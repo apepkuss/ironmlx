@@ -1,0 +1,76 @@
+{
+  "metadata": {
+    "runs_measured": 2,
+    "sampler": {
+      "temperature": 0.0,
+      "top_p": 1.0
+    },
+    "targets": [
+      {
+        "name": "ironmlx",
+        "url": "http://127.0.0.1:18821"
+      }
+    ],
+    "warmup": 1
+  },
+  "raw_runs": [
+    {
+      "cached_tokens": null,
+      "completion_tokens_server": null,
+      "e2e_s": 3.177814042,
+      "early_itl_ms": 7.340802125,
+      "finish_reason": "stop",
+      "pp_target": 8192,
+      "pp_tps": 4397.049293729245,
+      "prompt_tokens_local": 8192,
+      "prompt_tokens_server": null,
+      "run_idx": 0,
+      "target": "ironmlx",
+      "tg_target": 512,
+      "tg_tps": 136.14792325521677,
+      "tpot_ms": 7.386216061797753,
+      "ttft_ms": 1863.0675829999998
+    },
+    {
+      "cached_tokens": null,
+      "completion_tokens_server": null,
+      "e2e_s": 2.383442917,
+      "early_itl_ms": 7.574072874999999,
+      "finish_reason": "stop",
+      "pp_target": 8192,
+      "pp_tps": 4383.503197908186,
+      "prompt_tokens_local": 8192,
+      "prompt_tokens_server": null,
+      "run_idx": 1,
+      "target": "ironmlx",
+      "tg_target": 512,
+      "tg_tps": 136.02322499407327,
+      "tpot_ms": 7.458231884057971,
+      "ttft_ms": 1868.824917
+    }
+  ],
+  "stats": [
+    {
+      "cached_tokens_warning": false,
+      "e2e_s_median": 2.7806284795,
+      "e2e_s_p95": 3.13809548575,
+      "early_itl_ms": {
+        "first_n": 8,
+        "median": 7.457437499999999,
+        "p95": 7.562409337499999,
+        "sample_count": 2
+      },
+      "finish_reason_summary": "stop×2",
+      "n_runs": 2,
+      "pp_target": 8192,
+      "pp_tps_median": 4390.276245818715,
+      "target": "ironmlx",
+      "tg_target": 512,
+      "tg_tps_median": 136.085574124645,
+      "tg_tps_p95": 136.1416883421596,
+      "tpot_ms_median": 7.422223972927862,
+      "ttft_ms_median": 1865.94625,
+      "ttft_ms_p95": 1868.5370503
+    }
+  ]
+}

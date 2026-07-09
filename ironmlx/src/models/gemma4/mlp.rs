@@ -11,9 +11,15 @@ use super::ops::{
     gelu_approx_mul_on, quantized_gate_up_geglu_decode_on, QuantizedGateUpGeGluDecode,
 };
 use super::profile;
+use super::quant_fusion::{fused_quant_compatibility, FusedQuantCompatibility};
+
+enum Gemma4GateUpProjection {
+    Fused(Linear),
+    Separate { gate: Linear, up: Linear },
+}
 
 pub struct Gemma4GeGluMlp {
-    gate_up: Linear,
+    gate_up: Gemma4GateUpProjection,
     down: Linear,
     intermediate_size: i32,
     layer_idx: usize,
@@ -28,8 +34,26 @@ impl Gemma4GeGluMlp {
         layer_idx: usize,
         layer_kind: Gemma4LayerKind,
     ) -> Result<Self> {
-        let gate_up = load_fused_gate_up(loader, prefix)
-            .with_context(|| format!("loading fused Gemma4 GeGLU gate/up at `{prefix}`"))?;
+        let gate = format!("{prefix}.gate_proj");
+        let up = format!("{prefix}.up_proj");
+        let compat = fused_quant_compatibility(
+            loader,
+            &[gate.as_str(), up.as_str()],
+            "Gemma4GeGluMlp gate/up",
+        )?;
+        let gate_up = if compat == FusedQuantCompatibility::MixedQuantized {
+            Gemma4GateUpProjection::Separate {
+                gate: Linear::from_loader(loader, &gate)
+                    .with_context(|| format!("loading Gemma4 GeGLU gate_proj at `{prefix}`"))?,
+                up: Linear::from_loader(loader, &up)
+                    .with_context(|| format!("loading Gemma4 GeGLU up_proj at `{prefix}`"))?,
+            }
+        } else {
+            Gemma4GateUpProjection::Fused(
+                load_fused_gate_up(loader, prefix, compat)
+                    .with_context(|| format!("loading fused Gemma4 GeGLU gate/up at `{prefix}`"))?,
+            )
+        };
         let down = Linear::from_loader(loader, &format!("{prefix}.down_proj"))
             .with_context(|| format!("loading Gemma4 GeGLU down at `{prefix}`"))?;
         Ok(Self {
@@ -45,81 +69,115 @@ impl Gemma4GeGluMlp {
         let target = target.into();
         let profile = profile::vl_layer_enabled();
 
-        if let Some(parts) = self.gate_up.quantized_parts() {
-            if let (None, Some(qbiases)) = (parts.bias, parts.biases) {
-                let t0 = Instant::now();
-                let params = QuantizedGateUpGeGluDecode {
-                    weight: parts.weight,
-                    scales: parts.scales,
-                    biases: qbiases,
-                    intermediate_size: self.intermediate_size,
-                    group_size: parts.group_size,
-                    bits: parts.bits,
-                };
-                if let Some(activated) = quantized_gate_up_geglu_decode_on(x, params, target)? {
-                    profile::eval_layer(
-                        "gemma4_text_mlp_gate_up_geglu_fused",
-                        self.layer_idx,
-                        self.layer_kind,
-                        &[&activated],
-                        t0,
-                        profile,
-                    )?;
-                    let t0 = Instant::now();
-                    let out = self.down.forward_on(&activated, target)?;
-                    profile::eval_layer(
-                        "gemma4_text_mlp_down",
-                        self.layer_idx,
-                        self.layer_kind,
-                        &[&out],
-                        t0,
-                        profile,
-                    )?;
-                    return Ok(out);
+        match &self.gate_up {
+            Gemma4GateUpProjection::Fused(gate_up) => {
+                if let Some(parts) = gate_up.quantized_parts() {
+                    if let (None, Some(qbiases)) = (parts.bias, parts.biases) {
+                        let t0 = Instant::now();
+                        let params = QuantizedGateUpGeGluDecode {
+                            weight: parts.weight,
+                            scales: parts.scales,
+                            biases: qbiases,
+                            intermediate_size: self.intermediate_size,
+                            group_size: parts.group_size,
+                            bits: parts.bits,
+                            mode: parts.mode,
+                        };
+                        if let Some(activated) =
+                            quantized_gate_up_geglu_decode_on(x, params, target)?
+                        {
+                            profile::eval_layer(
+                                "gemma4_text_mlp_gate_up_geglu_fused",
+                                self.layer_idx,
+                                self.layer_kind,
+                                &[&activated],
+                                t0,
+                                profile,
+                            )?;
+                            return self.forward_down_on(&activated, target, profile);
+                        }
+                    }
                 }
+
+                let t0 = Instant::now();
+                let projected = gate_up.forward_on(x, target)?;
+                profile::eval_layer(
+                    "gemma4_text_mlp_gate_up",
+                    self.layer_idx,
+                    self.layer_kind,
+                    &[&projected],
+                    t0,
+                    profile,
+                )?;
+                let t0 = Instant::now();
+                let axis = projected.ndim() as i32 - 1;
+                let parts = mlx::ops::shape::split_at_on(
+                    &projected,
+                    &[self.intermediate_size][..],
+                    axis,
+                    target,
+                )?;
+                if parts.len() != 2 {
+                    return Err(anyhow!(
+                        "Gemma4GeGluMlp: split fused gate/up expected 2 parts, got {}",
+                        parts.len()
+                    ));
+                }
+                profile::eval_layer(
+                    "gemma4_text_mlp_split",
+                    self.layer_idx,
+                    self.layer_kind,
+                    &[&parts[0], &parts[1]],
+                    t0,
+                    profile,
+                )?;
+                let t0 = Instant::now();
+                let activated = gelu_approx_mul_on(&parts[0], &parts[1], target)?;
+                profile::eval_layer(
+                    "gemma4_text_mlp_geglu",
+                    self.layer_idx,
+                    self.layer_kind,
+                    &[&activated],
+                    t0,
+                    profile,
+                )?;
+                self.forward_down_on(&activated, target, profile)
+            }
+            Gemma4GateUpProjection::Separate { gate, up } => {
+                let t0 = Instant::now();
+                let gate_projected = gate.forward_on(x, target)?;
+                let up_projected = up.forward_on(x, target)?;
+                profile::eval_layer(
+                    "gemma4_text_mlp_gate_up_separate",
+                    self.layer_idx,
+                    self.layer_kind,
+                    &[&gate_projected, &up_projected],
+                    t0,
+                    profile,
+                )?;
+                let t0 = Instant::now();
+                let activated = gelu_approx_mul_on(&gate_projected, &up_projected, target)?;
+                profile::eval_layer(
+                    "gemma4_text_mlp_geglu",
+                    self.layer_idx,
+                    self.layer_kind,
+                    &[&activated],
+                    t0,
+                    profile,
+                )?;
+                self.forward_down_on(&activated, target, profile)
             }
         }
+    }
 
+    fn forward_down_on(
+        &self,
+        activated: &Array,
+        target: StreamOrDevice,
+        profile: bool,
+    ) -> Result<Array> {
         let t0 = Instant::now();
-        let projected = self.gate_up.forward_on(x, target)?;
-        profile::eval_layer(
-            "gemma4_text_mlp_gate_up",
-            self.layer_idx,
-            self.layer_kind,
-            &[&projected],
-            t0,
-            profile,
-        )?;
-        let t0 = Instant::now();
-        let axis = projected.ndim() as i32 - 1;
-        let parts =
-            mlx::ops::shape::split_at_on(&projected, &[self.intermediate_size][..], axis, target)?;
-        if parts.len() != 2 {
-            return Err(anyhow!(
-                "Gemma4GeGluMlp: split fused gate/up expected 2 parts, got {}",
-                parts.len()
-            ));
-        }
-        profile::eval_layer(
-            "gemma4_text_mlp_split",
-            self.layer_idx,
-            self.layer_kind,
-            &[&parts[0], &parts[1]],
-            t0,
-            profile,
-        )?;
-        let t0 = Instant::now();
-        let activated = gelu_approx_mul_on(&parts[0], &parts[1], target)?;
-        profile::eval_layer(
-            "gemma4_text_mlp_geglu",
-            self.layer_idx,
-            self.layer_kind,
-            &[&activated],
-            t0,
-            profile,
-        )?;
-        let t0 = Instant::now();
-        let out = self.down.forward_on(&activated, target)?;
+        let out = self.down.forward_on(activated, target)?;
         profile::eval_layer(
             "gemma4_text_mlp_down",
             self.layer_idx,
@@ -132,7 +190,17 @@ impl Gemma4GeGluMlp {
     }
 }
 
-fn load_fused_gate_up(loader: &Loader, prefix: &str) -> Result<Linear> {
+fn load_fused_gate_up(
+    loader: &Loader,
+    prefix: &str,
+    compat: FusedQuantCompatibility,
+) -> Result<Linear> {
+    if compat == FusedQuantCompatibility::MixedQuantized {
+        return Err(anyhow!(
+            "Gemma4GeGluMlp: mixed gate_proj/up_proj quantization cannot be fused at `{prefix}`"
+        ));
+    }
+
     let gate = format!("{prefix}.gate_proj");
     let up = format!("{prefix}.up_proj");
     let gate_w = loader.tensor(&format!("{gate}.weight"))?.clone();
@@ -151,17 +219,9 @@ fn load_fused_gate_up(loader: &Loader, prefix: &str) -> Result<Linear> {
         }
     };
 
-    let gate_scales_key = format!("{gate}.scales");
-    let up_scales_key = format!("{up}.scales");
-    if loader.contains(&gate_scales_key) || loader.contains(&up_scales_key) {
-        if !loader.contains(&gate_scales_key) || !loader.contains(&up_scales_key) {
-            return Err(anyhow!(
-                "Gemma4GeGluMlp: gate_proj/up_proj quantization mismatch at `{prefix}`"
-            ));
-        }
-        let qmeta = loader.quant_meta().ok_or_else(|| {
-            anyhow!("Gemma4GeGluMlp: quantized gate/up present but Loader has no quant meta")
-        })?;
+    if let FusedQuantCompatibility::Quantized(qmeta) = compat {
+        let gate_scales_key = format!("{gate}.scales");
+        let up_scales_key = format!("{up}.scales");
         let gate_scales = loader.tensor(&gate_scales_key)?.clone();
         let up_scales = loader.tensor(&up_scales_key)?.clone();
         let scales = mlx::ops::shape::concatenate(&[&gate_scales, &up_scales], 0)?;
@@ -189,13 +249,14 @@ fn load_fused_gate_up(loader: &Loader, prefix: &str) -> Result<Linear> {
                 anyhow!("{prefix}: eager eval of fused gate/up tensors failed: {e}")
             })?;
         }
-        Ok(Linear::new_quant(
+        Ok(Linear::new_quant_with_mode(
             weight,
             scales,
             biases,
             bias,
             qmeta.group_size,
             qmeta.bits,
+            qmeta.mode,
         ))
     } else {
         {

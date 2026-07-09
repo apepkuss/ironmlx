@@ -4,6 +4,7 @@ use mlx::ops;
 use mlx::{Array, MetalKernel, Shape, StreamOrDevice};
 use std::sync::OnceLock;
 
+use crate::core::QuantMode;
 use crate::Result;
 
 #[cfg(test)]
@@ -80,6 +81,7 @@ pub(crate) struct QuantizedGateUpGeGluDecode<'a> {
     pub(crate) intermediate_size: i32,
     pub(crate) group_size: i32,
     pub(crate) bits: i32,
+    pub(crate) mode: QuantMode,
 }
 
 pub fn quantized_gate_up_geglu_decode_on(
@@ -87,7 +89,11 @@ pub fn quantized_gate_up_geglu_decode_on(
     params: QuantizedGateUpGeGluDecode<'_>,
     target: impl Into<StreamOrDevice>,
 ) -> Result<Option<Array>> {
-    if params.group_size != 64 || params.bits != 4 || params.intermediate_size <= 0 {
+    if params.group_size != 64
+        || params.bits != 4
+        || !params.mode.uses_affine_storage()
+        || params.intermediate_size <= 0
+    {
         return Ok(None);
     }
 
@@ -566,6 +572,7 @@ mod tests {
             intermediate_size: n,
             group_size,
             bits,
+            mode: QuantMode::Affine,
         };
         let got = quantized_gate_up_geglu_decode_on(&x, params, ())
             .unwrap()

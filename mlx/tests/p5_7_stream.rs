@@ -153,6 +153,37 @@ fn shape_transpose_on_default_matches() {
 }
 
 #[test]
+fn shape_contiguous_on_default_materializes_transpose_values() {
+    use mlx::ops::shape as ops_shape;
+    let a: Array = (&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0][..], (2, 3))
+        .try_into()
+        .unwrap();
+    let t = ops_shape::transpose(&a).expect("transpose");
+    let c = ops_shape::contiguous_on(&t, false, ()).expect("contiguous_on default");
+    assert_eq!(c.shape().as_slice(), &[3, 2]);
+    assert_eq!(
+        c.to_vec::<f32>().unwrap(),
+        vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]
+    );
+}
+
+#[test]
+fn array_contiguous_on_explicit_device_materializes_transpose_values() {
+    let a: Array = (&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0][..], (2, 3))
+        .try_into()
+        .unwrap();
+    let t = a.transpose().expect("transpose");
+    let c = t
+        .contiguous_on(false, Device::cpu())
+        .expect("Array::contiguous_on device");
+    assert_eq!(c.shape().as_slice(), &[3, 2]);
+    assert_eq!(
+        c.to_vec::<f32>().unwrap(),
+        vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]
+    );
+}
+
+#[test]
 fn shape_concatenate_on_explicit_device() {
     use mlx::ops::shape as ops_shape;
     let a: Array = (&[1.0_f32, 2.0][..], (2,)).try_into().unwrap();

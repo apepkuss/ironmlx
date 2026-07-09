@@ -72,6 +72,31 @@ pub fn transpose_on(a: &Array, target: impl Into<StreamOrDevice>) -> Result<Arra
     Ok(Array::from_inner(inner))
 }
 
+/// Ensure `a` has contiguous storage. If `allow_col_major` is true, MLX may
+/// keep an existing column-contiguous buffer instead of copying.
+pub fn contiguous(a: &Array, allow_col_major: bool) -> Result<Array> {
+    contiguous_on(a, allow_col_major, ())
+}
+
+/// Stream-targeted variant of [`contiguous`].
+pub fn contiguous_on(
+    a: &Array,
+    allow_col_major: bool,
+    target: impl Into<StreamOrDevice>,
+) -> Result<Array> {
+    let (has, dev_only, dev_t, idx) = target.into().encode();
+    let inner = mlx_sys::array::ffi::array_contiguous(
+        a.as_inner(),
+        allow_col_major,
+        has,
+        dev_only,
+        dev_t,
+        idx,
+    )
+    .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
 /// Permute axes per the given permutation. `axes` must be a permutation of
 /// `[0, a.ndim())`; MLX validates and errors otherwise.
 pub fn transpose_axes<S: IntoShape>(a: &Array, axes: S) -> Result<Array> {

@@ -1,0 +1,67 @@
+{
+  "error": null,
+  "name": "stability",
+  "ok": true,
+  "runs": [
+    {
+      "content_chars": 34,
+      "elapsed_s": 0.5996783340001457,
+      "finish_reason": "stop",
+      "ok": true,
+      "run": 0,
+      "usage": {
+        "completion_tokens": 10,
+        "prompt_tokens": 21,
+        "total_tokens": 31
+      }
+    },
+    {
+      "content_chars": 36,
+      "elapsed_s": 0.5819009170002118,
+      "finish_reason": "stop",
+      "ok": true,
+      "run": 1,
+      "usage": {
+        "completion_tokens": 10,
+        "prompt_tokens": 21,
+        "total_tokens": 31
+      }
+    },
+    {
+      "content_chars": 47,
+      "elapsed_s": 0.6253702919998432,
+      "finish_reason": "stop",
+      "ok": true,
+      "run": 2,
+      "usage": {
+        "completion_tokens": 11,
+        "prompt_tokens": 21,
+        "total_tokens": 32
+      }
+    },
+    {
+      "content_chars": 49,
+      "elapsed_s": 0.6197297500000332,
+      "finish_reason": "stop",
+      "ok": true,
+      "run": 3,
+      "usage": {
+        "completion_tokens": 11,
+        "prompt_tokens": 21,
+        "total_tokens": 32
+      }
+    },
+    {
+      "content_chars": 44,
+      "elapsed_s": 0.6198184160000437,
+      "finish_reason": "stop",
+      "ok": true,
+      "run": 4,
+      "usage": {
+        "completion_tokens": 11,
+        "prompt_tokens": 21,
+        "total_tokens": 32
+      }
+    }
+  ]
+}

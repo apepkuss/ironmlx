@@ -1,0 +1,158 @@
+{
+  "finished_at": "2026-07-09T22:43:49.572857",
+  "models": [
+    {
+      "label": "Qwen3.5-4B-MLX-4bit",
+      "path": "/Users/xin/.ironmlx/models/models--mlx-community--Qwen3.5-4B-MLX-4bit/snapshots/32f3e8ecf65426fc3306969496342d504bfa13f3"
+    },
+    {
+      "label": "Qwen3.5-4B-MLX-8bit",
+      "path": "/Users/xin/.ironmlx/models/models--mlx-community--Qwen3.5-4B-MLX-8bit/snapshots/5319bbbe4f1cbe6c0b3c80f4f7de4f0338c3906d"
+    },
+    {
+      "label": "Qwen3.5-4B-MLX-bf16",
+      "path": "/Users/xin/.ironmlx/models/models--mlx-community--Qwen3.5-4B-MLX-bf16/snapshots/475632ded9a95863da4e4b235ab9ccbc5d3cc6bf"
+    }
+  ],
+  "overall_status": "completed",
+  "prompt": "/tmp/ironmlx-decode-stress-agent-prompt.txt",
+  "results": [
+    {
+      "cell": "seq_tg512_c1",
+      "elapsed_s": 6.755524084,
+      "json": "docs/benchmarks/bf16-decode-high-concurrency/2026-07-09-223455-strict-decode/Qwen3.5-4B-MLX-4bit/seq_tg512_c1.json",
+      "model": "Qwen3.5-4B-MLX-4bit",
+      "rc": 0,
+      "stderr": "docs/benchmarks/bf16-decode-high-concurrency/2026-07-09-223455-strict-decode/Qwen3.5-4B-MLX-4bit/seq_tg512_c1.stderr.log",
+      "summary": {
+        "completion_tokens_server": [
+          null
+        ],
+        "e2e_s_p95": 6.538379917,
+        "finish": [
+          "length"
+        ],
+        "mode": "sequential",
+        "n_runs": 1,
+        "pp_target": 11266,
+        "tg_tps_median": 133.41121442275787,
+        "tpot_ms_median": 7.510290281800391,
+        "ttft_ms_p95": 2700.621583
+      }
+    },
+    {
+      "cell": "conc_tg512_c8",
+      "elapsed_s": 115.088653208,
+      "json": "docs/benchmarks/bf16-decode-high-concurrency/2026-07-09-223455-strict-decode/Qwen3.5-4B-MLX-4bit/conc_tg512_c8.json",
+      "model": "Qwen3.5-4B-MLX-4bit",
+      "rc": 0,
+      "stderr": "docs/benchmarks/bf16-decode-high-concurrency/2026-07-09-223455-strict-decode/Qwen3.5-4B-MLX-4bit/conc_tg512_c8.stderr.log",
+      "summary": {
+        "completion_max": 512,
+        "completion_median": 512,
+        "completion_min": 512,
+        "e2e_s_p95": 54.472029166,
+        "finish": {
+          "length": 9
+        },
+        "itl_ms_p50": 7.609786530332681,
+        "mode": "concurrent",
+        "n_requests": 9,
+        "tokens_per_sec": 460.8,
+        "ttft_ms_p95": 50582.349125
+      }
+    },
+    {
+      "cell": "seq_tg512_c1",
+      "elapsed_s": 9.040041041999984,
+      "json": "docs/benchmarks/bf16-decode-high-concurrency/2026-07-09-223455-strict-decode/Qwen3.5-4B-MLX-8bit/seq_tg512_c1.json",
+      "model": "Qwen3.5-4B-MLX-8bit",
+      "rc": 0,
+      "stderr": "docs/benchmarks/bf16-decode-high-concurrency/2026-07-09-223455-strict-decode/Qwen3.5-4B-MLX-8bit/seq_tg512_c1.stderr.log",
+      "summary": {
+        "completion_tokens_server": [
+          null
+        ],
+        "e2e_s_p95": 8.805148416,
+        "finish": [
+          "length"
+        ],
+        "mode": "sequential",
+        "n_runs": 1,
+        "pp_target": 11266,
+        "tg_tps_median": 87.54588223903296,
+        "tpot_ms_median": 11.444935176125245,
+        "ttft_ms_p95": 2956.786541
+      }
+    },
+    {
+      "cell": "conc_tg512_c8",
+      "elapsed_s": 165.686200541,
+      "json": "docs/benchmarks/bf16-decode-high-concurrency/2026-07-09-223455-strict-decode/Qwen3.5-4B-MLX-8bit/conc_tg512_c8.json",
+      "model": "Qwen3.5-4B-MLX-8bit",
+      "rc": 0,
+      "stderr": "docs/benchmarks/bf16-decode-high-concurrency/2026-07-09-223455-strict-decode/Qwen3.5-4B-MLX-8bit/conc_tg512_c8.stderr.log",
+      "summary": {
+        "completion_max": 512,
+        "completion_median": 512,
+        "completion_min": 512,
+        "e2e_s_p95": 80.26526075,
+        "finish": {
+          "length": 9
+        },
+        "itl_ms_p50": 11.6661448962818,
+        "mode": "concurrent",
+        "n_requests": 9,
+        "tokens_per_sec": 460.8,
+        "ttft_ms_p95": 74199.81850000001
+      }
+    },
+    {
+      "cell": "seq_tg512_c1",
+      "elapsed_s": 13.265737875000013,
+      "json": "docs/benchmarks/bf16-decode-high-concurrency/2026-07-09-223455-strict-decode/Qwen3.5-4B-MLX-bf16/seq_tg512_c1.json",
+      "model": "Qwen3.5-4B-MLX-bf16",
+      "rc": 0,
+      "stderr": "docs/benchmarks/bf16-decode-high-concurrency/2026-07-09-223455-strict-decode/Qwen3.5-4B-MLX-bf16/seq_tg512_c1.stderr.log",
+      "summary": {
+        "completion_tokens_server": [
+          null
+        ],
+        "e2e_s_p95": 13.031279208,
+        "finish": [
+          "length"
+        ],
+        "mode": "sequential",
+        "n_runs": 1,
+        "pp_target": 11266,
+        "tg_tps_median": 50.976823258768135,
+        "tpot_ms_median": 19.655146851272015,
+        "ttft_ms_p95": 2987.4991670000004
+      }
+    },
+    {
+      "cell": "conc_tg512_c8",
+      "elapsed_s": 217.852431959,
+      "json": "docs/benchmarks/bf16-decode-high-concurrency/2026-07-09-223455-strict-decode/Qwen3.5-4B-MLX-bf16/conc_tg512_c8.json",
+      "model": "Qwen3.5-4B-MLX-bf16",
+      "rc": 0,
+      "stderr": "docs/benchmarks/bf16-decode-high-concurrency/2026-07-09-223455-strict-decode/Qwen3.5-4B-MLX-bf16/conc_tg512_c8.stderr.log",
+      "summary": {
+        "completion_max": 512,
+        "completion_median": 512,
+        "completion_min": 512,
+        "e2e_s_p95": 110.306967667,
+        "finish": {
+          "length": 8
+        },
+        "itl_ms_p50": 19.554533023483362,
+        "mode": "concurrent",
+        "n_requests": 8,
+        "tokens_per_sec": 409.6,
+        "ttft_ms_p95": 100305.90100000001
+      }
+    }
+  ],
+  "run_dir": "docs/benchmarks/bf16-decode-high-concurrency/2026-07-09-223455-strict-decode",
+  "started_at": "2026-07-09T22:34:55.341778"
+}

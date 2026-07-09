@@ -230,6 +230,9 @@ std::unique_ptr<MlxArray> array_transpose(
 std::unique_ptr<MlxArray> array_transpose_axes(
     const MlxArray& a, rust::Slice<const int32_t> axes,
     bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_contiguous(
+    const MlxArray& a, bool allow_col_major,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 std::unique_ptr<MlxArray> array_broadcast_to(
     const MlxArray& a, rust::Slice<const int32_t> shape,
     bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);

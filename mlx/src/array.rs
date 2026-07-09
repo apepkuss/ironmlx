@@ -558,6 +558,21 @@ impl Array {
         crate::ops::shape::transpose_on(self, target)
     }
 
+    /// Ensure this array has contiguous storage. If `allow_col_major` is true,
+    /// MLX may keep an existing column-contiguous buffer instead of copying.
+    pub fn contiguous(&self, allow_col_major: bool) -> Result<Array> {
+        crate::ops::shape::contiguous(self, allow_col_major)
+    }
+
+    /// Stream-targeted variant of [`Array::contiguous`].
+    pub fn contiguous_on(
+        &self,
+        allow_col_major: bool,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::shape::contiguous_on(self, allow_col_major, target)
+    }
+
     /// Shorthand for [`Array::transpose`]. Standard convention in matrix code.
     pub fn t(&self) -> Result<Array> {
         crate::ops::transpose(self)

@@ -919,6 +919,7 @@ pub fn render_json_concurrent(
                     "tokens_per_sec": s.agg_tokens_per_sec,
                     "req_per_sec": s.agg_req_per_sec,
                 },
+                "e2e_s_p95": s.e2e_s_p95,
                 "per_worker": {
                     "req_count": s.per_worker_req_count,
                     "tokens_per_sec": s.per_worker_tokens_per_sec,
@@ -928,6 +929,7 @@ pub fn render_json_concurrent(
             })
         })
         .collect();
+    let raw_runs = concurrent_raw_runs_json(cells);
 
     let payload = serde_json::json!({
         "mode": "concurrent",
@@ -936,9 +938,64 @@ pub fn render_json_concurrent(
         "warmup_duration_s": warmup_duration,
         "targets": targets.iter().map(|(n, u)| serde_json::json!({"name": n, "url": u})).collect::<Vec<_>>(),
         "cells": stats_json,
+        "raw_runs": raw_runs,
     });
 
     serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
+}
+
+fn concurrent_raw_runs_json(
+    cells: &[crate::runner::ConcurrentCellResult],
+) -> Vec<serde_json::Value> {
+    cells
+        .iter()
+        .flat_map(|c| {
+            let mut per_worker_idx: Vec<usize> = vec![0; c.concurrent];
+            c.outcomes.iter().map(move |outcome| {
+                let r = &outcome.result;
+                let ttft_s = r.timings.ttft().as_secs_f64().max(1e-9);
+                let gen_s = r.timings.gen_duration().as_secs_f64().max(1e-9);
+                let e2e_s = r.timings.e2e().as_secs_f64();
+                let completion_tokens = r.server_completion_tokens.unwrap_or(r.chunk_count);
+                let prompt_tokens = r
+                    .server_prompt_tokens
+                    .map(|n| n as usize)
+                    .unwrap_or(outcome.prompt_tokens_local);
+                let completion_tokens_f = completion_tokens as f64;
+                let itl_div = (completion_tokens_f - 1.0).max(1.0);
+                let request_idx_in_worker = if outcome.worker_id < c.concurrent {
+                    let idx = per_worker_idx[outcome.worker_id];
+                    per_worker_idx[outcome.worker_id] += 1;
+                    idx
+                } else {
+                    0
+                };
+
+                serde_json::json!({
+                    "target": c.target_name,
+                    "pp_target": c.pp_target,
+                    "tg_target": c.tg_target,
+                    "concurrent": c.concurrent,
+                    "worker_id": outcome.worker_id,
+                    "request_idx_in_worker": request_idx_in_worker,
+                    "ttft_ms": ttft_s * 1000.0,
+                    "gen_secs": gen_s,
+                    "e2e_s": e2e_s,
+                    "completion_tokens": completion_tokens,
+                    "prompt_tokens": prompt_tokens,
+                    "prompt_tokens_local": outcome.prompt_tokens_local,
+                    "prompt_tokens_server": r.server_prompt_tokens,
+                    "completion_tokens_server": r.server_completion_tokens,
+                    "cached_tokens": r.server_cached_tokens,
+                    "chunk_count": r.chunk_count,
+                    "finish_reason": r.finish_reason,
+                    "request_id": r.request_id,
+                    "itl_ms": (gen_s / itl_div) * 1000.0,
+                    "early_itl_ms": mean_early_itl_ms(&r.timings, EARLY_ITL_WINDOW),
+                })
+            })
+        })
+        .collect()
 }
 
 pub fn render_json_concurrent_with_prefix_cache_probe(
@@ -1402,6 +1459,156 @@ mod tests {
         assert!(md.contains("p50 TTFT"));
         assert!(md.contains("tokens/s"));
         assert!(md.contains("## Notes"), "Notes section should be present");
+    }
+
+    #[test]
+    fn render_json_concurrent_exports_e2e_tail_latency() {
+        use crate::runner::{ConcurrentCellResult, RequestOutcome};
+
+        let cell_start = Instant::now();
+        let request_start = Instant::now();
+        let first_token = request_start + Duration::from_millis(10);
+        let end = first_token + Duration::from_millis(90);
+        let outcome = RequestOutcome {
+            worker_id: 0,
+            prompt_tokens_local: 128,
+            result: RequestResult {
+                timings: RequestTimings {
+                    start: request_start,
+                    first_token: Some(first_token),
+                    end,
+                    token_times: vec![first_token, end],
+                },
+                server_prompt_tokens: Some(128),
+                server_completion_tokens: Some(2),
+                server_cached_tokens: Some(0),
+                chunk_count: 2,
+                finish_reason: "stop".to_string(),
+                content_chars: 8,
+                request_id: None,
+            },
+        };
+        let cell = ConcurrentCellResult {
+            target_name: "mock".into(),
+            target_url: "http://localhost:0".into(),
+            pp_target: 128,
+            tg_target: 2,
+            concurrent: 1,
+            cell_start,
+            cell_end: cell_start + Duration::from_secs(1),
+            outcomes: vec![outcome],
+        };
+        let targets = vec![("mock".into(), "http://localhost:0".into())];
+
+        let raw = render_json_concurrent(&[cell], &targets, 1, 1, 0);
+        let json: serde_json::Value = serde_json::from_str(&raw).expect("valid json");
+        let value = json["cells"][0]["e2e_s_p95"]
+            .as_f64()
+            .expect("cell should export e2e_s_p95");
+
+        assert!((value - 0.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn render_json_concurrent_exports_raw_request_runs() {
+        use crate::runner::{ConcurrentCellResult, RequestOutcome};
+
+        let cell_start = Instant::now();
+        let req0_start = Instant::now();
+        let req0_first = req0_start + Duration::from_millis(10);
+        let req0_end = req0_first + Duration::from_millis(90);
+        let req1_start = Instant::now();
+        let req1_first = req1_start + Duration::from_millis(20);
+        let req1_end = req1_first + Duration::from_millis(180);
+
+        let cell = ConcurrentCellResult {
+            target_name: "mock".into(),
+            target_url: "http://localhost:0".into(),
+            pp_target: 2048,
+            tg_target: 512,
+            concurrent: 2,
+            cell_start,
+            cell_end: cell_start + Duration::from_secs(1),
+            outcomes: vec![
+                RequestOutcome {
+                    worker_id: 0,
+                    prompt_tokens_local: 2048,
+                    result: RequestResult {
+                        timings: RequestTimings {
+                            start: req0_start,
+                            first_token: Some(req0_first),
+                            end: req0_end,
+                            token_times: vec![
+                                req0_first,
+                                req0_first + Duration::from_millis(30),
+                                req0_end,
+                            ],
+                        },
+                        server_prompt_tokens: Some(2048),
+                        server_completion_tokens: Some(3),
+                        server_cached_tokens: Some(0),
+                        chunk_count: 3,
+                        finish_reason: "stop".to_string(),
+                        content_chars: 12,
+                        request_id: Some("req-0".to_string()),
+                    },
+                },
+                RequestOutcome {
+                    worker_id: 1,
+                    prompt_tokens_local: 2049,
+                    result: RequestResult {
+                        timings: RequestTimings {
+                            start: req1_start,
+                            first_token: Some(req1_first),
+                            end: req1_end,
+                            token_times: vec![req1_first, req1_end],
+                        },
+                        server_prompt_tokens: Some(2050),
+                        server_completion_tokens: Some(2),
+                        server_cached_tokens: Some(7),
+                        chunk_count: 2,
+                        finish_reason: "length".to_string(),
+                        content_chars: 8,
+                        request_id: Some("req-1".to_string()),
+                    },
+                },
+            ],
+        };
+        let targets = vec![("mock".into(), "http://localhost:0".into())];
+
+        let raw = render_json_concurrent(&[cell], &targets, 2, 1, 0);
+        let json: serde_json::Value = serde_json::from_str(&raw).expect("valid json");
+        let raw_runs = json["raw_runs"]
+            .as_array()
+            .expect("concurrent JSON should export raw_runs");
+
+        assert_eq!(raw_runs.len(), 2);
+        assert_eq!(raw_runs[0]["target"], "mock");
+        assert_eq!(raw_runs[0]["pp_target"], 2048);
+        assert_eq!(raw_runs[0]["tg_target"], 512);
+        assert_eq!(raw_runs[0]["concurrent"], 2);
+        assert_eq!(raw_runs[0]["worker_id"], 0);
+        assert_eq!(raw_runs[0]["request_idx_in_worker"], 0);
+        assert_eq!(raw_runs[0]["prompt_tokens_local"], 2048);
+        assert_eq!(raw_runs[0]["prompt_tokens_server"], 2048);
+        assert_eq!(raw_runs[0]["completion_tokens_server"], 3);
+        assert_eq!(raw_runs[0]["completion_tokens"], 3);
+        assert_eq!(raw_runs[0]["cached_tokens"], 0);
+        assert_eq!(raw_runs[0]["chunk_count"], 3);
+        assert_eq!(raw_runs[0]["finish_reason"], "stop");
+        assert_eq!(raw_runs[0]["request_id"], "req-0");
+        assert!((raw_runs[0]["ttft_ms"].as_f64().unwrap() - 10.0).abs() < 1e-6);
+        assert!((raw_runs[0]["e2e_s"].as_f64().unwrap() - 0.1).abs() < 1e-6);
+        assert!(raw_runs[0]["early_itl_ms"].as_f64().is_some());
+
+        assert_eq!(raw_runs[1]["worker_id"], 1);
+        assert_eq!(raw_runs[1]["request_idx_in_worker"], 0);
+        assert_eq!(raw_runs[1]["prompt_tokens_local"], 2049);
+        assert_eq!(raw_runs[1]["prompt_tokens_server"], 2050);
+        assert_eq!(raw_runs[1]["completion_tokens_server"], 2);
+        assert_eq!(raw_runs[1]["cached_tokens"], 7);
+        assert_eq!(raw_runs[1]["finish_reason"], "length");
+        assert_eq!(raw_runs[1]["request_id"], "req-1");
     }
 
     #[test]

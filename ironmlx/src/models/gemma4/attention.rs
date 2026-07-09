@@ -10,6 +10,7 @@ use crate::Result;
 use super::config::{Gemma4LayerKind, Gemma4TextConfig};
 use super::ops::{rms_norm_default_rope_decode_on, rms_norm_no_scale_on, RmsNormDefaultRopeDecode};
 use super::profile;
+use super::quant_fusion::{fused_quant_compatibility, FusedQuantCompatibility};
 use super::rope::{Gemma4Rope, RopeOffsets};
 
 #[derive(Clone)]
@@ -55,10 +56,20 @@ pub struct Gemma4Attention {
 impl Gemma4AttentionProjection {
     fn from_loader(loader: &Loader, prefix: &str, owns_kv: bool, use_k_eq_v: bool) -> Result<Self> {
         if owns_kv && !use_k_eq_v {
-            return Ok(Self::FusedQkv {
-                qkv: load_fused_qkv(loader, prefix)
-                    .with_context(|| format!("loading fused Gemma4 q/k/v `{prefix}`"))?,
-            });
+            let q = format!("{prefix}.q_proj");
+            let k = format!("{prefix}.k_proj");
+            let v = format!("{prefix}.v_proj");
+            let compat = fused_quant_compatibility(
+                loader,
+                &[q.as_str(), k.as_str(), v.as_str()],
+                "Gemma4Attention q/k/v",
+            )?;
+            if compat != FusedQuantCompatibility::MixedQuantized {
+                return Ok(Self::FusedQkv {
+                    qkv: load_fused_qkv(loader, prefix, compat)
+                        .with_context(|| format!("loading fused Gemma4 q/k/v `{prefix}`"))?,
+                });
+            }
         }
 
         let q_proj = Linear::from_loader(loader, &format!("{prefix}.q_proj"))
@@ -166,7 +177,17 @@ impl Gemma4AttentionProjection {
     }
 }
 
-fn load_fused_qkv(loader: &Loader, prefix: &str) -> Result<Linear> {
+fn load_fused_qkv(
+    loader: &Loader,
+    prefix: &str,
+    compat: FusedQuantCompatibility,
+) -> Result<Linear> {
+    if compat == FusedQuantCompatibility::MixedQuantized {
+        return Err(anyhow!(
+            "Gemma4Attention: mixed q/k/v quantization cannot be fused at `{prefix}`"
+        ));
+    }
+
     let q = format!("{prefix}.q_proj");
     let k = format!("{prefix}.k_proj");
     let v = format!("{prefix}.v_proj");
@@ -189,24 +210,10 @@ fn load_fused_qkv(loader: &Loader, prefix: &str) -> Result<Linear> {
         }
     };
 
-    let q_scales_key = format!("{q}.scales");
-    let k_scales_key = format!("{k}.scales");
-    let v_scales_key = format!("{v}.scales");
-    let any_quant = loader.contains(&q_scales_key)
-        || loader.contains(&k_scales_key)
-        || loader.contains(&v_scales_key);
-    if any_quant {
-        if !loader.contains(&q_scales_key)
-            || !loader.contains(&k_scales_key)
-            || !loader.contains(&v_scales_key)
-        {
-            return Err(anyhow!(
-                "Gemma4Attention: q/k/v quantization mismatch at `{prefix}`"
-            ));
-        }
-        let qmeta = loader.quant_meta().ok_or_else(|| {
-            anyhow!("Gemma4Attention: quantized q/k/v present but Loader has no quant meta")
-        })?;
+    if let FusedQuantCompatibility::Quantized(qmeta) = compat {
+        let q_scales_key = format!("{q}.scales");
+        let k_scales_key = format!("{k}.scales");
+        let v_scales_key = format!("{v}.scales");
         let q_scales = loader.tensor(&q_scales_key)?.clone();
         let k_scales = loader.tensor(&k_scales_key)?.clone();
         let v_scales = loader.tensor(&v_scales_key)?.clone();
@@ -237,13 +244,14 @@ fn load_fused_qkv(loader: &Loader, prefix: &str) -> Result<Linear> {
             mlx::transforms::eval(&to_eval)
                 .map_err(|e| anyhow!("{prefix}: eager eval of fused q/k/v tensors failed: {e}"))?;
         }
-        Ok(Linear::new_quant(
+        Ok(Linear::new_quant_with_mode(
             weight,
             scales,
             biases,
             bias,
             qmeta.group_size,
             qmeta.bits,
+            qmeta.mode,
         ))
     } else {
         {
