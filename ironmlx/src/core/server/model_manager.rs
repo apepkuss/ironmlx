@@ -1464,6 +1464,8 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
     let mut mtp_sampling_us = 0;
     let mut mtp_main_rollback_us = 0;
     let mut mtp_cache_commit_us = 0;
+    let mut mtp_prefill_cache_commit_us = 0;
+    let mut mtp_decode_cache_commit_us = 0;
     let mut mtp_cache_restore_us = 0;
     let mut active_kv_snapshots = Vec::new();
 
@@ -1510,6 +1512,8 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
         mtp_sampling_us += snapshot.mtp.sampling_us;
         mtp_main_rollback_us += snapshot.mtp.main_rollback_us;
         mtp_cache_commit_us += snapshot.mtp.cache_commit_us;
+        mtp_prefill_cache_commit_us += snapshot.mtp.prefill_cache_commit_us;
+        mtp_decode_cache_commit_us += snapshot.mtp.decode_cache_commit_us;
         mtp_cache_restore_us += snapshot.mtp.cache_restore_us;
         active_kv_snapshots.push(snapshot.active_kv_offload);
     }
@@ -1581,6 +1585,8 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
             sampling_us: mtp_sampling_us,
             main_rollback_us: mtp_main_rollback_us,
             cache_commit_us: mtp_cache_commit_us,
+            prefill_cache_commit_us: mtp_prefill_cache_commit_us,
+            decode_cache_commit_us: mtp_decode_cache_commit_us,
             cache_restore_us: mtp_cache_restore_us,
         },
         active_kv_offload,
@@ -1719,6 +1725,8 @@ mod tests {
                 sampling_us: 31,
                 main_rollback_us: 37,
                 cache_commit_us: 41,
+                prefill_cache_commit_us: 17,
+                decode_cache_commit_us: 24,
                 cache_restore_us: 43,
             },
             active_kv_offload: crate::core::cache::ActiveKvOffloadHealth::disabled(),
@@ -1742,6 +1750,8 @@ mod tests {
         assert_eq!(aggregated.mtp.sampling_us, 31);
         assert_eq!(aggregated.mtp.main_rollback_us, 37);
         assert_eq!(aggregated.mtp.cache_commit_us, 41);
+        assert_eq!(aggregated.mtp.prefill_cache_commit_us, 17);
+        assert_eq!(aggregated.mtp.decode_cache_commit_us, 24);
         assert_eq!(aggregated.mtp.cache_restore_us, 43);
     }
 

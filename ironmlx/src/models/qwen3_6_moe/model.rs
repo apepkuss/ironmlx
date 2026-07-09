@@ -568,6 +568,69 @@ mod tests {
         Some(path)
     }
 
+    fn qwen36_long_prompt_path() -> Option<std::path::PathBuf> {
+        let path = match std::env::var("QWEN36_MOE_LONG_PROMPT") {
+            Ok(path) => std::path::PathBuf::from(path),
+            Err(_) => {
+                eprintln!("skip: set QWEN36_MOE_LONG_PROMPT to a local long prompt file");
+                return None;
+            }
+        };
+        if !path.exists() {
+            eprintln!("skip: {} not found", path.display());
+            return None;
+        }
+        Some(path)
+    }
+
+    fn flatten_logits(logits: &Array) -> Array {
+        let dims = logits.shape();
+        let dims = dims.as_slice();
+        let vocab = *dims.last().expect("logits have vocab axis");
+        logits.reshape(&[vocab][..]).expect("flatten logits")
+    }
+
+    fn slice_batch_logits(logits: &Array, row: i32) -> Array {
+        let dims = logits.shape();
+        let dims = dims.as_slice();
+        assert_eq!(dims.len(), 3, "expected [B, 1, vocab]");
+        let vocab = dims[2];
+        mlx::ops::indexing::slice(
+            logits,
+            &[row, 0_i32, 0_i32][..],
+            &[row + 1, 1_i32, vocab][..],
+        )
+        .expect("slice batch logits")
+        .reshape(&[vocab][..])
+        .expect("flatten batch row logits")
+    }
+
+    fn logits_vec_f32(logits: &Array) -> Vec<f32> {
+        mlx::ops::cast::astype(logits, Dtype::Float32)
+            .expect("astype logits f32")
+            .to_vec::<f32>()
+            .expect("logits to_vec")
+    }
+
+    fn logits_argmax(logits: &Array) -> usize {
+        logits_vec_f32(logits)
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(idx, _)| idx)
+            .expect("non-empty logits")
+    }
+
+    fn logits_max_abs_diff(a: &Array, b: &Array) -> f32 {
+        let av = logits_vec_f32(a);
+        let bv = logits_vec_f32(b);
+        assert_eq!(av.len(), bv.len(), "logits vocab size");
+        av.iter()
+            .zip(bv.iter())
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0_f32, f32::max)
+    }
+
     #[test]
     #[ignore = "loads a full local Qwen3.6 MoE checkpoint"]
     fn loads_qwen36_moe_real_checkpoint_with_vision() {
@@ -793,6 +856,163 @@ mod tests {
             )
             .expect("batched prefill");
         assert_eq!(sample(&logits_batched), expected_first_token);
+    }
+
+    #[test]
+    #[ignore = "loads a full local Qwen3.6 MoE checkpoint and long prompt"]
+    fn qwen36_moe_long_prompt_batched_prefill_diverges_from_b1_real_checkpoint() {
+        let Some(dir) = qwen36_model_dir() else {
+            return;
+        };
+        let Some(prompt_path) = qwen36_long_prompt_path() else {
+            return;
+        };
+        let loader = crate::core::Loader::open(&dir).expect("open");
+        let tokenizer = crate::core::Tokenizer::from_loader(&loader).expect("tokenizer");
+        let model = Qwen36MoeModel::from_loader(&loader).expect("model");
+        let prompt = std::fs::read_to_string(&prompt_path).expect("read long prompt");
+        let prompt_ids = tokenizer
+            .encode(&prompt, false)
+            .expect("tokenize long prompt");
+        let len = prompt_ids.len() as i32;
+        eprintln!(
+            "[qwen36-long-prefill] prompt_path={} tokens={len}",
+            prompt_path.display()
+        );
+
+        let input_b1: Array = (prompt_ids.as_slice(), &[1_i32, len][..])
+            .try_into()
+            .expect("input_b1");
+        let position_b1 = crate::core::generate::build_position_ids(0, len).expect("position_b1");
+        let mut cache_b1 = model
+            .make_cache(1, len + 4, Dtype::Bfloat16)
+            .expect("cache_b1");
+        let logits_b1 = model
+            .forward_on(&input_b1, &position_b1, None, None, Some(&mut cache_b1), ())
+            .expect("forward_on b1");
+        let logits_b1 = flatten_logits(&logits_b1);
+        let (arg_batched_b1, diff_batched_b1) = {
+            let position_batched_b1 =
+                crate::core::generate::build_position_ids_batched(&[len], len)
+                    .expect("position_batched_b1");
+            let attention_mask_b1 =
+                crate::core::generate::build_batch_attention_mask(&[len], len, Dtype::Bfloat16)
+                    .expect("attention_mask_b1");
+            let linear_attention_mask_b1 =
+                crate::core::generate::build_batch_linear_mask(&[len], len)
+                    .expect("linear_attention_mask_b1");
+            let mut cache_batched_b1 = model
+                .make_cache(1, len + 4, Dtype::Bfloat16)
+                .expect("cache_batched_b1");
+            let logits_batched_b1 = model
+                .batched_prefill(
+                    &input_b1,
+                    &position_batched_b1,
+                    &attention_mask_b1,
+                    &linear_attention_mask_b1,
+                    &[len],
+                    Some(&mut cache_batched_b1),
+                    (),
+                )
+                .expect("batched_prefill b1");
+            let logits_batched_b1 = flatten_logits(&logits_batched_b1);
+            (
+                logits_argmax(&logits_batched_b1),
+                logits_max_abs_diff(&logits_b1, &logits_batched_b1),
+            )
+        };
+
+        let mut packed = Vec::with_capacity(prompt_ids.len() * 2);
+        packed.extend_from_slice(&prompt_ids);
+        packed.extend_from_slice(&prompt_ids);
+        let input_b2: Array = (packed.as_slice(), &[2_i32, len][..])
+            .try_into()
+            .expect("input_b2");
+        let prompt_lens = [len, len];
+        let position_b2 = crate::core::generate::build_position_ids_batched(&prompt_lens, len)
+            .expect("position_b2");
+        let attention_mask =
+            crate::core::generate::build_batch_attention_mask(&prompt_lens, len, Dtype::Bfloat16)
+                .expect("attention_mask");
+        let linear_attention_mask =
+            crate::core::generate::build_batch_linear_mask(&prompt_lens, len)
+                .expect("linear_attention_mask");
+        if std::env::var("IRONMLX_QWEN36_TRACE_LAYERS").as_deref() == Ok("1") {
+            let mut trace_cache_b1 = model
+                .make_cache(1, len + 4, Dtype::Bfloat16)
+                .expect("trace_cache_b1");
+            let mut trace_cache_b2 = model
+                .make_cache(2, len + 4, Dtype::Bfloat16)
+                .expect("trace_cache_b2");
+            let diffs = model
+                .text()
+                .debug_b1_b2_same_prompt_layer_diffs_on(
+                    &input_b1,
+                    &position_b1,
+                    &mut trace_cache_b1,
+                    &input_b2,
+                    &position_b2,
+                    &mut trace_cache_b2,
+                    &attention_mask,
+                    &linear_attention_mask,
+                    &prompt_lens,
+                    (),
+                )
+                .expect("trace layer diffs");
+            for diff in diffs {
+                eprintln!(
+                    "[qwen36-long-prefill-layer] layer={} kind={:?} row0_diff={:.6} \
+                     row1_diff={:.6} row0_row1_diff={:.6}",
+                    diff.layer_idx,
+                    diff.kind,
+                    diff.row0_max_abs_diff,
+                    diff.row1_max_abs_diff,
+                    diff.row0_row1_max_abs_diff,
+                );
+            }
+        }
+        let mut cache_b2 = model
+            .make_cache(2, len + 4, Dtype::Bfloat16)
+            .expect("cache_b2");
+        let logits_b2 = model
+            .batched_prefill(
+                &input_b2,
+                &position_b2,
+                &attention_mask,
+                &linear_attention_mask,
+                &prompt_lens,
+                Some(&mut cache_b2),
+                (),
+            )
+            .expect("batched_prefill b2");
+        let logits_b2_row0 = slice_batch_logits(&logits_b2, 0);
+        let logits_b2_row1 = slice_batch_logits(&logits_b2, 1);
+
+        let arg_b1 = logits_argmax(&logits_b1);
+        let arg_row0 = logits_argmax(&logits_b2_row0);
+        let arg_row1 = logits_argmax(&logits_b2_row1);
+        let diff_row0 = logits_max_abs_diff(&logits_b1, &logits_b2_row0);
+        let diff_row1 = logits_max_abs_diff(&logits_b1, &logits_b2_row1);
+        eprintln!(
+            "[qwen36-long-prefill] arg_b1={arg_b1} arg_row0={arg_row0} \
+             arg_row1={arg_row1} arg_batched_b1={arg_batched_b1} \
+             diff_batched_b1={diff_batched_b1:.6} diff_row0={diff_row0:.6} \
+             diff_row1={diff_row1:.6}",
+        );
+
+        assert_eq!(arg_batched_b1, arg_b1, "B=1 batched argmax must match B1");
+        assert!(
+            diff_batched_b1 < 1.0,
+            "B=1 batched max_abs_diff {diff_batched_b1} exceeds Qwen drift envelope"
+        );
+        assert!(
+            arg_row0 != arg_b1 || diff_row0 >= 1.0,
+            "row0 unexpectedly matched B1; revisit Qwen long fresh-batch admission policy"
+        );
+        assert!(
+            arg_row1 != arg_b1 || diff_row1 >= 1.0,
+            "row1 unexpectedly matched B1; revisit Qwen long fresh-batch admission policy"
+        );
     }
 
     #[test]

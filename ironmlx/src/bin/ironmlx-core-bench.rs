@@ -266,6 +266,8 @@ struct MtpRecordStats {
     sampling_us: u64,
     main_rollback_us: u64,
     mtp_cache_commit_us: u64,
+    mtp_prefill_cache_commit_us: u64,
+    mtp_decode_cache_commit_us: u64,
     mtp_cache_restore_us: u64,
 }
 
@@ -382,6 +384,8 @@ impl From<MtpSpeculativeStats> for MtpRecordStats {
             sampling_us: stats.sampling_us,
             main_rollback_us: stats.main_rollback_us,
             mtp_cache_commit_us: stats.mtp_cache_commit_us,
+            mtp_prefill_cache_commit_us: stats.mtp_prefill_cache_commit_us,
+            mtp_decode_cache_commit_us: stats.mtp_decode_cache_commit_us,
             mtp_cache_restore_us: stats.mtp_cache_restore_us,
         }
     }
@@ -1985,6 +1989,8 @@ mod tests {
                 sampling_us: 0,
                 main_rollback_us: 0,
                 mtp_cache_commit_us: 0,
+                mtp_prefill_cache_commit_us: 0,
+                mtp_decode_cache_commit_us: 0,
                 mtp_cache_restore_us: 0,
             }),
             mtp_trace: None,

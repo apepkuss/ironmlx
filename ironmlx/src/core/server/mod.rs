@@ -857,6 +857,8 @@ where
                 scheduler_handle.mtp_sampling_us.clone(),
                 scheduler_handle.mtp_main_rollback_us.clone(),
                 scheduler_handle.mtp_cache_commit_us.clone(),
+                scheduler_handle.mtp_prefill_cache_commit_us.clone(),
+                scheduler_handle.mtp_decode_cache_commit_us.clone(),
                 scheduler_handle.mtp_cache_restore_us.clone(),
             )
         })
@@ -1191,6 +1193,8 @@ mod tests {
             mtp_sampling_us: Arc::new(AtomicU64::new(0)),
             mtp_main_rollback_us: Arc::new(AtomicU64::new(0)),
             mtp_cache_commit_us: Arc::new(AtomicU64::new(0)),
+            mtp_prefill_cache_commit_us: Arc::new(AtomicU64::new(0)),
+            mtp_decode_cache_commit_us: Arc::new(AtomicU64::new(0)),
             mtp_cache_restore_us: Arc::new(AtomicU64::new(0)),
             b_active: Arc::new(AtomicU64::new(0)),
             b_queued: Arc::new(AtomicU64::new(0)),
@@ -1248,6 +1252,12 @@ mod tests {
         handle.mtp_sampling_us.store(31, Ordering::Relaxed);
         handle.mtp_main_rollback_us.store(37, Ordering::Relaxed);
         handle.mtp_cache_commit_us.store(41, Ordering::Relaxed);
+        handle
+            .mtp_prefill_cache_commit_us
+            .store(17, Ordering::Relaxed);
+        handle
+            .mtp_decode_cache_commit_us
+            .store(24, Ordering::Relaxed);
         handle.mtp_cache_restore_us.store(43, Ordering::Relaxed);
         let collector = build_health_collector(
             "test-model".to_string(),
@@ -1269,6 +1279,8 @@ mod tests {
                 handle.mtp_sampling_us.clone(),
                 handle.mtp_main_rollback_us.clone(),
                 handle.mtp_cache_commit_us.clone(),
+                handle.mtp_prefill_cache_commit_us.clone(),
+                handle.mtp_decode_cache_commit_us.clone(),
                 handle.mtp_cache_restore_us.clone(),
             ),
         );
@@ -1288,6 +1300,8 @@ mod tests {
         assert_eq!(snapshot.mtp.sampling_us, 31);
         assert_eq!(snapshot.mtp.main_rollback_us, 37);
         assert_eq!(snapshot.mtp.cache_commit_us, 41);
+        assert_eq!(snapshot.mtp.prefill_cache_commit_us, 17);
+        assert_eq!(snapshot.mtp.decode_cache_commit_us, 24);
         assert_eq!(snapshot.mtp.cache_restore_us, 43);
     }
 

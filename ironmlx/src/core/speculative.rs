@@ -38,26 +38,8 @@ pub fn default_mtp_draft_tokens_for_config(raw_config: &serde_json::Value) -> us
         .get("model_type")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("");
-    let text = raw_config
-        .get("text_config")
-        .and_then(serde_json::Value::as_object);
-    let hidden_size = text
-        .and_then(|v| v.get("hidden_size"))
-        .and_then(serde_json::Value::as_i64);
-    let layers = text
-        .and_then(|v| v.get("num_hidden_layers"))
-        .and_then(serde_json::Value::as_i64);
-    let experts = text
-        .and_then(|v| v.get("num_experts"))
-        .and_then(serde_json::Value::as_i64);
-    let experts_per_tok = text
-        .and_then(|v| v.get("num_experts_per_tok"))
-        .and_then(serde_json::Value::as_i64);
-
-    match (model_type, hidden_size, layers, experts, experts_per_tok) {
-        ("gemma4" | "gemma4_unified", _, _, _, _) => 2,
-        ("qwen3_5", Some(5120), Some(64), None, None) => 2,
-        ("qwen3_5_moe", Some(2048), Some(40), Some(256), Some(8)) => 2,
+    match model_type {
+        "gemma4" | "gemma4_unified" => 2,
         _ => 1,
     }
 }
@@ -125,6 +107,10 @@ pub struct MtpSpeculativeStats {
     pub main_rollback_us: u64,
     /// Microseconds spent committing accepted tokens into the MTP KV cache.
     pub mtp_cache_commit_us: u64,
+    /// Microseconds spent building MTP KV cache entries during prompt prefill.
+    pub mtp_prefill_cache_commit_us: u64,
+    /// Microseconds spent committing accepted decode tokens into the MTP KV cache.
+    pub mtp_decode_cache_commit_us: u64,
     /// Microseconds spent restoring the MTP KV cache after temporary draft.
     pub mtp_cache_restore_us: u64,
 }
@@ -185,6 +171,12 @@ impl MtpSpeculativeStats {
             mtp_cache_commit_us: self
                 .mtp_cache_commit_us
                 .saturating_sub(before.mtp_cache_commit_us),
+            mtp_prefill_cache_commit_us: self
+                .mtp_prefill_cache_commit_us
+                .saturating_sub(before.mtp_prefill_cache_commit_us),
+            mtp_decode_cache_commit_us: self
+                .mtp_decode_cache_commit_us
+                .saturating_sub(before.mtp_decode_cache_commit_us),
             mtp_cache_restore_us: self
                 .mtp_cache_restore_us
                 .saturating_sub(before.mtp_cache_restore_us),
@@ -532,6 +524,18 @@ pub(crate) fn add_elapsed_us(counter: &mut u64, start: Instant) {
     *counter = counter.saturating_add(elapsed_us_since(start));
 }
 
+pub(crate) fn add_mtp_prefill_cache_commit_us(stats: &mut MtpSpeculativeStats, start: Instant) {
+    let elapsed = elapsed_us_since(start);
+    stats.mtp_cache_commit_us = stats.mtp_cache_commit_us.saturating_add(elapsed);
+    stats.mtp_prefill_cache_commit_us = stats.mtp_prefill_cache_commit_us.saturating_add(elapsed);
+}
+
+pub(crate) fn add_mtp_decode_cache_commit_us(stats: &mut MtpSpeculativeStats, start: Instant) {
+    let elapsed = elapsed_us_since(start);
+    stats.mtp_cache_commit_us = stats.mtp_cache_commit_us.saturating_add(elapsed);
+    stats.mtp_decode_cache_commit_us = stats.mtp_decode_cache_commit_us.saturating_add(elapsed);
+}
+
 /// Outcome of comparing MTP draft tokens with the main model's verified tokens.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpeculativeResolution {
@@ -598,6 +602,8 @@ pub(crate) struct MtpDraftPolicyWindow {
     pub sampling_us: u64,
     pub main_rollback_us: u64,
     pub mtp_cache_commit_us: u64,
+    pub mtp_prefill_cache_commit_us: u64,
+    pub mtp_decode_cache_commit_us: u64,
     pub mtp_cache_restore_us: u64,
 }
 
@@ -616,6 +622,8 @@ impl MtpDraftPolicyWindow {
             sampling_us: delta.sampling_us,
             main_rollback_us: delta.main_rollback_us,
             mtp_cache_commit_us: delta.mtp_cache_commit_us,
+            mtp_prefill_cache_commit_us: delta.mtp_prefill_cache_commit_us,
+            mtp_decode_cache_commit_us: delta.mtp_decode_cache_commit_us,
             mtp_cache_restore_us: delta.mtp_cache_restore_us,
         }
     }
@@ -625,7 +633,7 @@ impl MtpDraftPolicyWindow {
             .saturating_add(self.projection_us)
             .saturating_add(self.sampling_us)
             .saturating_add(self.main_rollback_us)
-            .saturating_add(self.mtp_cache_commit_us)
+            .saturating_add(self.mtp_decode_cache_commit_us)
             .saturating_add(self.mtp_cache_restore_us)
     }
 
@@ -1102,7 +1110,7 @@ where
                 &chunk_pos_ids,
                 (),
             )?;
-            add_elapsed_us(&mut stats.mtp_cache_commit_us, commit_start);
+            add_mtp_prefill_cache_commit_us(&mut stats, commit_start);
             let chunk_last_hidden = slice_hidden_position(&hidden, n - 1)?;
             mtp_prev_hidden = Some(chunk_last_hidden.clone());
             if pos + n == prompt_len_i32 {
@@ -1314,7 +1322,7 @@ where
                 &accepted_position_ids,
                 (),
             )?;
-            add_elapsed_us(&mut self.stats.mtp_cache_commit_us, commit_start);
+            add_mtp_decode_cache_commit_us(&mut self.stats, commit_start);
         } else {
             let commit_start = Instant::now();
             commit_mtp_cache_hidden_tail(
@@ -1327,7 +1335,7 @@ where
                 &accepted_position_ids,
                 (),
             )?;
-            add_elapsed_us(&mut self.stats.mtp_cache_commit_us, commit_start);
+            add_mtp_decode_cache_commit_us(&mut self.stats, commit_start);
             self.stats.mtp_cache_reuse_count = self.stats.mtp_cache_reuse_count.saturating_add(1);
             self.stats.mtp_cache_reused_tokens = self
                 .stats
@@ -2030,7 +2038,7 @@ mod tests {
     }
 
     #[test]
-    fn mtp_policy_defaults_qwen36_dense_27b_to_d2() {
+    fn mtp_policy_defaults_qwen36_dense_27b_to_d1() {
         let raw = serde_json::json!({
             "model_type": "qwen3_5",
             "text_config": {
@@ -2040,11 +2048,11 @@ mod tests {
             }
         });
 
-        assert_eq!(default_mtp_draft_tokens_for_config(&raw), 2);
+        assert_eq!(default_mtp_draft_tokens_for_config(&raw), 1);
     }
 
     #[test]
-    fn mtp_policy_defaults_qwen36_moe_35b_a3b_to_d2() {
+    fn mtp_policy_defaults_qwen36_moe_35b_a3b_to_d1() {
         let raw = serde_json::json!({
             "model_type": "qwen3_5_moe",
             "text_config": {
@@ -2056,7 +2064,7 @@ mod tests {
             }
         });
 
-        assert_eq!(default_mtp_draft_tokens_for_config(&raw), 2);
+        assert_eq!(default_mtp_draft_tokens_for_config(&raw), 1);
     }
 
     #[test]
@@ -2124,6 +2132,8 @@ mod tests {
                 sampling_us: 800,
                 main_rollback_us: 200,
                 mtp_cache_commit_us: 900,
+                mtp_prefill_cache_commit_us: 0,
+                mtp_decode_cache_commit_us: 900,
                 mtp_cache_restore_us: 300,
             },
             &stats,
@@ -2149,6 +2159,8 @@ mod tests {
                 sampling_us: 800,
                 main_rollback_us: 200,
                 mtp_cache_commit_us: 900,
+                mtp_prefill_cache_commit_us: 0,
+                mtp_decode_cache_commit_us: 900,
                 mtp_cache_restore_us: 300,
             },
             &stats,
@@ -2167,6 +2179,8 @@ mod tests {
                     sampling_us: 20,
                     main_rollback_us: 0,
                     mtp_cache_commit_us: 30,
+                    mtp_prefill_cache_commit_us: 0,
+                    mtp_decode_cache_commit_us: 30,
                     mtp_cache_restore_us: 0,
                 },
                 &stats,
@@ -2195,6 +2209,8 @@ mod tests {
                 sampling_us: 20,
                 main_rollback_us: 0,
                 mtp_cache_commit_us: 30,
+                mtp_prefill_cache_commit_us: 0,
+                mtp_decode_cache_commit_us: 30,
                 mtp_cache_restore_us: 0,
             },
             &stats,

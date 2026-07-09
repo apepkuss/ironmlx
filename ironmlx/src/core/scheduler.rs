@@ -78,14 +78,15 @@ use crate::core::generate::{
 use crate::core::model::Model;
 use crate::core::sampler::Sampler;
 use crate::core::speculative::{
-    add_elapsed_us, adjust_mtp_draft_budget, commit_mtp_cache_hidden_prefix,
-    commit_mtp_cache_hidden_tail, effective_mtp_draft_tokens_for_paged_prefix,
-    layer_cache_supports_accepted_prefix_trim, resolve_greedy_verified_hidden_until_mismatch,
-    resolve_speculative_tokens, restore_layer_cache, rollback_main_cache_to_accepted_prefix,
-    sample_logits_positions, slice_hidden_position, slice_position_ids_prefix,
-    trim_full_layer_cache_rows_to_accepted_prefix, verify_input, zero_hidden_like_position,
-    MainCacheRollbackInput, MtpDraftPolicyState, MtpDraftPolicyWindow, MtpDraftResult,
-    MtpSpeculativeConfig, MtpSpeculativeModel, MtpSpeculativeStats, SpeculativeResolution,
+    add_elapsed_us, add_mtp_decode_cache_commit_us, add_mtp_prefill_cache_commit_us,
+    adjust_mtp_draft_budget, commit_mtp_cache_hidden_prefix, commit_mtp_cache_hidden_tail,
+    effective_mtp_draft_tokens_for_paged_prefix, layer_cache_supports_accepted_prefix_trim,
+    resolve_greedy_verified_hidden_until_mismatch, resolve_speculative_tokens, restore_layer_cache,
+    rollback_main_cache_to_accepted_prefix, sample_logits_positions, slice_hidden_position,
+    slice_position_ids_prefix, trim_full_layer_cache_rows_to_accepted_prefix, verify_input,
+    zero_hidden_like_position, MainCacheRollbackInput, MtpDraftPolicyState, MtpDraftPolicyWindow,
+    MtpDraftResult, MtpSpeculativeConfig, MtpSpeculativeModel, MtpSpeculativeStats,
+    SpeculativeResolution,
 };
 use crate::nn::{
     enable_paged_hot_cold_tiering_caches, enable_paged_kv_caches, enable_turboquant_kv_caches,
@@ -845,34 +846,6 @@ fn slice_hidden_row_position(
     .map_err(Into::into)
 }
 
-fn slice_hidden_row_prefix(
-    hidden: &Array,
-    row_idx: usize,
-    len: usize,
-    target: mlx::StreamOrDevice,
-) -> Result<Array> {
-    let shape = hidden.shape();
-    let dims = shape.as_slice();
-    if dims.len() != 3 {
-        return Err(anyhow!(
-            "slice_hidden_row_prefix: expected hidden [B,S,H], got {dims:?}"
-        ));
-    }
-    if len == 0 || row_idx as i32 >= dims[0] || len > dims[1] as usize {
-        return Err(anyhow!(
-            "slice_hidden_row_prefix: row={row_idx} len={len} out of shape {dims:?}"
-        ));
-    }
-    mlx::ops::indexing::slice_strided_on(
-        hidden,
-        &[row_idx as i32, 0_i32, 0_i32][..],
-        &[row_idx as i32 + 1, len as i32, dims[2]][..],
-        &[1_i32, 1_i32, 1_i32][..],
-        target,
-    )
-    .map_err(Into::into)
-}
-
 fn slice_position_ids_row_position(
     position_ids: &Array,
     row_idx: usize,
@@ -1298,6 +1271,12 @@ fn add_mtp_stats(dst: &mut MtpSpeculativeStats, src: MtpSpeculativeStats) {
     dst.mtp_cache_commit_us = dst
         .mtp_cache_commit_us
         .saturating_add(src.mtp_cache_commit_us);
+    dst.mtp_prefill_cache_commit_us = dst
+        .mtp_prefill_cache_commit_us
+        .saturating_add(src.mtp_prefill_cache_commit_us);
+    dst.mtp_decode_cache_commit_us = dst
+        .mtp_decode_cache_commit_us
+        .saturating_add(src.mtp_decode_cache_commit_us);
     dst.mtp_cache_restore_us = dst
         .mtp_cache_restore_us
         .saturating_add(src.mtp_cache_restore_us);
@@ -4234,6 +4213,101 @@ impl<M: Model> Scheduler<M> {
         Ok(())
     }
 
+    fn compact_main_cache_to_rows(
+        &mut self,
+        model: &M,
+        target_rows: &[usize],
+        context: &str,
+    ) -> Result<(Vec<LayerCache>, Vec<usize>)> {
+        if target_rows.is_empty() {
+            return Err(anyhow!("{context}: compact target rows cannot be empty"));
+        }
+
+        let old_cache = self
+            .cache
+            .take()
+            .ok_or_else(|| anyhow!("{context}: cache absent"))?;
+        let old_rows = std::mem::take(&mut self.cache_rows);
+        let (cap, dtype) = cache_cap_and_dtype(&old_cache)?;
+        let turboquant_bits = self.kv_cache_turboquant_bits_for_rows(target_rows)?;
+        let mut compact_cache =
+            self.make_model_cache(model, target_rows.len() as i32, cap, dtype, turboquant_bits)?;
+
+        for (dst_row, &slot_row) in target_rows.iter().enumerate() {
+            let src_row = old_rows
+                .iter()
+                .position(|&row| row == slot_row)
+                .ok_or_else(|| {
+                    anyhow!("{context}: target slot row {slot_row} missing from old layout {old_rows:?}")
+                })?;
+            adopt_cache_row_layers(&mut compact_cache, &old_cache, dst_row, src_row, context)?;
+        }
+
+        self.cache = Some(compact_cache);
+        self.cache_rows = target_rows.to_vec();
+        Ok((old_cache, old_rows))
+    }
+
+    fn merge_compact_main_cache_into_rows(
+        &mut self,
+        model: &M,
+        old_cache: Vec<LayerCache>,
+        old_rows: Vec<usize>,
+        target_rows: &[usize],
+        context: &str,
+    ) -> Result<()> {
+        let compact_cache = self
+            .cache
+            .take()
+            .ok_or_else(|| anyhow!("{context}: compact cache absent"))?;
+        let compact_rows = std::mem::take(&mut self.cache_rows);
+        let (old_cap, old_dtype) = cache_cap_and_dtype(&old_cache)?;
+        let (compact_cap, compact_dtype) = cache_cap_and_dtype(&compact_cache)?;
+        if old_dtype != compact_dtype {
+            return Err(anyhow!(
+                "{context}: compact cache dtype {:?} != old cache dtype {:?}",
+                compact_dtype,
+                old_dtype
+            ));
+        }
+
+        let cap = old_cap.max(compact_cap);
+        let turboquant_bits = self.kv_cache_turboquant_bits_for_rows(target_rows)?;
+        let mut merged_cache = self.make_model_cache(
+            model,
+            target_rows.len() as i32,
+            cap,
+            old_dtype,
+            turboquant_bits,
+        )?;
+
+        for (dst_row, &slot_row) in target_rows.iter().enumerate() {
+            if let Some(src_row) = compact_rows.iter().position(|&row| row == slot_row) {
+                adopt_cache_row_layers(
+                    &mut merged_cache,
+                    &compact_cache,
+                    dst_row,
+                    src_row,
+                    context,
+                )?;
+            } else {
+                let src_row = old_rows
+                    .iter()
+                    .position(|&row| row == slot_row)
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "{context}: slot row {slot_row} missing from old layout {old_rows:?}"
+                        )
+                    })?;
+                adopt_cache_row_layers(&mut merged_cache, &old_cache, dst_row, src_row, context)?;
+            }
+        }
+
+        self.cache = Some(merged_cache);
+        self.cache_rows = target_rows.to_vec();
+        Ok(())
+    }
+
     fn install_cache_with_temp_row(
         &mut self,
         model: &M,
@@ -4703,7 +4777,7 @@ impl<M: Model> Scheduler<M> {
                 &chunk_pos_ids,
                 mlx::StreamOrDevice::default(),
             )?;
-            add_elapsed_us(&mut stats.mtp_cache_commit_us, commit_start);
+            add_mtp_prefill_cache_commit_us(&mut stats, commit_start);
             let chunk_last_hidden = slice_hidden_position(&hidden, n - 1)?;
             mtp_prev_hidden = Some(chunk_last_hidden.clone());
             let new_pos = pos + n;
@@ -4854,6 +4928,7 @@ impl<M: Model> Scheduler<M> {
                 "prefill_admitted_mtp_batch requires at least one admitted request"
             ));
         }
+        let mut final_cap = MIN_KV_CACHE_CAP_FOR_GPU_PERF;
         for &row_idx in &active_rows {
             let state = self.slots[row_idx]
                 .as_ref()
@@ -4869,16 +4944,25 @@ impl<M: Model> Scheduler<M> {
                 ));
             }
             MtpSpeculativeConfig::new(cfg.max_draft_tokens, state.sampler)?;
+            let row_cap = state.prompt_ids.len().saturating_add(state.max_new_tokens);
+            let row_cap = i32::try_from(row_cap).unwrap_or(i32::MAX);
+            final_cap = final_cap.max(row_cap.max(MIN_KV_CACHE_CAP_FOR_GPU_PERF));
         }
 
-        let mut temp_rows = Vec::with_capacity(active_rows.len());
         let mut row_states = HashMap::with_capacity(active_rows.len());
         let mut stats = MtpSpeculativeStats::default();
         let mut events = Vec::with_capacity(active_rows.len());
-        let mut final_cap = MIN_KV_CACHE_CAP_FOR_GPU_PERF;
         let dtype = model.cache_dtype();
+        let turboquant_bits = self.kv_cache_turboquant_bits_for_rows(&active_rows)?;
+        let mut final_cache = self.make_model_cache(
+            model,
+            active_rows.len() as i32,
+            final_cap,
+            dtype,
+            turboquant_bits,
+        )?;
 
-        for &row_idx in &active_rows {
+        for (dst_row, &row_idx) in active_rows.iter().enumerate() {
             let mut temp = self.temp_mtp_scheduler_for_row(row_idx)?;
             let event = temp
                 .prefill_admitted_mtp_single(model, mtp, cfg)
@@ -4886,8 +4970,6 @@ impl<M: Model> Scheduler<M> {
             let temp_cache = temp.cache.take().ok_or_else(|| {
                 anyhow!("prefill_admitted_mtp_batch row {row_idx}: temp cache absent")
             })?;
-            let (cap, _) = cache_cap_and_dtype(&temp_cache)?;
-            final_cap = final_cap.max(cap);
             let mut temp_mtp_state = temp.mtp_state.take().ok_or_else(|| {
                 anyhow!("prefill_admitted_mtp_batch row {row_idx}: temp MTP state absent")
             })?;
@@ -4906,34 +4988,14 @@ impl<M: Model> Scheduler<M> {
             slot.real_len = temp_slot.real_len;
             slot.finished = temp_slot.finished;
             slot.finish_reason = temp_slot.finish_reason;
-            temp_rows.push((row_idx, temp_cache));
-            events.extend(event);
-        }
-
-        let turboquant_bits = self.kv_cache_turboquant_bits_for_rows(&active_rows)?;
-        let mut final_cache = self.make_model_cache(
-            model,
-            active_rows.len() as i32,
-            final_cap,
-            dtype,
-            turboquant_bits,
-        )?;
-        for (dst_row, &slot_row) in active_rows.iter().enumerate() {
-            let (_, temp_cache) = temp_rows
-                .iter()
-                .find(|(row, _)| *row == slot_row)
-                .ok_or_else(|| {
-                    anyhow!(
-                        "prefill_admitted_mtp_batch: missing temp cache for slot row {slot_row}"
-                    )
-                })?;
             adopt_cache_row_layers(
                 &mut final_cache,
-                temp_cache,
+                &temp_cache,
                 dst_row,
                 0,
                 "prefill_admitted_mtp_batch",
             )?;
+            events.extend(event);
         }
 
         let all_finished = active_rows.iter().all(|&row| {
@@ -5620,22 +5682,6 @@ impl<M: Model> Scheduler<M> {
                     .then_some(row)
             })
             .collect::<Vec<_>>();
-        self.rebuild_cache_layout(model, &active_rows)?;
-        let cache_row_for_ctx = contexts
-            .iter()
-            .map(|ctx| {
-                self.cache_rows
-                    .iter()
-                    .position(|&row| row == ctx.row_idx)
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "fill_mtp_windows_batched: row {} missing from cache layout {:?}",
-                            ctx.row_idx,
-                            self.cache_rows
-                        )
-                    })
-            })
-            .collect::<Result<Vec<_>>>()?;
         let max_verify_len = contexts
             .iter()
             .map(|ctx| ctx.verify_input.len())
@@ -5645,325 +5691,402 @@ impl<M: Model> Scheduler<M> {
             return Ok(());
         }
 
-        let base_snapshot = {
-            let cache = self
-                .cache
-                .as_ref()
-                .ok_or_else(|| anyhow!("fill_mtp_windows_batched: main cache absent"))?;
-            cache.iter().map(LayerCache::snapshot).collect::<Vec<_>>()
-        };
-        let b = active_rows.len();
-        let mut flat = vec![0_u32; b * max_verify_len];
-        let mut verify_lens = vec![0_i32; b];
-        let mut verify_starts = vec![0_i32; b];
-        for (ctx, &compact_row) in contexts.iter().zip(cache_row_for_ctx.iter()) {
-            let input_len = ctx.verify_input.len();
-            let start = compact_row * max_verify_len;
-            flat[start..start + input_len].copy_from_slice(&ctx.verify_input);
-            verify_lens[compact_row] = input_len as i32;
-            verify_starts[compact_row] = ctx.verify_start_pos;
-        }
-        let verify_arr: Array = (&flat[..], &[b as i32, max_verify_len as i32][..]).try_into()?;
-        let verify_pos_ids = if model.requires_position_ids() {
-            build_mtp_batched_position_ids(&verify_starts, &verify_lens, max_verify_len as i32)?
+        let verify_rows = if contexts.len() < active_rows.len() {
+            contexts.iter().map(|ctx| ctx.row_idx).collect::<Vec<_>>()
         } else {
-            self.reusable_dummy_position_ids()?
+            active_rows.clone()
         };
-        let decode_mask = {
-            let cache = self
-                .cache
-                .as_ref()
-                .ok_or_else(|| anyhow!("fill_mtp_windows_batched: main cache absent"))?;
-            maybe_build_sparse_decode_mask(cache, &verify_lens)?
-        };
-        let verify_forward_start = Instant::now();
-        let verified_hidden = {
-            let cache = self
-                .cache
-                .as_mut()
-                .ok_or_else(|| anyhow!("fill_mtp_windows_batched: main cache absent"))?;
-            model.forward_text_hidden(
-                &verify_arr,
-                &verify_pos_ids,
-                Some(&verify_lens),
-                decode_mask.as_ref(),
-                Some(cache.as_mut_slice()),
-                mlx::StreamOrDevice::default(),
-            )?
-        };
-        add_elapsed_us(&mut stats.verify_forward_us, verify_forward_start);
-
-        let mut resolutions = Vec::with_capacity(contexts.len());
-        for (ctx_idx, ctx) in contexts.iter().enumerate() {
-            let compact_row = cache_row_for_ctx[ctx_idx];
-            let row_hidden = slice_hidden_row_prefix(
-                &verified_hidden,
-                compact_row,
-                ctx.verify_input.len(),
-                mlx::StreamOrDevice::default(),
-            )?;
-            let resolution = resolve_greedy_verified_hidden_until_mismatch(
+        let saved_full_cache = if verify_rows.len() < active_rows.len() {
+            Some(self.compact_main_cache_to_rows(
                 model,
-                &row_hidden,
-                &ctx.draft_tokens,
-                stats,
-                mlx::StreamOrDevice::default(),
-            )?;
-            stats.windows += 1;
-            stats.drafted_tokens += ctx.draft_tokens.len();
-            stats.accepted_draft_tokens += resolution.accepted_draft_len;
-            stats.record_window_acceptance(ctx.draft_tokens.len(), resolution.accepted_draft_len);
-            if resolution.needs_rollback {
-                stats.rollback_count += 1;
-            }
-            resolutions.push(resolution);
-        }
-
-        let mismatch_rows = resolutions
-            .iter()
-            .enumerate()
-            .filter_map(|(ctx_idx, resolution)| {
-                resolution.needs_rollback.then_some((
-                    cache_row_for_ctx[ctx_idx],
-                    resolution.accepted_verify_input_len,
-                ))
-            })
-            .collect::<Vec<_>>();
-        let main_cache_supports_trim = {
-            let cache = self
-                .cache
-                .as_ref()
-                .ok_or_else(|| anyhow!("fill_mtp_windows_batched: main cache absent"))?;
-            layer_cache_supports_accepted_prefix_trim(cache.as_slice())
-        };
-        let (accepted_hidden_source, accepted_position_ids_source) = if mismatch_rows.is_empty() {
-            (verified_hidden.clone(), verify_pos_ids.clone())
-        } else if main_cache_supports_trim {
-            let rollback_start = Instant::now();
-            {
-                let cache = self
-                    .cache
-                    .as_mut()
-                    .ok_or_else(|| anyhow!("fill_mtp_windows_batched: main cache absent"))?;
-                trim_full_layer_cache_rows_to_accepted_prefix(
-                    cache.as_mut_slice(),
-                    &base_snapshot,
-                    &mismatch_rows,
-                )?;
-            }
-            add_elapsed_us(&mut stats.main_rollback_us, rollback_start);
-            (verified_hidden.clone(), verify_pos_ids.clone())
+                &verify_rows,
+                "fill_mtp_windows_batched compact verify",
+            )?)
         } else {
-            let rollback_start = Instant::now();
-            {
-                let cache = self
-                    .cache
-                    .as_mut()
-                    .ok_or_else(|| anyhow!("fill_mtp_windows_batched: main cache absent"))?;
-                restore_layer_cache(cache.as_mut_slice(), &base_snapshot)?;
-            }
+            self.rebuild_cache_layout(model, &active_rows)?;
+            None
+        };
 
-            let accepted_lens = resolutions
+        let verify_result = (|| -> Result<()> {
+            let cache_row_for_ctx = contexts
                 .iter()
-                .map(|resolution| resolution.accepted_verify_input_len)
-                .collect::<Vec<_>>();
-            let max_replay_len = accepted_lens.iter().copied().max().unwrap_or(0);
-            if max_replay_len == 0 {
-                return Err(anyhow!(
-                    "fill_mtp_windows_batched: accepted replay length cannot be zero"
-                ));
-            }
-            let mut replay_flat = vec![0_u32; b * max_replay_len];
-            let mut replay_lens = vec![0_i32; b];
-            let mut replay_starts = vec![0_i32; b];
-            for (ctx_idx, ctx) in contexts.iter().enumerate() {
-                let compact_row = cache_row_for_ctx[ctx_idx];
-                let accepted_len = accepted_lens[ctx_idx];
-                if accepted_len == 0 || accepted_len > ctx.verify_input.len() {
-                    return Err(anyhow!(
-                        "fill_mtp_windows_batched: row {} accepted_len={} verify_len={}",
-                        ctx.row_idx,
-                        accepted_len,
-                        ctx.verify_input.len()
-                    ));
-                }
-                let start = compact_row * max_replay_len;
-                replay_flat[start..start + accepted_len]
-                    .copy_from_slice(&ctx.verify_input[..accepted_len]);
-                replay_lens[compact_row] = accepted_len as i32;
-                replay_starts[compact_row] = ctx.verify_start_pos;
-            }
-            let replay_arr: Array =
-                (&replay_flat[..], &[b as i32, max_replay_len as i32][..]).try_into()?;
-            let replay_pos_ids = if model.requires_position_ids() {
-                build_mtp_batched_position_ids(&replay_starts, &replay_lens, max_replay_len as i32)?
-            } else {
-                self.reusable_dummy_position_ids()?
-            };
-            let replay_decode_mask = {
+                .map(|ctx| {
+                    self.cache_rows
+                        .iter()
+                        .position(|&row| row == ctx.row_idx)
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "fill_mtp_windows_batched: row {} missing from cache layout {:?}",
+                                ctx.row_idx,
+                                self.cache_rows
+                            )
+                        })
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            let base_snapshot = {
                 let cache = self
                     .cache
                     .as_ref()
                     .ok_or_else(|| anyhow!("fill_mtp_windows_batched: main cache absent"))?;
-                maybe_build_sparse_decode_mask(cache, &replay_lens)?
+                cache.iter().map(LayerCache::snapshot).collect::<Vec<_>>()
             };
-            let replay_hidden = {
+            let b = self.cache_rows.len();
+            let mut flat = vec![0_u32; b * max_verify_len];
+            let mut verify_lens = vec![0_i32; b];
+            let mut verify_starts = vec![0_i32; b];
+            for (ctx, &compact_row) in contexts.iter().zip(cache_row_for_ctx.iter()) {
+                let input_len = ctx.verify_input.len();
+                let start = compact_row * max_verify_len;
+                flat[start..start + input_len].copy_from_slice(&ctx.verify_input);
+                verify_lens[compact_row] = input_len as i32;
+                verify_starts[compact_row] = ctx.verify_start_pos;
+            }
+            let verify_arr: Array =
+                (&flat[..], &[b as i32, max_verify_len as i32][..]).try_into()?;
+            let verify_pos_ids = if model.requires_position_ids() {
+                build_mtp_batched_position_ids(&verify_starts, &verify_lens, max_verify_len as i32)?
+            } else {
+                self.reusable_dummy_position_ids()?
+            };
+            let decode_mask = {
+                let cache = self
+                    .cache
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("fill_mtp_windows_batched: main cache absent"))?;
+                maybe_build_sparse_decode_mask(cache, &verify_lens)?
+            };
+            let verify_forward_start = Instant::now();
+            let verified_hidden = {
                 let cache = self
                     .cache
                     .as_mut()
                     .ok_or_else(|| anyhow!("fill_mtp_windows_batched: main cache absent"))?;
                 model.forward_text_hidden(
-                    &replay_arr,
-                    &replay_pos_ids,
-                    Some(&replay_lens),
-                    replay_decode_mask.as_ref(),
+                    &verify_arr,
+                    &verify_pos_ids,
+                    Some(&verify_lens),
+                    decode_mask.as_ref(),
                     Some(cache.as_mut_slice()),
                     mlx::StreamOrDevice::default(),
                 )?
             };
-            add_elapsed_us(&mut stats.main_rollback_us, rollback_start);
-            (replay_hidden, replay_pos_ids)
-        };
+            add_elapsed_us(&mut stats.verify_forward_us, verify_forward_start);
 
-        let mut policy_inputs = Vec::with_capacity(contexts.len());
-        let mut full_accept_tail_commits: Vec<(usize, u32, Array, Array)> = Vec::new();
-        for (ctx_idx, resolution) in resolutions.into_iter().enumerate() {
-            let ctx = &contexts[ctx_idx];
-            let compact_row = cache_row_for_ctx[ctx_idx];
-            let accepted_len = resolution.accepted_verify_input_len;
-            let accepted_last_hidden = slice_hidden_row_position(
-                &accepted_hidden_source,
-                compact_row,
-                accepted_len - 1,
-                mlx::StreamOrDevice::default(),
-            )?;
-            let accepted_input = ctx.verify_input[..accepted_len].to_vec();
+            let projection_start = Instant::now();
+            let verified_logits =
+                model.project_hidden_on(&verified_hidden, mlx::StreamOrDevice::default())?;
+            add_elapsed_us(&mut stats.projection_us, projection_start);
 
-            let row_state = row_states.get_mut(&ctx.row_idx).ok_or_else(|| {
-                anyhow!(
-                    "fill_mtp_windows_batched: row {} MTP state absent after verify",
-                    ctx.row_idx
-                )
-            })?;
-            let pre_window_hidden = row_state.last_hidden.clone();
-            if resolution.needs_rollback {
-                let trim_start = Instant::now();
-                let accepted_mtp_input_len =
-                    accepted_input.len() + usize::from(ctx.deferred_tail_commit.is_some());
-                row_state.mtp_cache.trim_row_to_snapshot_prefix_len(
-                    &ctx.mtp_cache_snapshot,
-                    0,
-                    accepted_mtp_input_len,
-                )?;
-                add_elapsed_us(&mut stats.mtp_cache_restore_us, trim_start);
-            } else {
-                let tail_idx = accepted_input.len() - 1;
-                let tail_prev_hidden = if tail_idx == 0 {
-                    pre_window_hidden.clone()
-                } else {
-                    slice_hidden_row_position(
-                        &accepted_hidden_source,
-                        compact_row,
-                        tail_idx - 1,
-                        mlx::StreamOrDevice::default(),
-                    )?
-                };
-                let tail_position_ids = slice_position_ids_row_position(
-                    &accepted_position_ids_source,
-                    compact_row,
-                    tail_idx,
-                    mlx::StreamOrDevice::default(),
-                )?;
-                full_accept_tail_commits.push((
-                    ctx_idx,
-                    accepted_input[tail_idx],
-                    tail_prev_hidden,
-                    tail_position_ids,
+            let sampling_start = Instant::now();
+            let verified_ids = mlx::ops::reduction::argmax(&verified_logits, -1, false)?;
+            let verified_tokens: Vec<u32> = verified_ids.to_vec()?;
+            add_elapsed_us(&mut stats.sampling_us, sampling_start);
+
+            let logits_shape = verified_logits.shape();
+            let logits_dims = logits_shape.as_slice();
+            if logits_dims.len() != 3 {
+                return Err(anyhow!(
+                    "fill_mtp_windows_batched: expected verified logits [B,S,V], got {:?}",
+                    logits_dims
                 ));
-                stats.mtp_cache_reuse_count = stats.mtp_cache_reuse_count.saturating_add(1);
-                stats.mtp_cache_reused_tokens = stats
-                    .mtp_cache_reused_tokens
-                    .saturating_add(accepted_input.len().saturating_sub(1));
             }
-            row_state.last_hidden = accepted_last_hidden;
-
-            let mut tokens_to_append = resolution.tokens_to_append;
-            if let Some(stop_idx) = tokens_to_append
-                .iter()
-                .position(|token| ctx.stop_token_ids.contains(token))
-            {
-                tokens_to_append.truncate(stop_idx + 1);
-            }
-            tokens_to_append.truncate(ctx.remaining);
-            row_state.pending_tokens.extend(tokens_to_append);
-            policy_inputs.push((
-                ctx.row_idx,
-                ctx.draft_tokens.len(),
-                resolution.accepted_draft_len,
+            let logits_batch = logits_dims[0] as usize;
+            let logits_seq = logits_dims[1] as usize;
+            if logits_batch != b || logits_seq != max_verify_len {
+                return Err(anyhow!(
+                "fill_mtp_windows_batched: verified logits shape {:?} does not match batch {} max_verify_len {}",
+                logits_dims,
+                b,
+                max_verify_len
             ));
-        }
+            }
+            if verified_tokens.len() != logits_batch * logits_seq {
+                return Err(anyhow!(
+                    "fill_mtp_windows_batched: argmax returned {} tokens for logits shape {:?}",
+                    verified_tokens.len(),
+                    logits_dims
+                ));
+            }
 
-        if !full_accept_tail_commits.is_empty() {
-            match tail_commit_mode {
-                MtpBatchedTailCommitMode::BatchedFromRowCaches => {
-                    let ctx_indices = full_accept_tail_commits
+            let mut resolutions = Vec::with_capacity(contexts.len());
+            for (ctx_idx, ctx) in contexts.iter().enumerate() {
+                let compact_row = cache_row_for_ctx[ctx_idx];
+                let input_len = ctx.verify_input.len();
+                let row_start = compact_row * logits_seq;
+                let row_end = row_start + input_len;
+                let row_verified_tokens =
+                    verified_tokens.get(row_start..row_end).ok_or_else(|| {
+                        anyhow!(
+                    "fill_mtp_windows_batched: row {} verified token range {}..{} out of {}",
+                    ctx.row_idx,
+                    row_start,
+                    row_end,
+                    verified_tokens.len()
+                )
+                    })?;
+                let resolution =
+                    resolve_speculative_tokens(&ctx.draft_tokens, row_verified_tokens)?;
+                stats.windows += 1;
+                stats.drafted_tokens += ctx.draft_tokens.len();
+                stats.accepted_draft_tokens += resolution.accepted_draft_len;
+                stats.record_window_acceptance(
+                    ctx.draft_tokens.len(),
+                    resolution.accepted_draft_len,
+                );
+                if resolution.needs_rollback {
+                    stats.rollback_count += 1;
+                }
+                resolutions.push(resolution);
+            }
+
+            let mismatch_rows = resolutions
+                .iter()
+                .enumerate()
+                .filter_map(|(ctx_idx, resolution)| {
+                    resolution.needs_rollback.then_some((
+                        cache_row_for_ctx[ctx_idx],
+                        resolution.accepted_verify_input_len,
+                    ))
+                })
+                .collect::<Vec<_>>();
+            let main_cache_supports_trim = {
+                let cache = self
+                    .cache
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("fill_mtp_windows_batched: main cache absent"))?;
+                layer_cache_supports_accepted_prefix_trim(cache.as_slice())
+            };
+            let (accepted_hidden_source, accepted_position_ids_source) =
+                if mismatch_rows.is_empty() {
+                    (verified_hidden.clone(), verify_pos_ids.clone())
+                } else if main_cache_supports_trim {
+                    let rollback_start = Instant::now();
+                    {
+                        let cache = self.cache.as_mut().ok_or_else(|| {
+                            anyhow!("fill_mtp_windows_batched: main cache absent")
+                        })?;
+                        trim_full_layer_cache_rows_to_accepted_prefix(
+                            cache.as_mut_slice(),
+                            &base_snapshot,
+                            &mismatch_rows,
+                        )?;
+                    }
+                    add_elapsed_us(&mut stats.main_rollback_us, rollback_start);
+                    (verified_hidden.clone(), verify_pos_ids.clone())
+                } else {
+                    let rollback_start = Instant::now();
+                    {
+                        let cache = self.cache.as_mut().ok_or_else(|| {
+                            anyhow!("fill_mtp_windows_batched: main cache absent")
+                        })?;
+                        restore_layer_cache(cache.as_mut_slice(), &base_snapshot)?;
+                    }
+
+                    let accepted_lens = resolutions
                         .iter()
-                        .map(|(ctx_idx, _, _, _)| *ctx_idx)
+                        .map(|resolution| resolution.accepted_verify_input_len)
                         .collect::<Vec<_>>();
-                    let mut tail_cache = self.make_batched_mtp_cache_from_rows(
-                        model,
-                        mtp,
-                        &contexts,
-                        row_states,
-                        &ctx_indices,
-                    )?;
-                    let tail_tokens = full_accept_tail_commits
-                        .iter()
-                        .map(|(_, token, _, _)| *token)
-                        .collect::<Vec<_>>();
-                    let token_arr: Array =
-                        (&tail_tokens[..], &[tail_tokens.len() as i32, 1_i32][..]).try_into()?;
-                    let prev_hidden_rows = full_accept_tail_commits
-                        .iter()
-                        .map(|(_, _, hidden, _)| hidden)
-                        .collect::<Vec<_>>();
-                    let prev_hidden = mlx::ops::shape::concatenate_on(
-                        &prev_hidden_rows[..],
-                        0,
-                        mlx::StreamOrDevice::default(),
-                    )?;
-                    let position_ids = if model.requires_position_ids() {
-                        let pos_rows = full_accept_tail_commits
-                            .iter()
-                            .map(|(_, _, _, pos)| pos)
-                            .collect::<Vec<_>>();
-                        mlx::ops::shape::concatenate_on(
-                            &pos_rows[..],
-                            1,
-                            mlx::StreamOrDevice::default(),
+                    let max_replay_len = accepted_lens.iter().copied().max().unwrap_or(0);
+                    if max_replay_len == 0 {
+                        return Err(anyhow!(
+                            "fill_mtp_windows_batched: accepted replay length cannot be zero"
+                        ));
+                    }
+                    let mut replay_flat = vec![0_u32; b * max_replay_len];
+                    let mut replay_lens = vec![0_i32; b];
+                    let mut replay_starts = vec![0_i32; b];
+                    for (ctx_idx, ctx) in contexts.iter().enumerate() {
+                        let compact_row = cache_row_for_ctx[ctx_idx];
+                        let accepted_len = accepted_lens[ctx_idx];
+                        if accepted_len == 0 || accepted_len > ctx.verify_input.len() {
+                            return Err(anyhow!(
+                                "fill_mtp_windows_batched: row {} accepted_len={} verify_len={}",
+                                ctx.row_idx,
+                                accepted_len,
+                                ctx.verify_input.len()
+                            ));
+                        }
+                        let start = compact_row * max_replay_len;
+                        replay_flat[start..start + accepted_len]
+                            .copy_from_slice(&ctx.verify_input[..accepted_len]);
+                        replay_lens[compact_row] = accepted_len as i32;
+                        replay_starts[compact_row] = ctx.verify_start_pos;
+                    }
+                    let replay_arr: Array =
+                        (&replay_flat[..], &[b as i32, max_replay_len as i32][..]).try_into()?;
+                    let replay_pos_ids = if model.requires_position_ids() {
+                        build_mtp_batched_position_ids(
+                            &replay_starts,
+                            &replay_lens,
+                            max_replay_len as i32,
                         )?
                     } else {
                         self.reusable_dummy_position_ids()?
                     };
+                    let replay_decode_mask = {
+                        let cache = self.cache.as_ref().ok_or_else(|| {
+                            anyhow!("fill_mtp_windows_batched: main cache absent")
+                        })?;
+                        maybe_build_sparse_decode_mask(cache, &replay_lens)?
+                    };
+                    let replay_hidden = {
+                        let cache = self.cache.as_mut().ok_or_else(|| {
+                            anyhow!("fill_mtp_windows_batched: main cache absent")
+                        })?;
+                        model.forward_text_hidden(
+                            &replay_arr,
+                            &replay_pos_ids,
+                            Some(&replay_lens),
+                            replay_decode_mask.as_ref(),
+                            Some(cache.as_mut_slice()),
+                            mlx::StreamOrDevice::default(),
+                        )?
+                    };
+                    add_elapsed_us(&mut stats.main_rollback_us, rollback_start);
+                    (replay_hidden, replay_pos_ids)
+                };
 
-                    let commit_start = Instant::now();
-                    let mtp_hidden = model.mtp_forward_hidden_on(
-                        mtp,
-                        &prev_hidden,
-                        &token_arr,
-                        &position_ids,
-                        None,
-                        Some(&mut tail_cache),
+            let mut policy_inputs = Vec::with_capacity(contexts.len());
+            let mut full_accept_tail_commits: Vec<(usize, u32, Array, Array)> = Vec::new();
+            for (ctx_idx, resolution) in resolutions.into_iter().enumerate() {
+                let ctx = &contexts[ctx_idx];
+                let compact_row = cache_row_for_ctx[ctx_idx];
+                let accepted_len = resolution.accepted_verify_input_len;
+                let accepted_last_hidden = slice_hidden_row_position(
+                    &accepted_hidden_source,
+                    compact_row,
+                    accepted_len - 1,
+                    mlx::StreamOrDevice::default(),
+                )?;
+                let accepted_input = ctx.verify_input[..accepted_len].to_vec();
+
+                let row_state = row_states.get_mut(&ctx.row_idx).ok_or_else(|| {
+                    anyhow!(
+                        "fill_mtp_windows_batched: row {} MTP state absent after verify",
+                        ctx.row_idx
+                    )
+                })?;
+                let pre_window_hidden = row_state.last_hidden.clone();
+                if resolution.needs_rollback {
+                    let trim_start = Instant::now();
+                    let accepted_mtp_input_len =
+                        accepted_input.len() + usize::from(ctx.deferred_tail_commit.is_some());
+                    row_state.mtp_cache.trim_row_to_snapshot_prefix_len(
+                        &ctx.mtp_cache_snapshot,
+                        0,
+                        accepted_mtp_input_len,
+                    )?;
+                    add_elapsed_us(&mut stats.mtp_cache_restore_us, trim_start);
+                } else {
+                    let tail_idx = accepted_input.len() - 1;
+                    let tail_prev_hidden = if tail_idx == 0 {
+                        pre_window_hidden.clone()
+                    } else {
+                        slice_hidden_row_position(
+                            &accepted_hidden_source,
+                            compact_row,
+                            tail_idx - 1,
+                            mlx::StreamOrDevice::default(),
+                        )?
+                    };
+                    let tail_position_ids = slice_position_ids_row_position(
+                        &accepted_position_ids_source,
+                        compact_row,
+                        tail_idx,
                         mlx::StreamOrDevice::default(),
                     )?;
-                    mlx::transforms::eval(&[&mtp_hidden])?;
-                    add_elapsed_us(&mut stats.mtp_cache_commit_us, commit_start);
+                    full_accept_tail_commits.push((
+                        ctx_idx,
+                        accepted_input[tail_idx],
+                        tail_prev_hidden,
+                        tail_position_ids,
+                    ));
+                    stats.mtp_cache_reuse_count = stats.mtp_cache_reuse_count.saturating_add(1);
+                    stats.mtp_cache_reused_tokens = stats
+                        .mtp_cache_reused_tokens
+                        .saturating_add(accepted_input.len().saturating_sub(1));
+                }
+                row_state.last_hidden = accepted_last_hidden;
 
-                    for (compact_idx, (ctx_idx, _, _, _)) in
-                        full_accept_tail_commits.iter().enumerate()
-                    {
-                        let row_idx = contexts[*ctx_idx].row_idx;
-                        row_states
+                let mut tokens_to_append = resolution.tokens_to_append;
+                if let Some(stop_idx) = tokens_to_append
+                    .iter()
+                    .position(|token| ctx.stop_token_ids.contains(token))
+                {
+                    tokens_to_append.truncate(stop_idx + 1);
+                }
+                tokens_to_append.truncate(ctx.remaining);
+                row_state.pending_tokens.extend(tokens_to_append);
+                policy_inputs.push((
+                    ctx.row_idx,
+                    ctx.draft_tokens.len(),
+                    resolution.accepted_draft_len,
+                ));
+            }
+
+            if !full_accept_tail_commits.is_empty() {
+                match tail_commit_mode {
+                    MtpBatchedTailCommitMode::BatchedFromRowCaches => {
+                        let ctx_indices = full_accept_tail_commits
+                            .iter()
+                            .map(|(ctx_idx, _, _, _)| *ctx_idx)
+                            .collect::<Vec<_>>();
+                        let mut tail_cache = self.make_batched_mtp_cache_from_rows(
+                            model,
+                            mtp,
+                            &contexts,
+                            row_states,
+                            &ctx_indices,
+                        )?;
+                        let tail_tokens = full_accept_tail_commits
+                            .iter()
+                            .map(|(_, token, _, _)| *token)
+                            .collect::<Vec<_>>();
+                        let token_arr: Array =
+                            (&tail_tokens[..], &[tail_tokens.len() as i32, 1_i32][..])
+                                .try_into()?;
+                        let prev_hidden_rows = full_accept_tail_commits
+                            .iter()
+                            .map(|(_, _, hidden, _)| hidden)
+                            .collect::<Vec<_>>();
+                        let prev_hidden = mlx::ops::shape::concatenate_on(
+                            &prev_hidden_rows[..],
+                            0,
+                            mlx::StreamOrDevice::default(),
+                        )?;
+                        let position_ids = if model.requires_position_ids() {
+                            let pos_rows = full_accept_tail_commits
+                                .iter()
+                                .map(|(_, _, _, pos)| pos)
+                                .collect::<Vec<_>>();
+                            mlx::ops::shape::concatenate_on(
+                                &pos_rows[..],
+                                1,
+                                mlx::StreamOrDevice::default(),
+                            )?
+                        } else {
+                            self.reusable_dummy_position_ids()?
+                        };
+
+                        let commit_start = Instant::now();
+                        let mtp_hidden = model.mtp_forward_hidden_on(
+                            mtp,
+                            &prev_hidden,
+                            &token_arr,
+                            &position_ids,
+                            None,
+                            Some(&mut tail_cache),
+                            mlx::StreamOrDevice::default(),
+                        )?;
+                        mlx::transforms::eval(&[&mtp_hidden])?;
+                        add_mtp_decode_cache_commit_us(stats, commit_start);
+
+                        for (compact_idx, (ctx_idx, _, _, _)) in
+                            full_accept_tail_commits.iter().enumerate()
+                        {
+                            let row_idx = contexts[*ctx_idx].row_idx;
+                            row_states
                             .get_mut(&row_idx)
                             .ok_or_else(|| {
                                 anyhow!(
@@ -5972,55 +6095,84 @@ impl<M: Model> Scheduler<M> {
                             })?
                             .mtp_cache
                             .adopt_row_from(&tail_cache, 0, compact_idx)?;
+                        }
                     }
-                }
-                MtpBatchedTailCommitMode::PerRowCache => {
-                    for (ctx_idx, token, prev_hidden, position_ids) in &full_accept_tail_commits {
-                        let row_idx = contexts[*ctx_idx].row_idx;
-                        let row_state = row_states.get_mut(&row_idx).ok_or_else(|| {
+                    MtpBatchedTailCommitMode::PerRowCache => {
+                        for (ctx_idx, token, prev_hidden, position_ids) in &full_accept_tail_commits
+                        {
+                            let row_idx = contexts[*ctx_idx].row_idx;
+                            let row_state = row_states.get_mut(&row_idx).ok_or_else(|| {
                             anyhow!(
                                 "fill_mtp_windows_batched: row {row_idx} state absent for row-cache tail commit"
                             )
                         })?;
-                        row_state.deferred_tail_commit = Some(MtpDeferredTailCommit {
-                            token: *token,
-                            prev_hidden: prev_hidden.clone(),
-                            position_ids: position_ids.clone(),
-                        });
+                            row_state.deferred_tail_commit = Some(MtpDeferredTailCommit {
+                                token: *token,
+                                prev_hidden: prev_hidden.clone(),
+                                position_ids: position_ids.clone(),
+                            });
+                        }
                     }
                 }
             }
-        }
 
-        let stats_delta = stats.saturating_delta_since(&stats_before_batch);
-        let divisor = contexts.len() as u64;
-        for (row_idx, attempted, accepted) in policy_inputs {
-            let row_state = row_states.get_mut(&row_idx).ok_or_else(|| {
-                anyhow!("fill_mtp_windows_batched: row {row_idx} state absent for policy update")
-            })?;
-            let change = row_state.draft_policy.observe_window(
-                MtpDraftPolicyWindow {
-                    attempted_draft_tokens: attempted,
-                    accepted_draft_tokens: accepted,
-                    draft_forward_us: stats_delta.draft_forward_us / divisor,
-                    verify_forward_us: stats_delta.verify_forward_us / divisor,
-                    projection_us: stats_delta.projection_us / divisor,
-                    sampling_us: stats_delta.sampling_us / divisor,
-                    main_rollback_us: stats_delta.main_rollback_us / divisor,
-                    mtp_cache_commit_us: stats_delta.mtp_cache_commit_us / divisor,
-                    mtp_cache_restore_us: stats_delta.mtp_cache_restore_us / divisor,
-                },
-                stats,
-            );
-            if change.reduced {
-                stats.draft_budget_reductions = stats.draft_budget_reductions.saturating_add(1);
-            } else if change.increased {
-                stats.draft_budget_increases = stats.draft_budget_increases.saturating_add(1);
+            let stats_delta = stats.saturating_delta_since(&stats_before_batch);
+            let divisor = contexts.len() as u64;
+            for (row_idx, attempted, accepted) in policy_inputs {
+                let row_state = row_states.get_mut(&row_idx).ok_or_else(|| {
+                    anyhow!(
+                        "fill_mtp_windows_batched: row {row_idx} state absent for policy update"
+                    )
+                })?;
+                let change = row_state.draft_policy.observe_window(
+                    MtpDraftPolicyWindow {
+                        attempted_draft_tokens: attempted,
+                        accepted_draft_tokens: accepted,
+                        draft_forward_us: stats_delta.draft_forward_us / divisor,
+                        verify_forward_us: stats_delta.verify_forward_us / divisor,
+                        projection_us: stats_delta.projection_us / divisor,
+                        sampling_us: stats_delta.sampling_us / divisor,
+                        main_rollback_us: stats_delta.main_rollback_us / divisor,
+                        mtp_cache_commit_us: stats_delta.mtp_cache_commit_us / divisor,
+                        mtp_prefill_cache_commit_us: stats_delta.mtp_prefill_cache_commit_us
+                            / divisor,
+                        mtp_decode_cache_commit_us: stats_delta.mtp_decode_cache_commit_us
+                            / divisor,
+                        mtp_cache_restore_us: stats_delta.mtp_cache_restore_us / divisor,
+                    },
+                    stats,
+                );
+                if change.reduced {
+                    stats.draft_budget_reductions = stats.draft_budget_reductions.saturating_add(1);
+                } else if change.increased {
+                    stats.draft_budget_increases = stats.draft_budget_increases.saturating_add(1);
+                }
+                row_state.adaptive_draft_tokens = row_state
+                    .draft_policy
+                    .current_budget()
+                    .min(max_supported_draft_tokens);
             }
-            row_state.adaptive_draft_tokens = row_state
-                .draft_policy
-                .current_budget()
-                .min(max_supported_draft_tokens);
+
+            Ok(())
+        })();
+
+        match (verify_result, saved_full_cache) {
+            (Ok(()), Some((old_cache, old_rows))) => {
+                self.merge_compact_main_cache_into_rows(
+                    model,
+                    old_cache,
+                    old_rows,
+                    &active_rows,
+                    "fill_mtp_windows_batched compact verify",
+                )?;
+            }
+            (Err(err), Some((old_cache, old_rows))) => {
+                self.cache = Some(old_cache);
+                self.cache_rows = old_rows;
+                return Err(err);
+            }
+            (Err(err), None) => return Err(err),
+            (Ok(()), None) => {}
         }
 
         self.refresh_active_kv_residency_stats();
@@ -6307,7 +6459,7 @@ impl<M: Model> Scheduler<M> {
                 &accepted_position_ids,
                 mlx::StreamOrDevice::default(),
             )?;
-            add_elapsed_us(&mut stats.mtp_cache_commit_us, commit_start);
+            add_mtp_decode_cache_commit_us(stats, commit_start);
             stats.mtp_cache_reuse_count = stats.mtp_cache_reuse_count.saturating_add(1);
             stats.mtp_cache_reused_tokens = stats
                 .mtp_cache_reused_tokens
@@ -8124,7 +8276,7 @@ impl<M: Model> Scheduler<M> {
             &chunk_pos_ids,
             mlx::StreamOrDevice::default(),
         )?;
-        add_elapsed_us(&mut handle.stats.mtp_cache_commit_us, commit_start);
+        add_mtp_prefill_cache_commit_us(&mut handle.stats, commit_start);
 
         let chunk_last_hidden = slice_hidden_position(&hidden, chunk_len - 1)?;
         let new_pos = chunk_end;
@@ -11330,7 +11482,10 @@ mod tests {
             hidden: &mlx::Array,
             _target: impl Into<mlx::StreamOrDevice>,
         ) -> crate::Result<mlx::Array> {
-            let seq = hidden.shape().as_slice()[1] as usize;
+            let hidden_shape = hidden.shape();
+            let hidden_dims = hidden_shape.as_slice();
+            let batch = hidden_dims[0] as usize;
+            let seq = hidden_dims[1] as usize;
             let mut calls = self.project_calls.lock().unwrap();
             let mut first_token_calls_remaining = self.first_token_calls_remaining.lock().unwrap();
             let mut expecting_first_token_projection =
@@ -11354,17 +11509,33 @@ mod tests {
                 }
                 vec![token]
             } else {
-                let sequence = sequences.pop_front().expect("verify sequence available");
+                let mut sequence = Vec::with_capacity(batch * seq);
+                for _ in 0..batch {
+                    let row_sequence = sequences.pop_front().expect("verify sequence available");
+                    assert!(
+                        row_sequence.len() <= seq,
+                        "batched project row sequence length {} must not exceed hidden seq {}",
+                        row_sequence.len(),
+                        seq
+                    );
+                    let row_len = row_sequence.len();
+                    sequence.extend(row_sequence);
+                    sequence.extend(std::iter::repeat_n(0, seq - row_len));
+                }
                 *expecting_first_token_projection = true;
                 sequence
             };
             *calls += 1;
             assert_eq!(
                 tokens.len(),
-                seq,
+                batch * seq,
                 "project logits sequence length must match hidden seq"
             );
-            fake_logits_for_token_sequence(&tokens)
+            if batch == 1 {
+                fake_logits_for_token_sequence(&tokens)
+            } else {
+                fake_logits_for_batch_token_sequences(batch, seq, &tokens)
+            }
         }
 
         fn mtp_hidden_size(&self, _mtp: &Self::MtpHead) -> i32 {
@@ -11462,6 +11633,17 @@ mod tests {
             .offset()
     }
 
+    fn assert_mtp_prefill_only_cache_commit(stats: &MtpSpeculativeStats) {
+        assert_eq!(
+            stats.mtp_decode_cache_commit_us, 0,
+            "prefill should not contribute to decode MTP cache commit cost"
+        );
+        assert_eq!(
+            stats.mtp_cache_commit_us, stats.mtp_prefill_cache_commit_us,
+            "prefill-only runs should attribute all MTP cache commit cost to prefill"
+        );
+    }
+
     #[test]
     #[serial(mlx_metal)]
     fn mtp_temp_scheduler_preserves_active_kv_budget_policy() {
@@ -11545,6 +11727,7 @@ mod tests {
                 .is_some(),
             "warm MTP prefill should save prefix entries"
         );
+        assert_mtp_prefill_only_cache_commit(&warm.mtp_stats().expect("warm MTP stats"));
 
         let mut hit = Scheduler::<ScriptedMtpSchedulerModel>::new(
             1,
@@ -11575,6 +11758,7 @@ mod tests {
             vec![1],
             "exact MTP prefix hit should restore N-1 main/MTP cache state and compute only the final token"
         );
+        assert_mtp_prefill_only_cache_commit(&hit.mtp_stats().expect("hit MTP stats"));
 
         std::fs::remove_dir_all(root).expect("cleanup prefix cache");
     }
@@ -11647,6 +11831,7 @@ mod tests {
             vec![1, 1],
             "exact MTP prefix hits should restore each row's N-1 main/MTP cache state and compute only final tokens"
         );
+        assert_mtp_prefill_only_cache_commit(&hit.mtp_stats().expect("batch hit MTP stats"));
 
         std::fs::remove_dir_all(root).expect("cleanup prefix cache");
     }
@@ -11784,6 +11969,7 @@ mod tests {
         );
         assert_eq!(model.vl_hidden_vision_present(), vec![false]);
         assert_eq!(model.mtp_hidden_seq_lens(), vec![1]);
+        assert_mtp_prefill_only_cache_commit(&s.mtp_stats().expect("hit VL MTP stats"));
 
         std::fs::remove_dir_all(root).expect("cleanup prefix cache");
     }
@@ -11856,6 +12042,7 @@ mod tests {
         assert_eq!(hit_model.vl_hidden_seq_lens(), vec![1, 1]);
         assert_eq!(hit_model.vl_hidden_vision_present(), vec![false, false]);
         assert_eq!(hit_model.mtp_hidden_seq_lens(), vec![1, 1]);
+        assert_mtp_prefill_only_cache_commit(&hit.mtp_stats().expect("batch VL hit MTP stats"));
 
         std::fs::remove_dir_all(root).expect("cleanup prefix cache");
     }
@@ -12324,6 +12511,7 @@ mod tests {
         s.step_mtp_batch(&model, &FakeMtpHead)
             .expect("first pending batch step");
         model.clear_mtp_hidden_trace();
+        *model.project_calls.lock().unwrap() = 0;
 
         let step_2 = s
             .step_mtp_batch(&model, &FakeMtpHead)
@@ -12352,6 +12540,11 @@ mod tests {
             model.mtp_hidden_seq_lens(),
             vec![1, 1],
             "batched postfill should need one draft step and one accepted-tail commit"
+        );
+        assert_eq!(
+            *model.project_calls.lock().unwrap(),
+            1,
+            "batched verify should project the whole [B,S,H] hidden tensor once"
         );
     }
 
@@ -12617,6 +12810,108 @@ mod tests {
             "row 1 should keep accepted draft plus bonus token"
         );
         assert_eq!(mtp_state.stats.rollback_count, 1);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn mtp_batch_subset_postfill_verifies_only_rows_needing_new_window() {
+        let mut s = Scheduler::<ScriptedMtpSchedulerModel>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        let id0 = s.admit(mtp_req(vec![1, 2], 5)).expect("admit row 0");
+        let id1 = s.admit(mtp_req(vec![10, 11], 5)).expect("admit row 1");
+        let model = ScriptedMtpSchedulerModel::new_with_first_token_calls(
+            3,
+            2,
+            vec![4, 6, 8],
+            vec![vec![10], vec![6, 7], vec![8, 12], vec![0]],
+        );
+        let cfg = MtpSpeculativeConfig::new(1, Sampler::greedy()).expect("mtp cfg");
+
+        let first = s
+            .prefill_admitted_mtp_batch(&model, &FakeMtpHead, cfg)
+            .expect("mtp batch prefill");
+        assert_eq!(
+            first,
+            vec![
+                StepEvent {
+                    id: id0,
+                    token: 3,
+                    finish_reason: None
+                },
+                StepEvent {
+                    id: id1,
+                    token: 3,
+                    finish_reason: None
+                }
+            ]
+        );
+
+        model.clear_text_hidden_trace();
+        model.clear_mtp_hidden_trace();
+        *model.project_calls.lock().unwrap() = 0;
+        let step_1 = s
+            .step_mtp_batch(&model, &FakeMtpHead)
+            .expect("first pending batch step with subset postfill");
+        assert_eq!(
+            step_1,
+            vec![
+                StepEvent {
+                    id: id0,
+                    token: 10,
+                    finish_reason: None
+                },
+                StepEvent {
+                    id: id1,
+                    token: 6,
+                    finish_reason: None
+                }
+            ]
+        );
+        assert_eq!(
+            model.text_hidden_batch_sizes(),
+            vec![1],
+            "postfill should verify only rows whose pending token queue is empty"
+        );
+        assert_eq!(
+            model.text_hidden_seq_lens(),
+            vec![2],
+            "subset postfill should still verify the full current+draft window"
+        );
+        assert_eq!(
+            *model.project_calls.lock().unwrap(),
+            1,
+            "subset postfill should project only the compact verify batch once"
+        );
+
+        let mtp_state = s.mtp_state.as_ref().expect("scheduler MTP state");
+        assert_eq!(
+            mtp_state
+                .rows
+                .get(&0)
+                .expect("row 0 MTP state")
+                .pending_tokens
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![8, 12],
+            "row 0 should receive its new postfill window"
+        );
+        assert_eq!(
+            mtp_state
+                .rows
+                .get(&1)
+                .expect("row 1 MTP state")
+                .pending_tokens
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![7],
+            "row 1 should keep its existing pending token without being reverified"
+        );
     }
 
     #[test]

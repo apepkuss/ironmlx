@@ -2191,7 +2191,7 @@ mod scheduler_profile_tests {
     }
 
     #[test]
-    fn qwen_mtp_default_scheduler_uses_adaptive_bmax_four_when_unconfigured() {
+    fn qwen_mtp_default_scheduler_uses_latency_first_bmax_two_when_unconfigured() {
         let args = base_args();
         let mut resolved = ResolvedSchedulerRuntime {
             scheduler_runtime_profile: default_scheduler_runtime_profile(),
@@ -2206,9 +2206,9 @@ mod scheduler_profile_tests {
             &mut resolved,
         );
 
-        assert!(changed, "Qwen MTP defaults should enable b_max=4");
-        assert_eq!(resolved.scheduler_config.b_max, 4);
-        assert_eq!(resolved.scheduler_runtime_profile.config.b_max, 4);
+        assert!(changed, "Qwen MTP defaults should enable b_max=2");
+        assert_eq!(resolved.scheduler_config.b_max, 2);
+        assert_eq!(resolved.scheduler_runtime_profile.config.b_max, 2);
     }
 
     #[test]
@@ -2290,7 +2290,7 @@ mod scheduler_profile_tests {
     }
 
     #[test]
-    fn serve_mtp_config_accepts_qwen36_default_draft_tokens() {
+    fn serve_mtp_config_accepts_qwen36_latency_first_default_draft_tokens() {
         let temp_dir = unique_temp_dir("serve-mtp-qwen36-default");
         std::fs::create_dir_all(&temp_dir).expect("create mtp dir");
         let mut args = base_args();
@@ -2309,7 +2309,7 @@ mod scheduler_profile_tests {
         .expect("enabled");
 
         assert_eq!(cfg.model_dir, temp_dir);
-        assert_eq!(cfg.draft_tokens, 2);
+        assert_eq!(cfg.draft_tokens, 1);
         std::fs::remove_dir_all(cfg.model_dir).expect("cleanup");
     }
 

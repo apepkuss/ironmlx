@@ -35,7 +35,9 @@ use crate::core::scheduler::{
     ActiveKvParkedRequest, AdmitMidHandle, DenseVlMethods, Gemma4DrafterAdmitMidHandle,
     MtpAdmitMidHandle, Phase, RequestId, Scheduler, StepEvent,
 };
-use crate::core::server::adaptive_admission::{AdaptiveAdmissionPolicy, AdmissionRequestShape};
+use crate::core::server::adaptive_admission::{
+    AdaptiveAdmissionPolicy, AdmissionRequestShape, ROLLING_DECODE_STEPS_AFTER_ADMISSION_WORK,
+};
 use crate::core::speculative::{
     effective_mtp_draft_tokens_for_paged_prefix, MtpSpeculativeConfig, MtpSpeculativeModel,
     MtpSpeculativeStats,
@@ -86,7 +88,14 @@ fn admission_request_shape(request: &GenerateRequest) -> AdmissionRequestShape {
     AdmissionRequestShape {
         prompt_len: request.prompt_ids.len(),
         prefill_chunk_size: request.prefill_chunk_size,
+        decode_cadence_mid_chunk_cap: request.decode_cadence_mid_chunk_cap,
+        speculative_pipelinable: request.sampler.is_pipelinable(),
     }
+}
+
+fn admission_command_shape(cmd: &SchedulerCommand) -> AdmissionRequestShape {
+    let SchedulerCommand::Admit { request, .. } = cmd;
+    admission_request_shape(request)
 }
 
 fn startup_budget_policy(
@@ -196,27 +205,58 @@ fn cadence_protected_mid_chunk_size(
 /// Rolling-loop admission fairness policy.
 ///
 /// Any completed admission work (initial prefill or mid-batch prefill)
-/// makes one decode step due before the actor accepts more optional
-/// admission work. This bounds active streams' token gap under sustained
-/// arrivals while keeping the existing initial admission window and FIFO
-/// queue semantics intact.
+/// makes a short decode burst due before the actor accepts more optional
+/// admission work. This keeps prefill from alternating with every decode
+/// token under sustained long-prompt arrivals.
 #[derive(Debug, Default)]
 struct RollingAdmissionPolicy {
-    decode_due_after_admission: bool,
+    decode_steps_due_after_admission: usize,
 }
 
 impl RollingAdmissionPolicy {
     fn record_admission_work(&mut self) {
-        self.decode_due_after_admission = true;
+        self.decode_steps_due_after_admission = self
+            .decode_steps_due_after_admission
+            .max(ROLLING_DECODE_STEPS_AFTER_ADMISSION_WORK);
     }
 
     fn record_decode_step(&mut self) {
-        self.decode_due_after_admission = false;
+        self.decode_steps_due_after_admission =
+            self.decode_steps_due_after_admission.saturating_sub(1);
     }
 
-    fn should_force_decode(&self, phase: Phase, active_count: usize) -> bool {
-        self.decode_due_after_admission && phase == Phase::Decoding && active_count > 0
+    fn should_force_decode(
+        &self,
+        phase: Phase,
+        has_decodable_rows: bool,
+        has_pending_admission_work: bool,
+    ) -> bool {
+        self.decode_steps_due_after_admission > 0
+            && phase == Phase::Decoding
+            && has_decodable_rows
+            && has_pending_admission_work
     }
+}
+
+fn scheduler_has_decodable_rows<M: Model>(sched: &Scheduler<M>) -> bool {
+    sched
+        .active()
+        .into_iter()
+        .any(|state| !state.finished && !state.generated_tokens.is_empty())
+}
+
+fn scheduler_available_decode_steps<M: Model>(sched: &Scheduler<M>) -> usize {
+    sched
+        .active()
+        .into_iter()
+        .filter(|state| !state.finished && !state.generated_tokens.is_empty())
+        .map(|state| {
+            state
+                .max_new_tokens
+                .saturating_sub(state.generated_tokens.len())
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 #[derive(Clone)]
@@ -233,6 +273,8 @@ struct SchedulerActorMtpCounters {
     mtp_sampling_us: Arc<AtomicU64>,
     mtp_main_rollback_us: Arc<AtomicU64>,
     mtp_cache_commit_us: Arc<AtomicU64>,
+    mtp_prefill_cache_commit_us: Arc<AtomicU64>,
+    mtp_decode_cache_commit_us: Arc<AtomicU64>,
     mtp_cache_restore_us: Arc<AtomicU64>,
     published_stats: Arc<StdMutex<Option<MtpSpeculativeStats>>>,
 }
@@ -252,6 +294,8 @@ impl SchedulerActorMtpCounters {
         mtp_sampling_us: Arc<AtomicU64>,
         mtp_main_rollback_us: Arc<AtomicU64>,
         mtp_cache_commit_us: Arc<AtomicU64>,
+        mtp_prefill_cache_commit_us: Arc<AtomicU64>,
+        mtp_decode_cache_commit_us: Arc<AtomicU64>,
         mtp_cache_restore_us: Arc<AtomicU64>,
     ) -> Self {
         Self {
@@ -267,6 +311,8 @@ impl SchedulerActorMtpCounters {
             mtp_sampling_us,
             mtp_main_rollback_us,
             mtp_cache_commit_us,
+            mtp_prefill_cache_commit_us,
+            mtp_decode_cache_commit_us,
             mtp_cache_restore_us,
             published_stats: Arc::new(StdMutex::new(None)),
         }
@@ -315,6 +361,10 @@ impl SchedulerActorMtpCounters {
             .fetch_add(stats.main_rollback_us, Ordering::Relaxed);
         self.mtp_cache_commit_us
             .fetch_add(stats.mtp_cache_commit_us, Ordering::Relaxed);
+        self.mtp_prefill_cache_commit_us
+            .fetch_add(stats.mtp_prefill_cache_commit_us, Ordering::Relaxed);
+        self.mtp_decode_cache_commit_us
+            .fetch_add(stats.mtp_decode_cache_commit_us, Ordering::Relaxed);
         self.mtp_cache_restore_us
             .fetch_add(stats.mtp_cache_restore_us, Ordering::Relaxed);
     }
@@ -888,6 +938,12 @@ pub struct SchedulerActorHandle {
     /// Latest cumulative microseconds spent committing accepted tokens to MTP KV.
     #[doc(hidden)]
     pub mtp_cache_commit_us: Arc<AtomicU64>,
+    /// Latest cumulative microseconds spent building MTP KV during prefill.
+    #[doc(hidden)]
+    pub mtp_prefill_cache_commit_us: Arc<AtomicU64>,
+    /// Latest cumulative microseconds spent committing accepted decode tokens to MTP KV.
+    #[doc(hidden)]
+    pub mtp_decode_cache_commit_us: Arc<AtomicU64>,
     /// Latest cumulative microseconds spent restoring temporary MTP KV.
     #[doc(hidden)]
     pub mtp_cache_restore_us: Arc<AtomicU64>,
@@ -1266,6 +1322,8 @@ where
     let mtp_sampling_us = Arc::new(AtomicU64::new(0));
     let mtp_main_rollback_us = Arc::new(AtomicU64::new(0));
     let mtp_cache_commit_us = Arc::new(AtomicU64::new(0));
+    let mtp_prefill_cache_commit_us = Arc::new(AtomicU64::new(0));
+    let mtp_decode_cache_commit_us = Arc::new(AtomicU64::new(0));
     let mtp_cache_restore_us = Arc::new(AtomicU64::new(0));
     // B1-p2.5 G3: live b_active / b_queued updated by driver_loop tail.
     let b_active = Arc::new(AtomicU64::new(0));
@@ -1293,6 +1351,8 @@ where
         mtp_sampling_us.clone(),
         mtp_main_rollback_us.clone(),
         mtp_cache_commit_us.clone(),
+        mtp_prefill_cache_commit_us.clone(),
+        mtp_decode_cache_commit_us.clone(),
         mtp_cache_restore_us.clone(),
     );
     let b_active_for_task = b_active.clone();
@@ -1367,6 +1427,8 @@ where
         mtp_sampling_us,
         mtp_main_rollback_us,
         mtp_cache_commit_us,
+        mtp_prefill_cache_commit_us,
+        mtp_decode_cache_commit_us,
         mtp_cache_restore_us,
         b_active,
         b_queued,
@@ -1460,6 +1522,7 @@ fn driver_loop<M, A>(
         };
         let fresh_batch_limit =
             fresh_prefill_batch_limit_for_command::<M>(&first_cmd, b_max, adaptive_policy);
+        let fresh_batch_shape = admission_command_shape(&first_cmd);
         handle_admit(first_cmd, &mut sched, &mut event_txs, &admit_count);
 
         if sched.active_count() == 0 {
@@ -1484,6 +1547,8 @@ fn driver_loop<M, A>(
                 b_max,
                 admission_queue_max,
                 admission_deadline,
+                fresh_batch_shape,
+                adaptive_policy,
             ));
         }
 
@@ -1599,23 +1664,26 @@ fn driver_loop<M, A>(
                 }
             }
 
-            let evt: RollingEvent =
-                if admission_policy.should_force_decode(sched.phase(), sched.active_count()) {
-                    RollingEvent::Step
-                } else if in_flight_mid_admit.is_some() {
-                    RollingEvent::AdvanceMidAdmit
-                } else {
-                    rt.block_on(async {
-                        tokio::select! {
-                            biased;
-                            maybe_cmd = cmd_rx.recv() => match maybe_cmd {
-                                Some(cmd) => RollingEvent::Admit(cmd),
-                                None => RollingEvent::Shutdown,
-                            },
-                            _ = std::future::ready(()) => RollingEvent::Step,
-                        }
-                    })
-                };
+            let evt: RollingEvent = if admission_policy.should_force_decode(
+                sched.phase(),
+                scheduler_has_decodable_rows(&sched),
+                in_flight_mid_admit.is_some() || !admission_queue.is_empty(),
+            ) {
+                RollingEvent::Step
+            } else if in_flight_mid_admit.is_some() {
+                RollingEvent::AdvanceMidAdmit
+            } else {
+                rt.block_on(async {
+                    tokio::select! {
+                        biased;
+                        maybe_cmd = cmd_rx.recv() => match maybe_cmd {
+                            Some(cmd) => RollingEvent::Admit(cmd),
+                            None => RollingEvent::Shutdown,
+                        },
+                        _ = std::future::ready(()) => RollingEvent::Step,
+                    }
+                })
+            };
 
             match evt {
                 RollingEvent::Shutdown => {
@@ -1646,6 +1714,7 @@ fn driver_loop<M, A>(
                         );
                     } else if !can_start_rolling_mid_admit_for_command::<M>(
                         &cmd,
+                        &sched,
                         sched.active_count(),
                         b_max,
                         adaptive_policy,
@@ -1653,6 +1722,7 @@ fn driver_loop<M, A>(
                         let mut pending_cmd = Some(cmd);
                         let can_start_after_park = can_start_rolling_mid_admit_for_command::<M>(
                             pending_cmd.as_ref().expect("pending command present"),
+                            &sched,
                             sched.active_count().saturating_sub(1),
                             b_max,
                             adaptive_policy,
@@ -1675,7 +1745,13 @@ fn driver_loop<M, A>(
                                     &queue_rejected,
                                 );
                                 admission_policy.record_admission_work();
-                            } else if start_mid_admit_one_chunk(
+                            } else if can_start_rolling_mid_admit_for_command::<M>(
+                                pending_cmd.as_ref().expect("pending command present"),
+                                &sched,
+                                sched.active_count(),
+                                b_max,
+                                adaptive_policy,
+                            ) && start_mid_admit_one_chunk(
                                 pending_cmd.take().expect("pending command present"),
                                 &mut in_flight_mid_admit,
                                 &mut sched,
@@ -1959,6 +2035,8 @@ async fn drain_window<M>(
     b_max: usize,
     queue_max: usize,
     deadline: Duration,
+    batch_shape: AdmissionRequestShape,
+    adaptive_policy: AdaptiveAdmissionPolicy,
 ) where
     M: Model + DenseVlMethods + Send + 'static,
 {
@@ -1972,7 +2050,13 @@ async fn drain_window<M>(
             _ = &mut timer => return,
             maybe = cmd_rx.recv() => {
                 let Some(cmd) = maybe else { return }; // channel closed
-                if limit_reached {
+                let command_shape = admission_command_shape(&cmd);
+                let command_batch_limit =
+                    fresh_prefill_batch_limit_for_command::<M>(&cmd, b_max, adaptive_policy);
+                if limit_reached
+                    || sched.active_count() >= command_batch_limit
+                    || !adaptive_policy.can_join_fresh_batch(batch_shape, command_shape)
+                {
                     // Fresh batch is full for this model/prompt policy — push
                     // to queue or reject.
                     enqueue_or_reject(
@@ -2038,6 +2122,7 @@ fn handle_admit<M>(
 
 fn can_start_rolling_mid_admit_for_request<M: Model>(
     request: &GenerateRequest,
+    sched: &Scheduler<M>,
     active_count: usize,
     b_max: usize,
     adaptive_policy: AdaptiveAdmissionPolicy,
@@ -2051,17 +2136,25 @@ fn can_start_rolling_mid_admit_for_request<M: Model>(
         active_count,
         model_limit,
         b_max,
+        scheduler_available_decode_steps(sched),
     )
 }
 
 fn can_start_rolling_mid_admit_for_command<M: Model>(
     cmd: &SchedulerCommand,
+    sched: &Scheduler<M>,
     active_count: usize,
     b_max: usize,
     adaptive_policy: AdaptiveAdmissionPolicy,
 ) -> bool {
     let SchedulerCommand::Admit { request, .. } = cmd;
-    can_start_rolling_mid_admit_for_request::<M>(request, active_count, b_max, adaptive_policy)
+    can_start_rolling_mid_admit_for_request::<M>(
+        request,
+        sched,
+        active_count,
+        b_max,
+        adaptive_policy,
+    )
 }
 
 fn begin_mid_admit<M, A>(
@@ -2405,6 +2498,7 @@ where
         };
         if !can_start_rolling_mid_admit_for_request::<M>(
             &pending.request,
+            sched,
             sched.active_count(),
             b_max,
             adaptive_policy,
@@ -2736,6 +2830,7 @@ where
             .expect("queue non-empty checked");
         let fresh_batch_limit =
             fresh_prefill_batch_limit_for_request::<M>(&pending.request, b_max, adaptive_policy);
+        let fresh_batch_shape = admission_request_shape(&pending.request);
         handle_admit(
             SchedulerCommand::Admit {
                 request: pending.request,
@@ -2754,9 +2849,30 @@ where
             // these are already-queued admits, not racing-in cmd_rx).
             // Then optionally drain_window for fresh cmd_rx admits.
             while sched.active_count() < fresh_batch_limit {
-                let Some(p) = admission_queue.pop_front() else {
+                let Some(pending_shape) = admission_queue
+                    .front()
+                    .map(|pending| admission_request_shape(&pending.request))
+                else {
                     break;
                 };
+                let candidate_limit = admission_queue
+                    .front()
+                    .map(|pending| {
+                        fresh_prefill_batch_limit_for_request::<M>(
+                            &pending.request,
+                            b_max,
+                            adaptive_policy,
+                        )
+                    })
+                    .expect("queue.front returned Some immediately before candidate limit");
+                if sched.active_count() >= candidate_limit
+                    || !adaptive_policy.can_join_fresh_batch(fresh_batch_shape, pending_shape)
+                {
+                    break;
+                }
+                let p = admission_queue
+                    .pop_front()
+                    .expect("queue.front returned Some immediately before pop_front");
                 handle_admit(
                     SchedulerCommand::Admit {
                         request: p.request,
@@ -2782,6 +2898,8 @@ where
                     b_max,
                     admission_queue_max,
                     admission_deadline,
+                    fresh_batch_shape,
+                    adaptive_policy,
                 ));
             }
         }
@@ -2826,6 +2944,7 @@ where
         Ok(cmd) => {
             let fresh_batch_limit =
                 fresh_prefill_batch_limit_for_command::<M>(&cmd, b_max, adaptive_policy);
+            let fresh_batch_shape = admission_command_shape(&cmd);
             if sched.phase() == Phase::Decoding {
                 if let Err(evict_err) = sched.evict_all() {
                     tracing::warn!(
@@ -2860,6 +2979,8 @@ where
                     b_max,
                     admission_queue_max,
                     admission_deadline,
+                    fresh_batch_shape,
+                    adaptive_policy,
                 ));
             }
             batch_count.fetch_add(1, Ordering::Relaxed);
@@ -3269,6 +3390,8 @@ mod tests {
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
         )
     }
 
@@ -3477,6 +3600,8 @@ mod tests {
             sampling_us: 40,
             main_rollback_us: 50,
             mtp_cache_commit_us: 60,
+            mtp_prefill_cache_commit_us: 25,
+            mtp_decode_cache_commit_us: 35,
             mtp_cache_restore_us: 70,
             ..MtpSpeculativeStats::default()
         };
@@ -3492,6 +3617,8 @@ mod tests {
             sampling_us: 55,
             main_rollback_us: 70,
             mtp_cache_commit_us: 90,
+            mtp_prefill_cache_commit_us: 40,
+            mtp_decode_cache_commit_us: 50,
             mtp_cache_restore_us: 75,
             ..MtpSpeculativeStats::default()
         };
@@ -3509,6 +3636,14 @@ mod tests {
         assert_eq!(counters.mtp_sampling_us.load(Ordering::Relaxed), 55);
         assert_eq!(counters.mtp_main_rollback_us.load(Ordering::Relaxed), 70);
         assert_eq!(counters.mtp_cache_commit_us.load(Ordering::Relaxed), 90);
+        assert_eq!(
+            counters.mtp_prefill_cache_commit_us.load(Ordering::Relaxed),
+            40
+        );
+        assert_eq!(
+            counters.mtp_decode_cache_commit_us.load(Ordering::Relaxed),
+            50
+        );
         assert_eq!(counters.mtp_cache_restore_us.load(Ordering::Relaxed), 75);
 
         counters.reset_stats_baseline();
@@ -3522,6 +3657,8 @@ mod tests {
             sampling_us: 400,
             main_rollback_us: 500,
             mtp_cache_commit_us: 600,
+            mtp_prefill_cache_commit_us: 250,
+            mtp_decode_cache_commit_us: 350,
             mtp_cache_restore_us: 700,
             ..MtpSpeculativeStats::default()
         };
@@ -3539,6 +3676,14 @@ mod tests {
         assert_eq!(counters.mtp_sampling_us.load(Ordering::Relaxed), 455);
         assert_eq!(counters.mtp_main_rollback_us.load(Ordering::Relaxed), 570);
         assert_eq!(counters.mtp_cache_commit_us.load(Ordering::Relaxed), 690);
+        assert_eq!(
+            counters.mtp_prefill_cache_commit_us.load(Ordering::Relaxed),
+            290
+        );
+        assert_eq!(
+            counters.mtp_decode_cache_commit_us.load(Ordering::Relaxed),
+            400
+        );
         assert_eq!(counters.mtp_cache_restore_us.load(Ordering::Relaxed), 775);
     }
 
@@ -3600,15 +3745,16 @@ mod tests {
     }
 
     #[test]
-    fn rolling_policy_forces_one_decode_after_admission_work() {
+    fn rolling_policy_forces_decode_burst_after_admission_work() {
         let mut policy = RollingAdmissionPolicy::default();
 
-        assert!(!policy.should_force_decode(Phase::Decoding, 1));
+        assert!(!policy.should_force_decode(Phase::Decoding, true, true));
         policy.record_admission_work();
-        assert!(policy.should_force_decode(Phase::Decoding, 1));
-
-        policy.record_decode_step();
-        assert!(!policy.should_force_decode(Phase::Decoding, 1));
+        for _ in 0..ROLLING_DECODE_STEPS_AFTER_ADMISSION_WORK {
+            assert!(policy.should_force_decode(Phase::Decoding, true, true));
+            policy.record_decode_step();
+        }
+        assert!(!policy.should_force_decode(Phase::Decoding, true, true));
     }
 
     #[test]
@@ -3616,9 +3762,36 @@ mod tests {
         let mut policy = RollingAdmissionPolicy::default();
 
         policy.record_admission_work();
-        assert!(!policy.should_force_decode(Phase::Idle, 1));
-        assert!(!policy.should_force_decode(Phase::Finished, 1));
-        assert!(!policy.should_force_decode(Phase::Decoding, 0));
+        assert!(!policy.should_force_decode(Phase::Idle, true, true));
+        assert!(!policy.should_force_decode(Phase::Finished, true, true));
+        assert!(!policy.should_force_decode(Phase::Decoding, false, true));
+    }
+
+    #[test]
+    fn rolling_policy_does_not_force_decode_without_known_admission_work() {
+        let mut policy = RollingAdmissionPolicy::default();
+
+        policy.record_admission_work();
+        assert!(!policy.should_force_decode(Phase::Decoding, true, false));
+    }
+
+    #[test]
+    fn scheduler_has_decodable_rows_requires_generated_token() {
+        let mut scheduler = Scheduler::<SchedulerActorFakeModel>::new(
+            1,
+            32,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler");
+        scheduler.admit(mk_req(11)).expect("admit");
+
+        assert!(!scheduler_has_decodable_rows(&scheduler));
+
+        let events = scheduler
+            .prefill_admitted(&SchedulerActorFakeModel)
+            .expect("prefill");
+        assert_eq!(events.len(), 1);
+        assert!(scheduler_has_decodable_rows(&scheduler));
     }
 
     #[test]
@@ -3676,10 +3849,26 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_qwen_mtp_fresh_limit_starts_long_chunked_request_alone() {
+    fn adaptive_qwen_mtp_fresh_limit_batches_greedy_long_chunked_requests() {
         let mut request = mk_req(11);
         request.prompt_ids = (0..4096).collect();
         request.prefill_chunk_size = 2048;
+
+        let limit = fresh_prefill_batch_limit_for_request::<SchedulerActorFakeModel>(
+            &request,
+            4,
+            crate::core::server::adaptive_admission::AdaptiveAdmissionPolicy::qwen_mtp(),
+        );
+
+        assert_eq!(limit, 2);
+    }
+
+    #[test]
+    fn adaptive_qwen_mtp_fresh_limit_starts_non_pipelinable_long_chunked_request_alone() {
+        let mut request = mk_req(11);
+        request.prompt_ids = (0..4096).collect();
+        request.prefill_chunk_size = 2048;
+        request.sampler = Sampler::greedy().with_temperature(0.7);
 
         let limit = fresh_prefill_batch_limit_for_request::<SchedulerActorFakeModel>(
             &request,
@@ -3701,6 +3890,289 @@ mod tests {
         );
 
         assert_eq!(limit, 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn qwen_mtp_fresh_window_batches_compatible_greedy_long_requests() {
+        let mut scheduler = Scheduler::<SchedulerActorFakeModel>::new(
+            4,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        let mut first = mk_req(11);
+        first.prompt_ids = (0..4096).collect();
+        first.prefill_chunk_size = 2048;
+        scheduler.admit(first.clone()).expect("admit first");
+
+        let (tx, mut rx) = mpsc::channel(4);
+        let (reply_tx, mut reply_rx) = oneshot::channel();
+        let mut second = mk_req(12);
+        second.prompt_ids = (0..4096).collect();
+        second.prefill_chunk_size = 2048;
+        tx.send(SchedulerCommand::Admit {
+            request: second,
+            reply_tx,
+        })
+        .await
+        .expect("send second");
+        drop(tx);
+
+        let mut event_txs = HashMap::new();
+        let mut queue = VecDeque::new();
+        let admit_count = Arc::new(AtomicU64::new(0));
+        let saturate_triggered = Arc::new(AtomicU64::new(0));
+        let queue_depth_peak = Arc::new(AtomicUsize::new(0));
+        let queue_rejected = Arc::new(AtomicU64::new(0));
+        let policy = AdaptiveAdmissionPolicy::qwen_mtp();
+        let limit =
+            fresh_prefill_batch_limit_for_request::<SchedulerActorFakeModel>(&first, 4, policy);
+
+        drain_window(
+            &mut rx,
+            &mut scheduler,
+            &mut event_txs,
+            &mut queue,
+            &admit_count,
+            &saturate_triggered,
+            &queue_depth_peak,
+            &queue_rejected,
+            limit,
+            4,
+            8,
+            Duration::from_millis(1),
+            admission_request_shape(&first),
+            policy,
+        )
+        .await;
+
+        assert_eq!(scheduler.active_count(), 2);
+        assert_eq!(queue.len(), 0);
+        assert!(
+            matches!(reply_rx.try_recv(), Ok(Ok(_))),
+            "compatible long Qwen MTP request should join the fresh batch"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn qwen_mtp_fresh_window_does_not_mix_short_batch_with_long_prompt() {
+        let mut scheduler = Scheduler::<SchedulerActorFakeModel>::new(
+            4,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        let first = mk_req(11);
+        scheduler.admit(first.clone()).expect("admit first");
+
+        let (tx, mut rx) = mpsc::channel(4);
+        let (reply_tx, mut reply_rx) = oneshot::channel();
+        let mut second = mk_req(12);
+        second.prompt_ids = (0..4096).collect();
+        second.prefill_chunk_size = 2048;
+        tx.send(SchedulerCommand::Admit {
+            request: second,
+            reply_tx,
+        })
+        .await
+        .expect("send second");
+        drop(tx);
+
+        let mut event_txs = HashMap::new();
+        let mut queue = VecDeque::new();
+        let admit_count = Arc::new(AtomicU64::new(0));
+        let saturate_triggered = Arc::new(AtomicU64::new(0));
+        let queue_depth_peak = Arc::new(AtomicUsize::new(0));
+        let queue_rejected = Arc::new(AtomicU64::new(0));
+        let policy = AdaptiveAdmissionPolicy::qwen_mtp();
+        let limit =
+            fresh_prefill_batch_limit_for_request::<SchedulerActorFakeModel>(&first, 4, policy);
+
+        drain_window(
+            &mut rx,
+            &mut scheduler,
+            &mut event_txs,
+            &mut queue,
+            &admit_count,
+            &saturate_triggered,
+            &queue_depth_peak,
+            &queue_rejected,
+            limit,
+            4,
+            8,
+            Duration::from_millis(1),
+            admission_request_shape(&first),
+            policy,
+        )
+        .await;
+
+        assert_eq!(scheduler.active_count(), 1);
+        assert_eq!(queue.len(), 1);
+        assert!(reply_rx.try_recv().is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn qwen_mtp_fresh_window_does_not_mix_non_pipelinable_long_prompt() {
+        let mut scheduler = Scheduler::<SchedulerActorFakeModel>::new(
+            4,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        let mut first = mk_req(11);
+        first.prompt_ids = (0..4096).collect();
+        first.prefill_chunk_size = 2048;
+        scheduler.admit(first.clone()).expect("admit first");
+
+        let (tx, mut rx) = mpsc::channel(4);
+        let (reply_tx, mut reply_rx) = oneshot::channel();
+        let mut second = mk_req(12);
+        second.prompt_ids = (0..4096).collect();
+        second.prefill_chunk_size = 2048;
+        second.sampler = Sampler::greedy().with_temperature(0.7);
+        tx.send(SchedulerCommand::Admit {
+            request: second,
+            reply_tx,
+        })
+        .await
+        .expect("send second");
+        drop(tx);
+
+        let mut event_txs = HashMap::new();
+        let mut queue = VecDeque::new();
+        let admit_count = Arc::new(AtomicU64::new(0));
+        let saturate_triggered = Arc::new(AtomicU64::new(0));
+        let queue_depth_peak = Arc::new(AtomicUsize::new(0));
+        let queue_rejected = Arc::new(AtomicU64::new(0));
+        let policy = AdaptiveAdmissionPolicy::qwen_mtp();
+        let limit =
+            fresh_prefill_batch_limit_for_request::<SchedulerActorFakeModel>(&first, 4, policy);
+
+        drain_window(
+            &mut rx,
+            &mut scheduler,
+            &mut event_txs,
+            &mut queue,
+            &admit_count,
+            &saturate_triggered,
+            &queue_depth_peak,
+            &queue_rejected,
+            limit,
+            4,
+            8,
+            Duration::from_millis(1),
+            admission_request_shape(&first),
+            policy,
+        )
+        .await;
+
+        assert_eq!(scheduler.active_count(), 1);
+        assert_eq!(queue.len(), 1);
+        assert!(reply_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn qwen_mtp_long_mid_admit_rejects_decode_hot_path() {
+        let mut scheduler = Scheduler::<SchedulerActorFakeModel>::new(
+            4,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        let mut active = mk_req(11);
+        active.max_new_tokens = 64;
+        let active_id = scheduler.admit(active).expect("admit active");
+        let first = scheduler
+            .prefill_admitted(&SchedulerActorFakeModel)
+            .expect("prefill active");
+        assert_eq!(first.len(), 1);
+
+        let mut pending = mk_req(12);
+        pending.prompt_ids = (0..19_785).collect();
+        pending.prefill_chunk_size = 2048;
+        pending.decode_cadence_mid_chunk_cap = 256;
+
+        let policy = AdaptiveAdmissionPolicy::qwen_mtp();
+        assert!(
+            !can_start_rolling_mid_admit_for_request::<SchedulerActorFakeModel>(
+                &pending,
+                &scheduler,
+                scheduler.active_count(),
+                4,
+                policy,
+            ),
+            "64-token active decode budget cannot amortize a 20K rolling prefill"
+        );
+
+        scheduler
+            .get_mut(active_id)
+            .expect("active row")
+            .max_new_tokens = 512;
+        assert!(
+            !can_start_rolling_mid_admit_for_request::<SchedulerActorFakeModel>(
+                &pending,
+                &scheduler,
+                scheduler.active_count(),
+                4,
+                policy,
+            ),
+            "20K rolling prefill should not enter the decode hot path even with a 512-token decode budget"
+        );
+    }
+
+    #[test]
+    fn qwen_mtp_long_mid_admit_stays_blocked_after_active_row_removal() {
+        let mut scheduler = Scheduler::<SchedulerActorFakeModel>::new(
+            4,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        let mut high_budget_active = mk_req(11);
+        high_budget_active.max_new_tokens = 512;
+        let high_budget_id = scheduler
+            .admit(high_budget_active)
+            .expect("admit high-budget active");
+        let mut low_budget_active = mk_req(12);
+        low_budget_active.max_new_tokens = 64;
+        scheduler
+            .admit(low_budget_active)
+            .expect("admit low-budget active");
+        let first = scheduler
+            .prefill_admitted(&SchedulerActorFakeModel)
+            .expect("prefill active rows");
+        assert_eq!(first.len(), 2);
+
+        let mut pending = mk_req(13);
+        pending.prompt_ids = (0..19_785).collect();
+        pending.prefill_chunk_size = 2048;
+        pending.decode_cadence_mid_chunk_cap = 256;
+
+        let policy = AdaptiveAdmissionPolicy::qwen_mtp();
+        assert!(
+            !can_start_rolling_mid_admit_for_request::<SchedulerActorFakeModel>(
+                &pending,
+                &scheduler,
+                scheduler.active_count(),
+                4,
+                policy,
+            ),
+            "long Qwen MTP prefill should stay out of active decode even while a high-budget row is active"
+        );
+
+        scheduler
+            .evict(high_budget_id)
+            .expect("remove high-budget active row");
+        assert!(
+            !can_start_rolling_mid_admit_for_request::<SchedulerActorFakeModel>(
+                &pending,
+                &scheduler,
+                scheduler.active_count(),
+                4,
+                policy,
+            ),
+            "after removing the high-budget row, remaining decode budget is insufficient"
+        );
     }
 
     #[test]
