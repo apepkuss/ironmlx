@@ -1,0 +1,104 @@
+{
+  "cells": [
+    {
+      "aggregate": {
+        "req_per_sec": 3.8,
+        "tokens_per_sec": 38.0
+      },
+      "cached_tokens_warning": false,
+      "concurrent": 4,
+      "early_itl_ms": {
+        "first_n": 8,
+        "p50": 18.0554895,
+        "p95": 29.045234375000003,
+        "p99": 32.37229175,
+        "sample_count": 76
+      },
+      "finish_reason_summary": "stop=76",
+      "itl_ms": {
+        "p50": 19.286240666666664,
+        "p95": 30.47019911111111,
+        "p99": 33.41124533333333
+      },
+      "n_requests": 76,
+      "per_worker": {
+        "req_count": [
+          19,
+          19,
+          19,
+          19
+        ],
+        "tokens_per_sec": [
+          9.5,
+          9.5,
+          9.5,
+          9.5
+        ]
+      },
+      "pp_target": 256,
+      "target_name": "qwen36_35b_a3b_mtp_b4_d2",
+      "tg_target": 64,
+      "ttft_ms": {
+        "p50": 875.374167,
+        "p95": 915.062083,
+        "p99": 958.852833
+      },
+      "wall_duration_s": 20.0
+    },
+    {
+      "aggregate": {
+        "req_per_sec": 0.45,
+        "tokens_per_sec": 18.0
+      },
+      "cached_tokens_warning": false,
+      "concurrent": 4,
+      "early_itl_ms": {
+        "first_n": 8,
+        "p50": 9.9037135,
+        "p95": 10.47865625,
+        "p99": 10.47865625,
+        "sample_count": 9
+      },
+      "finish_reason_summary": "length=5,stop=4",
+      "itl_ms": {
+        "p50": 8.963789031746032,
+        "p95": 10.636333333333335,
+        "p99": 10.636333333333335
+      },
+      "n_requests": 9,
+      "per_worker": {
+        "req_count": [
+          2,
+          3,
+          2,
+          2
+        ],
+        "tokens_per_sec": [
+          3.7,
+          6.9,
+          6.4,
+          1.0
+        ]
+      },
+      "pp_target": 8192,
+      "target_name": "qwen36_35b_a3b_mtp_b4_d2",
+      "tg_target": 64,
+      "ttft_ms": {
+        "p50": 13118.396792,
+        "p95": 14115.978167,
+        "p99": 14115.978167
+      },
+      "wall_duration_s": 20.0
+    }
+  ],
+  "concurrent": 4,
+  "duration_s": 20,
+  "mode": "concurrent",
+  "targets": [
+    {
+      "name": "qwen36_35b_a3b_mtp_b4_d2",
+      "url": "http://127.0.0.1:18207"
+    }
+  ],
+  "warmup_duration_s": 3
+}

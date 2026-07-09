@@ -38,27 +38,21 @@ pub fn default_mtp_draft_tokens_for_config(raw_config: &serde_json::Value) -> us
         .get("model_type")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("");
-    let text = raw_config
-        .get("text_config")
-        .and_then(serde_json::Value::as_object);
-    let hidden_size = text
-        .and_then(|v| v.get("hidden_size"))
-        .and_then(serde_json::Value::as_i64);
-    let layers = text
-        .and_then(|v| v.get("num_hidden_layers"))
-        .and_then(serde_json::Value::as_i64);
-    let experts = text
-        .and_then(|v| v.get("num_experts"))
-        .and_then(serde_json::Value::as_i64);
-    let experts_per_tok = text
-        .and_then(|v| v.get("num_experts_per_tok"))
-        .and_then(serde_json::Value::as_i64);
-
-    match (model_type, hidden_size, layers, experts, experts_per_tok) {
-        ("gemma4" | "gemma4_unified", _, _, _, _) => 2,
-        ("qwen3_5", Some(5120), Some(64), None, None) => 2,
-        ("qwen3_5_moe", Some(2048), Some(40), Some(256), Some(8)) => 2,
+    match model_type {
+        "gemma4" | "gemma4_unified" => 2,
         _ => 1,
+    }
+}
+
+pub fn effective_mtp_draft_tokens_for_paged_prefix(
+    draft_tokens: usize,
+    paged_prefix_cache_enabled: bool,
+) -> usize {
+    let draft_tokens = draft_tokens.max(1);
+    if paged_prefix_cache_enabled {
+        1
+    } else {
+        draft_tokens
     }
 }
 
@@ -113,11 +107,82 @@ pub struct MtpSpeculativeStats {
     pub main_rollback_us: u64,
     /// Microseconds spent committing accepted tokens into the MTP KV cache.
     pub mtp_cache_commit_us: u64,
+    /// Microseconds spent building MTP KV cache entries during prompt prefill.
+    pub mtp_prefill_cache_commit_us: u64,
+    /// Microseconds spent committing accepted decode tokens into the MTP KV cache.
+    pub mtp_decode_cache_commit_us: u64,
     /// Microseconds spent restoring the MTP KV cache after temporary draft.
     pub mtp_cache_restore_us: u64,
 }
 
 impl MtpSpeculativeStats {
+    pub fn saturating_delta_since(&self, before: &Self) -> Self {
+        fn vec_delta(current: &[usize], before: &[usize]) -> Vec<usize> {
+            let len = current.len().max(before.len());
+            (0..len)
+                .map(|idx| {
+                    current
+                        .get(idx)
+                        .copied()
+                        .unwrap_or_default()
+                        .saturating_sub(before.get(idx).copied().unwrap_or_default())
+                })
+                .collect()
+        }
+
+        Self {
+            windows: self.windows.saturating_sub(before.windows),
+            drafted_tokens: self.drafted_tokens.saturating_sub(before.drafted_tokens),
+            accepted_draft_tokens: self
+                .accepted_draft_tokens
+                .saturating_sub(before.accepted_draft_tokens),
+            draft_attempts_by_position: vec_delta(
+                &self.draft_attempts_by_position,
+                &before.draft_attempts_by_position,
+            ),
+            draft_accepts_by_position: vec_delta(
+                &self.draft_accepts_by_position,
+                &before.draft_accepts_by_position,
+            ),
+            rollback_count: self.rollback_count.saturating_sub(before.rollback_count),
+            mtp_cache_reuse_count: self
+                .mtp_cache_reuse_count
+                .saturating_sub(before.mtp_cache_reuse_count),
+            mtp_cache_reused_tokens: self
+                .mtp_cache_reused_tokens
+                .saturating_sub(before.mtp_cache_reused_tokens),
+            draft_budget_reductions: self
+                .draft_budget_reductions
+                .saturating_sub(before.draft_budget_reductions),
+            draft_budget_increases: self
+                .draft_budget_increases
+                .saturating_sub(before.draft_budget_increases),
+            draft_forward_us: self
+                .draft_forward_us
+                .saturating_sub(before.draft_forward_us),
+            verify_forward_us: self
+                .verify_forward_us
+                .saturating_sub(before.verify_forward_us),
+            projection_us: self.projection_us.saturating_sub(before.projection_us),
+            sampling_us: self.sampling_us.saturating_sub(before.sampling_us),
+            main_rollback_us: self
+                .main_rollback_us
+                .saturating_sub(before.main_rollback_us),
+            mtp_cache_commit_us: self
+                .mtp_cache_commit_us
+                .saturating_sub(before.mtp_cache_commit_us),
+            mtp_prefill_cache_commit_us: self
+                .mtp_prefill_cache_commit_us
+                .saturating_sub(before.mtp_prefill_cache_commit_us),
+            mtp_decode_cache_commit_us: self
+                .mtp_decode_cache_commit_us
+                .saturating_sub(before.mtp_decode_cache_commit_us),
+            mtp_cache_restore_us: self
+                .mtp_cache_restore_us
+                .saturating_sub(before.mtp_cache_restore_us),
+        }
+    }
+
     pub fn record_window_acceptance(
         &mut self,
         attempted_draft_tokens: usize,
@@ -459,6 +524,18 @@ pub(crate) fn add_elapsed_us(counter: &mut u64, start: Instant) {
     *counter = counter.saturating_add(elapsed_us_since(start));
 }
 
+pub(crate) fn add_mtp_prefill_cache_commit_us(stats: &mut MtpSpeculativeStats, start: Instant) {
+    let elapsed = elapsed_us_since(start);
+    stats.mtp_cache_commit_us = stats.mtp_cache_commit_us.saturating_add(elapsed);
+    stats.mtp_prefill_cache_commit_us = stats.mtp_prefill_cache_commit_us.saturating_add(elapsed);
+}
+
+pub(crate) fn add_mtp_decode_cache_commit_us(stats: &mut MtpSpeculativeStats, start: Instant) {
+    let elapsed = elapsed_us_since(start);
+    stats.mtp_cache_commit_us = stats.mtp_cache_commit_us.saturating_add(elapsed);
+    stats.mtp_decode_cache_commit_us = stats.mtp_decode_cache_commit_us.saturating_add(elapsed);
+}
+
 /// Outcome of comparing MTP draft tokens with the main model's verified tokens.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpeculativeResolution {
@@ -513,6 +590,199 @@ pub fn resolve_speculative_tokens(
 pub(crate) struct MtpDraftResult {
     pub tokens: Vec<u32>,
     pub cache_snapshot: MtpCacheSnapshot,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct MtpDraftPolicyWindow {
+    pub attempted_draft_tokens: usize,
+    pub accepted_draft_tokens: usize,
+    pub draft_forward_us: u64,
+    pub verify_forward_us: u64,
+    pub projection_us: u64,
+    pub sampling_us: u64,
+    pub main_rollback_us: u64,
+    pub mtp_cache_commit_us: u64,
+    pub mtp_prefill_cache_commit_us: u64,
+    pub mtp_decode_cache_commit_us: u64,
+    pub mtp_cache_restore_us: u64,
+}
+
+impl MtpDraftPolicyWindow {
+    pub(crate) fn from_stats_delta(
+        attempted_draft_tokens: usize,
+        accepted_draft_tokens: usize,
+        delta: &MtpSpeculativeStats,
+    ) -> Self {
+        Self {
+            attempted_draft_tokens,
+            accepted_draft_tokens,
+            draft_forward_us: delta.draft_forward_us,
+            verify_forward_us: delta.verify_forward_us,
+            projection_us: delta.projection_us,
+            sampling_us: delta.sampling_us,
+            main_rollback_us: delta.main_rollback_us,
+            mtp_cache_commit_us: delta.mtp_cache_commit_us,
+            mtp_prefill_cache_commit_us: delta.mtp_prefill_cache_commit_us,
+            mtp_decode_cache_commit_us: delta.mtp_decode_cache_commit_us,
+            mtp_cache_restore_us: delta.mtp_cache_restore_us,
+        }
+    }
+
+    fn non_verify_overhead_us(self) -> u64 {
+        self.draft_forward_us
+            .saturating_add(self.projection_us)
+            .saturating_add(self.sampling_us)
+            .saturating_add(self.main_rollback_us)
+            .saturating_add(self.mtp_decode_cache_commit_us)
+            .saturating_add(self.mtp_cache_restore_us)
+    }
+
+    fn acceptance_rate(self) -> f64 {
+        if self.attempted_draft_tokens == 0 {
+            1.0
+        } else {
+            self.accepted_draft_tokens.min(self.attempted_draft_tokens) as f64
+                / self.attempted_draft_tokens as f64
+        }
+    }
+
+    fn overhead_ratio(self) -> f64 {
+        self.non_verify_overhead_us() as f64 / self.verify_forward_us.max(1) as f64
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct MtpDraftBudgetChange {
+    pub reduced: bool,
+    pub increased: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct MtpDraftPolicyState {
+    max_draft_tokens: usize,
+    current_budget: usize,
+    acceptance_ewma: Option<f64>,
+    overhead_ratio_ewma: Option<f64>,
+    cooldown_windows: usize,
+}
+
+impl MtpDraftPolicyState {
+    const EWMA_ALPHA: f64 = 0.35;
+    const HIGH_OVERHEAD_RATIO: f64 = 1.50;
+    const VERY_HIGH_OVERHEAD_RATIO: f64 = 3.00;
+    const LOW_ACCEPTANCE: f64 = 0.50;
+    const HIGH_ACCEPTANCE: f64 = 0.85;
+    const MIN_POSITION_ATTEMPTS: usize = 4;
+    const LOW_POSITION_ACCEPTANCE: f64 = 0.45;
+
+    pub(crate) fn new(max_draft_tokens: usize) -> Self {
+        let max_draft_tokens = max_draft_tokens.max(1);
+        Self {
+            max_draft_tokens,
+            current_budget: max_draft_tokens,
+            acceptance_ewma: None,
+            overhead_ratio_ewma: None,
+            cooldown_windows: 0,
+        }
+    }
+
+    pub(crate) fn current_budget(&self) -> usize {
+        self.current_budget.clamp(1, self.max_draft_tokens)
+    }
+
+    pub(crate) fn observe_window(
+        &mut self,
+        window: MtpDraftPolicyWindow,
+        cumulative_stats: &MtpSpeculativeStats,
+    ) -> MtpDraftBudgetChange {
+        let old = self.current_budget();
+        if self.max_draft_tokens <= 1 || window.attempted_draft_tokens == 0 {
+            self.current_budget = self.max_draft_tokens.max(1);
+            return budget_change(old, self.current_budget);
+        }
+
+        let acceptance = window.acceptance_rate();
+        let overhead_ratio = window.overhead_ratio();
+        self.acceptance_ewma = Some(update_ewma(
+            self.acceptance_ewma,
+            acceptance,
+            Self::EWMA_ALPHA,
+        ));
+        self.overhead_ratio_ewma = Some(update_ewma(
+            self.overhead_ratio_ewma,
+            overhead_ratio,
+            Self::EWMA_ALPHA,
+        ));
+
+        let mut next = if self.cooldown_windows > 0 {
+            self.cooldown_windows -= 1;
+            if window.accepted_draft_tokens == window.attempted_draft_tokens
+                && overhead_ratio <= Self::HIGH_OVERHEAD_RATIO
+            {
+                old.saturating_add(1)
+            } else {
+                1
+            }
+        } else if window.accepted_draft_tokens == window.attempted_draft_tokens {
+            if overhead_ratio > Self::HIGH_OVERHEAD_RATIO {
+                old
+            } else {
+                old.saturating_add(1)
+            }
+        } else {
+            window.accepted_draft_tokens.saturating_add(1)
+        };
+
+        let smoothed_acceptance = self.acceptance_ewma.unwrap_or(acceptance);
+        let smoothed_overhead_ratio = self.overhead_ratio_ewma.unwrap_or(overhead_ratio);
+        if smoothed_acceptance < Self::LOW_ACCEPTANCE
+            && smoothed_overhead_ratio > Self::HIGH_OVERHEAD_RATIO
+        {
+            next = next.min(old.saturating_sub(1).max(1));
+        }
+        if acceptance < Self::LOW_ACCEPTANCE && overhead_ratio > Self::VERY_HIGH_OVERHEAD_RATIO {
+            next = 1;
+            self.cooldown_windows = self.cooldown_windows.max(1);
+        }
+        if smoothed_acceptance >= Self::HIGH_ACCEPTANCE
+            && smoothed_overhead_ratio <= Self::HIGH_OVERHEAD_RATIO
+            && window.accepted_draft_tokens == window.attempted_draft_tokens
+        {
+            next = next.max(old.saturating_add(1));
+        }
+        if let Some(position_cap) = position_acceptance_budget_cap(cumulative_stats) {
+            next = next.min(position_cap);
+        }
+
+        self.current_budget = next.clamp(1, self.max_draft_tokens);
+        budget_change(old, self.current_budget)
+    }
+}
+
+fn update_ewma(current: Option<f64>, sample: f64, alpha: f64) -> f64 {
+    current.map_or(sample, |value| value.mul_add(1.0 - alpha, sample * alpha))
+}
+
+fn budget_change(old: usize, new: usize) -> MtpDraftBudgetChange {
+    MtpDraftBudgetChange {
+        reduced: new < old,
+        increased: new > old,
+    }
+}
+
+fn position_acceptance_budget_cap(stats: &MtpSpeculativeStats) -> Option<usize> {
+    stats
+        .draft_attempts_by_position
+        .iter()
+        .zip(stats.draft_accepts_by_position.iter())
+        .enumerate()
+        .find_map(|(idx, (&attempts, &accepts))| {
+            if attempts < MtpDraftPolicyState::MIN_POSITION_ATTEMPTS {
+                return None;
+            }
+            let acceptance = accepts as f64 / attempts.max(1) as f64;
+            (acceptance < MtpDraftPolicyState::LOW_POSITION_ACCEPTANCE).then_some(idx.max(1))
+        })
 }
 
 pub(crate) fn adjust_mtp_draft_budget(
@@ -744,6 +1014,7 @@ where
     dummy_position_ids: Option<Array>,
     prng_state: Array,
     adaptive_draft_tokens: usize,
+    draft_policy: MtpDraftPolicyState,
     stats: MtpSpeculativeStats,
 }
 
@@ -839,7 +1110,7 @@ where
                 &chunk_pos_ids,
                 (),
             )?;
-            add_elapsed_us(&mut stats.mtp_cache_commit_us, commit_start);
+            add_mtp_prefill_cache_commit_us(&mut stats, commit_start);
             let chunk_last_hidden = slice_hidden_position(&hidden, n - 1)?;
             mtp_prev_hidden = Some(chunk_last_hidden.clone());
             if pos + n == prompt_len_i32 {
@@ -887,6 +1158,7 @@ where
             dummy_position_ids,
             prng_state,
             adaptive_draft_tokens: cfg.max_draft_tokens,
+            draft_policy: MtpDraftPolicyState::new(cfg.max_draft_tokens),
             stats,
         })
     }
@@ -945,6 +1217,7 @@ where
             return Ok(());
         }
 
+        let stats_before_window = self.stats.clone();
         let draft_budget = self
             .adaptive_draft_tokens
             .clamp(1, self.cfg.max_draft_tokens)
@@ -970,18 +1243,28 @@ where
             ().into(),
         )?;
         add_elapsed_us(&mut self.stats.verify_forward_us, verify_forward_start);
-        let projection_start = Instant::now();
-        let verified_logits = self.model.project_hidden_on(&verified_hidden, ())?;
-        add_elapsed_us(&mut self.stats.projection_us, projection_start);
-        let sampling_start = Instant::now();
-        let verified_tokens = sample_logits_positions(
-            &verified_logits,
-            self.request.sampler,
-            &self.history,
-            &mut self.prng_state,
-        )?;
-        add_elapsed_us(&mut self.stats.sampling_us, sampling_start);
-        let resolution = resolve_speculative_tokens(&draft_tokens, &verified_tokens)?;
+        let resolution = if self.request.sampler.is_pipelinable() {
+            resolve_greedy_verified_hidden_until_mismatch(
+                self.model,
+                &verified_hidden,
+                &draft_tokens,
+                &mut self.stats,
+                (),
+            )?
+        } else {
+            let projection_start = Instant::now();
+            let verified_logits = self.model.project_hidden_on(&verified_hidden, ())?;
+            add_elapsed_us(&mut self.stats.projection_us, projection_start);
+            let sampling_start = Instant::now();
+            let verified_tokens = sample_logits_positions(
+                &verified_logits,
+                self.request.sampler,
+                &self.history,
+                &mut self.prng_state,
+            )?;
+            add_elapsed_us(&mut self.stats.sampling_us, sampling_start);
+            resolve_speculative_tokens(&draft_tokens, &verified_tokens)?
+        };
         self.stats.windows += 1;
         self.stats.drafted_tokens += draft_tokens.len();
         self.stats.accepted_draft_tokens += resolution.accepted_draft_len;
@@ -990,52 +1273,39 @@ where
         if resolution.needs_rollback {
             self.stats.rollback_count += 1;
         }
-        adjust_mtp_draft_budget(
-            self.cfg.max_draft_tokens,
-            &mut self.adaptive_draft_tokens,
-            draft_tokens.len(),
-            resolution.accepted_draft_len,
-            &mut self.stats,
-        );
 
-        let (accepted_input, accepted_hidden, accepted_position_ids, accepted_last_hidden) =
-            if resolution.needs_rollback {
-                let rollback_start = Instant::now();
-                restore_layer_cache(&mut self.cache, &base_snapshot)?;
-                add_elapsed_us(&mut self.stats.main_rollback_us, rollback_start);
-                let replay_len = resolution.accepted_verify_input_len;
-                let replay_input = &verify_input[..replay_len];
-                let replay_arr: Array =
-                    (replay_input, &[1_i32, replay_len as i32][..]).try_into()?;
-                let replay_pos_ids = self.position_ids(verify_start_pos, replay_len as i32)?;
-                let replay_forward_start = Instant::now();
-                let replay_hidden = self.model.forward_text_hidden(
-                    &replay_arr,
-                    &replay_pos_ids,
-                    None,
-                    None,
-                    Some(&mut self.cache),
-                    ().into(),
-                )?;
-                add_elapsed_us(&mut self.stats.verify_forward_us, replay_forward_start);
-                let last_hidden = slice_hidden_position(&replay_hidden, replay_len as i32 - 1)?;
-                (
-                    replay_input.to_vec(),
-                    replay_hidden,
-                    replay_pos_ids,
-                    last_hidden,
-                )
-            } else {
-                (
-                    verify_input[..resolution.accepted_verify_input_len].to_vec(),
-                    verified_hidden.clone(),
-                    verify_pos_ids.clone(),
-                    slice_hidden_position(
-                        &verified_hidden,
-                        resolution.accepted_verify_input_len as i32 - 1,
-                    )?,
-                )
-            };
+        let accepted_len = resolution.accepted_verify_input_len;
+        let (accepted_hidden, accepted_position_ids, accepted_last_hidden) = if resolution
+            .needs_rollback
+        {
+            let accepted_position_ids = slice_position_ids_prefix(&verify_pos_ids, accepted_len)?;
+            let rollback_start = Instant::now();
+            let accepted_hidden = rollback_main_cache_to_accepted_prefix(
+                self.model,
+                &mut self.cache,
+                &base_snapshot,
+                MainCacheRollbackInput {
+                    accepted_by_row: &[(0, accepted_len)],
+                    verify_input: &verify_input,
+                    accepted_position_ids: &accepted_position_ids,
+                    verified_hidden: &verified_hidden,
+                },
+                (),
+            )?;
+            add_elapsed_us(&mut self.stats.main_rollback_us, rollback_start);
+            (
+                accepted_hidden.clone(),
+                accepted_position_ids,
+                slice_hidden_position(&accepted_hidden, accepted_len as i32 - 1)?,
+            )
+        } else {
+            (
+                verified_hidden.clone(),
+                verify_pos_ids.clone(),
+                slice_hidden_position(&verified_hidden, accepted_len as i32 - 1)?,
+            )
+        };
+        let accepted_input = verify_input[..accepted_len].to_vec();
 
         if resolution.needs_rollback {
             let restore_start = Instant::now();
@@ -1052,7 +1322,7 @@ where
                 &accepted_position_ids,
                 (),
             )?;
-            add_elapsed_us(&mut self.stats.mtp_cache_commit_us, commit_start);
+            add_mtp_decode_cache_commit_us(&mut self.stats, commit_start);
         } else {
             let commit_start = Instant::now();
             commit_mtp_cache_hidden_tail(
@@ -1065,7 +1335,7 @@ where
                 &accepted_position_ids,
                 (),
             )?;
-            add_elapsed_us(&mut self.stats.mtp_cache_commit_us, commit_start);
+            add_mtp_decode_cache_commit_us(&mut self.stats, commit_start);
             self.stats.mtp_cache_reuse_count = self.stats.mtp_cache_reuse_count.saturating_add(1);
             self.stats.mtp_cache_reused_tokens = self
                 .stats
@@ -1073,6 +1343,23 @@ where
                 .saturating_add(accepted_input.len().saturating_sub(1));
         }
         self.last_hidden = accepted_last_hidden;
+
+        let stats_delta = self.stats.saturating_delta_since(&stats_before_window);
+        let change = self.draft_policy.observe_window(
+            MtpDraftPolicyWindow::from_stats_delta(
+                draft_tokens.len(),
+                resolution.accepted_draft_len,
+                &stats_delta,
+            ),
+            &self.stats,
+        );
+        if change.reduced {
+            self.stats.draft_budget_reductions =
+                self.stats.draft_budget_reductions.saturating_add(1);
+        } else if change.increased {
+            self.stats.draft_budget_increases = self.stats.draft_budget_increases.saturating_add(1);
+        }
+        self.adaptive_draft_tokens = self.draft_policy.current_budget();
 
         let mut tokens_to_append = resolution.tokens_to_append;
         if let Some(stop_idx) = tokens_to_append
@@ -1194,6 +1481,60 @@ pub(crate) fn sample_logits_positions(
     Ok(sampled)
 }
 
+pub(crate) fn resolve_greedy_verified_hidden_until_mismatch<M>(
+    model: &M,
+    verified_hidden: &Array,
+    draft_tokens: &[u32],
+    stats: &mut MtpSpeculativeStats,
+    target: impl Into<StreamOrDevice>,
+) -> Result<SpeculativeResolution>
+where
+    M: MtpSpeculativeModel,
+{
+    let target = target.into();
+    let mut tokens_to_append = Vec::with_capacity(draft_tokens.len() + 1);
+    for pos in 0..=draft_tokens.len() {
+        let row_hidden = slice_hidden_position(verified_hidden, pos as i32)?;
+        let projection_start = Instant::now();
+        let row_logits = model.project_hidden_on(&row_hidden, target)?;
+        add_elapsed_us(&mut stats.projection_us, projection_start);
+
+        let sampling_start = Instant::now();
+        let ids = mlx::ops::reduction::argmax(&row_logits, -1, false)?;
+        let row_tokens: Vec<u32> = ids.to_vec()?;
+        add_elapsed_us(&mut stats.sampling_us, sampling_start);
+        let token = *row_tokens.first().ok_or_else(|| {
+            anyhow!("resolve_greedy_verified_hidden_until_mismatch: empty argmax result")
+        })?;
+
+        if pos < draft_tokens.len() {
+            if token == draft_tokens[pos] {
+                tokens_to_append.push(token);
+                continue;
+            }
+            tokens_to_append.push(token);
+            return Ok(SpeculativeResolution {
+                accepted_draft_len: pos,
+                tokens_to_append,
+                accepted_verify_input_len: pos + 1,
+                needs_rollback: true,
+            });
+        }
+
+        tokens_to_append.push(token);
+        return Ok(SpeculativeResolution {
+            accepted_draft_len: draft_tokens.len(),
+            tokens_to_append,
+            accepted_verify_input_len: draft_tokens.len() + 1,
+            needs_rollback: false,
+        });
+    }
+
+    Err(anyhow!(
+        "resolve_greedy_verified_hidden_until_mismatch: unreachable verifier loop exit"
+    ))
+}
+
 pub(crate) fn slice_hidden_position(hidden: &Array, pos: i32) -> Result<Array> {
     let shape = hidden.shape();
     let dims = shape.as_slice();
@@ -1219,6 +1560,81 @@ pub(crate) fn slice_hidden_position(hidden: &Array, pos: i32) -> Result<Array> {
     .map_err(anyhow::Error::from)
 }
 
+pub(crate) fn slice_hidden_prefix(hidden: &Array, len: usize) -> Result<Array> {
+    let shape = hidden.shape();
+    let dims = shape.as_slice();
+    if dims.len() != 3 || dims[0] != 1 {
+        return Err(anyhow!(
+            "slice_hidden_prefix: expected hidden shape [1, S, H], got {:?}",
+            dims
+        ));
+    }
+    if len == 0 || len > dims[1] as usize {
+        return Err(anyhow!(
+            "slice_hidden_prefix: len {len} out of [1, {}]",
+            dims[1]
+        ));
+    }
+    if len == dims[1] as usize {
+        return Ok(hidden.clone());
+    }
+    mlx::ops::indexing::slice_strided(
+        hidden,
+        &[0_i32, 0_i32, 0_i32][..],
+        &[1_i32, len as i32, dims[2]][..],
+        &[1_i32, 1_i32, 1_i32][..],
+    )
+    .map_err(anyhow::Error::from)
+}
+
+pub(crate) fn slice_position_ids_prefix(position_ids: &Array, len: usize) -> Result<Array> {
+    let shape = position_ids.shape();
+    let dims = shape.as_slice();
+    if len == 0 {
+        return Err(anyhow!("slice_position_ids_prefix: len must be > 0"));
+    }
+    match dims {
+        [1, seq] => {
+            if len > *seq as usize {
+                return Err(anyhow!(
+                    "slice_position_ids_prefix: len {len} exceeds position_ids seq {seq}"
+                ));
+            }
+            if len == *seq as usize {
+                return Ok(position_ids.clone());
+            }
+            mlx::ops::indexing::slice_strided(
+                position_ids,
+                &[0_i32, 0_i32][..],
+                &[1_i32, len as i32][..],
+                &[1_i32, 1_i32][..],
+            )
+            .map_err(anyhow::Error::from)
+        }
+        [planes, 1, seq] => {
+            if len > *seq as usize {
+                return Err(anyhow!(
+                    "slice_position_ids_prefix: len {len} exceeds position_ids seq {seq}"
+                ));
+            }
+            if len == *seq as usize {
+                return Ok(position_ids.clone());
+            }
+            mlx::ops::indexing::slice_strided(
+                position_ids,
+                &[0_i32, 0_i32, 0_i32][..],
+                &[*planes, 1_i32, len as i32][..],
+                &[1_i32, 1_i32, 1_i32][..],
+            )
+            .map_err(anyhow::Error::from)
+        }
+        _ => Err(anyhow!(
+            "slice_position_ids_prefix: expected position_ids shape [1, S] or [P, 1, S], got {:?}",
+            dims
+        )),
+    }
+}
+
 pub(crate) fn restore_layer_cache(
     cache: &mut [LayerCache],
     snapshots: &[LayerCacheSnapshot],
@@ -1236,9 +1652,372 @@ pub(crate) fn restore_layer_cache(
     Ok(())
 }
 
+pub(crate) fn layer_cache_supports_accepted_prefix_trim(cache: &[LayerCache]) -> bool {
+    cache
+        .iter()
+        .all(|layer| matches!(layer, LayerCache::Full(_)))
+}
+
+pub(crate) fn trim_full_layer_cache_rows_to_accepted_prefix(
+    cache: &mut [LayerCache],
+    snapshots: &[LayerCacheSnapshot],
+    accepted_by_row: &[(usize, usize)],
+) -> Result<()> {
+    if cache.len() != snapshots.len() {
+        return Err(anyhow!(
+            "trim_full_layer_cache_rows_to_accepted_prefix: cache layers {} != snapshot layers {}",
+            cache.len(),
+            snapshots.len()
+        ));
+    }
+    if accepted_by_row.is_empty() {
+        return Ok(());
+    }
+
+    for (layer_idx, (layer, snapshot)) in cache.iter_mut().zip(snapshots.iter()).enumerate() {
+        let (LayerCache::Full(kv), LayerCacheSnapshot::Full(saved)) = (layer, snapshot) else {
+            return Err(anyhow!(
+                "trim_full_layer_cache_rows_to_accepted_prefix: Qwen MTP rollback only supports Full KV layers, layer {layer_idx}"
+            ));
+        };
+        let mut offsets = kv.offsets().to_vec();
+        for &(row, accepted_len) in accepted_by_row {
+            let base = *saved.offsets().get(row).ok_or_else(|| {
+                anyhow!(
+                    "trim_full_layer_cache_rows_to_accepted_prefix: row {row} out of snapshot offsets for layer {layer_idx}"
+                )
+            })?;
+            let live = offsets.get_mut(row).ok_or_else(|| {
+                anyhow!(
+                    "trim_full_layer_cache_rows_to_accepted_prefix: row {row} out of live offsets for layer {layer_idx}"
+                )
+            })?;
+            let accepted_len = i32::try_from(accepted_len).map_err(|_| {
+                anyhow!(
+                    "trim_full_layer_cache_rows_to_accepted_prefix: accepted_len {accepted_len} exceeds i32"
+                )
+            })?;
+            let target = base.checked_add(accepted_len).ok_or_else(|| {
+                anyhow!(
+                    "trim_full_layer_cache_rows_to_accepted_prefix: base {base} + accepted_len {accepted_len} overflow"
+                )
+            })?;
+            if target > *live {
+                return Err(anyhow!(
+                    "trim_full_layer_cache_rows_to_accepted_prefix: target offset {target} exceeds live offset {} for row {row} layer {layer_idx}",
+                    *live
+                ));
+            }
+            *live = target;
+        }
+        kv.restore_offsets(&offsets)?;
+    }
+    Ok(())
+}
+
+pub(crate) struct MainCacheRollbackInput<'a> {
+    pub(crate) accepted_by_row: &'a [(usize, usize)],
+    pub(crate) verify_input: &'a [u32],
+    pub(crate) accepted_position_ids: &'a Array,
+    pub(crate) verified_hidden: &'a Array,
+}
+
+pub(crate) fn rollback_main_cache_to_accepted_prefix<M: MtpSpeculativeModel>(
+    model: &M,
+    cache: &mut [LayerCache],
+    snapshots: &[LayerCacheSnapshot],
+    input: MainCacheRollbackInput<'_>,
+    target: impl Into<mlx::StreamOrDevice>,
+) -> Result<Array> {
+    if input.accepted_by_row.len() != 1 || input.accepted_by_row[0].0 != 0 {
+        return Err(anyhow!(
+            "rollback_main_cache_to_accepted_prefix: single-row helper got accepted_by_row={:?}",
+            input.accepted_by_row
+        ));
+    }
+    let accepted_len = input.accepted_by_row[0].1;
+    if accepted_len == 0 || accepted_len > input.verify_input.len() {
+        return Err(anyhow!(
+            "rollback_main_cache_to_accepted_prefix: accepted_len {accepted_len} outside [1, {}]",
+            input.verify_input.len()
+        ));
+    }
+
+    if layer_cache_supports_accepted_prefix_trim(cache) {
+        trim_full_layer_cache_rows_to_accepted_prefix(cache, snapshots, input.accepted_by_row)?;
+        return slice_hidden_prefix(input.verified_hidden, accepted_len);
+    }
+
+    restore_layer_cache(cache, snapshots)?;
+    let accepted_arr: Array = (
+        &input.verify_input[..accepted_len],
+        &[1_i32, accepted_len as i32][..],
+    )
+        .try_into()?;
+    model.forward_text_hidden(
+        &accepted_arr,
+        input.accepted_position_ids,
+        None,
+        None,
+        Some(cache),
+        target.into(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct FakeGreedyProjectModel {
+        tokens: Vec<u32>,
+        project_calls: AtomicUsize,
+        replay_calls: AtomicUsize,
+    }
+
+    impl FakeGreedyProjectModel {
+        fn new(tokens: Vec<u32>) -> Self {
+            Self {
+                tokens,
+                project_calls: AtomicUsize::new(0),
+                replay_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn project_calls(&self) -> usize {
+            self.project_calls.load(Ordering::Relaxed)
+        }
+
+        fn replay_calls(&self) -> usize {
+            self.replay_calls.load(Ordering::Relaxed)
+        }
+    }
+
+    impl Model for FakeGreedyProjectModel {
+        fn make_cache(&self, _batch: i32, _cap: i32, _dtype: Dtype) -> Result<Vec<LayerCache>> {
+            Ok(Vec::new())
+        }
+
+        fn forward_on(
+            &self,
+            _input_ids: &Array,
+            _position_ids: &Array,
+            _per_row_lens: Option<&[i32]>,
+            _decode_mask: Option<&Array>,
+            _cache: Option<&mut [LayerCache]>,
+            _target: StreamOrDevice,
+        ) -> Result<Array> {
+            Err(anyhow!("FakeGreedyProjectModel::forward_on unused"))
+        }
+
+        fn batched_prefill(
+            &self,
+            _input_ids: &Array,
+            _position_ids: &Array,
+            _attention_mask: &Array,
+            _linear_attention_mask: &Array,
+            _per_row_lens: &[i32],
+            _cache: Option<&mut [LayerCache]>,
+            _target: StreamOrDevice,
+        ) -> Result<Array> {
+            Err(anyhow!("FakeGreedyProjectModel::batched_prefill unused"))
+        }
+
+        fn forward_text_hidden(
+            &self,
+            input_ids: &Array,
+            _position_ids: &Array,
+            _per_row_lens: Option<&[i32]>,
+            _decode_mask: Option<&Array>,
+            cache: Option<&mut [LayerCache]>,
+            _target: StreamOrDevice,
+        ) -> Result<Array> {
+            self.replay_calls.fetch_add(1, Ordering::Relaxed);
+            let dims = input_ids.shape();
+            let dims = dims.as_slice();
+            if dims.len() != 2 {
+                return Err(anyhow!(
+                    "FakeGreedyProjectModel::forward_text_hidden expected [B,S], got {dims:?}"
+                ));
+            }
+            if let Some(cache) = cache {
+                for layer in cache {
+                    if let LayerCache::Linear(gd) = layer {
+                        let row_lens = vec![dims[1]; dims[0] as usize];
+                        gd.advance(&row_lens)?;
+                    }
+                }
+            }
+            Array::zeros((dims[0], dims[1], 1_i32), Dtype::Float32).map_err(anyhow::Error::from)
+        }
+
+        fn model_meta(&self) -> crate::core::memory_budget::ModelMeta {
+            crate::core::memory_budget::test_meta_qwen35()
+        }
+
+        fn num_hidden_layers(&self) -> usize {
+            0
+        }
+    }
+
+    impl MtpSpeculativeModel for FakeGreedyProjectModel {
+        type MtpHead = ();
+
+        fn load_mtp_head(&self, _loader: &Loader) -> Result<Self::MtpHead> {
+            Ok(())
+        }
+
+        fn make_mtp_cache(
+            &self,
+            _mtp: &Self::MtpHead,
+            _batch: i32,
+            _cap: i32,
+            _dtype: Dtype,
+        ) -> Result<MtpCache> {
+            Err(anyhow!("FakeGreedyProjectModel::make_mtp_cache unused"))
+        }
+
+        fn mtp_hidden_size(&self, _mtp: &Self::MtpHead) -> i32 {
+            1
+        }
+
+        fn mtp_hidden_dtype(&self, _mtp: &Self::MtpHead) -> Dtype {
+            Dtype::Float32
+        }
+
+        fn project_hidden_on(
+            &self,
+            _hidden: &Array,
+            _target: impl Into<StreamOrDevice>,
+        ) -> Result<Array> {
+            let call = self.project_calls.fetch_add(1, Ordering::Relaxed);
+            let token = *self
+                .tokens
+                .get(call)
+                .ok_or_else(|| anyhow!("missing fake token for project call {call}"))?;
+            let vocab = 128_usize;
+            let mut logits = vec![0.0_f32; vocab];
+            logits[token as usize] = 100.0;
+            (&logits[..], &[1_i32, 1_i32, vocab as i32][..])
+                .try_into()
+                .map_err(anyhow::Error::from)
+        }
+
+        fn mtp_forward_hidden_on(
+            &self,
+            _mtp: &Self::MtpHead,
+            _hidden_states: &Array,
+            _next_token_ids: &Array,
+            _position_ids: &Array,
+            _mask: Option<&Array>,
+            _mtp_cache: Option<&mut MtpCache>,
+            _target: impl Into<StreamOrDevice>,
+        ) -> Result<Array> {
+            Err(anyhow!(
+                "FakeGreedyProjectModel::mtp_forward_hidden_on unused"
+            ))
+        }
+
+        fn mtp_forward_on(
+            &self,
+            _mtp: &Self::MtpHead,
+            _hidden_states: &Array,
+            _next_token_ids: &Array,
+            _position_ids: &Array,
+            _mask: Option<&Array>,
+            _mtp_cache: Option<&mut MtpCache>,
+            _target: impl Into<StreamOrDevice>,
+        ) -> Result<MtpStepOutput> {
+            Err(anyhow!("FakeGreedyProjectModel::mtp_forward_on unused"))
+        }
+    }
+
+    #[test]
+    fn greedy_verify_resolve_stops_projection_after_mismatch() {
+        let model = FakeGreedyProjectModel::new(vec![4, 99, 6, 7]);
+        let hidden = Array::zeros((1_i32, 4_i32, 1_i32), Dtype::Float32).expect("hidden");
+        let mut stats = MtpSpeculativeStats::default();
+
+        let resolution = resolve_greedy_verified_hidden_until_mismatch(
+            &model,
+            &hidden,
+            &[4, 5, 6],
+            &mut stats,
+            (),
+        )
+        .expect("resolution");
+
+        assert_eq!(resolution.accepted_draft_len, 1);
+        assert_eq!(resolution.tokens_to_append, vec![4, 99]);
+        assert_eq!(resolution.accepted_verify_input_len, 2);
+        assert!(resolution.needs_rollback);
+        assert_eq!(model.project_calls(), 2);
+    }
+
+    #[test]
+    fn greedy_verify_resolve_projects_bonus_after_full_accept() {
+        let model = FakeGreedyProjectModel::new(vec![4, 5, 6, 7]);
+        let hidden = Array::zeros((1_i32, 4_i32, 1_i32), Dtype::Float32).expect("hidden");
+        let mut stats = MtpSpeculativeStats::default();
+
+        let resolution = resolve_greedy_verified_hidden_until_mismatch(
+            &model,
+            &hidden,
+            &[4, 5, 6],
+            &mut stats,
+            (),
+        )
+        .expect("resolution");
+
+        assert_eq!(resolution.accepted_draft_len, 3);
+        assert_eq!(resolution.tokens_to_append, vec![4, 5, 6, 7]);
+        assert_eq!(resolution.accepted_verify_input_len, 4);
+        assert!(!resolution.needs_rollback);
+        assert_eq!(model.project_calls(), 4);
+    }
+
+    #[test]
+    fn mtp_rollback_main_cache_replays_hybrid_cache_after_mismatch() {
+        let model = FakeGreedyProjectModel::new(Vec::new());
+        let mut cache = vec![LayerCache::Linear(
+            crate::core::cache::GatedDeltaCache::new_with_cap(1, 4, 8, 1, 4, 4, Dtype::Float32, 16)
+                .expect("linear cache"),
+        )];
+        if let LayerCache::Linear(gd) = &mut cache[0] {
+            gd.advance(&[4]).expect("base prefix");
+        }
+        let snapshots = cache.iter().map(LayerCache::snapshot).collect::<Vec<_>>();
+        if let LayerCache::Linear(gd) = &mut cache[0] {
+            gd.advance(&[3]).expect("verified suffix");
+        }
+
+        let verify_input = vec![10_u32, 11, 12];
+        let accepted_position_ids =
+            crate::core::generate::build_position_ids(4, 2).expect("position ids");
+        let verified_hidden =
+            Array::zeros((1_i32, 3_i32, 1_i32), Dtype::Float32).expect("verified hidden");
+
+        let accepted_hidden = rollback_main_cache_to_accepted_prefix(
+            &model,
+            &mut cache,
+            &snapshots,
+            MainCacheRollbackInput {
+                accepted_by_row: &[(0, 2)],
+                verify_input: &verify_input,
+                accepted_position_ids: &accepted_position_ids,
+                verified_hidden: &verified_hidden,
+            },
+            (),
+        )
+        .expect("hybrid rollback replay");
+
+        assert_eq!(accepted_hidden.shape().as_slice(), &[1, 2, 1]);
+        assert_eq!(model.replay_calls(), 1);
+        let LayerCache::Linear(gd) = &cache[0] else {
+            panic!("expected linear cache");
+        };
+        assert_eq!(gd.offsets(), &[6]);
+    }
 
     #[test]
     fn mtp_policy_defaults_qwen35_dense_4b_to_d1() {
@@ -1259,7 +2038,7 @@ mod tests {
     }
 
     #[test]
-    fn mtp_policy_defaults_qwen36_dense_27b_to_d2() {
+    fn mtp_policy_defaults_qwen36_dense_27b_to_d1() {
         let raw = serde_json::json!({
             "model_type": "qwen3_5",
             "text_config": {
@@ -1269,11 +2048,11 @@ mod tests {
             }
         });
 
-        assert_eq!(default_mtp_draft_tokens_for_config(&raw), 2);
+        assert_eq!(default_mtp_draft_tokens_for_config(&raw), 1);
     }
 
     #[test]
-    fn mtp_policy_defaults_qwen36_moe_35b_a3b_to_d2() {
+    fn mtp_policy_defaults_qwen36_moe_35b_a3b_to_d1() {
         let raw = serde_json::json!({
             "model_type": "qwen3_5_moe",
             "text_config": {
@@ -1285,7 +2064,7 @@ mod tests {
             }
         });
 
-        assert_eq!(default_mtp_draft_tokens_for_config(&raw), 2);
+        assert_eq!(default_mtp_draft_tokens_for_config(&raw), 1);
     }
 
     #[test]
@@ -1335,5 +2114,121 @@ mod tests {
 
         assert_eq!(stats.draft_attempts_by_position, vec![3, 3, 2, 2]);
         assert_eq!(stats.draft_accepts_by_position, vec![2, 2, 0, 0]);
+    }
+
+    #[test]
+    fn mtp_cost_aware_policy_reduces_high_overhead_low_acceptance_window() {
+        let mut policy = MtpDraftPolicyState::new(4);
+        let mut stats = MtpSpeculativeStats::default();
+        stats.record_window_acceptance(4, 0);
+
+        let change = policy.observe_window(
+            MtpDraftPolicyWindow {
+                attempted_draft_tokens: 4,
+                accepted_draft_tokens: 0,
+                draft_forward_us: 1_000,
+                verify_forward_us: 500,
+                projection_us: 600,
+                sampling_us: 800,
+                main_rollback_us: 200,
+                mtp_cache_commit_us: 900,
+                mtp_prefill_cache_commit_us: 0,
+                mtp_decode_cache_commit_us: 900,
+                mtp_cache_restore_us: 300,
+            },
+            &stats,
+        );
+
+        assert_eq!(policy.current_budget(), 1);
+        assert!(change.reduced);
+    }
+
+    #[test]
+    fn mtp_cost_aware_policy_restores_after_cheap_full_accept_windows() {
+        let mut policy = MtpDraftPolicyState::new(4);
+        let mut stats = MtpSpeculativeStats::default();
+
+        stats.record_window_acceptance(4, 0);
+        policy.observe_window(
+            MtpDraftPolicyWindow {
+                attempted_draft_tokens: 4,
+                accepted_draft_tokens: 0,
+                draft_forward_us: 1_000,
+                verify_forward_us: 500,
+                projection_us: 600,
+                sampling_us: 800,
+                main_rollback_us: 200,
+                mtp_cache_commit_us: 900,
+                mtp_prefill_cache_commit_us: 0,
+                mtp_decode_cache_commit_us: 900,
+                mtp_cache_restore_us: 300,
+            },
+            &stats,
+        );
+        assert_eq!(policy.current_budget(), 1);
+
+        for _ in 0..4 {
+            stats.record_window_acceptance(policy.current_budget(), policy.current_budget());
+            let change = policy.observe_window(
+                MtpDraftPolicyWindow {
+                    attempted_draft_tokens: policy.current_budget(),
+                    accepted_draft_tokens: policy.current_budget(),
+                    draft_forward_us: 50,
+                    verify_forward_us: 1_000,
+                    projection_us: 20,
+                    sampling_us: 20,
+                    main_rollback_us: 0,
+                    mtp_cache_commit_us: 30,
+                    mtp_prefill_cache_commit_us: 0,
+                    mtp_decode_cache_commit_us: 30,
+                    mtp_cache_restore_us: 0,
+                },
+                &stats,
+            );
+            assert!(!change.reduced);
+        }
+
+        assert_eq!(policy.current_budget(), 4);
+    }
+
+    #[test]
+    fn mtp_cost_aware_policy_caps_depth_from_position_acceptance() {
+        let mut policy = MtpDraftPolicyState::new(4);
+        let mut stats = MtpSpeculativeStats::default();
+        for _ in 0..6 {
+            stats.record_window_acceptance(4, 2);
+        }
+
+        let change = policy.observe_window(
+            MtpDraftPolicyWindow {
+                attempted_draft_tokens: 4,
+                accepted_draft_tokens: 4,
+                draft_forward_us: 50,
+                verify_forward_us: 1_000,
+                projection_us: 20,
+                sampling_us: 20,
+                main_rollback_us: 0,
+                mtp_cache_commit_us: 30,
+                mtp_prefill_cache_commit_us: 0,
+                mtp_decode_cache_commit_us: 30,
+                mtp_cache_restore_us: 0,
+            },
+            &stats,
+        );
+
+        assert_eq!(policy.current_budget(), 2);
+        assert!(change.reduced);
+    }
+
+    #[test]
+    fn mtp_cost_aware_policy_keeps_single_budget_for_zero_attempt_window() {
+        let mut policy = MtpDraftPolicyState::new(1);
+        let stats = MtpSpeculativeStats::default();
+
+        let change = policy.observe_window(MtpDraftPolicyWindow::default(), &stats);
+
+        assert_eq!(policy.current_budget(), 1);
+        assert!(!change.reduced);
+        assert!(!change.increased);
     }
 }

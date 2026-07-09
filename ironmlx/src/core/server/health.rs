@@ -62,6 +62,16 @@ pub struct MtpHealthInfo {
     pub fallback_prefill_count: u64,
     pub drafted_tokens: u64,
     pub accepted_draft_tokens: u64,
+    pub windows: u64,
+    pub draft_forward_us: u64,
+    pub verify_forward_us: u64,
+    pub projection_us: u64,
+    pub sampling_us: u64,
+    pub main_rollback_us: u64,
+    pub cache_commit_us: u64,
+    pub prefill_cache_commit_us: u64,
+    pub decode_cache_commit_us: u64,
+    pub cache_restore_us: u64,
 }
 
 #[derive(Clone)]
@@ -73,6 +83,16 @@ pub struct MtpHealthConfig {
     fallback_prefill_count: Arc<AtomicU64>,
     drafted_tokens: Arc<AtomicU64>,
     accepted_draft_tokens: Arc<AtomicU64>,
+    windows: Arc<AtomicU64>,
+    draft_forward_us: Arc<AtomicU64>,
+    verify_forward_us: Arc<AtomicU64>,
+    projection_us: Arc<AtomicU64>,
+    sampling_us: Arc<AtomicU64>,
+    main_rollback_us: Arc<AtomicU64>,
+    cache_commit_us: Arc<AtomicU64>,
+    prefill_cache_commit_us: Arc<AtomicU64>,
+    decode_cache_commit_us: Arc<AtomicU64>,
+    cache_restore_us: Arc<AtomicU64>,
 }
 
 impl MtpHealthConfig {
@@ -85,9 +105,20 @@ impl MtpHealthConfig {
             fallback_prefill_count: Arc::new(AtomicU64::new(0)),
             drafted_tokens: Arc::new(AtomicU64::new(0)),
             accepted_draft_tokens: Arc::new(AtomicU64::new(0)),
+            windows: Arc::new(AtomicU64::new(0)),
+            draft_forward_us: Arc::new(AtomicU64::new(0)),
+            verify_forward_us: Arc::new(AtomicU64::new(0)),
+            projection_us: Arc::new(AtomicU64::new(0)),
+            sampling_us: Arc::new(AtomicU64::new(0)),
+            main_rollback_us: Arc::new(AtomicU64::new(0)),
+            cache_commit_us: Arc::new(AtomicU64::new(0)),
+            prefill_cache_commit_us: Arc::new(AtomicU64::new(0)),
+            decode_cache_commit_us: Arc::new(AtomicU64::new(0)),
+            cache_restore_us: Arc::new(AtomicU64::new(0)),
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn enabled(
         draft_tokens: usize,
         prefill_count: Arc<AtomicU64>,
@@ -95,6 +126,16 @@ impl MtpHealthConfig {
         fallback_prefill_count: Arc<AtomicU64>,
         drafted_tokens: Arc<AtomicU64>,
         accepted_draft_tokens: Arc<AtomicU64>,
+        windows: Arc<AtomicU64>,
+        draft_forward_us: Arc<AtomicU64>,
+        verify_forward_us: Arc<AtomicU64>,
+        projection_us: Arc<AtomicU64>,
+        sampling_us: Arc<AtomicU64>,
+        main_rollback_us: Arc<AtomicU64>,
+        cache_commit_us: Arc<AtomicU64>,
+        prefill_cache_commit_us: Arc<AtomicU64>,
+        decode_cache_commit_us: Arc<AtomicU64>,
+        cache_restore_us: Arc<AtomicU64>,
     ) -> Self {
         Self {
             enabled: true,
@@ -104,6 +145,16 @@ impl MtpHealthConfig {
             fallback_prefill_count,
             drafted_tokens,
             accepted_draft_tokens,
+            windows,
+            draft_forward_us,
+            verify_forward_us,
+            projection_us,
+            sampling_us,
+            main_rollback_us,
+            cache_commit_us,
+            prefill_cache_commit_us,
+            decode_cache_commit_us,
+            cache_restore_us,
         }
     }
 
@@ -116,6 +167,16 @@ impl MtpHealthConfig {
             fallback_prefill_count: self.fallback_prefill_count.load(Ordering::Relaxed),
             drafted_tokens: self.drafted_tokens.load(Ordering::Relaxed),
             accepted_draft_tokens: self.accepted_draft_tokens.load(Ordering::Relaxed),
+            windows: self.windows.load(Ordering::Relaxed),
+            draft_forward_us: self.draft_forward_us.load(Ordering::Relaxed),
+            verify_forward_us: self.verify_forward_us.load(Ordering::Relaxed),
+            projection_us: self.projection_us.load(Ordering::Relaxed),
+            sampling_us: self.sampling_us.load(Ordering::Relaxed),
+            main_rollback_us: self.main_rollback_us.load(Ordering::Relaxed),
+            cache_commit_us: self.cache_commit_us.load(Ordering::Relaxed),
+            prefill_cache_commit_us: self.prefill_cache_commit_us.load(Ordering::Relaxed),
+            decode_cache_commit_us: self.decode_cache_commit_us.load(Ordering::Relaxed),
+            cache_restore_us: self.cache_restore_us.load(Ordering::Relaxed),
         }
     }
 }
@@ -361,6 +422,14 @@ mod tests {
         assert_eq!(snapshot.mtp.fallback_prefill_count, 0);
         assert_eq!(snapshot.mtp.drafted_tokens, 0);
         assert_eq!(snapshot.mtp.accepted_draft_tokens, 0);
+        assert_eq!(snapshot.mtp.windows, 0);
+        assert_eq!(snapshot.mtp.draft_forward_us, 0);
+        assert_eq!(snapshot.mtp.verify_forward_us, 0);
+        assert_eq!(snapshot.mtp.projection_us, 0);
+        assert_eq!(snapshot.mtp.sampling_us, 0);
+        assert_eq!(snapshot.mtp.main_rollback_us, 0);
+        assert_eq!(snapshot.mtp.cache_commit_us, 0);
+        assert_eq!(snapshot.mtp.cache_restore_us, 0);
     }
 
     #[test]
@@ -370,6 +439,16 @@ mod tests {
         let fallback_prefill_count = Arc::new(AtomicU64::new(13));
         let drafted_tokens = Arc::new(AtomicU64::new(17));
         let accepted_draft_tokens = Arc::new(AtomicU64::new(19));
+        let windows = Arc::new(AtomicU64::new(23));
+        let draft_forward_us = Arc::new(AtomicU64::new(29));
+        let verify_forward_us = Arc::new(AtomicU64::new(31));
+        let projection_us = Arc::new(AtomicU64::new(37));
+        let sampling_us = Arc::new(AtomicU64::new(41));
+        let main_rollback_us = Arc::new(AtomicU64::new(43));
+        let cache_commit_us = Arc::new(AtomicU64::new(47));
+        let prefill_cache_commit_us = Arc::new(AtomicU64::new(19));
+        let decode_cache_commit_us = Arc::new(AtomicU64::new(28));
+        let cache_restore_us = Arc::new(AtomicU64::new(53));
         let snapshot = test_collector(MtpHealthConfig::enabled(
             2,
             prefill_count.clone(),
@@ -377,6 +456,16 @@ mod tests {
             fallback_prefill_count.clone(),
             drafted_tokens.clone(),
             accepted_draft_tokens.clone(),
+            windows.clone(),
+            draft_forward_us.clone(),
+            verify_forward_us.clone(),
+            projection_us.clone(),
+            sampling_us.clone(),
+            main_rollback_us.clone(),
+            cache_commit_us.clone(),
+            prefill_cache_commit_us.clone(),
+            decode_cache_commit_us.clone(),
+            cache_restore_us.clone(),
         ))
         .snapshot();
 
@@ -387,12 +476,32 @@ mod tests {
         assert_eq!(snapshot.mtp.fallback_prefill_count, 13);
         assert_eq!(snapshot.mtp.drafted_tokens, 17);
         assert_eq!(snapshot.mtp.accepted_draft_tokens, 19);
+        assert_eq!(snapshot.mtp.windows, 23);
+        assert_eq!(snapshot.mtp.draft_forward_us, 29);
+        assert_eq!(snapshot.mtp.verify_forward_us, 31);
+        assert_eq!(snapshot.mtp.projection_us, 37);
+        assert_eq!(snapshot.mtp.sampling_us, 41);
+        assert_eq!(snapshot.mtp.main_rollback_us, 43);
+        assert_eq!(snapshot.mtp.cache_commit_us, 47);
+        assert_eq!(snapshot.mtp.prefill_cache_commit_us, 19);
+        assert_eq!(snapshot.mtp.decode_cache_commit_us, 28);
+        assert_eq!(snapshot.mtp.cache_restore_us, 53);
 
         prefill_count.store(13, Ordering::Relaxed);
         step_count.store(17, Ordering::Relaxed);
         fallback_prefill_count.store(23, Ordering::Relaxed);
         drafted_tokens.store(29, Ordering::Relaxed);
         accepted_draft_tokens.store(31, Ordering::Relaxed);
+        windows.store(37, Ordering::Relaxed);
+        draft_forward_us.store(41, Ordering::Relaxed);
+        verify_forward_us.store(43, Ordering::Relaxed);
+        projection_us.store(47, Ordering::Relaxed);
+        sampling_us.store(53, Ordering::Relaxed);
+        main_rollback_us.store(59, Ordering::Relaxed);
+        cache_commit_us.store(61, Ordering::Relaxed);
+        prefill_cache_commit_us.store(29, Ordering::Relaxed);
+        decode_cache_commit_us.store(32, Ordering::Relaxed);
+        cache_restore_us.store(67, Ordering::Relaxed);
         let snapshot = test_collector(MtpHealthConfig::enabled(
             2,
             prefill_count,
@@ -400,6 +509,16 @@ mod tests {
             fallback_prefill_count,
             drafted_tokens,
             accepted_draft_tokens,
+            windows,
+            draft_forward_us,
+            verify_forward_us,
+            projection_us,
+            sampling_us,
+            main_rollback_us,
+            cache_commit_us,
+            prefill_cache_commit_us,
+            decode_cache_commit_us,
+            cache_restore_us,
         ))
         .snapshot();
 
@@ -408,6 +527,16 @@ mod tests {
         assert_eq!(snapshot.mtp.fallback_prefill_count, 23);
         assert_eq!(snapshot.mtp.drafted_tokens, 29);
         assert_eq!(snapshot.mtp.accepted_draft_tokens, 31);
+        assert_eq!(snapshot.mtp.windows, 37);
+        assert_eq!(snapshot.mtp.draft_forward_us, 41);
+        assert_eq!(snapshot.mtp.verify_forward_us, 43);
+        assert_eq!(snapshot.mtp.projection_us, 47);
+        assert_eq!(snapshot.mtp.sampling_us, 53);
+        assert_eq!(snapshot.mtp.main_rollback_us, 59);
+        assert_eq!(snapshot.mtp.cache_commit_us, 61);
+        assert_eq!(snapshot.mtp.prefill_cache_commit_us, 29);
+        assert_eq!(snapshot.mtp.decode_cache_commit_us, 32);
+        assert_eq!(snapshot.mtp.cache_restore_us, 67);
     }
 
     #[test]
@@ -465,6 +594,16 @@ mod tests {
                 fallback_prefill_count: 0,
                 drafted_tokens: 0,
                 accepted_draft_tokens: 0,
+                windows: 0,
+                draft_forward_us: 0,
+                verify_forward_us: 0,
+                projection_us: 0,
+                sampling_us: 0,
+                main_rollback_us: 0,
+                cache_commit_us: 0,
+                prefill_cache_commit_us: 0,
+                decode_cache_commit_us: 0,
+                cache_restore_us: 0,
             },
             active_kv_offload: ActiveKvOffloadHealth::disabled(),
             device_name: Some("Apple Test GPU".to_string()),

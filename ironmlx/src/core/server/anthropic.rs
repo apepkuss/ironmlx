@@ -344,6 +344,7 @@ where
         scheduler_config.prefill_chunk_size,
         state.b_max,
         state.paged_prefix_cache_enabled,
+        state.mtp_enabled && sampler.is_pipelinable(),
     );
 
     match messages_route(stream, use_scheduler) {

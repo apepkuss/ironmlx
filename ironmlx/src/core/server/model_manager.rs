@@ -14,10 +14,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use crate::cli::serve::{
-    apply_gemma4_drafter_adaptive_scheduler_defaults, read_model_type,
-    resolve_active_kv_offload_config, resolve_engine_paged_prefix_cache_settings,
-    resolve_memory_limit_bytes, resolve_model_ttl, resolve_scheduler_for_model,
-    ResolvedSchedulerRuntime, SchedulerProfileSource, ServeArgs,
+    apply_adaptive_mtp_scheduler_defaults, read_model_type, resolve_active_kv_offload_config,
+    resolve_engine_paged_prefix_cache_settings, resolve_memory_limit_bytes, resolve_model_ttl,
+    resolve_scheduler_for_model, ResolvedSchedulerRuntime, SchedulerProfileSource, ServeArgs,
 };
 use crate::core::sampler::Sampler;
 use crate::core::speculative::{MtpDraftTokensArg, MtpSpeculativeConfig};
@@ -569,14 +568,9 @@ fn build_engine_model_config(
             );
         }
     }
-    if apply_gemma4_drafter_adaptive_scheduler_defaults(
-        args,
-        architecture,
-        mtp.is_some(),
-        &mut resolved,
-    ) {
+    if apply_adaptive_mtp_scheduler_defaults(args, architecture, mtp.is_some(), &mut resolved) {
         tracing::info!(
-            "ironmlx app: Gemma4 drafter adaptive scheduler default applied model_id={} b_max={}",
+            "ironmlx app: adaptive MTP scheduler default applied model_id={} b_max={}",
             model_id,
             resolved.scheduler_config.b_max
         );
@@ -1463,6 +1457,16 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
     let mut mtp_fallback_prefill_count = 0;
     let mut mtp_drafted_tokens = 0;
     let mut mtp_accepted_draft_tokens = 0;
+    let mut mtp_windows = 0;
+    let mut mtp_draft_forward_us = 0;
+    let mut mtp_verify_forward_us = 0;
+    let mut mtp_projection_us = 0;
+    let mut mtp_sampling_us = 0;
+    let mut mtp_main_rollback_us = 0;
+    let mut mtp_cache_commit_us = 0;
+    let mut mtp_prefill_cache_commit_us = 0;
+    let mut mtp_decode_cache_commit_us = 0;
+    let mut mtp_cache_restore_us = 0;
     let mut active_kv_snapshots = Vec::new();
 
     for snapshot in snapshots {
@@ -1501,6 +1505,16 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
         mtp_fallback_prefill_count += snapshot.mtp.fallback_prefill_count;
         mtp_drafted_tokens += snapshot.mtp.drafted_tokens;
         mtp_accepted_draft_tokens += snapshot.mtp.accepted_draft_tokens;
+        mtp_windows += snapshot.mtp.windows;
+        mtp_draft_forward_us += snapshot.mtp.draft_forward_us;
+        mtp_verify_forward_us += snapshot.mtp.verify_forward_us;
+        mtp_projection_us += snapshot.mtp.projection_us;
+        mtp_sampling_us += snapshot.mtp.sampling_us;
+        mtp_main_rollback_us += snapshot.mtp.main_rollback_us;
+        mtp_cache_commit_us += snapshot.mtp.cache_commit_us;
+        mtp_prefill_cache_commit_us += snapshot.mtp.prefill_cache_commit_us;
+        mtp_decode_cache_commit_us += snapshot.mtp.decode_cache_commit_us;
+        mtp_cache_restore_us += snapshot.mtp.cache_restore_us;
         active_kv_snapshots.push(snapshot.active_kv_offload);
     }
 
@@ -1564,6 +1578,16 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
             fallback_prefill_count: mtp_fallback_prefill_count,
             drafted_tokens: mtp_drafted_tokens,
             accepted_draft_tokens: mtp_accepted_draft_tokens,
+            windows: mtp_windows,
+            draft_forward_us: mtp_draft_forward_us,
+            verify_forward_us: mtp_verify_forward_us,
+            projection_us: mtp_projection_us,
+            sampling_us: mtp_sampling_us,
+            main_rollback_us: mtp_main_rollback_us,
+            cache_commit_us: mtp_cache_commit_us,
+            prefill_cache_commit_us: mtp_prefill_cache_commit_us,
+            decode_cache_commit_us: mtp_decode_cache_commit_us,
+            cache_restore_us: mtp_cache_restore_us,
         },
         active_kv_offload,
         device_name: mlx_memory.device_name,
@@ -1694,6 +1718,16 @@ mod tests {
                 fallback_prefill_count: 7,
                 drafted_tokens: 11,
                 accepted_draft_tokens: 13,
+                windows: 17,
+                draft_forward_us: 19,
+                verify_forward_us: 23,
+                projection_us: 29,
+                sampling_us: 31,
+                main_rollback_us: 37,
+                cache_commit_us: 41,
+                prefill_cache_commit_us: 17,
+                decode_cache_commit_us: 24,
+                cache_restore_us: 43,
             },
             active_kv_offload: crate::core::cache::ActiveKvOffloadHealth::disabled(),
             device_name: None,
@@ -1709,6 +1743,16 @@ mod tests {
         assert_eq!(aggregated.mtp.fallback_prefill_count, 7);
         assert_eq!(aggregated.mtp.drafted_tokens, 11);
         assert_eq!(aggregated.mtp.accepted_draft_tokens, 13);
+        assert_eq!(aggregated.mtp.windows, 17);
+        assert_eq!(aggregated.mtp.draft_forward_us, 19);
+        assert_eq!(aggregated.mtp.verify_forward_us, 23);
+        assert_eq!(aggregated.mtp.projection_us, 29);
+        assert_eq!(aggregated.mtp.sampling_us, 31);
+        assert_eq!(aggregated.mtp.main_rollback_us, 37);
+        assert_eq!(aggregated.mtp.cache_commit_us, 41);
+        assert_eq!(aggregated.mtp.prefill_cache_commit_us, 17);
+        assert_eq!(aggregated.mtp.decode_cache_commit_us, 24);
+        assert_eq!(aggregated.mtp.cache_restore_us, 43);
     }
 
     #[test]
