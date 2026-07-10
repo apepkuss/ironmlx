@@ -78,6 +78,7 @@ impl Linear {
             })?;
             let scales = loader.tensor(&scales_key)?.clone();
             let biases = loader.tensor_opt(&biases_key).cloned();
+            qmeta.validate_storage(prefix, &weight, &scales, biases.as_ref())?;
             Ok(Linear {
                 inner: LinearImpl::Quant {
                     weight,
@@ -619,6 +620,22 @@ mod tests {
             false,
             QuantMode::Affine
         ));
+        assert!(!should_dispatch_self_qmm(
+            true,
+            2048,
+            4,
+            32,
+            false,
+            QuantMode::Mxfp4
+        ));
+        assert!(!should_dispatch_self_qmm(
+            true,
+            2048,
+            8,
+            32,
+            false,
+            QuantMode::Mxfp8
+        ));
     }
 
     fn assert_quantized_forward_matches_mlx(bits: i32, raw_dtype: mlx::Dtype) {
@@ -685,6 +702,81 @@ mod tests {
     #[serial(mlx_metal)]
     fn quantized_2bit_forward_matches_mlx_float32() {
         assert_quantized_forward_matches_mlx(2, mlx::Dtype::Float32);
+    }
+
+    fn assert_mxfp_forward_matches_mlx(mode: QuantMode, bits: i32) {
+        let out = 3_i32;
+        let in_dim = 32_i32;
+        let group_size = 32_i32;
+        let w_data: Vec<f32> = (0..(out * in_dim))
+            .map(|i| ((i % 23) as f32 - 11.0) * 0.02)
+            .collect();
+        let x_data: Vec<f32> = (0..(2 * in_dim))
+            .map(|i| ((i % 17) as f32 - 8.0) * 0.03)
+            .collect();
+        let raw_w_f32: Array = (w_data.as_slice(), &[out, in_dim][..]).try_into().unwrap();
+        let x_f32: Array = (x_data.as_slice(), &[2_i32, in_dim][..])
+            .try_into()
+            .unwrap();
+        let raw_w = mlx::ops::cast::astype(&raw_w_f32, mlx::Dtype::Bfloat16).unwrap();
+        let x = mlx::ops::cast::astype(&x_f32, mlx::Dtype::Bfloat16).unwrap();
+        let q = mlx::quantization::quantize(
+            &raw_w,
+            Some(group_size),
+            Some(bits),
+            mode.mlx_mode(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(q.len(), 2, "MXFP quantization returns weight and scales");
+
+        let layer = Linear::new_quant_with_mode(
+            q[0].clone(),
+            q[1].clone(),
+            None,
+            None,
+            group_size,
+            bits,
+            mode,
+        );
+        let got = layer.forward(&x).unwrap();
+        let expected = mlx::quantization::quantized_matmul(
+            &x,
+            &q[0],
+            &q[1],
+            None,
+            true,
+            Some(group_size),
+            Some(bits),
+            mode.mlx_mode(),
+        )
+        .unwrap();
+
+        assert_eq!(got.dtype(), mlx::Dtype::Bfloat16);
+        let got = mlx::ops::cast::astype(&got, mlx::Dtype::Float32)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+        let expected = mlx::ops::cast::astype(&expected, mlx::Dtype::Float32)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+        assert_eq!(got.len(), expected.len());
+        for (idx, (g, e)) in got.iter().zip(expected.iter()).enumerate() {
+            assert!((g - e).abs() <= 0.001, "idx={idx} got={g} expected={e}");
+        }
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn mxfp4_forward_matches_native_mlx() {
+        assert_mxfp_forward_matches_mlx(QuantMode::Mxfp4, 4);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn mxfp8_forward_matches_native_mlx() {
+        assert_mxfp_forward_matches_mlx(QuantMode::Mxfp8, 8);
     }
 
     #[test]

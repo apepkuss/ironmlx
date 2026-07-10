@@ -228,6 +228,8 @@ fn load_fused_gate_up(
 
         let gate_biases = loader.tensor_opt(&format!("{gate}.biases")).cloned();
         let up_biases = loader.tensor_opt(&format!("{up}.biases")).cloned();
+        qmeta.validate_storage(&gate, &gate_w, &gate_scales, gate_biases.as_ref())?;
+        qmeta.validate_storage(&up, &up_w, &up_scales, up_biases.as_ref())?;
         let biases = match (gate_biases, up_biases) {
             (Some(g), Some(u)) => Some(mlx::ops::shape::concatenate(&[&g, &u], 0)?),
             (None, None) => None,

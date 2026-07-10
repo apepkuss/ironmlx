@@ -20,7 +20,7 @@
 use anyhow::Result;
 use mlx::{Array, StreamOrDevice};
 
-use crate::core::Loader;
+use crate::core::{Loader, QuantMode};
 use crate::nn::{Linear, RmsNorm};
 
 use super::config::Glm4MoeLiteConfig;
@@ -29,9 +29,9 @@ use super::rope::{Glm4Rope, RopeOffset};
 
 /// Per-head stacked quantized linear (mirrors omlx `QuantizedMultiLinear`).
 ///
-/// Weight is `[H, out, in/8]` (4-bit packed) with per-group `scales` and
-/// optional affine `biases` (zero-points). The forward [`apply`](Self::apply)
-/// is a single `quantized_matmul`:
+/// Weight is `[H, out, packed_in]` with per-group `scales` and optional
+/// affine `biases` (zero-points). The forward [`apply`](Self::apply) is a
+/// single `quantized_matmul`:
 ///
 /// - `transpose=true`  → `in → out` (decode: fold query into the latent space).
 /// - `transpose=false` → `out → in` (prefill: un-fold latent per head).
@@ -45,6 +45,7 @@ pub struct PerHeadQuantLinear {
     biases: Option<Array>,
     group_size: i32,
     bits: i32,
+    mode: QuantMode,
 }
 
 impl PerHeadQuantLinear {
@@ -60,12 +61,17 @@ impl PerHeadQuantLinear {
         let qm = loader.quant_meta_for(prefix).ok_or_else(|| {
             anyhow::anyhow!("{prefix}: expected quantized per-head weight (no quantization meta)")
         })?;
+        let weight = loader.tensor(&format!("{prefix}.weight"))?.clone();
+        let scales = loader.tensor(&format!("{prefix}.scales"))?.clone();
+        let biases = loader.tensor_opt(&format!("{prefix}.biases")).cloned();
+        qm.validate_storage(prefix, &weight, &scales, biases.as_ref())?;
         Ok(Self {
-            weight: loader.tensor(&format!("{prefix}.weight"))?.clone(),
-            scales: loader.tensor(&format!("{prefix}.scales"))?.clone(),
-            biases: loader.tensor_opt(&format!("{prefix}.biases")).cloned(),
+            weight,
+            scales,
+            biases,
             group_size: qm.group_size,
             bits: qm.bits,
+            mode: qm.mode,
         })
     }
 
@@ -82,6 +88,7 @@ impl PerHeadQuantLinear {
         biases: Option<Array>,
         group_size: i32,
         bits: i32,
+        mode: QuantMode,
     ) -> Self {
         Self {
             weight,
@@ -89,6 +96,7 @@ impl PerHeadQuantLinear {
             biases,
             group_size,
             bits,
+            mode,
         }
     }
 
@@ -109,7 +117,7 @@ impl PerHeadQuantLinear {
             transpose,
             Some(self.group_size),
             Some(self.bits),
-            "affine",
+            self.mode.mlx_mode(),
             target,
         )?)
     }
@@ -128,7 +136,7 @@ impl PerHeadQuantLinear {
             self.biases.as_ref(),
             Some(self.group_size),
             Some(self.bits),
-            "affine",
+            self.mode.mlx_mode(),
             None,
             None,
         )?)
@@ -541,7 +549,71 @@ mod tests {
     fn quant_per_head(w_fp: &Array, in_dim: i32) -> PerHeadQuantLinear {
         let q = mlx::quantization::quantize_on(w_fp, Some(in_dim), Some(4), "affine", None, ())
             .unwrap();
-        PerHeadQuantLinear::from_parts(q[0].clone(), q[1].clone(), q.get(2).cloned(), in_dim, 4)
+        PerHeadQuantLinear::from_parts(
+            q[0].clone(),
+            q[1].clone(),
+            q.get(2).cloned(),
+            in_dim,
+            4,
+            QuantMode::Affine,
+        )
+    }
+
+    fn assert_per_head_mxfp_matches_native(mode: crate::core::QuantMode, bits: i32) {
+        let heads = 2_i32;
+        let out = 3_i32;
+        let in_dim = 32_i32;
+        let data: Vec<f32> = (0..heads * out * in_dim)
+            .map(|i| ((i % 29) as f32 - 14.0) * 0.01)
+            .collect();
+        let raw_f32: Array = (data.as_slice(), &[heads, out, in_dim][..])
+            .try_into()
+            .unwrap();
+        let raw = mlx::ops::cast::astype(&raw_f32, mlx::Dtype::Bfloat16).unwrap();
+        let q = mlx::quantization::quantize(&raw, Some(in_dim), Some(bits), mode.mlx_mode(), None)
+            .unwrap();
+        let layer =
+            PerHeadQuantLinear::from_parts(q[0].clone(), q[1].clone(), None, in_dim, bits, mode);
+        let x_data: Vec<f32> = (0..heads * in_dim)
+            .map(|i| ((i % 17) as f32 - 8.0) * 0.02)
+            .collect();
+        let x_f32: Array = (x_data.as_slice(), &[heads, 1_i32, in_dim][..])
+            .try_into()
+            .unwrap();
+        let x = mlx::ops::cast::astype(&x_f32, mlx::Dtype::Bfloat16).unwrap();
+        let got = layer.apply(&x, true, ()).unwrap();
+        let expected = mlx::quantization::quantized_matmul(
+            &x,
+            &q[0],
+            &q[1],
+            None,
+            true,
+            Some(in_dim),
+            Some(bits),
+            mode.mlx_mode(),
+        )
+        .unwrap();
+        let got = mlx::ops::cast::astype(&got, mlx::Dtype::Float32)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+        let expected = mlx::ops::cast::astype(&expected, mlx::Dtype::Float32)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn per_head_mxfp4_matches_native_mlx() {
+        assert_per_head_mxfp_matches_native(crate::core::QuantMode::Mxfp4, 4);
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn per_head_mxfp8_matches_native_mlx() {
+        assert_per_head_mxfp_matches_native(crate::core::QuantMode::Mxfp8, 8);
     }
 
     /// Dequantize-then-matmul reference for `transpose=true` (in→out), per head.
@@ -556,9 +628,9 @@ mod tests {
             &phl.weight,
             &phl.scales,
             phl.biases.as_ref(),
-            Some(in_dim),
-            Some(4),
-            "affine",
+            Some(phl.group_size),
+            Some(phl.bits),
+            phl.mode.mlx_mode(),
             None,
             None,
         )
@@ -776,7 +848,14 @@ mod tests {
     fn quant_per_head_8b(w_fp: &Array, in_dim: i32) -> PerHeadQuantLinear {
         let q = mlx::quantization::quantize_on(w_fp, Some(in_dim), Some(8), "affine", None, ())
             .unwrap();
-        PerHeadQuantLinear::from_parts(q[0].clone(), q[1].clone(), q.get(2).cloned(), in_dim, 8)
+        PerHeadQuantLinear::from_parts(
+            q[0].clone(),
+            q[1].clone(),
+            q.get(2).cloned(),
+            in_dim,
+            8,
+            QuantMode::Affine,
+        )
     }
 
     /// Tiny `MlaAttention` for the two-regime forward tests.
