@@ -34,7 +34,7 @@ use mlx::ops::shape::concatenate_on;
 use mlx::ops::sort::{argpartition_on, argsort_on};
 use mlx::{Array, StreamOrDevice};
 
-use crate::core::Loader;
+use crate::core::{Loader, QuantMode};
 use crate::nn::activations::{build_swiglu, invoke_swiglu};
 use crate::nn::{Linear, Mlp};
 use crate::Result;
@@ -187,9 +187,8 @@ struct FusedGateUp {
 /// axis (axis=1) on the first forward call so a single
 /// `gather_qmm` call replaces the prior two-call (gate then up). The fused
 /// output is sliced along the last dim into gate_out / up_out before
-/// SwiGLU. 4-bit affine quantization is per-row along intermediate (groups
-/// are along K=last); stacking along intermediate preserves all per-row
-/// scales/biases.
+/// SwiGLU. Supported quantization modes are grouped along K=last; stacking
+/// along intermediate preserves all per-row scales and optional biases.
 ///
 /// Lazy build is required to keep MLX Array allocations on the worker
 /// thread's Metal stream — building eagerly in `from_loader` (which runs
@@ -216,6 +215,7 @@ pub struct RoutedExperts {
     pub down_biases: Option<Array>,
     pub group_size: i32,
     pub bits: i32,
+    mode: QuantMode,
     pub num_experts: i32,
     /// Lazily-built compiled SwiGLU closure for the routed activation.
     /// Owned here so `apply_experts` is self-contained.
@@ -226,45 +226,67 @@ impl RoutedExperts {
     /// Load from `{prefix}.gate_proj.*` + `up_proj.*` + `down_proj.*`.
     /// Prefix is typically `"model.layers.{i}.mlp.switch_mlp"`.
     pub fn from_loader(loader: &Loader, prefix: &str) -> Result<Self> {
-        let qmeta = loader.quant_meta().ok_or_else(|| {
-            anyhow!("RoutedExperts requires quantized checkpoint; loader has no QuantMeta")
+        let gate_prefix = format!("{prefix}.gate_proj");
+        let up_prefix = format!("{prefix}.up_proj");
+        let down_prefix = format!("{prefix}.down_proj");
+        let qmeta = loader.quant_meta_for(&gate_prefix).ok_or_else(|| {
+            anyhow!("RoutedExperts requires quantization metadata for `{gate_prefix}`")
         })?;
+        let up_qmeta = loader.quant_meta_for(&up_prefix).ok_or_else(|| {
+            anyhow!("RoutedExperts requires quantization metadata for `{up_prefix}`")
+        })?;
+        let down_qmeta = loader.quant_meta_for(&down_prefix).ok_or_else(|| {
+            anyhow!("RoutedExperts requires quantization metadata for `{down_prefix}`")
+        })?;
+        if qmeta != up_qmeta || qmeta != down_qmeta {
+            return Err(anyhow!(
+                "RoutedExperts requires matching gate/up/down quantization metadata; gate={qmeta:?}, up={up_qmeta:?}, down={down_qmeta:?}"
+            ));
+        }
 
         let gate_weight = loader
-            .tensor(&format!("{prefix}.gate_proj.weight"))
+            .tensor(&format!("{gate_prefix}.weight"))
             .context("RoutedExperts: gate_proj.weight")?
             .clone();
         let gate_scales = loader
-            .tensor(&format!("{prefix}.gate_proj.scales"))
+            .tensor(&format!("{gate_prefix}.scales"))
             .context("RoutedExperts: gate_proj.scales")?
             .clone();
-        let gate_biases = loader
-            .tensor_opt(&format!("{prefix}.gate_proj.biases"))
-            .cloned();
+        let gate_biases = loader.tensor_opt(&format!("{gate_prefix}.biases")).cloned();
 
         let up_weight = loader
-            .tensor(&format!("{prefix}.up_proj.weight"))
+            .tensor(&format!("{up_prefix}.weight"))
             .context("RoutedExperts: up_proj.weight")?
             .clone();
         let up_scales = loader
-            .tensor(&format!("{prefix}.up_proj.scales"))
+            .tensor(&format!("{up_prefix}.scales"))
             .context("RoutedExperts: up_proj.scales")?
             .clone();
-        let up_biases = loader
-            .tensor_opt(&format!("{prefix}.up_proj.biases"))
-            .cloned();
+        let up_biases = loader.tensor_opt(&format!("{up_prefix}.biases")).cloned();
 
         let down_weight = loader
-            .tensor(&format!("{prefix}.down_proj.weight"))
+            .tensor(&format!("{down_prefix}.weight"))
             .context("RoutedExperts: down_proj.weight")?
             .clone();
         let down_scales = loader
-            .tensor(&format!("{prefix}.down_proj.scales"))
+            .tensor(&format!("{down_prefix}.scales"))
             .context("RoutedExperts: down_proj.scales")?
             .clone();
-        let down_biases = loader
-            .tensor_opt(&format!("{prefix}.down_proj.biases"))
-            .cloned();
+        let down_biases = loader.tensor_opt(&format!("{down_prefix}.biases")).cloned();
+
+        qmeta.validate_storage(
+            &gate_prefix,
+            &gate_weight,
+            &gate_scales,
+            gate_biases.as_ref(),
+        )?;
+        qmeta.validate_storage(&up_prefix, &up_weight, &up_scales, up_biases.as_ref())?;
+        qmeta.validate_storage(
+            &down_prefix,
+            &down_weight,
+            &down_scales,
+            down_biases.as_ref(),
+        )?;
 
         let num_experts = gate_weight.shape().as_slice()[0];
         let moe_intermediate = gate_weight.shape().as_slice()[1];
@@ -299,6 +321,7 @@ impl RoutedExperts {
             down_biases,
             group_size: qmeta.group_size,
             bits: qmeta.bits,
+            mode: qmeta.mode,
             num_experts,
             swiglu: std::sync::OnceLock::new(),
         })
@@ -311,7 +334,7 @@ impl RoutedExperts {
     /// underlying `concatenate_on` calls — typically
     /// `StreamOrDevice::default()` from the scheduler driver thread.
     ///
-    /// 4-bit affine quantization stores per-(expert,row) scale + bias with
+    /// Quantization stores per-(expert,row) scale and optional bias with
     /// groups along the K=last axis only; stacking along the
     /// intermediate axis is a mathematically exact row-wise rearrangement
     /// that preserves every per-row scale/bias. Single gather_qmm output
@@ -517,7 +540,7 @@ impl RoutedExperts {
                             true,
                             Some(self.group_size),
                             Some(self.bits),
-                            "affine",
+                            self.mode.mlx_mode(),
                             /* sorted_indices */ true,
                             target,
                         )
@@ -549,7 +572,7 @@ impl RoutedExperts {
                             true,
                             Some(self.group_size),
                             Some(self.bits),
-                            "affine",
+                            self.mode.mlx_mode(),
                             false,
                             target,
                         )
@@ -598,7 +621,7 @@ impl RoutedExperts {
                     true,
                     Some(self.group_size),
                     Some(self.bits),
-                    "affine",
+                    self.mode.mlx_mode(),
                     sorted_flag,
                     target,
                 )

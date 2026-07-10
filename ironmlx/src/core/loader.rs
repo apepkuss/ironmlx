@@ -18,17 +18,30 @@ pub enum QuantMode {
     Affine,
     /// OptiQ mixed-bit quantization backed by MLX affine packed tensors.
     OptiQ,
+    /// OCP microscaling 4-bit floating-point quantization.
+    Mxfp4,
+    /// OCP microscaling 8-bit floating-point quantization.
+    Mxfp8,
 }
 
 impl QuantMode {
     pub(crate) fn mlx_mode(self) -> &'static str {
         match self {
             Self::Affine | Self::OptiQ => "affine",
+            Self::Mxfp4 => "mxfp4",
+            Self::Mxfp8 => "mxfp8",
         }
     }
 
     pub(crate) fn uses_affine_storage(self) -> bool {
         matches!(self, Self::Affine | Self::OptiQ)
+    }
+
+    pub(crate) fn output_dtype(self, scales_dtype: Dtype, biases_dtype: Option<Dtype>) -> Dtype {
+        match self {
+            Self::Affine | Self::OptiQ => biases_dtype.unwrap_or(scales_dtype),
+            Self::Mxfp4 | Self::Mxfp8 => Dtype::Bfloat16,
+        }
     }
 }
 
@@ -41,6 +54,40 @@ pub struct QuantMeta {
     pub bits: i32,
     /// Quantization scheme.
     pub mode: QuantMode,
+}
+
+impl QuantMeta {
+    pub(crate) fn validate_storage(
+        self,
+        prefix: &str,
+        weight: &Array,
+        scales: &Array,
+        biases: Option<&Array>,
+    ) -> Result<()> {
+        if matches!(self.mode, QuantMode::Mxfp4 | QuantMode::Mxfp8) {
+            if weight.dtype() != Dtype::Uint32 {
+                return Err(anyhow!(
+                    "{prefix}: {} packed weight must have dtype uint32, got {:?}",
+                    self.mode.mlx_mode(),
+                    weight.dtype()
+                ));
+            }
+            if scales.dtype() != Dtype::Uint8 {
+                return Err(anyhow!(
+                    "{prefix}: {} scales must have dtype uint8, got {:?}",
+                    self.mode.mlx_mode(),
+                    scales.dtype()
+                ));
+            }
+            if biases.is_some() {
+                return Err(anyhow!(
+                    "{prefix}: {} storage must not contain affine quantization biases",
+                    self.mode.mlx_mode()
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// HF `eos_token_id` field — single int or list of ints.
@@ -607,14 +654,16 @@ fn parse_quant_meta_value_with_mode(
                 ));
             }
         },
-        Some(QuantMode::Affine) => QuantMode::Affine,
+        Some(mode) => mode,
         None => match q.get("mode").and_then(|m| m.as_str()) {
             Some("affine") => QuantMode::Affine,
+            Some("mxfp4") => QuantMode::Mxfp4,
+            Some("mxfp8") => QuantMode::Mxfp8,
             Some(other) => return Err(anyhow!("unsupported {context_name}.mode `{other}`")),
             None => default_mode.unwrap_or(QuantMode::Affine),
         },
     };
-    validate_quant_meta_bits(mode, bits, context_name)?;
+    validate_quant_meta_contract(mode, bits, group_size, context_name)?;
     Ok(QuantMeta {
         group_size,
         bits,
@@ -622,11 +671,24 @@ fn parse_quant_meta_value_with_mode(
     })
 }
 
-fn validate_quant_meta_bits(mode: QuantMode, bits: i32, context_name: &str) -> Result<()> {
+fn validate_quant_meta_contract(
+    mode: QuantMode,
+    bits: i32,
+    group_size: i32,
+    context_name: &str,
+) -> Result<()> {
     match mode {
         QuantMode::Affine | QuantMode::OptiQ if matches!(bits, 2 | 4 | 8) => Ok(()),
         QuantMode::Affine | QuantMode::OptiQ => Err(anyhow!(
             "unsupported {context_name}.bits `{bits}` for {mode:?} quantization; supported bits are 2, 4, and 8"
+        )),
+        QuantMode::Mxfp4 if bits == 4 && group_size == 32 => Ok(()),
+        QuantMode::Mxfp4 => Err(anyhow!(
+            "{context_name}.mode `mxfp4` requires bits=4 and group_size=32, got bits={bits} and group_size={group_size}"
+        )),
+        QuantMode::Mxfp8 if bits == 8 && group_size == 32 => Ok(()),
+        QuantMode::Mxfp8 => Err(anyhow!(
+            "{context_name}.mode `mxfp8` requires bits=8 and group_size=32, got bits={bits} and group_size={group_size}"
         )),
     }
 }
@@ -810,6 +872,116 @@ mod tests {
         assert_eq!(q.group_size, 64);
         assert_eq!(q.bits, 2);
         assert_eq!(q.mode, QuantMode::Affine);
+    }
+
+    #[test]
+    fn parse_quant_meta_mxfp4_exact_contract() {
+        let cfg = json!({
+            "quantization": { "group_size": 32, "bits": 4, "mode": "mxfp4" }
+        });
+        let q = parse_quant_meta(&cfg).unwrap().expect("quant");
+        assert_eq!(q.group_size, 32);
+        assert_eq!(q.bits, 4);
+        assert_eq!(q.mode, QuantMode::Mxfp4);
+        assert_eq!(q.mode.mlx_mode(), "mxfp4");
+        assert!(!q.mode.uses_affine_storage());
+        assert_eq!(q.mode.output_dtype(Dtype::Uint8, None), Dtype::Bfloat16);
+    }
+
+    #[test]
+    fn parse_quant_meta_mxfp8_exact_contract() {
+        let cfg = json!({
+            "quantization_config": { "group_size": 32, "bits": 8, "mode": "mxfp8" }
+        });
+        let q = parse_quant_meta(&cfg).unwrap().expect("quant");
+        assert_eq!(q.group_size, 32);
+        assert_eq!(q.bits, 8);
+        assert_eq!(q.mode, QuantMode::Mxfp8);
+        assert_eq!(q.mode.mlx_mode(), "mxfp8");
+        assert!(!q.mode.uses_affine_storage());
+        assert_eq!(q.mode.output_dtype(Dtype::Uint8, None), Dtype::Bfloat16);
+    }
+
+    #[test]
+    fn parse_quant_overrides_inherit_mxfp_mode() {
+        let cfg = json!({
+            "quantization": {
+                "group_size": 32,
+                "bits": 4,
+                "mode": "mxfp4",
+                "language_model.model.layers.0.mlp.down_proj": {
+                    "group_size": 32,
+                    "bits": 4
+                }
+            }
+        });
+        let global = parse_quant_meta(&cfg).unwrap().expect("global quant");
+        let overrides = parse_quant_overrides(&cfg, global).unwrap();
+        assert_eq!(
+            overrides["model.layers.0.mlp.down_proj"].mode,
+            QuantMode::Mxfp4
+        );
+    }
+
+    #[test]
+    fn parse_quant_meta_rejects_invalid_mxfp_parameters() {
+        for (mode, bits, group_size) in [
+            ("mxfp4", 8, 32),
+            ("mxfp4", 4, 64),
+            ("mxfp8", 4, 32),
+            ("mxfp8", 8, 64),
+        ] {
+            let cfg = json!({
+                "quantization": {
+                    "group_size": group_size,
+                    "bits": bits,
+                    "mode": mode
+                }
+            });
+            let err = parse_quant_meta(&cfg).expect_err("invalid MXFP contract must fail");
+            let message = err.to_string();
+            assert!(message.contains(mode), "unexpected error: {message}");
+            assert!(message.contains("requires"), "unexpected error: {message}");
+        }
+    }
+
+    #[test]
+    fn mxfp_storage_requires_uint8_scales_without_quant_biases() {
+        for mode in [QuantMode::Mxfp4, QuantMode::Mxfp8] {
+            let bits = if mode == QuantMode::Mxfp4 { 4 } else { 8 };
+            let meta = QuantMeta {
+                group_size: 32,
+                bits,
+                mode,
+            };
+            let weight = Array::zeros((2, 2), Dtype::Uint32).unwrap();
+            let scales = Array::zeros((2, 2), Dtype::Uint8).unwrap();
+            meta.validate_storage("model.layers.0.mlp.down_proj", &weight, &scales, None)
+                .expect("valid MXFP storage");
+
+            let byte_weight = Array::zeros((2, 2), Dtype::Uint8).unwrap();
+            let err = meta
+                .validate_storage("model.layers.0.mlp.down_proj", &byte_weight, &scales, None)
+                .expect_err("MXFP byte weights must fail");
+            assert!(err.to_string().contains("uint32"));
+
+            let float_scales = Array::zeros((2, 2), Dtype::Bfloat16).unwrap();
+            let err = meta
+                .validate_storage("model.layers.0.mlp.down_proj", &weight, &float_scales, None)
+                .expect_err("MXFP float scales must fail");
+            assert!(err.to_string().contains("uint8"));
+
+            let biases = Array::zeros((2, 2), Dtype::Uint8).unwrap();
+            let err = meta
+                .validate_storage(
+                    "model.layers.0.mlp.down_proj",
+                    &weight,
+                    &scales,
+                    Some(&biases),
+                )
+                .expect_err("MXFP quant biases must fail");
+            assert!(err.to_string().contains("must not contain"));
+        }
     }
 
     #[test]

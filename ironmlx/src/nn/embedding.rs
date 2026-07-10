@@ -62,6 +62,7 @@ impl Embedding {
             })?;
             let scales = loader.tensor(&scales_key)?.clone();
             let biases = loader.tensor_opt(&biases_key).cloned();
+            qmeta.validate_storage(prefix, &weight, &scales, biases.as_ref())?;
             Ok(Embedding {
                 inner: EmbeddingImpl::Quant {
                     weight,
@@ -82,9 +83,12 @@ impl Embedding {
     pub fn output_dtype(&self) -> Dtype {
         match &self.inner {
             EmbeddingImpl::Fp { weight, .. } => weight.dtype(),
-            EmbeddingImpl::Quant { scales, biases, .. } => {
-                biases.as_ref().map_or(scales.dtype(), Array::dtype)
-            }
+            EmbeddingImpl::Quant {
+                scales,
+                biases,
+                mode,
+                ..
+            } => mode.output_dtype(scales.dtype(), biases.as_ref().map(Array::dtype)),
         }
     }
 
@@ -535,5 +539,85 @@ mod tests {
             &[2],
             &[1, 1],
         );
+    }
+
+    fn assert_mxfp_embedding_matches_native_mlx(mode: QuantMode, bits: i32) {
+        let vocab = 4_i32;
+        let dim = 32_i32;
+        let group_size = 32_i32;
+        let w_data: Vec<f32> = (0..(vocab * dim))
+            .map(|i| ((i % 31) as f32 - 15.0) * 0.01)
+            .collect();
+        let raw_w_f32: Array = (w_data.as_slice(), (vocab, dim)).try_into().unwrap();
+        let raw_w = ops::cast::astype(&raw_w_f32, Dtype::Bfloat16).unwrap();
+        let q = mlx::quantization::quantize(
+            &raw_w,
+            Some(group_size),
+            Some(bits),
+            mode.mlx_mode(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(q.len(), 2, "MXFP quantization returns weight and scales");
+        let tokens: Array = (&[1_u32, 3][..], &[1_i32, 2][..]).try_into().unwrap();
+
+        let weight_rows = q[0].take(&tokens, 0).unwrap();
+        let scales_rows = q[1].take(&tokens, 0).unwrap();
+        let expected_lookup = mlx::quantization::dequantize(
+            &weight_rows,
+            &scales_rows,
+            None,
+            Some(group_size),
+            Some(bits),
+            mode.mlx_mode(),
+            None,
+            None,
+        )
+        .unwrap();
+        let layer = Embedding {
+            inner: EmbeddingImpl::Quant {
+                weight: q[0].clone(),
+                scales: q[1].clone(),
+                biases: None,
+                group_size,
+                bits,
+                mode,
+            },
+        };
+        assert_eq!(layer.output_dtype(), Dtype::Bfloat16);
+        let got_lookup = layer.forward(&tokens).unwrap();
+        assert_eq!(got_lookup.dtype(), Dtype::Bfloat16);
+        assert_all_close(&got_lookup, &expected_lookup, 0.001);
+
+        let hidden_data: Vec<f32> = (0..dim).map(|i| ((i % 13) as f32 - 6.0) * 0.02).collect();
+        let hidden_f32: Array = (hidden_data.as_slice(), &[1_i32, 1_i32, dim][..])
+            .try_into()
+            .unwrap();
+        let hidden = ops::cast::astype(&hidden_f32, Dtype::Bfloat16).unwrap();
+        let got_output = layer.as_output(&hidden).unwrap();
+        let expected_output = mlx::quantization::quantized_matmul(
+            &hidden,
+            &q[0],
+            &q[1],
+            None,
+            true,
+            Some(group_size),
+            Some(bits),
+            mode.mlx_mode(),
+        )
+        .unwrap();
+        assert_all_close(&got_output, &expected_output, 0.001);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn mxfp4_lookup_and_output_match_native_mlx() {
+        assert_mxfp_embedding_matches_native_mlx(QuantMode::Mxfp4, 4);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn mxfp8_lookup_and_output_match_native_mlx() {
+        assert_mxfp_embedding_matches_native_mlx(QuantMode::Mxfp8, 8);
     }
 }

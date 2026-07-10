@@ -73,7 +73,11 @@ mod tests {
 
     fn meta(bits: i32, mode: QuantMode) -> QuantMeta {
         QuantMeta {
-            group_size: 64,
+            group_size: if matches!(mode, QuantMode::Mxfp4 | QuantMode::Mxfp8) {
+                32
+            } else {
+                64
+            },
             bits,
             mode,
         }
@@ -108,6 +112,36 @@ mod tests {
             compat,
             FusedQuantCompatibility::Quantized(meta(4, QuantMode::OptiQ))
         );
+    }
+
+    #[test]
+    fn matching_mxfp_metadata_can_be_fused() {
+        for (bits, mode) in [(4, QuantMode::Mxfp4), (8, QuantMode::Mxfp8)] {
+            let q = "model.layers.1.self_attn.q_proj";
+            let k = "model.layers.1.self_attn.k_proj";
+            let v = "model.layers.1.self_attn.v_proj";
+            let metas = [
+                (q, Some(meta(bits, mode))),
+                (k, Some(meta(bits, mode))),
+                (v, Some(meta(bits, mode))),
+            ];
+
+            let compat = classify_fused_quant_metas(&metas, "qkv").unwrap();
+            assert_eq!(compat, FusedQuantCompatibility::Quantized(meta(bits, mode)));
+        }
+    }
+
+    #[test]
+    fn affine_and_mxfp_are_never_fused_together() {
+        let gate = "model.layers.2.mlp.gate_proj";
+        let up = "model.layers.2.mlp.up_proj";
+        let metas = [
+            (gate, Some(meta(4, QuantMode::Affine))),
+            (up, Some(meta(4, QuantMode::Mxfp4))),
+        ];
+
+        let compat = classify_fused_quant_metas(&metas, "gate_up").unwrap();
+        assert_eq!(compat, FusedQuantCompatibility::MixedQuantized);
     }
 
     #[test]

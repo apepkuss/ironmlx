@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_OUT_ROOT = "docs/benchmarks/quant-validation"
+DEFAULT_OUT_ROOT = "reports/quant-validation"
 DEFAULT_SEQUENTIAL_PROMPT_LENS = "128,512"
 DEFAULT_LONG_PROMPT_LENS = "4096"
 DEFAULT_CONCURRENT_PROMPT_LENS = DEFAULT_SEQUENTIAL_PROMPT_LENS
@@ -43,6 +43,10 @@ DEFAULT_WARMUP_DURATION = 2
 DEFAULT_STABILITY_RUNS = 5
 DEFAULT_MULTI_TURN_TURNS = 3
 DEFAULT_PORT_BASE = 18600
+DEFAULT_SERVE_ADMISSION_DEADLINE_MS = 5
+DEFAULT_SERVE_ADMISSION_QUEUE_MAX = 32
+DEFAULT_SERVE_DECODE_CADENCE_MID_CHUNK_CAP = 256
+MXFP_CONTRACTS = {"mxfp4": (4, 32), "mxfp8": (8, 32)}
 
 
 @dataclass(frozen=True)
@@ -155,7 +159,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--startup-timeout", type=int, default=600)
     parser.add_argument("--request-timeout", type=int, default=600)
     parser.add_argument("--serve-prefill-chunk-size", type=int, default=2048)
+    parser.add_argument(
+        "--serve-admission-deadline-ms",
+        type=int,
+        default=DEFAULT_SERVE_ADMISSION_DEADLINE_MS,
+    )
+    parser.add_argument(
+        "--serve-admission-queue-max",
+        type=int,
+        default=DEFAULT_SERVE_ADMISSION_QUEUE_MAX,
+    )
     parser.add_argument("--serve-max-cache-cap", type=int, default=32768)
+    parser.add_argument(
+        "--serve-decode-cadence-mid-chunk-cap",
+        type=int,
+        default=DEFAULT_SERVE_DECODE_CADENCE_MID_CHUNK_CAP,
+    )
     parser.add_argument("--skip-build", action="store_true")
     return parser.parse_args()
 
@@ -169,7 +188,10 @@ def ensure_positive_args(args: argparse.Namespace) -> None:
         "startup_timeout",
         "request_timeout",
         "serve_prefill_chunk_size",
+        "serve_admission_deadline_ms",
+        "serve_admission_queue_max",
         "serve_max_cache_cap",
+        "serve_decode_cadence_mid_chunk_cap",
     ]
     for field in fields:
         if getattr(args, field) <= 0:
@@ -197,6 +219,36 @@ def validate_models(models: list[ModelSpec]) -> None:
         config = model.path / "config.json"
         if not config.is_file():
             raise MatrixError(f"{model.label}: missing config.json at {config}")
+        identity = checkpoint_identity(model)
+        if not identity["contract_matches"]:
+            raise MatrixError(
+                f"{model.label}: quantization contract mismatch: "
+                f"mode={identity['quantization_mode']} bits={identity['bits']} "
+                f"group_size={identity['group_size']}"
+            )
+
+
+def checkpoint_identity(model: ModelSpec) -> dict[str, Any]:
+    config = load_json(model.path / "config.json")
+    quantization = config.get("quantization") or config.get("quantization_config") or {}
+    mode = quantization.get("mode")
+    bits = quantization.get("bits")
+    group_size = quantization.get("group_size")
+    expected_bits, expected_group_size = MXFP_CONTRACTS.get(mode, (bits, group_size))
+    cache_name = model.path.parent.parent.name
+    repo_id = None
+    if cache_name.startswith("models--"):
+        repo_id = cache_name.removeprefix("models--").replace("--", "/", 1)
+    return {
+        "repo_id": repo_id,
+        "revision": model.path.name,
+        "quantization_mode": mode,
+        "bits": bits,
+        "group_size": group_size,
+        "expected_bits": expected_bits,
+        "expected_group_size": expected_group_size,
+        "contract_matches": bits == expected_bits and group_size == expected_group_size,
+    }
 
 
 def make_run_dir(root: Path) -> Path:
@@ -285,16 +337,28 @@ def tail(path: Path, max_bytes: int = 8192) -> str:
         return handle.read().decode("utf-8", errors="replace")
 
 
-def start_server(
+def scheduler_config_from_args(
+    args: argparse.Namespace, max_sequences: int
+) -> dict[str, int]:
+    return {
+        "b_max": max_sequences,
+        "prefill_chunk_size": args.serve_prefill_chunk_size,
+        "admission_deadline_ms": args.serve_admission_deadline_ms,
+        "admission_queue_max": args.serve_admission_queue_max,
+        "max_cache_cap": args.serve_max_cache_cap,
+        "decode_cadence_mid_chunk_cap": args.serve_decode_cadence_mid_chunk_cap,
+    }
+
+
+def build_server_command(
     repo: Path,
     model: ModelSpec,
-    model_dir: Path,
     port: int,
     max_sequences: int,
     args: argparse.Namespace,
-) -> subprocess.Popen[Any]:
-    log_path = model_dir / "server.log"
-    command = [
+) -> list[str]:
+    config = scheduler_config_from_args(args, max_sequences)
+    return [
         str(repo / "target/release/ironmlx"),
         "serve",
         "--model",
@@ -304,12 +368,30 @@ def start_server(
         "--port",
         str(port),
         "--max-sequences",
-        str(max_sequences),
+        str(config["b_max"]),
         "--max-cache-cap",
-        str(args.serve_max_cache_cap),
+        str(config["max_cache_cap"]),
         "--prefill-chunk-size",
-        str(args.serve_prefill_chunk_size),
+        str(config["prefill_chunk_size"]),
+        "--admission-deadline-ms",
+        str(config["admission_deadline_ms"]),
+        "--admission-queue-max",
+        str(config["admission_queue_max"]),
+        "--decode-cadence-mid-chunk-cap",
+        str(config["decode_cadence_mid_chunk_cap"]),
     ]
+
+
+def start_server(
+    repo: Path,
+    model: ModelSpec,
+    model_dir: Path,
+    port: int,
+    max_sequences: int,
+    args: argparse.Namespace,
+) -> subprocess.Popen[Any]:
+    log_path = model_dir / "server.log"
+    command = build_server_command(repo, model, port, max_sequences, args)
     server_env = os.environ.copy()
     log_file = log_path.open("w", encoding="utf-8")
     process = subprocess.Popen(
@@ -588,9 +670,45 @@ def maybe_capture_healthz(base_url: str, path: Path) -> dict[str, Any]:
         except json.JSONDecodeError:
             payload = {"raw": body}
         write_json(path, payload)
-        return {"ok": True, "path": str(path)}
+        return with_check_status({"ok": True, "path": str(path)})
     except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "error": str(exc)}
+        return with_check_status({"ok": False, "error": str(exc)})
+
+
+def with_check_status(value: dict[str, Any]) -> dict[str, Any]:
+    return {**value, "status": "passed" if value.get("ok") else "failed"}
+
+
+def benchmark_completion_counts(payload: dict[str, Any]) -> dict[str, int]:
+    if payload.get("stats") is not None:
+        completed = sum(int(stat.get("n_runs") or 0) for stat in payload.get("stats", []))
+    else:
+        completed = sum(int(cell.get("n_requests") or 0) for cell in payload.get("cells", []))
+    return {"completed_requests": completed, "failed_requests": 0}
+
+
+def direct_completion_counts(payload: dict[str, Any]) -> dict[str, int]:
+    items = payload.get("turns") or payload.get("runs") or []
+    completed = sum(1 for item in items if item.get("ok"))
+    return {
+        "completed_requests": completed,
+        "failed_requests": len(items) - completed,
+    }
+
+
+def benchmark_check(result: dict[str, Any]) -> dict[str, Any]:
+    check = without_payload(result)
+    if result.get("payload") is not None:
+        check.update(benchmark_completion_counts(result["payload"]))
+    else:
+        check.update({"completed_requests": 0, "failed_requests": 1})
+    return with_check_status(check)
+
+
+def direct_check(result: dict[str, Any]) -> dict[str, Any]:
+    check = without_large_fields(result)
+    check.update(direct_completion_counts(result))
+    return with_check_status(check)
 
 
 def summarize_sequential(model: str, category: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -608,6 +726,9 @@ def summarize_sequential(model: str, category: str, payload: dict[str, Any]) -> 
                 "ttft_ms_p95": stat.get("ttft_ms_p95"),
                 "e2e_s_p95": stat.get("e2e_s_p95"),
                 "tokens_per_sec": stat.get("tg_tps_median"),
+                "prefill_tokens_per_sec": stat.get("pp_tps_median"),
+                "tpot_ms_median": stat.get("tpot_ms_median"),
+                "itl_ms_p95": stat.get("early_itl_ms", {}).get("p95"),
                 "finish_reason_summary": stat.get("finish_reason_summary"),
                 "ok": True,
             }
@@ -630,6 +751,9 @@ def summarize_concurrent(model: str, payload: dict[str, Any]) -> list[dict[str, 
                 "ttft_ms_p95": cell.get("ttft_ms", {}).get("p95"),
                 "e2e_s_p95": cell.get("e2e_s_p95"),
                 "tokens_per_sec": cell.get("aggregate", {}).get("tokens_per_sec"),
+                "prefill_tokens_per_sec": None,
+                "tpot_ms_median": None,
+                "itl_ms_p95": cell.get("itl_ms", {}).get("p95"),
                 "finish_reason_summary": cell.get("finish_reason_summary"),
                 "ok": True,
             }
@@ -668,6 +792,9 @@ def summarize_direct(model: str, category: str, payload: dict[str, Any]) -> dict
         "ttft_ms_p95": None,
         "e2e_s_p95": percentile(elapsed, 0.95),
         "tokens_per_sec": None,
+        "prefill_tokens_per_sec": None,
+        "tpot_ms_median": None,
+        "itl_ms_p95": None,
         "finish_reason_summary": None,
         "ok": payload.get("ok", False),
     }
@@ -694,10 +821,13 @@ def write_summary(run_dir: Path, rows: list[dict[str, Any]], manifest: dict[str,
         "ttft_ms_p95",
         "e2e_s_p95",
         "tokens_per_sec",
+        "prefill_tokens_per_sec",
+        "tpot_ms_median",
+        "itl_ms_p95",
         "ok",
     ]
     with csv_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=columns)
+        writer = csv.DictWriter(handle, fieldnames=columns, lineterminator="\n")
         writer.writeheader()
         for row in rows:
             writer.writerow({column: row.get(column) for column in columns})
@@ -711,12 +841,12 @@ def write_summary(run_dir: Path, rows: list[dict[str, Any]], manifest: dict[str,
         "",
         "## Matrix Summary",
         "",
-        "| model | category | PP | TG | C | requests | TTFT p50 ms | TTFT p95 ms | E2E p95 s | tok/s | ok |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        "| model | category | PP | TG | C | requests | TTFT p50 ms | TTFT p95 ms | E2E p95 s | tok/s | prefill tok/s | TPOT ms | ITL p95 ms | ok |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for row in rows:
         lines.append(
-            "| {model} | {category} | {pp} | {tg} | {concurrency} | {requests} | {ttft50} | {ttft95} | {e2e95} | {tps} | {ok} |".format(
+            "| {model} | {category} | {pp} | {tg} | {concurrency} | {requests} | {ttft50} | {ttft95} | {e2e95} | {tps} | {pp_tps} | {tpot} | {itl95} | {ok} |".format(
                 model=row.get("model", ""),
                 category=row.get("category", ""),
                 pp=row.get("pp_target") if row.get("pp_target") is not None else "",
@@ -727,6 +857,9 @@ def write_summary(run_dir: Path, rows: list[dict[str, Any]], manifest: dict[str,
                 ttft95=format_float(row.get("ttft_ms_p95")),
                 e2e95=format_float(row.get("e2e_s_p95")),
                 tps=format_float(row.get("tokens_per_sec")),
+                pp_tps=format_float(row.get("prefill_tokens_per_sec")),
+                tpot=format_float(row.get("tpot_ms_median")),
+                itl95=format_float(row.get("itl_ms_p95")),
                 ok=str(row.get("ok", False)).lower(),
             )
         )
@@ -771,8 +904,10 @@ def run_model(
     record: dict[str, Any] = {
         "label": model.label,
         "path": str(model.path),
+        "checkpoint": checkpoint_identity(model),
         "port": port,
         "artifact_dir": str(model_dir),
+        "scheduler_config": scheduler_config_from_args(args, max(args.concurrent)),
         "ok": False,
         "checks": {},
     }
@@ -805,7 +940,7 @@ def run_model(
             args,
             concurrent_level=None,
         )
-        record["checks"]["http_e2e_sequential"] = without_payload(sequential)
+        record["checks"]["http_e2e_sequential"] = benchmark_check(sequential)
         if sequential["ok"] and sequential["payload"] is not None:
             rows.extend(summarize_sequential(model.label, "http_e2e", sequential["payload"]))
 
@@ -819,7 +954,7 @@ def run_model(
             args,
             concurrent_level=None,
         )
-        record["checks"]["long_context"] = without_payload(long_context)
+        record["checks"]["long_context"] = benchmark_check(long_context)
         if long_context["ok"] and long_context["payload"] is not None:
             rows.extend(summarize_sequential(model.label, "long_context", long_context["payload"]))
 
@@ -835,16 +970,16 @@ def run_model(
                 args,
                 concurrent_level=concurrent_level,
             )
-            record["checks"][check_name] = without_payload(concurrent)
+            record["checks"][check_name] = benchmark_check(concurrent)
             if concurrent["ok"] and concurrent["payload"] is not None:
                 rows.extend(summarize_concurrent(model.label, concurrent["payload"]))
 
         multi_turn = run_multi_turn(model, base_url, model_dir, args)
-        record["checks"]["multi_turn"] = without_large_fields(multi_turn)
+        record["checks"]["multi_turn"] = direct_check(multi_turn)
         rows.append(summarize_direct(model.label, "multi_turn", multi_turn))
 
         stability = run_stability(model, base_url, model_dir, args)
-        record["checks"]["stability"] = without_large_fields(stability)
+        record["checks"]["stability"] = direct_check(stability)
         rows.append(summarize_direct(model.label, "stability", stability))
 
         record["checks"]["health_after"] = maybe_capture_healthz(
@@ -857,13 +992,20 @@ def run_model(
             stop_server(process)
 
     required_checks = [
+        "health_before",
         "http_e2e_sequential",
         "long_context",
         *(f"concurrent_c{concurrent}" for concurrent in args.concurrent),
         "multi_turn",
         "stability",
+        "health_after",
     ]
     record["ok"] = all(record["checks"].get(name, {}).get("ok") for name in required_checks)
+    request_checks = [
+        check for check in record["checks"].values() if "completed_requests" in check
+    ]
+    record["completed_requests"] = sum(check["completed_requests"] for check in request_checks)
+    record["failed_requests"] = sum(check["failed_requests"] for check in request_checks)
     return record, rows
 
 
@@ -905,8 +1047,12 @@ def main() -> int:
             "stability_runs": args.stability_runs,
             "multi_turn_turns": args.multi_turn_turns,
             "serve_prefill_chunk_size": args.serve_prefill_chunk_size,
+            "serve_admission_deadline_ms": args.serve_admission_deadline_ms,
+            "serve_admission_queue_max": args.serve_admission_queue_max,
             "serve_max_cache_cap": args.serve_max_cache_cap,
+            "serve_decode_cadence_mid_chunk_cap": args.serve_decode_cadence_mid_chunk_cap,
         },
+        "scheduler_config": scheduler_config_from_args(args, max(args.concurrent)),
         "build": None,
         "models": [],
         "overall_status": "failed",

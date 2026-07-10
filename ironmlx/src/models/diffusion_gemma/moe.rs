@@ -6,7 +6,7 @@ use mlx::ops::indexing::{slice_on, take_along_axis_on, take_on};
 use mlx::ops::sort::{argpartition_on, argsort_on};
 use mlx::{Array, StreamOrDevice};
 
-use crate::core::Loader;
+use crate::core::{Loader, QuantMode};
 use crate::nn::Linear;
 use crate::Result;
 
@@ -34,6 +34,7 @@ pub struct DiffusionGemmaExperts {
     down_biases: Option<Array>,
     group_size: i32,
     bits: i32,
+    mode: QuantMode,
     moe_intermediate: i32,
     geglu: OnceLock<CompiledFn>,
 }
@@ -104,6 +105,14 @@ impl DiffusionGemmaExperts {
         let qmeta = loader
             .quant_meta_for(&gate_up_prefix)
             .ok_or_else(|| anyhow!("DiffusionGemmaExperts requires quantization metadata"))?;
+        let down_qmeta = loader.quant_meta_for(&down_prefix).ok_or_else(|| {
+            anyhow!("DiffusionGemmaExperts requires quantization metadata for `{down_prefix}`")
+        })?;
+        if qmeta != down_qmeta {
+            return Err(anyhow!(
+                "DiffusionGemmaExperts requires matching gate_up/down quantization metadata; gate_up={qmeta:?}, down={down_qmeta:?}"
+            ));
+        }
         let gate_up_weight = loader.tensor(&format!("{gate_up_prefix}.weight"))?.clone();
         let gate_up_scales = loader.tensor(&format!("{gate_up_prefix}.scales"))?.clone();
         let gate_up_biases = loader
@@ -112,6 +121,18 @@ impl DiffusionGemmaExperts {
         let down_weight = loader.tensor(&format!("{down_prefix}.weight"))?.clone();
         let down_scales = loader.tensor(&format!("{down_prefix}.scales"))?.clone();
         let down_biases = loader.tensor_opt(&format!("{down_prefix}.biases")).cloned();
+        qmeta.validate_storage(
+            &gate_up_prefix,
+            &gate_up_weight,
+            &gate_up_scales,
+            gate_up_biases.as_ref(),
+        )?;
+        qmeta.validate_storage(
+            &down_prefix,
+            &down_weight,
+            &down_scales,
+            down_biases.as_ref(),
+        )?;
         let dims = gate_up_weight.shape();
         let shape = dims.as_slice();
         if shape.len() != 3 || shape[1] % 2 != 0 {
@@ -129,6 +150,7 @@ impl DiffusionGemmaExperts {
             down_biases,
             group_size: qmeta.group_size,
             bits: qmeta.bits,
+            mode: qmeta.mode,
             moe_intermediate: shape[1] / 2,
             geglu: OnceLock::new(),
         })
@@ -184,7 +206,7 @@ impl DiffusionGemmaExperts {
                 true,
                 Some(self.group_size),
                 Some(self.bits),
-                "affine",
+                self.mode.mlx_mode(),
                 true,
                 target,
             )
@@ -205,7 +227,7 @@ impl DiffusionGemmaExperts {
                 true,
                 Some(self.group_size),
                 Some(self.bits),
-                "affine",
+                self.mode.mlx_mode(),
                 false,
                 target,
             )
@@ -228,7 +250,7 @@ impl DiffusionGemmaExperts {
             true,
             Some(self.group_size),
             Some(self.bits),
-            "affine",
+            self.mode.mlx_mode(),
             sorted,
             target,
         )

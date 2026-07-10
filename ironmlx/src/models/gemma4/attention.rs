@@ -222,6 +222,9 @@ fn load_fused_qkv(
         let q_biases = loader.tensor_opt(&format!("{q}.biases")).cloned();
         let k_biases = loader.tensor_opt(&format!("{k}.biases")).cloned();
         let v_biases = loader.tensor_opt(&format!("{v}.biases")).cloned();
+        qmeta.validate_storage(&q, &q_w, &q_scales, q_biases.as_ref())?;
+        qmeta.validate_storage(&k, &k_w, &k_scales, k_biases.as_ref())?;
+        qmeta.validate_storage(&v, &v_w, &v_scales, v_biases.as_ref())?;
         let biases = match (q_biases, k_biases, v_biases) {
             (Some(qb), Some(kb), Some(vb)) => {
                 Some(mlx::ops::shape::concatenate(&[&qb, &kb, &vb], 0)?)

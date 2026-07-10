@@ -1,0 +1,280 @@
+{
+  "model_id": "mlx-community/Qwen3.5-4B-mxfp4",
+  "revision": "8e9cb97ec8ee0f6a04021220b7a6b5845353df56",
+  "prompt": "What is 2+2?",
+  "input_ids": [
+    3710,
+    369,
+    220,
+    17,
+    10,
+    17,
+    30
+  ],
+  "vocab_size": 248320,
+  "next_token_id": 271,
+  "logits_file": "mxfp4.npy",
+  "top_logits": [
+    {
+      "token_id": 271,
+      "logit": 20.0
+    },
+    {
+      "token_id": 198,
+      "logit": 17.0
+    },
+    {
+      "token_id": 7054,
+      "logit": 16.25
+    },
+    {
+      "token_id": 2091,
+      "logit": 16.0
+    },
+    {
+      "token_id": 3437,
+      "logit": 16.0
+    },
+    {
+      "token_id": 2228,
+      "logit": 15.9375
+    },
+    {
+      "token_id": 471,
+      "logit": 15.875
+    },
+    {
+      "token_id": 2500,
+      "logit": 15.5
+    },
+    {
+      "token_id": 21708,
+      "logit": 15.5
+    },
+    {
+      "token_id": 8169,
+      "logit": 15.3125
+    },
+    {
+      "token_id": 18050,
+      "logit": 15.0625
+    },
+    {
+      "token_id": 2885,
+      "logit": 15.0
+    },
+    {
+      "token_id": 220,
+      "logit": 14.8125
+    },
+    {
+      "token_id": 1541,
+      "logit": 14.75
+    },
+    {
+      "token_id": 318,
+      "logit": 14.5625
+    },
+    {
+      "token_id": 353,
+      "logit": 14.125
+    },
+    {
+      "token_id": 561,
+      "logit": 14.125
+    },
+    {
+      "token_id": 735,
+      "logit": 13.875
+    },
+    {
+      "token_id": 38256,
+      "logit": 13.6875
+    },
+    {
+      "token_id": 6558,
+      "logit": 13.5625
+    },
+    {
+      "token_id": 79091,
+      "logit": 13.5625
+    },
+    {
+      "token_id": 12193,
+      "logit": 13.5
+    },
+    {
+      "token_id": 1049,
+      "logit": 13.4375
+    },
+    {
+      "token_id": 1061,
+      "logit": 13.4375
+    },
+    {
+      "token_id": 5044,
+      "logit": 13.4375
+    },
+    {
+      "token_id": 10166,
+      "logit": 13.4375
+    },
+    {
+      "token_id": 4558,
+      "logit": 13.25
+    },
+    {
+      "token_id": 1317,
+      "logit": 13.1875
+    },
+    {
+      "token_id": 1368,
+      "logit": 13.1875
+    },
+    {
+      "token_id": 1946,
+      "logit": 13.125
+    },
+    {
+      "token_id": 535,
+      "logit": 12.9375
+    },
+    {
+      "token_id": 695,
+      "logit": 12.8125
+    },
+    {
+      "token_id": 8448,
+      "logit": 12.8125
+    },
+    {
+      "token_id": 21134,
+      "logit": 12.75
+    },
+    {
+      "token_id": 2844,
+      "logit": 12.6875
+    },
+    {
+      "token_id": 2332,
+      "logit": 12.3125
+    },
+    {
+      "token_id": 3054,
+      "logit": 12.125
+    },
+    {
+      "token_id": 332,
+      "logit": 12.0
+    },
+    {
+      "token_id": 2532,
+      "logit": 12.0
+    },
+    {
+      "token_id": 733,
+      "logit": 11.9375
+    },
+    {
+      "token_id": 2717,
+      "logit": 11.9375
+    },
+    {
+      "token_id": 16018,
+      "logit": 11.9375
+    },
+    {
+      "token_id": 15451,
+      "logit": 11.875
+    },
+    {
+      "token_id": 10646,
+      "logit": 11.8125
+    },
+    {
+      "token_id": 373,
+      "logit": 11.75
+    },
+    {
+      "token_id": 2972,
+      "logit": 11.75
+    },
+    {
+      "token_id": 17,
+      "logit": 11.6875
+    },
+    {
+      "token_id": 2233,
+      "logit": 11.6875
+    },
+    {
+      "token_id": 0,
+      "logit": 11.625
+    },
+    {
+      "token_id": 357,
+      "logit": 11.625
+    },
+    {
+      "token_id": 1358,
+      "logit": 11.625
+    },
+    {
+      "token_id": 9357,
+      "logit": 11.625
+    },
+    {
+      "token_id": 20052,
+      "logit": 11.5
+    },
+    {
+      "token_id": 2441,
+      "logit": 11.375
+    },
+    {
+      "token_id": 5514,
+      "logit": 11.3125
+    },
+    {
+      "token_id": 498,
+      "logit": 11.25
+    },
+    {
+      "token_id": 1921,
+      "logit": 11.25
+    },
+    {
+      "token_id": 21513,
+      "logit": 11.25
+    },
+    {
+      "token_id": 3095,
+      "logit": 11.1875
+    },
+    {
+      "token_id": 4781,
+      "logit": 11.1875
+    },
+    {
+      "token_id": 19892,
+      "logit": 11.1875
+    },
+    {
+      "token_id": 5272,
+      "logit": 11.125
+    },
+    {
+      "token_id": 1394,
+      "logit": 11.0625
+    },
+    {
+      "token_id": 18053,
+      "logit": 11.0625
+    }
+  ],
+  "reference": {
+    "mlx": "0.32.0",
+    "mlx_lm": "0.31.3",
+    "transformers": "5.7.0"
+  }
+}
