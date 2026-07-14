@@ -1,12 +1,6 @@
-//! Micro-benchmark for ironmlx self-quant matmul kernel.
+//! Micro-benchmark for MLX affine quantized matmul.
 //!
-//! Measures wall-clock time of a single `qmm_t` dispatch with given
-//! `(M, N, K, BM, BN, BK, bits, group_size)`. Used by stage 9 task 7 to
-//! sweep tile candidates on M1 Pro and pick the best `(BM, BN, BK)`.
-//!
-//! Reaches into `ironmlx::nn::self_qmm::kernel::dispatch_qmm_t` directly
-//! to avoid env-var/lookup overhead in `qmm_t_on` — the bench needs to
-//! pin the tile, not let the lookup table choose one.
+//! This binary keeps a small, direct qmm timing harness in the workspace.
 
 use std::time::Instant;
 
@@ -23,66 +17,42 @@ enum Layout {
 }
 
 #[derive(Parser, Debug)]
-#[command(about = "ironmlx self-quant matmul kernel micro-benchmark")]
+#[command(about = "MLX affine quantized matmul micro-benchmark")]
 struct Args {
-    /// Matmul rows (typically prompt length × batch)
+    /// Matmul rows (typically prompt length x batch).
     #[arg(long, default_value_t = 2048)]
     m: i32,
 
-    /// Matmul output cols (typically intermediate_size)
+    /// Matmul output cols (typically intermediate_size).
     #[arg(long, default_value_t = 9216)]
     n: i32,
 
-    /// Matmul depth (typically hidden_size)
+    /// Matmul depth (typically hidden_size).
     #[arg(long, default_value_t = 2560)]
     k: i32,
 
-    /// Tile BM
-    #[arg(long, default_value_t = 32)]
-    bm: i32,
-
-    /// Tile BN
-    #[arg(long, default_value_t = 64)]
-    bn: i32,
-
-    /// Tile BK
-    #[arg(long, default_value_t = 32)]
-    bk: i32,
-
-    /// Quantization bits (only 4 supported in stage 9)
+    /// Quantization bits.
     #[arg(long, default_value_t = 4)]
     bits: i32,
 
-    /// Quantization group size (only 64 supported in stage 9)
+    /// Quantization group size.
     #[arg(long, default_value_t = 64)]
     group_size: i32,
 
-    /// Number of timed runs (median reported)
+    /// Number of timed runs. Median is reported.
     #[arg(long, default_value_t = 5)]
     runs: usize,
 
-    /// Number of warmup runs (excluded from stats)
+    /// Number of warmup runs excluded from stats.
     #[arg(long, default_value_t = 1)]
     warmup: usize,
 
-    /// Run mlx baseline (`quantized_matmul_on` affine) for comparison
-    #[arg(long, default_value_t = false)]
-    mlx_baseline: bool,
-
-    /// Skip the ironmlx self_qmm kernel and only run requested baselines.
-    #[arg(long, default_value_t = false)]
-    skip_self_qmm: bool,
-
-    /// Quantized weight layout for the MLX baseline.
+    /// Quantized weight layout.
     #[arg(long, value_enum, default_value_t = Layout::Transposed)]
     layout: Layout,
 }
 
 /// Build `(x, w_packed, w_scales, w_biases)` test inputs at the given shape.
-///
-/// Uses deterministic data (no random-seed flakiness across runs) within a
-/// small numeric range, keeping matmul output values well within bf16
-/// precision so the kernel doesn't NaN under uninitialized memory bugs.
 fn build_inputs(
     m: i32,
     n: i32,
@@ -91,14 +61,11 @@ fn build_inputs(
     bits: i32,
     layout: Layout,
 ) -> Result<(Array, Array, Array, Array)> {
-    // x bf16 [M, K] — small uniform range
     let x_count = (m as usize) * (k as usize);
     let x_data: Vec<f32> = (0..x_count).map(|i| ((i as f32) * 0.001) - 0.5).collect();
     let x_f32: Array = (x_data.as_slice(), (m, k)).try_into()?;
     let x = ops::cast::astype(&x_f32, Dtype::Bfloat16)?;
 
-    // raw weights bf16. Transposed layout stores logical [N, K] for x @ W^T;
-    // non-transposed stores logical [K, N] for x @ W.
     let w_shape = match layout {
         Layout::Transposed => (n, k),
         Layout::NonTransposed => (k, n),
@@ -108,7 +75,6 @@ fn build_inputs(
     let raw_w_f32: Array = (w_data.as_slice(), w_shape).try_into()?;
     let raw_w_bf16 = ops::cast::astype(&raw_w_f32, Dtype::Bfloat16)?;
 
-    // Quantize via mlx public API: returns [packed, scales, biases] for "affine"
     let q_outs =
         mlx::quantization::quantize(&raw_w_bf16, Some(group_size), Some(bits), "affine", None)?;
     anyhow::ensure!(
@@ -117,36 +83,14 @@ fn build_inputs(
         q_outs.len()
     );
     let mut iter = q_outs.into_iter();
-    let w_packed = iter.next().unwrap();
-    let w_scales = iter.next().unwrap();
-    let w_biases = iter.next().unwrap();
+    let w_packed = iter.next().expect("checked output count");
+    let w_scales = iter.next().expect("checked output count");
+    let w_biases = iter.next().expect("checked output count");
 
     Ok((x, w_packed, w_scales, w_biases))
 }
 
-fn time_self_qmm(args: &Args, inputs: &(Array, Array, Array, Array)) -> Result<f64> {
-    let (x, w, s, b) = inputs;
-
-    // Warmup
-    for _ in 0..args.warmup {
-        let y =
-            ironmlx::nn::self_qmm::kernel::dispatch_qmm_t(x, w, s, b, args.bm, args.bn, args.bk)?;
-        mlx::transforms::eval(&[&y])?;
-    }
-
-    let mut times = Vec::with_capacity(args.runs);
-    for _ in 0..args.runs {
-        let t0 = Instant::now();
-        let y =
-            ironmlx::nn::self_qmm::kernel::dispatch_qmm_t(x, w, s, b, args.bm, args.bn, args.bk)?;
-        mlx::transforms::eval(&[&y])?;
-        times.push(t0.elapsed().as_secs_f64());
-    }
-    times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    Ok(times[times.len() / 2])
-}
-
-fn time_mlx_baseline(args: &Args, inputs: &(Array, Array, Array, Array)) -> Result<f64> {
+fn time_mlx_affine(args: &Args, inputs: &(Array, Array, Array, Array)) -> Result<f64> {
     let (x, w, s, b) = inputs;
 
     for _ in 0..args.warmup {
@@ -166,7 +110,7 @@ fn time_mlx_baseline(args: &Args, inputs: &(Array, Array, Array, Array)) -> Resu
 
     let mut times = Vec::with_capacity(args.runs);
     for _ in 0..args.runs {
-        let t0 = Instant::now();
+        let started = Instant::now();
         let y = mlx::quantization::quantized_matmul_on(
             x,
             w,
@@ -179,18 +123,19 @@ fn time_mlx_baseline(args: &Args, inputs: &(Array, Array, Array, Array)) -> Resu
             (),
         )?;
         mlx::transforms::eval(&[&y])?;
-        times.push(t0.elapsed().as_secs_f64());
+        times.push(started.elapsed().as_secs_f64());
     }
-    times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    times.sort_by(|a, b| a.total_cmp(b));
     Ok(times[times.len() / 2])
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    anyhow::ensure!(args.runs > 0, "--runs must be greater than 0");
+
     println!("# ironmlx-bench-kernel");
     println!("M={}, N={}, K={}", args.m, args.n, args.k);
     println!("MLX layout: {:?}", args.layout);
-    println!("Tile: BM={}, BN={}, BK={}", args.bm, args.bn, args.bk);
     println!("Quant: bits={}, group_size={}", args.bits, args.group_size);
     println!(
         "Runs: {} measured (after {} warmup)",
@@ -207,37 +152,14 @@ fn main() -> Result<()> {
         args.layout,
     )?;
 
+    let elapsed = time_mlx_affine(&args, &inputs)?;
     let flops = 2.0 * (args.m as f64) * (args.n as f64) * (args.k as f64);
-    let self_t = if args.skip_self_qmm {
-        println!("self_qmm:    skipped (--skip-self-qmm)");
-        None
-    } else if args.layout == Layout::Transposed {
-        let self_t = time_self_qmm(&args, &inputs)?;
-        let self_gflops = flops / self_t / 1e9;
-        println!(
-            "self_qmm:    median {:.3} ms, {:.1} GFLOP/s",
-            self_t * 1000.0,
-            self_gflops
-        );
-        Some(self_t)
-    } else {
-        println!("self_qmm:    skipped (requires transposed [N,K] packed layout)");
-        None
-    };
-
-    if args.mlx_baseline {
-        let mlx_t = time_mlx_baseline(&args, &inputs)?;
-        let mlx_gflops = flops / mlx_t / 1e9;
-        println!(
-            "mlx affine:  median {:.3} ms, {:.1} GFLOP/s",
-            mlx_t * 1000.0,
-            mlx_gflops
-        );
-        if let Some(self_t) = self_t {
-            let speedup = mlx_t / self_t;
-            println!("self_qmm vs mlx: {speedup:.2}x speedup");
-        }
-    }
+    let gflops = flops / elapsed / 1e9;
+    println!(
+        "mlx affine: median {:.3} ms, {:.1} GFLOP/s",
+        elapsed * 1000.0,
+        gflops
+    );
 
     Ok(())
 }

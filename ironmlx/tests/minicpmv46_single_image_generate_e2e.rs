@@ -46,8 +46,8 @@ const IMAGE_TOKEN_ID: i32 = 248056;
 /// helpers, not by VL inference itself (positions are sequential).
 const SPATIAL_MERGE_SIZE: i32 = 4;
 /// Far-tail logit noise floor for this 4-bit-LM / bf16 hybrid backbone under
-/// ironmlx's independent quantized-matmul accumulation order (self_qmm/gather
-/// vs mlx `quantized_matmul`). Locked at 1.0 by the P2a logits-parity test
+/// ironmlx's independent quantized-matmul accumulation order (custom gather
+/// paths vs mlx `quantized_matmul`). Locked at 1.0 by the P2a logits-parity test
 /// (`minicpmv46_single_image_parity.rs`) and the text-only logits test, ~2×
 /// the observed ~0.50 far-tail deviation. A real structural decode bug (wrong
 /// decode position / broken cache continuity) produces a multi-unit deviation

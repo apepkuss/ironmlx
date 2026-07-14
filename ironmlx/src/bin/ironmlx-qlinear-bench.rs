@@ -10,7 +10,7 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, ValueEnum};
 use ironmlx::core::{Loader, QuantMeta};
 use ironmlx::models::Qwen35MoeConfig;
-use ironmlx::nn::{self_qmm, AttnKind, GatedDeltaNetConfig, Linear, RmsNormGated};
+use ironmlx::nn::{AttnKind, GatedDeltaNetConfig, Linear, RmsNormGated};
 use mlx::{random, Array, Device, Dtype, StreamOrDevice};
 use serde::Serialize;
 
@@ -48,10 +48,6 @@ struct Args {
     /// JSON output path.
     #[arg(long)]
     out: PathBuf,
-
-    /// Include diagnostic direct self_qmm cases, bypassing Linear's production threshold.
-    #[arg(long)]
-    include_self_qmm: bool,
 
     /// Include C++-side direct quantized_matmul timing-loop diagnostics.
     #[arg(long)]
@@ -209,18 +205,6 @@ fn main() -> Result<()> {
                 bench_target.target,
             )?);
         }
-        if args.include_self_qmm {
-            records.push(bench_case(
-                seq,
-                "qkvz-self-qmm",
-                args.warmup_runs,
-                args.runs,
-                || {
-                    qkvz.forward_self_qmm_on(&x_hidden, bench_target.target)
-                        .map(|out| vec![out])
-                },
-            )?);
-        }
         records.push(bench_case(
             seq,
             "qkvz-linear",
@@ -258,19 +242,6 @@ fn main() -> Result<()> {
                 args.warmup_runs,
                 args.runs,
                 bench_target.target,
-            )?);
-        }
-        if args.include_self_qmm {
-            records.push(bench_case(
-                seq,
-                "out-self-qmm",
-                args.warmup_runs,
-                args.runs,
-                || {
-                    out_proj
-                        .forward_self_qmm_on(&x_value, bench_target.target)
-                        .map(|out| vec![out])
-                },
             )?);
         }
         records.push(bench_case(
@@ -350,26 +321,6 @@ impl QuantProjection {
 
     fn forward_linear_on(&self, x: &Array, target: StreamOrDevice) -> Result<Array> {
         self.linear.forward_on(x, target)
-    }
-
-    fn forward_self_qmm_on(&self, x: &Array, target: StreamOrDevice) -> Result<Array> {
-        let biases = self
-            .biases
-            .as_ref()
-            .ok_or_else(|| anyhow!("self_qmm diagnostic requires affine quant biases"))?;
-        let mut y = self_qmm::qmm_t_on(
-            x,
-            &self.weight,
-            &self.scales,
-            biases,
-            self.bits,
-            self.group_size,
-            target,
-        )?;
-        if let Some(bias) = &self.bias {
-            y = mlx::ops::binary::add_on(&y, bias, target)?;
-        }
-        Ok(y)
     }
 
     fn cxx_qmm_timings_ms(
