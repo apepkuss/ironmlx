@@ -50,10 +50,32 @@ impl QuantMode {
 pub struct QuantMeta {
     /// Group size for per-group quantization parameters.
     pub group_size: i32,
-    /// Bits per quantized weight (2, 4, 8).
+    /// Bits per quantized weight.
     pub bits: i32,
     /// Quantization scheme.
     pub mode: QuantMode,
+}
+
+pub(crate) fn logical_width_from_packed(packed_columns: i32, bits: i32) -> Result<i32> {
+    if packed_columns <= 0 {
+        return Err(anyhow!(
+            "packed quantized width must be positive, got {packed_columns}"
+        ));
+    }
+    if bits <= 0 {
+        return Err(anyhow!("quantized bit width must be positive, got {bits}"));
+    }
+
+    let packed_bits = packed_columns
+        .checked_mul(32)
+        .ok_or_else(|| anyhow!("packed quantized width overflows i32: {packed_columns} * 32"))?;
+    if packed_bits % bits != 0 {
+        return Err(anyhow!(
+            "packed quantized width {packed_columns} does not encode an integral logical width at {bits} bits"
+        ));
+    }
+
+    Ok(packed_bits / bits)
 }
 
 impl QuantMeta {
@@ -64,30 +86,118 @@ impl QuantMeta {
         scales: &Array,
         biases: Option<&Array>,
     ) -> Result<()> {
-        if matches!(self.mode, QuantMode::Mxfp4 | QuantMode::Mxfp8) {
-            if weight.dtype() != Dtype::Uint32 {
-                return Err(anyhow!(
-                    "{prefix}: {} packed weight must have dtype uint32, got {:?}",
-                    self.mode.mlx_mode(),
-                    weight.dtype()
-                ));
+        match self.mode {
+            QuantMode::Affine => {
+                self.validate_affine_storage(prefix, weight, scales, biases)?;
             }
-            if scales.dtype() != Dtype::Uint8 {
-                return Err(anyhow!(
-                    "{prefix}: {} scales must have dtype uint8, got {:?}",
-                    self.mode.mlx_mode(),
-                    scales.dtype()
-                ));
-            }
-            if biases.is_some() {
-                return Err(anyhow!(
-                    "{prefix}: {} storage must not contain affine quantization biases",
-                    self.mode.mlx_mode()
-                ));
+            QuantMode::OptiQ => {}
+            QuantMode::Mxfp4 | QuantMode::Mxfp8 => {
+                if weight.dtype() != Dtype::Uint32 {
+                    return Err(anyhow!(
+                        "{prefix}: {} packed weight must have dtype uint32, got {:?}",
+                        self.mode.mlx_mode(),
+                        weight.dtype()
+                    ));
+                }
+                if scales.dtype() != Dtype::Uint8 {
+                    return Err(anyhow!(
+                        "{prefix}: {} scales must have dtype uint8, got {:?}",
+                        self.mode.mlx_mode(),
+                        scales.dtype()
+                    ));
+                }
+                if biases.is_some() {
+                    return Err(anyhow!(
+                        "{prefix}: {} storage must not contain affine quantization biases",
+                        self.mode.mlx_mode()
+                    ));
+                }
             }
         }
         Ok(())
     }
+
+    fn validate_affine_storage(
+        self,
+        prefix: &str,
+        weight: &Array,
+        scales: &Array,
+        biases: Option<&Array>,
+    ) -> Result<()> {
+        if weight.dtype() != Dtype::Uint32 {
+            return Err(anyhow!(
+                "{prefix}: affine packed weight must have dtype uint32, got {:?}",
+                weight.dtype()
+            ));
+        }
+        let biases = biases
+            .ok_or_else(|| anyhow!("{prefix}: affine storage requires quantization biases"))?;
+        if !is_supported_affine_parameter_dtype(scales.dtype())
+            || !is_supported_affine_parameter_dtype(biases.dtype())
+        {
+            return Err(anyhow!(
+                "{prefix}: affine scales and biases must use a supported real floating dtype, got {:?} and {:?}",
+                scales.dtype(),
+                biases.dtype()
+            ));
+        }
+        if !matches!(self.group_size, 32 | 64 | 128) {
+            return Err(anyhow!(
+                "{prefix}: unsupported affine group_size {}; supported values are 32, 64, and 128",
+                self.group_size
+            ));
+        }
+
+        let weight_shape = weight.shape();
+        let scales_shape = scales.shape();
+        let biases_shape = biases.shape();
+        if weight_shape.len() < 2 || scales_shape.len() != weight_shape.len() {
+            return Err(anyhow!(
+                "{prefix}: affine weight and scales must have matching rank of at least 2, got {:?} and {:?}",
+                weight_shape.as_slice(),
+                scales_shape.as_slice()
+            ));
+        }
+        if scales_shape != biases_shape {
+            return Err(anyhow!(
+                "{prefix}: affine scales and biases must have the same shape, got {:?} and {:?}",
+                scales_shape.as_slice(),
+                biases_shape.as_slice()
+            ));
+        }
+
+        let trailing_axis = weight_shape.len() - 1;
+        if weight_shape.as_slice()[..trailing_axis] != scales_shape.as_slice()[..trailing_axis] {
+            return Err(anyhow!(
+                "{prefix}: affine weight and parameters must have identical leading dimensions, got {:?} and {:?}",
+                &weight_shape.as_slice()[..trailing_axis],
+                &scales_shape.as_slice()[..trailing_axis]
+            ));
+        }
+
+        let logical_width =
+            logical_width_from_packed(weight_shape.as_slice()[trailing_axis], self.bits)
+                .with_context(|| format!("{prefix}: invalid affine packed weight shape"))?;
+        if logical_width % self.group_size != 0 {
+            return Err(anyhow!(
+                "{prefix}: affine logical width {logical_width} is not divisible by group_size {}",
+                self.group_size
+            ));
+        }
+        let expected_groups = logical_width / self.group_size;
+        let actual_groups = scales_shape.as_slice()[trailing_axis];
+        if actual_groups != expected_groups {
+            return Err(anyhow!(
+                "{prefix}: affine parameter trailing width must be {expected_groups}, got {actual_groups}"
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+fn is_supported_affine_parameter_dtype(dtype: Dtype) -> bool {
+    matches!(dtype, Dtype::Float16 | Dtype::Float32 | Dtype::Bfloat16)
 }
 
 /// HF `eos_token_id` field — single int or list of ints.
@@ -678,9 +788,16 @@ fn validate_quant_meta_contract(
     context_name: &str,
 ) -> Result<()> {
     match mode {
-        QuantMode::Affine | QuantMode::OptiQ if matches!(bits, 2 | 4 | 8) => Ok(()),
-        QuantMode::Affine | QuantMode::OptiQ => Err(anyhow!(
-            "unsupported {context_name}.bits `{bits}` for {mode:?} quantization; supported bits are 2, 4, and 8"
+        QuantMode::Affine if !matches!(group_size, 32 | 64 | 128) => Err(anyhow!(
+            "unsupported {context_name}.group_size `{group_size}` for affine quantization; supported values are 32, 64, and 128"
+        )),
+        QuantMode::Affine if matches!(bits, 2 | 4 | 5 | 6 | 8) => Ok(()),
+        QuantMode::Affine => Err(anyhow!(
+            "unsupported {context_name}.bits `{bits}` for affine quantization; supported bits are 2, 4, 5, 6, and 8"
+        )),
+        QuantMode::OptiQ if matches!(bits, 2 | 4 | 8) => Ok(()),
+        QuantMode::OptiQ => Err(anyhow!(
+            "unsupported {context_name}.bits `{bits}` for OptiQ quantization; supported bits are 2, 4, and 8"
         )),
         QuantMode::Mxfp4 if bits == 4 && group_size == 32 => Ok(()),
         QuantMode::Mxfp4 => Err(anyhow!(
@@ -984,6 +1101,116 @@ mod tests {
         }
     }
 
+    fn affine_storage(bits: i32, weight_shape: &[i32], params_shape: &[i32]) -> Result<()> {
+        let meta = QuantMeta {
+            group_size: 64,
+            bits,
+            mode: QuantMode::Affine,
+        };
+        let weight = Array::zeros(weight_shape, Dtype::Uint32).unwrap();
+        let scales = Array::zeros(params_shape, Dtype::Bfloat16).unwrap();
+        let biases = Array::zeros(params_shape, Dtype::Bfloat16).unwrap();
+        meta.validate_storage(
+            "model.layers.0.mlp.down_proj",
+            &weight,
+            &scales,
+            Some(&biases),
+        )
+    }
+
+    #[test]
+    fn affine_storage_accepts_exact_5bit_and_6bit_layouts() {
+        affine_storage(5, &[10240, 400], &[10240, 40]).expect("valid 5-bit affine storage");
+        affine_storage(6, &[10240, 480], &[10240, 40]).expect("valid 6-bit affine storage");
+        affine_storage(5, &[4, 2, 10], &[4, 2, 1]).expect("valid batched 5-bit affine storage");
+    }
+
+    #[test]
+    fn affine_storage_rejects_invalid_dtype_and_missing_biases() {
+        let meta = QuantMeta {
+            group_size: 64,
+            bits: 5,
+            mode: QuantMode::Affine,
+        };
+        let weight = Array::zeros((2, 10), Dtype::Uint8).unwrap();
+        let scales = Array::zeros((2, 1), Dtype::Bfloat16).unwrap();
+        let biases = Array::zeros((2, 1), Dtype::Bfloat16).unwrap();
+        let err = meta
+            .validate_storage("proj", &weight, &scales, Some(&biases))
+            .expect_err("byte affine weights must fail");
+        assert!(err.to_string().contains("uint32"), "{err:#}");
+
+        let weight = Array::zeros((2, 10), Dtype::Uint32).unwrap();
+        let err = meta
+            .validate_storage("proj", &weight, &scales, None)
+            .expect_err("affine biases are required");
+        assert!(err.to_string().contains("biases"), "{err:#}");
+
+        let integer_scales = Array::zeros((2, 1), Dtype::Uint16).unwrap();
+        let integer_biases = Array::zeros((2, 1), Dtype::Int16).unwrap();
+        let err = meta
+            .validate_storage("proj", &weight, &integer_scales, Some(&integer_biases))
+            .expect_err("affine parameters must promote to a real floating dtype");
+        assert!(err.to_string().contains("floating"), "{err:#}");
+    }
+
+    #[test]
+    fn affine_storage_rejects_invalid_group_and_packed_width() {
+        let weight = Array::zeros((2, 10), Dtype::Uint32).unwrap();
+        let params = Array::zeros((2, 1), Dtype::Bfloat16).unwrap();
+        let invalid_group = QuantMeta {
+            group_size: 48,
+            bits: 5,
+            mode: QuantMode::Affine,
+        };
+        let err = invalid_group
+            .validate_storage("proj", &weight, &params, Some(&params))
+            .expect_err("unsupported affine group size must fail");
+        assert!(err.to_string().contains("group_size"), "{err:#}");
+
+        let non_integral_weight = Array::zeros((2, 11), Dtype::Uint32).unwrap();
+        let meta = QuantMeta {
+            group_size: 64,
+            bits: 6,
+            mode: QuantMode::Affine,
+        };
+        let err = meta
+            .validate_storage("proj", &non_integral_weight, &params, Some(&params))
+            .expect_err("non-integral packed width must fail");
+        assert!(
+            format!("{err:#}").contains("integral logical width"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn affine_storage_rejects_inconsistent_parameter_shapes() {
+        let meta = QuantMeta {
+            group_size: 64,
+            bits: 5,
+            mode: QuantMode::Affine,
+        };
+        let weight = Array::zeros(&[4, 2, 10], Dtype::Uint32).unwrap();
+        let scales = Array::zeros(&[4, 2, 1], Dtype::Bfloat16).unwrap();
+        let wrong_biases = Array::zeros(&[4, 2, 2], Dtype::Bfloat16).unwrap();
+        let err = meta
+            .validate_storage("proj", &weight, &scales, Some(&wrong_biases))
+            .expect_err("scale/bias shape mismatch must fail");
+        assert!(err.to_string().contains("same shape"), "{err:#}");
+
+        let wrong_groups = Array::zeros(&[4, 2, 2], Dtype::Bfloat16).unwrap();
+        let err = meta
+            .validate_storage("proj", &weight, &wrong_groups, Some(&wrong_groups))
+            .expect_err("wrong scale group count must fail");
+        assert!(err.to_string().contains("trailing"), "{err:#}");
+
+        let wrong_leading = Array::zeros(&[3, 2, 1], Dtype::Bfloat16).unwrap();
+        let err = meta
+            .validate_storage("proj", &weight, &wrong_leading, Some(&wrong_leading))
+            .expect_err("weight/parameter leading dimensions must match");
+        assert!(err.to_string().contains("leading dimensions"), "{err:#}");
+    }
+
     #[test]
     fn parse_quant_meta_falls_back_to_quantization_config() {
         let cfg = json!({
@@ -1281,15 +1508,59 @@ mod tests {
     }
 
     #[test]
-    fn parse_quant_meta_rejects_affine_6bit_for_now() {
-        let cfg = json!({
-            "quantization": { "group_size": 64, "bits": 6, "mode": "affine" }
-        });
-        let err = parse_quant_meta(&cfg).expect_err("6-bit affine should be rejected");
-        assert!(
-            err.to_string().contains("unsupported quantization.bits"),
-            "{err:#}"
-        );
+    fn parse_quant_meta_accepts_affine_5bit_and_6bit() {
+        for bits in [5, 6] {
+            let cfg = json!({
+                "quantization": {
+                    "group_size": 64,
+                    "bits": bits,
+                    "mode": "affine",
+                    "model.layers.0.mlp.down_proj": {
+                        "group_size": 64,
+                        "bits": bits
+                    }
+                }
+            });
+            let global = parse_quant_meta(&cfg).unwrap().expect("global quant");
+            let overrides = parse_quant_overrides(&cfg, global).unwrap();
+            assert_eq!(
+                global,
+                QuantMeta {
+                    group_size: 64,
+                    bits,
+                    mode: QuantMode::Affine,
+                }
+            );
+            assert_eq!(overrides["model.layers.0.mlp.down_proj"], global);
+        }
+    }
+
+    #[test]
+    fn optiq_does_not_accept_affine_5bit_or_6bit() {
+        for bits in [5, 6] {
+            let cfg = json!({
+                "quantization": { "group_size": 64, "bits": bits, "mode": "affine" }
+            });
+            let optiq = json!({
+                "method": "optiq_mixed_precision",
+                "per_layer": {}
+            });
+            let err = parse_quant_meta_with_optiq(&cfg, Some(&optiq))
+                .expect_err("OptiQ contract must remain limited to its existing widths");
+            assert!(err.to_string().contains("OptiQ"), "{err:#}");
+        }
+    }
+
+    #[test]
+    fn packed_columns_recover_exact_logical_width() {
+        for (packed_columns, bits) in [(320, 4), (400, 5), (480, 6), (640, 8)] {
+            assert_eq!(
+                logical_width_from_packed(packed_columns, bits).unwrap(),
+                2560
+            );
+        }
+        assert!(logical_width_from_packed(401, 5).is_err());
+        assert!(logical_width_from_packed(481, 6).is_err());
     }
 
     #[test]

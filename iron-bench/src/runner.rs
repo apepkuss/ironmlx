@@ -96,6 +96,7 @@ pub async fn run_cell(
     warmup: usize,
     runs: usize,
     capture_request_id: bool,
+    ignore_eos: bool,
     capture_run_timestamps: bool,
     inter_run_cooldown_secs: u64,
     nonce_seed_override: Option<u64>,
@@ -107,8 +108,16 @@ pub async fn run_cell(
     for w in 0..warmup {
         let nonce = warmup_nonce(prefix_cache_probe, nonce_seed_override, w);
         let (prompt, _) = prompt_source.render(tokenizer, nonce)?;
-        let _ =
-            run_chat_completion(client, target_url, model, &prompt, tg, capture_request_id).await?;
+        let _ = run_chat_completion(
+            client,
+            target_url,
+            model,
+            &prompt,
+            tg,
+            capture_request_id,
+            ignore_eos,
+        )
+        .await?;
     }
 
     eprintln!("[{target_name}] PP={pp} TG={tg}: timed runs x{runs} ...");
@@ -121,8 +130,16 @@ pub async fn run_cell(
         } else {
             None
         };
-        let result =
-            run_chat_completion(client, target_url, model, &prompt, tg, capture_request_id).await?;
+        let result = run_chat_completion(
+            client,
+            target_url,
+            model,
+            &prompt,
+            tg,
+            capture_request_id,
+            ignore_eos,
+        )
+        .await?;
         let run_end_unix_ns = if capture_run_timestamps {
             Some(now_unix_ns())
         } else {
@@ -184,6 +201,7 @@ pub async fn run_cell_concurrent(
     duration: std::time::Duration,
     concurrent: usize,
     capture_request_id: bool,
+    ignore_eos: bool,
     prefix_cache_probe: PrefixCacheProbe,
     tokenizer: std::sync::Arc<Tokenizer>,
 ) -> Result<ConcurrentCellResult> {
@@ -215,6 +233,7 @@ pub async fn run_cell_concurrent(
                         &prompt,
                         tg,
                         capture_request_id,
+                        ignore_eos,
                     )
                     .await?;
                     nonce = next_worker_nonce(prefix_cache_probe, nonce);
@@ -254,6 +273,7 @@ pub async fn run_cell_concurrent(
                     &prompt,
                     tg,
                     capture_request_id,
+                    ignore_eos,
                 )
                 .await?;
                 outcomes.push(RequestOutcome {

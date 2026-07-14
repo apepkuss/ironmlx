@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-"""Run fixed-prompt, full-length HTTP decode validation for MXFP checkpoints."""
+"""Run repeatable HTTP prefill measurements for affine 4/5/6-bit checkpoints."""
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
+import math
 import os
 import signal
-import subprocess
-import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -17,14 +15,13 @@ from typing import Any
 import quant_validation_matrix as qvm
 
 
-DEFAULT_PROMPT = "scripts/fixtures/mxfp_strict_decode_prompt.txt"
-DEFAULT_OUT_ROOT = "reports/mxfp-strict-decode"
+DEFAULT_PROMPT_LENS = "2048,8192,32768"
+DEFAULT_OUT_ROOT = "reports/affine56-prefill"
+SERVER_B_MAX = 8
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Validate full-length decode through the external HTTP API."
-    )
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--model",
         action="append",
@@ -32,15 +29,17 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Model under test as LABEL=LOCAL_SNAPSHOT_PATH. Repeat as needed.",
     )
-    parser.add_argument("--prompt-file", type=Path, default=Path(DEFAULT_PROMPT))
-    parser.add_argument("--out-root", default=DEFAULT_OUT_ROOT)
-    parser.add_argument("--port-base", type=int, default=18740)
-    parser.add_argument("--max-tokens", type=int, default=512)
     parser.add_argument(
-        "--concurrent", type=qvm.parse_int_list, default=qvm.parse_int_list("1,8")
+        "--prompt-lens",
+        type=qvm.parse_int_list,
+        default=qvm.parse_int_list(DEFAULT_PROMPT_LENS),
     )
-    parser.add_argument("--duration", type=int, default=30)
-    parser.add_argument("--warmup-duration", type=int, default=5)
+    parser.add_argument("--runs", type=int, default=5)
+    parser.add_argument("--warmup", type=int, default=2)
+    parser.add_argument("--inter-run-cooldown-secs", type=int, default=1)
+    parser.add_argument("--nonce-seed", type=int, default=5606)
+    parser.add_argument("--out-root", default=DEFAULT_OUT_ROOT)
+    parser.add_argument("--port-base", type=int, default=19140)
     parser.add_argument("--startup-timeout", type=int, default=900)
     parser.add_argument("--request-timeout", type=int, default=1800)
     parser.add_argument("--serve-prefill-chunk-size", type=int, default=2048)
@@ -64,11 +63,11 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def validate_args(args: argparse.Namespace, repo: Path) -> Path:
+def validate_args(args: argparse.Namespace) -> None:
     for name in (
         "port_base",
-        "max_tokens",
-        "duration",
+        "runs",
+        "nonce_seed",
         "startup_timeout",
         "request_timeout",
         "serve_prefill_chunk_size",
@@ -79,69 +78,92 @@ def validate_args(args: argparse.Namespace, repo: Path) -> Path:
     ):
         if getattr(args, name) <= 0:
             raise qvm.MatrixError(f"--{name.replace('_', '-')} must be > 0")
-    if args.warmup_duration < 0:
-        raise qvm.MatrixError("--warmup-duration must be >= 0")
-    prompt_path = args.prompt_file
-    if not prompt_path.is_absolute():
-        prompt_path = repo / prompt_path
-    prompt_path = prompt_path.resolve()
-    if not prompt_path.is_file() or not prompt_path.read_text(encoding="utf-8").strip():
-        raise qvm.MatrixError(f"strict decode prompt is missing or empty: {prompt_path}")
+    if args.warmup < 0 or args.inter_run_cooldown_secs < 0:
+        raise qvm.MatrixError("warmup and cooldown must be >= 0")
+    if not args.prompt_lens or any(prompt <= 0 for prompt in args.prompt_lens):
+        raise qvm.MatrixError("--prompt-lens must contain positive values")
+    if len(set(args.prompt_lens)) != len(args.prompt_lens):
+        raise qvm.MatrixError("--prompt-lens must not contain duplicates")
     qvm.validate_models(args.model)
-    return prompt_path
 
 
 def validate_payload(
-    payload: dict[str, Any], max_tokens: int, concurrent: int
+    payload: dict[str, Any], prompt_lens: list[int], runs: int
 ) -> dict[str, Any]:
-    cells = payload.get("cells") or []
+    stats = payload.get("stats") or []
     raw_runs = payload.get("raw_runs") or []
+    metadata = payload.get("metadata") or {}
     errors: list[str] = []
-    failed_request_indices: set[int] = set()
-    if len(cells) != 1:
-        errors.append(f"expected one benchmark cell, found {len(cells)}")
-    if not raw_runs:
-        errors.append("benchmark completed no requests")
 
+    if metadata.get("runs_measured") != runs:
+        errors.append(
+            f"metadata.runs_measured={metadata.get('runs_measured')!r}, expected {runs}"
+        )
+
+    cells: dict[int, dict[str, float]] = {}
+    for row in stats:
+        prompt = row.get("pp_target")
+        median = row.get("ttft_ms_median")
+        p95 = row.get("ttft_ms_p95")
+        if not isinstance(prompt, int) or prompt in cells:
+            errors.append(f"invalid or duplicate prefill stats cell: {prompt!r}")
+            continue
+        if row.get("tg_target") != 1 or row.get("n_runs") != runs:
+            errors.append(f"invalid TG/run count for PP={prompt}")
+        if not all(
+            isinstance(value, (int, float)) and math.isfinite(value) and value > 0
+            for value in (median, p95)
+        ):
+            errors.append(f"invalid TTFT metrics for PP={prompt}")
+            continue
+        cells[prompt] = {
+            "ttft_ms_median": float(median),
+            "ttft_ms_p95": float(p95),
+        }
+
+    if set(cells) != set(prompt_lens):
+        errors.append(
+            f"prompt coverage={sorted(cells)}, expected={sorted(prompt_lens)}"
+        )
+
+    counts = {prompt: 0 for prompt in prompt_lens}
+    failed_requests = 0
     for index, row in enumerate(raw_runs):
-        reason = row.get("finish_reason")
-        completion_tokens = row.get("completion_tokens_server")
-        if reason != "length":
-            failed_request_indices.add(index)
-            errors.append(
-                f"request {index} finish_reason={reason!r}, expected 'length'"
+        prompt = row.get("pp_target")
+        request_errors = []
+        if prompt not in counts:
+            request_errors.append(f"unexpected pp_target={prompt!r}")
+        else:
+            counts[prompt] += 1
+        if row.get("tg_target") != 1:
+            request_errors.append(f"tg_target={row.get('tg_target')!r}")
+        if row.get("finish_reason") != "length":
+            request_errors.append(f"finish_reason={row.get('finish_reason')!r}")
+        if row.get("completion_tokens_server") != 1:
+            request_errors.append(
+                f"completion_tokens_server={row.get('completion_tokens_server')!r}"
             )
-        if completion_tokens != max_tokens:
-            failed_request_indices.add(index)
-            errors.append(
-                f"request {index} completion_tokens_server={completion_tokens!r}, "
-                f"expected {max_tokens}"
-            )
+        ttft = row.get("ttft_ms")
+        if not isinstance(ttft, (int, float)) or not math.isfinite(ttft) or ttft <= 0:
+            request_errors.append(f"ttft_ms={ttft!r}")
+        if request_errors:
+            failed_requests += 1
+            errors.append(f"request {index}: {', '.join(request_errors)}")
 
-    workers = {row.get("worker_id") for row in raw_runs}
-    expected_workers = set(range(concurrent))
-    if workers != expected_workers:
+    for prompt, count in counts.items():
+        if count != runs:
+            errors.append(f"PP={prompt} request count={count}, expected={runs}")
+    expected_requests = len(prompt_lens) * runs
+    if len(raw_runs) != expected_requests:
         errors.append(
-            f"worker coverage={sorted(worker for worker in workers if worker is not None)}, "
-            f"expected={sorted(expected_workers)}"
+            f"raw request count={len(raw_runs)}, expected={expected_requests}"
         )
 
-    cell = cells[0] if cells else {}
-    if cell.get("n_requests") != len(raw_runs):
-        errors.append(
-            f"cell request count={cell.get('n_requests')!r}, raw request count={len(raw_runs)}"
-        )
     return {
         "ok": not errors,
         "completed_requests": len(raw_runs),
-        "failed_requests": len(failed_request_indices),
-        "prompt_tokens": cell.get("pp_target"),
-        "itl_ms_p95": (cell.get("itl_ms") or {}).get("p95"),
-        "e2e_s_p95": cell.get("e2e_s_p95"),
-        "aggregate_tokens_per_sec": (cell.get("aggregate") or {}).get(
-            "tokens_per_sec"
-        ),
-        "finish_reason_summary": cell.get("finish_reason_summary"),
+        "failed_requests": failed_requests,
+        "cells": cells,
         "errors": errors,
     }
 
@@ -150,13 +172,11 @@ def run_benchmark(
     repo: Path,
     model: qvm.ModelSpec,
     model_dir: Path,
-    prompt_path: Path,
     port: int,
-    concurrent: int,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
-    out_json = model_dir / f"strict_decode_c{concurrent}.json"
-    err_log = model_dir / f"strict_decode_c{concurrent}.stderr.log"
+    out_json = model_dir / "strict_prefill.json"
+    err_log = model_dir / "strict_prefill.stderr.log"
     command = [
         str(repo / "target/release/iron-bench"),
         "--target",
@@ -165,41 +185,44 @@ def run_benchmark(
         str(model.path),
         "--model",
         model.label,
-        "--fixed-prompt-file",
-        str(prompt_path),
+        "--prompt-len",
+        ",".join(str(prompt) for prompt in args.prompt_lens),
         "--max-tokens",
-        str(args.max_tokens),
+        "1",
         "--ignore-eos",
-        "--concurrent",
-        str(concurrent),
-        "--duration",
-        str(args.duration),
-        "--warmup-duration",
-        str(args.warmup_duration),
+        "--runs",
+        str(args.runs),
+        "--warmup",
+        str(args.warmup),
+        "--inter-run-cooldown-secs",
+        str(args.inter_run_cooldown_secs),
+        "--nonce-seed",
+        str(args.nonce_seed),
         "--format",
         "json",
         "--timeout",
         str(args.request_timeout),
     ]
     result = qvm.run_command(
-        name=f"strict_decode_c{concurrent}",
+        name="strict_prefill",
         command=command,
         cwd=repo,
         stdout_path=out_json,
         stderr_path=err_log,
         env=os.environ.copy(),
     )
-    payload: dict[str, Any] = {}
     validation = {
         "ok": False,
         "completed_requests": 0,
         "failed_requests": 1,
+        "cells": {},
         "errors": [f"iron-bench exited with status {result.exit_code}"],
     }
     if result.ok:
         try:
-            payload = qvm.load_json(out_json)
-            validation = validate_payload(payload, args.max_tokens, concurrent)
+            validation = validate_payload(
+                qvm.load_json(out_json), args.prompt_lens, args.runs
+            )
         except Exception as exc:  # noqa: BLE001
             validation["errors"] = [f"failed to parse benchmark JSON: {exc}"]
     return {
@@ -217,21 +240,19 @@ def run_model(
     repo: Path,
     run_dir: Path,
     model: qvm.ModelSpec,
-    prompt_path: Path,
     port: int,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
     model_dir = run_dir / model.label
     model_dir.mkdir(parents=True, exist_ok=False)
     base_url = f"http://127.0.0.1:{port}"
-    process: subprocess.Popen[Any] | None = None
+    process = None
     record: dict[str, Any] = {
         "label": model.label,
         "path": str(model.path),
         "checkpoint": qvm.checkpoint_identity(model),
         "artifact_dir": str(model_dir),
         "port": port,
-        "benchmarks": {},
         "ok": False,
     }
     try:
@@ -240,7 +261,7 @@ def run_model(
             model,
             model_dir,
             port,
-            max_sequences=max(args.concurrent),
+            max_sequences=SERVER_B_MAX,
             args=args,
         )
         qvm.wait_for_health(
@@ -252,10 +273,7 @@ def run_model(
         record["health_before"] = qvm.maybe_capture_healthz(
             base_url, model_dir / "health_before.json"
         )
-        for concurrent in args.concurrent:
-            record["benchmarks"][f"c{concurrent}"] = run_benchmark(
-                repo, model, model_dir, prompt_path, port, concurrent, args
-            )
+        record["benchmark"] = run_benchmark(repo, model, model_dir, port, args)
         record["health_after"] = qvm.maybe_capture_healthz(
             base_url, model_dir / "health_after.json"
         )
@@ -268,38 +286,29 @@ def run_model(
     health_ok = record.get("health_before", {}).get("ok") and record.get(
         "health_after", {}
     ).get("ok")
-    record["ok"] = bool(health_ok) and all(
-        benchmark.get("ok") for benchmark in record["benchmarks"].values()
-    ) and len(record["benchmarks"]) == len(args.concurrent)
+    record["ok"] = bool(health_ok) and record.get("benchmark", {}).get("ok", False)
     return record
 
 
 def write_summary(run_dir: Path, manifest: dict[str, Any]) -> None:
     lines = [
-        "# MXFP Strict Decode Validation",
+        "# Affine 5-bit and 6-bit Clean Prefill",
         "",
         f"- Status: `{manifest['overall_status']}`",
-        f"- Prompt SHA-256: `{manifest['prompt_sha256']}`",
-        f"- Max completion tokens: `{manifest['args']['max_tokens']}`",
-        f"- Concurrency levels: `{manifest['args']['concurrent']}`",
+        f"- Runs per cell: `{manifest['args']['runs']}`",
+        f"- Warmup per cell: `{manifest['args']['warmup']}`",
+        f"- Inter-run cooldown: `{manifest['args']['inter_run_cooldown_secs']}s`",
         "",
-        "| model | C | requests | prompt tokens | ITL p95 ms | E2E p95 s | tok/s | status |",
-        "|---|---:|---:|---:|---:|---:|---:|---|",
+        "| model | PP | runs | TTFT median ms | TTFT p95 ms | status |",
+        "|---|---:|---:|---:|---:|---|",
     ]
     for model in manifest["models"]:
-        for name, benchmark in model["benchmarks"].items():
-            validation = benchmark["validation"]
+        validation = (model.get("benchmark") or {}).get("validation") or {}
+        for prompt, cell in sorted((validation.get("cells") or {}).items()):
             lines.append(
-                "| {model} | {concurrent} | {requests} | {prompt_tokens} | {itl} | {e2e} | {tps} | {status} |".format(
-                    model=model["label"],
-                    concurrent=name.removeprefix("c"),
-                    requests=validation.get("completed_requests", 0),
-                    prompt_tokens=validation.get("prompt_tokens", ""),
-                    itl=qvm.format_float(validation.get("itl_ms_p95")),
-                    e2e=qvm.format_float(validation.get("e2e_s_p95")),
-                    tps=qvm.format_float(validation.get("aggregate_tokens_per_sec")),
-                    status="passed" if benchmark["ok"] else "failed",
-                )
+                f"| {model['label']} | {prompt} | {manifest['args']['runs']} | "
+                f"{cell['ttft_ms_median']:.3f} | {cell['ttft_ms_p95']:.3f} | "
+                f"{'passed' if model['ok'] else 'failed'} |"
             )
     lines.extend(["", f"- Manifest: `{run_dir / 'manifest.json'}`", ""])
     (run_dir / "summary.md").write_text("\n".join(lines), encoding="utf-8")
@@ -307,28 +316,27 @@ def write_summary(run_dir: Path, manifest: dict[str, Any]) -> None:
 
 def main() -> int:
     args = parse_args()
+    validate_args(args)
     repo = qvm.repo_root()
-    prompt_path = validate_args(args, repo)
     run_dir = qvm.make_run_dir((repo / args.out_root).resolve())
-    prompt_bytes = prompt_path.read_bytes()
     manifest: dict[str, Any] = {
         "started_at_unix": int(time.time()),
         "repo": str(repo),
-        "prompt_file": str(prompt_path),
-        "prompt_sha256": hashlib.sha256(prompt_bytes).hexdigest(),
         "args": {
-            "max_tokens": args.max_tokens,
+            "prompt_lens": args.prompt_lens,
+            "max_tokens": 1,
             "ignore_eos": True,
-            "concurrent": args.concurrent,
-            "duration": args.duration,
-            "warmup_duration": args.warmup_duration,
+            "runs": args.runs,
+            "warmup": args.warmup,
+            "inter_run_cooldown_secs": args.inter_run_cooldown_secs,
+            "nonce_seed": args.nonce_seed,
             "serve_prefill_chunk_size": args.serve_prefill_chunk_size,
             "serve_admission_deadline_ms": args.serve_admission_deadline_ms,
             "serve_admission_queue_max": args.serve_admission_queue_max,
             "serve_max_cache_cap": args.serve_max_cache_cap,
             "serve_decode_cadence_mid_chunk_cap": args.serve_decode_cadence_mid_chunk_cap,
         },
-        "scheduler_config": qvm.scheduler_config_from_args(args, max(args.concurrent)),
+        "scheduler_config": qvm.scheduler_config_from_args(args, SERVER_B_MAX),
         "build": None,
         "models": [],
         "overall_status": "failed",
@@ -352,10 +360,8 @@ def main() -> int:
             return 1
 
     for index, model in enumerate(args.model):
-        print(f"[mxfp-strict-decode] running {model.label}", flush=True)
-        record = run_model(
-            repo, run_dir, model, prompt_path, args.port_base + index, args
-        )
+        print(f"[affine56-prefill] running {model.label}", flush=True)
+        record = run_model(repo, run_dir, model, args.port_base + index, args)
         manifest["models"].append(record)
         qvm.write_json(run_dir / "manifest.json", manifest)
 

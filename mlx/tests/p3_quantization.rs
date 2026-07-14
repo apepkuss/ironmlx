@@ -147,6 +147,81 @@ fn quantized_matmul_matches_dequantize_matmul() {
     );
 }
 
+fn assert_affine_non_power_of_two_qmm_matches_reference(bits: i32, rows: i32) {
+    let n = 16_i32;
+    let k = 64_i32;
+    let weight_data: Vec<f32> = (0..n * k)
+        .map(|i| ((i % 31) as f32 - 15.0) * 0.015)
+        .collect();
+    let input_data: Vec<f32> = (0..rows * k)
+        .map(|i| ((i % 23) as f32 - 11.0) * 0.02)
+        .collect();
+    let weight_f32 = Array::try_from((weight_data.as_slice(), &[n, k][..])).expect("weight");
+    let input_f32 = Array::try_from((input_data.as_slice(), &[rows, k][..])).expect("input");
+    let weight = weight_f32.astype(Dtype::Bfloat16).expect("bf16 weight");
+    let input = input_f32.astype(Dtype::Bfloat16).expect("bf16 input");
+    let parts = quantize(&weight, Some(64), Some(bits), "affine", None).expect("quantize");
+    assert_eq!(parts[0].shape().as_slice(), &[n, k * bits / 32]);
+
+    let got = quantized_matmul(
+        &input,
+        &parts[0],
+        &parts[1],
+        Some(&parts[2]),
+        true,
+        Some(64),
+        Some(bits),
+        "affine",
+    )
+    .expect("qmm");
+    let dequantized = dequantize(
+        &parts[0],
+        &parts[1],
+        Some(&parts[2]),
+        Some(64),
+        Some(bits),
+        "affine",
+        None,
+        None,
+    )
+    .expect("dequantize");
+    let expected = input
+        .matmul(&dequantized.transpose().expect("transpose"))
+        .expect("dense reference");
+
+    let got = got
+        .astype(Dtype::Float32)
+        .expect("cast qmm")
+        .to_vec::<f32>()
+        .expect("qmm values");
+    let expected = expected
+        .astype(Dtype::Float32)
+        .expect("cast reference")
+        .to_vec::<f32>()
+        .expect("reference values");
+    let mut max_abs = 0.0_f32;
+    let mut max_ref = 0.0_f32;
+    for (actual, reference) in got.iter().zip(&expected) {
+        assert!(actual.is_finite() && reference.is_finite());
+        max_abs = max_abs.max((actual - reference).abs());
+        max_ref = max_ref.max(reference.abs());
+    }
+    let peak_relative = max_abs / max_ref.max(1.0);
+    assert!(
+        max_abs <= 0.25 && peak_relative <= 0.01,
+        "bits={bits} rows={rows} max_abs={max_abs} peak_relative={peak_relative}"
+    );
+}
+
+#[test]
+fn affine_non_power_of_two_qmm_matches_dequantized_reference() {
+    for bits in [5, 6] {
+        for rows in [1, 64] {
+            assert_affine_non_power_of_two_qmm_matches_reference(bits, rows);
+        }
+    }
+}
+
 use mlx::quantization::qqmm;
 
 #[test]
@@ -250,6 +325,79 @@ fn gather_quantized_matmul_no_indices_binding_smoke() {
             assert!(
                 msg.contains("NYI"),
                 "gather_quantized_matmul construction failed with non-NYI error (real regression?): {msg}"
+            );
+        }
+    }
+}
+
+#[test]
+fn gather_quantized_matmul_affine_non_power_of_two_bits_matches_reference() {
+    let experts = 2_i32;
+    let n = 4_i32;
+    let k = 64_i32;
+    let batch = 2_i32;
+    let weight_data: Vec<f32> = (0..experts * n * k)
+        .map(|i| ((i % 37) as f32 - 18.0) * 0.01)
+        .collect();
+    let input_data: Vec<f32> = (0..batch * k)
+        .map(|i| ((i % 29) as f32 - 14.0) * 0.015)
+        .collect();
+    let weight = Array::try_from((weight_data.as_slice(), &[experts, n, k][..])).expect("weight");
+    let input = Array::try_from((input_data.as_slice(), &[batch, 1, 1, k][..])).expect("input");
+    let expert_indices = Array::try_from((&[0_u32, 1][..], &[batch, 1][..])).expect("indices");
+
+    for bits in [5, 6] {
+        let parts = quantize(&weight, Some(64), Some(bits), "affine", None).expect("quantize");
+        let got = gather_quantized_matmul(
+            &input,
+            &parts[0],
+            &parts[1],
+            Some(&parts[2]),
+            None,
+            Some(&expert_indices),
+            true,
+            Some(64),
+            Some(bits),
+            "affine",
+            false,
+        )
+        .expect("gather qmm")
+        .to_vec::<f32>()
+        .expect("gather qmm values");
+        let dequantized = dequantize(
+            &parts[0],
+            &parts[1],
+            Some(&parts[2]),
+            Some(64),
+            Some(bits),
+            "affine",
+            None,
+            None,
+        )
+        .expect("dequantize")
+        .to_vec::<f32>()
+        .expect("dequantized values");
+
+        let mut expected = Vec::with_capacity((batch * n) as usize);
+        for batch_idx in 0..batch as usize {
+            let expert = batch_idx;
+            for output_idx in 0..n as usize {
+                let mut sum = 0.0_f32;
+                for input_idx in 0..k as usize {
+                    let x = input_data[batch_idx * k as usize + input_idx];
+                    let w =
+                        dequantized[(expert * n as usize + output_idx) * k as usize + input_idx];
+                    sum += x * w;
+                }
+                expected.push(sum);
+            }
+        }
+
+        assert_eq!(got.len(), expected.len());
+        for (idx, (actual, reference)) in got.iter().zip(&expected).enumerate() {
+            assert!(
+                (actual - reference).abs() <= 0.03,
+                "bits={bits} idx={idx} actual={actual} reference={reference}"
             );
         }
     }

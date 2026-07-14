@@ -235,7 +235,7 @@ def validate_strict_payload(payload: dict[str, Any], label: str) -> dict[str, An
         index
         for index, row in enumerate(raw_runs)
         if row.get("finish_reason") != "length"
-        or row.get("completion_tokens") != max_tokens
+        or row.get("completion_tokens_server") != max_tokens
     ]
     if invalid:
         raise GateError(

@@ -4,7 +4,7 @@
 //! The checkpoint stores MLA in **absorbed (matrix-folded)** form (DeepSeek-V2
 //! §2.1.3): there is no `kv_b_proj`; instead `embed_q` (`W^UK^T`, 192→512 per
 //! head) and `unembed_out` (`W^UV`, 512→256 per head) are stored as per-head
-//! stacked 4-bit quantized weights `[H, out, in/8]`. This module provides:
+//! stacked affine quantized weights `[H, out, packed_in]`. This module provides:
 //!
 //! - [`PerHeadQuantLinear`] — per-head stacked quantized matmul (mirrors omlx
 //!   `QuantizedMultiLinear`); the single kv-head latent broadcasts across all
@@ -49,7 +49,7 @@ pub struct PerHeadQuantLinear {
 }
 
 impl PerHeadQuantLinear {
-    /// Load `{prefix}.weight` (`[H, out, in/8]`, required), `{prefix}.scales`
+    /// Load `{prefix}.weight` (`[H, out, packed_in]`, required), `{prefix}.scales`
     /// (required), and `{prefix}.biases` (optional affine zero-points).
     /// `group_size`/`bits` come from the loader's quantization metadata.
     ///
@@ -559,7 +559,7 @@ mod tests {
         )
     }
 
-    fn assert_per_head_mxfp_matches_native(mode: crate::core::QuantMode, bits: i32) {
+    fn assert_per_head_quant_matches_native(mode: crate::core::QuantMode, bits: i32) {
         let heads = 2_i32;
         let out = 3_i32;
         let in_dim = 32_i32;
@@ -572,8 +572,14 @@ mod tests {
         let raw = mlx::ops::cast::astype(&raw_f32, mlx::Dtype::Bfloat16).unwrap();
         let q = mlx::quantization::quantize(&raw, Some(in_dim), Some(bits), mode.mlx_mode(), None)
             .unwrap();
-        let layer =
-            PerHeadQuantLinear::from_parts(q[0].clone(), q[1].clone(), None, in_dim, bits, mode);
+        let layer = PerHeadQuantLinear::from_parts(
+            q[0].clone(),
+            q[1].clone(),
+            q.get(2).cloned(),
+            in_dim,
+            bits,
+            mode,
+        );
         let x_data: Vec<f32> = (0..heads * in_dim)
             .map(|i| ((i % 17) as f32 - 8.0) * 0.02)
             .collect();
@@ -586,7 +592,7 @@ mod tests {
             &x,
             &q[0],
             &q[1],
-            None,
+            q.get(2),
             true,
             Some(in_dim),
             Some(bits),
@@ -607,13 +613,21 @@ mod tests {
     #[test]
     #[serial_test::serial(mlx_metal)]
     fn per_head_mxfp4_matches_native_mlx() {
-        assert_per_head_mxfp_matches_native(crate::core::QuantMode::Mxfp4, 4);
+        assert_per_head_quant_matches_native(crate::core::QuantMode::Mxfp4, 4);
     }
 
     #[test]
     #[serial_test::serial(mlx_metal)]
     fn per_head_mxfp8_matches_native_mlx() {
-        assert_per_head_mxfp_matches_native(crate::core::QuantMode::Mxfp8, 8);
+        assert_per_head_quant_matches_native(crate::core::QuantMode::Mxfp8, 8);
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn per_head_affine_5bit_and_6bit_match_native_mlx() {
+        for bits in [5, 6] {
+            assert_per_head_quant_matches_native(crate::core::QuantMode::Affine, bits);
+        }
     }
 
     /// Dequantize-then-matmul reference for `transpose=true` (in→out), per head.

@@ -51,6 +51,11 @@ struct Args {
     #[arg(long, default_value_t = 128)]
     max_tokens: usize,
 
+    /// Continue generation through EOS until `--max-tokens` is reached.
+    /// Use only for controlled full-length decode measurements.
+    #[arg(long, default_value_t = false)]
+    ignore_eos: bool,
+
     /// (v1 sequential mode) Timed runs per cell. Mutually exclusive with `--concurrent`.
     #[arg(long, default_value_t = 5, conflicts_with = "concurrent")]
     runs: usize,
@@ -460,6 +465,7 @@ async fn main() -> Result<()> {
                         args.warmup,
                         args.runs,
                         args.capture_server_request_id,
+                        args.ignore_eos,
                         args.capture_run_timestamps,
                         args.inter_run_cooldown_secs,
                         args.nonce_seed,
@@ -489,6 +495,7 @@ async fn main() -> Result<()> {
                         std::time::Duration::from_secs(args.duration),
                         concurrent,
                         args.capture_server_request_id,
+                        args.ignore_eos,
                         prefix_cache_probe,
                         tokenizer_arc.clone(),
                     )

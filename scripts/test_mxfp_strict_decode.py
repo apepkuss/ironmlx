@@ -36,8 +36,16 @@ class StrictDecodeValidationTests(unittest.TestCase):
                 }
             ],
             "raw_runs": [
-                {"worker_id": 0, "finish_reason": "length", "completion_tokens": 512},
-                {"worker_id": 1, "finish_reason": "length", "completion_tokens": 512},
+                {
+                    "worker_id": 0,
+                    "finish_reason": "length",
+                    "completion_tokens_server": 512,
+                },
+                {
+                    "worker_id": 1,
+                    "finish_reason": "length",
+                    "completion_tokens_server": 512,
+                },
             ],
         }
 
@@ -47,11 +55,38 @@ class StrictDecodeValidationTests(unittest.TestCase):
         self.assertEqual(result["completed_requests"], 2)
         self.assertEqual(result["itl_ms_p95"], 12.5)
 
+    def test_uses_server_token_count_when_detokenized_chunks_are_coalesced(self) -> None:
+        payload = {
+            "cells": [
+                {
+                    "n_requests": 1,
+                    "itl_ms": {"p95": 12.5},
+                    "finish_reason_summary": "length=1",
+                }
+            ],
+            "raw_runs": [
+                {
+                    "worker_id": 0,
+                    "finish_reason": "length",
+                    "completion_tokens": 40,
+                    "completion_tokens_server": 512,
+                }
+            ],
+        }
+
+        result = strict.validate_payload(payload, max_tokens=512, concurrent=1)
+
+        self.assertTrue(result["ok"])
+
     def test_rejects_early_stop(self) -> None:
         payload = {
             "cells": [{"n_requests": 1, "itl_ms": {"p95": 10.0}}],
             "raw_runs": [
-                {"worker_id": 0, "finish_reason": "stop", "completion_tokens": 23}
+                {
+                    "worker_id": 0,
+                    "finish_reason": "stop",
+                    "completion_tokens_server": 23,
+                }
             ],
         }
 
@@ -65,7 +100,11 @@ class StrictDecodeValidationTests(unittest.TestCase):
         payload = {
             "cells": [{"n_requests": 1, "itl_ms": {"p95": 10.0}}],
             "raw_runs": [
-                {"worker_id": 0, "finish_reason": "length", "completion_tokens": 512}
+                {
+                    "worker_id": 0,
+                    "finish_reason": "length",
+                    "completion_tokens_server": 512,
+                }
             ],
         }
 

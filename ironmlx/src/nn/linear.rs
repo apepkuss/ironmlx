@@ -10,7 +10,7 @@
 use anyhow::anyhow;
 use mlx::{Array, StreamOrDevice};
 
-use crate::core::{Loader, QuantMode};
+use crate::core::{logical_width_from_packed, Loader, QuantMode};
 use crate::Result;
 
 /// Linear projection layer. Handles both full-precision and quantized
@@ -49,7 +49,7 @@ enum LinearImpl {
         bias: Option<Array>,
         /// Group size from quantization metadata.
         group_size: i32,
-        /// Bits per quantized weight (2 / 4 / 8).
+        /// Bits per quantized weight.
         bits: i32,
         /// Quantization scheme from loader metadata.
         mode: QuantMode,
@@ -182,22 +182,14 @@ impl Linear {
     ///
     /// For fp weights stored as `[out, in]`, returns `weight.shape()[1]`.
     /// For quantized weights packed at `bits` bits per element into `u32`
-    /// (32-bit) lanes, each stored column covers `32 / bits` logical input
-    /// features, so `in_features = weight.shape()[1] * (32 / bits)`.
+    /// (32-bit) lanes, `in_features = weight.shape()[1] * 32 / bits`.
     pub fn in_features(&self) -> usize {
         match &self.inner {
             LinearImpl::Fp { weight, .. } => weight.shape().as_slice()[1] as usize,
             LinearImpl::Quant { weight, bits, .. } => {
-                // Formula assumes power-of-2 bit width (2 / 4 / 8): each u32
-                // lane packs 32/bits elements. mlx-community quants for
-                // Qwen3.x are all 4-bit, so the assumption holds in practice;
-                // the assert prevents silent mis-computation if a future
-                // checkpoint uses non-power-of-2 bits (3 / 5 / 6, byte-packed).
-                debug_assert!(
-                    *bits > 0 && *bits <= 32 && (*bits as u32).is_power_of_two(),
-                    "Linear::in_features: 32/bits packing assumes power-of-2 bits in {{2,4,8,16,32}}, got bits={bits}"
-                );
-                (weight.shape().as_slice()[1] * (32 / bits)) as usize
+                logical_width_from_packed(weight.shape().as_slice()[1], *bits)
+                    .expect("quantized Linear must have a valid packed input width")
+                    as usize
             }
         }
     }
@@ -459,6 +451,21 @@ mod tests {
         assert_eq!(lin.out_features(), out as usize);
     }
 
+    #[test]
+    fn non_power_of_two_affine_widths_recover_exact_input_features() {
+        let out = 2_i32;
+        let logical_in = 2560_i32;
+        for bits in [5_i32, 6_i32] {
+            let packed_in = logical_in * bits / 32;
+            let weight = Array::zeros((out, packed_in), mlx::Dtype::Uint32).unwrap();
+            let scales = Array::zeros((out, logical_in / 64), mlx::Dtype::Bfloat16).unwrap();
+            let biases = Array::zeros((out, logical_in / 64), mlx::Dtype::Bfloat16).unwrap();
+            let linear = Linear::new_quant(weight, scales, Some(biases), None, 64, bits);
+
+            assert_eq!(linear.in_features(), logical_in as usize);
+        }
+    }
+
     /// Regression guard for the `m_total >= 2048` threshold. Small-M
     /// measurements empirically refuted the prior `m_total >= 32` threshold
     /// via 3× substep regression + 1.75-7.52% e2e regression at PP=128/512
@@ -604,6 +611,16 @@ mod tests {
             true,
             QuantMode::Affine
         ));
+        for bits in [5, 6] {
+            assert!(!should_dispatch_self_qmm(
+                true,
+                2048,
+                bits,
+                64,
+                true,
+                QuantMode::Affine
+            ));
+        }
         assert!(!should_dispatch_self_qmm(
             true,
             2048,
@@ -638,20 +655,18 @@ mod tests {
         ));
     }
 
-    fn assert_quantized_forward_matches_mlx(bits: i32, raw_dtype: mlx::Dtype) {
+    fn assert_quantized_forward_matches_mlx(bits: i32, raw_dtype: mlx::Dtype, rows: i32) {
         let out = 3_i32;
         let in_dim = 32_i32;
         let group_size = 32_i32;
         let w_data: Vec<f32> = (0..(out * in_dim))
             .map(|i| ((i % 23) as f32 - 11.0) * 0.02)
             .collect();
-        let x_data: Vec<f32> = (0..(2 * in_dim))
+        let x_data: Vec<f32> = (0..(rows * in_dim))
             .map(|i| ((i % 17) as f32 - 8.0) * 0.03)
             .collect();
         let raw_w_f32: Array = (w_data.as_slice(), &[out, in_dim][..]).try_into().unwrap();
-        let x_f32: Array = (x_data.as_slice(), &[2_i32, in_dim][..])
-            .try_into()
-            .unwrap();
+        let x_f32: Array = (x_data.as_slice(), &[rows, in_dim][..]).try_into().unwrap();
         let raw_w = mlx::ops::cast::astype(&raw_w_f32, raw_dtype).unwrap();
         let x = mlx::ops::cast::astype(&x_f32, raw_dtype).unwrap();
         let q = mlx::quantization::quantize(&raw_w, Some(group_size), Some(bits), "affine", None)
@@ -695,13 +710,23 @@ mod tests {
     #[test]
     #[serial(mlx_metal)]
     fn quantized_8bit_forward_matches_mlx_bfloat16() {
-        assert_quantized_forward_matches_mlx(8, mlx::Dtype::Bfloat16);
+        assert_quantized_forward_matches_mlx(8, mlx::Dtype::Bfloat16, 2);
     }
 
     #[test]
     #[serial(mlx_metal)]
     fn quantized_2bit_forward_matches_mlx_float32() {
-        assert_quantized_forward_matches_mlx(2, mlx::Dtype::Float32);
+        assert_quantized_forward_matches_mlx(2, mlx::Dtype::Float32, 2);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn quantized_5bit_and_6bit_forward_match_mlx_bfloat16() {
+        for bits in [5, 6] {
+            for rows in [1, 64] {
+                assert_quantized_forward_matches_mlx(bits, mlx::Dtype::Bfloat16, rows);
+            }
+        }
     }
 
     fn assert_mxfp_forward_matches_mlx(mode: QuantMode, bits: i32) {

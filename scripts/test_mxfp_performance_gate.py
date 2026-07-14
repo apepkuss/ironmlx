@@ -167,7 +167,8 @@ class PerformanceGateTests(unittest.TestCase):
                                 {
                                     "worker_id": worker,
                                     "finish_reason": "length",
-                                    "completion_tokens": 512,
+                                    "completion_tokens": 40,
+                                    "completion_tokens_server": 512,
                                 }
                                 for worker in range(8)
                             ],
@@ -214,7 +215,8 @@ class PerformanceGateTests(unittest.TestCase):
                                 {
                                     "worker_id": worker,
                                     "finish_reason": "stop" if worker == 0 else "length",
-                                    "completion_tokens": 12 if worker == 0 else 512,
+                                    "completion_tokens": 12 if worker == 0 else 40,
+                                    "completion_tokens_server": 12 if worker == 0 else 512,
                                 }
                                 for worker in range(8)
                             ],

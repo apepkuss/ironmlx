@@ -218,7 +218,7 @@ fn geglu_kernel() -> Result<&'static MetalKernel> {
         float u = float(up[gid]);
         float x2 = x * x;
         float inner = 0.7978845608028654f * (x + 0.044715f * x * x2);
-        float gelu = 0.5f * x * (1.0f + tanh(inner));
+        float gelu = 0.5f * x * (1.0f + tanh(clamp(inner, -10.0f, 10.0f)));
         out[gid] = static_cast<__typeof__(*out)>(gelu * u);
     "#;
 
@@ -408,7 +408,8 @@ fn qmv_geglu_kernel() -> Result<&'static MetalKernel> {
                 float gate2 = gate_rounded * gate_rounded;
                 float inner = 0.7978845608028654f *
                               (gate_rounded + 0.044715f * gate_rounded * gate2);
-                float gelu = 0.5f * gate_rounded * (1.0f + tanh(inner));
+                float gelu = 0.5f * gate_rounded *
+                    (1.0f + tanh(clamp(inner, -10.0f, 10.0f)));
                 out_row[n] = static_cast<__typeof__(*out)>(gelu * up_rounded);
             }
         }
@@ -481,6 +482,29 @@ mod tests {
 
         let expected = &gelu_approx_on(&gate, ()).unwrap() * &up;
         let got = gelu_approx_mul_on(&gate, &up, ()).unwrap();
+        assert_all_close(&got, &expected, 1e-5);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn geglu_fused_remains_finite_for_saturated_tanh_inputs() {
+        let gate: Array = (
+            &[-14.0_f32, -12.0, 11.999_075, 12.472_275, 13.705_244, 14.0][..],
+            &[6_i32][..],
+        )
+            .try_into()
+            .unwrap();
+        let up: Array = (
+            &[0.5_f32, -2.0, 12.568_986, 5.104_907, 0.989_551_7, -0.25][..],
+            &[6_i32][..],
+        )
+            .try_into()
+            .unwrap();
+
+        let expected = &gelu_approx_on(&gate, ()).unwrap() * &up;
+        let got = gelu_approx_mul_on(&gate, &up, ()).unwrap();
+        let values = got.to_vec::<f32>().unwrap();
+        assert!(values.iter().all(|value| value.is_finite()));
         assert_all_close(&got, &expected, 1e-5);
     }
 
@@ -580,6 +604,32 @@ mod tests {
 
         assert_eq!(got.shape().as_slice(), expected.shape().as_slice());
         assert_all_close(&got, &expected, 0.02);
+    }
+
+    #[test]
+    fn qmv_geglu_decode_fast_path_stays_4bit_only() {
+        let x = Array::zeros((1, 512), Dtype::Bfloat16).unwrap();
+        let weight = Array::zeros((16, 80), Dtype::Uint32).unwrap();
+        let scales = Array::zeros((16, 8), Dtype::Bfloat16).unwrap();
+        let biases = Array::zeros((16, 8), Dtype::Bfloat16).unwrap();
+
+        for bits in [5, 6] {
+            let result = quantized_gate_up_geglu_decode_on(
+                &x,
+                QuantizedGateUpGeGluDecode {
+                    weight: &weight,
+                    scales: &scales,
+                    biases: &biases,
+                    intermediate_size: 8,
+                    group_size: 64,
+                    bits,
+                    mode: QuantMode::Affine,
+                },
+                (),
+            )
+            .unwrap();
+            assert!(result.is_none(), "{bits}-bit must use native MLX fallback");
+        }
     }
 
     #[test]

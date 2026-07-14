@@ -88,6 +88,12 @@ pub struct ChatRequest {
     pub messages: Vec<ChatMessage>,
     #[serde(default)]
     pub stream: bool,
+    #[serde(default)]
+    pub stream_options: Option<StreamOptions>,
+    /// Generate until `max_tokens` even when the model emits an EOS token.
+    /// Intended for controlled full-length performance measurements.
+    #[serde(default)]
+    pub ignore_eos: bool,
     #[serde(default = "default_max_tokens")]
     pub max_tokens: usize,
     #[serde(default)]
@@ -105,6 +111,12 @@ pub struct ChatRequest {
     /// `enable_thinking` toggle, vLLM's `tools` / `documents`, etc.
     #[serde(default)]
     pub chat_template_kwargs: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct StreamOptions {
+    #[serde(default)]
+    pub include_usage: bool,
 }
 
 fn default_max_tokens() -> usize {
@@ -141,6 +153,33 @@ struct ChunkResponse<T> {
     created: u64,
     model: String,
     choices: Vec<Choice<T>>,
+}
+
+#[derive(Debug, Serialize)]
+struct StreamUsageChunk {
+    id: String,
+    object: &'static str,
+    created: u64,
+    model: String,
+    choices: Vec<serde_json::Value>,
+    usage: Usage,
+}
+
+impl StreamUsageChunk {
+    fn new(id: impl Into<String>, model: impl Into<String>, prompt: u32, completion: u32) -> Self {
+        Self {
+            id: id.into(),
+            object: "chat.completion.chunk",
+            created: now_unix(),
+            model: model.into(),
+            choices: Vec::new(),
+            usage: Usage {
+                prompt_tokens: prompt,
+                completion_tokens: completion,
+                total_tokens: prompt + completion,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -305,6 +344,14 @@ fn chat_completions_route(stream: bool, use_scheduler: bool) -> ChatCompletionsR
     }
 }
 
+fn stop_token_ids_for_request(eos_token_ids: &[u32], ignore_eos: bool) -> Vec<u32> {
+    if ignore_eos {
+        Vec::new()
+    } else {
+        eos_token_ids.to_vec()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Handler (Step 19.3)
 // ---------------------------------------------------------------------------
@@ -325,6 +372,11 @@ where
 {
     // Extract fields we need after consuming req.messages.
     let stream = req.stream;
+    let include_usage = req
+        .stream_options
+        .map(|options| options.include_usage)
+        .unwrap_or(false);
+    let ignore_eos = req.ignore_eos;
 
     let max_tokens = req.max_tokens;
     let model_label = req.model.clone().unwrap_or_else(|| state.model_id.clone());
@@ -393,7 +445,7 @@ where
         state.mtp_enabled && sampler.is_pipelinable(),
     );
 
-    let stop_token_ids = state.tokenizer.eos_token_ids().to_vec();
+    let stop_token_ids = stop_token_ids_for_request(state.tokenizer.eos_token_ids(), ignore_eos);
     let prompt_tokens = prompt_len as u32;
     let request = GenerateRequest {
         prompt_ids,
@@ -411,10 +463,11 @@ where
 
     match chat_completions_route(stream, use_scheduler) {
         ChatCompletionsRoute::SchedulerStream => {
-            serve_via_scheduler_stream(state, request, model_label).await
+            serve_via_scheduler_stream(state, request, model_label, prompt_tokens, include_usage)
+                .await
         }
         ChatCompletionsRoute::GenerationStreamStream => {
-            serve_via_gs_stream(state, request, model_label).await
+            serve_via_gs_stream(state, request, model_label, prompt_tokens, include_usage).await
         }
         ChatCompletionsRoute::SchedulerUnary => {
             serve_via_scheduler_unary(state, request, model_label, prompt_tokens).await
@@ -437,6 +490,11 @@ pub(crate) async fn chat_completions_with_gemma4_drafter_state(
     req: ChatRequest,
 ) -> Response {
     let stream = req.stream;
+    let include_usage = req
+        .stream_options
+        .map(|options| options.include_usage)
+        .unwrap_or(false);
+    let ignore_eos = req.ignore_eos;
     let max_tokens = req.max_tokens;
     let model_label = req
         .model
@@ -500,7 +558,8 @@ pub(crate) async fn chat_completions_with_gemma4_drafter_state(
             .into_response();
     }
     let scheduler_config = state.base.scheduler_request_config(prompt_len, max_tokens);
-    let stop_token_ids = state.base.tokenizer.eos_token_ids().to_vec();
+    let stop_token_ids =
+        stop_token_ids_for_request(state.base.tokenizer.eos_token_ids(), ignore_eos);
     let prompt_tokens = prompt_len as u32;
     let request = GenerateRequest {
         prompt_ids,
@@ -517,7 +576,14 @@ pub(crate) async fn chat_completions_with_gemma4_drafter_state(
     };
 
     if stream {
-        serve_via_scheduler_stream(state.base, request, model_label).await
+        serve_via_scheduler_stream(
+            state.base,
+            request,
+            model_label,
+            prompt_tokens,
+            include_usage,
+        )
+        .await
     } else {
         serve_via_scheduler_unary(state.base, request, model_label, prompt_tokens).await
     }
@@ -527,6 +593,8 @@ async fn serve_via_gs_stream<M>(
     state: AppState<M>,
     request: GenerateRequest,
     model_id: String,
+    prompt_tokens: u32,
+    include_usage: bool,
 ) -> Response
 where
     M: Model + DenseVlMethods + Send + 'static,
@@ -578,11 +646,13 @@ where
             return;
         }
 
+        let mut completion_tokens = 0_u32;
         loop {
             let ev_result = stream.next_token();
 
             match ev_result {
                 Ok(Some(ev)) => {
+                    completion_tokens += 1;
                     let chunk = ChunkResponse {
                         id: id_for_task.clone(),
                         object: "chat.completion.chunk",
@@ -614,6 +684,15 @@ where
                 }
             }
         }
+        if include_usage {
+            let usage = StreamUsageChunk::new(
+                id_for_task.clone(),
+                model_id_for_task.clone(),
+                prompt_tokens,
+                completion_tokens,
+            );
+            let _ = tx.blocking_send(Ok(format_sse_data(&usage)));
+        }
         let _ = tx.blocking_send(Ok(Bytes::from_static(b"data: [DONE]\n\n")));
     });
 
@@ -632,6 +711,8 @@ async fn serve_via_scheduler_stream<M>(
     state: AppState<M>,
     request: GenerateRequest,
     model_id: String,
+    prompt_tokens: u32,
+    include_usage: bool,
 ) -> Response
 where
     M: Model + DenseVlMethods + Send + 'static,
@@ -712,7 +793,9 @@ where
         }
 
         let mut detok = tokenizer.decode_stream(/* skip_special */ true);
+        let mut completion_tokens = 0_u32;
         while let Some(ev) = event_rx.recv().await {
+            completion_tokens += 1;
             let text = match detok.step(ev.token) {
                 Ok(Some(s)) => s,
                 Ok(None) => String::new(),
@@ -747,6 +830,15 @@ where
             if ev.finish_reason.is_some() {
                 break;
             }
+        }
+        if include_usage {
+            let usage = StreamUsageChunk::new(
+                id_for_task.clone(),
+                model_id_for_task.clone(),
+                prompt_tokens,
+                completion_tokens,
+            );
+            let _ = tx.send(Ok(format_sse_data(&usage))).await;
         }
         let _ = tx.send(Ok(Bytes::from_static(b"data: [DONE]\n\n"))).await;
     });
@@ -956,6 +1048,34 @@ mod tests {
             chat_completions_route(false, false),
             ChatCompletionsRoute::GenerationStreamUnary
         );
+    }
+
+    #[test]
+    fn chat_request_supports_full_length_stream_controls() {
+        let req: ChatRequest = serde_json::from_value(serde_json::json!({
+            "messages": [],
+            "stream": true,
+            "ignore_eos": true,
+            "stream_options": {"include_usage": true}
+        }))
+        .expect("chat request");
+
+        assert!(req.ignore_eos);
+        assert!(req.stream_options.expect("stream options").include_usage);
+        assert!(stop_token_ids_for_request(&[1, 2], true).is_empty());
+        assert_eq!(stop_token_ids_for_request(&[1, 2], false), vec![1, 2]);
+    }
+
+    #[test]
+    fn stream_usage_chunk_reports_authoritative_token_counts() {
+        let chunk = StreamUsageChunk::new("x", "m", 50, 512);
+        let value = serde_json::to_value(chunk).expect("serialize usage chunk");
+
+        assert_eq!(value["object"], "chat.completion.chunk");
+        assert_eq!(value["choices"], serde_json::json!([]));
+        assert_eq!(value["usage"]["prompt_tokens"], 50);
+        assert_eq!(value["usage"]["completion_tokens"], 512);
+        assert_eq!(value["usage"]["total_tokens"], 562);
     }
 
     #[test]

@@ -35,7 +35,7 @@ enum EmbeddingImpl {
         biases: Option<Array>,
         /// Group size from quantization metadata.
         group_size: i32,
-        /// Bits per quantized weight (2 / 4 / 8).
+        /// Bits per quantized weight.
         bits: i32,
         /// Quantization scheme from loader metadata.
         mode: QuantMode,
@@ -454,9 +454,9 @@ mod tests {
 
         let layer = Embedding {
             inner: EmbeddingImpl::Quant {
-                weight,
-                scales,
-                biases: Some(biases),
+                weight: weight.clone(),
+                scales: scales.clone(),
+                biases: Some(biases.clone()),
                 group_size,
                 bits,
                 mode,
@@ -467,6 +467,25 @@ mod tests {
         assert_eq!(got.shape().as_slice(), expected.shape().as_slice());
         assert_eq!(got.dtype(), expected.dtype());
         assert_all_close(&got, &expected, 0.001);
+
+        let hidden_data: Vec<f32> = (0..dim).map(|i| ((i % 19) as f32 - 9.0) * 0.02).collect();
+        let hidden_f32: Array = (hidden_data.as_slice(), &[1_i32, 1_i32, dim][..])
+            .try_into()
+            .unwrap();
+        let hidden = ops::cast::astype(&hidden_f32, raw_dtype).unwrap();
+        let got_output = layer.as_output(&hidden).unwrap();
+        let expected_output = mlx::quantization::quantized_matmul(
+            &hidden,
+            &weight,
+            &scales,
+            Some(&biases),
+            true,
+            Some(group_size),
+            Some(bits),
+            "affine",
+        )
+        .unwrap();
+        assert_all_close(&got_output, &expected_output, 0.001);
     }
 
     #[test]
@@ -527,6 +546,45 @@ mod tests {
             &[2],
             &[1, 1],
         );
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn affine_5bit_and_6bit_lookup_and_tied_output_match_native_mlx() {
+        for bits in [5, 6] {
+            assert_quantized_tokens_match_dequantize(
+                Dtype::Bfloat16,
+                bits,
+                QuantMode::Affine,
+                &[1, 2, 3, 0],
+                &[2, 2],
+            );
+        }
+    }
+
+    #[test]
+    fn quantized_embedding_decode_fast_path_stays_4bit_only() {
+        let tokens = Array::zeros((1,), Dtype::Uint32).unwrap();
+        let weight = Array::zeros((2, 10), Dtype::Uint32).unwrap();
+        let scales = Array::zeros((2, 1), Dtype::Bfloat16).unwrap();
+        let biases = Array::zeros((2, 1), Dtype::Bfloat16).unwrap();
+
+        for bits in [5, 6] {
+            let result = qembedding_decode_on(
+                &tokens,
+                QEmbeddingDecode {
+                    weight: &weight,
+                    scales: &scales,
+                    biases: Some(&biases),
+                    group_size: 64,
+                    bits,
+                    mode: QuantMode::Affine,
+                },
+                (),
+            )
+            .unwrap();
+            assert!(result.is_none(), "{bits}-bit must use native MLX fallback");
+        }
     }
 
     #[test]

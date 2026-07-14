@@ -139,6 +139,7 @@ struct ChatRequest<'a> {
     top_p: f32,
     stream_options: StreamOptions,
     chat_template_kwargs: ChatTemplateKwargs,
+    ignore_eos: bool,
 }
 
 #[derive(Serialize)]
@@ -169,6 +170,7 @@ pub async fn run_chat_completion(
     prompt: &str,
     max_tokens: usize,
     capture_request_id: bool,
+    ignore_eos: bool,
 ) -> Result<RequestResult> {
     let body = ChatRequest {
         model,
@@ -186,6 +188,7 @@ pub async fn run_chat_completion(
         chat_template_kwargs: ChatTemplateKwargs {
             enable_thinking: false,
         },
+        ignore_eos,
     };
 
     let start = Instant::now();
@@ -353,5 +356,31 @@ mod tests {
             state.last_usage.as_ref().and_then(|u| u.cached_tokens),
             Some(40)
         );
+    }
+
+    #[test]
+    fn request_serializes_ignore_eos_for_full_length_benchmarks() {
+        let request = ChatRequest {
+            model: "model",
+            messages: vec![ChatMessage {
+                role: "user",
+                content: "prompt",
+            }],
+            stream: true,
+            max_tokens: 512,
+            temperature: 0.0,
+            top_p: 1.0,
+            stream_options: StreamOptions {
+                include_usage: true,
+            },
+            chat_template_kwargs: ChatTemplateKwargs {
+                enable_thinking: false,
+            },
+            ignore_eos: true,
+        };
+
+        let value = serde_json::to_value(request).expect("serialize request");
+        assert_eq!(value["ignore_eos"], true);
+        assert_eq!(value["stream_options"]["include_usage"], true);
     }
 }

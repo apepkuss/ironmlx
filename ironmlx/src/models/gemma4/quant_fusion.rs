@@ -115,6 +115,24 @@ mod tests {
     }
 
     #[test]
+    fn matching_affine_5bit_and_6bit_metadata_can_be_fused() {
+        for bits in [5, 6] {
+            let gate = "model.layers.2.mlp.gate_proj";
+            let up = "model.layers.2.mlp.up_proj";
+            let metas = [
+                (gate, Some(meta(bits, QuantMode::Affine))),
+                (up, Some(meta(bits, QuantMode::Affine))),
+            ];
+
+            let compat = classify_fused_quant_metas(&metas, "gate_up").unwrap();
+            assert_eq!(
+                compat,
+                FusedQuantCompatibility::Quantized(meta(bits, QuantMode::Affine))
+            );
+        }
+    }
+
+    #[test]
     fn matching_mxfp_metadata_can_be_fused() {
         for (bits, mode) in [(4, QuantMode::Mxfp4), (8, QuantMode::Mxfp8)] {
             let q = "model.layers.1.self_attn.q_proj";
