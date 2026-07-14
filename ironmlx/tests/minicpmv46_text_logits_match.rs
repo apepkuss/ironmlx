@@ -112,7 +112,7 @@ fn minicpmv46_text_logits_match() {
 
         // Structural-sanity guard on the full-vocab worst-element deviation.
         // 4-bit BF16 across 24 hybrid layers + an independent quantized-matmul
-        // accumulation order (ironmlx self_qmm/gather vs mlx quantized_matmul)
+        // accumulation order (custom gather paths vs mlx quantized_matmul)
         // produces a far-tail noise floor of ~0.53 here (observed across these
         // 4 prompts; the winning-token logit itself stays within ~0.125, and is
         // bit-identical on prompt 2). 1.0 is ~1.9x that floor — the same

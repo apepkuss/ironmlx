@@ -178,7 +178,7 @@ fn minicpmv46_single_image_parity() {
     // bit-identical at diff@argmax = 0.0). Rationale: the text-only test
     // (minicpmv46_text_logits_match) established a ~0.53 far-tail noise floor for
     // this 4-bit-LM / bf16 hybrid backbone under an independent quantized-matmul
-    // accumulation order (ironmlx self_qmm/gather vs mlx quantized_matmul), and
+    // accumulation order (custom gather paths vs mlx quantized_matmul), and
     // locked its guard at 1.0 (~1.9x that floor). The VL path adds one extra
     // source of bf16 jitter — the cross-modal scatter rounds the f32→bf16 vision
     // rows (`replace_image_tokens` builds the scatter buffer in f32 then casts to

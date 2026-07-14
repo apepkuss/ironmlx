@@ -54,8 +54,8 @@ pub fn stop() -> Result<()> {
 /// - `"apple_g14g"` — M2
 /// - `"apple_g15p"` — M3 Pro / M3 Max
 ///
-/// Used by tile-lookup tables (ironmlx self_qmm) to pick per-chip kernel
-/// dimensions without re-implementing the Metal device query in Rust.
+/// Used by diagnostics that need per-chip Metal behavior without
+/// re-implementing the Metal device query in Rust.
 ///
 /// Errors if the Metal backend isn't available on this system.
 pub fn architecture() -> Result<String> {

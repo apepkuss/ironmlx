@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Micro-benchmark binary for ironmlx self-quant matmul Metal kernel (stage 9)"
+description = "Micro-benchmark binary for MLX affine quantized matmul"
 publish = false
 
 [[bin]]
@@ -12,7 +12,6 @@ name = "ironmlx-bench-kernel"
 path = "src/main.rs"
 
 [dependencies]
-ironmlx = { path = "../ironmlx" }
 mlx = { path = "../mlx" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

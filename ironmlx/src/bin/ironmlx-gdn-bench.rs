@@ -263,18 +263,6 @@ fn load_gdn_bench_config(loader: &Loader, arch: ModelArchitecture) -> Result<Gdn
     }
 }
 
-#[cfg(feature = "p5g-profile")]
-fn init_tracing() {
-    let _ = tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("ironmlx=info,warn")),
-        )
-        .try_init();
-}
-
-#[cfg(not(feature = "p5g-profile"))]
 fn init_tracing() {}
 
 fn shapes_for_mode(mode: CacheMode) -> Vec<BenchShape> {
