@@ -142,7 +142,7 @@ impl Embedding {
                         biases_rows.as_ref(),
                         Some(*group_size),
                         Some(*bits),
-                        mode.mlx_mode(),
+                        mode.mlx_backend_mode(),
                         None,
                         None,
                         target,
@@ -196,7 +196,7 @@ impl Embedding {
                 /* transpose = */ true,
                 Some(*group_size),
                 Some(*bits),
-                mode.mlx_mode(),
+                mode.mlx_backend_mode(),
                 target,
             )?),
         }
@@ -222,7 +222,7 @@ impl Embedding {
                 biases.as_ref(),
                 Some(*group_size),
                 Some(*bits),
-                mode.mlx_mode(),
+                mode.mlx_backend_mode(),
                 None,
                 None,
                 target,
@@ -612,7 +612,7 @@ mod tests {
             &raw_w,
             Some(group_size),
             Some(bits),
-            mode.mlx_mode(),
+            mode.mlx_backend_mode(),
             None,
         )
         .unwrap();
@@ -627,7 +627,7 @@ mod tests {
             None,
             Some(group_size),
             Some(bits),
-            mode.mlx_mode(),
+            mode.mlx_backend_mode(),
             None,
             None,
         )
@@ -661,7 +661,7 @@ mod tests {
             true,
             Some(group_size),
             Some(bits),
-            mode.mlx_mode(),
+            mode.mlx_backend_mode(),
         )
         .unwrap();
         assert_all_close(&got_output, &expected_output, 0.001);

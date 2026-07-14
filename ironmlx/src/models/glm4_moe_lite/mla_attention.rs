@@ -117,7 +117,7 @@ impl PerHeadQuantLinear {
             transpose,
             Some(self.group_size),
             Some(self.bits),
-            self.mode.mlx_mode(),
+            self.mode.mlx_backend_mode(),
             target,
         )?)
     }
@@ -136,7 +136,7 @@ impl PerHeadQuantLinear {
             self.biases.as_ref(),
             Some(self.group_size),
             Some(self.bits),
-            self.mode.mlx_mode(),
+            self.mode.mlx_backend_mode(),
             None,
             None,
         )?)
@@ -570,8 +570,14 @@ mod tests {
             .try_into()
             .unwrap();
         let raw = mlx::ops::cast::astype(&raw_f32, mlx::Dtype::Bfloat16).unwrap();
-        let q = mlx::quantization::quantize(&raw, Some(in_dim), Some(bits), mode.mlx_mode(), None)
-            .unwrap();
+        let q = mlx::quantization::quantize(
+            &raw,
+            Some(in_dim),
+            Some(bits),
+            mode.mlx_backend_mode(),
+            None,
+        )
+        .unwrap();
         let layer = PerHeadQuantLinear::from_parts(
             q[0].clone(),
             q[1].clone(),
@@ -596,7 +602,7 @@ mod tests {
             true,
             Some(in_dim),
             Some(bits),
-            mode.mlx_mode(),
+            mode.mlx_backend_mode(),
         )
         .unwrap();
         let got = mlx::ops::cast::astype(&got, mlx::Dtype::Float32)
@@ -644,7 +650,7 @@ mod tests {
             phl.biases.as_ref(),
             Some(phl.group_size),
             Some(phl.bits),
-            phl.mode.mlx_mode(),
+            phl.mode.mlx_backend_mode(),
             None,
             None,
         )

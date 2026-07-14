@@ -16,7 +16,9 @@ use crate::Result;
 pub enum QuantMode {
     /// Affine quantization (scale + offset per group).
     Affine,
-    /// OptiQ mixed-bit quantization backed by MLX affine packed tensors.
+    /// OptiQ mixed-bit quantization. Current MLX checkpoints use an
+    /// affine-compatible packed tensor layout, but the model format and
+    /// per-layer bit allocation are treated as an independent contract.
     OptiQ,
     /// OCP microscaling 4-bit floating-point quantization.
     Mxfp4,
@@ -25,7 +27,7 @@ pub enum QuantMode {
 }
 
 impl QuantMode {
-    pub(crate) fn mlx_mode(self) -> &'static str {
+    pub(crate) fn mlx_backend_mode(self) -> &'static str {
         match self {
             Self::Affine | Self::OptiQ => "affine",
             Self::Mxfp4 => "mxfp4",
@@ -88,28 +90,36 @@ impl QuantMeta {
     ) -> Result<()> {
         match self.mode {
             QuantMode::Affine => {
-                self.validate_affine_storage(prefix, weight, scales, biases)?;
+                self.validate_affine_compatible_storage(prefix, weight, scales, biases, "affine")?;
             }
-            QuantMode::OptiQ => {}
+            QuantMode::OptiQ => {
+                self.validate_affine_compatible_storage(
+                    prefix,
+                    weight,
+                    scales,
+                    biases,
+                    "OptiQ affine-compatible",
+                )?;
+            }
             QuantMode::Mxfp4 | QuantMode::Mxfp8 => {
                 if weight.dtype() != Dtype::Uint32 {
                     return Err(anyhow!(
                         "{prefix}: {} packed weight must have dtype uint32, got {:?}",
-                        self.mode.mlx_mode(),
+                        self.mode.mlx_backend_mode(),
                         weight.dtype()
                     ));
                 }
                 if scales.dtype() != Dtype::Uint8 {
                     return Err(anyhow!(
                         "{prefix}: {} scales must have dtype uint8, got {:?}",
-                        self.mode.mlx_mode(),
+                        self.mode.mlx_backend_mode(),
                         scales.dtype()
                     ));
                 }
                 if biases.is_some() {
                     return Err(anyhow!(
                         "{prefix}: {} storage must not contain affine quantization biases",
-                        self.mode.mlx_mode()
+                        self.mode.mlx_backend_mode()
                     ));
                 }
             }
@@ -117,35 +127,46 @@ impl QuantMeta {
         Ok(())
     }
 
-    fn validate_affine_storage(
+    fn validate_affine_compatible_storage(
         self,
         prefix: &str,
         weight: &Array,
         scales: &Array,
         biases: Option<&Array>,
+        scheme_name: &str,
     ) -> Result<()> {
         if weight.dtype() != Dtype::Uint32 {
             return Err(anyhow!(
-                "{prefix}: affine packed weight must have dtype uint32, got {:?}",
+                "{prefix}: {scheme_name} packed weight must have dtype uint32, got {:?}",
                 weight.dtype()
             ));
         }
-        let biases = biases
-            .ok_or_else(|| anyhow!("{prefix}: affine storage requires quantization biases"))?;
+        let biases = biases.ok_or_else(|| {
+            anyhow!("{prefix}: {scheme_name} storage requires quantization biases")
+        })?;
         if !is_supported_affine_parameter_dtype(scales.dtype())
             || !is_supported_affine_parameter_dtype(biases.dtype())
         {
             return Err(anyhow!(
-                "{prefix}: affine scales and biases must use a supported real floating dtype, got {:?} and {:?}",
+                "{prefix}: {scheme_name} scales and biases must use a supported real floating dtype, got {:?} and {:?}",
                 scales.dtype(),
                 biases.dtype()
             ));
         }
-        if !matches!(self.group_size, 32 | 64 | 128) {
-            return Err(anyhow!(
-                "{prefix}: unsupported affine group_size {}; supported values are 32, 64, and 128",
-                self.group_size
-            ));
+        match self.mode {
+            QuantMode::OptiQ if self.group_size != 64 => {
+                return Err(anyhow!(
+                    "{prefix}: unsupported {scheme_name} group_size {}; supported value is 64",
+                    self.group_size
+                ));
+            }
+            QuantMode::Affine if !matches!(self.group_size, 32 | 64 | 128) => {
+                return Err(anyhow!(
+                    "{prefix}: unsupported {scheme_name} group_size {}; supported values are 32, 64, and 128",
+                    self.group_size
+                ));
+            }
+            _ => {}
         }
 
         let weight_shape = weight.shape();
@@ -153,14 +174,14 @@ impl QuantMeta {
         let biases_shape = biases.shape();
         if weight_shape.len() < 2 || scales_shape.len() != weight_shape.len() {
             return Err(anyhow!(
-                "{prefix}: affine weight and scales must have matching rank of at least 2, got {:?} and {:?}",
+                "{prefix}: {scheme_name} weight and scales must have matching rank of at least 2, got {:?} and {:?}",
                 weight_shape.as_slice(),
                 scales_shape.as_slice()
             ));
         }
         if scales_shape != biases_shape {
             return Err(anyhow!(
-                "{prefix}: affine scales and biases must have the same shape, got {:?} and {:?}",
+                "{prefix}: {scheme_name} scales and biases must have the same shape, got {:?} and {:?}",
                 scales_shape.as_slice(),
                 biases_shape.as_slice()
             ));
@@ -169,7 +190,7 @@ impl QuantMeta {
         let trailing_axis = weight_shape.len() - 1;
         if weight_shape.as_slice()[..trailing_axis] != scales_shape.as_slice()[..trailing_axis] {
             return Err(anyhow!(
-                "{prefix}: affine weight and parameters must have identical leading dimensions, got {:?} and {:?}",
+                "{prefix}: {scheme_name} weight and parameters must have identical leading dimensions, got {:?} and {:?}",
                 &weight_shape.as_slice()[..trailing_axis],
                 &scales_shape.as_slice()[..trailing_axis]
             ));
@@ -177,10 +198,10 @@ impl QuantMeta {
 
         let logical_width =
             logical_width_from_packed(weight_shape.as_slice()[trailing_axis], self.bits)
-                .with_context(|| format!("{prefix}: invalid affine packed weight shape"))?;
+                .with_context(|| format!("{prefix}: invalid {scheme_name} packed weight shape"))?;
         if logical_width % self.group_size != 0 {
             return Err(anyhow!(
-                "{prefix}: affine logical width {logical_width} is not divisible by group_size {}",
+                "{prefix}: {scheme_name} logical width {logical_width} is not divisible by group_size {}",
                 self.group_size
             ));
         }
@@ -188,7 +209,7 @@ impl QuantMeta {
         let actual_groups = scales_shape.as_slice()[trailing_axis];
         if actual_groups != expected_groups {
             return Err(anyhow!(
-                "{prefix}: affine parameter trailing width must be {expected_groups}, got {actual_groups}"
+                "{prefix}: {scheme_name} parameter trailing width must be {expected_groups}, got {actual_groups}"
             ));
         }
 
@@ -353,6 +374,7 @@ impl Loader {
                 Self::sanitize_gemma4_drafter(&mut tensors, &config_raw)?
             }
         }
+        validate_quantized_storage_manifest(&tensors, quant, &quant_overrides)?;
 
         // Eagerly evaluate all tensors on the loading thread so that no lazy
         // stream-tagged computation remains in the weight arrays.  This
@@ -639,6 +661,57 @@ fn tensor_storage_bytes(tensors: &HashMap<String, Array>) -> usize {
     })
 }
 
+fn validate_quantized_storage_manifest(
+    tensors: &HashMap<String, Array>,
+    quant: Option<QuantMeta>,
+    quant_overrides: &HashMap<String, QuantMeta>,
+) -> Result<()> {
+    let mut scale_prefixes: Vec<String> = tensors
+        .keys()
+        .filter_map(|key| key.strip_suffix(".scales").map(str::to_owned))
+        .collect();
+    scale_prefixes.sort();
+
+    for prefix in scale_prefixes {
+        let weight_key = format!("{prefix}.weight");
+        let scales_key = format!("{prefix}.scales");
+        let biases_key = format!("{prefix}.biases");
+        let weight = tensors.get(&weight_key).ok_or_else(|| {
+            anyhow!("{prefix}: quantized storage has `{scales_key}` but missing `{weight_key}`")
+        })?;
+        let scales = tensors
+            .get(&scales_key)
+            .expect("scale key was collected from tensors");
+        let biases = tensors.get(&biases_key);
+        let qmeta = quant_overrides
+            .get(&prefix)
+            .copied()
+            .or(quant)
+            .ok_or_else(|| {
+                anyhow!(
+                    "{prefix}: quantized storage exists but Loader has no quantization metadata"
+                )
+            })?;
+        qmeta.validate_storage(&prefix, weight, scales, biases)?;
+    }
+
+    let mut bias_prefixes: Vec<String> = tensors
+        .keys()
+        .filter_map(|key| key.strip_suffix(".biases").map(str::to_owned))
+        .collect();
+    bias_prefixes.sort();
+    for prefix in bias_prefixes {
+        let scales_key = format!("{prefix}.scales");
+        if !tensors.contains_key(&scales_key) {
+            return Err(anyhow!(
+                "{prefix}: quantized storage has `{prefix}.biases` but missing `{scales_key}`"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn quant_config_value(config_raw: &serde_json::Value) -> Option<&serde_json::Value> {
     config_raw
         .get("quantization")
@@ -757,16 +830,17 @@ fn parse_quant_meta_value_with_mode(
         i32::try_from(bits_i64).with_context(|| format!("{context_name}.bits out of i32 range"))?;
     let mode = match force_mode {
         Some(QuantMode::OptiQ) => match q.get("mode").and_then(|m| m.as_str()) {
-            Some("affine") | None => QuantMode::OptiQ,
+            Some("affine") | Some("optiq") | None => QuantMode::OptiQ,
             Some(other) => {
                 return Err(anyhow!(
-                    "unsupported {context_name}.mode `{other}` for OptiQ affine storage"
+                    "unsupported {context_name}.mode `{other}` for OptiQ affine-compatible storage"
                 ));
             }
         },
         Some(mode) => mode,
         None => match q.get("mode").and_then(|m| m.as_str()) {
             Some("affine") => QuantMode::Affine,
+            Some("optiq") => QuantMode::OptiQ,
             Some("mxfp4") => QuantMode::Mxfp4,
             Some("mxfp8") => QuantMode::Mxfp8,
             Some(other) => return Err(anyhow!("unsupported {context_name}.mode `{other}`")),
@@ -794,6 +868,9 @@ fn validate_quant_meta_contract(
         QuantMode::Affine if matches!(bits, 2 | 4 | 5 | 6 | 8) => Ok(()),
         QuantMode::Affine => Err(anyhow!(
             "unsupported {context_name}.bits `{bits}` for affine quantization; supported bits are 2, 4, 5, 6, and 8"
+        )),
+        QuantMode::OptiQ if group_size != 64 => Err(anyhow!(
+            "unsupported {context_name}.group_size `{group_size}` for OptiQ quantization; supported group_size is 64"
         )),
         QuantMode::OptiQ if matches!(bits, 2 | 4 | 8) => Ok(()),
         QuantMode::OptiQ => Err(anyhow!(
@@ -831,7 +908,80 @@ fn validate_optiq_metadata(metadata: &serde_json::Value) -> Result<()> {
     if method != "optiq_mixed_precision" {
         return Err(anyhow!("unsupported optiq_metadata.method `{method}`"));
     }
-    optiq_per_layer(metadata)?;
+    let per_layer = optiq_per_layer(metadata)?;
+    if per_layer.is_empty() {
+        return Err(anyhow!("optiq_metadata.per_layer must not be empty"));
+    }
+    for (key, value) in per_layer {
+        if key.trim().is_empty() {
+            return Err(anyhow!(
+                "optiq_metadata.per_layer contains an empty tensor prefix"
+            ));
+        }
+        parse_quant_meta_value_with_mode(
+            value,
+            None,
+            Some(QuantMode::OptiQ),
+            &format!("optiq_metadata.per_layer.{key}"),
+        )?;
+    }
+    validate_optiq_metadata_optional_number(metadata, "target_bpw")?;
+    validate_optiq_metadata_optional_number(metadata, "achieved_bpw")?;
+    validate_optiq_metadata_optional_number(metadata, "threshold")?;
+    validate_optiq_metadata_optional_string(metadata, "base_model")?;
+    validate_optiq_metadata_optional_string(metadata, "reference")?;
+    validate_optiq_metadata_bit_counts(metadata, per_layer.len())?;
+    Ok(())
+}
+
+fn validate_optiq_metadata_optional_number(metadata: &serde_json::Value, key: &str) -> Result<()> {
+    if let Some(value) = metadata.get(key) {
+        if !value.is_number() {
+            return Err(anyhow!("optiq_metadata.{key} must be numeric when present"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_optiq_metadata_optional_string(metadata: &serde_json::Value, key: &str) -> Result<()> {
+    if let Some(value) = metadata.get(key) {
+        if !value.is_string() {
+            return Err(anyhow!(
+                "optiq_metadata.{key} must be a string when present"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_optiq_metadata_count(metadata: &serde_json::Value, key: &str) -> Result<Option<usize>> {
+    let Some(value) = metadata.get(key) else {
+        return Ok(None);
+    };
+    let count = value
+        .as_u64()
+        .ok_or_else(|| anyhow!("optiq_metadata.{key} must be a non-negative integer count"))?;
+    usize::try_from(count)
+        .with_context(|| format!("optiq_metadata.{key} out of usize range"))
+        .map(Some)
+}
+
+fn validate_optiq_metadata_bit_counts(
+    metadata: &serde_json::Value,
+    per_layer_count: usize,
+) -> Result<()> {
+    let low = validate_optiq_metadata_count(metadata, "n_low_bits")?;
+    let high = validate_optiq_metadata_count(metadata, "n_high_bits")?;
+    if let (Some(low), Some(high)) = (low, high) {
+        let total = low
+            .checked_add(high)
+            .ok_or_else(|| anyhow!("optiq_metadata n_low_bits+n_high_bits overflows"))?;
+        if total != per_layer_count {
+            return Err(anyhow!(
+                "optiq_metadata n_low_bits+n_high_bits must equal per_layer count {per_layer_count}, got {total}"
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -1000,7 +1150,7 @@ mod tests {
         assert_eq!(q.group_size, 32);
         assert_eq!(q.bits, 4);
         assert_eq!(q.mode, QuantMode::Mxfp4);
-        assert_eq!(q.mode.mlx_mode(), "mxfp4");
+        assert_eq!(q.mode.mlx_backend_mode(), "mxfp4");
         assert!(!q.mode.uses_affine_storage());
         assert_eq!(q.mode.output_dtype(Dtype::Uint8, None), Dtype::Bfloat16);
     }
@@ -1014,7 +1164,7 @@ mod tests {
         assert_eq!(q.group_size, 32);
         assert_eq!(q.bits, 8);
         assert_eq!(q.mode, QuantMode::Mxfp8);
-        assert_eq!(q.mode.mlx_mode(), "mxfp8");
+        assert_eq!(q.mode.mlx_backend_mode(), "mxfp8");
         assert!(!q.mode.uses_affine_storage());
         assert_eq!(q.mode.output_dtype(Dtype::Uint8, None), Dtype::Bfloat16);
     }
@@ -1123,6 +1273,76 @@ mod tests {
         affine_storage(5, &[10240, 400], &[10240, 40]).expect("valid 5-bit affine storage");
         affine_storage(6, &[10240, 480], &[10240, 40]).expect("valid 6-bit affine storage");
         affine_storage(5, &[4, 2, 10], &[4, 2, 1]).expect("valid batched 5-bit affine storage");
+    }
+
+    #[test]
+    fn optiq_storage_uses_strict_affine_compatible_contract() {
+        let meta = QuantMeta {
+            group_size: 64,
+            bits: 4,
+            mode: QuantMode::OptiQ,
+        };
+        let weight = Array::zeros((2, 8), Dtype::Uint32).unwrap();
+        let scales = Array::zeros((2, 1), Dtype::Bfloat16).unwrap();
+        let biases = Array::zeros((2, 1), Dtype::Bfloat16).unwrap();
+        meta.validate_storage("proj", &weight, &scales, Some(&biases))
+            .expect("valid OptiQ affine-compatible storage");
+
+        let err = meta
+            .validate_storage("proj", &weight, &scales, None)
+            .expect_err("OptiQ storage requires biases");
+        assert!(err.to_string().contains("OptiQ"), "{err:#}");
+
+        let invalid_group = QuantMeta {
+            group_size: 128,
+            bits: 4,
+            mode: QuantMode::OptiQ,
+        };
+        let err = invalid_group
+            .validate_storage("proj", &weight, &scales, Some(&biases))
+            .expect_err("OptiQ group size is fixed");
+        assert!(err.to_string().contains("supported value is 64"), "{err:#}");
+    }
+
+    #[test]
+    fn quantized_storage_manifest_validates_all_quantized_tensors() {
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "model.layers.0.mlp.down_proj.weight".to_owned(),
+            Array::zeros((2, 8), Dtype::Uint32).unwrap(),
+        );
+        tensors.insert(
+            "model.layers.0.mlp.down_proj.scales".to_owned(),
+            Array::zeros((2, 1), Dtype::Bfloat16).unwrap(),
+        );
+        tensors.insert(
+            "model.layers.0.mlp.down_proj.biases".to_owned(),
+            Array::zeros((2, 1), Dtype::Bfloat16).unwrap(),
+        );
+        let global = QuantMeta {
+            group_size: 64,
+            bits: 4,
+            mode: QuantMode::OptiQ,
+        };
+        validate_quantized_storage_manifest(&tensors, Some(global), &HashMap::new())
+            .expect("valid OptiQ manifest");
+
+        tensors.remove("model.layers.0.mlp.down_proj.weight");
+        let err = validate_quantized_storage_manifest(&tensors, Some(global), &HashMap::new())
+            .expect_err("scale without packed weight must fail");
+        assert!(err.to_string().contains("missing"), "{err:#}");
+    }
+
+    #[test]
+    fn quantized_storage_manifest_rejects_orphan_biases() {
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "model.layers.0.mlp.down_proj.biases".to_owned(),
+            Array::zeros((2, 1), Dtype::Bfloat16).unwrap(),
+        );
+        let err = validate_quantized_storage_manifest(&tensors, None, &HashMap::new())
+            .expect_err("orphan quant biases must fail");
+        assert!(err.to_string().contains("missing"), "{err:#}");
     }
 
     #[test]
@@ -1332,6 +1552,32 @@ mod tests {
     }
 
     #[test]
+    fn parse_quant_meta_accepts_explicit_optiq_mode_without_sidecar() {
+        let cfg = json!({
+            "quantization": { "group_size": 64, "bits": 4, "mode": "optiq" }
+        });
+        let q = parse_quant_meta(&cfg).unwrap().expect("quant");
+        assert_eq!(
+            q,
+            QuantMeta {
+                group_size: 64,
+                bits: 4,
+                mode: QuantMode::OptiQ,
+            }
+        );
+        assert_eq!(q.mode.mlx_backend_mode(), "affine");
+    }
+
+    #[test]
+    fn parse_quant_meta_rejects_optiq_group_size_outside_contract() {
+        let cfg = json!({
+            "quantization": { "group_size": 128, "bits": 4, "mode": "optiq" }
+        });
+        let err = parse_quant_meta(&cfg).expect_err("OptiQ group size must be strict");
+        assert!(err.to_string().contains("group_size"), "{err:#}");
+    }
+
+    #[test]
     fn parse_quant_overrides_accepts_optiq_per_layer_not_duplicated_in_config() {
         let cfg = json!({
             "quantization": { "group_size": 64, "bits": 4, "mode": "affine" }
@@ -1404,6 +1650,47 @@ mod tests {
         assert!(err
             .to_string()
             .contains("unsupported optiq_metadata.method"));
+    }
+
+    #[test]
+    fn optiq_metadata_requires_non_empty_per_layer() {
+        let optiq = json!({
+            "method": "optiq_mixed_precision",
+            "per_layer": {}
+        });
+        let err = validate_optiq_metadata(&optiq).expect_err("empty OptiQ per_layer must fail");
+        assert!(err.to_string().contains("must not be empty"), "{err:#}");
+    }
+
+    #[test]
+    fn optiq_metadata_validates_count_fields() {
+        let optiq = json!({
+            "method": "optiq_mixed_precision",
+            "n_low_bits": 1,
+            "n_high_bits": 1,
+            "target_bpw": 5.0,
+            "achieved_bpw": 5.2,
+            "threshold": 0.0,
+            "base_model": "mlx-community/base",
+            "reference": "optiq",
+            "per_layer": {
+                "model.layers.0.self_attn.q_proj": {"group_size": 64, "bits": 4},
+                "model.layers.0.self_attn.k_proj": {"group_size": 64, "bits": 8}
+            }
+        });
+        validate_optiq_metadata(&optiq).expect("valid OptiQ metadata");
+
+        let bad = json!({
+            "method": "optiq_mixed_precision",
+            "n_low_bits": 1,
+            "n_high_bits": 0,
+            "per_layer": {
+                "model.layers.0.self_attn.q_proj": {"group_size": 64, "bits": 4},
+                "model.layers.0.self_attn.k_proj": {"group_size": 64, "bits": 8}
+            }
+        });
+        let err = validate_optiq_metadata(&bad).expect_err("count mismatch must fail");
+        assert!(err.to_string().contains("per_layer count"), "{err:#}");
     }
 
     #[test]
@@ -1543,7 +1830,12 @@ mod tests {
             });
             let optiq = json!({
                 "method": "optiq_mixed_precision",
-                "per_layer": {}
+                "per_layer": {
+                    "model.layers.0.self_attn.q_proj": {
+                        "group_size": 64,
+                        "bits": 4
+                    }
+                }
             });
             let err = parse_quant_meta_with_optiq(&cfg, Some(&optiq))
                 .expect_err("OptiQ contract must remain limited to its existing widths");
