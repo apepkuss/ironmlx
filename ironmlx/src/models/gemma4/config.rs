@@ -200,6 +200,8 @@ pub struct Gemma4TextConfig {
     pub num_experts: Option<i32>,
     #[serde(default)]
     pub top_k_experts: Option<i32>,
+    #[serde(default)]
+    pub moe_intermediate_size: Option<i32>,
     pub layer_types: Vec<String>,
     #[serde(default = "default_true")]
     pub tie_word_embeddings: bool,
@@ -508,11 +510,12 @@ impl Gemma4TextConfig {
                 self.model_type
             ));
         }
-        if self.enable_moe_block || self.num_experts.is_some() || self.top_k_experts.is_some() {
+        if assistant && self.enable_moe_block {
             return Err(anyhow!(
-                "Gemma4 Dense support only accepts enable_moe_block=false; Gemma4 MoE is out of scope"
+                "Gemma4AssistantConfig: assistant MoE text_config is not supported"
             ));
         }
+        self.validate_moe_config()?;
         if self.num_hidden_layers <= 0 {
             return Err(anyhow!(
                 "Gemma4TextConfig: num_hidden_layers must be > 0, got {}",
@@ -544,9 +547,7 @@ impl Gemma4TextConfig {
             ));
         }
         if !self.tie_word_embeddings {
-            return Err(anyhow!(
-                "Gemma4 Dense e4b path expects tie_word_embeddings=true"
-            ));
+            return Err(anyhow!("Gemma4 text path expects tie_word_embeddings=true"));
         }
         if !self.rope_parameters.contains_key("sliding_attention") {
             self.rope_parameters.insert(
@@ -577,6 +578,46 @@ impl Gemma4TextConfig {
             .map(|s| Gemma4LayerKind::from_str(s))
             .collect::<Result<Vec<_>>>()?;
         self.previous_kvs = self.build_previous_kvs()?;
+        Ok(())
+    }
+
+    fn validate_moe_config(&self) -> Result<()> {
+        if !self.enable_moe_block {
+            if self.num_experts.is_some()
+                || self.top_k_experts.is_some()
+                || self.moe_intermediate_size.is_some()
+            {
+                return Err(anyhow!(
+                    "Gemma4TextConfig: num_experts/top_k_experts/moe_intermediate_size require enable_moe_block=true"
+                ));
+            }
+            return Ok(());
+        }
+
+        let num_experts = self.num_experts.ok_or_else(|| {
+            anyhow!("Gemma4TextConfig: enable_moe_block=true requires num_experts")
+        })?;
+        if num_experts <= 0 {
+            return Err(anyhow!(
+                "Gemma4TextConfig: num_experts must be > 0, got {num_experts}"
+            ));
+        }
+        let top_k = self.top_k_experts.ok_or_else(|| {
+            anyhow!("Gemma4TextConfig: enable_moe_block=true requires top_k_experts")
+        })?;
+        if top_k <= 0 || top_k > num_experts {
+            return Err(anyhow!(
+                "Gemma4TextConfig: top_k_experts must be in 1..=num_experts, got top_k_experts={top_k}, num_experts={num_experts}"
+            ));
+        }
+        let moe_intermediate = self.moe_intermediate_size.ok_or_else(|| {
+            anyhow!("Gemma4TextConfig: enable_moe_block=true requires moe_intermediate_size")
+        })?;
+        if moe_intermediate <= 0 {
+            return Err(anyhow!(
+                "Gemma4TextConfig: moe_intermediate_size must be > 0, got {moe_intermediate}"
+            ));
+        }
         Ok(())
     }
 
@@ -616,6 +657,16 @@ impl Gemma4TextConfig {
 
     pub fn all_layers_share_external_kv(&self) -> bool {
         self.num_kv_shared_layers == self.num_hidden_layers
+    }
+
+    pub(crate) fn num_experts_value(&self) -> i32 {
+        self.num_experts
+            .expect("Gemma4TextConfig validation requires num_experts for MoE")
+    }
+
+    pub(crate) fn top_k_experts_value(&self) -> i32 {
+        self.top_k_experts
+            .expect("Gemma4TextConfig validation requires top_k_experts for MoE")
     }
 
     pub fn rope_params_for(&self, kind: Gemma4LayerKind) -> &Gemma4RopeParams {
@@ -666,6 +717,36 @@ mod tests {
             "num_kv_shared_layers": 18,
             "hidden_size_per_layer_input": 256,
             "layer_types": (0..42).map(|i| if (i + 1) % 6 == 0 { "full_attention" } else { "sliding_attention" }).collect::<Vec<_>>(),
+            "rope_parameters": {
+                "full_attention": {"partial_rotary_factor": 0.25, "rope_theta": 1000000.0, "rope_type": "proportional"},
+                "sliding_attention": {"rope_theta": 10000.0, "rope_type": "default"}
+            }
+        }))
+        .unwrap();
+        cfg.validate_and_finalize().unwrap();
+        cfg
+    }
+
+    fn moe_26b_like() -> Gemma4TextConfig {
+        let mut cfg: Gemma4TextConfig = serde_json::from_value(serde_json::json!({
+            "model_type": "gemma4_text",
+            "hidden_size": 2816,
+            "num_hidden_layers": 30,
+            "intermediate_size": 2112,
+            "moe_intermediate_size": 704,
+            "num_attention_heads": 8,
+            "head_dim": 256,
+            "global_head_dim": 512,
+            "vocab_size": 262144,
+            "num_key_value_heads": 1,
+            "num_global_key_value_heads": 2,
+            "num_kv_shared_layers": 0,
+            "hidden_size_per_layer_input": 0,
+            "attention_k_eq_v": true,
+            "enable_moe_block": true,
+            "num_experts": 128,
+            "top_k_experts": 8,
+            "layer_types": (0..30).map(|i| if (i + 1) % 6 == 0 { "full_attention" } else { "sliding_attention" }).collect::<Vec<_>>(),
             "rope_parameters": {
                 "full_attention": {"partial_rotary_factor": 0.25, "rope_theta": 1000000.0, "rope_type": "proportional"},
                 "sliding_attention": {"rope_theta": 10000.0, "rope_type": "default"}
@@ -743,6 +824,47 @@ mod tests {
         .unwrap();
         cfg.validate_and_finalize().unwrap();
         cfg
+    }
+
+    #[test]
+    fn gemma4_moe_26b_like_config_validates() {
+        let cfg = moe_26b_like();
+
+        assert!(cfg.enable_moe_block);
+        assert_eq!(cfg.num_experts_value(), 128);
+        assert_eq!(cfg.top_k_experts_value(), 8);
+        assert_eq!(cfg.moe_intermediate_size, Some(704));
+        assert_eq!(cfg.first_kv_shared_layer_idx(), 30);
+        assert_eq!(cfg.kv_heads_for_layer(5), 2);
+    }
+
+    #[test]
+    fn dense_config_rejects_moe_fields_without_moe_enabled() {
+        let mut value = serde_json::json!({
+            "model_type": "gemma4_text",
+            "hidden_size": 2816,
+            "num_hidden_layers": 1,
+            "intermediate_size": 2112,
+            "num_attention_heads": 8,
+            "head_dim": 256,
+            "vocab_size": 262144,
+            "num_key_value_heads": 1,
+            "num_kv_shared_layers": 0,
+            "layer_types": ["full_attention"],
+            "num_experts": 128
+        });
+        let mut cfg: Gemma4TextConfig = serde_json::from_value(value.clone()).unwrap();
+        let err = cfg
+            .validate_and_finalize()
+            .expect_err("dense config must reject dangling MoE fields");
+        assert!(err.to_string().contains("require enable_moe_block=true"));
+
+        value["enable_moe_block"] = serde_json::Value::Bool(true);
+        let mut cfg: Gemma4TextConfig = serde_json::from_value(value).unwrap();
+        let err = cfg
+            .validate_and_finalize()
+            .expect_err("MoE config must require top_k_experts and moe_intermediate_size");
+        assert!(err.to_string().contains("requires top_k_experts"));
     }
 
     fn e4b_assistant_like() -> Gemma4AssistantConfig {

@@ -35,7 +35,7 @@ use mlx::ops::sort::{argpartition_on, argsort_on};
 use mlx::{Array, StreamOrDevice};
 
 use crate::core::{logical_width_from_packed, Loader, QuantMeta};
-use crate::nn::activations::{build_swiglu, invoke_swiglu};
+use crate::nn::activations::{build_geglu_tanh, build_swiglu, invoke_geglu_tanh, invoke_swiglu};
 use crate::nn::{Linear, Mlp};
 use crate::Result;
 
@@ -47,6 +47,19 @@ use crate::Result;
 /// diverge from the reference route packing even before any KV-cache logic runs.
 const SORTED_ROUTING_MIN_BS_K: i32 = 64;
 const MAX_EXACT_U32_IN_F32: i32 = 1 << 24;
+
+#[derive(Debug, Clone, Copy)]
+enum RoutedActivation {
+    SwiGlu,
+    GeGluTanh,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RoutedApplyOptions {
+    layer_idx: i32,
+    cast_output_to_expert_dtype: bool,
+    activation: RoutedActivation,
+}
 
 fn sorted_token_indices_from_sort_perm(
     sort_perm: &Array,
@@ -264,6 +277,8 @@ pub struct RoutedExperts {
     /// Lazily-built compiled SwiGLU closure for the routed activation.
     /// Owned here so `apply_experts` is self-contained.
     swiglu: std::sync::OnceLock<CompiledFn>,
+    /// Lazily-built compiled GeGLU closure for Gemma-family routed experts.
+    geglu: std::sync::OnceLock<CompiledFn>,
 }
 
 impl RoutedExperts {
@@ -315,6 +330,7 @@ impl RoutedExperts {
             bits: gate_meta.bits,
             num_experts,
             swiglu: std::sync::OnceLock::new(),
+            geglu: std::sync::OnceLock::new(),
         })
     }
 
@@ -600,7 +616,39 @@ impl RoutedExperts {
         target: StreamOrDevice,
         layer_idx: i32,
     ) -> Result<Array> {
-        self.apply_experts_inner(x, inds, weights, target, layer_idx, false)
+        self.apply_experts_inner(
+            x,
+            inds,
+            weights,
+            target,
+            RoutedApplyOptions {
+                layer_idx,
+                cast_output_to_expert_dtype: false,
+                activation: RoutedActivation::SwiGlu,
+            },
+        )
+    }
+
+    /// Gemma-family routed combine using GELU(tanh)-gated expert activation.
+    pub fn apply_experts_geglu(
+        &self,
+        x: &Array,
+        inds: &Array,
+        weights: &Array,
+        target: StreamOrDevice,
+        layer_idx: i32,
+    ) -> Result<Array> {
+        self.apply_experts_inner(
+            x,
+            inds,
+            weights,
+            target,
+            RoutedApplyOptions {
+                layer_idx,
+                cast_output_to_expert_dtype: false,
+                activation: RoutedActivation::GeGluTanh,
+            },
+        )
     }
 
     /// GLM/DeepSeek-style routed combine where the weighted-reduce result is
@@ -615,7 +663,17 @@ impl RoutedExperts {
         target: StreamOrDevice,
         layer_idx: i32,
     ) -> Result<Array> {
-        self.apply_experts_inner(x, inds, weights, target, layer_idx, true)
+        self.apply_experts_inner(
+            x,
+            inds,
+            weights,
+            target,
+            RoutedApplyOptions {
+                layer_idx,
+                cast_output_to_expert_dtype: true,
+                activation: RoutedActivation::SwiGlu,
+            },
+        )
     }
 
     fn apply_experts_inner(
@@ -624,8 +682,7 @@ impl RoutedExperts {
         inds: &Array,
         weights: &Array,
         target: StreamOrDevice,
-        layer_idx: i32,
-        cast_output_to_expert_dtype: bool,
+        options: RoutedApplyOptions,
     ) -> Result<Array> {
         let xdims = x.shape();
         let xvec = xdims.as_slice();
@@ -652,7 +709,7 @@ impl RoutedExperts {
             with_glm_routed_experts_child_span(
                 child_spans_enabled,
                 "glm_moe_routed_gate_up_gather_qmm",
-                layer_idx,
+                options.layer_idx,
                 || -> Result<(Array, Array, Array, bool, Option<Array>)> {
                     let result = if use_sorted {
                         // --- Sorted routing path. ---
@@ -703,14 +760,18 @@ impl RoutedExperts {
                 },
             )?;
 
-        // SwiGLU activation: silu(gate) * up. Element-wise; same code path for
-        // both routing branches.
+        // Routed activation. Qwen/GLM use SwiGLU; Gemma4 MoE uses GeGLU.
         let act = with_glm_routed_experts_child_span(
             child_spans_enabled,
             "glm_moe_routed_swiglu",
-            layer_idx,
+            options.layer_idx,
             || -> Result<Array> {
-                let act = invoke_swiglu(self.swiglu(), &gate_out, &up_out)?;
+                let act = match options.activation {
+                    RoutedActivation::SwiGlu => invoke_swiglu(self.swiglu(), &gate_out, &up_out)?,
+                    RoutedActivation::GeGluTanh => {
+                        invoke_geglu_tanh(self.geglu(), &gate_out, &up_out)?
+                    }
+                };
                 Ok(act)
             },
         )?;
@@ -718,7 +779,7 @@ impl RoutedExperts {
         let down_out = with_glm_routed_experts_child_span(
             child_spans_enabled,
             "glm_moe_routed_down_gather_qmm",
-            layer_idx,
+            options.layer_idx,
             || -> Result<Array> {
                 let down_out_raw = mlx::quantization::gather_quantized_matmul_on(
                     &act,
@@ -759,14 +820,14 @@ impl RoutedExperts {
         with_glm_routed_experts_child_span(
             child_spans_enabled,
             "glm_moe_routed_weighted_reduce",
-            layer_idx,
+            options.layer_idx,
             || -> Result<Array> {
                 let weights_unsq = mlx::ops::shape::expand_dims_on(weights, -1_i32, target)
                     .context("RoutedExperts::apply_experts: expand weights dim")?;
                 let weighted = &down_out * &weights_unsq;
                 let mut out = mlx::ops::sum_on(&weighted, -2_i32, false, target)
                     .context("RoutedExperts::apply_experts: sum across k")?;
-                if cast_output_to_expert_dtype {
+                if options.cast_output_to_expert_dtype {
                     out = out.astype_on(down_out.dtype(), target).context(
                         "RoutedExperts::apply_experts: cast weighted sum to expert dtype",
                     )?;
@@ -779,6 +840,10 @@ impl RoutedExperts {
     /// Lazily-built compiled SwiGLU closure shared by `apply_experts`.
     fn swiglu(&self) -> &CompiledFn {
         self.swiglu.get_or_init(build_swiglu)
+    }
+
+    fn geglu(&self) -> &CompiledFn {
+        self.geglu.get_or_init(build_geglu_tanh)
     }
 }
 
