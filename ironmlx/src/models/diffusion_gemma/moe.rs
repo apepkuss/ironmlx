@@ -206,7 +206,7 @@ impl DiffusionGemmaExperts {
                 true,
                 Some(self.group_size),
                 Some(self.bits),
-                self.mode.mlx_mode(),
+                self.mode.mlx_backend_mode(),
                 true,
                 target,
             )
@@ -227,7 +227,7 @@ impl DiffusionGemmaExperts {
                 true,
                 Some(self.group_size),
                 Some(self.bits),
-                self.mode.mlx_mode(),
+                self.mode.mlx_backend_mode(),
                 false,
                 target,
             )
@@ -250,7 +250,7 @@ impl DiffusionGemmaExperts {
             true,
             Some(self.group_size),
             Some(self.bits),
-            self.mode.mlx_mode(),
+            self.mode.mlx_backend_mode(),
             sorted,
             target,
         )

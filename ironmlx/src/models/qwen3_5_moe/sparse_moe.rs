@@ -34,7 +34,7 @@ use mlx::ops::shape::concatenate_on;
 use mlx::ops::sort::{argpartition_on, argsort_on};
 use mlx::{Array, StreamOrDevice};
 
-use crate::core::{Loader, QuantMode};
+use crate::core::{logical_width_from_packed, Loader, QuantMeta};
 use crate::nn::activations::{build_swiglu, invoke_swiglu};
 use crate::nn::{Linear, Mlp};
 use crate::Result;
@@ -153,15 +153,63 @@ fn with_glm_routed_experts_child_span<T>(
     }
 }
 
+struct ExpertQuantProjection {
+    weight: Array,
+    scales: Array,
+    biases: Option<Array>,
+    meta: QuantMeta,
+}
+
+impl ExpertQuantProjection {
+    fn gather(
+        &self,
+        lhs: &Array,
+        rhs_indices: &Array,
+        sorted_indices: bool,
+        target: StreamOrDevice,
+        context: &'static str,
+    ) -> Result<Array> {
+        mlx::quantization::gather_quantized_matmul_on(
+            lhs,
+            &self.weight,
+            &self.scales,
+            self.biases.as_ref(),
+            None,
+            Some(rhs_indices),
+            true,
+            Some(self.meta.group_size),
+            Some(self.meta.bits),
+            self.meta.mode.mlx_backend_mode(),
+            sorted_indices,
+            target,
+        )
+        .with_context(|| format!("RoutedExperts::apply_experts: {context}"))
+    }
+}
+
+enum GateUpPath {
+    Fused {
+        /// Legacy source weights, consumed on first forward call. After
+        /// lazy fused build the inner `Option` is `take()`-d to `None`,
+        /// releasing the original Array refs back to MLX.
+        legacy_source: std::sync::Mutex<Option<LazyGateUpSource>>,
+        /// Lazy-built fused weights. Initialized on the first forward call so
+        /// the resulting MLX Arrays are bound to the worker thread's Metal
+        /// stream. See struct doc for failure-mode rationale.
+        fused_gate_up: std::sync::OnceLock<FusedGateUp>,
+        meta: QuantMeta,
+    },
+    Split {
+        gate: ExpertQuantProjection,
+        up: ExpertQuantProjection,
+    },
+}
+
 /// Source legacy gate + up weights, consumed once during lazy fused-weight
 /// build then dropped to release the two packed `(E × I × H)` buffers per layer.
 struct LazyGateUpSource {
-    gate_weight: Array,
-    gate_scales: Array,
-    gate_biases: Option<Array>,
-    up_weight: Array,
-    up_scales: Array,
-    up_biases: Option<Array>,
+    gate: ExpertQuantProjection,
+    up: ExpertQuantProjection,
 }
 
 /// Container for the fused gate+up quantized weights, lazily built on the
@@ -172,6 +220,7 @@ struct FusedGateUp {
     weight: Array,
     scales: Array,
     biases: Option<Array>,
+    meta: QuantMeta,
 }
 
 /// Stacked-expert quantized weights for the routed SwiGLU.
@@ -198,23 +247,19 @@ struct FusedGateUp {
 /// consumed and dropped once the fused build succeeds (avoids doubling
 /// MoE weight footprint by ~16 GB on the 35B model).
 pub struct RoutedExperts {
-    /// Legacy source weights, consumed on first forward call. After
-    /// lazy fused build the inner `Option` is `take()`-d to `None`,
-    /// releasing the original Array refs back to MLX.
-    legacy_source: std::sync::Mutex<Option<LazyGateUpSource>>,
-    /// Lazy-built fused weights. Initialized on the first forward call so
-    /// the resulting MLX Arrays are bound to the worker thread's Metal
-    /// stream. See struct doc for failure-mode rationale.
-    fused_gate_up: std::sync::OnceLock<FusedGateUp>,
+    gate_up: GateUpPath,
     /// Per-projection intermediate size I (= gate_weight.shape(1)).
     /// Cached at load time to avoid recomputing in the hot forward path.
     pub moe_intermediate: i32,
     pub down_weight: Array,
     pub down_scales: Array,
     pub down_biases: Option<Array>,
+    down_meta: QuantMeta,
+    /// Diagnostic/public metadata for the gate projection. Uniform 4-bit MoE
+    /// checkpoints have the same value for gate/up/down; OptiQ mixed-bit
+    /// checkpoints may not, so production dispatch uses per-projection metadata.
     pub group_size: i32,
     pub bits: i32,
-    mode: QuantMode,
     pub num_experts: i32,
     /// Lazily-built compiled SwiGLU closure for the routed activation.
     /// Owned here so `apply_experts` is self-contained.
@@ -228,102 +273,130 @@ impl RoutedExperts {
         let gate_prefix = format!("{prefix}.gate_proj");
         let up_prefix = format!("{prefix}.up_proj");
         let down_prefix = format!("{prefix}.down_proj");
-        let qmeta = loader.quant_meta_for(&gate_prefix).ok_or_else(|| {
-            anyhow!("RoutedExperts requires quantization metadata for `{gate_prefix}`")
-        })?;
-        let up_qmeta = loader.quant_meta_for(&up_prefix).ok_or_else(|| {
-            anyhow!("RoutedExperts requires quantization metadata for `{up_prefix}`")
-        })?;
-        let down_qmeta = loader.quant_meta_for(&down_prefix).ok_or_else(|| {
-            anyhow!("RoutedExperts requires quantization metadata for `{down_prefix}`")
-        })?;
-        if qmeta != up_qmeta || qmeta != down_qmeta {
-            return Err(anyhow!(
-                "RoutedExperts requires matching gate/up/down quantization metadata; gate={qmeta:?}, up={up_qmeta:?}, down={down_qmeta:?}"
-            ));
-        }
+        let gate = Self::load_projection(loader, &gate_prefix, "gate_proj")?;
+        let up = Self::load_projection(loader, &up_prefix, "up_proj")?;
+        let down = Self::load_projection(loader, &down_prefix, "down_proj")?;
 
-        let gate_weight = loader
-            .tensor(&format!("{gate_prefix}.weight"))
-            .context("RoutedExperts: gate_proj.weight")?
-            .clone();
-        let gate_scales = loader
-            .tensor(&format!("{gate_prefix}.scales"))
-            .context("RoutedExperts: gate_proj.scales")?
-            .clone();
-        let gate_biases = loader.tensor_opt(&format!("{gate_prefix}.biases")).cloned();
+        let num_experts = gate.weight.shape().as_slice()[0];
+        let moe_intermediate = gate.weight.shape().as_slice()[1];
+        Self::validate_projection_shapes(prefix, &gate, &up, &down)?;
 
-        let up_weight = loader
-            .tensor(&format!("{up_prefix}.weight"))
-            .context("RoutedExperts: up_proj.weight")?
-            .clone();
-        let up_scales = loader
-            .tensor(&format!("{up_prefix}.scales"))
-            .context("RoutedExperts: up_proj.scales")?
-            .clone();
-        let up_biases = loader.tensor_opt(&format!("{up_prefix}.biases")).cloned();
-
-        let down_weight = loader
-            .tensor(&format!("{down_prefix}.weight"))
-            .context("RoutedExperts: down_proj.weight")?
-            .clone();
-        let down_scales = loader
-            .tensor(&format!("{down_prefix}.scales"))
-            .context("RoutedExperts: down_proj.scales")?
-            .clone();
-        let down_biases = loader.tensor_opt(&format!("{down_prefix}.biases")).cloned();
-
-        qmeta.validate_storage(
-            &gate_prefix,
-            &gate_weight,
-            &gate_scales,
-            gate_biases.as_ref(),
-        )?;
-        qmeta.validate_storage(&up_prefix, &up_weight, &up_scales, up_biases.as_ref())?;
-        qmeta.validate_storage(
-            &down_prefix,
-            &down_weight,
-            &down_scales,
-            down_biases.as_ref(),
-        )?;
-
-        let num_experts = gate_weight.shape().as_slice()[0];
-        let moe_intermediate = gate_weight.shape().as_slice()[1];
-
-        // Validate biases presence symmetry upfront (cheap, no MLX op).
-        match (gate_biases.as_ref(), up_biases.as_ref()) {
-            (Some(_), Some(_)) | (None, None) => {}
-            (gb, ub) => {
-                return Err(anyhow!(
-                    "RoutedExperts: gate/up biases presence mismatch (gate={}, up={}); affine quantization requires both or neither",
-                    gb.is_some(),
-                    ub.is_some()
-                ));
+        let gate_meta = gate.meta;
+        let down_meta = down.meta;
+        let gate_up = if gate.meta == up.meta {
+            // Validate biases presence symmetry upfront (cheap, no MLX op).
+            match (gate.biases.as_ref(), up.biases.as_ref()) {
+                (Some(_), Some(_)) | (None, None) => {}
+                (gb, ub) => {
+                    return Err(anyhow!(
+                        "RoutedExperts: gate/up biases presence mismatch (gate={}, up={}); fused gate/up quantization requires both or neither",
+                        gb.is_some(),
+                        ub.is_some()
+                    ));
+                }
             }
-        }
-
-        let legacy_source = LazyGateUpSource {
-            gate_weight,
-            gate_scales,
-            gate_biases,
-            up_weight,
-            up_scales,
-            up_biases,
+            GateUpPath::Fused {
+                legacy_source: std::sync::Mutex::new(Some(LazyGateUpSource { gate, up })),
+                fused_gate_up: std::sync::OnceLock::new(),
+                meta: gate_meta,
+            }
+        } else {
+            GateUpPath::Split { gate, up }
         };
 
         Ok(Self {
-            legacy_source: std::sync::Mutex::new(Some(legacy_source)),
-            fused_gate_up: std::sync::OnceLock::new(),
+            gate_up,
             moe_intermediate,
-            down_weight,
-            down_scales,
-            down_biases,
-            group_size: qmeta.group_size,
-            bits: qmeta.bits,
-            mode: qmeta.mode,
+            down_weight: down.weight,
+            down_scales: down.scales,
+            down_biases: down.biases,
+            down_meta,
+            group_size: gate_meta.group_size,
+            bits: gate_meta.bits,
             num_experts,
             swiglu: std::sync::OnceLock::new(),
         })
+    }
+
+    fn load_projection(
+        loader: &Loader,
+        prefix: &str,
+        projection_name: &'static str,
+    ) -> Result<ExpertQuantProjection> {
+        let meta = loader.quant_meta_for(prefix).ok_or_else(|| {
+            anyhow!("RoutedExperts requires quantization metadata for `{prefix}`")
+        })?;
+        let weight = loader
+            .tensor(&format!("{prefix}.weight"))
+            .with_context(|| format!("RoutedExperts: {projection_name}.weight"))?
+            .clone();
+        let scales = loader
+            .tensor(&format!("{prefix}.scales"))
+            .with_context(|| format!("RoutedExperts: {projection_name}.scales"))?
+            .clone();
+        let biases = loader.tensor_opt(&format!("{prefix}.biases")).cloned();
+        meta.validate_storage(prefix, &weight, &scales, biases.as_ref())?;
+        Ok(ExpertQuantProjection {
+            weight,
+            scales,
+            biases,
+            meta,
+        })
+    }
+
+    fn validate_projection_shapes(
+        prefix: &str,
+        gate: &ExpertQuantProjection,
+        up: &ExpertQuantProjection,
+        down: &ExpertQuantProjection,
+    ) -> Result<()> {
+        let gate_shape = gate.weight.shape();
+        let up_shape = up.weight.shape();
+        let down_shape = down.weight.shape();
+        let gate_shape = gate_shape.as_slice();
+        let up_shape = up_shape.as_slice();
+        let down_shape = down_shape.as_slice();
+        if gate_shape.len() != 3 || up_shape.len() != 3 || down_shape.len() != 3 {
+            return Err(anyhow!(
+                "{prefix}: routed expert weights must be rank-3 [E,O,packed_K], got gate={gate_shape:?}, up={up_shape:?}, down={down_shape:?}"
+            ));
+        }
+        if gate_shape[0] != up_shape[0] || gate_shape[0] != down_shape[0] {
+            return Err(anyhow!(
+                "{prefix}: gate/up/down expert counts must match, got gate={}, up={}, down={}",
+                gate_shape[0],
+                up_shape[0],
+                down_shape[0]
+            ));
+        }
+        if gate_shape[1] != up_shape[1] {
+            return Err(anyhow!(
+                "{prefix}: gate/up intermediate widths must match, got gate={} and up={}",
+                gate_shape[1],
+                up_shape[1]
+            ));
+        }
+        let hidden_from_gate = logical_width_from_packed(gate_shape[2], gate.meta.bits)
+            .with_context(|| format!("{prefix}: invalid gate packed hidden width"))?;
+        let hidden_from_up = logical_width_from_packed(up_shape[2], up.meta.bits)
+            .with_context(|| format!("{prefix}: invalid up packed hidden width"))?;
+        if hidden_from_gate != hidden_from_up || hidden_from_gate != down_shape[1] {
+            return Err(anyhow!(
+                "{prefix}: hidden width mismatch, gate={}, up={}, down={}",
+                hidden_from_gate,
+                hidden_from_up,
+                down_shape[1]
+            ));
+        }
+        let intermediate_from_down = logical_width_from_packed(down_shape[2], down.meta.bits)
+            .with_context(|| format!("{prefix}: invalid down packed intermediate width"))?;
+        if intermediate_from_down != gate_shape[1] {
+            return Err(anyhow!(
+                "{prefix}: down packed input width {intermediate_from_down} must match gate/up intermediate width {}",
+                gate_shape[1]
+            ));
+        }
+        Ok(())
     }
 
     /// Returns the fused gate+up weights, lazily building them on first
@@ -354,20 +427,29 @@ impl RoutedExperts {
     /// inside the lock and return the populated value. There is no
     /// "raced + lost source" failure mode.
     fn fused_gate_up(&self, target: StreamOrDevice) -> Result<&FusedGateUp> {
+        let GateUpPath::Fused {
+            legacy_source,
+            fused_gate_up,
+            meta,
+        } = &self.gate_up
+        else {
+            return Err(anyhow!(
+                "RoutedExperts: fused gate/up requested for split mixed-bit path"
+            ));
+        };
         // Fast path: already built — no lock needed.
-        if let Some(fused) = self.fused_gate_up.get() {
+        if let Some(fused) = fused_gate_up.get() {
             return Ok(fused);
         }
         // Slow path: hold the mutex across the entire build+set window so a
         // concurrent second caller blocks here until the first builder
         // finishes, then sees the populated OnceLock on the inner re-check.
-        let mut guard = self
-            .legacy_source
+        let mut guard = legacy_source
             .lock()
             .map_err(|e| anyhow!("RoutedExperts: legacy_source mutex poisoned: {e}"))?;
         // Inner re-check: another caller may have raced through the slow
         // path while we were waiting on the mutex.
-        if let Some(fused) = self.fused_gate_up.get() {
+        if let Some(fused) = fused_gate_up.get() {
             return Ok(fused);
         }
         let source = guard.take().ok_or_else(|| {
@@ -376,11 +458,11 @@ impl RoutedExperts {
                  likely a prior panic mid-build that this struct cannot recover from"
             )
         })?;
-        let weight = concatenate_on(&[&source.gate_weight, &source.up_weight], 1, target)
+        let weight = concatenate_on(&[&source.gate.weight, &source.up.weight], 1, target)
             .context("RoutedExperts::fused_gate_up: concatenate weights")?;
-        let scales = concatenate_on(&[&source.gate_scales, &source.up_scales], 1, target)
+        let scales = concatenate_on(&[&source.gate.scales, &source.up.scales], 1, target)
             .context("RoutedExperts::fused_gate_up: concatenate scales")?;
-        let biases = match (source.gate_biases.as_ref(), source.up_biases.as_ref()) {
+        let biases = match (source.gate.biases.as_ref(), source.up.biases.as_ref()) {
             (Some(gb), Some(ub)) => Some(
                 concatenate_on(&[gb, ub], 1, target)
                     .context("RoutedExperts::fused_gate_up: concatenate biases")?,
@@ -413,16 +495,79 @@ impl RoutedExperts {
             weight,
             scales,
             biases,
+            meta: *meta,
         };
         // We hold the mutex AND OnceLock is empty (re-checked above), so
         // `set` cannot fail under correct usage.
-        self.fused_gate_up
+        fused_gate_up
             .set(fused)
             .map_err(|_| anyhow!("RoutedExperts: fused_gate_up OnceLock set raced under mutex"))?;
-        Ok(self
-            .fused_gate_up
+        Ok(fused_gate_up
             .get()
             .expect("just set under mutex; OnceLock is now populated"))
+    }
+
+    fn gate_up_outputs(
+        &self,
+        lhs: &Array,
+        rhs_indices: &Array,
+        sorted_indices: bool,
+        target: StreamOrDevice,
+    ) -> Result<(Array, Array)> {
+        match &self.gate_up {
+            GateUpPath::Fused { .. } => {
+                let fused = self.fused_gate_up(target)?;
+                let gate_up_out = mlx::quantization::gather_quantized_matmul_on(
+                    lhs,
+                    &fused.weight,
+                    &fused.scales,
+                    fused.biases.as_ref(),
+                    None,
+                    Some(rhs_indices),
+                    true,
+                    Some(fused.meta.group_size),
+                    Some(fused.meta.bits),
+                    fused.meta.mode.mlx_backend_mode(),
+                    sorted_indices,
+                    target,
+                )
+                .context("RoutedExperts::apply_experts: gate_up gather_qmm")?;
+                let out_shape = gate_up_out.shape();
+                let out_shape = out_shape.as_slice();
+                let i = self.moe_intermediate;
+                let (starts, gate_ends, up_starts, up_ends) = match out_shape {
+                    [bs_k, one, _two_i] => (
+                        vec![0_i32, 0, 0],
+                        vec![*bs_k, *one, i],
+                        vec![0_i32, 0, i],
+                        vec![*bs_k, *one, 2 * i],
+                    ),
+                    [bs, k, one, _two_i] => (
+                        vec![0_i32, 0, 0, 0],
+                        vec![*bs, *k, *one, i],
+                        vec![0_i32, 0, 0, i],
+                        vec![*bs, *k, *one, 2 * i],
+                    ),
+                    other => {
+                        return Err(anyhow!(
+                            "RoutedExperts::apply_experts: fused gate_up output must be rank-3 or rank-4, got {other:?}"
+                        ));
+                    }
+                };
+                let gate_out = slice_on(&gate_up_out, starts, gate_ends, target)
+                    .context("RoutedExperts::apply_experts: slice gate_out")?;
+                let up_out = slice_on(&gate_up_out, up_starts, up_ends, target)
+                    .context("RoutedExperts::apply_experts: slice up_out")?;
+                Ok((gate_out, up_out))
+            }
+            GateUpPath::Split { gate, up } => {
+                let gate_out =
+                    gate.gather(lhs, rhs_indices, sorted_indices, target, "gate gather_qmm")?;
+                let up_out =
+                    up.gather(lhs, rhs_indices, sorted_indices, target, "up gather_qmm")?;
+                Ok((gate_out, up_out))
+            }
+        }
     }
 
     /// SwitchGLU-style routed-expert combine.
@@ -528,28 +673,14 @@ impl RoutedExperts {
                                 "RoutedExperts::apply_experts: expand_dims sorted_x → [BS*k,1,H]",
                             )?;
 
-                        let fused = self.fused_gate_up(target)?;
-                        let gate_up_out = mlx::quantization::gather_quantized_matmul_on(
-                            &sorted_x_3d,
-                            &fused.weight,
-                            &fused.scales,
-                            fused.biases.as_ref(),
-                            None,
-                            Some(&sorted_topk),
-                            true,
-                            Some(self.group_size),
-                            Some(self.bits),
-                            self.mode.mlx_mode(),
-                            /* sorted_indices */ true,
-                            target,
-                        )
-                        .context("RoutedExperts::apply_experts: gate_up gather_qmm (sorted)")?;
-                        let i = self.moe_intermediate;
-                        let gate_out = slice_on(&gate_up_out, [0_i32, 0, 0], [bs_k, 1, i], target)
-                            .context("RoutedExperts::apply_experts: slice gate_out (sorted)")?;
-                        let up_out =
-                            slice_on(&gate_up_out, [0_i32, 0, i], [bs_k, 1, 2 * i], target)
-                                .context("RoutedExperts::apply_experts: slice up_out (sorted)")?;
+                        let (gate_out, up_out) = self
+                            .gate_up_outputs(
+                                &sorted_x_3d,
+                                &sorted_topk,
+                                /* sorted_indices */ true,
+                                target,
+                            )
+                            .context("RoutedExperts::apply_experts: gate/up gather_qmm (sorted)")?;
 
                         (gate_out, up_out, sorted_topk, true, Some(sort_perm))
                     } else {
@@ -560,31 +691,10 @@ impl RoutedExperts {
                                     "RoutedExperts::apply_experts: expand_dims x → [BS,1,1,H]",
                                 )?; // [BS, 1, 1, H]
 
-                        let fused = self.fused_gate_up(target)?;
-                        let gate_up_out = mlx::quantization::gather_quantized_matmul_on(
-                            &x_in,
-                            &fused.weight,
-                            &fused.scales,
-                            fused.biases.as_ref(),
-                            None,
-                            Some(inds),
-                            true,
-                            Some(self.group_size),
-                            Some(self.bits),
-                            self.mode.mlx_mode(),
-                            false,
-                            target,
-                        )
-                        .context("RoutedExperts::apply_experts: gate_up gather_qmm (default)")?; // [BS, k, 1, 2*I]
-                        let i = self.moe_intermediate;
-                        let gate_out =
-                            slice_on(&gate_up_out, [0_i32, 0, 0, 0], [bs, k, 1, i], target)
-                                .context(
-                                    "RoutedExperts::apply_experts: slice gate_out (default)",
-                                )?;
-                        let up_out =
-                            slice_on(&gate_up_out, [0_i32, 0, 0, i], [bs, k, 1, 2 * i], target)
-                                .context("RoutedExperts::apply_experts: slice up_out (default)")?;
+                        let (gate_out, up_out) =
+                            self.gate_up_outputs(&x_in, inds, false, target).context(
+                                "RoutedExperts::apply_experts: gate/up gather_qmm (default)",
+                            )?;
 
                         (gate_out, up_out, inds.clone(), false, None)
                     };
@@ -618,9 +728,9 @@ impl RoutedExperts {
                     None,
                     Some(&rhs_idx_used),
                     true,
-                    Some(self.group_size),
-                    Some(self.bits),
-                    self.mode.mlx_mode(),
+                    Some(self.down_meta.group_size),
+                    Some(self.down_meta.bits),
+                    self.down_meta.mode.mlx_backend_mode(),
                     sorted_flag,
                     target,
                 )

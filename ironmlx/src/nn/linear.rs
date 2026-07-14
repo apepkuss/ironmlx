@@ -254,7 +254,7 @@ impl Linear {
                     /* transpose = */ true,
                     Some(*group_size),
                     Some(*bits),
-                    mode.mlx_mode(),
+                    mode.mlx_backend_mode(),
                     target,
                 )?;
                 if let Some(b) = bias {
@@ -466,7 +466,7 @@ mod tests {
             &raw_w,
             Some(group_size),
             Some(bits),
-            mode.mlx_mode(),
+            mode.mlx_backend_mode(),
             None,
         )
         .unwrap();
@@ -490,7 +490,7 @@ mod tests {
             true,
             Some(group_size),
             Some(bits),
-            mode.mlx_mode(),
+            mode.mlx_backend_mode(),
         )
         .unwrap();
 
@@ -523,10 +523,10 @@ mod tests {
 
     #[test]
     #[serial(mlx_metal)]
-    fn optiq_quantized_forward_uses_affine_storage() {
+    fn optiq_quantized_forward_uses_independent_mode_with_affine_backend() {
         let out = 3_i32;
-        let in_dim = 32_i32;
-        let group_size = 32_i32;
+        let in_dim = 64_i32;
+        let group_size = 64_i32;
         let bits = 4_i32;
         let w_data: Vec<f32> = (0..(out * in_dim))
             .map(|i| ((i % 19) as f32 - 9.0) * 0.015)
