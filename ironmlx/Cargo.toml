@@ -42,7 +42,6 @@ uuid = { version = "1", features = ["v4"] }
 [features]
 default = []
 vision-dump = []
-p5g-profile = []
 
 [dev-dependencies]
 approx = "0.5"

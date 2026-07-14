@@ -53,8 +53,6 @@ Conclusion: the current MoE routed-MLP execution shape is not the main steady-st
 
 ### Full GatedDeltaNet Path Microbench
 
-Added `scripts/qwen36_gdn_path_compare.py`.
-
 This compares mlx-lm's split-projection GDN reference with an ironmlx-shaped fused qkvz/ba projection path while still using MLX's Python-side `gated_delta_update`.
 
 Results from `/tmp/ironmlx-qwen36-perf-phase4-latest/captures/mlx_gdn_path_compare_seq521_seq1.json`:
@@ -87,29 +85,9 @@ Results from `/tmp/ironmlx-qwen36-perf-phase4-latest/captures/ironmlx_gdn_bench_
 | `seq=1` | fresh cache, output eval only | 0.263 ms | roughly parity with MLX fresh-cache at 0.257 ms |
 | `seq=1` | fresh cache, output + cache-state eval | 0.261 ms | cache-state materialization is not the decode-path issue |
 
-Additional `seq=521` ablations under `p5g-profile`:
-
-| Diagnostic | p50 | Finding |
-| --- | ---: | --- |
-| profile feature off-mode control | 4.037 ms | matches non-profile direct benchmark |
-| substitute conv output | 3.949 ms | conv is not the main root cause |
-| substitute `t_arr` scalar | 4.043 ms | scalar construction is not the root cause |
-| substitute `compute_g` input | 4.877 ms | not a useful optimization direction; changed kernel input values can worsen timing |
-| temporary force-regular-state kernel | 3.959 ms | zero-state kernel variant is not the root cause |
-
 Conclusion: the long-prefill gap is reproduced inside Rust `GatedDeltaNet` itself. The shape-specific signature is important: `seq=1` is at parity while `seq=521` is about 2.3x slower per layer than the MLX Python reference. The remaining high-signal area is the custom gated-delta Metal dispatch path and Rust MLX binding/materialization behavior for long sequences.
 
 ### Direct Stage Breakdown
-
-Added:
-
-- `scripts/qwen36_p5g_direct_summary.py` for direct-bench `[p5g-profile] layer2` log aggregation.
-- `scripts/qwen36_gdn_stage_compare.py` for an aligned MLX/Python stage benchmark using the same fused qkvz/ba projection shape.
-
-Artifacts:
-
-- Rust direct layer2: `/tmp/ironmlx-qwen36-perf-phase4-latest/captures/ironmlx_gdn_bench_layer2_seq521_measured_summary.json`
-- MLX/Python aligned stage: `/tmp/ironmlx-qwen36-perf-phase4-latest/captures/mlx_gdn_stage_seq521_aligned.json`
 
 Selected `seq=521` p50 forced-eval stage timings:
 
@@ -124,20 +102,9 @@ Selected `seq=521` p50 forced-eval stage timings:
 | gated-delta kernel + state | 851 us | 1304 us | Rust is not slower here |
 | gated RMSNorm + out projection | 1000 us | 702 us | secondary Rust-side excess |
 
-The stage sums are higher than the no-profile whole-forward timings because layer2 deliberately inserts eval barriers after each stage. The important directional result is that the custom gated-delta kernel is not the slow stage under aligned forced-eval measurement; the remaining excess is concentrated in qkvz projection and output projection/materialization. This shifts the next investigation from "rewrite GDN recurrent kernel" to "quantized linear / graph scheduling around GDN projections".
+The stage sums are higher than the no-profile whole-forward timings because the measurement deliberately inserts eval barriers after each stage. The important directional result is that the custom gated-delta kernel is not the slow stage under aligned forced-eval measurement; the remaining excess is concentrated in qkvz projection and output projection/materialization. This shifts the next investigation from "rewrite GDN recurrent kernel" to "quantized linear / graph scheduling around GDN projections".
 
 ### Focused Quantized-Linear Breakdown
-
-Added:
-
-- `ironmlx/src/bin/ironmlx-qlinear-bench.rs` for direct Rust benchmarks of GDN qkvz/out projection shapes.
-- `scripts/qwen36_qlinear_compare.py` for the same projection shapes under MLX Python.
-
-Artifacts:
-
-- Rust default qlinear: `/tmp/ironmlx-qwen36-perf-phase4-latest/captures/ironmlx_qlinear_seq521_seq1.json`
-- Rust with direct self_qmm diagnostics: `/tmp/ironmlx-qwen36-perf-phase4-latest/captures/ironmlx_qlinear_self_seq521_seq1.json`
-- MLX/Python qlinear: `/tmp/ironmlx-qwen36-perf-phase4-latest/captures/mlx_qlinear_seq521_seq1.json`
 
 Selected p50 timings:
 
