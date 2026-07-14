@@ -1,0 +1,293 @@
+{
+  "model_id": "mlx-community/gemma-4-e2b-it-5bit",
+  "revision": "dc565aea8c49afb542497310a2d86bf1fd91391f",
+  "architecture": "gemma4",
+  "quantization": {
+    "mode": "affine",
+    "bits": 5,
+    "group_size": 64
+  },
+  "prompt": "What is 2+2?",
+  "prompt_sha256": "52cb6b5e4a038af1756708f98afb718a08c75b87b2f03dbee4dd9c8139c15c5e",
+  "input_ids": [
+    3689,
+    563,
+    236743,
+    236778,
+    236862,
+    236778,
+    236881
+  ],
+  "vocab_size": 262144,
+  "next_token_id": 106,
+  "greedy_token_ids": [
+    106,
+    106,
+    106,
+    106
+  ],
+  "logits_file": "gemma4-5bit.npy",
+  "top_logits": [
+    {
+      "token_id": 106,
+      "logit": -4.6875
+    },
+    {
+      "token_id": 107,
+      "logit": -6.21875
+    },
+    {
+      "token_id": 108,
+      "logit": -7.28125
+    },
+    {
+      "token_id": 1018,
+      "logit": -8.5625
+    },
+    {
+      "token_id": 101,
+      "logit": -8.75
+    },
+    {
+      "token_id": 236829,
+      "logit": -9.875
+    },
+    {
+      "token_id": 236743,
+      "logit": -10.875
+    },
+    {
+      "token_id": 568,
+      "logit": -11.25
+    },
+    {
+      "token_id": 1,
+      "logit": -11.625
+    },
+    {
+      "token_id": 236880,
+      "logit": -12.1875
+    },
+    {
+      "token_id": 236909,
+      "logit": -12.1875
+    },
+    {
+      "token_id": 52,
+      "logit": -12.5625
+    },
+    {
+      "token_id": 236778,
+      "logit": -12.75
+    },
+    {
+      "token_id": 1109,
+      "logit": -12.8125
+    },
+    {
+      "token_id": 138,
+      "logit": -12.9375
+    },
+    {
+      "token_id": 563,
+      "logit": -12.9375
+    },
+    {
+      "token_id": 6985,
+      "logit": -13.375
+    },
+    {
+      "token_id": 2301,
+      "logit": -13.625
+    },
+    {
+      "token_id": 236770,
+      "logit": -13.625
+    },
+    {
+      "token_id": 236800,
+      "logit": -13.6875
+    },
+    {
+      "token_id": 109,
+      "logit": -13.75
+    },
+    {
+      "token_id": 236776,
+      "logit": -13.9375
+    },
+    {
+      "token_id": 564,
+      "logit": -14.0625
+    },
+    {
+      "token_id": 192,
+      "logit": -14.125
+    },
+    {
+      "token_id": 562,
+      "logit": -14.125
+    },
+    {
+      "token_id": 578,
+      "logit": -14.125
+    },
+    {
+      "token_id": 236865,
+      "logit": -14.125
+    },
+    {
+      "token_id": 808,
+      "logit": -14.25
+    },
+    {
+      "token_id": 8438,
+      "logit": -14.25
+    },
+    {
+      "token_id": 432,
+      "logit": -14.3125
+    },
+    {
+      "token_id": 197,
+      "logit": -14.4375
+    },
+    {
+      "token_id": 1174,
+      "logit": -14.4375
+    },
+    {
+      "token_id": 5246,
+      "logit": -14.4375
+    },
+    {
+      "token_id": 236780,
+      "logit": -14.4375
+    },
+    {
+      "token_id": 965,
+      "logit": -14.5
+    },
+    {
+      "token_id": 1030,
+      "logit": -14.5
+    },
+    {
+      "token_id": 13513,
+      "logit": -14.5
+    },
+    {
+      "token_id": 236828,
+      "logit": -14.5625
+    },
+    {
+      "token_id": 669,
+      "logit": -14.6875
+    },
+    {
+      "token_id": 997,
+      "logit": -14.6875
+    },
+    {
+      "token_id": 239794,
+      "logit": -14.6875
+    },
+    {
+      "token_id": 176,
+      "logit": -14.75
+    },
+    {
+      "token_id": 239158,
+      "logit": -14.75
+    },
+    {
+      "token_id": 251,
+      "logit": -14.875
+    },
+    {
+      "token_id": 1160,
+      "logit": -14.875
+    },
+    {
+      "token_id": 236779,
+      "logit": -14.875
+    },
+    {
+      "token_id": 532,
+      "logit": -14.9375
+    },
+    {
+      "token_id": 753,
+      "logit": -14.9375
+    },
+    {
+      "token_id": 236812,
+      "logit": -14.9375
+    },
+    {
+      "token_id": 2360,
+      "logit": -15.0
+    },
+    {
+      "token_id": 8455,
+      "logit": -15.0
+    },
+    {
+      "token_id": 236791,
+      "logit": -15.0
+    },
+    {
+      "token_id": 236881,
+      "logit": -15.0
+    },
+    {
+      "token_id": 237048,
+      "logit": -15.0
+    },
+    {
+      "token_id": 653,
+      "logit": -15.125
+    },
+    {
+      "token_id": 5213,
+      "logit": -15.125
+    },
+    {
+      "token_id": 22159,
+      "logit": -15.125
+    },
+    {
+      "token_id": 236862,
+      "logit": -15.125
+    },
+    {
+      "token_id": 236929,
+      "logit": -15.125
+    },
+    {
+      "token_id": 565,
+      "logit": -15.25
+    },
+    {
+      "token_id": 2375,
+      "logit": -15.25
+    },
+    {
+      "token_id": 2717,
+      "logit": -15.25
+    },
+    {
+      "token_id": 11686,
+      "logit": -15.25
+    },
+    {
+      "token_id": 146,
+      "logit": -15.375
+    }
+  ],
+  "reference": {
+    "mlx": "0.32.1.dev20260710+938006e4a",
+    "mlx_lm": "0.31.3",
+    "transformers": "5.7.0"
+  }
+}

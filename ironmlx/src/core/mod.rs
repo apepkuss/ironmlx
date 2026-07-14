@@ -16,6 +16,7 @@ pub mod tokenizer;
 pub use cache::KVCache;
 pub use chat_template::{ChatTemplate, Message};
 pub use generate::{build_position_ids, GenerateEvent, GenerateRequest, GenerationStream};
+pub(crate) use loader::logical_width_from_packed;
 pub use loader::{EosTokenId, Loader, QuantMeta, QuantMode, TokenizerConfig};
 pub use model::Model;
 pub use sampler::Sampler;

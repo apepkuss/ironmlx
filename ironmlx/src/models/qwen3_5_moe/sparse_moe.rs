@@ -154,7 +154,7 @@ fn with_glm_routed_experts_child_span<T>(
 }
 
 /// Source legacy gate + up weights, consumed once during lazy fused-weight
-/// build then dropped to release the 2 × (E × I × H/8) buffer per layer.
+/// build then dropped to release the two packed `(E × I × H)` buffers per layer.
 struct LazyGateUpSource {
     gate_weight: Array,
     gate_scales: Array,
@@ -176,12 +176,11 @@ struct FusedGateUp {
 
 /// Stacked-expert quantized weights for the routed SwiGLU.
 ///
-/// Shape convention (4-bit, group_size=64, num_experts=E, hidden=H,
-/// moe_intermediate=I):
+/// Shape convention (num_experts=E, hidden=H, moe_intermediate=I):
 ///   gate/up (legacy source, dropped after fused build):
-///                weight `[E, I, H/8]`, scales/biases `[E, I, H/64]`
-///   gate_up (fused, lazy): weight `[E, 2I, H/8]`, scales/biases `[E, 2I, H/64]`
-///   down:    weight `[E, H, I/8]`, scales/biases `[E, H, I/64]`
+///                weight `[E, I, packed_H]`, scales/biases `[E, I, H/group_size]`
+///   gate_up (fused, lazy): weight `[E, 2I, packed_H]`, scales/biases `[E, 2I, H/group_size]`
+///   down:    weight `[E, H, packed_I]`, scales/biases `[E, H, I/group_size]`
 ///
 /// Gate_proj + up_proj weights are concatenated along the intermediate
 /// axis (axis=1) on the first forward call so a single

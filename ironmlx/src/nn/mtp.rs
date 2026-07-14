@@ -53,6 +53,20 @@ pub struct MtpStepOutput {
     pub logits: Array,
 }
 
+pub(crate) fn validate_mtp_fc_shape(fc: &Linear, fc_prefix: &str, hidden_size: i32) -> Result<()> {
+    let expected_in = (hidden_size * 2) as usize;
+    let expected_out = hidden_size as usize;
+    if fc.in_features() != expected_in || fc.out_features() != expected_out {
+        return Err(anyhow!(
+            "MTP fc weight shape mismatch under prefix '{fc_prefix}': \
+             expected [in={expected_in}, out={expected_out}], got [in={}, out={}]",
+            fc.in_features(),
+            fc.out_features(),
+        ));
+    }
+    Ok(())
+}
+
 impl Mtp {
     /// Test/composition seam: build an `Mtp` from pre-built sub-modules.
     ///
@@ -244,17 +258,7 @@ impl Mtp {
         // 2H -> H contract is MTP-specific — a misconfigured weight could silently
         // propagate wrong-rank features into the DecoderLayer chain. Catch it here
         // (production-grade stability — explicit bounds > trust caller).
-        let expected_in = (cfg.hidden_size * 2) as usize;
-        let expected_out = cfg.hidden_size as usize;
-        if fc.in_features() != expected_in || fc.out_features() != expected_out {
-            return Err(anyhow!(
-                "Mtp.fc weight shape mismatch under prefix '{}': \
-                 expected [in={expected_in}, out={expected_out}], got [in={}, out={}]",
-                key("fc"),
-                fc.in_features(),
-                fc.out_features(),
-            ));
-        }
+        validate_mtp_fc_shape(&fc, &key("fc"), cfg.hidden_size)?;
 
         let norm = RmsNorm::from_loader(loader, &key("norm"), cfg.layer.rms_norm_eps)?;
 
@@ -384,6 +388,24 @@ mod tests {
             RmsNorm::new(ones_w(h), layer_cfg.rms_norm_eps),
             cfg,
         )
+    }
+
+    #[test]
+    fn mtp_fc_accepts_exact_affine_5bit_and_6bit_packed_widths() {
+        let hidden_size = 1280_i32;
+        let logical_input = hidden_size * 2;
+        for bits in [5_i32, 6_i32] {
+            let packed_input = logical_input * bits / 32;
+            let weight = Array::zeros((hidden_size, packed_input), Dtype::Uint32).unwrap();
+            let scales = Array::zeros((hidden_size, logical_input / 64), Dtype::Bfloat16).unwrap();
+            let biases = Array::zeros((hidden_size, logical_input / 64), Dtype::Bfloat16).unwrap();
+            let fc = Linear::new_quant(weight, scales, Some(biases), None, 64, bits);
+
+            validate_mtp_fc_shape(&fc, "mtp.fc", hidden_size)
+                .expect("5/6-bit packed MTP fc must recover exact 2H input width");
+            assert_eq!(fc.in_features(), 2560);
+            assert_eq!(packed_input, if bits == 5 { 400 } else { 480 });
+        }
     }
 
     #[test]

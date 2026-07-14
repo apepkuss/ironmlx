@@ -8,6 +8,7 @@ use mlx::{Array, StreamOrDevice};
 
 use crate::core::cache::MtpCache;
 use crate::core::Loader;
+use crate::nn::mtp::validate_mtp_fc_shape;
 use crate::nn::{AttnKind, Linear, Mrope, RmsNorm};
 use crate::Result;
 
@@ -173,17 +174,7 @@ impl Qwen35MoeMtp {
         )?;
         let fc = Linear::from_loader(loader, &key("fc"))?;
 
-        let expected_in = (cfg.hidden_size * 2) as usize;
-        let expected_out = cfg.hidden_size as usize;
-        if fc.in_features() != expected_in || fc.out_features() != expected_out {
-            return Err(anyhow!(
-                "Qwen35MoeMtp.fc weight shape mismatch under prefix '{}': \
-                 expected [in={expected_in}, out={expected_out}], got [in={}, out={}]",
-                key("fc"),
-                fc.in_features(),
-                fc.out_features(),
-            ));
-        }
+        validate_mtp_fc_shape(&fc, &key("fc"), cfg.hidden_size)?;
 
         let norm = RmsNorm::from_loader(loader, &key("norm"), cfg.layer.rms_norm_eps)?;
 
