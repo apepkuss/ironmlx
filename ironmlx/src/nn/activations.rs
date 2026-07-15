@@ -76,3 +76,39 @@ pub(crate) fn invoke_swiglu(func: &CompiledFn, gate: &Array, up: &Array) -> Resu
     outs.pop()
         .ok_or_else(|| anyhow!("SwiGLU returned no outputs"))
 }
+
+pub(crate) fn build_geglu_tanh() -> CompiledFn {
+    compile(
+        |inputs: &[&Array]| -> mlx::Result<Vec<Array>> {
+            let gate = inputs[0];
+            let up = inputs[1];
+            let gelu = gelu_tanh_expr(gate)?;
+            Ok(vec![&gelu * up])
+        },
+        ShapeMode::Shapeless,
+    )
+    .expect("GeGLU tanh compile")
+}
+
+pub(crate) fn invoke_geglu_tanh(func: &CompiledFn, gate: &Array, up: &Array) -> Result<Array> {
+    let mut outs = func
+        .invoke(&[gate, up])
+        .map_err(|e| anyhow!("GeGLU tanh invoke failed: {e}"))?;
+    outs.pop()
+        .ok_or_else(|| anyhow!("GeGLU tanh returned no outputs"))
+}
+
+fn gelu_tanh_expr(x: &Array) -> mlx::Result<Array> {
+    let three: Array = (&[3_i32][..], ()).try_into()?;
+    let x3 = x.power(&three)?;
+
+    let dtype = x.dtype();
+    let c_044715: Array = ops::cast::astype(&(&[0.044_715_f32][..], ()).try_into()?, dtype)?;
+    let c_sqrt2pi: Array = ops::cast::astype(&(&[SQRT_2_OVER_PI][..], ()).try_into()?, dtype)?;
+    let c_half: Array = ops::cast::astype(&(&[0.5_f32][..], ()).try_into()?, dtype)?;
+    let c_one: Array = ops::cast::astype(&(&[1.0_f32][..], ()).try_into()?, dtype)?;
+
+    let inner = (&(&x3 * &c_044715) + x) * &c_sqrt2pi;
+    let t = inner.tanh()?;
+    Ok(x * &c_half * (&t + &c_one))
+}

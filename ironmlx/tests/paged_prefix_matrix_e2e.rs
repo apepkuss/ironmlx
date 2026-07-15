@@ -36,37 +36,128 @@ struct ServerProcess {
 
 impl ServerProcess {
     fn spawn(model_dir: &Path, cache_dir: &Path, port: u16) -> Self {
+        Self::spawn_with_max_sequences(model_dir, cache_dir, port, 2)
+    }
+
+    fn spawn_with_max_sequences(
+        model_dir: &Path,
+        cache_dir: &Path,
+        port: u16,
+        max_sequences: usize,
+    ) -> Self {
+        Self::spawn_with_options(model_dir, cache_dir, None, None, port, max_sequences)
+    }
+
+    fn spawn_with_kv_quant(
+        model_dir: &Path,
+        cache_dir: &Path,
+        kv_quant: &str,
+        port: u16,
+        max_sequences: usize,
+    ) -> Self {
+        Self::spawn_with_options(
+            model_dir,
+            cache_dir,
+            Some(kv_quant),
+            None,
+            port,
+            max_sequences,
+        )
+    }
+
+    fn spawn_with_active_kv(
+        model_dir: &Path,
+        cache_dir: &Path,
+        active_kv_dir: &Path,
+        port: u16,
+        max_sequences: usize,
+    ) -> Self {
+        Self::spawn_with_options(
+            model_dir,
+            cache_dir,
+            None,
+            Some(active_kv_dir),
+            port,
+            max_sequences,
+        )
+    }
+
+    fn spawn_with_kv_quant_and_active_kv(
+        model_dir: &Path,
+        cache_dir: &Path,
+        kv_quant: &str,
+        active_kv_dir: &Path,
+        port: u16,
+        max_sequences: usize,
+    ) -> Self {
+        Self::spawn_with_options(
+            model_dir,
+            cache_dir,
+            Some(kv_quant),
+            Some(active_kv_dir),
+            port,
+            max_sequences,
+        )
+    }
+
+    fn spawn_with_options(
+        model_dir: &Path,
+        cache_dir: &Path,
+        kv_quant: Option<&str>,
+        active_kv_dir: Option<&Path>,
+        port: u16,
+        max_sequences: usize,
+    ) -> Self {
         let bin = env!("CARGO_BIN_EXE_ironmlx");
         let mlx_dir = std::env::var("MLX_DIR").expect("MLX_DIR must be set");
-        let mut cmd = Command::new(bin);
-        cmd.current_dir(env!("CARGO_MANIFEST_DIR"));
-        cmd.args([
-            "serve",
-            "--model",
-            model_dir.to_str().expect("model path must be valid UTF-8"),
-            "--paged-prefix-cache-dir",
+        let mut args = vec![
+            "serve".to_owned(),
+            "--model".to_owned(),
+            model_dir
+                .to_str()
+                .expect("model path must be valid UTF-8")
+                .to_owned(),
+            "--paged-prefix-cache-dir".to_owned(),
             cache_dir
                 .to_str()
-                .expect("prefix cache path must be valid UTF-8"),
-            "--paged-prefix-cache-block-size",
-            "16",
-            "--paged-prefix-cache-max-pages",
-            "4096",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            &port.to_string(),
-            "--b-max",
-            "2",
-            "--admission-deadline-ms",
-            "200",
-            "--admission-queue-max",
-            "8",
-            "--prefill-chunk-size",
-            "0",
-            "--max-cache-cap",
-            "4096",
-        ]);
+                .expect("prefix cache path must be valid UTF-8")
+                .to_owned(),
+            "--paged-prefix-cache-block-size".to_owned(),
+            "16".to_owned(),
+            "--paged-prefix-cache-max-pages".to_owned(),
+            "4096".to_owned(),
+            "--host".to_owned(),
+            "127.0.0.1".to_owned(),
+            "--port".to_owned(),
+            port.to_string(),
+            "--max-sequences".to_owned(),
+            max_sequences.to_string(),
+            "--admission-deadline-ms".to_owned(),
+            "200".to_owned(),
+            "--admission-queue-max".to_owned(),
+            "8".to_owned(),
+            "--prefill-chunk-size".to_owned(),
+            "0".to_owned(),
+            "--max-cache-cap".to_owned(),
+            "4096".to_owned(),
+        ];
+        if let Some(kv_quant) = kv_quant {
+            args.push("--kv-quant".to_owned());
+            args.push(kv_quant.to_owned());
+        }
+        if let Some(active_kv_dir) = active_kv_dir {
+            args.push("--active-kv-offload".to_owned());
+            args.push("--active-kv-offload-dir".to_owned());
+            args.push(
+                active_kv_dir
+                    .to_str()
+                    .expect("active KV path must be valid UTF-8")
+                    .to_owned(),
+            );
+        }
+        let mut cmd = Command::new(bin);
+        cmd.current_dir(env!("CARGO_MANIFEST_DIR"));
+        cmd.args(args);
         cmd.env("MLX_DIR", mlx_dir);
         cmd.env("RUST_LOG", "ironmlx=debug,warn");
         cmd.stderr(Stdio::piped());
@@ -174,6 +265,13 @@ fn minicpmv46_model_dir() -> PathBuf {
 
 fn gemma4_model_dir() -> PathBuf {
     snapshot_from_env_or_default("GEMMA4_MODEL", "models--mlx-community--gemma-4-e4b-it-4bit")
+}
+
+fn gemma4_moe_model_dir() -> PathBuf {
+    snapshot_from_env_or_default(
+        "GEMMA4_MOE_MODEL",
+        "models--mlx-community--gemma-4-26b-a4b-it-4bit",
+    )
 }
 
 fn coco_path() -> PathBuf {
@@ -289,6 +387,73 @@ async fn post_chat(
         "prompt token count must be present: {json}"
     );
     json
+}
+
+async fn healthz(client: &reqwest::Client, port: u16) -> serde_json::Value {
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/healthz"))
+        .send()
+        .await
+        .expect("healthz send");
+    let status = resp.status();
+    let text = resp.text().await.expect("healthz body");
+    assert_eq!(status, 200, "healthz failed: {text}");
+    serde_json::from_str(&text).expect("healthz json")
+}
+
+fn assert_active_kv_health(health: &serde_json::Value) {
+    assert_eq!(
+        health["memory"]["kv_cache_budget_policy"].as_str(),
+        Some("active_kv_offload"),
+        "unexpected healthz memory policy: {health}"
+    );
+    assert_eq!(
+        health["memory"]["kv_cache_logical_cap_tokens"].as_u64(),
+        Some(4096),
+        "unexpected logical cap: {health}"
+    );
+    assert_eq!(
+        health["memory"]["kv_cache_resident_cap_tokens"].as_u64(),
+        Some(1024),
+        "unexpected resident cap: {health}"
+    );
+    assert_eq!(
+        health["active_kv_offload"]["enabled"].as_bool(),
+        Some(true),
+        "Active KV should be enabled: {health}"
+    );
+    assert_eq!(
+        health["active_kv_offload"]["degraded"].as_bool(),
+        Some(false),
+        "Active KV should not be degraded: {health}"
+    );
+    assert_eq!(
+        health["active_kv_offload"]["swap_error_count"].as_u64(),
+        Some(0),
+        "Active KV swap errors: {health}"
+    );
+}
+
+async fn post_same_body_concurrently(
+    client: &reqwest::Client,
+    port: u16,
+    body: serde_json::Value,
+    concurrency: usize,
+) -> Vec<serde_json::Value> {
+    let mut tasks = Vec::with_capacity(concurrency);
+    for _ in 0..concurrency {
+        let client = client.clone();
+        let body = body.clone();
+        tasks.push(tokio::spawn(
+            async move { post_chat(&client, port, body).await },
+        ));
+    }
+
+    let mut responses = Vec::with_capacity(concurrency);
+    for task in tasks {
+        responses.push(task.await.expect("concurrent chat task"));
+    }
+    responses
 }
 
 fn count_log(text: &str, needle: &str) -> usize {
@@ -536,6 +701,44 @@ async fn run_text_exact_hit_case(model_dir: PathBuf, expected_kinds: &[&str], pr
     std::fs::remove_dir_all(&cache_dir).expect("cleanup prefix cache dir");
 }
 
+async fn run_text_concurrent_exact_hit_case(
+    model_dir: PathBuf,
+    expected_kinds: &[&str],
+    prompt: &str,
+    concurrency: usize,
+) {
+    let cache_dir = unique_temp_dir("text-prefix-concurrent");
+    std::fs::create_dir_all(&cache_dir).expect("create prefix cache dir");
+    let port = alloc_port().await;
+    let mut server =
+        ServerProcess::spawn_with_max_sequences(&model_dir, &cache_dir, port, concurrency);
+    let client = client();
+    wait_ready(&client, port, &mut server).await;
+
+    let body = text_body(prompt);
+    let warm = post_chat(&client, port, body.clone()).await;
+    assert_cache_kinds(&cache_dir, expected_kinds);
+
+    let hits_before = count_log(&server.stderr_text(), "paged SSD prefix cache hit");
+    let responses = post_same_body_concurrently(&client, port, body, concurrency).await;
+    for response in responses {
+        assert_eq!(
+            response["usage"]["prompt_tokens"], warm["usage"]["prompt_tokens"],
+            "concurrent exact-hit prompt token count must stay stable"
+        );
+    }
+    wait_log_count(
+        &server,
+        "paged SSD prefix cache hit",
+        hits_before + concurrency,
+        Duration::from_secs(20),
+    )
+    .await;
+    assert_cache_kinds(&cache_dir, expected_kinds);
+
+    std::fs::remove_dir_all(&cache_dir).expect("cleanup prefix cache dir");
+}
+
 async fn run_text_restart_persistence_case(
     model_dir: PathBuf,
     expected_kinds: &[&str],
@@ -633,6 +836,174 @@ async fn run_vl_exact_hit_and_image_miss_case(
     std::fs::remove_dir_all(&image_dir).expect("cleanup image temp dir");
 }
 
+async fn run_vl_concurrent_exact_hit_case(
+    label: &str,
+    model_dir: PathBuf,
+    expected_kinds: &[&str],
+    concurrency: usize,
+) {
+    let cache_dir = unique_temp_dir(&format!("{label}-vl-prefix-concurrent"));
+    std::fs::create_dir_all(&cache_dir).expect("create prefix cache dir");
+
+    let port = alloc_port().await;
+    let mut server =
+        ServerProcess::spawn_with_max_sequences(&model_dir, &cache_dir, port, concurrency);
+    let client = client();
+    wait_ready(&client, port, &mut server).await;
+
+    let body = vl_body(&coco_path());
+    let warm = post_chat(&client, port, body.clone()).await;
+    assert_cache_kinds(&cache_dir, expected_kinds);
+    assert_has_vl_fingerprint(&cache_dir);
+
+    let hits_before = count_log(&server.stderr_text(), "paged SSD prefix cache hit");
+    let responses = post_same_body_concurrently(&client, port, body, concurrency).await;
+    for response in responses {
+        assert_eq!(
+            response["usage"]["prompt_tokens"], warm["usage"]["prompt_tokens"],
+            "concurrent VL exact-hit prompt token count must stay stable"
+        );
+    }
+    wait_log_count(
+        &server,
+        "paged SSD prefix cache hit",
+        hits_before + concurrency,
+        Duration::from_secs(30),
+    )
+    .await;
+    assert_cache_kinds(cache_dir.as_path(), expected_kinds);
+    assert_has_vl_fingerprint(&cache_dir);
+
+    std::fs::remove_dir_all(&cache_dir).expect("cleanup prefix cache dir");
+}
+
+async fn run_turboquant_paged_prefix_text_and_vl_case(kv_quant: &str) {
+    let cache_dir = unique_temp_dir(&format!("gemma4-moe-{kv_quant}-paged-prefix"));
+    std::fs::create_dir_all(&cache_dir).expect("create prefix cache dir");
+
+    let port = alloc_port().await;
+    let mut server =
+        ServerProcess::spawn_with_kv_quant(&gemma4_moe_model_dir(), &cache_dir, kv_quant, port, 2);
+    let client = client();
+    wait_ready(&client, port, &mut server).await;
+
+    let text_body = text_body(&format!(
+        "For Gemma4 MoE {kv_quant} paged prefix validation, answer briefly."
+    ));
+    let text_warm = post_chat(&client, port, text_body.clone()).await;
+    assert_cache_kinds(&cache_dir, &["full_turbo_quant_packed"]);
+
+    let text_hits_before = count_log(&server.stderr_text(), "paged SSD prefix cache hit");
+    let text_hit = post_chat(&client, port, text_body).await;
+    assert_eq!(
+        text_hit["usage"]["prompt_tokens"], text_warm["usage"]["prompt_tokens"],
+        "{kv_quant} text exact-hit prompt token count must stay stable"
+    );
+    wait_log_count(
+        &server,
+        "paged SSD prefix cache hit",
+        text_hits_before + 1,
+        Duration::from_secs(20),
+    )
+    .await;
+    assert_cache_kinds(&cache_dir, &["full_turbo_quant_packed"]);
+
+    let vl_body = vl_body(&coco_path());
+    let vl_warm = post_chat(&client, port, vl_body.clone()).await;
+    assert_cache_kinds(&cache_dir, &["full_turbo_quant_packed"]);
+    assert_has_vl_fingerprint(&cache_dir);
+
+    let vl_hits_before = count_log(&server.stderr_text(), "paged SSD prefix cache hit");
+    let vl_hit = post_chat(&client, port, vl_body).await;
+    assert_eq!(
+        vl_hit["usage"]["prompt_tokens"], vl_warm["usage"]["prompt_tokens"],
+        "{kv_quant} VL exact-hit prompt token count must stay stable"
+    );
+    wait_log_count(
+        &server,
+        "paged SSD prefix cache hit",
+        vl_hits_before + 1,
+        Duration::from_secs(30),
+    )
+    .await;
+    assert_cache_kinds(&cache_dir, &["full_turbo_quant_packed"]);
+    assert_has_vl_fingerprint(&cache_dir);
+
+    std::fs::remove_dir_all(&cache_dir).expect("cleanup prefix cache dir");
+}
+
+async fn run_turboquant_paged_prefix_active_kv_text_and_vl_case(kv_quant: &str) {
+    let cache_dir = unique_temp_dir(&format!("gemma4-moe-{kv_quant}-active-kv-prefix"));
+    let active_kv_dir = unique_temp_dir(&format!("gemma4-moe-{kv_quant}-active-kv-offload"));
+    std::fs::create_dir_all(&cache_dir).expect("create prefix cache dir");
+
+    let port = alloc_port().await;
+    let mut server = ServerProcess::spawn_with_kv_quant_and_active_kv(
+        &gemma4_moe_model_dir(),
+        &cache_dir,
+        kv_quant,
+        &active_kv_dir,
+        port,
+        2,
+    );
+    let client = client();
+    wait_ready(&client, port, &mut server).await;
+    assert_active_kv_health(&healthz(&client, port).await);
+
+    let text_body = text_body(&format!(
+        "For Gemma4 MoE {kv_quant} paged prefix and Active KV validation, answer briefly."
+    ));
+    let text_warm = post_chat(&client, port, text_body.clone()).await;
+    assert_cache_kinds(&cache_dir, &["full_turbo_quant_packed"]);
+
+    let text_hits_before = count_log(&server.stderr_text(), "paged SSD prefix cache hit");
+    let text_hit = post_chat(&client, port, text_body).await;
+    assert_eq!(
+        text_hit["usage"]["prompt_tokens"], text_warm["usage"]["prompt_tokens"],
+        "{kv_quant} text exact-hit prompt token count must stay stable"
+    );
+    wait_log_count(
+        &server,
+        "paged SSD prefix cache hit",
+        text_hits_before + 1,
+        Duration::from_secs(20),
+    )
+    .await;
+    assert_cache_kinds(&cache_dir, &["full_turbo_quant_packed"]);
+
+    let vl_body = vl_body(&coco_path());
+    let vl_warm = post_chat(&client, port, vl_body.clone()).await;
+    assert_cache_kinds(&cache_dir, &["full_turbo_quant_packed"]);
+    assert_has_vl_fingerprint(&cache_dir);
+
+    let vl_hits_before = count_log(&server.stderr_text(), "paged SSD prefix cache hit");
+    let vl_hit = post_chat(&client, port, vl_body).await;
+    assert_eq!(
+        vl_hit["usage"]["prompt_tokens"], vl_warm["usage"]["prompt_tokens"],
+        "{kv_quant} VL exact-hit prompt token count must stay stable"
+    );
+    wait_log_count(
+        &server,
+        "paged SSD prefix cache hit",
+        vl_hits_before + 1,
+        Duration::from_secs(30),
+    )
+    .await;
+    assert_cache_kinds(&cache_dir, &["full_turbo_quant_packed"]);
+    assert_has_vl_fingerprint(&cache_dir);
+
+    let after = healthz(&client, port).await;
+    assert_active_kv_health(&after);
+    assert_eq!(
+        after["active_kv_offload"]["parked_requests"].as_u64(),
+        Some(0),
+        "HTTP TurboQuant+Paged Prefix+Active KV should not leak parked requests: {after}"
+    );
+
+    std::fs::remove_dir_all(&cache_dir).expect("cleanup prefix cache dir");
+    std::fs::remove_dir_all(&active_kv_dir).ok();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires QWEN35_MODEL/MLX_DIR or default local Qwen3.5 checkpoint"]
 async fn qwen35_text_linear_paged_prefix_cache_batched_exact_hit() {
@@ -688,6 +1059,98 @@ async fn minicpmv46_vl_paged_prefix_cache_exact_hit_and_image_miss() {
 #[ignore = "requires GEMMA4_MODEL/MLX_DIR or default local Gemma4 checkpoint"]
 async fn gemma4_vl_paged_prefix_cache_exact_hit_and_image_miss() {
     run_vl_exact_hit_and_image_miss_case("gemma4", gemma4_model_dir(), &["full_paged"]).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires GEMMA4_MOE_MODEL/MLX_DIR or default local Gemma4 MoE checkpoint"]
+async fn gemma4_moe_text_paged_prefix_cache_batched_exact_hit() {
+    run_text_exact_hit_case(
+        gemma4_moe_model_dir(),
+        &["full_paged"],
+        "For Gemma4 MoE prefix cache validation, answer with one concise sentence.",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires GEMMA4_MOE_MODEL/MLX_DIR or default local Gemma4 MoE checkpoint"]
+async fn gemma4_moe_text_paged_prefix_cache_c4_exact_hit() {
+    run_text_concurrent_exact_hit_case(
+        gemma4_moe_model_dir(),
+        &["full_paged"],
+        "For Gemma4 MoE concurrent prefix cache validation, answer with one concise sentence.",
+        4,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires GEMMA4_MOE_MODEL/MLX_DIR or default local Gemma4 MoE checkpoint"]
+async fn gemma4_moe_vl_paged_prefix_cache_exact_hit_and_image_miss() {
+    run_vl_exact_hit_and_image_miss_case("gemma4_moe", gemma4_moe_model_dir(), &["full_paged"])
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires GEMMA4_MOE_MODEL/MLX_DIR or default local Gemma4 MoE checkpoint"]
+async fn gemma4_moe_vl_paged_prefix_cache_c4_exact_hit() {
+    run_vl_concurrent_exact_hit_case("gemma4_moe", gemma4_moe_model_dir(), &["full_paged"], 4)
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires GEMMA4_MOE_MODEL/MLX_DIR or default local Gemma4 MoE checkpoint"]
+async fn gemma4_moe_turboquant_kv_paged_prefix_cache_text_and_vl_exact_hit() {
+    for kv_quant in ["turbo3", "turbo4", "k3v4"] {
+        run_turboquant_paged_prefix_text_and_vl_case(kv_quant).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires GEMMA4_MOE_MODEL/MLX_DIR or default local Gemma4 MoE checkpoint"]
+async fn gemma4_moe_turboquant_kv_paged_prefix_cache_active_kv_http_text_and_vl() {
+    for kv_quant in ["turbo3", "turbo4", "k3v4"] {
+        run_turboquant_paged_prefix_active_kv_text_and_vl_case(kv_quant).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires GEMMA4_MOE_MODEL/MLX_DIR or default local Gemma4 MoE checkpoint"]
+async fn gemma4_moe_active_kv_offload_http_text_and_vl_health() {
+    let cache_dir = unique_temp_dir("gemma4-moe-active-kv-http-prefix");
+    let active_kv_dir = unique_temp_dir("gemma4-moe-active-kv-http-offload");
+    std::fs::create_dir_all(&cache_dir).expect("create prefix cache dir");
+
+    let port = alloc_port().await;
+    let mut server = ServerProcess::spawn_with_active_kv(
+        &gemma4_moe_model_dir(),
+        &cache_dir,
+        &active_kv_dir,
+        port,
+        1,
+    );
+    let client = client();
+    wait_ready(&client, port, &mut server).await;
+    assert_active_kv_health(&healthz(&client, port).await);
+
+    post_chat(
+        &client,
+        port,
+        text_body("For Gemma4 MoE Active KV health validation, answer briefly."),
+    )
+    .await;
+    post_chat(&client, port, vl_body(&coco_path())).await;
+
+    let after = healthz(&client, port).await;
+    assert_active_kv_health(&after);
+    assert_eq!(
+        after["active_kv_offload"]["parked_requests"].as_u64(),
+        Some(0),
+        "HTTP Active KV should not leak parked requests: {after}"
+    );
+
+    std::fs::remove_dir_all(&cache_dir).expect("cleanup prefix cache dir");
+    std::fs::remove_dir_all(&active_kv_dir).ok();
 }
 
 #[test]

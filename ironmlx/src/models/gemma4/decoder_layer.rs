@@ -8,7 +8,7 @@ use crate::Result;
 
 use super::attention::{Gemma4Attention, SharedKv};
 use super::config::{Gemma4LayerKind, Gemma4TextConfig};
-use super::mlp::Gemma4GeGluMlp;
+use super::moe::Gemma4FeedForward;
 use super::ops::gelu_approx_mul_on;
 use super::profile;
 use super::rope::RopeOffsets;
@@ -18,7 +18,7 @@ pub struct Gemma4DecoderLayer {
     self_attn: Gemma4Attention,
     post_attention_layernorm: RmsNorm,
     pre_feedforward_layernorm: RmsNorm,
-    mlp: Gemma4GeGluMlp,
+    feed_forward: Gemma4FeedForward,
     post_feedforward_layernorm: RmsNorm,
     per_layer_input_gate: Option<Linear>,
     per_layer_projection: Option<Linear>,
@@ -93,12 +93,13 @@ impl Gemma4DecoderLayer {
                 &format!("{prefix}.pre_feedforward_layernorm"),
                 cfg.rms_norm_eps,
             )?,
-            mlp: Gemma4GeGluMlp::from_loader(
+            feed_forward: Gemma4FeedForward::from_loader(
                 loader,
-                &format!("{prefix}.mlp"),
-                mlp_intermediate,
+                prefix,
+                cfg,
                 layer_idx,
                 layer_kind,
+                mlp_intermediate,
             )?,
             post_feedforward_layernorm: RmsNorm::from_loader(
                 loader,
@@ -213,9 +214,9 @@ impl Gemma4DecoderLayer {
 
         let residual = h.clone();
         let t0 = Instant::now();
-        let ffn = self.pre_feedforward_layernorm.forward_on(&h, target)?;
-        push_last(&mut stage_trace, &ffn, target)?;
-        let ffn = self.mlp.forward_on(&ffn, target)?;
+        let ffn = self
+            .feed_forward
+            .forward_on(&h, &self.pre_feedforward_layernorm, target)?;
         push_last(&mut stage_trace, &ffn, target)?;
         let ffn = self.post_feedforward_layernorm.forward_on(&ffn, target)?;
         push_last(&mut stage_trace, &ffn, target)?;
