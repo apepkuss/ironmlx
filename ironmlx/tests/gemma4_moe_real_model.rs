@@ -41,6 +41,10 @@ fn should_run() -> bool {
     std::env::var_os("IRONMLX_TEST_REAL_GEMMA4_MOE").as_deref() == Some("1".as_ref())
 }
 
+fn should_run_optiq() -> bool {
+    std::env::var_os("IRONMLX_TEST_REAL_GEMMA4_MOE_OPTIQ").as_deref() == Some("1".as_ref())
+}
+
 fn coco_fixture() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/p6_qwen35_vl/coco_sample.jpg")
 }
@@ -103,6 +107,82 @@ fn assert_gemma4_moe_loader_contract(loader: &Loader) {
 
     assert_eq!(router_layers, 30);
     assert_eq!(expert_layers, 30);
+}
+
+fn assert_gemma4_moe_optiq_loader_contract(loader: &Loader) {
+    let global = loader.quant_meta().expect("global OptiQ quant meta");
+    assert_eq!(global.mode, QuantMode::OptiQ);
+    assert_eq!(global.bits, 4);
+    assert_eq!(global.group_size, 64);
+
+    let cfg = loader.config_raw_value();
+    assert_eq!(cfg["model_type"].as_str(), Some("gemma4"));
+    assert_eq!(cfg["text_config"]["enable_moe_block"].as_bool(), Some(true));
+    assert_eq!(cfg["text_config"]["num_experts"].as_i64(), Some(128));
+    assert_eq!(cfg["text_config"]["top_k_experts"].as_i64(), Some(8));
+    assert_eq!(
+        cfg["text_config"]["moe_intermediate_size"].as_i64(),
+        Some(704)
+    );
+
+    assert!(
+        loader.contains("vision_tower.patch_embedder.input_proj.weight"),
+        "Gemma4 MoE OptiQ multimodal loader must retain optiq vision tower sidecar weights"
+    );
+    assert!(
+        loader.contains("embed_vision.embedding_projection.weight"),
+        "Gemma4 MoE OptiQ multimodal loader must retain embed_vision projection"
+    );
+
+    let mut router_layers = 0usize;
+    let mut expert_layers = 0usize;
+    let mut expert_4bit = 0usize;
+    let mut expert_8bit = 0usize;
+    for layer in 0..30 {
+        let router = format!("model.layers.{layer}.router.proj");
+        let router_meta = loader
+            .quant_meta_for(&router)
+            .unwrap_or_else(|| panic!("{router}: missing quant meta"));
+        assert_eq!(router_meta.mode, QuantMode::OptiQ, "{router}");
+        assert_eq!(router_meta.bits, 8, "{router}");
+        assert_eq!(router_meta.group_size, 64, "{router}");
+        assert!(loader.contains(&format!("{router}.weight")));
+        assert!(loader.contains(&format!("{router}.scales")));
+        assert!(loader.contains(&format!("{router}.biases")));
+        assert!(loader.contains(&format!("model.layers.{layer}.router.scale")));
+        assert!(loader.contains(&format!("model.layers.{layer}.router.per_expert_scale")));
+        router_layers += 1;
+
+        for name in ["gate_proj", "up_proj", "down_proj"] {
+            let prefix = format!("model.layers.{layer}.experts.switch_glu.{name}");
+            let meta = loader
+                .quant_meta_for(&prefix)
+                .unwrap_or_else(|| panic!("{prefix}: missing quant meta"));
+            assert_eq!(meta.mode, QuantMode::OptiQ, "{prefix}");
+            assert_eq!(meta.group_size, 64, "{prefix}");
+            assert!(
+                matches!(meta.bits, 4 | 8),
+                "{prefix}: unexpected OptiQ bit width {}",
+                meta.bits
+            );
+            match meta.bits {
+                4 => expert_4bit += 1,
+                8 => expert_8bit += 1,
+                _ => unreachable!("validated above"),
+            }
+            assert!(loader.contains(&format!("{prefix}.weight")));
+            assert!(loader.contains(&format!("{prefix}.scales")));
+            assert!(loader.contains(&format!("{prefix}.biases")));
+        }
+        expert_layers += 1;
+    }
+
+    assert_eq!(router_layers, 30);
+    assert_eq!(expert_layers, 30);
+    assert!(
+        expert_4bit > 0 && expert_8bit > 0,
+        "Gemma4 MoE OptiQ gate must exercise mixed expert precision: 4bit={expert_4bit} 8bit={expert_8bit}"
+    );
 }
 
 fn assert_short_text_generation(model: &Gemma4Model, tokenizer: &Tokenizer) {
@@ -349,6 +429,30 @@ fn gemma4_moe_affine4_real_checkpoint_loads_and_generates_when_requested() {
     let cfg = Gemma4Config::from_loader(&loader).expect("Gemma4Config::from_loader");
     let tokenizer = Tokenizer::from_loader(&loader).expect("Tokenizer::from_loader");
     let model = Gemma4Model::from_loader(&loader).expect("Gemma4Model::from_loader");
+    assert!(model.config().enable_moe_block);
+    assert_short_text_generation(&model, &tokenizer);
+    assert_short_image_generation(&model, &tokenizer, &cfg);
+}
+
+#[test]
+fn gemma4_moe_optiq_real_checkpoint_loads_and_generates_when_requested() {
+    if !should_run_optiq() {
+        eprintln!(
+            "IRONMLX_TEST_REAL_GEMMA4_MOE_OPTIQ=1 not set; skipping real Gemma4 MoE OptiQ gate"
+        );
+        return;
+    }
+    let Some(dir) = snapshot_dir("gemma-4-26B-A4B-it-OptiQ-4bit") else {
+        eprintln!("gemma-4-26B-A4B-it-OptiQ-4bit cache absent; skipping");
+        return;
+    };
+
+    let loader =
+        Loader::open_multimodal(&dir).expect("Loader::open_multimodal Gemma4 MoE OptiQ 4bit");
+    assert_gemma4_moe_optiq_loader_contract(&loader);
+    let cfg = Gemma4Config::from_loader(&loader).expect("Gemma4Config::from_loader");
+    let tokenizer = Tokenizer::from_loader(&loader).expect("Tokenizer::from_loader");
+    let model = Gemma4Model::from_loader(&loader).expect("Gemma4Model::from_loader OptiQ");
     assert!(model.config().enable_moe_block);
     assert_short_text_generation(&model, &tokenizer);
     assert_short_image_generation(&model, &tokenizer, &cfg);
