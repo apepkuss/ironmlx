@@ -13,6 +13,9 @@ public enum LocalModelBackendRegistrar {
         let defaultModel = AppConfig.normalizedModelReference(defaultModel)
         var failed: [String] = []
         for model in localModels {
+            guard model.readiness?.isLoadable != false else {
+                continue
+            }
             guard let modelDir = scanner.resolveModelPath(for: model.id) else {
                 failed.append(model.id)
                 IronMLXAppLogger.error("Failed to register local model \(model.id): model path not found")

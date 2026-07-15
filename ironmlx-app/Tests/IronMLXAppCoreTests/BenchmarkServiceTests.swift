@@ -351,7 +351,9 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
 
     #expect(dashboardHTML(html, contains: "mtp_badge_available"))
     #expect(dashboardHTML(html, contains: "mtp_badge_enabled"))
-    #expect(dashboardHTML(html, contains: "mtp_badge_incompatible"))
+    #expect(!dashboardHTML(html, contains: "mtp_badge_incompatible"))
+    #expect(!dashboardHTML(html, contains: "badge-mtp-warning"))
+    #expect(!dashboardHTML(html, contains: "MTP 不兼容"))
     #expect(dashboardHTML(html, contains: #"mtp_badge_available: "MTP""#))
     #expect(dashboardHTML(html, contains: #"mtp_badge_enabled: "MTP""#))
     #expect(dashboardHTML(html, contains: "action_load_mtp"))
@@ -406,8 +408,9 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
         encoding: .utf8
     )
 
-    #expect(dashboardHTML(html, contains: #"class="col-model" style="width:40%;""#))
-    #expect(dashboardHTML(html, contains: #"class="col-type" style="width:6%;""#))
+    #expect(dashboardHTML(html, contains: #"class="col-model" style="width:32%;""#))
+    #expect(dashboardHTML(html, contains: #"class="col-type" style="width:8%;""#))
+    #expect(dashboardHTML(html, contains: #"class="col-quant" style="width:8%;""#))
     #expect(dashboardHTML(html, contains: #"class="col-default" style="width:6%;""#))
     #expect(dashboardHTML(html, contains: #"class="col-params" style="width:6%;""#))
     #expect(dashboardHTML(html, contains: #"class="col-select" style="width:44px; min-width:44px; max-width:44px;""#))
@@ -419,14 +422,47 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(dashboardHTML(html, contains: #"text-overflow: clip;"#))
     #expect(dashboardHTML(html, contains: #".data-table th:nth-child(3),"#))
     #expect(dashboardHTML(html, contains: #".data-table td:nth-child(3),"#))
-    #expect(dashboardHTML(html, contains: #".data-table th:nth-child(6),"#))
-    #expect(dashboardHTML(html, contains: #".data-table td:nth-child(6),"#))
+    #expect(dashboardHTML(html, contains: #".data-table th:nth-child(4),"#))
+    #expect(dashboardHTML(html, contains: #".data-table td:nth-child(4),"#))
     #expect(dashboardHTML(html, contains: #".data-table th:nth-child(7),"#))
-    #expect(dashboardHTML(html, contains: #".data-table td:nth-child(7)"#))
+    #expect(dashboardHTML(html, contains: #".data-table td:nth-child(7),"#))
+    #expect(dashboardHTML(html, contains: #".data-table th:nth-child(8),"#))
+    #expect(dashboardHTML(html, contains: #".data-table td:nth-child(8)"#))
     #expect(dashboardHTML(html, contains: #"text-align: center;"#))
     #expect(dashboardHTML(html, contains: #".data-table .model-name-text"#))
     #expect(dashboardHTML(html, contains: #"min-width: 0;"#))
     #expect(dashboardHTML(html, contains: #"text-overflow: ellipsis;"#))
+}
+
+@Test func dashboardModelTypeColumnUsesCapabilityLabels() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(html, contains: "function renderModelType(model)"))
+    #expect(dashboardHTML(html, contains: "vlm: 'LLM/VLM'"))
+    #expect(dashboardHTML(html, contains: "embedding: 'Embedding'"))
+    #expect(dashboardHTML(html, contains: "reranker: 'Reranker'"))
+    #expect(dashboardHTML(html, contains: "asr: 'ASR'"))
+    #expect(dashboardHTML(html, contains: "tts: 'TTS'"))
+    #expect(dashboardHTML(html, contains: "renderModelType(m)"))
+    #expect(dashboardHTML(html, contains: #"option value="vlm">LLM/VLM</option>"#))
+    #expect(dashboardHTML(html, contains: #"option value="asr">ASR</option>"#))
+    #expect(dashboardHTML(html, contains: #"option value="tts">TTS</option>"#))
+}
+
+@Test func dashboardQuantColumnHidesAffinePrefixInDisplayOnly() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(html, contains: "function quantDisplayLabel(quant)"))
+    #expect(dashboardHTML(html, contains: "quant.kind === 'affine' && quant.bits"))
+    #expect(dashboardHTML(html, contains: "return quant.bits + '-bit';"))
+    #expect(dashboardHTML(html, contains: "const label = quantDisplayLabel(quant);"))
+    #expect(dashboardHTML(html, contains: "titleParts.push('kind=' + quant.kind)"))
 }
 
 @Test func dashboardModelParamsModalIncludesMtpRuntimeControls() throws {

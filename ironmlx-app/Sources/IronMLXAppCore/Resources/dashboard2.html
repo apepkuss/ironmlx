@@ -666,10 +666,23 @@
     border-color: rgba(52, 199, 89, 0.34);
   }
 
-  .badge-mtp-warning {
+  .badge-quant {
+    background: rgba(52, 199, 89, 0.10);
+    color: var(--green);
+    border: 1px solid rgba(52, 199, 89, 0.30);
+  }
+
+  .badge-quant-warning {
     background: #fff3cd;
     color: #856404;
     border-color: #ffc107;
+  }
+
+  .badge-model-type {
+    background: rgba(88, 86, 214, 0.10);
+    color: #5856d6;
+    border: 1px solid rgba(88, 86, 214, 0.28);
+    white-space: nowrap;
   }
 
   @media (prefers-color-scheme: dark) {
@@ -1079,10 +1092,12 @@
   }
   .data-table th:nth-child(3),
   .data-table td:nth-child(3),
-  .data-table th:nth-child(6),
-  .data-table td:nth-child(6),
+  .data-table th:nth-child(4),
+  .data-table td:nth-child(4),
   .data-table th:nth-child(7),
-  .data-table td:nth-child(7) {
+  .data-table td:nth-child(7),
+  .data-table th:nth-child(8),
+  .data-table td:nth-child(8) {
     text-align: center;
   }
   .data-table th:last-child,
@@ -1145,6 +1160,8 @@
   .status-dot.model-ready { background: var(--accent); }
   .status-dot.model-loaded { background: var(--green); }
   .status-dot.model-busy { background: var(--warning); }
+  .status-dot.model-incomplete,
+  .status-dot.model-unsupported { background: var(--warning); }
 
   .action-btn {
     font-size: 11px;
@@ -1773,10 +1790,11 @@
         <table class="data-table" id="model-table">
           <colgroup>
             <col class="col-select" style="width:44px; min-width:44px; max-width:44px;">
-            <col class="col-model" style="width:40%;">
-            <col class="col-type" style="width:6%;">
-            <col style="width:10%;">
-            <col style="width:10%;">
+            <col class="col-model" style="width:32%;">
+            <col class="col-type" style="width:8%;">
+            <col class="col-quant" style="width:8%;">
+            <col style="width:9%;">
+            <col style="width:9%;">
             <col class="col-default" style="width:6%;">
             <col class="col-params" style="width:6%;">
             <col class="col-fixed" style="width:110px; min-width:110px; max-width:110px;">
@@ -1787,6 +1805,7 @@
               <th><input type="checkbox" id="select-all-models" onchange="toggleSelectAllModels(this)" style="accent-color:var(--accent);"></th>
               <th data-i18n="col_model" data-resizable="true">Model &#9650;</th>
               <th data-i18n="col_type" data-resizable="true">Type</th>
+              <th data-i18n="col_quant" data-resizable="true">Quant</th>
               <th data-i18n="col_size" data-resizable="true">Size</th>
               <th data-i18n="col_status" data-resizable="true">Status</th>
               <th data-i18n="col_default" data-resizable="true">Default</th>
@@ -2728,7 +2747,7 @@
         </div>
         <div class="modal-field" style="flex:1;">
           <label data-i18n="model_type">Model Type</label>
-          <select id="modal-model-type"><option value="auto" data-i18n="auto_detect">Auto Detect</option><option value="llm">LLM</option><option value="vlm">VLM</option><option value="embedding">Embedding</option><option value="reranker">Reranker</option></select>
+          <select id="modal-model-type"><option value="auto" data-i18n="auto_detect">Auto Detect</option><option value="llm">LLM</option><option value="vlm">LLM/VLM</option><option value="embedding">Embedding</option><option value="reranker">Reranker</option><option value="asr">ASR</option><option value="tts">TTS</option></select>
         </div>
       </div>
       <div class="modal-row">
@@ -2820,7 +2839,8 @@
       active_kv_status: "Active KV Offload", active_kv_enabled: "On", active_kv_disabled: "Off", active_kv_parked: "parked {value}", active_kv_swaps: "swaps {out}/{in}", active_kv_errors: "errors {value}",
       gpu_memory: "GPU Memory", requests: "Requests", active_mem: "Active", peak_mem: "Peak", cache_mem: "Cache", stopped: "Stopped",
       models_subtitle: "Manage and download models.", model_manager: "Model Manager", model_download: "Model Download",
-      col_model: "Model \u25B2", col_type: "Type", col_size: "Size", col_status: "Status", col_pinned: "Pinned", col_default: "Default", col_params: "Params", status_ready: "Not loaded",
+      col_model: "Model \u25B2", col_type: "Type", col_quant: "Quant", col_size: "Size", col_status: "Status", col_pinned: "Pinned", col_default: "Default", col_params: "Params", status_ready: "Not loaded",
+      status_incomplete: "Incomplete", status_unsupported: "Unsupported", model_not_ready: "Model snapshot is not ready to load.", action_unavailable: "Unavailable",
       batch_delete: "Batch Delete", cancel: "Cancel", selected_count: "{n} selected",
       confirm_delete_single: 'Delete model "{name}"? This cannot be undone.',
       confirm_delete_batch: "Delete {n} selected models? This cannot be undone.",
@@ -2829,8 +2849,8 @@
       action_loading: "Loading...", action_unloading: "Unloading...", action_load_model_only: "Model only", action_load_mtp: "Model + MTP",
       pin_model_tooltip: "Pin loaded model: exempt from TTL auto-unload and automatic release policies. Manual unload is still available.",
       unpin_model_tooltip: "Pinned loaded model: click to unpin and restore TTL and automatic release policies.",
-      mtp_badge_available: "MTP", mtp_badge_enabled: "MTP", mtp_badge_incompatible: "MTP incompatible",
-      mtp_badge_available_title: "Compatible MTP weights are available.", mtp_badge_enabled_title: "This model is loaded with MTP acceleration.", mtp_badge_incompatible_title: "MTP weights were found but are not compatible with this model.",
+      mtp_badge_available: "MTP", mtp_badge_enabled: "MTP",
+      mtp_badge_available_title: "Compatible MTP weights are available.", mtp_badge_enabled_title: "This model is loaded with MTP acceleration.",
       mtp_acceleration: "MTP Acceleration", mtp_weights: "MTP Weights", mtp_draft_tokens: "Draft Tokens",
       mtp_status_available: "MTP available", mtp_status_incompatible: "MTP weights are incompatible", mtp_status_unavailable: "No compatible MTP weights",
       model_exists_locally: "Model \"{name}\" already exists locally.",
@@ -3093,7 +3113,8 @@
       active_kv_status: "Active KV 分层卸载", active_kv_enabled: "开启", active_kv_disabled: "关闭", active_kv_parked: "暂停 {value}", active_kv_swaps: "换出/换入 {out}/{in}", active_kv_errors: "错误 {value}",
       gpu_memory: "GPU 内存", requests: "请求数", active_mem: "活跃", peak_mem: "峰值", cache_mem: "缓存", stopped: "已停止",
       models_subtitle: "管理和下载模型。", model_manager: "模型管理", model_download: "模型下载",
-      col_model: "模型 \u25B2", col_type: "类型", col_size: "大小", col_status: "状态", col_pinned: "固定", col_default: "默认", col_params: "参数", status_ready: "未加载",
+      col_model: "模型 \u25B2", col_type: "类型", col_quant: "量化", col_size: "大小", col_status: "状态", col_pinned: "固定", col_default: "默认", col_params: "参数", status_ready: "未加载",
+      status_incomplete: "不完整", status_unsupported: "不支持", model_not_ready: "模型快照尚未达到可加载状态。", action_unavailable: "不可用",
       batch_delete: "批量删除", cancel: "取消", selected_count: "已选 {n} 个",
       confirm_delete_single: '确定删除模型 "{name}"？此操作不可恢复。',
       confirm_delete_batch: "确定删除 {n} 个模型？此操作不可恢复。",
@@ -3102,8 +3123,8 @@
       action_loading: "加载中...", action_unloading: "卸载中...", action_load_model_only: "仅模型", action_load_mtp: "模型+MTP",
       pin_model_tooltip: "固定加载：不会被 TTL 自动卸载，也不会参与自动释放策略。仍可手动卸载。",
       unpin_model_tooltip: "已固定加载：点击取消固定，恢复 TTL 和自动释放策略。",
-      mtp_badge_available: "MTP", mtp_badge_enabled: "MTP", mtp_badge_incompatible: "MTP 不兼容",
-      mtp_badge_available_title: "已发现兼容的 MTP 权重。", mtp_badge_enabled_title: "该模型已使用 MTP 加速加载。", mtp_badge_incompatible_title: "已发现 MTP 权重，但与该模型不兼容。",
+      mtp_badge_available: "MTP", mtp_badge_enabled: "MTP",
+      mtp_badge_available_title: "已发现兼容的 MTP 权重。", mtp_badge_enabled_title: "该模型已使用 MTP 加速加载。",
       mtp_acceleration: "MTP 加速", mtp_weights: "MTP 权重", mtp_draft_tokens: "Draft Tokens",
       mtp_status_available: "MTP 可用", mtp_status_incompatible: "MTP 权重不兼容", mtp_status_unavailable: "未发现兼容的 MTP 权重",
       model_exists_locally: "模型 \"{name}\" 已存在于本地。",
@@ -3366,7 +3387,8 @@
       active_kv_status: "Active KV 分層卸載", active_kv_enabled: "開啟", active_kv_disabled: "關閉", active_kv_parked: "暫停 {value}", active_kv_swaps: "換出/換入 {out}/{in}", active_kv_errors: "錯誤 {value}",
       gpu_memory: "GPU 記憶體", requests: "請求數", active_mem: "活躍", peak_mem: "峰值", cache_mem: "快取", stopped: "已停止",
       models_subtitle: "管理和下載模型。", model_manager: "模型管理", model_download: "模型下載",
-      col_model: "模型 \u25B2", col_type: "類型", col_size: "大小", col_status: "狀態", col_pinned: "固定", col_default: "預設", col_params: "參數", status_ready: "未載入",
+      col_model: "模型 \u25B2", col_type: "類型", col_quant: "量化", col_size: "大小", col_status: "狀態", col_pinned: "固定", col_default: "預設", col_params: "參數", status_ready: "未載入",
+      status_incomplete: "不完整", status_unsupported: "不支援", model_not_ready: "模型快照尚未達到可載入狀態。", action_unavailable: "不可用",
       batch_delete: "批量刪除", cancel: "取消", selected_count: "已選 {n} 個",
       confirm_delete_single: '確定刪除模型 "{name}"？此操作不可復原。',
       confirm_delete_batch: "確定刪除 {n} 個模型？此操作不可復原。",
@@ -3375,8 +3397,8 @@
       action_loading: "載入中...", action_unloading: "卸載中...", action_load_model_only: "僅模型", action_load_mtp: "模型+MTP",
       pin_model_tooltip: "固定載入：不會被 TTL 自動卸載，也不會參與自動釋放策略。仍可手動卸載。",
       unpin_model_tooltip: "已固定載入：點擊取消固定，恢復 TTL 和自動釋放策略。",
-      mtp_badge_available: "MTP", mtp_badge_enabled: "MTP", mtp_badge_incompatible: "MTP 不相容",
-      mtp_badge_available_title: "已發現相容的 MTP 權重。", mtp_badge_enabled_title: "此模型已使用 MTP 加速載入。", mtp_badge_incompatible_title: "已發現 MTP 權重，但與此模型不相容。",
+      mtp_badge_available: "MTP", mtp_badge_enabled: "MTP",
+      mtp_badge_available_title: "已發現相容的 MTP 權重。", mtp_badge_enabled_title: "此模型已使用 MTP 加速載入。",
       mtp_acceleration: "MTP 加速", mtp_weights: "MTP 權重", mtp_draft_tokens: "Draft Tokens",
       mtp_status_available: "MTP 可用", mtp_status_incompatible: "MTP 權重不相容", mtp_status_unavailable: "未發現相容的 MTP 權重",
       model_exists_locally: "模型 \"{name}\" 已存在於本地。",
@@ -3622,7 +3644,8 @@
       active_kv_status: "Active KV オフロード", active_kv_enabled: "オン", active_kv_disabled: "オフ", active_kv_parked: "一時停止 {value}", active_kv_swaps: "退避/復元 {out}/{in}", active_kv_errors: "エラー {value}",
       gpu_memory: "GPU メモリ", requests: "リクエスト", active_mem: "アクティブ", peak_mem: "ピーク", cache_mem: "キャッシュ", stopped: "停止中",
       models_subtitle: "モデルの管理とダウンロード。", model_manager: "モデル管理", model_download: "モデルダウンロード",
-      col_model: "モデル \u25B2", col_type: "タイプ", col_size: "サイズ", col_status: "ステータス", col_pinned: "固定", col_default: "デフォルト", col_params: "パラメータ", status_ready: "未ロード",
+      col_model: "モデル \u25B2", col_type: "タイプ", col_quant: "量子化", col_size: "サイズ", col_status: "ステータス", col_pinned: "固定", col_default: "デフォルト", col_params: "パラメータ", status_ready: "未ロード",
+      status_incomplete: "不完全", status_unsupported: "未対応", model_not_ready: "モデルスナップショットはまだロード可能な状態ではありません。", action_unavailable: "利用不可",
       batch_delete: "一括削除", cancel: "キャンセル", selected_count: "{n} 件選択中",
       confirm_delete_single: 'モデル "{name}" を削除しますか？この操作は元に戻せません。',
       confirm_delete_batch: "{n} 件のモデルを削除しますか？この操作は元に戻せません。",
@@ -3631,8 +3654,8 @@
       action_loading: "ロード中...", action_unloading: "アンロード中...", action_load_model_only: "モデルのみ", action_load_mtp: "モデル+MTP",
       pin_model_tooltip: "固定ロード：TTL 自動アンロードや自動解放の対象外になります。手動アンロードは引き続き可能です。",
       unpin_model_tooltip: "固定ロード中：クリックすると固定を解除し、TTL と自動解放の対象に戻します。",
-      mtp_badge_available: "MTP", mtp_badge_enabled: "MTP", mtp_badge_incompatible: "MTP 非互換",
-      mtp_badge_available_title: "互換性のある MTP ウェイトが見つかりました。", mtp_badge_enabled_title: "このモデルは MTP アクセラレーション付きでロードされています。", mtp_badge_incompatible_title: "MTP ウェイトは見つかりましたが、このモデルとは互換性がありません。",
+      mtp_badge_available: "MTP", mtp_badge_enabled: "MTP",
+      mtp_badge_available_title: "互換性のある MTP ウェイトが見つかりました。", mtp_badge_enabled_title: "このモデルは MTP アクセラレーション付きでロードされています。",
       mtp_acceleration: "MTP アクセラレーション", mtp_weights: "MTP ウェイト", mtp_draft_tokens: "Draft Tokens",
       mtp_status_available: "MTP 利用可", mtp_status_incompatible: "MTP ウェイトは非互換です", mtp_status_unavailable: "互換性のある MTP ウェイトはありません",
       model_exists_locally: "モデル \"{name}\" はローカルに既に存在します。",
@@ -3878,7 +3901,8 @@
       active_kv_status: "Active KV 오프로드", active_kv_enabled: "켜짐", active_kv_disabled: "꺼짐", active_kv_parked: "일시 중지 {value}", active_kv_swaps: "내보내기/복원 {out}/{in}", active_kv_errors: "오류 {value}",
       gpu_memory: "GPU 메모리", requests: "요청", active_mem: "활성", peak_mem: "피크", cache_mem: "캐시", stopped: "중지됨",
       models_subtitle: "모델 관리 및 다운로드.", model_manager: "모델 관리", model_download: "모델 다운로드",
-      col_model: "모델 \u25B2", col_type: "유형", col_size: "크기", col_status: "상태", col_pinned: "고정", col_default: "기본", col_params: "매개변수", status_ready: "로드 안 됨",
+      col_model: "모델 \u25B2", col_type: "유형", col_quant: "양자화", col_size: "크기", col_status: "상태", col_pinned: "고정", col_default: "기본", col_params: "매개변수", status_ready: "로드 안 됨",
+      status_incomplete: "불완전", status_unsupported: "지원 안 됨", model_not_ready: "모델 스냅샷을 아직 로드할 수 없습니다.", action_unavailable: "사용 불가",
       batch_delete: "일괄 삭제", cancel: "취소", selected_count: "{n}개 선택됨",
       confirm_delete_single: '모델 "{name}"을(를) 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.',
       confirm_delete_batch: "{n}개의 모델을 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.",
@@ -3887,8 +3911,8 @@
       action_loading: "로딩 중...", action_unloading: "언로드 중...", action_load_model_only: "모델만", action_load_mtp: "모델+MTP",
       pin_model_tooltip: "고정 로드: TTL 자동 언로드와 자동 해제 정책에서 제외됩니다. 수동 언로드는 계속 사용할 수 있습니다.",
       unpin_model_tooltip: "고정 로드됨: 클릭하면 고정을 해제하고 TTL 및 자동 해제 정책을 다시 적용합니다.",
-      mtp_badge_available: "MTP", mtp_badge_enabled: "MTP", mtp_badge_incompatible: "MTP 비호환",
-      mtp_badge_available_title: "호환되는 MTP 가중치를 찾았습니다.", mtp_badge_enabled_title: "이 모델은 MTP 가속으로 로드되었습니다.", mtp_badge_incompatible_title: "MTP 가중치를 찾았지만 이 모델과 호환되지 않습니다.",
+      mtp_badge_available: "MTP", mtp_badge_enabled: "MTP",
+      mtp_badge_available_title: "호환되는 MTP 가중치를 찾았습니다.", mtp_badge_enabled_title: "이 모델은 MTP 가속으로 로드되었습니다.",
       mtp_acceleration: "MTP 가속", mtp_weights: "MTP 가중치", mtp_draft_tokens: "Draft Tokens",
       mtp_status_available: "MTP 사용 가능", mtp_status_incompatible: "MTP 가중치가 호환되지 않습니다", mtp_status_unavailable: "호환되는 MTP 가중치 없음",
       model_exists_locally: "모델 \"{name}\"이(가) 이미 로컬에 존재합니다.",
@@ -5077,15 +5101,66 @@
     if (mtp.status === 'available') {
       return ' <span class="badge badge-mtp" title="' + (dict.mtp_badge_available_title || 'Compatible MTP weights are available') + '">' + (dict.mtp_badge_available || 'MTP available') + '</span>';
     }
-    if (mtp.status === 'incompatible') {
-      return ' <span class="badge badge-mtp badge-mtp-warning" title="' + (dict.mtp_badge_incompatible_title || 'MTP weights were found but are not compatible with this model') + '">' + (dict.mtp_badge_incompatible || 'MTP incompatible') + '</span>';
-    }
     return '';
+  }
+
+  function modelReadiness(model) {
+    return model.readiness || { status: 'ready' };
+  }
+
+  function isModelLoadable(model) {
+    return (modelReadiness(model).status || 'ready') === 'ready';
+  }
+
+  function modelReadinessTitle(model) {
+    const readiness = modelReadiness(model);
+    return readiness.message || readiness.reason_code || '';
+  }
+
+  function renderModelType(model) {
+    const type = String(model.type || 'llm').toLowerCase();
+    const labels = {
+      llm: 'LLM',
+      vlm: 'LLM/VLM',
+      embedding: 'Embedding',
+      reranker: 'Reranker',
+      asr: 'ASR',
+      tts: 'TTS'
+    };
+    return '<span class="badge badge-model-type">' + escapeAttr(labels[type] || type.toUpperCase()) + '</span>';
+  }
+
+  function quantDisplayLabel(quant) {
+    if (quant.kind === 'affine' && quant.bits) {
+      return quant.bits + '-bit';
+    }
+    return quant.label || 'Unknown';
+  }
+
+  function renderQuantBadge(model) {
+    const quant = model.quantization || {};
+    const readiness = modelReadiness(model);
+    const label = quantDisplayLabel(quant);
+    const warn = readiness.status === 'incomplete' || readiness.status === 'unsupported';
+    const titleParts = [];
+    if (quant.kind) titleParts.push('kind=' + quant.kind);
+    if (quant.bits) titleParts.push('bits=' + quant.bits);
+    if (quant.group_size) titleParts.push('group_size=' + quant.group_size);
+    if (quant.dtype) titleParts.push('dtype=' + quant.dtype);
+    if ((quant.mixed_bits || []).length) titleParts.push('mixed_bits=' + quant.mixed_bits.join('/'));
+    if (readiness.message) titleParts.push(readiness.message);
+    const title = escapeAttr(titleParts.join('; '));
+    return '<span class="badge badge-quant' + (warn ? ' badge-quant-warning' : '') + '" title="' + title + '">' + escapeAttr(label) + '</span>';
   }
 
   function renderModelLoadActions(model, escapedSq, escaped, actionClass, actionText, isLoaded) {
     if (isLoaded) {
       return '<button class="action-btn ' + actionClass + '" onclick="toggleModelLoad(\'' + escapedSq + '\', this)" data-model="' + escaped + '">' + actionText + '</button>';
+    }
+    if (!isModelLoadable(model)) {
+      const dict = I18N[currentLang] || I18N.en;
+      const title = escapeAttr(modelReadinessTitle(model) || (dict.model_not_ready || 'Model snapshot is not ready to load.'));
+      return '<button class="action-btn action-load" disabled title="' + title + '" data-model="' + escaped + '">' + (dict.action_unavailable || 'Unavailable') + '</button>';
     }
     const mtp = model.mtp || {};
     const canUseMtp = mtp.status === 'available' && (mtp.candidates || []).length > 0;
@@ -5114,10 +5189,17 @@
         const displayName = m.id;
         const isDefault = (m.id === defaultModel);
         const isLoaded = m.loaded;
+        const readiness = modelReadiness(m);
         const escaped = m.id.replace(/"/g, '&quot;');
         const escapedSq = m.id.replace(/'/g, "\\'");
-        const statusDot = isLoaded ? 'model-loaded' : 'model-ready';
-        const statusText = isLoaded ? (dict.status_loaded || 'Loaded') : (dict.status_ready || 'Ready');
+        const statusDot = isLoaded ? 'model-loaded' : (readiness.status === 'ready' ? 'model-ready' : 'model-' + readiness.status);
+        const statusText = isLoaded
+          ? (dict.status_loaded || 'Loaded')
+          : readiness.status === 'incomplete'
+            ? (dict.status_incomplete || 'Incomplete')
+            : readiness.status === 'unsupported'
+              ? (dict.status_unsupported || 'Unsupported')
+              : (dict.status_ready || 'Ready');
         const actionClass = isLoaded ? 'action-unload' : 'action-load';
         const actionText = isLoaded ? (dict.action_unload || 'Unload') : (dict.action_load || 'Load');
         const tr = document.createElement('tr');
@@ -5128,10 +5210,11 @@
           + '<td><div class="model-name">' + sourceIcon + '<span class="model-name-text">' + displayName + '</span>' + renderMtpBadge(m)
           + (isLoaded ? ' <button class="icon-btn pin-btn' + (m.pinned ? ' pinned' : '') + '" onclick="event.stopPropagation();togglePin(\'' + escapedSq + '\', this)" data-model="' + escaped + '" title="' + escapeAttr(pinTooltip(m.pinned)) + '" style="vertical-align:middle;padding:0 2px;font-size:13px;opacity:' + (m.pinned ? '1' : '0.4') + '">&#x1F4CC;</button>' : '')
           + '</div></td>'
-          + '<td>' + (m.type || 'llm') + '</td>'
+          + '<td>' + renderModelType(m) + '</td>'
+          + '<td>' + renderQuantBadge(m) + '</td>'
           + '<td>' + formatSize(m.size_mb) + '</td>'
-          + '<td class="model-status-cell"><span class="status-dot ' + statusDot + '"></span> <span class="model-status-text">' + statusText + '</span></td>'
-          + '<td><input type="radio" name="default-model" value="' + escaped + '" ' + (isDefault ? 'checked' : '') + ' style="accent-color:var(--accent);" onchange="setDefaultModel(this.value)"></td>'
+          + '<td class="model-status-cell" title="' + escapeAttr(modelReadinessTitle(m)) + '"><span class="status-dot ' + statusDot + '"></span> <span class="model-status-text">' + statusText + '</span></td>'
+          + '<td><input type="radio" name="default-model" value="' + escaped + '" ' + (isDefault ? 'checked' : '') + ' ' + (!isModelLoadable(m) ? 'disabled ' : '') + 'style="accent-color:var(--accent);" onchange="setDefaultModel(this.value)"></td>'
           + '<td><button class="icon-btn" onclick="openParamsModal(\'' + escapedSq + '\')"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1.5l1 2a4.5 4.5 0 0 1 1.5.9l2-.5.8 1.4-1.1 1.6a4.3 4.3 0 0 1 0 1.8l1.1 1.6-.8 1.4-2-.5a4.5 4.5 0 0 1-1.5.9l-1 2-1-2a4.5 4.5 0 0 1-1.5-.9l-2 .5-.8-1.4 1.1-1.6a4.3 4.3 0 0 1 0-1.8L2.2 5.8l.8-1.4 2 .5A4.5 4.5 0 0 1 6.5 4l1-2Z" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/><circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.1"/></svg></button></td>'
           + '<td>' + renderModelLoadActions(m, escapedSq, escaped, actionClass, actionText, isLoaded) + '</td>'
           + '<td><button class="icon-btn" onclick="deleteSingleModel(\'' + escapedSq + '\')" title="Delete"><svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2M19 6v12a2 2 0 01-2 2H7a2 2 0 01-2-2V6" stroke="#e53e3e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M10 11v6M14 11v6" stroke="#e53e3e" stroke-width="1.5" stroke-linecap="round"/></svg></button></td>';

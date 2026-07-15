@@ -253,14 +253,21 @@ public actor ModelDownloadService {
             throw DownloadFailure(repoID: repoID, code: "repo_missing_tokenizer", message: "Repository \"\(repoID)\" is missing tokenizer.json.")
         }
 
+        let configData = try? await fetchHuggingFaceFileData(repoID: repoID, filename: "config.json", token: token)
         let snapshot = snapshotURL(sourceDirectory: "models", repoID: repoID, snapshotID: "main")
         let optionalFiles = [
             "tokenizer_config.json",
             "generation_config.json",
             "special_tokens_map.json",
+            "chat_template.jinja",
+            "preprocessor_config.json",
+            "processor_config.json",
+            "image_processor_config.json",
             "model.safetensors.index.json",
+            "optiq_metadata.json",
         ].filter { fileNames.contains($0) }
         var files = ["config.json", "tokenizer.json"] + optionalFiles
+        files.append(contentsOf: try optiqSidecarFiles(repoID: repoID, configData: configData, fileNames: fileNames))
 
         if fileNames.contains("model.safetensors.index.json"),
            let indexData = try? await fetchHuggingFaceFileData(repoID: repoID, filename: "model.safetensors.index.json", token: token),
@@ -306,6 +313,7 @@ public actor ModelDownloadService {
                 )
             )
         }
+        try validateDownloadedSnapshot(repoID: repoID)
     }
 
     private func fetchHuggingFaceModelInfo(repoID: String, token: String?) async throws -> HuggingFaceModelInfo {
@@ -393,6 +401,7 @@ public actor ModelDownloadService {
             try await downloadFile(request: URLRequest(url: url), filename: filename, to: snapshot)
             statuses[repoID]?.progressPct = Double(index + 1) / Double(files.count) * 100
         }
+        try validateDownloadedSnapshot(repoID: repoID)
     }
 
     private func fetchModelScopeFiles(repoID: String) async throws -> ModelScopeFilesResponse {
@@ -488,6 +497,46 @@ public actor ModelDownloadService {
             result.append(file)
         }
         return result
+    }
+
+    private func optiqSidecarFiles(repoID: String, configData: Data?, fileNames: [String]) throws -> [String] {
+        let optiqSafetensors = fileNames
+            .filter { $0.hasPrefix("optiq/") && $0.hasSuffix(".safetensors") }
+            .sorted()
+        guard let configData,
+              let config = try? JSONSerialization.jsonObject(with: configData) as? [String: Any],
+              let optiqVision = config["optiq_vision"] as? [String: Any],
+              let sidecar = optiqVision["sidecar"] as? String,
+              !sidecar.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return optiqSafetensors
+        }
+        guard fileNames.contains(sidecar) else {
+            throw DownloadFailure(
+                repoID: repoID,
+                code: "repo_missing_optiq_sidecar",
+                message: "Repository \"\(repoID)\" is missing OptiQ vision sidecar \"\(sidecar)\"."
+            )
+        }
+        return Array(Set(optiqSafetensors + [sidecar])).sorted()
+    }
+
+    private func validateDownloadedSnapshot(repoID: String) throws {
+        let scanner = LocalModelScanner(rootURL: rootURL)
+        if scanner.resolveModelPath(for: repoID) != nil {
+            return
+        }
+        if let readiness = scanner.readiness(for: repoID) {
+            throw DownloadFailure(
+                repoID: repoID,
+                code: readiness.reasonCode ?? "downloaded_snapshot_not_ready",
+                message: readiness.message ?? "Downloaded model snapshot is not ready to load."
+            )
+        }
+        throw DownloadFailure(
+            repoID: repoID,
+            code: "downloaded_snapshot_not_found",
+            message: "Downloaded model snapshot could not be discovered."
+        )
     }
 
     private func safetensorsShards(from data: Data) -> [String]? {

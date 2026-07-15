@@ -183,7 +183,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                     pinnedModels: state.pinnedModels,
                     mtpEnabledModels: state.mtpEnabledModels
                 )
-                let benchmarkModels = models.map {
+                let benchmarkModels = models.filter { $0.readiness?.isLoadable != false }.map {
                     BenchmarkModel(repoID: $0.repoID, loaded: $0.loaded)
                 }
                 let json = (try? Self.jsonString(benchmarkModels)) ?? "[]"
@@ -506,6 +506,11 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         let model = instruction.modelReference.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !model.isEmpty else {
             deliverModelOperationResult(error: "No model is configured.", callback: callback)
+            return
+        }
+        if let readiness = scanner.readiness(for: model), !readiness.isLoadable {
+            let detail = readiness.message ?? "Model snapshot is not ready to load."
+            deliverModelOperationResult(error: detail, callback: callback)
             return
         }
         let config = configStore.load()

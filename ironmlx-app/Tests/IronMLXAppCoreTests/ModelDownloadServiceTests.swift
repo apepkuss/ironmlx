@@ -38,6 +38,7 @@ import Testing
       ]
     }
     """.utf8)
+    client.dataResponses["https://huggingface.co/mlx-community/Tiny-4bit/resolve/main/config.json"] = Data("{}".utf8)
     client.downloadResponses["https://huggingface.co/mlx-community/Tiny-4bit/resolve/main/config.json"] = Data("{}".utf8)
     client.downloadResponses["https://huggingface.co/mlx-community/Tiny-4bit/resolve/main/tokenizer.json"] = Data("{}".utf8)
     client.downloadResponses["https://huggingface.co/mlx-community/Tiny-4bit/resolve/main/tokenizer_config.json"] = Data("{}".utf8)
@@ -54,6 +55,56 @@ import Testing
     #expect(result.success)
     #expect(LocalModelScanner(rootURL: root).scan().map(\.repoID) == ["mlx-community/Tiny-4bit"])
     #expect(await progress.percentages().last == 100)
+}
+
+@Test func huggingFaceDownloadIncludesOptiqMetadataAndSidecars() async throws {
+    let root = try temporaryDirectory()
+    let client = FakeModelDownloadHTTPClient()
+    client.dataResponses["https://huggingface.co/api/models/mlx-community/Gemma-OptiQ"] = Data("""
+    {
+      "siblings": [
+        {"rfilename":"config.json"},
+        {"rfilename":"tokenizer.json"},
+        {"rfilename":"chat_template.jinja"},
+        {"rfilename":"optiq_metadata.json"},
+        {"rfilename":"model.safetensors"},
+        {"rfilename":"optiq/optiq_vision.safetensors"}
+      ]
+    }
+    """.utf8)
+    let config = Data("""
+    {
+      "quantization": {"group_size": 64, "bits": 4, "mode": "optiq"},
+      "optiq_vision": {"sidecar": "optiq/optiq_vision.safetensors"}
+    }
+    """.utf8)
+    let optiqMetadata = Data("""
+    {
+      "method": "optiq_mixed_precision",
+      "per_layer": {
+        "model.layers.0.self_attn.q_proj": {"group_size": 64, "bits": 4},
+        "model.layers.0.self_attn.k_proj": {"group_size": 64, "bits": 8}
+      }
+    }
+    """.utf8)
+    client.dataResponses["https://huggingface.co/mlx-community/Gemma-OptiQ/resolve/main/config.json"] = config
+    client.downloadResponses["https://huggingface.co/mlx-community/Gemma-OptiQ/resolve/main/config.json"] = config
+    client.downloadResponses["https://huggingface.co/mlx-community/Gemma-OptiQ/resolve/main/tokenizer.json"] = Data("{}".utf8)
+    client.downloadResponses["https://huggingface.co/mlx-community/Gemma-OptiQ/resolve/main/chat_template.jinja"] = Data("{{ messages }}".utf8)
+    client.downloadResponses["https://huggingface.co/mlx-community/Gemma-OptiQ/resolve/main/optiq_metadata.json"] = optiqMetadata
+    client.downloadResponses["https://huggingface.co/mlx-community/Gemma-OptiQ/resolve/main/model.safetensors"] = Data("weights".utf8)
+    client.downloadResponses["https://huggingface.co/mlx-community/Gemma-OptiQ/resolve/main/optiq/optiq_vision.safetensors"] = Data("vision".utf8)
+    let service = ModelDownloadService(rootURL: root, httpClient: client)
+
+    let result = await service.downloadHuggingFace(repoID: "mlx-community/Gemma-OptiQ", token: nil)
+    let model = try #require(LocalModelScanner(rootURL: root).scan().first)
+
+    #expect(result.success)
+    #expect(model.quantization?.kind == "optiq")
+    #expect(model.quantization?.mixedBits == [4, 8])
+    #expect(model.readiness?.status == "ready")
+    #expect(client.downloadRequests.contains("https://huggingface.co/mlx-community/Gemma-OptiQ/resolve/main/optiq_metadata.json"))
+    #expect(client.downloadRequests.contains("https://huggingface.co/mlx-community/Gemma-OptiQ/resolve/main/optiq/optiq_vision.safetensors"))
 }
 
 @Test func modelScopeDownloadUpdatesStatusAndWritesMainSnapshot() async throws {
@@ -91,6 +142,7 @@ private final class FakeModelDownloadHTTPClient: ModelDownloadHTTPClient, @unche
     var dataResponses: [String: Data] = [:]
     var downloadResponses: [String: Data] = [:]
     private(set) var dataRequests: [String] = []
+    private(set) var downloadRequests: [String] = []
     private let lock = NSLock()
 
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
@@ -106,6 +158,9 @@ private final class FakeModelDownloadHTTPClient: ModelDownloadHTTPClient, @unche
 
     func download(for request: URLRequest) async throws -> (URL, HTTPURLResponse) {
         let key = try requestKey(request)
+        lock.withLock {
+            downloadRequests.append(key)
+        }
         guard let data = lock.withLock({ downloadResponses[key] }) else {
             throw URLError(.fileDoesNotExist)
         }
