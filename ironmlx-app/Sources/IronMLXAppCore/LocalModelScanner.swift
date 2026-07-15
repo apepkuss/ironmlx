@@ -1,5 +1,69 @@
 import Foundation
 
+public struct LocalModelQuantization: Codable, Equatable, Sendable {
+    public var kind: String
+    public var label: String
+    public var bits: Int?
+    public var groupSize: Int?
+    public var dtype: String?
+    public var mixedBits: [Int]
+
+    public init(
+        kind: String,
+        label: String,
+        bits: Int? = nil,
+        groupSize: Int? = nil,
+        dtype: String? = nil,
+        mixedBits: [Int] = []
+    ) {
+        self.kind = kind
+        self.label = label
+        self.bits = bits
+        self.groupSize = groupSize
+        self.dtype = dtype
+        self.mixedBits = mixedBits
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case kind
+        case label
+        case bits
+        case groupSize = "group_size"
+        case dtype
+        case mixedBits = "mixed_bits"
+    }
+}
+
+public struct LocalModelReadiness: Codable, Equatable, Sendable {
+    public var status: String
+    public var reasonCode: String?
+    public var message: String?
+    public var missingFiles: [String]
+
+    public init(
+        status: String = "ready",
+        reasonCode: String? = nil,
+        message: String? = nil,
+        missingFiles: [String] = []
+    ) {
+        self.status = status
+        self.reasonCode = reasonCode
+        self.message = message
+        self.missingFiles = missingFiles
+    }
+
+    public var isLoadable: Bool {
+        status == "ready"
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case status
+        case reasonCode = "reason_code"
+        case message
+        case missingFiles = "missing_files"
+    }
+}
+
 public struct LocalModel: Codable, Equatable, Sendable {
     public var id: String
     public var repoID: String
@@ -12,6 +76,8 @@ public struct LocalModel: Codable, Equatable, Sendable {
     public var effectiveMaxTokens: Int?
     public var generationDefaults: BackendSamplingDefaults?
     public var mtp: LocalModelMtpInfo?
+    public var quantization: LocalModelQuantization?
+    public var readiness: LocalModelReadiness?
 
     public init(
         id: String,
@@ -24,7 +90,9 @@ public struct LocalModel: Codable, Equatable, Sendable {
         maxPositionEmbeddings: Int? = nil,
         effectiveMaxTokens: Int? = nil,
         generationDefaults: BackendSamplingDefaults? = nil,
-        mtp: LocalModelMtpInfo? = nil
+        mtp: LocalModelMtpInfo? = nil,
+        quantization: LocalModelQuantization? = nil,
+        readiness: LocalModelReadiness? = nil
     ) {
         self.id = id
         self.repoID = repoID
@@ -37,6 +105,8 @@ public struct LocalModel: Codable, Equatable, Sendable {
         self.effectiveMaxTokens = effectiveMaxTokens
         self.generationDefaults = generationDefaults
         self.mtp = mtp
+        self.quantization = quantization
+        self.readiness = readiness
     }
 
     enum CodingKeys: String, CodingKey {
@@ -51,6 +121,8 @@ public struct LocalModel: Codable, Equatable, Sendable {
         case effectiveMaxTokens = "effective_max_tokens"
         case generationDefaults = "generation_defaults"
         case mtp
+        case quantization
+        case readiness
     }
 }
 
@@ -75,6 +147,20 @@ private struct LocalModelArtifact {
             reasonCode: signature == nil ? "mtp_invalid_config" : nil
         )
     }
+}
+
+private struct SnapshotInspection {
+    var path: URL
+    var config: [String: Any]
+    var capabilityType: String
+    var readiness: LocalModelReadiness
+    var quantization: LocalModelQuantization
+}
+
+private struct QuantizationInspection {
+    var quantization: LocalModelQuantization
+    var missingFiles: [String]
+    var unsupportedReason: String?
 }
 
 private extension LocalModel {
@@ -264,7 +350,9 @@ public struct LocalModelScanner: Sendable {
             pinnedModels: pinnedModels
         )
 
-        let mtpArtifacts = artifacts.filter { $0.kind == .mtp }
+        let mtpArtifacts = artifacts.filter {
+            $0.kind == .mtp && $0.model.readiness?.isLoadable != false
+        }
         let mtpCandidates = mtpArtifacts.map(\.mtpCandidate)
         return artifacts
             .filter { $0.kind == .base }
@@ -309,8 +397,30 @@ public struct LocalModelScanner: Sendable {
             let snapshots = root
                 .appendingPathComponent(dirName, isDirectory: true)
                 .appendingPathComponent("snapshots", isDirectory: true)
-            if let snapshot = firstCompleteSnapshot(in: snapshots) {
-                return snapshot.path
+            if let snapshot = firstReadySnapshot(in: snapshots) {
+                return snapshot.path.path
+            }
+        }
+        return nil
+    }
+
+    public func readiness(for reference: String) -> LocalModelReadiness? {
+        let direct = URL(fileURLWithPath: NSString(string: reference).expandingTildeInPath)
+        if FileManager.default.fileExists(atPath: direct.path) {
+            return inspectSnapshot(direct)?.readiness
+        }
+
+        let dirName = "models--" + reference.replacingOccurrences(of: "/", with: "--")
+        let roots = [
+            rootURL.appendingPathComponent("models", isDirectory: true),
+            rootURL.appendingPathComponent("models-ms", isDirectory: true),
+        ]
+        for root in roots {
+            let snapshots = root
+                .appendingPathComponent(dirName, isDirectory: true)
+                .appendingPathComponent("snapshots", isDirectory: true)
+            if let inspection = firstSnapshotInspection(in: snapshots) {
+                return inspection.readiness
             }
         }
         return nil
@@ -349,25 +459,28 @@ public struct LocalModelScanner: Sendable {
             let id = String(name.dropFirst("models--".count))
                 .replacingOccurrences(of: "--", with: "/")
             let snapshots = entry.appendingPathComponent("snapshots", isDirectory: true)
-            guard let snapshot = firstCompleteSnapshot(in: snapshots) else {
+            guard let inspection = firstSnapshotInspection(in: snapshots) else {
                 return nil
             }
+            let snapshot = inspection.path
             let sizeMB = directorySize(snapshot) / 1_048_576.0
             let loaded = loadedModels.contains(id) || loadedModels.contains(snapshot.path)
             let pinned = loaded && (pinnedModels.contains(id) || pinnedModels.contains(snapshot.path))
-            let config = configJSON(in: snapshot)
+            let config = inspection.config
             let kind = artifactKind(config)
             let signature = mtpCompatibilitySignature(config)
             return LocalModel(
                 id: id,
                 repoID: id,
                 source: source,
-                type: kind == .mtp ? "mtp" : "llm",
+                type: kind == .mtp ? "mtp" : inspection.capabilityType,
                 sizeMB: sizeMB,
                 loaded: loaded,
                 pinned: pinned,
                 maxPositionEmbeddings: maxPositionEmbeddings(in: snapshot),
-                generationDefaults: generationDefaults(in: snapshot)
+                generationDefaults: generationDefaults(in: snapshot),
+                quantization: inspection.quantization,
+                readiness: inspection.readiness
             ).artifact(kind: kind, path: snapshot, signature: signature)
         }
     }
@@ -379,6 +492,103 @@ public struct LocalModelScanner: Sendable {
             return nil
         }
         return json
+    }
+
+    private func modelCapabilityType(config: [String: Any]) -> String {
+        let signals = modelCapabilitySignals(config: config)
+        let modelType = normalizedString(config["model_type"]) ?? ""
+        if isMtpModelType(modelType) {
+            return "mtp"
+        }
+        if signalsContainAny(signals, ["reranker", "rerank", "text-ranking"]) {
+            return "reranker"
+        }
+        if signalsContainAny(
+            signals,
+            ["embedding", "embeddings", "text-embedding", "sentence-similarity", "feature-extraction", "sentence-transformers"]
+        ) {
+            return "embedding"
+        }
+        if signalsContainAny(
+            signals,
+            ["automatic-speech-recognition", "speech-recognition", "asr", "whisper", "wav2vec", "hubert", "seamless"]
+        ) {
+            return "asr"
+        }
+        if signalsContainAny(signals, ["text-to-speech", "tts", "speecht5", "vits", "bark", "parler", "kokoro"]) {
+            return "tts"
+        }
+        if hasVisionCapability(config: config, signals: signals) {
+            return "vlm"
+        }
+        return "llm"
+    }
+
+    private func modelCapabilitySignals(config: [String: Any]) -> [String] {
+        var signals: [String] = []
+        for key in ["model_type", "pipeline_tag", "task", "_name_or_path"] {
+            if let signal = normalizedString(config[key]) {
+                signals.append(signal)
+            }
+        }
+        signals.append(contentsOf: stringArray(config["architectures"]).map(normalizedSignal))
+        signals.append(contentsOf: stringArray(config["tags"]).map(normalizedSignal))
+        return signals
+    }
+
+    private func normalizedString(_ value: Any?) -> String? {
+        guard let string = value as? String else {
+            return nil
+        }
+        let normalized = normalizedSignal(string)
+        return normalized.isEmpty ? nil : normalized
+    }
+
+    private func normalizedSignal(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "_", with: "-")
+    }
+
+    private func signalsContainAny(_ signals: [String], _ keywords: [String]) -> Bool {
+        signals.contains { signal in
+            keywords.contains { signal.contains($0) }
+        }
+    }
+
+    private func isMtpModelType(_ modelType: String) -> Bool {
+        modelType == "qwen3-5-mtp"
+            || modelType == "gemma4-assistant"
+            || modelType == "gemma4-unified-assistant"
+    }
+
+    private func hasVisionCapability(config: [String: Any], signals: [String]) -> Bool {
+        if let visionConfig = config["vision_config"] as? [String: Any], !visionConfig.isEmpty {
+            return true
+        }
+        if config["image_token_id"] != nil
+            || config["vision_token_id"] != nil
+            || config["vision_start_token_id"] != nil
+            || config["vision_end_token_id"] != nil
+            || config["video_token_id"] != nil {
+            return true
+        }
+        return signalsContainAny(signals, ["vlm", "vision", "multimodal", "minicpmv"])
+    }
+
+    private func unsupportedModelTypeReason(for type: String) -> String? {
+        switch type {
+        case "embedding":
+            return "Embedding models are detected for metadata display, but ironmlx-app serving currently loads LLM/VLM generation models only."
+        case "reranker":
+            return "Reranker models are detected for metadata display, but ironmlx-app serving currently loads LLM/VLM generation models only."
+        case "asr":
+            return "ASR models are detected for metadata display, but ironmlx-app serving currently loads LLM/VLM generation models only."
+        case "tts":
+            return "TTS models are detected for metadata display, but ironmlx-app serving currently loads LLM/VLM generation models only."
+        default:
+            return nil
+        }
     }
 
     private func artifactKind(_ config: [String: Any]?) -> LocalModelArtifactKind {
@@ -600,7 +810,14 @@ public struct LocalModelScanner: Sendable {
         return parsed
     }
 
-    private func firstCompleteSnapshot(in snapshotsURL: URL) -> URL? {
+    private func firstReadySnapshot(in snapshotsURL: URL) -> SnapshotInspection? {
+        firstSnapshotInspection(in: snapshotsURL) { $0.readiness.isLoadable }
+    }
+
+    private func firstSnapshotInspection(
+        in snapshotsURL: URL,
+        matching predicate: (SnapshotInspection) -> Bool = { _ in true }
+    ) -> SnapshotInspection? {
         guard let entries = try? FileManager.default.contentsOfDirectory(
             at: snapshotsURL,
             includingPropertiesForKeys: nil,
@@ -610,29 +827,76 @@ public struct LocalModelScanner: Sendable {
         }
 
         return entries.sorted { $0.lastPathComponent < $1.lastPathComponent }
-            .first { snapshotIsComplete($0) }
+            .compactMap { inspectSnapshot($0) }
+            .first(where: predicate)
     }
 
-    private func snapshotIsComplete(_ url: URL) -> Bool {
+    private func inspectSnapshot(_ url: URL) -> SnapshotInspection? {
         let config = url.appendingPathComponent("config.json")
         guard FileManager.default.isReadableFile(atPath: config.path),
               let files = try? FileManager.default.contentsOfDirectory(
                 at: url,
                 includingPropertiesForKeys: nil,
                 options: [.skipsHiddenFiles]
-        ) else {
-            return false
+              ),
+              let configJSON = configJSON(in: url)
+        else {
+            return nil
         }
+        var missingFiles = requiredWeightFilesMissing(in: url, files: files)
+        let quantization = quantizationInspection(config: configJSON, snapshot: url)
+        let capabilityType = modelCapabilityType(config: configJSON)
+        missingFiles.append(contentsOf: quantization.missingFiles)
+
+        let readiness: LocalModelReadiness
+        if let unsupportedReason = quantization.unsupportedReason {
+            readiness = LocalModelReadiness(
+                status: "unsupported",
+                reasonCode: "unsupported_quantization",
+                message: unsupportedReason
+            )
+        } else if let unsupportedReason = unsupportedModelTypeReason(for: capabilityType) {
+            readiness = LocalModelReadiness(
+                status: "unsupported",
+                reasonCode: "unsupported_model_type",
+                message: unsupportedReason
+            )
+        } else if missingFiles.isEmpty {
+            readiness = LocalModelReadiness()
+        } else {
+            readiness = LocalModelReadiness(
+                status: "incomplete",
+                reasonCode: "missing_required_files",
+                message: "Missing required model files: \(missingFiles.joined(separator: ", "))",
+                missingFiles: missingFiles
+            )
+        }
+        return SnapshotInspection(
+            path: url,
+            config: configJSON,
+            capabilityType: capabilityType,
+            readiness: readiness,
+            quantization: quantization.quantization
+        )
+    }
+
+    private func requiredWeightFilesMissing(in url: URL, files: [URL]) -> [String] {
         let singleFile = files.contains { $0.lastPathComponent == "model.safetensors" }
         let index = url.appendingPathComponent("model.safetensors.index.json")
         if FileManager.default.isReadableFile(atPath: index.path) {
             let shards = safetensorsShards(from: index)
-            let shardsComplete = !shards.isEmpty && shards.allSatisfy {
-                FileManager.default.isReadableFile(atPath: url.appendingPathComponent($0).path)
+            if shards.isEmpty {
+                return singleFile ? [] : ["model.safetensors"]
             }
-            return shardsComplete || singleFile
+            let missing = shards.filter {
+                !FileManager.default.isReadableFile(atPath: url.appendingPathComponent($0).path)
+            }
+            return missing.isEmpty || singleFile ? [] : missing
         }
-        return singleFile || files.contains { $0.pathExtension == "safetensors" }
+        if singleFile || files.contains(where: { $0.pathExtension == "safetensors" }) {
+            return []
+        }
+        return ["model.safetensors"]
     }
 
     private func safetensorsShards(from index: URL) -> [String] {
@@ -642,6 +906,177 @@ public struct LocalModelScanner: Sendable {
             return []
         }
         return Array(Set(weightMap.values.compactMap { $0 as? String })).sorted()
+    }
+
+    private func quantizationInspection(config: [String: Any], snapshot: URL) -> QuantizationInspection {
+        let optiqMetadataURL = snapshot.appendingPathComponent("optiq_metadata.json")
+        let hasOptiQMetadata = FileManager.default.isReadableFile(atPath: optiqMetadataURL.path)
+        guard let rawQuantization = quantizationConfig(in: config) else {
+            return QuantizationInspection(
+                quantization: denseQuantization(config: config),
+                missingFiles: [],
+                unsupportedReason: nil
+            )
+        }
+
+        guard let bits = intValue(rawQuantization["bits"]),
+              let groupSize = intValue(rawQuantization["group_size"]) else {
+            return QuantizationInspection(
+                quantization: LocalModelQuantization(kind: "unknown", label: "Unknown quantization"),
+                missingFiles: [],
+                unsupportedReason: "Quantization metadata must include integer bits and group_size."
+            )
+        }
+
+        let configuredMode = (rawQuantization["mode"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let mode = hasOptiQMetadata ? "optiq" : configuredMode ?? "affine"
+
+        switch mode {
+        case "affine":
+            var unsupportedReason: String?
+            if ![2, 4, 5, 6, 8].contains(bits) {
+                unsupportedReason = "Unsupported affine bit width \(bits). Supported values are 2, 4, 5, 6, and 8."
+            } else if ![32, 64, 128].contains(groupSize) {
+                unsupportedReason = "Unsupported affine group_size \(groupSize). Supported values are 32, 64, and 128."
+            }
+            return QuantizationInspection(
+                quantization: LocalModelQuantization(
+                    kind: "affine",
+                    label: "affine \(bits)-bit",
+                    bits: bits,
+                    groupSize: groupSize
+                ),
+                missingFiles: [],
+                unsupportedReason: unsupportedReason
+            )
+        case "optiq":
+            var missingFiles: [String] = []
+            var unsupportedReason: String?
+            var mixedBits: [Int] = []
+            if hasOptiQMetadata {
+                let metadata = optiqMetadata(in: optiqMetadataURL)
+                mixedBits = metadata.mixedBits
+                unsupportedReason = metadata.unsupportedReason
+            } else {
+                missingFiles.append("optiq_metadata.json")
+            }
+            missingFiles.append(contentsOf: optiqVisionSidecarsMissing(config: config, snapshot: snapshot))
+            if groupSize != 64 {
+                unsupportedReason = "Unsupported OptiQ group_size \(groupSize). Supported value is 64."
+            } else if ![2, 4, 8].contains(bits) {
+                unsupportedReason = "Unsupported OptiQ bit width \(bits). Supported values are 2, 4, and 8."
+            }
+            let bitsLabel = mixedBits.isEmpty
+                ? "\(bits)-bit"
+                : mixedBits.map { "\($0)" }.joined(separator: "/") + "-bit"
+            return QuantizationInspection(
+                quantization: LocalModelQuantization(
+                    kind: "optiq",
+                    label: "OptiQ \(bitsLabel)",
+                    bits: bits,
+                    groupSize: groupSize,
+                    mixedBits: mixedBits
+                ),
+                missingFiles: missingFiles,
+                unsupportedReason: unsupportedReason
+            )
+        case "mxfp4":
+            let unsupportedReason = bits == 4 && groupSize == 32
+                ? nil
+                : "MXFP4 requires bits=4 and group_size=32."
+            return QuantizationInspection(
+                quantization: LocalModelQuantization(kind: "mxfp4", label: "MXFP4", bits: bits, groupSize: groupSize),
+                missingFiles: [],
+                unsupportedReason: unsupportedReason
+            )
+        case "mxfp8":
+            let unsupportedReason = bits == 8 && groupSize == 32
+                ? nil
+                : "MXFP8 requires bits=8 and group_size=32."
+            return QuantizationInspection(
+                quantization: LocalModelQuantization(kind: "mxfp8", label: "MXFP8", bits: bits, groupSize: groupSize),
+                missingFiles: [],
+                unsupportedReason: unsupportedReason
+            )
+        default:
+            return QuantizationInspection(
+                quantization: LocalModelQuantization(
+                    kind: "unknown",
+                    label: mode.uppercased(),
+                    bits: bits,
+                    groupSize: groupSize
+                ),
+                missingFiles: [],
+                unsupportedReason: "Unsupported quantization mode \(mode)."
+            )
+        }
+    }
+
+    private func quantizationConfig(in config: [String: Any]) -> [String: Any]? {
+        (config["quantization"] as? [String: Any]) ?? (config["quantization_config"] as? [String: Any])
+    }
+
+    private func denseQuantization(config: [String: Any]) -> LocalModelQuantization {
+        let dtype = dtypeValue(config)
+        let label = dtype == "bf16" ? "bf16" : "Dense"
+        return LocalModelQuantization(kind: "dense", label: label, dtype: dtype)
+    }
+
+    private func dtypeValue(_ config: [String: Any]) -> String? {
+        let raw = (config["torch_dtype"] as? String)
+            ?? (config["dtype"] as? String)
+            ?? ((config["text_config"] as? [String: Any])?["torch_dtype"] as? String)
+            ?? ((config["text_config"] as? [String: Any])?["dtype"] as? String)
+        guard let raw else {
+            return nil
+        }
+        let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        switch normalized {
+        case "bfloat16":
+            return "bf16"
+        default:
+            return normalized
+        }
+    }
+
+    private func optiqMetadata(in url: URL) -> (mixedBits: [Int], unsupportedReason: String?) {
+        guard let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return ([], "optiq_metadata.json is not valid JSON.")
+        }
+        guard (json["method"] as? String) == "optiq_mixed_precision" else {
+            return ([], "Unsupported OptiQ metadata method.")
+        }
+        guard let perLayer = json["per_layer"] as? [String: Any], !perLayer.isEmpty else {
+            return ([], "optiq_metadata.json must include non-empty per_layer metadata.")
+        }
+        var bits = Set<Int>()
+        for value in perLayer.values {
+            guard let layer = value as? [String: Any],
+                  let layerBits = intValue(layer["bits"]),
+                  let groupSize = intValue(layer["group_size"]) else {
+                return ([], "OptiQ per_layer entries must include integer bits and group_size.")
+            }
+            guard [2, 4, 8].contains(layerBits), groupSize == 64 else {
+                return ([], "OptiQ per_layer entries must use bits 2, 4, or 8 with group_size 64.")
+            }
+            bits.insert(layerBits)
+        }
+        return (bits.sorted(), nil)
+    }
+
+    private func optiqVisionSidecarsMissing(config: [String: Any], snapshot: URL) -> [String] {
+        guard let optiqVision = config["optiq_vision"] as? [String: Any],
+              let sidecar = optiqVision["sidecar"] as? String,
+              !sidecar.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return []
+        }
+        if FileManager.default.isReadableFile(atPath: snapshot.appendingPathComponent(sidecar).path) {
+            return []
+        }
+        return [sidecar]
     }
 
     private func directorySize(_ url: URL) -> Double {

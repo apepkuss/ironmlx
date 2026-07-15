@@ -3,7 +3,7 @@ import Testing
 
 @testable import IronMLXAppCore
 
-@Test func localModelScannerRejectsIncompleteShardedSnapshot() throws {
+@Test func localModelScannerSurfacesIncompleteShardedSnapshot() throws {
     let root = try temporaryDirectory()
     let snapshot = root
         .appendingPathComponent("models", isDirectory: true)
@@ -19,11 +19,184 @@ import Testing
 
     let scanner = LocalModelScanner(rootURL: root)
 
-    #expect(scanner.scan().isEmpty)
+    let incomplete = try #require(scanner.scan().first)
+    #expect(incomplete.readiness?.status == "incomplete")
+    #expect(incomplete.readiness?.missingFiles == ["model-00002-of-00002.safetensors"])
+    #expect(scanner.resolveModelPath(for: "mlx-community/Sharded-4bit") == nil)
 
     try Data("complete".utf8).write(to: snapshot.appendingPathComponent("model-00002-of-00002.safetensors"))
 
     #expect(scanner.scan().map(\.repoID) == ["mlx-community/Sharded-4bit"])
+    #expect(scanner.scan().first?.readiness?.status == "ready")
+    #expect(scanner.resolveModelPath(for: "mlx-community/Sharded-4bit") != nil)
+}
+
+@Test func localModelScannerReportsSupportedWeightQuantizationKinds() throws {
+    let root = try temporaryDirectory()
+    _ = try writeSnapshot(
+        root: root,
+        repoID: "mlx-community/Dense-bf16",
+        configJSON: #"{"torch_dtype":"bfloat16"}"#
+    )
+    for bits in [2, 4, 5, 6, 8] {
+        _ = try writeSnapshot(
+            root: root,
+            repoID: "mlx-community/Affine-\(bits)bit",
+            configJSON: #"{"quantization":{"group_size":64,"bits":\#(bits),"mode":"affine"}}"#
+        )
+    }
+    _ = try writeSnapshot(
+        root: root,
+        repoID: "mlx-community/MXFP4",
+        configJSON: #"{"quantization":{"group_size":32,"bits":4,"mode":"mxfp4"}}"#
+    )
+    _ = try writeSnapshot(
+        root: root,
+        repoID: "mlx-community/MXFP8",
+        configJSON: #"{"quantization_config":{"group_size":32,"bits":8,"mode":"mxfp8"}}"#
+    )
+    let optiq = try writeSnapshot(
+        root: root,
+        repoID: "mlx-community/OptiQ-4bit",
+        configJSON: #"{"quantization":{"group_size":64,"bits":4,"mode":"affine"}}"#
+    )
+    try Data("""
+    {
+      "method": "optiq_mixed_precision",
+      "per_layer": {
+        "model.layers.0.self_attn.q_proj": {"group_size": 64, "bits": 4},
+        "model.layers.0.self_attn.k_proj": {"group_size": 64, "bits": 8}
+      }
+    }
+    """.utf8).write(to: optiq.appendingPathComponent("optiq_metadata.json"))
+
+    let models = Dictionary(uniqueKeysWithValues: LocalModelScanner(rootURL: root).scan().map { ($0.id, $0) })
+
+    #expect(models["mlx-community/Dense-bf16"]?.quantization?.label == "bf16")
+    for bits in [2, 4, 5, 6, 8] {
+        let model = try #require(models["mlx-community/Affine-\(bits)bit"])
+        #expect(model.quantization?.kind == "affine")
+        #expect(model.quantization?.bits == bits)
+        #expect(model.quantization?.label == "affine \(bits)-bit")
+        #expect(model.readiness?.status == "ready")
+    }
+    #expect(models["mlx-community/MXFP4"]?.quantization?.label == "MXFP4")
+    #expect(models["mlx-community/MXFP8"]?.quantization?.label == "MXFP8")
+    #expect(models["mlx-community/OptiQ-4bit"]?.quantization?.kind == "optiq")
+    #expect(models["mlx-community/OptiQ-4bit"]?.quantization?.mixedBits == [4, 8])
+    #expect(models["mlx-community/OptiQ-4bit"]?.quantization?.label == "OptiQ 4/8-bit")
+}
+
+@Test func localModelScannerReportsModelCapabilityTypes() throws {
+    let root = try temporaryDirectory()
+    _ = try writeSnapshot(
+        root: root,
+        repoID: "mlx-community/Text-LLM",
+        configJSON: #"{"model_type":"llama","architectures":["LlamaForCausalLM"]}"#
+    )
+    _ = try writeSnapshot(
+        root: root,
+        repoID: "mlx-community/Vision-LM",
+        configJSON: """
+        {
+          "model_type": "gemma4",
+          "architectures": ["Gemma4ForConditionalGeneration"],
+          "text_config": {"model_type": "gemma4_text"},
+          "vision_config": {"model_type": "gemma4_vision", "patch_size": 16}
+        }
+        """
+    )
+    _ = try writeSnapshot(
+        root: root,
+        repoID: "mlx-community/Text-Embedding",
+        configJSON: #"{"pipeline_tag":"feature-extraction","architectures":["BertModel"]}"#
+    )
+    _ = try writeSnapshot(
+        root: root,
+        repoID: "mlx-community/Text-Reranker",
+        configJSON: #"{"pipeline_tag":"text-ranking","architectures":["XLMRobertaForSequenceClassification"]}"#
+    )
+    _ = try writeSnapshot(
+        root: root,
+        repoID: "mlx-community/Speech-ASR",
+        configJSON: #"{"model_type":"whisper","pipeline_tag":"automatic-speech-recognition"}"#
+    )
+    _ = try writeSnapshot(
+        root: root,
+        repoID: "mlx-community/Speech-TTS",
+        configJSON: #"{"model_type":"vits","pipeline_tag":"text-to-speech"}"#
+    )
+
+    let models = Dictionary(uniqueKeysWithValues: LocalModelScanner(rootURL: root).scan().map { ($0.id, $0) })
+
+    #expect(models["mlx-community/Text-LLM"]?.type == "llm")
+    #expect(models["mlx-community/Text-LLM"]?.readiness?.status == "ready")
+    #expect(models["mlx-community/Vision-LM"]?.type == "vlm")
+    #expect(models["mlx-community/Vision-LM"]?.readiness?.status == "ready")
+    for (id, type) in [
+        ("mlx-community/Text-Embedding", "embedding"),
+        ("mlx-community/Text-Reranker", "reranker"),
+        ("mlx-community/Speech-ASR", "asr"),
+        ("mlx-community/Speech-TTS", "tts"),
+    ] {
+        let model = try #require(models[id])
+        #expect(model.type == type)
+        #expect(model.readiness?.status == "unsupported")
+        #expect(model.readiness?.reasonCode == "unsupported_model_type")
+    }
+}
+
+@Test func localModelScannerMarksMissingOptiqSidecarIncomplete() throws {
+    let root = try temporaryDirectory()
+    let snapshot = try writeSnapshot(
+        root: root,
+        repoID: "mlx-community/Gemma-OptiQ",
+        configJSON: """
+        {
+          "quantization": {"group_size": 64, "bits": 4, "mode": "optiq"},
+          "optiq_vision": {"sidecar": "optiq/optiq_vision.safetensors"}
+        }
+        """
+    )
+    try Data("""
+    {
+      "method": "optiq_mixed_precision",
+      "per_layer": {
+        "model.layers.0.self_attn.q_proj": {"group_size": 64, "bits": 4}
+      }
+    }
+    """.utf8).write(to: snapshot.appendingPathComponent("optiq_metadata.json"))
+
+    let scanner = LocalModelScanner(rootURL: root)
+    let incomplete = try #require(scanner.scan().first)
+
+    #expect(incomplete.readiness?.status == "incomplete")
+    #expect(incomplete.readiness?.missingFiles == ["optiq/optiq_vision.safetensors"])
+    #expect(scanner.resolveModelPath(for: "mlx-community/Gemma-OptiQ") == nil)
+
+    let sidecar = snapshot.appendingPathComponent("optiq", isDirectory: true)
+        .appendingPathComponent("optiq_vision.safetensors")
+    try FileManager.default.createDirectory(at: sidecar.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try Data("vision".utf8).write(to: sidecar)
+
+    let ready = try #require(scanner.scan().first)
+    #expect(ready.readiness?.status == "ready")
+    #expect(scanner.resolveModelPath(for: "mlx-community/Gemma-OptiQ") != nil)
+}
+
+@Test func localModelScannerMarksUnsupportedQuantizationMode() throws {
+    let root = try temporaryDirectory()
+    _ = try writeSnapshot(
+        root: root,
+        repoID: "mlx-community/NVFP4",
+        configJSON: #"{"quantization":{"group_size":16,"bits":4,"mode":"nvfp4"}}"#
+    )
+
+    let model = try #require(LocalModelScanner(rootURL: root).scan().first)
+
+    #expect(model.quantization?.kind == "unknown")
+    #expect(model.readiness?.status == "unsupported")
+    #expect(model.readiness?.reasonCode == "unsupported_quantization")
 }
 
 @Test func localModelScannerReadsContextWindowFromConfig() throws {

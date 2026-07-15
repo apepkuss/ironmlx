@@ -61,6 +61,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                         var latestResponse: BackendModelAdminResponse?
                         for model in models {
                             do {
+                                if let readiness = self.scanner.readiness(for: model), !readiness.isLoadable {
+                                    let detail = readiness.message ?? "model snapshot is not ready to load"
+                                    IronMLXAppLogger.error("Skipped restoring ironmlx model on app launch: \(model): \(detail)")
+                                    continue
+                                }
                                 let resolvedModel = self.scanner.resolveModelPath(for: model) ?? model
                                 let setDefault = model == defaultModel || defaultModel == nil && model == models.first
                                 let mtpRuntime = try? ModelMtpRuntimeResolver.runtime(

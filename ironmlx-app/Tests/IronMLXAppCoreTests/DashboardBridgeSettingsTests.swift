@@ -184,6 +184,45 @@ import WebKit
     withExtendedLifetime(bridge) {}
 }
 
+@MainActor
+@Test func dashboardScannedModelsExposeQuantizationAndReadiness() async throws {
+    let root = try dashboardBridgeNotificationModelRoot(
+        repoID: "mlx-community/Affine-6bit",
+        configJSON: #"{"quantization":{"group_size":64,"bits":6,"mode":"affine"}}"#
+    )
+    let configStore = AppConfigStore(url: root.appendingPathComponent("app_config.json"))
+    configStore.save(AppConfig())
+    let webView = CapturingDashboardWebView()
+    let notificationCenter = NotificationCenter()
+    let bridge = DashboardBridge(
+        webView: webView,
+        configStore: configStore,
+        backend: BackendProcessManager(
+            configStore: configStore,
+            scanner: LocalModelScanner(rootURL: root)
+        ),
+        scanner: LocalModelScanner(rootURL: root),
+        parameterStore: ModelParameterStore(url: root.appendingPathComponent("model_params.json")),
+        notificationCenter: notificationCenter
+    )
+
+    notificationCenter.post(name: .ironMLXLoadedModelsDidChange, object: nil)
+
+    let script = try #require(await webView.script(containing: "onLocalModelsScanned"))
+    let payload = try decodedJavaScriptStringArgument(from: script, functionName: "onLocalModelsScanned")
+    let data = try #require(payload.data(using: .utf8))
+    let models = try #require(JSONSerialization.jsonObject(with: data) as? [[String: Any]])
+    let model = try #require(models.first)
+    let quantization = try #require(model["quantization"] as? [String: Any])
+    let readiness = try #require(model["readiness"] as? [String: Any])
+
+    #expect(quantization["kind"] as? String == "affine")
+    #expect(quantization["bits"] as? Int == 6)
+    #expect(quantization["label"] as? String == "affine 6-bit")
+    #expect(readiness["status"] as? String == "ready")
+    withExtendedLifetime(bridge) {}
+}
+
 @Test func dashboardModelParamsUseLanguageInvariantCapacityLabels() throws {
     let html = try String(
         contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
