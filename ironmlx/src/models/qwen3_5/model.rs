@@ -214,6 +214,18 @@ impl Qwen35Model {
         }
     }
 
+    pub(crate) fn project_mtp_verify_hidden_on(
+        &self,
+        hidden: &Array,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        let target = target.into();
+        match &self.lm_head {
+            Some(head) => head.forward_mtp_verify_on(hidden, target),
+            None => self.text.as_output_on(hidden, target),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn mtp_forward_hidden_on(
         &self,

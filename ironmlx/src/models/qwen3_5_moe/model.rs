@@ -144,6 +144,14 @@ impl Qwen35MoeModel {
         self.lm_head.forward_on(hidden, target)
     }
 
+    pub(crate) fn project_mtp_verify_hidden_on(
+        &self,
+        hidden: &Array,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        self.lm_head.forward_mtp_verify_on(hidden, target)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn mtp_forward_hidden_on(
         &self,
