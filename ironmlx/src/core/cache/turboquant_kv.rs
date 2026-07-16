@@ -497,6 +497,189 @@ impl TurboQuantKVCache {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub fn update_and_attend_multirow_on(
+        &mut self,
+        queries: &Array,
+        k: &Array,
+        v: &Array,
+        offsets: &mut [i32],
+        per_row_lens: &[i32],
+        scale: f32,
+        mask_arr: Option<&Array>,
+        output_dtype: Dtype,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        validate_dense_shape("k", k, self.head_dim)?;
+        validate_dense_shape("v", v, self.v_head_dim)?;
+        validate_dense_batch_heads("k", k, self.batch, self.n_kv_heads)?;
+        validate_dense_batch_heads("v", v, self.batch, self.n_kv_heads)?;
+        if self.head_dim != self.v_head_dim {
+            anyhow::bail!(
+                "TurboQuantKVCache::update_and_attend_multirow_on: value head dim {} must match key/query head dim {}",
+                self.v_head_dim,
+                self.head_dim,
+            );
+        }
+        if offsets.len() != self.batch as usize {
+            anyhow::bail!(
+                "TurboQuantKVCache::update_and_attend_multirow_on: offsets.len()={} != batch={}",
+                offsets.len(),
+                self.batch,
+            );
+        }
+        if per_row_lens.len() != self.batch as usize {
+            anyhow::bail!(
+                "TurboQuantKVCache::update_and_attend_multirow_on: per_row_lens.len()={} != batch={}",
+                per_row_lens.len(),
+                self.batch,
+            );
+        }
+
+        let q_shape = queries.shape();
+        let q_dims = q_shape.as_slice();
+        if q_dims.len() != 4
+            || q_dims[0] != self.batch
+            || q_dims[1] % self.n_kv_heads != 0
+            || q_dims[3] != self.head_dim
+        {
+            anyhow::bail!(
+                "TurboQuantKVCache::update_and_attend_multirow_on: queries must be [B,Hq,Q,D] with B={}, D={}, Hq divisible by Hkv={} (got {:?})",
+                self.batch,
+                self.head_dim,
+                self.n_kv_heads,
+                q_dims,
+            );
+        }
+        let q_rows = q_dims[2];
+        if !(2..=mlx::fast::TURBOQUANT_MULTIROW_MAX_QUERY_ROWS).contains(&q_rows) {
+            anyhow::bail!(
+                "TurboQuantKVCache::update_and_attend_multirow_on: query rows must be in [2, {}] (got {q_rows})",
+                mlx::fast::TURBOQUANT_MULTIROW_MAX_QUERY_ROWS,
+            );
+        }
+        let k_seq = k.shape().as_slice()[2];
+        if k_seq != q_rows || v.shape().as_slice()[2] != q_rows {
+            anyhow::bail!(
+                "TurboQuantKVCache::update_and_attend_multirow_on: K/V seq dims must match query rows {q_rows} (got K={k_seq}, V={})",
+                v.shape().as_slice()[2],
+            );
+        }
+        for (i, &n) in per_row_lens.iter().enumerate() {
+            if n <= 0 || n > q_rows {
+                anyhow::bail!(
+                    "TurboQuantKVCache::update_and_attend_multirow_on: per_row_lens[{i}] = {n} must be in [1, {q_rows}]",
+                );
+            }
+            let new_off = offsets[i] + n;
+            if new_off > self.cap {
+                anyhow::bail!(
+                    "TurboQuantKVCache cap {} exceeded on row {i}: offset {} + new {} = {}",
+                    self.cap,
+                    offsets[i],
+                    n,
+                    new_off,
+                );
+            }
+        }
+
+        let max_off_after = offsets
+            .iter()
+            .zip(per_row_lens.iter())
+            .map(|(o, n)| o + n)
+            .max()
+            .unwrap_or(0);
+        let kv_lens = offsets
+            .iter()
+            .zip(per_row_lens.iter())
+            .map(|(offset, len)| offset + len)
+            .collect::<Vec<_>>();
+
+        let target = target.into();
+        if max_off_after > self.capacity() {
+            let target_capacity =
+                ((max_off_after + self.step - 1) / self.step * self.step).min(self.cap);
+            self.grow_to(target_capacity, offsets, target)?;
+        }
+        self.write_per_row(k, v, offsets, per_row_lens, target)?;
+        for (o, &n) in offsets.iter_mut().zip(per_row_lens.iter()) {
+            *o += n;
+        }
+
+        let k_packed = self.k_packed.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("TurboQuantKVCache::update_and_attend_multirow_on: missing K")
+        })?;
+        let k_norms = self.k_norms.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("TurboQuantKVCache::update_and_attend_multirow_on: missing K norms")
+        })?;
+        let v_packed = self.v_packed.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("TurboQuantKVCache::update_and_attend_multirow_on: missing V")
+        })?;
+        let v_norms = self.v_norms.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("TurboQuantKVCache::update_and_attend_multirow_on: missing V norms")
+        })?;
+        let k_packed = slice_strided_on(
+            k_packed,
+            [0_i32, 0, 0, 0],
+            [
+                self.batch,
+                self.n_kv_heads,
+                max_off_after,
+                self.packed_head_dim,
+            ],
+            [1_i32, 1, 1, 1],
+            target,
+        )?;
+        let k_norms = slice_strided_on(
+            k_norms,
+            [0_i32, 0, 0],
+            [self.batch, self.n_kv_heads, max_off_after],
+            [1_i32, 1, 1],
+            target,
+        )?;
+        let v_packed = slice_strided_on(
+            v_packed,
+            [0_i32, 0, 0, 0],
+            [
+                self.batch,
+                self.n_kv_heads,
+                max_off_after,
+                self.packed_v_head_dim,
+            ],
+            [1_i32, 1, 1, 1],
+            target,
+        )?;
+        let v_norms = slice_strided_on(
+            v_norms,
+            [0_i32, 0, 0],
+            [self.batch, self.n_kv_heads, max_off_after],
+            [1_i32, 1, 1],
+            target,
+        )?;
+        let query_lens: Array = (per_row_lens, &[self.batch][..]).try_into()?;
+        let kv_lens: Array = (kv_lens.as_slice(), &[self.batch][..]).try_into()?;
+
+        Ok(mlx::fast::turboquant_sdpa_multirow_on(
+            queries,
+            &k_packed,
+            &k_norms,
+            &v_packed,
+            &v_norms,
+            &self.k_signs,
+            &self.k_codebook,
+            &self.v_signs,
+            &self.v_codebook,
+            scale,
+            self.bits.key_bits(),
+            self.bits.value_bits(),
+            &query_lens,
+            &kv_lens,
+            mask_arr,
+            output_dtype,
+            target,
+        )?)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn update_and_attend_decode_pre_rotated_on(
         &mut self,
         q_rot: &Array,
