@@ -666,3 +666,153 @@ fn turboquant_sdpa_decode_parallel_pre_rotated_matches_regular_parallel() {
         );
     }
 }
+
+#[test]
+fn turboquant_sdpa_multirow_matches_dense_causal_reference() {
+    let _guard = turboquant_test_lock();
+    let b = 1_i32;
+    let h_q = 4_i32;
+    let h_kv = 1_i32;
+    let q_rows = 3_i32;
+    let s = 67_i32;
+    let d = 64_i32;
+    let k_bits = 3_u8;
+    let v_bits = 4_u8;
+    let scale = (d as f32).sqrt().recip();
+
+    let q_data = test_values((b * h_q * q_rows * d) as usize);
+    let k_data = test_values((b * h_kv * s * d) as usize)
+        .into_iter()
+        .map(|value| value * 0.8)
+        .collect::<Vec<_>>();
+    let v_data = test_values((b * h_kv * s * d) as usize)
+        .into_iter()
+        .map(|value| value * 1.1 + 0.05)
+        .collect::<Vec<_>>();
+    let q: Array = (q_data.as_slice(), &[b, h_q, q_rows, d][..])
+        .try_into()
+        .unwrap();
+    let k: Array = (k_data.as_slice(), &[b, h_kv, s, d][..])
+        .try_into()
+        .unwrap();
+    let v: Array = (v_data.as_slice(), &[b, h_kv, s, d][..])
+        .try_into()
+        .unwrap();
+
+    let seed = 0x5455_5242_4f51_5541_u64;
+    let k_signs = turboquant::wht::generate_signs(d as usize, seed);
+    let k_signs: Array = (k_signs.as_slice(), &[d][..]).try_into().unwrap();
+    let v_signs = turboquant::wht::generate_signs(d as usize, seed);
+    let v_signs: Array = (v_signs.as_slice(), &[d][..]).try_into().unwrap();
+    let k_codebook = turboquant::codebook::Codebook::new(k_bits, d as usize);
+    let k_codebook: Array = (
+        k_codebook.centroids.as_slice(),
+        &[k_codebook.centroids.len() as i32][..],
+    )
+        .try_into()
+        .unwrap();
+    let v_codebook = turboquant::codebook::Codebook::new(v_bits, d as usize);
+    let v_codebook: Array = (
+        v_codebook.centroids.as_slice(),
+        &[v_codebook.centroids.len() as i32][..],
+    )
+        .try_into()
+        .unwrap();
+
+    let (k_packed, k_norms) =
+        mlx::fast::turbo_quantize(&k, &k_signs, &k_codebook, k_bits).expect("quantize k");
+    let (v_packed, v_norms) =
+        mlx::fast::turbo_quantize(&v, &v_signs, &v_codebook, v_bits).expect("quantize v");
+    let query_lens: Array = (&[q_rows][..], &[b][..]).try_into().unwrap();
+    let kv_lens: Array = (&[s][..], &[b][..]).try_into().unwrap();
+    let actual = mlx::fast::turboquant_sdpa_multirow(
+        &q,
+        &k_packed,
+        &k_norms,
+        &v_packed,
+        &v_norms,
+        &k_signs,
+        &k_codebook,
+        &v_signs,
+        &v_codebook,
+        scale,
+        k_bits,
+        v_bits,
+        &query_lens,
+        &kv_lens,
+        None,
+        Dtype::Float32,
+    )
+    .expect("multi-row turboquant sdpa");
+    let mask_data = vec![0.0_f32; (b * s) as usize];
+    let broadcast_mask: Array = (mask_data.as_slice(), &[b, 1_i32, 1_i32, s][..])
+        .try_into()
+        .unwrap();
+    let masked_actual = mlx::fast::turboquant_sdpa_multirow(
+        &q,
+        &k_packed,
+        &k_norms,
+        &v_packed,
+        &v_norms,
+        &k_signs,
+        &k_codebook,
+        &v_signs,
+        &v_codebook,
+        scale,
+        k_bits,
+        v_bits,
+        &query_lens,
+        &kv_lens,
+        Some(&broadcast_mask),
+        Dtype::Float32,
+    )
+    .expect("masked multi-row turboquant sdpa");
+
+    let k_dense = mlx::fast::turbo_dequantize(
+        &k_packed,
+        &k_norms,
+        &k_signs,
+        &k_codebook,
+        k_bits,
+        d,
+        Dtype::Float32,
+    )
+    .expect("dequantize k");
+    let v_dense = mlx::fast::turbo_dequantize(
+        &v_packed,
+        &v_norms,
+        &v_signs,
+        &v_codebook,
+        v_bits,
+        d,
+        Dtype::Float32,
+    )
+    .expect("dequantize v");
+    let expected = mlx::fast::scaled_dot_product_attention(
+        &q, &k_dense, &v_dense, scale, "causal", None, None,
+    )
+    .expect("dense causal sdpa reference");
+
+    assert_eq!(actual.shape().as_slice(), &[b, h_q, q_rows, d]);
+    let actual_values = actual.to_vec::<f32>().unwrap();
+    let masked_actual_values = masked_actual.to_vec::<f32>().unwrap();
+    let expected_values = expected.to_vec::<f32>().unwrap();
+    for (idx, (actual, expected)) in actual_values.iter().zip(expected_values.iter()).enumerate() {
+        let diff = (actual - expected).abs();
+        assert!(
+            diff < 2.5e-2,
+            "multi-row sdpa mismatch at {idx}: got {actual}, want {expected}, diff {diff}"
+        );
+    }
+    for (idx, (actual, expected)) in masked_actual_values
+        .iter()
+        .zip(expected_values.iter())
+        .enumerate()
+    {
+        let diff = (actual - expected).abs();
+        assert!(
+            diff < 2.5e-2,
+            "masked multi-row sdpa mismatch at {idx}: got {actual}, want {expected}, diff {diff}"
+        );
+    }
+}

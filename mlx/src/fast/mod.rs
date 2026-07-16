@@ -24,7 +24,9 @@ pub use turboquant::{
     turbo_dequantize, turbo_dequantize_on, turbo_quantize, turbo_quantize_on,
     turboquant_sdpa_decode, turboquant_sdpa_decode_on, turboquant_sdpa_decode_parallel,
     turboquant_sdpa_decode_parallel_on, turboquant_sdpa_decode_parallel_pre_rotated,
-    turboquant_sdpa_decode_parallel_pre_rotated_on, TURBOQUANT_PARALLEL_DECODE_SEQ_THRESHOLD,
+    turboquant_sdpa_decode_parallel_pre_rotated_on, turboquant_sdpa_multirow,
+    turboquant_sdpa_multirow_on, TURBOQUANT_MULTIROW_MAX_QUERY_ROWS,
+    TURBOQUANT_MULTIROW_MIN_SEQ_LEN, TURBOQUANT_PARALLEL_DECODE_SEQ_THRESHOLD,
 };
 
 use crate::{Array, Error, Result, StreamOrDevice};

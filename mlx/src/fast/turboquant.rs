@@ -6,6 +6,8 @@ use crate::ops::unary::softmax_on;
 use crate::{Array, Dtype, Error, MetalKernel, Result, Shape, StreamOrDevice};
 
 pub const TURBOQUANT_PARALLEL_DECODE_SEQ_THRESHOLD: i32 = 128;
+pub const TURBOQUANT_MULTIROW_MAX_QUERY_ROWS: i32 = 4;
+pub const TURBOQUANT_MULTIROW_MIN_SEQ_LEN: i32 = 2048;
 const PARALLEL_DECODE_V_CHUNK_SIZE: i32 = 256;
 const QK_SIMDGROUPS_PER_THREADGROUP: i32 = 4;
 const QK_POSITIONS_PER_SIMDGROUP: i32 = 4;
@@ -378,6 +380,204 @@ for (uint width = 1; width < HEAD_DIM; width <<= 1) {
 }
 
 q_rot[q_base + lid] = values[lid] / sqrt((float)HEAD_DIM);
+"#;
+
+const TURBOQUANT_SDPA_MULTIROW_PASS1_SOURCE: &str = r#"
+uint kv_head = threadgroup_position_in_grid.x;
+uint batch = threadgroup_position_in_grid.y;
+uint block = threadgroup_position_in_grid.z;
+uint lane = thread_index_in_simdgroup;
+uint repeat = thread_position_in_threadgroup.y;
+uint q_head = kv_head * Q_PER_KV + repeat;
+
+thread float q_values[Q_ROWS][ELEMENTS_PER_LANE];
+thread float out_values[Q_ROWS][ELEMENTS_PER_LANE];
+thread float max_scores[Q_ROWS];
+thread float sum_exp_scores[Q_ROWS];
+
+#pragma clang loop unroll(full)
+for (uint row = 0; row < Q_ROWS; ++row) {
+    uint q_base = (((batch * Q_HEADS + q_head) * Q_ROWS + row) * HEAD_DIM);
+    #pragma clang loop unroll(full)
+    for (uint i = 0; i < ELEMENTS_PER_LANE; ++i) {
+        uint dim = lane + i * 32;
+        q_values[row][i] = (float)q_rot[q_base + dim];
+        out_values[row][i] = 0.0f;
+    }
+    max_scores[row] = -INFINITY;
+    sum_exp_scores[row] = 0.0f;
+}
+
+for (uint pos = block; pos < SEQ_LEN; pos += BLOCKS) {
+    uint kv_vec = ((batch * KV_HEADS + kv_head) * SEQ_LEN + pos);
+    float k_norm = (float)k_norms[kv_vec];
+    float v_norm = (float)v_norms[kv_vec];
+    thread float k_values[ELEMENTS_PER_LANE];
+    thread float v_values[ELEMENTS_PER_LANE];
+
+    #pragma clang loop unroll(full)
+    for (uint i = 0; i < ELEMENTS_PER_LANE; ++i) {
+        uint dim = lane + i * 32;
+        uint k_word_idx = dim / K_VALUES_PER_WORD;
+        uint k_word_offset = dim - k_word_idx * K_VALUES_PER_WORD;
+        uint k_word = k_packed[kv_vec * K_PACKED_DIM + k_word_idx];
+        uint k_idx = (k_word >> (k_word_offset * K_BITS)) & ((1u << K_BITS) - 1u);
+        k_values[i] = (float)k_codebook[k_idx] * k_norm;
+
+        uint v_word_idx = dim / V_VALUES_PER_WORD;
+        uint v_word_offset = dim - v_word_idx * V_VALUES_PER_WORD;
+        uint v_word = v_packed[kv_vec * V_PACKED_DIM + v_word_idx];
+        uint v_idx = (v_word >> (v_word_offset * V_BITS)) & ((1u << V_BITS) - 1u);
+        v_values[i] = (float)v_codebook[v_idx] * v_norm;
+    }
+
+    #pragma clang loop unroll(full)
+    for (uint row = 0; row < Q_ROWS; ++row) {
+        float dot = 0.0f;
+        #pragma clang loop unroll(full)
+        for (uint i = 0; i < ELEMENTS_PER_LANE; ++i) {
+            dot += q_values[row][i] * k_values[i];
+        }
+        float score = simd_sum(dot) * (float)scale_arr;
+        uint query_len = (uint)query_lens[batch];
+        uint kv_len = (uint)kv_lens[batch];
+        bool visible = query_len > 0 && query_len <= Q_ROWS
+            && kv_len >= query_len && kv_len <= SEQ_LEN
+            && row < query_len && pos <= kv_len - query_len + row;
+        if (HAS_MASK) {
+            uint mask_head = MASK_HEADS == 1 ? 0 : q_head;
+            uint mask_row = MASK_ROWS == 1 ? 0 : row;
+            uint mask_idx = (((batch * MASK_HEADS + mask_head) * MASK_ROWS + mask_row) * SEQ_LEN + pos);
+            float mask_value = (float)mask_arr[mask_idx];
+            score += mask_value;
+            visible = visible && mask_value > -1.0e30f;
+        }
+
+        if (visible) {
+            float new_max = max(max_scores[row], score);
+            float old_factor = fast::exp(max_scores[row] - new_max);
+            float new_factor = fast::exp(score - new_max);
+            max_scores[row] = new_max;
+            sum_exp_scores[row] = sum_exp_scores[row] * old_factor + new_factor;
+            #pragma clang loop unroll(full)
+            for (uint i = 0; i < ELEMENTS_PER_LANE; ++i) {
+                out_values[row][i] = out_values[row][i] * old_factor
+                    + new_factor * v_values[i];
+            }
+        }
+    }
+}
+
+#pragma clang loop unroll(full)
+for (uint row = 0; row < Q_ROWS; ++row) {
+    uint output_row = ((batch * Q_HEADS + q_head) * Q_ROWS + row);
+    uint partial_row = output_row * BLOCKS + block;
+    if (lane == 0) {
+        partial_sums[partial_row] = sum_exp_scores[row];
+        partial_maxs[partial_row] = max_scores[row];
+    }
+    #pragma clang loop unroll(full)
+    for (uint i = 0; i < ELEMENTS_PER_LANE; ++i) {
+        uint dim = lane + i * 32;
+        partial_acc[partial_row * HEAD_DIM + dim] = out_values[row][i];
+    }
+}
+"#;
+
+const TURBOQUANT_SDPA_MULTIROW_PASS2_SOURCE: &str = r#"
+uint output_row = threadgroup_position_in_grid.x;
+uint lid = thread_index_in_threadgroup;
+uint simd_gid = simdgroup_index_in_threadgroup;
+uint simd_lid = thread_index_in_simdgroup;
+
+threadgroup float values[HEAD_DIM];
+threadgroup float reduce_scratch[1024];
+threadgroup float simd_maxs[32];
+threadgroup float simd_sums[32];
+threadgroup float global_max;
+threadgroup float global_sum;
+
+thread float acc[ELEMENTS_PER_LANE];
+#pragma clang loop unroll(full)
+for (uint i = 0; i < ELEMENTS_PER_LANE; ++i) {
+    acc[i] = 0.0f;
+}
+float local_max = -INFINITY;
+float local_sum = 0.0f;
+for (uint block = simd_gid; block < BLOCKS; block += 32) {
+    uint partial_row = output_row * BLOCKS + block;
+    float block_max = (float)partial_maxs[partial_row];
+    float block_sum = (float)partial_sums[partial_row];
+    if (block_max <= -1.0e30f) {
+        continue;
+    }
+    float new_max = max(local_max, block_max);
+    float old_factor = fast::exp(local_max - new_max);
+    float block_factor = fast::exp(block_max - new_max);
+    local_sum = local_sum * old_factor + block_sum * block_factor;
+    #pragma clang loop unroll(full)
+    for (uint i = 0; i < ELEMENTS_PER_LANE; ++i) {
+        uint dim = simd_lid + i * 32;
+        acc[i] = acc[i] * old_factor
+            + (float)partial_acc[partial_row * HEAD_DIM + dim] * block_factor;
+    }
+    local_max = new_max;
+}
+
+if (simd_lid == 0) {
+    simd_maxs[simd_gid] = local_max;
+    simd_sums[simd_gid] = local_sum;
+}
+threadgroup_barrier(mem_flags::mem_threadgroup);
+
+if (simd_gid == 0) {
+    float group_max = simd_maxs[simd_lid];
+    float row_max = simd_max(group_max);
+    float factor = group_max > -1.0e30f ? fast::exp(group_max - row_max) : 0.0f;
+    float row_sum = simd_sum(simd_sums[simd_lid] * factor);
+    if (simd_lid == 0) {
+        global_max = row_max;
+        global_sum = row_sum;
+    }
+}
+threadgroup_barrier(mem_flags::mem_threadgroup);
+
+float local_factor = local_max > -1.0e30f ? fast::exp(local_max - global_max) : 0.0f;
+#pragma clang loop unroll(full)
+for (uint i = 0; i < ELEMENTS_PER_LANE; ++i) {
+    reduce_scratch[simd_lid * 32 + simd_gid] = acc[i] * local_factor;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (simd_gid == 0) {
+        float total = 0.0f;
+        #pragma clang loop unroll(full)
+        for (uint group = 0; group < 32; ++group) {
+            total += reduce_scratch[simd_lid * 32 + group];
+        }
+        uint dim = simd_lid + i * 32;
+        values[dim] = global_sum > 1.0e-20f ? total / global_sum : 0.0f;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+}
+
+for (uint width = 1; width < HEAD_DIM; width <<= 1) {
+    uint pair = lid;
+    if (pair < HEAD_DIM / 2) {
+        uint block = pair / width;
+        uint offset = pair - block * width;
+        uint left = block * width * 2 + offset;
+        uint right = left + width;
+        float a = values[left];
+        float b = values[right];
+        values[left] = a + b;
+        values[right] = a - b;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+}
+
+if (lid < HEAD_DIM) {
+    float recovered = (values[lid] / sqrt((float)HEAD_DIM)) * (float)v_signs[lid];
+    out[output_row * HEAD_DIM + lid] = static_cast<__typeof__(*out)>(recovered);
+}
 "#;
 
 const TURBOQUANT_QK_DECODE_SOURCE: &str = r#"
@@ -765,6 +965,50 @@ fn cached_turboquant_query_rotate_kernel() -> Result<&'static MetalKernel> {
     Ok(CELL.get_or_init(|| kernel))
 }
 
+fn cached_turboquant_sdpa_multirow_pass1_kernel() -> Result<&'static MetalKernel> {
+    static CELL: OnceLock<MetalKernel> = OnceLock::new();
+    if let Some(kernel) = CELL.get() {
+        return Ok(kernel);
+    }
+
+    let kernel = MetalKernel::builder("mlx_fast_turboquant_sdpa_multirow_pass1")
+        .inputs(&[
+            "q_rot",
+            "k_packed",
+            "k_norms",
+            "k_codebook",
+            "v_packed",
+            "v_norms",
+            "v_codebook",
+            "scale_arr",
+            "query_lens",
+            "kv_lens",
+            "mask_arr",
+        ])
+        .outputs(&["partial_acc", "partial_sums", "partial_maxs"])
+        .source(TURBOQUANT_SDPA_MULTIROW_PASS1_SOURCE)
+        .ensure_row_contiguous(true)
+        .atomic_outputs(false)
+        .build()?;
+    Ok(CELL.get_or_init(|| kernel))
+}
+
+fn cached_turboquant_sdpa_multirow_pass2_kernel() -> Result<&'static MetalKernel> {
+    static CELL: OnceLock<MetalKernel> = OnceLock::new();
+    if let Some(kernel) = CELL.get() {
+        return Ok(kernel);
+    }
+
+    let kernel = MetalKernel::builder("mlx_fast_turboquant_sdpa_multirow_pass2")
+        .inputs(&["partial_acc", "partial_sums", "partial_maxs", "v_signs"])
+        .outputs(&["out"])
+        .source(TURBOQUANT_SDPA_MULTIROW_PASS2_SOURCE)
+        .ensure_row_contiguous(true)
+        .atomic_outputs(false)
+        .build()?;
+    Ok(CELL.get_or_init(|| kernel))
+}
+
 fn cached_turboquant_qk_decode_kernel() -> Result<&'static MetalKernel> {
     static CELL: OnceLock<MetalKernel> = OnceLock::new();
     if let Some(kernel) = CELL.get() {
@@ -1086,6 +1330,287 @@ pub fn turbo_dequantize_on(
         .dispatch()?;
 
     outputs.take_at(0)
+}
+
+/// Causal multi-row attention over TurboQuant-packed K/V.
+///
+/// This path is specialized for MTP verification. `queries` must be
+/// `[B, Hq, Q, D]` with `2 <= Q <= 4`; every K/V token is unpacked once per
+/// GQA repeat and reused across all query rows. `query_lens` and `kv_lens` are
+/// `[B]` int32 arrays describing each batch row's valid query count and total
+/// cache length. Valid row `r` attends through position
+/// `kv_lens[b] - query_lens[b] + r`; padded query rows produce zero output.
+/// The output is `[B, Hq, Q, D]`.
+#[allow(clippy::too_many_arguments)]
+pub fn turboquant_sdpa_multirow(
+    queries: &Array,
+    k_packed: &Array,
+    k_norms: &Array,
+    v_packed: &Array,
+    v_norms: &Array,
+    k_signs: &Array,
+    k_codebook: &Array,
+    v_signs: &Array,
+    v_codebook: &Array,
+    scale: f32,
+    k_bits: u8,
+    v_bits: u8,
+    query_lens: &Array,
+    kv_lens: &Array,
+    mask_arr: Option<&Array>,
+    output_dtype: Dtype,
+) -> Result<Array> {
+    turboquant_sdpa_multirow_on(
+        queries,
+        k_packed,
+        k_norms,
+        v_packed,
+        v_norms,
+        k_signs,
+        k_codebook,
+        v_signs,
+        v_codebook,
+        scale,
+        k_bits,
+        v_bits,
+        query_lens,
+        kv_lens,
+        mask_arr,
+        output_dtype,
+        (),
+    )
+}
+
+/// Stream-targeted variant of [`turboquant_sdpa_multirow`].
+#[allow(clippy::too_many_arguments)]
+pub fn turboquant_sdpa_multirow_on(
+    queries: &Array,
+    k_packed: &Array,
+    k_norms: &Array,
+    v_packed: &Array,
+    v_norms: &Array,
+    k_signs: &Array,
+    k_codebook: &Array,
+    v_signs: &Array,
+    v_codebook: &Array,
+    scale: f32,
+    k_bits: u8,
+    v_bits: u8,
+    query_lens: &Array,
+    kv_lens: &Array,
+    mask_arr: Option<&Array>,
+    output_dtype: Dtype,
+    target: impl Into<StreamOrDevice>,
+) -> Result<Array> {
+    const OP: &str = "turboquant_sdpa_multirow";
+    if !matches!(
+        output_dtype,
+        Dtype::Float32 | Dtype::Float16 | Dtype::Bfloat16
+    ) {
+        return Err(Error::Mlx(format!(
+            "{OP}: output_dtype must be f32, f16, or bf16 (got {output_dtype})"
+        )));
+    }
+
+    let queries_shape = queries.shape();
+    let queries_dims = queries_shape.as_slice();
+    if queries_dims.len() != 4 {
+        return Err(Error::Mlx(format!(
+            "{OP}: queries must be rank-4 [B,Hq,Q,D] (got {queries_shape})"
+        )));
+    }
+    let batch = queries_dims[0];
+    let q_heads = queries_dims[1];
+    let q_rows = queries_dims[2];
+    let head_dim = queries_dims[3];
+    if batch <= 0 || q_heads <= 0 {
+        return Err(Error::Mlx(format!(
+            "{OP}: batch and q_heads must be positive (got B={batch}, Hq={q_heads})"
+        )));
+    }
+    if !(2..=TURBOQUANT_MULTIROW_MAX_QUERY_ROWS).contains(&q_rows) {
+        return Err(Error::Mlx(format!(
+            "{OP}: query rows must be in [2, {}] (got {q_rows})",
+            TURBOQUANT_MULTIROW_MAX_QUERY_ROWS
+        )));
+    }
+    validate_head_dim(OP, head_dim)?;
+    if head_dim < 32 || head_dim % 32 != 0 {
+        return Err(Error::Mlx(format!(
+            "{OP}: head_dim must be a multiple of 32 and at least 32 (got {head_dim})"
+        )));
+    }
+
+    let (k_values_per_word, k_levels) = bit_layout(OP, "k_bits", k_bits)?;
+    let (v_values_per_word, v_levels) = bit_layout(OP, "v_bits", v_bits)?;
+    let k_packed_dim = (head_dim + k_values_per_word - 1) / k_values_per_word;
+    let v_packed_dim = (head_dim + v_values_per_word - 1) / v_values_per_word;
+
+    let k_packed_shape = k_packed.shape();
+    let k_packed_dims = k_packed_shape.as_slice();
+    if k_packed_dims.len() != 4 {
+        return Err(Error::Mlx(format!(
+            "{OP}: k_packed must be rank-4 [B,Hkv,S,packed_D] (got {k_packed_shape})"
+        )));
+    }
+    let kv_heads = k_packed_dims[1];
+    let seq_len = k_packed_dims[2];
+    if k_packed_dims[0] != batch
+        || k_packed_dims[3] != k_packed_dim
+        || seq_len < q_rows
+        || kv_heads <= 0
+    {
+        return Err(Error::Mlx(format!(
+            "{OP}: k_packed shape {k_packed_shape} is incompatible with queries {queries_shape}, k_bits={k_bits}"
+        )));
+    }
+    if q_heads % kv_heads != 0 {
+        return Err(Error::Mlx(format!(
+            "{OP}: q_heads {q_heads} must be divisible by kv_heads {kv_heads}"
+        )));
+    }
+    let q_per_kv = q_heads / kv_heads;
+    if q_per_kv > 32 {
+        return Err(Error::Mlx(format!(
+            "{OP}: q_heads/kv_heads must not exceed 32 (got {q_per_kv})"
+        )));
+    }
+
+    let expected_norms = [batch, kv_heads, seq_len];
+    let k_norms_shape = k_norms.shape();
+    if k_norms_shape.as_slice() != expected_norms {
+        return Err(Error::Mlx(format!(
+            "{OP}: k_norms shape must be {:?} (got {k_norms_shape})",
+            expected_norms
+        )));
+    }
+    let v_packed_shape = v_packed.shape();
+    if v_packed_shape.as_slice() != [batch, kv_heads, seq_len, v_packed_dim] {
+        return Err(Error::Mlx(format!(
+            "{OP}: v_packed shape must be [{batch}, {kv_heads}, {seq_len}, {v_packed_dim}] for v_bits={v_bits} (got {v_packed_shape})"
+        )));
+    }
+    let v_norms_shape = v_norms.shape();
+    if v_norms_shape.as_slice() != expected_norms {
+        return Err(Error::Mlx(format!(
+            "{OP}: v_norms shape must be {:?} (got {v_norms_shape})",
+            expected_norms
+        )));
+    }
+
+    validate_vector_shape(OP, "k_signs", k_signs, head_dim)?;
+    validate_vector_shape(OP, "v_signs", v_signs, head_dim)?;
+    validate_codebook_shape(OP, "k_codebook", k_codebook, k_levels, k_bits)?;
+    validate_codebook_shape(OP, "v_codebook", v_codebook, v_levels, v_bits)?;
+
+    for (name, lens) in [("query_lens", query_lens), ("kv_lens", kv_lens)] {
+        let lens_shape = lens.shape();
+        if lens.dtype() != Dtype::Int32 || lens_shape.as_slice() != [batch] {
+            return Err(Error::Mlx(format!(
+                "{OP}: {name} must be int32 [{batch}] (got dtype={}, shape={lens_shape})",
+                lens.dtype()
+            )));
+        }
+    }
+
+    let (mask_heads, mask_rows) = match mask_arr {
+        Some(mask) => {
+            let mask_shape = mask.shape();
+            let mask_dims = mask_shape.as_slice();
+            if mask_dims.len() != 4
+                || mask_dims[0] != batch
+                || !(mask_dims[2] == 1 || mask_dims[2] == q_rows)
+                || mask_dims[3] != seq_len
+                || !(mask_dims[1] == 1 || mask_dims[1] == q_heads)
+            {
+                return Err(Error::Mlx(format!(
+                    "{OP}: mask must be [B,1|Hq,1|Q,S] for B={batch}, Hq={q_heads}, Q={q_rows}, S={seq_len} (got {mask_shape})"
+                )));
+            }
+            (mask_dims[1], mask_dims[2])
+        }
+        None => (1, 1),
+    };
+
+    let blocks = if seq_len <= 8_192 {
+        64
+    } else if seq_len <= 32_768 {
+        128
+    } else if seq_len <= 65_536 {
+        256
+    } else {
+        512
+    };
+    let target = target.into();
+    let q_rot_shape = Shape::from(vec![batch, q_heads, q_rows, head_dim]);
+    let mut q_rot_outputs = cached_turboquant_query_rotate_kernel()?
+        .dispatch_builder()
+        .inputs(&[queries, k_signs])
+        .output_shapes(&[q_rot_shape])
+        .output_dtypes(&[Dtype::Float32])
+        .grid(batch * q_heads * q_rows * head_dim, 1, 1)
+        .threadgroup(head_dim, 1, 1)
+        .stream(target)
+        .template_int("HEAD_DIM", head_dim)
+        .dispatch()?;
+    let q_rot = q_rot_outputs.take_at(0)?;
+
+    let scale_arr: Array = (&[scale][..], &[][..]).try_into()?;
+    let mask_input = mask_arr.unwrap_or(queries);
+    let output_rows = batch * q_heads * q_rows;
+    let partial_acc_shape = Shape::from(vec![output_rows, blocks, head_dim]);
+    let partial_stats_shape = Shape::from(vec![output_rows, blocks]);
+    let mut pass1_outputs = cached_turboquant_sdpa_multirow_pass1_kernel()?
+        .dispatch_builder()
+        .inputs(&[
+            &q_rot, k_packed, k_norms, k_codebook, v_packed, v_norms, v_codebook, &scale_arr,
+            query_lens, kv_lens, mask_input,
+        ])
+        .output_shapes(&[
+            partial_acc_shape,
+            partial_stats_shape.clone(),
+            partial_stats_shape,
+        ])
+        .output_dtypes(&[Dtype::Float32, Dtype::Float32, Dtype::Float32])
+        .grid(kv_heads * 32, batch * q_per_kv, blocks)
+        .threadgroup(32, q_per_kv, 1)
+        .stream(target)
+        .template_int("HEAD_DIM", head_dim)
+        .template_int("ELEMENTS_PER_LANE", head_dim / 32)
+        .template_int("Q_HEADS", q_heads)
+        .template_int("KV_HEADS", kv_heads)
+        .template_int("Q_PER_KV", q_per_kv)
+        .template_int("Q_ROWS", q_rows)
+        .template_int("SEQ_LEN", seq_len)
+        .template_int("BLOCKS", blocks)
+        .template_int("K_BITS", i32::from(k_bits))
+        .template_int("V_BITS", i32::from(v_bits))
+        .template_int("K_VALUES_PER_WORD", k_values_per_word)
+        .template_int("V_VALUES_PER_WORD", v_values_per_word)
+        .template_int("K_PACKED_DIM", k_packed_dim)
+        .template_int("V_PACKED_DIM", v_packed_dim)
+        .template_bool("HAS_MASK", mask_arr.is_some())
+        .template_int("MASK_HEADS", mask_heads)
+        .template_int("MASK_ROWS", mask_rows)
+        .dispatch()?;
+    let partial_acc = pass1_outputs.take_at(0)?;
+    let partial_sums = pass1_outputs.take_at(0)?;
+    let partial_maxs = pass1_outputs.take_at(0)?;
+
+    let output_shape = Shape::from(vec![batch, q_heads, q_rows, head_dim]);
+    let mut output = cached_turboquant_sdpa_multirow_pass2_kernel()?
+        .dispatch_builder()
+        .inputs(&[&partial_acc, &partial_sums, &partial_maxs, v_signs])
+        .output_shapes(&[output_shape])
+        .output_dtypes(&[output_dtype])
+        .grid(output_rows * 1024, 1, 1)
+        .threadgroup(1024, 1, 1)
+        .stream(target)
+        .template_int("HEAD_DIM", head_dim)
+        .template_int("ELEMENTS_PER_LANE", head_dim / 32)
+        .template_int("BLOCKS", blocks)
+        .dispatch()?;
+    output.take_at(0)
 }
 
 /// Fused decode attention over TurboQuant-packed K/V.

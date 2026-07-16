@@ -713,6 +713,17 @@ impl KVCache {
         )? {
             return Ok(Some(out));
         }
+        if let Some(out) = self.try_update_and_attend_multirow_on(
+            queries,
+            k,
+            v,
+            per_row_lens,
+            scale,
+            mask_arr,
+            target,
+        )? {
+            return Ok(Some(out));
+        }
         if self.paged.is_some()
             && self.supports_paged_prefill_attention(queries, k, v, per_row_lens, mask_arr)
         {
@@ -790,6 +801,42 @@ impl KVCache {
             .as_mut()
             .expect("checked turboquant is some");
         Ok(Some(tq.update_and_attend_decode_on(
+            queries,
+            k,
+            v,
+            &mut self.offsets,
+            per_row_lens,
+            scale,
+            mask_arr,
+            output_dtype,
+            target,
+        )?))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_update_and_attend_multirow_on(
+        &mut self,
+        queries: &Array,
+        k: &Array,
+        v: &Array,
+        per_row_lens: &[i32],
+        scale: f32,
+        mask_arr: Option<&Array>,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Option<Array>> {
+        if self.turboquant.is_none()
+            || !self.supports_turboquant_multirow_attention(queries, k, v, per_row_lens, mask_arr)
+        {
+            return Ok(None);
+        }
+
+        let target = target.into();
+        let output_dtype = queries.dtype();
+        let tq = self
+            .turboquant
+            .as_mut()
+            .expect("checked turboquant is some");
+        Ok(Some(tq.update_and_attend_multirow_on(
             queries,
             k,
             v,
@@ -1170,6 +1217,74 @@ impl KVCache {
             if mask_dims.len() != 4
                 || mask_dims[0] != self.batch
                 || mask_dims[2] != 1
+                || mask_dims[3] != max_off_after
+                || !(mask_dims[1] == 1 || mask_dims[1] == q_dims[1])
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn supports_turboquant_multirow_attention(
+        &self,
+        queries: &Array,
+        k: &Array,
+        v: &Array,
+        per_row_lens: &[i32],
+        mask_arr: Option<&Array>,
+    ) -> bool {
+        if self.v_head_dim != self.head_dim
+            || self.head_dim < 32
+            || self.head_dim % 32 != 0
+            || per_row_lens.len() != self.batch as usize
+            || !matches!(
+                queries.dtype(),
+                Dtype::Float32 | Dtype::Float16 | Dtype::Bfloat16
+            )
+        {
+            return false;
+        }
+        let q_shape = queries.shape();
+        let q_dims = q_shape.as_slice();
+        let k_shape = k.shape();
+        let k_dims = k_shape.as_slice();
+        let v_shape = v.shape();
+        let v_dims = v_shape.as_slice();
+        if q_dims.len() != 4 || k_dims.len() != 4 || v_dims.len() != 4 {
+            return false;
+        }
+        let q_rows = q_dims[2];
+        if q_dims[0] != self.batch
+            || !(2..=mlx::fast::TURBOQUANT_MULTIROW_MAX_QUERY_ROWS).contains(&q_rows)
+            || q_dims[3] != self.head_dim
+            || q_dims[1] % self.n_kv_heads != 0
+            || q_dims[1] / self.n_kv_heads > 32
+        {
+            return false;
+        }
+        if k_dims != [self.batch, self.n_kv_heads, q_rows, self.head_dim]
+            || v_dims != [self.batch, self.n_kv_heads, q_rows, self.v_head_dim]
+            || per_row_lens.iter().any(|&n| n <= 0 || n > q_rows)
+        {
+            return false;
+        }
+        let max_off_after = self
+            .offsets
+            .iter()
+            .zip(per_row_lens.iter())
+            .map(|(o, n)| o + n)
+            .max()
+            .unwrap_or(0);
+        if max_off_after > self.cap || max_off_after <= mlx::fast::TURBOQUANT_MULTIROW_MIN_SEQ_LEN {
+            return false;
+        }
+        if let Some(mask) = mask_arr {
+            let mask_shape = mask.shape();
+            let mask_dims = mask_shape.as_slice();
+            if mask_dims.len() != 4
+                || mask_dims[0] != self.batch
+                || !(mask_dims[2] == 1 || mask_dims[2] == q_rows)
                 || mask_dims[3] != max_off_after
                 || !(mask_dims[1] == 1 || mask_dims[1] == q_dims[1])
             {
@@ -2604,6 +2719,216 @@ mod tests {
                 (actual - expected).abs() < 1.0e-3,
                 "idx={idx} actual={actual} expected={expected}"
             );
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn kvcache_turboquant_multirow_attention_uses_packed_path() {
+        let prefix_len = mlx::fast::TURBOQUANT_MULTIROW_MIN_SEQ_LEN;
+        let q_rows = 3_i32;
+        let total_len = prefix_len + q_rows;
+        let head_dim = 64_i32;
+        let mut cache = KVCache::new(1, 1, head_dim, head_dim, Dtype::Float32, total_len)
+            .with_step(total_len)
+            .with_turboquant(TurboQuantKVBits::K3V4)
+            .expect("enable turboquant");
+        let prefix_k_data: Vec<f32> = (0..(prefix_len * head_dim))
+            .map(|i| ((i as f32) * 0.0031).sin() * 0.9)
+            .collect();
+        let prefix_v_data: Vec<f32> = (0..(prefix_len * head_dim))
+            .map(|i| ((i as f32) * 0.0047).cos() * 1.1)
+            .collect();
+        let prefix_k: Array = (
+            prefix_k_data.as_slice(),
+            (1_i32, 1_i32, prefix_len, head_dim),
+        )
+            .try_into()
+            .unwrap();
+        let prefix_v: Array = (
+            prefix_v_data.as_slice(),
+            (1_i32, 1_i32, prefix_len, head_dim),
+        )
+            .try_into()
+            .unwrap();
+        cache
+            .update_and_fetch(&prefix_k, &prefix_v, &[prefix_len])
+            .expect("prefix update");
+
+        let q_data: Vec<f32> = (0..(4 * q_rows * head_dim))
+            .map(|i| ((i as f32) * 0.0053).sin() * 0.7)
+            .collect();
+        let step_k_data: Vec<f32> = (0..(q_rows * head_dim))
+            .map(|i| ((i as f32) * 0.0071).cos() * 0.8)
+            .collect();
+        let step_v_data: Vec<f32> = (0..(q_rows * head_dim))
+            .map(|i| ((i as f32) * 0.0083).sin() * 1.2)
+            .collect();
+        let q: Array = (q_data.as_slice(), (1_i32, 4_i32, q_rows, head_dim))
+            .try_into()
+            .unwrap();
+        let step_k: Array = (step_k_data.as_slice(), (1_i32, 1_i32, q_rows, head_dim))
+            .try_into()
+            .unwrap();
+        let step_v: Array = (step_v_data.as_slice(), (1_i32, 1_i32, q_rows, head_dim))
+            .try_into()
+            .unwrap();
+        let scale = (head_dim as f32).sqrt().recip();
+
+        let actual = cache
+            .try_update_and_attend_on(&q, &step_k, &step_v, &[q_rows], scale, None, ())
+            .expect("multi-row attention")
+            .expect("turboquant multi-row packed path");
+
+        assert_eq!(cache.offsets(), &[total_len]);
+        assert!(
+            cache.keys.is_none(),
+            "packed path must not allocate dense K"
+        );
+        assert!(
+            cache.values.is_none(),
+            "packed path must not allocate dense V"
+        );
+        let (k_ref, v_ref) = cache
+            .turboquant()
+            .expect("turboquant cache")
+            .materialize_prefix_on(total_len, Dtype::Float32, ())
+            .expect("materialize reference");
+        let expected = mlx::fast::scaled_dot_product_attention(
+            &q, &k_ref, &v_ref, scale, "causal", None, None,
+        )
+        .expect("dense causal reference");
+
+        assert_eq!(actual.shape().as_slice(), &[1, 4, q_rows, head_dim]);
+        let actual = actual.to_vec::<f32>().unwrap();
+        let expected = expected.to_vec::<f32>().unwrap();
+        for (idx, (actual, expected)) in actual.iter().zip(expected.iter()).enumerate() {
+            let diff = (actual - expected).abs();
+            assert!(
+                diff < 2.5e-2,
+                "idx={idx} actual={actual} expected={expected} diff={diff}"
+            );
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn kvcache_turboquant_multirow_attention_handles_ragged_batch() {
+        let prefix_rows = [2048_i32, 2040_i32];
+        let query_rows = 4_i32;
+        let query_lens = [4_i32, 2_i32];
+        let kv_lens = [2052_i32, 2042_i32];
+        let max_len = kv_lens[0];
+        let head_dim = 64_i32;
+        let mut cache = KVCache::new(2, 1, head_dim, head_dim, Dtype::Float32, max_len)
+            .with_step(max_len)
+            .with_turboquant(TurboQuantKVBits::K4V4)
+            .expect("enable turboquant");
+
+        let prefix_values = (2 * prefix_rows[0] * head_dim) as usize;
+        let prefix_k_data = (0..prefix_values)
+            .map(|i| ((i as f32) * 0.0029).sin() * 0.8)
+            .collect::<Vec<_>>();
+        let prefix_v_data = (0..prefix_values)
+            .map(|i| ((i as f32) * 0.0041).cos())
+            .collect::<Vec<_>>();
+        let prefix_k: Array = (
+            prefix_k_data.as_slice(),
+            (2_i32, 1_i32, prefix_rows[0], head_dim),
+        )
+            .try_into()
+            .unwrap();
+        let prefix_v: Array = (
+            prefix_v_data.as_slice(),
+            (2_i32, 1_i32, prefix_rows[0], head_dim),
+        )
+            .try_into()
+            .unwrap();
+        cache
+            .update_and_fetch(&prefix_k, &prefix_v, &prefix_rows)
+            .expect("ragged prefix update");
+
+        let q_values = (2 * 4 * query_rows * head_dim) as usize;
+        let kv_values = (2 * query_rows * head_dim) as usize;
+        let q_data = (0..q_values)
+            .map(|i| ((i as f32) * 0.0059).sin() * 0.7)
+            .collect::<Vec<_>>();
+        let step_k_data = (0..kv_values)
+            .map(|i| ((i as f32) * 0.0073).cos() * 0.9)
+            .collect::<Vec<_>>();
+        let step_v_data = (0..kv_values)
+            .map(|i| ((i as f32) * 0.0089).sin() * 1.1)
+            .collect::<Vec<_>>();
+        let q: Array = (q_data.as_slice(), (2_i32, 4_i32, query_rows, head_dim))
+            .try_into()
+            .unwrap();
+        let step_k: Array = (step_k_data.as_slice(), (2_i32, 1_i32, query_rows, head_dim))
+            .try_into()
+            .unwrap();
+        let step_v: Array = (step_v_data.as_slice(), (2_i32, 1_i32, query_rows, head_dim))
+            .try_into()
+            .unwrap();
+        let scale = (head_dim as f32).sqrt().recip();
+        let actual = cache
+            .try_update_and_attend_on(&q, &step_k, &step_v, &query_lens, scale, None, ())
+            .expect("ragged multi-row attention")
+            .expect("ragged batch uses packed path");
+
+        assert_eq!(cache.offsets(), &kv_lens);
+        assert!(cache.keys.is_none());
+        assert!(cache.values.is_none());
+        let (k_ref, v_ref) = cache
+            .turboquant()
+            .expect("turboquant cache")
+            .materialize_prefix_on(max_len, Dtype::Float32, ())
+            .expect("materialize ragged reference");
+        let mut mask_data = vec![f32::NEG_INFINITY; (2 * query_rows * max_len) as usize];
+        for batch in 0..2_usize {
+            for row in 0..query_lens[batch] as usize {
+                let visible = (kv_lens[batch] - query_lens[batch] + row as i32 + 1) as usize;
+                let start = (batch * query_rows as usize + row) * max_len as usize;
+                mask_data[start..start + visible].fill(0.0);
+            }
+        }
+        let mask: Array = (mask_data.as_slice(), (2_i32, 1_i32, query_rows, max_len))
+            .try_into()
+            .unwrap();
+        let expected = mlx::fast::scaled_dot_product_attention(
+            &q,
+            &k_ref,
+            &v_ref,
+            scale,
+            "",
+            Some(&mask),
+            None,
+        )
+        .expect("dense ragged reference");
+
+        let actual = actual.to_vec::<f32>().unwrap();
+        let expected = expected.to_vec::<f32>().unwrap();
+        let row_size = head_dim as usize;
+        for batch in 0..2_usize {
+            for head in 0..4_usize {
+                for row in 0..query_rows as usize {
+                    let start = ((batch * 4 + head) * query_rows as usize + row) * row_size;
+                    if row >= query_lens[batch] as usize {
+                        assert!(
+                            actual[start..start + row_size]
+                                .iter()
+                                .all(|value| value.abs() < 1.0e-6),
+                            "padded output must be zero: batch={batch} head={head} row={row}"
+                        );
+                        continue;
+                    }
+                    for dim in 0..row_size {
+                        let diff = (actual[start + dim] - expected[start + dim]).abs();
+                        assert!(
+                            diff < 2.5e-2,
+                            "batch={batch} head={head} row={row} dim={dim} diff={diff}"
+                        );
+                    }
+                }
+            }
         }
     }
 
