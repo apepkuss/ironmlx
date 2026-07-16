@@ -228,6 +228,13 @@ impl Linear {
     /// Stream-targeted forward pass.
     pub fn forward_on(&self, x: &Array, target: impl Into<StreamOrDevice>) -> Result<Array> {
         let target = target.into();
+        if super::verify_qmm::is_armed() {
+            if let Some(parts) = self.quantized_parts() {
+                if let Some(output) = super::verify_qmm::forward_candidate_on(x, parts, target)? {
+                    return Ok(output);
+                }
+            }
+        }
         match &self.inner {
             LinearImpl::Fp { weight, bias } => {
                 let wt = weight.transpose_on(target)?;
@@ -263,6 +270,26 @@ impl Linear {
                 Ok(y)
             }
         }
+    }
+
+    /// MTP verify projection for a small batch of speculative positions.
+    ///
+    /// Eligible affine quantized shapes use the dedicated verify QMM kernel;
+    /// all other shapes and full-precision layers retain the standard
+    /// [`Linear::forward_on`] path.
+    #[doc(hidden)]
+    pub fn forward_mtp_verify_on(
+        &self,
+        x: &Array,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        let target = target.into();
+        if let Some(parts) = self.quantized_parts() {
+            if let Some(output) = super::verify_qmm::forward_candidate_on(x, parts, target)? {
+                return Ok(output);
+            }
+        }
+        self.forward_on(x, target)
     }
 }
 

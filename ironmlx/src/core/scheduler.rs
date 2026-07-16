@@ -5758,6 +5758,7 @@ impl<M: Model> Scheduler<M> {
             };
             let verify_forward_start = Instant::now();
             let verified_hidden = {
+                let _verify_qmm = crate::nn::verify_qmm::armed_scope();
                 let cache = self
                     .cache
                     .as_mut()
@@ -5774,8 +5775,8 @@ impl<M: Model> Scheduler<M> {
             add_elapsed_us(&mut stats.verify_forward_us, verify_forward_start);
 
             let projection_start = Instant::now();
-            let verified_logits =
-                model.project_hidden_on(&verified_hidden, mlx::StreamOrDevice::default())?;
+            let verified_logits = model
+                .project_mtp_verify_hidden_on(&verified_hidden, mlx::StreamOrDevice::default())?;
             add_elapsed_us(&mut stats.projection_us, projection_start);
 
             let sampling_start = Instant::now();
@@ -5931,6 +5932,7 @@ impl<M: Model> Scheduler<M> {
                         maybe_build_sparse_decode_mask(cache, &replay_lens)?
                     };
                     let replay_hidden = {
+                        let _verify_qmm = crate::nn::verify_qmm::armed_scope();
                         let cache = self.cache.as_mut().ok_or_else(|| {
                             anyhow!("fill_mtp_windows_batched: main cache absent")
                         })?;
@@ -6357,6 +6359,7 @@ impl<M: Model> Scheduler<M> {
         };
         let verify_forward_start = Instant::now();
         let verified_hidden = {
+            let _verify_qmm = crate::nn::verify_qmm::armed_scope();
             let cache = self
                 .cache
                 .as_mut()
@@ -6381,8 +6384,8 @@ impl<M: Model> Scheduler<M> {
             )?
         } else {
             let projection_start = Instant::now();
-            let verified_logits =
-                model.project_hidden_on(&verified_hidden, mlx::StreamOrDevice::default())?;
+            let verified_logits = model
+                .project_mtp_verify_hidden_on(&verified_hidden, mlx::StreamOrDevice::default())?;
             add_elapsed_us(&mut stats.projection_us, projection_start);
             let sampling_start = Instant::now();
             let verified_tokens =

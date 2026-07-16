@@ -18,6 +18,7 @@ pub mod mrope;
 pub mod mtp;
 pub mod norm;
 pub(crate) mod sorted_moe_weighted_sum;
+pub(crate) mod verify_qmm;
 
 pub use attention::{Attention, AttentionConfig};
 pub use conv::{Conv1d, Conv1dConfig};

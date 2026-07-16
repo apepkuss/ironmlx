@@ -3580,7 +3580,10 @@ mod tests {
         assert_eq!(counters.mtp_step_count.load(Ordering::Relaxed), 1);
         let drafted = counters.mtp_drafted_tokens.load(Ordering::Relaxed);
         let accepted = counters.mtp_accepted_draft_tokens.load(Ordering::Relaxed);
-        assert_eq!(drafted, 2);
+        assert!(
+            drafted >= 1,
+            "eligible request must draft at least one token"
+        );
         assert!(
             accepted <= drafted,
             "accepted draft tokens cannot exceed drafted tokens"

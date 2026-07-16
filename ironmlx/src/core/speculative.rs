@@ -230,6 +230,14 @@ pub trait MtpSpeculativeModel: Model {
     fn project_hidden_on(&self, hidden: &Array, target: impl Into<StreamOrDevice>)
         -> Result<Array>;
 
+    fn project_mtp_verify_hidden_on(
+        &self,
+        hidden: &Array,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        self.project_hidden_on(hidden, target)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn mtp_forward_hidden_on(
         &self,
@@ -287,6 +295,14 @@ impl MtpSpeculativeModel for Qwen35Model {
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
         Qwen35Model::project_hidden_on(self, hidden, target)
+    }
+
+    fn project_mtp_verify_hidden_on(
+        &self,
+        hidden: &Array,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        Qwen35Model::project_mtp_verify_hidden_on(self, hidden, target)
     }
 
     fn mtp_hidden_size(&self, mtp: &Self::MtpHead) -> i32 {
@@ -376,6 +392,14 @@ impl MtpSpeculativeModel for Qwen35MoeModel {
         Qwen35MoeModel::project_hidden_on(self, hidden, target)
     }
 
+    fn project_mtp_verify_hidden_on(
+        &self,
+        hidden: &Array,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        Qwen35MoeModel::project_mtp_verify_hidden_on(self, hidden, target)
+    }
+
     fn mtp_hidden_size(&self, mtp: &Self::MtpHead) -> i32 {
         mtp.config().hidden_size
     }
@@ -461,6 +485,14 @@ impl MtpSpeculativeModel for Qwen36MoeModel {
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
         Qwen36MoeModel::project_hidden_on(self, hidden, target)
+    }
+
+    fn project_mtp_verify_hidden_on(
+        &self,
+        hidden: &Array,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        Qwen36MoeModel::project_mtp_verify_hidden_on(self, hidden, target)
     }
 
     fn mtp_hidden_size(&self, mtp: &Self::MtpHead) -> i32 {
@@ -1234,14 +1266,17 @@ where
         let base_snapshot: Vec<LayerCacheSnapshot> =
             self.cache.iter().map(LayerCache::snapshot).collect();
         let verify_forward_start = Instant::now();
-        let verified_hidden = self.model.forward_text_hidden(
-            &verify_arr,
-            &verify_pos_ids,
-            None,
-            None,
-            Some(&mut self.cache),
-            ().into(),
-        )?;
+        let verified_hidden = {
+            let _verify_qmm = crate::nn::verify_qmm::armed_scope();
+            self.model.forward_text_hidden(
+                &verify_arr,
+                &verify_pos_ids,
+                None,
+                None,
+                Some(&mut self.cache),
+                ().into(),
+            )?
+        };
         add_elapsed_us(&mut self.stats.verify_forward_us, verify_forward_start);
         let resolution = if self.request.sampler.is_pipelinable() {
             resolve_greedy_verified_hidden_until_mismatch(
@@ -1253,7 +1288,9 @@ where
             )?
         } else {
             let projection_start = Instant::now();
-            let verified_logits = self.model.project_hidden_on(&verified_hidden, ())?;
+            let verified_logits = self
+                .model
+                .project_mtp_verify_hidden_on(&verified_hidden, ())?;
             add_elapsed_us(&mut self.stats.projection_us, projection_start);
             let sampling_start = Instant::now();
             let verified_tokens = sample_logits_positions(
@@ -1492,47 +1529,15 @@ where
     M: MtpSpeculativeModel,
 {
     let target = target.into();
-    let mut tokens_to_append = Vec::with_capacity(draft_tokens.len() + 1);
-    for pos in 0..=draft_tokens.len() {
-        let row_hidden = slice_hidden_position(verified_hidden, pos as i32)?;
-        let projection_start = Instant::now();
-        let row_logits = model.project_hidden_on(&row_hidden, target)?;
-        add_elapsed_us(&mut stats.projection_us, projection_start);
+    let projection_start = Instant::now();
+    let verified_logits = model.project_mtp_verify_hidden_on(verified_hidden, target)?;
+    add_elapsed_us(&mut stats.projection_us, projection_start);
 
-        let sampling_start = Instant::now();
-        let ids = mlx::ops::reduction::argmax(&row_logits, -1, false)?;
-        let row_tokens: Vec<u32> = ids.to_vec()?;
-        add_elapsed_us(&mut stats.sampling_us, sampling_start);
-        let token = *row_tokens.first().ok_or_else(|| {
-            anyhow!("resolve_greedy_verified_hidden_until_mismatch: empty argmax result")
-        })?;
-
-        if pos < draft_tokens.len() {
-            if token == draft_tokens[pos] {
-                tokens_to_append.push(token);
-                continue;
-            }
-            tokens_to_append.push(token);
-            return Ok(SpeculativeResolution {
-                accepted_draft_len: pos,
-                tokens_to_append,
-                accepted_verify_input_len: pos + 1,
-                needs_rollback: true,
-            });
-        }
-
-        tokens_to_append.push(token);
-        return Ok(SpeculativeResolution {
-            accepted_draft_len: draft_tokens.len(),
-            tokens_to_append,
-            accepted_verify_input_len: draft_tokens.len() + 1,
-            needs_rollback: false,
-        });
-    }
-
-    Err(anyhow!(
-        "resolve_greedy_verified_hidden_until_mismatch: unreachable verifier loop exit"
-    ))
+    let sampling_start = Instant::now();
+    let verified_ids = mlx::ops::reduction::argmax(&verified_logits, -1, false)?;
+    let verified_tokens: Vec<u32> = verified_ids.to_vec()?;
+    add_elapsed_us(&mut stats.sampling_us, sampling_start);
+    resolve_speculative_tokens(draft_tokens, &verified_tokens)
 }
 
 pub(crate) fn slice_hidden_position(hidden: &Array, pos: i32) -> Result<Array> {
@@ -1754,6 +1759,7 @@ pub(crate) fn rollback_main_cache_to_accepted_prefix<M: MtpSpeculativeModel>(
         &[1_i32, accepted_len as i32][..],
     )
         .try_into()?;
+    let _verify_qmm = crate::nn::verify_qmm::armed_scope();
     model.forward_text_hidden(
         &accepted_arr,
         input.accepted_position_ids,
@@ -1887,18 +1893,25 @@ mod tests {
 
         fn project_hidden_on(
             &self,
-            _hidden: &Array,
+            hidden: &Array,
             _target: impl Into<StreamOrDevice>,
         ) -> Result<Array> {
-            let call = self.project_calls.fetch_add(1, Ordering::Relaxed);
-            let token = *self
-                .tokens
-                .get(call)
-                .ok_or_else(|| anyhow!("missing fake token for project call {call}"))?;
+            self.project_calls.fetch_add(1, Ordering::Relaxed);
+            let shape = hidden.shape();
+            let dims = shape.as_slice();
+            let seq = dims[1] as usize;
+            if self.tokens.len() != seq {
+                return Err(anyhow!(
+                    "fake token count {} does not match hidden seq {seq}",
+                    self.tokens.len()
+                ));
+            }
             let vocab = 128_usize;
-            let mut logits = vec![0.0_f32; vocab];
-            logits[token as usize] = 100.0;
-            (&logits[..], &[1_i32, 1_i32, vocab as i32][..])
+            let mut logits = vec![0.0_f32; seq * vocab];
+            for (pos, &token) in self.tokens.iter().enumerate() {
+                logits[pos * vocab + token as usize] = 100.0;
+            }
+            (&logits[..], &[1_i32, seq as i32, vocab as i32][..])
                 .try_into()
                 .map_err(anyhow::Error::from)
         }
@@ -1933,7 +1946,7 @@ mod tests {
     }
 
     #[test]
-    fn greedy_verify_resolve_stops_projection_after_mismatch() {
+    fn greedy_verify_resolve_batches_projection_before_mismatch_resolution() {
         let model = FakeGreedyProjectModel::new(vec![4, 99, 6, 7]);
         let hidden = Array::zeros((1_i32, 4_i32, 1_i32), Dtype::Float32).expect("hidden");
         let mut stats = MtpSpeculativeStats::default();
@@ -1951,7 +1964,7 @@ mod tests {
         assert_eq!(resolution.tokens_to_append, vec![4, 99]);
         assert_eq!(resolution.accepted_verify_input_len, 2);
         assert!(resolution.needs_rollback);
-        assert_eq!(model.project_calls(), 2);
+        assert_eq!(model.project_calls(), 1);
     }
 
     #[test]
@@ -1973,7 +1986,7 @@ mod tests {
         assert_eq!(resolution.tokens_to_append, vec![4, 5, 6, 7]);
         assert_eq!(resolution.accepted_verify_input_len, 4);
         assert!(!resolution.needs_rollback);
-        assert_eq!(model.project_calls(), 4);
+        assert_eq!(model.project_calls(), 1);
     }
 
     #[test]
