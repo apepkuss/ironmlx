@@ -36,6 +36,7 @@ use mlx::{Array, StreamOrDevice};
 
 use crate::core::{logical_width_from_packed, Loader, QuantMeta};
 use crate::nn::activations::{build_geglu_tanh, build_swiglu, invoke_geglu_tanh, invoke_swiglu};
+use crate::nn::sorted_moe_weighted_sum;
 use crate::nn::{Linear, Mlp};
 use crate::Result;
 
@@ -776,11 +777,11 @@ impl RoutedExperts {
             },
         )?;
 
-        let down_out = with_glm_routed_experts_child_span(
+        let (down_out, already_reduced) = with_glm_routed_experts_child_span(
             child_spans_enabled,
             "glm_moe_routed_down_gather_qmm",
             options.layer_idx,
-            || -> Result<Array> {
+            || -> Result<(Array, bool)> {
                 let down_out_raw = mlx::quantization::gather_quantized_matmul_on(
                     &act,
                     &self.down_weight,
@@ -797,10 +798,22 @@ impl RoutedExperts {
                 )
                 .context("RoutedExperts::apply_experts: down_proj gather_qmm")?;
 
-                // Restore [BS, k, H] order, then weight + reduce across k.
+                // The sorted path can consume expert output in route-sorted order,
+                // avoiding the [BS,k,H] scatter and expanded intermediate.
                 let down_out = if let Some(sort_perm) = sort_perm_opt {
                     let inv_perm = argsort_on(&sort_perm, -1_i32, target)
                         .context("RoutedExperts::apply_experts: argsort inv permutation")?;
+                    if sorted_moe_weighted_sum::should_use(&down_out_raw, &inv_perm, weights) {
+                        let out = sorted_moe_weighted_sum::apply_on(
+                            &down_out_raw,
+                            &inv_perm,
+                            weights,
+                            options.cast_output_to_expert_dtype,
+                            target,
+                        )
+                        .context("RoutedExperts::apply_experts: sorted weighted-sum kernel")?;
+                        return Ok((out, true));
+                    }
                     let down_out_2d = mlx::ops::shape::reshape(&down_out_raw, [bs_k, h]).context(
                         "RoutedExperts::apply_experts: reshape sorted down_out to [BS*k, H]",
                     )?;
@@ -812,9 +825,13 @@ impl RoutedExperts {
                     mlx::ops::shape::squeeze_on(&down_out_raw, &[-2_i32][..], target)
                         .context("RoutedExperts::apply_experts: squeeze down_proj dim -2")?
                 };
-                Ok(down_out)
+                Ok((down_out, false))
             },
         )?;
+
+        if already_reduced {
+            return Ok(down_out);
+        }
 
         // weights: [BS, k] -> [BS, k, 1] for broadcast with [BS, k, H].
         with_glm_routed_experts_child_span(
