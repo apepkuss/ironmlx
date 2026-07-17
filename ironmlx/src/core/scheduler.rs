@@ -2379,6 +2379,33 @@ fn batched_text_input_ids(
         .map_err(anyhow::Error::from)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn forward_batched_text_prefill<M: Model>(
+    model: &M,
+    input_ids: &Array,
+    position_ids: &Array,
+    per_row_lens: &[i32],
+    max_len: i32,
+    cache: Option<&mut [LayerCache]>,
+    target: mlx::StreamOrDevice,
+) -> Result<Array> {
+    if per_row_lens.iter().all(|&len| len == max_len) {
+        return model.batched_prefill_causal(input_ids, position_ids, per_row_lens, cache, target);
+    }
+
+    let attention_mask = build_batch_attention_mask(per_row_lens, max_len, Dtype::Bfloat16)?;
+    let linear_attention_mask = build_batch_linear_mask(per_row_lens, max_len)?;
+    model.batched_prefill(
+        input_ids,
+        position_ids,
+        &attention_mask,
+        &linear_attention_mask,
+        per_row_lens,
+        cache,
+        target,
+    )
+}
+
 fn try_save_batched_text_prefix_row(
     prefix_cache_config: Option<&PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<&PrefixLruCacheHandle>,
@@ -2440,15 +2467,13 @@ fn forward_batched_text_cold_miss_with_paged_prefix<M: Model>(
         .expect("batch is non-empty");
     let prefix_input_ids =
         batched_text_input_ids(prompt_ids, &prefix_lens, max_prefix_len as usize)?;
-    let attention_mask = build_batch_attention_mask(&prefix_lens, max_prefix_len, Dtype::Bfloat16)?;
-    let linear_attention_mask = build_batch_linear_mask(&prefix_lens, max_prefix_len)?;
     let position_ids = build_position_ids_batched(&prefix_lens, max_prefix_len)?;
-    let prefix_logits = model.batched_prefill(
+    let prefix_logits = forward_batched_text_prefill(
+        model,
         &prefix_input_ids,
         &position_ids,
-        &attention_mask,
-        &linear_attention_mask,
         &prefix_lens,
+        max_prefix_len,
         Some(&mut *cache),
         mlx::StreamOrDevice::default(),
     )?;
@@ -6568,12 +6593,13 @@ impl<M: Model> Scheduler<M> {
     /// drops the cache (3f) so the next batch's cap is sized to its slots, not
     /// inherited from the prior batch.
     ///
-    /// Builds a right-padded model-facing batch over occupied rows only. Its
-    /// tensors are `[B_prefill, T_max]` input_ids, `[3, B_prefill, T_max]`
-    /// position_ids, `[B_prefill, 1, T_max, T_max]` attention mask, and
-    /// `[B_prefill, T_max]` linear mask, then calls `M::batched_prefill` via
-    /// the `Model` trait. The resulting cache remains compact; decode uses the
-    /// same scheduler-row mapping rather than padding up to `b_max`.
+    /// Builds a model-facing batch over occupied rows only. Its tensors are
+    /// `[B_prefill, T_max]` input_ids and `[3, B_prefill, T_max]` position_ids.
+    /// Equal-length rows use causal attention without an explicit mask;
+    /// right-padded rows additionally build `[B_prefill, 1, T_max, T_max]`
+    /// attention and `[B_prefill, T_max]` linear masks. The resulting cache
+    /// remains compact; decode uses the same scheduler-row mapping rather than
+    /// padding up to `b_max`.
     ///
     /// After prefill, samples the first token via a three-stage dispatch:
     /// Stage A collects per-row `sampler` refs + prompt histories in compact
@@ -7086,20 +7112,17 @@ impl<M: Model> Scheduler<M> {
                     },
                 )?
             } else {
-                let attention_mask =
-                    build_batch_attention_mask(&prompt_lens, max_len, Dtype::Bfloat16)?;
-                let linear_attention_mask = build_batch_linear_mask(&prompt_lens, max_len)?;
                 let position_ids = if let Some(dummy) = dummy_position_ids.as_ref() {
                     dummy.clone()
                 } else {
                     build_position_ids_batched(&prompt_lens, max_len)?
                 };
-                model.batched_prefill(
+                forward_batched_text_prefill(
+                    model,
                     &input_ids,
                     &position_ids,
-                    &attention_mask,
-                    &linear_attention_mask,
                     &prompt_lens,
+                    max_len,
                     Some(prefill_cache),
                     mlx::StreamOrDevice::default(),
                 )?
@@ -13279,7 +13302,10 @@ mod tests {
         let events = s.prefill_admitted(&model).expect("prefill");
 
         assert_eq!(model.make_cache_batches(), vec![2]);
-        assert_eq!(model.text_prefill_batches(), vec![2]);
+        assert_eq!(model.text_prefill_batches(), Vec::<i32>::new());
+        assert_eq!(model.text_forward_batches(), vec![2]);
+        assert_eq!(model.text_forward_seq_lens(), vec![3]);
+        assert_eq!(model.text_forward_masks(), vec![(true, false)]);
         assert_eq!(events.len(), 2);
         assert_eq!((events[0].id, events[0].token), (id_0, 3));
         assert_eq!((events[1].id, events[1].token), (id_2, 4));
@@ -13621,7 +13647,7 @@ mod tests {
 
     #[test]
     #[serial(mlx_metal)]
-    fn prefill_admitted_batched_text_paged_prefix_cold_miss_uses_batched_prefill() {
+    fn prefill_admitted_batched_text_paged_prefix_cold_miss_uses_causal_prefill() {
         let root = std::env::temp_dir().join(format!(
             "ironmlx-paged-prefix-batch-text-cold-{}",
             uuid::Uuid::new_v4().simple()
@@ -13643,16 +13669,62 @@ mod tests {
         let model = StepDecodeMaskModel::default();
         let events = scheduler.prefill_admitted(&model).expect("prefill");
 
-        assert_eq!(model.batched_prefill_batches(), vec![2]);
-        assert_eq!(model.batched_prefill_lens(), vec![vec![3, 3]]);
+        assert_eq!(
+            model.batched_prefill_batches(),
+            Vec::<i32>::new(),
+            "equal-length rows must not build the padded batched-prefill mask"
+        );
+        assert_eq!(model.batched_prefill_lens(), Vec::<Vec<i32>>::new());
         assert_eq!(
             model.forward_seq_lens(),
-            vec![1],
-            "cold paged-prefix batch should only decode the final token after batched prefix prefill"
+            vec![3, 1],
+            "cold paged-prefix batch should causally prefill the shared prefix shape, then decode the final token"
         );
+        assert_eq!(model.decode_lens_seen(), vec![vec![3, 3], vec![1, 1]]);
+        assert_eq!(model.decode_mask_seen(), vec![false, false]);
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].id, id_0);
         assert_eq!(events[1].id, id_1);
+
+        std::fs::remove_dir_all(root).expect("cleanup prefix cache");
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn prefill_admitted_batched_text_paged_prefix_cold_miss_keeps_padding_mask() {
+        let root = std::env::temp_dir().join(format!(
+            "ironmlx-paged-prefix-batch-text-padded-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let config = crate::core::cache::PagedPrefixCacheConfig::new(&root, "step-test", 2, 32)
+            .expect("prefix config");
+
+        let mut scheduler = Scheduler::<StepDecodeMaskModel>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        scheduler
+            .enable_paged_prefix_cache(config)
+            .expect("enable prefix cache");
+        scheduler
+            .admit(mk_req(vec![1, 2, 3, 4]))
+            .expect("admit long row");
+        scheduler
+            .admit(mk_req(vec![5, 6, 7]))
+            .expect("admit short row");
+        let model = StepDecodeMaskModel::default();
+        let events = scheduler.prefill_admitted(&model).expect("prefill");
+
+        assert_eq!(model.batched_prefill_batches(), vec![2]);
+        assert_eq!(model.batched_prefill_lens(), vec![vec![3, 2]]);
+        assert_eq!(
+            model.forward_seq_lens(),
+            vec![1],
+            "right-padded rows must retain the explicit-mask batched prefill path"
+        );
+        assert_eq!(events.len(), 2);
 
         std::fs::remove_dir_all(root).expect("cleanup prefix cache");
     }
@@ -13967,7 +14039,10 @@ mod tests {
         let events = s.prefill_admitted(&model).expect("prefill");
 
         assert_eq!(model.make_cache_batches(), vec![2]);
-        assert_eq!(model.text_prefill_batches(), vec![2]);
+        assert_eq!(model.text_prefill_batches(), Vec::<i32>::new());
+        assert_eq!(model.text_forward_batches(), vec![2]);
+        assert_eq!(model.text_forward_seq_lens(), vec![3]);
+        assert_eq!(model.text_forward_masks(), vec![(true, false)]);
         assert_eq!(events.len(), 2);
         assert_eq!((events[0].id, events[0].token), (id_0, 3));
         assert_eq!((events[1].id, events[1].token), (id_1, 4));
@@ -14056,7 +14131,7 @@ mod tests {
 
         let step_events = s.step(&model).expect("step after stale-row reuse");
         assert_eq!(step_events.len(), 2);
-        assert_eq!(model.decode_lens_seen(), vec![vec![1, 1]]);
+        assert_eq!(model.decode_lens_seen(), vec![vec![3, 3], vec![1, 1]]);
     }
 
     #[test]
@@ -14075,8 +14150,8 @@ mod tests {
 
         let step_events = s.step(&model).expect("step");
         assert_eq!(step_events.len(), 2);
-        assert_eq!(model.decode_lens_seen(), vec![vec![1, 1]]);
-        assert_eq!(model.decode_mask_seen(), vec![false]);
+        assert_eq!(model.decode_lens_seen(), vec![vec![3, 3], vec![1, 1]]);
+        assert_eq!(model.decode_mask_seen(), vec![false, false]);
     }
 
     #[test]

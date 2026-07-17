@@ -35,6 +35,11 @@ use crate::Result;
 use super::config::LlamaConfig;
 use super::decoder_layer::LlamaDecoderLayer;
 
+// Long B>1 Llama prefill produces an oversized shape-specialized MLX graph.
+// Admit one fresh row and let rolling admission chunk additional requests.
+const LONG_PREFILL_BATCH_LIMIT_THRESHOLD: usize = 4096;
+const LONG_PREFILL_BATCH_LIMIT: usize = 1;
+
 pub struct LlamaModel {
     embed_tokens: Embedding,
     layers: Vec<LlamaDecoderLayer>,
@@ -343,6 +348,14 @@ impl Model for LlamaModel {
         LlamaModel::make_cache(self, batch, cap, dtype)
     }
 
+    fn fresh_prefill_batch_limit(prompt_len: usize, b_max: usize) -> usize {
+        if prompt_len >= LONG_PREFILL_BATCH_LIMIT_THRESHOLD {
+            b_max.min(LONG_PREFILL_BATCH_LIMIT)
+        } else {
+            b_max
+        }
+    }
+
     fn forward_on(
         &self,
         input_ids: &Array,
@@ -473,5 +486,26 @@ impl crate::core::scheduler::DenseVlMethods for LlamaModel {
         _target: mlx::StreamOrDevice,
     ) -> crate::Result<mlx::Array> {
         Err(anyhow!("LlamaModel is text-only: VL methods unsupported"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LlamaModel;
+    use crate::core::Model;
+
+    #[test]
+    fn fresh_prefill_batch_limit_keeps_short_prompts_batched() {
+        assert_eq!(<LlamaModel as Model>::fresh_prefill_batch_limit(2048, 4), 4);
+    }
+
+    #[test]
+    fn fresh_prefill_batch_limit_serializes_long_prompts() {
+        assert_eq!(<LlamaModel as Model>::fresh_prefill_batch_limit(4095, 4), 4);
+        assert_eq!(<LlamaModel as Model>::fresh_prefill_batch_limit(4096, 4), 1);
+        assert_eq!(
+            <LlamaModel as Model>::fresh_prefill_batch_limit(32_619, 4),
+            1
+        );
     }
 }

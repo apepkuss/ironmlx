@@ -16,7 +16,8 @@ use tokio::sync::RwLock;
 use crate::cli::serve::{
     apply_adaptive_mtp_scheduler_defaults, read_model_type, resolve_active_kv_offload_config,
     resolve_engine_paged_prefix_cache_settings, resolve_memory_limit_bytes, resolve_model_ttl,
-    resolve_scheduler_for_model, ResolvedSchedulerRuntime, SchedulerProfileSource, ServeArgs,
+    resolve_scheduler_for_model_with_mtp, ResolvedSchedulerRuntime, SchedulerProfileSource,
+    ServeArgs,
 };
 use crate::core::sampler::Sampler;
 use crate::core::speculative::{MtpDraftTokensArg, MtpSpeculativeConfig};
@@ -538,7 +539,13 @@ fn build_engine_model_config(
     pinned: bool,
 ) -> Result<EngineModelLoad> {
     let mut resolved = apply_load_request_scheduler_overrides(
-        resolve_scheduler_for_model(args, model_dir)?,
+        resolve_scheduler_for_model_with_mtp(
+            args,
+            model_dir,
+            mtp.as_ref().map(|settings| settings.model_dir.as_path()),
+            mtp.as_ref().and_then(|settings| settings.draft_tokens),
+            max_cache_cap_override,
+        )?,
         max_cache_cap_override,
     );
     let sampling_defaults = read_generation_sampling_defaults(model_dir)?
@@ -2188,6 +2195,7 @@ mod tests {
                 schema_version: crate::core::scheduler_autotune::SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
                 model_name: "test-model".to_string(),
                 hardware_label: "test-hardware".to_string(),
+                runtime_context: crate::core::scheduler_autotune::SchedulerAutotuneRuntimeContext::local_default(32768),
                 config: crate::core::scheduler_autotune::SchedulerAutotuneProfileConfig {
                     b_max: 1,
                     prefill_chunk_size: 1024,

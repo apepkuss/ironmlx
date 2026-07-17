@@ -1,6 +1,6 @@
 # Scheduler/Autotune 设计研究与轻量落地
 
-状态：阶段 1 诊断报告、阶段 2 离线 profile 选择器、本地一键校准、profile store、serve 自动加载本机 profile 已完成轻量落地；autotune v2 在 `codex/scheduler-autotune-v2` 继续补齐 profile 健康度与重新校准提示。
+状态：历史研究记录。当前生产契约已经升级到 scheduler profile v5，详见 [`docs/scheduler-profile-v5.md`](../../scheduler-profile-v5.md)。下文保留早期设计背景，不再作为 schema、store 匹配或校准矩阵的实现依据。
 
 ## 0. 结论摘要
 

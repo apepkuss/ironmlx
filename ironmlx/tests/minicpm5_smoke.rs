@@ -125,5 +125,48 @@ fn minicpm5_first_token_matches_mlx_lm_reference() {
         "top-1 logit {top1:.4} deviates from mlx_lm reference {REFERENCE_TOP1_LOGIT:.4} by > {LOGIT_TOLERANCE}"
     );
 
+    let batched_ids: Vec<i32> = prompt_i32
+        .iter()
+        .copied()
+        .chain(prompt_i32.iter().copied())
+        .collect();
+    let batched_input: Array = (batched_ids.as_slice(), &[2, n][..]).try_into().unwrap();
+    let mut batched_cache =
+        Model::make_cache(&model, 2, 64, Dtype::Bfloat16).expect("make batched cache");
+    let batched_logits = Model::batched_prefill_causal(
+        &model,
+        &batched_input,
+        &pos,
+        &[n, n],
+        Some(&mut batched_cache),
+        StreamOrDevice::default(),
+    )
+    .expect("batched_prefill_causal");
+    assert_eq!(
+        batched_logits.shape().as_slice(),
+        &[2, 1, 130_560],
+        "batched logits [2,1,vocab]"
+    );
+    let batched: Vec<f32> = mlx::ops::cast::astype(&batched_logits, Dtype::Float32)
+        .unwrap()
+        .to_vec()
+        .unwrap();
+    for (row, logits) in batched.chunks_exact(130_560).enumerate() {
+        assert!(
+            logits.iter().all(|x| x.is_finite()),
+            "batched row {row} logits must be finite"
+        );
+        let argmax = logits
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .map(|(index, _)| index)
+            .expect("non-empty logits row");
+        assert_eq!(
+            argmax, EXPECTED_ARGMAX_ID,
+            "batched row {row} first-token argmax mismatch"
+        );
+    }
+
     eprintln!("MiniCPM5 smoke OK: argmax={argmax} (id 8181 = ' Paris'), top1 logit={top1:.4}");
 }

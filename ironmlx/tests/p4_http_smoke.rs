@@ -26,6 +26,8 @@ fn scheduler_profile() -> SchedulerAutotuneRuntimeProfile {
         schema_version: SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
         model_name: "qwen3.5-4b".to_string(),
         hardware_label: "test-host".to_string(),
+        runtime_context:
+            ironmlx::core::scheduler_autotune::SchedulerAutotuneRuntimeContext::local_default(32768),
         config: SchedulerAutotuneProfileConfig {
             b_max: 4,
             prefill_chunk_size: 2048,

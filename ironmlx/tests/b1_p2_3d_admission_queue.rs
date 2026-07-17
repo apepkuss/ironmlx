@@ -407,6 +407,8 @@ async fn iron_bench_c8_with_queue_no_4xx() {
         schema_version: SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
         model_name: "qwen35".to_string(),
         hardware_label: "test-host".to_string(),
+        runtime_context:
+            ironmlx::core::scheduler_autotune::SchedulerAutotuneRuntimeContext::local_default(32768),
         config: SchedulerAutotuneProfileConfig {
             b_max: 4,
             prefill_chunk_size: 2048,

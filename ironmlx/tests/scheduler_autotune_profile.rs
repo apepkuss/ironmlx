@@ -1,14 +1,15 @@
 use ironmlx::core::scheduler_autotune::{
     build_scheduler_autotune_runtime_profile, build_scheduler_autotune_runtime_profile_at,
     evaluate_scheduler_autotune_profile_health, select_scheduler_autotune_profile,
-    select_scheduler_autotune_profile_with_options, SchedulerAutotuneCalibrationInput,
-    SchedulerAutotuneCandidateScore, SchedulerAutotuneMeasurement, SchedulerAutotuneObjective,
-    SchedulerAutotuneProfileConfig, SchedulerAutotuneProfileHealthInput,
-    SchedulerAutotuneProfileHealthLevel, SchedulerAutotuneProfileHealthStatus,
-    SchedulerAutotuneProfileSelection, SchedulerAutotuneRuntimeProfile,
-    SchedulerAutotuneRuntimeProfileMetadata, SchedulerAutotuneRuntimeRequest,
-    SchedulerAutotuneScenario, SchedulerAutotuneScenarioOverride,
-    SchedulerAutotuneSelectionOptions, SchedulerAutotuneSelectionProfile,
+    select_scheduler_autotune_profile_with_options, SchedulerAutotuneCacheState,
+    SchedulerAutotuneCalibrationInput, SchedulerAutotuneCandidateScore,
+    SchedulerAutotuneMeasurement, SchedulerAutotuneObjective, SchedulerAutotuneProfileConfig,
+    SchedulerAutotuneProfileHealthInput, SchedulerAutotuneProfileHealthLevel,
+    SchedulerAutotuneProfileHealthStatus, SchedulerAutotuneProfileSelection,
+    SchedulerAutotuneRuntimeContext, SchedulerAutotuneRuntimeHealth,
+    SchedulerAutotuneRuntimeProfile, SchedulerAutotuneRuntimeProfileMetadata,
+    SchedulerAutotuneRuntimeRequest, SchedulerAutotuneScenario, SchedulerAutotuneScenarioOverride,
+    SchedulerAutotuneSelectionOptions, SchedulerAutotuneSelectionProfile, SchedulerSpeculativeMode,
     SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
 };
 
@@ -55,6 +56,7 @@ fn measurement(
         prompt_len,
         max_new_tokens,
         concurrency,
+        cache_state: SchedulerAutotuneCacheState::Cold,
         ttft_ms_p95,
         itl_ms_p95,
         e2e_s_p95,
@@ -62,6 +64,7 @@ fn measurement(
         early_itl_ms_p95: itl_ms_p95,
         memory_budget_ok: true,
         cached_tokens_warning: false,
+        runtime_health: healthy_runtime(),
     }
 }
 
@@ -70,6 +73,7 @@ fn input(measurements: Vec<SchedulerAutotuneMeasurement>) -> SchedulerAutotuneCa
         schema_version: SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
         model_name: "test-model".to_string(),
         hardware_label: "test-host".to_string(),
+        runtime_context: runtime_context(),
         objective: SchedulerAutotuneObjective::agent_default(),
         measurements,
     }
@@ -87,6 +91,7 @@ fn runtime_profile_with_metadata(
         schema_version: SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
         model_name: "test-model".to_string(),
         hardware_label: "test-host".to_string(),
+        runtime_context: runtime_context(),
         config: config(1, 2048, 5),
         rules: Vec::new(),
         metadata,
@@ -117,6 +122,7 @@ fn scenario_override(
             prompt_len,
             max_new_tokens,
             concurrency,
+            cache_state: SchedulerAutotuneCacheState::Cold,
         },
         config,
         score: 1.0,
@@ -132,6 +138,7 @@ fn selection_with_overrides(
         diagnose_only: true,
         model_name: "test-model".to_string(),
         hardware_label: "test-host".to_string(),
+        runtime_context: runtime_context(),
         selection_profile: SchedulerAutotuneSelectionProfile::AgentLongPrompt,
         objective: SchedulerAutotuneObjective::agent_default(),
         scenarios: scenario_overrides
@@ -143,6 +150,25 @@ fn selection_with_overrides(
         scenario_overrides,
         rejected: Vec::new(),
         warnings: Vec::new(),
+    }
+}
+
+fn runtime_context() -> SchedulerAutotuneRuntimeContext {
+    SchedulerAutotuneRuntimeContext::local_default(32768)
+}
+
+fn healthy_runtime() -> SchedulerAutotuneRuntimeHealth {
+    SchedulerAutotuneRuntimeHealth {
+        healthy: true,
+        status: "healthy".to_string(),
+        request_completion_ok: true,
+        admission_queue_full_count_delta: 0,
+        memory_budget_exceeded_count_delta: 0,
+        active_kv_degraded: false,
+        active_kv_swap_error_count_delta: 0,
+        logical_kv_cap_tokens: 32768,
+        resident_kv_cap_tokens: 32768,
+        mtp: None,
     }
 }
 
@@ -164,6 +190,52 @@ fn profile_selection_prefers_agent_balanced_config_over_ttft_only_winner() {
     assert_eq!(selected.config, balanced);
     assert!(selection.diagnose_only);
     assert!(selection.render_text().contains("diagnose-only"));
+}
+
+#[test]
+fn profile_selection_rejects_unhealthy_runtime_measurement() {
+    let selected_config = config(1, 2048, 5);
+    let mut row = measurement(selected_config, 2048, 128, 1, 100.0, 12.0, 2.0, 80.0);
+    row.runtime_health.healthy = false;
+    row.runtime_health.status = "admission-queue-full".to_string();
+    row.runtime_health.admission_queue_full_count_delta = 1;
+
+    let selection = select_scheduler_autotune_profile(input(vec![row]));
+
+    assert!(selection.selected.is_none());
+    assert!(selection
+        .rejected
+        .iter()
+        .any(|item| item.code == "runtime_health_unsafe"));
+}
+
+#[test]
+fn profile_selection_rejects_inactive_speculative_context() {
+    let selected_config = config(1, 2048, 5);
+    let mut calibration = input(vec![measurement(
+        selected_config,
+        2048,
+        128,
+        1,
+        100.0,
+        12.0,
+        2.0,
+        80.0,
+    )]);
+    calibration.runtime_context.speculative.mode = SchedulerSpeculativeMode::QwenMtp;
+    calibration
+        .runtime_context
+        .speculative
+        .draft_model_fingerprint = Some("draft-model".to_string());
+    calibration.runtime_context.speculative.draft_tokens = Some(3);
+
+    let selection = select_scheduler_autotune_profile(calibration);
+
+    assert!(selection.selected.is_none());
+    assert!(selection
+        .rejected
+        .iter()
+        .any(|item| item.code == "speculative_path_inactive"));
 }
 
 #[test]
@@ -359,11 +431,13 @@ fn profile_health_reports_healthy_for_matching_fresh_agent_coverage() {
                 prompt_len: 1024,
                 max_new_tokens: 128,
                 concurrency: 1,
+                cache_state: SchedulerAutotuneCacheState::Cold,
             },
             SchedulerAutotuneScenario {
                 prompt_len: 4096,
                 max_new_tokens: 128,
                 concurrency: 2,
+                cache_state: SchedulerAutotuneCacheState::Cold,
             },
         ],
     );
@@ -372,6 +446,7 @@ fn profile_health_reports_healthy_for_matching_fresh_agent_coverage() {
         profile: &profile,
         expected_model_name: "test-model",
         expected_hardware_label: "test-host",
+        expected_runtime_context: &profile.runtime_context,
         current_ironmlx_version: env!("CARGO_PKG_VERSION"),
         now_unix_ms: 1811606400000 + 1000,
         max_age_days: 30,
@@ -392,6 +467,7 @@ fn profile_health_warns_for_stale_version_and_missing_concurrency_coverage() {
             prompt_len: 1024,
             max_new_tokens: 128,
             concurrency: 1,
+            cache_state: SchedulerAutotuneCacheState::Cold,
         }],
     );
     profile.metadata.ironmlx_version = "0.0.0-test".to_string();
@@ -400,6 +476,7 @@ fn profile_health_warns_for_stale_version_and_missing_concurrency_coverage() {
         profile: &profile,
         expected_model_name: "other-model-name",
         expected_hardware_label: "test-host",
+        expected_runtime_context: &profile.runtime_context,
         current_ironmlx_version: env!("CARGO_PKG_VERSION"),
         now_unix_ms: 1811606400000 + 31 * 24 * 60 * 60 * 1000,
         max_age_days: 30,
@@ -429,6 +506,7 @@ fn profile_health_invalidates_schema_and_hardware_mismatch() {
             prompt_len: 4096,
             max_new_tokens: 128,
             concurrency: 2,
+            cache_state: SchedulerAutotuneCacheState::Cold,
         }],
     );
     profile.schema_version = SCHEDULER_AUTOTUNE_SCHEMA_VERSION + 1;
@@ -438,6 +516,7 @@ fn profile_health_invalidates_schema_and_hardware_mismatch() {
         profile: &profile,
         expected_model_name: "test-model",
         expected_hardware_label: "test-host",
+        expected_runtime_context: &profile.runtime_context,
         current_ironmlx_version: env!("CARGO_PKG_VERSION"),
         now_unix_ms: 1811606400000,
         max_age_days: 30,
@@ -452,6 +531,37 @@ fn profile_health_invalidates_schema_and_hardware_mismatch() {
         .notes
         .iter()
         .any(|note| note.code == "hardware_label_mismatch"));
+}
+
+#[test]
+fn profile_health_invalidates_runtime_context_mismatch() {
+    let profile = runtime_profile_with_metadata(
+        1811606400000,
+        vec![SchedulerAutotuneScenario {
+            prompt_len: 4096,
+            max_new_tokens: 128,
+            concurrency: 2,
+            cache_state: SchedulerAutotuneCacheState::Cold,
+        }],
+    );
+    let mut expected_context = profile.runtime_context.clone();
+    expected_context.logical_kv_cap_tokens += 1;
+
+    let report = evaluate_scheduler_autotune_profile_health(SchedulerAutotuneProfileHealthInput {
+        profile: &profile,
+        expected_model_name: "test-model",
+        expected_hardware_label: "test-host",
+        expected_runtime_context: &expected_context,
+        current_ironmlx_version: env!("CARGO_PKG_VERSION"),
+        now_unix_ms: 1811606400000,
+        max_age_days: 30,
+    });
+
+    assert_eq!(report.status, SchedulerAutotuneProfileHealthStatus::Invalid);
+    assert!(report
+        .notes
+        .iter()
+        .any(|note| note.code == "runtime_context_mismatch"));
 }
 
 #[test]

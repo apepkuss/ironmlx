@@ -1,7 +1,8 @@
 use ironmlx::core::scheduler_autotune::{
-    merge_scheduler_autotune_calibrations, SchedulerAutotuneCalibrationInput,
-    SchedulerAutotuneMeasurement, SchedulerAutotuneMergeOptions, SchedulerAutotuneObjective,
-    SchedulerAutotuneProfileConfig, SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+    merge_scheduler_autotune_calibrations, SchedulerAutotuneCacheState,
+    SchedulerAutotuneCalibrationInput, SchedulerAutotuneMeasurement, SchedulerAutotuneMergeOptions,
+    SchedulerAutotuneObjective, SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeContext,
+    SchedulerAutotuneRuntimeHealth, SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
 };
 
 fn config(b_max: usize, chunk: usize) -> SchedulerAutotuneProfileConfig {
@@ -26,6 +27,7 @@ fn measurement(
         prompt_len,
         max_new_tokens,
         concurrency,
+        cache_state: SchedulerAutotuneCacheState::Cold,
         ttft_ms_p95: 100.0,
         itl_ms_p95: 12.0,
         e2e_s_p95: 2.4,
@@ -33,6 +35,18 @@ fn measurement(
         early_itl_ms_p95: 12.0,
         memory_budget_ok: true,
         cached_tokens_warning: false,
+        runtime_health: SchedulerAutotuneRuntimeHealth {
+            healthy: true,
+            status: "healthy".to_string(),
+            request_completion_ok: true,
+            admission_queue_full_count_delta: 0,
+            memory_budget_exceeded_count_delta: 0,
+            active_kv_degraded: false,
+            active_kv_swap_error_count_delta: 0,
+            logical_kv_cap_tokens: 32768,
+            resident_kv_cap_tokens: 32768,
+            mtp: None,
+        },
     }
 }
 
@@ -45,6 +59,7 @@ fn input(
         schema_version: SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
         model_name: model_name.to_string(),
         hardware_label: hardware_label.to_string(),
+        runtime_context: SchedulerAutotuneRuntimeContext::local_default(32768),
         objective: SchedulerAutotuneObjective::agent_default(),
         measurements,
     }

@@ -282,6 +282,21 @@
     border-radius: inherit;
     background: linear-gradient(90deg, transparent, var(--accent), transparent);
     animation: profile-progress-slide 1.15s ease-in-out infinite;
+    transition: width 0.25s ease;
+  }
+
+  .profile-progress.is-determinate .profile-progress-bar {
+    background: var(--accent);
+    animation: none;
+    transform: none;
+  }
+
+  .profile-progress-details {
+    margin-top: 8px;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    white-space: pre-line;
   }
 
   .profile-progress-text {
@@ -463,6 +478,10 @@
   }
   .btn-danger:hover {
     opacity: 0.85;
+  }
+  .btn-danger:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
   }
 
   /* ── Chat Tab Bar ── */
@@ -1835,7 +1854,8 @@
             <span class="profile-help-tooltip" id="profile-help-tooltip" role="tooltip">
               <span class="profile-help-tooltip-title" data-i18n="scheduler_profile_help_title">What this profile does</span>
               <span class="profile-help-tooltip-body" data-i18n="scheduler_profile_help_body">Generates a scheduler profile for the selected model on this Mac so ironmlx can choose better runtime scheduling parameters.</span>
-              <span class="profile-help-tooltip-flow" data-i18n="scheduler_profile_help_flow">Flow: select a model, choose a strategy, then generate the profile. Use it before benchmark runs or after changing models or hardware.</span>
+              <span class="profile-help-tooltip-flow" data-i18n="scheduler_profile_help_flow">Flow: select a model, choose a strategy and calibration level, then generate the profile. Use it before benchmark runs or after changing models or hardware.</span>
+              <span class="profile-help-tooltip-flow" data-i18n="scheduler_profile_help_levels">Levels: Quick Validation runs up to 16 jobs in about 8–15 minutes for a basic check; Standard Calibration runs up to 48 jobs in about 40–60 minutes and is recommended for routine use; Full Calibration runs up to 96 jobs in about 2–2.5 hours for the widest coverage.</span>
             </span>
           </span>
         </div>
@@ -1843,22 +1863,33 @@
           <div class="dl-row">
             <div class="dl-field" style="flex:2;">
               <label data-i18n="model">Model</label>
-              <select id="profile-model-select" style="min-width:260px;"><option value="" data-i18n="select_model">Select a model...</option></select>
+              <select id="profile-model-select" style="min-width:260px;" onchange="requestSchedulerProfilePreview()"><option value="" data-i18n="select_model">Select a model...</option></select>
             </div>
             <div class="dl-field" style="flex:1.4;">
               <label data-i18n="scheduler_profile_strategy">Selection Strategy</label>
-              <select id="profile-selection-select" style="min-width:180px;">
+              <select id="profile-selection-select" style="min-width:180px;" onchange="requestSchedulerProfilePreview()">
                 <option value="agent-long-prompt" data-i18n="scheduler_profile_agent_long_prompt">Agent Long Prompt</option>
                 <option value="balanced" data-i18n="scheduler_profile_balanced">Balanced</option>
               </select>
             </div>
-            <button class="btn-accent" id="profile-generate-btn" onclick="runSchedulerProfileGeneration()"><svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 1.75v2.2M7 10.05v2.2M12.25 7h-2.2M3.95 7h-2.2M10.7 3.3 9.15 4.85M4.85 9.15 3.3 10.7M10.7 10.7 9.15 9.15M4.85 4.85 3.3 3.3" stroke="white" stroke-width="1.2" stroke-linecap="round"/><circle cx="7" cy="7" r="1.7" stroke="white" stroke-width="1.2"/></svg> <span data-i18n="generate_profile">Generate Profile</span></button>
+            <div class="dl-field" style="flex:1.2;">
+              <label data-i18n="scheduler_profile_level">Calibration Level</label>
+              <select id="profile-level-select" style="min-width:170px;" onchange="requestSchedulerProfilePreview()">
+                <option value="quick" data-i18n="scheduler_profile_level_quick">Quick Validation</option>
+                <option value="standard" data-i18n="scheduler_profile_level_standard" selected>Standard Calibration</option>
+                <option value="full" data-i18n="scheduler_profile_level_full">Full Calibration</option>
+              </select>
+            </div>
+            <button class="btn-accent" id="profile-generate-btn" onclick="runSchedulerProfileGeneration()"><span data-i18n="generate_profile">Generate Profile</span></button>
+            <button class="btn-danger" id="profile-cancel-btn" onclick="cancelSchedulerProfileGeneration()" style="display:none;" data-i18n="stop_calibration">Stop Calibration</button>
           </div>
+          <div id="profile-level-hint" style="margin-top:8px;font-size:11px;color:var(--text-tertiary);"></div>
           <div id="profile-status" style="margin-top:12px;font-size:12px;color:var(--text-secondary);white-space:pre-line;" data-i18n="profile_idle">No profile generation running.</div>
           <div id="profile-progress" class="profile-progress" style="display:none;" role="progressbar" aria-busy="true">
             <div class="profile-progress-bar"></div>
             <span class="profile-progress-text" data-i18n="profile_running_hint">This can take several minutes. You can watch the log below while the calibration is running.</span>
           </div>
+          <div id="profile-progress-details" class="profile-progress-details" style="display:none;"></div>
           <div id="profile-result" class="profile-result" style="display:none;">
             <div id="profile-result-title" class="profile-result-title"></div>
             <div id="profile-result-stored-row" class="profile-result-row" style="display:none;"><span data-i18n="profile_store_path">Stored profile</span>: <code id="profile-result-stored"></code></div>
@@ -2964,8 +2995,8 @@
       single_request_test: "Single Request Test", gen_length_note: "Generation length: 128 tokens (fixed)",
       batch_test: "Continuous Batch Test", batch_note: "Batch test runs each batch size against every selected prompt size (tg128).",
       run_benchmark: "Run Benchmark",
-      scheduler_profile: "Scheduler Profile", scheduler_profile_help_title: "What this profile does", scheduler_profile_help_body: "Generates a scheduler profile for the selected model on this Mac so ironmlx can choose better runtime scheduling parameters.", scheduler_profile_help_flow: "Flow: select a model, choose a strategy, then generate the profile. Use it before benchmark runs or after changing models or hardware.", scheduler_profile_strategy: "Selection Strategy", scheduler_profile_agent_long_prompt: "Agent Long Prompt", scheduler_profile_balanced: "Balanced", generate_profile: "Generate Profile",
-      profile_idle: "No profile generation running.", profile_running: "Generating scheduler profile for {name}...", profile_running_hint: "This can take several minutes. You can watch the log below while the calibration is running.", profile_succeeded: "Scheduler profile generated for {name}.", profile_result_title: "Generated files", profile_failed: "Scheduler profile generation failed: {detail}", profile_runtime_path: "Runtime profile", profile_store_path: "Stored profile", profile_report_path: "Detailed report",
+      scheduler_profile: "Scheduler Profile", scheduler_profile_help_title: "What this profile does", scheduler_profile_help_body: "Generates a scheduler profile for the selected model on this Mac so ironmlx can choose better runtime scheduling parameters.", scheduler_profile_help_flow: "Flow: select a model, choose a strategy and calibration level, then generate the profile. Use it before benchmark runs or after changing models or hardware.", scheduler_profile_help_levels: "Levels: Quick Validation runs up to 16 jobs in about 8–15 minutes for a basic check; Standard Calibration runs up to 48 jobs in about 40–60 minutes and is recommended for routine use; Full Calibration runs up to 96 jobs in about 2–2.5 hours for the widest coverage.", scheduler_profile_strategy: "Selection Strategy", scheduler_profile_agent_long_prompt: "Agent Long Prompt", scheduler_profile_balanced: "Balanced", scheduler_profile_level: "Calibration Level", scheduler_profile_level_quick: "Quick Validation", scheduler_profile_level_standard: "Standard Calibration", scheduler_profile_level_full: "Full Calibration", scheduler_profile_level_quick_hint: "Up to 16 jobs · estimated 8–15 minutes", scheduler_profile_level_standard_hint: "Up to 48 jobs · estimated 40–60 minutes", scheduler_profile_level_full_hint: "Up to 96 jobs · estimated 2–2.5 hours", scheduler_profile_preview_select_model: "Select a model to estimate jobs and calibration time.", scheduler_profile_preview_loading: "Calculating job count and estimated time...", scheduler_profile_preview_summary: "Estimated {jobs} jobs · about {min}–{max}", scheduler_profile_preview_failed: "Unable to estimate: {detail}", generate_profile: "Generate Profile", stop_calibration: "Stop Calibration",
+      profile_idle: "No profile generation running.", profile_running: "Generating scheduler profile for {name}...", profile_running_hint: "This can take several minutes. You can watch the log below while the calibration is running.", profile_cancelling: "Stopping calibration...", profile_cancelled: "Calibration stopped. Incomplete output was removed; diagnostic logs were retained.", profile_progress_summary: "Completed {completed} / {total} · Elapsed {elapsed} · Remaining {remaining}", profile_eta_calculating: "calculating", profile_succeeded: "Scheduler profile generated for {name}.", profile_result_title: "Generated files", profile_failed: "Scheduler profile generation failed: {detail}", profile_runtime_path: "Runtime profile", profile_store_path: "Stored profile", profile_report_path: "Detailed report",
       metrics_ref: "Metrics Reference",
       ttft_label: "(Time to First Token)", ttft_desc: "Latency before the model starts responding. Measures prompt processing (prefill) speed. Lower is better.",
       tpot_label: "(Time per Output Token)", tpot_desc: "Average time between each generated token. Measures decode speed. Lower is better.",
@@ -3238,8 +3269,8 @@
       single_request_test: "单请求测试", gen_length_note: "生成长度：128 tokens（固定）",
       batch_test: "连续批处理测试", batch_note: "每种批大小都会对所勾选的每个 prompt 规模各跑一次（tg128）。",
       run_benchmark: "运行基准测试",
-      scheduler_profile: "Scheduler Profile", scheduler_profile_help_title: "Profile 的作用", scheduler_profile_help_body: "为当前 Mac 上选定的模型生成调度 profile，帮助 ironmlx 选择更合适的运行时调度参数。", scheduler_profile_help_flow: "流程：选择模型，选择策略，然后生成 profile。建议在 benchmark 前、切换模型或更换硬件环境后使用。", scheduler_profile_strategy: "选择策略", scheduler_profile_agent_long_prompt: "Agent 长提示词", scheduler_profile_balanced: "均衡", generate_profile: "生成 Profile",
-      profile_idle: "当前没有正在生成的 profile。", profile_running: "正在为 {name} 生成 scheduler profile...", profile_running_hint: "生成可能需要几分钟。校准运行期间，可以通过下方日志了解进展。", profile_succeeded: "{name} 的 scheduler profile 已生成。", profile_result_title: "生成结果", profile_failed: "Scheduler profile 生成失败：{detail}", profile_runtime_path: "Runtime profile", profile_store_path: "已存储 profile", profile_report_path: "详细报告",
+      scheduler_profile: "Scheduler Profile", scheduler_profile_help_title: "Profile 的作用", scheduler_profile_help_body: "为当前 Mac 上选定的模型生成调度 profile，帮助 ironmlx 选择更合适的运行时调度参数。", scheduler_profile_help_flow: "流程：选择模型、选择策略和校准级别，然后生成 profile。建议在 benchmark 前、切换模型或更换硬件环境后使用。", scheduler_profile_help_levels: "级别：快速验证最多运行 16 jobs，预计 8–15 分钟，用于基本确认；标准校准最多运行 48 jobs，预计 40–60 分钟，推荐日常使用；完整校准最多运行 96 jobs，预计 2–2.5 小时，提供最广覆盖。", scheduler_profile_strategy: "选择策略", scheduler_profile_agent_long_prompt: "Agent 长提示词", scheduler_profile_balanced: "均衡", scheduler_profile_level: "校准级别", scheduler_profile_level_quick: "快速验证", scheduler_profile_level_standard: "标准校准", scheduler_profile_level_full: "完整校准", scheduler_profile_level_quick_hint: "最多 16 jobs · 预计 8–15 分钟", scheduler_profile_level_standard_hint: "最多 48 jobs · 预计 40–60 分钟", scheduler_profile_level_full_hint: "最多 96 jobs · 预计 2–2.5 小时", scheduler_profile_preview_select_model: "选择模型后显示预计 jobs 和校准时间。", scheduler_profile_preview_loading: "正在计算 jobs 和预计时间...", scheduler_profile_preview_summary: "预计 {jobs} jobs · 约 {min}–{max}", scheduler_profile_preview_failed: "无法估算：{detail}", generate_profile: "生成 Profile", stop_calibration: "停止校准",
+      profile_idle: "当前没有正在生成的 profile。", profile_running: "正在为 {name} 生成 scheduler profile...", profile_running_hint: "生成可能需要几分钟。校准运行期间，可以通过下方日志了解进展。", profile_cancelling: "正在停止校准...", profile_cancelled: "校准已停止，未完成的输出已清理，诊断日志已保留。", profile_progress_summary: "已完成 {completed} / {total} · 已用 {elapsed} · 剩余 {remaining}", profile_eta_calculating: "计算中", profile_succeeded: "{name} 的 scheduler profile 已生成。", profile_result_title: "生成结果", profile_failed: "Scheduler profile 生成失败：{detail}", profile_runtime_path: "Runtime profile", profile_store_path: "已存储 profile", profile_report_path: "详细报告",
       metrics_ref: "指标参考",
       ttft_label: "（首 Token 时间）", ttft_desc: "模型开始响应前的延迟。衡量提示词处理（预填充）速度。越低越好。",
       tpot_label: "（每输出 Token 时间）", tpot_desc: "每个生成 Token 之间的平均时间。衡量解码速度。越低越好。",
@@ -3495,8 +3526,8 @@
       single_request_test: "單請求測試", gen_length_note: "生成長度：128 tokens（固定）",
       batch_test: "連續批次處理測試", batch_note: "每種批次大小都會對所勾選的每個 prompt 規模各跑一次（tg128）。",
       run_benchmark: "執行基準測試",
-      scheduler_profile: "Scheduler Profile", scheduler_profile_help_title: "Profile 的作用", scheduler_profile_help_body: "為目前 Mac 上選定的模型產生調度 profile，協助 ironmlx 選擇更合適的執行階段調度參數。", scheduler_profile_help_flow: "流程：選擇模型，選擇策略，然後產生 profile。建議在 benchmark 前、切換模型或更換硬體環境後使用。", scheduler_profile_strategy: "選擇策略", scheduler_profile_agent_long_prompt: "Agent 長提示詞", scheduler_profile_balanced: "均衡", generate_profile: "生成 Profile",
-      profile_idle: "目前沒有正在生成的 profile。", profile_running: "正在為 {name} 生成 scheduler profile...", profile_running_hint: "生成可能需要幾分鐘。校準執行期間，可以透過下方日誌了解進展。", profile_succeeded: "{name} 的 scheduler profile 已生成。", profile_result_title: "生成結果", profile_failed: "Scheduler profile 生成失敗：{detail}", profile_runtime_path: "Runtime profile", profile_store_path: "已儲存 profile", profile_report_path: "詳細報告",
+      scheduler_profile: "Scheduler Profile", scheduler_profile_help_title: "Profile 的作用", scheduler_profile_help_body: "為目前 Mac 上選定的模型產生調度 profile，協助 ironmlx 選擇更合適的執行階段調度參數。", scheduler_profile_help_flow: "流程：選擇模型、選擇策略和校準級別，然後產生 profile。建議在 benchmark 前、切換模型或更換硬體環境後使用。", scheduler_profile_help_levels: "級別：快速驗證最多執行 16 jobs，預計 8–15 分鐘，用於基本確認；標準校準最多執行 48 jobs，預計 40–60 分鐘，建議日常使用；完整校準最多執行 96 jobs，預計 2–2.5 小時，提供最廣覆蓋。", scheduler_profile_strategy: "選擇策略", scheduler_profile_agent_long_prompt: "Agent 長提示詞", scheduler_profile_balanced: "均衡", scheduler_profile_level: "校準級別", scheduler_profile_level_quick: "快速驗證", scheduler_profile_level_standard: "標準校準", scheduler_profile_level_full: "完整校準", scheduler_profile_level_quick_hint: "最多 16 jobs · 預計 8–15 分鐘", scheduler_profile_level_standard_hint: "最多 48 jobs · 預計 40–60 分鐘", scheduler_profile_level_full_hint: "最多 96 jobs · 預計 2–2.5 小時", scheduler_profile_preview_select_model: "選擇模型後顯示預計 jobs 和校準時間。", scheduler_profile_preview_loading: "正在計算 jobs 和預計時間...", scheduler_profile_preview_summary: "預計 {jobs} jobs · 約 {min}–{max}", scheduler_profile_preview_failed: "無法估算：{detail}", generate_profile: "生成 Profile", stop_calibration: "停止校準",
+      profile_idle: "目前沒有正在生成的 profile。", profile_running: "正在為 {name} 生成 scheduler profile...", profile_running_hint: "生成可能需要幾分鐘。校準執行期間，可以透過下方日誌了解進展。", profile_cancelling: "正在停止校準...", profile_cancelled: "校準已停止，未完成的輸出已清理，診斷日誌已保留。", profile_progress_summary: "已完成 {completed} / {total} · 已用 {elapsed} · 剩餘 {remaining}", profile_eta_calculating: "計算中", profile_succeeded: "{name} 的 scheduler profile 已生成。", profile_result_title: "生成結果", profile_failed: "Scheduler profile 生成失敗：{detail}", profile_runtime_path: "Runtime profile", profile_store_path: "已儲存 profile", profile_report_path: "詳細報告",
       metrics_ref: "指標參考",
       ttft_label: "（首 Token 時間）", ttft_desc: "模型開始回應前的延遲。衡量提示詞處理（預填充）速度。越低越好。",
       tpot_label: "（每輸出 Token 時間）", tpot_desc: "每個生成 Token 之間的平均時間。衡量解碼速度。越低越好。",
@@ -3752,8 +3783,8 @@
       single_request_test: "単一リクエストテスト", gen_length_note: "生成長：128 トークン（固定）",
       batch_test: "連続バッチテスト", batch_note: "各バッチサイズは選択されたすべての prompt サイズに対してそれぞれ実行されます（tg128）。",
       run_benchmark: "ベンチマーク実行",
-      scheduler_profile: "Scheduler Profile", scheduler_profile_help_title: "Profile の役割", scheduler_profile_help_body: "この Mac 上で選択したモデル向けの scheduler profile を生成し、ironmlx がより適切な実行時スケジューリングパラメータを選べるようにします。", scheduler_profile_help_flow: "手順: モデルを選択し、戦略を選んで profile を生成します。ベンチマーク前、モデル変更後、またはハードウェア環境を変えた後に使用します。", scheduler_profile_strategy: "選択戦略", scheduler_profile_agent_long_prompt: "Agent Long Prompt", scheduler_profile_balanced: "Balanced", generate_profile: "Profile を生成",
-      profile_idle: "実行中の profile 生成はありません。", profile_running: "{name} の scheduler profile を生成中...", profile_running_hint: "生成には数分かかる場合があります。実行中は下のログで進行状況を確認できます。", profile_succeeded: "{name} の scheduler profile を生成しました。", profile_result_title: "生成結果", profile_failed: "Scheduler profile 生成に失敗しました: {detail}", profile_runtime_path: "Runtime profile", profile_store_path: "Stored profile", profile_report_path: "Detailed report",
+      scheduler_profile: "Scheduler Profile", scheduler_profile_help_title: "Profile の役割", scheduler_profile_help_body: "この Mac 上で選択したモデル向けの scheduler profile を生成し、ironmlx がより適切な実行時スケジューリングパラメータを選べるようにします。", scheduler_profile_help_flow: "手順: モデル、戦略、校準レベルを選択してから profile を生成します。ベンチマーク前、モデル変更後、またはハードウェア環境を変えた後に使用します。", scheduler_profile_help_levels: "レベル: クイック検証は最大 16 jobs、約 8–15 分で基本確認向けです。標準校準は最大 48 jobs、約 40–60 分で通常利用に推奨します。完全校準は最大 96 jobs、約 2–2.5 時間で最も広い範囲を検証します。", scheduler_profile_strategy: "選択戦略", scheduler_profile_agent_long_prompt: "Agent Long Prompt", scheduler_profile_balanced: "Balanced", scheduler_profile_level: "校準レベル", scheduler_profile_level_quick: "クイック検証", scheduler_profile_level_standard: "標準校準", scheduler_profile_level_full: "完全校準", scheduler_profile_level_quick_hint: "最大 16 jobs · 約 8–15 分", scheduler_profile_level_standard_hint: "最大 48 jobs · 約 40–60 分", scheduler_profile_level_full_hint: "最大 96 jobs · 約 2–2.5 時間", scheduler_profile_preview_select_model: "モデルを選択すると jobs 数と校準時間の目安を表示します。", scheduler_profile_preview_loading: "jobs 数と所要時間を計算しています...", scheduler_profile_preview_summary: "推定 {jobs} jobs · 約 {min}–{max}", scheduler_profile_preview_failed: "推定できません：{detail}", generate_profile: "Profile を生成", stop_calibration: "校準を停止",
+      profile_idle: "実行中の profile 生成はありません。", profile_running: "{name} の scheduler profile を生成中...", profile_running_hint: "生成には数分かかる場合があります。実行中は下のログで進行状況を確認できます。", profile_cancelling: "校準を停止しています...", profile_cancelled: "校準を停止しました。未完了の出力を削除し、診断ログを保持しました。", profile_progress_summary: "完了 {completed} / {total} · 経過 {elapsed} · 残り {remaining}", profile_eta_calculating: "計算中", profile_succeeded: "{name} の scheduler profile を生成しました。", profile_result_title: "生成結果", profile_failed: "Scheduler profile 生成に失敗しました: {detail}", profile_runtime_path: "Runtime profile", profile_store_path: "Stored profile", profile_report_path: "Detailed report",
       metrics_ref: "指標リファレンス",
       ttft_label: "（最初のトークンまでの時間）", ttft_desc: "モデルが応答を開始するまでの遅延。プロンプト処理（プリフィル）速度を測定。低いほど良い。",
       tpot_label: "（出力トークンあたりの時間）", tpot_desc: "生成トークン間の平均時間。デコード速度を測定。低いほど良い。",
@@ -4009,8 +4040,8 @@
       single_request_test: "단일 요청 테스트", gen_length_note: "생성 길이: 128 토큰 (고정)",
       batch_test: "연속 배치 테스트", batch_note: "각 배치 크기는 선택된 모든 prompt 크기에 대해 한 번씩 실행됩니다 (tg128).",
       run_benchmark: "벤치마크 실행",
-      scheduler_profile: "Scheduler Profile", scheduler_profile_help_title: "Profile 역할", scheduler_profile_help_body: "이 Mac에서 선택한 모델의 scheduler profile을 생성하여 ironmlx가 더 적절한 런타임 스케줄링 파라미터를 선택하도록 돕습니다.", scheduler_profile_help_flow: "흐름: 모델을 선택하고 전략을 고른 뒤 profile을 생성합니다. 벤치마크 전, 모델 변경 후 또는 하드웨어 환경 변경 후 사용하세요.", scheduler_profile_strategy: "선택 전략", scheduler_profile_agent_long_prompt: "Agent Long Prompt", scheduler_profile_balanced: "Balanced", generate_profile: "Profile 생성",
-      profile_idle: "실행 중인 profile 생성이 없습니다.", profile_running: "{name} scheduler profile 생성 중...", profile_running_hint: "생성에는 몇 분이 걸릴 수 있습니다. 실행 중에는 아래 로그로 진행 상황을 확인할 수 있습니다.", profile_succeeded: "{name} scheduler profile을 생성했습니다.", profile_result_title: "생성 결과", profile_failed: "Scheduler profile 생성 실패: {detail}", profile_runtime_path: "Runtime profile", profile_store_path: "Stored profile", profile_report_path: "Detailed report",
+      scheduler_profile: "Scheduler Profile", scheduler_profile_help_title: "Profile 역할", scheduler_profile_help_body: "이 Mac에서 선택한 모델의 scheduler profile을 생성하여 ironmlx가 더 적절한 런타임 스케줄링 파라미터를 선택하도록 돕습니다.", scheduler_profile_help_flow: "흐름: 모델, 전략, 보정 수준을 선택한 뒤 profile을 생성합니다. 벤치마크 전, 모델 변경 후 또는 하드웨어 환경 변경 후 사용하세요.", scheduler_profile_help_levels: "수준: 빠른 검증은 최대 16 jobs, 약 8–15분으로 기본 확인에 적합합니다. 표준 보정은 최대 48 jobs, 약 40–60분으로 일반적인 사용에 권장됩니다. 전체 보정은 최대 96 jobs, 약 2–2.5시간으로 가장 넓은 범위를 검증합니다.", scheduler_profile_strategy: "선택 전략", scheduler_profile_agent_long_prompt: "Agent Long Prompt", scheduler_profile_balanced: "Balanced", scheduler_profile_level: "보정 수준", scheduler_profile_level_quick: "빠른 검증", scheduler_profile_level_standard: "표준 보정", scheduler_profile_level_full: "전체 보정", scheduler_profile_level_quick_hint: "최대 16 jobs · 예상 8–15분", scheduler_profile_level_standard_hint: "최대 48 jobs · 예상 40–60분", scheduler_profile_level_full_hint: "최대 96 jobs · 예상 2–2.5시간", scheduler_profile_preview_select_model: "모델을 선택하면 예상 jobs 수와 보정 시간을 표시합니다.", scheduler_profile_preview_loading: "jobs 수와 예상 시간을 계산하는 중...", scheduler_profile_preview_summary: "예상 {jobs} jobs · 약 {min}–{max}", scheduler_profile_preview_failed: "예상할 수 없음: {detail}", generate_profile: "Profile 생성", stop_calibration: "보정 중지",
+      profile_idle: "실행 중인 profile 생성이 없습니다.", profile_running: "{name} scheduler profile 생성 중...", profile_running_hint: "생성에는 몇 분이 걸릴 수 있습니다. 실행 중에는 아래 로그로 진행 상황을 확인할 수 있습니다.", profile_cancelling: "보정을 중지하는 중...", profile_cancelled: "보정을 중지했습니다. 완료되지 않은 출력은 삭제하고 진단 로그는 유지했습니다.", profile_progress_summary: "완료 {completed} / {total} · 경과 {elapsed} · 남음 {remaining}", profile_eta_calculating: "계산 중", profile_succeeded: "{name} scheduler profile을 생성했습니다.", profile_result_title: "생성 결과", profile_failed: "Scheduler profile 생성 실패: {detail}", profile_runtime_path: "Runtime profile", profile_store_path: "Stored profile", profile_report_path: "Detailed report",
       metrics_ref: "지표 참조",
       ttft_label: "(첫 토큰까지 시간)", ttft_desc: "모델이 응답을 시작하기 전 지연. 프롬프트 처리(프리필) 속도 측정. 낮을수록 좋음.",
       tpot_label: "(출력 토큰당 시간)", tpot_desc: "생성 토큰 간 평균 시간. 디코딩 속도 측정. 낮을수록 좋음.",
@@ -4128,6 +4159,7 @@
     if (sub && dict.settings_subtitle_html) {
       sub.innerHTML = dict.settings_subtitle_html;
     }
+    renderSchedulerProfilePreview();
   }
 
   function t(key, fallback) {
@@ -5240,6 +5272,7 @@
       profileSelect.appendChild(opt);
     });
     if (current) profileSelect.value = current;
+    requestSchedulerProfilePreview();
   }
 
   function syncBenchmarkModels() {
@@ -5275,6 +5308,8 @@
   let benchPhase = 'idle';
   let benchExclusivePrepared = false;
   let schedulerProfilePollTimer = null;
+  let schedulerProfilePreview = null;
+  let schedulerProfilePreviewToken = 0;
 
   function runBenchmark() {
     if (benchRunning) return;
@@ -5536,6 +5571,7 @@
     const model = document.getElementById('profile-model-select').value;
     if (!model) { showToast(dict.select_model || 'Please select a model first.', 'info'); return; }
     const selectionProfile = document.getElementById('profile-selection-select').value;
+    const calibrationLevel = document.getElementById('profile-level-select').value;
     const btn = document.getElementById('profile-generate-btn');
     btn.disabled = true;
     btn.style.opacity = '0.5';
@@ -5543,7 +5579,8 @@
     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.generateSchedulerProfile) {
       window.webkit.messageHandlers.generateSchedulerProfile.postMessage(JSON.stringify({
         model: model,
-        selection_profile: selectionProfile
+        selection_profile: selectionProfile,
+        calibration_level: calibrationLevel
       }));
       clearInterval(schedulerProfilePollTimer);
       schedulerProfilePollTimer = setInterval(refreshSchedulerProfileStatus, 2000);
@@ -5557,6 +5594,102 @@
     }
   }
 
+  function schedulerProfileSelectionPayload() {
+    return {
+      model: document.getElementById('profile-model-select')?.value || '',
+      selection_profile: document.getElementById('profile-selection-select')?.value || 'agent-long-prompt',
+      calibration_level: document.getElementById('profile-level-select')?.value || 'standard'
+    };
+  }
+
+  function cancelSchedulerProfileGeneration() {
+    const btn = document.getElementById('profile-cancel-btn');
+    if (btn) btn.disabled = true;
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.cancelSchedulerProfileGeneration) {
+      window.webkit.messageHandlers.cancelSchedulerProfileGeneration.postMessage('cancel');
+    }
+  }
+
+  function requestSchedulerProfilePreview() {
+    const payload = schedulerProfileSelectionPayload();
+    schedulerProfilePreview = null;
+    const hint = document.getElementById('profile-level-hint');
+    if (!hint) return;
+    const dict = I18N[currentLang] || I18N.en;
+    if (!payload.model) {
+      renderSchedulerProfilePreview();
+      return;
+    }
+    const handler = window.webkit?.messageHandlers?.previewSchedulerProfileGeneration;
+    if (handler) {
+      schedulerProfilePreviewToken += 1;
+      payload.request_token = schedulerProfilePreviewToken;
+      hint.textContent = dict.scheduler_profile_preview_loading || 'Calculating job count and estimated time...';
+      handler.postMessage(JSON.stringify(payload));
+      return;
+    }
+    renderSchedulerProfilePreview();
+  }
+
+  function onSchedulerProfilePreview(jsonStr) {
+    let preview;
+    try {
+      preview = JSON.parse(jsonStr);
+    } catch (e) {
+      preview = { success: false, request_token: schedulerProfilePreviewToken, error: jsonStr || 'Invalid preview payload.' };
+    }
+    if (preview.request_token !== schedulerProfilePreviewToken) return;
+    schedulerProfilePreview = preview;
+    renderSchedulerProfilePreview();
+  }
+
+  function renderSchedulerProfilePreview() {
+    const payload = schedulerProfileSelectionPayload();
+    const hint = document.getElementById('profile-level-hint');
+    if (!hint) return;
+    const dict = I18N[currentLang] || I18N.en;
+    if (!payload.model) {
+      hint.textContent = dict.scheduler_profile_preview_select_model || 'Select a model to estimate jobs and calibration time.';
+      return;
+    }
+    if (schedulerProfilePreview?.success) {
+      const minimum = formatProfileEstimateDuration(schedulerProfilePreview.estimated_min_seconds);
+      const maximum = formatProfileEstimateDuration(schedulerProfilePreview.estimated_max_seconds);
+      hint.textContent = (dict.scheduler_profile_preview_summary || 'Estimated {jobs} jobs · about {min}–{max}')
+        .replace('{jobs}', schedulerProfilePreview.total_jobs)
+        .replace('{min}', minimum)
+        .replace('{max}', maximum);
+      return;
+    }
+    if (schedulerProfilePreview && schedulerProfilePreview.error) {
+      hint.textContent = (dict.scheduler_profile_preview_failed || 'Unable to estimate: {detail}')
+        .replace('{detail}', schedulerProfilePreview.error);
+      return;
+    }
+    hint.textContent = dict['scheduler_profile_level_' + payload.calibration_level + '_hint'] || '';
+  }
+
+  function formatProfileEstimateDuration(seconds) {
+    if (!Number.isFinite(seconds) || seconds <= 0) return '—';
+    const totalMinutes = Math.ceil(seconds / 60);
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    if (hours > 0 && minutes > 0) return hours + 'h ' + minutes + 'm';
+    if (hours > 0) return hours + 'h';
+    return totalMinutes + 'm';
+  }
+
+  function formatProfileDuration(seconds) {
+    if (!Number.isFinite(seconds) || seconds < 0) return '—';
+    const rounded = Math.round(seconds);
+    const hours = Math.floor(rounded / 3600);
+    const minutes = Math.floor((rounded % 3600) / 60);
+    const secs = rounded % 60;
+    if (hours > 0) return hours + 'h ' + minutes + 'm';
+    if (minutes > 0) return minutes + 'm ' + secs + 's';
+    return secs + 's';
+  }
+
   function refreshSchedulerProfileStatus() {
     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.refreshSchedulerProfileStatus) {
       window.webkit.messageHandlers.refreshSchedulerProfileStatus.postMessage('refresh');
@@ -5567,7 +5700,8 @@
     let status = {};
     try { status = JSON.parse(jsonStr); } catch(e) { status = { state: 'failed', success: false, error: jsonStr || 'Invalid status payload.' }; }
     renderSchedulerProfileStatus(status);
-    if (status.state !== 'running') {
+    const isActive = status.state === 'running' || status.state === 'cancelling';
+    if (!isActive) {
       clearInterval(schedulerProfilePollTimer);
       schedulerProfilePollTimer = null;
       const btn = document.getElementById('profile-generate-btn');
@@ -5586,6 +5720,10 @@
     const dict = I18N[currentLang] || I18N.en;
     const statusEl = document.getElementById('profile-status');
     const progressEl = document.getElementById('profile-progress');
+    const progressDetailsEl = document.getElementById('profile-progress-details');
+    const progressBarEl = progressEl?.querySelector('.profile-progress-bar');
+    const generateBtn = document.getElementById('profile-generate-btn');
+    const cancelBtn = document.getElementById('profile-cancel-btn');
     const logEl = document.getElementById('profile-log-tail');
     const profileResultEl = document.getElementById('profile-result');
     const resultTitleEl = document.getElementById('profile-result-title');
@@ -5593,9 +5731,10 @@
     const storedEl = document.getElementById('profile-result-stored');
     const runtimeDetailsEl = document.getElementById('profile-result-runtime-details');
     const runtimeEl = document.getElementById('profile-result-runtime');
-    if (!statusEl || !progressEl || !logEl || !profileResultEl || !resultTitleEl || !storedRowEl || !storedEl || !runtimeDetailsEl || !runtimeEl) return;
+    if (!statusEl || !progressEl || !progressDetailsEl || !logEl || !profileResultEl || !resultTitleEl || !storedRowEl || !storedEl || !runtimeDetailsEl || !runtimeEl) return;
 
     progressEl.style.display = 'none';
+    progressDetailsEl.style.display = 'none';
     profileResultEl.style.display = 'none';
     resultTitleEl.textContent = '';
     storedRowEl.style.display = 'none';
@@ -5609,10 +5748,41 @@
       logEl.textContent = '';
       return;
     }
-    if (status.state === 'running') {
+    const isActive = status.state === 'running' || status.state === 'cancelling';
+    if (isActive) {
       const running = (dict.profile_running || 'Generating scheduler profile for {name}...').replace('{name}', status.model || '');
-      statusEl.textContent = running + '\n' + (dict.profile_running_hint || 'This can take several minutes. You can watch the log below while the calibration is running.');
+      statusEl.textContent = status.state === 'cancelling'
+        ? (dict.profile_cancelling || 'Stopping calibration...')
+        : running;
       progressEl.style.display = '';
+      if (generateBtn) generateBtn.style.display = 'none';
+      if (cancelBtn) {
+        cancelBtn.style.display = '';
+        cancelBtn.disabled = status.state === 'cancelling';
+      }
+      const completed = Number(status.completed_jobs || 0);
+      const total = Number(status.total_jobs || 0);
+      if (total > 0 && progressBarEl) {
+        const percent = Math.max(0, Math.min(100, completed / total * 100));
+        progressEl.classList.add('is-determinate');
+        progressEl.setAttribute('aria-valuemin', '0');
+        progressEl.setAttribute('aria-valuemax', String(total));
+        progressEl.setAttribute('aria-valuenow', String(completed));
+        progressBarEl.style.width = percent + '%';
+      }
+      const progressTemplate = dict.profile_progress_summary || 'Completed {completed} / {total} · Elapsed {elapsed} · Remaining {remaining}';
+      const remaining = status.estimated_remaining_seconds == null
+        ? (dict.profile_eta_calculating || 'calculating')
+        : formatProfileDuration(Number(status.estimated_remaining_seconds));
+      let details = progressTemplate
+        .replace('{completed}', String(completed))
+        .replace('{total}', total > 0 ? String(total) : '—')
+        .replace('{elapsed}', formatProfileDuration(Number(status.elapsed_seconds || 0)))
+        .replace('{remaining}', remaining);
+      if (status.current_job) details += '\n' + status.current_job;
+      if (status.current_stage) details += '\n' + status.current_stage;
+      progressDetailsEl.textContent = details;
+      progressDetailsEl.style.display = '';
     } else if (status.state === 'succeeded') {
       const title = (dict.profile_succeeded || 'Scheduler profile generated for {name}.').replace('{name}', status.model || '');
       statusEl.textContent = title;
@@ -5626,8 +5796,14 @@
         runtimeDetailsEl.style.display = 'flex';
       }
       profileResultEl.style.display = '';
+    } else if (status.state === 'cancelled') {
+      statusEl.textContent = dict.profile_cancelled || 'Calibration stopped.';
     } else {
       statusEl.textContent = (dict.profile_failed || 'Scheduler profile generation failed: {detail}').replace('{detail}', status.error || 'Unknown error');
+    }
+    if (!isActive) {
+      if (generateBtn) generateBtn.style.display = '';
+      if (cancelBtn) cancelBtn.style.display = 'none';
     }
     if (status.log_tail) {
       logEl.textContent = status.log_tail.split('\n').slice(-18).join('\n');
