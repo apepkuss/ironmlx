@@ -83,6 +83,13 @@ impl<'a> DecodeStream<'a> {
 }
 
 impl Tokenizer {
+    /// Load tokenizer data and chat-template configuration without opening
+    /// model weights.
+    pub fn from_model_dir(model_dir: &Path) -> Result<Self> {
+        let config = TokenizerConfig::from_model_dir(model_dir)?;
+        Self::from_files(&model_dir.join("tokenizer.json"), &config)
+    }
+
     /// Build a [`Tokenizer`] from a [`Loader`]. Loads
     /// `{model_dir}/tokenizer.json` and uses
     /// [`Loader::tokenizer_config`] for chat template + EOS resolution.

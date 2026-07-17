@@ -78,7 +78,9 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         "syncLoadedModels",
         "getAppLogs",
         "dashboardLog",
+        "previewSchedulerProfileGeneration",
         "generateSchedulerProfile",
+        "cancelSchedulerProfileGeneration",
         "refreshSchedulerProfileStatus",
         "saveModelParams",
         "openOpenClawChat",
@@ -133,8 +135,12 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             sendAppLogs()
         case "dashboardLog":
             logDashboardMessage(json: stringBody(body))
+        case "previewSchedulerProfileGeneration":
+            previewSchedulerProfileGeneration(json: stringBody(body))
         case "generateSchedulerProfile":
             generateSchedulerProfile(json: stringBody(body))
+        case "cancelSchedulerProfileGeneration":
+            cancelSchedulerProfileGeneration()
         case "refreshSchedulerProfileStatus":
             sendSchedulerProfileStatus()
         case "saveModelParams":
@@ -1172,37 +1178,16 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
 
     private func generateSchedulerProfile(json: String) {
         let current = profileGenerationService.currentStatus()
-        guard current.state != "running" else {
+        guard current.state != "running", current.state != "cancelling" else {
             sendSchedulerProfileStatus(current)
             return
         }
-        guard let data = json.data(using: .utf8),
-              let payload = try? JSONDecoder().decode(SchedulerProfileGenerationPayload.self, from: data)
-        else {
+        let request: SchedulerProfileGenerationRequest
+        do {
+            request = try schedulerProfileGenerationRequest(json: json)
+        } catch {
             sendSchedulerProfileStatus(
-                SchedulerProfileGenerationStatus.failed(
-                    request: nil,
-                    error: "Invalid scheduler profile generation request."
-                )
-            )
-            return
-        }
-        let model = payload.model.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !model.isEmpty else {
-            sendSchedulerProfileStatus(
-                SchedulerProfileGenerationStatus.failed(
-                    request: nil,
-                    error: "No model is selected."
-                )
-            )
-            return
-        }
-        guard let modelPath = scanner.resolveModelPath(for: model) else {
-            sendSchedulerProfileStatus(
-                SchedulerProfileGenerationStatus.failed(
-                    request: nil,
-                    error: "Model not found locally: \(model)"
-                )
+                SchedulerProfileGenerationStatus.failed(request: nil, error: error.localizedDescription)
             )
             return
         }
@@ -1211,11 +1196,6 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         if shouldRestartBackend {
             backend.stop()
         }
-        let request = SchedulerProfileGenerationRequest(
-            model: model,
-            modelPath: modelPath,
-            selectionProfile: payload.selectionProfile ?? "agent-long-prompt"
-        )
         let started = profileGenerationService.start(request: request) { [weak self] status in
             Task { @MainActor in
                 guard let self else {
@@ -1230,10 +1210,82 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         sendSchedulerProfileStatus(started)
     }
 
+    private func previewSchedulerProfileGeneration(json: String) {
+        let payload = json.data(using: .utf8)
+            .flatMap { try? JSONDecoder().decode(SchedulerProfileGenerationPayload.self, from: $0) }
+        do {
+            sendSchedulerProfilePreview(
+                SchedulerProfileGenerationPreview(
+                    request: try schedulerProfileGenerationRequest(json: json),
+                    requestToken: payload?.requestToken
+                )
+            )
+        } catch {
+            sendSchedulerProfilePreview(
+                .failed(error: error.localizedDescription, requestToken: payload?.requestToken)
+            )
+        }
+    }
+
+    private func schedulerProfileGenerationRequest(json: String) throws -> SchedulerProfileGenerationRequest {
+        guard let data = json.data(using: .utf8),
+              let payload = try? JSONDecoder().decode(SchedulerProfileGenerationPayload.self, from: data)
+        else {
+            throw SchedulerProfileGenerationRequestError.invalidRequest
+        }
+        let model = payload.model.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !model.isEmpty else {
+            throw SchedulerProfileGenerationRequestError.noModelSelected
+        }
+        guard let modelPath = scanner.resolveModelPath(for: model) else {
+            throw SchedulerProfileGenerationRequestError.modelNotFound(model)
+        }
+
+        let launchOptions = BackendLaunchOptions(config: configStore.load())
+        let mtpRuntime = try ModelMtpRuntimeResolver.runtime(
+            for: model,
+            useMtp: nil,
+            scanner: scanner,
+            parameterStore: parameterStore
+        )
+        let maxCacheCap = ModelLoadParameters.maxCacheCap(
+            for: model,
+            scanner: scanner,
+            parameterStore: parameterStore,
+            activeKvOffloadEnabled: launchOptions.activeKvOffload
+        ) ?? ModelLoadParameters.conservativeLongContextCap
+
+        return SchedulerProfileGenerationRequest(
+            model: model,
+            modelPath: modelPath,
+            selectionProfile: payload.selectionProfile ?? "agent-long-prompt",
+            calibrationLevel: payload.calibrationLevel ?? "standard",
+            mtpModelDir: mtpRuntime?.modelDir,
+            mtpDraftTokens: mtpRuntime?.draftTokens,
+            kvQuant: launchOptions.kvQuant ?? "none",
+            pagedPrefixCacheDir: launchOptions.pagedPrefixCacheDir,
+            prefixLruCacheMaxBytes: launchOptions.prefixLruCacheMaxBytes,
+            ssdPrefixCacheMaxGB: launchOptions.ssdPrefixCacheMaxGB,
+            activeKvOffload: launchOptions.activeKvOffload,
+            memoryLimitTotalGB: launchOptions.memoryLimitTotalGB,
+            memoryLimitModelGB: launchOptions.memoryLimitModelGB,
+            maxCacheCap: maxCacheCap
+        )
+    }
+
+    private func cancelSchedulerProfileGeneration() {
+        sendSchedulerProfileStatus(profileGenerationService.cancel())
+    }
+
     private func sendSchedulerProfileStatus(_ status: SchedulerProfileGenerationStatus? = nil) {
         let payload = status ?? profileGenerationService.currentStatus()
         let json = (try? Self.jsonString(payload)) ?? "{\"state\":\"failed\",\"success\":false}"
         sendJavaScript("onSchedulerProfileStatus(\(Self.jsStringLiteral(json)))")
+    }
+
+    private func sendSchedulerProfilePreview(_ preview: SchedulerProfileGenerationPreview) {
+        let json = (try? Self.jsonString(preview)) ?? "{\"success\":false}"
+        sendJavaScript("onSchedulerProfilePreview(\(Self.jsStringLiteral(json)))")
     }
 
     private func sendFetchResult(path: String, jsonString: String) {
@@ -1440,10 +1492,31 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     private struct SchedulerProfileGenerationPayload: Decodable {
         var model: String
         var selectionProfile: String?
+        var calibrationLevel: String?
+        var requestToken: Int?
 
         enum CodingKeys: String, CodingKey {
             case model
             case selectionProfile = "selection_profile"
+            case calibrationLevel = "calibration_level"
+            case requestToken = "request_token"
+        }
+    }
+
+    private enum SchedulerProfileGenerationRequestError: LocalizedError {
+        case invalidRequest
+        case noModelSelected
+        case modelNotFound(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidRequest:
+                "Invalid scheduler profile generation request."
+            case .noModelSelected:
+                "No model is selected."
+            case let .modelNotFound(model):
+                "Model not found locally: \(model)"
+            }
         }
     }
 

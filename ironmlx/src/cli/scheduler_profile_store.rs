@@ -6,12 +6,13 @@ use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
 
 use crate::core::scheduler_autotune::{
-    SchedulerAutotuneRuntimeProfile, SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+    SchedulerAutotuneRuntimeProfile, SchedulerAutotuneSelectionProfile,
+    SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
 };
 use crate::Result;
 
-const STORE_SCHEMA_VERSION: u32 = 1;
-const INDEX_FILE: &str = "index.json";
+const STORE_SCHEMA_VERSION: u32 = 2;
+const INDEX_FILE: &str = "index-v5.json";
 const PROFILES_DIR: &str = "profiles";
 
 #[derive(Debug, Clone)]
@@ -31,6 +32,7 @@ struct SchedulerProfileStoreEntry {
     model_name: String,
     model_path: String,
     hardware_label: String,
+    runtime_context_fingerprint: String,
     ironmlx_version: String,
     runtime_schema_version: u32,
     profile_path: PathBuf,
@@ -43,6 +45,7 @@ pub(crate) struct SchedulerProfileStoreRecord {
     pub(crate) model_name: String,
     pub(crate) model_path: String,
     pub(crate) hardware_label: String,
+    pub(crate) runtime_context_fingerprint: String,
     pub(crate) ironmlx_version: String,
     pub(crate) runtime_schema_version: u32,
     pub(crate) profile_path: PathBuf,
@@ -70,11 +73,16 @@ impl SchedulerProfileStore {
         &self,
         model_name: &str,
         hardware_label: &str,
+        selection_profile: SchedulerAutotuneSelectionProfile,
         model_path: &Path,
+        runtime_context_fingerprint: &str,
     ) -> PathBuf {
-        self.root.join(PROFILES_DIR).join(format!(
-            "{}.json",
-            profile_id(model_name, hardware_label, model_path)
+        self.root.join(PROFILES_DIR).join(profile_filename(
+            model_name,
+            hardware_label,
+            selection_profile,
+            model_path,
+            runtime_context_fingerprint,
         ))
     }
 
@@ -91,33 +99,66 @@ impl SchedulerProfileStore {
             );
         }
 
-        let profile_path =
-            self.profile_path(&profile.model_name, &profile.hardware_label, model_path);
+        let runtime_context_fingerprint = profile.runtime_context.fingerprint();
+        let profile_path = self.profile_path(
+            &profile.model_name,
+            &profile.hardware_label,
+            profile.metadata.selection_profile,
+            model_path,
+            &runtime_context_fingerprint,
+        );
         let relative_profile_path = profile_path
             .strip_prefix(&self.root)
             .unwrap_or(&profile_path)
             .to_path_buf();
+        let mut index = self.read_index()?;
+        let id = profile_id(
+            &profile.model_name,
+            &profile.hardware_label,
+            model_path,
+            &runtime_context_fingerprint,
+        );
+        let previous_profile_path = index
+            .profiles
+            .iter()
+            .find(|entry| entry.id == id)
+            .map(|entry| self.root.join(&entry.profile_path));
+
         std::fs::create_dir_all(self.root.join(PROFILES_DIR))
             .with_context(|| format!("creating {}", self.root.join(PROFILES_DIR).display()))?;
-
         let output = serde_json::to_string_pretty(profile)?;
         std::fs::write(&profile_path, format!("{output}\n"))
             .with_context(|| format!("writing {}", profile_path.display()))?;
 
-        let mut index = self.read_index()?;
-        let id = profile_id(&profile.model_name, &profile.hardware_label, model_path);
         index.profiles.retain(|entry| entry.id != id);
         index.profiles.push(SchedulerProfileStoreEntry {
             id,
             model_name: profile.model_name.clone(),
             model_path: normalized_model_path(model_path),
             hardware_label: profile.hardware_label.clone(),
+            runtime_context_fingerprint,
             ironmlx_version: env!("CARGO_PKG_VERSION").to_string(),
             runtime_schema_version: profile.schema_version,
             profile_path: relative_profile_path,
             updated_at_unix_ms: unix_time_ms(),
         });
         self.write_index(&index)?;
+        if let Some(previous_profile_path) = previous_profile_path {
+            if previous_profile_path != profile_path {
+                match std::fs::remove_file(&previous_profile_path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(error).with_context(|| {
+                            format!(
+                                "removing replaced profile {}",
+                                previous_profile_path.display()
+                            )
+                        });
+                    }
+                }
+            }
+        }
 
         Ok(profile_path)
     }
@@ -125,8 +166,8 @@ impl SchedulerProfileStore {
     pub(crate) fn find_profile(
         &self,
         model_path: &Path,
-        model_name: &str,
         hardware_label: &str,
+        runtime_context_fingerprint: &str,
     ) -> Result<Option<PathBuf>> {
         let index = self.read_index()?;
         let normalized_model_path = normalized_model_path(model_path);
@@ -136,7 +177,8 @@ impl SchedulerProfileStore {
             .filter(|entry| {
                 entry.hardware_label == hardware_label
                     && entry.runtime_schema_version == SCHEDULER_AUTOTUNE_SCHEMA_VERSION
-                    && (entry.model_path == normalized_model_path || entry.model_name == model_name)
+                    && entry.model_path == normalized_model_path
+                    && entry.runtime_context_fingerprint == runtime_context_fingerprint
                     && self.root.join(&entry.profile_path).exists()
             })
             .max_by_key(|entry| entry.updated_at_unix_ms)
@@ -244,6 +286,7 @@ impl SchedulerProfileStore {
             model_name: entry.model_name.clone(),
             model_path: entry.model_path.clone(),
             hardware_label: entry.hardware_label.clone(),
+            runtime_context_fingerprint: entry.runtime_context_fingerprint.clone(),
             ironmlx_version: entry.ironmlx_version.clone(),
             runtime_schema_version: entry.runtime_schema_version,
             profile_exists: profile_path.exists(),
@@ -257,12 +300,35 @@ pub(crate) fn detect_scheduler_profile_hardware_label() -> String {
     hardware_label_from_parts(detect_cpu_label().as_deref(), detect_total_ram_bytes())
 }
 
-fn profile_id(model_name: &str, hardware_label: &str, model_path: &Path) -> String {
+fn profile_id(
+    model_name: &str,
+    hardware_label: &str,
+    model_path: &Path,
+    runtime_context_fingerprint: &str,
+) -> String {
     format!(
-        "{}--{}--{}",
+        "{}--{}--{}--{}",
         slugify_component(model_name),
         slugify_component(hardware_label),
-        stable_hex_hash(&normalized_model_path(model_path))
+        stable_hex_hash(&normalized_model_path(model_path)),
+        runtime_context_fingerprint
+    )
+}
+
+fn profile_filename(
+    model_name: &str,
+    hardware_label: &str,
+    selection_profile: SchedulerAutotuneSelectionProfile,
+    model_path: &Path,
+    runtime_context_fingerprint: &str,
+) -> String {
+    format!(
+        "{}--{}--{}--{}--{}.json",
+        slugify_component(model_name),
+        slugify_component(hardware_label),
+        selection_profile.as_str(),
+        stable_hex_hash(&normalized_model_path(model_path)),
+        runtime_context_fingerprint
     )
 }
 
@@ -396,10 +462,14 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::core::scheduler_autotune::{
-        SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeProfile,
+        SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeContext,
+        SchedulerAutotuneRuntimeProfile, SchedulerAutotuneSelectionProfile,
     };
 
-    use super::{hardware_label_from_parts, stable_hex_hash, SchedulerProfileStore};
+    use super::{
+        hardware_label_from_parts, normalized_model_path, stable_hex_hash, SchedulerProfileStore,
+        INDEX_FILE,
+    };
 
     #[test]
     fn hardware_label_from_parts_slugifies_cpu_and_memory() {
@@ -416,6 +486,99 @@ mod tests {
             stable_hex_hash("/tmp/model-a"),
             stable_hex_hash("/tmp/model-b")
         );
+    }
+
+    #[test]
+    fn profile_filename_includes_selection_profile_in_requested_order() {
+        let temp_dir = unique_temp_dir("scheduler-profile-filename");
+        let model_dir = temp_dir.join("model");
+        std::fs::create_dir_all(&model_dir).expect("create model dir");
+        let store = SchedulerProfileStore::from_root(temp_dir.join("store"));
+        let profile = runtime_profile();
+        let context_fingerprint = profile.runtime_context.fingerprint();
+
+        let path = store.profile_path(
+            &profile.model_name,
+            &profile.hardware_label,
+            profile.metadata.selection_profile,
+            &model_dir,
+            &context_fingerprint,
+        );
+
+        let expected_filename = format!(
+            "test-model--test-host--agent-long-prompt--{}--{}.json",
+            stable_hex_hash(&normalized_model_path(&model_dir)),
+            context_fingerprint
+        );
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some(expected_filename.as_str())
+        );
+
+        std::fs::remove_dir_all(temp_dir).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn persisting_different_strategy_replaces_active_profile_and_removes_old_file() {
+        let temp_dir = unique_temp_dir("scheduler-profile-strategy-replacement");
+        let model_dir = temp_dir.join("model");
+        std::fs::create_dir_all(&model_dir).expect("create model dir");
+        let store = SchedulerProfileStore::from_root(temp_dir.join("store"));
+        let agent_profile = runtime_profile();
+        let agent_path = store
+            .persist_profile(&model_dir, &agent_profile)
+            .expect("persist agent profile");
+        let original_id = store.list_profiles().expect("list profiles")[0].id.clone();
+        let mut balanced_profile = runtime_profile();
+        balanced_profile.metadata.selection_profile = SchedulerAutotuneSelectionProfile::Balanced;
+
+        let balanced_path = store
+            .persist_profile(&model_dir, &balanced_profile)
+            .expect("persist balanced profile");
+
+        assert_ne!(agent_path, balanced_path);
+        assert!(!agent_path.exists());
+        assert!(balanced_path.exists());
+        let records = store.list_profiles().expect("list replaced profiles");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, original_id);
+        assert_eq!(records[0].profile_path, balanced_path);
+        let loaded = store
+            .read_profile(&original_id)
+            .expect("read active profile")
+            .expect("active profile should exist");
+        assert_eq!(
+            loaded.metadata.selection_profile,
+            SchedulerAutotuneSelectionProfile::Balanced
+        );
+
+        std::fs::remove_dir_all(temp_dir).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn v5_index_coexists_with_legacy_index_without_rewriting_it() {
+        let temp_dir = unique_temp_dir("scheduler-profile-index-coexistence");
+        let model_dir = temp_dir.join("model");
+        let store_root = temp_dir.join("scheduler-profiles");
+        std::fs::create_dir_all(&model_dir).expect("create model dir");
+        std::fs::create_dir_all(&store_root).expect("create store dir");
+        let legacy_index = store_root.join("index.json");
+        let legacy_contents = "{\"schema_version\":1,\"profiles\":[]}\n";
+        std::fs::write(&legacy_index, legacy_contents).expect("write legacy index");
+        let store = SchedulerProfileStore::from_root(&store_root);
+
+        store
+            .persist_profile(&model_dir, &runtime_profile())
+            .expect("persist v5 profile");
+
+        assert_eq!(
+            std::fs::read_to_string(&legacy_index).expect("read legacy index"),
+            legacy_contents
+        );
+        assert!(store_root.join(INDEX_FILE).exists());
+        assert_eq!(store.list_profiles().expect("list v5 profiles").len(), 1);
+
+        std::fs::remove_dir_all(temp_dir).expect("cleanup temp dir");
     }
 
     #[test]
@@ -471,11 +634,57 @@ mod tests {
         std::fs::remove_dir_all(temp_dir).expect("cleanup temp dir");
     }
 
+    #[test]
+    fn find_profile_requires_exact_model_path_and_runtime_context() {
+        let temp_dir = unique_temp_dir("scheduler-profile-exact-match");
+        let model_a = temp_dir.join("tenant-a").join("shared-name");
+        let model_b = temp_dir.join("tenant-b").join("shared-name");
+        std::fs::create_dir_all(&model_a).expect("create first model dir");
+        std::fs::create_dir_all(&model_b).expect("create second model dir");
+        let store = SchedulerProfileStore::from_root(temp_dir.join("store"));
+        let profile = runtime_profile();
+        let expected_path = store
+            .persist_profile(&model_a, &profile)
+            .expect("persist profile");
+
+        let exact = store
+            .find_profile(
+                &model_a,
+                &profile.hardware_label,
+                &profile.runtime_context.fingerprint(),
+            )
+            .expect("find exact profile");
+        assert_eq!(exact.as_deref(), Some(expected_path.as_path()));
+
+        assert!(store
+            .find_profile(
+                &model_b,
+                &profile.hardware_label,
+                &profile.runtime_context.fingerprint(),
+            )
+            .expect("find by different model path")
+            .is_none());
+
+        let mut different_context = profile.runtime_context.clone();
+        different_context.logical_kv_cap_tokens += 1;
+        assert!(store
+            .find_profile(
+                &model_a,
+                &profile.hardware_label,
+                &different_context.fingerprint(),
+            )
+            .expect("find by different runtime context")
+            .is_none());
+
+        std::fs::remove_dir_all(temp_dir).expect("cleanup temp dir");
+    }
+
     fn runtime_profile() -> SchedulerAutotuneRuntimeProfile {
         SchedulerAutotuneRuntimeProfile {
             schema_version: crate::core::scheduler_autotune::SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
             model_name: "test-model".to_string(),
             hardware_label: "test-host".to_string(),
+            runtime_context: SchedulerAutotuneRuntimeContext::local_default(8192),
             config: SchedulerAutotuneProfileConfig {
                 b_max: 2,
                 prefill_chunk_size: 1024,

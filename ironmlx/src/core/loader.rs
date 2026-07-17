@@ -251,6 +251,35 @@ pub struct TokenizerConfig {
     pub eos_token_id: Option<EosTokenId>,
 }
 
+impl TokenizerConfig {
+    /// Load tokenizer configuration and fall back to a standalone
+    /// `chat_template.jinja` when the JSON does not inline a template.
+    pub fn from_model_dir(model_dir: &Path) -> Result<Self> {
+        let config_path = model_dir.join("tokenizer_config.json");
+        let mut config = if config_path.exists() {
+            serde_json::from_reader(
+                std::fs::File::open(&config_path)
+                    .with_context(|| format!("opening {}", config_path.display()))?,
+            )
+            .with_context(|| format!("parsing {}", config_path.display()))?
+        } else {
+            Self::default()
+        };
+
+        if config.chat_template.is_none() {
+            let template_path = model_dir.join("chat_template.jinja");
+            if template_path.exists() {
+                config.chat_template = Some(
+                    std::fs::read_to_string(&template_path)
+                        .with_context(|| format!("reading {}", template_path.display()))?,
+                );
+            }
+        }
+
+        Ok(config)
+    }
+}
+
 /// Mmap-eager safetensors model loader. Owns all tensor data + parsed config.
 pub struct Loader {
     tensors: HashMap<String, Array>,
@@ -322,29 +351,7 @@ impl Loader {
         )
         .with_context(|| format!("parsing {}", config_path.display()))?;
 
-        let tok_path = model_dir.join("tokenizer_config.json");
-        let mut tokenizer_config: TokenizerConfig = if tok_path.exists() {
-            serde_json::from_reader(
-                std::fs::File::open(&tok_path)
-                    .with_context(|| format!("opening {}", tok_path.display()))?,
-            )
-            .with_context(|| format!("parsing {}", tok_path.display()))?
-        } else {
-            TokenizerConfig::default()
-        };
-
-        // Some HF checkpoints (e.g. Qwen3.5-4B-MLX-4bit) store the chat
-        // template in a standalone `chat_template.jinja` instead of inlining
-        // it in `tokenizer_config.json`. Fall back to that file when the JSON
-        // field is absent.
-        if tokenizer_config.chat_template.is_none() {
-            let jinja_path = model_dir.join("chat_template.jinja");
-            if jinja_path.exists() {
-                let tmpl = std::fs::read_to_string(&jinja_path)
-                    .with_context(|| format!("reading {}", jinja_path.display()))?;
-                tokenizer_config.chat_template = Some(tmpl);
-            }
-        }
+        let tokenizer_config = TokenizerConfig::from_model_dir(model_dir)?;
 
         let optiq_metadata = load_optiq_metadata(model_dir)?;
         let quant = parse_quant_meta_with_optiq(&config_raw, optiq_metadata.as_ref())?;
@@ -1118,6 +1125,43 @@ mod tests {
     use serde_json::json;
     use serial_test::serial;
     use std::collections::HashMap;
+
+    #[test]
+    fn tokenizer_config_loads_standalone_chat_template() {
+        let dir =
+            std::env::temp_dir().join(format!("ironmlx-tokenizer-config-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create tokenizer config dir");
+        std::fs::write(dir.join("tokenizer_config.json"), "{}\n").expect("write tokenizer config");
+        std::fs::write(dir.join("chat_template.jinja"), "standalone-template\n")
+            .expect("write standalone template");
+
+        let config = TokenizerConfig::from_model_dir(&dir).expect("load tokenizer config");
+
+        assert_eq!(
+            config.chat_template.as_deref(),
+            Some("standalone-template\n")
+        );
+        std::fs::remove_dir_all(dir).expect("cleanup tokenizer config dir");
+    }
+
+    #[test]
+    fn tokenizer_config_prefers_inline_chat_template() {
+        let dir =
+            std::env::temp_dir().join(format!("ironmlx-tokenizer-config-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create tokenizer config dir");
+        std::fs::write(
+            dir.join("tokenizer_config.json"),
+            "{\"chat_template\":\"inline-template\"}\n",
+        )
+        .expect("write tokenizer config");
+        std::fs::write(dir.join("chat_template.jinja"), "standalone-template\n")
+            .expect("write standalone template");
+
+        let config = TokenizerConfig::from_model_dir(&dir).expect("load tokenizer config");
+
+        assert_eq!(config.chat_template.as_deref(), Some("inline-template"));
+        std::fs::remove_dir_all(dir).expect("cleanup tokenizer config dir");
+    }
 
     #[test]
     fn parse_quant_meta_affine_4bit() {

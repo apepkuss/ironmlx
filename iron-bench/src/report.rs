@@ -3,7 +3,7 @@
 use crate::runner::{CellResult, RunOutcome};
 
 const EARLY_ITL_WINDOW: usize = 8;
-const AUTOTUNE_SCHEMA_VERSION: u32 = 4;
+const AUTOTUNE_SCHEMA_VERSION: u32 = 5;
 
 /// Aggregated per-cell statistics across N timed runs.
 #[derive(Debug, Clone)]
@@ -1036,6 +1036,9 @@ pub struct AutotuneExportOptions {
     pub hardware_label: String,
     pub config: AutotuneProfileConfig,
     pub memory_budget_ok: bool,
+    pub runtime_context: serde_json::Value,
+    pub cache_state: String,
+    pub runtime_health: serde_json::Value,
 }
 
 pub fn render_autotune_json_sequential(
@@ -1106,6 +1109,7 @@ fn autotune_measurement_json(
         "prompt_len": prompt_len,
         "max_new_tokens": max_new_tokens,
         "concurrency": concurrency,
+        "cache_state": options.cache_state,
         "ttft_ms_p95": ttft_ms_p95,
         "itl_ms_p95": itl_ms_p95,
         "early_itl_ms_p95": early_itl_ms_p95,
@@ -1113,6 +1117,7 @@ fn autotune_measurement_json(
         "tokens_per_sec": tokens_per_sec,
         "memory_budget_ok": options.memory_budget_ok,
         "cached_tokens_warning": cached_tokens_warning,
+        "runtime_health": options.runtime_health,
     })
 }
 
@@ -1124,6 +1129,13 @@ fn render_autotune_root(
         "schema_version": AUTOTUNE_SCHEMA_VERSION,
         "model_name": options.model_name,
         "hardware_label": options.hardware_label,
+        "runtime_context": options.runtime_context,
+        "objective": {
+            "ttft_p95_weight": 0.40,
+            "itl_p95_weight": 0.35,
+            "e2e_p95_weight": 0.20,
+            "throughput_weight": 0.05,
+        },
         "measurements": measurements,
     });
     serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
@@ -1145,6 +1157,28 @@ mod tests {
     use super::*;
     use crate::client::{RequestResult, RequestTimings};
     use std::time::{Duration, Instant};
+
+    fn autotune_runtime_context() -> serde_json::Value {
+        serde_json::json!({
+            "execution_model": "rolling-v1",
+            "logical_kv_cap_tokens": 32768,
+        })
+    }
+
+    fn autotune_runtime_health(memory_budget_ok: bool) -> serde_json::Value {
+        serde_json::json!({
+            "healthy": memory_budget_ok,
+            "status": if memory_budget_ok { "healthy" } else { "memory-budget-exceeded" },
+            "request_completion_ok": true,
+            "admission_queue_full_count_delta": 0,
+            "memory_budget_exceeded_count_delta": if memory_budget_ok { 0 } else { 1 },
+            "active_kv_degraded": false,
+            "active_kv_swap_error_count_delta": 0,
+            "logical_kv_cap_tokens": 32768,
+            "resident_kv_cap_tokens": 32768,
+            "mtp": null,
+        })
+    }
 
     fn fake_outcome(
         run_idx: usize,
@@ -1752,14 +1786,22 @@ mod tests {
                 decode_cadence_mid_chunk_cap: 256,
             },
             memory_budget_ok: true,
+            runtime_context: autotune_runtime_context(),
+            cache_state: "cold".to_string(),
+            runtime_health: autotune_runtime_health(true),
         };
 
         let raw = render_autotune_json_sequential(&[cell], &options);
         let json: serde_json::Value = serde_json::from_str(&raw).expect("valid json");
 
-        assert_eq!(json["schema_version"], 4);
+        assert_eq!(json["schema_version"], 5);
         assert_eq!(json["model_name"], "GLM-4.7-flash-4bit");
         assert_eq!(json["hardware_label"], "m3-max");
+        assert_eq!(json["runtime_context"]["execution_model"], "rolling-v1");
+        assert_eq!(json["objective"]["ttft_p95_weight"], 0.40);
+        assert_eq!(json["objective"]["itl_p95_weight"], 0.35);
+        assert_eq!(json["objective"]["e2e_p95_weight"], 0.20);
+        assert_eq!(json["objective"]["throughput_weight"], 0.05);
 
         let measurements = json["measurements"].as_array().expect("measurements array");
         assert_eq!(measurements.len(), 1);
@@ -1845,6 +1887,9 @@ mod tests {
                 decode_cadence_mid_chunk_cap: 256,
             },
             memory_budget_ok: false,
+            runtime_context: autotune_runtime_context(),
+            cache_state: "cold".to_string(),
+            runtime_health: autotune_runtime_health(false),
         };
 
         let raw = render_autotune_json_concurrent(&[cell], &options);
@@ -1855,6 +1900,10 @@ mod tests {
         assert_eq!(row["max_new_tokens"], 128);
         assert_eq!(row["concurrency"], 2);
         assert_eq!(row["memory_budget_ok"], false);
+        assert_eq!(
+            row["runtime_health"]["memory_budget_exceeded_count_delta"],
+            1
+        );
         assert_eq!(row["cached_tokens_warning"], false);
         assert_eq!(row["ttft_ms_p95"].as_f64().unwrap(), 10.0);
         assert_eq!(row["itl_ms_p95"].as_f64().unwrap(), 22.5);

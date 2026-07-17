@@ -17,7 +17,7 @@ use crate::core::Model;
 use serde::{Deserialize, Serialize};
 
 const PROMPT_LIMIT_SAMPLES: [usize; 4] = [512, 1024, 2048, 8192];
-pub const SCHEDULER_AUTOTUNE_SCHEMA_VERSION: u32 = 4;
+pub const SCHEDULER_AUTOTUNE_SCHEMA_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PromptBatchLimit {
@@ -411,21 +411,169 @@ pub struct SchedulerAutotuneProfileConfig {
     pub decode_cadence_mid_chunk_cap: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SchedulerExecutionModel {
+    RollingV1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SchedulerSpeculativeMode {
+    Disabled,
+    QwenMtp,
+    Gemma4Drafter,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SchedulerKvQuantization {
+    None,
+    Turbo3,
+    Turbo4,
+    K3V4,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SchedulerWeightQuantizationContext {
+    pub mode: String,
+    pub fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SchedulerSpeculativeContext {
+    pub mode: SchedulerSpeculativeMode,
+    pub draft_model_fingerprint: Option<String>,
+    pub draft_tokens: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SchedulerPrefixCacheContext {
+    pub enabled: bool,
+    pub block_size: Option<usize>,
+    pub max_pages: Option<usize>,
+    pub lru_max_bytes: Option<usize>,
+    pub ssd_max_bytes: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SchedulerActiveKvContext {
+    pub enabled: bool,
+    pub resident_cap_tokens: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SchedulerAutotuneRuntimeContext {
+    pub execution_model: SchedulerExecutionModel,
+    pub model_architecture: String,
+    pub model_fingerprint: String,
+    pub weight_quantization: SchedulerWeightQuantizationContext,
+    pub speculative: SchedulerSpeculativeContext,
+    pub kv_quantization: SchedulerKvQuantization,
+    pub prefix_cache: SchedulerPrefixCacheContext,
+    pub active_kv: SchedulerActiveKvContext,
+    pub logical_kv_cap_tokens: usize,
+    pub memory_limit_total_bytes: Option<usize>,
+    pub memory_limit_model_bytes: Option<usize>,
+}
+
+impl SchedulerAutotuneRuntimeContext {
+    pub fn local_default(logical_kv_cap_tokens: usize) -> Self {
+        Self {
+            execution_model: SchedulerExecutionModel::RollingV1,
+            model_architecture: "unknown".to_string(),
+            model_fingerprint: "runtime-default".to_string(),
+            weight_quantization: SchedulerWeightQuantizationContext {
+                mode: "unknown".to_string(),
+                fingerprint: "runtime-default".to_string(),
+            },
+            speculative: SchedulerSpeculativeContext {
+                mode: SchedulerSpeculativeMode::Disabled,
+                draft_model_fingerprint: None,
+                draft_tokens: None,
+            },
+            kv_quantization: SchedulerKvQuantization::None,
+            prefix_cache: SchedulerPrefixCacheContext {
+                enabled: false,
+                block_size: None,
+                max_pages: None,
+                lru_max_bytes: None,
+                ssd_max_bytes: None,
+            },
+            active_kv: SchedulerActiveKvContext {
+                enabled: false,
+                resident_cap_tokens: None,
+            },
+            logical_kv_cap_tokens,
+            memory_limit_total_bytes: None,
+            memory_limit_model_bytes: None,
+        }
+    }
+
+    pub fn fingerprint(&self) -> String {
+        let encoded = serde_json::to_vec(self)
+            .expect("scheduler runtime context contains only serializable fields");
+        let mut hash = 0xcbf29ce484222325_u64;
+        for byte in encoded {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        format!("{hash:016x}")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SchedulerAutotuneCacheState {
+    Cold,
+    Warm,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SchedulerAutotuneMtpMetrics {
+    pub drafted_tokens: u64,
+    pub accepted_draft_tokens: u64,
+    pub windows: u64,
+    pub fallback_prefill_count: u64,
+    pub draft_forward_us: u64,
+    pub verify_forward_us: u64,
+    pub projection_us: u64,
+    pub sampling_us: u64,
+    pub main_rollback_us: u64,
+    pub prefill_cache_commit_us: u64,
+    pub decode_cache_commit_us: u64,
+    pub cache_restore_us: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SchedulerAutotuneRuntimeHealth {
+    pub healthy: bool,
+    pub status: String,
+    pub request_completion_ok: bool,
+    pub admission_queue_full_count_delta: u64,
+    pub memory_budget_exceeded_count_delta: u64,
+    pub active_kv_degraded: bool,
+    pub active_kv_swap_error_count_delta: u64,
+    pub logical_kv_cap_tokens: usize,
+    pub resident_kv_cap_tokens: usize,
+    pub mtp: Option<SchedulerAutotuneMtpMetrics>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SchedulerAutotuneMeasurement {
     pub config: SchedulerAutotuneProfileConfig,
     pub prompt_len: usize,
     pub max_new_tokens: usize,
     pub concurrency: usize,
+    pub cache_state: SchedulerAutotuneCacheState,
     pub ttft_ms_p95: f64,
     pub itl_ms_p95: f64,
     pub early_itl_ms_p95: f64,
     pub e2e_s_p95: f64,
     pub tokens_per_sec: f64,
-    #[serde(default = "default_true")]
     pub memory_budget_ok: bool,
-    #[serde(default)]
     pub cached_tokens_warning: bool,
+    pub runtime_health: SchedulerAutotuneRuntimeHealth,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -433,6 +581,7 @@ pub struct SchedulerAutotuneScenario {
     pub prompt_len: usize,
     pub max_new_tokens: usize,
     pub concurrency: usize,
+    pub cache_state: SchedulerAutotuneCacheState,
 }
 
 impl From<&SchedulerAutotuneMeasurement> for SchedulerAutotuneScenario {
@@ -441,6 +590,7 @@ impl From<&SchedulerAutotuneMeasurement> for SchedulerAutotuneScenario {
             prompt_len: value.prompt_len,
             max_new_tokens: value.max_new_tokens,
             concurrency: value.concurrency,
+            cache_state: value.cache_state,
         }
     }
 }
@@ -450,7 +600,7 @@ pub struct SchedulerAutotuneCalibrationInput {
     pub schema_version: u32,
     pub model_name: String,
     pub hardware_label: String,
-    #[serde(default)]
+    pub runtime_context: SchedulerAutotuneRuntimeContext,
     pub objective: SchedulerAutotuneObjective,
     pub measurements: Vec<SchedulerAutotuneMeasurement>,
 }
@@ -528,6 +678,7 @@ pub struct SchedulerAutotuneProfileSelection {
     pub diagnose_only: bool,
     pub model_name: String,
     pub hardware_label: String,
+    pub runtime_context: SchedulerAutotuneRuntimeContext,
     pub selection_profile: SchedulerAutotuneSelectionProfile,
     pub objective: SchedulerAutotuneObjective,
     pub scenarios: Vec<SchedulerAutotuneScenario>,
@@ -572,6 +723,7 @@ pub struct SchedulerAutotuneRuntimeProfile {
     pub schema_version: u32,
     pub model_name: String,
     pub hardware_label: String,
+    pub runtime_context: SchedulerAutotuneRuntimeContext,
     pub config: SchedulerAutotuneProfileConfig,
     pub rules: Vec<SchedulerAutotuneRuntimeRule>,
     pub metadata: SchedulerAutotuneRuntimeProfileMetadata,
@@ -674,6 +826,8 @@ pub struct SchedulerAutotuneProfileHealthReport {
     pub status: SchedulerAutotuneProfileHealthStatus,
     pub model_name: String,
     pub hardware_label: String,
+    pub profile_context_fingerprint: String,
+    pub expected_context_fingerprint: String,
     pub created_at_unix_ms: u64,
     pub max_age_days: u64,
     pub notes: Vec<SchedulerAutotuneProfileHealthNote>,
@@ -686,6 +840,12 @@ impl SchedulerAutotuneProfileHealthReport {
         writeln!(out, "status: {}", self.status.as_str()).unwrap();
         writeln!(out, "model: {}", self.model_name).unwrap();
         writeln!(out, "hardware: {}", self.hardware_label).unwrap();
+        writeln!(
+            out,
+            "runtime_context: profile={} expected={}",
+            self.profile_context_fingerprint, self.expected_context_fingerprint
+        )
+        .unwrap();
         writeln!(out, "created_at_unix_ms: {}", self.created_at_unix_ms).unwrap();
         writeln!(out, "max_age_days: {}", self.max_age_days).unwrap();
         writeln!(out, "notes:").unwrap();
@@ -708,6 +868,7 @@ pub struct SchedulerAutotuneProfileHealthInput<'a> {
     pub profile: &'a SchedulerAutotuneRuntimeProfile,
     pub expected_model_name: &'a str,
     pub expected_hardware_label: &'a str,
+    pub expected_runtime_context: &'a SchedulerAutotuneRuntimeContext,
     pub current_ironmlx_version: &'a str,
     pub now_unix_ms: u64,
     pub max_age_days: u64,
@@ -737,6 +898,17 @@ pub fn evaluate_scheduler_autotune_profile_health(
             format!(
                 "profile hardware_label={} does not match current hardware_label={}",
                 profile.hardware_label, input.expected_hardware_label
+            ),
+        ));
+    }
+
+    if profile.runtime_context != *input.expected_runtime_context {
+        notes.push(profile_health_error(
+            "runtime_context_mismatch",
+            format!(
+                "profile runtime context {} does not match current runtime context {}",
+                profile.runtime_context.fingerprint(),
+                input.expected_runtime_context.fingerprint()
             ),
         ));
     }
@@ -796,6 +968,17 @@ pub fn evaluate_scheduler_autotune_profile_health(
                 "profile has no concurrency>1 calibration scenario; queued-request TTFT was not validated".to_string(),
             ));
         }
+        if profile.runtime_context.prefix_cache.enabled
+            && !scenarios
+                .iter()
+                .any(|scenario| scenario.cache_state == SchedulerAutotuneCacheState::Warm)
+        {
+            notes.push(profile_health_warning(
+                "no_warm_prefix_cache_coverage",
+                "profile enables prefix cache but has no warm-cache calibration scenario"
+                    .to_string(),
+            ));
+        }
     }
 
     for warning in &profile.metadata.selection_warnings {
@@ -827,6 +1010,8 @@ pub fn evaluate_scheduler_autotune_profile_health(
         status,
         model_name: profile.model_name.clone(),
         hardware_label: profile.hardware_label.clone(),
+        profile_context_fingerprint: profile.runtime_context.fingerprint(),
+        expected_context_fingerprint: input.expected_runtime_context.fingerprint(),
         created_at_unix_ms: profile.metadata.created_at_unix_ms,
         max_age_days: input.max_age_days,
         notes,
@@ -878,6 +1063,13 @@ pub fn merge_scheduler_autotune_calibrations(
                 input.hardware_label
             );
         }
+        if input.runtime_context != merged.runtime_context {
+            bail!(
+                "{label} runtime_context mismatch: expected {}, got {}",
+                merged.runtime_context.fingerprint(),
+                input.runtime_context.fingerprint()
+            );
+        }
         if input.objective != objective {
             bail!("{label} objective mismatch");
         }
@@ -906,6 +1098,7 @@ pub fn select_scheduler_autotune_profile_with_options(
     options: SchedulerAutotuneSelectionOptions,
 ) -> SchedulerAutotuneProfileSelection {
     let objective = input.objective.normalized();
+    let runtime_context = input.runtime_context;
     let mut grouped: BTreeMap<SchedulerAutotuneProfileConfig, Vec<SchedulerAutotuneMeasurement>> =
         BTreeMap::new();
     for row in input.measurements {
@@ -927,11 +1120,47 @@ pub fn select_scheduler_autotune_profile_with_options(
             ));
             continue;
         }
-        if rows.iter().any(|row| row.cached_tokens_warning) {
+        if rows.iter().any(|row| {
+            row.cache_state == SchedulerAutotuneCacheState::Cold && row.cached_tokens_warning
+        }) {
             rejected.push(rejected_candidate(
                 config,
                 "cached_tokens_present",
                 "one or more calibration rows reported cached_tokens_warning=true",
+            ));
+            continue;
+        }
+        if rows.iter().any(|row| !row.runtime_health.healthy) {
+            rejected.push(rejected_candidate(
+                config,
+                "runtime_health_unsafe",
+                "one or more calibration rows reported an unhealthy runtime delta",
+            ));
+            continue;
+        }
+        if rows
+            .iter()
+            .any(|row| !row.runtime_health.request_completion_ok)
+        {
+            rejected.push(rejected_candidate(
+                config,
+                "request_completion_failed",
+                "one or more calibration rows did not complete benchmark requests",
+            ));
+            continue;
+        }
+        if runtime_context.speculative.mode != SchedulerSpeculativeMode::Disabled
+            && rows.iter().all(|row| {
+                row.runtime_health
+                    .mtp
+                    .as_ref()
+                    .is_none_or(|mtp| mtp.drafted_tokens == 0)
+            })
+        {
+            rejected.push(rejected_candidate(
+                config,
+                "speculative_path_inactive",
+                "runtime context enables speculative decoding but no draft tokens were observed",
             ));
             continue;
         }
@@ -969,7 +1198,7 @@ pub fn select_scheduler_autotune_profile_with_options(
         }
     }
 
-    let mut warnings = coverage_warnings(&required_scenarios);
+    let mut warnings = coverage_warnings(&required_scenarios, &runtime_context);
     if complete.len() == 1 {
         warnings.push(selection_note(
             "single_candidate",
@@ -997,6 +1226,7 @@ pub fn select_scheduler_autotune_profile_with_options(
         diagnose_only: true,
         model_name: input.model_name,
         hardware_label: input.hardware_label,
+        runtime_context,
         selection_profile: options.profile,
         objective,
         scenarios: required_scenarios.iter().cloned().collect(),
@@ -1146,6 +1376,7 @@ pub fn build_scheduler_autotune_runtime_profile_at(
         schema_version: SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
         model_name: selection.model_name.clone(),
         hardware_label: selection.hardware_label.clone(),
+        runtime_context: selection.runtime_context.clone(),
         config: selected.config,
         rules: runtime_rules_from_overrides(&selection.scenario_overrides),
         metadata: SchedulerAutotuneRuntimeProfileMetadata {
@@ -1167,6 +1398,7 @@ fn runtime_rules_from_overrides(
 ) -> Vec<SchedulerAutotuneRuntimeRule> {
     let mut rules = overrides
         .iter()
+        .filter(|item| item.scenario.cache_state == SchedulerAutotuneCacheState::Cold)
         .map(|item| SchedulerAutotuneRuntimeRule {
             when: SchedulerAutotuneRuntimeRuleCondition {
                 prompt_len_gte: item.scenario.prompt_len,
@@ -1446,6 +1678,7 @@ impl ScenarioBest {
 
 fn coverage_warnings(
     required_scenarios: &BTreeSet<SchedulerAutotuneScenario>,
+    runtime_context: &SchedulerAutotuneRuntimeContext,
 ) -> Vec<SchedulerAutotuneSelectionNote> {
     let mut warnings = Vec::new();
     if !required_scenarios
@@ -1464,6 +1697,16 @@ fn coverage_warnings(
         warnings.push(selection_note(
             "no_concurrent_coverage",
             "calibration input has no concurrency>1 scenario; queued-request TTFT cannot be assessed",
+        ));
+    }
+    if runtime_context.prefix_cache.enabled
+        && !required_scenarios
+            .iter()
+            .any(|scenario| scenario.cache_state == SchedulerAutotuneCacheState::Warm)
+    {
+        warnings.push(selection_note(
+            "no_warm_prefix_cache_coverage",
+            "runtime context enables prefix cache but calibration has no warm-cache scenario",
         ));
     }
     warnings
@@ -1485,6 +1728,12 @@ fn validate_single_calibration(
     }
     if input.hardware_label.trim().is_empty() {
         bail!("{label} hardware_label must not be empty");
+    }
+    if input.runtime_context.model_architecture.trim().is_empty() {
+        bail!("{label} runtime_context.model_architecture must not be empty");
+    }
+    if input.runtime_context.model_fingerprint.trim().is_empty() {
+        bail!("{label} runtime_context.model_fingerprint must not be empty");
     }
     if input.measurements.is_empty() {
         bail!("{label} measurements must not be empty");
@@ -1606,8 +1855,4 @@ fn unix_time_ms() -> u64 {
         .expect("system time before unix epoch")
         .as_millis();
     millis.min(u128::from(u64::MAX)) as u64
-}
-
-fn default_true() -> bool {
-    true
 }

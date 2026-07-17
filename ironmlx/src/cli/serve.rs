@@ -6,6 +6,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{bail, Context};
 use clap::Args;
 
+use super::scheduler_profile_context::{
+    build_scheduler_runtime_context, SchedulerProfileContextOptions,
+};
 use super::scheduler_profile_store::{
     detect_scheduler_profile_hardware_label, SchedulerProfileStore,
 };
@@ -15,8 +18,9 @@ use crate::core::scheduler::DenseVlMethods;
 use crate::core::scheduler_autotune::{
     evaluate_scheduler_autotune_profile_health, SchedulerAutotuneProfileConfig,
     SchedulerAutotuneProfileHealthInput, SchedulerAutotuneProfileHealthReport,
-    SchedulerAutotuneProfileHealthStatus, SchedulerAutotuneRuntimeProfile,
-    SchedulerAutotuneRuntimeProfileMetadata, SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+    SchedulerAutotuneProfileHealthStatus, SchedulerAutotuneRuntimeContext,
+    SchedulerAutotuneRuntimeProfile, SchedulerAutotuneRuntimeProfileMetadata,
+    SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
 };
 use crate::core::server::adaptive_admission::{
     GEMMA4_DRAFTER_ADAPTIVE_PHYSICAL_B_MAX, QWEN_MTP_ADAPTIVE_PHYSICAL_B_MAX,
@@ -396,11 +400,14 @@ fn default_scheduler_profile_config() -> SchedulerAutotuneProfileConfig {
     }
 }
 
-fn default_scheduler_runtime_profile() -> SchedulerAutotuneRuntimeProfile {
+fn default_scheduler_runtime_profile(
+    runtime_context: SchedulerAutotuneRuntimeContext,
+) -> SchedulerAutotuneRuntimeProfile {
     SchedulerAutotuneRuntimeProfile {
         schema_version: SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
         model_name: "default".to_string(),
         hardware_label: "local".to_string(),
+        runtime_context,
         config: default_scheduler_profile_config(),
         rules: Vec::new(),
         metadata: SchedulerAutotuneRuntimeProfileMetadata::synthetic(0),
@@ -486,12 +493,14 @@ fn load_scheduler_profile_for_model(
     model_dir: &Path,
     store: Option<&SchedulerProfileStore>,
     hardware_label: &str,
+    runtime_context_fingerprint: &str,
 ) -> Result<Option<SchedulerProfileLoad>> {
     load_scheduler_profile_for_model_with_explicit(
         args.scheduler_profile.as_deref(),
         model_dir,
         store,
         hardware_label,
+        runtime_context_fingerprint,
     )
 }
 
@@ -500,6 +509,7 @@ fn load_scheduler_profile_for_model_with_explicit(
     model_dir: &Path,
     store: Option<&SchedulerProfileStore>,
     hardware_label: &str,
+    runtime_context_fingerprint: &str,
 ) -> Result<Option<SchedulerProfileLoad>> {
     if let Some(path) = explicit_profile {
         return Ok(Some(SchedulerProfileLoad {
@@ -513,7 +523,11 @@ fn load_scheduler_profile_for_model_with_explicit(
         return Ok(None);
     };
     let model_name = scheduler_profile_model_name(model_dir)?;
-    let Some(path) = (match store.find_profile(model_dir, &model_name, hardware_label) {
+    let Some(path) = (match store.find_profile(
+        model_dir,
+        hardware_label,
+        runtime_context_fingerprint,
+    ) {
         Ok(path) => path,
         Err(error) => {
             tracing::warn!(
@@ -554,12 +568,14 @@ fn check_loaded_scheduler_profile_health(
     profile: &SchedulerAutotuneRuntimeProfile,
     expected_model_name: &str,
     expected_hardware_label: &str,
+    expected_runtime_context: &SchedulerAutotuneRuntimeContext,
     now_unix_ms: u64,
 ) -> Result<SchedulerAutotuneProfileHealthReport> {
     let report = evaluate_scheduler_autotune_profile_health(SchedulerAutotuneProfileHealthInput {
         profile,
         expected_model_name,
         expected_hardware_label,
+        expected_runtime_context,
         current_ironmlx_version: env!("CARGO_PKG_VERSION"),
         now_unix_ms,
         max_age_days: 30,
@@ -625,6 +641,41 @@ fn unix_time_ms() -> u64 {
         .expect("system time before unix epoch")
         .as_millis();
     millis.min(u128::from(u64::MAX)) as u64
+}
+
+fn scheduler_runtime_context_for_model(
+    args: &ServeArgs,
+    model_dir: &Path,
+    mtp_model_dir: Option<&Path>,
+    mtp_draft_tokens: Option<usize>,
+    logical_kv_cap_tokens: Option<usize>,
+) -> Result<SchedulerAutotuneRuntimeContext> {
+    let logical_kv_cap_tokens = logical_kv_cap_tokens
+        .or(args.max_cache_cap)
+        .unwrap_or(DEFAULT_MAX_CACHE_CAP);
+    build_scheduler_runtime_context(
+        model_dir,
+        SchedulerProfileContextOptions {
+            mtp_model_dir,
+            mtp_draft_tokens,
+            kv_quantization: args.kv_quant.profile_context(),
+            paged_prefix_cache_enabled: args.paged_prefix_cache_dir.is_some(),
+            paged_prefix_cache_block_size: args.paged_prefix_cache_block_size,
+            paged_prefix_cache_max_pages: args.paged_prefix_cache_max_pages,
+            prefix_lru_cache_max_bytes: args.prefix_lru_cache_max_bytes,
+            ssd_prefix_cache_max_bytes: resolve_ssd_prefix_cache_max_bytes(args)?,
+            active_kv_offload: args.active_kv_offload,
+            logical_kv_cap_tokens,
+            memory_limit_total_bytes: resolve_memory_limit_bytes(
+                args.memory_limit_total_gb,
+                "--memory-limit-total-gb",
+            )?,
+            memory_limit_model_bytes: resolve_memory_limit_bytes(
+                args.memory_limit_model_gb,
+                "--memory-limit-model-gb",
+            )?,
+        },
+    )
 }
 
 fn apply_scheduler_cli_overrides(
@@ -711,6 +762,7 @@ fn resolve_serve_mtp_config(
 fn resolve_scheduler_runtime_profile(
     args: &ServeArgs,
     profile: Option<&SchedulerAutotuneRuntimeProfile>,
+    runtime_context: &SchedulerAutotuneRuntimeContext,
 ) -> Result<SchedulerAutotuneRuntimeProfile> {
     if let Some(profile) = profile {
         if profile.schema_version != SCHEDULER_AUTOTUNE_SCHEMA_VERSION {
@@ -724,7 +776,7 @@ fn resolve_scheduler_runtime_profile(
 
     let mut resolved = profile
         .cloned()
-        .unwrap_or_else(default_scheduler_runtime_profile);
+        .unwrap_or_else(|| default_scheduler_runtime_profile(runtime_context.clone()));
     resolved.config = apply_scheduler_cli_overrides(args, resolved.config);
     for rule in &mut resolved.rules {
         rule.config = apply_scheduler_cli_overrides(args, rule.config);
@@ -738,7 +790,11 @@ fn resolve_scheduler_serve_config(
     args: &ServeArgs,
     profile: Option<&SchedulerAutotuneRuntimeProfile>,
 ) -> Result<SchedulerServeConfig> {
-    let profile = resolve_scheduler_runtime_profile(args, profile)?;
+    let profile = resolve_scheduler_runtime_profile(
+        args,
+        profile,
+        &SchedulerAutotuneRuntimeContext::local_default(DEFAULT_MAX_CACHE_CAP),
+    )?;
     Ok(SchedulerServeConfig {
         prefill_chunk_size: profile.config.prefill_chunk_size,
         b_max: profile.config.b_max,
@@ -753,6 +809,30 @@ pub(crate) fn resolve_scheduler_for_model(
     args: &ServeArgs,
     model_dir: &Path,
 ) -> Result<ResolvedSchedulerRuntime> {
+    resolve_scheduler_for_model_with_mtp(
+        args,
+        model_dir,
+        args.mtp_model_dir.as_deref(),
+        args.mtp_draft_tokens,
+        None,
+    )
+}
+
+pub(crate) fn resolve_scheduler_for_model_with_mtp(
+    args: &ServeArgs,
+    model_dir: &Path,
+    mtp_model_dir: Option<&Path>,
+    mtp_draft_tokens: Option<usize>,
+    max_cache_cap_override: Option<usize>,
+) -> Result<ResolvedSchedulerRuntime> {
+    let runtime_context = scheduler_runtime_context_for_model(
+        args,
+        model_dir,
+        mtp_model_dir,
+        mtp_draft_tokens,
+        max_cache_cap_override,
+    )?;
+    let runtime_context_fingerprint = runtime_context.fingerprint();
     let scheduler_profile_store = if args.scheduler_profile.is_none() {
         match SchedulerProfileStore::default() {
             Ok(store) => Some(store),
@@ -773,6 +853,7 @@ pub(crate) fn resolve_scheduler_for_model(
         model_dir,
         scheduler_profile_store.as_ref(),
         &scheduler_profile_hardware_label,
+        &runtime_context_fingerprint,
     )?;
     let scheduler_profile_model_name = scheduler_profile_model_name(model_dir)?;
     let mut discard_auto_profile = false;
@@ -781,6 +862,7 @@ pub(crate) fn resolve_scheduler_for_model(
             &load.profile,
             &scheduler_profile_model_name,
             &scheduler_profile_hardware_label,
+            &runtime_context,
             unix_time_ms(),
         ) {
             Ok(report) => log_scheduler_profile_health(&load.path, &report),
@@ -803,6 +885,7 @@ pub(crate) fn resolve_scheduler_for_model(
     let scheduler_runtime_profile = resolve_scheduler_runtime_profile(
         args,
         scheduler_profile_load.as_ref().map(|load| &load.profile),
+        &runtime_context,
     )?;
     if scheduler_profile_load.is_none() && args.scheduler_profile.is_none() {
         match scheduler_profile_store.as_ref() {
@@ -1149,13 +1232,24 @@ fn resolve_engine_pool_scheduler_profile(
     manifest_profile: Option<&Path>,
     store: Option<&SchedulerProfileStore>,
     hardware_label: &str,
+    mtp_model_dir: Option<&Path>,
+    mtp_draft_tokens: Option<usize>,
 ) -> Result<ResolvedSchedulerRuntime> {
+    let runtime_context = scheduler_runtime_context_for_model(
+        args,
+        model_dir,
+        mtp_model_dir,
+        mtp_draft_tokens,
+        None,
+    )?;
+    let runtime_context_fingerprint = runtime_context.fingerprint();
     let explicit_profile = manifest_profile.or(args.scheduler_profile.as_deref());
     let mut scheduler_profile_load = load_scheduler_profile_for_model_with_explicit(
         explicit_profile,
         model_dir,
         store,
         hardware_label,
+        &runtime_context_fingerprint,
     )?;
     let scheduler_profile_model_name = scheduler_profile_model_name(model_dir)?;
     let mut discard_auto_profile = false;
@@ -1164,6 +1258,7 @@ fn resolve_engine_pool_scheduler_profile(
             &load.profile,
             &scheduler_profile_model_name,
             hardware_label,
+            &runtime_context,
             unix_time_ms(),
         ) {
             Ok(report) => log_scheduler_profile_health(&load.path, &report),
@@ -1186,6 +1281,7 @@ fn resolve_engine_pool_scheduler_profile(
     let scheduler_runtime_profile = resolve_scheduler_runtime_profile(
         args,
         scheduler_profile_load.as_ref().map(|load| &load.profile),
+        &runtime_context,
     )?;
     let scheduler_config = SchedulerServeConfig {
         prefill_chunk_size: scheduler_runtime_profile.config.prefill_chunk_size,
@@ -1230,7 +1326,9 @@ fn build_engine_model_config_for_pool(
             load_policy: model.load_policy,
             default: model.default,
             pinned: false,
-            scheduler_runtime_profile: default_scheduler_runtime_profile(),
+            scheduler_runtime_profile: default_scheduler_runtime_profile(
+                SchedulerAutotuneRuntimeContext::local_default(DEFAULT_MAX_CACHE_CAP),
+            ),
             mtp,
             sampling_defaults: server::SamplingDefaults::default(),
         });
@@ -1254,6 +1352,8 @@ fn build_engine_model_config_for_pool(
         model.scheduler_profile.as_deref(),
         scheduler_profile_store,
         hardware_label,
+        mtp.as_ref().map(|settings| settings.model_dir.as_path()),
+        mtp.as_ref().and_then(|settings| settings.draft_tokens),
     )?;
     let model_type = read_model_type(&model.path)?;
     let architecture = crate::models::ModelArchitecture::from_model_type(&model_type)?;
@@ -1372,104 +1472,7 @@ pub fn run(args: ServeArgs) -> Result<()> {
         ));
     }
 
-    let scheduler_profile_store = if args.scheduler_profile.is_none() {
-        match SchedulerProfileStore::default() {
-            Ok(store) => Some(store),
-            Err(error) => {
-                tracing::warn!(
-                    "ironmlx serve: scheduler profile store disabled error={:#}; using CLI/default scheduler config",
-                    error
-                );
-                None
-            }
-        }
-    } else {
-        None
-    };
-    let scheduler_profile_hardware_label = detect_scheduler_profile_hardware_label();
-    let mut scheduler_profile_load = load_scheduler_profile_for_model(
-        &args,
-        &model_dir,
-        scheduler_profile_store.as_ref(),
-        &scheduler_profile_hardware_label,
-    )?;
-    let scheduler_profile_model_name = scheduler_profile_model_name(&model_dir)?;
-    let mut discard_auto_profile = false;
-    if let Some(load) = scheduler_profile_load.as_ref() {
-        match check_loaded_scheduler_profile_health(
-            &load.profile,
-            &scheduler_profile_model_name,
-            &scheduler_profile_hardware_label,
-            unix_time_ms(),
-        ) {
-            Ok(report) => log_scheduler_profile_health(&load.path, &report),
-            Err(error) if load.auto_loaded => {
-                tracing::warn!(
-                    "ironmlx serve: scheduler profile ignored path={} model_name={} hardware_label={} error={:#}; using CLI/default scheduler config",
-                    load.path.display(),
-                    scheduler_profile_model_name,
-                    scheduler_profile_hardware_label,
-                    error
-                );
-                discard_auto_profile = true;
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    if discard_auto_profile {
-        scheduler_profile_load = None;
-    }
-    let scheduler_runtime_profile = resolve_scheduler_runtime_profile(
-        &args,
-        scheduler_profile_load.as_ref().map(|load| &load.profile),
-    )?;
-    if scheduler_profile_load.is_none() && args.scheduler_profile.is_none() {
-        match scheduler_profile_store.as_ref() {
-            Some(store) => tracing::info!(
-                "ironmlx serve: no matching scheduler profile found store={} model={} hardware_label={}; using CLI/default scheduler config",
-                store.root().display(),
-                model_dir.display(),
-                scheduler_profile_hardware_label
-            ),
-            None => tracing::info!(
-                "ironmlx serve: no scheduler profile store available model={} hardware_label={}; using CLI/default scheduler config",
-                model_dir.display(),
-                scheduler_profile_hardware_label
-            ),
-        }
-    }
-    let scheduler_config = SchedulerServeConfig {
-        prefill_chunk_size: scheduler_runtime_profile.config.prefill_chunk_size,
-        b_max: scheduler_runtime_profile.config.b_max,
-        admission_deadline_ms: scheduler_runtime_profile.config.admission_deadline_ms,
-        admission_queue_max: scheduler_runtime_profile.config.admission_queue_max,
-        max_cache_cap: scheduler_runtime_profile.config.max_cache_cap,
-        decode_cadence_mid_chunk_cap: scheduler_runtime_profile
-            .config
-            .decode_cadence_mid_chunk_cap,
-    };
-    if let Some(load) = &scheduler_profile_load {
-        let source = if load.auto_loaded {
-            "store"
-        } else {
-            "explicit"
-        };
-        tracing::info!(
-            "ironmlx serve: scheduler profile applied source={} path={} model_name={} hardware_label={} rules={}",
-            source,
-            load.path.display(),
-            load.profile.model_name,
-            load.profile.hardware_label,
-            scheduler_runtime_profile.rules.len()
-        );
-    }
-    let profile_source = scheduler_profile_load.as_ref().map(|load| {
-        if load.auto_loaded {
-            SchedulerProfileSource::Store
-        } else {
-            SchedulerProfileSource::Explicit
-        }
-    });
+    let mut resolved_scheduler = resolve_scheduler_for_model(&args, &model_dir)?;
 
     let model_type = read_model_type(&model_dir)?;
     let architecture = crate::models::ModelArchitecture::from_model_type(&model_type)?;
@@ -1479,13 +1482,8 @@ pub fn run(args: ServeArgs) -> Result<()> {
         &args,
         architecture,
         loader.config_raw_value(),
-        scheduler_config,
+        resolved_scheduler.scheduler_config,
     )?;
-    let mut resolved_scheduler = ResolvedSchedulerRuntime {
-        scheduler_runtime_profile,
-        scheduler_config,
-        profile_source,
-    };
     if apply_adaptive_mtp_scheduler_defaults(
         &args,
         architecture,
@@ -1697,7 +1695,8 @@ mod scheduler_profile_tests {
     use crate::cli::scheduler_profile_store::SchedulerProfileStore;
     use crate::cli::Command;
     use crate::core::scheduler_autotune::{
-        SchedulerAutotuneProfileConfig, SchedulerAutotuneProfileHealthStatus,
+        SchedulerAutotuneCacheState, SchedulerAutotuneProfileConfig,
+        SchedulerAutotuneProfileHealthStatus, SchedulerAutotuneRuntimeContext,
         SchedulerAutotuneRuntimeProfile, SchedulerAutotuneRuntimeRule,
         SchedulerAutotuneRuntimeRuleCondition, SchedulerAutotuneScenario,
         SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
@@ -1731,6 +1730,7 @@ mod scheduler_profile_tests {
             schema_version: SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
             model_name: "test-model".to_string(),
             hardware_label: "test-host".to_string(),
+            runtime_context: runtime_context(),
             config: profile_config(),
             rules: vec![SchedulerAutotuneRuntimeRule {
                 when: SchedulerAutotuneRuntimeRuleCondition {
@@ -1749,6 +1749,10 @@ mod scheduler_profile_tests {
                     1811606400000,
                 ),
         }
+    }
+
+    fn runtime_context() -> SchedulerAutotuneRuntimeContext {
+        SchedulerAutotuneRuntimeContext::local_default(8192)
     }
 
     fn base_args() -> ServeArgs {
@@ -1939,6 +1943,11 @@ mod scheduler_profile_tests {
             r#"{"model_type":"gemma4","text_config":{"model_type":"gemma4_text"}}"#,
         )
         .expect("write config");
+        std::fs::write(
+            mtp_dir.join("config.json"),
+            r#"{"model_type":"gemma4_assistant"}"#,
+        )
+        .expect("write assistant config");
         let args = base_args();
         let manifest_model = EngineModelManifest {
             id: "gemma4-manifest".to_string(),
@@ -2076,7 +2085,8 @@ mod scheduler_profile_tests {
         };
 
         let profile =
-            resolve_scheduler_runtime_profile(&args, Some(&runtime_profile())).expect("resolved");
+            resolve_scheduler_runtime_profile(&args, Some(&runtime_profile()), &runtime_context())
+                .expect("resolved");
 
         assert_eq!(profile.config.prefill_chunk_size, 256);
         assert_eq!(profile.config.decode_cadence_mid_chunk_cap, 64);
@@ -2089,7 +2099,7 @@ mod scheduler_profile_tests {
     fn gemma4_drafter_default_scheduler_uses_bmax_four_when_unconfigured() {
         let args = base_args();
         let mut resolved = ResolvedSchedulerRuntime {
-            scheduler_runtime_profile: default_scheduler_runtime_profile(),
+            scheduler_runtime_profile: default_scheduler_runtime_profile(runtime_context()),
             scheduler_config: SchedulerServeConfig::default(),
             profile_source: None,
         };
@@ -2113,8 +2123,12 @@ mod scheduler_profile_tests {
             ..base_args()
         };
         let mut resolved = ResolvedSchedulerRuntime {
-            scheduler_runtime_profile: resolve_scheduler_runtime_profile(&args, None)
-                .expect("resolved profile"),
+            scheduler_runtime_profile: resolve_scheduler_runtime_profile(
+                &args,
+                None,
+                &runtime_context(),
+            )
+            .expect("resolved profile"),
             scheduler_config: SchedulerServeConfig {
                 b_max: 1,
                 ..SchedulerServeConfig::default()
@@ -2194,7 +2208,7 @@ mod scheduler_profile_tests {
     fn qwen_mtp_default_scheduler_uses_latency_first_bmax_two_when_unconfigured() {
         let args = base_args();
         let mut resolved = ResolvedSchedulerRuntime {
-            scheduler_runtime_profile: default_scheduler_runtime_profile(),
+            scheduler_runtime_profile: default_scheduler_runtime_profile(runtime_context()),
             scheduler_config: SchedulerServeConfig::default(),
             profile_source: None,
         };
@@ -2631,6 +2645,7 @@ mod scheduler_profile_tests {
             prompt_len: 1024,
             max_new_tokens: 128,
             concurrency: 1,
+            cache_state: SchedulerAutotuneCacheState::Cold,
         }];
         let args = base_args();
 
@@ -2638,6 +2653,7 @@ mod scheduler_profile_tests {
             &profile,
             "different-model-name",
             "test-host",
+            &profile.runtime_context,
             1811606400000 + 31 * 24 * 60 * 60 * 1000,
         )
         .expect("warning health should not fail");
@@ -2646,7 +2662,10 @@ mod scheduler_profile_tests {
             checked.status,
             SchedulerAutotuneProfileHealthStatus::Warning
         );
-        assert!(resolve_scheduler_runtime_profile(&args, Some(&profile)).is_ok());
+        assert!(
+            resolve_scheduler_runtime_profile(&args, Some(&profile), &profile.runtime_context)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -2658,6 +2677,7 @@ mod scheduler_profile_tests {
             &profile,
             "test-model",
             "test-host",
+            &profile.runtime_context,
             1811606400000,
         )
         .expect_err("invalid health should fail");
@@ -2679,14 +2699,27 @@ mod scheduler_profile_tests {
             ..base_args()
         };
 
-        let loaded = load_scheduler_profile_for_model(&args, &model_dir, Some(&store), "test-host")
-            .expect("load profile")
-            .expect("stored profile should match");
+        let fingerprint = runtime_context().fingerprint();
+        let loaded = load_scheduler_profile_for_model(
+            &args,
+            &model_dir,
+            Some(&store),
+            "test-host",
+            &fingerprint,
+        )
+        .expect("load profile")
+        .expect("stored profile should match");
 
         assert_eq!(loaded.profile.config, profile_config());
         assert_eq!(
             loaded.path,
-            store.profile_path("test-model", "test-host", &model_dir)
+            store.profile_path(
+                "test-model",
+                "test-host",
+                runtime_profile().metadata.selection_profile,
+                &model_dir,
+                &fingerprint,
+            )
         );
 
         std::fs::remove_dir_all(temp_dir).expect("cleanup temp dir");
@@ -2718,9 +2751,15 @@ mod scheduler_profile_tests {
             ..base_args()
         };
 
-        let loaded = load_scheduler_profile_for_model(&args, &model_dir, Some(&store), "test-host")
-            .expect("load profile")
-            .expect("explicit profile should load");
+        let loaded = load_scheduler_profile_for_model(
+            &args,
+            &model_dir,
+            Some(&store),
+            "test-host",
+            &runtime_context().fingerprint(),
+        )
+        .expect("load profile")
+        .expect("explicit profile should load");
 
         assert_eq!(loaded.profile.model_name, "explicit-model");
         assert_eq!(loaded.profile.config.prefill_chunk_size, 4096);
@@ -2736,15 +2775,21 @@ mod scheduler_profile_tests {
         std::fs::create_dir_all(&model_dir).expect("create model dir");
         let store_root = temp_dir.join("store");
         std::fs::create_dir_all(&store_root).expect("create store dir");
-        std::fs::write(store_root.join("index.json"), "not json").expect("write corrupt index");
+        std::fs::write(store_root.join("index-v5.json"), "not json").expect("write corrupt index");
         let store = SchedulerProfileStore::from_root(store_root);
         let args = ServeArgs {
             model: Some(model_dir.to_string_lossy().into_owned()),
             ..base_args()
         };
 
-        let loaded = load_scheduler_profile_for_model(&args, &model_dir, Some(&store), "test-host")
-            .expect("corrupt store should fall back");
+        let loaded = load_scheduler_profile_for_model(
+            &args,
+            &model_dir,
+            Some(&store),
+            "test-host",
+            &runtime_context().fingerprint(),
+        )
+        .expect("corrupt store should fall back");
 
         assert!(loaded.is_none());
 
@@ -2766,8 +2811,14 @@ mod scheduler_profile_tests {
             ..base_args()
         };
 
-        let loaded = load_scheduler_profile_for_model(&args, &model_dir, Some(&store), "test-host")
-            .expect("corrupt auto profile should fall back");
+        let loaded = load_scheduler_profile_for_model(
+            &args,
+            &model_dir,
+            Some(&store),
+            "test-host",
+            &runtime_context().fingerprint(),
+        )
+        .expect("corrupt auto profile should fall back");
 
         assert!(loaded.is_none());
 

@@ -8,7 +8,8 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
+use serde::Deserialize;
 
 mod client;
 mod prompt;
@@ -113,6 +114,14 @@ struct Args {
     #[arg(long, default_value_t = false)]
     pub autotune_memory_budget_unsafe: bool,
 
+    /// Scheduler runtime context JSON emitted by `ironmlx scheduler-autotune calibrate`.
+    #[arg(long)]
+    pub autotune_runtime_context: Option<PathBuf>,
+
+    /// Prefix-cache state represented by exported autotune measurements.
+    #[arg(long, value_enum)]
+    pub autotune_cache_state: Option<AutotuneCacheState>,
+
     /// HTTP request timeout (seconds).
     #[arg(long, default_value_t = 300)]
     timeout: u64,
@@ -161,6 +170,21 @@ enum OutputFormat {
     AutotuneJson,
 }
 
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum AutotuneCacheState {
+    Cold,
+    Warm,
+}
+
+impl AutotuneCacheState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Cold => "cold",
+            Self::Warm => "warm",
+        }
+    }
+}
+
 fn parse_target(s: &str) -> std::result::Result<(String, String), String> {
     s.split_once('=')
         .map(|(name, url)| (name.into(), url.trim_end_matches('/').into()))
@@ -205,6 +229,21 @@ impl Args {
                     )?,
             },
             memory_budget_ok: !self.autotune_memory_budget_unsafe,
+            runtime_context: {
+                let path = self.autotune_runtime_context.as_ref().context(
+                    "--autotune-runtime-context is required with --format autotune-json",
+                )?;
+                let raw = std::fs::read_to_string(path)
+                    .with_context(|| format!("reading {}", path.display()))?;
+                serde_json::from_str(&raw)
+                    .with_context(|| format!("parsing {}", path.display()))?
+            },
+            cache_state: self
+                .autotune_cache_state
+                .context("--autotune-cache-state is required with --format autotune-json")?
+                .as_str()
+                .to_string(),
+            runtime_health: serde_json::Value::Null,
         }))
     }
 }
@@ -316,6 +355,118 @@ fn command_output(program: &str, args: &[&str]) -> Option<String> {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct AutotuneHealthSnapshot {
+    status: String,
+    scheduler: AutotuneSchedulerHealth,
+    memory: AutotuneMemoryHealth,
+    mtp: AutotuneMtpHealth,
+    active_kv_offload: AutotuneActiveKvHealth,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct AutotuneSchedulerHealth {
+    admission_queue_full_count: u64,
+    memory_budget_exceeded_count: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct AutotuneMemoryHealth {
+    kv_cache_logical_cap_tokens: usize,
+    kv_cache_resident_cap_tokens: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct AutotuneMtpHealth {
+    enabled: bool,
+    fallback_prefill_count: u64,
+    drafted_tokens: u64,
+    accepted_draft_tokens: u64,
+    windows: u64,
+    draft_forward_us: u64,
+    verify_forward_us: u64,
+    projection_us: u64,
+    sampling_us: u64,
+    main_rollback_us: u64,
+    prefill_cache_commit_us: u64,
+    decode_cache_commit_us: u64,
+    cache_restore_us: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct AutotuneActiveKvHealth {
+    degraded: bool,
+    swap_error_count: u64,
+}
+
+async fn fetch_autotune_health(
+    client: &reqwest::Client,
+    target_url: &str,
+) -> Result<AutotuneHealthSnapshot> {
+    let url = format!("{}/healthz", target_url.trim_end_matches('/'));
+    client
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("requesting {url}"))?
+        .error_for_status()
+        .with_context(|| format!("reading {url}"))?
+        .json()
+        .await
+        .with_context(|| format!("parsing {url}"))
+}
+
+fn health_delta(
+    before: &AutotuneHealthSnapshot,
+    after: &AutotuneHealthSnapshot,
+) -> serde_json::Value {
+    let admission_queue_full_count_delta = after
+        .scheduler
+        .admission_queue_full_count
+        .saturating_sub(before.scheduler.admission_queue_full_count);
+    let memory_budget_exceeded_count_delta = after
+        .scheduler
+        .memory_budget_exceeded_count
+        .saturating_sub(before.scheduler.memory_budget_exceeded_count);
+    let active_kv_swap_error_count_delta = after
+        .active_kv_offload
+        .swap_error_count
+        .saturating_sub(before.active_kv_offload.swap_error_count);
+    let healthy = after.status == "healthy"
+        && admission_queue_full_count_delta == 0
+        && memory_budget_exceeded_count_delta == 0
+        && !after.active_kv_offload.degraded
+        && active_kv_swap_error_count_delta == 0;
+    let mtp = (before.mtp.enabled || after.mtp.enabled).then(|| {
+        serde_json::json!({
+            "drafted_tokens": after.mtp.drafted_tokens.saturating_sub(before.mtp.drafted_tokens),
+            "accepted_draft_tokens": after.mtp.accepted_draft_tokens.saturating_sub(before.mtp.accepted_draft_tokens),
+            "windows": after.mtp.windows.saturating_sub(before.mtp.windows),
+            "fallback_prefill_count": after.mtp.fallback_prefill_count.saturating_sub(before.mtp.fallback_prefill_count),
+            "draft_forward_us": after.mtp.draft_forward_us.saturating_sub(before.mtp.draft_forward_us),
+            "verify_forward_us": after.mtp.verify_forward_us.saturating_sub(before.mtp.verify_forward_us),
+            "projection_us": after.mtp.projection_us.saturating_sub(before.mtp.projection_us),
+            "sampling_us": after.mtp.sampling_us.saturating_sub(before.mtp.sampling_us),
+            "main_rollback_us": after.mtp.main_rollback_us.saturating_sub(before.mtp.main_rollback_us),
+            "prefill_cache_commit_us": after.mtp.prefill_cache_commit_us.saturating_sub(before.mtp.prefill_cache_commit_us),
+            "decode_cache_commit_us": after.mtp.decode_cache_commit_us.saturating_sub(before.mtp.decode_cache_commit_us),
+            "cache_restore_us": after.mtp.cache_restore_us.saturating_sub(before.mtp.cache_restore_us),
+        })
+    });
+    serde_json::json!({
+        "healthy": healthy,
+        "status": after.status,
+        "request_completion_ok": true,
+        "admission_queue_full_count_delta": admission_queue_full_count_delta,
+        "memory_budget_exceeded_count_delta": memory_budget_exceeded_count_delta,
+        "active_kv_degraded": after.active_kv_offload.degraded,
+        "active_kv_swap_error_count_delta": active_kv_swap_error_count_delta,
+        "logical_kv_cap_tokens": after.memory.kv_cache_logical_cap_tokens,
+        "resident_kv_cap_tokens": after.memory.kv_cache_resident_cap_tokens,
+        "mtp": mtp,
+    })
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -381,11 +532,20 @@ async fn main() -> Result<()> {
         );
     }
 
-    if args.prefix_cache_probe && args.format == OutputFormat::AutotuneJson {
-        anyhow::bail!("--prefix-cache-probe is incompatible with --format autotune-json");
+    if args.format == OutputFormat::AutotuneJson {
+        match (args.autotune_cache_state, args.prefix_cache_probe) {
+            (Some(AutotuneCacheState::Warm), true) | (Some(AutotuneCacheState::Cold), false) => {}
+            (Some(AutotuneCacheState::Warm), false) => {
+                anyhow::bail!("warm autotune cache state requires --prefix-cache-probe")
+            }
+            (Some(AutotuneCacheState::Cold), true) => {
+                anyhow::bail!("cold autotune cache state cannot use --prefix-cache-probe")
+            }
+            (None, _) => {}
+        }
     }
 
-    let autotune_options = args.autotune_export_options()?;
+    let mut autotune_options = args.autotune_export_options()?;
     let prefix_cache_probe = runner::PrefixCacheProbe::from_enabled(args.prefix_cache_probe);
 
     // Load tokenizer.json before building prompt sources so fixed prompts get
@@ -439,6 +599,11 @@ async fn main() -> Result<()> {
         .timeout(std::time::Duration::from_secs(args.timeout))
         .build()
         .context("reqwest::Client::build")?;
+    let autotune_health_before = if autotune_options.is_some() {
+        Some(fetch_autotune_health(&client, &args.target[0].1).await?)
+    } else {
+        None
+    };
 
     // Cells are heterogeneous between v1 (Sequential) and v2 (Concurrent) modes.
     // Use the unified enum so the existing `for cell in cells { render }` loop
@@ -479,7 +644,7 @@ async fn main() -> Result<()> {
         }
         Some(concurrent) => {
             // v2 concurrent path: share Client + Tokenizer via Arc.
-            let client_arc = std::sync::Arc::new(client);
+            let client_arc = std::sync::Arc::new(client.clone());
             let tokenizer_arc = std::sync::Arc::new(tokenizer);
             for prompt_source in &prompt_sources {
                 let prompt_source_arc = std::sync::Arc::new(prompt_source.clone());
@@ -504,6 +669,14 @@ async fn main() -> Result<()> {
                 }
             }
         }
+    }
+
+    if let Some(before) = autotune_health_before.as_ref() {
+        let after = fetch_autotune_health(&client, &args.target[0].1).await?;
+        autotune_options
+            .as_mut()
+            .expect("autotune options exist when health collection is enabled")
+            .runtime_health = health_delta(before, &after);
     }
 
     // Split cells back into sequential vs concurrent slices for the existing
@@ -705,26 +878,43 @@ mod tests {
 
     #[test]
     fn autotune_export_options_generates_hardware_label_when_omitted() {
-        let args = Args::parse_from([
-            "iron-bench",
-            "--target",
-            "ironmlx=http://localhost:8080",
-            "--model-dir",
-            "/tmp/model",
-            "--format",
-            "autotune-json",
-            "--autotune-b-max",
-            "2",
-            "--autotune-prefill-chunk-size",
-            "1024",
-            "--autotune-admission-deadline-ms",
-            "5",
-            "--autotune-admission-queue-max",
-            "32",
-            "--autotune-max-cache-cap",
-            "32768",
-            "--autotune-decode-cadence-mid-chunk-cap",
-            "256",
+        let context_path = std::env::temp_dir().join(format!(
+            "iron-bench-runtime-context-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time before unix epoch")
+                .as_nanos()
+        ));
+        std::fs::write(
+            &context_path,
+            r#"{"execution_model":"rolling-v1","logical_kv_cap_tokens":32768}"#,
+        )
+        .expect("write runtime context");
+        let args = Args::parse_from(vec![
+            "iron-bench".to_string(),
+            "--target".to_string(),
+            "ironmlx=http://localhost:8080".to_string(),
+            "--model-dir".to_string(),
+            "/tmp/model".to_string(),
+            "--format".to_string(),
+            "autotune-json".to_string(),
+            "--autotune-runtime-context".to_string(),
+            context_path.to_string_lossy().into_owned(),
+            "--autotune-cache-state".to_string(),
+            "cold".to_string(),
+            "--autotune-b-max".to_string(),
+            "2".to_string(),
+            "--autotune-prefill-chunk-size".to_string(),
+            "1024".to_string(),
+            "--autotune-admission-deadline-ms".to_string(),
+            "5".to_string(),
+            "--autotune-admission-queue-max".to_string(),
+            "32".to_string(),
+            "--autotune-max-cache-cap".to_string(),
+            "32768".to_string(),
+            "--autotune-decode-cadence-mid-chunk-cap".to_string(),
+            "256".to_string(),
         ]);
 
         let options = args
@@ -733,6 +923,8 @@ mod tests {
             .expect("autotune-json should produce export options");
 
         assert!(!options.hardware_label.trim().is_empty());
+        assert_eq!(options.runtime_context["execution_model"], "rolling-v1");
+        std::fs::remove_file(context_path).expect("remove runtime context");
     }
 
     #[test]

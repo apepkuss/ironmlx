@@ -7,6 +7,7 @@ use anyhow::{bail, Context};
 use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
 
+use super::scheduler_profile_context::SchedulerProfileRuntimeArgs;
 use super::scheduler_profile_store::{
     detect_scheduler_profile_hardware_label, SchedulerProfileStore,
 };
@@ -127,6 +128,9 @@ pub struct SchedulerAutotuneProfileDoctorArgs {
     /// Maximum accepted profile age before warning.
     #[arg(long, default_value_t = 30)]
     pub max_age_days: u64,
+
+    #[command(flatten)]
+    pub runtime: SchedulerProfileRuntimeArgs,
 }
 
 #[derive(Args, Debug)]
@@ -208,7 +212,7 @@ fn run_profile_list(store: &SchedulerProfileStore) -> Result<()> {
         return Ok(());
     }
     println!(
-        "id\tmodel_name\thardware_label\tstatus\truntime_schema\tironmlx_version\tupdated_at_unix_ms\tmodel_path\tprofile_path"
+        "id\tmodel_name\thardware_label\truntime_context\tstatus\truntime_schema\tironmlx_version\tupdated_at_unix_ms\tmodel_path\tprofile_path"
     );
     for record in records {
         let status = if record.profile_exists {
@@ -217,10 +221,11 @@ fn run_profile_list(store: &SchedulerProfileStore) -> Result<()> {
             "missing"
         };
         println!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             record.id,
             record.model_name,
             record.hardware_label,
+            record.runtime_context_fingerprint,
             status,
             record.runtime_schema_version,
             record.ironmlx_version,
@@ -252,7 +257,11 @@ fn run_profile_doctor(
 ) -> Result<()> {
     let model_name = profile_model_name(&args.model)?;
     let hardware_label = detect_scheduler_profile_hardware_label();
-    let Some(profile_path) = store.find_profile(&args.model, &model_name, &hardware_label)? else {
+    let runtime_context = args.runtime.context_for_model(&args.model)?;
+    let runtime_context_fingerprint = runtime_context.fingerprint();
+    let Some(profile_path) =
+        store.find_profile(&args.model, &hardware_label, &runtime_context_fingerprint)?
+    else {
         bail!(
             "no matching scheduler profile found for model={} model_name={} hardware_label={} store={}",
             args.model.display(),
@@ -266,6 +275,7 @@ fn run_profile_doctor(
         profile: &profile,
         expected_model_name: &model_name,
         expected_hardware_label: &hardware_label,
+        expected_runtime_context: &runtime_context,
         current_ironmlx_version: env!("CARGO_PKG_VERSION"),
         now_unix_ms: unix_time_ms(),
         max_age_days: args.max_age_days,
@@ -446,8 +456,8 @@ mod tests {
     use super::{import_profile, SchedulerAutotuneProfileImportArgs};
     use crate::cli::scheduler_profile_store::SchedulerProfileStore;
     use crate::core::scheduler_autotune::{
-        SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeProfile,
-        SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+        SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeContext,
+        SchedulerAutotuneRuntimeProfile, SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
     };
 
     #[test]
@@ -472,10 +482,20 @@ mod tests {
 
         assert_eq!(
             stored,
-            store.profile_path("GLM-4.7-Flash-4bit", "test-host", &model_dir)
+            store.profile_path(
+                "GLM-4.7-Flash-4bit",
+                "test-host",
+                profile.metadata.selection_profile,
+                &model_dir,
+                &profile.runtime_context.fingerprint(),
+            )
         );
         let loaded_path = store
-            .find_profile(&model_dir, "GLM-4.7-Flash-4bit", "test-host")
+            .find_profile(
+                &model_dir,
+                "test-host",
+                &profile.runtime_context.fingerprint(),
+            )
             .expect("find profile")
             .expect("profile should exist");
         assert_eq!(loaded_path, stored);
@@ -488,6 +508,7 @@ mod tests {
             schema_version: SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
             model_name: "GLM-4.7-Flash-4bit".to_string(),
             hardware_label: "test-host".to_string(),
+            runtime_context: SchedulerAutotuneRuntimeContext::local_default(32768),
             config: SchedulerAutotuneProfileConfig {
                 b_max: 1,
                 prefill_chunk_size: 2048,

@@ -41,6 +41,29 @@ pub trait Model {
         target: StreamOrDevice,
     ) -> Result<Array>;
 
+    /// Batched prefill for rows that all occupy the full sequence dimension.
+    ///
+    /// With no right-padding, the model's regular causal forward is sufficient
+    /// and avoids materializing a quadratic `[B, 1, T, T]` attention mask.
+    #[allow(clippy::too_many_arguments)]
+    fn batched_prefill_causal(
+        &self,
+        input_ids: &Array,
+        position_ids: &Array,
+        per_row_lens: &[i32],
+        cache: Option<&mut [LayerCache]>,
+        target: StreamOrDevice,
+    ) -> Result<Array> {
+        self.forward_on(
+            input_ids,
+            position_ids,
+            Some(per_row_lens),
+            None,
+            cache,
+            target,
+        )
+    }
+
     /// Forward through embed + transformer + final RmsNorm, returning the
     /// hidden states (NOT projected to logits). Used by the chunked-prefill
     /// path for intermediate (non-last) chunks where only KV cache needs to

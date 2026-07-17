@@ -2936,6 +2936,10 @@ mod tests {
             schema_version: SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
             model_name: "test-model".to_string(),
             hardware_label: "test-host".to_string(),
+            runtime_context:
+                crate::core::scheduler_autotune::SchedulerAutotuneRuntimeContext::local_default(
+                    1024,
+                ),
             config: profile_config(),
             rules: Vec::new(),
             metadata: SchedulerAutotuneRuntimeProfileMetadata::synthetic(0),
