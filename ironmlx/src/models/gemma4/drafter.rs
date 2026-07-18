@@ -17,9 +17,9 @@ use crate::core::generate::{
 };
 use crate::core::scheduler::{paged_prefix_fingerprint_for_request, DenseVlMethods};
 use crate::core::speculative::{
-    add_elapsed_us, adjust_mtp_draft_budget, resolve_speculative_tokens, sample_logits_positions,
-    slice_hidden_position, trim_full_layer_cache_rows_to_accepted_prefix, verify_input,
-    MtpSpeculativeConfig, MtpSpeculativeStats,
+    add_elapsed_us, adjust_mtp_draft_budget, elapsed_us_since, resolve_speculative_tokens,
+    sample_logits_positions, slice_hidden_position, trim_full_layer_cache_rows_to_accepted_prefix,
+    verify_input, MtpSpeculativeConfig, MtpSpeculativeStats,
 };
 use crate::core::tokenizer::{DecodeStream, Tokenizer};
 use crate::core::{Loader, Model};
@@ -1186,6 +1186,10 @@ impl<'m> Gemma4DrafterGenerationStream<'m> {
             return Ok(());
         }
 
+        let window_started = Instant::now();
+        let timing_before = self.stats.draft_cap_timing();
+        let context_tokens = self.history.len();
+
         let draft_budget = self
             .adaptive_draft_tokens
             .clamp(1, self.cfg.max_draft_tokens)
@@ -1224,6 +1228,8 @@ impl<'m> Gemma4DrafterGenerationStream<'m> {
         add_elapsed_us(&mut self.stats.sampling_us, sampling_start);
 
         let resolution = resolve_speculative_tokens(&draft_tokens, &verified_tokens)?;
+        let accepted_draft_len = resolution.accepted_draft_len;
+        let rollback_count = usize::from(resolution.needs_rollback);
         if self.trace_windows.len() < self.trace_window_limit {
             self.trace_windows.push(Gemma4DrafterTraceWindow {
                 history_len: self.history.len(),
@@ -1286,12 +1292,27 @@ impl<'m> Gemma4DrafterGenerationStream<'m> {
             tokens_to_append.truncate(stop_idx + 1);
         }
         tokens_to_append.truncate(remaining);
+        let committed_tokens = tokens_to_append.len();
         for token in tokens_to_append {
             self.history.push(token);
             self.pending_tokens.push_back(token);
         }
         self.prefix_cache
             .refresh_active_kv_residency_stats(&self.cache);
+        let timing_delta = self
+            .stats
+            .draft_cap_timing()
+            .saturating_delta_since(timing_before);
+        self.stats.record_draft_cap_observation(
+            self.cfg.max_draft_tokens,
+            &[draft_tokens.len()],
+            &[context_tokens],
+            accepted_draft_len,
+            committed_tokens,
+            rollback_count,
+            elapsed_us_since(window_started),
+            timing_delta,
+        );
         Ok(())
     }
 

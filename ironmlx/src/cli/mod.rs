@@ -6,6 +6,7 @@
 mod generate;
 mod info;
 mod kv_quant;
+mod mtp_draft_cap;
 mod scheduler_autotune;
 mod scheduler_autotune_calibrate;
 mod scheduler_profile_context;
@@ -37,6 +38,8 @@ enum Command {
     Generate(generate::GenerateArgs),
     /// Select a scheduler/autotune profile from offline calibration results.
     SchedulerAutotune(scheduler_autotune::SchedulerAutotuneArgs),
+    /// Recommend Gemma4 drafter caps from offline benchmark observations.
+    MtpDraftCap(mtp_draft_cap::MtpDraftCapArgs),
     /// Boot an OpenAI/Anthropic-compatible HTTP server (single-stream).
     Serve(Box<serve::ServeArgs>),
 }
@@ -47,6 +50,7 @@ impl Cli {
             Command::Info(args) => info::run(args),
             Command::Generate(args) => generate::run(args),
             Command::SchedulerAutotune(args) => scheduler_autotune::run(args),
+            Command::MtpDraftCap(args) => mtp_draft_cap::run(args),
             Command::Serve(args) => serve::run(*args),
         }
     }
@@ -57,6 +61,40 @@ mod tests {
     use clap::Parser;
 
     use super::{Cli, Command, KvQuantArg};
+
+    #[test]
+    fn mtp_draft_cap_subcommand_parses_inputs_and_threshold() {
+        let cli = Cli::parse_from([
+            "ironmlx",
+            "mtp-draft-cap",
+            "--input",
+            "cap1.json",
+            "--input",
+            "cap2.json",
+            "--min-windows",
+            "64",
+            "--min-records",
+            "5",
+            "--min-improvement-percent",
+            "4.5",
+            "--output",
+            "recommendation.json",
+        ]);
+
+        match cli.command {
+            Command::MtpDraftCap(args) => {
+                assert_eq!(args.input.len(), 2);
+                assert_eq!(args.min_windows, 64);
+                assert_eq!(args.min_records, 5);
+                assert_eq!(args.min_improvement_percent, 4.5);
+                assert_eq!(
+                    args.output.expect("output").to_string_lossy(),
+                    "recommendation.json"
+                );
+            }
+            other => panic!("expected MtpDraftCap command, got {other:?}"),
+        }
+    }
 
     #[test]
     fn scheduler_autotune_subcommand_parses_input_and_json_format() {

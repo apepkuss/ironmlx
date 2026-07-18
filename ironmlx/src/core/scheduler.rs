@@ -80,13 +80,13 @@ use crate::core::sampler::Sampler;
 use crate::core::speculative::{
     add_elapsed_us, add_mtp_decode_cache_commit_us, add_mtp_prefill_cache_commit_us,
     adjust_mtp_draft_budget, commit_mtp_cache_hidden_prefix, commit_mtp_cache_hidden_tail,
-    effective_mtp_draft_tokens_for_paged_prefix, layer_cache_supports_accepted_prefix_trim,
-    resolve_greedy_verified_hidden_until_mismatch, resolve_speculative_tokens, restore_layer_cache,
-    rollback_main_cache_to_accepted_prefix, sample_logits_positions, slice_hidden_position,
-    slice_position_ids_prefix, trim_full_layer_cache_rows_to_accepted_prefix, verify_input,
-    zero_hidden_like_position, MainCacheRollbackInput, MtpDraftPolicyState, MtpDraftPolicyWindow,
-    MtpDraftResult, MtpSpeculativeConfig, MtpSpeculativeModel, MtpSpeculativeStats,
-    SpeculativeResolution,
+    effective_mtp_draft_tokens_for_paged_prefix, elapsed_us_since,
+    layer_cache_supports_accepted_prefix_trim, resolve_greedy_verified_hidden_until_mismatch,
+    resolve_speculative_tokens, restore_layer_cache, rollback_main_cache_to_accepted_prefix,
+    sample_logits_positions, slice_hidden_position, slice_position_ids_prefix,
+    trim_full_layer_cache_rows_to_accepted_prefix, verify_input, zero_hidden_like_position,
+    MainCacheRollbackInput, MtpDraftPolicyState, MtpDraftPolicyWindow, MtpDraftResult,
+    MtpSpeculativeConfig, MtpSpeculativeModel, MtpSpeculativeStats, SpeculativeResolution,
 };
 use crate::nn::{
     enable_paged_hot_cold_tiering_caches, enable_paged_kv_caches, enable_turboquant_kv_caches,
@@ -954,7 +954,7 @@ fn append_resolved_gemma4_tokens(
     row_state: &mut SchedulerGemma4DrafterRowState,
     ctx: &Gemma4DrafterBatchedFillContext,
     resolution: SpeculativeResolution,
-) {
+) -> usize {
     let mut tokens_to_append = resolution.tokens_to_append;
     if let Some(stop_idx) = tokens_to_append
         .iter()
@@ -963,7 +963,9 @@ fn append_resolved_gemma4_tokens(
         tokens_to_append.truncate(stop_idx + 1);
     }
     tokens_to_append.truncate(ctx.remaining);
+    let committed_tokens = tokens_to_append.len();
     row_state.pending_tokens.extend(tokens_to_append);
+    committed_tokens
 }
 
 fn active_kv_entry_supported(entry: &PagedPrefixEntry) -> bool {
@@ -1158,57 +1160,7 @@ fn generate_request_from_state(state: &RequestState) -> Result<GenerateRequest> 
 }
 
 fn add_mtp_stats(dst: &mut MtpSpeculativeStats, src: MtpSpeculativeStats) {
-    dst.windows = dst.windows.saturating_add(src.windows);
-    dst.drafted_tokens = dst.drafted_tokens.saturating_add(src.drafted_tokens);
-    dst.accepted_draft_tokens = dst
-        .accepted_draft_tokens
-        .saturating_add(src.accepted_draft_tokens);
-    if dst.draft_attempts_by_position.len() < src.draft_attempts_by_position.len() {
-        dst.draft_attempts_by_position
-            .resize(src.draft_attempts_by_position.len(), 0);
-    }
-    for (idx, value) in src.draft_attempts_by_position.into_iter().enumerate() {
-        dst.draft_attempts_by_position[idx] =
-            dst.draft_attempts_by_position[idx].saturating_add(value);
-    }
-    if dst.draft_accepts_by_position.len() < src.draft_accepts_by_position.len() {
-        dst.draft_accepts_by_position
-            .resize(src.draft_accepts_by_position.len(), 0);
-    }
-    for (idx, value) in src.draft_accepts_by_position.into_iter().enumerate() {
-        dst.draft_accepts_by_position[idx] =
-            dst.draft_accepts_by_position[idx].saturating_add(value);
-    }
-    dst.rollback_count = dst.rollback_count.saturating_add(src.rollback_count);
-    dst.mtp_cache_reuse_count = dst
-        .mtp_cache_reuse_count
-        .saturating_add(src.mtp_cache_reuse_count);
-    dst.mtp_cache_reused_tokens = dst
-        .mtp_cache_reused_tokens
-        .saturating_add(src.mtp_cache_reused_tokens);
-    dst.draft_budget_reductions = dst
-        .draft_budget_reductions
-        .saturating_add(src.draft_budget_reductions);
-    dst.draft_budget_increases = dst
-        .draft_budget_increases
-        .saturating_add(src.draft_budget_increases);
-    dst.draft_forward_us = dst.draft_forward_us.saturating_add(src.draft_forward_us);
-    dst.verify_forward_us = dst.verify_forward_us.saturating_add(src.verify_forward_us);
-    dst.projection_us = dst.projection_us.saturating_add(src.projection_us);
-    dst.sampling_us = dst.sampling_us.saturating_add(src.sampling_us);
-    dst.main_rollback_us = dst.main_rollback_us.saturating_add(src.main_rollback_us);
-    dst.mtp_cache_commit_us = dst
-        .mtp_cache_commit_us
-        .saturating_add(src.mtp_cache_commit_us);
-    dst.mtp_prefill_cache_commit_us = dst
-        .mtp_prefill_cache_commit_us
-        .saturating_add(src.mtp_prefill_cache_commit_us);
-    dst.mtp_decode_cache_commit_us = dst
-        .mtp_decode_cache_commit_us
-        .saturating_add(src.mtp_decode_cache_commit_us);
-    dst.mtp_cache_restore_us = dst
-        .mtp_cache_restore_us
-        .saturating_add(src.mtp_cache_restore_us);
+    dst.merge_from(src);
 }
 
 pub(crate) fn paged_prefix_fingerprint_for_request(
@@ -9506,6 +9458,9 @@ impl Scheduler<crate::models::Gemma4Model> {
             ));
         }
 
+        let window_started = Instant::now();
+        let timing_before = stats.draft_cap_timing();
+
         let mut contexts = Vec::with_capacity(rows_to_fill.len());
         for &row_idx in rows_to_fill {
             let slot = self.slots[row_idx].as_ref().ok_or_else(|| {
@@ -9748,6 +9703,11 @@ impl Scheduler<crate::models::Gemma4Model> {
                 ))
             })
             .collect::<Vec<_>>();
+        let accepted_draft_tokens = resolutions
+            .iter()
+            .map(|resolution| resolution.accepted_draft_len)
+            .sum();
+        let rollback_count = mismatch_rows.len();
         if !mismatch_rows.is_empty() {
             let rollback_start = Instant::now();
             {
@@ -9768,6 +9728,7 @@ impl Scheduler<crate::models::Gemma4Model> {
         // rejected suffix preserves its absolute start. Batched attention
         // returns the full padded cache view and must use each row's offset.
         let single_row_layout = active_rows.len() == 1;
+        let mut committed_tokens = 0usize;
         for (ctx_idx, (ctx, resolution)) in contexts.iter().zip(resolutions).enumerate() {
             let compact_row = cache_row_for_ctx[ctx_idx];
             let accepted_len = resolution.accepted_verify_input_len;
@@ -9818,10 +9779,36 @@ impl Scheduler<crate::models::Gemma4Model> {
                     mlx::StreamOrDevice::default(),
                 )?
             };
-            append_resolved_gemma4_tokens(row_state, ctx, resolution);
+            committed_tokens = committed_tokens
+                .saturating_add(append_resolved_gemma4_tokens(row_state, ctx, resolution));
         }
 
         self.refresh_active_kv_residency_stats();
+        let timing_delta = stats
+            .draft_cap_timing()
+            .saturating_delta_since(timing_before);
+        let draft_tokens_by_row = contexts
+            .iter()
+            .map(|ctx| ctx.draft_tokens.len())
+            .collect::<Vec<_>>();
+        let context_tokens_by_row = contexts
+            .iter()
+            .map(|ctx| {
+                usize::try_from(ctx.kv_valid_len)
+                    .unwrap_or(0)
+                    .saturating_add(1)
+            })
+            .collect::<Vec<_>>();
+        stats.record_draft_cap_observation(
+            cfg.max_draft_tokens,
+            &draft_tokens_by_row,
+            &context_tokens_by_row,
+            accepted_draft_tokens,
+            committed_tokens,
+            rollback_count,
+            elapsed_us_since(window_started),
+            timing_delta,
+        );
         Ok(())
     }
 
@@ -9960,6 +9947,10 @@ impl Scheduler<crate::models::Gemma4Model> {
         history.extend_from_slice(&prompt_ids);
         history.extend_from_slice(&generated_tokens);
 
+        let window_started = Instant::now();
+        let timing_before = stats.draft_cap_timing();
+        let context_tokens = history.len();
+
         let draft_budget = row_state
             .adaptive_draft_tokens
             .clamp(1, cfg.max_draft_tokens)
@@ -10018,6 +10009,8 @@ impl Scheduler<crate::models::Gemma4Model> {
         self.scatter_prng_state_from_rows(&[row_idx], &compact_prng)?;
 
         let resolution = resolve_speculative_tokens(&draft_tokens, &verified_tokens)?;
+        let accepted_draft_len = resolution.accepted_draft_len;
+        let rollback_count = usize::from(resolution.needs_rollback);
         stats.windows += 1;
         stats.drafted_tokens += draft_tokens.len();
         stats.accepted_draft_tokens += resolution.accepted_draft_len;
@@ -10076,8 +10069,22 @@ impl Scheduler<crate::models::Gemma4Model> {
             tokens_to_append.truncate(stop_idx + 1);
         }
         tokens_to_append.truncate(remaining);
+        let committed_tokens = tokens_to_append.len();
         row_state.pending_tokens.extend(tokens_to_append);
         self.refresh_active_kv_residency_stats();
+        let timing_delta = stats
+            .draft_cap_timing()
+            .saturating_delta_since(timing_before);
+        stats.record_draft_cap_observation(
+            cfg.max_draft_tokens,
+            &[draft_tokens.len()],
+            &[context_tokens],
+            accepted_draft_len,
+            committed_tokens,
+            rollback_count,
+            elapsed_us_since(window_started),
+            timing_delta,
+        );
         Ok(())
     }
 
@@ -10391,48 +10398,45 @@ mod tests {
     #[test]
     #[serial(mlx_metal)]
     fn gemma4_drafter_temp_scheduler_preserves_active_kv_budget_policy() {
-        crate::core::memory_budget::with_total_ram_bytes_for_test("137438953472", || {
-            let meta = crate::core::memory_budget::test_meta_gemma4_12b();
-            let resident_cap = 1_024;
-            let policy =
-                crate::core::memory_budget::KvBudgetPolicy::active_kv_offload(resident_cap);
-            let budget_state = crate::core::memory_budget::BudgetState::with_caps(
-                crate::core::memory_budget::kv_cache_bytes(1, resident_cap, &meta),
-                262_144,
-                resident_cap,
-                policy,
-            );
-            let memory_budget_exceeded_count =
-                std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-            let mut scheduler = Scheduler::<crate::models::Gemma4Model>::new_with_state(
-                1,
-                262_144,
-                budget_state,
-                memory_budget_exceeded_count,
-                meta,
-            )
-            .expect("parent scheduler startup");
-            let root = std::env::temp_dir().join(format!(
-                "ironmlx-gemma4-drafter-temp-budget-{}",
-                uuid::Uuid::new_v4().simple()
-            ));
-            let config = crate::core::cache::ActiveKvOffloadConfig::enabled(root.clone());
-            let stats = crate::core::cache::ActiveKvOffloadSharedStats::new(&config);
-            scheduler
-                .enable_active_kv_offload(config, stats)
-                .expect("enable active KV offload");
-            scheduler
-                .admit(mk_req(vec![1, 2, 3, 4]))
-                .expect("admit request");
+        let meta = crate::core::memory_budget::test_meta_gemma4_12b();
+        let resident_cap = 1_024;
+        let policy = crate::core::memory_budget::KvBudgetPolicy::active_kv_offload(resident_cap);
+        let budget_state = crate::core::memory_budget::BudgetState::with_caps(
+            crate::core::memory_budget::kv_cache_bytes(1, resident_cap, &meta),
+            262_144,
+            resident_cap,
+            policy,
+        );
+        let memory_budget_exceeded_count =
+            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mut scheduler = Scheduler::<crate::models::Gemma4Model>::new_with_state(
+            1,
+            262_144,
+            budget_state,
+            memory_budget_exceeded_count,
+            meta,
+        )
+        .expect("parent scheduler startup");
+        let root = std::env::temp_dir().join(format!(
+            "ironmlx-gemma4-drafter-temp-budget-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let config = crate::core::cache::ActiveKvOffloadConfig::enabled(root.clone());
+        let stats = crate::core::cache::ActiveKvOffloadSharedStats::new(&config);
+        scheduler
+            .enable_active_kv_offload(config, stats)
+            .expect("enable active KV offload");
+        scheduler
+            .admit(mk_req(vec![1, 2, 3, 4]))
+            .expect("admit request");
 
-            let temp = scheduler
-                .temp_gemma4_drafter_scheduler_for_row(0)
-                .expect("temp scheduler should use resident offload budget");
+        let temp = scheduler
+            .temp_gemma4_drafter_scheduler_for_row(0)
+            .expect("temp scheduler should use resident offload budget");
 
-            assert_eq!(temp.budget_state.policy().name(), "active_kv_offload");
-            assert_eq!(temp.budget_state.resident_cap(), resident_cap);
-            std::fs::remove_dir_all(root).ok();
-        });
+        assert_eq!(temp.budget_state.policy().name(), "active_kv_offload");
+        assert_eq!(temp.budget_state.resident_cap(), resident_cap);
+        std::fs::remove_dir_all(root).ok();
     }
 
     /// Helper: build a minimal `GenerateRequest` for tests. Uses
@@ -11581,38 +11585,35 @@ mod tests {
     #[test]
     #[serial(mlx_metal)]
     fn mtp_temp_scheduler_preserves_active_kv_budget_policy() {
-        crate::core::memory_budget::with_total_ram_bytes_for_test("17179869184", || {
-            let meta = crate::core::memory_budget::test_meta_qwen35();
-            let resident_cap = 1_024;
-            let policy =
-                crate::core::memory_budget::KvBudgetPolicy::active_kv_offload(resident_cap);
-            let budget_state = crate::core::memory_budget::BudgetState::with_caps(
-                crate::core::memory_budget::kv_cache_bytes(1, resident_cap, &meta),
-                262_144,
-                resident_cap,
-                policy,
-            );
-            let memory_budget_exceeded_count =
-                std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-            let mut scheduler = Scheduler::<ScriptedMtpSchedulerModel>::new_with_state(
-                1,
-                262_144,
-                budget_state,
-                memory_budget_exceeded_count,
-                meta,
-            )
-            .expect("parent scheduler startup");
-            scheduler
-                .admit(mtp_req(vec![1, 2, 3, 4], 16))
-                .expect("admit request");
+        let meta = crate::core::memory_budget::test_meta_qwen35();
+        let resident_cap = 1_024;
+        let policy = crate::core::memory_budget::KvBudgetPolicy::active_kv_offload(resident_cap);
+        let budget_state = crate::core::memory_budget::BudgetState::with_caps(
+            crate::core::memory_budget::kv_cache_bytes(1, resident_cap, &meta),
+            262_144,
+            resident_cap,
+            policy,
+        );
+        let memory_budget_exceeded_count =
+            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mut scheduler = Scheduler::<ScriptedMtpSchedulerModel>::new_with_state(
+            1,
+            262_144,
+            budget_state,
+            memory_budget_exceeded_count,
+            meta,
+        )
+        .expect("parent scheduler startup");
+        scheduler
+            .admit(mtp_req(vec![1, 2, 3, 4], 16))
+            .expect("admit request");
 
-            let temp = scheduler
-                .temp_mtp_scheduler_for_row(0)
-                .expect("temp MTP scheduler should use resident offload budget");
+        let temp = scheduler
+            .temp_mtp_scheduler_for_row(0)
+            .expect("temp MTP scheduler should use resident offload budget");
 
-            assert_eq!(temp.budget_state.policy().name(), "active_kv_offload");
-            assert_eq!(temp.budget_state.resident_cap(), resident_cap);
-        });
+        assert_eq!(temp.budget_state.policy().name(), "active_kv_offload");
+        assert_eq!(temp.budget_state.resident_cap(), resident_cap);
     }
 
     #[test]
