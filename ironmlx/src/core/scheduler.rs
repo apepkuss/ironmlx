@@ -91,7 +91,7 @@ use crate::core::speculative::{
 use crate::nn::{
     enable_paged_hot_cold_tiering_caches, enable_paged_kv_caches, enable_turboquant_kv_caches,
     prefix_entry_for_row, prefix_key_spec_for_caches, restore_prefix_entry_for_row,
-    restore_prefix_entry_for_rows, LayerCache, LayerCacheSnapshot,
+    restore_prefix_entry_for_rows, LayerCache,
 };
 
 /// Convenience alias — avoids `clippy::type_complexity` on Vec<Option<&[...]>> sites.
@@ -681,54 +681,28 @@ fn mtp_supported_max_draft_tokens(
     )
 }
 
-fn restore_layer_cache_compact_rows(
-    cache: &mut [LayerCache],
-    snapshots: &[LayerCacheSnapshot],
-    compact_rows: &[usize],
-) -> Result<()> {
-    if cache.len() != snapshots.len() {
-        return Err(anyhow!(
-            "restore_layer_cache_compact_rows: cache.len()={} != snapshots.len()={}",
-            cache.len(),
-            snapshots.len()
-        ));
-    }
-    if compact_rows.is_empty() {
-        return Ok(());
-    }
-
-    for (layer_idx, (layer, snapshot)) in cache.iter_mut().zip(snapshots.iter()).enumerate() {
-        match (layer, snapshot) {
-            (LayerCache::Full(kv), LayerCacheSnapshot::Full(saved)) => {
-                let mut offsets = kv.offsets().to_vec();
-                for &row in compact_rows {
-                    let saved_offset = *saved.offsets().get(row).ok_or_else(|| {
-                        anyhow!(
-                            "restore_layer_cache_compact_rows: row {row} out of saved offsets for layer {layer_idx}"
-                        )
-                    })?;
-                    let live = offsets.get_mut(row).ok_or_else(|| {
-                        anyhow!(
-                            "restore_layer_cache_compact_rows: row {row} out of live offsets for layer {layer_idx}"
-                        )
-                    })?;
-                    *live = saved_offset;
-                }
-                kv.restore_offsets(&offsets)?;
-            }
-            (LayerCache::Full(_), _) => {
+fn full_layer_cache_row_offset(cache: &[LayerCache], row: usize) -> Result<i32> {
+    let mut expected = None;
+    for (layer_idx, layer) in cache.iter().enumerate() {
+        let LayerCache::Full(kv) = layer else {
+            return Err(anyhow!(
+                "full_layer_cache_row_offset: Gemma4 drafter requires Full KV at layer {layer_idx}"
+            ));
+        };
+        let offset = *kv.offsets().get(row).ok_or_else(|| {
+            anyhow!("full_layer_cache_row_offset: row {row} out of offsets for layer {layer_idx}")
+        })?;
+        if let Some(expected) = expected {
+            if offset != expected {
                 return Err(anyhow!(
-                    "restore_layer_cache_compact_rows: snapshot type mismatch for full layer {layer_idx}"
+                    "full_layer_cache_row_offset: row {row} offset {offset} at layer {layer_idx} != {expected}"
                 ));
             }
-            _ => {
-                return Err(anyhow!(
-                    "restore_layer_cache_compact_rows: Gemma4 drafter batched rollback only supports Full KV layers, layer {layer_idx}"
-                ));
-            }
+        } else {
+            expected = Some(offset);
         }
     }
-    Ok(())
+    expected.ok_or_else(|| anyhow!("full_layer_cache_row_offset: cache has no layers"))
 }
 
 fn build_gemma4_drafter_batched_verify_input(
@@ -767,51 +741,6 @@ fn build_gemma4_drafter_batched_verify_input(
         }
         let start = compact_row * max_len;
         flat[start..start + input_len].copy_from_slice(&ctx.verify_input);
-        lens[compact_row] = input_len as i32;
-    }
-    let arr: Array = (&flat[..], &[b as i32, max_len as i32][..]).try_into()?;
-    Ok((arr, lens))
-}
-
-fn build_gemma4_drafter_batched_replay_input(
-    active_rows: &[usize],
-    contexts: &[Gemma4DrafterBatchedFillContext],
-    cache_row_for_ctx: &[usize],
-    mismatch_ctx_indices: &[(usize, SpeculativeResolution)],
-    max_len: usize,
-) -> Result<(Array, Vec<i32>)> {
-    let b = active_rows.len();
-    if b == 0 || max_len == 0 {
-        return Err(anyhow!(
-            "build_gemma4_drafter_batched_replay_input: empty batch b={b} max_len={max_len}"
-        ));
-    }
-    let mut flat = vec![0_u32; b * max_len];
-    let mut lens = vec![0_i32; b];
-    for (ctx_idx, resolution) in mismatch_ctx_indices {
-        let ctx = contexts.get(*ctx_idx).ok_or_else(|| {
-            anyhow!("build_gemma4_drafter_batched_replay_input: ctx_idx {ctx_idx} out of range")
-        })?;
-        let compact_row = *cache_row_for_ctx.get(*ctx_idx).ok_or_else(|| {
-            anyhow!(
-                "build_gemma4_drafter_batched_replay_input: cache row for ctx_idx {ctx_idx} missing"
-            )
-        })?;
-        if compact_row >= b {
-            return Err(anyhow!(
-                "build_gemma4_drafter_batched_replay_input: compact row {compact_row} >= batch {b}"
-            ));
-        }
-        let input_len = resolution.accepted_verify_input_len;
-        if input_len == 0 || input_len > max_len || input_len > ctx.verify_input.len() {
-            return Err(anyhow!(
-                "build_gemma4_drafter_batched_replay_input: row {} replay input_len={input_len} max_len={max_len} verify_len={}",
-                ctx.row_idx,
-                ctx.verify_input.len()
-            ));
-        }
-        let start = compact_row * max_len;
-        flat[start..start + input_len].copy_from_slice(&ctx.verify_input[..input_len]);
         lens[compact_row] = input_len as i32;
     }
     let arr: Array = (&flat[..], &[b as i32, max_len as i32][..]).try_into()?;
@@ -9788,8 +9717,7 @@ impl Scheduler<crate::models::Gemma4Model> {
         let verified_tokens_flat: Vec<u32> = verified_ids.to_vec()?;
         add_elapsed_us(&mut stats.sampling_us, sampling_start);
 
-        let mut mismatch_ctx_indices = Vec::new();
-        let mut full_accept_ctx_indices = Vec::new();
+        let mut resolutions = Vec::with_capacity(contexts.len());
         for (ctx_idx, ctx) in contexts.iter().enumerate() {
             let compact_row = cache_row_for_ctx[ctx_idx];
             let verify_len = ctx.verify_input.len();
@@ -9806,15 +9734,42 @@ impl Scheduler<crate::models::Gemma4Model> {
             stats.record_window_acceptance(ctx.draft_tokens.len(), resolution.accepted_draft_len);
             if resolution.needs_rollback {
                 stats.rollback_count += 1;
-                mismatch_ctx_indices.push((ctx_idx, resolution));
-            } else {
-                full_accept_ctx_indices.push((ctx_idx, resolution));
             }
+            resolutions.push(resolution);
         }
 
-        for (ctx_idx, resolution) in &full_accept_ctx_indices {
-            let ctx = &contexts[*ctx_idx];
-            let compact_row = cache_row_for_ctx[*ctx_idx];
+        let mismatch_rows = resolutions
+            .iter()
+            .enumerate()
+            .filter_map(|(ctx_idx, resolution)| {
+                resolution.needs_rollback.then_some((
+                    cache_row_for_ctx[ctx_idx],
+                    resolution.accepted_verify_input_len,
+                ))
+            })
+            .collect::<Vec<_>>();
+        if !mismatch_rows.is_empty() {
+            let rollback_start = Instant::now();
+            {
+                let cache = self.cache.as_mut().ok_or_else(|| {
+                    anyhow!("fill_gemma4_drafter_windows_batched: main cache absent")
+                })?;
+                trim_full_layer_cache_rows_to_accepted_prefix(
+                    cache.as_mut_slice(),
+                    &base_snapshot,
+                    &mismatch_rows,
+                )?;
+            }
+            self.refresh_active_kv_residency_stats();
+            add_elapsed_us(&mut stats.main_rollback_us, rollback_start);
+        }
+
+        // B=1 sliding attention returns a tail-aligned view, so removing the
+        // rejected suffix preserves its absolute start. Batched attention
+        // returns the full padded cache view and must use each row's offset.
+        let single_row_layout = active_rows.len() == 1;
+        for (ctx_idx, (ctx, resolution)) in contexts.iter().zip(resolutions).enumerate() {
+            let compact_row = cache_row_for_ctx[ctx_idx];
             let accepted_len = resolution.accepted_verify_input_len;
             let row_state = row_states.get_mut(&ctx.row_idx).ok_or_else(|| {
                 anyhow!(
@@ -9835,93 +9790,35 @@ impl Scheduler<crate::models::Gemma4Model> {
                 accepted_len - 1,
                 mlx::StreamOrDevice::default(),
             )?;
-            row_state.shared_kv = crate::models::gemma4::shared_kv_row_view_on(
-                &verified.shared_kv,
-                compact_row,
-                mlx::StreamOrDevice::default(),
-            )?;
-            append_resolved_gemma4_tokens(row_state, ctx, resolution.clone());
-        }
-
-        if !mismatch_ctx_indices.is_empty() {
-            let mismatch_rows = mismatch_ctx_indices
-                .iter()
-                .map(|(ctx_idx, _)| cache_row_for_ctx[*ctx_idx])
-                .collect::<Vec<_>>();
-            let rollback_start = Instant::now();
-            {
-                let cache = self.cache.as_mut().ok_or_else(|| {
-                    anyhow!("fill_gemma4_drafter_windows_batched: main cache absent")
+            row_state.shared_kv = if single_row_layout {
+                let rejected_len = ctx.verify_input.len().checked_sub(accepted_len).ok_or_else(|| {
+                    anyhow!(
+                        "fill_gemma4_drafter_windows_batched: row {} accepted length {accepted_len} exceeds verify length {}",
+                        ctx.row_idx,
+                        ctx.verify_input.len()
+                    )
                 })?;
-                restore_layer_cache_compact_rows(
-                    cache.as_mut_slice(),
-                    &base_snapshot,
-                    &mismatch_rows,
-                )?;
-            }
-            self.refresh_active_kv_residency_stats();
-            add_elapsed_us(&mut stats.main_rollback_us, rollback_start);
-
-            let max_replay_len = mismatch_ctx_indices
-                .iter()
-                .map(|(_, resolution)| resolution.accepted_verify_input_len)
-                .max()
-                .unwrap_or(0);
-            let (replay_arr, replay_lens) = build_gemma4_drafter_batched_replay_input(
-                &active_rows,
-                &contexts,
-                &cache_row_for_ctx,
-                &mismatch_ctx_indices,
-                max_replay_len,
-            )?;
-            let replay_pos_ids = self.reusable_dummy_position_ids()?;
-            let replay_forward_start = Instant::now();
-            let replay = {
-                let cache = self.cache.as_mut().ok_or_else(|| {
-                    anyhow!("fill_gemma4_drafter_windows_batched: main cache absent")
-                })?;
-                model.forward_text_hidden_with_shared_kv_on(
-                    &replay_arr,
-                    &replay_pos_ids,
-                    Some(&replay_lens),
-                    None,
-                    Some(cache.as_mut_slice()),
+                crate::models::gemma4::shared_kv_row_trim_suffix_on(
+                    &verified.shared_kv,
+                    compact_row,
+                    rejected_len,
+                    mlx::StreamOrDevice::default(),
+                )?
+            } else {
+                let accepted_cache_len = {
+                    let cache = self.cache.as_ref().ok_or_else(|| {
+                        anyhow!("fill_gemma4_drafter_windows_batched: main cache absent")
+                    })?;
+                    full_layer_cache_row_offset(cache.as_slice(), compact_row)?
+                };
+                crate::models::gemma4::shared_kv_row_prefix_on(
+                    &verified.shared_kv,
+                    compact_row,
+                    accepted_cache_len,
                     mlx::StreamOrDevice::default(),
                 )?
             };
-            self.refresh_active_kv_residency_stats();
-            add_elapsed_us(&mut stats.verify_forward_us, replay_forward_start);
-
-            for (ctx_idx, resolution) in mismatch_ctx_indices {
-                let ctx = &contexts[ctx_idx];
-                let compact_row = cache_row_for_ctx[ctx_idx];
-                let accepted_len = resolution.accepted_verify_input_len;
-                let row_state = row_states.get_mut(&ctx.row_idx).ok_or_else(|| {
-                    anyhow!(
-                        "fill_gemma4_drafter_windows_batched: row {} state absent after replay",
-                        ctx.row_idx
-                    )
-                })?;
-                adjust_mtp_draft_budget(
-                    cfg.max_draft_tokens,
-                    &mut row_state.adaptive_draft_tokens,
-                    ctx.draft_tokens.len(),
-                    resolution.accepted_draft_len,
-                    stats,
-                );
-                row_state.last_hidden = slice_hidden_row_position(
-                    &replay.hidden,
-                    compact_row,
-                    accepted_len - 1,
-                    mlx::StreamOrDevice::default(),
-                )?;
-                row_state.shared_kv = crate::models::gemma4::shared_kv_row_view_on(
-                    &replay.shared_kv,
-                    compact_row,
-                    mlx::StreamOrDevice::default(),
-                )?;
-                append_resolved_gemma4_tokens(row_state, ctx, resolution);
-            }
+            append_resolved_gemma4_tokens(row_state, ctx, resolution);
         }
 
         self.refresh_active_kv_residency_stats();
@@ -10136,49 +10033,37 @@ impl Scheduler<crate::models::Gemma4Model> {
             stats,
         );
 
-        let (accepted_last_hidden, accepted_shared_kv) = if resolution.needs_rollback {
+        let accepted_len = resolution.accepted_verify_input_len;
+        let accepted_last_hidden =
+            slice_hidden_position(&verified.hidden, i32::try_from(accepted_len)? - 1)?;
+        let accepted_shared_kv = if resolution.needs_rollback {
             let rollback_start = Instant::now();
             {
                 let cache = self.cache.as_mut().ok_or_else(|| {
                     anyhow!("fill_gemma4_drafter_window_single: main cache absent")
                 })?;
-                restore_layer_cache(cache.as_mut_slice(), &base_snapshot)?;
+                trim_full_layer_cache_rows_to_accepted_prefix(
+                    cache.as_mut_slice(),
+                    &base_snapshot,
+                    &[(0, accepted_len)],
+                )?;
             }
             self.refresh_active_kv_residency_stats();
             add_elapsed_us(&mut stats.main_rollback_us, rollback_start);
-            let replay_len = resolution.accepted_verify_input_len;
-            let replay_input = &verify_input[..replay_len];
-            let replay_arr: Array = (replay_input, &[1_i32, replay_len as i32][..]).try_into()?;
-            let replay_pos_ids =
-                self.gemma4_drafter_position_ids(model, verify_start_pos, replay_len as i32)?;
-            let replay_forward_start = Instant::now();
-            let replay = {
-                let cache = self.cache.as_mut().ok_or_else(|| {
-                    anyhow!("fill_gemma4_drafter_window_single: main cache absent")
-                })?;
-                model.forward_text_hidden_with_shared_kv_on(
-                    &replay_arr,
-                    &replay_pos_ids,
-                    None,
-                    None,
-                    Some(cache.as_mut_slice()),
-                    mlx::StreamOrDevice::default(),
-                )?
-            };
-            self.refresh_active_kv_residency_stats();
-            add_elapsed_us(&mut stats.verify_forward_us, replay_forward_start);
-            (
-                slice_hidden_position(&replay.hidden, replay_len as i32 - 1)?,
-                replay.shared_kv,
-            )
+            let rejected_len = verify_input.len().checked_sub(accepted_len).ok_or_else(|| {
+                anyhow!(
+                    "fill_gemma4_drafter_window_single: accepted length {accepted_len} exceeds verify length {}",
+                    verify_input.len()
+                )
+            })?;
+            crate::models::gemma4::shared_kv_row_trim_suffix_on(
+                &verified.shared_kv,
+                0,
+                rejected_len,
+                mlx::StreamOrDevice::default(),
+            )?
         } else {
-            (
-                slice_hidden_position(
-                    &verified.hidden,
-                    resolution.accepted_verify_input_len as i32 - 1,
-                )?,
-                verified.shared_kv,
-            )
+            verified.shared_kv
         };
         row_state.last_hidden = accepted_last_hidden;
         row_state.shared_kv = accepted_shared_kv;
@@ -10322,7 +10207,7 @@ mod tests {
     type TestScheduler = Scheduler<crate::models::qwen3_5::Qwen35Model>;
 
     #[test]
-    fn restore_layer_cache_compact_rows_only_selected_offsets() {
+    fn accepted_prefix_trim_updates_only_selected_cache_rows() {
         let mut cache = vec![LayerCache::Full(
             KVCache::new(2, 1, 1, 1, Dtype::Float32, 8).with_step(4),
         )];
@@ -10351,11 +10236,34 @@ mod tests {
         kv.update_and_fetch(&k2, &v2, &[2, 2])
             .expect("second update");
 
-        restore_layer_cache_compact_rows(&mut cache, &snapshot, &[1]).expect("row restore");
+        trim_full_layer_cache_rows_to_accepted_prefix(&mut cache, &snapshot, &[(1, 1)])
+            .expect("accepted-prefix trim");
         let LayerCache::Full(kv) = &cache[0] else {
             panic!("full cache");
         };
-        assert_eq!(kv.offsets(), &[4, 2]);
+        assert_eq!(kv.offsets(), &[4, 3]);
+        assert_eq!(full_layer_cache_row_offset(&cache, 0).unwrap(), 4);
+        assert_eq!(full_layer_cache_row_offset(&cache, 1).unwrap(), 3);
+    }
+
+    #[test]
+    fn full_layer_cache_row_offset_rejects_layer_drift() {
+        let mut first = KVCache::new(1, 1, 1, 1, Dtype::Float32, 8).with_step(4);
+        let mut second = KVCache::new(1, 1, 1, 1, Dtype::Float32, 8).with_step(4);
+        let k: Array = (&[1.0_f32, 2.0][..], &[1_i32, 1, 2, 1][..])
+            .try_into()
+            .unwrap();
+        let v = &k + 10.0_f32;
+        first.update_and_fetch(&k, &v, &[2]).unwrap();
+        second.update_and_fetch(&k, &v, &[1]).unwrap();
+        let cache = vec![LayerCache::Full(first), LayerCache::Full(second)];
+
+        let err = full_layer_cache_row_offset(&cache, 0).unwrap_err();
+
+        assert!(
+            err.to_string().contains("offset 1 at layer 1 != 2"),
+            "unexpected error: {err:#}"
+        );
     }
 
     #[test]

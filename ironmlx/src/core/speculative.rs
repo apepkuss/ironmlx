@@ -85,7 +85,7 @@ pub struct MtpSpeculativeStats {
     pub draft_attempts_by_position: Vec<usize>,
     /// Draft windows that accepted each zero-based draft position.
     pub draft_accepts_by_position: Vec<usize>,
-    /// Windows that required main-cache rollback and accepted-prefix replay.
+    /// Windows that required committing only an accepted main-cache prefix.
     pub rollback_count: usize,
     /// Windows that reused the temporary draft MTP cache after full acceptance.
     pub mtp_cache_reuse_count: usize,
@@ -97,13 +97,13 @@ pub struct MtpSpeculativeStats {
     pub draft_budget_increases: usize,
     /// Microseconds spent in MTP draft hidden forward passes.
     pub draft_forward_us: u64,
-    /// Microseconds spent in main-model verify/replay hidden forward passes.
+    /// Microseconds spent in main-model verify and fallback replay hidden forwards.
     pub verify_forward_us: u64,
     /// Microseconds spent projecting hidden states to logits.
     pub projection_us: u64,
     /// Microseconds spent sampling logits.
     pub sampling_us: u64,
-    /// Microseconds spent restoring/replaying the main KV cache after mismatch.
+    /// Microseconds spent trimming, restoring, or replaying main KV after mismatch.
     pub main_rollback_us: u64,
     /// Microseconds spent committing accepted tokens into the MTP KV cache.
     pub mtp_cache_commit_us: u64,
@@ -1682,7 +1682,7 @@ pub(crate) fn trim_full_layer_cache_rows_to_accepted_prefix(
     for (layer_idx, (layer, snapshot)) in cache.iter_mut().zip(snapshots.iter()).enumerate() {
         let (LayerCache::Full(kv), LayerCacheSnapshot::Full(saved)) = (layer, snapshot) else {
             return Err(anyhow!(
-                "trim_full_layer_cache_rows_to_accepted_prefix: Qwen MTP rollback only supports Full KV layers, layer {layer_idx}"
+                "trim_full_layer_cache_rows_to_accepted_prefix: accepted-prefix trim only supports Full KV layers, layer {layer_idx}"
             ));
         };
         let mut offsets = kv.offsets().to_vec();
@@ -1773,6 +1773,7 @@ pub(crate) fn rollback_main_cache_to_accepted_prefix<M: MtpSpeculativeModel>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::cache::{KVCache, TurboQuantKVBits};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct FakeGreedyProjectModel {
@@ -2030,6 +2031,94 @@ mod tests {
             panic!("expected linear cache");
         };
         assert_eq!(gd.offsets(), &[6]);
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn accepted_prefix_trim_supports_paged_kv() {
+        let mut kv = KVCache::new(1, 1, 2, 2, Dtype::Float32, 8).with_step(4);
+        kv.enable_paged(2, 4).expect("enable paged KV");
+        let base_k: Array = (&[1.0_f32, 2.0, 3.0, 4.0][..], &[1_i32, 1, 2, 2][..])
+            .try_into()
+            .unwrap();
+        let base_v = &base_k + 100.0_f32;
+        kv.update_and_fetch(&base_k, &base_v, &[2])
+            .expect("paged base prefix");
+        let mut cache = vec![LayerCache::Full(kv)];
+        let snapshots = cache.iter().map(LayerCache::snapshot).collect::<Vec<_>>();
+        let verify_k: Array = (
+            &[5.0_f32, 6.0, 7.0, 8.0, 9.0, 10.0][..],
+            &[1_i32, 1, 3, 2][..],
+        )
+            .try_into()
+            .unwrap();
+        let verify_v = &verify_k + 100.0_f32;
+        let LayerCache::Full(kv) = &mut cache[0] else {
+            panic!("full cache");
+        };
+        kv.update_and_fetch(&verify_k, &verify_v, &[3])
+            .expect("paged verify suffix");
+
+        trim_full_layer_cache_rows_to_accepted_prefix(&mut cache, &snapshots, &[(0, 1)])
+            .expect("trim paged accepted prefix");
+
+        let LayerCache::Full(kv) = &cache[0] else {
+            panic!("full cache");
+        };
+        assert_eq!(kv.offsets(), &[3]);
+        let (keys, values) = kv
+            .materialize_current_paged_prefix_on(())
+            .expect("materialize trimmed paged prefix");
+        assert_eq!(keys.shape().as_slice(), &[1, 1, 3, 2]);
+        assert_eq!(values.shape().as_slice(), &[1, 1, 3, 2]);
+        assert_eq!(
+            keys.to_vec::<f32>().unwrap(),
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn accepted_prefix_trim_supports_turboquant_kv() {
+        let mut kv = KVCache::new(1, 1, 8, 8, Dtype::Float32, 8)
+            .with_step(8)
+            .with_turboquant(TurboQuantKVBits::K4V4)
+            .expect("enable TurboQuant KV");
+        let base_data = (0..16).map(|idx| idx as f32 * 0.1).collect::<Vec<_>>();
+        let base_k: Array = (base_data.as_slice(), &[1_i32, 1, 2, 8][..])
+            .try_into()
+            .unwrap();
+        let base_v = &base_k + 1.0_f32;
+        kv.update_and_fetch(&base_k, &base_v, &[2])
+            .expect("TurboQuant base prefix");
+        let mut cache = vec![LayerCache::Full(kv)];
+        let snapshots = cache.iter().map(LayerCache::snapshot).collect::<Vec<_>>();
+        let verify_data = (0..24)
+            .map(|idx| 2.0_f32 + idx as f32 * 0.1)
+            .collect::<Vec<_>>();
+        let verify_k: Array = (verify_data.as_slice(), &[1_i32, 1, 3, 8][..])
+            .try_into()
+            .unwrap();
+        let verify_v = &verify_k + 1.0_f32;
+        let LayerCache::Full(kv) = &mut cache[0] else {
+            panic!("full cache");
+        };
+        kv.update_and_fetch(&verify_k, &verify_v, &[3])
+            .expect("TurboQuant verify suffix");
+
+        trim_full_layer_cache_rows_to_accepted_prefix(&mut cache, &snapshots, &[(0, 1)])
+            .expect("trim TurboQuant accepted prefix");
+
+        let LayerCache::Full(kv) = &cache[0] else {
+            panic!("full cache");
+        };
+        assert_eq!(kv.offsets(), &[3]);
+        let (keys, values, len) = kv
+            .dense_prefix_layer_for_row_on(0, ())
+            .expect("materialize trimmed TurboQuant prefix");
+        assert_eq!(len, 3);
+        assert_eq!(keys.shape().as_slice(), &[1, 1, 3, 8]);
+        assert_eq!(values.shape().as_slice(), &[1, 1, 3, 8]);
     }
 
     #[test]
