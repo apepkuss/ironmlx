@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use anyhow::anyhow;
 use mlx::{Array, Dtype, StreamOrDevice};
+use serde::{Deserialize, Serialize};
 
 use crate::core::cache::{MtpCache, MtpCacheSnapshot};
 use crate::core::generate::{build_position_ids, GenerateEvent, GenerateRequest};
@@ -72,6 +73,149 @@ impl MtpSpeculativeConfig {
     }
 }
 
+const MAX_DRAFT_CAP_OBSERVATION_REGIMES: usize = 256;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MtpDraftCapContextBucket {
+    UpTo2k,
+    UpTo8k,
+    UpTo32k,
+    UpTo128k,
+    Above128k,
+}
+
+impl MtpDraftCapContextBucket {
+    pub fn for_tokens(tokens: usize) -> Self {
+        match tokens {
+            0..=2_048 => Self::UpTo2k,
+            2_049..=8_192 => Self::UpTo8k,
+            8_193..=32_768 => Self::UpTo32k,
+            32_769..=131_072 => Self::UpTo128k,
+            _ => Self::Above128k,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MtpDraftCapObservation {
+    pub configured_max_draft_tokens: usize,
+    pub min_draft_tokens: usize,
+    pub max_draft_tokens: usize,
+    pub batch_width: usize,
+    pub context_bucket: MtpDraftCapContextBucket,
+    pub mixed_context_buckets: bool,
+    pub windows: usize,
+    pub drafted_tokens: usize,
+    pub accepted_draft_tokens: usize,
+    pub committed_tokens: usize,
+    pub rollback_count: usize,
+    pub total_us: u64,
+    pub draft_forward_us: u64,
+    pub verify_forward_us: u64,
+    pub projection_us: u64,
+    pub sampling_us: u64,
+    pub main_rollback_us: u64,
+    pub decode_cache_commit_us: u64,
+    pub cache_restore_us: u64,
+}
+
+impl MtpDraftCapObservation {
+    fn same_regime(&self, other: &Self) -> bool {
+        self.configured_max_draft_tokens == other.configured_max_draft_tokens
+            && self.min_draft_tokens == other.min_draft_tokens
+            && self.max_draft_tokens == other.max_draft_tokens
+            && self.batch_width == other.batch_width
+            && self.context_bucket == other.context_bucket
+            && self.mixed_context_buckets == other.mixed_context_buckets
+    }
+
+    fn add_assign(&mut self, other: &Self) {
+        debug_assert!(self.same_regime(other));
+        self.windows = self.windows.saturating_add(other.windows);
+        self.drafted_tokens = self.drafted_tokens.saturating_add(other.drafted_tokens);
+        self.accepted_draft_tokens = self
+            .accepted_draft_tokens
+            .saturating_add(other.accepted_draft_tokens);
+        self.committed_tokens = self.committed_tokens.saturating_add(other.committed_tokens);
+        self.rollback_count = self.rollback_count.saturating_add(other.rollback_count);
+        self.total_us = self.total_us.saturating_add(other.total_us);
+        self.draft_forward_us = self.draft_forward_us.saturating_add(other.draft_forward_us);
+        self.verify_forward_us = self
+            .verify_forward_us
+            .saturating_add(other.verify_forward_us);
+        self.projection_us = self.projection_us.saturating_add(other.projection_us);
+        self.sampling_us = self.sampling_us.saturating_add(other.sampling_us);
+        self.main_rollback_us = self.main_rollback_us.saturating_add(other.main_rollback_us);
+        self.decode_cache_commit_us = self
+            .decode_cache_commit_us
+            .saturating_add(other.decode_cache_commit_us);
+        self.cache_restore_us = self.cache_restore_us.saturating_add(other.cache_restore_us);
+    }
+
+    fn saturating_delta_since(&self, before: Option<&Self>) -> Self {
+        let before = before.filter(|value| self.same_regime(value));
+        Self {
+            configured_max_draft_tokens: self.configured_max_draft_tokens,
+            min_draft_tokens: self.min_draft_tokens,
+            max_draft_tokens: self.max_draft_tokens,
+            batch_width: self.batch_width,
+            context_bucket: self.context_bucket,
+            mixed_context_buckets: self.mixed_context_buckets,
+            windows: self
+                .windows
+                .saturating_sub(before.map_or(0, |value| value.windows)),
+            drafted_tokens: self
+                .drafted_tokens
+                .saturating_sub(before.map_or(0, |value| value.drafted_tokens)),
+            accepted_draft_tokens: self
+                .accepted_draft_tokens
+                .saturating_sub(before.map_or(0, |value| value.accepted_draft_tokens)),
+            committed_tokens: self
+                .committed_tokens
+                .saturating_sub(before.map_or(0, |value| value.committed_tokens)),
+            rollback_count: self
+                .rollback_count
+                .saturating_sub(before.map_or(0, |value| value.rollback_count)),
+            total_us: self
+                .total_us
+                .saturating_sub(before.map_or(0, |value| value.total_us)),
+            draft_forward_us: self
+                .draft_forward_us
+                .saturating_sub(before.map_or(0, |value| value.draft_forward_us)),
+            verify_forward_us: self
+                .verify_forward_us
+                .saturating_sub(before.map_or(0, |value| value.verify_forward_us)),
+            projection_us: self
+                .projection_us
+                .saturating_sub(before.map_or(0, |value| value.projection_us)),
+            sampling_us: self
+                .sampling_us
+                .saturating_sub(before.map_or(0, |value| value.sampling_us)),
+            main_rollback_us: self
+                .main_rollback_us
+                .saturating_sub(before.map_or(0, |value| value.main_rollback_us)),
+            decode_cache_commit_us: self
+                .decode_cache_commit_us
+                .saturating_sub(before.map_or(0, |value| value.decode_cache_commit_us)),
+            cache_restore_us: self
+                .cache_restore_us
+                .saturating_sub(before.map_or(0, |value| value.cache_restore_us)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct MtpDraftCapTiming {
+    draft_forward_us: u64,
+    verify_forward_us: u64,
+    projection_us: u64,
+    sampling_us: u64,
+    main_rollback_us: u64,
+    decode_cache_commit_us: u64,
+    cache_restore_us: u64,
+}
+
 /// Runtime counters collected by [`MtpTextGenerationStream`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MtpSpeculativeStats {
@@ -85,7 +229,7 @@ pub struct MtpSpeculativeStats {
     pub draft_attempts_by_position: Vec<usize>,
     /// Draft windows that accepted each zero-based draft position.
     pub draft_accepts_by_position: Vec<usize>,
-    /// Windows that required main-cache rollback and accepted-prefix replay.
+    /// Windows that required committing only an accepted main-cache prefix.
     pub rollback_count: usize,
     /// Windows that reused the temporary draft MTP cache after full acceptance.
     pub mtp_cache_reuse_count: usize,
@@ -97,13 +241,13 @@ pub struct MtpSpeculativeStats {
     pub draft_budget_increases: usize,
     /// Microseconds spent in MTP draft hidden forward passes.
     pub draft_forward_us: u64,
-    /// Microseconds spent in main-model verify/replay hidden forward passes.
+    /// Microseconds spent in main-model verify and fallback replay hidden forwards.
     pub verify_forward_us: u64,
     /// Microseconds spent projecting hidden states to logits.
     pub projection_us: u64,
     /// Microseconds spent sampling logits.
     pub sampling_us: u64,
-    /// Microseconds spent restoring/replaying the main KV cache after mismatch.
+    /// Microseconds spent trimming, restoring, or replaying main KV after mismatch.
     pub main_rollback_us: u64,
     /// Microseconds spent committing accepted tokens into the MTP KV cache.
     pub mtp_cache_commit_us: u64,
@@ -113,9 +257,25 @@ pub struct MtpSpeculativeStats {
     pub mtp_decode_cache_commit_us: u64,
     /// Microseconds spent restoring the MTP KV cache after temporary draft.
     pub mtp_cache_restore_us: u64,
+    /// Bounded, regime-level observations used only by offline draft-cap calibration.
+    pub draft_cap_observations: Vec<MtpDraftCapObservation>,
+    /// Windows omitted after the bounded observation table reached capacity.
+    pub draft_cap_observation_dropped_windows: usize,
 }
 
 impl MtpSpeculativeStats {
+    pub(crate) fn draft_cap_timing(&self) -> MtpDraftCapTiming {
+        MtpDraftCapTiming {
+            draft_forward_us: self.draft_forward_us,
+            verify_forward_us: self.verify_forward_us,
+            projection_us: self.projection_us,
+            sampling_us: self.sampling_us,
+            main_rollback_us: self.main_rollback_us,
+            decode_cache_commit_us: self.mtp_decode_cache_commit_us,
+            cache_restore_us: self.mtp_cache_restore_us,
+        }
+    }
+
     pub fn saturating_delta_since(&self, before: &Self) -> Self {
         fn vec_delta(current: &[usize], before: &[usize]) -> Vec<usize> {
             let len = current.len().max(before.len());
@@ -129,6 +289,19 @@ impl MtpSpeculativeStats {
                 })
                 .collect()
         }
+
+        let draft_cap_observations = self
+            .draft_cap_observations
+            .iter()
+            .map(|current| {
+                let before = before
+                    .draft_cap_observations
+                    .iter()
+                    .find(|value| current.same_regime(value));
+                current.saturating_delta_since(before)
+            })
+            .filter(|value| value.windows > 0)
+            .collect();
 
         Self {
             windows: self.windows.saturating_sub(before.windows),
@@ -180,7 +353,146 @@ impl MtpSpeculativeStats {
             mtp_cache_restore_us: self
                 .mtp_cache_restore_us
                 .saturating_sub(before.mtp_cache_restore_us),
+            draft_cap_observations,
+            draft_cap_observation_dropped_windows: self
+                .draft_cap_observation_dropped_windows
+                .saturating_sub(before.draft_cap_observation_dropped_windows),
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_draft_cap_observation(
+        &mut self,
+        configured_max_draft_tokens: usize,
+        draft_tokens_by_row: &[usize],
+        context_tokens_by_row: &[usize],
+        accepted_draft_tokens: usize,
+        committed_tokens: usize,
+        rollback_count: usize,
+        total_us: u64,
+        timing_delta: MtpDraftCapTiming,
+    ) {
+        if draft_tokens_by_row.is_empty()
+            || draft_tokens_by_row.len() != context_tokens_by_row.len()
+        {
+            return;
+        }
+        let min_draft_tokens = draft_tokens_by_row.iter().copied().min().unwrap_or(0);
+        let max_draft_tokens = draft_tokens_by_row.iter().copied().max().unwrap_or(0);
+        if min_draft_tokens == 0 {
+            return;
+        }
+        let first_context_bucket = MtpDraftCapContextBucket::for_tokens(context_tokens_by_row[0]);
+        let mixed_context_buckets = context_tokens_by_row
+            .iter()
+            .copied()
+            .map(MtpDraftCapContextBucket::for_tokens)
+            .any(|bucket| bucket != first_context_bucket);
+        let observation = MtpDraftCapObservation {
+            configured_max_draft_tokens,
+            min_draft_tokens,
+            max_draft_tokens,
+            batch_width: draft_tokens_by_row.len(),
+            context_bucket: context_tokens_by_row
+                .iter()
+                .copied()
+                .map(MtpDraftCapContextBucket::for_tokens)
+                .max()
+                .unwrap_or(first_context_bucket),
+            mixed_context_buckets,
+            windows: draft_tokens_by_row.len(),
+            drafted_tokens: draft_tokens_by_row.iter().copied().sum(),
+            accepted_draft_tokens,
+            committed_tokens,
+            rollback_count,
+            total_us,
+            draft_forward_us: timing_delta.draft_forward_us,
+            verify_forward_us: timing_delta.verify_forward_us,
+            projection_us: timing_delta.projection_us,
+            sampling_us: timing_delta.sampling_us,
+            main_rollback_us: timing_delta.main_rollback_us,
+            decode_cache_commit_us: timing_delta.decode_cache_commit_us,
+            cache_restore_us: timing_delta.cache_restore_us,
+        };
+        if let Some(current) = self
+            .draft_cap_observations
+            .iter_mut()
+            .find(|value| value.same_regime(&observation))
+        {
+            current.add_assign(&observation);
+        } else if self.draft_cap_observations.len() < MAX_DRAFT_CAP_OBSERVATION_REGIMES {
+            self.draft_cap_observations.push(observation);
+        } else {
+            self.draft_cap_observation_dropped_windows = self
+                .draft_cap_observation_dropped_windows
+                .saturating_add(observation.windows);
+        }
+    }
+
+    pub(crate) fn merge_from(&mut self, other: Self) {
+        self.windows = self.windows.saturating_add(other.windows);
+        self.drafted_tokens = self.drafted_tokens.saturating_add(other.drafted_tokens);
+        self.accepted_draft_tokens = self
+            .accepted_draft_tokens
+            .saturating_add(other.accepted_draft_tokens);
+        merge_counter_vec(
+            &mut self.draft_attempts_by_position,
+            other.draft_attempts_by_position,
+        );
+        merge_counter_vec(
+            &mut self.draft_accepts_by_position,
+            other.draft_accepts_by_position,
+        );
+        self.rollback_count = self.rollback_count.saturating_add(other.rollback_count);
+        self.mtp_cache_reuse_count = self
+            .mtp_cache_reuse_count
+            .saturating_add(other.mtp_cache_reuse_count);
+        self.mtp_cache_reused_tokens = self
+            .mtp_cache_reused_tokens
+            .saturating_add(other.mtp_cache_reused_tokens);
+        self.draft_budget_reductions = self
+            .draft_budget_reductions
+            .saturating_add(other.draft_budget_reductions);
+        self.draft_budget_increases = self
+            .draft_budget_increases
+            .saturating_add(other.draft_budget_increases);
+        self.draft_forward_us = self.draft_forward_us.saturating_add(other.draft_forward_us);
+        self.verify_forward_us = self
+            .verify_forward_us
+            .saturating_add(other.verify_forward_us);
+        self.projection_us = self.projection_us.saturating_add(other.projection_us);
+        self.sampling_us = self.sampling_us.saturating_add(other.sampling_us);
+        self.main_rollback_us = self.main_rollback_us.saturating_add(other.main_rollback_us);
+        self.mtp_cache_commit_us = self
+            .mtp_cache_commit_us
+            .saturating_add(other.mtp_cache_commit_us);
+        self.mtp_prefill_cache_commit_us = self
+            .mtp_prefill_cache_commit_us
+            .saturating_add(other.mtp_prefill_cache_commit_us);
+        self.mtp_decode_cache_commit_us = self
+            .mtp_decode_cache_commit_us
+            .saturating_add(other.mtp_decode_cache_commit_us);
+        self.mtp_cache_restore_us = self
+            .mtp_cache_restore_us
+            .saturating_add(other.mtp_cache_restore_us);
+        for observation in other.draft_cap_observations {
+            if let Some(current) = self
+                .draft_cap_observations
+                .iter_mut()
+                .find(|value| value.same_regime(&observation))
+            {
+                current.add_assign(&observation);
+            } else if self.draft_cap_observations.len() < MAX_DRAFT_CAP_OBSERVATION_REGIMES {
+                self.draft_cap_observations.push(observation);
+            } else {
+                self.draft_cap_observation_dropped_windows = self
+                    .draft_cap_observation_dropped_windows
+                    .saturating_add(observation.windows);
+            }
+        }
+        self.draft_cap_observation_dropped_windows = self
+            .draft_cap_observation_dropped_windows
+            .saturating_add(other.draft_cap_observation_dropped_windows);
     }
 
     pub fn record_window_acceptance(
@@ -206,6 +518,39 @@ impl MtpSpeculativeStats {
                     self.draft_accepts_by_position[idx].saturating_add(1);
             }
         }
+    }
+}
+
+impl MtpDraftCapTiming {
+    pub(crate) fn saturating_delta_since(self, before: Self) -> Self {
+        Self {
+            draft_forward_us: self
+                .draft_forward_us
+                .saturating_sub(before.draft_forward_us),
+            verify_forward_us: self
+                .verify_forward_us
+                .saturating_sub(before.verify_forward_us),
+            projection_us: self.projection_us.saturating_sub(before.projection_us),
+            sampling_us: self.sampling_us.saturating_sub(before.sampling_us),
+            main_rollback_us: self
+                .main_rollback_us
+                .saturating_sub(before.main_rollback_us),
+            decode_cache_commit_us: self
+                .decode_cache_commit_us
+                .saturating_sub(before.decode_cache_commit_us),
+            cache_restore_us: self
+                .cache_restore_us
+                .saturating_sub(before.cache_restore_us),
+        }
+    }
+}
+
+fn merge_counter_vec(dst: &mut Vec<usize>, src: Vec<usize>) {
+    if dst.len() < src.len() {
+        dst.resize(src.len(), 0);
+    }
+    for (idx, value) in src.into_iter().enumerate() {
+        dst[idx] = dst[idx].saturating_add(value);
     }
 }
 
@@ -1682,7 +2027,7 @@ pub(crate) fn trim_full_layer_cache_rows_to_accepted_prefix(
     for (layer_idx, (layer, snapshot)) in cache.iter_mut().zip(snapshots.iter()).enumerate() {
         let (LayerCache::Full(kv), LayerCacheSnapshot::Full(saved)) = (layer, snapshot) else {
             return Err(anyhow!(
-                "trim_full_layer_cache_rows_to_accepted_prefix: Qwen MTP rollback only supports Full KV layers, layer {layer_idx}"
+                "trim_full_layer_cache_rows_to_accepted_prefix: accepted-prefix trim only supports Full KV layers, layer {layer_idx}"
             ));
         };
         let mut offsets = kv.offsets().to_vec();
@@ -1773,6 +2118,7 @@ pub(crate) fn rollback_main_cache_to_accepted_prefix<M: MtpSpeculativeModel>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::cache::{KVCache, TurboQuantKVBits};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct FakeGreedyProjectModel {
@@ -2033,6 +2379,94 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn accepted_prefix_trim_supports_paged_kv() {
+        let mut kv = KVCache::new(1, 1, 2, 2, Dtype::Float32, 8).with_step(4);
+        kv.enable_paged(2, 4).expect("enable paged KV");
+        let base_k: Array = (&[1.0_f32, 2.0, 3.0, 4.0][..], &[1_i32, 1, 2, 2][..])
+            .try_into()
+            .unwrap();
+        let base_v = &base_k + 100.0_f32;
+        kv.update_and_fetch(&base_k, &base_v, &[2])
+            .expect("paged base prefix");
+        let mut cache = vec![LayerCache::Full(kv)];
+        let snapshots = cache.iter().map(LayerCache::snapshot).collect::<Vec<_>>();
+        let verify_k: Array = (
+            &[5.0_f32, 6.0, 7.0, 8.0, 9.0, 10.0][..],
+            &[1_i32, 1, 3, 2][..],
+        )
+            .try_into()
+            .unwrap();
+        let verify_v = &verify_k + 100.0_f32;
+        let LayerCache::Full(kv) = &mut cache[0] else {
+            panic!("full cache");
+        };
+        kv.update_and_fetch(&verify_k, &verify_v, &[3])
+            .expect("paged verify suffix");
+
+        trim_full_layer_cache_rows_to_accepted_prefix(&mut cache, &snapshots, &[(0, 1)])
+            .expect("trim paged accepted prefix");
+
+        let LayerCache::Full(kv) = &cache[0] else {
+            panic!("full cache");
+        };
+        assert_eq!(kv.offsets(), &[3]);
+        let (keys, values) = kv
+            .materialize_current_paged_prefix_on(())
+            .expect("materialize trimmed paged prefix");
+        assert_eq!(keys.shape().as_slice(), &[1, 1, 3, 2]);
+        assert_eq!(values.shape().as_slice(), &[1, 1, 3, 2]);
+        assert_eq!(
+            keys.to_vec::<f32>().unwrap(),
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn accepted_prefix_trim_supports_turboquant_kv() {
+        let mut kv = KVCache::new(1, 1, 8, 8, Dtype::Float32, 8)
+            .with_step(8)
+            .with_turboquant(TurboQuantKVBits::K4V4)
+            .expect("enable TurboQuant KV");
+        let base_data = (0..16).map(|idx| idx as f32 * 0.1).collect::<Vec<_>>();
+        let base_k: Array = (base_data.as_slice(), &[1_i32, 1, 2, 8][..])
+            .try_into()
+            .unwrap();
+        let base_v = &base_k + 1.0_f32;
+        kv.update_and_fetch(&base_k, &base_v, &[2])
+            .expect("TurboQuant base prefix");
+        let mut cache = vec![LayerCache::Full(kv)];
+        let snapshots = cache.iter().map(LayerCache::snapshot).collect::<Vec<_>>();
+        let verify_data = (0..24)
+            .map(|idx| 2.0_f32 + idx as f32 * 0.1)
+            .collect::<Vec<_>>();
+        let verify_k: Array = (verify_data.as_slice(), &[1_i32, 1, 3, 8][..])
+            .try_into()
+            .unwrap();
+        let verify_v = &verify_k + 1.0_f32;
+        let LayerCache::Full(kv) = &mut cache[0] else {
+            panic!("full cache");
+        };
+        kv.update_and_fetch(&verify_k, &verify_v, &[3])
+            .expect("TurboQuant verify suffix");
+
+        trim_full_layer_cache_rows_to_accepted_prefix(&mut cache, &snapshots, &[(0, 1)])
+            .expect("trim TurboQuant accepted prefix");
+
+        let LayerCache::Full(kv) = &cache[0] else {
+            panic!("full cache");
+        };
+        assert_eq!(kv.offsets(), &[3]);
+        let (keys, values, len) = kv
+            .dense_prefix_layer_for_row_on(0, ())
+            .expect("materialize trimmed TurboQuant prefix");
+        assert_eq!(len, 3);
+        assert_eq!(keys.shape().as_slice(), &[1, 1, 3, 8]);
+        assert_eq!(values.shape().as_slice(), &[1, 1, 3, 8]);
+    }
+
+    #[test]
     fn mtp_policy_defaults_qwen35_dense_4b_to_d1() {
         let raw = serde_json::json!({
             "model_type": "qwen3_5",
@@ -2127,6 +2561,55 @@ mod tests {
 
         assert_eq!(stats.draft_attempts_by_position, vec![3, 3, 2, 2]);
         assert_eq!(stats.draft_accepts_by_position, vec![2, 2, 0, 0]);
+    }
+
+    #[test]
+    fn draft_cap_context_bucket_uses_inclusive_boundaries() {
+        assert_eq!(
+            MtpDraftCapContextBucket::for_tokens(2_048),
+            MtpDraftCapContextBucket::UpTo2k
+        );
+        assert_eq!(
+            MtpDraftCapContextBucket::for_tokens(2_049),
+            MtpDraftCapContextBucket::UpTo8k
+        );
+        assert_eq!(
+            MtpDraftCapContextBucket::for_tokens(131_073),
+            MtpDraftCapContextBucket::Above128k
+        );
+    }
+
+    #[test]
+    fn draft_cap_observation_aggregates_only_matching_regimes() {
+        let mut stats = MtpSpeculativeStats::default();
+        let timing = MtpDraftCapTiming {
+            draft_forward_us: 10,
+            verify_forward_us: 20,
+            projection_us: 3,
+            sampling_us: 4,
+            main_rollback_us: 5,
+            decode_cache_commit_us: 6,
+            cache_restore_us: 7,
+        };
+
+        stats.record_draft_cap_observation(2, &[2, 2], &[1_000, 2_000], 3, 5, 1, 100, timing);
+        stats.record_draft_cap_observation(2, &[2, 2], &[1_500, 2_048], 2, 4, 2, 120, timing);
+        stats.record_draft_cap_observation(2, &[1, 2], &[2_048, 2_049], 1, 2, 1, 80, timing);
+
+        assert_eq!(stats.draft_cap_observations.len(), 2);
+        let homogeneous = &stats.draft_cap_observations[0];
+        assert_eq!(homogeneous.windows, 4);
+        assert_eq!(homogeneous.accepted_draft_tokens, 5);
+        assert_eq!(homogeneous.committed_tokens, 9);
+        assert_eq!(homogeneous.total_us, 220);
+        assert_eq!(homogeneous.draft_forward_us, 20);
+
+        let mixed = &stats.draft_cap_observations[1];
+        assert_eq!(mixed.windows, 2);
+        assert!(mixed.mixed_context_buckets);
+        assert_eq!(mixed.min_draft_tokens, 1);
+        assert_eq!(mixed.max_draft_tokens, 2);
+        assert_eq!(mixed.context_bucket, MtpDraftCapContextBucket::UpTo8k);
     }
 
     #[test]

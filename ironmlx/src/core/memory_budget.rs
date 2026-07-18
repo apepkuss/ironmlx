@@ -117,7 +117,11 @@ pub fn system_total_ram_bytes() -> usize {
 }
 
 pub fn available_budget_bytes(meta: &ModelMeta) -> usize {
-    system_total_ram_bytes()
+    available_budget_bytes_for_total_ram(meta, system_total_ram_bytes())
+}
+
+fn available_budget_bytes_for_total_ram(meta: &ModelMeta, total_ram_bytes: usize) -> usize {
+    total_ram_bytes
         .saturating_sub(meta.weight_bytes)
         .saturating_sub(SAFETY_MARGIN_BYTES)
 }
@@ -251,12 +255,28 @@ pub fn validate_startup_budget_with_policy(
     meta: &ModelMeta,
     policy: KvBudgetPolicy,
 ) -> Result<BudgetState, MemoryBudgetError> {
+    validate_startup_budget_with_policy_for_total_ram(
+        b_max,
+        effective_cap_max,
+        meta,
+        policy,
+        system_total_ram_bytes(),
+    )
+}
+
+fn validate_startup_budget_with_policy_for_total_ram(
+    b_max: usize,
+    effective_cap_max: usize,
+    meta: &ModelMeta,
+    policy: KvBudgetPolicy,
+    total_ram_bytes: usize,
+) -> Result<BudgetState, MemoryBudgetError> {
     let bytes_per_token = kv_bytes_per_token(meta);
     let resident_cap = policy.resident_cap(effective_cap_max);
     let requested = b_max
         .saturating_mul(resident_cap)
         .saturating_mul(bytes_per_token);
-    let available = available_budget_bytes(meta);
+    let available = available_budget_bytes_for_total_ram(meta, total_ram_bytes);
     if requested > available {
         return Err(MemoryBudgetError {
             b_max,
@@ -266,7 +286,7 @@ pub fn validate_startup_budget_with_policy(
             bytes_per_token,
             requested_bytes: requested,
             available_bytes: available,
-            total_ram_bytes: system_total_ram_bytes(),
+            total_ram_bytes,
             model_weight_bytes: meta.weight_bytes,
         });
     }
@@ -340,36 +360,22 @@ pub fn test_meta_gemma4_12b() -> ModelMeta {
 }
 
 #[cfg(test)]
-#[doc(hidden)]
-pub fn with_total_ram_bytes_for_test<T>(bytes: &str, f: impl FnOnce() -> T) -> T {
-    let _guard = total_ram_env_lock_for_test()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    std::env::set_var("IRONMLX_TOTAL_RAM_BYTES", bytes);
-
-    struct ClearTotalRamEnv;
-    impl Drop for ClearTotalRamEnv {
-        fn drop(&mut self) {
-            std::env::remove_var("IRONMLX_TOTAL_RAM_BYTES");
-        }
-    }
-    let _clear = ClearTotalRamEnv;
-
-    f()
-}
-
-#[cfg(test)]
-fn total_ram_env_lock_for_test() -> &'static std::sync::Mutex<()> {
-    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
-    fn with_total_ram_bytes<T>(bytes: &str, f: impl FnOnce() -> T) -> T {
-        with_total_ram_bytes_for_test(bytes, f)
+    fn validate_with_total_ram(
+        b_max: usize,
+        effective_cap_max: usize,
+        meta: &ModelMeta,
+        total_ram_bytes: usize,
+    ) -> Result<BudgetState, MemoryBudgetError> {
+        validate_startup_budget_with_policy_for_total_ram(
+            b_max,
+            effective_cap_max,
+            meta,
+            KvBudgetPolicy::FullResident,
+            total_ram_bytes,
+        )
     }
 
     fn meta() -> ModelMeta {
@@ -391,21 +397,17 @@ mod tests {
 
     #[test]
     fn validate_within_budget_ok() {
-        with_total_ram_bytes("34359738368", || {
-            let st = validate_startup_budget(1, 4096, &meta()).expect("should fit");
-            assert!(st.soft_limit() > 0);
-        });
+        let st = validate_with_total_ram(1, 4096, &meta(), 34_359_738_368).expect("should fit");
+        assert!(st.soft_limit() > 0);
     }
 
     #[test]
     fn validate_over_budget_err() {
-        with_total_ram_bytes("8589934592", || {
-            let err = validate_startup_budget(4, 32768, &meta())
-                .expect_err("4 × 32768 × 114688 should exceed 8 - 3 - 2 = 3 GiB budget");
-            let msg = format!("{err}");
-            assert!(msg.contains("memory budget exceeded"), "msg: {msg}");
-            assert!(msg.contains("Lower --b-max"), "msg: {msg}");
-        });
+        let err = validate_with_total_ram(4, 32768, &meta(), 8_589_934_592)
+            .expect_err("4 × 32768 × 114688 should exceed 8 - 3 - 2 = 3 GiB budget");
+        let msg = format!("{err}");
+        assert!(msg.contains("memory budget exceeded"), "msg: {msg}");
+        assert!(msg.contains("Lower --b-max"), "msg: {msg}");
     }
 
     #[test]
@@ -435,74 +437,74 @@ mod tests {
 
     #[test]
     fn moe_validate_budget_realistic_32gb_fits() {
-        with_total_ram_bytes("34359738368", || {
-            let st = validate_startup_budget(1, 8192, &test_meta_qwen35_moe())
-                .expect("32GB host should fit 1 stream × 8K context for MoE");
-            assert!(st.soft_limit() > 0);
-        });
+        let st = validate_with_total_ram(1, 8192, &test_meta_qwen35_moe(), 34_359_738_368)
+            .expect("32GB host should fit 1 stream × 8K context for MoE");
+        assert!(st.soft_limit() > 0);
     }
 
     #[test]
     fn moe_validate_budget_rejects_overcommit_16gb() {
-        with_total_ram_bytes("17179869184", || {
-            // 16 GB - 17 GB weights - 2 GB safety margin = negative budget,
-            // any cap must be rejected.
-            let err = validate_startup_budget(1, 4096, &test_meta_qwen35_moe())
-                .expect_err("16GB host cannot fit 17GB MoE weights");
-            let msg = format!("{err}");
-            assert!(msg.contains("memory budget exceeded"), "msg: {msg}");
-        });
+        // 16 GB - 17 GB weights - 2 GB safety margin = negative budget,
+        // any cap must be rejected.
+        let err = validate_with_total_ram(1, 4096, &test_meta_qwen35_moe(), 17_179_869_184)
+            .expect_err("16GB host cannot fit 17GB MoE weights");
+        let msg = format!("{err}");
+        assert!(msg.contains("memory budget exceeded"), "msg: {msg}");
     }
 
     #[test]
     fn startup_budget_without_offload_rejects_large_logical_cap() {
         let meta = test_meta_gemma4_12b();
-        with_total_ram_bytes("137438953472", || {
-            let error = validate_startup_budget(1, 262_144, &meta)
-                .expect_err("full-resident 256K cache should exceed budget");
-            assert_eq!(error.cap, 262_144);
-            assert_eq!(error.resident_cap, 262_144);
-            assert_eq!(error.policy, "full_resident");
-        });
+        let error = validate_with_total_ram(1, 262_144, &meta, 137_438_953_472)
+            .expect_err("full-resident 256K cache should exceed budget");
+        assert_eq!(error.cap, 262_144);
+        assert_eq!(error.resident_cap, 262_144);
+        assert_eq!(error.policy, "full_resident");
     }
 
     #[test]
     fn startup_budget_with_offload_charges_hot_resident_cap() {
         let meta = test_meta_gemma4_12b();
         let policy = KvBudgetPolicy::active_kv_offload(8_192);
-        with_total_ram_bytes("137438953472", || {
-            let state = validate_startup_budget_with_policy(1, 262_144, &meta, policy)
-                .expect("offload hot window should fit");
-            assert_eq!(state.logical_cap(), 262_144);
-            assert_eq!(state.resident_cap(), 8_192);
-            assert_eq!(state.policy(), policy);
-            assert!(state.soft_limit() > 0);
-        });
+        let state = validate_startup_budget_with_policy_for_total_ram(
+            1,
+            262_144,
+            &meta,
+            policy,
+            137_438_953_472,
+        )
+        .expect("offload hot window should fit");
+        assert_eq!(state.logical_cap(), 262_144);
+        assert_eq!(state.resident_cap(), 8_192);
+        assert_eq!(state.policy(), policy);
+        assert!(state.soft_limit() > 0);
     }
 
     #[test]
     fn startup_budget_soft_limit_allows_configured_full_resident_cap() {
         let meta = test_meta_qwen35();
-        with_total_ram_bytes("34359738368", || {
-            let state = validate_startup_budget(1, 32_768, &meta)
-                .expect("configured full resident cap should fit");
-            let configured_bytes = kv_cache_bytes(1, 32_768, &meta);
-            assert!(
-                state.soft_limit() >= configured_bytes,
-                "runtime soft limit must allow the startup-validated full-resident cap"
-            );
-        });
+        let state = validate_with_total_ram(1, 32_768, &meta, 34_359_738_368)
+            .expect("configured full resident cap should fit");
+        let configured_bytes = kv_cache_bytes(1, 32_768, &meta);
+        assert!(
+            state.soft_limit() >= configured_bytes,
+            "runtime soft limit must allow the startup-validated full-resident cap"
+        );
     }
 
     #[test]
     fn startup_budget_with_offload_soft_limit_allows_resident_budget() {
         let meta = test_meta_gemma4_12b();
         let policy = KvBudgetPolicy::active_kv_offload(8_192);
-        with_total_ram_bytes("137438953472", || {
-            let state = validate_startup_budget_with_policy(1, 262_144, &meta, policy)
-                .expect("offload hot window should fit");
-            let resident_bytes = kv_cache_bytes(1, 8_192, &meta);
-            assert_eq!(state.soft_limit(), resident_bytes);
-        });
+        let state = validate_startup_budget_with_policy_for_total_ram(
+            1,
+            262_144,
+            &meta,
+            policy,
+            137_438_953_472,
+        )
+        .expect("offload hot window should fit");
+        let resident_bytes = kv_cache_bytes(1, 8_192, &meta);
+        assert_eq!(state.soft_limit(), resident_bytes);
     }
 }

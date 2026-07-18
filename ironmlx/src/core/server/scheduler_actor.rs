@@ -1283,6 +1283,43 @@ where
         budget_policy,
     )?;
 
+    spawn_scheduler_actor_with_mode_and_budget_state(
+        model,
+        mtp_mode,
+        b_max,
+        admission_deadline,
+        admission_queue_max,
+        effective_cap_max,
+        decode_cadence_mid_chunk_cap,
+        meta,
+        paged_prefix_cache,
+        prefix_lru_cache,
+        adaptive_policy,
+        active_kv_offload,
+        budget_state,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_scheduler_actor_with_mode_and_budget_state<M, A>(
+    model: Arc<Mutex<M>>,
+    mtp_mode: A,
+    b_max: usize,
+    admission_deadline: Duration,
+    admission_queue_max: usize,
+    effective_cap_max: usize,
+    decode_cadence_mid_chunk_cap: usize,
+    meta: crate::core::memory_budget::ModelMeta,
+    paged_prefix_cache: Option<PagedPrefixCacheConfig>,
+    prefix_lru_cache: Option<PrefixLruCacheConfig>,
+    adaptive_policy: AdaptiveAdmissionPolicy,
+    active_kv_offload: ActiveKvOffloadConfig,
+    budget_state: crate::core::memory_budget::BudgetState,
+) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError>
+where
+    M: Model + DenseVlMethods + Send + 'static,
+    A: SchedulerActorMtpMode<M> + Send + 'static,
+{
     // ── Step 2: Shared atomics created on the calling thread. ─────────────
     // Cloned for both the handle (returned to caller) and the driver thread.
     // This is the single source of truth — handle + driver share the same
@@ -3430,30 +3467,43 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn spawn_actor_with_paged_prefix_and_active_kv_accepts_large_logical_cap() {
-        crate::core::memory_budget::with_total_ram_bytes_for_test("137438953472", || {
-            let prefix_root = unique_temp_dir("actor-gemma4-prefix");
-            let active_kv_root = unique_temp_dir("actor-gemma4-active-kv");
-            let config = PagedPrefixCacheConfig::new(&prefix_root, "fake-gemma4", 128, 4096)
-                .expect("prefix config");
-            let model = Arc::new(Mutex::new(SchedulerActorFakeModel));
-            let handle = spawn_scheduler_actor_with_paged_prefix_cache_and_active_kv(
-                model,
-                1,
-                Duration::from_millis(1),
-                1,
-                262_144,
-                256,
-                crate::core::memory_budget::test_meta_gemma4_12b(),
-                config,
-                None,
-                ActiveKvOffloadConfig::enabled(active_kv_root.clone()),
-            )
-            .expect("active KV + paged prefix should allow 256K logical Gemma4 cap");
+        let prefix_root = unique_temp_dir("actor-gemma4-prefix");
+        let active_kv_root = unique_temp_dir("actor-gemma4-active-kv");
+        let config = PagedPrefixCacheConfig::new(&prefix_root, "fake-gemma4", 128, 4096)
+            .expect("prefix config");
+        let active_kv_offload = ActiveKvOffloadConfig::enabled(active_kv_root.clone());
+        let meta = crate::core::memory_budget::test_meta_gemma4_12b();
+        let effective_cap_max = 262_144;
+        let policy = startup_budget_policy(effective_cap_max, Some(&config), &active_kv_offload);
+        let resident_cap = policy.resident_cap(effective_cap_max);
+        let resident_bytes = crate::core::memory_budget::kv_cache_bytes(1, resident_cap, &meta);
+        let budget_state = crate::core::memory_budget::BudgetState::with_soft_limit(
+            resident_bytes,
+            effective_cap_max,
+            resident_cap,
+            policy,
+        );
+        let model = Arc::new(Mutex::new(SchedulerActorFakeModel));
+        let handle = spawn_scheduler_actor_with_mode_and_budget_state(
+            model,
+            SchedulerActorNoMtp,
+            1,
+            Duration::from_millis(1),
+            1,
+            effective_cap_max,
+            256,
+            meta,
+            Some(config),
+            None,
+            AdaptiveAdmissionPolicy::disabled(),
+            active_kv_offload,
+            budget_state,
+        )
+        .expect("active KV + paged prefix should allow 256K logical Gemma4 cap");
 
-            drop(handle);
-            std::fs::remove_dir_all(prefix_root).ok();
-            std::fs::remove_dir_all(active_kv_root).ok();
-        });
+        drop(handle);
+        std::fs::remove_dir_all(prefix_root).ok();
+        std::fs::remove_dir_all(active_kv_root).ok();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

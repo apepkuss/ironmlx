@@ -17,9 +17,9 @@ use crate::core::generate::{
 };
 use crate::core::scheduler::{paged_prefix_fingerprint_for_request, DenseVlMethods};
 use crate::core::speculative::{
-    add_elapsed_us, adjust_mtp_draft_budget, resolve_speculative_tokens, restore_layer_cache,
-    sample_logits_positions, slice_hidden_position, verify_input, MtpSpeculativeConfig,
-    MtpSpeculativeStats,
+    add_elapsed_us, adjust_mtp_draft_budget, elapsed_us_since, resolve_speculative_tokens,
+    sample_logits_positions, slice_hidden_position, trim_full_layer_cache_rows_to_accepted_prefix,
+    verify_input, MtpSpeculativeConfig, MtpSpeculativeStats,
 };
 use crate::core::tokenizer::{DecodeStream, Tokenizer};
 use crate::core::{Loader, Model};
@@ -1186,6 +1186,10 @@ impl<'m> Gemma4DrafterGenerationStream<'m> {
             return Ok(());
         }
 
+        let window_started = Instant::now();
+        let timing_before = self.stats.draft_cap_timing();
+        let context_tokens = self.history.len();
+
         let draft_budget = self
             .adaptive_draft_tokens
             .clamp(1, self.cfg.max_draft_tokens)
@@ -1224,6 +1228,8 @@ impl<'m> Gemma4DrafterGenerationStream<'m> {
         add_elapsed_us(&mut self.stats.sampling_us, sampling_start);
 
         let resolution = resolve_speculative_tokens(&draft_tokens, &verified_tokens)?;
+        let accepted_draft_len = resolution.accepted_draft_len;
+        let rollback_count = usize::from(resolution.needs_rollback);
         if self.trace_windows.len() < self.trace_window_limit {
             self.trace_windows.push(Gemma4DrafterTraceWindow {
                 history_len: self.history.len(),
@@ -1249,40 +1255,31 @@ impl<'m> Gemma4DrafterGenerationStream<'m> {
             &mut self.stats,
         );
 
-        let (accepted_last_hidden, accepted_shared_kv) = if resolution.needs_rollback {
+        let accepted_len = resolution.accepted_verify_input_len;
+        let accepted_last_hidden =
+            slice_hidden_position(&verified.hidden, i32::try_from(accepted_len)? - 1)?;
+        let accepted_shared_kv = if resolution.needs_rollback {
             let rollback_start = Instant::now();
-            restore_layer_cache(&mut self.cache, &base_snapshot)?;
-            self.prefix_cache
-                .refresh_active_kv_residency_stats(&self.cache);
-            add_elapsed_us(&mut self.stats.main_rollback_us, rollback_start);
-            let replay_len = resolution.accepted_verify_input_len;
-            let replay_input = &verify_input[..replay_len];
-            let replay_arr: Array = (replay_input, &[1_i32, replay_len as i32][..]).try_into()?;
-            let replay_pos_ids = self.position_ids(verify_start_pos, replay_len as i32)?;
-            let replay_forward_start = Instant::now();
-            let replay = self.model.forward_text_hidden_with_shared_kv_on(
-                &replay_arr,
-                &replay_pos_ids,
-                None,
-                None,
-                Some(&mut self.cache),
-                (),
+            trim_full_layer_cache_rows_to_accepted_prefix(
+                &mut self.cache,
+                &base_snapshot,
+                &[(0, accepted_len)],
             )?;
             self.prefix_cache
                 .refresh_active_kv_residency_stats(&self.cache);
-            add_elapsed_us(&mut self.stats.verify_forward_us, replay_forward_start);
-            (
-                slice_hidden_position(&replay.hidden, replay_len as i32 - 1)?,
-                replay.shared_kv,
-            )
+            add_elapsed_us(&mut self.stats.main_rollback_us, rollback_start);
+            let rejected_len = verify_input
+                .len()
+                .checked_sub(accepted_len)
+                .ok_or_else(|| {
+                    anyhow!(
+                    "Gemma4 drafter accepted verify length {accepted_len} exceeds input length {}",
+                    verify_input.len()
+                )
+                })?;
+            shared_kv_row_trim_suffix_on(&verified.shared_kv, 0, rejected_len, ())?
         } else {
-            (
-                slice_hidden_position(
-                    &verified.hidden,
-                    resolution.accepted_verify_input_len as i32 - 1,
-                )?,
-                verified.shared_kv,
-            )
+            verified.shared_kv
         };
         self.last_hidden = accepted_last_hidden;
         self.shared_kv = accepted_shared_kv;
@@ -1295,12 +1292,27 @@ impl<'m> Gemma4DrafterGenerationStream<'m> {
             tokens_to_append.truncate(stop_idx + 1);
         }
         tokens_to_append.truncate(remaining);
+        let committed_tokens = tokens_to_append.len();
         for token in tokens_to_append {
             self.history.push(token);
             self.pending_tokens.push_back(token);
         }
         self.prefix_cache
             .refresh_active_kv_residency_stats(&self.cache);
+        let timing_delta = self
+            .stats
+            .draft_cap_timing()
+            .saturating_delta_since(timing_before);
+        self.stats.record_draft_cap_observation(
+            self.cfg.max_draft_tokens,
+            &[draft_tokens.len()],
+            &[context_tokens],
+            accepted_draft_len,
+            committed_tokens,
+            rollback_count,
+            elapsed_us_since(window_started),
+            timing_delta,
+        );
         Ok(())
     }
 
@@ -1734,22 +1746,61 @@ pub(crate) fn draft_position_for_shared_kv(kv_valid_len: i32) -> i32 {
     (kv_valid_len - 1).max(0)
 }
 
-pub(crate) fn shared_kv_row_view_on(
+/// Extract one committed row from a full batched target-cache view.
+pub(crate) fn shared_kv_row_prefix_on(
     states: &Gemma4SharedKvStates,
     row_idx: usize,
+    prefix_len: i32,
     target: impl Into<StreamOrDevice>,
 ) -> Result<Gemma4SharedKvStates> {
+    if prefix_len <= 0 {
+        return Err(anyhow!(
+            "Gemma4 drafter shared KV prefix length must be positive, got {prefix_len}"
+        ));
+    }
     let target = target.into();
     let mut out = Gemma4SharedKvStates::default();
     for kind in [Gemma4LayerKind::Sliding, Gemma4LayerKind::Full] {
         if let Some(kv) = states.get(kind) {
             let len = kv_len(kv)?;
-            if len <= 0 {
-                continue;
+            if prefix_len > len {
+                return Err(anyhow!(
+                    "Gemma4 drafter shared KV prefix length {prefix_len} exceeds {kind:?} length {len}"
+                ));
             }
             out.insert(
                 kind,
-                slice_shared_kv_row_range_on(kv, row_idx, 0, len, target)?,
+                slice_shared_kv_row_range_on(kv, row_idx, 0, prefix_len, target)?,
+            );
+        }
+    }
+    Ok(out)
+}
+
+/// Commit a B=1 target view by removing rejected verify positions from its tail.
+pub(crate) fn shared_kv_row_trim_suffix_on(
+    states: &Gemma4SharedKvStates,
+    row_idx: usize,
+    trim: usize,
+    target: impl Into<StreamOrDevice>,
+) -> Result<Gemma4SharedKvStates> {
+    let trim = i32::try_from(trim)?;
+    let target = target.into();
+    let mut out = Gemma4SharedKvStates::default();
+    for kind in [Gemma4LayerKind::Sliding, Gemma4LayerKind::Full] {
+        if let Some(kv) = states.get(kind) {
+            let len = kv_len(kv)?;
+            let end = len.checked_sub(trim).ok_or_else(|| {
+                anyhow!("Gemma4 drafter shared KV trim {trim} exceeds {kind:?} length {len}")
+            })?;
+            if end <= 0 {
+                return Err(anyhow!(
+                    "Gemma4 drafter shared KV trim {trim} leaves empty {kind:?} state of length {len}"
+                ));
+            }
+            out.insert(
+                kind,
+                slice_shared_kv_row_range_on(kv, row_idx, 0, end, target)?,
             );
         }
     }
@@ -1870,6 +1921,75 @@ mod tests {
         assert_eq!(draft_position_for_shared_kv(0), 0);
         assert_eq!(draft_position_for_shared_kv(1), 0);
         assert_eq!(draft_position_for_shared_kv(20_400), 20_399);
+    }
+
+    fn two_row_shared_kv_states() -> Gemma4SharedKvStates {
+        let keys: Array = (
+            &[0.0_f32, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0][..],
+            &[2_i32, 1, 5, 1][..],
+        )
+            .try_into()
+            .unwrap();
+        let values = &keys + 100.0_f32;
+        let mut states = Gemma4SharedKvStates::default();
+        states.insert(
+            Gemma4LayerKind::Sliding,
+            SharedKv {
+                keys: keys.clone(),
+                values: values.clone(),
+            },
+        );
+        states.insert(Gemma4LayerKind::Full, SharedKv { keys, values });
+        states
+    }
+
+    #[test]
+    fn shared_kv_row_prefix_selects_row_and_committed_length() {
+        let states = two_row_shared_kv_states();
+
+        let prefix = shared_kv_row_prefix_on(&states, 1, 3, ()).unwrap();
+
+        for kind in [Gemma4LayerKind::Sliding, Gemma4LayerKind::Full] {
+            let kv = prefix.require(kind).unwrap();
+            assert_eq!(kv.keys.shape().as_slice(), &[1, 1, 3, 1]);
+            assert_eq!(kv.keys.to_vec::<f32>().unwrap(), vec![5.0, 6.0, 7.0]);
+            assert_eq!(
+                kv.values.to_vec::<f32>().unwrap(),
+                vec![105.0, 106.0, 107.0]
+            );
+        }
+    }
+
+    #[test]
+    fn shared_kv_row_trim_suffix_keeps_verified_accepted_prefix() {
+        let states = two_row_shared_kv_states();
+
+        let prefix = shared_kv_row_trim_suffix_on(&states, 0, 2, ()).unwrap();
+
+        for kind in [Gemma4LayerKind::Sliding, Gemma4LayerKind::Full] {
+            let kv = prefix.require(kind).unwrap();
+            assert_eq!(kv.keys.shape().as_slice(), &[1, 1, 3, 1]);
+            assert_eq!(kv.keys.to_vec::<f32>().unwrap(), vec![0.0, 1.0, 2.0]);
+            assert_eq!(
+                kv.values.to_vec::<f32>().unwrap(),
+                vec![100.0, 101.0, 102.0]
+            );
+        }
+    }
+
+    #[test]
+    fn shared_kv_row_trim_suffix_rejects_empty_state() {
+        let states = two_row_shared_kv_states();
+
+        let err = match shared_kv_row_trim_suffix_on(&states, 0, 5, ()) {
+            Ok(_) => panic!("empty shared KV state should fail"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string().contains("leaves empty Sliding state"),
+            "unexpected error: {err:#}"
+        );
     }
 
     fn shared_kv_restore_config() -> Gemma4TextConfig {

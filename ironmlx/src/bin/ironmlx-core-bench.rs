@@ -15,8 +15,8 @@ use ironmlx::core::cache::{
 };
 use ironmlx::core::scheduler::DenseVlMethods;
 use ironmlx::core::speculative::{
-    resolve_mtp_draft_tokens, MtpDraftTokensArg, MtpSpeculativeConfig, MtpSpeculativeModel,
-    MtpSpeculativeStats, MtpTextGenerationStream,
+    resolve_mtp_draft_tokens, MtpDraftCapObservation, MtpDraftTokensArg, MtpSpeculativeConfig,
+    MtpSpeculativeModel, MtpSpeculativeStats, MtpTextGenerationStream,
 };
 use ironmlx::core::{GenerateRequest, GenerationStream, Loader, Model, Sampler, Scheduler};
 use ironmlx::models::gemma4::{
@@ -184,6 +184,7 @@ struct BenchOutput {
 struct Meta {
     backend: &'static str,
     mode: BenchMode,
+    speculative_source: Option<&'static str>,
     model_dir: String,
     mtp_model_dir: Option<String>,
     mtp_draft_tokens: Option<usize>,
@@ -205,6 +206,8 @@ struct Meta {
     warmup_runs: usize,
     measured_runs: usize,
     load_ms: f64,
+    device_name: Option<String>,
+    ironmlx_version: &'static str,
 }
 
 #[derive(Serialize)]
@@ -269,6 +272,8 @@ struct MtpRecordStats {
     mtp_prefill_cache_commit_us: u64,
     mtp_decode_cache_commit_us: u64,
     mtp_cache_restore_us: u64,
+    draft_cap_observations: Vec<MtpDraftCapObservation>,
+    draft_cap_observation_dropped_windows: usize,
 }
 
 #[derive(Serialize)]
@@ -387,6 +392,8 @@ impl From<MtpSpeculativeStats> for MtpRecordStats {
             mtp_prefill_cache_commit_us: stats.mtp_prefill_cache_commit_us,
             mtp_decode_cache_commit_us: stats.mtp_decode_cache_commit_us,
             mtp_cache_restore_us: stats.mtp_cache_restore_us,
+            draft_cap_observations: stats.draft_cap_observations,
+            draft_cap_observation_dropped_windows: stats.draft_cap_observation_dropped_windows,
         }
     }
 }
@@ -728,6 +735,7 @@ where
         meta: Meta {
             backend: "ironmlx-core",
             mode: args.mode,
+            speculative_source: None,
             model_dir: args.model.display().to_string(),
             mtp_model_dir: None,
             mtp_draft_tokens: None,
@@ -763,6 +771,8 @@ where
             warmup_runs: args.warmup_runs,
             measured_runs: args.runs,
             load_ms,
+            device_name: mlx::memory::snapshot().device_name,
+            ironmlx_version: env!("CARGO_PKG_VERSION"),
         },
         summary: summarize(&records),
         warmups,
@@ -857,6 +867,7 @@ where
         meta: Meta {
             backend: "ironmlx-core",
             mode: args.mode,
+            speculative_source: mtp.as_ref().map(|_| "qwen-mtp"),
             model_dir: args.model.display().to_string(),
             mtp_model_dir: args
                 .mtp_model_dir
@@ -895,6 +906,8 @@ where
             warmup_runs: args.warmup_runs,
             measured_runs: args.runs,
             load_ms,
+            device_name: mlx::memory::snapshot().device_name,
+            ironmlx_version: env!("CARGO_PKG_VERSION"),
         },
         summary: summarize(&records),
         warmups,
@@ -986,6 +999,7 @@ fn run_for_gemma4_model(
         meta: Meta {
             backend: "ironmlx-core",
             mode: args.mode,
+            speculative_source: drafter.as_ref().map(|_| "gemma4-drafter"),
             model_dir: args.model.display().to_string(),
             mtp_model_dir: args
                 .mtp_model_dir
@@ -1024,6 +1038,8 @@ fn run_for_gemma4_model(
             warmup_runs: args.warmup_runs,
             measured_runs: args.runs,
             load_ms,
+            device_name: mlx::memory::snapshot().device_name,
+            ironmlx_version: env!("CARGO_PKG_VERSION"),
         },
         summary: summarize(&records),
         warmups,
@@ -1992,6 +2008,8 @@ mod tests {
                 mtp_prefill_cache_commit_us: 0,
                 mtp_decode_cache_commit_us: 0,
                 mtp_cache_restore_us: 0,
+                draft_cap_observations: Vec::new(),
+                draft_cap_observation_dropped_windows: 0,
             }),
             mtp_trace: None,
             active_kv_stats: None,
