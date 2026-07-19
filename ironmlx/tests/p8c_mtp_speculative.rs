@@ -293,7 +293,7 @@ fn minimal_tokenizer() -> Tokenizer {
 }
 
 #[test]
-fn mtp_stream_rolls_back_and_replays_accepted_prefix_after_partial_reject() {
+fn mtp_stream_commits_accepted_prefix_without_replay_after_partial_reject() {
     let model = FakeMtpModel::new();
     let mtp = FakeMtpHead;
     let tokenizer = minimal_tokenizer();
@@ -324,7 +324,7 @@ fn mtp_stream_rolls_back_and_replays_accepted_prefix_after_partial_reject() {
 
     assert_eq!(
         model.text_hidden_inputs(),
-        vec![vec![1, 2], vec![10, 11, 99], vec![10, 11]]
+        vec![vec![1, 2], vec![10, 11, 99]]
     );
 
     let second = stream.next_token().unwrap().unwrap();
