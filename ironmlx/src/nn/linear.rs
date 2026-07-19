@@ -257,31 +257,17 @@ impl Linear {
                     && x.ndim() == 3
                     && x.shape().as_slice()[0] > 1
                 {
-                    let dims = x.shape();
-                    let dims = dims.as_slice();
-                    let mut rows = Vec::with_capacity(dims[0] as usize);
-                    for row in 0..dims[0] {
-                        let x_row = mlx::ops::indexing::slice_strided_on(
-                            x,
-                            &[row, 0_i32, 0][..],
-                            &[row + 1, dims[1], dims[2]][..],
-                            &[1_i32, 1, 1][..],
-                            target,
-                        )?;
-                        rows.push(mlx::quantization::quantized_matmul_on(
-                            &x_row,
-                            weight,
-                            scales,
-                            biases.as_ref(),
-                            true,
-                            Some(*group_size),
-                            Some(*bits),
-                            mode.mlx_backend_mode(),
-                            target,
-                        )?);
-                    }
-                    let row_refs = rows.iter().collect::<Vec<_>>();
-                    mlx::ops::shape::concatenate_on(&row_refs, 0, target)?
+                    mlx::quantization::quantized_matmul_batch_isolated_on(
+                        x,
+                        weight,
+                        scales,
+                        biases.as_ref(),
+                        true,
+                        Some(*group_size),
+                        Some(*bits),
+                        mode.mlx_backend_mode(),
+                        target,
+                    )?
                 } else {
                     mlx::quantization::quantized_matmul_on(
                         x,
