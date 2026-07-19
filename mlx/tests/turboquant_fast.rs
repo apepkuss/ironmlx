@@ -558,6 +558,271 @@ fn turboquant_sdpa_decode_parallel_matches_dense_materialized_reference() {
 }
 
 #[test]
+fn turboquant_sdpa_decode_serial_preserves_identical_batch_rows() {
+    let _guard = turboquant_test_lock();
+    let b = 4_i32;
+    let h_q = 8_i32;
+    let h_kv = 2_i32;
+    let s = 121_i32;
+    let d = 512_i32;
+    let k_bits = 3_u8;
+    let v_bits = 4_u8;
+    let scale = (d as f32).sqrt().recip();
+
+    let q_row = test_values((h_q * d) as usize);
+    let k_row = test_values((h_kv * s * d) as usize);
+    let v_row = test_values((h_kv * s * d) as usize);
+    let q_data = q_row.repeat(b as usize);
+    let k_data = k_row.repeat(b as usize);
+    let v_data = v_row.repeat(b as usize);
+    let q: Array = (q_data.as_slice(), &[b, h_q, 1_i32, d][..])
+        .try_into()
+        .unwrap();
+    let k: Array = (k_data.as_slice(), &[b, h_kv, s, d][..])
+        .try_into()
+        .unwrap();
+    let v: Array = (v_data.as_slice(), &[b, h_kv, s, d][..])
+        .try_into()
+        .unwrap();
+
+    let seed = 0x5455_5242_4f51_5541_u64;
+    let k_signs = turboquant::wht::generate_signs(d as usize, seed);
+    let k_signs: Array = (k_signs.as_slice(), &[d][..]).try_into().unwrap();
+    let v_signs = turboquant::wht::generate_signs(d as usize, seed);
+    let v_signs: Array = (v_signs.as_slice(), &[d][..]).try_into().unwrap();
+    let k_codebook = turboquant::codebook::Codebook::new(k_bits, d as usize);
+    let k_codebook: Array = (
+        k_codebook.centroids.as_slice(),
+        &[k_codebook.centroids.len() as i32][..],
+    )
+        .try_into()
+        .unwrap();
+    let v_codebook = turboquant::codebook::Codebook::new(v_bits, d as usize);
+    let v_codebook: Array = (
+        v_codebook.centroids.as_slice(),
+        &[v_codebook.centroids.len() as i32][..],
+    )
+        .try_into()
+        .unwrap();
+    let (k_packed, k_norms) =
+        mlx::fast::turbo_quantize(&k, &k_signs, &k_codebook, k_bits).expect("quantize k");
+    let (v_packed, v_norms) =
+        mlx::fast::turbo_quantize(&v, &v_signs, &v_codebook, v_bits).expect("quantize v");
+    let mask_data = vec![0.0_f32; (b * s) as usize];
+    let mask: Array = (mask_data.as_slice(), &[b, 1_i32, 1_i32, s][..])
+        .try_into()
+        .unwrap();
+
+    let actual = mlx::fast::turboquant_sdpa_decode(
+        &q,
+        &k_packed,
+        &k_norms,
+        &v_packed,
+        &v_norms,
+        &k_signs,
+        &k_codebook,
+        &v_signs,
+        &v_codebook,
+        scale,
+        k_bits,
+        v_bits,
+        Some(&mask),
+        Dtype::Float32,
+    )
+    .expect("serial turboquant sdpa decode");
+
+    let values = actual.to_vec::<f32>().unwrap();
+    let row_size = (h_q * d) as usize;
+    for row in 1..b as usize {
+        assert_eq!(
+            &values[row * row_size..(row + 1) * row_size],
+            &values[..row_size],
+            "serial batch row {row} differs"
+        );
+    }
+}
+
+#[test]
+fn turboquant_sdpa_decode_parallel_preserves_identical_batch_rows() {
+    let _guard = turboquant_test_lock();
+    let b = 4_i32;
+    let h_q = 8_i32;
+    let h_kv = 2_i32;
+    let s = 193_i32;
+    let d = 512_i32;
+    let k_bits = 3_u8;
+    let v_bits = 4_u8;
+    let scale = (d as f32).sqrt().recip();
+
+    let q_row = test_values((h_q * d) as usize);
+    let k_row = test_values((h_kv * s * d) as usize)
+        .into_iter()
+        .map(|value| value * 0.8)
+        .collect::<Vec<_>>();
+    let v_row = test_values((h_kv * s * d) as usize)
+        .into_iter()
+        .map(|value| value * 1.1 + 0.05)
+        .collect::<Vec<_>>();
+    let q_data = q_row.repeat(b as usize);
+    let k_data = k_row.repeat(b as usize);
+    let v_data = v_row.repeat(b as usize);
+
+    let q: Array = (q_data.as_slice(), &[b, h_q, 1_i32, d][..])
+        .try_into()
+        .unwrap();
+    let k: Array = (k_data.as_slice(), &[b, h_kv, s, d][..])
+        .try_into()
+        .unwrap();
+    let v: Array = (v_data.as_slice(), &[b, h_kv, s, d][..])
+        .try_into()
+        .unwrap();
+
+    let seed = 0x5455_5242_4f51_5541_u64;
+    let k_signs = turboquant::wht::generate_signs(d as usize, seed);
+    let k_signs: Array = (k_signs.as_slice(), &[d][..]).try_into().unwrap();
+    let v_signs = turboquant::wht::generate_signs(d as usize, seed);
+    let v_signs: Array = (v_signs.as_slice(), &[d][..]).try_into().unwrap();
+    let k_codebook = turboquant::codebook::Codebook::new(k_bits, d as usize);
+    let k_codebook: Array = (
+        k_codebook.centroids.as_slice(),
+        &[k_codebook.centroids.len() as i32][..],
+    )
+        .try_into()
+        .unwrap();
+    let v_codebook = turboquant::codebook::Codebook::new(v_bits, d as usize);
+    let v_codebook: Array = (
+        v_codebook.centroids.as_slice(),
+        &[v_codebook.centroids.len() as i32][..],
+    )
+        .try_into()
+        .unwrap();
+
+    let (k_packed, k_norms) =
+        mlx::fast::turbo_quantize(&k, &k_signs, &k_codebook, k_bits).expect("quantize k");
+    let (v_packed, v_norms) =
+        mlx::fast::turbo_quantize(&v, &v_signs, &v_codebook, v_bits).expect("quantize v");
+    let mask_data = vec![0.0_f32; (b * s) as usize];
+    let mask: Array = (mask_data.as_slice(), &[b, 1_i32, 1_i32, s][..])
+        .try_into()
+        .unwrap();
+
+    let actual = mlx::fast::turboquant_sdpa_decode_parallel(
+        &q,
+        &k_packed,
+        &k_norms,
+        &v_packed,
+        &v_norms,
+        &k_signs,
+        &k_codebook,
+        &v_signs,
+        &v_codebook,
+        scale,
+        k_bits,
+        v_bits,
+        Some(&mask),
+        Dtype::Float32,
+    )
+    .expect("parallel turboquant sdpa decode");
+
+    let q_rot_data = reference_query_rotate(&q_data, d as usize, &k_signs.to_vec().unwrap());
+    let q_rot: Array = (q_rot_data.as_slice(), &[b, h_q, d][..])
+        .try_into()
+        .unwrap();
+    let pre_rotated = mlx::fast::turboquant_sdpa_decode_parallel_pre_rotated(
+        &q_rot,
+        &k_packed,
+        &k_norms,
+        &v_packed,
+        &v_norms,
+        &k_codebook,
+        &v_signs,
+        &v_codebook,
+        scale,
+        k_bits,
+        v_bits,
+        Some(&mask),
+        Dtype::Float32,
+    )
+    .expect("pre-rotated parallel turboquant sdpa decode");
+
+    let values = actual.to_vec::<f32>().unwrap();
+    let pre_rotated_values = pre_rotated.to_vec::<f32>().unwrap();
+    let row_size = (h_q * d) as usize;
+    let first = &values[..row_size];
+    let pre_rotated_first = &pre_rotated_values[..row_size];
+    for row in 1..b as usize {
+        let row_values = &values[row * row_size..(row + 1) * row_size];
+        let pre_rotated_row = &pre_rotated_values[row * row_size..(row + 1) * row_size];
+        for (idx, (got, want)) in pre_rotated_row
+            .iter()
+            .zip(pre_rotated_first.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                got, want,
+                "pre-rotated batch row {row} differs at output index {idx}"
+            );
+        }
+        for (idx, (got, want)) in row_values.iter().zip(first.iter()).enumerate() {
+            assert_eq!(got, want, "batch row {row} differs at output index {idx}");
+        }
+    }
+}
+
+#[test]
+fn turbo_quantize_preserves_identical_large_batch_rows() {
+    let _guard = turboquant_test_lock();
+    let b = 4_i32;
+    let h = 2_i32;
+    let s = 193_i32;
+    let d = 512_i32;
+    let row = test_values((h * s * d) as usize);
+    let data = row.repeat(b as usize);
+    let input: Array = (data.as_slice(), &[b, h, s, d][..]).try_into().unwrap();
+
+    let seed = 0x5455_5242_4f51_5541_u64;
+    let signs = turboquant::wht::generate_signs(d as usize, seed);
+    let signs: Array = (signs.as_slice(), &[d][..]).try_into().unwrap();
+
+    for bits in [3_u8, 4_u8] {
+        let (expected_packed, expected_norms, _) = reference_quantize(&row, d as usize, bits);
+        let codebook = turboquant::codebook::Codebook::new(bits, d as usize);
+        let codebook: Array = (
+            codebook.centroids.as_slice(),
+            &[codebook.centroids.len() as i32][..],
+        )
+            .try_into()
+            .unwrap();
+        let (packed, norms) =
+            mlx::fast::turbo_quantize(&input, &signs, &codebook, bits).expect("turbo quantize");
+        let packed = packed.to_vec::<u32>().unwrap();
+        let norms = norms.to_vec::<f32>().unwrap();
+
+        let packed_row_size = packed.len() / b as usize;
+        let norm_row_size = norms.len() / b as usize;
+        assert_eq!(&packed[..packed_row_size], expected_packed);
+        for (actual, expected) in norms[..norm_row_size].iter().zip(expected_norms.iter()) {
+            assert!(
+                (actual - expected).abs() < 5.0e-5,
+                "{bits}-bit norm mismatch: actual={actual}, expected={expected}"
+            );
+        }
+        for batch in 1..b as usize {
+            assert_eq!(
+                &packed[batch * packed_row_size..(batch + 1) * packed_row_size],
+                &packed[..packed_row_size],
+                "{bits}-bit packed row {batch} differs"
+            );
+            assert_eq!(
+                &norms[batch * norm_row_size..(batch + 1) * norm_row_size],
+                &norms[..norm_row_size],
+                "{bits}-bit norm row {batch} differs"
+            );
+        }
+    }
+}
+
+#[test]
 fn turboquant_sdpa_decode_parallel_pre_rotated_matches_regular_parallel() {
     let _guard = turboquant_test_lock();
     let b = 1_i32;

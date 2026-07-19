@@ -97,89 +97,113 @@ impl TurboquantAttnProfile {
 
 const TURBO_QUANTIZE_SOURCE: &str = r#"
 uint vec_idx = threadgroup_position_in_grid.x;
-uint lid = thread_index_in_threadgroup;
-
-threadgroup float values[HEAD_DIM];
-threadgroup uint indices[HEAD_DIM];
+uint lane = thread_index_in_simdgroup;
 
 uint input_base = vec_idx * HEAD_DIM;
 uint packed_base = vec_idx * PACKED_DIM;
 
-float x_val = (float)x[input_base + lid];
-values[lid] = x_val * x_val;
-threadgroup_barrier(mem_flags::mem_threadgroup);
-
-for (uint stride = HEAD_DIM / 2; stride > 0; stride >>= 1) {
-    if (lid < stride) {
-        values[lid] += values[lid + stride];
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
+thread float values[ELEMENTS_PER_LANE];
+thread float scratch[ELEMENTS_PER_LANE];
+float norm_sq = 0.0f;
+for (uint i = 0; i < ELEMENTS_PER_LANE; ++i) {
+    uint dim = lane + i * 32;
+    float value = dim < HEAD_DIM ? (float)x[input_base + dim] : 0.0f;
+    values[i] = value;
+    norm_sq += value * value;
 }
 
-if (lid == 0) {
-    values[0] = sqrt(values[0]);
-}
-threadgroup_barrier(mem_flags::mem_threadgroup);
-
-float norm = values[0];
+float norm = sqrt(simd_sum(norm_sq));
 float safe_norm = norm > 1.0e-10f ? norm : 1.0f;
-values[lid] = (x_val / safe_norm) * (float)signs[lid];
-threadgroup_barrier(mem_flags::mem_threadgroup);
-
-for (uint width = 1; width < HEAD_DIM; width <<= 1) {
-    uint pair = lid;
-    if (pair < HEAD_DIM / 2) {
-        uint block = pair / width;
-        uint offset = pair - block * width;
-        uint left = block * width * 2 + offset;
-        uint right = left + width;
-        float a = values[left];
-        float b = values[right];
-        values[left] = a + b;
-        values[right] = a - b;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
+for (uint i = 0; i < ELEMENTS_PER_LANE; ++i) {
+    uint dim = lane + i * 32;
+    values[i] = dim < HEAD_DIM
+        ? (values[i] / safe_norm) * (float)signs[dim]
+        : 0.0f;
 }
 
-float rotated = values[lid] / sqrt((float)HEAD_DIM);
-uint idx = 0;
-for (uint c = 0; c < LEVELS - 1; ++c) {
-    float boundary = 0.5f * ((float)codebook[c] + (float)codebook[c + 1]);
-    if (rotated > boundary) {
-        idx += 1;
-    } else {
-        break;
+for (uint width = 1; width < HEAD_DIM && width < 32; width <<= 1) {
+    for (uint i = 0; i < ELEMENTS_PER_LANE; ++i) {
+        float self = values[i];
+        float other = simd_shuffle_xor(self, width);
+        values[i] = (lane & width) == 0 ? self + other : other - self;
     }
 }
-indices[lid] = idx;
 
-float centroid = (float)codebook[idx];
-values[lid] = centroid * centroid;
-threadgroup_barrier(mem_flags::mem_threadgroup);
-
-for (uint stride = HEAD_DIM / 2; stride > 0; stride >>= 1) {
-    if (lid < stride) {
-        values[lid] += values[lid + stride];
+for (uint width = 1; width < ELEMENTS_PER_LANE; width <<= 1) {
+    for (uint i = 0; i < ELEMENTS_PER_LANE; ++i) {
+        uint partner = i ^ width;
+        float self = values[i];
+        float other = values[partner];
+        scratch[i] = (i & width) == 0 ? self + other : other - self;
     }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint i = 0; i < ELEMENTS_PER_LANE; ++i) {
+        values[i] = scratch[i];
+    }
 }
 
-if (lid == 0) {
-    float recon_norm = sqrt(values[0]);
-    float safe_recon_norm = recon_norm > 1.0e-10f ? recon_norm : 1.0e-10f;
-    norms[vec_idx] = norm / safe_recon_norm;
-}
-threadgroup_barrier(mem_flags::mem_threadgroup);
-
-if (lid < PACKED_DIM) {
-    uint word = 0;
+float inv_sqrt_head_dim = rsqrt((float)HEAD_DIM);
+uint word = 0;
+// Every lane must participate because simd_shuffle is executed in the loop body.
+for (uint packed_round = 0; packed_round < (PACKED_DIM + 31) / 32; ++packed_round) {
+    uint packed_idx = lane + packed_round * 32;
+    bool packed_valid = packed_idx < PACKED_DIM;
+    word = 0;
     for (uint i = 0; i < VALUES_PER_WORD; ++i) {
-        uint src = lid * VALUES_PER_WORD + i;
-        if (src < HEAD_DIM) {
-            word |= (indices[src] & ((1u << BITS) - 1u)) << (i * BITS);
+        uint requested = packed_idx * VALUES_PER_WORD + i;
+        bool valid = packed_valid && requested < HEAD_DIM;
+        uint src = valid ? requested : 0;
+        uint src_lane = src & 31;
+        uint src_slot = src >> 5;
+        float src_value = 0.0f;
+        for (uint slot = 0; slot < ELEMENTS_PER_LANE; ++slot) {
+            float candidate = simd_shuffle(values[slot], src_lane);
+            if (slot == src_slot) {
+                src_value = candidate;
+            }
+        }
+        uint src_idx = 0;
+        if (valid) {
+            float src_rotated = src_value * inv_sqrt_head_dim;
+            for (uint c = 0; c < LEVELS - 1; ++c) {
+                float boundary = 0.5f * ((float)codebook[c] + (float)codebook[c + 1]);
+                if (src_rotated > boundary) {
+                    src_idx += 1;
+                } else {
+                    break;
+                }
+            }
+        }
+        word |= (src_idx & ((1u << BITS) - 1u)) << (i * BITS);
+    }
+    if (packed_valid) {
+        packed[packed_base + packed_idx] = word;
+    }
+}
+
+float recon_norm_sq = 0.0f;
+for (uint i = 0; i < ELEMENTS_PER_LANE; ++i) {
+    uint dim = lane + i * 32;
+    if (dim >= HEAD_DIM) {
+        continue;
+    }
+    float rotated = values[i] * inv_sqrt_head_dim;
+    uint idx = 0;
+    for (uint c = 0; c < LEVELS - 1; ++c) {
+        float boundary = 0.5f * ((float)codebook[c] + (float)codebook[c + 1]);
+        if (rotated > boundary) {
+            idx += 1;
+        } else {
+            break;
         }
     }
-    packed[packed_base + lid] = word;
+    float centroid = (float)codebook[idx];
+    recon_norm_sq += centroid * centroid;
+}
+
+float recon_norm = sqrt(simd_sum(recon_norm_sq));
+if (lane == 0) {
+    float safe_recon_norm = recon_norm > 1.0e-10f ? recon_norm : 1.0e-10f;
+    norms[vec_idx] = norm / safe_recon_norm;
 }
 "#;
 
@@ -1175,7 +1199,7 @@ pub fn turbo_quantize_on(
     let packed_shape = Shape::from(packed_shape);
 
     let kernel = cached_turbo_quantize_kernel()?;
-    let grid_x = vector_count * head_dim;
+    let grid_x = vector_count * 32;
     let target = target.into();
     let mut outputs = kernel
         .dispatch_builder()
@@ -1183,9 +1207,10 @@ pub fn turbo_quantize_on(
         .output_shapes(&[packed_shape, norms_shape])
         .output_dtypes(&[Dtype::Uint32, Dtype::Float32])
         .grid(grid_x, 1, 1)
-        .threadgroup(head_dim, 1, 1)
+        .threadgroup(32, 1, 1)
         .stream(target)
         .template_int("HEAD_DIM", head_dim)
+        .template_int("ELEMENTS_PER_LANE", (head_dim + 31) / 32)
         .template_int("BITS", i32::from(bits))
         .template_int("VALUES_PER_WORD", values_per_word)
         .template_int("PACKED_DIM", packed_dim)

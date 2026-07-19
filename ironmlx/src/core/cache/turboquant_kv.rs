@@ -1865,7 +1865,19 @@ fn packed_dim(dim: i32, bits: u8) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mlx::Dtype;
+    use mlx::{Array, Dtype};
+
+    fn test_values(len: usize) -> Vec<f32> {
+        let mut values = Vec::with_capacity(len);
+        let mut state = 0x1234_5678_9abc_def0_u64;
+        for _ in 0..len {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            values.push(((state & 0xffff) as f32 / 65_535.0 - 0.5) * 1.7);
+        }
+        values
+    }
 
     #[test]
     fn packed_dim_matches_word_layout() {
@@ -1900,5 +1912,95 @@ mod tests {
         assert_eq!(tq.v_codebook.shape().as_slice(), &[16]);
         assert_eq!(tq.k_signs.dtype(), Dtype::Float32);
         assert_eq!(tq.k_codebook.dtype(), Dtype::Float32);
+    }
+
+    #[test]
+    fn k3v4_per_row_append_preserves_identical_d512_batch_rows() {
+        let batch = 4_i32;
+        let heads = 2_i32;
+        let seq = 121_i32;
+        let head_dim = 512_i32;
+        let row = test_values((heads * seq * head_dim) as usize);
+        let data = row.repeat(batch as usize);
+        let k: Array = (data.as_slice(), &[batch, heads, seq, head_dim][..])
+            .try_into()
+            .unwrap();
+        let v: Array = (data.as_slice(), &[batch, heads, seq, head_dim][..])
+            .try_into()
+            .unwrap();
+        let mut cache = TurboQuantKVCache::new(
+            batch,
+            heads,
+            head_dim,
+            head_dim,
+            256,
+            256,
+            TurboQuantKVBits::K3V4,
+        )
+        .unwrap();
+        let mut offsets = vec![0_i32; batch as usize];
+        let row_lens = vec![seq; batch as usize];
+
+        let _ = cache
+            .update_and_fetch_on(&k, &v, &mut offsets, &row_lens, Dtype::Float32, ())
+            .unwrap();
+        let decode_row = test_values((heads * head_dim) as usize)
+            .into_iter()
+            .map(|value| value * 0.7 + 0.2)
+            .collect::<Vec<_>>();
+        let decode_data = decode_row.repeat(batch as usize);
+        let decode_k: Array = (decode_data.as_slice(), &[batch, heads, 1_i32, head_dim][..])
+            .try_into()
+            .unwrap();
+        let decode_v = decode_k.clone();
+        let decode_lens = vec![1_i32; batch as usize];
+        let (dense_k, dense_v) = cache
+            .update_and_fetch_on(
+                &decode_k,
+                &decode_v,
+                &mut offsets,
+                &decode_lens,
+                Dtype::Float32,
+                (),
+            )
+            .unwrap();
+
+        let k_packed = cache.k_packed.as_ref().unwrap().to_vec::<u32>().unwrap();
+        let k_norms = cache.k_norms.as_ref().unwrap().to_vec::<f32>().unwrap();
+        let v_packed = cache.v_packed.as_ref().unwrap().to_vec::<u32>().unwrap();
+        let v_norms = cache.v_norms.as_ref().unwrap().to_vec::<f32>().unwrap();
+        for values in [&k_packed, &v_packed] {
+            let row_size = values.len() / batch as usize;
+            for row in 1..batch as usize {
+                assert_eq!(
+                    &values[row * row_size..(row + 1) * row_size],
+                    &values[..row_size],
+                    "packed cache row {row} differs"
+                );
+            }
+        }
+        for values in [&k_norms, &v_norms] {
+            let row_size = values.len() / batch as usize;
+            for row in 1..batch as usize {
+                assert_eq!(
+                    &values[row * row_size..(row + 1) * row_size],
+                    &values[..row_size],
+                    "norm cache row {row} differs"
+                );
+            }
+        }
+        for values in [
+            dense_k.to_vec::<f32>().unwrap(),
+            dense_v.to_vec::<f32>().unwrap(),
+        ] {
+            let row_size = values.len() / batch as usize;
+            for row in 1..batch as usize {
+                assert_eq!(
+                    &values[row * row_size..(row + 1) * row_size],
+                    &values[..row_size],
+                    "materialized cache row {row} differs"
+                );
+            }
+        }
     }
 }
