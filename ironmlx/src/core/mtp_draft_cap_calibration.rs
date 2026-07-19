@@ -7,15 +7,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::speculative::{MtpDraftCapContextBucket, MtpDraftCapObservation};
 
-pub const MTP_DRAFT_CAP_CALIBRATION_SCHEMA_VERSION: u32 = 1;
+pub const MTP_DRAFT_CAP_CALIBRATION_SCHEMA_VERSION: u32 = 2;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct MtpDraftCapBenchInput {
     pub meta: MtpDraftCapBenchMeta,
     pub records: Vec<MtpDraftCapBenchRecord>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct MtpDraftCapBenchMeta {
     pub backend: String,
     pub mode: String,
@@ -26,6 +26,9 @@ pub struct MtpDraftCapBenchMeta {
     pub mtp_trace_windows: usize,
     pub prompt_file: String,
     pub prompt_tokens: usize,
+    pub scheduler_prompt_files: Vec<String>,
+    pub scheduler_prompt_tokens: Vec<usize>,
+    pub scheduler_batch_width: usize,
     pub max_tokens: usize,
     pub prefill_chunk_size: usize,
     pub kv_quant: String,
@@ -41,20 +44,29 @@ pub struct MtpDraftCapBenchMeta {
     pub ironmlx_version: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct MtpDraftCapBenchRecord {
     pub valid: bool,
     pub generated_tokens: usize,
     pub generated_token_ids: Vec<u32>,
     pub finish_reason: Option<String>,
+    pub scheduler_requests: Vec<MtpDraftCapBenchRequest>,
     pub mtp_stats: Option<MtpDraftCapBenchStats>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
+pub struct MtpDraftCapBenchRequest {
+    pub request_index: usize,
+    pub prompt_file: String,
+    pub generated_tokens: usize,
+    pub generated_token_ids: Vec<u32>,
+    pub finish_reason: Option<String>,
+    pub valid: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub struct MtpDraftCapBenchStats {
-    #[serde(default)]
     pub draft_cap_observations: Vec<MtpDraftCapObservation>,
-    #[serde(default)]
     pub draft_cap_observation_dropped_windows: usize,
 }
 
@@ -80,6 +92,9 @@ pub struct MtpDraftCapRuntimeContext {
     pub ironmlx_version: String,
     pub prompt_file: String,
     pub prompt_tokens: usize,
+    pub scheduler_prompt_files: Vec<String>,
+    pub scheduler_prompt_tokens: Vec<usize>,
+    pub scheduler_batch_width: usize,
     pub max_tokens: usize,
     pub prefill_chunk_size: usize,
     pub kv_quant: String,
@@ -253,7 +268,7 @@ pub fn calibrate_mtp_draft_cap(
 
     let mut ignored = MtpDraftCapIgnoredCoverage::default();
     let mut valid_records = 0;
-    let mut expected_output: Option<(Vec<u32>, Option<String>)> = None;
+    let mut expected_outputs: Option<Vec<(Vec<u32>, Option<String>)>> = None;
     let mut grouped: BTreeMap<CandidateKey, CandidateAccumulator> = BTreeMap::new();
     for (input_idx, input) in inputs.iter().enumerate() {
         for (record_idx, record) in input.records.iter().enumerate() {
@@ -261,7 +276,13 @@ pub fn calibrate_mtp_draft_cap(
                 ignored.invalid_records = ignored.invalid_records.saturating_add(1);
                 continue;
             }
-            validate_record_output(record, input_idx, record_idx, &mut expected_output)?;
+            validate_record_output(
+                record,
+                &input.meta,
+                input_idx,
+                record_idx,
+                &mut expected_outputs,
+            )?;
             valid_records += 1;
             let Some(stats) = record.mtp_stats.as_ref() else {
                 ignored.missing_observation_records =
@@ -281,6 +302,13 @@ pub fn calibrate_mtp_draft_cap(
             let mut record_grouped = BTreeMap::<CandidateKey, CandidateAccumulator>::new();
             for observation in &stats.draft_cap_observations {
                 validate_observation(observation, input_idx, record_idx)?;
+                if observation.batch_width > input.meta.scheduler_batch_width {
+                    bail!(
+                        "input[{input_idx}].records[{record_idx}] observation batch_width {} exceeds scheduler_batch_width {}",
+                        observation.batch_width,
+                        input.meta.scheduler_batch_width
+                    );
+                }
                 if Some(observation.configured_max_draft_tokens) != input.meta.mtp_draft_tokens {
                     bail!(
                         "input[{input_idx}].records[{record_idx}] observation cap {} does not match metadata cap {:?}",
@@ -421,6 +449,9 @@ pub fn calibrate_mtp_draft_cap(
             ironmlx_version: first.meta.ironmlx_version.clone(),
             prompt_file: first.meta.prompt_file.clone(),
             prompt_tokens: first.meta.prompt_tokens,
+            scheduler_prompt_files: first.meta.scheduler_prompt_files.clone(),
+            scheduler_prompt_tokens: first.meta.scheduler_prompt_tokens.clone(),
+            scheduler_batch_width: first.meta.scheduler_batch_width,
             max_tokens: first.meta.max_tokens,
             prefill_chunk_size: first.meta.prefill_chunk_size,
             kv_quant: first.meta.kv_quant.clone(),
@@ -498,8 +529,11 @@ fn validate_input(input: &MtpDraftCapBenchInput, label: &str) -> Result<()> {
     if meta.backend != "ironmlx-core" {
         bail!("{label} backend must be ironmlx-core, got {}", meta.backend);
     }
-    if meta.mode != "mtp-text" {
-        bail!("{label} mode must be mtp-text, got {}", meta.mode);
+    if !matches!(meta.mode.as_str(), "mtp-text" | "scheduler-text") {
+        bail!(
+            "{label} mode must be mtp-text or scheduler-text, got {}",
+            meta.mode
+        );
     }
     if meta.speculative_source.as_deref() != Some("gemma4-drafter") {
         bail!(
@@ -512,6 +546,41 @@ fn validate_input(input: &MtpDraftCapBenchInput, label: &str) -> Result<()> {
     }
     if meta.mtp_draft_tokens.is_none() {
         bail!("{label} is missing mtp_draft_tokens");
+    }
+    if meta.scheduler_batch_width == 0 {
+        bail!("{label} scheduler_batch_width must be greater than zero");
+    }
+    if meta.scheduler_batch_width > meta.b_max {
+        bail!(
+            "{label} scheduler_batch_width {} exceeds b_max {}",
+            meta.scheduler_batch_width,
+            meta.b_max
+        );
+    }
+    if meta.mode == "mtp-text" && meta.scheduler_batch_width != 1 {
+        bail!(
+            "{label} mtp-text requires scheduler_batch_width 1, got {}",
+            meta.scheduler_batch_width
+        );
+    }
+    if meta.scheduler_prompt_files.len() != meta.scheduler_batch_width {
+        bail!(
+            "{label} scheduler_prompt_files count {} does not match scheduler_batch_width {}",
+            meta.scheduler_prompt_files.len(),
+            meta.scheduler_batch_width
+        );
+    }
+    if meta.scheduler_prompt_tokens.len() != meta.scheduler_batch_width {
+        bail!(
+            "{label} scheduler_prompt_tokens count {} does not match scheduler_batch_width {}",
+            meta.scheduler_prompt_tokens.len(),
+            meta.scheduler_batch_width
+        );
+    }
+    if meta.scheduler_prompt_files.first() != Some(&meta.prompt_file)
+        || meta.scheduler_prompt_tokens.first() != Some(&meta.prompt_tokens)
+    {
+        bail!("{label} primary prompt metadata does not match scheduler prompt metadata");
     }
     if meta.device_name.as_deref().is_none_or(str::is_empty) {
         bail!("{label} is missing device_name");
@@ -537,9 +606,10 @@ fn validate_input(input: &MtpDraftCapBenchInput, label: &str) -> Result<()> {
 
 fn validate_record_output(
     record: &MtpDraftCapBenchRecord,
+    meta: &MtpDraftCapBenchMeta,
     input_idx: usize,
     record_idx: usize,
-    expected_output: &mut Option<(Vec<u32>, Option<String>)>,
+    expected_outputs: &mut Option<Vec<(Vec<u32>, Option<String>)>>,
 ) -> Result<()> {
     let label = format!("input[{input_idx}].records[{record_idx}]");
     if record.generated_tokens == 0 {
@@ -552,17 +622,90 @@ fn validate_record_output(
             record.generated_token_ids.len()
         );
     }
-    if let Some((expected_ids, expected_finish_reason)) = expected_output {
-        if record.generated_token_ids.as_slice() != expected_ids.as_slice()
-            || record.finish_reason.as_deref() != expected_finish_reason.as_deref()
-        {
-            bail!("{label} output differs from the first valid greedy benchmark record");
+    if record.generated_tokens != meta.max_tokens
+        || record.finish_reason.as_deref() != Some("length")
+    {
+        bail!(
+            "{label} valid output must finish by length with exactly {} tokens",
+            meta.max_tokens
+        );
+    }
+    let outputs = match meta.mode.as_str() {
+        "mtp-text" => {
+            if !record.scheduler_requests.is_empty() {
+                bail!("{label} mtp-text record must not contain scheduler_requests");
+            }
+            vec![(
+                record.generated_token_ids.clone(),
+                record.finish_reason.clone(),
+            )]
+        }
+        "scheduler-text" => {
+            if record.scheduler_requests.len() != meta.scheduler_batch_width {
+                bail!(
+                    "{label} scheduler request count {} does not match scheduler_batch_width {}",
+                    record.scheduler_requests.len(),
+                    meta.scheduler_batch_width
+                );
+            }
+            let mut outputs = Vec::with_capacity(record.scheduler_requests.len());
+            for (expected_index, request) in record.scheduler_requests.iter().enumerate() {
+                let request_label = format!("{label}.scheduler_requests[{expected_index}]");
+                if request.request_index != expected_index {
+                    bail!(
+                        "{request_label} request_index {} does not match position {expected_index}",
+                        request.request_index
+                    );
+                }
+                if request.prompt_file != meta.scheduler_prompt_files[expected_index] {
+                    bail!(
+                        "{request_label} prompt_file mismatch: expected {:?}, got {:?}",
+                        meta.scheduler_prompt_files[expected_index],
+                        request.prompt_file
+                    );
+                }
+                if !request.valid {
+                    bail!("{request_label} is marked invalid inside a valid benchmark record");
+                }
+                if request.generated_tokens == 0 {
+                    bail!("{request_label} generated zero tokens");
+                }
+                if request.generated_tokens != request.generated_token_ids.len() {
+                    bail!(
+                        "{request_label} generated_tokens {} does not match generated_token_ids length {}",
+                        request.generated_tokens,
+                        request.generated_token_ids.len()
+                    );
+                }
+                if request.generated_tokens != meta.max_tokens
+                    || request.finish_reason.as_deref() != Some("length")
+                {
+                    bail!(
+                        "{request_label} valid output must finish by length with exactly {} tokens",
+                        meta.max_tokens
+                    );
+                }
+                outputs.push((
+                    request.generated_token_ids.clone(),
+                    request.finish_reason.clone(),
+                ));
+            }
+            if outputs[0].0 != record.generated_token_ids
+                || outputs[0].1.as_deref() != record.finish_reason.as_deref()
+            {
+                bail!("{label} representative output does not match scheduler request 0");
+            }
+            outputs
+        }
+        mode => bail!("{label} has unsupported mode {mode:?} after input validation"),
+    };
+
+    if let Some(expected) = expected_outputs {
+        if outputs != *expected {
+            bail!("{label} outputs differ from the first valid greedy benchmark record");
         }
     } else {
-        *expected_output = Some((
-            record.generated_token_ids.clone(),
-            record.finish_reason.clone(),
-        ));
+        *expected_outputs = Some(outputs);
     }
     Ok(())
 }
@@ -590,6 +733,9 @@ fn ensure_same_runtime(
     require_equal!(mtp_trace_windows);
     require_equal!(prompt_file);
     require_equal!(prompt_tokens);
+    require_equal!(scheduler_prompt_files);
+    require_equal!(scheduler_prompt_tokens);
+    require_equal!(scheduler_batch_width);
     require_equal!(max_tokens);
     require_equal!(prefill_chunk_size);
     require_equal!(kv_quant);
@@ -720,7 +866,10 @@ mod tests {
                 mtp_trace_windows: 0,
                 prompt_file: "/prompts/calibration.txt".to_string(),
                 prompt_tokens: 4_096,
-                max_tokens: 256,
+                scheduler_prompt_files: vec!["/prompts/calibration.txt".to_string()],
+                scheduler_prompt_tokens: vec![4_096],
+                scheduler_batch_width: 1,
+                max_tokens: 3,
                 prefill_chunk_size: 2_048,
                 kv_quant: "none".to_string(),
                 paged_prefix_cache_dir: None,
@@ -740,6 +889,7 @@ mod tests {
                     generated_tokens: 3,
                     generated_token_ids: vec![11, 12, 13],
                     finish_reason: Some("length".to_string()),
+                    scheduler_requests: Vec::new(),
                     mtp_stats: Some(MtpDraftCapBenchStats {
                         draft_cap_observations: vec![observation.clone()],
                         draft_cap_observation_dropped_windows: 0,
@@ -757,12 +907,51 @@ mod tests {
         }
     }
 
+    fn scheduler_input(
+        cap: usize,
+        mut observation: MtpDraftCapObservation,
+    ) -> MtpDraftCapBenchInput {
+        observation.batch_width = 2;
+        let mut input = input(cap, observation);
+        input.meta.mode = "scheduler-text".to_string();
+        input.meta.scheduler_prompt_files = vec![
+            "/prompts/short.txt".to_string(),
+            "/prompts/long.txt".to_string(),
+        ];
+        input.meta.scheduler_prompt_tokens = vec![512, 4_096];
+        input.meta.scheduler_batch_width = 2;
+        input.meta.prompt_file = "/prompts/short.txt".to_string();
+        input.meta.prompt_tokens = 512;
+        for record in &mut input.records {
+            record.scheduler_requests = vec![
+                MtpDraftCapBenchRequest {
+                    request_index: 0,
+                    prompt_file: "/prompts/short.txt".to_string(),
+                    generated_tokens: 3,
+                    generated_token_ids: vec![11, 12, 13],
+                    finish_reason: Some("length".to_string()),
+                    valid: true,
+                },
+                MtpDraftCapBenchRequest {
+                    request_index: 1,
+                    prompt_file: "/prompts/long.txt".to_string(),
+                    generated_tokens: 3,
+                    generated_token_ids: vec![21, 22, 23],
+                    finish_reason: Some("length".to_string()),
+                    valid: true,
+                },
+            ];
+        }
+        input
+    }
+
     #[test]
     fn calibration_recommends_highest_observed_committed_rate() {
         let cap1 = observation(1, 64, 2, 640_000);
         let cap2 = observation(2, 64, 3, 768_000);
         let report = calibrate_mtp_draft_cap(vec![input(1, cap1), input(2, cap2)], config())
             .expect("calibration");
+        assert_eq!(report.schema_version, 2);
         assert_eq!(report.recommendations.len(), 1);
         let regime = &report.recommendations[0];
         assert_eq!(regime.status, MtpDraftCapRecommendationStatus::Recommended);
@@ -820,7 +1009,7 @@ mod tests {
             .expect_err("divergent greedy output must fail calibration");
         assert!(error
             .to_string()
-            .contains("output differs from the first valid greedy benchmark record"));
+            .contains("outputs differ from the first valid greedy benchmark record"));
     }
 
     #[test]
@@ -833,5 +1022,145 @@ mod tests {
         assert!(error
             .to_string()
             .contains("record count 2 does not match measured_runs 3"));
+    }
+
+    #[test]
+    fn calibration_accepts_scheduler_batch_outputs_aligned_by_request() {
+        let cap1 = scheduler_input(1, observation(1, 64, 2, 640_000));
+        let cap2 = scheduler_input(2, observation(2, 64, 3, 768_000));
+
+        let report =
+            calibrate_mtp_draft_cap(vec![cap1, cap2], config()).expect("scheduler calibration");
+
+        assert_eq!(report.runtime.mode, "scheduler-text");
+        assert_eq!(report.runtime.scheduler_batch_width, 2);
+        assert_eq!(report.recommendations[0].batch_width, 2);
+        assert_eq!(report.recommendations[0].recommended_cap, Some(2));
+    }
+
+    #[test]
+    fn calibration_rejects_scheduler_output_divergence_by_request() {
+        let first = scheduler_input(1, observation(1, 64, 2, 640_000));
+        let mut second = scheduler_input(2, observation(2, 64, 3, 768_000));
+        second.records[0].scheduler_requests[1].generated_token_ids[2] = 99;
+
+        let error = calibrate_mtp_draft_cap(vec![first, second], config())
+            .expect_err("per-request output divergence must fail");
+        assert!(error
+            .to_string()
+            .contains("outputs differ from the first valid greedy benchmark record"));
+    }
+
+    #[test]
+    fn calibration_rejects_scheduler_record_without_request_outputs() {
+        let mut batch = scheduler_input(1, observation(1, 64, 2, 640_000));
+        batch.records[0].scheduler_requests.clear();
+
+        let error = calibrate_mtp_draft_cap(vec![batch], config())
+            .expect_err("batched records require per-request outputs");
+        assert!(error
+            .to_string()
+            .contains("scheduler request count 0 does not match scheduler_batch_width 2"));
+    }
+
+    #[test]
+    fn calibration_rejects_scheduler_b1_without_request_output() {
+        let mut batch = scheduler_input(1, observation(1, 64, 2, 640_000));
+        batch.meta.scheduler_prompt_files.truncate(1);
+        batch.meta.scheduler_prompt_tokens.truncate(1);
+        batch.meta.scheduler_batch_width = 1;
+        for record in &mut batch.records {
+            record.scheduler_requests.truncate(1);
+            for observation in &mut record
+                .mtp_stats
+                .as_mut()
+                .expect("stats")
+                .draft_cap_observations
+            {
+                observation.batch_width = 1;
+            }
+        }
+        batch.records[0].scheduler_requests.clear();
+
+        let error = calibrate_mtp_draft_cap(vec![batch], config())
+            .expect_err("scheduler B1 requires per-request output");
+        assert!(error
+            .to_string()
+            .contains("scheduler request count 0 does not match scheduler_batch_width 1"));
+    }
+
+    #[test]
+    fn bench_input_rejects_missing_scheduler_contract_fields() {
+        let make_input = || input(1, observation(1, 64, 2, 640_000));
+
+        let mut missing_prompt_files = serde_json::to_value(make_input()).expect("serialize input");
+        missing_prompt_files["meta"]
+            .as_object_mut()
+            .expect("meta object")
+            .remove("scheduler_prompt_files");
+        let error = serde_json::from_value::<MtpDraftCapBenchInput>(missing_prompt_files)
+            .expect_err("scheduler_prompt_files is required");
+        assert!(error.to_string().contains("scheduler_prompt_files"));
+
+        let mut missing_requests = serde_json::to_value(make_input()).expect("serialize input");
+        missing_requests["records"][0]
+            .as_object_mut()
+            .expect("record object")
+            .remove("scheduler_requests");
+        let error = serde_json::from_value::<MtpDraftCapBenchInput>(missing_requests)
+            .expect_err("scheduler_requests is required");
+        assert!(error.to_string().contains("scheduler_requests"));
+
+        let mut missing_observations = serde_json::to_value(make_input()).expect("serialize input");
+        missing_observations["records"][0]["mtp_stats"]
+            .as_object_mut()
+            .expect("mtp_stats object")
+            .remove("draft_cap_observations");
+        let error = serde_json::from_value::<MtpDraftCapBenchInput>(missing_observations)
+            .expect_err("draft_cap_observations is required");
+        assert!(error.to_string().contains("draft_cap_observations"));
+    }
+
+    #[test]
+    fn calibration_keeps_scheduler_width_shrink_as_separate_regime() {
+        let mut batch_observation = observation(1, 64, 2, 640_000);
+        batch_observation.batch_width = 2;
+        let mut single_observation = observation(1, 32, 2, 320_000);
+        single_observation.context_bucket = MtpDraftCapContextBucket::UpTo2k;
+        let mut batch = scheduler_input(1, batch_observation);
+        for record in &mut batch.records {
+            record
+                .mtp_stats
+                .as_mut()
+                .expect("stats")
+                .draft_cap_observations
+                .push(single_observation.clone());
+        }
+
+        let report = calibrate_mtp_draft_cap(vec![batch], config()).expect("calibration");
+
+        assert_eq!(report.recommendations.len(), 2);
+        assert_eq!(report.recommendations[0].batch_width, 1);
+        assert_eq!(report.recommendations[1].batch_width, 2);
+    }
+
+    #[test]
+    fn calibration_rejects_observation_wider_than_admitted_batch() {
+        let mut too_wide = observation(1, 66, 2, 660_000);
+        too_wide.batch_width = 3;
+        let mut batch = scheduler_input(1, too_wide.clone());
+        for record in &mut batch.records {
+            record
+                .mtp_stats
+                .as_mut()
+                .expect("stats")
+                .draft_cap_observations[0] = too_wide.clone();
+        }
+
+        let error = calibrate_mtp_draft_cap(vec![batch], config())
+            .expect_err("observation width must fit admitted batch");
+        assert!(error
+            .to_string()
+            .contains("observation batch_width 3 exceeds scheduler_batch_width 2"));
     }
 }
