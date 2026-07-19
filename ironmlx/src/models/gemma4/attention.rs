@@ -340,6 +340,10 @@ impl Gemma4Attention {
         target: impl Into<StreamOrDevice>,
     ) -> Result<(Array, SharedKv)> {
         let target = target.into();
+        // The scheduler arms this only for K3V4 multi-row speculative verify.
+        // MLPs remain batched; Q/K/V and O projections retain B=1 numerics.
+        let _stable_qmm = crate::nn::batch_stable_qmm::context_is_armed()
+            .then(crate::nn::batch_stable_qmm::linear_scope);
         let profile = profile::vl_layer_enabled();
         let dims_borrow = x.shape();
         let dims = dims_borrow.as_slice();

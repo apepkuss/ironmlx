@@ -705,6 +705,14 @@ fn full_layer_cache_row_offset(cache: &[LayerCache], row: usize) -> Result<i32> 
     expected.ok_or_else(|| anyhow!("full_layer_cache_row_offset: cache has no layers"))
 }
 
+fn gemma4_verify_needs_batch_stable_qmm(
+    kv_bits: Option<TurboQuantKVBits>,
+    batch_width: usize,
+    verify_len: usize,
+) -> bool {
+    kv_bits == Some(TurboQuantKVBits::K3V4) && batch_width > 1 && verify_len > 2
+}
+
 fn build_gemma4_drafter_batched_verify_input(
     active_rows: &[usize],
     contexts: &[Gemma4DrafterBatchedFillContext],
@@ -9646,7 +9654,16 @@ impl Scheduler<crate::models::Gemma4Model> {
         )?;
         let verify_pos_ids = self.reusable_dummy_position_ids()?;
         let verify_forward_start = Instant::now();
+        // K3 quantization can amplify batch-shaped QMM rounding into a
+        // persistent cache difference. Keep only q>=3 attention projections
+        // on the same per-request QMM shape used by B=1 verification.
+        let stable_k3v4_verify = gemma4_verify_needs_batch_stable_qmm(
+            self.kv_cache_turboquant_bits_for_rows(rows_to_fill)?,
+            active_rows.len(),
+            max_verify_len,
+        );
         let verified = {
+            let _stable_qmm = stable_k3v4_verify.then(crate::nn::batch_stable_qmm::context_scope);
             let cache = self
                 .cache
                 .as_mut()
@@ -10204,7 +10221,7 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
 
-    use crate::core::cache::{KVCache, MtpCache};
+    use crate::core::cache::{KVCache, MtpCache, TurboQuantKVBits};
     use crate::core::speculative::{MtpSpeculativeConfig, MtpSpeculativeModel};
     use crate::nn::MtpStepOutput;
     use serial_test::serial;
@@ -10271,6 +10288,31 @@ mod tests {
             err.to_string().contains("offset 1 at layer 1 != 2"),
             "unexpected error: {err:#}"
         );
+    }
+
+    #[test]
+    fn gemma4_batch_stable_qmm_is_limited_to_multirow_k3v4_verify() {
+        assert!(gemma4_verify_needs_batch_stable_qmm(
+            Some(TurboQuantKVBits::K3V4),
+            4,
+            3
+        ));
+        assert!(!gemma4_verify_needs_batch_stable_qmm(
+            Some(TurboQuantKVBits::K3V4),
+            1,
+            3
+        ));
+        assert!(!gemma4_verify_needs_batch_stable_qmm(
+            Some(TurboQuantKVBits::K3V4),
+            4,
+            2
+        ));
+        assert!(!gemma4_verify_needs_batch_stable_qmm(
+            Some(TurboQuantKVBits::K4V4),
+            4,
+            3
+        ));
+        assert!(!gemma4_verify_needs_batch_stable_qmm(None, 4, 3));
     }
 
     #[test]

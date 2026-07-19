@@ -56,6 +56,8 @@ pub struct MemoryInfo {
 #[derive(Debug, Serialize)]
 pub struct MtpHealthInfo {
     pub enabled: bool,
+    pub requested_draft_tokens: Option<usize>,
+    /// Runtime cap after applying cache and scheduler safety constraints.
     pub draft_tokens: Option<usize>,
     pub prefill_count: u64,
     pub step_count: u64,
@@ -77,6 +79,7 @@ pub struct MtpHealthInfo {
 #[derive(Clone)]
 pub struct MtpHealthConfig {
     enabled: bool,
+    requested_draft_tokens: Option<usize>,
     draft_tokens: Option<usize>,
     prefill_count: Arc<AtomicU64>,
     step_count: Arc<AtomicU64>,
@@ -99,6 +102,7 @@ impl MtpHealthConfig {
     pub fn disabled() -> Self {
         Self {
             enabled: false,
+            requested_draft_tokens: None,
             draft_tokens: None,
             prefill_count: Arc::new(AtomicU64::new(0)),
             step_count: Arc::new(AtomicU64::new(0)),
@@ -120,6 +124,7 @@ impl MtpHealthConfig {
 
     #[allow(clippy::too_many_arguments)]
     pub fn enabled(
+        requested_draft_tokens: usize,
         draft_tokens: usize,
         prefill_count: Arc<AtomicU64>,
         step_count: Arc<AtomicU64>,
@@ -139,6 +144,7 @@ impl MtpHealthConfig {
     ) -> Self {
         Self {
             enabled: true,
+            requested_draft_tokens: Some(requested_draft_tokens),
             draft_tokens: Some(draft_tokens),
             prefill_count,
             step_count,
@@ -161,6 +167,7 @@ impl MtpHealthConfig {
     fn snapshot(&self) -> MtpHealthInfo {
         MtpHealthInfo {
             enabled: self.enabled,
+            requested_draft_tokens: self.requested_draft_tokens,
             draft_tokens: self.draft_tokens,
             prefill_count: self.prefill_count.load(Ordering::Relaxed),
             step_count: self.step_count.load(Ordering::Relaxed),
@@ -416,6 +423,7 @@ mod tests {
         let snapshot = test_collector(MtpHealthConfig::disabled()).snapshot();
 
         assert!(!snapshot.mtp.enabled);
+        assert_eq!(snapshot.mtp.requested_draft_tokens, None);
         assert_eq!(snapshot.mtp.draft_tokens, None);
         assert_eq!(snapshot.mtp.prefill_count, 0);
         assert_eq!(snapshot.mtp.step_count, 0);
@@ -451,6 +459,7 @@ mod tests {
         let cache_restore_us = Arc::new(AtomicU64::new(53));
         let snapshot = test_collector(MtpHealthConfig::enabled(
             2,
+            1,
             prefill_count.clone(),
             step_count.clone(),
             fallback_prefill_count.clone(),
@@ -469,8 +478,11 @@ mod tests {
         ))
         .snapshot();
 
+        assert_eq!(snapshot.mtp.requested_draft_tokens, Some(2));
+        assert_eq!(snapshot.mtp.draft_tokens, Some(1));
+
         assert!(snapshot.mtp.enabled);
-        assert_eq!(snapshot.mtp.draft_tokens, Some(2));
+        assert_eq!(snapshot.mtp.draft_tokens, Some(1));
         assert_eq!(snapshot.mtp.prefill_count, 7);
         assert_eq!(snapshot.mtp.step_count, 11);
         assert_eq!(snapshot.mtp.fallback_prefill_count, 13);
@@ -504,6 +516,7 @@ mod tests {
         cache_restore_us.store(67, Ordering::Relaxed);
         let snapshot = test_collector(MtpHealthConfig::enabled(
             2,
+            2,
             prefill_count,
             step_count,
             fallback_prefill_count,
@@ -522,6 +535,8 @@ mod tests {
         ))
         .snapshot();
 
+        assert_eq!(snapshot.mtp.requested_draft_tokens, Some(2));
+        assert_eq!(snapshot.mtp.draft_tokens, Some(2));
         assert_eq!(snapshot.mtp.prefill_count, 13);
         assert_eq!(snapshot.mtp.step_count, 17);
         assert_eq!(snapshot.mtp.fallback_prefill_count, 23);
@@ -588,6 +603,7 @@ mod tests {
             },
             mtp: MtpHealthInfo {
                 enabled: false,
+                requested_draft_tokens: None,
                 draft_tokens: None,
                 prefill_count: 0,
                 step_count: 0,

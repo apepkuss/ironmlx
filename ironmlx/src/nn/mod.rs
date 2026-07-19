@@ -7,6 +7,7 @@
 pub(crate) mod activations;
 pub(crate) use activations::gelu_tanh;
 pub mod attention;
+pub(crate) mod batch_stable_qmm;
 pub mod conv;
 pub mod decoder_layer;
 pub mod embedding;

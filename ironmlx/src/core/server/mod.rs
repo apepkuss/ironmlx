@@ -182,6 +182,12 @@ pub(crate) struct Gemma4DrafterAppState {
     pub(crate) mtp_draft_tokens: usize,
 }
 
+#[derive(Clone, Copy)]
+struct MtpHealthDraftTokens {
+    requested: usize,
+    effective: usize,
+}
+
 impl Gemma4DrafterAppState {
     pub(crate) fn with_sampling_defaults(mut self, sampling_defaults: SamplingDefaults) -> Self {
         self.base = self.base.with_sampling_defaults(sampling_defaults);
@@ -505,6 +511,11 @@ where
     M: Model + DenseVlMethods + MtpSpeculativeModel + Send + 'static,
     M::MtpHead: Send + 'static,
 {
+    let requested_mtp_draft_tokens = mtp_draft_tokens;
+    let effective_mtp_draft_tokens = effective_mtp_draft_tokens_for_paged_prefix(
+        requested_mtp_draft_tokens,
+        paged_prefix_cache.is_some(),
+    );
     serve_inner(
         model,
         tokenizer,
@@ -521,10 +532,13 @@ where
         scheduler_runtime_profile,
         scheduler_autotune_report,
         vision_input_override,
-        Some(mtp_draft_tokens),
+        Some(MtpHealthDraftTokens {
+            requested: requested_mtp_draft_tokens,
+            effective: effective_mtp_draft_tokens,
+        }),
         MtpSchedulerActorSpawner {
             mtp,
-            mtp_draft_tokens,
+            mtp_draft_tokens: effective_mtp_draft_tokens,
             paged_prefix_cache,
             prefix_lru_cache,
             active_kv_offload,
@@ -692,7 +706,10 @@ where
         scheduler_autotune_report,
         vision_input_override,
         loaded_model_weight_bytes,
-        Some(effective_mtp_draft_tokens),
+        Some(MtpHealthDraftTokens {
+            requested: mtp_draft_tokens,
+            effective: effective_mtp_draft_tokens,
+        }),
         MtpSchedulerActorSpawner {
             mtp,
             mtp_draft_tokens: effective_mtp_draft_tokens,
@@ -726,6 +743,31 @@ pub(crate) async fn build_gemma4_drafter_app_state(
     loaded_model_weight_bytes: Option<usize>,
     active_kv_offload: ActiveKvOffloadConfig,
 ) -> Result<Gemma4DrafterAppState> {
+    let effective_mtp_draft_tokens =
+        effective_mtp_draft_tokens_for_paged_prefix(mtp_draft_tokens, paged_prefix_cache.is_some());
+    let kv_cache_profile = kv_cache_turboquant_bits
+        .map(|bits| bits.to_string())
+        .unwrap_or_else(|| "unquantized".to_string());
+    if effective_mtp_draft_tokens < mtp_draft_tokens {
+        tracing::warn!(
+            requested_draft_tokens = mtp_draft_tokens,
+            effective_draft_tokens = effective_mtp_draft_tokens,
+            scheduler_b_max = b_max,
+            kv_cache = %kv_cache_profile,
+            paged_prefix_cache_enabled = paged_prefix_cache.is_some(),
+            constraint = "paged_prefix_cache",
+            "Gemma4 drafter cap constrained"
+        );
+    } else {
+        tracing::info!(
+            requested_draft_tokens = mtp_draft_tokens,
+            effective_draft_tokens = effective_mtp_draft_tokens,
+            scheduler_b_max = b_max,
+            kv_cache = %kv_cache_profile,
+            paged_prefix_cache_enabled = paged_prefix_cache.is_some(),
+            "Gemma4 drafter cap resolved"
+        );
+    }
     let drafter = Arc::new(Mutex::new(drafter));
     let base = build_app_state(
         model,
@@ -742,10 +784,13 @@ pub(crate) async fn build_gemma4_drafter_app_state(
         scheduler_autotune_report,
         vision_input_override,
         loaded_model_weight_bytes,
-        Some(mtp_draft_tokens),
+        Some(MtpHealthDraftTokens {
+            requested: mtp_draft_tokens,
+            effective: effective_mtp_draft_tokens,
+        }),
         Gemma4DrafterSchedulerActorSpawner {
             drafter,
-            mtp_draft_tokens,
+            mtp_draft_tokens: effective_mtp_draft_tokens,
             paged_prefix_cache,
             prefix_lru_cache,
             active_kv_offload,
@@ -755,7 +800,7 @@ pub(crate) async fn build_gemma4_drafter_app_state(
 
     Ok(Gemma4DrafterAppState {
         base,
-        mtp_draft_tokens,
+        mtp_draft_tokens: effective_mtp_draft_tokens,
     })
 }
 
@@ -775,7 +820,7 @@ async fn build_app_state<M, S>(
     scheduler_autotune_report: bool,
     vision_input_override: Option<VisionInputConfig>,
     loaded_model_weight_bytes: Option<usize>,
-    mtp_health_draft_tokens: Option<usize>,
+    mtp_health_draft_tokens: Option<MtpHealthDraftTokens>,
     scheduler_actor_spawner: S,
 ) -> Result<AppState<M>>
 where
@@ -844,7 +889,8 @@ where
     let mtp_health = mtp_health_draft_tokens
         .map(|draft_tokens| {
             health::MtpHealthConfig::enabled(
-                draft_tokens,
+                draft_tokens.requested,
+                draft_tokens.effective,
                 scheduler_handle.mtp_prefill_count.clone(),
                 scheduler_handle.mtp_step_count.clone(),
                 scheduler_handle.mtp_fallback_prefill_count.clone(),
@@ -919,7 +965,7 @@ async fn serve_inner<M, S>(
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     scheduler_autotune_report: bool,
     vision_input_override: Option<VisionInputConfig>,
-    mtp_health_draft_tokens: Option<usize>,
+    mtp_health_draft_tokens: Option<MtpHealthDraftTokens>,
     scheduler_actor_spawner: S,
 ) -> Result<()>
 where
@@ -1267,6 +1313,7 @@ mod tests {
             &handle,
             health::MtpHealthConfig::enabled(
                 2,
+                2,
                 handle.mtp_prefill_count.clone(),
                 handle.mtp_step_count.clone(),
                 handle.mtp_fallback_prefill_count.clone(),
@@ -1287,6 +1334,7 @@ mod tests {
         let snapshot = collector.snapshot();
 
         assert!(snapshot.mtp.enabled);
+        assert_eq!(snapshot.mtp.requested_draft_tokens, Some(2));
         assert_eq!(snapshot.mtp.draft_tokens, Some(2));
         assert_eq!(snapshot.mtp.prefill_count, 3);
         assert_eq!(snapshot.mtp.step_count, 5);

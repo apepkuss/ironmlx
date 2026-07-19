@@ -1458,6 +1458,7 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
     let mut kv_cache_resident_cap_tokens = 0;
     let mut kv_cache_budget_policies: Vec<String> = Vec::new();
     let mut mtp_enabled = false;
+    let mut mtp_requested_draft_token_values: Vec<usize> = Vec::new();
     let mut mtp_draft_token_values: Vec<usize> = Vec::new();
     let mut mtp_prefill_count = 0;
     let mut mtp_step_count = 0;
@@ -1501,6 +1502,11 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
         }
         if snapshot.mtp.enabled {
             mtp_enabled = true;
+            if let Some(draft_tokens) = snapshot.mtp.requested_draft_tokens {
+                if !mtp_requested_draft_token_values.contains(&draft_tokens) {
+                    mtp_requested_draft_token_values.push(draft_tokens);
+                }
+            }
             if let Some(draft_tokens) = snapshot.mtp.draft_tokens {
                 if !mtp_draft_token_values.contains(&draft_tokens) {
                     mtp_draft_token_values.push(draft_tokens);
@@ -1529,6 +1535,11 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
         crate::core::cache::ActiveKvOffloadHealth::aggregate(active_kv_snapshots);
     let mtp_draft_tokens = if mtp_enabled && mtp_draft_token_values.len() == 1 {
         mtp_draft_token_values.first().copied()
+    } else {
+        None
+    };
+    let mtp_requested_draft_tokens = if mtp_enabled && mtp_requested_draft_token_values.len() == 1 {
+        mtp_requested_draft_token_values.first().copied()
     } else {
         None
     };
@@ -1579,6 +1590,7 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
         },
         mtp: MtpHealthInfo {
             enabled: mtp_enabled,
+            requested_draft_tokens: mtp_requested_draft_tokens,
             draft_tokens: mtp_draft_tokens,
             prefill_count: mtp_prefill_count,
             step_count: mtp_step_count,
@@ -1719,6 +1731,7 @@ mod tests {
             },
             mtp: MtpHealthInfo {
                 enabled: true,
+                requested_draft_tokens: Some(2),
                 draft_tokens: Some(2),
                 prefill_count: 3,
                 step_count: 5,
@@ -1744,6 +1757,7 @@ mod tests {
         let aggregated = aggregate_health(Instant::now(), vec![snapshot]);
 
         assert!(aggregated.mtp.enabled);
+        assert_eq!(aggregated.mtp.requested_draft_tokens, Some(2));
         assert_eq!(aggregated.mtp.draft_tokens, Some(2));
         assert_eq!(aggregated.mtp.prefill_count, 3);
         assert_eq!(aggregated.mtp.step_count, 5);

@@ -253,17 +253,48 @@ impl Linear {
                 bits,
                 mode,
             } => {
-                let mut y = mlx::quantization::quantized_matmul_on(
-                    x,
-                    weight,
-                    scales,
-                    biases.as_ref(),
-                    /* transpose = */ true,
-                    Some(*group_size),
-                    Some(*bits),
-                    mode.mlx_backend_mode(),
-                    target,
-                )?;
+                let mut y = if super::batch_stable_qmm::linear_is_armed()
+                    && x.ndim() == 3
+                    && x.shape().as_slice()[0] > 1
+                {
+                    let dims = x.shape();
+                    let dims = dims.as_slice();
+                    let mut rows = Vec::with_capacity(dims[0] as usize);
+                    for row in 0..dims[0] {
+                        let x_row = mlx::ops::indexing::slice_strided_on(
+                            x,
+                            &[row, 0_i32, 0][..],
+                            &[row + 1, dims[1], dims[2]][..],
+                            &[1_i32, 1, 1][..],
+                            target,
+                        )?;
+                        rows.push(mlx::quantization::quantized_matmul_on(
+                            &x_row,
+                            weight,
+                            scales,
+                            biases.as_ref(),
+                            true,
+                            Some(*group_size),
+                            Some(*bits),
+                            mode.mlx_backend_mode(),
+                            target,
+                        )?);
+                    }
+                    let row_refs = rows.iter().collect::<Vec<_>>();
+                    mlx::ops::shape::concatenate_on(&row_refs, 0, target)?
+                } else {
+                    mlx::quantization::quantized_matmul_on(
+                        x,
+                        weight,
+                        scales,
+                        biases.as_ref(),
+                        /* transpose = */ true,
+                        Some(*group_size),
+                        Some(*bits),
+                        mode.mlx_backend_mode(),
+                        target,
+                    )?
+                };
                 if let Some(b) = bias {
                     y = &y + b;
                 }
@@ -455,6 +486,49 @@ mod tests {
     #[serial(mlx_metal)]
     fn quantized_8bit_forward_matches_mlx_bfloat16() {
         assert_quantized_forward_matches_mlx(8, mlx::Dtype::Bfloat16, 2);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn batch_stable_quantized_forward_matches_single_row_shape() {
+        let out = 32_i32;
+        let in_dim = 64_i32;
+        let group_size = 64_i32;
+        let rows = 3_i32;
+        let weight_data = (0..(out * in_dim))
+            .map(|idx| ((idx % 29) as f32 - 14.0) * 0.015)
+            .collect::<Vec<_>>();
+        let input_data = (0..(rows * in_dim))
+            .map(|idx| ((idx % 19) as f32 - 9.0) * 0.025)
+            .collect::<Vec<_>>();
+        let weight: Array = (weight_data.as_slice(), &[out, in_dim][..])
+            .try_into()
+            .unwrap();
+        let input: Array = (input_data.as_slice(), &[1_i32, rows, in_dim][..])
+            .try_into()
+            .unwrap();
+        let quantized =
+            mlx::quantization::quantize(&weight, Some(group_size), Some(4), "affine", None)
+                .unwrap();
+        let layer = Linear::new_quant(
+            quantized[0].clone(),
+            quantized[1].clone(),
+            Some(quantized[2].clone()),
+            None,
+            group_size,
+            4,
+        );
+        let expected = layer.forward(&input).unwrap().to_vec::<f32>().unwrap();
+        let batch = mlx::ops::shape::concatenate(&[&input, &input, &input, &input], 0).unwrap();
+        let actual = {
+            let _scope = crate::nn::batch_stable_qmm::linear_scope();
+            layer.forward(&batch).unwrap().to_vec::<f32>().unwrap()
+        };
+
+        assert_eq!(actual.len(), expected.len() * 4);
+        for row in actual.chunks_exact(expected.len()) {
+            assert_eq!(row, expected.as_slice());
+        }
     }
 
     #[test]

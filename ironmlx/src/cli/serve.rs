@@ -1080,7 +1080,7 @@ where
     runtime.block_on(server::serve_with_mtp(
         model,
         mtp,
-        effective_draft_tokens,
+        mtp_config.draft_tokens,
         tokenizer,
         model_id,
         &args.host,
@@ -1115,7 +1115,7 @@ fn serve_with_gemma4_drafter_model(
 ) -> Result<()> {
     log_scheduler_mode(scheduler_config);
     tracing::info!(
-        "ironmlx serve: Gemma4 drafter enabled model_dir={} draft_tokens={}",
+        "ironmlx serve: Gemma4 drafter enabled model_dir={} requested_draft_tokens={}",
         mtp_config.model_dir.display(),
         mtp_config.draft_tokens
     );
