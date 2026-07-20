@@ -720,20 +720,18 @@ fn gemma4_verify_needs_batch_stable_qmm(
     kv_bits == Some(TurboQuantKVBits::K3V4) && batch_width > 1 && verify_len > 2
 }
 
-// Long K3V4 cap 2 is safe and profitable only for a single-request scheduler.
-// Multi-request verification remains on cap 1 until its cross-cap numerical
-// path is both stable and faster than cap 1.
+// Long K3V4 cap 2 remains numerically sensitive to verify segment shape in
+// production chat prompts. Keep every long-context scheduler on cap 1 until
+// cap 2 is both output-stable and faster across the HTTP workload matrix.
 const GEMMA4_K3V4_CAP2_MAX_CONTEXT_TOKENS: usize = 1024;
 
 fn gemma4_drafter_effective_budget_for_context(
     kv_bits: Option<TurboQuantKVBits>,
     draft_budget: usize,
     context_tokens: usize,
-    scheduler_batch_capacity: usize,
 ) -> usize {
     if kv_bits == Some(TurboQuantKVBits::K3V4)
         && context_tokens > GEMMA4_K3V4_CAP2_MAX_CONTEXT_TOKENS
-        && scheduler_batch_capacity > 1
     {
         draft_budget.min(1)
     } else {
@@ -749,7 +747,7 @@ fn gemma4_k3v4_long_verify_needs_stable_attention(
 ) -> bool {
     kv_bits == Some(TurboQuantKVBits::K3V4)
         && context_tokens > GEMMA4_K3V4_CAP2_MAX_CONTEXT_TOKENS
-        && verify_len > 1
+        && verify_len > 2
         && scheduler_batch_capacity == 1
 }
 
@@ -9549,7 +9547,6 @@ impl Scheduler<crate::models::Gemma4Model> {
                 kv_bits,
                 cfg.max_draft_tokens,
                 history.len(),
-                self.b_max,
             );
             let draft_budget = row_state
                 .adaptive_draft_tokens
@@ -10049,7 +10046,6 @@ impl Scheduler<crate::models::Gemma4Model> {
             self.kv_cache_turboquant_bits_for_rows(&[row_idx])?,
             cfg.max_draft_tokens,
             context_tokens,
-            scheduler_batch_capacity,
         );
         let draft_budget = row_state
             .adaptive_draft_tokens
@@ -10407,22 +10403,20 @@ mod tests {
     }
 
     #[test]
-    fn gemma4_k3v4_long_context_limits_cap2_to_single_request_scheduler() {
+    fn gemma4_k3v4_long_context_clamps_cap2_for_every_scheduler_capacity() {
         assert_eq!(
             gemma4_drafter_effective_budget_for_context(
                 Some(TurboQuantKVBits::K3V4),
                 2,
                 GEMMA4_K3V4_CAP2_MAX_CONTEXT_TOKENS,
-                4,
             ),
             2
         );
         assert_eq!(
             gemma4_drafter_effective_budget_for_context(
                 Some(TurboQuantKVBits::K3V4),
-                2,
-                GEMMA4_K3V4_CAP2_MAX_CONTEXT_TOKENS + 1,
                 4,
+                GEMMA4_K3V4_CAP2_MAX_CONTEXT_TOKENS + 1,
             ),
             1
         );
@@ -10431,16 +10425,14 @@ mod tests {
                 Some(TurboQuantKVBits::K3V4),
                 2,
                 GEMMA4_K3V4_CAP2_MAX_CONTEXT_TOKENS + 1,
-                1,
             ),
-            2
+            1
         );
         assert_eq!(
             gemma4_drafter_effective_budget_for_context(
                 Some(TurboQuantKVBits::K4V4),
                 2,
                 GEMMA4_K3V4_CAP2_MAX_CONTEXT_TOKENS + 1,
-                4,
             ),
             2
         );
@@ -10449,7 +10441,6 @@ mod tests {
                 Some(TurboQuantKVBits::K3V4),
                 1,
                 GEMMA4_K3V4_CAP2_MAX_CONTEXT_TOKENS + 1,
-                4,
             ),
             1
         );
@@ -10457,6 +10448,12 @@ mod tests {
             Some(TurboQuantKVBits::K3V4),
             GEMMA4_K3V4_CAP2_MAX_CONTEXT_TOKENS + 1,
             3,
+            1,
+        ));
+        assert!(!gemma4_k3v4_long_verify_needs_stable_attention(
+            Some(TurboQuantKVBits::K3V4),
+            GEMMA4_K3V4_CAP2_MAX_CONTEXT_TOKENS + 1,
+            2,
             1,
         ));
         assert!(!gemma4_k3v4_long_verify_needs_stable_attention(
