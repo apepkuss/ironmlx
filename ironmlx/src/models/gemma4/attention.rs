@@ -348,6 +348,11 @@ impl Gemma4Attention {
         let dims_borrow = x.shape();
         let dims = dims_borrow.as_slice();
         let (batch, seq) = (dims[0], dims[1]);
+        let reuses_shared_kv = shared_kv.is_some();
+        let query_isolated = crate::nn::gemma4_verify_attention::is_armed()
+            && seq > 1
+            && self.layer_kind == Gemma4LayerKind::Full
+            && !reuses_shared_kv;
         let single_row_decode =
             cache.as_ref().is_some() && batch == 1 && seq == 1 && per_row_lens.is_none();
 
@@ -386,7 +391,7 @@ impl Gemma4Attention {
         )?;
 
         let t0 = Instant::now();
-        let mut paged_decode_out: Option<Array> = None;
+        let mut cached_attention_out: Option<Array> = None;
         let kv = match shared_kv {
             Some(kv) => {
                 profile::log_layer(
@@ -458,17 +463,33 @@ impl Gemma4Attention {
                                 &lens_owned
                             }
                         };
-                        let maybe_paged_out = if c.paged().is_some() {
+                        let maybe_cached_out = if c.paged().is_some() {
                             c.try_update_and_attend_decode_on(&q, &k, &v, lens, 1.0, mask, target)?
+                        } else if crate::nn::gemma4_verify_attention::is_armed() && !query_isolated
+                        {
+                            c.try_update_and_attend_multirow_on(
+                                &q, &k, &v, lens, 1.0, mask, target,
+                            )?
                         } else {
                             None
                         };
-                        let (keys, values) = if maybe_paged_out.is_some() {
-                            c.materialize_current_paged_prefix_on(target)?
+                        let (keys, values) = if maybe_cached_out.is_some() {
+                            if c.paged().is_some() {
+                                c.materialize_current_paged_prefix_on(target)?
+                            } else {
+                                let len = c.offsets().iter().copied().max().unwrap_or(0);
+                                c.turboquant()
+                                    .ok_or_else(|| {
+                                        anyhow!(
+                                            "Gemma4Attention: cached attention returned without paged or TurboQuant storage"
+                                        )
+                                    })?
+                                    .materialize_prefix_on(len, c.dtype(), target)?
+                            }
                         } else {
                             c.update_and_fetch_for_attention_on(&k, &v, lens, target)?
                         };
-                        paged_decode_out = maybe_paged_out;
+                        cached_attention_out = maybe_cached_out;
                         profile::eval_layer(
                             "gemma4_attn_cache_update_fetch",
                             self.layer_idx,
@@ -496,8 +517,10 @@ impl Gemma4Attention {
         let mask = sliced_mask.as_ref().or(mask);
 
         let t0 = Instant::now();
-        let out = if let Some(out) = paged_decode_out {
+        let out = if let Some(out) = cached_attention_out {
             out
+        } else if query_isolated {
+            query_isolated_full_attention_on(&q, &kv, per_row_lens, offsets.values(), target)?
         } else {
             match mask {
                 Some(m) => mlx::fast::scaled_dot_product_attention_on(
@@ -594,6 +617,84 @@ impl Gemma4Attention {
     }
 }
 
+fn query_isolated_full_attention_on(
+    queries: &Array,
+    kv: &SharedKv,
+    per_row_lens: Option<&[i32]>,
+    offsets: &[i32],
+    target: StreamOrDevice,
+) -> Result<Array> {
+    let q_shape = queries.shape();
+    let q_dims = q_shape.as_slice();
+    let (batch, heads, query_len, head_dim) = (q_dims[0], q_dims[1], q_dims[2], q_dims[3]);
+    let kv_len = kv.keys.shape().as_slice()[2];
+    let lens_owned;
+    let lens = match per_row_lens {
+        Some(lens) => lens,
+        None => {
+            lens_owned = vec![query_len; batch as usize];
+            &lens_owned
+        }
+    };
+    if offsets.len() != batch as usize || lens.len() != batch as usize {
+        return Err(anyhow!(
+            "Gemma4 query-isolated attention expected {batch} offsets/lens, got {}/{}",
+            offsets.len(),
+            lens.len()
+        ));
+    }
+    let mut batch_outputs = Vec::with_capacity(batch as usize);
+    for row in 0..batch {
+        let valid_queries = lens[row as usize];
+        let mut row_outputs = Vec::with_capacity(query_len as usize);
+        for query_idx in 0..query_len {
+            let query = mlx::ops::indexing::slice_strided_on(
+                queries,
+                &[row, 0, query_idx, 0][..],
+                &[row + 1, heads, query_idx + 1, head_dim][..],
+                &[1_i32, 1, 1, 1][..],
+                target,
+            )?;
+            if query_idx >= valid_queries {
+                row_outputs.push(&query * 0.0_f32);
+                continue;
+            }
+            let key_end = offsets[row as usize] + query_idx + 1;
+            if key_end <= 0 || key_end > kv_len {
+                return Err(anyhow!(
+                    "Gemma4 query-isolated attention key end {key_end} outside (0,{kv_len}] for row {row} query {query_idx}"
+                ));
+            }
+            let keys = mlx::ops::indexing::slice_strided_on(
+                &kv.keys,
+                &[row, 0, 0, 0][..],
+                &[row + 1, kv.keys.shape().as_slice()[1], key_end, head_dim][..],
+                &[1_i32, 1, 1, 1][..],
+                target,
+            )?;
+            let values = mlx::ops::indexing::slice_strided_on(
+                &kv.values,
+                &[row, 0, 0, 0][..],
+                &[
+                    row + 1,
+                    kv.values.shape().as_slice()[1],
+                    key_end,
+                    kv.values.shape().as_slice()[3],
+                ][..],
+                &[1_i32, 1, 1, 1][..],
+                target,
+            )?;
+            row_outputs.push(mlx::fast::scaled_dot_product_attention_on(
+                &query, &keys, &values, 1.0, "", None, None, target,
+            )?);
+        }
+        let row_refs = row_outputs.iter().collect::<Vec<_>>();
+        batch_outputs.push(mlx::ops::shape::concatenate_on(&row_refs, 2, target)?);
+    }
+    let batch_refs = batch_outputs.iter().collect::<Vec<_>>();
+    Ok(mlx::ops::shape::concatenate_on(&batch_refs, 0, target)?)
+}
+
 fn sliding_attention_view_len(kv_len: i32, query_len: i32, window: i32) -> i32 {
     if kv_len <= 0 {
         return 0;
@@ -682,8 +783,48 @@ fn align_attention_mask_tail_on(
 
 #[cfg(test)]
 mod tests {
-    use super::{align_attention_mask_tail_on, sliding_attention_view_len};
+    use super::{
+        align_attention_mask_tail_on, query_isolated_full_attention_on, sliding_attention_view_len,
+        SharedKv,
+    };
     use mlx::{Array, Dtype};
+    use serial_test::serial;
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn query_isolated_full_attention_handles_ragged_rows() {
+        let queries: Array = (
+            &[
+                1.0_f32, 0.0, 0.0, 1.0, // row 0
+                1.0, 1.0, 9.0, 9.0, // row 1; second query is padding
+            ][..],
+            &[2_i32, 1, 2, 2][..],
+        )
+            .try_into()
+            .unwrap();
+        let keys: Array = (
+            &[
+                1.0_f32, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 2.0, // row 0
+                1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 2.0, // row 1
+            ][..],
+            &[2_i32, 1, 4, 2][..],
+        )
+            .try_into()
+            .unwrap();
+        let values = keys.clone();
+
+        let out = query_isolated_full_attention_on(
+            &queries,
+            &SharedKv { keys, values },
+            Some(&[2, 1]),
+            &[1, 2],
+            ().into(),
+        )
+        .unwrap();
+        assert_eq!(out.shape().as_slice(), &[2, 1, 2, 2]);
+        let values: Vec<f32> = out.to_vec().unwrap();
+        assert_eq!(&values[6..8], &[0.0, 0.0]);
+    }
 
     #[test]
     fn sliding_attention_view_keeps_window_plus_query_minus_one() {

@@ -163,6 +163,7 @@ struct Gemma4DrafterBatchedFillContext {
     current_token: u32,
     stop_token_ids: Vec<u32>,
     remaining: usize,
+    effective_max_draft_tokens: usize,
     draft_budget: usize,
     kv_valid_len: i32,
     draft_position: i32,
@@ -172,6 +173,12 @@ struct Gemma4DrafterBatchedFillContext {
     draft_history: Vec<u32>,
     draft_tokens: Vec<u32>,
     verify_input: Vec<u32>,
+}
+
+#[derive(Clone, Copy)]
+struct Gemma4DrafterWindowPolicy {
+    cfg: MtpSpeculativeConfig,
+    scheduler_batch_capacity: usize,
 }
 
 /// Extension trait for VL-capable models, intentionally NOT part of `core::Model`
@@ -711,6 +718,39 @@ fn gemma4_verify_needs_batch_stable_qmm(
     verify_len: usize,
 ) -> bool {
     kv_bits == Some(TurboQuantKVBits::K3V4) && batch_width > 1 && verify_len > 2
+}
+
+// Long K3V4 cap 2 is safe and profitable only for a single-request scheduler.
+// Multi-request verification remains on cap 1 until its cross-cap numerical
+// path is both stable and faster than cap 1.
+const GEMMA4_K3V4_CAP2_MAX_CONTEXT_TOKENS: usize = 1024;
+
+fn gemma4_drafter_effective_budget_for_context(
+    kv_bits: Option<TurboQuantKVBits>,
+    draft_budget: usize,
+    context_tokens: usize,
+    scheduler_batch_capacity: usize,
+) -> usize {
+    if kv_bits == Some(TurboQuantKVBits::K3V4)
+        && context_tokens > GEMMA4_K3V4_CAP2_MAX_CONTEXT_TOKENS
+        && scheduler_batch_capacity > 1
+    {
+        draft_budget.min(1)
+    } else {
+        draft_budget
+    }
+}
+
+fn gemma4_k3v4_long_verify_needs_stable_attention(
+    kv_bits: Option<TurboQuantKVBits>,
+    context_tokens: usize,
+    verify_len: usize,
+    scheduler_batch_capacity: usize,
+) -> bool {
+    kv_bits == Some(TurboQuantKVBits::K3V4)
+        && context_tokens > GEMMA4_K3V4_CAP2_MAX_CONTEXT_TOKENS
+        && verify_len > 1
+        && scheduler_batch_capacity == 1
 }
 
 fn build_gemma4_drafter_batched_verify_input(
@@ -8888,7 +8928,7 @@ impl Scheduler<crate::models::Gemma4Model> {
             ));
         }
         if active_rows.len() == 1 {
-            return self.prefill_admitted_gemma4_drafter_single(model, drafter, cfg);
+            return self.prefill_admitted_gemma4_drafter_single(model, drafter, cfg, self.b_max);
         }
         for &row_idx in &active_rows {
             let state = self.slots[row_idx]
@@ -8913,11 +8953,17 @@ impl Scheduler<crate::models::Gemma4Model> {
         let mut events = Vec::with_capacity(active_rows.len());
         let mut final_cap = MIN_KV_CACHE_CAP_FOR_GPU_PERF;
         let dtype = model.cache_dtype();
+        let scheduler_batch_capacity = self.b_max;
 
         for &row_idx in &active_rows {
             let mut temp = self.temp_gemma4_drafter_scheduler_for_row(row_idx)?;
             let event = temp
-                .prefill_admitted_gemma4_drafter_single(model, drafter, cfg)
+                .prefill_admitted_gemma4_drafter_single(
+                    model,
+                    drafter,
+                    cfg,
+                    scheduler_batch_capacity,
+                )
                 .map_err(|err| {
                     anyhow!("prefill_admitted_gemma4_drafter_batch row {row_idx}: {err:#}")
                 })?;
@@ -9006,6 +9052,7 @@ impl Scheduler<crate::models::Gemma4Model> {
         model: &crate::models::Gemma4Model,
         drafter: &crate::models::gemma4::Gemma4AssistantModel,
         cfg: MtpSpeculativeConfig,
+        scheduler_batch_capacity: usize,
     ) -> Result<Vec<StepEvent>> {
         match self.phase {
             Phase::Idle | Phase::Admitting => {}
@@ -9316,7 +9363,12 @@ impl Scheduler<crate::models::Gemma4Model> {
         });
 
         if finish_reason.is_none() {
-            self.fill_gemma4_drafter_window_single(row_idx, model, drafter)?;
+            self.fill_gemma4_drafter_window_single(
+                row_idx,
+                model,
+                drafter,
+                scheduler_batch_capacity,
+            )?;
         }
 
         Ok(vec![StepEvent {
@@ -9468,6 +9520,7 @@ impl Scheduler<crate::models::Gemma4Model> {
 
         let window_started = Instant::now();
         let timing_before = stats.draft_cap_timing();
+        let kv_bits = self.kv_cache_turboquant_bits_for_rows(rows_to_fill)?;
 
         let mut contexts = Vec::with_capacity(rows_to_fill.len());
         for &row_idx in rows_to_fill {
@@ -9488,20 +9541,27 @@ impl Scheduler<crate::models::Gemma4Model> {
             let row_state = row_states.get(&row_idx).ok_or_else(|| {
                 anyhow!("fill_gemma4_drafter_windows_batched: row {row_idx} state absent")
             })?;
-            let draft_budget = row_state
-                .adaptive_draft_tokens
-                .clamp(1, cfg.max_draft_tokens)
-                .min(remaining);
             let mut history =
                 Vec::with_capacity(slot.prompt_ids.len() + slot.generated_tokens.len());
             history.extend_from_slice(&slot.prompt_ids);
             history.extend_from_slice(&slot.generated_tokens);
+            let effective_max_draft_tokens = gemma4_drafter_effective_budget_for_context(
+                kv_bits,
+                cfg.max_draft_tokens,
+                history.len(),
+                self.b_max,
+            );
+            let draft_budget = row_state
+                .adaptive_draft_tokens
+                .clamp(1, effective_max_draft_tokens)
+                .min(remaining);
             let kv_valid_len = (history.len() - 1) as i32;
             contexts.push(Gemma4DrafterBatchedFillContext {
                 row_idx,
                 current_token,
                 stop_token_ids: slot.stop_token_ids.clone(),
                 remaining,
+                effective_max_draft_tokens,
                 draft_budget,
                 kv_valid_len,
                 draft_position: crate::models::gemma4::draft_position_for_shared_kv(kv_valid_len),
@@ -9654,9 +9714,16 @@ impl Scheduler<crate::models::Gemma4Model> {
         )?;
         let verify_pos_ids = self.reusable_dummy_position_ids()?;
         let verify_forward_start = Instant::now();
-        // K3 quantization can amplify batch-shaped QMM rounding into a
-        // persistent cache difference. Keep only q>=3 attention projections
-        // on the same per-request QMM shape used by B=1 verification.
+        let stable_attention = gemma4_k3v4_long_verify_needs_stable_attention(
+            kv_bits,
+            contexts
+                .iter()
+                .map(|ctx| ctx.draft_history.len())
+                .max()
+                .unwrap_or(0),
+            max_verify_len,
+            self.b_max,
+        );
         let stable_k3v4_verify = gemma4_verify_needs_batch_stable_qmm(
             self.kv_cache_turboquant_bits_for_rows(rows_to_fill)?,
             active_rows.len(),
@@ -9664,6 +9731,8 @@ impl Scheduler<crate::models::Gemma4Model> {
         );
         let verified = {
             let _stable_qmm = stable_k3v4_verify.then(crate::nn::batch_stable_qmm::context_scope);
+            let _stable_attention =
+                stable_attention.then(crate::nn::gemma4_verify_attention::scope);
             let cache = self
                 .cache
                 .as_mut()
@@ -9756,7 +9825,7 @@ impl Scheduler<crate::models::Gemma4Model> {
                 )
             })?;
             adjust_mtp_draft_budget(
-                cfg.max_draft_tokens,
+                ctx.effective_max_draft_tokens,
                 &mut row_state.adaptive_draft_tokens,
                 ctx.draft_tokens.len(),
                 resolution.accepted_draft_len,
@@ -9869,7 +9938,7 @@ impl Scheduler<crate::models::Gemma4Model> {
             .pending_tokens
             .is_empty()
         {
-            self.fill_gemma4_drafter_window_single(row_idx, model, drafter)?;
+            self.fill_gemma4_drafter_window_single(row_idx, model, drafter, self.b_max)?;
         }
 
         let token = {
@@ -9899,7 +9968,7 @@ impl Scheduler<crate::models::Gemma4Model> {
             .and_then(|state| state.rows.get(&row_idx))
             .is_some_and(|state| state.pending_tokens.is_empty())
         {
-            self.fill_gemma4_drafter_window_single(row_idx, model, drafter)?;
+            self.fill_gemma4_drafter_window_single(row_idx, model, drafter, self.b_max)?;
         }
 
         Ok(vec![event])
@@ -9910,6 +9979,7 @@ impl Scheduler<crate::models::Gemma4Model> {
         row_idx: usize,
         model: &crate::models::Gemma4Model,
         drafter: &crate::models::gemma4::Gemma4AssistantModel,
+        scheduler_batch_capacity: usize,
     ) -> Result<()> {
         let mut drafter_state = self
             .gemma4_drafter_state
@@ -9920,7 +9990,10 @@ impl Scheduler<crate::models::Gemma4Model> {
         })?;
         let result = self.fill_gemma4_drafter_window_single_with_state(
             row_idx,
-            drafter_state.cfg,
+            Gemma4DrafterWindowPolicy {
+                cfg: drafter_state.cfg,
+                scheduler_batch_capacity,
+            },
             &mut drafter_state.stats,
             &mut row_state,
             model,
@@ -9934,12 +10007,16 @@ impl Scheduler<crate::models::Gemma4Model> {
     fn fill_gemma4_drafter_window_single_with_state(
         &mut self,
         row_idx: usize,
-        cfg: MtpSpeculativeConfig,
+        policy: Gemma4DrafterWindowPolicy,
         stats: &mut MtpSpeculativeStats,
         row_state: &mut SchedulerGemma4DrafterRowState,
         model: &crate::models::Gemma4Model,
         drafter: &crate::models::gemma4::Gemma4AssistantModel,
     ) -> Result<()> {
+        let Gemma4DrafterWindowPolicy {
+            cfg,
+            scheduler_batch_capacity,
+        } = policy;
         let (prompt_ids, generated_tokens, max_new_tokens, sampler, stop_token_ids) = {
             let state = self.slots[row_idx]
                 .as_ref()
@@ -9968,9 +10045,15 @@ impl Scheduler<crate::models::Gemma4Model> {
         let timing_before = stats.draft_cap_timing();
         let context_tokens = history.len();
 
+        let effective_max_draft_tokens = gemma4_drafter_effective_budget_for_context(
+            self.kv_cache_turboquant_bits_for_rows(&[row_idx])?,
+            cfg.max_draft_tokens,
+            context_tokens,
+            scheduler_batch_capacity,
+        );
         let draft_budget = row_state
             .adaptive_draft_tokens
-            .clamp(1, cfg.max_draft_tokens)
+            .clamp(1, effective_max_draft_tokens)
             .min(remaining);
         let mut compact_prng = self.compact_prng_state_for_rows(&[row_idx])?;
         let draft_tokens = self.draft_gemma4_drafter_tokens_single(
@@ -10000,6 +10083,14 @@ impl Scheduler<crate::models::Gemma4Model> {
         };
         let verify_forward_start = Instant::now();
         let verified = {
+            let stable_attention = gemma4_k3v4_long_verify_needs_stable_attention(
+                self.kv_cache_turboquant_bits_for_rows(&[row_idx])?,
+                context_tokens,
+                verify_input.len(),
+                scheduler_batch_capacity,
+            );
+            let _stable_attention =
+                stable_attention.then(crate::nn::gemma4_verify_attention::scope);
             let cache = self
                 .cache
                 .as_mut()
@@ -10036,7 +10127,7 @@ impl Scheduler<crate::models::Gemma4Model> {
             stats.rollback_count += 1;
         }
         adjust_mtp_draft_budget(
-            cfg.max_draft_tokens,
+            effective_max_draft_tokens,
             &mut row_state.adaptive_draft_tokens,
             draft_tokens.len(),
             resolution.accepted_draft_len,
@@ -10313,6 +10404,67 @@ mod tests {
             3
         ));
         assert!(!gemma4_verify_needs_batch_stable_qmm(None, 4, 3));
+    }
+
+    #[test]
+    fn gemma4_k3v4_long_context_limits_cap2_to_single_request_scheduler() {
+        assert_eq!(
+            gemma4_drafter_effective_budget_for_context(
+                Some(TurboQuantKVBits::K3V4),
+                2,
+                GEMMA4_K3V4_CAP2_MAX_CONTEXT_TOKENS,
+                4,
+            ),
+            2
+        );
+        assert_eq!(
+            gemma4_drafter_effective_budget_for_context(
+                Some(TurboQuantKVBits::K3V4),
+                2,
+                GEMMA4_K3V4_CAP2_MAX_CONTEXT_TOKENS + 1,
+                4,
+            ),
+            1
+        );
+        assert_eq!(
+            gemma4_drafter_effective_budget_for_context(
+                Some(TurboQuantKVBits::K3V4),
+                2,
+                GEMMA4_K3V4_CAP2_MAX_CONTEXT_TOKENS + 1,
+                1,
+            ),
+            2
+        );
+        assert_eq!(
+            gemma4_drafter_effective_budget_for_context(
+                Some(TurboQuantKVBits::K4V4),
+                2,
+                GEMMA4_K3V4_CAP2_MAX_CONTEXT_TOKENS + 1,
+                4,
+            ),
+            2
+        );
+        assert_eq!(
+            gemma4_drafter_effective_budget_for_context(
+                Some(TurboQuantKVBits::K3V4),
+                1,
+                GEMMA4_K3V4_CAP2_MAX_CONTEXT_TOKENS + 1,
+                4,
+            ),
+            1
+        );
+        assert!(gemma4_k3v4_long_verify_needs_stable_attention(
+            Some(TurboQuantKVBits::K3V4),
+            GEMMA4_K3V4_CAP2_MAX_CONTEXT_TOKENS + 1,
+            3,
+            1,
+        ));
+        assert!(!gemma4_k3v4_long_verify_needs_stable_attention(
+            Some(TurboQuantKVBits::K3V4),
+            GEMMA4_K3V4_CAP2_MAX_CONTEXT_TOKENS + 1,
+            3,
+            4,
+        ));
     }
 
     #[test]

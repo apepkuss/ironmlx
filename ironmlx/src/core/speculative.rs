@@ -34,15 +34,11 @@ pub fn resolve_mtp_draft_tokens(raw_config: &serde_json::Value, arg: MtpDraftTok
     }
 }
 
-pub fn default_mtp_draft_tokens_for_config(raw_config: &serde_json::Value) -> usize {
-    let model_type = raw_config
-        .get("model_type")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("");
-    match model_type {
-        "gemma4" | "gemma4_unified" => 2,
-        _ => 1,
-    }
+pub fn default_mtp_draft_tokens_for_config(_raw_config: &serde_json::Value) -> usize {
+    // Cap 2 remains available through explicit runtime configuration and
+    // scheduler profiles, but is not safe as an unconditional default across
+    // Gemma4 context and batch regimes.
+    1
 }
 
 pub fn effective_mtp_draft_tokens_for_paged_prefix(
@@ -2515,7 +2511,7 @@ mod tests {
     }
 
     #[test]
-    fn mtp_policy_defaults_gemma4_to_d2() {
+    fn mtp_policy_defaults_gemma4_to_d1() {
         for model_type in ["gemma4", "gemma4_unified"] {
             let raw = serde_json::json!({
                 "model_type": model_type,
@@ -2526,10 +2522,10 @@ mod tests {
                 }
             });
 
-            assert_eq!(default_mtp_draft_tokens_for_config(&raw), 2);
+            assert_eq!(default_mtp_draft_tokens_for_config(&raw), 1);
             assert_eq!(
                 resolve_mtp_draft_tokens(&raw, MtpDraftTokensArg::Omitted),
-                2
+                1
             );
         }
     }
