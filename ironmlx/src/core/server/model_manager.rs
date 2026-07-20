@@ -100,6 +100,7 @@ impl ModelManager {
 
     fn start_model_ttl_sweeper(&self) {
         self.pool.start_model_ttl_sweeper();
+        self.pool.start_memory_governor_monitor();
     }
 
     async fn load_model(
@@ -956,7 +957,9 @@ pub async fn serve_app_daemon(args: ServeArgs) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("binding {addr}"))?;
-    axum::serve(listener, app).await?;
+    let serve_result = axum::serve(listener, app).await;
+    crate::core::cache::shutdown_process_async_prefix_store_queue();
+    serve_result?;
     Ok(())
 }
 
@@ -1442,6 +1445,9 @@ fn likely_engine_pool_total_memory_limit_error(message: &str) -> bool {
 
 fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> HealthSnapshot {
     let mlx_memory = mlx::memory::snapshot();
+    let process_governor =
+        crate::core::process_memory::global_process_memory_governor().sample_process();
+    let prefix_store = crate::core::cache::process_async_prefix_store_queue().stats();
     let total_ram_bytes = crate::core::memory_budget::system_total_ram_bytes();
     let free_ram_bytes = system_free_ram_bytes();
     let mut names = Vec::new();
@@ -1557,6 +1563,16 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
     if active_kv_offload.degraded {
         status = HealthStatus::Degraded;
     }
+    if crate::core::cache::process_async_prefix_store_queue().is_backpressured() {
+        status = HealthStatus::Degraded;
+    }
+    if process_governor.pressure_level == crate::core::process_memory::PressureLevel::Emergency {
+        status = HealthStatus::Down;
+    } else if process_governor.telemetry_degraded
+        || process_governor.pressure_level != crate::core::process_memory::PressureLevel::Normal
+    {
+        status = HealthStatus::Degraded;
+    }
 
     HealthSnapshot {
         status,
@@ -1587,6 +1603,8 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
             mlx_cache_bytes: mlx_memory.cache_bytes,
             mlx_peak_bytes: mlx_memory.peak_bytes,
             mlx_memory_limit_bytes: mlx_memory.memory_limit_bytes,
+            process_governor,
+            prefix_store,
         },
         mtp: MtpHealthInfo {
             enabled: mtp_enabled,
@@ -1728,6 +1746,8 @@ mod tests {
                 mlx_cache_bytes: 0,
                 mlx_peak_bytes: 0,
                 mlx_memory_limit_bytes: 0,
+                process_governor: crate::core::process_memory::MemoryGovernorSnapshot::default(),
+                prefix_store: crate::core::cache::AsyncPrefixStoreStats::default(),
             },
             mtp: MtpHealthInfo {
                 enabled: true,

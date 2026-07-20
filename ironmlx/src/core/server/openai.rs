@@ -62,7 +62,14 @@ fn admit_err_to_response(err: anyhow::Error) -> Response {
             // effective_cap_max. Body includes needed + max via Display.
             (StatusCode::PAYLOAD_TOO_LARGE, msg).into_response()
         }
-        Some(SchedulerError::MemoryBudgetExceeded { .. }) => {
+        Some(
+            SchedulerError::MemoryBudgetExceeded { .. }
+            | SchedulerError::MemoryPressure { .. }
+            | SchedulerError::PrefillPeakUnsafe { .. }
+            | SchedulerError::VisionPrefillPeakUnsafe { .. }
+            | SchedulerError::ColdMaterializationUnsafe { .. }
+            | SchedulerError::StoreBackpressure { .. },
+        ) => {
             // 503 Service Unavailable — runtime KV budget soft-limit hit.
             // Retry-After: 5s (fixed conservative backoff). B1-p2.5 §4.1.4.
             let mut resp = (StatusCode::SERVICE_UNAVAILABLE, msg).into_response();
@@ -74,6 +81,14 @@ fn admit_err_to_response(err: anyhow::Error) -> Response {
             // Other anyhow Errs (prompt parsing, OOM, etc.) → 400 Bad Request.
             (StatusCode::BAD_REQUEST, msg).into_response()
         }
+    }
+}
+
+fn generation_err_to_response(err: anyhow::Error) -> Response {
+    if err.downcast_ref::<crate::core::SchedulerError>().is_some() {
+        admit_err_to_response(err)
+    } else {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("{err:#}")).into_response()
     }
 }
 
@@ -600,6 +615,7 @@ where
     M: Model + DenseVlMethods + Send + 'static,
 {
     let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+    let (init_tx, init_rx) = oneshot::channel::<anyhow::Result<()>>();
     let id = gen_id();
     let id_for_task = id.clone();
     let model_id_for_task = model_id.clone();
@@ -607,6 +623,13 @@ where
     tokio::task::spawn_blocking(move || {
         let model_guard = state.model.blocking_lock();
         let tokenizer = &*state.tokenizer;
+        let memory = match super::begin_direct_request_memory(&state, &*model_guard, &request) {
+            Ok(memory) => memory,
+            Err(error) => {
+                let _ = init_tx.send(Err(error));
+                return;
+            }
+        };
 
         // T0a.8 Step 2: wrap GenerationStream::new in gs_stream_init_and_chunk_loop
         // so deep spans inside (gs_kv_cache_alloc / gs_chunk_N /
@@ -617,10 +640,21 @@ where
         let mut stream = match stream_result {
             Ok(s) => s,
             Err(e) => {
-                let _ = tx.blocking_send(Ok(format_sse_error(&e)));
+                let _ = init_tx.send(Err(e));
                 return;
             }
         };
+        let first_event = match stream.next_token() {
+            Ok(event) => event,
+            Err(error) => {
+                let _ = init_tx.send(Err(error));
+                return;
+            }
+        };
+        memory.commit();
+        if init_tx.send(Ok(())).is_err() {
+            return;
+        }
 
         // First chunk: emit role.
         let role_chunk = ChunkResponse {
@@ -647,8 +681,12 @@ where
         }
 
         let mut completion_tokens = 0_u32;
+        let mut first_event = Some(first_event);
         loop {
-            let ev_result = stream.next_token();
+            let ev_result = match first_event.take() {
+                Some(event) => Ok(event),
+                None => stream.next_token(),
+            };
 
             match ev_result {
                 Ok(Some(ev)) => {
@@ -695,6 +733,18 @@ where
         }
         let _ = tx.blocking_send(Ok(Bytes::from_static(b"data: [DONE]\n\n")));
     });
+
+    match init_rx.await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => return generation_err_to_response(error),
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("generation initialization channel closed: {error}"),
+            )
+                .into_response();
+        }
+    }
 
     let stream = ReceiverStream::new(rx);
     let body = Body::from_stream(stream);
@@ -863,16 +913,24 @@ where
     M: Model + DenseVlMethods + Send + 'static,
 {
     let id = gen_id();
-    let result = tokio::task::spawn_blocking(
-        move || -> std::result::Result<(String, &'static str, u32), String> {
+    let result =
+        tokio::task::spawn_blocking(move || -> anyhow::Result<(String, &'static str, u32)> {
             let model_guard = state.model.blocking_lock();
             let tokenizer = &*state.tokenizer;
-            let mut stream = GenerationStream::new(&*model_guard, tokenizer, request)
-                .map_err(|e| e.to_string())?;
+            let memory = super::begin_direct_request_memory(&state, &*model_guard, &request)?;
+            let mut stream = GenerationStream::new(&*model_guard, tokenizer, request)?;
             let mut buf = String::new();
             let mut finish: &'static str = "stop";
             let mut completion_tokens: u32 = 0;
-            while let Some(ev) = stream.next_token().map_err(|e| e.to_string())? {
+            let mut memory = Some(memory);
+            loop {
+                let next = stream.next_token()?;
+                if let Some(memory) = memory.take() {
+                    memory.commit();
+                }
+                let Some(ev) = next else {
+                    break;
+                };
                 buf.push_str(&ev.text);
                 completion_tokens += 1;
                 if let Some(reason) = ev.finish_reason {
@@ -881,13 +939,12 @@ where
                 }
             }
             Ok((buf, finish, completion_tokens))
-        },
-    )
-    .await;
+        })
+        .await;
 
     let (content, finish, completion_tokens) = match result {
         Ok(Ok(t)) => t,
-        Ok(Err(msg)) => return (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response(),
+        Ok(Err(err)) => return generation_err_to_response(err),
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1292,6 +1349,42 @@ mod tests {
             .get(axum::http::header::RETRY_AFTER)
             .expect("Retry-After header should be set");
         assert_eq!(retry, "5");
+    }
+
+    #[test]
+    fn memory_governor_rejections_are_retryable_http_503() {
+        let errors = [
+            crate::core::SchedulerError::MemoryPressure {
+                level: crate::core::process_memory::PressureLevel::Hard,
+                current_bytes: 95,
+                ceiling_bytes: 100,
+            },
+            crate::core::SchedulerError::PrefillPeakUnsafe {
+                requested_tokens: 4096,
+                selected_tokens: 0,
+                target_bytes: 100,
+            },
+            crate::core::SchedulerError::ColdMaterializationUnsafe {
+                requested_bytes: 3 * 1024 * 1024 * 1024,
+                current_bytes: 20 * 1024 * 1024 * 1024,
+                target_bytes: 22 * 1024 * 1024 * 1024,
+            },
+            crate::core::SchedulerError::StoreBackpressure {
+                pending_jobs: 4,
+                pending_bytes: 512 * 1024 * 1024,
+            },
+        ];
+        for error in errors {
+            let response = admit_err_to_response(error.into());
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(
+                response
+                    .headers()
+                    .get(axum::http::header::RETRY_AFTER)
+                    .expect("Retry-After header"),
+                "5"
+            );
+        }
     }
 
     #[tokio::test]

@@ -20,10 +20,15 @@ pub use kv_cache::{KVCache, KVCacheSnapshot};
 pub use mtp_cache::{MtpCache, MtpCacheSnapshot};
 pub use paged_kv::{PagedKVCache, PagedKvHotColdConfig, PagedKvHotColdSummary};
 pub use prefix_store::{
-    PagedPrefixCacheConfig, PagedPrefixEntry, PagedPrefixEntryStats, PagedPrefixKeySpec,
-    PagedPrefixLayer, PagedPrefixLoadStatus, PagedPrefixStore, PrefixLayerKind, PrefixLayerPayload,
-    PrefixLayerSpec, PrefixLruCache, PrefixLruCacheConfig, PrefixLruInsertResult,
-    PrefixLruInsertStatus, PrefixMtpLayerPayload, PrefixMtpLayerSpec, PrefixTensorSpec,
+    cancel_process_async_prefix_store_model, process_async_prefix_store_queue,
+    process_shared_prefix_lru_cache, shrink_process_prefix_lru_caches,
+    shutdown_process_async_prefix_store_queue, AsyncPrefixStoreAdmission,
+    AsyncPrefixStoreCancellation, AsyncPrefixStorePermit, AsyncPrefixStoreQueue,
+    AsyncPrefixStoreStats, AsyncPrefixStoreSubmit, PagedPrefixCacheConfig, PagedPrefixEntry,
+    PagedPrefixEntryStats, PagedPrefixKeySpec, PagedPrefixLayer, PagedPrefixLoadStatus,
+    PagedPrefixStore, PrefixLayerKind, PrefixLayerPayload, PrefixLayerSpec, PrefixLruCache,
+    PrefixLruCacheConfig, PrefixLruInsertResult, PrefixLruInsertStatus, PrefixMtpLayerPayload,
+    PrefixMtpLayerSpec, PrefixTensorSpec, SharedPrefixLruCache,
     DEFAULT_PAGED_PREFIX_CACHE_BLOCK_SIZE,
 };
 pub use turboquant_kv::{TurboQuantKVBits, TurboQuantKVCache, TurboQuantPrefixLayer};

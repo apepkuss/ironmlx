@@ -7,6 +7,7 @@ use mlx::{Array, Dtype, StreamOrDevice};
 
 use crate::core::cache::{
     ActiveKvOffloadConfig, ActiveKvOffloadSharedStats, ActiveKvResidencySummary,
+    AsyncPrefixStoreAdmission, AsyncPrefixStoreCancellation, AsyncPrefixStoreSubmit,
     PagedKvHotColdConfig, PagedPrefixCacheConfig, PagedPrefixEntry, PagedPrefixEntryStats,
     PagedPrefixLoadStatus, PagedPrefixStore, PrefixLruCache, PrefixLruCacheConfig,
     PrefixLruInsertStatus, PrefixTensorSpec, TurboQuantKVBits,
@@ -533,6 +534,27 @@ impl Gemma4DrafterPrefixCache {
             ));
         }
 
+        let store = config.store();
+        let key = PagedPrefixStore::key_for(&spec);
+        let permit = match crate::core::cache::process_async_prefix_store_queue().try_admit(
+            store,
+            spec.clone(),
+            AsyncPrefixStoreCancellation::default(),
+        ) {
+            AsyncPrefixStoreAdmission::Admitted(permit) => *permit,
+            AsyncPrefixStoreAdmission::Coalesced => return Ok(Some(key)),
+            AsyncPrefixStoreAdmission::Backpressured => {
+                tracing::warn!(
+                    key,
+                    "paged SSD prefix cache Gemma4 drafter extraction skipped by async-store backpressure"
+                );
+                return Ok(None);
+            }
+            AsyncPrefixStoreAdmission::Closed => {
+                return Err(anyhow!("paged SSD prefix cache async store is closed"));
+            }
+        };
+
         let Some((mut entry, entry_cached_len)) = prefix_entry_for_row(cache, 0)? else {
             return Ok(None);
         };
@@ -550,36 +572,31 @@ impl Gemma4DrafterPrefixCache {
             spec.clone(),
             entry.clone(),
         )?;
-        let store = config.store();
-        if let Some(key) = store.matching_entry_key(&spec)? {
-            tracing::trace!(
-                "paged SSD prefix cache Gemma4 drafter save skipped: tokens={} key={} status=already_present",
-                prompt_ids.len(),
-                key
-            );
-            return Ok(None);
+        match permit.submit(entry) {
+            AsyncPrefixStoreSubmit::Queued => {
+                tracing::debug!(
+                    "paged SSD prefix cache Gemma4 drafter queued: key={} tokens={} cached_len={} payload_bytes={} tensors={}",
+                    key,
+                    prompt_ids.len(),
+                    stats.cached_len,
+                    stats.payload_bytes,
+                    stats.tensor_count,
+                );
+                Ok(Some(key))
+            }
+            AsyncPrefixStoreSubmit::Coalesced => Ok(Some(key)),
+            AsyncPrefixStoreSubmit::Cancelled => Ok(None),
+            AsyncPrefixStoreSubmit::Backpressured => {
+                tracing::warn!(
+                    key,
+                    "paged SSD prefix cache Gemma4 drafter skipped by async-store backpressure"
+                );
+                Ok(None)
+            }
+            AsyncPrefixStoreSubmit::Closed => {
+                Err(anyhow!("paged SSD prefix cache async store is closed"))
+            }
         }
-        let save_start = Instant::now();
-        let (key, saved) = store.save_if_absent(&spec, &entry)?;
-        let save_us = save_start.elapsed().as_micros();
-        if !saved {
-            tracing::trace!(
-                "paged SSD prefix cache Gemma4 drafter save skipped: tokens={} key={} status=already_present",
-                prompt_ids.len(),
-                key
-            );
-            return Ok(None);
-        }
-        tracing::debug!(
-            "paged SSD prefix cache Gemma4 drafter saved: key={} tokens={} cached_len={} payload_bytes={} tensors={} save_us={}",
-            key,
-            prompt_ids.len(),
-            stats.cached_len,
-            stats.payload_bytes,
-            stats.tensor_count,
-            save_us
-        );
-        Ok(Some(key))
     }
 }
 
@@ -613,7 +630,7 @@ fn gemma4_drafter_prefix_restore_candidates(
     }
     let max_cached_len = i32::try_from(prompt_len)
         .map_err(|_| anyhow!("Gemma4 drafter prefix restore length exceeds i32"))?;
-    let mut cached_lengths = Vec::new();
+    let mut cached_lengths = vec![max_cached_len];
     if let Some(prefix_lru_cache) = prefix_lru_cache {
         cached_lengths.extend(
             gemma4_lock_prefix_lru_cache(prefix_lru_cache)?

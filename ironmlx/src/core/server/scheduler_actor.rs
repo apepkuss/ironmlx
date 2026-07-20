@@ -869,6 +869,8 @@ pub struct AdmitReply {
 #[derive(Clone)]
 pub struct SchedulerActorHandle {
     pub cmd_tx: mpsc::Sender<SchedulerCommand>,
+    pub(crate) cold_materialization_tracker:
+        Arc<OnceLock<Arc<crate::core::process_memory::ColdMaterializationTracker>>>,
     /// Test-observable counter. Incremented by the driver every time
     /// `Scheduler::admit` succeeds. Doc-hidden because production code
     /// shouldn't read it — it exists for integration tests to assert
@@ -974,6 +976,17 @@ pub struct SchedulerActorHandle {
     pub kv_cache_budget_policy: &'static str,
     /// Shared Active KV offload metrics and runtime status.
     pub active_kv_offload: ActiveKvOffloadSharedStats,
+}
+
+impl SchedulerActorHandle {
+    pub(crate) fn install_cold_materialization_tracker(
+        &self,
+        tracker: Arc<crate::core::process_memory::ColdMaterializationTracker>,
+    ) -> Result<()> {
+        self.cold_materialization_tracker
+            .set(tracker)
+            .map_err(|_| anyhow::anyhow!("cold materialization tracker already installed"))
+    }
 }
 
 /// Spawn the driver task and return a handle. The driver runs on
@@ -1333,6 +1346,7 @@ where
     // calling thread while deferring Scheduler::new_with_state (and thus
     // Array allocation) to the spawn_blocking worker thread.
     let memory_budget_exceeded_count = Arc::new(AtomicU64::new(0));
+    let cold_materialization_tracker = Arc::new(OnceLock::new());
 
     // Healthz observables cloned from BudgetState (Arc<AtomicUsize> inside).
     let kv_cache_active_bytes = budget_state.shared_active();
@@ -1398,6 +1412,7 @@ where
     let prefix_lru_cache_for_task = prefix_lru_cache;
     let active_kv_offload_for_task = active_kv_offload.clone();
     let active_kv_stats_for_task = active_kv_stats.clone();
+    let cold_materialization_tracker_for_task = Arc::clone(&cold_materialization_tracker);
 
     // ── Step 3: Spawn driver — Scheduler::new_with_state constructed INSIDE
     //    spawn_blocking so MLX Array fields (prng_state) are allocated on the
@@ -1411,14 +1426,20 @@ where
             meta,
         )
         .expect("budget already validated above; new_with_state must not fail");
+        scheduler.enable_process_memory_governor(
+            crate::core::process_memory::global_process_memory_governor(),
+        );
+        scheduler.share_cold_materialization_tracker(cold_materialization_tracker_for_task);
         if let Some(config) = paged_prefix_cache_for_task {
             scheduler
                 .enable_paged_prefix_cache(config)
                 .expect("paged prefix cache config was validated before actor spawn");
         }
         if let Some(config) = prefix_lru_cache_for_task {
+            let cache = crate::core::cache::process_shared_prefix_lru_cache(config)
+                .expect("prefix LRU cache config was validated before actor spawn");
             scheduler
-                .enable_prefix_lru_cache(config)
+                .enable_shared_prefix_lru_cache(cache)
                 .expect("prefix LRU cache config was validated before actor spawn");
         }
         scheduler
@@ -1447,6 +1468,7 @@ where
 
     Ok(SchedulerActorHandle {
         cmd_tx,
+        cold_materialization_tracker,
         admit_count,
         batch_count,
         saturate_triggered,
@@ -1589,6 +1611,18 @@ fn driver_loop<M, A>(
             ));
         }
 
+        prune_abandoned_pending_admits(&mut admission_queue);
+        evict_abandoned_active_requests::<M, A>(
+            &mut sched,
+            &mut event_txs,
+            &mut in_flight_mid_admit,
+        );
+        b_active.store(sched.active_count() as u64, Ordering::Relaxed);
+        b_queued.store(admission_queue.len() as u64, Ordering::Relaxed);
+        if sched.active_count() == 0 {
+            continue 'outer;
+        }
+
         // ===== First-batch prefill. =====
         batch_count.fetch_add(1, Ordering::Relaxed);
         let prefill_profile = rolling_profile_enabled()
@@ -1659,6 +1693,27 @@ fn driver_loop<M, A>(
         let mut admission_policy = RollingAdmissionPolicy::default();
         admission_policy.record_admission_work();
         'rolling: loop {
+            prune_abandoned_pending_admits(&mut admission_queue);
+            evict_abandoned_active_requests::<M, A>(
+                &mut sched,
+                &mut event_txs,
+                &mut in_flight_mid_admit,
+            );
+            discard_abandoned_parked_requests(
+                &sched,
+                &mut parked_active_kv,
+                &mut event_txs,
+                &active_kv_stats,
+            );
+            // Cancellation can empty the scheduler before the rolling-loop
+            // tail is reached. Publish the post-eviction state here so
+            // /healthz never reports a ghost active request while the actor is
+            // already blocked in the outer idle receive.
+            b_active.store(sched.active_count() as u64, Ordering::Relaxed);
+            b_queued.store(admission_queue.len() as u64, Ordering::Relaxed);
+            if let Err(error) = sched.apply_process_memory_pressure() {
+                tracing::warn!(%error, "scheduler memory-pressure reclaim failed");
+            }
             // Pre-event Finished-batch finalization + handoff. If
             // previous iteration's prefill_admitted/step left phase=Finished
             // (e.g. max_tokens=1 workload), handle the completed batch BEFORE
@@ -2453,6 +2508,10 @@ fn enqueue_or_reject(
     queue_rejected: &Arc<AtomicU64>,
 ) {
     let SchedulerCommand::Admit { request, reply_tx } = cmd;
+    if reply_tx.is_closed() {
+        return;
+    }
+    prune_abandoned_pending_admits(queue);
     if queue.len() >= queue_max {
         queue_rejected.fetch_add(1, Ordering::Relaxed);
         let _ = reply_tx.send(Err(anyhow::Error::new(
@@ -2486,6 +2545,101 @@ fn enqueue_or_reject(
             queue_max
         );
     }
+}
+
+fn prune_abandoned_pending_admits(queue: &mut VecDeque<PendingAdmit>) -> usize {
+    let before = queue.len();
+    queue.retain(|pending| !pending.reply_tx.is_closed());
+    before.saturating_sub(queue.len())
+}
+
+fn evict_abandoned_active_requests<M, A>(
+    sched: &mut Scheduler<M>,
+    event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
+    in_flight_mid_admit: &mut Option<A::MidAdmitHandle>,
+) -> usize
+where
+    M: Model + DenseVlMethods + Send + 'static,
+    A: SchedulerActorMtpMode<M>,
+{
+    let mut evicted = 0;
+    if let Some(handle) = in_flight_mid_admit.as_ref() {
+        let id = A::mid_admit_request_id(handle);
+        let abandoned = event_txs.get(&id).is_some_and(|tx| tx.is_closed());
+        if abandoned {
+            match sched.evict(id) {
+                Ok(()) => {
+                    *in_flight_mid_admit = None;
+                    event_txs.remove(&id);
+                    evicted += 1;
+                }
+                Err(error) => {
+                    tracing::warn!(request_id = id.0, %error, "failed to evict cancelled mid-admit request");
+                }
+            }
+        }
+    }
+
+    let abandoned_ids: Vec<RequestId> = sched
+        .active()
+        .into_iter()
+        .filter_map(|state| {
+            event_txs
+                .get(&state.id)
+                .is_some_and(|tx| tx.is_closed())
+                .then_some(state.id)
+        })
+        .collect();
+    for id in abandoned_ids {
+        match sched.evict(id) {
+            Ok(()) => {
+                event_txs.remove(&id);
+                evicted += 1;
+            }
+            Err(error) => {
+                tracing::warn!(request_id = id.0, %error, "failed to evict cancelled request");
+            }
+        }
+    }
+    evicted
+}
+
+fn discard_abandoned_parked_requests<M>(
+    sched: &Scheduler<M>,
+    parked_active_kv: &mut VecDeque<ActiveKvParkedRequest>,
+    event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
+    active_kv_stats: &ActiveKvOffloadSharedStats,
+) -> usize
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    let mut discarded = 0;
+    let mut retained = VecDeque::with_capacity(parked_active_kv.len());
+    while let Some(parked) = parked_active_kv.pop_front() {
+        let abandoned = event_txs.get(&parked.id).is_none_or(|tx| tx.is_closed());
+        if abandoned {
+            match sched.discard_active_kv_request(&parked) {
+                Ok(()) => {
+                    event_txs.remove(&parked.id);
+                    discarded += 1;
+                }
+                Err(error) => {
+                    active_kv_stats.record_error();
+                    tracing::warn!(
+                        request_id = parked.id.0,
+                        %error,
+                        "failed to discard cancelled parked request"
+                    );
+                    retained.push_back(parked);
+                }
+            }
+        } else {
+            retained.push_back(parked);
+        }
+    }
+    *parked_active_kv = retained;
+    active_kv_stats.set_parked_requests(parked_active_kv.len());
+    discarded
 }
 
 /// Drain at most one mid-batch admit chunk from the admission queue.
@@ -2533,6 +2687,10 @@ where
         let Some(pending) = queue.front() else {
             return false;
         };
+        if pending.reply_tx.is_closed() {
+            queue.pop_front();
+            continue;
+        }
         if !can_start_rolling_mid_admit_for_request::<M>(
             &pending.request,
             sched,
@@ -2592,8 +2750,8 @@ where
 fn route_event(ev: StepEvent, event_txs: &HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>) {
     if let Some(tx) = event_txs.get(&ev.id) {
         // Unbounded channel — only fails when the receiver was dropped
-        // (handler abandoned). That's fine; the entry naturally clears
-        // at the next `event_txs.clear()` in driver_loop.
+        // (handler abandoned). The rolling-loop cancellation sweep evicts
+        // that request and releases its KV/governor reservations.
         let _ = tx.send(ev);
     }
 }
@@ -2664,6 +2822,20 @@ where
             active_kv_stats.set_parked_requests(0);
             return false;
         };
+        if event_txs.get(&parked.id).is_none_or(|tx| tx.is_closed()) {
+            if let Err(error) = sched.discard_active_kv_request(&parked) {
+                active_kv_stats.record_error();
+                tracing::warn!(
+                    request_id = parked.id.0,
+                    %error,
+                    "failed to discard cancelled parked request before restore"
+                );
+            } else {
+                event_txs.remove(&parked.id);
+            }
+            active_kv_stats.set_parked_requests(parked_active_kv.len());
+            continue;
+        }
         let model_lock = model.blocking_lock();
         match sched.restore_active_kv_request(&parked, &model_lock) {
             Ok(id) => {
@@ -3213,6 +3385,19 @@ mod tests {
             _target: mlx::StreamOrDevice,
         ) -> Result<mlx::Array> {
             fake_logits(input_ids.shape().as_slice()[0] as usize)
+        }
+
+        fn estimate_vision_prefill_peak_bytes(
+            &self,
+            pixel_values: &[mlx::Array],
+            grid_thw: &[(i32, i32, i32)],
+        ) -> Result<usize> {
+            Ok(pixel_values
+                .iter()
+                .map(|pixels| pixels.size().saturating_mul(pixels.dtype().byte_size()))
+                .sum::<usize>()
+                .saturating_add(grid_thw.len())
+                .max(1))
         }
 
         fn compute_vision_embeds(
@@ -3826,6 +4011,45 @@ mod tests {
 
         policy.record_admission_work();
         assert!(!policy.should_force_decode(Phase::Decoding, true, false));
+    }
+
+    #[test]
+    fn abandoned_event_receiver_evicts_request_and_releases_slot() {
+        let mut scheduler = Scheduler::<SchedulerActorFakeModel>::new(
+            1,
+            32,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler");
+        let id = scheduler.admit(mk_req(11)).expect("admit");
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        drop(event_rx);
+        let mut event_txs = HashMap::from([(id, event_tx)]);
+        let mut in_flight: Option<AdmitMidHandle> = None;
+
+        assert_eq!(
+            evict_abandoned_active_requests::<_, SchedulerActorNoMtp>(
+                &mut scheduler,
+                &mut event_txs,
+                &mut in_flight,
+            ),
+            1
+        );
+        assert_eq!(scheduler.active_count(), 0);
+        assert_eq!(scheduler.phase(), Phase::Idle);
+        assert!(event_txs.is_empty());
+    }
+
+    #[test]
+    fn abandoned_queued_admission_does_not_consume_queue_capacity() {
+        let (abandoned, abandoned_rx) = queued_pending(11);
+        drop(abandoned_rx);
+        let (live, _live_rx) = queued_pending(12);
+        let mut queue = VecDeque::from([abandoned, live]);
+
+        assert_eq!(prune_abandoned_pending_admits(&mut queue), 1);
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue.front().unwrap().request.prompt_ids, vec![12]);
     }
 
     #[test]

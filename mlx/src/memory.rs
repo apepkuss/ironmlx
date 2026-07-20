@@ -22,3 +22,8 @@ pub fn snapshot() -> MemorySnapshot {
         device_name: mlx_sys::memory::ffi::get_device_name().ok(),
     }
 }
+
+/// Set the allocator cache limit and return the previous limit.
+pub fn set_cache_limit(limit: usize) -> usize {
+    mlx_sys::memory::ffi::set_cache_limit(limit)
+}

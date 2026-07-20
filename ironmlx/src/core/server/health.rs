@@ -51,6 +51,8 @@ pub struct MemoryInfo {
     pub mlx_cache_bytes: usize,
     pub mlx_peak_bytes: usize,
     pub mlx_memory_limit_bytes: usize,
+    pub process_governor: crate::core::process_memory::MemoryGovernorSnapshot,
+    pub prefix_store: crate::core::cache::AsyncPrefixStoreStats,
 }
 
 #[derive(Debug, Serialize)]
@@ -231,6 +233,9 @@ impl SchedulerHealthCollector {
         let mb_exceeded = self.memory_budget_exceeded_count.load(Ordering::Relaxed);
         let kv_active = self.kv_cache_active_bytes.load(Ordering::Relaxed);
         let mlx_memory = mlx::memory::snapshot();
+        let process_governor =
+            crate::core::process_memory::global_process_memory_governor().sample_process();
+        let prefix_store = crate::core::cache::process_async_prefix_store_queue().stats();
 
         let active_kv_offload = self.active_kv_offload.snapshot();
         let mut status = classify_status(
@@ -243,7 +248,17 @@ impl SchedulerHealthCollector {
         if active_kv_offload.degraded {
             status = HealthStatus::Degraded;
         }
-
+        if crate::core::cache::process_async_prefix_store_queue().is_backpressured() {
+            status = HealthStatus::Degraded;
+        }
+        if process_governor.pressure_level == crate::core::process_memory::PressureLevel::Emergency
+        {
+            status = HealthStatus::Down;
+        } else if process_governor.telemetry_degraded
+            || process_governor.pressure_level != crate::core::process_memory::PressureLevel::Normal
+        {
+            status = HealthStatus::Degraded;
+        }
         HealthSnapshot {
             status,
             uptime_secs,
@@ -273,6 +288,8 @@ impl SchedulerHealthCollector {
                 mlx_cache_bytes: mlx_memory.cache_bytes,
                 mlx_peak_bytes: mlx_memory.peak_bytes,
                 mlx_memory_limit_bytes: mlx_memory.memory_limit_bytes,
+                process_governor,
+                prefix_store,
             },
             mtp: self.mtp.snapshot(),
             active_kv_offload,
@@ -600,6 +617,8 @@ mod tests {
                 mlx_cache_bytes: 22,
                 mlx_peak_bytes: 33,
                 mlx_memory_limit_bytes: 44,
+                process_governor: crate::core::process_memory::MemoryGovernorSnapshot::default(),
+                prefix_store: crate::core::cache::AsyncPrefixStoreStats::default(),
             },
             mtp: MtpHealthInfo {
                 enabled: false,

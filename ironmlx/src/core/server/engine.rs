@@ -22,6 +22,9 @@ use crate::core::cache::{
     ActiveKvOffloadConfig, PagedPrefixCacheConfig, PrefixLruCacheConfig, TurboQuantKVBits,
 };
 use crate::core::model::Model;
+use crate::core::process_memory::{
+    global_process_memory_governor, MemoryReservation, PressureLevel, StaticMemoryEstimate,
+};
 use crate::core::sampler::Sampler;
 use crate::core::scheduler_autotune::SchedulerAutotuneRuntimeProfile;
 use crate::core::speculative::{MtpDraftTokensArg, MtpSpeculativeConfig, MtpSpeculativeModel};
@@ -467,6 +470,71 @@ fn validate_engine_model_config(model: &EngineModelConfig) -> Result<()> {
         )
     })?;
     Ok(())
+}
+
+fn estimated_weight_bytes_for_roots<'a>(
+    model_paths: impl IntoIterator<Item = &'a std::path::Path>,
+) -> Result<usize> {
+    let roots: Vec<PathBuf> = model_paths.into_iter().map(PathBuf::from).collect();
+    let mut pending = roots.clone();
+    let mut observed_files = HashSet::new();
+    let mut bytes = 0usize;
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory)
+            .with_context(|| format!("reading model directory {}", directory.display()))?
+        {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                pending.push(entry.path());
+                continue;
+            }
+            // Hugging Face snapshots expose weight shards as symlinks into
+            // the blob store. `DirEntry::file_type` describes the symlink,
+            // while `metadata` follows it to the authoritative file size.
+            let metadata = std::fs::metadata(entry.path())?;
+            if !metadata.is_file() {
+                continue;
+            }
+            let path = entry.path();
+            let is_weight = matches!(
+                path.extension().and_then(|extension| extension.to_str()),
+                Some("safetensors" | "gguf" | "bin")
+            );
+            if is_weight {
+                let authoritative_path = std::fs::canonicalize(&path)
+                    .with_context(|| format!("resolving model weight {}", path.display()))?;
+                if observed_files.insert(authoritative_path) {
+                    bytes = bytes.saturating_add(metadata.len() as usize);
+                }
+            }
+        }
+    }
+    if bytes == 0 {
+        let roots = roots
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        bail!("cannot estimate model load memory: no weight files found under {roots}");
+    }
+    Ok(bytes)
+}
+
+#[cfg(test)]
+fn estimated_model_weight_bytes(model_path: &std::path::Path) -> Result<usize> {
+    estimated_weight_bytes_for_roots([model_path])
+}
+
+fn estimated_engine_weight_bytes(model: &EngineModelConfig) -> Result<usize> {
+    estimated_weight_bytes_for_roots(
+        std::iter::once(model.path.as_path()).chain(
+            model
+                .mtp
+                .iter()
+                .map(|settings| settings.model_dir.as_path()),
+        ),
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -978,6 +1046,62 @@ impl EnginePoolState {
         });
     }
 
+    pub(crate) fn start_memory_governor_monitor(&self) {
+        let weak = Arc::downgrade(&self.inner);
+        let interval_duration = global_process_memory_governor().config().poll_interval;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(interval_duration);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                let Some(inner) = weak.upgrade() else {
+                    return;
+                };
+                let snapshot = global_process_memory_governor().sample_process();
+                if snapshot.pressure_level == PressureLevel::Normal {
+                    continue;
+                }
+
+                // MLX cache reclaim is idempotent and does not invalidate
+                // request KV or model weights.
+                mlx::transforms::clear_cache();
+                let retain_ratio = match snapshot.pressure_level {
+                    PressureLevel::Normal => 1.0,
+                    PressureLevel::Soft => 0.75,
+                    PressureLevel::Hard => 0.25,
+                    PressureLevel::Emergency => 0.0,
+                };
+                match crate::core::cache::shrink_process_prefix_lru_caches(retain_ratio) {
+                    Ok(reclaimed_bytes) if reclaimed_bytes > 0 => {
+                        tracing::info!(
+                            reclaimed_bytes,
+                            ?snapshot.pressure_level,
+                            "memory governor shrank process hot prefix cache"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(%error, "memory governor hot-cache shrink failed");
+                    }
+                }
+                if snapshot.pressure_level.rank() >= PressureLevel::Hard.rank() {
+                    let evict_all = snapshot.pressure_level == PressureLevel::Emergency;
+                    loop {
+                        match inner.evict_lru_idle_engine("memory-pressure").await {
+                            Ok(true) if evict_all => continue,
+                            Ok(true) | Ok(false) => break,
+                            Err(error) => {
+                                tracing::warn!(%error, "memory governor idle-model eviction failed");
+                                break;
+                            }
+                        }
+                    }
+                    global_process_memory_governor().refresh_process();
+                }
+            }
+        });
+    }
+
     pub(crate) async fn unload_expired_model_ttl_once(&self, now_unix_ms: u64) -> Vec<String> {
         let Some(ttl) = self.inner.runtime.model_ttl else {
             return Vec::new();
@@ -1458,7 +1582,15 @@ impl EnginePoolState {
             .iter()
             .filter(|model| model.state == EngineRuntimeState::Failed)
             .count();
-        let status = if failed_models > 0 {
+        let process_governor = global_process_memory_governor().sample_process();
+        let prefix_store = crate::core::cache::process_async_prefix_store_queue().stats();
+        let status = if process_governor.pressure_level == PressureLevel::Emergency {
+            "down"
+        } else if failed_models > 0
+            || process_governor.telemetry_degraded
+            || process_governor.pressure_level != PressureLevel::Normal
+            || crate::core::cache::process_async_prefix_store_queue().is_backpressured()
+        {
             "degraded"
         } else {
             "healthy"
@@ -1470,19 +1602,70 @@ impl EnginePoolState {
             max_loaded_models,
             loaded_models,
             models,
+            process_governor,
+            prefix_store,
             version: env!("CARGO_PKG_VERSION"),
         }
     }
 }
 
 impl EnginePoolInner {
-    async fn ensure_capacity_for(&self, target_id: &str) -> Result<()> {
+    async fn ensure_capacity_for(
+        &self,
+        model: &EngineModelConfig,
+    ) -> Result<Option<MemoryReservation>> {
+        let target_id = model.id.as_str();
+        let governor = global_process_memory_governor();
+        let estimated_weight_bytes = estimated_engine_weight_bytes(model)?;
+        let first_snapshot = governor.sample_process();
+        let first_reservation = if first_snapshot.pressure_level == PressureLevel::Normal {
+            governor.try_reserve(estimated_weight_bytes, "model_load")
+        } else {
+            Err(
+                crate::core::process_memory::MemoryReservationError::Pressure {
+                    purpose: "model_load",
+                    level: first_snapshot.pressure_level,
+                },
+            )
+        };
+        let memory_reservation = match first_reservation {
+            Ok(reservation) => Some(reservation),
+            Err(first_error) => {
+                // One reclaim/retry attempt. Every action is idempotent:
+                // clearing an empty MLX cache is a no-op, prefix shrink has an
+                // absolute target, and idle eviction rechecks ownership while
+                // holding the slot lock.
+                mlx::transforms::clear_cache();
+                let retain_ratio = match first_snapshot.pressure_level {
+                    PressureLevel::Normal => 0.75,
+                    PressureLevel::Soft => 0.50,
+                    PressureLevel::Hard | PressureLevel::Emergency => 0.0,
+                };
+                crate::core::cache::shrink_process_prefix_lru_caches(retain_ratio)?;
+                let _ = self.evict_lru_idle_engine(target_id).await?;
+                let retry_snapshot = governor.refresh_process();
+                if retry_snapshot.pressure_level != PressureLevel::Normal {
+                    bail!(
+                        "process memory governor rejected model load `{target_id}` after one reclaim retry: first={first_error}; pressure={:?}",
+                        retry_snapshot.pressure_level
+                    );
+                }
+                match governor.try_reserve(estimated_weight_bytes, "model_load") {
+                    Ok(reservation) => Some(reservation),
+                    Err(retry_error) => {
+                        bail!(
+                            "process memory governor rejected model load `{target_id}` after one reclaim retry: first={first_error}; retry={retry_error}"
+                        )
+                    }
+                }
+            }
+        };
         let Some(max_loaded_models) = self.registry.lock().await.max_loaded_models() else {
-            return Ok(());
+            return Ok(memory_reservation);
         };
         let loaded_count = self.loaded_count().await;
         match decide_engine_pool_capacity(self.capacity_policy, max_loaded_models, loaded_count) {
-            EnginePoolCapacityDecision::Continue => return Ok(()),
+            EnginePoolCapacityDecision::Continue => return Ok(memory_reservation),
             EnginePoolCapacityDecision::Reject => {
                 bail!(
                     "engine pool capacity reached: max_loaded_models={max_loaded_models}, unload an existing model before loading `{target_id}`"
@@ -1491,7 +1674,7 @@ impl EnginePoolInner {
             EnginePoolCapacityDecision::TryEvictLruIdle => {}
         }
         if self.evict_lru_idle_engine(target_id).await? {
-            return Ok(());
+            return Ok(memory_reservation);
         }
         bail!(
             "engine pool capacity reached: max_loaded_models={max_loaded_models}, no idle lazy engine can be evicted"
@@ -1604,6 +1787,7 @@ impl EnginePoolInner {
             changed_unix_ms: unix_time_ms(),
             load_attempts,
         };
+        crate::core::cache::cancel_process_async_prefix_store_model(&evict_id);
         tracing::info!(
             "ironmlx EnginePool evicted idle model id={} for target={}",
             evict_id,
@@ -1744,18 +1928,21 @@ impl EngineSlot {
                 }
             }
 
-            if let Err(error) = pool.ensure_capacity_for(&self.model.id).await {
-                let mut state = self.state.lock().await;
-                let load_attempts = state.load_attempts();
-                *state = EngineSlotState::Unloaded {
-                    reason: EngineUnloadReason::CapacityRejected,
-                    last_error: Some(format!("{error:#}")),
-                    changed_unix_ms: unix_time_ms(),
-                    load_attempts,
-                };
-                self.notify.notify_waiters();
-                return Err(error);
-            }
+            let load_reservation = match pool.ensure_capacity_for(&self.model).await {
+                Ok(reservation) => reservation,
+                Err(error) => {
+                    let mut state = self.state.lock().await;
+                    let load_attempts = state.load_attempts();
+                    *state = EngineSlotState::Unloaded {
+                        reason: EngineUnloadReason::CapacityRejected,
+                        last_error: Some(format!("{error:#}")),
+                        changed_unix_ms: unix_time_ms(),
+                        load_attempts,
+                    };
+                    self.notify.notify_waiters();
+                    return Err(error);
+                }
+            };
 
             let load_attempts = {
                 let mut state = self.state.lock().await;
@@ -1786,6 +1973,10 @@ impl EngineSlot {
                         return Err(error);
                     }
                     let engine = Arc::new(engine);
+                    if let Some(reservation) = load_reservation {
+                        reservation.commit();
+                    }
+                    global_process_memory_governor().sample_process();
                     let now = unix_time_ms();
                     let mut state = self.state.lock().await;
                     let active_requests = if trigger == EngineLoadTrigger::Request {
@@ -1861,6 +2052,7 @@ impl EngineSlot {
             changed_unix_ms: now_unix_ms,
             load_attempts,
         };
+        crate::core::cache::cancel_process_async_prefix_store_model(&self.model.id);
         self.notify.notify_waiters();
         true
     }
@@ -1908,6 +2100,7 @@ impl EngineSlot {
             changed_unix_ms: unix_time_ms(),
             load_attempts,
         };
+        crate::core::cache::cancel_process_async_prefix_store_model(&self.model.id);
         self.notify.notify_waiters();
         Ok(())
     }
@@ -1926,6 +2119,7 @@ impl EngineSlot {
                             changed_unix_ms: unix_time_ms(),
                             load_attempts,
                         };
+                        crate::core::cache::cancel_process_async_prefix_store_model(&slot.model.id);
                         slot.notify.notify_waiters();
                     }
                     break;
@@ -2213,7 +2407,12 @@ async fn load_engine_variant(
 ) -> Result<EngineVariant> {
     let loader = Loader::open_multimodal(&model.path)
         .with_context(|| format!("Loader::open_multimodal {}", model.path.display()))?;
-    let base_model_weight_bytes = loader.loaded_tensor_bytes();
+    let component_bytes = loader.loaded_tensor_component_bytes();
+    let static_memory_estimate = StaticMemoryEstimate {
+        text_cold_bytes: component_bytes.text,
+        vision_cold_bytes: component_bytes.vision,
+        speculative_cold_bytes: 0,
+    };
     let tokenizer = Tokenizer::from_loader(&loader).context("Tokenizer::from_loader")?;
     let model_type = loader
         .config_raw_value()
@@ -2235,7 +2434,7 @@ async fn load_engine_variant(
                 tokenizer,
                 model,
                 runtime,
-                base_model_weight_bytes,
+                static_memory_estimate,
                 paged_prefix_cache,
                 prefix_lru_cache,
                 mtp_config,
@@ -2252,7 +2451,7 @@ async fn load_engine_variant(
                     tokenizer,
                     model,
                     runtime,
-                    base_model_weight_bytes,
+                    static_memory_estimate,
                     paged_prefix_cache,
                     prefix_lru_cache,
                     mtp_config,
@@ -2267,7 +2466,7 @@ async fn load_engine_variant(
                     tokenizer,
                     model,
                     runtime,
-                    base_model_weight_bytes,
+                    static_memory_estimate,
                     paged_prefix_cache,
                     prefix_lru_cache,
                     mtp_config,
@@ -2289,7 +2488,7 @@ async fn load_engine_variant(
                     tokenizer,
                     model,
                     runtime,
-                    base_model_weight_bytes,
+                    static_memory_estimate,
                     paged_prefix_cache,
                     prefix_lru_cache,
                     mtp_config,
@@ -2303,7 +2502,7 @@ async fn load_engine_variant(
                     tokenizer,
                     model,
                     runtime,
-                    base_model_weight_bytes,
+                    static_memory_estimate,
                     paged_prefix_cache,
                     prefix_lru_cache,
                     vision_input,
@@ -2320,7 +2519,7 @@ async fn load_engine_variant(
                 tokenizer,
                 model,
                 runtime,
-                base_model_weight_bytes,
+                static_memory_estimate,
                 paged_prefix_cache,
                 prefix_lru_cache,
                 None,
@@ -2335,7 +2534,7 @@ async fn load_engine_variant(
                 tokenizer,
                 model,
                 runtime,
-                base_model_weight_bytes,
+                static_memory_estimate,
                 paged_prefix_cache,
                 prefix_lru_cache,
                 None,
@@ -2351,7 +2550,7 @@ async fn load_engine_variant(
                 tokenizer,
                 model,
                 runtime,
-                base_model_weight_bytes,
+                static_memory_estimate,
                 paged_prefix_cache,
                 prefix_lru_cache,
                 Some(VisionInputConfig::MiniCpmV46 {
@@ -2384,7 +2583,7 @@ async fn load_engine_variant(
                 tokenizer,
                 generation_config,
                 model.id.clone(),
-                base_model_weight_bytes,
+                static_memory_estimate.total_cold_bytes(),
                 VisionInputConfig::DiffusionGemma {
                     vision_config,
                     image_token_id,
@@ -2401,7 +2600,7 @@ async fn build_qwen35_engine(
     tokenizer: Tokenizer,
     model: &EngineModelConfig,
     runtime: &EnginePoolRuntimeConfig,
-    loaded_model_weight_bytes: usize,
+    static_memory_estimate: StaticMemoryEstimate,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     mtp_config: Option<ResolvedEngineMtpConfig>,
@@ -2413,7 +2612,7 @@ async fn build_qwen35_engine(
             tokenizer,
             model,
             runtime,
-            loaded_model_weight_bytes,
+            static_memory_estimate,
             paged_prefix_cache,
             prefix_lru_cache,
             mtp_config,
@@ -2427,7 +2626,7 @@ async fn build_qwen35_engine(
             tokenizer,
             model,
             runtime,
-            loaded_model_weight_bytes,
+            static_memory_estimate,
             paged_prefix_cache,
             prefix_lru_cache,
             vision_input,
@@ -2443,7 +2642,7 @@ async fn build_qwen35_moe_engine(
     tokenizer: Tokenizer,
     model: &EngineModelConfig,
     runtime: &EnginePoolRuntimeConfig,
-    loaded_model_weight_bytes: usize,
+    static_memory_estimate: StaticMemoryEstimate,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     mtp_config: Option<ResolvedEngineMtpConfig>,
@@ -2455,7 +2654,7 @@ async fn build_qwen35_moe_engine(
             tokenizer,
             model,
             runtime,
-            loaded_model_weight_bytes,
+            static_memory_estimate,
             paged_prefix_cache,
             prefix_lru_cache,
             mtp_config,
@@ -2469,7 +2668,7 @@ async fn build_qwen35_moe_engine(
             tokenizer,
             model,
             runtime,
-            loaded_model_weight_bytes,
+            static_memory_estimate,
             paged_prefix_cache,
             prefix_lru_cache,
             vision_input,
@@ -2485,7 +2684,7 @@ async fn build_qwen36_moe_engine(
     tokenizer: Tokenizer,
     model: &EngineModelConfig,
     runtime: &EnginePoolRuntimeConfig,
-    loaded_model_weight_bytes: usize,
+    static_memory_estimate: StaticMemoryEstimate,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     mtp_config: Option<ResolvedEngineMtpConfig>,
@@ -2497,7 +2696,7 @@ async fn build_qwen36_moe_engine(
             tokenizer,
             model,
             runtime,
-            loaded_model_weight_bytes,
+            static_memory_estimate,
             paged_prefix_cache,
             prefix_lru_cache,
             mtp_config,
@@ -2511,7 +2710,7 @@ async fn build_qwen36_moe_engine(
             tokenizer,
             model,
             runtime,
-            loaded_model_weight_bytes,
+            static_memory_estimate,
             paged_prefix_cache,
             prefix_lru_cache,
             vision_input,
@@ -2527,7 +2726,7 @@ async fn build_plain_causal_state<M>(
     tokenizer: Tokenizer,
     model: &EngineModelConfig,
     runtime: &EnginePoolRuntimeConfig,
-    loaded_model_weight_bytes: usize,
+    static_memory_estimate: StaticMemoryEstimate,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     vision_input: Option<VisionInputConfig>,
@@ -2552,7 +2751,7 @@ where
         vision_input,
         paged_prefix_cache,
         prefix_lru_cache,
-        Some(loaded_model_weight_bytes),
+        static_memory_estimate,
         runtime.active_kv_offload.clone(),
     )
     .await?;
@@ -2565,7 +2764,7 @@ async fn build_mtp_causal_state<M>(
     tokenizer: Tokenizer,
     model: &EngineModelConfig,
     runtime: &EnginePoolRuntimeConfig,
-    loaded_model_weight_bytes: usize,
+    mut static_memory_estimate: StaticMemoryEstimate,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     mtp_config: ResolvedEngineMtpConfig,
@@ -2577,8 +2776,7 @@ where
 {
     let mtp_loader = Loader::open_mtp(&mtp_config.model_dir)
         .with_context(|| format!("Loader::open_mtp {}", mtp_config.model_dir.display()))?;
-    let total_model_weight_bytes =
-        loaded_model_weight_bytes.saturating_add(mtp_loader.loaded_tensor_bytes());
+    static_memory_estimate.speculative_cold_bytes = mtp_loader.loaded_tensor_bytes();
     let mtp = model_impl
         .load_mtp_head(&mtp_loader)
         .with_context(|| format!("loading MTP head from {}", mtp_config.model_dir.display()))?;
@@ -2601,7 +2799,7 @@ where
         vision_input,
         paged_prefix_cache,
         prefix_lru_cache,
-        Some(total_model_weight_bytes),
+        static_memory_estimate,
         runtime.active_kv_offload.clone(),
     )
     .await?;
@@ -2614,7 +2812,7 @@ async fn build_gemma4_drafter_causal_state(
     tokenizer: Tokenizer,
     model: &EngineModelConfig,
     runtime: &EnginePoolRuntimeConfig,
-    loaded_model_weight_bytes: usize,
+    mut static_memory_estimate: StaticMemoryEstimate,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     mtp_config: ResolvedEngineMtpConfig,
@@ -2626,8 +2824,7 @@ async fn build_gemma4_drafter_causal_state(
             mtp_config.model_dir.display()
         )
     })?;
-    let total_model_weight_bytes =
-        loaded_model_weight_bytes.saturating_add(drafter_loader.loaded_tensor_bytes());
+    static_memory_estimate.speculative_cold_bytes = drafter_loader.loaded_tensor_bytes();
     let drafter = crate::models::gemma4::Gemma4AssistantModel::from_loader(&drafter_loader)
         .with_context(|| {
             format!(
@@ -2654,7 +2851,7 @@ async fn build_gemma4_drafter_causal_state(
         vision_input,
         paged_prefix_cache,
         prefix_lru_cache,
-        Some(total_model_weight_bytes),
+        static_memory_estimate,
         runtime.active_kv_offload.clone(),
     )
     .await?;
@@ -2669,6 +2866,7 @@ pub async fn serve_engine_pool(
     let port = runtime.port;
     let state = EnginePoolState::new(config, runtime).await?;
     state.start_model_ttl_sweeper();
+    state.start_memory_governor_monitor();
     let app = engine_pool_router().with_state(state);
 
     let addr: SocketAddr = format!("{host}:{port}")
@@ -2678,7 +2876,9 @@ pub async fn serve_engine_pool(
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("binding {addr}"))?;
-    axum::serve(listener, app).await?;
+    let serve_result = axum::serve(listener, app).await;
+    crate::core::cache::shutdown_process_async_prefix_store_queue();
+    serve_result?;
     Ok(())
 }
 
@@ -2840,6 +3040,8 @@ struct EnginePoolHealth {
     max_loaded_models: Option<usize>,
     loaded_models: usize,
     models: Vec<EngineModelHealth>,
+    process_governor: crate::core::process_memory::MemoryGovernorSnapshot,
+    prefix_store: crate::core::cache::AsyncPrefixStoreStats,
     version: &'static str,
 }
 
@@ -2900,11 +3102,12 @@ mod tests {
     use crate::core::server::SamplingDefaults;
 
     use super::{
-        decide_engine_pool_capacity, unix_time_ms, EngineLoadPolicy, EngineLoadTrigger,
-        EngineModelConfig, EngineModelManifest, EnginePoolCapacityDecision,
-        EnginePoolCapacityPolicy, EnginePoolConfig, EnginePoolManifest, EnginePoolMemoryLimits,
-        EnginePoolRuntimeConfig, EnginePoolState, EngineRegistry, EngineRegistryError,
-        EngineRuntimeState, EngineSlot, EngineSlotState, ModelTtlCandidate,
+        decide_engine_pool_capacity, estimated_engine_weight_bytes, estimated_model_weight_bytes,
+        unix_time_ms, EngineLoadPolicy, EngineLoadTrigger, EngineModelConfig, EngineModelManifest,
+        EngineMtpSettings, EnginePoolCapacityDecision, EnginePoolCapacityPolicy, EnginePoolConfig,
+        EnginePoolManifest, EnginePoolMemoryLimits, EnginePoolRuntimeConfig, EnginePoolState,
+        EngineRegistry, EngineRegistryError, EngineRuntimeState, EngineSlot, EngineSlotState,
+        ModelTtlCandidate,
     };
     use tokio::sync::{Mutex, Notify};
 
@@ -2989,6 +3192,45 @@ mod tests {
         )
         .expect("write config");
         dir
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn model_weight_estimate_follows_hugging_face_snapshot_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let model_dir = write_minimal_model_config("qwen3_5");
+        let blob = model_dir.join("weight-blob");
+        std::fs::write(&blob, vec![0_u8; 4096]).expect("write weight blob");
+        symlink(&blob, model_dir.join("model.safetensors")).expect("symlink weight shard");
+
+        assert_eq!(estimated_model_weight_bytes(&model_dir).unwrap(), 4096);
+    }
+
+    #[test]
+    fn engine_weight_estimate_includes_mtp_weights_without_double_counting_roots() {
+        let base_dir = write_minimal_model_config("qwen3_5");
+        let mtp_dir = write_minimal_model_config("qwen3_5_mtp");
+        std::fs::write(base_dir.join("model.safetensors"), vec![0_u8; 4096])
+            .expect("write base weights");
+        std::fs::write(mtp_dir.join("model.safetensors"), vec![0_u8; 1024])
+            .expect("write mtp weights");
+        let mut config = model_config("qwen", &base_dir, EngineLoadPolicy::Lazy);
+        config.mtp = Some(EngineMtpSettings {
+            model_dir: mtp_dir.clone(),
+            draft_tokens: Some(2),
+        });
+
+        assert_eq!(estimated_engine_weight_bytes(&config).unwrap(), 5120);
+
+        config.mtp = Some(EngineMtpSettings {
+            model_dir: base_dir.clone(),
+            draft_tokens: Some(2),
+        });
+        assert_eq!(estimated_engine_weight_bytes(&config).unwrap(), 4096);
+
+        std::fs::remove_dir_all(base_dir).ok();
+        std::fs::remove_dir_all(mtp_dir).ok();
     }
 
     #[test]
@@ -3453,5 +3695,53 @@ mod tests {
         EnginePoolState::new(config, runtime_config())
             .await
             .expect("gemma4_unified lazy model type should be accepted");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires QWEN35_MODEL pointing to a real checkpoint"]
+    #[serial_test::serial(mlx_metal)]
+    async fn real_engine_pool_pressure_path_evicts_idle_lru_before_second_model_load() {
+        let model_dir = PathBuf::from(
+            std::env::var("QWEN35_MODEL")
+                .expect("QWEN35_MODEL must point to a real Qwen3.5 checkpoint"),
+        );
+        let config = EnginePoolConfig {
+            default_model: Some("alpha".to_string()),
+            max_loaded_models: Some(1),
+            models: vec![
+                model_config("alpha", &model_dir, EngineLoadPolicy::Lazy),
+                model_config("beta", &model_dir, EngineLoadPolicy::Lazy),
+            ],
+        };
+        let pool = EnginePoolState::new(config, runtime_config())
+            .await
+            .expect("engine pool");
+
+        assert_eq!(
+            pool.load_model("alpha").await.expect("load alpha").state,
+            EngineRuntimeState::Loaded
+        );
+        assert_eq!(
+            pool.load_model("beta").await.expect("load beta").state,
+            EngineRuntimeState::Loaded
+        );
+
+        let models = pool.model_list().await;
+        let alpha = models
+            .data
+            .iter()
+            .find(|model| model.id == "alpha")
+            .expect("alpha state");
+        let beta = models
+            .data
+            .iter()
+            .find(|model| model.id == "beta")
+            .expect("beta state");
+        assert_eq!(alpha.state, EngineRuntimeState::Unloaded);
+        assert_eq!(
+            alpha.unload_reason,
+            Some(super::EngineUnloadReason::Evicted)
+        );
+        assert_eq!(beta.state, EngineRuntimeState::Loaded);
     }
 }

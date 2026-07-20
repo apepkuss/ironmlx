@@ -11,6 +11,14 @@ use serde::Deserialize;
 
 use crate::Result;
 
+/// Storage bytes retained by the runtime after loader sanitization, split by
+/// the component that first touches the corresponding mmap-backed tensors.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct LoadedTensorComponentBytes {
+    pub text: usize,
+    pub vision: usize,
+}
+
 /// Quantization scheme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuantMode {
@@ -437,6 +445,13 @@ impl Loader {
         tensor_storage_bytes(&self.tensors)
     }
 
+    /// Storage bytes grouped by the runtime component that consumes them.
+    /// This is metadata-only accounting and never evaluates or touches tensor
+    /// contents, so model loading retains its mmap-on-demand behavior.
+    pub(crate) fn loaded_tensor_component_bytes(&self) -> LoadedTensorComponentBytes {
+        tensor_component_storage_bytes(&self.tensors)
+    }
+
     /// Quantization metadata, or None if model is not quantized.
     pub fn quant_meta(&self) -> Option<QuantMeta> {
         self.quant
@@ -666,6 +681,34 @@ fn tensor_storage_bytes(tensors: &HashMap<String, Array>) -> usize {
     tensors.values().fold(0usize, |total, tensor| {
         total.saturating_add(tensor.size().saturating_mul(tensor.dtype().byte_size()))
     })
+}
+
+fn tensor_component_storage_bytes(tensors: &HashMap<String, Array>) -> LoadedTensorComponentBytes {
+    tensors.iter().fold(
+        LoadedTensorComponentBytes::default(),
+        |mut bytes, (key, tensor)| {
+            let storage = tensor.size().saturating_mul(tensor.dtype().byte_size());
+            if is_vision_tensor_key(key) {
+                bytes.vision = bytes.vision.saturating_add(storage);
+            } else {
+                bytes.text = bytes.text.saturating_add(storage);
+            }
+            bytes
+        },
+    )
+}
+
+fn is_vision_tensor_key(key: &str) -> bool {
+    const VISION_PREFIXES: &[&str] = &[
+        "vision_tower.",
+        "vision_embedder.",
+        "embed_vision.",
+        "model.encoder.vision_tower.",
+        "model.encoder.embed_vision.",
+        "vit_merger.",
+        "merger.",
+    ];
+    VISION_PREFIXES.iter().any(|prefix| key.starts_with(prefix))
 }
 
 fn validate_quantized_storage_manifest(
@@ -2085,6 +2128,32 @@ mod tests {
         w.insert("model.u8.weight".into(), u8_arr);
 
         assert_eq!(super::tensor_storage_bytes(&w), 6 * 4 + 5 * 2 + 7);
+    }
+
+    #[test]
+    fn tensor_component_storage_bytes_separates_all_supported_vision_prefixes() {
+        let mut weights: HashMap<String, Array> = HashMap::new();
+        let tensor = || Array::zeros((2_i32, 3), mlx::Dtype::Float32).unwrap();
+        weights.insert("model.layers.0.self_attn.q_proj.weight".into(), tensor());
+        for key in [
+            "vision_tower.blocks.0.attn.qkv.weight",
+            "vision_embedder.patch_dense.weight",
+            "embed_vision.weight",
+            "model.encoder.vision_tower.embeddings.weight",
+            "model.encoder.embed_vision.weight",
+            "vit_merger.proj.weight",
+            "merger.mlp.0.linear_1.weight",
+        ] {
+            weights.insert(key.into(), tensor());
+        }
+
+        let bytes = super::tensor_component_storage_bytes(&weights);
+        assert_eq!(bytes.text, 2 * 3 * 4);
+        assert_eq!(bytes.vision, 7 * 2 * 3 * 4);
+        assert_eq!(
+            bytes.text.saturating_add(bytes.vision),
+            super::tensor_storage_bytes(&weights)
+        );
     }
 
     #[test]

@@ -781,6 +781,132 @@ impl crate::core::scheduler::DenseVlMethods for Gemma4Model {
         Ok(logits)
     }
 
+    fn estimate_vision_prefill_peak_bytes(
+        &self,
+        pixel_values: &[Array],
+        grid_thw: &[(i32, i32, i32)],
+    ) -> Result<usize> {
+        anyhow::ensure!(
+            pixel_values.len() == grid_thw.len(),
+            "Gemma4Model vision peak estimator requires pixel_values.len()={} to equal grid_thw.len()={}",
+            pixel_values.len(),
+            grid_thw.len()
+        );
+        anyhow::ensure!(
+            self.vision.is_some() || self.unified_vision.is_some(),
+            "Gemma4Model vision peak estimator requires a loaded vision tower"
+        );
+        let config = self
+            .vision_config
+            .as_ref()
+            .ok_or_else(|| anyhow!("Gemma4Model vision peak estimator requires vision_config"))?;
+        if config.is_unified() {
+            let default_tokens = usize::try_from(config.default_output_length)
+                .map_err(|_| anyhow!("Gemma4 unified default_output_length must be positive"))?;
+            let embedding = usize::try_from(config.mm_embed_dim)
+                .map_err(|_| anyhow!("Gemma4 unified mm_embed_dim must be positive"))?;
+            let output = usize::try_from(config.output_proj_dims)
+                .map_err(|_| anyhow!("Gemma4 unified output_proj_dims must be positive"))?;
+            let model_patch = usize::try_from(config.model_patch_size())
+                .map_err(|_| anyhow!("Gemma4 unified model_patch_size must be positive"))?;
+            let pool = usize::try_from(config.pooling_kernel_size)
+                .map_err(|_| anyhow!("Gemma4 unified pooling_kernel_size must be positive"))?;
+            anyhow::ensure!(
+                default_tokens > 0 && embedding > 0 && output > 0 && model_patch > 0 && pool > 0,
+                "Gemma4 unified vision peak estimator received an invalid model profile"
+            );
+            let patch_dim = model_patch.saturating_mul(model_patch).saturating_mul(3);
+            let expected_tokens = i32::try_from(default_tokens).unwrap_or(i32::MAX);
+            let expected_patch_dim = i32::try_from(patch_dim).unwrap_or(i32::MAX);
+            let activation_bytes = self
+                .hidden_dtype()
+                .byte_size()
+                .max(std::mem::size_of::<f32>());
+            let hidden_bytes = default_tokens
+                .saturating_mul(embedding)
+                .saturating_mul(activation_bytes);
+            let projected_bytes = default_tokens
+                .saturating_mul(output)
+                .saturating_mul(activation_bytes);
+            let positional_peak = hidden_bytes
+                .saturating_mul(5)
+                .saturating_add(default_tokens.saturating_mul(std::mem::size_of::<f32>()));
+            let projection_peak = hidden_bytes
+                .saturating_mul(2)
+                .saturating_add(projected_bytes);
+            let mut payload_bytes = 0usize;
+            let mut retained_output = 0usize;
+            let mut patch_projection_peak = 0usize;
+            for (pixels, &(t, h, w)) in pixel_values.iter().zip(grid_thw.iter()) {
+                anyhow::ensure!(
+                    t == 1 && h > 0 && w > 0,
+                    "Gemma4 unified vision requires grid (1,h,w), got ({t},{h},{w})"
+                );
+                let h = usize::try_from(h).unwrap_or(usize::MAX);
+                let w = usize::try_from(w).unwrap_or(usize::MAX);
+                anyhow::ensure!(
+                    h % pool == 0 && w % pool == 0,
+                    "Gemma4 unified grid {h}x{w} must be divisible by pooling kernel {pool}"
+                );
+                let valid_tokens = (h / pool).saturating_mul(w / pool);
+                anyhow::ensure!(
+                    valid_tokens > 0 && valid_tokens <= default_tokens,
+                    "Gemma4 unified grid implies {valid_tokens} valid tokens, maximum is {default_tokens}"
+                );
+                let shape = pixels.shape();
+                let dims = shape.as_slice();
+                anyhow::ensure!(
+                    dims == [1, expected_tokens, expected_patch_dim],
+                    "Gemma4 unified vision expects pixel tensor [1,{default_tokens},{patch_dim}], got {dims:?}"
+                );
+                let current_payload = pixels.size().saturating_mul(pixels.dtype().byte_size());
+                payload_bytes = payload_bytes.saturating_add(current_payload);
+                retained_output = retained_output.saturating_add(
+                    valid_tokens
+                        .saturating_mul(output)
+                        .saturating_mul(activation_bytes),
+                );
+                patch_projection_peak = patch_projection_peak.max(
+                    current_payload
+                        .saturating_mul(3)
+                        .saturating_add(hidden_bytes),
+                );
+            }
+            let stage_peak = patch_projection_peak
+                .max(positional_peak)
+                .max(projection_peak);
+            let unscaled = payload_bytes
+                .saturating_add(retained_output)
+                .saturating_add(stage_peak);
+            let estimated = unscaled
+                .saturating_add(unscaled / 2)
+                .saturating_add(crate::core::scheduler::VISION_PREFILL_RUNTIME_OVERHEAD_BYTES);
+            anyhow::ensure!(
+                estimated > 0 && estimated != usize::MAX,
+                "Gemma4 unified vision peak estimate overflowed or produced zero"
+            );
+            return Ok(estimated);
+        }
+        let pool = usize::try_from(config.pooling_kernel_size)
+            .map_err(|_| anyhow!("Gemma4 vision pooling_kernel_size must be positive"))?;
+        crate::core::scheduler::estimate_transformer_vision_prefill_peak_bytes(
+            pixel_values,
+            grid_thw,
+            crate::core::scheduler::VisionPrefillMemoryProfile {
+                hidden_size: usize::try_from(config.hidden_size)
+                    .map_err(|_| anyhow!("Gemma4 vision hidden_size must be positive"))?,
+                intermediate_size: usize::try_from(config.intermediate_size)
+                    .map_err(|_| anyhow!("Gemma4 vision intermediate_size must be positive"))?,
+                num_attention_heads: usize::try_from(config.num_attention_heads)
+                    .map_err(|_| anyhow!("Gemma4 vision num_attention_heads must be positive"))?,
+                output_hidden_size: usize::try_from(self.config().hidden_size)
+                    .map_err(|_| anyhow!("Gemma4 text hidden_size must be positive"))?,
+                spatial_merge_area: pool.saturating_mul(pool),
+                activation_bytes: self.hidden_dtype().byte_size(),
+            },
+        )
+    }
+
     fn compute_vision_embeds(
         &self,
         pixel_values: &[Array],

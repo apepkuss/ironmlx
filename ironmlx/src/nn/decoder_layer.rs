@@ -165,6 +165,20 @@ impl LayerCache {
         Ok(())
     }
 
+    pub fn shrink_paged_hot_window(&mut self, hot_window_pages: i32) -> anyhow::Result<usize> {
+        match self {
+            LayerCache::Full(kv) => kv.shrink_paged_hot_window(hot_window_pages),
+            LayerCache::Linear(_) | LayerCache::Mla(_) => Ok(0),
+        }
+    }
+
+    pub fn restore_configured_paged_hot_window(&mut self) -> bool {
+        match self {
+            LayerCache::Full(kv) => kv.restore_configured_paged_hot_window(),
+            LayerCache::Linear(_) | LayerCache::Mla(_) => false,
+        }
+    }
+
     /// Reset to empty state (offset → 0; recurrent state cleared). Preserves
     /// any underlying Array allocations so the next batch can reuse them.
     pub fn reset(&mut self) -> anyhow::Result<()> {

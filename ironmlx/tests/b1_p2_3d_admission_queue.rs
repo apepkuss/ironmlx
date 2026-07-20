@@ -447,6 +447,7 @@ async fn iron_bench_c8_with_queue_no_4xx() {
             scheduler_profile,
             false, // scheduler_autotune_report
             None,  // vision_input_override
+            ironmlx::core::process_memory::StaticMemoryEstimate::default(),
         )
         .await
     });

@@ -150,6 +150,10 @@ impl Qwen35Model {
         self.text.config()
     }
 
+    pub(crate) fn vision_loaded(&self) -> bool {
+        self.vision.is_some()
+    }
+
     /// Extract memory-budget-relevant model attributes for Scheduler::new
     /// (B1-p2.5 G1).
     pub fn model_meta(&self) -> crate::core::memory_budget::ModelMeta {

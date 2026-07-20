@@ -578,6 +578,16 @@ impl crate::core::scheduler::DenseVlMethods for Glm4MoeLiteModel {
         ))
     }
 
+    fn estimate_vision_prefill_peak_bytes(
+        &self,
+        _pixel_values: &[mlx::Array],
+        _grid_thw: &[(i32, i32, i32)],
+    ) -> crate::Result<usize> {
+        Err(anyhow!(
+            "Glm4MoeLiteModel is text-only: VL methods unsupported"
+        ))
+    }
+
     fn compute_vision_embeds(
         &self,
         _pixel_values: &[mlx::Array],

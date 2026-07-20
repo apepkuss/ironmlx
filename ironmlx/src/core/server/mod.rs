@@ -121,6 +121,10 @@ pub struct AppState<M: Model + DenseVlMethods + Send + 'static> {
     /// Loaded model weight bytes captured once at load time so EnginePool
     /// guardrails do not need to lock the model later.
     pub model_weight_bytes: usize,
+    /// Metadata-only mmap liability split by first-use component.
+    pub static_memory_estimate: crate::core::process_memory::StaticMemoryEstimate,
+    /// Engine-lifetime first-use tracker shared by Scheduler and direct paths.
+    pub cold_materialization_tracker: Arc<crate::core::process_memory::ColdMaterializationTracker>,
     /// Optional TurboQuant K/V bit-widths for full-attention KV cache reads.
     pub kv_cache_turboquant_bits: Option<TurboQuantKVBits>,
     /// True when this state owns a scheduler-backed MTP head.
@@ -147,6 +151,8 @@ impl<M: Model + DenseVlMethods + Send + 'static> Clone for AppState<M> {
             scheduler_runtime_profile: self.scheduler_runtime_profile.clone(),
             sampling_defaults: self.sampling_defaults,
             model_weight_bytes: self.model_weight_bytes,
+            static_memory_estimate: self.static_memory_estimate,
+            cold_materialization_tracker: self.cold_materialization_tracker.clone(),
             kv_cache_turboquant_bits: self.kv_cache_turboquant_bits,
             mtp_enabled: self.mtp_enabled,
             health_collector: self.health_collector.clone(),
@@ -174,6 +180,56 @@ impl<M: Model + DenseVlMethods + Send + 'static> AppState<M> {
                 effective_concurrency: active.saturating_add(queued).saturating_add(1),
             })
     }
+}
+
+pub(crate) struct DirectRequestMemoryGuard {
+    cold: Option<crate::core::process_memory::ColdMaterializationGuard>,
+    vision: Option<crate::core::process_memory::MemoryReservation>,
+}
+
+impl DirectRequestMemoryGuard {
+    pub(crate) fn commit(mut self) {
+        drop(self.vision.take());
+        if let Some(cold) = self.cold.take() {
+            cold.commit();
+        }
+    }
+}
+
+pub(crate) fn begin_direct_request_memory<M>(
+    state: &AppState<M>,
+    model: &M,
+    request: &crate::core::generate::GenerateRequest,
+) -> Result<DirectRequestMemoryGuard>
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    let governor = crate::core::process_memory::global_process_memory_governor();
+    let components = crate::core::process_memory::MaterializationComponents::for_request(
+        request.pixel_values.is_some(),
+        false,
+    );
+    let cold = state
+        .cold_materialization_tracker
+        .begin(components, &governor)
+        .map(Some)
+        .map_err(|_| {
+            let snapshot = governor.snapshot();
+            anyhow::Error::new(
+                crate::core::scheduler::SchedulerError::ColdMaterializationUnsafe {
+                    requested_bytes: components.requested_bytes(state.static_memory_estimate),
+                    current_bytes: snapshot.current_usage_bytes,
+                    target_bytes: snapshot.hard_watermark_bytes,
+                },
+            )
+        })?;
+    let vision = crate::core::scheduler::reserve_vision_prefill_for_request(
+        Some(&governor),
+        model,
+        request.pixel_values.as_deref(),
+        request.image_grid_thw.as_deref(),
+    )?;
+    Ok(DirectRequestMemoryGuard { cold, vision })
 }
 
 #[derive(Clone)]
@@ -454,6 +510,7 @@ pub async fn serve<M>(
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     scheduler_autotune_report: bool,
     vision_input_override: Option<VisionInputConfig>,
+    static_memory_estimate: crate::core::process_memory::StaticMemoryEstimate,
 ) -> Result<()>
 where
     M: Model + DenseVlMethods + Send + 'static,
@@ -474,6 +531,7 @@ where
         scheduler_runtime_profile,
         scheduler_autotune_report,
         vision_input_override,
+        static_memory_estimate,
         None,
         PlainSchedulerActorSpawner {
             paged_prefix_cache,
@@ -506,6 +564,7 @@ pub async fn serve_with_mtp<M>(
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     scheduler_autotune_report: bool,
     vision_input_override: Option<VisionInputConfig>,
+    static_memory_estimate: crate::core::process_memory::StaticMemoryEstimate,
 ) -> Result<()>
 where
     M: Model + DenseVlMethods + MtpSpeculativeModel + Send + 'static,
@@ -532,6 +591,7 @@ where
         scheduler_runtime_profile,
         scheduler_autotune_report,
         vision_input_override,
+        static_memory_estimate,
         Some(MtpHealthDraftTokens {
             requested: requested_mtp_draft_tokens,
             effective: effective_mtp_draft_tokens,
@@ -569,7 +629,7 @@ pub async fn serve_with_gemma4_drafter(
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     scheduler_autotune_report: bool,
     vision_input_override: Option<VisionInputConfig>,
-    loaded_model_weight_bytes: Option<usize>,
+    static_memory_estimate: crate::core::process_memory::StaticMemoryEstimate,
 ) -> Result<()> {
     let state = build_gemma4_drafter_app_state(
         model,
@@ -589,7 +649,7 @@ pub async fn serve_with_gemma4_drafter(
         vision_input_override,
         paged_prefix_cache,
         prefix_lru_cache,
-        loaded_model_weight_bytes,
+        static_memory_estimate,
         active_kv_offload,
     )
     .await?;
@@ -632,7 +692,7 @@ pub(crate) async fn build_plain_app_state<M>(
     vision_input_override: Option<VisionInputConfig>,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
-    loaded_model_weight_bytes: Option<usize>,
+    static_memory_estimate: crate::core::process_memory::StaticMemoryEstimate,
     active_kv_offload: ActiveKvOffloadConfig,
 ) -> Result<AppState<M>>
 where
@@ -652,7 +712,7 @@ where
         scheduler_runtime_profile,
         scheduler_autotune_report,
         vision_input_override,
-        loaded_model_weight_bytes,
+        static_memory_estimate,
         None,
         PlainSchedulerActorSpawner {
             paged_prefix_cache,
@@ -682,7 +742,7 @@ pub(crate) async fn build_mtp_app_state<M>(
     vision_input_override: Option<VisionInputConfig>,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
-    loaded_model_weight_bytes: Option<usize>,
+    static_memory_estimate: crate::core::process_memory::StaticMemoryEstimate,
     active_kv_offload: ActiveKvOffloadConfig,
 ) -> Result<AppState<M>>
 where
@@ -705,7 +765,7 @@ where
         scheduler_runtime_profile,
         scheduler_autotune_report,
         vision_input_override,
-        loaded_model_weight_bytes,
+        static_memory_estimate,
         Some(MtpHealthDraftTokens {
             requested: mtp_draft_tokens,
             effective: effective_mtp_draft_tokens,
@@ -740,7 +800,7 @@ pub(crate) async fn build_gemma4_drafter_app_state(
     vision_input_override: Option<VisionInputConfig>,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
-    loaded_model_weight_bytes: Option<usize>,
+    static_memory_estimate: crate::core::process_memory::StaticMemoryEstimate,
     active_kv_offload: ActiveKvOffloadConfig,
 ) -> Result<Gemma4DrafterAppState> {
     let effective_mtp_draft_tokens =
@@ -783,7 +843,7 @@ pub(crate) async fn build_gemma4_drafter_app_state(
         scheduler_runtime_profile,
         scheduler_autotune_report,
         vision_input_override,
-        loaded_model_weight_bytes,
+        static_memory_estimate,
         Some(MtpHealthDraftTokens {
             requested: mtp_draft_tokens,
             effective: effective_mtp_draft_tokens,
@@ -819,7 +879,7 @@ async fn build_app_state<M, S>(
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     scheduler_autotune_report: bool,
     vision_input_override: Option<VisionInputConfig>,
-    loaded_model_weight_bytes: Option<usize>,
+    static_memory_estimate: crate::core::process_memory::StaticMemoryEstimate,
     mtp_health_draft_tokens: Option<MtpHealthDraftTokens>,
     scheduler_actor_spawner: S,
 ) -> Result<AppState<M>>
@@ -838,7 +898,8 @@ where
         let guard = model.lock().await;
         guard.model_meta()
     };
-    meta.weight_bytes = effective_model_weight_bytes(meta.weight_bytes, loaded_model_weight_bytes);
+    meta.weight_bytes =
+        effective_model_weight_bytes(meta.weight_bytes, static_memory_estimate.total_cold_bytes());
     let model_max_context: usize = meta.max_position_embeddings.max(0) as usize;
     let effective_cap_max = max_cache_cap.min(model_max_context);
     if max_cache_cap > model_max_context {
@@ -882,6 +943,10 @@ where
         decode_cadence_mid_chunk_cap,
         meta,
     )?;
+    let cold_materialization_tracker =
+        crate::core::process_memory::ColdMaterializationTracker::new(static_memory_estimate);
+    scheduler_handle
+        .install_cold_materialization_tracker(Arc::clone(&cold_materialization_tracker))?;
     let vision_input = vision_input_override.unwrap_or(VisionInputConfig::Qwen {
         spatial_merge_size: meta.spatial_merge_size,
     });
@@ -933,19 +998,16 @@ where
         scheduler_runtime_profile: Arc::new(scheduler_runtime_profile),
         sampling_defaults: SamplingDefaults::default(),
         model_weight_bytes: meta.weight_bytes,
+        static_memory_estimate,
+        cold_materialization_tracker,
         kv_cache_turboquant_bits,
         mtp_enabled: mtp_health_draft_tokens.is_some(),
         health_collector,
     })
 }
 
-fn effective_model_weight_bytes(
-    meta_weight_bytes: usize,
-    loaded_weight_bytes: Option<usize>,
-) -> usize {
-    loaded_weight_bytes
-        .unwrap_or(meta_weight_bytes)
-        .max(meta_weight_bytes)
+fn effective_model_weight_bytes(meta_weight_bytes: usize, loaded_weight_bytes: usize) -> usize {
+    loaded_weight_bytes.max(meta_weight_bytes)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -965,6 +1027,7 @@ async fn serve_inner<M, S>(
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     scheduler_autotune_report: bool,
     vision_input_override: Option<VisionInputConfig>,
+    static_memory_estimate: crate::core::process_memory::StaticMemoryEstimate,
     mtp_health_draft_tokens: Option<MtpHealthDraftTokens>,
     scheduler_actor_spawner: S,
 ) -> Result<()>
@@ -986,7 +1049,7 @@ where
         scheduler_runtime_profile,
         scheduler_autotune_report,
         vision_input_override,
-        None,
+        static_memory_estimate,
         mtp_health_draft_tokens,
         scheduler_actor_spawner,
     )
@@ -1068,13 +1131,12 @@ mod tests {
 
     #[test]
     fn effective_model_weight_bytes_uses_loaded_tensor_bytes_when_larger() {
-        assert_eq!(effective_model_weight_bytes(1_024, Some(4_096)), 4_096);
+        assert_eq!(effective_model_weight_bytes(1_024, 4_096), 4_096);
     }
 
     #[test]
-    fn effective_model_weight_bytes_keeps_meta_estimate_when_larger_or_absent() {
-        assert_eq!(effective_model_weight_bytes(4_096, Some(1_024)), 4_096);
-        assert_eq!(effective_model_weight_bytes(4_096, None), 4_096);
+    fn effective_model_weight_bytes_keeps_meta_estimate_when_larger() {
+        assert_eq!(effective_model_weight_bytes(4_096, 1_024), 4_096);
     }
 
     struct DefaultRouteModel;
@@ -1222,6 +1284,7 @@ mod tests {
         let queue_rejected = Arc::new(AtomicU64::new(0));
         scheduler_actor::SchedulerActorHandle {
             cmd_tx,
+            cold_materialization_tracker: Arc::new(std::sync::OnceLock::new()),
             admit_count: Arc::new(AtomicU64::new(0)),
             batch_count: Arc::new(AtomicU64::new(0)),
             saturate_triggered: Arc::new(AtomicU64::new(0)),

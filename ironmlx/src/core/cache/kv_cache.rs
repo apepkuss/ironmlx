@@ -232,6 +232,19 @@ impl KVCache {
             .and_then(|paged| paged.hot_cold_summary())
     }
 
+    pub fn shrink_paged_hot_window(&mut self, hot_window_pages: i32) -> Result<usize> {
+        let Some(paged) = self.paged.as_mut() else {
+            return Ok(0);
+        };
+        paged.shrink_hot_window_on(&self.offsets, hot_window_pages, ())
+    }
+
+    pub fn restore_configured_paged_hot_window(&mut self) -> bool {
+        self.paged
+            .as_mut()
+            .is_some_and(|paged| paged.restore_configured_hot_window())
+    }
+
     pub fn batch(&self) -> i32 {
         self.batch
     }
