@@ -1991,7 +1991,33 @@ fn driver_loop<M, A>(
                             for ev in events {
                                 route_event(ev, &event_txs);
                             }
-                            let evicted_count = sched.gc_finished_rows(&mut event_txs).len();
+                            let evicted_count = match sched.gc_finished_rows(&mut event_txs) {
+                                Ok(evicted) => evicted.len(),
+                                Err(error) => {
+                                    tracing::error!(%error, "request-owned KV release failed");
+                                    if let Err(evict_err) = sched.evict_all() {
+                                        tracing::warn!(
+                                            "[SchedulerActor] evict_all after request-owned KV release failure also failed: {evict_err:?}"
+                                        );
+                                    }
+                                    mtp_counters.reset_stats_baseline();
+                                    in_flight_mid_admit = None;
+                                    cleanup_parked_active_kv_requests(
+                                        &sched,
+                                        &mut parked_active_kv,
+                                        &mut event_txs,
+                                        &active_kv_stats,
+                                        "scheduler poisoned after request-owned KV release failure",
+                                    );
+                                    event_txs.clear();
+                                    while let Some(pending) = admission_queue.pop_front() {
+                                        let _ = pending.reply_tx.send(Err(anyhow::anyhow!(
+                                            "scheduler poisoned after request-owned KV release failure"
+                                        )));
+                                    }
+                                    continue 'outer;
+                                }
+                            };
                             if let (
                                 Some((
                                     step_active_before,

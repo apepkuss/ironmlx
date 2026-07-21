@@ -10,8 +10,9 @@ use mlx::ops::shape::concatenate_on;
 use mlx::{Array, Dtype, StreamOrDevice};
 
 use super::{
-    PagedKVCache, PagedKvHotColdConfig, PagedKvHotColdSummary, PagedPrefixLayer, TurboQuantKVBits,
-    TurboQuantKVCache, TurboQuantPrefixLayer,
+    PagedKVCache, PagedKvBlockOwner, PagedKvHotColdConfig, PagedKvHotColdSummary,
+    PagedKvPhysicalStats, PagedPrefixLayer, TurboQuantKVBits, TurboQuantKVCache,
+    TurboQuantPrefixLayer,
 };
 use crate::Result;
 
@@ -224,6 +225,79 @@ impl KVCache {
 
     pub fn paged(&self) -> Option<&PagedKVCache> {
         self.paged.as_deref()
+    }
+
+    pub fn bind_paged_execution_rows(&mut self, owners: &[PagedKvBlockOwner]) -> Result<bool> {
+        let Some(paged) = self.paged.as_mut() else {
+            return Ok(false);
+        };
+        self.batch = i32::try_from(owners.len())
+            .map_err(|_| anyhow::anyhow!("KVCache::bind_paged_execution_rows: batch overflow"))?;
+        paged.bind_execution_rows(owners, &mut self.offsets)?;
+        Ok(true)
+    }
+
+    pub fn reuse_paged_storage_from(
+        &mut self,
+        src: &mut KVCache,
+        owners: &[PagedKvBlockOwner],
+    ) -> Result<bool> {
+        self.validate_paged_storage_reuse_from(src, owners)?;
+        match (&mut self.paged, &mut src.paged) {
+            (Some(dst_paged), Some(src_paged)) => {
+                src_paged.commit_execution_rows(&src.offsets)?;
+                std::mem::swap(dst_paged, src_paged);
+                dst_paged.grow_cap(self.cap);
+                let mut transferred_offsets = src.offsets.clone();
+                dst_paged.bind_execution_rows(owners, &mut transferred_offsets)?;
+                self.batch = i32::try_from(owners.len()).map_err(|_| {
+                    anyhow::anyhow!("KVCache::reuse_paged_storage_from: batch overflow")
+                })?;
+                self.offsets = transferred_offsets;
+                Ok(true)
+            }
+            (None, None) => Ok(false),
+            _ => unreachable!("paged cache kind preflight must match"),
+        }
+    }
+
+    pub fn validate_paged_storage_reuse_from(
+        &self,
+        src: &KVCache,
+        owners: &[PagedKvBlockOwner],
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.n_kv_heads == src.n_kv_heads
+                && self.head_dim == src.head_dim
+                && self.v_head_dim == src.v_head_dim
+                && self.dtype == src.dtype,
+            "KVCache::reuse_paged_storage_from: layout mismatch"
+        );
+        match (&self.paged, &src.paged) {
+            (Some(dst_paged), Some(src_paged)) => {
+                dst_paged.validate_storage_reuse_from(src_paged, owners)
+            }
+            (None, None) => Ok(()),
+            _ => anyhow::bail!("KVCache::reuse_paged_storage_from: paged cache kind mismatch"),
+        }
+    }
+
+    pub fn release_paged_owner(&mut self, owner: PagedKvBlockOwner) -> Result<bool> {
+        let Some(paged) = self.paged.as_mut() else {
+            return Ok(false);
+        };
+        paged.release_owner(owner, &mut self.offsets)
+    }
+
+    pub fn paged_physical_stats(&self) -> Option<PagedKvPhysicalStats> {
+        self.paged.as_ref().map(|paged| paged.physical_stats())
+    }
+
+    pub fn validate_paged_owner_invariants(&self) -> Result<()> {
+        if let Some(paged) = self.paged.as_ref() {
+            paged.validate_owner_invariants()?;
+        }
+        Ok(())
     }
 
     pub fn paged_hot_cold_summary(&self) -> Option<PagedKvHotColdSummary> {
