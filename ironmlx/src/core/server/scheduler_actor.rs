@@ -282,6 +282,10 @@ struct SchedulerActorMtpCounters {
     mtp_verify_forward_us: Arc<AtomicU64>,
     mtp_projection_us: Arc<AtomicU64>,
     mtp_sampling_us: Arc<AtomicU64>,
+    mtp_draft_host_sync_count: Arc<AtomicU64>,
+    mtp_draft_host_sync_us: Arc<AtomicU64>,
+    mtp_verify_accept_host_sync_count: Arc<AtomicU64>,
+    mtp_verify_accept_host_sync_us: Arc<AtomicU64>,
     mtp_main_rollback_us: Arc<AtomicU64>,
     mtp_cache_commit_us: Arc<AtomicU64>,
     mtp_prefill_cache_commit_us: Arc<AtomicU64>,
@@ -303,6 +307,10 @@ impl SchedulerActorMtpCounters {
         mtp_verify_forward_us: Arc<AtomicU64>,
         mtp_projection_us: Arc<AtomicU64>,
         mtp_sampling_us: Arc<AtomicU64>,
+        mtp_draft_host_sync_count: Arc<AtomicU64>,
+        mtp_draft_host_sync_us: Arc<AtomicU64>,
+        mtp_verify_accept_host_sync_count: Arc<AtomicU64>,
+        mtp_verify_accept_host_sync_us: Arc<AtomicU64>,
         mtp_main_rollback_us: Arc<AtomicU64>,
         mtp_cache_commit_us: Arc<AtomicU64>,
         mtp_prefill_cache_commit_us: Arc<AtomicU64>,
@@ -320,6 +328,10 @@ impl SchedulerActorMtpCounters {
             mtp_verify_forward_us,
             mtp_projection_us,
             mtp_sampling_us,
+            mtp_draft_host_sync_count,
+            mtp_draft_host_sync_us,
+            mtp_verify_accept_host_sync_count,
+            mtp_verify_accept_host_sync_us,
             mtp_main_rollback_us,
             mtp_cache_commit_us,
             mtp_prefill_cache_commit_us,
@@ -368,6 +380,16 @@ impl SchedulerActorMtpCounters {
             .fetch_add(stats.projection_us, Ordering::Relaxed);
         self.mtp_sampling_us
             .fetch_add(stats.sampling_us, Ordering::Relaxed);
+        self.mtp_draft_host_sync_count
+            .fetch_add(stats.draft_host_sync_count as u64, Ordering::Relaxed);
+        self.mtp_draft_host_sync_us
+            .fetch_add(stats.draft_host_sync_us, Ordering::Relaxed);
+        self.mtp_verify_accept_host_sync_count.fetch_add(
+            stats.verify_accept_host_sync_count as u64,
+            Ordering::Relaxed,
+        );
+        self.mtp_verify_accept_host_sync_us
+            .fetch_add(stats.verify_accept_host_sync_us, Ordering::Relaxed);
         self.mtp_main_rollback_us
             .fetch_add(stats.main_rollback_us, Ordering::Relaxed);
         self.mtp_cache_commit_us
@@ -945,6 +967,18 @@ pub struct SchedulerActorHandle {
     /// Latest cumulative microseconds spent sampling logits.
     #[doc(hidden)]
     pub mtp_sampling_us: Arc<AtomicU64>,
+    /// Host synchronizations performed while constructing MTP draft chains.
+    #[doc(hidden)]
+    pub mtp_draft_host_sync_count: Arc<AtomicU64>,
+    /// Microseconds blocked on draft-chain host synchronization.
+    #[doc(hidden)]
+    pub mtp_draft_host_sync_us: Arc<AtomicU64>,
+    /// Host synchronizations performed to resolve verified MTP windows.
+    #[doc(hidden)]
+    pub mtp_verify_accept_host_sync_count: Arc<AtomicU64>,
+    /// Microseconds blocked on compact verify-acceptance results.
+    #[doc(hidden)]
+    pub mtp_verify_accept_host_sync_us: Arc<AtomicU64>,
     /// Latest cumulative microseconds spent rolling back/replaying main KV.
     #[doc(hidden)]
     pub mtp_main_rollback_us: Arc<AtomicU64>,
@@ -1382,6 +1416,10 @@ where
     let mtp_verify_forward_us = Arc::new(AtomicU64::new(0));
     let mtp_projection_us = Arc::new(AtomicU64::new(0));
     let mtp_sampling_us = Arc::new(AtomicU64::new(0));
+    let mtp_draft_host_sync_count = Arc::new(AtomicU64::new(0));
+    let mtp_draft_host_sync_us = Arc::new(AtomicU64::new(0));
+    let mtp_verify_accept_host_sync_count = Arc::new(AtomicU64::new(0));
+    let mtp_verify_accept_host_sync_us = Arc::new(AtomicU64::new(0));
     let mtp_main_rollback_us = Arc::new(AtomicU64::new(0));
     let mtp_cache_commit_us = Arc::new(AtomicU64::new(0));
     let mtp_prefill_cache_commit_us = Arc::new(AtomicU64::new(0));
@@ -1411,6 +1449,10 @@ where
         mtp_verify_forward_us.clone(),
         mtp_projection_us.clone(),
         mtp_sampling_us.clone(),
+        mtp_draft_host_sync_count.clone(),
+        mtp_draft_host_sync_us.clone(),
+        mtp_verify_accept_host_sync_count.clone(),
+        mtp_verify_accept_host_sync_us.clone(),
         mtp_main_rollback_us.clone(),
         mtp_cache_commit_us.clone(),
         mtp_prefill_cache_commit_us.clone(),
@@ -1495,6 +1537,10 @@ where
         mtp_verify_forward_us,
         mtp_projection_us,
         mtp_sampling_us,
+        mtp_draft_host_sync_count,
+        mtp_draft_host_sync_us,
+        mtp_verify_accept_host_sync_count,
+        mtp_verify_accept_host_sync_us,
         mtp_main_rollback_us,
         mtp_cache_commit_us,
         mtp_prefill_cache_commit_us,
@@ -3625,6 +3671,10 @@ mod tests {
 
     fn test_mtp_counters() -> SchedulerActorMtpCounters {
         SchedulerActorMtpCounters::new(
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),

@@ -1476,6 +1476,10 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
     let mut mtp_verify_forward_us = 0;
     let mut mtp_projection_us = 0;
     let mut mtp_sampling_us = 0;
+    let mut mtp_draft_host_sync_count = 0;
+    let mut mtp_draft_host_sync_us = 0;
+    let mut mtp_verify_accept_host_sync_count = 0;
+    let mut mtp_verify_accept_host_sync_us = 0;
     let mut mtp_main_rollback_us = 0;
     let mut mtp_cache_commit_us = 0;
     let mut mtp_prefill_cache_commit_us = 0;
@@ -1529,6 +1533,10 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
         mtp_verify_forward_us += snapshot.mtp.verify_forward_us;
         mtp_projection_us += snapshot.mtp.projection_us;
         mtp_sampling_us += snapshot.mtp.sampling_us;
+        mtp_draft_host_sync_count += snapshot.mtp.draft_host_sync_count;
+        mtp_draft_host_sync_us += snapshot.mtp.draft_host_sync_us;
+        mtp_verify_accept_host_sync_count += snapshot.mtp.verify_accept_host_sync_count;
+        mtp_verify_accept_host_sync_us += snapshot.mtp.verify_accept_host_sync_us;
         mtp_main_rollback_us += snapshot.mtp.main_rollback_us;
         mtp_cache_commit_us += snapshot.mtp.cache_commit_us;
         mtp_prefill_cache_commit_us += snapshot.mtp.prefill_cache_commit_us;
@@ -1620,6 +1628,10 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
             verify_forward_us: mtp_verify_forward_us,
             projection_us: mtp_projection_us,
             sampling_us: mtp_sampling_us,
+            draft_host_sync_count: mtp_draft_host_sync_count,
+            draft_host_sync_us: mtp_draft_host_sync_us,
+            verify_accept_host_sync_count: mtp_verify_accept_host_sync_count,
+            verify_accept_host_sync_us: mtp_verify_accept_host_sync_us,
             main_rollback_us: mtp_main_rollback_us,
             cache_commit_us: mtp_cache_commit_us,
             prefill_cache_commit_us: mtp_prefill_cache_commit_us,
@@ -1763,6 +1775,10 @@ mod tests {
                 verify_forward_us: 23,
                 projection_us: 29,
                 sampling_us: 31,
+                draft_host_sync_count: 0,
+                draft_host_sync_us: 0,
+                verify_accept_host_sync_count: 17,
+                verify_accept_host_sync_us: 53,
                 main_rollback_us: 37,
                 cache_commit_us: 41,
                 prefill_cache_commit_us: 17,
