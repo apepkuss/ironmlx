@@ -71,6 +71,10 @@ pub struct MtpHealthInfo {
     pub verify_forward_us: u64,
     pub projection_us: u64,
     pub sampling_us: u64,
+    pub draft_host_sync_count: u64,
+    pub draft_host_sync_us: u64,
+    pub verify_accept_host_sync_count: u64,
+    pub verify_accept_host_sync_us: u64,
     pub main_rollback_us: u64,
     pub cache_commit_us: u64,
     pub prefill_cache_commit_us: u64,
@@ -93,6 +97,10 @@ pub struct MtpHealthConfig {
     verify_forward_us: Arc<AtomicU64>,
     projection_us: Arc<AtomicU64>,
     sampling_us: Arc<AtomicU64>,
+    draft_host_sync_count: Arc<AtomicU64>,
+    draft_host_sync_us: Arc<AtomicU64>,
+    verify_accept_host_sync_count: Arc<AtomicU64>,
+    verify_accept_host_sync_us: Arc<AtomicU64>,
     main_rollback_us: Arc<AtomicU64>,
     cache_commit_us: Arc<AtomicU64>,
     prefill_cache_commit_us: Arc<AtomicU64>,
@@ -116,6 +124,10 @@ impl MtpHealthConfig {
             verify_forward_us: Arc::new(AtomicU64::new(0)),
             projection_us: Arc::new(AtomicU64::new(0)),
             sampling_us: Arc::new(AtomicU64::new(0)),
+            draft_host_sync_count: Arc::new(AtomicU64::new(0)),
+            draft_host_sync_us: Arc::new(AtomicU64::new(0)),
+            verify_accept_host_sync_count: Arc::new(AtomicU64::new(0)),
+            verify_accept_host_sync_us: Arc::new(AtomicU64::new(0)),
             main_rollback_us: Arc::new(AtomicU64::new(0)),
             cache_commit_us: Arc::new(AtomicU64::new(0)),
             prefill_cache_commit_us: Arc::new(AtomicU64::new(0)),
@@ -138,6 +150,10 @@ impl MtpHealthConfig {
         verify_forward_us: Arc<AtomicU64>,
         projection_us: Arc<AtomicU64>,
         sampling_us: Arc<AtomicU64>,
+        draft_host_sync_count: Arc<AtomicU64>,
+        draft_host_sync_us: Arc<AtomicU64>,
+        verify_accept_host_sync_count: Arc<AtomicU64>,
+        verify_accept_host_sync_us: Arc<AtomicU64>,
         main_rollback_us: Arc<AtomicU64>,
         cache_commit_us: Arc<AtomicU64>,
         prefill_cache_commit_us: Arc<AtomicU64>,
@@ -158,6 +174,10 @@ impl MtpHealthConfig {
             verify_forward_us,
             projection_us,
             sampling_us,
+            draft_host_sync_count,
+            draft_host_sync_us,
+            verify_accept_host_sync_count,
+            verify_accept_host_sync_us,
             main_rollback_us,
             cache_commit_us,
             prefill_cache_commit_us,
@@ -181,6 +201,12 @@ impl MtpHealthConfig {
             verify_forward_us: self.verify_forward_us.load(Ordering::Relaxed),
             projection_us: self.projection_us.load(Ordering::Relaxed),
             sampling_us: self.sampling_us.load(Ordering::Relaxed),
+            draft_host_sync_count: self.draft_host_sync_count.load(Ordering::Relaxed),
+            draft_host_sync_us: self.draft_host_sync_us.load(Ordering::Relaxed),
+            verify_accept_host_sync_count: self
+                .verify_accept_host_sync_count
+                .load(Ordering::Relaxed),
+            verify_accept_host_sync_us: self.verify_accept_host_sync_us.load(Ordering::Relaxed),
             main_rollback_us: self.main_rollback_us.load(Ordering::Relaxed),
             cache_commit_us: self.cache_commit_us.load(Ordering::Relaxed),
             prefill_cache_commit_us: self.prefill_cache_commit_us.load(Ordering::Relaxed),
@@ -469,6 +495,10 @@ mod tests {
         let verify_forward_us = Arc::new(AtomicU64::new(31));
         let projection_us = Arc::new(AtomicU64::new(37));
         let sampling_us = Arc::new(AtomicU64::new(41));
+        let draft_host_sync_count = Arc::new(AtomicU64::new(0));
+        let draft_host_sync_us = Arc::new(AtomicU64::new(0));
+        let verify_accept_host_sync_count = Arc::new(AtomicU64::new(23));
+        let verify_accept_host_sync_us = Arc::new(AtomicU64::new(42));
         let main_rollback_us = Arc::new(AtomicU64::new(43));
         let cache_commit_us = Arc::new(AtomicU64::new(47));
         let prefill_cache_commit_us = Arc::new(AtomicU64::new(19));
@@ -487,6 +517,10 @@ mod tests {
             verify_forward_us.clone(),
             projection_us.clone(),
             sampling_us.clone(),
+            draft_host_sync_count.clone(),
+            draft_host_sync_us.clone(),
+            verify_accept_host_sync_count.clone(),
+            verify_accept_host_sync_us.clone(),
             main_rollback_us.clone(),
             cache_commit_us.clone(),
             prefill_cache_commit_us.clone(),
@@ -510,6 +544,10 @@ mod tests {
         assert_eq!(snapshot.mtp.verify_forward_us, 31);
         assert_eq!(snapshot.mtp.projection_us, 37);
         assert_eq!(snapshot.mtp.sampling_us, 41);
+        assert_eq!(snapshot.mtp.draft_host_sync_count, 0);
+        assert_eq!(snapshot.mtp.draft_host_sync_us, 0);
+        assert_eq!(snapshot.mtp.verify_accept_host_sync_count, 23);
+        assert_eq!(snapshot.mtp.verify_accept_host_sync_us, 42);
         assert_eq!(snapshot.mtp.main_rollback_us, 43);
         assert_eq!(snapshot.mtp.cache_commit_us, 47);
         assert_eq!(snapshot.mtp.prefill_cache_commit_us, 19);
@@ -526,6 +564,8 @@ mod tests {
         verify_forward_us.store(43, Ordering::Relaxed);
         projection_us.store(47, Ordering::Relaxed);
         sampling_us.store(53, Ordering::Relaxed);
+        verify_accept_host_sync_count.store(37, Ordering::Relaxed);
+        verify_accept_host_sync_us.store(61, Ordering::Relaxed);
         main_rollback_us.store(59, Ordering::Relaxed);
         cache_commit_us.store(61, Ordering::Relaxed);
         prefill_cache_commit_us.store(29, Ordering::Relaxed);
@@ -544,6 +584,10 @@ mod tests {
             verify_forward_us,
             projection_us,
             sampling_us,
+            draft_host_sync_count,
+            draft_host_sync_us,
+            verify_accept_host_sync_count,
+            verify_accept_host_sync_us,
             main_rollback_us,
             cache_commit_us,
             prefill_cache_commit_us,
@@ -634,6 +678,10 @@ mod tests {
                 verify_forward_us: 0,
                 projection_us: 0,
                 sampling_us: 0,
+                draft_host_sync_count: 0,
+                draft_host_sync_us: 0,
+                verify_accept_host_sync_count: 0,
+                verify_accept_host_sync_us: 0,
                 main_rollback_us: 0,
                 cache_commit_us: 0,
                 prefill_cache_commit_us: 0,

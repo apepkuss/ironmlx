@@ -298,6 +298,10 @@ struct MtpRecordStats {
     verify_forward_us: u64,
     projection_us: u64,
     sampling_us: u64,
+    draft_host_sync_count: usize,
+    draft_host_sync_us: u64,
+    verify_accept_host_sync_count: usize,
+    verify_accept_host_sync_us: u64,
     main_rollback_us: u64,
     mtp_cache_commit_us: u64,
     mtp_prefill_cache_commit_us: u64,
@@ -418,6 +422,10 @@ impl From<MtpSpeculativeStats> for MtpRecordStats {
             verify_forward_us: stats.verify_forward_us,
             projection_us: stats.projection_us,
             sampling_us: stats.sampling_us,
+            draft_host_sync_count: stats.draft_host_sync_count,
+            draft_host_sync_us: stats.draft_host_sync_us,
+            verify_accept_host_sync_count: stats.verify_accept_host_sync_count,
+            verify_accept_host_sync_us: stats.verify_accept_host_sync_us,
             main_rollback_us: stats.main_rollback_us,
             mtp_cache_commit_us: stats.mtp_cache_commit_us,
             mtp_prefill_cache_commit_us: stats.mtp_prefill_cache_commit_us,
@@ -877,17 +885,17 @@ fn run_for_qwen_model<M>(
 where
     M: MtpSpeculativeModel + DenseVlMethods,
 {
-    if args.prompt_file.len() != 1 {
-        return Err(anyhow!(
-            "multiple --prompt-file values are only supported for Gemma4 scheduler drafter benchmarks"
-        ));
-    }
-    let prompt_file = primary_prompt_file(args);
-    let prompt_ids = read_prompt_ids(tokenizer, prompt_file)?;
+    let prompt_ids = read_scheduler_prompt_ids(tokenizer, args)?;
+    let primary_prompt_ids = prompt_ids
+        .first()
+        .expect("validated prompt list must be non-empty");
 
     let effective_cap_max = args.effective_cap_max.unwrap_or_else(|| {
         prompt_ids
-            .len()
+            .iter()
+            .map(Vec::len)
+            .max()
+            .unwrap_or(0)
             .saturating_add(args.max_tokens)
             .max(MIN_KV_CACHE_CAP_FOR_GPU_PERF as usize)
     });
@@ -959,11 +967,11 @@ where
                 .map(|dir| dir.display().to_string()),
             mtp_draft_tokens,
             mtp_trace_windows: args.mtp_trace_windows,
-            prompt_file: prompt_file.display().to_string(),
-            prompt_tokens: prompt_ids.len(),
+            prompt_file: primary_prompt_file(args).display().to_string(),
+            prompt_tokens: primary_prompt_ids.len(),
             scheduler_prompt_files: scheduler_prompt_files(args),
-            scheduler_prompt_tokens: vec![prompt_ids.len()],
-            scheduler_batch_width: 1,
+            scheduler_prompt_tokens: prompt_ids.iter().map(Vec::len).collect(),
+            scheduler_batch_width: prompt_ids.len(),
             max_tokens: args.max_tokens,
             prefill_chunk_size: args.prefill_chunk_size,
             kv_quant: args.kv_quant,
@@ -1165,7 +1173,7 @@ fn run_once_qwen<M>(
     model: &M,
     mtp: Option<&M::MtpHead>,
     tokenizer: &Tokenizer,
-    prompt_ids: &[u32],
+    prompt_ids: &[Vec<u32>],
     args: &Args,
     scheduler_config: SchedulerBenchConfig<'_>,
     mtp_draft_tokens: Option<usize>,
@@ -1173,13 +1181,27 @@ fn run_once_qwen<M>(
 where
     M: MtpSpeculativeModel + DenseVlMethods,
 {
+    let primary_prompt_ids = prompt_ids
+        .first()
+        .ok_or_else(|| anyhow!("Qwen benchmark requires at least one prompt"))?;
     match args.mode {
-        BenchMode::Gs => run_generation_stream(model, tokenizer, prompt_ids, args),
+        BenchMode::Gs => {
+            require_single_prompt(prompt_ids, args.mode)?;
+            run_generation_stream(model, tokenizer, primary_prompt_ids, args)
+        }
         BenchMode::Mtp => {
+            require_single_prompt(prompt_ids, args.mode)?;
             let mtp = mtp.ok_or_else(|| anyhow!("mtp-text mode requires a loaded MTP head"))?;
             let mtp_draft_tokens =
                 mtp_draft_tokens.ok_or_else(|| anyhow!("MTP run missing resolved draft tokens"))?;
-            run_mtp_generation_stream(model, mtp, tokenizer, prompt_ids, args, mtp_draft_tokens)
+            run_mtp_generation_stream(
+                model,
+                mtp,
+                tokenizer,
+                primary_prompt_ids,
+                args,
+                mtp_draft_tokens,
+            )
         }
         BenchMode::Scheduler => {
             if let Some(mtp) = mtp {
@@ -1195,7 +1217,8 @@ where
                     mtp_draft_tokens,
                 )
             } else {
-                run_scheduler(model, tokenizer, prompt_ids, args, scheduler_config)
+                require_single_prompt(prompt_ids, args.mode)?;
+                run_scheduler(model, tokenizer, primary_prompt_ids, args, scheduler_config)
             }
         }
     }
@@ -1483,7 +1506,7 @@ fn run_scheduler_mtp<M>(
     model: &M,
     mtp: &M::MtpHead,
     tokenizer: &Tokenizer,
-    prompt_ids: &[u32],
+    prompt_ids: &[Vec<u32>],
     args: &Args,
     scheduler_config: SchedulerBenchConfig<'_>,
     mtp_draft_tokens: usize,
@@ -1491,6 +1514,14 @@ fn run_scheduler_mtp<M>(
 where
     M: MtpSpeculativeModel + DenseVlMethods,
 {
+    if prompt_ids.is_empty() || prompt_ids.len() > args.b_max {
+        return Err(anyhow!(
+            "Qwen MTP scheduler batch width {} must be within 1..={}",
+            prompt_ids.len(),
+            args.b_max
+        ));
+    }
+
     let mut scheduler = Scheduler::<M>::new(
         args.b_max,
         scheduler_config.effective_cap_max,
@@ -1498,51 +1529,116 @@ where
     )
     .context("Scheduler::new")?;
     let active_kv_stats = configure_scheduler_features(&mut scheduler, scheduler_config.features)?;
-    let request = make_request(model, tokenizer, prompt_ids, args);
-    let cfg = MtpSpeculativeConfig::new(mtp_draft_tokens, request.sampler)?;
+    let cfg = MtpSpeculativeConfig::new(mtp_draft_tokens, Sampler::greedy())?;
     let started = Instant::now();
-    let _request_id = scheduler.admit(request)?;
+    let mut requests = Vec::with_capacity(prompt_ids.len());
+    let mut request_rows = HashMap::with_capacity(prompt_ids.len());
+
+    for (request_index, ids) in prompt_ids.iter().enumerate() {
+        let request_id = scheduler.admit(make_request(model, tokenizer, ids, args))?;
+        request_rows.insert(request_id, request_index);
+        requests.push(SchedulerRequestState {
+            request_index,
+            request_id,
+            prompt_file: args.prompt_file[request_index].display().to_string(),
+            ttft_ms: None,
+            e2e_ms: None,
+            generated_token_ids: Vec::with_capacity(args.max_tokens),
+            finish_reason: None,
+        });
+    }
+
     let first_events = scheduler.prefill_admitted_mtp_batch(model, mtp, cfg)?;
     refresh_active_kv_stats(&scheduler, active_kv_stats.as_ref());
-    let mut generated_token_ids: Vec<u32> = first_events.iter().map(|event| event.token).collect();
-    let mut finish_reason = first_events.first().and_then(|event| event.finish_reason);
-    let ttft_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let batch_ttft_ms = started.elapsed().as_secs_f64() * 1000.0;
+    record_scheduler_events(
+        &mut requests,
+        &request_rows,
+        &first_events,
+        batch_ttft_ms,
+        true,
+    )?;
+    if requests.iter().any(|request| request.ttft_ms.is_none()) {
+        return Err(anyhow!(
+            "Qwen MTP scheduler prefill did not emit one first event per admitted request"
+        ));
+    }
 
-    while finish_reason.is_none() && generated_token_ids.len() < args.max_tokens {
+    while requests
+        .iter()
+        .any(|request| request.finish_reason.is_none())
+    {
         let events = scheduler.step_mtp_batch(model, mtp)?;
         if events.is_empty() {
-            break;
+            return Err(anyhow!(
+                "Qwen MTP scheduler stopped before all benchmark requests finished"
+            ));
         }
         refresh_active_kv_stats(&scheduler, active_kv_stats.as_ref());
-        generated_token_ids.extend(events.iter().map(|event| event.token));
-        finish_reason = events.first().and_then(|event| event.finish_reason);
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+        record_scheduler_events(&mut requests, &request_rows, &events, elapsed_ms, false)?;
     }
     mlx::transforms::synchronize()?;
     refresh_active_kv_stats(&scheduler, active_kv_stats.as_ref());
-    let e2e_ms = started.elapsed().as_secs_f64() * 1000.0;
-    let generated_text = tokenizer
-        .decode(&generated_token_ids, true)
-        .unwrap_or_default();
+    let batch_e2e_ms = started.elapsed().as_secs_f64() * 1000.0;
     let mtp_stats = scheduler
         .mtp_stats()
         .ok_or_else(|| anyhow!("scheduler MTP run produced no MTP stats"))?
         .into();
-    Ok(make_record(RecordInput {
+
+    let scheduler_requests = requests
+        .into_iter()
+        .map(|request| {
+            let finish_reason = request.finish_reason;
+            let generated_tokens = request.generated_token_ids.len();
+            let generated_text = tokenizer
+                .decode(&request.generated_token_ids, true)
+                .unwrap_or_default();
+            SchedulerRequestRecord {
+                request_index: request.request_index,
+                prompt_file: request.prompt_file,
+                ttft_ms: request.ttft_ms.unwrap_or(batch_ttft_ms),
+                e2e_ms: request.e2e_ms.unwrap_or(batch_e2e_ms),
+                generated_tokens,
+                generated_token_ids: request.generated_token_ids,
+                generated_text,
+                finish_reason,
+                valid: finish_reason == Some("length") && generated_tokens >= args.max_tokens,
+            }
+        })
+        .collect::<Vec<_>>();
+    let representative = scheduler_requests
+        .first()
+        .ok_or_else(|| anyhow!("Qwen MTP scheduler batch produced no request records"))?;
+    let mut record = make_record(RecordInput {
         mode: args.mode,
-        ttft_ms,
-        e2e_ms,
+        ttft_ms: batch_ttft_ms,
+        e2e_ms: batch_e2e_ms,
         generated: GeneratedOutput {
-            token_ids: generated_token_ids,
-            text: generated_text,
+            token_ids: representative.generated_token_ids.clone(),
+            text: representative.generated_text.clone(),
         },
-        finish_reason,
+        finish_reason: representative.finish_reason,
         max_tokens: args.max_tokens,
         mtp_stats: Some(mtp_stats),
         mtp_trace: None,
         active_kv_stats: active_kv_stats
             .as_ref()
             .map(|stats| ActiveKvRecordStats::from(stats.snapshot())),
-    }))
+    });
+    let batch_decode_time_ms = (batch_e2e_ms - batch_ttft_ms).max(0.0);
+    let decoded_tokens = scheduler_requests
+        .iter()
+        .map(|request| request.generated_tokens.saturating_sub(1))
+        .sum::<usize>();
+    record.aggregate_generation_tps = if batch_decode_time_ms > 0.0 {
+        decoded_tokens as f64 / (batch_decode_time_ms / 1000.0)
+    } else {
+        0.0
+    };
+    record.valid = scheduler_requests.iter().all(|request| request.valid);
+    record.scheduler_requests = scheduler_requests;
+    Ok(record)
 }
 
 fn run_scheduler_gemma4_drafter(
@@ -2451,6 +2547,10 @@ mod tests {
                 verify_forward_us: 0,
                 projection_us: 0,
                 sampling_us: 0,
+                draft_host_sync_count: 0,
+                draft_host_sync_us: 0,
+                verify_accept_host_sync_count: 1,
+                verify_accept_host_sync_us: 0,
                 main_rollback_us: 0,
                 mtp_cache_commit_us: 0,
                 mtp_prefill_cache_commit_us: 0,

@@ -243,6 +243,14 @@ pub struct MtpSpeculativeStats {
     pub projection_us: u64,
     /// Microseconds spent sampling logits.
     pub sampling_us: u64,
+    /// Host synchronizations performed while constructing neural draft chains.
+    pub draft_host_sync_count: usize,
+    /// Microseconds blocked on host synchronization while constructing draft chains.
+    pub draft_host_sync_us: u64,
+    /// Host synchronizations performed to resolve a verified speculative window.
+    pub verify_accept_host_sync_count: usize,
+    /// Microseconds blocked on the compact verify-acceptance result.
+    pub verify_accept_host_sync_us: u64,
     /// Microseconds spent trimming, restoring, or replaying main KV after mismatch.
     pub main_rollback_us: u64,
     /// Microseconds spent committing accepted tokens into the MTP KV cache.
@@ -334,6 +342,18 @@ impl MtpSpeculativeStats {
                 .saturating_sub(before.verify_forward_us),
             projection_us: self.projection_us.saturating_sub(before.projection_us),
             sampling_us: self.sampling_us.saturating_sub(before.sampling_us),
+            draft_host_sync_count: self
+                .draft_host_sync_count
+                .saturating_sub(before.draft_host_sync_count),
+            draft_host_sync_us: self
+                .draft_host_sync_us
+                .saturating_sub(before.draft_host_sync_us),
+            verify_accept_host_sync_count: self
+                .verify_accept_host_sync_count
+                .saturating_sub(before.verify_accept_host_sync_count),
+            verify_accept_host_sync_us: self
+                .verify_accept_host_sync_us
+                .saturating_sub(before.verify_accept_host_sync_us),
             main_rollback_us: self
                 .main_rollback_us
                 .saturating_sub(before.main_rollback_us),
@@ -458,6 +478,18 @@ impl MtpSpeculativeStats {
             .saturating_add(other.verify_forward_us);
         self.projection_us = self.projection_us.saturating_add(other.projection_us);
         self.sampling_us = self.sampling_us.saturating_add(other.sampling_us);
+        self.draft_host_sync_count = self
+            .draft_host_sync_count
+            .saturating_add(other.draft_host_sync_count);
+        self.draft_host_sync_us = self
+            .draft_host_sync_us
+            .saturating_add(other.draft_host_sync_us);
+        self.verify_accept_host_sync_count = self
+            .verify_accept_host_sync_count
+            .saturating_add(other.verify_accept_host_sync_count);
+        self.verify_accept_host_sync_us = self
+            .verify_accept_host_sync_us
+            .saturating_add(other.verify_accept_host_sync_us);
         self.main_rollback_us = self.main_rollback_us.saturating_add(other.main_rollback_us);
         self.mtp_cache_commit_us = self
             .mtp_cache_commit_us
@@ -973,6 +1005,7 @@ pub(crate) struct MtpDraftPolicyWindow {
     pub verify_forward_us: u64,
     pub projection_us: u64,
     pub sampling_us: u64,
+    pub verify_accept_host_sync_us: u64,
     pub main_rollback_us: u64,
     pub mtp_cache_commit_us: u64,
     pub mtp_prefill_cache_commit_us: u64,
@@ -993,6 +1026,7 @@ impl MtpDraftPolicyWindow {
             verify_forward_us: delta.verify_forward_us,
             projection_us: delta.projection_us,
             sampling_us: delta.sampling_us,
+            verify_accept_host_sync_us: delta.verify_accept_host_sync_us,
             main_rollback_us: delta.main_rollback_us,
             mtp_cache_commit_us: delta.mtp_cache_commit_us,
             mtp_prefill_cache_commit_us: delta.mtp_prefill_cache_commit_us,
@@ -1005,6 +1039,7 @@ impl MtpDraftPolicyWindow {
         self.draft_forward_us
             .saturating_add(self.projection_us)
             .saturating_add(self.sampling_us)
+            .saturating_add(self.verify_accept_host_sync_us)
             .saturating_add(self.main_rollback_us)
             .saturating_add(self.mtp_decode_cache_commit_us)
             .saturating_add(self.mtp_cache_restore_us)
@@ -2622,11 +2657,40 @@ mod tests {
                 verify_forward_us: 500,
                 projection_us: 600,
                 sampling_us: 800,
+                verify_accept_host_sync_us: 400,
                 main_rollback_us: 200,
                 mtp_cache_commit_us: 900,
                 mtp_prefill_cache_commit_us: 0,
                 mtp_decode_cache_commit_us: 900,
                 mtp_cache_restore_us: 300,
+            },
+            &stats,
+        );
+
+        assert_eq!(policy.current_budget(), 1);
+        assert!(change.reduced);
+    }
+
+    #[test]
+    fn mtp_cost_aware_policy_accounts_for_acceptance_host_sync() {
+        let mut policy = MtpDraftPolicyState::new(4);
+        let mut stats = MtpSpeculativeStats::default();
+        stats.record_window_acceptance(4, 0);
+
+        let change = policy.observe_window(
+            MtpDraftPolicyWindow {
+                attempted_draft_tokens: 4,
+                accepted_draft_tokens: 0,
+                draft_forward_us: 0,
+                verify_forward_us: 500,
+                projection_us: 0,
+                sampling_us: 0,
+                verify_accept_host_sync_us: 2_000,
+                main_rollback_us: 0,
+                mtp_cache_commit_us: 0,
+                mtp_prefill_cache_commit_us: 0,
+                mtp_decode_cache_commit_us: 0,
+                mtp_cache_restore_us: 0,
             },
             &stats,
         );
@@ -2649,6 +2713,7 @@ mod tests {
                 verify_forward_us: 500,
                 projection_us: 600,
                 sampling_us: 800,
+                verify_accept_host_sync_us: 400,
                 main_rollback_us: 200,
                 mtp_cache_commit_us: 900,
                 mtp_prefill_cache_commit_us: 0,
@@ -2669,6 +2734,7 @@ mod tests {
                     verify_forward_us: 1_000,
                     projection_us: 20,
                     sampling_us: 20,
+                    verify_accept_host_sync_us: 10,
                     main_rollback_us: 0,
                     mtp_cache_commit_us: 30,
                     mtp_prefill_cache_commit_us: 0,
@@ -2699,6 +2765,7 @@ mod tests {
                 verify_forward_us: 1_000,
                 projection_us: 20,
                 sampling_us: 20,
+                verify_accept_host_sync_us: 10,
                 main_rollback_us: 0,
                 mtp_cache_commit_us: 30,
                 mtp_prefill_cache_commit_us: 0,
