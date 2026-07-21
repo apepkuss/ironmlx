@@ -215,9 +215,12 @@ struct RollingAdmissionPolicy {
 
 impl RollingAdmissionPolicy {
     fn record_admission_work(&mut self) {
-        self.decode_steps_due_after_admission = self
-            .decode_steps_due_after_admission
-            .max(ROLLING_DECODE_STEPS_AFTER_ADMISSION_WORK);
+        self.record_admission_work_with_decode_steps(ROLLING_DECODE_STEPS_AFTER_ADMISSION_WORK);
+    }
+
+    fn record_admission_work_with_decode_steps(&mut self, decode_steps: usize) {
+        self.decode_steps_due_after_admission =
+            self.decode_steps_due_after_admission.max(decode_steps);
     }
 
     fn record_decode_step(&mut self) {
@@ -236,6 +239,14 @@ impl RollingAdmissionPolicy {
             && has_decodable_rows
             && has_pending_admission_work
     }
+}
+
+fn decode_steps_after_mid_admit_chunk(chunk_tokens: usize, cadence_chunk_cap: usize) -> usize {
+    let cadence_chunk_cap = cadence_chunk_cap.max(1);
+    chunk_tokens
+        .max(1)
+        .div_ceil(cadence_chunk_cap)
+        .saturating_mul(ROLLING_DECODE_STEPS_AFTER_ADMISSION_WORK)
 }
 
 fn scheduler_has_decodable_rows<M: Model>(sched: &Scheduler<M>) -> bool {
@@ -1843,23 +1854,27 @@ fn driver_loop<M, A>(
                                 sched.active_count(),
                                 b_max,
                                 adaptive_policy,
-                            ) && start_mid_admit_one_chunk(
-                                pending_cmd.take().expect("pending command present"),
-                                &mut in_flight_mid_admit,
-                                &mut sched,
-                                &mut event_txs,
-                                &admit_count,
-                                &model,
-                                &mut mtp_mode,
-                                &mtp_counters,
-                                MidAdmitProfileContext {
-                                    source: RollingMidAdmitSource::Direct,
-                                    queue_wait_ms: None,
-                                    queue_len: admission_queue.len(),
-                                },
-                                decode_cadence_mid_chunk_cap,
                             ) {
-                                admission_policy.record_admission_work();
+                                let decode_steps = start_mid_admit_one_chunk(
+                                    pending_cmd.take().expect("pending command present"),
+                                    &mut in_flight_mid_admit,
+                                    &mut sched,
+                                    &mut event_txs,
+                                    &admit_count,
+                                    &model,
+                                    &mut mtp_mode,
+                                    &mtp_counters,
+                                    MidAdmitProfileContext {
+                                        source: RollingMidAdmitSource::Direct,
+                                        queue_wait_ms: None,
+                                        queue_len: admission_queue.len(),
+                                    },
+                                    decode_cadence_mid_chunk_cap,
+                                );
+                                if decode_steps > 0 {
+                                    admission_policy
+                                        .record_admission_work_with_decode_steps(decode_steps);
+                                }
                             }
                         }
                         if let Some(cmd) = pending_cmd {
@@ -1872,27 +1887,30 @@ fn driver_loop<M, A>(
                                 &queue_rejected,
                             );
                         }
-                    } else if start_mid_admit_one_chunk(
-                        cmd,
-                        &mut in_flight_mid_admit,
-                        &mut sched,
-                        &mut event_txs,
-                        &admit_count,
-                        &model,
-                        &mut mtp_mode,
-                        &mtp_counters,
-                        MidAdmitProfileContext {
-                            source: RollingMidAdmitSource::Direct,
-                            queue_wait_ms: None,
-                            queue_len: admission_queue.len(),
-                        },
-                        decode_cadence_mid_chunk_cap,
-                    ) {
-                        admission_policy.record_admission_work();
+                    } else {
+                        let decode_steps = start_mid_admit_one_chunk(
+                            cmd,
+                            &mut in_flight_mid_admit,
+                            &mut sched,
+                            &mut event_txs,
+                            &admit_count,
+                            &model,
+                            &mut mtp_mode,
+                            &mtp_counters,
+                            MidAdmitProfileContext {
+                                source: RollingMidAdmitSource::Direct,
+                                queue_wait_ms: None,
+                                queue_len: admission_queue.len(),
+                            },
+                            decode_cadence_mid_chunk_cap,
+                        );
+                        if decode_steps > 0 {
+                            admission_policy.record_admission_work_with_decode_steps(decode_steps);
+                        }
                     }
                 }
                 RollingEvent::AdvanceMidAdmit => {
-                    if advance_mid_admit_one_chunk(
+                    let decode_steps = advance_mid_admit_one_chunk(
                         &mut in_flight_mid_admit,
                         &mut sched,
                         &mut event_txs,
@@ -1902,8 +1920,9 @@ fn driver_loop<M, A>(
                         &mtp_counters,
                         admission_queue.len(),
                         decode_cadence_mid_chunk_cap,
-                    ) {
-                        admission_policy.record_admission_work();
+                    );
+                    if decode_steps > 0 {
+                        admission_policy.record_admission_work_with_decode_steps(decode_steps);
                     }
                 }
                 RollingEvent::Step => {
@@ -1967,9 +1986,8 @@ fn driver_loop<M, A>(
                                     &active_kv_stats,
                                 );
                             }
-                            if mtp_mode.allow_rolling_mid_admit()
-                                && in_flight_mid_admit.is_none()
-                                && drain_admission_queue(
+                            if mtp_mode.allow_rolling_mid_admit() && in_flight_mid_admit.is_none() {
+                                let decode_steps = drain_admission_queue(
                                     &mut admission_queue,
                                     &mut in_flight_mid_admit,
                                     &mut sched,
@@ -1981,9 +1999,11 @@ fn driver_loop<M, A>(
                                     b_max,
                                     decode_cadence_mid_chunk_cap,
                                     adaptive_policy,
-                                )
-                            {
-                                admission_policy.record_admission_work();
+                                );
+                                if decode_steps > 0 {
+                                    admission_policy
+                                        .record_admission_work_with_decode_steps(decode_steps);
+                                }
                             }
                         }
                         Err(e) => {
@@ -2331,17 +2351,17 @@ fn start_mid_admit_one_chunk<M, A>(
     mtp_counters: &SchedulerActorMtpCounters,
     profile_context: MidAdmitProfileContext,
     decode_cadence_mid_chunk_cap: usize,
-) -> bool
+) -> usize
 where
     M: Model + DenseVlMethods + Send + 'static,
     A: SchedulerActorMtpMode<M>,
 {
     if in_flight_mid_admit.is_some() {
-        return false;
+        return 0;
     }
     let Some(handle) = begin_mid_admit(cmd, sched, event_txs, model, mtp_mode, profile_context)
     else {
-        return false;
+        return 0;
     };
     *in_flight_mid_admit = Some(handle);
     advance_mid_admit_one_chunk(
@@ -2368,17 +2388,18 @@ fn advance_mid_admit_one_chunk<M, A>(
     mtp_counters: &SchedulerActorMtpCounters,
     queue_len: usize,
     decode_cadence_mid_chunk_cap: usize,
-) -> bool
+) -> usize
 where
     M: Model + DenseVlMethods + Send + 'static,
     A: SchedulerActorMtpMode<M>,
 {
     let Some(mut handle) = in_flight_mid_admit.take() else {
-        return false;
+        return 0;
     };
     let id = A::mid_admit_request_id(&handle);
     let active_count_before_chunk = sched.active_count();
     let requested_chunk_size = A::mid_admit_chunk_size(&handle);
+    let chunk_start_before = A::mid_admit_chunk_start(&handle);
     let effective_chunk_size = cadence_protected_mid_chunk_size(
         requested_chunk_size,
         active_count_before_chunk,
@@ -2388,7 +2409,7 @@ where
     A::set_mid_admit_chunk_size(&mut handle, effective_chunk_size);
     let chunk_profile = rolling_profile_enabled().then(|| {
         (
-            A::mid_admit_chunk_start(&handle),
+            chunk_start_before,
             A::mid_admit_prompt_len(&handle),
             effective_chunk_size,
             active_count_before_chunk,
@@ -2426,9 +2447,14 @@ where
             tracing::error!("[SchedulerActor] admit_mid_chunk error: {e:?}");
             let _ = sched.evict(id);
             event_txs.remove(&id);
-            return true;
+            return ROLLING_DECODE_STEPS_AFTER_ADMISSION_WORK;
         }
     };
+    let completed_chunk_tokens =
+        usize::try_from(A::mid_admit_chunk_start(&handle).saturating_sub(chunk_start_before))
+            .unwrap_or(0);
+    let decode_steps =
+        decode_steps_after_mid_admit_chunk(completed_chunk_tokens, decode_cadence_mid_chunk_cap);
     if let Some((chunk_start, prompt_len, chunk_size, active_count, chunk_timer)) = chunk_profile {
         let chunk_end_time = Instant::now();
         let chunk_end = A::mid_admit_chunk_start(&handle);
@@ -2450,7 +2476,7 @@ where
 
     if !is_last {
         *in_flight_mid_admit = Some(handle);
-        return true;
+        return decode_steps;
     }
 
     let finalize_profile =
@@ -2491,7 +2517,7 @@ where
             event_txs.remove(&id);
         }
     }
-    true
+    decode_steps
 }
 
 /// Push a pending admit into the queue if there's capacity; otherwise reply
@@ -2668,24 +2694,24 @@ fn drain_admission_queue<M, A>(
     b_max: usize,
     decode_cadence_mid_chunk_cap: usize,
     adaptive_policy: AdaptiveAdmissionPolicy,
-) -> bool
+) -> usize
 where
     M: Model + DenseVlMethods + Send + 'static,
     A: SchedulerActorMtpMode<M>,
 {
     // admit_mid is only legal in Decoding phase.
     if sched.phase() != Phase::Decoding {
-        return false;
+        return 0;
     }
     if sched.active_count() == 0 {
-        return false;
+        return 0;
     }
     if in_flight_mid_admit.is_some() {
-        return false;
+        return 0;
     }
     while sched.active_count() < b_max {
         let Some(pending) = queue.front() else {
-            return false;
+            return 0;
         };
         if pending.reply_tx.is_closed() {
             queue.pop_front();
@@ -2698,7 +2724,7 @@ where
             b_max,
             adaptive_policy,
         ) {
-            return false;
+            return 0;
         }
         let pending = queue
             .pop_front()
@@ -2722,7 +2748,7 @@ where
             request: pending.request,
             reply_tx: pending.reply_tx,
         };
-        let did_admission_work = start_mid_admit_one_chunk(
+        let decode_steps = start_mid_admit_one_chunk(
             cmd,
             in_flight_mid_admit,
             sched,
@@ -2740,11 +2766,11 @@ where
         );
         // Re-check phase after each mid-admit — if admit_mid itself
         // exhausted remaining rows and transitioned to Finished, stop.
-        if did_admission_work || sched.phase() != Phase::Decoding {
-            return did_admission_work;
+        if decode_steps > 0 || sched.phase() != Phase::Decoding {
+            return decode_steps;
         }
     }
-    false
+    0
 }
 
 fn route_event(ev: StepEvent, event_txs: &HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>) {
@@ -3996,6 +4022,24 @@ mod tests {
     }
 
     #[test]
+    fn rolling_policy_scales_decode_credit_with_mid_admit_chunk_work() {
+        assert_eq!(decode_steps_after_mid_admit_chunk(256, 256), 4);
+        assert_eq!(decode_steps_after_mid_admit_chunk(257, 256), 8);
+        assert_eq!(decode_steps_after_mid_admit_chunk(2048, 256), 32);
+
+        let mut policy = RollingAdmissionPolicy::default();
+        policy
+            .record_admission_work_with_decode_steps(decode_steps_after_mid_admit_chunk(2048, 256));
+        for _ in 0..31 {
+            assert!(policy.should_force_decode(Phase::Decoding, true, true));
+            policy.record_decode_step();
+        }
+        assert!(policy.should_force_decode(Phase::Decoding, true, true));
+        policy.record_decode_step();
+        assert!(!policy.should_force_decode(Phase::Decoding, true, true));
+    }
+
+    #[test]
     fn rolling_policy_does_not_force_decode_without_active_decoding_rows() {
         let mut policy = RollingAdmissionPolicy::default();
 
@@ -4493,7 +4537,7 @@ mod tests {
             AdaptiveAdmissionPolicy::disabled(),
         );
 
-        assert!(did_admit, "expected one queued request to be admitted");
+        assert!(did_admit > 0, "expected one queued request to be admitted");
         assert_eq!(
             queue.len(),
             2,
@@ -4550,7 +4594,7 @@ mod tests {
         );
 
         assert!(
-            !did_admit,
+            did_admit == 0,
             "active rows already reached the model's rolling prefill batch limit"
         );
         assert_eq!(
@@ -4612,7 +4656,7 @@ mod tests {
         );
 
         assert!(
-            did_admit,
+            did_admit > 0,
             "chunked queued requests may start prefill under decode-cadence protection"
         );
         assert_eq!(queue.len(), 0);
@@ -4677,7 +4721,7 @@ mod tests {
             AdaptiveAdmissionPolicy::disabled(),
         );
 
-        assert!(did_admit, "chunked queued request should start");
+        assert!(did_admit > 0, "chunked queued request should start");
         let handle = in_flight_mid_admit
             .as_ref()
             .expect("chunked mid-admit should still be in flight");

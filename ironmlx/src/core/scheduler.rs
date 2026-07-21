@@ -1017,18 +1017,32 @@ fn gemma4_verify_needs_batch_stable_qmm(
     kv_bits == Some(TurboQuantKVBits::K3V4) && batch_width > 1 && verify_len > 2
 }
 
-// Long K3V4 cap 2 remains numerically sensitive to verify segment shape in
-// production chat prompts. Keep every long-context scheduler on cap 1 until
-// cap 2 is both output-stable and faster across the HTTP workload matrix.
-const GEMMA4_K3V4_CAP2_MAX_CONTEXT_TOKENS: usize = 1024;
+const GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS: usize = 1024;
+
+fn gemma4_drafter_mid_admit_chunk_cap(
+    kv_bits: Option<TurboQuantKVBits>,
+    context_tokens: usize,
+    prefill_chunk_size: i32,
+    decode_cadence_mid_chunk_cap: usize,
+) -> usize {
+    if kv_bits == Some(TurboQuantKVBits::K3V4)
+        && context_tokens > GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS
+    {
+        decode_cadence_mid_chunk_cap.max(prefill_chunk_size.max(1) as usize)
+    } else {
+        decode_cadence_mid_chunk_cap
+    }
+}
 
 fn gemma4_drafter_effective_budget_for_context(
     kv_bits: Option<TurboQuantKVBits>,
     draft_budget: usize,
     context_tokens: usize,
+    scheduler_batch_capacity: usize,
 ) -> usize {
     if kv_bits == Some(TurboQuantKVBits::K3V4)
-        && context_tokens > GEMMA4_K3V4_CAP2_MAX_CONTEXT_TOKENS
+        && context_tokens > GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS
+        && scheduler_batch_capacity > 1
     {
         draft_budget.min(1)
     } else {
@@ -1041,11 +1055,12 @@ fn gemma4_k3v4_long_verify_needs_stable_attention(
     context_tokens: usize,
     verify_len: usize,
     scheduler_batch_capacity: usize,
+    active_batch_width: usize,
 ) -> bool {
     kv_bits == Some(TurboQuantKVBits::K3V4)
-        && context_tokens > GEMMA4_K3V4_CAP2_MAX_CONTEXT_TOKENS
-        && verify_len > 2
-        && scheduler_batch_capacity == 1
+        && context_tokens > GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS
+        && verify_len > 1
+        && (scheduler_batch_capacity == 1 || active_batch_width > 1)
 }
 
 fn build_gemma4_drafter_batched_verify_input(
@@ -9414,6 +9429,12 @@ impl Scheduler<crate::models::Gemma4Model> {
         } else {
             prefill_chunk_size.max(1)
         };
+        let decode_cadence_mid_chunk_cap = gemma4_drafter_mid_admit_chunk_cap(
+            turboquant_bits,
+            prompt_len_usz,
+            chunk_size,
+            decode_cadence_mid_chunk_cap,
+        );
 
         Ok(Gemma4DrafterAdmitMidHandle {
             request_id: id,
@@ -10431,6 +10452,7 @@ impl Scheduler<crate::models::Gemma4Model> {
                 kv_bits,
                 cfg.max_draft_tokens,
                 history.len(),
+                self.b_max,
             );
             let draft_budget = row_state
                 .adaptive_draft_tokens
@@ -10604,6 +10626,7 @@ impl Scheduler<crate::models::Gemma4Model> {
                 .unwrap_or(0),
             max_verify_len,
             self.b_max,
+            active_rows.len(),
         );
         let stable_k3v4_verify = gemma4_verify_needs_batch_stable_qmm(
             self.kv_cache_turboquant_bits_for_rows(rows_to_fill)?,
@@ -10930,6 +10953,7 @@ impl Scheduler<crate::models::Gemma4Model> {
             self.kv_cache_turboquant_bits_for_rows(&[row_idx])?,
             cfg.max_draft_tokens,
             context_tokens,
+            scheduler_batch_capacity,
         );
         let draft_budget = row_state
             .adaptive_draft_tokens
@@ -10968,6 +10992,7 @@ impl Scheduler<crate::models::Gemma4Model> {
                 context_tokens,
                 verify_input.len(),
                 scheduler_batch_capacity,
+                1,
             );
             let _stable_attention =
                 stable_attention.then(crate::nn::gemma4_verify_attention::scope);
@@ -11287,65 +11312,109 @@ mod tests {
     }
 
     #[test]
-    fn gemma4_k3v4_long_context_clamps_cap2_for_every_scheduler_capacity() {
+    fn gemma4_k3v4_long_context_stabilizes_every_multi_token_b1_verify() {
         assert_eq!(
             gemma4_drafter_effective_budget_for_context(
                 Some(TurboQuantKVBits::K3V4),
                 2,
-                GEMMA4_K3V4_CAP2_MAX_CONTEXT_TOKENS,
-            ),
-            2
-        );
-        assert_eq!(
-            gemma4_drafter_effective_budget_for_context(
-                Some(TurboQuantKVBits::K3V4),
-                4,
-                GEMMA4_K3V4_CAP2_MAX_CONTEXT_TOKENS + 1,
-            ),
-            1
-        );
-        assert_eq!(
-            gemma4_drafter_effective_budget_for_context(
-                Some(TurboQuantKVBits::K3V4),
-                2,
-                GEMMA4_K3V4_CAP2_MAX_CONTEXT_TOKENS + 1,
-            ),
-            1
-        );
-        assert_eq!(
-            gemma4_drafter_effective_budget_for_context(
-                Some(TurboQuantKVBits::K4V4),
-                2,
-                GEMMA4_K3V4_CAP2_MAX_CONTEXT_TOKENS + 1,
-            ),
-            2
-        );
-        assert_eq!(
-            gemma4_drafter_effective_budget_for_context(
-                Some(TurboQuantKVBits::K3V4),
+                GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
                 1,
-                GEMMA4_K3V4_CAP2_MAX_CONTEXT_TOKENS + 1,
+            ),
+            2
+        );
+        assert_eq!(
+            gemma4_drafter_effective_budget_for_context(
+                Some(TurboQuantKVBits::K3V4),
+                2,
+                GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
+                4,
             ),
             1
+        );
+        assert_eq!(
+            gemma4_drafter_effective_budget_for_context(
+                Some(TurboQuantKVBits::K3V4),
+                2,
+                GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS,
+                4,
+            ),
+            2
         );
         assert!(gemma4_k3v4_long_verify_needs_stable_attention(
             Some(TurboQuantKVBits::K3V4),
-            GEMMA4_K3V4_CAP2_MAX_CONTEXT_TOKENS + 1,
+            GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
             3,
             1,
+            1,
         ));
-        assert!(!gemma4_k3v4_long_verify_needs_stable_attention(
+        assert!(gemma4_k3v4_long_verify_needs_stable_attention(
             Some(TurboQuantKVBits::K3V4),
-            GEMMA4_K3V4_CAP2_MAX_CONTEXT_TOKENS + 1,
+            GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
             2,
-            1,
-        ));
-        assert!(!gemma4_k3v4_long_verify_needs_stable_attention(
-            Some(TurboQuantKVBits::K3V4),
-            GEMMA4_K3V4_CAP2_MAX_CONTEXT_TOKENS + 1,
-            3,
+            4,
             4,
         ));
+        assert!(!gemma4_k3v4_long_verify_needs_stable_attention(
+            Some(TurboQuantKVBits::K3V4),
+            GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
+            1,
+            4,
+            4,
+        ));
+        assert!(!gemma4_k3v4_long_verify_needs_stable_attention(
+            Some(TurboQuantKVBits::K3V4),
+            GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
+            2,
+            4,
+            1,
+        ));
+        assert!(!gemma4_k3v4_long_verify_needs_stable_attention(
+            Some(TurboQuantKVBits::K4V4),
+            GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
+            3,
+            4,
+            4,
+        ));
+    }
+
+    #[test]
+    fn gemma4_k3v4_long_mid_admit_preserves_prefill_chunk_shape() {
+        assert_eq!(
+            gemma4_drafter_mid_admit_chunk_cap(
+                Some(TurboQuantKVBits::K3V4),
+                GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
+                2048,
+                256,
+            ),
+            2048
+        );
+        assert_eq!(
+            gemma4_drafter_mid_admit_chunk_cap(
+                Some(TurboQuantKVBits::K3V4),
+                GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS,
+                2048,
+                256,
+            ),
+            256
+        );
+        assert_eq!(
+            gemma4_drafter_mid_admit_chunk_cap(
+                Some(TurboQuantKVBits::K4V4),
+                GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
+                2048,
+                256,
+            ),
+            256
+        );
+        assert_eq!(
+            gemma4_drafter_mid_admit_chunk_cap(
+                Some(TurboQuantKVBits::K3V4),
+                GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
+                2048,
+                4096,
+            ),
+            4096
+        );
     }
 
     #[test]

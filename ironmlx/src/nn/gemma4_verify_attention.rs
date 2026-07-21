@@ -1,8 +1,8 @@
 //! Scoped routing for segment-stable Gemma4 speculative verification.
 //!
-//! The scheduler arms this only for long-context K3V4 verification in a
-//! single-request scheduler. Full-attention cache owners isolate query rows;
-//! sliding cache owners use the packed multi-row attention kernel.
+//! The scheduler arms this for long-context K3V4 verification. Full-attention
+//! cache owners isolate query rows; sliding cache owners isolate each row's
+//! absolute rolling window while retaining packed query execution per row.
 
 use std::cell::Cell;
 

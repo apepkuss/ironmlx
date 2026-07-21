@@ -349,10 +349,16 @@ impl Gemma4Attention {
         let dims = dims_borrow.as_slice();
         let (batch, seq) = (dims[0], dims[1]);
         let reuses_shared_kv = shared_kv.is_some();
-        let query_isolated = crate::nn::gemma4_verify_attention::is_armed()
-            && seq > 1
-            && self.layer_kind == Gemma4LayerKind::Full
-            && !reuses_shared_kv;
+        let stable_verify_attention = crate::nn::gemma4_verify_attention::is_armed() && seq > 1;
+        let segment_stable_verify = stable_verify_attention && batch == 1;
+        let batch_stable_verify = stable_verify_attention && batch > 1;
+        let query_isolated =
+            segment_stable_verify && self.layer_kind == Gemma4LayerKind::Full && !reuses_shared_kv;
+        let segment_stable_sliding =
+            segment_stable_verify && self.layer_kind == Gemma4LayerKind::Sliding;
+        let batch_stable_sliding =
+            batch_stable_verify && self.layer_kind == Gemma4LayerKind::Sliding;
+        let batch_stable_full = batch_stable_verify && self.layer_kind == Gemma4LayerKind::Full;
         let single_row_decode =
             cache.as_ref().is_some() && batch == 1 && seq == 1 && per_row_lens.is_none();
 
@@ -465,7 +471,10 @@ impl Gemma4Attention {
                         };
                         let maybe_cached_out = if c.paged().is_some() {
                             c.try_update_and_attend_decode_on(&q, &k, &v, lens, 1.0, mask, target)?
-                        } else if crate::nn::gemma4_verify_attention::is_armed() && !query_isolated
+                        } else if stable_verify_attention
+                            && !query_isolated
+                            && !segment_stable_sliding
+                            && !batch_stable_verify
                         {
                             c.try_update_and_attend_multirow_on(
                                 &q, &k, &v, lens, 1.0, mask, target,
@@ -513,14 +522,47 @@ impl Gemma4Attention {
             t0,
             profile,
         )?;
-        let (kv, sliced_mask) = self.sliding_attention_view_on(&kv, mask, seq, target)?;
+        let (kv, sliced_mask) = if segment_stable_sliding || batch_stable_sliding {
+            (kv, None)
+        } else {
+            self.sliding_attention_view_on(&kv, mask, seq, target)?
+        };
         let mask = sliced_mask.as_ref().or(mask);
 
         let t0 = Instant::now();
         let out = if let Some(out) = cached_attention_out {
             out
+        } else if segment_stable_sliding {
+            segment_stable_sliding_attention_on(
+                &q,
+                &kv,
+                per_row_lens,
+                offsets.values(),
+                self.sliding_window,
+                target,
+            )?
+        } else if batch_stable_sliding {
+            row_isolated_causal_attention_on(
+                &q,
+                &kv,
+                mask,
+                per_row_lens,
+                offsets.values(),
+                Some(self.sliding_window),
+                target,
+            )?
         } else if query_isolated {
             query_isolated_full_attention_on(&q, &kv, per_row_lens, offsets.values(), target)?
+        } else if batch_stable_full {
+            row_isolated_causal_attention_on(
+                &q,
+                &kv,
+                mask,
+                per_row_lens,
+                offsets.values(),
+                None,
+                target,
+            )?
         } else {
             match mask {
                 Some(m) => mlx::fast::scaled_dot_product_attention_on(
@@ -695,6 +737,266 @@ fn query_isolated_full_attention_on(
     Ok(mlx::ops::shape::concatenate_on(&batch_refs, 0, target)?)
 }
 
+fn segment_stable_sliding_attention_on(
+    queries: &Array,
+    kv: &SharedKv,
+    per_row_lens: Option<&[i32]>,
+    offsets: &[i32],
+    sliding_window: i32,
+    target: StreamOrDevice,
+) -> Result<Array> {
+    let q_shape = queries.shape();
+    let q_dims = q_shape.as_slice();
+    let (batch, heads, query_len, head_dim) = (q_dims[0], q_dims[1], q_dims[2], q_dims[3]);
+    if batch != 1 || sliding_window <= 0 {
+        return Err(anyhow!(
+            "Gemma4 segment-stable sliding attention requires B=1 and a positive window, got B={batch}, window={sliding_window}"
+        ));
+    }
+    let valid_query_len = match per_row_lens {
+        Some([len]) => *len,
+        Some(lens) => {
+            return Err(anyhow!(
+                "Gemma4 segment-stable sliding attention expected one row length, got {}",
+                lens.len()
+            ));
+        }
+        None => query_len,
+    };
+    if valid_query_len <= 0 || valid_query_len > query_len || offsets.len() != 1 {
+        return Err(anyhow!(
+            "Gemma4 segment-stable sliding attention invalid row length {valid_query_len}, query length {query_len}, or offset count {}",
+            offsets.len()
+        ));
+    }
+    let kv_dims = kv.keys.shape();
+    let kv_dims = kv_dims.as_slice();
+    let kv_len = kv_dims[2];
+
+    let mut query_rows = Vec::with_capacity(valid_query_len as usize);
+    let mut key_windows = Vec::with_capacity(valid_query_len as usize);
+    let mut value_windows = Vec::with_capacity(valid_query_len as usize);
+    for query_idx in 0..valid_query_len {
+        let (key_start, key_end) =
+            stable_sliding_query_window(kv_len, offsets[0], query_idx, sliding_window)?;
+        query_rows.push(mlx::ops::indexing::slice_strided_on(
+            queries,
+            &[0_i32, 0, query_idx, 0][..],
+            &[1_i32, heads, query_idx + 1, head_dim][..],
+            &[1_i32, 1, 1, 1][..],
+            target,
+        )?);
+        key_windows.push(mlx::ops::indexing::slice_strided_on(
+            &kv.keys,
+            &[0_i32, 0, key_start, 0][..],
+            &[1_i32, kv_dims[1], key_end, head_dim][..],
+            &[1_i32, 1, 1, 1][..],
+            target,
+        )?);
+        value_windows.push(mlx::ops::indexing::slice_strided_on(
+            &kv.values,
+            &[0_i32, 0, key_start, 0][..],
+            &[
+                1_i32,
+                kv.values.shape().as_slice()[1],
+                key_end,
+                kv.values.shape().as_slice()[3],
+            ][..],
+            &[1_i32, 1, 1, 1][..],
+            target,
+        )?);
+    }
+    let query_refs = query_rows.iter().collect::<Vec<_>>();
+    let key_refs = key_windows.iter().collect::<Vec<_>>();
+    let value_refs = value_windows.iter().collect::<Vec<_>>();
+    let packed_queries = mlx::ops::shape::concatenate_on(&query_refs, 0, target)?;
+    let keys = mlx::ops::shape::concatenate_on(&key_refs, 0, target)?;
+    let values = mlx::ops::shape::concatenate_on(&value_refs, 0, target)?;
+    let out = mlx::fast::scaled_dot_product_attention_on(
+        &packed_queries,
+        &keys,
+        &values,
+        1.0,
+        "",
+        None,
+        None,
+        target,
+    )?
+    .transpose_axes_on(&[2_i32, 1, 0, 3][..], target)?;
+    if valid_query_len == query_len {
+        return Ok(out);
+    }
+    let padding = mlx::ops::indexing::slice_strided_on(
+        queries,
+        &[0_i32, 0, valid_query_len, 0][..],
+        &[1_i32, heads, query_len, head_dim][..],
+        &[1_i32, 1, 1, 1][..],
+        target,
+    )? * 0.0_f32;
+    mlx::ops::shape::concatenate_on(&[&out, &padding], 2, target).map_err(Into::into)
+}
+
+fn row_isolated_causal_attention_on(
+    queries: &Array,
+    kv: &SharedKv,
+    mask: Option<&Array>,
+    per_row_lens: Option<&[i32]>,
+    offsets: &[i32],
+    sliding_window: Option<i32>,
+    target: StreamOrDevice,
+) -> Result<Array> {
+    let q_shape = queries.shape();
+    let q_dims = q_shape.as_slice();
+    let (batch, heads, query_len, head_dim) = (q_dims[0], q_dims[1], q_dims[2], q_dims[3]);
+    let lens_owned;
+    let lens = match per_row_lens {
+        Some(lens) => lens,
+        None => {
+            lens_owned = vec![query_len; batch as usize];
+            &lens_owned
+        }
+    };
+    if offsets.len() != batch as usize || lens.len() != batch as usize {
+        return Err(anyhow!(
+            "Gemma4 row-isolated causal attention expected {batch} offsets/lens, got {}/{}",
+            offsets.len(),
+            lens.len()
+        ));
+    }
+    if sliding_window.is_some_and(|window| window <= 0) {
+        return Err(anyhow!(
+            "Gemma4 row-isolated causal attention requires a positive sliding window"
+        ));
+    }
+    let kv_dims = kv.keys.shape();
+    let kv_dims = kv_dims.as_slice();
+    let kv_len = kv_dims[2];
+    let mut batch_outputs = Vec::with_capacity(batch as usize);
+    for row in 0..batch {
+        let valid_query_len = lens[row as usize];
+        if valid_query_len < 0 || valid_query_len > query_len {
+            return Err(anyhow!(
+                "Gemma4 row-isolated causal attention invalid row {row} length {valid_query_len} for query length {query_len}"
+            ));
+        }
+        if valid_query_len == 0 {
+            batch_outputs.push(
+                mlx::ops::indexing::slice_strided_on(
+                    queries,
+                    &[row, 0, 0, 0][..],
+                    &[row + 1, heads, query_len, head_dim][..],
+                    &[1_i32, 1, 1, 1][..],
+                    target,
+                )? * 0.0_f32,
+            );
+            continue;
+        }
+        let key_end = offsets[row as usize] + valid_query_len;
+        let key_start = sliding_window.map_or(0, |window| {
+            key_end - window.saturating_add(valid_query_len).saturating_sub(1)
+        });
+        if key_start < 0 || key_end > kv_len {
+            return Err(anyhow!(
+                "Gemma4 row-isolated causal window is invalid: row={row}, kv_len={kv_len}, offset={}, query_len={valid_query_len}, sliding_window={sliding_window:?}",
+                offsets[row as usize]
+            ));
+        }
+        let query = mlx::ops::indexing::slice_strided_on(
+            queries,
+            &[row, 0, 0, 0][..],
+            &[row + 1, heads, valid_query_len, head_dim][..],
+            &[1_i32, 1, 1, 1][..],
+            target,
+        )?;
+        let keys = mlx::ops::indexing::slice_strided_on(
+            &kv.keys,
+            &[row, 0, key_start, 0][..],
+            &[row + 1, kv_dims[1], key_end, head_dim][..],
+            &[1_i32, 1, 1, 1][..],
+            target,
+        )?;
+        let values = mlx::ops::indexing::slice_strided_on(
+            &kv.values,
+            &[row, 0, key_start, 0][..],
+            &[
+                row + 1,
+                kv.values.shape().as_slice()[1],
+                key_end,
+                kv.values.shape().as_slice()[3],
+            ][..],
+            &[1_i32, 1, 1, 1][..],
+            target,
+        )?;
+        let row_mask = mask
+            .map(|mask| {
+                let mask_shape = mask.shape();
+                let mask_dims = mask_shape.as_slice();
+                if mask_dims.len() != 4 {
+                    return Err(anyhow!(
+                        "Gemma4 row-isolated causal attention expected rank-4 mask, got {:?}",
+                        mask_dims
+                    ));
+                }
+                let mask_row = if mask_dims[0] == 1 { 0 } else { row };
+                if mask_row >= mask_dims[0]
+                    || valid_query_len > mask_dims[2]
+                    || key_end > mask_dims[3]
+                {
+                    return Err(anyhow!(
+                        "Gemma4 row-isolated causal mask cannot cover row={row}, query_len={valid_query_len}, key_end={key_end}, shape={mask_dims:?}"
+                    ));
+                }
+                Ok(mlx::ops::indexing::slice_strided_on(
+                    mask,
+                    &[mask_row, 0, 0, key_start][..],
+                    &[mask_row + 1, mask_dims[1], valid_query_len, key_end][..],
+                    &[1_i32, 1, 1, 1][..],
+                    target,
+                )?)
+            })
+            .transpose()?;
+        let mut out = mlx::fast::scaled_dot_product_attention_on(
+            &query,
+            &keys,
+            &values,
+            1.0,
+            if row_mask.is_some() { "" } else { "causal" },
+            row_mask.as_ref(),
+            None,
+            target,
+        )?;
+        if valid_query_len < query_len {
+            let padding = mlx::ops::indexing::slice_strided_on(
+                queries,
+                &[row, 0, valid_query_len, 0][..],
+                &[row + 1, heads, query_len, head_dim][..],
+                &[1_i32, 1, 1, 1][..],
+                target,
+            )? * 0.0_f32;
+            out = mlx::ops::shape::concatenate_on(&[&out, &padding], 2, target)?;
+        }
+        batch_outputs.push(out);
+    }
+    let batch_refs = batch_outputs.iter().collect::<Vec<_>>();
+    Ok(mlx::ops::shape::concatenate_on(&batch_refs, 0, target)?)
+}
+
+fn stable_sliding_query_window(
+    kv_len: i32,
+    offset: i32,
+    query_idx: i32,
+    sliding_window: i32,
+) -> Result<(i32, i32)> {
+    let key_end = offset + query_idx + 1;
+    let key_start = key_end - sliding_window;
+    if query_idx < 0 || sliding_window <= 0 || key_start < 0 || key_end > kv_len {
+        return Err(anyhow!(
+            "Gemma4 segment-stable sliding window is invalid: kv_len={kv_len}, offset={offset}, query_idx={query_idx}, window={sliding_window}"
+        ));
+    }
+    Ok((key_start, key_end))
+}
+
 fn sliding_attention_view_len(kv_len: i32, query_len: i32, window: i32) -> i32 {
     if kv_len <= 0 {
         return 0;
@@ -784,8 +1086,9 @@ fn align_attention_mask_tail_on(
 #[cfg(test)]
 mod tests {
     use super::{
-        align_attention_mask_tail_on, query_isolated_full_attention_on, sliding_attention_view_len,
-        SharedKv,
+        align_attention_mask_tail_on, query_isolated_full_attention_on,
+        row_isolated_causal_attention_on, segment_stable_sliding_attention_on,
+        sliding_attention_view_len, stable_sliding_query_window, SharedKv,
     };
     use mlx::{Array, Dtype};
     use serial_test::serial;
@@ -831,6 +1134,121 @@ mod tests {
         assert_eq!(sliding_attention_view_len(20_400, 2_048, 1_024), 3_071);
         assert_eq!(sliding_attention_view_len(20_400, 1, 1_024), 1_024);
         assert_eq!(sliding_attention_view_len(512, 2_048, 1_024), 512);
+    }
+
+    #[test]
+    fn stable_sliding_windows_preserve_the_same_absolute_causal_prefix() {
+        assert_eq!(
+            stable_sliding_query_window(513, 511, 1, 512).unwrap(),
+            (1, 513)
+        );
+        assert_eq!(
+            stable_sliding_query_window(514, 511, 0, 512).unwrap(),
+            (0, 512)
+        );
+        assert!(stable_sliding_query_window(511, 511, 0, 512).is_err());
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn stable_sliding_attention_is_invariant_to_verify_segment_boundaries() {
+        let global_keys = (0..515)
+            .flat_map(|idx| [idx as f32 / 515.0, (idx % 17) as f32 / 17.0])
+            .collect::<Vec<_>>();
+        let global_keys: Array = (global_keys.as_slice(), &[1_i32, 1, 515, 2][..])
+            .try_into()
+            .unwrap();
+        let cap1_keys =
+            mlx::ops::indexing::slice(&global_keys, [0_i32, 0, 0, 0], [1_i32, 1, 513, 2]).unwrap();
+        let cap2_keys =
+            mlx::ops::indexing::slice(&global_keys, [0_i32, 0, 1, 0], [1_i32, 1, 515, 2]).unwrap();
+        let cap1_queries: Array = (&[0.1_f32, 0.2, 0.3, 0.4][..], &[1_i32, 1, 2, 2][..])
+            .try_into()
+            .unwrap();
+        let cap2_queries: Array = (
+            &[0.3_f32, 0.4, 0.5, 0.6, 0.7, 0.8][..],
+            &[1_i32, 1, 3, 2][..],
+        )
+            .try_into()
+            .unwrap();
+
+        let cap1 = segment_stable_sliding_attention_on(
+            &cap1_queries,
+            &SharedKv {
+                keys: cap1_keys.clone(),
+                values: cap1_keys,
+            },
+            None,
+            &[511],
+            512,
+            ().into(),
+        )
+        .unwrap();
+        let cap2 = segment_stable_sliding_attention_on(
+            &cap2_queries,
+            &SharedKv {
+                keys: cap2_keys.clone(),
+                values: cap2_keys,
+            },
+            None,
+            &[511],
+            512,
+            ().into(),
+        )
+        .unwrap();
+        let cap1_values = cap1.to_vec::<f32>().unwrap();
+        let cap2_values = cap2.to_vec::<f32>().unwrap();
+        assert_eq!(&cap1_values[2..4], &cap2_values[0..2]);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn stable_sliding_attention_preserves_rows_and_zero_length_padding() {
+        let queries: Array = (
+            &[0.1_f32, 0.2, 0.3, 0.4, 0.1, 0.2, 0.3, 0.4][..],
+            &[2_i32, 1, 2, 2][..],
+        )
+            .try_into()
+            .unwrap();
+        let row_keys = (0..513)
+            .flat_map(|idx| [idx as f32 / 513.0, (idx % 17) as f32 / 17.0])
+            .collect::<Vec<_>>();
+        let row_keys: Array = (row_keys.as_slice(), &[1_i32, 1, 513, 2][..])
+            .try_into()
+            .unwrap();
+        let keys = mlx::ops::shape::concatenate_on(&[&row_keys, &row_keys], 0, ()).unwrap();
+        let full = row_isolated_causal_attention_on(
+            &queries,
+            &SharedKv {
+                keys: keys.clone(),
+                values: keys.clone(),
+            },
+            None,
+            Some(&[2, 2]),
+            &[511, 511],
+            Some(512),
+            ().into(),
+        )
+        .unwrap();
+        let full_values = full.to_vec::<f32>().unwrap();
+        assert_eq!(&full_values[..4], &full_values[4..]);
+
+        let padded = row_isolated_causal_attention_on(
+            &queries,
+            &SharedKv {
+                keys: keys.clone(),
+                values: keys,
+            },
+            None,
+            Some(&[2, 0]),
+            &[511, 511],
+            Some(512),
+            ().into(),
+        )
+        .unwrap();
+        let padded_values = padded.to_vec::<f32>().unwrap();
+        assert_eq!(&padded_values[..4], &full_values[..4]);
+        assert_eq!(&padded_values[4..], &[0.0_f32; 4]);
     }
 
     #[test]
