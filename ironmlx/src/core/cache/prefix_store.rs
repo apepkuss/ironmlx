@@ -2,6 +2,10 @@ use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, SyncSender, TrySendError};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
+use std::thread::JoinHandle;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
@@ -126,6 +130,32 @@ pub struct PagedPrefixKeySpec {
     pub gemma4_drafter_last_hidden: Option<PrefixTensorSpec>,
 }
 
+impl PagedPrefixKeySpec {
+    pub fn payload_bytes(&self) -> usize {
+        let main = self
+            .main_layers
+            .iter()
+            .flat_map(|layer| layer.tensors.iter())
+            .fold(0usize, |bytes, tensor| {
+                bytes.saturating_add(tensor_spec_payload_bytes(tensor))
+            });
+        let mtp = self.mtp_layers.iter().fold(0usize, |bytes, layer| {
+            bytes
+                .saturating_add(tensor_spec_payload_bytes(&layer.k))
+                .saturating_add(tensor_spec_payload_bytes(&layer.v))
+        });
+        [
+            self.mtp_last_hidden.as_ref(),
+            self.gemma4_drafter_last_hidden.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .fold(main.saturating_add(mtp), |bytes, tensor| {
+            bytes.saturating_add(tensor_spec_payload_bytes(tensor))
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PagedPrefixLayer {
     pub k_pages: Array,
@@ -187,6 +217,41 @@ pub struct PagedPrefixEntryStats {
 }
 
 impl PagedPrefixEntry {
+    fn eval(&self) -> Result<()> {
+        let mut arrays = Vec::new();
+        for layer in &self.main_layers {
+            match layer {
+                PrefixLayerPayload::FullDense { k, v }
+                | PrefixLayerPayload::FullPaged {
+                    k_pages: k,
+                    v_pages: v,
+                } => arrays.extend([k, v]),
+                PrefixLayerPayload::FullTurboQuantPacked {
+                    k_packed,
+                    k_norms,
+                    v_packed,
+                    v_norms,
+                } => arrays.extend([k_packed, k_norms, v_packed, v_norms]),
+                PrefixLayerPayload::Linear {
+                    conv_state,
+                    recurrent_state,
+                } => arrays.extend([conv_state, recurrent_state]),
+                PrefixLayerPayload::Mla { c_kv, k_pe } => arrays.extend([c_kv, k_pe]),
+            }
+        }
+        for layer in &self.mtp_layers {
+            arrays.extend([&layer.k, &layer.v]);
+        }
+        if let Some(hidden) = self.mtp_last_hidden.as_ref() {
+            arrays.push(hidden);
+        }
+        if let Some(hidden) = self.gemma4_drafter_last_hidden.as_ref() {
+            arrays.push(hidden);
+        }
+        mlx::transforms::eval(&arrays).context("evaluate async prefix store payload")?;
+        Ok(())
+    }
+
     pub fn main_layer_specs(&self) -> Vec<PrefixLayerSpec> {
         self.main_layers
             .iter()
@@ -439,6 +504,631 @@ pub struct PrefixLruCache {
     recency: VecDeque<(String, u64)>,
 }
 
+pub type SharedPrefixLruCache = Arc<Mutex<PrefixLruCache>>;
+
+static PROCESS_PREFIX_LRU_CACHE: OnceLock<Mutex<Weak<Mutex<PrefixLruCache>>>> = OnceLock::new();
+
+/// Return the process-wide hot prefix cache for a configured global budget.
+/// Every engine and scheduler charges and evicts against the same byte
+/// counter. If independently-created runtimes request different limits, the
+/// process adopts the smaller limit immediately; a later caller cannot grow a
+/// budget that is already in use.
+pub fn process_shared_prefix_lru_cache(
+    config: PrefixLruCacheConfig,
+) -> Result<SharedPrefixLruCache> {
+    config.validate()?;
+    let registry = PROCESS_PREFIX_LRU_CACHE.get_or_init(|| Mutex::new(Weak::new()));
+    let mut registry = registry
+        .lock()
+        .map_err(|_| anyhow::anyhow!("process prefix LRU registry lock poisoned"))?;
+    if let Some(cache) = registry.upgrade() {
+        let mut cache_guard = cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("process prefix LRU cache lock poisoned"))?;
+        if config.max_bytes < cache_guard.max_bytes {
+            cache_guard.max_bytes = config.max_bytes;
+            cache_guard.shrink_to(config.max_bytes);
+        }
+        drop(cache_guard);
+        return Ok(cache);
+    }
+    let cache = Arc::new(Mutex::new(PrefixLruCache::new(config)?));
+    *registry = Arc::downgrade(&cache);
+    Ok(cache)
+}
+
+pub fn shrink_process_prefix_lru_caches(retain_ratio: f64) -> Result<usize> {
+    anyhow::ensure!((0.0..=1.0).contains(&retain_ratio), "invalid retain ratio");
+    let Some(registry) = PROCESS_PREFIX_LRU_CACHE.get() else {
+        return Ok(0);
+    };
+    let cache = registry
+        .lock()
+        .map_err(|_| anyhow::anyhow!("process prefix LRU registry lock poisoned"))?
+        .upgrade();
+    let Some(cache) = cache else {
+        return Ok(0);
+    };
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("process prefix LRU cache lock poisoned"))?;
+    let target = ((cache.max_bytes() as f64) * retain_ratio) as usize;
+    Ok(cache.shrink_to(target))
+}
+
+const PROCESS_PREFIX_STORE_QUEUE_CAPACITY: usize = 4;
+const PROCESS_PREFIX_STORE_PENDING_BYTES: usize = 512 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+pub struct AsyncPrefixStoreStats {
+    pub pending_jobs: usize,
+    pub pending_bytes: usize,
+    pub queued_total: u64,
+    pub completed_total: u64,
+    pub failed_total: u64,
+    pub cancelled_total: u64,
+    pub backpressured_total: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AsyncPrefixStoreSubmit {
+    Queued,
+    Coalesced,
+    Cancelled,
+    Backpressured,
+    Closed,
+}
+
+pub enum AsyncPrefixStoreAdmission {
+    Admitted(Box<AsyncPrefixStorePermit>),
+    Coalesced,
+    Backpressured,
+    Closed,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AsyncPrefixStoreCancellation(Arc<AtomicBool>);
+
+impl AsyncPrefixStoreCancellation {
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+#[derive(Debug, Default)]
+struct AsyncPrefixStoreCounters {
+    pending_jobs: AtomicUsize,
+    pending_bytes: AtomicUsize,
+    queued_total: AtomicU64,
+    completed_total: AtomicU64,
+    failed_total: AtomicU64,
+    cancelled_total: AtomicU64,
+    backpressured_total: AtomicU64,
+}
+
+struct AsyncPrefixStoreJob {
+    id: u64,
+    pending_key: (PathBuf, String),
+    store: PagedPrefixStore,
+    spec: PagedPrefixKeySpec,
+    entry: PagedPrefixEntry,
+    payload_bytes: usize,
+    cancellation: AsyncPrefixStoreCancellation,
+}
+
+#[derive(Clone)]
+struct AsyncPrefixPendingEntry {
+    id: u64,
+    spec: PagedPrefixKeySpec,
+    entry: Option<PagedPrefixEntry>,
+    cancellation: AsyncPrefixStoreCancellation,
+}
+
+struct AsyncPrefixStoreInner {
+    capacity: usize,
+    max_pending_bytes: usize,
+    sender: Mutex<Option<SyncSender<Box<AsyncPrefixStoreJob>>>>,
+    worker: Mutex<Option<JoinHandle<()>>>,
+    counters: Arc<AsyncPrefixStoreCounters>,
+    pending: Arc<Mutex<HashMap<(PathBuf, String), AsyncPrefixPendingEntry>>>,
+    next_job_id: AtomicU64,
+    idle: Arc<(Mutex<()>, Condvar)>,
+}
+
+impl Drop for AsyncPrefixStoreInner {
+    fn drop(&mut self) {
+        self.sender.get_mut().ok().and_then(Option::take);
+        if let Some(worker) = self.worker.get_mut().ok().and_then(Option::take) {
+            let _ = worker.join();
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct AsyncPrefixStoreQueue(Arc<AsyncPrefixStoreInner>);
+
+pub struct AsyncPrefixStorePermit {
+    queue: AsyncPrefixStoreQueue,
+    id: u64,
+    pending_key: (PathBuf, String),
+    store: Option<PagedPrefixStore>,
+    spec: Option<PagedPrefixKeySpec>,
+    payload_bytes: usize,
+    cancellation: AsyncPrefixStoreCancellation,
+    active: bool,
+}
+
+impl std::fmt::Debug for AsyncPrefixStorePermit {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AsyncPrefixStorePermit")
+            .field("id", &self.id)
+            .field("pending_key", &self.pending_key)
+            .field("payload_bytes", &self.payload_bytes)
+            .field("active", &self.active)
+            .finish()
+    }
+}
+
+impl Drop for AsyncPrefixStorePermit {
+    fn drop(&mut self) {
+        if self.active {
+            self.queue
+                .remove_pending_if_current(&self.pending_key, self.id);
+            self.queue.release_pending(self.payload_bytes);
+        }
+    }
+}
+
+impl AsyncPrefixStorePermit {
+    pub fn submit(mut self, entry: PagedPrefixEntry) -> AsyncPrefixStoreSubmit {
+        let queue = self.queue.clone();
+        queue.submit_permit(&mut self, entry)
+    }
+}
+
+impl std::fmt::Debug for AsyncPrefixStoreQueue {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AsyncPrefixStoreQueue")
+            .field("capacity", &self.0.capacity)
+            .field("max_pending_bytes", &self.0.max_pending_bytes)
+            .field("stats", &self.stats())
+            .finish()
+    }
+}
+
+impl AsyncPrefixStoreQueue {
+    pub fn new(capacity: usize, max_pending_bytes: usize) -> Result<Self> {
+        anyhow::ensure!(
+            capacity > 0,
+            "async prefix store queue capacity must be > 0"
+        );
+        anyhow::ensure!(
+            max_pending_bytes > 0,
+            "async prefix store pending-byte limit must be > 0"
+        );
+        let (sender, receiver) = mpsc::sync_channel::<Box<AsyncPrefixStoreJob>>(capacity);
+        let counters = Arc::new(AsyncPrefixStoreCounters::default());
+        let worker_counters = Arc::clone(&counters);
+        let pending = Arc::new(Mutex::new(HashMap::<
+            (PathBuf, String),
+            AsyncPrefixPendingEntry,
+        >::new()));
+        let worker_pending = Arc::clone(&pending);
+        let idle = Arc::new((Mutex::new(()), Condvar::new()));
+        let worker_idle = Arc::clone(&idle);
+        let worker = std::thread::Builder::new()
+            .name("ironmlx-prefix-store".to_owned())
+            .spawn(move || {
+                // MLX stream registries are thread-local. The async writer
+                // receives GPU-backed arrays created by scheduler threads, so
+                // it must own a real Metal stream before safetensors can
+                // evaluate or copy those arrays.
+                let worker_device = mlx::Device::gpu(0);
+                mlx::set_default_device(worker_device);
+                let worker_stream = mlx::default_stream(worker_device);
+                mlx::set_default_stream(worker_stream);
+                while let Ok(job) = receiver.recv() {
+                    if job.cancellation.is_cancelled() {
+                        worker_counters
+                            .cancelled_total
+                            .fetch_add(1, Ordering::Relaxed);
+                    } else if let Err(error) = job.store.save_if_absent(&job.spec, &job.entry) {
+                        worker_counters.failed_total.fetch_add(1, Ordering::Relaxed);
+                        tracing::warn!(%error, "async paged prefix store write failed");
+                    } else {
+                        worker_counters
+                            .completed_total
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                    if let Ok(mut pending) = worker_pending.lock() {
+                        if pending
+                            .get(&job.pending_key)
+                            .is_some_and(|entry| entry.id == job.id)
+                        {
+                            pending.remove(&job.pending_key);
+                        }
+                    }
+                    if let Ok(_idle_guard) = worker_idle.0.lock() {
+                        worker_counters.pending_jobs.fetch_sub(1, Ordering::AcqRel);
+                        worker_counters
+                            .pending_bytes
+                            .fetch_sub(job.payload_bytes, Ordering::AcqRel);
+                        worker_idle.1.notify_all();
+                    } else {
+                        worker_counters.pending_jobs.fetch_sub(1, Ordering::AcqRel);
+                        worker_counters
+                            .pending_bytes
+                            .fetch_sub(job.payload_bytes, Ordering::AcqRel);
+                    }
+                }
+                mlx::clear_streams();
+            })
+            .context("spawn async prefix store worker")?;
+        Ok(Self(Arc::new(AsyncPrefixStoreInner {
+            capacity,
+            max_pending_bytes,
+            sender: Mutex::new(Some(sender)),
+            worker: Mutex::new(Some(worker)),
+            counters,
+            pending,
+            next_job_id: AtomicU64::new(1),
+            idle,
+        })))
+    }
+
+    pub fn try_enqueue(
+        &self,
+        store: PagedPrefixStore,
+        spec: PagedPrefixKeySpec,
+        entry: PagedPrefixEntry,
+    ) -> AsyncPrefixStoreSubmit {
+        self.try_enqueue_cancellable(store, spec, entry, AsyncPrefixStoreCancellation::default())
+    }
+
+    pub fn try_enqueue_cancellable(
+        &self,
+        store: PagedPrefixStore,
+        spec: PagedPrefixKeySpec,
+        entry: PagedPrefixEntry,
+        cancellation: AsyncPrefixStoreCancellation,
+    ) -> AsyncPrefixStoreSubmit {
+        match self.try_admit(store, spec, cancellation) {
+            AsyncPrefixStoreAdmission::Admitted(permit) => (*permit).submit(entry),
+            AsyncPrefixStoreAdmission::Coalesced => AsyncPrefixStoreSubmit::Coalesced,
+            AsyncPrefixStoreAdmission::Backpressured => AsyncPrefixStoreSubmit::Backpressured,
+            AsyncPrefixStoreAdmission::Closed => AsyncPrefixStoreSubmit::Closed,
+        }
+    }
+
+    pub fn try_admit(
+        &self,
+        store: PagedPrefixStore,
+        spec: PagedPrefixKeySpec,
+        cancellation: AsyncPrefixStoreCancellation,
+    ) -> AsyncPrefixStoreAdmission {
+        let sender_open = self
+            .0
+            .sender
+            .lock()
+            .ok()
+            .is_some_and(|sender| sender.is_some());
+        if !sender_open {
+            return AsyncPrefixStoreAdmission::Closed;
+        }
+        let payload_bytes = spec.payload_bytes();
+        if !self.reserve_pending(payload_bytes) {
+            self.0
+                .counters
+                .backpressured_total
+                .fetch_add(1, Ordering::Relaxed);
+            return AsyncPrefixStoreAdmission::Backpressured;
+        }
+        let id = self.0.next_job_id.fetch_add(1, Ordering::Relaxed);
+        let key = PagedPrefixStore::key_for(&spec);
+        let pending_key = (store.root.clone(), key);
+        let pending_result = self.0.pending.lock().map(|mut pending| {
+            if pending
+                .get(&pending_key)
+                .is_some_and(|entry| !entry.cancellation.is_cancelled())
+            {
+                return false;
+            }
+            pending.insert(
+                pending_key.clone(),
+                AsyncPrefixPendingEntry {
+                    id,
+                    spec: spec.clone(),
+                    entry: None,
+                    cancellation: cancellation.clone(),
+                },
+            );
+            true
+        });
+        match pending_result {
+            Ok(true) => AsyncPrefixStoreAdmission::Admitted(Box::new(AsyncPrefixStorePermit {
+                queue: self.clone(),
+                id,
+                pending_key,
+                store: Some(store),
+                spec: Some(spec),
+                payload_bytes,
+                cancellation,
+                active: true,
+            })),
+            Ok(false) => {
+                self.release_pending(payload_bytes);
+                AsyncPrefixStoreAdmission::Coalesced
+            }
+            Err(_) => {
+                self.release_pending(payload_bytes);
+                AsyncPrefixStoreAdmission::Closed
+            }
+        }
+    }
+
+    fn submit_permit(
+        &self,
+        permit: &mut AsyncPrefixStorePermit,
+        entry: PagedPrefixEntry,
+    ) -> AsyncPrefixStoreSubmit {
+        let spec = permit.spec.take().expect("active permit owns spec");
+        let actual_payload_bytes = entry.observability_stats(spec.cached_len).payload_bytes;
+        if actual_payload_bytes != permit.payload_bytes {
+            self.0.counters.failed_total.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(
+                reserved_bytes = permit.payload_bytes,
+                actual_bytes = actual_payload_bytes,
+                "async paged prefix store payload size changed after admission"
+            );
+            return AsyncPrefixStoreSubmit::Closed;
+        }
+        if let Err(error) = entry.eval() {
+            self.0.counters.failed_total.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(%error, "async paged prefix store payload evaluation failed");
+            return AsyncPrefixStoreSubmit::Closed;
+        }
+        if permit.cancellation.is_cancelled() {
+            self.0
+                .counters
+                .cancelled_total
+                .fetch_add(1, Ordering::Relaxed);
+            return AsyncPrefixStoreSubmit::Cancelled;
+        }
+        let pending_updated = self.0.pending.lock().is_ok_and(|mut pending| {
+            let Some(current) = pending.get_mut(&permit.pending_key) else {
+                return false;
+            };
+            if current.id != permit.id || current.cancellation.is_cancelled() {
+                return false;
+            }
+            current.entry = Some(entry.clone());
+            true
+        });
+        if !pending_updated {
+            self.0
+                .counters
+                .cancelled_total
+                .fetch_add(1, Ordering::Relaxed);
+            return AsyncPrefixStoreSubmit::Cancelled;
+        }
+        let job = AsyncPrefixStoreJob {
+            id: permit.id,
+            pending_key: permit.pending_key.clone(),
+            store: permit.store.take().expect("active permit owns store"),
+            spec,
+            entry,
+            payload_bytes: permit.payload_bytes,
+            cancellation: permit.cancellation.clone(),
+        };
+        let send_result = self
+            .0
+            .sender
+            .lock()
+            .ok()
+            .and_then(|sender| sender.as_ref().map(|sender| sender.try_send(Box::new(job))));
+        match send_result {
+            Some(Ok(())) => {
+                permit.active = false;
+                self.0.counters.queued_total.fetch_add(1, Ordering::Relaxed);
+                AsyncPrefixStoreSubmit::Queued
+            }
+            Some(Err(TrySendError::Full(job))) => {
+                self.remove_pending_if_current(&job.pending_key, job.id);
+                self.release_pending(job.payload_bytes);
+                permit.active = false;
+                self.0
+                    .counters
+                    .backpressured_total
+                    .fetch_add(1, Ordering::Relaxed);
+                AsyncPrefixStoreSubmit::Backpressured
+            }
+            Some(Err(TrySendError::Disconnected(job))) => {
+                self.remove_pending_if_current(&job.pending_key, job.id);
+                self.release_pending(job.payload_bytes);
+                permit.active = false;
+                AsyncPrefixStoreSubmit::Closed
+            }
+            None => {
+                self.remove_pending_if_current(&permit.pending_key, permit.id);
+                self.release_pending(permit.payload_bytes);
+                permit.active = false;
+                AsyncPrefixStoreSubmit::Closed
+            }
+        }
+    }
+
+    fn remove_pending_if_current(&self, key: &(PathBuf, String), id: u64) {
+        if let Ok(mut pending) = self.0.pending.lock() {
+            if pending.get(key).is_some_and(|entry| entry.id == id) {
+                pending.remove(key);
+            }
+        }
+    }
+
+    fn load_pending_observed(
+        &self,
+        store: &PagedPrefixStore,
+        spec: &PagedPrefixKeySpec,
+    ) -> Option<PagedPrefixLoadResult> {
+        let key = PagedPrefixStore::key_for(spec);
+        let pending_key = (store.root.clone(), key.clone());
+        let pending = self.0.pending.lock().ok()?;
+        let entry = pending.get(&pending_key)?;
+        if entry.cancellation.is_cancelled() || entry.spec != *spec {
+            return None;
+        }
+        let cached_entry = entry.entry.as_ref()?;
+        Some(PagedPrefixLoadResult {
+            key,
+            status: PagedPrefixLoadStatus::Hit,
+            entry: Some(cached_entry.clone()),
+            stats: Some(cached_entry.observability_stats(spec.cached_len)),
+        })
+    }
+
+    fn pending_cached_lengths(&self, store: &PagedPrefixStore, max_cached_len: i32) -> Vec<i32> {
+        let Ok(pending) = self.0.pending.lock() else {
+            return Vec::new();
+        };
+        pending
+            .iter()
+            .filter_map(|((root, _), entry)| {
+                (root == &store.root
+                    && !entry.cancellation.is_cancelled()
+                    && entry.entry.is_some()
+                    && entry.spec.cached_len > 0
+                    && entry.spec.cached_len <= max_cached_len)
+                    .then_some(entry.spec.cached_len)
+            })
+            .collect()
+    }
+
+    fn reserve_pending(&self, bytes: usize) -> bool {
+        if bytes > self.0.max_pending_bytes
+            || self.0.counters.pending_jobs.load(Ordering::Acquire) >= self.0.capacity
+        {
+            return false;
+        }
+        let reserved = self.0.counters.pending_bytes.fetch_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |current| {
+                current
+                    .checked_add(bytes)
+                    .filter(|projected| *projected <= self.0.max_pending_bytes)
+            },
+        );
+        if reserved.is_err() {
+            return false;
+        }
+        let previous_jobs = self.0.counters.pending_jobs.fetch_add(1, Ordering::AcqRel);
+        if previous_jobs >= self.0.capacity {
+            self.0.counters.pending_jobs.fetch_sub(1, Ordering::AcqRel);
+            self.0
+                .counters
+                .pending_bytes
+                .fetch_sub(bytes, Ordering::AcqRel);
+            return false;
+        }
+        true
+    }
+
+    fn release_pending(&self, bytes: usize) {
+        self.0.counters.pending_jobs.fetch_sub(1, Ordering::AcqRel);
+        self.0
+            .counters
+            .pending_bytes
+            .fetch_sub(bytes, Ordering::AcqRel);
+    }
+
+    pub fn is_backpressured(&self) -> bool {
+        self.0.counters.pending_jobs.load(Ordering::Acquire) >= self.0.capacity
+            || self.0.counters.pending_bytes.load(Ordering::Acquire) >= self.0.max_pending_bytes
+    }
+
+    /// Cancel queued store work owned by a model that is being unloaded.
+    ///
+    /// Cancellation is cooperative: jobs that have not started are skipped;
+    /// an already-running atomic filesystem save is allowed to finish. Pending
+    /// read-through stops exposing cancelled entries immediately.
+    pub fn cancel_model(&self, model_id: &str) -> usize {
+        let Ok(pending) = self.0.pending.lock() else {
+            return 0;
+        };
+        let mut cancelled = 0usize;
+        for entry in pending.values() {
+            if entry.spec.model_id == model_id && !entry.cancellation.is_cancelled() {
+                entry.cancellation.cancel();
+                cancelled = cancelled.saturating_add(1);
+            }
+        }
+        cancelled
+    }
+
+    pub fn stats(&self) -> AsyncPrefixStoreStats {
+        AsyncPrefixStoreStats {
+            pending_jobs: self.0.counters.pending_jobs.load(Ordering::Acquire),
+            pending_bytes: self.0.counters.pending_bytes.load(Ordering::Acquire),
+            queued_total: self.0.counters.queued_total.load(Ordering::Relaxed),
+            completed_total: self.0.counters.completed_total.load(Ordering::Relaxed),
+            failed_total: self.0.counters.failed_total.load(Ordering::Relaxed),
+            cancelled_total: self.0.counters.cancelled_total.load(Ordering::Relaxed),
+            backpressured_total: self.0.counters.backpressured_total.load(Ordering::Relaxed),
+        }
+    }
+
+    pub fn shutdown(&self) {
+        if let Ok(mut sender) = self.0.sender.lock() {
+            sender.take();
+        }
+        if let Ok(mut worker) = self.0.worker.lock() {
+            if let Some(worker) = worker.take() {
+                let _ = worker.join();
+            }
+        }
+    }
+
+    pub fn wait_idle(&self) {
+        let (lock, idle) = &*self.0.idle;
+        let mut guard = lock.lock().expect("async prefix store idle lock poisoned");
+        while self.0.counters.pending_jobs.load(Ordering::Acquire) != 0 {
+            guard = idle
+                .wait(guard)
+                .expect("async prefix store idle lock poisoned");
+        }
+    }
+}
+
+static PROCESS_PREFIX_STORE_QUEUE: OnceLock<AsyncPrefixStoreQueue> = OnceLock::new();
+
+pub fn process_async_prefix_store_queue() -> &'static AsyncPrefixStoreQueue {
+    PROCESS_PREFIX_STORE_QUEUE.get_or_init(|| {
+        AsyncPrefixStoreQueue::new(
+            PROCESS_PREFIX_STORE_QUEUE_CAPACITY,
+            PROCESS_PREFIX_STORE_PENDING_BYTES,
+        )
+        .expect("valid process prefix store queue")
+    })
+}
+
+pub fn cancel_process_async_prefix_store_model(model_id: &str) -> usize {
+    PROCESS_PREFIX_STORE_QUEUE
+        .get()
+        .map_or(0, |queue| queue.cancel_model(model_id))
+}
+
+pub fn shutdown_process_async_prefix_store_queue() {
+    if let Some(queue) = PROCESS_PREFIX_STORE_QUEUE.get() {
+        queue.shutdown();
+    }
+}
+
 impl PrefixLruCache {
     pub fn new(config: PrefixLruCacheConfig) -> Result<Self> {
         config.validate()?;
@@ -553,7 +1243,7 @@ impl PrefixLruCache {
             },
         );
         self.recency.push_back((key.clone(), generation));
-        self.evict_to_capacity();
+        self.shrink_to(self.max_bytes);
 
         Ok(PrefixLruInsertResult { key, status, stats })
     }
@@ -571,22 +1261,50 @@ impl PrefixLruCache {
         }
     }
 
-    fn evict_to_capacity(&mut self) {
-        while self.total_bytes > self.max_bytes {
-            let Some((key, generation)) = self.recency.pop_front() else {
+    /// Shrink to an absolute byte target. When multiple models own entries,
+    /// reclaim first from the owner furthest above its equal fair share, then
+    /// evict that owner's least-recently-used entry.
+    pub fn shrink_to(&mut self, target_bytes: usize) -> usize {
+        let before = self.total_bytes;
+        while self.total_bytes > target_bytes {
+            let mut owner_bytes = HashMap::<&str, usize>::new();
+            for entry in self.entries.values() {
+                let owner_bytes = owner_bytes.entry(entry.spec.model_id.as_str()).or_default();
+                *owner_bytes = owner_bytes.saturating_add(entry.stats.payload_bytes);
+            }
+            let fair_share = if owner_bytes.is_empty() {
+                target_bytes
+            } else {
+                target_bytes / owner_bytes.len()
+            };
+            let selected_owner = owner_bytes
+                .iter()
+                .max_by_key(|(_, bytes)| bytes.saturating_sub(fair_share))
+                .map(|(owner, _)| *owner);
+            let candidate = self
+                .entries
+                .iter()
+                .filter(|(_, entry)| {
+                    selected_owner.is_none_or(|owner| entry.spec.model_id == owner)
+                })
+                .min_by_key(|(_, entry)| entry.generation)
+                .map(|(key, entry)| (key.clone(), entry.generation));
+            let Some((key, generation)) = candidate else {
                 break;
             };
-            let is_current = self
-                .entries
-                .get(&key)
-                .is_some_and(|entry| entry.generation == generation);
-            if !is_current {
-                continue;
-            }
             if let Some(entry) = self.entries.remove(&key) {
                 self.total_bytes = self.total_bytes.saturating_sub(entry.stats.payload_bytes);
             }
+            self.recency.retain(|(recency_key, recency_generation)| {
+                recency_key != &key || *recency_generation != generation
+            });
         }
+        self.recency.retain(|(key, generation)| {
+            self.entries
+                .get(key)
+                .is_some_and(|entry| entry.generation == *generation)
+        });
+        before.saturating_sub(self.total_bytes)
     }
 }
 
@@ -777,15 +1495,23 @@ impl PagedPrefixStore {
         if max_cached_len <= 0 {
             return Ok(Vec::new());
         }
+        let mut lengths = PROCESS_PREFIX_STORE_QUEUE
+            .get()
+            .map_or_else(Vec::new, |queue| {
+                queue.pending_cached_lengths(self, max_cached_len)
+            });
         let entries = match fs::read_dir(&self.root) {
             Ok(entries) => entries,
-            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) if err.kind() == ErrorKind::NotFound => {
+                lengths.sort_unstable_by(|left, right| right.cmp(left));
+                lengths.dedup();
+                return Ok(lengths);
+            }
             Err(err) => {
                 return Err(err)
                     .with_context(|| format!("read prefix cache root {}", self.root.display()));
             }
         };
-        let mut lengths = Vec::new();
         for entry in entries {
             let entry =
                 entry.with_context(|| format!("read prefix cache root {}", self.root.display()))?;
@@ -821,6 +1547,12 @@ impl PagedPrefixStore {
 
     pub fn load_observed(&self, spec: &PagedPrefixKeySpec) -> Result<PagedPrefixLoadResult> {
         self.validate_spec(spec)?;
+        if let Some(observed) = PROCESS_PREFIX_STORE_QUEUE
+            .get()
+            .and_then(|queue| queue.load_pending_observed(self, spec))
+        {
+            return Ok(observed);
+        }
         let key = Self::key_for(spec);
         let entry_dir = self.root.join(&key);
         if !entry_dir.is_dir() {
@@ -1548,6 +2280,18 @@ fn tensor_payload_bytes(array: &Array) -> usize {
     tensor_element_count(array).saturating_mul(dtype_size_bytes(array.dtype()))
 }
 
+fn tensor_spec_payload_bytes(spec: &PrefixTensorSpec) -> usize {
+    spec.shape
+        .iter()
+        .try_fold(1usize, |elements, &dim| {
+            usize::try_from(dim)
+                .ok()
+                .map(|dim| elements.saturating_mul(dim))
+        })
+        .unwrap_or(0)
+        .saturating_mul(dtype_size_bytes(spec.dtype))
+}
+
 fn tensor_element_count(array: &Array) -> usize {
     let mut elements = 1_usize;
     for &dim in array.shape().as_slice() {
@@ -2049,6 +2793,265 @@ mod tests {
         assert_eq!(cache.cached_lengths_descending(10), vec![6, 4, 2]);
         assert_eq!(cache.cached_lengths_descending(5), vec![4, 2]);
         assert_eq!(cache.cached_lengths_descending(1), Vec::<i32>::new());
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn prefix_lru_shrink_reclaims_from_owner_above_fair_share() {
+        let mut cache =
+            PrefixLruCache::new(PrefixLruCacheConfig::new(96).expect("config")).expect("cache");
+        let entry_b = single_full_paged_entry(10.0);
+        let entry_a1 = single_full_paged_entry(20.0);
+        let entry_a2 = single_full_paged_entry(30.0);
+        let mut spec_b = spec(
+            vec![10, 11],
+            2,
+            None,
+            entry_b.main_layer_specs(),
+            vec![],
+            None,
+        );
+        spec_b.model_id = "model-b".to_owned();
+        let mut spec_a1 = spec(
+            vec![20, 21],
+            2,
+            None,
+            entry_a1.main_layer_specs(),
+            vec![],
+            None,
+        );
+        spec_a1.model_id = "model-a".to_owned();
+        let mut spec_a2 = spec(
+            vec![30, 31],
+            2,
+            None,
+            entry_a2.main_layer_specs(),
+            vec![],
+            None,
+        );
+        spec_a2.model_id = "model-a".to_owned();
+
+        cache.insert(spec_b.clone(), entry_b).expect("insert b");
+        cache.insert(spec_a1.clone(), entry_a1).expect("insert a1");
+        cache.insert(spec_a2.clone(), entry_a2).expect("insert a2");
+        assert_eq!(cache.shrink_to(64), 32);
+        assert_eq!(
+            cache.load_observed(&spec_b).expect("load b").status,
+            PagedPrefixLoadStatus::Hit
+        );
+        assert_eq!(
+            cache.load_observed(&spec_a1).expect("load a1").status,
+            PagedPrefixLoadStatus::MissingEntry
+        );
+        assert_eq!(
+            cache.load_observed(&spec_a2).expect("load a2").status,
+            PagedPrefixLoadStatus::Hit
+        );
+    }
+
+    #[test]
+    fn process_prefix_lru_budget_is_singleton() {
+        let config = PrefixLruCacheConfig::new(123_457).expect("config");
+        let first = process_shared_prefix_lru_cache(config).expect("first");
+        let second = process_shared_prefix_lru_cache(config).expect("second");
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn async_prefix_store_completes_and_releases_pending_budget() {
+        let root = temp_root("async-prefix-store-complete");
+        let entry = single_full_paged_entry(40.0);
+        let wanted = spec(
+            vec![40, 41],
+            2,
+            None,
+            entry.main_layer_specs(),
+            vec![],
+            None,
+        );
+        let key = PagedPrefixStore::key_for(&wanted);
+        let queue = AsyncPrefixStoreQueue::new(2, 1024).expect("queue");
+        assert_eq!(
+            queue.try_enqueue(PagedPrefixStore::new(&root), wanted, entry),
+            AsyncPrefixStoreSubmit::Queued
+        );
+        queue.shutdown();
+        let stats = queue.stats();
+        assert_eq!(stats.pending_jobs, 0);
+        assert_eq!(stats.pending_bytes, 0);
+        assert_eq!(stats.completed_total, 1);
+        assert!(root.join(key).is_dir());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn async_prefix_store_enforces_byte_backpressure_and_cancellation() {
+        let entry = single_full_paged_entry(50.0);
+        let wanted = spec(
+            vec![50, 51],
+            2,
+            None,
+            entry.main_layer_specs(),
+            vec![],
+            None,
+        );
+        let payload_bytes = entry.observability_stats(2).payload_bytes;
+        let queue = AsyncPrefixStoreQueue::new(1, payload_bytes - 1).expect("queue");
+        assert_eq!(
+            queue.try_enqueue(PagedPrefixStore::new(temp_root("unused")), wanted, entry),
+            AsyncPrefixStoreSubmit::Backpressured
+        );
+        assert_eq!(queue.stats().backpressured_total, 1);
+        queue.shutdown();
+
+        let root = temp_root("async-prefix-store-cancel");
+        let entry = single_full_paged_entry(60.0);
+        let wanted = spec(
+            vec![60, 61],
+            2,
+            None,
+            entry.main_layer_specs(),
+            vec![],
+            None,
+        );
+        let cancellation = AsyncPrefixStoreCancellation::default();
+        cancellation.cancel();
+        let queue = AsyncPrefixStoreQueue::new(1, 1024).expect("queue");
+        assert_eq!(
+            queue.try_enqueue_cancellable(
+                PagedPrefixStore::new(&root),
+                wanted,
+                entry,
+                cancellation,
+            ),
+            AsyncPrefixStoreSubmit::Cancelled
+        );
+        assert_eq!(queue.stats().cancelled_total, 1);
+        assert_eq!(queue.stats().pending_jobs, 0);
+        queue.shutdown();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn async_prefix_store_admits_before_payload_extraction_and_coalesces_duplicate_key() {
+        let root = temp_root("async-prefix-store-early-admission");
+        let store = PagedPrefixStore::new(&root);
+        let entry = single_full_paged_entry(61.0);
+        let wanted = spec(
+            vec![61, 62],
+            2,
+            None,
+            entry.main_layer_specs(),
+            vec![],
+            None,
+        );
+        assert_eq!(
+            wanted.payload_bytes(),
+            entry.observability_stats(wanted.cached_len).payload_bytes
+        );
+        let queue = AsyncPrefixStoreQueue::new(2, 1024).expect("queue");
+        let cancellation = AsyncPrefixStoreCancellation::default();
+        let permit = match queue.try_admit(store.clone(), wanted.clone(), cancellation.clone()) {
+            AsyncPrefixStoreAdmission::Admitted(permit) => *permit,
+            _ => panic!("first admission must reserve before extraction"),
+        };
+        assert_eq!(queue.stats().pending_jobs, 1);
+        assert!(matches!(
+            queue.try_admit(
+                store,
+                wanted.clone(),
+                AsyncPrefixStoreCancellation::default(),
+            ),
+            AsyncPrefixStoreAdmission::Coalesced
+        ));
+        assert_eq!(queue.stats().pending_jobs, 1);
+        assert_eq!(queue.cancel_model(&wanted.model_id), 1);
+        assert!(cancellation.is_cancelled());
+        drop(permit);
+        assert_eq!(queue.stats().pending_jobs, 0);
+        assert_eq!(queue.stats().pending_bytes, 0);
+        queue.shutdown();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn async_prefix_store_model_unload_cancels_pending_read_through() {
+        let root = temp_root("async-prefix-store-model-cancel");
+        let store = PagedPrefixStore::new(&root);
+        let entry = single_full_paged_entry(65.0);
+        let wanted = spec(
+            vec![65, 66],
+            2,
+            None,
+            entry.main_layer_specs(),
+            vec![],
+            None,
+        );
+        let key = PagedPrefixStore::key_for(&wanted);
+        let pending_key = (root.clone(), key);
+        let cancellation = AsyncPrefixStoreCancellation::default();
+        let queue = AsyncPrefixStoreQueue::new(1, 1024).expect("queue");
+        queue.0.pending.lock().unwrap().insert(
+            pending_key.clone(),
+            AsyncPrefixPendingEntry {
+                id: 1,
+                spec: wanted.clone(),
+                entry: Some(entry),
+                cancellation: cancellation.clone(),
+            },
+        );
+
+        assert_eq!(queue.cancel_model("other-model"), 0);
+        assert_eq!(queue.cancel_model(&wanted.model_id), 1);
+        assert!(cancellation.is_cancelled());
+        assert!(queue.load_pending_observed(&store, &wanted).is_none());
+
+        queue.0.pending.lock().unwrap().remove(&pending_key);
+        queue.shutdown();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn async_prefix_store_counts_failures_and_shutdown_closes_queue() {
+        let parent = temp_root("async-prefix-store-failure");
+        let invalid_root = parent.join("not-a-directory");
+        std::fs::write(&invalid_root, b"file").unwrap();
+        let entry = single_full_paged_entry(70.0);
+        let wanted = spec(
+            vec![70, 71],
+            2,
+            None,
+            entry.main_layer_specs(),
+            vec![],
+            None,
+        );
+        let queue = AsyncPrefixStoreQueue::new(1, 1024).expect("queue");
+        assert_eq!(
+            queue.try_enqueue(PagedPrefixStore::new(&invalid_root), wanted, entry),
+            AsyncPrefixStoreSubmit::Queued
+        );
+        queue.shutdown();
+        assert_eq!(queue.stats().failed_total, 1);
+
+        let entry = single_full_paged_entry(80.0);
+        let wanted = spec(
+            vec![80, 81],
+            2,
+            None,
+            entry.main_layer_specs(),
+            vec![],
+            None,
+        );
+        assert_eq!(
+            queue.try_enqueue(PagedPrefixStore::new(&invalid_root), wanted, entry),
+            AsyncPrefixStoreSubmit::Closed
+        );
+        std::fs::remove_dir_all(parent).unwrap();
     }
 
     #[test]

@@ -11,10 +11,10 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::marker::PhantomData;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Instant;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use mlx::{Array, Dtype};
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -58,15 +58,59 @@ pub enum SchedulerError {
         requested_bytes: usize,
         soft_limit_bytes: usize,
     },
+
+    #[error(
+        "process memory pressure blocks admission: level={level:?} current={current_bytes} ceiling={ceiling_bytes}"
+    )]
+    MemoryPressure {
+        level: crate::core::process_memory::PressureLevel,
+        current_bytes: usize,
+        ceiling_bytes: usize,
+    },
+
+    #[error(
+        "prefill peak guard rejected request: requested_tokens={requested_tokens} selected_tokens={selected_tokens} target_bytes={target_bytes}"
+    )]
+    PrefillPeakUnsafe {
+        requested_tokens: usize,
+        selected_tokens: usize,
+        target_bytes: usize,
+    },
+
+    #[error(
+        "vision prefill peak guard rejected request: estimated_bytes={estimated_bytes} target_bytes={target_bytes}"
+    )]
+    VisionPrefillPeakUnsafe {
+        estimated_bytes: usize,
+        target_bytes: usize,
+    },
+
+    #[error(
+        "cold mmap materialization guard rejected request: requested_bytes={requested_bytes} current_bytes={current_bytes} target_bytes={target_bytes}"
+    )]
+    ColdMaterializationUnsafe {
+        requested_bytes: usize,
+        current_bytes: usize,
+        target_bytes: usize,
+    },
+
+    #[error(
+        "prefix store backpressure blocks admission: pending_jobs={pending_jobs} pending_bytes={pending_bytes}"
+    )]
+    StoreBackpressure {
+        pending_jobs: usize,
+        pending_bytes: usize,
+    },
 }
 
 use crate::core::cache::{
     timed, ActiveKvOffloadConfig, ActiveKvOffloadSharedStats, ActiveKvOffloadStore,
-    ActiveKvResidencySummary, ActiveKvStoredPayload, MtpCache, MtpCacheSnapshot,
-    PagedKvHotColdConfig, PagedPrefixCacheConfig, PagedPrefixEntry, PagedPrefixEntryStats,
-    PagedPrefixLoadStatus, PagedPrefixStore, PrefixLayerPayload, PrefixLruCache,
-    PrefixLruCacheConfig, PrefixLruInsertStatus, PrefixMtpLayerSpec, PrefixTensorSpec,
-    TurboQuantKVBits,
+    ActiveKvResidencySummary, ActiveKvStoredPayload, AsyncPrefixStoreAdmission,
+    AsyncPrefixStoreCancellation, AsyncPrefixStorePermit, AsyncPrefixStoreSubmit, MtpCache,
+    MtpCacheSnapshot, PagedKvHotColdConfig, PagedPrefixCacheConfig, PagedPrefixEntry,
+    PagedPrefixEntryStats, PagedPrefixKeySpec, PagedPrefixLoadStatus, PagedPrefixStore,
+    PrefixLayerPayload, PrefixLruCache, PrefixLruCacheConfig, PrefixLruInsertStatus,
+    PrefixMtpLayerSpec, PrefixTensorSpec, SharedPrefixLruCache, TurboQuantKVBits,
 };
 use crate::core::generate::{
     build_batch_attention_mask, build_batch_linear_mask, build_decode_position_ids,
@@ -97,7 +141,7 @@ use crate::nn::{
 /// Convenience alias — avoids `clippy::type_complexity` on Vec<Option<&[...]>> sites.
 type GridThwSlice<'a> = Option<&'a [(i32, i32, i32)]>;
 type PixelValuesSlice<'a> = Option<&'a [Array]>;
-type PrefixLruCacheHandle = Arc<Mutex<PrefixLruCache>>;
+type PrefixLruCacheHandle = SharedPrefixLruCache;
 
 const MTP_BATCH_DRAFT_ROW_CACHE_MIN_OFFSET: i32 = 4096;
 
@@ -163,6 +207,7 @@ struct Gemma4DrafterBatchedFillContext {
     current_token: u32,
     stop_token_ids: Vec<u32>,
     remaining: usize,
+    effective_max_draft_tokens: usize,
     draft_budget: usize,
     kv_valid_len: i32,
     draft_position: i32,
@@ -172,6 +217,12 @@ struct Gemma4DrafterBatchedFillContext {
     draft_history: Vec<u32>,
     draft_tokens: Vec<u32>,
     verify_input: Vec<u32>,
+}
+
+#[derive(Clone, Copy)]
+struct Gemma4DrafterWindowPolicy {
+    cfg: MtpSpeculativeConfig,
+    scheduler_batch_capacity: usize,
 }
 
 /// Extension trait for VL-capable models, intentionally NOT part of `core::Model`
@@ -195,6 +246,16 @@ pub trait DenseVlMethods {
         cache: Option<&mut [crate::nn::LayerCache]>,
         target: mlx::StreamOrDevice,
     ) -> crate::Result<mlx::Array>;
+
+    /// Estimate the transient process-memory growth caused by constructing and
+    /// materializing the vision encoder graph for this exact payload. This is
+    /// mandatory for every scheduler-visible model: a multimodal request must
+    /// fail closed when the model cannot provide an architecture-aware bound.
+    fn estimate_vision_prefill_peak_bytes(
+        &self,
+        pixel_values: &[mlx::Array],
+        grid_thw: &[(i32, i32, i32)],
+    ) -> crate::Result<usize>;
 
     fn compute_vision_embeds(
         &self,
@@ -230,6 +291,200 @@ pub trait DenseVlMethods {
     ) -> crate::Result<mlx::Array>;
 }
 
+/// Architecture parameters used by the common vision-prefill peak estimator.
+/// Model implementations remain responsible for selecting the correct values
+/// from their loaded vision configuration.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct VisionPrefillMemoryProfile {
+    pub hidden_size: usize,
+    pub intermediate_size: usize,
+    pub num_attention_heads: usize,
+    pub output_hidden_size: usize,
+    pub spatial_merge_area: usize,
+    pub activation_bytes: usize,
+}
+
+/// Process-footprint headroom for MLX command graphs, allocator churn, and
+/// Metal runtime state that are not represented by tensor-shape arithmetic.
+/// With the process cache governor capped at 512 MiB, real Qwen3.5, Gemma4,
+/// and MiniCPM-V-4.6 runs showed a maximum non-shape warm-run gap of about
+/// 1.02 GiB. 1.125 GiB keeps a deterministic safety margin without requiring
+/// a model warmup or a user-generated memory profile.
+pub(crate) const VISION_PREFILL_RUNTIME_OVERHEAD_BYTES: usize = 1_152 * 1024 * 1024;
+
+/// Conservative upper bound for a transformer-style vision tower. It covers
+/// payload storage, QKV/attention/MLP temporaries, positional intermediates,
+/// merged output retained for cross-modal scatter, a 1.5x tensor-graph safety
+/// margin, and the calibrated MLX runtime footprint above. Saturating
+/// arithmetic intentionally turns overflow into a fail-safe reservation
+/// rejection instead of underestimating the peak.
+pub(crate) fn estimate_transformer_vision_prefill_peak_bytes(
+    pixel_values: &[mlx::Array],
+    grid_thw: &[(i32, i32, i32)],
+    profile: VisionPrefillMemoryProfile,
+) -> crate::Result<usize> {
+    anyhow::ensure!(
+        !pixel_values.is_empty(),
+        "vision peak estimator requires non-empty pixel_values"
+    );
+    anyhow::ensure!(
+        !grid_thw.is_empty(),
+        "vision peak estimator requires non-empty grid_thw"
+    );
+    anyhow::ensure!(
+        profile.hidden_size > 0
+            && profile.intermediate_size > 0
+            && profile.num_attention_heads > 0
+            && profile.output_hidden_size > 0
+            && profile.spatial_merge_area > 0
+            && profile.activation_bytes > 0,
+        "vision peak estimator received an invalid model profile"
+    );
+
+    let payload_bytes = pixel_values.iter().fold(0usize, |total, pixels| {
+        total.saturating_add(pixels.size().saturating_mul(pixels.dtype().byte_size()))
+    });
+    let mut total_tokens = 0usize;
+    let mut attention_scores = 0usize;
+    for &(t, h, w) in grid_thw {
+        anyhow::ensure!(
+            t > 0 && h > 0 && w > 0,
+            "vision peak estimator requires positive grid dimensions, got ({t}, {h}, {w})"
+        );
+        let tokens = usize::try_from(t)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(usize::try_from(h).unwrap_or(usize::MAX))
+            .saturating_mul(usize::try_from(w).unwrap_or(usize::MAX));
+        total_tokens = total_tokens.saturating_add(tokens);
+        attention_scores = attention_scores.saturating_add(
+            profile
+                .num_attention_heads
+                .saturating_mul(tokens)
+                .saturating_mul(tokens)
+                .saturating_mul(std::mem::size_of::<f32>()),
+        );
+    }
+
+    let hidden_activations = total_tokens
+        .saturating_mul(profile.hidden_size)
+        .saturating_mul(profile.activation_bytes);
+    let qkv_peak = hidden_activations.saturating_mul(4);
+    let attention_peak = qkv_peak.saturating_add(attention_scores);
+    let mlp_peak = total_tokens
+        .saturating_mul(profile.intermediate_size)
+        .saturating_mul(profile.activation_bytes)
+        .saturating_add(hidden_activations.saturating_mul(2));
+    let positional_peak = hidden_activations.saturating_mul(4);
+    let merged_tokens =
+        total_tokens.saturating_add(profile.spatial_merge_area - 1) / profile.spatial_merge_area;
+    let retained_output = merged_tokens
+        .saturating_mul(profile.output_hidden_size)
+        .saturating_mul(profile.activation_bytes);
+    let merger_peak = hidden_activations
+        .saturating_mul(profile.spatial_merge_area)
+        .saturating_add(retained_output);
+    let stage_peak = qkv_peak
+        .max(attention_peak)
+        .max(mlp_peak)
+        .max(positional_peak)
+        .max(merger_peak);
+    let unscaled = payload_bytes
+        .saturating_add(retained_output)
+        .saturating_add(stage_peak);
+    let estimated = unscaled
+        .saturating_add(unscaled / 2)
+        .saturating_add(VISION_PREFILL_RUNTIME_OVERHEAD_BYTES);
+    anyhow::ensure!(
+        estimated > 0 && estimated != usize::MAX,
+        "vision peak estimate overflowed or produced zero"
+    );
+    Ok(estimated)
+}
+
+fn reserve_vision_prefill<M: DenseVlMethods>(
+    governor: Option<&crate::core::process_memory::SharedProcessMemoryGovernor>,
+    model: &M,
+    per_row_pixel_values: &[PixelValuesSlice<'_>],
+    per_row_grid_thw: &[GridThwSlice<'_>],
+) -> Result<Option<crate::core::process_memory::MemoryReservation>> {
+    anyhow::ensure!(
+        per_row_pixel_values.len() == per_row_grid_thw.len(),
+        "vision prefill reservation requires aligned per-row payloads"
+    );
+    let mut estimated_bytes = 0usize;
+    for (row, (pixel_values, grid_thw)) in per_row_pixel_values
+        .iter()
+        .zip(per_row_grid_thw.iter())
+        .enumerate()
+    {
+        match (pixel_values, grid_thw) {
+            (Some(pixel_values), Some(grid_thw)) if !grid_thw.is_empty() => {
+                let row_estimate = model
+                    .estimate_vision_prefill_peak_bytes(pixel_values, grid_thw)
+                    .with_context(|| {
+                        format!("vision prefill peak estimation failed for row {row}")
+                    })?;
+                anyhow::ensure!(
+                    row_estimate > 0,
+                    "vision prefill peak estimator returned zero for row {row}"
+                );
+                estimated_bytes = estimated_bytes.saturating_add(row_estimate);
+            }
+            (Some(_), None) | (None, Some(_)) => {
+                anyhow::bail!(
+                    "vision prefill row {row} must provide both pixel_values and grid_thw"
+                );
+            }
+            _ => {}
+        }
+    }
+    if estimated_bytes == 0 {
+        return Ok(None);
+    }
+    anyhow::ensure!(
+        estimated_bytes != usize::MAX,
+        "vision prefill aggregate estimate overflowed"
+    );
+    let Some(governor) = governor else {
+        return Ok(None);
+    };
+
+    governor.sample_process();
+    match governor.try_reserve_prefill(estimated_bytes, "vision_prefill") {
+        Ok(reservation) => Ok(Some(reservation)),
+        Err(first_error) => {
+            mlx::transforms::clear_cache();
+            governor.refresh_process();
+            governor
+                .try_reserve_prefill(estimated_bytes, "vision_prefill")
+                .map(Some)
+                .map_err(|retry_error| {
+                    let snapshot = governor.snapshot();
+                    tracing::warn!(
+                        first_error = %first_error,
+                        retry_error = %retry_error,
+                        estimated_bytes,
+                        target_bytes = snapshot.effective_ceiling_bytes,
+                        "vision prefill peak guard rejected after one reclaim retry"
+                    );
+                    anyhow::Error::new(SchedulerError::VisionPrefillPeakUnsafe {
+                        estimated_bytes,
+                        target_bytes: snapshot.effective_ceiling_bytes,
+                    })
+                })
+        }
+    }
+}
+
+pub(crate) fn reserve_vision_prefill_for_request<M: DenseVlMethods>(
+    governor: Option<&crate::core::process_memory::SharedProcessMemoryGovernor>,
+    model: &M,
+    pixel_values: Option<&[Array]>,
+    grid_thw: Option<&[(i32, i32, i32)]>,
+) -> Result<Option<crate::core::process_memory::MemoryReservation>> {
+    reserve_vision_prefill(governor, model, &[pixel_values], &[grid_thw])
+}
+
 impl DenseVlMethods for crate::models::qwen3_5::Qwen35Model {
     fn batched_prefill_vl(
         &self,
@@ -256,6 +511,46 @@ impl DenseVlMethods for crate::models::qwen3_5::Qwen35Model {
             image_token_id,
             cache,
             target,
+        )
+    }
+
+    fn estimate_vision_prefill_peak_bytes(
+        &self,
+        pixel_values: &[mlx::Array],
+        grid_thw: &[(i32, i32, i32)],
+    ) -> crate::Result<usize> {
+        anyhow::ensure!(
+            pixel_values.len() == grid_thw.len(),
+            "Qwen35Model vision peak estimator requires pixel_values.len()={} to equal grid_thw.len()={}",
+            pixel_values.len(),
+            grid_thw.len()
+        );
+        anyhow::ensure!(
+            self.vision_loaded(),
+            "Qwen35Model vision peak estimator requires a loaded vision tower"
+        );
+        let config =
+            self.config().vision_config.as_ref().ok_or_else(|| {
+                anyhow!("Qwen35Model vision peak estimator requires vision_config")
+            })?;
+        let merge = usize::try_from(config.spatial_merge_size)
+            .map_err(|_| anyhow!("Qwen35Model spatial_merge_size must be positive"))?;
+        estimate_transformer_vision_prefill_peak_bytes(
+            pixel_values,
+            grid_thw,
+            VisionPrefillMemoryProfile {
+                hidden_size: usize::try_from(config.hidden_size)
+                    .map_err(|_| anyhow!("Qwen35Model vision hidden_size must be positive"))?,
+                intermediate_size: usize::try_from(config.intermediate_size).map_err(|_| {
+                    anyhow!("Qwen35Model vision intermediate_size must be positive")
+                })?,
+                num_attention_heads: usize::try_from(config.num_heads)
+                    .map_err(|_| anyhow!("Qwen35Model vision num_heads must be positive"))?,
+                output_hidden_size: usize::try_from(config.out_hidden_size)
+                    .map_err(|_| anyhow!("Qwen35Model vision out_hidden_size must be positive"))?,
+                spatial_merge_area: merge.saturating_mul(merge),
+                activation_bytes: self.hidden_dtype().byte_size(),
+            },
         )
     }
 
@@ -428,6 +723,9 @@ pub struct AdmitMidHandle {
     /// are consumed by `compute_vision_embeds` in `admit_mid_begin`
     /// and not carried forward in the handle.
     pub(crate) vision_embeds_full: Option<Array>,
+    pub(crate) vision_reservation: Option<crate::core::process_memory::MemoryReservation>,
+    pub(crate) cold_materialization_guard:
+        Option<Box<crate::core::process_memory::ColdMaterializationGuard>>,
     pub(crate) image_pad_consumed: usize,
     /// Last chunk's `[1, 1, vocab]` logits, captured only at the final
     /// chunk for first-token sampling in `admit_mid_finalize`.
@@ -456,6 +754,9 @@ pub struct MtpAdmitMidHandle {
     pub(crate) position_ids_required: bool,
     pub(crate) position_ids_full: Array,
     pub(crate) vision_embeds_full: Option<Array>,
+    pub(crate) vision_reservation: Option<crate::core::process_memory::MemoryReservation>,
+    pub(crate) cold_materialization_guard:
+        Option<Box<crate::core::process_memory::ColdMaterializationGuard>>,
     pub(crate) image_pad_consumed: usize,
     pub(crate) mtp_prev_hidden: Option<Array>,
     pub(crate) last_prompt_hidden: Option<Array>,
@@ -484,6 +785,9 @@ pub struct Gemma4DrafterAdmitMidHandle {
     pub(crate) dummy_position_ids: Option<Array>,
     pub(crate) position_ids_full: Option<Array>,
     pub(crate) vision_embeds_full: Option<Array>,
+    pub(crate) vision_reservation: Option<crate::core::process_memory::MemoryReservation>,
+    pub(crate) cold_materialization_guard:
+        Option<Box<crate::core::process_memory::ColdMaterializationGuard>>,
     pub(crate) image_pad_consumed: usize,
     pub(crate) last_prompt_hidden: Option<Array>,
     pub(crate) last_shared_kv: Option<crate::models::gemma4::Gemma4SharedKvStates>,
@@ -703,6 +1007,60 @@ fn full_layer_cache_row_offset(cache: &[LayerCache], row: usize) -> Result<i32> 
         }
     }
     expected.ok_or_else(|| anyhow!("full_layer_cache_row_offset: cache has no layers"))
+}
+
+fn gemma4_verify_needs_batch_stable_qmm(
+    kv_bits: Option<TurboQuantKVBits>,
+    batch_width: usize,
+    verify_len: usize,
+) -> bool {
+    kv_bits == Some(TurboQuantKVBits::K3V4) && batch_width > 1 && verify_len > 2
+}
+
+const GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS: usize = 1024;
+
+fn gemma4_drafter_mid_admit_chunk_cap(
+    kv_bits: Option<TurboQuantKVBits>,
+    context_tokens: usize,
+    prefill_chunk_size: i32,
+    decode_cadence_mid_chunk_cap: usize,
+) -> usize {
+    if kv_bits == Some(TurboQuantKVBits::K3V4)
+        && context_tokens > GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS
+    {
+        decode_cadence_mid_chunk_cap.max(prefill_chunk_size.max(1) as usize)
+    } else {
+        decode_cadence_mid_chunk_cap
+    }
+}
+
+fn gemma4_drafter_effective_budget_for_context(
+    kv_bits: Option<TurboQuantKVBits>,
+    draft_budget: usize,
+    context_tokens: usize,
+    scheduler_batch_capacity: usize,
+) -> usize {
+    if kv_bits == Some(TurboQuantKVBits::K3V4)
+        && context_tokens > GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS
+        && scheduler_batch_capacity > 1
+    {
+        draft_budget.min(1)
+    } else {
+        draft_budget
+    }
+}
+
+fn gemma4_k3v4_long_verify_needs_stable_attention(
+    kv_bits: Option<TurboQuantKVBits>,
+    context_tokens: usize,
+    verify_len: usize,
+    scheduler_batch_capacity: usize,
+    active_batch_width: usize,
+) -> bool {
+    kv_bits == Some(TurboQuantKVBits::K3V4)
+        && context_tokens > GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS
+        && verify_len > 1
+        && (scheduler_batch_capacity == 1 || active_batch_width > 1)
 }
 
 fn build_gemma4_drafter_batched_verify_input(
@@ -1232,7 +1590,10 @@ fn paged_prefix_restore_candidates(
     }
     let max_cached_len = i32::try_from(prompt_len - 1)
         .map_err(|_| anyhow!("paged prefix restore length exceeds i32"))?;
-    let mut cached_lengths = Vec::new();
+    // The writer always stores the maximal reusable prefix (prompt_len - 1).
+    // Probe it directly so an in-flight async store entry is visible before
+    // its temporary directory has been atomically renamed into place.
+    let mut cached_lengths = vec![max_cached_len];
     if let Some(prefix_lru_cache) = prefix_lru_cache {
         cached_lengths.extend(
             lock_prefix_lru_cache(prefix_lru_cache)?
@@ -1326,6 +1687,66 @@ fn try_insert_prefix_lru_entry(
                 lock_prefix_lru_cache(prefix_lru_cache)?.max_bytes()
             );
             Ok(None)
+        }
+    }
+}
+
+fn try_admit_prefix_store_entry(
+    store: PagedPrefixStore,
+    spec: &PagedPrefixKeySpec,
+    main_row: usize,
+    mtp_row: Option<usize>,
+) -> Result<Option<(String, Option<AsyncPrefixStorePermit>)>> {
+    let key = PagedPrefixStore::key_for(spec);
+    match crate::core::cache::process_async_prefix_store_queue().try_admit(
+        store,
+        spec.clone(),
+        AsyncPrefixStoreCancellation::default(),
+    ) {
+        AsyncPrefixStoreAdmission::Admitted(permit) => Ok(Some((key, Some(*permit)))),
+        AsyncPrefixStoreAdmission::Coalesced => Ok(Some((key, None))),
+        AsyncPrefixStoreAdmission::Backpressured => {
+            tracing::warn!(
+                main_row,
+                ?mtp_row,
+                key,
+                "paged SSD prefix cache extraction skipped by async-store backpressure"
+            );
+            Ok(None)
+        }
+        AsyncPrefixStoreAdmission::Closed => {
+            Err(anyhow!("paged SSD prefix cache async store is closed"))
+        }
+    }
+}
+
+fn submit_prefix_store_entry(
+    permit: AsyncPrefixStorePermit,
+    key: String,
+    entry: PagedPrefixEntry,
+    cached_len: i32,
+    main_row: usize,
+    mtp_row: Option<usize>,
+) -> Result<Option<String>> {
+    let stats = entry.observability_stats(cached_len);
+    match permit.submit(entry) {
+        AsyncPrefixStoreSubmit::Queued => {
+            log_paged_prefix_save("queued", &key, main_row, mtp_row, stats, 0);
+            Ok(Some(key))
+        }
+        AsyncPrefixStoreSubmit::Coalesced => Ok(Some(key)),
+        AsyncPrefixStoreSubmit::Cancelled => Ok(None),
+        AsyncPrefixStoreSubmit::Backpressured => {
+            tracing::warn!(
+                main_row,
+                ?mtp_row,
+                key,
+                "paged SSD prefix cache write skipped by async-store backpressure"
+            );
+            Ok(None)
+        }
+        AsyncPrefixStoreSubmit::Closed => {
+            Err(anyhow!("paged SSD prefix cache async store is closed"))
         }
     }
 }
@@ -1549,6 +1970,13 @@ fn try_save_paged_prefix_for_prompt_row(
     else {
         return Ok(None);
     };
+    let store = config.store();
+    let Some((key, permit)) = try_admit_prefix_store_entry(store, &spec, cache_row, None)? else {
+        return Ok(None);
+    };
+    let Some(permit) = permit else {
+        return Ok(Some(key));
+    };
     let Some((entry, cached_len)) = prefix_entry_for_row(cache, cache_row)? else {
         return Ok(None);
     };
@@ -1561,7 +1989,6 @@ fn try_save_paged_prefix_for_prompt_row(
             prompt_ids.len()
         );
     }
-    let stats = entry.observability_stats(cached_len);
     try_insert_prefix_lru_entry(
         prefix_lru_cache,
         spec.clone(),
@@ -1569,30 +1996,7 @@ fn try_save_paged_prefix_for_prompt_row(
         cache_row,
         None,
     )?;
-    let store = config.store();
-    if let Some(key) = store.matching_entry_key(&spec)? {
-        tracing::trace!(
-            "paged SSD prefix cache save skipped: row={} tokens={} key={} status=already_present",
-            cache_row,
-            prompt_ids.len(),
-            key
-        );
-        return Ok(None);
-    }
-    let save_start = Instant::now();
-    let (key, saved) = store.save_if_absent(&spec, &entry)?;
-    let save_us = save_start.elapsed().as_micros();
-    if !saved {
-        tracing::trace!(
-            "paged SSD prefix cache save skipped: row={} tokens={} key={} status=already_present",
-            cache_row,
-            prompt_ids.len(),
-            key
-        );
-        return Ok(None);
-    }
-    log_paged_prefix_save("saved", &key, cache_row, None, stats, save_us);
-    Ok(Some(key))
+    submit_prefix_store_entry(permit, key, entry, cached_len, cache_row, None)
 }
 
 fn mtp_layer_specs_for_cache(mtp_cache: &MtpCache, cached_len: i32) -> Vec<PrefixMtpLayerSpec> {
@@ -1829,6 +2233,15 @@ fn try_save_paged_prefix_for_prompt_with_mtp_row(
     };
     spec.mtp_layers = mtp_layer_specs_for_cache(mtp_cache, cached_len);
     spec.mtp_last_hidden = Some(PrefixTensorSpec::from_array(last_hidden));
+    let store = config.store();
+    let Some((key, permit)) =
+        try_admit_prefix_store_entry(store, &spec, main_cache_row, Some(mtp_cache_row))?
+    else {
+        return Ok(None);
+    };
+    let Some(permit) = permit else {
+        return Ok(Some(key));
+    };
     let Some((mut entry, cached_len)) = prefix_entry_for_row(main_cache, main_cache_row)? else {
         return Ok(None);
     };
@@ -1852,7 +2265,6 @@ fn try_save_paged_prefix_for_prompt_with_mtp_row(
 
     spec.mtp_layers = entry.mtp_layer_specs();
     spec.mtp_last_hidden = entry.mtp_last_hidden_spec();
-    let stats = entry.observability_stats(cached_len);
     try_insert_prefix_lru_entry(
         prefix_lru_cache,
         spec.clone(),
@@ -1860,39 +2272,14 @@ fn try_save_paged_prefix_for_prompt_with_mtp_row(
         main_cache_row,
         Some(mtp_cache_row),
     )?;
-    let store = config.store();
-    if let Some(key) = store.matching_entry_key(&spec)? {
-        tracing::trace!(
-            "paged SSD prefix cache MTP save skipped: main_row={} mtp_row={} tokens={} key={} status=already_present",
-            main_cache_row,
-            mtp_cache_row,
-            prompt_ids.len(),
-            key
-        );
-        return Ok(None);
-    }
-    let save_start = Instant::now();
-    let (key, saved) = store.save_if_absent(&spec, &entry)?;
-    let save_us = save_start.elapsed().as_micros();
-    if !saved {
-        tracing::trace!(
-            "paged SSD prefix cache MTP save skipped: main_row={} mtp_row={} tokens={} key={} status=already_present",
-            main_cache_row,
-            mtp_cache_row,
-            prompt_ids.len(),
-            key
-        );
-        return Ok(None);
-    }
-    log_paged_prefix_save(
-        "MTP saved",
-        &key,
+    submit_prefix_store_entry(
+        permit,
+        key,
+        entry,
+        cached_len,
         main_cache_row,
         Some(mtp_cache_row),
-        stats,
-        save_us,
-    );
-    Ok(Some(key))
+    )
 }
 
 fn empty_prefix_stats(cached_len: i32) -> PagedPrefixEntryStats {
@@ -3236,6 +3623,11 @@ pub struct Scheduler<M: Model> {
     active_kv_config: ActiveKvOffloadConfig,
     /// Shared Active KV metrics used by `/healthz` and Dashboard status.
     active_kv_stats: Option<ActiveKvOffloadSharedStats>,
+    process_memory_governor: Option<crate::core::process_memory::SharedProcessMemoryGovernor>,
+    cold_materialization_tracker:
+        Arc<OnceLock<Arc<crate::core::process_memory::ColdMaterializationTracker>>>,
+    governor_admission_reservations:
+        HashMap<RequestId, crate::core::process_memory::MemoryReservation>,
     _marker: PhantomData<fn(&M) -> ()>,
 }
 
@@ -3340,6 +3732,9 @@ impl<M: Model> Scheduler<M> {
             active_kv_store: None,
             active_kv_config: ActiveKvOffloadConfig::disabled(),
             active_kv_stats: None,
+            process_memory_governor: None,
+            cold_materialization_tracker: Arc::new(OnceLock::new()),
+            governor_admission_reservations: HashMap::new(),
             _marker: PhantomData,
         })
     }
@@ -3355,6 +3750,14 @@ impl<M: Model> Scheduler<M> {
             anyhow::bail!("prefix LRU cache requires paged prefix cache");
         }
         self.prefix_lru_cache = Some(Arc::new(Mutex::new(PrefixLruCache::new(config)?)));
+        Ok(())
+    }
+
+    pub fn enable_shared_prefix_lru_cache(&mut self, cache: SharedPrefixLruCache) -> Result<()> {
+        if self.paged_prefix_cache.is_none() {
+            anyhow::bail!("prefix LRU cache requires paged prefix cache");
+        }
+        self.prefix_lru_cache = Some(cache);
         Ok(())
     }
 
@@ -3379,6 +3782,163 @@ impl<M: Model> Scheduler<M> {
         self.active_kv_store.is_some()
     }
 
+    pub fn enable_process_memory_governor(
+        &mut self,
+        governor: crate::core::process_memory::SharedProcessMemoryGovernor,
+    ) {
+        governor.sample_process();
+        self.process_memory_governor = Some(governor);
+    }
+
+    pub(crate) fn share_cold_materialization_tracker(
+        &mut self,
+        tracker: Arc<OnceLock<Arc<crate::core::process_memory::ColdMaterializationTracker>>>,
+    ) {
+        self.cold_materialization_tracker = tracker;
+    }
+
+    fn begin_cold_materialization(
+        &self,
+        components: crate::core::process_memory::MaterializationComponents,
+    ) -> Result<Option<crate::core::process_memory::ColdMaterializationGuard>> {
+        let (Some(tracker), Some(governor)) = (
+            self.cold_materialization_tracker.get(),
+            self.process_memory_governor.as_ref(),
+        ) else {
+            return Ok(None);
+        };
+        tracker.begin(components, governor).map(Some).map_err(|_| {
+            let snapshot = governor.snapshot();
+            anyhow::Error::new(SchedulerError::ColdMaterializationUnsafe {
+                requested_bytes: components.requested_bytes(tracker.estimate()),
+                current_bytes: snapshot.current_usage_bytes,
+                target_bytes: snapshot.hard_watermark_bytes,
+            })
+        })
+    }
+
+    fn active_materialization_components(
+        &self,
+        speculative: bool,
+    ) -> crate::core::process_memory::MaterializationComponents {
+        crate::core::process_memory::MaterializationComponents::for_request(
+            self.slots
+                .iter()
+                .flatten()
+                .any(|state| state.pixel_values.is_some()),
+            speculative,
+        )
+    }
+
+    pub fn memory_governor_snapshot(
+        &self,
+    ) -> Option<crate::core::process_memory::MemoryGovernorSnapshot> {
+        self.process_memory_governor
+            .as_ref()
+            .map(|governor| governor.snapshot())
+    }
+
+    pub fn apply_process_memory_pressure(
+        &mut self,
+    ) -> Result<crate::core::process_memory::PressureLevel> {
+        let Some(governor) = self.process_memory_governor.as_ref() else {
+            return Ok(crate::core::process_memory::PressureLevel::Normal);
+        };
+        let snapshot = governor.sample_process();
+        if snapshot.pressure_level == crate::core::process_memory::PressureLevel::Normal {
+            if let Some(cache) = self.cache.as_mut() {
+                let restored = cache
+                    .iter_mut()
+                    .map(|layer| usize::from(layer.restore_configured_paged_hot_window()))
+                    .sum::<usize>();
+                if restored > 0 {
+                    tracing::info!(
+                        restored_layers = restored,
+                        "memory governor restored active KV hot-window policy"
+                    );
+                }
+            }
+        } else {
+            mlx::transforms::clear_cache();
+        }
+        if snapshot.pressure_level.rank() >= crate::core::process_memory::PressureLevel::Hard.rank()
+        {
+            let mut reclaimed_pages = 0usize;
+            if let Some(cache) = self.cache.as_mut() {
+                for layer in cache {
+                    reclaimed_pages =
+                        reclaimed_pages.saturating_add(layer.shrink_paged_hot_window(1)?);
+                }
+            }
+            if reclaimed_pages > 0 {
+                tracing::info!(
+                    reclaimed_pages,
+                    ?snapshot.pressure_level,
+                    "memory governor demoted active KV hot pages"
+                );
+                self.refresh_active_kv_residency_stats();
+            }
+        }
+        Ok(snapshot.pressure_level)
+    }
+
+    fn plan_prefill_chunk(
+        &self,
+        requested_tokens: usize,
+        kv_len: usize,
+        batch_size: usize,
+    ) -> Result<Option<crate::core::process_memory::PrefillChunkPlan>> {
+        let Some(governor) = self.process_memory_governor.as_ref() else {
+            return Ok(None);
+        };
+        governor.sample_process();
+        match governor.plan_prefill_chunk(requested_tokens, kv_len, batch_size, &self.meta) {
+            Ok(plan) => Ok(Some(plan)),
+            Err(first_error) => {
+                // One idempotent reclaim-and-retry is part of the prefill
+                // contract. `clear_cache` only releases MLX's reusable buffer
+                // cache; it does not mutate model weights or request KV.
+                mlx::transforms::clear_cache();
+                governor.refresh_process();
+                governor
+                    .plan_prefill_chunk(requested_tokens, kv_len, batch_size, &self.meta)
+                    .map(Some)
+                    .map_err(|retry_error| {
+                        tracing::warn!(
+                            first_error = %first_error,
+                            retry_error = %retry_error,
+                            requested_tokens,
+                            kv_len,
+                            batch_size,
+                            "prefill peak guard rejected after one reclaim retry"
+                        );
+                        let snapshot = governor.snapshot();
+                        anyhow::Error::new(SchedulerError::PrefillPeakUnsafe {
+                            requested_tokens,
+                            selected_tokens: 0,
+                            target_bytes: snapshot.effective_ceiling_bytes,
+                        })
+                    })
+            }
+        }
+    }
+
+    fn commit_governor_admission(&mut self, id: RequestId) {
+        if let Some(reservation) = self.governor_admission_reservations.remove(&id) {
+            reservation.commit();
+        }
+    }
+
+    fn commit_all_governor_admissions(&mut self) {
+        for (_, reservation) in self.governor_admission_reservations.drain() {
+            reservation.commit();
+        }
+    }
+
+    fn rollback_all_governor_admissions(&mut self) {
+        self.governor_admission_reservations.clear();
+    }
+
     fn temp_scheduler_with_parent_budget<T>(&self) -> Result<Scheduler<T>>
     where
         T: Model,
@@ -3389,14 +3949,18 @@ impl<M: Model> Scheduler<M> {
             self.budget_state.resident_cap(),
             self.budget_state.policy(),
         );
-        Scheduler::<T>::new_with_state(
+        let mut scheduler = Scheduler::<T>::new_with_state(
             1,
             self.effective_cap_max,
             budget_state,
             self.memory_budget_exceeded_count.clone(),
             self.meta,
         )
-        .map_err(anyhow::Error::from)
+        .map_err(anyhow::Error::from)?;
+        if let Some(governor) = self.process_memory_governor.as_ref() {
+            scheduler.enable_process_memory_governor(Arc::clone(governor));
+        }
+        Ok(scheduler)
     }
 
     pub fn refresh_active_kv_residency_stats(&self) {
@@ -3806,6 +4370,17 @@ impl<M: Model> Scheduler<M> {
                 anyhow!("scheduler full: no row available (b_max={})", self.b_max)
             })?;
 
+        if self.paged_prefix_cache.is_some() {
+            let store_queue = crate::core::cache::process_async_prefix_store_queue();
+            if store_queue.is_backpressured() {
+                let stats = store_queue.stats();
+                return Err(anyhow::Error::new(SchedulerError::StoreBackpressure {
+                    pending_jobs: stats.pending_jobs,
+                    pending_bytes: stats.pending_bytes,
+                }));
+            }
+        }
+
         // B1-p2.5: memory budget admission gate.
         let row_cap = req.prompt_ids.len().saturating_add(req.max_new_tokens);
         let charged_cap = self.budget_state.resident_charge_cap(row_cap);
@@ -3820,6 +4395,33 @@ impl<M: Model> Scheduler<M> {
                 soft_limit_bytes: soft_limit,
             }));
         }
+
+        let governor_reservation = if let Some(governor) = self.process_memory_governor.as_ref() {
+            let snapshot = governor.sample_process();
+            if snapshot.pressure_level != crate::core::process_memory::PressureLevel::Normal {
+                self.budget_state.release(requested_bytes);
+                return Err(anyhow::Error::new(SchedulerError::MemoryPressure {
+                    level: snapshot.pressure_level,
+                    current_bytes: snapshot.current_usage_bytes,
+                    ceiling_bytes: snapshot.effective_ceiling_bytes,
+                }));
+            }
+            match governor.try_reserve(requested_bytes, "scheduler_admission") {
+                Ok(reservation) => Some(reservation),
+                Err(error) => {
+                    self.budget_state.release(requested_bytes);
+                    let snapshot = governor.snapshot();
+                    tracing::warn!(error = %error, "process memory governor rejected admission");
+                    return Err(anyhow::Error::new(SchedulerError::MemoryPressure {
+                        level: snapshot.pressure_level,
+                        current_bytes: snapshot.current_usage_bytes,
+                        ceiling_bytes: snapshot.effective_ceiling_bytes,
+                    }));
+                }
+            }
+        } else {
+            None
+        };
 
         let id = RequestId(self.next_id);
         self.next_id += 1;
@@ -3853,6 +4455,9 @@ impl<M: Model> Scheduler<M> {
         };
         let seed = state.sampler.seed;
         self.slots[row_idx] = Some(state);
+        if let Some(reservation) = governor_reservation {
+            self.governor_admission_reservations.insert(id, reservation);
+        }
         // Seed this row's PRNG state from the request's sampler seed.
         self.init_row_prng(row_idx, seed)?;
         if self.phase == Phase::Idle {
@@ -3879,6 +4484,7 @@ impl<M: Model> Scheduler<M> {
         if let Some(state) = self.slots[row_idx].take() {
             self.budget_state.release(state.kv_bytes_admitted);
         }
+        self.governor_admission_reservations.remove(&id);
         self.drop_speculative_row_state(row_idx);
         // Phase transitions on evict:
         //   Admitting + active_count==0 -> Idle (pre-3c-3 behavior)
@@ -4368,6 +4974,7 @@ impl<M: Model> Scheduler<M> {
                 self.budget_state.release(state.kv_bytes_admitted);
             }
         }
+        self.governor_admission_reservations.clear();
         // B1-p2.3f: drop the cache so the next prefill_admitted lazy-allocates
         // with cap matching the new batch's requirements. ~10ms re-alloc per
         // outer batch is negligible vs prefill GPU time (100s of ms to
@@ -4403,8 +5010,12 @@ impl<M: Model> Scheduler<M> {
     {
         self.ensure_not_poisoned()?;
         match self.prefill_admitted_mtp_single_inner(model, mtp, cfg) {
-            Ok(events) => Ok(events),
+            Ok(events) => {
+                self.commit_all_governor_admissions();
+                Ok(events)
+            }
             Err(e) => {
+                self.rollback_all_governor_admissions();
                 self.poisoned = true;
                 if !matches!(self.phase, Phase::Decoding | Phase::Finished) {
                     self.phase = Phase::Finished;
@@ -4506,6 +5117,16 @@ impl<M: Model> Scheduler<M> {
         }
         MtpSpeculativeConfig::new(cfg.max_draft_tokens, sampler)?;
         let is_vl = pixel_values.is_some();
+        let _vision_reservation = if is_vl {
+            reserve_vision_prefill(
+                self.process_memory_governor.as_ref(),
+                model,
+                &[pixel_values.as_deref()],
+                &[image_grid_thw.as_deref()],
+            )?
+        } else {
+            None
+        };
         let prompt_ids_i32: Vec<i32> = if is_vl {
             prompt_ids.iter().map(|&t| t as i32).collect()
         } else {
@@ -4594,6 +5215,10 @@ impl<M: Model> Scheduler<M> {
             } else {
                 remaining.min(prefill_chunk_size.max(1))
             };
+            let prefill_plan = self.plan_prefill_chunk(n as usize, pos as usize, 1)?;
+            if let Some(plan) = prefill_plan.as_ref() {
+                n = plan.selected_tokens as i32;
+            }
             if self.paged_prefix_cache.is_some()
                 && pos + n == prompt_len_i32
                 && pos < prompt_len_i32 - 1
@@ -4685,6 +5310,7 @@ impl<M: Model> Scheduler<M> {
             )?;
             add_mtp_prefill_cache_commit_us(&mut stats, commit_start);
             let chunk_last_hidden = slice_hidden_position(&hidden, n - 1)?;
+            mlx::transforms::eval(&[&hidden, &chunk_last_hidden])?;
             mtp_prev_hidden = Some(chunk_last_hidden.clone());
             let new_pos = pos + n;
             if let Some(cache) = self.cache.as_ref() {
@@ -4709,6 +5335,7 @@ impl<M: Model> Scheduler<M> {
             if new_pos == prompt_len_i32 {
                 last_prompt_hidden = Some(chunk_last_hidden);
             }
+            drop(prefill_plan);
             pos = new_pos;
         }
         let last_prompt_hidden = last_prompt_hidden
@@ -4786,9 +5413,18 @@ impl<M: Model> Scheduler<M> {
         M: MtpSpeculativeModel + DenseVlMethods,
     {
         self.ensure_not_poisoned()?;
+        let cold_materialization =
+            self.begin_cold_materialization(self.active_materialization_components(true))?;
         match self.prefill_admitted_mtp_batch_inner(model, mtp, cfg) {
-            Ok(events) => Ok(events),
+            Ok(events) => {
+                self.commit_all_governor_admissions();
+                if let Some(guard) = cold_materialization {
+                    guard.commit();
+                }
+                Ok(events)
+            }
             Err(e) => {
+                self.rollback_all_governor_admissions();
                 self.poisoned = true;
                 if !matches!(self.phase, Phase::Decoding | Phase::Finished) {
                     self.phase = Phase::Finished;
@@ -6496,9 +7132,18 @@ impl<M: Model> Scheduler<M> {
         M: DenseVlMethods,
     {
         self.ensure_not_poisoned()?;
+        let cold_materialization =
+            self.begin_cold_materialization(self.active_materialization_components(false))?;
         match self.prefill_admitted_inner(model) {
-            Ok(events) => Ok(events),
+            Ok(events) => {
+                self.commit_all_governor_admissions();
+                if let Some(guard) = cold_materialization {
+                    guard.commit();
+                }
+                Ok(events)
+            }
             Err(e) => {
+                self.rollback_all_governor_admissions();
                 self.poisoned = true;
                 Err(e)
             }
@@ -6553,6 +7198,23 @@ impl<M: Model> Scheduler<M> {
         // Build [B_prefill, T_max] right-padded input_ids (pad value 0).
         let b = prefill_rows.len();
         let t = max_len as usize;
+        let prefill_plan = self.plan_prefill_chunk(t, 0, b)?;
+        if prefill_plan
+            .as_ref()
+            .is_some_and(|plan| plan.selected_tokens < t)
+        {
+            let plan = prefill_plan.as_ref().expect("checked Some above");
+            if b == 1 {
+                let chunk_size = plan.selected_tokens;
+                drop(prefill_plan);
+                return self.prefill_single_adaptive_chunks(model, prefill_rows[0], chunk_size);
+            }
+            return Err(anyhow::Error::new(SchedulerError::PrefillPeakUnsafe {
+                requested_tokens: t,
+                selected_tokens: plan.selected_tokens,
+                target_bytes: plan.target_bytes,
+            }));
+        }
         let mut flat: Vec<i32> = vec![0; b * t];
         for (batch_row, &slot_row) in prefill_rows.iter().enumerate() {
             let state = self.slots[slot_row]
@@ -6574,6 +7236,42 @@ impl<M: Model> Scheduler<M> {
                 .as_ref()
                 .is_some_and(|r| r.pixel_values.is_some())
         });
+        let per_row_pv_owned: Vec<Option<Vec<Array>>> = prefill_rows
+            .iter()
+            .map(|&row| {
+                self.slots[row]
+                    .as_ref()
+                    .expect("prefill_rows contain only occupied slots")
+                    .pixel_values
+                    .clone()
+            })
+            .collect();
+        let per_row_grids_owned: Vec<Option<Vec<(i32, i32, i32)>>> = prefill_rows
+            .iter()
+            .map(|&row| {
+                self.slots[row]
+                    .as_ref()
+                    .expect("prefill_rows contain only occupied slots")
+                    .image_grid_thw
+                    .clone()
+            })
+            .collect();
+        let per_row_pv: Vec<PixelValuesSlice<'_>> =
+            per_row_pv_owned.iter().map(|opt| opt.as_deref()).collect();
+        let per_row_grids: Vec<GridThwSlice<'_>> = per_row_grids_owned
+            .iter()
+            .map(|opt| opt.as_deref())
+            .collect();
+        let _vision_reservation = if any_vl {
+            reserve_vision_prefill(
+                self.process_memory_governor.as_ref(),
+                model,
+                &per_row_pv,
+                &per_row_grids,
+            )?
+        } else {
+            None
+        };
 
         // Allocate the compact cache exactly to the occupied scheduler rows.
         let cap = self.prefill_cache_cap();
@@ -6626,31 +7324,6 @@ impl<M: Model> Scheduler<M> {
                     .collect();
                 let per_row_ids_refs: Vec<&[i32]> =
                     per_row_ids_i32.iter().map(|v| v.as_slice()).collect();
-                let per_row_grids_owned: Vec<Option<Vec<(i32, i32, i32)>>> = prefill_rows
-                    .iter()
-                    .map(|&row| {
-                        self.slots[row]
-                            .as_ref()
-                            .expect("prefill_rows contain only occupied slots")
-                            .image_grid_thw
-                            .clone()
-                    })
-                    .collect();
-                let per_row_grids: Vec<GridThwSlice<'_>> = per_row_grids_owned
-                    .iter()
-                    .map(|opt| opt.as_deref())
-                    .collect();
-                let per_row_pv: Vec<PixelValuesSlice<'_>> = prefill_rows
-                    .iter()
-                    .map(|&row| {
-                        self.slots[row]
-                            .as_ref()
-                            .expect("prefill_rows contain only occupied slots")
-                            .pixel_values
-                            .as_deref()
-                    })
-                    .collect();
-
                 // Tokenizer-defined constants from the first VL slot.
                 let (img_token_id, merge_size) = prefill_rows
                     .iter()
@@ -7103,6 +7776,7 @@ impl<M: Model> Scheduler<M> {
         .map_err(|e| anyhow!("prefill_admitted: sample_batch failed: {e:?}"));
 
         let tokens = sample_result?;
+        drop(prefill_plan);
         drop(history_refs);
         drop(row_samplers);
         self.scatter_prng_state_from_rows(&prefill_rows, &compact_prng)?;
@@ -7146,6 +7820,47 @@ impl<M: Model> Scheduler<M> {
         };
 
         Ok(events)
+    }
+
+    fn prefill_single_adaptive_chunks(
+        &mut self,
+        model: &M,
+        row_idx: usize,
+        chunk_size: usize,
+    ) -> Result<Vec<StepEvent>>
+    where
+        M: DenseVlMethods,
+    {
+        let id = self.slots[row_idx]
+            .as_ref()
+            .ok_or_else(|| anyhow!("adaptive prefill row is absent"))?
+            .id;
+        let cap = self.prefill_cache_cap();
+        let turboquant_bits = self.kv_cache_turboquant_bits_for_rows(&[row_idx])?;
+        self.cache =
+            Some(self.make_model_cache(model, 1, cap, model.cache_dtype(), turboquant_bits)?);
+        self.cache_rows = vec![row_idx];
+        let mut handle = self.admit_mid_begin_inner(id, row_idx, model)?;
+        handle.chunk_size = i32::try_from(chunk_size)
+            .map_err(|_| anyhow!("adaptive prefill chunk exceeds i32"))?
+            .max(1);
+        loop {
+            if self.admit_mid_chunk(&mut handle, model)? {
+                break;
+            }
+        }
+        let (_, event) = self.admit_mid_finalize(handle, model)?;
+        self.phase = if self
+            .slots
+            .iter()
+            .any(|slot| matches!(slot, Some(state) if !state.finished))
+        {
+            Phase::Decoding
+        } else {
+            Phase::Finished
+        };
+        self.refresh_active_kv_residency_stats();
+        Ok(vec![event])
     }
 
     /// Advance every non-finished active row by exactly one decode token.
@@ -7546,6 +8261,28 @@ impl<M: Model> Scheduler<M> {
         // For VL: pre-compute vision embeddings once (`[N_image_pad_total,
         // hidden]`). Each chunk slices the rows it consumes; tracking the
         // running offset via `image_pad_consumed`.
+        let cold_materialization_guard = if is_vl {
+            self.begin_cold_materialization(
+                crate::core::process_memory::MaterializationComponents {
+                    text: false,
+                    vision: true,
+                    speculative: false,
+                },
+            )?
+            .map(Box::new)
+        } else {
+            None
+        };
+        let vision_reservation = if is_vl {
+            reserve_vision_prefill(
+                self.process_memory_governor.as_ref(),
+                model,
+                &[pixel_values.as_deref()],
+                &[image_grid_thw.as_deref()],
+            )?
+        } else {
+            None
+        };
         let vision_embeds_full = if is_vl {
             let pv = pixel_values
                 .as_deref()
@@ -7581,6 +8318,8 @@ impl<M: Model> Scheduler<M> {
             position_ids_required,
             position_ids_full,
             vision_embeds_full,
+            vision_reservation,
+            cold_materialization_guard,
             image_pad_consumed,
             last_logits: None,
         })
@@ -7606,9 +8345,18 @@ impl<M: Model> Scheduler<M> {
     {
         self.ensure_not_poisoned()?;
 
+        let requested_tokens = handle
+            .chunk_size
+            .min(handle.prompt_len.saturating_sub(handle.chunk_start))
+            .max(1) as usize;
+        let mut prefill_plan =
+            self.plan_prefill_chunk(requested_tokens, handle.chunk_start as usize, 1)?;
+        let selected_tokens = prefill_plan
+            .as_ref()
+            .map_or(requested_tokens, |plan| plan.selected_tokens);
         let base_chunk_end = handle
             .chunk_start
-            .saturating_add(handle.chunk_size)
+            .saturating_add(selected_tokens as i32)
             .min(handle.prompt_len);
         let mut chunk_end = if handle.is_vl {
             extend_vl_chunk_end_for_image_pad(
@@ -7620,6 +8368,25 @@ impl<M: Model> Scheduler<M> {
         } else {
             base_chunk_end
         };
+        let actual_tokens = (chunk_end - handle.chunk_start).max(0) as usize;
+        if actual_tokens > selected_tokens {
+            // VL image-pad runs are atomic and may extend the proposed chunk.
+            // Re-reserve the true peak; never silently exceed the governor's
+            // selected size.
+            drop(prefill_plan.take());
+            prefill_plan =
+                self.plan_prefill_chunk(actual_tokens, handle.chunk_start as usize, 1)?;
+            if prefill_plan
+                .as_ref()
+                .is_some_and(|plan| plan.selected_tokens < actual_tokens)
+            {
+                return Err(anyhow::Error::new(SchedulerError::PrefillPeakUnsafe {
+                    requested_tokens: actual_tokens,
+                    selected_tokens: prefill_plan.as_ref().map_or(0, |plan| plan.selected_tokens),
+                    target_bytes: prefill_plan.as_ref().map_or(0, |plan| plan.target_bytes),
+                }));
+            }
+        }
         if self.paged_prefix_cache.is_some()
             && chunk_end == handle.prompt_len
             && handle.chunk_start < handle.prompt_len - 1
@@ -7671,6 +8438,9 @@ impl<M: Model> Scheduler<M> {
         //   into the interleaved `Scheduler::step` call. (GenerationStream
         //   chunked prefill at core/generate.rs ~line 1053 uses the
         //   same `eval(hidden)` pattern for the same reason.)
+        let materializes_vision = handle.is_vl
+            && count_image_pad(chunk_ids_u32, handle.image_token_id) > 0
+            && handle.vision_reservation.is_some();
         let result_logits: Option<Array> = if handle.is_vl {
             // VL chunk: slice the rows of `vision_embeds_full` that
             // correspond to this chunk's `image_pad` token count.
@@ -7748,6 +8518,9 @@ impl<M: Model> Scheduler<M> {
         };
 
         if let Some(logits) = result_logits {
+            // The reservation covers materialization, not merely lazy graph
+            // construction. This is also the hand-off barrier to finalize.
+            mlx::transforms::eval(&[&logits])?;
             handle.last_logits = Some(logits);
         } else {
             match try_save_paged_prefix_for_prompt(
@@ -7768,6 +8541,13 @@ impl<M: Model> Scheduler<M> {
                 }
             }
         }
+        if materializes_vision {
+            drop(handle.vision_reservation.take());
+            if let Some(guard) = handle.cold_materialization_guard.take() {
+                (*guard).commit();
+            }
+        }
+        drop(prefill_plan);
         handle.chunk_start = chunk_end;
         Ok(is_last)
     }
@@ -7850,6 +8630,7 @@ impl<M: Model> Scheduler<M> {
             state.finish_reason = Some("length");
         }
         let finish_reason = state.finish_reason;
+        self.commit_governor_admission(id);
 
         Ok((
             id,
@@ -8025,6 +8806,28 @@ impl<M: Model> Scheduler<M> {
             build_position_ids(0, prompt_len)?
         };
 
+        let cold_materialization_guard = if is_vl {
+            self.begin_cold_materialization(
+                crate::core::process_memory::MaterializationComponents {
+                    text: false,
+                    vision: true,
+                    speculative: false,
+                },
+            )?
+            .map(Box::new)
+        } else {
+            None
+        };
+        let vision_reservation = if is_vl {
+            reserve_vision_prefill(
+                self.process_memory_governor.as_ref(),
+                model,
+                &[pixel_values.as_deref()],
+                &[image_grid_thw.as_deref()],
+            )?
+        } else {
+            None
+        };
         let vision_embeds_full = if is_vl {
             let pv = pixel_values
                 .as_deref()
@@ -8059,6 +8862,8 @@ impl<M: Model> Scheduler<M> {
             position_ids_required,
             position_ids_full,
             vision_embeds_full,
+            vision_reservation,
+            cold_materialization_guard,
             image_pad_consumed,
             mtp_prev_hidden,
             last_prompt_hidden,
@@ -8084,9 +8889,18 @@ impl<M: Model> Scheduler<M> {
             return Ok(true);
         }
 
+        let requested_tokens = handle
+            .chunk_size
+            .min(handle.prompt_len.saturating_sub(handle.chunk_start))
+            .max(1) as usize;
+        let mut prefill_plan =
+            self.plan_prefill_chunk(requested_tokens, handle.chunk_start as usize, 1)?;
+        let selected_tokens = prefill_plan
+            .as_ref()
+            .map_or(requested_tokens, |plan| plan.selected_tokens);
         let base_chunk_end = handle
             .chunk_start
-            .saturating_add(handle.chunk_size)
+            .saturating_add(selected_tokens as i32)
             .min(handle.prompt_len);
         let mut chunk_end = if handle.is_vl {
             extend_vl_chunk_end_for_image_pad(
@@ -8098,6 +8912,22 @@ impl<M: Model> Scheduler<M> {
         } else {
             base_chunk_end
         };
+        let actual_tokens = (chunk_end - handle.chunk_start).max(0) as usize;
+        if actual_tokens > selected_tokens {
+            drop(prefill_plan.take());
+            prefill_plan =
+                self.plan_prefill_chunk(actual_tokens, handle.chunk_start as usize, 1)?;
+            if prefill_plan
+                .as_ref()
+                .is_some_and(|plan| plan.selected_tokens < actual_tokens)
+            {
+                return Err(anyhow::Error::new(SchedulerError::PrefillPeakUnsafe {
+                    requested_tokens: actual_tokens,
+                    selected_tokens: prefill_plan.as_ref().map_or(0, |plan| plan.selected_tokens),
+                    target_bytes: prefill_plan.as_ref().map_or(0, |plan| plan.target_bytes),
+                }));
+            }
+        }
         if self.paged_prefix_cache.is_some()
             && chunk_end == handle.prompt_len
             && handle.chunk_start < handle.prompt_len - 1
@@ -8121,6 +8951,9 @@ impl<M: Model> Scheduler<M> {
             handle.position_ids_full.clone()
         };
 
+        let materializes_vision = handle.is_vl
+            && count_image_pad(chunk_ids, handle.image_token_id) > 0
+            && handle.vision_reservation.is_some();
         let hidden = if handle.is_vl {
             let chunk_ids_i32: Vec<i32> = chunk_ids.iter().map(|&t| t as i32).collect();
             let chunk_arr: Array = (&chunk_ids_i32[..], &[1_i32, chunk_len][..]).try_into()?;
@@ -8186,6 +9019,13 @@ impl<M: Model> Scheduler<M> {
         add_mtp_prefill_cache_commit_us(&mut handle.stats, commit_start);
 
         let chunk_last_hidden = slice_hidden_position(&hidden, chunk_len - 1)?;
+        mlx::transforms::eval(&[&hidden, &chunk_last_hidden])?;
+        if materializes_vision {
+            drop(handle.vision_reservation.take());
+            if let Some(guard) = handle.cold_materialization_guard.take() {
+                (*guard).commit();
+            }
+        }
         let new_pos = chunk_end;
         handle.mtp_prev_hidden = Some(chunk_last_hidden.clone());
         handle.last_prompt_hidden = Some(chunk_last_hidden.clone());
@@ -8206,6 +9046,7 @@ impl<M: Model> Scheduler<M> {
                 tracing::warn!("paged SSD prefix cache MTP mid-admit save skipped: {err:#}");
             }
         }
+        drop(prefill_plan);
         handle.chunk_start = chunk_end;
         Ok(is_last)
     }
@@ -8321,6 +9162,7 @@ impl<M: Model> Scheduler<M> {
         } else {
             Phase::Finished
         };
+        self.commit_governor_admission(id);
 
         Ok((
             id,
@@ -8548,6 +9390,28 @@ impl Scheduler<crate::models::Gemma4Model> {
             None
         };
 
+        let cold_materialization_guard = if is_vl {
+            self.begin_cold_materialization(
+                crate::core::process_memory::MaterializationComponents {
+                    text: false,
+                    vision: true,
+                    speculative: false,
+                },
+            )?
+            .map(Box::new)
+        } else {
+            None
+        };
+        let vision_reservation = if is_vl {
+            reserve_vision_prefill(
+                self.process_memory_governor.as_ref(),
+                model,
+                &[pixel_values.as_deref()],
+                &[image_grid_thw.as_deref()],
+            )?
+        } else {
+            None
+        };
         let vision_embeds_full = if is_vl {
             let pv = pixel_values
                 .as_deref()
@@ -8565,6 +9429,12 @@ impl Scheduler<crate::models::Gemma4Model> {
         } else {
             prefill_chunk_size.max(1)
         };
+        let decode_cadence_mid_chunk_cap = gemma4_drafter_mid_admit_chunk_cap(
+            turboquant_bits,
+            prompt_len_usz,
+            chunk_size,
+            decode_cadence_mid_chunk_cap,
+        );
 
         Ok(Gemma4DrafterAdmitMidHandle {
             request_id: id,
@@ -8581,6 +9451,8 @@ impl Scheduler<crate::models::Gemma4Model> {
             dummy_position_ids,
             position_ids_full,
             vision_embeds_full,
+            vision_reservation,
+            cold_materialization_guard,
             image_pad_consumed,
             last_prompt_hidden,
             last_shared_kv,
@@ -8602,9 +9474,18 @@ impl Scheduler<crate::models::Gemma4Model> {
             return Ok(true);
         }
 
+        let requested_tokens = handle
+            .chunk_size
+            .min(handle.prompt_len.saturating_sub(handle.chunk_start))
+            .max(1) as usize;
+        let mut prefill_plan =
+            self.plan_prefill_chunk(requested_tokens, handle.chunk_start as usize, 1)?;
+        let selected_tokens = prefill_plan
+            .as_ref()
+            .map_or(requested_tokens, |plan| plan.selected_tokens);
         let base_chunk_end = handle
             .chunk_start
-            .saturating_add(handle.chunk_size)
+            .saturating_add(selected_tokens as i32)
             .min(handle.prompt_len);
         let chunk_end = if handle.is_vl {
             extend_vl_chunk_end_for_image_pad(
@@ -8616,6 +9497,22 @@ impl Scheduler<crate::models::Gemma4Model> {
         } else {
             base_chunk_end
         };
+        let actual_tokens = (chunk_end - handle.chunk_start).max(0) as usize;
+        if actual_tokens > selected_tokens {
+            drop(prefill_plan.take());
+            prefill_plan =
+                self.plan_prefill_chunk(actual_tokens, handle.chunk_start as usize, 1)?;
+            if prefill_plan
+                .as_ref()
+                .is_some_and(|plan| plan.selected_tokens < actual_tokens)
+            {
+                return Err(anyhow::Error::new(SchedulerError::PrefillPeakUnsafe {
+                    requested_tokens: actual_tokens,
+                    selected_tokens: prefill_plan.as_ref().map_or(0, |plan| plan.selected_tokens),
+                    target_bytes: prefill_plan.as_ref().map_or(0, |plan| plan.target_bytes),
+                }));
+            }
+        }
         let is_last = chunk_end == handle.prompt_len;
         let chunk_len = chunk_end - handle.chunk_start;
         if chunk_len <= 0 {
@@ -8637,6 +9534,9 @@ impl Scheduler<crate::models::Gemma4Model> {
             (None, None) => build_position_ids(handle.chunk_start, chunk_len)?,
         };
 
+        let materializes_vision = handle.is_vl
+            && count_image_pad(chunk_ids, handle.image_token_id) > 0
+            && handle.vision_reservation.is_some();
         let forward_start = Instant::now();
         let out = if handle.is_vl {
             let image_tokens = count_image_pad(chunk_ids, handle.image_token_id);
@@ -8684,6 +9584,13 @@ impl Scheduler<crate::models::Gemma4Model> {
         add_elapsed_us(&mut handle.stats.verify_forward_us, forward_start);
 
         let chunk_last_hidden = slice_hidden_position(&out.hidden, chunk_len - 1)?;
+        mlx::transforms::eval(&[&out.hidden, &chunk_last_hidden])?;
+        if materializes_vision {
+            drop(handle.vision_reservation.take());
+            if let Some(guard) = handle.cold_materialization_guard.take() {
+                (*guard).commit();
+            }
+        }
         let new_pos = chunk_end;
         let prefix_cache = self.gemma4_drafter_prefix_cache();
         match prefix_cache.try_save(
@@ -8706,6 +9613,7 @@ impl Scheduler<crate::models::Gemma4Model> {
         self.refresh_active_kv_residency_stats();
         handle.last_prompt_hidden = Some(chunk_last_hidden);
         handle.last_shared_kv = Some(out.shared_kv);
+        drop(prefill_plan);
         handle.chunk_start = chunk_end;
         Ok(is_last)
     }
@@ -8802,6 +9710,7 @@ impl Scheduler<crate::models::Gemma4Model> {
             Phase::Finished
         };
         self.refresh_active_kv_residency_stats();
+        self.commit_governor_admission(id);
 
         Ok((
             id,
@@ -8820,9 +9729,18 @@ impl Scheduler<crate::models::Gemma4Model> {
         cfg: MtpSpeculativeConfig,
     ) -> Result<Vec<StepEvent>> {
         self.ensure_not_poisoned()?;
+        let cold_materialization =
+            self.begin_cold_materialization(self.active_materialization_components(true))?;
         match self.prefill_admitted_gemma4_drafter_batch_inner(model, drafter, cfg) {
-            Ok(events) => Ok(events),
+            Ok(events) => {
+                self.commit_all_governor_admissions();
+                if let Some(guard) = cold_materialization {
+                    guard.commit();
+                }
+                Ok(events)
+            }
             Err(e) => {
+                self.rollback_all_governor_admissions();
                 self.poisoned = true;
                 if !matches!(self.phase, Phase::Decoding | Phase::Finished) {
                     self.phase = Phase::Finished;
@@ -8880,7 +9798,7 @@ impl Scheduler<crate::models::Gemma4Model> {
             ));
         }
         if active_rows.len() == 1 {
-            return self.prefill_admitted_gemma4_drafter_single(model, drafter, cfg);
+            return self.prefill_admitted_gemma4_drafter_single(model, drafter, cfg, self.b_max);
         }
         for &row_idx in &active_rows {
             let state = self.slots[row_idx]
@@ -8905,11 +9823,17 @@ impl Scheduler<crate::models::Gemma4Model> {
         let mut events = Vec::with_capacity(active_rows.len());
         let mut final_cap = MIN_KV_CACHE_CAP_FOR_GPU_PERF;
         let dtype = model.cache_dtype();
+        let scheduler_batch_capacity = self.b_max;
 
         for &row_idx in &active_rows {
             let mut temp = self.temp_gemma4_drafter_scheduler_for_row(row_idx)?;
             let event = temp
-                .prefill_admitted_gemma4_drafter_single(model, drafter, cfg)
+                .prefill_admitted_gemma4_drafter_single(
+                    model,
+                    drafter,
+                    cfg,
+                    scheduler_batch_capacity,
+                )
                 .map_err(|err| {
                     anyhow!("prefill_admitted_gemma4_drafter_batch row {row_idx}: {err:#}")
                 })?;
@@ -8998,6 +9922,7 @@ impl Scheduler<crate::models::Gemma4Model> {
         model: &crate::models::Gemma4Model,
         drafter: &crate::models::gemma4::Gemma4AssistantModel,
         cfg: MtpSpeculativeConfig,
+        scheduler_batch_capacity: usize,
     ) -> Result<Vec<StepEvent>> {
         match self.phase {
             Phase::Idle | Phase::Admitting => {}
@@ -9077,6 +10002,16 @@ impl Scheduler<crate::models::Gemma4Model> {
 
         let prefix_cache = self.gemma4_drafter_prefix_cache();
         let is_vl = pixel_values.is_some();
+        let _vision_reservation = if is_vl {
+            reserve_vision_prefill(
+                self.process_memory_governor.as_ref(),
+                model,
+                &[pixel_values.as_deref()],
+                &[image_grid_thw.as_deref()],
+            )?
+        } else {
+            None
+        };
         let prefix_fingerprint = if prefix_cache.is_enabled() {
             paged_prefix_fingerprint_for_request(
                 pixel_values.as_deref(),
@@ -9146,6 +10081,10 @@ impl Scheduler<crate::models::Gemma4Model> {
             } else {
                 remaining.min(prefill_chunk_size.max(1))
             };
+            let mut prefill_plan = self.plan_prefill_chunk(n as usize, pos as usize, 1)?;
+            if let Some(plan) = prefill_plan.as_ref() {
+                n = plan.selected_tokens as i32;
+            }
             if n <= 0 {
                 return Err(anyhow!(
                     "prefill_admitted_gemma4_drafter_single: invalid prefill chunk length {n}"
@@ -9155,6 +10094,25 @@ impl Scheduler<crate::models::Gemma4Model> {
                 let adjusted_end =
                     extend_vl_chunk_end_for_image_pad(&prompt_ids, image_token_id, pos, pos + n);
                 n = adjusted_end - pos;
+                if prefill_plan
+                    .as_ref()
+                    .is_some_and(|plan| plan.selected_tokens < n as usize)
+                {
+                    drop(prefill_plan.take());
+                    prefill_plan = self.plan_prefill_chunk(n as usize, pos as usize, 1)?;
+                    if prefill_plan
+                        .as_ref()
+                        .is_some_and(|plan| plan.selected_tokens < n as usize)
+                    {
+                        return Err(anyhow::Error::new(SchedulerError::PrefillPeakUnsafe {
+                            requested_tokens: n as usize,
+                            selected_tokens: prefill_plan
+                                .as_ref()
+                                .map_or(0, |plan| plan.selected_tokens),
+                            target_bytes: prefill_plan.as_ref().map_or(0, |plan| plan.target_bytes),
+                        }));
+                    }
+                }
             }
 
             let chunk_ids = &prompt_ids[pos as usize..(pos as usize + n as usize)];
@@ -9222,6 +10180,7 @@ impl Scheduler<crate::models::Gemma4Model> {
             };
             add_elapsed_us(&mut stats.verify_forward_us, forward_start);
             let chunk_last_hidden = slice_hidden_position(&out.hidden, n - 1)?;
+            mlx::transforms::eval(&[&out.hidden, &chunk_last_hidden])?;
             let new_pos = pos + n;
             if let Some(cache) = self.cache.as_ref() {
                 match prefix_cache.try_save(
@@ -9246,9 +10205,8 @@ impl Scheduler<crate::models::Gemma4Model> {
             if new_pos == prompt_len_i32 {
                 last_prompt_hidden = Some(chunk_last_hidden);
                 last_shared_kv = Some(out.shared_kv);
-            } else {
-                mlx::transforms::eval(&[&out.hidden])?;
             }
+            drop(prefill_plan);
             pos = new_pos;
         }
 
@@ -9308,7 +10266,12 @@ impl Scheduler<crate::models::Gemma4Model> {
         });
 
         if finish_reason.is_none() {
-            self.fill_gemma4_drafter_window_single(row_idx, model, drafter)?;
+            self.fill_gemma4_drafter_window_single(
+                row_idx,
+                model,
+                drafter,
+                scheduler_batch_capacity,
+            )?;
         }
 
         Ok(vec![StepEvent {
@@ -9460,6 +10423,7 @@ impl Scheduler<crate::models::Gemma4Model> {
 
         let window_started = Instant::now();
         let timing_before = stats.draft_cap_timing();
+        let kv_bits = self.kv_cache_turboquant_bits_for_rows(rows_to_fill)?;
 
         let mut contexts = Vec::with_capacity(rows_to_fill.len());
         for &row_idx in rows_to_fill {
@@ -9480,20 +10444,27 @@ impl Scheduler<crate::models::Gemma4Model> {
             let row_state = row_states.get(&row_idx).ok_or_else(|| {
                 anyhow!("fill_gemma4_drafter_windows_batched: row {row_idx} state absent")
             })?;
-            let draft_budget = row_state
-                .adaptive_draft_tokens
-                .clamp(1, cfg.max_draft_tokens)
-                .min(remaining);
             let mut history =
                 Vec::with_capacity(slot.prompt_ids.len() + slot.generated_tokens.len());
             history.extend_from_slice(&slot.prompt_ids);
             history.extend_from_slice(&slot.generated_tokens);
+            let effective_max_draft_tokens = gemma4_drafter_effective_budget_for_context(
+                kv_bits,
+                cfg.max_draft_tokens,
+                history.len(),
+                self.b_max,
+            );
+            let draft_budget = row_state
+                .adaptive_draft_tokens
+                .clamp(1, effective_max_draft_tokens)
+                .min(remaining);
             let kv_valid_len = (history.len() - 1) as i32;
             contexts.push(Gemma4DrafterBatchedFillContext {
                 row_idx,
                 current_token,
                 stop_token_ids: slot.stop_token_ids.clone(),
                 remaining,
+                effective_max_draft_tokens,
                 draft_budget,
                 kv_valid_len,
                 draft_position: crate::models::gemma4::draft_position_for_shared_kv(kv_valid_len),
@@ -9646,7 +10617,26 @@ impl Scheduler<crate::models::Gemma4Model> {
         )?;
         let verify_pos_ids = self.reusable_dummy_position_ids()?;
         let verify_forward_start = Instant::now();
+        let stable_attention = gemma4_k3v4_long_verify_needs_stable_attention(
+            kv_bits,
+            contexts
+                .iter()
+                .map(|ctx| ctx.draft_history.len())
+                .max()
+                .unwrap_or(0),
+            max_verify_len,
+            self.b_max,
+            active_rows.len(),
+        );
+        let stable_k3v4_verify = gemma4_verify_needs_batch_stable_qmm(
+            self.kv_cache_turboquant_bits_for_rows(rows_to_fill)?,
+            active_rows.len(),
+            max_verify_len,
+        );
         let verified = {
+            let _stable_qmm = stable_k3v4_verify.then(crate::nn::batch_stable_qmm::context_scope);
+            let _stable_attention =
+                stable_attention.then(crate::nn::gemma4_verify_attention::scope);
             let cache = self
                 .cache
                 .as_mut()
@@ -9739,7 +10729,7 @@ impl Scheduler<crate::models::Gemma4Model> {
                 )
             })?;
             adjust_mtp_draft_budget(
-                cfg.max_draft_tokens,
+                ctx.effective_max_draft_tokens,
                 &mut row_state.adaptive_draft_tokens,
                 ctx.draft_tokens.len(),
                 resolution.accepted_draft_len,
@@ -9852,7 +10842,7 @@ impl Scheduler<crate::models::Gemma4Model> {
             .pending_tokens
             .is_empty()
         {
-            self.fill_gemma4_drafter_window_single(row_idx, model, drafter)?;
+            self.fill_gemma4_drafter_window_single(row_idx, model, drafter, self.b_max)?;
         }
 
         let token = {
@@ -9882,7 +10872,7 @@ impl Scheduler<crate::models::Gemma4Model> {
             .and_then(|state| state.rows.get(&row_idx))
             .is_some_and(|state| state.pending_tokens.is_empty())
         {
-            self.fill_gemma4_drafter_window_single(row_idx, model, drafter)?;
+            self.fill_gemma4_drafter_window_single(row_idx, model, drafter, self.b_max)?;
         }
 
         Ok(vec![event])
@@ -9893,6 +10883,7 @@ impl Scheduler<crate::models::Gemma4Model> {
         row_idx: usize,
         model: &crate::models::Gemma4Model,
         drafter: &crate::models::gemma4::Gemma4AssistantModel,
+        scheduler_batch_capacity: usize,
     ) -> Result<()> {
         let mut drafter_state = self
             .gemma4_drafter_state
@@ -9903,7 +10894,10 @@ impl Scheduler<crate::models::Gemma4Model> {
         })?;
         let result = self.fill_gemma4_drafter_window_single_with_state(
             row_idx,
-            drafter_state.cfg,
+            Gemma4DrafterWindowPolicy {
+                cfg: drafter_state.cfg,
+                scheduler_batch_capacity,
+            },
             &mut drafter_state.stats,
             &mut row_state,
             model,
@@ -9917,12 +10911,16 @@ impl Scheduler<crate::models::Gemma4Model> {
     fn fill_gemma4_drafter_window_single_with_state(
         &mut self,
         row_idx: usize,
-        cfg: MtpSpeculativeConfig,
+        policy: Gemma4DrafterWindowPolicy,
         stats: &mut MtpSpeculativeStats,
         row_state: &mut SchedulerGemma4DrafterRowState,
         model: &crate::models::Gemma4Model,
         drafter: &crate::models::gemma4::Gemma4AssistantModel,
     ) -> Result<()> {
+        let Gemma4DrafterWindowPolicy {
+            cfg,
+            scheduler_batch_capacity,
+        } = policy;
         let (prompt_ids, generated_tokens, max_new_tokens, sampler, stop_token_ids) = {
             let state = self.slots[row_idx]
                 .as_ref()
@@ -9951,9 +10949,15 @@ impl Scheduler<crate::models::Gemma4Model> {
         let timing_before = stats.draft_cap_timing();
         let context_tokens = history.len();
 
+        let effective_max_draft_tokens = gemma4_drafter_effective_budget_for_context(
+            self.kv_cache_turboquant_bits_for_rows(&[row_idx])?,
+            cfg.max_draft_tokens,
+            context_tokens,
+            scheduler_batch_capacity,
+        );
         let draft_budget = row_state
             .adaptive_draft_tokens
-            .clamp(1, cfg.max_draft_tokens)
+            .clamp(1, effective_max_draft_tokens)
             .min(remaining);
         let mut compact_prng = self.compact_prng_state_for_rows(&[row_idx])?;
         let draft_tokens = self.draft_gemma4_drafter_tokens_single(
@@ -9983,6 +10987,15 @@ impl Scheduler<crate::models::Gemma4Model> {
         };
         let verify_forward_start = Instant::now();
         let verified = {
+            let stable_attention = gemma4_k3v4_long_verify_needs_stable_attention(
+                self.kv_cache_turboquant_bits_for_rows(&[row_idx])?,
+                context_tokens,
+                verify_input.len(),
+                scheduler_batch_capacity,
+                1,
+            );
+            let _stable_attention =
+                stable_attention.then(crate::nn::gemma4_verify_attention::scope);
             let cache = self
                 .cache
                 .as_mut()
@@ -10019,7 +11032,7 @@ impl Scheduler<crate::models::Gemma4Model> {
             stats.rollback_count += 1;
         }
         adjust_mtp_draft_budget(
-            cfg.max_draft_tokens,
+            effective_max_draft_tokens,
             &mut row_state.adaptive_draft_tokens,
             draft_tokens.len(),
             resolution.accepted_draft_len,
@@ -10204,7 +11217,7 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
 
-    use crate::core::cache::{KVCache, MtpCache};
+    use crate::core::cache::{KVCache, MtpCache, TurboQuantKVBits};
     use crate::core::speculative::{MtpSpeculativeConfig, MtpSpeculativeModel};
     use crate::nn::MtpStepOutput;
     use serial_test::serial;
@@ -10270,6 +11283,137 @@ mod tests {
         assert!(
             err.to_string().contains("offset 1 at layer 1 != 2"),
             "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn gemma4_batch_stable_qmm_is_limited_to_multirow_k3v4_verify() {
+        assert!(gemma4_verify_needs_batch_stable_qmm(
+            Some(TurboQuantKVBits::K3V4),
+            4,
+            3
+        ));
+        assert!(!gemma4_verify_needs_batch_stable_qmm(
+            Some(TurboQuantKVBits::K3V4),
+            1,
+            3
+        ));
+        assert!(!gemma4_verify_needs_batch_stable_qmm(
+            Some(TurboQuantKVBits::K3V4),
+            4,
+            2
+        ));
+        assert!(!gemma4_verify_needs_batch_stable_qmm(
+            Some(TurboQuantKVBits::K4V4),
+            4,
+            3
+        ));
+        assert!(!gemma4_verify_needs_batch_stable_qmm(None, 4, 3));
+    }
+
+    #[test]
+    fn gemma4_k3v4_long_context_stabilizes_every_multi_token_b1_verify() {
+        assert_eq!(
+            gemma4_drafter_effective_budget_for_context(
+                Some(TurboQuantKVBits::K3V4),
+                2,
+                GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
+                1,
+            ),
+            2
+        );
+        assert_eq!(
+            gemma4_drafter_effective_budget_for_context(
+                Some(TurboQuantKVBits::K3V4),
+                2,
+                GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
+                4,
+            ),
+            1
+        );
+        assert_eq!(
+            gemma4_drafter_effective_budget_for_context(
+                Some(TurboQuantKVBits::K3V4),
+                2,
+                GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS,
+                4,
+            ),
+            2
+        );
+        assert!(gemma4_k3v4_long_verify_needs_stable_attention(
+            Some(TurboQuantKVBits::K3V4),
+            GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
+            3,
+            1,
+            1,
+        ));
+        assert!(gemma4_k3v4_long_verify_needs_stable_attention(
+            Some(TurboQuantKVBits::K3V4),
+            GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
+            2,
+            4,
+            4,
+        ));
+        assert!(!gemma4_k3v4_long_verify_needs_stable_attention(
+            Some(TurboQuantKVBits::K3V4),
+            GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
+            1,
+            4,
+            4,
+        ));
+        assert!(!gemma4_k3v4_long_verify_needs_stable_attention(
+            Some(TurboQuantKVBits::K3V4),
+            GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
+            2,
+            4,
+            1,
+        ));
+        assert!(!gemma4_k3v4_long_verify_needs_stable_attention(
+            Some(TurboQuantKVBits::K4V4),
+            GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
+            3,
+            4,
+            4,
+        ));
+    }
+
+    #[test]
+    fn gemma4_k3v4_long_mid_admit_preserves_prefill_chunk_shape() {
+        assert_eq!(
+            gemma4_drafter_mid_admit_chunk_cap(
+                Some(TurboQuantKVBits::K3V4),
+                GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
+                2048,
+                256,
+            ),
+            2048
+        );
+        assert_eq!(
+            gemma4_drafter_mid_admit_chunk_cap(
+                Some(TurboQuantKVBits::K3V4),
+                GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS,
+                2048,
+                256,
+            ),
+            256
+        );
+        assert_eq!(
+            gemma4_drafter_mid_admit_chunk_cap(
+                Some(TurboQuantKVBits::K4V4),
+                GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
+                2048,
+                256,
+            ),
+            256
+        );
+        assert_eq!(
+            gemma4_drafter_mid_admit_chunk_cap(
+                Some(TurboQuantKVBits::K3V4),
+                GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
+                2048,
+                4096,
+            ),
+            4096
         );
     }
 
@@ -10457,6 +11601,317 @@ mod tests {
         }
     }
 
+    #[test]
+    fn transformer_vision_peak_estimator_is_conservative_and_deterministic() {
+        let pixels: Array = (&[0.0_f32; 16][..], &[1_i32, 16][..])
+            .try_into()
+            .expect("pixel payload");
+        let estimate = estimate_transformer_vision_prefill_peak_bytes(
+            &[pixels],
+            &[(1, 2, 2)],
+            VisionPrefillMemoryProfile {
+                hidden_size: 8,
+                intermediate_size: 16,
+                num_attention_heads: 2,
+                output_hidden_size: 8,
+                spatial_merge_area: 4,
+                activation_bytes: 2,
+            },
+        )
+        .expect("valid estimate");
+
+        assert_eq!(estimate, VISION_PREFILL_RUNTIME_OVERHEAD_BYTES + 696);
+        let concatenated_pixels: Array = (&[0.0_f32; 32][..], &[2_i32, 16][..])
+            .try_into()
+            .expect("concatenated pixel payload");
+        let multi_grid_estimate = estimate_transformer_vision_prefill_peak_bytes(
+            &[concatenated_pixels],
+            &[(1, 2, 2), (1, 2, 2)],
+            VisionPrefillMemoryProfile {
+                hidden_size: 8,
+                intermediate_size: 16,
+                num_attention_heads: 2,
+                output_hidden_size: 8,
+                spatial_merge_area: 4,
+                activation_bytes: 2,
+            },
+        )
+        .expect("one concatenated tensor may describe multiple image grids");
+        assert!(multi_grid_estimate > estimate);
+        assert!(estimate_transformer_vision_prefill_peak_bytes(
+            &[],
+            &[],
+            VisionPrefillMemoryProfile {
+                hidden_size: 8,
+                intermediate_size: 16,
+                num_attention_heads: 2,
+                output_hidden_size: 8,
+                spatial_merge_area: 4,
+                activation_bytes: 2,
+            },
+        )
+        .is_err());
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn vision_prefill_reservation_is_fail_safe_and_raii_balanced() {
+        use crate::core::process_memory::{
+            HostVmStatistics, MemoryGovernorConfig, MemoryTelemetry, ProcessMemoryGovernor,
+        };
+
+        let gib = 1024 * 1024 * 1024;
+        let pixels: Array = (&[0.0_f32; 4][..], &[1_i32, 4][..])
+            .try_into()
+            .expect("pixel payload");
+        let pixel_values = [pixels];
+        let grids = [(1, 2, 2)];
+        let model = RecordingPrefillModel::default();
+
+        let unavailable = Arc::new(
+            ProcessMemoryGovernor::new(MemoryGovernorConfig {
+                // `reserve_vision_prefill` deliberately retries with a fresh
+                // native sample after cache reclaim. Keep the configured
+                // ceiling unsafe even if this host can provide that retry
+                // sample, so the fail-safe assertion is machine-independent.
+                static_reserve_bytes: usize::MAX,
+                ..MemoryGovernorConfig::default()
+            })
+            .expect("governor"),
+        );
+        unavailable.update(MemoryTelemetry::default());
+        let error = reserve_vision_prefill(
+            Some(&unavailable),
+            &model,
+            &[Some(&pixel_values)],
+            &[Some(&grids)],
+        )
+        .expect_err("unsafe telemetry must reject after the reclaim retry");
+        assert!(matches!(
+            error.downcast_ref::<SchedulerError>(),
+            Some(SchedulerError::VisionPrefillPeakUnsafe { .. })
+        ));
+        assert_eq!(unavailable.snapshot().reserved_bytes, 0);
+
+        let governor = Arc::new(
+            ProcessMemoryGovernor::new(MemoryGovernorConfig {
+                static_reserve_bytes: gib,
+                ..MemoryGovernorConfig::default()
+            })
+            .expect("governor"),
+        );
+        governor.update(MemoryTelemetry {
+            total_ram_bytes: 16 * gib,
+            phys_footprint_bytes: Some(2 * gib),
+            vm: Some(HostVmStatistics {
+                free_bytes: 8 * gib,
+                active_bytes: 4 * gib,
+                inactive_bytes: gib,
+                wired_bytes: 3 * gib,
+            }),
+            mlx_active_bytes: Some(2 * gib),
+            mlx_cache_bytes: Some(0),
+            metal_limit_bytes: Some(12 * gib),
+        });
+        let cache_growth_liability = governor.snapshot().mlx_cache_limit_bytes;
+        let reservation = reserve_vision_prefill(
+            Some(&governor),
+            &model,
+            &[Some(&pixel_values)],
+            &[Some(&grids)],
+        )
+        .expect("reservation")
+        .expect("visual payload reserves memory");
+        assert_eq!(reservation.bytes(), 17 + cache_growth_liability);
+        assert_eq!(
+            governor.snapshot().reserved_bytes,
+            17 + cache_growth_liability
+        );
+        drop(reservation);
+        assert_eq!(governor.snapshot().reserved_bytes, 0);
+    }
+
+    #[test]
+    fn process_governor_admission_reservation_rolls_back_on_evict_and_rejection() {
+        use crate::core::process_memory::{
+            HostVmStatistics, MemoryGovernorConfig, MemoryTelemetry, ProcessMemoryGovernor,
+        };
+
+        let gib = 1024 * 1024 * 1024;
+        let governor = Arc::new(
+            ProcessMemoryGovernor::new(MemoryGovernorConfig {
+                static_reserve_bytes: 4 * gib,
+                promotion_samples: 2,
+                recovery_samples: 2,
+                emergency_overage_bytes: gib,
+                minimum_prefill_chunk_tokens: 1,
+                ..MemoryGovernorConfig::default()
+            })
+            .unwrap(),
+        );
+        let telemetry = |usage| MemoryTelemetry {
+            total_ram_bytes: 32 * gib,
+            phys_footprint_bytes: Some(usage),
+            vm: Some(HostVmStatistics {
+                free_bytes: 8 * gib,
+                inactive_bytes: 2 * gib,
+                active_bytes: 8 * gib,
+                wired_bytes: 8 * gib,
+            }),
+            mlx_active_bytes: Some(usage),
+            mlx_cache_bytes: Some(0),
+            metal_limit_bytes: Some(24 * gib),
+        };
+        governor.update(telemetry(4 * gib));
+
+        let mut scheduler = Scheduler::<FinishedPhaseFakeModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler");
+        scheduler.process_memory_governor = Some(Arc::clone(&governor));
+        let id = scheduler.admit(mk_req(vec![1, 2, 3, 4])).expect("admit");
+        assert!(governor.snapshot().reserved_bytes > 0);
+        scheduler.evict(id).expect("evict");
+        assert_eq!(governor.snapshot().reserved_bytes, 0);
+        assert_eq!(scheduler.budget_state.active_bytes(), 0);
+
+        governor.update(telemetry(23 * gib));
+        governor.update(telemetry(23 * gib));
+        let error = scheduler
+            .admit(mk_req(vec![5, 6, 7, 8]))
+            .expect_err("hard pressure must reject");
+        assert!(error.downcast_ref::<SchedulerError>().is_some());
+        assert_eq!(governor.snapshot().reserved_bytes, 0);
+        assert_eq!(scheduler.budget_state.active_bytes(), 0);
+    }
+
+    #[test]
+    fn process_governor_adaptive_fresh_prefill_finishes_in_decode_phase() {
+        let mut scheduler = Scheduler::<FinishedPhaseFakeModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler");
+        let prompt = vec![1_u32; 4096];
+        scheduler.admit(mk_req(prompt)).expect("admit");
+
+        let events = scheduler
+            .prefill_single_adaptive_chunks(&FinishedPhaseFakeModel, 0, 128)
+            .expect("adaptive prefill");
+        assert_eq!(events.len(), 1);
+        assert_eq!(scheduler.phase(), Phase::Decoding);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn fresh_prefill_commits_cold_text_liability_after_real_execution() {
+        use crate::core::process_memory::{
+            ComponentMaterializationState, HostVmStatistics, MaterializationComponent,
+            MemoryGovernorConfig, MemoryTelemetry, ProcessMemoryGovernor, StaticMemoryEstimate,
+        };
+
+        let gib = 1024 * 1024 * 1024;
+        let governor = Arc::new(
+            ProcessMemoryGovernor::new(MemoryGovernorConfig {
+                static_reserve_bytes: 4 * gib,
+                minimum_prefill_chunk_tokens: 1,
+                ..MemoryGovernorConfig::default()
+            })
+            .expect("governor"),
+        );
+        governor.update(MemoryTelemetry {
+            total_ram_bytes: 32 * gib,
+            phys_footprint_bytes: Some(4 * gib),
+            vm: Some(HostVmStatistics {
+                free_bytes: 8 * gib,
+                inactive_bytes: 2 * gib,
+                active_bytes: 8 * gib,
+                wired_bytes: 8 * gib,
+            }),
+            mlx_active_bytes: Some(4 * gib),
+            mlx_cache_bytes: Some(0),
+            metal_limit_bytes: Some(24 * gib),
+        });
+        let tracker =
+            crate::core::process_memory::ColdMaterializationTracker::new(StaticMemoryEstimate {
+                text_cold_bytes: 8_192,
+                ..StaticMemoryEstimate::default()
+            });
+        let tracker_slot = Arc::new(OnceLock::new());
+        tracker_slot
+            .set(Arc::clone(&tracker))
+            .expect("install tracker");
+        let mut scheduler = Scheduler::<FinishedPhaseFakeModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler");
+        scheduler.process_memory_governor = Some(Arc::clone(&governor));
+        scheduler.share_cold_materialization_tracker(tracker_slot);
+        scheduler.admit(mk_req(vec![1, 2, 3, 4])).expect("admit");
+
+        scheduler
+            .prefill_admitted(&FinishedPhaseFakeModel)
+            .expect("prefill");
+
+        assert_eq!(
+            tracker.state(MaterializationComponent::Text),
+            ComponentMaterializationState::Warm
+        );
+        assert_eq!(governor.snapshot().reserved_bytes, 0);
+    }
+
+    #[test]
+    fn process_governor_prefill_failure_rolls_back_admission_reservation() {
+        use crate::core::process_memory::{
+            HostVmStatistics, MemoryGovernorConfig, MemoryTelemetry, ProcessMemoryGovernor,
+        };
+
+        let gib = 1024 * 1024 * 1024;
+        let governor = Arc::new(
+            ProcessMemoryGovernor::new(MemoryGovernorConfig {
+                static_reserve_bytes: 4 * gib,
+                promotion_samples: 1,
+                recovery_samples: 1,
+                ..MemoryGovernorConfig::default()
+            })
+            .unwrap(),
+        );
+        let telemetry = |usage| MemoryTelemetry {
+            total_ram_bytes: 32 * gib,
+            phys_footprint_bytes: Some(usage),
+            vm: Some(HostVmStatistics {
+                free_bytes: 8 * gib,
+                inactive_bytes: 2 * gib,
+                active_bytes: 8 * gib,
+                wired_bytes: 8 * gib,
+            }),
+            mlx_active_bytes: Some(usage),
+            mlx_cache_bytes: Some(0),
+            metal_limit_bytes: Some(24 * gib),
+        };
+        governor.update(telemetry(4 * gib));
+        let mut scheduler = Scheduler::<FinishedPhaseFakeModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler");
+        scheduler.process_memory_governor = Some(Arc::clone(&governor));
+        scheduler.admit(mk_req(vec![1, 2, 3, 4])).expect("admit");
+        assert!(governor.snapshot().reserved_bytes > 0);
+
+        scheduler.cache = Some(Vec::new());
+        scheduler
+            .prefill_admitted(&FinishedPhaseFakeModel)
+            .expect_err("prefill setup failure must roll back reservation");
+        assert_eq!(governor.snapshot().reserved_bytes, 0);
+    }
+
     /// Minimal fake model for scheduler Finished-phase unit tests. Implements
     /// `Model` + `DenseVlMethods` without requiring a real Qwen35 weight
     /// file.  `batched_prefill` returns synthetic logits that always argmax
@@ -10466,11 +11921,13 @@ mod tests {
     impl crate::core::model::Model for FinishedPhaseFakeModel {
         fn make_cache(
             &self,
-            _batch: i32,
-            _cap: i32,
-            _dtype: mlx::Dtype,
+            batch: i32,
+            cap: i32,
+            dtype: mlx::Dtype,
         ) -> crate::Result<Vec<crate::nn::LayerCache>> {
-            Ok(Vec::new())
+            Ok(vec![crate::nn::LayerCache::Full(
+                crate::core::KVCache::new(batch, 1, 1, 1, dtype, cap),
+            )])
         }
 
         fn forward_on(
@@ -10540,7 +11997,7 @@ mod tests {
         }
 
         fn num_hidden_layers(&self) -> usize {
-            0
+            1
         }
     }
 
@@ -10558,6 +12015,14 @@ mod tests {
             _cache: Option<&mut [crate::nn::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
+            unreachable!("Finished-phase unit tests are text-only")
+        }
+
+        fn estimate_vision_prefill_peak_bytes(
+            &self,
+            _pixel_values: &[mlx::Array],
+            _grid_thw: &[(i32, i32, i32)],
+        ) -> crate::Result<usize> {
             unreachable!("Finished-phase unit tests are text-only")
         }
 
@@ -10783,6 +12248,19 @@ mod tests {
                 .unwrap()
                 .push(per_row_pixel_values.len());
             fake_logits_for_batch(batch)
+        }
+
+        fn estimate_vision_prefill_peak_bytes(
+            &self,
+            pixel_values: &[mlx::Array],
+            grid_thw: &[(i32, i32, i32)],
+        ) -> crate::Result<usize> {
+            Ok(pixel_values
+                .iter()
+                .map(|pixels| pixels.size().saturating_mul(pixels.dtype().byte_size()))
+                .sum::<usize>()
+                .saturating_add(grid_thw.len())
+                .max(1))
         }
 
         fn compute_vision_embeds(
@@ -11019,6 +12497,19 @@ mod tests {
                 .push(per_row_lens.to_vec());
             Self::bump_first_full_cache(cache, input_ids, Some(per_row_lens))?;
             fake_logits_for_batch(input_ids.shape().as_slice()[0])
+        }
+
+        fn estimate_vision_prefill_peak_bytes(
+            &self,
+            pixel_values: &[mlx::Array],
+            grid_thw: &[(i32, i32, i32)],
+        ) -> crate::Result<usize> {
+            Ok(pixel_values
+                .iter()
+                .map(|pixels| pixels.size().saturating_mul(pixels.dtype().byte_size()))
+                .sum::<usize>()
+                .saturating_add(grid_thw.len())
+                .max(1))
         }
 
         fn compute_vision_embeds(
@@ -11340,6 +12831,19 @@ mod tests {
             fake_logits_for_token_sequence(&[self.first_token])
         }
 
+        fn estimate_vision_prefill_peak_bytes(
+            &self,
+            pixel_values: &[mlx::Array],
+            grid_thw: &[(i32, i32, i32)],
+        ) -> crate::Result<usize> {
+            Ok(pixel_values
+                .iter()
+                .map(|pixels| pixels.size().saturating_mul(pixels.dtype().byte_size()))
+                .sum::<usize>()
+                .saturating_add(grid_thw.len())
+                .max(1))
+        }
+
         fn compute_vision_embeds(
             &self,
             _pixel_values: &[mlx::Array],
@@ -11655,6 +13159,7 @@ mod tests {
             vec![3, 1],
             "warm MTP prefill should split N-1 prefix before the final token"
         );
+        crate::core::cache::process_async_prefix_store_queue().wait_idle();
         assert!(
             std::fs::read_dir(&root)
                 .expect("prefix cache dir")
@@ -11694,6 +13199,8 @@ mod tests {
             "exact MTP prefix hit should restore N-1 main/MTP cache state and compute only the final token"
         );
         assert_mtp_prefill_only_cache_commit(&hit.mtp_stats().expect("hit MTP stats"));
+
+        crate::core::cache::process_async_prefix_store_queue().wait_idle();
 
         std::fs::remove_dir_all(root).expect("cleanup prefix cache");
     }
@@ -11767,6 +13274,8 @@ mod tests {
             "exact MTP prefix hits should restore each row's N-1 main/MTP cache state and compute only final tokens"
         );
         assert_mtp_prefill_only_cache_commit(&hit.mtp_stats().expect("batch hit MTP stats"));
+
+        crate::core::cache::process_async_prefix_store_queue().wait_idle();
 
         std::fs::remove_dir_all(root).expect("cleanup prefix cache");
     }
@@ -11906,6 +13415,8 @@ mod tests {
         assert_eq!(model.mtp_hidden_seq_lens(), vec![1]);
         assert_mtp_prefill_only_cache_commit(&s.mtp_stats().expect("hit VL MTP stats"));
 
+        crate::core::cache::process_async_prefix_store_queue().wait_idle();
+
         std::fs::remove_dir_all(root).expect("cleanup prefix cache");
     }
 
@@ -11978,6 +13489,8 @@ mod tests {
         assert_eq!(hit_model.vl_hidden_vision_present(), vec![false, false]);
         assert_eq!(hit_model.mtp_hidden_seq_lens(), vec![1, 1]);
         assert_mtp_prefill_only_cache_commit(&hit.mtp_stats().expect("batch VL hit MTP stats"));
+
+        crate::core::cache::process_async_prefix_store_queue().wait_idle();
 
         std::fs::remove_dir_all(root).expect("cleanup prefix cache");
     }
@@ -12137,6 +13650,8 @@ mod tests {
         );
         assert_eq!(stats.draft_attempts_by_position, vec![1]);
 
+        crate::core::cache::process_async_prefix_store_queue().wait_idle();
+
         std::fs::remove_dir_all(root).expect("cleanup prefix cache");
     }
 
@@ -12170,6 +13685,8 @@ mod tests {
             mtp_state.cfg.max_draft_tokens, 1,
             "paged prefix cache must make the whole MTP runtime state d=1, not only clamp one window"
         );
+
+        crate::core::cache::process_async_prefix_store_queue().wait_idle();
 
         std::fs::remove_dir_all(root).expect("cleanup prefix cache");
     }
@@ -12239,6 +13756,8 @@ mod tests {
             "batched fill should run one draft step and one accepted-tail commit"
         );
         s.mtp_state = Some(mtp_state);
+
+        crate::core::cache::process_async_prefix_store_queue().wait_idle();
 
         std::fs::remove_dir_all(root).expect("cleanup prefix cache");
     }
@@ -13364,6 +14883,7 @@ mod tests {
             }
             _ => panic!("expected full-attention cache"),
         }
+        crate::core::cache::process_async_prefix_store_queue().wait_idle();
         assert!(
             std::fs::read_dir(&root)
                 .expect("prefix cache dir")
@@ -13371,6 +14891,8 @@ mod tests {
                 .is_some(),
             "prefill should save a packed prefix cache entry for TurboQuant"
         );
+
+        crate::core::cache::process_async_prefix_store_queue().wait_idle();
 
         std::fs::remove_dir_all(root).expect("cleanup prefix cache");
     }
@@ -13398,12 +14920,14 @@ mod tests {
         warm.prefill_admitted(&warm_model).expect("warm prefill");
         assert_eq!(warm_model.hidden_seq_lens(), vec![3]);
         assert_eq!(warm_model.forward_seq_lens(), vec![1]);
+        crate::core::cache::process_async_prefix_store_queue().wait_idle();
         assert!(
             std::fs::read_dir(&root)
                 .expect("prefix cache dir")
                 .next()
                 .is_some(),
-            "warm prefill should save a prefix cache entry"
+            "warm prefill should save a prefix cache entry: {:?}",
+            crate::core::cache::process_async_prefix_store_queue().stats()
         );
 
         let mut hit = Scheduler::<StepDecodeMaskModel>::new(
@@ -13428,6 +14952,8 @@ mod tests {
             LayerCache::Full(kv) => assert!(kv.paged().is_some()),
             _ => panic!("expected full-attention cache"),
         }
+
+        crate::core::cache::process_async_prefix_store_queue().wait_idle();
 
         std::fs::remove_dir_all(root).expect("cleanup prefix cache");
     }
@@ -13479,6 +15005,7 @@ mod tests {
         );
 
         scheduler.evict_all().expect("clear warm request");
+        crate::core::cache::process_async_prefix_store_queue().wait_idle();
         std::fs::remove_dir_all(&root).expect("remove SSD cache");
         scheduler
             .admit(mk_req(vec![1, 2, 3, 4]))
@@ -13551,6 +15078,8 @@ mod tests {
         assert_eq!(events[0].id, id_0);
         assert_eq!(events[1].id, id_1);
 
+        crate::core::cache::process_async_prefix_store_queue().wait_idle();
+
         std::fs::remove_dir_all(root).expect("cleanup prefix cache");
     }
 
@@ -13595,6 +15124,8 @@ mod tests {
         assert_eq!(events[0].id, id_0);
         assert_eq!(events[1].id, id_1);
 
+        crate::core::cache::process_async_prefix_store_queue().wait_idle();
+
         std::fs::remove_dir_all(root).expect("cleanup prefix cache");
     }
 
@@ -13634,6 +15165,8 @@ mod tests {
             "right-padded rows must retain the explicit-mask batched prefill path"
         );
         assert_eq!(events.len(), 2);
+
+        crate::core::cache::process_async_prefix_store_queue().wait_idle();
 
         std::fs::remove_dir_all(root).expect("cleanup prefix cache");
     }
@@ -13739,6 +15272,8 @@ mod tests {
         );
         assert_eq!(hit_model.forward_seq_lens(), vec![1]);
 
+        crate::core::cache::process_async_prefix_store_queue().wait_idle();
+
         std::fs::remove_dir_all(root).expect("cleanup prefix cache");
     }
 
@@ -13798,6 +15333,8 @@ mod tests {
         assert_eq!(events[0].id, id_0);
         assert_eq!(events[1].id, id_1);
 
+        crate::core::cache::process_async_prefix_store_queue().wait_idle();
+
         std::fs::remove_dir_all(root).expect("cleanup prefix cache");
     }
 
@@ -13853,6 +15390,7 @@ mod tests {
         s.admit_mid_finalize(handle, &model)
             .expect("finalize VL mid-admit");
 
+        crate::core::cache::process_async_prefix_store_queue().wait_idle();
         let entry_count = std::fs::read_dir(&root)
             .map(|entries| entries.count())
             .unwrap_or(0);
@@ -13903,6 +15441,8 @@ mod tests {
             "different VL image must miss despite identical token ids"
         );
         assert_eq!(different_image_model.forward_seq_lens(), vec![1]);
+
+        crate::core::cache::process_async_prefix_store_queue().wait_idle();
 
         std::fs::remove_dir_all(root).expect("cleanup prefix cache");
     }

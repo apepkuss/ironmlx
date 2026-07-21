@@ -59,6 +59,10 @@ std::size_t get_memory_limit() {
   return mlx::core::get_memory_limit();
 }
 
+std::size_t set_cache_limit(std::size_t limit) {
+  return mlx::core::set_cache_limit(limit);
+}
+
 std::size_t get_memory_size() {
   return device_info_size("memory_size");
 }

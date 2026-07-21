@@ -215,9 +215,12 @@ struct RollingAdmissionPolicy {
 
 impl RollingAdmissionPolicy {
     fn record_admission_work(&mut self) {
-        self.decode_steps_due_after_admission = self
-            .decode_steps_due_after_admission
-            .max(ROLLING_DECODE_STEPS_AFTER_ADMISSION_WORK);
+        self.record_admission_work_with_decode_steps(ROLLING_DECODE_STEPS_AFTER_ADMISSION_WORK);
+    }
+
+    fn record_admission_work_with_decode_steps(&mut self, decode_steps: usize) {
+        self.decode_steps_due_after_admission =
+            self.decode_steps_due_after_admission.max(decode_steps);
     }
 
     fn record_decode_step(&mut self) {
@@ -236,6 +239,14 @@ impl RollingAdmissionPolicy {
             && has_decodable_rows
             && has_pending_admission_work
     }
+}
+
+fn decode_steps_after_mid_admit_chunk(chunk_tokens: usize, cadence_chunk_cap: usize) -> usize {
+    let cadence_chunk_cap = cadence_chunk_cap.max(1);
+    chunk_tokens
+        .max(1)
+        .div_ceil(cadence_chunk_cap)
+        .saturating_mul(ROLLING_DECODE_STEPS_AFTER_ADMISSION_WORK)
 }
 
 fn scheduler_has_decodable_rows<M: Model>(sched: &Scheduler<M>) -> bool {
@@ -869,6 +880,8 @@ pub struct AdmitReply {
 #[derive(Clone)]
 pub struct SchedulerActorHandle {
     pub cmd_tx: mpsc::Sender<SchedulerCommand>,
+    pub(crate) cold_materialization_tracker:
+        Arc<OnceLock<Arc<crate::core::process_memory::ColdMaterializationTracker>>>,
     /// Test-observable counter. Incremented by the driver every time
     /// `Scheduler::admit` succeeds. Doc-hidden because production code
     /// shouldn't read it — it exists for integration tests to assert
@@ -974,6 +987,17 @@ pub struct SchedulerActorHandle {
     pub kv_cache_budget_policy: &'static str,
     /// Shared Active KV offload metrics and runtime status.
     pub active_kv_offload: ActiveKvOffloadSharedStats,
+}
+
+impl SchedulerActorHandle {
+    pub(crate) fn install_cold_materialization_tracker(
+        &self,
+        tracker: Arc<crate::core::process_memory::ColdMaterializationTracker>,
+    ) -> Result<()> {
+        self.cold_materialization_tracker
+            .set(tracker)
+            .map_err(|_| anyhow::anyhow!("cold materialization tracker already installed"))
+    }
 }
 
 /// Spawn the driver task and return a handle. The driver runs on
@@ -1333,6 +1357,7 @@ where
     // calling thread while deferring Scheduler::new_with_state (and thus
     // Array allocation) to the spawn_blocking worker thread.
     let memory_budget_exceeded_count = Arc::new(AtomicU64::new(0));
+    let cold_materialization_tracker = Arc::new(OnceLock::new());
 
     // Healthz observables cloned from BudgetState (Arc<AtomicUsize> inside).
     let kv_cache_active_bytes = budget_state.shared_active();
@@ -1398,6 +1423,7 @@ where
     let prefix_lru_cache_for_task = prefix_lru_cache;
     let active_kv_offload_for_task = active_kv_offload.clone();
     let active_kv_stats_for_task = active_kv_stats.clone();
+    let cold_materialization_tracker_for_task = Arc::clone(&cold_materialization_tracker);
 
     // ── Step 3: Spawn driver — Scheduler::new_with_state constructed INSIDE
     //    spawn_blocking so MLX Array fields (prng_state) are allocated on the
@@ -1411,14 +1437,20 @@ where
             meta,
         )
         .expect("budget already validated above; new_with_state must not fail");
+        scheduler.enable_process_memory_governor(
+            crate::core::process_memory::global_process_memory_governor(),
+        );
+        scheduler.share_cold_materialization_tracker(cold_materialization_tracker_for_task);
         if let Some(config) = paged_prefix_cache_for_task {
             scheduler
                 .enable_paged_prefix_cache(config)
                 .expect("paged prefix cache config was validated before actor spawn");
         }
         if let Some(config) = prefix_lru_cache_for_task {
+            let cache = crate::core::cache::process_shared_prefix_lru_cache(config)
+                .expect("prefix LRU cache config was validated before actor spawn");
             scheduler
-                .enable_prefix_lru_cache(config)
+                .enable_shared_prefix_lru_cache(cache)
                 .expect("prefix LRU cache config was validated before actor spawn");
         }
         scheduler
@@ -1447,6 +1479,7 @@ where
 
     Ok(SchedulerActorHandle {
         cmd_tx,
+        cold_materialization_tracker,
         admit_count,
         batch_count,
         saturate_triggered,
@@ -1589,6 +1622,18 @@ fn driver_loop<M, A>(
             ));
         }
 
+        prune_abandoned_pending_admits(&mut admission_queue);
+        evict_abandoned_active_requests::<M, A>(
+            &mut sched,
+            &mut event_txs,
+            &mut in_flight_mid_admit,
+        );
+        b_active.store(sched.active_count() as u64, Ordering::Relaxed);
+        b_queued.store(admission_queue.len() as u64, Ordering::Relaxed);
+        if sched.active_count() == 0 {
+            continue 'outer;
+        }
+
         // ===== First-batch prefill. =====
         batch_count.fetch_add(1, Ordering::Relaxed);
         let prefill_profile = rolling_profile_enabled()
@@ -1659,6 +1704,27 @@ fn driver_loop<M, A>(
         let mut admission_policy = RollingAdmissionPolicy::default();
         admission_policy.record_admission_work();
         'rolling: loop {
+            prune_abandoned_pending_admits(&mut admission_queue);
+            evict_abandoned_active_requests::<M, A>(
+                &mut sched,
+                &mut event_txs,
+                &mut in_flight_mid_admit,
+            );
+            discard_abandoned_parked_requests(
+                &sched,
+                &mut parked_active_kv,
+                &mut event_txs,
+                &active_kv_stats,
+            );
+            // Cancellation can empty the scheduler before the rolling-loop
+            // tail is reached. Publish the post-eviction state here so
+            // /healthz never reports a ghost active request while the actor is
+            // already blocked in the outer idle receive.
+            b_active.store(sched.active_count() as u64, Ordering::Relaxed);
+            b_queued.store(admission_queue.len() as u64, Ordering::Relaxed);
+            if let Err(error) = sched.apply_process_memory_pressure() {
+                tracing::warn!(%error, "scheduler memory-pressure reclaim failed");
+            }
             // Pre-event Finished-batch finalization + handoff. If
             // previous iteration's prefill_admitted/step left phase=Finished
             // (e.g. max_tokens=1 workload), handle the completed batch BEFORE
@@ -1788,23 +1854,27 @@ fn driver_loop<M, A>(
                                 sched.active_count(),
                                 b_max,
                                 adaptive_policy,
-                            ) && start_mid_admit_one_chunk(
-                                pending_cmd.take().expect("pending command present"),
-                                &mut in_flight_mid_admit,
-                                &mut sched,
-                                &mut event_txs,
-                                &admit_count,
-                                &model,
-                                &mut mtp_mode,
-                                &mtp_counters,
-                                MidAdmitProfileContext {
-                                    source: RollingMidAdmitSource::Direct,
-                                    queue_wait_ms: None,
-                                    queue_len: admission_queue.len(),
-                                },
-                                decode_cadence_mid_chunk_cap,
                             ) {
-                                admission_policy.record_admission_work();
+                                let decode_steps = start_mid_admit_one_chunk(
+                                    pending_cmd.take().expect("pending command present"),
+                                    &mut in_flight_mid_admit,
+                                    &mut sched,
+                                    &mut event_txs,
+                                    &admit_count,
+                                    &model,
+                                    &mut mtp_mode,
+                                    &mtp_counters,
+                                    MidAdmitProfileContext {
+                                        source: RollingMidAdmitSource::Direct,
+                                        queue_wait_ms: None,
+                                        queue_len: admission_queue.len(),
+                                    },
+                                    decode_cadence_mid_chunk_cap,
+                                );
+                                if decode_steps > 0 {
+                                    admission_policy
+                                        .record_admission_work_with_decode_steps(decode_steps);
+                                }
                             }
                         }
                         if let Some(cmd) = pending_cmd {
@@ -1817,27 +1887,30 @@ fn driver_loop<M, A>(
                                 &queue_rejected,
                             );
                         }
-                    } else if start_mid_admit_one_chunk(
-                        cmd,
-                        &mut in_flight_mid_admit,
-                        &mut sched,
-                        &mut event_txs,
-                        &admit_count,
-                        &model,
-                        &mut mtp_mode,
-                        &mtp_counters,
-                        MidAdmitProfileContext {
-                            source: RollingMidAdmitSource::Direct,
-                            queue_wait_ms: None,
-                            queue_len: admission_queue.len(),
-                        },
-                        decode_cadence_mid_chunk_cap,
-                    ) {
-                        admission_policy.record_admission_work();
+                    } else {
+                        let decode_steps = start_mid_admit_one_chunk(
+                            cmd,
+                            &mut in_flight_mid_admit,
+                            &mut sched,
+                            &mut event_txs,
+                            &admit_count,
+                            &model,
+                            &mut mtp_mode,
+                            &mtp_counters,
+                            MidAdmitProfileContext {
+                                source: RollingMidAdmitSource::Direct,
+                                queue_wait_ms: None,
+                                queue_len: admission_queue.len(),
+                            },
+                            decode_cadence_mid_chunk_cap,
+                        );
+                        if decode_steps > 0 {
+                            admission_policy.record_admission_work_with_decode_steps(decode_steps);
+                        }
                     }
                 }
                 RollingEvent::AdvanceMidAdmit => {
-                    if advance_mid_admit_one_chunk(
+                    let decode_steps = advance_mid_admit_one_chunk(
                         &mut in_flight_mid_admit,
                         &mut sched,
                         &mut event_txs,
@@ -1847,8 +1920,9 @@ fn driver_loop<M, A>(
                         &mtp_counters,
                         admission_queue.len(),
                         decode_cadence_mid_chunk_cap,
-                    ) {
-                        admission_policy.record_admission_work();
+                    );
+                    if decode_steps > 0 {
+                        admission_policy.record_admission_work_with_decode_steps(decode_steps);
                     }
                 }
                 RollingEvent::Step => {
@@ -1912,9 +1986,8 @@ fn driver_loop<M, A>(
                                     &active_kv_stats,
                                 );
                             }
-                            if mtp_mode.allow_rolling_mid_admit()
-                                && in_flight_mid_admit.is_none()
-                                && drain_admission_queue(
+                            if mtp_mode.allow_rolling_mid_admit() && in_flight_mid_admit.is_none() {
+                                let decode_steps = drain_admission_queue(
                                     &mut admission_queue,
                                     &mut in_flight_mid_admit,
                                     &mut sched,
@@ -1926,9 +1999,11 @@ fn driver_loop<M, A>(
                                     b_max,
                                     decode_cadence_mid_chunk_cap,
                                     adaptive_policy,
-                                )
-                            {
-                                admission_policy.record_admission_work();
+                                );
+                                if decode_steps > 0 {
+                                    admission_policy
+                                        .record_admission_work_with_decode_steps(decode_steps);
+                                }
                             }
                         }
                         Err(e) => {
@@ -2276,17 +2351,17 @@ fn start_mid_admit_one_chunk<M, A>(
     mtp_counters: &SchedulerActorMtpCounters,
     profile_context: MidAdmitProfileContext,
     decode_cadence_mid_chunk_cap: usize,
-) -> bool
+) -> usize
 where
     M: Model + DenseVlMethods + Send + 'static,
     A: SchedulerActorMtpMode<M>,
 {
     if in_flight_mid_admit.is_some() {
-        return false;
+        return 0;
     }
     let Some(handle) = begin_mid_admit(cmd, sched, event_txs, model, mtp_mode, profile_context)
     else {
-        return false;
+        return 0;
     };
     *in_flight_mid_admit = Some(handle);
     advance_mid_admit_one_chunk(
@@ -2313,17 +2388,18 @@ fn advance_mid_admit_one_chunk<M, A>(
     mtp_counters: &SchedulerActorMtpCounters,
     queue_len: usize,
     decode_cadence_mid_chunk_cap: usize,
-) -> bool
+) -> usize
 where
     M: Model + DenseVlMethods + Send + 'static,
     A: SchedulerActorMtpMode<M>,
 {
     let Some(mut handle) = in_flight_mid_admit.take() else {
-        return false;
+        return 0;
     };
     let id = A::mid_admit_request_id(&handle);
     let active_count_before_chunk = sched.active_count();
     let requested_chunk_size = A::mid_admit_chunk_size(&handle);
+    let chunk_start_before = A::mid_admit_chunk_start(&handle);
     let effective_chunk_size = cadence_protected_mid_chunk_size(
         requested_chunk_size,
         active_count_before_chunk,
@@ -2333,7 +2409,7 @@ where
     A::set_mid_admit_chunk_size(&mut handle, effective_chunk_size);
     let chunk_profile = rolling_profile_enabled().then(|| {
         (
-            A::mid_admit_chunk_start(&handle),
+            chunk_start_before,
             A::mid_admit_prompt_len(&handle),
             effective_chunk_size,
             active_count_before_chunk,
@@ -2371,9 +2447,14 @@ where
             tracing::error!("[SchedulerActor] admit_mid_chunk error: {e:?}");
             let _ = sched.evict(id);
             event_txs.remove(&id);
-            return true;
+            return ROLLING_DECODE_STEPS_AFTER_ADMISSION_WORK;
         }
     };
+    let completed_chunk_tokens =
+        usize::try_from(A::mid_admit_chunk_start(&handle).saturating_sub(chunk_start_before))
+            .unwrap_or(0);
+    let decode_steps =
+        decode_steps_after_mid_admit_chunk(completed_chunk_tokens, decode_cadence_mid_chunk_cap);
     if let Some((chunk_start, prompt_len, chunk_size, active_count, chunk_timer)) = chunk_profile {
         let chunk_end_time = Instant::now();
         let chunk_end = A::mid_admit_chunk_start(&handle);
@@ -2395,7 +2476,7 @@ where
 
     if !is_last {
         *in_flight_mid_admit = Some(handle);
-        return true;
+        return decode_steps;
     }
 
     let finalize_profile =
@@ -2436,7 +2517,7 @@ where
             event_txs.remove(&id);
         }
     }
-    true
+    decode_steps
 }
 
 /// Push a pending admit into the queue if there's capacity; otherwise reply
@@ -2453,6 +2534,10 @@ fn enqueue_or_reject(
     queue_rejected: &Arc<AtomicU64>,
 ) {
     let SchedulerCommand::Admit { request, reply_tx } = cmd;
+    if reply_tx.is_closed() {
+        return;
+    }
+    prune_abandoned_pending_admits(queue);
     if queue.len() >= queue_max {
         queue_rejected.fetch_add(1, Ordering::Relaxed);
         let _ = reply_tx.send(Err(anyhow::Error::new(
@@ -2488,6 +2573,101 @@ fn enqueue_or_reject(
     }
 }
 
+fn prune_abandoned_pending_admits(queue: &mut VecDeque<PendingAdmit>) -> usize {
+    let before = queue.len();
+    queue.retain(|pending| !pending.reply_tx.is_closed());
+    before.saturating_sub(queue.len())
+}
+
+fn evict_abandoned_active_requests<M, A>(
+    sched: &mut Scheduler<M>,
+    event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
+    in_flight_mid_admit: &mut Option<A::MidAdmitHandle>,
+) -> usize
+where
+    M: Model + DenseVlMethods + Send + 'static,
+    A: SchedulerActorMtpMode<M>,
+{
+    let mut evicted = 0;
+    if let Some(handle) = in_flight_mid_admit.as_ref() {
+        let id = A::mid_admit_request_id(handle);
+        let abandoned = event_txs.get(&id).is_some_and(|tx| tx.is_closed());
+        if abandoned {
+            match sched.evict(id) {
+                Ok(()) => {
+                    *in_flight_mid_admit = None;
+                    event_txs.remove(&id);
+                    evicted += 1;
+                }
+                Err(error) => {
+                    tracing::warn!(request_id = id.0, %error, "failed to evict cancelled mid-admit request");
+                }
+            }
+        }
+    }
+
+    let abandoned_ids: Vec<RequestId> = sched
+        .active()
+        .into_iter()
+        .filter_map(|state| {
+            event_txs
+                .get(&state.id)
+                .is_some_and(|tx| tx.is_closed())
+                .then_some(state.id)
+        })
+        .collect();
+    for id in abandoned_ids {
+        match sched.evict(id) {
+            Ok(()) => {
+                event_txs.remove(&id);
+                evicted += 1;
+            }
+            Err(error) => {
+                tracing::warn!(request_id = id.0, %error, "failed to evict cancelled request");
+            }
+        }
+    }
+    evicted
+}
+
+fn discard_abandoned_parked_requests<M>(
+    sched: &Scheduler<M>,
+    parked_active_kv: &mut VecDeque<ActiveKvParkedRequest>,
+    event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
+    active_kv_stats: &ActiveKvOffloadSharedStats,
+) -> usize
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    let mut discarded = 0;
+    let mut retained = VecDeque::with_capacity(parked_active_kv.len());
+    while let Some(parked) = parked_active_kv.pop_front() {
+        let abandoned = event_txs.get(&parked.id).is_none_or(|tx| tx.is_closed());
+        if abandoned {
+            match sched.discard_active_kv_request(&parked) {
+                Ok(()) => {
+                    event_txs.remove(&parked.id);
+                    discarded += 1;
+                }
+                Err(error) => {
+                    active_kv_stats.record_error();
+                    tracing::warn!(
+                        request_id = parked.id.0,
+                        %error,
+                        "failed to discard cancelled parked request"
+                    );
+                    retained.push_back(parked);
+                }
+            }
+        } else {
+            retained.push_back(parked);
+        }
+    }
+    *parked_active_kv = retained;
+    active_kv_stats.set_parked_requests(parked_active_kv.len());
+    discarded
+}
+
 /// Drain at most one mid-batch admit chunk from the admission queue.
 /// Full-prompt rolling admits obey the model's `fresh_prefill_batch_limit`.
 /// Multi-chunk admits may start in a spare slot beyond that limit because
@@ -2514,25 +2694,29 @@ fn drain_admission_queue<M, A>(
     b_max: usize,
     decode_cadence_mid_chunk_cap: usize,
     adaptive_policy: AdaptiveAdmissionPolicy,
-) -> bool
+) -> usize
 where
     M: Model + DenseVlMethods + Send + 'static,
     A: SchedulerActorMtpMode<M>,
 {
     // admit_mid is only legal in Decoding phase.
     if sched.phase() != Phase::Decoding {
-        return false;
+        return 0;
     }
     if sched.active_count() == 0 {
-        return false;
+        return 0;
     }
     if in_flight_mid_admit.is_some() {
-        return false;
+        return 0;
     }
     while sched.active_count() < b_max {
         let Some(pending) = queue.front() else {
-            return false;
+            return 0;
         };
+        if pending.reply_tx.is_closed() {
+            queue.pop_front();
+            continue;
+        }
         if !can_start_rolling_mid_admit_for_request::<M>(
             &pending.request,
             sched,
@@ -2540,7 +2724,7 @@ where
             b_max,
             adaptive_policy,
         ) {
-            return false;
+            return 0;
         }
         let pending = queue
             .pop_front()
@@ -2564,7 +2748,7 @@ where
             request: pending.request,
             reply_tx: pending.reply_tx,
         };
-        let did_admission_work = start_mid_admit_one_chunk(
+        let decode_steps = start_mid_admit_one_chunk(
             cmd,
             in_flight_mid_admit,
             sched,
@@ -2582,18 +2766,18 @@ where
         );
         // Re-check phase after each mid-admit — if admit_mid itself
         // exhausted remaining rows and transitioned to Finished, stop.
-        if did_admission_work || sched.phase() != Phase::Decoding {
-            return did_admission_work;
+        if decode_steps > 0 || sched.phase() != Phase::Decoding {
+            return decode_steps;
         }
     }
-    false
+    0
 }
 
 fn route_event(ev: StepEvent, event_txs: &HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>) {
     if let Some(tx) = event_txs.get(&ev.id) {
         // Unbounded channel — only fails when the receiver was dropped
-        // (handler abandoned). That's fine; the entry naturally clears
-        // at the next `event_txs.clear()` in driver_loop.
+        // (handler abandoned). The rolling-loop cancellation sweep evicts
+        // that request and releases its KV/governor reservations.
         let _ = tx.send(ev);
     }
 }
@@ -2664,6 +2848,20 @@ where
             active_kv_stats.set_parked_requests(0);
             return false;
         };
+        if event_txs.get(&parked.id).is_none_or(|tx| tx.is_closed()) {
+            if let Err(error) = sched.discard_active_kv_request(&parked) {
+                active_kv_stats.record_error();
+                tracing::warn!(
+                    request_id = parked.id.0,
+                    %error,
+                    "failed to discard cancelled parked request before restore"
+                );
+            } else {
+                event_txs.remove(&parked.id);
+            }
+            active_kv_stats.set_parked_requests(parked_active_kv.len());
+            continue;
+        }
         let model_lock = model.blocking_lock();
         match sched.restore_active_kv_request(&parked, &model_lock) {
             Ok(id) => {
@@ -3213,6 +3411,19 @@ mod tests {
             _target: mlx::StreamOrDevice,
         ) -> Result<mlx::Array> {
             fake_logits(input_ids.shape().as_slice()[0] as usize)
+        }
+
+        fn estimate_vision_prefill_peak_bytes(
+            &self,
+            pixel_values: &[mlx::Array],
+            grid_thw: &[(i32, i32, i32)],
+        ) -> Result<usize> {
+            Ok(pixel_values
+                .iter()
+                .map(|pixels| pixels.size().saturating_mul(pixels.dtype().byte_size()))
+                .sum::<usize>()
+                .saturating_add(grid_thw.len())
+                .max(1))
         }
 
         fn compute_vision_embeds(
@@ -3811,6 +4022,24 @@ mod tests {
     }
 
     #[test]
+    fn rolling_policy_scales_decode_credit_with_mid_admit_chunk_work() {
+        assert_eq!(decode_steps_after_mid_admit_chunk(256, 256), 4);
+        assert_eq!(decode_steps_after_mid_admit_chunk(257, 256), 8);
+        assert_eq!(decode_steps_after_mid_admit_chunk(2048, 256), 32);
+
+        let mut policy = RollingAdmissionPolicy::default();
+        policy
+            .record_admission_work_with_decode_steps(decode_steps_after_mid_admit_chunk(2048, 256));
+        for _ in 0..31 {
+            assert!(policy.should_force_decode(Phase::Decoding, true, true));
+            policy.record_decode_step();
+        }
+        assert!(policy.should_force_decode(Phase::Decoding, true, true));
+        policy.record_decode_step();
+        assert!(!policy.should_force_decode(Phase::Decoding, true, true));
+    }
+
+    #[test]
     fn rolling_policy_does_not_force_decode_without_active_decoding_rows() {
         let mut policy = RollingAdmissionPolicy::default();
 
@@ -3826,6 +4055,45 @@ mod tests {
 
         policy.record_admission_work();
         assert!(!policy.should_force_decode(Phase::Decoding, true, false));
+    }
+
+    #[test]
+    fn abandoned_event_receiver_evicts_request_and_releases_slot() {
+        let mut scheduler = Scheduler::<SchedulerActorFakeModel>::new(
+            1,
+            32,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler");
+        let id = scheduler.admit(mk_req(11)).expect("admit");
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        drop(event_rx);
+        let mut event_txs = HashMap::from([(id, event_tx)]);
+        let mut in_flight: Option<AdmitMidHandle> = None;
+
+        assert_eq!(
+            evict_abandoned_active_requests::<_, SchedulerActorNoMtp>(
+                &mut scheduler,
+                &mut event_txs,
+                &mut in_flight,
+            ),
+            1
+        );
+        assert_eq!(scheduler.active_count(), 0);
+        assert_eq!(scheduler.phase(), Phase::Idle);
+        assert!(event_txs.is_empty());
+    }
+
+    #[test]
+    fn abandoned_queued_admission_does_not_consume_queue_capacity() {
+        let (abandoned, abandoned_rx) = queued_pending(11);
+        drop(abandoned_rx);
+        let (live, _live_rx) = queued_pending(12);
+        let mut queue = VecDeque::from([abandoned, live]);
+
+        assert_eq!(prune_abandoned_pending_admits(&mut queue), 1);
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue.front().unwrap().request.prompt_ids, vec![12]);
     }
 
     #[test]
@@ -4269,7 +4537,7 @@ mod tests {
             AdaptiveAdmissionPolicy::disabled(),
         );
 
-        assert!(did_admit, "expected one queued request to be admitted");
+        assert!(did_admit > 0, "expected one queued request to be admitted");
         assert_eq!(
             queue.len(),
             2,
@@ -4326,7 +4594,7 @@ mod tests {
         );
 
         assert!(
-            !did_admit,
+            did_admit == 0,
             "active rows already reached the model's rolling prefill batch limit"
         );
         assert_eq!(
@@ -4388,7 +4656,7 @@ mod tests {
         );
 
         assert!(
-            did_admit,
+            did_admit > 0,
             "chunked queued requests may start prefill under decode-cadence protection"
         );
         assert_eq!(queue.len(), 0);
@@ -4453,7 +4721,7 @@ mod tests {
             AdaptiveAdmissionPolicy::disabled(),
         );
 
-        assert!(did_admit, "chunked queued request should start");
+        assert!(did_admit > 0, "chunked queued request should start");
         let handle = in_flight_mid_admit
             .as_ref()
             .expect("chunked mid-admit should still be in flight");

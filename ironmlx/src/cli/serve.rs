@@ -14,6 +14,7 @@ use super::scheduler_profile_store::{
 };
 use super::KvQuantArg;
 use crate::core::cache::DEFAULT_PAGED_PREFIX_CACHE_BLOCK_SIZE;
+use crate::core::process_memory::StaticMemoryEstimate;
 use crate::core::scheduler::DenseVlMethods;
 use crate::core::scheduler_autotune::{
     evaluate_scheduler_autotune_profile_health, SchedulerAutotuneProfileConfig,
@@ -987,6 +988,7 @@ fn serve_with_model<M>(
     scheduler_config: SchedulerServeConfig,
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     vision_input: Option<server::VisionInputConfig>,
+    static_memory_estimate: StaticMemoryEstimate,
 ) -> Result<()>
 where
     M: Model + DenseVlMethods + Send + 'static,
@@ -1031,9 +1033,11 @@ where
         scheduler_runtime_profile,
         args.scheduler_autotune_report,
         vision_input,
+        static_memory_estimate,
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn serve_with_mtp_model<M>(
     model: M,
     tokenizer: Tokenizer,
@@ -1042,6 +1046,7 @@ fn serve_with_mtp_model<M>(
     scheduler_config: SchedulerServeConfig,
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     vision_input: Option<server::VisionInputConfig>,
+    mut static_memory_estimate: StaticMemoryEstimate,
 ) -> Result<()>
 where
     M: Model + DenseVlMethods + MtpSpeculativeModel + Send + 'static,
@@ -1054,6 +1059,7 @@ where
     let mtp = model
         .load_mtp_head(&mtp_loader)
         .with_context(|| format!("loading MTP head from {}", mtp_config.model_dir.display()))?;
+    static_memory_estimate.speculative_cold_bytes = mtp_loader.loaded_tensor_bytes();
 
     let model_id = single_model_id(args)?;
     let paged_prefix_cache = resolve_paged_prefix_cache_config(args, scheduler_config, &model_id)?;
@@ -1080,7 +1086,7 @@ where
     runtime.block_on(server::serve_with_mtp(
         model,
         mtp,
-        effective_draft_tokens,
+        mtp_config.draft_tokens,
         tokenizer,
         model_id,
         &args.host,
@@ -1098,6 +1104,7 @@ where
         scheduler_runtime_profile,
         args.scheduler_autotune_report,
         vision_input,
+        static_memory_estimate,
     ))
 }
 
@@ -1106,7 +1113,7 @@ fn serve_with_gemma4_drafter_model(
     model: crate::models::Gemma4Model,
     tokenizer: Tokenizer,
     model_dir: &Path,
-    base_model_weight_bytes: usize,
+    mut static_memory_estimate: StaticMemoryEstimate,
     mtp_config: ServeMtpConfig,
     args: &ServeArgs,
     scheduler_config: SchedulerServeConfig,
@@ -1115,7 +1122,7 @@ fn serve_with_gemma4_drafter_model(
 ) -> Result<()> {
     log_scheduler_mode(scheduler_config);
     tracing::info!(
-        "ironmlx serve: Gemma4 drafter enabled model_dir={} draft_tokens={}",
+        "ironmlx serve: Gemma4 drafter enabled model_dir={} requested_draft_tokens={}",
         mtp_config.model_dir.display(),
         mtp_config.draft_tokens
     );
@@ -1139,8 +1146,7 @@ fn serve_with_gemma4_drafter_model(
             mtp_config.model_dir.display()
         )
     })?;
-    let total_model_weight_bytes =
-        base_model_weight_bytes.saturating_add(drafter_loader.loaded_tensor_bytes());
+    static_memory_estimate.speculative_cold_bytes = drafter_loader.loaded_tensor_bytes();
     let drafter = crate::models::gemma4::Gemma4AssistantModel::from_loader(&drafter_loader)
         .with_context(|| {
             format!(
@@ -1181,7 +1187,7 @@ fn serve_with_gemma4_drafter_model(
         scheduler_runtime_profile,
         args.scheduler_autotune_report,
         vision_input,
-        Some(total_model_weight_bytes),
+        static_memory_estimate,
     ))
 }
 
@@ -1478,6 +1484,12 @@ pub fn run(args: ServeArgs) -> Result<()> {
     let architecture = crate::models::ModelArchitecture::from_model_type(&model_type)?;
     // open_multimodal so Qwen VL checkpoints retain vision_tower.* keys.
     let loader = Loader::open_multimodal(&model_dir).context("Loader::open_multimodal")?;
+    let component_bytes = loader.loaded_tensor_component_bytes();
+    let static_memory_estimate = StaticMemoryEstimate {
+        text_cold_bytes: component_bytes.text,
+        vision_cold_bytes: component_bytes.vision,
+        speculative_cold_bytes: 0,
+    };
     let mtp_config = resolve_serve_mtp_config(
         &args,
         architecture,
@@ -1529,6 +1541,7 @@ pub fn run(args: ServeArgs) -> Result<()> {
                     scheduler_config,
                     scheduler_runtime_profile,
                     vision_input,
+                    static_memory_estimate,
                 )
             } else {
                 serve_with_model(
@@ -1538,6 +1551,7 @@ pub fn run(args: ServeArgs) -> Result<()> {
                     scheduler_config,
                     scheduler_runtime_profile,
                     vision_input,
+                    static_memory_estimate,
                 )
             }
         }
@@ -1555,6 +1569,7 @@ pub fn run(args: ServeArgs) -> Result<()> {
                             scheduler_config,
                             scheduler_runtime_profile,
                             vision_input,
+                            static_memory_estimate,
                         )
                     } else {
                         serve_with_model(
@@ -1564,6 +1579,7 @@ pub fn run(args: ServeArgs) -> Result<()> {
                             scheduler_config,
                             scheduler_runtime_profile,
                             vision_input,
+                            static_memory_estimate,
                         )
                     }
                 }
@@ -1579,6 +1595,7 @@ pub fn run(args: ServeArgs) -> Result<()> {
                             scheduler_config,
                             scheduler_runtime_profile,
                             vision_input,
+                            static_memory_estimate,
                         )
                     } else {
                         serve_with_model(
@@ -1588,6 +1605,7 @@ pub fn run(args: ServeArgs) -> Result<()> {
                             scheduler_config,
                             scheduler_runtime_profile,
                             vision_input,
+                            static_memory_estimate,
                         )
                     }
                 }
@@ -1601,7 +1619,7 @@ pub fn run(args: ServeArgs) -> Result<()> {
                     model,
                     tokenizer,
                     &model_dir,
-                    loader.loaded_tensor_bytes(),
+                    static_memory_estimate,
                     mtp_config,
                     &args,
                     scheduler_config,
@@ -1616,6 +1634,7 @@ pub fn run(args: ServeArgs) -> Result<()> {
                     scheduler_config,
                     scheduler_runtime_profile,
                     vision_input,
+                    static_memory_estimate,
                 )
             }
         }
@@ -1629,6 +1648,7 @@ pub fn run(args: ServeArgs) -> Result<()> {
                 scheduler_config,
                 scheduler_runtime_profile,
                 None,
+                static_memory_estimate,
             )
         }
         crate::models::ModelArchitecture::Llama => {
@@ -1641,6 +1661,7 @@ pub fn run(args: ServeArgs) -> Result<()> {
                 scheduler_config,
                 scheduler_runtime_profile,
                 None,
+                static_memory_estimate,
             )
         }
         crate::models::ModelArchitecture::MiniCpmV46 => {
@@ -1654,6 +1675,7 @@ pub fn run(args: ServeArgs) -> Result<()> {
                 scheduler_config,
                 scheduler_runtime_profile,
                 vision_input,
+                static_memory_estimate,
             )
         }
         crate::models::ModelArchitecture::DiffusionGemma => {

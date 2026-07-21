@@ -51,11 +51,15 @@ pub struct MemoryInfo {
     pub mlx_cache_bytes: usize,
     pub mlx_peak_bytes: usize,
     pub mlx_memory_limit_bytes: usize,
+    pub process_governor: crate::core::process_memory::MemoryGovernorSnapshot,
+    pub prefix_store: crate::core::cache::AsyncPrefixStoreStats,
 }
 
 #[derive(Debug, Serialize)]
 pub struct MtpHealthInfo {
     pub enabled: bool,
+    pub requested_draft_tokens: Option<usize>,
+    /// Runtime cap after applying cache and scheduler safety constraints.
     pub draft_tokens: Option<usize>,
     pub prefill_count: u64,
     pub step_count: u64,
@@ -77,6 +81,7 @@ pub struct MtpHealthInfo {
 #[derive(Clone)]
 pub struct MtpHealthConfig {
     enabled: bool,
+    requested_draft_tokens: Option<usize>,
     draft_tokens: Option<usize>,
     prefill_count: Arc<AtomicU64>,
     step_count: Arc<AtomicU64>,
@@ -99,6 +104,7 @@ impl MtpHealthConfig {
     pub fn disabled() -> Self {
         Self {
             enabled: false,
+            requested_draft_tokens: None,
             draft_tokens: None,
             prefill_count: Arc::new(AtomicU64::new(0)),
             step_count: Arc::new(AtomicU64::new(0)),
@@ -120,6 +126,7 @@ impl MtpHealthConfig {
 
     #[allow(clippy::too_many_arguments)]
     pub fn enabled(
+        requested_draft_tokens: usize,
         draft_tokens: usize,
         prefill_count: Arc<AtomicU64>,
         step_count: Arc<AtomicU64>,
@@ -139,6 +146,7 @@ impl MtpHealthConfig {
     ) -> Self {
         Self {
             enabled: true,
+            requested_draft_tokens: Some(requested_draft_tokens),
             draft_tokens: Some(draft_tokens),
             prefill_count,
             step_count,
@@ -161,6 +169,7 @@ impl MtpHealthConfig {
     fn snapshot(&self) -> MtpHealthInfo {
         MtpHealthInfo {
             enabled: self.enabled,
+            requested_draft_tokens: self.requested_draft_tokens,
             draft_tokens: self.draft_tokens,
             prefill_count: self.prefill_count.load(Ordering::Relaxed),
             step_count: self.step_count.load(Ordering::Relaxed),
@@ -224,6 +233,9 @@ impl SchedulerHealthCollector {
         let mb_exceeded = self.memory_budget_exceeded_count.load(Ordering::Relaxed);
         let kv_active = self.kv_cache_active_bytes.load(Ordering::Relaxed);
         let mlx_memory = mlx::memory::snapshot();
+        let process_governor =
+            crate::core::process_memory::global_process_memory_governor().sample_process();
+        let prefix_store = crate::core::cache::process_async_prefix_store_queue().stats();
 
         let active_kv_offload = self.active_kv_offload.snapshot();
         let mut status = classify_status(
@@ -236,7 +248,17 @@ impl SchedulerHealthCollector {
         if active_kv_offload.degraded {
             status = HealthStatus::Degraded;
         }
-
+        if crate::core::cache::process_async_prefix_store_queue().is_backpressured() {
+            status = HealthStatus::Degraded;
+        }
+        if process_governor.pressure_level == crate::core::process_memory::PressureLevel::Emergency
+        {
+            status = HealthStatus::Down;
+        } else if process_governor.telemetry_degraded
+            || process_governor.pressure_level != crate::core::process_memory::PressureLevel::Normal
+        {
+            status = HealthStatus::Degraded;
+        }
         HealthSnapshot {
             status,
             uptime_secs,
@@ -266,6 +288,8 @@ impl SchedulerHealthCollector {
                 mlx_cache_bytes: mlx_memory.cache_bytes,
                 mlx_peak_bytes: mlx_memory.peak_bytes,
                 mlx_memory_limit_bytes: mlx_memory.memory_limit_bytes,
+                process_governor,
+                prefix_store,
             },
             mtp: self.mtp.snapshot(),
             active_kv_offload,
@@ -416,6 +440,7 @@ mod tests {
         let snapshot = test_collector(MtpHealthConfig::disabled()).snapshot();
 
         assert!(!snapshot.mtp.enabled);
+        assert_eq!(snapshot.mtp.requested_draft_tokens, None);
         assert_eq!(snapshot.mtp.draft_tokens, None);
         assert_eq!(snapshot.mtp.prefill_count, 0);
         assert_eq!(snapshot.mtp.step_count, 0);
@@ -451,6 +476,7 @@ mod tests {
         let cache_restore_us = Arc::new(AtomicU64::new(53));
         let snapshot = test_collector(MtpHealthConfig::enabled(
             2,
+            1,
             prefill_count.clone(),
             step_count.clone(),
             fallback_prefill_count.clone(),
@@ -469,8 +495,11 @@ mod tests {
         ))
         .snapshot();
 
+        assert_eq!(snapshot.mtp.requested_draft_tokens, Some(2));
+        assert_eq!(snapshot.mtp.draft_tokens, Some(1));
+
         assert!(snapshot.mtp.enabled);
-        assert_eq!(snapshot.mtp.draft_tokens, Some(2));
+        assert_eq!(snapshot.mtp.draft_tokens, Some(1));
         assert_eq!(snapshot.mtp.prefill_count, 7);
         assert_eq!(snapshot.mtp.step_count, 11);
         assert_eq!(snapshot.mtp.fallback_prefill_count, 13);
@@ -504,6 +533,7 @@ mod tests {
         cache_restore_us.store(67, Ordering::Relaxed);
         let snapshot = test_collector(MtpHealthConfig::enabled(
             2,
+            2,
             prefill_count,
             step_count,
             fallback_prefill_count,
@@ -522,6 +552,8 @@ mod tests {
         ))
         .snapshot();
 
+        assert_eq!(snapshot.mtp.requested_draft_tokens, Some(2));
+        assert_eq!(snapshot.mtp.draft_tokens, Some(2));
         assert_eq!(snapshot.mtp.prefill_count, 13);
         assert_eq!(snapshot.mtp.step_count, 17);
         assert_eq!(snapshot.mtp.fallback_prefill_count, 23);
@@ -585,9 +617,12 @@ mod tests {
                 mlx_cache_bytes: 22,
                 mlx_peak_bytes: 33,
                 mlx_memory_limit_bytes: 44,
+                process_governor: crate::core::process_memory::MemoryGovernorSnapshot::default(),
+                prefix_store: crate::core::cache::AsyncPrefixStoreStats::default(),
             },
             mtp: MtpHealthInfo {
                 enabled: false,
+                requested_draft_tokens: None,
                 draft_tokens: None,
                 prefill_count: 0,
                 step_count: 0,

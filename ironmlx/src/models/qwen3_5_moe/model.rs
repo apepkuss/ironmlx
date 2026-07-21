@@ -763,6 +763,40 @@ impl crate::core::scheduler::DenseVlMethods for Qwen35MoeModel {
         )
     }
 
+    fn estimate_vision_prefill_peak_bytes(
+        &self,
+        pixel_values: &[mlx::Array],
+        grid_thw: &[(i32, i32, i32)],
+    ) -> crate::Result<usize> {
+        anyhow::ensure!(
+            self.vision.is_some(),
+            "Qwen35MoeModel vision peak estimator requires a loaded vision tower"
+        );
+        let config = self.config().vision_config.as_ref().ok_or_else(|| {
+            anyhow!("Qwen35MoeModel vision peak estimator requires vision_config")
+        })?;
+        let merge = usize::try_from(config.spatial_merge_size)
+            .map_err(|_| anyhow!("Qwen35MoeModel spatial_merge_size must be positive"))?;
+        crate::core::scheduler::estimate_transformer_vision_prefill_peak_bytes(
+            pixel_values,
+            grid_thw,
+            crate::core::scheduler::VisionPrefillMemoryProfile {
+                hidden_size: usize::try_from(config.hidden_size)
+                    .map_err(|_| anyhow!("Qwen35MoeModel vision hidden_size must be positive"))?,
+                intermediate_size: usize::try_from(config.intermediate_size).map_err(|_| {
+                    anyhow!("Qwen35MoeModel vision intermediate_size must be positive")
+                })?,
+                num_attention_heads: usize::try_from(config.num_heads)
+                    .map_err(|_| anyhow!("Qwen35MoeModel vision num_heads must be positive"))?,
+                output_hidden_size: usize::try_from(config.out_hidden_size).map_err(|_| {
+                    anyhow!("Qwen35MoeModel vision out_hidden_size must be positive")
+                })?,
+                spatial_merge_area: merge.saturating_mul(merge),
+                activation_bytes: self.hidden_dtype().byte_size(),
+            },
+        )
+    }
+
     fn compute_vision_embeds(
         &self,
         pixel_values: &[mlx::Array],

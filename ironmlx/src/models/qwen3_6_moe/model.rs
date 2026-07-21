@@ -415,6 +415,18 @@ impl crate::core::scheduler::DenseVlMethods for Qwen36MoeModel {
         )
     }
 
+    fn estimate_vision_prefill_peak_bytes(
+        &self,
+        pixel_values: &[mlx::Array],
+        grid_thw: &[(i32, i32, i32)],
+    ) -> crate::Result<usize> {
+        crate::core::scheduler::DenseVlMethods::estimate_vision_prefill_peak_bytes(
+            &self.inner,
+            pixel_values,
+            grid_thw,
+        )
+    }
+
     fn compute_vision_embeds(
         &self,
         pixel_values: &[mlx::Array],

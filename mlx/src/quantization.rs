@@ -198,6 +198,62 @@ pub fn quantized_matmul_on(
     Ok(Array::from_inner(inner))
 }
 
+/// Compute a quantized matmul while evaluating each leading batch matrix with
+/// the same matrix shape as an independent single-batch call.
+#[allow(clippy::too_many_arguments)]
+pub fn quantized_matmul_batch_isolated(
+    x: &Array,
+    w: &Array,
+    scales: &Array,
+    biases: Option<&Array>,
+    transpose: bool,
+    group_size: Option<i32>,
+    bits: Option<i32>,
+    mode: &str,
+) -> Result<Array> {
+    quantized_matmul_batch_isolated_on(x, w, scales, biases, transpose, group_size, bits, mode, ())
+}
+
+/// Stream-targeted variant of [`quantized_matmul_batch_isolated`].
+#[allow(clippy::too_many_arguments)]
+pub fn quantized_matmul_batch_isolated_on(
+    x: &Array,
+    w: &Array,
+    scales: &Array,
+    biases: Option<&Array>,
+    transpose: bool,
+    group_size: Option<i32>,
+    bits: Option<i32>,
+    mode: &str,
+    target: impl Into<StreamOrDevice>,
+) -> Result<Array> {
+    let b_ptr = biases.map_or(std::ptr::null(), |a| a.as_inner() as *const _);
+    let (has_gs, gs) = group_size.map_or((false, 0), |v| (true, v));
+    let (has_b, b) = bits.map_or((false, 0), |v| (true, v));
+    let (has, dev_only, dev_t, idx) = target.into().encode();
+    // SAFETY: b_ptr is null or borrows a valid array for this call.
+    let inner = unsafe {
+        mlx_sys::quantization::ffi::quantized_matmul_batch_isolated(
+            x.as_inner(),
+            w.as_inner(),
+            scales.as_inner(),
+            b_ptr,
+            transpose,
+            has_gs,
+            gs,
+            has_b,
+            b,
+            mode,
+            has,
+            dev_only,
+            dev_t,
+            idx,
+        )
+    }
+    .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
 /// Quantized-quantized matmul. Both x and w may be quantized; default
 /// mode is `"nvfp4"`.
 #[allow(clippy::too_many_arguments)]

@@ -31,6 +31,9 @@ pub struct MiniCpmV46Model {
     /// Vision encoder; `Some` when opened via `open_multimodal` AND
     /// `vision_tower.embeddings.patch_embedding.weight` is present.
     vision: Option<MiniCpmV46Vision>,
+    /// Parsed model-level vision profile retained for mandatory transient
+    /// peak estimation before scheduler graph construction.
+    vision_config: Option<MiniCpmV46VisionConfig>,
     /// Tokenizer id for the per-patch image placeholder.
     image_token_id: i32,
 }
@@ -117,6 +120,7 @@ impl MiniCpmV46Model {
             None
         };
         let image_token_id = vcfg
+            .as_ref()
             .map(|v| v.image_token_id)
             .unwrap_or(crate::core::generate::IMAGE_TOKEN_ID);
 
@@ -126,6 +130,7 @@ impl MiniCpmV46Model {
             text,
             lm_head,
             vision,
+            vision_config: vcfg,
             image_token_id,
         })
     }
@@ -573,6 +578,46 @@ impl MiniCpmV46Model {
 }
 
 impl crate::core::scheduler::DenseVlMethods for MiniCpmV46Model {
+    fn estimate_vision_prefill_peak_bytes(
+        &self,
+        pixel_values: &[mlx::Array],
+        grid_thw: &[(i32, i32, i32)],
+    ) -> crate::Result<usize> {
+        anyhow::ensure!(
+            pixel_values.len() == grid_thw.len(),
+            "MiniCpmV46Model vision peak estimator requires pixel_values.len()={} to equal grid_thw.len()={}",
+            pixel_values.len(),
+            grid_thw.len()
+        );
+        anyhow::ensure!(
+            self.vision.is_some(),
+            "MiniCpmV46Model vision peak estimator requires a loaded vision tower"
+        );
+        let config = self.vision_config.as_ref().ok_or_else(|| {
+            anyhow!("MiniCpmV46Model vision peak estimator requires vision_config")
+        })?;
+        let merge_h = usize::try_from(config.merge_group.0)
+            .map_err(|_| anyhow!("MiniCPM vision merge height must be positive"))?;
+        let merge_w = usize::try_from(config.merge_group.1)
+            .map_err(|_| anyhow!("MiniCPM vision merge width must be positive"))?;
+        crate::core::scheduler::estimate_transformer_vision_prefill_peak_bytes(
+            pixel_values,
+            grid_thw,
+            crate::core::scheduler::VisionPrefillMemoryProfile {
+                hidden_size: usize::try_from(config.hidden_size)
+                    .map_err(|_| anyhow!("MiniCPM vision hidden_size must be positive"))?,
+                intermediate_size: usize::try_from(config.intermediate_size)
+                    .map_err(|_| anyhow!("MiniCPM vision intermediate_size must be positive"))?,
+                num_attention_heads: usize::try_from(config.num_attention_heads)
+                    .map_err(|_| anyhow!("MiniCPM vision num_attention_heads must be positive"))?,
+                output_hidden_size: usize::try_from(self.config().hidden_size)
+                    .map_err(|_| anyhow!("MiniCPM text hidden_size must be positive"))?,
+                spatial_merge_area: merge_h.saturating_mul(merge_w),
+                activation_bytes: Dtype::Bfloat16.byte_size(),
+            },
+        )
+    }
+
     fn compute_vision_embeds(
         &self,
         pixel_values: &[mlx::Array],

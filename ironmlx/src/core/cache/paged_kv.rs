@@ -207,6 +207,45 @@ impl PagedKVCache {
         self.hot_cold.as_ref().map(PagedKvHotColdTiering::summary)
     }
 
+    pub fn shrink_hot_window_on(
+        &mut self,
+        offsets: &[i32],
+        hot_window_pages: i32,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<usize> {
+        anyhow::ensure!(
+            hot_window_pages > 0,
+            "hot window must retain at least one page"
+        );
+        let Some(tiering) = self.hot_cold.as_mut() else {
+            return Ok(0);
+        };
+        tiering.hot_window_pages = tiering.hot_window_pages.min(hot_window_pages);
+        let before = tiering
+            .slot_to_logical
+            .iter()
+            .filter(|page| page.is_some())
+            .count();
+        self.enforce_hot_window(offsets, target.into())?;
+        let after = self.hot_cold.as_ref().map_or(0, |tiering| {
+            tiering
+                .slot_to_logical
+                .iter()
+                .filter(|page| page.is_some())
+                .count()
+        });
+        Ok(before.saturating_sub(after))
+    }
+
+    pub fn restore_configured_hot_window(&mut self) -> bool {
+        let Some(tiering) = self.hot_cold.as_mut() else {
+            return false;
+        };
+        let changed = tiering.hot_window_pages != tiering.configured_hot_window_pages;
+        tiering.hot_window_pages = tiering.configured_hot_window_pages;
+        changed
+    }
+
     pub fn capacity(&self) -> i32 {
         self.cap
     }
@@ -3533,6 +3572,8 @@ fn default_stream_cache_pages(hot_window_pages: i32, chunk_pages: i32) -> usize 
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PagedKvHotColdSummary {
+    pub hot_window_pages: i32,
+    pub configured_hot_window_pages: i32,
     pub resident_pages: usize,
     pub offloaded_pages: usize,
     pub loading_pages: usize,
@@ -3631,6 +3672,7 @@ impl PagedKvPageState {
 struct PagedKvHotColdTiering {
     cache_dir: PathBuf,
     hot_window_pages: i32,
+    configured_hot_window_pages: i32,
     chunk_pages: i32,
     stream_cache_pages: usize,
     stream_cache: HashMap<i32, (Array, Array)>,
@@ -3654,6 +3696,7 @@ impl PagedKvHotColdTiering {
         Ok(Self {
             cache_dir,
             hot_window_pages: config.hot_window_pages,
+            configured_hot_window_pages: config.hot_window_pages,
             chunk_pages: config.chunk_pages,
             stream_cache_pages: config.stream_cache_pages,
             stream_cache: HashMap::new(),
@@ -3824,6 +3867,8 @@ impl PagedKvHotColdTiering {
 
     fn summary(&self) -> PagedKvHotColdSummary {
         let mut summary = PagedKvHotColdSummary {
+            hot_window_pages: self.hot_window_pages,
+            configured_hot_window_pages: self.configured_hot_window_pages,
             resident_pages: 0,
             offloaded_pages: 0,
             loading_pages: 0,
@@ -4258,6 +4303,51 @@ mod tests {
             storage_dir.display()
         );
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn paged_kv_pressure_shrink_demotes_resident_pages_idempotently() {
+        let root = unique_test_dir("paged-kv-pressure-shrink");
+        let mut paged =
+            PagedKVCache::new(1, 1, 2, 2, Dtype::Float32, 8, 2, 8).expect("paged cache");
+        paged
+            .enable_hot_cold_tiering(
+                PagedKvHotColdConfig::new(&root, 4, 1).expect("hot/cold config"),
+            )
+            .expect("enable hot/cold tiering");
+        let data = vec![1.0_f32; 16];
+        let k: Array = (data.as_slice(), (1_i32, 1_i32, 8_i32, 2_i32))
+            .try_into()
+            .unwrap();
+        let v = k.clone();
+        let mut offsets = vec![0_i32];
+        paged
+            .update_and_fetch_on(&k, &v, &mut offsets, &[8], ())
+            .expect("populate hot cache");
+        assert_eq!(paged.hot_cold_summary().unwrap().resident_pages, 4);
+
+        let reclaimed = paged
+            .shrink_hot_window_on(&offsets, 1, ())
+            .expect("pressure shrink");
+        assert_eq!(reclaimed, 3);
+        let summary = paged.hot_cold_summary().unwrap();
+        assert_eq!(summary.resident_pages, 1);
+        assert_eq!(summary.offloaded_pages, 3);
+        assert_eq!(summary.hot_window_pages, 1);
+        assert_eq!(summary.configured_hot_window_pages, 4);
+        assert_eq!(
+            paged
+                .shrink_hot_window_on(&offsets, 1, ())
+                .expect("repeated pressure shrink"),
+            0
+        );
+        assert!(paged.restore_configured_hot_window());
+        assert_eq!(paged.hot_cold_summary().unwrap().hot_window_pages, 4);
+        assert!(!paged.restore_configured_hot_window());
+
+        drop(paged);
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]

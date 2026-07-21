@@ -74,6 +74,17 @@ std::unique_ptr<MlxArray> quantized_matmul(
     rust::Str mode,
     bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
+std::unique_ptr<MlxArray> quantized_matmul_batch_isolated(
+    const MlxArray& x,
+    const MlxArray& w,
+    const MlxArray& scales,
+    const MlxArray* biases,
+    bool transpose,
+    bool has_group_size, int32_t group_size,
+    bool has_bits, int32_t bits,
+    rust::Str mode,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+
 rust::Vec<double> quantized_matmul_bench_ms(
     const MlxArray& x,
     const MlxArray& w,

@@ -3,6 +3,7 @@
 //! This binary intentionally bypasses HTTP so scheduler/model gaps can be
 //! measured without server parsing, SSE, or client timing noise.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -41,9 +42,10 @@ struct Args {
     #[arg(long)]
     model: PathBuf,
 
-    /// File containing the already-rendered raw model prompt.
-    #[arg(long)]
-    prompt_file: PathBuf,
+    /// File containing an already-rendered raw model prompt. Repeat this flag
+    /// to admit a concurrent Gemma4 drafter batch in scheduler-text mode.
+    #[arg(long, required = true)]
+    prompt_file: Vec<PathBuf>,
 
     /// Core path to measure.
     #[arg(long, value_enum)]
@@ -191,6 +193,9 @@ struct Meta {
     mtp_trace_windows: usize,
     prompt_file: String,
     prompt_tokens: usize,
+    scheduler_prompt_files: Vec<String>,
+    scheduler_prompt_tokens: Vec<usize>,
+    scheduler_batch_width: usize,
     max_tokens: usize,
     prefill_chunk_size: usize,
     kv_quant: KvQuantBenchArg,
@@ -218,6 +223,7 @@ struct Summary {
     e2e_ms: Stats,
     decode_time_ms: Stats,
     generation_tps: Stats,
+    aggregate_generation_tps: Stats,
 }
 
 #[derive(Serialize)]
@@ -237,12 +243,37 @@ struct Record {
     generated_token_ids: Vec<u32>,
     generated_text: String,
     generation_tps: f64,
+    aggregate_generation_tps: f64,
     finish_reason: Option<&'static str>,
     valid: bool,
     mtp_stats: Option<MtpRecordStats>,
     #[serde(skip_serializing_if = "Option::is_none")]
     mtp_trace: Option<Vec<MtpTraceWindowRecord>>,
     active_kv_stats: Option<ActiveKvRecordStats>,
+    scheduler_requests: Vec<SchedulerRequestRecord>,
+}
+
+#[derive(Serialize)]
+struct SchedulerRequestRecord {
+    request_index: usize,
+    prompt_file: String,
+    ttft_ms: f64,
+    e2e_ms: f64,
+    generated_tokens: usize,
+    generated_token_ids: Vec<u32>,
+    generated_text: String,
+    finish_reason: Option<&'static str>,
+    valid: bool,
+}
+
+struct SchedulerRequestState {
+    request_index: usize,
+    request_id: ironmlx::core::RequestId,
+    prompt_file: String,
+    ttft_ms: Option<f64>,
+    e2e_ms: Option<f64>,
+    generated_token_ids: Vec<u32>,
+    finish_reason: Option<&'static str>,
 }
 
 struct GeneratedOutput {
@@ -481,6 +512,21 @@ fn main() -> Result<()> {
 }
 
 fn validate_args(args: &Args) -> Result<()> {
+    if args.prompt_file.is_empty() {
+        return Err(anyhow!("at least one --prompt-file is required"));
+    }
+    if args.prompt_file.len() > 1 && args.mode != BenchMode::Scheduler {
+        return Err(anyhow!(
+            "multiple --prompt-file values require --mode scheduler-text"
+        ));
+    }
+    if args.prompt_file.len() > args.b_max {
+        return Err(anyhow!(
+            "scheduler prompt count {} exceeds --b-max {}",
+            args.prompt_file.len(),
+            args.b_max
+        ));
+    }
     if args.paged_prefix_cache_block_size <= 0 {
         return Err(anyhow!(
             "--paged-prefix-cache-block-size must be > 0, got {}",
@@ -681,21 +727,55 @@ fn validate_mtp_dir(mtp_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+fn primary_prompt_file(args: &Args) -> &Path {
+    args.prompt_file
+        .first()
+        .expect("clap and validate_args require at least one prompt file")
+}
+
+fn read_prompt_ids(tokenizer: &Tokenizer, prompt_file: &Path) -> Result<Vec<u32>> {
+    let rendered_prompt = std::fs::read_to_string(prompt_file)
+        .with_context(|| format!("reading {}", prompt_file.display()))?;
+    let prompt_ids = tokenizer.encode(&rendered_prompt, false)?;
+    if prompt_ids.is_empty() {
+        return Err(anyhow!(
+            "prompt_file {} encoded to zero tokens",
+            prompt_file.display()
+        ));
+    }
+    Ok(prompt_ids)
+}
+
+fn read_scheduler_prompt_ids(tokenizer: &Tokenizer, args: &Args) -> Result<Vec<Vec<u32>>> {
+    args.prompt_file
+        .iter()
+        .map(|prompt_file| read_prompt_ids(tokenizer, prompt_file))
+        .collect()
+}
+
+fn scheduler_prompt_files(args: &Args) -> Vec<String> {
+    args.prompt_file
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect()
+}
+
 fn run_for_model<M>(model: &M, tokenizer: &Tokenizer, args: &Args, load_ms: f64) -> Result<()>
 where
     M: Model + DenseVlMethods,
 {
+    if args.prompt_file.len() != 1 {
+        return Err(anyhow!(
+            "multiple --prompt-file values are only supported for Gemma4 scheduler drafter benchmarks"
+        ));
+    }
     if args.mtp_model_dir.is_some() {
         return Err(anyhow!(
             "--mtp-model-dir is only supported for Qwen dense/MoE text models"
         ));
     }
-    let rendered_prompt = std::fs::read_to_string(&args.prompt_file)
-        .with_context(|| format!("reading {}", args.prompt_file.display()))?;
-    let prompt_ids = tokenizer.encode(&rendered_prompt, false)?;
-    if prompt_ids.is_empty() {
-        return Err(anyhow!("prompt_file encoded to zero tokens"));
-    }
+    let prompt_file = primary_prompt_file(args);
+    let prompt_ids = read_prompt_ids(tokenizer, prompt_file)?;
 
     let effective_cap_max = args.effective_cap_max.unwrap_or_else(|| {
         prompt_ids
@@ -740,8 +820,11 @@ where
             mtp_model_dir: None,
             mtp_draft_tokens: None,
             mtp_trace_windows: args.mtp_trace_windows,
-            prompt_file: args.prompt_file.display().to_string(),
+            prompt_file: prompt_file.display().to_string(),
             prompt_tokens: prompt_ids.len(),
+            scheduler_prompt_files: scheduler_prompt_files(args),
+            scheduler_prompt_tokens: vec![prompt_ids.len()],
+            scheduler_batch_width: 1,
             max_tokens: args.max_tokens,
             prefill_chunk_size: args.prefill_chunk_size,
             kv_quant: args.kv_quant,
@@ -794,12 +877,13 @@ fn run_for_qwen_model<M>(
 where
     M: MtpSpeculativeModel + DenseVlMethods,
 {
-    let rendered_prompt = std::fs::read_to_string(&args.prompt_file)
-        .with_context(|| format!("reading {}", args.prompt_file.display()))?;
-    let prompt_ids = tokenizer.encode(&rendered_prompt, false)?;
-    if prompt_ids.is_empty() {
-        return Err(anyhow!("prompt_file encoded to zero tokens"));
+    if args.prompt_file.len() != 1 {
+        return Err(anyhow!(
+            "multiple --prompt-file values are only supported for Gemma4 scheduler drafter benchmarks"
+        ));
     }
+    let prompt_file = primary_prompt_file(args);
+    let prompt_ids = read_prompt_ids(tokenizer, prompt_file)?;
 
     let effective_cap_max = args.effective_cap_max.unwrap_or_else(|| {
         prompt_ids
@@ -875,8 +959,11 @@ where
                 .map(|dir| dir.display().to_string()),
             mtp_draft_tokens,
             mtp_trace_windows: args.mtp_trace_windows,
-            prompt_file: args.prompt_file.display().to_string(),
+            prompt_file: prompt_file.display().to_string(),
             prompt_tokens: prompt_ids.len(),
+            scheduler_prompt_files: scheduler_prompt_files(args),
+            scheduler_prompt_tokens: vec![prompt_ids.len()],
+            scheduler_batch_width: 1,
             max_tokens: args.max_tokens,
             prefill_chunk_size: args.prefill_chunk_size,
             kv_quant: args.kv_quant,
@@ -926,16 +1013,17 @@ fn run_for_gemma4_model(
     raw_config: &serde_json::Value,
     load_ms: f64,
 ) -> Result<()> {
-    let rendered_prompt = std::fs::read_to_string(&args.prompt_file)
-        .with_context(|| format!("reading {}", args.prompt_file.display()))?;
-    let prompt_ids = tokenizer.encode(&rendered_prompt, false)?;
-    if prompt_ids.is_empty() {
-        return Err(anyhow!("prompt_file encoded to zero tokens"));
-    }
+    let prompt_ids = read_scheduler_prompt_ids(tokenizer, args)?;
+    let primary_prompt_ids = prompt_ids
+        .first()
+        .expect("validated prompt list must be non-empty");
 
     let effective_cap_max = args.effective_cap_max.unwrap_or_else(|| {
         prompt_ids
-            .len()
+            .iter()
+            .map(Vec::len)
+            .max()
+            .unwrap_or(0)
             .saturating_add(args.max_tokens)
             .max(MIN_KV_CACHE_CAP_FOR_GPU_PERF as usize)
     });
@@ -1007,8 +1095,11 @@ fn run_for_gemma4_model(
                 .map(|dir| dir.display().to_string()),
             mtp_draft_tokens,
             mtp_trace_windows: args.mtp_trace_windows,
-            prompt_file: args.prompt_file.display().to_string(),
-            prompt_tokens: prompt_ids.len(),
+            prompt_file: primary_prompt_file(args).display().to_string(),
+            prompt_tokens: primary_prompt_ids.len(),
+            scheduler_prompt_files: scheduler_prompt_files(args),
+            scheduler_prompt_tokens: prompt_ids.iter().map(Vec::len).collect(),
+            scheduler_batch_width: prompt_ids.len(),
             max_tokens: args.max_tokens,
             prefill_chunk_size: args.prefill_chunk_size,
             kv_quant: args.kv_quant,
@@ -1114,14 +1205,21 @@ fn run_once_gemma4(
     model: &Gemma4Model,
     drafter: Option<&Gemma4AssistantModel>,
     tokenizer: &Tokenizer,
-    prompt_ids: &[u32],
+    prompt_ids: &[Vec<u32>],
     args: &Args,
     scheduler_config: SchedulerBenchConfig<'_>,
     mtp_draft_tokens: Option<usize>,
 ) -> Result<Record> {
+    let primary_prompt_ids = prompt_ids
+        .first()
+        .ok_or_else(|| anyhow!("Gemma4 benchmark requires at least one prompt"))?;
     match args.mode {
-        BenchMode::Gs => run_generation_stream(model, tokenizer, prompt_ids, args),
+        BenchMode::Gs => {
+            require_single_prompt(prompt_ids, args.mode)?;
+            run_generation_stream(model, tokenizer, primary_prompt_ids, args)
+        }
         BenchMode::Mtp => {
+            require_single_prompt(prompt_ids, args.mode)?;
             let drafter =
                 drafter.ok_or_else(|| anyhow!("mtp-text mode requires a loaded Gemma4 drafter"))?;
             let mtp_draft_tokens = mtp_draft_tokens
@@ -1130,20 +1228,40 @@ fn run_once_gemma4(
                 model,
                 drafter,
                 tokenizer,
-                prompt_ids,
+                primary_prompt_ids,
                 args,
                 mtp_draft_tokens,
             )
         }
         BenchMode::Scheduler => {
-            if drafter.is_some() {
-                return Err(anyhow!(
-                    "scheduler-text with --mtp-model-dir is not supported for Gemma4 in ironmlx-core-bench; use mtp-text"
-                ));
+            if let Some(drafter) = drafter {
+                let mtp_draft_tokens = mtp_draft_tokens.ok_or_else(|| {
+                    anyhow!("Gemma4 scheduler drafter run missing resolved draft tokens")
+                })?;
+                return run_scheduler_gemma4_drafter(
+                    model,
+                    drafter,
+                    tokenizer,
+                    prompt_ids,
+                    args,
+                    scheduler_config,
+                    mtp_draft_tokens,
+                );
             }
-            run_scheduler(model, tokenizer, prompt_ids, args, scheduler_config)
+            require_single_prompt(prompt_ids, args.mode)?;
+            run_scheduler(model, tokenizer, primary_prompt_ids, args, scheduler_config)
         }
     }
+}
+
+fn require_single_prompt(prompt_ids: &[Vec<u32>], mode: BenchMode) -> Result<()> {
+    if prompt_ids.len() != 1 {
+        return Err(anyhow!(
+            "{} prompts are not supported for {mode:?}; concurrent prompts require Gemma4 scheduler-text with --mtp-model-dir",
+            prompt_ids.len()
+        ));
+    }
+    Ok(())
 }
 
 fn run_generation_stream<M>(
@@ -1427,6 +1545,202 @@ where
     }))
 }
 
+fn run_scheduler_gemma4_drafter(
+    model: &Gemma4Model,
+    drafter: &Gemma4AssistantModel,
+    tokenizer: &Tokenizer,
+    prompt_ids: &[Vec<u32>],
+    args: &Args,
+    scheduler_config: SchedulerBenchConfig<'_>,
+    mtp_draft_tokens: usize,
+) -> Result<Record> {
+    if prompt_ids.is_empty() || prompt_ids.len() > args.b_max {
+        return Err(anyhow!(
+            "Gemma4 scheduler batch width {} must be within 1..={}",
+            prompt_ids.len(),
+            args.b_max
+        ));
+    }
+
+    let mut scheduler = Scheduler::<Gemma4Model>::new(
+        args.b_max,
+        scheduler_config.effective_cap_max,
+        model.model_meta(),
+    )
+    .context("Scheduler::new")?;
+    let active_kv_stats = configure_scheduler_features(&mut scheduler, scheduler_config.features)?;
+    let cfg = MtpSpeculativeConfig::new(mtp_draft_tokens, Sampler::greedy())?;
+    let started = Instant::now();
+    let mut requests = Vec::with_capacity(prompt_ids.len());
+    let mut request_rows = HashMap::with_capacity(prompt_ids.len());
+
+    for (request_index, ids) in prompt_ids.iter().enumerate() {
+        let request_id = scheduler.admit(make_request(model, tokenizer, ids, args))?;
+        request_rows.insert(request_id, request_index);
+        requests.push(SchedulerRequestState {
+            request_index,
+            request_id,
+            prompt_file: args.prompt_file[request_index].display().to_string(),
+            ttft_ms: None,
+            e2e_ms: None,
+            generated_token_ids: Vec::with_capacity(args.max_tokens),
+            finish_reason: None,
+        });
+    }
+
+    let first_events = scheduler.prefill_admitted_gemma4_drafter_batch(model, drafter, cfg)?;
+    refresh_active_kv_stats(&scheduler, active_kv_stats.as_ref());
+    let batch_ttft_ms = started.elapsed().as_secs_f64() * 1000.0;
+    record_scheduler_events(
+        &mut requests,
+        &request_rows,
+        &first_events,
+        batch_ttft_ms,
+        true,
+    )?;
+    if requests.iter().any(|request| request.ttft_ms.is_none()) {
+        return Err(anyhow!(
+            "Gemma4 scheduler prefill did not emit one first event per admitted request"
+        ));
+    }
+
+    while requests
+        .iter()
+        .any(|request| request.finish_reason.is_none())
+    {
+        let events = scheduler.step_gemma4_drafter_batch(model, drafter)?;
+        if events.is_empty() {
+            return Err(anyhow!(
+                "Gemma4 scheduler drafter stopped before all benchmark requests finished"
+            ));
+        }
+        refresh_active_kv_stats(&scheduler, active_kv_stats.as_ref());
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+        record_scheduler_events(&mut requests, &request_rows, &events, elapsed_ms, false)?;
+    }
+
+    mlx::transforms::synchronize()?;
+    refresh_active_kv_stats(&scheduler, active_kv_stats.as_ref());
+    let batch_e2e_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let mtp_stats = scheduler
+        .gemma4_drafter_stats()
+        .ok_or_else(|| anyhow!("Gemma4 scheduler drafter run produced no MTP stats"))?
+        .into();
+
+    let scheduler_requests = requests
+        .into_iter()
+        .map(|request| {
+            let finish_reason = request.finish_reason;
+            let generated_tokens = request.generated_token_ids.len();
+            let generated_text = tokenizer
+                .decode(&request.generated_token_ids, true)
+                .unwrap_or_default();
+            SchedulerRequestRecord {
+                request_index: request.request_index,
+                prompt_file: request.prompt_file,
+                ttft_ms: request.ttft_ms.unwrap_or(batch_ttft_ms),
+                e2e_ms: request.e2e_ms.unwrap_or(batch_e2e_ms),
+                generated_tokens,
+                generated_token_ids: request.generated_token_ids,
+                generated_text,
+                finish_reason,
+                valid: finish_reason == Some("length") && generated_tokens >= args.max_tokens,
+            }
+        })
+        .collect::<Vec<_>>();
+    let representative = scheduler_requests
+        .first()
+        .ok_or_else(|| anyhow!("Gemma4 scheduler batch produced no request records"))?;
+    let mut record = make_record(RecordInput {
+        mode: args.mode,
+        ttft_ms: batch_ttft_ms,
+        e2e_ms: batch_e2e_ms,
+        generated: GeneratedOutput {
+            token_ids: representative.generated_token_ids.clone(),
+            text: representative.generated_text.clone(),
+        },
+        finish_reason: representative.finish_reason,
+        max_tokens: args.max_tokens,
+        mtp_stats: Some(mtp_stats),
+        mtp_trace: None,
+        active_kv_stats: active_kv_stats
+            .as_ref()
+            .map(|stats| ActiveKvRecordStats::from(stats.snapshot())),
+    });
+    let batch_decode_time_ms = (batch_e2e_ms - batch_ttft_ms).max(0.0);
+    let decoded_tokens = scheduler_requests
+        .iter()
+        .map(|request| request.generated_tokens.saturating_sub(1))
+        .sum::<usize>();
+    record.aggregate_generation_tps = if batch_decode_time_ms > 0.0 {
+        decoded_tokens as f64 / (batch_decode_time_ms / 1000.0)
+    } else {
+        0.0
+    };
+    record.valid = scheduler_requests.iter().all(|request| request.valid);
+    record.scheduler_requests = scheduler_requests;
+    Ok(record)
+}
+
+fn record_scheduler_events(
+    requests: &mut [SchedulerRequestState],
+    request_rows: &HashMap<ironmlx::core::RequestId, usize>,
+    events: &[ironmlx::core::StepEvent],
+    elapsed_ms: f64,
+    first_events: bool,
+) -> Result<()> {
+    let mut seen = HashSet::with_capacity(events.len());
+    for event in events {
+        if !seen.insert(event.id) {
+            return Err(anyhow!(
+                "scheduler emitted duplicate event for request {} in one step",
+                event.id.0
+            ));
+        }
+        let request_index = request_rows.get(&event.id).copied().ok_or_else(|| {
+            anyhow!(
+                "scheduler emitted unknown benchmark request id {}",
+                event.id.0
+            )
+        })?;
+        let request = requests
+            .get_mut(request_index)
+            .ok_or_else(|| anyhow!("scheduler request index {request_index} is out of range"))?;
+        if request.request_id != event.id {
+            return Err(anyhow!(
+                "scheduler request id mismatch at index {request_index}: expected {}, got {}",
+                request.request_id.0,
+                event.id.0
+            ));
+        }
+        if request.finish_reason.is_some() {
+            return Err(anyhow!(
+                "scheduler emitted an event after request {} finished",
+                event.id.0
+            ));
+        }
+        if first_events {
+            if request.ttft_ms.replace(elapsed_ms).is_some() {
+                return Err(anyhow!(
+                    "scheduler emitted duplicate first event for request {}",
+                    event.id.0
+                ));
+            }
+        } else if request.ttft_ms.is_none() {
+            return Err(anyhow!(
+                "scheduler emitted decode event before first event for request {}",
+                event.id.0
+            ));
+        }
+        request.generated_token_ids.push(event.token);
+        request.finish_reason = event.finish_reason;
+        if event.finish_reason.is_some() {
+            request.e2e_ms = Some(elapsed_ms);
+        }
+    }
+    Ok(())
+}
+
 fn configure_scheduler_features<M: Model>(
     scheduler: &mut Scheduler<M>,
     features: &BenchSchedulerFeatures,
@@ -1507,11 +1821,13 @@ fn make_record(input: RecordInput) -> Record {
         generated_token_ids: generated.token_ids,
         generated_text: generated.text,
         generation_tps,
+        aggregate_generation_tps: generation_tps,
         finish_reason,
         valid: finish_reason == Some("length") && generated_tokens >= max_tokens,
         mtp_stats,
         mtp_trace,
         active_kv_stats,
+        scheduler_requests: Vec::new(),
     }
 }
 
@@ -1524,6 +1840,12 @@ fn summarize(records: &[Record]) -> Summary {
         e2e_ms: stats(valid.iter().map(|record| record.e2e_ms).collect()),
         decode_time_ms: stats(valid.iter().map(|record| record.decode_time_ms).collect()),
         generation_tps: stats(valid.iter().map(|record| record.generation_tps).collect()),
+        aggregate_generation_tps: stats(
+            valid
+                .iter()
+                .map(|record| record.aggregate_generation_tps)
+                .collect(),
+        ),
     }
 }
 
@@ -1976,6 +2298,132 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_text_accepts_repeated_prompt_files_within_b_max() {
+        let mtp_dir = temp_mtp_dir("scheduler-concurrent-prompts");
+        let args = parse_args(&[
+            "ironmlx-core-bench",
+            "--model",
+            "/tmp/model",
+            "--prompt-file",
+            "/tmp/short.txt",
+            "--prompt-file",
+            "/tmp/long.txt",
+            "--mode",
+            "scheduler-text",
+            "--b-max",
+            "2",
+            "--mtp-model-dir",
+            mtp_dir.to_str().expect("utf8 temp path"),
+            "--out",
+            "/tmp/out.json",
+        ]);
+
+        let result = validate_args(&args);
+        std::fs::remove_dir_all(mtp_dir).ok();
+
+        assert!(result.is_ok(), "unexpected validate error: {result:?}");
+        assert_eq!(
+            args.prompt_file,
+            vec![
+                PathBuf::from("/tmp/short.txt"),
+                PathBuf::from("/tmp/long.txt")
+            ]
+        );
+    }
+
+    #[test]
+    fn scheduler_text_rejects_prompt_count_above_b_max() {
+        let args = parse_args(&[
+            "ironmlx-core-bench",
+            "--model",
+            "/tmp/model",
+            "--prompt-file",
+            "/tmp/short.txt",
+            "--prompt-file",
+            "/tmp/long.txt",
+            "--mode",
+            "scheduler-text",
+            "--b-max",
+            "1",
+            "--out",
+            "/tmp/out.json",
+        ]);
+
+        let error = validate_args(&args).expect_err("prompt count must fit scheduler capacity");
+        assert!(error.to_string().contains("exceeds --b-max"));
+    }
+
+    #[test]
+    fn non_scheduler_mode_rejects_repeated_prompt_files() {
+        let args = parse_args(&[
+            "ironmlx-core-bench",
+            "--model",
+            "/tmp/model",
+            "--prompt-file",
+            "/tmp/short.txt",
+            "--prompt-file",
+            "/tmp/long.txt",
+            "--mode",
+            "gs-text",
+            "--b-max",
+            "2",
+            "--out",
+            "/tmp/out.json",
+        ]);
+
+        let error = validate_args(&args).expect_err("only scheduler mode accepts prompt batches");
+        assert!(error.to_string().contains("require --mode scheduler-text"));
+    }
+
+    #[test]
+    fn scheduler_events_are_routed_by_request_id() {
+        let mut requests = vec![
+            SchedulerRequestState {
+                request_index: 0,
+                request_id: ironmlx::core::RequestId(10),
+                prompt_file: "/tmp/short.txt".to_string(),
+                ttft_ms: None,
+                e2e_ms: None,
+                generated_token_ids: Vec::new(),
+                finish_reason: None,
+            },
+            SchedulerRequestState {
+                request_index: 1,
+                request_id: ironmlx::core::RequestId(11),
+                prompt_file: "/tmp/long.txt".to_string(),
+                ttft_ms: None,
+                e2e_ms: None,
+                generated_token_ids: Vec::new(),
+                finish_reason: None,
+            },
+        ];
+        let rows = HashMap::from([
+            (ironmlx::core::RequestId(10), 0),
+            (ironmlx::core::RequestId(11), 1),
+        ]);
+        let events = [
+            ironmlx::core::StepEvent {
+                id: ironmlx::core::RequestId(11),
+                token: 201,
+                finish_reason: None,
+            },
+            ironmlx::core::StepEvent {
+                id: ironmlx::core::RequestId(10),
+                token: 101,
+                finish_reason: None,
+            },
+        ];
+
+        record_scheduler_events(&mut requests, &rows, &events, 5.0, true)
+            .expect("route first events");
+
+        assert_eq!(requests[0].generated_token_ids, vec![101]);
+        assert_eq!(requests[1].generated_token_ids, vec![201]);
+        assert_eq!(requests[0].ttft_ms, Some(5.0));
+        assert_eq!(requests[1].ttft_ms, Some(5.0));
+    }
+
+    #[test]
     fn scheduler_text_mtp_keeps_scheduler_mode_stats_contract() {
         let record = make_record(RecordInput {
             mode: BenchMode::Scheduler,
@@ -2019,6 +2467,8 @@ mod tests {
         assert!(record.valid);
         assert_eq!(record.generated_token_ids, vec![101, 102, 103, 104]);
         assert_eq!(record.generated_text, "bench text");
+        let serialized = serde_json::to_value(&record).expect("serialize benchmark record");
+        assert_eq!(serialized["scheduler_requests"], serde_json::json!([]));
         let stats = record.mtp_stats.expect("scheduler MTP stats");
         assert_eq!(stats.windows, 1);
         assert_eq!(stats.rollback_count, 1);

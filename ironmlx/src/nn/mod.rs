@@ -7,11 +7,13 @@
 pub(crate) mod activations;
 pub(crate) use activations::gelu_tanh;
 pub mod attention;
+pub(crate) mod batch_stable_qmm;
 pub mod conv;
 pub mod decoder_layer;
 pub mod embedding;
 pub mod gated_attention;
 pub mod gated_delta_net;
+pub(crate) mod gemma4_verify_attention;
 pub mod linear;
 pub mod mlp;
 pub mod mrope;

@@ -100,6 +100,7 @@ impl ModelManager {
 
     fn start_model_ttl_sweeper(&self) {
         self.pool.start_model_ttl_sweeper();
+        self.pool.start_memory_governor_monitor();
     }
 
     async fn load_model(
@@ -956,7 +957,9 @@ pub async fn serve_app_daemon(args: ServeArgs) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("binding {addr}"))?;
-    axum::serve(listener, app).await?;
+    let serve_result = axum::serve(listener, app).await;
+    crate::core::cache::shutdown_process_async_prefix_store_queue();
+    serve_result?;
     Ok(())
 }
 
@@ -1442,6 +1445,9 @@ fn likely_engine_pool_total_memory_limit_error(message: &str) -> bool {
 
 fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> HealthSnapshot {
     let mlx_memory = mlx::memory::snapshot();
+    let process_governor =
+        crate::core::process_memory::global_process_memory_governor().sample_process();
+    let prefix_store = crate::core::cache::process_async_prefix_store_queue().stats();
     let total_ram_bytes = crate::core::memory_budget::system_total_ram_bytes();
     let free_ram_bytes = system_free_ram_bytes();
     let mut names = Vec::new();
@@ -1458,6 +1464,7 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
     let mut kv_cache_resident_cap_tokens = 0;
     let mut kv_cache_budget_policies: Vec<String> = Vec::new();
     let mut mtp_enabled = false;
+    let mut mtp_requested_draft_token_values: Vec<usize> = Vec::new();
     let mut mtp_draft_token_values: Vec<usize> = Vec::new();
     let mut mtp_prefill_count = 0;
     let mut mtp_step_count = 0;
@@ -1501,6 +1508,11 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
         }
         if snapshot.mtp.enabled {
             mtp_enabled = true;
+            if let Some(draft_tokens) = snapshot.mtp.requested_draft_tokens {
+                if !mtp_requested_draft_token_values.contains(&draft_tokens) {
+                    mtp_requested_draft_token_values.push(draft_tokens);
+                }
+            }
             if let Some(draft_tokens) = snapshot.mtp.draft_tokens {
                 if !mtp_draft_token_values.contains(&draft_tokens) {
                     mtp_draft_token_values.push(draft_tokens);
@@ -1532,6 +1544,11 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
     } else {
         None
     };
+    let mtp_requested_draft_tokens = if mtp_enabled && mtp_requested_draft_token_values.len() == 1 {
+        mtp_requested_draft_token_values.first().copied()
+    } else {
+        None
+    };
 
     let mut status = match classify_status(
         b_queued,
@@ -1544,6 +1561,16 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
         HealthStatus::Degraded | HealthStatus::Down => HealthStatus::Degraded,
     };
     if active_kv_offload.degraded {
+        status = HealthStatus::Degraded;
+    }
+    if crate::core::cache::process_async_prefix_store_queue().is_backpressured() {
+        status = HealthStatus::Degraded;
+    }
+    if process_governor.pressure_level == crate::core::process_memory::PressureLevel::Emergency {
+        status = HealthStatus::Down;
+    } else if process_governor.telemetry_degraded
+        || process_governor.pressure_level != crate::core::process_memory::PressureLevel::Normal
+    {
         status = HealthStatus::Degraded;
     }
 
@@ -1576,9 +1603,12 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
             mlx_cache_bytes: mlx_memory.cache_bytes,
             mlx_peak_bytes: mlx_memory.peak_bytes,
             mlx_memory_limit_bytes: mlx_memory.memory_limit_bytes,
+            process_governor,
+            prefix_store,
         },
         mtp: MtpHealthInfo {
             enabled: mtp_enabled,
+            requested_draft_tokens: mtp_requested_draft_tokens,
             draft_tokens: mtp_draft_tokens,
             prefill_count: mtp_prefill_count,
             step_count: mtp_step_count,
@@ -1716,9 +1746,12 @@ mod tests {
                 mlx_cache_bytes: 0,
                 mlx_peak_bytes: 0,
                 mlx_memory_limit_bytes: 0,
+                process_governor: crate::core::process_memory::MemoryGovernorSnapshot::default(),
+                prefix_store: crate::core::cache::AsyncPrefixStoreStats::default(),
             },
             mtp: MtpHealthInfo {
                 enabled: true,
+                requested_draft_tokens: Some(2),
                 draft_tokens: Some(2),
                 prefill_count: 3,
                 step_count: 5,
@@ -1744,6 +1777,7 @@ mod tests {
         let aggregated = aggregate_health(Instant::now(), vec![snapshot]);
 
         assert!(aggregated.mtp.enabled);
+        assert_eq!(aggregated.mtp.requested_draft_tokens, Some(2));
         assert_eq!(aggregated.mtp.draft_tokens, Some(2));
         assert_eq!(aggregated.mtp.prefill_count, 3);
         assert_eq!(aggregated.mtp.step_count, 5);
