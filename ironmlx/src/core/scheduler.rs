@@ -657,6 +657,7 @@ impl RequestBlockTable {
 pub struct RequestOwnedKvStats {
     pub request_tables: u64,
     pub physical: PagedKvPhysicalStats,
+    pub request_forks: u64,
     pub layout_rebuilds: u64,
     pub layout_rebuild_page_copies: u64,
 }
@@ -1737,6 +1738,50 @@ fn release_full_paged_cache_owner(
     Ok(released)
 }
 
+fn full_paged_owner_offset(cache: &[LayerCache], owner: PagedKvBlockOwner) -> Result<Option<i32>> {
+    let mut owner_offset = None;
+    for layer in cache {
+        let LayerCache::Full(kv) = layer else {
+            continue;
+        };
+        let Some(offset) = kv.paged_owner_offset(owner) else {
+            continue;
+        };
+        if let Some(expected) = owner_offset {
+            anyhow::ensure!(
+                expected == offset,
+                "FullPaged owner {owner:?} has inconsistent layer offsets {expected} and {offset}"
+            );
+        } else {
+            owner_offset = Some(offset);
+        }
+    }
+    Ok(owner_offset)
+}
+
+fn fork_full_paged_cache_owner(
+    cache: &mut [LayerCache],
+    source: PagedKvBlockOwner,
+    destination: PagedKvBlockOwner,
+) -> Result<bool> {
+    let mut has_paged = false;
+    for layer in cache.iter_mut() {
+        if let LayerCache::Full(kv) = layer {
+            has_paged |= kv.validate_paged_owner_fork(source, destination)?;
+        }
+    }
+    if !has_paged {
+        return Ok(false);
+    }
+    for layer in cache.iter_mut() {
+        if let LayerCache::Full(kv) = layer {
+            kv.fork_paged_owner_prevalidated(source, destination);
+        }
+    }
+    validate_full_paged_owner_invariants(cache)?;
+    Ok(true)
+}
+
 fn validate_full_paged_owner_invariants(cache: &[LayerCache]) -> Result<()> {
     for layer in cache {
         if let LayerCache::Full(kv) = layer {
@@ -1774,6 +1819,10 @@ fn add_paged_physical_stats(total: &mut PagedKvPhysicalStats, layer: PagedKvPhys
     total.adopt_page_copies = total
         .adopt_page_copies
         .saturating_add(layer.adopt_page_copies);
+    total.owner_forks = total.owner_forks.saturating_add(layer.owner_forks);
+    total.forked_page_references = total
+        .forked_page_references
+        .saturating_add(layer.forked_page_references);
     total.owner_releases = total.owner_releases.saturating_add(layer.owner_releases);
 }
 
@@ -3895,6 +3944,7 @@ pub struct Scheduler<M: Model> {
     /// row `i`.
     cache_rows: Vec<usize>,
     request_block_tables: HashMap<RequestId, RequestBlockTable>,
+    request_owned_kv_forks: u64,
     request_owned_kv_layout_rebuilds: u64,
     request_owned_kv_layout_rebuild_page_copies: u64,
     /// Reusable placeholder for models that derive positions internally and
@@ -4032,6 +4082,7 @@ impl<M: Model> Scheduler<M> {
             cache: None,
             cache_rows: Vec::new(),
             request_block_tables: HashMap::new(),
+            request_owned_kv_forks: 0,
             request_owned_kv_layout_rebuilds: 0,
             request_owned_kv_layout_rebuild_page_copies: 0,
             dummy_position_ids: None,
@@ -4643,9 +4694,185 @@ impl<M: Model> Scheduler<M> {
         RequestOwnedKvStats {
             request_tables: self.request_block_tables.len() as u64,
             physical,
+            request_forks: self.request_owned_kv_forks,
             layout_rebuilds: self.request_owned_kv_layout_rebuilds,
             layout_rebuild_page_copies: self.request_owned_kv_layout_rebuild_page_copies,
         }
+    }
+
+    /// Fork a decoding request into an admitted, empty destination request.
+    /// The destination keeps its sampler, PRNG, limits, and stop policy while
+    /// inheriting the source's committed decode cursor. FullPaged pages are
+    /// shared, while Linear and MLA state is copied into the destination row.
+    /// VLM and MTP/drafter side state have separate contracts and are rejected.
+    pub fn fork_request_blocks(
+        &mut self,
+        source_id: RequestId,
+        destination_id: RequestId,
+        model: &M,
+    ) -> Result<bool> {
+        self.ensure_not_poisoned()?;
+        anyhow::ensure!(
+            source_id != destination_id,
+            "fork_request_blocks: source and destination must differ"
+        );
+        let source_state = self
+            .slots
+            .iter()
+            .flatten()
+            .find(|state| state.id == source_id)
+            .ok_or_else(|| anyhow!("fork_request_blocks: source {} not found", source_id.0))?
+            .clone();
+        let destination_state = self
+            .slots
+            .iter()
+            .flatten()
+            .find(|state| state.id == destination_id)
+            .ok_or_else(|| {
+                anyhow!(
+                    "fork_request_blocks: destination {} not found",
+                    destination_id.0
+                )
+            })?
+            .clone();
+        anyhow::ensure!(
+            !source_state.finished && !destination_state.finished,
+            "fork_request_blocks: cannot fork a finished request"
+        );
+        anyhow::ensure!(
+            !source_state.generated_tokens.is_empty(),
+            "fork_request_blocks: source has not entered decoding"
+        );
+        anyhow::ensure!(
+            destination_state.generated_tokens.is_empty(),
+            "fork_request_blocks: destination decode cursor is not empty"
+        );
+        anyhow::ensure!(
+            source_state.prompt_ids == destination_state.prompt_ids,
+            "fork_request_blocks: source and destination prompts differ"
+        );
+        anyhow::ensure!(
+            source_state.pixel_values.is_none()
+                && destination_state.pixel_values.is_none()
+                && source_state.image_grid_thw.is_none()
+                && destination_state.image_grid_thw.is_none(),
+            "fork_request_blocks: VLM request fork is not supported"
+        );
+        anyhow::ensure!(
+            source_state.generated_tokens.len() < destination_state.max_new_tokens,
+            "fork_request_blocks: destination generation limit is already exhausted"
+        );
+        anyhow::ensure!(
+            source_state
+                .generated_tokens
+                .iter()
+                .all(|token| !destination_state.stop_token_ids.contains(token)),
+            "fork_request_blocks: destination stop policy would have finished the copied cursor"
+        );
+        for row in [source_state.row_idx, destination_state.row_idx] {
+            anyhow::ensure!(
+                !self
+                    .mtp_state
+                    .as_ref()
+                    .is_some_and(|state| state.rows.contains_key(&row))
+                    && !self
+                        .gemma4_drafter_state
+                        .as_ref()
+                        .is_some_and(|state| state.rows.contains_key(&row)),
+                "fork_request_blocks: speculative side state is not forkable"
+            );
+        }
+        let source_owner = self
+            .request_block_tables
+            .get(&source_id)
+            .map(|table| table.owner)
+            .ok_or_else(|| anyhow!("fork_request_blocks: source block table absent"))?;
+        let destination_owner = self
+            .request_block_tables
+            .get(&destination_id)
+            .map(|table| table.owner)
+            .ok_or_else(|| anyhow!("fork_request_blocks: destination block table absent"))?;
+        let cache = self
+            .cache
+            .as_ref()
+            .ok_or_else(|| anyhow!("fork_request_blocks: scheduler cache is absent"))?;
+        let cached_len = full_paged_owner_offset(cache, source_owner)?
+            .ok_or_else(|| anyhow!("fork_request_blocks: source has no FullPaged owner"))?;
+        anyhow::ensure!(
+            cached_len > 0,
+            "fork_request_blocks: source FullPaged owner is empty"
+        );
+        let source_tokens = cached_token_prefix_for_state(&source_state, cached_len)?;
+        let mut forked_destination_state = destination_state.clone();
+        forked_destination_state.generated_tokens = source_state.generated_tokens.clone();
+        forked_destination_state.real_len = source_state.real_len;
+        let destination_tokens =
+            cached_token_prefix_for_state(&forked_destination_state, cached_len)?;
+        anyhow::ensure!(
+            source_tokens == destination_tokens,
+            "fork_request_blocks: cached token prefixes differ"
+        );
+
+        let (mut new_cache, target_rows, copies_before) = self.prepare_forked_cache_layout(
+            model,
+            source_state.row_idx,
+            destination_state.row_idx,
+        )?;
+
+        let forked = fork_full_paged_cache_owner(
+            self.cache
+                .as_mut()
+                .expect("cache remained present after preflight"),
+            source_owner,
+            destination_owner,
+        )?;
+        if !forked {
+            return Ok(false);
+        }
+
+        let old_rows = self.cache_rows.clone();
+        let owners = self.block_owners_for_rows(&target_rows)?;
+        let mut old_cache = self.cache.take().expect("cache checked before fork");
+        self.cache_rows.clear();
+        let transfer_result = reuse_full_paged_storage(
+            &mut new_cache,
+            &mut old_cache,
+            &owners,
+            "fork_request_blocks",
+        );
+        match transfer_result {
+            Ok(true) => {}
+            Ok(false) => {
+                self.cache = Some(old_cache);
+                self.cache_rows = old_rows;
+                if let Some(cache) = self.cache.as_mut() {
+                    release_full_paged_cache_owner(cache, destination_owner)?;
+                }
+                anyhow::bail!("fork_request_blocks: FullPaged storage was not reused");
+            }
+            Err(err) => {
+                self.cache = Some(old_cache);
+                self.cache_rows = old_rows;
+                if let Some(cache) = self.cache.as_mut() {
+                    release_full_paged_cache_owner(cache, destination_owner)?;
+                }
+                return Err(err);
+            }
+        }
+        let copies_after = paged_adopt_page_copies(&new_cache);
+        self.record_request_owned_kv_layout_rebuild(copies_before, copies_after);
+        self.cache = Some(new_cache);
+        self.cache_rows = target_rows;
+        let destination_slot = self
+            .slots
+            .get_mut(destination_state.row_idx)
+            .and_then(Option::as_mut)
+            .expect("destination slot remained active during fork");
+        destination_slot.generated_tokens = forked_destination_state.generated_tokens;
+        destination_slot.real_len = forked_destination_state.real_len;
+        self.request_owned_kv_forks = self.request_owned_kv_forks.saturating_add(1);
+        self.validate_request_owned_kv_invariants()?;
+        Ok(true)
     }
 
     pub fn validate_request_owned_kv_invariants(&self) -> Result<()> {
@@ -5198,6 +5425,55 @@ impl<M: Model> Scheduler<M> {
         self.cache = Some(new_cache);
         self.cache_rows = target_rows.to_vec();
         Ok(())
+    }
+
+    fn prepare_forked_cache_layout(
+        &self,
+        model: &M,
+        source_slot_row: usize,
+        destination_slot_row: usize,
+    ) -> Result<(Vec<LayerCache>, Vec<usize>, u64)> {
+        let old_cache = self
+            .cache
+            .as_deref()
+            .ok_or_else(|| anyhow!("prepare_forked_cache_layout: cache absent"))?;
+        let old_rows = &self.cache_rows;
+        anyhow::ensure!(
+            old_rows.contains(&source_slot_row),
+            "prepare_forked_cache_layout: source slot row {source_slot_row} missing from {old_rows:?}"
+        );
+        let mut target_rows = old_rows.clone();
+        if !target_rows.contains(&destination_slot_row) {
+            target_rows.push(destination_slot_row);
+            target_rows.sort_unstable();
+        }
+        let (cap, dtype) = cache_cap_and_dtype(old_cache)?;
+        let turboquant_bits = self.kv_cache_turboquant_bits_for_rows(&target_rows)?;
+        let mut new_cache =
+            self.make_model_cache_for_rows(model, &target_rows, cap, dtype, turboquant_bits)?;
+        for (dst_row, &slot_row) in target_rows.iter().enumerate() {
+            let source_row = if slot_row == destination_slot_row {
+                source_slot_row
+            } else {
+                slot_row
+            };
+            let src_row = old_rows
+                .iter()
+                .position(|&row| row == source_row)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "prepare_forked_cache_layout: source slot row {source_row} missing from {old_rows:?}"
+                    )
+                })?;
+            adopt_cache_row_layers_skipping_reused_paged(
+                &mut new_cache,
+                old_cache,
+                dst_row,
+                src_row,
+                "prepare_forked_cache_layout",
+            )?;
+        }
+        Ok((new_cache, target_rows, paged_adopt_page_copies(old_cache)))
     }
 
     fn compact_main_cache_to_rows(
@@ -15886,6 +16162,140 @@ mod tests {
 
         crate::core::cache::process_async_prefix_store_queue().wait_idle();
         std::fs::remove_dir_all(root).expect("cleanup prefix cache");
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn fullpaged_request_fork_shares_pool_cows_tail_and_releases_both_branches() {
+        let root = std::env::temp_dir().join(format!(
+            "ironmlx-request-fork-kv-scheduler-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let config =
+            crate::core::cache::PagedPrefixCacheConfig::new(&root, "request-fork-test", 3, 64)
+                .expect("prefix config");
+        let mut scheduler = Scheduler::<StepDecodeMaskModel>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        scheduler
+            .enable_paged_prefix_cache(config)
+            .expect("enable paged prefix cache");
+        let source = scheduler
+            .admit(mk_req(vec![1, 2, 3, 4]))
+            .expect("admit source");
+        let model = StepDecodeMaskModel::default();
+        scheduler.prefill_admitted(&model).expect("source prefill");
+        let source_state = scheduler.get(source).expect("source state");
+        let destination = scheduler
+            .admit(mk_req(source_state.prompt_ids.clone()))
+            .expect("admit destination");
+
+        assert!(scheduler
+            .fork_request_blocks(source, destination, &model)
+            .expect("fork request blocks"));
+        scheduler
+            .validate_request_owned_kv_invariants()
+            .expect("post-fork owner invariants");
+        let forked = scheduler.request_owned_kv_stats();
+        assert_eq!(forked.request_forks, 1);
+        assert!(forked.physical.owner_forks > 0);
+        assert!(forked.physical.forked_page_references > 0);
+        assert!(forked.physical.shared_physical_pages > 0);
+        assert_eq!(forked.physical.cow_page_copies, 0);
+
+        let events = scheduler.step(&model).expect("decode forked branches");
+        assert_eq!(events.len(), 2);
+        let diverged = scheduler.request_owned_kv_stats();
+        assert!(
+            diverged.physical.cow_page_copies > forked.physical.cow_page_copies,
+            "writing a shared partial tail must trigger GPU COW"
+        );
+        assert_eq!(diverged.physical.orphan_pages, 0);
+        scheduler
+            .validate_request_owned_kv_invariants()
+            .expect("post-COW owner invariants");
+
+        scheduler.evict(source).expect("release source branch");
+        scheduler
+            .validate_request_owned_kv_invariants()
+            .expect("source release invariants");
+        let after_source_release = scheduler.request_owned_kv_stats();
+        assert_eq!(after_source_release.request_tables, 1);
+        assert!(after_source_release.physical.physical_pages_referenced > 0);
+        assert_eq!(after_source_release.physical.orphan_pages, 0);
+
+        scheduler
+            .evict(destination)
+            .expect("release destination branch");
+        scheduler
+            .validate_request_owned_kv_invariants()
+            .expect("final release invariants");
+        let released = scheduler.request_owned_kv_stats();
+        assert_eq!(released.request_tables, 0);
+        assert_eq!(released.physical.physical_pages_referenced, 0);
+        assert_eq!(released.physical.orphan_pages, 0);
+
+        crate::core::cache::process_async_prefix_store_queue().wait_idle();
+        std::fs::remove_dir_all(root).expect("cleanup prefix cache");
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn fullpaged_cross_layer_fork_preflight_failure_leaves_every_layer_unchanged() {
+        let source = PagedKvBlockOwner::Request(11);
+        let destination = PagedKvBlockOwner::Request(22);
+
+        let mut first = KVCache::new(1, 1, 2, 2, Dtype::Float32, 8);
+        first.enable_paged(2, 8).expect("first paged cache");
+        first
+            .bind_paged_execution_rows(&[source])
+            .expect("bind first source");
+        let first_data = [1.0_f32, 2.0, 3.0, 4.0];
+        let first_k: Array = (&first_data[..], (1_i32, 1_i32, 2_i32, 2_i32))
+            .try_into()
+            .unwrap();
+        let first_v = first_k.clone();
+        first
+            .update_and_fetch(&first_k, &first_v, &[2])
+            .expect("fill first source");
+
+        let mut second = KVCache::new(2, 1, 2, 2, Dtype::Float32, 8);
+        second.enable_paged(2, 8).expect("second paged cache");
+        second
+            .bind_paged_execution_rows(&[source, destination])
+            .expect("bind second owners");
+        let second_data = [11.0_f32, 12.0, 13.0, 14.0, 21.0, 22.0, 23.0, 24.0];
+        let second_k: Array = (&second_data[..], (2_i32, 1_i32, 2_i32, 2_i32))
+            .try_into()
+            .unwrap();
+        let second_v = second_k.clone();
+        second
+            .update_and_fetch(&second_k, &second_v, &[2, 2])
+            .expect("fill second owners");
+
+        let mut layers = vec![LayerCache::Full(first), LayerCache::Full(second)];
+        let before = layers
+            .iter()
+            .map(|layer| match layer {
+                LayerCache::Full(kv) => kv.paged_physical_stats().expect("paged stats"),
+                _ => unreachable!(),
+            })
+            .collect::<Vec<_>>();
+        let err = fork_full_paged_cache_owner(&mut layers, source, destination)
+            .expect_err("non-empty destination in second layer must reject fork");
+        assert!(err.to_string().contains("destination owner"));
+        let after = layers
+            .iter()
+            .map(|layer| match layer {
+                LayerCache::Full(kv) => kv.paged_physical_stats().expect("paged stats"),
+                _ => unreachable!(),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(after, before);
+        validate_full_paged_owner_invariants(&layers).expect("owner invariants");
     }
 
     #[test]

@@ -72,6 +72,8 @@ pub struct PagedKvPhysicalStats {
     pub orphan_pages: u64,
     pub cow_page_copies: u64,
     pub adopt_page_copies: u64,
+    pub owner_forks: u64,
+    pub forked_page_references: u64,
     pub owner_releases: u64,
 }
 
@@ -79,6 +81,8 @@ pub struct PagedKvPhysicalStats {
 struct PagedKvObservability {
     cow_page_copies: u64,
     adopt_page_copies: u64,
+    owner_forks: u64,
+    forked_page_references: u64,
     owner_releases: u64,
 }
 
@@ -301,6 +305,8 @@ impl PagedKVCache {
             transient_owned_tables,
             cow_page_copies: self.observability.cow_page_copies,
             adopt_page_copies: self.observability.adopt_page_copies,
+            owner_forks: self.observability.owner_forks,
+            forked_page_references: self.observability.forked_page_references,
             owner_releases: self.observability.owner_releases,
             ..PagedKvPhysicalStats::default()
         };
@@ -531,6 +537,101 @@ impl PagedKVCache {
             offsets.push(table.offset);
         }
         self.remove_unbound_empty_transient_owners();
+        self.validate_owner_invariants()
+    }
+
+    pub fn owner_offset(&self, owner: PagedKvBlockOwner) -> Option<i32> {
+        self.owned_block_tables
+            .get(&owner)
+            .map(|table| table.offset)
+    }
+
+    pub(super) fn validate_owner_fork(
+        &mut self,
+        source: PagedKvBlockOwner,
+        destination: PagedKvBlockOwner,
+        offsets: &[i32],
+    ) -> Result<()> {
+        anyhow::ensure!(
+            source != destination,
+            "PagedKVCache::fork_owner: source and destination must differ"
+        );
+        anyhow::ensure!(
+            offsets.len() == self.batch as usize,
+            "PagedKVCache::fork_owner: offsets.len()={} != batch {}",
+            offsets.len(),
+            self.batch
+        );
+        self.commit_execution_rows(offsets)?;
+        let source_table = self.owned_block_tables.get(&source).ok_or_else(|| {
+            anyhow::anyhow!("PagedKVCache::fork_owner: source owner {source:?} absent")
+        })?;
+        if let Some(destination_table) = self.owned_block_tables.get(&destination) {
+            anyhow::ensure!(
+                destination_table.offset == 0
+                    && destination_table.blocks.iter().all(|&page| page < 0),
+                "PagedKVCache::fork_owner: destination owner {destination:?} is not empty"
+            );
+        }
+        for &page in source_table.blocks.iter().filter(|&&page| page >= 0) {
+            let ref_count = self.page_ref_count(page);
+            anyhow::ensure!(
+                ref_count > 0,
+                "PagedKVCache::fork_owner: source owner {source:?} references free page {page}"
+            );
+            anyhow::ensure!(
+                ref_count < i32::MAX,
+                "PagedKVCache::fork_owner: page {page} refcount overflow"
+            );
+        }
+        Ok(())
+    }
+
+    pub(super) fn fork_owner_prevalidated(
+        &mut self,
+        source: PagedKvBlockOwner,
+        destination: PagedKvBlockOwner,
+        offsets: &mut [i32],
+    ) {
+        let source_table = self
+            .owned_block_tables
+            .get(&source)
+            .expect("prevalidated source owner exists")
+            .clone();
+        let forked_page_references = source_table
+            .blocks
+            .iter()
+            .filter(|&&page| page >= 0)
+            .count() as u64;
+        for &page in source_table.blocks.iter().filter(|&&page| page >= 0) {
+            self.page_ref_counts[page as usize] += 1;
+        }
+        self.owned_block_tables
+            .insert(destination, source_table.clone());
+        for (row, &owner) in self.execution_owners.iter().enumerate() {
+            if owner == destination {
+                self.block_tables[row].clone_from(&source_table.blocks);
+                offsets[row] = source_table.offset;
+            }
+        }
+        self.observability.owner_forks = self.observability.owner_forks.saturating_add(1);
+        self.observability.forked_page_references = self
+            .observability
+            .forked_page_references
+            .saturating_add(forked_page_references);
+    }
+
+    /// Fork one owner table inside this physical pool. Full and partial pages
+    /// are shared; the existing append path performs GPU COW only when a
+    /// shared partial page is written.
+    pub fn fork_owner(
+        &mut self,
+        source: PagedKvBlockOwner,
+        destination: PagedKvBlockOwner,
+        offsets: &mut [i32],
+    ) -> Result<()> {
+        self.validate_owner_fork(source, destination, offsets)?;
+        self.fork_owner_prevalidated(source, destination, offsets);
         self.validate_owner_invariants()
     }
 
@@ -4436,6 +4537,106 @@ mod tests {
         assert_eq!(released_stats.physical_pages_free, 1);
         assert_eq!(released_stats.owner_releases, 1);
         assert_eq!(released_stats.orphan_pages, 0);
+        cache.validate_owner_invariants().expect("owner invariants");
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn paged_kv_owner_fork_shares_pages_and_cows_only_the_written_tail() {
+        let source = PagedKvBlockOwner::Request(11);
+        let destination = PagedKvBlockOwner::Request(22);
+        let mut cache =
+            PagedKVCache::new(1, 1, 2, 2, Dtype::Float32, 8, 2, 8).expect("paged cache");
+        let mut offsets = vec![0_i32];
+        cache
+            .bind_execution_rows(&[source], &mut offsets)
+            .expect("bind source owner");
+        let initial_k = [1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let initial_v = [10.0_f32, 20.0, 30.0, 40.0, 50.0, 60.0];
+        let k: Array = (&initial_k[..], (1_i32, 1_i32, 3_i32, 2_i32))
+            .try_into()
+            .unwrap();
+        let v: Array = (&initial_v[..], (1_i32, 1_i32, 3_i32, 2_i32))
+            .try_into()
+            .unwrap();
+        cache
+            .update_and_fetch_on(&k, &v, &mut offsets, &[3], ())
+            .expect("append source prefix");
+        let source_pages = cache.block_table_row(0)[..2].to_vec();
+
+        cache
+            .fork_owner(source, destination, &mut offsets)
+            .expect("fork owner");
+        let forked = cache.physical_stats();
+        assert_eq!(forked.owner_forks, 1);
+        assert_eq!(forked.forked_page_references, 2);
+        assert_eq!(forked.shared_physical_pages, 2);
+        assert_eq!(forked.shared_page_references, 2);
+        assert_eq!(forked.cow_page_copies, 0);
+
+        let duplicate_fork = cache.fork_owner(source, destination, &mut offsets);
+        assert!(duplicate_fork.is_err());
+        assert_eq!(cache.physical_stats(), forked);
+
+        cache
+            .bind_execution_rows(&[source, destination], &mut offsets)
+            .expect("bind forked owners");
+        assert_eq!(offsets, vec![3, 3]);
+        assert_eq!(&cache.block_table_row(0)[..2], source_pages.as_slice());
+        assert_eq!(&cache.block_table_row(1)[..2], source_pages.as_slice());
+
+        let branch_k = [101.0_f32, 102.0, 201.0, 202.0];
+        let branch_v = [1010.0_f32, 1020.0, 2010.0, 2020.0];
+        let k: Array = (&branch_k[..], (2_i32, 1_i32, 1_i32, 2_i32))
+            .try_into()
+            .unwrap();
+        let v: Array = (&branch_v[..], (2_i32, 1_i32, 1_i32, 2_i32))
+            .try_into()
+            .unwrap();
+        cache
+            .update_and_fetch_on(&k, &v, &mut offsets, &[1, 1], ())
+            .expect("append diverging branches");
+
+        assert_eq!(offsets, vec![4, 4]);
+        assert_eq!(cache.block_table_row(0)[0], cache.block_table_row(1)[0]);
+        assert_ne!(cache.block_table_row(0)[1], cache.block_table_row(1)[1]);
+        let (k_read, v_read) = cache
+            .materialize_prefix_on(&offsets, 4, ())
+            .expect("materialize forked rows");
+        assert_eq!(
+            k_read.to_vec::<f32>().unwrap(),
+            vec![
+                1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 101.0, 102.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 201.0,
+                202.0,
+            ]
+        );
+        assert_eq!(
+            v_read.to_vec::<f32>().unwrap(),
+            vec![
+                10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 1010.0, 1020.0, 10.0, 20.0, 30.0, 40.0, 50.0,
+                60.0, 2010.0, 2020.0,
+            ]
+        );
+        let diverged = cache.physical_stats();
+        assert_eq!(diverged.cow_page_copies, 1);
+        assert_eq!(diverged.shared_physical_pages, 1);
+        assert_eq!(diverged.shared_page_references, 1);
+        assert_eq!(diverged.physical_pages_referenced, 3);
+        assert_eq!(diverged.orphan_pages, 0);
+
+        assert!(cache
+            .release_owner(source, &mut offsets)
+            .expect("release source"));
+        assert!(!cache
+            .release_owner(source, &mut offsets)
+            .expect("repeat source release"));
+        assert!(cache
+            .release_owner(destination, &mut offsets)
+            .expect("release destination"));
+        let released = cache.physical_stats();
+        assert_eq!(released.physical_pages_referenced, 0);
+        assert_eq!(released.owner_releases, 2);
+        assert_eq!(released.orphan_pages, 0);
         cache.validate_owner_invariants().expect("owner invariants");
     }
 

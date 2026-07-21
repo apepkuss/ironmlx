@@ -289,6 +289,36 @@ impl KVCache {
         paged.release_owner(owner, &mut self.offsets)
     }
 
+    pub fn paged_owner_offset(&self, owner: PagedKvBlockOwner) -> Option<i32> {
+        self.paged
+            .as_ref()
+            .and_then(|paged| paged.owner_offset(owner))
+    }
+
+    pub fn validate_paged_owner_fork(
+        &mut self,
+        source: PagedKvBlockOwner,
+        destination: PagedKvBlockOwner,
+    ) -> Result<bool> {
+        let Some(paged) = self.paged.as_mut() else {
+            return Ok(false);
+        };
+        paged.validate_owner_fork(source, destination, &self.offsets)?;
+        Ok(true)
+    }
+
+    pub fn fork_paged_owner_prevalidated(
+        &mut self,
+        source: PagedKvBlockOwner,
+        destination: PagedKvBlockOwner,
+    ) -> bool {
+        let Some(paged) = self.paged.as_mut() else {
+            return false;
+        };
+        paged.fork_owner_prevalidated(source, destination, &mut self.offsets);
+        true
+    }
+
     pub fn paged_physical_stats(&self) -> Option<PagedKvPhysicalStats> {
         self.paged.as_ref().map(|paged| paged.physical_stats())
     }
