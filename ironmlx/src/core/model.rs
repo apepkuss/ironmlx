@@ -82,6 +82,16 @@ pub trait Model {
         target: StreamOrDevice,
     ) -> Result<Array>;
 
+    /// Project post-norm hidden states at every sequence position to logits.
+    /// Source-independent speculative verification uses the preserved
+    /// `[B, S, V]` sequence dimension to check a complete draft window.
+    fn project_hidden_on(&self, _hidden: &Array, _target: StreamOrDevice) -> Result<Array> {
+        Err(anyhow::anyhow!(
+            "full-sequence hidden projection is not implemented for {}",
+            std::any::type_name::<Self>()
+        ))
+    }
+
     /// Whether caller-built MRoPE `position_ids` are semantically consumed by
     /// this model. Models returning `false` derive positions internally and
     /// may receive a reusable placeholder Array from generation/scheduler hot

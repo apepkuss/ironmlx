@@ -121,6 +121,7 @@ use crate::core::generate::{
     slice_pos_ids_axis2, slice_vision_embeds_rows, GenerateRequest,
 };
 use crate::core::model::Model;
+use crate::core::prompt_lookup::{PromptLookupConfig, PromptLookupRowState, PromptLookupStats};
 use crate::core::sampler::Sampler;
 use crate::core::speculative::{
     add_elapsed_us, add_mtp_decode_cache_commit_us, add_mtp_prefill_cache_commit_us,
@@ -204,6 +205,27 @@ struct SchedulerGemma4DrafterState {
     cfg: MtpSpeculativeConfig,
     rows: HashMap<usize, SchedulerGemma4DrafterRowState>,
     stats: MtpSpeculativeStats,
+}
+
+#[derive(Debug, Clone)]
+struct SchedulerPromptLookupRowState {
+    lookup: PromptLookupRowState,
+    pending_tokens: VecDeque<u32>,
+}
+
+struct SchedulerPromptLookupState {
+    cfg: PromptLookupConfig,
+    rows: HashMap<usize, SchedulerPromptLookupRowState>,
+    stats: PromptLookupStats,
+}
+
+struct PromptLookupBatchedFillContext {
+    row_idx: usize,
+    current_token: u32,
+    stop_token_ids: Vec<u32>,
+    remaining: usize,
+    verify_start_pos: i32,
+    draft_tokens: Vec<u32>,
 }
 
 struct Gemma4DrafterBatchedFillContext {
@@ -999,6 +1021,7 @@ pub struct ActiveKvParkedRequest {
     prng_key: [u32; 2],
     cache_cap: i32,
     cache_dtype: Dtype,
+    prompt_lookup_row: Option<SchedulerPromptLookupRowState>,
 }
 
 /// Read pre-write per-row offsets from the first cache layer that tracks
@@ -1287,7 +1310,7 @@ fn build_mtp_device_verify_input(
     Ok((verify, lens))
 }
 
-fn pack_mtp_greedy_acceptance_on(
+fn pack_greedy_acceptance_on(
     verify_input: &Array,
     verify_lens: &[i32],
     verified_ids: &Array,
@@ -1295,14 +1318,14 @@ fn pack_mtp_greedy_acceptance_on(
 ) -> Result<Array> {
     let shape = verify_input.shape();
     let dims = shape.as_slice();
-    if dims.len() != 2 || dims[0] <= 0 || dims[1] < 2 {
+    if dims.len() != 2 || dims[0] <= 0 || dims[1] < 1 {
         return Err(anyhow!(
-            "pack_mtp_greedy_acceptance_on: expected verify input [B,S>=2], got {dims:?}"
+            "pack_greedy_acceptance_on: expected verify input [B,S>=1], got {dims:?}"
         ));
     }
     if verified_ids.shape().as_slice() != dims {
         return Err(anyhow!(
-            "pack_mtp_greedy_acceptance_on: verified shape {:?} != verify shape {dims:?}",
+            "pack_greedy_acceptance_on: verified shape {:?} != verify shape {dims:?}",
             verified_ids.shape().as_slice()
         ));
     }
@@ -1310,8 +1333,14 @@ fn pack_mtp_greedy_acceptance_on(
     let seq = dims[1] as usize;
     if verify_lens.len() != batch || verify_lens.iter().any(|&len| len < 0 || len as usize > seq) {
         return Err(anyhow!(
-            "pack_mtp_greedy_acceptance_on: invalid verify lengths {verify_lens:?} for shape {dims:?}"
+            "pack_greedy_acceptance_on: invalid verify lengths {verify_lens:?} for shape {dims:?}"
         ));
+    }
+
+    if seq == 1 {
+        let accepted_len = Array::zeros_on((batch as i32, 1_i32), Dtype::Uint32, target)?;
+        return mlx::ops::shape::concatenate_on(&[&accepted_len, verified_ids], 1, target)
+            .map_err(Into::into);
     }
 
     let draft_width = seq - 1;
@@ -1363,7 +1392,7 @@ fn pack_mtp_greedy_acceptance_on(
         .map_err(Into::into)
 }
 
-fn resolve_packed_mtp_greedy_acceptance(
+fn resolve_packed_greedy_acceptance(
     packed: &[u32],
     packed_stride: usize,
     compact_row: usize,
@@ -1371,19 +1400,19 @@ fn resolve_packed_mtp_greedy_acceptance(
 ) -> Result<(Vec<u32>, SpeculativeResolution)> {
     let row_start = compact_row
         .checked_mul(packed_stride)
-        .ok_or_else(|| anyhow!("resolve_packed_mtp_greedy_acceptance: row offset overflow"))?;
+        .ok_or_else(|| anyhow!("resolve_packed_greedy_acceptance: row offset overflow"))?;
     let row = packed
         .get(row_start..row_start + packed_stride)
         .ok_or_else(|| {
             anyhow!(
-                "resolve_packed_mtp_greedy_acceptance: row {compact_row} outside packed len {} stride {packed_stride}",
+                "resolve_packed_greedy_acceptance: row {compact_row} outside packed len {} stride {packed_stride}",
                 packed.len()
             )
         })?;
     let accepted_draft_len = row[0] as usize;
     if accepted_draft_len > draft_len || draft_len + 2 > packed_stride {
         return Err(anyhow!(
-            "resolve_packed_mtp_greedy_acceptance: accepted={accepted_draft_len} draft={draft_len} stride={packed_stride}"
+            "resolve_packed_greedy_acceptance: accepted={accepted_draft_len} draft={draft_len} stride={packed_stride}"
         ));
     }
     let draft_tokens = row[1..1 + draft_len].to_vec();
@@ -4932,6 +4961,8 @@ pub struct Scheduler<M: Model> {
     mtp_state: Option<SchedulerMtpState>,
     /// Optional row-scoped Gemma4 assistant-drafter runtime state.
     gemma4_drafter_state: Option<SchedulerGemma4DrafterState>,
+    /// Optional request-local CPU PromptLookup state.
+    prompt_lookup_state: Option<SchedulerPromptLookupState>,
     poisoned: bool,
     /// Upper bound on `prompt_len + max_new_tokens` per request, computed
     /// at boot as `min(cli_max_cache_cap, model.config.max_position_embeddings)`.
@@ -5067,6 +5098,7 @@ impl<M: Model> Scheduler<M> {
             dummy_position_ids: None,
             mtp_state: None,
             gemma4_drafter_state: None,
+            prompt_lookup_state: None,
             poisoned: false,
             effective_cap_max,
             prng_state,
@@ -5446,6 +5478,14 @@ impl<M: Model> Scheduler<M> {
         {
             return Ok(None);
         }
+        if self
+            .prompt_lookup_state
+            .as_ref()
+            .and_then(|state| state.rows.get(&row_idx))
+            .is_some_and(|row| !row.pending_tokens.is_empty())
+        {
+            return Ok(None);
+        }
         let state = self.slots[row_idx]
             .as_ref()
             .expect("row_idx found an occupied slot");
@@ -5496,6 +5536,13 @@ impl<M: Model> Scheduler<M> {
             }
         }
 
+        let prompt_lookup_row = self
+            .prompt_lookup_state
+            .as_mut()
+            .and_then(|state| state.rows.remove(&row_idx));
+        if let Some(state) = self.prompt_lookup_state.as_mut() {
+            Self::refresh_prompt_lookup_index_stats(state);
+        }
         let state = self.slots[row_idx]
             .take()
             .expect("row_idx still occupied after cache layout rebuild");
@@ -5510,6 +5557,7 @@ impl<M: Model> Scheduler<M> {
             prng_key,
             cache_cap,
             cache_dtype,
+            prompt_lookup_row,
         }))
     }
 
@@ -5519,6 +5567,15 @@ impl<M: Model> Scheduler<M> {
         model: &M,
     ) -> Result<RequestId> {
         self.ensure_not_poisoned()?;
+        if let Some(prompt_lookup_row) = parked.prompt_lookup_row.as_ref() {
+            let cfg = prompt_lookup_row.lookup.config();
+            anyhow::ensure!(
+                self.prompt_lookup_state
+                    .as_ref()
+                    .is_none_or(|state| state.cfg == cfg),
+                "active KV restore prompt lookup config mismatch"
+            );
+        }
         anyhow::ensure!(
             self.slots
                 .iter()
@@ -5586,6 +5643,18 @@ impl<M: Model> Scheduler<M> {
                 stats.record_error();
             }
             return Err(err);
+        }
+        if let Some(prompt_lookup_row) = parked.prompt_lookup_row.clone() {
+            let cfg = prompt_lookup_row.lookup.config();
+            let state =
+                self.prompt_lookup_state
+                    .get_or_insert_with(|| SchedulerPromptLookupState {
+                        cfg,
+                        rows: HashMap::new(),
+                        stats: PromptLookupStats::default(),
+                    });
+            state.rows.insert(row_idx, prompt_lookup_row);
+            Self::refresh_prompt_lookup_index_stats(state);
         }
         if matches!(self.phase, Phase::Idle | Phase::Finished) {
             self.phase = Phase::Decoding;
@@ -5831,6 +5900,27 @@ impl<M: Model> Scheduler<M> {
                 "fork_request_blocks: speculative side state is not forkable"
             );
         }
+        let prompt_lookup_fork = if let Some(prompt_lookup) = self.prompt_lookup_state.as_ref() {
+            if let Some(destination_row) = prompt_lookup.rows.get(&destination_state.row_idx) {
+                anyhow::ensure!(
+                    destination_row.pending_tokens.is_empty(),
+                    "fork_request_blocks: destination prompt lookup queue is not empty"
+                );
+            }
+            prompt_lookup
+                .rows
+                .get(&source_state.row_idx)
+                .map(|source_row| {
+                    anyhow::ensure!(
+                        source_row.pending_tokens.is_empty(),
+                        "fork_request_blocks: source prompt lookup queue is not empty"
+                    );
+                    Ok(source_row.clone())
+                })
+                .transpose()?
+        } else {
+            None
+        };
         let source_owner = self
             .request_block_tables
             .get(&source_id)
@@ -5919,6 +6009,16 @@ impl<M: Model> Scheduler<M> {
             .expect("destination slot remained active during fork");
         destination_slot.generated_tokens = forked_destination_state.generated_tokens;
         destination_slot.real_len = forked_destination_state.real_len;
+        if let Some(prompt_lookup_row) = prompt_lookup_fork {
+            let prompt_lookup = self
+                .prompt_lookup_state
+                .as_mut()
+                .expect("prompt lookup state supplied fork row");
+            prompt_lookup
+                .rows
+                .insert(destination_state.row_idx, prompt_lookup_row);
+            Self::refresh_prompt_lookup_index_stats(prompt_lookup);
+        }
         self.request_owned_kv_forks = self.request_owned_kv_forks.saturating_add(1);
         self.validate_request_owned_kv_invariants()?;
         Ok(true)
@@ -6330,6 +6430,7 @@ impl<M: Model> Scheduler<M> {
         if self.active_count() == 0 {
             self.mtp_state = None;
             self.gemma4_drafter_state = None;
+            self.prompt_lookup_state = None;
             if self.phase == Phase::Admitting {
                 self.phase = Phase::Idle;
             } else if self.phase == Phase::Decoding {
@@ -6345,6 +6446,9 @@ impl<M: Model> Scheduler<M> {
         }
         if let Some(drafter_state) = self.gemma4_drafter_state.as_mut() {
             drafter_state.rows.remove(&row_idx);
+        }
+        if let Some(prompt_lookup_state) = self.prompt_lookup_state.as_mut() {
+            prompt_lookup_state.rows.remove(&row_idx);
         }
     }
 
@@ -7110,6 +7214,7 @@ impl<M: Model> Scheduler<M> {
         self.cache_rows.clear();
         self.mtp_state = None;
         self.gemma4_drafter_state = None;
+        self.prompt_lookup_state = None;
         self.phase = Phase::Idle;
         self.poisoned = false;
         Ok(())
@@ -7123,6 +7228,568 @@ impl<M: Model> Scheduler<M> {
         self.gemma4_drafter_state
             .as_ref()
             .map(|state| state.stats.clone())
+    }
+
+    pub fn prompt_lookup_stats(&self) -> Option<PromptLookupStats> {
+        self.prompt_lookup_state.as_ref().map(|state| state.stats)
+    }
+
+    pub fn prefill_admitted_prompt_lookup(
+        &mut self,
+        model: &M,
+        cfg: PromptLookupConfig,
+    ) -> Result<Vec<StepEvent>>
+    where
+        M: DenseVlMethods,
+    {
+        let cfg = cfg.validate()?;
+        anyhow::ensure!(
+            self.slots
+                .iter()
+                .flatten()
+                .all(|state| state.sampler.is_pipelinable()),
+            "prompt lookup requires greedy sampling"
+        );
+        let events = self.prefill_admitted(model)?;
+        let build_start = Instant::now();
+        let mut rows = HashMap::new();
+        for (row_idx, slot) in self.slots.iter().enumerate() {
+            let Some(state) = slot.as_ref().filter(|state| !state.finished) else {
+                continue;
+            };
+            let mut history = Vec::with_capacity(
+                state
+                    .prompt_ids
+                    .len()
+                    .saturating_add(state.generated_tokens.len()),
+            );
+            history.extend_from_slice(&state.prompt_ids);
+            history.extend_from_slice(&state.generated_tokens);
+            rows.insert(
+                row_idx,
+                SchedulerPromptLookupRowState {
+                    lookup: PromptLookupRowState::new(&history, cfg)?,
+                    pending_tokens: VecDeque::new(),
+                },
+            );
+        }
+        let mut state = SchedulerPromptLookupState {
+            cfg,
+            rows,
+            stats: PromptLookupStats::default(),
+        };
+        add_elapsed_us(&mut state.stats.index_build_us, build_start);
+        Self::refresh_prompt_lookup_index_stats(&mut state);
+        self.prompt_lookup_state = Some(state);
+        Ok(events)
+    }
+
+    pub fn register_prompt_lookup_request(
+        &mut self,
+        id: RequestId,
+        cfg: PromptLookupConfig,
+    ) -> Result<()> {
+        let cfg = cfg.validate()?;
+        let row_idx = self
+            .slots
+            .iter()
+            .position(|slot| matches!(slot, Some(state) if state.id == id))
+            .ok_or_else(|| anyhow!("prompt lookup request {} is not active", id.0))?;
+        let state = self.slots[row_idx]
+            .as_ref()
+            .expect("row_idx found an occupied slot");
+        anyhow::ensure!(
+            state.sampler.is_pipelinable(),
+            "prompt lookup requires greedy sampling"
+        );
+        let prompt_lookup = self
+            .prompt_lookup_state
+            .as_mut()
+            .ok_or_else(|| anyhow!("prompt lookup scheduler state is absent"))?;
+        anyhow::ensure!(
+            prompt_lookup.cfg == cfg,
+            "prompt lookup config changed while scheduler is active"
+        );
+        if state.finished {
+            return Ok(());
+        }
+        let mut history = Vec::with_capacity(
+            state
+                .prompt_ids
+                .len()
+                .saturating_add(state.generated_tokens.len()),
+        );
+        history.extend_from_slice(&state.prompt_ids);
+        history.extend_from_slice(&state.generated_tokens);
+        let build_start = Instant::now();
+        let lookup = PromptLookupRowState::new(&history, cfg)?;
+        add_elapsed_us(&mut prompt_lookup.stats.index_build_us, build_start);
+        prompt_lookup.rows.insert(
+            row_idx,
+            SchedulerPromptLookupRowState {
+                lookup,
+                pending_tokens: VecDeque::new(),
+            },
+        );
+        Self::refresh_prompt_lookup_index_stats(prompt_lookup);
+        Ok(())
+    }
+
+    pub fn step_prompt_lookup(&mut self, model: &M) -> Result<Vec<StepEvent>> {
+        self.ensure_not_poisoned()?;
+        match self.step_prompt_lookup_inner(model) {
+            Ok(events) => Ok(events),
+            Err(err) => {
+                self.poisoned = true;
+                Err(err)
+            }
+        }
+    }
+
+    fn step_prompt_lookup_inner(&mut self, model: &M) -> Result<Vec<StepEvent>> {
+        if self.phase != Phase::Decoding {
+            return Err(anyhow!(
+                "step_prompt_lookup illegal in {:?} phase: call prefill_admitted_prompt_lookup first",
+                self.phase
+            ));
+        }
+        let mut prompt_lookup = self
+            .prompt_lookup_state
+            .take()
+            .ok_or_else(|| anyhow!("step_prompt_lookup: scheduler state is absent"))?;
+        let result = (|| {
+            let active_rows = self
+                .slots
+                .iter()
+                .enumerate()
+                .filter_map(|(row, slot)| {
+                    (matches!(slot, Some(state) if !state.finished)
+                        && prompt_lookup.rows.contains_key(&row))
+                    .then_some(row)
+                })
+                .collect::<Vec<_>>();
+            if active_rows.is_empty() {
+                self.phase = if self
+                    .slots
+                    .iter()
+                    .any(|slot| matches!(slot, Some(state) if !state.finished))
+                {
+                    Phase::Decoding
+                } else {
+                    Phase::Finished
+                };
+                return Ok(Vec::new());
+            }
+
+            let rows_to_fill = active_rows
+                .iter()
+                .copied()
+                .filter(|row_idx| {
+                    prompt_lookup
+                        .rows
+                        .get(row_idx)
+                        .is_some_and(|row| row.pending_tokens.is_empty())
+                })
+                .collect::<Vec<_>>();
+            self.fill_prompt_lookup_windows(
+                &rows_to_fill,
+                &mut prompt_lookup.stats,
+                &mut prompt_lookup.rows,
+                model,
+            )?;
+
+            let mut events = Vec::with_capacity(active_rows.len());
+            for row_idx in active_rows {
+                let token = prompt_lookup
+                    .rows
+                    .get_mut(&row_idx)
+                    .ok_or_else(|| anyhow!("step_prompt_lookup: row {row_idx} state is absent"))?
+                    .pending_tokens
+                    .pop_front()
+                    .ok_or_else(|| {
+                        anyhow!("step_prompt_lookup: row {row_idx} pending queue is empty")
+                    })?;
+                let event = self.emit_token_for_row(row_idx, token)?;
+                let update_start = Instant::now();
+                prompt_lookup
+                    .rows
+                    .get_mut(&row_idx)
+                    .expect("row state checked above")
+                    .lookup
+                    .commit(token);
+                add_elapsed_us(&mut prompt_lookup.stats.index_update_us, update_start);
+                events.push(event);
+            }
+            Self::refresh_prompt_lookup_index_stats(&mut prompt_lookup);
+            self.phase = if self
+                .slots
+                .iter()
+                .any(|slot| matches!(slot, Some(state) if !state.finished))
+            {
+                Phase::Decoding
+            } else {
+                Phase::Finished
+            };
+            self.refresh_active_kv_residency_stats();
+            Ok(events)
+        })();
+        self.prompt_lookup_state = Some(prompt_lookup);
+        result
+    }
+
+    fn refresh_prompt_lookup_index_stats(state: &mut SchedulerPromptLookupState) {
+        state.stats.index_entries_current = state
+            .rows
+            .values()
+            .map(|row| row.lookup.index_entries() as u64)
+            .sum();
+        let peak = state
+            .rows
+            .values()
+            .map(|row| row.lookup.index_entries_peak() as u64)
+            .sum();
+        state.stats.index_entries_peak = state.stats.index_entries_peak.max(peak);
+        state.stats.index_evictions = state
+            .rows
+            .values()
+            .map(|row| row.lookup.index_evictions())
+            .sum();
+    }
+
+    fn fill_prompt_lookup_windows(
+        &mut self,
+        rows_to_fill: &[usize],
+        stats: &mut PromptLookupStats,
+        row_states: &mut HashMap<usize, SchedulerPromptLookupRowState>,
+        model: &M,
+    ) -> Result<()> {
+        if rows_to_fill.is_empty() {
+            return Ok(());
+        }
+
+        let mut contexts = Vec::with_capacity(rows_to_fill.len());
+        for &row_idx in rows_to_fill {
+            let slot = self.slots[row_idx].as_ref().ok_or_else(|| {
+                anyhow!("fill_prompt_lookup_windows: row {row_idx} slot is absent")
+            })?;
+            if slot.finished {
+                continue;
+            }
+            let remaining = slot
+                .max_new_tokens
+                .saturating_sub(slot.generated_tokens.len());
+            if remaining == 0 {
+                continue;
+            }
+            let current_token = *slot.generated_tokens.last().ok_or_else(|| {
+                anyhow!("fill_prompt_lookup_windows: row {row_idx} has no current token")
+            })?;
+            let mut history = Vec::with_capacity(
+                slot.prompt_ids
+                    .len()
+                    .saturating_add(slot.generated_tokens.len()),
+            );
+            history.extend_from_slice(&slot.prompt_ids);
+            history.extend_from_slice(&slot.generated_tokens);
+            let row_state = row_states.get(&row_idx).ok_or_else(|| {
+                anyhow!("fill_prompt_lookup_windows: row {row_idx} state is absent")
+            })?;
+            row_state.lookup.validate_history(&history)?;
+            stats.queries = stats.queries.saturating_add(1);
+            let propose_start = Instant::now();
+            let proposal = row_state.lookup.propose(remaining.saturating_sub(1));
+            add_elapsed_us(&mut stats.propose_us, propose_start);
+            let draft_tokens = if let Some((_ngram, tokens)) = proposal {
+                stats.hits = stats.hits.saturating_add(1);
+                tokens
+            } else {
+                stats.misses = stats.misses.saturating_add(1);
+                Vec::new()
+            };
+            contexts.push(PromptLookupBatchedFillContext {
+                row_idx,
+                current_token,
+                stop_token_ids: slot.stop_token_ids.clone(),
+                remaining,
+                verify_start_pos: (history.len() - 1) as i32,
+                draft_tokens,
+            });
+        }
+        if contexts.is_empty() {
+            return Ok(());
+        }
+
+        let active_rows = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(row, slot)| {
+                (matches!(slot, Some(state) if !state.finished) && row_states.contains_key(&row))
+                    .then_some(row)
+            })
+            .collect::<Vec<_>>();
+        let verify_rows = contexts.iter().map(|ctx| ctx.row_idx).collect::<Vec<_>>();
+        let saved_full_cache = if verify_rows.len() < active_rows.len() {
+            Some(self.compact_main_cache_to_rows(
+                model,
+                &verify_rows,
+                "fill_prompt_lookup_windows compact verify",
+            )?)
+        } else {
+            self.rebuild_cache_layout(model, &active_rows)?;
+            None
+        };
+
+        let verify_result = (|| -> Result<()> {
+            let cache_row_for_ctx = contexts
+                .iter()
+                .map(|ctx| {
+                    self.cache_rows
+                        .iter()
+                        .position(|&row| row == ctx.row_idx)
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "fill_prompt_lookup_windows: row {} missing from cache layout {:?}",
+                                ctx.row_idx,
+                                self.cache_rows
+                            )
+                        })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let base_snapshot = self
+                .cache
+                .as_ref()
+                .ok_or_else(|| anyhow!("fill_prompt_lookup_windows: main cache is absent"))?
+                .iter()
+                .map(LayerCache::snapshot)
+                .collect::<Vec<_>>();
+            let batch = self.cache_rows.len();
+            let max_verify_len = contexts
+                .iter()
+                .map(|ctx| ctx.draft_tokens.len() + 1)
+                .max()
+                .unwrap_or(1);
+            let mut verify_flat = vec![0_u32; batch * max_verify_len];
+            let mut verify_lens = vec![0_i32; batch];
+            let mut verify_starts = vec![0_i32; batch];
+            for (ctx_idx, ctx) in contexts.iter().enumerate() {
+                let compact_row = cache_row_for_ctx[ctx_idx];
+                let start = compact_row * max_verify_len;
+                verify_flat[start] = ctx.current_token;
+                verify_flat[start + 1..start + 1 + ctx.draft_tokens.len()]
+                    .copy_from_slice(&ctx.draft_tokens);
+                verify_lens[compact_row] = (ctx.draft_tokens.len() + 1) as i32;
+                verify_starts[compact_row] = ctx.verify_start_pos;
+            }
+            let verify_arr: Array =
+                (&verify_flat[..], &[batch as i32, max_verify_len as i32][..]).try_into()?;
+            let position_ids = if model.requires_position_ids() {
+                build_mtp_batched_position_ids(&verify_starts, &verify_lens, max_verify_len as i32)?
+            } else {
+                self.reusable_dummy_position_ids()?
+            };
+            let decode_mask = {
+                let cache = self
+                    .cache
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("fill_prompt_lookup_windows: main cache is absent"))?;
+                maybe_build_sparse_decode_mask(cache, &verify_lens)?
+            };
+            let verify_start = Instant::now();
+            let hidden = {
+                let _verify_qmm = crate::nn::verify_qmm::armed_scope();
+                let cache = self
+                    .cache
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("fill_prompt_lookup_windows: main cache is absent"))?;
+                model.forward_text_hidden(
+                    &verify_arr,
+                    &position_ids,
+                    Some(&verify_lens),
+                    decode_mask.as_ref(),
+                    Some(cache.as_mut_slice()),
+                    mlx::StreamOrDevice::default(),
+                )?
+            };
+            add_elapsed_us(&mut stats.verify_forward_us, verify_start);
+            let projection_start = Instant::now();
+            let logits = model.project_hidden_on(&hidden, mlx::StreamOrDevice::default())?;
+            add_elapsed_us(&mut stats.projection_us, projection_start);
+            let verified_ids = mlx::ops::reduction::argmax(&logits, -1, false)?;
+            let packed = pack_greedy_acceptance_on(
+                &verify_arr,
+                &verify_lens,
+                &verified_ids,
+                mlx::StreamOrDevice::default(),
+            )?;
+            let sync_start = Instant::now();
+            let packed: Vec<u32> = packed.to_vec()?;
+            stats.verify_accept_host_sync_count =
+                stats.verify_accept_host_sync_count.saturating_add(1);
+            add_elapsed_us(&mut stats.verify_accept_host_sync_us, sync_start);
+            let packed_stride = max_verify_len + 1;
+            anyhow::ensure!(
+                packed.len() == batch * packed_stride,
+                "fill_prompt_lookup_windows: packed acceptance len {} != {}",
+                packed.len(),
+                batch * packed_stride
+            );
+
+            let mut resolutions = Vec::with_capacity(contexts.len());
+            for (ctx_idx, ctx) in contexts.iter().enumerate() {
+                let resolution = resolve_packed_greedy_acceptance(
+                    &packed,
+                    packed_stride,
+                    cache_row_for_ctx[ctx_idx],
+                    ctx.draft_tokens.len(),
+                )?
+                .1;
+                let drafted = ctx.draft_tokens.len() as u64;
+                let accepted = resolution.accepted_draft_len as u64;
+                stats.drafted_tokens = stats.drafted_tokens.saturating_add(drafted);
+                stats.accepted_tokens = stats.accepted_tokens.saturating_add(accepted);
+                stats.rejected_tokens = stats
+                    .rejected_tokens
+                    .saturating_add(drafted.saturating_sub(accepted));
+                if drafted > 0 && accepted == 0 {
+                    stats.zero_accept_windows = stats.zero_accept_windows.saturating_add(1);
+                }
+                if resolution.needs_rollback {
+                    stats.rollback_count = stats.rollback_count.saturating_add(1);
+                }
+                resolutions.push(resolution);
+            }
+
+            let mismatch_rows = resolutions
+                .iter()
+                .enumerate()
+                .filter_map(|(ctx_idx, resolution)| {
+                    resolution.needs_rollback.then_some((
+                        cache_row_for_ctx[ctx_idx],
+                        resolution.accepted_verify_input_len,
+                    ))
+                })
+                .collect::<Vec<_>>();
+            if !mismatch_rows.is_empty() {
+                let rollback_start = Instant::now();
+                let supports_trim = self
+                    .cache
+                    .as_ref()
+                    .is_some_and(|cache| layer_cache_supports_accepted_prefix_trim(cache));
+                if supports_trim {
+                    let cache = self.cache.as_mut().ok_or_else(|| {
+                        anyhow!("fill_prompt_lookup_windows: main cache is absent")
+                    })?;
+                    trim_full_layer_cache_rows_to_accepted_prefix(
+                        cache.as_mut_slice(),
+                        &base_snapshot,
+                        &mismatch_rows,
+                    )?;
+                } else {
+                    {
+                        let cache = self.cache.as_mut().ok_or_else(|| {
+                            anyhow!("fill_prompt_lookup_windows: main cache is absent")
+                        })?;
+                        restore_layer_cache(cache.as_mut_slice(), &base_snapshot)?;
+                    }
+                    let accepted_lens = resolutions
+                        .iter()
+                        .map(|resolution| resolution.accepted_verify_input_len)
+                        .collect::<Vec<_>>();
+                    let max_replay_len = accepted_lens.iter().copied().max().unwrap_or(1);
+                    let mut replay_flat = vec![0_u32; batch * max_replay_len];
+                    let mut replay_lens = vec![0_i32; batch];
+                    let mut replay_starts = vec![0_i32; batch];
+                    for (ctx_idx, ctx) in contexts.iter().enumerate() {
+                        let compact_row = cache_row_for_ctx[ctx_idx];
+                        let accepted_len = accepted_lens[ctx_idx];
+                        let start = compact_row * max_replay_len;
+                        replay_flat[start] = ctx.current_token;
+                        replay_flat[start + 1..start + accepted_len]
+                            .copy_from_slice(&ctx.draft_tokens[..accepted_len.saturating_sub(1)]);
+                        replay_lens[compact_row] = accepted_len as i32;
+                        replay_starts[compact_row] = ctx.verify_start_pos;
+                    }
+                    let replay_arr: Array =
+                        (&replay_flat[..], &[batch as i32, max_replay_len as i32][..])
+                            .try_into()?;
+                    let replay_position_ids = if model.requires_position_ids() {
+                        build_mtp_batched_position_ids(
+                            &replay_starts,
+                            &replay_lens,
+                            max_replay_len as i32,
+                        )?
+                    } else {
+                        self.reusable_dummy_position_ids()?
+                    };
+                    let replay_mask = {
+                        let cache = self.cache.as_ref().ok_or_else(|| {
+                            anyhow!("fill_prompt_lookup_windows: main cache is absent")
+                        })?;
+                        maybe_build_sparse_decode_mask(cache, &replay_lens)?
+                    };
+                    let cache = self.cache.as_mut().ok_or_else(|| {
+                        anyhow!("fill_prompt_lookup_windows: main cache is absent")
+                    })?;
+                    let replay_hidden = model.forward_text_hidden(
+                        &replay_arr,
+                        &replay_position_ids,
+                        Some(&replay_lens),
+                        replay_mask.as_ref(),
+                        Some(cache.as_mut_slice()),
+                        mlx::StreamOrDevice::default(),
+                    )?;
+                    mlx::transforms::eval(&[&replay_hidden])?;
+                }
+                add_elapsed_us(&mut stats.rollback_us, rollback_start);
+            }
+
+            for (ctx, resolution) in contexts.iter().zip(resolutions) {
+                let mut tokens = resolution.tokens_to_append;
+                if let Some(stop_idx) = tokens
+                    .iter()
+                    .position(|token| ctx.stop_token_ids.contains(token))
+                {
+                    tokens.truncate(stop_idx + 1);
+                }
+                tokens.truncate(ctx.remaining);
+                row_states
+                    .get_mut(&ctx.row_idx)
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "fill_prompt_lookup_windows: row {} state disappeared",
+                            ctx.row_idx
+                        )
+                    })?
+                    .pending_tokens
+                    .extend(tokens);
+            }
+            Ok(())
+        })();
+
+        match (verify_result, saved_full_cache) {
+            (Ok(()), Some((old_cache, old_rows, _old_snapshots))) => {
+                self.merge_compact_main_cache_into_rows(
+                    model,
+                    old_cache,
+                    old_rows,
+                    &active_rows,
+                    "fill_prompt_lookup_windows compact verify",
+                )?;
+            }
+            (Err(err), Some((old_cache, old_rows, old_snapshots))) => {
+                self.rollback_compact_main_cache(
+                    old_cache,
+                    old_rows,
+                    &old_snapshots,
+                    "fill_prompt_lookup_windows compact verify",
+                )?;
+                return Err(err);
+            }
+            (Err(err), None) => return Err(err),
+            (Ok(()), None) => {}
+        }
+        Ok(())
     }
 
     pub fn prefill_admitted_mtp_single(
@@ -8478,7 +9145,7 @@ impl<M: Model> Scheduler<M> {
                 ));
             }
 
-            let packed_acceptance = pack_mtp_greedy_acceptance_on(
+            let packed_acceptance = pack_greedy_acceptance_on(
                 &verify_arr,
                 &verify_lens,
                 &verified_ids,
@@ -8503,7 +9170,7 @@ impl<M: Model> Scheduler<M> {
             let mut resolved_draft_tokens = Vec::with_capacity(contexts.len());
             for (ctx_idx, ctx) in contexts.iter().enumerate() {
                 let compact_row = cache_row_for_ctx[ctx_idx];
-                let (draft_tokens, resolution) = resolve_packed_mtp_greedy_acceptance(
+                let (draft_tokens, resolution) = resolve_packed_greedy_acceptance(
                     &packed_acceptance,
                     packed_stride,
                     compact_row,
@@ -9095,7 +9762,7 @@ impl<M: Model> Scheduler<M> {
             add_elapsed_us(&mut stats.projection_us, projection_start);
             let sampling_start = Instant::now();
             let verified_ids = mlx::ops::reduction::argmax(&verified_logits, -1, false)?;
-            let packed = pack_mtp_greedy_acceptance_on(
+            let packed = pack_greedy_acceptance_on(
                 &verify_arr,
                 &[verify_len as i32],
                 &verified_ids,
@@ -9107,7 +9774,7 @@ impl<M: Model> Scheduler<M> {
             stats.verify_accept_host_sync_count =
                 stats.verify_accept_host_sync_count.saturating_add(1);
             add_elapsed_us(&mut stats.verify_accept_host_sync_us, accept_sync_start);
-            resolve_packed_mtp_greedy_acceptance(&packed, verify_len + 1, 0, draft_budget)?
+            resolve_packed_greedy_acceptance(&packed, verify_len + 1, 0, draft_budget)?
         } else {
             let projection_start = Instant::now();
             let verified_logits = model
@@ -13885,7 +14552,7 @@ mod tests {
             .try_into()
             .expect("verified ids");
 
-        let packed = pack_mtp_greedy_acceptance_on(
+        let packed = pack_greedy_acceptance_on(
             &verify_input,
             &[4, 3],
             &verified_ids,
@@ -13897,14 +14564,14 @@ mod tests {
         assert_eq!(packed, vec![1, 10, 11, 12, 99, 2, 20, 21, 0, 22]);
 
         let (draft0, resolution0) =
-            resolve_packed_mtp_greedy_acceptance(&packed, 5, 0, 3).expect("resolve row 0");
+            resolve_packed_greedy_acceptance(&packed, 5, 0, 3).expect("resolve row 0");
         assert_eq!(draft0, vec![10, 11, 12]);
         assert_eq!(resolution0.accepted_draft_len, 1);
         assert_eq!(resolution0.tokens_to_append, vec![10, 99]);
         assert!(resolution0.needs_rollback);
 
         let (draft1, resolution1) =
-            resolve_packed_mtp_greedy_acceptance(&packed, 5, 1, 2).expect("resolve row 1");
+            resolve_packed_greedy_acceptance(&packed, 5, 1, 2).expect("resolve row 1");
         assert_eq!(draft1, vec![20, 21]);
         assert_eq!(resolution1.accepted_draft_len, 2);
         assert_eq!(resolution1.tokens_to_append, vec![20, 21, 22]);
@@ -15468,7 +16135,8 @@ mod tests {
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
             Self::bump_first_full_cache(cache, input_ids, Some(per_row_lens))?;
-            fake_logits_for_token_sequence(&[self.first_token])
+            let batch = input_ids.shape()[0] as usize;
+            fake_logits_for_batch_token_sequences(batch, 1, &vec![self.first_token; batch])
         }
 
         fn forward_text_hidden(
@@ -15487,6 +16155,67 @@ mod tests {
             self.text_hidden_batch_sizes.lock().unwrap().push(dims[0]);
             mlx::Array::zeros((dims[0], dims[1], 4_i32), mlx::Dtype::Float32)
                 .map_err(|e| anyhow::anyhow!("fake hidden failed: {e:?}"))
+        }
+
+        fn project_hidden_on(
+            &self,
+            hidden: &mlx::Array,
+            _target: mlx::StreamOrDevice,
+        ) -> crate::Result<mlx::Array> {
+            let hidden_shape = hidden.shape();
+            let hidden_dims = hidden_shape.as_slice();
+            let batch = hidden_dims[0] as usize;
+            let seq = hidden_dims[1] as usize;
+            let mut calls = self.project_calls.lock().unwrap();
+            let mut first_token_calls_remaining = self.first_token_calls_remaining.lock().unwrap();
+            let mut expecting_first_token_projection =
+                self.expecting_first_token_projection.lock().unwrap();
+            let mut sequences = self.verify_sequences.lock().unwrap();
+            let tokens = if seq == 1
+                && *first_token_calls_remaining > 0
+                && (*expecting_first_token_projection || sequences.is_empty())
+            {
+                *first_token_calls_remaining -= 1;
+                *expecting_first_token_projection = false;
+                vec![self.first_token]
+            } else if seq == 1 {
+                let sequence = sequences
+                    .front_mut()
+                    .expect("verify sequence available for single-position projection");
+                let token = sequence.remove(0);
+                if sequence.is_empty() {
+                    sequences.pop_front();
+                    *expecting_first_token_projection = true;
+                }
+                vec![token]
+            } else {
+                let mut sequence = Vec::with_capacity(batch * seq);
+                for _ in 0..batch {
+                    let row_sequence = sequences.pop_front().expect("verify sequence available");
+                    assert!(
+                        row_sequence.len() <= seq,
+                        "batched project row sequence length {} must not exceed hidden seq {}",
+                        row_sequence.len(),
+                        seq
+                    );
+                    let row_len = row_sequence.len();
+                    sequence.extend(row_sequence);
+                    sequence.extend(std::iter::repeat_n(0, seq - row_len));
+                }
+                *expecting_first_token_projection = true;
+                sequence
+            };
+            *calls += 1;
+            assert_eq!(
+                tokens.len(),
+                batch * seq,
+                "project logits sequence length must match hidden seq"
+            );
+            if batch == 1 {
+                fake_logits_for_token_sequence(&tokens)
+            } else {
+                fake_logits_for_batch_token_sequences(batch, seq, &tokens)
+            }
         }
 
         fn model_meta(&self) -> crate::core::memory_budget::ModelMeta {
@@ -15602,67 +16331,6 @@ mod tests {
                 anyhow::bail!("fake mtp cache failure");
             }
             MtpCache::new_with_cap(1, batch, 1, 1, 1, dtype, cap)
-        }
-
-        fn project_hidden_on(
-            &self,
-            hidden: &mlx::Array,
-            _target: impl Into<mlx::StreamOrDevice>,
-        ) -> crate::Result<mlx::Array> {
-            let hidden_shape = hidden.shape();
-            let hidden_dims = hidden_shape.as_slice();
-            let batch = hidden_dims[0] as usize;
-            let seq = hidden_dims[1] as usize;
-            let mut calls = self.project_calls.lock().unwrap();
-            let mut first_token_calls_remaining = self.first_token_calls_remaining.lock().unwrap();
-            let mut expecting_first_token_projection =
-                self.expecting_first_token_projection.lock().unwrap();
-            let mut sequences = self.verify_sequences.lock().unwrap();
-            let tokens = if seq == 1
-                && *first_token_calls_remaining > 0
-                && (*expecting_first_token_projection || sequences.is_empty())
-            {
-                *first_token_calls_remaining -= 1;
-                *expecting_first_token_projection = false;
-                vec![self.first_token]
-            } else if seq == 1 {
-                let sequence = sequences
-                    .front_mut()
-                    .expect("verify sequence available for single-position projection");
-                let token = sequence.remove(0);
-                if sequence.is_empty() {
-                    sequences.pop_front();
-                    *expecting_first_token_projection = true;
-                }
-                vec![token]
-            } else {
-                let mut sequence = Vec::with_capacity(batch * seq);
-                for _ in 0..batch {
-                    let row_sequence = sequences.pop_front().expect("verify sequence available");
-                    assert!(
-                        row_sequence.len() <= seq,
-                        "batched project row sequence length {} must not exceed hidden seq {}",
-                        row_sequence.len(),
-                        seq
-                    );
-                    let row_len = row_sequence.len();
-                    sequence.extend(row_sequence);
-                    sequence.extend(std::iter::repeat_n(0, seq - row_len));
-                }
-                *expecting_first_token_projection = true;
-                sequence
-            };
-            *calls += 1;
-            assert_eq!(
-                tokens.len(),
-                batch * seq,
-                "project logits sequence length must match hidden seq"
-            );
-            if batch == 1 {
-                fake_logits_for_token_sequence(&tokens)
-            } else {
-                fake_logits_for_batch_token_sequences(batch, seq, &tokens)
-            }
         }
 
         fn mtp_hidden_size(&self, _mtp: &Self::MtpHead) -> i32 {
@@ -16277,6 +16945,223 @@ mod tests {
         assert_eq!(stats.rollback_count, 0);
         assert_eq!(stats.draft_host_sync_count, 0);
         assert_eq!(stats.verify_accept_host_sync_count, stats.windows);
+    }
+
+    fn prompt_lookup_cfg() -> PromptLookupConfig {
+        PromptLookupConfig {
+            min_ngram: 2,
+            max_ngram: 3,
+            max_draft_tokens: 4,
+            history_window_tokens: 64,
+            max_index_entries: 64,
+        }
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn prompt_lookup_full_accept_emits_one_pending_token_per_step() {
+        let mut scheduler = Scheduler::<ScriptedMtpSchedulerModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        let id = scheduler
+            .admit(mtp_req(vec![1, 2, 3, 4, 1, 2, 3], 6))
+            .expect("admit");
+        let model = ScriptedMtpSchedulerModel::new(4, Vec::new(), vec![vec![1, 2, 3, 4, 5]]);
+
+        let first = scheduler
+            .prefill_admitted_prompt_lookup(&model, prompt_lookup_cfg())
+            .expect("prompt lookup prefill");
+        assert_eq!(first[0].token, 4);
+
+        let mut emitted = Vec::new();
+        for _ in 0..5 {
+            let events = scheduler
+                .step_prompt_lookup(&model)
+                .expect("prompt lookup step");
+            assert_eq!(events.len(), 1);
+            emitted.push(events[0].token);
+        }
+        assert_eq!(emitted, vec![1, 2, 3, 4, 5]);
+        assert_eq!(
+            scheduler.get(id).expect("request state").generated_tokens,
+            vec![4, 1, 2, 3, 4, 5]
+        );
+        let stats = scheduler
+            .prompt_lookup_stats()
+            .expect("prompt lookup stats");
+        assert_eq!(stats.queries, 1);
+        assert_eq!(stats.hits, 1);
+        assert_eq!(stats.misses, 0);
+        assert_eq!(stats.drafted_tokens, 4);
+        assert_eq!(stats.accepted_tokens, 4);
+        assert_eq!(stats.rejected_tokens, 0);
+        assert_eq!(stats.verify_accept_host_sync_count, 1);
+        assert_eq!(stats.rollback_count, 0);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn prompt_lookup_miss_falls_back_to_one_target_token() {
+        let mut scheduler = Scheduler::<ScriptedMtpSchedulerModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        let id = scheduler.admit(mtp_req(vec![1, 2, 3], 2)).expect("admit");
+        let model =
+            ScriptedMtpSchedulerModel::new_with_first_token_calls(4, 0, Vec::new(), vec![vec![5]]);
+
+        scheduler
+            .prefill_admitted_prompt_lookup(&model, prompt_lookup_cfg())
+            .expect("prompt lookup prefill");
+        let events = scheduler
+            .step_prompt_lookup(&model)
+            .expect("prompt lookup miss step");
+        assert_eq!(events[0].token, 5);
+        assert_eq!(
+            scheduler.get(id).expect("request state").generated_tokens,
+            vec![4, 5]
+        );
+        let stats = scheduler
+            .prompt_lookup_stats()
+            .expect("prompt lookup stats");
+        assert_eq!(stats.queries, 1);
+        assert_eq!(stats.hits, 0);
+        assert_eq!(stats.misses, 1);
+        assert_eq!(stats.drafted_tokens, 0);
+        assert_eq!(stats.accepted_tokens, 0);
+        assert_eq!(stats.rollback_count, 0);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn prompt_lookup_rejected_draft_rolls_back_and_commits_only_target_token() {
+        let mut scheduler = Scheduler::<ScriptedMtpSchedulerModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        let prompt = vec![1, 2, 3, 4, 1, 2, 3];
+        let id = scheduler.admit(mtp_req(prompt.clone(), 3)).expect("admit");
+        let model = ScriptedMtpSchedulerModel::new(4, Vec::new(), vec![vec![9, 0]]);
+
+        scheduler
+            .prefill_admitted_prompt_lookup(&model, prompt_lookup_cfg())
+            .expect("prompt lookup prefill");
+        let events = scheduler
+            .step_prompt_lookup(&model)
+            .expect("prompt lookup mismatch step");
+        assert_eq!(events[0].token, 9);
+        assert_eq!(
+            scheduler.get(id).expect("request state").generated_tokens,
+            vec![4, 9]
+        );
+        let row = scheduler
+            .prompt_lookup_state
+            .as_ref()
+            .expect("prompt lookup state")
+            .rows
+            .get(&0)
+            .expect("row lookup state");
+        let mut expected_history = prompt;
+        expected_history.extend([4, 9]);
+        assert_eq!(row.lookup.history(), expected_history);
+        let stats = scheduler
+            .prompt_lookup_stats()
+            .expect("prompt lookup stats");
+        assert_eq!(stats.drafted_tokens, 1);
+        assert_eq!(stats.accepted_tokens, 0);
+        assert_eq!(stats.rejected_tokens, 1);
+        assert_eq!(stats.zero_accept_windows, 1);
+        assert_eq!(stats.rollback_count, 1);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn prompt_lookup_batch_isolates_rows_with_different_draft_lengths() {
+        let mut scheduler = Scheduler::<ScriptedMtpSchedulerModel>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        let prompt0 = vec![1, 2, 3, 4, 1, 2, 3];
+        let prompt1 = vec![10, 4, 11, 10];
+        let id0 = scheduler
+            .admit(mtp_req(prompt0.clone(), 6))
+            .expect("admit row 0");
+        let id1 = scheduler
+            .admit(mtp_req(prompt1.clone(), 5))
+            .expect("admit row 1");
+        let model = ScriptedMtpSchedulerModel::new_with_first_token_calls(
+            4,
+            2,
+            Vec::new(),
+            vec![vec![1, 2, 3, 4, 5], vec![11, 10, 4, 13]],
+        );
+
+        let first = scheduler
+            .prefill_admitted_prompt_lookup(&model, prompt_lookup_cfg())
+            .expect("prompt lookup batch prefill");
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[0].token, 4);
+        assert_eq!(first[1].token, 4);
+
+        let events = scheduler
+            .step_prompt_lookup(&model)
+            .expect("prompt lookup batch step");
+        assert_eq!(
+            events,
+            vec![
+                StepEvent {
+                    id: id0,
+                    token: 1,
+                    finish_reason: None,
+                },
+                StepEvent {
+                    id: id1,
+                    token: 11,
+                    finish_reason: None,
+                },
+            ]
+        );
+        assert_eq!(model.text_hidden_batch_sizes(), vec![2]);
+        assert_eq!(model.text_hidden_seq_lens(), vec![5]);
+
+        let prompt_lookup = scheduler
+            .prompt_lookup_state
+            .as_ref()
+            .expect("prompt lookup state");
+        let row0 = prompt_lookup.rows.get(&0).expect("row 0 lookup state");
+        let row1 = prompt_lookup.rows.get(&1).expect("row 1 lookup state");
+        assert_eq!(
+            row0.pending_tokens.iter().copied().collect::<Vec<_>>(),
+            vec![2, 3, 4, 5]
+        );
+        assert_eq!(
+            row1.pending_tokens.iter().copied().collect::<Vec<_>>(),
+            vec![10, 4, 13]
+        );
+        assert_eq!(
+            row0.lookup.history(),
+            [prompt0.as_slice(), &[4, 1]].concat()
+        );
+        assert_eq!(
+            row1.lookup.history(),
+            [prompt1.as_slice(), &[4, 11]].concat()
+        );
+
+        let stats = prompt_lookup.stats;
+        assert_eq!(stats.queries, 2);
+        assert_eq!(stats.hits, 2);
+        assert_eq!(stats.drafted_tokens, 7);
+        assert_eq!(stats.accepted_tokens, 7);
+        assert_eq!(stats.verify_accept_host_sync_count, 1);
     }
 
     #[test]
@@ -17487,6 +18372,70 @@ mod tests {
 
     #[test]
     #[serial(mlx_metal)]
+    fn prompt_lookup_state_survives_active_kv_park_and_restore() {
+        let model = StepDecodeMaskModel::default();
+        let root = std::env::temp_dir().join(format!(
+            "ironmlx-prompt-lookup-active-kv-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let config = crate::core::cache::ActiveKvOffloadConfig::enabled(root.clone());
+        let stats = crate::core::cache::ActiveKvOffloadSharedStats::new(&config);
+        let mut scheduler = Scheduler::<StepDecodeMaskModel>::new(
+            2,
+            64,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        scheduler
+            .enable_active_kv_offload(config, stats)
+            .expect("enable active KV offload");
+        let id = scheduler
+            .admit(mk_req(vec![1, 2, 3, 1, 2, 3]))
+            .expect("admit");
+        scheduler
+            .prefill_admitted_prompt_lookup(&model, prompt_lookup_cfg())
+            .expect("prompt lookup prefill");
+        let before = scheduler
+            .prompt_lookup_state
+            .as_ref()
+            .and_then(|state| state.rows.get(&0))
+            .expect("prompt lookup row before park")
+            .lookup
+            .history()
+            .to_vec();
+
+        let parked = scheduler
+            .park_active_kv_request(id, &model)
+            .expect("park request")
+            .expect("request should park");
+        assert!(parked.prompt_lookup_row.is_some());
+        assert_eq!(
+            scheduler
+                .prompt_lookup_stats()
+                .expect("prompt lookup stats")
+                .index_entries_current,
+            0
+        );
+
+        assert_eq!(
+            scheduler
+                .restore_active_kv_request(&parked, &model)
+                .expect("restore request"),
+            id
+        );
+        let restored = scheduler
+            .prompt_lookup_state
+            .as_ref()
+            .and_then(|state| state.rows.get(&0))
+            .expect("restored prompt lookup row");
+        assert_eq!(restored.lookup.history(), before);
+        assert!(restored.pending_tokens.is_empty());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
     fn active_kv_restore_reclaims_full_immutable_prefix_pool() {
         let model = StepDecodeMaskModel::default();
         let root = std::env::temp_dir().join(format!(
@@ -17995,6 +18944,75 @@ mod tests {
                 .physical_pages_referenced,
             0
         );
+
+        crate::core::cache::process_async_prefix_store_queue().wait_idle();
+        std::fs::remove_dir_all(root).expect("cleanup prefix cache");
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn fullpaged_request_fork_clones_request_local_prompt_lookup_state() {
+        let root = std::env::temp_dir().join(format!(
+            "ironmlx-prompt-lookup-request-fork-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let config =
+            crate::core::cache::PagedPrefixCacheConfig::new(&root, "prompt-lookup-fork", 3, 64)
+                .expect("prefix config");
+        let mut scheduler = Scheduler::<StepDecodeMaskModel>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        scheduler
+            .enable_paged_prefix_cache(config)
+            .expect("enable paged prefix cache");
+        let source = scheduler
+            .admit(mk_req(vec![1, 2, 3, 1, 2, 3]))
+            .expect("admit source");
+        let model = StepDecodeMaskModel::default();
+        scheduler
+            .prefill_admitted_prompt_lookup(&model, prompt_lookup_cfg())
+            .expect("source prompt lookup prefill");
+        let destination = scheduler
+            .admit(mk_req(vec![1, 2, 3, 1, 2, 3]))
+            .expect("admit destination");
+        scheduler
+            .register_prompt_lookup_request(destination, prompt_lookup_cfg())
+            .expect("register destination prompt lookup state");
+
+        assert!(scheduler
+            .fork_request_blocks(source, destination, &model)
+            .expect("fork request blocks"));
+        let source_row = scheduler.get(source).expect("source state").row_idx;
+        let destination_row = scheduler
+            .get(destination)
+            .expect("destination state")
+            .row_idx;
+        let prompt_lookup = scheduler
+            .prompt_lookup_state
+            .as_ref()
+            .expect("prompt lookup state");
+        let source_lookup = prompt_lookup.rows.get(&source_row).expect("source lookup");
+        let destination_lookup = prompt_lookup
+            .rows
+            .get(&destination_row)
+            .expect("destination lookup");
+        assert_eq!(
+            source_lookup.lookup.history(),
+            destination_lookup.lookup.history()
+        );
+        assert!(source_lookup.pending_tokens.is_empty());
+        assert!(destination_lookup.pending_tokens.is_empty());
+
+        scheduler.evict(source).expect("evict source");
+        assert!(scheduler
+            .prompt_lookup_state
+            .as_ref()
+            .is_some_and(|state| state.rows.contains_key(&destination_row)));
+        scheduler.evict(destination).expect("evict destination");
+        scheduler.evict_all().expect("reset scheduler");
 
         crate::core::cache::process_async_prefix_store_queue().wait_idle();
         std::fs::remove_dir_all(root).expect("cleanup prefix cache");

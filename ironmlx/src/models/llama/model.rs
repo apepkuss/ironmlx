@@ -328,6 +328,14 @@ impl LlamaModel {
         self.run_layers(input_ids, per_row_lens, decode_mask, cache, target)
     }
 
+    pub fn project_hidden_on(
+        &self,
+        hidden: &Array,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        self.lm_head.forward_on(hidden, target.into())
+    }
+
     pub fn model_meta(&self) -> ModelMeta {
         let cfg = &self.cfg;
         ModelMeta {
@@ -416,6 +424,10 @@ impl Model for LlamaModel {
             cache,
             target,
         )
+    }
+
+    fn project_hidden_on(&self, hidden: &Array, target: StreamOrDevice) -> Result<Array> {
+        LlamaModel::project_hidden_on(self, hidden, target)
     }
 
     fn requires_position_ids(&self) -> bool {

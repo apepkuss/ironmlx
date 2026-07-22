@@ -153,6 +153,30 @@ pub struct ServeArgs {
     #[arg(long = "mtp-draft-tokens")]
     pub mtp_draft_tokens: Option<usize>,
 
+    /// Enable request-local greedy prompt lookup speculative decoding.
+    #[arg(long = "prompt-lookup", default_value_t = false)]
+    pub prompt_lookup: bool,
+
+    /// Minimum n-gram length considered by --prompt-lookup.
+    #[arg(long = "prompt-lookup-min-ngram")]
+    pub prompt_lookup_min_ngram: Option<usize>,
+
+    /// Maximum n-gram length considered by --prompt-lookup.
+    #[arg(long = "prompt-lookup-max-ngram")]
+    pub prompt_lookup_max_ngram: Option<usize>,
+
+    /// Maximum copied draft tokens per PromptLookup verification window.
+    #[arg(long = "prompt-lookup-max-draft-tokens")]
+    pub prompt_lookup_max_draft_tokens: Option<usize>,
+
+    /// Per-request committed-token history retained by PromptLookup.
+    #[arg(long = "prompt-lookup-history-window-tokens")]
+    pub prompt_lookup_history_window_tokens: Option<usize>,
+
+    /// Maximum distinct n-gram keys retained per request.
+    #[arg(long = "prompt-lookup-max-index-entries")]
+    pub prompt_lookup_max_index_entries: Option<usize>,
+
     /// KV cache quantization used by attention reads: none, turbo3, turbo4, or k3v4.
     #[arg(long = "kv-quant", value_enum, default_value = "none")]
     pub(crate) kv_quant: KvQuantArg,
@@ -374,6 +398,42 @@ impl Default for SchedulerServeConfig {
 struct ServeMtpConfig {
     model_dir: PathBuf,
     draft_tokens: usize,
+}
+
+fn resolve_prompt_lookup_config(
+    args: &ServeArgs,
+) -> Result<Option<crate::core::prompt_lookup::PromptLookupConfig>> {
+    let has_source_params = args.prompt_lookup_min_ngram.is_some()
+        || args.prompt_lookup_max_ngram.is_some()
+        || args.prompt_lookup_max_draft_tokens.is_some()
+        || args.prompt_lookup_history_window_tokens.is_some()
+        || args.prompt_lookup_max_index_entries.is_some();
+    if !args.prompt_lookup {
+        if has_source_params {
+            bail!("prompt lookup source parameters require --prompt-lookup");
+        }
+        return Ok(None);
+    }
+    if args.mtp_model_dir.is_some() || args.mtp_draft_tokens.is_some() {
+        bail!("--prompt-lookup is mutually exclusive with neural MTP/drafter options");
+    }
+    let defaults = crate::core::prompt_lookup::PromptLookupConfig::default();
+    Ok(Some(
+        crate::core::prompt_lookup::PromptLookupConfig {
+            min_ngram: args.prompt_lookup_min_ngram.unwrap_or(defaults.min_ngram),
+            max_ngram: args.prompt_lookup_max_ngram.unwrap_or(defaults.max_ngram),
+            max_draft_tokens: args
+                .prompt_lookup_max_draft_tokens
+                .unwrap_or(defaults.max_draft_tokens),
+            history_window_tokens: args
+                .prompt_lookup_history_window_tokens
+                .unwrap_or(defaults.history_window_tokens),
+            max_index_entries: args
+                .prompt_lookup_max_index_entries
+                .unwrap_or(defaults.max_index_entries),
+        }
+        .validate()?,
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -649,8 +709,12 @@ fn scheduler_runtime_context_for_model(
     model_dir: &Path,
     mtp_model_dir: Option<&Path>,
     mtp_draft_tokens: Option<usize>,
+    prompt_lookup: Option<crate::core::prompt_lookup::PromptLookupConfig>,
     logical_kv_cap_tokens: Option<usize>,
 ) -> Result<SchedulerAutotuneRuntimeContext> {
+    if prompt_lookup.is_some() && mtp_model_dir.is_some() {
+        bail!("PromptLookup is mutually exclusive with neural MTP/drafter options");
+    }
     let logical_kv_cap_tokens = logical_kv_cap_tokens
         .or(args.max_cache_cap)
         .unwrap_or(DEFAULT_MAX_CACHE_CAP);
@@ -659,6 +723,7 @@ fn scheduler_runtime_context_for_model(
         SchedulerProfileContextOptions {
             mtp_model_dir,
             mtp_draft_tokens,
+            prompt_lookup,
             kv_quantization: args.kv_quant.profile_context(),
             paged_prefix_cache_enabled: args.paged_prefix_cache_dir.is_some(),
             paged_prefix_cache_block_size: args.paged_prefix_cache_block_size,
@@ -810,20 +875,22 @@ pub(crate) fn resolve_scheduler_for_model(
     args: &ServeArgs,
     model_dir: &Path,
 ) -> Result<ResolvedSchedulerRuntime> {
-    resolve_scheduler_for_model_with_mtp(
+    resolve_scheduler_for_model_with_speculative(
         args,
         model_dir,
         args.mtp_model_dir.as_deref(),
         args.mtp_draft_tokens,
+        resolve_prompt_lookup_config(args)?,
         None,
     )
 }
 
-pub(crate) fn resolve_scheduler_for_model_with_mtp(
+pub(crate) fn resolve_scheduler_for_model_with_speculative(
     args: &ServeArgs,
     model_dir: &Path,
     mtp_model_dir: Option<&Path>,
     mtp_draft_tokens: Option<usize>,
+    prompt_lookup: Option<crate::core::prompt_lookup::PromptLookupConfig>,
     max_cache_cap_override: Option<usize>,
 ) -> Result<ResolvedSchedulerRuntime> {
     let runtime_context = scheduler_runtime_context_for_model(
@@ -831,6 +898,7 @@ pub(crate) fn resolve_scheduler_for_model_with_mtp(
         model_dir,
         mtp_model_dir,
         mtp_draft_tokens,
+        prompt_lookup,
         max_cache_cap_override,
     )?;
     let runtime_context_fingerprint = runtime_context.fingerprint();
@@ -999,6 +1067,7 @@ where
     let paged_prefix_cache = resolve_paged_prefix_cache_config(args, scheduler_config, &model_id)?;
     let prefix_lru_cache = resolve_prefix_lru_cache_config(args, paged_prefix_cache.as_ref())?;
     let active_kv_offload = resolve_active_kv_offload_config(args)?;
+    let prompt_lookup = resolve_prompt_lookup_config(args)?;
     if let Some(config) = &paged_prefix_cache {
         tracing::info!(
             "ironmlx serve: paged SSD prefix cache enabled dir={} block_size={} max_pages={}",
@@ -1014,27 +1083,60 @@ where
         );
     }
     let runtime = serve_runtime()?;
-    runtime.block_on(server::serve(
-        model,
-        tokenizer,
-        model_id,
-        &args.host,
-        args.port,
-        scheduler_config.prefill_chunk_size,
-        scheduler_config.b_max,
-        scheduler_config.admission_deadline_ms,
-        scheduler_config.admission_queue_max,
-        scheduler_config.max_cache_cap,
-        scheduler_config.decode_cadence_mid_chunk_cap,
-        args.kv_quant.turboquant_bits(),
-        paged_prefix_cache,
-        prefix_lru_cache,
-        active_kv_offload,
-        scheduler_runtime_profile,
-        args.scheduler_autotune_report,
-        vision_input,
-        static_memory_estimate,
-    ))
+    if let Some(cfg) = prompt_lookup {
+        tracing::info!(
+            min_ngram = cfg.min_ngram,
+            max_ngram = cfg.max_ngram,
+            max_draft_tokens = cfg.max_draft_tokens,
+            history_window_tokens = cfg.history_window_tokens,
+            max_index_entries = cfg.max_index_entries,
+            "ironmlx serve: request-local PromptLookup enabled"
+        );
+        runtime.block_on(server::serve_with_prompt_lookup(
+            model,
+            cfg,
+            tokenizer,
+            model_id,
+            &args.host,
+            args.port,
+            scheduler_config.prefill_chunk_size,
+            scheduler_config.b_max,
+            scheduler_config.admission_deadline_ms,
+            scheduler_config.admission_queue_max,
+            scheduler_config.max_cache_cap,
+            scheduler_config.decode_cadence_mid_chunk_cap,
+            args.kv_quant.turboquant_bits(),
+            paged_prefix_cache,
+            prefix_lru_cache,
+            active_kv_offload,
+            scheduler_runtime_profile,
+            args.scheduler_autotune_report,
+            vision_input,
+            static_memory_estimate,
+        ))
+    } else {
+        runtime.block_on(server::serve(
+            model,
+            tokenizer,
+            model_id,
+            &args.host,
+            args.port,
+            scheduler_config.prefill_chunk_size,
+            scheduler_config.b_max,
+            scheduler_config.admission_deadline_ms,
+            scheduler_config.admission_queue_max,
+            scheduler_config.max_cache_cap,
+            scheduler_config.decode_cadence_mid_chunk_cap,
+            args.kv_quant.turboquant_bits(),
+            paged_prefix_cache,
+            prefix_lru_cache,
+            active_kv_offload,
+            scheduler_runtime_profile,
+            args.scheduler_autotune_report,
+            vision_input,
+            static_memory_estimate,
+        ))
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1232,20 +1334,34 @@ fn read_engine_pool_manifest(path: &Path) -> Result<server::engine::EnginePoolMa
     serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
 }
 
+struct EnginePoolSchedulerProfileRequest<'a> {
+    manifest_profile: Option<&'a Path>,
+    store: Option<&'a SchedulerProfileStore>,
+    hardware_label: &'a str,
+    mtp_model_dir: Option<&'a Path>,
+    mtp_draft_tokens: Option<usize>,
+    prompt_lookup: Option<crate::core::prompt_lookup::PromptLookupConfig>,
+}
+
 fn resolve_engine_pool_scheduler_profile(
     args: &ServeArgs,
     model_dir: &Path,
-    manifest_profile: Option<&Path>,
-    store: Option<&SchedulerProfileStore>,
-    hardware_label: &str,
-    mtp_model_dir: Option<&Path>,
-    mtp_draft_tokens: Option<usize>,
+    request: EnginePoolSchedulerProfileRequest<'_>,
 ) -> Result<ResolvedSchedulerRuntime> {
+    let EnginePoolSchedulerProfileRequest {
+        manifest_profile,
+        store,
+        hardware_label,
+        mtp_model_dir,
+        mtp_draft_tokens,
+        prompt_lookup,
+    } = request;
     let runtime_context = scheduler_runtime_context_for_model(
         args,
         model_dir,
         mtp_model_dir,
         mtp_draft_tokens,
+        prompt_lookup,
         None,
     )?;
     let runtime_context_fingerprint = runtime_context.fingerprint();
@@ -1319,6 +1435,10 @@ fn build_engine_model_config_for_pool(
     scheduler_profile_store: Option<&SchedulerProfileStore>,
     hardware_label: &str,
 ) -> Result<server::engine::EngineModelConfig> {
+    let prompt_lookup = model
+        .prompt_lookup
+        .map(crate::core::prompt_lookup::PromptLookupConfig::validate)
+        .transpose()?;
     let mtp = model
         .mtp_model_dir
         .map(|model_dir| server::engine::EngineMtpSettings {
@@ -1336,6 +1456,7 @@ fn build_engine_model_config_for_pool(
                 SchedulerAutotuneRuntimeContext::local_default(DEFAULT_MAX_CACHE_CAP),
             ),
             mtp,
+            prompt_lookup,
             sampling_defaults: server::SamplingDefaults::default(),
         });
     }
@@ -1352,14 +1473,23 @@ fn build_engine_model_config_for_pool(
             model.id
         );
     }
+    if mtp.is_some() && prompt_lookup.is_some() {
+        bail!(
+            "engine model `{}` configures both neural MTP/drafter and PromptLookup",
+            model.id
+        );
+    }
     let mut resolved = resolve_engine_pool_scheduler_profile(
         args,
         &model.path,
-        model.scheduler_profile.as_deref(),
-        scheduler_profile_store,
-        hardware_label,
-        mtp.as_ref().map(|settings| settings.model_dir.as_path()),
-        mtp.as_ref().and_then(|settings| settings.draft_tokens),
+        EnginePoolSchedulerProfileRequest {
+            manifest_profile: model.scheduler_profile.as_deref(),
+            store: scheduler_profile_store,
+            hardware_label,
+            mtp_model_dir: mtp.as_ref().map(|settings| settings.model_dir.as_path()),
+            mtp_draft_tokens: mtp.as_ref().and_then(|settings| settings.draft_tokens),
+            prompt_lookup,
+        },
     )?;
     let model_type = read_model_type(&model.path)?;
     let architecture = crate::models::ModelArchitecture::from_model_type(&model_type)?;
@@ -1378,6 +1508,7 @@ fn build_engine_model_config_for_pool(
         pinned: false,
         scheduler_runtime_profile: resolved.scheduler_runtime_profile,
         mtp,
+        prompt_lookup,
         sampling_defaults: server::SamplingDefaults::default(),
     })
 }
@@ -1385,6 +1516,9 @@ fn build_engine_model_config_for_pool(
 fn run_engine_pool(args: ServeArgs, manifest_path: &Path) -> Result<()> {
     if args.mtp_model_dir.is_some() || args.mtp_draft_tokens.is_some() {
         bail!("--model-manifest uses per-model mtp_model_dir / mtp_draft_tokens entries; do not pass global MTP flags");
+    }
+    if resolve_prompt_lookup_config(&args)?.is_some() {
+        bail!("--model-manifest uses per-model prompt_lookup entries; do not pass global PromptLookup flags");
     }
     if args.prefix_lru_cache_max_bytes.is_some() && args.paged_prefix_cache_dir.is_none() {
         bail!("--prefix-lru-cache-max-bytes requires --paged-prefix-cache-dir");
@@ -1731,9 +1865,10 @@ mod scheduler_profile_tests {
         load_scheduler_profile_for_model, qwen_moe_serve_model, read_engine_pool_manifest,
         resolve_active_kv_offload_config, resolve_memory_limit_bytes, resolve_model_ttl,
         resolve_paged_prefix_cache_config, resolve_prefix_lru_cache_config,
-        resolve_scheduler_runtime_profile, resolve_scheduler_serve_config,
-        resolve_serve_mtp_config, KvQuantArg, QwenMoeServeModel, ResolvedSchedulerRuntime,
-        SchedulerProfileSource, SchedulerServeConfig, ServeArgs, BYTES_PER_GIB,
+        resolve_prompt_lookup_config, resolve_scheduler_runtime_profile,
+        resolve_scheduler_serve_config, resolve_serve_mtp_config, KvQuantArg, QwenMoeServeModel,
+        ResolvedSchedulerRuntime, SchedulerProfileSource, SchedulerServeConfig, ServeArgs,
+        BYTES_PER_GIB,
     };
 
     fn profile_config() -> SchedulerAutotuneProfileConfig {
@@ -1796,6 +1931,12 @@ mod scheduler_profile_tests {
             scheduler_autotune_report: false,
             mtp_model_dir: None,
             mtp_draft_tokens: None,
+            prompt_lookup: false,
+            prompt_lookup_min_ngram: None,
+            prompt_lookup_max_ngram: None,
+            prompt_lookup_max_draft_tokens: None,
+            prompt_lookup_history_window_tokens: None,
+            prompt_lookup_max_index_entries: None,
             kv_quant: KvQuantArg::None,
             paged_prefix_cache_dir: None,
             paged_prefix_cache_block_size:
@@ -1944,6 +2085,7 @@ mod scheduler_profile_tests {
             )),
             mtp_model_dir: None,
             mtp_draft_tokens: None,
+            prompt_lookup: None,
         };
 
         let config = build_engine_model_config_for_pool(&args, manifest_model, None, "test-host")
@@ -1979,12 +2121,54 @@ mod scheduler_profile_tests {
             scheduler_profile: None,
             mtp_model_dir: Some(mtp_dir),
             mtp_draft_tokens: Some(2),
+            prompt_lookup: None,
         };
 
         let config = build_engine_model_config_for_pool(&args, manifest_model, None, "test-host")
             .expect("build manifest model config");
 
         assert_eq!(config.scheduler_runtime_profile.config.b_max, 4);
+        std::fs::remove_dir_all(temp_dir).expect("cleanup");
+    }
+
+    #[test]
+    fn serve_engine_pool_preserves_prompt_lookup_source_config() {
+        let temp_dir = unique_temp_dir("serve-engine-pool-prompt-lookup");
+        let model_dir = temp_dir.join("qwen-base");
+        std::fs::create_dir_all(&model_dir).expect("create model dir");
+        std::fs::write(model_dir.join("config.json"), r#"{"model_type":"qwen3_5"}"#)
+            .expect("write config");
+        let args = base_args();
+        let prompt_lookup = crate::core::prompt_lookup::PromptLookupConfig {
+            min_ngram: 2,
+            max_ngram: 5,
+            max_draft_tokens: 3,
+            history_window_tokens: 4096,
+            max_index_entries: 8192,
+        };
+        let manifest_model = EngineModelManifest {
+            id: "qwen-prompt-lookup".to_string(),
+            path: model_dir,
+            load_policy: EngineLoadPolicy::Lazy,
+            default: true,
+            scheduler_profile: None,
+            mtp_model_dir: None,
+            mtp_draft_tokens: None,
+            prompt_lookup: Some(prompt_lookup),
+        };
+
+        let config = build_engine_model_config_for_pool(&args, manifest_model, None, "test-host")
+            .expect("build prompt lookup manifest config");
+
+        assert_eq!(config.prompt_lookup, Some(prompt_lookup));
+        assert_eq!(
+            config
+                .scheduler_runtime_profile
+                .runtime_context
+                .speculative
+                .mode,
+            crate::core::scheduler_autotune::SchedulerSpeculativeMode::PromptLookup
+        );
         std::fs::remove_dir_all(temp_dir).expect("cleanup");
     }
 
@@ -2253,6 +2437,31 @@ mod scheduler_profile_tests {
 
         assert!(args.mtp_model_dir.is_none());
         assert_eq!(args.mtp_draft_tokens, None);
+        assert!(!args.prompt_lookup);
+        assert!(resolve_prompt_lookup_config(&args)
+            .expect("resolve prompt lookup")
+            .is_none());
+    }
+
+    #[test]
+    fn serve_prompt_lookup_requires_explicit_source_enablement() {
+        let mut args = base_args();
+        args.prompt_lookup_max_draft_tokens = Some(3);
+
+        let error = resolve_prompt_lookup_config(&args).expect_err("source must be enabled");
+        assert!(error
+            .to_string()
+            .contains("source parameters require --prompt-lookup"));
+    }
+
+    #[test]
+    fn serve_prompt_lookup_rejects_neural_source_configuration() {
+        let mut args = base_args();
+        args.prompt_lookup = true;
+        args.mtp_model_dir = Some(PathBuf::from("/tmp/mtp"));
+
+        let error = resolve_prompt_lookup_config(&args).expect_err("sources are exclusive");
+        assert!(error.to_string().contains("mutually exclusive"));
     }
 
     #[test]

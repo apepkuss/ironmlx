@@ -901,6 +901,14 @@ impl crate::core::model::Model for Qwen35Model {
         )
     }
 
+    fn project_hidden_on(
+        &self,
+        hidden: &mlx::Array,
+        target: mlx::StreamOrDevice,
+    ) -> crate::Result<mlx::Array> {
+        Qwen35Model::project_hidden_on(self, hidden, target)
+    }
+
     fn model_meta(&self) -> crate::core::memory_budget::ModelMeta {
         Qwen35Model::model_meta(self)
     }

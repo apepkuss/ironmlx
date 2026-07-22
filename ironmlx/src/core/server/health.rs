@@ -2,13 +2,14 @@
 //! memory / model state for monitoring + load balancer health probes.
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use serde::Serialize;
 
 use crate::core::cache::{ActiveKvOffloadHealth, ActiveKvOffloadSharedStats};
 use crate::core::memory_budget::system_total_ram_bytes;
+use crate::core::prompt_lookup::{PromptLookupConfig, PromptLookupStats};
 
 #[derive(Debug, Serialize)]
 pub enum HealthStatus {
@@ -217,6 +218,153 @@ impl MtpHealthConfig {
     }
 }
 
+#[derive(Debug, Default, Serialize)]
+pub struct PromptLookupHealthInfo {
+    pub enabled: bool,
+    pub min_ngram: Option<usize>,
+    pub max_ngram: Option<usize>,
+    pub max_draft_tokens: Option<usize>,
+    pub history_window_tokens: Option<usize>,
+    pub max_index_entries: Option<usize>,
+    pub queries: u64,
+    pub hits: u64,
+    pub misses: u64,
+    pub drafted_tokens: u64,
+    pub accepted_tokens: u64,
+    pub rejected_tokens: u64,
+    pub zero_accept_windows: u64,
+    pub propose_us: u64,
+    pub index_build_us: u64,
+    pub index_update_us: u64,
+    pub index_entries_current: u64,
+    pub index_entries_peak: u64,
+    pub index_evictions: u64,
+    pub verify_forward_us: u64,
+    pub projection_us: u64,
+    pub verify_accept_host_sync_count: u64,
+    pub verify_accept_host_sync_us: u64,
+    pub rollback_count: u64,
+    pub rollback_us: u64,
+}
+
+impl PromptLookupHealthInfo {
+    pub fn aggregate(snapshots: impl IntoIterator<Item = Self>) -> Self {
+        let mut aggregate = Self::default();
+        let mut config: Option<(usize, usize, usize, usize, usize)> = None;
+        let mut config_mismatch = false;
+        for snapshot in snapshots {
+            aggregate.enabled |= snapshot.enabled;
+            if snapshot.enabled {
+                let current = snapshot
+                    .min_ngram
+                    .zip(snapshot.max_ngram)
+                    .zip(snapshot.max_draft_tokens)
+                    .zip(snapshot.history_window_tokens)
+                    .zip(snapshot.max_index_entries)
+                    .map(
+                        |((((min_ngram, max_ngram), max_draft_tokens), history), entries)| {
+                            (min_ngram, max_ngram, max_draft_tokens, history, entries)
+                        },
+                    );
+                match (config, current) {
+                    (None, Some(current)) => config = Some(current),
+                    (Some(expected), Some(current)) if expected == current => {}
+                    _ => config_mismatch = true,
+                }
+            }
+            aggregate.queries += snapshot.queries;
+            aggregate.hits += snapshot.hits;
+            aggregate.misses += snapshot.misses;
+            aggregate.drafted_tokens += snapshot.drafted_tokens;
+            aggregate.accepted_tokens += snapshot.accepted_tokens;
+            aggregate.rejected_tokens += snapshot.rejected_tokens;
+            aggregate.zero_accept_windows += snapshot.zero_accept_windows;
+            aggregate.propose_us += snapshot.propose_us;
+            aggregate.index_build_us += snapshot.index_build_us;
+            aggregate.index_update_us += snapshot.index_update_us;
+            aggregate.index_entries_current += snapshot.index_entries_current;
+            aggregate.index_entries_peak += snapshot.index_entries_peak;
+            aggregate.index_evictions += snapshot.index_evictions;
+            aggregate.verify_forward_us += snapshot.verify_forward_us;
+            aggregate.projection_us += snapshot.projection_us;
+            aggregate.verify_accept_host_sync_count += snapshot.verify_accept_host_sync_count;
+            aggregate.verify_accept_host_sync_us += snapshot.verify_accept_host_sync_us;
+            aggregate.rollback_count += snapshot.rollback_count;
+            aggregate.rollback_us += snapshot.rollback_us;
+        }
+        if !config_mismatch {
+            if let Some((min_ngram, max_ngram, max_draft_tokens, history, entries)) = config {
+                aggregate.min_ngram = Some(min_ngram);
+                aggregate.max_ngram = Some(max_ngram);
+                aggregate.max_draft_tokens = Some(max_draft_tokens);
+                aggregate.history_window_tokens = Some(history);
+                aggregate.max_index_entries = Some(entries);
+            }
+        }
+        aggregate
+    }
+}
+
+#[derive(Clone)]
+pub struct PromptLookupHealthConfig {
+    config: Option<PromptLookupConfig>,
+    stats: Arc<Mutex<Option<PromptLookupStats>>>,
+}
+
+impl PromptLookupHealthConfig {
+    pub fn disabled() -> Self {
+        Self {
+            config: None,
+            stats: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    pub fn enabled(
+        config: PromptLookupConfig,
+        stats: Arc<Mutex<Option<PromptLookupStats>>>,
+    ) -> Self {
+        Self {
+            config: Some(config),
+            stats,
+        }
+    }
+
+    fn snapshot(&self) -> PromptLookupHealthInfo {
+        let stats = self
+            .stats
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_default();
+        PromptLookupHealthInfo {
+            enabled: self.config.is_some(),
+            min_ngram: self.config.map(|config| config.min_ngram),
+            max_ngram: self.config.map(|config| config.max_ngram),
+            max_draft_tokens: self.config.map(|config| config.max_draft_tokens),
+            history_window_tokens: self.config.map(|config| config.history_window_tokens),
+            max_index_entries: self.config.map(|config| config.max_index_entries),
+            queries: stats.queries,
+            hits: stats.hits,
+            misses: stats.misses,
+            drafted_tokens: stats.drafted_tokens,
+            accepted_tokens: stats.accepted_tokens,
+            rejected_tokens: stats.rejected_tokens,
+            zero_accept_windows: stats.zero_accept_windows,
+            propose_us: stats.propose_us,
+            index_build_us: stats.index_build_us,
+            index_update_us: stats.index_update_us,
+            index_entries_current: stats.index_entries_current,
+            index_entries_peak: stats.index_entries_peak,
+            index_evictions: stats.index_evictions,
+            verify_forward_us: stats.verify_forward_us,
+            projection_us: stats.projection_us,
+            verify_accept_host_sync_count: stats.verify_accept_host_sync_count,
+            verify_accept_host_sync_us: stats.verify_accept_host_sync_us,
+            rollback_count: stats.rollback_count,
+            rollback_us: stats.rollback_us,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct HealthSnapshot {
     pub status: HealthStatus,
@@ -225,6 +373,7 @@ pub struct HealthSnapshot {
     pub scheduler: SchedulerInfo,
     pub memory: MemoryInfo,
     pub mtp: MtpHealthInfo,
+    pub prompt_lookup: PromptLookupHealthInfo,
     pub active_kv_offload: ActiveKvOffloadHealth,
     pub device_name: Option<String>,
     pub version: &'static str,
@@ -246,6 +395,7 @@ pub struct SchedulerHealthCollector {
     pub kv_cache_resident_cap_tokens: usize,
     pub kv_cache_budget_policy: String,
     pub mtp: MtpHealthConfig,
+    pub prompt_lookup: PromptLookupHealthConfig,
     pub active_kv_offload: ActiveKvOffloadSharedStats,
     pub immutable_prefix_blocks:
         crate::core::server::scheduler_actor::ImmutablePrefixBlockSharedStats,
@@ -322,6 +472,7 @@ impl SchedulerHealthCollector {
                 immutable_prefix_blocks: self.immutable_prefix_blocks.snapshot(),
             },
             mtp: self.mtp.snapshot(),
+            prompt_lookup: self.prompt_lookup.snapshot(),
             active_kv_offload,
             device_name: mlx_memory.device_name,
             version: env!("CARGO_PKG_VERSION"),
@@ -452,6 +603,7 @@ mod tests {
             kv_cache_resident_cap_tokens: 1_024,
             kv_cache_budget_policy: "active_kv_offload".to_string(),
             mtp,
+            prompt_lookup: PromptLookupHealthConfig::disabled(),
             active_kv_offload,
             immutable_prefix_blocks:
                 crate::core::server::scheduler_actor::ImmutablePrefixBlockSharedStats::new(false),
@@ -487,6 +639,46 @@ mod tests {
         assert_eq!(snapshot.mtp.main_rollback_us, 0);
         assert_eq!(snapshot.mtp.cache_commit_us, 0);
         assert_eq!(snapshot.mtp.cache_restore_us, 0);
+    }
+
+    #[test]
+    fn snapshot_prompt_lookup_reports_config_and_live_stats() {
+        let config = PromptLookupConfig {
+            min_ngram: 2,
+            max_ngram: 5,
+            max_draft_tokens: 3,
+            history_window_tokens: 4096,
+            max_index_entries: 8192,
+        };
+        let stats = PromptLookupStats {
+            queries: 11,
+            hits: 7,
+            misses: 4,
+            drafted_tokens: 19,
+            accepted_tokens: 13,
+            rejected_tokens: 6,
+            verify_accept_host_sync_count: 7,
+            rollback_count: 2,
+            ..PromptLookupStats::default()
+        };
+        let published = Arc::new(Mutex::new(Some(stats)));
+        let mut collector = test_collector(MtpHealthConfig::disabled());
+        collector.prompt_lookup = PromptLookupHealthConfig::enabled(config, published);
+
+        let snapshot = collector.snapshot();
+
+        assert!(snapshot.prompt_lookup.enabled);
+        assert_eq!(snapshot.prompt_lookup.min_ngram, Some(2));
+        assert_eq!(snapshot.prompt_lookup.max_ngram, Some(5));
+        assert_eq!(snapshot.prompt_lookup.max_draft_tokens, Some(3));
+        assert_eq!(snapshot.prompt_lookup.queries, 11);
+        assert_eq!(snapshot.prompt_lookup.hits, 7);
+        assert_eq!(snapshot.prompt_lookup.misses, 4);
+        assert_eq!(snapshot.prompt_lookup.drafted_tokens, 19);
+        assert_eq!(snapshot.prompt_lookup.accepted_tokens, 13);
+        assert_eq!(snapshot.prompt_lookup.rejected_tokens, 6);
+        assert_eq!(snapshot.prompt_lookup.verify_accept_host_sync_count, 7);
+        assert_eq!(snapshot.prompt_lookup.rollback_count, 2);
     }
 
     #[test]
@@ -696,6 +888,7 @@ mod tests {
                 decode_cache_commit_us: 0,
                 cache_restore_us: 0,
             },
+            prompt_lookup: PromptLookupHealthInfo::default(),
             active_kv_offload: ActiveKvOffloadHealth::disabled(),
             device_name: Some("Apple Test GPU".to_string()),
             version: "test",

@@ -600,15 +600,12 @@ pub trait MtpSpeculativeModel: Model {
 
     fn mtp_hidden_dtype(&self, mtp: &Self::MtpHead) -> Dtype;
 
-    fn project_hidden_on(&self, hidden: &Array, target: impl Into<StreamOrDevice>)
-        -> Result<Array>;
-
     fn project_mtp_verify_hidden_on(
         &self,
         hidden: &Array,
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
-        self.project_hidden_on(hidden, target)
+        Model::project_hidden_on(self, hidden, target.into())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -660,14 +657,6 @@ impl MtpSpeculativeModel for Qwen35Model {
             dtype,
             cap,
         )
-    }
-
-    fn project_hidden_on(
-        &self,
-        hidden: &Array,
-        target: impl Into<StreamOrDevice>,
-    ) -> Result<Array> {
-        Qwen35Model::project_hidden_on(self, hidden, target)
     }
 
     fn project_mtp_verify_hidden_on(
@@ -757,14 +746,6 @@ impl MtpSpeculativeModel for Qwen35MoeModel {
         )
     }
 
-    fn project_hidden_on(
-        &self,
-        hidden: &Array,
-        target: impl Into<StreamOrDevice>,
-    ) -> Result<Array> {
-        Qwen35MoeModel::project_hidden_on(self, hidden, target)
-    }
-
     fn project_mtp_verify_hidden_on(
         &self,
         hidden: &Array,
@@ -850,14 +831,6 @@ impl MtpSpeculativeModel for Qwen36MoeModel {
             dtype,
             cap,
         )
-    }
-
-    fn project_hidden_on(
-        &self,
-        hidden: &Array,
-        target: impl Into<StreamOrDevice>,
-    ) -> Result<Array> {
-        Qwen36MoeModel::project_hidden_on(self, hidden, target)
     }
 
     fn project_mtp_verify_hidden_on(
@@ -1530,7 +1503,8 @@ where
             last_prompt_hidden.ok_or_else(|| anyhow!("MTP prefill produced no prompt hidden"))?;
 
         let projection_start = Instant::now();
-        let first_logits = model.project_hidden_on(&last_prompt_hidden, ())?;
+        let first_logits =
+            model.project_hidden_on(&last_prompt_hidden, StreamOrDevice::default())?;
         add_elapsed_us(&mut stats.projection_us, projection_start);
         let mut prng_state = mlx::random::key(request.sampler.seed)?;
         let sampling_start = Instant::now();
@@ -2234,6 +2208,27 @@ mod tests {
             Array::zeros((dims[0], dims[1], 1_i32), Dtype::Float32).map_err(anyhow::Error::from)
         }
 
+        fn project_hidden_on(&self, hidden: &Array, _target: StreamOrDevice) -> Result<Array> {
+            self.project_calls.fetch_add(1, Ordering::Relaxed);
+            let shape = hidden.shape();
+            let dims = shape.as_slice();
+            let seq = dims[1] as usize;
+            if self.tokens.len() != seq {
+                return Err(anyhow!(
+                    "fake token count {} does not match hidden seq {seq}",
+                    self.tokens.len()
+                ));
+            }
+            let vocab = 128_usize;
+            let mut logits = vec![0.0_f32; seq * vocab];
+            for (pos, &token) in self.tokens.iter().enumerate() {
+                logits[pos * vocab + token as usize] = 100.0;
+            }
+            (&logits[..], &[1_i32, seq as i32, vocab as i32][..])
+                .try_into()
+                .map_err(anyhow::Error::from)
+        }
+
         fn model_meta(&self) -> crate::core::memory_budget::ModelMeta {
             crate::core::memory_budget::test_meta_qwen35()
         }
@@ -2266,31 +2261,6 @@ mod tests {
 
         fn mtp_hidden_dtype(&self, _mtp: &Self::MtpHead) -> Dtype {
             Dtype::Float32
-        }
-
-        fn project_hidden_on(
-            &self,
-            hidden: &Array,
-            _target: impl Into<StreamOrDevice>,
-        ) -> Result<Array> {
-            self.project_calls.fetch_add(1, Ordering::Relaxed);
-            let shape = hidden.shape();
-            let dims = shape.as_slice();
-            let seq = dims[1] as usize;
-            if self.tokens.len() != seq {
-                return Err(anyhow!(
-                    "fake token count {} does not match hidden seq {seq}",
-                    self.tokens.len()
-                ));
-            }
-            let vocab = 128_usize;
-            let mut logits = vec![0.0_f32; seq * vocab];
-            for (pos, &token) in self.tokens.iter().enumerate() {
-                logits[pos * vocab + token as usize] = 100.0;
-            }
-            (&logits[..], &[1_i32, seq as i32, vocab as i32][..])
-                .try_into()
-                .map_err(anyhow::Error::from)
         }
 
         fn mtp_forward_hidden_on(

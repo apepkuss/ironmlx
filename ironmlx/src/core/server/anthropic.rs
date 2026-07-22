@@ -292,6 +292,10 @@ where
     let stream = req.stream;
     let model_label = req.model.clone().unwrap_or_else(|| state.model_id.clone());
     let sampler = build_sampler(&req, state.sampling_defaults);
+    if let Err(error) = super::validate_prompt_lookup_sampler(state.prompt_lookup_enabled, sampler)
+    {
+        return (StatusCode::BAD_REQUEST, format!("{error:#}")).into_response();
+    }
 
     // Decode Anthropic wire format -> neutral DecodedMessage (base64 -> bytes).
     let decoded = match decode_anthropic_messages(req.messages) {
@@ -359,7 +363,7 @@ where
         scheduler_config.prefill_chunk_size,
         state.b_max,
         state.paged_prefix_cache_enabled,
-        state.mtp_enabled && sampler.is_pipelinable(),
+        state.speculative_enabled && sampler.is_pipelinable(),
     );
 
     match messages_route(stream, use_scheduler) {

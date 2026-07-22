@@ -52,7 +52,7 @@ pub enum SchedulerAutotuneAction {
     /// Run local scheduler/autotune calibration candidates and write a profile.
     Calibrate(Box<super::scheduler_autotune_calibrate::SchedulerAutotuneCalibrateArgs>),
     /// Inspect or remove persisted local scheduler profiles.
-    Profile(SchedulerAutotuneProfileArgs),
+    Profile(Box<SchedulerAutotuneProfileArgs>),
 }
 
 #[derive(Args, Debug)]
@@ -102,7 +102,7 @@ pub enum SchedulerAutotuneProfileAction {
     /// Print one persisted scheduler profile as JSON.
     Show(SchedulerAutotuneProfileShowArgs),
     /// Diagnose the matching local scheduler profile for one model.
-    Doctor(SchedulerAutotuneProfileDoctorArgs),
+    Doctor(Box<SchedulerAutotuneProfileDoctorArgs>),
     /// Remove one persisted scheduler profile and its JSON file.
     Remove(SchedulerAutotuneProfileRemoveArgs),
     /// Import one runtime scheduler profile into ~/.ironmlx for one model path.
@@ -178,7 +178,7 @@ pub fn run(args: SchedulerAutotuneArgs) -> Result<()> {
         Some(SchedulerAutotuneAction::Calibrate(calibrate)) => {
             super::scheduler_autotune_calibrate::run(*calibrate)
         }
-        Some(SchedulerAutotuneAction::Profile(profile)) => run_profile(profile),
+        Some(SchedulerAutotuneAction::Profile(profile)) => run_profile(*profile),
         None => {
             let input = args
                 .input
@@ -198,7 +198,7 @@ fn run_profile(args: SchedulerAutotuneProfileArgs) -> Result<()> {
     match args.action {
         SchedulerAutotuneProfileAction::List => run_profile_list(&store),
         SchedulerAutotuneProfileAction::Show(show) => run_profile_show(&store, show),
-        SchedulerAutotuneProfileAction::Doctor(doctor) => run_profile_doctor(&store, doctor),
+        SchedulerAutotuneProfileAction::Doctor(doctor) => run_profile_doctor(&store, *doctor),
         SchedulerAutotuneProfileAction::Remove(remove) => run_profile_remove(&store, remove),
         SchedulerAutotuneProfileAction::Import(import) => run_profile_import(&store, import),
     }

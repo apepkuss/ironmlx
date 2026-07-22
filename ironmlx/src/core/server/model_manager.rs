@@ -16,9 +16,10 @@ use tokio::sync::RwLock;
 use crate::cli::serve::{
     apply_adaptive_mtp_scheduler_defaults, read_model_type, resolve_active_kv_offload_config,
     resolve_engine_paged_prefix_cache_settings, resolve_memory_limit_bytes, resolve_model_ttl,
-    resolve_scheduler_for_model_with_mtp, ResolvedSchedulerRuntime, SchedulerProfileSource,
+    resolve_scheduler_for_model_with_speculative, ResolvedSchedulerRuntime, SchedulerProfileSource,
     ServeArgs,
 };
+use crate::core::prompt_lookup::PromptLookupConfig;
 use crate::core::sampler::Sampler;
 use crate::core::speculative::{MtpDraftTokensArg, MtpSpeculativeConfig};
 use crate::models::{
@@ -32,7 +33,7 @@ use super::engine::{
 };
 use super::health::{
     classify_status, system_free_ram_bytes, HealthSnapshot, HealthStatus, MemoryInfo, ModelInfo,
-    MtpHealthInfo, SchedulerInfo,
+    MtpHealthInfo, PromptLookupHealthInfo, SchedulerInfo,
 };
 use super::{anthropic, openai, SamplingDefaults};
 
@@ -114,6 +115,7 @@ impl ModelManager {
             max_cache_cap_override: parsed.max_cache_cap_override,
             sampling_defaults_override: parsed.sampling_defaults,
             mtp: parsed.mtp.clone(),
+            prompt_lookup: parsed.prompt_lookup,
             pinned: parsed.pinned,
             set_default: parsed.set_default,
         };
@@ -153,12 +155,15 @@ impl ModelManager {
         ensure_gpu_memory_headroom()?;
         let load = build_engine_model_config(
             &self.serve_args,
-            parsed.model_reference.clone(),
-            &parsed.model_dir,
-            parsed.max_cache_cap_override,
-            parsed.sampling_defaults,
-            parsed.mtp,
-            parsed.pinned,
+            EngineModelBuildRequest {
+                model_id: parsed.model_reference.clone(),
+                model_dir: &parsed.model_dir,
+                max_cache_cap_override: parsed.max_cache_cap_override,
+                sampling_defaults_override: parsed.sampling_defaults,
+                mtp: parsed.mtp,
+                prompt_lookup: parsed.prompt_lookup,
+                pinned: parsed.pinned,
+            },
         )
         .map_err(AdminError::from_load_error)?;
         self.pool
@@ -181,12 +186,15 @@ impl ModelManager {
         let parsed = ParsedLoadModelRequest::new(request)?;
         let load = build_engine_model_config(
             &self.serve_args,
-            parsed.model_reference.clone(),
-            &parsed.model_dir,
-            parsed.max_cache_cap_override,
-            parsed.sampling_defaults,
-            parsed.mtp,
-            parsed.pinned,
+            EngineModelBuildRequest {
+                model_id: parsed.model_reference.clone(),
+                model_dir: &parsed.model_dir,
+                max_cache_cap_override: parsed.max_cache_cap_override,
+                sampling_defaults_override: parsed.sampling_defaults,
+                mtp: parsed.mtp,
+                prompt_lookup: parsed.prompt_lookup,
+                pinned: parsed.pinned,
+            },
         )
         .map_err(AdminError::from_load_error)?;
         self.pool
@@ -328,12 +336,15 @@ impl ModelManager {
 
         let load = build_engine_model_config(
             &self.serve_args,
-            reload.model_reference.clone(),
-            &reload.model_dir,
-            reload.max_cache_cap_override,
-            reload.sampling_defaults_override,
-            reload.mtp.clone(),
-            reload.pinned,
+            EngineModelBuildRequest {
+                model_id: reload.model_reference.clone(),
+                model_dir: &reload.model_dir,
+                max_cache_cap_override: reload.max_cache_cap_override,
+                sampling_defaults_override: reload.sampling_defaults_override,
+                mtp: reload.mtp.clone(),
+                prompt_lookup: reload.prompt_lookup,
+                pinned: reload.pinned,
+            },
         )
         .map_err(AdminError::from_load_error)?;
         self.pool
@@ -390,12 +401,15 @@ impl ModelManager {
                 }
                 let load = build_engine_model_config(
                     &serve_args,
-                    reload.model_reference.clone(),
-                    &reload.model_dir,
-                    reload.max_cache_cap_override,
-                    reload.sampling_defaults_override,
-                    reload.mtp.clone(),
-                    reload.pinned,
+                    EngineModelBuildRequest {
+                        model_id: reload.model_reference.clone(),
+                        model_dir: &reload.model_dir,
+                        max_cache_cap_override: reload.max_cache_cap_override,
+                        sampling_defaults_override: reload.sampling_defaults_override,
+                        mtp: reload.mtp.clone(),
+                        prompt_lookup: reload.prompt_lookup,
+                        pinned: reload.pinned,
+                    },
                 );
                 match load {
                     Ok(load) => {
@@ -427,6 +441,7 @@ struct PendingModelReload {
     max_cache_cap_override: Option<usize>,
     sampling_defaults_override: SamplingDefaults,
     mtp: Option<super::engine::EngineMtpSettings>,
+    prompt_lookup: Option<PromptLookupConfig>,
     pinned: bool,
     set_default: bool,
 }
@@ -442,6 +457,7 @@ struct ParsedLoadModelRequest {
     max_cache_cap_override: Option<usize>,
     sampling_defaults: SamplingDefaults,
     mtp: Option<super::engine::EngineMtpSettings>,
+    prompt_lookup: Option<PromptLookupConfig>,
     pinned: bool,
     set_default: bool,
     reload_when_idle: bool,
@@ -494,12 +510,24 @@ impl ParsedLoadModelRequest {
             }
             (None, None) => None,
         };
+        let prompt_lookup = request
+            .prompt_lookup
+            .map(PromptLookupConfig::validate)
+            .transpose()
+            .map_err(AdminError::from_load_error)?;
+        if mtp.is_some() && prompt_lookup.is_some() {
+            return Err(AdminError::bad_request_with_code(
+                "PromptLookup is mutually exclusive with neural MTP/drafter.",
+                None,
+            ));
+        }
         Ok(Self {
             model_reference,
             model_dir,
             max_cache_cap_override,
             sampling_defaults: request.sampling_defaults,
             mtp,
+            prompt_lookup,
             pinned: request.pinned.unwrap_or(false),
             set_default: request.set_default.unwrap_or(false),
             reload_when_idle: request.reload_when_idle.unwrap_or(false),
@@ -530,21 +558,39 @@ fn engine_runtime_config(args: &ServeArgs) -> Result<EnginePoolRuntimeConfig> {
     })
 }
 
-fn build_engine_model_config(
-    args: &ServeArgs,
+struct EngineModelBuildRequest<'a> {
     model_id: String,
-    model_dir: &Path,
+    model_dir: &'a Path,
     max_cache_cap_override: Option<usize>,
     sampling_defaults_override: SamplingDefaults,
     mtp: Option<super::engine::EngineMtpSettings>,
+    prompt_lookup: Option<PromptLookupConfig>,
     pinned: bool,
+}
+
+fn build_engine_model_config(
+    args: &ServeArgs,
+    request: EngineModelBuildRequest<'_>,
 ) -> Result<EngineModelLoad> {
+    let EngineModelBuildRequest {
+        model_id,
+        model_dir,
+        max_cache_cap_override,
+        sampling_defaults_override,
+        mtp,
+        prompt_lookup,
+        pinned,
+    } = request;
+    if mtp.is_some() && prompt_lookup.is_some() {
+        anyhow::bail!("PromptLookup is mutually exclusive with neural MTP/drafter");
+    }
     let mut resolved = apply_load_request_scheduler_overrides(
-        resolve_scheduler_for_model_with_mtp(
+        resolve_scheduler_for_model_with_speculative(
             args,
             model_dir,
             mtp.as_ref().map(|settings| settings.model_dir.as_path()),
             mtp.as_ref().and_then(|settings| settings.draft_tokens),
+            prompt_lookup,
             max_cache_cap_override,
         )?,
         max_cache_cap_override,
@@ -592,6 +638,7 @@ fn build_engine_model_config(
             pinned,
             scheduler_runtime_profile: resolved.scheduler_runtime_profile,
             mtp,
+            prompt_lookup,
             sampling_defaults,
         },
         warning,
@@ -1090,6 +1137,7 @@ struct LoadModelRequest {
     pinned: Option<bool>,
     mtp_model_dir: Option<String>,
     mtp_draft_tokens: Option<usize>,
+    prompt_lookup: Option<PromptLookupConfig>,
     reload_when_idle: Option<bool>,
     #[serde(flatten)]
     sampling_defaults: SamplingDefaults,
@@ -1232,6 +1280,9 @@ struct LoadedModelInfo {
     mtp_model_dir: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     mtp_draft_tokens: Option<usize>,
+    prompt_lookup_enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_lookup: Option<PromptLookupConfig>,
 }
 
 impl From<EngineLoadedModelInfo> for LoadedModelInfo {
@@ -1247,6 +1298,8 @@ impl From<EngineLoadedModelInfo> for LoadedModelInfo {
             mtp_enabled: info.mtp_model_dir.is_some(),
             mtp_model_dir: info.mtp_model_dir,
             mtp_draft_tokens: info.mtp_draft_tokens,
+            prompt_lookup_enabled: info.prompt_lookup.is_some(),
+            prompt_lookup: info.prompt_lookup,
         }
     }
 }
@@ -1486,6 +1539,7 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
     let mut mtp_decode_cache_commit_us = 0;
     let mut mtp_cache_restore_us = 0;
     let mut active_kv_snapshots = Vec::new();
+    let mut prompt_lookup_snapshots = Vec::new();
     let mut immutable_prefix_blocks =
         crate::core::server::scheduler_actor::ImmutablePrefixBlockHealth::default();
 
@@ -1582,6 +1636,7 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
             .ssd_load_pressure_skips;
         immutable_prefix_blocks.dedup_saved_bytes +=
             snapshot.memory.immutable_prefix_blocks.dedup_saved_bytes;
+        prompt_lookup_snapshots.push(snapshot.prompt_lookup);
         active_kv_snapshots.push(snapshot.active_kv_offload);
     }
 
@@ -1679,6 +1734,7 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
             decode_cache_commit_us: mtp_decode_cache_commit_us,
             cache_restore_us: mtp_cache_restore_us,
         },
+        prompt_lookup: PromptLookupHealthInfo::aggregate(prompt_lookup_snapshots),
         active_kv_offload,
         device_name: mlx_memory.device_name,
         version: env!("CARGO_PKG_VERSION"),
@@ -1739,6 +1795,33 @@ mod tests {
     }
 
     #[test]
+    fn load_model_request_accepts_prompt_lookup_settings() {
+        let request: LoadModelRequest = serde_json::from_value(serde_json::json!({
+            "model": "mlx-community/Qwen3.5-4B-MLX-4bit",
+            "model_dir": "/models/qwen",
+            "prompt_lookup": {
+                "min_ngram": 2,
+                "max_ngram": 5,
+                "max_draft_tokens": 3,
+                "history_window_tokens": 4096,
+                "max_index_entries": 8192
+            }
+        }))
+        .expect("load request");
+
+        assert_eq!(
+            request.prompt_lookup,
+            Some(PromptLookupConfig {
+                min_ngram: 2,
+                max_ngram: 5,
+                max_draft_tokens: 3,
+                history_window_tokens: 4096,
+                max_index_entries: 8192,
+            })
+        );
+    }
+
+    #[test]
     fn app_dynamic_gemma4_drafter_default_scheduler_uses_bmax_four() {
         let root = unique_temp_dir("app-gemma4-drafter-default-bmax");
         let base = root.join("base");
@@ -1752,15 +1835,18 @@ mod tests {
 
         let load = build_engine_model_config(
             &args,
-            "gemma4-test".to_string(),
-            &base,
-            None,
-            SamplingDefaults::default(),
-            Some(crate::core::server::engine::EngineMtpSettings {
-                model_dir: mtp,
-                draft_tokens: Some(2),
-            }),
-            false,
+            EngineModelBuildRequest {
+                model_id: "gemma4-test".to_string(),
+                model_dir: &base,
+                max_cache_cap_override: None,
+                sampling_defaults_override: SamplingDefaults::default(),
+                mtp: Some(crate::core::server::engine::EngineMtpSettings {
+                    model_dir: mtp,
+                    draft_tokens: Some(2),
+                }),
+                prompt_lookup: None,
+                pinned: false,
+            },
         )
         .expect("build app dynamic model config");
 
@@ -1828,6 +1914,7 @@ mod tests {
                 decode_cache_commit_us: 24,
                 cache_restore_us: 43,
             },
+            prompt_lookup: PromptLookupHealthInfo::default(),
             active_kv_offload: crate::core::cache::ActiveKvOffloadHealth::disabled(),
             device_name: None,
             version: "test",
@@ -2091,6 +2178,12 @@ mod tests {
             scheduler_autotune_report: false,
             mtp_model_dir: None,
             mtp_draft_tokens: None,
+            prompt_lookup: false,
+            prompt_lookup_min_ngram: None,
+            prompt_lookup_max_ngram: None,
+            prompt_lookup_max_draft_tokens: None,
+            prompt_lookup_history_window_tokens: None,
+            prompt_lookup_max_index_entries: None,
             kv_quant: crate::cli::KvQuantArg::None,
             paged_prefix_cache_dir: None,
             paged_prefix_cache_block_size:

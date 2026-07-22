@@ -8,6 +8,7 @@ pub mod memory_budget;
 pub mod model;
 pub mod mtp_draft_cap_calibration;
 pub mod process_memory;
+pub mod prompt_lookup;
 pub mod sampler;
 pub mod scheduler;
 pub mod scheduler_autotune;

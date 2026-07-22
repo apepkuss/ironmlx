@@ -330,6 +330,17 @@ impl crate::core::model::Model for MiniCpmV46Model {
         )
     }
 
+    fn project_hidden_on(
+        &self,
+        hidden: &mlx::Array,
+        target: mlx::StreamOrDevice,
+    ) -> crate::Result<mlx::Array> {
+        match &self.lm_head {
+            Some(head) => head.forward_on(hidden, target),
+            None => self.text.as_output_on(hidden, target),
+        }
+    }
+
     fn model_meta(&self) -> crate::core::memory_budget::ModelMeta {
         let cfg = self.config();
         // MiniCPM-V-4.6 uses a 4× spatial downsample product: 2×2 VitMerger ×

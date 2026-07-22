@@ -676,6 +676,10 @@ impl Model for Gemma4Model {
         )
     }
 
+    fn project_hidden_on(&self, hidden: &Array, target: StreamOrDevice) -> Result<Array> {
+        Gemma4Model::project_hidden_on(self, hidden, target)
+    }
+
     fn requires_position_ids(&self) -> bool {
         false
     }

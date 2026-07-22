@@ -702,6 +702,10 @@ impl Model for Qwen35MoeModel {
         )
     }
 
+    fn project_hidden_on(&self, hidden: &Array, target: StreamOrDevice) -> Result<Array> {
+        Qwen35MoeModel::project_hidden_on(self, hidden, target)
+    }
+
     fn model_meta(&self) -> ModelMeta {
         Qwen35MoeModel::model_meta(self)
     }

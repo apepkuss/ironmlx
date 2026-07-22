@@ -32,6 +32,7 @@ use crate::core::cache::{
 };
 use crate::core::generate::GenerateRequest;
 use crate::core::model::Model;
+use crate::core::prompt_lookup::{PromptLookupConfig, PromptLookupStats};
 use crate::core::scheduler::{
     ActiveKvParkedRequest, AdmitMidHandle, DenseVlMethods, Gemma4DrafterAdmitMidHandle,
     ImmutablePrefixBlockStats, MtpAdmitMidHandle, Phase, RequestId, Scheduler, StepEvent,
@@ -415,6 +416,7 @@ struct SchedulerActorMtpCounters {
     mtp_decode_cache_commit_us: Arc<AtomicU64>,
     mtp_cache_restore_us: Arc<AtomicU64>,
     published_stats: Arc<StdMutex<Option<MtpSpeculativeStats>>>,
+    prompt_lookup_published_stats: Arc<StdMutex<Option<PromptLookupStats>>>,
 }
 
 impl SchedulerActorMtpCounters {
@@ -439,6 +441,7 @@ impl SchedulerActorMtpCounters {
         mtp_prefill_cache_commit_us: Arc<AtomicU64>,
         mtp_decode_cache_commit_us: Arc<AtomicU64>,
         mtp_cache_restore_us: Arc<AtomicU64>,
+        prompt_lookup_published_stats: Arc<StdMutex<Option<PromptLookupStats>>>,
     ) -> Self {
         Self {
             mtp_prefill_count,
@@ -461,6 +464,7 @@ impl SchedulerActorMtpCounters {
             mtp_decode_cache_commit_us,
             mtp_cache_restore_us,
             published_stats: Arc::new(StdMutex::new(None)),
+            prompt_lookup_published_stats,
         }
     }
 
@@ -523,6 +527,13 @@ impl SchedulerActorMtpCounters {
             .fetch_add(stats.mtp_decode_cache_commit_us, Ordering::Relaxed);
         self.mtp_cache_restore_us
             .fetch_add(stats.mtp_cache_restore_us, Ordering::Relaxed);
+    }
+
+    fn store_prompt_lookup_stats(&self, stats: Option<PromptLookupStats>) {
+        *self
+            .prompt_lookup_published_stats
+            .lock()
+            .expect("PromptLookup published stats mutex poisoned") = stats;
     }
 }
 
@@ -587,6 +598,10 @@ where
 
 struct SchedulerActorNoMtp;
 
+struct SchedulerActorPromptLookup {
+    cfg: PromptLookupConfig,
+}
+
 struct SchedulerActorMtp<H> {
     mtp: H,
     cfg: MtpSpeculativeConfig,
@@ -616,6 +631,14 @@ impl<H> SchedulerActorMtp<H> {
                 max_draft_tokens: mtp_draft_tokens,
             },
         }
+    }
+}
+
+impl SchedulerActorPromptLookup {
+    fn new(cfg: PromptLookupConfig) -> Result<Self> {
+        Ok(Self {
+            cfg: cfg.validate()?,
+        })
     }
 }
 
@@ -708,6 +731,94 @@ where
         _counters: &SchedulerActorMtpCounters,
     ) -> Result<(RequestId, StepEvent)> {
         sched.admit_mid_finalize(handle, model)
+    }
+}
+
+impl<M> SchedulerActorMtpMode<M> for SchedulerActorPromptLookup
+where
+    M: Model + DenseVlMethods,
+{
+    type MidAdmitHandle = AdmitMidHandle;
+
+    fn mid_admit_request_id(handle: &Self::MidAdmitHandle) -> RequestId {
+        handle.request_id
+    }
+
+    fn mid_admit_chunk_start(handle: &Self::MidAdmitHandle) -> i32 {
+        handle.chunk_start
+    }
+
+    fn mid_admit_prompt_len(handle: &Self::MidAdmitHandle) -> i32 {
+        handle.prompt_len
+    }
+
+    fn mid_admit_chunk_size(handle: &Self::MidAdmitHandle) -> i32 {
+        handle.chunk_size
+    }
+
+    fn set_mid_admit_chunk_size(handle: &mut Self::MidAdmitHandle, chunk_size: i32) {
+        handle.chunk_size = chunk_size;
+    }
+
+    fn mid_admit_decode_cadence_mid_chunk_cap(handle: &Self::MidAdmitHandle) -> usize {
+        handle.decode_cadence_mid_chunk_cap
+    }
+
+    fn prefill_admitted(
+        &mut self,
+        sched: &mut Scheduler<M>,
+        model: &M,
+        counters: &SchedulerActorMtpCounters,
+    ) -> Result<Vec<StepEvent>> {
+        let events = sched.prefill_admitted_prompt_lookup(model, self.cfg)?;
+        counters.store_prompt_lookup_stats(sched.prompt_lookup_stats());
+        Ok(events)
+    }
+
+    fn step(
+        &mut self,
+        sched: &mut Scheduler<M>,
+        model: &M,
+        counters: &SchedulerActorMtpCounters,
+    ) -> Result<Vec<StepEvent>> {
+        let events = sched.step_prompt_lookup(model)?;
+        counters.store_prompt_lookup_stats(sched.prompt_lookup_stats());
+        Ok(events)
+    }
+
+    fn begin_mid_admit(
+        &mut self,
+        sched: &mut Scheduler<M>,
+        model: &M,
+        request: GenerateRequest,
+    ) -> Result<Self::MidAdmitHandle> {
+        anyhow::ensure!(
+            request.sampler.is_pipelinable(),
+            "prompt lookup requires greedy sampling"
+        );
+        sched.admit_mid_begin(request, model)
+    }
+
+    fn advance_mid_admit_chunk(
+        &mut self,
+        sched: &mut Scheduler<M>,
+        model: &M,
+        handle: &mut Self::MidAdmitHandle,
+    ) -> Result<bool> {
+        sched.admit_mid_chunk(handle, model)
+    }
+
+    fn finalize_mid_admit(
+        &mut self,
+        sched: &mut Scheduler<M>,
+        model: &M,
+        handle: Self::MidAdmitHandle,
+        counters: &SchedulerActorMtpCounters,
+    ) -> Result<(RequestId, StepEvent)> {
+        let result = sched.admit_mid_finalize(handle, model)?;
+        sched.register_prompt_lookup_request(result.0, self.cfg)?;
+        counters.store_prompt_lookup_stats(sched.prompt_lookup_stats());
+        Ok(result)
     }
 }
 
@@ -1117,6 +1228,7 @@ pub struct SchedulerActorHandle {
     /// Latest cumulative microseconds spent restoring temporary MTP KV.
     #[doc(hidden)]
     pub mtp_cache_restore_us: Arc<AtomicU64>,
+    pub(crate) prompt_lookup_published_stats: Arc<StdMutex<Option<PromptLookupStats>>>,
     // ── B1-p2.5 G3: /healthz monitoring atomics ──────────────────────────
     /// Live count of in-flight (active) requests in the scheduler slots.
     /// Updated by driver_loop tail on every rolling iteration.
@@ -1149,6 +1261,13 @@ pub struct SchedulerActorHandle {
 }
 
 impl SchedulerActorHandle {
+    pub fn prompt_lookup_stats(&self) -> Option<PromptLookupStats> {
+        *self
+            .prompt_lookup_published_stats
+            .lock()
+            .expect("PromptLookup published stats mutex poisoned")
+    }
+
     pub(crate) fn install_cold_materialization_tracker(
         &self,
         tracker: Arc<crate::core::process_memory::ColdMaterializationTracker>,
@@ -1332,6 +1451,40 @@ where
         AdaptiveAdmissionPolicy::qwen_mtp(),
         ActiveKvOffloadConfig::disabled(),
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_scheduler_actor_with_prompt_lookup<M>(
+    model: Arc<Mutex<M>>,
+    cfg: PromptLookupConfig,
+    b_max: usize,
+    admission_deadline: Duration,
+    admission_queue_max: usize,
+    effective_cap_max: usize,
+    decode_cadence_mid_chunk_cap: usize,
+    meta: crate::core::memory_budget::ModelMeta,
+    paged_prefix_cache: Option<PagedPrefixCacheConfig>,
+    prefix_lru_cache: Option<PrefixLruCacheConfig>,
+    active_kv_offload: ActiveKvOffloadConfig,
+) -> Result<SchedulerActorHandle>
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    let mode = SchedulerActorPromptLookup::new(cfg)?;
+    Ok(spawn_scheduler_actor_with_mode(
+        model,
+        mode,
+        b_max,
+        admission_deadline,
+        admission_queue_max,
+        effective_cap_max,
+        decode_cadence_mid_chunk_cap,
+        meta,
+        paged_prefix_cache,
+        prefix_lru_cache,
+        AdaptiveAdmissionPolicy::qwen_mtp(),
+        active_kv_offload,
+    )?)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1550,6 +1703,7 @@ where
     let mtp_prefill_cache_commit_us = Arc::new(AtomicU64::new(0));
     let mtp_decode_cache_commit_us = Arc::new(AtomicU64::new(0));
     let mtp_cache_restore_us = Arc::new(AtomicU64::new(0));
+    let prompt_lookup_published_stats = Arc::new(StdMutex::new(None));
     // B1-p2.5 G3: live b_active / b_queued updated by driver_loop tail.
     let b_active = Arc::new(AtomicU64::new(0));
     let b_queued = Arc::new(AtomicU64::new(0));
@@ -1584,6 +1738,7 @@ where
         mtp_prefill_cache_commit_us.clone(),
         mtp_decode_cache_commit_us.clone(),
         mtp_cache_restore_us.clone(),
+        prompt_lookup_published_stats.clone(),
     );
     let b_active_for_task = b_active.clone();
     let b_queued_for_task = b_queued.clone();
@@ -1675,6 +1830,7 @@ where
         mtp_prefill_cache_commit_us,
         mtp_decode_cache_commit_us,
         mtp_cache_restore_us,
+        prompt_lookup_published_stats,
         b_active,
         b_queued,
         // P1.1: alias admission_queue_full_count to queue_rejected Arc —
@@ -3634,6 +3790,16 @@ mod tests {
                 .map_err(|e| anyhow::anyhow!("fake hidden Array failed: {e:?}"))
         }
 
+        fn project_hidden_on(
+            &self,
+            hidden: &mlx::Array,
+            _target: mlx::StreamOrDevice,
+        ) -> Result<mlx::Array> {
+            let seq = hidden.shape().as_slice()[1] as usize;
+            let tokens: Vec<u32> = if seq == 1 { vec![3] } else { vec![4; seq] };
+            fake_logits_for_tokens(&tokens)
+        }
+
         fn fresh_prefill_batch_limit(_prompt_len: usize, b_max: usize) -> usize
         where
             Self: Sized,
@@ -3746,16 +3912,6 @@ mod tests {
             dtype: mlx::Dtype,
         ) -> Result<MtpCache> {
             MtpCache::new_with_cap(1, batch, 1, 1, 1, dtype, cap)
-        }
-
-        fn project_hidden_on(
-            &self,
-            hidden: &mlx::Array,
-            _target: impl Into<mlx::StreamOrDevice>,
-        ) -> Result<mlx::Array> {
-            let seq = hidden.shape().as_slice()[1] as usize;
-            let tokens: Vec<u32> = if seq == 1 { vec![3] } else { vec![4; seq] };
-            fake_logits_for_tokens(&tokens)
         }
 
         fn mtp_hidden_size(&self, _mtp: &Self::MtpHead) -> i32 {
@@ -3898,6 +4054,7 @@ mod tests {
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
+            Arc::new(StdMutex::new(None)),
         )
     }
 
