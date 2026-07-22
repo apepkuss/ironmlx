@@ -29,9 +29,9 @@ pub use prefix_store::{
     AsyncPrefixStoreCancellation, AsyncPrefixStorePermit, AsyncPrefixStoreQueue,
     AsyncPrefixStoreStats, AsyncPrefixStoreSubmit, PagedPrefixCacheConfig, PagedPrefixEntry,
     PagedPrefixEntryStats, PagedPrefixKeySpec, PagedPrefixLayer, PagedPrefixLoadStatus,
-    PagedPrefixStore, PrefixLayerKind, PrefixLayerPayload, PrefixLayerSpec, PrefixLruCache,
-    PrefixLruCacheConfig, PrefixLruInsertResult, PrefixLruInsertStatus, PrefixMtpLayerPayload,
-    PrefixMtpLayerSpec, PrefixTensorSpec, SharedPrefixLruCache,
+    PagedPrefixStore, PrefixEntryKind, PrefixLayerKind, PrefixLayerPayload, PrefixLayerSpec,
+    PrefixLruCache, PrefixLruCacheConfig, PrefixLruInsertResult, PrefixLruInsertStatus,
+    PrefixMtpLayerPayload, PrefixMtpLayerSpec, PrefixTensorSpec, SharedPrefixLruCache,
     DEFAULT_PAGED_PREFIX_CACHE_BLOCK_SIZE,
 };
 pub use turboquant_kv::{TurboQuantKVBits, TurboQuantKVCache, TurboQuantPrefixLayer};

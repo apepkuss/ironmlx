@@ -1560,6 +1560,26 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
             snapshot.memory.immutable_prefix_blocks.evicted_blocks;
         immutable_prefix_blocks.blocked_evictions +=
             snapshot.memory.immutable_prefix_blocks.blocked_evictions;
+        immutable_prefix_blocks.pressure_evicted_blocks += snapshot
+            .memory
+            .immutable_prefix_blocks
+            .pressure_evicted_blocks;
+        immutable_prefix_blocks.ssd_block_hits +=
+            snapshot.memory.immutable_prefix_blocks.ssd_block_hits;
+        immutable_prefix_blocks.ssd_blocks_loaded +=
+            snapshot.memory.immutable_prefix_blocks.ssd_blocks_loaded;
+        immutable_prefix_blocks.ssd_blocks_queued +=
+            snapshot.memory.immutable_prefix_blocks.ssd_blocks_queued;
+        immutable_prefix_blocks.ssd_blocks_pending +=
+            snapshot.memory.immutable_prefix_blocks.ssd_blocks_pending;
+        immutable_prefix_blocks.ssd_store_backpressure += snapshot
+            .memory
+            .immutable_prefix_blocks
+            .ssd_store_backpressure;
+        immutable_prefix_blocks.ssd_load_pressure_skips += snapshot
+            .memory
+            .immutable_prefix_blocks
+            .ssd_load_pressure_skips;
         immutable_prefix_blocks.dedup_saved_bytes +=
             snapshot.memory.immutable_prefix_blocks.dedup_saved_bytes;
         active_kv_snapshots.push(snapshot.active_kv_offload);

@@ -391,6 +391,40 @@ impl KVCache {
         Ok(true)
     }
 
+    pub fn paged_immutable_block_prefix_on(
+        &self,
+        pin: PagedKvBlockOwner,
+        handle: PagedKvImmutableBlockHandle,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Option<PagedPrefixLayer>> {
+        let Some(paged) = self.paged.as_ref() else {
+            return Ok(None);
+        };
+        let (k_pages, v_pages) = paged.immutable_block_prefix_on(pin, handle, target)?;
+        Ok(Some(PagedPrefixLayer { k_pages, v_pages }))
+    }
+
+    pub fn install_paged_immutable_block_from_prefix_on(
+        &mut self,
+        pin: PagedKvBlockOwner,
+        block_index: i32,
+        layer: &PagedPrefixLayer,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Option<PagedKvImmutableBlockHandle>> {
+        let Some(paged) = self.paged.as_mut() else {
+            return Ok(None);
+        };
+        paged
+            .install_immutable_block_from_prefix_on(
+                pin,
+                block_index,
+                &layer.k_pages,
+                &layer.v_pages,
+                target,
+            )
+            .map(Some)
+    }
+
     pub fn paged_available_unique_pages(&self) -> Option<usize> {
         self.paged
             .as_ref()

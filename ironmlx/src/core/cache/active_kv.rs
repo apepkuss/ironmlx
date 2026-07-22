@@ -295,6 +295,7 @@ impl ActiveKvOffloadStore {
             .collect::<Result<Vec<_>>>()?;
         let block_size = infer_block_size(entry).unwrap_or(1);
         let spec = PagedPrefixKeySpec {
+            entry_kind: super::PrefixEntryKind::WholePrefix,
             model_id: format!("active-kv-request-{request_id}"),
             token_ids,
             cached_len,

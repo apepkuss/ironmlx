@@ -56,6 +56,13 @@ pub struct ImmutablePrefixBlockHealth {
     pub lookup_misses: u64,
     pub evicted_blocks: u64,
     pub blocked_evictions: u64,
+    pub pressure_evicted_blocks: u64,
+    pub ssd_block_hits: u64,
+    pub ssd_blocks_loaded: u64,
+    pub ssd_blocks_queued: u64,
+    pub ssd_blocks_pending: u64,
+    pub ssd_store_backpressure: u64,
+    pub ssd_load_pressure_skips: u64,
     pub dedup_saved_bytes: u64,
 }
 
@@ -70,6 +77,13 @@ pub struct ImmutablePrefixBlockSharedStats {
     lookup_misses: Arc<AtomicU64>,
     evicted_blocks: Arc<AtomicU64>,
     blocked_evictions: Arc<AtomicU64>,
+    pressure_evicted_blocks: Arc<AtomicU64>,
+    ssd_block_hits: Arc<AtomicU64>,
+    ssd_blocks_loaded: Arc<AtomicU64>,
+    ssd_blocks_queued: Arc<AtomicU64>,
+    ssd_blocks_pending: Arc<AtomicU64>,
+    ssd_store_backpressure: Arc<AtomicU64>,
+    ssd_load_pressure_skips: Arc<AtomicU64>,
     dedup_saved_bytes: Arc<AtomicU64>,
 }
 
@@ -85,6 +99,13 @@ impl ImmutablePrefixBlockSharedStats {
             lookup_misses: Arc::new(AtomicU64::new(0)),
             evicted_blocks: Arc::new(AtomicU64::new(0)),
             blocked_evictions: Arc::new(AtomicU64::new(0)),
+            pressure_evicted_blocks: Arc::new(AtomicU64::new(0)),
+            ssd_block_hits: Arc::new(AtomicU64::new(0)),
+            ssd_blocks_loaded: Arc::new(AtomicU64::new(0)),
+            ssd_blocks_queued: Arc::new(AtomicU64::new(0)),
+            ssd_blocks_pending: Arc::new(AtomicU64::new(0)),
+            ssd_store_backpressure: Arc::new(AtomicU64::new(0)),
+            ssd_load_pressure_skips: Arc::new(AtomicU64::new(0)),
             dedup_saved_bytes: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -105,6 +126,20 @@ impl ImmutablePrefixBlockSharedStats {
             .store(stats.evicted_blocks, Ordering::Relaxed);
         self.blocked_evictions
             .store(stats.blocked_evictions, Ordering::Relaxed);
+        self.pressure_evicted_blocks
+            .store(stats.pressure_evicted_blocks, Ordering::Relaxed);
+        self.ssd_block_hits
+            .store(stats.ssd_block_hits, Ordering::Relaxed);
+        self.ssd_blocks_loaded
+            .store(stats.ssd_blocks_loaded, Ordering::Relaxed);
+        self.ssd_blocks_queued
+            .store(stats.ssd_blocks_queued, Ordering::Relaxed);
+        self.ssd_blocks_pending
+            .store(stats.ssd_blocks_pending, Ordering::Relaxed);
+        self.ssd_store_backpressure
+            .store(stats.ssd_store_backpressure, Ordering::Relaxed);
+        self.ssd_load_pressure_skips
+            .store(stats.ssd_load_pressure_skips, Ordering::Relaxed);
         self.dedup_saved_bytes
             .store(stats.dedup_saved_bytes, Ordering::Relaxed);
     }
@@ -120,6 +155,13 @@ impl ImmutablePrefixBlockSharedStats {
             lookup_misses: self.lookup_misses.load(Ordering::Relaxed),
             evicted_blocks: self.evicted_blocks.load(Ordering::Relaxed),
             blocked_evictions: self.blocked_evictions.load(Ordering::Relaxed),
+            pressure_evicted_blocks: self.pressure_evicted_blocks.load(Ordering::Relaxed),
+            ssd_block_hits: self.ssd_block_hits.load(Ordering::Relaxed),
+            ssd_blocks_loaded: self.ssd_blocks_loaded.load(Ordering::Relaxed),
+            ssd_blocks_queued: self.ssd_blocks_queued.load(Ordering::Relaxed),
+            ssd_blocks_pending: self.ssd_blocks_pending.load(Ordering::Relaxed),
+            ssd_store_backpressure: self.ssd_store_backpressure.load(Ordering::Relaxed),
+            ssd_load_pressure_skips: self.ssd_load_pressure_skips.load(Ordering::Relaxed),
             dedup_saved_bytes: self.dedup_saved_bytes.load(Ordering::Relaxed),
         }
     }
@@ -1715,15 +1757,42 @@ fn driver_loop<M, A>(
         // Outer Idle is reached only after evict_all clears all slots; the
         // admission queue is invariantly empty here (any queue elements were
         // drained inside the rolling loop before reaching this point).
-        let Some(first_cmd) = rt.block_on(cmd_rx.recv()) else {
-            cleanup_parked_active_kv_requests(
-                &sched,
-                &mut parked_active_kv,
-                &mut event_txs,
-                &active_kv_stats,
-                "scheduler command channel closed",
-            );
-            return; // cmd_rx closed; all senders dropped.
+        let first_cmd = loop {
+            match rt.block_on(tokio::time::timeout(
+                Duration::from_millis(250),
+                cmd_rx.recv(),
+            )) {
+                Ok(Some(cmd)) => break cmd,
+                Ok(None) => {
+                    cleanup_parked_active_kv_requests(
+                        &sched,
+                        &mut parked_active_kv,
+                        &mut event_txs,
+                        &active_kv_stats,
+                        "scheduler command channel closed",
+                    );
+                    return;
+                }
+                Err(_) => {
+                    match sched.apply_process_memory_pressure() {
+                        Ok(reclaim)
+                            if reclaim.level
+                                == crate::core::process_memory::PressureLevel::Normal =>
+                        {
+                            if let Err(error) =
+                                sched.retry_pending_immutable_prefix_stores(usize::MAX)
+                            {
+                                tracing::warn!(%error, "idle immutable block SSD retry failed");
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            tracing::warn!(%error, "idle scheduler memory-pressure reclaim failed");
+                        }
+                    }
+                    immutable_prefix_stats.store(sched.request_owned_kv_stats().immutable_prefix);
+                }
+            }
         };
         let fresh_batch_limit =
             fresh_prefill_batch_limit_for_command::<M>(&first_cmd, b_max, adaptive_policy);
@@ -1857,8 +1926,20 @@ fn driver_loop<M, A>(
             // already blocked in the outer idle receive.
             b_active.store(sched.active_count() as u64, Ordering::Relaxed);
             b_queued.store(admission_queue.len() as u64, Ordering::Relaxed);
-            if let Err(error) = sched.apply_process_memory_pressure() {
-                tracing::warn!(%error, "scheduler memory-pressure reclaim failed");
+            match sched.apply_process_memory_pressure() {
+                Ok(reclaim) if reclaim.should_park_request && in_flight_mid_admit.is_none() => {
+                    let _ = try_park_one_active_kv_request(
+                        &mut sched,
+                        &model,
+                        &mut parked_active_kv,
+                        &active_kv_stats,
+                    );
+                    b_active.store(sched.active_count() as u64, Ordering::Relaxed);
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "scheduler memory-pressure reclaim failed");
+                }
             }
             // Pre-event Finished-batch finalization + handoff. If
             // previous iteration's prefill_admitted/step left phase=Finished
@@ -3005,6 +3086,11 @@ where
     if !sched.active_kv_offload_enabled() || sched.active_count() >= sched.b_max() {
         return false;
     }
+    if sched.memory_governor_snapshot().is_some_and(|snapshot| {
+        snapshot.pressure_level != crate::core::process_memory::PressureLevel::Normal
+    }) {
+        return false;
+    }
 
     while sched.active_count() < sched.b_max() {
         let Some(parked) = parked_active_kv.pop_front() else {
@@ -3199,6 +3285,15 @@ where
         }
     }
 
+    if try_restore_one_active_kv_request(sched, model, parked_active_kv, event_txs, active_kv_stats)
+    {
+        return RollingControl::ContinueRolling;
+    }
+    if !parked_active_kv.is_empty() {
+        std::thread::sleep(Duration::from_millis(10));
+        return RollingControl::ContinueRolling;
+    }
+
     if !admission_queue.is_empty() {
         // Reset Decoding-with-zero-active-rows to Idle for fresh batch.
         // (Finished was already handled by finalize above; Idle would
@@ -3333,10 +3428,6 @@ where
         return RollingControl::ContinueRolling;
     }
 
-    if try_restore_one_active_kv_request(sched, model, parked_active_kv, event_txs, active_kv_stats)
-    {
-        return RollingControl::ContinueRolling;
-    }
     // Queue empty + no active rows — same logic as pre-3d.
     match cmd_rx.try_recv() {
         Ok(cmd) => {
@@ -3971,6 +4062,121 @@ mod tests {
         let health = handle.active_kv_offload.snapshot();
         assert!(health.swap_out_count >= 1, "expected at least one swap out");
         assert!(health.swap_in_count >= 1, "expected at least one swap in");
+        assert_eq!(health.swap_error_count, 0);
+        assert_eq!(health.parked_requests, 0);
+
+        drop(handle);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn actor_restores_parked_request_before_admitting_next_queued_request() {
+        let root = unique_temp_dir("actor-active-kv-fairness");
+        let _delay_guard = FakeForwardDelayGuard::set(25);
+        let model = Arc::new(Mutex::new(SchedulerActorFakeModel));
+        let handle = spawn_scheduler_actor_with_active_kv_offload(
+            model,
+            1,
+            Duration::from_millis(1),
+            4,
+            32,
+            256,
+            crate::core::memory_budget::test_meta_qwen35(),
+            ActiveKvOffloadConfig::enabled(root.clone()),
+        )
+        .expect("spawn actor with active kv offload");
+
+        let (reply_tx_1, reply_rx_1) = oneshot::channel();
+        let mut request_1 = mk_req(11);
+        request_1.max_new_tokens = 4;
+        handle
+            .cmd_tx
+            .send(SchedulerCommand::Admit {
+                request: request_1,
+                reply_tx: reply_tx_1,
+            })
+            .await
+            .expect("send first request");
+        let mut events_1 = reply_rx_1
+            .await
+            .expect("first reply")
+            .expect("first admit")
+            .event_rx;
+        let first_event = tokio::time::timeout(Duration::from_secs(2), events_1.recv())
+            .await
+            .expect("first event timeout")
+            .expect("first event");
+        assert_eq!(first_event.finish_reason, None);
+
+        let (reply_tx_2, reply_rx_2) = oneshot::channel();
+        let mut request_2 = mk_req(22);
+        request_2.max_new_tokens = 4;
+        handle
+            .cmd_tx
+            .send(SchedulerCommand::Admit {
+                request: request_2,
+                reply_tx: reply_tx_2,
+            })
+            .await
+            .expect("send second request");
+        let mut events_2 = tokio::time::timeout(Duration::from_secs(2), reply_rx_2)
+            .await
+            .expect("second reply timeout")
+            .expect("second reply")
+            .expect("second admit")
+            .event_rx;
+
+        let (reply_tx_3, reply_rx_3) = oneshot::channel();
+        let mut request_3 = mk_req(33);
+        request_3.max_new_tokens = 1;
+        handle
+            .cmd_tx
+            .send(SchedulerCommand::Admit {
+                request: request_3,
+                reply_tx: reply_tx_3,
+            })
+            .await
+            .expect("send third request");
+
+        while let Some(event) = tokio::time::timeout(Duration::from_secs(2), events_2.recv())
+            .await
+            .expect("second event timeout")
+        {
+            if event.finish_reason.is_some() {
+                break;
+            }
+        }
+
+        let mut reply_rx_3 = Box::pin(reply_rx_3);
+        loop {
+            tokio::select! {
+                biased;
+                third = &mut reply_rx_3 => {
+                    let _ = third.expect("third reply channel").expect("third admit");
+                    panic!("third queued request was admitted before the parked first request finished");
+                }
+                event = events_1.recv() => {
+                    let event = event.expect("restored first request event");
+                    if event.finish_reason.is_some() {
+                        break;
+                    }
+                }
+            }
+        }
+
+        let mut events_3 = tokio::time::timeout(Duration::from_secs(2), &mut reply_rx_3)
+            .await
+            .expect("third reply timeout")
+            .expect("third reply")
+            .expect("third admit")
+            .event_rx;
+        let third_event = tokio::time::timeout(Duration::from_secs(2), events_3.recv())
+            .await
+            .expect("third event timeout")
+            .expect("third event");
+        assert_eq!(third_event.finish_reason, Some("length"));
+
+        let health = handle.active_kv_offload.snapshot();
         assert_eq!(health.swap_error_count, 0);
         assert_eq!(health.parked_requests, 0);
 

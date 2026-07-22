@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::Result;
 
-const SCHEMA_VERSION: u32 = 6;
+const SCHEMA_VERSION: u32 = 7;
 const META_FILE: &str = "meta.json";
 const PAYLOAD_FILE: &str = "payload.safetensors";
 
@@ -26,6 +26,13 @@ pub enum PrefixLayerKind {
     FullTurboQuantPacked,
     Linear,
     Mla,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrefixEntryKind {
+    WholePrefix,
+    ImmutableBlock,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,6 +125,7 @@ impl PrefixMtpLayerSpec {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PagedPrefixKeySpec {
+    pub entry_kind: PrefixEntryKind,
     pub model_id: String,
     pub token_ids: Vec<i32>,
     pub cached_len: i32,
@@ -992,6 +1000,16 @@ impl AsyncPrefixStoreQueue {
         })
     }
 
+    fn contains_pending(&self, store: &PagedPrefixStore, spec: &PagedPrefixKeySpec) -> bool {
+        let key = PagedPrefixStore::key_for(spec);
+        let pending_key = (store.root.clone(), key);
+        self.0.pending.lock().is_ok_and(|pending| {
+            pending
+                .get(&pending_key)
+                .is_some_and(|entry| !entry.cancellation.is_cancelled() && entry.spec == *spec)
+        })
+    }
+
     fn pending_cached_lengths(&self, store: &PagedPrefixStore, max_cached_len: i32) -> Vec<i32> {
         let Ok(pending) = self.0.pending.lock() else {
             return Vec::new();
@@ -1002,6 +1020,7 @@ impl AsyncPrefixStoreQueue {
                 (root == &store.root
                     && !entry.cancellation.is_cancelled()
                     && entry.entry.is_some()
+                    && entry.spec.entry_kind == PrefixEntryKind::WholePrefix
                     && entry.spec.cached_len > 0
                     && entry.spec.cached_len <= max_cached_len)
                     .then_some(entry.spec.cached_len)
@@ -1329,6 +1348,7 @@ struct MtpLayerSpecMetadata {
 #[derive(Debug, Serialize)]
 struct KeyMaterial<'a> {
     schema_version: u32,
+    entry_kind: PrefixEntryKind,
     model_id: &'a str,
     token_ids: &'a [i32],
     cached_len: i32,
@@ -1344,6 +1364,7 @@ struct KeyMaterial<'a> {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct PrefixMetadata {
     schema_version: u32,
+    entry_kind: PrefixEntryKind,
     key: String,
     model_id: String,
     token_hash: String,
@@ -1379,6 +1400,7 @@ impl PagedPrefixStore {
     pub fn key_for(spec: &PagedPrefixKeySpec) -> String {
         let material = KeyMaterial {
             schema_version: SCHEMA_VERSION,
+            entry_kind: spec.entry_kind,
             model_id: &spec.model_id,
             token_ids: &spec.token_ids,
             cached_len: spec.cached_len,
@@ -1530,6 +1552,7 @@ impl PagedPrefixStore {
                 continue;
             };
             if metadata.schema_version == SCHEMA_VERSION
+                && metadata.entry_kind == PrefixEntryKind::WholePrefix
                 && metadata.cached_len > 0
                 && metadata.cached_len <= max_cached_len
             {
@@ -1543,6 +1566,23 @@ impl PagedPrefixStore {
 
     pub fn load(&self, spec: &PagedPrefixKeySpec) -> Result<Option<PagedPrefixEntry>> {
         Ok(self.load_observed(spec)?.entry)
+    }
+
+    pub fn contains(&self, spec: &PagedPrefixKeySpec) -> Result<bool> {
+        self.validate_spec(spec)?;
+        if PROCESS_PREFIX_STORE_QUEUE
+            .get()
+            .is_some_and(|queue| queue.contains_pending(self, spec))
+        {
+            return Ok(true);
+        }
+        self.contains_persisted(spec)
+    }
+
+    pub fn contains_persisted(&self, spec: &PagedPrefixKeySpec) -> Result<bool> {
+        self.validate_spec(spec)?;
+        let key = Self::key_for(spec);
+        self.entry_metadata_matches(spec, &key)
     }
 
     pub fn load_observed(&self, spec: &PagedPrefixKeySpec) -> Result<PagedPrefixLoadResult> {
@@ -1768,6 +1808,34 @@ impl PagedPrefixStore {
         }
         if spec.main_layers.is_empty() && spec.mtp_layers.is_empty() {
             anyhow::bail!("PagedPrefixStore: entry must contain at least one cache layer");
+        }
+        if spec.entry_kind == PrefixEntryKind::ImmutableBlock {
+            if spec.cached_len != spec.block_size {
+                anyhow::bail!(
+                    "PagedPrefixStore: immutable block cached_len {} != block_size {}",
+                    spec.cached_len,
+                    spec.block_size
+                );
+            }
+            if !spec.mtp_layers.is_empty()
+                || spec.mtp_last_hidden.is_some()
+                || spec.gemma4_drafter_last_hidden.is_some()
+                || spec
+                    .main_layers
+                    .iter()
+                    .any(|layer| layer.kind != PrefixLayerKind::FullPaged)
+            {
+                anyhow::bail!(
+                    "PagedPrefixStore: immutable blocks support FullPaged main layers only"
+                );
+            }
+            if spec.fingerprint.as_deref().is_none_or(|fingerprint| {
+                fingerprint != "immutable-root" && !fingerprint.starts_with("immutable-parent:")
+            }) {
+                anyhow::bail!(
+                    "PagedPrefixStore: immutable block requires an explicit parent fingerprint"
+                );
+            }
         }
         if spec.mtp_layers.is_empty() && spec.mtp_last_hidden.is_some() {
             anyhow::bail!("PagedPrefixStore: mtp_last_hidden cannot be present without mtp_layers");
@@ -2100,6 +2168,7 @@ fn validate_tensor_payload(name: &str, spec: &PrefixTensorSpec, tensor: &Array) 
 fn metadata_for(spec: &PagedPrefixKeySpec, key: &str) -> Result<PrefixMetadata> {
     Ok(PrefixMetadata {
         schema_version: SCHEMA_VERSION,
+        entry_kind: spec.entry_kind,
         key: key.to_owned(),
         model_id: spec.model_id.clone(),
         token_hash: token_hash(&spec.token_ids)?,
@@ -2411,6 +2480,7 @@ mod tests {
         mtp_last_hidden: Option<PrefixTensorSpec>,
     ) -> PagedPrefixKeySpec {
         PagedPrefixKeySpec {
+            entry_kind: PrefixEntryKind::WholePrefix,
             model_id: "qwen3-test".to_owned(),
             token_ids: tokens,
             cached_len,
@@ -2458,6 +2528,9 @@ mod tests {
             vec![],
             None,
         );
+        let mut immutable = shorter.clone();
+        immutable.entry_kind = PrefixEntryKind::ImmutableBlock;
+        immutable.fingerprint = Some("immutable-root".to_owned());
         assert_eq!(PagedPrefixStore::key_for(&a), PagedPrefixStore::key_for(&b));
         assert_ne!(
             PagedPrefixStore::key_for(&a),
@@ -2470,6 +2543,10 @@ mod tests {
         assert_ne!(
             PagedPrefixStore::key_for(&vl_a),
             PagedPrefixStore::key_for(&vl_b)
+        );
+        assert_ne!(
+            PagedPrefixStore::key_for(&shorter),
+            PagedPrefixStore::key_for(&immutable)
         );
     }
 
@@ -3093,8 +3170,14 @@ mod tests {
             vec![],
             None,
         );
+        let mut immutable = len2.clone();
+        immutable.entry_kind = PrefixEntryKind::ImmutableBlock;
+        immutable.fingerprint = Some("immutable-root".to_owned());
         store.save(&len2, &entry).expect("save len2");
         store.save(&len4, &entry).expect("save len4");
+        store
+            .save(&immutable, &entry)
+            .expect("save immutable block");
 
         assert_eq!(
             store.cached_lengths_descending(10).expect("cached lengths"),

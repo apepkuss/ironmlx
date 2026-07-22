@@ -109,9 +109,9 @@ use crate::core::cache::{
     AsyncPrefixStoreCancellation, AsyncPrefixStorePermit, AsyncPrefixStoreSubmit, MtpCache,
     MtpCacheSnapshot, PagedKvBlockOwner, PagedKvHotColdConfig, PagedKvImmutableBlockHandle,
     PagedKvPhysicalStats, PagedPrefixCacheConfig, PagedPrefixEntry, PagedPrefixEntryStats,
-    PagedPrefixKeySpec, PagedPrefixLoadStatus, PagedPrefixStore, PrefixLayerPayload,
-    PrefixLruCache, PrefixLruCacheConfig, PrefixLruInsertStatus, PrefixMtpLayerSpec,
-    PrefixTensorSpec, SharedPrefixLruCache, TurboQuantKVBits,
+    PagedPrefixKeySpec, PagedPrefixLayer, PagedPrefixLoadStatus, PagedPrefixStore, PrefixEntryKind,
+    PrefixLayerPayload, PrefixLruCache, PrefixLruCacheConfig, PrefixLruInsertStatus,
+    PrefixMtpLayerSpec, PrefixTensorSpec, SharedPrefixLruCache, TurboQuantKVBits,
 };
 use crate::core::generate::{
     build_batch_attention_mask, build_batch_linear_mask, build_decode_position_ids,
@@ -135,8 +135,8 @@ use crate::core::speculative::{
 };
 use crate::nn::{
     enable_paged_hot_cold_tiering_caches, enable_paged_kv_caches, enable_turboquant_kv_caches,
-    prefix_entry_for_row, prefix_key_spec_for_caches, restore_prefix_entry_for_row,
-    restore_prefix_entry_for_rows, LayerCache, LayerCacheSnapshot,
+    paged_prefix_key_spec_for_full_caches, prefix_entry_for_row, prefix_key_spec_for_caches,
+    restore_prefix_entry_for_row, restore_prefix_entry_for_rows, LayerCache, LayerCacheSnapshot,
 };
 
 /// Convenience alias — avoids `clippy::type_complexity` on Vec<Option<&[...]>> sites.
@@ -677,7 +677,22 @@ pub struct ImmutablePrefixBlockStats {
     pub lookup_misses: u64,
     pub evicted_blocks: u64,
     pub blocked_evictions: u64,
+    pub pressure_evicted_blocks: u64,
+    pub ssd_block_hits: u64,
+    pub ssd_blocks_loaded: u64,
+    pub ssd_blocks_queued: u64,
+    pub ssd_blocks_pending: u64,
+    pub ssd_store_backpressure: u64,
+    pub ssd_load_pressure_skips: u64,
     pub dedup_saved_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryPressureReclaim {
+    pub level: crate::core::process_memory::PressureLevel,
+    pub immutable_blocks_evicted: usize,
+    pub demoted_pages: usize,
+    pub should_park_request: bool,
 }
 
 #[derive(Debug)]
@@ -689,6 +704,7 @@ struct ImmutablePrefixBlockPool {
     access_clock: u64,
     lookup: HashMap<ImmutablePrefixBlockLookupKey, u64>,
     entries: HashMap<u64, ImmutablePrefixBlockEntry>,
+    pending_store_blocks: HashSet<u64>,
     stats: ImmutablePrefixBlockStats,
 }
 
@@ -705,6 +721,7 @@ impl ImmutablePrefixBlockPool {
             access_clock: 0,
             lookup: HashMap::new(),
             entries: HashMap::new(),
+            pending_store_blocks: HashSet::new(),
             stats: ImmutablePrefixBlockStats::default(),
         }
     }
@@ -719,6 +736,7 @@ impl ImmutablePrefixBlockPool {
     fn stats(&self) -> ImmutablePrefixBlockStats {
         ImmutablePrefixBlockStats {
             blocks: self.entries.len() as u64,
+            ssd_blocks_pending: self.pending_store_blocks.len() as u64,
             ..self.stats
         }
     }
@@ -2179,11 +2197,13 @@ fn immutable_prefix_chain_hash(model_id: &str, parent_hash: Option<u64>, tokens:
 fn evict_one_idle_immutable_leaf(
     pool: &mut ImmutablePrefixBlockPool,
     cache: &mut [LayerCache],
+    protected: &HashSet<u64>,
+    pressure_reclaim: bool,
 ) -> Result<bool> {
     let mut candidates = pool
         .entries
         .values()
-        .filter(|entry| entry.child_count == 0)
+        .filter(|entry| entry.child_count == 0 && !protected.contains(&entry.id))
         .map(|entry| (entry.last_access, entry.id))
         .collect::<Vec<_>>();
     candidates.sort_unstable();
@@ -2200,6 +2220,7 @@ fn evict_one_idle_immutable_leaf(
             .entries
             .remove(&id)
             .expect("immutable eviction candidate remained present");
+        pool.pending_store_blocks.remove(&id);
         pool.lookup.remove(&entry.key);
         if let Some(parent) = entry.key.parent {
             let parent = pool
@@ -2213,6 +2234,10 @@ fn evict_one_idle_immutable_leaf(
         }
         release_full_paged_cache_owner(cache, entry.bundle.pin)?;
         pool.stats.evicted_blocks = pool.stats.evicted_blocks.saturating_add(1);
+        if pressure_reclaim {
+            pool.stats.pressure_evicted_blocks =
+                pool.stats.pressure_evicted_blocks.saturating_add(1);
+        }
         return Ok(true);
     }
     pool.stats.blocked_evictions = pool.stats.blocked_evictions.saturating_add(1);
@@ -2227,11 +2252,26 @@ fn reclaim_idle_immutable_blocks_for_targets(
     let required = additional_full_paged_pages_for_targets(cache, pool.block_size, targets)?;
     while full_paged_available_unique_pages(cache).unwrap_or(0) < required {
         anyhow::ensure!(
-            evict_one_idle_immutable_leaf(pool, cache)?,
+            evict_one_idle_immutable_leaf(pool, cache, &HashSet::new(), false)?,
             "FullPaged immutable prefix pool cannot reclaim enough idle blocks for {required} new pages"
         );
     }
     Ok(())
+}
+
+fn reclaim_idle_immutable_blocks_to(
+    pool: &mut ImmutablePrefixBlockPool,
+    cache: &mut [LayerCache],
+    target_blocks: usize,
+) -> Result<usize> {
+    let mut evicted = 0_usize;
+    while pool.entries.len() > target_blocks {
+        if !evict_one_idle_immutable_leaf(pool, cache, &HashSet::new(), true)? {
+            break;
+        }
+        evicted = evicted.saturating_add(1);
+    }
+    Ok(evicted)
 }
 
 fn validate_immutable_prefix_pool_invariants(
@@ -2253,6 +2293,12 @@ fn validate_immutable_prefix_pool_invariants(
         "immutable prefix lookup has {} keys for {} entries",
         pool.lookup.len(),
         pool.entries.len()
+    );
+    anyhow::ensure!(
+        pool.pending_store_blocks
+            .iter()
+            .all(|id| pool.entries.contains_key(id)),
+        "immutable prefix SSD pending set contains an absent block"
     );
     let paged_layers = cache
         .iter()
@@ -2314,9 +2360,315 @@ fn validate_immutable_prefix_pool_invariants(
     Ok(())
 }
 
+fn immutable_block_store_spec(
+    config: &PagedPrefixCacheConfig,
+    cache: &[LayerCache],
+    tokens: &[u32],
+    parent_hash: Option<u64>,
+) -> Result<PagedPrefixKeySpec> {
+    anyhow::ensure!(
+        tokens.len() == usize::try_from(config.block_size).unwrap_or(0),
+        "immutable block store requires exactly one configured block"
+    );
+    let mut spec = paged_prefix_key_spec_for_full_caches(&config.model_id, tokens, cache)?
+        .ok_or_else(|| anyhow!("immutable block store requires a FullPaged-only cache"))?;
+    spec.entry_kind = PrefixEntryKind::ImmutableBlock;
+    spec.fingerprint = Some(match parent_hash {
+        Some(hash) => format!("immutable-parent:{hash:016x}"),
+        None => "immutable-root".to_owned(),
+    });
+    Ok(spec)
+}
+
+fn immutable_bundle_entry(
+    cache: &[LayerCache],
+    bundle: &ImmutablePrefixBlockBundle,
+) -> Result<PagedPrefixEntry> {
+    let mut main_layers = Vec::with_capacity(bundle.handles.len());
+    let mut handle_index = 0_usize;
+    for layer in cache {
+        let LayerCache::Full(kv) = layer else {
+            anyhow::bail!("immutable block export requires a FullPaged-only cache");
+        };
+        let handle = *bundle
+            .handles
+            .get(handle_index)
+            .ok_or_else(|| anyhow!("immutable block export handle count mismatch"))?;
+        let payload = kv
+            .paged_immutable_block_prefix_on(bundle.pin, handle, ())?
+            .ok_or_else(|| anyhow!("immutable block export layer is not FullPaged"))?;
+        main_layers.push(PrefixLayerPayload::FullPaged {
+            k_pages: payload.k_pages,
+            v_pages: payload.v_pages,
+        });
+        handle_index += 1;
+    }
+    anyhow::ensure!(
+        handle_index == bundle.handles.len(),
+        "immutable block export found {handle_index} layers for {} handles",
+        bundle.handles.len()
+    );
+    Ok(PagedPrefixEntry {
+        main_layers,
+        ..PagedPrefixEntry::default()
+    })
+}
+
+fn install_full_paged_immutable_block_from_entry(
+    cache: &mut [LayerCache],
+    pin: PagedKvBlockOwner,
+    block_index: usize,
+    entry: PagedPrefixEntry,
+) -> Result<ImmutablePrefixBlockBundle> {
+    anyhow::ensure!(
+        entry.mtp_layers.is_empty()
+            && entry.mtp_last_hidden.is_none()
+            && entry.gemma4_drafter_last_hidden.is_none(),
+        "immutable block SSD entry contains unsupported side state"
+    );
+    let expected_layers = cache
+        .iter()
+        .filter(|layer| matches!(layer, LayerCache::Full(_)))
+        .count();
+    anyhow::ensure!(
+        cache_is_fullpaged_only(cache) && entry.main_layers.len() == expected_layers,
+        "immutable block SSD entry layer count/layout mismatch"
+    );
+    let block_index = i32::try_from(block_index).map_err(|_| anyhow!("block index overflow"))?;
+    let mut payloads = entry.main_layers.into_iter();
+    let install_result = (|| -> Result<Vec<PagedKvImmutableBlockHandle>> {
+        let mut handles = Vec::with_capacity(expected_layers);
+        for layer in cache.iter_mut() {
+            let LayerCache::Full(kv) = layer else {
+                anyhow::bail!("immutable block SSD install requires FullPaged-only cache");
+            };
+            let payload = payloads
+                .next()
+                .ok_or_else(|| anyhow!("immutable block SSD payload ended early"))?;
+            let PrefixLayerPayload::FullPaged { k_pages, v_pages } = payload else {
+                anyhow::bail!("immutable block SSD payload is not FullPaged");
+            };
+            let prefix = PagedPrefixLayer { k_pages, v_pages };
+            let handle = kv
+                .install_paged_immutable_block_from_prefix_on(pin, block_index, &prefix, ())?
+                .ok_or_else(|| anyhow!("immutable block SSD destination is not FullPaged"))?;
+            handles.push(handle);
+        }
+        anyhow::ensure!(
+            payloads.next().is_none(),
+            "immutable block SSD payload has extra layers"
+        );
+        Ok(handles)
+    })();
+    let handles = match install_result {
+        Ok(handles) => handles,
+        Err(error) => {
+            release_full_paged_cache_owner(cache, pin)?;
+            return Err(error);
+        }
+    };
+    if let Err(error) = validate_full_paged_owner_invariants(cache) {
+        release_full_paged_cache_owner(cache, pin)?;
+        return Err(error);
+    }
+    Ok(ImmutablePrefixBlockBundle { pin, handles })
+}
+
+fn queue_immutable_block_store(
+    pool: &mut ImmutablePrefixBlockPool,
+    cache: &[LayerCache],
+    config: Option<&PagedPrefixCacheConfig>,
+    entry_id: u64,
+) -> Result<ImmutableBlockStoreAttempt> {
+    let Some(config) = config else {
+        return Ok(ImmutableBlockStoreAttempt::Persisted);
+    };
+    let entry = pool
+        .entries
+        .get(&entry_id)
+        .ok_or_else(|| anyhow!("immutable block {entry_id} is absent before SSD queue"))?;
+    let parent_hash = entry
+        .key
+        .parent
+        .and_then(|parent| pool.entries.get(&parent).map(|entry| entry.chain_hash));
+    let spec = immutable_block_store_spec(config, cache, &entry.key.tokens, parent_hash)?;
+    let store = config.store();
+    if store.contains_persisted(&spec)? {
+        return Ok(ImmutableBlockStoreAttempt::Persisted);
+    }
+    let permit = match crate::core::cache::process_async_prefix_store_queue().try_admit(
+        store,
+        spec,
+        AsyncPrefixStoreCancellation::default(),
+    ) {
+        AsyncPrefixStoreAdmission::Admitted(permit) => *permit,
+        AsyncPrefixStoreAdmission::Coalesced => {
+            return Ok(ImmutableBlockStoreAttempt::Pending);
+        }
+        AsyncPrefixStoreAdmission::Backpressured => {
+            pool.stats.ssd_store_backpressure = pool.stats.ssd_store_backpressure.saturating_add(1);
+            return Ok(ImmutableBlockStoreAttempt::Backpressured);
+        }
+        AsyncPrefixStoreAdmission::Closed => {
+            return Err(anyhow!("immutable block SSD async store is closed"));
+        }
+    };
+    let payload = immutable_bundle_entry(cache, &entry.bundle)?;
+    let attempt = match permit.submit(payload) {
+        AsyncPrefixStoreSubmit::Queued => {
+            pool.stats.ssd_blocks_queued = pool.stats.ssd_blocks_queued.saturating_add(1);
+            ImmutableBlockStoreAttempt::Pending
+        }
+        AsyncPrefixStoreSubmit::Coalesced => ImmutableBlockStoreAttempt::Pending,
+        AsyncPrefixStoreSubmit::Backpressured => {
+            pool.stats.ssd_store_backpressure = pool.stats.ssd_store_backpressure.saturating_add(1);
+            ImmutableBlockStoreAttempt::Backpressured
+        }
+        AsyncPrefixStoreSubmit::Cancelled => ImmutableBlockStoreAttempt::Pending,
+        AsyncPrefixStoreSubmit::Closed => {
+            return Err(anyhow!("immutable block SSD async store is closed"));
+        }
+    };
+    Ok(attempt)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImmutableBlockStoreAttempt {
+    Persisted,
+    Pending,
+    Backpressured,
+}
+
+fn retry_pending_immutable_block_stores(
+    pool: &mut ImmutablePrefixBlockPool,
+    cache: &[LayerCache],
+    config: Option<&PagedPrefixCacheConfig>,
+    limit: usize,
+) -> Result<usize> {
+    let mut ids = pool
+        .pending_store_blocks
+        .iter()
+        .copied()
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    let mut persisted = 0_usize;
+    for id in ids.into_iter().take(limit) {
+        if !pool.entries.contains_key(&id) {
+            pool.pending_store_blocks.remove(&id);
+            continue;
+        }
+        match queue_immutable_block_store(pool, cache, config, id)? {
+            ImmutableBlockStoreAttempt::Persisted => {
+                pool.pending_store_blocks.remove(&id);
+                persisted = persisted.saturating_add(1);
+            }
+            ImmutableBlockStoreAttempt::Pending => {}
+            ImmutableBlockStoreAttempt::Backpressured => break,
+        }
+    }
+    Ok(persisted)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_load_immutable_block_from_store(
+    pool: &mut ImmutablePrefixBlockPool,
+    cache: &mut [LayerCache],
+    config: Option<&PagedPrefixCacheConfig>,
+    governor: Option<&crate::core::process_memory::SharedProcessMemoryGovernor>,
+    parent: Option<u64>,
+    parent_hash: Option<u64>,
+    tokens: &[u32],
+    block_index: usize,
+) -> Result<Option<u64>> {
+    let Some(config) = config else {
+        return Ok(None);
+    };
+    let spec = immutable_block_store_spec(config, cache, tokens, parent_hash)?;
+    let reservation = if let Some(governor) = governor {
+        governor.sample_process();
+        match governor.try_reserve(spec.payload_bytes(), "immutable_block_ssd_load") {
+            Ok(reservation) => Some(reservation),
+            Err(error) => {
+                pool.stats.ssd_load_pressure_skips =
+                    pool.stats.ssd_load_pressure_skips.saturating_add(1);
+                tracing::debug!(%error, "immutable block SSD load skipped by memory governor");
+                return Ok(None);
+            }
+        }
+    } else {
+        None
+    };
+    let observed = config.store().load_observed(&spec)?;
+    if observed.status != PagedPrefixLoadStatus::Hit {
+        return Ok(None);
+    }
+    let payload = observed
+        .entry
+        .ok_or_else(|| anyhow!("immutable block SSD hit has no payload"))?;
+
+    let protected = parent.into_iter().collect::<HashSet<_>>();
+    while pool.entries.len() >= pool.max_blocks {
+        if !evict_one_idle_immutable_leaf(pool, cache, &protected, false)? {
+            return Ok(None);
+        }
+    }
+    while full_paged_available_unique_pages(cache).unwrap_or(0) < 1 {
+        if !evict_one_idle_immutable_leaf(pool, cache, &protected, false)? {
+            return Ok(None);
+        }
+    }
+    if let Some(parent_id) = parent {
+        anyhow::ensure!(
+            pool.entries.contains_key(&parent_id),
+            "immutable SSD block parent {parent_id} disappeared before install"
+        );
+    }
+    let key = ImmutablePrefixBlockLookupKey {
+        parent,
+        tokens: tokens.into(),
+    };
+    let id = pool.next_id;
+    anyhow::ensure!(
+        !pool.lookup.contains_key(&key) && !pool.entries.contains_key(&id),
+        "immutable SSD block identity collided during actor-owned install"
+    );
+    let pin = PagedKvBlockOwner::Immutable(id);
+    let bundle = install_full_paged_immutable_block_from_entry(cache, pin, block_index, payload)?;
+    pool.next_id = pool.next_id.saturating_add(1);
+    let chain_hash = immutable_prefix_chain_hash(&pool.model_id, parent_hash, tokens);
+    pool.access_clock = pool.access_clock.saturating_add(1);
+    if let Some(parent_id) = parent {
+        let parent_entry = pool
+            .entries
+            .get_mut(&parent_id)
+            .expect("immutable SSD parent validated above");
+        parent_entry.child_count = parent_entry.child_count.saturating_add(1);
+    }
+    pool.lookup.insert(key.clone(), id);
+    pool.entries.insert(
+        id,
+        ImmutablePrefixBlockEntry {
+            id,
+            chain_hash,
+            key,
+            bundle,
+            child_count: 0,
+            last_access: pool.access_clock,
+        },
+    );
+    pool.stats.ssd_block_hits = pool.stats.ssd_block_hits.saturating_add(1);
+    pool.stats.ssd_blocks_loaded = pool.stats.ssd_blocks_loaded.saturating_add(1);
+    if let Some(reservation) = reservation {
+        reservation.commit();
+    }
+    Ok(Some(id))
+}
+
 fn restore_immutable_prefix_blocks(
     pool: &mut ImmutablePrefixBlockPool,
     cache: &mut [LayerCache],
+    config: Option<&PagedPrefixCacheConfig>,
+    governor: Option<&crate::core::process_memory::SharedProcessMemoryGovernor>,
     destination: PagedKvBlockOwner,
     prompt_ids: &[u32],
 ) -> Result<Option<i32>> {
@@ -2339,9 +2691,26 @@ fn restore_immutable_prefix_blocks(
             parent,
             tokens: prompt_ids[start..end].into(),
         };
-        let Some(&id) = pool.lookup.get(&key) else {
-            pool.stats.lookup_misses = pool.stats.lookup_misses.saturating_add(1);
-            break;
+        let id = if let Some(&id) = pool.lookup.get(&key) {
+            id
+        } else {
+            let parent_hash =
+                parent.and_then(|parent| pool.entries.get(&parent).map(|entry| entry.chain_hash));
+            let Some(id) = try_load_immutable_block_from_store(
+                pool,
+                cache,
+                config,
+                governor,
+                parent,
+                parent_hash,
+                &prompt_ids[start..end],
+                block_index,
+            )?
+            else {
+                pool.stats.lookup_misses = pool.stats.lookup_misses.saturating_add(1);
+                break;
+            };
+            id
         };
         let entry = pool
             .entries
@@ -2393,6 +2762,7 @@ fn restore_immutable_prefix_blocks(
 fn publish_immutable_prefix_blocks(
     pool: &mut ImmutablePrefixBlockPool,
     cache: &mut [LayerCache],
+    config: Option<&PagedPrefixCacheConfig>,
     source: PagedKvBlockOwner,
     token_ids: &[u32],
 ) -> Result<usize> {
@@ -2405,6 +2775,7 @@ fn publish_immutable_prefix_blocks(
     let mut parent = None;
     let mut parent_hash = None;
     let mut published = 0_usize;
+    let mut store_backpressured = false;
     for block_index in 0..block_count {
         let start = block_index * pool.block_size;
         let end = start + pool.block_size;
@@ -2420,10 +2791,25 @@ fn publish_immutable_prefix_blocks(
             parent_hash = Some(entry.chain_hash);
             parent = Some(id);
             pool.touch(id);
+            if config.is_some() {
+                pool.pending_store_blocks.insert(id);
+                if !store_backpressured {
+                    match queue_immutable_block_store(pool, cache, config, id)? {
+                        ImmutableBlockStoreAttempt::Persisted => {
+                            pool.pending_store_blocks.remove(&id);
+                        }
+                        ImmutableBlockStoreAttempt::Pending => {}
+                        ImmutableBlockStoreAttempt::Backpressured => {
+                            store_backpressured = true;
+                        }
+                    }
+                }
+            }
             continue;
         }
         while pool.entries.len() >= pool.max_blocks {
-            if !evict_one_idle_immutable_leaf(pool, cache)? {
+            let protected = parent.into_iter().collect::<HashSet<_>>();
+            if !evict_one_idle_immutable_leaf(pool, cache, &protected, false)? {
                 return Ok(published);
             }
         }
@@ -2462,6 +2848,20 @@ fn publish_immutable_prefix_blocks(
         );
         pool.stats.published_blocks = pool.stats.published_blocks.saturating_add(1);
         published += 1;
+        if config.is_some() {
+            pool.pending_store_blocks.insert(id);
+            if !store_backpressured {
+                match queue_immutable_block_store(pool, cache, config, id)? {
+                    ImmutableBlockStoreAttempt::Persisted => {
+                        pool.pending_store_blocks.remove(&id);
+                    }
+                    ImmutableBlockStoreAttempt::Pending => {}
+                    ImmutableBlockStoreAttempt::Backpressured => {
+                        store_backpressured = true;
+                    }
+                }
+            }
+        }
         parent_hash = Some(chain_hash);
         parent = Some(id);
     }
@@ -2670,6 +3070,9 @@ fn try_restore_paged_prefix_for_prompt_row(
     if prompt_ids.len() <= 1 {
         return Ok(None);
     }
+    if fingerprint.is_none() && cache_is_fullpaged_only(cache) {
+        return Ok(None);
+    }
     let store = config.store();
     for (restore_len, cached_len) in
         paged_prefix_restore_candidates(&store, prefix_lru_cache, prompt_ids.len())?
@@ -2730,6 +3133,9 @@ fn try_restore_paged_prefix_for_prompt_rows(
     fingerprint: Option<&str>,
 ) -> Result<Option<i32>> {
     if cache_rows.is_empty() {
+        return Ok(None);
+    }
+    if fingerprint.is_none() && cache_is_fullpaged_only(cache) {
         return Ok(None);
     }
     if cache_rows.len() == 1 {
@@ -2850,6 +3256,9 @@ fn try_save_paged_prefix_for_prompt_row(
         return Ok(None);
     };
     if prompt_ids.is_empty() {
+        return Ok(None);
+    }
+    if fingerprint.is_none() && cache_is_fullpaged_only(cache) {
         return Ok(None);
     }
     let Some(cached_len) = cache_row_cached_len(cache, cache_row)? else {
@@ -4781,11 +5190,14 @@ impl<M: Model> Scheduler<M> {
             .map(|governor| governor.snapshot())
     }
 
-    pub fn apply_process_memory_pressure(
-        &mut self,
-    ) -> Result<crate::core::process_memory::PressureLevel> {
-        let Some(governor) = self.process_memory_governor.as_ref() else {
-            return Ok(crate::core::process_memory::PressureLevel::Normal);
+    pub fn apply_process_memory_pressure(&mut self) -> Result<MemoryPressureReclaim> {
+        let Some(governor) = self.process_memory_governor.clone() else {
+            return Ok(MemoryPressureReclaim {
+                level: crate::core::process_memory::PressureLevel::Normal,
+                immutable_blocks_evicted: 0,
+                demoted_pages: 0,
+                should_park_request: false,
+            });
         };
         let snapshot = governor.sample_process();
         if snapshot.pressure_level == crate::core::process_memory::PressureLevel::Normal {
@@ -4804,25 +5216,82 @@ impl<M: Model> Scheduler<M> {
         } else {
             mlx::transforms::clear_cache();
         }
+
+        let mut immutable_blocks_evicted = 0_usize;
+        if snapshot.pressure_level != crate::core::process_memory::PressureLevel::Normal {
+            let retain_ratio = match snapshot.pressure_level {
+                crate::core::process_memory::PressureLevel::Normal => unreachable!(),
+                crate::core::process_memory::PressureLevel::Soft => (3_usize, 4_usize),
+                crate::core::process_memory::PressureLevel::Hard => (1, 4),
+                crate::core::process_memory::PressureLevel::Emergency => (0, 1),
+            };
+            if let (Some(pool), Some(cache)) =
+                (self.immutable_prefix_blocks.as_mut(), self.cache.as_mut())
+            {
+                let target = pool
+                    .entries
+                    .len()
+                    .saturating_mul(retain_ratio.0)
+                    .div_ceil(retain_ratio.1);
+                immutable_blocks_evicted = reclaim_idle_immutable_blocks_to(pool, cache, target)?;
+            }
+        }
+
+        let mut demoted_pages = 0usize;
         if snapshot.pressure_level.rank() >= crate::core::process_memory::PressureLevel::Hard.rank()
         {
-            let mut reclaimed_pages = 0usize;
             if let Some(cache) = self.cache.as_mut() {
                 for layer in cache {
-                    reclaimed_pages =
-                        reclaimed_pages.saturating_add(layer.shrink_paged_hot_window(1)?);
+                    demoted_pages = demoted_pages.saturating_add(layer.shrink_paged_hot_window(1)?);
                 }
             }
-            if reclaimed_pages > 0 {
+            if demoted_pages > 0 {
                 tracing::info!(
-                    reclaimed_pages,
+                    demoted_pages,
                     ?snapshot.pressure_level,
                     "memory governor demoted active KV hot pages"
                 );
                 self.refresh_active_kv_residency_stats();
             }
         }
-        Ok(snapshot.pressure_level)
+        if immutable_blocks_evicted > 0 {
+            tracing::info!(
+                immutable_blocks_evicted,
+                ?snapshot.pressure_level,
+                "memory governor evicted idle immutable FullPaged blocks"
+            );
+        }
+        let refreshed = if immutable_blocks_evicted > 0 || demoted_pages > 0 {
+            governor.refresh_process()
+        } else {
+            snapshot
+        };
+        if refreshed.pressure_level == crate::core::process_memory::PressureLevel::Emergency
+            && self.active_count() == 0
+            && self
+                .immutable_prefix_blocks
+                .as_ref()
+                .is_none_or(ImmutablePrefixBlockPool::is_empty)
+        {
+            self.discard_retained_immutable_prefix_cache();
+        }
+        Ok(MemoryPressureReclaim {
+            level: refreshed.pressure_level,
+            immutable_blocks_evicted,
+            demoted_pages,
+            should_park_request: refreshed.pressure_level.rank()
+                >= crate::core::process_memory::PressureLevel::Hard.rank()
+                && self.active_count() > 0,
+        })
+    }
+
+    pub fn retry_pending_immutable_prefix_stores(&mut self, limit: usize) -> Result<usize> {
+        let (Some(pool), Some(cache)) =
+            (self.immutable_prefix_blocks.as_mut(), self.cache.as_ref())
+        else {
+            return Ok(0);
+        };
+        retry_pending_immutable_block_stores(pool, cache, self.paged_prefix_cache.as_ref(), limit)
     }
 
     fn plan_prefill_chunk(
@@ -5614,6 +6083,7 @@ impl<M: Model> Scheduler<M> {
             } else if let Some(pool) = self.immutable_prefix_blocks.as_mut() {
                 pool.lookup.clear();
                 pool.entries.clear();
+                pool.pending_store_blocks.clear();
             }
         }
         self.cache = Some(new_cache);
@@ -5628,6 +6098,7 @@ impl<M: Model> Scheduler<M> {
         if let Some(pool) = self.immutable_prefix_blocks.as_mut() {
             pool.lookup.clear();
             pool.entries.clear();
+            pool.pending_store_blocks.clear();
         }
         self.cache = None;
     }
@@ -6456,6 +6927,24 @@ impl<M: Model> Scheduler<M> {
         parked_cache_dtype: Dtype,
         model: &M,
     ) -> Result<()> {
+        let cached_len_usize = usize::try_from(cached_len)
+            .map_err(|_| anyhow!("install_active_kv_payload: negative cached length"))?;
+        let destination_owner = self
+            .slots
+            .get(slot_row)
+            .and_then(Option::as_ref)
+            .and_then(|state| self.request_block_tables.get(&state.id))
+            .ok_or_else(|| anyhow!("install_active_kv_payload: request block table absent"))?
+            .owner;
+        if let (Some(pool), Some(cache)) =
+            (self.immutable_prefix_blocks.as_mut(), self.cache.as_mut())
+        {
+            reclaim_idle_immutable_blocks_for_targets(
+                pool,
+                cache,
+                &[(destination_owner, cached_len_usize)],
+            )?;
+        }
         let copies_before = self
             .cache
             .as_deref()
@@ -6538,6 +7027,12 @@ impl<M: Model> Scheduler<M> {
         })();
         if let Err(err) = install_result {
             if reused_paged {
+                if old_rows.is_empty() {
+                    release_full_paged_cache_owner(&mut new_cache, destination_owner)?;
+                    self.cache = Some(new_cache);
+                    self.cache_rows = old_rows;
+                    return Err(err);
+                }
                 let old_cache = old_cache
                     .as_mut()
                     .expect("paged storage reuse requires an old cache");
@@ -9081,6 +9576,8 @@ impl<M: Model> Scheduler<M> {
                     (owner, state.prompt_ids.clone())
                 })
                 .collect::<Vec<_>>();
+            let prefix_config = self.paged_prefix_cache.clone();
+            let memory_governor = self.process_memory_governor.clone();
             if let (Some(pool), Some(cache)) =
                 (self.immutable_prefix_blocks.as_mut(), self.cache.as_mut())
             {
@@ -9088,9 +9585,14 @@ impl<M: Model> Scheduler<M> {
                     if immutable_replay_from[cache_row] > 0 {
                         continue;
                     }
-                    if let Some(restored) =
-                        restore_immutable_prefix_blocks(pool, cache, *owner, prompt_ids)?
-                    {
+                    if let Some(restored) = restore_immutable_prefix_blocks(
+                        pool,
+                        cache,
+                        prefix_config.as_ref(),
+                        memory_governor.as_ref(),
+                        *owner,
+                        prompt_ids,
+                    )? {
                         immutable_replay_from[cache_row] = usize::try_from(restored)
                             .map_err(|_| anyhow!("negative immutable restore length"))?;
                         tracing::debug!(
@@ -9634,6 +10136,7 @@ impl<M: Model> Scheduler<M> {
                     (owner, state.prompt_ids.clone())
                 })
                 .collect::<Vec<_>>();
+            let prefix_config = self.paged_prefix_cache.clone();
             if let (Some(pool), Some(cache)) =
                 (self.immutable_prefix_blocks.as_mut(), self.cache.as_mut())
             {
@@ -9642,6 +10145,7 @@ impl<M: Model> Scheduler<M> {
                     let published = publish_immutable_prefix_blocks(
                         pool,
                         cache,
+                        prefix_config.as_ref(),
                         owner,
                         &prompt_ids[..reusable_len],
                     )?;
@@ -9771,6 +10275,57 @@ impl<M: Model> Scheduler<M> {
         }
     }
 
+    fn reclaim_idle_immutable_blocks_for_decode_rows(
+        &mut self,
+        rows: &[usize],
+        pre_offsets: &[i32],
+    ) -> Result<()> {
+        let Some(block_size) = self
+            .immutable_prefix_blocks
+            .as_ref()
+            .map(|pool| pool.block_size)
+        else {
+            return Ok(());
+        };
+        anyhow::ensure!(
+            rows.len() == pre_offsets.len(),
+            "decode reclaim rows {} != offsets {}",
+            rows.len(),
+            pre_offsets.len()
+        );
+        let mut targets = Vec::new();
+        for (&row, &offset) in rows.iter().zip(pre_offsets.iter()) {
+            let offset = usize::try_from(offset)
+                .map_err(|_| anyhow!("decode reclaim row {row} has negative offset"))?;
+            if offset % block_size != 0 {
+                continue;
+            }
+            let request_id = self
+                .slots
+                .get(row)
+                .and_then(Option::as_ref)
+                .map(|state| state.id)
+                .ok_or_else(|| anyhow!("decode reclaim row {row} has no request"))?;
+            let owner = self
+                .request_block_tables
+                .get(&request_id)
+                .map(|table| table.owner)
+                .ok_or_else(|| {
+                    anyhow!("decode reclaim request {} has no block table", request_id.0)
+                })?;
+            targets.push((owner, offset.saturating_add(1)));
+        }
+        if targets.is_empty() {
+            return Ok(());
+        }
+        if let (Some(pool), Some(cache)) =
+            (self.immutable_prefix_blocks.as_mut(), self.cache.as_mut())
+        {
+            reclaim_idle_immutable_blocks_for_targets(pool, cache, &targets)?;
+        }
+        Ok(())
+    }
+
     fn step_inner(&mut self, model: &M) -> Result<Vec<StepEvent>> {
         if self.phase != Phase::Decoding {
             return Err(anyhow!(
@@ -9805,6 +10360,20 @@ impl<M: Model> Scheduler<M> {
 
         self.rebuild_cache_layout(model, &active_rows)?;
         let b = active_rows.len();
+
+        let pre_offsets = first_full_layer_offsets(
+            self.cache
+                .as_ref()
+                .ok_or_else(|| anyhow!("step: cache absent after layout rebuild"))?,
+        )?
+        .to_vec();
+        anyhow::ensure!(
+            pre_offsets.len() == b,
+            "step: cache offset rows {} != active rows {}",
+            pre_offsets.len(),
+            b
+        );
+        self.reclaim_idle_immutable_blocks_for_decode_rows(&active_rows, &pre_offsets)?;
 
         // Build [B_active, 1] input_ids in compact cache order.
         let last_tokens: Vec<i32> = active_rows
@@ -9853,13 +10422,6 @@ impl<M: Model> Scheduler<M> {
         // Build per-row decode mask BEFORE the forward — necessary so
         // SDPA correctly masks stale K/V cells for rows whose cache
         // offsets have diverged from max(offsets).
-        let pre_offsets: Vec<i32> = first_full_layer_offsets(cache_ref)?.to_vec();
-        anyhow::ensure!(
-            pre_offsets.len() == b,
-            "step: cache offset rows {} != active rows {}",
-            pre_offsets.len(),
-            b
-        );
         let mask_row_lens: Vec<i32> = pre_offsets
             .iter()
             .zip(per_row_lens.iter())
@@ -10109,11 +10671,18 @@ impl<M: Model> Scheduler<M> {
         let can_restore_in_place = !is_vl
             && turboquant_bits.is_none()
             && self.cache.as_deref().is_some_and(cache_is_fullpaged_only);
+        let prefix_config = self.paged_prefix_cache.clone();
+        let memory_governor = self.process_memory_governor.clone();
         let immutable_restored_start = if can_restore_in_place {
             match (self.immutable_prefix_blocks.as_mut(), self.cache.as_mut()) {
-                (Some(pool), Some(cache)) => {
-                    restore_immutable_prefix_blocks(pool, cache, destination_owner, &prompt_ids)?
-                }
+                (Some(pool), Some(cache)) => restore_immutable_prefix_blocks(
+                    pool,
+                    cache,
+                    prefix_config.as_ref(),
+                    memory_governor.as_ref(),
+                    destination_owner,
+                    &prompt_ids,
+                )?,
                 _ => None,
             }
         } else {
@@ -10612,11 +11181,18 @@ impl<M: Model> Scheduler<M> {
                 .get(&id)
                 .ok_or_else(|| anyhow!("mid-admit request block table absent"))?
                 .owner;
+            let prefix_config = self.paged_prefix_cache.clone();
             if let (Some(pool), Some(cache)) =
                 (self.immutable_prefix_blocks.as_mut(), self.cache.as_mut())
             {
                 let reusable_len = prompt_ids.len().saturating_sub(1);
-                publish_immutable_prefix_blocks(pool, cache, owner, &prompt_ids[..reusable_len])?;
+                publish_immutable_prefix_blocks(
+                    pool,
+                    cache,
+                    prefix_config.as_ref(),
+                    owner,
+                    &prompt_ids[..reusable_len],
+                )?;
             }
         } else {
             match try_save_paged_prefix_for_prompt(
@@ -16910,6 +17486,80 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
+    fn active_kv_restore_reclaims_full_immutable_prefix_pool() {
+        let model = StepDecodeMaskModel::default();
+        let root = std::env::temp_dir().join(format!(
+            "ironmlx-active-kv-immutable-pool-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let prefix_root = root.join("prefix");
+        let active_root = root.join("active");
+        let prefix_config = crate::core::cache::PagedPrefixCacheConfig::new(
+            &prefix_root,
+            "active-kv-immutable-pool",
+            2,
+            8,
+        )
+        .expect("prefix config");
+        let active_config = crate::core::cache::ActiveKvOffloadConfig::enabled(active_root);
+        let active_stats = crate::core::cache::ActiveKvOffloadSharedStats::new(&active_config);
+        let mut scheduler = Scheduler::<StepDecodeMaskModel>::new(
+            1,
+            64,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        scheduler
+            .enable_paged_prefix_cache(prefix_config)
+            .expect("enable prefix cache");
+        scheduler
+            .enable_active_kv_offload(active_config, active_stats.clone())
+            .expect("enable active KV offload");
+
+        let id = scheduler
+            .admit(mk_req((1_u32..=15).collect()))
+            .expect("admit");
+        scheduler.prefill_admitted(&model).expect("prefill");
+        assert_eq!(
+            scheduler.request_owned_kv_stats().immutable_prefix.blocks,
+            7,
+            "immutable pool should retain all seven sealed prompt blocks"
+        );
+
+        let parked = scheduler
+            .park_active_kv_request(id, &model)
+            .expect("park request")
+            .expect("request should be eligible for active KV offload");
+        assert_eq!(scheduler.active_count(), 0);
+        assert_eq!(active_stats.snapshot().swap_out_count, 1);
+        scheduler
+            .validate_request_owned_kv_invariants()
+            .expect("parked immutable pool invariants");
+
+        assert_eq!(
+            scheduler
+                .restore_active_kv_request(&parked, &model)
+                .expect("restore request"),
+            id
+        );
+        assert_eq!(scheduler.active_count(), 1);
+        assert_eq!(
+            scheduler.request_owned_kv_stats().immutable_prefix.blocks,
+            0,
+            "restore must reclaim idle immutable leaves before allocating eight request pages"
+        );
+        assert_eq!(active_stats.snapshot().swap_in_count, 1);
+        scheduler
+            .validate_request_owned_kv_invariants()
+            .expect("restored request invariants");
+        scheduler.step(&model).expect("decode after restore");
+
+        crate::core::cache::process_async_prefix_store_queue().wait_idle();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn prefill_admitted_single_text_row_uses_forward_on_fast_path() {
         let mut s = Scheduler::<RecordingPrefillModel>::new(
             1,
@@ -17022,7 +17672,7 @@ mod tests {
 
     #[test]
     #[serial(mlx_metal)]
-    fn prefill_admitted_uses_paged_ssd_prefix_cache_on_exact_hit() {
+    fn prefill_admitted_uses_paged_ssd_immutable_blocks_on_exact_hit() {
         let root = std::env::temp_dir().join(format!(
             "ironmlx-paged-prefix-scheduler-{}",
             uuid::Uuid::new_v4().simple()
@@ -17043,7 +17693,25 @@ mod tests {
         warm.prefill_admitted(&warm_model).expect("warm prefill");
         assert_eq!(warm_model.hidden_seq_lens(), vec![3]);
         assert_eq!(warm_model.forward_seq_lens(), vec![1]);
+        assert_eq!(
+            warm.request_owned_kv_stats()
+                .immutable_prefix
+                .ssd_blocks_pending,
+            1,
+            "queued immutable blocks remain pending until durable completion is observed"
+        );
         crate::core::cache::process_async_prefix_store_queue().wait_idle();
+        assert_eq!(
+            warm.retry_pending_immutable_prefix_stores(usize::MAX)
+                .expect("observe durable immutable block"),
+            1
+        );
+        assert_eq!(
+            warm.request_owned_kv_stats()
+                .immutable_prefix
+                .ssd_blocks_pending,
+            0
+        );
         assert!(
             std::fs::read_dir(&root)
                 .expect("prefix cache dir")
@@ -17067,10 +17735,13 @@ mod tests {
 
         assert_eq!(
             hit_model.hidden_seq_lens(),
-            Vec::<i32>::new(),
-            "exact cache hit should restore prompt prefix instead of recomputing it"
+            vec![1],
+            "immutable-block hits should only recompute the unsealed prompt tail"
         );
         assert_eq!(hit_model.forward_seq_lens(), vec![1]);
+        let stats = hit.request_owned_kv_stats();
+        assert_eq!(stats.immutable_prefix.ssd_block_hits, 1);
+        assert_eq!(stats.immutable_prefix.ssd_blocks_loaded, 1);
         match &hit.cache.as_ref().expect("cache")[0] {
             LayerCache::Full(kv) => assert!(kv.paged().is_some()),
             _ => panic!("expected full-attention cache"),
@@ -17078,6 +17749,75 @@ mod tests {
 
         crate::core::cache::process_async_prefix_store_queue().wait_idle();
 
+        std::fs::remove_dir_all(root).expect("cleanup prefix cache");
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn fullpaged_immutable_blocks_eventually_persist_after_store_backpressure() {
+        let root = std::env::temp_dir().join(format!(
+            "ironmlx-immutable-store-retry-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let config =
+            crate::core::cache::PagedPrefixCacheConfig::new(&root, "immutable-store-retry", 2, 64)
+                .expect("prefix config");
+        let mut scheduler = Scheduler::<StepDecodeMaskModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        scheduler
+            .enable_paged_prefix_cache(config)
+            .expect("enable prefix cache");
+        scheduler
+            .admit(mk_req((1_u32..=33).collect()))
+            .expect("admit long prompt");
+        scheduler
+            .prefill_admitted(&StepDecodeMaskModel::default())
+            .expect("publish immutable blocks");
+
+        let published = scheduler
+            .request_owned_kv_stats()
+            .immutable_prefix
+            .published_blocks;
+        assert_eq!(published, 16);
+        assert_eq!(
+            scheduler
+                .request_owned_kv_stats()
+                .immutable_prefix
+                .ssd_blocks_pending,
+            published
+        );
+
+        for _ in 0..=published {
+            crate::core::cache::process_async_prefix_store_queue().wait_idle();
+            scheduler
+                .retry_pending_immutable_prefix_stores(usize::MAX)
+                .expect("retry immutable block stores");
+            if scheduler
+                .request_owned_kv_stats()
+                .immutable_prefix
+                .ssd_blocks_pending
+                == 0
+            {
+                break;
+            }
+        }
+        crate::core::cache::process_async_prefix_store_queue().wait_idle();
+
+        let stats = scheduler.request_owned_kv_stats().immutable_prefix;
+        assert_eq!(stats.ssd_blocks_pending, 0);
+        assert_eq!(
+            std::fs::read_dir(&root).expect("prefix cache dir").count(),
+            published as usize
+        );
+        scheduler
+            .validate_request_owned_kv_invariants()
+            .expect("immutable store retry invariants");
+        scheduler.evict_all().expect("reset scheduler");
+        scheduler.discard_retained_immutable_prefix_cache();
         std::fs::remove_dir_all(root).expect("cleanup prefix cache");
     }
 
@@ -17330,6 +18070,274 @@ mod tests {
 
     #[test]
     #[serial(mlx_metal)]
+    fn fullpaged_immutable_prefix_round_trips_through_block_ssd_schema() {
+        let root = std::env::temp_dir().join(format!(
+            "ironmlx-immutable-ssd-prefix-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let config = crate::core::cache::PagedPrefixCacheConfig::new(&root, "immutable-ssd", 2, 64)
+            .expect("prefix config");
+        let mut scheduler = Scheduler::<StepDecodeMaskModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        scheduler
+            .enable_paged_prefix_cache(config.clone())
+            .expect("enable paged prefix cache");
+
+        let warm = scheduler
+            .admit(mk_req(vec![1, 2, 3, 4, 5, 6]))
+            .expect("admit warm request");
+        scheduler
+            .prefill_admitted(&StepDecodeMaskModel::default())
+            .expect("warm prefill");
+        scheduler.evict(warm).expect("evict warm request");
+        scheduler.evict_all().expect("reset scheduler phase");
+        crate::core::cache::process_async_prefix_store_queue().wait_idle();
+        assert_eq!(
+            config
+                .store()
+                .cached_lengths_descending(32)
+                .expect("whole-prefix lengths"),
+            Vec::<i32>::new(),
+            "FullPaged text persistence must use block entries only"
+        );
+
+        scheduler.discard_retained_immutable_prefix_cache();
+        assert_eq!(
+            scheduler
+                .request_owned_kv_stats()
+                .physical
+                .physical_pages_referenced,
+            0
+        );
+
+        let hit = scheduler
+            .admit(mk_req(vec![1, 2, 3, 4, 9, 10]))
+            .expect("admit SSD hit request");
+        let model = StepDecodeMaskModel::default();
+        scheduler
+            .prefill_admitted(&model)
+            .expect("SSD block restore prefill");
+        assert_eq!(model.hidden_seq_lens(), vec![1]);
+        assert_eq!(model.forward_seq_lens(), vec![1]);
+        let stats = scheduler.request_owned_kv_stats();
+        assert_eq!(stats.immutable_prefix.ssd_block_hits, 2);
+        assert_eq!(stats.immutable_prefix.ssd_blocks_loaded, 2);
+        assert_eq!(stats.immutable_prefix.restored_blocks, 2);
+        assert_eq!(stats.physical.adopt_page_copies, 0);
+        assert_eq!(stats.physical.cow_page_copies, 0);
+        assert_eq!(stats.physical.orphan_pages, 0);
+        scheduler
+            .validate_request_owned_kv_invariants()
+            .expect("SSD restore invariants");
+
+        scheduler.evict(hit).expect("evict SSD hit request");
+        scheduler.evict_all().expect("reset after SSD hit");
+        scheduler.discard_retained_immutable_prefix_cache();
+        crate::core::cache::process_async_prefix_store_queue().wait_idle();
+        std::fs::remove_dir_all(root).expect("cleanup prefix cache");
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn fullpaged_pressure_reclaim_evicts_only_idle_immutable_leaves() {
+        let root = std::env::temp_dir().join(format!(
+            "ironmlx-immutable-pressure-prefix-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let config =
+            crate::core::cache::PagedPrefixCacheConfig::new(&root, "immutable-pressure", 2, 64)
+                .expect("prefix config");
+        let mut scheduler = Scheduler::<StepDecodeMaskModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        scheduler
+            .enable_paged_prefix_cache(config)
+            .expect("enable paged prefix cache");
+        let warm = scheduler
+            .admit(mk_req(vec![1, 2, 3, 4, 5, 6, 7]))
+            .expect("admit pressure warm request");
+        scheduler
+            .prefill_admitted(&StepDecodeMaskModel::default())
+            .expect("pressure warm prefill");
+        scheduler.evict(warm).expect("evict pressure warm request");
+        scheduler.evict_all().expect("reset pressure scheduler");
+
+        let evicted = reclaim_idle_immutable_blocks_to(
+            scheduler
+                .immutable_prefix_blocks
+                .as_mut()
+                .expect("immutable pool"),
+            scheduler.cache.as_mut().expect("retained physical cache"),
+            1,
+        )
+        .expect("pressure reclaim");
+        assert_eq!(evicted, 2);
+        let stats = scheduler.request_owned_kv_stats();
+        assert_eq!(stats.immutable_prefix.blocks, 1);
+        assert_eq!(stats.immutable_prefix.pressure_evicted_blocks, 2);
+        assert_eq!(stats.physical.immutable_pinned_pages, 1);
+        assert_eq!(stats.physical.orphan_pages, 0);
+        scheduler
+            .validate_request_owned_kv_invariants()
+            .expect("pressure reclaim invariants");
+
+        scheduler.discard_retained_immutable_prefix_cache();
+        crate::core::cache::process_async_prefix_store_queue().wait_idle();
+        std::fs::remove_dir_all(root).expect("cleanup prefix cache");
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn fullpaged_pressure_reclaim_preserves_request_referenced_blocks() {
+        let root = std::env::temp_dir().join(format!(
+            "ironmlx-immutable-pressure-active-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let config = crate::core::cache::PagedPrefixCacheConfig::new(
+            &root,
+            "immutable-pressure-active",
+            2,
+            64,
+        )
+        .expect("prefix config");
+        let mut scheduler = Scheduler::<StepDecodeMaskModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        scheduler
+            .enable_paged_prefix_cache(config)
+            .expect("enable paged prefix cache");
+        let active = scheduler
+            .admit(mk_req(vec![1, 2, 3, 4, 5, 6, 7]))
+            .expect("admit active request");
+        scheduler
+            .prefill_admitted(&StepDecodeMaskModel::default())
+            .expect("active request prefill");
+
+        let evicted = reclaim_idle_immutable_blocks_to(
+            scheduler
+                .immutable_prefix_blocks
+                .as_mut()
+                .expect("immutable pool"),
+            scheduler.cache.as_mut().expect("active physical cache"),
+            0,
+        )
+        .expect("pressure reclaim with active references");
+        assert_eq!(evicted, 0);
+        let stats = scheduler.request_owned_kv_stats();
+        assert_eq!(stats.immutable_prefix.blocks, 3);
+        assert_eq!(stats.immutable_prefix.pressure_evicted_blocks, 0);
+        assert!(stats.immutable_prefix.blocked_evictions > 0);
+        assert_eq!(stats.physical.orphan_pages, 0);
+        scheduler
+            .validate_request_owned_kv_invariants()
+            .expect("active pressure reclaim invariants");
+
+        scheduler.evict(active).expect("evict active request");
+        scheduler.evict_all().expect("reset active scheduler");
+        scheduler.discard_retained_immutable_prefix_cache();
+        crate::core::cache::process_async_prefix_store_queue().wait_idle();
+        std::fs::remove_dir_all(root).expect("cleanup prefix cache");
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn fullpaged_hard_pressure_requests_parking_without_evicting_active_blocks() {
+        use crate::core::process_memory::{
+            HostVmStatistics, MemoryGovernorConfig, MemoryTelemetry, PressureLevel,
+            ProcessMemoryGovernor,
+        };
+
+        let gib = 1024 * 1024 * 1024;
+        let governor = Arc::new(
+            ProcessMemoryGovernor::new(MemoryGovernorConfig {
+                static_reserve_bytes: 4 * gib,
+                promotion_samples: 1,
+                recovery_samples: 1,
+                poll_interval: std::time::Duration::from_secs(3600),
+                telemetry_stale_after: std::time::Duration::from_secs(7200),
+                ..MemoryGovernorConfig::default()
+            })
+            .expect("governor"),
+        );
+        let telemetry = |usage| MemoryTelemetry {
+            total_ram_bytes: 32 * gib,
+            phys_footprint_bytes: Some(usage),
+            vm: Some(HostVmStatistics {
+                free_bytes: 8 * gib,
+                inactive_bytes: 2 * gib,
+                active_bytes: 8 * gib,
+                wired_bytes: 8 * gib,
+            }),
+            mlx_active_bytes: Some(usage),
+            mlx_cache_bytes: Some(0),
+            metal_limit_bytes: Some(24 * gib),
+        };
+        governor.update(telemetry(4 * gib));
+
+        let root = std::env::temp_dir().join(format!(
+            "ironmlx-immutable-pressure-park-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let config = crate::core::cache::PagedPrefixCacheConfig::new(
+            &root,
+            "immutable-pressure-park",
+            2,
+            64,
+        )
+        .expect("prefix config");
+        let mut scheduler = Scheduler::<StepDecodeMaskModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        scheduler.process_memory_governor = Some(Arc::clone(&governor));
+        scheduler
+            .enable_paged_prefix_cache(config)
+            .expect("enable paged prefix cache");
+        let active = scheduler
+            .admit(mk_req(vec![1, 2, 3, 4, 5, 6, 7]))
+            .expect("admit active request");
+        scheduler
+            .prefill_admitted(&StepDecodeMaskModel::default())
+            .expect("active request prefill");
+
+        assert_eq!(
+            governor.update(telemetry(23 * gib)).pressure_level,
+            PressureLevel::Hard
+        );
+        let reclaim = scheduler
+            .apply_process_memory_pressure()
+            .expect("apply hard pressure");
+        assert_eq!(reclaim.level, PressureLevel::Hard);
+        assert_eq!(reclaim.immutable_blocks_evicted, 0);
+        assert!(reclaim.should_park_request);
+        let stats = scheduler.request_owned_kv_stats();
+        assert_eq!(stats.immutable_prefix.blocks, 3);
+        assert_eq!(stats.physical.orphan_pages, 0);
+        scheduler
+            .validate_request_owned_kv_invariants()
+            .expect("hard pressure active invariants");
+
+        scheduler.evict(active).expect("evict active request");
+        scheduler.evict_all().expect("reset active scheduler");
+        scheduler.discard_retained_immutable_prefix_cache();
+        crate::core::cache::process_async_prefix_store_queue().wait_idle();
+        std::fs::remove_dir_all(root).expect("cleanup prefix cache");
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
     fn fullpaged_immutable_prefix_reuses_active_blocks_for_mid_admission() {
         let root = std::env::temp_dir().join(format!(
             "ironmlx-immutable-active-prefix-{}",
@@ -17450,6 +18458,66 @@ mod tests {
 
     #[test]
     #[serial(mlx_metal)]
+    fn fullpaged_decode_reclaims_idle_immutable_leaf_before_page_growth() {
+        let root = std::env::temp_dir().join(format!(
+            "ironmlx-immutable-decode-growth-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let config =
+            crate::core::cache::PagedPrefixCacheConfig::new(&root, "immutable-decode", 2, 6)
+                .expect("prefix config");
+        let mut scheduler = Scheduler::<StepDecodeMaskModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        scheduler
+            .enable_paged_prefix_cache(config)
+            .expect("enable paged prefix cache");
+
+        let warm = scheduler
+            .admit(mk_req((1_u32..=11).collect()))
+            .expect("admit warm request");
+        scheduler
+            .prefill_admitted(&StepDecodeMaskModel::default())
+            .expect("warm request prefill");
+        scheduler.evict(warm).expect("evict warm request");
+        scheduler.evict_all().expect("reset warm scheduler");
+        crate::core::cache::process_async_prefix_store_queue().wait_idle();
+        assert_eq!(
+            scheduler.request_owned_kv_stats().immutable_prefix.blocks,
+            5
+        );
+
+        let active = scheduler
+            .admit(mk_req(vec![42, 43]))
+            .expect("admit active request");
+        scheduler
+            .prefill_admitted(&StepDecodeMaskModel::default())
+            .expect("active request prefill");
+        let events = scheduler
+            .step(&StepDecodeMaskModel::default())
+            .expect("decode page growth should reclaim an idle immutable leaf");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, active);
+
+        let stats = scheduler.request_owned_kv_stats();
+        assert!(stats.immutable_prefix.evicted_blocks >= 1);
+        assert_eq!(stats.physical.orphan_pages, 0);
+        scheduler
+            .validate_request_owned_kv_invariants()
+            .expect("decode growth invariants");
+
+        scheduler.evict(active).expect("evict active request");
+        scheduler.evict_all().expect("reset after decode growth");
+        scheduler.discard_retained_immutable_prefix_cache();
+        crate::core::cache::process_async_prefix_store_queue().wait_idle();
+        std::fs::remove_dir_all(root).expect("cleanup prefix cache");
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
     fn fullpaged_cross_layer_fork_preflight_failure_leaves_every_layer_unchanged() {
         let source = PagedKvBlockOwner::Request(11);
         let destination = PagedKvBlockOwner::Request(22);
@@ -17506,7 +18574,7 @@ mod tests {
 
     #[test]
     #[serial(mlx_metal)]
-    fn prefill_admitted_uses_prefix_lru_cache_when_ssd_entry_is_gone() {
+    fn fullpaged_prefill_uses_immutable_pool_when_ssd_entries_are_gone() {
         let root = std::env::temp_dir().join(format!(
             "ironmlx-prefix-lru-scheduler-{}",
             uuid::Uuid::new_v4().simple()
@@ -17545,9 +18613,8 @@ mod tests {
                 .expect("L1 cache")
                 .lock()
                 .expect("L1 lock")
-                .len()
-                > 0,
-            "warm prefill should populate L1"
+                .is_empty(),
+            "FullPaged text must not dual-write the whole-entry L1"
         );
 
         scheduler.evict_all().expect("clear warm request");
@@ -17563,16 +18630,19 @@ mod tests {
 
         assert_eq!(
             hit_model.hidden_seq_lens(),
-            Vec::<i32>::new(),
-            "L1 exact hit should restore prompt prefix without recomputing it"
+            vec![1],
+            "the immutable pool should leave only the unsealed tail to recompute"
         );
         assert_eq!(hit_model.forward_seq_lens(), vec![1]);
+        let stats = scheduler.request_owned_kv_stats();
+        assert_eq!(stats.immutable_prefix.idle_block_hits, 1);
+        assert_eq!(stats.immutable_prefix.ssd_block_hits, 0);
         std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
     #[serial(mlx_metal)]
-    fn prefill_admitted_batched_text_uses_paged_ssd_prefix_cache_on_exact_hits() {
+    fn prefill_admitted_batched_text_uses_paged_ssd_immutable_blocks_on_exact_hits() {
         let root = std::env::temp_dir().join(format!(
             "ironmlx-paged-prefix-batch-text-{}",
             uuid::Uuid::new_v4().simple()
@@ -17619,7 +18689,10 @@ mod tests {
             Vec::<i32>::new(),
             "fully hit batch should restore prefixes instead of recomputing them"
         );
-        assert_eq!(hit_model.forward_seq_lens(), vec![1]);
+        assert_eq!(hit_model.forward_seq_lens(), vec![1, 1]);
+        let stats = hit.request_owned_kv_stats();
+        assert_eq!(stats.immutable_prefix.ssd_block_hits, 2);
+        assert_eq!(stats.immutable_prefix.ssd_blocks_loaded, 2);
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].id, id_0);
         assert_eq!(events[1].id, id_1);

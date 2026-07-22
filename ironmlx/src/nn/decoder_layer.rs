@@ -389,6 +389,7 @@ pub fn prefix_key_spec_for_caches(
     }
 
     Ok(Some(PagedPrefixKeySpec {
+        entry_kind: crate::core::cache::PrefixEntryKind::WholePrefix,
         model_id: model_id.to_owned(),
         token_ids: token_ids.iter().map(|&id| id as i32).collect(),
         cached_len,
@@ -739,6 +740,7 @@ pub fn paged_prefix_key_spec_for_full_caches(
         })
         .collect();
     Ok(Some(PagedPrefixKeySpec {
+        entry_kind: crate::core::cache::PrefixEntryKind::WholePrefix,
         model_id: model_id.to_owned(),
         token_ids: token_ids.iter().map(|&id| id as i32).collect(),
         cached_len,
