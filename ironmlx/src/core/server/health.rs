@@ -53,6 +53,7 @@ pub struct MemoryInfo {
     pub mlx_memory_limit_bytes: usize,
     pub process_governor: crate::core::process_memory::MemoryGovernorSnapshot,
     pub prefix_store: crate::core::cache::AsyncPrefixStoreStats,
+    pub immutable_prefix_blocks: crate::core::server::scheduler_actor::ImmutablePrefixBlockHealth,
 }
 
 #[derive(Debug, Serialize)]
@@ -246,6 +247,8 @@ pub struct SchedulerHealthCollector {
     pub kv_cache_budget_policy: String,
     pub mtp: MtpHealthConfig,
     pub active_kv_offload: ActiveKvOffloadSharedStats,
+    pub immutable_prefix_blocks:
+        crate::core::server::scheduler_actor::ImmutablePrefixBlockSharedStats,
 }
 
 impl SchedulerHealthCollector {
@@ -316,6 +319,7 @@ impl SchedulerHealthCollector {
                 mlx_memory_limit_bytes: mlx_memory.memory_limit_bytes,
                 process_governor,
                 prefix_store,
+                immutable_prefix_blocks: self.immutable_prefix_blocks.snapshot(),
             },
             mtp: self.mtp.snapshot(),
             active_kv_offload,
@@ -449,6 +453,8 @@ mod tests {
             kv_cache_budget_policy: "active_kv_offload".to_string(),
             mtp,
             active_kv_offload,
+            immutable_prefix_blocks:
+                crate::core::server::scheduler_actor::ImmutablePrefixBlockSharedStats::new(false),
         }
     }
 
@@ -663,6 +669,8 @@ mod tests {
                 mlx_memory_limit_bytes: 44,
                 process_governor: crate::core::process_memory::MemoryGovernorSnapshot::default(),
                 prefix_store: crate::core::cache::AsyncPrefixStoreStats::default(),
+                immutable_prefix_blocks:
+                    crate::core::server::scheduler_actor::ImmutablePrefixBlockHealth::default(),
             },
             mtp: MtpHealthInfo {
                 enabled: false,

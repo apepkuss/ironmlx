@@ -299,6 +299,7 @@ async fn anthropic_actor_scheduler_path_emits_6_event_sequence() {
         kv_cache_budget_policy: handle.kv_cache_budget_policy.to_string(),
         mtp: ironmlx::core::server::health::MtpHealthConfig::disabled(),
         active_kv_offload: handle.active_kv_offload.clone(),
+        immutable_prefix_blocks: handle.immutable_prefix_blocks.clone(),
     });
     let state = AppState {
         model: model.clone(),
