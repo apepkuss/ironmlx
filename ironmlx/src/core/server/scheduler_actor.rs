@@ -24,6 +24,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use serde::Serialize;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::core::cache::{
@@ -33,7 +34,7 @@ use crate::core::generate::GenerateRequest;
 use crate::core::model::Model;
 use crate::core::scheduler::{
     ActiveKvParkedRequest, AdmitMidHandle, DenseVlMethods, Gemma4DrafterAdmitMidHandle,
-    MtpAdmitMidHandle, Phase, RequestId, Scheduler, StepEvent,
+    ImmutablePrefixBlockStats, MtpAdmitMidHandle, Phase, RequestId, Scheduler, StepEvent,
 };
 use crate::core::server::adaptive_admission::{
     AdaptiveAdmissionPolicy, AdmissionRequestShape, ROLLING_DECODE_STEPS_AFTER_ADMISSION_WORK,
@@ -43,6 +44,86 @@ use crate::core::speculative::{
     MtpSpeculativeStats,
 };
 use crate::Result;
+
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct ImmutablePrefixBlockHealth {
+    pub enabled: bool,
+    pub blocks: u64,
+    pub published_blocks: u64,
+    pub restored_blocks: u64,
+    pub active_block_hits: u64,
+    pub idle_block_hits: u64,
+    pub lookup_misses: u64,
+    pub evicted_blocks: u64,
+    pub blocked_evictions: u64,
+    pub dedup_saved_bytes: u64,
+}
+
+#[derive(Clone)]
+pub struct ImmutablePrefixBlockSharedStats {
+    enabled: bool,
+    blocks: Arc<AtomicU64>,
+    published_blocks: Arc<AtomicU64>,
+    restored_blocks: Arc<AtomicU64>,
+    active_block_hits: Arc<AtomicU64>,
+    idle_block_hits: Arc<AtomicU64>,
+    lookup_misses: Arc<AtomicU64>,
+    evicted_blocks: Arc<AtomicU64>,
+    blocked_evictions: Arc<AtomicU64>,
+    dedup_saved_bytes: Arc<AtomicU64>,
+}
+
+impl ImmutablePrefixBlockSharedStats {
+    pub(crate) fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            blocks: Arc::new(AtomicU64::new(0)),
+            published_blocks: Arc::new(AtomicU64::new(0)),
+            restored_blocks: Arc::new(AtomicU64::new(0)),
+            active_block_hits: Arc::new(AtomicU64::new(0)),
+            idle_block_hits: Arc::new(AtomicU64::new(0)),
+            lookup_misses: Arc::new(AtomicU64::new(0)),
+            evicted_blocks: Arc::new(AtomicU64::new(0)),
+            blocked_evictions: Arc::new(AtomicU64::new(0)),
+            dedup_saved_bytes: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    fn store(&self, stats: ImmutablePrefixBlockStats) {
+        self.blocks.store(stats.blocks, Ordering::Relaxed);
+        self.published_blocks
+            .store(stats.published_blocks, Ordering::Relaxed);
+        self.restored_blocks
+            .store(stats.restored_blocks, Ordering::Relaxed);
+        self.active_block_hits
+            .store(stats.active_block_hits, Ordering::Relaxed);
+        self.idle_block_hits
+            .store(stats.idle_block_hits, Ordering::Relaxed);
+        self.lookup_misses
+            .store(stats.lookup_misses, Ordering::Relaxed);
+        self.evicted_blocks
+            .store(stats.evicted_blocks, Ordering::Relaxed);
+        self.blocked_evictions
+            .store(stats.blocked_evictions, Ordering::Relaxed);
+        self.dedup_saved_bytes
+            .store(stats.dedup_saved_bytes, Ordering::Relaxed);
+    }
+
+    pub fn snapshot(&self) -> ImmutablePrefixBlockHealth {
+        ImmutablePrefixBlockHealth {
+            enabled: self.enabled,
+            blocks: self.blocks.load(Ordering::Relaxed),
+            published_blocks: self.published_blocks.load(Ordering::Relaxed),
+            restored_blocks: self.restored_blocks.load(Ordering::Relaxed),
+            active_block_hits: self.active_block_hits.load(Ordering::Relaxed),
+            idle_block_hits: self.idle_block_hits.load(Ordering::Relaxed),
+            lookup_misses: self.lookup_misses.load(Ordering::Relaxed),
+            evicted_blocks: self.evicted_blocks.load(Ordering::Relaxed),
+            blocked_evictions: self.blocked_evictions.load(Ordering::Relaxed),
+            dedup_saved_bytes: self.dedup_saved_bytes.load(Ordering::Relaxed),
+        }
+    }
+}
 
 /// Commands accepted by the actor. 3b-2 ships only [`Admit`]; later
 /// phases may add `Cancel { id }`, `Stats`, etc.
@@ -1021,6 +1102,8 @@ pub struct SchedulerActorHandle {
     pub kv_cache_budget_policy: &'static str,
     /// Shared Active KV offload metrics and runtime status.
     pub active_kv_offload: ActiveKvOffloadSharedStats,
+    /// FullPaged immutable content-addressed prefix block pool metrics.
+    pub immutable_prefix_blocks: ImmutablePrefixBlockSharedStats,
 }
 
 impl SchedulerActorHandle {
@@ -1429,6 +1512,7 @@ where
     let b_active = Arc::new(AtomicU64::new(0));
     let b_queued = Arc::new(AtomicU64::new(0));
     let active_kv_stats = ActiveKvOffloadSharedStats::new(&active_kv_offload);
+    let immutable_prefix_stats = ImmutablePrefixBlockSharedStats::new(paged_prefix_cache.is_some());
 
     // Clone Arcs for the driver thread.
     let driver_budget_state = budget_state.clone();
@@ -1465,6 +1549,7 @@ where
     let prefix_lru_cache_for_task = prefix_lru_cache;
     let active_kv_offload_for_task = active_kv_offload.clone();
     let active_kv_stats_for_task = active_kv_stats.clone();
+    let immutable_prefix_stats_for_task = immutable_prefix_stats.clone();
     let cold_materialization_tracker_for_task = Arc::clone(&cold_materialization_tracker);
 
     // ── Step 3: Spawn driver — Scheduler::new_with_state constructed INSIDE
@@ -1498,12 +1583,14 @@ where
         scheduler
             .enable_active_kv_offload(active_kv_offload_for_task, active_kv_stats_for_task.clone())
             .expect("active KV offload config was validated before actor spawn");
+        immutable_prefix_stats_for_task.store(scheduler.request_owned_kv_stats().immutable_prefix);
         driver_loop(
             scheduler,
             model,
             mtp_mode,
             mtp_counters_for_task,
             active_kv_stats_for_task,
+            immutable_prefix_stats_for_task,
             admission_deadline,
             admission_queue_max,
             cmd_rx,
@@ -1558,6 +1645,7 @@ where
         kv_cache_resident_cap_tokens,
         kv_cache_budget_policy,
         active_kv_offload: active_kv_stats,
+        immutable_prefix_blocks: immutable_prefix_stats,
     })
 }
 
@@ -1568,6 +1656,7 @@ fn driver_loop<M, A>(
     mut mtp_mode: A,
     mtp_counters: SchedulerActorMtpCounters,
     active_kv_stats: ActiveKvOffloadSharedStats,
+    immutable_prefix_stats: ImmutablePrefixBlockSharedStats,
     admission_deadline: Duration,
     admission_queue_max: usize,
     mut cmd_rx: mpsc::Receiver<SchedulerCommand>,
@@ -2132,6 +2221,7 @@ fn driver_loop<M, A>(
             b_queued.store(admission_queue.len() as u64, Ordering::Relaxed);
             sched.refresh_active_kv_residency_stats();
             active_kv_stats.set_parked_requests(parked_active_kv.len());
+            immutable_prefix_stats.store(sched.request_owned_kv_stats().immutable_prefix);
 
             // ===== Exit rolling loop when active_count == 0 AND queue empty. =====
             // Spec §9 R1: if `active_count() == 0` but admission_queue is
@@ -2189,6 +2279,7 @@ fn driver_loop<M, A>(
             }
             mtp_counters.reset_stats_baseline();
         }
+        immutable_prefix_stats.store(sched.request_owned_kv_stats().immutable_prefix);
         in_flight_mid_admit = None;
         cleanup_parked_active_kv_requests(
             &sched,

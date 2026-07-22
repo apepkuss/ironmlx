@@ -24,9 +24,11 @@ pub struct PagedKVCache {
     block_tables: Vec<Vec<i32>>,
     execution_owners: Vec<PagedKvBlockOwner>,
     owned_block_tables: HashMap<PagedKvBlockOwner, PagedKvOwnedBlockTable>,
+    immutable_pins: HashMap<u64, PagedKvImmutableBlockHandle>,
     next_transient_owner: u64,
     free_pages: Vec<i32>,
     page_ref_counts: Vec<i32>,
+    page_generations: Vec<u64>,
     allocated_pages: i32,
     page_capacity: i32,
     max_pages: i32,
@@ -50,7 +52,15 @@ pub struct PagedKVCache {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PagedKvBlockOwner {
     Request(u64),
+    Immutable(u64),
     Transient(u64),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PagedKvImmutableBlockHandle {
+    pub block_index: i32,
+    pub page: i32,
+    pub generation: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +79,8 @@ pub struct PagedKvPhysicalStats {
     pub max_page_refcount: u64,
     pub request_owned_tables: u64,
     pub transient_owned_tables: u64,
+    pub immutable_pinned_tables: u64,
+    pub immutable_pinned_pages: u64,
     pub orphan_pages: u64,
     pub cow_page_copies: u64,
     pub adopt_page_copies: u64,
@@ -214,9 +226,11 @@ impl PagedKVCache {
             block_tables,
             execution_owners,
             owned_block_tables,
+            immutable_pins: HashMap::new(),
             next_transient_owner: batch as u64,
             free_pages: Vec::new(),
             page_ref_counts: Vec::new(),
+            page_generations: Vec::new(),
             allocated_pages: 0,
             page_capacity: 0,
             max_pages,
@@ -244,6 +258,16 @@ impl PagedKVCache {
 
     pub fn max_pages(&self) -> i32 {
         self.max_pages
+    }
+
+    pub fn page_bytes(&self) -> usize {
+        let elements = usize::try_from(self.n_kv_heads)
+            .unwrap_or(0)
+            .saturating_mul(usize::try_from(self.block_size).unwrap_or(0))
+            .saturating_mul(
+                usize::try_from(self.head_dim.saturating_add(self.v_head_dim)).unwrap_or(0),
+            );
+        elements.saturating_mul(self.dtype.byte_size())
     }
 
     pub fn block_table_row(&self, row: usize) -> &[i32] {
@@ -284,9 +308,13 @@ impl PagedKVCache {
         let mut owner_refs = vec![0_u64; self.allocated_pages as usize];
         let mut request_owned_tables = 0_u64;
         let mut transient_owned_tables = 0_u64;
+        let immutable_pinned_tables = self.immutable_pins.len() as u64;
         for (owner, table) in &self.owned_block_tables {
             match owner {
                 PagedKvBlockOwner::Request(_) => request_owned_tables += 1,
+                PagedKvBlockOwner::Immutable(_) => {
+                    debug_assert!(false, "immutable pins must not allocate full block tables")
+                }
                 PagedKvBlockOwner::Transient(_) => transient_owned_tables += 1,
             }
             for &page in &table.blocks {
@@ -298,11 +326,21 @@ impl PagedKVCache {
                 }
             }
         }
+        for handle in self.immutable_pins.values() {
+            if let Some(count) = usize::try_from(handle.page)
+                .ok()
+                .and_then(|page| owner_refs.get_mut(page))
+            {
+                *count += 1;
+            }
+        }
 
         let mut stats = PagedKvPhysicalStats {
             physical_pages_total: self.allocated_pages.max(0) as u64,
             request_owned_tables,
             transient_owned_tables,
+            immutable_pinned_tables,
+            immutable_pinned_pages: immutable_pinned_tables,
             cow_page_copies: self.observability.cow_page_copies,
             adopt_page_copies: self.observability.adopt_page_copies,
             owner_forks: self.observability.owner_forks,
@@ -350,6 +388,10 @@ impl PagedKVCache {
         let mut counted_refs = vec![0_i32; self.allocated_pages as usize];
         for (owner, table) in &self.owned_block_tables {
             anyhow::ensure!(
+                !matches!(owner, PagedKvBlockOwner::Immutable(_)),
+                "PagedKVCache owner invariant: immutable owner {owner:?} has a full block table"
+            );
+            anyhow::ensure!(
                 table.blocks.len() == self.max_blocks_per_row as usize,
                 "PagedKVCache owner invariant: owner {owner:?} table width {} != {}",
                 table.blocks.len(),
@@ -374,6 +416,16 @@ impl PagedKVCache {
                 counted_refs[page] += 1;
             }
         }
+        for (&id, &handle) in &self.immutable_pins {
+            self.validate_live_handle(handle)?;
+            anyhow::ensure!(
+                handle.block_index >= 0 && handle.block_index < self.max_blocks_per_row,
+                "PagedKVCache owner invariant: immutable pin {id} block {} outside table width {}",
+                handle.block_index,
+                self.max_blocks_per_row
+            );
+            counted_refs[handle.page as usize] += 1;
+        }
         for (page, (&counted, &stored)) in counted_refs
             .iter()
             .zip(self.page_ref_counts.iter())
@@ -384,6 +436,12 @@ impl PagedKVCache {
                 "PagedKVCache owner invariant: page {page} counted refs {counted} != stored refs {stored}"
             );
         }
+        anyhow::ensure!(
+            self.page_generations.len() >= self.allocated_pages as usize,
+            "PagedKVCache owner invariant: generation slots {} < allocated pages {}",
+            self.page_generations.len(),
+            self.allocated_pages
+        );
         for (row, &owner) in self.execution_owners.iter().enumerate() {
             let table = self.owned_block_tables.get(&owner).ok_or_else(|| {
                 anyhow::anyhow!(
@@ -546,6 +604,200 @@ impl PagedKVCache {
             .map(|table| table.offset)
     }
 
+    pub fn available_unique_pages(&self) -> usize {
+        let referenced = self
+            .page_ref_counts
+            .iter()
+            .take(self.allocated_pages as usize)
+            .filter(|&&count| count > 0)
+            .count();
+        usize::try_from(self.max_pages)
+            .unwrap_or(0)
+            .saturating_sub(referenced)
+    }
+
+    pub(super) fn validate_immutable_block_pin(
+        &self,
+        source: PagedKvBlockOwner,
+        block_index: i32,
+        pin: PagedKvBlockOwner,
+    ) -> Result<PagedKvImmutableBlockHandle> {
+        anyhow::ensure!(
+            matches!(pin, PagedKvBlockOwner::Immutable(_)),
+            "PagedKVCache::pin_immutable_block: pin owner must be immutable"
+        );
+        anyhow::ensure!(
+            block_index >= 0 && block_index < self.max_blocks_per_row,
+            "PagedKVCache::pin_immutable_block: block index {block_index} outside [0, {})",
+            self.max_blocks_per_row
+        );
+        let PagedKvBlockOwner::Immutable(pin_id) = pin else {
+            unreachable!("immutable pin kind checked above")
+        };
+        anyhow::ensure!(
+            !self.immutable_pins.contains_key(&pin_id),
+            "PagedKVCache::pin_immutable_block: pin owner {pin:?} already exists"
+        );
+        let source_table = self.owned_block_tables.get(&source).ok_or_else(|| {
+            anyhow::anyhow!("PagedKVCache::pin_immutable_block: source owner {source:?} absent")
+        })?;
+        let block_end = (block_index + 1)
+            .checked_mul(self.block_size)
+            .ok_or_else(|| anyhow::anyhow!("immutable block end overflow"))?;
+        anyhow::ensure!(
+            source_table.offset >= block_end,
+            "PagedKVCache::pin_immutable_block: source offset {} does not seal block {block_index}",
+            source_table.offset
+        );
+        let page = source_table.blocks[block_index as usize];
+        anyhow::ensure!(
+            page >= 0 && self.page_ref_count(page) > 0,
+            "PagedKVCache::pin_immutable_block: source block {block_index} has no live page"
+        );
+        anyhow::ensure!(
+            self.page_ref_count(page) < i32::MAX,
+            "PagedKVCache::pin_immutable_block: page {page} refcount overflow"
+        );
+        Ok(PagedKvImmutableBlockHandle {
+            block_index,
+            page,
+            generation: self.page_generation(page),
+        })
+    }
+
+    pub(super) fn pin_immutable_block_prevalidated(
+        &mut self,
+        pin: PagedKvBlockOwner,
+        handle: PagedKvImmutableBlockHandle,
+    ) {
+        let PagedKvBlockOwner::Immutable(pin_id) = pin else {
+            unreachable!("prevalidated immutable pin must be immutable")
+        };
+        self.page_ref_counts[handle.page as usize] += 1;
+        self.immutable_pins.insert(pin_id, handle);
+    }
+
+    pub(super) fn validate_immutable_prefix_install(
+        &mut self,
+        destination: PagedKvBlockOwner,
+        handles: &[PagedKvImmutableBlockHandle],
+        offsets: &[i32],
+    ) -> Result<()> {
+        anyhow::ensure!(
+            matches!(destination, PagedKvBlockOwner::Request(_)),
+            "PagedKVCache::install_immutable_prefix: destination must be a request owner"
+        );
+        anyhow::ensure!(
+            !handles.is_empty() && handles.len() <= self.max_blocks_per_row as usize,
+            "PagedKVCache::install_immutable_prefix: invalid block count {}",
+            handles.len()
+        );
+        anyhow::ensure!(
+            offsets.len() == self.batch as usize,
+            "PagedKVCache::install_immutable_prefix: offsets.len()={} != batch {}",
+            offsets.len(),
+            self.batch
+        );
+        self.commit_execution_rows(offsets)?;
+        if let Some(table) = self.owned_block_tables.get(&destination) {
+            anyhow::ensure!(
+                table.offset == 0 && table.blocks.iter().all(|&page| page < 0),
+                "PagedKVCache::install_immutable_prefix: destination {destination:?} is not empty"
+            );
+        }
+        for (block_index, handle) in handles.iter().enumerate() {
+            anyhow::ensure!(
+                handle.block_index == block_index as i32,
+                "PagedKVCache::install_immutable_prefix: handle block {} != destination block {block_index}",
+                handle.block_index
+            );
+            self.validate_live_handle(*handle)?;
+            anyhow::ensure!(
+                self.page_ref_count(handle.page) < i32::MAX,
+                "PagedKVCache::install_immutable_prefix: page {} refcount overflow",
+                handle.page
+            );
+        }
+        Ok(())
+    }
+
+    pub(super) fn install_immutable_prefix_prevalidated(
+        &mut self,
+        destination: PagedKvBlockOwner,
+        handles: &[PagedKvImmutableBlockHandle],
+        offsets: &mut [i32],
+    ) {
+        let mut table = PagedKvOwnedBlockTable {
+            blocks: vec![-1; self.max_blocks_per_row as usize],
+            offset: handles.len() as i32 * self.block_size,
+        };
+        for handle in handles {
+            table.blocks[handle.block_index as usize] = handle.page;
+            self.page_ref_counts[handle.page as usize] += 1;
+        }
+        self.owned_block_tables.insert(destination, table.clone());
+        for (row, &owner) in self.execution_owners.iter().enumerate() {
+            if owner == destination {
+                self.block_tables[row].clone_from(&table.blocks);
+                offsets[row] = table.offset;
+            }
+        }
+    }
+
+    pub fn immutable_handle_has_request_refs(
+        &self,
+        handle: PagedKvImmutableBlockHandle,
+    ) -> Result<bool> {
+        self.validate_live_handle(handle)?;
+        Ok(self.page_ref_count(handle.page) > 1)
+    }
+
+    pub(super) fn validate_immutable_pin_handle(
+        &self,
+        pin: PagedKvBlockOwner,
+        handle: PagedKvImmutableBlockHandle,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            matches!(pin, PagedKvBlockOwner::Immutable(_)),
+            "PagedKVCache immutable pin owner must be immutable"
+        );
+        self.validate_live_handle(handle)?;
+        let PagedKvBlockOwner::Immutable(pin_id) = pin else {
+            unreachable!("immutable pin kind checked above")
+        };
+        let stored = self
+            .immutable_pins
+            .get(&pin_id)
+            .ok_or_else(|| anyhow::anyhow!("PagedKVCache immutable pin owner {pin:?} is absent"))?;
+        anyhow::ensure!(
+            *stored == handle,
+            "PagedKVCache immutable pin {pin:?} handle {stored:?} != {handle:?}"
+        );
+        Ok(())
+    }
+
+    fn validate_live_handle(&self, handle: PagedKvImmutableBlockHandle) -> Result<()> {
+        anyhow::ensure!(
+            handle.page >= 0 && handle.page < self.allocated_pages,
+            "PagedKVCache immutable handle page {} outside allocated pages {}",
+            handle.page,
+            self.allocated_pages
+        );
+        anyhow::ensure!(
+            self.page_ref_count(handle.page) > 0,
+            "PagedKVCache immutable handle references free page {}",
+            handle.page
+        );
+        anyhow::ensure!(
+            self.page_generation(handle.page) == handle.generation,
+            "PagedKVCache immutable handle generation mismatch for page {}: {} != {}",
+            handle.page,
+            handle.generation,
+            self.page_generation(handle.page)
+        );
+        Ok(())
+    }
+
     pub(super) fn validate_owner_fork(
         &mut self,
         source: PagedKvBlockOwner,
@@ -645,6 +897,15 @@ impl PagedKVCache {
             self.batch
         );
         self.commit_execution_rows(offsets)?;
+        if let PagedKvBlockOwner::Immutable(id) = owner {
+            let Some(handle) = self.immutable_pins.remove(&id) else {
+                return Ok(false);
+            };
+            self.release_page_ref(handle.page);
+            self.observability.owner_releases = self.observability.owner_releases.saturating_add(1);
+            self.validate_owner_invariants()?;
+            return Ok(true);
+        }
         let Some(table) = self.owned_block_tables.remove(&owner) else {
             return Ok(false);
         };
@@ -719,6 +980,8 @@ impl PagedKVCache {
         }
         self.free_pages.clear();
         self.page_ref_counts.fill(0);
+        self.page_generations.clear();
+        self.immutable_pins.clear();
         self.allocated_pages = 0;
         for table in self.owned_block_tables.values_mut() {
             table.blocks.fill(-1);
@@ -1652,6 +1915,8 @@ impl PagedKVCache {
         self.page_capacity = total_pages;
         self.page_ref_counts.clear();
         self.page_ref_counts.resize(total_pages as usize, 0);
+        self.page_generations.clear();
+        self.page_generations.resize(total_pages as usize, 1);
         self.k_pages = Some(self.build_prefix_page_tensor_on(
             k_pages_src,
             shared_blocks,
@@ -1707,6 +1972,8 @@ impl PagedKVCache {
         self.page_capacity = resident_pages.len() as i32;
         self.page_ref_counts.clear();
         self.page_ref_counts.resize(total_pages as usize, 0);
+        self.page_generations.clear();
+        self.page_generations.resize(total_pages as usize, 1);
         self.k_pages = Some(self.build_selected_prefix_page_tensor_on(
             k_pages_src,
             &page_source,
@@ -2884,6 +3151,13 @@ impl PagedKVCache {
             .unwrap_or(0)
     }
 
+    fn page_generation(&self, page: i32) -> u64 {
+        self.page_generations
+            .get(page as usize)
+            .copied()
+            .unwrap_or(0)
+    }
+
     fn set_page_ref_count(&mut self, page: i32, count: i32) {
         debug_assert!(page >= 0);
         debug_assert!(count >= 0);
@@ -2933,6 +3207,13 @@ impl PagedKVCache {
             self.ensure_page_capacity(page + 1, target)?;
         }
         self.set_page_ref_count(page, 1);
+        let needed = page as usize + 1;
+        if self.page_generations.len() < needed {
+            self.page_generations.resize(needed, 0);
+        }
+        self.page_generations[page as usize] = self.page_generations[page as usize]
+            .saturating_add(1)
+            .max(1);
         Ok(page)
     }
 
@@ -3849,6 +4130,9 @@ impl PagedKVCache {
         if self.page_ref_counts.len() < target_capacity as usize {
             self.page_ref_counts.resize(target_capacity as usize, 0);
         }
+        if self.page_generations.len() < target_capacity as usize {
+            self.page_generations.resize(target_capacity as usize, 0);
+        }
         Ok(())
     }
 
@@ -4637,6 +4921,145 @@ mod tests {
         assert_eq!(released.physical_pages_referenced, 0);
         assert_eq!(released.owner_releases, 2);
         assert_eq!(released.orphan_pages, 0);
+        cache.validate_owner_invariants().expect("owner invariants");
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn paged_kv_immutable_blocks_share_complete_pages_and_keep_tails_private() {
+        let source = PagedKvBlockOwner::Request(11);
+        let destination = PagedKvBlockOwner::Request(22);
+        let first_pin = PagedKvBlockOwner::Immutable(100);
+        let second_pin = PagedKvBlockOwner::Immutable(101);
+        let mut cache =
+            PagedKVCache::new(1, 1, 2, 2, Dtype::Float32, 10, 2, 8).expect("paged cache");
+        let mut offsets = vec![0_i32];
+        cache
+            .bind_execution_rows(&[source], &mut offsets)
+            .expect("bind source");
+        let values = [1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let k: Array = (&values[..], (1_i32, 1_i32, 4_i32, 2_i32))
+            .try_into()
+            .unwrap();
+        cache
+            .update_and_fetch_on(&k, &k, &mut offsets, &[4], ())
+            .expect("append sealed blocks");
+
+        let first = cache
+            .validate_immutable_block_pin(source, 0, first_pin)
+            .expect("validate first pin");
+        cache.pin_immutable_block_prevalidated(first_pin, first);
+        let second = cache
+            .validate_immutable_block_pin(source, 1, second_pin)
+            .expect("validate second pin");
+        cache.pin_immutable_block_prevalidated(second_pin, second);
+        assert_eq!(
+            cache.owned_block_tables.len(),
+            1,
+            "immutable pins must not allocate sparse full-width block tables"
+        );
+        assert_eq!(cache.immutable_pins.len(), 2);
+        cache
+            .validate_immutable_pin_handle(first_pin, first)
+            .expect("first pin identity");
+        cache
+            .validate_immutable_pin_handle(second_pin, second)
+            .expect("second pin identity");
+
+        cache
+            .release_owner(source, &mut offsets)
+            .expect("release source");
+        cache
+            .bind_execution_rows(&[destination], &mut offsets)
+            .expect("bind destination");
+        cache
+            .validate_immutable_prefix_install(destination, &[first, second], &offsets)
+            .expect("validate immutable install");
+        cache.install_immutable_prefix_prevalidated(destination, &[first, second], &mut offsets);
+        assert_eq!(offsets, vec![4]);
+        assert_eq!(&cache.block_table_row(0)[..2], &[first.page, second.page]);
+        assert_eq!(cache.physical_stats().cow_page_copies, 0);
+
+        let tail = [9.0_f32, 10.0];
+        let tail: Array = (&tail[..], (1_i32, 1_i32, 1_i32, 2_i32))
+            .try_into()
+            .unwrap();
+        cache
+            .update_and_fetch_on(&tail, &tail, &mut offsets, &[1], ())
+            .expect("append private tail");
+        assert_eq!(offsets, vec![5]);
+        assert_eq!(cache.physical_stats().cow_page_copies, 0);
+
+        cache
+            .release_owner(destination, &mut offsets)
+            .expect("release destination");
+        let pinned = cache.physical_stats();
+        assert_eq!(pinned.physical_pages_referenced, 2);
+        assert_eq!(pinned.immutable_pinned_tables, 2);
+        cache
+            .release_owner(first_pin, &mut offsets)
+            .expect("release first pin");
+        cache
+            .release_owner(second_pin, &mut offsets)
+            .expect("release second pin");
+        assert_eq!(cache.physical_stats().physical_pages_referenced, 0);
+        cache.validate_owner_invariants().expect("owner invariants");
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn paged_kv_immutable_pin_rejects_partial_block_and_stale_generation() {
+        let source = PagedKvBlockOwner::Request(11);
+        let pin = PagedKvBlockOwner::Immutable(100);
+        let mut cache =
+            PagedKVCache::new(1, 1, 2, 2, Dtype::Float32, 8, 2, 4).expect("paged cache");
+        let mut offsets = vec![0_i32];
+        cache
+            .bind_execution_rows(&[source], &mut offsets)
+            .expect("bind source");
+        let values = [1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let values: Array = (&values[..], (1_i32, 1_i32, 3_i32, 2_i32))
+            .try_into()
+            .unwrap();
+        cache
+            .update_and_fetch_on(&values, &values, &mut offsets, &[3], ())
+            .expect("append partial tail");
+        let partial = cache.validate_immutable_block_pin(source, 1, pin);
+        assert!(partial
+            .expect_err("partial block must not be pinned")
+            .to_string()
+            .contains("does not seal block"));
+
+        let handle = cache
+            .validate_immutable_block_pin(source, 0, pin)
+            .expect("validate sealed block");
+        cache.pin_immutable_block_prevalidated(pin, handle);
+        cache
+            .release_owner(source, &mut offsets)
+            .expect("release source");
+        cache.release_owner(pin, &mut offsets).expect("release pin");
+        let replacement = PagedKvBlockOwner::Request(22);
+        cache
+            .bind_execution_rows(&[replacement], &mut offsets)
+            .expect("bind replacement");
+        let replacement_values = [9.0_f32, 10.0, 11.0, 12.0];
+        let replacement_values: Array = (&replacement_values[..], (1_i32, 1_i32, 2_i32, 2_i32))
+            .try_into()
+            .unwrap();
+        cache
+            .update_and_fetch_on(
+                &replacement_values,
+                &replacement_values,
+                &mut offsets,
+                &[2],
+                (),
+            )
+            .expect("reuse released page");
+        assert!(cache
+            .validate_live_handle(handle)
+            .expect_err("stale generation must be rejected")
+            .to_string()
+            .contains("generation mismatch"));
         cache.validate_owner_invariants().expect("owner invariants");
     }
 

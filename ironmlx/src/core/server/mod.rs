@@ -1101,6 +1101,7 @@ fn build_health_collector(
         kv_cache_budget_policy: scheduler_handle.kv_cache_budget_policy.to_string(),
         mtp,
         active_kv_offload: scheduler_handle.active_kv_offload.clone(),
+        immutable_prefix_blocks: scheduler_handle.immutable_prefix_blocks.clone(),
     })
 }
 
@@ -1325,6 +1326,7 @@ mod tests {
             active_kv_offload: crate::core::cache::ActiveKvOffloadSharedStats::new(
                 &crate::core::cache::ActiveKvOffloadConfig::disabled(),
             ),
+            immutable_prefix_blocks: scheduler_actor::ImmutablePrefixBlockSharedStats::new(false),
         }
     }
 

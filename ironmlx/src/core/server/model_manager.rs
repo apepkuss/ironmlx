@@ -1486,6 +1486,8 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
     let mut mtp_decode_cache_commit_us = 0;
     let mut mtp_cache_restore_us = 0;
     let mut active_kv_snapshots = Vec::new();
+    let mut immutable_prefix_blocks =
+        crate::core::server::scheduler_actor::ImmutablePrefixBlockHealth::default();
 
     for snapshot in snapshots {
         if !snapshot.model.name.is_empty() {
@@ -1542,6 +1544,24 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
         mtp_prefill_cache_commit_us += snapshot.mtp.prefill_cache_commit_us;
         mtp_decode_cache_commit_us += snapshot.mtp.decode_cache_commit_us;
         mtp_cache_restore_us += snapshot.mtp.cache_restore_us;
+        immutable_prefix_blocks.enabled |= snapshot.memory.immutable_prefix_blocks.enabled;
+        immutable_prefix_blocks.blocks += snapshot.memory.immutable_prefix_blocks.blocks;
+        immutable_prefix_blocks.published_blocks +=
+            snapshot.memory.immutable_prefix_blocks.published_blocks;
+        immutable_prefix_blocks.restored_blocks +=
+            snapshot.memory.immutable_prefix_blocks.restored_blocks;
+        immutable_prefix_blocks.active_block_hits +=
+            snapshot.memory.immutable_prefix_blocks.active_block_hits;
+        immutable_prefix_blocks.idle_block_hits +=
+            snapshot.memory.immutable_prefix_blocks.idle_block_hits;
+        immutable_prefix_blocks.lookup_misses +=
+            snapshot.memory.immutable_prefix_blocks.lookup_misses;
+        immutable_prefix_blocks.evicted_blocks +=
+            snapshot.memory.immutable_prefix_blocks.evicted_blocks;
+        immutable_prefix_blocks.blocked_evictions +=
+            snapshot.memory.immutable_prefix_blocks.blocked_evictions;
+        immutable_prefix_blocks.dedup_saved_bytes +=
+            snapshot.memory.immutable_prefix_blocks.dedup_saved_bytes;
         active_kv_snapshots.push(snapshot.active_kv_offload);
     }
 
@@ -1613,6 +1633,7 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
             mlx_memory_limit_bytes: mlx_memory.memory_limit_bytes,
             process_governor,
             prefix_store,
+            immutable_prefix_blocks,
         },
         mtp: MtpHealthInfo {
             enabled: mtp_enabled,
@@ -1760,6 +1781,8 @@ mod tests {
                 mlx_memory_limit_bytes: 0,
                 process_governor: crate::core::process_memory::MemoryGovernorSnapshot::default(),
                 prefix_store: crate::core::cache::AsyncPrefixStoreStats::default(),
+                immutable_prefix_blocks:
+                    crate::core::server::scheduler_actor::ImmutablePrefixBlockHealth::default(),
             },
             mtp: MtpHealthInfo {
                 enabled: true,

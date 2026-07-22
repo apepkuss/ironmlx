@@ -11,8 +11,8 @@ use mlx::{Array, Dtype, StreamOrDevice};
 
 use super::{
     PagedKVCache, PagedKvBlockOwner, PagedKvHotColdConfig, PagedKvHotColdSummary,
-    PagedKvPhysicalStats, PagedPrefixLayer, TurboQuantKVBits, TurboQuantKVCache,
-    TurboQuantPrefixLayer,
+    PagedKvImmutableBlockHandle, PagedKvPhysicalStats, PagedPrefixLayer, TurboQuantKVBits,
+    TurboQuantKVCache, TurboQuantPrefixLayer,
 };
 use crate::Result;
 
@@ -319,8 +319,90 @@ impl KVCache {
         true
     }
 
+    pub fn validate_paged_immutable_block_pin(
+        &mut self,
+        source: PagedKvBlockOwner,
+        block_index: i32,
+        pin: PagedKvBlockOwner,
+    ) -> Result<Option<PagedKvImmutableBlockHandle>> {
+        let Some(paged) = self.paged.as_mut() else {
+            return Ok(None);
+        };
+        paged
+            .validate_immutable_block_pin(source, block_index, pin)
+            .map(Some)
+    }
+
+    pub fn pin_paged_immutable_block_prevalidated(
+        &mut self,
+        pin: PagedKvBlockOwner,
+        handle: PagedKvImmutableBlockHandle,
+    ) -> bool {
+        let Some(paged) = self.paged.as_mut() else {
+            return false;
+        };
+        paged.pin_immutable_block_prevalidated(pin, handle);
+        true
+    }
+
+    pub fn validate_paged_immutable_prefix_install(
+        &mut self,
+        destination: PagedKvBlockOwner,
+        handles: &[PagedKvImmutableBlockHandle],
+    ) -> Result<bool> {
+        let Some(paged) = self.paged.as_mut() else {
+            return Ok(false);
+        };
+        paged.validate_immutable_prefix_install(destination, handles, &self.offsets)?;
+        Ok(true)
+    }
+
+    pub fn install_paged_immutable_prefix_prevalidated(
+        &mut self,
+        destination: PagedKvBlockOwner,
+        handles: &[PagedKvImmutableBlockHandle],
+    ) -> bool {
+        let Some(paged) = self.paged.as_mut() else {
+            return false;
+        };
+        paged.install_immutable_prefix_prevalidated(destination, handles, &mut self.offsets);
+        true
+    }
+
+    pub fn paged_immutable_handle_has_request_refs(
+        &self,
+        handle: PagedKvImmutableBlockHandle,
+    ) -> Result<Option<bool>> {
+        let Some(paged) = self.paged.as_ref() else {
+            return Ok(None);
+        };
+        paged.immutable_handle_has_request_refs(handle).map(Some)
+    }
+
+    pub fn validate_paged_immutable_pin_handle(
+        &self,
+        pin: PagedKvBlockOwner,
+        handle: PagedKvImmutableBlockHandle,
+    ) -> Result<bool> {
+        let Some(paged) = self.paged.as_ref() else {
+            return Ok(false);
+        };
+        paged.validate_immutable_pin_handle(pin, handle)?;
+        Ok(true)
+    }
+
+    pub fn paged_available_unique_pages(&self) -> Option<usize> {
+        self.paged
+            .as_ref()
+            .map(|paged| paged.available_unique_pages())
+    }
+
     pub fn paged_physical_stats(&self) -> Option<PagedKvPhysicalStats> {
         self.paged.as_ref().map(|paged| paged.physical_stats())
+    }
+
+    pub fn paged_page_bytes(&self) -> Option<usize> {
+        self.paged.as_ref().map(|paged| paged.page_bytes())
     }
 
     pub fn validate_paged_owner_invariants(&self) -> Result<()> {

@@ -20,7 +20,7 @@ pub use kv_cache::{KVCache, KVCacheSnapshot};
 pub use mtp_cache::{MtpCache, MtpCacheSnapshot};
 pub use paged_kv::{
     PagedKVCache, PagedKvBlockOwner, PagedKvHotColdConfig, PagedKvHotColdSummary,
-    PagedKvPhysicalStats,
+    PagedKvImmutableBlockHandle, PagedKvPhysicalStats,
 };
 pub use prefix_store::{
     cancel_process_async_prefix_store_model, process_async_prefix_store_queue,
