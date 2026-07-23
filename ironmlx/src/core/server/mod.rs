@@ -128,8 +128,8 @@ pub struct AppState<M: Model + DenseVlMethods + Send + 'static> {
     pub cold_materialization_tracker: Arc<crate::core::process_memory::ColdMaterializationTracker>,
     /// Optional TurboQuant K/V bit-widths for full-attention KV cache reads.
     pub kv_cache_turboquant_bits: Option<TurboQuantKVBits>,
-    /// True when this state owns any scheduler-backed speculative source.
-    pub speculative_enabled: bool,
+    /// Route eligible greedy requests through SchedulerActor.
+    pub force_scheduler_for_greedy: bool,
     /// True only for the request-local greedy PromptLookup source.
     pub prompt_lookup_enabled: bool,
     /// Health snapshot collector for `/healthz`. Holds shared Arc atomics
@@ -157,7 +157,7 @@ impl<M: Model + DenseVlMethods + Send + 'static> Clone for AppState<M> {
             static_memory_estimate: self.static_memory_estimate,
             cold_materialization_tracker: self.cold_materialization_tracker.clone(),
             kv_cache_turboquant_bits: self.kv_cache_turboquant_bits,
-            speculative_enabled: self.speculative_enabled,
+            force_scheduler_for_greedy: self.force_scheduler_for_greedy,
             prompt_lookup_enabled: self.prompt_lookup_enabled,
             health_collector: self.health_collector.clone(),
         }
@@ -288,7 +288,7 @@ where
 {
     fn paged_prefix_cache_enabled(&self) -> bool;
 
-    fn speculative_enabled(&self) -> bool;
+    fn force_scheduler_for_greedy(&self) -> bool;
 
     fn prompt_lookup_config(&self) -> Option<crate::core::prompt_lookup::PromptLookupConfig> {
         None
@@ -311,6 +311,7 @@ struct PlainSchedulerActorSpawner {
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     active_kv_offload: ActiveKvOffloadConfig,
+    force_scheduler: bool,
 }
 
 impl<M> SchedulerActorSpawner<M> for PlainSchedulerActorSpawner
@@ -321,8 +322,8 @@ where
         self.paged_prefix_cache.is_some()
     }
 
-    fn speculative_enabled(&self) -> bool {
-        false
+    fn force_scheduler_for_greedy(&self) -> bool {
+        self.force_scheduler
     }
 
     fn spawn(
@@ -335,6 +336,22 @@ where
         decode_cadence_mid_chunk_cap: usize,
         meta: crate::core::memory_budget::ModelMeta,
     ) -> Result<scheduler_actor::SchedulerActorHandle> {
+        if self.force_scheduler {
+            return Ok(
+                scheduler_actor::spawn_scheduler_actor_for_prompt_lookup_control(
+                    model,
+                    b_max,
+                    admission_deadline,
+                    admission_queue_max,
+                    effective_cap_max,
+                    decode_cadence_mid_chunk_cap,
+                    meta,
+                    self.paged_prefix_cache,
+                    self.prefix_lru_cache,
+                    self.active_kv_offload,
+                )?,
+            );
+        }
         if let Some(config) = self.paged_prefix_cache {
             if self.active_kv_offload.enabled {
                 return Ok(
@@ -402,6 +419,7 @@ struct MtpSchedulerActorSpawner<H> {
 
 struct PromptLookupSchedulerActorSpawner {
     cfg: crate::core::prompt_lookup::PromptLookupConfig,
+    qualification: crate::core::prompt_lookup::PromptLookupQualificationRuntimeConfig,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     active_kv_offload: ActiveKvOffloadConfig,
@@ -420,7 +438,7 @@ impl SchedulerActorSpawner<crate::models::Gemma4Model> for Gemma4DrafterSchedule
         self.paged_prefix_cache.is_some()
     }
 
-    fn speculative_enabled(&self) -> bool {
+    fn force_scheduler_for_greedy(&self) -> bool {
         true
     }
 
@@ -478,7 +496,7 @@ where
         self.paged_prefix_cache.is_some()
     }
 
-    fn speculative_enabled(&self) -> bool {
+    fn force_scheduler_for_greedy(&self) -> bool {
         true
     }
 
@@ -535,7 +553,7 @@ where
         self.paged_prefix_cache.is_some()
     }
 
-    fn speculative_enabled(&self) -> bool {
+    fn force_scheduler_for_greedy(&self) -> bool {
         true
     }
 
@@ -556,6 +574,7 @@ where
         scheduler_actor::spawn_scheduler_actor_with_prompt_lookup(
             model,
             self.cfg,
+            self.qualification,
             b_max,
             admission_deadline,
             admission_queue_max,
@@ -590,6 +609,7 @@ pub async fn serve<M>(
     scheduler_autotune_report: bool,
     vision_input_override: Option<VisionInputConfig>,
     static_memory_estimate: crate::core::process_memory::StaticMemoryEstimate,
+    force_scheduler: bool,
 ) -> Result<()>
 where
     M: Model + DenseVlMethods + Send + 'static,
@@ -616,6 +636,7 @@ where
             paged_prefix_cache,
             prefix_lru_cache,
             active_kv_offload,
+            force_scheduler,
         },
     )
     .await
@@ -647,6 +668,10 @@ pub async fn serve_with_prompt_lookup<M>(
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
+    let qualification =
+        crate::core::prompt_lookup::PromptLookupQualificationRuntimeConfig::for_scheduler_profile(
+            &scheduler_runtime_profile,
+        )?;
     serve_inner(
         model,
         tokenizer,
@@ -667,6 +692,7 @@ where
         None,
         PromptLookupSchedulerActorSpawner {
             cfg,
+            qualification,
             paged_prefix_cache,
             prefix_lru_cache,
             active_kv_offload,
@@ -851,6 +877,7 @@ where
             paged_prefix_cache,
             prefix_lru_cache,
             active_kv_offload,
+            force_scheduler: false,
         },
     )
     .await
@@ -880,6 +907,10 @@ pub(crate) async fn build_prompt_lookup_app_state<M>(
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
+    let qualification =
+        crate::core::prompt_lookup::PromptLookupQualificationRuntimeConfig::for_scheduler_profile(
+            &scheduler_runtime_profile,
+        )?;
     build_app_state(
         model,
         tokenizer,
@@ -898,6 +929,7 @@ where
         None,
         PromptLookupSchedulerActorSpawner {
             cfg,
+            qualification,
             paged_prefix_cache,
             prefix_lru_cache,
             active_kv_offload,
@@ -1117,7 +1149,7 @@ where
     }
 
     let paged_prefix_cache_enabled = scheduler_actor_spawner.paged_prefix_cache_enabled();
-    let speculative_enabled = scheduler_actor_spawner.speculative_enabled();
+    let force_scheduler_for_greedy = scheduler_actor_spawner.force_scheduler_for_greedy();
     let prompt_lookup_config = scheduler_actor_spawner.prompt_lookup_config();
     let prompt_lookup_enabled = prompt_lookup_config.is_some();
     let scheduler_handle = scheduler_actor_spawner.spawn(
@@ -1200,7 +1232,7 @@ where
         static_memory_estimate,
         cold_materialization_tracker,
         kv_cache_turboquant_bits,
-        speculative_enabled,
+        force_scheduler_for_greedy,
         prompt_lookup_enabled,
         health_collector,
     })
@@ -1289,6 +1321,8 @@ fn build_health_collector(
         max_position_embeddings: model_max_context as i32,
         b_active: scheduler_handle.b_active.clone(),
         b_queued: scheduler_handle.b_queued.clone(),
+        admit_count: scheduler_handle.admit_count.clone(),
+        batch_count: scheduler_handle.batch_count.clone(),
         admission_queue_full_count: scheduler_handle.admission_queue_full_count.clone(),
         memory_budget_exceeded_count: scheduler_handle.memory_budget_exceeded_count.clone(),
         kv_cache_active_bytes: scheduler_handle.kv_cache_active_bytes.clone(),
@@ -1476,7 +1510,7 @@ mod tests {
     }
 
     #[test]
-    fn route_uses_scheduler_for_long_prompt_when_mtp_forces_scheduler() {
+    fn route_uses_scheduler_for_long_prompt_when_greedy_scheduler_is_forced() {
         assert!(should_route_to_scheduler::<DefaultRouteModel>(
             4096, 2048, 1, false, true,
         ));

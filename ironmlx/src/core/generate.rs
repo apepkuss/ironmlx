@@ -475,6 +475,79 @@ pub fn build_per_row_decode_mask(
     mlx::ops::cast::astype(&arr_f32, dtype).map_err(|e| anyhow!("astype mask: {e}"))
 }
 
+/// Build an additive causal mask for a ragged batched cache append.
+///
+/// The returned shape is `[B, 1, max_new_len, max_post_len]`. Row `i`
+/// appends `per_row_new_lens[i]` real tokens after `pre_offsets[i]` cached
+/// tokens. Real query `q` can attend through `pre_offsets[i] + q`; padded
+/// queries can attend to the row's valid post-append history so their softmax
+/// remains finite, but their outputs are discarded and never written to KV.
+pub fn build_batched_append_attention_mask(
+    pre_offsets: &[i32],
+    per_row_new_lens: &[i32],
+    max_new_len: i32,
+    dtype: Dtype,
+) -> Result<Array> {
+    if pre_offsets.is_empty() || pre_offsets.len() != per_row_new_lens.len() {
+        return Err(anyhow!(
+            "build_batched_append_attention_mask: pre_offsets len {} must equal non-zero per_row_new_lens len {}",
+            pre_offsets.len(),
+            per_row_new_lens.len()
+        ));
+    }
+    if max_new_len <= 0 {
+        return Err(anyhow!(
+            "build_batched_append_attention_mask: max_new_len must be > 0, got {max_new_len}"
+        ));
+    }
+
+    let mut post_lens = Vec::with_capacity(pre_offsets.len());
+    for (row, (&pre, &new_len)) in pre_offsets.iter().zip(per_row_new_lens.iter()).enumerate() {
+        if pre < 0 {
+            return Err(anyhow!(
+                "build_batched_append_attention_mask: pre_offsets[{row}] = {pre} must be >= 0"
+            ));
+        }
+        if new_len < 0 || new_len > max_new_len {
+            return Err(anyhow!(
+                "build_batched_append_attention_mask: per_row_new_lens[{row}] = {new_len} out of [0, {max_new_len}]"
+            ));
+        }
+        post_lens.push(pre + new_len);
+    }
+    let max_post_len = post_lens.iter().copied().max().unwrap_or(0);
+    if max_post_len <= 0 {
+        return Err(anyhow!(
+            "build_batched_append_attention_mask: every row has zero post-append length"
+        ));
+    }
+
+    let b = pre_offsets.len();
+    let q_len = max_new_len as usize;
+    let kv_len = max_post_len as usize;
+    let neg_inf = f32::NEG_INFINITY;
+    let mut flat = vec![neg_inf; b * q_len * kv_len];
+    for row in 0..b {
+        let pre = pre_offsets[row] as usize;
+        let new_len = per_row_new_lens[row] as usize;
+        let post_len = post_lens[row] as usize;
+        for q in 0..q_len {
+            let visible = if q < new_len {
+                pre + q + 1
+            } else {
+                post_len.max(1)
+            };
+            for k in 0..visible.min(kv_len) {
+                flat[(row * q_len + q) * kv_len + k] = 0.0;
+            }
+        }
+    }
+
+    let arr_f32: Array =
+        (&flat[..], &[b as i32, 1_i32, max_new_len, max_post_len][..]).try_into()?;
+    mlx::ops::cast::astype(&arr_f32, dtype).map_err(|e| anyhow!("astype mask: {e}"))
+}
+
 /// Build a cross-chunk prefill attention mask for one chunk of a chunked
 /// mid-batch admit. Shape: `[1, 1, chunk_len, chunk_start + chunk_len]`.
 ///
@@ -2254,6 +2327,32 @@ mod b1_p2_1_mask_tests {
             0.0, ni, ni, 0.0, 0.0, ni, 0.0, 0.0, 0.0,
         ];
         assert_eq!(flat, expected);
+    }
+
+    #[test]
+    fn build_batched_append_mask_handles_complementary_offsets_and_lens() {
+        // Both rows end at K=8, but row 0 appends one token after a longer
+        // history while row 1 appends five. Treating this as an unmasked
+        // uniform append would incorrectly build K=12 from max(pre)+Q.
+        let mask =
+            build_batched_append_attention_mask(&[7, 3], &[1, 5], 5, Dtype::Float32).expect("mask");
+        assert_eq!(mask.shape().as_slice(), &[2, 1, 5, 8]);
+        let flat: Vec<f32> = mask.to_vec().expect("to_vec");
+        let row_stride = 5 * 8;
+
+        // Row 0's only real query sees all eight valid keys. Its padded
+        // queries remain finite without extending the cache.
+        assert!(flat[..row_stride].iter().all(|&value| value == 0.0));
+
+        // Row 1's real queries reveal one new key at a time after K=3.
+        for q in 0..5 {
+            let query = &flat[row_stride + q * 8..row_stride + (q + 1) * 8];
+            let visible = 3 + q + 1;
+            assert!(query[..visible].iter().all(|&value| value == 0.0));
+            assert!(query[visible..]
+                .iter()
+                .all(|value| value.is_infinite() && value.is_sign_negative()));
+        }
     }
 }
 

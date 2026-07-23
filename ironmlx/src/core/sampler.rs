@@ -114,22 +114,17 @@ impl Sampler {
         self
     }
 
-    /// Returns `true` iff this sampler is in the "default greedy"
-    /// configuration: `temperature <= 0` and no penalties / filters
-    /// (`top_k`, `top_p`, `min_p`, repetition / frequency / presence
-    /// penalty all `None` / zero). Used by [`sample_batch`] (3e.1a) to
-    /// pick the vectorized argmax fast path when every active row's
-    /// sampler is greedy.
+    /// Returns `true` iff this sampler has deterministic argmax semantics:
+    /// `temperature <= 0` and no repetition / frequency / presence penalty.
+    /// `top_k`, `top_p`, and `min_p` are intentionally ignored because
+    /// [`Sampler::sample`] returns from its greedy branch before applying
+    /// those sampling-only filters. Used by [`sample_batch`] (3e.1a) to pick
+    /// the vectorized argmax fast path when every active row is greedy.
     ///
-    /// Distinct from [`is_pipelinable`] which permits non-greedy
-    /// temperature as long as penalties are off: pipelined decode only
-    /// requires no host-side penalty math, whereas `is_greedy` requires
-    /// the full greedy short-circuit at `Sampler::sample` line ~210.
+    /// This predicate deliberately matches the eligibility of the greedy
+    /// async pipeline so synchronous and batched sampling cannot disagree.
     pub fn is_greedy(&self) -> bool {
         self.temperature <= 0.0
-            && self.top_k.is_none()
-            && self.top_p.is_none()
-            && self.min_p.is_none()
             && self.repetition_penalty.is_none()
             && self.frequency_penalty.is_none()
             && self.presence_penalty.is_none()
@@ -949,9 +944,12 @@ mod tests {
     }
 
     #[test]
-    fn is_greedy_false_when_top_p_set() {
-        let s = Sampler::greedy().with_top_p(0.9);
-        assert!(!s.is_greedy());
+    fn is_greedy_ignores_sampling_filters_at_zero_temperature() {
+        let s = Sampler::greedy()
+            .with_top_k(2)
+            .with_top_p(0.9)
+            .with_min_p(0.1);
+        assert!(s.is_greedy());
     }
 
     #[test]
@@ -999,6 +997,22 @@ mod tests {
         let tokens =
             sample_batch(&samplers, &logits, &histories, &mut prng).expect("sample_batch B=1");
         assert_eq!(tokens, vec![15]);
+    }
+
+    #[test]
+    fn sample_batch_zero_temperature_with_http_filters_returns_argmax() {
+        let s = Sampler::greedy().with_top_p(1.0).with_top_k(8);
+        let samplers = vec![&s];
+        let logits: Array = (&[0.1_f32, 1.5, 7.0, 3.0][..], &[1_i32, 4_i32][..])
+            .try_into()
+            .unwrap();
+        let histories: Vec<&[u32]> = vec![&[]];
+        let mut prng: Array = (&[0_u32; 2][..], &[1_i32, 2_i32][..]).try_into().unwrap();
+
+        let tokens = sample_batch(&samplers, &logits, &histories, &mut prng)
+            .expect("zero-temperature HTTP filters must retain greedy semantics");
+
+        assert_eq!(tokens, vec![2]);
     }
 
     #[test]

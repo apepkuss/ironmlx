@@ -290,6 +290,8 @@ async fn anthropic_actor_scheduler_path_emits_6_event_sequence() {
         max_position_embeddings: 32768_i32,
         b_active: handle.b_active.clone(),
         b_queued: handle.b_queued.clone(),
+        admit_count: handle.admit_count.clone(),
+        batch_count: handle.batch_count.clone(),
         admission_queue_full_count: handle.admission_queue_full_count.clone(),
         memory_budget_exceeded_count: handle.memory_budget_exceeded_count.clone(),
         kv_cache_active_bytes: handle.kv_cache_active_bytes.clone(),
@@ -298,6 +300,7 @@ async fn anthropic_actor_scheduler_path_emits_6_event_sequence() {
         kv_cache_resident_cap_tokens: handle.kv_cache_resident_cap_tokens,
         kv_cache_budget_policy: handle.kv_cache_budget_policy.to_string(),
         mtp: ironmlx::core::server::health::MtpHealthConfig::disabled(),
+        prompt_lookup: ironmlx::core::server::health::PromptLookupHealthConfig::disabled(),
         active_kv_offload: handle.active_kv_offload.clone(),
         immutable_prefix_blocks: handle.immutable_prefix_blocks.clone(),
     });
@@ -343,7 +346,8 @@ async fn anthropic_actor_scheduler_path_emits_6_event_sequence() {
         cold_materialization_tracker:
             ironmlx::core::process_memory::ColdMaterializationTracker::new(Default::default()),
         kv_cache_turboquant_bits: None,
-        mtp_enabled: false,
+        force_scheduler_for_greedy: true,
+        prompt_lookup_enabled: false,
         health_collector,
     };
 

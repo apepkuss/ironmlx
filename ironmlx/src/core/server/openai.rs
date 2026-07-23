@@ -461,7 +461,7 @@ where
         scheduler_config.prefill_chunk_size,
         state.b_max,
         state.paged_prefix_cache_enabled,
-        state.speculative_enabled && sampler.is_pipelinable(),
+        state.force_scheduler_for_greedy && sampler.is_pipelinable(),
     );
 
     let stop_token_ids = stop_token_ids_for_request(state.tokenizer.eos_token_ids(), ignore_eos);

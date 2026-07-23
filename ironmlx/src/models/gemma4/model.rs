@@ -688,6 +688,10 @@ impl Model for Gemma4Model {
         Gemma4Model::model_meta(self)
     }
 
+    fn requires_eager_sequential_speculative_verify(&self) -> bool {
+        true
+    }
+
     fn num_hidden_layers(&self) -> usize {
         self.config().num_hidden_layers as usize
     }

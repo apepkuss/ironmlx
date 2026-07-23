@@ -1509,6 +1509,8 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
     let mut b_active = 0;
     let mut b_queued = 0;
     let mut queue_max = 0;
+    let mut admit_count = 0;
+    let mut batch_count = 0;
     let mut admission_queue_full_count = 0;
     let mut memory_budget_exceeded_count = 0;
     let mut kv_cache_active_bytes = 0;
@@ -1553,6 +1555,8 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
         b_active += snapshot.scheduler.b_active;
         b_queued += snapshot.scheduler.b_queued;
         queue_max += snapshot.scheduler.queue_max;
+        admit_count += snapshot.scheduler.admit_count;
+        batch_count += snapshot.scheduler.batch_count;
         admission_queue_full_count += snapshot.scheduler.admission_queue_full_count;
         memory_budget_exceeded_count += snapshot.scheduler.memory_budget_exceeded_count;
         kv_cache_active_bytes += snapshot.memory.kv_cache_active_bytes;
@@ -1689,6 +1693,8 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
             b_active,
             b_queued,
             queue_max,
+            admit_count,
+            batch_count,
             admission_queue_full_count,
             memory_budget_exceeded_count,
         },
@@ -1868,6 +1874,8 @@ mod tests {
                 b_active: 0,
                 b_queued: 0,
                 queue_max: 32,
+                admit_count: 0,
+                batch_count: 0,
                 admission_queue_full_count: 0,
                 memory_budget_exceeded_count: 0,
             },
@@ -2169,6 +2177,7 @@ mod tests {
             port: 8080,
             host: "127.0.0.1".to_string(),
             prefill_chunk_size: None,
+            force_scheduler: false,
             b_max: None,
             admission_deadline_ms: None,
             admission_queue_max: None,

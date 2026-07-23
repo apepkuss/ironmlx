@@ -223,10 +223,7 @@ fn profile_selection_rejects_inactive_speculative_context() {
         80.0,
     )]);
     calibration.runtime_context.speculative.mode = SchedulerSpeculativeMode::QwenMtp;
-    calibration
-        .runtime_context
-        .speculative
-        .draft_model_fingerprint = Some("draft-model".to_string());
+    calibration.runtime_context.speculative.source_fingerprint = Some("draft-model".to_string());
     calibration.runtime_context.speculative.draft_tokens = Some(3);
 
     let selection = select_scheduler_autotune_profile(calibration);

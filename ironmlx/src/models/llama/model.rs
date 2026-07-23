@@ -434,6 +434,10 @@ impl Model for LlamaModel {
         false
     }
 
+    fn supports_speculative_accepted_prefix_trim(&self) -> bool {
+        true
+    }
+
     fn model_meta(&self) -> ModelMeta {
         LlamaModel::model_meta(self)
     }

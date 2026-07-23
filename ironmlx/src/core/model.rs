@@ -100,6 +100,37 @@ pub trait Model {
         true
     }
 
+    /// Whether this model has qualified a multi-token speculative verify
+    /// forward as greedy-token-equivalent to its ordinary single-token decode
+    /// path across supported batch shapes.
+    ///
+    /// Full KV cache trim is necessary for an exact batched verify, but it is
+    /// not sufficient: quantized projection and attention kernels can change
+    /// numerical shape at `Q > 1` and flip an argmax. Models must opt in only
+    /// after architecture-level token-parity qualification.
+    fn supports_exact_batched_speculative_verify(&self) -> bool {
+        false
+    }
+
+    /// Whether q=1 speculative verification must materialize each device
+    /// result before host-side cache offsets advance to the next depth.
+    ///
+    /// Most architectures can retain the full sequential chain lazily. A
+    /// model should opt in only when its cache/shared-state execution has
+    /// demonstrated that deferred materialization changes greedy results.
+    fn requires_eager_sequential_speculative_verify(&self) -> bool {
+        false
+    }
+
+    /// Whether speculative rollback may keep the already-computed accepted
+    /// prefix by trimming only Full-cache offsets.
+    ///
+    /// Models whose cache or attention implementation has not qualified that
+    /// invariant must restore the base snapshot and replay accepted inputs.
+    fn supports_speculative_accepted_prefix_trim(&self) -> bool {
+        false
+    }
+
     /// Maximum number of requests this model wants to admit into one fresh
     /// prefill batch for a prompt of `prompt_len` tokens.
     ///

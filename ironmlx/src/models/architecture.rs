@@ -73,4 +73,28 @@ impl ModelArchitecture {
             Self::DiffusionGemma => "diffusion_gemma",
         }
     }
+
+    pub fn supports_prompt_lookup(self) -> bool {
+        !matches!(self, Self::DiffusionGemma)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ModelArchitecture;
+
+    #[test]
+    fn prompt_lookup_is_limited_to_causal_scheduler_architectures() {
+        for architecture in [
+            ModelArchitecture::Qwen35Dense,
+            ModelArchitecture::Qwen35Moe,
+            ModelArchitecture::Gemma4,
+            ModelArchitecture::Glm4MoeLite,
+            ModelArchitecture::Llama,
+            ModelArchitecture::MiniCpmV46,
+        ] {
+            assert!(architecture.supports_prompt_lookup(), "{architecture:?}");
+        }
+        assert!(!ModelArchitecture::DiffusionGemma.supports_prompt_lookup());
+    }
 }

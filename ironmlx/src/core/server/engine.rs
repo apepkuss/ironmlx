@@ -482,7 +482,7 @@ fn validate_engine_model_config(model: &EngineModelConfig) -> Result<()> {
     }
     if let Some(prompt_lookup) = model.prompt_lookup {
         prompt_lookup.validate()?;
-        if architecture == ModelArchitecture::DiffusionGemma {
+        if !architecture.supports_prompt_lookup() {
             bail!(
                 "engine model `{}` configures PromptLookup for DiffusionGemma",
                 model.id
@@ -2619,7 +2619,7 @@ async fn load_engine_variant(
                     model.id
                 );
             }
-            if model.prompt_lookup.is_some() {
+            if model.prompt_lookup.is_some() && !architecture.supports_prompt_lookup() {
                 bail!(
                     "engine model `{}` configures PromptLookup for DiffusionGemma",
                     model.id

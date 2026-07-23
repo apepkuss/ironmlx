@@ -32,7 +32,11 @@ use crate::core::cache::{
 };
 use crate::core::generate::GenerateRequest;
 use crate::core::model::Model;
-use crate::core::prompt_lookup::{PromptLookupConfig, PromptLookupStats};
+use crate::core::prompt_lookup::{
+    PromptLookupConfig, PromptLookupCostAction, PromptLookupCostController,
+    PromptLookupQualificationRegime, PromptLookupQualificationRuntimeConfig,
+    PromptLookupQualificationStats, PromptLookupStats,
+};
 use crate::core::scheduler::{
     ActiveKvParkedRequest, AdmitMidHandle, DenseVlMethods, Gemma4DrafterAdmitMidHandle,
     ImmutablePrefixBlockStats, MtpAdmitMidHandle, Phase, RequestId, Scheduler, StepEvent,
@@ -308,6 +312,10 @@ fn rolling_profile_elapsed_ms(start: Instant, end: Instant) -> f64 {
     end.saturating_duration_since(start).as_secs_f64() * 1000.0
 }
 
+fn duration_ns(duration: Duration) -> u64 {
+    duration.as_nanos().try_into().unwrap_or(u64::MAX)
+}
+
 fn rolling_profile_queue_wait_ms(queued_at: Instant, now: Instant) -> f64 {
     rolling_profile_elapsed_ms(queued_at, now)
 }
@@ -417,6 +425,7 @@ struct SchedulerActorMtpCounters {
     mtp_cache_restore_us: Arc<AtomicU64>,
     published_stats: Arc<StdMutex<Option<MtpSpeculativeStats>>>,
     prompt_lookup_published_stats: Arc<StdMutex<Option<PromptLookupStats>>>,
+    prompt_lookup_stats_baseline: Arc<StdMutex<Option<PromptLookupStats>>>,
 }
 
 impl SchedulerActorMtpCounters {
@@ -465,6 +474,7 @@ impl SchedulerActorMtpCounters {
             mtp_cache_restore_us,
             published_stats: Arc::new(StdMutex::new(None)),
             prompt_lookup_published_stats,
+            prompt_lookup_stats_baseline: Arc::new(StdMutex::new(None)),
         }
     }
 
@@ -490,6 +500,7 @@ impl SchedulerActorMtpCounters {
 
     fn reset_stats_baseline(&self) {
         self.store_stats(None);
+        self.store_prompt_lookup_stats(None);
     }
 
     fn add_stats_delta(&self, stats: &MtpSpeculativeStats) {
@@ -530,10 +541,52 @@ impl SchedulerActorMtpCounters {
     }
 
     fn store_prompt_lookup_stats(&self, stats: Option<PromptLookupStats>) {
-        *self
+        let mut baseline = self
+            .prompt_lookup_stats_baseline
+            .lock()
+            .expect("PromptLookup stats baseline mutex poisoned");
+        let mut published = self
             .prompt_lookup_published_stats
             .lock()
-            .expect("PromptLookup published stats mutex poisoned") = stats;
+            .expect("PromptLookup published stats mutex poisoned");
+        match stats {
+            Some(stats) => {
+                let delta = baseline
+                    .map(|before| stats.saturating_delta_since(before))
+                    .unwrap_or(stats);
+                published.get_or_insert_default().accumulate_delta(delta);
+                *baseline = Some(stats);
+            }
+            None => {
+                *baseline = None;
+                if let Some(stats) = published.as_mut() {
+                    stats.index_entries_current = 0;
+                }
+            }
+        }
+    }
+
+    fn store_prompt_lookup_stats_with_qualification(
+        &self,
+        stats: Option<PromptLookupStats>,
+        qualification: PromptLookupQualificationStats,
+    ) {
+        self.store_prompt_lookup_stats(stats);
+        let mut published = self
+            .prompt_lookup_published_stats
+            .lock()
+            .expect("PromptLookup published stats mutex poisoned");
+        let stats = published.get_or_insert_default();
+        stats.ordinary_cost_samples = qualification.ordinary_cost_samples;
+        stats.lookup_cost_samples = qualification.lookup_cost_samples;
+        stats.ordinary_cost_us = qualification.ordinary_cost_us;
+        stats.lookup_cost_us = qualification.lookup_cost_us;
+        stats.qualified_regimes_current = qualification.qualified_regimes_current;
+        stats.rejected_regimes_current = qualification.rejected_regimes_current;
+        stats.qualification_changes = qualification.qualification_changes;
+        stats.qualification_profile_loads = qualification.profile_loads;
+        stats.qualification_profile_writes = qualification.profile_writes;
+        stats.qualification_profile_write_drops = qualification.profile_write_drops;
     }
 }
 
@@ -544,6 +597,10 @@ where
     type MidAdmitHandle: Send + 'static;
 
     fn allow_rolling_mid_admit(&self) -> bool {
+        true
+    }
+
+    fn can_start_rolling_mid_admit(&self, _sched: &Scheduler<M>) -> bool {
         true
     }
 
@@ -600,6 +657,16 @@ struct SchedulerActorNoMtp;
 
 struct SchedulerActorPromptLookup {
     cfg: PromptLookupConfig,
+    defer_speculation_once: bool,
+    cost_controller: PromptLookupCostController,
+    measured_cycle: Option<PromptLookupMeasuredCycle>,
+}
+
+struct PromptLookupMeasuredCycle {
+    regime: PromptLookupQualificationRegime,
+    elapsed_ns: u64,
+    committed_tokens: usize,
+    stats_before: PromptLookupStats,
 }
 
 struct SchedulerActorMtp<H> {
@@ -635,10 +702,23 @@ impl<H> SchedulerActorMtp<H> {
 }
 
 impl SchedulerActorPromptLookup {
-    fn new(cfg: PromptLookupConfig) -> Result<Self> {
+    fn new(
+        cfg: PromptLookupConfig,
+        qualification: PromptLookupQualificationRuntimeConfig,
+    ) -> Result<Self> {
         Ok(Self {
             cfg: cfg.validate()?,
+            defer_speculation_once: false,
+            cost_controller: PromptLookupCostController::new(qualification)?,
+            measured_cycle: None,
         })
+    }
+
+    fn publish_stats<M: Model>(&self, sched: &Scheduler<M>, counters: &SchedulerActorMtpCounters) {
+        counters.store_prompt_lookup_stats_with_qualification(
+            sched.prompt_lookup_stats(),
+            self.cost_controller.stats(),
+        );
     }
 }
 
@@ -740,6 +820,10 @@ where
 {
     type MidAdmitHandle = AdmitMidHandle;
 
+    fn can_start_rolling_mid_admit(&self, sched: &Scheduler<M>) -> bool {
+        sched.prompt_lookup_can_start_rolling_mid_admit()
+    }
+
     fn mid_admit_request_id(handle: &Self::MidAdmitHandle) -> RequestId {
         handle.request_id
     }
@@ -771,7 +855,9 @@ where
         counters: &SchedulerActorMtpCounters,
     ) -> Result<Vec<StepEvent>> {
         let events = sched.prefill_admitted_prompt_lookup(model, self.cfg)?;
-        counters.store_prompt_lookup_stats(sched.prompt_lookup_stats());
+        self.defer_speculation_once = true;
+        self.measured_cycle = None;
+        self.publish_stats(sched, counters);
         Ok(events)
     }
 
@@ -781,8 +867,73 @@ where
         model: &M,
         counters: &SchedulerActorMtpCounters,
     ) -> Result<Vec<StepEvent>> {
-        let events = sched.step_prompt_lookup(model)?;
-        counters.store_prompt_lookup_stats(sched.prompt_lookup_stats());
+        let boundary_before = sched.prompt_lookup_can_start_rolling_mid_admit();
+        let regime = self
+            .measured_cycle
+            .as_ref()
+            .map(|cycle| cycle.regime)
+            .or_else(|| sched.prompt_lookup_qualification_regime());
+        let action = if self.measured_cycle.is_some() {
+            PromptLookupCostAction::Lookup
+        } else if self.defer_speculation_once {
+            self.defer_speculation_once = false;
+            PromptLookupCostAction::Ordinary
+        } else {
+            regime
+                .map(|regime| self.cost_controller.next_action(regime))
+                .unwrap_or(PromptLookupCostAction::Ordinary)
+        };
+        debug_assert!(
+            self.measured_cycle.is_none() || !boundary_before,
+            "PromptLookup measured cycle remained active at a window boundary"
+        );
+        let stats_before = sched.prompt_lookup_stats().unwrap_or_default();
+        let started = Instant::now();
+        let events = match action {
+            PromptLookupCostAction::Ordinary => sched.step_prompt_lookup_ordinary(model)?,
+            PromptLookupCostAction::Lookup => sched.step_prompt_lookup(model)?,
+        };
+        let elapsed_ns = duration_ns(started.elapsed());
+        let stats_after = sched.prompt_lookup_stats().unwrap_or_default();
+        if let Some(regime) = regime {
+            match action {
+                PromptLookupCostAction::Ordinary => {
+                    self.cost_controller.record_sample(
+                        regime,
+                        action,
+                        elapsed_ns,
+                        events.len(),
+                        stats_after.saturating_delta_since(stats_before),
+                    );
+                }
+                PromptLookupCostAction::Lookup => {
+                    let cycle = self
+                        .measured_cycle
+                        .get_or_insert(PromptLookupMeasuredCycle {
+                            regime,
+                            elapsed_ns: 0,
+                            committed_tokens: 0,
+                            stats_before,
+                        });
+                    cycle.elapsed_ns = cycle.elapsed_ns.saturating_add(elapsed_ns);
+                    cycle.committed_tokens = cycle.committed_tokens.saturating_add(events.len());
+                    if sched.prompt_lookup_can_start_rolling_mid_admit() {
+                        let cycle = self
+                            .measured_cycle
+                            .take()
+                            .expect("PromptLookup measured cycle initialized above");
+                        self.cost_controller.record_sample(
+                            cycle.regime,
+                            action,
+                            cycle.elapsed_ns,
+                            cycle.committed_tokens,
+                            stats_after.saturating_delta_since(cycle.stats_before),
+                        );
+                    }
+                }
+            }
+        }
+        self.publish_stats(sched, counters);
         Ok(events)
     }
 
@@ -817,7 +968,9 @@ where
     ) -> Result<(RequestId, StepEvent)> {
         let result = sched.admit_mid_finalize(handle, model)?;
         sched.register_prompt_lookup_request(result.0, self.cfg)?;
-        counters.store_prompt_lookup_stats(sched.prompt_lookup_stats());
+        self.defer_speculation_once = true;
+        self.measured_cycle = None;
+        self.publish_stats(sched, counters);
         Ok(result)
     }
 }
@@ -1325,6 +1478,38 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_scheduler_actor_for_prompt_lookup_control<M>(
+    model: Arc<Mutex<M>>,
+    b_max: usize,
+    admission_deadline: Duration,
+    admission_queue_max: usize,
+    effective_cap_max: usize,
+    decode_cadence_mid_chunk_cap: usize,
+    meta: crate::core::memory_budget::ModelMeta,
+    paged_prefix_cache: Option<PagedPrefixCacheConfig>,
+    prefix_lru_cache: Option<PrefixLruCacheConfig>,
+    active_kv_offload: ActiveKvOffloadConfig,
+) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError>
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    spawn_scheduler_actor_with_mode(
+        model,
+        SchedulerActorNoMtp,
+        b_max,
+        admission_deadline,
+        admission_queue_max,
+        effective_cap_max,
+        decode_cadence_mid_chunk_cap,
+        meta,
+        paged_prefix_cache,
+        prefix_lru_cache,
+        AdaptiveAdmissionPolicy::prompt_lookup(),
+        active_kv_offload,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_scheduler_actor_with_active_kv_offload<M>(
     model: Arc<Mutex<M>>,
     b_max: usize,
@@ -1454,9 +1639,10 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn spawn_scheduler_actor_with_prompt_lookup<M>(
+pub(crate) fn spawn_scheduler_actor_with_prompt_lookup<M>(
     model: Arc<Mutex<M>>,
     cfg: PromptLookupConfig,
+    qualification: PromptLookupQualificationRuntimeConfig,
     b_max: usize,
     admission_deadline: Duration,
     admission_queue_max: usize,
@@ -1470,7 +1656,7 @@ pub fn spawn_scheduler_actor_with_prompt_lookup<M>(
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
-    let mode = SchedulerActorPromptLookup::new(cfg)?;
+    let mode = SchedulerActorPromptLookup::new(cfg, qualification)?;
     Ok(spawn_scheduler_actor_with_mode(
         model,
         mode,
@@ -1482,7 +1668,7 @@ where
         meta,
         paged_prefix_cache,
         prefix_lru_cache,
-        AdaptiveAdmissionPolicy::qwen_mtp(),
+        AdaptiveAdmissionPolicy::prompt_lookup(),
         active_kv_offload,
     )?)
 }
@@ -1909,6 +2095,11 @@ fn driver_loop<M, A>(
             }
         }
 
+        // Every ContinueOuter path may follow an error recovery that evicted
+        // the live batch. Publish the recovered depth before blocking for the
+        // next admit so health never retains a stale non-zero active count.
+        publish_scheduler_depth(&sched, admission_queue.len(), &b_active, &b_queued);
+
         // ===== Outer Idle: block waiting for first admit (or shutdown). =====
         // Outer Idle is reached only after evict_all clears all slots; the
         // admission queue is invariantly empty here (any queue elements were
@@ -1988,6 +2179,7 @@ fn driver_loop<M, A>(
             &mut event_txs,
             &mut in_flight_mid_admit,
         );
+        mtp_counters.store_prompt_lookup_stats(sched.prompt_lookup_stats());
         b_active.store(sched.active_count() as u64, Ordering::Relaxed);
         b_queued.store(admission_queue.len() as u64, Ordering::Relaxed);
         if sched.active_count() == 0 {
@@ -2179,7 +2371,9 @@ fn driver_loop<M, A>(
                     return;
                 }
                 RollingEvent::Admit(cmd) => {
-                    if !mtp_mode.allow_rolling_mid_admit() {
+                    if !mtp_mode.allow_rolling_mid_admit()
+                        || !mtp_mode.can_start_rolling_mid_admit(&sched)
+                    {
                         enqueue_or_reject(
                             cmd,
                             &mut admission_queue,
@@ -2341,9 +2535,12 @@ fn driver_loop<M, A>(
                                             "scheduler poisoned after request-owned KV release failure"
                                         )));
                                     }
+                                    b_active.store(sched.active_count() as u64, Ordering::Relaxed);
+                                    b_queued.store(admission_queue.len() as u64, Ordering::Relaxed);
                                     continue 'outer;
                                 }
                             };
+                            mtp_counters.store_prompt_lookup_stats(sched.prompt_lookup_stats());
                             if let (
                                 Some((
                                     step_active_before,
@@ -2373,6 +2570,7 @@ fn driver_loop<M, A>(
                             // requests wait for the next decode turn so
                             // active streams keep making progress.
                             if mtp_mode.allow_rolling_mid_admit()
+                                && mtp_mode.can_start_rolling_mid_admit(&sched)
                                 && in_flight_mid_admit.is_none()
                                 && !admission_queue.is_empty()
                                 && sched.active_count() >= b_max
@@ -2384,7 +2582,10 @@ fn driver_loop<M, A>(
                                     &active_kv_stats,
                                 );
                             }
-                            if mtp_mode.allow_rolling_mid_admit() && in_flight_mid_admit.is_none() {
+                            if mtp_mode.allow_rolling_mid_admit()
+                                && mtp_mode.can_start_rolling_mid_admit(&sched)
+                                && in_flight_mid_admit.is_none()
+                            {
                                 let decode_steps = drain_admission_queue(
                                     &mut admission_queue,
                                     &mut in_flight_mid_admit,
@@ -2447,6 +2648,8 @@ fn driver_loop<M, A>(
                                     "scheduler poisoned after step error"
                                 )));
                             }
+                            b_active.store(sched.active_count() as u64, Ordering::Relaxed);
+                            b_queued.store(admission_queue.len() as u64, Ordering::Relaxed);
                             continue 'outer;
                         }
                     }
@@ -2527,6 +2730,18 @@ fn driver_loop<M, A>(
         );
         event_txs.clear();
     }
+}
+
+fn publish_scheduler_depth<M>(
+    sched: &Scheduler<M>,
+    queued: usize,
+    b_active: &AtomicU64,
+    b_queued: &AtomicU64,
+) where
+    M: Model,
+{
+    b_active.store(sched.active_count() as u64, Ordering::Relaxed);
+    b_queued.store(queued as u64, Ordering::Relaxed);
 }
 
 /// Drain additional `Admit` commands until either the deadline expires or the
@@ -4479,6 +4694,145 @@ mod tests {
             400
         );
         assert_eq!(counters.mtp_cache_restore_us.load(Ordering::Relaxed), 775);
+    }
+
+    #[test]
+    fn prompt_lookup_counters_publish_cumulative_batches_and_live_index_state() {
+        let counters = test_mtp_counters();
+        counters.store_prompt_lookup_stats(Some(PromptLookupStats {
+            queries: 3,
+            hits: 2,
+            misses: 1,
+            drafted_tokens: 7,
+            accepted_tokens: 5,
+            rejected_tokens: 2,
+            index_entries_current: 11,
+            index_entries_peak: 13,
+            ..PromptLookupStats::default()
+        }));
+        counters.store_prompt_lookup_stats(Some(PromptLookupStats {
+            queries: 5,
+            hits: 3,
+            misses: 2,
+            drafted_tokens: 10,
+            accepted_tokens: 8,
+            rejected_tokens: 2,
+            index_entries_current: 0,
+            index_entries_peak: 17,
+            ..PromptLookupStats::default()
+        }));
+        counters.store_prompt_lookup_stats_with_qualification(
+            None,
+            PromptLookupQualificationStats {
+                ordinary_cost_samples: 8,
+                lookup_cost_samples: 9,
+                ordinary_cost_us: 10,
+                lookup_cost_us: 11,
+                qualified_regimes_current: 1,
+                rejected_regimes_current: 2,
+                qualification_changes: 3,
+                profile_loads: 1,
+                profile_writes: 4,
+                profile_write_drops: 1,
+            },
+        );
+        counters.reset_stats_baseline();
+        counters.store_prompt_lookup_stats_with_qualification(
+            Some(PromptLookupStats {
+                queries: 4,
+                hits: 1,
+                misses: 3,
+                drafted_tokens: 6,
+                accepted_tokens: 2,
+                rejected_tokens: 4,
+                index_entries_current: 9,
+                index_entries_peak: 12,
+                ..PromptLookupStats::default()
+            }),
+            PromptLookupQualificationStats {
+                ordinary_cost_samples: 8,
+                lookup_cost_samples: 9,
+                ordinary_cost_us: 10,
+                lookup_cost_us: 11,
+                qualified_regimes_current: 1,
+                rejected_regimes_current: 2,
+                qualification_changes: 3,
+                profile_loads: 1,
+                profile_writes: 4,
+                profile_write_drops: 1,
+            },
+        );
+
+        let stats = counters
+            .prompt_lookup_published_stats
+            .lock()
+            .expect("PromptLookup published stats")
+            .expect("PromptLookup stats were published");
+        assert_eq!(stats.queries, 9);
+        assert_eq!(stats.hits, 4);
+        assert_eq!(stats.misses, 5);
+        assert_eq!(stats.drafted_tokens, 16);
+        assert_eq!(stats.accepted_tokens, 10);
+        assert_eq!(stats.rejected_tokens, 6);
+        assert_eq!(stats.index_entries_current, 9);
+        assert_eq!(stats.index_entries_peak, 17);
+        assert_eq!(stats.ordinary_cost_samples, 8);
+        assert_eq!(stats.lookup_cost_samples, 9);
+        assert_eq!(stats.qualified_regimes_current, 1);
+        assert_eq!(stats.rejected_regimes_current, 2);
+        assert_eq!(stats.qualification_profile_writes, 4);
+
+        counters.reset_stats_baseline();
+        let stats = counters
+            .prompt_lookup_published_stats
+            .lock()
+            .expect("PromptLookup published stats")
+            .expect("PromptLookup stats remain cumulative while idle");
+        assert_eq!(stats.queries, 9);
+        assert_eq!(stats.index_entries_current, 0);
+        assert_eq!(stats.index_entries_peak, 17);
+    }
+
+    #[test]
+    fn prompt_lookup_scheduler_stats_do_not_clear_qualification_gauges() {
+        let counters = test_mtp_counters();
+        counters.store_prompt_lookup_stats_with_qualification(
+            Some(PromptLookupStats::default()),
+            PromptLookupQualificationStats {
+                qualified_regimes_current: 1,
+                rejected_regimes_current: 2,
+                ..PromptLookupQualificationStats::default()
+            },
+        );
+
+        counters.store_prompt_lookup_stats(Some(PromptLookupStats::default()));
+
+        let stats = counters
+            .prompt_lookup_published_stats
+            .lock()
+            .expect("PromptLookup published stats")
+            .expect("PromptLookup stats were published");
+        assert_eq!(stats.qualified_regimes_current, 1);
+        assert_eq!(stats.rejected_regimes_current, 2);
+    }
+
+    #[test]
+    fn recovered_prefill_failure_publishes_idle_scheduler_depth() {
+        let mut scheduler = Scheduler::<SchedulerActorFakeModel>::new(
+            4,
+            32,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler");
+        scheduler.admit(mk_req(11)).expect("admit");
+        scheduler.evict_all().expect("recover failed prefill");
+
+        let b_active = AtomicU64::new(4);
+        let b_queued = AtomicU64::new(3);
+        publish_scheduler_depth(&scheduler, 0, &b_active, &b_queued);
+
+        assert_eq!(b_active.load(Ordering::Relaxed), 0);
+        assert_eq!(b_queued.load(Ordering::Relaxed), 0);
     }
 
     #[test]

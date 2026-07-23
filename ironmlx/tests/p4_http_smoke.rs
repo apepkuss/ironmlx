@@ -75,6 +75,7 @@ async fn boot_server(port: u16) -> tokio::task::JoinHandle<anyhow::Result<()>> {
             /* scheduler_autotune_report */ false,
             /* vision_input_override */ None,
             /* static_memory_estimate */ Default::default(),
+            /* force_scheduler */ false,
         )
         .await
     })

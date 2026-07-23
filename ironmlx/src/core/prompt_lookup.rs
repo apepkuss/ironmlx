@@ -1,11 +1,26 @@
 use std::collections::{HashMap, VecDeque};
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, bail};
+use anyhow::{anyhow, bail, Context};
 use serde::{Deserialize, Serialize};
 
+use crate::core::scheduler_autotune::SchedulerAutotuneRuntimeProfile;
 use crate::Result;
 
 const POSITIONS_PER_NGRAM: usize = 2;
+const QUALIFICATION_SCHEMA_VERSION: u32 = 2;
+const QUALIFICATION_BASELINE_SAMPLES: usize = 8;
+const QUALIFICATION_PROBE_SAMPLES: usize = 8;
+const QUALIFICATION_MIN_GAIN_BPS: u64 = 300;
+const QUALIFICATION_MULTI_BATCH_INITIAL_DELAY_TOKENS: u64 = 512;
+const QUALIFICATION_REJECTED_INITIAL_COOLDOWN_TOKENS: u64 = 512;
+const QUALIFICATION_REJECTED_MAX_COOLDOWN_TOKENS: u64 = 32 * 1_024;
+const QUALIFICATION_REVALIDATE_TOKENS: u64 = 512;
+const QUALIFICATION_PROFILE_TTL_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptLookupConfig {
@@ -84,6 +99,17 @@ pub struct PromptLookupStats {
     pub verify_accept_host_sync_us: u64,
     pub rollback_count: u64,
     pub rollback_us: u64,
+    pub miss_fast_path_steps: u64,
+    pub ordinary_cost_samples: u64,
+    pub lookup_cost_samples: u64,
+    pub ordinary_cost_us: u64,
+    pub lookup_cost_us: u64,
+    pub qualified_regimes_current: u64,
+    pub rejected_regimes_current: u64,
+    pub qualification_changes: u64,
+    pub qualification_profile_loads: u64,
+    pub qualification_profile_writes: u64,
+    pub qualification_profile_write_drops: u64,
 }
 
 impl PromptLookupStats {
@@ -116,8 +142,875 @@ impl PromptLookupStats {
                 .saturating_sub(before.verify_accept_host_sync_us),
             rollback_count: self.rollback_count.saturating_sub(before.rollback_count),
             rollback_us: self.rollback_us.saturating_sub(before.rollback_us),
+            miss_fast_path_steps: self
+                .miss_fast_path_steps
+                .saturating_sub(before.miss_fast_path_steps),
+            ordinary_cost_samples: self
+                .ordinary_cost_samples
+                .saturating_sub(before.ordinary_cost_samples),
+            lookup_cost_samples: self
+                .lookup_cost_samples
+                .saturating_sub(before.lookup_cost_samples),
+            ordinary_cost_us: self
+                .ordinary_cost_us
+                .saturating_sub(before.ordinary_cost_us),
+            lookup_cost_us: self.lookup_cost_us.saturating_sub(before.lookup_cost_us),
+            qualified_regimes_current: self.qualified_regimes_current,
+            rejected_regimes_current: self.rejected_regimes_current,
+            qualification_changes: self
+                .qualification_changes
+                .saturating_sub(before.qualification_changes),
+            qualification_profile_loads: self
+                .qualification_profile_loads
+                .saturating_sub(before.qualification_profile_loads),
+            qualification_profile_writes: self
+                .qualification_profile_writes
+                .saturating_sub(before.qualification_profile_writes),
+            qualification_profile_write_drops: self
+                .qualification_profile_write_drops
+                .saturating_sub(before.qualification_profile_write_drops),
         }
     }
+
+    pub(crate) fn accumulate_delta(&mut self, delta: Self) {
+        self.queries = self.queries.saturating_add(delta.queries);
+        self.hits = self.hits.saturating_add(delta.hits);
+        self.misses = self.misses.saturating_add(delta.misses);
+        self.drafted_tokens = self.drafted_tokens.saturating_add(delta.drafted_tokens);
+        self.accepted_tokens = self.accepted_tokens.saturating_add(delta.accepted_tokens);
+        self.rejected_tokens = self.rejected_tokens.saturating_add(delta.rejected_tokens);
+        self.zero_accept_windows = self
+            .zero_accept_windows
+            .saturating_add(delta.zero_accept_windows);
+        self.propose_us = self.propose_us.saturating_add(delta.propose_us);
+        self.index_build_us = self.index_build_us.saturating_add(delta.index_build_us);
+        self.index_update_us = self.index_update_us.saturating_add(delta.index_update_us);
+        self.index_entries_current = delta.index_entries_current;
+        self.index_entries_peak = self.index_entries_peak.max(delta.index_entries_peak);
+        self.index_evictions = self.index_evictions.saturating_add(delta.index_evictions);
+        self.verify_forward_us = self
+            .verify_forward_us
+            .saturating_add(delta.verify_forward_us);
+        self.projection_us = self.projection_us.saturating_add(delta.projection_us);
+        self.verify_accept_host_sync_count = self
+            .verify_accept_host_sync_count
+            .saturating_add(delta.verify_accept_host_sync_count);
+        self.verify_accept_host_sync_us = self
+            .verify_accept_host_sync_us
+            .saturating_add(delta.verify_accept_host_sync_us);
+        self.rollback_count = self.rollback_count.saturating_add(delta.rollback_count);
+        self.rollback_us = self.rollback_us.saturating_add(delta.rollback_us);
+        self.miss_fast_path_steps = self
+            .miss_fast_path_steps
+            .saturating_add(delta.miss_fast_path_steps);
+        self.ordinary_cost_samples = self
+            .ordinary_cost_samples
+            .saturating_add(delta.ordinary_cost_samples);
+        self.lookup_cost_samples = self
+            .lookup_cost_samples
+            .saturating_add(delta.lookup_cost_samples);
+        self.ordinary_cost_us = self.ordinary_cost_us.saturating_add(delta.ordinary_cost_us);
+        self.lookup_cost_us = self.lookup_cost_us.saturating_add(delta.lookup_cost_us);
+        self.qualification_changes = self
+            .qualification_changes
+            .saturating_add(delta.qualification_changes);
+        self.qualification_profile_loads = self
+            .qualification_profile_loads
+            .saturating_add(delta.qualification_profile_loads);
+        self.qualification_profile_writes = self
+            .qualification_profile_writes
+            .saturating_add(delta.qualification_profile_writes);
+        self.qualification_profile_write_drops = self
+            .qualification_profile_write_drops
+            .saturating_add(delta.qualification_profile_write_drops);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PromptLookupCostAction {
+    Ordinary,
+    Lookup,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub(crate) struct PromptLookupQualificationRegime {
+    pub batch_width: usize,
+    pub context_bucket_tokens: usize,
+}
+
+impl PromptLookupQualificationRegime {
+    pub(crate) fn new(batch_width: usize, context_tokens: usize) -> Self {
+        Self {
+            batch_width: batch_width.max(1),
+            context_bucket_tokens: context_bucket(context_tokens),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PromptLookupQualificationRuntimeConfig {
+    context_fingerprint: String,
+    profile_path: PathBuf,
+}
+
+impl PromptLookupQualificationRuntimeConfig {
+    pub(crate) fn for_scheduler_profile(profile: &SchedulerAutotuneRuntimeProfile) -> Result<Self> {
+        let context_fingerprint = qualification_context_fingerprint(profile)?;
+        let home = dirs::home_dir()
+            .context("locating home directory for PromptLookup qualification profiles")?;
+        Ok(Self {
+            profile_path: home
+                .join(".ironmlx")
+                .join("prompt-lookup-qualifications")
+                .join("profiles")
+                .join(format!("{context_fingerprint}.json")),
+            context_fingerprint,
+        })
+    }
+
+    #[cfg(test)]
+    fn for_test(context_fingerprint: &str, profile_path: PathBuf) -> Self {
+        Self {
+            context_fingerprint: context_fingerprint.to_string(),
+            profile_path,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct PromptLookupQualificationStats {
+    pub ordinary_cost_samples: u64,
+    pub lookup_cost_samples: u64,
+    pub ordinary_cost_us: u64,
+    pub lookup_cost_us: u64,
+    pub qualified_regimes_current: u64,
+    pub rejected_regimes_current: u64,
+    pub qualification_changes: u64,
+    pub profile_loads: u64,
+    pub profile_writes: u64,
+    pub profile_write_drops: u64,
+}
+
+#[derive(Debug)]
+pub(crate) struct PromptLookupCostController {
+    runtime: PromptLookupQualificationRuntimeConfig,
+    regimes: HashMap<PromptLookupQualificationRegime, QualificationRegimeState>,
+    writer: QualificationProfileWriter,
+    stats: PromptLookupQualificationStats,
+}
+
+#[derive(Debug)]
+struct QualificationRegimeState {
+    phase: QualificationPhase,
+    last_evidence: Option<PromptLookupQualificationEvidence>,
+    next_rejected_cooldown_tokens: u64,
+}
+
+#[derive(Debug)]
+enum QualificationPhase {
+    Delayed {
+        samples: VecDeque<u64>,
+        remaining_tokens: u64,
+    },
+    Baseline {
+        samples: Vec<u64>,
+    },
+    Probe {
+        baseline_cost_per_token_ns: u64,
+        samples: Vec<u64>,
+        counters: PromptLookupQualificationCounters,
+    },
+    Qualified {
+        baseline_cost_per_token_ns: u64,
+        rolling_lookup_samples: VecDeque<u64>,
+        rolling_counters: VecDeque<PromptLookupQualificationCounters>,
+        tokens_until_revalidate: u64,
+    },
+    Rejected {
+        cooldown_tokens: u64,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+struct PromptLookupQualificationCounters {
+    queries: u64,
+    hits: u64,
+    misses: u64,
+    drafted_tokens: u64,
+    accepted_tokens: u64,
+    rollback_count: u64,
+}
+
+impl PromptLookupQualificationCounters {
+    fn accumulate(&mut self, delta: PromptLookupStats) {
+        self.queries = self.queries.saturating_add(delta.queries);
+        self.hits = self.hits.saturating_add(delta.hits);
+        self.misses = self.misses.saturating_add(delta.misses);
+        self.drafted_tokens = self.drafted_tokens.saturating_add(delta.drafted_tokens);
+        self.accepted_tokens = self.accepted_tokens.saturating_add(delta.accepted_tokens);
+        self.rollback_count = self.rollback_count.saturating_add(delta.rollback_count);
+    }
+
+    fn accumulate_counters(&mut self, delta: Self) {
+        self.queries = self.queries.saturating_add(delta.queries);
+        self.hits = self.hits.saturating_add(delta.hits);
+        self.misses = self.misses.saturating_add(delta.misses);
+        self.drafted_tokens = self.drafted_tokens.saturating_add(delta.drafted_tokens);
+        self.accepted_tokens = self.accepted_tokens.saturating_add(delta.accepted_tokens);
+        self.rollback_count = self.rollback_count.saturating_add(delta.rollback_count);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PromptLookupQualificationDecision {
+    Qualified,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PromptLookupQualificationEvidence {
+    regime: PromptLookupQualificationRegime,
+    decision: PromptLookupQualificationDecision,
+    baseline_cost_per_token_ns: u64,
+    lookup_cost_per_token_ns: u64,
+    estimated_gain_bps: i64,
+    baseline_samples: usize,
+    lookup_samples: usize,
+    counters: PromptLookupQualificationCounters,
+    rejected_cooldown_tokens: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PromptLookupQualificationProfile {
+    schema_version: u32,
+    context_fingerprint: String,
+    updated_at_unix_ms: u64,
+    entries: Vec<PromptLookupQualificationEvidence>,
+}
+
+#[derive(Debug)]
+struct QualificationProfileWriter {
+    mailbox: Arc<QualificationProfileMailbox>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+#[derive(Debug)]
+struct QualificationProfileMailbox {
+    state: Mutex<QualificationProfileMailboxState>,
+    wake: Condvar,
+}
+
+#[derive(Debug, Default)]
+struct QualificationProfileMailboxState {
+    pending: Option<PromptLookupQualificationProfile>,
+    closed: bool,
+}
+
+impl QualificationProfileWriter {
+    fn new(path: PathBuf) -> Result<Self> {
+        let mailbox = Arc::new(QualificationProfileMailbox {
+            state: Mutex::new(QualificationProfileMailboxState::default()),
+            wake: Condvar::new(),
+        });
+        let worker_mailbox = Arc::clone(&mailbox);
+        let worker = std::thread::Builder::new()
+            .name("prompt-lookup-profile-writer".to_string())
+            .spawn(move || loop {
+                let profile = {
+                    let mut state = worker_mailbox
+                        .state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    while state.pending.is_none() && !state.closed {
+                        state = worker_mailbox
+                            .wake
+                            .wait(state)
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    }
+                    match state.pending.take() {
+                        Some(profile) => profile,
+                        None if state.closed => break,
+                        None => continue,
+                    }
+                };
+                if let Err(error) = persist_qualification_profile(&path, &profile) {
+                    tracing::warn!(
+                        target: "ironmlx::prompt_lookup",
+                        path = %path.display(),
+                        error = %error,
+                        "failed to persist PromptLookup qualification profile"
+                    );
+                }
+            })
+            .context("spawning PromptLookup qualification profile writer")?;
+        Ok(Self {
+            mailbox,
+            worker: Some(worker),
+        })
+    }
+
+    fn queue_latest(&self, profile: PromptLookupQualificationProfile) -> bool {
+        let mut state = self
+            .mailbox
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let replaced = state.pending.replace(profile).is_some();
+        self.mailbox.wake.notify_one();
+        replaced
+    }
+}
+
+impl Drop for QualificationProfileWriter {
+    fn drop(&mut self) {
+        {
+            let mut state = self
+                .mailbox
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.closed = true;
+            self.mailbox.wake.notify_one();
+        }
+        if let Some(worker) = self.worker.take() {
+            if worker.join().is_err() {
+                tracing::warn!(
+                    target: "ironmlx::prompt_lookup",
+                    "PromptLookup qualification profile writer panicked during shutdown"
+                );
+            }
+        }
+    }
+}
+
+impl PromptLookupCostController {
+    pub(crate) fn new(runtime: PromptLookupQualificationRuntimeConfig) -> Result<Self> {
+        let mut stats = PromptLookupQualificationStats::default();
+        let regimes = match load_qualification_profile(&runtime) {
+            Ok(Some(profile)) => {
+                stats.profile_loads = 1;
+                profile
+                    .entries
+                    .into_iter()
+                    .map(|evidence| {
+                        let (phase, next_rejected_cooldown_tokens) = match evidence.decision {
+                            PromptLookupQualificationDecision::Qualified => (
+                                QualificationPhase::Qualified {
+                                    baseline_cost_per_token_ns: evidence.baseline_cost_per_token_ns,
+                                    rolling_lookup_samples: VecDeque::new(),
+                                    rolling_counters: VecDeque::new(),
+                                    tokens_until_revalidate: QUALIFICATION_REVALIDATE_TOKENS,
+                                },
+                                QUALIFICATION_REJECTED_INITIAL_COOLDOWN_TOKENS,
+                            ),
+                            PromptLookupQualificationDecision::Rejected => (
+                                QualificationPhase::Rejected {
+                                    cooldown_tokens: evidence.rejected_cooldown_tokens,
+                                },
+                                next_rejected_cooldown(evidence.rejected_cooldown_tokens),
+                            ),
+                        };
+                        (
+                            evidence.regime,
+                            QualificationRegimeState {
+                                phase,
+                                last_evidence: Some(evidence),
+                                next_rejected_cooldown_tokens,
+                            },
+                        )
+                    })
+                    .collect()
+            }
+            Ok(None) => HashMap::new(),
+            Err(error) => {
+                tracing::warn!(
+                    target: "ironmlx::prompt_lookup",
+                    path = %runtime.profile_path.display(),
+                    error = %error,
+                    "ignoring invalid PromptLookup qualification profile"
+                );
+                HashMap::new()
+            }
+        };
+        let writer = QualificationProfileWriter::new(runtime.profile_path.clone())?;
+        let mut controller = Self {
+            runtime,
+            regimes,
+            writer,
+            stats,
+        };
+        controller.refresh_regime_gauges();
+        Ok(controller)
+    }
+
+    pub(crate) fn next_action(
+        &mut self,
+        regime: PromptLookupQualificationRegime,
+    ) -> PromptLookupCostAction {
+        let state = self
+            .regimes
+            .entry(regime)
+            .or_insert_with(|| initial_regime_state(regime));
+        match state.phase {
+            QualificationPhase::Delayed { .. }
+            | QualificationPhase::Baseline { .. }
+            | QualificationPhase::Rejected { .. } => PromptLookupCostAction::Ordinary,
+            QualificationPhase::Probe { .. } | QualificationPhase::Qualified { .. } => {
+                PromptLookupCostAction::Lookup
+            }
+        }
+    }
+
+    pub(crate) fn record_sample(
+        &mut self,
+        regime: PromptLookupQualificationRegime,
+        action: PromptLookupCostAction,
+        elapsed_ns: u64,
+        committed_tokens: usize,
+        prompt_lookup_delta: PromptLookupStats,
+    ) {
+        if committed_tokens == 0 {
+            return;
+        }
+        let cost_per_token_ns = elapsed_ns / committed_tokens as u64;
+        let state = self
+            .regimes
+            .entry(regime)
+            .or_insert_with(|| initial_regime_state(regime));
+        let progress_tokens = normalized_progress_tokens(regime, committed_tokens);
+        let mut persist = false;
+        match &mut state.phase {
+            QualificationPhase::Delayed {
+                samples,
+                remaining_tokens,
+            } => {
+                if action != PromptLookupCostAction::Ordinary {
+                    return;
+                }
+                self.stats.ordinary_cost_samples =
+                    self.stats.ordinary_cost_samples.saturating_add(1);
+                self.stats.ordinary_cost_us = self
+                    .stats
+                    .ordinary_cost_us
+                    .saturating_add(elapsed_ns / 1_000);
+                samples.push_back(cost_per_token_ns);
+                while samples.len() > QUALIFICATION_BASELINE_SAMPLES {
+                    samples.pop_front();
+                }
+                *remaining_tokens = remaining_tokens.saturating_sub(progress_tokens);
+                if *remaining_tokens == 0 {
+                    if samples.len() == QUALIFICATION_BASELINE_SAMPLES {
+                        state.phase = QualificationPhase::Probe {
+                            baseline_cost_per_token_ns: median_deque(samples),
+                            samples: Vec::with_capacity(QUALIFICATION_PROBE_SAMPLES),
+                            counters: PromptLookupQualificationCounters::default(),
+                        };
+                    } else {
+                        state.phase = QualificationPhase::Baseline {
+                            samples: samples.iter().copied().collect(),
+                        };
+                    }
+                }
+            }
+            QualificationPhase::Baseline { samples } => {
+                if action != PromptLookupCostAction::Ordinary {
+                    return;
+                }
+                self.stats.ordinary_cost_samples =
+                    self.stats.ordinary_cost_samples.saturating_add(1);
+                self.stats.ordinary_cost_us = self
+                    .stats
+                    .ordinary_cost_us
+                    .saturating_add(elapsed_ns / 1_000);
+                samples.push(cost_per_token_ns);
+                if samples.len() >= QUALIFICATION_BASELINE_SAMPLES {
+                    let baseline_cost_per_token_ns = median(samples);
+                    state.phase = QualificationPhase::Probe {
+                        baseline_cost_per_token_ns,
+                        samples: Vec::with_capacity(QUALIFICATION_PROBE_SAMPLES),
+                        counters: PromptLookupQualificationCounters::default(),
+                    };
+                }
+            }
+            QualificationPhase::Probe {
+                baseline_cost_per_token_ns,
+                samples,
+                counters,
+            } => {
+                if action != PromptLookupCostAction::Lookup {
+                    return;
+                }
+                self.stats.lookup_cost_samples = self.stats.lookup_cost_samples.saturating_add(1);
+                self.stats.lookup_cost_us =
+                    self.stats.lookup_cost_us.saturating_add(elapsed_ns / 1_000);
+                samples.push(cost_per_token_ns);
+                counters.accumulate(prompt_lookup_delta);
+                if samples.len() >= QUALIFICATION_PROBE_SAMPLES {
+                    let baseline = *baseline_cost_per_token_ns;
+                    let lookup = median(samples);
+                    let decision = qualification_decision(baseline, lookup);
+                    let rejected_cooldown_tokens = match decision {
+                        PromptLookupQualificationDecision::Qualified => 0,
+                        PromptLookupQualificationDecision::Rejected => {
+                            state.next_rejected_cooldown_tokens
+                        }
+                    };
+                    let evidence = PromptLookupQualificationEvidence {
+                        regime,
+                        decision,
+                        baseline_cost_per_token_ns: baseline,
+                        lookup_cost_per_token_ns: lookup,
+                        estimated_gain_bps: estimated_gain_bps(baseline, lookup),
+                        baseline_samples: QUALIFICATION_BASELINE_SAMPLES,
+                        lookup_samples: QUALIFICATION_PROBE_SAMPLES,
+                        counters: *counters,
+                        rejected_cooldown_tokens,
+                    };
+                    state.last_evidence = Some(evidence);
+                    state.phase = match decision {
+                        PromptLookupQualificationDecision::Qualified => {
+                            state.next_rejected_cooldown_tokens =
+                                QUALIFICATION_REJECTED_INITIAL_COOLDOWN_TOKENS;
+                            QualificationPhase::Qualified {
+                                baseline_cost_per_token_ns: baseline,
+                                rolling_lookup_samples: VecDeque::new(),
+                                rolling_counters: VecDeque::new(),
+                                tokens_until_revalidate: QUALIFICATION_REVALIDATE_TOKENS,
+                            }
+                        }
+                        PromptLookupQualificationDecision::Rejected => {
+                            state.next_rejected_cooldown_tokens =
+                                next_rejected_cooldown(rejected_cooldown_tokens);
+                            QualificationPhase::Rejected {
+                                cooldown_tokens: rejected_cooldown_tokens,
+                            }
+                        }
+                    };
+                    self.stats.qualification_changes =
+                        self.stats.qualification_changes.saturating_add(1);
+                    persist = true;
+                }
+            }
+            QualificationPhase::Qualified {
+                baseline_cost_per_token_ns,
+                rolling_lookup_samples,
+                rolling_counters,
+                tokens_until_revalidate,
+            } => {
+                if action != PromptLookupCostAction::Lookup {
+                    return;
+                }
+                self.stats.lookup_cost_samples = self.stats.lookup_cost_samples.saturating_add(1);
+                self.stats.lookup_cost_us =
+                    self.stats.lookup_cost_us.saturating_add(elapsed_ns / 1_000);
+                rolling_lookup_samples.push_back(cost_per_token_ns);
+                let mut counter_delta = PromptLookupQualificationCounters::default();
+                counter_delta.accumulate(prompt_lookup_delta);
+                rolling_counters.push_back(counter_delta);
+                while rolling_lookup_samples.len() > QUALIFICATION_PROBE_SAMPLES {
+                    rolling_lookup_samples.pop_front();
+                    rolling_counters.pop_front();
+                }
+                *tokens_until_revalidate = tokens_until_revalidate.saturating_sub(progress_tokens);
+                let drifted = rolling_lookup_samples.len() == QUALIFICATION_PROBE_SAMPLES
+                    && qualification_decision(
+                        *baseline_cost_per_token_ns,
+                        median_deque(rolling_lookup_samples),
+                    ) == PromptLookupQualificationDecision::Rejected;
+                if drifted {
+                    let lookup = median_deque(rolling_lookup_samples);
+                    let counters = rolling_counters.iter().copied().fold(
+                        PromptLookupQualificationCounters::default(),
+                        |mut total, delta| {
+                            total.accumulate_counters(delta);
+                            total
+                        },
+                    );
+                    state.last_evidence = Some(PromptLookupQualificationEvidence {
+                        regime,
+                        decision: PromptLookupQualificationDecision::Rejected,
+                        baseline_cost_per_token_ns: *baseline_cost_per_token_ns,
+                        lookup_cost_per_token_ns: lookup,
+                        estimated_gain_bps: estimated_gain_bps(*baseline_cost_per_token_ns, lookup),
+                        baseline_samples: QUALIFICATION_BASELINE_SAMPLES,
+                        lookup_samples: QUALIFICATION_PROBE_SAMPLES,
+                        counters,
+                        rejected_cooldown_tokens: state.next_rejected_cooldown_tokens,
+                    });
+                    let rejected_cooldown_tokens = state.next_rejected_cooldown_tokens;
+                    state.next_rejected_cooldown_tokens =
+                        next_rejected_cooldown(rejected_cooldown_tokens);
+                    state.phase = QualificationPhase::Rejected {
+                        cooldown_tokens: rejected_cooldown_tokens,
+                    };
+                    self.stats.qualification_changes =
+                        self.stats.qualification_changes.saturating_add(1);
+                    persist = true;
+                } else if *tokens_until_revalidate == 0 {
+                    state.phase = QualificationPhase::Baseline {
+                        samples: Vec::with_capacity(QUALIFICATION_BASELINE_SAMPLES),
+                    };
+                    state.last_evidence = None;
+                    self.stats.qualification_changes =
+                        self.stats.qualification_changes.saturating_add(1);
+                    persist = true;
+                }
+            }
+            QualificationPhase::Rejected { cooldown_tokens } => {
+                if action != PromptLookupCostAction::Ordinary {
+                    return;
+                }
+                self.stats.ordinary_cost_samples =
+                    self.stats.ordinary_cost_samples.saturating_add(1);
+                self.stats.ordinary_cost_us = self
+                    .stats
+                    .ordinary_cost_us
+                    .saturating_add(elapsed_ns / 1_000);
+                *cooldown_tokens = cooldown_tokens.saturating_sub(progress_tokens);
+                if *cooldown_tokens == 0 {
+                    state.phase = QualificationPhase::Baseline {
+                        samples: Vec::with_capacity(QUALIFICATION_BASELINE_SAMPLES),
+                    };
+                    self.stats.qualification_changes =
+                        self.stats.qualification_changes.saturating_add(1);
+                }
+            }
+        }
+        self.refresh_regime_gauges();
+        if persist {
+            self.queue_profile_write();
+        }
+    }
+
+    pub(crate) fn stats(&self) -> PromptLookupQualificationStats {
+        self.stats
+    }
+
+    fn refresh_regime_gauges(&mut self) {
+        self.stats.qualified_regimes_current = self
+            .regimes
+            .values()
+            .filter(|state| matches!(state.phase, QualificationPhase::Qualified { .. }))
+            .count() as u64;
+        self.stats.rejected_regimes_current = self
+            .regimes
+            .values()
+            .filter(|state| matches!(state.phase, QualificationPhase::Rejected { .. }))
+            .count() as u64;
+    }
+
+    fn queue_profile_write(&mut self) {
+        let profile = PromptLookupQualificationProfile {
+            schema_version: QUALIFICATION_SCHEMA_VERSION,
+            context_fingerprint: self.runtime.context_fingerprint.clone(),
+            updated_at_unix_ms: unix_time_ms(),
+            entries: self
+                .regimes
+                .values()
+                .filter_map(|state| state.last_evidence.clone())
+                .collect(),
+        };
+        let replaced = self.writer.queue_latest(profile);
+        self.stats.profile_writes = self.stats.profile_writes.saturating_add(1);
+        if replaced {
+            self.stats.profile_write_drops = self.stats.profile_write_drops.saturating_add(1);
+        }
+    }
+}
+
+fn qualification_context_fingerprint(profile: &SchedulerAutotuneRuntimeProfile) -> Result<String> {
+    let encoded = serde_json::to_vec(&(
+        QUALIFICATION_SCHEMA_VERSION,
+        env!("CARGO_PKG_VERSION"),
+        &profile.hardware_label,
+        profile.runtime_context.fingerprint(),
+        profile.config,
+        &profile.rules,
+    ))?;
+    Ok(fnv1a_hex(&encoded))
+}
+
+fn initial_regime_state(regime: PromptLookupQualificationRegime) -> QualificationRegimeState {
+    let phase = if regime.batch_width > 1 {
+        QualificationPhase::Delayed {
+            samples: VecDeque::with_capacity(QUALIFICATION_BASELINE_SAMPLES),
+            remaining_tokens: QUALIFICATION_MULTI_BATCH_INITIAL_DELAY_TOKENS,
+        }
+    } else {
+        QualificationPhase::Baseline {
+            samples: Vec::with_capacity(QUALIFICATION_BASELINE_SAMPLES),
+        }
+    };
+    QualificationRegimeState {
+        phase,
+        last_evidence: None,
+        next_rejected_cooldown_tokens: QUALIFICATION_REJECTED_INITIAL_COOLDOWN_TOKENS,
+    }
+}
+
+fn normalized_progress_tokens(
+    regime: PromptLookupQualificationRegime,
+    committed_tokens: usize,
+) -> u64 {
+    committed_tokens
+        .div_ceil(regime.batch_width)
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+fn next_rejected_cooldown(current: u64) -> u64 {
+    current.saturating_mul(4).clamp(
+        QUALIFICATION_REJECTED_INITIAL_COOLDOWN_TOKENS,
+        QUALIFICATION_REJECTED_MAX_COOLDOWN_TOKENS,
+    )
+}
+
+fn context_bucket(context_tokens: usize) -> usize {
+    context_tokens
+        .max(1_024)
+        .checked_next_power_of_two()
+        .unwrap_or(usize::MAX)
+}
+
+fn qualification_decision(
+    baseline_cost_per_token_ns: u64,
+    lookup_cost_per_token_ns: u64,
+) -> PromptLookupQualificationDecision {
+    if lookup_cost_per_token_ns.saturating_mul(10_000)
+        <= baseline_cost_per_token_ns.saturating_mul(10_000 - QUALIFICATION_MIN_GAIN_BPS)
+    {
+        PromptLookupQualificationDecision::Qualified
+    } else {
+        PromptLookupQualificationDecision::Rejected
+    }
+}
+
+fn estimated_gain_bps(baseline_cost_per_token_ns: u64, lookup_cost_per_token_ns: u64) -> i64 {
+    if baseline_cost_per_token_ns == 0 {
+        return 0;
+    }
+    let baseline = i128::from(baseline_cost_per_token_ns);
+    let lookup = i128::from(lookup_cost_per_token_ns);
+    (((baseline - lookup) * 10_000) / baseline).clamp(i128::from(i64::MIN), i128::from(i64::MAX))
+        as i64
+}
+
+fn median(samples: &[u64]) -> u64 {
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable();
+    let middle = sorted.len() / 2;
+    if sorted.len().is_multiple_of(2) {
+        sorted[middle - 1].saturating_add(sorted[middle]) / 2
+    } else {
+        sorted[middle]
+    }
+}
+
+fn median_deque(samples: &VecDeque<u64>) -> u64 {
+    median(&samples.iter().copied().collect::<Vec<_>>())
+}
+
+fn load_qualification_profile(
+    runtime: &PromptLookupQualificationRuntimeConfig,
+) -> Result<Option<PromptLookupQualificationProfile>> {
+    let raw = match std::fs::read_to_string(&runtime.profile_path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("reading {}", runtime.profile_path.display()));
+        }
+    };
+    let profile: PromptLookupQualificationProfile = serde_json::from_str(&raw)
+        .with_context(|| format!("parsing {}", runtime.profile_path.display()))?;
+    if profile.schema_version != QUALIFICATION_SCHEMA_VERSION {
+        bail!(
+            "PromptLookup qualification schema mismatch: expected {}, got {}",
+            QUALIFICATION_SCHEMA_VERSION,
+            profile.schema_version
+        );
+    }
+    if profile.context_fingerprint != runtime.context_fingerprint {
+        bail!("PromptLookup qualification context fingerprint mismatch");
+    }
+    if unix_time_ms().saturating_sub(profile.updated_at_unix_ms) > QUALIFICATION_PROFILE_TTL_MS {
+        return Ok(None);
+    }
+    for evidence in &profile.entries {
+        match evidence.decision {
+            PromptLookupQualificationDecision::Qualified
+                if evidence.rejected_cooldown_tokens != 0 =>
+            {
+                bail!("qualified PromptLookup evidence contains a rejected cooldown");
+            }
+            PromptLookupQualificationDecision::Rejected
+                if !valid_rejected_cooldown(evidence.rejected_cooldown_tokens) =>
+            {
+                bail!(
+                    "invalid PromptLookup rejected cooldown: {}",
+                    evidence.rejected_cooldown_tokens
+                );
+            }
+            _ => {}
+        }
+    }
+    Ok(Some(profile))
+}
+
+fn valid_rejected_cooldown(cooldown_tokens: u64) -> bool {
+    let mut candidate = QUALIFICATION_REJECTED_INITIAL_COOLDOWN_TOKENS;
+    loop {
+        if cooldown_tokens == candidate {
+            return true;
+        }
+        if candidate == QUALIFICATION_REJECTED_MAX_COOLDOWN_TOKENS {
+            return false;
+        }
+        candidate = next_rejected_cooldown(candidate);
+    }
+}
+
+fn persist_qualification_profile(
+    path: &Path,
+    profile: &PromptLookupQualificationProfile,
+) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("PromptLookup qualification profile path has no parent"))?;
+    std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    let temp_path = path.with_extension(format!("tmp-{}-{}", std::process::id(), unix_time_ms()));
+    let encoded = serde_json::to_vec_pretty(profile)?;
+    let mut temp = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temp_path)
+        .with_context(|| format!("creating {}", temp_path.display()))?;
+    temp.write_all(&encoded)?;
+    temp.write_all(b"\n")?;
+    temp.sync_all()?;
+    std::fs::rename(&temp_path, path)
+        .with_context(|| format!("renaming {} to {}", temp_path.display(), path.display()))?;
+    File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
+fn fnv1a_hex(bytes: &[u8]) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for &byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -287,6 +1180,25 @@ impl PromptLookupRowState {
         }
         Ok(())
     }
+
+    pub fn validate_committed_tail(
+        &self,
+        expected_len: usize,
+        expected_last_token: u32,
+    ) -> Result<()> {
+        if self.history.len() != expected_len
+            || self.history.last().copied() != Some(expected_last_token)
+        {
+            return Err(anyhow!(
+                "prompt lookup history tail diverged: indexed len={} last={:?}, request len={} last={}",
+                self.history.len(),
+                self.history.last(),
+                expected_len,
+                expected_last_token
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -356,5 +1268,321 @@ mod tests {
             ..cfg()
         };
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validates_committed_tail_without_full_history_comparison() {
+        let state = PromptLookupRowState::new(&[1, 2, 3, 4], cfg()).unwrap();
+        state.validate_committed_tail(4, 4).unwrap();
+        assert!(state.validate_committed_tail(3, 4).is_err());
+        assert!(state.validate_committed_tail(4, 3).is_err());
+    }
+
+    #[test]
+    fn cost_controller_qualifies_only_after_measured_gain() {
+        let path = test_profile_path("qualifies");
+        let runtime = PromptLookupQualificationRuntimeConfig::for_test("ctx-a", path.clone());
+        let mut controller = PromptLookupCostController::new(runtime).unwrap();
+        let regime = PromptLookupQualificationRegime::new(1, 8_000);
+
+        for _ in 0..QUALIFICATION_BASELINE_SAMPLES {
+            assert_eq!(
+                controller.next_action(regime),
+                PromptLookupCostAction::Ordinary
+            );
+            controller.record_sample(
+                regime,
+                PromptLookupCostAction::Ordinary,
+                100_000,
+                1,
+                PromptLookupStats::default(),
+            );
+        }
+        for _ in 0..QUALIFICATION_PROBE_SAMPLES {
+            assert_eq!(
+                controller.next_action(regime),
+                PromptLookupCostAction::Lookup
+            );
+            controller.record_sample(
+                regime,
+                PromptLookupCostAction::Lookup,
+                80_000,
+                1,
+                PromptLookupStats {
+                    queries: 1,
+                    hits: 1,
+                    drafted_tokens: 4,
+                    accepted_tokens: 4,
+                    ..PromptLookupStats::default()
+                },
+            );
+        }
+
+        assert_eq!(
+            controller.next_action(regime),
+            PromptLookupCostAction::Lookup
+        );
+        assert_eq!(controller.stats().qualified_regimes_current, 1);
+        controller.record_sample(
+            regime,
+            PromptLookupCostAction::Lookup,
+            80_000,
+            QUALIFICATION_REVALIDATE_TOKENS as usize,
+            PromptLookupStats::default(),
+        );
+        assert_eq!(
+            controller.next_action(regime),
+            PromptLookupCostAction::Ordinary
+        );
+        assert!(controller
+            .regimes
+            .get(&regime)
+            .expect("qualified regime")
+            .last_evidence
+            .is_none());
+        drop(controller);
+        let persisted: PromptLookupQualificationProfile =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(persisted.entries.is_empty());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn cost_controller_rejects_unprofitable_lookup_and_cools_down() {
+        let path = test_profile_path("rejects");
+        let runtime = PromptLookupQualificationRuntimeConfig::for_test("ctx-b", path.clone());
+        let mut controller = PromptLookupCostController::new(runtime).unwrap();
+        let regime = PromptLookupQualificationRegime::new(1, 64_000);
+
+        drive_unprofitable_qualification(&mut controller, regime);
+
+        assert_eq!(
+            controller.next_action(regime),
+            PromptLookupCostAction::Ordinary
+        );
+        assert_eq!(controller.stats().rejected_regimes_current, 1);
+        controller.record_sample(
+            regime,
+            PromptLookupCostAction::Ordinary,
+            100_000,
+            QUALIFICATION_REJECTED_INITIAL_COOLDOWN_TOKENS as usize,
+            PromptLookupStats::default(),
+        );
+        assert_eq!(
+            controller.next_action(regime),
+            PromptLookupCostAction::Ordinary
+        );
+        assert_eq!(controller.stats().rejected_regimes_current, 0);
+        assert!(controller
+            .regimes
+            .get(&regime)
+            .expect("rejected regime")
+            .last_evidence
+            .is_some());
+        drop(controller);
+        let persisted: PromptLookupQualificationProfile =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(persisted.entries.len(), 1);
+        assert_eq!(
+            persisted.entries[0].rejected_cooldown_tokens,
+            QUALIFICATION_REJECTED_INITIAL_COOLDOWN_TOKENS
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn multi_batch_regime_delays_probe_by_per_request_tokens() {
+        let path = test_profile_path("multi-delay");
+        let runtime = PromptLookupQualificationRuntimeConfig::for_test("ctx-delay", path.clone());
+        let mut controller = PromptLookupCostController::new(runtime).unwrap();
+        let regime = PromptLookupQualificationRegime::new(8, 8_000);
+
+        for _ in 0..QUALIFICATION_MULTI_BATCH_INITIAL_DELAY_TOKENS - 1 {
+            assert_eq!(
+                controller.next_action(regime),
+                PromptLookupCostAction::Ordinary
+            );
+            controller.record_sample(
+                regime,
+                PromptLookupCostAction::Ordinary,
+                800_000,
+                regime.batch_width,
+                PromptLookupStats::default(),
+            );
+        }
+        assert_eq!(
+            controller.next_action(regime),
+            PromptLookupCostAction::Ordinary
+        );
+        controller.record_sample(
+            regime,
+            PromptLookupCostAction::Ordinary,
+            800_000,
+            regime.batch_width,
+            PromptLookupStats::default(),
+        );
+
+        assert_eq!(
+            controller.next_action(regime),
+            PromptLookupCostAction::Lookup
+        );
+        assert_eq!(
+            controller.stats().ordinary_cost_samples,
+            QUALIFICATION_MULTI_BATCH_INITIAL_DELAY_TOKENS
+        );
+        drop(controller);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn rejected_regime_uses_persisted_exponential_backoff() {
+        let path = test_profile_path("reject-backoff");
+        let runtime = PromptLookupQualificationRuntimeConfig::for_test("ctx-backoff", path.clone());
+        let mut controller = PromptLookupCostController::new(runtime.clone()).unwrap();
+        let regime = PromptLookupQualificationRegime::new(1, 64_000);
+
+        drive_unprofitable_qualification(&mut controller, regime);
+        controller.record_sample(
+            regime,
+            PromptLookupCostAction::Ordinary,
+            100_000,
+            QUALIFICATION_REJECTED_INITIAL_COOLDOWN_TOKENS as usize,
+            PromptLookupStats::default(),
+        );
+        drive_unprofitable_qualification(&mut controller, regime);
+
+        let state = controller.regimes.get(&regime).expect("rejected regime");
+        let QualificationPhase::Rejected { cooldown_tokens } = state.phase else {
+            panic!("expected rejected phase");
+        };
+        assert_eq!(cooldown_tokens, 2_048);
+        assert_eq!(state.next_rejected_cooldown_tokens, 8_192);
+        assert_eq!(
+            state
+                .last_evidence
+                .as_ref()
+                .expect("rejected evidence")
+                .rejected_cooldown_tokens,
+            2_048
+        );
+        drop(controller);
+
+        let reloaded = PromptLookupCostController::new(runtime).unwrap();
+        let state = reloaded.regimes.get(&regime).expect("reloaded regime");
+        let QualificationPhase::Rejected { cooldown_tokens } = state.phase else {
+            panic!("expected reloaded rejected phase");
+        };
+        assert_eq!(cooldown_tokens, 2_048);
+        assert_eq!(state.next_rejected_cooldown_tokens, 8_192);
+        assert_eq!(reloaded.stats().profile_loads, 1);
+        drop(reloaded);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn qualification_profile_requires_exact_context_and_fresh_schema() {
+        let path = test_profile_path("profile");
+        let regime = PromptLookupQualificationRegime::new(2, 32_000);
+        let mut profile = PromptLookupQualificationProfile {
+            schema_version: QUALIFICATION_SCHEMA_VERSION,
+            context_fingerprint: "ctx-c".to_string(),
+            updated_at_unix_ms: unix_time_ms(),
+            entries: vec![PromptLookupQualificationEvidence {
+                regime,
+                decision: PromptLookupQualificationDecision::Qualified,
+                baseline_cost_per_token_ns: 100,
+                lookup_cost_per_token_ns: 80,
+                estimated_gain_bps: 2_000,
+                baseline_samples: QUALIFICATION_BASELINE_SAMPLES,
+                lookup_samples: QUALIFICATION_PROBE_SAMPLES,
+                counters: PromptLookupQualificationCounters::default(),
+                rejected_cooldown_tokens: 0,
+            }],
+        };
+        persist_qualification_profile(&path, &profile).unwrap();
+        let runtime = PromptLookupQualificationRuntimeConfig::for_test("ctx-c", path.clone());
+        assert!(load_qualification_profile(&runtime).unwrap().is_some());
+        let mismatch = PromptLookupQualificationRuntimeConfig::for_test("ctx-other", path.clone());
+        assert!(load_qualification_profile(&mismatch).is_err());
+
+        profile.schema_version = QUALIFICATION_SCHEMA_VERSION - 1;
+        persist_qualification_profile(&path, &profile).unwrap();
+        assert!(load_qualification_profile(&runtime).is_err());
+
+        profile.schema_version = QUALIFICATION_SCHEMA_VERSION;
+        profile.entries[0].rejected_cooldown_tokens =
+            QUALIFICATION_REJECTED_INITIAL_COOLDOWN_TOKENS;
+        persist_qualification_profile(&path, &profile).unwrap();
+        assert!(load_qualification_profile(&runtime).is_err());
+
+        profile.entries[0].decision = PromptLookupQualificationDecision::Rejected;
+        profile.entries[0].rejected_cooldown_tokens = 1_024;
+        persist_qualification_profile(&path, &profile).unwrap();
+        assert!(load_qualification_profile(&runtime).is_err());
+
+        profile.entries[0].rejected_cooldown_tokens = 2_048;
+        persist_qualification_profile(&path, &profile).unwrap();
+        assert!(load_qualification_profile(&runtime).unwrap().is_some());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn qualification_regime_uses_power_of_two_context_buckets() {
+        assert_eq!(
+            PromptLookupQualificationRegime::new(1, 1).context_bucket_tokens,
+            1_024
+        );
+        assert_eq!(
+            PromptLookupQualificationRegime::new(4, 8_001).context_bucket_tokens,
+            8_192
+        );
+        assert_eq!(
+            PromptLookupQualificationRegime::new(8, 64 * 1_024).context_bucket_tokens,
+            64 * 1_024
+        );
+    }
+
+    fn test_profile_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "ironmlx-prompt-lookup-{name}-{}-{}.json",
+            std::process::id(),
+            unix_time_ms()
+        ))
+    }
+
+    fn drive_unprofitable_qualification(
+        controller: &mut PromptLookupCostController,
+        regime: PromptLookupQualificationRegime,
+    ) {
+        for _ in 0..QUALIFICATION_BASELINE_SAMPLES {
+            assert_eq!(
+                controller.next_action(regime),
+                PromptLookupCostAction::Ordinary
+            );
+            controller.record_sample(
+                regime,
+                PromptLookupCostAction::Ordinary,
+                100_000,
+                regime.batch_width,
+                PromptLookupStats::default(),
+            );
+        }
+        for _ in 0..QUALIFICATION_PROBE_SAMPLES {
+            assert_eq!(
+                controller.next_action(regime),
+                PromptLookupCostAction::Lookup
+            );
+            controller.record_sample(
+                regime,
+                PromptLookupCostAction::Lookup,
+                110_000,
+                regime.batch_width,
+                PromptLookupStats {
+                    queries: 1,
+                    misses: 1,
+                    ..PromptLookupStats::default()
+                },
+            );
+        }
     }
 }

@@ -94,6 +94,11 @@ pub struct ServeArgs {
     #[arg(long)]
     pub prefill_chunk_size: Option<usize>,
 
+    /// Route greedy HTTP generation through SchedulerActor even when the
+    /// ordinary GenerationStream path would otherwise be eligible.
+    #[arg(long)]
+    pub force_scheduler: bool,
+
     /// Maximum concurrent in-flight requests (Scheduler slot count).
     /// Requests beyond this limit go to the admission queue. Default `1`
     /// optimizes single-request prefill / decode by avoiding [B,T_max]-padded
@@ -1135,6 +1140,7 @@ where
             args.scheduler_autotune_report,
             vision_input,
             static_memory_estimate,
+            args.force_scheduler,
         ))
     }
 }
@@ -1616,6 +1622,11 @@ pub fn run(args: ServeArgs) -> Result<()> {
 
     let model_type = read_model_type(&model_dir)?;
     let architecture = crate::models::ModelArchitecture::from_model_type(&model_type)?;
+    if resolve_prompt_lookup_config(&args)?.is_some() && !architecture.supports_prompt_lookup() {
+        bail!(
+            "ironmlx serve --prompt-lookup requires a causal scheduler model; `{model_type}` is not supported"
+        );
+    }
     // open_multimodal so Qwen VL checkpoints retain vision_tower.* keys.
     let loader = Loader::open_multimodal(&model_dir).context("Loader::open_multimodal")?;
     let component_bytes = loader.loaded_tensor_component_bytes();
@@ -1922,6 +1933,7 @@ mod scheduler_profile_tests {
             port: 8080,
             host: "127.0.0.1".to_string(),
             prefill_chunk_size: None,
+            force_scheduler: false,
             b_max: None,
             admission_deadline_ms: None,
             admission_queue_max: None,

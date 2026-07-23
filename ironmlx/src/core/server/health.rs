@@ -33,6 +33,8 @@ pub struct SchedulerInfo {
     pub b_active: usize,
     pub b_queued: usize,
     pub queue_max: usize,
+    pub admit_count: u64,
+    pub batch_count: u64,
     pub admission_queue_full_count: u64,
     pub memory_budget_exceeded_count: u64,
 }
@@ -245,6 +247,17 @@ pub struct PromptLookupHealthInfo {
     pub verify_accept_host_sync_us: u64,
     pub rollback_count: u64,
     pub rollback_us: u64,
+    pub miss_fast_path_steps: u64,
+    pub ordinary_cost_samples: u64,
+    pub lookup_cost_samples: u64,
+    pub ordinary_cost_us: u64,
+    pub lookup_cost_us: u64,
+    pub qualified_regimes_current: u64,
+    pub rejected_regimes_current: u64,
+    pub qualification_changes: u64,
+    pub qualification_profile_loads: u64,
+    pub qualification_profile_writes: u64,
+    pub qualification_profile_write_drops: u64,
 }
 
 impl PromptLookupHealthInfo {
@@ -291,6 +304,18 @@ impl PromptLookupHealthInfo {
             aggregate.verify_accept_host_sync_us += snapshot.verify_accept_host_sync_us;
             aggregate.rollback_count += snapshot.rollback_count;
             aggregate.rollback_us += snapshot.rollback_us;
+            aggregate.miss_fast_path_steps += snapshot.miss_fast_path_steps;
+            aggregate.ordinary_cost_samples += snapshot.ordinary_cost_samples;
+            aggregate.lookup_cost_samples += snapshot.lookup_cost_samples;
+            aggregate.ordinary_cost_us += snapshot.ordinary_cost_us;
+            aggregate.lookup_cost_us += snapshot.lookup_cost_us;
+            aggregate.qualified_regimes_current += snapshot.qualified_regimes_current;
+            aggregate.rejected_regimes_current += snapshot.rejected_regimes_current;
+            aggregate.qualification_changes += snapshot.qualification_changes;
+            aggregate.qualification_profile_loads += snapshot.qualification_profile_loads;
+            aggregate.qualification_profile_writes += snapshot.qualification_profile_writes;
+            aggregate.qualification_profile_write_drops +=
+                snapshot.qualification_profile_write_drops;
         }
         if !config_mismatch {
             if let Some((min_ngram, max_ngram, max_draft_tokens, history, entries)) = config {
@@ -361,6 +386,17 @@ impl PromptLookupHealthConfig {
             verify_accept_host_sync_us: stats.verify_accept_host_sync_us,
             rollback_count: stats.rollback_count,
             rollback_us: stats.rollback_us,
+            miss_fast_path_steps: stats.miss_fast_path_steps,
+            ordinary_cost_samples: stats.ordinary_cost_samples,
+            lookup_cost_samples: stats.lookup_cost_samples,
+            ordinary_cost_us: stats.ordinary_cost_us,
+            lookup_cost_us: stats.lookup_cost_us,
+            qualified_regimes_current: stats.qualified_regimes_current,
+            rejected_regimes_current: stats.rejected_regimes_current,
+            qualification_changes: stats.qualification_changes,
+            qualification_profile_loads: stats.qualification_profile_loads,
+            qualification_profile_writes: stats.qualification_profile_writes,
+            qualification_profile_write_drops: stats.qualification_profile_write_drops,
         }
     }
 }
@@ -387,6 +423,8 @@ pub struct SchedulerHealthCollector {
     pub max_position_embeddings: i32,
     pub b_active: Arc<AtomicU64>,
     pub b_queued: Arc<AtomicU64>,
+    pub admit_count: Arc<AtomicU64>,
+    pub batch_count: Arc<AtomicU64>,
     pub admission_queue_full_count: Arc<AtomicU64>,
     pub memory_budget_exceeded_count: Arc<AtomicU64>,
     pub kv_cache_active_bytes: Arc<AtomicUsize>,
@@ -450,6 +488,8 @@ impl SchedulerHealthCollector {
                 b_active,
                 b_queued,
                 queue_max: self.queue_max,
+                admit_count: self.admit_count.load(Ordering::Relaxed),
+                batch_count: self.batch_count.load(Ordering::Relaxed),
                 admission_queue_full_count: admission_full,
                 memory_budget_exceeded_count: mb_exceeded,
             },
@@ -595,6 +635,8 @@ mod tests {
             max_position_embeddings: 4096,
             b_active: Arc::new(AtomicU64::new(0)),
             b_queued: Arc::new(AtomicU64::new(0)),
+            admit_count: Arc::new(AtomicU64::new(0)),
+            batch_count: Arc::new(AtomicU64::new(0)),
             admission_queue_full_count: Arc::new(AtomicU64::new(0)),
             memory_budget_exceeded_count: Arc::new(AtomicU64::new(0)),
             kv_cache_active_bytes: Arc::new(AtomicUsize::new(0)),
@@ -612,11 +654,16 @@ mod tests {
 
     #[test]
     fn snapshot_memory_reports_budget_policy_and_caps() {
-        let snapshot = test_collector(MtpHealthConfig::disabled()).snapshot();
+        let collector = test_collector(MtpHealthConfig::disabled());
+        collector.admit_count.store(3, Ordering::Relaxed);
+        collector.batch_count.store(2, Ordering::Relaxed);
+        let snapshot = collector.snapshot();
 
         assert_eq!(snapshot.memory.kv_cache_logical_cap_tokens, 262_144);
         assert_eq!(snapshot.memory.kv_cache_resident_cap_tokens, 1_024);
         assert_eq!(snapshot.memory.kv_cache_budget_policy, "active_kv_offload");
+        assert_eq!(snapshot.scheduler.admit_count, 3);
+        assert_eq!(snapshot.scheduler.batch_count, 2);
     }
 
     #[test]
@@ -659,6 +706,17 @@ mod tests {
             rejected_tokens: 6,
             verify_accept_host_sync_count: 7,
             rollback_count: 2,
+            miss_fast_path_steps: 3,
+            ordinary_cost_samples: 8,
+            lookup_cost_samples: 9,
+            ordinary_cost_us: 10,
+            lookup_cost_us: 11,
+            qualified_regimes_current: 1,
+            rejected_regimes_current: 2,
+            qualification_changes: 4,
+            qualification_profile_loads: 1,
+            qualification_profile_writes: 5,
+            qualification_profile_write_drops: 1,
             ..PromptLookupStats::default()
         };
         let published = Arc::new(Mutex::new(Some(stats)));
@@ -679,6 +737,17 @@ mod tests {
         assert_eq!(snapshot.prompt_lookup.rejected_tokens, 6);
         assert_eq!(snapshot.prompt_lookup.verify_accept_host_sync_count, 7);
         assert_eq!(snapshot.prompt_lookup.rollback_count, 2);
+        assert_eq!(snapshot.prompt_lookup.miss_fast_path_steps, 3);
+        assert_eq!(snapshot.prompt_lookup.ordinary_cost_samples, 8);
+        assert_eq!(snapshot.prompt_lookup.lookup_cost_samples, 9);
+        assert_eq!(snapshot.prompt_lookup.ordinary_cost_us, 10);
+        assert_eq!(snapshot.prompt_lookup.lookup_cost_us, 11);
+        assert_eq!(snapshot.prompt_lookup.qualified_regimes_current, 1);
+        assert_eq!(snapshot.prompt_lookup.rejected_regimes_current, 2);
+        assert_eq!(snapshot.prompt_lookup.qualification_changes, 4);
+        assert_eq!(snapshot.prompt_lookup.qualification_profile_loads, 1);
+        assert_eq!(snapshot.prompt_lookup.qualification_profile_writes, 5);
+        assert_eq!(snapshot.prompt_lookup.qualification_profile_write_drops, 1);
     }
 
     #[test]
@@ -842,6 +911,8 @@ mod tests {
                 b_active: 1,
                 b_queued: 0,
                 queue_max: 16,
+                admit_count: 1,
+                batch_count: 1,
                 admission_queue_full_count: 0,
                 memory_budget_exceeded_count: 0,
             },
