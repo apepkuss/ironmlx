@@ -654,6 +654,8 @@ def health_delta(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[str, Any
         "index_evictions",
         "verify_forward_us",
         "projection_us",
+        "exact_batched_verify_windows",
+        "sequential_verify_windows",
         "verify_accept_host_sync_count",
         "verify_accept_host_sync_us",
         "rollback_count",

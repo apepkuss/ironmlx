@@ -243,6 +243,8 @@ pub struct PromptLookupHealthInfo {
     pub index_evictions: u64,
     pub verify_forward_us: u64,
     pub projection_us: u64,
+    pub exact_batched_verify_windows: u64,
+    pub sequential_verify_windows: u64,
     pub verify_accept_host_sync_count: u64,
     pub verify_accept_host_sync_us: u64,
     pub rollback_count: u64,
@@ -300,6 +302,8 @@ impl PromptLookupHealthInfo {
             aggregate.index_evictions += snapshot.index_evictions;
             aggregate.verify_forward_us += snapshot.verify_forward_us;
             aggregate.projection_us += snapshot.projection_us;
+            aggregate.exact_batched_verify_windows += snapshot.exact_batched_verify_windows;
+            aggregate.sequential_verify_windows += snapshot.sequential_verify_windows;
             aggregate.verify_accept_host_sync_count += snapshot.verify_accept_host_sync_count;
             aggregate.verify_accept_host_sync_us += snapshot.verify_accept_host_sync_us;
             aggregate.rollback_count += snapshot.rollback_count;
@@ -382,6 +386,8 @@ impl PromptLookupHealthConfig {
             index_evictions: stats.index_evictions,
             verify_forward_us: stats.verify_forward_us,
             projection_us: stats.projection_us,
+            exact_batched_verify_windows: stats.exact_batched_verify_windows,
+            sequential_verify_windows: stats.sequential_verify_windows,
             verify_accept_host_sync_count: stats.verify_accept_host_sync_count,
             verify_accept_host_sync_us: stats.verify_accept_host_sync_us,
             rollback_count: stats.rollback_count,
@@ -711,6 +717,8 @@ mod tests {
             lookup_cost_samples: 9,
             ordinary_cost_us: 10,
             lookup_cost_us: 11,
+            exact_batched_verify_windows: 3,
+            sequential_verify_windows: 4,
             qualified_regimes_current: 1,
             rejected_regimes_current: 2,
             qualification_changes: 4,
@@ -742,6 +750,8 @@ mod tests {
         assert_eq!(snapshot.prompt_lookup.lookup_cost_samples, 9);
         assert_eq!(snapshot.prompt_lookup.ordinary_cost_us, 10);
         assert_eq!(snapshot.prompt_lookup.lookup_cost_us, 11);
+        assert_eq!(snapshot.prompt_lookup.exact_batched_verify_windows, 3);
+        assert_eq!(snapshot.prompt_lookup.sequential_verify_windows, 4);
         assert_eq!(snapshot.prompt_lookup.qualified_regimes_current, 1);
         assert_eq!(snapshot.prompt_lookup.rejected_regimes_current, 2);
         assert_eq!(snapshot.prompt_lookup.qualification_changes, 4);

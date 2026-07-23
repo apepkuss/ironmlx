@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use crate::core::cache::KVCache;
 use crate::core::memory_budget::ModelMeta;
-use crate::core::{Loader, Model};
+use crate::core::{Loader, Model, QuantMeta, QuantMode};
 use crate::nn::LayerCache;
 use crate::Result;
 
@@ -17,6 +17,7 @@ use super::vision::{
 
 pub struct Gemma4Model {
     text: Gemma4TextModel,
+    exact_batched_verify_precision_qualified: bool,
     vision: Option<VisionModel>,
     unified_vision: Option<Gemma4UnifiedVisionEmbedder>,
     embed_vision: Option<MultimodalEmbedder>,
@@ -63,6 +64,40 @@ fn per_row_slice_last(
 
 fn vl_profile_enabled() -> bool {
     std::env::var_os("IRONMLX_GEMMA4_VL_PROFILE").is_some()
+}
+
+fn exact_batched_verify_precision_qualified(
+    quant_meta: Option<QuantMeta>,
+    checkpoint_dtype: Option<&str>,
+) -> bool {
+    checkpoint_dtype == Some("bfloat16")
+        && match quant_meta {
+            None => true,
+            Some(QuantMeta {
+                group_size: 64,
+                bits: 4,
+                mode: QuantMode::Affine,
+            }) => true,
+            Some(_) => false,
+        }
+}
+
+fn exact_batched_verify_qualified(
+    precision_qualified: bool,
+    batch_width: usize,
+    context_tokens: usize,
+    verify_width: usize,
+) -> bool {
+    const MAX_QUALIFIED_BATCH: usize = 8;
+    const MAX_QUALIFIED_CONTEXT_TOKENS: usize = 1_024;
+    const MAX_QUALIFIED_VERIFY_WIDTH: usize = 5;
+
+    batch_width > 0
+        && batch_width <= MAX_QUALIFIED_BATCH
+        && context_tokens <= MAX_QUALIFIED_CONTEXT_TOKENS
+        && verify_width > 1
+        && verify_width <= MAX_QUALIFIED_VERIFY_WIDTH
+        && precision_qualified
 }
 
 fn vl_profile_eval(label: &str, arrays: &[&Array], start: Instant, enabled: bool) -> Result<()> {
@@ -177,8 +212,16 @@ impl Gemma4Model {
         };
         let vision_soft_tokens_per_image = cfg.vision_soft_tokens_per_image;
         let text = Gemma4TextModel::from_loader(loader, cfg.text_config)?;
+        let exact_batched_verify_precision_qualified = exact_batched_verify_precision_qualified(
+            loader.quant_meta(),
+            loader
+                .config_raw_value()
+                .get("dtype")
+                .and_then(serde_json::Value::as_str),
+        );
         Ok(Self {
             text,
+            exact_batched_verify_precision_qualified,
             vision,
             unified_vision,
             embed_vision,
@@ -692,6 +735,20 @@ impl Model for Gemma4Model {
         true
     }
 
+    fn supports_exact_batched_speculative_verify(
+        &self,
+        batch_width: usize,
+        context_tokens: usize,
+        verify_width: usize,
+    ) -> bool {
+        exact_batched_verify_qualified(
+            self.exact_batched_verify_precision_qualified,
+            batch_width,
+            context_tokens,
+            verify_width,
+        )
+    }
+
     fn num_hidden_layers(&self) -> usize {
         self.config().num_hidden_layers as usize
     }
@@ -1168,6 +1225,53 @@ impl crate::core::scheduler::DenseVlMethods for Gemma4Model {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exact_batched_verify_qualification_is_shape_and_quantization_scoped() {
+        let affine4 = Some(QuantMeta {
+            group_size: 64,
+            bits: 4,
+            mode: QuantMode::Affine,
+        });
+        assert!(exact_batched_verify_precision_qualified(
+            None,
+            Some("bfloat16")
+        ));
+        assert!(exact_batched_verify_precision_qualified(
+            affine4,
+            Some("bfloat16")
+        ));
+        assert!(!exact_batched_verify_precision_qualified(
+            None,
+            Some("float16")
+        ));
+        assert!(!exact_batched_verify_precision_qualified(
+            affine4,
+            Some("float16")
+        ));
+        assert!(!exact_batched_verify_precision_qualified(None, None));
+        assert!(!exact_batched_verify_precision_qualified(
+            Some(QuantMeta {
+                group_size: 64,
+                bits: 5,
+                mode: QuantMode::Affine,
+            }),
+            Some("bfloat16"),
+        ));
+        assert!(!exact_batched_verify_precision_qualified(
+            Some(QuantMeta {
+                group_size: 64,
+                bits: 4,
+                mode: QuantMode::OptiQ,
+            }),
+            Some("bfloat16"),
+        ));
+        assert!(exact_batched_verify_qualified(true, 8, 1_024, 5));
+        assert!(!exact_batched_verify_qualified(false, 8, 1_024, 5));
+        assert!(!exact_batched_verify_qualified(true, 9, 1_024, 5));
+        assert!(!exact_batched_verify_qualified(true, 8, 1_025, 5));
+        assert!(!exact_batched_verify_qualified(true, 8, 1_024, 6));
+    }
 
     #[test]
     fn exact_unique_image_rows_reuses_identical_pixels() {

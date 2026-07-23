@@ -95,6 +95,8 @@ pub struct PromptLookupStats {
     pub index_evictions: u64,
     pub verify_forward_us: u64,
     pub projection_us: u64,
+    pub exact_batched_verify_windows: u64,
+    pub sequential_verify_windows: u64,
     pub verify_accept_host_sync_count: u64,
     pub verify_accept_host_sync_us: u64,
     pub rollback_count: u64,
@@ -134,6 +136,12 @@ impl PromptLookupStats {
                 .verify_forward_us
                 .saturating_sub(before.verify_forward_us),
             projection_us: self.projection_us.saturating_sub(before.projection_us),
+            exact_batched_verify_windows: self
+                .exact_batched_verify_windows
+                .saturating_sub(before.exact_batched_verify_windows),
+            sequential_verify_windows: self
+                .sequential_verify_windows
+                .saturating_sub(before.sequential_verify_windows),
             verify_accept_host_sync_count: self
                 .verify_accept_host_sync_count
                 .saturating_sub(before.verify_accept_host_sync_count),
@@ -192,6 +200,12 @@ impl PromptLookupStats {
             .verify_forward_us
             .saturating_add(delta.verify_forward_us);
         self.projection_us = self.projection_us.saturating_add(delta.projection_us);
+        self.exact_batched_verify_windows = self
+            .exact_batched_verify_windows
+            .saturating_add(delta.exact_batched_verify_windows);
+        self.sequential_verify_windows = self
+            .sequential_verify_windows
+            .saturating_add(delta.sequential_verify_windows);
         self.verify_accept_host_sync_count = self
             .verify_accept_host_sync_count
             .saturating_add(delta.verify_accept_host_sync_count);

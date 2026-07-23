@@ -7770,11 +7770,27 @@ impl<M: Model> Scheduler<M> {
             }
             let verify_arr: Array =
                 (&verify_flat[..], &[batch as i32, max_verify_len as i32][..]).try_into()?;
+            let max_context_tokens = verify_starts
+                .iter()
+                .copied()
+                .max()
+                .and_then(|value| usize::try_from(value).ok())
+                .unwrap_or(usize::MAX);
             let exact_batched_verify = self
                 .cache
                 .as_ref()
                 .is_some_and(|cache| layer_cache_supports_accepted_prefix_trim(cache))
-                && model.supports_exact_batched_speculative_verify();
+                && model.supports_exact_batched_speculative_verify(
+                    batch,
+                    max_context_tokens,
+                    max_verify_len,
+                );
+            if exact_batched_verify {
+                stats.exact_batched_verify_windows =
+                    stats.exact_batched_verify_windows.saturating_add(1);
+            } else {
+                stats.sequential_verify_windows = stats.sequential_verify_windows.saturating_add(1);
+            }
             let verified_ids = if exact_batched_verify {
                 let model_verify_flat = verify_flat
                     .iter()
@@ -16599,7 +16615,12 @@ mod tests {
             1
         }
 
-        fn supports_exact_batched_speculative_verify(&self) -> bool {
+        fn supports_exact_batched_speculative_verify(
+            &self,
+            _batch_width: usize,
+            _context_tokens: usize,
+            _verify_width: usize,
+        ) -> bool {
             true
         }
 
@@ -17663,6 +17684,8 @@ mod tests {
         assert_eq!(stats.drafted_tokens, 7);
         assert_eq!(stats.accepted_tokens, 6);
         assert_eq!(stats.rejected_tokens, 1);
+        assert_eq!(stats.exact_batched_verify_windows, 1);
+        assert_eq!(stats.sequential_verify_windows, 0);
         assert_eq!(stats.verify_accept_host_sync_count, 1);
     }
 

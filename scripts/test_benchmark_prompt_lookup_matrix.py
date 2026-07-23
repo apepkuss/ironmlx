@@ -244,6 +244,8 @@ class BenchmarkPromptLookupMatrixTests(unittest.TestCase):
                 "queries": 100,
                 "drafted_tokens": 300,
                 "accepted_tokens": 250,
+                "exact_batched_verify_windows": 10,
+                "sequential_verify_windows": 20,
             }
         }
         after = {
@@ -253,6 +255,8 @@ class BenchmarkPromptLookupMatrixTests(unittest.TestCase):
                 "queries": 104,
                 "drafted_tokens": 312,
                 "accepted_tokens": 259,
+                "exact_batched_verify_windows": 13,
+                "sequential_verify_windows": 22,
                 "index_entries_current": 0,
                 "index_entries_peak": 80,
             },
@@ -263,6 +267,8 @@ class BenchmarkPromptLookupMatrixTests(unittest.TestCase):
         self.assertEqual(delta["prompt_lookup"]["queries"], 4)
         self.assertEqual(delta["prompt_lookup"]["drafted_tokens"], 12)
         self.assertEqual(delta["prompt_lookup"]["accepted_tokens"], 9)
+        self.assertEqual(delta["prompt_lookup"]["exact_batched_verify_windows"], 3)
+        self.assertEqual(delta["prompt_lookup"]["sequential_verify_windows"], 2)
 
     def test_built_requests_include_stable_prompt_hashes(self):
         case = self.module.load_corpus(self.module.DEFAULT_CORPUS)[0]

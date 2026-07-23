@@ -100,15 +100,20 @@ pub trait Model {
         true
     }
 
-    /// Whether this model has qualified a multi-token speculative verify
-    /// forward as greedy-token-equivalent to its ordinary single-token decode
-    /// path across supported batch shapes.
+    /// Whether this model instance has qualified a multi-token speculative
+    /// verify forward as greedy-token-equivalent to its ordinary single-token
+    /// decode path for the requested execution shape.
     ///
     /// Full KV cache trim is necessary for an exact batched verify, but it is
     /// not sufficient: quantized projection and attention kernels can change
     /// numerical shape at `Q > 1` and flip an argmax. Models must opt in only
     /// after architecture-level token-parity qualification.
-    fn supports_exact_batched_speculative_verify(&self) -> bool {
+    fn supports_exact_batched_speculative_verify(
+        &self,
+        _batch_width: usize,
+        _context_tokens: usize,
+        _verify_width: usize,
+    ) -> bool {
         false
     }
 
