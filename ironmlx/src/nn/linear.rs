@@ -228,6 +228,13 @@ impl Linear {
     /// Stream-targeted forward pass.
     pub fn forward_on(&self, x: &Array, target: impl Into<StreamOrDevice>) -> Result<Array> {
         let target = target.into();
+        if super::position_stable_qmm::is_armed()
+            && x.ndim() == 3
+            && x.shape().as_slice()[1] > 1
+            && self.quantized_parts().is_some()
+        {
+            return self.forward_positions_isolated_on(x, target);
+        }
         if super::verify_qmm::is_armed() {
             if let Some(parts) = self.quantized_parts() {
                 if let Some(output) = super::verify_qmm::forward_candidate_on(x, parts, target)? {
@@ -287,6 +294,56 @@ impl Linear {
                 Ok(y)
             }
         }
+    }
+
+    /// Project `[B, Q, K]` as Q independent `[B, K]` matrices, preserving the
+    /// quantized matrix shape of a sequential `[B, 1, K]` call at each depth.
+    /// Full-precision weights and non-sequence inputs retain the regular path.
+    pub(crate) fn forward_positions_isolated_on(
+        &self,
+        x: &Array,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        let target = target.into();
+        let shape = x.shape();
+        let shape = shape.as_slice();
+        let Some(&[batch, sequence, _]) = <&[i32; 3]>::try_from(shape).ok() else {
+            return self.forward_on(x, target);
+        };
+        if sequence <= 1 {
+            return self.forward_on(x, target);
+        }
+        let LinearImpl::Quant {
+            weight,
+            scales,
+            biases,
+            bias,
+            group_size,
+            bits,
+            mode,
+        } = &self.inner
+        else {
+            return self.forward_on(x, target);
+        };
+        let isolated = x.transpose_axes_on(&[1_i32, 0, 2][..], target)?;
+        let mut output = mlx::quantization::quantized_matmul_batch_isolated_on(
+            &isolated,
+            weight,
+            scales,
+            biases.as_ref(),
+            true,
+            Some(*group_size),
+            Some(*bits),
+            mode.mlx_backend_mode(),
+            target,
+        )?;
+        if let Some(bias) = bias {
+            output = &output + bias;
+        }
+        let output_width = output.shape().as_slice()[2];
+        let output = output.transpose_axes_on(&[1_i32, 0, 2][..], target)?;
+        debug_assert_eq!(output.shape().as_slice(), &[batch, sequence, output_width]);
+        Ok(output)
     }
 
     /// MTP verify projection for a small batch of speculative positions.
@@ -515,6 +572,69 @@ mod tests {
         for row in actual.chunks_exact(expected.len()) {
             assert_eq!(row, expected.as_slice());
         }
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn position_stable_quantized_forward_matches_sequential_q1_shapes() {
+        let batch = 4_i32;
+        let sequence = 5_i32;
+        let out = 32_i32;
+        let in_dim = 64_i32;
+        let group_size = 64_i32;
+        let weight_data = (0..(out * in_dim))
+            .map(|idx| ((idx % 29) as f32 - 14.0) * 0.015)
+            .collect::<Vec<_>>();
+        let input_data = (0..(batch * sequence * in_dim))
+            .map(|idx| ((idx % 19) as f32 - 9.0) * 0.025)
+            .collect::<Vec<_>>();
+        let weight: Array = (weight_data.as_slice(), &[out, in_dim][..])
+            .try_into()
+            .unwrap();
+        let input: Array = (input_data.as_slice(), &[batch, sequence, in_dim][..])
+            .try_into()
+            .unwrap();
+        let weight = mlx::ops::cast::astype(&weight, mlx::Dtype::Bfloat16).unwrap();
+        let input = mlx::ops::cast::astype(&input, mlx::Dtype::Bfloat16).unwrap();
+        let quantized =
+            mlx::quantization::quantize(&weight, Some(group_size), Some(8), "affine", None)
+                .unwrap();
+        let layer = Linear::new_quant(
+            quantized[0].clone(),
+            quantized[1].clone(),
+            Some(quantized[2].clone()),
+            None,
+            group_size,
+            8,
+        );
+
+        let mut expected = Vec::with_capacity(sequence as usize);
+        for depth in 0..sequence {
+            let position = mlx::ops::indexing::slice_strided(
+                &input,
+                &[0_i32, depth, 0][..],
+                &[batch, depth + 1, in_dim][..],
+                &[1_i32, 1, 1][..],
+            )
+            .unwrap();
+            expected.push(layer.forward(&position).unwrap());
+        }
+        let expected_refs = expected.iter().collect::<Vec<_>>();
+        let expected = mlx::ops::shape::concatenate(&expected_refs, 1).unwrap();
+        let actual = {
+            let _scope = crate::nn::position_stable_qmm::scope();
+            layer.forward(&input).unwrap()
+        };
+
+        let expected = mlx::ops::cast::astype(&expected, mlx::Dtype::Float32)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+        let actual = mlx::ops::cast::astype(&actual, mlx::Dtype::Float32)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+        assert_eq!(actual, expected);
     }
 
     #[test]

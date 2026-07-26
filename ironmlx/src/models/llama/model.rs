@@ -46,6 +46,7 @@ pub struct LlamaModel {
     norm: RmsNorm,
     /// Output projection (separate weight; `tie_word_embeddings = false`).
     lm_head: Linear,
+    exact_batched_verify_precision_qualified: bool,
     cfg: LlamaConfig,
 }
 
@@ -149,11 +150,20 @@ impl LlamaModel {
             .context("loading LlamaModel norm")?;
         let lm_head =
             Linear::from_loader(loader, "lm_head").context("loading LlamaModel lm_head")?;
+        let exact_batched_verify_precision_qualified =
+            super::speculative::exact_batched_verify_precision_qualified(
+                loader.quant_meta_for("lm_head"),
+                loader
+                    .config_raw_value()
+                    .get("torch_dtype")
+                    .and_then(serde_json::Value::as_str),
+            );
         Ok(Self {
             embed_tokens,
             layers,
             norm,
             lm_head,
+            exact_batched_verify_precision_qualified,
             cfg,
         })
     }
@@ -208,6 +218,11 @@ impl LlamaModel {
         let in_s = in_dims.as_slice();
         let batch = in_s[0];
         let seq_len = in_s[1];
+        let exact_batched_verify = crate::nn::verify_qmm::is_armed()
+            && self.exact_batched_verify_precision_qualified
+            && (1..=8).contains(&batch)
+            && (2..=5).contains(&seq_len);
+        let _position_stable_qmm = exact_batched_verify.then(crate::nn::position_stable_qmm::scope);
 
         let caches = cache.ok_or_else(|| anyhow!("llama requires a cache"))?;
         if caches.len() != self.layers.len() {
@@ -254,7 +269,16 @@ impl LlamaModel {
             let LayerCache::Full(c) = &mut caches[i] else {
                 return Err(anyhow!("llama: expected LayerCache::Full at layer {i}"));
             };
-            h = layer.forward_on(&h, &offset, c, &prl, effective_mask, target)?;
+            h = layer.forward_on(
+                &h,
+                &offset,
+                &offsets_vec,
+                c,
+                &prl,
+                effective_mask,
+                exact_batched_verify,
+                target,
+            )?;
         }
         self.norm.forward_on(&h, target)
     }
@@ -333,7 +357,15 @@ impl LlamaModel {
         hidden: &Array,
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
-        self.lm_head.forward_on(hidden, target.into())
+        let target = target.into();
+        if self.exact_batched_verify_precision_qualified
+            && hidden.ndim() == 3
+            && hidden.shape().as_slice()[1] > 1
+        {
+            self.lm_head.forward_positions_isolated_on(hidden, target)
+        } else {
+            self.lm_head.forward_on(hidden, target)
+        }
     }
 
     pub fn model_meta(&self) -> ModelMeta {
@@ -432,6 +464,20 @@ impl Model for LlamaModel {
 
     fn requires_position_ids(&self) -> bool {
         false
+    }
+
+    fn supports_exact_batched_speculative_verify(
+        &self,
+        batch_width: usize,
+        context_tokens: usize,
+        verify_width: usize,
+    ) -> bool {
+        super::speculative::exact_batched_verify_qualified(
+            self.exact_batched_verify_precision_qualified,
+            batch_width,
+            context_tokens,
+            verify_width,
+        )
     }
 
     fn supports_speculative_accepted_prefix_trim(&self) -> bool {

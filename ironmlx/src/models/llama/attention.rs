@@ -9,6 +9,7 @@
 //! engine. The per-head `head_dim` is taken from config (MiniCPM5-1B uses 128,
 //! which is NOT `hidden_size / num_heads = 96`).
 
+use anyhow::anyhow;
 use mlx::{Array, StreamOrDevice};
 
 use crate::core::cache::KVCache;
@@ -71,9 +72,11 @@ impl LlamaAttention {
         &self,
         x: &Array,
         offset: &Array,
+        offset_values: &[i32],
         per_row_lens: &[i32],
         mask: Option<&Array>,
         cache: &mut KVCache,
+        exact_batched_verify: bool,
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
         let target = target.into();
@@ -124,27 +127,43 @@ impl LlamaAttention {
 
         // Write post-RoPE K/V into the cache. Decode-time TurboQuant caches
         // can answer SDPA directly from packed K/V.
-        let out = if let Some(out) =
+        let cached_attention = if exact_batched_verify {
+            None
+        } else {
             cache.try_update_and_attend_on(&q, &k, &v, per_row_lens, self.scale, mask, target)?
-        {
+        };
+        let out = if let Some(out) = cached_attention {
             out
         } else {
             let (k_full, v_full) =
                 cache.update_and_fetch_for_attention_on(&k, &v, per_row_lens, target)?;
-            match mask {
-                None => mlx::fast::scaled_dot_product_attention_on(
-                    &q, &k_full, &v_full, self.scale, "causal", None, None, target,
-                )?,
-                Some(m) => mlx::fast::scaled_dot_product_attention_on(
+            if exact_batched_verify {
+                query_position_isolated_attention_on(
                     &q,
                     &k_full,
                     &v_full,
+                    mask,
+                    per_row_lens,
+                    offset_values,
                     self.scale,
-                    "",
-                    Some(m),
-                    None,
                     target,
-                )?,
+                )?
+            } else {
+                match mask {
+                    None => mlx::fast::scaled_dot_product_attention_on(
+                        &q, &k_full, &v_full, self.scale, "causal", None, None, target,
+                    )?,
+                    Some(m) => mlx::fast::scaled_dot_product_attention_on(
+                        &q,
+                        &k_full,
+                        &v_full,
+                        self.scale,
+                        "",
+                        Some(m),
+                        None,
+                        target,
+                    )?,
+                }
             }
         };
 
@@ -155,4 +174,137 @@ impl LlamaAttention {
 
         self.o_proj.forward_on(&out, target)
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn query_position_isolated_attention_on(
+    queries: &Array,
+    keys: &Array,
+    values: &Array,
+    mask: Option<&Array>,
+    per_row_lens: &[i32],
+    offsets: &[i32],
+    scale: f32,
+    target: StreamOrDevice,
+) -> Result<Array> {
+    let q_shape = queries.shape();
+    let q_dims = q_shape.as_slice();
+    if q_dims.len() != 4 {
+        return Err(anyhow!(
+            "Llama exact verify attention expected rank-4 queries, got {q_dims:?}"
+        ));
+    }
+    let (batch, heads, query_len, head_dim) = (q_dims[0], q_dims[1], q_dims[2], q_dims[3]);
+    if offsets.len() != batch as usize || per_row_lens.len() != batch as usize {
+        return Err(anyhow!(
+            "Llama exact verify attention expected {batch} offsets/lens, got {}/{}",
+            offsets.len(),
+            per_row_lens.len()
+        ));
+    }
+    if query_len <= 1 {
+        return Err(anyhow!(
+            "Llama exact verify attention requires Q>1, got Q={query_len}"
+        ));
+    }
+    for (row, &len) in per_row_lens.iter().enumerate() {
+        if len < 0 || len > query_len {
+            return Err(anyhow!(
+                "Llama exact verify attention invalid row {row} length {len} for Q={query_len}"
+            ));
+        }
+    }
+
+    let key_dims = keys.shape();
+    let key_dims = key_dims.as_slice();
+    let value_dims = values.shape();
+    let value_dims = value_dims.as_slice();
+    if key_dims.len() != 4
+        || value_dims.len() != 4
+        || key_dims[0] != batch
+        || value_dims[0] != batch
+        || key_dims[2] != value_dims[2]
+    {
+        return Err(anyhow!(
+            "Llama exact verify attention incompatible KV shapes: keys={key_dims:?}, values={value_dims:?}, batch={batch}"
+        ));
+    }
+    let final_key_len = key_dims[2];
+    let mask_dims = mask.map(|mask| mask.shape());
+    if let Some(mask_dims) = mask_dims.as_ref() {
+        let dims = mask_dims.as_slice();
+        if dims.len() != 4
+            || !matches!(dims[0], 1) && dims[0] != batch
+            || dims[2] < query_len
+            || dims[3] < final_key_len
+        {
+            return Err(anyhow!(
+                "Llama exact verify attention mask {dims:?} cannot cover B={batch}, Q={query_len}, K={final_key_len}"
+            ));
+        }
+    }
+
+    let mut outputs = Vec::with_capacity(query_len as usize);
+    for depth in 0..query_len {
+        let key_end = offsets
+            .iter()
+            .zip(per_row_lens.iter())
+            .map(|(&offset, &len)| offset + (depth + 1).min(len))
+            .max()
+            .unwrap_or(0);
+        if key_end <= 0 || key_end > final_key_len {
+            return Err(anyhow!(
+                "Llama exact verify attention key end {key_end} outside (0,{final_key_len}] at depth {depth}"
+            ));
+        }
+        let query = mlx::ops::indexing::slice_strided_on(
+            queries,
+            &[0_i32, 0, depth, 0][..],
+            &[batch, heads, depth + 1, head_dim][..],
+            &[1_i32, 1, 1, 1][..],
+            target,
+        )?;
+        let keys = mlx::ops::indexing::slice_strided_on(
+            keys,
+            &[0_i32, 0, 0, 0][..],
+            &[batch, key_dims[1], key_end, key_dims[3]][..],
+            &[1_i32, 1, 1, 1][..],
+            target,
+        )?;
+        let values = mlx::ops::indexing::slice_strided_on(
+            values,
+            &[0_i32, 0, 0, 0][..],
+            &[batch, value_dims[1], key_end, value_dims[3]][..],
+            &[1_i32, 1, 1, 1][..],
+            target,
+        )?;
+        let depth_mask = mask
+            .map(|mask| {
+                let dims = mask_dims
+                    .as_ref()
+                    .expect("mask dimensions exist when mask exists");
+                let dims = dims.as_slice();
+                mlx::ops::indexing::slice_strided_on(
+                    mask,
+                    &[0_i32, 0, depth, 0][..],
+                    &[dims[0], dims[1], depth + 1, key_end][..],
+                    &[1_i32, 1, 1, 1][..],
+                    target,
+                )
+                .map_err(anyhow::Error::from)
+            })
+            .transpose()?;
+        outputs.push(mlx::fast::scaled_dot_product_attention_on(
+            &query,
+            &keys,
+            &values,
+            scale,
+            "",
+            depth_mask.as_ref(),
+            None,
+            target,
+        )?);
+    }
+    let refs = outputs.iter().collect::<Vec<_>>();
+    mlx::ops::shape::concatenate_on(&refs, 2, target).map_err(Into::into)
 }

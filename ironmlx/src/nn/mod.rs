@@ -19,6 +19,7 @@ pub mod mlp;
 pub mod mrope;
 pub mod mtp;
 pub mod norm;
+pub(crate) mod position_stable_qmm;
 pub(crate) mod sorted_moe_weighted_sum;
 pub(crate) mod verify_qmm;
 
@@ -39,3 +40,12 @@ pub use mlp::Mlp;
 pub use mrope::Mrope;
 pub use mtp::{Mtp, MtpConfig, MtpStepOutput};
 pub use norm::{LayerNorm, RmsNorm, RmsNormGated};
+
+/// Enter the same scoped verify route used by the production scheduler.
+///
+/// This is exposed for real-model qualification tests that must exercise the
+/// exact Q>1 execution path rather than an ordinary multi-token prefill.
+#[doc(hidden)]
+pub fn verify_qmm_scope() -> impl Drop {
+    verify_qmm::armed_scope()
+}

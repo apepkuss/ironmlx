@@ -7,7 +7,8 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use ironmlx::core::generate::build_position_ids;
+use ironmlx::core::cache::TurboQuantKVBits;
+use ironmlx::core::generate::{build_batched_append_attention_mask, build_position_ids};
 use ironmlx::core::{Loader, Model, Tokenizer};
 use ironmlx::models::{Gemma4Model, LlamaModel, Qwen35Model};
 use mlx::{Array, Dtype, StreamOrDevice};
@@ -21,6 +22,42 @@ IronMLX verifies copied prompt continuations against the target model. \
 This qualification sentence intentionally repeats: exact batched verification \
 must match sequential verification token by token. \
 The final clause supplies enough continuation tokens for every verify width.";
+
+#[derive(Clone, Copy, Debug)]
+enum QualificationCache {
+    Dense,
+    Paged,
+    TurboQuant(TurboQuantKVBits),
+}
+
+fn configure_cache(
+    cache: &mut [ironmlx::nn::LayerCache],
+    mode: QualificationCache,
+    batch: usize,
+    cap: i32,
+) -> Result<()> {
+    match mode {
+        QualificationCache::Dense => Ok(()),
+        QualificationCache::Paged => {
+            let block_size = 16_i32;
+            let pages_per_row = (cap + block_size - 1) / block_size;
+            let max_pages = i32::try_from(batch)
+                .context("batch exceeds i32")?
+                .saturating_mul(pages_per_row)
+                .saturating_add(8);
+            for layer in cache {
+                layer.enable_paged_kv(block_size, max_pages)?;
+            }
+            Ok(())
+        }
+        QualificationCache::TurboQuant(bits) => {
+            for layer in cache {
+                layer.enable_turboquant(bits)?;
+            }
+            Ok(())
+        }
+    }
+}
 
 fn snapshot_from_env_or_cache(env_name: &str, cache_repo: &str) -> Option<PathBuf> {
     if let Ok(path) = std::env::var(env_name) {
@@ -131,6 +168,7 @@ fn qualify_case<M: Model>(
     batch: usize,
     prefix_len: usize,
     verify_width: usize,
+    cache_mode: QualificationCache,
 ) -> Result<()> {
     let row_stride = prefix_len.saturating_add(verify_width);
     anyhow::ensure!(
@@ -150,6 +188,8 @@ fn qualify_case<M: Model>(
     let batch_i32 = i32::try_from(batch).context("batch exceeds i32")?;
     let mut sequential_cache = model.make_cache(batch_i32, cap, model.cache_dtype())?;
     let mut batched_cache = model.make_cache(batch_i32, cap, model.cache_dtype())?;
+    configure_cache(&mut sequential_cache, cache_mode, batch, cap)?;
+    configure_cache(&mut batched_cache, cache_mode, batch, cap)?;
     prefill(
         model,
         &prefix_tokens,
@@ -159,6 +199,7 @@ fn qualify_case<M: Model>(
     )?;
     prefill(model, &prefix_tokens, batch, prefix_len, &mut batched_cache)?;
 
+    let mut sequential_hidden = Vec::with_capacity(verify_width);
     let mut sequential_logits = Vec::with_capacity(verify_width);
     let mut sequential_tokens = vec![Vec::with_capacity(verify_width); batch];
     for depth in 0..verify_width {
@@ -169,7 +210,7 @@ fn qualify_case<M: Model>(
         let start = i32::try_from(prefix_len + depth).context("position exceeds i32")?;
         let positions = build_position_ids(start, 1)?;
         let per_row_lens = vec![1_i32; batch];
-        let logits = model.forward_on(
+        let hidden = model.forward_text_hidden(
             &input,
             &positions,
             Some(&per_row_lens),
@@ -177,10 +218,12 @@ fn qualify_case<M: Model>(
             Some(sequential_cache.as_mut_slice()),
             StreamOrDevice::default(),
         )?;
+        let logits = model.project_hidden_on(&hidden, StreamOrDevice::default())?;
         eval(&logits)?;
         for (row, token) in argmax_tokens(&logits)?.into_iter().enumerate() {
             sequential_tokens[row].push(token);
         }
+        sequential_hidden.push(hidden);
         sequential_logits.push(logits);
     }
 
@@ -189,32 +232,60 @@ fn qualify_case<M: Model>(
     let verify_start = i32::try_from(prefix_len).context("verify start exceeds i32")?;
     let positions = build_position_ids(verify_start, verify_width_i32)?;
     let per_row_lens = vec![verify_width_i32; batch];
-    let hidden = model.forward_text_hidden(
-        &verify_input,
-        &positions,
-        Some(&per_row_lens),
-        None,
-        Some(batched_cache.as_mut_slice()),
-        StreamOrDevice::default(),
-    )?;
+    let hidden = {
+        let _verify_qmm = ironmlx::nn::verify_qmm_scope();
+        model.forward_text_hidden(
+            &verify_input,
+            &positions,
+            Some(&per_row_lens),
+            None,
+            Some(batched_cache.as_mut_slice()),
+            StreamOrDevice::default(),
+        )?
+    };
     let batched_logits = model.project_hidden_on(&hidden, StreamOrDevice::default())?;
     eval(&batched_logits)?;
     let batched_tokens = argmax_tokens(&batched_logits)?
         .chunks(verify_width)
         .map(<[u32]>::to_vec)
         .collect::<Vec<_>>();
+    let mut isolated_projection_tokens = vec![Vec::with_capacity(verify_width); batch];
+    for row in 0..batch {
+        for depth in 0..verify_width {
+            let position_hidden = mlx::ops::indexing::slice_strided(
+                &hidden,
+                &[row as i32, depth as i32, 0][..],
+                &[
+                    row as i32 + 1,
+                    depth as i32 + 1,
+                    hidden.shape().as_slice()[2],
+                ][..],
+                &[1_i32, 1, 1][..],
+            )?;
+            let position_logits =
+                model.project_hidden_on(&position_hidden, StreamOrDevice::default())?;
+            isolated_projection_tokens[row].push(argmax_tokens(&position_logits)?[0]);
+        }
+    }
 
     let mut max_logit_diff = 0.0_f32;
+    let mut max_hidden_diff = 0.0_f32;
     for (depth, sequential) in sequential_logits.iter().enumerate() {
         for row in 0..batch {
+            let sequential_hidden = slice_position(&sequential_hidden[depth], row as i32, 0)?;
+            let batched_hidden = slice_position(&hidden, row as i32, depth as i32)?;
+            max_hidden_diff =
+                max_hidden_diff.max(max_abs_diff(&sequential_hidden, &batched_hidden)?);
             let sequential = slice_position(sequential, row as i32, 0)?;
             let batched = slice_position(&batched_logits, row as i32, depth as i32)?;
             max_logit_diff = max_logit_diff.max(max_abs_diff(&sequential, &batched)?);
         }
     }
     eprintln!(
-        "exact verify qualification: model={} batch={} prefix_len={} verify_width={} \
-         sequential={sequential_tokens:?} batched={batched_tokens:?} max_abs={max_logit_diff:.6}",
+        "exact verify qualification: model={} cache={cache_mode:?} batch={} prefix_len={} verify_width={} \
+         sequential={sequential_tokens:?} batched={batched_tokens:?} \
+         isolated_projection={isolated_projection_tokens:?} \
+         max_hidden_abs={max_hidden_diff:.6} max_logit_abs={max_logit_diff:.6}",
         std::any::type_name::<M>(),
         batch,
         prefix_len,
@@ -222,9 +293,132 @@ fn qualify_case<M: Model>(
     );
     anyhow::ensure!(
         sequential_tokens == batched_tokens,
-        "greedy token mismatch for model={} batch={batch} prefix_len={prefix_len} \
+        "greedy token mismatch for model={} cache={cache_mode:?} batch={batch} prefix_len={prefix_len} \
          verify_width={verify_width}: \
-         sequential={sequential_tokens:?}, batched={batched_tokens:?}, max_abs={max_logit_diff:.6}",
+         sequential={sequential_tokens:?}, batched={batched_tokens:?}, \
+         isolated_projection={isolated_projection_tokens:?}, \
+         max_hidden_abs={max_hidden_diff:.6}, max_logit_abs={max_logit_diff:.6}",
+        std::any::type_name::<M>()
+    );
+    Ok(())
+}
+
+fn qualify_ragged_case<M: Model>(
+    model: &M,
+    tokens: &[u32],
+    prefix_len: usize,
+    verify_lens: &[usize],
+) -> Result<()> {
+    let batch = verify_lens.len();
+    let verify_width = verify_lens.iter().copied().max().unwrap_or(0);
+    anyhow::ensure!(batch > 0 && verify_width > 1, "invalid ragged verify shape");
+    let row_stride = prefix_len.saturating_add(verify_width);
+    anyhow::ensure!(
+        batch.saturating_mul(row_stride) <= tokens.len(),
+        "ragged qualification token sequence is too short"
+    );
+
+    let mut prefix_tokens = Vec::with_capacity(batch.saturating_mul(prefix_len));
+    let mut verify_tokens = vec![0_u32; batch.saturating_mul(verify_width)];
+    for row in 0..batch {
+        let row_start = row.saturating_mul(row_stride);
+        prefix_tokens.extend_from_slice(&tokens[row_start..row_start + prefix_len]);
+        let verify_start = row_start + prefix_len;
+        verify_tokens[row * verify_width..row * verify_width + verify_lens[row]]
+            .copy_from_slice(&tokens[verify_start..verify_start + verify_lens[row]]);
+    }
+
+    let cap = i32::try_from(prefix_len + verify_width + 8).context("cache cap exceeds i32")?;
+    let batch_i32 = i32::try_from(batch).context("batch exceeds i32")?;
+    let mut sequential_cache = model.make_cache(batch_i32, cap, model.cache_dtype())?;
+    let mut batched_cache = model.make_cache(batch_i32, cap, model.cache_dtype())?;
+    prefill(
+        model,
+        &prefix_tokens,
+        batch,
+        prefix_len,
+        &mut sequential_cache,
+    )?;
+    prefill(model, &prefix_tokens, batch, prefix_len, &mut batched_cache)?;
+
+    let mut offsets = vec![i32::try_from(prefix_len).context("prefix length exceeds i32")?; batch];
+    let mut sequential_tokens = vec![Vec::new(); batch];
+    for depth in 0..verify_width {
+        let step_tokens = (0..batch)
+            .map(|row| verify_tokens[row * verify_width + depth])
+            .collect::<Vec<_>>();
+        let step_lens = verify_lens
+            .iter()
+            .map(|&len| i32::from(depth < len))
+            .collect::<Vec<_>>();
+        let input = input_array(&step_tokens, batch, 1)?;
+        let positions = build_position_ids(
+            i32::try_from(prefix_len + depth).context("position exceeds i32")?,
+            1,
+        )?;
+        let mask = build_batched_append_attention_mask(&offsets, &step_lens, 1, Dtype::Bfloat16)?;
+        let hidden = model.forward_text_hidden(
+            &input,
+            &positions,
+            Some(&step_lens),
+            Some(&mask),
+            Some(sequential_cache.as_mut_slice()),
+            StreamOrDevice::default(),
+        )?;
+        let logits = model.project_hidden_on(&hidden, StreamOrDevice::default())?;
+        eval(&logits)?;
+        for (row, token) in argmax_tokens(&logits)?.into_iter().enumerate() {
+            if step_lens[row] == 1 {
+                sequential_tokens[row].push(token);
+            }
+            offsets[row] += step_lens[row];
+        }
+    }
+
+    let input = input_array(&verify_tokens, batch, verify_width)?;
+    let positions = build_position_ids(
+        i32::try_from(prefix_len).context("verify start exceeds i32")?,
+        i32::try_from(verify_width).context("verify width exceeds i32")?,
+    )?;
+    let pre_offsets = vec![i32::try_from(prefix_len).context("prefix length exceeds i32")?; batch];
+    let verify_lens_i32 = verify_lens
+        .iter()
+        .map(|&len| i32::try_from(len).context("verify length exceeds i32"))
+        .collect::<Result<Vec<_>>>()?;
+    let mask = build_batched_append_attention_mask(
+        &pre_offsets,
+        &verify_lens_i32,
+        i32::try_from(verify_width).context("verify width exceeds i32")?,
+        Dtype::Bfloat16,
+    )?;
+    let hidden = {
+        let _verify_qmm = ironmlx::nn::verify_qmm_scope();
+        model.forward_text_hidden(
+            &input,
+            &positions,
+            Some(&verify_lens_i32),
+            Some(&mask),
+            Some(batched_cache.as_mut_slice()),
+            StreamOrDevice::default(),
+        )?
+    };
+    let logits = model.project_hidden_on(&hidden, StreamOrDevice::default())?;
+    eval(&logits)?;
+    let flat = argmax_tokens(&logits)?;
+    let batched_tokens = (0..batch)
+        .map(|row| flat[row * verify_width..row * verify_width + verify_lens[row]].to_vec())
+        .collect::<Vec<_>>();
+    eprintln!(
+        "ragged exact verify qualification: model={} prefix_len={} verify_lens={verify_lens:?} \
+         sequential={sequential_tokens:?} batched={batched_tokens:?}",
+        std::any::type_name::<M>(),
+        prefix_len
+    );
+    anyhow::ensure!(
+        sequential_tokens == batched_tokens,
+        "ragged greedy token mismatch for model={} prefix_len={prefix_len} \
+         verify_lens={verify_lens:?}: sequential={sequential_tokens:?}, \
+         batched={batched_tokens:?}",
         std::any::type_name::<M>()
     );
     Ok(())
@@ -250,7 +444,14 @@ fn qualify_model<M: Model>(model: &M, tokenizer: &Tokenizer) -> Result<()> {
                 .into_iter()
                 .filter(|&width| width <= max_verify_width)
             {
-                qualify_case(model, &tokens, batch, prefix_len, verify_width)?;
+                qualify_case(
+                    model,
+                    &tokens,
+                    batch,
+                    prefix_len,
+                    verify_width,
+                    QualificationCache::Dense,
+                )?;
             }
         }
     }
@@ -310,5 +511,22 @@ fn llama_qgt1_matches_sequential_verify() -> Result<()> {
     let loader = Loader::open(&model_dir).context("opening Llama-family checkpoint")?;
     let tokenizer = load_tokenizer(&loader, &model_dir)?;
     let model = LlamaModel::from_loader(&loader).context("loading Llama-family model")?;
-    qualify_model(&model, &tokenizer)
+    qualify_model(&model, &tokenizer)?;
+
+    let mut tokens = tokenizer
+        .encode(QUALIFICATION_TEXT, false)
+        .context("tokenizing ragged qualification text")?;
+    while tokens.len() < 8 * (128 + 5) {
+        let copy = tokens.clone();
+        tokens.extend(copy);
+    }
+    for cache_mode in [
+        QualificationCache::Paged,
+        QualificationCache::TurboQuant(TurboQuantKVBits::K3V4),
+        QualificationCache::TurboQuant(TurboQuantKVBits::K4V4),
+    ] {
+        qualify_case(&model, &tokens, 4, 64, 5, cache_mode)?;
+    }
+    qualify_ragged_case(&model, &tokens, 64, &[5, 4, 2, 0])?;
+    qualify_ragged_case(&model, &tokens, 128, &[5, 1, 4, 0, 3, 2, 5, 0])
 }
