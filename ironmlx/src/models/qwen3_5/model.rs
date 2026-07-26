@@ -39,6 +39,7 @@ pub const MIN_KV_CACHE_CAP_FOR_GPU_PERF: i32 = 256;
 /// `vision` is `None`.
 pub struct Qwen35Model {
     text: Qwen35TextModel,
+    exact_batched_verify_precision_qualified: bool,
     /// `Some` when `!tie_word_embeddings`. `None` reuses `text.embed_tokens` for output projection.
     lm_head: Option<Linear>,
     /// Vision encoder; `Some` for VL models loaded with `open_multimodal`. `None` for text-only.
@@ -106,6 +107,14 @@ impl Qwen35Model {
     }
 
     pub fn from_loader_with_config(loader: &Loader, cfg: Qwen35Config) -> Result<Self> {
+        let exact_batched_verify_precision_qualified =
+            super::speculative::exact_batched_verify_precision_qualified(
+                loader.quant_meta(),
+                loader
+                    .config_raw_value()
+                    .pointer("/text_config/dtype")
+                    .and_then(serde_json::Value::as_str),
+            );
         let lm_head = if cfg.tie_word_embeddings {
             None
         } else {
@@ -131,6 +140,7 @@ impl Qwen35Model {
         let text = Qwen35TextModel::from_loader(loader, cfg)?;
         Ok(Self {
             text,
+            exact_batched_verify_precision_qualified,
             lm_head,
             vision,
         })
@@ -141,6 +151,7 @@ impl Qwen35Model {
     pub fn from_components(text: Qwen35TextModel, lm_head: Option<Linear>) -> Self {
         Self {
             text,
+            exact_batched_verify_precision_qualified: false,
             lm_head,
             vision: None,
         }
@@ -824,6 +835,7 @@ impl Qwen35Model {
         let text = Qwen35TextModel::from_components(stub_embed, Vec::new(), stub_norm, mrope, cfg);
         Self {
             text,
+            exact_batched_verify_precision_qualified: false,
             lm_head: None,
             vision: None,
         }
@@ -907,6 +919,20 @@ impl crate::core::model::Model for Qwen35Model {
         target: mlx::StreamOrDevice,
     ) -> crate::Result<mlx::Array> {
         Qwen35Model::project_hidden_on(self, hidden, target)
+    }
+
+    fn supports_exact_batched_speculative_verify(
+        &self,
+        batch_width: usize,
+        context_tokens: usize,
+        verify_width: usize,
+    ) -> bool {
+        super::speculative::exact_batched_verify_qualified(
+            self.exact_batched_verify_precision_qualified,
+            batch_width,
+            context_tokens,
+            verify_width,
+        )
     }
 
     fn model_meta(&self) -> crate::core::memory_budget::ModelMeta {

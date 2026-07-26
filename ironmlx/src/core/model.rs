@@ -104,10 +104,12 @@ pub trait Model {
     /// verify forward as greedy-token-equivalent to its ordinary single-token
     /// decode path for the requested execution shape.
     ///
-    /// Full KV cache trim is necessary for an exact batched verify, but it is
-    /// not sufficient: quantized projection and attention kernels can change
-    /// numerical shape at `Q > 1` and flip an argmax. Models must opt in only
-    /// after architecture-level token-parity qualification.
+    /// Cache rollback policy is independent of this capability. Full KV
+    /// caches may trim accepted offsets, while mixed recurrent caches restore
+    /// a transaction checkpoint and replay the accepted prefix. Quantized
+    /// projection and attention kernels can still change numerical shape at
+    /// `Q > 1` and flip an argmax, so models must opt in only after
+    /// architecture-level token-parity qualification.
     fn supports_exact_batched_speculative_verify(
         &self,
         _batch_width: usize,
@@ -115,6 +117,20 @@ pub trait Model {
         _verify_width: usize,
     ) -> bool {
         false
+    }
+
+    /// Whether PromptLookup may fall back to a chain of q=1 verify forwards
+    /// when exact batched verification is not qualified for the current
+    /// shape. Architectures may disable this when production measurements
+    /// show that sequential probing is consistently more expensive than
+    /// ordinary decode.
+    fn supports_sequential_prompt_lookup_verify(
+        &self,
+        _batch_width: usize,
+        _context_tokens: usize,
+        _verify_width: usize,
+    ) -> bool {
+        true
     }
 
     /// Whether q=1 speculative verification must materialize each device

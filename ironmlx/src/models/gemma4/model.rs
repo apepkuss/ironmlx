@@ -749,6 +749,15 @@ impl Model for Gemma4Model {
         )
     }
 
+    fn supports_sequential_prompt_lookup_verify(
+        &self,
+        _batch_width: usize,
+        _context_tokens: usize,
+        _verify_width: usize,
+    ) -> bool {
+        false
+    }
+
     fn num_hidden_layers(&self) -> usize {
         self.config().num_hidden_layers as usize
     }

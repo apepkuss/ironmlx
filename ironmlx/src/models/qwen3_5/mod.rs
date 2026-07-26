@@ -6,6 +6,7 @@
 
 mod config;
 mod model;
+pub(crate) mod speculative;
 mod text_model;
 
 pub mod cross_modal;

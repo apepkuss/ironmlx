@@ -7727,6 +7727,14 @@ impl<M: Model> Scheduler<M> {
         // per-row lens below, so their cache state does not advance.
         self.rebuild_cache_layout(model, &active_rows)?;
 
+        let base_snapshot = self
+            .cache
+            .as_ref()
+            .ok_or_else(|| anyhow!("fill_prompt_lookup_windows: main cache is absent"))?
+            .iter()
+            .map(LayerCache::snapshot)
+            .collect::<Vec<_>>();
+        let mut attempted_verify = false;
         let verify_result = (|| -> Result<()> {
             let cache_row_for_ctx = contexts
                 .iter()
@@ -7743,13 +7751,6 @@ impl<M: Model> Scheduler<M> {
                         })
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let base_snapshot = self
-                .cache
-                .as_ref()
-                .ok_or_else(|| anyhow!("fill_prompt_lookup_windows: main cache is absent"))?
-                .iter()
-                .map(LayerCache::snapshot)
-                .collect::<Vec<_>>();
             let batch = self.cache_rows.len();
             let max_verify_len = contexts
                 .iter()
@@ -7776,15 +7777,21 @@ impl<M: Model> Scheduler<M> {
                 .max()
                 .and_then(|value| usize::try_from(value).ok())
                 .unwrap_or(usize::MAX);
-            let exact_batched_verify = self
-                .cache
-                .as_ref()
-                .is_some_and(|cache| layer_cache_supports_accepted_prefix_trim(cache))
-                && model.supports_exact_batched_speculative_verify(
+            let exact_batched_verify = model.supports_exact_batched_speculative_verify(
+                batch,
+                max_context_tokens,
+                max_verify_len,
+            );
+            if !exact_batched_verify
+                && !model.supports_sequential_prompt_lookup_verify(
                     batch,
                     max_context_tokens,
                     max_verify_len,
-                );
+                )
+            {
+                return Ok(());
+            }
+            attempted_verify = true;
             if exact_batched_verify {
                 stats.exact_batched_verify_windows =
                     stats.exact_batched_verify_windows.saturating_add(1);
@@ -8069,6 +8076,7 @@ impl<M: Model> Scheduler<M> {
                 add_elapsed_us(&mut stats.rollback_us, rollback_start);
             }
 
+            let mut pending_commits = Vec::with_capacity(contexts.len());
             for (ctx, resolution) in contexts.iter().zip(resolutions) {
                 let accepted_draft_len = resolution.accepted_draft_len;
                 let accepted_verify_input_len = resolution.accepted_verify_input_len;
@@ -8081,19 +8089,17 @@ impl<M: Model> Scheduler<M> {
                     tokens.truncate(stop_idx + 1);
                 }
                 tokens.truncate(ctx.remaining);
-                row_states
-                    .get_mut(&ctx.row_idx)
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "fill_prompt_lookup_windows: row {} state disappeared",
-                            ctx.row_idx
-                        )
-                    })?
-                    .pending_tokens
-                    .extend(tokens);
-                let row_state = row_states
-                    .get(&ctx.row_idx)
-                    .expect("prompt lookup row checked above");
+                let row_state = row_states.get(&ctx.row_idx).ok_or_else(|| {
+                    anyhow!(
+                        "fill_prompt_lookup_windows: row {} state disappeared",
+                        ctx.row_idx
+                    )
+                })?;
+                anyhow::ensure!(
+                    row_state.pending_tokens.is_empty(),
+                    "fill_prompt_lookup_windows: row {} pending queue changed during verify",
+                    ctx.row_idx
+                );
                 let slot = self.slots[ctx.row_idx]
                     .as_ref()
                     .expect("prompt lookup context retains its request slot");
@@ -8111,14 +8117,14 @@ impl<M: Model> Scheduler<M> {
                 .ok_or_else(|| anyhow!("prompt lookup cache has no sequence offset"))?;
                 let expected_cached_len = slot
                     .real_len
-                    .saturating_add(row_state.pending_tokens.len() as i32)
+                    .saturating_add(tokens.len() as i32)
                     .saturating_sub(1);
                 anyhow::ensure!(
                     cached_len == expected_cached_len,
                     "prompt lookup row {} cache offset {cached_len} != emitted real_len {} + pending {} - 1",
                     ctx.row_idx,
                     slot.real_len,
-                    row_state.pending_tokens.len()
+                    tokens.len()
                 );
                 tracing::debug!(
                     target: "ironmlx::prompt_lookup",
@@ -8129,16 +8135,36 @@ impl<M: Model> Scheduler<M> {
                     accepted_verify_input_len,
                     needs_rollback,
                     real_len = slot.real_len,
-                    pending_len = row_state.pending_tokens.len(),
+                    pending_len = tokens.len(),
                     cached_len,
                     "filled PromptLookup window"
                 );
+                pending_commits.push((ctx.row_idx, tokens));
+            }
+            for (row_idx, tokens) in pending_commits {
+                row_states
+                    .get_mut(&row_idx)
+                    .expect("prompt lookup row validated before transaction commit")
+                    .pending_tokens
+                    .extend(tokens);
             }
             Ok(())
         })();
 
-        verify_result?;
-        Ok(true)
+        if let Err(err) = verify_result {
+            let restore_result = self
+                .cache
+                .as_mut()
+                .ok_or_else(|| anyhow!("fill_prompt_lookup_windows: main cache is absent"))
+                .and_then(|cache| restore_layer_cache(cache.as_mut_slice(), &base_snapshot));
+            return match restore_result {
+                Ok(()) => Err(err),
+                Err(restore_err) => Err(err.context(format!(
+                    "prompt lookup verify transaction rollback failed: {restore_err:#}"
+                ))),
+            };
+        }
+        Ok(attempted_verify)
     }
 
     pub fn prefill_admitted_mtp_single(
@@ -16321,6 +16347,8 @@ mod tests {
         vision_grid_lens: std::sync::Mutex<Vec<usize>>,
         project_calls: std::sync::Mutex<usize>,
         fail_mtp_cache: bool,
+        hybrid_cache: bool,
+        fail_verify_projection: bool,
     }
 
     impl ScriptedMtpSchedulerModel {
@@ -16349,7 +16377,19 @@ mod tests {
                 vision_grid_lens: std::sync::Mutex::new(Vec::new()),
                 project_calls: std::sync::Mutex::new(0),
                 fail_mtp_cache: false,
+                hybrid_cache: false,
+                fail_verify_projection: false,
             }
+        }
+
+        fn with_hybrid_cache(mut self) -> Self {
+            self.hybrid_cache = true;
+            self
+        }
+
+        fn with_verify_projection_failure(mut self) -> Self {
+            self.fail_verify_projection = true;
+            self
         }
 
         fn with_mtp_cache_failure(first_token: u32) -> Self {
@@ -16368,6 +16408,8 @@ mod tests {
                 vision_grid_lens: std::sync::Mutex::new(Vec::new()),
                 project_calls: std::sync::Mutex::new(0),
                 fail_mtp_cache: true,
+                hybrid_cache: false,
+                fail_verify_projection: false,
             }
         }
 
@@ -16433,9 +16475,14 @@ mod tests {
             let v = mlx::Array::zeros((batch, 1_i32, seq, 1_i32), mlx::Dtype::Bfloat16)
                 .map_err(|e| anyhow::anyhow!("fake v failed: {e:?}"))?;
             for layer in cache {
-                if let crate::nn::LayerCache::Full(kv) = layer {
-                    kv.update_and_fetch(&k, &v, lens)?;
-                    break;
+                match layer {
+                    crate::nn::LayerCache::Full(kv) => {
+                        kv.update_and_fetch(&k, &v, lens)?;
+                    }
+                    crate::nn::LayerCache::Linear(gd) => {
+                        gd.advance(lens)?;
+                    }
+                    crate::nn::LayerCache::Mla(_) => {}
                 }
             }
             Ok(())
@@ -16495,9 +16542,17 @@ mod tests {
             cap: i32,
             dtype: mlx::Dtype,
         ) -> crate::Result<Vec<crate::nn::LayerCache>> {
-            Ok(vec![crate::nn::LayerCache::Full(
-                crate::core::KVCache::new(batch, 1, 1, 1, dtype, cap),
-            )])
+            let mut cache = vec![crate::nn::LayerCache::Full(crate::core::KVCache::new(
+                batch, 1, 1, 1, dtype, cap,
+            ))];
+            if self.hybrid_cache {
+                cache.push(crate::nn::LayerCache::Linear(
+                    crate::core::cache::GatedDeltaCache::new_with_cap(
+                        batch, 2, 4, 1, 1, 1, dtype, cap,
+                    )?,
+                ));
+            }
+            Ok(cache)
         }
 
         fn forward_on(
@@ -16557,6 +16612,9 @@ mod tests {
             let seq = hidden_dims[1] as usize;
             let mut calls = self.project_calls.lock().unwrap();
             let mut first_token_calls_remaining = self.first_token_calls_remaining.lock().unwrap();
+            if self.fail_verify_projection && seq > 1 {
+                return Err(anyhow!("injected verify projection failure"));
+            }
             let mut expecting_first_token_projection =
                 self.expecting_first_token_projection.lock().unwrap();
             let mut sequences = self.verify_sequences.lock().unwrap();
@@ -17567,7 +17625,8 @@ mod tests {
         .expect("scheduler startup");
         let prompt = vec![1, 2, 3, 4, 1, 2, 3];
         let id = scheduler.admit(mtp_req(prompt.clone(), 3)).expect("admit");
-        let model = ScriptedMtpSchedulerModel::new(4, Vec::new(), vec![vec![9, 0]]);
+        let model =
+            ScriptedMtpSchedulerModel::new(4, Vec::new(), vec![vec![9, 0]]).with_hybrid_cache();
 
         scheduler
             .prefill_admitted_prompt_lookup(&model, prompt_lookup_cfg())
@@ -17601,6 +17660,88 @@ mod tests {
         assert_eq!(stats.rejected_tokens, 1);
         assert_eq!(stats.zero_accept_windows, 1);
         assert_eq!(stats.rollback_count, 1);
+        assert_eq!(stats.exact_batched_verify_windows, 1);
+        assert_eq!(stats.sequential_verify_windows, 0);
+        let expected_offset = scheduler
+            .get(id)
+            .expect("request state")
+            .real_len
+            .saturating_sub(1);
+        let cache = scheduler.cache.as_ref().expect("scheduler cache");
+        assert!(matches!(
+            cache.as_slice(),
+            [LayerCache::Full(_), LayerCache::Linear(_)]
+        ));
+        for layer in cache {
+            match layer {
+                LayerCache::Full(kv) => assert_eq!(kv.offsets(), &[expected_offset]),
+                LayerCache::Linear(gd) => assert_eq!(gd.offsets(), &[expected_offset]),
+                LayerCache::Mla(_) => panic!("unexpected MLA cache"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn prompt_lookup_exact_hybrid_verify_failure_restores_transaction() {
+        let mut scheduler = Scheduler::<ScriptedMtpSchedulerModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        let prompt = vec![1, 2, 3, 4, 1, 2, 3];
+        scheduler
+            .admit(mtp_req(prompt, 3))
+            .expect("admit hybrid request");
+        let model = ScriptedMtpSchedulerModel::new(4, Vec::new(), vec![vec![9, 0]])
+            .with_hybrid_cache()
+            .with_verify_projection_failure();
+
+        scheduler
+            .prefill_admitted_prompt_lookup(&model, prompt_lookup_cfg())
+            .expect("prompt lookup prefill");
+        let offsets_before = scheduler
+            .cache
+            .as_ref()
+            .expect("scheduler cache")
+            .iter()
+            .map(|layer| match layer {
+                LayerCache::Full(kv) => kv.offsets().to_vec(),
+                LayerCache::Linear(gd) => gd.offsets().to_vec(),
+                LayerCache::Mla(_) => panic!("unexpected MLA cache"),
+            })
+            .collect::<Vec<_>>();
+
+        let err = scheduler
+            .step_prompt_lookup(&model)
+            .expect_err("verify projection failure");
+        assert!(
+            format!("{err:#}").contains("injected verify projection failure"),
+            "unexpected error: {err:#}"
+        );
+        let offsets_after = scheduler
+            .cache
+            .as_ref()
+            .expect("scheduler cache")
+            .iter()
+            .map(|layer| match layer {
+                LayerCache::Full(kv) => kv.offsets().to_vec(),
+                LayerCache::Linear(gd) => gd.offsets().to_vec(),
+                LayerCache::Mla(_) => panic!("unexpected MLA cache"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(offsets_after, offsets_before);
+        assert!(scheduler.poisoned);
+        assert!(scheduler
+            .prompt_lookup_state
+            .as_ref()
+            .expect("prompt lookup state")
+            .rows
+            .get(&0)
+            .expect("row state")
+            .pending_tokens
+            .is_empty());
     }
 
     #[test]

@@ -133,6 +133,7 @@ class MatrixConfig:
     max_tokens: Tuple[int, ...] = (128,)
     concurrency: Tuple[int, ...] = (1, 2)
     max_sequences: Optional[int] = None
+    max_cache_cap: Optional[int] = None
     prefill_chunk_size: int = 2048
     runs: int = 3
     warmup_batches: int = 1
@@ -471,7 +472,9 @@ def build_serve_command(
     variant: Variant,
     variant_dir: Path,
 ) -> List[str]:
-    max_cache_cap = max(config.prompt_tokens) + max(config.max_tokens) + 1024
+    max_cache_cap = config.max_cache_cap or (
+        max(config.prompt_tokens) + max(config.max_tokens) + 1024
+    )
     cmd = [
         str(config.serve_bin),
         "serve",
@@ -1568,7 +1571,6 @@ def run_matrix(config: MatrixConfig) -> int:
         if missing:
             raise ValueError("unknown or empty corpus categories: {}".format(sorted(missing)))
     variants = build_variants(config)
-    write_run_plan(config, variants)
     metadata = {
         "created_at": datetime.now().astimezone().isoformat(),
         "config": {
@@ -1588,6 +1590,7 @@ def run_matrix(config: MatrixConfig) -> int:
         json.dumps(metadata, indent=2, default=str), encoding="utf-8"
     )
     if config.dry_run:
+        write_run_plan(config, variants)
         print("dry-run wrote {}".format(config.out_root))
         return 0
     if config.build:
@@ -1609,6 +1612,15 @@ def run_matrix(config: MatrixConfig) -> int:
             for prompt_tokens in config.prompt_tokens
             for max_tokens in config.max_tokens
         ]
+        if config.max_cache_cap is None:
+            config.max_cache_cap = max(
+                item.prompt_tokens_local + item.max_tokens for item in resolved
+            ) + 1024
+            metadata["config"]["max_cache_cap"] = config.max_cache_cap
+            (config.out_root / "metadata.json").write_text(
+                json.dumps(metadata, indent=2, default=str), encoding="utf-8"
+            )
+        write_run_plan(config, variants)
         (config.out_root / "resolved-corpus.json").write_text(
             json.dumps(
                 [
@@ -1716,6 +1728,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> MatrixConfig:
     parser.add_argument("--concurrency", type=parse_int_list)
     parser.add_argument("--max-sequences", type=int)
     parser.add_argument(
+        "--max-cache-cap",
+        type=int,
+        help="server cache cap; defaults to the resolved prompt length plus generation and headroom",
+    )
+    parser.add_argument(
         "--prefill-chunk-size",
         type=int,
         default=2048,
@@ -1765,6 +1782,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> MatrixConfig:
         parser.error("--runs must be positive and --warmup-batches must be non-negative")
     if args.max_sequences is not None and args.max_sequences <= 0:
         parser.error("--max-sequences must be positive")
+    if args.max_cache_cap is not None and args.max_cache_cap <= 0:
+        parser.error("--max-cache-cap must be positive")
     if args.prefill_chunk_size < 0:
         parser.error("--prefill-chunk-size must be non-negative")
     out_root = args.out_root or (
@@ -1786,6 +1805,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> MatrixConfig:
         max_tokens=tuple(max_tokens),
         concurrency=tuple(concurrency),
         max_sequences=args.max_sequences,
+        max_cache_cap=args.max_cache_cap,
         prefill_chunk_size=args.prefill_chunk_size,
         runs=runs,
         warmup_batches=args.warmup_batches,

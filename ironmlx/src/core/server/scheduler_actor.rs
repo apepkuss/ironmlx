@@ -628,6 +628,7 @@ where
         sched: &mut Scheduler<M>,
         model: &M,
         counters: &SchedulerActorMtpCounters,
+        admission_pending: bool,
     ) -> Result<Vec<StepEvent>>;
 
     fn begin_mid_admit(
@@ -660,6 +661,13 @@ struct SchedulerActorPromptLookup {
     defer_speculation_once: bool,
     cost_controller: PromptLookupCostController,
     measured_cycle: Option<PromptLookupMeasuredCycle>,
+}
+
+fn prompt_lookup_admission_forces_ordinary(
+    measured_cycle_active: bool,
+    admission_pending: bool,
+) -> bool {
+    admission_pending && !measured_cycle_active
 }
 
 struct PromptLookupMeasuredCycle {
@@ -781,6 +789,7 @@ where
         sched: &mut Scheduler<M>,
         model: &M,
         _counters: &SchedulerActorMtpCounters,
+        _admission_pending: bool,
     ) -> Result<Vec<StepEvent>> {
         sched.step(model)
     }
@@ -866,17 +875,22 @@ where
         sched: &mut Scheduler<M>,
         model: &M,
         counters: &SchedulerActorMtpCounters,
+        admission_pending: bool,
     ) -> Result<Vec<StepEvent>> {
         let boundary_before = sched.prompt_lookup_can_start_rolling_mid_admit();
+        let measured_cycle_active = self.measured_cycle.is_some();
         let regime = self
             .measured_cycle
             .as_ref()
             .map(|cycle| cycle.regime)
             .or_else(|| sched.prompt_lookup_qualification_regime());
-        let action = if self.measured_cycle.is_some() {
+        let action = if measured_cycle_active {
             PromptLookupCostAction::Lookup
         } else if self.defer_speculation_once {
             self.defer_speculation_once = false;
+            PromptLookupCostAction::Ordinary
+        } else if prompt_lookup_admission_forces_ordinary(measured_cycle_active, admission_pending)
+        {
             PromptLookupCostAction::Ordinary
         } else {
             regime
@@ -1047,6 +1061,7 @@ where
         sched: &mut Scheduler<M>,
         model: &M,
         counters: &SchedulerActorMtpCounters,
+        _admission_pending: bool,
     ) -> Result<Vec<StepEvent>> {
         if sched.mtp_stats().is_some() {
             counters.mtp_step_count.fetch_add(1, Ordering::Relaxed);
@@ -1190,6 +1205,7 @@ impl SchedulerActorMtpMode<crate::models::Gemma4Model> for SchedulerActorGemma4D
         sched: &mut Scheduler<crate::models::Gemma4Model>,
         model: &crate::models::Gemma4Model,
         counters: &SchedulerActorMtpCounters,
+        _admission_pending: bool,
     ) -> Result<Vec<StepEvent>> {
         if sched.gemma4_drafter_stats().is_some() {
             counters.mtp_step_count.fetch_add(1, Ordering::Relaxed);
@@ -2502,7 +2518,12 @@ fn driver_loop<M, A>(
                     });
                     let step_result = {
                         let model_lock = model.blocking_lock();
-                        mtp_mode.step(&mut sched, &model_lock, &mtp_counters)
+                        mtp_mode.step(
+                            &mut sched,
+                            &model_lock,
+                            &mtp_counters,
+                            in_flight_mid_admit.is_some() || !admission_queue.is_empty(),
+                        )
                     };
                     let step_end = step_profile.map(|_| Instant::now());
                     match step_result {
@@ -4580,7 +4601,7 @@ mod tests {
         assert!(scheduler.mtp_stats().is_some());
 
         let step_events = mode
-            .step(&mut scheduler, &SchedulerActorFakeModel, &counters)
+            .step(&mut scheduler, &SchedulerActorFakeModel, &counters, false)
             .expect("mtp step");
         assert_eq!(step_events.len(), 1);
         assert_eq!(counters.mtp_step_count.load(Ordering::Relaxed), 1);
@@ -4594,6 +4615,13 @@ mod tests {
             accepted <= drafted,
             "accepted draft tokens cannot exceed drafted tokens"
         );
+    }
+
+    #[test]
+    fn prompt_lookup_admission_pressure_only_blocks_new_windows() {
+        assert!(prompt_lookup_admission_forces_ordinary(false, true));
+        assert!(!prompt_lookup_admission_forces_ordinary(true, true));
+        assert!(!prompt_lookup_admission_forces_ordinary(false, false));
     }
 
     #[test]
