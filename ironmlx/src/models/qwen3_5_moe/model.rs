@@ -23,7 +23,7 @@ pub const MIN_KV_CACHE_CAP_FOR_GPU_PERF: i32 =
 
 pub struct Qwen35MoeModel {
     text: Qwen35MoeTextModel,
-    exact_batched_verify_precision_qualified: bool,
+    exact_batched_verify_profile: crate::models::qwen3_5::speculative::ExactBatchedVerifyProfile,
     /// Always Some for 35B-A3B (tie_word_embeddings=false).
     lm_head: Linear,
     /// Vision encoder; `Some` for multimodal MoE checkpoints loaded with `open_multimodal`.
@@ -95,8 +95,8 @@ impl Qwen35MoeModel {
         }
         let lm_head =
             Linear::from_loader(loader, "lm_head").context("loading Qwen35MoeModel lm_head")?;
-        let exact_batched_verify_precision_qualified =
-            crate::models::qwen3_5::speculative::exact_batched_verify_precision_qualified(
+        let exact_batched_verify_profile =
+            crate::models::qwen3_5::speculative::moe_exact_batched_verify_profile(
                 loader.quant_meta(),
                 loader
                     .config_raw_value()
@@ -115,7 +115,7 @@ impl Qwen35MoeModel {
         let text = Qwen35MoeTextModel::from_loader(loader, cfg)?;
         Ok(Self {
             text,
-            exact_batched_verify_precision_qualified,
+            exact_batched_verify_profile,
             lm_head,
             vision,
         })
@@ -155,9 +155,9 @@ impl Qwen35MoeModel {
         let hidden_shape = hidden.shape();
         let hidden_shape = hidden_shape.as_slice();
         let exact_batched_verify = crate::nn::verify_qmm::is_armed()
-            && self.exact_batched_verify_precision_qualified
             && hidden_shape.len() == 3
             && crate::models::qwen3_5::speculative::exact_batched_verify_shape_qualified(
+                self.exact_batched_verify_profile,
                 hidden_shape[0] as usize,
                 hidden_shape[1] as usize,
             );
@@ -419,7 +419,8 @@ impl Qwen35MoeModel {
             Qwen35MoeTextModel::from_components(stub_embed, Vec::new(), stub_norm, mrope, cfg);
         Self {
             text,
-            exact_batched_verify_precision_qualified: false,
+            exact_batched_verify_profile:
+                crate::models::qwen3_5::speculative::ExactBatchedVerifyProfile::Disabled,
             lm_head,
             vision: None,
         }
@@ -641,9 +642,9 @@ impl Qwen35MoeModel {
         let input_shape = input_ids.shape();
         let input_shape = input_shape.as_slice();
         let exact_batched_verify = crate::nn::verify_qmm::is_armed()
-            && self.exact_batched_verify_precision_qualified
             && input_shape.len() == 2
             && crate::models::qwen3_5::speculative::exact_batched_verify_shape_qualified(
+                self.exact_batched_verify_profile,
                 input_shape[0] as usize,
                 input_shape[1] as usize,
             );
@@ -756,7 +757,7 @@ impl Model for Qwen35MoeModel {
         verify_width: usize,
     ) -> bool {
         crate::models::qwen3_5::speculative::exact_batched_verify_qualified(
-            self.exact_batched_verify_precision_qualified,
+            self.exact_batched_verify_profile,
             batch_width,
             context_tokens,
             verify_width,

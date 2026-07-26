@@ -437,6 +437,7 @@ fn qualify_ragged_case<M: Model>(
 }
 
 fn qualify_model<M: Model>(model: &M, tokenizer: &Tokenizer) -> Result<()> {
+    let force_candidate = std::env::var_os("PROMPT_LOOKUP_VERIFY_FORCE_CANDIDATE").is_some();
     let max_verify_width = std::env::var("PROMPT_LOOKUP_VERIFY_MAX_WIDTH")
         .ok()
         .map(|value| value.parse::<usize>())
@@ -481,23 +482,53 @@ fn qualify_model<M: Model>(model: &M, tokenizer: &Tokenizer) -> Result<()> {
         let copy = tokens.clone();
         tokens.extend(copy);
     }
+    let mut qualified_cases = 0_usize;
+    let mut candidate_failures = Vec::new();
     for batch in batches {
         for &prefix_len in &prefix_lens {
             for &verify_width in verify_widths
                 .iter()
                 .filter(|&&width| width <= max_verify_width)
             {
-                qualify_case(
+                if !force_candidate
+                    && !model.supports_exact_batched_speculative_verify(
+                        batch,
+                        prefix_len,
+                        verify_width,
+                    )
+                {
+                    continue;
+                }
+                let result = qualify_case(
                     model,
                     &tokens,
                     batch,
                     prefix_len,
                     verify_width,
                     QualificationCache::Dense,
-                )?;
+                );
+                match result {
+                    Ok(()) => qualified_cases += 1,
+                    Err(error) if force_candidate => {
+                        let failure =
+                            format!("B{batch} context={prefix_len} Q{verify_width}: {error:#}");
+                        eprintln!("candidate exact verify failure: {failure}");
+                        candidate_failures.push(failure);
+                    }
+                    Err(error) => return Err(error),
+                }
             }
         }
     }
+    anyhow::ensure!(
+        candidate_failures.is_empty(),
+        "candidate exact Q>1 qualification failures:\n{}",
+        candidate_failures.join("\n")
+    );
+    anyhow::ensure!(
+        qualified_cases > 0,
+        "model reported no exact Q>1 qualification cases"
+    );
     Ok(())
 }
 
@@ -514,10 +545,79 @@ fn qualify_qwen_cache_and_ragged<M: Model>(model: &M, tokenizer: &Tokenizer) -> 
         QualificationCache::TurboQuant(TurboQuantKVBits::K3V4),
         QualificationCache::TurboQuant(TurboQuantKVBits::K4V4),
     ] {
-        qualify_case(model, &tokens, 4, 64, 5, cache_mode)?;
+        if model.supports_exact_batched_speculative_verify(4, 64, 5) {
+            qualify_case(model, &tokens, 4, 64, 5, cache_mode)?;
+        } else if model.supports_exact_batched_speculative_verify(8, 64, 2) {
+            for &batch in &[1_usize, 4, 8] {
+                qualify_case(model, &tokens, batch, 64, 2, cache_mode)?;
+            }
+        } else {
+            for &(batch, verify_width) in &[(1_usize, 5_usize), (2, 4), (4, 2)] {
+                anyhow::ensure!(
+                    model.supports_exact_batched_speculative_verify(batch, 64, verify_width),
+                    "missing expected Affine8 exact qualification for B{batch} Q{verify_width}"
+                );
+                qualify_case(model, &tokens, batch, 64, verify_width, cache_mode)?;
+            }
+        }
     }
-    qualify_ragged_case(model, &tokens, 64, &[5, 4, 2, 0])?;
-    qualify_ragged_case(model, &tokens, 128, &[5, 1, 4, 0, 3, 2, 5, 0])
+    if model.supports_exact_batched_speculative_verify(8, 128, 5) {
+        qualify_ragged_case(model, &tokens, 64, &[5, 4, 2, 0])?;
+        qualify_ragged_case(model, &tokens, 128, &[5, 1, 4, 0, 3, 2, 5, 0])
+    } else if model.supports_exact_batched_speculative_verify(8, 128, 2) {
+        qualify_ragged_case(model, &tokens, 64, &[2, 1, 2, 0])?;
+        qualify_ragged_case(model, &tokens, 128, &[2, 1, 2, 0, 2, 1, 2, 0])
+    } else {
+        qualify_ragged_case(model, &tokens, 64, &[4, 2])?;
+        qualify_ragged_case(model, &tokens, 128, &[2, 1, 2, 0])
+    }
+}
+
+fn qualify_gemma_cache_and_ragged<M: Model>(model: &M, tokenizer: &Tokenizer) -> Result<()> {
+    let mut tokens = tokenizer
+        .encode(QUALIFICATION_TEXT, false)
+        .context("tokenizing Gemma4 cache qualification text")?;
+    while tokens.len() < 8 * (128 + 5) {
+        let copy = tokens.clone();
+        tokens.extend(copy);
+    }
+    let batch = if model.supports_exact_batched_speculative_verify(4, 64, 5) {
+        4
+    } else {
+        anyhow::ensure!(
+            model.supports_exact_batched_speculative_verify(2, 64, 5),
+            "missing expected Gemma4 exact qualification for B2 Q5"
+        );
+        2
+    };
+    for cache_mode in [
+        QualificationCache::Paged,
+        QualificationCache::TurboQuant(TurboQuantKVBits::K3V4),
+        QualificationCache::TurboQuant(TurboQuantKVBits::K4V4),
+    ] {
+        let kv_bits = match cache_mode {
+            QualificationCache::TurboQuant(bits) => Some(bits),
+            QualificationCache::Dense | QualificationCache::Paged => None,
+        };
+        if model.supports_exact_batched_speculative_verify_for_kv_cache(batch, 64, 5, kv_bits) {
+            qualify_case(model, &tokens, batch, 64, 5, cache_mode)?;
+        } else {
+            anyhow::ensure!(
+                kv_bits.is_some(),
+                "unexpected Gemma4 cache qualification rejection for {cache_mode:?}"
+            );
+            if model.supports_exact_batched_speculative_verify_for_kv_cache(batch, 64, 2, kv_bits) {
+                qualify_case(model, &tokens, batch, 64, 2, cache_mode)?;
+            }
+        }
+    }
+    if batch == 4 {
+        qualify_ragged_case(model, &tokens, 64, &[5, 4, 2, 0])?;
+        qualify_ragged_case(model, &tokens, 128, &[5, 1, 4, 0, 3, 2, 5, 0])
+    } else {
+        qualify_ragged_case(model, &tokens, 64, &[5, 2])?;
+        qualify_ragged_case(model, &tokens, 128, &[5, 1])
+    }
 }
 
 fn qualify_identical_row_decode<M: Model>(
@@ -661,6 +761,20 @@ fn qwen35_dense_qgt1_matches_sequential_verify() -> Result<()> {
     let loader = Loader::open(&model_dir).context("opening Qwen3.5 checkpoint")?;
     let tokenizer = load_tokenizer(&loader, &model_dir)?;
     let model = Qwen35Model::from_loader(&loader).context("loading Qwen3.5 model")?;
+    if loader.quant_meta().is_some_and(|quant| quant.bits == 8) {
+        anyhow::ensure!(
+            model.supports_exact_batched_speculative_verify(1, 4_096, 5)
+                && model.supports_exact_batched_speculative_verify(2, 4_096, 4)
+                && model.supports_exact_batched_speculative_verify(4, 4_096, 2),
+            "Qwen3.5 Dense Affine8 checkpoint is missing its exact qualification staircase"
+        );
+        anyhow::ensure!(
+            !model.supports_exact_batched_speculative_verify(2, 4_096, 5)
+                && !model.supports_exact_batched_speculative_verify(4, 4_096, 3)
+                && !model.supports_exact_batched_speculative_verify(8, 4_096, 2),
+            "Qwen3.5 Dense Affine8 checkpoint exceeded its qualified exact shape"
+        );
+    }
     qualify_model(&model, &tokenizer)?;
     qualify_qwen_cache_and_ragged(&model, &tokenizer)
 }
@@ -679,10 +793,19 @@ fn qwen35_moe_qgt1_matches_sequential_verify() -> Result<()> {
     let loader = Loader::open(&model_dir).context("opening Qwen3.5 MoE checkpoint")?;
     let tokenizer = load_tokenizer(&loader, &model_dir)?;
     let model = Qwen35MoeModel::from_loader(&loader).context("loading Qwen3.5 MoE model")?;
-    anyhow::ensure!(
-        model.supports_exact_batched_speculative_verify(8, 4_096, 5),
-        "Qwen3.5 MoE checkpoint is not exact-verify precision qualified"
-    );
+    if loader.quant_meta().is_some_and(|quant| quant.bits == 8) {
+        anyhow::ensure!(
+            model.supports_exact_batched_speculative_verify(8, 1_024, 2)
+                && !model.supports_exact_batched_speculative_verify(8, 1_025, 2)
+                && !model.supports_exact_batched_speculative_verify(1, 1_024, 4),
+            "Qwen3.5 MoE Affine8 checkpoint exceeded its exact Q2 qualification"
+        );
+    } else {
+        anyhow::ensure!(
+            model.supports_exact_batched_speculative_verify(8, 4_096, 5),
+            "Qwen3.5 MoE checkpoint is not exact-verify precision qualified"
+        );
+    }
     qualify_model(&model, &tokenizer)?;
     qualify_qwen_cache_and_ragged(&model, &tokenizer)
 }
@@ -718,11 +841,24 @@ fn qwen36_moe_qgt1_matches_sequential_verify() -> Result<()> {
     let loader = Loader::open(&model_dir).context("opening Qwen3.6 MoE checkpoint")?;
     let tokenizer = load_tokenizer(&loader, &model_dir)?;
     let model = Qwen36MoeModel::from_loader(&loader).context("loading Qwen3.6 MoE model")?;
-    anyhow::ensure!(
-        model.supports_exact_batched_speculative_verify(8, 4_096, 5),
-        "Qwen3.6 MoE checkpoint is not exact-verify precision qualified"
-    );
+    let force_candidate = std::env::var_os("PROMPT_LOOKUP_VERIFY_FORCE_CANDIDATE").is_some();
+    if !force_candidate && loader.quant_meta().is_some_and(|quant| quant.bits == 8) {
+        anyhow::ensure!(
+            model.supports_exact_batched_speculative_verify(8, 1_024, 2)
+                && !model.supports_exact_batched_speculative_verify(8, 1_025, 2)
+                && !model.supports_exact_batched_speculative_verify(1, 1_024, 4),
+            "Qwen3.6 MoE Affine8 checkpoint exceeded its exact Q2 qualification"
+        );
+    } else if !force_candidate {
+        anyhow::ensure!(
+            model.supports_exact_batched_speculative_verify(8, 4_096, 5),
+            "Qwen3.6 MoE checkpoint is not exact-verify precision qualified"
+        );
+    }
     qualify_model(&model, &tokenizer)?;
+    if force_candidate {
+        return Ok(());
+    }
     qualify_qwen_cache_and_ragged(&model, &tokenizer)
 }
 
@@ -740,7 +876,34 @@ fn gemma4_qgt1_matches_sequential_verify() -> Result<()> {
     let loader = Loader::open(&model_dir).context("opening Gemma4 checkpoint")?;
     let tokenizer = load_tokenizer(&loader, &model_dir)?;
     let model = Gemma4Model::from_loader(&loader).context("loading Gemma4 model")?;
-    qualify_model(&model, &tokenizer)
+    let force_candidate = std::env::var_os("PROMPT_LOOKUP_VERIFY_FORCE_CANDIDATE").is_some();
+    if !force_candidate && loader.quant_meta().is_some_and(|quant| quant.bits == 8) {
+        let is_moe = loader
+            .config_raw_value()
+            .pointer("/text_config/enable_moe_block")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        if is_moe {
+            anyhow::ensure!(
+                model.supports_exact_batched_speculative_verify(2, 1_024, 5)
+                    && !model.supports_exact_batched_speculative_verify(4, 1_024, 2)
+                    && !model.supports_exact_batched_speculative_verify(2, 1_025, 5),
+                "Gemma4 MoE Affine8 checkpoint exceeded its B1-B2 exact qualification"
+            );
+        } else {
+            anyhow::ensure!(
+                model.supports_exact_batched_speculative_verify(8, 1_024, 5)
+                    && !model.supports_exact_batched_speculative_verify(8, 1_025, 5)
+                    && !model.supports_exact_batched_speculative_verify(8, 1_024, 6),
+                "Gemma4 Dense Affine8 checkpoint exceeded its exact qualification"
+            );
+        }
+    }
+    qualify_model(&model, &tokenizer)?;
+    if force_candidate {
+        return Ok(());
+    }
+    qualify_gemma_cache_and_ragged(&model, &tokenizer)
 }
 
 #[test]

@@ -39,7 +39,7 @@ pub const MIN_KV_CACHE_CAP_FOR_GPU_PERF: i32 = 256;
 /// `vision` is `None`.
 pub struct Qwen35Model {
     text: Qwen35TextModel,
-    exact_batched_verify_precision_qualified: bool,
+    exact_batched_verify_profile: super::speculative::ExactBatchedVerifyProfile,
     /// `Some` when `!tie_word_embeddings`. `None` reuses `text.embed_tokens` for output projection.
     lm_head: Option<Linear>,
     /// Vision encoder; `Some` for VL models loaded with `open_multimodal`. `None` for text-only.
@@ -107,14 +107,13 @@ impl Qwen35Model {
     }
 
     pub fn from_loader_with_config(loader: &Loader, cfg: Qwen35Config) -> Result<Self> {
-        let exact_batched_verify_precision_qualified =
-            super::speculative::exact_batched_verify_precision_qualified(
-                loader.quant_meta(),
-                loader
-                    .config_raw_value()
-                    .pointer("/text_config/dtype")
-                    .and_then(serde_json::Value::as_str),
-            );
+        let exact_batched_verify_profile = super::speculative::dense_exact_batched_verify_profile(
+            loader.quant_meta(),
+            loader
+                .config_raw_value()
+                .pointer("/text_config/dtype")
+                .and_then(serde_json::Value::as_str),
+        );
         let lm_head = if cfg.tie_word_embeddings {
             None
         } else {
@@ -140,7 +139,7 @@ impl Qwen35Model {
         let text = Qwen35TextModel::from_loader(loader, cfg)?;
         Ok(Self {
             text,
-            exact_batched_verify_precision_qualified,
+            exact_batched_verify_profile,
             lm_head,
             vision,
         })
@@ -151,7 +150,7 @@ impl Qwen35Model {
     pub fn from_components(text: Qwen35TextModel, lm_head: Option<Linear>) -> Self {
         Self {
             text,
-            exact_batched_verify_precision_qualified: false,
+            exact_batched_verify_profile: super::speculative::ExactBatchedVerifyProfile::Disabled,
             lm_head,
             vision: None,
         }
@@ -226,9 +225,9 @@ impl Qwen35Model {
         let hidden_shape = hidden.shape();
         let hidden_shape = hidden_shape.as_slice();
         let exact_batched_verify = crate::nn::verify_qmm::is_armed()
-            && self.exact_batched_verify_precision_qualified
             && hidden_shape.len() == 3
             && crate::models::qwen3_5::speculative::exact_batched_verify_shape_qualified(
+                self.exact_batched_verify_profile,
                 hidden_shape[0] as usize,
                 hidden_shape[1] as usize,
             );
@@ -863,7 +862,7 @@ impl Qwen35Model {
         let text = Qwen35TextModel::from_components(stub_embed, Vec::new(), stub_norm, mrope, cfg);
         Self {
             text,
-            exact_batched_verify_precision_qualified: false,
+            exact_batched_verify_profile: super::speculative::ExactBatchedVerifyProfile::Disabled,
             lm_head: None,
             vision: None,
         }
@@ -934,9 +933,9 @@ impl crate::core::model::Model for Qwen35Model {
         let input_shape = input_ids.shape();
         let input_shape = input_shape.as_slice();
         let exact_batched_verify = crate::nn::verify_qmm::is_armed()
-            && self.exact_batched_verify_precision_qualified
             && input_shape.len() == 2
             && crate::models::qwen3_5::speculative::exact_batched_verify_shape_qualified(
+                self.exact_batched_verify_profile,
                 input_shape[0] as usize,
                 input_shape[1] as usize,
             );
@@ -966,7 +965,7 @@ impl crate::core::model::Model for Qwen35Model {
         verify_width: usize,
     ) -> bool {
         super::speculative::exact_batched_verify_qualified(
-            self.exact_batched_verify_precision_qualified,
+            self.exact_batched_verify_profile,
             batch_width,
             context_tokens,
             verify_width,

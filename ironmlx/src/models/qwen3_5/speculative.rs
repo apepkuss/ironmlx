@@ -4,45 +4,85 @@ use mlx::{Array, StreamOrDevice};
 use crate::core::{QuantMeta, QuantMode};
 use crate::Result;
 
-pub(crate) fn exact_batched_verify_precision_qualified(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ExactBatchedVerifyProfile {
+    Disabled,
+    Affine4,
+    Affine8Dense,
+    Affine8Moe,
+}
+
+pub(crate) fn dense_exact_batched_verify_profile(
     quant_meta: Option<QuantMeta>,
     checkpoint_dtype: Option<&str>,
-) -> bool {
-    checkpoint_dtype == Some("bfloat16")
-        && match quant_meta {
-            Some(QuantMeta {
-                group_size: 64,
-                bits: 4,
-                mode: QuantMode::Affine,
-            }) => true,
-            None | Some(_) => false,
+) -> ExactBatchedVerifyProfile {
+    if checkpoint_dtype != Some("bfloat16") {
+        return ExactBatchedVerifyProfile::Disabled;
+    }
+    match quant_meta {
+        Some(QuantMeta {
+            group_size: 64,
+            bits: 4,
+            mode: QuantMode::Affine,
+        }) => ExactBatchedVerifyProfile::Affine4,
+        Some(QuantMeta {
+            group_size: 64,
+            bits: 8,
+            mode: QuantMode::Affine,
+        }) => ExactBatchedVerifyProfile::Affine8Dense,
+        None | Some(_) => ExactBatchedVerifyProfile::Disabled,
+    }
+}
+
+pub(crate) fn moe_exact_batched_verify_profile(
+    quant_meta: Option<QuantMeta>,
+    checkpoint_dtype: Option<&str>,
+) -> ExactBatchedVerifyProfile {
+    match dense_exact_batched_verify_profile(quant_meta, checkpoint_dtype) {
+        ExactBatchedVerifyProfile::Affine4 => ExactBatchedVerifyProfile::Affine4,
+        ExactBatchedVerifyProfile::Affine8Dense => ExactBatchedVerifyProfile::Affine8Moe,
+        ExactBatchedVerifyProfile::Disabled | ExactBatchedVerifyProfile::Affine8Moe => {
+            ExactBatchedVerifyProfile::Disabled
         }
+    }
 }
 
 pub(crate) fn exact_batched_verify_qualified(
-    precision_qualified: bool,
+    profile: ExactBatchedVerifyProfile,
     batch_width: usize,
     context_tokens: usize,
     verify_width: usize,
 ) -> bool {
-    const MAX_QUALIFIED_CONTEXT_TOKENS: usize = 4096;
-
-    precision_qualified
-        && exact_batched_verify_shape_qualified(batch_width, verify_width)
-        && context_tokens <= MAX_QUALIFIED_CONTEXT_TOKENS
+    let max_context_tokens = match profile {
+        ExactBatchedVerifyProfile::Affine8Moe => 1_024,
+        ExactBatchedVerifyProfile::Disabled
+        | ExactBatchedVerifyProfile::Affine4
+        | ExactBatchedVerifyProfile::Affine8Dense => 4_096,
+    };
+    context_tokens <= max_context_tokens
+        && exact_batched_verify_shape_qualified(profile, batch_width, verify_width)
 }
 
 pub(crate) fn exact_batched_verify_shape_qualified(
+    profile: ExactBatchedVerifyProfile,
     batch_width: usize,
     verify_width: usize,
 ) -> bool {
-    const MAX_QUALIFIED_BATCH: usize = 8;
-    const MAX_QUALIFIED_VERIFY_WIDTH: usize = 5;
-
-    batch_width > 0
-        && batch_width <= MAX_QUALIFIED_BATCH
-        && verify_width > 1
-        && verify_width <= MAX_QUALIFIED_VERIFY_WIDTH
+    match profile {
+        ExactBatchedVerifyProfile::Disabled => false,
+        ExactBatchedVerifyProfile::Affine4 => {
+            batch_width > 0 && batch_width <= 8 && verify_width > 1 && verify_width <= 5
+        }
+        ExactBatchedVerifyProfile::Affine8Dense => match batch_width {
+            1 => verify_width > 1 && verify_width <= 5,
+            2 => verify_width > 1 && verify_width <= 4,
+            3 | 4 => verify_width == 2,
+            _ => false,
+        },
+        ExactBatchedVerifyProfile::Affine8Moe => {
+            batch_width > 0 && batch_width <= 8 && verify_width == 2
+        }
+    }
 }
 
 pub(crate) fn project_positions_isolated_on(
@@ -84,35 +124,80 @@ mod tests {
             bits: 4,
             mode: QuantMode::Affine,
         });
-        assert!(!exact_batched_verify_precision_qualified(
-            None,
-            Some("bfloat16")
+        let affine8 = Some(QuantMeta {
+            group_size: 64,
+            bits: 8,
+            mode: QuantMode::Affine,
+        });
+        assert_eq!(
+            dense_exact_batched_verify_profile(None, Some("bfloat16")),
+            ExactBatchedVerifyProfile::Disabled
+        );
+        assert_eq!(
+            dense_exact_batched_verify_profile(affine4, Some("bfloat16")),
+            ExactBatchedVerifyProfile::Affine4
+        );
+        assert_eq!(
+            dense_exact_batched_verify_profile(affine8, Some("bfloat16")),
+            ExactBatchedVerifyProfile::Affine8Dense
+        );
+        assert_eq!(
+            moe_exact_batched_verify_profile(affine8, Some("bfloat16")),
+            ExactBatchedVerifyProfile::Affine8Moe
+        );
+        assert_eq!(
+            dense_exact_batched_verify_profile(affine4, Some("float16")),
+            ExactBatchedVerifyProfile::Disabled
+        );
+        assert_eq!(
+            dense_exact_batched_verify_profile(
+                Some(QuantMeta {
+                    group_size: 64,
+                    bits: 6,
+                    mode: QuantMode::Affine,
+                }),
+                Some("bfloat16"),
+            ),
+            ExactBatchedVerifyProfile::Disabled
+        );
+
+        assert!(exact_batched_verify_qualified(
+            ExactBatchedVerifyProfile::Affine4,
+            8,
+            4096,
+            5
         ));
-        assert!(exact_batched_verify_precision_qualified(
-            affine4,
-            Some("bfloat16")
+        assert!(!exact_batched_verify_qualified(
+            ExactBatchedVerifyProfile::Disabled,
+            8,
+            4096,
+            5
         ));
-        assert!(!exact_batched_verify_precision_qualified(
-            affine4,
-            Some("float16")
+        assert!(!exact_batched_verify_qualified(
+            ExactBatchedVerifyProfile::Affine4,
+            8,
+            4097,
+            5
         ));
-        assert!(!exact_batched_verify_precision_qualified(
-            Some(QuantMeta {
-                group_size: 64,
-                bits: 6,
-                mode: QuantMode::Affine,
-            }),
-            Some("bfloat16"),
-        ));
-        assert!(exact_batched_verify_qualified(true, 8, 4096, 5));
-        assert!(!exact_batched_verify_qualified(false, 8, 4096, 5));
-        assert!(!exact_batched_verify_qualified(true, 0, 4096, 5));
-        assert!(!exact_batched_verify_qualified(true, 9, 4096, 5));
-        assert!(!exact_batched_verify_qualified(true, 8, 4097, 5));
-        assert!(!exact_batched_verify_qualified(true, 8, 4096, 1));
-        assert!(!exact_batched_verify_qualified(true, 8, 4096, 6));
-        assert!(exact_batched_verify_shape_qualified(8, 5));
-        assert!(!exact_batched_verify_shape_qualified(9, 5));
-        assert!(!exact_batched_verify_shape_qualified(8, 6));
+
+        let affine8 = ExactBatchedVerifyProfile::Affine8Dense;
+        assert!(exact_batched_verify_shape_qualified(affine8, 1, 5));
+        assert!(exact_batched_verify_shape_qualified(affine8, 2, 4));
+        assert!(exact_batched_verify_shape_qualified(affine8, 3, 2));
+        assert!(exact_batched_verify_shape_qualified(affine8, 4, 2));
+        assert!(!exact_batched_verify_shape_qualified(affine8, 2, 5));
+        assert!(!exact_batched_verify_shape_qualified(affine8, 4, 3));
+        assert!(!exact_batched_verify_shape_qualified(affine8, 8, 2));
+        assert!(!exact_batched_verify_shape_qualified(affine8, 1, 1));
+
+        let affine8_moe = ExactBatchedVerifyProfile::Affine8Moe;
+        assert!(exact_batched_verify_qualified(affine8_moe, 8, 1_024, 2));
+        assert!(!exact_batched_verify_qualified(affine8_moe, 8, 1_025, 2));
+        assert!(!exact_batched_verify_qualified(affine8_moe, 8, 1_024, 4));
+
+        let affine4 = ExactBatchedVerifyProfile::Affine4;
+        assert!(exact_batched_verify_shape_qualified(affine4, 8, 5));
+        assert!(!exact_batched_verify_shape_qualified(affine4, 9, 5));
+        assert!(!exact_batched_verify_shape_qualified(affine4, 8, 6));
     }
 }

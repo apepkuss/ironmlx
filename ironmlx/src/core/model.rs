@@ -6,6 +6,7 @@
 
 use mlx::{Array, Dtype, StreamOrDevice};
 
+use crate::core::cache::TurboQuantKVBits;
 use crate::core::memory_budget::ModelMeta;
 use crate::nn::LayerCache;
 use crate::Result;
@@ -117,6 +118,22 @@ pub trait Model {
         _verify_width: usize,
     ) -> bool {
         false
+    }
+
+    /// Apply cache-layout qualification on top of the model's architecture
+    /// and weight-quantization profile.
+    ///
+    /// TurboQuant can make a multi-token cache update numerically distinct
+    /// from repeated q=1 updates even when the model forward itself is
+    /// qualified. Models with such a restriction must fail closed here.
+    fn supports_exact_batched_speculative_verify_for_kv_cache(
+        &self,
+        batch_width: usize,
+        context_tokens: usize,
+        verify_width: usize,
+        _kv_bits: Option<TurboQuantKVBits>,
+    ) -> bool {
+        self.supports_exact_batched_speculative_verify(batch_width, context_tokens, verify_width)
     }
 
     /// Whether PromptLookup may fall back to a chain of q=1 verify forwards

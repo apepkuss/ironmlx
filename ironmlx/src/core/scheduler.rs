@@ -7771,11 +7771,14 @@ impl<M: Model> Scheduler<M> {
                 .max()
                 .and_then(|value| usize::try_from(value).ok())
                 .unwrap_or(usize::MAX);
-            let exact_batched_verify = model.supports_exact_batched_speculative_verify(
-                batch,
-                max_context_tokens,
-                max_verify_len,
-            );
+            let verify_kv_bits = self.kv_cache_turboquant_bits_for_rows(&self.cache_rows)?;
+            let exact_batched_verify = model
+                .supports_exact_batched_speculative_verify_for_kv_cache(
+                    batch,
+                    max_context_tokens,
+                    max_verify_len,
+                    verify_kv_bits,
+                );
             if !exact_batched_verify
                 && !model.supports_sequential_prompt_lookup_verify(
                     batch,
