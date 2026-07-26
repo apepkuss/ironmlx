@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use ironmlx::core::cache::TurboQuantKVBits;
 use ironmlx::core::generate::{build_batched_append_attention_mask, build_position_ids};
 use ironmlx::core::{Loader, Model, Tokenizer};
-use ironmlx::models::{Gemma4Model, LlamaModel, Qwen35Model};
+use ironmlx::models::{Gemma4Model, LlamaModel, Qwen35Model, Qwen35MoeModel, Qwen36MoeModel};
 use mlx::{Array, Dtype, StreamOrDevice};
 use serial_test::serial;
 
@@ -89,6 +89,16 @@ fn input_array(tokens: &[u32], batch: usize, sequence: usize) -> Result<Array> {
         .context("building token input")
 }
 
+fn uniform_position_ids(start: i32, len: i32, batch: usize) -> Result<Array> {
+    let positions = build_position_ids(start, len)?;
+    if batch == 1 {
+        return Ok(positions);
+    }
+    let batch = i32::try_from(batch).context("batch exceeds i32")?;
+    mlx::ops::shape::broadcast_to_on(&positions, &[3_i32, batch, len][..], ())
+        .context("broadcasting uniform position ids")
+}
+
 fn eval(array: &Array) -> Result<()> {
     mlx::transforms::eval(&[array]).context("evaluating MLX graph")
 }
@@ -147,7 +157,7 @@ fn prefill<M: Model>(
         let input = input_array(&chunk_tokens, batch, chunk_len)?;
         let chunk_start = i32::try_from(chunk_start).context("chunk start exceeds i32")?;
         let chunk_len = i32::try_from(chunk_len).context("chunk length exceeds i32")?;
-        let positions = build_position_ids(chunk_start, chunk_len)?;
+        let positions = uniform_position_ids(chunk_start, chunk_len, batch)?;
         let per_row_lens = vec![chunk_len; batch];
         let hidden = model.forward_text_hidden(
             &input,
@@ -208,7 +218,7 @@ fn qualify_case<M: Model>(
             .collect::<Vec<_>>();
         let input = input_array(&step_tokens, batch, 1)?;
         let start = i32::try_from(prefix_len + depth).context("position exceeds i32")?;
-        let positions = build_position_ids(start, 1)?;
+        let positions = uniform_position_ids(start, 1, batch)?;
         let per_row_lens = vec![1_i32; batch];
         let hidden = model.forward_text_hidden(
             &input,
@@ -230,10 +240,10 @@ fn qualify_case<M: Model>(
     let verify_input = input_array(&verify_tokens, batch, verify_width)?;
     let verify_width_i32 = i32::try_from(verify_width).context("verify width exceeds i32")?;
     let verify_start = i32::try_from(prefix_len).context("verify start exceeds i32")?;
-    let positions = build_position_ids(verify_start, verify_width_i32)?;
+    let positions = uniform_position_ids(verify_start, verify_width_i32, batch)?;
     let per_row_lens = vec![verify_width_i32; batch];
+    let _verify_qmm = ironmlx::nn::verify_qmm_scope();
     let hidden = {
-        let _verify_qmm = ironmlx::nn::verify_qmm_scope();
         model.forward_text_hidden(
             &verify_input,
             &positions,
@@ -352,9 +362,10 @@ fn qualify_ragged_case<M: Model>(
             .map(|&len| i32::from(depth < len))
             .collect::<Vec<_>>();
         let input = input_array(&step_tokens, batch, 1)?;
-        let positions = build_position_ids(
+        let positions = uniform_position_ids(
             i32::try_from(prefix_len + depth).context("position exceeds i32")?,
             1,
+            batch,
         )?;
         let mask = build_batched_append_attention_mask(&offsets, &step_lens, 1, Dtype::Bfloat16)?;
         let hidden = model.forward_text_hidden(
@@ -376,9 +387,10 @@ fn qualify_ragged_case<M: Model>(
     }
 
     let input = input_array(&verify_tokens, batch, verify_width)?;
-    let positions = build_position_ids(
+    let positions = uniform_position_ids(
         i32::try_from(prefix_len).context("verify start exceeds i32")?,
         i32::try_from(verify_width).context("verify width exceeds i32")?,
+        batch,
     )?;
     let pre_offsets = vec![i32::try_from(prefix_len).context("prefix length exceeds i32")?; batch];
     let verify_lens_i32 = verify_lens
@@ -391,8 +403,8 @@ fn qualify_ragged_case<M: Model>(
         i32::try_from(verify_width).context("verify width exceeds i32")?,
         Dtype::Bfloat16,
     )?;
+    let _verify_qmm = ironmlx::nn::verify_qmm_scope();
     let hidden = {
-        let _verify_qmm = ironmlx::nn::verify_qmm_scope();
         model.forward_text_hidden(
             &input,
             &positions,
@@ -425,24 +437,55 @@ fn qualify_ragged_case<M: Model>(
 }
 
 fn qualify_model<M: Model>(model: &M, tokenizer: &Tokenizer) -> Result<()> {
-    let mut tokens = tokenizer
-        .encode(QUALIFICATION_TEXT, false)
-        .context("tokenizing qualification text")?;
     let max_verify_width = std::env::var("PROMPT_LOOKUP_VERIFY_MAX_WIDTH")
         .ok()
         .map(|value| value.parse::<usize>())
         .transpose()
         .context("parsing PROMPT_LOOKUP_VERIFY_MAX_WIDTH")?
-        .unwrap_or(8);
-    while tokens.len() < 8 * (1_024 + 8) {
+        .unwrap_or(5);
+    let parse_axis = |name: &str, defaults: &[usize]| -> Result<Vec<usize>> {
+        let Some(value) = std::env::var_os(name) else {
+            return Ok(defaults.to_vec());
+        };
+        value
+            .to_string_lossy()
+            .split(',')
+            .map(|item| {
+                item.trim()
+                    .parse::<usize>()
+                    .with_context(|| format!("parsing {name}"))
+            })
+            .collect()
+    };
+    let batches = parse_axis("PROMPT_LOOKUP_VERIFY_BATCHES", &[1, 2, 4, 8])?;
+    let prefix_lens = parse_axis("PROMPT_LOOKUP_VERIFY_PREFIX_LENS", &[8, 32, 64, 128, 1_024])?;
+    let verify_widths = parse_axis("PROMPT_LOOKUP_VERIFY_WIDTHS", &[2, 4, 5, 8])?;
+    let max_batch = batches.iter().copied().max().unwrap_or(0);
+    let max_prefix_len = prefix_lens.iter().copied().max().unwrap_or(0);
+    let max_requested_width = verify_widths
+        .iter()
+        .copied()
+        .filter(|&width| width <= max_verify_width)
+        .max()
+        .unwrap_or(0);
+    anyhow::ensure!(
+        max_batch > 0 && max_prefix_len > 0 && max_requested_width > 1,
+        "qualification axes must contain a positive batch/prefix and verify width greater than one"
+    );
+    let required_tokens =
+        max_batch.saturating_mul(max_prefix_len.saturating_add(max_requested_width));
+    let mut tokens = tokenizer
+        .encode(QUALIFICATION_TEXT, false)
+        .context("tokenizing qualification text")?;
+    while tokens.len() < required_tokens {
         let copy = tokens.clone();
         tokens.extend(copy);
     }
-    for batch in [1_usize, 2, 4, 8] {
-        for prefix_len in [8_usize, 32, 64, 128, 1_024] {
-            for verify_width in [2_usize, 4, 5, 8]
-                .into_iter()
-                .filter(|&width| width <= max_verify_width)
+    for batch in batches {
+        for &prefix_len in &prefix_lens {
+            for &verify_width in verify_widths
+                .iter()
+                .filter(|&&width| width <= max_verify_width)
             {
                 qualify_case(
                     model,
@@ -456,6 +499,25 @@ fn qualify_model<M: Model>(model: &M, tokenizer: &Tokenizer) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn qualify_qwen_cache_and_ragged<M: Model>(model: &M, tokenizer: &Tokenizer) -> Result<()> {
+    let mut tokens = tokenizer
+        .encode(QUALIFICATION_TEXT, false)
+        .context("tokenizing Qwen cache qualification text")?;
+    while tokens.len() < 8 * (128 + 5) {
+        let copy = tokens.clone();
+        tokens.extend(copy);
+    }
+    for cache_mode in [
+        QualificationCache::Paged,
+        QualificationCache::TurboQuant(TurboQuantKVBits::K3V4),
+        QualificationCache::TurboQuant(TurboQuantKVBits::K4V4),
+    ] {
+        qualify_case(model, &tokens, 4, 64, 5, cache_mode)?;
+    }
+    qualify_ragged_case(model, &tokens, 64, &[5, 4, 2, 0])?;
+    qualify_ragged_case(model, &tokens, 128, &[5, 1, 4, 0, 3, 2, 5, 0])
 }
 
 fn load_tokenizer(loader: &Loader, model_dir: &Path) -> Result<Tokenizer> {
@@ -477,7 +539,52 @@ fn qwen35_dense_qgt1_matches_sequential_verify() -> Result<()> {
     let loader = Loader::open(&model_dir).context("opening Qwen3.5 checkpoint")?;
     let tokenizer = load_tokenizer(&loader, &model_dir)?;
     let model = Qwen35Model::from_loader(&loader).context("loading Qwen3.5 model")?;
-    qualify_model(&model, &tokenizer)
+    qualify_model(&model, &tokenizer)?;
+    qualify_qwen_cache_and_ragged(&model, &tokenizer)
+}
+
+#[test]
+#[ignore = "requires a real Qwen3.5 MoE checkpoint and Apple Silicon"]
+#[serial(mlx_metal)]
+fn qwen35_moe_qgt1_matches_sequential_verify() -> Result<()> {
+    let Some(model_dir) = snapshot_from_env_or_cache(
+        "PROMPT_LOOKUP_VERIFY_QWEN35_MOE_MODEL",
+        "models--mlx-community--Qwen3.5-35B-A3B-4bit",
+    ) else {
+        eprintln!("skip: no Qwen3.5 MoE qualification checkpoint");
+        return Ok(());
+    };
+    let loader = Loader::open(&model_dir).context("opening Qwen3.5 MoE checkpoint")?;
+    let tokenizer = load_tokenizer(&loader, &model_dir)?;
+    let model = Qwen35MoeModel::from_loader(&loader).context("loading Qwen3.5 MoE model")?;
+    anyhow::ensure!(
+        model.supports_exact_batched_speculative_verify(8, 4_096, 5),
+        "Qwen3.5 MoE checkpoint is not exact-verify precision qualified"
+    );
+    qualify_model(&model, &tokenizer)?;
+    qualify_qwen_cache_and_ragged(&model, &tokenizer)
+}
+
+#[test]
+#[ignore = "requires a real Qwen3.6 MoE checkpoint and Apple Silicon"]
+#[serial(mlx_metal)]
+fn qwen36_moe_qgt1_matches_sequential_verify() -> Result<()> {
+    let Some(model_dir) = snapshot_from_env_or_cache(
+        "PROMPT_LOOKUP_VERIFY_QWEN36_MOE_MODEL",
+        "models--mlx-community--Qwen3.6-35B-A3B-4bit",
+    ) else {
+        eprintln!("skip: no Qwen3.6 MoE qualification checkpoint");
+        return Ok(());
+    };
+    let loader = Loader::open(&model_dir).context("opening Qwen3.6 MoE checkpoint")?;
+    let tokenizer = load_tokenizer(&loader, &model_dir)?;
+    let model = Qwen36MoeModel::from_loader(&loader).context("loading Qwen3.6 MoE model")?;
+    anyhow::ensure!(
+        model.supports_exact_batched_speculative_verify(8, 4_096, 5),
+        "Qwen3.6 MoE checkpoint is not exact-verify precision qualified"
+    );
+    qualify_model(&model, &tokenizer)?;
+    qualify_qwen_cache_and_ragged(&model, &tokenizer)
 }
 
 #[test]

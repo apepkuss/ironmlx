@@ -7472,10 +7472,6 @@ impl<M: Model> Scheduler<M> {
                 return Ok(Vec::new());
             }
 
-            let mixed_cache = !self
-                .cache
-                .as_ref()
-                .is_some_and(|cache| layer_cache_supports_accepted_prefix_trim(cache));
             let mid_admit_in_flight = self.slots.iter().enumerate().any(|(row_idx, slot)| {
                 matches!(slot, Some(state) if !state.finished)
                     && !prompt_lookup.rows.contains_key(&row_idx)
@@ -7492,9 +7488,7 @@ impl<M: Model> Scheduler<M> {
             // transition is not architecture-stable even when offsets remain
             // correct. Once finalize registers the new row, speculation may
             // resume from the ordinary boundary on the next turn.
-            if (mid_admit_in_flight || (mixed_cache && active_rows.len() > 1))
-                && all_at_window_boundary
-            {
+            if mid_admit_in_flight && all_at_window_boundary {
                 let events = self.step_inner(model)?;
                 for event in &events {
                     let row_idx = self
@@ -7824,8 +7818,8 @@ impl<M: Model> Scheduler<M> {
                     maybe_build_sparse_decode_mask(cache, &verify_lens)?
                 };
                 let verify_start = Instant::now();
+                let _verify_qmm = crate::nn::verify_qmm::armed_scope();
                 let hidden = {
-                    let _verify_qmm = crate::nn::verify_qmm::armed_scope();
                     let cache = self.cache.as_mut().ok_or_else(|| {
                         anyhow!("fill_prompt_lookup_windows: main cache is absent")
                     })?;
@@ -16349,6 +16343,7 @@ mod tests {
         fail_mtp_cache: bool,
         hybrid_cache: bool,
         fail_verify_projection: bool,
+        require_verify_projection_scope: bool,
     }
 
     impl ScriptedMtpSchedulerModel {
@@ -16379,6 +16374,7 @@ mod tests {
                 fail_mtp_cache: false,
                 hybrid_cache: false,
                 fail_verify_projection: false,
+                require_verify_projection_scope: false,
             }
         }
 
@@ -16389,6 +16385,11 @@ mod tests {
 
         fn with_verify_projection_failure(mut self) -> Self {
             self.fail_verify_projection = true;
+            self
+        }
+
+        fn with_required_verify_projection_scope(mut self) -> Self {
+            self.require_verify_projection_scope = true;
             self
         }
 
@@ -16410,6 +16411,7 @@ mod tests {
                 fail_mtp_cache: true,
                 hybrid_cache: false,
                 fail_verify_projection: false,
+                require_verify_projection_scope: false,
             }
         }
 
@@ -16612,6 +16614,12 @@ mod tests {
             let seq = hidden_dims[1] as usize;
             let mut calls = self.project_calls.lock().unwrap();
             let mut first_token_calls_remaining = self.first_token_calls_remaining.lock().unwrap();
+            if self.require_verify_projection_scope && seq > 1 {
+                assert!(
+                    crate::nn::verify_qmm::is_armed(),
+                    "exact batched verify projection must remain inside the verify QMM scope"
+                );
+            }
             if self.fail_verify_projection && seq > 1 {
                 return Err(anyhow!("injected verify projection failure"));
             }
@@ -17625,8 +17633,9 @@ mod tests {
         .expect("scheduler startup");
         let prompt = vec![1, 2, 3, 4, 1, 2, 3];
         let id = scheduler.admit(mtp_req(prompt.clone(), 3)).expect("admit");
-        let model =
-            ScriptedMtpSchedulerModel::new(4, Vec::new(), vec![vec![9, 0]]).with_hybrid_cache();
+        let model = ScriptedMtpSchedulerModel::new(4, Vec::new(), vec![vec![9, 0]])
+            .with_hybrid_cache()
+            .with_required_verify_projection_scope();
 
         scheduler
             .prefill_admitted_prompt_lookup(&model, prompt_lookup_cfg())
@@ -17746,7 +17755,7 @@ mod tests {
 
     #[test]
     #[serial(mlx_metal)]
-    fn prompt_lookup_batch_isolates_rows_with_different_draft_lengths() {
+    fn prompt_lookup_hybrid_batch_isolates_rows_with_different_draft_lengths() {
         let mut scheduler = Scheduler::<ScriptedMtpSchedulerModel>::new(
             2,
             32768,
@@ -17766,7 +17775,9 @@ mod tests {
             2,
             Vec::new(),
             vec![vec![1, 2, 3, 4, 5], vec![11, 10, 4, 13]],
-        );
+        )
+        .with_hybrid_cache()
+        .with_required_verify_projection_scope();
 
         let first = scheduler
             .prefill_admitted_prompt_lookup(&model, prompt_lookup_cfg())
@@ -17793,8 +17804,19 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(model.text_hidden_batch_sizes(), vec![2]);
-        assert_eq!(model.text_hidden_seq_lens(), vec![5]);
+        assert_eq!(model.text_hidden_batch_sizes(), vec![2, 2, 2, 2, 2]);
+        assert_eq!(model.text_hidden_seq_lens(), vec![5, 1, 1, 1, 1]);
+        assert!(matches!(
+            scheduler.cache.as_deref(),
+            Some([LayerCache::Full(_), LayerCache::Linear(_)])
+        ));
+        for layer in scheduler.cache.as_deref().expect("scheduler cache") {
+            match layer {
+                LayerCache::Full(kv) => assert_eq!(kv.offsets(), &[11, 8]),
+                LayerCache::Linear(gd) => assert_eq!(gd.offsets(), &[11, 8]),
+                LayerCache::Mla(_) => panic!("unexpected MLA cache"),
+            }
+        }
 
         let prompt_lookup = scheduler
             .prompt_lookup_state

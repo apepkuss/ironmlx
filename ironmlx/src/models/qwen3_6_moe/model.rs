@@ -381,6 +381,19 @@ impl Model for Qwen36MoeModel {
         Qwen36MoeModel::project_hidden_on(self, hidden, target)
     }
 
+    fn supports_exact_batched_speculative_verify(
+        &self,
+        batch_width: usize,
+        context_tokens: usize,
+        verify_width: usize,
+    ) -> bool {
+        self.inner.supports_exact_batched_speculative_verify(
+            batch_width,
+            context_tokens,
+            verify_width,
+        )
+    }
+
     fn model_meta(&self) -> ModelMeta {
         Qwen36MoeModel::model_meta(self)
     }

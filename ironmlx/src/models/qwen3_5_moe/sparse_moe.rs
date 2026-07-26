@@ -937,6 +937,35 @@ impl SparseMoeBlock {
             ));
         }
         let (b, s, h) = (dvec[0], dvec[1], dvec[2]);
+        if crate::nn::position_stable_qmm::is_armed() && s > 1 {
+            let mut positions = Vec::with_capacity(s as usize);
+            for position in 0..s {
+                let position_x = mlx::ops::indexing::slice_strided_on(
+                    x,
+                    &[0_i32, position, 0][..],
+                    &[b, position + 1, h][..],
+                    &[1_i32, 1, 1][..],
+                    target,
+                )
+                .context("SparseMoeBlock: slicing exact verify position")?;
+                positions.push(self.forward_unisolated_on(&position_x, target, layer_idx)?);
+            }
+            let position_refs = positions.iter().collect::<Vec<_>>();
+            return mlx::ops::shape::concatenate_on(&position_refs, 1, target)
+                .context("SparseMoeBlock: concatenating exact verify positions");
+        }
+        self.forward_unisolated_on(x, target, layer_idx)
+    }
+
+    fn forward_unisolated_on(
+        &self,
+        x: &Array,
+        target: StreamOrDevice,
+        layer_idx: i32,
+    ) -> Result<Array> {
+        let dims = x.shape();
+        let dvec = dims.as_slice();
+        let (b, s, h) = (dvec[0], dvec[1], dvec[2]);
         let bs = b * s;
         let k = self.num_experts_per_tok;
         let num_experts = self.routed.num_experts;

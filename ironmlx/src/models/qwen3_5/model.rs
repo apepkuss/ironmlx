@@ -223,6 +223,34 @@ impl Qwen35Model {
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
         let target = target.into();
+        let hidden_shape = hidden.shape();
+        let hidden_shape = hidden_shape.as_slice();
+        let exact_batched_verify = crate::nn::verify_qmm::is_armed()
+            && self.exact_batched_verify_precision_qualified
+            && hidden_shape.len() == 3
+            && crate::models::qwen3_5::speculative::exact_batched_verify_shape_qualified(
+                hidden_shape[0] as usize,
+                hidden_shape[1] as usize,
+            );
+        if exact_batched_verify {
+            if self.lm_head.is_some() {
+                let _position_stable_qmm = crate::nn::position_stable_qmm::scope();
+                return self.project_hidden_unisolated_on(hidden, target);
+            }
+            return crate::models::qwen3_5::speculative::project_positions_isolated_on(
+                hidden,
+                target,
+                |position_hidden, target| self.text.as_output_on(position_hidden, target),
+            );
+        }
+        self.project_hidden_unisolated_on(hidden, target)
+    }
+
+    fn project_hidden_unisolated_on(
+        &self,
+        hidden: &Array,
+        target: StreamOrDevice,
+    ) -> Result<Array> {
         match &self.lm_head {
             Some(head) => head.forward_on(hidden, target),
             None => self.text.as_output_on(hidden, target),
@@ -903,6 +931,16 @@ impl crate::core::model::Model for Qwen35Model {
         cache: Option<&mut [crate::nn::LayerCache]>,
         target: mlx::StreamOrDevice,
     ) -> crate::Result<mlx::Array> {
+        let input_shape = input_ids.shape();
+        let input_shape = input_shape.as_slice();
+        let exact_batched_verify = crate::nn::verify_qmm::is_armed()
+            && self.exact_batched_verify_precision_qualified
+            && input_shape.len() == 2
+            && crate::models::qwen3_5::speculative::exact_batched_verify_shape_qualified(
+                input_shape[0] as usize,
+                input_shape[1] as usize,
+            );
+        let _position_stable_qmm = exact_batched_verify.then(crate::nn::position_stable_qmm::scope);
         self.text().forward_on(
             input_ids,
             position_ids,
