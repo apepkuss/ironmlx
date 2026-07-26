@@ -520,6 +520,128 @@ fn qualify_qwen_cache_and_ragged<M: Model>(model: &M, tokenizer: &Tokenizer) -> 
     qualify_ragged_case(model, &tokens, 128, &[5, 1, 4, 0, 3, 2, 5, 0])
 }
 
+fn qualify_identical_row_decode<M: Model>(
+    model: &M,
+    tokenizer: &Tokenizer,
+    prefix_len: usize,
+    decode_steps: usize,
+) -> Result<()> {
+    const BATCH: usize = 2;
+
+    let prompt_path = std::env::var_os("QWEN35_MOE_ORDINARY_PROMPT");
+    let mut source = if let Some(path) = prompt_path.as_ref() {
+        let content = std::fs::read_to_string(&path).with_context(|| {
+            format!(
+                "reading ordinary prompt from {}",
+                PathBuf::from(path).display()
+            )
+        })?;
+        let prompt = tokenizer.apply_chat_template(
+            &[ironmlx::core::Message {
+                role: "user".to_owned(),
+                content,
+            }],
+            true,
+            Some(&serde_json::json!({"enable_thinking": false})),
+        )?;
+        tokenizer
+            .encode(&prompt, false)
+            .context("tokenizing ordinary chat prompt")?
+    } else {
+        tokenizer
+            .encode(QUALIFICATION_TEXT, false)
+            .context("tokenizing identical-row qualification text")?
+    };
+    let (prefix_len, decode_steps) = if prompt_path.is_some() {
+        (source.len(), 0)
+    } else {
+        while source.len() < prefix_len.saturating_add(decode_steps) {
+            let copy = source.clone();
+            source.extend(copy);
+        }
+        (
+            prefix_len.min(source.len().saturating_sub(decode_steps)),
+            decode_steps,
+        )
+    };
+    let prefix = &source[..prefix_len];
+    let mut prefix_tokens = Vec::with_capacity(BATCH.saturating_mul(prefix_len));
+    for _ in 0..BATCH {
+        prefix_tokens.extend_from_slice(prefix);
+    }
+
+    let cap = i32::try_from(prefix_len.saturating_add(decode_steps).saturating_add(8))
+        .context("identical-row cache cap exceeds i32")?;
+    let mut cache = model.make_cache(BATCH as i32, cap, model.cache_dtype())?;
+    let input = input_array(&prefix_tokens, BATCH, prefix_len)?;
+    let prefix_len_i32 = i32::try_from(prefix_len).context("prefix length exceeds i32")?;
+    let per_row_lens = vec![prefix_len_i32; BATCH];
+    let positions =
+        ironmlx::core::generate::build_position_ids_batched(&per_row_lens, prefix_len_i32)?;
+    let first_logits = model.batched_prefill_causal(
+        &input,
+        &positions,
+        &per_row_lens,
+        Some(cache.as_mut_slice()),
+        StreamOrDevice::default(),
+    )?;
+    eval(&first_logits)?;
+    let first_row0 = slice_position(&first_logits, 0, 0)?;
+    let first_row1 = slice_position(&first_logits, 1, 0)?;
+    let first_logit_diff = max_abs_diff(&first_row0, &first_row1)?;
+    let first_greedy = argmax_tokens(&first_logits)?;
+    eprintln!(
+        "identical-row ordinary prefill: model={} prefix_len={prefix_len} \
+         logit_abs={first_logit_diff:.6} greedy={first_greedy:?}",
+        std::any::type_name::<M>()
+    );
+    anyhow::ensure!(
+        first_logit_diff == 0.0 && first_greedy[0] == first_greedy[1],
+        "identical ordinary B2 prefill rows diverged for model={} prefix_len={prefix_len}: \
+         logit_abs={first_logit_diff:.6} greedy={first_greedy:?}",
+        std::any::type_name::<M>()
+    );
+
+    for depth in 0..decode_steps {
+        let token = source[prefix_len + depth];
+        let input = input_array(&[token, token], BATCH, 1)?;
+        let position = i32::try_from(prefix_len + depth).context("decode position exceeds i32")?;
+        let positions = uniform_position_ids(position, 1, BATCH)?;
+        let per_row_lens = vec![1_i32; BATCH];
+        let hidden = model.forward_text_hidden(
+            &input,
+            &positions,
+            Some(&per_row_lens),
+            None,
+            Some(cache.as_mut_slice()),
+            StreamOrDevice::default(),
+        )?;
+        let logits = model.project_hidden_on(&hidden, StreamOrDevice::default())?;
+        eval(&logits)?;
+
+        let row0_hidden = slice_position(&hidden, 0, 0)?;
+        let row1_hidden = slice_position(&hidden, 1, 0)?;
+        let row0_logits = slice_position(&logits, 0, 0)?;
+        let row1_logits = slice_position(&logits, 1, 0)?;
+        let hidden_diff = max_abs_diff(&row0_hidden, &row1_hidden)?;
+        let logit_diff = max_abs_diff(&row0_logits, &row1_logits)?;
+        let greedy = argmax_tokens(&logits)?;
+        eprintln!(
+            "identical-row ordinary decode: model={} prefix_len={prefix_len} depth={depth} \
+             hidden_abs={hidden_diff:.6} logit_abs={logit_diff:.6} greedy={greedy:?}",
+            std::any::type_name::<M>()
+        );
+        anyhow::ensure!(
+            hidden_diff == 0.0 && logit_diff == 0.0 && greedy[0] == greedy[1],
+            "identical ordinary B2 rows diverged for model={} prefix_len={prefix_len} \
+             depth={depth}: hidden_abs={hidden_diff:.6} logit_abs={logit_diff:.6} \
+             greedy={greedy:?}",
+            std::any::type_name::<M>()
+        );
+    }
+    Ok(())
+}
+
 fn load_tokenizer(loader: &Loader, model_dir: &Path) -> Result<Tokenizer> {
     Tokenizer::from_loader(loader)
         .with_context(|| format!("loading tokenizer from {}", model_dir.display()))
@@ -563,6 +685,23 @@ fn qwen35_moe_qgt1_matches_sequential_verify() -> Result<()> {
     );
     qualify_model(&model, &tokenizer)?;
     qualify_qwen_cache_and_ragged(&model, &tokenizer)
+}
+
+#[test]
+#[ignore = "requires a real Qwen3.5 MoE checkpoint and Apple Silicon"]
+#[serial(mlx_metal)]
+fn qwen35_moe_identical_ordinary_b2_rows_match() -> Result<()> {
+    let Some(model_dir) = snapshot_from_env_or_cache(
+        "PROMPT_LOOKUP_VERIFY_QWEN35_MOE_MODEL",
+        "models--mlx-community--Qwen3.5-35B-A3B-4bit",
+    ) else {
+        eprintln!("skip: no Qwen3.5 MoE qualification checkpoint");
+        return Ok(());
+    };
+    let loader = Loader::open(&model_dir).context("opening Qwen3.5 MoE checkpoint")?;
+    let tokenizer = load_tokenizer(&loader, &model_dir)?;
+    let model = Qwen35MoeModel::from_loader(&loader).context("loading Qwen3.5 MoE model")?;
+    qualify_identical_row_decode(&model, &tokenizer, 2_713, 16)
 }
 
 #[test]

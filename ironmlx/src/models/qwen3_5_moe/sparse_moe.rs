@@ -60,6 +60,7 @@ struct RoutedApplyOptions {
     layer_idx: i32,
     cast_output_to_expert_dtype: bool,
     activation: RoutedActivation,
+    request_layout: Option<(i32, i32)>,
 }
 
 fn sorted_token_indices_from_sort_perm(
@@ -110,6 +111,55 @@ fn sorted_token_indices_from_sort_perm(
         .map_err(|e| anyhow!("SparseMoeBlock: build token_idx array: {e}"))?;
     take_along_axis_on(&token_idx, sort_perm, -1_i32, target)
         .context("SparseMoeBlock: take_along_axis sort token_idx")
+}
+
+fn request_interleaved_sort_perm(
+    flat_topk: &Array,
+    batch: i32,
+    sequence: i32,
+    top_k: i32,
+    bs_k: i32,
+    num_experts: i32,
+    target: StreamOrDevice,
+) -> Result<Array> {
+    if batch <= 0 || sequence <= 0 || top_k <= 0 || num_experts <= 0 {
+        return Err(anyhow!(
+            "request-interleaved MoE sort requires positive B/S/K/E, got B={batch}, S={sequence}, K={top_k}, E={num_experts}"
+        ));
+    }
+    let routes_per_request = sequence
+        .checked_mul(top_k)
+        .ok_or_else(|| anyhow!("request-interleaved MoE sort overflow: {sequence} * {top_k}"))?;
+    if batch.checked_mul(routes_per_request) != Some(bs_k) {
+        return Err(anyhow!(
+            "request-interleaved MoE sort layout mismatch: B={batch}, routes/request={routes_per_request}, total={bs_k}"
+        ));
+    }
+    let max_key_exclusive = (num_experts as u64)
+        .checked_mul(bs_k as u64)
+        .ok_or_else(|| anyhow!("request-interleaved MoE sort key range overflow"))?;
+    if max_key_exclusive > u32::MAX as u64 + 1 {
+        return Err(anyhow!(
+            "request-interleaved MoE sort key exceeds Uint32: E={num_experts}, routes={bs_k}"
+        ));
+    }
+
+    // Build a unique route rank whose logical order is
+    // (position, top-k slot, request row). Pairing equivalent request rows
+    // within each expert group keeps the sorted gather kernel's matrix-row
+    // position stable without copying route metadata to the host.
+    let ranks =
+        mlx::ops::constructors::arange_on(0.0, bs_k as f64, 1.0, mlx::Dtype::Uint32, target)?;
+    let ranks = mlx::ops::shape::reshape(&ranks, [routes_per_request, batch])?;
+    let ranks = ranks.transpose_axes_on(&[1_i32, 0][..], target)?;
+    let ranks = mlx::ops::shape::reshape(&ranks, [bs_k])?;
+    let expert_stride: Array = (&[bs_k as u32][..], ())
+        .try_into()
+        .map_err(|e| anyhow!("request-interleaved MoE sort expert stride: {e}"))?;
+    let keys = flat_topk
+        .try_mul_on(&expert_stride, target)?
+        .try_add_on(&ranks, target)?;
+    argsort_on(&keys, -1_i32, target).context("request-interleaved MoE route argsort")
 }
 
 fn router_topk_scores_and_indices(
@@ -602,8 +652,11 @@ impl RoutedExperts {
     ///     pre-sort tokens by expert id, pass `sorted_indices=true`; x is
     ///     gathered to `[BS*k, 1, H]` (rank r+2 with r=1, so `lhs_indices`
     ///     defaults to `x.shape()[..-2] = [BS*k]` and broadcasts trivially
-    ///     against `rhs_indices [BS*k]`). After down_proj the permutation is
-    ///     inverted to restore original token/slot order.
+    ///     against `rhs_indices [BS*k]`). Qwen callers also provide the
+    ///     request layout so equal expert ids are ordered by token/slot before
+    ///     request row; this keeps equivalent rows in the same gather-QMM
+    ///     numeric shape. After down_proj the permutation is inverted to
+    ///     restore original token/slot order.
     ///   - Default broadcast path otherwise: x kept `[BS, 1, 1, H]` and MLX
     ///     broadcasts `rhs_indices [BS, k]` over the leading dims.
     ///
@@ -626,6 +679,7 @@ impl RoutedExperts {
                 layer_idx,
                 cast_output_to_expert_dtype: false,
                 activation: RoutedActivation::SwiGlu,
+                request_layout: None,
             },
         )
     }
@@ -648,6 +702,7 @@ impl RoutedExperts {
                 layer_idx,
                 cast_output_to_expert_dtype: false,
                 activation: RoutedActivation::GeGluTanh,
+                request_layout: None,
             },
         )
     }
@@ -673,6 +728,7 @@ impl RoutedExperts {
                 layer_idx,
                 cast_output_to_expert_dtype: true,
                 activation: RoutedActivation::SwiGlu,
+                request_layout: None,
             },
         )
     }
@@ -716,8 +772,25 @@ impl RoutedExperts {
                         // --- Sorted routing path. ---
                         let flat_topk = mlx::ops::shape::reshape(inds, [bs_k])
                             .context("RoutedExperts::apply_experts: reshape inds to [BS*k]")?;
-                        let sort_perm = argsort_on(&flat_topk, -1_i32, target)
-                            .context("RoutedExperts::apply_experts: argsort flat_topk")?; // [BS*k]
+                        let use_request_interleaving =
+                            options.request_layout.is_some_and(|(batch, _)| batch > 1);
+                        let sort_perm = if use_request_interleaving {
+                            let (batch, sequence) = options
+                                .request_layout
+                                .expect("checked request layout presence");
+                            request_interleaved_sort_perm(
+                                &flat_topk,
+                                batch,
+                                sequence,
+                                k,
+                                bs_k,
+                                self.num_experts,
+                                target,
+                            )?
+                        } else {
+                            argsort_on(&flat_topk, -1_i32, target)
+                                .context("RoutedExperts::apply_experts: argsort flat_topk")?
+                        }; // [BS*k]
                         let sorted_topk = take_along_axis_on(
                             &flat_topk, &sort_perm, -1_i32, target,
                         )
@@ -1006,9 +1079,18 @@ impl SparseMoeBlock {
             // k. `inds_u32` is the rhs_indices (expert id per (token, slot));
             // `scores` are the per-slot routing weights. This is the exact
             // logic previously inlined here, extracted so GLM-4 can reuse it.
-            let routed_y = self
-                .routed
-                .apply_experts(&flat_x, &inds_u32, &scores, target, layer_idx)?;
+            let routed_y = self.routed.apply_experts_inner(
+                &flat_x,
+                &inds_u32,
+                &scores,
+                target,
+                RoutedApplyOptions {
+                    layer_idx,
+                    cast_output_to_expert_dtype: false,
+                    activation: RoutedActivation::SwiGlu,
+                    request_layout: Some((b, s)),
+                },
+            )?;
 
             // (7) Shared expert with independent sigmoid gate.
             let shared_y = self
@@ -1041,6 +1123,15 @@ mod tests {
     #[test]
     fn sorted_routing_threshold_matches_mlx_switch_glu_contract() {
         assert_eq!(SORTED_ROUTING_MIN_BS_K, 64);
+    }
+
+    #[test]
+    fn request_interleaved_sort_pairs_matching_routes() -> Result<()> {
+        let experts: Array = (&[1_u32, 0, 1, 0, 1, 0, 1, 0][..], [8]).try_into()?;
+        let perm = request_interleaved_sort_perm(&experts, 2, 2, 2, 8, 2, ().into())?;
+
+        assert_eq!(perm.to_vec::<u32>()?, vec![1, 5, 3, 7, 0, 4, 2, 6]);
+        Ok(())
     }
 
     /// Compile-time check: RoutedExperts fields are public and Array can be
