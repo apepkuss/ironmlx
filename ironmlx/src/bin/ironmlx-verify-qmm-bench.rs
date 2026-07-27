@@ -250,9 +250,9 @@ fn load_projection(model: &Path, prefix: &str) -> Result<QuantProjection> {
     let meta = loader
         .quant_meta_for(prefix)
         .ok_or_else(|| anyhow!("{prefix}: missing quantization metadata"))?;
-    if meta.mode != QuantMode::Affine || meta.bits != 8 {
+    if meta.mode != QuantMode::Affine || !matches!(meta.bits, 4 | 5 | 6 | 8) {
         bail!(
-            "{prefix}: P1-D calibration requires Affine8, got {:?} {}-bit",
+            "{prefix}: verify calibration requires Affine4/5/6/8, got {:?} {}-bit",
             meta.mode,
             meta.bits
         );

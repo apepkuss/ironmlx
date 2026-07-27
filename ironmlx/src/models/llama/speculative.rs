@@ -64,6 +64,16 @@ mod tests {
             }),
             Some("bfloat16")
         ));
+        for bits in [5, 6] {
+            assert!(!exact_batched_verify_precision_qualified(
+                Some(QuantMeta {
+                    group_size: 64,
+                    bits,
+                    mode: QuantMode::Affine,
+                }),
+                Some("bfloat16")
+            ));
+        }
         assert!(!exact_batched_verify_precision_qualified(
             Some(QuantMeta {
                 group_size: 64,

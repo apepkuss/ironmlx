@@ -8,6 +8,10 @@ use crate::Result;
 pub(crate) enum ExactBatchedVerifyProfile {
     Disabled,
     Affine4,
+    Affine5Dense,
+    Affine5Moe,
+    Affine6Dense,
+    Affine6Moe,
     Affine8Dense,
     Affine8Moe,
 }
@@ -27,6 +31,16 @@ pub(crate) fn dense_exact_batched_verify_profile(
         }) => ExactBatchedVerifyProfile::Affine4,
         Some(QuantMeta {
             group_size: 64,
+            bits: 5,
+            mode: QuantMode::Affine,
+        }) => ExactBatchedVerifyProfile::Affine5Dense,
+        Some(QuantMeta {
+            group_size: 64,
+            bits: 6,
+            mode: QuantMode::Affine,
+        }) => ExactBatchedVerifyProfile::Affine6Dense,
+        Some(QuantMeta {
+            group_size: 64,
             bits: 8,
             mode: QuantMode::Affine,
         }) => ExactBatchedVerifyProfile::Affine8Dense,
@@ -40,10 +54,13 @@ pub(crate) fn moe_exact_batched_verify_profile(
 ) -> ExactBatchedVerifyProfile {
     match dense_exact_batched_verify_profile(quant_meta, checkpoint_dtype) {
         ExactBatchedVerifyProfile::Affine4 => ExactBatchedVerifyProfile::Affine4,
+        ExactBatchedVerifyProfile::Affine5Dense => ExactBatchedVerifyProfile::Affine5Moe,
+        ExactBatchedVerifyProfile::Affine6Dense => ExactBatchedVerifyProfile::Affine6Moe,
         ExactBatchedVerifyProfile::Affine8Dense => ExactBatchedVerifyProfile::Affine8Moe,
-        ExactBatchedVerifyProfile::Disabled | ExactBatchedVerifyProfile::Affine8Moe => {
-            ExactBatchedVerifyProfile::Disabled
-        }
+        ExactBatchedVerifyProfile::Disabled
+        | ExactBatchedVerifyProfile::Affine5Moe
+        | ExactBatchedVerifyProfile::Affine6Moe
+        | ExactBatchedVerifyProfile::Affine8Moe => ExactBatchedVerifyProfile::Disabled,
     }
 }
 
@@ -54,9 +71,13 @@ pub(crate) fn exact_batched_verify_qualified(
     verify_width: usize,
 ) -> bool {
     let max_context_tokens = match profile {
-        ExactBatchedVerifyProfile::Affine8Moe => 1_024,
+        ExactBatchedVerifyProfile::Affine5Moe
+        | ExactBatchedVerifyProfile::Affine6Moe
+        | ExactBatchedVerifyProfile::Affine8Moe => 1_024,
         ExactBatchedVerifyProfile::Disabled
         | ExactBatchedVerifyProfile::Affine4
+        | ExactBatchedVerifyProfile::Affine5Dense
+        | ExactBatchedVerifyProfile::Affine6Dense
         | ExactBatchedVerifyProfile::Affine8Dense => 4_096,
     };
     context_tokens <= max_context_tokens
@@ -70,10 +91,14 @@ pub(crate) fn exact_batched_verify_shape_qualified(
 ) -> bool {
     match profile {
         ExactBatchedVerifyProfile::Disabled => false,
-        ExactBatchedVerifyProfile::Affine4 => {
+        ExactBatchedVerifyProfile::Affine4
+        | ExactBatchedVerifyProfile::Affine5Moe
+        | ExactBatchedVerifyProfile::Affine6Moe => {
             batch_width > 0 && batch_width <= 8 && verify_width > 1 && verify_width <= 5
         }
-        ExactBatchedVerifyProfile::Affine8Dense => match batch_width {
+        ExactBatchedVerifyProfile::Affine5Dense
+        | ExactBatchedVerifyProfile::Affine6Dense
+        | ExactBatchedVerifyProfile::Affine8Dense => match batch_width {
             1 => verify_width > 1 && verify_width <= 5,
             2 => verify_width > 1 && verify_width <= 4,
             3 | 4 => verify_width == 2,
@@ -129,6 +154,16 @@ mod tests {
             bits: 8,
             mode: QuantMode::Affine,
         });
+        let affine5 = Some(QuantMeta {
+            group_size: 64,
+            bits: 5,
+            mode: QuantMode::Affine,
+        });
+        let affine6 = Some(QuantMeta {
+            group_size: 64,
+            bits: 6,
+            mode: QuantMode::Affine,
+        });
         assert_eq!(
             dense_exact_batched_verify_profile(None, Some("bfloat16")),
             ExactBatchedVerifyProfile::Disabled
@@ -142,6 +177,22 @@ mod tests {
             ExactBatchedVerifyProfile::Affine8Dense
         );
         assert_eq!(
+            dense_exact_batched_verify_profile(affine5, Some("bfloat16")),
+            ExactBatchedVerifyProfile::Affine5Dense
+        );
+        assert_eq!(
+            dense_exact_batched_verify_profile(affine6, Some("bfloat16")),
+            ExactBatchedVerifyProfile::Affine6Dense
+        );
+        assert_eq!(
+            moe_exact_batched_verify_profile(affine5, Some("bfloat16")),
+            ExactBatchedVerifyProfile::Affine5Moe
+        );
+        assert_eq!(
+            moe_exact_batched_verify_profile(affine6, Some("bfloat16")),
+            ExactBatchedVerifyProfile::Affine6Moe
+        );
+        assert_eq!(
             moe_exact_batched_verify_profile(affine8, Some("bfloat16")),
             ExactBatchedVerifyProfile::Affine8Moe
         );
@@ -149,18 +200,6 @@ mod tests {
             dense_exact_batched_verify_profile(affine4, Some("float16")),
             ExactBatchedVerifyProfile::Disabled
         );
-        assert_eq!(
-            dense_exact_batched_verify_profile(
-                Some(QuantMeta {
-                    group_size: 64,
-                    bits: 6,
-                    mode: QuantMode::Affine,
-                }),
-                Some("bfloat16"),
-            ),
-            ExactBatchedVerifyProfile::Disabled
-        );
-
         assert!(exact_batched_verify_qualified(
             ExactBatchedVerifyProfile::Affine4,
             8,
@@ -179,6 +218,25 @@ mod tests {
             4097,
             5
         ));
+        for profile in [
+            ExactBatchedVerifyProfile::Affine5Dense,
+            ExactBatchedVerifyProfile::Affine6Dense,
+        ] {
+            assert!(exact_batched_verify_qualified(profile, 1, 4_096, 5));
+            assert!(exact_batched_verify_qualified(profile, 2, 4_096, 4));
+            assert!(exact_batched_verify_qualified(profile, 4, 4_096, 2));
+            assert!(!exact_batched_verify_qualified(profile, 2, 4_096, 5));
+            assert!(!exact_batched_verify_qualified(profile, 4, 4_096, 4));
+            assert!(!exact_batched_verify_qualified(profile, 8, 4_096, 2));
+            assert!(!exact_batched_verify_qualified(profile, 1, 4_097, 5));
+        }
+        for profile in [
+            ExactBatchedVerifyProfile::Affine5Moe,
+            ExactBatchedVerifyProfile::Affine6Moe,
+        ] {
+            assert!(exact_batched_verify_qualified(profile, 8, 1_024, 5));
+            assert!(!exact_batched_verify_qualified(profile, 8, 1_025, 5));
+        }
 
         let affine8 = ExactBatchedVerifyProfile::Affine8Dense;
         assert!(exact_batched_verify_shape_qualified(affine8, 1, 5));

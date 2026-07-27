@@ -70,6 +70,8 @@ fn vl_profile_enabled() -> bool {
 enum ExactBatchedVerifyProfile {
     Disabled,
     Standard,
+    Affine5Dense,
+    Affine6Dense,
     Affine8Dense,
     Affine8Moe,
 }
@@ -89,6 +91,16 @@ fn exact_batched_verify_profile(
             bits: 4,
             mode: QuantMode::Affine,
         }) => ExactBatchedVerifyProfile::Standard,
+        Some(QuantMeta {
+            group_size: 64,
+            bits: 5,
+            mode: QuantMode::Affine,
+        }) if !is_moe => ExactBatchedVerifyProfile::Affine5Dense,
+        Some(QuantMeta {
+            group_size: 64,
+            bits: 6,
+            mode: QuantMode::Affine,
+        }) if !is_moe => ExactBatchedVerifyProfile::Affine6Dense,
         Some(QuantMeta {
             group_size: 64,
             bits: 8,
@@ -115,7 +127,10 @@ fn exact_batched_verify_qualified(
 
     let batch_qualified = match profile {
         ExactBatchedVerifyProfile::Disabled => false,
-        ExactBatchedVerifyProfile::Standard | ExactBatchedVerifyProfile::Affine8Dense => {
+        ExactBatchedVerifyProfile::Standard
+        | ExactBatchedVerifyProfile::Affine5Dense
+        | ExactBatchedVerifyProfile::Affine6Dense
+        | ExactBatchedVerifyProfile::Affine8Dense => {
             batch_width > 0 && batch_width <= MAX_QUALIFIED_BATCH
         }
         ExactBatchedVerifyProfile::Affine8Moe => batch_width > 0 && batch_width <= 2,
@@ -140,6 +155,9 @@ fn exact_batched_verify_qualified_for_kv_cache(
                     kv_bits,
                     Some(TurboQuantKVBits::K3V4 | TurboQuantKVBits::K4V4)
                 )
+        }
+        ExactBatchedVerifyProfile::Affine5Dense | ExactBatchedVerifyProfile::Affine6Dense => {
+            kv_bits.is_none()
         }
         _ => kv_bits != Some(TurboQuantKVBits::K3V4) || verify_width <= 2,
     };
@@ -1350,6 +1368,16 @@ mod tests {
             bits: 8,
             mode: QuantMode::Affine,
         });
+        let affine5 = Some(QuantMeta {
+            group_size: 64,
+            bits: 5,
+            mode: QuantMode::Affine,
+        });
+        let affine6 = Some(QuantMeta {
+            group_size: 64,
+            bits: 6,
+            mode: QuantMode::Affine,
+        });
         assert_eq!(
             exact_batched_verify_profile(None, Some("bfloat16"), false),
             ExactBatchedVerifyProfile::Standard
@@ -1367,6 +1395,22 @@ mod tests {
             ExactBatchedVerifyProfile::Affine8Moe
         );
         assert_eq!(
+            exact_batched_verify_profile(affine5, Some("bfloat16"), false),
+            ExactBatchedVerifyProfile::Affine5Dense
+        );
+        assert_eq!(
+            exact_batched_verify_profile(affine6, Some("bfloat16"), false),
+            ExactBatchedVerifyProfile::Affine6Dense
+        );
+        assert_eq!(
+            exact_batched_verify_profile(affine5, Some("bfloat16"), true),
+            ExactBatchedVerifyProfile::Disabled
+        );
+        assert_eq!(
+            exact_batched_verify_profile(affine6, Some("bfloat16"), true),
+            ExactBatchedVerifyProfile::Disabled
+        );
+        assert_eq!(
             exact_batched_verify_profile(None, Some("float16"), false),
             ExactBatchedVerifyProfile::Disabled
         );
@@ -1378,18 +1422,13 @@ mod tests {
             exact_batched_verify_profile(None, None, false),
             ExactBatchedVerifyProfile::Disabled
         );
-        assert_eq!(
-            exact_batched_verify_profile(
-                Some(QuantMeta {
-                    group_size: 64,
-                    bits: 5,
-                    mode: QuantMode::Affine,
-                }),
-                Some("bfloat16"),
-                false,
-            ),
-            ExactBatchedVerifyProfile::Disabled
-        );
+        for profile in [
+            ExactBatchedVerifyProfile::Affine5Dense,
+            ExactBatchedVerifyProfile::Affine6Dense,
+        ] {
+            assert!(exact_batched_verify_qualified(profile, 8, 1_024, 5));
+            assert!(!exact_batched_verify_qualified(profile, 8, 1_025, 5));
+        }
         assert!(exact_batched_verify_qualified(
             ExactBatchedVerifyProfile::Standard,
             8,
@@ -1459,6 +1498,28 @@ mod tests {
             5,
             Some(TurboQuantKVBits::K4V4)
         ));
+        for profile in [
+            ExactBatchedVerifyProfile::Affine5Dense,
+            ExactBatchedVerifyProfile::Affine6Dense,
+        ] {
+            assert!(exact_batched_verify_qualified_for_kv_cache(
+                profile, 8, 1_024, 5, None
+            ));
+            assert!(!exact_batched_verify_qualified_for_kv_cache(
+                profile,
+                8,
+                1_024,
+                2,
+                Some(TurboQuantKVBits::K3V4)
+            ));
+            assert!(!exact_batched_verify_qualified_for_kv_cache(
+                profile,
+                8,
+                1_024,
+                2,
+                Some(TurboQuantKVBits::K4V4)
+            ));
+        }
         assert!(exact_batched_verify_qualified_for_kv_cache(
             ExactBatchedVerifyProfile::Affine8Moe,
             2,

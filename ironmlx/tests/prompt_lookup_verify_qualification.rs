@@ -244,19 +244,18 @@ fn qualify_case<M: Model>(
     let verify_start = i32::try_from(prefix_len).context("verify start exceeds i32")?;
     let positions = uniform_position_ids(verify_start, verify_width_i32, batch)?;
     let per_row_lens = vec![verify_width_i32; batch];
-    let hidden = {
-        let _verify_qmm = ironmlx::nn::verify_qmm_scope();
-        model.forward_text_hidden(
-            &verify_input,
-            &positions,
-            Some(&per_row_lens),
-            None,
-            Some(batched_cache.as_mut_slice()),
-            StreamOrDevice::default(),
-        )?
-    };
+    let verify_qmm = ironmlx::nn::verify_qmm_scope();
+    let hidden = model.forward_text_hidden(
+        &verify_input,
+        &positions,
+        Some(&per_row_lens),
+        None,
+        Some(batched_cache.as_mut_slice()),
+        StreamOrDevice::default(),
+    )?;
     let batched_logits = model.project_hidden_on(&hidden, StreamOrDevice::default())?;
     eval(&batched_logits)?;
+    drop(verify_qmm);
     let batched_tokens = argmax_tokens(&batched_logits)?
         .chunks(verify_width)
         .map(<[u32]>::to_vec)
@@ -466,19 +465,18 @@ fn qualify_ragged_case_with_cache<M: Model>(
         i32::try_from(verify_width).context("verify width exceeds i32")?,
         Dtype::Bfloat16,
     )?;
-    let _verify_qmm = ironmlx::nn::verify_qmm_scope();
-    let hidden = {
-        model.forward_text_hidden(
-            &input,
-            &positions,
-            Some(&verify_lens_i32),
-            Some(&mask),
-            Some(batched_cache.as_mut_slice()),
-            StreamOrDevice::default(),
-        )?
-    };
+    let verify_qmm = ironmlx::nn::verify_qmm_scope();
+    let hidden = model.forward_text_hidden(
+        &input,
+        &positions,
+        Some(&verify_lens_i32),
+        Some(&mask),
+        Some(batched_cache.as_mut_slice()),
+        StreamOrDevice::default(),
+    )?;
     let logits = model.project_hidden_on(&hidden, StreamOrDevice::default())?;
     eval(&logits)?;
+    drop(verify_qmm);
     let flat = argmax_tokens(&logits)?;
     let batched_tokens = (0..batch)
         .map(|row| flat[row * verify_width..row * verify_width + verify_lens[row]].to_vec())
@@ -868,7 +866,8 @@ fn qwen35_dense_qgt1_matches_sequential_verify() -> Result<()> {
     let loader = Loader::open(&model_dir).context("opening Qwen3.5 checkpoint")?;
     let tokenizer = load_tokenizer(&loader, &model_dir)?;
     let model = Qwen35Model::from_loader(&loader).context("loading Qwen3.5 model")?;
-    if loader.quant_meta().is_some_and(|quant| quant.bits == 8) {
+    let quant_bits = loader.quant_meta().map(|quant| quant.bits);
+    if quant_bits == Some(8) {
         anyhow::ensure!(
             model.supports_exact_batched_speculative_verify(1, 4_096, 5)
                 && model.supports_exact_batched_speculative_verify(2, 4_096, 4)
@@ -880,6 +879,17 @@ fn qwen35_dense_qgt1_matches_sequential_verify() -> Result<()> {
                 && !model.supports_exact_batched_speculative_verify(4, 4_096, 3)
                 && !model.supports_exact_batched_speculative_verify(8, 4_096, 2),
             "Qwen3.5 Dense Affine8 checkpoint exceeded its qualified exact shape"
+        );
+    } else if matches!(quant_bits, Some(5 | 6)) {
+        anyhow::ensure!(
+            model.supports_exact_batched_speculative_verify(1, 4_096, 5)
+                && model.supports_exact_batched_speculative_verify(2, 4_096, 4)
+                && model.supports_exact_batched_speculative_verify(4, 4_096, 2)
+                && !model.supports_exact_batched_speculative_verify(2, 4_096, 5)
+                && !model.supports_exact_batched_speculative_verify(4, 4_096, 4)
+                && !model.supports_exact_batched_speculative_verify(8, 4_096, 2)
+                && !model.supports_exact_batched_speculative_verify(1, 4_097, 5),
+            "Qwen3.5 Dense Affine5/6 checkpoint exceeded its exact qualification staircase"
         );
     }
     qualify_model(&model, &tokenizer)?;
@@ -900,12 +910,20 @@ fn qwen35_moe_qgt1_matches_sequential_verify() -> Result<()> {
     let loader = Loader::open(&model_dir).context("opening Qwen3.5 MoE checkpoint")?;
     let tokenizer = load_tokenizer(&loader, &model_dir)?;
     let model = Qwen35MoeModel::from_loader(&loader).context("loading Qwen3.5 MoE model")?;
-    if loader.quant_meta().is_some_and(|quant| quant.bits == 8) {
+    let quant_bits = loader.quant_meta().map(|quant| quant.bits);
+    if quant_bits == Some(8) {
         anyhow::ensure!(
             model.supports_exact_batched_speculative_verify(8, 1_024, 2)
                 && !model.supports_exact_batched_speculative_verify(8, 1_025, 2)
                 && !model.supports_exact_batched_speculative_verify(1, 1_024, 4),
             "Qwen3.5 MoE Affine8 checkpoint exceeded its exact Q2 qualification"
+        );
+    } else if matches!(quant_bits, Some(5 | 6)) {
+        anyhow::ensure!(
+            model.supports_exact_batched_speculative_verify(8, 1_024, 5)
+                && !model.supports_exact_batched_speculative_verify(8, 1_025, 5)
+                && !model.supports_exact_batched_speculative_verify(8, 1_024, 6),
+            "Qwen3.5 MoE Affine5/6 checkpoint exceeded its exact qualification"
         );
     } else {
         anyhow::ensure!(
@@ -949,12 +967,20 @@ fn qwen36_moe_qgt1_matches_sequential_verify() -> Result<()> {
     let tokenizer = load_tokenizer(&loader, &model_dir)?;
     let model = Qwen36MoeModel::from_loader(&loader).context("loading Qwen3.6 MoE model")?;
     let force_candidate = std::env::var_os("PROMPT_LOOKUP_VERIFY_FORCE_CANDIDATE").is_some();
-    if !force_candidate && loader.quant_meta().is_some_and(|quant| quant.bits == 8) {
+    let quant_bits = loader.quant_meta().map(|quant| quant.bits);
+    if !force_candidate && quant_bits == Some(8) {
         anyhow::ensure!(
             model.supports_exact_batched_speculative_verify(8, 1_024, 2)
                 && !model.supports_exact_batched_speculative_verify(8, 1_025, 2)
                 && !model.supports_exact_batched_speculative_verify(1, 1_024, 4),
             "Qwen3.6 MoE Affine8 checkpoint exceeded its exact Q2 qualification"
+        );
+    } else if !force_candidate && matches!(quant_bits, Some(5 | 6)) {
+        anyhow::ensure!(
+            model.supports_exact_batched_speculative_verify(8, 1_024, 5)
+                && !model.supports_exact_batched_speculative_verify(8, 1_025, 5)
+                && !model.supports_exact_batched_speculative_verify(8, 1_024, 6),
+            "Qwen3.6 MoE Affine5/6 checkpoint exceeded its exact qualification"
         );
     } else if !force_candidate {
         anyhow::ensure!(
@@ -986,12 +1012,13 @@ fn gemma4_qgt1_matches_sequential_verify() -> Result<()> {
     let force_candidate = std::env::var_os("PROMPT_LOOKUP_VERIFY_FORCE_CANDIDATE").is_some();
     let force_turboquant_candidate =
         std::env::var_os("PROMPT_LOOKUP_VERIFY_FORCE_TURBOQUANT_CANDIDATE").is_some();
-    if !force_candidate && loader.quant_meta().is_some_and(|quant| quant.bits == 8) {
-        let is_moe = loader
-            .config_raw_value()
-            .pointer("/text_config/enable_moe_block")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
+    let quant_bits = loader.quant_meta().map(|quant| quant.bits);
+    let is_moe = loader
+        .config_raw_value()
+        .pointer("/text_config/enable_moe_block")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if !force_candidate && quant_bits == Some(8) {
         if is_moe {
             anyhow::ensure!(
                 model.supports_exact_batched_speculative_verify(2, 1_024, 5)
@@ -1005,6 +1032,34 @@ fn gemma4_qgt1_matches_sequential_verify() -> Result<()> {
                     && !model.supports_exact_batched_speculative_verify(8, 1_025, 5)
                     && !model.supports_exact_batched_speculative_verify(8, 1_024, 6),
                 "Gemma4 Dense Affine8 checkpoint exceeded its exact qualification"
+            );
+        }
+    } else if !force_candidate && matches!(quant_bits, Some(5 | 6)) {
+        if is_moe {
+            anyhow::ensure!(
+                !model.supports_exact_batched_speculative_verify(1, 1_024, 2),
+                "Gemma4 MoE Affine5/6 must remain fail closed without a qualification model"
+            );
+        } else {
+            anyhow::ensure!(
+                model.supports_exact_batched_speculative_verify(8, 1_024, 5)
+                    && !model.supports_exact_batched_speculative_verify(8, 1_025, 5)
+                    && !model.supports_exact_batched_speculative_verify(8, 1_024, 6)
+                    && model
+                        .supports_exact_batched_speculative_verify_for_kv_cache(8, 1_024, 5, None,)
+                    && !model.supports_exact_batched_speculative_verify_for_kv_cache(
+                        8,
+                        1_024,
+                        2,
+                        Some(TurboQuantKVBits::K3V4),
+                    )
+                    && !model.supports_exact_batched_speculative_verify_for_kv_cache(
+                        8,
+                        1_024,
+                        2,
+                        Some(TurboQuantKVBits::K4V4),
+                    ),
+                "Gemma4 Dense Affine5/6 checkpoint exceeded its exact qualification"
             );
         }
     }
