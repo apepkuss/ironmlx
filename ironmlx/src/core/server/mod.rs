@@ -412,6 +412,10 @@ where
 struct MtpSchedulerActorSpawner<H> {
     mtp: H,
     mtp_draft_tokens: usize,
+    prompt_lookup: Option<(
+        crate::core::prompt_lookup::PromptLookupConfig,
+        crate::core::prompt_lookup::PromptLookupQualificationRuntimeConfig,
+    )>,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     active_kv_offload: ActiveKvOffloadConfig,
@@ -428,6 +432,10 @@ struct PromptLookupSchedulerActorSpawner {
 struct Gemma4DrafterSchedulerActorSpawner {
     drafter: Arc<Mutex<crate::models::gemma4::Gemma4AssistantModel>>,
     mtp_draft_tokens: usize,
+    prompt_lookup: Option<(
+        crate::core::prompt_lookup::PromptLookupConfig,
+        crate::core::prompt_lookup::PromptLookupQualificationRuntimeConfig,
+    )>,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     active_kv_offload: ActiveKvOffloadConfig,
@@ -442,6 +450,10 @@ impl SchedulerActorSpawner<crate::models::Gemma4Model> for Gemma4DrafterSchedule
         true
     }
 
+    fn prompt_lookup_config(&self) -> Option<crate::core::prompt_lookup::PromptLookupConfig> {
+        self.prompt_lookup.as_ref().map(|(cfg, _)| *cfg)
+    }
+
     fn spawn(
         self,
         model: Arc<Mutex<crate::models::Gemma4Model>>,
@@ -452,6 +464,24 @@ impl SchedulerActorSpawner<crate::models::Gemma4Model> for Gemma4DrafterSchedule
         decode_cadence_mid_chunk_cap: usize,
         meta: crate::core::memory_budget::ModelMeta,
     ) -> Result<scheduler_actor::SchedulerActorHandle> {
+        if let Some((prompt_lookup, qualification)) = self.prompt_lookup {
+            return scheduler_actor::spawn_scheduler_actor_with_gemma4_drafter_prompt_lookup(
+                model,
+                self.drafter,
+                self.mtp_draft_tokens,
+                prompt_lookup,
+                qualification,
+                b_max,
+                admission_deadline,
+                admission_queue_max,
+                effective_cap_max,
+                decode_cadence_mid_chunk_cap,
+                meta,
+                self.paged_prefix_cache,
+                self.prefix_lru_cache,
+                self.active_kv_offload,
+            );
+        }
         if self.active_kv_offload.enabled {
             Ok(
                 scheduler_actor::spawn_scheduler_actor_with_gemma4_drafter_and_active_kv(
@@ -500,6 +530,10 @@ where
         true
     }
 
+    fn prompt_lookup_config(&self) -> Option<crate::core::prompt_lookup::PromptLookupConfig> {
+        self.prompt_lookup.as_ref().map(|(cfg, _)| *cfg)
+    }
+
     fn spawn(
         self,
         model: Arc<Mutex<M>>,
@@ -510,6 +544,24 @@ where
         decode_cadence_mid_chunk_cap: usize,
         meta: crate::core::memory_budget::ModelMeta,
     ) -> Result<scheduler_actor::SchedulerActorHandle> {
+        if let Some((prompt_lookup, qualification)) = self.prompt_lookup {
+            return scheduler_actor::spawn_scheduler_actor_with_mtp_prompt_lookup(
+                model,
+                self.mtp,
+                self.mtp_draft_tokens,
+                prompt_lookup,
+                qualification,
+                b_max,
+                admission_deadline,
+                admission_queue_max,
+                effective_cap_max,
+                decode_cadence_mid_chunk_cap,
+                meta,
+                self.paged_prefix_cache,
+                self.prefix_lru_cache,
+                self.active_kv_offload,
+            );
+        }
         if self.active_kv_offload.enabled {
             Ok(
                 scheduler_actor::spawn_scheduler_actor_with_mtp_and_active_kv(
@@ -706,6 +758,7 @@ pub async fn serve_with_mtp<M>(
     model: M,
     mtp: M::MtpHead,
     mtp_draft_tokens: usize,
+    prompt_lookup: Option<crate::core::prompt_lookup::PromptLookupConfig>,
     tokenizer: Tokenizer,
     model_id: String,
     host: &str,
@@ -734,6 +787,15 @@ where
         requested_mtp_draft_tokens,
         paged_prefix_cache.is_some(),
     );
+    let prompt_lookup = prompt_lookup
+        .map(|cfg| -> Result<_> {
+            let qualification = crate::core::prompt_lookup::PromptLookupQualificationRuntimeConfig::for_scheduler_profile_with_baseline(
+                &scheduler_runtime_profile,
+                crate::core::prompt_lookup::PromptLookupQualificationBaseline::QwenMtp,
+            )?;
+            Ok((cfg.validate()?, qualification))
+        })
+        .transpose()?;
     serve_inner(
         model,
         tokenizer,
@@ -758,6 +820,7 @@ where
         MtpSchedulerActorSpawner {
             mtp,
             mtp_draft_tokens: effective_mtp_draft_tokens,
+            prompt_lookup,
             paged_prefix_cache,
             prefix_lru_cache,
             active_kv_offload,
@@ -771,6 +834,7 @@ pub async fn serve_with_gemma4_drafter(
     model: crate::models::Gemma4Model,
     drafter: crate::models::gemma4::Gemma4AssistantModel,
     mtp_draft_tokens: usize,
+    prompt_lookup: Option<crate::core::prompt_lookup::PromptLookupConfig>,
     tokenizer: Tokenizer,
     model_id: String,
     host: &str,
@@ -794,6 +858,7 @@ pub async fn serve_with_gemma4_drafter(
         model,
         drafter,
         mtp_draft_tokens,
+        prompt_lookup,
         tokenizer,
         model_id,
         prefill_chunk_size,
@@ -943,6 +1008,7 @@ pub(crate) async fn build_mtp_app_state<M>(
     model: M,
     mtp: M::MtpHead,
     mtp_draft_tokens: usize,
+    prompt_lookup: Option<crate::core::prompt_lookup::PromptLookupConfig>,
     tokenizer: Tokenizer,
     model_id: String,
     prefill_chunk_size: usize,
@@ -966,6 +1032,15 @@ where
 {
     let effective_mtp_draft_tokens =
         effective_mtp_draft_tokens_for_paged_prefix(mtp_draft_tokens, paged_prefix_cache.is_some());
+    let prompt_lookup = prompt_lookup
+        .map(|cfg| -> Result<_> {
+            let qualification = crate::core::prompt_lookup::PromptLookupQualificationRuntimeConfig::for_scheduler_profile_with_baseline(
+                &scheduler_runtime_profile,
+                crate::core::prompt_lookup::PromptLookupQualificationBaseline::QwenMtp,
+            )?;
+            Ok((cfg.validate()?, qualification))
+        })
+        .transpose()?;
     build_app_state(
         model,
         tokenizer,
@@ -988,6 +1063,7 @@ where
         MtpSchedulerActorSpawner {
             mtp,
             mtp_draft_tokens: effective_mtp_draft_tokens,
+            prompt_lookup,
             paged_prefix_cache,
             prefix_lru_cache,
             active_kv_offload,
@@ -1001,6 +1077,7 @@ pub(crate) async fn build_gemma4_drafter_app_state(
     model: crate::models::Gemma4Model,
     drafter: crate::models::gemma4::Gemma4AssistantModel,
     mtp_draft_tokens: usize,
+    prompt_lookup: Option<crate::core::prompt_lookup::PromptLookupConfig>,
     tokenizer: Tokenizer,
     model_id: String,
     prefill_chunk_size: usize,
@@ -1043,6 +1120,15 @@ pub(crate) async fn build_gemma4_drafter_app_state(
             "Gemma4 drafter cap resolved"
         );
     }
+    let prompt_lookup = prompt_lookup
+        .map(|cfg| -> Result<_> {
+            let qualification = crate::core::prompt_lookup::PromptLookupQualificationRuntimeConfig::for_scheduler_profile_with_baseline(
+                &scheduler_runtime_profile,
+                crate::core::prompt_lookup::PromptLookupQualificationBaseline::Gemma4Assistant,
+            )?;
+            Ok((cfg.validate()?, qualification))
+        })
+        .transpose()?;
     let drafter = Arc::new(Mutex::new(drafter));
     let base = build_app_state(
         model,
@@ -1066,6 +1152,7 @@ pub(crate) async fn build_gemma4_drafter_app_state(
         Gemma4DrafterSchedulerActorSpawner {
             drafter,
             mtp_draft_tokens: effective_mtp_draft_tokens,
+            prompt_lookup,
             paged_prefix_cache,
             prefix_lru_cache,
             active_kv_offload,

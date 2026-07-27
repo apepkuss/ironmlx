@@ -422,7 +422,9 @@ pub enum SchedulerExecutionModel {
 pub enum SchedulerSpeculativeMode {
     Disabled,
     QwenMtp,
+    QwenMtpPromptLookup,
     Gemma4Drafter,
+    Gemma4DrafterPromptLookup,
     PromptLookup,
 }
 

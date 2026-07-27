@@ -419,9 +419,6 @@ fn resolve_prompt_lookup_config(
         }
         return Ok(None);
     }
-    if args.mtp_model_dir.is_some() || args.mtp_draft_tokens.is_some() {
-        bail!("--prompt-lookup is mutually exclusive with neural MTP/drafter options");
-    }
     let defaults = crate::core::prompt_lookup::PromptLookupConfig::default();
     Ok(Some(
         crate::core::prompt_lookup::PromptLookupConfig {
@@ -717,9 +714,6 @@ fn scheduler_runtime_context_for_model(
     prompt_lookup: Option<crate::core::prompt_lookup::PromptLookupConfig>,
     logical_kv_cap_tokens: Option<usize>,
 ) -> Result<SchedulerAutotuneRuntimeContext> {
-    if prompt_lookup.is_some() && mtp_model_dir.is_some() {
-        bail!("PromptLookup is mutually exclusive with neural MTP/drafter options");
-    }
     let logical_kv_cap_tokens = logical_kv_cap_tokens
         .or(args.max_cache_cap)
         .unwrap_or(DEFAULT_MAX_CACHE_CAP);
@@ -1184,6 +1178,7 @@ where
     );
     let prefix_lru_cache = resolve_prefix_lru_cache_config(args, paged_prefix_cache.as_ref())?;
     let active_kv_offload = resolve_active_kv_offload_config(args)?;
+    let prompt_lookup = resolve_prompt_lookup_config(args)?;
     if let Some(config) = &prefix_lru_cache {
         tracing::info!(
             "ironmlx serve: prefix LRU cache enabled max_bytes={}",
@@ -1195,6 +1190,7 @@ where
         model,
         mtp,
         mtp_config.draft_tokens,
+        prompt_lookup,
         tokenizer,
         model_id,
         &args.host,
@@ -1267,6 +1263,7 @@ fn serve_with_gemma4_drafter_model(
     let paged_prefix_cache = resolve_paged_prefix_cache_config(args, scheduler_config, &model_id)?;
     let prefix_lru_cache = resolve_prefix_lru_cache_config(args, paged_prefix_cache.as_ref())?;
     let active_kv_offload = resolve_active_kv_offload_config(args)?;
+    let prompt_lookup = resolve_prompt_lookup_config(args)?;
     if let Some(config) = &prefix_lru_cache {
         tracing::info!(
             "ironmlx serve: prefix LRU cache enabled max_bytes={}",
@@ -1278,6 +1275,7 @@ fn serve_with_gemma4_drafter_model(
         model,
         drafter,
         mtp_config.draft_tokens,
+        prompt_lookup,
         tokenizer,
         model_id,
         &args.host,
@@ -1476,12 +1474,6 @@ fn build_engine_model_config_for_pool(
     if model.mtp_draft_tokens.is_some() && mtp.is_none() {
         bail!(
             "engine model `{}` sets mtp_draft_tokens without mtp_model_dir",
-            model.id
-        );
-    }
-    if mtp.is_some() && prompt_lookup.is_some() {
-        bail!(
-            "engine model `{}` configures both neural MTP/drafter and PromptLookup",
             model.id
         );
     }
@@ -2184,6 +2176,49 @@ mod scheduler_profile_tests {
         std::fs::remove_dir_all(temp_dir).expect("cleanup");
     }
 
+    #[test]
+    fn serve_engine_pool_preserves_hybrid_source_config() {
+        let temp_dir = unique_temp_dir("serve-engine-pool-hybrid");
+        let model_dir = temp_dir.join("qwen-base");
+        let mtp_dir = temp_dir.join("qwen-mtp");
+        std::fs::create_dir_all(&model_dir).expect("create model dir");
+        std::fs::create_dir_all(&mtp_dir).expect("create MTP dir");
+        std::fs::write(model_dir.join("config.json"), r#"{"model_type":"qwen3_5"}"#)
+            .expect("write model config");
+        std::fs::write(
+            mtp_dir.join("config.json"),
+            r#"{"model_type":"qwen3_5_mtp"}"#,
+        )
+        .expect("write MTP config");
+        let args = base_args();
+        let prompt_lookup = crate::core::prompt_lookup::PromptLookupConfig::default();
+        let manifest_model = EngineModelManifest {
+            id: "qwen-hybrid".to_string(),
+            path: model_dir,
+            load_policy: EngineLoadPolicy::Lazy,
+            default: true,
+            scheduler_profile: None,
+            mtp_model_dir: Some(mtp_dir),
+            mtp_draft_tokens: Some(2),
+            prompt_lookup: Some(prompt_lookup),
+        };
+
+        let config = build_engine_model_config_for_pool(&args, manifest_model, None, "test-host")
+            .expect("build hybrid manifest config");
+
+        assert!(config.mtp.is_some());
+        assert_eq!(config.prompt_lookup, Some(prompt_lookup));
+        assert_eq!(
+            config
+                .scheduler_runtime_profile
+                .runtime_context
+                .speculative
+                .mode,
+            crate::core::scheduler_autotune::SchedulerSpeculativeMode::QwenMtpPromptLookup
+        );
+        std::fs::remove_dir_all(temp_dir).expect("cleanup");
+    }
+
     fn qwen36_dense_27b_raw_config() -> serde_json::Value {
         serde_json::json!({
             "model_type": "qwen3_5",
@@ -2467,13 +2502,14 @@ mod scheduler_profile_tests {
     }
 
     #[test]
-    fn serve_prompt_lookup_rejects_neural_source_configuration() {
+    fn serve_prompt_lookup_accepts_neural_source_configuration() {
         let mut args = base_args();
         args.prompt_lookup = true;
         args.mtp_model_dir = Some(PathBuf::from("/tmp/mtp"));
 
-        let error = resolve_prompt_lookup_config(&args).expect_err("sources are exclusive");
-        assert!(error.to_string().contains("mutually exclusive"));
+        assert!(resolve_prompt_lookup_config(&args)
+            .expect("hybrid sources are valid")
+            .is_some());
     }
 
     #[test]

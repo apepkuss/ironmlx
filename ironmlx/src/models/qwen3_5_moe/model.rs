@@ -764,6 +764,18 @@ impl Model for Qwen35MoeModel {
         )
     }
 
+    fn supports_sequential_prompt_lookup_verify(
+        &self,
+        _batch_width: usize,
+        context_tokens: usize,
+        _verify_width: usize,
+    ) -> bool {
+        crate::models::qwen3_5::speculative::sequential_prompt_lookup_verify_qualified(
+            self.exact_batched_verify_profile,
+            context_tokens,
+        )
+    }
+
     fn model_meta(&self) -> ModelMeta {
         Qwen35MoeModel::model_meta(self)
     }

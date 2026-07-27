@@ -515,12 +515,6 @@ impl ParsedLoadModelRequest {
             .map(PromptLookupConfig::validate)
             .transpose()
             .map_err(AdminError::from_load_error)?;
-        if mtp.is_some() && prompt_lookup.is_some() {
-            return Err(AdminError::bad_request_with_code(
-                "PromptLookup is mutually exclusive with neural MTP/drafter.",
-                None,
-            ));
-        }
         Ok(Self {
             model_reference,
             model_dir,
@@ -581,9 +575,6 @@ fn build_engine_model_config(
         prompt_lookup,
         pinned,
     } = request;
-    if mtp.is_some() && prompt_lookup.is_some() {
-        anyhow::bail!("PromptLookup is mutually exclusive with neural MTP/drafter");
-    }
     let mut resolved = apply_load_request_scheduler_overrides(
         resolve_scheduler_for_model_with_speculative(
             args,
@@ -1825,6 +1816,42 @@ mod tests {
                 max_index_entries: 8192,
             })
         );
+    }
+
+    #[test]
+    fn parsed_load_model_request_accepts_hybrid_sources() {
+        let root = unique_temp_dir("hybrid-load-request");
+        let base = root.join("base");
+        let mtp = root.join("mtp");
+        std::fs::create_dir_all(&base).expect("base model dir");
+        let request: LoadModelRequest = serde_json::from_value(serde_json::json!({
+            "model": "mlx-community/Qwen3.5-4B-MLX-4bit",
+            "model_dir": base,
+            "mtp_model_dir": mtp,
+            "mtp_draft_tokens": 2,
+            "prompt_lookup": {
+                "min_ngram": 2,
+                "max_ngram": 5,
+                "max_draft_tokens": 3,
+                "history_window_tokens": 4096,
+                "max_index_entries": 8192
+            }
+        }))
+        .expect("load request");
+
+        let parsed = match ParsedLoadModelRequest::new(request) {
+            Ok(parsed) => parsed,
+            Err(_) => panic!("hybrid load request should parse"),
+        };
+        assert_eq!(
+            parsed
+                .mtp
+                .as_ref()
+                .map(|settings| settings.model_dir.as_path()),
+            Some(mtp.as_path())
+        );
+        assert!(parsed.prompt_lookup.is_some());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

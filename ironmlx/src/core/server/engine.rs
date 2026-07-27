@@ -474,12 +474,6 @@ fn validate_engine_model_config(model: &EngineModelConfig) -> Result<()> {
             config_path.display()
         )
     })?;
-    if model.mtp.is_some() && model.prompt_lookup.is_some() {
-        bail!(
-            "engine model `{}` configures both neural MTP/drafter and PromptLookup",
-            model.id
-        );
-    }
     if let Some(prompt_lookup) = model.prompt_lookup {
         prompt_lookup.validate()?;
         if !architecture.supports_prompt_lookup() {
@@ -2447,12 +2441,6 @@ async fn load_engine_variant(
         .prompt_lookup
         .map(PromptLookupConfig::validate)
         .transpose()?;
-    if mtp_config.is_some() && prompt_lookup.is_some() {
-        bail!(
-            "engine model `{}` configures both neural MTP/drafter and PromptLookup",
-            model.id
-        );
-    }
     let scheduler_config = model.scheduler_runtime_profile.config;
     let paged_prefix_cache = runtime.paged_prefix_cache_config(&model.id, scheduler_config)?;
     let prefix_lru_cache = runtime.prefix_lru_cache_config(paged_prefix_cache.as_ref())?;
@@ -2527,6 +2515,7 @@ async fn load_engine_variant(
                     paged_prefix_cache,
                     prefix_lru_cache,
                     mtp_config,
+                    prompt_lookup,
                     vision_input,
                 )
                 .await?;
@@ -2675,6 +2664,7 @@ async fn build_qwen35_engine(
             paged_prefix_cache,
             prefix_lru_cache,
             mtp_config,
+            prompt_lookup,
             vision_input,
         )
         .await?;
@@ -2719,6 +2709,7 @@ async fn build_qwen35_moe_engine(
             paged_prefix_cache,
             prefix_lru_cache,
             mtp_config,
+            prompt_lookup,
             vision_input,
         )
         .await?;
@@ -2763,6 +2754,7 @@ async fn build_qwen36_moe_engine(
             paged_prefix_cache,
             prefix_lru_cache,
             mtp_config,
+            prompt_lookup,
             vision_input,
         )
         .await?;
@@ -2915,6 +2907,7 @@ async fn build_mtp_causal_state<M>(
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     mtp_config: ResolvedEngineMtpConfig,
+    prompt_lookup: Option<PromptLookupConfig>,
     vision_input: Option<VisionInputConfig>,
 ) -> Result<AppState<M>>
 where
@@ -2932,6 +2925,7 @@ where
         model_impl,
         mtp,
         mtp_config.draft_tokens,
+        prompt_lookup,
         tokenizer,
         model.id.clone(),
         profile.config.prefill_chunk_size,
@@ -2963,6 +2957,7 @@ async fn build_gemma4_drafter_causal_state(
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     mtp_config: ResolvedEngineMtpConfig,
+    prompt_lookup: Option<PromptLookupConfig>,
     vision_input: Option<VisionInputConfig>,
 ) -> Result<Gemma4DrafterAppState> {
     let drafter_loader = Loader::open_gemma4_drafter(&mtp_config.model_dir).with_context(|| {
@@ -2984,6 +2979,7 @@ async fn build_gemma4_drafter_causal_state(
         model_impl,
         drafter,
         mtp_config.draft_tokens,
+        prompt_lookup,
         tokenizer,
         model.id.clone(),
         profile.config.prefill_chunk_size,
@@ -3344,7 +3340,7 @@ mod tests {
     }
 
     #[test]
-    fn engine_model_rejects_neural_and_prompt_lookup_sources_together() {
+    fn engine_model_accepts_neural_and_prompt_lookup_sources_together() {
         let model_dir = write_minimal_model_config("qwen3_5");
         let mut config = model_config("dual-source", &model_dir, EngineLoadPolicy::Lazy);
         config.mtp = Some(EngineMtpSettings {
@@ -3353,10 +3349,7 @@ mod tests {
         });
         config.prompt_lookup = Some(crate::core::prompt_lookup::PromptLookupConfig::default());
 
-        let error = validate_engine_model_config(&config).expect_err("sources must be exclusive");
-        assert!(error
-            .to_string()
-            .contains("both neural MTP/drafter and PromptLookup"));
+        validate_engine_model_config(&config).expect("hybrid sources are valid");
 
         std::fs::remove_dir_all(model_dir).expect("cleanup");
     }

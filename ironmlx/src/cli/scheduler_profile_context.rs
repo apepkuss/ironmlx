@@ -155,9 +155,6 @@ impl SchedulerProfileRuntimeArgs {
         if !self.prompt_lookup && has_prompt_lookup_params {
             bail!("prompt lookup source parameters require --prompt-lookup");
         }
-        if self.prompt_lookup && self.mtp_model_dir.is_some() {
-            bail!("--prompt-lookup is mutually exclusive with --mtp-model-dir");
-        }
         let prompt_lookup = if self.prompt_lookup {
             let defaults = crate::core::prompt_lookup::PromptLookupConfig::default();
             Some(
@@ -222,28 +219,42 @@ pub(crate) fn build_scheduler_runtime_context(
     let model_revision_fingerprint = model_fingerprint(model_dir, &config_bytes)?;
     let weight_quantization = weight_quantization_context(model_dir, &config)?;
 
-    if options.mtp_model_dir.is_some() && options.prompt_lookup.is_some() {
-        bail!("PromptLookup and neural MTP/drafter are mutually exclusive");
-    }
     let speculative = match (options.mtp_model_dir, options.prompt_lookup) {
-        (Some(mtp_model_dir), None) => {
+        (Some(mtp_model_dir), prompt_lookup) => {
             if !mtp_model_dir.is_dir() {
                 bail!(
                     "MTP model path must point to a local directory: {}",
                     mtp_model_dir.display()
                 );
             }
-            let mode = match architecture {
-                ModelArchitecture::Qwen35Dense | ModelArchitecture::Qwen35Moe => {
+            let mode = match (architecture, prompt_lookup.is_some()) {
+                (ModelArchitecture::Qwen35Dense | ModelArchitecture::Qwen35Moe, false) => {
                     SchedulerSpeculativeMode::QwenMtp
                 }
-                ModelArchitecture::Gemma4 => SchedulerSpeculativeMode::Gemma4Drafter,
+                (ModelArchitecture::Qwen35Dense | ModelArchitecture::Qwen35Moe, true) => {
+                    SchedulerSpeculativeMode::QwenMtpPromptLookup
+                }
+                (ModelArchitecture::Gemma4, false) => SchedulerSpeculativeMode::Gemma4Drafter,
+                (ModelArchitecture::Gemma4, true) => {
+                    SchedulerSpeculativeMode::Gemma4DrafterPromptLookup
+                }
                 _ => bail!("scheduler profile MTP context supports Qwen and Gemma4 only"),
             };
             let draft_config =
                 std::fs::read(mtp_model_dir.join("config.json")).with_context(|| {
                     format!("reading {}", mtp_model_dir.join("config.json").display())
                 })?;
+            let neural_fingerprint = model_fingerprint(mtp_model_dir, &draft_config)?;
+            let source_fingerprint = prompt_lookup.map_or(neural_fingerprint.clone(), |config| {
+                format!(
+                    "neural={neural_fingerprint};lookup=min={};max={};draft={};history={};entries={}",
+                    config.min_ngram,
+                    config.max_ngram,
+                    config.max_draft_tokens,
+                    config.history_window_tokens,
+                    config.max_index_entries
+                )
+            });
             let draft_tokens = crate::core::speculative::resolve_mtp_draft_tokens(
                 &config,
                 options
@@ -253,7 +264,7 @@ pub(crate) fn build_scheduler_runtime_context(
             );
             SchedulerSpeculativeContext {
                 mode,
-                source_fingerprint: Some(model_fingerprint(mtp_model_dir, &draft_config)?),
+                source_fingerprint: Some(source_fingerprint),
                 draft_tokens: Some(draft_tokens),
             }
         }
@@ -274,7 +285,6 @@ pub(crate) fn build_scheduler_runtime_context(
             source_fingerprint: None,
             draft_tokens: None,
         },
-        (Some(_), Some(_)) => unreachable!("mutual exclusion checked above"),
     };
 
     let block_size = usize::try_from(options.paged_prefix_cache_block_size)
@@ -654,6 +664,58 @@ mod tests {
                 Some(baseline_fingerprint.as_str())
             );
         }
+
+        std::fs::remove_dir_all(temp_dir).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn runtime_context_distinguishes_qwen_hybrid_from_neural_only() {
+        let temp_dir = unique_temp_dir("scheduler-profile-hybrid");
+        let model_dir = temp_dir.join("model");
+        let mtp_dir = temp_dir.join("mtp");
+        create_model(
+            &model_dir,
+            r#"{"model_type":"qwen3_5"}"#,
+            b"main-weights-v1",
+        );
+        create_model(&mtp_dir, r#"{"model_type":"qwen3_5_mtp"}"#, b"mtp-weights");
+        let build = |prompt_lookup| {
+            build_scheduler_runtime_context(
+                &model_dir,
+                SchedulerProfileContextOptions {
+                    mtp_model_dir: Some(&mtp_dir),
+                    mtp_draft_tokens: Some(3),
+                    prompt_lookup,
+                    kv_quantization: SchedulerKvQuantization::None,
+                    paged_prefix_cache_enabled: false,
+                    paged_prefix_cache_block_size: 256,
+                    paged_prefix_cache_max_pages: None,
+                    prefix_lru_cache_max_bytes: None,
+                    ssd_prefix_cache_max_bytes: None,
+                    active_kv_offload: false,
+                    logical_kv_cap_tokens: 32768,
+                    memory_limit_total_bytes: None,
+                    memory_limit_model_bytes: None,
+                },
+            )
+            .expect("build speculative context")
+        };
+        let neural = build(None);
+        let hybrid = build(Some(
+            crate::core::prompt_lookup::PromptLookupConfig::default(),
+        ));
+
+        assert_eq!(neural.speculative.mode, SchedulerSpeculativeMode::QwenMtp);
+        assert_eq!(
+            hybrid.speculative.mode,
+            SchedulerSpeculativeMode::QwenMtpPromptLookup
+        );
+        assert_ne!(neural.fingerprint(), hybrid.fingerprint());
+        assert!(hybrid
+            .speculative
+            .source_fingerprint
+            .as_deref()
+            .is_some_and(|fingerprint| fingerprint.contains(";lookup=")));
 
         std::fs::remove_dir_all(temp_dir).expect("cleanup temp dir");
     }

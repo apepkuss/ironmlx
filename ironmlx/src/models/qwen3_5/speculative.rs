@@ -70,12 +70,13 @@ pub(crate) fn exact_batched_verify_qualified(
     context_tokens: usize,
     verify_width: usize,
 ) -> bool {
+    // Affine4 has an input-dependent B2/Q5 parity counterexample above 1024 tokens.
     let max_context_tokens = match profile {
-        ExactBatchedVerifyProfile::Affine5Moe
+        ExactBatchedVerifyProfile::Affine4
+        | ExactBatchedVerifyProfile::Affine5Moe
         | ExactBatchedVerifyProfile::Affine6Moe
         | ExactBatchedVerifyProfile::Affine8Moe => 1_024,
         ExactBatchedVerifyProfile::Disabled
-        | ExactBatchedVerifyProfile::Affine4
         | ExactBatchedVerifyProfile::Affine5Dense
         | ExactBatchedVerifyProfile::Affine6Dense
         | ExactBatchedVerifyProfile::Affine8Dense => 4_096,
@@ -108,6 +109,14 @@ pub(crate) fn exact_batched_verify_shape_qualified(
             batch_width > 0 && batch_width <= 8 && verify_width == 2
         }
     }
+}
+
+pub(crate) fn sequential_prompt_lookup_verify_qualified(
+    profile: ExactBatchedVerifyProfile,
+    context_tokens: usize,
+) -> bool {
+    // The same Affine4 counterexample persists with chained transactional Q1 verify.
+    profile != ExactBatchedVerifyProfile::Affine4 || context_tokens <= 1_024
 }
 
 pub(crate) fn project_positions_isolated_on(
@@ -203,7 +212,7 @@ mod tests {
         assert!(exact_batched_verify_qualified(
             ExactBatchedVerifyProfile::Affine4,
             8,
-            4096,
+            1024,
             5
         ));
         assert!(!exact_batched_verify_qualified(
@@ -215,8 +224,20 @@ mod tests {
         assert!(!exact_batched_verify_qualified(
             ExactBatchedVerifyProfile::Affine4,
             8,
-            4097,
+            1025,
             5
+        ));
+        assert!(sequential_prompt_lookup_verify_qualified(
+            ExactBatchedVerifyProfile::Affine4,
+            1_024
+        ));
+        assert!(!sequential_prompt_lookup_verify_qualified(
+            ExactBatchedVerifyProfile::Affine4,
+            1_025
+        ));
+        assert!(sequential_prompt_lookup_verify_qualified(
+            ExactBatchedVerifyProfile::Affine5Dense,
+            4_096
         ));
         for profile in [
             ExactBatchedVerifyProfile::Affine5Dense,

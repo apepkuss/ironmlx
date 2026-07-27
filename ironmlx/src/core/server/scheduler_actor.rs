@@ -316,6 +316,10 @@ fn duration_ns(duration: Duration) -> u64 {
     duration.as_nanos().try_into().unwrap_or(u64::MAX)
 }
 
+fn duration_us(duration: Duration) -> u64 {
+    duration.as_micros().try_into().unwrap_or(u64::MAX)
+}
+
 fn rolling_profile_queue_wait_ms(queued_at: Instant, now: Instant) -> f64 {
     rolling_profile_elapsed_ms(queued_at, now)
 }
@@ -588,6 +592,20 @@ impl SchedulerActorMtpCounters {
         stats.qualification_profile_writes = qualification.profile_writes;
         stats.qualification_profile_write_drops = qualification.profile_write_drops;
     }
+
+    fn store_prompt_lookup_hybrid_stats(&self, hybrid: PromptLookupHybridStats) {
+        let mut published = self
+            .prompt_lookup_published_stats
+            .lock()
+            .expect("PromptLookup published stats mutex poisoned");
+        let stats = published.get_or_insert_default();
+        stats.hybrid_neural_windows = hybrid.neural_windows;
+        stats.hybrid_lookup_windows = hybrid.lookup_windows;
+        stats.hybrid_source_switches = hybrid.source_switches;
+        stats.hybrid_lookup_miss_fallbacks = hybrid.lookup_miss_fallbacks;
+        stats.hybrid_neural_rebases = hybrid.neural_rebases;
+        stats.hybrid_neural_rebase_us = hybrid.neural_rebase_us;
+    }
 }
 
 trait SchedulerActorMtpMode<M>
@@ -677,6 +695,55 @@ struct PromptLookupMeasuredCycle {
     stats_before: PromptLookupStats,
 }
 
+#[derive(Debug, Default)]
+struct PromptLookupEpisode {
+    regimes: Vec<PromptLookupQualificationRegime>,
+    committed_tokens: usize,
+}
+
+impl PromptLookupEpisode {
+    fn record(&mut self, regime: PromptLookupQualificationRegime, committed_tokens: usize) {
+        if !self.regimes.contains(&regime) {
+            self.regimes.push(regime);
+        }
+        self.committed_tokens = self.committed_tokens.saturating_add(committed_tokens);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HybridDraftSource {
+    Neural,
+    PromptLookup,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct PromptLookupHybridStats {
+    neural_windows: u64,
+    lookup_windows: u64,
+    source_switches: u64,
+    lookup_miss_fallbacks: u64,
+    neural_rebases: u64,
+    neural_rebase_us: u64,
+}
+
+struct SchedulerActorMtpPromptLookupHybrid<H> {
+    neural: SchedulerActorMtp<H>,
+    prompt_lookup: SchedulerActorPromptLookup,
+    current_source: Option<HybridDraftSource>,
+    measured_cycle: Option<PromptLookupMeasuredCycle>,
+    stats: PromptLookupHybridStats,
+}
+
+struct SchedulerActorGemma4PromptLookupHybrid {
+    neural: SchedulerActorGemma4Drafter,
+    prompt_lookup: SchedulerActorPromptLookup,
+    current_source: Option<HybridDraftSource>,
+    neural_dirty: bool,
+    measured_cycle: Option<PromptLookupMeasuredCycle>,
+    lookup_episode: Option<PromptLookupEpisode>,
+    stats: PromptLookupHybridStats,
+}
+
 struct SchedulerActorMtp<H> {
     mtp: H,
     cfg: MtpSpeculativeConfig,
@@ -706,6 +773,42 @@ impl<H> SchedulerActorMtp<H> {
                 max_draft_tokens: mtp_draft_tokens,
             },
         }
+    }
+}
+
+impl<H> SchedulerActorMtpPromptLookupHybrid<H> {
+    fn new(
+        mtp: H,
+        mtp_draft_tokens: usize,
+        prompt_lookup: PromptLookupConfig,
+        qualification: PromptLookupQualificationRuntimeConfig,
+    ) -> Result<Self> {
+        Ok(Self {
+            neural: SchedulerActorMtp::new(mtp, mtp_draft_tokens),
+            prompt_lookup: SchedulerActorPromptLookup::new(prompt_lookup, qualification)?,
+            current_source: None,
+            measured_cycle: None,
+            stats: PromptLookupHybridStats::default(),
+        })
+    }
+}
+
+impl SchedulerActorGemma4PromptLookupHybrid {
+    fn new(
+        drafter: Arc<Mutex<crate::models::gemma4::Gemma4AssistantModel>>,
+        mtp_draft_tokens: usize,
+        prompt_lookup: PromptLookupConfig,
+        qualification: PromptLookupQualificationRuntimeConfig,
+    ) -> Result<Self> {
+        Ok(Self {
+            neural: SchedulerActorGemma4Drafter::new(drafter, mtp_draft_tokens),
+            prompt_lookup: SchedulerActorPromptLookup::new(prompt_lookup, qualification)?,
+            current_source: None,
+            neural_dirty: false,
+            measured_cycle: None,
+            lookup_episode: None,
+            stats: PromptLookupHybridStats::default(),
+        })
     }
 }
 
@@ -1127,6 +1230,240 @@ where
     }
 }
 
+impl<M> SchedulerActorMtpMode<M> for SchedulerActorMtpPromptLookupHybrid<M::MtpHead>
+where
+    M: Model + DenseVlMethods + MtpSpeculativeModel,
+{
+    type MidAdmitHandle = SchedulerActorMtpMidAdmitHandle;
+
+    fn can_start_rolling_mid_admit(&self, sched: &Scheduler<M>) -> bool {
+        self.measured_cycle.is_none()
+            && sched.mtp_at_batch_window_boundary()
+            && sched.prompt_lookup_can_start_rolling_mid_admit()
+    }
+
+    fn mid_admit_request_id(handle: &Self::MidAdmitHandle) -> RequestId {
+        <SchedulerActorMtp<M::MtpHead> as SchedulerActorMtpMode<M>>::mid_admit_request_id(handle)
+    }
+
+    fn mid_admit_chunk_start(handle: &Self::MidAdmitHandle) -> i32 {
+        <SchedulerActorMtp<M::MtpHead> as SchedulerActorMtpMode<M>>::mid_admit_chunk_start(handle)
+    }
+
+    fn mid_admit_prompt_len(handle: &Self::MidAdmitHandle) -> i32 {
+        <SchedulerActorMtp<M::MtpHead> as SchedulerActorMtpMode<M>>::mid_admit_prompt_len(handle)
+    }
+
+    fn mid_admit_chunk_size(handle: &Self::MidAdmitHandle) -> i32 {
+        <SchedulerActorMtp<M::MtpHead> as SchedulerActorMtpMode<M>>::mid_admit_chunk_size(handle)
+    }
+
+    fn set_mid_admit_chunk_size(handle: &mut Self::MidAdmitHandle, chunk_size: i32) {
+        <SchedulerActorMtp<M::MtpHead> as SchedulerActorMtpMode<M>>::set_mid_admit_chunk_size(
+            handle, chunk_size,
+        );
+    }
+
+    fn mid_admit_decode_cadence_mid_chunk_cap(handle: &Self::MidAdmitHandle) -> usize {
+        <SchedulerActorMtp<M::MtpHead> as SchedulerActorMtpMode<M>>::mid_admit_decode_cadence_mid_chunk_cap(handle)
+    }
+
+    fn prefill_admitted(
+        &mut self,
+        sched: &mut Scheduler<M>,
+        model: &M,
+        counters: &SchedulerActorMtpCounters,
+    ) -> Result<Vec<StepEvent>> {
+        let events = if sched.mtp_batch_active_greedy_eligible() {
+            counters.mtp_prefill_count.fetch_add(1, Ordering::Relaxed);
+            let events =
+                sched.prefill_admitted_mtp_batch(model, &self.neural.mtp, self.neural.cfg)?;
+            counters.store_stats(sched.mtp_stats());
+            events
+        } else {
+            counters
+                .mtp_prefill_fallback_count
+                .fetch_add(1, Ordering::Relaxed);
+            sched.prefill_admitted(model)?
+        };
+        if sched.mtp_stats().is_some() {
+            sched.initialize_prompt_lookup_for_active(self.prompt_lookup.cfg)?;
+            self.current_source = Some(HybridDraftSource::Neural);
+            self.measured_cycle = None;
+            self.prompt_lookup.publish_stats(sched, counters);
+            counters.store_prompt_lookup_hybrid_stats(self.stats);
+        }
+        Ok(events)
+    }
+
+    fn step(
+        &mut self,
+        sched: &mut Scheduler<M>,
+        model: &M,
+        counters: &SchedulerActorMtpCounters,
+        admission_pending: bool,
+    ) -> Result<Vec<StepEvent>> {
+        if sched.mtp_stats().is_none() {
+            return sched.step(model);
+        }
+
+        let mut source = self.current_source.unwrap_or(HybridDraftSource::Neural);
+        let at_boundary = match source {
+            HybridDraftSource::Neural => sched.mtp_at_batch_window_boundary(),
+            HybridDraftSource::PromptLookup => sched.prompt_lookup_can_start_rolling_mid_admit(),
+        };
+        let stats_before = sched.prompt_lookup_stats().unwrap_or_default();
+        let regime = sched.prompt_lookup_qualification_regime();
+
+        if self.measured_cycle.is_none() && at_boundary {
+            let requested = if admission_pending {
+                PromptLookupCostAction::Ordinary
+            } else {
+                regime
+                    .map(|regime| self.prompt_lookup.cost_controller.next_action(regime))
+                    .unwrap_or(PromptLookupCostAction::Ordinary)
+            };
+            let lookup_available = if requested == PromptLookupCostAction::Lookup {
+                let has_drafts = sched.prepare_prompt_lookup_batch_window()?;
+                let verify_eligible =
+                    has_drafts && sched.prompt_lookup_prepared_window_verify_eligible(model)?;
+                if has_drafts && !verify_eligible {
+                    if let Some(regime) = regime {
+                        self.prompt_lookup
+                            .cost_controller
+                            .record_lookup_ineligible(regime);
+                    }
+                }
+                verify_eligible
+            } else {
+                sched.discard_prepared_prompt_lookup_window();
+                false
+            };
+            source = if requested == PromptLookupCostAction::Lookup && lookup_available {
+                HybridDraftSource::PromptLookup
+            } else {
+                if requested == PromptLookupCostAction::Lookup && !lookup_available {
+                    self.stats.lookup_miss_fallbacks =
+                        self.stats.lookup_miss_fallbacks.saturating_add(1);
+                }
+                sched.discard_prepared_prompt_lookup_window();
+                HybridDraftSource::Neural
+            };
+            if self
+                .current_source
+                .is_some_and(|previous| previous != source)
+            {
+                self.stats.source_switches = self.stats.source_switches.saturating_add(1);
+            }
+            self.current_source = Some(source);
+        }
+
+        let regime = regime.or_else(|| sched.prompt_lookup_qualification_regime());
+        if self.measured_cycle.is_none() {
+            if let Some(regime) = regime {
+                self.measured_cycle = Some(PromptLookupMeasuredCycle {
+                    regime,
+                    elapsed_ns: 0,
+                    committed_tokens: 0,
+                    stats_before,
+                });
+            }
+        }
+
+        counters.mtp_step_count.fetch_add(1, Ordering::Relaxed);
+        let started = Instant::now();
+        let events = match source {
+            HybridDraftSource::Neural => {
+                let events = sched.step_mtp_batch_without_postfill(model, &self.neural.mtp)?;
+                sched.commit_prompt_lookup_events(&events)?;
+                counters.store_stats(sched.mtp_stats());
+                events
+            }
+            HybridDraftSource::PromptLookup => {
+                sched.step_prompt_lookup_with_mtp_verify(model, &self.neural.mtp)?
+            }
+        };
+        let elapsed_ns = duration_ns(started.elapsed());
+        if let Some(cycle) = self.measured_cycle.as_mut() {
+            cycle.elapsed_ns = cycle.elapsed_ns.saturating_add(elapsed_ns);
+            cycle.committed_tokens = cycle.committed_tokens.saturating_add(events.len());
+        }
+
+        let completed = match source {
+            HybridDraftSource::Neural => sched.mtp_at_batch_window_boundary(),
+            HybridDraftSource::PromptLookup => sched.prompt_lookup_can_start_rolling_mid_admit(),
+        };
+        if completed {
+            match source {
+                HybridDraftSource::Neural => {
+                    self.stats.neural_windows = self.stats.neural_windows.saturating_add(1);
+                }
+                HybridDraftSource::PromptLookup => {
+                    self.stats.lookup_windows = self.stats.lookup_windows.saturating_add(1);
+                }
+            }
+            if let Some(cycle) = self.measured_cycle.take() {
+                let action = match source {
+                    HybridDraftSource::Neural => PromptLookupCostAction::Ordinary,
+                    HybridDraftSource::PromptLookup => PromptLookupCostAction::Lookup,
+                };
+                let stats_after = sched.prompt_lookup_stats().unwrap_or_default();
+                self.prompt_lookup.cost_controller.record_sample(
+                    cycle.regime,
+                    action,
+                    cycle.elapsed_ns,
+                    cycle.committed_tokens,
+                    stats_after.saturating_delta_since(cycle.stats_before),
+                );
+            }
+        }
+
+        self.prompt_lookup.publish_stats(sched, counters);
+        counters.store_prompt_lookup_hybrid_stats(self.stats);
+        Ok(events)
+    }
+
+    fn begin_mid_admit(
+        &mut self,
+        sched: &mut Scheduler<M>,
+        model: &M,
+        request: GenerateRequest,
+    ) -> Result<Self::MidAdmitHandle> {
+        anyhow::ensure!(
+            request.sampler.is_pipelinable(),
+            "PromptLookup/neural hybrid requires greedy sampling"
+        );
+        self.neural.begin_mid_admit(sched, model, request)
+    }
+
+    fn advance_mid_admit_chunk(
+        &mut self,
+        sched: &mut Scheduler<M>,
+        model: &M,
+        handle: &mut Self::MidAdmitHandle,
+    ) -> Result<bool> {
+        self.neural.advance_mid_admit_chunk(sched, model, handle)
+    }
+
+    fn finalize_mid_admit(
+        &mut self,
+        sched: &mut Scheduler<M>,
+        model: &M,
+        handle: Self::MidAdmitHandle,
+        counters: &SchedulerActorMtpCounters,
+    ) -> Result<(RequestId, StepEvent)> {
+        let result = self
+            .neural
+            .finalize_mid_admit(sched, model, handle, counters)?;
+        sched.register_prompt_lookup_request(result.0, self.prompt_lookup.cfg)?;
+        self.current_source = Some(HybridDraftSource::Neural);
+        self.measured_cycle = None;
+        self.prompt_lookup.publish_stats(sched, counters);
+        counters.store_prompt_lookup_hybrid_stats(self.stats);
+        Ok(result)
+    }
+}
+
 impl SchedulerActorMtpMode<crate::models::Gemma4Model> for SchedulerActorGemma4Drafter {
     type MidAdmitHandle = SchedulerActorGemma4DrafterMidAdmitHandle;
 
@@ -1269,6 +1606,283 @@ impl SchedulerActorMtpMode<crate::models::Gemma4Model> for SchedulerActorGemma4D
                 result
             }
         }
+    }
+}
+
+impl SchedulerActorMtpMode<crate::models::Gemma4Model> for SchedulerActorGemma4PromptLookupHybrid {
+    type MidAdmitHandle = SchedulerActorGemma4DrafterMidAdmitHandle;
+
+    fn can_start_rolling_mid_admit(&self, sched: &Scheduler<crate::models::Gemma4Model>) -> bool {
+        self.measured_cycle.is_none()
+            && sched.gemma4_drafter_at_batch_window_boundary()
+            && sched.prompt_lookup_can_start_rolling_mid_admit()
+    }
+
+    fn mid_admit_request_id(handle: &Self::MidAdmitHandle) -> RequestId {
+        <SchedulerActorGemma4Drafter as SchedulerActorMtpMode<
+            crate::models::Gemma4Model,
+        >>::mid_admit_request_id(handle)
+    }
+
+    fn mid_admit_chunk_start(handle: &Self::MidAdmitHandle) -> i32 {
+        <SchedulerActorGemma4Drafter as SchedulerActorMtpMode<
+            crate::models::Gemma4Model,
+        >>::mid_admit_chunk_start(handle)
+    }
+
+    fn mid_admit_prompt_len(handle: &Self::MidAdmitHandle) -> i32 {
+        <SchedulerActorGemma4Drafter as SchedulerActorMtpMode<
+            crate::models::Gemma4Model,
+        >>::mid_admit_prompt_len(handle)
+    }
+
+    fn mid_admit_chunk_size(handle: &Self::MidAdmitHandle) -> i32 {
+        <SchedulerActorGemma4Drafter as SchedulerActorMtpMode<
+            crate::models::Gemma4Model,
+        >>::mid_admit_chunk_size(handle)
+    }
+
+    fn set_mid_admit_chunk_size(handle: &mut Self::MidAdmitHandle, chunk_size: i32) {
+        <SchedulerActorGemma4Drafter as SchedulerActorMtpMode<
+            crate::models::Gemma4Model,
+        >>::set_mid_admit_chunk_size(handle, chunk_size);
+    }
+
+    fn mid_admit_decode_cadence_mid_chunk_cap(handle: &Self::MidAdmitHandle) -> usize {
+        <SchedulerActorGemma4Drafter as SchedulerActorMtpMode<
+            crate::models::Gemma4Model,
+        >>::mid_admit_decode_cadence_mid_chunk_cap(handle)
+    }
+
+    fn prefill_admitted(
+        &mut self,
+        sched: &mut Scheduler<crate::models::Gemma4Model>,
+        model: &crate::models::Gemma4Model,
+        counters: &SchedulerActorMtpCounters,
+    ) -> Result<Vec<StepEvent>> {
+        let events = self.neural.prefill_admitted(sched, model, counters)?;
+        if sched.gemma4_drafter_stats().is_some() {
+            sched.initialize_prompt_lookup_for_active(self.prompt_lookup.cfg)?;
+            self.current_source = Some(HybridDraftSource::Neural);
+            self.neural_dirty = false;
+            self.measured_cycle = None;
+            self.lookup_episode = None;
+            self.prompt_lookup.publish_stats(sched, counters);
+            counters.store_prompt_lookup_hybrid_stats(self.stats);
+        }
+        Ok(events)
+    }
+
+    fn step(
+        &mut self,
+        sched: &mut Scheduler<crate::models::Gemma4Model>,
+        model: &crate::models::Gemma4Model,
+        counters: &SchedulerActorMtpCounters,
+        admission_pending: bool,
+    ) -> Result<Vec<StepEvent>> {
+        if sched.gemma4_drafter_stats().is_none() {
+            return sched.step(model);
+        }
+
+        let mut source = self.current_source.unwrap_or(HybridDraftSource::Neural);
+        let at_boundary = match source {
+            HybridDraftSource::Neural => sched.gemma4_drafter_at_batch_window_boundary(),
+            HybridDraftSource::PromptLookup => sched.prompt_lookup_can_start_rolling_mid_admit(),
+        };
+        let stats_before = sched.prompt_lookup_stats().unwrap_or_default();
+        let regime = sched.prompt_lookup_qualification_regime();
+
+        if self.measured_cycle.is_none() && at_boundary {
+            let requested = if admission_pending {
+                PromptLookupCostAction::Ordinary
+            } else {
+                regime
+                    .map(|regime| self.prompt_lookup.cost_controller.next_action(regime))
+                    .unwrap_or(PromptLookupCostAction::Ordinary)
+            };
+            let lookup_available = if requested == PromptLookupCostAction::Lookup {
+                let has_drafts = sched.prepare_prompt_lookup_batch_window()?;
+                let verify_eligible =
+                    has_drafts && sched.prompt_lookup_prepared_window_verify_eligible(model)?;
+                if has_drafts && !verify_eligible {
+                    if let Some(regime) = regime {
+                        self.prompt_lookup
+                            .cost_controller
+                            .record_lookup_ineligible(regime);
+                    }
+                }
+                verify_eligible
+            } else {
+                sched.discard_prepared_prompt_lookup_window();
+                false
+            };
+            source = if requested == PromptLookupCostAction::Lookup && lookup_available {
+                HybridDraftSource::PromptLookup
+            } else {
+                if requested == PromptLookupCostAction::Lookup && !lookup_available {
+                    self.stats.lookup_miss_fallbacks =
+                        self.stats.lookup_miss_fallbacks.saturating_add(1);
+                }
+                sched.discard_prepared_prompt_lookup_window();
+                HybridDraftSource::Neural
+            };
+            if self
+                .current_source
+                .is_some_and(|previous| previous != source)
+            {
+                self.stats.source_switches = self.stats.source_switches.saturating_add(1);
+            }
+            self.current_source = Some(source);
+            if source == HybridDraftSource::Neural && self.neural_dirty {
+                let rebase_started = Instant::now();
+                let drafter = self.neural.drafter.blocking_lock();
+                sched.rebase_gemma4_drafter_from_committed_history(model, &drafter)?;
+                let rebase_elapsed = rebase_started.elapsed();
+                self.stats.neural_rebases = self.stats.neural_rebases.saturating_add(1);
+                self.stats.neural_rebase_us = self
+                    .stats
+                    .neural_rebase_us
+                    .saturating_add(duration_us(rebase_elapsed));
+                if let Some(episode) = self.lookup_episode.take() {
+                    self.prompt_lookup.cost_controller.record_lookup_transition(
+                        &episode.regimes,
+                        duration_ns(rebase_elapsed),
+                        episode.committed_tokens,
+                    );
+                }
+                self.neural_dirty = false;
+            }
+        }
+
+        let regime = regime.or_else(|| sched.prompt_lookup_qualification_regime());
+        if self.measured_cycle.is_none() {
+            if let Some(regime) = regime {
+                self.measured_cycle = Some(PromptLookupMeasuredCycle {
+                    regime,
+                    elapsed_ns: 0,
+                    committed_tokens: 0,
+                    stats_before,
+                });
+            }
+        }
+
+        counters.mtp_step_count.fetch_add(1, Ordering::Relaxed);
+        let started = Instant::now();
+        let events = match source {
+            HybridDraftSource::Neural => {
+                let drafter = self.neural.drafter.blocking_lock();
+                let events = sched.step_gemma4_drafter_batch_without_postfill(model, &drafter)?;
+                drop(drafter);
+                sched.commit_prompt_lookup_events(&events)?;
+                counters.store_stats(sched.gemma4_drafter_stats());
+                events
+            }
+            HybridDraftSource::PromptLookup => sched.step_prompt_lookup_batch_window(model)?,
+        };
+        let elapsed_ns = duration_ns(started.elapsed());
+        if let Some(cycle) = self.measured_cycle.as_mut() {
+            cycle.elapsed_ns = cycle.elapsed_ns.saturating_add(elapsed_ns);
+            cycle.committed_tokens = cycle.committed_tokens.saturating_add(events.len());
+        }
+
+        let completed = match source {
+            HybridDraftSource::Neural => sched.gemma4_drafter_at_batch_window_boundary(),
+            HybridDraftSource::PromptLookup => sched.prompt_lookup_can_start_rolling_mid_admit(),
+        };
+        if completed {
+            match source {
+                HybridDraftSource::Neural => {
+                    self.stats.neural_windows = self.stats.neural_windows.saturating_add(1);
+                }
+                HybridDraftSource::PromptLookup => {
+                    self.stats.lookup_windows = self.stats.lookup_windows.saturating_add(1);
+                    self.neural_dirty = true;
+                }
+            }
+            if let Some(cycle) = self.measured_cycle.take() {
+                let action = match source {
+                    HybridDraftSource::Neural => PromptLookupCostAction::Ordinary,
+                    HybridDraftSource::PromptLookup => PromptLookupCostAction::Lookup,
+                };
+                let stats_after = sched.prompt_lookup_stats().unwrap_or_default();
+                self.prompt_lookup.cost_controller.record_sample(
+                    cycle.regime,
+                    action,
+                    cycle.elapsed_ns,
+                    cycle.committed_tokens,
+                    stats_after.saturating_delta_since(cycle.stats_before),
+                );
+                if source == HybridDraftSource::PromptLookup {
+                    self.lookup_episode
+                        .get_or_insert_with(PromptLookupEpisode::default)
+                        .record(cycle.regime, cycle.committed_tokens);
+                }
+            }
+        }
+
+        self.prompt_lookup.publish_stats(sched, counters);
+        counters.store_prompt_lookup_hybrid_stats(self.stats);
+        Ok(events)
+    }
+
+    fn begin_mid_admit(
+        &mut self,
+        sched: &mut Scheduler<crate::models::Gemma4Model>,
+        model: &crate::models::Gemma4Model,
+        request: GenerateRequest,
+    ) -> Result<Self::MidAdmitHandle> {
+        anyhow::ensure!(
+            request.sampler.is_pipelinable(),
+            "PromptLookup/neural hybrid requires greedy sampling"
+        );
+        self.neural.begin_mid_admit(sched, model, request)
+    }
+
+    fn advance_mid_admit_chunk(
+        &mut self,
+        sched: &mut Scheduler<crate::models::Gemma4Model>,
+        model: &crate::models::Gemma4Model,
+        handle: &mut Self::MidAdmitHandle,
+    ) -> Result<bool> {
+        self.neural.advance_mid_admit_chunk(sched, model, handle)
+    }
+
+    fn finalize_mid_admit(
+        &mut self,
+        sched: &mut Scheduler<crate::models::Gemma4Model>,
+        model: &crate::models::Gemma4Model,
+        handle: Self::MidAdmitHandle,
+        counters: &SchedulerActorMtpCounters,
+    ) -> Result<(RequestId, StepEvent)> {
+        let result = self
+            .neural
+            .finalize_mid_admit(sched, model, handle, counters)?;
+        sched.register_prompt_lookup_request(result.0, self.prompt_lookup.cfg)?;
+        if self.neural_dirty {
+            let rebase_started = Instant::now();
+            let drafter = self.neural.drafter.blocking_lock();
+            sched.rebase_gemma4_drafter_from_committed_history(model, &drafter)?;
+            let rebase_elapsed = rebase_started.elapsed();
+            self.stats.neural_rebases = self.stats.neural_rebases.saturating_add(1);
+            self.stats.neural_rebase_us = self
+                .stats
+                .neural_rebase_us
+                .saturating_add(duration_us(rebase_elapsed));
+            if let Some(episode) = self.lookup_episode.take() {
+                self.prompt_lookup.cost_controller.record_lookup_transition(
+                    &episode.regimes,
+                    duration_ns(rebase_elapsed),
+                    episode.committed_tokens,
+                );
+            }
+            self.neural_dirty = false;
+        }
+        self.current_source = Some(HybridDraftSource::Neural);
+        self.measured_cycle = None;
+        self.lookup_episode = None;
+        self.prompt_lookup.publish_stats(sched, counters);
+        counters.store_prompt_lookup_hybrid_stats(self.stats);
+        Ok(result)
     }
 }
 
@@ -1655,6 +2269,51 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_scheduler_actor_with_mtp_prompt_lookup<M>(
+    model: Arc<Mutex<M>>,
+    mtp: M::MtpHead,
+    mtp_draft_tokens: usize,
+    prompt_lookup: PromptLookupConfig,
+    qualification: PromptLookupQualificationRuntimeConfig,
+    b_max: usize,
+    admission_deadline: Duration,
+    admission_queue_max: usize,
+    effective_cap_max: usize,
+    decode_cadence_mid_chunk_cap: usize,
+    meta: crate::core::memory_budget::ModelMeta,
+    paged_prefix_cache: Option<PagedPrefixCacheConfig>,
+    prefix_lru_cache: Option<PrefixLruCacheConfig>,
+    active_kv_offload: ActiveKvOffloadConfig,
+) -> Result<SchedulerActorHandle>
+where
+    M: Model + DenseVlMethods + MtpSpeculativeModel + Send + 'static,
+    M::MtpHead: Send + 'static,
+{
+    let mtp_draft_tokens =
+        effective_mtp_draft_tokens_for_paged_prefix(mtp_draft_tokens, paged_prefix_cache.is_some());
+    let mode = SchedulerActorMtpPromptLookupHybrid::new(
+        mtp,
+        mtp_draft_tokens,
+        prompt_lookup,
+        qualification,
+    )?;
+    Ok(spawn_scheduler_actor_with_mode(
+        model,
+        mode,
+        b_max,
+        admission_deadline,
+        admission_queue_max,
+        effective_cap_max,
+        decode_cadence_mid_chunk_cap,
+        meta,
+        paged_prefix_cache,
+        prefix_lru_cache,
+        AdaptiveAdmissionPolicy::qwen_mtp(),
+        active_kv_offload,
+    )?)
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_scheduler_actor_with_prompt_lookup<M>(
     model: Arc<Mutex<M>>,
     cfg: PromptLookupConfig,
@@ -1754,6 +2413,45 @@ pub fn spawn_scheduler_actor_with_gemma4_drafter(
         AdaptiveAdmissionPolicy::gemma4_drafter(),
         ActiveKvOffloadConfig::disabled(),
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_scheduler_actor_with_gemma4_drafter_prompt_lookup(
+    model: Arc<Mutex<crate::models::Gemma4Model>>,
+    drafter: Arc<Mutex<crate::models::gemma4::Gemma4AssistantModel>>,
+    mtp_draft_tokens: usize,
+    prompt_lookup: PromptLookupConfig,
+    qualification: PromptLookupQualificationRuntimeConfig,
+    b_max: usize,
+    admission_deadline: Duration,
+    admission_queue_max: usize,
+    effective_cap_max: usize,
+    decode_cadence_mid_chunk_cap: usize,
+    meta: crate::core::memory_budget::ModelMeta,
+    paged_prefix_cache: Option<PagedPrefixCacheConfig>,
+    prefix_lru_cache: Option<PrefixLruCacheConfig>,
+    active_kv_offload: ActiveKvOffloadConfig,
+) -> Result<SchedulerActorHandle> {
+    let mode = SchedulerActorGemma4PromptLookupHybrid::new(
+        drafter,
+        mtp_draft_tokens,
+        prompt_lookup,
+        qualification,
+    )?;
+    Ok(spawn_scheduler_actor_with_mode(
+        model,
+        mode,
+        b_max,
+        admission_deadline,
+        admission_queue_max,
+        effective_cap_max,
+        decode_cadence_mid_chunk_cap,
+        meta,
+        paged_prefix_cache,
+        prefix_lru_cache,
+        AdaptiveAdmissionPolicy::gemma4_drafter(),
+        active_kv_offload,
+    )?)
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -394,6 +394,19 @@ impl Model for Qwen36MoeModel {
         )
     }
 
+    fn supports_sequential_prompt_lookup_verify(
+        &self,
+        batch_width: usize,
+        context_tokens: usize,
+        verify_width: usize,
+    ) -> bool {
+        self.inner.supports_sequential_prompt_lookup_verify(
+            batch_width,
+            context_tokens,
+            verify_width,
+        )
+    }
+
     fn model_meta(&self) -> ModelMeta {
         Qwen36MoeModel::model_meta(self)
     }

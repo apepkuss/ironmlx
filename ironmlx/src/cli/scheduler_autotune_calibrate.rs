@@ -262,9 +262,12 @@ fn default_candidate_configs(
     runtime_context: &SchedulerAutotuneRuntimeContext,
 ) -> Vec<SchedulerAutotuneProfileConfig> {
     let b_max_values: &[usize] = match runtime_context.speculative.mode {
-        SchedulerSpeculativeMode::QwenMtp => &[1, 2],
+        SchedulerSpeculativeMode::QwenMtp | SchedulerSpeculativeMode::QwenMtpPromptLookup => {
+            &[1, 2]
+        }
         SchedulerSpeculativeMode::Disabled
         | SchedulerSpeculativeMode::Gemma4Drafter
+        | SchedulerSpeculativeMode::Gemma4DrafterPromptLookup
         | SchedulerSpeculativeMode::PromptLookup => &[1, 2, 4],
     };
     let mut candidates = Vec::new();

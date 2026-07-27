@@ -12,10 +12,11 @@ use crate::core::scheduler_autotune::SchedulerAutotuneRuntimeProfile;
 use crate::Result;
 
 const POSITIONS_PER_NGRAM: usize = 2;
-const QUALIFICATION_SCHEMA_VERSION: u32 = 2;
+const QUALIFICATION_SCHEMA_VERSION: u32 = 4;
 const QUALIFICATION_BASELINE_SAMPLES: usize = 8;
 const QUALIFICATION_PROBE_SAMPLES: usize = 8;
 const QUALIFICATION_MIN_GAIN_BPS: u64 = 300;
+const QUALIFICATION_MAX_REPROBE_OVERHEAD_BPS: u64 = 300;
 const QUALIFICATION_MULTI_BATCH_INITIAL_DELAY_TOKENS: u64 = 512;
 const QUALIFICATION_REJECTED_INITIAL_COOLDOWN_TOKENS: u64 = 512;
 const QUALIFICATION_REJECTED_MAX_COOLDOWN_TOKENS: u64 = 32 * 1_024;
@@ -105,6 +106,9 @@ pub struct PromptLookupStats {
     pub verify_accept_host_sync_us: u64,
     pub rollback_count: u64,
     pub rollback_us: u64,
+    pub mtp_shadow_commit_windows: u64,
+    pub mtp_shadow_commit_tokens: u64,
+    pub mtp_shadow_commit_us: u64,
     pub miss_fast_path_steps: u64,
     pub ordinary_cost_samples: u64,
     pub lookup_cost_samples: u64,
@@ -116,6 +120,12 @@ pub struct PromptLookupStats {
     pub qualification_profile_loads: u64,
     pub qualification_profile_writes: u64,
     pub qualification_profile_write_drops: u64,
+    pub hybrid_neural_windows: u64,
+    pub hybrid_lookup_windows: u64,
+    pub hybrid_source_switches: u64,
+    pub hybrid_lookup_miss_fallbacks: u64,
+    pub hybrid_neural_rebases: u64,
+    pub hybrid_neural_rebase_us: u64,
 }
 
 impl PromptLookupStats {
@@ -155,6 +165,15 @@ impl PromptLookupStats {
                 .saturating_sub(before.verify_accept_host_sync_us),
             rollback_count: self.rollback_count.saturating_sub(before.rollback_count),
             rollback_us: self.rollback_us.saturating_sub(before.rollback_us),
+            mtp_shadow_commit_windows: self
+                .mtp_shadow_commit_windows
+                .saturating_sub(before.mtp_shadow_commit_windows),
+            mtp_shadow_commit_tokens: self
+                .mtp_shadow_commit_tokens
+                .saturating_sub(before.mtp_shadow_commit_tokens),
+            mtp_shadow_commit_us: self
+                .mtp_shadow_commit_us
+                .saturating_sub(before.mtp_shadow_commit_us),
             miss_fast_path_steps: self
                 .miss_fast_path_steps
                 .saturating_sub(before.miss_fast_path_steps),
@@ -182,6 +201,24 @@ impl PromptLookupStats {
             qualification_profile_write_drops: self
                 .qualification_profile_write_drops
                 .saturating_sub(before.qualification_profile_write_drops),
+            hybrid_neural_windows: self
+                .hybrid_neural_windows
+                .saturating_sub(before.hybrid_neural_windows),
+            hybrid_lookup_windows: self
+                .hybrid_lookup_windows
+                .saturating_sub(before.hybrid_lookup_windows),
+            hybrid_source_switches: self
+                .hybrid_source_switches
+                .saturating_sub(before.hybrid_source_switches),
+            hybrid_lookup_miss_fallbacks: self
+                .hybrid_lookup_miss_fallbacks
+                .saturating_sub(before.hybrid_lookup_miss_fallbacks),
+            hybrid_neural_rebases: self
+                .hybrid_neural_rebases
+                .saturating_sub(before.hybrid_neural_rebases),
+            hybrid_neural_rebase_us: self
+                .hybrid_neural_rebase_us
+                .saturating_sub(before.hybrid_neural_rebase_us),
         }
     }
 
@@ -220,6 +257,15 @@ impl PromptLookupStats {
             .saturating_add(delta.verify_accept_host_sync_us);
         self.rollback_count = self.rollback_count.saturating_add(delta.rollback_count);
         self.rollback_us = self.rollback_us.saturating_add(delta.rollback_us);
+        self.mtp_shadow_commit_windows = self
+            .mtp_shadow_commit_windows
+            .saturating_add(delta.mtp_shadow_commit_windows);
+        self.mtp_shadow_commit_tokens = self
+            .mtp_shadow_commit_tokens
+            .saturating_add(delta.mtp_shadow_commit_tokens);
+        self.mtp_shadow_commit_us = self
+            .mtp_shadow_commit_us
+            .saturating_add(delta.mtp_shadow_commit_us);
         self.miss_fast_path_steps = self
             .miss_fast_path_steps
             .saturating_add(delta.miss_fast_path_steps);
@@ -243,6 +289,24 @@ impl PromptLookupStats {
         self.qualification_profile_write_drops = self
             .qualification_profile_write_drops
             .saturating_add(delta.qualification_profile_write_drops);
+        self.hybrid_neural_windows = self
+            .hybrid_neural_windows
+            .saturating_add(delta.hybrid_neural_windows);
+        self.hybrid_lookup_windows = self
+            .hybrid_lookup_windows
+            .saturating_add(delta.hybrid_lookup_windows);
+        self.hybrid_source_switches = self
+            .hybrid_source_switches
+            .saturating_add(delta.hybrid_source_switches);
+        self.hybrid_lookup_miss_fallbacks = self
+            .hybrid_lookup_miss_fallbacks
+            .saturating_add(delta.hybrid_lookup_miss_fallbacks);
+        self.hybrid_neural_rebases = self
+            .hybrid_neural_rebases
+            .saturating_add(delta.hybrid_neural_rebases);
+        self.hybrid_neural_rebase_us = self
+            .hybrid_neural_rebase_us
+            .saturating_add(delta.hybrid_neural_rebase_us);
     }
 }
 
@@ -271,11 +335,30 @@ impl PromptLookupQualificationRegime {
 pub(crate) struct PromptLookupQualificationRuntimeConfig {
     context_fingerprint: String,
     profile_path: PathBuf,
+    baseline: PromptLookupQualificationBaseline,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PromptLookupQualificationBaseline {
+    Ordinary,
+    QwenMtp,
+    Gemma4Assistant,
 }
 
 impl PromptLookupQualificationRuntimeConfig {
     pub(crate) fn for_scheduler_profile(profile: &SchedulerAutotuneRuntimeProfile) -> Result<Self> {
-        let context_fingerprint = qualification_context_fingerprint(profile)?;
+        Self::for_scheduler_profile_with_baseline(
+            profile,
+            PromptLookupQualificationBaseline::Ordinary,
+        )
+    }
+
+    pub(crate) fn for_scheduler_profile_with_baseline(
+        profile: &SchedulerAutotuneRuntimeProfile,
+        baseline: PromptLookupQualificationBaseline,
+    ) -> Result<Self> {
+        let context_fingerprint = qualification_context_fingerprint(profile, baseline)?;
         let home = dirs::home_dir()
             .context("locating home directory for PromptLookup qualification profiles")?;
         Ok(Self {
@@ -285,6 +368,7 @@ impl PromptLookupQualificationRuntimeConfig {
                 .join("profiles")
                 .join(format!("{context_fingerprint}.json")),
             context_fingerprint,
+            baseline,
         })
     }
 
@@ -293,6 +377,7 @@ impl PromptLookupQualificationRuntimeConfig {
         Self {
             context_fingerprint: context_fingerprint.to_string(),
             profile_path,
+            baseline: PromptLookupQualificationBaseline::Ordinary,
         }
     }
 }
@@ -324,6 +409,7 @@ struct QualificationRegimeState {
     phase: QualificationPhase,
     last_evidence: Option<PromptLookupQualificationEvidence>,
     next_rejected_cooldown_tokens: u64,
+    transition_cost_per_token_ns: u64,
 }
 
 #[derive(Debug)]
@@ -386,6 +472,7 @@ impl PromptLookupQualificationCounters {
 enum PromptLookupQualificationDecision {
     Qualified,
     Rejected,
+    Ineligible,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -394,6 +481,7 @@ struct PromptLookupQualificationEvidence {
     decision: PromptLookupQualificationDecision,
     baseline_cost_per_token_ns: u64,
     lookup_cost_per_token_ns: u64,
+    transition_cost_per_token_ns: u64,
     estimated_gain_bps: i64,
     baseline_samples: usize,
     lookup_samples: usize,
@@ -405,6 +493,7 @@ struct PromptLookupQualificationEvidence {
 struct PromptLookupQualificationProfile {
     schema_version: u32,
     context_fingerprint: String,
+    baseline: PromptLookupQualificationBaseline,
     updated_at_unix_ms: u64,
     entries: Vec<PromptLookupQualificationEvidence>,
 }
@@ -524,7 +613,8 @@ impl PromptLookupCostController {
                                 },
                                 QUALIFICATION_REJECTED_INITIAL_COOLDOWN_TOKENS,
                             ),
-                            PromptLookupQualificationDecision::Rejected => (
+                            PromptLookupQualificationDecision::Rejected
+                            | PromptLookupQualificationDecision::Ineligible => (
                                 QualificationPhase::Rejected {
                                     cooldown_tokens: evidence.rejected_cooldown_tokens,
                                 },
@@ -534,6 +624,7 @@ impl PromptLookupCostController {
                         (
                             evidence.regime,
                             QualificationRegimeState {
+                                transition_cost_per_token_ns: evidence.transition_cost_per_token_ns,
                                 phase,
                                 last_evidence: Some(evidence),
                                 next_rejected_cooldown_tokens,
@@ -593,11 +684,17 @@ impl PromptLookupCostController {
         if committed_tokens == 0 {
             return;
         }
-        let cost_per_token_ns = elapsed_ns / committed_tokens as u64;
         let state = self
             .regimes
             .entry(regime)
             .or_insert_with(|| initial_regime_state(regime));
+        let cost_per_token_ns = (elapsed_ns / committed_tokens as u64).saturating_add(
+            if action == PromptLookupCostAction::Lookup {
+                state.transition_cost_per_token_ns
+            } else {
+                0
+            },
+        );
         let progress_tokens = normalized_progress_tokens(regime, committed_tokens);
         let mut persist = false;
         match &mut state.phase {
@@ -672,7 +769,8 @@ impl PromptLookupCostController {
                     let decision = qualification_decision(baseline, lookup);
                     let rejected_cooldown_tokens = match decision {
                         PromptLookupQualificationDecision::Qualified => 0,
-                        PromptLookupQualificationDecision::Rejected => {
+                        PromptLookupQualificationDecision::Rejected
+                        | PromptLookupQualificationDecision::Ineligible => {
                             state.next_rejected_cooldown_tokens
                         }
                     };
@@ -681,6 +779,7 @@ impl PromptLookupCostController {
                         decision,
                         baseline_cost_per_token_ns: baseline,
                         lookup_cost_per_token_ns: lookup,
+                        transition_cost_per_token_ns: state.transition_cost_per_token_ns,
                         estimated_gain_bps: estimated_gain_bps(baseline, lookup),
                         baseline_samples: QUALIFICATION_BASELINE_SAMPLES,
                         lookup_samples: QUALIFICATION_PROBE_SAMPLES,
@@ -699,7 +798,8 @@ impl PromptLookupCostController {
                                 tokens_until_revalidate: QUALIFICATION_REVALIDATE_TOKENS,
                             }
                         }
-                        PromptLookupQualificationDecision::Rejected => {
+                        PromptLookupQualificationDecision::Rejected
+                        | PromptLookupQualificationDecision::Ineligible => {
                             state.next_rejected_cooldown_tokens =
                                 next_rejected_cooldown(rejected_cooldown_tokens);
                             QualificationPhase::Rejected {
@@ -752,6 +852,7 @@ impl PromptLookupCostController {
                         decision: PromptLookupQualificationDecision::Rejected,
                         baseline_cost_per_token_ns: *baseline_cost_per_token_ns,
                         lookup_cost_per_token_ns: lookup,
+                        transition_cost_per_token_ns: state.transition_cost_per_token_ns,
                         estimated_gain_bps: estimated_gain_bps(*baseline_cost_per_token_ns, lookup),
                         baseline_samples: QUALIFICATION_BASELINE_SAMPLES,
                         lookup_samples: QUALIFICATION_PROBE_SAMPLES,
@@ -803,6 +904,121 @@ impl PromptLookupCostController {
         }
     }
 
+    pub(crate) fn record_lookup_transition(
+        &mut self,
+        regimes: &[PromptLookupQualificationRegime],
+        elapsed_ns: u64,
+        episode_committed_tokens: usize,
+    ) {
+        if regimes.is_empty() || elapsed_ns == 0 || episode_committed_tokens == 0 {
+            return;
+        }
+        let transition_cost_per_token_ns = elapsed_ns / episode_committed_tokens as u64;
+        self.stats.lookup_cost_us = self.stats.lookup_cost_us.saturating_add(elapsed_ns / 1_000);
+        let mut persist = false;
+
+        for regime in regimes {
+            let state = self
+                .regimes
+                .entry(*regime)
+                .or_insert_with(|| initial_regime_state(*regime));
+            let previous_transition_cost = state.transition_cost_per_token_ns;
+            state.transition_cost_per_token_ns =
+                previous_transition_cost.max(transition_cost_per_token_ns);
+            let Some(mut evidence) = state.last_evidence.clone() else {
+                continue;
+            };
+
+            let lookup_execution_cost = evidence
+                .lookup_cost_per_token_ns
+                .saturating_sub(evidence.transition_cost_per_token_ns);
+            evidence.transition_cost_per_token_ns = state.transition_cost_per_token_ns;
+            evidence.lookup_cost_per_token_ns =
+                lookup_execution_cost.saturating_add(state.transition_cost_per_token_ns);
+            evidence.estimated_gain_bps = estimated_gain_bps(
+                evidence.baseline_cost_per_token_ns,
+                evidence.lookup_cost_per_token_ns,
+            );
+            evidence.decision = qualification_decision(
+                evidence.baseline_cost_per_token_ns,
+                evidence.lookup_cost_per_token_ns,
+            );
+
+            let minimum_cooldown = minimum_rejected_cooldown_tokens(
+                *regime,
+                evidence.baseline_cost_per_token_ns,
+                elapsed_ns,
+            );
+            match evidence.decision {
+                PromptLookupQualificationDecision::Qualified => {
+                    evidence.rejected_cooldown_tokens = 0;
+                }
+                PromptLookupQualificationDecision::Rejected
+                | PromptLookupQualificationDecision::Ineligible => {
+                    let current_cooldown = match state.phase {
+                        QualificationPhase::Rejected { cooldown_tokens } => cooldown_tokens,
+                        _ => state.next_rejected_cooldown_tokens,
+                    };
+                    let cooldown_tokens = current_cooldown.max(minimum_cooldown);
+                    evidence.rejected_cooldown_tokens = cooldown_tokens;
+                    state.phase = QualificationPhase::Rejected { cooldown_tokens };
+                    state.next_rejected_cooldown_tokens = state
+                        .next_rejected_cooldown_tokens
+                        .max(next_rejected_cooldown(cooldown_tokens));
+                    self.stats.qualification_changes =
+                        self.stats.qualification_changes.saturating_add(1);
+                }
+            }
+            state.last_evidence = Some(evidence);
+            persist = true;
+        }
+
+        self.refresh_regime_gauges();
+        if persist {
+            self.queue_profile_write();
+        }
+    }
+
+    pub(crate) fn record_lookup_ineligible(&mut self, regime: PromptLookupQualificationRegime) {
+        let state = self
+            .regimes
+            .entry(regime)
+            .or_insert_with(|| initial_regime_state(regime));
+        let baseline_cost_per_token_ns = match &state.phase {
+            QualificationPhase::Probe {
+                baseline_cost_per_token_ns,
+                ..
+            }
+            | QualificationPhase::Qualified {
+                baseline_cost_per_token_ns,
+                ..
+            } => *baseline_cost_per_token_ns,
+            _ => state
+                .last_evidence
+                .as_ref()
+                .map_or(0, |evidence| evidence.baseline_cost_per_token_ns),
+        };
+        state.last_evidence = Some(PromptLookupQualificationEvidence {
+            regime,
+            decision: PromptLookupQualificationDecision::Ineligible,
+            baseline_cost_per_token_ns,
+            lookup_cost_per_token_ns: 0,
+            transition_cost_per_token_ns: 0,
+            estimated_gain_bps: 0,
+            baseline_samples: QUALIFICATION_BASELINE_SAMPLES,
+            lookup_samples: 0,
+            counters: PromptLookupQualificationCounters::default(),
+            rejected_cooldown_tokens: QUALIFICATION_REJECTED_MAX_COOLDOWN_TOKENS,
+        });
+        state.phase = QualificationPhase::Rejected {
+            cooldown_tokens: QUALIFICATION_REJECTED_MAX_COOLDOWN_TOKENS,
+        };
+        state.next_rejected_cooldown_tokens = QUALIFICATION_REJECTED_MAX_COOLDOWN_TOKENS;
+        self.stats.qualification_changes = self.stats.qualification_changes.saturating_add(1);
+        self.refresh_regime_gauges();
+        self.queue_profile_write();
+    }
+
     pub(crate) fn stats(&self) -> PromptLookupQualificationStats {
         self.stats
     }
@@ -824,6 +1040,7 @@ impl PromptLookupCostController {
         let profile = PromptLookupQualificationProfile {
             schema_version: QUALIFICATION_SCHEMA_VERSION,
             context_fingerprint: self.runtime.context_fingerprint.clone(),
+            baseline: self.runtime.baseline,
             updated_at_unix_ms: unix_time_ms(),
             entries: self
                 .regimes
@@ -839,10 +1056,14 @@ impl PromptLookupCostController {
     }
 }
 
-fn qualification_context_fingerprint(profile: &SchedulerAutotuneRuntimeProfile) -> Result<String> {
+fn qualification_context_fingerprint(
+    profile: &SchedulerAutotuneRuntimeProfile,
+    baseline: PromptLookupQualificationBaseline,
+) -> Result<String> {
     let encoded = serde_json::to_vec(&(
         QUALIFICATION_SCHEMA_VERSION,
         env!("CARGO_PKG_VERSION"),
+        baseline,
         &profile.hardware_label,
         profile.runtime_context.fingerprint(),
         profile.config,
@@ -866,6 +1087,7 @@ fn initial_regime_state(regime: PromptLookupQualificationRegime) -> Qualificatio
         phase,
         last_evidence: None,
         next_rejected_cooldown_tokens: QUALIFICATION_REJECTED_INITIAL_COOLDOWN_TOKENS,
+        transition_cost_per_token_ns: 0,
     }
 }
 
@@ -884,6 +1106,26 @@ fn next_rejected_cooldown(current: u64) -> u64 {
         QUALIFICATION_REJECTED_INITIAL_COOLDOWN_TOKENS,
         QUALIFICATION_REJECTED_MAX_COOLDOWN_TOKENS,
     )
+}
+
+fn minimum_rejected_cooldown_tokens(
+    regime: PromptLookupQualificationRegime,
+    baseline_cost_per_token_ns: u64,
+    transition_elapsed_ns: u64,
+) -> u64 {
+    let normalized_token_cost_ns = baseline_cost_per_token_ns
+        .saturating_mul(regime.batch_width.try_into().unwrap_or(u64::MAX));
+    let allowed_overhead_ns =
+        normalized_token_cost_ns.saturating_mul(QUALIFICATION_MAX_REPROBE_OVERHEAD_BPS) / 10_000;
+    if allowed_overhead_ns == 0 {
+        return QUALIFICATION_REJECTED_MAX_COOLDOWN_TOKENS;
+    }
+    let required_tokens = transition_elapsed_ns.div_ceil(allowed_overhead_ns);
+    let mut cooldown = QUALIFICATION_REJECTED_INITIAL_COOLDOWN_TOKENS;
+    while cooldown < required_tokens && cooldown < QUALIFICATION_REJECTED_MAX_COOLDOWN_TOKENS {
+        cooldown = next_rejected_cooldown(cooldown);
+    }
+    cooldown
 }
 
 fn context_bucket(context_tokens: usize) -> usize {
@@ -954,6 +1196,9 @@ fn load_qualification_profile(
     if profile.context_fingerprint != runtime.context_fingerprint {
         bail!("PromptLookup qualification context fingerprint mismatch");
     }
+    if profile.baseline != runtime.baseline {
+        bail!("PromptLookup qualification baseline mismatch");
+    }
     if unix_time_ms().saturating_sub(profile.updated_at_unix_ms) > QUALIFICATION_PROFILE_TTL_MS {
         return Ok(None);
     }
@@ -965,6 +1210,7 @@ fn load_qualification_profile(
                 bail!("qualified PromptLookup evidence contains a rejected cooldown");
             }
             PromptLookupQualificationDecision::Rejected
+            | PromptLookupQualificationDecision::Ineligible
                 if !valid_rejected_cooldown(evidence.rejected_cooldown_tokens) =>
             {
                 bail!(
@@ -1432,6 +1678,103 @@ mod tests {
     }
 
     #[test]
+    fn lookup_transition_cost_is_charged_to_lookup_and_can_revoke_qualification() {
+        let path = test_profile_path("transition-cost");
+        let runtime =
+            PromptLookupQualificationRuntimeConfig::for_test("ctx-transition", path.clone());
+        let mut controller = PromptLookupCostController::new(runtime).unwrap();
+        let regime = PromptLookupQualificationRegime::new(1, 8_000);
+
+        for _ in 0..QUALIFICATION_BASELINE_SAMPLES {
+            controller.record_sample(
+                regime,
+                PromptLookupCostAction::Ordinary,
+                100_000,
+                1,
+                PromptLookupStats::default(),
+            );
+        }
+        for _ in 0..QUALIFICATION_PROBE_SAMPLES {
+            controller.record_sample(
+                regime,
+                PromptLookupCostAction::Lookup,
+                80_000,
+                1,
+                PromptLookupStats::default(),
+            );
+        }
+        assert_eq!(controller.stats().qualified_regimes_current, 1);
+
+        controller.record_lookup_transition(&[regime], 400_000, 8);
+
+        let state = controller.regimes.get(&regime).expect("transition regime");
+        let QualificationPhase::Rejected { cooldown_tokens } = state.phase else {
+            panic!("transition cost should revoke qualification");
+        };
+        assert_eq!(cooldown_tokens, 512);
+        let evidence = state.last_evidence.as_ref().expect("transition evidence");
+        assert_eq!(evidence.transition_cost_per_token_ns, 50_000);
+        assert_eq!(evidence.lookup_cost_per_token_ns, 130_000);
+        assert_eq!(
+            evidence.decision,
+            PromptLookupQualificationDecision::Rejected
+        );
+        assert_eq!(controller.stats().lookup_cost_us, 1_040);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn lookup_transition_cost_expands_reprobe_cooldown_with_batch_normalization() {
+        let b1 = PromptLookupQualificationRegime::new(1, 8_000);
+        let b4 = PromptLookupQualificationRegime::new(4, 8_000);
+        assert_eq!(
+            minimum_rejected_cooldown_tokens(b1, 100_000, 10_000_000),
+            8_192
+        );
+        assert_eq!(
+            minimum_rejected_cooldown_tokens(b4, 100_000, 10_000_000),
+            2_048
+        );
+    }
+
+    #[test]
+    fn ineligible_lookup_regime_is_persisted_fail_closed() {
+        let path = test_profile_path("ineligible");
+        let runtime =
+            PromptLookupQualificationRuntimeConfig::for_test("ctx-ineligible", path.clone());
+        let mut controller = PromptLookupCostController::new(runtime.clone()).unwrap();
+        let regime = PromptLookupQualificationRegime::new(2, 8_000);
+
+        controller.record_lookup_ineligible(regime);
+        assert_eq!(
+            controller.next_action(regime),
+            PromptLookupCostAction::Ordinary
+        );
+        let evidence = controller
+            .regimes
+            .get(&regime)
+            .and_then(|state| state.last_evidence.as_ref())
+            .expect("ineligible evidence");
+        assert_eq!(
+            evidence.decision,
+            PromptLookupQualificationDecision::Ineligible
+        );
+        assert_eq!(
+            evidence.rejected_cooldown_tokens,
+            QUALIFICATION_REJECTED_MAX_COOLDOWN_TOKENS
+        );
+        drop(controller);
+
+        let mut reloaded = PromptLookupCostController::new(runtime).unwrap();
+        assert_eq!(
+            reloaded.next_action(regime),
+            PromptLookupCostAction::Ordinary
+        );
+        assert_eq!(reloaded.stats().profile_loads, 1);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn multi_batch_regime_delays_probe_by_per_request_tokens() {
         let path = test_profile_path("multi-delay");
         let runtime = PromptLookupQualificationRuntimeConfig::for_test("ctx-delay", path.clone());
@@ -1527,12 +1870,14 @@ mod tests {
         let mut profile = PromptLookupQualificationProfile {
             schema_version: QUALIFICATION_SCHEMA_VERSION,
             context_fingerprint: "ctx-c".to_string(),
+            baseline: PromptLookupQualificationBaseline::Ordinary,
             updated_at_unix_ms: unix_time_ms(),
             entries: vec![PromptLookupQualificationEvidence {
                 regime,
                 decision: PromptLookupQualificationDecision::Qualified,
                 baseline_cost_per_token_ns: 100,
                 lookup_cost_per_token_ns: 80,
+                transition_cost_per_token_ns: 0,
                 estimated_gain_bps: 2_000,
                 baseline_samples: QUALIFICATION_BASELINE_SAMPLES,
                 lookup_samples: QUALIFICATION_PROBE_SAMPLES,
@@ -1545,6 +1890,11 @@ mod tests {
         assert!(load_qualification_profile(&runtime).unwrap().is_some());
         let mismatch = PromptLookupQualificationRuntimeConfig::for_test("ctx-other", path.clone());
         assert!(load_qualification_profile(&mismatch).is_err());
+        let baseline_mismatch = PromptLookupQualificationRuntimeConfig {
+            baseline: PromptLookupQualificationBaseline::QwenMtp,
+            ..runtime.clone()
+        };
+        assert!(load_qualification_profile(&baseline_mismatch).is_err());
 
         profile.schema_version = QUALIFICATION_SCHEMA_VERSION - 1;
         persist_qualification_profile(&path, &profile).unwrap();

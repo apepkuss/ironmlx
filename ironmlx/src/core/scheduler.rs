@@ -139,7 +139,7 @@ use crate::core::speculative::{
 use crate::nn::{
     enable_paged_hot_cold_tiering_caches, enable_paged_kv_caches, enable_turboquant_kv_caches,
     paged_prefix_key_spec_for_full_caches, prefix_entry_for_row, prefix_key_spec_for_caches,
-    restore_prefix_entry_for_row, restore_prefix_entry_for_rows, LayerCache, LayerCacheSnapshot,
+    restore_prefix_entry_for_row, restore_prefix_entry_for_rows, LayerCache,
 };
 
 /// Convenience alias — avoids `clippy::type_complexity` on Vec<Option<&[...]>> sites.
@@ -196,11 +196,35 @@ enum MtpBatchedTailCommitMode {
     PerRowCache,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MtpTargetProjection {
+    Neural,
+    Canonical,
+}
+
+#[derive(Clone, Copy)]
+struct MtpSingleWindowConfig {
+    speculative: MtpSpeculativeConfig,
+    projection: MtpTargetProjection,
+}
+
 struct SchedulerGemma4DrafterRowState {
     pending_tokens: VecDeque<u32>,
     last_hidden: Array,
     shared_kv: crate::models::gemma4::Gemma4SharedKvStates,
     adaptive_draft_tokens: usize,
+}
+
+fn project_mtp_target_hidden<M: MtpSpeculativeModel>(
+    model: &M,
+    hidden: &Array,
+    projection: MtpTargetProjection,
+    target: mlx::StreamOrDevice,
+) -> Result<Array> {
+    match projection {
+        MtpTargetProjection::Neural => model.project_mtp_verify_hidden_on(hidden, target),
+        MtpTargetProjection::Canonical => model.project_hidden_on(hidden, target),
+    }
 }
 
 struct SchedulerGemma4DrafterState {
@@ -213,6 +237,7 @@ struct SchedulerGemma4DrafterState {
 struct SchedulerPromptLookupRowState {
     cfg: PromptLookupConfig,
     lookup: Option<PromptLookupRowState>,
+    prepared_draft_tokens: Option<Vec<u32>>,
     pending_tokens: VecDeque<u32>,
 }
 
@@ -229,6 +254,22 @@ struct PromptLookupBatchedFillContext {
     remaining: usize,
     verify_start_pos: i32,
     draft_tokens: Vec<u32>,
+}
+
+struct PromptLookupMtpAcceptedInput {
+    row_idx: usize,
+    input_tokens: Vec<u32>,
+    input_hidden: Array,
+    position_ids: Array,
+}
+
+struct PromptLookupFillRuntime<'a, M, F, C> {
+    stats: &'a mut PromptLookupStats,
+    row_states: &'a mut HashMap<usize, SchedulerPromptLookupRowState>,
+    model: &'a M,
+    project_hidden: F,
+    capture_accepted_hidden: bool,
+    commit_shadow: &'a mut C,
 }
 
 struct Gemma4DrafterBatchedFillContext {
@@ -1461,6 +1502,34 @@ fn slice_hidden_row_position(
     .map_err(Into::into)
 }
 
+fn slice_hidden_row_prefix(
+    hidden: &Array,
+    row_idx: usize,
+    len: usize,
+    target: mlx::StreamOrDevice,
+) -> Result<Array> {
+    let shape = hidden.shape();
+    let dims = shape.as_slice();
+    if dims.len() != 3 {
+        return Err(anyhow!(
+            "slice_hidden_row_prefix: expected hidden [B,S,H], got {dims:?}"
+        ));
+    }
+    if len == 0 || row_idx as i32 >= dims[0] || len as i32 > dims[1] {
+        return Err(anyhow!(
+            "slice_hidden_row_prefix: row={row_idx} len={len} out of shape {dims:?}"
+        ));
+    }
+    mlx::ops::indexing::slice_strided_on(
+        hidden,
+        &[row_idx as i32, 0_i32, 0_i32][..],
+        &[row_idx as i32 + 1, len as i32, dims[2]][..],
+        &[1_i32, 1_i32, 1_i32][..],
+        target,
+    )
+    .map_err(Into::into)
+}
+
 fn slice_position_ids_row_position(
     position_ids: &Array,
     row_idx: usize,
@@ -2159,6 +2228,50 @@ fn generate_request_from_state(state: &RequestState) -> Result<GenerateRequest> 
         stop_token_ids: state.stop_token_ids.clone(),
         prefill_chunk_size: usize::try_from(state.prefill_chunk_size)
             .map_err(|_| anyhow!("generate_request_from_state: negative prefill_chunk_size"))?,
+        decode_cadence_mid_chunk_cap: state.decode_cadence_mid_chunk_cap,
+        kv_cache_turboquant_bits: state.kv_cache_turboquant_bits,
+        pixel_values: state.pixel_values.clone(),
+        image_grid_thw: state.image_grid_thw.clone(),
+        image_spatial_merge_size: state.image_spatial_merge_size,
+        image_token_id: state.image_token_id,
+    })
+}
+
+fn generate_neural_rebase_request_from_state(state: &RequestState) -> Result<GenerateRequest> {
+    anyhow::ensure!(
+        !state.finished,
+        "neural rebase requires an unfinished request"
+    );
+    let emitted = state.generated_tokens.len();
+    anyhow::ensure!(
+        emitted > 0,
+        "neural rebase requires at least one committed generated token"
+    );
+    let mut prompt_ids = Vec::with_capacity(
+        state
+            .prompt_ids
+            .len()
+            .saturating_add(emitted)
+            .saturating_sub(1),
+    );
+    prompt_ids.extend_from_slice(&state.prompt_ids);
+    prompt_ids.extend_from_slice(&state.generated_tokens[..emitted - 1]);
+    let max_new_tokens = state
+        .max_new_tokens
+        .saturating_sub(emitted)
+        .saturating_add(1);
+    anyhow::ensure!(
+        max_new_tokens > 0,
+        "neural rebase requires at least one remaining token"
+    );
+    Ok(GenerateRequest {
+        prompt_ids,
+        max_new_tokens,
+        sampler: state.sampler,
+        stop_token_ids: state.stop_token_ids.clone(),
+        prefill_chunk_size: usize::try_from(state.prefill_chunk_size).map_err(|_| {
+            anyhow!("generate_neural_rebase_request_from_state: negative prefill_chunk_size")
+        })?,
         decode_cadence_mid_chunk_cap: state.decode_cadence_mid_chunk_cap,
         kv_cache_turboquant_bits: state.kv_cache_turboquant_bits,
         pixel_values: state.pixel_values.clone(),
@@ -6769,170 +6882,6 @@ impl<M: Model> Scheduler<M> {
         Ok((new_cache, target_rows, paged_adopt_page_copies(old_cache)))
     }
 
-    fn compact_main_cache_to_rows(
-        &mut self,
-        model: &M,
-        target_rows: &[usize],
-        context: &str,
-    ) -> Result<(Vec<LayerCache>, Vec<usize>, Vec<LayerCacheSnapshot>)> {
-        if target_rows.is_empty() {
-            return Err(anyhow!("{context}: compact target rows cannot be empty"));
-        }
-
-        let old_cache_ref = self
-            .cache
-            .as_ref()
-            .ok_or_else(|| anyhow!("{context}: cache absent"))?;
-        let copies_before = paged_adopt_page_copies(old_cache_ref);
-        let old_snapshots = old_cache_ref
-            .iter()
-            .map(LayerCache::snapshot)
-            .collect::<Vec<_>>();
-        let old_rows = self.cache_rows.clone();
-        for &slot_row in target_rows {
-            anyhow::ensure!(
-                old_rows.contains(&slot_row),
-                "{context}: target slot row {slot_row} missing from old layout {old_rows:?}"
-            );
-        }
-        let (cap, dtype) = cache_cap_and_dtype(old_cache_ref)?;
-        let turboquant_bits = self.kv_cache_turboquant_bits_for_rows(target_rows)?;
-        let mut compact_cache =
-            self.make_model_cache_for_rows(model, target_rows, cap, dtype, turboquant_bits)?;
-        let mut old_cache = self.cache.take().expect("cache checked above");
-        self.cache_rows.clear();
-        let owners = self.block_owners_for_rows(target_rows)?;
-        let prepare_result = (|| -> Result<()> {
-            for (dst_row, &slot_row) in target_rows.iter().enumerate() {
-                let src_row = old_rows
-                    .iter()
-                    .position(|&row| row == slot_row)
-                    .expect("target rows prevalidated");
-                adopt_cache_row_layers_skipping_reused_paged(
-                    &mut compact_cache,
-                    &old_cache,
-                    dst_row,
-                    src_row,
-                    context,
-                )?;
-            }
-            reuse_full_paged_storage(&mut compact_cache, &mut old_cache, &owners, context)?;
-            Ok(())
-        })();
-        if let Err(err) = prepare_result {
-            self.cache = Some(old_cache);
-            self.cache_rows = old_rows;
-            return Err(err);
-        }
-
-        let copies_after = paged_adopt_page_copies(&compact_cache);
-        self.record_request_owned_kv_layout_rebuild(copies_before, copies_after);
-        self.cache = Some(compact_cache);
-        self.cache_rows = target_rows.to_vec();
-        Ok((old_cache, old_rows, old_snapshots))
-    }
-
-    fn rollback_compact_main_cache(
-        &mut self,
-        mut old_cache: Vec<LayerCache>,
-        old_rows: Vec<usize>,
-        old_snapshots: &[LayerCacheSnapshot],
-        context: &str,
-    ) -> Result<()> {
-        let mut compact_cache = self
-            .cache
-            .take()
-            .ok_or_else(|| anyhow!("{context}: compact cache absent during rollback"))?;
-        let owners = self.block_owners_for_rows(&old_rows)?;
-        reuse_full_paged_storage(
-            &mut old_cache,
-            &mut compact_cache,
-            &owners,
-            &format!("{context} rollback"),
-        )?;
-        restore_layer_cache(old_cache.as_mut_slice(), old_snapshots)?;
-        self.cache = Some(old_cache);
-        self.cache_rows = old_rows;
-        Ok(())
-    }
-
-    fn merge_compact_main_cache_into_rows(
-        &mut self,
-        model: &M,
-        old_cache: Vec<LayerCache>,
-        old_rows: Vec<usize>,
-        target_rows: &[usize],
-        context: &str,
-    ) -> Result<()> {
-        let compact_cache_ref = self
-            .cache
-            .as_ref()
-            .ok_or_else(|| anyhow!("{context}: compact cache absent"))?;
-        let copies_before = paged_adopt_page_copies(compact_cache_ref);
-        let compact_rows = self.cache_rows.clone();
-        let (old_cap, old_dtype) = cache_cap_and_dtype(&old_cache)?;
-        let (compact_cap, compact_dtype) = cache_cap_and_dtype(compact_cache_ref)?;
-        if old_dtype != compact_dtype {
-            return Err(anyhow!(
-                "{context}: compact cache dtype {:?} != old cache dtype {:?}",
-                compact_dtype,
-                old_dtype
-            ));
-        }
-        for &slot_row in target_rows {
-            anyhow::ensure!(
-                compact_rows.contains(&slot_row) || old_rows.contains(&slot_row),
-                "{context}: slot row {slot_row} missing from compact {compact_rows:?} and old {old_rows:?} layouts"
-            );
-        }
-
-        let cap = old_cap.max(compact_cap);
-        let turboquant_bits = self.kv_cache_turboquant_bits_for_rows(target_rows)?;
-        let mut merged_cache =
-            self.make_model_cache_for_rows(model, target_rows, cap, old_dtype, turboquant_bits)?;
-        let mut compact_cache = self.cache.take().expect("compact cache checked above");
-        self.cache_rows.clear();
-        let owners = self.block_owners_for_rows(target_rows)?;
-        let prepare_result = (|| -> Result<()> {
-            for (dst_row, &slot_row) in target_rows.iter().enumerate() {
-                if let Some(src_row) = compact_rows.iter().position(|&row| row == slot_row) {
-                    adopt_cache_row_layers_skipping_reused_paged(
-                        &mut merged_cache,
-                        &compact_cache,
-                        dst_row,
-                        src_row,
-                        context,
-                    )?;
-                } else {
-                    let src_row = old_rows
-                        .iter()
-                        .position(|&row| row == slot_row)
-                        .expect("target rows prevalidated");
-                    adopt_cache_row_layers_skipping_reused_paged(
-                        &mut merged_cache,
-                        &old_cache,
-                        dst_row,
-                        src_row,
-                        context,
-                    )?;
-                }
-            }
-            reuse_full_paged_storage(&mut merged_cache, &mut compact_cache, &owners, context)?;
-            Ok(())
-        })();
-        if let Err(err) = prepare_result {
-            self.cache = Some(compact_cache);
-            self.cache_rows = compact_rows;
-            return Err(err);
-        }
-
-        let copies_after = paged_adopt_page_copies(&merged_cache);
-        self.record_request_owned_kv_layout_rebuild(copies_before, copies_after);
-        self.cache = Some(merged_cache);
-        self.cache_rows = target_rows.to_vec();
-        Ok(())
-    }
-
     fn install_cache_with_temp_row(
         &mut self,
         model: &M,
@@ -7263,9 +7212,18 @@ impl<M: Model> Scheduler<M> {
     }
 
     pub fn prompt_lookup_can_start_rolling_mid_admit(&self) -> bool {
-        self.prompt_lookup_state
-            .as_ref()
-            .is_some_and(|state| state.rows.values().all(|row| row.pending_tokens.is_empty()))
+        self.prompt_lookup_state.as_ref().is_some_and(|state| {
+            state.rows.iter().all(|(&row_idx, row)| {
+                self.slots
+                    .get(row_idx)
+                    .and_then(Option::as_ref)
+                    .is_none_or(|slot| {
+                        slot.finished
+                            || (row.pending_tokens.is_empty()
+                                && row.prepared_draft_tokens.is_none())
+                    })
+            })
+        })
     }
 
     pub(crate) fn prompt_lookup_qualification_regime(
@@ -7311,6 +7269,19 @@ impl<M: Model> Scheduler<M> {
             "prompt lookup requires greedy sampling"
         );
         let events = self.prefill_admitted(model)?;
+        self.initialize_prompt_lookup_for_active(cfg)?;
+        Ok(events)
+    }
+
+    pub fn initialize_prompt_lookup_for_active(&mut self, cfg: PromptLookupConfig) -> Result<()> {
+        let cfg = cfg.validate()?;
+        anyhow::ensure!(
+            self.slots
+                .iter()
+                .flatten()
+                .all(|state| state.sampler.is_pipelinable()),
+            "prompt lookup requires greedy sampling"
+        );
         let mut rows = HashMap::new();
         for (row_idx, slot) in self.slots.iter().enumerate() {
             let Some(_state) = slot.as_ref().filter(|state| !state.finished) else {
@@ -7321,6 +7292,7 @@ impl<M: Model> Scheduler<M> {
                 SchedulerPromptLookupRowState {
                     cfg,
                     lookup: None,
+                    prepared_draft_tokens: None,
                     pending_tokens: VecDeque::new(),
                 },
             );
@@ -7332,7 +7304,7 @@ impl<M: Model> Scheduler<M> {
         };
         Self::refresh_prompt_lookup_index_stats(&mut state);
         self.prompt_lookup_state = Some(state);
-        Ok(events)
+        Ok(())
     }
 
     pub fn register_prompt_lookup_request(
@@ -7369,6 +7341,7 @@ impl<M: Model> Scheduler<M> {
             SchedulerPromptLookupRowState {
                 cfg,
                 lookup: None,
+                prepared_draft_tokens: None,
                 pending_tokens: VecDeque::new(),
             },
         );
@@ -7376,9 +7349,213 @@ impl<M: Model> Scheduler<M> {
         Ok(())
     }
 
-    pub fn step_prompt_lookup(&mut self, model: &M) -> Result<Vec<StepEvent>> {
+    pub fn prepare_prompt_lookup_batch_window(&mut self) -> Result<bool> {
         self.ensure_not_poisoned()?;
-        match self.step_prompt_lookup_inner(model) {
+        anyhow::ensure!(
+            self.phase == Phase::Decoding,
+            "prepare_prompt_lookup_batch_window illegal in {:?} phase",
+            self.phase
+        );
+        let mut prompt_lookup = self
+            .prompt_lookup_state
+            .take()
+            .ok_or_else(|| anyhow!("prompt lookup scheduler state is absent"))?;
+        let result = (|| {
+            let active_rows = self
+                .slots
+                .iter()
+                .enumerate()
+                .filter_map(|(row, slot)| {
+                    (matches!(slot, Some(state) if !state.finished)
+                        && prompt_lookup.rows.contains_key(&row))
+                    .then_some(row)
+                })
+                .collect::<Vec<_>>();
+            if active_rows.is_empty() {
+                return Ok(false);
+            }
+            anyhow::ensure!(
+                active_rows.iter().all(|row_idx| {
+                    prompt_lookup
+                        .rows
+                        .get(row_idx)
+                        .is_some_and(|row| row.pending_tokens.is_empty())
+                }),
+                "prompt lookup proposal preparation requires a common batch-window boundary"
+            );
+            self.prepare_prompt_lookup_rows(
+                &active_rows,
+                &mut prompt_lookup.stats,
+                &mut prompt_lookup.rows,
+            )?;
+            Ok(active_rows.iter().all(|row_idx| {
+                prompt_lookup
+                    .rows
+                    .get(row_idx)
+                    .and_then(|row| row.prepared_draft_tokens.as_ref())
+                    .is_some_and(|tokens| !tokens.is_empty())
+            }))
+        })();
+        Self::refresh_prompt_lookup_index_stats(&mut prompt_lookup);
+        self.prompt_lookup_state = Some(prompt_lookup);
+        result
+    }
+
+    pub fn prompt_lookup_prepared_window_verify_eligible(&self, model: &M) -> Result<bool> {
+        let prompt_lookup = self
+            .prompt_lookup_state
+            .as_ref()
+            .ok_or_else(|| anyhow!("prompt lookup scheduler state is absent"))?;
+        let active_rows = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(row, slot)| {
+                (matches!(slot, Some(state) if !state.finished)
+                    && prompt_lookup.rows.contains_key(&row))
+                .then_some(row)
+            })
+            .collect::<Vec<_>>();
+        if active_rows.is_empty() {
+            return Ok(false);
+        }
+
+        let mut max_context_tokens = 0_usize;
+        let mut max_verify_len = 1_usize;
+        for &row_idx in &active_rows {
+            let slot = self.slots[row_idx]
+                .as_ref()
+                .expect("active prompt lookup row retains its slot");
+            let Some(draft_tokens) = prompt_lookup
+                .rows
+                .get(&row_idx)
+                .and_then(|row| row.prepared_draft_tokens.as_ref())
+            else {
+                return Ok(false);
+            };
+            if draft_tokens.is_empty() {
+                return Ok(false);
+            }
+            max_context_tokens = max_context_tokens.max(slot.real_len.max(0) as usize);
+            max_verify_len = max_verify_len.max(draft_tokens.len().saturating_add(1));
+        }
+
+        let batch = active_rows.len();
+        let verify_kv_bits = self.kv_cache_turboquant_bits_for_rows(&active_rows)?;
+        Ok(
+            model.supports_exact_batched_speculative_verify_for_kv_cache(
+                batch,
+                max_context_tokens,
+                max_verify_len,
+                verify_kv_bits,
+            ) || model.supports_sequential_prompt_lookup_verify(
+                batch,
+                max_context_tokens,
+                max_verify_len,
+            ),
+        )
+    }
+
+    pub fn discard_prepared_prompt_lookup_window(&mut self) {
+        if let Some(state) = self.prompt_lookup_state.as_mut() {
+            for row in state.rows.values_mut() {
+                row.prepared_draft_tokens = None;
+            }
+        }
+    }
+
+    pub fn commit_prompt_lookup_events(&mut self, events: &[StepEvent]) -> Result<()> {
+        let Some(prompt_lookup) = self.prompt_lookup_state.as_mut() else {
+            return Ok(());
+        };
+        for event in events {
+            let row_idx = self
+                .slots
+                .iter()
+                .position(|slot| matches!(slot, Some(state) if state.id == event.id))
+                .ok_or_else(|| {
+                    anyhow!("commit_prompt_lookup_events lost request {}", event.id.0)
+                })?;
+            let Some(lookup) = prompt_lookup
+                .rows
+                .get_mut(&row_idx)
+                .and_then(|row| row.lookup.as_mut())
+            else {
+                continue;
+            };
+            let update_start = Instant::now();
+            lookup.commit(event.token);
+            add_elapsed_us(&mut prompt_lookup.stats.index_update_us, update_start);
+        }
+        Self::refresh_prompt_lookup_index_stats(prompt_lookup);
+        Ok(())
+    }
+
+    pub fn step_prompt_lookup(&mut self, model: &M) -> Result<Vec<StepEvent>> {
+        self.step_prompt_lookup_with_projection(
+            model,
+            |model, hidden, target| model.project_hidden_on(hidden, target),
+            false,
+            false,
+            |_, _| Ok(()),
+        )
+    }
+
+    pub fn step_prompt_lookup_batch_window(&mut self, model: &M) -> Result<Vec<StepEvent>> {
+        self.step_prompt_lookup_with_projection(
+            model,
+            |model, hidden, target| model.project_hidden_on(hidden, target),
+            false,
+            true,
+            |_, _| Ok(()),
+        )
+    }
+
+    pub fn step_prompt_lookup_with_mtp_verify(
+        &mut self,
+        model: &M,
+        mtp: &M::MtpHead,
+    ) -> Result<Vec<StepEvent>>
+    where
+        M: MtpSpeculativeModel,
+    {
+        let mut mtp_state = self
+            .mtp_state
+            .take()
+            .ok_or_else(|| anyhow!("step_prompt_lookup_with_mtp_verify: MTP state absent"))?;
+        let result = self.step_prompt_lookup_with_projection(
+            model,
+            |model, hidden, target| model.project_hidden_on(hidden, target),
+            true,
+            true,
+            |accepted, stats| {
+                Self::commit_prompt_lookup_mtp_shadow(model, mtp, &mut mtp_state, accepted, stats)
+            },
+        );
+        self.mtp_state = Some(mtp_state);
+        result
+    }
+
+    fn step_prompt_lookup_with_projection<F, C>(
+        &mut self,
+        model: &M,
+        project_hidden: F,
+        capture_accepted_hidden: bool,
+        common_batch_window: bool,
+        mut commit_shadow: C,
+    ) -> Result<Vec<StepEvent>>
+    where
+        F: Fn(&M, &Array, mlx::StreamOrDevice) -> Result<Array> + Copy,
+        C: FnMut(&[PromptLookupMtpAcceptedInput], &mut PromptLookupStats) -> Result<()>,
+    {
+        self.ensure_not_poisoned()?;
+        match self.step_prompt_lookup_inner(
+            model,
+            project_hidden,
+            capture_accepted_hidden,
+            common_batch_window,
+            &mut commit_shadow,
+        ) {
             Ok(events) => Ok(events),
             Err(err) => {
                 self.poisoned = true;
@@ -7437,7 +7614,18 @@ impl<M: Model> Scheduler<M> {
         result
     }
 
-    fn step_prompt_lookup_inner(&mut self, model: &M) -> Result<Vec<StepEvent>> {
+    fn step_prompt_lookup_inner<F, C>(
+        &mut self,
+        model: &M,
+        project_hidden: F,
+        capture_accepted_hidden: bool,
+        common_batch_window: bool,
+        commit_shadow: &mut C,
+    ) -> Result<Vec<StepEvent>>
+    where
+        F: Fn(&M, &Array, mlx::StreamOrDevice) -> Result<Array> + Copy,
+        C: FnMut(&[PromptLookupMtpAcceptedInput], &mut PromptLookupStats) -> Result<()>,
+    {
         if self.phase != Phase::Decoding {
             return Err(anyhow!(
                 "step_prompt_lookup illegal in {:?} phase: call prefill_admitted_prompt_lookup first",
@@ -7489,6 +7677,10 @@ impl<M: Model> Scheduler<M> {
             // correct. Once finalize registers the new row, speculation may
             // resume from the ordinary boundary on the next turn.
             if mid_admit_in_flight && all_at_window_boundary {
+                anyhow::ensure!(
+                    !capture_accepted_hidden,
+                    "PromptLookup MTP shadow mode cannot fall back to ordinary decode during mid-admission"
+                );
                 let events = self.step_inner(model)?;
                 for event in &events {
                     let row_idx = self
@@ -7516,23 +7708,36 @@ impl<M: Model> Scheduler<M> {
                 return Ok(events);
             }
 
-            let rows_to_fill = active_rows
-                .iter()
-                .copied()
-                .filter(|row_idx| {
-                    prompt_lookup
-                        .rows
-                        .get(row_idx)
-                        .is_some_and(|row| row.pending_tokens.is_empty())
-                })
-                .collect::<Vec<_>>();
+            let rows_to_fill = if common_batch_window && !all_at_window_boundary {
+                Vec::new()
+            } else {
+                active_rows
+                    .iter()
+                    .copied()
+                    .filter(|row_idx| {
+                        prompt_lookup
+                            .rows
+                            .get(row_idx)
+                            .is_some_and(|row| row.pending_tokens.is_empty())
+                    })
+                    .collect::<Vec<_>>()
+            };
             let filled = self.fill_prompt_lookup_windows(
                 &rows_to_fill,
-                &mut prompt_lookup.stats,
-                &mut prompt_lookup.rows,
-                model,
+                PromptLookupFillRuntime {
+                    stats: &mut prompt_lookup.stats,
+                    row_states: &mut prompt_lookup.rows,
+                    model,
+                    project_hidden,
+                    capture_accepted_hidden,
+                    commit_shadow,
+                },
             )?;
             if !filled {
+                anyhow::ensure!(
+                    !capture_accepted_hidden,
+                    "PromptLookup MTP shadow mode requires a prepared eligible verify window"
+                );
                 let events = self.step_inner(model)?;
                 for event in &events {
                     let row_idx = self
@@ -7562,15 +7767,19 @@ impl<M: Model> Scheduler<M> {
 
             let mut events = Vec::with_capacity(active_rows.len());
             for row_idx in active_rows {
-                let token = prompt_lookup
+                let Some(token) = prompt_lookup
                     .rows
                     .get_mut(&row_idx)
                     .ok_or_else(|| anyhow!("step_prompt_lookup: row {row_idx} state is absent"))?
                     .pending_tokens
                     .pop_front()
-                    .ok_or_else(|| {
-                        anyhow!("step_prompt_lookup: row {row_idx} pending queue is empty")
-                    })?;
+                else {
+                    anyhow::ensure!(
+                        common_batch_window && !all_at_window_boundary,
+                        "step_prompt_lookup: row {row_idx} pending queue is empty"
+                    );
+                    continue;
+                };
                 let event = self.emit_token_for_row(row_idx, token)?;
                 let update_start = Instant::now();
                 prompt_lookup
@@ -7623,21 +7832,15 @@ impl<M: Model> Scheduler<M> {
             .sum();
     }
 
-    fn fill_prompt_lookup_windows(
-        &mut self,
-        rows_to_fill: &[usize],
+    fn prepare_prompt_lookup_rows(
+        &self,
+        rows_to_prepare: &[usize],
         stats: &mut PromptLookupStats,
         row_states: &mut HashMap<usize, SchedulerPromptLookupRowState>,
-        model: &M,
-    ) -> Result<bool> {
-        if rows_to_fill.is_empty() {
-            return Ok(true);
-        }
-
-        let mut contexts = Vec::with_capacity(rows_to_fill.len());
-        for &row_idx in rows_to_fill {
+    ) -> Result<()> {
+        for &row_idx in rows_to_prepare {
             let slot = self.slots[row_idx].as_ref().ok_or_else(|| {
-                anyhow!("fill_prompt_lookup_windows: row {row_idx} slot is absent")
+                anyhow!("prepare_prompt_lookup_rows: row {row_idx} slot is absent")
             })?;
             if slot.finished {
                 continue;
@@ -7649,11 +7852,14 @@ impl<M: Model> Scheduler<M> {
                 continue;
             }
             let current_token = *slot.generated_tokens.last().ok_or_else(|| {
-                anyhow!("fill_prompt_lookup_windows: row {row_idx} has no current token")
+                anyhow!("prepare_prompt_lookup_rows: row {row_idx} has no current token")
             })?;
             let row_state = row_states.get_mut(&row_idx).ok_or_else(|| {
-                anyhow!("fill_prompt_lookup_windows: row {row_idx} state is absent")
+                anyhow!("prepare_prompt_lookup_rows: row {row_idx} state is absent")
             })?;
+            if row_state.prepared_draft_tokens.is_some() {
+                continue;
+            }
             if row_state.lookup.is_none() {
                 let mut history = Vec::with_capacity(
                     slot.prompt_ids
@@ -7680,13 +7886,62 @@ impl<M: Model> Scheduler<M> {
             let propose_start = Instant::now();
             let proposal = lookup.propose(remaining.saturating_sub(1));
             add_elapsed_us(&mut stats.propose_us, propose_start);
-            let draft_tokens = if let Some((_ngram, tokens)) = proposal {
+            row_state.prepared_draft_tokens = Some(if let Some((_ngram, tokens)) = proposal {
                 stats.hits = stats.hits.saturating_add(1);
                 tokens
             } else {
                 stats.misses = stats.misses.saturating_add(1);
                 Vec::new()
-            };
+            });
+        }
+        Ok(())
+    }
+
+    fn fill_prompt_lookup_windows<F, C>(
+        &mut self,
+        rows_to_fill: &[usize],
+        runtime: PromptLookupFillRuntime<'_, M, F, C>,
+    ) -> Result<bool>
+    where
+        F: Fn(&M, &Array, mlx::StreamOrDevice) -> Result<Array> + Copy,
+        C: FnMut(&[PromptLookupMtpAcceptedInput], &mut PromptLookupStats) -> Result<()>,
+    {
+        let PromptLookupFillRuntime {
+            stats,
+            row_states,
+            model,
+            project_hidden,
+            capture_accepted_hidden,
+            commit_shadow,
+        } = runtime;
+        if rows_to_fill.is_empty() {
+            return Ok(true);
+        }
+
+        self.prepare_prompt_lookup_rows(rows_to_fill, stats, row_states)?;
+        let mut contexts = Vec::with_capacity(rows_to_fill.len());
+        for &row_idx in rows_to_fill {
+            let slot = self.slots[row_idx].as_ref().ok_or_else(|| {
+                anyhow!("fill_prompt_lookup_windows: row {row_idx} slot is absent")
+            })?;
+            if slot.finished {
+                continue;
+            }
+            let remaining = slot
+                .max_new_tokens
+                .saturating_sub(slot.generated_tokens.len());
+            if remaining == 0 {
+                continue;
+            }
+            let current_token = *slot.generated_tokens.last().ok_or_else(|| {
+                anyhow!("fill_prompt_lookup_windows: row {row_idx} has no current token")
+            })?;
+            let row_state = row_states.get_mut(&row_idx).ok_or_else(|| {
+                anyhow!("fill_prompt_lookup_windows: row {row_idx} state is absent")
+            })?;
+            let draft_tokens = row_state.prepared_draft_tokens.take().ok_or_else(|| {
+                anyhow!("fill_prompt_lookup_windows: row {row_idx} has no prepared proposal")
+            })?;
             contexts.push(PromptLookupBatchedFillContext {
                 row_idx,
                 current_token,
@@ -7716,9 +7971,9 @@ impl<M: Model> Scheduler<M> {
                     .then_some(row)
             })
             .collect::<Vec<_>>();
-        // Keep the model-facing batch stable while some rows drain accepted
-        // pending tokens. Rows absent from the verify contexts use zero
-        // per-row lens below, so their cache state does not advance.
+        // Keep the model-facing batch stable while some standalone
+        // PromptLookup rows drain pending tokens. Nonparticipant rows receive
+        // zero sequence lengths below and therefore do not advance cache.
         self.rebuild_cache_layout(model, &active_rows)?;
 
         let base_snapshot = self
@@ -7796,6 +8051,7 @@ impl<M: Model> Scheduler<M> {
                 stats.sequential_verify_windows = stats.sequential_verify_windows.saturating_add(1);
             }
             let verify_round_start = Instant::now();
+            let mut accepted_hidden_source = None;
             let verified_ids = if exact_batched_verify {
                 let model_verify_flat = verify_flat
                     .iter()
@@ -7837,12 +8093,17 @@ impl<M: Model> Scheduler<M> {
                     )?
                 };
                 add_elapsed_us(&mut stats.verify_forward_us, verify_start);
+                if capture_accepted_hidden {
+                    accepted_hidden_source = Some(hidden.clone());
+                }
                 let projection_start = Instant::now();
-                let logits = model.project_hidden_on(&hidden, mlx::StreamOrDevice::default())?;
+                let logits = project_hidden(model, &hidden, mlx::StreamOrDevice::default())?;
                 add_elapsed_us(&mut stats.projection_us, projection_start);
                 mlx::ops::reduction::argmax(&logits, -1, false)?
             } else {
                 let mut verified_steps = Vec::with_capacity(max_verify_len);
+                let mut hidden_steps =
+                    capture_accepted_hidden.then(|| Vec::with_capacity(max_verify_len));
                 for depth in 0..max_verify_len {
                     let mut step_tokens = vec![0_i32; batch];
                     let mut step_lens = vec![0_i32; batch];
@@ -7868,18 +8129,37 @@ impl<M: Model> Scheduler<M> {
                         maybe_build_sparse_decode_mask(cache, &step_lens)?
                     };
                     let verify_start = Instant::now();
-                    let logits = {
+                    let (logits, hidden) = {
                         let cache = self.cache.as_mut().ok_or_else(|| {
                             anyhow!("fill_prompt_lookup_windows: main cache is absent")
                         })?;
-                        model.forward_on(
-                            &step_arr,
-                            &position_ids,
-                            Some(&step_lens),
-                            decode_mask.as_ref(),
-                            Some(cache.as_mut_slice()),
-                            mlx::StreamOrDevice::default(),
-                        )?
+                        if capture_accepted_hidden {
+                            let hidden = model.forward_text_hidden(
+                                &step_arr,
+                                &position_ids,
+                                Some(&step_lens),
+                                decode_mask.as_ref(),
+                                Some(cache.as_mut_slice()),
+                                mlx::StreamOrDevice::default(),
+                            )?;
+                            let projection_start = Instant::now();
+                            let logits =
+                                project_hidden(model, &hidden, mlx::StreamOrDevice::default())?;
+                            add_elapsed_us(&mut stats.projection_us, projection_start);
+                            (logits, Some(hidden))
+                        } else {
+                            (
+                                model.forward_on(
+                                    &step_arr,
+                                    &position_ids,
+                                    Some(&step_lens),
+                                    decode_mask.as_ref(),
+                                    Some(cache.as_mut_slice()),
+                                    mlx::StreamOrDevice::default(),
+                                )?,
+                                None,
+                            )
+                        }
                     };
                     add_elapsed_us(&mut stats.verify_forward_us, verify_start);
                     let vocab =
@@ -7899,7 +8179,18 @@ impl<M: Model> Scheduler<M> {
                         // until the packed acceptance result is read once.
                         mlx::transforms::eval(&[&verified_step])?;
                     }
+                    if let (Some(hidden_steps), Some(hidden)) = (hidden_steps.as_mut(), hidden) {
+                        hidden_steps.push(hidden);
+                    }
                     verified_steps.push(verified_step);
+                }
+                if let Some(hidden_steps) = hidden_steps {
+                    let refs = hidden_steps.iter().collect::<Vec<_>>();
+                    accepted_hidden_source = Some(mlx::ops::shape::concatenate_on(
+                        &refs,
+                        1,
+                        mlx::StreamOrDevice::default(),
+                    )?);
                 }
                 let refs = verified_steps.iter().collect::<Vec<_>>();
                 mlx::ops::shape::concatenate(&refs, 1)?
@@ -7989,13 +8280,14 @@ impl<M: Model> Scheduler<M> {
                     ))
                 })
                 .collect::<Vec<_>>();
-            if !mismatch_rows.is_empty() {
+            let supports_trim = self
+                .cache
+                .as_ref()
+                .is_some_and(|cache| layer_cache_supports_accepted_prefix_trim(cache))
+                && model.supports_speculative_accepted_prefix_trim();
+            let requires_transactional_replay = exact_batched_verify && !supports_trim;
+            if !mismatch_rows.is_empty() || requires_transactional_replay {
                 let rollback_start = Instant::now();
-                let supports_trim = self
-                    .cache
-                    .as_ref()
-                    .is_some_and(|cache| layer_cache_supports_accepted_prefix_trim(cache))
-                    && model.supports_speculative_accepted_prefix_trim();
                 if supports_trim {
                     let cache = self.cache.as_mut().ok_or_else(|| {
                         anyhow!("fill_prompt_lookup_windows: main cache is absent")
@@ -8034,6 +8326,8 @@ impl<M: Model> Scheduler<M> {
                         replay_lens[compact_row] = accepted_len as i32;
                         replay_starts[compact_row] = ctx.verify_start_pos;
                     }
+                    let mut replay_hidden_steps =
+                        capture_accepted_hidden.then(|| Vec::with_capacity(max_replay_len));
                     for depth in 0..max_replay_len {
                         let mut step_tokens = vec![0_i32; batch];
                         let mut step_lens = vec![0_i32; batch];
@@ -8070,12 +8364,24 @@ impl<M: Model> Scheduler<M> {
                             mlx::StreamOrDevice::default(),
                         )?;
                         mlx::transforms::eval(&[&replay_hidden])?;
+                        if let Some(hidden_steps) = replay_hidden_steps.as_mut() {
+                            hidden_steps.push(replay_hidden);
+                        }
+                    }
+                    if let Some(hidden_steps) = replay_hidden_steps {
+                        let refs = hidden_steps.iter().collect::<Vec<_>>();
+                        accepted_hidden_source = Some(mlx::ops::shape::concatenate_on(
+                            &refs,
+                            1,
+                            mlx::StreamOrDevice::default(),
+                        )?);
                     }
                 }
                 add_elapsed_us(&mut stats.rollback_us, rollback_start);
             }
 
             let mut pending_commits = Vec::with_capacity(contexts.len());
+            let mut mtp_shadow_commits = Vec::with_capacity(contexts.len());
             for (ctx, resolution) in contexts.iter().zip(resolutions) {
                 let accepted_draft_len = resolution.accepted_draft_len;
                 let accepted_verify_input_len = resolution.accepted_verify_input_len;
@@ -8138,7 +8444,45 @@ impl<M: Model> Scheduler<M> {
                     cached_len,
                     "filled PromptLookup window"
                 );
+                if capture_accepted_hidden {
+                    let hidden_source = accepted_hidden_source.as_ref().ok_or_else(|| {
+                        anyhow!(
+                            "fill_prompt_lookup_windows: accepted hidden source absent for MTP shadow commit"
+                        )
+                    })?;
+                    let mut input_tokens = Vec::with_capacity(accepted_verify_input_len);
+                    input_tokens.push(ctx.current_token);
+                    input_tokens.extend_from_slice(
+                        &ctx.draft_tokens[..accepted_verify_input_len.saturating_sub(1)],
+                    );
+                    let input_hidden = slice_hidden_row_prefix(
+                        hidden_source,
+                        compact_row,
+                        accepted_verify_input_len,
+                        mlx::StreamOrDevice::default(),
+                    )?;
+                    let position_ids = self.mtp_position_ids(
+                        model,
+                        ctx.verify_start_pos,
+                        accepted_verify_input_len as i32,
+                    )?;
+                    mtp_shadow_commits.push(PromptLookupMtpAcceptedInput {
+                        row_idx: ctx.row_idx,
+                        input_tokens,
+                        input_hidden,
+                        position_ids,
+                    });
+                }
                 pending_commits.push((ctx.row_idx, tokens));
+            }
+            if capture_accepted_hidden {
+                anyhow::ensure!(
+                    mtp_shadow_commits.len() == contexts.len(),
+                    "fill_prompt_lookup_windows: MTP shadow commits {} != contexts {}",
+                    mtp_shadow_commits.len(),
+                    contexts.len()
+                );
+                commit_shadow(&mtp_shadow_commits, stats)?;
             }
             for (row_idx, tokens) in pending_commits {
                 row_states
@@ -8166,6 +8510,244 @@ impl<M: Model> Scheduler<M> {
         Ok(attempted_verify)
     }
 
+    fn make_empty_batched_mtp_cache_for_row_indices(
+        model: &M,
+        mtp: &M::MtpHead,
+        row_states: &HashMap<usize, SchedulerMtpRowState>,
+        row_indices: &[usize],
+    ) -> Result<MtpCache>
+    where
+        M: MtpSpeculativeModel,
+    {
+        anyhow::ensure!(
+            !row_indices.is_empty(),
+            "make_empty_batched_mtp_cache_for_row_indices: rows cannot be empty"
+        );
+        let mut cap = 0_i32;
+        let mut dtype = None;
+        for &row_idx in row_indices {
+            let row_state = row_states.get(&row_idx).ok_or_else(|| {
+                anyhow!("make_empty_batched_mtp_cache_for_row_indices: row {row_idx} state absent")
+            })?;
+            let layer = row_state.mtp_cache.layer(0);
+            cap = cap.max(layer.cap());
+            if let Some(expected) = dtype {
+                anyhow::ensure!(
+                    expected == layer.dtype(),
+                    "make_empty_batched_mtp_cache_for_row_indices: dtype mismatch {:?} != {:?}",
+                    expected,
+                    layer.dtype()
+                );
+            } else {
+                dtype = Some(layer.dtype());
+            }
+        }
+        let dtype = dtype
+            .ok_or_else(|| anyhow!("make_empty_batched_mtp_cache_for_row_indices: dtype absent"))?;
+        model.make_mtp_cache(mtp, row_indices.len() as i32, cap, dtype)
+    }
+
+    fn make_batched_mtp_cache_from_row_indices(
+        model: &M,
+        mtp: &M::MtpHead,
+        row_states: &HashMap<usize, SchedulerMtpRowState>,
+        row_indices: &[usize],
+    ) -> Result<MtpCache>
+    where
+        M: MtpSpeculativeModel,
+    {
+        let mut cache = Self::make_empty_batched_mtp_cache_for_row_indices(
+            model,
+            mtp,
+            row_states,
+            row_indices,
+        )?;
+        for (compact_idx, &row_idx) in row_indices.iter().enumerate() {
+            let row_state = row_states.get(&row_idx).ok_or_else(|| {
+                anyhow!("make_batched_mtp_cache_from_row_indices: row {row_idx} state absent")
+            })?;
+            cache.adopt_row_from(&row_state.mtp_cache, compact_idx, 0)?;
+        }
+        Ok(cache)
+    }
+
+    fn commit_prompt_lookup_mtp_shadow(
+        model: &M,
+        mtp: &M::MtpHead,
+        mtp_state: &mut SchedulerMtpState,
+        accepted: &[PromptLookupMtpAcceptedInput],
+        stats: &mut PromptLookupStats,
+    ) -> Result<()>
+    where
+        M: MtpSpeculativeModel,
+    {
+        anyhow::ensure!(
+            !accepted.is_empty(),
+            "commit_prompt_lookup_mtp_shadow: accepted rows cannot be empty"
+        );
+        let mut snapshots = Vec::with_capacity(accepted.len());
+        let mut seen_rows = HashSet::with_capacity(accepted.len());
+        for input in accepted {
+            anyhow::ensure!(
+                seen_rows.insert(input.row_idx),
+                "commit_prompt_lookup_mtp_shadow: duplicate row {}",
+                input.row_idx
+            );
+            let row = mtp_state.rows.get(&input.row_idx).ok_or_else(|| {
+                anyhow!(
+                    "commit_prompt_lookup_mtp_shadow: row {} MTP state absent",
+                    input.row_idx
+                )
+            })?;
+            snapshots.push((
+                input.row_idx,
+                row.mtp_cache.snapshot(),
+                row.last_hidden.clone(),
+                row.deferred_tail_commit.clone(),
+            ));
+        }
+
+        let commit_started = Instant::now();
+        let mut committed_tokens = 0_u64;
+        let commit_result = (|| -> Result<()> {
+            let deferred = accepted
+                .iter()
+                .filter_map(|input| {
+                    mtp_state
+                        .rows
+                        .get(&input.row_idx)
+                        .and_then(|row| row.deferred_tail_commit.clone())
+                        .map(|tail| (input.row_idx, tail))
+                })
+                .collect::<Vec<_>>();
+            if !deferred.is_empty() {
+                let row_indices = deferred.iter().map(|(row, _)| *row).collect::<Vec<_>>();
+                let mut cache = Self::make_batched_mtp_cache_from_row_indices(
+                    model,
+                    mtp,
+                    &mtp_state.rows,
+                    &row_indices,
+                )?;
+                let tokens = deferred
+                    .iter()
+                    .map(|(_, tail)| tail.token)
+                    .collect::<Vec<_>>();
+                let token_arr: Array =
+                    (&tokens[..], &[tokens.len() as i32, 1_i32][..]).try_into()?;
+                let hidden_rows = deferred
+                    .iter()
+                    .map(|(_, tail)| &tail.prev_hidden)
+                    .collect::<Vec<_>>();
+                let shifted_hidden = mlx::ops::shape::concatenate_on(
+                    &hidden_rows,
+                    0,
+                    mlx::StreamOrDevice::default(),
+                )?;
+                let position_ids = if model.requires_position_ids() {
+                    let position_rows = deferred
+                        .iter()
+                        .map(|(_, tail)| &tail.position_ids)
+                        .collect::<Vec<_>>();
+                    mlx::ops::shape::concatenate_on(
+                        &position_rows,
+                        1,
+                        mlx::StreamOrDevice::default(),
+                    )?
+                } else {
+                    deferred[0].1.position_ids.clone()
+                };
+                let mtp_hidden = model.mtp_forward_hidden_on(
+                    mtp,
+                    &shifted_hidden,
+                    &token_arr,
+                    &position_ids,
+                    None,
+                    Some(&mut cache),
+                    mlx::StreamOrDevice::default(),
+                )?;
+                mlx::transforms::eval(&[&mtp_hidden])?;
+                for (compact_idx, &row_idx) in row_indices.iter().enumerate() {
+                    let row = mtp_state.rows.get_mut(&row_idx).ok_or_else(|| {
+                        anyhow!(
+                            "commit_prompt_lookup_mtp_shadow: deferred row {row_idx} disappeared"
+                        )
+                    })?;
+                    row.mtp_cache.adopt_row_from(&cache, 0, compact_idx)?;
+                    row.deferred_tail_commit = None;
+                }
+                committed_tokens = committed_tokens.saturating_add(tokens.len() as u64);
+            }
+
+            for input in accepted {
+                anyhow::ensure!(
+                    !input.input_tokens.is_empty(),
+                    "commit_prompt_lookup_mtp_shadow: row {} accepted input cannot be empty",
+                    input.row_idx
+                );
+                let row = mtp_state.rows.get_mut(&input.row_idx).ok_or_else(|| {
+                    anyhow!(
+                        "commit_prompt_lookup_mtp_shadow: row {} disappeared",
+                        input.row_idx
+                    )
+                })?;
+                let prev_hidden = row.last_hidden.clone();
+                commit_mtp_cache_hidden_prefix(
+                    model,
+                    mtp,
+                    &mut row.mtp_cache,
+                    &prev_hidden,
+                    &input.input_tokens,
+                    &input.input_hidden,
+                    &input.position_ids,
+                    mlx::StreamOrDevice::default(),
+                )?;
+                let accepted_last_hidden = slice_hidden_row_position(
+                    &input.input_hidden,
+                    0,
+                    input.input_tokens.len() - 1,
+                    mlx::StreamOrDevice::default(),
+                )?;
+                row.last_hidden = accepted_last_hidden;
+                row.deferred_tail_commit = None;
+                committed_tokens = committed_tokens.saturating_add(input.input_tokens.len() as u64);
+            }
+            Ok(())
+        })();
+
+        if let Err(error) = commit_result {
+            let mut rollback_error = None;
+            for (row_idx, snapshot, last_hidden, deferred_tail_commit) in snapshots {
+                let Some(row) = mtp_state.rows.get_mut(&row_idx) else {
+                    rollback_error = Some(anyhow!(
+                        "commit_prompt_lookup_mtp_shadow rollback lost row {row_idx}"
+                    ));
+                    continue;
+                };
+                if let Err(error) = row.mtp_cache.restore(&snapshot) {
+                    rollback_error = Some(error.context(format!(
+                        "commit_prompt_lookup_mtp_shadow rollback row {row_idx}"
+                    )));
+                }
+                row.last_hidden = last_hidden;
+                row.deferred_tail_commit = deferred_tail_commit;
+            }
+            return match rollback_error {
+                Some(rollback_error) => Err(error.context(format!(
+                    "MTP shadow commit failed and rollback failed: {rollback_error:#}"
+                ))),
+                None => Err(error),
+            };
+        }
+
+        stats.mtp_shadow_commit_windows = stats.mtp_shadow_commit_windows.saturating_add(1);
+        stats.mtp_shadow_commit_tokens = stats
+            .mtp_shadow_commit_tokens
+            .saturating_add(committed_tokens);
+        add_elapsed_us(&mut stats.mtp_shadow_commit_us, commit_started);
+        add_mtp_decode_cache_commit_us(&mut mtp_state.stats, commit_started);
+        Ok(())
+    }
+
     pub fn prefill_admitted_mtp_single(
         &mut self,
         model: &M,
@@ -8175,8 +8757,37 @@ impl<M: Model> Scheduler<M> {
     where
         M: MtpSpeculativeModel + DenseVlMethods,
     {
+        self.prefill_admitted_mtp_single_with_options(
+            model,
+            mtp,
+            cfg,
+            None,
+            true,
+            MtpTargetProjection::Neural,
+        )
+    }
+
+    fn prefill_admitted_mtp_single_with_options(
+        &mut self,
+        model: &M,
+        mtp: &M::MtpHead,
+        cfg: MtpSpeculativeConfig,
+        forced_current: Option<u32>,
+        fill_initial_window: bool,
+        projection: MtpTargetProjection,
+    ) -> Result<Vec<StepEvent>>
+    where
+        M: MtpSpeculativeModel + DenseVlMethods,
+    {
         self.ensure_not_poisoned()?;
-        match self.prefill_admitted_mtp_single_inner(model, mtp, cfg) {
+        match self.prefill_admitted_mtp_single_inner(
+            model,
+            mtp,
+            cfg,
+            forced_current,
+            fill_initial_window,
+            projection,
+        ) {
             Ok(events) => {
                 self.commit_all_governor_admissions();
                 Ok(events)
@@ -8211,6 +8822,9 @@ impl<M: Model> Scheduler<M> {
         model: &M,
         mtp: &M::MtpHead,
         cfg: MtpSpeculativeConfig,
+        forced_current: Option<u32>,
+        fill_initial_window: bool,
+        projection: MtpTargetProjection,
     ) -> Result<Vec<StepEvent>>
     where
         M: MtpSpeculativeModel + DenseVlMethods,
@@ -8510,19 +9124,28 @@ impl<M: Model> Scheduler<M> {
         let last_prompt_hidden = last_prompt_hidden
             .ok_or_else(|| anyhow!("prefill_admitted_mtp_single produced no prompt hidden"))?;
 
-        let projection_start = Instant::now();
-        let first_logits =
-            model.project_hidden_on(&last_prompt_hidden, mlx::StreamOrDevice::default())?;
-        add_elapsed_us(&mut stats.projection_us, projection_start);
-        let mut compact_prng = self.compact_prng_state_for_rows(&[row_idx])?;
-        let sampling_start = Instant::now();
-        let first_tokens =
-            sample_logits_positions(&first_logits, sampler, &prompt_ids, &mut compact_prng)?;
-        add_elapsed_us(&mut stats.sampling_us, sampling_start);
-        self.scatter_prng_state_from_rows(&[row_idx], &compact_prng)?;
-        let first_token = *first_tokens
-            .first()
-            .ok_or_else(|| anyhow!("prefill_admitted_mtp_single produced no first token"))?;
+        let first_token = match forced_current {
+            Some(token) => token,
+            None => {
+                let projection_start = Instant::now();
+                let first_logits =
+                    model.project_hidden_on(&last_prompt_hidden, mlx::StreamOrDevice::default())?;
+                add_elapsed_us(&mut stats.projection_us, projection_start);
+                let mut compact_prng = self.compact_prng_state_for_rows(&[row_idx])?;
+                let sampling_start = Instant::now();
+                let first_tokens = sample_logits_positions(
+                    &first_logits,
+                    sampler,
+                    &prompt_ids,
+                    &mut compact_prng,
+                )?;
+                add_elapsed_us(&mut stats.sampling_us, sampling_start);
+                self.scatter_prng_state_from_rows(&[row_idx], &compact_prng)?;
+                *first_tokens
+                    .first()
+                    .ok_or_else(|| anyhow!("prefill_admitted_mtp_single produced no first token"))?
+            }
+        };
 
         let finish_reason = {
             let state = self.slots[row_idx]
@@ -8561,8 +9184,8 @@ impl<M: Model> Scheduler<M> {
             stats,
         });
 
-        if finish_reason.is_none() {
-            self.fill_mtp_window_single(row_idx, model, mtp)?;
+        if finish_reason.is_none() && fill_initial_window {
+            self.fill_mtp_window_single_with_projection(row_idx, model, mtp, projection)?;
         }
 
         Ok(vec![StepEvent {
@@ -8581,10 +9204,45 @@ impl<M: Model> Scheduler<M> {
     where
         M: MtpSpeculativeModel + DenseVlMethods,
     {
+        self.prefill_admitted_mtp_batch_with_projection(
+            model,
+            mtp,
+            cfg,
+            MtpTargetProjection::Neural,
+        )
+    }
+
+    pub fn prefill_admitted_mtp_batch_with_canonical_verify(
+        &mut self,
+        model: &M,
+        mtp: &M::MtpHead,
+        cfg: MtpSpeculativeConfig,
+    ) -> Result<Vec<StepEvent>>
+    where
+        M: MtpSpeculativeModel + DenseVlMethods,
+    {
+        self.prefill_admitted_mtp_batch_with_projection(
+            model,
+            mtp,
+            cfg,
+            MtpTargetProjection::Canonical,
+        )
+    }
+
+    fn prefill_admitted_mtp_batch_with_projection(
+        &mut self,
+        model: &M,
+        mtp: &M::MtpHead,
+        cfg: MtpSpeculativeConfig,
+        projection: MtpTargetProjection,
+    ) -> Result<Vec<StepEvent>>
+    where
+        M: MtpSpeculativeModel + DenseVlMethods,
+    {
         self.ensure_not_poisoned()?;
         let cold_materialization =
             self.begin_cold_materialization(self.active_materialization_components(true))?;
-        match self.prefill_admitted_mtp_batch_inner(model, mtp, cfg) {
+        match self.prefill_admitted_mtp_batch_inner(model, mtp, cfg, projection) {
             Ok(events) => {
                 self.commit_all_governor_admissions();
                 if let Some(guard) = cold_materialization {
@@ -8608,6 +9266,7 @@ impl<M: Model> Scheduler<M> {
         model: &M,
         mtp: &M::MtpHead,
         cfg: MtpSpeculativeConfig,
+        projection: MtpTargetProjection,
     ) -> Result<Vec<StepEvent>>
     where
         M: MtpSpeculativeModel + DenseVlMethods,
@@ -8672,7 +9331,7 @@ impl<M: Model> Scheduler<M> {
         for (dst_row, &row_idx) in active_rows.iter().enumerate() {
             let mut temp = self.temp_mtp_scheduler_for_row(row_idx)?;
             let event = temp
-                .prefill_admitted_mtp_single(model, mtp, cfg)
+                .prefill_admitted_mtp_single_with_options(model, mtp, cfg, None, true, projection)
                 .map_err(|err| anyhow!("prefill_admitted_mtp_batch row {row_idx}: {err:#}"))?;
             let temp_cache = temp.cache.take().ok_or_else(|| {
                 anyhow!("prefill_admitted_mtp_batch row {row_idx}: temp cache absent")
@@ -8760,6 +9419,128 @@ impl<M: Model> Scheduler<M> {
         Ok(temp)
     }
 
+    fn temp_mtp_rebase_scheduler_for_row(&self, row_idx: usize) -> Result<Scheduler<M>> {
+        let state = self.slots[row_idx]
+            .as_ref()
+            .ok_or_else(|| anyhow!("temp_mtp_rebase_scheduler_for_row: row slot absent"))?;
+        let expected_current = *state
+            .generated_tokens
+            .last()
+            .ok_or_else(|| anyhow!("temp_mtp_rebase_scheduler_for_row: current token absent"))?;
+        anyhow::ensure!(
+            !state.stop_token_ids.contains(&expected_current),
+            "temp_mtp_rebase_scheduler_for_row: unfinished request current token is a stop token"
+        );
+        let mut temp = self.temp_scheduler_with_parent_budget::<M>()?;
+        if let Some(config) = self.paged_prefix_cache.as_ref() {
+            temp.enable_paged_prefix_cache(config.clone())?;
+        }
+        if let Some(prefix_lru_cache) = self.prefix_lru_cache.as_ref() {
+            temp.share_prefix_lru_cache(Arc::clone(prefix_lru_cache));
+        }
+        let temp_id = temp.admit(generate_neural_rebase_request_from_state(state)?)?;
+        let temp_state = temp.slots[0]
+            .as_mut()
+            .ok_or_else(|| anyhow!("temp_mtp_rebase_scheduler_for_row: temp slot absent"))?;
+        temp_state.id = state.id;
+        temp.request_block_tables.remove(&temp_id);
+        temp.request_block_tables
+            .insert(state.id, RequestBlockTable::new(state.id));
+        anyhow::ensure!(
+            temp_id == RequestId(0),
+            "temp_mtp_rebase_scheduler_for_row: unexpected temp id {}",
+            temp_id.0
+        );
+        Ok(temp)
+    }
+
+    pub fn rebase_mtp_from_committed_history(&mut self, model: &M, mtp: &M::MtpHead) -> Result<()>
+    where
+        M: MtpSpeculativeModel + DenseVlMethods,
+    {
+        self.ensure_not_poisoned()?;
+        anyhow::ensure!(
+            self.phase == Phase::Decoding,
+            "rebase_mtp_from_committed_history illegal in {:?} phase",
+            self.phase
+        );
+        let mtp_state = self
+            .mtp_state
+            .as_ref()
+            .ok_or_else(|| anyhow!("rebase_mtp_from_committed_history: MTP state absent"))?;
+        let cfg = mtp_state.cfg;
+        let mut stats = mtp_state.stats.clone();
+        let active_rows = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(row, slot)| matches!(slot, Some(state) if !state.finished).then_some(row))
+            .collect::<Vec<_>>();
+        anyhow::ensure!(
+            !active_rows.is_empty(),
+            "rebase_mtp_from_committed_history requires active rows"
+        );
+
+        let mut row_states = HashMap::with_capacity(active_rows.len());
+        anyhow::ensure!(
+            self.cache.is_some(),
+            "rebase_mtp_from_committed_history: main cache absent"
+        );
+        anyhow::ensure!(
+            self.cache_rows == active_rows,
+            "rebase_mtp_from_committed_history: live cache rows {:?} do not match active rows {:?}",
+            self.cache_rows,
+            active_rows
+        );
+        for &row_idx in &active_rows {
+            let expected_current = *self.slots[row_idx]
+                .as_ref()
+                .and_then(|state| state.generated_tokens.last())
+                .ok_or_else(|| {
+                    anyhow!("rebase_mtp_from_committed_history: row {row_idx} current token absent")
+                })?;
+            let mut temp = self.temp_mtp_rebase_scheduler_for_row(row_idx)?;
+            let events = temp
+                .prefill_admitted_mtp_single_with_options(
+                    model,
+                    mtp,
+                    cfg,
+                    Some(expected_current),
+                    false,
+                    MtpTargetProjection::Neural,
+                )
+                .map_err(|error| {
+                    anyhow!("rebase_mtp_from_committed_history row {row_idx}: {error:#}")
+                })?;
+            anyhow::ensure!(
+                events.len() == 1
+                    && events[0].token == expected_current
+                    && events[0].finish_reason.is_none(),
+                "rebase_mtp_from_committed_history row {row_idx}: forced boundary token was not installed"
+            );
+            let mut temp_state = temp.mtp_state.take().ok_or_else(|| {
+                anyhow!("rebase_mtp_from_committed_history row {row_idx}: temp MTP state absent")
+            })?;
+            add_mtp_stats(&mut stats, temp_state.stats);
+            let row_state = temp_state.rows.remove(&0).ok_or_else(|| {
+                anyhow!("rebase_mtp_from_committed_history row {row_idx}: temp row state absent")
+            })?;
+            anyhow::ensure!(
+                row_state.pending_tokens.is_empty() && row_state.deferred_tail_commit.is_none(),
+                "rebase_mtp_from_committed_history row {row_idx}: rebase must end at a pure batch-window boundary"
+            );
+            row_states.insert(row_idx, row_state);
+        }
+
+        self.mtp_state = Some(SchedulerMtpState {
+            cfg,
+            rows: row_states,
+            stats,
+        });
+        self.refresh_active_kv_residency_stats();
+        Ok(())
+    }
+
     fn install_temp_mtp_step_result(
         &mut self,
         model: &M,
@@ -8843,7 +9624,7 @@ impl<M: Model> Scheduler<M> {
         M: MtpSpeculativeModel,
     {
         self.ensure_not_poisoned()?;
-        match self.step_mtp_batch_inner(model, mtp) {
+        match self.step_mtp_batch_inner(model, mtp, true, MtpTargetProjection::Neural) {
             Ok(events) => Ok(events),
             Err(e) => {
                 self.poisoned = true;
@@ -8852,7 +9633,60 @@ impl<M: Model> Scheduler<M> {
         }
     }
 
-    fn step_mtp_batch_inner(&mut self, model: &M, mtp: &M::MtpHead) -> Result<Vec<StepEvent>>
+    pub fn step_mtp_batch_without_postfill(
+        &mut self,
+        model: &M,
+        mtp: &M::MtpHead,
+    ) -> Result<Vec<StepEvent>>
+    where
+        M: MtpSpeculativeModel,
+    {
+        self.ensure_not_poisoned()?;
+        match self.step_mtp_batch_inner(model, mtp, false, MtpTargetProjection::Neural) {
+            Ok(events) => Ok(events),
+            Err(e) => {
+                self.poisoned = true;
+                Err(e)
+            }
+        }
+    }
+
+    pub fn step_mtp_batch_without_postfill_with_canonical_verify(
+        &mut self,
+        model: &M,
+        mtp: &M::MtpHead,
+    ) -> Result<Vec<StepEvent>>
+    where
+        M: MtpSpeculativeModel,
+    {
+        self.ensure_not_poisoned()?;
+        match self.step_mtp_batch_inner(model, mtp, false, MtpTargetProjection::Canonical) {
+            Ok(events) => Ok(events),
+            Err(e) => {
+                self.poisoned = true;
+                Err(e)
+            }
+        }
+    }
+
+    pub fn mtp_at_batch_window_boundary(&self) -> bool {
+        self.mtp_state.as_ref().is_some_and(|state| {
+            state.rows.iter().all(|(&row_idx, row)| {
+                self.slots
+                    .get(row_idx)
+                    .and_then(Option::as_ref)
+                    .is_none_or(|slot| slot.finished || row.pending_tokens.is_empty())
+            })
+        })
+    }
+
+    fn step_mtp_batch_inner(
+        &mut self,
+        model: &M,
+        mtp: &M::MtpHead,
+        refill_after_emit: bool,
+        projection: MtpTargetProjection,
+    ) -> Result<Vec<StepEvent>>
     where
         M: MtpSpeculativeModel,
     {
@@ -8910,6 +9744,7 @@ impl<M: Model> Scheduler<M> {
             &mut mtp_state.rows,
             model,
             mtp,
+            projection,
         )?;
 
         for &row_idx in &active_rows {
@@ -8936,14 +9771,17 @@ impl<M: Model> Scheduler<M> {
                     .is_some_and(|row| row.pending_tokens.is_empty())
             })
             .collect::<Vec<_>>();
-        self.fill_mtp_windows_batched(
-            &rows_needing_postfill,
-            cfg,
-            &mut mtp_state.stats,
-            &mut mtp_state.rows,
-            model,
-            mtp,
-        )?;
+        if refill_after_emit {
+            self.fill_mtp_windows_batched(
+                &rows_needing_postfill,
+                cfg,
+                &mut mtp_state.stats,
+                &mut mtp_state.rows,
+                model,
+                mtp,
+                projection,
+            )?;
+        }
 
         let any_unfinished = self
             .slots
@@ -9158,6 +9996,7 @@ impl<M: Model> Scheduler<M> {
         row_states: &mut HashMap<usize, SchedulerMtpRowState>,
         model: &M,
         mtp: &M::MtpHead,
+        projection: MtpTargetProjection,
     ) -> Result<()>
     where
         M: MtpSpeculativeModel,
@@ -9165,7 +10004,6 @@ impl<M: Model> Scheduler<M> {
         if rows_to_fill.is_empty() {
             return Ok(());
         }
-
         let max_supported_draft_tokens =
             mtp_supported_max_draft_tokens(self.cache.as_deref(), cfg.max_draft_tokens);
         let stats_before_batch = stats.clone();
@@ -9214,7 +10052,6 @@ impl<M: Model> Scheduler<M> {
         if contexts.is_empty() {
             return Ok(());
         }
-
         let tail_commit_mode = if Self::should_use_row_cache_mtp_draft(&contexts) {
             self.draft_mtp_windows_from_row_caches(&mut contexts, stats, row_states, model, mtp)?;
             MtpBatchedTailCommitMode::PerRowCache
@@ -9402,21 +10239,9 @@ impl<M: Model> Scheduler<M> {
             return Ok(());
         }
 
-        let verify_rows = if contexts.len() < active_rows.len() {
-            contexts.iter().map(|ctx| ctx.row_idx).collect::<Vec<_>>()
-        } else {
-            active_rows.clone()
-        };
-        let saved_full_cache = if verify_rows.len() < active_rows.len() {
-            Some(self.compact_main_cache_to_rows(
-                model,
-                &verify_rows,
-                "fill_mtp_windows_batched compact verify",
-            )?)
-        } else {
-            self.rebuild_cache_layout(model, &active_rows)?;
-            None
-        };
+        // Preserve the qualified model-facing batch width. Rows without a new
+        // draft window use zero sequence lengths in the verify tensors.
+        self.rebuild_cache_layout(model, &active_rows)?;
 
         let verify_result = (|| -> Result<()> {
             let cache_row_for_ctx = contexts
@@ -9483,39 +10308,36 @@ impl<M: Model> Scheduler<M> {
                 )?
             };
             add_elapsed_us(&mut stats.verify_forward_us, verify_forward_start);
-
             let projection_start = Instant::now();
-            let verified_logits = model
-                .project_mtp_verify_hidden_on(&verified_hidden, mlx::StreamOrDevice::default())?;
+            let verified_logits = project_mtp_target_hidden(
+                model,
+                &verified_hidden,
+                projection,
+                mlx::StreamOrDevice::default(),
+            )?;
             add_elapsed_us(&mut stats.projection_us, projection_start);
-
+            let logits_shape = verified_logits.shape();
+            let logits_dims = logits_shape.as_slice();
+            if logits_dims.len() != 3
+                || logits_dims[0] as usize != b
+                || logits_dims[1] as usize != max_verify_len
+            {
+                return Err(anyhow!(
+                    "fill_mtp_windows_batched: verified logits shape {:?} does not match batch {} max_verify_len {}",
+                    logits_dims,
+                    b,
+                    max_verify_len
+                ));
+            }
             let sampling_start = Instant::now();
             let verified_ids = mlx::ops::reduction::argmax(&verified_logits, -1, false)?;
             add_elapsed_us(&mut stats.sampling_us, sampling_start);
-
-            let logits_shape = verified_logits.shape();
-            let logits_dims = logits_shape.as_slice();
-            if logits_dims.len() != 3 {
+            if verified_ids.size() != b * max_verify_len {
                 return Err(anyhow!(
-                    "fill_mtp_windows_batched: expected verified logits [B,S,V], got {:?}",
-                    logits_dims
-                ));
-            }
-            let logits_batch = logits_dims[0] as usize;
-            let logits_seq = logits_dims[1] as usize;
-            if logits_batch != b || logits_seq != max_verify_len {
-                return Err(anyhow!(
-                "fill_mtp_windows_batched: verified logits shape {:?} does not match batch {} max_verify_len {}",
-                logits_dims,
-                b,
-                max_verify_len
-            ));
-            }
-            if verified_ids.size() != logits_batch * logits_seq {
-                return Err(anyhow!(
-                    "fill_mtp_windows_batched: argmax returned {} tokens for logits shape {:?}",
+                    "fill_mtp_windows_batched: argmax returned {} tokens for batch {} max_verify_len {}",
                     verified_ids.size(),
-                    logits_dims
+                    b,
+                    max_verify_len
                 ));
             }
 
@@ -9636,39 +10458,56 @@ impl<M: Model> Scheduler<M> {
                         replay_lens[compact_row] = accepted_len as i32;
                         replay_starts[compact_row] = ctx.verify_start_pos;
                     }
-                    let replay_arr: Array =
-                        (&replay_flat[..], &[b as i32, max_replay_len as i32][..]).try_into()?;
-                    let replay_pos_ids = if model.requires_position_ids() {
-                        build_mtp_batched_position_ids(
-                            &replay_starts,
-                            &replay_lens,
-                            max_replay_len as i32,
-                        )?
-                    } else {
-                        self.reusable_dummy_position_ids()?
-                    };
-                    let replay_decode_mask = {
-                        let cache = self.cache.as_ref().ok_or_else(|| {
-                            anyhow!("fill_mtp_windows_batched: main cache absent")
-                        })?;
-                        maybe_build_sparse_decode_mask(cache, &replay_lens)?
-                    };
-                    let replay_hidden = {
-                        let _verify_qmm = crate::nn::verify_qmm::armed_scope();
-                        let cache = self.cache.as_mut().ok_or_else(|| {
-                            anyhow!("fill_mtp_windows_batched: main cache absent")
-                        })?;
-                        model.forward_text_hidden(
-                            &replay_arr,
-                            &replay_pos_ids,
-                            Some(&replay_lens),
-                            replay_decode_mask.as_ref(),
-                            Some(cache.as_mut_slice()),
-                            mlx::StreamOrDevice::default(),
-                        )?
-                    };
+                    let mut replay_hidden_steps = Vec::with_capacity(max_replay_len);
+                    for depth in 0..max_replay_len {
+                        let mut step_tokens = vec![0_u32; b];
+                        let mut step_lens = vec![0_i32; b];
+                        let mut step_starts = vec![0_i32; b];
+                        for row in 0..b {
+                            if depth < replay_lens[row] as usize {
+                                step_tokens[row] = replay_flat[row * max_replay_len + depth];
+                                step_lens[row] = 1;
+                                step_starts[row] = replay_starts[row] + depth as i32;
+                            }
+                        }
+                        let step_arr: Array =
+                            (&step_tokens[..], &[b as i32, 1_i32][..]).try_into()?;
+                        let replay_position_ids = if model.requires_position_ids() {
+                            build_mtp_batched_position_ids(&step_starts, &step_lens, 1)?
+                        } else {
+                            self.reusable_dummy_position_ids()?
+                        };
+                        let replay_decode_mask = {
+                            let cache = self.cache.as_ref().ok_or_else(|| {
+                                anyhow!("fill_mtp_windows_batched: main cache absent")
+                            })?;
+                            maybe_build_sparse_decode_mask(cache, &step_lens)?
+                        };
+                        let replay_hidden = {
+                            let _verify_qmm = crate::nn::verify_qmm::armed_scope();
+                            let cache = self.cache.as_mut().ok_or_else(|| {
+                                anyhow!("fill_mtp_windows_batched: main cache absent")
+                            })?;
+                            model.forward_text_hidden(
+                                &step_arr,
+                                &replay_position_ids,
+                                Some(&step_lens),
+                                replay_decode_mask.as_ref(),
+                                Some(cache.as_mut_slice()),
+                                mlx::StreamOrDevice::default(),
+                            )?
+                        };
+                        mlx::transforms::eval(&[&replay_hidden])?;
+                        replay_hidden_steps.push(replay_hidden);
+                    }
+                    let replay_hidden_refs = replay_hidden_steps.iter().collect::<Vec<_>>();
+                    let replay_hidden = mlx::ops::shape::concatenate_on(
+                        &replay_hidden_refs,
+                        1,
+                        mlx::StreamOrDevice::default(),
+                    )?;
                     add_elapsed_us(&mut stats.main_rollback_us, rollback_start);
-                    (replay_hidden, replay_pos_ids)
+                    (replay_hidden, verify_pos_ids.clone())
                 };
 
             let mut policy_inputs = Vec::with_capacity(contexts.len());
@@ -9886,28 +10725,7 @@ impl<M: Model> Scheduler<M> {
             Ok(())
         })();
 
-        match (verify_result, saved_full_cache) {
-            (Ok(()), Some((old_cache, old_rows, _old_snapshots))) => {
-                self.merge_compact_main_cache_into_rows(
-                    model,
-                    old_cache,
-                    old_rows,
-                    &active_rows,
-                    "fill_mtp_windows_batched compact verify",
-                )?;
-            }
-            (Err(err), Some((old_cache, old_rows, old_snapshots))) => {
-                self.rollback_compact_main_cache(
-                    old_cache,
-                    old_rows,
-                    &old_snapshots,
-                    "fill_mtp_windows_batched compact verify",
-                )?;
-                return Err(err);
-            }
-            (Err(err), None) => return Err(err),
-            (Ok(()), None) => {}
-        }
+        verify_result?;
 
         self.refresh_active_kv_residency_stats();
         Ok(())
@@ -9997,6 +10815,24 @@ impl<M: Model> Scheduler<M> {
     where
         M: MtpSpeculativeModel,
     {
+        self.fill_mtp_window_single_with_projection(
+            row_idx,
+            model,
+            mtp,
+            MtpTargetProjection::Neural,
+        )
+    }
+
+    fn fill_mtp_window_single_with_projection(
+        &mut self,
+        row_idx: usize,
+        model: &M,
+        mtp: &M::MtpHead,
+        projection: MtpTargetProjection,
+    ) -> Result<()>
+    where
+        M: MtpSpeculativeModel,
+    {
         let mut mtp_state = self
             .mtp_state
             .take()
@@ -10007,7 +10843,10 @@ impl<M: Model> Scheduler<M> {
             .ok_or_else(|| anyhow!("fill_mtp_window_single: row MTP state absent"))?;
         let result = self.fill_mtp_window_single_with_state(
             row_idx,
-            mtp_state.cfg,
+            MtpSingleWindowConfig {
+                speculative: mtp_state.cfg,
+                projection,
+            },
             &mut mtp_state.stats,
             &mut row_state,
             model,
@@ -10021,7 +10860,7 @@ impl<M: Model> Scheduler<M> {
     fn fill_mtp_window_single_with_state(
         &mut self,
         row_idx: usize,
-        cfg: MtpSpeculativeConfig,
+        window: MtpSingleWindowConfig,
         stats: &mut MtpSpeculativeStats,
         row_state: &mut SchedulerMtpRowState,
         model: &M,
@@ -10055,8 +10894,10 @@ impl<M: Model> Scheduler<M> {
         history.extend_from_slice(&generated_tokens);
 
         let stats_before_window = stats.clone();
-        let max_supported_draft_tokens =
-            mtp_supported_max_draft_tokens(self.cache.as_deref(), cfg.max_draft_tokens);
+        let max_supported_draft_tokens = mtp_supported_max_draft_tokens(
+            self.cache.as_deref(),
+            window.speculative.max_draft_tokens,
+        );
         let draft_budget = row_state
             .adaptive_draft_tokens
             .clamp(1, max_supported_draft_tokens)
@@ -10113,8 +10954,8 @@ impl<M: Model> Scheduler<M> {
             cache.iter().map(LayerCache::snapshot).collect::<Vec<_>>()
         };
         let verify_forward_start = Instant::now();
+        let _verify_qmm = crate::nn::verify_qmm::armed_scope();
         let verified_hidden = {
-            let _verify_qmm = crate::nn::verify_qmm::armed_scope();
             let cache = self
                 .cache
                 .as_mut()
@@ -10131,8 +10972,12 @@ impl<M: Model> Scheduler<M> {
         add_elapsed_us(&mut stats.verify_forward_us, verify_forward_start);
         let (draft_tokens, resolution) = if sampler.is_pipelinable() {
             let projection_start = Instant::now();
-            let verified_logits = model
-                .project_mtp_verify_hidden_on(&verified_hidden, mlx::StreamOrDevice::default())?;
+            let verified_logits = project_mtp_target_hidden(
+                model,
+                &verified_hidden,
+                window.projection,
+                mlx::StreamOrDevice::default(),
+            )?;
             add_elapsed_us(&mut stats.projection_us, projection_start);
             let sampling_start = Instant::now();
             let verified_ids = mlx::ops::reduction::argmax(&verified_logits, -1, false)?;
@@ -10151,8 +10996,12 @@ impl<M: Model> Scheduler<M> {
             resolve_packed_greedy_acceptance(&packed, verify_len + 1, 0, draft_budget)?
         } else {
             let projection_start = Instant::now();
-            let verified_logits = model
-                .project_mtp_verify_hidden_on(&verified_hidden, mlx::StreamOrDevice::default())?;
+            let verified_logits = project_mtp_target_hidden(
+                model,
+                &verified_hidden,
+                window.projection,
+                mlx::StreamOrDevice::default(),
+            )?;
             add_elapsed_us(&mut stats.projection_us, projection_start);
             let sampling_start = Instant::now();
             let verified_tokens =
@@ -13455,13 +14304,39 @@ impl Scheduler<crate::models::Gemma4Model> {
         drafter: &crate::models::gemma4::Gemma4AssistantModel,
     ) -> Result<Vec<StepEvent>> {
         self.ensure_not_poisoned()?;
-        match self.step_gemma4_drafter_batch_inner(model, drafter) {
+        match self.step_gemma4_drafter_batch_inner(model, drafter, true) {
             Ok(events) => Ok(events),
             Err(e) => {
                 self.poisoned = true;
                 Err(e)
             }
         }
+    }
+
+    pub fn step_gemma4_drafter_batch_without_postfill(
+        &mut self,
+        model: &crate::models::Gemma4Model,
+        drafter: &crate::models::gemma4::Gemma4AssistantModel,
+    ) -> Result<Vec<StepEvent>> {
+        self.ensure_not_poisoned()?;
+        match self.step_gemma4_drafter_batch_inner(model, drafter, false) {
+            Ok(events) => Ok(events),
+            Err(e) => {
+                self.poisoned = true;
+                Err(e)
+            }
+        }
+    }
+
+    pub fn gemma4_drafter_at_batch_window_boundary(&self) -> bool {
+        self.gemma4_drafter_state.as_ref().is_some_and(|state| {
+            state.rows.iter().all(|(&row_idx, row)| {
+                self.slots
+                    .get(row_idx)
+                    .and_then(Option::as_ref)
+                    .is_none_or(|slot| slot.finished || row.pending_tokens.is_empty())
+            })
+        })
     }
 
     fn prefill_admitted_gemma4_drafter_batch_inner(
@@ -13498,7 +14373,8 @@ impl Scheduler<crate::models::Gemma4Model> {
             ));
         }
         if active_rows.len() == 1 {
-            return self.prefill_admitted_gemma4_drafter_single(model, drafter, cfg, self.b_max);
+            return self
+                .prefill_admitted_gemma4_drafter_single(model, drafter, cfg, self.b_max, true);
         }
         for &row_idx in &active_rows {
             let state = self.slots[row_idx]
@@ -13533,6 +14409,7 @@ impl Scheduler<crate::models::Gemma4Model> {
                     drafter,
                     cfg,
                     scheduler_batch_capacity,
+                    true,
                 )
                 .map_err(|err| {
                     anyhow!("prefill_admitted_gemma4_drafter_batch row {row_idx}: {err:#}")
@@ -13618,6 +14495,7 @@ impl Scheduler<crate::models::Gemma4Model> {
         drafter: &crate::models::gemma4::Gemma4AssistantModel,
         cfg: MtpSpeculativeConfig,
         scheduler_batch_capacity: usize,
+        fill_initial_window: bool,
     ) -> Result<Vec<StepEvent>> {
         match self.phase {
             Phase::Idle | Phase::Admitting => {}
@@ -13962,7 +14840,7 @@ impl Scheduler<crate::models::Gemma4Model> {
             stats,
         });
 
-        if finish_reason.is_none() {
+        if finish_reason.is_none() && fill_initial_window {
             self.fill_gemma4_drafter_window_single(
                 row_idx,
                 model,
@@ -13982,6 +14860,7 @@ impl Scheduler<crate::models::Gemma4Model> {
         &mut self,
         model: &crate::models::Gemma4Model,
         drafter: &crate::models::gemma4::Gemma4AssistantModel,
+        refill_after_emit: bool,
     ) -> Result<Vec<StepEvent>> {
         if self.phase != Phase::Decoding {
             return Err(anyhow!(
@@ -14022,7 +14901,7 @@ impl Scheduler<crate::models::Gemma4Model> {
             && self.cache_rows.as_slice() == active_rows.as_slice()
         {
             self.gemma4_drafter_state = Some(drafter_state);
-            return self.step_gemma4_drafter_single(model, drafter);
+            return self.step_gemma4_drafter_single(model, drafter, refill_after_emit);
         }
 
         let rows_needing_prefill = active_rows
@@ -14076,14 +14955,16 @@ impl Scheduler<crate::models::Gemma4Model> {
                     .is_some_and(|row| row.pending_tokens.is_empty())
             })
             .collect::<Vec<_>>();
-        self.fill_gemma4_drafter_windows_batched(
-            &rows_needing_postfill,
-            cfg,
-            &mut drafter_state.stats,
-            &mut drafter_state.rows,
-            model,
-            drafter,
-        )?;
+        if refill_after_emit {
+            self.fill_gemma4_drafter_windows_batched(
+                &rows_needing_postfill,
+                cfg,
+                &mut drafter_state.stats,
+                &mut drafter_state.rows,
+                model,
+                drafter,
+            )?;
+        }
 
         let any_unfinished = self
             .slots
@@ -14503,6 +15384,7 @@ impl Scheduler<crate::models::Gemma4Model> {
         &mut self,
         model: &crate::models::Gemma4Model,
         drafter: &crate::models::gemma4::Gemma4AssistantModel,
+        refill_after_emit: bool,
     ) -> Result<Vec<StepEvent>> {
         if self.phase != Phase::Decoding {
             return Err(anyhow!(
@@ -14563,11 +15445,12 @@ impl Scheduler<crate::models::Gemma4Model> {
 
         if finish_reason.is_some() {
             self.phase = Phase::Finished;
-        } else if self
-            .gemma4_drafter_state
-            .as_ref()
-            .and_then(|state| state.rows.get(&row_idx))
-            .is_some_and(|state| state.pending_tokens.is_empty())
+        } else if refill_after_emit
+            && self
+                .gemma4_drafter_state
+                .as_ref()
+                .and_then(|state| state.rows.get(&row_idx))
+                .is_some_and(|state| state.pending_tokens.is_empty())
         {
             self.fill_gemma4_drafter_window_single(row_idx, model, drafter, self.b_max)?;
         }
@@ -14909,6 +15792,132 @@ impl Scheduler<crate::models::Gemma4Model> {
             temp_id.0
         );
         Ok(temp)
+    }
+
+    fn temp_gemma4_drafter_rebase_scheduler_for_row(
+        &self,
+        row_idx: usize,
+    ) -> Result<Scheduler<crate::models::Gemma4Model>> {
+        let state = self.slots[row_idx].as_ref().ok_or_else(|| {
+            anyhow!("temp_gemma4_drafter_rebase_scheduler_for_row: row slot absent")
+        })?;
+        let expected_current = *state.generated_tokens.last().ok_or_else(|| {
+            anyhow!("temp_gemma4_drafter_rebase_scheduler_for_row: current token absent")
+        })?;
+        anyhow::ensure!(
+            !state.stop_token_ids.contains(&expected_current),
+            "temp_gemma4_drafter_rebase_scheduler_for_row: unfinished request current token is a stop token"
+        );
+        let mut temp = self.temp_scheduler_with_parent_budget::<crate::models::Gemma4Model>()?;
+        if let Some(config) = self.paged_prefix_cache.as_ref() {
+            temp.enable_paged_prefix_cache(config.clone())?;
+        }
+        if let Some(prefix_lru_cache) = self.prefix_lru_cache.as_ref() {
+            temp.share_prefix_lru_cache(Arc::clone(prefix_lru_cache));
+        }
+        if let Some(stats) = self.active_kv_stats.as_ref() {
+            temp.enable_active_kv_offload(self.active_kv_config.clone(), stats.clone())?;
+        }
+        let temp_id = temp.admit(generate_neural_rebase_request_from_state(state)?)?;
+        let temp_state = temp.slots[0].as_mut().ok_or_else(|| {
+            anyhow!("temp_gemma4_drafter_rebase_scheduler_for_row: temp slot absent")
+        })?;
+        temp_state.id = state.id;
+        temp.request_block_tables.remove(&temp_id);
+        temp.request_block_tables
+            .insert(state.id, RequestBlockTable::new(state.id));
+        anyhow::ensure!(
+            temp_id == RequestId(0),
+            "temp_gemma4_drafter_rebase_scheduler_for_row: unexpected temp id {}",
+            temp_id.0
+        );
+        Ok(temp)
+    }
+
+    pub fn rebase_gemma4_drafter_from_committed_history(
+        &mut self,
+        model: &crate::models::Gemma4Model,
+        drafter: &crate::models::gemma4::Gemma4AssistantModel,
+    ) -> Result<()> {
+        self.ensure_not_poisoned()?;
+        anyhow::ensure!(
+            self.phase == Phase::Decoding,
+            "rebase_gemma4_drafter_from_committed_history illegal in {:?} phase",
+            self.phase
+        );
+        let drafter_state = self.gemma4_drafter_state.as_ref().ok_or_else(|| {
+            anyhow!("rebase_gemma4_drafter_from_committed_history: drafter state absent")
+        })?;
+        let cfg = drafter_state.cfg;
+        let mut stats = drafter_state.stats.clone();
+        let active_rows = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(row, slot)| matches!(slot, Some(state) if !state.finished).then_some(row))
+            .collect::<Vec<_>>();
+        anyhow::ensure!(
+            !active_rows.is_empty(),
+            "rebase_gemma4_drafter_from_committed_history requires active rows"
+        );
+
+        let mut row_states = HashMap::with_capacity(active_rows.len());
+        anyhow::ensure!(
+            self.cache.is_some(),
+            "rebase_gemma4_drafter_from_committed_history: main cache absent"
+        );
+        anyhow::ensure!(
+            self.cache_rows == active_rows,
+            "rebase_gemma4_drafter_from_committed_history: live cache rows {:?} do not match active rows {:?}",
+            self.cache_rows,
+            active_rows
+        );
+        for &row_idx in &active_rows {
+            let expected_current = *self.slots[row_idx]
+                .as_ref()
+                .and_then(|state| state.generated_tokens.last())
+                .ok_or_else(|| {
+                    anyhow!(
+                        "rebase_gemma4_drafter_from_committed_history: row {row_idx} current token absent"
+                    )
+                })?;
+            let mut temp = self.temp_gemma4_drafter_rebase_scheduler_for_row(row_idx)?;
+            let events = temp
+                .prefill_admitted_gemma4_drafter_single(model, drafter, cfg, self.b_max, false)
+                .map_err(|error| {
+                    anyhow!("rebase_gemma4_drafter_from_committed_history row {row_idx}: {error:#}")
+                })?;
+            anyhow::ensure!(
+                events.len() == 1
+                    && events[0].token == expected_current
+                    && events[0].finish_reason.is_none(),
+                "rebase_gemma4_drafter_from_committed_history row {row_idx}: regenerated boundary token does not match committed token"
+            );
+            let mut temp_state = temp.gemma4_drafter_state.take().ok_or_else(|| {
+                anyhow!(
+                    "rebase_gemma4_drafter_from_committed_history row {row_idx}: temp drafter state absent"
+                )
+            })?;
+            add_mtp_stats(&mut stats, temp_state.stats);
+            let row_state = temp_state.rows.remove(&0).ok_or_else(|| {
+                anyhow!(
+                    "rebase_gemma4_drafter_from_committed_history row {row_idx}: temp row state absent"
+                )
+            })?;
+            anyhow::ensure!(
+                row_state.pending_tokens.is_empty(),
+                "rebase_gemma4_drafter_from_committed_history row {row_idx}: rebase installed speculative pending tokens"
+            );
+            row_states.insert(row_idx, row_state);
+        }
+
+        self.gemma4_drafter_state = Some(SchedulerGemma4DrafterState {
+            cfg,
+            rows: row_states,
+            stats,
+        });
+        self.refresh_active_kv_residency_stats();
+        Ok(())
     }
 }
 
@@ -16341,6 +17350,7 @@ mod tests {
         text_hidden_batch_sizes: std::sync::Mutex<Vec<i32>>,
         mtp_hidden_seq_lens: std::sync::Mutex<Vec<i32>>,
         mtp_hidden_batch_sizes: std::sync::Mutex<Vec<i32>>,
+        mtp_hidden_inputs: std::sync::Mutex<Vec<Vec<f32>>>,
         vl_hidden_seq_lens: std::sync::Mutex<Vec<i32>>,
         vl_hidden_vision_present: std::sync::Mutex<Vec<bool>>,
         vision_grid_lens: std::sync::Mutex<Vec<usize>>,
@@ -16372,6 +17382,7 @@ mod tests {
                 text_hidden_batch_sizes: std::sync::Mutex::new(Vec::new()),
                 mtp_hidden_seq_lens: std::sync::Mutex::new(Vec::new()),
                 mtp_hidden_batch_sizes: std::sync::Mutex::new(Vec::new()),
+                mtp_hidden_inputs: std::sync::Mutex::new(Vec::new()),
                 vl_hidden_seq_lens: std::sync::Mutex::new(Vec::new()),
                 vl_hidden_vision_present: std::sync::Mutex::new(Vec::new()),
                 vision_grid_lens: std::sync::Mutex::new(Vec::new()),
@@ -16409,6 +17420,7 @@ mod tests {
                 text_hidden_batch_sizes: std::sync::Mutex::new(Vec::new()),
                 mtp_hidden_seq_lens: std::sync::Mutex::new(Vec::new()),
                 mtp_hidden_batch_sizes: std::sync::Mutex::new(Vec::new()),
+                mtp_hidden_inputs: std::sync::Mutex::new(Vec::new()),
                 vl_hidden_seq_lens: std::sync::Mutex::new(Vec::new()),
                 vl_hidden_vision_present: std::sync::Mutex::new(Vec::new()),
                 vision_grid_lens: std::sync::Mutex::new(Vec::new()),
@@ -16426,6 +17438,10 @@ mod tests {
 
         fn mtp_hidden_batch_sizes(&self) -> Vec<i32> {
             self.mtp_hidden_batch_sizes.lock().unwrap().clone()
+        }
+
+        fn mtp_hidden_inputs(&self) -> Vec<Vec<f32>> {
+            self.mtp_hidden_inputs.lock().unwrap().clone()
         }
 
         fn clear_mtp_hidden_trace(&self) {
@@ -16828,6 +17844,10 @@ mod tests {
             let dims = dims.as_slice();
             self.mtp_hidden_seq_lens.lock().unwrap().push(dims[1]);
             self.mtp_hidden_batch_sizes.lock().unwrap().push(dims[0]);
+            self.mtp_hidden_inputs
+                .lock()
+                .unwrap()
+                .push(hidden_states.to_vec::<f32>()?);
             if let Some(cache) = mtp_cache {
                 let batch = dims[0];
                 let seq = dims[1];
@@ -17540,6 +18560,51 @@ mod tests {
 
     #[test]
     #[serial(mlx_metal)]
+    fn prepared_prompt_lookup_proposal_is_consumed_without_requery() {
+        let mut scheduler = Scheduler::<ScriptedMtpSchedulerModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        scheduler
+            .admit(mtp_req(vec![1, 2, 3, 4, 1, 2, 3], 6))
+            .expect("admit");
+        let model = ScriptedMtpSchedulerModel::new(4, Vec::new(), vec![vec![1, 2, 3, 4, 5]]);
+
+        scheduler
+            .prefill_admitted_prompt_lookup(&model, prompt_lookup_cfg())
+            .expect("prompt lookup prefill");
+        assert!(scheduler
+            .prepare_prompt_lookup_batch_window()
+            .expect("prepare lookup window"));
+        assert!(scheduler
+            .prompt_lookup_prepared_window_verify_eligible(&model)
+            .expect("prepared lookup eligibility"));
+        assert_eq!(
+            scheduler
+                .prompt_lookup_stats()
+                .expect("prompt lookup stats")
+                .queries,
+            1
+        );
+
+        let events = scheduler
+            .step_prompt_lookup(&model)
+            .expect("consume prepared lookup window");
+        assert_eq!(events[0].token, 1);
+        assert_eq!(
+            scheduler
+                .prompt_lookup_stats()
+                .expect("prompt lookup stats")
+                .queries,
+            1,
+            "consuming a prepared proposal must not query the index again"
+        );
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
     fn prompt_lookup_uses_ordinary_decode_while_mid_admit_is_in_flight() {
         let mut scheduler = Scheduler::<ScriptedMtpSchedulerModel>::new(
             2,
@@ -17588,6 +18653,179 @@ mod tests {
             .expect("active lookup row")
             .pending_tokens
             .is_empty());
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn prompt_lookup_mtp_shadow_commit_advances_rows_and_deferred_tail_atomically() {
+        let model = ScriptedMtpSchedulerModel::default();
+        let cfg = MtpSpeculativeConfig::new(4, Sampler::greedy()).expect("MTP config");
+        let last_hidden0 =
+            mlx::Array::zeros((1_i32, 1_i32, 4_i32), mlx::Dtype::Float32).expect("last hidden 0");
+        let last_hidden1 =
+            mlx::Array::zeros((1_i32, 1_i32, 4_i32), mlx::Dtype::Float32).expect("last hidden 1");
+        let mut state = SchedulerMtpState {
+            cfg,
+            rows: HashMap::from([
+                (
+                    0,
+                    SchedulerMtpRowState {
+                        mtp_cache: MtpCache::new_with_cap(1, 1, 1, 1, 1, mlx::Dtype::Bfloat16, 32)
+                            .expect("row 0 cache"),
+                        pending_tokens: VecDeque::new(),
+                        last_hidden: last_hidden0.clone(),
+                        deferred_tail_commit: Some(MtpDeferredTailCommit {
+                            token: 7,
+                            prev_hidden: last_hidden0,
+                            position_ids: build_position_ids(0, 1).expect("tail position"),
+                        }),
+                        adaptive_draft_tokens: 4,
+                        draft_policy: MtpDraftPolicyState::new(4),
+                    },
+                ),
+                (
+                    1,
+                    SchedulerMtpRowState {
+                        mtp_cache: MtpCache::new_with_cap(1, 1, 1, 1, 1, mlx::Dtype::Bfloat16, 32)
+                            .expect("row 1 cache"),
+                        pending_tokens: VecDeque::new(),
+                        last_hidden: last_hidden1,
+                        deferred_tail_commit: None,
+                        adaptive_draft_tokens: 4,
+                        draft_policy: MtpDraftPolicyState::new(4),
+                    },
+                ),
+            ]),
+            stats: MtpSpeculativeStats::default(),
+        };
+        let hidden0: Array = (
+            &[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0][..],
+            &[1_i32, 2_i32, 4_i32][..],
+        )
+            .try_into()
+            .expect("accepted hidden 0");
+        let hidden1: Array = (
+            &[11.0_f32, 12.0, 13.0, 14.0][..],
+            &[1_i32, 1_i32, 4_i32][..],
+        )
+            .try_into()
+            .expect("accepted hidden 1");
+        let accepted = vec![
+            PromptLookupMtpAcceptedInput {
+                row_idx: 0,
+                input_tokens: vec![8, 9],
+                input_hidden: hidden0,
+                position_ids: build_position_ids(1, 2).expect("row 0 positions"),
+            },
+            PromptLookupMtpAcceptedInput {
+                row_idx: 1,
+                input_tokens: vec![18],
+                input_hidden: hidden1,
+                position_ids: build_position_ids(0, 1).expect("row 1 positions"),
+            },
+        ];
+        let mut stats = PromptLookupStats::default();
+
+        Scheduler::<ScriptedMtpSchedulerModel>::commit_prompt_lookup_mtp_shadow(
+            &model,
+            &FakeMtpHead,
+            &mut state,
+            &accepted,
+            &mut stats,
+        )
+        .expect("MTP shadow commit");
+
+        assert_eq!(state.rows[&0].mtp_cache.offset(), 3);
+        assert_eq!(state.rows[&1].mtp_cache.offset(), 1);
+        assert!(state.rows[&0].deferred_tail_commit.is_none());
+        assert!(state.rows[&1].deferred_tail_commit.is_none());
+        assert_eq!(
+            state.rows[&0]
+                .last_hidden
+                .to_vec::<f32>()
+                .expect("row 0 last hidden"),
+            vec![5.0, 6.0, 7.0, 8.0]
+        );
+        assert_eq!(
+            state.rows[&1]
+                .last_hidden
+                .to_vec::<f32>()
+                .expect("row 1 last hidden"),
+            vec![11.0, 12.0, 13.0, 14.0]
+        );
+        assert_eq!(model.mtp_hidden_batch_sizes(), vec![1, 1, 1]);
+        assert_eq!(model.mtp_hidden_seq_lens(), vec![1, 2, 1]);
+        assert_eq!(
+            model.mtp_hidden_inputs(),
+            vec![
+                vec![0.0; 4],
+                vec![0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 4.0],
+                vec![0.0, 0.0, 0.0, 0.0],
+            ]
+        );
+        assert_eq!(stats.mtp_shadow_commit_windows, 1);
+        assert_eq!(stats.mtp_shadow_commit_tokens, 4);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn prompt_lookup_mtp_shadow_commit_failure_preserves_row_state() {
+        let model = ScriptedMtpSchedulerModel::with_mtp_cache_failure(3);
+        let cfg = MtpSpeculativeConfig::new(4, Sampler::greedy()).expect("MTP config");
+        let last_hidden: Array = (&[1.0_f32, 2.0, 3.0, 4.0][..], &[1_i32, 1_i32, 4_i32][..])
+            .try_into()
+            .expect("last hidden");
+        let mut state = SchedulerMtpState {
+            cfg,
+            rows: HashMap::from([(
+                0,
+                SchedulerMtpRowState {
+                    mtp_cache: MtpCache::new_with_cap(1, 1, 1, 1, 1, mlx::Dtype::Bfloat16, 32)
+                        .expect("row cache"),
+                    pending_tokens: VecDeque::new(),
+                    last_hidden: last_hidden.clone(),
+                    deferred_tail_commit: Some(MtpDeferredTailCommit {
+                        token: 7,
+                        prev_hidden: last_hidden,
+                        position_ids: build_position_ids(0, 1).expect("tail position"),
+                    }),
+                    adaptive_draft_tokens: 4,
+                    draft_policy: MtpDraftPolicyState::new(4),
+                },
+            )]),
+            stats: MtpSpeculativeStats::default(),
+        };
+        let accepted_hidden =
+            mlx::Array::zeros((1_i32, 1_i32, 4_i32), mlx::Dtype::Float32).expect("accepted hidden");
+        let accepted = vec![PromptLookupMtpAcceptedInput {
+            row_idx: 0,
+            input_tokens: vec![8],
+            input_hidden: accepted_hidden,
+            position_ids: build_position_ids(1, 1).expect("accepted position"),
+        }];
+        let mut stats = PromptLookupStats::default();
+
+        let error = Scheduler::<ScriptedMtpSchedulerModel>::commit_prompt_lookup_mtp_shadow(
+            &model,
+            &FakeMtpHead,
+            &mut state,
+            &accepted,
+            &mut stats,
+        )
+        .expect_err("injected cache creation failure");
+
+        assert!(format!("{error:#}").contains("fake mtp cache failure"));
+        assert_eq!(state.rows[&0].mtp_cache.offset(), 0);
+        assert!(state.rows[&0].deferred_tail_commit.is_some());
+        assert_eq!(
+            state.rows[&0]
+                .last_hidden
+                .to_vec::<f32>()
+                .expect("restored last hidden"),
+            vec![1.0, 2.0, 3.0, 4.0]
+        );
+        assert_eq!(stats.mtp_shadow_commit_windows, 0);
+        assert_eq!(stats.mtp_shadow_commit_tokens, 0);
     }
 
     #[test]
@@ -17858,6 +19096,176 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
+    fn prompt_lookup_subset_verify_preserves_the_active_batch_shape() {
+        let mut scheduler = Scheduler::<ScriptedMtpSchedulerModel>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        let id0 = scheduler
+            .admit(mtp_req(vec![1, 2, 3, 4, 1, 2, 3], 6))
+            .expect("admit row 0");
+        let id1 = scheduler
+            .admit(mtp_req(vec![10, 4, 11, 10], 5))
+            .expect("admit row 1");
+        let model = ScriptedMtpSchedulerModel::new_with_first_token_calls(
+            4,
+            2,
+            Vec::new(),
+            vec![vec![1, 2, 3, 4, 5], vec![0, 0, 0, 0, 0]],
+        )
+        .with_required_verify_projection_scope();
+
+        scheduler
+            .prefill_admitted_prompt_lookup(&model, prompt_lookup_cfg())
+            .expect("prompt lookup batch prefill");
+        assert!(
+            scheduler
+                .prepare_prompt_lookup_batch_window()
+                .expect("prepare lookup batch"),
+            "both rows should have a prepared proposal"
+        );
+        {
+            let state = scheduler
+                .prompt_lookup_state
+                .as_mut()
+                .expect("prompt lookup state");
+            let pending_row = state.rows.get_mut(&1).expect("row 1 state");
+            pending_row.prepared_draft_tokens = None;
+            pending_row.pending_tokens.push_back(11);
+        }
+        let row1_offsets_before = scheduler
+            .cache
+            .as_ref()
+            .expect("scheduler cache")
+            .iter()
+            .map(|layer| match layer {
+                LayerCache::Full(kv) => kv.offsets()[1],
+                LayerCache::Linear(gd) => gd.offsets()[1],
+                LayerCache::Mla(_) => panic!("unexpected MLA cache"),
+            })
+            .collect::<Vec<_>>();
+        model.clear_text_hidden_trace();
+
+        let events = scheduler
+            .step_prompt_lookup(&model)
+            .expect("subset prompt lookup verify");
+        assert_eq!(
+            events,
+            vec![
+                StepEvent {
+                    id: id0,
+                    token: 1,
+                    finish_reason: None,
+                },
+                StepEvent {
+                    id: id1,
+                    token: 11,
+                    finish_reason: None,
+                },
+            ]
+        );
+        assert_eq!(
+            model.text_hidden_batch_sizes(),
+            vec![2],
+            "target verify must preserve the qualified active batch width"
+        );
+        assert_eq!(
+            model.text_hidden_seq_lens(),
+            vec![5],
+            "exact verify must keep the common query width"
+        );
+        let row1_offsets_after = scheduler
+            .cache
+            .as_ref()
+            .expect("scheduler cache")
+            .iter()
+            .map(|layer| match layer {
+                LayerCache::Full(kv) => kv.offsets()[1],
+                LayerCache::Linear(gd) => gd.offsets()[1],
+                LayerCache::Mla(_) => panic!("unexpected MLA cache"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            row1_offsets_after, row1_offsets_before,
+            "zero-length verify rows must preserve every cache kind"
+        );
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn prompt_lookup_common_batch_window_waits_instead_of_refilling_a_subset() {
+        let mut scheduler = Scheduler::<ScriptedMtpSchedulerModel>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        let id0 = scheduler
+            .admit(mtp_req(vec![1, 2, 3, 4, 1, 2, 3], 6))
+            .expect("admit row 0");
+        let id1 = scheduler
+            .admit(mtp_req(vec![10, 4, 11, 10], 5))
+            .expect("admit row 1");
+        let model = ScriptedMtpSchedulerModel::new_with_first_token_calls(
+            4,
+            2,
+            Vec::new(),
+            vec![vec![1, 2, 3, 4, 5]],
+        )
+        .with_hybrid_cache()
+        .with_required_verify_projection_scope();
+
+        scheduler
+            .prefill_admitted_prompt_lookup(&model, prompt_lookup_cfg())
+            .expect("prompt lookup batch prefill");
+        assert!(scheduler
+            .prepare_prompt_lookup_batch_window()
+            .expect("prepare lookup batch"));
+        {
+            let state = scheduler
+                .prompt_lookup_state
+                .as_mut()
+                .expect("prompt lookup state");
+            state
+                .rows
+                .get_mut(&0)
+                .expect("row 0 state")
+                .prepared_draft_tokens = None;
+            let row1 = state.rows.get_mut(&1).expect("row 1 state");
+            row1.prepared_draft_tokens = None;
+            row1.pending_tokens.push_back(11);
+        }
+        model.clear_text_hidden_trace();
+
+        let events = scheduler
+            .step_prompt_lookup_batch_window(&model)
+            .expect("drain common lookup batch window");
+        assert_eq!(
+            events,
+            vec![StepEvent {
+                id: id1,
+                token: 11,
+                finish_reason: None,
+            }]
+        );
+        assert!(
+            model.text_hidden_batch_sizes().is_empty(),
+            "an exhausted row must wait instead of starting a subset target verify"
+        );
+        assert_eq!(
+            scheduler
+                .get(id0)
+                .expect("waiting request")
+                .generated_tokens,
+            vec![4]
+        );
+        assert!(scheduler.prompt_lookup_can_start_rolling_mid_admit());
+    }
+
+    #[test]
     fn mtp_full_accept_reuses_draft_cache_and_commits_only_tail() {
         let mut s = Scheduler::<ScriptedMtpSchedulerModel>::new(
             1,
@@ -18007,6 +19415,7 @@ mod tests {
             &mut mtp_state.rows,
             &fill_model,
             &FakeMtpHead,
+            MtpTargetProjection::Neural,
         )
         .expect("batched MTP fill");
 
@@ -18189,6 +19598,110 @@ mod tests {
         assert_eq!(s.get(id1).unwrap().generated_tokens, vec![3, 6, 7]);
         let stats = s.mtp_stats().expect("MTP stats");
         assert_eq!(stats.draft_host_sync_count, 0);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn mtp_batch_without_postfill_stops_at_common_window_boundary() {
+        let mut scheduler = Scheduler::<ScriptedMtpSchedulerModel>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        scheduler
+            .admit(mtp_req(vec![1, 2], 5))
+            .expect("admit row 0");
+        scheduler
+            .admit(mtp_req(vec![10, 11], 5))
+            .expect("admit row 1");
+        let model = ScriptedMtpSchedulerModel::new_with_first_token_calls(
+            3,
+            2,
+            vec![4, 6],
+            vec![vec![4, 5], vec![6, 7]],
+        );
+        let cfg = MtpSpeculativeConfig::new(1, Sampler::greedy()).expect("mtp cfg");
+
+        scheduler
+            .prefill_admitted_mtp_batch(&model, &FakeMtpHead, cfg)
+            .expect("mtp batch prefill");
+        assert!(!scheduler.mtp_at_batch_window_boundary());
+        scheduler
+            .step_mtp_batch_without_postfill(&model, &FakeMtpHead)
+            .expect("emit first pending token");
+        assert!(!scheduler.mtp_at_batch_window_boundary());
+        scheduler
+            .step_mtp_batch_without_postfill(&model, &FakeMtpHead)
+            .expect("emit final pending token");
+        assert!(
+            scheduler.mtp_at_batch_window_boundary(),
+            "no-postfill mode must not create the next neural window"
+        );
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn mtp_rebase_teacher_forces_committed_boundary_token() {
+        let mut scheduler = Scheduler::<ScriptedMtpSchedulerModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        let id = scheduler
+            .admit(mtp_req(vec![1, 2], 5))
+            .expect("admit request");
+        let model = ScriptedMtpSchedulerModel::new(3, vec![4, 8], vec![vec![4, 5], vec![8, 9]]);
+        let cfg = MtpSpeculativeConfig::new(1, Sampler::greedy()).expect("mtp cfg");
+
+        scheduler
+            .prefill_admitted_mtp_single(&model, &FakeMtpHead, cfg)
+            .expect("initial MTP prefill");
+        {
+            let state = scheduler.get_mut(id).expect("request state");
+            state.generated_tokens.push(7);
+            state.real_len += 1;
+        }
+        let main_cache_offset_before =
+            match &scheduler.cache.as_ref().expect("main cache before rebase")[0] {
+                LayerCache::Full(cache) => cache.offsets()[0],
+                LayerCache::Linear(_) | LayerCache::Mla(_) => panic!("expected full cache"),
+            };
+
+        scheduler
+            .rebase_mtp_from_committed_history(&model, &FakeMtpHead)
+            .expect("teacher-forced MTP rebase");
+
+        assert_eq!(
+            scheduler.get(id).expect("request state").generated_tokens,
+            vec![3, 7],
+            "rebase must treat the committed boundary token as authoritative"
+        );
+        let row = scheduler
+            .mtp_state
+            .as_ref()
+            .expect("MTP state")
+            .rows
+            .get(&0)
+            .expect("row state");
+        assert!(
+            row.pending_tokens.is_empty() && row.deferred_tail_commit.is_none(),
+            "rebase must rebuild only the neural boundary state"
+        );
+        assert!(
+            scheduler.mtp_at_batch_window_boundary(),
+            "rebase must not publish tokens whose target KV exists only in the temporary scheduler"
+        );
+        let main_cache_offset_after =
+            match &scheduler.cache.as_ref().expect("main cache after rebase")[0] {
+                LayerCache::Full(cache) => cache.offsets()[0],
+                LayerCache::Linear(_) | LayerCache::Mla(_) => panic!("expected full cache"),
+            };
+        assert_eq!(
+            main_cache_offset_after, main_cache_offset_before,
+            "neural side-state rebase must not replace or advance the live main cache"
+        );
     }
 
     #[test]

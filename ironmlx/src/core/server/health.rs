@@ -250,6 +250,9 @@ pub struct PromptLookupHealthInfo {
     pub verify_accept_host_sync_us: u64,
     pub rollback_count: u64,
     pub rollback_us: u64,
+    pub mtp_shadow_commit_windows: u64,
+    pub mtp_shadow_commit_tokens: u64,
+    pub mtp_shadow_commit_us: u64,
     pub miss_fast_path_steps: u64,
     pub ordinary_cost_samples: u64,
     pub lookup_cost_samples: u64,
@@ -261,6 +264,12 @@ pub struct PromptLookupHealthInfo {
     pub qualification_profile_loads: u64,
     pub qualification_profile_writes: u64,
     pub qualification_profile_write_drops: u64,
+    pub hybrid_neural_windows: u64,
+    pub hybrid_lookup_windows: u64,
+    pub hybrid_source_switches: u64,
+    pub hybrid_lookup_miss_fallbacks: u64,
+    pub hybrid_neural_rebases: u64,
+    pub hybrid_neural_rebase_us: u64,
 }
 
 impl PromptLookupHealthInfo {
@@ -310,6 +319,9 @@ impl PromptLookupHealthInfo {
             aggregate.verify_accept_host_sync_us += snapshot.verify_accept_host_sync_us;
             aggregate.rollback_count += snapshot.rollback_count;
             aggregate.rollback_us += snapshot.rollback_us;
+            aggregate.mtp_shadow_commit_windows += snapshot.mtp_shadow_commit_windows;
+            aggregate.mtp_shadow_commit_tokens += snapshot.mtp_shadow_commit_tokens;
+            aggregate.mtp_shadow_commit_us += snapshot.mtp_shadow_commit_us;
             aggregate.miss_fast_path_steps += snapshot.miss_fast_path_steps;
             aggregate.ordinary_cost_samples += snapshot.ordinary_cost_samples;
             aggregate.lookup_cost_samples += snapshot.lookup_cost_samples;
@@ -322,6 +334,12 @@ impl PromptLookupHealthInfo {
             aggregate.qualification_profile_writes += snapshot.qualification_profile_writes;
             aggregate.qualification_profile_write_drops +=
                 snapshot.qualification_profile_write_drops;
+            aggregate.hybrid_neural_windows += snapshot.hybrid_neural_windows;
+            aggregate.hybrid_lookup_windows += snapshot.hybrid_lookup_windows;
+            aggregate.hybrid_source_switches += snapshot.hybrid_source_switches;
+            aggregate.hybrid_lookup_miss_fallbacks += snapshot.hybrid_lookup_miss_fallbacks;
+            aggregate.hybrid_neural_rebases += snapshot.hybrid_neural_rebases;
+            aggregate.hybrid_neural_rebase_us += snapshot.hybrid_neural_rebase_us;
         }
         if !config_mismatch {
             if let Some((min_ngram, max_ngram, max_draft_tokens, history, entries)) = config {
@@ -395,6 +413,9 @@ impl PromptLookupHealthConfig {
             verify_accept_host_sync_us: stats.verify_accept_host_sync_us,
             rollback_count: stats.rollback_count,
             rollback_us: stats.rollback_us,
+            mtp_shadow_commit_windows: stats.mtp_shadow_commit_windows,
+            mtp_shadow_commit_tokens: stats.mtp_shadow_commit_tokens,
+            mtp_shadow_commit_us: stats.mtp_shadow_commit_us,
             miss_fast_path_steps: stats.miss_fast_path_steps,
             ordinary_cost_samples: stats.ordinary_cost_samples,
             lookup_cost_samples: stats.lookup_cost_samples,
@@ -406,6 +427,12 @@ impl PromptLookupHealthConfig {
             qualification_profile_loads: stats.qualification_profile_loads,
             qualification_profile_writes: stats.qualification_profile_writes,
             qualification_profile_write_drops: stats.qualification_profile_write_drops,
+            hybrid_neural_windows: stats.hybrid_neural_windows,
+            hybrid_lookup_windows: stats.hybrid_lookup_windows,
+            hybrid_source_switches: stats.hybrid_source_switches,
+            hybrid_lookup_miss_fallbacks: stats.hybrid_lookup_miss_fallbacks,
+            hybrid_neural_rebases: stats.hybrid_neural_rebases,
+            hybrid_neural_rebase_us: stats.hybrid_neural_rebase_us,
         }
     }
 }
@@ -729,6 +756,12 @@ mod tests {
             qualification_profile_loads: 1,
             qualification_profile_writes: 5,
             qualification_profile_write_drops: 1,
+            hybrid_neural_windows: 12,
+            hybrid_lookup_windows: 6,
+            hybrid_source_switches: 4,
+            hybrid_lookup_miss_fallbacks: 3,
+            hybrid_neural_rebases: 2,
+            hybrid_neural_rebase_us: 29,
             ..PromptLookupStats::default()
         };
         let published = Arc::new(Mutex::new(Some(stats)));
@@ -763,6 +796,12 @@ mod tests {
         assert_eq!(snapshot.prompt_lookup.qualification_profile_loads, 1);
         assert_eq!(snapshot.prompt_lookup.qualification_profile_writes, 5);
         assert_eq!(snapshot.prompt_lookup.qualification_profile_write_drops, 1);
+        assert_eq!(snapshot.prompt_lookup.hybrid_neural_windows, 12);
+        assert_eq!(snapshot.prompt_lookup.hybrid_lookup_windows, 6);
+        assert_eq!(snapshot.prompt_lookup.hybrid_source_switches, 4);
+        assert_eq!(snapshot.prompt_lookup.hybrid_lookup_miss_fallbacks, 3);
+        assert_eq!(snapshot.prompt_lookup.hybrid_neural_rebases, 2);
+        assert_eq!(snapshot.prompt_lookup.hybrid_neural_rebase_us, 29);
     }
 
     #[test]

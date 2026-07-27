@@ -972,6 +972,18 @@ impl crate::core::model::Model for Qwen35Model {
         )
     }
 
+    fn supports_sequential_prompt_lookup_verify(
+        &self,
+        _batch_width: usize,
+        context_tokens: usize,
+        _verify_width: usize,
+    ) -> bool {
+        super::speculative::sequential_prompt_lookup_verify_qualified(
+            self.exact_batched_verify_profile,
+            context_tokens,
+        )
+    }
+
     fn model_meta(&self) -> crate::core::memory_budget::ModelMeta {
         Qwen35Model::model_meta(self)
     }
