@@ -134,11 +134,50 @@ fn exact_batched_verify_qualified_for_kv_cache(
     kv_bits: Option<TurboQuantKVBits>,
 ) -> bool {
     let kv_cache_qualified = match profile {
-        ExactBatchedVerifyProfile::Affine8Moe => kv_bits.is_none(),
+        ExactBatchedVerifyProfile::Affine8Moe => {
+            kv_bits.is_none()
+                || matches!(
+                    kv_bits,
+                    Some(TurboQuantKVBits::K3V4 | TurboQuantKVBits::K4V4)
+                )
+        }
         _ => kv_bits != Some(TurboQuantKVBits::K3V4) || verify_width <= 2,
     };
     exact_batched_verify_qualified(profile, batch_width, context_tokens, verify_width)
         && kv_cache_qualified
+}
+
+fn uniform_turboquant_bits(cache: Option<&[LayerCache]>) -> Option<TurboQuantKVBits> {
+    let mut bits = None;
+    for layer in cache? {
+        let LayerCache::Full(kv) = layer else {
+            return None;
+        };
+        let layer_bits = kv.turboquant()?.bits();
+        if bits.is_some_and(|current| current != layer_bits) {
+            return None;
+        }
+        bits = Some(layer_bits);
+    }
+    bits
+}
+
+fn affine8_moe_turboquant_exact_scope(
+    profile: ExactBatchedVerifyProfile,
+    input_ids: &Array,
+    cache: Option<&[LayerCache]>,
+) -> bool {
+    let dims = input_ids.shape();
+    let dims = dims.as_slice();
+    profile == ExactBatchedVerifyProfile::Affine8Moe
+        && crate::nn::verify_qmm::is_armed()
+        && dims.len() == 2
+        && (1..=2).contains(&dims[0])
+        && (2..=5).contains(&dims[1])
+        && matches!(
+            uniform_turboquant_bits(cache),
+            Some(TurboQuantKVBits::K3V4 | TurboQuantKVBits::K4V4)
+        )
 }
 
 fn vl_profile_eval(label: &str, arrays: &[&Array], start: Instant, enabled: bool) -> Result<()> {
@@ -751,6 +790,12 @@ impl Model for Gemma4Model {
         target: StreamOrDevice,
     ) -> Result<Array> {
         self.reject_multimodal_tokens(input_ids)?;
+        let exact_turboquant = affine8_moe_turboquant_exact_scope(
+            self.exact_batched_verify_profile,
+            input_ids,
+            cache.as_deref(),
+        );
+        let _position_stable_qmm = exact_turboquant.then(crate::nn::position_stable_qmm::scope);
         self.text.forward_on(
             input_ids,
             position_ids,
@@ -1414,14 +1459,14 @@ mod tests {
             5,
             Some(TurboQuantKVBits::K4V4)
         ));
-        assert!(!exact_batched_verify_qualified_for_kv_cache(
+        assert!(exact_batched_verify_qualified_for_kv_cache(
             ExactBatchedVerifyProfile::Affine8Moe,
             2,
             1_024,
             2,
             Some(TurboQuantKVBits::K3V4)
         ));
-        assert!(!exact_batched_verify_qualified_for_kv_cache(
+        assert!(exact_batched_verify_qualified_for_kv_cache(
             ExactBatchedVerifyProfile::Affine8Moe,
             2,
             1_024,

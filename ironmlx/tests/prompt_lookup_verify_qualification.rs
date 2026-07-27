@@ -180,6 +180,7 @@ fn qualify_case<M: Model>(
     verify_width: usize,
     cache_mode: QualificationCache,
 ) -> Result<()> {
+    const TAIL_STEPS: usize = 8;
     let row_stride = prefix_len.saturating_add(verify_width);
     anyhow::ensure!(
         batch.saturating_mul(row_stride) <= tokens.len(),
@@ -194,7 +195,8 @@ fn qualify_case<M: Model>(
             &tokens[row_start + prefix_len..row_start + prefix_len + verify_width],
         );
     }
-    let cap = i32::try_from(prefix_len + verify_width + 8).context("cache cap exceeds i32")?;
+    let cap =
+        i32::try_from(prefix_len + verify_width + TAIL_STEPS).context("cache cap exceeds i32")?;
     let batch_i32 = i32::try_from(batch).context("batch exceeds i32")?;
     let mut sequential_cache = model.make_cache(batch_i32, cap, model.cache_dtype())?;
     let mut batched_cache = model.make_cache(batch_i32, cap, model.cache_dtype())?;
@@ -242,8 +244,8 @@ fn qualify_case<M: Model>(
     let verify_start = i32::try_from(prefix_len).context("verify start exceeds i32")?;
     let positions = uniform_position_ids(verify_start, verify_width_i32, batch)?;
     let per_row_lens = vec![verify_width_i32; batch];
-    let _verify_qmm = ironmlx::nn::verify_qmm_scope();
     let hidden = {
+        let _verify_qmm = ironmlx::nn::verify_qmm_scope();
         model.forward_text_hidden(
             &verify_input,
             &positions,
@@ -310,6 +312,49 @@ fn qualify_case<M: Model>(
          max_hidden_abs={max_hidden_diff:.6}, max_logit_abs={max_logit_diff:.6}",
         std::any::type_name::<M>()
     );
+
+    let mut tail_input = sequential_tokens
+        .iter()
+        .map(|row| row.last().copied().context("missing last verify token"))
+        .collect::<Result<Vec<_>>>()?;
+    for tail_depth in 0..TAIL_STEPS {
+        let input = input_array(&tail_input, batch, 1)?;
+        let start = i32::try_from(prefix_len + verify_width + tail_depth)
+            .context("tail position exceeds i32")?;
+        let positions = uniform_position_ids(start, 1, batch)?;
+        let per_row_lens = vec![1_i32; batch];
+        let sequential_hidden = model.forward_text_hidden(
+            &input,
+            &positions,
+            Some(&per_row_lens),
+            None,
+            Some(sequential_cache.as_mut_slice()),
+            StreamOrDevice::default(),
+        )?;
+        let batched_hidden = model.forward_text_hidden(
+            &input,
+            &positions,
+            Some(&per_row_lens),
+            None,
+            Some(batched_cache.as_mut_slice()),
+            StreamOrDevice::default(),
+        )?;
+        let sequential_logits =
+            model.project_hidden_on(&sequential_hidden, StreamOrDevice::default())?;
+        let batched_logits = model.project_hidden_on(&batched_hidden, StreamOrDevice::default())?;
+        eval(&sequential_logits)?;
+        eval(&batched_logits)?;
+        let sequential_tail = argmax_tokens(&sequential_logits)?;
+        let batched_tail = argmax_tokens(&batched_logits)?;
+        anyhow::ensure!(
+            sequential_tail == batched_tail,
+            "post-verify tail mismatch for model={} cache={cache_mode:?} B{batch} \
+             C{prefix_len} Q{verify_width} tail_depth={tail_depth}: \
+             sequential={sequential_tail:?}, batched={batched_tail:?}",
+            std::any::type_name::<M>()
+        );
+        tail_input = sequential_tail;
+    }
     Ok(())
 }
 
@@ -318,6 +363,22 @@ fn qualify_ragged_case<M: Model>(
     tokens: &[u32],
     prefix_len: usize,
     verify_lens: &[usize],
+) -> Result<()> {
+    qualify_ragged_case_with_cache(
+        model,
+        tokens,
+        prefix_len,
+        verify_lens,
+        QualificationCache::Dense,
+    )
+}
+
+fn qualify_ragged_case_with_cache<M: Model>(
+    model: &M,
+    tokens: &[u32],
+    prefix_len: usize,
+    verify_lens: &[usize],
+    cache_mode: QualificationCache,
 ) -> Result<()> {
     let batch = verify_lens.len();
     let verify_width = verify_lens.iter().copied().max().unwrap_or(0);
@@ -342,6 +403,8 @@ fn qualify_ragged_case<M: Model>(
     let batch_i32 = i32::try_from(batch).context("batch exceeds i32")?;
     let mut sequential_cache = model.make_cache(batch_i32, cap, model.cache_dtype())?;
     let mut batched_cache = model.make_cache(batch_i32, cap, model.cache_dtype())?;
+    configure_cache(&mut sequential_cache, cache_mode, batch, cap)?;
+    configure_cache(&mut batched_cache, cache_mode, batch, cap)?;
     prefill(
         model,
         &prefix_tokens,
@@ -421,14 +484,14 @@ fn qualify_ragged_case<M: Model>(
         .map(|row| flat[row * verify_width..row * verify_width + verify_lens[row]].to_vec())
         .collect::<Vec<_>>();
     eprintln!(
-        "ragged exact verify qualification: model={} prefix_len={} verify_lens={verify_lens:?} \
+        "ragged exact verify qualification: model={} cache={cache_mode:?} prefix_len={} verify_lens={verify_lens:?} \
          sequential={sequential_tokens:?} batched={batched_tokens:?}",
         std::any::type_name::<M>(),
         prefix_len
     );
     anyhow::ensure!(
         sequential_tokens == batched_tokens,
-        "ragged greedy token mismatch for model={} prefix_len={prefix_len} \
+        "ragged greedy token mismatch for model={} cache={cache_mode:?} prefix_len={prefix_len} \
          verify_lens={verify_lens:?}: sequential={sequential_tokens:?}, \
          batched={batched_tokens:?}",
         std::any::type_name::<M>()
@@ -573,11 +636,15 @@ fn qualify_qwen_cache_and_ragged<M: Model>(model: &M, tokenizer: &Tokenizer) -> 
     }
 }
 
-fn qualify_gemma_cache_and_ragged<M: Model>(model: &M, tokenizer: &Tokenizer) -> Result<()> {
+fn qualify_gemma_cache_and_ragged<M: Model>(
+    model: &M,
+    tokenizer: &Tokenizer,
+    force_turboquant_candidate: bool,
+) -> Result<()> {
     let mut tokens = tokenizer
         .encode(QUALIFICATION_TEXT, false)
         .context("tokenizing Gemma4 cache qualification text")?;
-    while tokens.len() < 8 * (128 + 5) {
+    while tokens.len() < 2 * (1_024 + 5) {
         let copy = tokens.clone();
         tokens.extend(copy);
     }
@@ -590,16 +657,54 @@ fn qualify_gemma_cache_and_ragged<M: Model>(model: &M, tokenizer: &Tokenizer) ->
         );
         2
     };
-    for cache_mode in [
-        QualificationCache::Paged,
-        QualificationCache::TurboQuant(TurboQuantKVBits::K3V4),
-        QualificationCache::TurboQuant(TurboQuantKVBits::K4V4),
-    ] {
+    let cache_modes = if force_turboquant_candidate {
+        vec![
+            QualificationCache::TurboQuant(TurboQuantKVBits::K3V4),
+            QualificationCache::TurboQuant(TurboQuantKVBits::K4V4),
+        ]
+    } else {
+        vec![
+            QualificationCache::Paged,
+            QualificationCache::TurboQuant(TurboQuantKVBits::K3V4),
+            QualificationCache::TurboQuant(TurboQuantKVBits::K4V4),
+        ]
+    };
+    for cache_mode in cache_modes {
         let kv_bits = match cache_mode {
             QualificationCache::TurboQuant(bits) => Some(bits),
             QualificationCache::Dense | QualificationCache::Paged => None,
         };
-        if model.supports_exact_batched_speculative_verify_for_kv_cache(batch, 64, 5, kv_bits) {
+        if batch == 2 && kv_bits.is_some() {
+            for case_batch in [1_usize, 2] {
+                for context_tokens in [64_usize, 1_024] {
+                    for verify_width in [2_usize, 4, 5] {
+                        anyhow::ensure!(
+                            force_turboquant_candidate
+                                || model.supports_exact_batched_speculative_verify_for_kv_cache(
+                                    case_batch,
+                                    context_tokens,
+                                    verify_width,
+                                    kv_bits,
+                                ),
+                            "missing Gemma4 Affine8 MoE TurboQuant exact qualification for \
+                             cache={cache_mode:?} B{case_batch} Q{verify_width} C{context_tokens}"
+                        );
+                        qualify_case(
+                            model,
+                            &tokens,
+                            case_batch,
+                            context_tokens,
+                            verify_width,
+                            cache_mode,
+                        )?;
+                    }
+                }
+            }
+            qualify_ragged_case_with_cache(model, &tokens, 64, &[5, 2], cache_mode)?;
+            qualify_ragged_case_with_cache(model, &tokens, 128, &[5, 1], cache_mode)?;
+        } else if force_turboquant_candidate
+            || model.supports_exact_batched_speculative_verify_for_kv_cache(batch, 64, 5, kv_bits)
+        {
             qualify_case(model, &tokens, batch, 64, 5, cache_mode)?;
         } else {
             anyhow::ensure!(
@@ -614,9 +719,11 @@ fn qualify_gemma_cache_and_ragged<M: Model>(model: &M, tokenizer: &Tokenizer) ->
     if batch == 4 {
         qualify_ragged_case(model, &tokens, 64, &[5, 4, 2, 0])?;
         qualify_ragged_case(model, &tokens, 128, &[5, 1, 4, 0, 3, 2, 5, 0])
-    } else {
+    } else if !force_turboquant_candidate {
         qualify_ragged_case(model, &tokens, 64, &[5, 2])?;
         qualify_ragged_case(model, &tokens, 128, &[5, 1])
+    } else {
+        Ok(())
     }
 }
 
@@ -877,6 +984,8 @@ fn gemma4_qgt1_matches_sequential_verify() -> Result<()> {
     let tokenizer = load_tokenizer(&loader, &model_dir)?;
     let model = Gemma4Model::from_loader(&loader).context("loading Gemma4 model")?;
     let force_candidate = std::env::var_os("PROMPT_LOOKUP_VERIFY_FORCE_CANDIDATE").is_some();
+    let force_turboquant_candidate =
+        std::env::var_os("PROMPT_LOOKUP_VERIFY_FORCE_TURBOQUANT_CANDIDATE").is_some();
     if !force_candidate && loader.quant_meta().is_some_and(|quant| quant.bits == 8) {
         let is_moe = loader
             .config_raw_value()
@@ -899,11 +1008,13 @@ fn gemma4_qgt1_matches_sequential_verify() -> Result<()> {
             );
         }
     }
-    qualify_model(&model, &tokenizer)?;
+    if !force_turboquant_candidate {
+        qualify_model(&model, &tokenizer)?;
+    }
     if force_candidate {
         return Ok(());
     }
-    qualify_gemma_cache_and_ragged(&model, &tokenizer)
+    qualify_gemma_cache_and_ragged(&model, &tokenizer, force_turboquant_candidate)
 }
 
 #[test]

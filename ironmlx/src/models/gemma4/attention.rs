@@ -350,6 +350,9 @@ impl Gemma4Attention {
         let (batch, seq) = (dims[0], dims[1]);
         let reuses_shared_kv = shared_kv.is_some();
         let stable_verify_attention = crate::nn::gemma4_verify_attention::is_armed() && seq > 1;
+        let position_stable_full = crate::nn::position_stable_qmm::is_armed()
+            && seq > 1
+            && self.layer_kind == Gemma4LayerKind::Full;
         let segment_stable_verify = stable_verify_attention && batch == 1;
         let batch_stable_verify = stable_verify_attention && batch > 1;
         let query_isolated =
@@ -551,6 +554,15 @@ impl Gemma4Attention {
                 Some(self.sliding_window),
                 target,
             )?
+        } else if position_stable_full {
+            query_position_isolated_full_attention_on(
+                &q,
+                &kv,
+                mask,
+                per_row_lens,
+                offsets.values(),
+                target,
+            )?
         } else if query_isolated {
             query_isolated_full_attention_on(&q, &kv, per_row_lens, offsets.values(), target)?
         } else if batch_stable_full {
@@ -735,6 +747,144 @@ fn query_isolated_full_attention_on(
     }
     let batch_refs = batch_outputs.iter().collect::<Vec<_>>();
     Ok(mlx::ops::shape::concatenate_on(&batch_refs, 0, target)?)
+}
+
+fn query_position_isolated_full_attention_on(
+    queries: &Array,
+    kv: &SharedKv,
+    mask: Option<&Array>,
+    per_row_lens: Option<&[i32]>,
+    offsets: &[i32],
+    target: StreamOrDevice,
+) -> Result<Array> {
+    let q_shape = queries.shape();
+    let q_dims = q_shape.as_slice();
+    if q_dims.len() != 4 {
+        return Err(anyhow!(
+            "Gemma4 exact full attention expected rank-4 queries, got {q_dims:?}"
+        ));
+    }
+    let (batch, heads, query_len, head_dim) = (q_dims[0], q_dims[1], q_dims[2], q_dims[3]);
+    let lens_owned;
+    let lens = match per_row_lens {
+        Some(lens) => lens,
+        None => {
+            lens_owned = vec![query_len; batch as usize];
+            &lens_owned
+        }
+    };
+    if offsets.len() != batch as usize || lens.len() != batch as usize {
+        return Err(anyhow!(
+            "Gemma4 exact full attention expected {batch} offsets/lens, got {}/{}",
+            offsets.len(),
+            lens.len()
+        ));
+    }
+    if query_len <= 1 {
+        return Err(anyhow!(
+            "Gemma4 exact full attention requires Q>1, got Q={query_len}"
+        ));
+    }
+    for (row, &len) in lens.iter().enumerate() {
+        if len < 0 || len > query_len {
+            return Err(anyhow!(
+                "Gemma4 exact full attention invalid row {row} length {len} for Q={query_len}"
+            ));
+        }
+    }
+
+    let key_shape = kv.keys.shape();
+    let key_dims = key_shape.as_slice();
+    let value_shape = kv.values.shape();
+    let value_dims = value_shape.as_slice();
+    if key_dims.len() != 4
+        || value_dims.len() != 4
+        || key_dims[0] != batch
+        || value_dims[0] != batch
+        || key_dims[2] != value_dims[2]
+    {
+        return Err(anyhow!(
+            "Gemma4 exact full attention incompatible KV shapes: keys={key_dims:?}, values={value_dims:?}, batch={batch}"
+        ));
+    }
+    let final_key_len = key_dims[2];
+    let mask_shape = mask.map(Array::shape);
+    if let Some(mask_shape) = mask_shape.as_ref() {
+        let dims = mask_shape.as_slice();
+        if dims.len() != 4
+            || (!matches!(dims[0], 1) && dims[0] != batch)
+            || dims[2] < query_len
+            || dims[3] < final_key_len
+        {
+            return Err(anyhow!(
+                "Gemma4 exact full attention mask {dims:?} cannot cover B={batch}, Q={query_len}, K={final_key_len}"
+            ));
+        }
+    }
+
+    let mut outputs = Vec::with_capacity(query_len as usize);
+    for depth in 0..query_len {
+        let key_end = offsets
+            .iter()
+            .zip(lens.iter())
+            .map(|(&offset, &len)| offset + (depth + 1).min(len))
+            .max()
+            .unwrap_or(0);
+        if key_end <= 0 || key_end > final_key_len {
+            return Err(anyhow!(
+                "Gemma4 exact full attention key end {key_end} outside (0,{final_key_len}] at depth {depth}"
+            ));
+        }
+        let query = mlx::ops::indexing::slice_strided_on(
+            queries,
+            &[0_i32, 0, depth, 0][..],
+            &[batch, heads, depth + 1, head_dim][..],
+            &[1_i32, 1, 1, 1][..],
+            target,
+        )?;
+        let keys = mlx::ops::indexing::slice_strided_on(
+            &kv.keys,
+            &[0_i32, 0, 0, 0][..],
+            &[batch, key_dims[1], key_end, key_dims[3]][..],
+            &[1_i32, 1, 1, 1][..],
+            target,
+        )?;
+        let values = mlx::ops::indexing::slice_strided_on(
+            &kv.values,
+            &[0_i32, 0, 0, 0][..],
+            &[batch, value_dims[1], key_end, value_dims[3]][..],
+            &[1_i32, 1, 1, 1][..],
+            target,
+        )?;
+        let depth_mask = mask
+            .map(|mask| {
+                let dims = mask_shape
+                    .as_ref()
+                    .expect("mask dimensions exist when mask exists")
+                    .as_slice();
+                mlx::ops::indexing::slice_strided_on(
+                    mask,
+                    &[0_i32, 0, depth, 0][..],
+                    &[dims[0], dims[1], depth + 1, key_end][..],
+                    &[1_i32, 1, 1, 1][..],
+                    target,
+                )
+                .map_err(anyhow::Error::from)
+            })
+            .transpose()?;
+        outputs.push(mlx::fast::scaled_dot_product_attention_on(
+            &query,
+            &keys,
+            &values,
+            1.0,
+            "",
+            depth_mask.as_ref(),
+            None,
+            target,
+        )?);
+    }
+    let refs = outputs.iter().collect::<Vec<_>>();
+    mlx::ops::shape::concatenate_on(&refs, 2, target).map_err(Into::into)
 }
 
 fn segment_stable_sliding_attention_on(
