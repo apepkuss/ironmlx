@@ -93,6 +93,10 @@ pub struct PromptLookupStats {
     pub index_entries_current: u64,
     pub index_entries_peak: u64,
     pub index_evictions: u64,
+    /// End-to-end verify window time through the acceptance materialization
+    /// boundary. Unlike the submit-only phase timers below, this includes
+    /// pending lazy MLX work forced by the packed acceptance readback.
+    pub verify_round_us: u64,
     pub verify_forward_us: u64,
     pub projection_us: u64,
     pub exact_batched_verify_windows: u64,
@@ -132,6 +136,7 @@ impl PromptLookupStats {
             index_entries_current: self.index_entries_current,
             index_entries_peak: self.index_entries_peak.max(before.index_entries_peak),
             index_evictions: self.index_evictions.saturating_sub(before.index_evictions),
+            verify_round_us: self.verify_round_us.saturating_sub(before.verify_round_us),
             verify_forward_us: self
                 .verify_forward_us
                 .saturating_sub(before.verify_forward_us),
@@ -196,6 +201,7 @@ impl PromptLookupStats {
         self.index_entries_current = delta.index_entries_current;
         self.index_entries_peak = self.index_entries_peak.max(delta.index_entries_peak);
         self.index_evictions = self.index_evictions.saturating_add(delta.index_evictions);
+        self.verify_round_us = self.verify_round_us.saturating_add(delta.verify_round_us);
         self.verify_forward_us = self
             .verify_forward_us
             .saturating_add(delta.verify_forward_us);
@@ -1227,6 +1233,27 @@ mod tests {
             history_window_tokens: 64,
             max_index_entries: 64,
         }
+    }
+
+    #[test]
+    fn verify_round_time_survives_delta_and_accumulation() {
+        let before = PromptLookupStats {
+            verify_round_us: 100,
+            ..PromptLookupStats::default()
+        };
+        let after = PromptLookupStats {
+            verify_round_us: 175,
+            ..PromptLookupStats::default()
+        };
+        let delta = after.saturating_delta_since(before);
+        assert_eq!(delta.verify_round_us, 75);
+
+        let mut aggregate = PromptLookupStats {
+            verify_round_us: 25,
+            ..PromptLookupStats::default()
+        };
+        aggregate.accumulate_delta(delta);
+        assert_eq!(aggregate.verify_round_us, 100);
     }
 
     #[test]

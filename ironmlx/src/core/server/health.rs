@@ -241,6 +241,7 @@ pub struct PromptLookupHealthInfo {
     pub index_entries_current: u64,
     pub index_entries_peak: u64,
     pub index_evictions: u64,
+    pub verify_round_us: u64,
     pub verify_forward_us: u64,
     pub projection_us: u64,
     pub exact_batched_verify_windows: u64,
@@ -300,6 +301,7 @@ impl PromptLookupHealthInfo {
             aggregate.index_entries_current += snapshot.index_entries_current;
             aggregate.index_entries_peak += snapshot.index_entries_peak;
             aggregate.index_evictions += snapshot.index_evictions;
+            aggregate.verify_round_us += snapshot.verify_round_us;
             aggregate.verify_forward_us += snapshot.verify_forward_us;
             aggregate.projection_us += snapshot.projection_us;
             aggregate.exact_batched_verify_windows += snapshot.exact_batched_verify_windows;
@@ -384,6 +386,7 @@ impl PromptLookupHealthConfig {
             index_entries_current: stats.index_entries_current,
             index_entries_peak: stats.index_entries_peak,
             index_evictions: stats.index_evictions,
+            verify_round_us: stats.verify_round_us,
             verify_forward_us: stats.verify_forward_us,
             projection_us: stats.projection_us,
             exact_batched_verify_windows: stats.exact_batched_verify_windows,
@@ -710,6 +713,7 @@ mod tests {
             drafted_tokens: 19,
             accepted_tokens: 13,
             rejected_tokens: 6,
+            verify_round_us: 17,
             verify_accept_host_sync_count: 7,
             rollback_count: 2,
             miss_fast_path_steps: 3,
@@ -743,6 +747,7 @@ mod tests {
         assert_eq!(snapshot.prompt_lookup.drafted_tokens, 19);
         assert_eq!(snapshot.prompt_lookup.accepted_tokens, 13);
         assert_eq!(snapshot.prompt_lookup.rejected_tokens, 6);
+        assert_eq!(snapshot.prompt_lookup.verify_round_us, 17);
         assert_eq!(snapshot.prompt_lookup.verify_accept_host_sync_count, 7);
         assert_eq!(snapshot.prompt_lookup.rollback_count, 2);
         assert_eq!(snapshot.prompt_lookup.miss_fast_path_steps, 3);

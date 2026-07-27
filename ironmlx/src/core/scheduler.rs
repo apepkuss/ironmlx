@@ -7795,6 +7795,7 @@ impl<M: Model> Scheduler<M> {
             } else {
                 stats.sequential_verify_windows = stats.sequential_verify_windows.saturating_add(1);
             }
+            let verify_round_start = Instant::now();
             let verified_ids = if exact_batched_verify {
                 let model_verify_flat = verify_flat
                     .iter()
@@ -7914,6 +7915,7 @@ impl<M: Model> Scheduler<M> {
             stats.verify_accept_host_sync_count =
                 stats.verify_accept_host_sync_count.saturating_add(1);
             add_elapsed_us(&mut stats.verify_accept_host_sync_us, sync_start);
+            add_elapsed_us(&mut stats.verify_round_us, verify_round_start);
             let packed_stride = max_verify_len + 1;
             anyhow::ensure!(
                 packed.len() == batch * packed_stride,

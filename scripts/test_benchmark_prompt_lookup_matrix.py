@@ -244,6 +244,7 @@ class BenchmarkPromptLookupMatrixTests(unittest.TestCase):
                 "queries": 100,
                 "drafted_tokens": 300,
                 "accepted_tokens": 250,
+                "verify_round_us": 1000,
                 "exact_batched_verify_windows": 10,
                 "sequential_verify_windows": 20,
             }
@@ -255,6 +256,7 @@ class BenchmarkPromptLookupMatrixTests(unittest.TestCase):
                 "queries": 104,
                 "drafted_tokens": 312,
                 "accepted_tokens": 259,
+                "verify_round_us": 1600,
                 "exact_batched_verify_windows": 13,
                 "sequential_verify_windows": 22,
                 "index_entries_current": 0,
@@ -267,6 +269,7 @@ class BenchmarkPromptLookupMatrixTests(unittest.TestCase):
         self.assertEqual(delta["prompt_lookup"]["queries"], 4)
         self.assertEqual(delta["prompt_lookup"]["drafted_tokens"], 12)
         self.assertEqual(delta["prompt_lookup"]["accepted_tokens"], 9)
+        self.assertEqual(delta["prompt_lookup"]["verify_round_us"], 600)
         self.assertEqual(delta["prompt_lookup"]["exact_batched_verify_windows"], 3)
         self.assertEqual(delta["prompt_lookup"]["sequential_verify_windows"], 2)
 

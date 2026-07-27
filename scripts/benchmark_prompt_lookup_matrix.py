@@ -655,6 +655,7 @@ def health_delta(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[str, Any
         "rejected_tokens",
         "zero_accept_windows",
         "index_evictions",
+        "verify_round_us",
         "verify_forward_us",
         "projection_us",
         "exact_batched_verify_windows",
@@ -932,6 +933,10 @@ def aggregate_rows(
         lookup_deltas = [
             item["delta"]["prompt_lookup"] for item in health_items
         ]
+        verify_sync_count = sum(
+            item["verify_accept_host_sync_count"] for item in lookup_deltas
+        )
+        verify_round_us = sum(item["verify_round_us"] for item in lookup_deltas)
         all_itl = [value for sample in samples for value in sample["itl_ms"]]
         row = {
             "variant": variant,
@@ -962,6 +967,20 @@ def aggregate_rows(
             "lookup_accepted_tokens": sum(item["accepted_tokens"] for item in lookup_deltas),
             "lookup_rejected_tokens": sum(item["rejected_tokens"] for item in lookup_deltas),
             "lookup_rollbacks": sum(item["rollback_count"] for item in lookup_deltas),
+            "lookup_verify_round_us": verify_round_us,
+            "lookup_verify_round_us_per_window": (
+                verify_round_us / verify_sync_count if verify_sync_count else None
+            ),
+            "lookup_verify_forward_submit_us": sum(
+                item["verify_forward_us"] for item in lookup_deltas
+            ),
+            "lookup_projection_submit_us": sum(
+                item["projection_us"] for item in lookup_deltas
+            ),
+            "lookup_verify_accept_host_sync_count": verify_sync_count,
+            "lookup_verify_accept_host_sync_us": sum(
+                item["verify_accept_host_sync_us"] for item in lookup_deltas
+            ),
             "index_entries_current_max": max(
                 (item["index_entries_current"] for item in lookup_deltas), default=0
             ),
@@ -1055,6 +1074,22 @@ def build_comparisons(
                 "lookup_rejected_tokens": row["lookup_rejected_tokens"],
                 "lookup_acceptance_ratio": row["lookup_acceptance_ratio"],
                 "lookup_rollbacks": row["lookup_rollbacks"],
+                "lookup_verify_round_us": row.get("lookup_verify_round_us", 0),
+                "lookup_verify_round_us_per_window": row.get(
+                    "lookup_verify_round_us_per_window"
+                ),
+                "lookup_verify_forward_submit_us": row.get(
+                    "lookup_verify_forward_submit_us", 0
+                ),
+                "lookup_projection_submit_us": row.get(
+                    "lookup_projection_submit_us", 0
+                ),
+                "lookup_verify_accept_host_sync_count": row.get(
+                    "lookup_verify_accept_host_sync_count", 0
+                ),
+                "lookup_verify_accept_host_sync_us": row.get(
+                    "lookup_verify_accept_host_sync_us", 0
+                ),
                 "index_entries_current_max": row["index_entries_current_max"],
                 "index_entries_peak_max": row["index_entries_peak_max"],
                 "server_healthy": row["server_healthy"],
