@@ -124,18 +124,21 @@ use crate::core::model::Model;
 use crate::core::prompt_lookup::{
     PromptLookupConfig, PromptLookupQualificationRegime, PromptLookupRowState, PromptLookupStats,
 };
-use crate::core::sampler::Sampler;
+use crate::core::sampler::{draw_uniforms, sample_target_tokens_with_uniforms_batch, Sampler};
 use crate::core::speculative::{
     add_elapsed_us, add_mtp_decode_cache_commit_us, add_mtp_prefill_cache_commit_us,
     adjust_mtp_draft_budget, commit_mtp_cache_hidden_prefix, commit_mtp_cache_hidden_tail,
     effective_mtp_draft_tokens_for_paged_prefix, elapsed_us_since,
-    layer_cache_supports_accepted_prefix_trim, resolve_speculative_tokens, restore_layer_cache,
-    rollback_main_cache_to_accepted_prefix, sample_logits_positions, slice_hidden_position,
-    slice_position_ids_prefix, trim_full_layer_cache_rows_to_accepted_prefix, verify_input,
-    zero_hidden_like_position, MainCacheRollbackInput, MtpDraftPolicyState, MtpDraftPolicyWindow,
-    MtpDraftResult, MtpSpeculativeConfig, MtpSpeculativeModel, MtpSpeculativeStats,
-    SpeculativeResolution,
+    layer_cache_supports_accepted_prefix_trim, resolve_exact_deterministic_target_logits,
+    resolve_exact_deterministic_target_tokens, resolve_speculative_tokens, restore_layer_cache,
+    rollback_main_cache_to_accepted_prefix, sample_draft_logits_position,
+    sample_draft_logits_position_with_uniform, sample_logits_positions, slice_hidden_position,
+    slice_position_ids_prefix, split_speculative_draft_prng,
+    trim_full_layer_cache_rows_to_accepted_prefix, verify_input, zero_hidden_like_position,
+    DraftTokenDistribution, MainCacheRollbackInput, MtpDraftPolicyState, MtpDraftPolicyWindow,
+    MtpSpeculativeConfig, MtpSpeculativeModel, MtpSpeculativeStats, SpeculativeResolution,
 };
+use crate::core::speculative_qualification::{NeuralExactRegime, NeuralExactSource};
 use crate::nn::{
     enable_paged_hot_cold_tiering_caches, enable_paged_kv_caches, enable_turboquant_kv_caches,
     paged_prefix_key_spec_for_full_caches, prefix_entry_for_row, prefix_key_spec_for_caches,
@@ -254,6 +257,8 @@ struct PromptLookupBatchedFillContext {
     remaining: usize,
     verify_start_pos: i32,
     draft_tokens: Vec<u32>,
+    sampler: Sampler,
+    history: Vec<u32>,
 }
 
 struct PromptLookupMtpAcceptedInput {
@@ -1470,6 +1475,7 @@ fn resolve_packed_greedy_acceptance(
             tokens_to_append,
             accepted_verify_input_len: accepted_draft_len + 1,
             needs_rollback: accepted_draft_len < draft_len,
+            exact_sampling: Default::default(),
         },
     ))
 }
@@ -6603,18 +6609,40 @@ impl<M: Model> Scheduler<M> {
         self.slots.iter().filter_map(|s| s.as_ref()).collect()
     }
 
-    pub(crate) fn mtp_batch_active_greedy_eligible(&self) -> bool {
+    pub(crate) fn fresh_neural_exact_qualification_regime(
+        &self,
+        source: NeuralExactSource,
+    ) -> Option<NeuralExactRegime> {
+        if self.active_count() != 1 {
+            return None;
+        }
+        let state = self.slots.iter().find_map(Option::as_ref)?;
+        (!state.finished && state.generated_tokens.is_empty() && !state.sampler.is_pipelinable())
+            .then(|| NeuralExactRegime::new(source, state.prompt_ids.len(), state.sampler))
+    }
+
+    pub(crate) fn active_batch_finished(&self) -> bool {
+        self.active_count() > 0
+            && self
+                .slots
+                .iter()
+                .filter_map(Option::as_ref)
+                .all(|state| state.finished)
+    }
+
+    pub(crate) fn speculative_batch_active_fresh_eligible(&self) -> bool {
         let mut saw_active = false;
+        let mut active = 0usize;
+        let mut all_greedy = true;
         for state in self.slots.iter().filter_map(|slot| slot.as_ref()) {
             saw_active = true;
-            if state.finished
-                || !state.generated_tokens.is_empty()
-                || !state.sampler.is_pipelinable()
-            {
+            active = active.saturating_add(1);
+            if state.finished || !state.generated_tokens.is_empty() {
                 return false;
             }
+            all_greedy &= state.sampler.is_pipelinable();
         }
-        saw_active
+        saw_active && (active == 1 || all_greedy)
     }
 
     /// Look up by id. `None` if the id was never admitted or has been evicted.
@@ -7232,6 +7260,7 @@ impl<M: Model> Scheduler<M> {
         let prompt_lookup = self.prompt_lookup_state.as_ref()?;
         let mut batch_width = 0_usize;
         let mut context_tokens = 0_usize;
+        let mut sampler = None;
         for (&row_idx, row) in &prompt_lookup.rows {
             let Some(slot) = self
                 .slots
@@ -7241,6 +7270,15 @@ impl<M: Model> Scheduler<M> {
             else {
                 continue;
             };
+            if sampler.is_some_and(|current: Sampler| {
+                crate::core::prompt_lookup::PromptLookupSamplerFingerprint::from(current)
+                    != crate::core::prompt_lookup::PromptLookupSamplerFingerprint::from(
+                        slot.sampler,
+                    )
+            }) {
+                return None;
+            }
+            sampler = Some(slot.sampler);
             batch_width = batch_width.saturating_add(1);
             context_tokens = context_tokens.max(
                 slot.prompt_ids
@@ -7249,7 +7287,9 @@ impl<M: Model> Scheduler<M> {
                     .saturating_add(row.pending_tokens.len()),
             );
         }
-        (batch_width > 0).then(|| PromptLookupQualificationRegime::new(batch_width, context_tokens))
+        sampler.map(|sampler| {
+            PromptLookupQualificationRegime::new(batch_width, context_tokens, sampler)
+        })
     }
 
     pub fn prefill_admitted_prompt_lookup(
@@ -7261,13 +7301,6 @@ impl<M: Model> Scheduler<M> {
         M: DenseVlMethods,
     {
         let cfg = cfg.validate()?;
-        anyhow::ensure!(
-            self.slots
-                .iter()
-                .flatten()
-                .all(|state| state.sampler.is_pipelinable()),
-            "prompt lookup requires greedy sampling"
-        );
         let events = self.prefill_admitted(model)?;
         self.initialize_prompt_lookup_for_active(cfg)?;
         Ok(events)
@@ -7275,13 +7308,6 @@ impl<M: Model> Scheduler<M> {
 
     pub fn initialize_prompt_lookup_for_active(&mut self, cfg: PromptLookupConfig) -> Result<()> {
         let cfg = cfg.validate()?;
-        anyhow::ensure!(
-            self.slots
-                .iter()
-                .flatten()
-                .all(|state| state.sampler.is_pipelinable()),
-            "prompt lookup requires greedy sampling"
-        );
         let mut rows = HashMap::new();
         for (row_idx, slot) in self.slots.iter().enumerate() {
             let Some(_state) = slot.as_ref().filter(|state| !state.finished) else {
@@ -7321,10 +7347,6 @@ impl<M: Model> Scheduler<M> {
         let state = self.slots[row_idx]
             .as_ref()
             .expect("row_idx found an occupied slot");
-        anyhow::ensure!(
-            state.sampler.is_pipelinable(),
-            "prompt lookup requires greedy sampling"
-        );
         let prompt_lookup = self
             .prompt_lookup_state
             .as_mut()
@@ -7942,6 +7964,10 @@ impl<M: Model> Scheduler<M> {
             let draft_tokens = row_state.prepared_draft_tokens.take().ok_or_else(|| {
                 anyhow!("fill_prompt_lookup_windows: row {row_idx} has no prepared proposal")
             })?;
+            let mut history =
+                Vec::with_capacity(slot.prompt_ids.len() + slot.generated_tokens.len());
+            history.extend_from_slice(&slot.prompt_ids);
+            history.extend_from_slice(&slot.generated_tokens);
             contexts.push(PromptLookupBatchedFillContext {
                 row_idx,
                 current_token,
@@ -7949,6 +7975,8 @@ impl<M: Model> Scheduler<M> {
                 remaining,
                 verify_start_pos: slot.real_len,
                 draft_tokens,
+                sampler: slot.sampler,
+                history,
             });
         }
         if contexts.is_empty() {
@@ -7984,6 +8012,7 @@ impl<M: Model> Scheduler<M> {
             .map(LayerCache::snapshot)
             .collect::<Vec<_>>();
         let mut attempted_verify = false;
+        let mut prng_commit = None;
         let verify_result = (|| -> Result<()> {
             let cache_row_for_ctx = contexts
                 .iter()
@@ -8052,7 +8081,7 @@ impl<M: Model> Scheduler<M> {
             }
             let verify_round_start = Instant::now();
             let mut accepted_hidden_source = None;
-            let verified_ids = if exact_batched_verify {
+            let verify_logits = if exact_batched_verify {
                 let model_verify_flat = verify_flat
                     .iter()
                     .map(|&token| token as i32)
@@ -8099,9 +8128,9 @@ impl<M: Model> Scheduler<M> {
                 let projection_start = Instant::now();
                 let logits = project_hidden(model, &hidden, mlx::StreamOrDevice::default())?;
                 add_elapsed_us(&mut stats.projection_us, projection_start);
-                mlx::ops::reduction::argmax(&logits, -1, false)?
+                logits
             } else {
-                let mut verified_steps = Vec::with_capacity(max_verify_len);
+                let mut logits_steps = Vec::with_capacity(max_verify_len);
                 let mut hidden_steps =
                     capture_accepted_hidden.then(|| Vec::with_capacity(max_verify_len));
                 for depth in 0..max_verify_len {
@@ -8162,27 +8191,16 @@ impl<M: Model> Scheduler<M> {
                         }
                     };
                     add_elapsed_us(&mut stats.verify_forward_us, verify_start);
-                    let vocab =
-                        *logits.shape().as_slice().last().ok_or_else(|| {
-                            anyhow!("prompt lookup verify logits have no vocab axis")
-                        })?;
-                    let verified_step = mlx::ops::reduction::argmax(
-                        &logits.reshape(&[batch as i32, vocab][..])?,
-                        -1,
-                        false,
-                    )?
-                    .reshape(&[batch as i32, 1_i32][..])?;
                     if model.requires_eager_sequential_speculative_verify() {
                         // Some cache/shared-state implementations require
                         // each q=1 write to materialize before host-side
-                        // offsets advance. Token IDs still stay on device
-                        // until the packed acceptance result is read once.
-                        mlx::transforms::eval(&[&verified_step])?;
+                        // offsets advance.
+                        mlx::transforms::eval(&[&logits])?;
                     }
                     if let (Some(hidden_steps), Some(hidden)) = (hidden_steps.as_mut(), hidden) {
                         hidden_steps.push(hidden);
                     }
-                    verified_steps.push(verified_step);
+                    logits_steps.push(logits);
                 }
                 if let Some(hidden_steps) = hidden_steps {
                     let refs = hidden_steps.iter().collect::<Vec<_>>();
@@ -8192,40 +8210,129 @@ impl<M: Model> Scheduler<M> {
                         mlx::StreamOrDevice::default(),
                     )?);
                 }
-                let refs = verified_steps.iter().collect::<Vec<_>>();
+                let refs = logits_steps.iter().collect::<Vec<_>>();
                 mlx::ops::shape::concatenate(&refs, 1)?
             };
-            let packed = pack_greedy_acceptance_on(
-                &verify_arr,
-                &verify_lens,
-                &verified_ids,
-                mlx::StreamOrDevice::default(),
-            )?;
-            let sync_start = Instant::now();
-            let packed: Vec<u32> = packed.to_vec()?;
-            stats.verify_accept_host_sync_count =
-                stats.verify_accept_host_sync_count.saturating_add(1);
-            add_elapsed_us(&mut stats.verify_accept_host_sync_us, sync_start);
-            add_elapsed_us(&mut stats.verify_round_us, verify_round_start);
-            let packed_stride = max_verify_len + 1;
-            anyhow::ensure!(
-                packed.len() == batch * packed_stride,
-                "fill_prompt_lookup_windows: packed acceptance len {} != {}",
-                packed.len(),
-                batch * packed_stride
-            );
-
-            let mut resolutions = Vec::with_capacity(contexts.len());
-            for (ctx_idx, ctx) in contexts.iter().enumerate() {
-                let resolution = resolve_packed_greedy_acceptance(
-                    &packed,
-                    packed_stride,
-                    cache_row_for_ctx[ctx_idx],
-                    ctx.draft_tokens.len(),
-                )?
-                .1;
-                resolutions.push(resolution);
+            let all_greedy = contexts.iter().all(|ctx| ctx.sampler.is_pipelinable());
+            let mut resolutions = (0..contexts.len())
+                .map(|_| None)
+                .collect::<Vec<Option<SpeculativeResolution>>>();
+            if all_greedy {
+                let verified_ids = mlx::ops::reduction::argmax(&verify_logits, -1, false)?;
+                let packed = pack_greedy_acceptance_on(
+                    &verify_arr,
+                    &verify_lens,
+                    &verified_ids,
+                    mlx::StreamOrDevice::default(),
+                )?;
+                let sync_start = Instant::now();
+                let packed: Vec<u32> = packed.to_vec()?;
+                stats.verify_accept_host_sync_count =
+                    stats.verify_accept_host_sync_count.saturating_add(1);
+                add_elapsed_us(&mut stats.verify_accept_host_sync_us, sync_start);
+                let packed_stride = max_verify_len + 1;
+                anyhow::ensure!(
+                    packed.len() == batch * packed_stride,
+                    "fill_prompt_lookup_windows: packed acceptance len {} != {}",
+                    packed.len(),
+                    batch * packed_stride
+                );
+                for (ctx_idx, ctx) in contexts.iter().enumerate() {
+                    let resolution = resolve_packed_greedy_acceptance(
+                        &packed,
+                        packed_stride,
+                        cache_row_for_ctx[ctx_idx],
+                        ctx.draft_tokens.len(),
+                    )?
+                    .1;
+                    resolutions[ctx_idx] = Some(resolution);
+                }
+            } else {
+                let context_rows = contexts.iter().map(|ctx| ctx.row_idx).collect::<Vec<_>>();
+                let compact_prng = self.compact_prng_state_for_rows(&context_rows)?;
+                let mut compact_prng_host: Vec<u32> = compact_prng.to_vec()?;
+                let vocab = *verify_logits
+                    .shape()
+                    .as_slice()
+                    .last()
+                    .ok_or_else(|| anyhow!("prompt lookup verify logits have no vocab axis"))?;
+                let sync_start = Instant::now();
+                let mut compact_logits_rows = Vec::new();
+                let mut compact_samplers = Vec::new();
+                let mut compact_histories = Vec::new();
+                let mut compact_ranges = Vec::new();
+                let mut compact_uniforms = Vec::new();
+                for (ctx_idx, ctx) in contexts.iter().enumerate() {
+                    let compact_row = cache_row_for_ctx[ctx_idx] as i32;
+                    let verify_len = (ctx.draft_tokens.len() + 1) as i32;
+                    let row_logits = mlx::ops::indexing::slice(
+                        &verify_logits,
+                        &[compact_row, 0_i32, 0_i32][..],
+                        &[compact_row + 1, verify_len, vocab][..],
+                    )?;
+                    if ctx.sampler.is_pipelinable() {
+                        let verified =
+                            mlx::ops::reduction::argmax(&row_logits, -1, false)?.to_vec()?;
+                        resolutions[ctx_idx] =
+                            Some(resolve_speculative_tokens(&ctx.draft_tokens, &verified)?);
+                        continue;
+                    }
+                    let token_start = compact_samplers.len();
+                    compact_samplers.extend(std::iter::repeat_n(&ctx.sampler, verify_len as usize));
+                    compact_histories.extend((0..verify_len as usize).map(|position| {
+                        let mut position_history = Vec::with_capacity(ctx.history.len() + position);
+                        position_history.extend_from_slice(&ctx.history);
+                        position_history.extend_from_slice(&ctx.draft_tokens[..position]);
+                        position_history
+                    }));
+                    let key_start = ctx_idx * 2;
+                    let mut row_prng: Array =
+                        (&compact_prng_host[key_start..key_start + 2], &[2_i32][..]).try_into()?;
+                    compact_uniforms.extend(draw_uniforms(&mut row_prng, verify_len as usize)?);
+                    let updated_key: Vec<u32> = row_prng.to_vec()?;
+                    compact_prng_host[key_start..key_start + 2].copy_from_slice(&updated_key);
+                    compact_ranges.push((ctx_idx, token_start, verify_len as usize));
+                    compact_logits_rows.push(row_logits.reshape(&[verify_len, vocab][..])?);
+                }
+                if !compact_logits_rows.is_empty() {
+                    let refs = compact_logits_rows.iter().collect::<Vec<_>>();
+                    let compact_logits = mlx::ops::shape::concatenate(&refs, 0)?;
+                    let compact_history_refs = compact_histories
+                        .iter()
+                        .map(Vec::as_slice)
+                        .collect::<Vec<_>>();
+                    let target_tokens = sample_target_tokens_with_uniforms_batch(
+                        &compact_samplers,
+                        &compact_logits,
+                        &compact_history_refs,
+                        &compact_uniforms,
+                    )?;
+                    for &(ctx_idx, token_start, verify_len) in &compact_ranges {
+                        let ctx = &contexts[ctx_idx];
+                        resolutions[ctx_idx] = Some(resolve_exact_deterministic_target_tokens(
+                            &ctx.draft_tokens,
+                            &target_tokens[token_start..token_start + verify_len],
+                        )?);
+                    }
+                }
+                stats.verify_accept_host_sync_count =
+                    stats.verify_accept_host_sync_count.saturating_add(1);
+                add_elapsed_us(&mut stats.verify_accept_host_sync_us, sync_start);
+                prng_commit = Some((
+                    context_rows,
+                    (&compact_prng_host[..], &[contexts.len() as i32, 2_i32][..]).try_into()?,
+                ));
             }
+            let mut resolutions = resolutions
+                .into_iter()
+                .enumerate()
+                .map(|(ctx_idx, resolution)| {
+                    resolution.ok_or_else(|| {
+                        anyhow!("prompt lookup context {ctx_idx} has no speculative resolution")
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            add_elapsed_us(&mut stats.verify_round_us, verify_round_start);
 
             let common_emit_len = contexts
                 .iter()
@@ -8257,6 +8364,18 @@ impl<M: Model> Scheduler<M> {
                 resolution.needs_rollback = common_emit_len < verified_input_len;
                 let drafted = ctx.draft_tokens.len() as u64;
                 let accepted = resolution.accepted_draft_len as u64;
+                stats.exact_sampling_windows = stats
+                    .exact_sampling_windows
+                    .saturating_add(resolution.exact_sampling.windows as u64);
+                stats.exact_acceptance_draws = stats
+                    .exact_acceptance_draws
+                    .saturating_add(resolution.exact_sampling.acceptance_draws as u64);
+                stats.exact_residual_corrections = stats
+                    .exact_residual_corrections
+                    .saturating_add(resolution.exact_sampling.residual_corrections as u64);
+                stats.exact_bonus_samples = stats
+                    .exact_bonus_samples
+                    .saturating_add(resolution.exact_sampling.bonus_samples as u64);
                 stats.drafted_tokens = stats.drafted_tokens.saturating_add(drafted);
                 stats.accepted_tokens = stats.accepted_tokens.saturating_add(accepted);
                 stats.rejected_tokens = stats
@@ -8285,8 +8404,7 @@ impl<M: Model> Scheduler<M> {
                 .as_ref()
                 .is_some_and(|cache| layer_cache_supports_accepted_prefix_trim(cache))
                 && model.supports_speculative_accepted_prefix_trim();
-            let requires_transactional_replay = exact_batched_verify && !supports_trim;
-            if !mismatch_rows.is_empty() || requires_transactional_replay {
+            if !mismatch_rows.is_empty() {
                 let rollback_start = Instant::now();
                 if supports_trim {
                     let cache = self.cache.as_mut().ok_or_else(|| {
@@ -8483,6 +8601,9 @@ impl<M: Model> Scheduler<M> {
                     contexts.len()
                 );
                 commit_shadow(&mtp_shadow_commits, stats)?;
+            }
+            if let Some((rows, compact_prng)) = prng_commit.take() {
+                self.scatter_prng_state_from_rows(&rows, &compact_prng)?;
             }
             for (row_idx, tokens) in pending_commits {
                 row_states
@@ -9724,6 +9845,13 @@ impl<M: Model> Scheduler<M> {
             self.mtp_state = Some(mtp_state);
             return Ok(Vec::new());
         }
+        if active_rows.len() == 1
+            && self.active_count() == 1
+            && self.cache_rows.as_slice() == active_rows.as_slice()
+        {
+            self.mtp_state = Some(mtp_state);
+            return self.step_mtp_single_inner(model, mtp);
+        }
 
         let mut events = Vec::with_capacity(active_rows.len());
 
@@ -10735,9 +10863,6 @@ impl<M: Model> Scheduler<M> {
     where
         M: MtpSpeculativeModel,
     {
-        if self.b_max != 1 {
-            return Err(anyhow!("step_mtp_single currently requires b_max 1"));
-        }
         if self.phase != Phase::Decoding {
             return Err(anyhow!(
                 "step_mtp_single illegal in {:?} phase: call prefill_admitted_mtp_single first",
@@ -10749,6 +10874,10 @@ impl<M: Model> Scheduler<M> {
             .iter()
             .position(|slot| matches!(slot, Some(state) if !state.finished))
             .ok_or_else(|| anyhow!("step_mtp_single: no unfinished row"))?;
+        anyhow::ensure!(
+            self.active_count() == 1 && self.cache_rows.as_slice() == [row_idx],
+            "step_mtp_single requires one active row with matching cache layout"
+        );
 
         if self
             .mtp_state
@@ -10903,44 +11032,31 @@ impl<M: Model> Scheduler<M> {
             .clamp(1, max_supported_draft_tokens)
             .min(remaining);
         let mut compact_prng = self.compact_prng_state_for_rows(&[row_idx])?;
-        let (draft_tokens, verify_arr, mtp_cache_snapshot) = if sampler.is_pipelinable() {
-            let draft_result = self.draft_mtp_tokens_single_greedy_device(
-                stats,
-                row_state,
-                model,
-                mtp,
-                current_token,
-                draft_budget,
-                history.len(),
-            )?;
-            let current: Array = (&[current_token][..], &[1_i32, 1_i32][..]).try_into()?;
-            let mut token_steps = Vec::with_capacity(draft_result.tokens.len() + 1);
-            token_steps.push(&current);
-            token_steps.extend(draft_result.tokens.iter());
-            let verify_arr =
-                mlx::ops::shape::concatenate_on(&token_steps, 1, mlx::StreamOrDevice::default())?;
-            (None, verify_arr, draft_result.cache_snapshot)
+        let draft_result = self.draft_mtp_tokens_single_greedy_device(
+            stats,
+            row_state,
+            model,
+            mtp,
+            current_token,
+            draft_budget,
+            history.len(),
+        )?;
+        let current: Array = (&[current_token][..], &[1_i32, 1_i32][..]).try_into()?;
+        let mut token_steps = Vec::with_capacity(draft_result.tokens.len() + 1);
+        token_steps.push(&current);
+        token_steps.extend(draft_result.tokens.iter());
+        let verify_arr =
+            mlx::ops::shape::concatenate_on(&token_steps, 1, mlx::StreamOrDevice::default())?;
+        let draft_arr = if sampler.is_pipelinable() {
+            None
         } else {
-            let draft_result = self.draft_mtp_tokens_single(
-                stats,
-                row_state,
-                model,
-                mtp,
-                current_token,
-                draft_budget,
-                &history,
-                sampler,
-                &mut compact_prng,
-            )?;
-            let verify_input = verify_input(current_token, &draft_result.tokens);
-            let verify_arr: Array =
-                (&verify_input[..], &[1_i32, verify_input.len() as i32][..]).try_into()?;
-            (
-                Some(draft_result.tokens),
-                verify_arr,
-                draft_result.cache_snapshot,
-            )
+            Some(mlx::ops::indexing::slice(
+                &verify_arr,
+                &[0_i32, 1_i32][..],
+                &[1_i32, i32::try_from(draft_budget + 1)?][..],
+            )?)
         };
+        let mtp_cache_snapshot = draft_result.cache_snapshot;
         let verify_len = draft_budget + 1;
         let verify_start_pos = (prompt_ids.len() + generated_tokens.len() - 1) as i32;
         let verify_pos_ids = self.mtp_position_ids(model, verify_start_pos, verify_len as i32)?;
@@ -11004,20 +11120,30 @@ impl<M: Model> Scheduler<M> {
             )?;
             add_elapsed_us(&mut stats.projection_us, projection_start);
             let sampling_start = Instant::now();
-            let verified_tokens =
-                sample_logits_positions(&verified_logits, sampler, &history, &mut compact_prng)?;
+            let draft_arr = draft_arr
+                .as_ref()
+                .ok_or_else(|| anyhow!("fill_mtp_window_single: non-greedy draft array absent"))?;
+            let sync_start = Instant::now();
+            let draft_tokens: Vec<u32> = draft_arr.to_vec()?;
+            stats.draft_host_sync_count = stats.draft_host_sync_count.saturating_add(1);
+            add_elapsed_us(&mut stats.draft_host_sync_us, sync_start);
+            let resolution = resolve_exact_deterministic_target_logits(
+                &draft_tokens,
+                &verified_logits,
+                sampler,
+                &history,
+                &mut compact_prng,
+            )?;
+            let (draft_tokens, resolution) = (draft_tokens, resolution);
             add_elapsed_us(&mut stats.sampling_us, sampling_start);
-            let draft_tokens = draft_tokens
-                .ok_or_else(|| anyhow!("fill_mtp_window_single: non-greedy draft tokens absent"))?;
-            let resolution = resolve_speculative_tokens(&draft_tokens, &verified_tokens)?;
             (draft_tokens, resolution)
         };
-        self.scatter_prng_state_from_rows(&[row_idx], &compact_prng)?;
         let verify_input = verify_input(current_token, &draft_tokens);
 
         stats.windows += 1;
         stats.drafted_tokens += draft_tokens.len();
         stats.accepted_draft_tokens += resolution.accepted_draft_len;
+        stats.record_exact_sampling(resolution.exact_sampling);
         stats.record_window_acceptance(draft_tokens.len(), resolution.accepted_draft_len);
         if resolution.needs_rollback {
             stats.rollback_count += 1;
@@ -11118,64 +11244,8 @@ impl<M: Model> Scheduler<M> {
         }
         tokens_to_append.truncate(remaining);
         row_state.pending_tokens.extend(tokens_to_append);
+        self.scatter_prng_state_from_rows(&[row_idx], &compact_prng)?;
         Ok(())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn draft_mtp_tokens_single(
-        &mut self,
-        stats: &mut MtpSpeculativeStats,
-        row_state: &mut SchedulerMtpRowState,
-        model: &M,
-        mtp: &M::MtpHead,
-        current_token: u32,
-        draft_budget: usize,
-        history: &[u32],
-        sampler: Sampler,
-        prng_state: &mut Array,
-    ) -> Result<MtpDraftResult>
-    where
-        M: MtpSpeculativeModel,
-    {
-        let mtp_snapshot = row_state.mtp_cache.snapshot();
-        let mut draft_tokens = Vec::with_capacity(draft_budget);
-        let mut draft_history = history.to_vec();
-        let mut input_hidden = row_state.last_hidden.clone();
-        let mut input_token = current_token;
-        let start_pos = (history.len() - 1) as i32;
-
-        for offset in 0..draft_budget {
-            let token_arr: Array = (&[input_token][..], &[1_i32, 1_i32][..]).try_into()?;
-            let position_ids = self.mtp_position_ids(model, start_pos + offset as i32, 1)?;
-            let draft_forward_start = Instant::now();
-            let output = model.mtp_forward_on(
-                mtp,
-                &input_hidden,
-                &token_arr,
-                &position_ids,
-                None,
-                Some(&mut row_state.mtp_cache),
-                mlx::StreamOrDevice::default(),
-            )?;
-            mlx::transforms::eval(&[&output.hidden_states])?;
-            add_elapsed_us(&mut stats.draft_forward_us, draft_forward_start);
-            let sampling_start = Instant::now();
-            let sampled =
-                sample_logits_positions(&output.logits, sampler, &draft_history, prng_state)?;
-            add_elapsed_us(&mut stats.sampling_us, sampling_start);
-            let next_token = *sampled
-                .first()
-                .ok_or_else(|| anyhow!("draft_mtp_tokens_single: MTP draft produced no token"))?;
-            draft_tokens.push(next_token);
-            draft_history.push(next_token);
-            input_hidden = output.hidden_states;
-            input_token = next_token;
-        }
-
-        Ok(MtpDraftResult {
-            tokens: draft_tokens,
-            cache_snapshot: mtp_snapshot,
-        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -15540,7 +15610,12 @@ impl Scheduler<crate::models::Gemma4Model> {
             .clamp(1, effective_max_draft_tokens)
             .min(remaining);
         let mut compact_prng = self.compact_prng_state_for_rows(&[row_idx])?;
-        let draft_tokens = self.draft_gemma4_drafter_tokens_single(
+        let mut draft_prng = if sampler.is_pipelinable() {
+            None
+        } else {
+            Some(split_speculative_draft_prng(&mut compact_prng)?)
+        };
+        let (draft_tokens, _draft_distributions) = self.draft_gemma4_drafter_tokens_single(
             stats,
             row_state,
             model,
@@ -15549,7 +15624,7 @@ impl Scheduler<crate::models::Gemma4Model> {
             draft_budget,
             &history,
             sampler,
-            &mut compact_prng,
+            draft_prng.as_mut(),
         )?;
         let verify_input = verify_input(current_token, &draft_tokens);
         let verify_start_pos = (history.len() - 1) as i32;
@@ -15596,17 +15671,26 @@ impl Scheduler<crate::models::Gemma4Model> {
             model.project_hidden_on(&verified.hidden, mlx::StreamOrDevice::default())?;
         add_elapsed_us(&mut stats.projection_us, projection_start);
         let sampling_start = Instant::now();
-        let verified_tokens =
-            sample_logits_positions(&verified_logits, sampler, &history, &mut compact_prng)?;
+        let resolution = if sampler.is_pipelinable() {
+            let verified_tokens =
+                sample_logits_positions(&verified_logits, sampler, &history, &mut compact_prng)?;
+            resolve_speculative_tokens(&draft_tokens, &verified_tokens)?
+        } else {
+            resolve_exact_deterministic_target_logits(
+                &draft_tokens,
+                &verified_logits,
+                sampler,
+                &history,
+                &mut compact_prng,
+            )?
+        };
         add_elapsed_us(&mut stats.sampling_us, sampling_start);
-        self.scatter_prng_state_from_rows(&[row_idx], &compact_prng)?;
-
-        let resolution = resolve_speculative_tokens(&draft_tokens, &verified_tokens)?;
         let accepted_draft_len = resolution.accepted_draft_len;
         let rollback_count = usize::from(resolution.needs_rollback);
         stats.windows += 1;
         stats.drafted_tokens += draft_tokens.len();
         stats.accepted_draft_tokens += resolution.accepted_draft_len;
+        stats.record_exact_sampling(resolution.exact_sampling);
         stats.record_window_acceptance(draft_tokens.len(), resolution.accepted_draft_len);
         if resolution.needs_rollback {
             stats.rollback_count += 1;
@@ -15678,6 +15762,7 @@ impl Scheduler<crate::models::Gemma4Model> {
             elapsed_us_since(window_started),
             timing_delta,
         );
+        self.scatter_prng_state_from_rows(&[row_idx], &compact_prng)?;
         Ok(())
     }
 
@@ -15692,16 +15777,21 @@ impl Scheduler<crate::models::Gemma4Model> {
         draft_budget: usize,
         history: &[u32],
         sampler: Sampler,
-        prng_state: &mut Array,
-    ) -> Result<Vec<u32>> {
+        draft_prng: Option<&mut Array>,
+    ) -> Result<(Vec<u32>, Vec<DraftTokenDistribution>)> {
         let mut draft_tokens = Vec::with_capacity(draft_budget);
+        let mut draft_distributions = Vec::with_capacity(draft_budget);
         let mut draft_history = history.to_vec();
         let mut input_hidden = row_state.last_hidden.clone();
         let mut input_token = current_token;
         let kv_valid_len = (history.len() - 1) as i32;
         let draft_position = crate::models::gemma4::draft_position_for_shared_kv(kv_valid_len);
+        let draft_uniforms = match draft_prng {
+            Some(prng) => draw_uniforms(prng, draft_budget)?,
+            None => vec![0.0; draft_budget],
+        };
 
-        for _ in 0..draft_budget {
+        for &draft_uniform in draft_uniforms.iter().take(draft_budget) {
             let token_arr: Array = (&[input_token][..], &[1_i32, 1_i32][..]).try_into()?;
             let token_embed = model.embed_on(&token_arr, mlx::StreamOrDevice::default())?;
             let inputs_embeds = mlx::ops::shape::concatenate_on(
@@ -15719,19 +15809,25 @@ impl Scheduler<crate::models::Gemma4Model> {
             )?;
             add_elapsed_us(&mut stats.draft_forward_us, draft_forward_start);
             let sampling_start = Instant::now();
-            let sampled =
-                sample_logits_positions(&output.logits, sampler, &draft_history, prng_state)?;
+            let (next_token, distribution) = if sampler.is_pipelinable() {
+                sample_draft_logits_position(&output.logits, sampler, &draft_history, None)?
+            } else {
+                sample_draft_logits_position_with_uniform(
+                    &output.logits,
+                    sampler,
+                    &draft_history,
+                    draft_uniform,
+                )?
+            };
             add_elapsed_us(&mut stats.sampling_us, sampling_start);
-            let next_token = *sampled
-                .first()
-                .ok_or_else(|| anyhow!("Gemma4 drafter produced no token"))?;
             draft_tokens.push(next_token);
+            draft_distributions.push(distribution);
             draft_history.push(next_token);
             input_hidden = output.hidden_states;
             input_token = next_token;
         }
 
-        Ok(draft_tokens)
+        Ok((draft_tokens, draft_distributions))
     }
 
     fn gemma4_drafter_position_ids(
@@ -18138,11 +18234,11 @@ mod tests {
             .admit(mtp_req(vec![1, 2], 4))
             .expect("admit text greedy");
 
-        assert!(scheduler.mtp_batch_active_greedy_eligible());
+        assert!(scheduler.speculative_batch_active_fresh_eligible());
     }
 
     #[test]
-    fn mtp_batch_eligibility_accepts_vl_and_rejects_non_greedy_requests() {
+    fn speculative_batch_eligibility_accepts_sampled_b1_and_rejects_sampled_b2() {
         let mut vl_scheduler = Scheduler::<ScriptedMtpSchedulerModel>::new(
             1,
             16,
@@ -18151,7 +18247,7 @@ mod tests {
         .expect("scheduler");
         let vl = mtp_vl_req(vec![1, 248056, 2], 4);
         vl_scheduler.admit(vl).expect("admit vl");
-        assert!(vl_scheduler.mtp_batch_active_greedy_eligible());
+        assert!(vl_scheduler.speculative_batch_active_fresh_eligible());
 
         let mut sampling_scheduler = Scheduler::<ScriptedMtpSchedulerModel>::new(
             1,
@@ -18162,7 +18258,20 @@ mod tests {
         let mut sampled = mtp_req(vec![1, 2], 4);
         sampled.sampler = Sampler::greedy().with_temperature(0.7);
         sampling_scheduler.admit(sampled).expect("admit sampled");
-        assert!(!sampling_scheduler.mtp_batch_active_greedy_eligible());
+        assert!(sampling_scheduler.speculative_batch_active_fresh_eligible());
+
+        let mut sampled_b2_scheduler = Scheduler::<ScriptedMtpSchedulerModel>::new(
+            2,
+            16,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler");
+        for seed in [7, 11] {
+            let mut sampled = mtp_req(vec![1, 2], 4);
+            sampled.sampler = Sampler::greedy().with_temperature(0.7).with_seed(seed);
+            sampled_b2_scheduler.admit(sampled).expect("admit sampled");
+        }
+        assert!(!sampled_b2_scheduler.speculative_batch_active_fresh_eligible());
     }
 
     #[test]
@@ -18438,6 +18547,51 @@ mod tests {
         assert_eq!(stats.rollback_count, 0);
         assert_eq!(stats.draft_host_sync_count, 0);
         assert_eq!(stats.verify_accept_host_sync_count, stats.windows);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn mtp_sampled_b1_runs_exact_acceptance_and_commits_cache() {
+        let mut s = Scheduler::<ScriptedMtpSchedulerModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        let sampler = Sampler::greedy().with_temperature(0.7).with_seed(19);
+        let mut request = mtp_req(vec![1, 2], 4);
+        request.sampler = sampler;
+        let id = s.admit(request).expect("admit sampled request");
+        let model = ScriptedMtpSchedulerModel::new(3, vec![4, 5], vec![vec![4, 5, 6]]);
+        let cfg = MtpSpeculativeConfig::new(2, sampler).expect("sampled mtp cfg");
+
+        let first = s
+            .prefill_admitted_mtp_single(&model, &FakeMtpHead, cfg)
+            .expect("sampled mtp prefill");
+        assert_eq!(
+            first,
+            vec![StepEvent {
+                id,
+                token: 3,
+                finish_reason: None
+            }]
+        );
+        assert_eq!(
+            mtp_cache_offset(&s),
+            5,
+            "full exact acceptance must commit the sampled MTP tail"
+        );
+
+        let stats = s.mtp_stats().expect("sampled mtp stats");
+        assert_eq!(stats.windows, 1);
+        assert_eq!(stats.drafted_tokens, 2);
+        assert_eq!(stats.accepted_draft_tokens, 2);
+        assert_eq!(stats.exact_sampling_windows, 1);
+        assert_eq!(stats.exact_acceptance_draws, 2);
+        assert_eq!(stats.exact_residual_corrections, 0);
+        assert_eq!(stats.exact_bonus_samples, 1);
+        assert_eq!(stats.rollback_count, 0);
+        assert_eq!(stats.mtp_cache_reuse_count, 1);
     }
 
     fn prompt_lookup_cfg() -> PromptLookupConfig {
@@ -18935,6 +19089,55 @@ mod tests {
 
     #[test]
     #[serial(mlx_metal)]
+    fn prompt_lookup_exact_hybrid_full_accept_commits_live_cache_without_replay() {
+        let mut scheduler = Scheduler::<ScriptedMtpSchedulerModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        let prompt = vec![1, 2, 3, 4, 1, 2, 3];
+        let id = scheduler.admit(mtp_req(prompt, 6)).expect("admit");
+        let model = ScriptedMtpSchedulerModel::new(4, Vec::new(), vec![vec![1, 2, 3, 4, 5]])
+            .with_hybrid_cache()
+            .with_required_verify_projection_scope();
+
+        scheduler
+            .prefill_admitted_prompt_lookup(&model, prompt_lookup_cfg())
+            .expect("prompt lookup prefill");
+        model.clear_text_hidden_trace();
+        let events = scheduler
+            .step_prompt_lookup(&model)
+            .expect("prompt lookup full-accept step");
+
+        assert_eq!(events[0].token, 1);
+        assert_eq!(
+            model.text_hidden_seq_lens(),
+            vec![5],
+            "a fully accepted exact window must retain the live mixed-cache state"
+        );
+        let expected_offset = scheduler
+            .get(id)
+            .expect("request state")
+            .real_len
+            .saturating_add(3);
+        for layer in scheduler.cache.as_deref().expect("scheduler cache") {
+            match layer {
+                LayerCache::Full(kv) => assert_eq!(kv.offsets(), &[expected_offset]),
+                LayerCache::Linear(gd) => assert_eq!(gd.offsets(), &[expected_offset]),
+                LayerCache::Mla(_) => panic!("unexpected MLA cache"),
+            }
+        }
+        let stats = scheduler
+            .prompt_lookup_stats()
+            .expect("prompt lookup stats");
+        assert_eq!(stats.exact_batched_verify_windows, 1);
+        assert_eq!(stats.rollback_count, 0);
+        assert_eq!(stats.rollback_us, 0);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
     fn prompt_lookup_exact_hybrid_verify_failure_restores_transaction() {
         let mut scheduler = Scheduler::<ScriptedMtpSchedulerModel>::new(
             1,
@@ -18943,9 +19146,9 @@ mod tests {
         )
         .expect("scheduler startup");
         let prompt = vec![1, 2, 3, 4, 1, 2, 3];
-        scheduler
-            .admit(mtp_req(prompt, 3))
-            .expect("admit hybrid request");
+        let mut request = mtp_req(prompt, 3);
+        request.sampler = Sampler::greedy().with_temperature(0.7).with_seed(29);
+        scheduler.admit(request).expect("admit hybrid request");
         let model = ScriptedMtpSchedulerModel::new(4, Vec::new(), vec![vec![9, 0]])
             .with_hybrid_cache()
             .with_verify_projection_failure();
@@ -18964,6 +19167,7 @@ mod tests {
                 LayerCache::Mla(_) => panic!("unexpected MLA cache"),
             })
             .collect::<Vec<_>>();
+        let prng_before = scheduler.prng_state.to_vec::<u32>().expect("PRNG before");
 
         let err = scheduler
             .step_prompt_lookup(&model)
@@ -18984,6 +19188,11 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(offsets_after, offsets_before);
+        assert_eq!(
+            scheduler.prng_state.to_vec::<u32>().expect("PRNG after"),
+            prng_before,
+            "failed exact verify must not commit the row PRNG"
+        );
         assert!(scheduler.poisoned);
         assert!(scheduler
             .prompt_lookup_state
@@ -20117,8 +20326,8 @@ mod tests {
         );
         assert_eq!(
             model.text_hidden_batch_sizes(),
-            vec![1],
-            "postfill should verify only rows whose pending token queue is empty"
+            vec![2],
+            "postfill should preserve the qualified model-facing batch width"
         );
         assert_eq!(
             model.text_hidden_seq_lens(),

@@ -6,13 +6,13 @@
 //! 3. temperature scaling (zero ⇒ greedy short-circuit)
 //! 4. top_k mask
 //! 5. min_p mask (relative to top-1 prob)
-//! 6. top_p (nucleus) mask — coarse surrogate for now (P1 follow-up
-//!    tracks tightening once we have an exact gather-along-sorted-axis
-//!    primitive)
+//! 6. top_p (nucleus) mask
 //! 7. greedy: argmax | sample: categorical(num_samples=1)
 
+#[cfg(test)]
+use mlx::ops::sort;
 use mlx::{
-    ops::{indexing, reduction, sort, unary, All},
+    ops::{indexing, reduction, unary, All},
     random, Array,
 };
 
@@ -51,6 +51,174 @@ pub struct Sampler {
     pub presence_penalty: Option<f32>,
     /// PRNG seed (retained for external key initialisation in 3e.2 Scheduler).
     pub seed: u64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SamplingDistribution {
+    #[cfg(test)]
+    vocab: usize,
+    support: Vec<(u32, f32)>,
+}
+
+impl SamplingDistribution {
+    #[cfg(test)]
+    pub(crate) fn new(probs: Vec<f32>) -> Result<Self> {
+        let vocab = probs.len();
+        let support = probs
+            .into_iter()
+            .enumerate()
+            .filter_map(|(token, prob)| (prob > 0.0).then_some((token as u32, prob)))
+            .collect();
+        Self::from_unnormalized_support(vocab, support)
+    }
+
+    fn from_unnormalized_support(vocab: usize, mut support: Vec<(u32, f32)>) -> Result<Self> {
+        support
+            .retain(|(token, prob)| (*token as usize) < vocab && prob.is_finite() && *prob > 0.0);
+        support.sort_unstable_by_key(|&(token, _)| token);
+        let mut merged = Vec::<(u32, f32)>::with_capacity(support.len());
+        for (token, prob) in support {
+            if let Some((last_token, last_prob)) = merged.last_mut() {
+                if *last_token == token {
+                    *last_prob += prob;
+                    continue;
+                }
+            }
+            merged.push((token, prob));
+        }
+        let mut total = 0.0_f64;
+        for &(_, prob) in &merged {
+            total += f64::from(prob);
+        }
+        if !total.is_finite() || total <= 0.0 {
+            anyhow::bail!("sampling distribution has no finite positive mass");
+        }
+        let inv_total = (1.0 / total) as f32;
+        for (_, prob) in &mut merged {
+            *prob *= inv_total;
+        }
+        Ok(Self {
+            #[cfg(test)]
+            vocab,
+            support: merged,
+        })
+    }
+
+    pub(crate) fn point_mass(vocab: usize, token: u32) -> Result<Self> {
+        if token as usize >= vocab {
+            anyhow::bail!("point-mass token {token} is outside sampling vocabulary {vocab}");
+        }
+        Ok(Self {
+            #[cfg(test)]
+            vocab,
+            support: vec![(token, 1.0)],
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.vocab
+    }
+
+    #[cfg(test)]
+    pub(crate) fn probability(&self, token: u32) -> f32 {
+        self.support
+            .binary_search_by_key(&token, |&(support_token, _)| support_token)
+            .ok()
+            .map(|index| self.support[index].1)
+            .unwrap_or(0.0)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn acceptance_probability(&self, draft: &Self, token: u32) -> Result<f32> {
+        anyhow::ensure!(
+            self.len() == draft.len(),
+            "target vocabulary {} != draft vocabulary {}",
+            self.len(),
+            draft.len()
+        );
+        let p = self.probability(token);
+        let q = draft.probability(token);
+        anyhow::ensure!(
+            q > 0.0,
+            "sampled draft token {token} has zero proposal probability"
+        );
+        Ok((p / q).clamp(0.0, 1.0))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn residual(&self, draft: &Self) -> Result<Self> {
+        anyhow::ensure!(
+            self.len() == draft.len(),
+            "target vocabulary {} != draft vocabulary {}",
+            self.len(),
+            draft.len()
+        );
+        let residual = self
+            .support
+            .iter()
+            .filter_map(|&(token, p)| {
+                let residual = p - draft.probability(token);
+                (residual > 0.0).then_some((token, residual))
+            })
+            .collect();
+        Self::from_unnormalized_support(self.vocab, residual)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn residual_point_mass(&self, token: u32) -> Result<Self> {
+        let token = token as usize;
+        anyhow::ensure!(
+            token < self.len(),
+            "point-mass token {token} is outside sampling vocabulary {}",
+            self.len()
+        );
+        let residual = self
+            .support
+            .iter()
+            .filter_map(|&(support_token, prob)| {
+                let residual = if support_token as usize == token {
+                    (prob - 1.0).max(0.0)
+                } else {
+                    prob
+                };
+                (residual > 0.0).then_some((support_token, residual))
+            })
+            .collect();
+        Self::from_unnormalized_support(self.vocab, residual)
+    }
+
+    pub(crate) fn sample(&self, prng_state_row: &mut Array) -> Result<u32> {
+        let uniform = draw_uniform(prng_state_row)?;
+        self.sample_with_uniform(uniform)
+    }
+
+    pub(crate) fn sample_with_uniform(&self, uniform: f32) -> Result<u32> {
+        anyhow::ensure!(
+            uniform.is_finite() && (0.0..1.0).contains(&uniform),
+            "sampling uniform must be finite and in [0, 1), got {uniform}"
+        );
+        let mut cumulative = 0.0_f32;
+        for &(token, prob) in &self.support {
+            cumulative += prob;
+            if cumulative > uniform {
+                return Ok(token);
+            }
+        }
+        self.support
+            .last()
+            .map(|&(token, _)| token)
+            .ok_or_else(|| anyhow::anyhow!("cannot sample an empty distribution"))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn probabilities(&self) -> Vec<f32> {
+        let mut probs = vec![0.0; self.vocab];
+        for &(token, prob) in &self.support {
+            probs[token as usize] = prob;
+        }
+        probs
+    }
 }
 
 impl Sampler {
@@ -175,45 +343,134 @@ impl Sampler {
         history: &[u32],
         prng_state_row: &mut Array,
     ) -> Result<u32> {
-        let mut logits = logits.clone();
-        if let Some(p) = self.repetition_penalty {
-            if !history.is_empty() && (p - 1.0).abs() > f32::EPSILON {
-                logits = apply_repetition_penalty(&logits, history, p)?;
-            }
-        }
-        if self.frequency_penalty.unwrap_or(0.0).abs() > f32::EPSILON
-            || self.presence_penalty.unwrap_or(0.0).abs() > f32::EPSILON
-        {
-            let f = self.frequency_penalty.unwrap_or(0.0);
-            let pp = self.presence_penalty.unwrap_or(0.0);
-            logits = apply_freq_presence_penalty(&logits, history, f, pp)?;
-        }
         if self.temperature <= 0.0 {
+            let mut logits = logits.clone();
+            if let Some(p) = self.repetition_penalty {
+                if !history.is_empty() && (p - 1.0).abs() > f32::EPSILON {
+                    logits = apply_repetition_penalty(&logits, history, p)?;
+                }
+            }
+            if self.frequency_penalty.unwrap_or(0.0).abs() > f32::EPSILON
+                || self.presence_penalty.unwrap_or(0.0).abs() > f32::EPSILON
+            {
+                let f = self.frequency_penalty.unwrap_or(0.0);
+                let pp = self.presence_penalty.unwrap_or(0.0);
+                logits = apply_freq_presence_penalty(&logits, history, f, pp)?;
+            }
             let idx = reduction::argmax(&logits, All, false)?;
             return Ok(idx.item::<u32>()?);
         }
-        let inv_t = 1.0_f32 / self.temperature;
-        let mut logits = &logits * inv_t;
-        if let Some(k) = self.top_k {
-            logits = apply_top_k(&logits, k)?;
-        }
-        if let Some(p) = self.min_p {
-            logits = apply_min_p(&logits, p)?;
-        }
-        if let Some(p) = self.top_p {
-            if p < 1.0 {
-                logits = apply_top_p(&logits, p)?;
-            }
-        }
-        // PRNG: split + advance
-        let (next_key, sample_key) = random::split(prng_state_row)?;
-        let sample = random::categorical(&logits)
-            .num_samples(1)
-            .key(&sample_key)
-            .sample()?;
-        *prng_state_row = next_key;
-        Ok(sample.item::<u32>()?)
+        self.distribution(logits, history)?.sample(prng_state_row)
     }
+
+    pub(crate) fn distribution(
+        &self,
+        logits: &Array,
+        history: &[u32],
+    ) -> Result<SamplingDistribution> {
+        anyhow::ensure!(
+            self.temperature > 0.0,
+            "sampling distribution requires temperature > 0"
+        );
+        let dims = logits.shape();
+        anyhow::ensure!(
+            dims.as_slice().len() == 1,
+            "sampling distribution expects [vocab] logits, got {:?}",
+            dims.as_slice()
+        );
+        let vocab = dims.as_slice()[0];
+        let batched = logits.reshape(&[1_i32, vocab][..])?;
+        let samplers = [self];
+        let histories = [history];
+        configured_distributions(&samplers, &batched, &histories)?
+            .pop()
+            .ok_or_else(|| anyhow::anyhow!("sampling distribution pipeline returned no row"))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn distributions(
+        &self,
+        logits: &Array,
+        histories: &[&[u32]],
+    ) -> Result<Vec<SamplingDistribution>> {
+        let dims = logits.shape();
+        let dims = dims.as_slice();
+        anyhow::ensure!(
+            dims.len() == 2 && dims[0] as usize == histories.len(),
+            "sampling distributions require [B, vocab] logits and B histories, got {dims:?} and {} histories",
+            histories.len()
+        );
+        let samplers = vec![self; histories.len()];
+        configured_distributions(&samplers, logits, histories)
+    }
+}
+
+pub(crate) fn sample_target_tokens_with_uniforms_batch(
+    samplers: &[&Sampler],
+    logits: &Array,
+    histories: &[&[u32]],
+    uniforms: &[f32],
+) -> Result<Vec<u32>> {
+    let dims_owned = logits.shape();
+    let dims = dims_owned.as_slice();
+    anyhow::ensure!(
+        dims.len() == 2,
+        "target token sampling requires [B, vocab] logits, got {dims:?}"
+    );
+    let b = dims[0] as usize;
+    let vocab_i32 = dims[1];
+    let vocab = vocab_i32 as usize;
+    anyhow::ensure!(
+        samplers.len() == b && histories.len() == b && uniforms.len() == b,
+        "target token sampling rows do not match batch {b}: {} samplers, {} histories, {} uniforms",
+        samplers.len(),
+        histories.len(),
+        uniforms.len()
+    );
+    anyhow::ensure!(
+        samplers.iter().all(|sampler| sampler.temperature > 0.0),
+        "target token sampling requires temperature > 0"
+    );
+    anyhow::ensure!(
+        uniforms
+            .iter()
+            .all(|uniform| uniform.is_finite() && (0.0..1.0).contains(uniform)),
+        "target token sampling uniforms must be finite and in [0, 1)"
+    );
+    let configs = collect_per_row_configs(samplers, vocab_i32)?;
+    let history_count = if configs.need_history {
+        Some(build_history_count(histories, vocab)?)
+    } else {
+        None
+    };
+    let logits = apply_penalties(logits, history_count.as_ref(), &configs)?;
+    let logits = apply_temperature(&logits, &configs.temp)?;
+    let logits = apply_top_k_batched(&logits, &configs.top_k)?;
+    let probs_flat: Vec<f32> = apply_softmax(&logits)?.to_vec()?;
+
+    std::thread::scope(|scope| {
+        let handles = (0..b)
+            .map(|row| {
+                let probs = &probs_flat[row * vocab..(row + 1) * vocab];
+                scope.spawn(move || {
+                    let support = filter_sampling_support(
+                        probs,
+                        samplers[row].top_p.unwrap_or(1.0),
+                        samplers[row].min_p.unwrap_or(0.0),
+                    );
+                    sample_unnormalized_support(&support, uniforms[row])
+                })
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("target token sampling worker panicked"))?
+            })
+            .collect()
+    })
 }
 
 /// Batched per-row sampling for `Scheduler::step` and
@@ -295,10 +552,6 @@ struct PerRowConfigs {
     temp: Array,
     /// `[B] i32`. None → `vocab_size` (no clip).
     top_k: Array,
-    /// `[B] f32`. None → 1.0 (no nucleus cut).
-    top_p: Array,
-    /// `[B] f32`. None → 0.0 (no min_p floor).
-    min_p: Array,
     /// `[B] f32`. None → 1.0 (no repetition penalty).
     rep_pen: Array,
     /// `[B] f32`. None → 0.0 (no frequency penalty).
@@ -314,8 +567,6 @@ fn collect_per_row_configs(samplers: &[&Sampler], vocab: i32) -> Result<PerRowCo
     let b = samplers.len();
     let mut temp = Vec::with_capacity(b);
     let mut top_k = Vec::with_capacity(b);
-    let mut top_p = Vec::with_capacity(b);
-    let mut min_p = Vec::with_capacity(b);
     let mut rep_pen = Vec::with_capacity(b);
     let mut freq_pen = Vec::with_capacity(b);
     let mut pres_pen = Vec::with_capacity(b);
@@ -330,8 +581,6 @@ fn collect_per_row_configs(samplers: &[&Sampler], vocab: i32) -> Result<PerRowCo
             1.0
         });
         top_k.push(s.top_k.unwrap_or(vocab));
-        top_p.push(s.top_p.unwrap_or(1.0));
-        min_p.push(s.min_p.unwrap_or(0.0));
         rep_pen.push(s.repetition_penalty.unwrap_or(1.0));
         freq_pen.push(s.frequency_penalty.unwrap_or(0.0));
         pres_pen.push(s.presence_penalty.unwrap_or(0.0));
@@ -346,8 +595,6 @@ fn collect_per_row_configs(samplers: &[&Sampler], vocab: i32) -> Result<PerRowCo
     Ok(PerRowConfigs {
         temp: (&temp[..], dim).try_into()?,
         top_k: (&top_k[..], dim).try_into()?,
-        top_p: (&top_p[..], dim).try_into()?,
-        min_p: (&min_p[..], dim).try_into()?,
         rep_pen: (&rep_pen[..], dim).try_into()?,
         freq_pen: (&freq_pen[..], dim).try_into()?,
         pres_pen: (&pres_pen[..], dim).try_into()?,
@@ -445,46 +692,19 @@ fn configured_pipeline(
     histories: &[&[u32]],
     prng_state: &mut Array,
 ) -> Result<Vec<u32>> {
-    let dims_owned = logits.shape();
-    let dims = dims_owned.as_slice();
-    let vocab_i32 = dims[1];
-    let vocab = vocab_i32 as usize;
-    let b = dims[0] as usize;
-
-    let configs = collect_per_row_configs(samplers, vocab_i32)?;
-
-    let history_count = if configs.need_history {
-        Some(build_history_count(histories, vocab)?)
-    } else {
-        None
-    };
-
-    // GPU stage: penalties → temperature → top_k → softmax, all lazy.
-    // Single `to_vec` sync materialises [B * vocab] on CPU.
-    let logits = apply_penalties(logits, history_count.as_ref(), &configs)?;
-    let logits = apply_temperature(&logits, &configs.temp)?;
-    let logits = apply_top_k_batched(&logits, &configs.top_k)?;
-    let probs_gpu = apply_softmax(&logits)?;
-
-    // One GPU sync — eval the entire fused graph built above.
-    let probs_flat: Vec<f32> = probs_gpu.to_vec()?;
-
-    // CPU stage: top_p + min_p + renorm + CDF per row.
-    let top_p_host: Vec<f32> = configs.top_p.to_vec()?;
-    let min_p_host: Vec<f32> = configs.min_p.to_vec()?;
-
+    let distributions = configured_distributions(samplers, logits, histories)?;
+    let b = distributions.len();
     // Read all prng_state rows to host ONCE (cheap: B*2 u32 scalars).
     let prng_host: Vec<u32> = prng_state.to_vec()?;
 
     let mut tokens = Vec::with_capacity(b);
     let mut row_keys_after: Vec<Array> = Vec::with_capacity(b);
 
-    for row in 0..b {
-        let row_probs = &probs_flat[row * vocab..(row + 1) * vocab];
+    for (row, distribution) in distributions.iter().enumerate() {
         // Build row_key Array from host slice [2] u32.
         let row_key_bytes = &prng_host[row * 2..(row + 1) * 2];
         let mut row_key: Array = (row_key_bytes, &[2_i32][..]).try_into()?;
-        let token = sample_row_cpu(row_probs, top_p_host[row], min_p_host[row], &mut row_key)?;
+        let token = distribution.sample(&mut row_key)?;
         row_keys_after.push(row_key);
         tokens.push(token);
     }
@@ -496,84 +716,216 @@ fn configured_pipeline(
     Ok(tokens)
 }
 
-/// CPU-side sampling for one row of `[vocab]` probs.
-///
-/// `prng_state_row` is a `[2]` u32 Array representing this row's PRNG key.
-/// It is split + advanced in-place each call.
-///
-/// Algorithm: top_p nucleus → min_p floor → renormalize → CDF walk with
-/// uniform random draw from `prng_state_row`.
-fn sample_row_cpu(
-    probs: &[f32],
-    top_p: f32,
-    min_p: f32,
-    prng_state_row: &mut Array,
-) -> Result<u32> {
-    let vocab = probs.len();
+fn configured_distributions(
+    samplers: &[&Sampler],
+    logits: &Array,
+    histories: &[&[u32]],
+) -> Result<Vec<SamplingDistribution>> {
+    let dims_owned = logits.shape();
+    let dims = dims_owned.as_slice();
+    anyhow::ensure!(
+        dims.len() == 2,
+        "configured distributions require [B, vocab] logits, got {dims:?}"
+    );
+    let vocab_i32 = dims[1];
+    let vocab = vocab_i32 as usize;
+    let b = dims[0] as usize;
+    anyhow::ensure!(
+        samplers.len() == b && histories.len() == b,
+        "configured distribution rows do not match batch {b}"
+    );
+    let configs = collect_per_row_configs(samplers, vocab_i32)?;
+    let history_count = if configs.need_history {
+        Some(build_history_count(histories, vocab)?)
+    } else {
+        None
+    };
+    let logits = apply_penalties(logits, history_count.as_ref(), &configs)?;
+    let logits = apply_temperature(&logits, &configs.temp)?;
+    let logits = apply_top_k_batched(&logits, &configs.top_k)?;
+    let probs_gpu = apply_softmax(&logits)?;
+    let top_p_host = samplers
+        .iter()
+        .map(|sampler| sampler.top_p.unwrap_or(1.0))
+        .collect::<Vec<_>>();
+    let min_p_host = samplers
+        .iter()
+        .map(|sampler| sampler.min_p.unwrap_or(0.0))
+        .collect::<Vec<_>>();
+    let probs_flat: Vec<f32> = probs_gpu.to_vec()?;
 
-    // Sort descending by prob (stable tie-break by index via partial_cmp).
+    (0..b)
+        .map(|row| {
+            let probs = &probs_flat[row * vocab..(row + 1) * vocab];
+            if samplers[row].temperature <= 0.0 {
+                let token = probs
+                    .iter()
+                    .enumerate()
+                    .max_by(|(_, left), (_, right)| {
+                        left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .map(|(token, _)| token as u32)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("greedy sampling row has an empty vocabulary")
+                    })?;
+                return SamplingDistribution::point_mass(vocab, token);
+            }
+            SamplingDistribution::from_unnormalized_support(
+                vocab,
+                filter_sampling_support(probs, top_p_host[row], min_p_host[row]),
+            )
+        })
+        .collect()
+}
+
+const INITIAL_SAMPLING_CANDIDATES: usize = 32;
+
+fn filter_sampling_support(probs: &[f32], top_p: f32, min_p: f32) -> Vec<(u32, f32)> {
+    let vocab = probs.len();
+    if top_p >= 1.0 {
+        let max_prob = probs.iter().copied().fold(0.0_f32, f32::max);
+        let min_p_thresh = min_p * max_prob;
+        let mut support = probs
+            .iter()
+            .enumerate()
+            .filter_map(|(token, &prob)| {
+                (prob > 0.0 && prob >= min_p_thresh).then_some((token as u32, prob))
+            })
+            .collect::<Vec<_>>();
+        if support.is_empty() {
+            let (max_token, max_prob) = probs
+                .iter()
+                .enumerate()
+                .max_by(|(_, left), (_, right)| {
+                    left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .map(|(token, &prob)| (token, prob))
+                .unwrap_or((0, 1.0));
+            support.push((max_token as u32, max_prob.max(f32::MIN_POSITIVE)));
+        }
+        return support;
+    }
+
     let mut indexed: Vec<(f32, u32)> = probs
         .iter()
         .enumerate()
         .map(|(i, &p)| (p, i as u32))
         .collect();
-    indexed.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-
-    // Top_p nucleus: keep tokens until cumulative mass >= top_p.
-    let mut keep_count = vocab;
-    if top_p < 1.0 {
+    let descending = |left: &(f32, u32), right: &(f32, u32)| {
+        right
+            .0
+            .partial_cmp(&left.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    };
+    let mut candidate_limit = INITIAL_SAMPLING_CANDIDATES.min(vocab);
+    loop {
+        let outside_upper_bound = if candidate_limit < vocab {
+            indexed.select_nth_unstable_by(candidate_limit, descending);
+            indexed[..=candidate_limit].sort_unstable_by(descending);
+            indexed[candidate_limit].0
+        } else {
+            indexed.sort_unstable_by(descending);
+            f32::NEG_INFINITY
+        };
+        let candidates = &indexed[..candidate_limit];
         let mut cum = 0.0_f32;
-        for (k, &(p, _)) in indexed.iter().enumerate() {
+        let mut keep_count = candidate_limit;
+        for (k, &(p, _)) in candidates.iter().enumerate() {
             if cum >= top_p {
                 keep_count = k;
                 break;
             }
             cum += p;
         }
+        if (cum >= top_p || candidate_limit == vocab)
+            && keep_count > 0
+            && outside_upper_bound < candidates[keep_count - 1].0
+        {
+            let nucleus = &candidates[..keep_count];
+            let max_prob = nucleus[0].0;
+            let min_p_thresh = min_p * max_prob;
+            let mut support = nucleus
+                .iter()
+                .filter_map(|&(prob, token)| {
+                    (prob > 0.0 && prob >= min_p_thresh).then_some((token, prob))
+                })
+                .collect::<Vec<_>>();
+            if support.is_empty() {
+                support.push((nucleus[0].1, 1.0));
+            }
+            support.sort_unstable_by_key(|&(token, _)| token);
+            return support;
+        }
+        let next_limit = candidate_limit.saturating_mul(2).min(vocab);
+        if next_limit == vocab {
+            indexed = probs
+                .iter()
+                .enumerate()
+                .map(|(token, &prob)| (prob, token as u32))
+                .collect();
+        }
+        candidate_limit = next_limit;
     }
-    let nucleus = &indexed[..keep_count];
+}
 
-    // Min_p floor: drop tokens whose prob < min_p * max_prob.
-    let max_prob = nucleus.first().map(|&(p, _)| p).unwrap_or(1.0);
-    let min_p_thresh = min_p * max_prob;
-
-    let mut eligible: Vec<(f32, u32)> = nucleus
+fn sample_unnormalized_support(support: &[(u32, f32)], uniform: f32) -> Result<u32> {
+    let total = support
         .iter()
-        .filter(|&&(p, _)| p >= min_p_thresh)
-        .copied()
-        .collect();
-    if eligible.is_empty() {
-        // Fallback: return the top token.
-        return Ok(indexed[0].1);
+        .map(|&(_, probability)| f64::from(probability))
+        .sum::<f64>();
+    anyhow::ensure!(
+        total.is_finite() && total > 0.0,
+        "sampling support has no finite positive mass"
+    );
+    let threshold = f64::from(uniform) * total;
+    let mut cumulative = 0.0_f64;
+    for &(token, probability) in support {
+        cumulative += f64::from(probability);
+        if cumulative > threshold {
+            return Ok(token);
+        }
     }
+    support
+        .last()
+        .map(|&(token, _)| token)
+        .ok_or_else(|| anyhow::anyhow!("cannot sample an empty support"))
+}
 
-    // Renormalize.
-    let total: f32 = eligible.iter().map(|&(p, _)| p).sum();
-    let inv_total = if total > 0.0 { 1.0 / total } else { 1.0 };
-    for (p, _) in eligible.iter_mut() {
-        *p *= inv_total;
+#[cfg(test)]
+fn filter_sampling_probs(probs: &[f32], top_p: f32, min_p: f32) -> Vec<f32> {
+    let mut filtered = vec![0.0; probs.len()];
+    for (token, prob) in filter_sampling_support(probs, top_p, min_p) {
+        filtered[token as usize] = prob;
     }
+    filtered
+}
 
-    // PRNG advance + sample uniform u in [0, 1).
-    let (next_key, sample_key) = random::split(prng_state_row)?;
+pub(crate) fn draw_uniform(prng_state_row: &mut Array) -> Result<f32> {
+    draw_uniforms(prng_state_row, 1)?
+        .pop()
+        .ok_or_else(|| anyhow::anyhow!("uniform draw returned no samples"))
+}
+
+pub(crate) fn draw_uniforms(prng_state_row: &mut Array, count: usize) -> Result<Vec<f32>> {
+    anyhow::ensure!(
+        prng_state_row.size() == 2,
+        "uniform PRNG state must contain one two-word key, got shape {:?}",
+        prng_state_row.shape().as_slice()
+    );
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    let original_shape = prng_state_row.shape().as_slice().to_vec();
+    let flat_key = prng_state_row.reshape(&[2_i32][..])?;
+    let (next_key, sample_key) = random::split(&flat_key)?;
     let u_arr = random::uniform()
-        .shape(1_i32)
+        .shape(i32::try_from(count)?)
         .dtype(mlx::Dtype::Float32)
         .key(&sample_key)
         .sample()?;
-    let u: f32 = u_arr.item()?;
-    *prng_state_row = next_key;
-
-    // CDF walk.
-    let mut cum = 0.0_f32;
-    for &(p, idx) in &eligible {
-        cum += p;
-        if cum > u {
-            return Ok(idx);
-        }
-    }
-    // FP rounding fallback.
-    Ok(eligible.last().unwrap().1)
+    let uniforms = u_arr.to_vec()?;
+    *prng_state_row = next_key.reshape(original_shape.as_slice())?;
+    Ok(uniforms)
 }
 
 // ── T2: batched ops over [B, vocab] ─────────────────────────────────────────
@@ -616,6 +968,9 @@ fn apply_top_k_batched(logits: &Array, top_k_per_row: &Array) -> Result<Array> {
     let top_k_host: Vec<i32> = top_k_per_row.to_vec()?;
     let max_top_k = top_k_host.iter().copied().max().unwrap_or(vocab).min(vocab);
     let min_top_k = top_k_host.iter().copied().min().unwrap_or(vocab).min(vocab);
+    if min_top_k == vocab {
+        return Ok(logits.clone());
+    }
 
     // Pre-compute per-row threshold index: vocab - top_k[i].
     let vocab_arr: Array = (&[vocab][..], ()).try_into()?;
@@ -705,8 +1060,8 @@ fn apply_min_p_batched(probs: &Array, min_p_per_row: &Array) -> Result<Array> {
 /// Renormalize per-row probs so each row sums to 1.0. Used after
 /// top_p / min_p possibly zero out tokens.
 ///
-/// GPU-only version retained for unit-test verification. Production path
-/// uses `sample_row_cpu` which renormalizes on CPU.
+/// GPU-only version retained for unit-test verification. Production host
+/// configured sampling normalizes sparse support directly.
 #[cfg(test)]
 fn renormalize(probs: &Array) -> Result<Array> {
     let row_sum = reduction::sum(probs, &[-1_i32][..], true)?; // [B, 1] keepdims
@@ -756,45 +1111,6 @@ fn apply_freq_presence_penalty(
     Ok(logits - &sub_arr)
 }
 
-/// Mask logits below the k-th largest. Ties at the k-th position are
-/// excluded (strict `<` matches the `mask` semantics), so the output
-/// may have fewer than `k` surviving tokens when duplicates exist at
-/// the boundary.
-fn apply_top_k(logits: &Array, k: i32) -> Result<Array> {
-    // Sort ascending; cut threshold is `sorted[len - k]`.
-    let sorted = sort::sort(logits, -1)?;
-    let v_len = sorted.shape().as_slice().last().copied().unwrap_or(0);
-    let cut_idx = (v_len - k).max(0);
-    let threshold = sorted.slice((cut_idx,), (cut_idx + 1,))?;
-    let neg_inf: Array = (&[f32::NEG_INFINITY][..], (1,)).try_into()?;
-    let mask = mlx::ops::binary::less(logits, &threshold)?;
-    Ok(indexing::where_(&mask, &neg_inf, logits)?)
-}
-
-fn apply_min_p(logits: &Array, p: f32) -> Result<Array> {
-    let probs = unary::softmax(logits, All, false)?;
-    let max_p = reduction::max(&probs, All, true)?;
-    let threshold = &max_p * p;
-    let mask = mlx::ops::binary::less(&probs, &threshold)?;
-    let neg_inf: Array = (&[f32::NEG_INFINITY][..], (1,)).try_into()?;
-    Ok(indexing::where_(&mask, &neg_inf, logits)?)
-}
-
-fn apply_top_p(logits: &Array, p: f32) -> Result<Array> {
-    // MVP coarse surrogate (P1 follow-up tracks exact nucleus): mask
-    // tokens whose individual softmax prob is below `(1 - p) / vocab`.
-    // Exact nucleus needs gather-along-sorted-axis to translate the
-    // sorted cumulative cut back onto the original positions, which
-    // exceeds cxx-mlx's current scatter primitives.
-    let probs = unary::softmax(logits, All, false)?;
-    let vocab = probs.size() as f32;
-    let threshold_scalar = (1.0_f32 - p) / vocab;
-    let threshold: Array = (&[threshold_scalar][..], (1,)).try_into()?;
-    let mask = mlx::ops::binary::less(&probs, &threshold)?;
-    let neg_inf: Array = (&[f32::NEG_INFINITY][..], (1,)).try_into()?;
-    Ok(indexing::where_(&mask, &neg_inf, logits)?)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -839,6 +1155,138 @@ mod tests {
         let mut prng = mlx::random::key(42).unwrap();
         let id = s.sample(&logits, &[], &mut prng).unwrap();
         assert!((id as i32) < 10);
+    }
+
+    #[test]
+    fn exact_sampling_residual_recovers_target_marginal() {
+        let target = SamplingDistribution::new(vec![0.6, 0.3, 0.1]).unwrap();
+        let draft = SamplingDistribution::new(vec![0.2, 0.7, 0.1]).unwrap();
+        let residual = target.residual(&draft).unwrap();
+        let rejection_mass = (0..target.len())
+            .map(|token| {
+                let token = token as u32;
+                draft.probability(token)
+                    * (1.0 - target.acceptance_probability(&draft, token).unwrap())
+            })
+            .sum::<f32>();
+        let mut output = vec![0.0_f32; target.len()];
+        for (token, output_prob) in output.iter_mut().enumerate() {
+            let token = token as u32;
+            *output_prob = draft.probability(token)
+                * target.acceptance_probability(&draft, token).unwrap()
+                + rejection_mass * residual.probability(token);
+        }
+
+        for (&actual, expected) in output.iter().zip(target.probabilities()) {
+            assert!((actual - expected).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn exact_sampling_rejects_impossible_sampled_draft_token() {
+        let target = SamplingDistribution::new(vec![0.5, 0.5]).unwrap();
+        let draft = SamplingDistribution::new(vec![1.0, 0.0]).unwrap();
+        let err = target
+            .acceptance_probability(&draft, 1)
+            .expect_err("zero-q sampled token must fail");
+        assert!(err.to_string().contains("zero proposal probability"));
+    }
+
+    #[test]
+    fn exact_sampling_rejects_empty_residual() {
+        let target = SamplingDistribution::new(vec![0.5, 0.5]).unwrap();
+        let draft = SamplingDistribution::new(vec![0.5, 0.5]).unwrap();
+        let err = target
+            .residual(&draft)
+            .expect_err("identical distributions have no rejection residual");
+        assert!(err.to_string().contains("no finite positive mass"));
+    }
+
+    #[test]
+    fn partial_top_p_filter_matches_full_sort() {
+        let vocab = 1024;
+        let raw = (0..vocab)
+            .map(|token| (-0.04_f32 * token as f32).exp())
+            .collect::<Vec<_>>();
+        let total = raw.iter().sum::<f32>();
+        let probs = raw.iter().map(|prob| prob / total).collect::<Vec<_>>();
+        assert_eq!(
+            filter_sampling_probs(&probs, 0.9, 0.0),
+            full_sort_sampling_probs(&probs, 0.9, 0.0)
+        );
+    }
+
+    #[test]
+    fn partial_top_p_filter_matches_full_sort_on_boundary_tie() {
+        let vocab = 512;
+        let probs = vec![1.0 / vocab as f32; vocab];
+        assert_eq!(
+            filter_sampling_probs(&probs, 0.5, 0.0),
+            full_sort_sampling_probs(&probs, 0.5, 0.0)
+        );
+    }
+
+    fn full_sort_sampling_probs(probs: &[f32], top_p: f32, min_p: f32) -> Vec<f32> {
+        let mut indexed = probs
+            .iter()
+            .enumerate()
+            .map(|(token, &prob)| (prob, token as u32))
+            .collect::<Vec<_>>();
+        indexed.sort_unstable_by(|left, right| {
+            right
+                .0
+                .partial_cmp(&left.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mut cumulative = 0.0_f32;
+        let mut keep_count = probs.len();
+        if top_p < 1.0 {
+            for (idx, &(prob, _)) in indexed.iter().enumerate() {
+                if cumulative >= top_p {
+                    keep_count = idx;
+                    break;
+                }
+                cumulative += prob;
+            }
+        }
+        let nucleus = &indexed[..keep_count.max(1)];
+        let min_p_threshold = min_p * nucleus[0].0;
+        let mut filtered = vec![0.0_f32; probs.len()];
+        for &(prob, token) in nucleus {
+            if prob >= min_p_threshold {
+                filtered[token as usize] = prob;
+            }
+        }
+        filtered
+    }
+
+    #[test]
+    fn batched_uniform_draw_is_deterministic_and_advances_once() {
+        let mut left = mlx::random::key(42).unwrap();
+        let mut right = mlx::random::key(42).unwrap();
+        let left_draws = draw_uniforms(&mut left, 5).unwrap();
+        let right_draws = draw_uniforms(&mut right, 5).unwrap();
+        assert_eq!(left_draws, right_draws);
+        assert!(left_draws.iter().all(|draw| (0.0..1.0).contains(draw)));
+        assert_eq!(
+            left.to_vec::<u32>().unwrap(),
+            right.to_vec::<u32>().unwrap()
+        );
+    }
+
+    #[test]
+    fn configured_mixed_batch_keeps_greedy_row_deterministic() {
+        let greedy = Sampler::greedy();
+        let sampled = Sampler::greedy().with_temperature(0.8);
+        let logits: Array = (&[0.0_f32, 0.1, 2.0, 0.0, 0.1, 2.0][..], &[2_i32, 3_i32][..])
+            .try_into()
+            .unwrap();
+        let mut prng: Array = (&[1_u32, 2, 3, 4][..], &[2_i32, 2_i32][..])
+            .try_into()
+            .unwrap();
+        let tokens = sample_batch(&[&greedy, &sampled], &logits, &[&[], &[]], &mut prng).unwrap();
+
+        assert_eq!(tokens[0], 2);
     }
 
     #[test]
@@ -1167,8 +1615,6 @@ mod tests {
         let cfg = collect_per_row_configs(&samplers, 32000).expect("collect");
         let temp: Vec<f32> = cfg.temp.to_vec().expect("temp vec");
         assert_eq!(temp, vec![0.7, 1.0, 1.0]);
-        let top_p: Vec<f32> = cfg.top_p.to_vec().expect("top_p vec");
-        assert_eq!(top_p, vec![1.0, 0.9, 1.0]);
         let rep: Vec<f32> = cfg.rep_pen.to_vec().expect("rep vec");
         assert_eq!(rep, vec![1.0, 1.1, 1.0]);
         let top_k: Vec<i32> = cfg.top_k.to_vec().expect("top_k vec");
@@ -1507,6 +1953,45 @@ mod tests {
             .to_vec()
             .expect("to_vec row0");
         assert_eq!(row0_flat, vec![0, 0], "row 0 unmodified");
+    }
+
+    #[test]
+    fn target_token_sampling_matches_distribution_sampling() {
+        let vocab = 257_i32;
+        let rows = 3_i32;
+        let logits_host = (0..rows * vocab)
+            .map(|index| ((index * 37 % 509) as f32 - 254.0) * 0.017)
+            .collect::<Vec<_>>();
+        let logits: Array = (logits_host.as_slice(), &[rows, vocab][..])
+            .try_into()
+            .expect("logits");
+        let first = Sampler::greedy().with_temperature(0.7).with_top_p(0.9);
+        let second = Sampler::greedy()
+            .with_temperature(0.8)
+            .with_top_k(64)
+            .with_top_p(0.85)
+            .with_min_p(0.02);
+        let third = Sampler::greedy()
+            .with_temperature(1.1)
+            .with_top_p(0.95)
+            .with_repetition_penalty(1.05);
+        let samplers = [&first, &second, &third];
+        let histories = [&[][..], &[][..], &[2_u32, 2, 19, 31][..]];
+        let uniforms = [0.0_f32, 0.38125, 0.999_999];
+
+        let distributions =
+            configured_distributions(&samplers, &logits, &histories).expect("distributions");
+        let expected = distributions
+            .iter()
+            .zip(uniforms)
+            .map(|(distribution, uniform)| distribution.sample_with_uniform(uniform))
+            .collect::<Result<Vec<_>>>()
+            .expect("sample distributions");
+        let actual =
+            sample_target_tokens_with_uniforms_batch(&samplers, &logits, &histories, &uniforms)
+                .expect("sample target tokens");
+
+        assert_eq!(actual, expected);
     }
 
     #[test]

@@ -33,7 +33,7 @@ use super::engine::{
 };
 use super::health::{
     classify_status, system_free_ram_bytes, HealthSnapshot, HealthStatus, MemoryInfo, ModelInfo,
-    MtpHealthInfo, PromptLookupHealthInfo, SchedulerInfo,
+    MtpHealthInfo, NeuralExactQualificationHealth, PromptLookupHealthInfo, SchedulerInfo,
 };
 use super::{anthropic, openai, SamplingDefaults};
 
@@ -1518,6 +1518,10 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
     let mut mtp_drafted_tokens = 0;
     let mut mtp_accepted_draft_tokens = 0;
     let mut mtp_windows = 0;
+    let mut mtp_exact_sampling_windows = 0;
+    let mut mtp_exact_acceptance_draws = 0;
+    let mut mtp_exact_residual_corrections = 0;
+    let mut mtp_exact_bonus_samples = 0;
     let mut mtp_draft_forward_us = 0;
     let mut mtp_verify_forward_us = 0;
     let mut mtp_projection_us = 0;
@@ -1531,6 +1535,7 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
     let mut mtp_prefill_cache_commit_us = 0;
     let mut mtp_decode_cache_commit_us = 0;
     let mut mtp_cache_restore_us = 0;
+    let mut neural_exact_qualification = NeuralExactQualificationHealth::default();
     let mut active_kv_snapshots = Vec::new();
     let mut prompt_lookup_snapshots = Vec::new();
     let mut immutable_prefix_blocks =
@@ -1580,6 +1585,10 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
         mtp_drafted_tokens += snapshot.mtp.drafted_tokens;
         mtp_accepted_draft_tokens += snapshot.mtp.accepted_draft_tokens;
         mtp_windows += snapshot.mtp.windows;
+        mtp_exact_sampling_windows += snapshot.mtp.exact_sampling_windows;
+        mtp_exact_acceptance_draws += snapshot.mtp.exact_acceptance_draws;
+        mtp_exact_residual_corrections += snapshot.mtp.exact_residual_corrections;
+        mtp_exact_bonus_samples += snapshot.mtp.exact_bonus_samples;
         mtp_draft_forward_us += snapshot.mtp.draft_forward_us;
         mtp_verify_forward_us += snapshot.mtp.verify_forward_us;
         mtp_projection_us += snapshot.mtp.projection_us;
@@ -1593,6 +1602,44 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
         mtp_prefill_cache_commit_us += snapshot.mtp.prefill_cache_commit_us;
         mtp_decode_cache_commit_us += snapshot.mtp.decode_cache_commit_us;
         mtp_cache_restore_us += snapshot.mtp.cache_restore_us;
+        neural_exact_qualification.ordinary_cost_samples += snapshot
+            .mtp
+            .sampled_exact_qualification
+            .ordinary_cost_samples;
+        neural_exact_qualification.exact_cost_samples +=
+            snapshot.mtp.sampled_exact_qualification.exact_cost_samples;
+        neural_exact_qualification.ordinary_cost_us +=
+            snapshot.mtp.sampled_exact_qualification.ordinary_cost_us;
+        neural_exact_qualification.exact_cost_us +=
+            snapshot.mtp.sampled_exact_qualification.exact_cost_us;
+        neural_exact_qualification.qualified_regimes_current += snapshot
+            .mtp
+            .sampled_exact_qualification
+            .qualified_regimes_current;
+        neural_exact_qualification.rejected_regimes_current += snapshot
+            .mtp
+            .sampled_exact_qualification
+            .rejected_regimes_current;
+        neural_exact_qualification.qualification_changes += snapshot
+            .mtp
+            .sampled_exact_qualification
+            .qualification_changes;
+        neural_exact_qualification.profile_loads +=
+            snapshot.mtp.sampled_exact_qualification.profile_loads;
+        neural_exact_qualification.profile_write_requests += snapshot
+            .mtp
+            .sampled_exact_qualification
+            .profile_write_requests;
+        neural_exact_qualification.profile_writes +=
+            snapshot.mtp.sampled_exact_qualification.profile_writes;
+        neural_exact_qualification.profile_write_failures += snapshot
+            .mtp
+            .sampled_exact_qualification
+            .profile_write_failures;
+        neural_exact_qualification.profile_write_coalesces += snapshot
+            .mtp
+            .sampled_exact_qualification
+            .profile_write_coalesces;
         immutable_prefix_blocks.enabled |= snapshot.memory.immutable_prefix_blocks.enabled;
         immutable_prefix_blocks.blocks += snapshot.memory.immutable_prefix_blocks.blocks;
         immutable_prefix_blocks.published_blocks +=
@@ -1717,6 +1764,10 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
             drafted_tokens: mtp_drafted_tokens,
             accepted_draft_tokens: mtp_accepted_draft_tokens,
             windows: mtp_windows,
+            exact_sampling_windows: mtp_exact_sampling_windows,
+            exact_acceptance_draws: mtp_exact_acceptance_draws,
+            exact_residual_corrections: mtp_exact_residual_corrections,
+            exact_bonus_samples: mtp_exact_bonus_samples,
             draft_forward_us: mtp_draft_forward_us,
             verify_forward_us: mtp_verify_forward_us,
             projection_us: mtp_projection_us,
@@ -1730,6 +1781,7 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
             prefill_cache_commit_us: mtp_prefill_cache_commit_us,
             decode_cache_commit_us: mtp_decode_cache_commit_us,
             cache_restore_us: mtp_cache_restore_us,
+            sampled_exact_qualification: neural_exact_qualification,
         },
         prompt_lookup: PromptLookupHealthInfo::aggregate(prompt_lookup_snapshots),
         active_kv_offload,
@@ -1935,6 +1987,10 @@ mod tests {
                 drafted_tokens: 11,
                 accepted_draft_tokens: 13,
                 windows: 17,
+                exact_sampling_windows: 0,
+                exact_acceptance_draws: 0,
+                exact_residual_corrections: 0,
+                exact_bonus_samples: 0,
                 draft_forward_us: 19,
                 verify_forward_us: 23,
                 projection_us: 29,
@@ -1948,6 +2004,7 @@ mod tests {
                 prefill_cache_commit_us: 17,
                 decode_cache_commit_us: 24,
                 cache_restore_us: 43,
+                sampled_exact_qualification: NeuralExactQualificationHealth::default(),
             },
             prompt_lookup: PromptLookupHealthInfo::default(),
             active_kv_offload: crate::core::cache::ActiveKvOffloadHealth::disabled(),

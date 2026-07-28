@@ -317,6 +317,7 @@ struct MtpTraceWindowRecord {
     verify_start_pos: i32,
     draft_tokens: Vec<u32>,
     verified_tokens: Vec<u32>,
+    resolved_tokens: Vec<u32>,
     accepted_draft_len: usize,
 }
 
@@ -327,6 +328,7 @@ impl From<Gemma4DrafterTraceWindow> for MtpTraceWindowRecord {
             verify_start_pos: window.verify_start_pos,
             draft_tokens: window.draft_tokens,
             verified_tokens: window.verified_tokens,
+            resolved_tokens: window.resolved_tokens,
             accepted_draft_len: window.accepted_draft_len,
         }
     }

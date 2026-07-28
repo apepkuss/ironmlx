@@ -148,8 +148,8 @@ pub struct ServeArgs {
     #[arg(long, default_value_t = false)]
     pub scheduler_autotune_report: bool,
 
-    /// Optional local MTP/drafter model directory. When set, greedy speculative
-    /// decoding is enabled for supported Qwen and Gemma4 models.
+    /// Optional local MTP/drafter model directory. When set, greedy or exact
+    /// sampled speculative decoding is enabled for supported Qwen and Gemma4 models.
     #[arg(long = "mtp-model-dir")]
     pub mtp_model_dir: Option<PathBuf>,
 
@@ -158,7 +158,7 @@ pub struct ServeArgs {
     #[arg(long = "mtp-draft-tokens")]
     pub mtp_draft_tokens: Option<usize>,
 
-    /// Enable request-local greedy prompt lookup speculative decoding.
+    /// Enable request-local greedy or exact sampled prompt lookup speculative decoding.
     #[arg(long = "prompt-lookup", default_value_t = false)]
     pub prompt_lookup: bool,
 

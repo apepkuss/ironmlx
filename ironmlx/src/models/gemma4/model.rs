@@ -879,6 +879,10 @@ impl Model for Gemma4Model {
         false
     }
 
+    fn supports_speculative_accepted_prefix_trim(&self) -> bool {
+        true
+    }
+
     fn num_hidden_layers(&self) -> usize {
         self.config().num_hidden_layers as usize
     }

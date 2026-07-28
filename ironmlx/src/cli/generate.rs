@@ -64,7 +64,7 @@ pub struct GenerateArgs {
     pub prefill_chunk_size: usize,
 
     /// MTP/drafter model directory. When set, generation uses Qwen MTP heads or
-    /// Gemma4 assistant drafter weights for greedy speculative decoding.
+    /// Gemma4 assistant drafter weights for greedy or exact sampled speculative decoding.
     #[arg(long = "mtp-model-dir")]
     pub mtp_model_dir: Option<PathBuf>,
 

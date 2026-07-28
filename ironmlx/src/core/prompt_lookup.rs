@@ -8,11 +8,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, bail, Context};
 use serde::{Deserialize, Serialize};
 
+use crate::core::sampler::Sampler;
 use crate::core::scheduler_autotune::SchedulerAutotuneRuntimeProfile;
 use crate::Result;
 
 const POSITIONS_PER_NGRAM: usize = 2;
-const QUALIFICATION_SCHEMA_VERSION: u32 = 4;
+const QUALIFICATION_SCHEMA_VERSION: u32 = 5;
 const QUALIFICATION_BASELINE_SAMPLES: usize = 8;
 const QUALIFICATION_PROBE_SAMPLES: usize = 8;
 const QUALIFICATION_MIN_GAIN_BPS: u64 = 300;
@@ -88,6 +89,10 @@ pub struct PromptLookupStats {
     pub accepted_tokens: u64,
     pub rejected_tokens: u64,
     pub zero_accept_windows: u64,
+    pub exact_sampling_windows: u64,
+    pub exact_acceptance_draws: u64,
+    pub exact_residual_corrections: u64,
+    pub exact_bonus_samples: u64,
     pub propose_us: u64,
     pub index_build_us: u64,
     pub index_update_us: u64,
@@ -140,6 +145,18 @@ impl PromptLookupStats {
             zero_accept_windows: self
                 .zero_accept_windows
                 .saturating_sub(before.zero_accept_windows),
+            exact_sampling_windows: self
+                .exact_sampling_windows
+                .saturating_sub(before.exact_sampling_windows),
+            exact_acceptance_draws: self
+                .exact_acceptance_draws
+                .saturating_sub(before.exact_acceptance_draws),
+            exact_residual_corrections: self
+                .exact_residual_corrections
+                .saturating_sub(before.exact_residual_corrections),
+            exact_bonus_samples: self
+                .exact_bonus_samples
+                .saturating_sub(before.exact_bonus_samples),
             propose_us: self.propose_us.saturating_sub(before.propose_us),
             index_build_us: self.index_build_us.saturating_sub(before.index_build_us),
             index_update_us: self.index_update_us.saturating_sub(before.index_update_us),
@@ -232,6 +249,18 @@ impl PromptLookupStats {
         self.zero_accept_windows = self
             .zero_accept_windows
             .saturating_add(delta.zero_accept_windows);
+        self.exact_sampling_windows = self
+            .exact_sampling_windows
+            .saturating_add(delta.exact_sampling_windows);
+        self.exact_acceptance_draws = self
+            .exact_acceptance_draws
+            .saturating_add(delta.exact_acceptance_draws);
+        self.exact_residual_corrections = self
+            .exact_residual_corrections
+            .saturating_add(delta.exact_residual_corrections);
+        self.exact_bonus_samples = self
+            .exact_bonus_samples
+            .saturating_add(delta.exact_bonus_samples);
         self.propose_us = self.propose_us.saturating_add(delta.propose_us);
         self.index_build_us = self.index_build_us.saturating_add(delta.index_build_us);
         self.index_update_us = self.index_update_us.saturating_add(delta.index_update_us);
@@ -320,13 +349,40 @@ pub(crate) enum PromptLookupCostAction {
 pub(crate) struct PromptLookupQualificationRegime {
     pub batch_width: usize,
     pub context_bucket_tokens: usize,
+    pub sampler: PromptLookupSamplerFingerprint,
 }
 
 impl PromptLookupQualificationRegime {
-    pub(crate) fn new(batch_width: usize, context_tokens: usize) -> Self {
+    pub(crate) fn new(batch_width: usize, context_tokens: usize, sampler: Sampler) -> Self {
         Self {
             batch_width: batch_width.max(1),
             context_bucket_tokens: context_bucket(context_tokens),
+            sampler: sampler.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub(crate) struct PromptLookupSamplerFingerprint {
+    temperature_bits: u32,
+    top_k: Option<i32>,
+    top_p_bits: Option<u32>,
+    min_p_bits: Option<u32>,
+    repetition_penalty_bits: Option<u32>,
+    frequency_penalty_bits: Option<u32>,
+    presence_penalty_bits: Option<u32>,
+}
+
+impl From<Sampler> for PromptLookupSamplerFingerprint {
+    fn from(sampler: Sampler) -> Self {
+        Self {
+            temperature_bits: sampler.temperature.to_bits(),
+            top_k: sampler.top_k,
+            top_p_bits: sampler.top_p.map(f32::to_bits),
+            min_p_bits: sampler.min_p.map(f32::to_bits),
+            repetition_penalty_bits: sampler.repetition_penalty.map(f32::to_bits),
+            frequency_penalty_bits: sampler.frequency_penalty.map(f32::to_bits),
+            presence_penalty_bits: sampler.presence_penalty.map(f32::to_bits),
         }
     }
 }
@@ -1570,7 +1626,7 @@ mod tests {
         let path = test_profile_path("qualifies");
         let runtime = PromptLookupQualificationRuntimeConfig::for_test("ctx-a", path.clone());
         let mut controller = PromptLookupCostController::new(runtime).unwrap();
-        let regime = PromptLookupQualificationRegime::new(1, 8_000);
+        let regime = PromptLookupQualificationRegime::new(1, 8_000, Sampler::greedy());
 
         for _ in 0..QUALIFICATION_BASELINE_SAMPLES {
             assert_eq!(
@@ -1639,7 +1695,7 @@ mod tests {
         let path = test_profile_path("rejects");
         let runtime = PromptLookupQualificationRuntimeConfig::for_test("ctx-b", path.clone());
         let mut controller = PromptLookupCostController::new(runtime).unwrap();
-        let regime = PromptLookupQualificationRegime::new(1, 64_000);
+        let regime = PromptLookupQualificationRegime::new(1, 64_000, Sampler::greedy());
 
         drive_unprofitable_qualification(&mut controller, regime);
 
@@ -1683,7 +1739,7 @@ mod tests {
         let runtime =
             PromptLookupQualificationRuntimeConfig::for_test("ctx-transition", path.clone());
         let mut controller = PromptLookupCostController::new(runtime).unwrap();
-        let regime = PromptLookupQualificationRegime::new(1, 8_000);
+        let regime = PromptLookupQualificationRegime::new(1, 8_000, Sampler::greedy());
 
         for _ in 0..QUALIFICATION_BASELINE_SAMPLES {
             controller.record_sample(
@@ -1725,8 +1781,8 @@ mod tests {
 
     #[test]
     fn lookup_transition_cost_expands_reprobe_cooldown_with_batch_normalization() {
-        let b1 = PromptLookupQualificationRegime::new(1, 8_000);
-        let b4 = PromptLookupQualificationRegime::new(4, 8_000);
+        let b1 = PromptLookupQualificationRegime::new(1, 8_000, Sampler::greedy());
+        let b4 = PromptLookupQualificationRegime::new(4, 8_000, Sampler::greedy());
         assert_eq!(
             minimum_rejected_cooldown_tokens(b1, 100_000, 10_000_000),
             8_192
@@ -1743,7 +1799,7 @@ mod tests {
         let runtime =
             PromptLookupQualificationRuntimeConfig::for_test("ctx-ineligible", path.clone());
         let mut controller = PromptLookupCostController::new(runtime.clone()).unwrap();
-        let regime = PromptLookupQualificationRegime::new(2, 8_000);
+        let regime = PromptLookupQualificationRegime::new(2, 8_000, Sampler::greedy());
 
         controller.record_lookup_ineligible(regime);
         assert_eq!(
@@ -1779,7 +1835,7 @@ mod tests {
         let path = test_profile_path("multi-delay");
         let runtime = PromptLookupQualificationRuntimeConfig::for_test("ctx-delay", path.clone());
         let mut controller = PromptLookupCostController::new(runtime).unwrap();
-        let regime = PromptLookupQualificationRegime::new(8, 8_000);
+        let regime = PromptLookupQualificationRegime::new(8, 8_000, Sampler::greedy());
 
         for _ in 0..QUALIFICATION_MULTI_BATCH_INITIAL_DELAY_TOKENS - 1 {
             assert_eq!(
@@ -1823,7 +1879,7 @@ mod tests {
         let path = test_profile_path("reject-backoff");
         let runtime = PromptLookupQualificationRuntimeConfig::for_test("ctx-backoff", path.clone());
         let mut controller = PromptLookupCostController::new(runtime.clone()).unwrap();
-        let regime = PromptLookupQualificationRegime::new(1, 64_000);
+        let regime = PromptLookupQualificationRegime::new(1, 64_000, Sampler::greedy());
 
         drive_unprofitable_qualification(&mut controller, regime);
         controller.record_sample(
@@ -1866,7 +1922,7 @@ mod tests {
     #[test]
     fn qualification_profile_requires_exact_context_and_fresh_schema() {
         let path = test_profile_path("profile");
-        let regime = PromptLookupQualificationRegime::new(2, 32_000);
+        let regime = PromptLookupQualificationRegime::new(2, 32_000, Sampler::greedy());
         let mut profile = PromptLookupQualificationProfile {
             schema_version: QUALIFICATION_SCHEMA_VERSION,
             context_fingerprint: "ctx-c".to_string(),
@@ -1920,16 +1976,25 @@ mod tests {
     #[test]
     fn qualification_regime_uses_power_of_two_context_buckets() {
         assert_eq!(
-            PromptLookupQualificationRegime::new(1, 1).context_bucket_tokens,
+            PromptLookupQualificationRegime::new(1, 1, Sampler::greedy()).context_bucket_tokens,
             1_024
         );
         assert_eq!(
-            PromptLookupQualificationRegime::new(4, 8_001).context_bucket_tokens,
+            PromptLookupQualificationRegime::new(4, 8_001, Sampler::greedy()).context_bucket_tokens,
             8_192
         );
         assert_eq!(
-            PromptLookupQualificationRegime::new(8, 64 * 1_024).context_bucket_tokens,
+            PromptLookupQualificationRegime::new(8, 64 * 1_024, Sampler::greedy())
+                .context_bucket_tokens,
             64 * 1_024
+        );
+        assert_ne!(
+            PromptLookupQualificationRegime::new(1, 8_000, Sampler::greedy()),
+            PromptLookupQualificationRegime::new(
+                1,
+                8_000,
+                Sampler::greedy().with_temperature(0.7).with_top_p(0.9)
+            )
         );
     }
 

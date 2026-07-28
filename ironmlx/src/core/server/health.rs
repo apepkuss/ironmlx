@@ -71,6 +71,10 @@ pub struct MtpHealthInfo {
     pub drafted_tokens: u64,
     pub accepted_draft_tokens: u64,
     pub windows: u64,
+    pub exact_sampling_windows: u64,
+    pub exact_acceptance_draws: u64,
+    pub exact_residual_corrections: u64,
+    pub exact_bonus_samples: u64,
     pub draft_forward_us: u64,
     pub verify_forward_us: u64,
     pub projection_us: u64,
@@ -84,6 +88,44 @@ pub struct MtpHealthInfo {
     pub prefill_cache_commit_us: u64,
     pub decode_cache_commit_us: u64,
     pub cache_restore_us: u64,
+    pub sampled_exact_qualification: NeuralExactQualificationHealth,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct NeuralExactQualificationHealth {
+    pub ordinary_cost_samples: u64,
+    pub exact_cost_samples: u64,
+    pub ordinary_cost_us: u64,
+    pub exact_cost_us: u64,
+    pub qualified_regimes_current: u64,
+    pub rejected_regimes_current: u64,
+    pub qualification_changes: u64,
+    pub profile_loads: u64,
+    pub profile_write_requests: u64,
+    pub profile_writes: u64,
+    pub profile_write_failures: u64,
+    pub profile_write_coalesces: u64,
+}
+
+impl From<crate::core::speculative_qualification::NeuralExactQualificationStats>
+    for NeuralExactQualificationHealth
+{
+    fn from(stats: crate::core::speculative_qualification::NeuralExactQualificationStats) -> Self {
+        Self {
+            ordinary_cost_samples: stats.ordinary_cost_samples,
+            exact_cost_samples: stats.exact_cost_samples,
+            ordinary_cost_us: stats.ordinary_cost_us,
+            exact_cost_us: stats.exact_cost_us,
+            qualified_regimes_current: stats.qualified_regimes_current,
+            rejected_regimes_current: stats.rejected_regimes_current,
+            qualification_changes: stats.qualification_changes,
+            profile_loads: stats.profile_loads,
+            profile_write_requests: stats.profile_write_requests,
+            profile_writes: stats.profile_writes,
+            profile_write_failures: stats.profile_write_failures,
+            profile_write_coalesces: stats.profile_write_coalesces,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -97,6 +139,10 @@ pub struct MtpHealthConfig {
     drafted_tokens: Arc<AtomicU64>,
     accepted_draft_tokens: Arc<AtomicU64>,
     windows: Arc<AtomicU64>,
+    exact_sampling_windows: Arc<AtomicU64>,
+    exact_acceptance_draws: Arc<AtomicU64>,
+    exact_residual_corrections: Arc<AtomicU64>,
+    exact_bonus_samples: Arc<AtomicU64>,
     draft_forward_us: Arc<AtomicU64>,
     verify_forward_us: Arc<AtomicU64>,
     projection_us: Arc<AtomicU64>,
@@ -110,6 +156,9 @@ pub struct MtpHealthConfig {
     prefill_cache_commit_us: Arc<AtomicU64>,
     decode_cache_commit_us: Arc<AtomicU64>,
     cache_restore_us: Arc<AtomicU64>,
+    neural_exact_qualification_stats: Arc<
+        std::sync::Mutex<crate::core::speculative_qualification::NeuralExactQualificationStats>,
+    >,
 }
 
 impl MtpHealthConfig {
@@ -124,6 +173,10 @@ impl MtpHealthConfig {
             drafted_tokens: Arc::new(AtomicU64::new(0)),
             accepted_draft_tokens: Arc::new(AtomicU64::new(0)),
             windows: Arc::new(AtomicU64::new(0)),
+            exact_sampling_windows: Arc::new(AtomicU64::new(0)),
+            exact_acceptance_draws: Arc::new(AtomicU64::new(0)),
+            exact_residual_corrections: Arc::new(AtomicU64::new(0)),
+            exact_bonus_samples: Arc::new(AtomicU64::new(0)),
             draft_forward_us: Arc::new(AtomicU64::new(0)),
             verify_forward_us: Arc::new(AtomicU64::new(0)),
             projection_us: Arc::new(AtomicU64::new(0)),
@@ -137,6 +190,9 @@ impl MtpHealthConfig {
             prefill_cache_commit_us: Arc::new(AtomicU64::new(0)),
             decode_cache_commit_us: Arc::new(AtomicU64::new(0)),
             cache_restore_us: Arc::new(AtomicU64::new(0)),
+            neural_exact_qualification_stats: Arc::new(std::sync::Mutex::new(
+                crate::core::speculative_qualification::NeuralExactQualificationStats::default(),
+            )),
         }
     }
 
@@ -150,6 +206,10 @@ impl MtpHealthConfig {
         drafted_tokens: Arc<AtomicU64>,
         accepted_draft_tokens: Arc<AtomicU64>,
         windows: Arc<AtomicU64>,
+        exact_sampling_windows: Arc<AtomicU64>,
+        exact_acceptance_draws: Arc<AtomicU64>,
+        exact_residual_corrections: Arc<AtomicU64>,
+        exact_bonus_samples: Arc<AtomicU64>,
         draft_forward_us: Arc<AtomicU64>,
         verify_forward_us: Arc<AtomicU64>,
         projection_us: Arc<AtomicU64>,
@@ -163,6 +223,9 @@ impl MtpHealthConfig {
         prefill_cache_commit_us: Arc<AtomicU64>,
         decode_cache_commit_us: Arc<AtomicU64>,
         cache_restore_us: Arc<AtomicU64>,
+        neural_exact_qualification_stats: Arc<
+            std::sync::Mutex<crate::core::speculative_qualification::NeuralExactQualificationStats>,
+        >,
     ) -> Self {
         Self {
             enabled: true,
@@ -174,6 +237,10 @@ impl MtpHealthConfig {
             drafted_tokens,
             accepted_draft_tokens,
             windows,
+            exact_sampling_windows,
+            exact_acceptance_draws,
+            exact_residual_corrections,
+            exact_bonus_samples,
             draft_forward_us,
             verify_forward_us,
             projection_us,
@@ -187,6 +254,7 @@ impl MtpHealthConfig {
             prefill_cache_commit_us,
             decode_cache_commit_us,
             cache_restore_us,
+            neural_exact_qualification_stats,
         }
     }
 
@@ -201,6 +269,10 @@ impl MtpHealthConfig {
             drafted_tokens: self.drafted_tokens.load(Ordering::Relaxed),
             accepted_draft_tokens: self.accepted_draft_tokens.load(Ordering::Relaxed),
             windows: self.windows.load(Ordering::Relaxed),
+            exact_sampling_windows: self.exact_sampling_windows.load(Ordering::Relaxed),
+            exact_acceptance_draws: self.exact_acceptance_draws.load(Ordering::Relaxed),
+            exact_residual_corrections: self.exact_residual_corrections.load(Ordering::Relaxed),
+            exact_bonus_samples: self.exact_bonus_samples.load(Ordering::Relaxed),
             draft_forward_us: self.draft_forward_us.load(Ordering::Relaxed),
             verify_forward_us: self.verify_forward_us.load(Ordering::Relaxed),
             projection_us: self.projection_us.load(Ordering::Relaxed),
@@ -216,6 +288,11 @@ impl MtpHealthConfig {
             prefill_cache_commit_us: self.prefill_cache_commit_us.load(Ordering::Relaxed),
             decode_cache_commit_us: self.decode_cache_commit_us.load(Ordering::Relaxed),
             cache_restore_us: self.cache_restore_us.load(Ordering::Relaxed),
+            sampled_exact_qualification: (*self
+                .neural_exact_qualification_stats
+                .lock()
+                .expect("neural exact qualification stats mutex poisoned"))
+            .into(),
         }
     }
 }
@@ -235,6 +312,10 @@ pub struct PromptLookupHealthInfo {
     pub accepted_tokens: u64,
     pub rejected_tokens: u64,
     pub zero_accept_windows: u64,
+    pub exact_sampling_windows: u64,
+    pub exact_acceptance_draws: u64,
+    pub exact_residual_corrections: u64,
+    pub exact_bonus_samples: u64,
     pub propose_us: u64,
     pub index_build_us: u64,
     pub index_update_us: u64,
@@ -398,6 +479,10 @@ impl PromptLookupHealthConfig {
             accepted_tokens: stats.accepted_tokens,
             rejected_tokens: stats.rejected_tokens,
             zero_accept_windows: stats.zero_accept_windows,
+            exact_sampling_windows: stats.exact_sampling_windows,
+            exact_acceptance_draws: stats.exact_acceptance_draws,
+            exact_residual_corrections: stats.exact_residual_corrections,
+            exact_bonus_samples: stats.exact_bonus_samples,
             propose_us: stats.propose_us,
             index_build_us: stats.index_build_us,
             index_update_us: stats.index_update_us,
@@ -740,6 +825,10 @@ mod tests {
             drafted_tokens: 19,
             accepted_tokens: 13,
             rejected_tokens: 6,
+            exact_sampling_windows: 5,
+            exact_acceptance_draws: 14,
+            exact_residual_corrections: 3,
+            exact_bonus_samples: 2,
             verify_round_us: 17,
             verify_accept_host_sync_count: 7,
             rollback_count: 2,
@@ -780,6 +869,10 @@ mod tests {
         assert_eq!(snapshot.prompt_lookup.drafted_tokens, 19);
         assert_eq!(snapshot.prompt_lookup.accepted_tokens, 13);
         assert_eq!(snapshot.prompt_lookup.rejected_tokens, 6);
+        assert_eq!(snapshot.prompt_lookup.exact_sampling_windows, 5);
+        assert_eq!(snapshot.prompt_lookup.exact_acceptance_draws, 14);
+        assert_eq!(snapshot.prompt_lookup.exact_residual_corrections, 3);
+        assert_eq!(snapshot.prompt_lookup.exact_bonus_samples, 2);
         assert_eq!(snapshot.prompt_lookup.verify_round_us, 17);
         assert_eq!(snapshot.prompt_lookup.verify_accept_host_sync_count, 7);
         assert_eq!(snapshot.prompt_lookup.rollback_count, 2);
@@ -812,6 +905,10 @@ mod tests {
         let drafted_tokens = Arc::new(AtomicU64::new(17));
         let accepted_draft_tokens = Arc::new(AtomicU64::new(19));
         let windows = Arc::new(AtomicU64::new(23));
+        let exact_sampling_windows = Arc::new(AtomicU64::new(5));
+        let exact_acceptance_draws = Arc::new(AtomicU64::new(12));
+        let exact_residual_corrections = Arc::new(AtomicU64::new(3));
+        let exact_bonus_samples = Arc::new(AtomicU64::new(2));
         let draft_forward_us = Arc::new(AtomicU64::new(29));
         let verify_forward_us = Arc::new(AtomicU64::new(31));
         let projection_us = Arc::new(AtomicU64::new(37));
@@ -825,6 +922,15 @@ mod tests {
         let prefill_cache_commit_us = Arc::new(AtomicU64::new(19));
         let decode_cache_commit_us = Arc::new(AtomicU64::new(28));
         let cache_restore_us = Arc::new(AtomicU64::new(53));
+        let neural_exact_qualification_stats = Arc::new(std::sync::Mutex::new(
+            crate::core::speculative_qualification::NeuralExactQualificationStats {
+                ordinary_cost_samples: 8,
+                exact_cost_samples: 5,
+                rejected_regimes_current: 1,
+                qualification_changes: 1,
+                ..Default::default()
+            },
+        ));
         let snapshot = test_collector(MtpHealthConfig::enabled(
             2,
             1,
@@ -834,6 +940,10 @@ mod tests {
             drafted_tokens.clone(),
             accepted_draft_tokens.clone(),
             windows.clone(),
+            exact_sampling_windows.clone(),
+            exact_acceptance_draws.clone(),
+            exact_residual_corrections.clone(),
+            exact_bonus_samples.clone(),
             draft_forward_us.clone(),
             verify_forward_us.clone(),
             projection_us.clone(),
@@ -847,6 +957,7 @@ mod tests {
             prefill_cache_commit_us.clone(),
             decode_cache_commit_us.clone(),
             cache_restore_us.clone(),
+            neural_exact_qualification_stats.clone(),
         ))
         .snapshot();
 
@@ -874,6 +985,24 @@ mod tests {
         assert_eq!(snapshot.mtp.prefill_cache_commit_us, 19);
         assert_eq!(snapshot.mtp.decode_cache_commit_us, 28);
         assert_eq!(snapshot.mtp.cache_restore_us, 53);
+        assert_eq!(
+            snapshot
+                .mtp
+                .sampled_exact_qualification
+                .ordinary_cost_samples,
+            8
+        );
+        assert_eq!(
+            snapshot.mtp.sampled_exact_qualification.exact_cost_samples,
+            5
+        );
+        assert_eq!(
+            snapshot
+                .mtp
+                .sampled_exact_qualification
+                .rejected_regimes_current,
+            1
+        );
 
         prefill_count.store(13, Ordering::Relaxed);
         step_count.store(17, Ordering::Relaxed);
@@ -881,6 +1010,10 @@ mod tests {
         drafted_tokens.store(29, Ordering::Relaxed);
         accepted_draft_tokens.store(31, Ordering::Relaxed);
         windows.store(37, Ordering::Relaxed);
+        exact_sampling_windows.store(7, Ordering::Relaxed);
+        exact_acceptance_draws.store(18, Ordering::Relaxed);
+        exact_residual_corrections.store(4, Ordering::Relaxed);
+        exact_bonus_samples.store(3, Ordering::Relaxed);
         draft_forward_us.store(41, Ordering::Relaxed);
         verify_forward_us.store(43, Ordering::Relaxed);
         projection_us.store(47, Ordering::Relaxed);
@@ -901,6 +1034,10 @@ mod tests {
             drafted_tokens,
             accepted_draft_tokens,
             windows,
+            exact_sampling_windows,
+            exact_acceptance_draws,
+            exact_residual_corrections,
+            exact_bonus_samples,
             draft_forward_us,
             verify_forward_us,
             projection_us,
@@ -914,6 +1051,7 @@ mod tests {
             prefill_cache_commit_us,
             decode_cache_commit_us,
             cache_restore_us,
+            neural_exact_qualification_stats,
         ))
         .snapshot();
 
@@ -925,6 +1063,10 @@ mod tests {
         assert_eq!(snapshot.mtp.drafted_tokens, 29);
         assert_eq!(snapshot.mtp.accepted_draft_tokens, 31);
         assert_eq!(snapshot.mtp.windows, 37);
+        assert_eq!(snapshot.mtp.exact_sampling_windows, 7);
+        assert_eq!(snapshot.mtp.exact_acceptance_draws, 18);
+        assert_eq!(snapshot.mtp.exact_residual_corrections, 4);
+        assert_eq!(snapshot.mtp.exact_bonus_samples, 3);
         assert_eq!(snapshot.mtp.draft_forward_us, 41);
         assert_eq!(snapshot.mtp.verify_forward_us, 43);
         assert_eq!(snapshot.mtp.projection_us, 47);
@@ -999,6 +1141,10 @@ mod tests {
                 drafted_tokens: 0,
                 accepted_draft_tokens: 0,
                 windows: 0,
+                exact_sampling_windows: 0,
+                exact_acceptance_draws: 0,
+                exact_residual_corrections: 0,
+                exact_bonus_samples: 0,
                 draft_forward_us: 0,
                 verify_forward_us: 0,
                 projection_us: 0,
@@ -1012,6 +1158,7 @@ mod tests {
                 prefill_cache_commit_us: 0,
                 decode_cache_commit_us: 0,
                 cache_restore_us: 0,
+                sampled_exact_qualification: NeuralExactQualificationHealth::default(),
             },
             prompt_lookup: PromptLookupHealthInfo::default(),
             active_kv_offload: ActiveKvOffloadHealth::disabled(),

@@ -14,6 +14,7 @@ pub mod scheduler;
 pub mod scheduler_autotune;
 pub mod server;
 pub mod speculative;
+pub(crate) mod speculative_qualification;
 pub mod tokenizer;
 
 pub use cache::KVCache;

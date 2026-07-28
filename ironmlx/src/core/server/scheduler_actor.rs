@@ -48,6 +48,10 @@ use crate::core::speculative::{
     effective_mtp_draft_tokens_for_paged_prefix, MtpSpeculativeConfig, MtpSpeculativeModel,
     MtpSpeculativeStats,
 };
+use crate::core::speculative_qualification::{
+    NeuralExactAction, NeuralExactCostController, NeuralExactQualificationRuntimeConfig,
+    NeuralExactQualificationStats, NeuralExactRegime, NeuralExactSampleCounters, NeuralExactSource,
+};
 use crate::Result;
 
 #[derive(Debug, Clone, Copy, Default, Serialize)]
@@ -414,6 +418,10 @@ struct SchedulerActorMtpCounters {
     mtp_drafted_tokens: Arc<AtomicU64>,
     mtp_accepted_draft_tokens: Arc<AtomicU64>,
     mtp_windows: Arc<AtomicU64>,
+    mtp_exact_sampling_windows: Arc<AtomicU64>,
+    mtp_exact_acceptance_draws: Arc<AtomicU64>,
+    mtp_exact_residual_corrections: Arc<AtomicU64>,
+    mtp_exact_bonus_samples: Arc<AtomicU64>,
     mtp_draft_forward_us: Arc<AtomicU64>,
     mtp_verify_forward_us: Arc<AtomicU64>,
     mtp_projection_us: Arc<AtomicU64>,
@@ -430,6 +438,7 @@ struct SchedulerActorMtpCounters {
     published_stats: Arc<StdMutex<Option<MtpSpeculativeStats>>>,
     prompt_lookup_published_stats: Arc<StdMutex<Option<PromptLookupStats>>>,
     prompt_lookup_stats_baseline: Arc<StdMutex<Option<PromptLookupStats>>>,
+    neural_exact_qualification_stats: Arc<StdMutex<NeuralExactQualificationStats>>,
 }
 
 impl SchedulerActorMtpCounters {
@@ -441,6 +450,10 @@ impl SchedulerActorMtpCounters {
         mtp_drafted_tokens: Arc<AtomicU64>,
         mtp_accepted_draft_tokens: Arc<AtomicU64>,
         mtp_windows: Arc<AtomicU64>,
+        mtp_exact_sampling_windows: Arc<AtomicU64>,
+        mtp_exact_acceptance_draws: Arc<AtomicU64>,
+        mtp_exact_residual_corrections: Arc<AtomicU64>,
+        mtp_exact_bonus_samples: Arc<AtomicU64>,
         mtp_draft_forward_us: Arc<AtomicU64>,
         mtp_verify_forward_us: Arc<AtomicU64>,
         mtp_projection_us: Arc<AtomicU64>,
@@ -455,6 +468,7 @@ impl SchedulerActorMtpCounters {
         mtp_decode_cache_commit_us: Arc<AtomicU64>,
         mtp_cache_restore_us: Arc<AtomicU64>,
         prompt_lookup_published_stats: Arc<StdMutex<Option<PromptLookupStats>>>,
+        neural_exact_qualification_stats: Arc<StdMutex<NeuralExactQualificationStats>>,
     ) -> Self {
         Self {
             mtp_prefill_count,
@@ -463,6 +477,10 @@ impl SchedulerActorMtpCounters {
             mtp_drafted_tokens,
             mtp_accepted_draft_tokens,
             mtp_windows,
+            mtp_exact_sampling_windows,
+            mtp_exact_acceptance_draws,
+            mtp_exact_residual_corrections,
+            mtp_exact_bonus_samples,
             mtp_draft_forward_us,
             mtp_verify_forward_us,
             mtp_projection_us,
@@ -479,7 +497,15 @@ impl SchedulerActorMtpCounters {
             published_stats: Arc::new(StdMutex::new(None)),
             prompt_lookup_published_stats,
             prompt_lookup_stats_baseline: Arc::new(StdMutex::new(None)),
+            neural_exact_qualification_stats,
         }
+    }
+
+    fn store_neural_exact_qualification_stats(&self, stats: NeuralExactQualificationStats) {
+        *self
+            .neural_exact_qualification_stats
+            .lock()
+            .expect("neural exact qualification stats mutex poisoned") = stats;
     }
 
     fn store_stats(&self, stats: Option<MtpSpeculativeStats>) {
@@ -514,6 +540,14 @@ impl SchedulerActorMtpCounters {
             .fetch_add(stats.drafted_tokens as u64, Ordering::Relaxed);
         self.mtp_accepted_draft_tokens
             .fetch_add(stats.accepted_draft_tokens as u64, Ordering::Relaxed);
+        self.mtp_exact_sampling_windows
+            .fetch_add(stats.exact_sampling_windows as u64, Ordering::Relaxed);
+        self.mtp_exact_acceptance_draws
+            .fetch_add(stats.exact_acceptance_draws as u64, Ordering::Relaxed);
+        self.mtp_exact_residual_corrections
+            .fetch_add(stats.exact_residual_corrections as u64, Ordering::Relaxed);
+        self.mtp_exact_bonus_samples
+            .fetch_add(stats.exact_bonus_samples as u64, Ordering::Relaxed);
         self.mtp_draft_forward_us
             .fetch_add(stats.draft_forward_us, Ordering::Relaxed);
         self.mtp_verify_forward_us
@@ -747,6 +781,8 @@ struct SchedulerActorGemma4PromptLookupHybrid {
 struct SchedulerActorMtp<H> {
     mtp: H,
     cfg: MtpSpeculativeConfig,
+    exact_cost_controller: Option<NeuralExactCostController>,
+    exact_episode: Option<NeuralExactMeasuredEpisode>,
 }
 
 enum SchedulerActorMtpMidAdmitHandle {
@@ -757,6 +793,16 @@ enum SchedulerActorMtpMidAdmitHandle {
 struct SchedulerActorGemma4Drafter {
     drafter: Arc<Mutex<crate::models::gemma4::Gemma4AssistantModel>>,
     cfg: MtpSpeculativeConfig,
+    exact_cost_controller: Option<NeuralExactCostController>,
+    exact_episode: Option<NeuralExactMeasuredEpisode>,
+}
+
+struct NeuralExactMeasuredEpisode {
+    regime: NeuralExactRegime,
+    action: NeuralExactAction,
+    elapsed_ns: u64,
+    committed_tokens: usize,
+    stats_before: MtpSpeculativeStats,
 }
 
 enum SchedulerActorGemma4DrafterMidAdmitHandle {
@@ -772,7 +818,38 @@ impl<H> SchedulerActorMtp<H> {
             cfg: MtpSpeculativeConfig {
                 max_draft_tokens: mtp_draft_tokens,
             },
+            exact_cost_controller: None,
+            exact_episode: None,
         }
+    }
+
+    fn new_with_exact_qualification(
+        mtp: H,
+        mtp_draft_tokens: usize,
+        qualification: NeuralExactQualificationRuntimeConfig,
+    ) -> Result<Self> {
+        let mut mode = Self::new(mtp, mtp_draft_tokens);
+        mode.exact_cost_controller = Some(NeuralExactCostController::new(qualification)?);
+        Ok(mode)
+    }
+
+    fn publish_exact_qualification(&self, counters: &SchedulerActorMtpCounters) {
+        if let Some(controller) = self.exact_cost_controller.as_ref() {
+            counters.store_neural_exact_qualification_stats(controller.stats());
+        }
+    }
+
+    fn finish_exact_episode(
+        &mut self,
+        stats_after: Option<MtpSpeculativeStats>,
+        counters: &SchedulerActorMtpCounters,
+    ) {
+        finish_neural_exact_episode(
+            &mut self.exact_episode,
+            self.exact_cost_controller.as_mut(),
+            stats_after,
+        );
+        self.publish_exact_qualification(counters);
     }
 }
 
@@ -844,8 +921,64 @@ impl SchedulerActorGemma4Drafter {
             cfg: MtpSpeculativeConfig {
                 max_draft_tokens: mtp_draft_tokens,
             },
+            exact_cost_controller: None,
+            exact_episode: None,
         }
     }
+
+    fn new_with_exact_qualification(
+        drafter: Arc<Mutex<crate::models::gemma4::Gemma4AssistantModel>>,
+        mtp_draft_tokens: usize,
+        qualification: NeuralExactQualificationRuntimeConfig,
+    ) -> Result<Self> {
+        let mut mode = Self::new(drafter, mtp_draft_tokens);
+        mode.exact_cost_controller = Some(NeuralExactCostController::new(qualification)?);
+        Ok(mode)
+    }
+
+    fn publish_exact_qualification(&self, counters: &SchedulerActorMtpCounters) {
+        if let Some(controller) = self.exact_cost_controller.as_ref() {
+            counters.store_neural_exact_qualification_stats(controller.stats());
+        }
+    }
+
+    fn finish_exact_episode(
+        &mut self,
+        stats_after: Option<MtpSpeculativeStats>,
+        counters: &SchedulerActorMtpCounters,
+    ) {
+        finish_neural_exact_episode(
+            &mut self.exact_episode,
+            self.exact_cost_controller.as_mut(),
+            stats_after,
+        );
+        self.publish_exact_qualification(counters);
+    }
+}
+
+fn finish_neural_exact_episode(
+    episode: &mut Option<NeuralExactMeasuredEpisode>,
+    controller: Option<&mut NeuralExactCostController>,
+    stats_after: Option<MtpSpeculativeStats>,
+) {
+    let (Some(episode), Some(controller)) = (episode.take(), controller) else {
+        return;
+    };
+    let delta = stats_after
+        .map(|stats| stats.saturating_delta_since(&episode.stats_before))
+        .unwrap_or_default();
+    controller.record_sample(
+        episode.regime,
+        episode.action,
+        episode.elapsed_ns,
+        episode.committed_tokens,
+        NeuralExactSampleCounters {
+            drafted_tokens: delta.drafted_tokens as u64,
+            accepted_tokens: delta.accepted_draft_tokens as u64,
+            exact_windows: delta.exact_sampling_windows as u64,
+            residual_corrections: delta.exact_residual_corrections as u64,
+        },
+    );
 }
 
 impl<M> SchedulerActorMtpMode<M> for SchedulerActorNoMtp
@@ -1060,10 +1193,6 @@ where
         model: &M,
         request: GenerateRequest,
     ) -> Result<Self::MidAdmitHandle> {
-        anyhow::ensure!(
-            request.sampler.is_pipelinable(),
-            "prompt lookup requires greedy sampling"
-        );
         sched.admit_mid_begin(request, model)
     }
 
@@ -1146,17 +1275,44 @@ where
         model: &M,
         counters: &SchedulerActorMtpCounters,
     ) -> Result<Vec<StepEvent>> {
-        if sched.mtp_batch_active_greedy_eligible() {
+        self.exact_episode = None;
+        let regime = sched.fresh_neural_exact_qualification_regime(NeuralExactSource::QwenMtp);
+        let action = regime
+            .and_then(|regime| {
+                self.exact_cost_controller
+                    .as_mut()
+                    .map(|controller| controller.next_action(regime))
+            })
+            .unwrap_or(NeuralExactAction::Exact);
+        let stats_before = sched.mtp_stats().unwrap_or_default();
+        let started = Instant::now();
+        let events = if action == NeuralExactAction::Exact
+            && sched.speculative_batch_active_fresh_eligible()
+        {
             counters.mtp_prefill_count.fetch_add(1, Ordering::Relaxed);
             let events = sched.prefill_admitted_mtp_batch(model, &self.mtp, self.cfg)?;
             counters.store_stats(sched.mtp_stats());
-            Ok(events)
+            events
         } else {
             counters
                 .mtp_prefill_fallback_count
                 .fetch_add(1, Ordering::Relaxed);
-            sched.prefill_admitted(model)
+            sched.prefill_admitted(model)?
+        };
+        if let Some(regime) = regime.filter(|_| self.exact_cost_controller.is_some()) {
+            self.exact_episode = Some(NeuralExactMeasuredEpisode {
+                regime,
+                action,
+                elapsed_ns: duration_ns(started.elapsed()),
+                committed_tokens: events.len(),
+                stats_before,
+            });
+            if sched.active_batch_finished() {
+                self.finish_exact_episode(sched.mtp_stats(), counters);
+            }
         }
+        self.publish_exact_qualification(counters);
+        Ok(events)
     }
 
     fn step(
@@ -1166,14 +1322,30 @@ where
         counters: &SchedulerActorMtpCounters,
         _admission_pending: bool,
     ) -> Result<Vec<StepEvent>> {
-        if sched.mtp_stats().is_some() {
+        let action = self
+            .exact_episode
+            .as_ref()
+            .map(|episode| episode.action)
+            .unwrap_or(NeuralExactAction::Exact);
+        let started = Instant::now();
+        let events = if action == NeuralExactAction::Exact && sched.mtp_stats().is_some() {
             counters.mtp_step_count.fetch_add(1, Ordering::Relaxed);
             let events = sched.step_mtp_batch(model, &self.mtp)?;
             counters.store_stats(sched.mtp_stats());
-            Ok(events)
+            events
         } else {
-            sched.step(model)
+            sched.step(model)?
+        };
+        if let Some(episode) = self.exact_episode.as_mut() {
+            episode.elapsed_ns = episode
+                .elapsed_ns
+                .saturating_add(duration_ns(started.elapsed()));
+            episode.committed_tokens = episode.committed_tokens.saturating_add(events.len());
         }
+        if sched.active_batch_finished() {
+            self.finish_exact_episode(sched.mtp_stats(), counters);
+        }
+        Ok(events)
     }
 
     fn begin_mid_admit(
@@ -1182,6 +1354,7 @@ where
         model: &M,
         request: GenerateRequest,
     ) -> Result<Self::MidAdmitHandle> {
+        self.exact_episode = None;
         if sched.mtp_stats().is_some() {
             sched
                 .admit_mid_begin_mtp(request, model, &self.mtp, self.cfg)
@@ -1274,7 +1447,7 @@ where
         model: &M,
         counters: &SchedulerActorMtpCounters,
     ) -> Result<Vec<StepEvent>> {
-        let events = if sched.mtp_batch_active_greedy_eligible() {
+        let events = if sched.speculative_batch_active_fresh_eligible() {
             counters.mtp_prefill_count.fetch_add(1, Ordering::Relaxed);
             let events =
                 sched.prefill_admitted_mtp_batch(model, &self.neural.mtp, self.neural.cfg)?;
@@ -1523,18 +1696,46 @@ impl SchedulerActorMtpMode<crate::models::Gemma4Model> for SchedulerActorGemma4D
         model: &crate::models::Gemma4Model,
         counters: &SchedulerActorMtpCounters,
     ) -> Result<Vec<StepEvent>> {
-        if sched.mtp_batch_active_greedy_eligible() {
+        self.exact_episode = None;
+        let regime =
+            sched.fresh_neural_exact_qualification_regime(NeuralExactSource::Gemma4Assistant);
+        let action = regime
+            .and_then(|regime| {
+                self.exact_cost_controller
+                    .as_mut()
+                    .map(|controller| controller.next_action(regime))
+            })
+            .unwrap_or(NeuralExactAction::Exact);
+        let stats_before = sched.gemma4_drafter_stats().unwrap_or_default();
+        let started = Instant::now();
+        let events = if action == NeuralExactAction::Exact
+            && sched.speculative_batch_active_fresh_eligible()
+        {
             counters.mtp_prefill_count.fetch_add(1, Ordering::Relaxed);
             let drafter = self.drafter.blocking_lock();
             let events = sched.prefill_admitted_gemma4_drafter_batch(model, &drafter, self.cfg)?;
             counters.store_stats(sched.gemma4_drafter_stats());
-            Ok(events)
+            events
         } else {
             counters
                 .mtp_prefill_fallback_count
                 .fetch_add(1, Ordering::Relaxed);
-            sched.prefill_admitted(model)
+            sched.prefill_admitted(model)?
+        };
+        if let Some(regime) = regime.filter(|_| self.exact_cost_controller.is_some()) {
+            self.exact_episode = Some(NeuralExactMeasuredEpisode {
+                regime,
+                action,
+                elapsed_ns: duration_ns(started.elapsed()),
+                committed_tokens: events.len(),
+                stats_before,
+            });
+            if sched.active_batch_finished() {
+                self.finish_exact_episode(sched.gemma4_drafter_stats(), counters);
+            }
         }
+        self.publish_exact_qualification(counters);
+        Ok(events)
     }
 
     fn step(
@@ -1544,15 +1745,32 @@ impl SchedulerActorMtpMode<crate::models::Gemma4Model> for SchedulerActorGemma4D
         counters: &SchedulerActorMtpCounters,
         _admission_pending: bool,
     ) -> Result<Vec<StepEvent>> {
-        if sched.gemma4_drafter_stats().is_some() {
+        let action = self
+            .exact_episode
+            .as_ref()
+            .map(|episode| episode.action)
+            .unwrap_or(NeuralExactAction::Exact);
+        let started = Instant::now();
+        let events = if action == NeuralExactAction::Exact && sched.gemma4_drafter_stats().is_some()
+        {
             counters.mtp_step_count.fetch_add(1, Ordering::Relaxed);
             let drafter = self.drafter.blocking_lock();
             let events = sched.step_gemma4_drafter_batch(model, &drafter)?;
             counters.store_stats(sched.gemma4_drafter_stats());
-            Ok(events)
+            events
         } else {
-            sched.step(model)
+            sched.step(model)?
+        };
+        if let Some(episode) = self.exact_episode.as_mut() {
+            episode.elapsed_ns = episode
+                .elapsed_ns
+                .saturating_add(duration_ns(started.elapsed()));
+            episode.committed_tokens = episode.committed_tokens.saturating_add(events.len());
         }
+        if sched.active_batch_finished() {
+            self.finish_exact_episode(sched.gemma4_drafter_stats(), counters);
+        }
+        Ok(events)
     }
 
     fn begin_mid_admit(
@@ -1561,6 +1779,7 @@ impl SchedulerActorMtpMode<crate::models::Gemma4Model> for SchedulerActorGemma4D
         model: &crate::models::Gemma4Model,
         request: GenerateRequest,
     ) -> Result<Self::MidAdmitHandle> {
+        self.exact_episode = None;
         if sched.gemma4_drafter_stats().is_some() {
             sched
                 .admit_mid_begin_gemma4_drafter(request, model)
@@ -1972,6 +2191,14 @@ pub struct SchedulerActorHandle {
     /// Latest cumulative scheduler MTP speculative-window count.
     #[doc(hidden)]
     pub mtp_windows: Arc<AtomicU64>,
+    #[doc(hidden)]
+    pub mtp_exact_sampling_windows: Arc<AtomicU64>,
+    #[doc(hidden)]
+    pub mtp_exact_acceptance_draws: Arc<AtomicU64>,
+    #[doc(hidden)]
+    pub mtp_exact_residual_corrections: Arc<AtomicU64>,
+    #[doc(hidden)]
+    pub mtp_exact_bonus_samples: Arc<AtomicU64>,
     /// Latest cumulative microseconds spent in MTP draft forward passes.
     #[doc(hidden)]
     pub mtp_draft_forward_us: Arc<AtomicU64>,
@@ -2012,6 +2239,7 @@ pub struct SchedulerActorHandle {
     #[doc(hidden)]
     pub mtp_cache_restore_us: Arc<AtomicU64>,
     pub(crate) prompt_lookup_published_stats: Arc<StdMutex<Option<PromptLookupStats>>>,
+    pub(crate) neural_exact_qualification_stats: Arc<StdMutex<NeuralExactQualificationStats>>,
     // ── B1-p2.5 G3: /healthz monitoring atomics ──────────────────────────
     /// Live count of in-flight (active) requests in the scheduler slots.
     /// Updated by driver_loop tail on every rolling iteration.
@@ -2233,10 +2461,11 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn spawn_scheduler_actor_with_mtp<M>(
+pub(crate) fn spawn_scheduler_actor_with_mtp<M>(
     model: Arc<Mutex<M>>,
     mtp: M::MtpHead,
     mtp_draft_tokens: usize,
+    exact_qualification: NeuralExactQualificationRuntimeConfig,
     b_max: usize,
     admission_deadline: Duration,
     admission_queue_max: usize,
@@ -2245,16 +2474,21 @@ pub fn spawn_scheduler_actor_with_mtp<M>(
     meta: crate::core::memory_budget::ModelMeta,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
-) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError>
+) -> Result<SchedulerActorHandle>
 where
     M: Model + DenseVlMethods + MtpSpeculativeModel + Send + 'static,
     M::MtpHead: Send + 'static,
 {
     let mtp_draft_tokens =
         effective_mtp_draft_tokens_for_paged_prefix(mtp_draft_tokens, paged_prefix_cache.is_some());
-    spawn_scheduler_actor_with_mode(
+    let mode = SchedulerActorMtp::new_with_exact_qualification(
+        mtp,
+        mtp_draft_tokens,
+        exact_qualification,
+    )?;
+    Ok(spawn_scheduler_actor_with_mode(
         model,
-        SchedulerActorMtp::new(mtp, mtp_draft_tokens),
+        mode,
         b_max,
         admission_deadline,
         admission_queue_max,
@@ -2265,7 +2499,7 @@ where
         prefix_lru_cache,
         AdaptiveAdmissionPolicy::qwen_mtp(),
         ActiveKvOffloadConfig::disabled(),
-    )
+    )?)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2349,10 +2583,11 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn spawn_scheduler_actor_with_mtp_and_active_kv<M>(
+pub(crate) fn spawn_scheduler_actor_with_mtp_and_active_kv<M>(
     model: Arc<Mutex<M>>,
     mtp: M::MtpHead,
     mtp_draft_tokens: usize,
+    exact_qualification: NeuralExactQualificationRuntimeConfig,
     b_max: usize,
     admission_deadline: Duration,
     admission_queue_max: usize,
@@ -2362,16 +2597,21 @@ pub fn spawn_scheduler_actor_with_mtp_and_active_kv<M>(
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     active_kv_offload: ActiveKvOffloadConfig,
-) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError>
+) -> Result<SchedulerActorHandle>
 where
     M: Model + DenseVlMethods + MtpSpeculativeModel + Send + 'static,
     M::MtpHead: Send + 'static,
 {
     let mtp_draft_tokens =
         effective_mtp_draft_tokens_for_paged_prefix(mtp_draft_tokens, paged_prefix_cache.is_some());
-    spawn_scheduler_actor_with_mode(
+    let mode = SchedulerActorMtp::new_with_exact_qualification(
+        mtp,
+        mtp_draft_tokens,
+        exact_qualification,
+    )?;
+    Ok(spawn_scheduler_actor_with_mode(
         model,
-        SchedulerActorMtp::new(mtp, mtp_draft_tokens),
+        mode,
         b_max,
         admission_deadline,
         admission_queue_max,
@@ -2382,14 +2622,15 @@ where
         prefix_lru_cache,
         AdaptiveAdmissionPolicy::qwen_mtp(),
         active_kv_offload,
-    )
+    )?)
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn spawn_scheduler_actor_with_gemma4_drafter(
+pub(crate) fn spawn_scheduler_actor_with_gemma4_drafter(
     model: Arc<Mutex<crate::models::Gemma4Model>>,
     drafter: Arc<Mutex<crate::models::gemma4::Gemma4AssistantModel>>,
     mtp_draft_tokens: usize,
+    exact_qualification: NeuralExactQualificationRuntimeConfig,
     b_max: usize,
     admission_deadline: Duration,
     admission_queue_max: usize,
@@ -2398,10 +2639,15 @@ pub fn spawn_scheduler_actor_with_gemma4_drafter(
     meta: crate::core::memory_budget::ModelMeta,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
-) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError> {
-    spawn_scheduler_actor_with_mode(
+) -> Result<SchedulerActorHandle> {
+    let mode = SchedulerActorGemma4Drafter::new_with_exact_qualification(
+        drafter,
+        mtp_draft_tokens,
+        exact_qualification,
+    )?;
+    Ok(spawn_scheduler_actor_with_mode(
         model,
-        SchedulerActorGemma4Drafter::new(drafter, mtp_draft_tokens),
+        mode,
         b_max,
         admission_deadline,
         admission_queue_max,
@@ -2412,7 +2658,7 @@ pub fn spawn_scheduler_actor_with_gemma4_drafter(
         prefix_lru_cache,
         AdaptiveAdmissionPolicy::gemma4_drafter(),
         ActiveKvOffloadConfig::disabled(),
-    )
+    )?)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2455,10 +2701,11 @@ pub(crate) fn spawn_scheduler_actor_with_gemma4_drafter_prompt_lookup(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn spawn_scheduler_actor_with_gemma4_drafter_and_active_kv(
+pub(crate) fn spawn_scheduler_actor_with_gemma4_drafter_and_active_kv(
     model: Arc<Mutex<crate::models::Gemma4Model>>,
     drafter: Arc<Mutex<crate::models::gemma4::Gemma4AssistantModel>>,
     mtp_draft_tokens: usize,
+    exact_qualification: NeuralExactQualificationRuntimeConfig,
     b_max: usize,
     admission_deadline: Duration,
     admission_queue_max: usize,
@@ -2468,10 +2715,15 @@ pub fn spawn_scheduler_actor_with_gemma4_drafter_and_active_kv(
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     active_kv_offload: ActiveKvOffloadConfig,
-) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError> {
-    spawn_scheduler_actor_with_mode(
+) -> Result<SchedulerActorHandle> {
+    let mode = SchedulerActorGemma4Drafter::new_with_exact_qualification(
+        drafter,
+        mtp_draft_tokens,
+        exact_qualification,
+    )?;
+    Ok(spawn_scheduler_actor_with_mode(
         model,
-        SchedulerActorGemma4Drafter::new(drafter, mtp_draft_tokens),
+        mode,
         b_max,
         admission_deadline,
         admission_queue_max,
@@ -2482,7 +2734,7 @@ pub fn spawn_scheduler_actor_with_gemma4_drafter_and_active_kv(
         prefix_lru_cache,
         AdaptiveAdmissionPolicy::gemma4_drafter(),
         active_kv_offload,
-    )
+    )?)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2590,6 +2842,10 @@ where
     let mtp_drafted_tokens = Arc::new(AtomicU64::new(0));
     let mtp_accepted_draft_tokens = Arc::new(AtomicU64::new(0));
     let mtp_windows = Arc::new(AtomicU64::new(0));
+    let mtp_exact_sampling_windows = Arc::new(AtomicU64::new(0));
+    let mtp_exact_acceptance_draws = Arc::new(AtomicU64::new(0));
+    let mtp_exact_residual_corrections = Arc::new(AtomicU64::new(0));
+    let mtp_exact_bonus_samples = Arc::new(AtomicU64::new(0));
     let mtp_draft_forward_us = Arc::new(AtomicU64::new(0));
     let mtp_verify_forward_us = Arc::new(AtomicU64::new(0));
     let mtp_projection_us = Arc::new(AtomicU64::new(0));
@@ -2604,6 +2860,8 @@ where
     let mtp_decode_cache_commit_us = Arc::new(AtomicU64::new(0));
     let mtp_cache_restore_us = Arc::new(AtomicU64::new(0));
     let prompt_lookup_published_stats = Arc::new(StdMutex::new(None));
+    let neural_exact_qualification_stats =
+        Arc::new(StdMutex::new(NeuralExactQualificationStats::default()));
     // B1-p2.5 G3: live b_active / b_queued updated by driver_loop tail.
     let b_active = Arc::new(AtomicU64::new(0));
     let b_queued = Arc::new(AtomicU64::new(0));
@@ -2625,6 +2883,10 @@ where
         mtp_drafted_tokens.clone(),
         mtp_accepted_draft_tokens.clone(),
         mtp_windows.clone(),
+        mtp_exact_sampling_windows.clone(),
+        mtp_exact_acceptance_draws.clone(),
+        mtp_exact_residual_corrections.clone(),
+        mtp_exact_bonus_samples.clone(),
         mtp_draft_forward_us.clone(),
         mtp_verify_forward_us.clone(),
         mtp_projection_us.clone(),
@@ -2639,6 +2901,7 @@ where
         mtp_decode_cache_commit_us.clone(),
         mtp_cache_restore_us.clone(),
         prompt_lookup_published_stats.clone(),
+        neural_exact_qualification_stats.clone(),
     );
     let b_active_for_task = b_active.clone();
     let b_queued_for_task = b_queued.clone();
@@ -2717,6 +2980,10 @@ where
         mtp_drafted_tokens,
         mtp_accepted_draft_tokens,
         mtp_windows,
+        mtp_exact_sampling_windows,
+        mtp_exact_acceptance_draws,
+        mtp_exact_residual_corrections,
+        mtp_exact_bonus_samples,
         mtp_draft_forward_us,
         mtp_verify_forward_us,
         mtp_projection_us,
@@ -2731,6 +2998,7 @@ where
         mtp_decode_cache_commit_us,
         mtp_cache_restore_us,
         prompt_lookup_published_stats,
+        neural_exact_qualification_stats,
         b_active,
         b_queued,
         // P1.1: alias admission_queue_full_count to queue_rejected Arc —
@@ -4968,27 +5236,33 @@ mod tests {
     }
 
     fn test_mtp_counters() -> SchedulerActorMtpCounters {
+        let counter = || Arc::new(AtomicU64::new(0));
         SchedulerActorMtpCounters::new(
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
+            counter(),
+            counter(),
+            counter(),
+            counter(),
+            counter(),
+            counter(),
+            counter(),
+            counter(),
+            counter(),
+            counter(),
+            counter(),
+            counter(),
+            counter(),
+            counter(),
+            counter(),
+            counter(),
+            counter(),
+            counter(),
+            counter(),
+            counter(),
+            counter(),
+            counter(),
+            counter(),
             Arc::new(StdMutex::new(None)),
+            Arc::new(StdMutex::new(NeuralExactQualificationStats::default())),
         )
     }
 
@@ -5004,11 +5278,17 @@ mod tests {
     async fn spawn_mtp_actor_accepts_paged_prefix_cache_config() {
         let root = unique_temp_dir("actor-mtp-prefix");
         let config = PagedPrefixCacheConfig::new(&root, "fake-qwen", 16, 8).expect("prefix config");
+        let qualification = NeuralExactQualificationRuntimeConfig::for_test(
+            NeuralExactSource::QwenMtp,
+            "fake-qwen",
+            root.join("qualification.json"),
+        );
         let model = Arc::new(Mutex::new(SchedulerActorFakeModel));
         let handle = spawn_scheduler_actor_with_mtp(
             model,
             SchedulerActorFakeMtpHead,
             1,
+            qualification,
             2,
             Duration::from_millis(1),
             1,
@@ -5587,7 +5867,7 @@ mod tests {
     }
 
     #[test]
-    fn actor_mtp_mode_prefill_falls_back_for_non_greedy_request() {
+    fn actor_mtp_mode_prefill_uses_exact_mtp_for_sampled_b1_request() {
         let mut scheduler = Scheduler::<SchedulerActorFakeModel>::new(
             1,
             32,
@@ -5602,20 +5882,17 @@ mod tests {
 
         let prefill_events = mode
             .prefill_admitted(&mut scheduler, &SchedulerActorFakeModel, &counters)
-            .expect("ordinary prefill");
+            .expect("sampled exact MTP prefill");
 
         assert_eq!(prefill_events.len(), 1);
-        assert_eq!(counters.mtp_prefill_count.load(Ordering::Relaxed), 0);
+        assert_eq!(counters.mtp_prefill_count.load(Ordering::Relaxed), 1);
         assert_eq!(
             counters.mtp_prefill_fallback_count.load(Ordering::Relaxed),
-            1
-        );
-        assert_eq!(counters.mtp_drafted_tokens.load(Ordering::Relaxed), 0);
-        assert_eq!(
-            counters.mtp_accepted_draft_tokens.load(Ordering::Relaxed),
             0
         );
-        assert!(scheduler.mtp_stats().is_none());
+        assert!(counters.mtp_drafted_tokens.load(Ordering::Relaxed) > 0);
+        assert!(counters.mtp_exact_sampling_windows.load(Ordering::Relaxed) > 0);
+        assert!(scheduler.mtp_stats().is_some());
     }
 
     #[test]

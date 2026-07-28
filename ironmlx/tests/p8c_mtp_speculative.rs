@@ -57,13 +57,10 @@ fn mtp_config_rejects_zero_draft_tokens() {
 }
 
 #[test]
-fn mtp_config_rejects_non_greedy_sampler() {
-    let err = MtpSpeculativeConfig::new(4, Sampler::greedy().with_temperature(0.7)).unwrap_err();
+fn mtp_config_accepts_sampled_sampler() {
+    let cfg = MtpSpeculativeConfig::new(4, Sampler::greedy().with_temperature(0.7)).unwrap();
 
-    assert!(
-        err.to_string().contains("greedy"),
-        "unexpected error: {err}"
-    );
+    assert_eq!(cfg.max_draft_tokens, 4);
 }
 
 #[test]

@@ -164,10 +164,10 @@ impl<M: Model + DenseVlMethods + Send + 'static> Clone for AppState<M> {
     }
 }
 
-pub(crate) fn validate_prompt_lookup_sampler(enabled: bool, sampler: Sampler) -> Result<()> {
+pub(crate) fn validate_prompt_lookup_sampler(_enabled: bool, sampler: Sampler) -> Result<()> {
     anyhow::ensure!(
-        !enabled || sampler.is_pipelinable(),
-        "prompt lookup requires greedy sampling"
+        sampler.temperature.is_finite(),
+        "sampling temperature must be finite"
     );
     Ok(())
 }
@@ -412,6 +412,8 @@ where
 struct MtpSchedulerActorSpawner<H> {
     mtp: H,
     mtp_draft_tokens: usize,
+    exact_qualification:
+        crate::core::speculative_qualification::NeuralExactQualificationRuntimeConfig,
     prompt_lookup: Option<(
         crate::core::prompt_lookup::PromptLookupConfig,
         crate::core::prompt_lookup::PromptLookupQualificationRuntimeConfig,
@@ -432,6 +434,8 @@ struct PromptLookupSchedulerActorSpawner {
 struct Gemma4DrafterSchedulerActorSpawner {
     drafter: Arc<Mutex<crate::models::gemma4::Gemma4AssistantModel>>,
     mtp_draft_tokens: usize,
+    exact_qualification:
+        crate::core::speculative_qualification::NeuralExactQualificationRuntimeConfig,
     prompt_lookup: Option<(
         crate::core::prompt_lookup::PromptLookupConfig,
         crate::core::prompt_lookup::PromptLookupQualificationRuntimeConfig,
@@ -488,6 +492,7 @@ impl SchedulerActorSpawner<crate::models::Gemma4Model> for Gemma4DrafterSchedule
                     model,
                     self.drafter,
                     self.mtp_draft_tokens,
+                    self.exact_qualification,
                     b_max,
                     admission_deadline,
                     admission_queue_max,
@@ -504,6 +509,7 @@ impl SchedulerActorSpawner<crate::models::Gemma4Model> for Gemma4DrafterSchedule
                 model,
                 self.drafter,
                 self.mtp_draft_tokens,
+                self.exact_qualification,
                 b_max,
                 admission_deadline,
                 admission_queue_max,
@@ -568,6 +574,7 @@ where
                     model,
                     self.mtp,
                     self.mtp_draft_tokens,
+                    self.exact_qualification,
                     b_max,
                     admission_deadline,
                     admission_queue_max,
@@ -584,6 +591,7 @@ where
                 model,
                 self.mtp,
                 self.mtp_draft_tokens,
+                self.exact_qualification,
                 b_max,
                 admission_deadline,
                 admission_queue_max,
@@ -796,6 +804,11 @@ where
             Ok((cfg.validate()?, qualification))
         })
         .transpose()?;
+    let exact_qualification =
+        crate::core::speculative_qualification::NeuralExactQualificationRuntimeConfig::for_scheduler_profile(
+            &scheduler_runtime_profile,
+            crate::core::speculative_qualification::NeuralExactSource::QwenMtp,
+        )?;
     serve_inner(
         model,
         tokenizer,
@@ -820,6 +833,7 @@ where
         MtpSchedulerActorSpawner {
             mtp,
             mtp_draft_tokens: effective_mtp_draft_tokens,
+            exact_qualification,
             prompt_lookup,
             paged_prefix_cache,
             prefix_lru_cache,
@@ -1041,6 +1055,11 @@ where
             Ok((cfg.validate()?, qualification))
         })
         .transpose()?;
+    let exact_qualification =
+        crate::core::speculative_qualification::NeuralExactQualificationRuntimeConfig::for_scheduler_profile(
+            &scheduler_runtime_profile,
+            crate::core::speculative_qualification::NeuralExactSource::QwenMtp,
+        )?;
     build_app_state(
         model,
         tokenizer,
@@ -1063,6 +1082,7 @@ where
         MtpSchedulerActorSpawner {
             mtp,
             mtp_draft_tokens: effective_mtp_draft_tokens,
+            exact_qualification,
             prompt_lookup,
             paged_prefix_cache,
             prefix_lru_cache,
@@ -1129,6 +1149,11 @@ pub(crate) async fn build_gemma4_drafter_app_state(
             Ok((cfg.validate()?, qualification))
         })
         .transpose()?;
+    let exact_qualification =
+        crate::core::speculative_qualification::NeuralExactQualificationRuntimeConfig::for_scheduler_profile(
+            &scheduler_runtime_profile,
+            crate::core::speculative_qualification::NeuralExactSource::Gemma4Assistant,
+        )?;
     let drafter = Arc::new(Mutex::new(drafter));
     let base = build_app_state(
         model,
@@ -1152,6 +1177,7 @@ pub(crate) async fn build_gemma4_drafter_app_state(
         Gemma4DrafterSchedulerActorSpawner {
             drafter,
             mtp_draft_tokens: effective_mtp_draft_tokens,
+            exact_qualification,
             prompt_lookup,
             paged_prefix_cache,
             prefix_lru_cache,
@@ -1267,6 +1293,10 @@ where
                 scheduler_handle.mtp_drafted_tokens.clone(),
                 scheduler_handle.mtp_accepted_draft_tokens.clone(),
                 scheduler_handle.mtp_windows.clone(),
+                scheduler_handle.mtp_exact_sampling_windows.clone(),
+                scheduler_handle.mtp_exact_acceptance_draws.clone(),
+                scheduler_handle.mtp_exact_residual_corrections.clone(),
+                scheduler_handle.mtp_exact_bonus_samples.clone(),
                 scheduler_handle.mtp_draft_forward_us.clone(),
                 scheduler_handle.mtp_verify_forward_us.clone(),
                 scheduler_handle.mtp_projection_us.clone(),
@@ -1280,6 +1310,7 @@ where
                 scheduler_handle.mtp_prefill_cache_commit_us.clone(),
                 scheduler_handle.mtp_decode_cache_commit_us.clone(),
                 scheduler_handle.mtp_cache_restore_us.clone(),
+                scheduler_handle.neural_exact_qualification_stats.clone(),
             )
         })
         .unwrap_or_else(health::MtpHealthConfig::disabled);
@@ -1604,14 +1635,24 @@ mod tests {
     }
 
     #[test]
-    fn prompt_lookup_sampler_validation_rejects_non_greedy_before_admission() {
+    fn prompt_lookup_sampler_validation_accepts_exact_non_greedy() {
         assert!(validate_prompt_lookup_sampler(true, Sampler::greedy()).is_ok());
         assert!(
             validate_prompt_lookup_sampler(false, Sampler::greedy().with_temperature(0.7)).is_ok()
         );
-        let err = validate_prompt_lookup_sampler(true, Sampler::greedy().with_temperature(0.7))
-            .unwrap_err();
-        assert_eq!(err.to_string(), "prompt lookup requires greedy sampling");
+        assert!(
+            validate_prompt_lookup_sampler(true, Sampler::greedy().with_temperature(0.7)).is_ok()
+        );
+        let sampler = Sampler {
+            temperature: f32::NAN,
+            ..Sampler::greedy()
+        };
+        assert_eq!(
+            validate_prompt_lookup_sampler(true, sampler)
+                .unwrap_err()
+                .to_string(),
+            "sampling temperature must be finite"
+        );
     }
 
     fn test_scheduler_handle() -> scheduler_actor::SchedulerActorHandle {
@@ -1631,6 +1672,10 @@ mod tests {
             mtp_drafted_tokens: Arc::new(AtomicU64::new(0)),
             mtp_accepted_draft_tokens: Arc::new(AtomicU64::new(0)),
             mtp_windows: Arc::new(AtomicU64::new(0)),
+            mtp_exact_sampling_windows: Arc::new(AtomicU64::new(0)),
+            mtp_exact_acceptance_draws: Arc::new(AtomicU64::new(0)),
+            mtp_exact_residual_corrections: Arc::new(AtomicU64::new(0)),
+            mtp_exact_bonus_samples: Arc::new(AtomicU64::new(0)),
             mtp_draft_forward_us: Arc::new(AtomicU64::new(0)),
             mtp_verify_forward_us: Arc::new(AtomicU64::new(0)),
             mtp_projection_us: Arc::new(AtomicU64::new(0)),
@@ -1645,6 +1690,9 @@ mod tests {
             mtp_decode_cache_commit_us: Arc::new(AtomicU64::new(0)),
             mtp_cache_restore_us: Arc::new(AtomicU64::new(0)),
             prompt_lookup_published_stats: Arc::new(std::sync::Mutex::new(None)),
+            neural_exact_qualification_stats: Arc::new(std::sync::Mutex::new(
+                crate::core::speculative_qualification::NeuralExactQualificationStats::default(),
+            )),
             b_active: Arc::new(AtomicU64::new(0)),
             b_queued: Arc::new(AtomicU64::new(0)),
             admission_queue_full_count: queue_rejected,
@@ -1725,6 +1773,10 @@ mod tests {
                 handle.mtp_drafted_tokens.clone(),
                 handle.mtp_accepted_draft_tokens.clone(),
                 handle.mtp_windows.clone(),
+                handle.mtp_exact_sampling_windows.clone(),
+                handle.mtp_exact_acceptance_draws.clone(),
+                handle.mtp_exact_residual_corrections.clone(),
+                handle.mtp_exact_bonus_samples.clone(),
                 handle.mtp_draft_forward_us.clone(),
                 handle.mtp_verify_forward_us.clone(),
                 handle.mtp_projection_us.clone(),
@@ -1738,6 +1790,7 @@ mod tests {
                 handle.mtp_prefill_cache_commit_us.clone(),
                 handle.mtp_decode_cache_commit_us.clone(),
                 handle.mtp_cache_restore_us.clone(),
+                handle.neural_exact_qualification_stats.clone(),
             ),
             health::PromptLookupHealthConfig::disabled(),
         );
