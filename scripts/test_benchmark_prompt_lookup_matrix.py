@@ -126,6 +126,20 @@ class BenchmarkPromptLookupMatrixTests(unittest.TestCase):
 
         self.assertEqual(command[command.index("--max-sequences") + 1], "1")
 
+    def test_serve_command_enables_cross_request_only_when_requested(self):
+        lookup = self.module.LookupConfig(name="default")
+        variant = self.module.Variant("lookup", "off", lookup, 0)
+
+        local = self.module.build_serve_command(
+            self.config(cross_request=False), variant, Path("/tmp/local")
+        )
+        shared = self.module.build_serve_command(
+            self.config(cross_request=True), variant, Path("/tmp/shared")
+        )
+
+        self.assertNotIn("--prompt-lookup-cross-request", local)
+        self.assertIn("--prompt-lookup-cross-request", shared)
+
     def test_comparison_marks_only_shape_controlled_scheduler_cells(self):
         rows = []
         for lookup_name in (None, "default"):
@@ -247,6 +261,8 @@ class BenchmarkPromptLookupMatrixTests(unittest.TestCase):
                 "verify_round_us": 1000,
                 "exact_batched_verify_windows": 10,
                 "sequential_verify_windows": 20,
+                "shared_queries": 30,
+                "shared_hits": 20,
             }
         }
         after = {
@@ -259,8 +275,12 @@ class BenchmarkPromptLookupMatrixTests(unittest.TestCase):
                 "verify_round_us": 1600,
                 "exact_batched_verify_windows": 13,
                 "sequential_verify_windows": 22,
+                "shared_queries": 35,
+                "shared_hits": 24,
                 "index_entries_current": 0,
                 "index_entries_peak": 80,
+                "shared_entries_current": 40,
+                "shared_entries_peak": 64,
             },
         }
 
@@ -272,6 +292,10 @@ class BenchmarkPromptLookupMatrixTests(unittest.TestCase):
         self.assertEqual(delta["prompt_lookup"]["verify_round_us"], 600)
         self.assertEqual(delta["prompt_lookup"]["exact_batched_verify_windows"], 3)
         self.assertEqual(delta["prompt_lookup"]["sequential_verify_windows"], 2)
+        self.assertEqual(delta["prompt_lookup"]["shared_queries"], 5)
+        self.assertEqual(delta["prompt_lookup"]["shared_hits"], 4)
+        self.assertEqual(delta["prompt_lookup"]["shared_entries_current"], 40)
+        self.assertEqual(delta["prompt_lookup"]["shared_entries_peak"], 64)
 
     def test_built_requests_include_stable_prompt_hashes(self):
         case = self.module.load_corpus(self.module.DEFAULT_CORPUS)[0]

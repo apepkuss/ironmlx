@@ -305,6 +305,7 @@ pub struct PromptLookupHealthInfo {
     pub max_draft_tokens: Option<usize>,
     pub history_window_tokens: Option<usize>,
     pub max_index_entries: Option<usize>,
+    pub cross_request: Option<bool>,
     pub queries: u64,
     pub hits: u64,
     pub misses: u64,
@@ -351,12 +352,21 @@ pub struct PromptLookupHealthInfo {
     pub hybrid_lookup_miss_fallbacks: u64,
     pub hybrid_neural_rebases: u64,
     pub hybrid_neural_rebase_us: u64,
+    pub shared_queries: u64,
+    pub shared_hits: u64,
+    pub shared_misses: u64,
+    pub shared_published_requests: u64,
+    pub shared_published_tokens: u64,
+    pub shared_entries_current: u64,
+    pub shared_entries_peak: u64,
+    pub shared_evictions: u64,
+    pub shared_pressure_evictions: u64,
 }
 
 impl PromptLookupHealthInfo {
     pub fn aggregate(snapshots: impl IntoIterator<Item = Self>) -> Self {
         let mut aggregate = Self::default();
-        let mut config: Option<(usize, usize, usize, usize, usize)> = None;
+        let mut config: Option<(usize, usize, usize, usize, usize, bool)> = None;
         let mut config_mismatch = false;
         for snapshot in snapshots {
             aggregate.enabled |= snapshot.enabled;
@@ -367,9 +377,20 @@ impl PromptLookupHealthInfo {
                     .zip(snapshot.max_draft_tokens)
                     .zip(snapshot.history_window_tokens)
                     .zip(snapshot.max_index_entries)
+                    .zip(snapshot.cross_request)
                     .map(
-                        |((((min_ngram, max_ngram), max_draft_tokens), history), entries)| {
-                            (min_ngram, max_ngram, max_draft_tokens, history, entries)
+                        |(
+                            ((((min_ngram, max_ngram), max_draft_tokens), history), entries),
+                            cross_request,
+                        )| {
+                            (
+                                min_ngram,
+                                max_ngram,
+                                max_draft_tokens,
+                                history,
+                                entries,
+                                cross_request,
+                            )
                         },
                     );
                 match (config, current) {
@@ -421,14 +442,26 @@ impl PromptLookupHealthInfo {
             aggregate.hybrid_lookup_miss_fallbacks += snapshot.hybrid_lookup_miss_fallbacks;
             aggregate.hybrid_neural_rebases += snapshot.hybrid_neural_rebases;
             aggregate.hybrid_neural_rebase_us += snapshot.hybrid_neural_rebase_us;
+            aggregate.shared_queries += snapshot.shared_queries;
+            aggregate.shared_hits += snapshot.shared_hits;
+            aggregate.shared_misses += snapshot.shared_misses;
+            aggregate.shared_published_requests += snapshot.shared_published_requests;
+            aggregate.shared_published_tokens += snapshot.shared_published_tokens;
+            aggregate.shared_entries_current += snapshot.shared_entries_current;
+            aggregate.shared_entries_peak += snapshot.shared_entries_peak;
+            aggregate.shared_evictions += snapshot.shared_evictions;
+            aggregate.shared_pressure_evictions += snapshot.shared_pressure_evictions;
         }
         if !config_mismatch {
-            if let Some((min_ngram, max_ngram, max_draft_tokens, history, entries)) = config {
+            if let Some((min_ngram, max_ngram, max_draft_tokens, history, entries, cross_request)) =
+                config
+            {
                 aggregate.min_ngram = Some(min_ngram);
                 aggregate.max_ngram = Some(max_ngram);
                 aggregate.max_draft_tokens = Some(max_draft_tokens);
                 aggregate.history_window_tokens = Some(history);
                 aggregate.max_index_entries = Some(entries);
+                aggregate.cross_request = Some(cross_request);
             }
         }
         aggregate
@@ -472,6 +505,7 @@ impl PromptLookupHealthConfig {
             max_draft_tokens: self.config.map(|config| config.max_draft_tokens),
             history_window_tokens: self.config.map(|config| config.history_window_tokens),
             max_index_entries: self.config.map(|config| config.max_index_entries),
+            cross_request: self.config.map(|config| config.cross_request),
             queries: stats.queries,
             hits: stats.hits,
             misses: stats.misses,
@@ -518,6 +552,15 @@ impl PromptLookupHealthConfig {
             hybrid_lookup_miss_fallbacks: stats.hybrid_lookup_miss_fallbacks,
             hybrid_neural_rebases: stats.hybrid_neural_rebases,
             hybrid_neural_rebase_us: stats.hybrid_neural_rebase_us,
+            shared_queries: stats.shared_queries,
+            shared_hits: stats.shared_hits,
+            shared_misses: stats.shared_misses,
+            shared_published_requests: stats.shared_published_requests,
+            shared_published_tokens: stats.shared_published_tokens,
+            shared_entries_current: stats.shared_entries_current,
+            shared_entries_peak: stats.shared_entries_peak,
+            shared_evictions: stats.shared_evictions,
+            shared_pressure_evictions: stats.shared_pressure_evictions,
         }
     }
 }
@@ -817,6 +860,7 @@ mod tests {
             max_draft_tokens: 3,
             history_window_tokens: 4096,
             max_index_entries: 8192,
+            cross_request: true,
         };
         let stats = PromptLookupStats {
             queries: 11,
@@ -851,6 +895,15 @@ mod tests {
             hybrid_lookup_miss_fallbacks: 3,
             hybrid_neural_rebases: 2,
             hybrid_neural_rebase_us: 29,
+            shared_queries: 9,
+            shared_hits: 6,
+            shared_misses: 3,
+            shared_published_requests: 4,
+            shared_published_tokens: 128,
+            shared_entries_current: 32,
+            shared_entries_peak: 48,
+            shared_evictions: 7,
+            shared_pressure_evictions: 5,
             ..PromptLookupStats::default()
         };
         let published = Arc::new(Mutex::new(Some(stats)));
@@ -863,6 +916,7 @@ mod tests {
         assert_eq!(snapshot.prompt_lookup.min_ngram, Some(2));
         assert_eq!(snapshot.prompt_lookup.max_ngram, Some(5));
         assert_eq!(snapshot.prompt_lookup.max_draft_tokens, Some(3));
+        assert_eq!(snapshot.prompt_lookup.cross_request, Some(true));
         assert_eq!(snapshot.prompt_lookup.queries, 11);
         assert_eq!(snapshot.prompt_lookup.hits, 7);
         assert_eq!(snapshot.prompt_lookup.misses, 4);
@@ -895,6 +949,15 @@ mod tests {
         assert_eq!(snapshot.prompt_lookup.hybrid_lookup_miss_fallbacks, 3);
         assert_eq!(snapshot.prompt_lookup.hybrid_neural_rebases, 2);
         assert_eq!(snapshot.prompt_lookup.hybrid_neural_rebase_us, 29);
+        assert_eq!(snapshot.prompt_lookup.shared_queries, 9);
+        assert_eq!(snapshot.prompt_lookup.shared_hits, 6);
+        assert_eq!(snapshot.prompt_lookup.shared_misses, 3);
+        assert_eq!(snapshot.prompt_lookup.shared_published_requests, 4);
+        assert_eq!(snapshot.prompt_lookup.shared_published_tokens, 128);
+        assert_eq!(snapshot.prompt_lookup.shared_entries_current, 32);
+        assert_eq!(snapshot.prompt_lookup.shared_entries_peak, 48);
+        assert_eq!(snapshot.prompt_lookup.shared_evictions, 7);
+        assert_eq!(snapshot.prompt_lookup.shared_pressure_evictions, 5);
     }
 
     #[test]

@@ -130,7 +130,7 @@ pub struct AppState<M: Model + DenseVlMethods + Send + 'static> {
     pub kv_cache_turboquant_bits: Option<TurboQuantKVBits>,
     /// Route eligible greedy requests through SchedulerActor.
     pub force_scheduler_for_greedy: bool,
-    /// True only for the request-local greedy PromptLookup source.
+    /// True when PromptLookup is enabled for this model engine.
     pub prompt_lookup_enabled: bool,
     /// Health snapshot collector for `/healthz`. Holds shared Arc atomics
     /// wired to the SchedulerActor driver loop + BudgetState. B1-p2.5 G3.

@@ -528,9 +528,12 @@ impl SchedulerActorMtpCounters {
         }
     }
 
-    fn reset_stats_baseline(&self) {
+    fn reset_stats_baseline(&self, prompt_lookup_stats: Option<PromptLookupStats>) {
         self.store_stats(None);
-        self.store_prompt_lookup_stats(None);
+        match prompt_lookup_stats {
+            Some(stats) => self.store_prompt_lookup_stats(Some(stats)),
+            None => self.store_prompt_lookup_stats(None),
+        }
     }
 
     fn add_stats_delta(&self, stats: &MtpSpeculativeStats) {
@@ -3213,7 +3216,7 @@ fn driver_loop<M, A>(
                          {evict_err:?}; relying on 3b-1 poison flag to reject subsequent admits"
                     );
                 }
-                mtp_counters.reset_stats_baseline();
+                mtp_counters.reset_stats_baseline(sched.prompt_lookup_stats());
                 cleanup_parked_active_kv_requests(
                     &sched,
                     &mut parked_active_kv,
@@ -3507,7 +3510,7 @@ fn driver_loop<M, A>(
                                             "[SchedulerActor] evict_all after request-owned KV release failure also failed: {evict_err:?}"
                                         );
                                     }
-                                    mtp_counters.reset_stats_baseline();
+                                    mtp_counters.reset_stats_baseline(sched.prompt_lookup_stats());
                                     in_flight_mid_admit = None;
                                     cleanup_parked_active_kv_requests(
                                         &sched,
@@ -3620,7 +3623,7 @@ fn driver_loop<M, A>(
                                      {evict_err:?}; relying on 3b-1 poison flag to reject subsequent admits"
                                 );
                             }
-                            mtp_counters.reset_stats_baseline();
+                            mtp_counters.reset_stats_baseline(sched.prompt_lookup_stats());
                             in_flight_mid_admit = None;
                             cleanup_parked_active_kv_requests(
                                 &sched,
@@ -3704,7 +3707,7 @@ fn driver_loop<M, A>(
                      relying on 3b-1 poison flag to reject subsequent admits"
                 );
             }
-            mtp_counters.reset_stats_baseline();
+            mtp_counters.reset_stats_baseline(sched.prompt_lookup_stats());
         }
         immutable_prefix_stats.store(sched.request_owned_kv_stats().immutable_prefix);
         in_flight_mid_admit = None;
@@ -4551,7 +4554,7 @@ fn finalize_finished_batch_if_any<M: Model>(
     let evicted_ids: Vec<RequestId> = sched.active().into_iter().map(|state| state.id).collect();
     match sched.evict_all() {
         Ok(()) => {
-            mtp_counters.reset_stats_baseline();
+            mtp_counters.reset_stats_baseline(sched.prompt_lookup_stats());
             for id in evicted_ids {
                 event_txs.remove(&id);
             }
@@ -4670,7 +4673,7 @@ where
                 event_txs.clear();
                 return RollingControl::ContinueOuter;
             }
-            mtp_counters.reset_stats_baseline();
+            mtp_counters.reset_stats_baseline(sched.prompt_lookup_stats());
             // Preserve parked Active KV request event channels. At this point
             // active_count is zero; stale finished-batch channels were already
             // removed by gc/finalize paths.
@@ -4773,7 +4776,7 @@ where
                          {evict_err:?}; rejecting remaining queued admits"
                     );
                 }
-                mtp_counters.reset_stats_baseline();
+                mtp_counters.reset_stats_baseline(sched.prompt_lookup_stats());
                 event_txs.clear();
                 while let Some(p) = admission_queue.pop_front() {
                     let _ = p.reply_tx.send(Err(anyhow::anyhow!(
@@ -4803,7 +4806,7 @@ where
                     event_txs.clear();
                     return RollingControl::ContinueOuter;
                 }
-                mtp_counters.reset_stats_baseline();
+                mtp_counters.reset_stats_baseline(sched.prompt_lookup_stats());
                 // Preserve parked Active KV request event channels. At this
                 // point active_count is zero; stale finished-batch channels
                 // were already removed by gc/finalize paths.
@@ -4849,7 +4852,7 @@ where
                              {evict_err:?}; relying on 3b-1 poison flag to reject subsequent admits"
                         );
                     }
-                    mtp_counters.reset_stats_baseline();
+                    mtp_counters.reset_stats_baseline(sched.prompt_lookup_stats());
                     event_txs.clear();
                     return RollingControl::ContinueOuter;
                 }
@@ -5661,7 +5664,7 @@ mod tests {
         );
         assert_eq!(counters.mtp_cache_restore_us.load(Ordering::Relaxed), 75);
 
-        counters.reset_stats_baseline();
+        counters.reset_stats_baseline(None);
         let next_batch = MtpSpeculativeStats {
             windows: 1,
             drafted_tokens: 3,
@@ -5742,7 +5745,7 @@ mod tests {
                 profile_write_drops: 1,
             },
         );
-        counters.reset_stats_baseline();
+        counters.reset_stats_baseline(None);
         counters.store_prompt_lookup_stats_with_qualification(
             Some(PromptLookupStats {
                 queries: 4,
@@ -5788,7 +5791,7 @@ mod tests {
         assert_eq!(stats.rejected_regimes_current, 2);
         assert_eq!(stats.qualification_profile_writes, 4);
 
-        counters.reset_stats_baseline();
+        counters.reset_stats_baseline(None);
         let stats = counters
             .prompt_lookup_published_stats
             .lock()
@@ -5797,6 +5800,44 @@ mod tests {
         assert_eq!(stats.queries, 9);
         assert_eq!(stats.index_entries_current, 0);
         assert_eq!(stats.index_entries_peak, 17);
+    }
+
+    #[test]
+    fn prompt_lookup_counters_preserve_shared_pool_baseline_across_batches() {
+        let counters = test_mtp_counters();
+        let first = PromptLookupStats {
+            shared_queries: 2,
+            shared_hits: 1,
+            shared_misses: 1,
+            shared_published_requests: 1,
+            shared_entries_current: 10,
+            shared_entries_peak: 10,
+            ..PromptLookupStats::default()
+        };
+        counters.store_prompt_lookup_stats(Some(first));
+        counters.reset_stats_baseline(Some(first));
+
+        counters.store_prompt_lookup_stats(Some(PromptLookupStats {
+            shared_queries: 5,
+            shared_hits: 3,
+            shared_misses: 2,
+            shared_published_requests: 2,
+            shared_entries_current: 12,
+            shared_entries_peak: 12,
+            ..PromptLookupStats::default()
+        }));
+
+        let stats = counters
+            .prompt_lookup_published_stats
+            .lock()
+            .expect("PromptLookup published stats")
+            .expect("PromptLookup stats were published");
+        assert_eq!(stats.shared_queries, 5);
+        assert_eq!(stats.shared_hits, 3);
+        assert_eq!(stats.shared_misses, 2);
+        assert_eq!(stats.shared_published_requests, 2);
+        assert_eq!(stats.shared_entries_current, 12);
+        assert_eq!(stats.shared_entries_peak, 12);
     }
 
     #[test]

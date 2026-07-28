@@ -32,6 +32,9 @@ pub(crate) struct SchedulerProfileRuntimeArgs {
     #[arg(long = "prompt-lookup", default_value_t = false)]
     pub(crate) prompt_lookup: bool,
 
+    #[arg(long = "prompt-lookup-cross-request", default_value_t = false)]
+    pub(crate) prompt_lookup_cross_request: bool,
+
     #[arg(long = "prompt-lookup-min-ngram")]
     pub(crate) prompt_lookup_min_ngram: Option<usize>,
 
@@ -94,6 +97,7 @@ impl Default for SchedulerProfileRuntimeArgs {
             mtp_model_dir: None,
             mtp_draft_tokens: None,
             prompt_lookup: false,
+            prompt_lookup_cross_request: false,
             prompt_lookup_min_ngram: None,
             prompt_lookup_max_ngram: None,
             prompt_lookup_max_draft_tokens: None,
@@ -151,7 +155,8 @@ impl SchedulerProfileRuntimeArgs {
             || self.prompt_lookup_max_ngram.is_some()
             || self.prompt_lookup_max_draft_tokens.is_some()
             || self.prompt_lookup_history_window_tokens.is_some()
-            || self.prompt_lookup_max_index_entries.is_some();
+            || self.prompt_lookup_max_index_entries.is_some()
+            || self.prompt_lookup_cross_request;
         if !self.prompt_lookup && has_prompt_lookup_params {
             bail!("prompt lookup source parameters require --prompt-lookup");
         }
@@ -170,6 +175,7 @@ impl SchedulerProfileRuntimeArgs {
                     max_index_entries: self
                         .prompt_lookup_max_index_entries
                         .unwrap_or(defaults.max_index_entries),
+                    cross_request: self.prompt_lookup_cross_request,
                 }
                 .validate()?,
             )
@@ -247,12 +253,13 @@ pub(crate) fn build_scheduler_runtime_context(
             let neural_fingerprint = model_fingerprint(mtp_model_dir, &draft_config)?;
             let source_fingerprint = prompt_lookup.map_or(neural_fingerprint.clone(), |config| {
                 format!(
-                    "neural={neural_fingerprint};lookup=min={};max={};draft={};history={};entries={}",
+                    "neural={neural_fingerprint};lookup=min={};max={};draft={};history={};entries={};cross_request={}",
                     config.min_ngram,
                     config.max_ngram,
                     config.max_draft_tokens,
                     config.history_window_tokens,
-                    config.max_index_entries
+                    config.max_index_entries,
+                    config.cross_request
                 )
             });
             let draft_tokens = crate::core::speculative::resolve_mtp_draft_tokens(
@@ -271,12 +278,13 @@ pub(crate) fn build_scheduler_runtime_context(
         (None, Some(config)) => SchedulerSpeculativeContext {
             mode: SchedulerSpeculativeMode::PromptLookup,
             source_fingerprint: Some(format!(
-                "min={};max={};draft={};history={};entries={}",
+                "min={};max={};draft={};history={};entries={};cross_request={}",
                 config.min_ngram,
                 config.max_ngram,
                 config.max_draft_tokens,
                 config.history_window_tokens,
-                config.max_index_entries
+                config.max_index_entries,
+                config.cross_request
             )),
             draft_tokens: Some(config.max_draft_tokens),
         },
@@ -604,6 +612,7 @@ mod tests {
             max_draft_tokens: 4,
             history_window_tokens: 4096,
             max_index_entries: 8192,
+            cross_request: false,
         };
         let build = |prompt_lookup| {
             build_scheduler_runtime_context(
@@ -656,6 +665,10 @@ mod tests {
             },
             crate::core::prompt_lookup::PromptLookupConfig {
                 max_index_entries: 16384,
+                ..base
+            },
+            crate::core::prompt_lookup::PromptLookupConfig {
+                cross_request: true,
                 ..base
             },
         ] {

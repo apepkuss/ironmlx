@@ -23,6 +23,7 @@ const QUALIFICATION_REJECTED_INITIAL_COOLDOWN_TOKENS: u64 = 512;
 const QUALIFICATION_REJECTED_MAX_COOLDOWN_TOKENS: u64 = 32 * 1_024;
 const QUALIFICATION_REVALIDATE_TOKENS: u64 = 512;
 const QUALIFICATION_PROFILE_TTL_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
+const SHARED_PROMPT_LOOKUP_TTL_MS: u64 = 60 * 60 * 1_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptLookupConfig {
@@ -31,6 +32,9 @@ pub struct PromptLookupConfig {
     pub max_draft_tokens: usize,
     pub history_window_tokens: usize,
     pub max_index_entries: usize,
+    /// Share immutable histories from normally completed requests within one
+    /// model-engine trust domain.
+    pub cross_request: bool,
 }
 
 impl PromptLookupConfig {
@@ -76,6 +80,7 @@ impl Default for PromptLookupConfig {
             max_draft_tokens: Self::DEFAULT_MAX_DRAFT_TOKENS,
             history_window_tokens: Self::DEFAULT_HISTORY_WINDOW_TOKENS,
             max_index_entries: Self::DEFAULT_MAX_INDEX_ENTRIES,
+            cross_request: false,
         }
     }
 }
@@ -131,6 +136,15 @@ pub struct PromptLookupStats {
     pub hybrid_lookup_miss_fallbacks: u64,
     pub hybrid_neural_rebases: u64,
     pub hybrid_neural_rebase_us: u64,
+    pub shared_queries: u64,
+    pub shared_hits: u64,
+    pub shared_misses: u64,
+    pub shared_published_requests: u64,
+    pub shared_published_tokens: u64,
+    pub shared_entries_current: u64,
+    pub shared_entries_peak: u64,
+    pub shared_evictions: u64,
+    pub shared_pressure_evictions: u64,
 }
 
 impl PromptLookupStats {
@@ -236,6 +250,23 @@ impl PromptLookupStats {
             hybrid_neural_rebase_us: self
                 .hybrid_neural_rebase_us
                 .saturating_sub(before.hybrid_neural_rebase_us),
+            shared_queries: self.shared_queries.saturating_sub(before.shared_queries),
+            shared_hits: self.shared_hits.saturating_sub(before.shared_hits),
+            shared_misses: self.shared_misses.saturating_sub(before.shared_misses),
+            shared_published_requests: self
+                .shared_published_requests
+                .saturating_sub(before.shared_published_requests),
+            shared_published_tokens: self
+                .shared_published_tokens
+                .saturating_sub(before.shared_published_tokens),
+            shared_entries_current: self.shared_entries_current,
+            shared_entries_peak: self.shared_entries_peak.max(before.shared_entries_peak),
+            shared_evictions: self
+                .shared_evictions
+                .saturating_sub(before.shared_evictions),
+            shared_pressure_evictions: self
+                .shared_pressure_evictions
+                .saturating_sub(before.shared_pressure_evictions),
         }
     }
 
@@ -336,6 +367,21 @@ impl PromptLookupStats {
         self.hybrid_neural_rebase_us = self
             .hybrid_neural_rebase_us
             .saturating_add(delta.hybrid_neural_rebase_us);
+        self.shared_queries = self.shared_queries.saturating_add(delta.shared_queries);
+        self.shared_hits = self.shared_hits.saturating_add(delta.shared_hits);
+        self.shared_misses = self.shared_misses.saturating_add(delta.shared_misses);
+        self.shared_published_requests = self
+            .shared_published_requests
+            .saturating_add(delta.shared_published_requests);
+        self.shared_published_tokens = self
+            .shared_published_tokens
+            .saturating_add(delta.shared_published_tokens);
+        self.shared_entries_current = delta.shared_entries_current;
+        self.shared_entries_peak = self.shared_entries_peak.max(delta.shared_entries_peak);
+        self.shared_evictions = self.shared_evictions.saturating_add(delta.shared_evictions);
+        self.shared_pressure_evictions = self
+            .shared_pressure_evictions
+            .saturating_add(delta.shared_pressure_evictions);
     }
 }
 
@@ -1345,6 +1391,227 @@ struct IndexLedgerEntry {
 }
 
 #[derive(Debug, Clone)]
+struct SharedPromptLookupCandidate {
+    id: u64,
+    draft: Box<[u32]>,
+    expires_at_ms: u64,
+    last_access: u64,
+}
+
+#[derive(Debug, Clone)]
+struct SharedPromptLookupLedgerEntry {
+    id: u64,
+    key: NgramKey,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SharedPromptLookupPublishResult {
+    pub indexed_tokens: usize,
+    pub evicted_entries: usize,
+}
+
+/// Bounded CPU-only n-gram pool for immutable histories from normally
+/// completed requests. A scheduler instance is the trust-domain boundary.
+#[derive(Debug)]
+pub(crate) struct SharedPromptLookupPool {
+    config: PromptLookupConfig,
+    entries: HashMap<NgramKey, SharedPromptLookupCandidate>,
+    ledger: VecDeque<SharedPromptLookupLedgerEntry>,
+    next_id: u64,
+    access_clock: u64,
+    entries_peak: usize,
+}
+
+impl SharedPromptLookupPool {
+    pub(crate) fn new(config: PromptLookupConfig) -> Result<Self> {
+        let config = config.validate()?;
+        anyhow::ensure!(
+            config.cross_request,
+            "shared PromptLookup pool requires cross_request=true"
+        );
+        Ok(Self {
+            config,
+            entries: HashMap::new(),
+            ledger: VecDeque::new(),
+            next_id: 1,
+            access_clock: 0,
+            entries_peak: 0,
+        })
+    }
+
+    pub(crate) fn config(&self) -> PromptLookupConfig {
+        self.config
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub(crate) fn entries_peak(&self) -> usize {
+        self.entries_peak
+    }
+
+    pub(crate) fn publish_history(&mut self, history: &[u32]) -> SharedPromptLookupPublishResult {
+        let now_ms = unix_time_ms();
+        let mut evicted_entries = self.prune_expired(now_ms);
+        let window_start = history
+            .len()
+            .saturating_sub(self.config.history_window_tokens);
+        for continuation in window_start..history.len() {
+            let draft_end = history
+                .len()
+                .min(continuation.saturating_add(self.config.max_draft_tokens));
+            if continuation == draft_end {
+                continue;
+            }
+            for n in self.config.min_ngram..=self.config.max_ngram {
+                if continuation < n || continuation - n < window_start {
+                    continue;
+                }
+                let key = NgramKey(history[continuation - n..continuation].into());
+                self.insert(key, history[continuation..draft_end].into(), now_ms);
+            }
+        }
+        evicted_entries =
+            evicted_entries.saturating_add(self.reclaim_to(self.config.max_index_entries, now_ms));
+        self.entries_peak = self.entries_peak.max(self.entries.len());
+        self.compact_ledger_if_needed();
+        SharedPromptLookupPublishResult {
+            indexed_tokens: history.len().saturating_sub(window_start),
+            evicted_entries,
+        }
+    }
+
+    pub(crate) fn propose(&mut self, history: &[u32], limit: usize) -> Option<(usize, Vec<u32>)> {
+        let max_draft = limit.min(self.config.max_draft_tokens);
+        if max_draft == 0 {
+            return None;
+        }
+        let now_ms = unix_time_ms();
+        let max_ngram = self.config.max_ngram.min(history.len());
+        for n in (self.config.min_ngram..=max_ngram).rev() {
+            let key = NgramKey(history[history.len() - n..].into());
+            let expired = self
+                .entries
+                .get(&key)
+                .is_some_and(|candidate| candidate.expires_at_ms <= now_ms);
+            if expired {
+                self.entries.remove(&key);
+                continue;
+            }
+            let Some(candidate) = self.entries.get_mut(&key) else {
+                continue;
+            };
+            self.access_clock = self.access_clock.saturating_add(1);
+            self.next_id = self.next_id.saturating_add(1);
+            candidate.id = self.next_id;
+            candidate.last_access = self.access_clock;
+            self.ledger.push_back(SharedPromptLookupLedgerEntry {
+                id: candidate.id,
+                key,
+            });
+            let draft = candidate
+                .draft
+                .iter()
+                .copied()
+                .take(max_draft)
+                .collect::<Vec<_>>();
+            self.compact_ledger_if_needed();
+            return (!draft.is_empty()).then_some((n, draft));
+        }
+        self.compact_ledger_if_needed();
+        None
+    }
+
+    pub(crate) fn reclaim_fraction(&mut self, numerator: usize, denominator: usize) -> usize {
+        let target = self
+            .entries
+            .len()
+            .saturating_mul(numerator)
+            .div_ceil(denominator.max(1));
+        self.reclaim_to(target, unix_time_ms())
+    }
+
+    fn insert(&mut self, key: NgramKey, draft: Box<[u32]>, now_ms: u64) {
+        self.access_clock = self.access_clock.saturating_add(1);
+        self.next_id = self.next_id.saturating_add(1);
+        let id = self.next_id;
+        let candidate = SharedPromptLookupCandidate {
+            id,
+            draft,
+            expires_at_ms: now_ms.saturating_add(SHARED_PROMPT_LOOKUP_TTL_MS),
+            last_access: self.access_clock,
+        };
+        match self.entries.entry(key.clone()) {
+            std::collections::hash_map::Entry::Occupied(mut occupied)
+                if occupied.get().draft.len() > candidate.draft.len() =>
+            {
+                let existing = occupied.get_mut();
+                existing.id = candidate.id;
+                existing.expires_at_ms = candidate.expires_at_ms;
+                existing.last_access = candidate.last_access;
+            }
+            std::collections::hash_map::Entry::Occupied(mut occupied) => {
+                occupied.insert(candidate);
+            }
+            std::collections::hash_map::Entry::Vacant(vacant) => {
+                vacant.insert(candidate);
+            }
+        }
+        self.ledger
+            .push_back(SharedPromptLookupLedgerEntry { id, key });
+    }
+
+    fn prune_expired(&mut self, now_ms: u64) -> usize {
+        let before = self.entries.len();
+        self.entries
+            .retain(|_, candidate| candidate.expires_at_ms > now_ms);
+        before.saturating_sub(self.entries.len())
+    }
+
+    fn reclaim_to(&mut self, target: usize, now_ms: u64) -> usize {
+        let mut evicted = self.prune_expired(now_ms);
+        while self.entries.len() > target {
+            let Some(oldest) = self.ledger.pop_front() else {
+                break;
+            };
+            if self
+                .entries
+                .get(&oldest.key)
+                .is_some_and(|candidate| candidate.id == oldest.id)
+            {
+                self.entries.remove(&oldest.key);
+                evicted = evicted.saturating_add(1);
+            }
+        }
+        self.compact_ledger_if_needed();
+        evicted
+    }
+
+    fn compact_ledger_if_needed(&mut self) {
+        let limit = self.entries.len().saturating_mul(4).saturating_add(1_024);
+        if self.ledger.len() <= limit {
+            return;
+        }
+        let mut current = self
+            .entries
+            .iter()
+            .map(|(key, candidate)| {
+                (
+                    candidate.last_access,
+                    SharedPromptLookupLedgerEntry {
+                        id: candidate.id,
+                        key: key.clone(),
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        current.sort_unstable_by_key(|(last_access, _)| *last_access);
+        self.ledger = current.into_iter().map(|(_, entry)| entry).collect();
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct PromptLookupRowState {
     config: PromptLookupConfig,
     history: Vec<u32>,
@@ -1534,6 +1801,7 @@ mod tests {
             max_draft_tokens: 4,
             history_window_tokens: 64,
             max_index_entries: 64,
+            cross_request: false,
         }
     }
 
@@ -1619,6 +1887,73 @@ mod tests {
         state.validate_committed_tail(4, 4).unwrap();
         assert!(state.validate_committed_tail(3, 4).is_err());
         assert!(state.validate_committed_tail(4, 3).is_err());
+    }
+
+    #[test]
+    fn shared_pool_reuses_only_published_immutable_history() {
+        let config = PromptLookupConfig {
+            cross_request: true,
+            ..cfg()
+        };
+        let mut pool = SharedPromptLookupPool::new(config).unwrap();
+        assert_eq!(pool.propose(&[1, 2, 3], 4), None);
+
+        let published = pool.publish_history(&[1, 2, 3, 4, 5, 6]);
+        assert_eq!(published.indexed_tokens, 6);
+        assert_eq!(pool.propose(&[9, 1, 2, 3], 4), Some((3, vec![4, 5, 6])));
+    }
+
+    #[test]
+    fn shared_pool_enforces_global_entry_cap() {
+        let config = PromptLookupConfig {
+            max_index_entries: 3,
+            cross_request: true,
+            ..cfg()
+        };
+        let mut pool = SharedPromptLookupPool::new(config).unwrap();
+        let published = pool.publish_history(&(0..32).collect::<Vec<_>>());
+        assert!(pool.len() <= config.max_index_entries);
+        assert!(published.evicted_entries > 0);
+    }
+
+    #[test]
+    fn shared_pool_pressure_reclaims_lru_entries() {
+        let config = PromptLookupConfig {
+            cross_request: true,
+            ..cfg()
+        };
+        let mut pool = SharedPromptLookupPool::new(config).unwrap();
+        pool.publish_history(&(0..32).collect::<Vec<_>>());
+        let before = pool.len();
+        let evicted = pool.reclaim_fraction(1, 4);
+        assert!(evicted > 0);
+        assert!(pool.len() <= before.div_ceil(4));
+    }
+
+    #[test]
+    fn shared_pool_prefers_longer_candidate_and_expires_it() {
+        let config = PromptLookupConfig {
+            cross_request: true,
+            ..cfg()
+        };
+        let mut pool = SharedPromptLookupPool::new(config).unwrap();
+        pool.publish_history(&[1, 2, 3, 4, 5, 6]);
+        pool.publish_history(&[9, 1, 2, 3, 7]);
+
+        assert_eq!(
+            pool.propose(&[8, 1, 2, 3], 4),
+            Some((3, vec![4, 5, 6])),
+            "a recent short tail must not replace a longer candidate"
+        );
+
+        let expires_at = pool
+            .entries
+            .values()
+            .map(|candidate| candidate.expires_at_ms)
+            .max()
+            .expect("published entries");
+        assert!(pool.prune_expired(expires_at) > 0);
+        assert_eq!(pool.propose(&[8, 1, 2, 3], 4), None);
     }
 
     #[test]

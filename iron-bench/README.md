@@ -60,7 +60,7 @@ comma-separated; iron-bench iterates `prompt_len × target` cells.
 ## PromptLookup / CopySpec production matrix
 
 `scripts/benchmark_prompt_lookup_matrix.py` is the ironmlx-specific production
-qualification runner for request-local greedy PromptLookup. It keeps the core
+qualification runner for greedy PromptLookup. It keeps the core
 `iron-bench` client engine-neutral while adding the controls that CopySpec needs:
 
 - automatically starts and stops baseline and PromptLookup servers;
@@ -69,7 +69,8 @@ qualification runner for request-local greedy PromptLookup. It keeps the core
 - compares every PromptLookup response with the matching greedy baseline by
   output token-id hash, including distinct request markers under concurrency;
 - captures PromptLookup acceptance/rollback counters, scheduler errors, memory
-  pressure, and request-local index release from `/healthz`;
+  pressure, request-local index release, and optional shared-pool lifecycle
+  counters from `/healthz`;
 - supports balanced ABBA server order, parameter scans, B1/B2/B4/B8, optional
   prefix-cache variants, and JSON/CSV/Markdown artifacts under `/tmp` by default.
 
@@ -84,6 +85,12 @@ parity separate from controlled Scheduler parity.
 Use `--max-sequences 1` to drive concurrent HTTP clients while holding both
 baseline and PromptLookup execution to B1. This is the controlled mode for
 isolating CopySpec from batch-shape sensitivity.
+
+Cross-request lookup is an explicit trust-domain mode. Add `--cross-request`
+only when all requests served by that model engine may safely share immutable
+prompt and completion histories. The shared pool accepts normally completed
+requests only, expires entries after one hour, obeys the configured global
+entry cap, and shrinks under process-memory pressure.
 
 Build and run the short qualification profile:
 

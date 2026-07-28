@@ -140,6 +140,7 @@ class MatrixConfig:
     lookup_configs: Tuple[LookupConfig, ...] = (
         LookupConfig(name="default"),
     )
+    cross_request: bool = False
     include_prefix_cache: bool = False
     balanced: bool = False
     categories: Tuple[str, ...] = tuple()
@@ -509,6 +510,8 @@ def build_serve_command(
                 str(lookup.max_index_entries),
             ]
         )
+        if config.cross_request:
+            cmd.append("--prompt-lookup-cross-request")
     if variant.cache_mode == "prefix":
         cache_dir = variant_dir / "prefix-cache"
         cmd.extend(["--paged-prefix-cache-dir", str(cache_dir)])
@@ -664,6 +667,13 @@ def health_delta(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[str, Any
         "verify_accept_host_sync_us",
         "rollback_count",
         "rollback_us",
+        "shared_queries",
+        "shared_hits",
+        "shared_misses",
+        "shared_published_requests",
+        "shared_published_tokens",
+        "shared_evictions",
+        "shared_pressure_evictions",
     )
     before_lookup = before.get("prompt_lookup") or {}
     after_lookup = after.get("prompt_lookup") or {}
@@ -679,6 +689,10 @@ def health_delta(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[str, Any
             "enabled": bool(after_lookup.get("enabled")),
             "index_entries_current": int(after_lookup.get("index_entries_current") or 0),
             "index_entries_peak": int(after_lookup.get("index_entries_peak") or 0),
+            "shared_entries_current": int(
+                after_lookup.get("shared_entries_current") or 0
+            ),
+            "shared_entries_peak": int(after_lookup.get("shared_entries_peak") or 0),
         }
     )
     before_scheduler = before.get("scheduler") or {}
@@ -967,6 +981,21 @@ def aggregate_rows(
             "lookup_accepted_tokens": sum(item["accepted_tokens"] for item in lookup_deltas),
             "lookup_rejected_tokens": sum(item["rejected_tokens"] for item in lookup_deltas),
             "lookup_rollbacks": sum(item["rollback_count"] for item in lookup_deltas),
+            "shared_queries": sum(item["shared_queries"] for item in lookup_deltas),
+            "shared_hits": sum(item["shared_hits"] for item in lookup_deltas),
+            "shared_misses": sum(item["shared_misses"] for item in lookup_deltas),
+            "shared_published_requests": sum(
+                item["shared_published_requests"] for item in lookup_deltas
+            ),
+            "shared_published_tokens": sum(
+                item["shared_published_tokens"] for item in lookup_deltas
+            ),
+            "shared_evictions": sum(
+                item["shared_evictions"] for item in lookup_deltas
+            ),
+            "shared_pressure_evictions": sum(
+                item["shared_pressure_evictions"] for item in lookup_deltas
+            ),
             "lookup_verify_round_us": verify_round_us,
             "lookup_verify_round_us_per_window": (
                 verify_round_us / verify_sync_count if verify_sync_count else None
@@ -986,6 +1015,12 @@ def aggregate_rows(
             ),
             "index_entries_peak_max": max(
                 (item["index_entries_peak"] for item in lookup_deltas), default=0
+            ),
+            "shared_entries_current_max": max(
+                (item["shared_entries_current"] for item in lookup_deltas), default=0
+            ),
+            "shared_entries_peak_max": max(
+                (item["shared_entries_peak"] for item in lookup_deltas), default=0
             ),
             "server_healthy": all(
                 item["delta"].get("status") == "healthy"
@@ -1781,6 +1816,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> MatrixConfig:
         type=LookupConfig.parse,
         dest="lookup_configs",
     )
+    parser.add_argument(
+        "--cross-request",
+        action="store_true",
+        help="enable trust-domain-local reuse of completed request histories",
+    )
     parser.add_argument("--category", action="append", default=[])
     parser.add_argument("--include-prefix-cache", action="store_true")
     parser.add_argument("--balanced", action="store_true")
@@ -1845,6 +1885,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> MatrixConfig:
         runs=runs,
         warmup_batches=args.warmup_batches,
         lookup_configs=tuple(args.lookup_configs or (LookupConfig(name="default"),)),
+        cross_request=args.cross_request,
         include_prefix_cache=args.include_prefix_cache,
         balanced=balanced,
         categories=tuple(args.category),

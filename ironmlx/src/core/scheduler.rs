@@ -123,6 +123,7 @@ use crate::core::generate::{
 use crate::core::model::Model;
 use crate::core::prompt_lookup::{
     PromptLookupConfig, PromptLookupQualificationRegime, PromptLookupRowState, PromptLookupStats,
+    SharedPromptLookupPool,
 };
 use crate::core::sampler::{draw_uniforms, sample_target_tokens_with_uniforms_batch, Sampler};
 use crate::core::speculative::{
@@ -762,6 +763,7 @@ pub struct ImmutablePrefixBlockStats {
 pub struct MemoryPressureReclaim {
     pub level: crate::core::process_memory::PressureLevel,
     pub immutable_blocks_evicted: usize,
+    pub prompt_lookup_entries_evicted: usize,
     pub demoted_pages: usize,
     pub should_park_request: bool,
 }
@@ -5109,6 +5111,8 @@ pub struct Scheduler<M: Model> {
     gemma4_drafter_state: Option<SchedulerGemma4DrafterState>,
     /// Optional request-local CPU PromptLookup state.
     prompt_lookup_state: Option<SchedulerPromptLookupState>,
+    /// Immutable histories shared only within this model-engine trust domain.
+    shared_prompt_lookup_pool: Option<SharedPromptLookupPool>,
     poisoned: bool,
     /// Upper bound on `prompt_len + max_new_tokens` per request, computed
     /// at boot as `min(cli_max_cache_cap, model.config.max_position_embeddings)`.
@@ -5245,6 +5249,7 @@ impl<M: Model> Scheduler<M> {
             mtp_state: None,
             gemma4_drafter_state: None,
             prompt_lookup_state: None,
+            shared_prompt_lookup_pool: None,
             poisoned: false,
             effective_cap_max,
             prng_state,
@@ -5373,6 +5378,7 @@ impl<M: Model> Scheduler<M> {
             return Ok(MemoryPressureReclaim {
                 level: crate::core::process_memory::PressureLevel::Normal,
                 immutable_blocks_evicted: 0,
+                prompt_lookup_entries_evicted: 0,
                 demoted_pages: 0,
                 should_park_request: false,
             });
@@ -5396,6 +5402,7 @@ impl<M: Model> Scheduler<M> {
         }
 
         let mut immutable_blocks_evicted = 0_usize;
+        let mut prompt_lookup_entries_evicted = 0_usize;
         if snapshot.pressure_level != crate::core::process_memory::PressureLevel::Normal {
             let retain_ratio = match snapshot.pressure_level {
                 crate::core::process_memory::PressureLevel::Normal => unreachable!(),
@@ -5412,6 +5419,21 @@ impl<M: Model> Scheduler<M> {
                     .saturating_mul(retain_ratio.0)
                     .div_ceil(retain_ratio.1);
                 immutable_blocks_evicted = reclaim_idle_immutable_blocks_to(pool, cache, target)?;
+            }
+            if let Some(pool) = self.shared_prompt_lookup_pool.as_mut() {
+                prompt_lookup_entries_evicted =
+                    pool.reclaim_fraction(retain_ratio.0, retain_ratio.1);
+                if let Some(state) = self.prompt_lookup_state.as_mut() {
+                    state.stats.shared_evictions = state
+                        .stats
+                        .shared_evictions
+                        .saturating_add(prompt_lookup_entries_evicted as u64);
+                    state.stats.shared_pressure_evictions = state
+                        .stats
+                        .shared_pressure_evictions
+                        .saturating_add(prompt_lookup_entries_evicted as u64);
+                    state.stats.shared_entries_current = pool.len() as u64;
+                }
             }
         }
 
@@ -5439,7 +5461,10 @@ impl<M: Model> Scheduler<M> {
                 "memory governor evicted idle immutable FullPaged blocks"
             );
         }
-        let refreshed = if immutable_blocks_evicted > 0 || demoted_pages > 0 {
+        let refreshed = if immutable_blocks_evicted > 0
+            || prompt_lookup_entries_evicted > 0
+            || demoted_pages > 0
+        {
             governor.refresh_process()
         } else {
             snapshot
@@ -5456,6 +5481,7 @@ impl<M: Model> Scheduler<M> {
         Ok(MemoryPressureReclaim {
             level: refreshed.pressure_level,
             immutable_blocks_evicted,
+            prompt_lookup_entries_evicted,
             demoted_pages,
             should_park_request: refreshed.pressure_level.rank()
                 >= crate::core::process_memory::PressureLevel::Hard.rank()
@@ -6557,10 +6583,23 @@ impl<M: Model> Scheduler<M> {
             .iter()
             .position(|s| matches!(s, Some(r) if r.id == id))
             .ok_or_else(|| anyhow!("request id {} not found", id.0))?;
+        let completed_history = self.slots[row_idx]
+            .as_ref()
+            .filter(|state| state.finished)
+            .map(|state| {
+                let mut history =
+                    Vec::with_capacity(state.prompt_ids.len() + state.generated_tokens.len());
+                history.extend_from_slice(&state.prompt_ids);
+                history.extend_from_slice(&state.generated_tokens);
+                history
+            });
         if let Some(table) = self.request_block_tables.get(&id).copied() {
             if let Some(cache) = self.cache.as_mut() {
                 release_full_paged_cache_owner(cache, table.owner)?;
             }
+        }
+        if let Some(history) = completed_history.as_deref() {
+            self.publish_shared_prompt_lookup_history(history);
         }
         self.request_block_tables.remove(&id);
         // B1-p2.5: release budget before clearing the slot.
@@ -6576,7 +6615,14 @@ impl<M: Model> Scheduler<M> {
         if self.active_count() == 0 {
             self.mtp_state = None;
             self.gemma4_drafter_state = None;
-            self.prompt_lookup_state = None;
+            if self.shared_prompt_lookup_pool.is_some() {
+                if let Some(state) = self.prompt_lookup_state.as_mut() {
+                    state.rows.clear();
+                    Self::refresh_prompt_lookup_index_stats(state);
+                }
+            } else {
+                self.prompt_lookup_state = None;
+            }
             if self.phase == Phase::Admitting {
                 self.phase = Phase::Idle;
             } else if self.phase == Phase::Decoding {
@@ -7191,13 +7237,19 @@ impl<M: Model> Scheduler<M> {
                 ));
             }
         }
-        for slot in self.slots.iter_mut() {
-            // B1-p2.5: release budget before clearing slot.
-            if let Some(state) = slot.take() {
-                self.budget_state.release(state.kv_bytes_admitted);
-            }
-        }
-        self.governor_admission_reservations.clear();
+        let completed_histories = self
+            .slots
+            .iter()
+            .flatten()
+            .filter(|state| state.finished)
+            .map(|state| {
+                let mut history =
+                    Vec::with_capacity(state.prompt_ids.len() + state.generated_tokens.len());
+                history.extend_from_slice(&state.prompt_ids);
+                history.extend_from_slice(&state.generated_tokens);
+                history
+            })
+            .collect::<Vec<_>>();
         let owners = self
             .request_block_tables
             .values()
@@ -7208,6 +7260,16 @@ impl<M: Model> Scheduler<M> {
                 release_full_paged_cache_owner(cache, owner)?;
             }
         }
+        for history in &completed_histories {
+            self.publish_shared_prompt_lookup_history(history);
+        }
+        for slot in self.slots.iter_mut() {
+            // B1-p2.5: release budget before clearing slot.
+            if let Some(state) = slot.take() {
+                self.budget_state.release(state.kv_bytes_admitted);
+            }
+        }
+        self.governor_admission_reservations.clear();
         self.request_block_tables.clear();
         if self
             .immutable_prefix_blocks
@@ -7219,7 +7281,14 @@ impl<M: Model> Scheduler<M> {
         self.cache_rows.clear();
         self.mtp_state = None;
         self.gemma4_drafter_state = None;
-        self.prompt_lookup_state = None;
+        if self.shared_prompt_lookup_pool.is_some() {
+            if let Some(state) = self.prompt_lookup_state.as_mut() {
+                state.rows.clear();
+                Self::refresh_prompt_lookup_index_stats(state);
+            }
+        } else {
+            self.prompt_lookup_state = None;
+        }
         self.phase = Phase::Idle;
         self.poisoned = false;
         Ok(())
@@ -7236,7 +7305,15 @@ impl<M: Model> Scheduler<M> {
     }
 
     pub fn prompt_lookup_stats(&self) -> Option<PromptLookupStats> {
-        self.prompt_lookup_state.as_ref().map(|state| state.stats)
+        self.prompt_lookup_state.as_ref().map(|state| {
+            let mut stats = state.stats;
+            if let Some(pool) = self.shared_prompt_lookup_pool.as_ref() {
+                stats.shared_entries_current = pool.len() as u64;
+                stats.shared_entries_peak =
+                    stats.shared_entries_peak.max(pool.entries_peak() as u64);
+            }
+            stats
+        })
     }
 
     pub fn prompt_lookup_can_start_rolling_mid_admit(&self) -> bool {
@@ -7308,6 +7385,17 @@ impl<M: Model> Scheduler<M> {
 
     pub fn initialize_prompt_lookup_for_active(&mut self, cfg: PromptLookupConfig) -> Result<()> {
         let cfg = cfg.validate()?;
+        if cfg.cross_request {
+            match self.shared_prompt_lookup_pool.as_ref() {
+                Some(pool) => anyhow::ensure!(
+                    pool.config() == cfg,
+                    "cross-request PromptLookup config changed while scheduler is active"
+                ),
+                None => {
+                    self.shared_prompt_lookup_pool = Some(SharedPromptLookupPool::new(cfg)?);
+                }
+            }
+        }
         let mut rows = HashMap::new();
         for (row_idx, slot) in self.slots.iter().enumerate() {
             let Some(_state) = slot.as_ref().filter(|state| !state.finished) else {
@@ -7323,10 +7411,19 @@ impl<M: Model> Scheduler<M> {
                 },
             );
         }
-        let mut state = SchedulerPromptLookupState {
-            cfg,
-            rows,
-            stats: PromptLookupStats::default(),
+        let mut state = if let Some(mut state) = self.prompt_lookup_state.take() {
+            anyhow::ensure!(
+                state.cfg == cfg,
+                "prompt lookup config changed while scheduler is active"
+            );
+            state.rows = rows;
+            state
+        } else {
+            SchedulerPromptLookupState {
+                cfg,
+                rows,
+                stats: PromptLookupStats::default(),
+            }
         };
         Self::refresh_prompt_lookup_index_stats(&mut state);
         self.prompt_lookup_state = Some(state);
@@ -7369,6 +7466,30 @@ impl<M: Model> Scheduler<M> {
         );
         Self::refresh_prompt_lookup_index_stats(prompt_lookup);
         Ok(())
+    }
+
+    fn publish_shared_prompt_lookup_history(&mut self, history: &[u32]) {
+        let Some(pool) = self.shared_prompt_lookup_pool.as_mut() else {
+            return;
+        };
+        let result = pool.publish_history(history);
+        if let Some(state) = self.prompt_lookup_state.as_mut() {
+            state.stats.shared_published_requests =
+                state.stats.shared_published_requests.saturating_add(1);
+            state.stats.shared_published_tokens = state
+                .stats
+                .shared_published_tokens
+                .saturating_add(result.indexed_tokens as u64);
+            state.stats.shared_evictions = state
+                .stats
+                .shared_evictions
+                .saturating_add(result.evicted_entries as u64);
+            state.stats.shared_entries_current = pool.len() as u64;
+            state.stats.shared_entries_peak = state
+                .stats
+                .shared_entries_peak
+                .max(pool.entries_peak() as u64);
+        }
     }
 
     pub fn prepare_prompt_lookup_batch_window(&mut self) -> Result<bool> {
@@ -7855,7 +7976,7 @@ impl<M: Model> Scheduler<M> {
     }
 
     fn prepare_prompt_lookup_rows(
-        &self,
+        &mut self,
         rows_to_prepare: &[usize],
         stats: &mut PromptLookupStats,
         row_states: &mut HashMap<usize, SchedulerPromptLookupRowState>,
@@ -7907,6 +8028,25 @@ impl<M: Model> Scheduler<M> {
             stats.queries = stats.queries.saturating_add(1);
             let propose_start = Instant::now();
             let proposal = lookup.propose(remaining.saturating_sub(1));
+            let proposal = if proposal.is_none() && row_state.cfg.cross_request {
+                stats.shared_queries = stats.shared_queries.saturating_add(1);
+                let shared = self
+                    .shared_prompt_lookup_pool
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("cross-request PromptLookup pool is not initialized"))?;
+                match shared.propose(lookup.history(), remaining.saturating_sub(1)) {
+                    Some(proposal) => {
+                        stats.shared_hits = stats.shared_hits.saturating_add(1);
+                        Some(proposal)
+                    }
+                    None => {
+                        stats.shared_misses = stats.shared_misses.saturating_add(1);
+                        None
+                    }
+                }
+            } else {
+                proposal
+            };
             add_elapsed_us(&mut stats.propose_us, propose_start);
             row_state.prepared_draft_tokens = Some(if let Some((_ngram, tokens)) = proposal {
                 stats.hits = stats.hits.saturating_add(1);
@@ -13805,6 +13945,19 @@ impl<M: Model> Scheduler<M> {
                     .map(|state| state.id)
             })
             .collect::<Vec<_>>();
+        let completed_histories = self
+            .slots
+            .iter()
+            .flatten()
+            .filter(|state| state.finished)
+            .map(|state| {
+                let mut history =
+                    Vec::with_capacity(state.prompt_ids.len() + state.generated_tokens.len());
+                history.extend_from_slice(&state.prompt_ids);
+                history.extend_from_slice(&state.generated_tokens);
+                history
+            })
+            .collect::<Vec<_>>();
         for id in finished_ids {
             if let Some(table) = self.request_block_tables.get(&id).copied() {
                 if let Some(cache) = self.cache.as_mut() {
@@ -13812,6 +13965,9 @@ impl<M: Model> Scheduler<M> {
                 }
             }
             self.request_block_tables.remove(&id);
+        }
+        for history in &completed_histories {
+            self.publish_shared_prompt_lookup_history(history);
         }
         for (row_idx, slot) in self.slots.iter_mut().enumerate() {
             if slot.as_ref().is_some_and(|s| s.finished) {
@@ -18601,7 +18757,270 @@ mod tests {
             max_draft_tokens: 4,
             history_window_tokens: 64,
             max_index_entries: 64,
+            cross_request: false,
         }
+    }
+
+    fn cross_request_prompt_lookup_cfg() -> PromptLookupConfig {
+        PromptLookupConfig {
+            cross_request: true,
+            ..prompt_lookup_cfg()
+        }
+    }
+
+    #[test]
+    fn cross_request_prompt_lookup_publishes_only_normally_completed_requests() {
+        let mut scheduler =
+            TestScheduler::new(1, 32768, crate::core::memory_budget::test_meta_qwen35())
+                .expect("scheduler startup");
+        let cfg = cross_request_prompt_lookup_cfg();
+
+        let completed = scheduler
+            .admit(mk_req(vec![1, 2, 3]))
+            .expect("admit completed request");
+        scheduler
+            .initialize_prompt_lookup_for_active(cfg)
+            .expect("initialize shared PromptLookup");
+        {
+            let state = scheduler.get_mut(completed).expect("completed state");
+            state.generated_tokens = vec![4, 5, 6];
+            state.finished = true;
+            state.finish_reason = Some("length");
+        }
+        scheduler
+            .evict(completed)
+            .expect("release completed request");
+
+        let pool = scheduler
+            .shared_prompt_lookup_pool
+            .as_mut()
+            .expect("shared PromptLookup pool");
+        assert_eq!(
+            pool.propose(&[9, 1, 2, 3], cfg.max_draft_tokens),
+            Some((3, vec![4, 5, 6]))
+        );
+        let stats = scheduler.prompt_lookup_stats().expect("shared stats");
+        assert_eq!(stats.shared_published_requests, 1);
+        assert_eq!(stats.shared_published_tokens, 6);
+        assert!(stats.shared_entries_current > 0);
+
+        let cancelled = scheduler
+            .admit(mk_req(vec![10, 11, 12]))
+            .expect("admit cancelled request");
+        scheduler
+            .initialize_prompt_lookup_for_active(cfg)
+            .expect("restore shared PromptLookup state");
+        scheduler
+            .get_mut(cancelled)
+            .expect("cancelled state")
+            .generated_tokens = vec![13, 14, 15];
+        scheduler
+            .evict(cancelled)
+            .expect("release cancelled request");
+
+        let pool = scheduler
+            .shared_prompt_lookup_pool
+            .as_mut()
+            .expect("shared PromptLookup pool");
+        assert_eq!(
+            pool.propose(&[9, 10, 11, 12], cfg.max_draft_tokens),
+            None,
+            "cancelled request history must not become shared"
+        );
+        assert_eq!(
+            scheduler
+                .prompt_lookup_stats()
+                .expect("shared stats")
+                .shared_published_requests,
+            1
+        );
+    }
+
+    #[test]
+    fn cross_request_prompt_lookup_evict_all_publishes_only_completed_rows() {
+        let mut scheduler =
+            TestScheduler::new(2, 32768, crate::core::memory_budget::test_meta_qwen35())
+                .expect("scheduler startup");
+        let cfg = cross_request_prompt_lookup_cfg();
+        let completed = scheduler
+            .admit(mk_req(vec![1, 2, 3]))
+            .expect("admit completed request");
+        let cancelled = scheduler
+            .admit(mk_req(vec![10, 11, 12]))
+            .expect("admit cancelled request");
+        scheduler
+            .initialize_prompt_lookup_for_active(cfg)
+            .expect("initialize shared PromptLookup");
+        {
+            let state = scheduler.get_mut(completed).expect("completed state");
+            state.generated_tokens = vec![4, 5, 6];
+            state.finished = true;
+            state.finish_reason = Some("length");
+        }
+        scheduler
+            .get_mut(cancelled)
+            .expect("cancelled state")
+            .generated_tokens = vec![13, 14, 15];
+
+        scheduler.evict_all().expect("release batch");
+
+        let pool = scheduler
+            .shared_prompt_lookup_pool
+            .as_mut()
+            .expect("shared PromptLookup pool");
+        assert_eq!(
+            pool.propose(&[9, 1, 2, 3], cfg.max_draft_tokens),
+            Some((3, vec![4, 5, 6]))
+        );
+        assert_eq!(pool.propose(&[9, 10, 11, 12], cfg.max_draft_tokens), None);
+        assert_eq!(
+            scheduler
+                .prompt_lookup_stats()
+                .expect("shared stats")
+                .shared_published_requests,
+            1
+        );
+    }
+
+    #[test]
+    fn cross_request_prompt_lookup_gc_publishes_completed_rows_before_slot_release() {
+        let mut scheduler =
+            TestScheduler::new(1, 32768, crate::core::memory_budget::test_meta_qwen35())
+                .expect("scheduler startup");
+        let cfg = cross_request_prompt_lookup_cfg();
+        let completed = scheduler
+            .admit(mk_req(vec![1, 2, 3]))
+            .expect("admit completed request");
+        scheduler
+            .initialize_prompt_lookup_for_active(cfg)
+            .expect("initialize shared PromptLookup");
+        {
+            let state = scheduler.get_mut(completed).expect("completed state");
+            state.generated_tokens = vec![4, 5, 6];
+            state.finished = true;
+            state.finish_reason = Some("length");
+        }
+        scheduler.force_phase(Phase::Decoding);
+
+        let mut event_txs = HashMap::new();
+        let (tx, _rx) = mpsc::unbounded_channel::<StepEvent>();
+        event_txs.insert(completed, tx);
+        let evicted = scheduler
+            .gc_finished_rows(&mut event_txs)
+            .expect("gc completed request");
+
+        assert_eq!(evicted, vec![completed]);
+        assert_eq!(scheduler.active_count(), 0);
+        assert!(event_txs.is_empty());
+        let pool = scheduler
+            .shared_prompt_lookup_pool
+            .as_mut()
+            .expect("shared PromptLookup pool");
+        assert_eq!(
+            pool.propose(&[9, 1, 2, 3], cfg.max_draft_tokens),
+            Some((3, vec![4, 5, 6]))
+        );
+        assert_eq!(
+            scheduler
+                .prompt_lookup_stats()
+                .expect("shared stats")
+                .shared_published_requests,
+            1
+        );
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn cross_request_prompt_lookup_memory_governor_reclaims_shared_entries() {
+        use crate::core::process_memory::{
+            HostVmStatistics, MemoryGovernorConfig, MemoryTelemetry, PressureLevel,
+            ProcessMemoryGovernor,
+        };
+
+        let gib = 1024 * 1024 * 1024;
+        let governor = Arc::new(
+            ProcessMemoryGovernor::new(MemoryGovernorConfig {
+                static_reserve_bytes: 4 * gib,
+                promotion_samples: 1,
+                recovery_samples: 1,
+                poll_interval: std::time::Duration::from_secs(3600),
+                telemetry_stale_after: std::time::Duration::from_secs(7200),
+                ..MemoryGovernorConfig::default()
+            })
+            .expect("governor"),
+        );
+        let telemetry = |usage| MemoryTelemetry {
+            total_ram_bytes: 32 * gib,
+            phys_footprint_bytes: Some(usage),
+            vm: Some(HostVmStatistics {
+                free_bytes: 8 * gib,
+                inactive_bytes: 2 * gib,
+                active_bytes: 8 * gib,
+                wired_bytes: 8 * gib,
+            }),
+            mlx_active_bytes: Some(usage),
+            mlx_cache_bytes: Some(0),
+            metal_limit_bytes: Some(24 * gib),
+        };
+        governor.update(telemetry(4 * gib));
+
+        let mut scheduler =
+            TestScheduler::new(1, 32768, crate::core::memory_budget::test_meta_qwen35())
+                .expect("scheduler startup");
+        scheduler.process_memory_governor = Some(Arc::clone(&governor));
+        let cfg = cross_request_prompt_lookup_cfg();
+        let completed = scheduler
+            .admit(mk_req(vec![1, 2, 3, 4, 5, 6]))
+            .expect("admit completed request");
+        scheduler
+            .initialize_prompt_lookup_for_active(cfg)
+            .expect("initialize shared PromptLookup");
+        {
+            let state = scheduler.get_mut(completed).expect("completed state");
+            state.generated_tokens = vec![7, 8, 9, 10];
+            state.finished = true;
+            state.finish_reason = Some("length");
+        }
+        scheduler
+            .evict(completed)
+            .expect("publish completed request");
+        let entries_before = scheduler
+            .shared_prompt_lookup_pool
+            .as_ref()
+            .expect("shared PromptLookup pool")
+            .len();
+        assert!(entries_before > 4);
+
+        let mut level = governor.update(telemetry(23 * gib)).pressure_level;
+        if level == PressureLevel::Soft {
+            level = governor.update(telemetry(23 * gib)).pressure_level;
+        }
+        assert_eq!(level, PressureLevel::Hard);
+        let reclaim = scheduler
+            .apply_process_memory_pressure()
+            .expect("apply hard pressure");
+        let entries_after = scheduler
+            .shared_prompt_lookup_pool
+            .as_ref()
+            .expect("shared PromptLookup pool")
+            .len();
+        let expected_entries = entries_before.div_ceil(4);
+
+        assert_eq!(entries_after, expected_entries);
+        assert_eq!(
+            reclaim.prompt_lookup_entries_evicted,
+            entries_before - entries_after
+        );
+        let stats = scheduler.prompt_lookup_stats().expect("shared stats");
+        assert_eq!(stats.shared_entries_current, entries_after as u64);
+        assert_eq!(
+            stats.shared_pressure_evictions,
+            reclaim.prompt_lookup_entries_evicted as u64
+        );
+        assert_eq!(
+            stats.shared_evictions,
+            reclaim.prompt_lookup_entries_evicted as u64
+        );
     }
 
     #[test]

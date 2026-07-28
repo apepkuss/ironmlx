@@ -162,6 +162,11 @@ pub struct ServeArgs {
     #[arg(long = "prompt-lookup", default_value_t = false)]
     pub prompt_lookup: bool,
 
+    /// Reuse immutable histories from normally completed requests in this
+    /// model-engine trust domain. The server must not mix untrusted tenants.
+    #[arg(long = "prompt-lookup-cross-request", default_value_t = false)]
+    pub prompt_lookup_cross_request: bool,
+
     /// Minimum n-gram length considered by --prompt-lookup.
     #[arg(long = "prompt-lookup-min-ngram")]
     pub prompt_lookup_min_ngram: Option<usize>,
@@ -412,7 +417,8 @@ fn resolve_prompt_lookup_config(
         || args.prompt_lookup_max_ngram.is_some()
         || args.prompt_lookup_max_draft_tokens.is_some()
         || args.prompt_lookup_history_window_tokens.is_some()
-        || args.prompt_lookup_max_index_entries.is_some();
+        || args.prompt_lookup_max_index_entries.is_some()
+        || args.prompt_lookup_cross_request;
     if !args.prompt_lookup {
         if has_source_params {
             bail!("prompt lookup source parameters require --prompt-lookup");
@@ -433,6 +439,7 @@ fn resolve_prompt_lookup_config(
             max_index_entries: args
                 .prompt_lookup_max_index_entries
                 .unwrap_or(defaults.max_index_entries),
+            cross_request: args.prompt_lookup_cross_request,
         }
         .validate()?,
     ))
@@ -1089,7 +1096,8 @@ where
             max_draft_tokens = cfg.max_draft_tokens,
             history_window_tokens = cfg.history_window_tokens,
             max_index_entries = cfg.max_index_entries,
-            "ironmlx serve: request-local PromptLookup enabled"
+            cross_request = cfg.cross_request,
+            "ironmlx serve: PromptLookup enabled"
         );
         runtime.block_on(server::serve_with_prompt_lookup(
             model,
@@ -1941,6 +1949,7 @@ mod scheduler_profile_tests {
             prompt_lookup_max_draft_tokens: None,
             prompt_lookup_history_window_tokens: None,
             prompt_lookup_max_index_entries: None,
+            prompt_lookup_cross_request: false,
             kv_quant: KvQuantArg::None,
             paged_prefix_cache_dir: None,
             paged_prefix_cache_block_size:
@@ -2149,6 +2158,7 @@ mod scheduler_profile_tests {
             max_draft_tokens: 3,
             history_window_tokens: 4096,
             max_index_entries: 8192,
+            cross_request: true,
         };
         let manifest_model = EngineModelManifest {
             id: "qwen-prompt-lookup".to_string(),
@@ -2493,12 +2503,29 @@ mod scheduler_profile_tests {
     #[test]
     fn serve_prompt_lookup_requires_explicit_source_enablement() {
         let mut args = base_args();
-        args.prompt_lookup_max_draft_tokens = Some(3);
+        args.prompt_lookup_cross_request = true;
 
         let error = resolve_prompt_lookup_config(&args).expect_err("source must be enabled");
         assert!(error
             .to_string()
             .contains("source parameters require --prompt-lookup"));
+    }
+
+    #[test]
+    fn serve_prompt_lookup_cross_request_is_explicit_opt_in() {
+        let mut args = base_args();
+        args.prompt_lookup = true;
+
+        let local = resolve_prompt_lookup_config(&args)
+            .expect("resolve local PromptLookup")
+            .expect("PromptLookup config");
+        assert!(!local.cross_request);
+
+        args.prompt_lookup_cross_request = true;
+        let shared = resolve_prompt_lookup_config(&args)
+            .expect("resolve cross-request PromptLookup")
+            .expect("PromptLookup config");
+        assert!(shared.cross_request);
     }
 
     #[test]

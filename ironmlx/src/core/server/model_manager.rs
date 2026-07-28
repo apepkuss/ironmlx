@@ -1853,7 +1853,8 @@ mod tests {
                 "max_ngram": 5,
                 "max_draft_tokens": 3,
                 "history_window_tokens": 4096,
-                "max_index_entries": 8192
+                "max_index_entries": 8192,
+                "cross_request": true
             }
         }))
         .expect("load request");
@@ -1866,6 +1867,7 @@ mod tests {
                 max_draft_tokens: 3,
                 history_window_tokens: 4096,
                 max_index_entries: 8192,
+                cross_request: true,
             })
         );
     }
@@ -1886,7 +1888,8 @@ mod tests {
                 "max_ngram": 5,
                 "max_draft_tokens": 3,
                 "history_window_tokens": 4096,
-                "max_index_entries": 8192
+                "max_index_entries": 8192,
+                "cross_request": true
             }
         }))
         .expect("load request");
@@ -2277,6 +2280,7 @@ mod tests {
             prompt_lookup_max_draft_tokens: None,
             prompt_lookup_history_window_tokens: None,
             prompt_lookup_max_index_entries: None,
+            prompt_lookup_cross_request: false,
             kv_quant: crate::cli::KvQuantArg::None,
             paged_prefix_cache_dir: None,
             paged_prefix_cache_block_size:
