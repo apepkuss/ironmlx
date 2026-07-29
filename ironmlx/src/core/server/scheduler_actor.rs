@@ -633,6 +633,7 @@ impl SchedulerActorMtpCounters {
         stats.qualification_profile_loads = qualification.profile_loads;
         stats.qualification_profile_writes = qualification.profile_writes;
         stats.qualification_profile_write_drops = qualification.profile_write_drops;
+        stats.qualification_query_gate_skips = qualification.query_gate_skips;
     }
 
     fn store_prompt_lookup_hybrid_stats(&self, hybrid: PromptLookupHybridStats) {
@@ -721,6 +722,28 @@ struct SchedulerActorPromptLookup {
     defer_speculation_once: bool,
     cost_controller: PromptLookupCostController,
     measured_cycle: Option<PromptLookupMeasuredCycle>,
+    query_hint: Option<PromptLookupQueryHint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PromptLookupQueryScope {
+    base_regime: PromptLookupQualificationRegime,
+    owners: Vec<RequestId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PromptLookupQueryHint {
+    scope: PromptLookupQueryScope,
+    proposal_regime: PromptLookupQualificationRegime,
+}
+
+impl PromptLookupQueryHint {
+    fn proposal_regime_for(
+        &self,
+        scope: &PromptLookupQueryScope,
+    ) -> Option<PromptLookupQualificationRegime> {
+        (self.scope == *scope).then_some(self.proposal_regime)
+    }
 }
 
 fn prompt_lookup_admission_forces_ordinary(
@@ -935,6 +958,7 @@ impl SchedulerActorPromptLookup {
             defer_speculation_once: false,
             cost_controller: PromptLookupCostController::new(qualification)?,
             measured_cycle: None,
+            query_hint: None,
         })
     }
 
@@ -956,6 +980,18 @@ impl SchedulerActorPromptLookup {
     ) -> Result<PromptLookupWindowDecision> {
         let stats_before = sched.prompt_lookup_stats().unwrap_or_default();
         let base_regime = sched.prompt_lookup_qualification_regime();
+        let query_scope = base_regime.map(|base_regime| PromptLookupQueryScope {
+            base_regime,
+            owners: sched.prompt_lookup_active_request_ids(),
+        });
+        let hinted_regime = query_scope.as_ref().and_then(|scope| {
+            self.query_hint
+                .as_ref()
+                .and_then(|hint| hint.proposal_regime_for(scope))
+        });
+        if hinted_regime.is_none() {
+            self.query_hint = None;
+        }
         if force_ordinary {
             sched.discard_prepared_prompt_lookup_window();
             return Ok(PromptLookupWindowDecision {
@@ -965,6 +1001,19 @@ impl SchedulerActorPromptLookup {
                 stats_before,
                 fallback_to_baseline: false,
             });
+        }
+        if let Some(regime) = hinted_regime {
+            if self.cost_controller.next_action(regime) == PromptLookupCostAction::Ordinary {
+                self.cost_controller.record_query_gate_skip();
+                sched.discard_prepared_prompt_lookup_window();
+                return Ok(PromptLookupWindowDecision {
+                    action: PromptLookupCostAction::Ordinary,
+                    regime: Some(regime),
+                    proposal_elapsed_ns: 0,
+                    stats_before,
+                    fallback_to_baseline: false,
+                });
+            }
         }
 
         let proposal_started = Instant::now();
@@ -977,6 +1026,7 @@ impl SchedulerActorPromptLookup {
             .then(|| sched.prompt_lookup_prepared_qualification_regime())
             .flatten()
         else {
+            self.query_hint = None;
             sched.discard_prepared_prompt_lookup_window();
             return Ok(PromptLookupWindowDecision {
                 action: PromptLookupCostAction::Ordinary,
@@ -986,6 +1036,10 @@ impl SchedulerActorPromptLookup {
                 fallback_to_baseline: true,
             });
         };
+        self.query_hint = query_scope.map(|scope| PromptLookupQueryHint {
+            scope,
+            proposal_regime: regime,
+        });
         if !sched.prompt_lookup_prepared_window_verify_eligible(model, capture_accepted_hidden)? {
             self.cost_controller.record_lookup_ineligible(regime);
             sched.discard_prepared_prompt_lookup_window();
@@ -1207,6 +1261,7 @@ where
         let events = sched.prefill_admitted_prompt_lookup(model, self.cfg)?;
         self.defer_speculation_once = true;
         self.measured_cycle = None;
+        self.query_hint = None;
         self.publish_stats(sched, counters);
         Ok(events)
     }
@@ -1324,6 +1379,7 @@ where
         sched.register_prompt_lookup_request(result.0, self.cfg)?;
         self.defer_speculation_once = true;
         self.measured_cycle = None;
+        self.query_hint = None;
         self.publish_stats(sched, counters);
         Ok(result)
     }
@@ -1590,6 +1646,7 @@ where
         self.lookup_window_canonical = false;
         self.measured_cycle = None;
         self.lookup_episode = None;
+        self.prompt_lookup.query_hint = None;
         self.prompt_lookup.publish_stats(sched, counters);
         counters.store_prompt_lookup_hybrid_stats(self.stats);
         Ok(events)
@@ -1872,6 +1929,7 @@ where
         self.lookup_window_canonical = false;
         self.measured_cycle = None;
         self.lookup_episode = None;
+        self.prompt_lookup.query_hint = None;
         self.prompt_lookup.publish_stats(sched, counters);
         counters.store_prompt_lookup_hybrid_stats(self.stats);
         Ok(result)
@@ -2127,6 +2185,7 @@ impl SchedulerActorMtpMode<crate::models::Gemma4Model> for SchedulerActorGemma4P
             self.neural_dirty = false;
             self.measured_cycle = None;
             self.lookup_episode = None;
+            self.prompt_lookup.query_hint = None;
             self.prompt_lookup.publish_stats(sched, counters);
             counters.store_prompt_lookup_hybrid_stats(self.stats);
         }
@@ -2338,6 +2397,7 @@ impl SchedulerActorMtpMode<crate::models::Gemma4Model> for SchedulerActorGemma4P
         self.current_source = Some(HybridDraftSource::Neural);
         self.measured_cycle = None;
         self.lookup_episode = None;
+        self.prompt_lookup.query_hint = None;
         self.prompt_lookup.publish_stats(sched, counters);
         counters.store_prompt_lookup_hybrid_stats(self.stats);
         Ok(result)
@@ -5909,6 +5969,147 @@ mod tests {
     }
 
     #[test]
+    fn prompt_lookup_query_hint_is_bound_to_base_regime_and_request_owners() {
+        let base = PromptLookupQualificationRegime::new(2, 1024, Sampler::greedy());
+        let scope = PromptLookupQueryScope {
+            base_regime: base,
+            owners: vec![RequestId(11), RequestId(12)],
+        };
+        let proposal_regime = base.with_proposal(PromptLookupProposalSource::Shared, 4);
+        let hint = PromptLookupQueryHint {
+            scope: scope.clone(),
+            proposal_regime,
+        };
+
+        assert_eq!(hint.proposal_regime_for(&scope), Some(proposal_regime));
+        assert_eq!(
+            hint.proposal_regime_for(&PromptLookupQueryScope {
+                base_regime: PromptLookupQualificationRegime::new(2, 8193, Sampler::greedy()),
+                owners: scope.owners.clone(),
+            }),
+            None
+        );
+        assert_eq!(
+            hint.proposal_regime_for(&PromptLookupQueryScope {
+                base_regime: base,
+                owners: vec![RequestId(11), RequestId(13)],
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn prompt_lookup_query_gate_skips_repeated_baseline_proposal_search() {
+        let profile_path = std::env::temp_dir().join(format!(
+            "ironmlx-query-gate-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        let qualification =
+            PromptLookupQualificationRuntimeConfig::for_test("query-gate", profile_path.clone());
+        let cfg = PromptLookupConfig {
+            min_ngram: 2,
+            max_ngram: 3,
+            max_draft_tokens: 3,
+            history_window_tokens: 64,
+            max_index_entries: 128,
+            cross_request: false,
+        };
+        let mut mode = SchedulerActorPromptLookup::new(cfg, qualification).expect("lookup mode");
+        let mut scheduler = Scheduler::<SchedulerActorFakeModel>::new(
+            1,
+            32,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler");
+        let mut request = mk_req(1);
+        request.prompt_ids = vec![1, 2, 3, 4, 1, 2];
+        scheduler.admit(request).expect("admit");
+        let counters = test_mtp_counters();
+        mode.prefill_admitted(&mut scheduler, &SchedulerActorFakeModel, &counters)
+            .expect("prefill");
+
+        let first = mode
+            .select_prepared_window(
+                &mut scheduler,
+                &SchedulerActorFakeModel,
+                false,
+                false,
+                false,
+                false,
+            )
+            .expect("first proposal");
+        assert_eq!(first.action, PromptLookupCostAction::Ordinary);
+        assert!(first.regime.is_some_and(|regime| {
+            regime.proposal_source == Some(PromptLookupProposalSource::Local)
+        }));
+        let queries_after_first = scheduler
+            .prompt_lookup_stats()
+            .expect("lookup stats")
+            .queries;
+        assert_eq!(queries_after_first, 1);
+
+        let second = mode
+            .select_prepared_window(
+                &mut scheduler,
+                &SchedulerActorFakeModel,
+                false,
+                false,
+                false,
+                false,
+            )
+            .expect("gated proposal");
+        assert_eq!(second.action, PromptLookupCostAction::Ordinary);
+        assert_eq!(
+            scheduler
+                .prompt_lookup_stats()
+                .expect("lookup stats")
+                .queries,
+            queries_after_first
+        );
+        assert_eq!(mode.cost_controller.stats().query_gate_skips, 1);
+
+        let regime = first.regime.expect("proposal regime");
+        for _ in 0..8 {
+            mode.cost_controller.record_sample(
+                regime,
+                PromptLookupCostAction::Ordinary,
+                100_000,
+                1,
+                PromptLookupStats::default(),
+            );
+        }
+        assert_eq!(
+            mode.cost_controller.next_action(regime),
+            PromptLookupCostAction::Lookup
+        );
+
+        let probe = mode
+            .select_prepared_window(
+                &mut scheduler,
+                &SchedulerActorFakeModel,
+                false,
+                false,
+                false,
+                false,
+            )
+            .expect("probe proposal");
+        assert_eq!(probe.action, PromptLookupCostAction::Lookup);
+        assert_eq!(
+            scheduler
+                .prompt_lookup_stats()
+                .expect("lookup stats")
+                .queries,
+            queries_after_first + 1
+        );
+        drop(mode);
+        std::fs::remove_file(profile_path).ok();
+    }
+
+    #[test]
     fn mtp_counters_publish_cumulative_stat_deltas() {
         let counters = test_mtp_counters();
         let first = MtpSpeculativeStats {
@@ -6046,6 +6247,7 @@ mod tests {
                 profile_loads: 1,
                 profile_writes: 4,
                 profile_write_drops: 1,
+                query_gate_skips: 5,
             },
         );
         counters.reset_stats_baseline(None);
@@ -6072,6 +6274,7 @@ mod tests {
                 profile_loads: 1,
                 profile_writes: 4,
                 profile_write_drops: 1,
+                query_gate_skips: 5,
             },
         );
 
@@ -6093,6 +6296,7 @@ mod tests {
         assert_eq!(stats.qualified_regimes_current, 1);
         assert_eq!(stats.rejected_regimes_current, 2);
         assert_eq!(stats.qualification_profile_writes, 4);
+        assert_eq!(stats.qualification_query_gate_skips, 5);
 
         counters.reset_stats_baseline(None);
         let stats = counters

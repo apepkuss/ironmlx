@@ -191,6 +191,7 @@ pub struct PromptLookupStats {
     pub qualification_profile_loads: u64,
     pub qualification_profile_writes: u64,
     pub qualification_profile_write_drops: u64,
+    pub qualification_query_gate_skips: u64,
     pub hybrid_neural_windows: u64,
     pub hybrid_lookup_windows: u64,
     pub hybrid_source_switches: u64,
@@ -307,6 +308,9 @@ impl PromptLookupStats {
             qualification_profile_write_drops: self
                 .qualification_profile_write_drops
                 .saturating_sub(before.qualification_profile_write_drops),
+            qualification_query_gate_skips: self
+                .qualification_query_gate_skips
+                .saturating_sub(before.qualification_query_gate_skips),
             hybrid_neural_windows: self
                 .hybrid_neural_windows
                 .saturating_sub(before.hybrid_neural_windows),
@@ -464,6 +468,9 @@ impl PromptLookupStats {
         self.qualification_profile_write_drops = self
             .qualification_profile_write_drops
             .saturating_add(delta.qualification_profile_write_drops);
+        self.qualification_query_gate_skips = self
+            .qualification_query_gate_skips
+            .saturating_add(delta.qualification_query_gate_skips);
         self.hybrid_neural_windows = self
             .hybrid_neural_windows
             .saturating_add(delta.hybrid_neural_windows);
@@ -640,7 +647,7 @@ impl PromptLookupQualificationRuntimeConfig {
     }
 
     #[cfg(test)]
-    fn for_test(context_fingerprint: &str, profile_path: PathBuf) -> Self {
+    pub(crate) fn for_test(context_fingerprint: &str, profile_path: PathBuf) -> Self {
         Self {
             context_fingerprint: context_fingerprint.to_string(),
             profile_path,
@@ -661,6 +668,7 @@ pub(crate) struct PromptLookupQualificationStats {
     pub profile_loads: u64,
     pub profile_writes: u64,
     pub profile_write_drops: u64,
+    pub query_gate_skips: u64,
 }
 
 #[derive(Debug)]
@@ -1304,6 +1312,10 @@ impl PromptLookupCostController {
         self.stats.qualification_changes = self.stats.qualification_changes.saturating_add(1);
         self.refresh_regime_gauges();
         self.queue_profile_write();
+    }
+
+    pub(crate) fn record_query_gate_skip(&mut self) {
+        self.stats.query_gate_skips = self.stats.query_gate_skips.saturating_add(1);
     }
 
     pub(crate) fn stats(&self) -> PromptLookupQualificationStats {

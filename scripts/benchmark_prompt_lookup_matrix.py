@@ -692,6 +692,7 @@ def health_delta(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[str, Any
         "hybrid_lookup_miss_fallbacks",
         "hybrid_neural_rebases",
         "hybrid_neural_rebase_us",
+        "qualification_query_gate_skips",
         "shared_queries",
         "shared_hits",
         "shared_misses",
@@ -1064,6 +1065,9 @@ def aggregate_rows(
             "lookup_accepted_tokens": sum(item["accepted_tokens"] for item in lookup_deltas),
             "lookup_rejected_tokens": sum(item["rejected_tokens"] for item in lookup_deltas),
             "lookup_rollbacks": sum(item["rollback_count"] for item in lookup_deltas),
+            "qualification_query_gate_skips": sum(
+                item["qualification_query_gate_skips"] for item in lookup_deltas
+            ),
             "local_queries": sum(item["queries"] for item in local_deltas),
             "local_hits": sum(item["hits"] for item in local_deltas),
             "local_misses": sum(item["misses"] for item in local_deltas),
@@ -1337,6 +1341,9 @@ def build_comparisons(
                 "lookup_rejected_tokens": row["lookup_rejected_tokens"],
                 "lookup_acceptance_ratio": row["lookup_acceptance_ratio"],
                 "lookup_rollbacks": row["lookup_rollbacks"],
+                "qualification_query_gate_skips": row.get(
+                    "qualification_query_gate_skips", 0
+                ),
                 "local_queries": row.get("local_queries", 0),
                 "local_hits": row.get("local_hits", 0),
                 "local_misses": row.get("local_misses", 0),

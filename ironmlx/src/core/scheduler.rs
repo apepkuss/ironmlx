@@ -7780,6 +7780,24 @@ impl<M: Model> Scheduler<M> {
         })
     }
 
+    pub(crate) fn prompt_lookup_active_request_ids(&self) -> Vec<RequestId> {
+        let Some(prompt_lookup) = self.prompt_lookup_state.as_ref() else {
+            return Vec::new();
+        };
+        self.slots
+            .iter()
+            .enumerate()
+            .filter_map(|(row_idx, slot)| {
+                let slot = slot.as_ref().filter(|slot| !slot.finished)?;
+                prompt_lookup
+                    .rows
+                    .get(&row_idx)
+                    .is_some_and(|row| row.owner == slot.id)
+                    .then_some(slot.id)
+            })
+            .collect()
+    }
+
     pub(crate) fn prompt_lookup_prepared_qualification_regime(
         &self,
     ) -> Option<PromptLookupQualificationRegime> {

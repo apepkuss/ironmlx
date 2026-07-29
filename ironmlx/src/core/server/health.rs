@@ -397,6 +397,7 @@ pub struct PromptLookupHealthInfo {
     pub qualification_profile_loads: u64,
     pub qualification_profile_writes: u64,
     pub qualification_profile_write_drops: u64,
+    pub qualification_query_gate_skips: u64,
     pub hybrid_neural_windows: u64,
     pub hybrid_lookup_windows: u64,
     pub hybrid_source_switches: u64,
@@ -501,6 +502,7 @@ impl PromptLookupHealthInfo {
             aggregate.qualification_profile_writes += snapshot.qualification_profile_writes;
             aggregate.qualification_profile_write_drops +=
                 snapshot.qualification_profile_write_drops;
+            aggregate.qualification_query_gate_skips += snapshot.qualification_query_gate_skips;
             aggregate.hybrid_neural_windows += snapshot.hybrid_neural_windows;
             aggregate.hybrid_lookup_windows += snapshot.hybrid_lookup_windows;
             aggregate.hybrid_source_switches += snapshot.hybrid_source_switches;
@@ -636,6 +638,7 @@ impl PromptLookupHealthConfig {
             qualification_profile_loads: stats.qualification_profile_loads,
             qualification_profile_writes: stats.qualification_profile_writes,
             qualification_profile_write_drops: stats.qualification_profile_write_drops,
+            qualification_query_gate_skips: stats.qualification_query_gate_skips,
             hybrid_neural_windows: stats.hybrid_neural_windows,
             hybrid_lookup_windows: stats.hybrid_lookup_windows,
             hybrid_source_switches: stats.hybrid_source_switches,
@@ -994,6 +997,7 @@ mod tests {
             qualification_profile_loads: 1,
             qualification_profile_writes: 5,
             qualification_profile_write_drops: 1,
+            qualification_query_gate_skips: 6,
             hybrid_neural_windows: 12,
             hybrid_lookup_windows: 6,
             hybrid_source_switches: 4,
@@ -1080,6 +1084,7 @@ mod tests {
         assert_eq!(snapshot.prompt_lookup.qualification_profile_loads, 1);
         assert_eq!(snapshot.prompt_lookup.qualification_profile_writes, 5);
         assert_eq!(snapshot.prompt_lookup.qualification_profile_write_drops, 1);
+        assert_eq!(snapshot.prompt_lookup.qualification_query_gate_skips, 6);
         assert_eq!(snapshot.prompt_lookup.hybrid_neural_windows, 12);
         assert_eq!(snapshot.prompt_lookup.hybrid_lookup_windows, 6);
         assert_eq!(snapshot.prompt_lookup.hybrid_source_switches, 4);
