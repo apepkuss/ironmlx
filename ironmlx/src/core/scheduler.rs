@@ -124,9 +124,9 @@ use crate::core::model::Model;
 #[cfg(test)]
 use crate::core::prompt_lookup::PromptLookupHistoryFingerprint;
 use crate::core::prompt_lookup::{
-    PromptLookupConfig, PromptLookupProposalSource, PromptLookupQualificationRegime,
-    PromptLookupRowState, PromptLookupStats, SharedPromptLookupMtpCertification,
-    SharedPromptLookupPool,
+    PromptLookupConfig, PromptLookupDraftLimits, PromptLookupProposalSource,
+    PromptLookupQualificationRegime, PromptLookupRowState, PromptLookupStats,
+    SharedPromptLookupMtpCertification, SharedPromptLookupPool,
 };
 use crate::core::sampler::{draw_uniforms, sample_target_tokens_with_uniforms_batch, Sampler};
 use crate::core::speculative::{
@@ -8148,9 +8148,10 @@ impl<M: Model> Scheduler<M> {
         }
     }
 
-    pub fn prepare_prompt_lookup_batch_window(
+    pub(crate) fn prepare_prompt_lookup_batch_window(
         &mut self,
         allow_cross_request: bool,
+        draft_limits: PromptLookupDraftLimits,
     ) -> Result<bool> {
         self.ensure_not_poisoned()?;
         anyhow::ensure!(
@@ -8190,6 +8191,7 @@ impl<M: Model> Scheduler<M> {
                 &mut prompt_lookup.stats,
                 &mut prompt_lookup.rows,
                 allow_cross_request,
+                draft_limits,
             )?;
             Ok(active_rows.iter().all(|row_idx| {
                 prompt_lookup
@@ -8913,6 +8915,7 @@ impl<M: Model> Scheduler<M> {
         stats: &mut PromptLookupStats,
         row_states: &mut HashMap<usize, SchedulerPromptLookupRowState>,
         allow_cross_request: bool,
+        draft_limits: PromptLookupDraftLimits,
     ) -> Result<()> {
         for &row_idx in rows_to_prepare {
             let slot = self.slots[row_idx].as_ref().ok_or_else(|| {
@@ -8967,7 +8970,8 @@ impl<M: Model> Scheduler<M> {
             stats.queries = stats.queries.saturating_add(1);
             stats.local_source.queries = stats.local_source.queries.saturating_add(1);
             let local_start = Instant::now();
-            let local_proposal = lookup.propose(remaining.saturating_sub(1));
+            let local_proposal =
+                lookup.propose(remaining.saturating_sub(1).min(draft_limits.local()));
             let local_elapsed_us = elapsed_us_since(local_start);
             stats.propose_us = stats.propose_us.saturating_add(local_elapsed_us);
             stats.local_source.propose_us = stats
@@ -9017,7 +9021,7 @@ impl<M: Model> Scheduler<M> {
                     let shared_proposal = shared.propose(
                         lookup.history(),
                         lookup.history_fingerprint(),
-                        remaining.saturating_sub(1),
+                        remaining.saturating_sub(1).min(draft_limits.shared()),
                     );
                     let shared_elapsed_us = elapsed_us_since(shared_start);
                     stats.propose_us = stats.propose_us.saturating_add(shared_elapsed_us);
@@ -9106,7 +9110,17 @@ impl<M: Model> Scheduler<M> {
             });
         }
 
-        self.prepare_prompt_lookup_rows(rows_to_fill, stats, row_states, true)?;
+        let max_draft_tokens = row_states
+            .values()
+            .next()
+            .map_or(1, |row| row.cfg.max_draft_tokens);
+        self.prepare_prompt_lookup_rows(
+            rows_to_fill,
+            stats,
+            row_states,
+            true,
+            PromptLookupDraftLimits::uniform(max_draft_tokens),
+        )?;
         let mut contexts = Vec::with_capacity(rows_to_fill.len());
         for &row_idx in rows_to_fill {
             let slot = self.slots[row_idx].as_ref().ok_or_else(|| {
@@ -21313,7 +21327,10 @@ mod tests {
         scheduler.force_phase(Phase::Decoding);
 
         assert!(!scheduler
-            .prepare_prompt_lookup_batch_window(false)
+            .prepare_prompt_lookup_batch_window(
+                false,
+                PromptLookupDraftLimits::uniform(prompt_lookup_cfg().max_draft_tokens),
+            )
             .expect("local-only proposal preparation"));
         let stats = scheduler
             .prompt_lookup_stats()
@@ -21323,8 +21340,20 @@ mod tests {
 
         scheduler.discard_prepared_prompt_lookup_window();
         assert!(scheduler
-            .prepare_prompt_lookup_batch_window(true)
+            .prepare_prompt_lookup_batch_window(
+                true,
+                PromptLookupDraftLimits::new(cfg.max_draft_tokens, 1),
+            )
             .expect("shared proposal preparation"));
+        let row_idx = scheduler.get(id).expect("destination state").row_idx;
+        let proposal = scheduler
+            .prompt_lookup_state
+            .as_ref()
+            .and_then(|state| state.rows.get(&row_idx))
+            .and_then(|row| row.prepared_proposal.as_ref())
+            .expect("prepared shared proposal");
+        assert_eq!(proposal.source, PromptLookupProposalSource::Shared);
+        assert_eq!(proposal.tokens, vec![4]);
         let stats = scheduler
             .prompt_lookup_stats()
             .expect("PromptLookup stats after shared hit");
@@ -21370,7 +21399,10 @@ mod tests {
         scheduler.force_phase(Phase::Decoding);
 
         assert!(scheduler
-            .prepare_prompt_lookup_batch_window(true)
+            .prepare_prompt_lookup_batch_window(
+                true,
+                PromptLookupDraftLimits::new(2, cfg.max_draft_tokens),
+            )
             .expect("proposal preparation"));
         let proposal = scheduler
             .prompt_lookup_state
@@ -21379,7 +21411,7 @@ mod tests {
             .and_then(|row| row.prepared_proposal.as_ref())
             .expect("prepared local proposal");
         assert_eq!(proposal.source, PromptLookupProposalSource::Local);
-        assert_eq!(proposal.tokens, vec![4, 1, 2, 3]);
+        assert_eq!(proposal.tokens, vec![4, 1]);
         assert_eq!(proposal.mtp_certified_draft_len, 2);
         assert_eq!(proposal.mtp_certified_bonus_token, Some(2));
         assert!(proposal.mtp_policy_snapshot.is_some());
@@ -21418,7 +21450,10 @@ mod tests {
         scheduler.force_phase(Phase::Decoding);
 
         let error = scheduler
-            .prepare_prompt_lookup_batch_window(true)
+            .prepare_prompt_lookup_batch_window(
+                true,
+                PromptLookupDraftLimits::uniform(prompt_lookup_cfg().max_draft_tokens),
+            )
             .expect_err("stale row owner must be rejected");
         assert!(
             format!("{error:#}").contains("stale request"),
@@ -22167,7 +22202,10 @@ mod tests {
             .prefill_admitted_prompt_lookup(&model, prompt_lookup_cfg())
             .expect("prompt lookup prefill");
         assert!(scheduler
-            .prepare_prompt_lookup_batch_window(true)
+            .prepare_prompt_lookup_batch_window(
+                true,
+                PromptLookupDraftLimits::uniform(prompt_lookup_cfg().max_draft_tokens),
+            )
             .expect("prepare lookup window"));
         assert!(scheduler
             .prompt_lookup_prepared_window_verify_eligible(&model, false)
@@ -23250,7 +23288,10 @@ mod tests {
             .expect("prompt lookup batch prefill");
         assert!(
             scheduler
-                .prepare_prompt_lookup_batch_window(true)
+                .prepare_prompt_lookup_batch_window(
+                    true,
+                    PromptLookupDraftLimits::uniform(prompt_lookup_cfg().max_draft_tokens),
+                )
                 .expect("prepare lookup batch"),
             "both rows should have a prepared proposal"
         );
@@ -23348,7 +23389,10 @@ mod tests {
             .prefill_admitted_prompt_lookup(&model, prompt_lookup_cfg())
             .expect("prompt lookup batch prefill");
         assert!(scheduler
-            .prepare_prompt_lookup_batch_window(true)
+            .prepare_prompt_lookup_batch_window(
+                true,
+                PromptLookupDraftLimits::uniform(prompt_lookup_cfg().max_draft_tokens),
+            )
             .expect("prepare lookup batch"));
         {
             let state = scheduler

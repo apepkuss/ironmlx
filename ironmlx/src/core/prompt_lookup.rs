@@ -194,6 +194,9 @@ pub struct PromptLookupStats {
     pub qualification_query_gate_skips: u64,
     pub miss_query_gate_skips: u64,
     pub miss_query_reprobes: u64,
+    pub adaptive_draft_width_reductions: u64,
+    pub adaptive_draft_width_increases: u64,
+    pub adaptive_profitability_width_reductions: u64,
     pub hybrid_neural_windows: u64,
     pub hybrid_lookup_windows: u64,
     pub hybrid_source_switches: u64,
@@ -319,6 +322,15 @@ impl PromptLookupStats {
             miss_query_reprobes: self
                 .miss_query_reprobes
                 .saturating_sub(before.miss_query_reprobes),
+            adaptive_draft_width_reductions: self
+                .adaptive_draft_width_reductions
+                .saturating_sub(before.adaptive_draft_width_reductions),
+            adaptive_draft_width_increases: self
+                .adaptive_draft_width_increases
+                .saturating_sub(before.adaptive_draft_width_increases),
+            adaptive_profitability_width_reductions: self
+                .adaptive_profitability_width_reductions
+                .saturating_sub(before.adaptive_profitability_width_reductions),
             hybrid_neural_windows: self
                 .hybrid_neural_windows
                 .saturating_sub(before.hybrid_neural_windows),
@@ -485,6 +497,15 @@ impl PromptLookupStats {
         self.miss_query_reprobes = self
             .miss_query_reprobes
             .saturating_add(delta.miss_query_reprobes);
+        self.adaptive_draft_width_reductions = self
+            .adaptive_draft_width_reductions
+            .saturating_add(delta.adaptive_draft_width_reductions);
+        self.adaptive_draft_width_increases = self
+            .adaptive_draft_width_increases
+            .saturating_add(delta.adaptive_draft_width_increases);
+        self.adaptive_profitability_width_reductions = self
+            .adaptive_profitability_width_reductions
+            .saturating_add(delta.adaptive_profitability_width_reductions);
         self.hybrid_neural_windows = self
             .hybrid_neural_windows
             .saturating_add(delta.hybrid_neural_windows);
@@ -561,6 +582,33 @@ impl PromptLookupStats {
 pub(crate) enum PromptLookupCostAction {
     Ordinary,
     Lookup,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PromptLookupDraftLimits {
+    local: usize,
+    shared: usize,
+}
+
+impl PromptLookupDraftLimits {
+    pub(crate) fn new(local: usize, shared: usize) -> Self {
+        Self {
+            local: local.max(1),
+            shared: shared.max(1),
+        }
+    }
+
+    pub(crate) fn uniform(max_draft_tokens: usize) -> Self {
+        Self::new(max_draft_tokens, max_draft_tokens)
+    }
+
+    pub(crate) fn local(self) -> usize {
+        self.local
+    }
+
+    pub(crate) fn shared(self) -> usize {
+        self.shared
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -685,14 +733,53 @@ pub(crate) struct PromptLookupQualificationStats {
     pub query_gate_skips: u64,
     pub miss_query_gate_skips: u64,
     pub miss_query_reprobes: u64,
+    pub adaptive_draft_width_reductions: u64,
+    pub adaptive_draft_width_increases: u64,
+    pub adaptive_profitability_width_reductions: u64,
 }
 
 #[derive(Debug)]
 pub(crate) struct PromptLookupCostController {
     runtime: PromptLookupQualificationRuntimeConfig,
     regimes: HashMap<PromptLookupQualificationRegime, QualificationRegimeState>,
+    draft_widths: HashMap<PromptLookupDraftWidthRegime, PromptLookupDraftWidthState>,
     writer: QualificationProfileWriter,
     stats: PromptLookupQualificationStats,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct PromptLookupDraftWidthRegime {
+    batch_width: usize,
+    context_bucket_tokens: usize,
+    sampler: PromptLookupSamplerFingerprint,
+    source: PromptLookupProposalSource,
+}
+
+impl PromptLookupDraftWidthRegime {
+    fn new(base: PromptLookupQualificationRegime, source: PromptLookupProposalSource) -> Self {
+        Self {
+            batch_width: base.batch_width,
+            context_bucket_tokens: base.context_bucket_tokens,
+            sampler: base.sampler,
+            source,
+        }
+    }
+
+    fn qualification_regime(self, draft_tokens: usize) -> PromptLookupQualificationRegime {
+        PromptLookupQualificationRegime {
+            batch_width: self.batch_width,
+            context_bucket_tokens: self.context_bucket_tokens,
+            sampler: self.sampler,
+            proposal_source: Some(self.source),
+            verify_width: draft_tokens.saturating_add(1).max(2),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PromptLookupDraftWidthState {
+    max_draft_tokens: usize,
+    current_draft_tokens: usize,
 }
 
 #[derive(Debug)]
@@ -959,6 +1046,7 @@ impl PromptLookupCostController {
         let mut controller = Self {
             runtime,
             regimes,
+            draft_widths: HashMap::new(),
             writer,
             stats,
         };
@@ -982,6 +1070,56 @@ impl PromptLookupCostController {
                 PromptLookupCostAction::Lookup
             }
         }
+    }
+
+    pub(crate) fn adaptive_draft_limits(
+        &mut self,
+        base: PromptLookupQualificationRegime,
+        max_draft_tokens: usize,
+    ) -> PromptLookupDraftLimits {
+        PromptLookupDraftLimits::new(
+            self.adaptive_draft_limit(base, PromptLookupProposalSource::Local, max_draft_tokens),
+            self.adaptive_draft_limit(base, PromptLookupProposalSource::Shared, max_draft_tokens),
+        )
+    }
+
+    fn adaptive_draft_limit(
+        &mut self,
+        base: PromptLookupQualificationRegime,
+        source: PromptLookupProposalSource,
+        max_draft_tokens: usize,
+    ) -> usize {
+        let max_draft_tokens = max_draft_tokens.max(1);
+        let regime = PromptLookupDraftWidthRegime::new(base, source);
+        let draft_ceiling = self.adaptive_draft_ceiling(regime, max_draft_tokens);
+        let state = self
+            .draft_widths
+            .entry(regime)
+            .or_insert(PromptLookupDraftWidthState {
+                max_draft_tokens,
+                current_draft_tokens: draft_ceiling,
+            });
+        state.max_draft_tokens = max_draft_tokens;
+        state.current_draft_tokens = state
+            .current_draft_tokens
+            .clamp(1, state.max_draft_tokens.min(draft_ceiling));
+        state.current_draft_tokens
+    }
+
+    fn adaptive_draft_ceiling(
+        &self,
+        regime: PromptLookupDraftWidthRegime,
+        max_draft_tokens: usize,
+    ) -> usize {
+        (1..=max_draft_tokens)
+            .find(|&draft_tokens| {
+                self.regimes
+                    .get(&regime.qualification_regime(draft_tokens))
+                    .is_some_and(|state| matches!(state.phase, QualificationPhase::Rejected { .. }))
+            })
+            .map_or(max_draft_tokens, |draft_tokens| {
+                draft_tokens.saturating_sub(1).max(1)
+            })
     }
 
     pub(crate) fn record_sample(
@@ -1215,6 +1353,39 @@ impl PromptLookupCostController {
         }
     }
 
+    pub(crate) fn record_sample_with_adaptive_draft(
+        &mut self,
+        regime: PromptLookupQualificationRegime,
+        action: PromptLookupCostAction,
+        elapsed_ns: u64,
+        committed_tokens: usize,
+        prompt_lookup_delta: PromptLookupStats,
+    ) {
+        self.record_sample(
+            regime,
+            action,
+            elapsed_ns,
+            committed_tokens,
+            prompt_lookup_delta,
+        );
+        if action != PromptLookupCostAction::Lookup {
+            return;
+        }
+        if self
+            .regimes
+            .get(&regime)
+            .is_some_and(|state| matches!(state.phase, QualificationPhase::Rejected { .. }))
+        {
+            self.reduce_rejected_draft_width(regime, true);
+        } else if self
+            .regimes
+            .get(&regime)
+            .is_some_and(|state| matches!(state.phase, QualificationPhase::Qualified { .. }))
+        {
+            self.observe_adaptive_draft_widths(regime, prompt_lookup_delta);
+        }
+    }
+
     pub(crate) fn record_lookup_transition(
         &mut self,
         regimes: &[PromptLookupQualificationRegime],
@@ -1328,6 +1499,179 @@ impl PromptLookupCostController {
         self.stats.qualification_changes = self.stats.qualification_changes.saturating_add(1);
         self.refresh_regime_gauges();
         self.queue_profile_write();
+    }
+
+    pub(crate) fn record_lookup_ineligible_with_adaptive_draft(
+        &mut self,
+        regime: PromptLookupQualificationRegime,
+    ) {
+        self.record_lookup_ineligible(regime);
+        self.reduce_rejected_draft_width(regime, false);
+    }
+
+    fn observe_adaptive_draft_widths(
+        &mut self,
+        regime: PromptLookupQualificationRegime,
+        delta: PromptLookupStats,
+    ) {
+        self.observe_adaptive_draft_width(
+            regime,
+            PromptLookupProposalSource::Local,
+            delta.local_source,
+        );
+        self.observe_adaptive_draft_width(
+            regime,
+            PromptLookupProposalSource::Shared,
+            delta.shared_source,
+        );
+    }
+
+    fn observe_adaptive_draft_width(
+        &mut self,
+        base: PromptLookupQualificationRegime,
+        source: PromptLookupProposalSource,
+        stats: PromptLookupSourceStats,
+    ) {
+        if stats.hits == 0 || stats.drafted_tokens == 0 {
+            return;
+        }
+        let regime = PromptLookupDraftWidthRegime::new(base, source);
+        let Some(max_draft_tokens) = self
+            .draft_widths
+            .get(&regime)
+            .map(|state| state.max_draft_tokens)
+        else {
+            return;
+        };
+        let draft_ceiling = self.adaptive_draft_ceiling(regime, max_draft_tokens);
+        let Some((baseline_cost_per_token_ns, transition_cost_per_token_ns)) =
+            self.transferable_baseline(base)
+        else {
+            return;
+        };
+        let Some((old, next)) = self.draft_widths.get_mut(&regime).map(|state| {
+            let old = state.current_draft_tokens.clamp(1, state.max_draft_tokens);
+            let mut next = if stats.accepted_tokens >= stats.drafted_tokens {
+                old.saturating_add(1)
+            } else {
+                let accepted_per_window = stats.accepted_tokens / stats.hits.max(1);
+                usize::try_from(accepted_per_window)
+                    .unwrap_or(usize::MAX)
+                    .saturating_add(1)
+                    .max(old.saturating_sub(1).max(1))
+            };
+            if stats.zero_accept_windows > 0 {
+                next = next.min(old.saturating_sub(1).max(1));
+            }
+            state.current_draft_tokens = next.clamp(1, state.max_draft_tokens.min(draft_ceiling));
+            (old, state.current_draft_tokens)
+        }) else {
+            return;
+        };
+        if next < old {
+            self.stats.adaptive_draft_width_reductions =
+                self.stats.adaptive_draft_width_reductions.saturating_add(1);
+        } else if next > old {
+            self.stats.adaptive_draft_width_increases =
+                self.stats.adaptive_draft_width_increases.saturating_add(1);
+        }
+        if next != old {
+            self.seed_adaptive_draft_regime(
+                regime,
+                next,
+                baseline_cost_per_token_ns,
+                transition_cost_per_token_ns,
+            );
+        }
+    }
+
+    fn reduce_rejected_draft_width(
+        &mut self,
+        regime: PromptLookupQualificationRegime,
+        profitability_rejection: bool,
+    ) {
+        let Some(source @ (PromptLookupProposalSource::Local | PromptLookupProposalSource::Shared)) =
+            regime.proposal_source
+        else {
+            return;
+        };
+        let width_regime = PromptLookupDraftWidthRegime::new(regime, source);
+        let transferable_baseline = self.transferable_baseline(regime);
+        let rejected_draft_tokens = regime.verify_width.saturating_sub(1).max(1);
+        let Some((old, next)) = self.draft_widths.get_mut(&width_regime).map(|state| {
+            let old = state.current_draft_tokens.clamp(1, state.max_draft_tokens);
+            state.current_draft_tokens = old
+                .min(rejected_draft_tokens.saturating_sub(1).max(1))
+                .clamp(1, state.max_draft_tokens);
+            (old, state.current_draft_tokens)
+        }) else {
+            return;
+        };
+        if next < old {
+            self.stats.adaptive_draft_width_reductions =
+                self.stats.adaptive_draft_width_reductions.saturating_add(1);
+            if profitability_rejection {
+                self.stats.adaptive_profitability_width_reductions = self
+                    .stats
+                    .adaptive_profitability_width_reductions
+                    .saturating_add(1);
+            }
+            if let Some((baseline_cost_per_token_ns, transition_cost_per_token_ns)) =
+                transferable_baseline
+            {
+                self.seed_adaptive_draft_regime(
+                    width_regime,
+                    next,
+                    baseline_cost_per_token_ns,
+                    transition_cost_per_token_ns,
+                );
+            }
+        }
+    }
+
+    fn transferable_baseline(&self, regime: PromptLookupQualificationRegime) -> Option<(u64, u64)> {
+        let state = self.regimes.get(&regime)?;
+        let baseline_cost_per_token_ns = match &state.phase {
+            QualificationPhase::Probe {
+                baseline_cost_per_token_ns,
+                ..
+            }
+            | QualificationPhase::Qualified {
+                baseline_cost_per_token_ns,
+                ..
+            } => *baseline_cost_per_token_ns,
+            QualificationPhase::Rejected { .. } => state
+                .last_evidence
+                .as_ref()
+                .map_or(0, |evidence| evidence.baseline_cost_per_token_ns),
+            QualificationPhase::Delayed { .. } | QualificationPhase::Baseline { .. } => 0,
+        };
+        (baseline_cost_per_token_ns > 0).then_some((
+            baseline_cost_per_token_ns,
+            state.transition_cost_per_token_ns,
+        ))
+    }
+
+    fn seed_adaptive_draft_regime(
+        &mut self,
+        width_regime: PromptLookupDraftWidthRegime,
+        draft_tokens: usize,
+        baseline_cost_per_token_ns: u64,
+        transition_cost_per_token_ns: u64,
+    ) {
+        self.regimes
+            .entry(width_regime.qualification_regime(draft_tokens))
+            .or_insert_with(|| QualificationRegimeState {
+                phase: QualificationPhase::Probe {
+                    baseline_cost_per_token_ns,
+                    samples: Vec::with_capacity(QUALIFICATION_PROBE_SAMPLES),
+                    counters: PromptLookupQualificationCounters::default(),
+                },
+                last_evidence: None,
+                next_rejected_cooldown_tokens: QUALIFICATION_REJECTED_INITIAL_COOLDOWN_TOKENS,
+                transition_cost_per_token_ns,
+            });
+        self.refresh_regime_gauges();
     }
 
     pub(crate) fn record_query_gate_skip(&mut self) {
@@ -2657,6 +3001,218 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_draft_width_tracks_acceptance_without_cross_source_contamination() {
+        let path = test_profile_path("adaptive-acceptance");
+        let runtime =
+            PromptLookupQualificationRuntimeConfig::for_test("ctx-adaptive", path.clone());
+        let mut controller = PromptLookupCostController::new(runtime).unwrap();
+        let base = PromptLookupQualificationRegime::new(1, 8_000, Sampler::greedy());
+
+        assert_eq!(
+            controller.adaptive_draft_limits(base, 4),
+            PromptLookupDraftLimits {
+                local: 4,
+                shared: 4,
+            }
+        );
+        let local_regime = base.with_proposal(PromptLookupProposalSource::Local, 5);
+        drive_profitable_qualification(&mut controller, local_regime);
+        controller.record_sample_with_adaptive_draft(
+            local_regime,
+            PromptLookupCostAction::Lookup,
+            100_000,
+            1,
+            PromptLookupStats {
+                local_source: PromptLookupSourceStats {
+                    hits: 1,
+                    drafted_tokens: 4,
+                    zero_accept_windows: 1,
+                    ..PromptLookupSourceStats::default()
+                },
+                ..PromptLookupStats::default()
+            },
+        );
+        assert_eq!(
+            controller.adaptive_draft_limits(base, 4),
+            PromptLookupDraftLimits {
+                local: 3,
+                shared: 4,
+            }
+        );
+
+        let narrower = base.with_proposal(PromptLookupProposalSource::Local, 4);
+        for _ in 0..QUALIFICATION_PROBE_SAMPLES {
+            assert_eq!(
+                controller.next_action(narrower),
+                PromptLookupCostAction::Lookup
+            );
+            controller.record_sample(
+                narrower,
+                PromptLookupCostAction::Lookup,
+                80_000,
+                1,
+                PromptLookupStats::default(),
+            );
+        }
+        controller.record_sample_with_adaptive_draft(
+            narrower,
+            PromptLookupCostAction::Lookup,
+            100_000,
+            1,
+            PromptLookupStats {
+                local_source: PromptLookupSourceStats {
+                    hits: 1,
+                    drafted_tokens: 3,
+                    accepted_tokens: 3,
+                    ..PromptLookupSourceStats::default()
+                },
+                ..PromptLookupStats::default()
+            },
+        );
+        assert_eq!(
+            controller.adaptive_draft_limits(base, 4),
+            PromptLookupDraftLimits {
+                local: 4,
+                shared: 4,
+            }
+        );
+        assert_eq!(controller.stats().adaptive_draft_width_reductions, 1);
+        assert_eq!(controller.stats().adaptive_draft_width_increases, 1);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn adaptive_draft_width_retries_narrower_after_unprofitable_wide_probe() {
+        let path = test_profile_path("adaptive-profitability");
+        let runtime = PromptLookupQualificationRuntimeConfig::for_test(
+            "ctx-adaptive-profitability",
+            path.clone(),
+        );
+        let mut controller = PromptLookupCostController::new(runtime).unwrap();
+        let base = PromptLookupQualificationRegime::new(1, 8_000, Sampler::greedy());
+        let wide = base.with_proposal(PromptLookupProposalSource::Shared, 5);
+        assert_eq!(controller.adaptive_draft_limits(base, 4).shared(), 4);
+
+        for _ in 0..QUALIFICATION_BASELINE_SAMPLES {
+            controller.record_sample_with_adaptive_draft(
+                wide,
+                PromptLookupCostAction::Ordinary,
+                100_000,
+                1,
+                PromptLookupStats::default(),
+            );
+        }
+        for _ in 0..QUALIFICATION_PROBE_SAMPLES {
+            controller.record_sample_with_adaptive_draft(
+                wide,
+                PromptLookupCostAction::Lookup,
+                110_000,
+                1,
+                PromptLookupStats::default(),
+            );
+        }
+
+        assert_eq!(
+            controller.next_action(wide),
+            PromptLookupCostAction::Ordinary
+        );
+        assert_eq!(controller.adaptive_draft_limits(base, 4).shared(), 3);
+        assert_eq!(
+            controller.next_action(base.with_proposal(PromptLookupProposalSource::Shared, 4)),
+            PromptLookupCostAction::Lookup
+        );
+        assert_eq!(
+            controller.stats().adaptive_profitability_width_reductions,
+            1
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn adaptive_draft_width_restores_below_persisted_ineligible_width() {
+        let path = test_profile_path("adaptive-persisted-ineligible");
+        let runtime = PromptLookupQualificationRuntimeConfig::for_test(
+            "ctx-adaptive-persisted",
+            path.clone(),
+        );
+        let base = PromptLookupQualificationRegime::new(1, 8_000, Sampler::greedy());
+        let mut controller = PromptLookupCostController::new(runtime.clone()).unwrap();
+        assert_eq!(controller.adaptive_draft_limits(base, 4).local(), 4);
+        controller.record_lookup_ineligible_with_adaptive_draft(
+            base.with_proposal(PromptLookupProposalSource::Local, 5),
+        );
+        assert_eq!(controller.adaptive_draft_limits(base, 4).local(), 3);
+        assert_eq!(
+            controller.stats().adaptive_profitability_width_reductions,
+            0
+        );
+        drop(controller);
+
+        let mut reloaded = PromptLookupCostController::new(runtime).unwrap();
+        assert_eq!(reloaded.adaptive_draft_limits(base, 4).local(), 3);
+        assert_eq!(reloaded.adaptive_draft_limits(base, 4).shared(), 4);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn adaptive_draft_width_does_not_reprobe_rejected_width_before_cooldown() {
+        let path = test_profile_path("adaptive-rejected-ceiling");
+        let runtime =
+            PromptLookupQualificationRuntimeConfig::for_test("ctx-adaptive-ceiling", path.clone());
+        let mut controller = PromptLookupCostController::new(runtime).unwrap();
+        let base = PromptLookupQualificationRegime::new(1, 8_000, Sampler::greedy());
+        let rejected = base.with_proposal(PromptLookupProposalSource::Local, 5);
+        let accepted = base.with_proposal(PromptLookupProposalSource::Local, 4);
+
+        assert_eq!(controller.adaptive_draft_limits(base, 8).local(), 8);
+        drive_profitable_qualification(&mut controller, accepted);
+        controller.record_lookup_ineligible_with_adaptive_draft(rejected);
+        assert_eq!(controller.adaptive_draft_limits(base, 8).local(), 3);
+
+        controller.record_sample_with_adaptive_draft(
+            accepted,
+            PromptLookupCostAction::Lookup,
+            100_000,
+            1,
+            PromptLookupStats {
+                local_source: PromptLookupSourceStats {
+                    hits: 1,
+                    drafted_tokens: 3,
+                    accepted_tokens: 3,
+                    ..PromptLookupSourceStats::default()
+                },
+                ..PromptLookupStats::default()
+            },
+        );
+        assert_eq!(controller.adaptive_draft_limits(base, 8).local(), 3);
+
+        controller.record_sample(
+            rejected,
+            PromptLookupCostAction::Ordinary,
+            100_000,
+            QUALIFICATION_REJECTED_MAX_COOLDOWN_TOKENS as usize,
+            PromptLookupStats::default(),
+        );
+        controller.record_sample_with_adaptive_draft(
+            accepted,
+            PromptLookupCostAction::Lookup,
+            100_000,
+            1,
+            PromptLookupStats {
+                local_source: PromptLookupSourceStats {
+                    hits: 1,
+                    drafted_tokens: 3,
+                    accepted_tokens: 3,
+                    ..PromptLookupSourceStats::default()
+                },
+                ..PromptLookupStats::default()
+            },
+        );
+        assert_eq!(controller.adaptive_draft_limits(base, 8).local(), 4);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn lookup_transition_cost_is_charged_to_lookup_and_can_revoke_qualification() {
         let path = test_profile_path("transition-cost");
         let runtime =
@@ -2974,5 +3530,41 @@ mod tests {
                 },
             );
         }
+    }
+
+    fn drive_profitable_qualification(
+        controller: &mut PromptLookupCostController,
+        regime: PromptLookupQualificationRegime,
+    ) {
+        for _ in 0..QUALIFICATION_BASELINE_SAMPLES {
+            assert_eq!(
+                controller.next_action(regime),
+                PromptLookupCostAction::Ordinary
+            );
+            controller.record_sample(
+                regime,
+                PromptLookupCostAction::Ordinary,
+                100_000,
+                regime.batch_width,
+                PromptLookupStats::default(),
+            );
+        }
+        for _ in 0..QUALIFICATION_PROBE_SAMPLES {
+            assert_eq!(
+                controller.next_action(regime),
+                PromptLookupCostAction::Lookup
+            );
+            controller.record_sample(
+                regime,
+                PromptLookupCostAction::Lookup,
+                80_000,
+                regime.batch_width,
+                PromptLookupStats::default(),
+            );
+        }
+        assert!(controller
+            .regimes
+            .get(&regime)
+            .is_some_and(|state| matches!(state.phase, QualificationPhase::Qualified { .. })));
     }
 }

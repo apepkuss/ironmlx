@@ -34,7 +34,7 @@ use crate::core::generate::GenerateRequest;
 use crate::core::model::Model;
 use crate::core::prompt_lookup::{
     PromptLookupConfig, PromptLookupCostAction, PromptLookupCostController,
-    PromptLookupProposalSource, PromptLookupQualificationRegime,
+    PromptLookupDraftLimits, PromptLookupProposalSource, PromptLookupQualificationRegime,
     PromptLookupQualificationRuntimeConfig, PromptLookupQualificationStats, PromptLookupStats,
 };
 use crate::core::scheduler::{
@@ -636,6 +636,10 @@ impl SchedulerActorMtpCounters {
         stats.qualification_query_gate_skips = qualification.query_gate_skips;
         stats.miss_query_gate_skips = qualification.miss_query_gate_skips;
         stats.miss_query_reprobes = qualification.miss_query_reprobes;
+        stats.adaptive_draft_width_reductions = qualification.adaptive_draft_width_reductions;
+        stats.adaptive_draft_width_increases = qualification.adaptive_draft_width_increases;
+        stats.adaptive_profitability_width_reductions =
+            qualification.adaptive_profitability_width_reductions;
     }
 
     fn store_prompt_lookup_hybrid_stats(&self, hybrid: PromptLookupHybridStats) {
@@ -735,6 +739,7 @@ const PROMPT_LOOKUP_MISS_MAX_REPROBE_TOKENS: usize = 8;
 struct PromptLookupQueryScope {
     base_regime: PromptLookupQualificationRegime,
     owners: Vec<RequestId>,
+    draft_limits: PromptLookupDraftLimits,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1064,6 +1069,17 @@ impl SchedulerActorPromptLookup {
     ) -> Result<PromptLookupWindowDecision> {
         let stats_before = sched.prompt_lookup_stats().unwrap_or_default();
         let base_regime = sched.prompt_lookup_qualification_regime();
+        let draft_limits = if match_mtp_verify_shape {
+            PromptLookupDraftLimits::uniform(self.cfg.max_draft_tokens)
+        } else {
+            base_regime.map_or_else(
+                || PromptLookupDraftLimits::uniform(self.cfg.max_draft_tokens),
+                |regime| {
+                    self.cost_controller
+                        .adaptive_draft_limits(regime, self.cfg.max_draft_tokens)
+                },
+            )
+        };
         let miss_query_scope = Self::miss_query_scope(sched, base_regime, allow_cross_request);
         let query_scope = base_regime.map(|base_regime| PromptLookupQueryScope {
             base_regime,
@@ -1071,6 +1087,7 @@ impl SchedulerActorPromptLookup {
                 || sched.prompt_lookup_active_request_ids(),
                 |scope| scope.request_progress.iter().map(|(id, _)| *id).collect(),
             ),
+            draft_limits,
         });
         let hinted_regime = query_scope.as_ref().and_then(|scope| {
             self.query_hint
@@ -1130,7 +1147,8 @@ impl SchedulerActorPromptLookup {
         }
 
         let proposal_started = Instant::now();
-        let mut has_drafts = sched.prepare_prompt_lookup_batch_window(allow_cross_request)?;
+        let mut has_drafts =
+            sched.prepare_prompt_lookup_batch_window(allow_cross_request, draft_limits)?;
         if has_drafts && match_mtp_verify_shape {
             has_drafts = sched.align_prepared_prompt_lookup_to_mtp_verify_shape()?;
         }
@@ -1160,7 +1178,12 @@ impl SchedulerActorPromptLookup {
             proposal_regime: regime,
         });
         if !sched.prompt_lookup_prepared_window_verify_eligible(model, capture_accepted_hidden)? {
-            self.cost_controller.record_lookup_ineligible(regime);
+            if match_mtp_verify_shape {
+                self.cost_controller.record_lookup_ineligible(regime);
+            } else {
+                self.cost_controller
+                    .record_lookup_ineligible_with_adaptive_draft(regime);
+            }
             sched.discard_prepared_prompt_lookup_window();
             return Ok(PromptLookupWindowDecision {
                 action: PromptLookupCostAction::Ordinary,
@@ -1430,7 +1453,7 @@ where
         if let Some(regime) = regime {
             match action {
                 PromptLookupCostAction::Ordinary => {
-                    self.cost_controller.record_sample(
+                    self.cost_controller.record_sample_with_adaptive_draft(
                         regime,
                         action,
                         elapsed_ns,
@@ -1455,7 +1478,7 @@ where
                             .measured_cycle
                             .take()
                             .expect("PromptLookup measured cycle initialized above");
-                        self.cost_controller.record_sample(
+                        self.cost_controller.record_sample_with_adaptive_draft(
                             cycle.regime,
                             action,
                             cycle.elapsed_ns,
@@ -2446,13 +2469,15 @@ impl SchedulerActorMtpMode<crate::models::Gemma4Model> for SchedulerActorGemma4P
             }
             if let Some(cycle) = self.measured_cycle.take() {
                 let stats_after = sched.prompt_lookup_stats().unwrap_or_default();
-                self.prompt_lookup.cost_controller.record_sample(
-                    cycle.regime,
-                    cycle.action,
-                    cycle.elapsed_ns,
-                    cycle.committed_tokens,
-                    stats_after.saturating_delta_since(cycle.stats_before),
-                );
+                self.prompt_lookup
+                    .cost_controller
+                    .record_sample_with_adaptive_draft(
+                        cycle.regime,
+                        cycle.action,
+                        cycle.elapsed_ns,
+                        cycle.committed_tokens,
+                        stats_after.saturating_delta_since(cycle.stats_before),
+                    );
                 if source == HybridDraftSource::PromptLookup {
                     self.lookup_episode
                         .get_or_insert_with(PromptLookupEpisode::default)
@@ -6099,6 +6124,7 @@ mod tests {
         let scope = PromptLookupQueryScope {
             base_regime: base,
             owners: vec![RequestId(11), RequestId(12)],
+            draft_limits: PromptLookupDraftLimits::uniform(4),
         };
         let proposal_regime = base.with_proposal(PromptLookupProposalSource::Shared, 4);
         let hint = PromptLookupQueryHint {
@@ -6111,6 +6137,7 @@ mod tests {
             hint.proposal_regime_for(&PromptLookupQueryScope {
                 base_regime: PromptLookupQualificationRegime::new(2, 8193, Sampler::greedy()),
                 owners: scope.owners.clone(),
+                draft_limits: scope.draft_limits,
             }),
             None
         );
@@ -6118,6 +6145,15 @@ mod tests {
             hint.proposal_regime_for(&PromptLookupQueryScope {
                 base_regime: base,
                 owners: vec![RequestId(11), RequestId(13)],
+                draft_limits: scope.draft_limits,
+            }),
+            None
+        );
+        assert_eq!(
+            hint.proposal_regime_for(&PromptLookupQueryScope {
+                base_regime: base,
+                owners: scope.owners.clone(),
+                draft_limits: PromptLookupDraftLimits::new(3, 4),
             }),
             None
         );
@@ -6496,6 +6532,7 @@ mod tests {
                 query_gate_skips: 5,
                 miss_query_gate_skips: 6,
                 miss_query_reprobes: 7,
+                ..PromptLookupQualificationStats::default()
             },
         );
         counters.reset_stats_baseline(None);
@@ -6525,6 +6562,7 @@ mod tests {
                 query_gate_skips: 5,
                 miss_query_gate_skips: 6,
                 miss_query_reprobes: 7,
+                ..PromptLookupQualificationStats::default()
             },
         );
 

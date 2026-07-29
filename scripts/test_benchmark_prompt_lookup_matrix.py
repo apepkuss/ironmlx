@@ -272,6 +272,9 @@ class BenchmarkPromptLookupMatrixTests(unittest.TestCase):
                 "qualification_query_gate_skips": 100,
                 "miss_query_gate_skips": 3,
                 "miss_query_reprobes": 1,
+                "adaptive_draft_width_reductions": 2,
+                "adaptive_draft_width_increases": 1,
+                "adaptive_profitability_width_reductions": 1,
                 "local_source": {
                     "queries": 70,
                     "hits": 40,
@@ -315,6 +318,9 @@ class BenchmarkPromptLookupMatrixTests(unittest.TestCase):
                 "qualification_query_gate_skips": 124,
                 "miss_query_gate_skips": 11,
                 "miss_query_reprobes": 4,
+                "adaptive_draft_width_reductions": 7,
+                "adaptive_draft_width_increases": 4,
+                "adaptive_profitability_width_reductions": 3,
                 "shared_clear_count": 2,
                 "shared_cleared_entries": 10,
                 "index_entries_current": 0,
@@ -385,6 +391,15 @@ class BenchmarkPromptLookupMatrixTests(unittest.TestCase):
         )
         self.assertEqual(delta["prompt_lookup"]["miss_query_gate_skips"], 8)
         self.assertEqual(delta["prompt_lookup"]["miss_query_reprobes"], 3)
+        self.assertEqual(
+            delta["prompt_lookup"]["adaptive_draft_width_reductions"], 5
+        )
+        self.assertEqual(
+            delta["prompt_lookup"]["adaptive_draft_width_increases"], 3
+        )
+        self.assertEqual(
+            delta["prompt_lookup"]["adaptive_profitability_width_reductions"], 2
+        )
         self.assertEqual(delta["prompt_lookup"]["shared_entries_current"], 40)
         self.assertEqual(delta["prompt_lookup"]["shared_entries_peak"], 64)
         self.assertEqual(delta["prompt_lookup"]["shared_clear_count"], 2)

@@ -695,6 +695,9 @@ def health_delta(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[str, Any
         "qualification_query_gate_skips",
         "miss_query_gate_skips",
         "miss_query_reprobes",
+        "adaptive_draft_width_reductions",
+        "adaptive_draft_width_increases",
+        "adaptive_profitability_width_reductions",
         "shared_queries",
         "shared_hits",
         "shared_misses",
@@ -1076,6 +1079,16 @@ def aggregate_rows(
             "miss_query_reprobes": sum(
                 item["miss_query_reprobes"] for item in lookup_deltas
             ),
+            "adaptive_draft_width_reductions": sum(
+                item["adaptive_draft_width_reductions"] for item in lookup_deltas
+            ),
+            "adaptive_draft_width_increases": sum(
+                item["adaptive_draft_width_increases"] for item in lookup_deltas
+            ),
+            "adaptive_profitability_width_reductions": sum(
+                item["adaptive_profitability_width_reductions"]
+                for item in lookup_deltas
+            ),
             "local_queries": sum(item["queries"] for item in local_deltas),
             "local_hits": sum(item["hits"] for item in local_deltas),
             "local_misses": sum(item["misses"] for item in local_deltas),
@@ -1354,6 +1367,15 @@ def build_comparisons(
                 ),
                 "miss_query_gate_skips": row.get("miss_query_gate_skips", 0),
                 "miss_query_reprobes": row.get("miss_query_reprobes", 0),
+                "adaptive_draft_width_reductions": row.get(
+                    "adaptive_draft_width_reductions", 0
+                ),
+                "adaptive_draft_width_increases": row.get(
+                    "adaptive_draft_width_increases", 0
+                ),
+                "adaptive_profitability_width_reductions": row.get(
+                    "adaptive_profitability_width_reductions", 0
+                ),
                 "local_queries": row.get("local_queries", 0),
                 "local_hits": row.get("local_hits", 0),
                 "local_misses": row.get("local_misses", 0),

@@ -400,6 +400,9 @@ pub struct PromptLookupHealthInfo {
     pub qualification_query_gate_skips: u64,
     pub miss_query_gate_skips: u64,
     pub miss_query_reprobes: u64,
+    pub adaptive_draft_width_reductions: u64,
+    pub adaptive_draft_width_increases: u64,
+    pub adaptive_profitability_width_reductions: u64,
     pub hybrid_neural_windows: u64,
     pub hybrid_lookup_windows: u64,
     pub hybrid_source_switches: u64,
@@ -507,6 +510,10 @@ impl PromptLookupHealthInfo {
             aggregate.qualification_query_gate_skips += snapshot.qualification_query_gate_skips;
             aggregate.miss_query_gate_skips += snapshot.miss_query_gate_skips;
             aggregate.miss_query_reprobes += snapshot.miss_query_reprobes;
+            aggregate.adaptive_draft_width_reductions += snapshot.adaptive_draft_width_reductions;
+            aggregate.adaptive_draft_width_increases += snapshot.adaptive_draft_width_increases;
+            aggregate.adaptive_profitability_width_reductions +=
+                snapshot.adaptive_profitability_width_reductions;
             aggregate.hybrid_neural_windows += snapshot.hybrid_neural_windows;
             aggregate.hybrid_lookup_windows += snapshot.hybrid_lookup_windows;
             aggregate.hybrid_source_switches += snapshot.hybrid_source_switches;
@@ -645,6 +652,9 @@ impl PromptLookupHealthConfig {
             qualification_query_gate_skips: stats.qualification_query_gate_skips,
             miss_query_gate_skips: stats.miss_query_gate_skips,
             miss_query_reprobes: stats.miss_query_reprobes,
+            adaptive_draft_width_reductions: stats.adaptive_draft_width_reductions,
+            adaptive_draft_width_increases: stats.adaptive_draft_width_increases,
+            adaptive_profitability_width_reductions: stats.adaptive_profitability_width_reductions,
             hybrid_neural_windows: stats.hybrid_neural_windows,
             hybrid_lookup_windows: stats.hybrid_lookup_windows,
             hybrid_source_switches: stats.hybrid_source_switches,
@@ -1006,6 +1016,9 @@ mod tests {
             qualification_query_gate_skips: 6,
             miss_query_gate_skips: 7,
             miss_query_reprobes: 3,
+            adaptive_draft_width_reductions: 5,
+            adaptive_draft_width_increases: 4,
+            adaptive_profitability_width_reductions: 2,
             hybrid_neural_windows: 12,
             hybrid_lookup_windows: 6,
             hybrid_source_switches: 4,
@@ -1095,6 +1108,14 @@ mod tests {
         assert_eq!(snapshot.prompt_lookup.qualification_query_gate_skips, 6);
         assert_eq!(snapshot.prompt_lookup.miss_query_gate_skips, 7);
         assert_eq!(snapshot.prompt_lookup.miss_query_reprobes, 3);
+        assert_eq!(snapshot.prompt_lookup.adaptive_draft_width_reductions, 5);
+        assert_eq!(snapshot.prompt_lookup.adaptive_draft_width_increases, 4);
+        assert_eq!(
+            snapshot
+                .prompt_lookup
+                .adaptive_profitability_width_reductions,
+            2
+        );
         assert_eq!(snapshot.prompt_lookup.hybrid_neural_windows, 12);
         assert_eq!(snapshot.prompt_lookup.hybrid_lookup_windows, 6);
         assert_eq!(snapshot.prompt_lookup.hybrid_source_switches, 4);
