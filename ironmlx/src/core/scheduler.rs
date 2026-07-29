@@ -7781,6 +7781,13 @@ impl<M: Model> Scheduler<M> {
     }
 
     pub(crate) fn prompt_lookup_active_request_ids(&self) -> Vec<RequestId> {
+        self.prompt_lookup_active_request_progress()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    pub(crate) fn prompt_lookup_active_request_progress(&self) -> Vec<(RequestId, usize)> {
         let Some(prompt_lookup) = self.prompt_lookup_state.as_ref() else {
             return Vec::new();
         };
@@ -7792,10 +7799,26 @@ impl<M: Model> Scheduler<M> {
                 prompt_lookup
                     .rows
                     .get(&row_idx)
-                    .is_some_and(|row| row.owner == slot.id)
-                    .then_some(slot.id)
+                    .filter(|row| row.owner == slot.id)
+                    .map(|row| {
+                        let history_len = row.lookup.as_ref().map_or_else(
+                            || {
+                                slot.prompt_ids
+                                    .len()
+                                    .saturating_add(slot.generated_tokens.len())
+                            },
+                            |lookup| lookup.history().len(),
+                        );
+                        (slot.id, history_len)
+                    })
             })
             .collect()
+    }
+
+    pub(crate) fn shared_prompt_lookup_availability_epoch(&self) -> Option<u64> {
+        self.shared_prompt_lookup_pool
+            .as_ref()
+            .map(SharedPromptLookupPool::availability_epoch)
     }
 
     pub(crate) fn prompt_lookup_prepared_qualification_regime(

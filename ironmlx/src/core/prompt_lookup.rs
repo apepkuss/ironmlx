@@ -192,6 +192,8 @@ pub struct PromptLookupStats {
     pub qualification_profile_writes: u64,
     pub qualification_profile_write_drops: u64,
     pub qualification_query_gate_skips: u64,
+    pub miss_query_gate_skips: u64,
+    pub miss_query_reprobes: u64,
     pub hybrid_neural_windows: u64,
     pub hybrid_lookup_windows: u64,
     pub hybrid_source_switches: u64,
@@ -311,6 +313,12 @@ impl PromptLookupStats {
             qualification_query_gate_skips: self
                 .qualification_query_gate_skips
                 .saturating_sub(before.qualification_query_gate_skips),
+            miss_query_gate_skips: self
+                .miss_query_gate_skips
+                .saturating_sub(before.miss_query_gate_skips),
+            miss_query_reprobes: self
+                .miss_query_reprobes
+                .saturating_sub(before.miss_query_reprobes),
             hybrid_neural_windows: self
                 .hybrid_neural_windows
                 .saturating_sub(before.hybrid_neural_windows),
@@ -471,6 +479,12 @@ impl PromptLookupStats {
         self.qualification_query_gate_skips = self
             .qualification_query_gate_skips
             .saturating_add(delta.qualification_query_gate_skips);
+        self.miss_query_gate_skips = self
+            .miss_query_gate_skips
+            .saturating_add(delta.miss_query_gate_skips);
+        self.miss_query_reprobes = self
+            .miss_query_reprobes
+            .saturating_add(delta.miss_query_reprobes);
         self.hybrid_neural_windows = self
             .hybrid_neural_windows
             .saturating_add(delta.hybrid_neural_windows);
@@ -669,6 +683,8 @@ pub(crate) struct PromptLookupQualificationStats {
     pub profile_writes: u64,
     pub profile_write_drops: u64,
     pub query_gate_skips: u64,
+    pub miss_query_gate_skips: u64,
+    pub miss_query_reprobes: u64,
 }
 
 #[derive(Debug)]
@@ -1318,6 +1334,14 @@ impl PromptLookupCostController {
         self.stats.query_gate_skips = self.stats.query_gate_skips.saturating_add(1);
     }
 
+    pub(crate) fn record_miss_query_gate_skip(&mut self) {
+        self.stats.miss_query_gate_skips = self.stats.miss_query_gate_skips.saturating_add(1);
+    }
+
+    pub(crate) fn record_miss_query_reprobe(&mut self) {
+        self.stats.miss_query_reprobes = self.stats.miss_query_reprobes.saturating_add(1);
+    }
+
     pub(crate) fn stats(&self) -> PromptLookupQualificationStats {
         self.stats
     }
@@ -1687,6 +1711,7 @@ pub(crate) struct SharedPromptLookupPool {
     access_clock: u64,
     entries_peak: usize,
     estimated_bytes_peak: usize,
+    availability_epoch: u64,
 }
 
 impl SharedPromptLookupPool {
@@ -1704,6 +1729,7 @@ impl SharedPromptLookupPool {
             access_clock: 0,
             entries_peak: 0,
             estimated_bytes_peak: 0,
+            availability_epoch: 0,
         })
     }
 
@@ -1717,6 +1743,10 @@ impl SharedPromptLookupPool {
 
     pub(crate) fn entries_peak(&self) -> usize {
         self.entries_peak
+    }
+
+    pub(crate) fn availability_epoch(&self) -> u64 {
+        self.availability_epoch
     }
 
     pub(crate) fn estimated_bytes(&self) -> usize {
@@ -1753,6 +1783,9 @@ impl SharedPromptLookupPool {
         let cleared = self.entries.len();
         self.entries.clear();
         self.ledger.clear();
+        if cleared > 0 {
+            self.bump_availability_epoch();
+        }
         cleared
     }
 
@@ -1823,6 +1856,9 @@ impl SharedPromptLookupPool {
         self.entries_peak = self.entries_peak.max(self.entries.len());
         self.compact_ledger_if_needed();
         self.refresh_estimated_bytes_peak();
+        if history.len() > self.config.min_ngram || evicted_entries > 0 {
+            self.bump_availability_epoch();
+        }
         SharedPromptLookupPublishResult {
             indexed_tokens: history.len().saturating_sub(window_start),
             evicted_entries,
@@ -1848,7 +1884,9 @@ impl SharedPromptLookupPool {
                 .get(&key)
                 .is_some_and(|candidate| candidate.expires_at_ms <= now_ms);
             if expired {
-                self.entries.remove(&key);
+                if self.entries.remove(&key).is_some() {
+                    self.bump_availability_epoch();
+                }
                 continue;
             }
             let Some(candidate) = self.entries.get_mut(&key) else {
@@ -1899,6 +1937,9 @@ impl SharedPromptLookupPool {
             .saturating_mul(numerator)
             .div_ceil(denominator.max(1));
         let evicted = self.reclaim_to(target, unix_time_ms());
+        if evicted > 0 {
+            self.bump_availability_epoch();
+        }
         self.refresh_estimated_bytes_peak();
         evicted
     }
@@ -1994,6 +2035,10 @@ impl SharedPromptLookupPool {
 
     fn refresh_estimated_bytes_peak(&mut self) {
         self.estimated_bytes_peak = self.estimated_bytes_peak.max(self.estimated_bytes());
+    }
+
+    fn bump_availability_epoch(&mut self) {
+        self.availability_epoch = self.availability_epoch.saturating_add(1);
     }
 }
 
@@ -2433,6 +2478,27 @@ mod tests {
         let evicted = pool.reclaim_fraction(1, 4);
         assert!(evicted > 0);
         assert!(pool.len() <= before.div_ceil(4));
+    }
+
+    #[test]
+    fn shared_pool_availability_epoch_tracks_publish_clear_and_pressure() {
+        let config = PromptLookupConfig {
+            cross_request: true,
+            ..cfg()
+        };
+        let mut pool = SharedPromptLookupPool::new(config).unwrap();
+        assert_eq!(pool.availability_epoch(), 0);
+
+        pool.publish_history_with_mtp_certifications(&(0..32).collect::<Vec<_>>(), &[]);
+        let published_epoch = pool.availability_epoch();
+        assert!(published_epoch > 0);
+
+        assert!(pool.reclaim_fraction(1, 2) > 0);
+        let reclaimed_epoch = pool.availability_epoch();
+        assert!(reclaimed_epoch > published_epoch);
+
+        assert!(pool.clear() > 0);
+        assert!(pool.availability_epoch() > reclaimed_epoch);
     }
 
     #[test]

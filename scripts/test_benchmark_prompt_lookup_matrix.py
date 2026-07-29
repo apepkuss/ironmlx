@@ -270,6 +270,8 @@ class BenchmarkPromptLookupMatrixTests(unittest.TestCase):
                 "hybrid_neural_windows": 40,
                 "hybrid_lookup_windows": 10,
                 "qualification_query_gate_skips": 100,
+                "miss_query_gate_skips": 3,
+                "miss_query_reprobes": 1,
                 "local_source": {
                     "queries": 70,
                     "hits": 40,
@@ -311,6 +313,8 @@ class BenchmarkPromptLookupMatrixTests(unittest.TestCase):
                 "hybrid_neural_windows": 46,
                 "hybrid_lookup_windows": 13,
                 "qualification_query_gate_skips": 124,
+                "miss_query_gate_skips": 11,
+                "miss_query_reprobes": 4,
                 "shared_clear_count": 2,
                 "shared_cleared_entries": 10,
                 "index_entries_current": 0,
@@ -379,6 +383,8 @@ class BenchmarkPromptLookupMatrixTests(unittest.TestCase):
         self.assertEqual(
             delta["prompt_lookup"]["qualification_query_gate_skips"], 24
         )
+        self.assertEqual(delta["prompt_lookup"]["miss_query_gate_skips"], 8)
+        self.assertEqual(delta["prompt_lookup"]["miss_query_reprobes"], 3)
         self.assertEqual(delta["prompt_lookup"]["shared_entries_current"], 40)
         self.assertEqual(delta["prompt_lookup"]["shared_entries_peak"], 64)
         self.assertEqual(delta["prompt_lookup"]["shared_clear_count"], 2)

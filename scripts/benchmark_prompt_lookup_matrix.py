@@ -693,6 +693,8 @@ def health_delta(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[str, Any
         "hybrid_neural_rebases",
         "hybrid_neural_rebase_us",
         "qualification_query_gate_skips",
+        "miss_query_gate_skips",
+        "miss_query_reprobes",
         "shared_queries",
         "shared_hits",
         "shared_misses",
@@ -1068,6 +1070,12 @@ def aggregate_rows(
             "qualification_query_gate_skips": sum(
                 item["qualification_query_gate_skips"] for item in lookup_deltas
             ),
+            "miss_query_gate_skips": sum(
+                item["miss_query_gate_skips"] for item in lookup_deltas
+            ),
+            "miss_query_reprobes": sum(
+                item["miss_query_reprobes"] for item in lookup_deltas
+            ),
             "local_queries": sum(item["queries"] for item in local_deltas),
             "local_hits": sum(item["hits"] for item in local_deltas),
             "local_misses": sum(item["misses"] for item in local_deltas),
@@ -1344,6 +1352,8 @@ def build_comparisons(
                 "qualification_query_gate_skips": row.get(
                     "qualification_query_gate_skips", 0
                 ),
+                "miss_query_gate_skips": row.get("miss_query_gate_skips", 0),
+                "miss_query_reprobes": row.get("miss_query_reprobes", 0),
                 "local_queries": row.get("local_queries", 0),
                 "local_hits": row.get("local_hits", 0),
                 "local_misses": row.get("local_misses", 0),

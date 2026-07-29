@@ -634,6 +634,8 @@ impl SchedulerActorMtpCounters {
         stats.qualification_profile_writes = qualification.profile_writes;
         stats.qualification_profile_write_drops = qualification.profile_write_drops;
         stats.qualification_query_gate_skips = qualification.query_gate_skips;
+        stats.miss_query_gate_skips = qualification.miss_query_gate_skips;
+        stats.miss_query_reprobes = qualification.miss_query_reprobes;
     }
 
     fn store_prompt_lookup_hybrid_stats(&self, hybrid: PromptLookupHybridStats) {
@@ -723,7 +725,11 @@ struct SchedulerActorPromptLookup {
     cost_controller: PromptLookupCostController,
     measured_cycle: Option<PromptLookupMeasuredCycle>,
     query_hint: Option<PromptLookupQueryHint>,
+    miss_query_hint: Option<PromptLookupMissQueryHint>,
 }
+
+const PROMPT_LOOKUP_MISS_INITIAL_REPROBE_TOKENS: usize = 2;
+const PROMPT_LOOKUP_MISS_MAX_REPROBE_TOKENS: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PromptLookupQueryScope {
@@ -743,6 +749,66 @@ impl PromptLookupQueryHint {
         scope: &PromptLookupQueryScope,
     ) -> Option<PromptLookupQualificationRegime> {
         (self.scope == *scope).then_some(self.proposal_regime)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PromptLookupMissQueryScope {
+    base_regime: PromptLookupQualificationRegime,
+    request_progress: Vec<(RequestId, usize)>,
+    allow_cross_request: bool,
+    shared_availability_epoch: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PromptLookupMissQueryHint {
+    scope: PromptLookupMissQueryScope,
+    reprobe_after_tokens: usize,
+}
+
+impl PromptLookupMissQueryHint {
+    fn identity_matches(&self, scope: &PromptLookupMissQueryScope) -> bool {
+        self.scope.base_regime == scope.base_regime
+            && self.scope.allow_cross_request == scope.allow_cross_request
+            && self.scope.shared_availability_epoch == scope.shared_availability_epoch
+            && self.scope.request_progress.len() == scope.request_progress.len()
+            && self
+                .scope
+                .request_progress
+                .iter()
+                .zip(&scope.request_progress)
+                .all(|((previous_id, previous_len), (current_id, current_len))| {
+                    previous_id == current_id && current_len >= previous_len
+                })
+    }
+
+    fn should_skip(&self, scope: &PromptLookupMissQueryScope) -> bool {
+        self.identity_matches(scope)
+            && self
+                .scope
+                .request_progress
+                .iter()
+                .zip(&scope.request_progress)
+                .all(|((_, previous_len), (_, current_len))| {
+                    current_len.saturating_sub(*previous_len) < self.reprobe_after_tokens
+                })
+    }
+
+    fn after_miss(
+        scope: PromptLookupMissQueryScope,
+        previous: Option<&PromptLookupMissQueryHint>,
+    ) -> Self {
+        let reprobe_after_tokens = previous
+            .filter(|hint| hint.identity_matches(&scope))
+            .map_or(PROMPT_LOOKUP_MISS_INITIAL_REPROBE_TOKENS, |hint| {
+                hint.reprobe_after_tokens
+                    .saturating_mul(2)
+                    .min(PROMPT_LOOKUP_MISS_MAX_REPROBE_TOKENS)
+            });
+        Self {
+            scope,
+            reprobe_after_tokens,
+        }
     }
 }
 
@@ -959,6 +1025,24 @@ impl SchedulerActorPromptLookup {
             cost_controller: PromptLookupCostController::new(qualification)?,
             measured_cycle: None,
             query_hint: None,
+            miss_query_hint: None,
+        })
+    }
+
+    fn miss_query_scope<M: Model>(
+        sched: &Scheduler<M>,
+        base_regime: Option<PromptLookupQualificationRegime>,
+        allow_cross_request: bool,
+    ) -> Option<PromptLookupMissQueryScope> {
+        let base_regime = base_regime?;
+        let request_progress = sched.prompt_lookup_active_request_progress();
+        (!request_progress.is_empty()).then_some(PromptLookupMissQueryScope {
+            base_regime,
+            request_progress,
+            allow_cross_request,
+            shared_availability_epoch: allow_cross_request
+                .then(|| sched.shared_prompt_lookup_availability_epoch())
+                .flatten(),
         })
     }
 
@@ -980,9 +1064,13 @@ impl SchedulerActorPromptLookup {
     ) -> Result<PromptLookupWindowDecision> {
         let stats_before = sched.prompt_lookup_stats().unwrap_or_default();
         let base_regime = sched.prompt_lookup_qualification_regime();
+        let miss_query_scope = Self::miss_query_scope(sched, base_regime, allow_cross_request);
         let query_scope = base_regime.map(|base_regime| PromptLookupQueryScope {
             base_regime,
-            owners: sched.prompt_lookup_active_request_ids(),
+            owners: miss_query_scope.as_ref().map_or_else(
+                || sched.prompt_lookup_active_request_ids(),
+                |scope| scope.request_progress.iter().map(|(id, _)| *id).collect(),
+            ),
         });
         let hinted_regime = query_scope.as_ref().and_then(|scope| {
             self.query_hint
@@ -1015,6 +1103,31 @@ impl SchedulerActorPromptLookup {
                 });
             }
         }
+        if self.miss_query_hint.as_ref().is_some_and(|hint| {
+            miss_query_scope
+                .as_ref()
+                .is_some_and(|scope| hint.should_skip(scope))
+        }) {
+            self.cost_controller.record_miss_query_gate_skip();
+            sched.discard_prepared_prompt_lookup_window();
+            return Ok(PromptLookupWindowDecision {
+                action: PromptLookupCostAction::Ordinary,
+                regime: base_regime,
+                proposal_elapsed_ns: 0,
+                stats_before,
+                fallback_to_baseline: true,
+            });
+        }
+        if let Some(hint) = self.miss_query_hint.as_ref() {
+            if miss_query_scope
+                .as_ref()
+                .is_some_and(|scope| hint.identity_matches(scope))
+            {
+                self.cost_controller.record_miss_query_reprobe();
+            } else {
+                self.miss_query_hint = None;
+            }
+        }
 
         let proposal_started = Instant::now();
         let mut has_drafts = sched.prepare_prompt_lookup_batch_window(allow_cross_request)?;
@@ -1027,6 +1140,11 @@ impl SchedulerActorPromptLookup {
             .flatten()
         else {
             self.query_hint = None;
+            let miss_query_scope = Self::miss_query_scope(sched, base_regime, allow_cross_request);
+            let previous_miss_query_hint = self.miss_query_hint.take();
+            self.miss_query_hint = miss_query_scope.map(|scope| {
+                PromptLookupMissQueryHint::after_miss(scope, previous_miss_query_hint.as_ref())
+            });
             sched.discard_prepared_prompt_lookup_window();
             return Ok(PromptLookupWindowDecision {
                 action: PromptLookupCostAction::Ordinary,
@@ -1036,6 +1154,7 @@ impl SchedulerActorPromptLookup {
                 fallback_to_baseline: true,
             });
         };
+        self.miss_query_hint = None;
         self.query_hint = query_scope.map(|scope| PromptLookupQueryHint {
             scope,
             proposal_regime: regime,
@@ -1262,6 +1381,7 @@ where
         self.defer_speculation_once = true;
         self.measured_cycle = None;
         self.query_hint = None;
+        self.miss_query_hint = None;
         self.publish_stats(sched, counters);
         Ok(events)
     }
@@ -1380,6 +1500,7 @@ where
         self.defer_speculation_once = true;
         self.measured_cycle = None;
         self.query_hint = None;
+        self.miss_query_hint = None;
         self.publish_stats(sched, counters);
         Ok(result)
     }
@@ -1647,6 +1768,7 @@ where
         self.measured_cycle = None;
         self.lookup_episode = None;
         self.prompt_lookup.query_hint = None;
+        self.prompt_lookup.miss_query_hint = None;
         self.prompt_lookup.publish_stats(sched, counters);
         counters.store_prompt_lookup_hybrid_stats(self.stats);
         Ok(events)
@@ -1930,6 +2052,7 @@ where
         self.measured_cycle = None;
         self.lookup_episode = None;
         self.prompt_lookup.query_hint = None;
+        self.prompt_lookup.miss_query_hint = None;
         self.prompt_lookup.publish_stats(sched, counters);
         counters.store_prompt_lookup_hybrid_stats(self.stats);
         Ok(result)
@@ -2186,6 +2309,7 @@ impl SchedulerActorMtpMode<crate::models::Gemma4Model> for SchedulerActorGemma4P
             self.measured_cycle = None;
             self.lookup_episode = None;
             self.prompt_lookup.query_hint = None;
+            self.prompt_lookup.miss_query_hint = None;
             self.prompt_lookup.publish_stats(sched, counters);
             counters.store_prompt_lookup_hybrid_stats(self.stats);
         }
@@ -2398,6 +2522,7 @@ impl SchedulerActorMtpMode<crate::models::Gemma4Model> for SchedulerActorGemma4P
         self.measured_cycle = None;
         self.lookup_episode = None;
         self.prompt_lookup.query_hint = None;
+        self.prompt_lookup.miss_query_hint = None;
         self.prompt_lookup.publish_stats(sched, counters);
         counters.store_prompt_lookup_hybrid_stats(self.stats);
         Ok(result)
@@ -5999,6 +6124,127 @@ mod tests {
     }
 
     #[test]
+    fn prompt_lookup_miss_query_hint_uses_bounded_progress_and_invalidates_identity() {
+        let base = PromptLookupQualificationRegime::new(2, 1024, Sampler::greedy());
+        let scope = PromptLookupMissQueryScope {
+            base_regime: base,
+            request_progress: vec![(RequestId(11), 100), (RequestId(12), 200)],
+            allow_cross_request: true,
+            shared_availability_epoch: Some(3),
+        };
+        let first = PromptLookupMissQueryHint::after_miss(scope.clone(), None);
+        assert_eq!(first.reprobe_after_tokens, 2);
+
+        let mut progressed = scope.clone();
+        progressed.request_progress[0].1 += 1;
+        assert!(first.should_skip(&progressed));
+        progressed.request_progress[0].1 += 1;
+        assert!(!first.should_skip(&progressed));
+
+        let second = PromptLookupMissQueryHint::after_miss(progressed.clone(), Some(&first));
+        assert_eq!(second.reprobe_after_tokens, 4);
+        progressed.request_progress[1].1 += 3;
+        assert!(second.should_skip(&progressed));
+        progressed.request_progress[1].1 += 1;
+        assert!(!second.should_skip(&progressed));
+
+        let third = PromptLookupMissQueryHint::after_miss(progressed.clone(), Some(&second));
+        assert_eq!(third.reprobe_after_tokens, 8);
+        let capped = PromptLookupMissQueryHint::after_miss(progressed.clone(), Some(&third));
+        assert_eq!(capped.reprobe_after_tokens, 8);
+
+        let mut changed_epoch = progressed.clone();
+        changed_epoch.shared_availability_epoch = Some(4);
+        assert!(!capped.identity_matches(&changed_epoch));
+        assert!(!capped.should_skip(&changed_epoch));
+
+        let mut changed_owner = progressed;
+        changed_owner.request_progress[1].0 = RequestId(13);
+        assert!(!capped.identity_matches(&changed_owner));
+        assert!(!capped.should_skip(&changed_owner));
+    }
+
+    #[test]
+    fn prompt_lookup_miss_query_gate_skips_repeated_actor_query() {
+        let profile_path = std::env::temp_dir().join(format!(
+            "ironmlx-miss-query-gate-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        let qualification = PromptLookupQualificationRuntimeConfig::for_test(
+            "miss-query-gate",
+            profile_path.clone(),
+        );
+        let cfg = PromptLookupConfig {
+            min_ngram: 2,
+            max_ngram: 3,
+            max_draft_tokens: 3,
+            history_window_tokens: 64,
+            max_index_entries: 128,
+            cross_request: false,
+        };
+        let mut mode = SchedulerActorPromptLookup::new(cfg, qualification).expect("lookup mode");
+        let mut scheduler = Scheduler::<SchedulerActorFakeModel>::new(
+            1,
+            32,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler");
+        let mut request = mk_req(1);
+        request.prompt_ids = vec![1, 2, 4, 5, 6];
+        scheduler.admit(request).expect("admit");
+        let counters = test_mtp_counters();
+        mode.prefill_admitted(&mut scheduler, &SchedulerActorFakeModel, &counters)
+            .expect("prefill");
+
+        let first = mode
+            .select_prepared_window(
+                &mut scheduler,
+                &SchedulerActorFakeModel,
+                false,
+                false,
+                false,
+                false,
+            )
+            .expect("first miss");
+        assert_eq!(first.action, PromptLookupCostAction::Ordinary);
+        assert!(first.fallback_to_baseline);
+        let queries_after_first = scheduler
+            .prompt_lookup_stats()
+            .expect("lookup stats")
+            .queries;
+        assert_eq!(queries_after_first, 1);
+
+        let second = mode
+            .select_prepared_window(
+                &mut scheduler,
+                &SchedulerActorFakeModel,
+                false,
+                false,
+                false,
+                false,
+            )
+            .expect("gated miss");
+        assert_eq!(second.action, PromptLookupCostAction::Ordinary);
+        assert!(second.fallback_to_baseline);
+        assert_eq!(
+            scheduler
+                .prompt_lookup_stats()
+                .expect("lookup stats")
+                .queries,
+            queries_after_first
+        );
+        assert_eq!(mode.cost_controller.stats().miss_query_gate_skips, 1);
+        assert_eq!(mode.cost_controller.stats().miss_query_reprobes, 0);
+
+        drop(mode);
+        std::fs::remove_file(profile_path).ok();
+    }
+
+    #[test]
     fn prompt_lookup_query_gate_skips_repeated_baseline_proposal_search() {
         let profile_path = std::env::temp_dir().join(format!(
             "ironmlx-query-gate-{}-{}.json",
@@ -6248,6 +6494,8 @@ mod tests {
                 profile_writes: 4,
                 profile_write_drops: 1,
                 query_gate_skips: 5,
+                miss_query_gate_skips: 6,
+                miss_query_reprobes: 7,
             },
         );
         counters.reset_stats_baseline(None);
@@ -6275,6 +6523,8 @@ mod tests {
                 profile_writes: 4,
                 profile_write_drops: 1,
                 query_gate_skips: 5,
+                miss_query_gate_skips: 6,
+                miss_query_reprobes: 7,
             },
         );
 
@@ -6297,6 +6547,8 @@ mod tests {
         assert_eq!(stats.rejected_regimes_current, 2);
         assert_eq!(stats.qualification_profile_writes, 4);
         assert_eq!(stats.qualification_query_gate_skips, 5);
+        assert_eq!(stats.miss_query_gate_skips, 6);
+        assert_eq!(stats.miss_query_reprobes, 7);
 
         counters.reset_stats_baseline(None);
         let stats = counters
