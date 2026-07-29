@@ -231,6 +231,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             } else {
                 sendFetchResult(path: payload.path, jsonString: "null")
             }
+        case "/admin/api/prompt-lookup/clear":
+            clearSharedPromptLookup(path: payload.path)
         case "/v1/models/pin":
             setBackendPinnedModel(payload: payload, pinned: true)
         case "/v1/models/unpin":
@@ -263,6 +265,26 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         let capacity = ColdCacheCapacityPolicy.capacity(forDirectoryPath: directory)
         let json = (try? Self.jsonString(capacity)) ?? "{\"min_gb\":1,\"max_gb\":100,\"default_gb\":10,\"reserve_gb\":10}"
         sendFetchResult(path: payload.path, jsonString: json)
+    }
+
+    private func clearSharedPromptLookup(path: String) {
+        let config = configStore.load()
+        Task {
+            do {
+                let client = BackendAPIClient(host: config.host, port: config.port)
+                try await client.waitUntilReady()
+                let response = try await client.clearSharedPromptLookup()
+                let json = try Self.jsonString(response)
+                await MainActor.run {
+                    self.sendFetchResult(path: path, jsonString: json)
+                }
+            } catch {
+                let errorJSON = self.backendErrorJSON(error)
+                await MainActor.run {
+                    self.sendFetchResult(path: path, jsonString: errorJSON)
+                }
+            }
+        }
     }
 
     private func preflightBenchmark(payload: APIPostPayload) {
@@ -528,6 +550,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             parameterStore: parameterStore,
             activeKvOffloadEnabled: config.activeKvOffload == true
         )
+        let promptLookup = promptLookupConfig(for: model, instruction: instruction)
         let mtpRuntime: ModelMtpRuntime?
         do {
             mtpRuntime = try ModelMtpRuntimeResolver.runtime(
@@ -563,6 +586,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                     pinned: pinned,
                     mtpModelDir: mtpRuntime?.modelDir,
                     mtpDraftTokens: mtpRuntime?.draftTokens,
+                    promptLookup: promptLookup,
                     reloadWhenIdle: false,
                     samplingDefaults: self.parameterStore.parameters(for: model)?.samplingDefaults ?? .empty
                 )
@@ -695,6 +719,21 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         } catch {
             IronMLXAppLogger.error("Failed to persist MTP load preference for \(model): \(error)")
         }
+    }
+
+    private func promptLookupConfig(
+        for model: String,
+        instruction: ModelLoadInstruction
+    ) -> BackendPromptLookupConfig? {
+        let saved = parameterStore.parameters(for: model)
+        guard instruction.usePromptLookup ?? saved?.promptLookupEnabled ?? false else {
+            return nil
+        }
+        return BackendPromptLookupConfig(
+            crossRequest: instruction.crossRequestPromptLookup
+                ?? saved?.promptLookupCrossRequest
+                ?? false
+        )
     }
 
     private func restartBackend() {
@@ -877,6 +916,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                         pinned: config.pinnedModelReferences.contains(model),
                         mtpModelDir: mtpRuntime?.modelDir,
                         mtpDraftTokens: mtpRuntime?.draftTokens,
+                        promptLookup: self.parameterStore.parameters(for: model)?.promptLookupConfig,
                         samplingDefaults: self.parameterStore.parameters(for: model)?.samplingDefaults ?? .empty
                     )
                 } else {
@@ -938,6 +978,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                     pinned: loaded.pinned,
                     mtpModelDir: mtpRuntime?.modelDir,
                     mtpDraftTokens: mtpRuntime?.draftTokens,
+                    promptLookup: parameters.promptLookupConfig,
                     reloadWhenIdle: true,
                     samplingDefaults: parameters.samplingDefaults
                 )
@@ -1400,7 +1441,12 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                     ?? stringValue(dictionary, "model_id")
                     ?? "",
                 useMtp: boolValue(dictionary, "use_mtp"),
-                mtpModelID: stringValue(dictionary, "mtp_model_id")
+                mtpModelID: stringValue(dictionary, "mtp_model_id"),
+                usePromptLookup: boolValue(dictionary, "use_prompt_lookup"),
+                crossRequestPromptLookup: boolValue(
+                    dictionary,
+                    "cross_request_prompt_lookup"
+                )
             )
         }
         let text = body as? String ?? String(describing: body)
@@ -1409,7 +1455,9 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             return ModelLoadInstruction(
                 modelReference: decoded.model,
                 useMtp: decoded.useMtp,
-                mtpModelID: decoded.mtpModelID
+                mtpModelID: decoded.mtpModelID,
+                usePromptLookup: decoded.usePromptLookup,
+                crossRequestPromptLookup: decoded.crossRequestPromptLookup
             )
         }
         return ModelLoadInstruction(modelReference: text, useMtp: nil, mtpModelID: nil)
@@ -1436,17 +1484,37 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         var modelReference: String
         var useMtp: Bool?
         var mtpModelID: String?
+        var usePromptLookup: Bool?
+        var crossRequestPromptLookup: Bool?
+
+        init(
+            modelReference: String,
+            useMtp: Bool?,
+            mtpModelID: String?,
+            usePromptLookup: Bool? = nil,
+            crossRequestPromptLookup: Bool? = nil
+        ) {
+            self.modelReference = modelReference
+            self.useMtp = useMtp
+            self.mtpModelID = mtpModelID
+            self.usePromptLookup = usePromptLookup
+            self.crossRequestPromptLookup = crossRequestPromptLookup
+        }
     }
 
     private struct ModelLoadInstructionPayload: Decodable {
         var model: String
         var useMtp: Bool?
         var mtpModelID: String?
+        var usePromptLookup: Bool?
+        var crossRequestPromptLookup: Bool?
 
         enum CodingKeys: String, CodingKey {
             case model
             case useMtp = "use_mtp"
             case mtpModelID = "mtp_model_id"
+            case usePromptLookup = "use_prompt_lookup"
+            case crossRequestPromptLookup = "cross_request_prompt_lookup"
         }
     }
 

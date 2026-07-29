@@ -13,6 +13,8 @@ public struct ModelParameters: Codable, Equatable, Sendable {
     public var mtpEnabled: Bool?
     public var mtpModelID: String?
     public var mtpDraftTokens: String?
+    public var promptLookupEnabled: Bool?
+    public var promptLookupCrossRequest: Bool?
 
     public init(
         modelID: String,
@@ -26,7 +28,9 @@ public struct ModelParameters: Codable, Equatable, Sendable {
         repeatPenalty: String? = nil,
         mtpEnabled: Bool? = nil,
         mtpModelID: String? = nil,
-        mtpDraftTokens: String? = nil
+        mtpDraftTokens: String? = nil,
+        promptLookupEnabled: Bool? = nil,
+        promptLookupCrossRequest: Bool? = nil
     ) {
         self.modelID = modelID
         self.alias = alias
@@ -40,6 +44,8 @@ public struct ModelParameters: Codable, Equatable, Sendable {
         self.mtpEnabled = mtpEnabled
         self.mtpModelID = mtpModelID
         self.mtpDraftTokens = mtpDraftTokens
+        self.promptLookupEnabled = promptLookupEnabled
+        self.promptLookupCrossRequest = promptLookupCrossRequest
     }
 
     public var maxCacheCap: Int? {
@@ -62,6 +68,15 @@ public struct ModelParameters: Codable, Equatable, Sendable {
         positiveInt(mtpDraftTokens)
     }
 
+    public var promptLookupConfig: BackendPromptLookupConfig? {
+        guard promptLookupEnabled == true else {
+            return nil
+        }
+        return BackendPromptLookupConfig(
+            crossRequest: promptLookupCrossRequest == true
+        )
+    }
+
     enum CodingKeys: String, CodingKey {
         case modelID = "model_id"
         case alias
@@ -75,6 +90,8 @@ public struct ModelParameters: Codable, Equatable, Sendable {
         case mtpEnabled = "mtp_enabled"
         case mtpModelID = "mtp_model_id"
         case mtpDraftTokens = "mtp_draft_tokens"
+        case promptLookupEnabled = "prompt_lookup_enabled"
+        case promptLookupCrossRequest = "prompt_lookup_cross_request"
     }
 
     private func positiveInt(_ value: String?) -> Int? {

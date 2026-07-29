@@ -322,6 +322,8 @@ impl Qwen35Model {
             mtp_cache,
             target,
         )?;
+        let _product_stable_projection =
+            (mtp_hidden.shape().as_slice()[0] > 1).then(crate::nn::product_stable_qmm::scope);
         let logits = self.project_hidden_on(&mtp_hidden, target)?;
         Ok(MtpStepOutput {
             hidden_states: mtp_hidden,
@@ -997,7 +999,7 @@ impl crate::core::model::Model for Qwen35Model {
 mod tests {
     use super::*;
     use crate::nn::AttnKind;
-    use mlx::Dtype;
+    use mlx::{Array, Dtype};
     use serial_test::serial;
 
     fn make_cfg() -> Qwen35Config {
@@ -1122,6 +1124,129 @@ mod tests {
             &[1, 2, cfg.hidden_size]
         );
         assert_eq!(out.logits.shape().as_slice(), &[1, 2, cfg.vocab_size]);
+    }
+
+    fn qwen35_checkpoint(env_name: &str) -> Option<std::path::PathBuf> {
+        let path = match std::env::var(env_name) {
+            Ok(path) => std::path::PathBuf::from(path),
+            Err(_) => {
+                eprintln!("skip: set {env_name} to a local Qwen3.5 checkpoint");
+                return None;
+            }
+        };
+        if !path.exists() {
+            eprintln!("skip: {} not found", path.display());
+            return None;
+        }
+        Some(path)
+    }
+
+    fn repeat_rank3_row(row: &Array, batch: i32) -> Array {
+        let rows = std::iter::repeat_n(row, batch as usize).collect::<Vec<_>>();
+        mlx::ops::shape::concatenate(&rows, 0).expect("repeat rank-3 row")
+    }
+
+    fn slice_rank3_row(array: &Array, row: i32) -> Array {
+        let dims = array.shape();
+        let dims = dims.as_slice();
+        assert_eq!(dims.len(), 3, "expected rank-3 array");
+        mlx::ops::indexing::slice(
+            array,
+            &[row, 0_i32, 0_i32][..],
+            &[row + 1, dims[1], dims[2]][..],
+        )
+        .expect("slice rank-3 row")
+    }
+
+    fn assert_array_exact(reference: &Array, candidate: &Array, label: &str) {
+        let reference = mlx::ops::cast::astype(reference, Dtype::Float32)
+            .expect("cast reference")
+            .to_vec::<f32>()
+            .expect("read reference");
+        let candidate = mlx::ops::cast::astype(candidate, Dtype::Float32)
+            .expect("cast candidate")
+            .to_vec::<f32>()
+            .expect("read candidate");
+        assert_eq!(reference, candidate, "{label}");
+    }
+
+    #[test]
+    #[ignore = "loads full local Qwen3.5 main and MTP checkpoints"]
+    fn qwen35_product_stable_mtp_batched_matches_b1_rows_exactly() {
+        let Some(model_dir) = qwen35_checkpoint("QWEN35_MODEL") else {
+            return;
+        };
+        let Some(mtp_dir) = qwen35_checkpoint("QWEN35_MTP_MODEL") else {
+            return;
+        };
+        let loader = crate::core::Loader::open(&model_dir).expect("open Qwen3.5 model");
+        let model = Qwen35Model::from_loader(&loader).expect("load Qwen3.5 model");
+        let mtp_loader = crate::core::Loader::open(&mtp_dir).expect("open Qwen3.5 MTP");
+        let mtp = model.load_mtp_head(&mtp_loader).expect("load Qwen3.5 MTP");
+        let key = mlx::random::key(20260729).expect("random key");
+        let hidden_row = mlx::random::normal()
+            .shape((1_i32, 1_i32, model.config().hidden_size))
+            .dtype(model.hidden_dtype())
+            .key(&key)
+            .sample()
+            .expect("sample hidden row");
+        let token_row: Array = (&[100_u32][..], &[1_i32, 1_i32][..])
+            .try_into()
+            .expect("token row");
+        let position_row = crate::core::generate::build_position_ids(0, 1).expect("position row");
+        let reference = model
+            .mtp_forward_on(
+                &mtp,
+                &hidden_row,
+                &token_row,
+                &position_row,
+                None,
+                None,
+                mlx::StreamOrDevice::default(),
+            )
+            .expect("B1 MTP reference");
+
+        for batch in [2_i32, 4, 8] {
+            let hidden = repeat_rank3_row(&hidden_row, batch);
+            let token_values = vec![100_u32; batch as usize];
+            let tokens: Array = (&token_values[..], &[batch, 1_i32][..])
+                .try_into()
+                .expect("batched tokens");
+            let positions =
+                mlx::ops::shape::broadcast_to(&position_row, &[3_i32, batch, 1_i32][..])
+                    .expect("batched positions");
+            let candidate = model
+                .mtp_forward_on(
+                    &mtp,
+                    &hidden,
+                    &tokens,
+                    &positions,
+                    None,
+                    None,
+                    mlx::StreamOrDevice::default(),
+                )
+                .expect("batched product-stable MTP");
+            mlx::transforms::eval(&[
+                &reference.hidden_states,
+                &reference.logits,
+                &candidate.hidden_states,
+                &candidate.logits,
+            ])
+            .expect("evaluate MTP outputs");
+
+            for row in 0..batch {
+                assert_array_exact(
+                    &reference.hidden_states,
+                    &slice_rank3_row(&candidate.hidden_states, row),
+                    &format!("B{batch} row {row} hidden state diverged from B1"),
+                );
+                assert_array_exact(
+                    &reference.logits,
+                    &slice_rank3_row(&candidate.logits, row),
+                    &format!("B{batch} row {row} logits diverged from B1"),
+                );
+            }
+        }
     }
 
     /// Integration test: text-only `forward_vl` (pixel_values=None) must produce

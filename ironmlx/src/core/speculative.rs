@@ -1417,6 +1417,15 @@ pub(crate) struct MtpDraftPolicyState {
     cooldown_windows: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MtpDraftPolicySnapshot {
+    max_draft_tokens: usize,
+    current_budget: usize,
+    acceptance_ewma_bits: Option<u64>,
+    overhead_ratio_ewma_bits: Option<u64>,
+    cooldown_windows: usize,
+}
+
 impl MtpDraftPolicyState {
     const EWMA_ALPHA: f64 = 0.35;
     const HIGH_OVERHEAD_RATIO: f64 = 1.50;
@@ -1439,6 +1448,36 @@ impl MtpDraftPolicyState {
 
     pub(crate) fn current_budget(&self) -> usize {
         self.current_budget.clamp(1, self.max_draft_tokens)
+    }
+
+    pub(crate) fn snapshot(&self) -> MtpDraftPolicySnapshot {
+        MtpDraftPolicySnapshot {
+            max_draft_tokens: self.max_draft_tokens,
+            current_budget: self.current_budget,
+            acceptance_ewma_bits: self.acceptance_ewma.map(f64::to_bits),
+            overhead_ratio_ewma_bits: self.overhead_ratio_ewma.map(f64::to_bits),
+            cooldown_windows: self.cooldown_windows,
+        }
+    }
+
+    pub(crate) fn restore_snapshot(&mut self, snapshot: MtpDraftPolicySnapshot) -> Result<()> {
+        anyhow::ensure!(
+            snapshot.max_draft_tokens == self.max_draft_tokens,
+            "MTP draft policy snapshot max {} != destination max {}",
+            snapshot.max_draft_tokens,
+            self.max_draft_tokens
+        );
+        anyhow::ensure!(
+            (1..=snapshot.max_draft_tokens).contains(&snapshot.current_budget),
+            "MTP draft policy snapshot budget {} is outside [1, {}]",
+            snapshot.current_budget,
+            snapshot.max_draft_tokens
+        );
+        self.current_budget = snapshot.current_budget;
+        self.acceptance_ewma = snapshot.acceptance_ewma_bits.map(f64::from_bits);
+        self.overhead_ratio_ewma = snapshot.overhead_ratio_ewma_bits.map(f64::from_bits);
+        self.cooldown_windows = snapshot.cooldown_windows;
+        Ok(())
     }
 
     pub(crate) fn observe_window(

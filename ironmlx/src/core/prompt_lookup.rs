@@ -10,10 +10,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::sampler::Sampler;
 use crate::core::scheduler_autotune::SchedulerAutotuneRuntimeProfile;
+use crate::core::speculative::MtpDraftPolicySnapshot;
 use crate::Result;
 
 const POSITIONS_PER_NGRAM: usize = 2;
-const QUALIFICATION_SCHEMA_VERSION: u32 = 5;
+const QUALIFICATION_SCHEMA_VERSION: u32 = 6;
 const QUALIFICATION_BASELINE_SAMPLES: usize = 8;
 const QUALIFICATION_PROBE_SAMPLES: usize = 8;
 const QUALIFICATION_MIN_GAIN_BPS: u64 = 300;
@@ -23,7 +24,67 @@ const QUALIFICATION_REJECTED_INITIAL_COOLDOWN_TOKENS: u64 = 512;
 const QUALIFICATION_REJECTED_MAX_COOLDOWN_TOKENS: u64 = 32 * 1_024;
 const QUALIFICATION_REVALIDATE_TOKENS: u64 = 512;
 const QUALIFICATION_PROFILE_TTL_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
-const SHARED_PROMPT_LOOKUP_TTL_MS: u64 = 60 * 60 * 1_000;
+pub(crate) const SHARED_PROMPT_LOOKUP_TTL_MS: u64 = 60 * 60 * 1_000;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PromptLookupSourceStats {
+    pub queries: u64,
+    pub hits: u64,
+    pub misses: u64,
+    pub drafted_tokens: u64,
+    pub accepted_tokens: u64,
+    pub zero_accept_windows: u64,
+    pub wasted_verify_tokens: u64,
+    pub propose_us: u64,
+    pub verify_us: u64,
+    pub rollback_us: u64,
+}
+
+impl PromptLookupSourceStats {
+    fn saturating_delta_since(self, before: Self) -> Self {
+        Self {
+            queries: self.queries.saturating_sub(before.queries),
+            hits: self.hits.saturating_sub(before.hits),
+            misses: self.misses.saturating_sub(before.misses),
+            drafted_tokens: self.drafted_tokens.saturating_sub(before.drafted_tokens),
+            accepted_tokens: self.accepted_tokens.saturating_sub(before.accepted_tokens),
+            zero_accept_windows: self
+                .zero_accept_windows
+                .saturating_sub(before.zero_accept_windows),
+            wasted_verify_tokens: self
+                .wasted_verify_tokens
+                .saturating_sub(before.wasted_verify_tokens),
+            propose_us: self.propose_us.saturating_sub(before.propose_us),
+            verify_us: self.verify_us.saturating_sub(before.verify_us),
+            rollback_us: self.rollback_us.saturating_sub(before.rollback_us),
+        }
+    }
+
+    fn accumulate_delta(&mut self, delta: Self) {
+        self.queries = self.queries.saturating_add(delta.queries);
+        self.hits = self.hits.saturating_add(delta.hits);
+        self.misses = self.misses.saturating_add(delta.misses);
+        self.drafted_tokens = self.drafted_tokens.saturating_add(delta.drafted_tokens);
+        self.accepted_tokens = self.accepted_tokens.saturating_add(delta.accepted_tokens);
+        self.zero_accept_windows = self
+            .zero_accept_windows
+            .saturating_add(delta.zero_accept_windows);
+        self.wasted_verify_tokens = self
+            .wasted_verify_tokens
+            .saturating_add(delta.wasted_verify_tokens);
+        self.propose_us = self.propose_us.saturating_add(delta.propose_us);
+        self.verify_us = self.verify_us.saturating_add(delta.verify_us);
+        self.rollback_us = self.rollback_us.saturating_add(delta.rollback_us);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PromptLookupProposalSource {
+    Local,
+    Shared,
+    Mixed,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptLookupConfig {
@@ -136,15 +197,29 @@ pub struct PromptLookupStats {
     pub hybrid_lookup_miss_fallbacks: u64,
     pub hybrid_neural_rebases: u64,
     pub hybrid_neural_rebase_us: u64,
+    pub local_source: PromptLookupSourceStats,
+    pub shared_source: PromptLookupSourceStats,
     pub shared_queries: u64,
     pub shared_hits: u64,
     pub shared_misses: u64,
+    pub shared_mtp_certified_published_windows: u64,
+    pub shared_mtp_certified_published_tokens: u64,
+    pub shared_mtp_certified_hits: u64,
+    pub shared_mtp_canonical_validation_windows: u64,
+    pub shared_mtp_canonical_validation_tokens: u64,
+    pub shared_mtp_canonical_validation_us: u64,
+    pub shared_mtp_canonical_validation_mismatches: u64,
+    pub shared_mtp_canonical_fallbacks: u64,
     pub shared_published_requests: u64,
     pub shared_published_tokens: u64,
     pub shared_entries_current: u64,
     pub shared_entries_peak: u64,
     pub shared_evictions: u64,
     pub shared_pressure_evictions: u64,
+    pub shared_clear_count: u64,
+    pub shared_cleared_entries: u64,
+    pub shared_estimated_bytes_current: u64,
+    pub shared_estimated_bytes_peak: u64,
 }
 
 impl PromptLookupStats {
@@ -250,9 +325,39 @@ impl PromptLookupStats {
             hybrid_neural_rebase_us: self
                 .hybrid_neural_rebase_us
                 .saturating_sub(before.hybrid_neural_rebase_us),
+            local_source: self
+                .local_source
+                .saturating_delta_since(before.local_source),
+            shared_source: self
+                .shared_source
+                .saturating_delta_since(before.shared_source),
             shared_queries: self.shared_queries.saturating_sub(before.shared_queries),
             shared_hits: self.shared_hits.saturating_sub(before.shared_hits),
             shared_misses: self.shared_misses.saturating_sub(before.shared_misses),
+            shared_mtp_certified_published_windows: self
+                .shared_mtp_certified_published_windows
+                .saturating_sub(before.shared_mtp_certified_published_windows),
+            shared_mtp_certified_published_tokens: self
+                .shared_mtp_certified_published_tokens
+                .saturating_sub(before.shared_mtp_certified_published_tokens),
+            shared_mtp_certified_hits: self
+                .shared_mtp_certified_hits
+                .saturating_sub(before.shared_mtp_certified_hits),
+            shared_mtp_canonical_validation_windows: self
+                .shared_mtp_canonical_validation_windows
+                .saturating_sub(before.shared_mtp_canonical_validation_windows),
+            shared_mtp_canonical_validation_tokens: self
+                .shared_mtp_canonical_validation_tokens
+                .saturating_sub(before.shared_mtp_canonical_validation_tokens),
+            shared_mtp_canonical_validation_us: self
+                .shared_mtp_canonical_validation_us
+                .saturating_sub(before.shared_mtp_canonical_validation_us),
+            shared_mtp_canonical_validation_mismatches: self
+                .shared_mtp_canonical_validation_mismatches
+                .saturating_sub(before.shared_mtp_canonical_validation_mismatches),
+            shared_mtp_canonical_fallbacks: self
+                .shared_mtp_canonical_fallbacks
+                .saturating_sub(before.shared_mtp_canonical_fallbacks),
             shared_published_requests: self
                 .shared_published_requests
                 .saturating_sub(before.shared_published_requests),
@@ -267,6 +372,16 @@ impl PromptLookupStats {
             shared_pressure_evictions: self
                 .shared_pressure_evictions
                 .saturating_sub(before.shared_pressure_evictions),
+            shared_clear_count: self
+                .shared_clear_count
+                .saturating_sub(before.shared_clear_count),
+            shared_cleared_entries: self
+                .shared_cleared_entries
+                .saturating_sub(before.shared_cleared_entries),
+            shared_estimated_bytes_current: self.shared_estimated_bytes_current,
+            shared_estimated_bytes_peak: self
+                .shared_estimated_bytes_peak
+                .max(before.shared_estimated_bytes_peak),
         }
     }
 
@@ -367,9 +482,35 @@ impl PromptLookupStats {
         self.hybrid_neural_rebase_us = self
             .hybrid_neural_rebase_us
             .saturating_add(delta.hybrid_neural_rebase_us);
+        self.local_source.accumulate_delta(delta.local_source);
+        self.shared_source.accumulate_delta(delta.shared_source);
         self.shared_queries = self.shared_queries.saturating_add(delta.shared_queries);
         self.shared_hits = self.shared_hits.saturating_add(delta.shared_hits);
         self.shared_misses = self.shared_misses.saturating_add(delta.shared_misses);
+        self.shared_mtp_certified_published_windows = self
+            .shared_mtp_certified_published_windows
+            .saturating_add(delta.shared_mtp_certified_published_windows);
+        self.shared_mtp_certified_published_tokens = self
+            .shared_mtp_certified_published_tokens
+            .saturating_add(delta.shared_mtp_certified_published_tokens);
+        self.shared_mtp_certified_hits = self
+            .shared_mtp_certified_hits
+            .saturating_add(delta.shared_mtp_certified_hits);
+        self.shared_mtp_canonical_validation_windows = self
+            .shared_mtp_canonical_validation_windows
+            .saturating_add(delta.shared_mtp_canonical_validation_windows);
+        self.shared_mtp_canonical_validation_tokens = self
+            .shared_mtp_canonical_validation_tokens
+            .saturating_add(delta.shared_mtp_canonical_validation_tokens);
+        self.shared_mtp_canonical_validation_us = self
+            .shared_mtp_canonical_validation_us
+            .saturating_add(delta.shared_mtp_canonical_validation_us);
+        self.shared_mtp_canonical_validation_mismatches = self
+            .shared_mtp_canonical_validation_mismatches
+            .saturating_add(delta.shared_mtp_canonical_validation_mismatches);
+        self.shared_mtp_canonical_fallbacks = self
+            .shared_mtp_canonical_fallbacks
+            .saturating_add(delta.shared_mtp_canonical_fallbacks);
         self.shared_published_requests = self
             .shared_published_requests
             .saturating_add(delta.shared_published_requests);
@@ -382,6 +523,16 @@ impl PromptLookupStats {
         self.shared_pressure_evictions = self
             .shared_pressure_evictions
             .saturating_add(delta.shared_pressure_evictions);
+        self.shared_clear_count = self
+            .shared_clear_count
+            .saturating_add(delta.shared_clear_count);
+        self.shared_cleared_entries = self
+            .shared_cleared_entries
+            .saturating_add(delta.shared_cleared_entries);
+        self.shared_estimated_bytes_current = delta.shared_estimated_bytes_current;
+        self.shared_estimated_bytes_peak = self
+            .shared_estimated_bytes_peak
+            .max(delta.shared_estimated_bytes_peak);
     }
 }
 
@@ -396,6 +547,8 @@ pub(crate) struct PromptLookupQualificationRegime {
     pub batch_width: usize,
     pub context_bucket_tokens: usize,
     pub sampler: PromptLookupSamplerFingerprint,
+    pub proposal_source: Option<PromptLookupProposalSource>,
+    pub verify_width: usize,
 }
 
 impl PromptLookupQualificationRegime {
@@ -404,7 +557,19 @@ impl PromptLookupQualificationRegime {
             batch_width: batch_width.max(1),
             context_bucket_tokens: context_bucket(context_tokens),
             sampler: sampler.into(),
+            proposal_source: None,
+            verify_width: 1,
         }
+    }
+
+    pub(crate) fn with_proposal(
+        mut self,
+        proposal_source: PromptLookupProposalSource,
+        verify_width: usize,
+    ) -> Self {
+        self.proposal_source = Some(proposal_source);
+        self.verify_width = verify_width.max(2);
+        self
     }
 }
 
@@ -550,12 +715,32 @@ struct PromptLookupQualificationCounters {
 }
 
 impl PromptLookupQualificationCounters {
-    fn accumulate(&mut self, delta: PromptLookupStats) {
-        self.queries = self.queries.saturating_add(delta.queries);
-        self.hits = self.hits.saturating_add(delta.hits);
-        self.misses = self.misses.saturating_add(delta.misses);
-        self.drafted_tokens = self.drafted_tokens.saturating_add(delta.drafted_tokens);
-        self.accepted_tokens = self.accepted_tokens.saturating_add(delta.accepted_tokens);
+    fn accumulate(&mut self, delta: PromptLookupStats, source: Option<PromptLookupProposalSource>) {
+        let source_delta = match source {
+            Some(PromptLookupProposalSource::Local) => delta.local_source,
+            Some(PromptLookupProposalSource::Shared) => delta.shared_source,
+            Some(PromptLookupProposalSource::Mixed) | None => PromptLookupSourceStats {
+                queries: delta.queries,
+                hits: delta.hits,
+                misses: delta.misses,
+                drafted_tokens: delta.drafted_tokens,
+                accepted_tokens: delta.accepted_tokens,
+                zero_accept_windows: delta.zero_accept_windows,
+                wasted_verify_tokens: delta.rejected_tokens,
+                propose_us: delta.propose_us,
+                verify_us: delta.verify_round_us,
+                rollback_us: delta.rollback_us,
+            },
+        };
+        self.queries = self.queries.saturating_add(source_delta.queries);
+        self.hits = self.hits.saturating_add(source_delta.hits);
+        self.misses = self.misses.saturating_add(source_delta.misses);
+        self.drafted_tokens = self
+            .drafted_tokens
+            .saturating_add(source_delta.drafted_tokens);
+        self.accepted_tokens = self
+            .accepted_tokens
+            .saturating_add(source_delta.accepted_tokens);
         self.rollback_count = self.rollback_count.saturating_add(delta.rollback_count);
     }
 
@@ -864,7 +1049,7 @@ impl PromptLookupCostController {
                 self.stats.lookup_cost_us =
                     self.stats.lookup_cost_us.saturating_add(elapsed_ns / 1_000);
                 samples.push(cost_per_token_ns);
-                counters.accumulate(prompt_lookup_delta);
+                counters.accumulate(prompt_lookup_delta, regime.proposal_source);
                 if samples.len() >= QUALIFICATION_PROBE_SAMPLES {
                     let baseline = *baseline_cost_per_token_ns;
                     let lookup = median(samples);
@@ -928,7 +1113,7 @@ impl PromptLookupCostController {
                     self.stats.lookup_cost_us.saturating_add(elapsed_ns / 1_000);
                 rolling_lookup_samples.push_back(cost_per_token_ns);
                 let mut counter_delta = PromptLookupQualificationCounters::default();
-                counter_delta.accumulate(prompt_lookup_delta);
+                counter_delta.accumulate(prompt_lookup_delta, regime.proposal_source);
                 rolling_counters.push_back(counter_delta);
                 while rolling_lookup_samples.len() > QUALIFICATION_PROBE_SAMPLES {
                     rolling_lookup_samples.pop_front();
@@ -1384,6 +1569,49 @@ fn unix_time_ms() -> u64 {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct NgramKey(Box<[u32]>);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PromptLookupHistoryFingerprint {
+    len: usize,
+    lane0: u64,
+    lane1: u64,
+}
+
+impl PromptLookupHistoryFingerprint {
+    const LANE0_SEED: u64 = 0xcbf2_9ce4_8422_2325;
+    const LANE1_SEED: u64 = 0x6c62_272e_07bb_0142;
+    const LANE0_PRIME: u64 = 0x0000_0100_0000_01b3;
+    const LANE1_PRIME: u64 = 0x9e37_79b1_85eb_ca87;
+
+    fn new() -> Self {
+        Self {
+            len: 0,
+            lane0: Self::LANE0_SEED,
+            lane1: Self::LANE1_SEED,
+        }
+    }
+
+    fn push(&mut self, token: u32) {
+        let position = self.len as u64;
+        let value = u64::from(token) | (position.rotate_left(17) << 32);
+        self.lane0 ^= value;
+        self.lane0 = self.lane0.wrapping_mul(Self::LANE0_PRIME);
+        self.lane0 ^= self.lane0 >> 32;
+        self.lane1 ^= value.rotate_left(29) ^ position.wrapping_mul(Self::LANE0_PRIME);
+        self.lane1 = self.lane1.rotate_left(23).wrapping_mul(Self::LANE1_PRIME);
+        self.lane1 ^= self.lane1 >> 29;
+        self.len = self.len.saturating_add(1);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_history(history: &[u32]) -> Self {
+        let mut fingerprint = Self::new();
+        for &token in history {
+            fingerprint.push(token);
+        }
+        fingerprint
+    }
+}
+
 #[derive(Debug, Clone)]
 struct IndexLedgerEntry {
     key: NgramKey,
@@ -1394,6 +1622,9 @@ struct IndexLedgerEntry {
 struct SharedPromptLookupCandidate {
     id: u64,
     draft: Box<[u32]>,
+    mtp_certified_draft_len: usize,
+    mtp_certified_history: Option<PromptLookupHistoryFingerprint>,
+    mtp_policy_snapshot: Option<MtpDraftPolicySnapshot>,
     expires_at_ms: u64,
     last_access: u64,
 }
@@ -1410,6 +1641,29 @@ pub(crate) struct SharedPromptLookupPublishResult {
     pub evicted_entries: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SharedPromptLookupMtpCertification {
+    pub continuation: usize,
+    pub draft_len: usize,
+    pub policy_snapshot: MtpDraftPolicySnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SharedPromptLookupProposal {
+    pub ngram_size: usize,
+    pub tokens: Vec<u32>,
+    pub mtp_certified_draft_len: usize,
+    pub mtp_certified_bonus_token: Option<u32>,
+    pub mtp_policy_snapshot: Option<MtpDraftPolicySnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LocalPromptLookupProposal {
+    pub ngram_size: usize,
+    pub continuation: usize,
+    pub tokens: Vec<u32>,
+}
+
 /// Bounded CPU-only n-gram pool for immutable histories from normally
 /// completed requests. A scheduler instance is the trust-domain boundary.
 #[derive(Debug)]
@@ -1420,6 +1674,7 @@ pub(crate) struct SharedPromptLookupPool {
     next_id: u64,
     access_clock: u64,
     entries_peak: usize,
+    estimated_bytes_peak: usize,
 }
 
 impl SharedPromptLookupPool {
@@ -1436,6 +1691,7 @@ impl SharedPromptLookupPool {
             next_id: 1,
             access_clock: 0,
             entries_peak: 0,
+            estimated_bytes_peak: 0,
         })
     }
 
@@ -1451,9 +1707,60 @@ impl SharedPromptLookupPool {
         self.entries_peak
     }
 
-    pub(crate) fn publish_history(&mut self, history: &[u32]) -> SharedPromptLookupPublishResult {
+    pub(crate) fn estimated_bytes(&self) -> usize {
+        let entry_bytes = self
+            .entries
+            .iter()
+            .map(|(key, candidate)| {
+                std::mem::size_of::<(NgramKey, SharedPromptLookupCandidate)>()
+                    .saturating_add(key.0.len().saturating_mul(std::mem::size_of::<u32>()))
+                    .saturating_add(
+                        candidate
+                            .draft
+                            .len()
+                            .saturating_mul(std::mem::size_of::<u32>()),
+                    )
+            })
+            .sum::<usize>();
+        let ledger_bytes = self
+            .ledger
+            .iter()
+            .map(|entry| {
+                std::mem::size_of::<SharedPromptLookupLedgerEntry>()
+                    .saturating_add(entry.key.0.len().saturating_mul(std::mem::size_of::<u32>()))
+            })
+            .sum::<usize>();
+        entry_bytes.saturating_add(ledger_bytes)
+    }
+
+    pub(crate) fn estimated_bytes_peak(&self) -> usize {
+        self.estimated_bytes_peak
+    }
+
+    pub(crate) fn clear(&mut self) -> usize {
+        let cleared = self.entries.len();
+        self.entries.clear();
+        self.ledger.clear();
+        cleared
+    }
+
+    pub(crate) fn publish_history_with_mtp_certifications(
+        &mut self,
+        history: &[u32],
+        mtp_certifications: &[SharedPromptLookupMtpCertification],
+    ) -> SharedPromptLookupPublishResult {
         let now_ms = unix_time_ms();
         let mut evicted_entries = self.prune_expired(now_ms);
+        let prefix_fingerprints = (!mtp_certifications.is_empty()).then(|| {
+            let mut fingerprints = Vec::with_capacity(history.len().saturating_add(1));
+            let mut fingerprint = PromptLookupHistoryFingerprint::new();
+            fingerprints.push(fingerprint);
+            for &token in history {
+                fingerprint.push(token);
+                fingerprints.push(fingerprint);
+            }
+            fingerprints
+        });
         let window_start = history
             .len()
             .saturating_sub(self.config.history_window_tokens);
@@ -1464,25 +1771,58 @@ impl SharedPromptLookupPool {
             if continuation == draft_end {
                 continue;
             }
+            let mtp_certified_draft_len = mtp_certifications
+                .iter()
+                .filter(|certification| certification.continuation == continuation)
+                .map(|certification| certification.draft_len)
+                .max()
+                .unwrap_or(0)
+                .min(draft_end.saturating_sub(continuation));
+            let mtp_certified_history = (mtp_certified_draft_len > 0)
+                .then(|| {
+                    prefix_fingerprints
+                        .as_ref()
+                        .and_then(|fingerprints| fingerprints.get(continuation))
+                        .copied()
+                })
+                .flatten();
+            let mtp_policy_snapshot = mtp_certifications
+                .iter()
+                .filter(|certification| certification.continuation == continuation)
+                .max_by_key(|certification| certification.draft_len)
+                .map(|certification| certification.policy_snapshot);
             for n in self.config.min_ngram..=self.config.max_ngram {
                 if continuation < n || continuation - n < window_start {
                     continue;
                 }
                 let key = NgramKey(history[continuation - n..continuation].into());
-                self.insert(key, history[continuation..draft_end].into(), now_ms);
+                self.insert(
+                    key,
+                    history[continuation..draft_end].into(),
+                    mtp_certified_draft_len,
+                    mtp_certified_history,
+                    mtp_policy_snapshot,
+                    now_ms,
+                );
             }
         }
         evicted_entries =
             evicted_entries.saturating_add(self.reclaim_to(self.config.max_index_entries, now_ms));
         self.entries_peak = self.entries_peak.max(self.entries.len());
         self.compact_ledger_if_needed();
+        self.refresh_estimated_bytes_peak();
         SharedPromptLookupPublishResult {
             indexed_tokens: history.len().saturating_sub(window_start),
             evicted_entries,
         }
     }
 
-    pub(crate) fn propose(&mut self, history: &[u32], limit: usize) -> Option<(usize, Vec<u32>)> {
+    pub(crate) fn propose(
+        &mut self,
+        history: &[u32],
+        history_fingerprint: PromptLookupHistoryFingerprint,
+        limit: usize,
+    ) -> Option<SharedPromptLookupProposal> {
         let max_draft = limit.min(self.config.max_draft_tokens);
         if max_draft == 0 {
             return None;
@@ -1516,8 +1856,25 @@ impl SharedPromptLookupPool {
                 .copied()
                 .take(max_draft)
                 .collect::<Vec<_>>();
+            let mtp_certified_draft_len = candidate
+                .mtp_certified_history
+                .filter(|fingerprint| *fingerprint == history_fingerprint)
+                .map_or(0, |_| candidate.mtp_certified_draft_len.min(draft.len()));
+            let mtp_policy_snapshot = (mtp_certified_draft_len > 0)
+                .then_some(candidate.mtp_policy_snapshot)
+                .flatten();
+            let mtp_certified_bonus_token = (mtp_certified_draft_len > 0)
+                .then(|| draft.get(mtp_certified_draft_len).copied())
+                .flatten();
             self.compact_ledger_if_needed();
-            return (!draft.is_empty()).then_some((n, draft));
+            self.refresh_estimated_bytes_peak();
+            return (!draft.is_empty()).then_some(SharedPromptLookupProposal {
+                ngram_size: n,
+                tokens: draft,
+                mtp_certified_draft_len,
+                mtp_certified_bonus_token,
+                mtp_policy_snapshot,
+            });
         }
         self.compact_ledger_if_needed();
         None
@@ -1529,16 +1886,29 @@ impl SharedPromptLookupPool {
             .len()
             .saturating_mul(numerator)
             .div_ceil(denominator.max(1));
-        self.reclaim_to(target, unix_time_ms())
+        let evicted = self.reclaim_to(target, unix_time_ms());
+        self.refresh_estimated_bytes_peak();
+        evicted
     }
 
-    fn insert(&mut self, key: NgramKey, draft: Box<[u32]>, now_ms: u64) {
+    fn insert(
+        &mut self,
+        key: NgramKey,
+        draft: Box<[u32]>,
+        mtp_certified_draft_len: usize,
+        mtp_certified_history: Option<PromptLookupHistoryFingerprint>,
+        mtp_policy_snapshot: Option<MtpDraftPolicySnapshot>,
+        now_ms: u64,
+    ) {
         self.access_clock = self.access_clock.saturating_add(1);
         self.next_id = self.next_id.saturating_add(1);
         let id = self.next_id;
         let candidate = SharedPromptLookupCandidate {
             id,
             draft,
+            mtp_certified_draft_len,
+            mtp_certified_history,
+            mtp_policy_snapshot,
             expires_at_ms: now_ms.saturating_add(SHARED_PROMPT_LOOKUP_TTL_MS),
             last_access: self.access_clock,
         };
@@ -1609,12 +1979,17 @@ impl SharedPromptLookupPool {
         current.sort_unstable_by_key(|(last_access, _)| *last_access);
         self.ledger = current.into_iter().map(|(_, entry)| entry).collect();
     }
+
+    fn refresh_estimated_bytes_peak(&mut self) {
+        self.estimated_bytes_peak = self.estimated_bytes_peak.max(self.estimated_bytes());
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct PromptLookupRowState {
     config: PromptLookupConfig,
     history: Vec<u32>,
+    history_fingerprint: PromptLookupHistoryFingerprint,
     index: HashMap<NgramKey, VecDeque<usize>>,
     ledger: VecDeque<IndexLedgerEntry>,
     index_entries_peak: usize,
@@ -1627,6 +2002,7 @@ impl PromptLookupRowState {
         let mut state = Self {
             config,
             history: Vec::with_capacity(history.len()),
+            history_fingerprint: PromptLookupHistoryFingerprint::new(),
             index: HashMap::new(),
             ledger: VecDeque::new(),
             index_entries_peak: 0,
@@ -1646,6 +2022,10 @@ impl PromptLookupRowState {
         &self.history
     }
 
+    pub(crate) fn history_fingerprint(&self) -> PromptLookupHistoryFingerprint {
+        self.history_fingerprint
+    }
+
     pub fn index_entries(&self) -> usize {
         self.index.len()
     }
@@ -1658,7 +2038,7 @@ impl PromptLookupRowState {
         self.index_evictions
     }
 
-    pub fn propose(&self, limit: usize) -> Option<(usize, Vec<u32>)> {
+    pub(crate) fn propose(&self, limit: usize) -> Option<LocalPromptLookupProposal> {
         let max_draft = limit.min(self.config.max_draft_tokens);
         if max_draft == 0 {
             return None;
@@ -1689,10 +2069,11 @@ impl PromptLookupRowState {
                 }
             }
             if let Some((draft_len, continuation)) = best {
-                return Some((
-                    n,
-                    self.history[continuation..continuation + draft_len].to_vec(),
-                ));
+                return Some(LocalPromptLookupProposal {
+                    ngram_size: n,
+                    continuation,
+                    tokens: self.history[continuation..continuation + draft_len].to_vec(),
+                });
             }
         }
         None
@@ -1700,6 +2081,7 @@ impl PromptLookupRowState {
 
     pub fn commit(&mut self, token: u32) {
         self.history.push(token);
+        self.history_fingerprint.push(token);
         let continuation = self.history.len() - 1;
         for n in self.config.min_ngram..=self.config.max_ngram {
             if continuation < n {
@@ -1809,27 +2191,69 @@ mod tests {
     fn verify_round_time_survives_delta_and_accumulation() {
         let before = PromptLookupStats {
             verify_round_us: 100,
+            local_source: PromptLookupSourceStats {
+                queries: 2,
+                hits: 1,
+                ..PromptLookupSourceStats::default()
+            },
             ..PromptLookupStats::default()
         };
         let after = PromptLookupStats {
             verify_round_us: 175,
+            local_source: PromptLookupSourceStats {
+                queries: 5,
+                hits: 3,
+                drafted_tokens: 8,
+                accepted_tokens: 6,
+                wasted_verify_tokens: 2,
+                ..PromptLookupSourceStats::default()
+            },
+            shared_source: PromptLookupSourceStats {
+                queries: 4,
+                hits: 2,
+                zero_accept_windows: 1,
+                ..PromptLookupSourceStats::default()
+            },
             ..PromptLookupStats::default()
         };
         let delta = after.saturating_delta_since(before);
         assert_eq!(delta.verify_round_us, 75);
+        assert_eq!(delta.local_source.queries, 3);
+        assert_eq!(delta.local_source.hits, 2);
+        assert_eq!(delta.local_source.drafted_tokens, 8);
+        assert_eq!(delta.local_source.accepted_tokens, 6);
+        assert_eq!(delta.local_source.wasted_verify_tokens, 2);
+        assert_eq!(delta.shared_source.queries, 4);
+        assert_eq!(delta.shared_source.hits, 2);
+        assert_eq!(delta.shared_source.zero_accept_windows, 1);
 
         let mut aggregate = PromptLookupStats {
             verify_round_us: 25,
+            local_source: PromptLookupSourceStats {
+                queries: 7,
+                ..PromptLookupSourceStats::default()
+            },
             ..PromptLookupStats::default()
         };
         aggregate.accumulate_delta(delta);
         assert_eq!(aggregate.verify_round_us, 100);
+        assert_eq!(aggregate.local_source.queries, 10);
+        assert_eq!(aggregate.local_source.hits, 2);
+        assert_eq!(aggregate.shared_source.queries, 4);
+        assert_eq!(aggregate.shared_source.zero_accept_windows, 1);
     }
 
     #[test]
     fn proposes_continuation_for_longest_suffix_match() {
         let state = PromptLookupRowState::new(&[1, 2, 3, 4, 1, 2, 3], cfg()).unwrap();
-        assert_eq!(state.propose(4), Some((3, vec![4, 1, 2, 3])));
+        assert_eq!(
+            state.propose(4),
+            Some(LocalPromptLookupProposal {
+                ngram_size: 3,
+                continuation: 3,
+                tokens: vec![4, 1, 2, 3],
+            })
+        );
     }
 
     #[test]
@@ -1896,11 +2320,79 @@ mod tests {
             ..cfg()
         };
         let mut pool = SharedPromptLookupPool::new(config).unwrap();
-        assert_eq!(pool.propose(&[1, 2, 3], 4), None);
+        assert_eq!(
+            pool.propose(
+                &[1, 2, 3],
+                PromptLookupHistoryFingerprint::from_history(&[1, 2, 3]),
+                4,
+            ),
+            None
+        );
 
-        let published = pool.publish_history(&[1, 2, 3, 4, 5, 6]);
+        let published = pool.publish_history_with_mtp_certifications(&[1, 2, 3, 4, 5, 6], &[]);
         assert_eq!(published.indexed_tokens, 6);
-        assert_eq!(pool.propose(&[9, 1, 2, 3], 4), Some((3, vec![4, 5, 6])));
+        assert_eq!(
+            pool.propose(
+                &[9, 1, 2, 3],
+                PromptLookupHistoryFingerprint::from_history(&[9, 1, 2, 3]),
+                4,
+            ),
+            Some(SharedPromptLookupProposal {
+                ngram_size: 3,
+                tokens: vec![4, 5, 6],
+                mtp_certified_draft_len: 0,
+                mtp_certified_bonus_token: None,
+                mtp_policy_snapshot: None,
+            })
+        );
+    }
+
+    #[test]
+    fn shared_pool_preserves_mtp_certification_for_the_exact_continuation() {
+        let config = PromptLookupConfig {
+            cross_request: true,
+            ..cfg()
+        };
+        let mut pool = SharedPromptLookupPool::new(config).unwrap();
+        let policy_snapshot = crate::core::speculative::MtpDraftPolicyState::new(4).snapshot();
+        pool.publish_history_with_mtp_certifications(
+            &[1, 2, 3, 4, 5, 6],
+            &[SharedPromptLookupMtpCertification {
+                continuation: 3,
+                draft_len: 2,
+                policy_snapshot,
+            }],
+        );
+
+        assert_eq!(
+            pool.propose(
+                &[1, 2, 3],
+                PromptLookupHistoryFingerprint::from_history(&[1, 2, 3]),
+                4,
+            ),
+            Some(SharedPromptLookupProposal {
+                ngram_size: 3,
+                tokens: vec![4, 5, 6],
+                mtp_certified_draft_len: 2,
+                mtp_certified_bonus_token: Some(6),
+                mtp_policy_snapshot: Some(policy_snapshot),
+            })
+        );
+        assert_eq!(
+            pool.propose(
+                &[9, 1, 2, 3],
+                PromptLookupHistoryFingerprint::from_history(&[9, 1, 2, 3]),
+                4,
+            ),
+            Some(SharedPromptLookupProposal {
+                ngram_size: 3,
+                tokens: vec![4, 5, 6],
+                mtp_certified_draft_len: 0,
+                mtp_certified_bonus_token: None,
+                mtp_policy_snapshot: None,
+            }),
+            "matching only the n-gram must not inherit MTP certification from another history"
+        );
     }
 
     #[test]
@@ -1911,7 +2403,8 @@ mod tests {
             ..cfg()
         };
         let mut pool = SharedPromptLookupPool::new(config).unwrap();
-        let published = pool.publish_history(&(0..32).collect::<Vec<_>>());
+        let published =
+            pool.publish_history_with_mtp_certifications(&(0..32).collect::<Vec<_>>(), &[]);
         assert!(pool.len() <= config.max_index_entries);
         assert!(published.evicted_entries > 0);
     }
@@ -1923,7 +2416,7 @@ mod tests {
             ..cfg()
         };
         let mut pool = SharedPromptLookupPool::new(config).unwrap();
-        pool.publish_history(&(0..32).collect::<Vec<_>>());
+        pool.publish_history_with_mtp_certifications(&(0..32).collect::<Vec<_>>(), &[]);
         let before = pool.len();
         let evicted = pool.reclaim_fraction(1, 4);
         assert!(evicted > 0);
@@ -1937,12 +2430,22 @@ mod tests {
             ..cfg()
         };
         let mut pool = SharedPromptLookupPool::new(config).unwrap();
-        pool.publish_history(&[1, 2, 3, 4, 5, 6]);
-        pool.publish_history(&[9, 1, 2, 3, 7]);
+        pool.publish_history_with_mtp_certifications(&[1, 2, 3, 4, 5, 6], &[]);
+        pool.publish_history_with_mtp_certifications(&[9, 1, 2, 3, 7], &[]);
 
         assert_eq!(
-            pool.propose(&[8, 1, 2, 3], 4),
-            Some((3, vec![4, 5, 6])),
+            pool.propose(
+                &[8, 1, 2, 3],
+                PromptLookupHistoryFingerprint::from_history(&[8, 1, 2, 3]),
+                4,
+            ),
+            Some(SharedPromptLookupProposal {
+                ngram_size: 3,
+                tokens: vec![4, 5, 6],
+                mtp_certified_draft_len: 0,
+                mtp_certified_bonus_token: None,
+                mtp_policy_snapshot: None,
+            }),
             "a recent short tail must not replace a longer candidate"
         );
 
@@ -1953,7 +2456,14 @@ mod tests {
             .max()
             .expect("published entries");
         assert!(pool.prune_expired(expires_at) > 0);
-        assert_eq!(pool.propose(&[8, 1, 2, 3], 4), None);
+        assert_eq!(
+            pool.propose(
+                &[8, 1, 2, 3],
+                PromptLookupHistoryFingerprint::from_history(&[8, 1, 2, 3]),
+                4,
+            ),
+            None
+        );
     }
 
     #[test]
@@ -2330,6 +2840,17 @@ mod tests {
                 8_000,
                 Sampler::greedy().with_temperature(0.7).with_top_p(0.9)
             )
+        );
+        let base = PromptLookupQualificationRegime::new(2, 8_000, Sampler::greedy());
+        assert_ne!(
+            base.with_proposal(PromptLookupProposalSource::Local, 3),
+            base.with_proposal(PromptLookupProposalSource::Shared, 3),
+            "local and shared proposal evidence must use independent qualification regimes"
+        );
+        assert_ne!(
+            base.with_proposal(PromptLookupProposalSource::Shared, 3),
+            base.with_proposal(PromptLookupProposalSource::Shared, 5),
+            "actual verify width must remain part of the cost regime"
         );
     }
 

@@ -169,6 +169,8 @@ impl Mtp {
         let concat = mlx::ops::shape::concatenate_on(&[&e, &h], -1, target)?;
 
         // Step 3: fc 2H -> H (no bias).
+        let _product_stable_head =
+            (concat.shape().as_slice()[0] > 1).then(crate::nn::product_stable_qmm::scope);
         let mut x = self.fc.forward_on(&concat, target)?;
 
         // Step 4: feed through N DecoderLayers, each with its own KV cache slot.

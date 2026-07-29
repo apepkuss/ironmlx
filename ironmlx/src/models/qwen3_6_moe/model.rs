@@ -618,6 +618,21 @@ mod tests {
         Some(path)
     }
 
+    fn qwen36_mtp_model_dir() -> Option<std::path::PathBuf> {
+        let path = match std::env::var("QWEN36_MOE_MTP_MODEL") {
+            Ok(path) => std::path::PathBuf::from(path),
+            Err(_) => {
+                eprintln!("skip: set QWEN36_MOE_MTP_MODEL to a local Qwen3.6 MoE MTP checkpoint");
+                return None;
+            }
+        };
+        if !path.exists() {
+            eprintln!("skip: {} not found", path.display());
+            return None;
+        }
+        Some(path)
+    }
+
     fn qwen36_long_prompt_path() -> Option<std::path::PathBuf> {
         let path = match std::env::var("QWEN36_MOE_LONG_PROMPT") {
             Ok(path) => std::path::PathBuf::from(path),
@@ -681,6 +696,18 @@ mod tests {
             .fold(0.0_f32, f32::max)
     }
 
+    fn slice_rank3_row(array: &Array, row: i32) -> Array {
+        let dims = array.shape();
+        let dims = dims.as_slice();
+        assert_eq!(dims.len(), 3, "expected rank-3 array");
+        mlx::ops::indexing::slice(
+            array,
+            &[row, 0_i32, 0_i32][..],
+            &[row + 1, dims[1], dims[2]][..],
+        )
+        .expect("slice rank-3 row")
+    }
+
     #[test]
     #[ignore = "loads a full local Qwen3.6 MoE checkpoint"]
     fn loads_qwen36_moe_real_checkpoint_with_vision() {
@@ -695,6 +722,150 @@ mod tests {
         assert!(model.vision().is_some(), "vision tower should be loaded");
         assert_eq!(model.config().num_experts, 256);
         assert_eq!(model.config().num_experts_per_tok, 8);
+    }
+
+    #[test]
+    #[ignore = "loads full local Qwen3.6 MoE main and MTP checkpoints"]
+    fn qwen36_moe_product_stable_mtp_batched_matches_b1_rows_exactly() {
+        let Some(model_dir) = qwen36_model_dir() else {
+            return;
+        };
+        let Some(mtp_dir) = qwen36_mtp_model_dir() else {
+            return;
+        };
+        let loader = crate::core::Loader::open(&model_dir).expect("open Qwen3.6 MoE model");
+        let model = Qwen36MoeModel::from_loader(&loader).expect("load Qwen3.6 MoE model");
+        let mtp_loader = crate::core::Loader::open(&mtp_dir).expect("open Qwen3.6 MoE MTP");
+        let mtp = model
+            .load_mtp_head(&mtp_loader)
+            .expect("load Qwen3.6 MoE MTP");
+        let hidden_size = model.config().hidden_size;
+        let key = mlx::random::key(20260729).expect("random key");
+        let hidden_row = mlx::random::normal()
+            .shape((1_i32, 1_i32, hidden_size))
+            .dtype(model.hidden_dtype())
+            .key(&key)
+            .sample()
+            .expect("sample hidden row");
+        let token_row: Array = (&[100_u32][..], &[1_i32, 1_i32][..])
+            .try_into()
+            .expect("token row");
+        let position_row = crate::core::generate::build_position_ids(0, 1).expect("position row");
+        let reference = model
+            .mtp_forward_on(
+                &mtp,
+                &hidden_row,
+                &token_row,
+                &position_row,
+                None,
+                None,
+                mlx::StreamOrDevice::default(),
+            )
+            .expect("B1 MTP reference");
+        let embedded_row = model
+            .text()
+            .embed_on(&token_row, mlx::StreamOrDevice::default())
+            .expect("embed B1 token");
+        let (cos_row, sin_row) = model
+            .text()
+            .mrope()
+            .cos_sin(&position_row)
+            .expect("B1 rotary tables");
+        let reference_stages = mtp
+            .debug_forward_stages_on(
+                &hidden_row,
+                &embedded_row,
+                model.text().mrope(),
+                &cos_row,
+                &sin_row,
+                None,
+                None,
+                false,
+                mlx::StreamOrDevice::default(),
+            )
+            .expect("B1 MTP stages");
+
+        for batch in [2_i32, 4, 8] {
+            let hidden_rows = std::iter::repeat_n(&hidden_row, batch as usize).collect::<Vec<_>>();
+            let hidden = mlx::ops::shape::concatenate(&hidden_rows, 0).expect("repeat hidden row");
+            let token_values = vec![100_u32; batch as usize];
+            let tokens: Array = (&token_values[..], &[batch, 1_i32][..])
+                .try_into()
+                .expect("batched tokens");
+            let positions =
+                mlx::ops::shape::broadcast_to(&position_row, &[3_i32, batch, 1_i32][..])
+                    .expect("batched positions");
+            let embedded = model
+                .text()
+                .embed_on(&tokens, mlx::StreamOrDevice::default())
+                .expect("embed batched tokens");
+            let (cos, sin) = model
+                .text()
+                .mrope()
+                .cos_sin(&positions)
+                .expect("batched rotary tables");
+            let candidate_stages = mtp
+                .debug_forward_stages_on(
+                    &hidden,
+                    &embedded,
+                    model.text().mrope(),
+                    &cos,
+                    &sin,
+                    None,
+                    None,
+                    true,
+                    mlx::StreamOrDevice::default(),
+                )
+                .expect("batched product-stable MTP stages");
+            let candidate = model
+                .mtp_forward_on(
+                    &mtp,
+                    &hidden,
+                    &tokens,
+                    &positions,
+                    None,
+                    None,
+                    mlx::StreamOrDevice::default(),
+                )
+                .expect("batched product-stable MTP");
+            mlx::transforms::eval(&[
+                &reference.hidden_states,
+                &reference.logits,
+                &candidate.hidden_states,
+                &candidate.logits,
+            ])
+            .expect("evaluate MTP outputs");
+            let mut stage_arrays = reference_stages.iter().collect::<Vec<_>>();
+            stage_arrays.extend(candidate_stages.iter());
+            mlx::transforms::eval(&stage_arrays).expect("evaluate MTP stages");
+
+            for row in 0..batch {
+                for (stage_idx, (reference_stage, candidate_stage)) in reference_stages
+                    .iter()
+                    .zip(candidate_stages.iter())
+                    .enumerate()
+                {
+                    let candidate_row = slice_rank3_row(candidate_stage, row);
+                    eprintln!(
+                        "[qwen36-moe-mtp-morphology] batch={batch} row={row} stage={stage_idx} \
+                         max_abs_diff={:.8}",
+                        logits_max_abs_diff(reference_stage, &candidate_row)
+                    );
+                }
+                let hidden_row = slice_rank3_row(&candidate.hidden_states, row);
+                assert_eq!(
+                    logits_max_abs_diff(&reference.hidden_states, &hidden_row),
+                    0.0,
+                    "Qwen3.6 MoE product-stable hidden state diverged for batch {batch} row {row}"
+                );
+                let logits_row = slice_rank3_row(&candidate.logits, row);
+                assert_eq!(
+                    logits_max_abs_diff(&reference.logits, &logits_row),
+                    0.0,
+                    "Qwen3.6 MoE product-stable logits diverged for batch {batch} row {row}"
+                );
+            }
+        }
     }
 
     fn image_placeholder_string(token_count: usize) -> String {

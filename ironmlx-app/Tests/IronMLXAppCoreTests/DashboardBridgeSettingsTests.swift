@@ -242,6 +242,20 @@ import WebKit
     #expect(!html.contains("단일 요청 최대 Token 수"))
 }
 
+@Test func dashboardExposesCrossRequestPromptLookupControlsAndClearAction() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(html.contains(#"id="modal-prompt-lookup-enabled""#))
+    #expect(html.contains(#"id="modal-prompt-lookup-cross-request""#))
+    #expect(html.contains(#"onclick="clearSharedPromptLookup()""#))
+    #expect(html.contains(#"path === '/admin/api/prompt-lookup/clear'"#))
+    #expect(html.contains("cross_request_prompt_lookup"))
+    #expect(html.contains("prompt_lookup_cleared"))
+}
+
 private func dashboardBridgeNotificationModelRoot(repoID: String) throws -> URL {
     try dashboardBridgeNotificationModelRoot(repoID: repoID, configJSON: "{}")
 }

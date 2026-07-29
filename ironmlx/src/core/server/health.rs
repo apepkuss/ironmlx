@@ -9,7 +9,9 @@ use serde::Serialize;
 
 use crate::core::cache::{ActiveKvOffloadHealth, ActiveKvOffloadSharedStats};
 use crate::core::memory_budget::system_total_ram_bytes;
-use crate::core::prompt_lookup::{PromptLookupConfig, PromptLookupStats};
+use crate::core::prompt_lookup::{
+    PromptLookupConfig, PromptLookupSourceStats, PromptLookupStats, SHARED_PROMPT_LOOKUP_TTL_MS,
+};
 
 #[derive(Debug, Serialize)]
 pub enum HealthStatus {
@@ -297,6 +299,54 @@ impl MtpHealthConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct PromptLookupSourceHealthInfo {
+    pub queries: u64,
+    pub hits: u64,
+    pub misses: u64,
+    pub drafted_tokens: u64,
+    pub accepted_tokens: u64,
+    pub zero_accept_windows: u64,
+    pub wasted_verify_tokens: u64,
+    pub propose_us: u64,
+    pub verify_us: u64,
+    pub rollback_us: u64,
+}
+
+impl PromptLookupSourceHealthInfo {
+    fn from_stats(stats: PromptLookupSourceStats) -> Self {
+        Self {
+            queries: stats.queries,
+            hits: stats.hits,
+            misses: stats.misses,
+            drafted_tokens: stats.drafted_tokens,
+            accepted_tokens: stats.accepted_tokens,
+            zero_accept_windows: stats.zero_accept_windows,
+            wasted_verify_tokens: stats.wasted_verify_tokens,
+            propose_us: stats.propose_us,
+            verify_us: stats.verify_us,
+            rollback_us: stats.rollback_us,
+        }
+    }
+
+    fn accumulate(&mut self, other: Self) {
+        self.queries = self.queries.saturating_add(other.queries);
+        self.hits = self.hits.saturating_add(other.hits);
+        self.misses = self.misses.saturating_add(other.misses);
+        self.drafted_tokens = self.drafted_tokens.saturating_add(other.drafted_tokens);
+        self.accepted_tokens = self.accepted_tokens.saturating_add(other.accepted_tokens);
+        self.zero_accept_windows = self
+            .zero_accept_windows
+            .saturating_add(other.zero_accept_windows);
+        self.wasted_verify_tokens = self
+            .wasted_verify_tokens
+            .saturating_add(other.wasted_verify_tokens);
+        self.propose_us = self.propose_us.saturating_add(other.propose_us);
+        self.verify_us = self.verify_us.saturating_add(other.verify_us);
+        self.rollback_us = self.rollback_us.saturating_add(other.rollback_us);
+    }
+}
+
 #[derive(Debug, Default, Serialize)]
 pub struct PromptLookupHealthInfo {
     pub enabled: bool,
@@ -306,6 +356,7 @@ pub struct PromptLookupHealthInfo {
     pub history_window_tokens: Option<usize>,
     pub max_index_entries: Option<usize>,
     pub cross_request: Option<bool>,
+    pub shared_ttl_ms: Option<u64>,
     pub queries: u64,
     pub hits: u64,
     pub misses: u64,
@@ -352,15 +403,29 @@ pub struct PromptLookupHealthInfo {
     pub hybrid_lookup_miss_fallbacks: u64,
     pub hybrid_neural_rebases: u64,
     pub hybrid_neural_rebase_us: u64,
+    pub local_source: PromptLookupSourceHealthInfo,
+    pub shared_source: PromptLookupSourceHealthInfo,
     pub shared_queries: u64,
     pub shared_hits: u64,
     pub shared_misses: u64,
+    pub shared_mtp_certified_published_windows: u64,
+    pub shared_mtp_certified_published_tokens: u64,
+    pub shared_mtp_certified_hits: u64,
+    pub shared_mtp_canonical_validation_windows: u64,
+    pub shared_mtp_canonical_validation_tokens: u64,
+    pub shared_mtp_canonical_validation_us: u64,
+    pub shared_mtp_canonical_validation_mismatches: u64,
+    pub shared_mtp_canonical_fallbacks: u64,
     pub shared_published_requests: u64,
     pub shared_published_tokens: u64,
     pub shared_entries_current: u64,
     pub shared_entries_peak: u64,
     pub shared_evictions: u64,
     pub shared_pressure_evictions: u64,
+    pub shared_clear_count: u64,
+    pub shared_cleared_entries: u64,
+    pub shared_estimated_bytes_current: u64,
+    pub shared_estimated_bytes_peak: u64,
 }
 
 impl PromptLookupHealthInfo {
@@ -442,15 +507,35 @@ impl PromptLookupHealthInfo {
             aggregate.hybrid_lookup_miss_fallbacks += snapshot.hybrid_lookup_miss_fallbacks;
             aggregate.hybrid_neural_rebases += snapshot.hybrid_neural_rebases;
             aggregate.hybrid_neural_rebase_us += snapshot.hybrid_neural_rebase_us;
+            aggregate.local_source.accumulate(snapshot.local_source);
+            aggregate.shared_source.accumulate(snapshot.shared_source);
             aggregate.shared_queries += snapshot.shared_queries;
             aggregate.shared_hits += snapshot.shared_hits;
             aggregate.shared_misses += snapshot.shared_misses;
+            aggregate.shared_mtp_certified_published_windows +=
+                snapshot.shared_mtp_certified_published_windows;
+            aggregate.shared_mtp_certified_published_tokens +=
+                snapshot.shared_mtp_certified_published_tokens;
+            aggregate.shared_mtp_certified_hits += snapshot.shared_mtp_certified_hits;
+            aggregate.shared_mtp_canonical_validation_windows +=
+                snapshot.shared_mtp_canonical_validation_windows;
+            aggregate.shared_mtp_canonical_validation_tokens +=
+                snapshot.shared_mtp_canonical_validation_tokens;
+            aggregate.shared_mtp_canonical_validation_us +=
+                snapshot.shared_mtp_canonical_validation_us;
+            aggregate.shared_mtp_canonical_validation_mismatches +=
+                snapshot.shared_mtp_canonical_validation_mismatches;
+            aggregate.shared_mtp_canonical_fallbacks += snapshot.shared_mtp_canonical_fallbacks;
             aggregate.shared_published_requests += snapshot.shared_published_requests;
             aggregate.shared_published_tokens += snapshot.shared_published_tokens;
             aggregate.shared_entries_current += snapshot.shared_entries_current;
             aggregate.shared_entries_peak += snapshot.shared_entries_peak;
             aggregate.shared_evictions += snapshot.shared_evictions;
             aggregate.shared_pressure_evictions += snapshot.shared_pressure_evictions;
+            aggregate.shared_clear_count += snapshot.shared_clear_count;
+            aggregate.shared_cleared_entries += snapshot.shared_cleared_entries;
+            aggregate.shared_estimated_bytes_current += snapshot.shared_estimated_bytes_current;
+            aggregate.shared_estimated_bytes_peak += snapshot.shared_estimated_bytes_peak;
         }
         if !config_mismatch {
             if let Some((min_ngram, max_ngram, max_draft_tokens, history, entries, cross_request)) =
@@ -462,6 +547,7 @@ impl PromptLookupHealthInfo {
                 aggregate.history_window_tokens = Some(history);
                 aggregate.max_index_entries = Some(entries);
                 aggregate.cross_request = Some(cross_request);
+                aggregate.shared_ttl_ms = cross_request.then_some(SHARED_PROMPT_LOOKUP_TTL_MS);
             }
         }
         aggregate
@@ -506,6 +592,10 @@ impl PromptLookupHealthConfig {
             history_window_tokens: self.config.map(|config| config.history_window_tokens),
             max_index_entries: self.config.map(|config| config.max_index_entries),
             cross_request: self.config.map(|config| config.cross_request),
+            shared_ttl_ms: self
+                .config
+                .is_some_and(|config| config.cross_request)
+                .then_some(SHARED_PROMPT_LOOKUP_TTL_MS),
             queries: stats.queries,
             hits: stats.hits,
             misses: stats.misses,
@@ -552,15 +642,30 @@ impl PromptLookupHealthConfig {
             hybrid_lookup_miss_fallbacks: stats.hybrid_lookup_miss_fallbacks,
             hybrid_neural_rebases: stats.hybrid_neural_rebases,
             hybrid_neural_rebase_us: stats.hybrid_neural_rebase_us,
+            local_source: PromptLookupSourceHealthInfo::from_stats(stats.local_source),
+            shared_source: PromptLookupSourceHealthInfo::from_stats(stats.shared_source),
             shared_queries: stats.shared_queries,
             shared_hits: stats.shared_hits,
             shared_misses: stats.shared_misses,
+            shared_mtp_certified_published_windows: stats.shared_mtp_certified_published_windows,
+            shared_mtp_certified_published_tokens: stats.shared_mtp_certified_published_tokens,
+            shared_mtp_certified_hits: stats.shared_mtp_certified_hits,
+            shared_mtp_canonical_validation_windows: stats.shared_mtp_canonical_validation_windows,
+            shared_mtp_canonical_validation_tokens: stats.shared_mtp_canonical_validation_tokens,
+            shared_mtp_canonical_validation_us: stats.shared_mtp_canonical_validation_us,
+            shared_mtp_canonical_validation_mismatches: stats
+                .shared_mtp_canonical_validation_mismatches,
+            shared_mtp_canonical_fallbacks: stats.shared_mtp_canonical_fallbacks,
             shared_published_requests: stats.shared_published_requests,
             shared_published_tokens: stats.shared_published_tokens,
             shared_entries_current: stats.shared_entries_current,
             shared_entries_peak: stats.shared_entries_peak,
             shared_evictions: stats.shared_evictions,
             shared_pressure_evictions: stats.shared_pressure_evictions,
+            shared_clear_count: stats.shared_clear_count,
+            shared_cleared_entries: stats.shared_cleared_entries,
+            shared_estimated_bytes_current: stats.shared_estimated_bytes_current,
+            shared_estimated_bytes_peak: stats.shared_estimated_bytes_peak,
         }
     }
 }
@@ -895,6 +1000,30 @@ mod tests {
             hybrid_lookup_miss_fallbacks: 3,
             hybrid_neural_rebases: 2,
             hybrid_neural_rebase_us: 29,
+            local_source: PromptLookupSourceStats {
+                queries: 10,
+                hits: 6,
+                misses: 4,
+                drafted_tokens: 12,
+                accepted_tokens: 9,
+                zero_accept_windows: 1,
+                wasted_verify_tokens: 3,
+                propose_us: 31,
+                verify_us: 37,
+                rollback_us: 2,
+            },
+            shared_source: PromptLookupSourceStats {
+                queries: 9,
+                hits: 6,
+                misses: 3,
+                drafted_tokens: 7,
+                accepted_tokens: 4,
+                zero_accept_windows: 2,
+                wasted_verify_tokens: 3,
+                propose_us: 41,
+                verify_us: 43,
+                rollback_us: 5,
+            },
             shared_queries: 9,
             shared_hits: 6,
             shared_misses: 3,
@@ -904,6 +1033,10 @@ mod tests {
             shared_entries_peak: 48,
             shared_evictions: 7,
             shared_pressure_evictions: 5,
+            shared_clear_count: 2,
+            shared_cleared_entries: 11,
+            shared_estimated_bytes_current: 4096,
+            shared_estimated_bytes_peak: 8192,
             ..PromptLookupStats::default()
         };
         let published = Arc::new(Mutex::new(Some(stats)));
@@ -917,6 +1050,10 @@ mod tests {
         assert_eq!(snapshot.prompt_lookup.max_ngram, Some(5));
         assert_eq!(snapshot.prompt_lookup.max_draft_tokens, Some(3));
         assert_eq!(snapshot.prompt_lookup.cross_request, Some(true));
+        assert_eq!(
+            snapshot.prompt_lookup.shared_ttl_ms,
+            Some(SHARED_PROMPT_LOOKUP_TTL_MS)
+        );
         assert_eq!(snapshot.prompt_lookup.queries, 11);
         assert_eq!(snapshot.prompt_lookup.hits, 7);
         assert_eq!(snapshot.prompt_lookup.misses, 4);
@@ -949,6 +1086,26 @@ mod tests {
         assert_eq!(snapshot.prompt_lookup.hybrid_lookup_miss_fallbacks, 3);
         assert_eq!(snapshot.prompt_lookup.hybrid_neural_rebases, 2);
         assert_eq!(snapshot.prompt_lookup.hybrid_neural_rebase_us, 29);
+        assert_eq!(snapshot.prompt_lookup.local_source.queries, 10);
+        assert_eq!(snapshot.prompt_lookup.local_source.hits, 6);
+        assert_eq!(snapshot.prompt_lookup.local_source.misses, 4);
+        assert_eq!(snapshot.prompt_lookup.local_source.drafted_tokens, 12);
+        assert_eq!(snapshot.prompt_lookup.local_source.accepted_tokens, 9);
+        assert_eq!(snapshot.prompt_lookup.local_source.zero_accept_windows, 1);
+        assert_eq!(snapshot.prompt_lookup.local_source.wasted_verify_tokens, 3);
+        assert_eq!(snapshot.prompt_lookup.local_source.propose_us, 31);
+        assert_eq!(snapshot.prompt_lookup.local_source.verify_us, 37);
+        assert_eq!(snapshot.prompt_lookup.local_source.rollback_us, 2);
+        assert_eq!(snapshot.prompt_lookup.shared_source.queries, 9);
+        assert_eq!(snapshot.prompt_lookup.shared_source.hits, 6);
+        assert_eq!(snapshot.prompt_lookup.shared_source.misses, 3);
+        assert_eq!(snapshot.prompt_lookup.shared_source.drafted_tokens, 7);
+        assert_eq!(snapshot.prompt_lookup.shared_source.accepted_tokens, 4);
+        assert_eq!(snapshot.prompt_lookup.shared_source.zero_accept_windows, 2);
+        assert_eq!(snapshot.prompt_lookup.shared_source.wasted_verify_tokens, 3);
+        assert_eq!(snapshot.prompt_lookup.shared_source.propose_us, 41);
+        assert_eq!(snapshot.prompt_lookup.shared_source.verify_us, 43);
+        assert_eq!(snapshot.prompt_lookup.shared_source.rollback_us, 5);
         assert_eq!(snapshot.prompt_lookup.shared_queries, 9);
         assert_eq!(snapshot.prompt_lookup.shared_hits, 6);
         assert_eq!(snapshot.prompt_lookup.shared_misses, 3);
@@ -958,6 +1115,10 @@ mod tests {
         assert_eq!(snapshot.prompt_lookup.shared_entries_peak, 48);
         assert_eq!(snapshot.prompt_lookup.shared_evictions, 7);
         assert_eq!(snapshot.prompt_lookup.shared_pressure_evictions, 5);
+        assert_eq!(snapshot.prompt_lookup.shared_clear_count, 2);
+        assert_eq!(snapshot.prompt_lookup.shared_cleared_entries, 11);
+        assert_eq!(snapshot.prompt_lookup.shared_estimated_bytes_current, 4096);
+        assert_eq!(snapshot.prompt_lookup.shared_estimated_bytes_peak, 8192);
     }
 
     #[test]

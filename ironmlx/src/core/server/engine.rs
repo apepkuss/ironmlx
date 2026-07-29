@@ -1511,6 +1511,55 @@ impl EnginePoolState {
         snapshots
     }
 
+    pub(crate) async fn clear_shared_prompt_lookup(
+        &self,
+        requested: Option<&str>,
+    ) -> Result<(usize, usize)> {
+        let requested_id = match requested {
+            Some(requested) => Some(
+                self.inner
+                    .registry
+                    .lock()
+                    .await
+                    .resolve_model_id(Some(requested))?
+                    .to_string(),
+            ),
+            None => None,
+        };
+        let slots = self.inner.slots.lock().await.clone();
+        let mut engines = Vec::new();
+        for (id, slot) in slots {
+            if requested_id
+                .as_deref()
+                .is_some_and(|requested| requested != id)
+            {
+                continue;
+            }
+            let engine = {
+                let state = slot.state.lock().await;
+                match &*state {
+                    EngineSlotState::Loaded { engine, .. } => Some(engine.clone()),
+                    _ => None,
+                }
+            };
+            if let Some(engine) = engine {
+                engines.push(engine);
+            }
+        }
+        if requested_id.is_some() && engines.is_empty() {
+            bail!(
+                "engine model `{}` is not loaded",
+                requested_id.as_deref().unwrap_or_default()
+            );
+        }
+        let mut cleared_entries = 0_usize;
+        for engine in &engines {
+            cleared_entries =
+                cleared_entries.saturating_add(engine.clear_shared_prompt_lookup().await?);
+        }
+        Ok((engines.len(), cleared_entries))
+    }
+
     async fn model_list(&self) -> OpenAiModelList {
         let mut data = Vec::new();
         let models = self.inner.registry.lock().await.servable_models_owned();
@@ -2218,6 +2267,26 @@ impl EngineSlot {
 }
 
 impl EngineVariant {
+    async fn clear_shared_prompt_lookup(&self) -> Result<usize> {
+        match self {
+            Self::Qwen35(state) => state.scheduler_handle.clear_shared_prompt_lookup().await,
+            Self::Qwen35Moe(state) => state.scheduler_handle.clear_shared_prompt_lookup().await,
+            Self::Qwen36Moe(state) => state.scheduler_handle.clear_shared_prompt_lookup().await,
+            Self::Gemma4(state) => state.scheduler_handle.clear_shared_prompt_lookup().await,
+            Self::Gemma4Drafter(state) => {
+                state
+                    .base
+                    .scheduler_handle
+                    .clear_shared_prompt_lookup()
+                    .await
+            }
+            Self::Glm4MoeLite(state) => state.scheduler_handle.clear_shared_prompt_lookup().await,
+            Self::Llama(state) => state.scheduler_handle.clear_shared_prompt_lookup().await,
+            Self::MiniCpmV46(state) => state.scheduler_handle.clear_shared_prompt_lookup().await,
+            Self::DiffusionGemma(_) => Ok(0),
+        }
+    }
+
     async fn openai_chat_completions(&self, req: openai::ChatRequest) -> Response {
         match self {
             Self::Qwen35(state) => openai::chat_completions(State(state.clone()), Json(req)).await,

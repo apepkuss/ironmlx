@@ -20,6 +20,7 @@ public protocol BackendModelLoading: Sendable {
         pinned: Bool,
         mtpModelDir: String?,
         mtpDraftTokens: Int?,
+        promptLookup: BackendPromptLookupConfig?,
         samplingDefaults: BackendSamplingDefaults
     ) async throws -> BackendModelAdminResponse
     func loadModel(
@@ -30,6 +31,7 @@ public protocol BackendModelLoading: Sendable {
         pinned: Bool,
         mtpModelDir: String?,
         mtpDraftTokens: Int?,
+        promptLookup: BackendPromptLookupConfig?,
         reloadWhenIdle: Bool,
         samplingDefaults: BackendSamplingDefaults
     ) async throws -> BackendModelAdminResponse
@@ -160,6 +162,7 @@ public struct BackendRestartCoordinator {
                         pinned: pinnedModels.contains(model),
                         mtpModelDir: mtpRuntime?.modelDir,
                         mtpDraftTokens: mtpRuntime?.draftTokens,
+                        promptLookup: parameterStore.parameters(for: model)?.promptLookupConfig,
                         reloadWhenIdle: false,
                         samplingDefaults: parameterStore.parameters(for: model)?.samplingDefaults ?? .empty
                     )

@@ -123,6 +123,34 @@ import Testing
     #expect(await client.defaultID == "mlx-community/Old-4bit")
 }
 
+@Test func benchmarkExclusiveRestorePreservesCrossRequestPromptLookup() async throws {
+    let client = MockBenchmarkModelClient(
+        health: healthSnapshot(active: 0, queued: 0),
+        loadedModels: [
+            loadedModel(
+                "mlx-community/Old-4bit",
+                path: "/models/old",
+                isDefault: true,
+                promptLookup: .crossRequest
+            ),
+        ]
+    )
+    let coordinator = BenchmarkExclusiveSessionCoordinator()
+
+    _ = try await coordinator.prepare(
+        client: client,
+        targetModel: "mlx-community/New-4bit",
+        targetModelPath: "/models/new"
+    )
+    _ = try await coordinator.restore(client: client)
+
+    let restored = try #require(
+        await client.fetchLoadedModels()
+            .first(where: { $0.id == "mlx-community/Old-4bit" })
+    )
+    #expect(restored.promptLookup == .crossRequest)
+}
+
 private actor MockBenchmarkModelClient: BackendModelManaging {
     private var health: HealthzSnapshot
     private var loadedModelsByID: [String: BackendLoadedModelInfo]
@@ -171,10 +199,13 @@ private actor MockBenchmarkModelClient: BackendModelManaging {
         modelDir: String,
         setDefault: Bool,
         maxCacheCap: Int?,
-        pinned: Bool
+        pinned: Bool,
+        promptLookup: BackendPromptLookupConfig?
     ) async throws -> BackendModelAdminResponse {
         calls.append("load:\(model):\(modelDir):\(setDefault):\(pinned)")
-        loadedModelsByID[model] = loadedModel(model, path: modelDir, isDefault: setDefault, pinned: pinned)
+        var loaded = loadedModel(model, path: modelDir, isDefault: setDefault, pinned: pinned)
+        loaded.promptLookup = promptLookup
+        loadedModelsByID[model] = loaded
         if setDefault {
             defaultModelID = model
         }
@@ -214,6 +245,19 @@ private actor MockBenchmarkModelClient: BackendModelManaging {
         return adminResponse(status: "unpinned")
     }
 
+    func clearSharedPromptLookup(
+        model: String?
+    ) async throws -> BackendPromptLookupClearResponse {
+        calls.append("clearPromptLookup:\(model ?? "all")")
+        return BackendPromptLookupClearResponse(
+            success: true,
+            status: "cleared",
+            model: model,
+            clearedModels: model == nil ? loadedModelsByID.count : 1,
+            clearedEntries: 0
+        )
+    }
+
     private func adminResponse(status: String) -> BackendModelAdminResponse {
         BackendModelAdminResponse(
             success: true,
@@ -232,7 +276,8 @@ private func loadedModel(
     _ id: String,
     path: String? = nil,
     isDefault: Bool,
-    pinned: Bool = false
+    pinned: Bool = false,
+    promptLookup: BackendPromptLookupConfig? = nil
 ) -> BackendLoadedModelInfo {
     BackendLoadedModelInfo(
         id: id,
@@ -241,7 +286,8 @@ private func loadedModel(
         architecture: "qwen",
         isDefault: isDefault,
         maxPositionEmbeddings: 32768,
-        pinned: pinned
+        pinned: pinned,
+        promptLookup: promptLookup
     )
 }
 

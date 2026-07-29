@@ -34,12 +34,13 @@ use crate::core::generate::GenerateRequest;
 use crate::core::model::Model;
 use crate::core::prompt_lookup::{
     PromptLookupConfig, PromptLookupCostAction, PromptLookupCostController,
-    PromptLookupQualificationRegime, PromptLookupQualificationRuntimeConfig,
-    PromptLookupQualificationStats, PromptLookupStats,
+    PromptLookupProposalSource, PromptLookupQualificationRegime,
+    PromptLookupQualificationRuntimeConfig, PromptLookupQualificationStats, PromptLookupStats,
 };
 use crate::core::scheduler::{
     ActiveKvParkedRequest, AdmitMidHandle, DenseVlMethods, Gemma4DrafterAdmitMidHandle,
-    ImmutablePrefixBlockStats, MtpAdmitMidHandle, Phase, RequestId, Scheduler, StepEvent,
+    ImmutablePrefixBlockStats, MtpAdmitMidHandle, Phase, PromptLookupMtpStepOutcome, RequestId,
+    Scheduler, StepEvent,
 };
 use crate::core::server::adaptive_admission::{
     AdaptiveAdmissionPolicy, AdmissionRequestShape, ROLLING_DECODE_STEPS_AFTER_ADMISSION_WORK,
@@ -187,6 +188,10 @@ pub enum SchedulerCommand {
         request: GenerateRequest,
         reply_tx: oneshot::Sender<Result<AdmitReply>>,
     },
+}
+
+pub(super) enum SchedulerControlCommand {
+    ClearSharedPromptLookup { reply_tx: oneshot::Sender<usize> },
 }
 
 /// A request parked in `driver_loop`'s admission queue while the scheduler
@@ -725,11 +730,33 @@ fn prompt_lookup_admission_forces_ordinary(
     admission_pending && !measured_cycle_active
 }
 
+fn qwen_hybrid_uses_canonical_target(
+    source: HybridDraftSource,
+    regime: Option<PromptLookupQualificationRegime>,
+) -> bool {
+    source == HybridDraftSource::PromptLookup
+        && regime.is_some_and(|regime| {
+            matches!(
+                regime.proposal_source,
+                Some(PromptLookupProposalSource::Local | PromptLookupProposalSource::Shared)
+            )
+        })
+}
+
 struct PromptLookupMeasuredCycle {
     regime: PromptLookupQualificationRegime,
+    action: PromptLookupCostAction,
     elapsed_ns: u64,
     committed_tokens: usize,
     stats_before: PromptLookupStats,
+}
+
+struct PromptLookupWindowDecision {
+    action: PromptLookupCostAction,
+    regime: Option<PromptLookupQualificationRegime>,
+    proposal_elapsed_ns: u64,
+    stats_before: PromptLookupStats,
+    fallback_to_baseline: bool,
 }
 
 #[derive(Debug, Default)]
@@ -767,7 +794,10 @@ struct SchedulerActorMtpPromptLookupHybrid<H> {
     neural: SchedulerActorMtp<H>,
     prompt_lookup: SchedulerActorPromptLookup,
     current_source: Option<HybridDraftSource>,
+    neural_dirty: bool,
+    lookup_window_canonical: bool,
     measured_cycle: Option<PromptLookupMeasuredCycle>,
+    lookup_episode: Option<PromptLookupEpisode>,
     stats: PromptLookupHybridStats,
 }
 
@@ -867,7 +897,10 @@ impl<H> SchedulerActorMtpPromptLookupHybrid<H> {
             neural: SchedulerActorMtp::new(mtp, mtp_draft_tokens),
             prompt_lookup: SchedulerActorPromptLookup::new(prompt_lookup, qualification)?,
             current_source: None,
+            neural_dirty: false,
+            lookup_window_canonical: false,
             measured_cycle: None,
+            lookup_episode: None,
             stats: PromptLookupHybridStats::default(),
         })
     }
@@ -910,6 +943,75 @@ impl SchedulerActorPromptLookup {
             sched.prompt_lookup_stats(),
             self.cost_controller.stats(),
         );
+    }
+
+    fn select_prepared_window<M: Model>(
+        &mut self,
+        sched: &mut Scheduler<M>,
+        model: &M,
+        allow_cross_request: bool,
+        capture_accepted_hidden: bool,
+        match_mtp_verify_shape: bool,
+        force_ordinary: bool,
+    ) -> Result<PromptLookupWindowDecision> {
+        let stats_before = sched.prompt_lookup_stats().unwrap_or_default();
+        let base_regime = sched.prompt_lookup_qualification_regime();
+        if force_ordinary {
+            sched.discard_prepared_prompt_lookup_window();
+            return Ok(PromptLookupWindowDecision {
+                action: PromptLookupCostAction::Ordinary,
+                regime: base_regime,
+                proposal_elapsed_ns: 0,
+                stats_before,
+                fallback_to_baseline: false,
+            });
+        }
+
+        let proposal_started = Instant::now();
+        let mut has_drafts = sched.prepare_prompt_lookup_batch_window(allow_cross_request)?;
+        if has_drafts && match_mtp_verify_shape {
+            has_drafts = sched.align_prepared_prompt_lookup_to_mtp_verify_shape()?;
+        }
+        let proposal_elapsed_ns = duration_ns(proposal_started.elapsed());
+        let Some(regime) = has_drafts
+            .then(|| sched.prompt_lookup_prepared_qualification_regime())
+            .flatten()
+        else {
+            sched.discard_prepared_prompt_lookup_window();
+            return Ok(PromptLookupWindowDecision {
+                action: PromptLookupCostAction::Ordinary,
+                regime: base_regime,
+                proposal_elapsed_ns: 0,
+                stats_before,
+                fallback_to_baseline: true,
+            });
+        };
+        if !sched.prompt_lookup_prepared_window_verify_eligible(model, capture_accepted_hidden)? {
+            self.cost_controller.record_lookup_ineligible(regime);
+            sched.discard_prepared_prompt_lookup_window();
+            return Ok(PromptLookupWindowDecision {
+                action: PromptLookupCostAction::Ordinary,
+                regime: Some(regime),
+                proposal_elapsed_ns: 0,
+                stats_before,
+                fallback_to_baseline: true,
+            });
+        }
+        let action = self.cost_controller.next_action(regime);
+        if action == PromptLookupCostAction::Ordinary {
+            sched.discard_prepared_prompt_lookup_window();
+        }
+        Ok(PromptLookupWindowDecision {
+            action,
+            regime: Some(regime),
+            proposal_elapsed_ns: if action == PromptLookupCostAction::Lookup {
+                proposal_elapsed_ns
+            } else {
+                0
+            },
+            stats_before,
+            fallback_to_baseline: false,
+        })
     }
 }
 
@@ -1118,35 +1220,37 @@ where
     ) -> Result<Vec<StepEvent>> {
         let boundary_before = sched.prompt_lookup_can_start_rolling_mid_admit();
         let measured_cycle_active = self.measured_cycle.is_some();
-        let regime = self
-            .measured_cycle
-            .as_ref()
-            .map(|cycle| cycle.regime)
-            .or_else(|| sched.prompt_lookup_qualification_regime());
-        let action = if measured_cycle_active {
-            PromptLookupCostAction::Lookup
-        } else if self.defer_speculation_once {
-            self.defer_speculation_once = false;
-            PromptLookupCostAction::Ordinary
-        } else if prompt_lookup_admission_forces_ordinary(measured_cycle_active, admission_pending)
-        {
-            PromptLookupCostAction::Ordinary
+        let decision = if let Some(cycle) = self.measured_cycle.as_ref() {
+            PromptLookupWindowDecision {
+                action: PromptLookupCostAction::Lookup,
+                regime: Some(cycle.regime),
+                proposal_elapsed_ns: 0,
+                stats_before: cycle.stats_before,
+                fallback_to_baseline: false,
+            }
         } else {
-            regime
-                .map(|regime| self.cost_controller.next_action(regime))
-                .unwrap_or(PromptLookupCostAction::Ordinary)
+            let force_ordinary = if self.defer_speculation_once {
+                self.defer_speculation_once = false;
+                true
+            } else {
+                prompt_lookup_admission_forces_ordinary(measured_cycle_active, admission_pending)
+            };
+            self.select_prepared_window(sched, model, true, false, false, force_ordinary)?
         };
+        let action = decision.action;
+        let regime = decision.regime;
         debug_assert!(
             self.measured_cycle.is_none() || !boundary_before,
             "PromptLookup measured cycle remained active at a window boundary"
         );
-        let stats_before = sched.prompt_lookup_stats().unwrap_or_default();
+        let stats_before = decision.stats_before;
         let started = Instant::now();
         let events = match action {
             PromptLookupCostAction::Ordinary => sched.step_prompt_lookup_ordinary(model)?,
             PromptLookupCostAction::Lookup => sched.step_prompt_lookup(model)?,
         };
-        let elapsed_ns = duration_ns(started.elapsed());
+        let elapsed_ns =
+            duration_ns(started.elapsed()).saturating_add(decision.proposal_elapsed_ns);
         let stats_after = sched.prompt_lookup_stats().unwrap_or_default();
         if let Some(regime) = regime {
             match action {
@@ -1164,6 +1268,7 @@ where
                         .measured_cycle
                         .get_or_insert(PromptLookupMeasuredCycle {
                             regime,
+                            action,
                             elapsed_ns: 0,
                             committed_tokens: 0,
                             stats_before,
@@ -1291,6 +1396,7 @@ where
         let started = Instant::now();
         let events = if action == NeuralExactAction::Exact
             && sched.speculative_batch_active_fresh_eligible()
+            && sched.native_mtp_fresh_exact_verify_eligible(model, self.cfg)?
         {
             counters.mtp_prefill_count.fetch_add(1, Ordering::Relaxed);
             let events = sched.prefill_admitted_mtp_batch(model, &self.mtp, self.cfg)?;
@@ -1330,6 +1436,14 @@ where
             .as_ref()
             .map(|episode| episode.action)
             .unwrap_or(NeuralExactAction::Exact);
+        if action == NeuralExactAction::Exact
+            && sched.mtp_stats().is_some()
+            && sched.mtp_at_batch_window_boundary()
+            && !sched.native_mtp_next_window_exact_verify_eligible(model)?
+        {
+            counters.store_stats(sched.mtp_stats());
+            sched.retire_mtp_at_batch_window_boundary()?;
+        }
         let started = Instant::now();
         let events = if action == NeuralExactAction::Exact && sched.mtp_stats().is_some() {
             counters.mtp_step_count.fetch_add(1, Ordering::Relaxed);
@@ -1359,6 +1473,12 @@ where
     ) -> Result<Self::MidAdmitHandle> {
         self.exact_episode = None;
         if sched.mtp_stats().is_some() {
+            if !sched.native_mtp_rolling_admit_exact_verify_eligible(model, self.cfg, &request)? {
+                sched.retire_mtp_at_batch_window_boundary()?;
+                return sched
+                    .admit_mid_begin(request, model)
+                    .map(SchedulerActorMtpMidAdmitHandle::Generic);
+            }
             sched
                 .admit_mid_begin_mtp(request, model, &self.mtp, self.cfg)
                 .map(Box::new)
@@ -1414,7 +1534,7 @@ where
 
     fn can_start_rolling_mid_admit(&self, sched: &Scheduler<M>) -> bool {
         self.measured_cycle.is_none()
-            && sched.mtp_at_batch_window_boundary()
+            && (sched.mtp_stats().is_none() || sched.mtp_at_batch_window_boundary())
             && sched.prompt_lookup_can_start_rolling_mid_admit()
     }
 
@@ -1450,7 +1570,9 @@ where
         model: &M,
         counters: &SchedulerActorMtpCounters,
     ) -> Result<Vec<StepEvent>> {
-        let events = if sched.speculative_batch_active_fresh_eligible() {
+        let events = if sched.speculative_batch_active_fresh_eligible()
+            && sched.native_mtp_fresh_exact_verify_eligible(model, self.neural.cfg)?
+        {
             counters.mtp_prefill_count.fetch_add(1, Ordering::Relaxed);
             let events =
                 sched.prefill_admitted_mtp_batch(model, &self.neural.mtp, self.neural.cfg)?;
@@ -1462,13 +1584,14 @@ where
                 .fetch_add(1, Ordering::Relaxed);
             sched.prefill_admitted(model)?
         };
-        if sched.mtp_stats().is_some() {
-            sched.initialize_prompt_lookup_for_active(self.prompt_lookup.cfg)?;
-            self.current_source = Some(HybridDraftSource::Neural);
-            self.measured_cycle = None;
-            self.prompt_lookup.publish_stats(sched, counters);
-            counters.store_prompt_lookup_hybrid_stats(self.stats);
-        }
+        sched.initialize_prompt_lookup_for_active(self.prompt_lookup.cfg)?;
+        self.current_source = Some(HybridDraftSource::Neural);
+        self.neural_dirty = false;
+        self.lookup_window_canonical = false;
+        self.measured_cycle = None;
+        self.lookup_episode = None;
+        self.prompt_lookup.publish_stats(sched, counters);
+        counters.store_prompt_lookup_hybrid_stats(self.stats);
         Ok(events)
     }
 
@@ -1480,74 +1603,126 @@ where
         admission_pending: bool,
     ) -> Result<Vec<StepEvent>> {
         if sched.mtp_stats().is_none() {
-            return sched.step(model);
+            let events = sched.step_prompt_lookup_ordinary(model)?;
+            self.prompt_lookup.publish_stats(sched, counters);
+            counters.store_prompt_lookup_hybrid_stats(self.stats);
+            return Ok(events);
+        }
+
+        if sched.mtp_at_batch_window_boundary()
+            && !sched.native_mtp_next_window_exact_verify_eligible(model)?
+        {
+            counters.store_stats(sched.mtp_stats());
+            sched.retire_mtp_at_batch_window_boundary()?;
+            let events = sched.step_prompt_lookup_ordinary(model)?;
+            self.prompt_lookup.publish_stats(sched, counters);
+            counters.store_prompt_lookup_hybrid_stats(self.stats);
+            return Ok(events);
         }
 
         let mut source = self.current_source.unwrap_or(HybridDraftSource::Neural);
+        let mut canonical_target = false;
         let at_boundary = match source {
             HybridDraftSource::Neural => sched.mtp_at_batch_window_boundary(),
             HybridDraftSource::PromptLookup => sched.prompt_lookup_can_start_rolling_mid_admit(),
         };
-        let stats_before = sched.prompt_lookup_stats().unwrap_or_default();
-        let regime = sched.prompt_lookup_qualification_regime();
+        let mut window_decision = None;
 
         if self.measured_cycle.is_none() && at_boundary {
-            let requested = if admission_pending {
-                PromptLookupCostAction::Ordinary
-            } else {
-                regime
-                    .map(|regime| self.prompt_lookup.cost_controller.next_action(regime))
-                    .unwrap_or(PromptLookupCostAction::Ordinary)
-            };
-            let lookup_available = if requested == PromptLookupCostAction::Lookup {
-                let has_drafts = sched.prepare_prompt_lookup_batch_window()?;
-                let verify_eligible =
-                    has_drafts && sched.prompt_lookup_prepared_window_verify_eligible(model)?;
-                if has_drafts && !verify_eligible {
-                    if let Some(regime) = regime {
-                        self.prompt_lookup
-                            .cost_controller
-                            .record_lookup_ineligible(regime);
-                    }
-                }
-                verify_eligible
-            } else {
-                sched.discard_prepared_prompt_lookup_window();
-                false
-            };
-            source = if requested == PromptLookupCostAction::Lookup && lookup_available {
+            let decision = self.prompt_lookup.select_prepared_window(
+                sched,
+                model,
+                true,
+                true,
+                true,
+                admission_pending,
+            )?;
+            source = if decision.action == PromptLookupCostAction::Lookup {
                 HybridDraftSource::PromptLookup
             } else {
-                if requested == PromptLookupCostAction::Lookup && !lookup_available {
+                if decision.fallback_to_baseline {
                     self.stats.lookup_miss_fallbacks =
                         self.stats.lookup_miss_fallbacks.saturating_add(1);
                 }
                 sched.discard_prepared_prompt_lookup_window();
                 HybridDraftSource::Neural
             };
-            if self
-                .current_source
-                .is_some_and(|previous| previous != source)
-            {
+            canonical_target = qwen_hybrid_uses_canonical_target(source, decision.regime);
+            let previous_source = self.current_source;
+            let state_source = if canonical_target {
+                HybridDraftSource::Neural
+            } else {
+                source
+            };
+            if previous_source.is_some_and(|previous| previous != state_source) {
                 self.stats.source_switches = self.stats.source_switches.saturating_add(1);
             }
-            self.current_source = Some(source);
+            self.current_source = Some(state_source);
+            if source == HybridDraftSource::PromptLookup {
+                self.lookup_window_canonical = false;
+            } else if previous_source == Some(HybridDraftSource::PromptLookup) && !self.neural_dirty
+            {
+                if let Some(episode) = self.lookup_episode.take() {
+                    self.prompt_lookup.cost_controller.record_lookup_transition(
+                        &episode.regimes,
+                        0,
+                        episode.committed_tokens,
+                    );
+                }
+            }
+            if (source == HybridDraftSource::Neural || canonical_target) && self.neural_dirty {
+                let rebase_started = Instant::now();
+                sched.rebase_mtp_from_committed_history(model, &self.neural.mtp)?;
+                let rebase_elapsed = rebase_started.elapsed();
+                self.stats.neural_rebases = self.stats.neural_rebases.saturating_add(1);
+                self.stats.neural_rebase_us = self
+                    .stats
+                    .neural_rebase_us
+                    .saturating_add(duration_us(rebase_elapsed));
+                if let Some(episode) = self.lookup_episode.take() {
+                    self.prompt_lookup.cost_controller.record_lookup_transition(
+                        &episode.regimes,
+                        duration_ns(rebase_elapsed),
+                        episode.committed_tokens,
+                    );
+                }
+                self.neural_dirty = false;
+            }
+            window_decision = Some(decision);
         }
 
-        let regime = regime.or_else(|| sched.prompt_lookup_qualification_regime());
+        let regime = self
+            .measured_cycle
+            .as_ref()
+            .map(|cycle| cycle.regime)
+            .or_else(|| {
+                window_decision
+                    .as_ref()
+                    .and_then(|decision| decision.regime)
+            })
+            .or_else(|| sched.prompt_lookup_qualification_regime());
         if self.measured_cycle.is_none() {
             if let Some(regime) = regime {
                 self.measured_cycle = Some(PromptLookupMeasuredCycle {
                     regime,
-                    elapsed_ns: 0,
+                    action: window_decision
+                        .as_ref()
+                        .map_or(PromptLookupCostAction::Ordinary, |decision| decision.action),
+                    elapsed_ns: window_decision
+                        .as_ref()
+                        .map_or(0, |decision| decision.proposal_elapsed_ns),
                     committed_tokens: 0,
-                    stats_before,
+                    stats_before: window_decision.as_ref().map_or_else(
+                        || sched.prompt_lookup_stats().unwrap_or_default(),
+                        |decision| decision.stats_before,
+                    ),
                 });
             }
         }
 
         counters.mtp_step_count.fetch_add(1, Ordering::Relaxed);
         let started = Instant::now();
+        let attempted_source = source;
         let events = match source {
             HybridDraftSource::Neural => {
                 let events = sched.step_mtp_batch_without_postfill(model, &self.neural.mtp)?;
@@ -1556,7 +1731,42 @@ where
                 events
             }
             HybridDraftSource::PromptLookup => {
-                sched.step_prompt_lookup_with_mtp_verify(model, &self.neural.mtp)?
+                if canonical_target {
+                    let events = sched.step_mtp_batch_without_postfill_observing_prompt_lookup(
+                        model,
+                        &self.neural.mtp,
+                    )?;
+                    counters.store_stats(sched.mtp_stats());
+                    self.neural_dirty = false;
+                    self.lookup_window_canonical = true;
+                    source = HybridDraftSource::Neural;
+                    events
+                } else {
+                    match sched.step_prompt_lookup_with_mtp_verify(model, &self.neural.mtp)? {
+                        PromptLookupMtpStepOutcome::Events {
+                            events,
+                            canonical_shared_full_accept,
+                        } => {
+                            self.lookup_window_canonical |= canonical_shared_full_accept;
+                            events
+                        }
+                        PromptLookupMtpStepOutcome::FallbackToNeural => {
+                            let events =
+                                sched.step_mtp_batch_without_postfill(model, &self.neural.mtp)?;
+                            sched.commit_prompt_lookup_events(&events)?;
+                            counters.store_stats(sched.mtp_stats());
+                            if self.current_source != Some(HybridDraftSource::Neural) {
+                                self.stats.source_switches =
+                                    self.stats.source_switches.saturating_add(1);
+                            }
+                            self.current_source = Some(HybridDraftSource::Neural);
+                            self.neural_dirty = false;
+                            self.lookup_window_canonical = false;
+                            source = HybridDraftSource::Neural;
+                            events
+                        }
+                    }
+                }
             }
         };
         let elapsed_ns = duration_ns(started.elapsed());
@@ -1576,21 +1786,26 @@ where
                 }
                 HybridDraftSource::PromptLookup => {
                     self.stats.lookup_windows = self.stats.lookup_windows.saturating_add(1);
+                    self.neural_dirty = true;
+                    self.lookup_window_canonical = false;
                 }
             }
             if let Some(cycle) = self.measured_cycle.take() {
-                let action = match source {
-                    HybridDraftSource::Neural => PromptLookupCostAction::Ordinary,
-                    HybridDraftSource::PromptLookup => PromptLookupCostAction::Lookup,
-                };
                 let stats_after = sched.prompt_lookup_stats().unwrap_or_default();
                 self.prompt_lookup.cost_controller.record_sample(
                     cycle.regime,
-                    action,
+                    cycle.action,
                     cycle.elapsed_ns,
                     cycle.committed_tokens,
                     stats_after.saturating_delta_since(cycle.stats_before),
                 );
+                if attempted_source == HybridDraftSource::PromptLookup
+                    && source == HybridDraftSource::PromptLookup
+                {
+                    self.lookup_episode
+                        .get_or_insert_with(PromptLookupEpisode::default)
+                        .record(cycle.regime, cycle.committed_tokens);
+                }
             }
         }
 
@@ -1609,6 +1824,27 @@ where
             request.sampler.is_pipelinable(),
             "PromptLookup/neural hybrid requires greedy sampling"
         );
+        if self.neural_dirty {
+            let rebase_started = Instant::now();
+            sched.rebase_mtp_from_committed_history(model, &self.neural.mtp)?;
+            let rebase_elapsed = rebase_started.elapsed();
+            self.stats.neural_rebases = self.stats.neural_rebases.saturating_add(1);
+            self.stats.neural_rebase_us = self
+                .stats
+                .neural_rebase_us
+                .saturating_add(duration_us(rebase_elapsed));
+            if let Some(episode) = self.lookup_episode.take() {
+                self.prompt_lookup.cost_controller.record_lookup_transition(
+                    &episode.regimes,
+                    duration_ns(rebase_elapsed),
+                    episode.committed_tokens,
+                );
+            }
+            self.neural_dirty = false;
+        }
+        self.current_source = Some(HybridDraftSource::Neural);
+        self.lookup_window_canonical = false;
+        self.measured_cycle = None;
         self.neural.begin_mid_admit(sched, model, request)
     }
 
@@ -1633,7 +1869,9 @@ where
             .finalize_mid_admit(sched, model, handle, counters)?;
         sched.register_prompt_lookup_request(result.0, self.prompt_lookup.cfg)?;
         self.current_source = Some(HybridDraftSource::Neural);
+        self.lookup_window_canonical = false;
         self.measured_cycle = None;
+        self.lookup_episode = None;
         self.prompt_lookup.publish_stats(sched, counters);
         counters.store_prompt_lookup_hybrid_stats(self.stats);
         Ok(result)
@@ -1911,37 +2149,21 @@ impl SchedulerActorMtpMode<crate::models::Gemma4Model> for SchedulerActorGemma4P
             HybridDraftSource::Neural => sched.gemma4_drafter_at_batch_window_boundary(),
             HybridDraftSource::PromptLookup => sched.prompt_lookup_can_start_rolling_mid_admit(),
         };
-        let stats_before = sched.prompt_lookup_stats().unwrap_or_default();
-        let regime = sched.prompt_lookup_qualification_regime();
+        let mut window_decision = None;
 
         if self.measured_cycle.is_none() && at_boundary {
-            let requested = if admission_pending {
-                PromptLookupCostAction::Ordinary
-            } else {
-                regime
-                    .map(|regime| self.prompt_lookup.cost_controller.next_action(regime))
-                    .unwrap_or(PromptLookupCostAction::Ordinary)
-            };
-            let lookup_available = if requested == PromptLookupCostAction::Lookup {
-                let has_drafts = sched.prepare_prompt_lookup_batch_window()?;
-                let verify_eligible =
-                    has_drafts && sched.prompt_lookup_prepared_window_verify_eligible(model)?;
-                if has_drafts && !verify_eligible {
-                    if let Some(regime) = regime {
-                        self.prompt_lookup
-                            .cost_controller
-                            .record_lookup_ineligible(regime);
-                    }
-                }
-                verify_eligible
-            } else {
-                sched.discard_prepared_prompt_lookup_window();
-                false
-            };
-            source = if requested == PromptLookupCostAction::Lookup && lookup_available {
+            let decision = self.prompt_lookup.select_prepared_window(
+                sched,
+                model,
+                true,
+                false,
+                false,
+                admission_pending,
+            )?;
+            source = if decision.action == PromptLookupCostAction::Lookup {
                 HybridDraftSource::PromptLookup
             } else {
-                if requested == PromptLookupCostAction::Lookup && !lookup_available {
+                if decision.fallback_to_baseline {
                     self.stats.lookup_miss_fallbacks =
                         self.stats.lookup_miss_fallbacks.saturating_add(1);
                 }
@@ -1974,16 +2196,34 @@ impl SchedulerActorMtpMode<crate::models::Gemma4Model> for SchedulerActorGemma4P
                 }
                 self.neural_dirty = false;
             }
+            window_decision = Some(decision);
         }
 
-        let regime = regime.or_else(|| sched.prompt_lookup_qualification_regime());
+        let regime = self
+            .measured_cycle
+            .as_ref()
+            .map(|cycle| cycle.regime)
+            .or_else(|| {
+                window_decision
+                    .as_ref()
+                    .and_then(|decision| decision.regime)
+            })
+            .or_else(|| sched.prompt_lookup_qualification_regime());
         if self.measured_cycle.is_none() {
             if let Some(regime) = regime {
                 self.measured_cycle = Some(PromptLookupMeasuredCycle {
                     regime,
-                    elapsed_ns: 0,
+                    action: window_decision
+                        .as_ref()
+                        .map_or(PromptLookupCostAction::Ordinary, |decision| decision.action),
+                    elapsed_ns: window_decision
+                        .as_ref()
+                        .map_or(0, |decision| decision.proposal_elapsed_ns),
                     committed_tokens: 0,
-                    stats_before,
+                    stats_before: window_decision.as_ref().map_or_else(
+                        || sched.prompt_lookup_stats().unwrap_or_default(),
+                        |decision| decision.stats_before,
+                    ),
                 });
             }
         }
@@ -2022,14 +2262,10 @@ impl SchedulerActorMtpMode<crate::models::Gemma4Model> for SchedulerActorGemma4P
                 }
             }
             if let Some(cycle) = self.measured_cycle.take() {
-                let action = match source {
-                    HybridDraftSource::Neural => PromptLookupCostAction::Ordinary,
-                    HybridDraftSource::PromptLookup => PromptLookupCostAction::Lookup,
-                };
                 let stats_after = sched.prompt_lookup_stats().unwrap_or_default();
                 self.prompt_lookup.cost_controller.record_sample(
                     cycle.regime,
-                    action,
+                    cycle.action,
                     cycle.elapsed_ns,
                     cycle.committed_tokens,
                     stats_after.saturating_delta_since(cycle.stats_before),
@@ -2141,6 +2377,7 @@ pub struct AdmitReply {
 #[derive(Clone)]
 pub struct SchedulerActorHandle {
     pub cmd_tx: mpsc::Sender<SchedulerCommand>,
+    pub(super) control_tx: mpsc::Sender<SchedulerControlCommand>,
     pub(crate) cold_materialization_tracker:
         Arc<OnceLock<Arc<crate::core::process_memory::ColdMaterializationTracker>>>,
     /// Test-observable counter. Incremented by the driver every time
@@ -2289,6 +2526,17 @@ impl SchedulerActorHandle {
         self.cold_materialization_tracker
             .set(tracker)
             .map_err(|_| anyhow::anyhow!("cold materialization tracker already installed"))
+    }
+
+    pub async fn clear_shared_prompt_lookup(&self) -> Result<usize> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.control_tx
+            .send(SchedulerControlCommand::ClearSharedPromptLookup { reply_tx })
+            .await
+            .map_err(|_| anyhow::anyhow!("scheduler control channel is closed"))?;
+        reply_rx
+            .await
+            .map_err(|_| anyhow::anyhow!("scheduler stopped before clearing PromptLookup history"))
     }
 }
 
@@ -2834,6 +3082,7 @@ where
     let kv_cache_budget_policy = budget_state.policy().name();
 
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
+    let (control_tx, control_rx) = mpsc::channel(8);
     let admit_count = Arc::new(AtomicU64::new(0));
     let batch_count = Arc::new(AtomicU64::new(0));
     let saturate_triggered = Arc::new(AtomicU64::new(0));
@@ -2957,6 +3206,7 @@ where
             admission_deadline,
             admission_queue_max,
             cmd_rx,
+            control_rx,
             admit_count_for_task,
             batch_count_for_task,
             saturate_triggered_for_task,
@@ -2971,6 +3221,7 @@ where
 
     Ok(SchedulerActorHandle {
         cmd_tx,
+        control_tx,
         cold_materialization_tracker,
         admit_count,
         batch_count,
@@ -3029,6 +3280,7 @@ fn driver_loop<M, A>(
     admission_deadline: Duration,
     admission_queue_max: usize,
     mut cmd_rx: mpsc::Receiver<SchedulerCommand>,
+    mut control_rx: mpsc::Receiver<SchedulerControlCommand>,
     admit_count: Arc<AtomicU64>,
     batch_count: Arc<AtomicU64>,
     saturate_triggered: Arc<AtomicU64>,
@@ -3054,6 +3306,7 @@ fn driver_loop<M, A>(
     let rt = tokio::runtime::Handle::current();
 
     'outer: loop {
+        process_scheduler_control_commands(&mut sched, &mut control_rx, &mtp_counters);
         // Defensive: ensure scheduler is in Phase::Idle before
         // blocking on next admit. Most error paths already call evict_all,
         // but this guards any future code path that leaves phase=Finished.
@@ -3106,6 +3359,7 @@ fn driver_loop<M, A>(
                     return;
                 }
                 Err(_) => {
+                    process_scheduler_control_commands(&mut sched, &mut control_rx, &mtp_counters);
                     match sched.apply_process_memory_pressure() {
                         Ok(reclaim)
                             if reclaim.level
@@ -3241,6 +3495,7 @@ fn driver_loop<M, A>(
         let mut admission_policy = RollingAdmissionPolicy::default();
         admission_policy.record_admission_work();
         'rolling: loop {
+            process_scheduler_control_commands(&mut sched, &mut control_rx, &mtp_counters);
             prune_abandoned_pending_admits(&mut admission_queue);
             evict_abandoned_active_requests::<M, A>(
                 &mut sched,
@@ -3719,6 +3974,24 @@ fn driver_loop<M, A>(
             "scheduler outer loop reset",
         );
         event_txs.clear();
+    }
+}
+
+fn process_scheduler_control_commands<M>(
+    sched: &mut Scheduler<M>,
+    control_rx: &mut mpsc::Receiver<SchedulerControlCommand>,
+    counters: &SchedulerActorMtpCounters,
+) where
+    M: Model + DenseVlMethods,
+{
+    while let Ok(command) = control_rx.try_recv() {
+        match command {
+            SchedulerControlCommand::ClearSharedPromptLookup { reply_tx } => {
+                let cleared = sched.clear_shared_prompt_lookup();
+                counters.store_prompt_lookup_stats(sched.prompt_lookup_stats());
+                let _ = reply_tx.send(cleared);
+            }
+        }
     }
 }
 
@@ -5019,6 +5292,15 @@ mod tests {
         fn num_hidden_layers(&self) -> usize {
             0
         }
+
+        fn supports_exact_batched_speculative_verify(
+            &self,
+            _batch_width: usize,
+            _context_tokens: usize,
+            _verify_width: usize,
+        ) -> bool {
+            true
+        }
     }
 
     impl DenseVlMethods for SchedulerActorFakeModel {
@@ -5603,6 +5885,27 @@ mod tests {
         assert!(prompt_lookup_admission_forces_ordinary(false, true));
         assert!(!prompt_lookup_admission_forces_ordinary(true, true));
         assert!(!prompt_lookup_admission_forces_ordinary(false, false));
+    }
+
+    #[test]
+    fn qwen_hybrid_routes_certified_lookup_to_canonical_target() {
+        let base = PromptLookupQualificationRegime::new(2, 1024, Sampler::greedy());
+        assert!(qwen_hybrid_uses_canonical_target(
+            HybridDraftSource::PromptLookup,
+            Some(base.with_proposal(PromptLookupProposalSource::Shared, 3)),
+        ));
+        assert!(qwen_hybrid_uses_canonical_target(
+            HybridDraftSource::PromptLookup,
+            Some(base.with_proposal(PromptLookupProposalSource::Local, 3)),
+        ));
+        assert!(!qwen_hybrid_uses_canonical_target(
+            HybridDraftSource::Neural,
+            Some(base.with_proposal(PromptLookupProposalSource::Shared, 3)),
+        ));
+        assert!(!qwen_hybrid_uses_canonical_target(
+            HybridDraftSource::PromptLookup,
+            Some(base.with_proposal(PromptLookupProposalSource::Mixed, 3)),
+        ));
     }
 
     #[test]

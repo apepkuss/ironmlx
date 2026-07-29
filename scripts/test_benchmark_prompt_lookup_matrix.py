@@ -263,6 +263,32 @@ class BenchmarkPromptLookupMatrixTests(unittest.TestCase):
                 "sequential_verify_windows": 20,
                 "shared_queries": 30,
                 "shared_hits": 20,
+                "shared_mtp_certified_hits": 8,
+                "shared_mtp_canonical_validation_windows": 7,
+                "shared_mtp_canonical_validation_mismatches": 1,
+                "shared_mtp_canonical_fallbacks": 1,
+                "hybrid_neural_windows": 40,
+                "hybrid_lookup_windows": 10,
+                "local_source": {
+                    "queries": 70,
+                    "hits": 40,
+                    "drafted_tokens": 150,
+                    "accepted_tokens": 120,
+                    "wasted_verify_tokens": 30,
+                    "propose_us": 80,
+                    "verify_us": 500,
+                    "rollback_us": 10,
+                },
+                "shared_source": {
+                    "queries": 30,
+                    "hits": 20,
+                    "drafted_tokens": 150,
+                    "accepted_tokens": 130,
+                    "wasted_verify_tokens": 20,
+                    "propose_us": 20,
+                    "verify_us": 500,
+                    "rollback_us": 5,
+                },
             }
         }
         after = {
@@ -277,10 +303,52 @@ class BenchmarkPromptLookupMatrixTests(unittest.TestCase):
                 "sequential_verify_windows": 22,
                 "shared_queries": 35,
                 "shared_hits": 24,
+                "shared_mtp_certified_hits": 11,
+                "shared_mtp_canonical_validation_windows": 10,
+                "shared_mtp_canonical_validation_mismatches": 1,
+                "shared_mtp_canonical_fallbacks": 2,
+                "hybrid_neural_windows": 46,
+                "hybrid_lookup_windows": 13,
+                "shared_clear_count": 2,
+                "shared_cleared_entries": 10,
                 "index_entries_current": 0,
                 "index_entries_peak": 80,
                 "shared_entries_current": 40,
                 "shared_entries_peak": 64,
+                "shared_estimated_bytes_current": 4096,
+                "shared_estimated_bytes_peak": 8192,
+                "local_source": {
+                    "queries": 74,
+                    "hits": 43,
+                    "misses": 31,
+                    "drafted_tokens": 158,
+                    "accepted_tokens": 126,
+                    "zero_accept_windows": 2,
+                    "wasted_verify_tokens": 32,
+                    "propose_us": 88,
+                    "verify_us": 560,
+                    "rollback_us": 14,
+                },
+                "shared_source": {
+                    "queries": 35,
+                    "hits": 24,
+                    "misses": 11,
+                    "drafted_tokens": 154,
+                    "accepted_tokens": 133,
+                    "zero_accept_windows": 1,
+                    "wasted_verify_tokens": 21,
+                    "propose_us": 25,
+                    "verify_us": 540,
+                    "rollback_us": 8,
+                },
+            },
+            "memory": {
+                "mlx_peak_bytes": 8192,
+                "process_governor": {
+                    "pressure_level": "normal",
+                    "current_usage_bytes": 4096,
+                    "effective_ceiling_bytes": 16384,
+                },
             },
         }
 
@@ -294,8 +362,48 @@ class BenchmarkPromptLookupMatrixTests(unittest.TestCase):
         self.assertEqual(delta["prompt_lookup"]["sequential_verify_windows"], 2)
         self.assertEqual(delta["prompt_lookup"]["shared_queries"], 5)
         self.assertEqual(delta["prompt_lookup"]["shared_hits"], 4)
+        self.assertEqual(delta["prompt_lookup"]["shared_mtp_certified_hits"], 3)
+        self.assertEqual(
+            delta["prompt_lookup"]["shared_mtp_canonical_validation_windows"], 3
+        )
+        self.assertEqual(
+            delta["prompt_lookup"]["shared_mtp_canonical_validation_mismatches"], 0
+        )
+        self.assertEqual(
+            delta["prompt_lookup"]["shared_mtp_canonical_fallbacks"], 1
+        )
+        self.assertEqual(delta["prompt_lookup"]["hybrid_neural_windows"], 6)
+        self.assertEqual(delta["prompt_lookup"]["hybrid_lookup_windows"], 3)
         self.assertEqual(delta["prompt_lookup"]["shared_entries_current"], 40)
         self.assertEqual(delta["prompt_lookup"]["shared_entries_peak"], 64)
+        self.assertEqual(delta["prompt_lookup"]["shared_clear_count"], 2)
+        self.assertEqual(delta["prompt_lookup"]["shared_cleared_entries"], 10)
+        self.assertEqual(
+            delta["prompt_lookup"]["shared_estimated_bytes_current"], 4096
+        )
+        self.assertEqual(delta["prompt_lookup"]["shared_estimated_bytes_peak"], 8192)
+        self.assertEqual(delta["prompt_lookup"]["local_source"]["queries"], 4)
+        self.assertEqual(delta["prompt_lookup"]["local_source"]["hits"], 3)
+        self.assertEqual(
+            delta["prompt_lookup"]["local_source"]["drafted_tokens"], 8
+        )
+        self.assertEqual(
+            delta["prompt_lookup"]["local_source"]["accepted_tokens"], 6
+        )
+        self.assertEqual(
+            delta["prompt_lookup"]["local_source"]["wasted_verify_tokens"], 2
+        )
+        self.assertEqual(delta["prompt_lookup"]["shared_source"]["queries"], 5)
+        self.assertEqual(delta["prompt_lookup"]["shared_source"]["hits"], 4)
+        self.assertEqual(
+            delta["prompt_lookup"]["shared_source"]["drafted_tokens"], 4
+        )
+        self.assertEqual(
+            delta["prompt_lookup"]["shared_source"]["accepted_tokens"], 3
+        )
+        self.assertEqual(delta["process_current_usage_bytes"], 4096)
+        self.assertEqual(delta["process_effective_ceiling_bytes"], 16384)
+        self.assertEqual(delta["mlx_peak_bytes"], 8192)
 
     def test_built_requests_include_stable_prompt_hashes(self):
         case = self.module.load_corpus(self.module.DEFAULT_CORPUS)[0]
@@ -306,6 +414,31 @@ class BenchmarkPromptLookupMatrixTests(unittest.TestCase):
 
         self.assertEqual(first[0][2]["prompt_hash"], second[0][2]["prompt_hash"])
         self.assertNotEqual(first[0][2]["prompt_hash"], first[1][2]["prompt_hash"])
+
+    def test_cross_request_batches_pair_producer_and_consumer_prompts(self):
+        case = self.module.load_corpus(self.module.DEFAULT_CORPUS)[0]
+        resolved = self.module.ResolvedPrompt(case, 1024, 128, 12, 1000)
+
+        producer = self.module.build_requests(
+            resolved, 2, 4, warmup=False, cross_request=True
+        )
+        consumer = self.module.build_requests(
+            resolved, 2, 5, warmup=False, cross_request=True
+        )
+        next_producer = self.module.build_requests(
+            resolved, 2, 6, warmup=False, cross_request=True
+        )
+
+        self.assertEqual(
+            [item[2]["prompt_hash"] for item in producer],
+            [item[2]["prompt_hash"] for item in consumer],
+        )
+        self.assertNotEqual(
+            producer[0][2]["prompt_hash"],
+            next_producer[0][2]["prompt_hash"],
+        )
+        self.assertEqual(producer[0][2]["cross_request_role"], "producer")
+        self.assertEqual(consumer[0][2]["cross_request_role"], "consumer")
 
     def test_run_batch_submits_in_worker_order_without_serializing_responses(self):
         submitted = []
@@ -568,6 +701,17 @@ class BenchmarkPromptLookupMatrixTests(unittest.TestCase):
         self.assertTrue(gates["lookup_counter_invariants_hold"])
 
         comparisons[1]["lookup_rejected_tokens"] = 1
+        gates = self.module.evaluate_gates(cfg, comparisons)
+        self.assertFalse(gates["lookup_counter_invariants_hold"])
+
+        comparisons[1]["lookup_rejected_tokens"] = 2
+        comparisons[1].update(
+            local_queries=2,
+            local_hits=1,
+            local_drafted_tokens=3,
+            local_accepted_tokens=2,
+            local_wasted_verify_tokens=0,
+        )
         gates = self.module.evaluate_gates(cfg, comparisons)
         self.assertFalse(gates["lookup_counter_invariants_hold"])
 

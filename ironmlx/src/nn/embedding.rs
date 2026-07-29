@@ -188,17 +188,38 @@ impl Embedding {
                 group_size,
                 bits,
                 mode,
-            } => Ok(mlx::quantization::quantized_matmul_on(
-                hidden,
-                weight,
-                scales,
-                biases.as_ref(),
-                /* transpose = */ true,
-                Some(*group_size),
-                Some(*bits),
-                mode.mlx_backend_mode(),
-                target,
-            )?),
+            } => {
+                let product_stable = super::product_stable_qmm::is_armed()
+                    && hidden.ndim() == 3
+                    && hidden.shape().as_slice()[0] > 1
+                    && *bits == 4
+                    && mode.uses_affine_storage();
+                if product_stable {
+                    Ok(mlx::quantization::quantized_matmul_product_stable_on(
+                        hidden,
+                        weight,
+                        scales,
+                        biases.as_ref(),
+                        true,
+                        Some(*group_size),
+                        Some(*bits),
+                        mode.mlx_backend_mode(),
+                        target,
+                    )?)
+                } else {
+                    Ok(mlx::quantization::quantized_matmul_on(
+                        hidden,
+                        weight,
+                        scales,
+                        biases.as_ref(),
+                        /* transpose = */ true,
+                        Some(*group_size),
+                        Some(*bits),
+                        mode.mlx_backend_mode(),
+                        target,
+                    )?)
+                }
+            }
         }
     }
 

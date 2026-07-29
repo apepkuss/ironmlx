@@ -47,6 +47,9 @@ public actor BenchmarkExclusiveSessionCoordinator {
         let targetWasPinned = loadedModels.first {
             matches(model: $0, targetModel: targetModel, targetModelPath: targetModelPath)
         }?.pinned ?? false
+        let targetPromptLookup = loadedModels.first {
+            matches(model: $0, targetModel: targetModel, targetModelPath: targetModelPath)
+        }?.promptLookup
         let snapshot = BenchmarkExclusiveSession(
             targetModel: targetModel,
             targetModelPath: targetModelPath,
@@ -71,7 +74,8 @@ public actor BenchmarkExclusiveSessionCoordinator {
                 modelDir: targetModelPath,
                 setDefault: true,
                 maxCacheCap: nil,
-                pinned: targetWasPinned
+                pinned: targetWasPinned,
+                promptLookup: targetPromptLookup
             )
             _ = try await client.setDefaultModel(targetModel)
 
@@ -135,7 +139,8 @@ public actor BenchmarkExclusiveSessionCoordinator {
                     modelDir: model.path,
                     setDefault: false,
                     maxCacheCap: nil,
-                    pinned: model.pinned
+                    pinned: model.pinned,
+                    promptLookup: model.promptLookup
                 )
                 restored.append(model.id)
                 currentByID[model.id] = model.backendInfo(isDefault: false)
@@ -276,6 +281,7 @@ private struct BenchmarkLoadedModelSnapshot: Equatable, Sendable {
     var isDefault: Bool
     var pinned: Bool
     var maxPositionEmbeddings: Int
+    var promptLookup: BackendPromptLookupConfig?
 
     init(_ model: BackendLoadedModelInfo) {
         self.id = model.id
@@ -285,6 +291,7 @@ private struct BenchmarkLoadedModelSnapshot: Equatable, Sendable {
         self.isDefault = model.isDefault
         self.pinned = model.pinned
         self.maxPositionEmbeddings = model.maxPositionEmbeddings
+        self.promptLookup = model.promptLookup
     }
 
     func backendInfo(isDefault: Bool) -> BackendLoadedModelInfo {
@@ -295,7 +302,8 @@ private struct BenchmarkLoadedModelSnapshot: Equatable, Sendable {
             architecture: architecture,
             isDefault: isDefault,
             maxPositionEmbeddings: maxPositionEmbeddings,
-            pinned: pinned
+            pinned: pinned,
+            promptLookup: promptLookup
         )
     }
 }

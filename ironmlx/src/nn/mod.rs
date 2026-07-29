@@ -20,6 +20,7 @@ pub mod mrope;
 pub mod mtp;
 pub mod norm;
 pub(crate) mod position_stable_qmm;
+pub(crate) mod product_stable_qmm;
 pub(crate) mod sorted_moe_weighted_sum;
 pub(crate) mod verify_qmm;
 

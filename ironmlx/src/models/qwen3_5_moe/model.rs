@@ -238,6 +238,8 @@ impl Qwen35MoeModel {
             mtp_cache,
             target,
         )?;
+        let _product_stable_projection =
+            (mtp_hidden.shape().as_slice()[0] > 1).then(crate::nn::product_stable_qmm::scope);
         let logits = self.project_hidden_on(&mtp_hidden, target)?;
         Ok(MtpStepOutput {
             hidden_states: mtp_hidden,

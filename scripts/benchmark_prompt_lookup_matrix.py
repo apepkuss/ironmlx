@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Run the request-local greedy PromptLookup production qualification matrix.
+"""Run the request-local or cross-request PromptLookup qualification matrix.
 
 The runner owns ironmlx-specific orchestration while keeping iron-bench engine
 neutral. It starts baseline and PromptLookup servers, calibrates deterministic
 corpus prompts with the model tokenizer, drives streaming HTTP requests, and
-checks output parity, scheduler health, request-local index release, and
-performance gates.
+    checks output parity, scheduler health, index lifecycle, source-specific
+    economics, and performance gates.
 """
 
 import argparse
@@ -571,6 +571,19 @@ def wait_idle(config: MatrixConfig) -> Dict[str, Any]:
     raise RuntimeError("server did not return to an idle request-local state: {}".format(last))
 
 
+def clear_shared_prompt_lookup(config: MatrixConfig) -> Dict[str, Any]:
+    request = urllib.request.Request(
+        "http://{}:{}/admin/api/prompt-lookup/clear".format(
+            config.host, config.port
+        ),
+        data=b"{}",
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
 def ensure_port_available(host: str, port: int) -> None:
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
@@ -597,6 +610,9 @@ def start_server(
     log_path = variant_dir / "server.log"
     log_handle = log_path.open("w", encoding="utf-8")
     env = os.environ.copy()
+    home_dir = variant_dir / "home"
+    home_dir.mkdir(parents=True, exist_ok=True)
+    env["HOME"] = str(home_dir)
     env.setdefault("MLX_DIR", str(config.mlx_dir))
     env["RUST_LOG"] = config.rust_log
     mlx_lib = str(config.mlx_dir / "lib")
@@ -667,13 +683,32 @@ def health_delta(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[str, Any
         "verify_accept_host_sync_us",
         "rollback_count",
         "rollback_us",
+        "mtp_shadow_commit_windows",
+        "mtp_shadow_commit_tokens",
+        "mtp_shadow_commit_us",
+        "hybrid_neural_windows",
+        "hybrid_lookup_windows",
+        "hybrid_source_switches",
+        "hybrid_lookup_miss_fallbacks",
+        "hybrid_neural_rebases",
+        "hybrid_neural_rebase_us",
         "shared_queries",
         "shared_hits",
         "shared_misses",
+        "shared_mtp_certified_published_windows",
+        "shared_mtp_certified_published_tokens",
+        "shared_mtp_certified_hits",
+        "shared_mtp_canonical_validation_windows",
+        "shared_mtp_canonical_validation_tokens",
+        "shared_mtp_canonical_validation_us",
+        "shared_mtp_canonical_validation_mismatches",
+        "shared_mtp_canonical_fallbacks",
         "shared_published_requests",
         "shared_published_tokens",
         "shared_evictions",
         "shared_pressure_evictions",
+        "shared_clear_count",
+        "shared_cleared_entries",
     )
     before_lookup = before.get("prompt_lookup") or {}
     after_lookup = after.get("prompt_lookup") or {}
@@ -693,8 +728,36 @@ def health_delta(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[str, Any
                 after_lookup.get("shared_entries_current") or 0
             ),
             "shared_entries_peak": int(after_lookup.get("shared_entries_peak") or 0),
+            "shared_estimated_bytes_current": int(
+                after_lookup.get("shared_estimated_bytes_current") or 0
+            ),
+            "shared_estimated_bytes_peak": int(
+                after_lookup.get("shared_estimated_bytes_peak") or 0
+            ),
         }
     )
+    source_keys = (
+        "queries",
+        "hits",
+        "misses",
+        "drafted_tokens",
+        "accepted_tokens",
+        "zero_accept_windows",
+        "wasted_verify_tokens",
+        "propose_us",
+        "verify_us",
+        "rollback_us",
+    )
+    for source in ("local_source", "shared_source"):
+        before_source = before_lookup.get(source) or {}
+        after_source = after_lookup.get(source) or {}
+        lookup[source] = {
+            key: max(
+                0,
+                int(after_source.get(key) or 0) - int(before_source.get(key) or 0),
+            )
+            for key in source_keys
+        }
     before_scheduler = before.get("scheduler") or {}
     after_scheduler = after.get("scheduler") or {}
     scheduler_deltas = {}
@@ -714,6 +777,12 @@ def health_delta(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[str, Any
         "scheduler": scheduler_deltas,
         "prompt_lookup": lookup,
         "pressure_level": governor.get("pressure_level"),
+        "process_current_usage_bytes": int(
+            governor.get("current_usage_bytes") or 0
+        ),
+        "process_effective_ceiling_bytes": int(
+            governor.get("effective_ceiling_bytes") or 0
+        ),
         "mlx_peak_bytes": int((after.get("memory") or {}).get("mlx_peak_bytes") or 0),
     }
 
@@ -914,6 +983,7 @@ def aggregate_rows(
             row["target_prompt_tokens"],
             row["max_tokens"],
             row["concurrency"],
+            row.get("cross_request_role", "request_local"),
         )
         grouped.setdefault(key, []).append(row)
 
@@ -925,6 +995,7 @@ def aggregate_rows(
             item["target_prompt_tokens"],
             item["max_tokens"],
             item["concurrency"],
+            item.get("cross_request_role", "request_local"),
         )
         health_grouped.setdefault(key, []).append(item)
 
@@ -940,13 +1011,24 @@ def aggregate_rows(
             target_prompt_tokens,
             max_tokens,
             concurrency,
+            cross_request_role,
         ) = key
         health_items = health_grouped.get(
-            (variant, case_id, target_prompt_tokens, max_tokens, concurrency), []
+            (
+                variant,
+                case_id,
+                target_prompt_tokens,
+                max_tokens,
+                concurrency,
+                cross_request_role,
+            ),
+            [],
         )
         lookup_deltas = [
             item["delta"]["prompt_lookup"] for item in health_items
         ]
+        local_deltas = [item["local_source"] for item in lookup_deltas]
+        shared_source_deltas = [item["shared_source"] for item in lookup_deltas]
         verify_sync_count = sum(
             item["verify_accept_host_sync_count"] for item in lookup_deltas
         )
@@ -964,6 +1046,7 @@ def aggregate_rows(
             "prompt_tokens_server": median(sample["prompt_tokens_server"] for sample in samples),
             "max_tokens": max_tokens,
             "concurrency": concurrency,
+            "cross_request_role": cross_request_role,
             "samples": len(samples),
             "output_match_ratio": sum(bool(sample["baseline_match"]) for sample in samples) / len(samples),
             "baseline_consistent_ratio": sum(bool(sample["baseline_consistent"]) for sample in samples) / len(samples),
@@ -981,9 +1064,79 @@ def aggregate_rows(
             "lookup_accepted_tokens": sum(item["accepted_tokens"] for item in lookup_deltas),
             "lookup_rejected_tokens": sum(item["rejected_tokens"] for item in lookup_deltas),
             "lookup_rollbacks": sum(item["rollback_count"] for item in lookup_deltas),
+            "local_queries": sum(item["queries"] for item in local_deltas),
+            "local_hits": sum(item["hits"] for item in local_deltas),
+            "local_misses": sum(item["misses"] for item in local_deltas),
+            "local_drafted_tokens": sum(
+                item["drafted_tokens"] for item in local_deltas
+            ),
+            "local_accepted_tokens": sum(
+                item["accepted_tokens"] for item in local_deltas
+            ),
+            "local_zero_accept_windows": sum(
+                item["zero_accept_windows"] for item in local_deltas
+            ),
+            "local_wasted_verify_tokens": sum(
+                item["wasted_verify_tokens"] for item in local_deltas
+            ),
+            "local_propose_us": sum(item["propose_us"] for item in local_deltas),
+            "local_verify_us": sum(item["verify_us"] for item in local_deltas),
+            "local_rollback_us": sum(item["rollback_us"] for item in local_deltas),
             "shared_queries": sum(item["shared_queries"] for item in lookup_deltas),
             "shared_hits": sum(item["shared_hits"] for item in lookup_deltas),
             "shared_misses": sum(item["shared_misses"] for item in lookup_deltas),
+            "shared_mtp_certified_published_windows": sum(
+                item["shared_mtp_certified_published_windows"]
+                for item in lookup_deltas
+            ),
+            "shared_mtp_certified_published_tokens": sum(
+                item["shared_mtp_certified_published_tokens"]
+                for item in lookup_deltas
+            ),
+            "shared_mtp_certified_hits": sum(
+                item["shared_mtp_certified_hits"] for item in lookup_deltas
+            ),
+            "shared_mtp_canonical_validation_windows": sum(
+                item["shared_mtp_canonical_validation_windows"]
+                for item in lookup_deltas
+            ),
+            "shared_mtp_canonical_validation_tokens": sum(
+                item["shared_mtp_canonical_validation_tokens"]
+                for item in lookup_deltas
+            ),
+            "shared_mtp_canonical_validation_us": sum(
+                item["shared_mtp_canonical_validation_us"]
+                for item in lookup_deltas
+            ),
+            "shared_mtp_canonical_validation_mismatches": sum(
+                item["shared_mtp_canonical_validation_mismatches"]
+                for item in lookup_deltas
+            ),
+            "shared_mtp_canonical_fallbacks": sum(
+                item["shared_mtp_canonical_fallbacks"]
+                for item in lookup_deltas
+            ),
+            "shared_drafted_tokens": sum(
+                item["drafted_tokens"] for item in shared_source_deltas
+            ),
+            "shared_accepted_tokens": sum(
+                item["accepted_tokens"] for item in shared_source_deltas
+            ),
+            "shared_zero_accept_windows": sum(
+                item["zero_accept_windows"] for item in shared_source_deltas
+            ),
+            "shared_wasted_verify_tokens": sum(
+                item["wasted_verify_tokens"] for item in shared_source_deltas
+            ),
+            "shared_propose_us": sum(
+                item["propose_us"] for item in shared_source_deltas
+            ),
+            "shared_verify_us": sum(
+                item["verify_us"] for item in shared_source_deltas
+            ),
+            "shared_rollback_us": sum(
+                item["rollback_us"] for item in shared_source_deltas
+            ),
             "shared_published_requests": sum(
                 item["shared_published_requests"] for item in lookup_deltas
             ),
@@ -995,6 +1148,39 @@ def aggregate_rows(
             ),
             "shared_pressure_evictions": sum(
                 item["shared_pressure_evictions"] for item in lookup_deltas
+            ),
+            "shared_clear_count": sum(
+                item["shared_clear_count"] for item in lookup_deltas
+            ),
+            "shared_cleared_entries": sum(
+                item["shared_cleared_entries"] for item in lookup_deltas
+            ),
+            "mtp_shadow_commit_windows": sum(
+                item["mtp_shadow_commit_windows"] for item in lookup_deltas
+            ),
+            "mtp_shadow_commit_tokens": sum(
+                item["mtp_shadow_commit_tokens"] for item in lookup_deltas
+            ),
+            "mtp_shadow_commit_us": sum(
+                item["mtp_shadow_commit_us"] for item in lookup_deltas
+            ),
+            "hybrid_neural_windows": sum(
+                item["hybrid_neural_windows"] for item in lookup_deltas
+            ),
+            "hybrid_lookup_windows": sum(
+                item["hybrid_lookup_windows"] for item in lookup_deltas
+            ),
+            "hybrid_source_switches": sum(
+                item["hybrid_source_switches"] for item in lookup_deltas
+            ),
+            "hybrid_lookup_miss_fallbacks": sum(
+                item["hybrid_lookup_miss_fallbacks"] for item in lookup_deltas
+            ),
+            "hybrid_neural_rebases": sum(
+                item["hybrid_neural_rebases"] for item in lookup_deltas
+            ),
+            "hybrid_neural_rebase_us": sum(
+                item["hybrid_neural_rebase_us"] for item in lookup_deltas
             ),
             "lookup_verify_round_us": verify_round_us,
             "lookup_verify_round_us_per_window": (
@@ -1022,6 +1208,33 @@ def aggregate_rows(
             "shared_entries_peak_max": max(
                 (item["shared_entries_peak"] for item in lookup_deltas), default=0
             ),
+            "shared_estimated_bytes_current_max": max(
+                (item["shared_estimated_bytes_current"] for item in lookup_deltas),
+                default=0,
+            ),
+            "shared_estimated_bytes_peak_max": max(
+                (item["shared_estimated_bytes_peak"] for item in lookup_deltas),
+                default=0,
+            ),
+            "process_current_usage_bytes_max": max(
+                (
+                    item["delta"]["process_current_usage_bytes"]
+                    for item in health_items
+                ),
+                default=0,
+            ),
+            "process_effective_ceiling_bytes_min": min(
+                (
+                    item["delta"]["process_effective_ceiling_bytes"]
+                    for item in health_items
+                    if item["delta"]["process_effective_ceiling_bytes"] > 0
+                ),
+                default=0,
+            ),
+            "mlx_peak_bytes_max": max(
+                (item["delta"]["mlx_peak_bytes"] for item in health_items),
+                default=0,
+            ),
             "server_healthy": all(
                 item["delta"].get("status") == "healthy"
                 and item["delta"]["scheduler"]["admission_queue_full_count_delta"] == 0
@@ -1037,6 +1250,16 @@ def aggregate_rows(
         row["lookup_acceptance_ratio"] = (
             row["lookup_accepted_tokens"] / row["lookup_drafted_tokens"]
             if row["lookup_drafted_tokens"]
+            else None
+        )
+        row["local_acceptance_ratio"] = (
+            row["local_accepted_tokens"] / row["local_drafted_tokens"]
+            if row["local_drafted_tokens"]
+            else None
+        )
+        row["shared_acceptance_ratio"] = (
+            row["shared_accepted_tokens"] / row["shared_drafted_tokens"]
+            if row["shared_drafted_tokens"]
             else None
         )
         summary.append(row)
@@ -1056,6 +1279,7 @@ def build_comparisons(
                 row["target_prompt_tokens"],
                 row["max_tokens"],
                 row["concurrency"],
+                row.get("cross_request_role", "request_local"),
             )
             baselines[key] = row
     comparisons = []
@@ -1068,6 +1292,7 @@ def build_comparisons(
             row["target_prompt_tokens"],
             row["max_tokens"],
             row["concurrency"],
+            row.get("cross_request_role", "request_local"),
         )
         baseline = baselines.get(key)
         if baseline is None:
@@ -1083,6 +1308,9 @@ def build_comparisons(
                 "target_prompt_tokens": row["target_prompt_tokens"],
                 "max_tokens": row["max_tokens"],
                 "concurrency": row["concurrency"],
+                "cross_request_role": row.get(
+                    "cross_request_role", "request_local"
+                ),
                 "output_match_ratio": row["output_match_ratio"],
                 "baseline_consistent_ratio": row["baseline_consistent_ratio"],
                 "expected_prefix_match_ratio": row["expected_prefix_match_ratio"],
@@ -1109,6 +1337,89 @@ def build_comparisons(
                 "lookup_rejected_tokens": row["lookup_rejected_tokens"],
                 "lookup_acceptance_ratio": row["lookup_acceptance_ratio"],
                 "lookup_rollbacks": row["lookup_rollbacks"],
+                "local_queries": row.get("local_queries", 0),
+                "local_hits": row.get("local_hits", 0),
+                "local_misses": row.get("local_misses", 0),
+                "local_drafted_tokens": row.get("local_drafted_tokens", 0),
+                "local_accepted_tokens": row.get("local_accepted_tokens", 0),
+                "local_zero_accept_windows": row.get(
+                    "local_zero_accept_windows", 0
+                ),
+                "local_wasted_verify_tokens": row.get(
+                    "local_wasted_verify_tokens", 0
+                ),
+                "local_propose_us": row.get("local_propose_us", 0),
+                "local_verify_us": row.get("local_verify_us", 0),
+                "local_rollback_us": row.get("local_rollback_us", 0),
+                "shared_queries": row.get("shared_queries", 0),
+                "shared_hits": row.get("shared_hits", 0),
+                "shared_misses": row.get("shared_misses", 0),
+                "shared_drafted_tokens": row.get("shared_drafted_tokens", 0),
+                "shared_accepted_tokens": row.get(
+                    "shared_accepted_tokens", 0
+                ),
+                "shared_zero_accept_windows": row.get(
+                    "shared_zero_accept_windows", 0
+                ),
+                "shared_wasted_verify_tokens": row.get(
+                    "shared_wasted_verify_tokens", 0
+                ),
+                "shared_propose_us": row.get("shared_propose_us", 0),
+                "shared_verify_us": row.get("shared_verify_us", 0),
+                "shared_rollback_us": row.get("shared_rollback_us", 0),
+                "shared_published_requests": row.get(
+                    "shared_published_requests", 0
+                ),
+                "shared_published_tokens": row.get(
+                    "shared_published_tokens", 0
+                ),
+                "shared_evictions": row.get("shared_evictions", 0),
+                "shared_pressure_evictions": row.get(
+                    "shared_pressure_evictions", 0
+                ),
+                "shared_mtp_certified_published_windows": row.get(
+                    "shared_mtp_certified_published_windows", 0
+                ),
+                "shared_mtp_certified_published_tokens": row.get(
+                    "shared_mtp_certified_published_tokens", 0
+                ),
+                "shared_mtp_certified_hits": row.get(
+                    "shared_mtp_certified_hits", 0
+                ),
+                "shared_mtp_canonical_validation_windows": row.get(
+                    "shared_mtp_canonical_validation_windows", 0
+                ),
+                "shared_mtp_canonical_validation_tokens": row.get(
+                    "shared_mtp_canonical_validation_tokens", 0
+                ),
+                "shared_mtp_canonical_validation_us": row.get(
+                    "shared_mtp_canonical_validation_us", 0
+                ),
+                "shared_mtp_canonical_validation_mismatches": row.get(
+                    "shared_mtp_canonical_validation_mismatches", 0
+                ),
+                "shared_mtp_canonical_fallbacks": row.get(
+                    "shared_mtp_canonical_fallbacks", 0
+                ),
+                "mtp_shadow_commit_windows": row.get(
+                    "mtp_shadow_commit_windows", 0
+                ),
+                "mtp_shadow_commit_tokens": row.get(
+                    "mtp_shadow_commit_tokens", 0
+                ),
+                "mtp_shadow_commit_us": row.get("mtp_shadow_commit_us", 0),
+                "hybrid_neural_windows": row.get("hybrid_neural_windows", 0),
+                "hybrid_lookup_windows": row.get("hybrid_lookup_windows", 0),
+                "hybrid_source_switches": row.get(
+                    "hybrid_source_switches", 0
+                ),
+                "hybrid_lookup_miss_fallbacks": row.get(
+                    "hybrid_lookup_miss_fallbacks", 0
+                ),
+                "hybrid_neural_rebases": row.get("hybrid_neural_rebases", 0),
+                "hybrid_neural_rebase_us": row.get(
+                    "hybrid_neural_rebase_us", 0
+                ),
                 "lookup_verify_round_us": row.get("lookup_verify_round_us", 0),
                 "lookup_verify_round_us_per_window": row.get(
                     "lookup_verify_round_us_per_window"
@@ -1127,6 +1438,13 @@ def build_comparisons(
                 ),
                 "index_entries_current_max": row["index_entries_current_max"],
                 "index_entries_peak_max": row["index_entries_peak_max"],
+                "process_current_usage_bytes_max": row.get(
+                    "process_current_usage_bytes_max", 0
+                ),
+                "process_effective_ceiling_bytes_min": row.get(
+                    "process_effective_ceiling_bytes_min", 0
+                ),
+                "mlx_peak_bytes_max": row.get("mlx_peak_bytes_max", 0),
                 "server_healthy": row["server_healthy"],
                 "scheduler_path_controlled": bool(
                     row.get("scheduler_path_observed")
@@ -1143,6 +1461,13 @@ def evaluate_gates(
 ) -> Dict[str, Any]:
     exercised = [item for item in comparisons if item.get("lookup_queries", 0) > 0]
     fallback = [item for item in comparisons if item.get("lookup_queries", 0) == 0]
+    producer_cells = [
+        item for item in comparisons if item.get("cross_request_role") == "producer"
+    ]
+    consumer_cells = [
+        item for item in comparisons if item.get("cross_request_role") == "consumer"
+    ]
+    performance_cells = consumer_cells if config.cross_request else exercised
     correctness = all(
         item["output_match_ratio"] == 1.0
         and item["baseline_consistent_ratio"] == 1.0
@@ -1168,6 +1493,18 @@ def evaluate_gates(
         and item.get("lookup_rejected_tokens", 0)
         == item.get("lookup_drafted_tokens", 0)
         - item.get("lookup_accepted_tokens", 0)
+        and item.get("local_hits", 0) <= item.get("local_queries", 0)
+        and item.get("local_accepted_tokens", 0)
+        <= item.get("local_drafted_tokens", 0)
+        and item.get("local_wasted_verify_tokens", 0)
+        == item.get("local_drafted_tokens", 0)
+        - item.get("local_accepted_tokens", 0)
+        and item.get("shared_hits", 0) <= item.get("shared_queries", 0)
+        and item.get("shared_accepted_tokens", 0)
+        <= item.get("shared_drafted_tokens", 0)
+        and item.get("shared_wasted_verify_tokens", 0)
+        == item.get("shared_drafted_tokens", 0)
+        - item.get("shared_accepted_tokens", 0)
         for item in exercised
     )
     lifecycle = all(item["index_entries_current_max"] == 0 for item in exercised)
@@ -1179,13 +1516,15 @@ def evaluate_gates(
         for item in exercised
     )
     controls = [
-        item for item in exercised if item["polarity"] in ("negative", "adversarial")
+        item
+        for item in performance_cells
+        if item["polarity"] in ("negative", "adversarial")
     ]
     control_regression = all(
         item["tg_change_pct"] is not None and item["tg_change_pct"] >= -3.0
         for item in controls
     )
-    concurrent = [item for item in exercised if item["concurrency"] > 1]
+    concurrent = [item for item in performance_cells if item["concurrency"] > 1]
     concurrent_p95 = all(
         item["e2e_p95_change_pct"] is not None and item["e2e_p95_change_pct"] <= 3.0
         for item in concurrent
@@ -1194,7 +1533,7 @@ def evaluate_gates(
     for category in ("rag", "code", "json", "long_copy"):
         values = [
             item["tg_change_pct"]
-            for item in exercised
+            for item in performance_cells
             if item["category"] == category and item["tg_change_pct"] is not None
         ]
         category_gains[category] = statistics.median(values) if values else None
@@ -1236,6 +1575,28 @@ def evaluate_gates(
     lookup_dimension_coverage = expected_lookup_dimensions.issubset(
         exercised_lookup_dimensions
     )
+    shared_consumer_path_exercised = bool(
+        consumer_cells
+        and any(item.get("shared_hits", 0) > 0 for item in consumer_cells)
+    )
+    canonical_validation_mismatch_free = all(
+        item.get("shared_mtp_canonical_validation_mismatches", 0) == 0
+        for item in comparisons
+    )
+    mtp_hybrid = "--mtp-model-dir" in config.extra_serve_args
+    mtp_canonical_path_exercised = bool(
+        any(
+            item.get("shared_mtp_certified_hits", 0) > 0
+            and item.get("shared_mtp_canonical_validation_windows", 0) > 0
+            for item in consumer_cells
+        )
+    )
+    producer_miss_itl = all(
+        item.get("itl_p95_change_pct") is not None
+        and item["itl_p95_change_pct"] <= 2.0
+        for item in producer_cells
+        if item.get("shared_hits", 0) == 0
+    )
     gates = {
         "output_token_parity_100pct": correctness,
         "lookup_path_exercised": bool(exercised),
@@ -1260,6 +1621,18 @@ def evaluate_gates(
         "positive_category_median_tg_change_pct": category_gains,
         "positive_categories_at_least_10pct": positive_categories,
         "positive_category_gate": positive_categories >= 3,
+        "cross_request_consumer_path_exercised": (
+            shared_consumer_path_exercised if config.cross_request else None
+        ),
+        "cross_request_producer_miss_itl_within_2pct": (
+            producer_miss_itl if producer_cells else None
+        ),
+        "mtp_canonical_path_exercised": (
+            mtp_canonical_path_exercised if mtp_hybrid else None
+        ),
+        "mtp_canonical_validation_mismatch_free": (
+            canonical_validation_mismatch_free if mtp_hybrid else None
+        ),
         "full_coverage": full_coverage,
         "lookup_dimension_coverage": lookup_dimension_coverage,
     }
@@ -1269,6 +1642,12 @@ def evaluate_gates(
     if concurrent:
         hard_values.append(concurrent_p95)
     hard_values.append(positive_categories >= 3)
+    if config.cross_request:
+        hard_values.append(shared_consumer_path_exercised)
+    if mtp_hybrid:
+        hard_values.extend(
+            [mtp_canonical_path_exercised, canonical_validation_mismatch_free]
+        )
     if full_coverage:
         hard_values.append(lookup_dimension_coverage)
     gates["status"] = (
@@ -1282,9 +1661,14 @@ def build_requests(
     concurrency: int,
     batch_idx: int,
     warmup: bool,
+    cross_request: bool = False,
 ) -> List[Tuple[str, Optional[str], Dict[str, Any]]]:
     requests = []
-    seed_base = (900000 if warmup else 0) + batch_idx * 1000
+    episode_idx = batch_idx // 2 if cross_request and not warmup else batch_idx
+    cross_request_role = (
+        "producer" if batch_idx % 2 == 0 else "consumer"
+    ) if cross_request and not warmup else "request_local"
+    seed_base = (900000 if warmup else 0) + episode_idx * 1000
     for worker_id in range(concurrency):
         request_seed = seed_base + worker_id
         prompt, expected_prefix = render_case(
@@ -1301,10 +1685,17 @@ def build_requests(
                     "worker_id": worker_id,
                     "request_seed": request_seed,
                     "prompt_hash": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+                    "cross_request_role": cross_request_role,
                 },
             )
         )
     return requests
+
+
+def cross_request_role(config: MatrixConfig, batch_idx: int) -> str:
+    if not config.cross_request:
+        return "request_local"
+    return "producer" if batch_idx % 2 == 0 else "consumer"
 
 
 def run_variant(
@@ -1324,6 +1715,7 @@ def run_variant(
         )
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     rows, health_rows = load_batch_checkpoints(checkpoint_dir)
+    seeded_episodes = set()
     completed_batches = {
         (
             row["case_id"],
@@ -1347,7 +1739,9 @@ def run_variant(
             for concurrency in config.concurrency:
                 pending_batches = [
                     batch_idx
-                    for batch_idx in range(config.runs)
+                    for batch_idx in range(
+                        config.runs * (2 if config.cross_request else 1)
+                    )
                     if batch_key(resolved, concurrency, batch_idx)
                     not in completed_batches
                 ]
@@ -1360,9 +1754,44 @@ def run_variant(
                     run_batch(config, warmup_requests, resolved.max_tokens)
                     wait_idle(config)
                 for batch_idx in pending_batches:
+                    role = cross_request_role(config, batch_idx)
+                    episode_key = (
+                        resolved.case.case_id,
+                        resolved.target_prompt_tokens,
+                        resolved.max_tokens,
+                        concurrency,
+                        batch_idx // 2,
+                    )
+                    if (
+                        variant.lookup is not None
+                        and config.cross_request
+                        and role == "producer"
+                    ):
+                        clear_shared_prompt_lookup(config)
+                        wait_idle(config)
+                    elif (
+                        variant.lookup is not None
+                        and config.cross_request
+                        and role == "consumer"
+                        and episode_key not in seeded_episodes
+                    ):
+                        producer_requests = build_requests(
+                            resolved,
+                            concurrency,
+                            batch_idx - 1,
+                            warmup=False,
+                            cross_request=True,
+                        )
+                        run_batch(config, producer_requests, resolved.max_tokens)
+                        wait_idle(config)
+                        seeded_episodes.add(episode_key)
                     before = wait_idle(config)
                     requests = build_requests(
-                        resolved, concurrency, batch_idx, warmup=False
+                        resolved,
+                        concurrency,
+                        batch_idx,
+                        warmup=False,
+                        cross_request=config.cross_request,
                     )
                     results, batch_wall = run_batch(
                         config, requests, resolved.max_tokens
@@ -1422,6 +1851,9 @@ def run_variant(
                         "max_tokens": resolved.max_tokens,
                         "concurrency": concurrency,
                         "batch_idx": batch_idx,
+                        "cross_request_role": requests[0][2][
+                            "cross_request_role"
+                        ],
                         "delta": health_delta(before, after),
                     }
                     write_batch_checkpoint(
@@ -1435,6 +1867,8 @@ def run_variant(
                     rows.extend(batch_rows)
                     health_rows.append(health_row)
                     completed_batches.add(batch_key(resolved, concurrency, batch_idx))
+                    if role == "producer":
+                        seeded_episodes.add(episode_key)
         final_health = wait_idle(config)
         (variant_dir / "final-healthz.json").write_text(
             json.dumps(final_health, indent=2), encoding="utf-8"

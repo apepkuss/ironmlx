@@ -69,6 +69,37 @@ import Testing
     #expect(loaded["mlx-community/Qwen3.5-4B-MLX-4bit"]?.mtpDraftTokensValue == 2)
 }
 
+@Test func modelParameterStorePersistsCrossRequestPromptLookupPreference() throws {
+    let root = try temporaryDirectory()
+    let url = root.appendingPathComponent("model_params.json")
+    let store = ModelParameterStore(url: url)
+    let params = ModelParameters(
+        modelID: "mlx-community/Qwen3.5-4B-MLX-4bit",
+        promptLookupEnabled: true,
+        promptLookupCrossRequest: true
+    )
+
+    try store.save(params)
+
+    let loaded = try #require(
+        ModelParameterStore(url: url)
+            .loadAll()["mlx-community/Qwen3.5-4B-MLX-4bit"]
+    )
+    #expect(loaded.promptLookupEnabled == true)
+    #expect(loaded.promptLookupCrossRequest == true)
+    #expect(loaded.promptLookupConfig == .crossRequest)
+}
+
+@Test func disabledPromptLookupDoesNotCreateBackendConfig() {
+    let params = ModelParameters(
+        modelID: "mlx-community/Qwen3.5-4B-MLX-4bit",
+        promptLookupEnabled: false,
+        promptLookupCrossRequest: true
+    )
+
+    #expect(params.promptLookupConfig == nil)
+}
+
 @Test func modelParameterStoreRecordsMtpLoadPreferenceAndPreservesExistingParameters() throws {
     let root = try temporaryDirectory()
     let url = root.appendingPathComponent("model_params.json")

@@ -260,7 +260,24 @@ impl Linear {
                 bits,
                 mode,
             } => {
-                let mut y = if super::batch_stable_qmm::linear_is_armed()
+                let product_stable = super::product_stable_qmm::is_armed()
+                    && x.ndim() >= 2
+                    && x.shape().as_slice()[..x.ndim() - 1].iter().product::<i32>() > 1
+                    && *bits == 4
+                    && mode.uses_affine_storage();
+                let mut y = if product_stable {
+                    mlx::quantization::quantized_matmul_product_stable_on(
+                        x,
+                        weight,
+                        scales,
+                        biases.as_ref(),
+                        true,
+                        Some(*group_size),
+                        Some(*bits),
+                        mode.mlx_backend_mode(),
+                        target,
+                    )?
+                } else if super::batch_stable_qmm::linear_is_armed()
                     && x.ndim() == 3
                     && x.shape().as_slice()[0] > 1
                 {

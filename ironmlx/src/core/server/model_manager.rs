@@ -234,6 +234,29 @@ impl ModelManager {
         AdminModelResponse::ok(status, model, self.list_loaded().await, None)
     }
 
+    async fn clear_shared_prompt_lookup(
+        &self,
+        request: ClearPromptLookupRequest,
+    ) -> std::result::Result<ClearPromptLookupResponse, AdminError> {
+        let model = request
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let (cleared_models, cleared_entries) = self
+            .pool
+            .clear_shared_prompt_lookup(model)
+            .await
+            .map_err(AdminError::from_control_error)?;
+        Ok(ClearPromptLookupResponse {
+            success: true,
+            status: "cleared",
+            model: model.map(str::to_string),
+            cleared_models,
+            cleared_entries,
+        })
+    }
+
     async fn set_model_pinned(
         &self,
         request: PinModelRequest,
@@ -983,6 +1006,10 @@ pub async fn serve_app_daemon(args: ServeArgs) -> Result<()> {
         .route("/admin/api/models/load", post(load_model_handler))
         .route("/admin/api/models/mtp/validate", post(validate_mtp_handler))
         .route("/admin/api/models/unload", post(unload_model_handler))
+        .route(
+            "/admin/api/prompt-lookup/clear",
+            post(clear_prompt_lookup_handler),
+        )
         .route("/admin/api/models/pin", post(pin_model_handler))
         .route("/admin/api/models/unpin", post(unpin_model_handler))
         .route("/admin/api/models/default", post(set_default_model_handler))
@@ -1069,6 +1096,16 @@ async fn unload_model_handler(
     Json(request): Json<UnloadModelRequest>,
 ) -> Json<AdminModelResponse> {
     Json(manager.unload_model(request).await)
+}
+
+async fn clear_prompt_lookup_handler(
+    State(manager): State<ModelManager>,
+    Json(request): Json<ClearPromptLookupRequest>,
+) -> Response {
+    match manager.clear_shared_prompt_lookup(request).await {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => error.into_response(),
+    }
 }
 
 async fn pin_model_handler(
@@ -1179,6 +1216,21 @@ struct UnloadModelRequest {
     model: Option<String>,
     model_dir: Option<String>,
     repo_id: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ClearPromptLookupRequest {
+    model: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ClearPromptLookupResponse {
+    success: bool,
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    cleared_models: usize,
+    cleared_entries: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1870,6 +1922,34 @@ mod tests {
                 cross_request: true,
             })
         );
+    }
+
+    #[test]
+    fn clear_prompt_lookup_request_accepts_targeted_and_global_scope() {
+        let targeted: ClearPromptLookupRequest = serde_json::from_value(serde_json::json!({
+            "model": "mlx-community/Qwen3.5-4B-MLX-4bit"
+        }))
+        .expect("targeted clear request");
+        assert_eq!(
+            targeted.model.as_deref(),
+            Some("mlx-community/Qwen3.5-4B-MLX-4bit")
+        );
+
+        let global: ClearPromptLookupRequest =
+            serde_json::from_value(serde_json::json!({})).expect("global clear request");
+        assert_eq!(global.model, None);
+
+        let response = serde_json::to_value(ClearPromptLookupResponse {
+            success: true,
+            status: "cleared",
+            model: None,
+            cleared_models: 2,
+            cleared_entries: 17,
+        })
+        .expect("clear response");
+        assert_eq!(response["cleared_models"], 2);
+        assert_eq!(response["cleared_entries"], 17);
+        assert!(response.get("model").is_none());
     }
 
     #[test]

@@ -41,6 +41,7 @@ public enum LocalModelBackendRegistrar {
                     pinned: model.pinned,
                     mtpModelDir: mtpRuntime?.modelDir,
                     mtpDraftTokens: mtpRuntime?.draftTokens,
+                    promptLookup: parameterStore.parameters(for: model.id)?.promptLookupConfig,
                     samplingDefaults: parameterStore.parameters(for: model.id)?.samplingDefaults ?? .empty
                 )
             } catch {

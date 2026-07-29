@@ -896,6 +896,10 @@ pub async fn serve_with_gemma4_drafter(
         .route("/health", get(|| async { "ok" }))
         .route("/healthz", get(gemma4_drafter_healthz_handler))
         .route(
+            "/admin/api/prompt-lookup/clear",
+            post(gemma4_drafter_clear_prompt_lookup_handler),
+        )
+        .route(
             "/v1/chat/completions",
             post(openai::gemma4_drafter_chat_completions),
         )
@@ -1407,6 +1411,10 @@ where
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/healthz", get(healthz_handler))
+        .route(
+            "/admin/api/prompt-lookup/clear",
+            post(clear_prompt_lookup_handler),
+        )
         .route("/v1/chat/completions", post(openai::chat_completions))
         .route("/v1/messages", post(anthropic::messages))
         .with_state(state);
@@ -1470,6 +1478,50 @@ async fn gemma4_drafter_healthz_handler(
     axum::extract::State(state): axum::extract::State<Gemma4DrafterAppState>,
 ) -> axum::Json<health::HealthSnapshot> {
     axum::Json(state.base.health_collector.snapshot())
+}
+
+async fn clear_prompt_lookup_handler<M>(
+    axum::extract::State(state): axum::extract::State<AppState<M>>,
+) -> (axum::http::StatusCode, axum::Json<serde_json::Value>)
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    clear_prompt_lookup_response(&state.scheduler_handle, &state.model_id).await
+}
+
+async fn gemma4_drafter_clear_prompt_lookup_handler(
+    axum::extract::State(state): axum::extract::State<Gemma4DrafterAppState>,
+) -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
+    clear_prompt_lookup_response(&state.base.scheduler_handle, &state.base.model_id).await
+}
+
+async fn clear_prompt_lookup_response(
+    scheduler_handle: &scheduler_actor::SchedulerActorHandle,
+    model_id: &str,
+) -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
+    match scheduler_handle.clear_shared_prompt_lookup().await {
+        Ok(cleared_entries) => (
+            axum::http::StatusCode::OK,
+            axum::Json(serde_json::json!({
+                "success": true,
+                "status": "cleared",
+                "model": model_id,
+                "cleared_models": 1,
+                "cleared_entries": cleared_entries,
+            })),
+        ),
+        Err(error) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(serde_json::json!({
+                "success": false,
+                "status": "error",
+                "model": model_id,
+                "cleared_models": 0,
+                "cleared_entries": 0,
+                "error": error.to_string(),
+            })),
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -1657,9 +1709,11 @@ mod tests {
 
     fn test_scheduler_handle() -> scheduler_actor::SchedulerActorHandle {
         let (cmd_tx, _cmd_rx) = mpsc::channel(1);
+        let (control_tx, _control_rx) = mpsc::channel(1);
         let queue_rejected = Arc::new(AtomicU64::new(0));
         scheduler_actor::SchedulerActorHandle {
             cmd_tx,
+            control_tx,
             cold_materialization_tracker: Arc::new(std::sync::OnceLock::new()),
             admit_count: Arc::new(AtomicU64::new(0)),
             batch_count: Arc::new(AtomicU64::new(0)),
