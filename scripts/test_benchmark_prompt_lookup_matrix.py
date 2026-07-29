@@ -258,6 +258,9 @@ class BenchmarkPromptLookupMatrixTests(unittest.TestCase):
                 "queries": 100,
                 "drafted_tokens": 300,
                 "accepted_tokens": 250,
+                "propose_us": 100,
+                "index_build_us": 200,
+                "index_update_us": 300,
                 "verify_round_us": 1000,
                 "exact_batched_verify_windows": 10,
                 "sequential_verify_windows": 20,
@@ -304,6 +307,9 @@ class BenchmarkPromptLookupMatrixTests(unittest.TestCase):
                 "queries": 104,
                 "drafted_tokens": 312,
                 "accepted_tokens": 259,
+                "propose_us": 125,
+                "index_build_us": 260,
+                "index_update_us": 345,
                 "verify_round_us": 1600,
                 "exact_batched_verify_windows": 13,
                 "sequential_verify_windows": 22,
@@ -325,6 +331,10 @@ class BenchmarkPromptLookupMatrixTests(unittest.TestCase):
                 "shared_cleared_entries": 10,
                 "index_entries_current": 0,
                 "index_entries_peak": 80,
+                "index_ledger_entries_current": 0,
+                "index_ledger_entries_peak": 160,
+                "index_estimated_bytes_current": 0,
+                "index_estimated_bytes_peak": 16384,
                 "shared_entries_current": 40,
                 "shared_entries_peak": 64,
                 "shared_estimated_bytes_current": 4096,
@@ -369,6 +379,9 @@ class BenchmarkPromptLookupMatrixTests(unittest.TestCase):
         self.assertEqual(delta["prompt_lookup"]["queries"], 4)
         self.assertEqual(delta["prompt_lookup"]["drafted_tokens"], 12)
         self.assertEqual(delta["prompt_lookup"]["accepted_tokens"], 9)
+        self.assertEqual(delta["prompt_lookup"]["propose_us"], 25)
+        self.assertEqual(delta["prompt_lookup"]["index_build_us"], 60)
+        self.assertEqual(delta["prompt_lookup"]["index_update_us"], 45)
         self.assertEqual(delta["prompt_lookup"]["verify_round_us"], 600)
         self.assertEqual(delta["prompt_lookup"]["exact_batched_verify_windows"], 3)
         self.assertEqual(delta["prompt_lookup"]["sequential_verify_windows"], 2)
@@ -402,6 +415,10 @@ class BenchmarkPromptLookupMatrixTests(unittest.TestCase):
         )
         self.assertEqual(delta["prompt_lookup"]["shared_entries_current"], 40)
         self.assertEqual(delta["prompt_lookup"]["shared_entries_peak"], 64)
+        self.assertEqual(delta["prompt_lookup"]["index_ledger_entries_current"], 0)
+        self.assertEqual(delta["prompt_lookup"]["index_ledger_entries_peak"], 160)
+        self.assertEqual(delta["prompt_lookup"]["index_estimated_bytes_current"], 0)
+        self.assertEqual(delta["prompt_lookup"]["index_estimated_bytes_peak"], 16384)
         self.assertEqual(delta["prompt_lookup"]["shared_clear_count"], 2)
         self.assertEqual(delta["prompt_lookup"]["shared_cleared_entries"], 10)
         self.assertEqual(

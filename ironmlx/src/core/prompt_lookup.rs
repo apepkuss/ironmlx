@@ -164,6 +164,10 @@ pub struct PromptLookupStats {
     pub index_update_us: u64,
     pub index_entries_current: u64,
     pub index_entries_peak: u64,
+    pub index_ledger_entries_current: u64,
+    pub index_ledger_entries_peak: u64,
+    pub index_estimated_bytes_current: u64,
+    pub index_estimated_bytes_peak: u64,
     pub index_evictions: u64,
     /// End-to-end verify window time through the acceptance materialization
     /// boundary. Unlike the submit-only phase timers below, this includes
@@ -257,6 +261,14 @@ impl PromptLookupStats {
             index_update_us: self.index_update_us.saturating_sub(before.index_update_us),
             index_entries_current: self.index_entries_current,
             index_entries_peak: self.index_entries_peak.max(before.index_entries_peak),
+            index_ledger_entries_current: self.index_ledger_entries_current,
+            index_ledger_entries_peak: self
+                .index_ledger_entries_peak
+                .max(before.index_ledger_entries_peak),
+            index_estimated_bytes_current: self.index_estimated_bytes_current,
+            index_estimated_bytes_peak: self
+                .index_estimated_bytes_peak
+                .max(before.index_estimated_bytes_peak),
             index_evictions: self.index_evictions.saturating_sub(before.index_evictions),
             verify_round_us: self.verify_round_us.saturating_sub(before.verify_round_us),
             verify_forward_us: self
@@ -436,6 +448,14 @@ impl PromptLookupStats {
         self.index_update_us = self.index_update_us.saturating_add(delta.index_update_us);
         self.index_entries_current = delta.index_entries_current;
         self.index_entries_peak = self.index_entries_peak.max(delta.index_entries_peak);
+        self.index_ledger_entries_current = delta.index_ledger_entries_current;
+        self.index_ledger_entries_peak = self
+            .index_ledger_entries_peak
+            .max(delta.index_ledger_entries_peak);
+        self.index_estimated_bytes_current = delta.index_estimated_bytes_current;
+        self.index_estimated_bytes_peak = self
+            .index_estimated_bytes_peak
+            .max(delta.index_estimated_bytes_peak);
         self.index_evictions = self.index_evictions.saturating_add(delta.index_evictions);
         self.verify_round_us = self.verify_round_us.saturating_add(delta.verify_round_us);
         self.verify_forward_us = self
@@ -1946,8 +1966,39 @@ fn unix_time_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct NgramKey(Box<[u32]>);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct NgramKey {
+    len: usize,
+    lane0: u64,
+    lane1: u64,
+}
+
+impl NgramKey {
+    const LANE0_SEED: u64 = 0xcbf2_9ce4_8422_2325;
+    const LANE1_SEED: u64 = 0x6c62_272e_07bb_0142;
+    const LANE0_PRIME: u64 = 0x0000_0100_0000_01b3;
+    const LANE1_PRIME: u64 = 0x9e37_79b1_85eb_ca87;
+
+    fn from_tokens(tokens: &[u32]) -> Self {
+        let mut lane0 = Self::LANE0_SEED;
+        let mut lane1 = Self::LANE1_SEED;
+        for (relative_position, &token) in tokens.iter().enumerate() {
+            let position = relative_position as u64;
+            let value = u64::from(token) | (position.rotate_left(17) << 32);
+            lane0 ^= value;
+            lane0 = lane0.wrapping_mul(Self::LANE0_PRIME);
+            lane0 ^= lane0 >> 32;
+            lane1 ^= value.rotate_left(29) ^ position.wrapping_mul(Self::LANE0_PRIME);
+            lane1 = lane1.rotate_left(23).wrapping_mul(Self::LANE1_PRIME);
+            lane1 ^= lane1 >> 29;
+        }
+        Self {
+            len: tokens.len(),
+            lane0,
+            lane1,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PromptLookupHistoryFingerprint {
@@ -1982,7 +2033,6 @@ impl PromptLookupHistoryFingerprint {
         self.len = self.len.saturating_add(1);
     }
 
-    #[cfg(test)]
     pub(crate) fn from_history(history: &[u32]) -> Self {
         let mut fingerprint = Self::new();
         for &token in history {
@@ -1992,21 +2042,70 @@ impl PromptLookupHistoryFingerprint {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct IndexLedgerEntry {
     key: NgramKey,
     continuation: usize,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct RecentPositions {
+    values: [usize; POSITIONS_PER_NGRAM],
+    len: usize,
+}
+
+impl RecentPositions {
+    fn push(&mut self, continuation: usize) {
+        if self.len < POSITIONS_PER_NGRAM {
+            self.values[self.len] = continuation;
+            self.len += 1;
+            return;
+        }
+        self.values.rotate_left(1);
+        self.values[POSITIONS_PER_NGRAM - 1] = continuation;
+    }
+
+    fn front(&self) -> Option<usize> {
+        (self.len > 0).then_some(self.values[0])
+    }
+
+    fn pop_front(&mut self) {
+        if self.len == 0 {
+            return;
+        }
+        self.values[..self.len].rotate_left(1);
+        self.len -= 1;
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    fn iter(&self) -> impl DoubleEndedIterator<Item = &usize> {
+        self.values[..self.len].iter()
+    }
+}
+
 #[derive(Debug, Clone)]
 struct SharedPromptLookupCandidate {
     id: u64,
+    key_tokens: Box<[u32]>,
     draft: Box<[u32]>,
     mtp_certified_draft_len: usize,
     mtp_certified_history: Option<PromptLookupHistoryFingerprint>,
     mtp_policy_snapshot: Option<MtpDraftPolicySnapshot>,
     expires_at_ms: u64,
     last_access: u64,
+}
+
+#[derive(Debug)]
+struct SharedPromptLookupCandidatePayload {
+    key_tokens: Box<[u32]>,
+    draft: Box<[u32]>,
+    mtp_certified_draft_len: usize,
+    mtp_certified_history: Option<PromptLookupHistoryFingerprint>,
+    mtp_policy_snapshot: Option<MtpDraftPolicySnapshot>,
+    now_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -2051,10 +2150,12 @@ pub(crate) struct SharedPromptLookupPool {
     config: PromptLookupConfig,
     entries: HashMap<NgramKey, SharedPromptLookupCandidate>,
     ledger: VecDeque<SharedPromptLookupLedgerEntry>,
+    entry_payload_bytes: usize,
     next_id: u64,
     access_clock: u64,
     entries_peak: usize,
     estimated_bytes_peak: usize,
+    hash_collision_rejections: u64,
     availability_epoch: u64,
 }
 
@@ -2069,10 +2170,12 @@ impl SharedPromptLookupPool {
             config,
             entries: HashMap::new(),
             ledger: VecDeque::new(),
+            entry_payload_bytes: 0,
             next_id: 1,
             access_clock: 0,
             entries_peak: 0,
             estimated_bytes_peak: 0,
+            hash_collision_rejections: 0,
             availability_epoch: 0,
         })
     }
@@ -2094,29 +2197,17 @@ impl SharedPromptLookupPool {
     }
 
     pub(crate) fn estimated_bytes(&self) -> usize {
-        let entry_bytes = self
-            .entries
-            .iter()
-            .map(|(key, candidate)| {
-                std::mem::size_of::<(NgramKey, SharedPromptLookupCandidate)>()
-                    .saturating_add(key.0.len().saturating_mul(std::mem::size_of::<u32>()))
-                    .saturating_add(
-                        candidate
-                            .draft
-                            .len()
-                            .saturating_mul(std::mem::size_of::<u32>()),
-                    )
-            })
-            .sum::<usize>();
-        let ledger_bytes = self
-            .ledger
-            .iter()
-            .map(|entry| {
-                std::mem::size_of::<SharedPromptLookupLedgerEntry>()
-                    .saturating_add(entry.key.0.len().saturating_mul(std::mem::size_of::<u32>()))
-            })
-            .sum::<usize>();
-        entry_bytes.saturating_add(ledger_bytes)
+        self.entries
+            .capacity()
+            .saturating_mul(
+                std::mem::size_of::<(NgramKey, SharedPromptLookupCandidate)>().saturating_add(1),
+            )
+            .saturating_add(self.entry_payload_bytes)
+            .saturating_add(
+                self.ledger
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<SharedPromptLookupLedgerEntry>()),
+            )
     }
 
     pub(crate) fn estimated_bytes_peak(&self) -> usize {
@@ -2127,6 +2218,9 @@ impl SharedPromptLookupPool {
         let cleared = self.entries.len();
         self.entries.clear();
         self.ledger.clear();
+        self.entries.shrink_to_fit();
+        self.ledger.shrink_to_fit();
+        self.entry_payload_bytes = 0;
         if cleared > 0 {
             self.bump_availability_epoch();
         }
@@ -2150,6 +2244,21 @@ impl SharedPromptLookupPool {
             }
             fingerprints
         });
+        let mut certifications_by_continuation =
+            HashMap::<usize, &SharedPromptLookupMtpCertification>::new();
+        for certification in mtp_certifications {
+            match certifications_by_continuation.entry(certification.continuation) {
+                std::collections::hash_map::Entry::Occupied(mut occupied)
+                    if occupied.get().draft_len < certification.draft_len =>
+                {
+                    occupied.insert(certification);
+                }
+                std::collections::hash_map::Entry::Vacant(vacant) => {
+                    vacant.insert(certification);
+                }
+                _ => {}
+            }
+        }
         let window_start = history
             .len()
             .saturating_sub(self.config.history_window_tokens);
@@ -2160,11 +2269,9 @@ impl SharedPromptLookupPool {
             if continuation == draft_end {
                 continue;
             }
-            let mtp_certified_draft_len = mtp_certifications
-                .iter()
-                .filter(|certification| certification.continuation == continuation)
+            let certification = certifications_by_continuation.get(&continuation).copied();
+            let mtp_certified_draft_len = certification
                 .map(|certification| certification.draft_len)
-                .max()
                 .unwrap_or(0)
                 .min(draft_end.saturating_sub(continuation));
             let mtp_certified_history = (mtp_certified_draft_len > 0)
@@ -2175,24 +2282,34 @@ impl SharedPromptLookupPool {
                         .copied()
                 })
                 .flatten();
-            let mtp_policy_snapshot = mtp_certifications
-                .iter()
-                .filter(|certification| certification.continuation == continuation)
-                .max_by_key(|certification| certification.draft_len)
-                .map(|certification| certification.policy_snapshot);
+            let mtp_policy_snapshot =
+                certification.map(|certification| certification.policy_snapshot);
             for n in self.config.min_ngram..=self.config.max_ngram {
                 if continuation < n || continuation - n < window_start {
                     continue;
                 }
-                let key = NgramKey(history[continuation - n..continuation].into());
+                let key_tokens = &history[continuation - n..continuation];
+                let key = NgramKey::from_tokens(key_tokens);
                 self.insert(
                     key,
-                    history[continuation..draft_end].into(),
-                    mtp_certified_draft_len,
-                    mtp_certified_history,
-                    mtp_policy_snapshot,
-                    now_ms,
+                    SharedPromptLookupCandidatePayload {
+                        key_tokens: key_tokens.into(),
+                        draft: history[continuation..draft_end].into(),
+                        mtp_certified_draft_len,
+                        mtp_certified_history,
+                        mtp_policy_snapshot,
+                        now_ms,
+                    },
                 );
+            }
+            if continuation.saturating_sub(window_start) % 1_024 == 1_023 {
+                if self.entries.len() > self.config.max_index_entries {
+                    evicted_entries = evicted_entries
+                        .saturating_add(self.reclaim_lru_to(self.config.max_index_entries));
+                }
+                self.compact_ledger_if_needed();
+                self.entries_peak = self.entries_peak.max(self.entries.len());
+                self.refresh_estimated_bytes_peak();
             }
         }
         evicted_entries =
@@ -2222,13 +2339,17 @@ impl SharedPromptLookupPool {
         let now_ms = unix_time_ms();
         let max_ngram = self.config.max_ngram.min(history.len());
         for n in (self.config.min_ngram..=max_ngram).rev() {
-            let key = NgramKey(history[history.len() - n..].into());
+            let key_tokens = &history[history.len() - n..];
+            let key = NgramKey::from_tokens(key_tokens);
             let expired = self
                 .entries
                 .get(&key)
                 .is_some_and(|candidate| candidate.expires_at_ms <= now_ms);
             if expired {
-                if self.entries.remove(&key).is_some() {
+                if let Some(candidate) = self.entries.remove(&key) {
+                    self.entry_payload_bytes = self
+                        .entry_payload_bytes
+                        .saturating_sub(Self::candidate_payload_bytes(&candidate));
                     self.bump_availability_epoch();
                 }
                 continue;
@@ -2236,6 +2357,10 @@ impl SharedPromptLookupPool {
             let Some(candidate) = self.entries.get_mut(&key) else {
                 continue;
             };
+            if candidate.key_tokens.as_ref() != key_tokens {
+                self.hash_collision_rejections = self.hash_collision_rejections.saturating_add(1);
+                continue;
+            }
             self.access_clock = self.access_clock.saturating_add(1);
             self.next_id = self.next_id.saturating_add(1);
             candidate.id = self.next_id;
@@ -2288,28 +2413,27 @@ impl SharedPromptLookupPool {
         evicted
     }
 
-    fn insert(
-        &mut self,
-        key: NgramKey,
-        draft: Box<[u32]>,
-        mtp_certified_draft_len: usize,
-        mtp_certified_history: Option<PromptLookupHistoryFingerprint>,
-        mtp_policy_snapshot: Option<MtpDraftPolicySnapshot>,
-        now_ms: u64,
-    ) {
+    fn insert(&mut self, key: NgramKey, payload: SharedPromptLookupCandidatePayload) {
         self.access_clock = self.access_clock.saturating_add(1);
         self.next_id = self.next_id.saturating_add(1);
         let id = self.next_id;
         let candidate = SharedPromptLookupCandidate {
             id,
-            draft,
-            mtp_certified_draft_len,
-            mtp_certified_history,
-            mtp_policy_snapshot,
-            expires_at_ms: now_ms.saturating_add(SHARED_PROMPT_LOOKUP_TTL_MS),
+            key_tokens: payload.key_tokens,
+            draft: payload.draft,
+            mtp_certified_draft_len: payload.mtp_certified_draft_len,
+            mtp_certified_history: payload.mtp_certified_history,
+            mtp_policy_snapshot: payload.mtp_policy_snapshot,
+            expires_at_ms: payload.now_ms.saturating_add(SHARED_PROMPT_LOOKUP_TTL_MS),
             last_access: self.access_clock,
         };
-        match self.entries.entry(key.clone()) {
+        match self.entries.entry(key) {
+            std::collections::hash_map::Entry::Occupied(occupied)
+                if occupied.get().key_tokens != candidate.key_tokens =>
+            {
+                self.hash_collision_rejections = self.hash_collision_rejections.saturating_add(1);
+                return;
+            }
             std::collections::hash_map::Entry::Occupied(mut occupied)
                 if occupied.get().draft.len() > candidate.draft.len() =>
             {
@@ -2319,9 +2443,16 @@ impl SharedPromptLookupPool {
                 existing.last_access = candidate.last_access;
             }
             std::collections::hash_map::Entry::Occupied(mut occupied) => {
+                self.entry_payload_bytes = self
+                    .entry_payload_bytes
+                    .saturating_sub(Self::candidate_payload_bytes(occupied.get()))
+                    .saturating_add(Self::candidate_payload_bytes(&candidate));
                 occupied.insert(candidate);
             }
             std::collections::hash_map::Entry::Vacant(vacant) => {
+                self.entry_payload_bytes = self
+                    .entry_payload_bytes
+                    .saturating_add(Self::candidate_payload_bytes(&candidate));
                 vacant.insert(candidate);
             }
         }
@@ -2331,13 +2462,32 @@ impl SharedPromptLookupPool {
 
     fn prune_expired(&mut self, now_ms: u64) -> usize {
         let before = self.entries.len();
-        self.entries
-            .retain(|_, candidate| candidate.expires_at_ms > now_ms);
-        before.saturating_sub(self.entries.len())
+        let mut removed_payload_bytes = 0_usize;
+        self.entries.retain(|_, candidate| {
+            let keep = candidate.expires_at_ms > now_ms;
+            if !keep {
+                removed_payload_bytes =
+                    removed_payload_bytes.saturating_add(Self::candidate_payload_bytes(candidate));
+            }
+            keep
+        });
+        self.entry_payload_bytes = self
+            .entry_payload_bytes
+            .saturating_sub(removed_payload_bytes);
+        let removed = before.saturating_sub(self.entries.len());
+        if removed > 0 {
+            self.entries.shrink_to_fit();
+        }
+        removed
     }
 
     fn reclaim_to(&mut self, target: usize, now_ms: u64) -> usize {
-        let mut evicted = self.prune_expired(now_ms);
+        self.prune_expired(now_ms)
+            .saturating_add(self.reclaim_lru_to(target))
+    }
+
+    fn reclaim_lru_to(&mut self, target: usize) -> usize {
+        let mut evicted = 0_usize;
         while self.entries.len() > target {
             let Some(oldest) = self.ledger.pop_front() else {
                 break;
@@ -2347,8 +2497,12 @@ impl SharedPromptLookupPool {
                 .get(&oldest.key)
                 .is_some_and(|candidate| candidate.id == oldest.id)
             {
-                self.entries.remove(&oldest.key);
-                evicted = evicted.saturating_add(1);
+                if let Some(candidate) = self.entries.remove(&oldest.key) {
+                    self.entry_payload_bytes = self
+                        .entry_payload_bytes
+                        .saturating_sub(Self::candidate_payload_bytes(&candidate));
+                    evicted = evicted.saturating_add(1);
+                }
             }
         }
         self.compact_ledger_if_needed();
@@ -2356,7 +2510,7 @@ impl SharedPromptLookupPool {
     }
 
     fn compact_ledger_if_needed(&mut self) {
-        let limit = self.entries.len().saturating_mul(4).saturating_add(1_024);
+        let limit = self.entries.len().saturating_mul(2).saturating_add(1_024);
         if self.ledger.len() <= limit {
             return;
         }
@@ -2368,7 +2522,7 @@ impl SharedPromptLookupPool {
                     candidate.last_access,
                     SharedPromptLookupLedgerEntry {
                         id: candidate.id,
-                        key: key.clone(),
+                        key: *key,
                     },
                 )
             })
@@ -2381,6 +2535,14 @@ impl SharedPromptLookupPool {
         self.estimated_bytes_peak = self.estimated_bytes_peak.max(self.estimated_bytes());
     }
 
+    fn candidate_payload_bytes(candidate: &SharedPromptLookupCandidate) -> usize {
+        candidate
+            .key_tokens
+            .len()
+            .saturating_add(candidate.draft.len())
+            .saturating_mul(std::mem::size_of::<u32>())
+    }
+
     fn bump_availability_epoch(&mut self) {
         self.availability_epoch = self.availability_epoch.saturating_add(1);
     }
@@ -2391,9 +2553,11 @@ pub struct PromptLookupRowState {
     config: PromptLookupConfig,
     history: Vec<u32>,
     history_fingerprint: PromptLookupHistoryFingerprint,
-    index: HashMap<NgramKey, VecDeque<usize>>,
+    index: HashMap<NgramKey, RecentPositions>,
     ledger: VecDeque<IndexLedgerEntry>,
     index_entries_peak: usize,
+    ledger_entries_peak: usize,
+    estimated_bytes_peak: usize,
     index_evictions: u64,
 }
 
@@ -2402,16 +2566,29 @@ impl PromptLookupRowState {
         let config = config.validate()?;
         let mut state = Self {
             config,
-            history: Vec::with_capacity(history.len()),
-            history_fingerprint: PromptLookupHistoryFingerprint::new(),
+            history: history.to_vec(),
+            history_fingerprint: PromptLookupHistoryFingerprint::from_history(history),
             index: HashMap::new(),
             ledger: VecDeque::new(),
             index_entries_peak: 0,
+            ledger_entries_peak: 0,
+            estimated_bytes_peak: 0,
             index_evictions: 0,
         };
-        for &token in history {
-            state.commit(token);
+        let window_start = history
+            .len()
+            .saturating_sub(state.config.history_window_tokens);
+        for continuation in window_start..history.len() {
+            state.index_continuation(continuation, window_start);
+            if continuation.saturating_sub(window_start) % 1_024 == 1_023 {
+                state.evict_to_entry_cap();
+                state.compact_ledger_if_needed();
+                state.refresh_peaks();
+            }
         }
+        state.evict_to_entry_cap();
+        state.compact_ledger_if_needed();
+        state.refresh_peaks();
         Ok(state)
     }
 
@@ -2435,6 +2612,32 @@ impl PromptLookupRowState {
         self.index_entries_peak
     }
 
+    pub fn ledger_entries(&self) -> usize {
+        self.ledger.len()
+    }
+
+    pub fn ledger_entries_peak(&self) -> usize {
+        self.ledger_entries_peak
+    }
+
+    pub fn estimated_bytes(&self) -> usize {
+        self.history
+            .capacity()
+            .saturating_mul(std::mem::size_of::<u32>())
+            .saturating_add(self.index.capacity().saturating_mul(
+                std::mem::size_of::<(NgramKey, RecentPositions)>().saturating_add(1),
+            ))
+            .saturating_add(
+                self.ledger
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<IndexLedgerEntry>()),
+            )
+    }
+
+    pub fn estimated_bytes_peak(&self) -> usize {
+        self.estimated_bytes_peak
+    }
+
     pub fn index_evictions(&self) -> u64 {
         self.index_evictions
     }
@@ -2449,13 +2652,17 @@ impl PromptLookupRowState {
         let max_ngram = self.config.max_ngram.min(history_len);
         for n in (self.config.min_ngram..=max_ngram).rev() {
             let suffix_start = history_len - n;
-            let key = NgramKey(self.history[suffix_start..].into());
+            let suffix = &self.history[suffix_start..];
+            let key = NgramKey::from_tokens(suffix);
             let Some(positions) = self.index.get(&key) else {
                 continue;
             };
             let mut best: Option<(usize, usize)> = None;
             for &continuation in positions.iter().rev() {
                 if continuation < window_start || continuation >= suffix_start {
+                    continue;
+                }
+                if continuation < n || self.history[continuation - n..continuation] != *suffix {
                     continue;
                 }
                 let available = history_len.saturating_sub(continuation).min(max_draft);
@@ -2484,22 +2691,27 @@ impl PromptLookupRowState {
         self.history.push(token);
         self.history_fingerprint.push(token);
         let continuation = self.history.len() - 1;
+        let window_start = self
+            .history
+            .len()
+            .saturating_sub(self.config.history_window_tokens);
+        self.index_continuation(continuation, window_start);
+        self.evict_stale();
+        self.evict_to_entry_cap();
+        self.compact_ledger_if_needed();
+        self.refresh_peaks();
+    }
+
+    fn index_continuation(&mut self, continuation: usize, window_start: usize) {
         for n in self.config.min_ngram..=self.config.max_ngram {
-            if continuation < n {
+            if continuation < n || continuation - n < window_start {
                 continue;
             }
-            let key = NgramKey(self.history[continuation - n..continuation].into());
-            let positions = self.index.entry(key.clone()).or_default();
-            positions.push_back(continuation);
-            while positions.len() > POSITIONS_PER_NGRAM {
-                positions.pop_front();
-            }
+            let key = NgramKey::from_tokens(&self.history[continuation - n..continuation]);
+            self.index.entry(key).or_default().push(continuation);
             self.ledger
                 .push_back(IndexLedgerEntry { key, continuation });
         }
-        self.evict_stale();
-        self.evict_to_entry_cap();
-        self.index_entries_peak = self.index_entries_peak.max(self.index.len());
     }
 
     fn evict_stale(&mut self) {
@@ -2531,7 +2743,7 @@ impl PromptLookupRowState {
         };
         let mut remove_key = false;
         if let Some(positions) = self.index.get_mut(&entry.key) {
-            if positions.front() == Some(&entry.continuation) {
+            if positions.front() == Some(entry.continuation) {
                 positions.pop_front();
             }
             remove_key = positions.is_empty();
@@ -2540,6 +2752,32 @@ impl PromptLookupRowState {
             self.index.remove(&entry.key);
             self.index_evictions = self.index_evictions.saturating_add(1);
         }
+    }
+
+    fn compact_ledger_if_needed(&mut self) {
+        let live_positions = self.index.len().saturating_mul(POSITIONS_PER_NGRAM);
+        let limit = live_positions.saturating_add(1_024);
+        if self.ledger.len() <= limit {
+            return;
+        }
+        let mut current = self
+            .index
+            .iter()
+            .flat_map(|(key, positions)| {
+                positions.iter().map(|&continuation| IndexLedgerEntry {
+                    key: *key,
+                    continuation,
+                })
+            })
+            .collect::<Vec<_>>();
+        current.sort_unstable_by_key(|entry| entry.continuation);
+        self.ledger = current.into();
+    }
+
+    fn refresh_peaks(&mut self) {
+        self.index_entries_peak = self.index_entries_peak.max(self.index.len());
+        self.ledger_entries_peak = self.ledger_entries_peak.max(self.ledger.len());
+        self.estimated_bytes_peak = self.estimated_bytes_peak.max(self.estimated_bytes());
     }
 
     pub fn validate_history(&self, expected: &[u32]) -> Result<()> {
@@ -2697,6 +2935,55 @@ mod tests {
     }
 
     #[test]
+    fn long_repetitive_history_compacts_ledger_and_bounds_estimated_bytes() {
+        let config = PromptLookupConfig {
+            history_window_tokens: 64 * 1024,
+            max_index_entries: 128 * 1024,
+            ..cfg()
+        };
+        let history = vec![7; 128 * 1024];
+        let state = PromptLookupRowState::new(&history, config).unwrap();
+        let live_position_bound = state
+            .index_entries()
+            .saturating_mul(POSITIONS_PER_NGRAM)
+            .saturating_mul(2)
+            .saturating_add(1_024);
+        assert!(state.ledger_entries() <= live_position_bound);
+        assert!(
+            state.estimated_bytes()
+                < history
+                    .len()
+                    .saturating_mul(std::mem::size_of::<u32>())
+                    .saturating_add(128 * 1024)
+        );
+    }
+
+    #[test]
+    fn bulk_build_matches_incremental_index_semantics() {
+        let history = [1, 2, 3, 4, 1, 2, 3, 8, 1, 2, 3];
+        let bulk = PromptLookupRowState::new(&history, cfg()).unwrap();
+        let mut incremental = PromptLookupRowState::new(&[], cfg()).unwrap();
+        for &token in &history {
+            incremental.commit(token);
+        }
+        assert_eq!(bulk.history(), incremental.history());
+        assert_eq!(bulk.propose(4), incremental.propose(4));
+        assert_eq!(bulk.index_entries(), incremental.index_entries());
+    }
+
+    #[test]
+    fn local_index_does_not_match_ngram_crossing_window_boundary() {
+        let config = PromptLookupConfig {
+            min_ngram: 3,
+            max_ngram: 3,
+            history_window_tokens: 6,
+            ..cfg()
+        };
+        let state = PromptLookupRowState::new(&[1, 2, 3, 4, 1, 2, 3], config).unwrap();
+        assert_eq!(state.propose(4), None);
+    }
+
+    #[test]
     fn invalid_config_is_rejected() {
         let config = PromptLookupConfig {
             min_ngram: 4,
@@ -2807,6 +3094,7 @@ mod tests {
         let published =
             pool.publish_history_with_mtp_certifications(&(0..32).collect::<Vec<_>>(), &[]);
         assert!(pool.len() <= config.max_index_entries);
+        assert!(pool.entries_peak() <= config.max_index_entries);
         assert!(published.evicted_entries > 0);
     }
 
@@ -2822,6 +3110,21 @@ mod tests {
         let evicted = pool.reclaim_fraction(1, 4);
         assert!(evicted > 0);
         assert!(pool.len() <= before.div_ceil(4));
+    }
+
+    #[test]
+    fn shared_pool_estimated_bytes_tracks_payload_and_clear() {
+        let config = PromptLookupConfig {
+            cross_request: true,
+            ..cfg()
+        };
+        let mut pool = SharedPromptLookupPool::new(config).unwrap();
+        pool.publish_history_with_mtp_certifications(&(0..128).collect::<Vec<_>>(), &[]);
+        let populated = pool.estimated_bytes();
+        assert!(populated > 0);
+        assert!(pool.estimated_bytes_peak() >= populated);
+        assert!(pool.clear() > 0);
+        assert_eq!(pool.estimated_bytes(), 0);
     }
 
     #[test]

@@ -373,6 +373,10 @@ pub struct PromptLookupHealthInfo {
     pub index_update_us: u64,
     pub index_entries_current: u64,
     pub index_entries_peak: u64,
+    pub index_ledger_entries_current: u64,
+    pub index_ledger_entries_peak: u64,
+    pub index_estimated_bytes_current: u64,
+    pub index_estimated_bytes_peak: u64,
     pub index_evictions: u64,
     pub verify_round_us: u64,
     pub verify_forward_us: u64,
@@ -482,6 +486,10 @@ impl PromptLookupHealthInfo {
             aggregate.index_update_us += snapshot.index_update_us;
             aggregate.index_entries_current += snapshot.index_entries_current;
             aggregate.index_entries_peak += snapshot.index_entries_peak;
+            aggregate.index_ledger_entries_current += snapshot.index_ledger_entries_current;
+            aggregate.index_ledger_entries_peak += snapshot.index_ledger_entries_peak;
+            aggregate.index_estimated_bytes_current += snapshot.index_estimated_bytes_current;
+            aggregate.index_estimated_bytes_peak += snapshot.index_estimated_bytes_peak;
             aggregate.index_evictions += snapshot.index_evictions;
             aggregate.verify_round_us += snapshot.verify_round_us;
             aggregate.verify_forward_us += snapshot.verify_forward_us;
@@ -625,6 +633,10 @@ impl PromptLookupHealthConfig {
             index_update_us: stats.index_update_us,
             index_entries_current: stats.index_entries_current,
             index_entries_peak: stats.index_entries_peak,
+            index_ledger_entries_current: stats.index_ledger_entries_current,
+            index_ledger_entries_peak: stats.index_ledger_entries_peak,
+            index_estimated_bytes_current: stats.index_estimated_bytes_current,
+            index_estimated_bytes_peak: stats.index_estimated_bytes_peak,
             index_evictions: stats.index_evictions,
             verify_round_us: stats.verify_round_us,
             verify_forward_us: stats.verify_forward_us,
@@ -997,6 +1009,10 @@ mod tests {
             exact_acceptance_draws: 14,
             exact_residual_corrections: 3,
             exact_bonus_samples: 2,
+            index_ledger_entries_current: 64,
+            index_ledger_entries_peak: 96,
+            index_estimated_bytes_current: 12_288,
+            index_estimated_bytes_peak: 16_384,
             verify_round_us: 17,
             verify_accept_host_sync_count: 7,
             rollback_count: 2,
@@ -1153,6 +1169,10 @@ mod tests {
         assert_eq!(snapshot.prompt_lookup.shared_pressure_evictions, 5);
         assert_eq!(snapshot.prompt_lookup.shared_clear_count, 2);
         assert_eq!(snapshot.prompt_lookup.shared_cleared_entries, 11);
+        assert_eq!(snapshot.prompt_lookup.index_ledger_entries_current, 64);
+        assert_eq!(snapshot.prompt_lookup.index_ledger_entries_peak, 96);
+        assert_eq!(snapshot.prompt_lookup.index_estimated_bytes_current, 12_288);
+        assert_eq!(snapshot.prompt_lookup.index_estimated_bytes_peak, 16_384);
         assert_eq!(snapshot.prompt_lookup.shared_estimated_bytes_current, 4096);
         assert_eq!(snapshot.prompt_lookup.shared_estimated_bytes_peak, 8192);
     }

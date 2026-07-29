@@ -8901,6 +8901,36 @@ impl<M: Model> Scheduler<M> {
             .map(|lookup| lookup.index_entries_peak() as u64)
             .sum();
         state.stats.index_entries_peak = state.stats.index_entries_peak.max(peak);
+        state.stats.index_ledger_entries_current = state
+            .rows
+            .values()
+            .filter_map(|row| row.lookup.as_ref())
+            .map(|lookup| lookup.ledger_entries() as u64)
+            .sum();
+        let ledger_peak = state
+            .rows
+            .values()
+            .filter_map(|row| row.lookup.as_ref())
+            .map(|lookup| lookup.ledger_entries_peak() as u64)
+            .sum();
+        state.stats.index_ledger_entries_peak =
+            state.stats.index_ledger_entries_peak.max(ledger_peak);
+        state.stats.index_estimated_bytes_current = state
+            .rows
+            .values()
+            .filter_map(|row| row.lookup.as_ref())
+            .map(|lookup| lookup.estimated_bytes() as u64)
+            .sum();
+        let estimated_bytes_peak = state
+            .rows
+            .values()
+            .filter_map(|row| row.lookup.as_ref())
+            .map(|lookup| lookup.estimated_bytes_peak() as u64)
+            .sum();
+        state.stats.index_estimated_bytes_peak = state
+            .stats
+            .index_estimated_bytes_peak
+            .max(estimated_bytes_peak);
         state.stats.index_evictions = state
             .rows
             .values()

@@ -607,6 +607,8 @@ impl SchedulerActorMtpCounters {
                 *baseline = None;
                 if let Some(stats) = published.as_mut() {
                     stats.index_entries_current = 0;
+                    stats.index_ledger_entries_current = 0;
+                    stats.index_estimated_bytes_current = 0;
                 }
             }
         }
@@ -6503,6 +6505,10 @@ mod tests {
             rejected_tokens: 2,
             index_entries_current: 11,
             index_entries_peak: 13,
+            index_ledger_entries_current: 20,
+            index_ledger_entries_peak: 25,
+            index_estimated_bytes_current: 1_000,
+            index_estimated_bytes_peak: 1_200,
             ..PromptLookupStats::default()
         }));
         counters.store_prompt_lookup_stats(Some(PromptLookupStats {
@@ -6514,6 +6520,10 @@ mod tests {
             rejected_tokens: 2,
             index_entries_current: 0,
             index_entries_peak: 17,
+            index_ledger_entries_current: 0,
+            index_ledger_entries_peak: 30,
+            index_estimated_bytes_current: 0,
+            index_estimated_bytes_peak: 2_000,
             ..PromptLookupStats::default()
         }));
         counters.store_prompt_lookup_stats_with_qualification(
@@ -6546,6 +6556,10 @@ mod tests {
                 rejected_tokens: 4,
                 index_entries_current: 9,
                 index_entries_peak: 12,
+                index_ledger_entries_current: 18,
+                index_ledger_entries_peak: 22,
+                index_estimated_bytes_current: 900,
+                index_estimated_bytes_peak: 1_100,
                 ..PromptLookupStats::default()
             }),
             PromptLookupQualificationStats {
@@ -6579,6 +6593,10 @@ mod tests {
         assert_eq!(stats.rejected_tokens, 6);
         assert_eq!(stats.index_entries_current, 9);
         assert_eq!(stats.index_entries_peak, 17);
+        assert_eq!(stats.index_ledger_entries_current, 18);
+        assert_eq!(stats.index_ledger_entries_peak, 30);
+        assert_eq!(stats.index_estimated_bytes_current, 900);
+        assert_eq!(stats.index_estimated_bytes_peak, 2_000);
         assert_eq!(stats.ordinary_cost_samples, 8);
         assert_eq!(stats.lookup_cost_samples, 9);
         assert_eq!(stats.qualified_regimes_current, 1);
@@ -6597,6 +6615,10 @@ mod tests {
         assert_eq!(stats.queries, 9);
         assert_eq!(stats.index_entries_current, 0);
         assert_eq!(stats.index_entries_peak, 17);
+        assert_eq!(stats.index_ledger_entries_current, 0);
+        assert_eq!(stats.index_ledger_entries_peak, 30);
+        assert_eq!(stats.index_estimated_bytes_current, 0);
+        assert_eq!(stats.index_estimated_bytes_peak, 2_000);
     }
 
     #[test]

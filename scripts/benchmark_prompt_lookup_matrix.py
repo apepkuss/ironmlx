@@ -673,6 +673,9 @@ def health_delta(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[str, Any
         "accepted_tokens",
         "rejected_tokens",
         "zero_accept_windows",
+        "propose_us",
+        "index_build_us",
+        "index_update_us",
         "index_evictions",
         "verify_round_us",
         "verify_forward_us",
@@ -730,6 +733,18 @@ def health_delta(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[str, Any
             "enabled": bool(after_lookup.get("enabled")),
             "index_entries_current": int(after_lookup.get("index_entries_current") or 0),
             "index_entries_peak": int(after_lookup.get("index_entries_peak") or 0),
+            "index_ledger_entries_current": int(
+                after_lookup.get("index_ledger_entries_current") or 0
+            ),
+            "index_ledger_entries_peak": int(
+                after_lookup.get("index_ledger_entries_peak") or 0
+            ),
+            "index_estimated_bytes_current": int(
+                after_lookup.get("index_estimated_bytes_current") or 0
+            ),
+            "index_estimated_bytes_peak": int(
+                after_lookup.get("index_estimated_bytes_peak") or 0
+            ),
             "shared_entries_current": int(
                 after_lookup.get("shared_entries_current") or 0
             ),
@@ -1221,11 +1236,34 @@ def aggregate_rows(
             "lookup_verify_accept_host_sync_us": sum(
                 item["verify_accept_host_sync_us"] for item in lookup_deltas
             ),
+            "lookup_propose_us": sum(item["propose_us"] for item in lookup_deltas),
+            "lookup_index_build_us": sum(
+                item["index_build_us"] for item in lookup_deltas
+            ),
+            "lookup_index_update_us": sum(
+                item["index_update_us"] for item in lookup_deltas
+            ),
             "index_entries_current_max": max(
                 (item["index_entries_current"] for item in lookup_deltas), default=0
             ),
             "index_entries_peak_max": max(
                 (item["index_entries_peak"] for item in lookup_deltas), default=0
+            ),
+            "index_ledger_entries_current_max": max(
+                (item["index_ledger_entries_current"] for item in lookup_deltas),
+                default=0,
+            ),
+            "index_ledger_entries_peak_max": max(
+                (item["index_ledger_entries_peak"] for item in lookup_deltas),
+                default=0,
+            ),
+            "index_estimated_bytes_current_max": max(
+                (item["index_estimated_bytes_current"] for item in lookup_deltas),
+                default=0,
+            ),
+            "index_estimated_bytes_peak_max": max(
+                (item["index_estimated_bytes_peak"] for item in lookup_deltas),
+                default=0,
             ),
             "shared_entries_current_max": max(
                 (item["shared_entries_current"] for item in lookup_deltas), default=0
@@ -1475,8 +1513,23 @@ def build_comparisons(
                 "lookup_verify_accept_host_sync_us": row.get(
                     "lookup_verify_accept_host_sync_us", 0
                 ),
+                "lookup_propose_us": row.get("lookup_propose_us", 0),
+                "lookup_index_build_us": row.get("lookup_index_build_us", 0),
+                "lookup_index_update_us": row.get("lookup_index_update_us", 0),
                 "index_entries_current_max": row["index_entries_current_max"],
                 "index_entries_peak_max": row["index_entries_peak_max"],
+                "index_ledger_entries_current_max": row.get(
+                    "index_ledger_entries_current_max", 0
+                ),
+                "index_ledger_entries_peak_max": row.get(
+                    "index_ledger_entries_peak_max", 0
+                ),
+                "index_estimated_bytes_current_max": row.get(
+                    "index_estimated_bytes_current_max", 0
+                ),
+                "index_estimated_bytes_peak_max": row.get(
+                    "index_estimated_bytes_peak_max", 0
+                ),
                 "process_current_usage_bytes_max": row.get(
                     "process_current_usage_bytes_max", 0
                 ),
@@ -1586,6 +1639,19 @@ def evaluate_gates(
         item["index_entries_peak_max"] <= lookup_limits[item["lookup_name"]]
         for item in comparisons
     )
+    index_memory_bounds = {
+        lookup.name: (
+            lookup.history_window_tokens * 4
+            + lookup.max_index_entries * 128
+            + 1024 * 1024
+        )
+        for lookup in config.lookup_configs
+    }
+    index_memory_bounded = all(
+        item.get("index_estimated_bytes_peak_max", 0)
+        <= index_memory_bounds[item["lookup_name"]]
+        for item in comparisons
+    )
     full_coverage = (
         set(config.prompt_tokens) >= {1024, 8192, 32768, 65536}
         and set(config.max_tokens) >= {128, 512}
@@ -1654,6 +1720,7 @@ def evaluate_gates(
             not item["server_healthy"] for item in exercised
         ),
         "lookup_index_within_configured_cap": index_bounded,
+        "lookup_index_estimated_bytes_within_bound": index_memory_bounded,
         "ttft_within_2pct_or_5ms": ttft,
         "negative_decode_regression_within_3pct": control_regression if controls else None,
         "concurrent_p95_e2e_within_3pct": concurrent_p95 if concurrent else None,
@@ -1675,7 +1742,14 @@ def evaluate_gates(
         "full_coverage": full_coverage,
         "lookup_dimension_coverage": lookup_dimension_coverage,
     }
-    hard_values = [correctness, counter_invariants, lifecycle, index_bounded, ttft]
+    hard_values = [
+        correctness,
+        counter_invariants,
+        lifecycle,
+        index_bounded,
+        index_memory_bounded,
+        ttft,
+    ]
     if controls:
         hard_values.append(control_regression)
     if concurrent:
@@ -2050,6 +2124,43 @@ def render_markdown(
                     "scheduler-b1"
                     if row["scheduler_path_controlled"]
                     else "feature-toggle"
+                ),
+                **row,
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "## Index Scaling",
+            "",
+            "| lookup | case | pp | B | build ms | update ms | propose ms | index peak MiB | ledger peak | shared peak MiB |",
+            "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in comparisons:
+        lines.append(
+            "| {lookup_name} | {case_id} | {target_prompt_tokens} | {concurrency} | "
+            "{build_ms} | {update_ms} | {propose_ms} | {index_mib} | "
+            "{ledger_peak} | {shared_mib} |".format(
+                build_ms=format_number(
+                    row.get("lookup_index_build_us", 0) / 1_000.0, 3
+                ),
+                update_ms=format_number(
+                    row.get("lookup_index_update_us", 0) / 1_000.0, 3
+                ),
+                propose_ms=format_number(
+                    row.get("lookup_propose_us", 0) / 1_000.0, 3
+                ),
+                index_mib=format_number(
+                    row.get("index_estimated_bytes_peak_max", 0)
+                    / (1024.0 * 1024.0),
+                    3,
+                ),
+                ledger_peak=row.get("index_ledger_entries_peak_max", 0),
+                shared_mib=format_number(
+                    row.get("shared_estimated_bytes_peak_max", 0)
+                    / (1024.0 * 1024.0),
+                    3,
                 ),
                 **row,
             )
