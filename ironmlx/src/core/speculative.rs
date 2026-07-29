@@ -4,11 +4,14 @@ use std::collections::VecDeque;
 use std::time::Instant;
 
 use anyhow::anyhow;
-use mlx::{Array, Dtype, StreamOrDevice};
+use mlx::{random, Array, Dtype, StreamOrDevice};
 use serde::{Deserialize, Serialize};
 
 use crate::core::cache::{MtpCache, MtpCacheSnapshot};
 use crate::core::generate::{build_position_ids, GenerateEvent, GenerateRequest};
+#[cfg(test)]
+use crate::core::sampler::SamplingDistribution;
+use crate::core::sampler::{draw_uniforms, sample_target_tokens_with_uniforms_batch};
 use crate::core::tokenizer::{DecodeStream, Tokenizer};
 use crate::core::{Loader, Model, Sampler};
 use crate::models::{Qwen35Model, Qwen35MoeModel, Qwen35MoeMtp, Qwen36MoeModel};
@@ -60,11 +63,10 @@ impl MtpSpeculativeConfig {
                 "MtpSpeculativeConfig::new: max_draft_tokens must be > 0"
             ));
         }
-        if !sampler.is_pipelinable() {
-            return Err(anyhow!(
-                "MtpSpeculativeConfig::new: MTP speculative decoding currently requires greedy sampling"
-            ));
-        }
+        anyhow::ensure!(
+            sampler.temperature.is_finite(),
+            "sampling temperature must be finite"
+        );
         Ok(Self { max_draft_tokens })
     }
 }
@@ -221,6 +223,14 @@ pub struct MtpSpeculativeStats {
     pub drafted_tokens: usize,
     /// Draft tokens accepted before mismatch.
     pub accepted_draft_tokens: usize,
+    /// Non-greedy windows resolved with exact speculative sampling.
+    pub exact_sampling_windows: usize,
+    /// Acceptance Bernoulli draws consumed by exact sampling.
+    pub exact_acceptance_draws: usize,
+    /// Rejections corrected from the normalized positive residual `(p - q)+`.
+    pub exact_residual_corrections: usize,
+    /// Target-distribution bonus samples emitted after full draft acceptance.
+    pub exact_bonus_samples: usize,
     /// Draft windows that attempted each zero-based draft position.
     pub draft_attempts_by_position: Vec<usize>,
     /// Draft windows that accepted each zero-based draft position.
@@ -313,6 +323,18 @@ impl MtpSpeculativeStats {
             accepted_draft_tokens: self
                 .accepted_draft_tokens
                 .saturating_sub(before.accepted_draft_tokens),
+            exact_sampling_windows: self
+                .exact_sampling_windows
+                .saturating_sub(before.exact_sampling_windows),
+            exact_acceptance_draws: self
+                .exact_acceptance_draws
+                .saturating_sub(before.exact_acceptance_draws),
+            exact_residual_corrections: self
+                .exact_residual_corrections
+                .saturating_sub(before.exact_residual_corrections),
+            exact_bonus_samples: self
+                .exact_bonus_samples
+                .saturating_sub(before.exact_bonus_samples),
             draft_attempts_by_position: vec_delta(
                 &self.draft_attempts_by_position,
                 &before.draft_attempts_by_position,
@@ -451,6 +473,18 @@ impl MtpSpeculativeStats {
         self.accepted_draft_tokens = self
             .accepted_draft_tokens
             .saturating_add(other.accepted_draft_tokens);
+        self.exact_sampling_windows = self
+            .exact_sampling_windows
+            .saturating_add(other.exact_sampling_windows);
+        self.exact_acceptance_draws = self
+            .exact_acceptance_draws
+            .saturating_add(other.exact_acceptance_draws);
+        self.exact_residual_corrections = self
+            .exact_residual_corrections
+            .saturating_add(other.exact_residual_corrections);
+        self.exact_bonus_samples = self
+            .exact_bonus_samples
+            .saturating_add(other.exact_bonus_samples);
         merge_counter_vec(
             &mut self.draft_attempts_by_position,
             other.draft_attempts_by_position,
@@ -547,6 +581,19 @@ impl MtpSpeculativeStats {
             }
         }
     }
+
+    pub(crate) fn record_exact_sampling(&mut self, counters: ExactSamplingCounters) {
+        self.exact_sampling_windows = self.exact_sampling_windows.saturating_add(counters.windows);
+        self.exact_acceptance_draws = self
+            .exact_acceptance_draws
+            .saturating_add(counters.acceptance_draws);
+        self.exact_residual_corrections = self
+            .exact_residual_corrections
+            .saturating_add(counters.residual_corrections);
+        self.exact_bonus_samples = self
+            .exact_bonus_samples
+            .saturating_add(counters.bonus_samples);
+    }
 }
 
 impl MtpDraftCapTiming {
@@ -600,15 +647,12 @@ pub trait MtpSpeculativeModel: Model {
 
     fn mtp_hidden_dtype(&self, mtp: &Self::MtpHead) -> Dtype;
 
-    fn project_hidden_on(&self, hidden: &Array, target: impl Into<StreamOrDevice>)
-        -> Result<Array>;
-
     fn project_mtp_verify_hidden_on(
         &self,
         hidden: &Array,
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
-        self.project_hidden_on(hidden, target)
+        Model::project_hidden_on(self, hidden, target.into())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -660,14 +704,6 @@ impl MtpSpeculativeModel for Qwen35Model {
             dtype,
             cap,
         )
-    }
-
-    fn project_hidden_on(
-        &self,
-        hidden: &Array,
-        target: impl Into<StreamOrDevice>,
-    ) -> Result<Array> {
-        Qwen35Model::project_hidden_on(self, hidden, target)
     }
 
     fn project_mtp_verify_hidden_on(
@@ -757,14 +793,6 @@ impl MtpSpeculativeModel for Qwen35MoeModel {
         )
     }
 
-    fn project_hidden_on(
-        &self,
-        hidden: &Array,
-        target: impl Into<StreamOrDevice>,
-    ) -> Result<Array> {
-        Qwen35MoeModel::project_hidden_on(self, hidden, target)
-    }
-
     fn project_mtp_verify_hidden_on(
         &self,
         hidden: &Array,
@@ -850,14 +878,6 @@ impl MtpSpeculativeModel for Qwen36MoeModel {
             dtype,
             cap,
         )
-    }
-
-    fn project_hidden_on(
-        &self,
-        hidden: &Array,
-        target: impl Into<StreamOrDevice>,
-    ) -> Result<Array> {
-        Qwen36MoeModel::project_hidden_on(self, hidden, target)
     }
 
     fn project_mtp_verify_hidden_on(
@@ -958,6 +978,90 @@ pub struct SpeculativeResolution {
     /// Whether the caller must rollback the main KV cache after a full-window
     /// verify pass.
     pub needs_rollback: bool,
+    pub(crate) exact_sampling: ExactSamplingCounters,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ExactSamplingCounters {
+    pub windows: usize,
+    pub acceptance_draws: usize,
+    pub residual_corrections: usize,
+    pub bonus_samples: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum DraftTokenDistribution {
+    Deterministic,
+    #[cfg(test)]
+    Sampled(SamplingDistribution),
+}
+
+pub(crate) fn split_speculative_draft_prng(prng_state: &mut Array) -> Result<Array> {
+    anyhow::ensure!(
+        prng_state.size() == 2,
+        "speculative PRNG state must contain one two-word key, got shape {:?}",
+        prng_state.shape().as_slice()
+    );
+    let original_shape = prng_state.shape().as_slice().to_vec();
+    let flat = prng_state.reshape(&[2_i32][..])?;
+    let (next_decision_key, draft_key) = random::split(&flat)?;
+    *prng_state = next_decision_key.reshape(original_shape.as_slice())?;
+    Ok(draft_key)
+}
+
+pub(crate) fn sample_draft_logits_position(
+    logits: &Array,
+    _sampler: Sampler,
+    _history: &[u32],
+    _draft_prng: Option<&mut Array>,
+) -> Result<(u32, DraftTokenDistribution)> {
+    let dims = logits.shape();
+    let dims = dims.as_slice();
+    anyhow::ensure!(
+        dims.len() == 3 && dims[0] == 1 && dims[1] == 1,
+        "draft logits must be [1, 1, V], got {dims:?}"
+    );
+    let vocab = dims[2];
+    let row = logits.reshape((vocab,))?;
+    let token = mlx::ops::reduction::argmax(&row, -1, false)?.item::<u32>()?;
+    Ok((token, DraftTokenDistribution::Deterministic))
+}
+
+pub(crate) fn sample_draft_logits_position_with_uniform(
+    logits: &Array,
+    _sampler: Sampler,
+    _history: &[u32],
+    _uniform: f32,
+) -> Result<(u32, DraftTokenDistribution)> {
+    let dims = logits.shape();
+    let dims = dims.as_slice();
+    anyhow::ensure!(
+        dims.len() == 3 && dims[0] == 1 && dims[1] == 1,
+        "draft logits must be [1, 1, V], got {dims:?}"
+    );
+    let vocab = dims[2];
+    let row = logits.reshape((vocab,))?;
+    let token = mlx::ops::reduction::argmax(&row, -1, false)?.item::<u32>()?;
+    Ok((token, DraftTokenDistribution::Deterministic))
+}
+
+#[cfg(test)]
+impl DraftTokenDistribution {
+    fn acceptance_probability(&self, target: &SamplingDistribution, token: u32) -> Result<f32> {
+        match self {
+            Self::Deterministic => Ok(target.probability(token)),
+            #[cfg(test)]
+            Self::Sampled(draft) => target.acceptance_probability(draft, token),
+        }
+    }
+
+    fn residual(&self, target: &SamplingDistribution, token: u32) -> Result<SamplingDistribution> {
+        match self {
+            Self::Deterministic => target.residual_point_mass(token),
+            #[cfg(test)]
+            Self::Sampled(draft) => target.residual(draft),
+        }
+    }
 }
 
 pub fn resolve_speculative_tokens(
@@ -988,12 +1092,251 @@ pub fn resolve_speculative_tokens(
         tokens_to_append,
         accepted_verify_input_len,
         needs_rollback,
+        exact_sampling: ExactSamplingCounters::default(),
     })
+}
+
+#[cfg(test)]
+pub(crate) fn resolve_exact_speculative_logits(
+    draft_tokens: &[u32],
+    draft_distributions: &[DraftTokenDistribution],
+    target_logits: &Array,
+    sampler: Sampler,
+    history: &[u32],
+    prng_state: &mut Array,
+) -> Result<SpeculativeResolution> {
+    anyhow::ensure!(
+        sampler.temperature > 0.0,
+        "exact speculative sampling requires temperature > 0"
+    );
+    anyhow::ensure!(
+        draft_tokens.len() == draft_distributions.len(),
+        "exact speculative draft token count {} != distribution count {}",
+        draft_tokens.len(),
+        draft_distributions.len()
+    );
+    let shape = target_logits.shape();
+    let dims = shape.as_slice();
+    anyhow::ensure!(
+        dims.len() == 3 && dims[0] == 1,
+        "exact speculative target logits must be [1, S, V], got {dims:?}"
+    );
+    anyhow::ensure!(
+        dims[1] as usize == draft_tokens.len() + 1,
+        "exact speculative target positions {} != draft count {} + 1",
+        dims[1],
+        draft_tokens.len()
+    );
+
+    let target_distributions =
+        speculative_target_distributions(target_logits, sampler, history, draft_tokens)?;
+    let uniforms = draw_uniforms(prng_state, draft_tokens.len() + 1)?;
+    let correction_uniform = uniforms[draft_tokens.len()];
+    let mut tokens_to_append = Vec::with_capacity(draft_tokens.len() + 1);
+    let mut exact_sampling = ExactSamplingCounters {
+        windows: 1,
+        ..ExactSamplingCounters::default()
+    };
+    for (position, (&draft_token, draft_distribution)) in
+        draft_tokens.iter().zip(draft_distributions).enumerate()
+    {
+        let target = &target_distributions[position];
+        let accept_probability = draft_distribution.acceptance_probability(&target, draft_token)?;
+        exact_sampling.acceptance_draws = exact_sampling.acceptance_draws.saturating_add(1);
+        if uniforms[position] < accept_probability {
+            tokens_to_append.push(draft_token);
+            continue;
+        }
+
+        let corrected = draft_distribution
+            .residual(target, draft_token)?
+            .sample_with_uniform(correction_uniform)?;
+        exact_sampling.residual_corrections = exact_sampling.residual_corrections.saturating_add(1);
+        tokens_to_append.push(corrected);
+        return Ok(SpeculativeResolution {
+            accepted_draft_len: position,
+            tokens_to_append,
+            accepted_verify_input_len: position + 1,
+            needs_rollback: true,
+            exact_sampling,
+        });
+    }
+
+    tokens_to_append
+        .push(target_distributions[draft_tokens.len()].sample_with_uniform(correction_uniform)?);
+    exact_sampling.bonus_samples = exact_sampling.bonus_samples.saturating_add(1);
+    Ok(SpeculativeResolution {
+        accepted_draft_len: draft_tokens.len(),
+        tokens_to_append,
+        accepted_verify_input_len: draft_tokens.len() + 1,
+        needs_rollback: false,
+        exact_sampling,
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn resolve_exact_deterministic_target_distributions(
+    draft_tokens: &[u32],
+    target_distributions: &[SamplingDistribution],
+    prng_state: &mut Array,
+) -> Result<SpeculativeResolution> {
+    anyhow::ensure!(
+        target_distributions.len() == draft_tokens.len() + 1,
+        "exact deterministic target distribution count {} != draft count {} + 1",
+        target_distributions.len(),
+        draft_tokens.len()
+    );
+    let uniforms = draw_uniforms(prng_state, target_distributions.len())?;
+    let mut tokens_to_append = Vec::with_capacity(target_distributions.len());
+    let mut exact_sampling = ExactSamplingCounters {
+        windows: 1,
+        ..ExactSamplingCounters::default()
+    };
+
+    for (position, &draft_token) in draft_tokens.iter().enumerate() {
+        let target_token =
+            target_distributions[position].sample_with_uniform(uniforms[position])?;
+        exact_sampling.acceptance_draws = exact_sampling.acceptance_draws.saturating_add(1);
+        if target_token == draft_token {
+            tokens_to_append.push(draft_token);
+            continue;
+        }
+
+        tokens_to_append.push(target_token);
+        exact_sampling.residual_corrections = exact_sampling.residual_corrections.saturating_add(1);
+        return Ok(SpeculativeResolution {
+            accepted_draft_len: position,
+            tokens_to_append,
+            accepted_verify_input_len: position + 1,
+            needs_rollback: true,
+            exact_sampling,
+        });
+    }
+
+    tokens_to_append.push(
+        target_distributions[draft_tokens.len()]
+            .sample_with_uniform(uniforms[draft_tokens.len()])?,
+    );
+    exact_sampling.bonus_samples = exact_sampling.bonus_samples.saturating_add(1);
+    Ok(SpeculativeResolution {
+        accepted_draft_len: draft_tokens.len(),
+        tokens_to_append,
+        accepted_verify_input_len: draft_tokens.len() + 1,
+        needs_rollback: false,
+        exact_sampling,
+    })
+}
+
+pub(crate) fn resolve_exact_deterministic_target_tokens(
+    draft_tokens: &[u32],
+    target_tokens: &[u32],
+) -> Result<SpeculativeResolution> {
+    anyhow::ensure!(
+        target_tokens.len() == draft_tokens.len() + 1,
+        "exact deterministic target token count {} != draft count {} + 1",
+        target_tokens.len(),
+        draft_tokens.len()
+    );
+    let accepted_draft_len = draft_tokens
+        .iter()
+        .zip(target_tokens)
+        .take_while(|(draft, target)| draft == target)
+        .count();
+    let mut tokens_to_append = Vec::with_capacity(accepted_draft_len + 1);
+    tokens_to_append.extend_from_slice(&draft_tokens[..accepted_draft_len]);
+    tokens_to_append.push(target_tokens[accepted_draft_len]);
+    let mismatch = accepted_draft_len < draft_tokens.len();
+
+    Ok(SpeculativeResolution {
+        accepted_draft_len,
+        tokens_to_append,
+        accepted_verify_input_len: accepted_draft_len + 1,
+        needs_rollback: mismatch,
+        exact_sampling: ExactSamplingCounters {
+            windows: 1,
+            acceptance_draws: if mismatch {
+                accepted_draft_len + 1
+            } else {
+                draft_tokens.len()
+            },
+            residual_corrections: usize::from(mismatch),
+            bonus_samples: usize::from(!mismatch),
+        },
+    })
+}
+
+/// Exact coupling for a deterministic draft distribution `q = delta(draft)`.
+///
+/// Sampling once from each target distribution `p` is equivalent to the
+/// standard accept/reject algorithm: a sampled draft token is accepted when
+/// the target sample matches it; otherwise that same target sample has the
+/// conditional residual distribution over all non-draft tokens.
+pub(crate) fn resolve_exact_deterministic_target_logits(
+    draft_tokens: &[u32],
+    target_logits: &Array,
+    sampler: Sampler,
+    history: &[u32],
+    prng_state: &mut Array,
+) -> Result<SpeculativeResolution> {
+    anyhow::ensure!(
+        sampler.temperature > 0.0,
+        "exact deterministic target sampling requires temperature > 0"
+    );
+    let shape = target_logits.shape();
+    let dims = shape.as_slice();
+    let positions = draft_tokens.len() + 1;
+    anyhow::ensure!(
+        dims.len() == 3 && dims[0] == 1 && dims[1] as usize == positions,
+        "exact deterministic target logits must be [1, {positions}, V], got {dims:?}"
+    );
+    let rows = target_logits.reshape(&[i32::try_from(positions)?, dims[2]][..])?;
+    let histories = (0..positions)
+        .map(|position| {
+            let mut position_history = Vec::with_capacity(history.len() + position);
+            position_history.extend_from_slice(history);
+            position_history.extend_from_slice(&draft_tokens[..position]);
+            position_history
+        })
+        .collect::<Vec<_>>();
+    let history_refs = histories.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    let sampler_refs = vec![&sampler; positions];
+    let uniforms = draw_uniforms(prng_state, positions)?;
+    let target_tokens =
+        sample_target_tokens_with_uniforms_batch(&sampler_refs, &rows, &history_refs, &uniforms)?;
+    resolve_exact_deterministic_target_tokens(draft_tokens, &target_tokens)
+}
+
+#[cfg(test)]
+fn speculative_target_distributions(
+    logits: &Array,
+    sampler: Sampler,
+    history: &[u32],
+    draft_tokens: &[u32],
+) -> Result<Vec<SamplingDistribution>> {
+    let dims = logits.shape();
+    let dims = dims.as_slice();
+    let positions = draft_tokens.len() + 1;
+    anyhow::ensure!(
+        dims.len() == 3 && dims[0] == 1 && dims[1] as usize == positions,
+        "speculative target distributions require [1, {positions}, V], got {dims:?}"
+    );
+    let rows = logits.reshape(&[i32::try_from(positions)?, dims[2]][..])?;
+    let histories = (0..positions)
+        .map(|position| {
+            let mut position_history = Vec::with_capacity(history.len() + position);
+            position_history.extend_from_slice(history);
+            position_history.extend_from_slice(&draft_tokens[..position]);
+            position_history
+        })
+        .collect::<Vec<_>>();
+    let history_refs = histories.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    sampler.distributions(&rows, &history_refs)
 }
 
 #[derive(Debug)]
 pub(crate) struct MtpDraftResult {
     pub tokens: Vec<u32>,
+    pub distributions: Vec<DraftTokenDistribution>,
     pub cache_snapshot: MtpCacheSnapshot,
 }
 
@@ -1074,6 +1417,15 @@ pub(crate) struct MtpDraftPolicyState {
     cooldown_windows: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MtpDraftPolicySnapshot {
+    max_draft_tokens: usize,
+    current_budget: usize,
+    acceptance_ewma_bits: Option<u64>,
+    overhead_ratio_ewma_bits: Option<u64>,
+    cooldown_windows: usize,
+}
+
 impl MtpDraftPolicyState {
     const EWMA_ALPHA: f64 = 0.35;
     const HIGH_OVERHEAD_RATIO: f64 = 1.50;
@@ -1096,6 +1448,36 @@ impl MtpDraftPolicyState {
 
     pub(crate) fn current_budget(&self) -> usize {
         self.current_budget.clamp(1, self.max_draft_tokens)
+    }
+
+    pub(crate) fn snapshot(&self) -> MtpDraftPolicySnapshot {
+        MtpDraftPolicySnapshot {
+            max_draft_tokens: self.max_draft_tokens,
+            current_budget: self.current_budget,
+            acceptance_ewma_bits: self.acceptance_ewma.map(f64::to_bits),
+            overhead_ratio_ewma_bits: self.overhead_ratio_ewma.map(f64::to_bits),
+            cooldown_windows: self.cooldown_windows,
+        }
+    }
+
+    pub(crate) fn restore_snapshot(&mut self, snapshot: MtpDraftPolicySnapshot) -> Result<()> {
+        anyhow::ensure!(
+            snapshot.max_draft_tokens == self.max_draft_tokens,
+            "MTP draft policy snapshot max {} != destination max {}",
+            snapshot.max_draft_tokens,
+            self.max_draft_tokens
+        );
+        anyhow::ensure!(
+            (1..=snapshot.max_draft_tokens).contains(&snapshot.current_budget),
+            "MTP draft policy snapshot budget {} is outside [1, {}]",
+            snapshot.current_budget,
+            snapshot.max_draft_tokens
+        );
+        self.current_budget = snapshot.current_budget;
+        self.acceptance_ewma = snapshot.acceptance_ewma_bits.map(f64::from_bits);
+        self.overhead_ratio_ewma = snapshot.overhead_ratio_ewma_bits.map(f64::from_bits);
+        self.cooldown_windows = snapshot.cooldown_windows;
+        Ok(())
     }
 
     pub(crate) fn observe_window(
@@ -1453,12 +1835,6 @@ where
                 "MtpTextGenerationStream::new_text_only: max_draft_tokens must be > 0"
             ));
         }
-        if !request.sampler.is_pipelinable() {
-            return Err(anyhow!(
-                "MtpTextGenerationStream::new_text_only: MTP speculative decoding currently requires greedy sampling"
-            ));
-        }
-
         let prompt_len = request.prompt_ids.len();
         let cap = ((prompt_len + request.max_new_tokens) as i32)
             .max(crate::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF);
@@ -1530,7 +1906,8 @@ where
             last_prompt_hidden.ok_or_else(|| anyhow!("MTP prefill produced no prompt hidden"))?;
 
         let projection_start = Instant::now();
-        let first_logits = model.project_hidden_on(&last_prompt_hidden, ())?;
+        let first_logits =
+            model.project_hidden_on(&last_prompt_hidden, StreamOrDevice::default())?;
         add_elapsed_us(&mut stats.projection_us, projection_start);
         let mut prng_state = mlx::random::key(request.sampler.seed)?;
         let sampling_start = Instant::now();
@@ -1632,6 +2009,7 @@ where
             .min(remaining);
         let draft_result = self.draft_tokens(current_token, draft_budget)?;
         let draft_tokens = draft_result.tokens;
+        let _draft_distributions = draft_result.distributions;
         let verify_input = verify_input(current_token, &draft_tokens);
         let verify_start_pos = (self.history.len() - 1) as i32;
         let verify_pos_ids = self.position_ids(verify_start_pos, verify_input.len() as i32)?;
@@ -1669,18 +2047,20 @@ where
                 .project_mtp_verify_hidden_on(&verified_hidden, ())?;
             add_elapsed_us(&mut self.stats.projection_us, projection_start);
             let sampling_start = Instant::now();
-            let verified_tokens = sample_logits_positions(
+            let resolution = resolve_exact_deterministic_target_logits(
+                &draft_tokens,
                 &verified_logits,
                 self.request.sampler,
                 &self.history,
                 &mut self.prng_state,
             )?;
             add_elapsed_us(&mut self.stats.sampling_us, sampling_start);
-            resolve_speculative_tokens(&draft_tokens, &verified_tokens)?
+            resolution
         };
         self.stats.windows += 1;
         self.stats.drafted_tokens += draft_tokens.len();
         self.stats.accepted_draft_tokens += resolution.accepted_draft_len;
+        self.stats.record_exact_sampling(resolution.exact_sampling);
         self.stats
             .record_window_acceptance(draft_tokens.len(), resolution.accepted_draft_len);
         if resolution.needs_rollback {
@@ -1797,8 +2177,15 @@ where
         let mut input_hidden = self.last_hidden.clone();
         let mut input_token = current_token;
         let start_pos = (self.history.len() - 1) as i32;
+        let draft_uniforms = if self.request.sampler.is_pipelinable() {
+            vec![0.0; draft_budget]
+        } else {
+            let mut draft_prng = split_speculative_draft_prng(&mut self.prng_state)?;
+            draw_uniforms(&mut draft_prng, draft_budget)?
+        };
+        let mut distributions = Vec::with_capacity(draft_budget);
 
-        for offset in 0..draft_budget {
+        for (offset, &draft_uniform) in draft_uniforms.iter().enumerate().take(draft_budget) {
             let token_arr: Array = (&[input_token][..], &[1_i32, 1_i32][..]).try_into()?;
             let position_ids = self.position_ids(start_pos + offset as i32, 1)?;
             let draft_forward_start = Instant::now();
@@ -1813,17 +2200,24 @@ where
             )?;
             add_elapsed_us(&mut self.stats.draft_forward_us, draft_forward_start);
             let sampling_start = Instant::now();
-            let sampled = sample_logits_positions(
-                &output.logits,
-                self.request.sampler,
-                &draft_history,
-                &mut self.prng_state,
-            )?;
+            let (next_token, distribution) = if self.request.sampler.is_pipelinable() {
+                sample_draft_logits_position(
+                    &output.logits,
+                    self.request.sampler,
+                    &draft_history,
+                    None,
+                )?
+            } else {
+                sample_draft_logits_position_with_uniform(
+                    &output.logits,
+                    self.request.sampler,
+                    &draft_history,
+                    draft_uniform,
+                )?
+            };
             add_elapsed_us(&mut self.stats.sampling_us, sampling_start);
-            let next_token = *sampled
-                .first()
-                .ok_or_else(|| anyhow!("MTP draft produced no token"))?;
             draft_tokens.push(next_token);
+            distributions.push(distribution);
             draft_history.push(next_token);
             input_hidden = output.hidden_states;
             input_token = next_token;
@@ -1831,6 +2225,7 @@ where
 
         Ok(MtpDraftResult {
             tokens: draft_tokens,
+            distributions,
             cache_snapshot: mtp_snapshot,
         })
     }
@@ -2234,6 +2629,27 @@ mod tests {
             Array::zeros((dims[0], dims[1], 1_i32), Dtype::Float32).map_err(anyhow::Error::from)
         }
 
+        fn project_hidden_on(&self, hidden: &Array, _target: StreamOrDevice) -> Result<Array> {
+            self.project_calls.fetch_add(1, Ordering::Relaxed);
+            let shape = hidden.shape();
+            let dims = shape.as_slice();
+            let seq = dims[1] as usize;
+            if self.tokens.len() != seq {
+                return Err(anyhow!(
+                    "fake token count {} does not match hidden seq {seq}",
+                    self.tokens.len()
+                ));
+            }
+            let vocab = 128_usize;
+            let mut logits = vec![0.0_f32; seq * vocab];
+            for (pos, &token) in self.tokens.iter().enumerate() {
+                logits[pos * vocab + token as usize] = 100.0;
+            }
+            (&logits[..], &[1_i32, seq as i32, vocab as i32][..])
+                .try_into()
+                .map_err(anyhow::Error::from)
+        }
+
         fn model_meta(&self) -> crate::core::memory_budget::ModelMeta {
             crate::core::memory_budget::test_meta_qwen35()
         }
@@ -2266,31 +2682,6 @@ mod tests {
 
         fn mtp_hidden_dtype(&self, _mtp: &Self::MtpHead) -> Dtype {
             Dtype::Float32
-        }
-
-        fn project_hidden_on(
-            &self,
-            hidden: &Array,
-            _target: impl Into<StreamOrDevice>,
-        ) -> Result<Array> {
-            self.project_calls.fetch_add(1, Ordering::Relaxed);
-            let shape = hidden.shape();
-            let dims = shape.as_slice();
-            let seq = dims[1] as usize;
-            if self.tokens.len() != seq {
-                return Err(anyhow!(
-                    "fake token count {} does not match hidden seq {seq}",
-                    self.tokens.len()
-                ));
-            }
-            let vocab = 128_usize;
-            let mut logits = vec![0.0_f32; seq * vocab];
-            for (pos, &token) in self.tokens.iter().enumerate() {
-                logits[pos * vocab + token as usize] = 100.0;
-            }
-            (&logits[..], &[1_i32, seq as i32, vocab as i32][..])
-                .try_into()
-                .map_err(anyhow::Error::from)
         }
 
         fn mtp_forward_hidden_on(
@@ -2364,6 +2755,273 @@ mod tests {
         assert_eq!(resolution.accepted_verify_input_len, 4);
         assert!(!resolution.needs_rollback);
         assert_eq!(model.project_calls(), 1);
+    }
+
+    #[test]
+    fn exact_sampling_accepts_deterministic_draft_and_samples_bonus() {
+        let logits: Array = (
+            &[
+                f32::NEG_INFINITY,
+                0.0,
+                f32::NEG_INFINITY,
+                f32::NEG_INFINITY,
+                f32::NEG_INFINITY,
+                0.0,
+                f32::NEG_INFINITY,
+                f32::NEG_INFINITY,
+                f32::NEG_INFINITY,
+                f32::NEG_INFINITY,
+                0.0,
+                f32::NEG_INFINITY,
+            ][..],
+            &[1_i32, 3_i32, 4_i32][..],
+        )
+            .try_into()
+            .unwrap();
+        let mut prng = mlx::random::key(17).unwrap();
+        let resolution = resolve_exact_speculative_logits(
+            &[1, 1],
+            &[
+                DraftTokenDistribution::Deterministic,
+                DraftTokenDistribution::Deterministic,
+            ],
+            &logits,
+            Sampler::greedy().with_temperature(1.0),
+            &[9],
+            &mut prng,
+        )
+        .unwrap();
+
+        assert_eq!(resolution.accepted_draft_len, 2);
+        assert_eq!(resolution.tokens_to_append, vec![1, 1, 2]);
+        assert_eq!(resolution.accepted_verify_input_len, 3);
+        assert!(!resolution.needs_rollback);
+        assert_eq!(resolution.exact_sampling.windows, 1);
+        assert_eq!(resolution.exact_sampling.acceptance_draws, 2);
+        assert_eq!(resolution.exact_sampling.residual_corrections, 0);
+        assert_eq!(resolution.exact_sampling.bonus_samples, 1);
+    }
+
+    #[test]
+    fn exact_sampling_rejects_deterministic_draft_and_uses_residual() {
+        let logits: Array = (
+            &[
+                f32::NEG_INFINITY,
+                f32::NEG_INFINITY,
+                0.0,
+                f32::NEG_INFINITY,
+                0.0,
+                f32::NEG_INFINITY,
+                f32::NEG_INFINITY,
+                f32::NEG_INFINITY,
+            ][..],
+            &[1_i32, 2_i32, 4_i32][..],
+        )
+            .try_into()
+            .unwrap();
+        let mut prng = mlx::random::key(23).unwrap();
+        let resolution = resolve_exact_speculative_logits(
+            &[1],
+            &[DraftTokenDistribution::Deterministic],
+            &logits,
+            Sampler::greedy().with_temperature(1.0),
+            &[9],
+            &mut prng,
+        )
+        .unwrap();
+
+        assert_eq!(resolution.accepted_draft_len, 0);
+        assert_eq!(resolution.tokens_to_append, vec![2]);
+        assert_eq!(resolution.accepted_verify_input_len, 1);
+        assert!(resolution.needs_rollback);
+        assert_eq!(resolution.exact_sampling.windows, 1);
+        assert_eq!(resolution.exact_sampling.acceptance_draws, 1);
+        assert_eq!(resolution.exact_sampling.residual_corrections, 1);
+        assert_eq!(resolution.exact_sampling.bonus_samples, 0);
+    }
+
+    #[test]
+    fn exact_sampling_target_coupling_accepts_and_samples_bonus() {
+        let target_distributions = [
+            SamplingDistribution::new(vec![0.0, 1.0, 0.0, 0.0]).unwrap(),
+            SamplingDistribution::new(vec![0.0, 0.0, 1.0, 0.0]).unwrap(),
+            SamplingDistribution::new(vec![0.0, 0.0, 0.0, 1.0]).unwrap(),
+        ];
+        let mut prng = mlx::random::key(29).unwrap();
+        let resolution = resolve_exact_deterministic_target_distributions(
+            &[1, 2],
+            &target_distributions,
+            &mut prng,
+        )
+        .unwrap();
+
+        assert_eq!(resolution.accepted_draft_len, 2);
+        assert_eq!(resolution.tokens_to_append, vec![1, 2, 3]);
+        assert!(!resolution.needs_rollback);
+        assert_eq!(resolution.exact_sampling.acceptance_draws, 2);
+        assert_eq!(resolution.exact_sampling.residual_corrections, 0);
+        assert_eq!(resolution.exact_sampling.bonus_samples, 1);
+    }
+
+    #[test]
+    fn exact_sampling_target_coupling_reuses_rejected_target_as_correction() {
+        let target_distributions = [
+            SamplingDistribution::new(vec![0.0, 0.0, 1.0, 0.0]).unwrap(),
+            SamplingDistribution::new(vec![0.0, 0.0, 0.0, 1.0]).unwrap(),
+        ];
+        let mut prng = mlx::random::key(31).unwrap();
+        let resolution = resolve_exact_deterministic_target_distributions(
+            &[1],
+            &target_distributions,
+            &mut prng,
+        )
+        .unwrap();
+
+        assert_eq!(resolution.accepted_draft_len, 0);
+        assert_eq!(resolution.tokens_to_append, vec![2]);
+        assert!(resolution.needs_rollback);
+        assert_eq!(resolution.exact_sampling.acceptance_draws, 1);
+        assert_eq!(resolution.exact_sampling.residual_corrections, 1);
+        assert_eq!(resolution.exact_sampling.bonus_samples, 0);
+    }
+
+    #[test]
+    fn exact_sampling_target_tokens_preserve_target_coupling_counters() {
+        let accepted =
+            resolve_exact_deterministic_target_tokens(&[1, 2], &[1, 2, 3]).expect("accepted");
+        assert_eq!(accepted.accepted_draft_len, 2);
+        assert_eq!(accepted.tokens_to_append, vec![1, 2, 3]);
+        assert!(!accepted.needs_rollback);
+        assert_eq!(accepted.exact_sampling.acceptance_draws, 2);
+        assert_eq!(accepted.exact_sampling.residual_corrections, 0);
+        assert_eq!(accepted.exact_sampling.bonus_samples, 1);
+
+        let rejected =
+            resolve_exact_deterministic_target_tokens(&[1, 2], &[1, 9, 3]).expect("rejected");
+        assert_eq!(rejected.accepted_draft_len, 1);
+        assert_eq!(rejected.tokens_to_append, vec![1, 9]);
+        assert!(rejected.needs_rollback);
+        assert_eq!(rejected.exact_sampling.acceptance_draws, 2);
+        assert_eq!(rejected.exact_sampling.residual_corrections, 1);
+        assert_eq!(rejected.exact_sampling.bonus_samples, 0);
+    }
+
+    #[test]
+    fn exact_target_logits_preserve_position_histories_with_penalties() {
+        let logits: Array = (
+            &[
+                0.0_f32, 20.0, 0.0, 0.0, //
+                0.0, 0.0, 20.0, 0.0, //
+                0.0, 0.0, 0.0, 20.0,
+            ][..],
+            &[1_i32, 3, 4][..],
+        )
+            .try_into()
+            .unwrap();
+        let sampler = Sampler::greedy()
+            .with_temperature(0.8)
+            .with_top_p(0.95)
+            .with_repetition_penalty(1.1)
+            .with_frequency_penalty(0.2)
+            .with_presence_penalty(0.1);
+        let mut prng = mlx::random::key(41).unwrap();
+        let resolution = resolve_exact_deterministic_target_logits(
+            &[1, 2],
+            &logits,
+            sampler,
+            &[0, 0, 1],
+            &mut prng,
+        )
+        .unwrap();
+
+        assert_eq!(resolution.accepted_draft_len, 2);
+        assert_eq!(resolution.tokens_to_append, vec![1, 2, 3]);
+        assert!(!resolution.needs_rollback);
+    }
+
+    #[test]
+    fn speculative_prng_split_is_reproducible_independent_and_shape_preserving() {
+        for shape in [&[2_i32][..], &[1_i32, 2_i32][..]] {
+            let mut decision_a = mlx::random::key(47).unwrap().reshape(shape).unwrap();
+            let mut decision_b = mlx::random::key(47).unwrap().reshape(shape).unwrap();
+
+            let draft_a = split_speculative_draft_prng(&mut decision_a).unwrap();
+            let draft_b = split_speculative_draft_prng(&mut decision_b).unwrap();
+
+            assert_eq!(decision_a.shape().as_slice(), shape);
+            assert_eq!(decision_b.shape().as_slice(), shape);
+            assert_eq!(
+                decision_a.to_vec::<u32>().unwrap(),
+                decision_b.to_vec::<u32>().unwrap()
+            );
+            assert_eq!(
+                draft_a.to_vec::<u32>().unwrap(),
+                draft_b.to_vec::<u32>().unwrap()
+            );
+            assert_ne!(
+                decision_a.to_vec::<u32>().unwrap(),
+                draft_a.to_vec::<u32>().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn exact_sampling_same_seed_replays_resolution_and_prng_state() {
+        let logits: Array = (
+            &[
+                0.0_f32, 1.0, 2.0, 3.0, 3.0, 2.0, 1.0, 0.0, 0.5, 1.5, 2.5, 3.5,
+            ][..],
+            &[1_i32, 3_i32, 4_i32][..],
+        )
+            .try_into()
+            .unwrap();
+        let draft_distributions = vec![
+            DraftTokenDistribution::Sampled(
+                SamplingDistribution::new(vec![0.1, 0.2, 0.3, 0.4]).unwrap(),
+            ),
+            DraftTokenDistribution::Sampled(
+                SamplingDistribution::new(vec![0.4, 0.3, 0.2, 0.1]).unwrap(),
+            ),
+        ];
+        let sampler = Sampler::greedy()
+            .with_temperature(0.8)
+            .with_top_p(0.95)
+            .with_seed(71);
+        let mut key_a = mlx::random::key(71)
+            .unwrap()
+            .reshape((1_i32, 2_i32))
+            .unwrap();
+        let mut key_b = mlx::random::key(71)
+            .unwrap()
+            .reshape((1_i32, 2_i32))
+            .unwrap();
+
+        let resolution_a = resolve_exact_speculative_logits(
+            &[3, 0],
+            &draft_distributions,
+            &logits,
+            sampler,
+            &[9, 8],
+            &mut key_a,
+        )
+        .unwrap();
+        let resolution_b = resolve_exact_speculative_logits(
+            &[3, 0],
+            &draft_distributions,
+            &logits,
+            sampler,
+            &[9, 8],
+            &mut key_b,
+        )
+        .unwrap();
+
+        assert_eq!(resolution_a, resolution_b);
+        assert_eq!(key_a.shape().as_slice(), &[1, 2]);
+        assert_eq!(key_b.shape().as_slice(), &[1, 2]);
+        assert_eq!(
+            key_a.to_vec::<u32>().unwrap(),
+            key_b.to_vec::<u32>().unwrap()
+        );
     }
 
     #[test]

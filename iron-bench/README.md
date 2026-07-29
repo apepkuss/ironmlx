@@ -57,6 +57,76 @@ cargo run --release -p iron-bench -- \
 `--target name=URL` can be repeated for any number of endpoints. `--prompt-len` is
 comma-separated; iron-bench iterates `prompt_len × target` cells.
 
+## PromptLookup / CopySpec production matrix
+
+`scripts/benchmark_prompt_lookup_matrix.py` is the ironmlx-specific production
+qualification runner for greedy PromptLookup. It keeps the core
+`iron-bench` client engine-neutral while adding the controls that CopySpec needs:
+
+- automatically starts and stops baseline and PromptLookup servers;
+- calibrates deterministic RAG, code, JSON, long-copy, ordinary-chat, and
+  adversarial prompts with the model's own tokenizer;
+- compares every PromptLookup response with the matching greedy baseline by
+  output token-id hash, including distinct request markers under concurrency;
+- captures PromptLookup acceptance/rollback counters, scheduler errors, memory
+  pressure, request-local index release, and optional shared-pool lifecycle
+  counters from `/healthz`;
+- supports balanced ABBA server order, parameter scans, B1/B2/B4/B8, optional
+  prefix-cache variants, and JSON/CSV/Markdown artifacts under `/tmp` by default.
+
+The B1 prefix-cache pair is also the controlled Scheduler-to-Scheduler
+correctness comparison. For chunked long prompts, the cache-off feature toggle
+may compare the ordinary `GenerationStream` route with the PromptLookup
+`Scheduler` route. Concurrent long prompts can also use different admission
+shapes, so those cells remain feature-toggle evidence unless the server is
+explicitly constrained to B1. The report keeps user-visible feature-toggle
+parity separate from controlled Scheduler parity.
+
+Use `--max-sequences 1` to drive concurrent HTTP clients while holding both
+baseline and PromptLookup execution to B1. This is the controlled mode for
+isolating CopySpec from batch-shape sensitivity.
+
+Cross-request lookup is an explicit trust-domain mode. Add `--cross-request`
+only when all requests served by that model engine may safely share immutable
+prompt and completion histories. The shared pool accepts normally completed
+requests only, expires entries after one hour, obeys the configured global
+entry cap, and shrinks under process-memory pressure.
+
+Build and run the short qualification profile:
+
+```sh
+python3 scripts/benchmark_prompt_lookup_matrix.py \
+  --model-dir /path/to/model/snapshot \
+  --profile smoke \
+  --build
+```
+
+Run the full release gate (1K/8K/32K/64K, TG 128/512, B1/B2/B4/B8,
+five measured batches, balanced server order):
+
+```sh
+python3 scripts/benchmark_prompt_lookup_matrix.py \
+  --model-dir /path/to/model/snapshot \
+  --profile full \
+  --build
+```
+
+Scan an alternate lookup configuration or include the paged prefix-cache pair:
+
+```sh
+python3 scripts/benchmark_prompt_lookup_matrix.py \
+  --model-dir /path/to/model/snapshot \
+  --profile smoke \
+  --lookup-config wide:2:6:8:65536:100000 \
+  --include-prefix-cache
+```
+
+The output directory contains `raw-results.jsonl`, `cell-health.jsonl`,
+`summary.{json,csv,md}`, `comparisons.{json,csv}`, `gates.json`, the resolved
+tokenizer-calibrated corpus, exact server commands, health snapshots, and logs.
+`gates.status=incomplete` is intentional for reduced profiles; only the full,
+balanced matrix can return `pass` or `fail`.
+
 ## Prefix-cache probe
 
 Use `--prefix-cache-probe` only when the server is intentionally configured with

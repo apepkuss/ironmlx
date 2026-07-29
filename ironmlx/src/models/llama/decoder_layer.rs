@@ -51,20 +51,30 @@ impl LlamaDecoderLayer {
 
     /// Pre-norm block forward. See [`LlamaAttention::forward_on`] for the
     /// `offset` / `per_row_lens` / `mask` semantics.
+    #[allow(clippy::too_many_arguments)]
     pub fn forward_on(
         &self,
         x: &Array,
         offset: &Array,
+        offset_values: &[i32],
         cache: &mut KVCache,
         per_row_lens: &[i32],
         mask: Option<&Array>,
+        exact_batched_verify: bool,
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
         let target = target.into();
         let normed_in = self.input_layernorm.forward_on(x, target)?;
-        let attn =
-            self.self_attn
-                .forward_on(&normed_in, offset, per_row_lens, mask, cache, target)?;
+        let attn = self.self_attn.forward_on(
+            &normed_in,
+            offset,
+            offset_values,
+            per_row_lens,
+            mask,
+            cache,
+            exact_batched_verify,
+            target,
+        )?;
         let h = mlx::ops::binary::add_on(x, &attn, target)?;
 
         let normed_post = self.post_attention_layernorm.forward_on(&h, target)?;

@@ -87,6 +87,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                                     pinned: pinnedModels.contains(model),
                                     mtpModelDir: mtpRuntime?.modelDir,
                                     mtpDraftTokens: mtpRuntime?.draftTokens,
+                                    promptLookup: self.parameterStore.parameters(for: model)?.promptLookupConfig,
                                     reloadWhenIdle: false,
                                     samplingDefaults: self.parameterStore.parameters(for: model)?.samplingDefaults ?? .empty
                                 )

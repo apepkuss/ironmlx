@@ -32,9 +32,15 @@ use crate::core::cache::{
 };
 use crate::core::generate::GenerateRequest;
 use crate::core::model::Model;
+use crate::core::prompt_lookup::{
+    PromptLookupConfig, PromptLookupCostAction, PromptLookupCostController,
+    PromptLookupDraftLimits, PromptLookupProposalSource, PromptLookupQualificationRegime,
+    PromptLookupQualificationRuntimeConfig, PromptLookupQualificationStats, PromptLookupStats,
+};
 use crate::core::scheduler::{
     ActiveKvParkedRequest, AdmitMidHandle, DenseVlMethods, Gemma4DrafterAdmitMidHandle,
-    ImmutablePrefixBlockStats, MtpAdmitMidHandle, Phase, RequestId, Scheduler, StepEvent,
+    ImmutablePrefixBlockStats, MtpAdmitMidHandle, Phase, PromptLookupMtpStepOutcome, RequestId,
+    Scheduler, StepEvent,
 };
 use crate::core::server::adaptive_admission::{
     AdaptiveAdmissionPolicy, AdmissionRequestShape, ROLLING_DECODE_STEPS_AFTER_ADMISSION_WORK,
@@ -42,6 +48,10 @@ use crate::core::server::adaptive_admission::{
 use crate::core::speculative::{
     effective_mtp_draft_tokens_for_paged_prefix, MtpSpeculativeConfig, MtpSpeculativeModel,
     MtpSpeculativeStats,
+};
+use crate::core::speculative_qualification::{
+    NeuralExactAction, NeuralExactCostController, NeuralExactQualificationRuntimeConfig,
+    NeuralExactQualificationStats, NeuralExactRegime, NeuralExactSampleCounters, NeuralExactSource,
 };
 use crate::Result;
 
@@ -180,6 +190,10 @@ pub enum SchedulerCommand {
     },
 }
 
+pub(super) enum SchedulerControlCommand {
+    ClearSharedPromptLookup { reply_tx: oneshot::Sender<usize> },
+}
+
 /// A request parked in `driver_loop`'s admission queue while the scheduler
 /// is at `active_count == b_max`. Drained when `gc_finished_rows` frees a
 /// slot, then handed to the rolling mid-admit chunk path.
@@ -307,6 +321,14 @@ fn rolling_profile_elapsed_ms(start: Instant, end: Instant) -> f64 {
     end.saturating_duration_since(start).as_secs_f64() * 1000.0
 }
 
+fn duration_ns(duration: Duration) -> u64 {
+    duration.as_nanos().try_into().unwrap_or(u64::MAX)
+}
+
+fn duration_us(duration: Duration) -> u64 {
+    duration.as_micros().try_into().unwrap_or(u64::MAX)
+}
+
 fn rolling_profile_queue_wait_ms(queued_at: Instant, now: Instant) -> f64 {
     rolling_profile_elapsed_ms(queued_at, now)
 }
@@ -401,6 +423,10 @@ struct SchedulerActorMtpCounters {
     mtp_drafted_tokens: Arc<AtomicU64>,
     mtp_accepted_draft_tokens: Arc<AtomicU64>,
     mtp_windows: Arc<AtomicU64>,
+    mtp_exact_sampling_windows: Arc<AtomicU64>,
+    mtp_exact_acceptance_draws: Arc<AtomicU64>,
+    mtp_exact_residual_corrections: Arc<AtomicU64>,
+    mtp_exact_bonus_samples: Arc<AtomicU64>,
     mtp_draft_forward_us: Arc<AtomicU64>,
     mtp_verify_forward_us: Arc<AtomicU64>,
     mtp_projection_us: Arc<AtomicU64>,
@@ -415,6 +441,9 @@ struct SchedulerActorMtpCounters {
     mtp_decode_cache_commit_us: Arc<AtomicU64>,
     mtp_cache_restore_us: Arc<AtomicU64>,
     published_stats: Arc<StdMutex<Option<MtpSpeculativeStats>>>,
+    prompt_lookup_published_stats: Arc<StdMutex<Option<PromptLookupStats>>>,
+    prompt_lookup_stats_baseline: Arc<StdMutex<Option<PromptLookupStats>>>,
+    neural_exact_qualification_stats: Arc<StdMutex<NeuralExactQualificationStats>>,
 }
 
 impl SchedulerActorMtpCounters {
@@ -426,6 +455,10 @@ impl SchedulerActorMtpCounters {
         mtp_drafted_tokens: Arc<AtomicU64>,
         mtp_accepted_draft_tokens: Arc<AtomicU64>,
         mtp_windows: Arc<AtomicU64>,
+        mtp_exact_sampling_windows: Arc<AtomicU64>,
+        mtp_exact_acceptance_draws: Arc<AtomicU64>,
+        mtp_exact_residual_corrections: Arc<AtomicU64>,
+        mtp_exact_bonus_samples: Arc<AtomicU64>,
         mtp_draft_forward_us: Arc<AtomicU64>,
         mtp_verify_forward_us: Arc<AtomicU64>,
         mtp_projection_us: Arc<AtomicU64>,
@@ -439,6 +472,8 @@ impl SchedulerActorMtpCounters {
         mtp_prefill_cache_commit_us: Arc<AtomicU64>,
         mtp_decode_cache_commit_us: Arc<AtomicU64>,
         mtp_cache_restore_us: Arc<AtomicU64>,
+        prompt_lookup_published_stats: Arc<StdMutex<Option<PromptLookupStats>>>,
+        neural_exact_qualification_stats: Arc<StdMutex<NeuralExactQualificationStats>>,
     ) -> Self {
         Self {
             mtp_prefill_count,
@@ -447,6 +482,10 @@ impl SchedulerActorMtpCounters {
             mtp_drafted_tokens,
             mtp_accepted_draft_tokens,
             mtp_windows,
+            mtp_exact_sampling_windows,
+            mtp_exact_acceptance_draws,
+            mtp_exact_residual_corrections,
+            mtp_exact_bonus_samples,
             mtp_draft_forward_us,
             mtp_verify_forward_us,
             mtp_projection_us,
@@ -461,7 +500,17 @@ impl SchedulerActorMtpCounters {
             mtp_decode_cache_commit_us,
             mtp_cache_restore_us,
             published_stats: Arc::new(StdMutex::new(None)),
+            prompt_lookup_published_stats,
+            prompt_lookup_stats_baseline: Arc::new(StdMutex::new(None)),
+            neural_exact_qualification_stats,
         }
+    }
+
+    fn store_neural_exact_qualification_stats(&self, stats: NeuralExactQualificationStats) {
+        *self
+            .neural_exact_qualification_stats
+            .lock()
+            .expect("neural exact qualification stats mutex poisoned") = stats;
     }
 
     fn store_stats(&self, stats: Option<MtpSpeculativeStats>) {
@@ -484,8 +533,12 @@ impl SchedulerActorMtpCounters {
         }
     }
 
-    fn reset_stats_baseline(&self) {
+    fn reset_stats_baseline(&self, prompt_lookup_stats: Option<PromptLookupStats>) {
         self.store_stats(None);
+        match prompt_lookup_stats {
+            Some(stats) => self.store_prompt_lookup_stats(Some(stats)),
+            None => self.store_prompt_lookup_stats(None),
+        }
     }
 
     fn add_stats_delta(&self, stats: &MtpSpeculativeStats) {
@@ -495,6 +548,14 @@ impl SchedulerActorMtpCounters {
             .fetch_add(stats.drafted_tokens as u64, Ordering::Relaxed);
         self.mtp_accepted_draft_tokens
             .fetch_add(stats.accepted_draft_tokens as u64, Ordering::Relaxed);
+        self.mtp_exact_sampling_windows
+            .fetch_add(stats.exact_sampling_windows as u64, Ordering::Relaxed);
+        self.mtp_exact_acceptance_draws
+            .fetch_add(stats.exact_acceptance_draws as u64, Ordering::Relaxed);
+        self.mtp_exact_residual_corrections
+            .fetch_add(stats.exact_residual_corrections as u64, Ordering::Relaxed);
+        self.mtp_exact_bonus_samples
+            .fetch_add(stats.exact_bonus_samples as u64, Ordering::Relaxed);
         self.mtp_draft_forward_us
             .fetch_add(stats.draft_forward_us, Ordering::Relaxed);
         self.mtp_verify_forward_us
@@ -524,6 +585,78 @@ impl SchedulerActorMtpCounters {
         self.mtp_cache_restore_us
             .fetch_add(stats.mtp_cache_restore_us, Ordering::Relaxed);
     }
+
+    fn store_prompt_lookup_stats(&self, stats: Option<PromptLookupStats>) {
+        let mut baseline = self
+            .prompt_lookup_stats_baseline
+            .lock()
+            .expect("PromptLookup stats baseline mutex poisoned");
+        let mut published = self
+            .prompt_lookup_published_stats
+            .lock()
+            .expect("PromptLookup published stats mutex poisoned");
+        match stats {
+            Some(stats) => {
+                let delta = baseline
+                    .map(|before| stats.saturating_delta_since(before))
+                    .unwrap_or(stats);
+                published.get_or_insert_default().accumulate_delta(delta);
+                *baseline = Some(stats);
+            }
+            None => {
+                *baseline = None;
+                if let Some(stats) = published.as_mut() {
+                    stats.index_entries_current = 0;
+                    stats.index_ledger_entries_current = 0;
+                    stats.index_estimated_bytes_current = 0;
+                }
+            }
+        }
+    }
+
+    fn store_prompt_lookup_stats_with_qualification(
+        &self,
+        stats: Option<PromptLookupStats>,
+        qualification: PromptLookupQualificationStats,
+    ) {
+        self.store_prompt_lookup_stats(stats);
+        let mut published = self
+            .prompt_lookup_published_stats
+            .lock()
+            .expect("PromptLookup published stats mutex poisoned");
+        let stats = published.get_or_insert_default();
+        stats.ordinary_cost_samples = qualification.ordinary_cost_samples;
+        stats.lookup_cost_samples = qualification.lookup_cost_samples;
+        stats.ordinary_cost_us = qualification.ordinary_cost_us;
+        stats.lookup_cost_us = qualification.lookup_cost_us;
+        stats.qualified_regimes_current = qualification.qualified_regimes_current;
+        stats.rejected_regimes_current = qualification.rejected_regimes_current;
+        stats.qualification_changes = qualification.qualification_changes;
+        stats.qualification_profile_loads = qualification.profile_loads;
+        stats.qualification_profile_writes = qualification.profile_writes;
+        stats.qualification_profile_write_drops = qualification.profile_write_drops;
+        stats.qualification_query_gate_skips = qualification.query_gate_skips;
+        stats.miss_query_gate_skips = qualification.miss_query_gate_skips;
+        stats.miss_query_reprobes = qualification.miss_query_reprobes;
+        stats.adaptive_draft_width_reductions = qualification.adaptive_draft_width_reductions;
+        stats.adaptive_draft_width_increases = qualification.adaptive_draft_width_increases;
+        stats.adaptive_profitability_width_reductions =
+            qualification.adaptive_profitability_width_reductions;
+    }
+
+    fn store_prompt_lookup_hybrid_stats(&self, hybrid: PromptLookupHybridStats) {
+        let mut published = self
+            .prompt_lookup_published_stats
+            .lock()
+            .expect("PromptLookup published stats mutex poisoned");
+        let stats = published.get_or_insert_default();
+        stats.hybrid_neural_windows = hybrid.neural_windows;
+        stats.hybrid_lookup_windows = hybrid.lookup_windows;
+        stats.hybrid_source_switches = hybrid.source_switches;
+        stats.hybrid_lookup_miss_fallbacks = hybrid.lookup_miss_fallbacks;
+        stats.hybrid_neural_rebases = hybrid.neural_rebases;
+        stats.hybrid_neural_rebase_us = hybrid.neural_rebase_us;
+    }
 }
 
 trait SchedulerActorMtpMode<M>
@@ -533,6 +666,10 @@ where
     type MidAdmitHandle: Send + 'static;
 
     fn allow_rolling_mid_admit(&self) -> bool {
+        true
+    }
+
+    fn can_start_rolling_mid_admit(&self, _sched: &Scheduler<M>) -> bool {
         true
     }
 
@@ -560,6 +697,7 @@ where
         sched: &mut Scheduler<M>,
         model: &M,
         counters: &SchedulerActorMtpCounters,
+        admission_pending: bool,
     ) -> Result<Vec<StepEvent>>;
 
     fn begin_mid_admit(
@@ -587,9 +725,193 @@ where
 
 struct SchedulerActorNoMtp;
 
+struct SchedulerActorPromptLookup {
+    cfg: PromptLookupConfig,
+    defer_speculation_once: bool,
+    cost_controller: PromptLookupCostController,
+    measured_cycle: Option<PromptLookupMeasuredCycle>,
+    query_hint: Option<PromptLookupQueryHint>,
+    miss_query_hint: Option<PromptLookupMissQueryHint>,
+}
+
+const PROMPT_LOOKUP_MISS_INITIAL_REPROBE_TOKENS: usize = 2;
+const PROMPT_LOOKUP_MISS_MAX_REPROBE_TOKENS: usize = 8;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PromptLookupQueryScope {
+    base_regime: PromptLookupQualificationRegime,
+    owners: Vec<RequestId>,
+    draft_limits: PromptLookupDraftLimits,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PromptLookupQueryHint {
+    scope: PromptLookupQueryScope,
+    proposal_regime: PromptLookupQualificationRegime,
+}
+
+impl PromptLookupQueryHint {
+    fn proposal_regime_for(
+        &self,
+        scope: &PromptLookupQueryScope,
+    ) -> Option<PromptLookupQualificationRegime> {
+        (self.scope == *scope).then_some(self.proposal_regime)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PromptLookupMissQueryScope {
+    base_regime: PromptLookupQualificationRegime,
+    request_progress: Vec<(RequestId, usize)>,
+    allow_cross_request: bool,
+    shared_availability_epoch: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PromptLookupMissQueryHint {
+    scope: PromptLookupMissQueryScope,
+    reprobe_after_tokens: usize,
+}
+
+impl PromptLookupMissQueryHint {
+    fn identity_matches(&self, scope: &PromptLookupMissQueryScope) -> bool {
+        self.scope.base_regime == scope.base_regime
+            && self.scope.allow_cross_request == scope.allow_cross_request
+            && self.scope.shared_availability_epoch == scope.shared_availability_epoch
+            && self.scope.request_progress.len() == scope.request_progress.len()
+            && self
+                .scope
+                .request_progress
+                .iter()
+                .zip(&scope.request_progress)
+                .all(|((previous_id, previous_len), (current_id, current_len))| {
+                    previous_id == current_id && current_len >= previous_len
+                })
+    }
+
+    fn should_skip(&self, scope: &PromptLookupMissQueryScope) -> bool {
+        self.identity_matches(scope)
+            && self
+                .scope
+                .request_progress
+                .iter()
+                .zip(&scope.request_progress)
+                .all(|((_, previous_len), (_, current_len))| {
+                    current_len.saturating_sub(*previous_len) < self.reprobe_after_tokens
+                })
+    }
+
+    fn after_miss(
+        scope: PromptLookupMissQueryScope,
+        previous: Option<&PromptLookupMissQueryHint>,
+    ) -> Self {
+        let reprobe_after_tokens = previous
+            .filter(|hint| hint.identity_matches(&scope))
+            .map_or(PROMPT_LOOKUP_MISS_INITIAL_REPROBE_TOKENS, |hint| {
+                hint.reprobe_after_tokens
+                    .saturating_mul(2)
+                    .min(PROMPT_LOOKUP_MISS_MAX_REPROBE_TOKENS)
+            });
+        Self {
+            scope,
+            reprobe_after_tokens,
+        }
+    }
+}
+
+fn prompt_lookup_admission_forces_ordinary(
+    measured_cycle_active: bool,
+    admission_pending: bool,
+) -> bool {
+    admission_pending && !measured_cycle_active
+}
+
+fn qwen_hybrid_uses_canonical_target(
+    source: HybridDraftSource,
+    regime: Option<PromptLookupQualificationRegime>,
+) -> bool {
+    source == HybridDraftSource::PromptLookup
+        && regime.is_some_and(|regime| {
+            matches!(
+                regime.proposal_source,
+                Some(PromptLookupProposalSource::Local | PromptLookupProposalSource::Shared)
+            )
+        })
+}
+
+struct PromptLookupMeasuredCycle {
+    regime: PromptLookupQualificationRegime,
+    action: PromptLookupCostAction,
+    elapsed_ns: u64,
+    committed_tokens: usize,
+    stats_before: PromptLookupStats,
+}
+
+struct PromptLookupWindowDecision {
+    action: PromptLookupCostAction,
+    regime: Option<PromptLookupQualificationRegime>,
+    proposal_elapsed_ns: u64,
+    stats_before: PromptLookupStats,
+    fallback_to_baseline: bool,
+}
+
+#[derive(Debug, Default)]
+struct PromptLookupEpisode {
+    regimes: Vec<PromptLookupQualificationRegime>,
+    committed_tokens: usize,
+}
+
+impl PromptLookupEpisode {
+    fn record(&mut self, regime: PromptLookupQualificationRegime, committed_tokens: usize) {
+        if !self.regimes.contains(&regime) {
+            self.regimes.push(regime);
+        }
+        self.committed_tokens = self.committed_tokens.saturating_add(committed_tokens);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HybridDraftSource {
+    Neural,
+    PromptLookup,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct PromptLookupHybridStats {
+    neural_windows: u64,
+    lookup_windows: u64,
+    source_switches: u64,
+    lookup_miss_fallbacks: u64,
+    neural_rebases: u64,
+    neural_rebase_us: u64,
+}
+
+struct SchedulerActorMtpPromptLookupHybrid<H> {
+    neural: SchedulerActorMtp<H>,
+    prompt_lookup: SchedulerActorPromptLookup,
+    current_source: Option<HybridDraftSource>,
+    neural_dirty: bool,
+    lookup_window_canonical: bool,
+    measured_cycle: Option<PromptLookupMeasuredCycle>,
+    lookup_episode: Option<PromptLookupEpisode>,
+    stats: PromptLookupHybridStats,
+}
+
+struct SchedulerActorGemma4PromptLookupHybrid {
+    neural: SchedulerActorGemma4Drafter,
+    prompt_lookup: SchedulerActorPromptLookup,
+    current_source: Option<HybridDraftSource>,
+    neural_dirty: bool,
+    measured_cycle: Option<PromptLookupMeasuredCycle>,
+    lookup_episode: Option<PromptLookupEpisode>,
+    stats: PromptLookupHybridStats,
+}
+
 struct SchedulerActorMtp<H> {
     mtp: H,
     cfg: MtpSpeculativeConfig,
+    exact_cost_controller: Option<NeuralExactCostController>,
+    exact_episode: Option<NeuralExactMeasuredEpisode>,
 }
 
 enum SchedulerActorMtpMidAdmitHandle {
@@ -600,6 +922,16 @@ enum SchedulerActorMtpMidAdmitHandle {
 struct SchedulerActorGemma4Drafter {
     drafter: Arc<Mutex<crate::models::gemma4::Gemma4AssistantModel>>,
     cfg: MtpSpeculativeConfig,
+    exact_cost_controller: Option<NeuralExactCostController>,
+    exact_episode: Option<NeuralExactMeasuredEpisode>,
+}
+
+struct NeuralExactMeasuredEpisode {
+    regime: NeuralExactRegime,
+    action: NeuralExactAction,
+    elapsed_ns: u64,
+    committed_tokens: usize,
+    stats_before: MtpSpeculativeStats,
 }
 
 enum SchedulerActorGemma4DrafterMidAdmitHandle {
@@ -615,7 +947,269 @@ impl<H> SchedulerActorMtp<H> {
             cfg: MtpSpeculativeConfig {
                 max_draft_tokens: mtp_draft_tokens,
             },
+            exact_cost_controller: None,
+            exact_episode: None,
         }
+    }
+
+    fn new_with_exact_qualification(
+        mtp: H,
+        mtp_draft_tokens: usize,
+        qualification: NeuralExactQualificationRuntimeConfig,
+    ) -> Result<Self> {
+        let mut mode = Self::new(mtp, mtp_draft_tokens);
+        mode.exact_cost_controller = Some(NeuralExactCostController::new(qualification)?);
+        Ok(mode)
+    }
+
+    fn publish_exact_qualification(&self, counters: &SchedulerActorMtpCounters) {
+        if let Some(controller) = self.exact_cost_controller.as_ref() {
+            counters.store_neural_exact_qualification_stats(controller.stats());
+        }
+    }
+
+    fn finish_exact_episode(
+        &mut self,
+        stats_after: Option<MtpSpeculativeStats>,
+        counters: &SchedulerActorMtpCounters,
+    ) {
+        finish_neural_exact_episode(
+            &mut self.exact_episode,
+            self.exact_cost_controller.as_mut(),
+            stats_after,
+        );
+        self.publish_exact_qualification(counters);
+    }
+}
+
+impl<H> SchedulerActorMtpPromptLookupHybrid<H> {
+    fn new(
+        mtp: H,
+        mtp_draft_tokens: usize,
+        prompt_lookup: PromptLookupConfig,
+        qualification: PromptLookupQualificationRuntimeConfig,
+    ) -> Result<Self> {
+        Ok(Self {
+            neural: SchedulerActorMtp::new(mtp, mtp_draft_tokens),
+            prompt_lookup: SchedulerActorPromptLookup::new(prompt_lookup, qualification)?,
+            current_source: None,
+            neural_dirty: false,
+            lookup_window_canonical: false,
+            measured_cycle: None,
+            lookup_episode: None,
+            stats: PromptLookupHybridStats::default(),
+        })
+    }
+}
+
+impl SchedulerActorGemma4PromptLookupHybrid {
+    fn new(
+        drafter: Arc<Mutex<crate::models::gemma4::Gemma4AssistantModel>>,
+        mtp_draft_tokens: usize,
+        prompt_lookup: PromptLookupConfig,
+        qualification: PromptLookupQualificationRuntimeConfig,
+    ) -> Result<Self> {
+        Ok(Self {
+            neural: SchedulerActorGemma4Drafter::new(drafter, mtp_draft_tokens),
+            prompt_lookup: SchedulerActorPromptLookup::new(prompt_lookup, qualification)?,
+            current_source: None,
+            neural_dirty: false,
+            measured_cycle: None,
+            lookup_episode: None,
+            stats: PromptLookupHybridStats::default(),
+        })
+    }
+}
+
+impl SchedulerActorPromptLookup {
+    fn new(
+        cfg: PromptLookupConfig,
+        qualification: PromptLookupQualificationRuntimeConfig,
+    ) -> Result<Self> {
+        Ok(Self {
+            cfg: cfg.validate()?,
+            defer_speculation_once: false,
+            cost_controller: PromptLookupCostController::new(qualification)?,
+            measured_cycle: None,
+            query_hint: None,
+            miss_query_hint: None,
+        })
+    }
+
+    fn miss_query_scope<M: Model>(
+        sched: &Scheduler<M>,
+        base_regime: Option<PromptLookupQualificationRegime>,
+        allow_cross_request: bool,
+    ) -> Option<PromptLookupMissQueryScope> {
+        let base_regime = base_regime?;
+        let request_progress = sched.prompt_lookup_active_request_progress();
+        (!request_progress.is_empty()).then_some(PromptLookupMissQueryScope {
+            base_regime,
+            request_progress,
+            allow_cross_request,
+            shared_availability_epoch: allow_cross_request
+                .then(|| sched.shared_prompt_lookup_availability_epoch())
+                .flatten(),
+        })
+    }
+
+    fn publish_stats<M: Model>(&self, sched: &Scheduler<M>, counters: &SchedulerActorMtpCounters) {
+        counters.store_prompt_lookup_stats_with_qualification(
+            sched.prompt_lookup_stats(),
+            self.cost_controller.stats(),
+        );
+    }
+
+    fn select_prepared_window<M: Model>(
+        &mut self,
+        sched: &mut Scheduler<M>,
+        model: &M,
+        allow_cross_request: bool,
+        capture_accepted_hidden: bool,
+        match_mtp_verify_shape: bool,
+        force_ordinary: bool,
+    ) -> Result<PromptLookupWindowDecision> {
+        let stats_before = sched.prompt_lookup_stats().unwrap_or_default();
+        let base_regime = sched.prompt_lookup_qualification_regime();
+        let draft_limits = if match_mtp_verify_shape {
+            PromptLookupDraftLimits::uniform(self.cfg.max_draft_tokens)
+        } else {
+            base_regime.map_or_else(
+                || PromptLookupDraftLimits::uniform(self.cfg.max_draft_tokens),
+                |regime| {
+                    self.cost_controller
+                        .adaptive_draft_limits(regime, self.cfg.max_draft_tokens)
+                },
+            )
+        };
+        let miss_query_scope = Self::miss_query_scope(sched, base_regime, allow_cross_request);
+        let query_scope = base_regime.map(|base_regime| PromptLookupQueryScope {
+            base_regime,
+            owners: miss_query_scope.as_ref().map_or_else(
+                || sched.prompt_lookup_active_request_ids(),
+                |scope| scope.request_progress.iter().map(|(id, _)| *id).collect(),
+            ),
+            draft_limits,
+        });
+        let hinted_regime = query_scope.as_ref().and_then(|scope| {
+            self.query_hint
+                .as_ref()
+                .and_then(|hint| hint.proposal_regime_for(scope))
+        });
+        if hinted_regime.is_none() {
+            self.query_hint = None;
+        }
+        if force_ordinary {
+            sched.discard_prepared_prompt_lookup_window();
+            return Ok(PromptLookupWindowDecision {
+                action: PromptLookupCostAction::Ordinary,
+                regime: base_regime,
+                proposal_elapsed_ns: 0,
+                stats_before,
+                fallback_to_baseline: false,
+            });
+        }
+        if let Some(regime) = hinted_regime {
+            if self.cost_controller.next_action(regime) == PromptLookupCostAction::Ordinary {
+                self.cost_controller.record_query_gate_skip();
+                sched.discard_prepared_prompt_lookup_window();
+                return Ok(PromptLookupWindowDecision {
+                    action: PromptLookupCostAction::Ordinary,
+                    regime: Some(regime),
+                    proposal_elapsed_ns: 0,
+                    stats_before,
+                    fallback_to_baseline: false,
+                });
+            }
+        }
+        if self.miss_query_hint.as_ref().is_some_and(|hint| {
+            miss_query_scope
+                .as_ref()
+                .is_some_and(|scope| hint.should_skip(scope))
+        }) {
+            self.cost_controller.record_miss_query_gate_skip();
+            sched.discard_prepared_prompt_lookup_window();
+            return Ok(PromptLookupWindowDecision {
+                action: PromptLookupCostAction::Ordinary,
+                regime: base_regime,
+                proposal_elapsed_ns: 0,
+                stats_before,
+                fallback_to_baseline: true,
+            });
+        }
+        if let Some(hint) = self.miss_query_hint.as_ref() {
+            if miss_query_scope
+                .as_ref()
+                .is_some_and(|scope| hint.identity_matches(scope))
+            {
+                self.cost_controller.record_miss_query_reprobe();
+            } else {
+                self.miss_query_hint = None;
+            }
+        }
+
+        let proposal_started = Instant::now();
+        let mut has_drafts =
+            sched.prepare_prompt_lookup_batch_window(allow_cross_request, draft_limits)?;
+        if has_drafts && match_mtp_verify_shape {
+            has_drafts = sched.align_prepared_prompt_lookup_to_mtp_verify_shape()?;
+        }
+        let proposal_elapsed_ns = duration_ns(proposal_started.elapsed());
+        let Some(regime) = has_drafts
+            .then(|| sched.prompt_lookup_prepared_qualification_regime())
+            .flatten()
+        else {
+            self.query_hint = None;
+            let miss_query_scope = Self::miss_query_scope(sched, base_regime, allow_cross_request);
+            let previous_miss_query_hint = self.miss_query_hint.take();
+            self.miss_query_hint = miss_query_scope.map(|scope| {
+                PromptLookupMissQueryHint::after_miss(scope, previous_miss_query_hint.as_ref())
+            });
+            sched.discard_prepared_prompt_lookup_window();
+            return Ok(PromptLookupWindowDecision {
+                action: PromptLookupCostAction::Ordinary,
+                regime: base_regime,
+                proposal_elapsed_ns: 0,
+                stats_before,
+                fallback_to_baseline: true,
+            });
+        };
+        self.miss_query_hint = None;
+        self.query_hint = query_scope.map(|scope| PromptLookupQueryHint {
+            scope,
+            proposal_regime: regime,
+        });
+        if !sched.prompt_lookup_prepared_window_verify_eligible(model, capture_accepted_hidden)? {
+            if match_mtp_verify_shape {
+                self.cost_controller.record_lookup_ineligible(regime);
+            } else {
+                self.cost_controller
+                    .record_lookup_ineligible_with_adaptive_draft(regime);
+            }
+            sched.discard_prepared_prompt_lookup_window();
+            return Ok(PromptLookupWindowDecision {
+                action: PromptLookupCostAction::Ordinary,
+                regime: Some(regime),
+                proposal_elapsed_ns: 0,
+                stats_before,
+                fallback_to_baseline: true,
+            });
+        }
+        let action = self.cost_controller.next_action(regime);
+        if action == PromptLookupCostAction::Ordinary {
+            sched.discard_prepared_prompt_lookup_window();
+        }
+        Ok(PromptLookupWindowDecision {
+            action,
+            regime: Some(regime),
+            proposal_elapsed_ns: if action == PromptLookupCostAction::Lookup {
+                proposal_elapsed_ns
+            } else {
+                0
+            },
+            stats_before,
+            fallback_to_baseline: false,
+        })
     }
 }
 
@@ -630,8 +1224,64 @@ impl SchedulerActorGemma4Drafter {
             cfg: MtpSpeculativeConfig {
                 max_draft_tokens: mtp_draft_tokens,
             },
+            exact_cost_controller: None,
+            exact_episode: None,
         }
     }
+
+    fn new_with_exact_qualification(
+        drafter: Arc<Mutex<crate::models::gemma4::Gemma4AssistantModel>>,
+        mtp_draft_tokens: usize,
+        qualification: NeuralExactQualificationRuntimeConfig,
+    ) -> Result<Self> {
+        let mut mode = Self::new(drafter, mtp_draft_tokens);
+        mode.exact_cost_controller = Some(NeuralExactCostController::new(qualification)?);
+        Ok(mode)
+    }
+
+    fn publish_exact_qualification(&self, counters: &SchedulerActorMtpCounters) {
+        if let Some(controller) = self.exact_cost_controller.as_ref() {
+            counters.store_neural_exact_qualification_stats(controller.stats());
+        }
+    }
+
+    fn finish_exact_episode(
+        &mut self,
+        stats_after: Option<MtpSpeculativeStats>,
+        counters: &SchedulerActorMtpCounters,
+    ) {
+        finish_neural_exact_episode(
+            &mut self.exact_episode,
+            self.exact_cost_controller.as_mut(),
+            stats_after,
+        );
+        self.publish_exact_qualification(counters);
+    }
+}
+
+fn finish_neural_exact_episode(
+    episode: &mut Option<NeuralExactMeasuredEpisode>,
+    controller: Option<&mut NeuralExactCostController>,
+    stats_after: Option<MtpSpeculativeStats>,
+) {
+    let (Some(episode), Some(controller)) = (episode.take(), controller) else {
+        return;
+    };
+    let delta = stats_after
+        .map(|stats| stats.saturating_delta_since(&episode.stats_before))
+        .unwrap_or_default();
+    controller.record_sample(
+        episode.regime,
+        episode.action,
+        episode.elapsed_ns,
+        episode.committed_tokens,
+        NeuralExactSampleCounters {
+            drafted_tokens: delta.drafted_tokens as u64,
+            accepted_tokens: delta.accepted_draft_tokens as u64,
+            exact_windows: delta.exact_sampling_windows as u64,
+            residual_corrections: delta.exact_residual_corrections as u64,
+        },
+    );
 }
 
 impl<M> SchedulerActorMtpMode<M> for SchedulerActorNoMtp
@@ -678,6 +1328,7 @@ where
         sched: &mut Scheduler<M>,
         model: &M,
         _counters: &SchedulerActorMtpCounters,
+        _admission_pending: bool,
     ) -> Result<Vec<StepEvent>> {
         sched.step(model)
     }
@@ -708,6 +1359,175 @@ where
         _counters: &SchedulerActorMtpCounters,
     ) -> Result<(RequestId, StepEvent)> {
         sched.admit_mid_finalize(handle, model)
+    }
+}
+
+impl<M> SchedulerActorMtpMode<M> for SchedulerActorPromptLookup
+where
+    M: Model + DenseVlMethods,
+{
+    type MidAdmitHandle = AdmitMidHandle;
+
+    fn can_start_rolling_mid_admit(&self, sched: &Scheduler<M>) -> bool {
+        sched.prompt_lookup_can_start_rolling_mid_admit()
+    }
+
+    fn mid_admit_request_id(handle: &Self::MidAdmitHandle) -> RequestId {
+        handle.request_id
+    }
+
+    fn mid_admit_chunk_start(handle: &Self::MidAdmitHandle) -> i32 {
+        handle.chunk_start
+    }
+
+    fn mid_admit_prompt_len(handle: &Self::MidAdmitHandle) -> i32 {
+        handle.prompt_len
+    }
+
+    fn mid_admit_chunk_size(handle: &Self::MidAdmitHandle) -> i32 {
+        handle.chunk_size
+    }
+
+    fn set_mid_admit_chunk_size(handle: &mut Self::MidAdmitHandle, chunk_size: i32) {
+        handle.chunk_size = chunk_size;
+    }
+
+    fn mid_admit_decode_cadence_mid_chunk_cap(handle: &Self::MidAdmitHandle) -> usize {
+        handle.decode_cadence_mid_chunk_cap
+    }
+
+    fn prefill_admitted(
+        &mut self,
+        sched: &mut Scheduler<M>,
+        model: &M,
+        counters: &SchedulerActorMtpCounters,
+    ) -> Result<Vec<StepEvent>> {
+        let events = sched.prefill_admitted_prompt_lookup(model, self.cfg)?;
+        self.defer_speculation_once = true;
+        self.measured_cycle = None;
+        self.query_hint = None;
+        self.miss_query_hint = None;
+        self.publish_stats(sched, counters);
+        Ok(events)
+    }
+
+    fn step(
+        &mut self,
+        sched: &mut Scheduler<M>,
+        model: &M,
+        counters: &SchedulerActorMtpCounters,
+        admission_pending: bool,
+    ) -> Result<Vec<StepEvent>> {
+        let boundary_before = sched.prompt_lookup_can_start_rolling_mid_admit();
+        let measured_cycle_active = self.measured_cycle.is_some();
+        let decision = if let Some(cycle) = self.measured_cycle.as_ref() {
+            PromptLookupWindowDecision {
+                action: PromptLookupCostAction::Lookup,
+                regime: Some(cycle.regime),
+                proposal_elapsed_ns: 0,
+                stats_before: cycle.stats_before,
+                fallback_to_baseline: false,
+            }
+        } else {
+            let force_ordinary = if self.defer_speculation_once {
+                self.defer_speculation_once = false;
+                true
+            } else {
+                prompt_lookup_admission_forces_ordinary(measured_cycle_active, admission_pending)
+            };
+            self.select_prepared_window(sched, model, true, false, false, force_ordinary)?
+        };
+        let action = decision.action;
+        let regime = decision.regime;
+        debug_assert!(
+            self.measured_cycle.is_none() || !boundary_before,
+            "PromptLookup measured cycle remained active at a window boundary"
+        );
+        let stats_before = decision.stats_before;
+        let started = Instant::now();
+        let events = match action {
+            PromptLookupCostAction::Ordinary => sched.step_prompt_lookup_ordinary(model)?,
+            PromptLookupCostAction::Lookup => sched.step_prompt_lookup(model)?,
+        };
+        let elapsed_ns =
+            duration_ns(started.elapsed()).saturating_add(decision.proposal_elapsed_ns);
+        let stats_after = sched.prompt_lookup_stats().unwrap_or_default();
+        if let Some(regime) = regime {
+            match action {
+                PromptLookupCostAction::Ordinary => {
+                    self.cost_controller.record_sample_with_adaptive_draft(
+                        regime,
+                        action,
+                        elapsed_ns,
+                        events.len(),
+                        stats_after.saturating_delta_since(stats_before),
+                    );
+                }
+                PromptLookupCostAction::Lookup => {
+                    let cycle = self
+                        .measured_cycle
+                        .get_or_insert(PromptLookupMeasuredCycle {
+                            regime,
+                            action,
+                            elapsed_ns: 0,
+                            committed_tokens: 0,
+                            stats_before,
+                        });
+                    cycle.elapsed_ns = cycle.elapsed_ns.saturating_add(elapsed_ns);
+                    cycle.committed_tokens = cycle.committed_tokens.saturating_add(events.len());
+                    if sched.prompt_lookup_can_start_rolling_mid_admit() {
+                        let cycle = self
+                            .measured_cycle
+                            .take()
+                            .expect("PromptLookup measured cycle initialized above");
+                        self.cost_controller.record_sample_with_adaptive_draft(
+                            cycle.regime,
+                            action,
+                            cycle.elapsed_ns,
+                            cycle.committed_tokens,
+                            stats_after.saturating_delta_since(cycle.stats_before),
+                        );
+                    }
+                }
+            }
+        }
+        self.publish_stats(sched, counters);
+        Ok(events)
+    }
+
+    fn begin_mid_admit(
+        &mut self,
+        sched: &mut Scheduler<M>,
+        model: &M,
+        request: GenerateRequest,
+    ) -> Result<Self::MidAdmitHandle> {
+        sched.admit_mid_begin(request, model)
+    }
+
+    fn advance_mid_admit_chunk(
+        &mut self,
+        sched: &mut Scheduler<M>,
+        model: &M,
+        handle: &mut Self::MidAdmitHandle,
+    ) -> Result<bool> {
+        sched.admit_mid_chunk(handle, model)
+    }
+
+    fn finalize_mid_admit(
+        &mut self,
+        sched: &mut Scheduler<M>,
+        model: &M,
+        handle: Self::MidAdmitHandle,
+        counters: &SchedulerActorMtpCounters,
+    ) -> Result<(RequestId, StepEvent)> {
+        let result = sched.admit_mid_finalize(handle, model)?;
+        sched.register_prompt_lookup_request(result.0, self.cfg)?;
+        self.defer_speculation_once = true;
+        self.measured_cycle = None;
+        self.query_hint = None;
+        self.miss_query_hint = None;
+        self.publish_stats(sched, counters);
+        Ok(result)
     }
 }
 
@@ -765,17 +1585,45 @@ where
         model: &M,
         counters: &SchedulerActorMtpCounters,
     ) -> Result<Vec<StepEvent>> {
-        if sched.mtp_batch_active_greedy_eligible() {
+        self.exact_episode = None;
+        let regime = sched.fresh_neural_exact_qualification_regime(NeuralExactSource::QwenMtp);
+        let action = regime
+            .and_then(|regime| {
+                self.exact_cost_controller
+                    .as_mut()
+                    .map(|controller| controller.next_action(regime))
+            })
+            .unwrap_or(NeuralExactAction::Exact);
+        let stats_before = sched.mtp_stats().unwrap_or_default();
+        let started = Instant::now();
+        let events = if action == NeuralExactAction::Exact
+            && sched.speculative_batch_active_fresh_eligible()
+            && sched.native_mtp_fresh_exact_verify_eligible(model, self.cfg)?
+        {
             counters.mtp_prefill_count.fetch_add(1, Ordering::Relaxed);
             let events = sched.prefill_admitted_mtp_batch(model, &self.mtp, self.cfg)?;
             counters.store_stats(sched.mtp_stats());
-            Ok(events)
+            events
         } else {
             counters
                 .mtp_prefill_fallback_count
                 .fetch_add(1, Ordering::Relaxed);
-            sched.prefill_admitted(model)
+            sched.prefill_admitted(model)?
+        };
+        if let Some(regime) = regime.filter(|_| self.exact_cost_controller.is_some()) {
+            self.exact_episode = Some(NeuralExactMeasuredEpisode {
+                regime,
+                action,
+                elapsed_ns: duration_ns(started.elapsed()),
+                committed_tokens: events.len(),
+                stats_before,
+            });
+            if sched.active_batch_finished() {
+                self.finish_exact_episode(sched.mtp_stats(), counters);
+            }
         }
+        self.publish_exact_qualification(counters);
+        Ok(events)
     }
 
     fn step(
@@ -783,15 +1631,40 @@ where
         sched: &mut Scheduler<M>,
         model: &M,
         counters: &SchedulerActorMtpCounters,
+        _admission_pending: bool,
     ) -> Result<Vec<StepEvent>> {
-        if sched.mtp_stats().is_some() {
+        let action = self
+            .exact_episode
+            .as_ref()
+            .map(|episode| episode.action)
+            .unwrap_or(NeuralExactAction::Exact);
+        if action == NeuralExactAction::Exact
+            && sched.mtp_stats().is_some()
+            && sched.mtp_at_batch_window_boundary()
+            && !sched.native_mtp_next_window_exact_verify_eligible(model)?
+        {
+            counters.store_stats(sched.mtp_stats());
+            sched.retire_mtp_at_batch_window_boundary()?;
+        }
+        let started = Instant::now();
+        let events = if action == NeuralExactAction::Exact && sched.mtp_stats().is_some() {
             counters.mtp_step_count.fetch_add(1, Ordering::Relaxed);
             let events = sched.step_mtp_batch(model, &self.mtp)?;
             counters.store_stats(sched.mtp_stats());
-            Ok(events)
+            events
         } else {
-            sched.step(model)
+            sched.step(model)?
+        };
+        if let Some(episode) = self.exact_episode.as_mut() {
+            episode.elapsed_ns = episode
+                .elapsed_ns
+                .saturating_add(duration_ns(started.elapsed()));
+            episode.committed_tokens = episode.committed_tokens.saturating_add(events.len());
         }
+        if sched.active_batch_finished() {
+            self.finish_exact_episode(sched.mtp_stats(), counters);
+        }
+        Ok(events)
     }
 
     fn begin_mid_admit(
@@ -800,7 +1673,14 @@ where
         model: &M,
         request: GenerateRequest,
     ) -> Result<Self::MidAdmitHandle> {
+        self.exact_episode = None;
         if sched.mtp_stats().is_some() {
+            if !sched.native_mtp_rolling_admit_exact_verify_eligible(model, self.cfg, &request)? {
+                sched.retire_mtp_at_batch_window_boundary()?;
+                return sched
+                    .admit_mid_begin(request, model)
+                    .map(SchedulerActorMtpMidAdmitHandle::Generic);
+            }
             sched
                 .admit_mid_begin_mtp(request, model, &self.mtp, self.cfg)
                 .map(Box::new)
@@ -845,6 +1725,362 @@ where
                 result
             }
         }
+    }
+}
+
+impl<M> SchedulerActorMtpMode<M> for SchedulerActorMtpPromptLookupHybrid<M::MtpHead>
+where
+    M: Model + DenseVlMethods + MtpSpeculativeModel,
+{
+    type MidAdmitHandle = SchedulerActorMtpMidAdmitHandle;
+
+    fn can_start_rolling_mid_admit(&self, sched: &Scheduler<M>) -> bool {
+        self.measured_cycle.is_none()
+            && (sched.mtp_stats().is_none() || sched.mtp_at_batch_window_boundary())
+            && sched.prompt_lookup_can_start_rolling_mid_admit()
+    }
+
+    fn mid_admit_request_id(handle: &Self::MidAdmitHandle) -> RequestId {
+        <SchedulerActorMtp<M::MtpHead> as SchedulerActorMtpMode<M>>::mid_admit_request_id(handle)
+    }
+
+    fn mid_admit_chunk_start(handle: &Self::MidAdmitHandle) -> i32 {
+        <SchedulerActorMtp<M::MtpHead> as SchedulerActorMtpMode<M>>::mid_admit_chunk_start(handle)
+    }
+
+    fn mid_admit_prompt_len(handle: &Self::MidAdmitHandle) -> i32 {
+        <SchedulerActorMtp<M::MtpHead> as SchedulerActorMtpMode<M>>::mid_admit_prompt_len(handle)
+    }
+
+    fn mid_admit_chunk_size(handle: &Self::MidAdmitHandle) -> i32 {
+        <SchedulerActorMtp<M::MtpHead> as SchedulerActorMtpMode<M>>::mid_admit_chunk_size(handle)
+    }
+
+    fn set_mid_admit_chunk_size(handle: &mut Self::MidAdmitHandle, chunk_size: i32) {
+        <SchedulerActorMtp<M::MtpHead> as SchedulerActorMtpMode<M>>::set_mid_admit_chunk_size(
+            handle, chunk_size,
+        );
+    }
+
+    fn mid_admit_decode_cadence_mid_chunk_cap(handle: &Self::MidAdmitHandle) -> usize {
+        <SchedulerActorMtp<M::MtpHead> as SchedulerActorMtpMode<M>>::mid_admit_decode_cadence_mid_chunk_cap(handle)
+    }
+
+    fn prefill_admitted(
+        &mut self,
+        sched: &mut Scheduler<M>,
+        model: &M,
+        counters: &SchedulerActorMtpCounters,
+    ) -> Result<Vec<StepEvent>> {
+        let events = if sched.speculative_batch_active_fresh_eligible()
+            && sched.native_mtp_fresh_exact_verify_eligible(model, self.neural.cfg)?
+        {
+            counters.mtp_prefill_count.fetch_add(1, Ordering::Relaxed);
+            let events =
+                sched.prefill_admitted_mtp_batch(model, &self.neural.mtp, self.neural.cfg)?;
+            counters.store_stats(sched.mtp_stats());
+            events
+        } else {
+            counters
+                .mtp_prefill_fallback_count
+                .fetch_add(1, Ordering::Relaxed);
+            sched.prefill_admitted(model)?
+        };
+        sched.initialize_prompt_lookup_for_active(self.prompt_lookup.cfg)?;
+        self.current_source = Some(HybridDraftSource::Neural);
+        self.neural_dirty = false;
+        self.lookup_window_canonical = false;
+        self.measured_cycle = None;
+        self.lookup_episode = None;
+        self.prompt_lookup.query_hint = None;
+        self.prompt_lookup.miss_query_hint = None;
+        self.prompt_lookup.publish_stats(sched, counters);
+        counters.store_prompt_lookup_hybrid_stats(self.stats);
+        Ok(events)
+    }
+
+    fn step(
+        &mut self,
+        sched: &mut Scheduler<M>,
+        model: &M,
+        counters: &SchedulerActorMtpCounters,
+        admission_pending: bool,
+    ) -> Result<Vec<StepEvent>> {
+        if sched.mtp_stats().is_none() {
+            let events = sched.step_prompt_lookup_ordinary(model)?;
+            self.prompt_lookup.publish_stats(sched, counters);
+            counters.store_prompt_lookup_hybrid_stats(self.stats);
+            return Ok(events);
+        }
+
+        if sched.mtp_at_batch_window_boundary()
+            && !sched.native_mtp_next_window_exact_verify_eligible(model)?
+        {
+            counters.store_stats(sched.mtp_stats());
+            sched.retire_mtp_at_batch_window_boundary()?;
+            let events = sched.step_prompt_lookup_ordinary(model)?;
+            self.prompt_lookup.publish_stats(sched, counters);
+            counters.store_prompt_lookup_hybrid_stats(self.stats);
+            return Ok(events);
+        }
+
+        let mut source = self.current_source.unwrap_or(HybridDraftSource::Neural);
+        let mut canonical_target = false;
+        let at_boundary = match source {
+            HybridDraftSource::Neural => sched.mtp_at_batch_window_boundary(),
+            HybridDraftSource::PromptLookup => sched.prompt_lookup_can_start_rolling_mid_admit(),
+        };
+        let mut window_decision = None;
+
+        if self.measured_cycle.is_none() && at_boundary {
+            let decision = self.prompt_lookup.select_prepared_window(
+                sched,
+                model,
+                true,
+                true,
+                true,
+                admission_pending,
+            )?;
+            source = if decision.action == PromptLookupCostAction::Lookup {
+                HybridDraftSource::PromptLookup
+            } else {
+                if decision.fallback_to_baseline {
+                    self.stats.lookup_miss_fallbacks =
+                        self.stats.lookup_miss_fallbacks.saturating_add(1);
+                }
+                sched.discard_prepared_prompt_lookup_window();
+                HybridDraftSource::Neural
+            };
+            canonical_target = qwen_hybrid_uses_canonical_target(source, decision.regime);
+            let previous_source = self.current_source;
+            let state_source = if canonical_target {
+                HybridDraftSource::Neural
+            } else {
+                source
+            };
+            if previous_source.is_some_and(|previous| previous != state_source) {
+                self.stats.source_switches = self.stats.source_switches.saturating_add(1);
+            }
+            self.current_source = Some(state_source);
+            if source == HybridDraftSource::PromptLookup {
+                self.lookup_window_canonical = false;
+            } else if previous_source == Some(HybridDraftSource::PromptLookup) && !self.neural_dirty
+            {
+                if let Some(episode) = self.lookup_episode.take() {
+                    self.prompt_lookup.cost_controller.record_lookup_transition(
+                        &episode.regimes,
+                        0,
+                        episode.committed_tokens,
+                    );
+                }
+            }
+            if (source == HybridDraftSource::Neural || canonical_target) && self.neural_dirty {
+                let rebase_started = Instant::now();
+                sched.rebase_mtp_from_committed_history(model, &self.neural.mtp)?;
+                let rebase_elapsed = rebase_started.elapsed();
+                self.stats.neural_rebases = self.stats.neural_rebases.saturating_add(1);
+                self.stats.neural_rebase_us = self
+                    .stats
+                    .neural_rebase_us
+                    .saturating_add(duration_us(rebase_elapsed));
+                if let Some(episode) = self.lookup_episode.take() {
+                    self.prompt_lookup.cost_controller.record_lookup_transition(
+                        &episode.regimes,
+                        duration_ns(rebase_elapsed),
+                        episode.committed_tokens,
+                    );
+                }
+                self.neural_dirty = false;
+            }
+            window_decision = Some(decision);
+        }
+
+        let regime = self
+            .measured_cycle
+            .as_ref()
+            .map(|cycle| cycle.regime)
+            .or_else(|| {
+                window_decision
+                    .as_ref()
+                    .and_then(|decision| decision.regime)
+            })
+            .or_else(|| sched.prompt_lookup_qualification_regime());
+        if self.measured_cycle.is_none() {
+            if let Some(regime) = regime {
+                self.measured_cycle = Some(PromptLookupMeasuredCycle {
+                    regime,
+                    action: window_decision
+                        .as_ref()
+                        .map_or(PromptLookupCostAction::Ordinary, |decision| decision.action),
+                    elapsed_ns: window_decision
+                        .as_ref()
+                        .map_or(0, |decision| decision.proposal_elapsed_ns),
+                    committed_tokens: 0,
+                    stats_before: window_decision.as_ref().map_or_else(
+                        || sched.prompt_lookup_stats().unwrap_or_default(),
+                        |decision| decision.stats_before,
+                    ),
+                });
+            }
+        }
+
+        counters.mtp_step_count.fetch_add(1, Ordering::Relaxed);
+        let started = Instant::now();
+        let attempted_source = source;
+        let events = match source {
+            HybridDraftSource::Neural => {
+                let events = sched.step_mtp_batch_without_postfill(model, &self.neural.mtp)?;
+                sched.commit_prompt_lookup_events(&events)?;
+                counters.store_stats(sched.mtp_stats());
+                events
+            }
+            HybridDraftSource::PromptLookup => {
+                if canonical_target {
+                    let events = sched.step_mtp_batch_without_postfill_observing_prompt_lookup(
+                        model,
+                        &self.neural.mtp,
+                    )?;
+                    counters.store_stats(sched.mtp_stats());
+                    self.neural_dirty = false;
+                    self.lookup_window_canonical = true;
+                    source = HybridDraftSource::Neural;
+                    events
+                } else {
+                    match sched.step_prompt_lookup_with_mtp_verify(model, &self.neural.mtp)? {
+                        PromptLookupMtpStepOutcome::Events {
+                            events,
+                            canonical_shared_full_accept,
+                        } => {
+                            self.lookup_window_canonical |= canonical_shared_full_accept;
+                            events
+                        }
+                        PromptLookupMtpStepOutcome::FallbackToNeural => {
+                            let events =
+                                sched.step_mtp_batch_without_postfill(model, &self.neural.mtp)?;
+                            sched.commit_prompt_lookup_events(&events)?;
+                            counters.store_stats(sched.mtp_stats());
+                            if self.current_source != Some(HybridDraftSource::Neural) {
+                                self.stats.source_switches =
+                                    self.stats.source_switches.saturating_add(1);
+                            }
+                            self.current_source = Some(HybridDraftSource::Neural);
+                            self.neural_dirty = false;
+                            self.lookup_window_canonical = false;
+                            source = HybridDraftSource::Neural;
+                            events
+                        }
+                    }
+                }
+            }
+        };
+        let elapsed_ns = duration_ns(started.elapsed());
+        if let Some(cycle) = self.measured_cycle.as_mut() {
+            cycle.elapsed_ns = cycle.elapsed_ns.saturating_add(elapsed_ns);
+            cycle.committed_tokens = cycle.committed_tokens.saturating_add(events.len());
+        }
+
+        let completed = match source {
+            HybridDraftSource::Neural => sched.mtp_at_batch_window_boundary(),
+            HybridDraftSource::PromptLookup => sched.prompt_lookup_can_start_rolling_mid_admit(),
+        };
+        if completed {
+            match source {
+                HybridDraftSource::Neural => {
+                    self.stats.neural_windows = self.stats.neural_windows.saturating_add(1);
+                }
+                HybridDraftSource::PromptLookup => {
+                    self.stats.lookup_windows = self.stats.lookup_windows.saturating_add(1);
+                    self.neural_dirty = true;
+                    self.lookup_window_canonical = false;
+                }
+            }
+            if let Some(cycle) = self.measured_cycle.take() {
+                let stats_after = sched.prompt_lookup_stats().unwrap_or_default();
+                self.prompt_lookup.cost_controller.record_sample(
+                    cycle.regime,
+                    cycle.action,
+                    cycle.elapsed_ns,
+                    cycle.committed_tokens,
+                    stats_after.saturating_delta_since(cycle.stats_before),
+                );
+                if attempted_source == HybridDraftSource::PromptLookup
+                    && source == HybridDraftSource::PromptLookup
+                {
+                    self.lookup_episode
+                        .get_or_insert_with(PromptLookupEpisode::default)
+                        .record(cycle.regime, cycle.committed_tokens);
+                }
+            }
+        }
+
+        self.prompt_lookup.publish_stats(sched, counters);
+        counters.store_prompt_lookup_hybrid_stats(self.stats);
+        Ok(events)
+    }
+
+    fn begin_mid_admit(
+        &mut self,
+        sched: &mut Scheduler<M>,
+        model: &M,
+        request: GenerateRequest,
+    ) -> Result<Self::MidAdmitHandle> {
+        anyhow::ensure!(
+            request.sampler.is_pipelinable(),
+            "PromptLookup/neural hybrid requires greedy sampling"
+        );
+        if self.neural_dirty {
+            let rebase_started = Instant::now();
+            sched.rebase_mtp_from_committed_history(model, &self.neural.mtp)?;
+            let rebase_elapsed = rebase_started.elapsed();
+            self.stats.neural_rebases = self.stats.neural_rebases.saturating_add(1);
+            self.stats.neural_rebase_us = self
+                .stats
+                .neural_rebase_us
+                .saturating_add(duration_us(rebase_elapsed));
+            if let Some(episode) = self.lookup_episode.take() {
+                self.prompt_lookup.cost_controller.record_lookup_transition(
+                    &episode.regimes,
+                    duration_ns(rebase_elapsed),
+                    episode.committed_tokens,
+                );
+            }
+            self.neural_dirty = false;
+        }
+        self.current_source = Some(HybridDraftSource::Neural);
+        self.lookup_window_canonical = false;
+        self.measured_cycle = None;
+        self.neural.begin_mid_admit(sched, model, request)
+    }
+
+    fn advance_mid_admit_chunk(
+        &mut self,
+        sched: &mut Scheduler<M>,
+        model: &M,
+        handle: &mut Self::MidAdmitHandle,
+    ) -> Result<bool> {
+        self.neural.advance_mid_admit_chunk(sched, model, handle)
+    }
+
+    fn finalize_mid_admit(
+        &mut self,
+        sched: &mut Scheduler<M>,
+        model: &M,
+        handle: Self::MidAdmitHandle,
+        counters: &SchedulerActorMtpCounters,
+    ) -> Result<(RequestId, StepEvent)> {
+        let result = self
+            .neural
+            .finalize_mid_admit(sched, model, handle, counters)?;
+        sched.register_prompt_lookup_request(result.0, self.prompt_lookup.cfg)?;
+        self.current_source = Some(HybridDraftSource::Neural);
+        self.lookup_window_canonical = false;
+        self.measured_cycle = None;
+        self.lookup_episode = None;
+        self.prompt_lookup.query_hint = None;
+        self.prompt_lookup.miss_query_hint = None;
+        self.prompt_lookup.publish_stats(sched, counters);
+        counters.store_prompt_lookup_hybrid_stats(self.stats);
+        Ok(result)
     }
 }
 
@@ -907,18 +2143,46 @@ impl SchedulerActorMtpMode<crate::models::Gemma4Model> for SchedulerActorGemma4D
         model: &crate::models::Gemma4Model,
         counters: &SchedulerActorMtpCounters,
     ) -> Result<Vec<StepEvent>> {
-        if sched.mtp_batch_active_greedy_eligible() {
+        self.exact_episode = None;
+        let regime =
+            sched.fresh_neural_exact_qualification_regime(NeuralExactSource::Gemma4Assistant);
+        let action = regime
+            .and_then(|regime| {
+                self.exact_cost_controller
+                    .as_mut()
+                    .map(|controller| controller.next_action(regime))
+            })
+            .unwrap_or(NeuralExactAction::Exact);
+        let stats_before = sched.gemma4_drafter_stats().unwrap_or_default();
+        let started = Instant::now();
+        let events = if action == NeuralExactAction::Exact
+            && sched.speculative_batch_active_fresh_eligible()
+        {
             counters.mtp_prefill_count.fetch_add(1, Ordering::Relaxed);
             let drafter = self.drafter.blocking_lock();
             let events = sched.prefill_admitted_gemma4_drafter_batch(model, &drafter, self.cfg)?;
             counters.store_stats(sched.gemma4_drafter_stats());
-            Ok(events)
+            events
         } else {
             counters
                 .mtp_prefill_fallback_count
                 .fetch_add(1, Ordering::Relaxed);
-            sched.prefill_admitted(model)
+            sched.prefill_admitted(model)?
+        };
+        if let Some(regime) = regime.filter(|_| self.exact_cost_controller.is_some()) {
+            self.exact_episode = Some(NeuralExactMeasuredEpisode {
+                regime,
+                action,
+                elapsed_ns: duration_ns(started.elapsed()),
+                committed_tokens: events.len(),
+                stats_before,
+            });
+            if sched.active_batch_finished() {
+                self.finish_exact_episode(sched.gemma4_drafter_stats(), counters);
+            }
         }
+        self.publish_exact_qualification(counters);
+        Ok(events)
     }
 
     fn step(
@@ -926,16 +2190,34 @@ impl SchedulerActorMtpMode<crate::models::Gemma4Model> for SchedulerActorGemma4D
         sched: &mut Scheduler<crate::models::Gemma4Model>,
         model: &crate::models::Gemma4Model,
         counters: &SchedulerActorMtpCounters,
+        _admission_pending: bool,
     ) -> Result<Vec<StepEvent>> {
-        if sched.gemma4_drafter_stats().is_some() {
+        let action = self
+            .exact_episode
+            .as_ref()
+            .map(|episode| episode.action)
+            .unwrap_or(NeuralExactAction::Exact);
+        let started = Instant::now();
+        let events = if action == NeuralExactAction::Exact && sched.gemma4_drafter_stats().is_some()
+        {
             counters.mtp_step_count.fetch_add(1, Ordering::Relaxed);
             let drafter = self.drafter.blocking_lock();
             let events = sched.step_gemma4_drafter_batch(model, &drafter)?;
             counters.store_stats(sched.gemma4_drafter_stats());
-            Ok(events)
+            events
         } else {
-            sched.step(model)
+            sched.step(model)?
+        };
+        if let Some(episode) = self.exact_episode.as_mut() {
+            episode.elapsed_ns = episode
+                .elapsed_ns
+                .saturating_add(duration_ns(started.elapsed()));
+            episode.committed_tokens = episode.committed_tokens.saturating_add(events.len());
         }
+        if sched.active_batch_finished() {
+            self.finish_exact_episode(sched.gemma4_drafter_stats(), counters);
+        }
+        Ok(events)
     }
 
     fn begin_mid_admit(
@@ -944,6 +2226,7 @@ impl SchedulerActorMtpMode<crate::models::Gemma4Model> for SchedulerActorGemma4D
         model: &crate::models::Gemma4Model,
         request: GenerateRequest,
     ) -> Result<Self::MidAdmitHandle> {
+        self.exact_episode = None;
         if sched.gemma4_drafter_stats().is_some() {
             sched
                 .admit_mid_begin_gemma4_drafter(request, model)
@@ -992,6 +2275,287 @@ impl SchedulerActorMtpMode<crate::models::Gemma4Model> for SchedulerActorGemma4D
     }
 }
 
+impl SchedulerActorMtpMode<crate::models::Gemma4Model> for SchedulerActorGemma4PromptLookupHybrid {
+    type MidAdmitHandle = SchedulerActorGemma4DrafterMidAdmitHandle;
+
+    fn can_start_rolling_mid_admit(&self, sched: &Scheduler<crate::models::Gemma4Model>) -> bool {
+        self.measured_cycle.is_none()
+            && sched.gemma4_drafter_at_batch_window_boundary()
+            && sched.prompt_lookup_can_start_rolling_mid_admit()
+    }
+
+    fn mid_admit_request_id(handle: &Self::MidAdmitHandle) -> RequestId {
+        <SchedulerActorGemma4Drafter as SchedulerActorMtpMode<
+            crate::models::Gemma4Model,
+        >>::mid_admit_request_id(handle)
+    }
+
+    fn mid_admit_chunk_start(handle: &Self::MidAdmitHandle) -> i32 {
+        <SchedulerActorGemma4Drafter as SchedulerActorMtpMode<
+            crate::models::Gemma4Model,
+        >>::mid_admit_chunk_start(handle)
+    }
+
+    fn mid_admit_prompt_len(handle: &Self::MidAdmitHandle) -> i32 {
+        <SchedulerActorGemma4Drafter as SchedulerActorMtpMode<
+            crate::models::Gemma4Model,
+        >>::mid_admit_prompt_len(handle)
+    }
+
+    fn mid_admit_chunk_size(handle: &Self::MidAdmitHandle) -> i32 {
+        <SchedulerActorGemma4Drafter as SchedulerActorMtpMode<
+            crate::models::Gemma4Model,
+        >>::mid_admit_chunk_size(handle)
+    }
+
+    fn set_mid_admit_chunk_size(handle: &mut Self::MidAdmitHandle, chunk_size: i32) {
+        <SchedulerActorGemma4Drafter as SchedulerActorMtpMode<
+            crate::models::Gemma4Model,
+        >>::set_mid_admit_chunk_size(handle, chunk_size);
+    }
+
+    fn mid_admit_decode_cadence_mid_chunk_cap(handle: &Self::MidAdmitHandle) -> usize {
+        <SchedulerActorGemma4Drafter as SchedulerActorMtpMode<
+            crate::models::Gemma4Model,
+        >>::mid_admit_decode_cadence_mid_chunk_cap(handle)
+    }
+
+    fn prefill_admitted(
+        &mut self,
+        sched: &mut Scheduler<crate::models::Gemma4Model>,
+        model: &crate::models::Gemma4Model,
+        counters: &SchedulerActorMtpCounters,
+    ) -> Result<Vec<StepEvent>> {
+        let events = self.neural.prefill_admitted(sched, model, counters)?;
+        if sched.gemma4_drafter_stats().is_some() {
+            sched.initialize_prompt_lookup_for_active(self.prompt_lookup.cfg)?;
+            self.current_source = Some(HybridDraftSource::Neural);
+            self.neural_dirty = false;
+            self.measured_cycle = None;
+            self.lookup_episode = None;
+            self.prompt_lookup.query_hint = None;
+            self.prompt_lookup.miss_query_hint = None;
+            self.prompt_lookup.publish_stats(sched, counters);
+            counters.store_prompt_lookup_hybrid_stats(self.stats);
+        }
+        Ok(events)
+    }
+
+    fn step(
+        &mut self,
+        sched: &mut Scheduler<crate::models::Gemma4Model>,
+        model: &crate::models::Gemma4Model,
+        counters: &SchedulerActorMtpCounters,
+        admission_pending: bool,
+    ) -> Result<Vec<StepEvent>> {
+        if sched.gemma4_drafter_stats().is_none() {
+            return sched.step(model);
+        }
+
+        let mut source = self.current_source.unwrap_or(HybridDraftSource::Neural);
+        let at_boundary = match source {
+            HybridDraftSource::Neural => sched.gemma4_drafter_at_batch_window_boundary(),
+            HybridDraftSource::PromptLookup => sched.prompt_lookup_can_start_rolling_mid_admit(),
+        };
+        let mut window_decision = None;
+
+        if self.measured_cycle.is_none() && at_boundary {
+            let decision = self.prompt_lookup.select_prepared_window(
+                sched,
+                model,
+                true,
+                false,
+                false,
+                admission_pending,
+            )?;
+            source = if decision.action == PromptLookupCostAction::Lookup {
+                HybridDraftSource::PromptLookup
+            } else {
+                if decision.fallback_to_baseline {
+                    self.stats.lookup_miss_fallbacks =
+                        self.stats.lookup_miss_fallbacks.saturating_add(1);
+                }
+                sched.discard_prepared_prompt_lookup_window();
+                HybridDraftSource::Neural
+            };
+            if self
+                .current_source
+                .is_some_and(|previous| previous != source)
+            {
+                self.stats.source_switches = self.stats.source_switches.saturating_add(1);
+            }
+            self.current_source = Some(source);
+            if source == HybridDraftSource::Neural && self.neural_dirty {
+                let rebase_started = Instant::now();
+                let drafter = self.neural.drafter.blocking_lock();
+                sched.rebase_gemma4_drafter_from_committed_history(model, &drafter)?;
+                let rebase_elapsed = rebase_started.elapsed();
+                self.stats.neural_rebases = self.stats.neural_rebases.saturating_add(1);
+                self.stats.neural_rebase_us = self
+                    .stats
+                    .neural_rebase_us
+                    .saturating_add(duration_us(rebase_elapsed));
+                if let Some(episode) = self.lookup_episode.take() {
+                    self.prompt_lookup.cost_controller.record_lookup_transition(
+                        &episode.regimes,
+                        duration_ns(rebase_elapsed),
+                        episode.committed_tokens,
+                    );
+                }
+                self.neural_dirty = false;
+            }
+            window_decision = Some(decision);
+        }
+
+        let regime = self
+            .measured_cycle
+            .as_ref()
+            .map(|cycle| cycle.regime)
+            .or_else(|| {
+                window_decision
+                    .as_ref()
+                    .and_then(|decision| decision.regime)
+            })
+            .or_else(|| sched.prompt_lookup_qualification_regime());
+        if self.measured_cycle.is_none() {
+            if let Some(regime) = regime {
+                self.measured_cycle = Some(PromptLookupMeasuredCycle {
+                    regime,
+                    action: window_decision
+                        .as_ref()
+                        .map_or(PromptLookupCostAction::Ordinary, |decision| decision.action),
+                    elapsed_ns: window_decision
+                        .as_ref()
+                        .map_or(0, |decision| decision.proposal_elapsed_ns),
+                    committed_tokens: 0,
+                    stats_before: window_decision.as_ref().map_or_else(
+                        || sched.prompt_lookup_stats().unwrap_or_default(),
+                        |decision| decision.stats_before,
+                    ),
+                });
+            }
+        }
+
+        counters.mtp_step_count.fetch_add(1, Ordering::Relaxed);
+        let started = Instant::now();
+        let events = match source {
+            HybridDraftSource::Neural => {
+                let drafter = self.neural.drafter.blocking_lock();
+                let events = sched.step_gemma4_drafter_batch_without_postfill(model, &drafter)?;
+                drop(drafter);
+                sched.commit_prompt_lookup_events(&events)?;
+                counters.store_stats(sched.gemma4_drafter_stats());
+                events
+            }
+            HybridDraftSource::PromptLookup => sched.step_prompt_lookup_batch_window(model)?,
+        };
+        let elapsed_ns = duration_ns(started.elapsed());
+        if let Some(cycle) = self.measured_cycle.as_mut() {
+            cycle.elapsed_ns = cycle.elapsed_ns.saturating_add(elapsed_ns);
+            cycle.committed_tokens = cycle.committed_tokens.saturating_add(events.len());
+        }
+
+        let completed = match source {
+            HybridDraftSource::Neural => sched.gemma4_drafter_at_batch_window_boundary(),
+            HybridDraftSource::PromptLookup => sched.prompt_lookup_can_start_rolling_mid_admit(),
+        };
+        if completed {
+            match source {
+                HybridDraftSource::Neural => {
+                    self.stats.neural_windows = self.stats.neural_windows.saturating_add(1);
+                }
+                HybridDraftSource::PromptLookup => {
+                    self.stats.lookup_windows = self.stats.lookup_windows.saturating_add(1);
+                    self.neural_dirty = true;
+                }
+            }
+            if let Some(cycle) = self.measured_cycle.take() {
+                let stats_after = sched.prompt_lookup_stats().unwrap_or_default();
+                self.prompt_lookup
+                    .cost_controller
+                    .record_sample_with_adaptive_draft(
+                        cycle.regime,
+                        cycle.action,
+                        cycle.elapsed_ns,
+                        cycle.committed_tokens,
+                        stats_after.saturating_delta_since(cycle.stats_before),
+                    );
+                if source == HybridDraftSource::PromptLookup {
+                    self.lookup_episode
+                        .get_or_insert_with(PromptLookupEpisode::default)
+                        .record(cycle.regime, cycle.committed_tokens);
+                }
+            }
+        }
+
+        self.prompt_lookup.publish_stats(sched, counters);
+        counters.store_prompt_lookup_hybrid_stats(self.stats);
+        Ok(events)
+    }
+
+    fn begin_mid_admit(
+        &mut self,
+        sched: &mut Scheduler<crate::models::Gemma4Model>,
+        model: &crate::models::Gemma4Model,
+        request: GenerateRequest,
+    ) -> Result<Self::MidAdmitHandle> {
+        anyhow::ensure!(
+            request.sampler.is_pipelinable(),
+            "PromptLookup/neural hybrid requires greedy sampling"
+        );
+        self.neural.begin_mid_admit(sched, model, request)
+    }
+
+    fn advance_mid_admit_chunk(
+        &mut self,
+        sched: &mut Scheduler<crate::models::Gemma4Model>,
+        model: &crate::models::Gemma4Model,
+        handle: &mut Self::MidAdmitHandle,
+    ) -> Result<bool> {
+        self.neural.advance_mid_admit_chunk(sched, model, handle)
+    }
+
+    fn finalize_mid_admit(
+        &mut self,
+        sched: &mut Scheduler<crate::models::Gemma4Model>,
+        model: &crate::models::Gemma4Model,
+        handle: Self::MidAdmitHandle,
+        counters: &SchedulerActorMtpCounters,
+    ) -> Result<(RequestId, StepEvent)> {
+        let result = self
+            .neural
+            .finalize_mid_admit(sched, model, handle, counters)?;
+        sched.register_prompt_lookup_request(result.0, self.prompt_lookup.cfg)?;
+        if self.neural_dirty {
+            let rebase_started = Instant::now();
+            let drafter = self.neural.drafter.blocking_lock();
+            sched.rebase_gemma4_drafter_from_committed_history(model, &drafter)?;
+            let rebase_elapsed = rebase_started.elapsed();
+            self.stats.neural_rebases = self.stats.neural_rebases.saturating_add(1);
+            self.stats.neural_rebase_us = self
+                .stats
+                .neural_rebase_us
+                .saturating_add(duration_us(rebase_elapsed));
+            if let Some(episode) = self.lookup_episode.take() {
+                self.prompt_lookup.cost_controller.record_lookup_transition(
+                    &episode.regimes,
+                    duration_ns(rebase_elapsed),
+                    episode.committed_tokens,
+                );
+            }
+            self.neural_dirty = false;
+        }
+        self.current_source = Some(HybridDraftSource::Neural);
+        self.measured_cycle = None;
+        self.lookup_episode = None;
+        self.prompt_lookup.query_hint = None;
+        self.prompt_lookup.miss_query_hint = None;
+        self.prompt_lookup.publish_stats(sched, counters);
+        counters.store_prompt_lookup_hybrid_stats(self.stats);
+        Ok(result)
+    }
+}
+
 /// Result returned by [`drive_empty_scheduler_handoff`] encoding what the
 /// caller's rolling loop should do next. Matches the existing `continue
 /// 'rolling` / `break 'rolling` / `continue 'outer` / `return` patterns
@@ -1025,6 +2589,7 @@ pub struct AdmitReply {
 #[derive(Clone)]
 pub struct SchedulerActorHandle {
     pub cmd_tx: mpsc::Sender<SchedulerCommand>,
+    pub(super) control_tx: mpsc::Sender<SchedulerControlCommand>,
     pub(crate) cold_materialization_tracker:
         Arc<OnceLock<Arc<crate::core::process_memory::ColdMaterializationTracker>>>,
     /// Test-observable counter. Incremented by the driver every time
@@ -1078,6 +2643,14 @@ pub struct SchedulerActorHandle {
     /// Latest cumulative scheduler MTP speculative-window count.
     #[doc(hidden)]
     pub mtp_windows: Arc<AtomicU64>,
+    #[doc(hidden)]
+    pub mtp_exact_sampling_windows: Arc<AtomicU64>,
+    #[doc(hidden)]
+    pub mtp_exact_acceptance_draws: Arc<AtomicU64>,
+    #[doc(hidden)]
+    pub mtp_exact_residual_corrections: Arc<AtomicU64>,
+    #[doc(hidden)]
+    pub mtp_exact_bonus_samples: Arc<AtomicU64>,
     /// Latest cumulative microseconds spent in MTP draft forward passes.
     #[doc(hidden)]
     pub mtp_draft_forward_us: Arc<AtomicU64>,
@@ -1117,6 +2690,8 @@ pub struct SchedulerActorHandle {
     /// Latest cumulative microseconds spent restoring temporary MTP KV.
     #[doc(hidden)]
     pub mtp_cache_restore_us: Arc<AtomicU64>,
+    pub(crate) prompt_lookup_published_stats: Arc<StdMutex<Option<PromptLookupStats>>>,
+    pub(crate) neural_exact_qualification_stats: Arc<StdMutex<NeuralExactQualificationStats>>,
     // ── B1-p2.5 G3: /healthz monitoring atomics ──────────────────────────
     /// Live count of in-flight (active) requests in the scheduler slots.
     /// Updated by driver_loop tail on every rolling iteration.
@@ -1149,6 +2724,13 @@ pub struct SchedulerActorHandle {
 }
 
 impl SchedulerActorHandle {
+    pub fn prompt_lookup_stats(&self) -> Option<PromptLookupStats> {
+        *self
+            .prompt_lookup_published_stats
+            .lock()
+            .expect("PromptLookup published stats mutex poisoned")
+    }
+
     pub(crate) fn install_cold_materialization_tracker(
         &self,
         tracker: Arc<crate::core::process_memory::ColdMaterializationTracker>,
@@ -1156,6 +2738,17 @@ impl SchedulerActorHandle {
         self.cold_materialization_tracker
             .set(tracker)
             .map_err(|_| anyhow::anyhow!("cold materialization tracker already installed"))
+    }
+
+    pub async fn clear_shared_prompt_lookup(&self) -> Result<usize> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.control_tx
+            .send(SchedulerControlCommand::ClearSharedPromptLookup { reply_tx })
+            .await
+            .map_err(|_| anyhow::anyhow!("scheduler control channel is closed"))?;
+        reply_rx
+            .await
+            .map_err(|_| anyhow::anyhow!("scheduler stopped before clearing PromptLookup history"))
     }
 }
 
@@ -1202,6 +2795,38 @@ where
         None,
         AdaptiveAdmissionPolicy::disabled(),
         ActiveKvOffloadConfig::disabled(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_scheduler_actor_for_prompt_lookup_control<M>(
+    model: Arc<Mutex<M>>,
+    b_max: usize,
+    admission_deadline: Duration,
+    admission_queue_max: usize,
+    effective_cap_max: usize,
+    decode_cadence_mid_chunk_cap: usize,
+    meta: crate::core::memory_budget::ModelMeta,
+    paged_prefix_cache: Option<PagedPrefixCacheConfig>,
+    prefix_lru_cache: Option<PrefixLruCacheConfig>,
+    active_kv_offload: ActiveKvOffloadConfig,
+) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError>
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    spawn_scheduler_actor_with_mode(
+        model,
+        SchedulerActorNoMtp,
+        b_max,
+        admission_deadline,
+        admission_queue_max,
+        effective_cap_max,
+        decode_cadence_mid_chunk_cap,
+        meta,
+        paged_prefix_cache,
+        prefix_lru_cache,
+        AdaptiveAdmissionPolicy::prompt_lookup(),
+        active_kv_offload,
     )
 }
 
@@ -1299,10 +2924,11 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn spawn_scheduler_actor_with_mtp<M>(
+pub(crate) fn spawn_scheduler_actor_with_mtp<M>(
     model: Arc<Mutex<M>>,
     mtp: M::MtpHead,
     mtp_draft_tokens: usize,
+    exact_qualification: NeuralExactQualificationRuntimeConfig,
     b_max: usize,
     admission_deadline: Duration,
     admission_queue_max: usize,
@@ -1311,16 +2937,21 @@ pub fn spawn_scheduler_actor_with_mtp<M>(
     meta: crate::core::memory_budget::ModelMeta,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
-) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError>
+) -> Result<SchedulerActorHandle>
 where
     M: Model + DenseVlMethods + MtpSpeculativeModel + Send + 'static,
     M::MtpHead: Send + 'static,
 {
     let mtp_draft_tokens =
         effective_mtp_draft_tokens_for_paged_prefix(mtp_draft_tokens, paged_prefix_cache.is_some());
-    spawn_scheduler_actor_with_mode(
+    let mode = SchedulerActorMtp::new_with_exact_qualification(
+        mtp,
+        mtp_draft_tokens,
+        exact_qualification,
+    )?;
+    Ok(spawn_scheduler_actor_with_mode(
         model,
-        SchedulerActorMtp::new(mtp, mtp_draft_tokens),
+        mode,
         b_max,
         admission_deadline,
         admission_queue_max,
@@ -1331,14 +2962,16 @@ where
         prefix_lru_cache,
         AdaptiveAdmissionPolicy::qwen_mtp(),
         ActiveKvOffloadConfig::disabled(),
-    )
+    )?)
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn spawn_scheduler_actor_with_mtp_and_active_kv<M>(
+pub(crate) fn spawn_scheduler_actor_with_mtp_prompt_lookup<M>(
     model: Arc<Mutex<M>>,
     mtp: M::MtpHead,
     mtp_draft_tokens: usize,
+    prompt_lookup: PromptLookupConfig,
+    qualification: PromptLookupQualificationRuntimeConfig,
     b_max: usize,
     admission_deadline: Duration,
     admission_queue_max: usize,
@@ -1348,16 +2981,22 @@ pub fn spawn_scheduler_actor_with_mtp_and_active_kv<M>(
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     active_kv_offload: ActiveKvOffloadConfig,
-) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError>
+) -> Result<SchedulerActorHandle>
 where
     M: Model + DenseVlMethods + MtpSpeculativeModel + Send + 'static,
     M::MtpHead: Send + 'static,
 {
     let mtp_draft_tokens =
         effective_mtp_draft_tokens_for_paged_prefix(mtp_draft_tokens, paged_prefix_cache.is_some());
-    spawn_scheduler_actor_with_mode(
+    let mode = SchedulerActorMtpPromptLookupHybrid::new(
+        mtp,
+        mtp_draft_tokens,
+        prompt_lookup,
+        qualification,
+    )?;
+    Ok(spawn_scheduler_actor_with_mode(
         model,
-        SchedulerActorMtp::new(mtp, mtp_draft_tokens),
+        mode,
         b_max,
         admission_deadline,
         admission_queue_max,
@@ -1368,14 +3007,14 @@ where
         prefix_lru_cache,
         AdaptiveAdmissionPolicy::qwen_mtp(),
         active_kv_offload,
-    )
+    )?)
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn spawn_scheduler_actor_with_gemma4_drafter(
-    model: Arc<Mutex<crate::models::Gemma4Model>>,
-    drafter: Arc<Mutex<crate::models::gemma4::Gemma4AssistantModel>>,
-    mtp_draft_tokens: usize,
+pub(crate) fn spawn_scheduler_actor_with_prompt_lookup<M>(
+    model: Arc<Mutex<M>>,
+    cfg: PromptLookupConfig,
+    qualification: PromptLookupQualificationRuntimeConfig,
     b_max: usize,
     admission_deadline: Duration,
     admission_queue_max: usize,
@@ -1384,10 +3023,94 @@ pub fn spawn_scheduler_actor_with_gemma4_drafter(
     meta: crate::core::memory_budget::ModelMeta,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
-) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError> {
-    spawn_scheduler_actor_with_mode(
+    active_kv_offload: ActiveKvOffloadConfig,
+) -> Result<SchedulerActorHandle>
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    let mode = SchedulerActorPromptLookup::new(cfg, qualification)?;
+    Ok(spawn_scheduler_actor_with_mode(
         model,
-        SchedulerActorGemma4Drafter::new(drafter, mtp_draft_tokens),
+        mode,
+        b_max,
+        admission_deadline,
+        admission_queue_max,
+        effective_cap_max,
+        decode_cadence_mid_chunk_cap,
+        meta,
+        paged_prefix_cache,
+        prefix_lru_cache,
+        AdaptiveAdmissionPolicy::prompt_lookup(),
+        active_kv_offload,
+    )?)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_scheduler_actor_with_mtp_and_active_kv<M>(
+    model: Arc<Mutex<M>>,
+    mtp: M::MtpHead,
+    mtp_draft_tokens: usize,
+    exact_qualification: NeuralExactQualificationRuntimeConfig,
+    b_max: usize,
+    admission_deadline: Duration,
+    admission_queue_max: usize,
+    effective_cap_max: usize,
+    decode_cadence_mid_chunk_cap: usize,
+    meta: crate::core::memory_budget::ModelMeta,
+    paged_prefix_cache: Option<PagedPrefixCacheConfig>,
+    prefix_lru_cache: Option<PrefixLruCacheConfig>,
+    active_kv_offload: ActiveKvOffloadConfig,
+) -> Result<SchedulerActorHandle>
+where
+    M: Model + DenseVlMethods + MtpSpeculativeModel + Send + 'static,
+    M::MtpHead: Send + 'static,
+{
+    let mtp_draft_tokens =
+        effective_mtp_draft_tokens_for_paged_prefix(mtp_draft_tokens, paged_prefix_cache.is_some());
+    let mode = SchedulerActorMtp::new_with_exact_qualification(
+        mtp,
+        mtp_draft_tokens,
+        exact_qualification,
+    )?;
+    Ok(spawn_scheduler_actor_with_mode(
+        model,
+        mode,
+        b_max,
+        admission_deadline,
+        admission_queue_max,
+        effective_cap_max,
+        decode_cadence_mid_chunk_cap,
+        meta,
+        paged_prefix_cache,
+        prefix_lru_cache,
+        AdaptiveAdmissionPolicy::qwen_mtp(),
+        active_kv_offload,
+    )?)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_scheduler_actor_with_gemma4_drafter(
+    model: Arc<Mutex<crate::models::Gemma4Model>>,
+    drafter: Arc<Mutex<crate::models::gemma4::Gemma4AssistantModel>>,
+    mtp_draft_tokens: usize,
+    exact_qualification: NeuralExactQualificationRuntimeConfig,
+    b_max: usize,
+    admission_deadline: Duration,
+    admission_queue_max: usize,
+    effective_cap_max: usize,
+    decode_cadence_mid_chunk_cap: usize,
+    meta: crate::core::memory_budget::ModelMeta,
+    paged_prefix_cache: Option<PagedPrefixCacheConfig>,
+    prefix_lru_cache: Option<PrefixLruCacheConfig>,
+) -> Result<SchedulerActorHandle> {
+    let mode = SchedulerActorGemma4Drafter::new_with_exact_qualification(
+        drafter,
+        mtp_draft_tokens,
+        exact_qualification,
+    )?;
+    Ok(spawn_scheduler_actor_with_mode(
+        model,
+        mode,
         b_max,
         admission_deadline,
         admission_queue_max,
@@ -1398,14 +3121,16 @@ pub fn spawn_scheduler_actor_with_gemma4_drafter(
         prefix_lru_cache,
         AdaptiveAdmissionPolicy::gemma4_drafter(),
         ActiveKvOffloadConfig::disabled(),
-    )
+    )?)
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn spawn_scheduler_actor_with_gemma4_drafter_and_active_kv(
+pub(crate) fn spawn_scheduler_actor_with_gemma4_drafter_prompt_lookup(
     model: Arc<Mutex<crate::models::Gemma4Model>>,
     drafter: Arc<Mutex<crate::models::gemma4::Gemma4AssistantModel>>,
     mtp_draft_tokens: usize,
+    prompt_lookup: PromptLookupConfig,
+    qualification: PromptLookupQualificationRuntimeConfig,
     b_max: usize,
     admission_deadline: Duration,
     admission_queue_max: usize,
@@ -1415,10 +3140,16 @@ pub fn spawn_scheduler_actor_with_gemma4_drafter_and_active_kv(
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     active_kv_offload: ActiveKvOffloadConfig,
-) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError> {
-    spawn_scheduler_actor_with_mode(
+) -> Result<SchedulerActorHandle> {
+    let mode = SchedulerActorGemma4PromptLookupHybrid::new(
+        drafter,
+        mtp_draft_tokens,
+        prompt_lookup,
+        qualification,
+    )?;
+    Ok(spawn_scheduler_actor_with_mode(
         model,
-        SchedulerActorGemma4Drafter::new(drafter, mtp_draft_tokens),
+        mode,
         b_max,
         admission_deadline,
         admission_queue_max,
@@ -1429,7 +3160,44 @@ pub fn spawn_scheduler_actor_with_gemma4_drafter_and_active_kv(
         prefix_lru_cache,
         AdaptiveAdmissionPolicy::gemma4_drafter(),
         active_kv_offload,
-    )
+    )?)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_scheduler_actor_with_gemma4_drafter_and_active_kv(
+    model: Arc<Mutex<crate::models::Gemma4Model>>,
+    drafter: Arc<Mutex<crate::models::gemma4::Gemma4AssistantModel>>,
+    mtp_draft_tokens: usize,
+    exact_qualification: NeuralExactQualificationRuntimeConfig,
+    b_max: usize,
+    admission_deadline: Duration,
+    admission_queue_max: usize,
+    effective_cap_max: usize,
+    decode_cadence_mid_chunk_cap: usize,
+    meta: crate::core::memory_budget::ModelMeta,
+    paged_prefix_cache: Option<PagedPrefixCacheConfig>,
+    prefix_lru_cache: Option<PrefixLruCacheConfig>,
+    active_kv_offload: ActiveKvOffloadConfig,
+) -> Result<SchedulerActorHandle> {
+    let mode = SchedulerActorGemma4Drafter::new_with_exact_qualification(
+        drafter,
+        mtp_draft_tokens,
+        exact_qualification,
+    )?;
+    Ok(spawn_scheduler_actor_with_mode(
+        model,
+        mode,
+        b_max,
+        admission_deadline,
+        admission_queue_max,
+        effective_cap_max,
+        decode_cadence_mid_chunk_cap,
+        meta,
+        paged_prefix_cache,
+        prefix_lru_cache,
+        AdaptiveAdmissionPolicy::gemma4_drafter(),
+        active_kv_offload,
+    )?)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1526,6 +3294,7 @@ where
     let kv_cache_budget_policy = budget_state.policy().name();
 
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
+    let (control_tx, control_rx) = mpsc::channel(8);
     let admit_count = Arc::new(AtomicU64::new(0));
     let batch_count = Arc::new(AtomicU64::new(0));
     let saturate_triggered = Arc::new(AtomicU64::new(0));
@@ -1537,6 +3306,10 @@ where
     let mtp_drafted_tokens = Arc::new(AtomicU64::new(0));
     let mtp_accepted_draft_tokens = Arc::new(AtomicU64::new(0));
     let mtp_windows = Arc::new(AtomicU64::new(0));
+    let mtp_exact_sampling_windows = Arc::new(AtomicU64::new(0));
+    let mtp_exact_acceptance_draws = Arc::new(AtomicU64::new(0));
+    let mtp_exact_residual_corrections = Arc::new(AtomicU64::new(0));
+    let mtp_exact_bonus_samples = Arc::new(AtomicU64::new(0));
     let mtp_draft_forward_us = Arc::new(AtomicU64::new(0));
     let mtp_verify_forward_us = Arc::new(AtomicU64::new(0));
     let mtp_projection_us = Arc::new(AtomicU64::new(0));
@@ -1550,6 +3323,9 @@ where
     let mtp_prefill_cache_commit_us = Arc::new(AtomicU64::new(0));
     let mtp_decode_cache_commit_us = Arc::new(AtomicU64::new(0));
     let mtp_cache_restore_us = Arc::new(AtomicU64::new(0));
+    let prompt_lookup_published_stats = Arc::new(StdMutex::new(None));
+    let neural_exact_qualification_stats =
+        Arc::new(StdMutex::new(NeuralExactQualificationStats::default()));
     // B1-p2.5 G3: live b_active / b_queued updated by driver_loop tail.
     let b_active = Arc::new(AtomicU64::new(0));
     let b_queued = Arc::new(AtomicU64::new(0));
@@ -1571,6 +3347,10 @@ where
         mtp_drafted_tokens.clone(),
         mtp_accepted_draft_tokens.clone(),
         mtp_windows.clone(),
+        mtp_exact_sampling_windows.clone(),
+        mtp_exact_acceptance_draws.clone(),
+        mtp_exact_residual_corrections.clone(),
+        mtp_exact_bonus_samples.clone(),
         mtp_draft_forward_us.clone(),
         mtp_verify_forward_us.clone(),
         mtp_projection_us.clone(),
@@ -1584,6 +3364,8 @@ where
         mtp_prefill_cache_commit_us.clone(),
         mtp_decode_cache_commit_us.clone(),
         mtp_cache_restore_us.clone(),
+        prompt_lookup_published_stats.clone(),
+        neural_exact_qualification_stats.clone(),
     );
     let b_active_for_task = b_active.clone();
     let b_queued_for_task = b_queued.clone();
@@ -1636,6 +3418,7 @@ where
             admission_deadline,
             admission_queue_max,
             cmd_rx,
+            control_rx,
             admit_count_for_task,
             batch_count_for_task,
             saturate_triggered_for_task,
@@ -1650,6 +3433,7 @@ where
 
     Ok(SchedulerActorHandle {
         cmd_tx,
+        control_tx,
         cold_materialization_tracker,
         admit_count,
         batch_count,
@@ -1662,6 +3446,10 @@ where
         mtp_drafted_tokens,
         mtp_accepted_draft_tokens,
         mtp_windows,
+        mtp_exact_sampling_windows,
+        mtp_exact_acceptance_draws,
+        mtp_exact_residual_corrections,
+        mtp_exact_bonus_samples,
         mtp_draft_forward_us,
         mtp_verify_forward_us,
         mtp_projection_us,
@@ -1675,6 +3463,8 @@ where
         mtp_prefill_cache_commit_us,
         mtp_decode_cache_commit_us,
         mtp_cache_restore_us,
+        prompt_lookup_published_stats,
+        neural_exact_qualification_stats,
         b_active,
         b_queued,
         // P1.1: alias admission_queue_full_count to queue_rejected Arc —
@@ -1702,6 +3492,7 @@ fn driver_loop<M, A>(
     admission_deadline: Duration,
     admission_queue_max: usize,
     mut cmd_rx: mpsc::Receiver<SchedulerCommand>,
+    mut control_rx: mpsc::Receiver<SchedulerControlCommand>,
     admit_count: Arc<AtomicU64>,
     batch_count: Arc<AtomicU64>,
     saturate_triggered: Arc<AtomicU64>,
@@ -1727,6 +3518,7 @@ fn driver_loop<M, A>(
     let rt = tokio::runtime::Handle::current();
 
     'outer: loop {
+        process_scheduler_control_commands(&mut sched, &mut control_rx, &mtp_counters);
         // Defensive: ensure scheduler is in Phase::Idle before
         // blocking on next admit. Most error paths already call evict_all,
         // but this guards any future code path that leaves phase=Finished.
@@ -1753,6 +3545,11 @@ fn driver_loop<M, A>(
             }
         }
 
+        // Every ContinueOuter path may follow an error recovery that evicted
+        // the live batch. Publish the recovered depth before blocking for the
+        // next admit so health never retains a stale non-zero active count.
+        publish_scheduler_depth(&sched, admission_queue.len(), &b_active, &b_queued);
+
         // ===== Outer Idle: block waiting for first admit (or shutdown). =====
         // Outer Idle is reached only after evict_all clears all slots; the
         // admission queue is invariantly empty here (any queue elements were
@@ -1774,6 +3571,7 @@ fn driver_loop<M, A>(
                     return;
                 }
                 Err(_) => {
+                    process_scheduler_control_commands(&mut sched, &mut control_rx, &mtp_counters);
                     match sched.apply_process_memory_pressure() {
                         Ok(reclaim)
                             if reclaim.level
@@ -1832,6 +3630,7 @@ fn driver_loop<M, A>(
             &mut event_txs,
             &mut in_flight_mid_admit,
         );
+        mtp_counters.store_prompt_lookup_stats(sched.prompt_lookup_stats());
         b_active.store(sched.active_count() as u64, Ordering::Relaxed);
         b_queued.store(admission_queue.len() as u64, Ordering::Relaxed);
         if sched.active_count() == 0 {
@@ -1883,7 +3682,7 @@ fn driver_loop<M, A>(
                          {evict_err:?}; relying on 3b-1 poison flag to reject subsequent admits"
                     );
                 }
-                mtp_counters.reset_stats_baseline();
+                mtp_counters.reset_stats_baseline(sched.prompt_lookup_stats());
                 cleanup_parked_active_kv_requests(
                     &sched,
                     &mut parked_active_kv,
@@ -1908,6 +3707,7 @@ fn driver_loop<M, A>(
         let mut admission_policy = RollingAdmissionPolicy::default();
         admission_policy.record_admission_work();
         'rolling: loop {
+            process_scheduler_control_commands(&mut sched, &mut control_rx, &mtp_counters);
             prune_abandoned_pending_admits(&mut admission_queue);
             evict_abandoned_active_requests::<M, A>(
                 &mut sched,
@@ -2023,7 +3823,9 @@ fn driver_loop<M, A>(
                     return;
                 }
                 RollingEvent::Admit(cmd) => {
-                    if !mtp_mode.allow_rolling_mid_admit() {
+                    if !mtp_mode.allow_rolling_mid_admit()
+                        || !mtp_mode.can_start_rolling_mid_admit(&sched)
+                    {
                         enqueue_or_reject(
                             cmd,
                             &mut admission_queue,
@@ -2152,7 +3954,12 @@ fn driver_loop<M, A>(
                     });
                     let step_result = {
                         let model_lock = model.blocking_lock();
-                        mtp_mode.step(&mut sched, &model_lock, &mtp_counters)
+                        mtp_mode.step(
+                            &mut sched,
+                            &model_lock,
+                            &mtp_counters,
+                            in_flight_mid_admit.is_some() || !admission_queue.is_empty(),
+                        )
                     };
                     let step_end = step_profile.map(|_| Instant::now());
                     match step_result {
@@ -2170,7 +3977,7 @@ fn driver_loop<M, A>(
                                             "[SchedulerActor] evict_all after request-owned KV release failure also failed: {evict_err:?}"
                                         );
                                     }
-                                    mtp_counters.reset_stats_baseline();
+                                    mtp_counters.reset_stats_baseline(sched.prompt_lookup_stats());
                                     in_flight_mid_admit = None;
                                     cleanup_parked_active_kv_requests(
                                         &sched,
@@ -2185,9 +3992,12 @@ fn driver_loop<M, A>(
                                             "scheduler poisoned after request-owned KV release failure"
                                         )));
                                     }
+                                    b_active.store(sched.active_count() as u64, Ordering::Relaxed);
+                                    b_queued.store(admission_queue.len() as u64, Ordering::Relaxed);
                                     continue 'outer;
                                 }
                             };
+                            mtp_counters.store_prompt_lookup_stats(sched.prompt_lookup_stats());
                             if let (
                                 Some((
                                     step_active_before,
@@ -2217,6 +4027,7 @@ fn driver_loop<M, A>(
                             // requests wait for the next decode turn so
                             // active streams keep making progress.
                             if mtp_mode.allow_rolling_mid_admit()
+                                && mtp_mode.can_start_rolling_mid_admit(&sched)
                                 && in_flight_mid_admit.is_none()
                                 && !admission_queue.is_empty()
                                 && sched.active_count() >= b_max
@@ -2228,7 +4039,10 @@ fn driver_loop<M, A>(
                                     &active_kv_stats,
                                 );
                             }
-                            if mtp_mode.allow_rolling_mid_admit() && in_flight_mid_admit.is_none() {
+                            if mtp_mode.allow_rolling_mid_admit()
+                                && mtp_mode.can_start_rolling_mid_admit(&sched)
+                                && in_flight_mid_admit.is_none()
+                            {
                                 let decode_steps = drain_admission_queue(
                                     &mut admission_queue,
                                     &mut in_flight_mid_admit,
@@ -2276,7 +4090,7 @@ fn driver_loop<M, A>(
                                      {evict_err:?}; relying on 3b-1 poison flag to reject subsequent admits"
                                 );
                             }
-                            mtp_counters.reset_stats_baseline();
+                            mtp_counters.reset_stats_baseline(sched.prompt_lookup_stats());
                             in_flight_mid_admit = None;
                             cleanup_parked_active_kv_requests(
                                 &sched,
@@ -2291,6 +4105,8 @@ fn driver_loop<M, A>(
                                     "scheduler poisoned after step error"
                                 )));
                             }
+                            b_active.store(sched.active_count() as u64, Ordering::Relaxed);
+                            b_queued.store(admission_queue.len() as u64, Ordering::Relaxed);
                             continue 'outer;
                         }
                     }
@@ -2358,7 +4174,7 @@ fn driver_loop<M, A>(
                      relying on 3b-1 poison flag to reject subsequent admits"
                 );
             }
-            mtp_counters.reset_stats_baseline();
+            mtp_counters.reset_stats_baseline(sched.prompt_lookup_stats());
         }
         immutable_prefix_stats.store(sched.request_owned_kv_stats().immutable_prefix);
         in_flight_mid_admit = None;
@@ -2371,6 +4187,36 @@ fn driver_loop<M, A>(
         );
         event_txs.clear();
     }
+}
+
+fn process_scheduler_control_commands<M>(
+    sched: &mut Scheduler<M>,
+    control_rx: &mut mpsc::Receiver<SchedulerControlCommand>,
+    counters: &SchedulerActorMtpCounters,
+) where
+    M: Model + DenseVlMethods,
+{
+    while let Ok(command) = control_rx.try_recv() {
+        match command {
+            SchedulerControlCommand::ClearSharedPromptLookup { reply_tx } => {
+                let cleared = sched.clear_shared_prompt_lookup();
+                counters.store_prompt_lookup_stats(sched.prompt_lookup_stats());
+                let _ = reply_tx.send(cleared);
+            }
+        }
+    }
+}
+
+fn publish_scheduler_depth<M>(
+    sched: &Scheduler<M>,
+    queued: usize,
+    b_active: &AtomicU64,
+    b_queued: &AtomicU64,
+) where
+    M: Model,
+{
+    b_active.store(sched.active_count() as u64, Ordering::Relaxed);
+    b_queued.store(queued as u64, Ordering::Relaxed);
 }
 
 /// Drain additional `Admit` commands until either the deadline expires or the
@@ -3193,7 +5039,7 @@ fn finalize_finished_batch_if_any<M: Model>(
     let evicted_ids: Vec<RequestId> = sched.active().into_iter().map(|state| state.id).collect();
     match sched.evict_all() {
         Ok(()) => {
-            mtp_counters.reset_stats_baseline();
+            mtp_counters.reset_stats_baseline(sched.prompt_lookup_stats());
             for id in evicted_ids {
                 event_txs.remove(&id);
             }
@@ -3312,7 +5158,7 @@ where
                 event_txs.clear();
                 return RollingControl::ContinueOuter;
             }
-            mtp_counters.reset_stats_baseline();
+            mtp_counters.reset_stats_baseline(sched.prompt_lookup_stats());
             // Preserve parked Active KV request event channels. At this point
             // active_count is zero; stale finished-batch channels were already
             // removed by gc/finalize paths.
@@ -3415,7 +5261,7 @@ where
                          {evict_err:?}; rejecting remaining queued admits"
                     );
                 }
-                mtp_counters.reset_stats_baseline();
+                mtp_counters.reset_stats_baseline(sched.prompt_lookup_stats());
                 event_txs.clear();
                 while let Some(p) = admission_queue.pop_front() {
                     let _ = p.reply_tx.send(Err(anyhow::anyhow!(
@@ -3445,7 +5291,7 @@ where
                     event_txs.clear();
                     return RollingControl::ContinueOuter;
                 }
-                mtp_counters.reset_stats_baseline();
+                mtp_counters.reset_stats_baseline(sched.prompt_lookup_stats());
                 // Preserve parked Active KV request event channels. At this
                 // point active_count is zero; stale finished-batch channels
                 // were already removed by gc/finalize paths.
@@ -3491,7 +5337,7 @@ where
                              {evict_err:?}; relying on 3b-1 poison flag to reject subsequent admits"
                         );
                     }
-                    mtp_counters.reset_stats_baseline();
+                    mtp_counters.reset_stats_baseline(sched.prompt_lookup_stats());
                     event_txs.clear();
                     return RollingControl::ContinueOuter;
                 }
@@ -3634,6 +5480,16 @@ mod tests {
                 .map_err(|e| anyhow::anyhow!("fake hidden Array failed: {e:?}"))
         }
 
+        fn project_hidden_on(
+            &self,
+            hidden: &mlx::Array,
+            _target: mlx::StreamOrDevice,
+        ) -> Result<mlx::Array> {
+            let seq = hidden.shape().as_slice()[1] as usize;
+            let tokens: Vec<u32> = if seq == 1 { vec![3] } else { vec![4; seq] };
+            fake_logits_for_tokens(&tokens)
+        }
+
         fn fresh_prefill_batch_limit(_prompt_len: usize, b_max: usize) -> usize
         where
             Self: Sized,
@@ -3647,6 +5503,15 @@ mod tests {
 
         fn num_hidden_layers(&self) -> usize {
             0
+        }
+
+        fn supports_exact_batched_speculative_verify(
+            &self,
+            _batch_width: usize,
+            _context_tokens: usize,
+            _verify_width: usize,
+        ) -> bool {
+            true
         }
     }
 
@@ -3746,16 +5611,6 @@ mod tests {
             dtype: mlx::Dtype,
         ) -> Result<MtpCache> {
             MtpCache::new_with_cap(1, batch, 1, 1, 1, dtype, cap)
-        }
-
-        fn project_hidden_on(
-            &self,
-            hidden: &mlx::Array,
-            _target: impl Into<mlx::StreamOrDevice>,
-        ) -> Result<mlx::Array> {
-            let seq = hidden.shape().as_slice()[1] as usize;
-            let tokens: Vec<u32> = if seq == 1 { vec![3] } else { vec![4; seq] };
-            fake_logits_for_tokens(&tokens)
         }
 
         fn mtp_hidden_size(&self, _mtp: &Self::MtpHead) -> i32 {
@@ -3878,26 +5733,33 @@ mod tests {
     }
 
     fn test_mtp_counters() -> SchedulerActorMtpCounters {
+        let counter = || Arc::new(AtomicU64::new(0));
         SchedulerActorMtpCounters::new(
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
+            counter(),
+            counter(),
+            counter(),
+            counter(),
+            counter(),
+            counter(),
+            counter(),
+            counter(),
+            counter(),
+            counter(),
+            counter(),
+            counter(),
+            counter(),
+            counter(),
+            counter(),
+            counter(),
+            counter(),
+            counter(),
+            counter(),
+            counter(),
+            counter(),
+            counter(),
+            counter(),
+            Arc::new(StdMutex::new(None)),
+            Arc::new(StdMutex::new(NeuralExactQualificationStats::default())),
         )
     }
 
@@ -3913,11 +5775,17 @@ mod tests {
     async fn spawn_mtp_actor_accepts_paged_prefix_cache_config() {
         let root = unique_temp_dir("actor-mtp-prefix");
         let config = PagedPrefixCacheConfig::new(&root, "fake-qwen", 16, 8).expect("prefix config");
+        let qualification = NeuralExactQualificationRuntimeConfig::for_test(
+            NeuralExactSource::QwenMtp,
+            "fake-qwen",
+            root.join("qualification.json"),
+        );
         let model = Arc::new(Mutex::new(SchedulerActorFakeModel));
         let handle = spawn_scheduler_actor_with_mtp(
             model,
             SchedulerActorFakeMtpHead,
             1,
+            qualification,
             2,
             Duration::from_millis(1),
             1,
@@ -4208,7 +6076,7 @@ mod tests {
         assert!(scheduler.mtp_stats().is_some());
 
         let step_events = mode
-            .step(&mut scheduler, &SchedulerActorFakeModel, &counters)
+            .step(&mut scheduler, &SchedulerActorFakeModel, &counters, false)
             .expect("mtp step");
         assert_eq!(step_events.len(), 1);
         assert_eq!(counters.mtp_step_count.load(Ordering::Relaxed), 1);
@@ -4222,6 +6090,307 @@ mod tests {
             accepted <= drafted,
             "accepted draft tokens cannot exceed drafted tokens"
         );
+    }
+
+    #[test]
+    fn prompt_lookup_admission_pressure_only_blocks_new_windows() {
+        assert!(prompt_lookup_admission_forces_ordinary(false, true));
+        assert!(!prompt_lookup_admission_forces_ordinary(true, true));
+        assert!(!prompt_lookup_admission_forces_ordinary(false, false));
+    }
+
+    #[test]
+    fn qwen_hybrid_routes_certified_lookup_to_canonical_target() {
+        let base = PromptLookupQualificationRegime::new(2, 1024, Sampler::greedy());
+        assert!(qwen_hybrid_uses_canonical_target(
+            HybridDraftSource::PromptLookup,
+            Some(base.with_proposal(PromptLookupProposalSource::Shared, 3)),
+        ));
+        assert!(qwen_hybrid_uses_canonical_target(
+            HybridDraftSource::PromptLookup,
+            Some(base.with_proposal(PromptLookupProposalSource::Local, 3)),
+        ));
+        assert!(!qwen_hybrid_uses_canonical_target(
+            HybridDraftSource::Neural,
+            Some(base.with_proposal(PromptLookupProposalSource::Shared, 3)),
+        ));
+        assert!(!qwen_hybrid_uses_canonical_target(
+            HybridDraftSource::PromptLookup,
+            Some(base.with_proposal(PromptLookupProposalSource::Mixed, 3)),
+        ));
+    }
+
+    #[test]
+    fn prompt_lookup_query_hint_is_bound_to_base_regime_and_request_owners() {
+        let base = PromptLookupQualificationRegime::new(2, 1024, Sampler::greedy());
+        let scope = PromptLookupQueryScope {
+            base_regime: base,
+            owners: vec![RequestId(11), RequestId(12)],
+            draft_limits: PromptLookupDraftLimits::uniform(4),
+        };
+        let proposal_regime = base.with_proposal(PromptLookupProposalSource::Shared, 4);
+        let hint = PromptLookupQueryHint {
+            scope: scope.clone(),
+            proposal_regime,
+        };
+
+        assert_eq!(hint.proposal_regime_for(&scope), Some(proposal_regime));
+        assert_eq!(
+            hint.proposal_regime_for(&PromptLookupQueryScope {
+                base_regime: PromptLookupQualificationRegime::new(2, 8193, Sampler::greedy()),
+                owners: scope.owners.clone(),
+                draft_limits: scope.draft_limits,
+            }),
+            None
+        );
+        assert_eq!(
+            hint.proposal_regime_for(&PromptLookupQueryScope {
+                base_regime: base,
+                owners: vec![RequestId(11), RequestId(13)],
+                draft_limits: scope.draft_limits,
+            }),
+            None
+        );
+        assert_eq!(
+            hint.proposal_regime_for(&PromptLookupQueryScope {
+                base_regime: base,
+                owners: scope.owners.clone(),
+                draft_limits: PromptLookupDraftLimits::new(3, 4),
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn prompt_lookup_miss_query_hint_uses_bounded_progress_and_invalidates_identity() {
+        let base = PromptLookupQualificationRegime::new(2, 1024, Sampler::greedy());
+        let scope = PromptLookupMissQueryScope {
+            base_regime: base,
+            request_progress: vec![(RequestId(11), 100), (RequestId(12), 200)],
+            allow_cross_request: true,
+            shared_availability_epoch: Some(3),
+        };
+        let first = PromptLookupMissQueryHint::after_miss(scope.clone(), None);
+        assert_eq!(first.reprobe_after_tokens, 2);
+
+        let mut progressed = scope.clone();
+        progressed.request_progress[0].1 += 1;
+        assert!(first.should_skip(&progressed));
+        progressed.request_progress[0].1 += 1;
+        assert!(!first.should_skip(&progressed));
+
+        let second = PromptLookupMissQueryHint::after_miss(progressed.clone(), Some(&first));
+        assert_eq!(second.reprobe_after_tokens, 4);
+        progressed.request_progress[1].1 += 3;
+        assert!(second.should_skip(&progressed));
+        progressed.request_progress[1].1 += 1;
+        assert!(!second.should_skip(&progressed));
+
+        let third = PromptLookupMissQueryHint::after_miss(progressed.clone(), Some(&second));
+        assert_eq!(third.reprobe_after_tokens, 8);
+        let capped = PromptLookupMissQueryHint::after_miss(progressed.clone(), Some(&third));
+        assert_eq!(capped.reprobe_after_tokens, 8);
+
+        let mut changed_epoch = progressed.clone();
+        changed_epoch.shared_availability_epoch = Some(4);
+        assert!(!capped.identity_matches(&changed_epoch));
+        assert!(!capped.should_skip(&changed_epoch));
+
+        let mut changed_owner = progressed;
+        changed_owner.request_progress[1].0 = RequestId(13);
+        assert!(!capped.identity_matches(&changed_owner));
+        assert!(!capped.should_skip(&changed_owner));
+    }
+
+    #[test]
+    fn prompt_lookup_miss_query_gate_skips_repeated_actor_query() {
+        let profile_path = std::env::temp_dir().join(format!(
+            "ironmlx-miss-query-gate-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        let qualification = PromptLookupQualificationRuntimeConfig::for_test(
+            "miss-query-gate",
+            profile_path.clone(),
+        );
+        let cfg = PromptLookupConfig {
+            min_ngram: 2,
+            max_ngram: 3,
+            max_draft_tokens: 3,
+            history_window_tokens: 64,
+            max_index_entries: 128,
+            cross_request: false,
+        };
+        let mut mode = SchedulerActorPromptLookup::new(cfg, qualification).expect("lookup mode");
+        let mut scheduler = Scheduler::<SchedulerActorFakeModel>::new(
+            1,
+            32,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler");
+        let mut request = mk_req(1);
+        request.prompt_ids = vec![1, 2, 4, 5, 6];
+        scheduler.admit(request).expect("admit");
+        let counters = test_mtp_counters();
+        mode.prefill_admitted(&mut scheduler, &SchedulerActorFakeModel, &counters)
+            .expect("prefill");
+
+        let first = mode
+            .select_prepared_window(
+                &mut scheduler,
+                &SchedulerActorFakeModel,
+                false,
+                false,
+                false,
+                false,
+            )
+            .expect("first miss");
+        assert_eq!(first.action, PromptLookupCostAction::Ordinary);
+        assert!(first.fallback_to_baseline);
+        let queries_after_first = scheduler
+            .prompt_lookup_stats()
+            .expect("lookup stats")
+            .queries;
+        assert_eq!(queries_after_first, 1);
+
+        let second = mode
+            .select_prepared_window(
+                &mut scheduler,
+                &SchedulerActorFakeModel,
+                false,
+                false,
+                false,
+                false,
+            )
+            .expect("gated miss");
+        assert_eq!(second.action, PromptLookupCostAction::Ordinary);
+        assert!(second.fallback_to_baseline);
+        assert_eq!(
+            scheduler
+                .prompt_lookup_stats()
+                .expect("lookup stats")
+                .queries,
+            queries_after_first
+        );
+        assert_eq!(mode.cost_controller.stats().miss_query_gate_skips, 1);
+        assert_eq!(mode.cost_controller.stats().miss_query_reprobes, 0);
+
+        drop(mode);
+        std::fs::remove_file(profile_path).ok();
+    }
+
+    #[test]
+    fn prompt_lookup_query_gate_skips_repeated_baseline_proposal_search() {
+        let profile_path = std::env::temp_dir().join(format!(
+            "ironmlx-query-gate-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        let qualification =
+            PromptLookupQualificationRuntimeConfig::for_test("query-gate", profile_path.clone());
+        let cfg = PromptLookupConfig {
+            min_ngram: 2,
+            max_ngram: 3,
+            max_draft_tokens: 3,
+            history_window_tokens: 64,
+            max_index_entries: 128,
+            cross_request: false,
+        };
+        let mut mode = SchedulerActorPromptLookup::new(cfg, qualification).expect("lookup mode");
+        let mut scheduler = Scheduler::<SchedulerActorFakeModel>::new(
+            1,
+            32,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler");
+        let mut request = mk_req(1);
+        request.prompt_ids = vec![1, 2, 3, 4, 1, 2];
+        scheduler.admit(request).expect("admit");
+        let counters = test_mtp_counters();
+        mode.prefill_admitted(&mut scheduler, &SchedulerActorFakeModel, &counters)
+            .expect("prefill");
+
+        let first = mode
+            .select_prepared_window(
+                &mut scheduler,
+                &SchedulerActorFakeModel,
+                false,
+                false,
+                false,
+                false,
+            )
+            .expect("first proposal");
+        assert_eq!(first.action, PromptLookupCostAction::Ordinary);
+        assert!(first.regime.is_some_and(|regime| {
+            regime.proposal_source == Some(PromptLookupProposalSource::Local)
+        }));
+        let queries_after_first = scheduler
+            .prompt_lookup_stats()
+            .expect("lookup stats")
+            .queries;
+        assert_eq!(queries_after_first, 1);
+
+        let second = mode
+            .select_prepared_window(
+                &mut scheduler,
+                &SchedulerActorFakeModel,
+                false,
+                false,
+                false,
+                false,
+            )
+            .expect("gated proposal");
+        assert_eq!(second.action, PromptLookupCostAction::Ordinary);
+        assert_eq!(
+            scheduler
+                .prompt_lookup_stats()
+                .expect("lookup stats")
+                .queries,
+            queries_after_first
+        );
+        assert_eq!(mode.cost_controller.stats().query_gate_skips, 1);
+
+        let regime = first.regime.expect("proposal regime");
+        for _ in 0..8 {
+            mode.cost_controller.record_sample(
+                regime,
+                PromptLookupCostAction::Ordinary,
+                100_000,
+                1,
+                PromptLookupStats::default(),
+            );
+        }
+        assert_eq!(
+            mode.cost_controller.next_action(regime),
+            PromptLookupCostAction::Lookup
+        );
+
+        let probe = mode
+            .select_prepared_window(
+                &mut scheduler,
+                &SchedulerActorFakeModel,
+                false,
+                false,
+                false,
+                false,
+            )
+            .expect("probe proposal");
+        assert_eq!(probe.action, PromptLookupCostAction::Lookup);
+        assert_eq!(
+            scheduler
+                .prompt_lookup_stats()
+                .expect("lookup stats")
+                .queries,
+            queries_after_first + 1
+        );
+        drop(mode);
+        std::fs::remove_file(profile_path).ok();
     }
 
     #[test]
@@ -4283,7 +6452,7 @@ mod tests {
         );
         assert_eq!(counters.mtp_cache_restore_us.load(Ordering::Relaxed), 75);
 
-        counters.reset_stats_baseline();
+        counters.reset_stats_baseline(None);
         let next_batch = MtpSpeculativeStats {
             windows: 1,
             drafted_tokens: 3,
@@ -4325,6 +6494,214 @@ mod tests {
     }
 
     #[test]
+    fn prompt_lookup_counters_publish_cumulative_batches_and_live_index_state() {
+        let counters = test_mtp_counters();
+        counters.store_prompt_lookup_stats(Some(PromptLookupStats {
+            queries: 3,
+            hits: 2,
+            misses: 1,
+            drafted_tokens: 7,
+            accepted_tokens: 5,
+            rejected_tokens: 2,
+            index_entries_current: 11,
+            index_entries_peak: 13,
+            index_ledger_entries_current: 20,
+            index_ledger_entries_peak: 25,
+            index_estimated_bytes_current: 1_000,
+            index_estimated_bytes_peak: 1_200,
+            ..PromptLookupStats::default()
+        }));
+        counters.store_prompt_lookup_stats(Some(PromptLookupStats {
+            queries: 5,
+            hits: 3,
+            misses: 2,
+            drafted_tokens: 10,
+            accepted_tokens: 8,
+            rejected_tokens: 2,
+            index_entries_current: 0,
+            index_entries_peak: 17,
+            index_ledger_entries_current: 0,
+            index_ledger_entries_peak: 30,
+            index_estimated_bytes_current: 0,
+            index_estimated_bytes_peak: 2_000,
+            ..PromptLookupStats::default()
+        }));
+        counters.store_prompt_lookup_stats_with_qualification(
+            None,
+            PromptLookupQualificationStats {
+                ordinary_cost_samples: 8,
+                lookup_cost_samples: 9,
+                ordinary_cost_us: 10,
+                lookup_cost_us: 11,
+                qualified_regimes_current: 1,
+                rejected_regimes_current: 2,
+                qualification_changes: 3,
+                profile_loads: 1,
+                profile_writes: 4,
+                profile_write_drops: 1,
+                query_gate_skips: 5,
+                miss_query_gate_skips: 6,
+                miss_query_reprobes: 7,
+                ..PromptLookupQualificationStats::default()
+            },
+        );
+        counters.reset_stats_baseline(None);
+        counters.store_prompt_lookup_stats_with_qualification(
+            Some(PromptLookupStats {
+                queries: 4,
+                hits: 1,
+                misses: 3,
+                drafted_tokens: 6,
+                accepted_tokens: 2,
+                rejected_tokens: 4,
+                index_entries_current: 9,
+                index_entries_peak: 12,
+                index_ledger_entries_current: 18,
+                index_ledger_entries_peak: 22,
+                index_estimated_bytes_current: 900,
+                index_estimated_bytes_peak: 1_100,
+                ..PromptLookupStats::default()
+            }),
+            PromptLookupQualificationStats {
+                ordinary_cost_samples: 8,
+                lookup_cost_samples: 9,
+                ordinary_cost_us: 10,
+                lookup_cost_us: 11,
+                qualified_regimes_current: 1,
+                rejected_regimes_current: 2,
+                qualification_changes: 3,
+                profile_loads: 1,
+                profile_writes: 4,
+                profile_write_drops: 1,
+                query_gate_skips: 5,
+                miss_query_gate_skips: 6,
+                miss_query_reprobes: 7,
+                ..PromptLookupQualificationStats::default()
+            },
+        );
+
+        let stats = counters
+            .prompt_lookup_published_stats
+            .lock()
+            .expect("PromptLookup published stats")
+            .expect("PromptLookup stats were published");
+        assert_eq!(stats.queries, 9);
+        assert_eq!(stats.hits, 4);
+        assert_eq!(stats.misses, 5);
+        assert_eq!(stats.drafted_tokens, 16);
+        assert_eq!(stats.accepted_tokens, 10);
+        assert_eq!(stats.rejected_tokens, 6);
+        assert_eq!(stats.index_entries_current, 9);
+        assert_eq!(stats.index_entries_peak, 17);
+        assert_eq!(stats.index_ledger_entries_current, 18);
+        assert_eq!(stats.index_ledger_entries_peak, 30);
+        assert_eq!(stats.index_estimated_bytes_current, 900);
+        assert_eq!(stats.index_estimated_bytes_peak, 2_000);
+        assert_eq!(stats.ordinary_cost_samples, 8);
+        assert_eq!(stats.lookup_cost_samples, 9);
+        assert_eq!(stats.qualified_regimes_current, 1);
+        assert_eq!(stats.rejected_regimes_current, 2);
+        assert_eq!(stats.qualification_profile_writes, 4);
+        assert_eq!(stats.qualification_query_gate_skips, 5);
+        assert_eq!(stats.miss_query_gate_skips, 6);
+        assert_eq!(stats.miss_query_reprobes, 7);
+
+        counters.reset_stats_baseline(None);
+        let stats = counters
+            .prompt_lookup_published_stats
+            .lock()
+            .expect("PromptLookup published stats")
+            .expect("PromptLookup stats remain cumulative while idle");
+        assert_eq!(stats.queries, 9);
+        assert_eq!(stats.index_entries_current, 0);
+        assert_eq!(stats.index_entries_peak, 17);
+        assert_eq!(stats.index_ledger_entries_current, 0);
+        assert_eq!(stats.index_ledger_entries_peak, 30);
+        assert_eq!(stats.index_estimated_bytes_current, 0);
+        assert_eq!(stats.index_estimated_bytes_peak, 2_000);
+    }
+
+    #[test]
+    fn prompt_lookup_counters_preserve_shared_pool_baseline_across_batches() {
+        let counters = test_mtp_counters();
+        let first = PromptLookupStats {
+            shared_queries: 2,
+            shared_hits: 1,
+            shared_misses: 1,
+            shared_published_requests: 1,
+            shared_entries_current: 10,
+            shared_entries_peak: 10,
+            ..PromptLookupStats::default()
+        };
+        counters.store_prompt_lookup_stats(Some(first));
+        counters.reset_stats_baseline(Some(first));
+
+        counters.store_prompt_lookup_stats(Some(PromptLookupStats {
+            shared_queries: 5,
+            shared_hits: 3,
+            shared_misses: 2,
+            shared_published_requests: 2,
+            shared_entries_current: 12,
+            shared_entries_peak: 12,
+            ..PromptLookupStats::default()
+        }));
+
+        let stats = counters
+            .prompt_lookup_published_stats
+            .lock()
+            .expect("PromptLookup published stats")
+            .expect("PromptLookup stats were published");
+        assert_eq!(stats.shared_queries, 5);
+        assert_eq!(stats.shared_hits, 3);
+        assert_eq!(stats.shared_misses, 2);
+        assert_eq!(stats.shared_published_requests, 2);
+        assert_eq!(stats.shared_entries_current, 12);
+        assert_eq!(stats.shared_entries_peak, 12);
+    }
+
+    #[test]
+    fn prompt_lookup_scheduler_stats_do_not_clear_qualification_gauges() {
+        let counters = test_mtp_counters();
+        counters.store_prompt_lookup_stats_with_qualification(
+            Some(PromptLookupStats::default()),
+            PromptLookupQualificationStats {
+                qualified_regimes_current: 1,
+                rejected_regimes_current: 2,
+                ..PromptLookupQualificationStats::default()
+            },
+        );
+
+        counters.store_prompt_lookup_stats(Some(PromptLookupStats::default()));
+
+        let stats = counters
+            .prompt_lookup_published_stats
+            .lock()
+            .expect("PromptLookup published stats")
+            .expect("PromptLookup stats were published");
+        assert_eq!(stats.qualified_regimes_current, 1);
+        assert_eq!(stats.rejected_regimes_current, 2);
+    }
+
+    #[test]
+    fn recovered_prefill_failure_publishes_idle_scheduler_depth() {
+        let mut scheduler = Scheduler::<SchedulerActorFakeModel>::new(
+            4,
+            32,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler");
+        scheduler.admit(mk_req(11)).expect("admit");
+        scheduler.evict_all().expect("recover failed prefill");
+
+        let b_active = AtomicU64::new(4);
+        let b_queued = AtomicU64::new(3);
+        publish_scheduler_depth(&scheduler, 0, &b_active, &b_queued);
+
+        assert_eq!(b_active.load(Ordering::Relaxed), 0);
+        assert_eq!(b_queued.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
     fn actor_mtp_mode_prefill_uses_mtp_for_eligible_vl_request() {
         let mut scheduler = Scheduler::<SchedulerActorFakeModel>::new(
             1,
@@ -4350,7 +6727,7 @@ mod tests {
     }
 
     #[test]
-    fn actor_mtp_mode_prefill_falls_back_for_non_greedy_request() {
+    fn actor_mtp_mode_prefill_uses_exact_mtp_for_sampled_b1_request() {
         let mut scheduler = Scheduler::<SchedulerActorFakeModel>::new(
             1,
             32,
@@ -4365,20 +6742,17 @@ mod tests {
 
         let prefill_events = mode
             .prefill_admitted(&mut scheduler, &SchedulerActorFakeModel, &counters)
-            .expect("ordinary prefill");
+            .expect("sampled exact MTP prefill");
 
         assert_eq!(prefill_events.len(), 1);
-        assert_eq!(counters.mtp_prefill_count.load(Ordering::Relaxed), 0);
+        assert_eq!(counters.mtp_prefill_count.load(Ordering::Relaxed), 1);
         assert_eq!(
             counters.mtp_prefill_fallback_count.load(Ordering::Relaxed),
-            1
-        );
-        assert_eq!(counters.mtp_drafted_tokens.load(Ordering::Relaxed), 0);
-        assert_eq!(
-            counters.mtp_accepted_draft_tokens.load(Ordering::Relaxed),
             0
         );
-        assert!(scheduler.mtp_stats().is_none());
+        assert!(counters.mtp_drafted_tokens.load(Ordering::Relaxed) > 0);
+        assert!(counters.mtp_exact_sampling_windows.load(Ordering::Relaxed) > 0);
+        assert!(scheduler.mtp_stats().is_some());
     }
 
     #[test]

@@ -28,6 +28,28 @@ pub(crate) struct SchedulerProfileRuntimeArgs {
     #[arg(long = "mtp-draft-tokens")]
     pub(crate) mtp_draft_tokens: Option<usize>,
 
+    /// Enable request-local greedy PromptLookup during calibration.
+    #[arg(long = "prompt-lookup", default_value_t = false)]
+    pub(crate) prompt_lookup: bool,
+
+    #[arg(long = "prompt-lookup-cross-request", default_value_t = false)]
+    pub(crate) prompt_lookup_cross_request: bool,
+
+    #[arg(long = "prompt-lookup-min-ngram")]
+    pub(crate) prompt_lookup_min_ngram: Option<usize>,
+
+    #[arg(long = "prompt-lookup-max-ngram")]
+    pub(crate) prompt_lookup_max_ngram: Option<usize>,
+
+    #[arg(long = "prompt-lookup-max-draft-tokens")]
+    pub(crate) prompt_lookup_max_draft_tokens: Option<usize>,
+
+    #[arg(long = "prompt-lookup-history-window-tokens")]
+    pub(crate) prompt_lookup_history_window_tokens: Option<usize>,
+
+    #[arg(long = "prompt-lookup-max-index-entries")]
+    pub(crate) prompt_lookup_max_index_entries: Option<usize>,
+
     /// KV cache quantization used by the calibrated server.
     #[arg(long = "kv-quant", value_enum, default_value = "none")]
     pub(crate) kv_quant: KvQuantArg,
@@ -74,6 +96,13 @@ impl Default for SchedulerProfileRuntimeArgs {
         Self {
             mtp_model_dir: None,
             mtp_draft_tokens: None,
+            prompt_lookup: false,
+            prompt_lookup_cross_request: false,
+            prompt_lookup_min_ngram: None,
+            prompt_lookup_max_ngram: None,
+            prompt_lookup_max_draft_tokens: None,
+            prompt_lookup_history_window_tokens: None,
+            prompt_lookup_max_index_entries: None,
             kv_quant: KvQuantArg::None,
             paged_prefix_cache_dir: None,
             paged_prefix_cache_block_size: DEFAULT_PAGED_PREFIX_CACHE_BLOCK_SIZE,
@@ -91,6 +120,7 @@ impl Default for SchedulerProfileRuntimeArgs {
 pub(crate) struct SchedulerProfileContextOptions<'a> {
     pub(crate) mtp_model_dir: Option<&'a Path>,
     pub(crate) mtp_draft_tokens: Option<usize>,
+    pub(crate) prompt_lookup: Option<crate::core::prompt_lookup::PromptLookupConfig>,
     pub(crate) kv_quantization: SchedulerKvQuantization,
     pub(crate) paged_prefix_cache_enabled: bool,
     pub(crate) paged_prefix_cache_block_size: i32,
@@ -121,6 +151,37 @@ impl SchedulerProfileRuntimeArgs {
         if self.mtp_draft_tokens == Some(0) {
             bail!("--mtp-draft-tokens must be > 0");
         }
+        let has_prompt_lookup_params = self.prompt_lookup_min_ngram.is_some()
+            || self.prompt_lookup_max_ngram.is_some()
+            || self.prompt_lookup_max_draft_tokens.is_some()
+            || self.prompt_lookup_history_window_tokens.is_some()
+            || self.prompt_lookup_max_index_entries.is_some()
+            || self.prompt_lookup_cross_request;
+        if !self.prompt_lookup && has_prompt_lookup_params {
+            bail!("prompt lookup source parameters require --prompt-lookup");
+        }
+        let prompt_lookup = if self.prompt_lookup {
+            let defaults = crate::core::prompt_lookup::PromptLookupConfig::default();
+            Some(
+                crate::core::prompt_lookup::PromptLookupConfig {
+                    min_ngram: self.prompt_lookup_min_ngram.unwrap_or(defaults.min_ngram),
+                    max_ngram: self.prompt_lookup_max_ngram.unwrap_or(defaults.max_ngram),
+                    max_draft_tokens: self
+                        .prompt_lookup_max_draft_tokens
+                        .unwrap_or(defaults.max_draft_tokens),
+                    history_window_tokens: self
+                        .prompt_lookup_history_window_tokens
+                        .unwrap_or(defaults.history_window_tokens),
+                    max_index_entries: self
+                        .prompt_lookup_max_index_entries
+                        .unwrap_or(defaults.max_index_entries),
+                    cross_request: self.prompt_lookup_cross_request,
+                }
+                .validate()?,
+            )
+        } else {
+            None
+        };
         if self.prefix_lru_cache_max_bytes.is_some() && self.paged_prefix_cache_dir.is_none() {
             bail!("--prefix-lru-cache-max-bytes requires --paged-prefix-cache-dir");
         }
@@ -135,6 +196,7 @@ impl SchedulerProfileRuntimeArgs {
             SchedulerProfileContextOptions {
                 mtp_model_dir: self.mtp_model_dir.as_deref(),
                 mtp_draft_tokens: self.mtp_draft_tokens,
+                prompt_lookup,
                 kv_quantization: self.kv_quant.profile_context(),
                 paged_prefix_cache_enabled: self.paged_prefix_cache_dir.is_some(),
                 paged_prefix_cache_block_size: self.paged_prefix_cache_block_size,
@@ -163,25 +225,43 @@ pub(crate) fn build_scheduler_runtime_context(
     let model_revision_fingerprint = model_fingerprint(model_dir, &config_bytes)?;
     let weight_quantization = weight_quantization_context(model_dir, &config)?;
 
-    let speculative = match options.mtp_model_dir {
-        Some(mtp_model_dir) => {
+    let speculative = match (options.mtp_model_dir, options.prompt_lookup) {
+        (Some(mtp_model_dir), prompt_lookup) => {
             if !mtp_model_dir.is_dir() {
                 bail!(
                     "MTP model path must point to a local directory: {}",
                     mtp_model_dir.display()
                 );
             }
-            let mode = match architecture {
-                ModelArchitecture::Qwen35Dense | ModelArchitecture::Qwen35Moe => {
+            let mode = match (architecture, prompt_lookup.is_some()) {
+                (ModelArchitecture::Qwen35Dense | ModelArchitecture::Qwen35Moe, false) => {
                     SchedulerSpeculativeMode::QwenMtp
                 }
-                ModelArchitecture::Gemma4 => SchedulerSpeculativeMode::Gemma4Drafter,
+                (ModelArchitecture::Qwen35Dense | ModelArchitecture::Qwen35Moe, true) => {
+                    SchedulerSpeculativeMode::QwenMtpPromptLookup
+                }
+                (ModelArchitecture::Gemma4, false) => SchedulerSpeculativeMode::Gemma4Drafter,
+                (ModelArchitecture::Gemma4, true) => {
+                    SchedulerSpeculativeMode::Gemma4DrafterPromptLookup
+                }
                 _ => bail!("scheduler profile MTP context supports Qwen and Gemma4 only"),
             };
             let draft_config =
                 std::fs::read(mtp_model_dir.join("config.json")).with_context(|| {
                     format!("reading {}", mtp_model_dir.join("config.json").display())
                 })?;
+            let neural_fingerprint = model_fingerprint(mtp_model_dir, &draft_config)?;
+            let source_fingerprint = prompt_lookup.map_or(neural_fingerprint.clone(), |config| {
+                format!(
+                    "neural={neural_fingerprint};lookup=min={};max={};draft={};history={};entries={};cross_request={}",
+                    config.min_ngram,
+                    config.max_ngram,
+                    config.max_draft_tokens,
+                    config.history_window_tokens,
+                    config.max_index_entries,
+                    config.cross_request
+                )
+            });
             let draft_tokens = crate::core::speculative::resolve_mtp_draft_tokens(
                 &config,
                 options
@@ -191,13 +271,26 @@ pub(crate) fn build_scheduler_runtime_context(
             );
             SchedulerSpeculativeContext {
                 mode,
-                draft_model_fingerprint: Some(model_fingerprint(mtp_model_dir, &draft_config)?),
+                source_fingerprint: Some(source_fingerprint),
                 draft_tokens: Some(draft_tokens),
             }
         }
-        None => SchedulerSpeculativeContext {
+        (None, Some(config)) => SchedulerSpeculativeContext {
+            mode: SchedulerSpeculativeMode::PromptLookup,
+            source_fingerprint: Some(format!(
+                "min={};max={};draft={};history={};entries={};cross_request={}",
+                config.min_ngram,
+                config.max_ngram,
+                config.max_draft_tokens,
+                config.history_window_tokens,
+                config.max_index_entries,
+                config.cross_request
+            )),
+            draft_tokens: Some(config.max_draft_tokens),
+        },
+        (None, None) => SchedulerSpeculativeContext {
             mode: SchedulerSpeculativeMode::Disabled,
-            draft_model_fingerprint: None,
+            source_fingerprint: None,
             draft_tokens: None,
         },
     };
@@ -413,6 +506,7 @@ mod tests {
             SchedulerProfileContextOptions {
                 mtp_model_dir: Some(&mtp_dir),
                 mtp_draft_tokens: Some(3),
+                prompt_lookup: None,
                 kv_quantization: SchedulerKvQuantization::K3V4,
                 paged_prefix_cache_enabled: true,
                 paged_prefix_cache_block_size: 256,
@@ -431,7 +525,7 @@ mod tests {
         assert_eq!(context.weight_quantization.mode, "affine");
         assert_eq!(context.speculative.mode, SchedulerSpeculativeMode::QwenMtp);
         assert_eq!(context.speculative.draft_tokens, Some(3));
-        assert!(context.speculative.draft_model_fingerprint.is_some());
+        assert!(context.speculative.source_fingerprint.is_some());
         assert_eq!(context.kv_quantization, SchedulerKvQuantization::K3V4);
         assert_eq!(context.prefix_cache.block_size, Some(256));
         assert_eq!(context.prefix_cache.max_pages, Some(512));
@@ -454,6 +548,7 @@ mod tests {
             SchedulerProfileContextOptions {
                 mtp_model_dir: Some(&mtp_dir),
                 mtp_draft_tokens: Some(3),
+                prompt_lookup: None,
                 kv_quantization: SchedulerKvQuantization::K3V4,
                 paged_prefix_cache_enabled: true,
                 paged_prefix_cache_block_size: 256,
@@ -474,6 +569,7 @@ mod tests {
             SchedulerProfileContextOptions {
                 mtp_model_dir: None,
                 mtp_draft_tokens: None,
+                prompt_lookup: None,
                 kv_quantization: SchedulerKvQuantization::None,
                 paged_prefix_cache_enabled: false,
                 paged_prefix_cache_block_size: 256,
@@ -497,6 +593,142 @@ mod tests {
                 ssd_max_bytes: None,
             }
         );
+
+        std::fs::remove_dir_all(temp_dir).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn runtime_context_fingerprints_all_prompt_lookup_parameters() {
+        let temp_dir = unique_temp_dir("scheduler-profile-prompt-lookup");
+        let model_dir = temp_dir.join("model");
+        create_model(
+            &model_dir,
+            r#"{"model_type":"qwen3_5"}"#,
+            b"main-weights-v1",
+        );
+        let base = crate::core::prompt_lookup::PromptLookupConfig {
+            min_ngram: 2,
+            max_ngram: 4,
+            max_draft_tokens: 4,
+            history_window_tokens: 4096,
+            max_index_entries: 8192,
+            cross_request: false,
+        };
+        let build = |prompt_lookup| {
+            build_scheduler_runtime_context(
+                &model_dir,
+                SchedulerProfileContextOptions {
+                    mtp_model_dir: None,
+                    mtp_draft_tokens: None,
+                    prompt_lookup: Some(prompt_lookup),
+                    kv_quantization: SchedulerKvQuantization::None,
+                    paged_prefix_cache_enabled: false,
+                    paged_prefix_cache_block_size: 256,
+                    paged_prefix_cache_max_pages: None,
+                    prefix_lru_cache_max_bytes: None,
+                    ssd_prefix_cache_max_bytes: None,
+                    active_kv_offload: false,
+                    logical_kv_cap_tokens: 32768,
+                    memory_limit_total_bytes: None,
+                    memory_limit_model_bytes: None,
+                },
+            )
+            .expect("build prompt lookup context")
+        };
+        let context = build(base);
+        assert_eq!(
+            context.speculative.mode,
+            SchedulerSpeculativeMode::PromptLookup
+        );
+        assert_eq!(context.speculative.draft_tokens, Some(4));
+        let baseline_fingerprint = context
+            .speculative
+            .source_fingerprint
+            .expect("source fingerprint");
+
+        for changed in [
+            crate::core::prompt_lookup::PromptLookupConfig {
+                min_ngram: 3,
+                ..base
+            },
+            crate::core::prompt_lookup::PromptLookupConfig {
+                max_ngram: 5,
+                ..base
+            },
+            crate::core::prompt_lookup::PromptLookupConfig {
+                max_draft_tokens: 5,
+                ..base
+            },
+            crate::core::prompt_lookup::PromptLookupConfig {
+                history_window_tokens: 8192,
+                ..base
+            },
+            crate::core::prompt_lookup::PromptLookupConfig {
+                max_index_entries: 16384,
+                ..base
+            },
+            crate::core::prompt_lookup::PromptLookupConfig {
+                cross_request: true,
+                ..base
+            },
+        ] {
+            assert_ne!(
+                build(changed).speculative.source_fingerprint.as_deref(),
+                Some(baseline_fingerprint.as_str())
+            );
+        }
+
+        std::fs::remove_dir_all(temp_dir).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn runtime_context_distinguishes_qwen_hybrid_from_neural_only() {
+        let temp_dir = unique_temp_dir("scheduler-profile-hybrid");
+        let model_dir = temp_dir.join("model");
+        let mtp_dir = temp_dir.join("mtp");
+        create_model(
+            &model_dir,
+            r#"{"model_type":"qwen3_5"}"#,
+            b"main-weights-v1",
+        );
+        create_model(&mtp_dir, r#"{"model_type":"qwen3_5_mtp"}"#, b"mtp-weights");
+        let build = |prompt_lookup| {
+            build_scheduler_runtime_context(
+                &model_dir,
+                SchedulerProfileContextOptions {
+                    mtp_model_dir: Some(&mtp_dir),
+                    mtp_draft_tokens: Some(3),
+                    prompt_lookup,
+                    kv_quantization: SchedulerKvQuantization::None,
+                    paged_prefix_cache_enabled: false,
+                    paged_prefix_cache_block_size: 256,
+                    paged_prefix_cache_max_pages: None,
+                    prefix_lru_cache_max_bytes: None,
+                    ssd_prefix_cache_max_bytes: None,
+                    active_kv_offload: false,
+                    logical_kv_cap_tokens: 32768,
+                    memory_limit_total_bytes: None,
+                    memory_limit_model_bytes: None,
+                },
+            )
+            .expect("build speculative context")
+        };
+        let neural = build(None);
+        let hybrid = build(Some(
+            crate::core::prompt_lookup::PromptLookupConfig::default(),
+        ));
+
+        assert_eq!(neural.speculative.mode, SchedulerSpeculativeMode::QwenMtp);
+        assert_eq!(
+            hybrid.speculative.mode,
+            SchedulerSpeculativeMode::QwenMtpPromptLookup
+        );
+        assert_ne!(neural.fingerprint(), hybrid.fingerprint());
+        assert!(hybrid
+            .speculative
+            .source_fingerprint
+            .as_deref()
+            .is_some_and(|fingerprint| fingerprint.contains(";lookup=")));
 
         std::fs::remove_dir_all(temp_dir).expect("cleanup temp dir");
     }

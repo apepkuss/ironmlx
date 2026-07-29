@@ -23,6 +23,7 @@ pub const MIN_KV_CACHE_CAP_FOR_GPU_PERF: i32 =
 
 pub struct Qwen35MoeModel {
     text: Qwen35MoeTextModel,
+    exact_batched_verify_profile: crate::models::qwen3_5::speculative::ExactBatchedVerifyProfile,
     /// Always Some for 35B-A3B (tie_word_embeddings=false).
     lm_head: Linear,
     /// Vision encoder; `Some` for multimodal MoE checkpoints loaded with `open_multimodal`.
@@ -94,6 +95,14 @@ impl Qwen35MoeModel {
         }
         let lm_head =
             Linear::from_loader(loader, "lm_head").context("loading Qwen35MoeModel lm_head")?;
+        let exact_batched_verify_profile =
+            crate::models::qwen3_5::speculative::moe_exact_batched_verify_profile(
+                loader.quant_meta(),
+                loader
+                    .config_raw_value()
+                    .pointer("/text_config/dtype")
+                    .and_then(serde_json::Value::as_str),
+            );
         let vision = if let Some(vc) = cfg.vision_config.as_ref() {
             if loader.contains("vision_tower.patch_embed.proj.weight") {
                 Some(VisionTower::from_loader(loader, vc)?)
@@ -106,6 +115,7 @@ impl Qwen35MoeModel {
         let text = Qwen35MoeTextModel::from_loader(loader, cfg)?;
         Ok(Self {
             text,
+            exact_batched_verify_profile,
             lm_head,
             vision,
         })
@@ -140,6 +150,28 @@ impl Qwen35MoeModel {
         &self,
         hidden: &Array,
         target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        let target = target.into();
+        let hidden_shape = hidden.shape();
+        let hidden_shape = hidden_shape.as_slice();
+        let exact_batched_verify = crate::nn::verify_qmm::is_armed()
+            && hidden_shape.len() == 3
+            && crate::models::qwen3_5::speculative::exact_batched_verify_shape_qualified(
+                self.exact_batched_verify_profile,
+                hidden_shape[0] as usize,
+                hidden_shape[1] as usize,
+            );
+        if exact_batched_verify {
+            let _position_stable_qmm = crate::nn::position_stable_qmm::scope();
+            return self.project_hidden_unisolated_on(hidden, target);
+        }
+        self.project_hidden_unisolated_on(hidden, target)
+    }
+
+    fn project_hidden_unisolated_on(
+        &self,
+        hidden: &Array,
+        target: StreamOrDevice,
     ) -> Result<Array> {
         self.lm_head.forward_on(hidden, target)
     }
@@ -206,6 +238,8 @@ impl Qwen35MoeModel {
             mtp_cache,
             target,
         )?;
+        let _product_stable_projection =
+            (mtp_hidden.shape().as_slice()[0] > 1).then(crate::nn::product_stable_qmm::scope);
         let logits = self.project_hidden_on(&mtp_hidden, target)?;
         Ok(MtpStepOutput {
             hidden_states: mtp_hidden,
@@ -387,6 +421,8 @@ impl Qwen35MoeModel {
             Qwen35MoeTextModel::from_components(stub_embed, Vec::new(), stub_norm, mrope, cfg);
         Self {
             text,
+            exact_batched_verify_profile:
+                crate::models::qwen3_5::speculative::ExactBatchedVerifyProfile::Disabled,
             lm_head,
             vision: None,
         }
@@ -605,6 +641,16 @@ impl Qwen35MoeModel {
         cache: Option<&mut [LayerCache]>,
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
+        let input_shape = input_ids.shape();
+        let input_shape = input_shape.as_slice();
+        let exact_batched_verify = crate::nn::verify_qmm::is_armed()
+            && input_shape.len() == 2
+            && crate::models::qwen3_5::speculative::exact_batched_verify_shape_qualified(
+                self.exact_batched_verify_profile,
+                input_shape[0] as usize,
+                input_shape[1] as usize,
+            );
+        let _position_stable_qmm = exact_batched_verify.then(crate::nn::position_stable_qmm::scope);
         self.text.forward_on(
             input_ids,
             position_ids,
@@ -699,6 +745,36 @@ impl Model for Qwen35MoeModel {
             decode_mask,
             cache,
             target,
+        )
+    }
+
+    fn project_hidden_on(&self, hidden: &Array, target: StreamOrDevice) -> Result<Array> {
+        Qwen35MoeModel::project_hidden_on(self, hidden, target)
+    }
+
+    fn supports_exact_batched_speculative_verify(
+        &self,
+        batch_width: usize,
+        context_tokens: usize,
+        verify_width: usize,
+    ) -> bool {
+        crate::models::qwen3_5::speculative::exact_batched_verify_qualified(
+            self.exact_batched_verify_profile,
+            batch_width,
+            context_tokens,
+            verify_width,
+        )
+    }
+
+    fn supports_sequential_prompt_lookup_verify(
+        &self,
+        _batch_width: usize,
+        context_tokens: usize,
+        _verify_width: usize,
+    ) -> bool {
+        crate::models::qwen3_5::speculative::sequential_prompt_lookup_verify_qualified(
+            self.exact_batched_verify_profile,
+            context_tokens,
         )
     }
 

@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "description": "Deterministic request-local CopySpec production corpus. Context is expanded by the runner and calibrated with the target model tokenizer.",
+  "cases": [
+    {
+      "id": "rag_support_extract",
+      "category": "rag",
+      "polarity": "positive",
+      "generator": "rag",
+      "description": "Retrieve and copy an exact payload from a long support knowledge base."
+    },
+    {
+      "id": "code_function_copy",
+      "category": "code",
+      "polarity": "positive",
+      "generator": "code",
+      "description": "Copy one exact function body from a large source file."
+    },
+    {
+      "id": "json_record_copy",
+      "category": "json",
+      "polarity": "positive",
+      "generator": "json",
+      "description": "Copy one exact JSON payload selected by record id."
+    },
+    {
+      "id": "long_context_verbatim",
+      "category": "long_copy",
+      "polarity": "positive",
+      "generator": "long_copy",
+      "description": "Continue a unique verbatim passage embedded deep in long context."
+    },
+    {
+      "id": "ordinary_explanation_control",
+      "category": "ordinary_chat",
+      "polarity": "negative",
+      "generator": "negative",
+      "description": "Low-copy ordinary explanation with deterministic request isolation marker."
+    },
+    {
+      "id": "conflicting_continuation_control",
+      "category": "adversarial",
+      "polarity": "adversarial",
+      "generator": "adversarial",
+      "description": "Repeated n-gram prefixes with conflicting continuations exercise rejection and rollback."
+    }
+  ]
+}

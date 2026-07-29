@@ -10,6 +10,10 @@ description = "Head-to-head HTTP benchmark harness for OpenAI-compatible LLM end
 name = "iron-bench"
 path = "src/main.rs"
 
+[[bin]]
+name = "iron-bench-tokenizer"
+path = "src/bin/iron-bench-tokenizer.rs"
+
 [dependencies]
 tokio.workspace = true
 reqwest.workspace = true

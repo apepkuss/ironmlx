@@ -7,18 +7,27 @@ public protocol BackendModelManaging: Sendable {
         modelDir: String,
         setDefault: Bool,
         maxCacheCap: Int?,
-        pinned: Bool
+        pinned: Bool,
+        promptLookup: BackendPromptLookupConfig?
     ) async throws -> BackendModelAdminResponse
     func unloadModel(model: String, modelDir: String?) async throws -> BackendModelAdminResponse
     func setDefaultModel(_ model: String) async throws -> BackendModelAdminResponse
     func pinModel(model: String) async throws -> BackendModelAdminResponse
     func unpinModel(model: String) async throws -> BackendModelAdminResponse
     func fetchLoadedModels() async throws -> [BackendLoadedModelInfo]
+    func clearSharedPromptLookup(model: String?) async throws -> BackendPromptLookupClearResponse
 }
 
 public extension BackendModelManaging {
     func loadModel(model: String, modelDir: String, setDefault: Bool) async throws -> BackendModelAdminResponse {
-        try await loadModel(model: model, modelDir: modelDir, setDefault: setDefault, maxCacheCap: nil, pinned: false)
+        try await loadModel(
+            model: model,
+            modelDir: modelDir,
+            setDefault: setDefault,
+            maxCacheCap: nil,
+            pinned: false,
+            promptLookup: nil
+        )
     }
 }
 
@@ -91,7 +100,8 @@ public struct BackendAPIClient: Sendable {
         modelDir: String,
         setDefault: Bool = true,
         maxCacheCap: Int? = nil,
-        pinned: Bool = false
+        pinned: Bool = false,
+        promptLookup: BackendPromptLookupConfig? = nil
     ) async throws -> BackendModelAdminResponse {
         try await loadModel(
             model: model,
@@ -99,6 +109,7 @@ public struct BackendAPIClient: Sendable {
             setDefault: setDefault,
             maxCacheCap: maxCacheCap,
             pinned: pinned,
+            promptLookup: promptLookup,
             reloadWhenIdle: false,
             samplingDefaults: .empty
         )
@@ -112,6 +123,7 @@ public struct BackendAPIClient: Sendable {
         pinned: Bool = false,
         mtpModelDir: String? = nil,
         mtpDraftTokens: Int? = nil,
+        promptLookup: BackendPromptLookupConfig? = nil,
         reloadWhenIdle: Bool,
         samplingDefaults: BackendSamplingDefaults
     ) async throws -> BackendModelAdminResponse {
@@ -123,6 +135,7 @@ public struct BackendAPIClient: Sendable {
             pinned: pinned,
             mtpModelDir: mtpModelDir,
             mtpDraftTokens: mtpDraftTokens,
+            promptLookup: promptLookup,
             reloadWhenIdle: reloadWhenIdle,
             samplingDefaults: samplingDefaults
         )
@@ -138,6 +151,7 @@ public struct BackendAPIClient: Sendable {
         pinned: Bool = false,
         mtpModelDir: String? = nil,
         mtpDraftTokens: Int? = nil,
+        promptLookup: BackendPromptLookupConfig? = nil,
         samplingDefaults: BackendSamplingDefaults = .empty
     ) async throws -> BackendModelAdminResponse {
         let request = BackendLoadModelRequest(
@@ -148,6 +162,7 @@ public struct BackendAPIClient: Sendable {
             pinned: pinned,
             mtpModelDir: mtpModelDir,
             mtpDraftTokens: mtpDraftTokens,
+            promptLookup: promptLookup,
             samplingDefaults: samplingDefaults
         )
         let data = try await postJSON(path: "/admin/api/models/register", body: request)
@@ -184,6 +199,16 @@ public struct BackendAPIClient: Sendable {
         let data = try await fetchData(path: "/admin/api/models/loaded")
         return try JSONDecoder().decode([BackendLoadedModelInfo].self, from: data)
     }
+
+    public func clearSharedPromptLookup(
+        model: String? = nil
+    ) async throws -> BackendPromptLookupClearResponse {
+        let data = try await postJSON(
+            path: "/admin/api/prompt-lookup/clear",
+            body: BackendPromptLookupClearRequest(model: model)
+        )
+        return try JSONDecoder().decode(BackendPromptLookupClearResponse.self, from: data)
+    }
 }
 
 extension BackendAPIClient: BackendModelManaging {}
@@ -210,6 +235,7 @@ public struct BackendLoadModelRequest: Codable, Equatable, Sendable {
     public var pinned: Bool?
     public var mtpModelDir: String?
     public var mtpDraftTokens: Int?
+    public var promptLookup: BackendPromptLookupConfig?
     public var reloadWhenIdle: Bool?
     public var temperature: Double?
     public var topP: Double?
@@ -224,6 +250,7 @@ public struct BackendLoadModelRequest: Codable, Equatable, Sendable {
         case pinned
         case mtpModelDir = "mtp_model_dir"
         case mtpDraftTokens = "mtp_draft_tokens"
+        case promptLookup = "prompt_lookup"
         case reloadWhenIdle = "reload_when_idle"
         case temperature
         case topP = "top_p"
@@ -239,6 +266,7 @@ public struct BackendLoadModelRequest: Codable, Equatable, Sendable {
         pinned: Bool? = nil,
         mtpModelDir: String? = nil,
         mtpDraftTokens: Int? = nil,
+        promptLookup: BackendPromptLookupConfig? = nil,
         reloadWhenIdle: Bool? = nil,
         samplingDefaults: BackendSamplingDefaults = .empty
     ) {
@@ -249,11 +277,49 @@ public struct BackendLoadModelRequest: Codable, Equatable, Sendable {
         self.pinned = pinned
         self.mtpModelDir = mtpModelDir
         self.mtpDraftTokens = mtpDraftTokens
+        self.promptLookup = promptLookup
         self.reloadWhenIdle = reloadWhenIdle
         self.temperature = samplingDefaults.temperature
         self.topP = samplingDefaults.topP
         self.topK = samplingDefaults.topK
         self.repetitionPenalty = samplingDefaults.repetitionPenalty
+    }
+}
+
+public struct BackendPromptLookupConfig: Codable, Equatable, Sendable {
+    public static let requestLocal = BackendPromptLookupConfig(crossRequest: false)
+    public static let crossRequest = BackendPromptLookupConfig(crossRequest: true)
+
+    public var minNgram: Int
+    public var maxNgram: Int
+    public var maxDraftTokens: Int
+    public var historyWindowTokens: Int
+    public var maxIndexEntries: Int
+    public var crossRequest: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case minNgram = "min_ngram"
+        case maxNgram = "max_ngram"
+        case maxDraftTokens = "max_draft_tokens"
+        case historyWindowTokens = "history_window_tokens"
+        case maxIndexEntries = "max_index_entries"
+        case crossRequest = "cross_request"
+    }
+
+    public init(
+        minNgram: Int = 2,
+        maxNgram: Int = 4,
+        maxDraftTokens: Int = 4,
+        historyWindowTokens: Int = 32 * 1_024,
+        maxIndexEntries: Int = 64 * 1_024,
+        crossRequest: Bool
+    ) {
+        self.minNgram = minNgram
+        self.maxNgram = maxNgram
+        self.maxDraftTokens = maxDraftTokens
+        self.historyWindowTokens = historyWindowTokens
+        self.maxIndexEntries = maxIndexEntries
+        self.crossRequest = crossRequest
     }
 }
 
@@ -303,6 +369,26 @@ public struct BackendPinModelRequest: Codable, Equatable, Sendable {
     public var model: String
 }
 
+public struct BackendPromptLookupClearRequest: Codable, Equatable, Sendable {
+    public var model: String?
+}
+
+public struct BackendPromptLookupClearResponse: Codable, Equatable, Sendable {
+    public var success: Bool
+    public var status: String
+    public var model: String?
+    public var clearedModels: Int
+    public var clearedEntries: Int
+
+    enum CodingKeys: String, CodingKey {
+        case success
+        case status
+        case model
+        case clearedModels = "cleared_models"
+        case clearedEntries = "cleared_entries"
+    }
+}
+
 public struct BackendModelAdminResponse: Codable, Equatable, Sendable {
     public var success: Bool
     public var status: String
@@ -336,6 +422,7 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
     public var mtpEnabled: Bool
     public var mtpModelDir: String?
     public var mtpDraftTokens: Int?
+    public var promptLookup: BackendPromptLookupConfig?
 
     public init(
         id: String,
@@ -347,7 +434,8 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
         pinned: Bool = false,
         mtpEnabled: Bool = false,
         mtpModelDir: String? = nil,
-        mtpDraftTokens: Int? = nil
+        mtpDraftTokens: Int? = nil,
+        promptLookup: BackendPromptLookupConfig? = nil
     ) {
         self.id = id
         self.model = model
@@ -359,6 +447,7 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
         self.mtpEnabled = mtpEnabled
         self.mtpModelDir = mtpModelDir
         self.mtpDraftTokens = mtpDraftTokens
+        self.promptLookup = promptLookup
     }
 
     enum CodingKeys: String, CodingKey {
@@ -372,6 +461,7 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
         case mtpEnabled = "mtp_enabled"
         case mtpModelDir = "mtp_model_dir"
         case mtpDraftTokens = "mtp_draft_tokens"
+        case promptLookup = "prompt_lookup"
     }
 
     public init(from decoder: Decoder) throws {
@@ -386,5 +476,9 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
         self.mtpEnabled = try container.decodeIfPresent(Bool.self, forKey: .mtpEnabled) ?? false
         self.mtpModelDir = try container.decodeIfPresent(String.self, forKey: .mtpModelDir)
         self.mtpDraftTokens = try container.decodeIfPresent(Int.self, forKey: .mtpDraftTokens)
+        self.promptLookup = try container.decodeIfPresent(
+            BackendPromptLookupConfig.self,
+            forKey: .promptLookup
+        )
     }
 }

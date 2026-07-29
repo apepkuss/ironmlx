@@ -17,7 +17,7 @@ pub struct MtpCache {
 }
 
 /// Lightweight checkpoint for [`MtpCache`] rollback.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct MtpCacheSnapshot {
     layers: Vec<KVCacheSnapshot>,
 }

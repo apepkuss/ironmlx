@@ -1,6 +1,9 @@
 //! Integration tests for mlx::quantization — low-precision subsystem.
 
-use mlx::quantization::{dequantize, quantize, quantized_matmul, quantized_matmul_batch_isolated};
+use mlx::quantization::{
+    dequantize, quantize, quantized_matmul, quantized_matmul_batch_isolated,
+    quantized_matmul_product_stable,
+};
 use mlx::Array;
 
 /// 构造 [N=4, K=64] f32 测试权重矩阵（K=64 = 默认 group_size）。
@@ -213,6 +216,74 @@ fn batch_isolated_quantized_matmul_matches_rowwise_calls_exactly() {
     assert_eq!(
         actual.to_vec::<f32>().expect("actual values"),
         expected.to_vec::<f32>().expect("expected values")
+    );
+}
+
+#[test]
+fn product_stable_quantized_matmul_matches_rowwise_calls_exactly() {
+    let (rows, out_dim, in_dim) = (8_i32, 128_i32, 512_i32);
+    let weight_data = (0..out_dim * in_dim)
+        .map(|idx| ((idx % 41) as f32 - 20.0) * 0.0125)
+        .collect::<Vec<_>>();
+    let input_data = (0..rows * in_dim)
+        .map(|idx| ((idx % 37) as f32 - 18.0) * 0.0175)
+        .collect::<Vec<_>>();
+    let weight = Array::try_from((weight_data.as_slice(), &[out_dim, in_dim][..]))
+        .expect("weight")
+        .astype(mlx::Dtype::Bfloat16)
+        .expect("bf16 weight");
+    let input = Array::try_from((input_data.as_slice(), &[rows, 1_i32, in_dim][..]))
+        .expect("input")
+        .astype(mlx::Dtype::Bfloat16)
+        .expect("bf16 input");
+    let q = quantize(&weight, Some(64), Some(4), "affine", None).expect("quantize");
+
+    let actual = quantized_matmul_product_stable(
+        &input,
+        &q[0],
+        &q[1],
+        Some(&q[2]),
+        true,
+        Some(64),
+        Some(4),
+        "affine",
+    )
+    .expect("product-stable qmm");
+    let mut expected_rows = Vec::with_capacity(rows as usize);
+    for row in 0..rows {
+        let input_row = mlx::ops::indexing::slice_strided(
+            &input,
+            &[row, 0_i32, 0],
+            &[row + 1, 1_i32, in_dim],
+            &[1_i32, 1, 1],
+        )
+        .expect("slice input row");
+        expected_rows.push(
+            quantized_matmul(
+                &input_row,
+                &q[0],
+                &q[1],
+                Some(&q[2]),
+                true,
+                Some(64),
+                Some(4),
+                "affine",
+            )
+            .expect("rowwise qmm"),
+        );
+    }
+    let refs = expected_rows.iter().collect::<Vec<_>>();
+    let expected = mlx::ops::shape::concatenate(&refs, 0).expect("concatenate rows");
+
+    let actual = actual
+        .astype(mlx::Dtype::Float32)
+        .expect("cast actual to f32");
+    let expected = expected
+        .astype(mlx::Dtype::Float32)
+        .expect("cast expected to f32");
+    assert_eq!(
+        actual.to_vec::<f32>().expect("actual"),
+        expected.to_vec::<f32>().expect("expected")
     );
 }
 

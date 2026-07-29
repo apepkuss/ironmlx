@@ -2,9 +2,9 @@ use anyhow::{anyhow, Context};
 use mlx::{Array, Dtype, StreamOrDevice};
 use std::time::Instant;
 
-use crate::core::cache::KVCache;
+use crate::core::cache::{KVCache, TurboQuantKVBits};
 use crate::core::memory_budget::ModelMeta;
-use crate::core::{Loader, Model};
+use crate::core::{Loader, Model, QuantMeta, QuantMode};
 use crate::nn::LayerCache;
 use crate::Result;
 
@@ -17,6 +17,7 @@ use super::vision::{
 
 pub struct Gemma4Model {
     text: Gemma4TextModel,
+    exact_batched_verify_profile: ExactBatchedVerifyProfile,
     vision: Option<VisionModel>,
     unified_vision: Option<Gemma4UnifiedVisionEmbedder>,
     embed_vision: Option<MultimodalEmbedder>,
@@ -63,6 +64,138 @@ fn per_row_slice_last(
 
 fn vl_profile_enabled() -> bool {
     std::env::var_os("IRONMLX_GEMMA4_VL_PROFILE").is_some()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExactBatchedVerifyProfile {
+    Disabled,
+    Standard,
+    Affine5Dense,
+    Affine6Dense,
+    Affine8Dense,
+    Affine8Moe,
+}
+
+fn exact_batched_verify_profile(
+    quant_meta: Option<QuantMeta>,
+    checkpoint_dtype: Option<&str>,
+    is_moe: bool,
+) -> ExactBatchedVerifyProfile {
+    if checkpoint_dtype != Some("bfloat16") {
+        return ExactBatchedVerifyProfile::Disabled;
+    }
+    match quant_meta {
+        None
+        | Some(QuantMeta {
+            group_size: 64,
+            bits: 4,
+            mode: QuantMode::Affine,
+        }) => ExactBatchedVerifyProfile::Standard,
+        Some(QuantMeta {
+            group_size: 64,
+            bits: 5,
+            mode: QuantMode::Affine,
+        }) if !is_moe => ExactBatchedVerifyProfile::Affine5Dense,
+        Some(QuantMeta {
+            group_size: 64,
+            bits: 6,
+            mode: QuantMode::Affine,
+        }) if !is_moe => ExactBatchedVerifyProfile::Affine6Dense,
+        Some(QuantMeta {
+            group_size: 64,
+            bits: 8,
+            mode: QuantMode::Affine,
+        }) if is_moe => ExactBatchedVerifyProfile::Affine8Moe,
+        Some(QuantMeta {
+            group_size: 64,
+            bits: 8,
+            mode: QuantMode::Affine,
+        }) => ExactBatchedVerifyProfile::Affine8Dense,
+        Some(_) => ExactBatchedVerifyProfile::Disabled,
+    }
+}
+
+fn exact_batched_verify_qualified(
+    profile: ExactBatchedVerifyProfile,
+    batch_width: usize,
+    context_tokens: usize,
+    verify_width: usize,
+) -> bool {
+    const MAX_QUALIFIED_BATCH: usize = 8;
+    const MAX_QUALIFIED_CONTEXT_TOKENS: usize = 1_024;
+    const MAX_QUALIFIED_VERIFY_WIDTH: usize = 5;
+
+    let batch_qualified = match profile {
+        ExactBatchedVerifyProfile::Disabled => false,
+        ExactBatchedVerifyProfile::Standard
+        | ExactBatchedVerifyProfile::Affine5Dense
+        | ExactBatchedVerifyProfile::Affine6Dense
+        | ExactBatchedVerifyProfile::Affine8Dense => {
+            batch_width > 0 && batch_width <= MAX_QUALIFIED_BATCH
+        }
+        ExactBatchedVerifyProfile::Affine8Moe => batch_width > 0 && batch_width <= 2,
+    };
+    batch_qualified
+        && context_tokens <= MAX_QUALIFIED_CONTEXT_TOKENS
+        && verify_width > 1
+        && verify_width <= MAX_QUALIFIED_VERIFY_WIDTH
+}
+
+fn exact_batched_verify_qualified_for_kv_cache(
+    profile: ExactBatchedVerifyProfile,
+    batch_width: usize,
+    context_tokens: usize,
+    verify_width: usize,
+    kv_bits: Option<TurboQuantKVBits>,
+) -> bool {
+    let kv_cache_qualified = match profile {
+        ExactBatchedVerifyProfile::Affine8Moe => {
+            kv_bits.is_none()
+                || matches!(
+                    kv_bits,
+                    Some(TurboQuantKVBits::K3V4 | TurboQuantKVBits::K4V4)
+                )
+        }
+        ExactBatchedVerifyProfile::Affine5Dense | ExactBatchedVerifyProfile::Affine6Dense => {
+            kv_bits.is_none()
+        }
+        _ => kv_bits != Some(TurboQuantKVBits::K3V4) || verify_width <= 2,
+    };
+    exact_batched_verify_qualified(profile, batch_width, context_tokens, verify_width)
+        && kv_cache_qualified
+}
+
+fn uniform_turboquant_bits(cache: Option<&[LayerCache]>) -> Option<TurboQuantKVBits> {
+    let mut bits = None;
+    for layer in cache? {
+        let LayerCache::Full(kv) = layer else {
+            return None;
+        };
+        let layer_bits = kv.turboquant()?.bits();
+        if bits.is_some_and(|current| current != layer_bits) {
+            return None;
+        }
+        bits = Some(layer_bits);
+    }
+    bits
+}
+
+fn affine8_moe_turboquant_exact_scope(
+    profile: ExactBatchedVerifyProfile,
+    input_ids: &Array,
+    cache: Option<&[LayerCache]>,
+) -> bool {
+    let dims = input_ids.shape();
+    let dims = dims.as_slice();
+    profile == ExactBatchedVerifyProfile::Affine8Moe
+        && crate::nn::verify_qmm::is_armed()
+        && dims.len() == 2
+        && (1..=2).contains(&dims[0])
+        && (2..=5).contains(&dims[1])
+        && matches!(
+            uniform_turboquant_bits(cache),
+            Some(TurboQuantKVBits::K3V4 | TurboQuantKVBits::K4V4)
+        )
 }
 
 fn vl_profile_eval(label: &str, arrays: &[&Array], start: Instant, enabled: bool) -> Result<()> {
@@ -147,6 +280,14 @@ impl Gemma4Model {
     }
 
     pub fn from_loader_with_config(loader: &Loader, cfg: Gemma4Config) -> Result<Self> {
+        let exact_batched_verify_profile = exact_batched_verify_profile(
+            loader.quant_meta(),
+            loader
+                .config_raw_value()
+                .get("dtype")
+                .and_then(serde_json::Value::as_str),
+            cfg.text_config.enable_moe_block,
+        );
         let image_token_id = cfg.image_token_id;
         let audio_token_id = cfg.audio_token_id;
         let vision_config = cfg.vision_config.clone();
@@ -179,6 +320,7 @@ impl Gemma4Model {
         let text = Gemma4TextModel::from_loader(loader, cfg.text_config)?;
         Ok(Self {
             text,
+            exact_batched_verify_profile,
             vision,
             unified_vision,
             embed_vision,
@@ -666,6 +808,12 @@ impl Model for Gemma4Model {
         target: StreamOrDevice,
     ) -> Result<Array> {
         self.reject_multimodal_tokens(input_ids)?;
+        let exact_turboquant = affine8_moe_turboquant_exact_scope(
+            self.exact_batched_verify_profile,
+            input_ids,
+            cache.as_deref(),
+        );
+        let _position_stable_qmm = exact_turboquant.then(crate::nn::position_stable_qmm::scope);
         self.text.forward_on(
             input_ids,
             position_ids,
@@ -676,12 +824,63 @@ impl Model for Gemma4Model {
         )
     }
 
+    fn project_hidden_on(&self, hidden: &Array, target: StreamOrDevice) -> Result<Array> {
+        Gemma4Model::project_hidden_on(self, hidden, target)
+    }
+
     fn requires_position_ids(&self) -> bool {
         false
     }
 
     fn model_meta(&self) -> ModelMeta {
         Gemma4Model::model_meta(self)
+    }
+
+    fn requires_eager_sequential_speculative_verify(&self) -> bool {
+        true
+    }
+
+    fn supports_exact_batched_speculative_verify(
+        &self,
+        batch_width: usize,
+        context_tokens: usize,
+        verify_width: usize,
+    ) -> bool {
+        exact_batched_verify_qualified(
+            self.exact_batched_verify_profile,
+            batch_width,
+            context_tokens,
+            verify_width,
+        )
+    }
+
+    fn supports_exact_batched_speculative_verify_for_kv_cache(
+        &self,
+        batch_width: usize,
+        context_tokens: usize,
+        verify_width: usize,
+        kv_bits: Option<TurboQuantKVBits>,
+    ) -> bool {
+        exact_batched_verify_qualified_for_kv_cache(
+            self.exact_batched_verify_profile,
+            batch_width,
+            context_tokens,
+            verify_width,
+            kv_bits,
+        )
+    }
+
+    fn supports_sequential_prompt_lookup_verify(
+        &self,
+        _batch_width: usize,
+        _context_tokens: usize,
+        _verify_width: usize,
+    ) -> bool {
+        false
+    }
+
+    fn supports_speculative_accepted_prefix_trim(&self) -> bool {
+        true
     }
 
     fn num_hidden_layers(&self) -> usize {
@@ -1160,6 +1359,193 @@ impl crate::core::scheduler::DenseVlMethods for Gemma4Model {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exact_batched_verify_qualification_is_shape_and_quantization_scoped() {
+        let affine4 = Some(QuantMeta {
+            group_size: 64,
+            bits: 4,
+            mode: QuantMode::Affine,
+        });
+        let affine8 = Some(QuantMeta {
+            group_size: 64,
+            bits: 8,
+            mode: QuantMode::Affine,
+        });
+        let affine5 = Some(QuantMeta {
+            group_size: 64,
+            bits: 5,
+            mode: QuantMode::Affine,
+        });
+        let affine6 = Some(QuantMeta {
+            group_size: 64,
+            bits: 6,
+            mode: QuantMode::Affine,
+        });
+        assert_eq!(
+            exact_batched_verify_profile(None, Some("bfloat16"), false),
+            ExactBatchedVerifyProfile::Standard
+        );
+        assert_eq!(
+            exact_batched_verify_profile(affine4, Some("bfloat16"), false),
+            ExactBatchedVerifyProfile::Standard
+        );
+        assert_eq!(
+            exact_batched_verify_profile(affine8, Some("bfloat16"), false),
+            ExactBatchedVerifyProfile::Affine8Dense
+        );
+        assert_eq!(
+            exact_batched_verify_profile(affine8, Some("bfloat16"), true),
+            ExactBatchedVerifyProfile::Affine8Moe
+        );
+        assert_eq!(
+            exact_batched_verify_profile(affine5, Some("bfloat16"), false),
+            ExactBatchedVerifyProfile::Affine5Dense
+        );
+        assert_eq!(
+            exact_batched_verify_profile(affine6, Some("bfloat16"), false),
+            ExactBatchedVerifyProfile::Affine6Dense
+        );
+        assert_eq!(
+            exact_batched_verify_profile(affine5, Some("bfloat16"), true),
+            ExactBatchedVerifyProfile::Disabled
+        );
+        assert_eq!(
+            exact_batched_verify_profile(affine6, Some("bfloat16"), true),
+            ExactBatchedVerifyProfile::Disabled
+        );
+        assert_eq!(
+            exact_batched_verify_profile(None, Some("float16"), false),
+            ExactBatchedVerifyProfile::Disabled
+        );
+        assert_eq!(
+            exact_batched_verify_profile(affine4, Some("float16"), false),
+            ExactBatchedVerifyProfile::Disabled
+        );
+        assert_eq!(
+            exact_batched_verify_profile(None, None, false),
+            ExactBatchedVerifyProfile::Disabled
+        );
+        for profile in [
+            ExactBatchedVerifyProfile::Affine5Dense,
+            ExactBatchedVerifyProfile::Affine6Dense,
+        ] {
+            assert!(exact_batched_verify_qualified(profile, 8, 1_024, 5));
+            assert!(!exact_batched_verify_qualified(profile, 8, 1_025, 5));
+        }
+        assert!(exact_batched_verify_qualified(
+            ExactBatchedVerifyProfile::Standard,
+            8,
+            1_024,
+            5
+        ));
+        assert!(exact_batched_verify_qualified(
+            ExactBatchedVerifyProfile::Affine8Dense,
+            8,
+            1_024,
+            5
+        ));
+        assert!(exact_batched_verify_qualified(
+            ExactBatchedVerifyProfile::Affine8Moe,
+            2,
+            1_024,
+            5
+        ));
+        assert!(!exact_batched_verify_qualified(
+            ExactBatchedVerifyProfile::Affine8Moe,
+            4,
+            1_024,
+            2
+        ));
+        assert!(!exact_batched_verify_qualified(
+            ExactBatchedVerifyProfile::Disabled,
+            8,
+            1_024,
+            5
+        ));
+        assert!(!exact_batched_verify_qualified(
+            ExactBatchedVerifyProfile::Standard,
+            9,
+            1_024,
+            5
+        ));
+        assert!(!exact_batched_verify_qualified(
+            ExactBatchedVerifyProfile::Affine8Dense,
+            8,
+            1_025,
+            5
+        ));
+        assert!(!exact_batched_verify_qualified(
+            ExactBatchedVerifyProfile::Affine8Dense,
+            8,
+            1_024,
+            6
+        ));
+        assert!(exact_batched_verify_qualified_for_kv_cache(
+            ExactBatchedVerifyProfile::Affine8Dense,
+            8,
+            1_024,
+            2,
+            Some(TurboQuantKVBits::K3V4)
+        ));
+        assert!(!exact_batched_verify_qualified_for_kv_cache(
+            ExactBatchedVerifyProfile::Affine8Dense,
+            8,
+            1_024,
+            3,
+            Some(TurboQuantKVBits::K3V4)
+        ));
+        assert!(exact_batched_verify_qualified_for_kv_cache(
+            ExactBatchedVerifyProfile::Affine8Dense,
+            8,
+            1_024,
+            5,
+            Some(TurboQuantKVBits::K4V4)
+        ));
+        for profile in [
+            ExactBatchedVerifyProfile::Affine5Dense,
+            ExactBatchedVerifyProfile::Affine6Dense,
+        ] {
+            assert!(exact_batched_verify_qualified_for_kv_cache(
+                profile, 8, 1_024, 5, None
+            ));
+            assert!(!exact_batched_verify_qualified_for_kv_cache(
+                profile,
+                8,
+                1_024,
+                2,
+                Some(TurboQuantKVBits::K3V4)
+            ));
+            assert!(!exact_batched_verify_qualified_for_kv_cache(
+                profile,
+                8,
+                1_024,
+                2,
+                Some(TurboQuantKVBits::K4V4)
+            ));
+        }
+        assert!(exact_batched_verify_qualified_for_kv_cache(
+            ExactBatchedVerifyProfile::Affine8Moe,
+            2,
+            1_024,
+            2,
+            Some(TurboQuantKVBits::K3V4)
+        ));
+        assert!(exact_batched_verify_qualified_for_kv_cache(
+            ExactBatchedVerifyProfile::Affine8Moe,
+            2,
+            1_024,
+            5,
+            Some(TurboQuantKVBits::K4V4)
+        ));
+        assert!(exact_batched_verify_qualified_for_kv_cache(
+            ExactBatchedVerifyProfile::Affine8Moe,
+            2,
+            1_024,
+            5,
+            None
+        ));
+    }
 
     #[test]
     fn exact_unique_image_rows_reuses_identical_pixels() {

@@ -25,6 +25,7 @@ use crate::core::model::Model;
 use crate::core::process_memory::{
     global_process_memory_governor, MemoryReservation, PressureLevel, StaticMemoryEstimate,
 };
+use crate::core::prompt_lookup::PromptLookupConfig;
 use crate::core::sampler::Sampler;
 use crate::core::scheduler_autotune::SchedulerAutotuneRuntimeProfile;
 use crate::core::speculative::{MtpDraftTokensArg, MtpSpeculativeConfig, MtpSpeculativeModel};
@@ -64,6 +65,8 @@ pub struct EngineModelManifest {
     pub mtp_model_dir: Option<PathBuf>,
     #[serde(default)]
     pub mtp_draft_tokens: Option<usize>,
+    #[serde(default)]
+    pub prompt_lookup: Option<PromptLookupConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -408,6 +411,7 @@ pub struct EngineModelConfig {
     pub pinned: bool,
     pub scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     pub mtp: Option<EngineMtpSettings>,
+    pub prompt_lookup: Option<PromptLookupConfig>,
     pub sampling_defaults: SamplingDefaults,
 }
 
@@ -421,6 +425,7 @@ impl EngineModelConfig {
             scheduler_profile: None,
             mtp_model_dir: self.mtp.as_ref().map(|mtp| mtp.model_dir.clone()),
             mtp_draft_tokens: self.mtp.as_ref().and_then(|mtp| mtp.draft_tokens),
+            prompt_lookup: self.prompt_lookup,
         }
     }
 }
@@ -462,13 +467,22 @@ fn validate_engine_model_config(model: &EngineModelConfig) -> Result<()> {
         .with_context(|| format!("reading {}", config_path.display()))?;
     let config: serde_json::Value =
         serde_json::from_str(&raw).with_context(|| format!("parsing {}", config_path.display()))?;
-    ModelArchitecture::from_config_value(&config).with_context(|| {
+    let architecture = ModelArchitecture::from_config_value(&config).with_context(|| {
         format!(
             "engine model `{}` has unsupported architecture in {}",
             model.id,
             config_path.display()
         )
     })?;
+    if let Some(prompt_lookup) = model.prompt_lookup {
+        prompt_lookup.validate()?;
+        if !architecture.supports_prompt_lookup() {
+            bail!(
+                "engine model `{}` configures PromptLookup for DiffusionGemma",
+                model.id
+            );
+        }
+    }
     Ok(())
 }
 
@@ -650,6 +664,7 @@ pub(crate) struct EngineLoadedModelInfo {
     pub max_position_embeddings: i32,
     pub mtp_model_dir: Option<String>,
     pub mtp_draft_tokens: Option<usize>,
+    pub prompt_lookup: Option<PromptLookupConfig>,
 }
 
 struct EnginePoolInner {
@@ -1468,6 +1483,7 @@ impl EnginePoolState {
                     .as_ref()
                     .map(|mtp| mtp.model_dir.to_string_lossy().into_owned()),
                 mtp_draft_tokens: slot.model.mtp.as_ref().and_then(|mtp| mtp.draft_tokens),
+                prompt_lookup: slot.model.prompt_lookup,
             });
         }
         models.sort_by(|a, b| a.id.cmp(&b.id));
@@ -1493,6 +1509,55 @@ impl EnginePoolState {
             }
         }
         snapshots
+    }
+
+    pub(crate) async fn clear_shared_prompt_lookup(
+        &self,
+        requested: Option<&str>,
+    ) -> Result<(usize, usize)> {
+        let requested_id = match requested {
+            Some(requested) => Some(
+                self.inner
+                    .registry
+                    .lock()
+                    .await
+                    .resolve_model_id(Some(requested))?
+                    .to_string(),
+            ),
+            None => None,
+        };
+        let slots = self.inner.slots.lock().await.clone();
+        let mut engines = Vec::new();
+        for (id, slot) in slots {
+            if requested_id
+                .as_deref()
+                .is_some_and(|requested| requested != id)
+            {
+                continue;
+            }
+            let engine = {
+                let state = slot.state.lock().await;
+                match &*state {
+                    EngineSlotState::Loaded { engine, .. } => Some(engine.clone()),
+                    _ => None,
+                }
+            };
+            if let Some(engine) = engine {
+                engines.push(engine);
+            }
+        }
+        if requested_id.is_some() && engines.is_empty() {
+            bail!(
+                "engine model `{}` is not loaded",
+                requested_id.as_deref().unwrap_or_default()
+            );
+        }
+        let mut cleared_entries = 0_usize;
+        for engine in &engines {
+            cleared_entries =
+                cleared_entries.saturating_add(engine.clear_shared_prompt_lookup().await?);
+        }
+        Ok((engines.len(), cleared_entries))
     }
 
     async fn model_list(&self) -> OpenAiModelList {
@@ -2202,6 +2267,26 @@ impl EngineSlot {
 }
 
 impl EngineVariant {
+    async fn clear_shared_prompt_lookup(&self) -> Result<usize> {
+        match self {
+            Self::Qwen35(state) => state.scheduler_handle.clear_shared_prompt_lookup().await,
+            Self::Qwen35Moe(state) => state.scheduler_handle.clear_shared_prompt_lookup().await,
+            Self::Qwen36Moe(state) => state.scheduler_handle.clear_shared_prompt_lookup().await,
+            Self::Gemma4(state) => state.scheduler_handle.clear_shared_prompt_lookup().await,
+            Self::Gemma4Drafter(state) => {
+                state
+                    .base
+                    .scheduler_handle
+                    .clear_shared_prompt_lookup()
+                    .await
+            }
+            Self::Glm4MoeLite(state) => state.scheduler_handle.clear_shared_prompt_lookup().await,
+            Self::Llama(state) => state.scheduler_handle.clear_shared_prompt_lookup().await,
+            Self::MiniCpmV46(state) => state.scheduler_handle.clear_shared_prompt_lookup().await,
+            Self::DiffusionGemma(_) => Ok(0),
+        }
+    }
+
     async fn openai_chat_completions(&self, req: openai::ChatRequest) -> Response {
         match self {
             Self::Qwen35(state) => openai::chat_completions(State(state.clone()), Json(req)).await,
@@ -2421,6 +2506,10 @@ async fn load_engine_variant(
         .ok_or_else(|| anyhow::anyhow!("config.json missing model_type"))?;
     let architecture = ModelArchitecture::from_model_type(model_type)?;
     let mtp_config = resolve_engine_mtp_config(model, architecture, loader.config_raw_value())?;
+    let prompt_lookup = model
+        .prompt_lookup
+        .map(PromptLookupConfig::validate)
+        .transpose()?;
     let scheduler_config = model.scheduler_runtime_profile.config;
     let paged_prefix_cache = runtime.paged_prefix_cache_config(&model.id, scheduler_config)?;
     let prefix_lru_cache = runtime.prefix_lru_cache_config(paged_prefix_cache.as_ref())?;
@@ -2438,6 +2527,7 @@ async fn load_engine_variant(
                 paged_prefix_cache,
                 prefix_lru_cache,
                 mtp_config,
+                prompt_lookup,
                 None,
             )
             .await
@@ -2455,6 +2545,7 @@ async fn load_engine_variant(
                     paged_prefix_cache,
                     prefix_lru_cache,
                     mtp_config,
+                    prompt_lookup,
                     None,
                 )
                 .await
@@ -2470,6 +2561,7 @@ async fn load_engine_variant(
                     paged_prefix_cache,
                     prefix_lru_cache,
                     mtp_config,
+                    prompt_lookup,
                     None,
                 )
                 .await
@@ -2492,10 +2584,25 @@ async fn load_engine_variant(
                     paged_prefix_cache,
                     prefix_lru_cache,
                     mtp_config,
+                    prompt_lookup,
                     vision_input,
                 )
                 .await?;
                 Ok(EngineVariant::Gemma4Drafter(Box::new(state)))
+            } else if let Some(prompt_lookup) = prompt_lookup {
+                let state = build_prompt_lookup_causal_state(
+                    model_impl,
+                    tokenizer,
+                    model,
+                    runtime,
+                    static_memory_estimate,
+                    paged_prefix_cache,
+                    prefix_lru_cache,
+                    prompt_lookup,
+                    vision_input,
+                )
+                .await?;
+                Ok(EngineVariant::Gemma4(state))
             } else {
                 let state = build_plain_causal_state(
                     model_impl,
@@ -2514,7 +2621,7 @@ async fn load_engine_variant(
         ModelArchitecture::Glm4MoeLite => {
             let model_impl =
                 Glm4MoeLiteModel::from_loader(&loader).context("Glm4MoeLiteModel::from_loader")?;
-            let state = build_plain_causal_state(
+            let state = build_plain_or_prompt_lookup_causal_state(
                 model_impl,
                 tokenizer,
                 model,
@@ -2522,6 +2629,7 @@ async fn load_engine_variant(
                 static_memory_estimate,
                 paged_prefix_cache,
                 prefix_lru_cache,
+                prompt_lookup,
                 None,
             )
             .await?;
@@ -2529,7 +2637,7 @@ async fn load_engine_variant(
         }
         ModelArchitecture::Llama => {
             let model_impl = LlamaModel::from_loader(&loader).context("LlamaModel::from_loader")?;
-            let state = build_plain_causal_state(
+            let state = build_plain_or_prompt_lookup_causal_state(
                 model_impl,
                 tokenizer,
                 model,
@@ -2537,6 +2645,7 @@ async fn load_engine_variant(
                 static_memory_estimate,
                 paged_prefix_cache,
                 prefix_lru_cache,
+                prompt_lookup,
                 None,
             )
             .await?;
@@ -2545,7 +2654,7 @@ async fn load_engine_variant(
         ModelArchitecture::MiniCpmV46 => {
             let model_impl = crate::models::minicpmv4_6::model_from_loader(&loader)
                 .context("minicpmv4_6::model_from_loader")?;
-            let state = build_plain_causal_state(
+            let state = build_plain_or_prompt_lookup_causal_state(
                 model_impl,
                 tokenizer,
                 model,
@@ -2553,6 +2662,7 @@ async fn load_engine_variant(
                 static_memory_estimate,
                 paged_prefix_cache,
                 prefix_lru_cache,
+                prompt_lookup,
                 Some(VisionInputConfig::MiniCpmV46 {
                     spatial_merge_size: 4,
                 }),
@@ -2564,6 +2674,12 @@ async fn load_engine_variant(
             if model.mtp.is_some() {
                 bail!(
                     "engine model `{}` configures MTP for DiffusionGemma",
+                    model.id
+                );
+            }
+            if model.prompt_lookup.is_some() && !architecture.supports_prompt_lookup() {
+                bail!(
+                    "engine model `{}` configures PromptLookup for DiffusionGemma",
                     model.id
                 );
             }
@@ -2604,6 +2720,7 @@ async fn build_qwen35_engine(
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     mtp_config: Option<ResolvedEngineMtpConfig>,
+    prompt_lookup: Option<PromptLookupConfig>,
     vision_input: Option<VisionInputConfig>,
 ) -> Result<EngineVariant> {
     if let Some(mtp_config) = mtp_config {
@@ -2616,12 +2733,13 @@ async fn build_qwen35_engine(
             paged_prefix_cache,
             prefix_lru_cache,
             mtp_config,
+            prompt_lookup,
             vision_input,
         )
         .await?;
         Ok(EngineVariant::Qwen35(state))
     } else {
-        let state = build_plain_causal_state(
+        let state = build_plain_or_prompt_lookup_causal_state(
             model_impl,
             tokenizer,
             model,
@@ -2629,6 +2747,7 @@ async fn build_qwen35_engine(
             static_memory_estimate,
             paged_prefix_cache,
             prefix_lru_cache,
+            prompt_lookup,
             vision_input,
         )
         .await?;
@@ -2646,6 +2765,7 @@ async fn build_qwen35_moe_engine(
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     mtp_config: Option<ResolvedEngineMtpConfig>,
+    prompt_lookup: Option<PromptLookupConfig>,
     vision_input: Option<VisionInputConfig>,
 ) -> Result<EngineVariant> {
     if let Some(mtp_config) = mtp_config {
@@ -2658,12 +2778,13 @@ async fn build_qwen35_moe_engine(
             paged_prefix_cache,
             prefix_lru_cache,
             mtp_config,
+            prompt_lookup,
             vision_input,
         )
         .await?;
         Ok(EngineVariant::Qwen35Moe(state))
     } else {
-        let state = build_plain_causal_state(
+        let state = build_plain_or_prompt_lookup_causal_state(
             model_impl,
             tokenizer,
             model,
@@ -2671,6 +2792,7 @@ async fn build_qwen35_moe_engine(
             static_memory_estimate,
             paged_prefix_cache,
             prefix_lru_cache,
+            prompt_lookup,
             vision_input,
         )
         .await?;
@@ -2688,6 +2810,7 @@ async fn build_qwen36_moe_engine(
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     mtp_config: Option<ResolvedEngineMtpConfig>,
+    prompt_lookup: Option<PromptLookupConfig>,
     vision_input: Option<VisionInputConfig>,
 ) -> Result<EngineVariant> {
     if let Some(mtp_config) = mtp_config {
@@ -2700,12 +2823,58 @@ async fn build_qwen36_moe_engine(
             paged_prefix_cache,
             prefix_lru_cache,
             mtp_config,
+            prompt_lookup,
             vision_input,
         )
         .await?;
         Ok(EngineVariant::Qwen36Moe(state))
     } else {
-        let state = build_plain_causal_state(
+        let state = build_plain_or_prompt_lookup_causal_state(
+            model_impl,
+            tokenizer,
+            model,
+            runtime,
+            static_memory_estimate,
+            paged_prefix_cache,
+            prefix_lru_cache,
+            prompt_lookup,
+            vision_input,
+        )
+        .await?;
+        Ok(EngineVariant::Qwen36Moe(state))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn build_plain_or_prompt_lookup_causal_state<M>(
+    model_impl: M,
+    tokenizer: Tokenizer,
+    model: &EngineModelConfig,
+    runtime: &EnginePoolRuntimeConfig,
+    static_memory_estimate: StaticMemoryEstimate,
+    paged_prefix_cache: Option<PagedPrefixCacheConfig>,
+    prefix_lru_cache: Option<PrefixLruCacheConfig>,
+    prompt_lookup: Option<PromptLookupConfig>,
+    vision_input: Option<VisionInputConfig>,
+) -> Result<AppState<M>>
+where
+    M: Model + crate::core::scheduler::DenseVlMethods + Send + 'static,
+{
+    if let Some(prompt_lookup) = prompt_lookup {
+        build_prompt_lookup_causal_state(
+            model_impl,
+            tokenizer,
+            model,
+            runtime,
+            static_memory_estimate,
+            paged_prefix_cache,
+            prefix_lru_cache,
+            prompt_lookup,
+            vision_input,
+        )
+        .await
+    } else {
+        build_plain_causal_state(
             model_impl,
             tokenizer,
             model,
@@ -2715,8 +2884,7 @@ async fn build_qwen36_moe_engine(
             prefix_lru_cache,
             vision_input,
         )
-        .await?;
-        Ok(EngineVariant::Qwen36Moe(state))
+        .await
     }
 }
 
@@ -2759,6 +2927,46 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+async fn build_prompt_lookup_causal_state<M>(
+    model_impl: M,
+    tokenizer: Tokenizer,
+    model: &EngineModelConfig,
+    runtime: &EnginePoolRuntimeConfig,
+    static_memory_estimate: StaticMemoryEstimate,
+    paged_prefix_cache: Option<PagedPrefixCacheConfig>,
+    prefix_lru_cache: Option<PrefixLruCacheConfig>,
+    prompt_lookup: PromptLookupConfig,
+    vision_input: Option<VisionInputConfig>,
+) -> Result<AppState<M>>
+where
+    M: Model + crate::core::scheduler::DenseVlMethods + Send + 'static,
+{
+    let profile = model.scheduler_runtime_profile.clone();
+    let state = super::build_prompt_lookup_app_state(
+        model_impl,
+        prompt_lookup,
+        tokenizer,
+        model.id.clone(),
+        profile.config.prefill_chunk_size,
+        profile.config.b_max,
+        profile.config.admission_deadline_ms,
+        profile.config.admission_queue_max,
+        profile.config.max_cache_cap,
+        profile.config.decode_cadence_mid_chunk_cap,
+        runtime.kv_cache_turboquant_bits,
+        profile,
+        runtime.scheduler_autotune_report,
+        vision_input,
+        paged_prefix_cache,
+        prefix_lru_cache,
+        static_memory_estimate,
+        runtime.active_kv_offload.clone(),
+    )
+    .await?;
+    Ok(state.with_sampling_defaults(model.sampling_defaults))
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn build_mtp_causal_state<M>(
     model_impl: M,
     tokenizer: Tokenizer,
@@ -2768,6 +2976,7 @@ async fn build_mtp_causal_state<M>(
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     mtp_config: ResolvedEngineMtpConfig,
+    prompt_lookup: Option<PromptLookupConfig>,
     vision_input: Option<VisionInputConfig>,
 ) -> Result<AppState<M>>
 where
@@ -2785,6 +2994,7 @@ where
         model_impl,
         mtp,
         mtp_config.draft_tokens,
+        prompt_lookup,
         tokenizer,
         model.id.clone(),
         profile.config.prefill_chunk_size,
@@ -2816,6 +3026,7 @@ async fn build_gemma4_drafter_causal_state(
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     mtp_config: ResolvedEngineMtpConfig,
+    prompt_lookup: Option<PromptLookupConfig>,
     vision_input: Option<VisionInputConfig>,
 ) -> Result<Gemma4DrafterAppState> {
     let drafter_loader = Loader::open_gemma4_drafter(&mtp_config.model_dir).with_context(|| {
@@ -2837,6 +3048,7 @@ async fn build_gemma4_drafter_causal_state(
         model_impl,
         drafter,
         mtp_config.draft_tokens,
+        prompt_lookup,
         tokenizer,
         model.id.clone(),
         profile.config.prefill_chunk_size,
@@ -3103,11 +3315,11 @@ mod tests {
 
     use super::{
         decide_engine_pool_capacity, estimated_engine_weight_bytes, estimated_model_weight_bytes,
-        unix_time_ms, EngineLoadPolicy, EngineLoadTrigger, EngineModelConfig, EngineModelManifest,
-        EngineMtpSettings, EnginePoolCapacityDecision, EnginePoolCapacityPolicy, EnginePoolConfig,
-        EnginePoolManifest, EnginePoolMemoryLimits, EnginePoolRuntimeConfig, EnginePoolState,
-        EngineRegistry, EngineRegistryError, EngineRuntimeState, EngineSlot, EngineSlotState,
-        ModelTtlCandidate,
+        unix_time_ms, validate_engine_model_config, EngineLoadPolicy, EngineLoadTrigger,
+        EngineModelConfig, EngineModelManifest, EngineMtpSettings, EnginePoolCapacityDecision,
+        EnginePoolCapacityPolicy, EnginePoolConfig, EnginePoolManifest, EnginePoolMemoryLimits,
+        EnginePoolRuntimeConfig, EnginePoolState, EngineRegistry, EngineRegistryError,
+        EngineRuntimeState, EngineSlot, EngineSlotState, ModelTtlCandidate,
     };
     use tokio::sync::{Mutex, Notify};
 
@@ -3120,6 +3332,7 @@ mod tests {
             scheduler_profile: None,
             mtp_model_dir: None,
             mtp_draft_tokens: None,
+            prompt_lookup: None,
         }
     }
 
@@ -3172,6 +3385,7 @@ mod tests {
             pinned: false,
             scheduler_runtime_profile: runtime_profile(),
             mtp: None,
+            prompt_lookup: None,
             sampling_defaults: SamplingDefaults::default(),
         }
     }
@@ -3192,6 +3406,21 @@ mod tests {
         )
         .expect("write config");
         dir
+    }
+
+    #[test]
+    fn engine_model_accepts_neural_and_prompt_lookup_sources_together() {
+        let model_dir = write_minimal_model_config("qwen3_5");
+        let mut config = model_config("dual-source", &model_dir, EngineLoadPolicy::Lazy);
+        config.mtp = Some(EngineMtpSettings {
+            model_dir: model_dir.clone(),
+            draft_tokens: Some(2),
+        });
+        config.prompt_lookup = Some(crate::core::prompt_lookup::PromptLookupConfig::default());
+
+        validate_engine_model_config(&config).expect("hybrid sources are valid");
+
+        std::fs::remove_dir_all(model_dir).expect("cleanup");
     }
 
     #[test]

@@ -227,6 +227,7 @@ private actor FakeRestartModelLoader: BackendModelLoading {
         pinned: Bool,
         mtpModelDir: String?,
         mtpDraftTokens: Int?,
+        promptLookup: BackendPromptLookupConfig?,
         samplingDefaults: BackendSamplingDefaults
     ) async throws -> BackendModelAdminResponse {
         calls.append("register:\(model):\(modelDir):\(setDefault):\(maxCacheCap.map(String.init) ?? "nil"):\(pinned):\(mtpModelDir ?? "nil"):\(mtpDraftTokens.map(String.init) ?? "nil")")
@@ -250,6 +251,7 @@ private actor FakeRestartModelLoader: BackendModelLoading {
         pinned: Bool,
         mtpModelDir: String?,
         mtpDraftTokens: Int?,
+        promptLookup: BackendPromptLookupConfig?,
         reloadWhenIdle: Bool,
         samplingDefaults: BackendSamplingDefaults
     ) async throws -> BackendModelAdminResponse {

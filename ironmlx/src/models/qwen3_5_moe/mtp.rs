@@ -101,6 +101,8 @@ impl Qwen35MoeMtp {
             .pre_fc_norm_embedding
             .forward_on(next_token_embeds, target)?;
         let concat = mlx::ops::shape::concatenate_on(&[&e, &h], -1, target)?;
+        let _product_stable_head =
+            (concat.shape().as_slice()[0] > 1).then(crate::nn::product_stable_qmm::scope);
         let mut x = self.fc.forward_on(&concat, target)?;
 
         for (i, layer) in self.layers.iter().enumerate() {
@@ -109,6 +111,40 @@ impl Qwen35MoeMtp {
         }
 
         self.norm.forward_on(&x, target)
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn debug_forward_stages_on(
+        &self,
+        hidden_states: &Array,
+        next_token_embeds: &Array,
+        mrope: &Mrope,
+        cos: &Array,
+        sin: &Array,
+        mask: Option<&Array>,
+        mut mtp_cache: Option<&mut MtpCache>,
+        product_stable_head: bool,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Vec<Array>> {
+        let target = target.into();
+        self.validate_inputs(hidden_states, next_token_embeds, mtp_cache.as_deref())?;
+
+        let h = self.pre_fc_norm_hidden.forward_on(hidden_states, target)?;
+        let e = self
+            .pre_fc_norm_embedding
+            .forward_on(next_token_embeds, target)?;
+        let concat = mlx::ops::shape::concatenate_on(&[&e, &h], -1, target)?;
+        let _product_stable_head = product_stable_head.then(crate::nn::product_stable_qmm::scope);
+        let mut x = self.fc.forward_on(&concat, target)?;
+        let mut stages = vec![h, e, x.clone()];
+        for (i, layer) in self.layers.iter().enumerate() {
+            let layer_cache = mtp_cache.as_deref_mut().map(|cache| cache.layer_mut(i));
+            x = layer.forward_on_full_kv(&x, mrope, cos, sin, mask, layer_cache, target)?;
+            stages.push(x.clone());
+        }
+        stages.push(self.norm.forward_on(&x, target)?);
+        Ok(stages)
     }
 
     fn validate_inputs(

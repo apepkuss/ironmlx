@@ -16,11 +16,15 @@ use crate::core::generate::{
     build_position_ids, build_position_ids_vl, count_image_pad, extend_vl_chunk_end_for_image_pad,
     slice_pos_ids_axis2, slice_vision_embeds_rows, GenerateEvent, GenerateRequest,
 };
+use crate::core::sampler::draw_uniforms;
 use crate::core::scheduler::{paged_prefix_fingerprint_for_request, DenseVlMethods};
 use crate::core::speculative::{
-    add_elapsed_us, adjust_mtp_draft_budget, elapsed_us_since, resolve_speculative_tokens,
-    sample_logits_positions, slice_hidden_position, trim_full_layer_cache_rows_to_accepted_prefix,
-    verify_input, MtpSpeculativeConfig, MtpSpeculativeStats,
+    add_elapsed_us, adjust_mtp_draft_budget, elapsed_us_since,
+    resolve_exact_deterministic_target_logits, resolve_speculative_tokens,
+    sample_draft_logits_position, sample_draft_logits_position_with_uniform,
+    sample_logits_positions, slice_hidden_position, split_speculative_draft_prng,
+    trim_full_layer_cache_rows_to_accepted_prefix, verify_input, DraftTokenDistribution,
+    MtpSpeculativeConfig, MtpSpeculativeStats,
 };
 use crate::core::tokenizer::{DecodeStream, Tokenizer};
 use crate::core::{Loader, Model};
@@ -872,7 +876,11 @@ pub struct Gemma4DrafterTraceWindow {
     pub history_len: usize,
     pub verify_start_pos: i32,
     pub draft_tokens: Vec<u32>,
+    /// Greedy target tokens at every verify position. Empty for sampled exact
+    /// windows because the target at each position is a distribution.
     pub verified_tokens: Vec<u32>,
+    /// Tokens selected by acceptance, correction, or full-accept bonus.
+    pub resolved_tokens: Vec<u32>,
     pub accepted_draft_len: usize,
 }
 
@@ -910,11 +918,6 @@ impl<'m> Gemma4DrafterGenerationStream<'m> {
         if cfg.max_draft_tokens == 0 {
             return Err(anyhow!(
                 "Gemma4DrafterGenerationStream::new: max_draft_tokens must be > 0"
-            ));
-        }
-        if !request.sampler.is_pipelinable() {
-            return Err(anyhow!(
-                "Gemma4DrafterGenerationStream::new: Gemma4 drafter decoding currently requires greedy sampling"
             ));
         }
         if request.pixel_values.is_none() && request.image_grid_thw.is_some() {
@@ -1211,7 +1214,8 @@ impl<'m> Gemma4DrafterGenerationStream<'m> {
             .adaptive_draft_tokens
             .clamp(1, self.cfg.max_draft_tokens)
             .min(remaining);
-        let draft_tokens = self.draft_tokens(current_token, draft_budget)?;
+        let (draft_tokens, _draft_distributions) =
+            self.draft_tokens(current_token, draft_budget)?;
         let verify_input = verify_input(current_token, &draft_tokens);
         let verify_start_pos = (self.history.len() - 1) as i32;
         let verify_pos_ids = self.position_ids(verify_start_pos, verify_input.len() as i32)?;
@@ -1236,15 +1240,31 @@ impl<'m> Gemma4DrafterGenerationStream<'m> {
         let verified_logits = self.model.project_hidden_on(&verified.hidden, ())?;
         add_elapsed_us(&mut self.stats.projection_us, projection_start);
         let sampling_start = Instant::now();
-        let verified_tokens = sample_logits_positions(
-            &verified_logits,
-            self.request.sampler,
-            &self.history,
-            &mut self.prng_state,
-        )?;
+        let (resolution, verified_tokens) = if self.request.sampler.is_pipelinable() {
+            let verified_tokens = sample_logits_positions(
+                &verified_logits,
+                self.request.sampler,
+                &self.history,
+                &mut self.prng_state,
+            )?;
+            (
+                resolve_speculative_tokens(&draft_tokens, &verified_tokens)?,
+                verified_tokens,
+            )
+        } else {
+            (
+                resolve_exact_deterministic_target_logits(
+                    &draft_tokens,
+                    &verified_logits,
+                    self.request.sampler,
+                    &self.history,
+                    &mut self.prng_state,
+                )?,
+                Vec::new(),
+            )
+        };
         add_elapsed_us(&mut self.stats.sampling_us, sampling_start);
 
-        let resolution = resolve_speculative_tokens(&draft_tokens, &verified_tokens)?;
         let accepted_draft_len = resolution.accepted_draft_len;
         let rollback_count = usize::from(resolution.needs_rollback);
         if self.trace_windows.len() < self.trace_window_limit {
@@ -1252,13 +1272,15 @@ impl<'m> Gemma4DrafterGenerationStream<'m> {
                 history_len: self.history.len(),
                 verify_start_pos,
                 draft_tokens: draft_tokens.clone(),
-                verified_tokens: verified_tokens.clone(),
+                verified_tokens,
+                resolved_tokens: resolution.tokens_to_append.clone(),
                 accepted_draft_len: resolution.accepted_draft_len,
             });
         }
         self.stats.windows += 1;
         self.stats.drafted_tokens += draft_tokens.len();
         self.stats.accepted_draft_tokens += resolution.accepted_draft_len;
+        self.stats.record_exact_sampling(resolution.exact_sampling);
         self.stats
             .record_window_acceptance(draft_tokens.len(), resolution.accepted_draft_len);
         if resolution.needs_rollback {
@@ -1333,15 +1355,26 @@ impl<'m> Gemma4DrafterGenerationStream<'m> {
         Ok(())
     }
 
-    fn draft_tokens(&mut self, current_token: u32, draft_budget: usize) -> Result<Vec<u32>> {
+    fn draft_tokens(
+        &mut self,
+        current_token: u32,
+        draft_budget: usize,
+    ) -> Result<(Vec<u32>, Vec<DraftTokenDistribution>)> {
         let mut draft_tokens = Vec::with_capacity(draft_budget);
+        let mut draft_distributions = Vec::with_capacity(draft_budget);
         let mut draft_history = self.history.clone();
         let mut input_hidden = self.last_hidden.clone();
         let mut input_token = current_token;
         let kv_valid_len = (self.history.len() - 1) as i32;
         let draft_position = draft_position_for_shared_kv(kv_valid_len);
+        let draft_uniforms = if self.request.sampler.is_pipelinable() {
+            vec![0.0; draft_budget]
+        } else {
+            let mut draft_prng = split_speculative_draft_prng(&mut self.prng_state)?;
+            draw_uniforms(&mut draft_prng, draft_budget)?
+        };
 
-        for _ in 0..draft_budget {
+        for &draft_uniform in draft_uniforms.iter().take(draft_budget) {
             let token_arr: Array = (&[input_token][..], &[1_i32, 1_i32][..]).try_into()?;
             let token_embed = self.model.embed_on(&token_arr, ())?;
             let inputs_embeds =
@@ -1356,23 +1389,30 @@ impl<'m> Gemma4DrafterGenerationStream<'m> {
             )?;
             add_elapsed_us(&mut self.stats.draft_forward_us, draft_forward_start);
             let sampling_start = Instant::now();
-            let sampled = sample_logits_positions(
-                &output.logits,
-                self.request.sampler,
-                &draft_history,
-                &mut self.prng_state,
-            )?;
+            let (next_token, distribution) = if self.request.sampler.is_pipelinable() {
+                sample_draft_logits_position(
+                    &output.logits,
+                    self.request.sampler,
+                    &draft_history,
+                    None,
+                )?
+            } else {
+                sample_draft_logits_position_with_uniform(
+                    &output.logits,
+                    self.request.sampler,
+                    &draft_history,
+                    draft_uniform,
+                )?
+            };
             add_elapsed_us(&mut self.stats.sampling_us, sampling_start);
-            let next_token = *sampled
-                .first()
-                .ok_or_else(|| anyhow!("Gemma4 drafter produced no token"))?;
             draft_tokens.push(next_token);
+            draft_distributions.push(distribution);
             draft_history.push(next_token);
             input_hidden = output.hidden_states;
             input_token = next_token;
         }
 
-        Ok(draft_tokens)
+        Ok((draft_tokens, draft_distributions))
     }
 
     fn position_ids(&self, start_pos: i32, len: i32) -> Result<Array> {

@@ -57,13 +57,10 @@ fn mtp_config_rejects_zero_draft_tokens() {
 }
 
 #[test]
-fn mtp_config_rejects_non_greedy_sampler() {
-    let err = MtpSpeculativeConfig::new(4, Sampler::greedy().with_temperature(0.7)).unwrap_err();
+fn mtp_config_accepts_sampled_sampler() {
+    let cfg = MtpSpeculativeConfig::new(4, Sampler::greedy().with_temperature(0.7)).unwrap();
 
-    assert!(
-        err.to_string().contains("greedy"),
-        "unexpected error: {err}"
-    );
+    assert_eq!(cfg.max_draft_tokens, 4);
 }
 
 #[test]
@@ -157,6 +154,26 @@ impl ironmlx::core::Model for FakeMtpModel {
         Ok(Array::zeros((dims[0], dims[1], 4_i32), Dtype::Float32)?)
     }
 
+    fn project_hidden_on(&self, hidden: &Array, _target: StreamOrDevice) -> ironmlx::Result<Array> {
+        let call_idx = {
+            let mut calls = self.project_calls.lock().unwrap();
+            let idx = *calls;
+            *calls += 1;
+            idx
+        };
+        let seq = hidden.shape().as_slice()[1] as usize;
+        let mut flat = vec![0.0_f32; seq * 128];
+        let tokens: Vec<usize> = match call_idx {
+            0 => vec![10],
+            1 => vec![11, 12, 13],
+            _ => vec![0; seq],
+        };
+        for (row, token) in tokens.into_iter().enumerate().take(seq) {
+            flat[row * 128 + token] = 100.0;
+        }
+        Ok((&flat[..], &[1_i32, seq as i32, 128_i32][..]).try_into()?)
+    }
+
     fn model_meta(&self) -> ironmlx::core::memory_budget::ModelMeta {
         ironmlx::core::memory_budget::test_meta_qwen35()
     }
@@ -181,30 +198,6 @@ impl MtpSpeculativeModel for FakeMtpModel {
         dtype: Dtype,
     ) -> ironmlx::Result<ironmlx::core::cache::MtpCache> {
         ironmlx::core::cache::MtpCache::new_with_cap(1, 1, 1, 1, 1, dtype, cap)
-    }
-
-    fn project_hidden_on(
-        &self,
-        hidden: &Array,
-        _target: impl Into<StreamOrDevice>,
-    ) -> ironmlx::Result<Array> {
-        let call_idx = {
-            let mut calls = self.project_calls.lock().unwrap();
-            let idx = *calls;
-            *calls += 1;
-            idx
-        };
-        let seq = hidden.shape().as_slice()[1] as usize;
-        let mut flat = vec![0.0_f32; seq * 128];
-        let tokens: Vec<usize> = match call_idx {
-            0 => vec![10],
-            1 => vec![11, 12, 13],
-            _ => vec![0; seq],
-        };
-        for (row, token) in tokens.into_iter().enumerate().take(seq) {
-            flat[row * 128 + token] = 100.0;
-        }
-        Ok((&flat[..], &[1_i32, seq as i32, 128_i32][..]).try_into()?)
     }
 
     fn mtp_hidden_size(&self, _mtp: &Self::MtpHead) -> i32 {

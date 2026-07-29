@@ -8,6 +8,7 @@ mod attention;
 pub mod config;
 mod decoder_layer;
 mod model;
+mod speculative;
 
 pub use config::LlamaConfig;
 pub use model::LlamaModel;

@@ -10,6 +10,7 @@
 //!
 //! See P3b2 spec § 2 for the data flow.
 
+use anyhow::anyhow;
 use mlx::{Array, StreamOrDevice};
 
 use crate::core::cache::KVCache;
@@ -325,7 +326,14 @@ impl GatedAttention {
                         }
                     };
 
-                    if let Some(signs) = c
+                    let exact_batched_verify = super::position_stable_qmm::is_armed() && seq > 1;
+                    if exact_batched_verify {
+                        let (k, v) = mask_kv(k, v)?;
+                        query_position_isolated_attention_on(
+                            c, mrope, &queries, &k, &v, cos, sin, mask, lens_ref, self.scale,
+                            target,
+                        )?
+                    } else if let Some(signs) = c
                         .turboquant_pre_rotated_decode_query_signs(&queries, &k, &v, lens_ref, mask)
                     {
                         let (queries_tq, k_tq) = mrope
@@ -432,6 +440,234 @@ impl GatedAttention {
 
             self.o_proj.forward_on(&gated, target)
         }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn query_position_isolated_attention_on(
+    cache: &mut KVCache,
+    mrope: &Mrope,
+    queries: &Array,
+    keys: &Array,
+    values: &Array,
+    cos: &Array,
+    sin: &Array,
+    mask: Option<&Array>,
+    per_row_lens: &[i32],
+    scale: f32,
+    target: StreamOrDevice,
+) -> Result<Array> {
+    let q_shape = queries.shape();
+    let q_dims = q_shape.as_slice();
+    if q_dims.len() != 4 {
+        return Err(anyhow!(
+            "Qwen exact verify attention expected rank-4 queries, got {q_dims:?}"
+        ));
+    }
+    let (batch, heads, query_len, head_dim) = (q_dims[0], q_dims[1], q_dims[2], q_dims[3]);
+    if per_row_lens.len() != batch as usize {
+        return Err(anyhow!(
+            "Qwen exact verify attention expected {batch} row lengths, got {}",
+            per_row_lens.len()
+        ));
+    }
+    if query_len <= 1 {
+        return Err(anyhow!(
+            "Qwen exact verify attention requires Q>1, got Q={query_len}"
+        ));
+    }
+    for (row, &len) in per_row_lens.iter().enumerate() {
+        if len < 0 || len > query_len {
+            return Err(anyhow!(
+                "Qwen exact verify attention invalid row {row} length {len} for Q={query_len}"
+            ));
+        }
+    }
+
+    let key_shape = keys.shape();
+    let key_dims = key_shape.as_slice();
+    let value_shape = values.shape();
+    let value_dims = value_shape.as_slice();
+    if key_dims.len() != 4
+        || value_dims.len() != 4
+        || key_dims[0] != batch
+        || value_dims[0] != batch
+        || key_dims[2] != query_len
+        || key_dims[2] != value_dims[2]
+    {
+        return Err(anyhow!(
+            "Qwen exact verify attention incompatible KV shapes: keys={key_dims:?}, values={value_dims:?}, batch={batch}"
+        ));
+    }
+    let mask_shape = mask.map(Array::shape);
+    if let Some(mask_shape) = mask_shape.as_ref() {
+        let dims = mask_shape.as_slice();
+        if dims.len() != 4
+            || (!matches!(dims[0], 1) && dims[0] != batch)
+            || dims[2] < query_len
+            || dims[3] < query_len
+        {
+            return Err(anyhow!(
+                "Qwen exact verify attention mask {dims:?} cannot cover B={batch}, Q={query_len}"
+            ));
+        }
+    }
+    let cos_shape = cos.shape();
+    let cos_dims = cos_shape.as_slice();
+    let sin_shape = sin.shape();
+    let sin_dims = sin_shape.as_slice();
+    if cos_dims.len() != 3
+        || sin_dims.len() != 3
+        || cos_dims[0] != batch
+        || sin_dims[0] != batch
+        || cos_dims[1] != query_len
+        || sin_dims[1] != query_len
+        || cos_dims[2] != sin_dims[2]
+    {
+        return Err(anyhow!(
+            "Qwen exact verify attention incompatible MRoPE shapes: cos={cos_dims:?}, sin={sin_dims:?}, B={batch}, Q={query_len}"
+        ));
+    }
+
+    let mut outputs = Vec::with_capacity(query_len as usize);
+    for depth in 0..query_len {
+        let query = mlx::ops::indexing::slice_strided_on(
+            queries,
+            &[0_i32, 0, depth, 0][..],
+            &[batch, heads, depth + 1, head_dim][..],
+            &[1_i32, 1, 1, 1][..],
+            target,
+        )?;
+        let key = mlx::ops::indexing::slice_strided_on(
+            keys,
+            &[0_i32, 0, depth, 0][..],
+            &[batch, key_dims[1], depth + 1, key_dims[3]][..],
+            &[1_i32, 1, 1, 1][..],
+            target,
+        )?;
+        let value = mlx::ops::indexing::slice_strided_on(
+            values,
+            &[0_i32, 0, depth, 0][..],
+            &[batch, value_dims[1], depth + 1, value_dims[3]][..],
+            &[1_i32, 1, 1, 1][..],
+            target,
+        )?;
+        let depth_cos = mlx::ops::indexing::slice_strided_on(
+            cos,
+            &[0_i32, depth, 0][..],
+            &[batch, depth + 1, cos_dims[2]][..],
+            &[1_i32, 1, 1][..],
+            target,
+        )?;
+        let depth_sin = mlx::ops::indexing::slice_strided_on(
+            sin,
+            &[0_i32, depth, 0][..],
+            &[batch, depth + 1, sin_dims[2]][..],
+            &[1_i32, 1, 1][..],
+            target,
+        )?;
+        let step_lens = per_row_lens
+            .iter()
+            .map(|&len| i32::from(depth < len))
+            .collect::<Vec<_>>();
+        let key_end = cache
+            .offsets()
+            .iter()
+            .zip(step_lens.iter())
+            .map(|(&offset, &len)| offset + len)
+            .max()
+            .unwrap_or(0);
+        let depth_mask = mask
+            .map(|mask| {
+                let dims = mask_shape
+                    .as_ref()
+                    .expect("mask dimensions exist when mask exists");
+                let dims = dims.as_slice();
+                mlx::ops::indexing::slice_strided_on(
+                    mask,
+                    &[0_i32, 0, depth, 0][..],
+                    &[dims[0], dims[1], depth + 1, key_end][..],
+                    &[1_i32, 1, 1, 1][..],
+                    target,
+                )
+                .map_err(anyhow::Error::from)
+            })
+            .transpose()?;
+        outputs.push(update_and_attend_exact_position_on(
+            cache,
+            mrope,
+            &query,
+            &key,
+            &value,
+            &depth_cos,
+            &depth_sin,
+            &step_lens,
+            scale,
+            depth_mask.as_ref(),
+            target,
+        )?);
+    }
+    let output_refs = outputs.iter().collect::<Vec<_>>();
+    mlx::ops::shape::concatenate_on(&output_refs, 2, target).map_err(Into::into)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn update_and_attend_exact_position_on(
+    cache: &mut KVCache,
+    mrope: &Mrope,
+    query: &Array,
+    key: &Array,
+    value: &Array,
+    cos: &Array,
+    sin: &Array,
+    per_row_lens: &[i32],
+    scale: f32,
+    mask: Option<&Array>,
+    target: StreamOrDevice,
+) -> Result<Array> {
+    if let Some(signs) =
+        cache.turboquant_pre_rotated_decode_query_signs(query, key, value, per_row_lens, mask)
+    {
+        let (query_tq, key_tq) =
+            mrope.apply_decode_query_turbo_rotation(query, key, cos, sin, signs)?;
+        if let Some(output) = cache.try_update_and_attend_decode_pre_rotated_on(
+            &query_tq,
+            &key_tq,
+            value,
+            per_row_lens,
+            scale,
+            mask,
+            query.dtype(),
+            target,
+        )? {
+            return Ok(output);
+        }
+    }
+
+    let (query, key) = mrope.apply(query, key, cos, sin)?;
+    if let Some(output) =
+        cache.try_update_and_attend_on(&query, &key, value, per_row_lens, scale, mask, target)?
+    {
+        return Ok(output);
+    }
+    let (keys, values) =
+        cache.update_and_fetch_for_attention_on(&key, value, per_row_lens, target)?;
+    match mask {
+        Some(mask) => mlx::fast::scaled_dot_product_attention_on(
+            &query,
+            &keys,
+            &values,
+            scale,
+            "",
+            Some(mask),
+            None,
+            target,
+        )
+        .map_err(Into::into),
+        None => mlx::fast::scaled_dot_product_attention_on(
+            &query, &keys, &values, scale, "causal", None, None, target,
+        )
+        .map_err(Into::into),
     }
 }
 

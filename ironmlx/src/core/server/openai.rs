@@ -396,6 +396,10 @@ where
     let max_tokens = req.max_tokens;
     let model_label = req.model.clone().unwrap_or_else(|| state.model_id.clone());
     let sampler = build_sampler(&req, state.sampling_defaults);
+    if let Err(error) = super::validate_prompt_lookup_sampler(state.prompt_lookup_enabled, sampler)
+    {
+        return (StatusCode::BAD_REQUEST, format!("{error:#}")).into_response();
+    }
     let chat_template_kwargs = req.chat_template_kwargs;
 
     // Build a per-request reqwest client for image fetching.
@@ -457,7 +461,7 @@ where
         scheduler_config.prefill_chunk_size,
         state.b_max,
         state.paged_prefix_cache_enabled,
-        state.mtp_enabled && sampler.is_pipelinable(),
+        state.force_scheduler_for_greedy && sampler.is_pipelinable(),
     );
 
     let stop_token_ids = stop_token_ids_for_request(state.tokenizer.eos_token_ids(), ignore_eos);

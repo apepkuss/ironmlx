@@ -1915,6 +1915,115 @@ mod tests {
     }
 
     #[test]
+    fn multi_token_write_matches_sequential_single_token_writes() {
+        let batch = 2_i32;
+        let heads = 2_i32;
+        let seq = 5_i32;
+        let head_dim = 128_i32;
+        let data = test_values((batch * heads * seq * head_dim) as usize);
+        let k: Array = (data.as_slice(), &[batch, heads, seq, head_dim][..])
+            .try_into()
+            .unwrap();
+        let v_data = data
+            .iter()
+            .map(|value| value.mul_add(0.7, 0.2))
+            .collect::<Vec<_>>();
+        let v: Array = (v_data.as_slice(), &[batch, heads, seq, head_dim][..])
+            .try_into()
+            .unwrap();
+
+        for bits in [TurboQuantKVBits::K3V4, TurboQuantKVBits::K4V4] {
+            let mut batched =
+                TurboQuantKVCache::new(batch, heads, head_dim, head_dim, 32, 32, bits).unwrap();
+            let mut sequential =
+                TurboQuantKVCache::new(batch, heads, head_dim, head_dim, 32, 32, bits).unwrap();
+            let mut batched_offsets = vec![0_i32; batch as usize];
+            let mut sequential_offsets = vec![0_i32; batch as usize];
+
+            batched
+                .update_and_fetch_on(
+                    &k,
+                    &v,
+                    &mut batched_offsets,
+                    &vec![seq; batch as usize],
+                    Dtype::Float32,
+                    (),
+                )
+                .unwrap();
+            for token in 0..seq {
+                let token_k = slice_strided_on(
+                    &k,
+                    [0_i32, 0, token, 0],
+                    [batch, heads, token + 1, head_dim],
+                    [1_i32, 1, 1, 1],
+                    (),
+                )
+                .unwrap();
+                let token_v = slice_strided_on(
+                    &v,
+                    [0_i32, 0, token, 0],
+                    [batch, heads, token + 1, head_dim],
+                    [1_i32, 1, 1, 1],
+                    (),
+                )
+                .unwrap();
+                sequential
+                    .update_and_fetch_on(
+                        &token_k,
+                        &token_v,
+                        &mut sequential_offsets,
+                        &vec![1_i32; batch as usize],
+                        Dtype::Float32,
+                        (),
+                    )
+                    .unwrap();
+            }
+
+            assert_eq!(batched_offsets, sequential_offsets);
+            assert_eq!(
+                batched.k_packed.as_ref().unwrap().to_vec::<u32>().unwrap(),
+                sequential
+                    .k_packed
+                    .as_ref()
+                    .unwrap()
+                    .to_vec::<u32>()
+                    .unwrap(),
+                "{bits:?} K packed differs"
+            );
+            assert_eq!(
+                batched.k_norms.as_ref().unwrap().to_vec::<f32>().unwrap(),
+                sequential
+                    .k_norms
+                    .as_ref()
+                    .unwrap()
+                    .to_vec::<f32>()
+                    .unwrap(),
+                "{bits:?} K norms differ"
+            );
+            assert_eq!(
+                batched.v_packed.as_ref().unwrap().to_vec::<u32>().unwrap(),
+                sequential
+                    .v_packed
+                    .as_ref()
+                    .unwrap()
+                    .to_vec::<u32>()
+                    .unwrap(),
+                "{bits:?} V packed differs"
+            );
+            assert_eq!(
+                batched.v_norms.as_ref().unwrap().to_vec::<f32>().unwrap(),
+                sequential
+                    .v_norms
+                    .as_ref()
+                    .unwrap()
+                    .to_vec::<f32>()
+                    .unwrap(),
+                "{bits:?} V norms differ"
+            );
+        }
+    }
+
+    #[test]
     fn k3v4_per_row_append_preserves_identical_d512_batch_rows() {
         let batch = 4_i32;
         let heads = 2_i32;

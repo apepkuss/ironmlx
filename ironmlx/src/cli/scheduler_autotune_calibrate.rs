@@ -262,8 +262,13 @@ fn default_candidate_configs(
     runtime_context: &SchedulerAutotuneRuntimeContext,
 ) -> Vec<SchedulerAutotuneProfileConfig> {
     let b_max_values: &[usize] = match runtime_context.speculative.mode {
-        SchedulerSpeculativeMode::QwenMtp => &[1, 2],
-        SchedulerSpeculativeMode::Disabled | SchedulerSpeculativeMode::Gemma4Drafter => &[1, 2, 4],
+        SchedulerSpeculativeMode::QwenMtp | SchedulerSpeculativeMode::QwenMtpPromptLookup => {
+            &[1, 2]
+        }
+        SchedulerSpeculativeMode::Disabled
+        | SchedulerSpeculativeMode::Gemma4Drafter
+        | SchedulerSpeculativeMode::Gemma4DrafterPromptLookup
+        | SchedulerSpeculativeMode::PromptLookup => &[1, 2, 4],
     };
     let mut candidates = Vec::new();
     for &b_max in b_max_values {
@@ -1540,7 +1545,7 @@ mod tests {
         args.candidates.clear();
         let mut context = sample_runtime_context();
         context.speculative.mode = SchedulerSpeculativeMode::QwenMtp;
-        context.speculative.draft_model_fingerprint = Some("mtp-model".to_string());
+        context.speculative.source_fingerprint = Some("mtp-model".to_string());
         context.speculative.draft_tokens = Some(3);
 
         let resolved = resolve_run_config_with_context(

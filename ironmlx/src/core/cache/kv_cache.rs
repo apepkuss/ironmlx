@@ -40,14 +40,17 @@ pub struct KVCache {
     paged: Option<Box<PagedKVCache>>,
 }
 
-/// Lightweight checkpoint for [`KVCache`] rollback.
+/// Checkpoint for [`KVCache`] rollback.
 ///
-/// This intentionally stores only logical offsets. The dense K/V buffers may
-/// retain stale data past those offsets; callers already mask positions above
-/// each row's logical length.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Dense storage keeps the pre-verify Array handles so rollback restores the
+/// actual K/V data graph as well as logical offsets. Paged and TurboQuant
+/// storage retain their backend-owned data and restore through offsets.
+#[derive(Debug, Clone)]
 pub struct KVCacheSnapshot {
     offsets: Vec<i32>,
+    dense_keys: Option<Array>,
+    dense_values: Option<Array>,
+    restores_dense_storage: bool,
 }
 
 impl KVCacheSnapshot {
@@ -827,17 +830,38 @@ impl KVCache {
 
     /// Capture the current logical cache position. No K/V buffers are copied.
     pub fn snapshot(&self) -> KVCacheSnapshot {
+        let restores_dense_storage = self.turboquant.is_none() && self.paged.is_none();
         KVCacheSnapshot {
             offsets: self.offsets.clone(),
+            dense_keys: if restores_dense_storage {
+                self.keys.clone()
+            } else {
+                None
+            },
+            dense_values: if restores_dense_storage {
+                self.values.clone()
+            } else {
+                None
+            },
+            restores_dense_storage,
         }
     }
 
-    /// Restore logical offsets from a prior checkpoint.
+    /// Restore offsets and, for dense storage, the exact pre-verify K/V graph.
     ///
-    /// This is the cheap rollback path used by speculative decoding: stale
-    /// K/V data beyond restored offsets is left in-place and ignored by masks.
+    /// Paged and TurboQuant backends retain their backend-owned data and use
+    /// their offset rollback path.
     pub fn restore(&mut self, snapshot: &KVCacheSnapshot) -> Result<()> {
-        self.restore_offsets(snapshot.offsets())
+        self.restore_offsets(snapshot.offsets())?;
+        if snapshot.restores_dense_storage {
+            anyhow::ensure!(
+                self.turboquant.is_none() && self.paged.is_none(),
+                "KVCache::restore: dense snapshot cannot restore into Paged or TurboQuant storage"
+            );
+            self.keys = snapshot.dense_keys.clone();
+            self.values = snapshot.dense_values.clone();
+        }
+        Ok(())
     }
 
     /// Set logical offsets directly. Intended for rollback/truncation to an
@@ -2102,19 +2126,41 @@ mod tests {
     }
 
     #[test]
-    fn kvcache_snapshot_restore_offsets_only() {
+    fn kvcache_snapshot_restores_dense_storage_and_offsets() {
         let mut c = make_cache_b(2, 1024);
         let (k1, v1) = make_kv_b(2, 8);
         c.update_and_fetch(&k1, &v1, &[4, 8]).unwrap();
         let snapshot = c.snapshot();
         assert_eq!(snapshot.offsets(), &[4, 8]);
+        let before = c
+            .dense_prefix_layer_for_row_on(0, ())
+            .expect("snapshot prefix")
+            .0
+            .to_vec::<f32>()
+            .expect("snapshot prefix values");
 
-        let (k2, v2) = make_kv_b(2, 4);
-        c.update_and_fetch(&k2, &v2, &[4, 4]).unwrap();
-        assert_eq!(c.offsets(), &[8, 12]);
+        c.restore_offsets(&[0, 0]).expect("rewind for overwrite");
+        let total = 2 * 4 * 8 * 256;
+        let overwrite_k = vec![-1.0_f32; total];
+        let overwrite_v = vec![-2.0_f32; total];
+        let overwrite_k: Array = (&overwrite_k[..], (2_i32, 4_i32, 8_i32, 256_i32))
+            .try_into()
+            .unwrap();
+        let overwrite_v: Array = (&overwrite_v[..], (2_i32, 4_i32, 8_i32, 256_i32))
+            .try_into()
+            .unwrap();
+        c.update_and_fetch(&overwrite_k, &overwrite_v, &[4, 8])
+            .expect("overwrite cached prefix");
 
         c.restore(&snapshot).expect("restore snapshot");
         assert_eq!(c.offsets(), &[4, 8]);
+        let restored = c
+            .dense_prefix_layer_for_row_on(0, ())
+            .expect("restored prefix")
+            .0
+            .to_vec::<f32>()
+            .expect("restored prefix values");
+        assert_eq!(restored, before);
 
         c.restore_offsets(&[5, 9]).expect("restore accepted prefix");
         assert_eq!(c.offsets(), &[5, 9]);

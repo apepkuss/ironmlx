@@ -16,6 +16,7 @@ use crate::core::cache::{
     ActiveKvOffloadConfig, PagedPrefixCacheConfig, PrefixLruCacheConfig, TurboQuantKVBits,
 };
 use crate::core::model::Model;
+use crate::core::sampler::Sampler;
 use crate::core::scheduler::DenseVlMethods;
 use crate::core::scheduler_autotune::{
     SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeProfile,
@@ -127,8 +128,10 @@ pub struct AppState<M: Model + DenseVlMethods + Send + 'static> {
     pub cold_materialization_tracker: Arc<crate::core::process_memory::ColdMaterializationTracker>,
     /// Optional TurboQuant K/V bit-widths for full-attention KV cache reads.
     pub kv_cache_turboquant_bits: Option<TurboQuantKVBits>,
-    /// True when this state owns a scheduler-backed MTP head.
-    pub mtp_enabled: bool,
+    /// Route eligible greedy requests through SchedulerActor.
+    pub force_scheduler_for_greedy: bool,
+    /// True when PromptLookup is enabled for this model engine.
+    pub prompt_lookup_enabled: bool,
     /// Health snapshot collector for `/healthz`. Holds shared Arc atomics
     /// wired to the SchedulerActor driver loop + BudgetState. B1-p2.5 G3.
     pub health_collector: Arc<health::SchedulerHealthCollector>,
@@ -154,10 +157,19 @@ impl<M: Model + DenseVlMethods + Send + 'static> Clone for AppState<M> {
             static_memory_estimate: self.static_memory_estimate,
             cold_materialization_tracker: self.cold_materialization_tracker.clone(),
             kv_cache_turboquant_bits: self.kv_cache_turboquant_bits,
-            mtp_enabled: self.mtp_enabled,
+            force_scheduler_for_greedy: self.force_scheduler_for_greedy,
+            prompt_lookup_enabled: self.prompt_lookup_enabled,
             health_collector: self.health_collector.clone(),
         }
     }
+}
+
+pub(crate) fn validate_prompt_lookup_sampler(_enabled: bool, sampler: Sampler) -> Result<()> {
+    anyhow::ensure!(
+        sampler.temperature.is_finite(),
+        "sampling temperature must be finite"
+    );
+    Ok(())
 }
 
 impl<M: Model + DenseVlMethods + Send + 'static> AppState<M> {
@@ -276,6 +288,12 @@ where
 {
     fn paged_prefix_cache_enabled(&self) -> bool;
 
+    fn force_scheduler_for_greedy(&self) -> bool;
+
+    fn prompt_lookup_config(&self) -> Option<crate::core::prompt_lookup::PromptLookupConfig> {
+        None
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn spawn(
         self,
@@ -293,6 +311,7 @@ struct PlainSchedulerActorSpawner {
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     active_kv_offload: ActiveKvOffloadConfig,
+    force_scheduler: bool,
 }
 
 impl<M> SchedulerActorSpawner<M> for PlainSchedulerActorSpawner
@@ -301,6 +320,10 @@ where
 {
     fn paged_prefix_cache_enabled(&self) -> bool {
         self.paged_prefix_cache.is_some()
+    }
+
+    fn force_scheduler_for_greedy(&self) -> bool {
+        self.force_scheduler
     }
 
     fn spawn(
@@ -313,6 +336,22 @@ where
         decode_cadence_mid_chunk_cap: usize,
         meta: crate::core::memory_budget::ModelMeta,
     ) -> Result<scheduler_actor::SchedulerActorHandle> {
+        if self.force_scheduler {
+            return Ok(
+                scheduler_actor::spawn_scheduler_actor_for_prompt_lookup_control(
+                    model,
+                    b_max,
+                    admission_deadline,
+                    admission_queue_max,
+                    effective_cap_max,
+                    decode_cadence_mid_chunk_cap,
+                    meta,
+                    self.paged_prefix_cache,
+                    self.prefix_lru_cache,
+                    self.active_kv_offload,
+                )?,
+            );
+        }
         if let Some(config) = self.paged_prefix_cache {
             if self.active_kv_offload.enabled {
                 return Ok(
@@ -373,6 +412,20 @@ where
 struct MtpSchedulerActorSpawner<H> {
     mtp: H,
     mtp_draft_tokens: usize,
+    exact_qualification:
+        crate::core::speculative_qualification::NeuralExactQualificationRuntimeConfig,
+    prompt_lookup: Option<(
+        crate::core::prompt_lookup::PromptLookupConfig,
+        crate::core::prompt_lookup::PromptLookupQualificationRuntimeConfig,
+    )>,
+    paged_prefix_cache: Option<PagedPrefixCacheConfig>,
+    prefix_lru_cache: Option<PrefixLruCacheConfig>,
+    active_kv_offload: ActiveKvOffloadConfig,
+}
+
+struct PromptLookupSchedulerActorSpawner {
+    cfg: crate::core::prompt_lookup::PromptLookupConfig,
+    qualification: crate::core::prompt_lookup::PromptLookupQualificationRuntimeConfig,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     active_kv_offload: ActiveKvOffloadConfig,
@@ -381,6 +434,12 @@ struct MtpSchedulerActorSpawner<H> {
 struct Gemma4DrafterSchedulerActorSpawner {
     drafter: Arc<Mutex<crate::models::gemma4::Gemma4AssistantModel>>,
     mtp_draft_tokens: usize,
+    exact_qualification:
+        crate::core::speculative_qualification::NeuralExactQualificationRuntimeConfig,
+    prompt_lookup: Option<(
+        crate::core::prompt_lookup::PromptLookupConfig,
+        crate::core::prompt_lookup::PromptLookupQualificationRuntimeConfig,
+    )>,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     active_kv_offload: ActiveKvOffloadConfig,
@@ -389,6 +448,14 @@ struct Gemma4DrafterSchedulerActorSpawner {
 impl SchedulerActorSpawner<crate::models::Gemma4Model> for Gemma4DrafterSchedulerActorSpawner {
     fn paged_prefix_cache_enabled(&self) -> bool {
         self.paged_prefix_cache.is_some()
+    }
+
+    fn force_scheduler_for_greedy(&self) -> bool {
+        true
+    }
+
+    fn prompt_lookup_config(&self) -> Option<crate::core::prompt_lookup::PromptLookupConfig> {
+        self.prompt_lookup.as_ref().map(|(cfg, _)| *cfg)
     }
 
     fn spawn(
@@ -401,12 +468,31 @@ impl SchedulerActorSpawner<crate::models::Gemma4Model> for Gemma4DrafterSchedule
         decode_cadence_mid_chunk_cap: usize,
         meta: crate::core::memory_budget::ModelMeta,
     ) -> Result<scheduler_actor::SchedulerActorHandle> {
+        if let Some((prompt_lookup, qualification)) = self.prompt_lookup {
+            return scheduler_actor::spawn_scheduler_actor_with_gemma4_drafter_prompt_lookup(
+                model,
+                self.drafter,
+                self.mtp_draft_tokens,
+                prompt_lookup,
+                qualification,
+                b_max,
+                admission_deadline,
+                admission_queue_max,
+                effective_cap_max,
+                decode_cadence_mid_chunk_cap,
+                meta,
+                self.paged_prefix_cache,
+                self.prefix_lru_cache,
+                self.active_kv_offload,
+            );
+        }
         if self.active_kv_offload.enabled {
             Ok(
                 scheduler_actor::spawn_scheduler_actor_with_gemma4_drafter_and_active_kv(
                     model,
                     self.drafter,
                     self.mtp_draft_tokens,
+                    self.exact_qualification,
                     b_max,
                     admission_deadline,
                     admission_queue_max,
@@ -423,6 +509,7 @@ impl SchedulerActorSpawner<crate::models::Gemma4Model> for Gemma4DrafterSchedule
                 model,
                 self.drafter,
                 self.mtp_draft_tokens,
+                self.exact_qualification,
                 b_max,
                 admission_deadline,
                 admission_queue_max,
@@ -445,6 +532,14 @@ where
         self.paged_prefix_cache.is_some()
     }
 
+    fn force_scheduler_for_greedy(&self) -> bool {
+        true
+    }
+
+    fn prompt_lookup_config(&self) -> Option<crate::core::prompt_lookup::PromptLookupConfig> {
+        self.prompt_lookup.as_ref().map(|(cfg, _)| *cfg)
+    }
+
     fn spawn(
         self,
         model: Arc<Mutex<M>>,
@@ -455,12 +550,31 @@ where
         decode_cadence_mid_chunk_cap: usize,
         meta: crate::core::memory_budget::ModelMeta,
     ) -> Result<scheduler_actor::SchedulerActorHandle> {
+        if let Some((prompt_lookup, qualification)) = self.prompt_lookup {
+            return scheduler_actor::spawn_scheduler_actor_with_mtp_prompt_lookup(
+                model,
+                self.mtp,
+                self.mtp_draft_tokens,
+                prompt_lookup,
+                qualification,
+                b_max,
+                admission_deadline,
+                admission_queue_max,
+                effective_cap_max,
+                decode_cadence_mid_chunk_cap,
+                meta,
+                self.paged_prefix_cache,
+                self.prefix_lru_cache,
+                self.active_kv_offload,
+            );
+        }
         if self.active_kv_offload.enabled {
             Ok(
                 scheduler_actor::spawn_scheduler_actor_with_mtp_and_active_kv(
                     model,
                     self.mtp,
                     self.mtp_draft_tokens,
+                    self.exact_qualification,
                     b_max,
                     admission_deadline,
                     admission_queue_max,
@@ -477,6 +591,7 @@ where
                 model,
                 self.mtp,
                 self.mtp_draft_tokens,
+                self.exact_qualification,
                 b_max,
                 admission_deadline,
                 admission_queue_max,
@@ -487,6 +602,49 @@ where
                 self.prefix_lru_cache,
             )?)
         }
+    }
+}
+
+impl<M> SchedulerActorSpawner<M> for PromptLookupSchedulerActorSpawner
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    fn paged_prefix_cache_enabled(&self) -> bool {
+        self.paged_prefix_cache.is_some()
+    }
+
+    fn force_scheduler_for_greedy(&self) -> bool {
+        true
+    }
+
+    fn prompt_lookup_config(&self) -> Option<crate::core::prompt_lookup::PromptLookupConfig> {
+        Some(self.cfg)
+    }
+
+    fn spawn(
+        self,
+        model: Arc<Mutex<M>>,
+        b_max: usize,
+        admission_deadline: std::time::Duration,
+        admission_queue_max: usize,
+        effective_cap_max: usize,
+        decode_cadence_mid_chunk_cap: usize,
+        meta: crate::core::memory_budget::ModelMeta,
+    ) -> Result<scheduler_actor::SchedulerActorHandle> {
+        scheduler_actor::spawn_scheduler_actor_with_prompt_lookup(
+            model,
+            self.cfg,
+            self.qualification,
+            b_max,
+            admission_deadline,
+            admission_queue_max,
+            effective_cap_max,
+            decode_cadence_mid_chunk_cap,
+            meta,
+            self.paged_prefix_cache,
+            self.prefix_lru_cache,
+            self.active_kv_offload,
+        )
     }
 }
 
@@ -511,6 +669,7 @@ pub async fn serve<M>(
     scheduler_autotune_report: bool,
     vision_input_override: Option<VisionInputConfig>,
     static_memory_estimate: crate::core::process_memory::StaticMemoryEstimate,
+    force_scheduler: bool,
 ) -> Result<()>
 where
     M: Model + DenseVlMethods + Send + 'static,
@@ -537,6 +696,66 @@ where
             paged_prefix_cache,
             prefix_lru_cache,
             active_kv_offload,
+            force_scheduler,
+        },
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn serve_with_prompt_lookup<M>(
+    model: M,
+    cfg: crate::core::prompt_lookup::PromptLookupConfig,
+    tokenizer: Tokenizer,
+    model_id: String,
+    host: &str,
+    port: u16,
+    prefill_chunk_size: usize,
+    b_max: usize,
+    admission_deadline_ms: u64,
+    admission_queue_max: usize,
+    max_cache_cap: usize,
+    decode_cadence_mid_chunk_cap: usize,
+    kv_cache_turboquant_bits: Option<TurboQuantKVBits>,
+    paged_prefix_cache: Option<PagedPrefixCacheConfig>,
+    prefix_lru_cache: Option<PrefixLruCacheConfig>,
+    active_kv_offload: ActiveKvOffloadConfig,
+    scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
+    scheduler_autotune_report: bool,
+    vision_input_override: Option<VisionInputConfig>,
+    static_memory_estimate: crate::core::process_memory::StaticMemoryEstimate,
+) -> Result<()>
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    let qualification =
+        crate::core::prompt_lookup::PromptLookupQualificationRuntimeConfig::for_scheduler_profile(
+            &scheduler_runtime_profile,
+        )?;
+    serve_inner(
+        model,
+        tokenizer,
+        model_id,
+        host,
+        port,
+        prefill_chunk_size,
+        b_max,
+        admission_deadline_ms,
+        admission_queue_max,
+        max_cache_cap,
+        decode_cadence_mid_chunk_cap,
+        kv_cache_turboquant_bits,
+        scheduler_runtime_profile,
+        scheduler_autotune_report,
+        vision_input_override,
+        static_memory_estimate,
+        None,
+        PromptLookupSchedulerActorSpawner {
+            cfg,
+            qualification,
+            paged_prefix_cache,
+            prefix_lru_cache,
+            active_kv_offload,
         },
     )
     .await
@@ -547,6 +766,7 @@ pub async fn serve_with_mtp<M>(
     model: M,
     mtp: M::MtpHead,
     mtp_draft_tokens: usize,
+    prompt_lookup: Option<crate::core::prompt_lookup::PromptLookupConfig>,
     tokenizer: Tokenizer,
     model_id: String,
     host: &str,
@@ -575,6 +795,20 @@ where
         requested_mtp_draft_tokens,
         paged_prefix_cache.is_some(),
     );
+    let prompt_lookup = prompt_lookup
+        .map(|cfg| -> Result<_> {
+            let qualification = crate::core::prompt_lookup::PromptLookupQualificationRuntimeConfig::for_scheduler_profile_with_baseline(
+                &scheduler_runtime_profile,
+                crate::core::prompt_lookup::PromptLookupQualificationBaseline::QwenMtp,
+            )?;
+            Ok((cfg.validate()?, qualification))
+        })
+        .transpose()?;
+    let exact_qualification =
+        crate::core::speculative_qualification::NeuralExactQualificationRuntimeConfig::for_scheduler_profile(
+            &scheduler_runtime_profile,
+            crate::core::speculative_qualification::NeuralExactSource::QwenMtp,
+        )?;
     serve_inner(
         model,
         tokenizer,
@@ -599,6 +833,8 @@ where
         MtpSchedulerActorSpawner {
             mtp,
             mtp_draft_tokens: effective_mtp_draft_tokens,
+            exact_qualification,
+            prompt_lookup,
             paged_prefix_cache,
             prefix_lru_cache,
             active_kv_offload,
@@ -612,6 +848,7 @@ pub async fn serve_with_gemma4_drafter(
     model: crate::models::Gemma4Model,
     drafter: crate::models::gemma4::Gemma4AssistantModel,
     mtp_draft_tokens: usize,
+    prompt_lookup: Option<crate::core::prompt_lookup::PromptLookupConfig>,
     tokenizer: Tokenizer,
     model_id: String,
     host: &str,
@@ -635,6 +872,7 @@ pub async fn serve_with_gemma4_drafter(
         model,
         drafter,
         mtp_draft_tokens,
+        prompt_lookup,
         tokenizer,
         model_id,
         prefill_chunk_size,
@@ -657,6 +895,10 @@ pub async fn serve_with_gemma4_drafter(
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/healthz", get(gemma4_drafter_healthz_handler))
+        .route(
+            "/admin/api/prompt-lookup/clear",
+            post(gemma4_drafter_clear_prompt_lookup_handler),
+        )
         .route(
             "/v1/chat/completions",
             post(openai::gemma4_drafter_chat_completions),
@@ -718,6 +960,62 @@ where
             paged_prefix_cache,
             prefix_lru_cache,
             active_kv_offload,
+            force_scheduler: false,
+        },
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn build_prompt_lookup_app_state<M>(
+    model: M,
+    cfg: crate::core::prompt_lookup::PromptLookupConfig,
+    tokenizer: Tokenizer,
+    model_id: String,
+    prefill_chunk_size: usize,
+    b_max: usize,
+    admission_deadline_ms: u64,
+    admission_queue_max: usize,
+    max_cache_cap: usize,
+    decode_cadence_mid_chunk_cap: usize,
+    kv_cache_turboquant_bits: Option<TurboQuantKVBits>,
+    scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
+    scheduler_autotune_report: bool,
+    vision_input_override: Option<VisionInputConfig>,
+    paged_prefix_cache: Option<PagedPrefixCacheConfig>,
+    prefix_lru_cache: Option<PrefixLruCacheConfig>,
+    static_memory_estimate: crate::core::process_memory::StaticMemoryEstimate,
+    active_kv_offload: ActiveKvOffloadConfig,
+) -> Result<AppState<M>>
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    let qualification =
+        crate::core::prompt_lookup::PromptLookupQualificationRuntimeConfig::for_scheduler_profile(
+            &scheduler_runtime_profile,
+        )?;
+    build_app_state(
+        model,
+        tokenizer,
+        model_id,
+        prefill_chunk_size,
+        b_max,
+        admission_deadline_ms,
+        admission_queue_max,
+        max_cache_cap,
+        decode_cadence_mid_chunk_cap,
+        kv_cache_turboquant_bits,
+        scheduler_runtime_profile,
+        scheduler_autotune_report,
+        vision_input_override,
+        static_memory_estimate,
+        None,
+        PromptLookupSchedulerActorSpawner {
+            cfg,
+            qualification,
+            paged_prefix_cache,
+            prefix_lru_cache,
+            active_kv_offload,
         },
     )
     .await
@@ -728,6 +1026,7 @@ pub(crate) async fn build_mtp_app_state<M>(
     model: M,
     mtp: M::MtpHead,
     mtp_draft_tokens: usize,
+    prompt_lookup: Option<crate::core::prompt_lookup::PromptLookupConfig>,
     tokenizer: Tokenizer,
     model_id: String,
     prefill_chunk_size: usize,
@@ -751,6 +1050,20 @@ where
 {
     let effective_mtp_draft_tokens =
         effective_mtp_draft_tokens_for_paged_prefix(mtp_draft_tokens, paged_prefix_cache.is_some());
+    let prompt_lookup = prompt_lookup
+        .map(|cfg| -> Result<_> {
+            let qualification = crate::core::prompt_lookup::PromptLookupQualificationRuntimeConfig::for_scheduler_profile_with_baseline(
+                &scheduler_runtime_profile,
+                crate::core::prompt_lookup::PromptLookupQualificationBaseline::QwenMtp,
+            )?;
+            Ok((cfg.validate()?, qualification))
+        })
+        .transpose()?;
+    let exact_qualification =
+        crate::core::speculative_qualification::NeuralExactQualificationRuntimeConfig::for_scheduler_profile(
+            &scheduler_runtime_profile,
+            crate::core::speculative_qualification::NeuralExactSource::QwenMtp,
+        )?;
     build_app_state(
         model,
         tokenizer,
@@ -773,6 +1086,8 @@ where
         MtpSchedulerActorSpawner {
             mtp,
             mtp_draft_tokens: effective_mtp_draft_tokens,
+            exact_qualification,
+            prompt_lookup,
             paged_prefix_cache,
             prefix_lru_cache,
             active_kv_offload,
@@ -786,6 +1101,7 @@ pub(crate) async fn build_gemma4_drafter_app_state(
     model: crate::models::Gemma4Model,
     drafter: crate::models::gemma4::Gemma4AssistantModel,
     mtp_draft_tokens: usize,
+    prompt_lookup: Option<crate::core::prompt_lookup::PromptLookupConfig>,
     tokenizer: Tokenizer,
     model_id: String,
     prefill_chunk_size: usize,
@@ -828,6 +1144,20 @@ pub(crate) async fn build_gemma4_drafter_app_state(
             "Gemma4 drafter cap resolved"
         );
     }
+    let prompt_lookup = prompt_lookup
+        .map(|cfg| -> Result<_> {
+            let qualification = crate::core::prompt_lookup::PromptLookupQualificationRuntimeConfig::for_scheduler_profile_with_baseline(
+                &scheduler_runtime_profile,
+                crate::core::prompt_lookup::PromptLookupQualificationBaseline::Gemma4Assistant,
+            )?;
+            Ok((cfg.validate()?, qualification))
+        })
+        .transpose()?;
+    let exact_qualification =
+        crate::core::speculative_qualification::NeuralExactQualificationRuntimeConfig::for_scheduler_profile(
+            &scheduler_runtime_profile,
+            crate::core::speculative_qualification::NeuralExactSource::Gemma4Assistant,
+        )?;
     let drafter = Arc::new(Mutex::new(drafter));
     let base = build_app_state(
         model,
@@ -851,6 +1181,8 @@ pub(crate) async fn build_gemma4_drafter_app_state(
         Gemma4DrafterSchedulerActorSpawner {
             drafter,
             mtp_draft_tokens: effective_mtp_draft_tokens,
+            exact_qualification,
+            prompt_lookup,
             paged_prefix_cache,
             prefix_lru_cache,
             active_kv_offload,
@@ -934,6 +1266,9 @@ where
     }
 
     let paged_prefix_cache_enabled = scheduler_actor_spawner.paged_prefix_cache_enabled();
+    let force_scheduler_for_greedy = scheduler_actor_spawner.force_scheduler_for_greedy();
+    let prompt_lookup_config = scheduler_actor_spawner.prompt_lookup_config();
+    let prompt_lookup_enabled = prompt_lookup_config.is_some();
     let scheduler_handle = scheduler_actor_spawner.spawn(
         model.clone(),
         b_max,
@@ -962,6 +1297,10 @@ where
                 scheduler_handle.mtp_drafted_tokens.clone(),
                 scheduler_handle.mtp_accepted_draft_tokens.clone(),
                 scheduler_handle.mtp_windows.clone(),
+                scheduler_handle.mtp_exact_sampling_windows.clone(),
+                scheduler_handle.mtp_exact_acceptance_draws.clone(),
+                scheduler_handle.mtp_exact_residual_corrections.clone(),
+                scheduler_handle.mtp_exact_bonus_samples.clone(),
                 scheduler_handle.mtp_draft_forward_us.clone(),
                 scheduler_handle.mtp_verify_forward_us.clone(),
                 scheduler_handle.mtp_projection_us.clone(),
@@ -975,9 +1314,18 @@ where
                 scheduler_handle.mtp_prefill_cache_commit_us.clone(),
                 scheduler_handle.mtp_decode_cache_commit_us.clone(),
                 scheduler_handle.mtp_cache_restore_us.clone(),
+                scheduler_handle.neural_exact_qualification_stats.clone(),
             )
         })
         .unwrap_or_else(health::MtpHealthConfig::disabled);
+    let prompt_lookup_health = prompt_lookup_config
+        .map(|config| {
+            health::PromptLookupHealthConfig::enabled(
+                config,
+                scheduler_handle.prompt_lookup_published_stats.clone(),
+            )
+        })
+        .unwrap_or_else(health::PromptLookupHealthConfig::disabled);
     let health_collector = build_health_collector(
         model_id.clone(),
         model_max_context,
@@ -985,6 +1333,7 @@ where
         admission_queue_max,
         &scheduler_handle,
         mtp_health,
+        prompt_lookup_health,
     );
 
     Ok(AppState {
@@ -1005,7 +1354,8 @@ where
         static_memory_estimate,
         cold_materialization_tracker,
         kv_cache_turboquant_bits,
-        mtp_enabled: mtp_health_draft_tokens.is_some(),
+        force_scheduler_for_greedy,
+        prompt_lookup_enabled,
         health_collector,
     })
 }
@@ -1061,6 +1411,10 @@ where
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/healthz", get(healthz_handler))
+        .route(
+            "/admin/api/prompt-lookup/clear",
+            post(clear_prompt_lookup_handler),
+        )
         .route("/v1/chat/completions", post(openai::chat_completions))
         .route("/v1/messages", post(anthropic::messages))
         .with_state(state);
@@ -1083,6 +1437,7 @@ fn build_health_collector(
     admission_queue_max: usize,
     scheduler_handle: &scheduler_actor::SchedulerActorHandle,
     mtp: health::MtpHealthConfig,
+    prompt_lookup: health::PromptLookupHealthConfig,
 ) -> Arc<health::SchedulerHealthCollector> {
     Arc::new(health::SchedulerHealthCollector {
         start_time: std::time::Instant::now(),
@@ -1092,6 +1447,8 @@ fn build_health_collector(
         max_position_embeddings: model_max_context as i32,
         b_active: scheduler_handle.b_active.clone(),
         b_queued: scheduler_handle.b_queued.clone(),
+        admit_count: scheduler_handle.admit_count.clone(),
+        batch_count: scheduler_handle.batch_count.clone(),
         admission_queue_full_count: scheduler_handle.admission_queue_full_count.clone(),
         memory_budget_exceeded_count: scheduler_handle.memory_budget_exceeded_count.clone(),
         kv_cache_active_bytes: scheduler_handle.kv_cache_active_bytes.clone(),
@@ -1100,6 +1457,7 @@ fn build_health_collector(
         kv_cache_resident_cap_tokens: scheduler_handle.kv_cache_resident_cap_tokens,
         kv_cache_budget_policy: scheduler_handle.kv_cache_budget_policy.to_string(),
         mtp,
+        prompt_lookup,
         active_kv_offload: scheduler_handle.active_kv_offload.clone(),
         immutable_prefix_blocks: scheduler_handle.immutable_prefix_blocks.clone(),
     })
@@ -1120,6 +1478,50 @@ async fn gemma4_drafter_healthz_handler(
     axum::extract::State(state): axum::extract::State<Gemma4DrafterAppState>,
 ) -> axum::Json<health::HealthSnapshot> {
     axum::Json(state.base.health_collector.snapshot())
+}
+
+async fn clear_prompt_lookup_handler<M>(
+    axum::extract::State(state): axum::extract::State<AppState<M>>,
+) -> (axum::http::StatusCode, axum::Json<serde_json::Value>)
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    clear_prompt_lookup_response(&state.scheduler_handle, &state.model_id).await
+}
+
+async fn gemma4_drafter_clear_prompt_lookup_handler(
+    axum::extract::State(state): axum::extract::State<Gemma4DrafterAppState>,
+) -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
+    clear_prompt_lookup_response(&state.base.scheduler_handle, &state.base.model_id).await
+}
+
+async fn clear_prompt_lookup_response(
+    scheduler_handle: &scheduler_actor::SchedulerActorHandle,
+    model_id: &str,
+) -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
+    match scheduler_handle.clear_shared_prompt_lookup().await {
+        Ok(cleared_entries) => (
+            axum::http::StatusCode::OK,
+            axum::Json(serde_json::json!({
+                "success": true,
+                "status": "cleared",
+                "model": model_id,
+                "cleared_models": 1,
+                "cleared_entries": cleared_entries,
+            })),
+        ),
+        Err(error) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(serde_json::json!({
+                "success": false,
+                "status": "error",
+                "model": model_id,
+                "cleared_models": 0,
+                "cleared_entries": 0,
+                "error": error.to_string(),
+            })),
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -1278,17 +1680,40 @@ mod tests {
     }
 
     #[test]
-    fn route_uses_scheduler_for_long_prompt_when_mtp_forces_scheduler() {
+    fn route_uses_scheduler_for_long_prompt_when_greedy_scheduler_is_forced() {
         assert!(should_route_to_scheduler::<DefaultRouteModel>(
             4096, 2048, 1, false, true,
         ));
     }
 
+    #[test]
+    fn prompt_lookup_sampler_validation_accepts_exact_non_greedy() {
+        assert!(validate_prompt_lookup_sampler(true, Sampler::greedy()).is_ok());
+        assert!(
+            validate_prompt_lookup_sampler(false, Sampler::greedy().with_temperature(0.7)).is_ok()
+        );
+        assert!(
+            validate_prompt_lookup_sampler(true, Sampler::greedy().with_temperature(0.7)).is_ok()
+        );
+        let sampler = Sampler {
+            temperature: f32::NAN,
+            ..Sampler::greedy()
+        };
+        assert_eq!(
+            validate_prompt_lookup_sampler(true, sampler)
+                .unwrap_err()
+                .to_string(),
+            "sampling temperature must be finite"
+        );
+    }
+
     fn test_scheduler_handle() -> scheduler_actor::SchedulerActorHandle {
         let (cmd_tx, _cmd_rx) = mpsc::channel(1);
+        let (control_tx, _control_rx) = mpsc::channel(1);
         let queue_rejected = Arc::new(AtomicU64::new(0));
         scheduler_actor::SchedulerActorHandle {
             cmd_tx,
+            control_tx,
             cold_materialization_tracker: Arc::new(std::sync::OnceLock::new()),
             admit_count: Arc::new(AtomicU64::new(0)),
             batch_count: Arc::new(AtomicU64::new(0)),
@@ -1301,6 +1726,10 @@ mod tests {
             mtp_drafted_tokens: Arc::new(AtomicU64::new(0)),
             mtp_accepted_draft_tokens: Arc::new(AtomicU64::new(0)),
             mtp_windows: Arc::new(AtomicU64::new(0)),
+            mtp_exact_sampling_windows: Arc::new(AtomicU64::new(0)),
+            mtp_exact_acceptance_draws: Arc::new(AtomicU64::new(0)),
+            mtp_exact_residual_corrections: Arc::new(AtomicU64::new(0)),
+            mtp_exact_bonus_samples: Arc::new(AtomicU64::new(0)),
             mtp_draft_forward_us: Arc::new(AtomicU64::new(0)),
             mtp_verify_forward_us: Arc::new(AtomicU64::new(0)),
             mtp_projection_us: Arc::new(AtomicU64::new(0)),
@@ -1314,6 +1743,10 @@ mod tests {
             mtp_prefill_cache_commit_us: Arc::new(AtomicU64::new(0)),
             mtp_decode_cache_commit_us: Arc::new(AtomicU64::new(0)),
             mtp_cache_restore_us: Arc::new(AtomicU64::new(0)),
+            prompt_lookup_published_stats: Arc::new(std::sync::Mutex::new(None)),
+            neural_exact_qualification_stats: Arc::new(std::sync::Mutex::new(
+                crate::core::speculative_qualification::NeuralExactQualificationStats::default(),
+            )),
             b_active: Arc::new(AtomicU64::new(0)),
             b_queued: Arc::new(AtomicU64::new(0)),
             admission_queue_full_count: queue_rejected,
@@ -1340,6 +1773,7 @@ mod tests {
             8,
             &handle,
             health::MtpHealthConfig::disabled(),
+            health::PromptLookupHealthConfig::disabled(),
         );
         let snapshot = collector.snapshot();
 
@@ -1393,6 +1827,10 @@ mod tests {
                 handle.mtp_drafted_tokens.clone(),
                 handle.mtp_accepted_draft_tokens.clone(),
                 handle.mtp_windows.clone(),
+                handle.mtp_exact_sampling_windows.clone(),
+                handle.mtp_exact_acceptance_draws.clone(),
+                handle.mtp_exact_residual_corrections.clone(),
+                handle.mtp_exact_bonus_samples.clone(),
                 handle.mtp_draft_forward_us.clone(),
                 handle.mtp_verify_forward_us.clone(),
                 handle.mtp_projection_us.clone(),
@@ -1406,7 +1844,9 @@ mod tests {
                 handle.mtp_prefill_cache_commit_us.clone(),
                 handle.mtp_decode_cache_commit_us.clone(),
                 handle.mtp_cache_restore_us.clone(),
+                handle.neural_exact_qualification_stats.clone(),
             ),
+            health::PromptLookupHealthConfig::disabled(),
         );
         let snapshot = collector.snapshot();
 

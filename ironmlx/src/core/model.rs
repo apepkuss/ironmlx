@@ -6,6 +6,7 @@
 
 use mlx::{Array, Dtype, StreamOrDevice};
 
+use crate::core::cache::TurboQuantKVBits;
 use crate::core::memory_budget::ModelMeta;
 use crate::nn::LayerCache;
 use crate::Result;
@@ -82,12 +83,90 @@ pub trait Model {
         target: StreamOrDevice,
     ) -> Result<Array>;
 
+    /// Project post-norm hidden states at every sequence position to logits.
+    /// Source-independent speculative verification uses the preserved
+    /// `[B, S, V]` sequence dimension to check a complete draft window.
+    fn project_hidden_on(&self, _hidden: &Array, _target: StreamOrDevice) -> Result<Array> {
+        Err(anyhow::anyhow!(
+            "full-sequence hidden projection is not implemented for {}",
+            std::any::type_name::<Self>()
+        ))
+    }
+
     /// Whether caller-built MRoPE `position_ids` are semantically consumed by
     /// this model. Models returning `false` derive positions internally and
     /// may receive a reusable placeholder Array from generation/scheduler hot
     /// paths.
     fn requires_position_ids(&self) -> bool {
         true
+    }
+
+    /// Whether this model instance has qualified a multi-token speculative
+    /// verify forward as greedy-token-equivalent to its ordinary single-token
+    /// decode path for the requested execution shape.
+    ///
+    /// Cache rollback policy is independent of this capability. Full KV
+    /// caches may trim accepted offsets, while mixed recurrent caches restore
+    /// a transaction checkpoint and replay the accepted prefix. Quantized
+    /// projection and attention kernels can still change numerical shape at
+    /// `Q > 1` and flip an argmax, so models must opt in only after
+    /// architecture-level token-parity qualification.
+    fn supports_exact_batched_speculative_verify(
+        &self,
+        _batch_width: usize,
+        _context_tokens: usize,
+        _verify_width: usize,
+    ) -> bool {
+        false
+    }
+
+    /// Apply cache-layout qualification on top of the model's architecture
+    /// and weight-quantization profile.
+    ///
+    /// TurboQuant can make a multi-token cache update numerically distinct
+    /// from repeated q=1 updates even when the model forward itself is
+    /// qualified. Models with such a restriction must fail closed here.
+    fn supports_exact_batched_speculative_verify_for_kv_cache(
+        &self,
+        batch_width: usize,
+        context_tokens: usize,
+        verify_width: usize,
+        _kv_bits: Option<TurboQuantKVBits>,
+    ) -> bool {
+        self.supports_exact_batched_speculative_verify(batch_width, context_tokens, verify_width)
+    }
+
+    /// Whether PromptLookup may fall back to a chain of q=1 verify forwards
+    /// when exact batched verification is not qualified for the current
+    /// shape. Architectures may disable this when production measurements
+    /// show that sequential probing is consistently more expensive than
+    /// ordinary decode.
+    fn supports_sequential_prompt_lookup_verify(
+        &self,
+        _batch_width: usize,
+        _context_tokens: usize,
+        _verify_width: usize,
+    ) -> bool {
+        true
+    }
+
+    /// Whether q=1 speculative verification must materialize each device
+    /// result before host-side cache offsets advance to the next depth.
+    ///
+    /// Most architectures can retain the full sequential chain lazily. A
+    /// model should opt in only when its cache/shared-state execution has
+    /// demonstrated that deferred materialization changes greedy results.
+    fn requires_eager_sequential_speculative_verify(&self) -> bool {
+        false
+    }
+
+    /// Whether speculative rollback may keep the already-computed accepted
+    /// prefix by trimming only Full-cache offsets.
+    ///
+    /// Models whose cache or attention implementation has not qualified that
+    /// invariant must restore the base snapshot and replay accepted inputs.
+    fn supports_speculative_accepted_prefix_trim(&self) -> bool {
+        false
     }
 
     /// Maximum number of requests this model wants to admit into one fresh

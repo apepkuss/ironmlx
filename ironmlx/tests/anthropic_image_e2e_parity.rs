@@ -132,6 +132,7 @@ where
             /* scheduler_autotune_report */ false,
             /* vision_input_override */ vision,
             /* static_memory_estimate */ Default::default(),
+            /* force_scheduler */ true,
         )
         .await
     })

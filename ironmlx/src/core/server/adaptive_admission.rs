@@ -37,6 +37,7 @@ pub(crate) const ROLLING_DECODE_STEPS_AFTER_ADMISSION_WORK: usize = 4;
 enum AdaptiveAdmissionMode {
     Disabled,
     Gemma4Drafter,
+    PromptLookup,
     QwenMtp,
 }
 
@@ -64,6 +65,12 @@ impl AdaptiveAdmissionPolicy {
         }
     }
 
+    pub(crate) fn prompt_lookup() -> Self {
+        Self {
+            mode: AdaptiveAdmissionMode::PromptLookup,
+        }
+    }
+
     pub(crate) fn fresh_batch_limit(
         self,
         request: AdmissionRequestShape,
@@ -73,7 +80,7 @@ impl AdaptiveAdmissionPolicy {
         let model_limit = model_limit.clamp(1, b_max.max(1));
         match self.mode {
             AdaptiveAdmissionMode::Disabled => model_limit,
-            AdaptiveAdmissionMode::Gemma4Drafter => {
+            AdaptiveAdmissionMode::Gemma4Drafter | AdaptiveAdmissionMode::PromptLookup => {
                 if request.uses_multi_chunk_prefill() {
                     1
                 } else {
@@ -107,7 +114,7 @@ impl AdaptiveAdmissionPolicy {
     ) -> bool {
         match self.mode {
             AdaptiveAdmissionMode::Disabled => true,
-            AdaptiveAdmissionMode::Gemma4Drafter => {
+            AdaptiveAdmissionMode::Gemma4Drafter | AdaptiveAdmissionMode::PromptLookup => {
                 first.uses_multi_chunk_prefill() == candidate.uses_multi_chunk_prefill()
             }
             AdaptiveAdmissionMode::QwenMtp => {
@@ -139,9 +146,15 @@ impl AdaptiveAdmissionPolicy {
             AdaptiveAdmissionMode::Disabled => {
                 active_count < model_limit || request.uses_multi_chunk_prefill()
             }
-            AdaptiveAdmissionMode::Gemma4Drafter if request.uses_multi_chunk_prefill() => true,
+            AdaptiveAdmissionMode::Gemma4Drafter | AdaptiveAdmissionMode::PromptLookup
+                if request.uses_multi_chunk_prefill() =>
+            {
+                true
+            }
             AdaptiveAdmissionMode::QwenMtp if request.uses_multi_chunk_prefill() => false,
-            AdaptiveAdmissionMode::Gemma4Drafter | AdaptiveAdmissionMode::QwenMtp => {
+            AdaptiveAdmissionMode::Gemma4Drafter
+            | AdaptiveAdmissionMode::PromptLookup
+            | AdaptiveAdmissionMode::QwenMtp => {
                 active_count < model_limit.min(ADAPTIVE_LATENCY_BATCH_LIMIT)
             }
         }
@@ -204,6 +217,34 @@ mod tests {
 
         assert!(policy.can_start_rolling_mid_admit(request, 3, 4, 4, 0));
         assert!(!policy.can_start_rolling_mid_admit(request, 4, 4, 4, 0));
+    }
+
+    #[test]
+    fn prompt_lookup_serializes_long_fresh_prefill_and_allows_rolling_admit() {
+        let policy = AdaptiveAdmissionPolicy::prompt_lookup();
+        let request = AdmissionRequestShape {
+            prompt_len: 8192,
+            prefill_chunk_size: 2048,
+            decode_cadence_mid_chunk_cap: 256,
+            speculative_pipelinable: true,
+        };
+
+        assert_eq!(policy.fresh_batch_limit(request, 4, 4), 1);
+        assert!(policy.can_start_rolling_mid_admit(request, 1, 4, 4, 0));
+        assert!(policy.can_join_fresh_batch(request, request));
+    }
+
+    #[test]
+    fn prompt_lookup_keeps_short_fresh_prefill_batched() {
+        let policy = AdaptiveAdmissionPolicy::prompt_lookup();
+        let request = AdmissionRequestShape {
+            prompt_len: 512,
+            prefill_chunk_size: 2048,
+            decode_cadence_mid_chunk_cap: 256,
+            speculative_pipelinable: true,
+        };
+
+        assert_eq!(policy.fresh_batch_limit(request, 4, 4), 2);
     }
 
     #[test]

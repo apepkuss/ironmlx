@@ -17,7 +17,7 @@ use crate::core::Model;
 use serde::{Deserialize, Serialize};
 
 const PROMPT_LIMIT_SAMPLES: [usize; 4] = [512, 1024, 2048, 8192];
-pub const SCHEDULER_AUTOTUNE_SCHEMA_VERSION: u32 = 5;
+pub const SCHEDULER_AUTOTUNE_SCHEMA_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PromptBatchLimit {
@@ -422,7 +422,10 @@ pub enum SchedulerExecutionModel {
 pub enum SchedulerSpeculativeMode {
     Disabled,
     QwenMtp,
+    QwenMtpPromptLookup,
     Gemma4Drafter,
+    Gemma4DrafterPromptLookup,
+    PromptLookup,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -443,7 +446,7 @@ pub struct SchedulerWeightQuantizationContext {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SchedulerSpeculativeContext {
     pub mode: SchedulerSpeculativeMode,
-    pub draft_model_fingerprint: Option<String>,
+    pub source_fingerprint: Option<String>,
     pub draft_tokens: Option<usize>,
 }
 
@@ -489,7 +492,7 @@ impl SchedulerAutotuneRuntimeContext {
             },
             speculative: SchedulerSpeculativeContext {
                 mode: SchedulerSpeculativeMode::Disabled,
-                draft_model_fingerprint: None,
+                source_fingerprint: None,
                 draft_tokens: None,
             },
             kv_quantization: SchedulerKvQuantization::None,

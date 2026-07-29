@@ -2810,6 +2810,21 @@
           </div>
         </div>
       </div>
+      <div style="margin-top:14px;border-top:0.5px solid var(--border);padding-top:14px;">
+        <div class="modal-row" style="align-items:center;">
+          <label style="display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;color:var(--text);">
+            <input type="checkbox" id="modal-prompt-lookup-enabled" style="accent-color:var(--accent);">
+            <span data-i18n="prompt_lookup_acceleration">PromptLookup Acceleration</span>
+          </label>
+        </div>
+        <div class="modal-row" style="align-items:center;">
+          <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">
+            <input type="checkbox" id="modal-prompt-lookup-cross-request" style="accent-color:var(--accent);">
+            <span data-i18n="prompt_lookup_cross_request">Reuse completed history across App requests</span>
+          </label>
+          <button class="btn-cancel" type="button" onclick="clearSharedPromptLookup()" data-i18n="prompt_lookup_clear">Clear shared history</button>
+        </div>
+      </div>
     </div>
     <div class="modal-footer">
       <button class="btn-cancel" onclick="closeParamsModal()" data-i18n="cancel">Cancel</button>
@@ -2883,6 +2898,7 @@
       mtp_badge_available: "MTP", mtp_badge_enabled: "MTP",
       mtp_badge_available_title: "Compatible MTP weights are available.", mtp_badge_enabled_title: "This model is loaded with MTP acceleration.",
       mtp_acceleration: "MTP Acceleration", mtp_weights: "MTP Weights", mtp_draft_tokens: "Draft Tokens",
+      prompt_lookup_acceleration: "PromptLookup Acceleration", prompt_lookup_cross_request: "Reuse completed history across App requests", prompt_lookup_clear: "Clear shared history", prompt_lookup_cleared: "Shared PromptLookup history cleared.",
       mtp_status_available: "MTP available", mtp_status_incompatible: "MTP weights are incompatible", mtp_status_unavailable: "No compatible MTP weights",
       model_exists_locally: "Model \"{name}\" already exists locally.",
       menu_start_needs_model: "No default model is set. Download a model and choose it as the default; IronMLX will start the backend automatically.",
@@ -3157,6 +3173,7 @@
       mtp_badge_available: "MTP", mtp_badge_enabled: "MTP",
       mtp_badge_available_title: "已发现兼容的 MTP 权重。", mtp_badge_enabled_title: "该模型已使用 MTP 加速加载。",
       mtp_acceleration: "MTP 加速", mtp_weights: "MTP 权重", mtp_draft_tokens: "Draft Tokens",
+      prompt_lookup_acceleration: "PromptLookup 加速", prompt_lookup_cross_request: "在 App 请求之间复用已完成的历史", prompt_lookup_clear: "清空共享历史", prompt_lookup_cleared: "已清空共享 PromptLookup 历史。",
       mtp_status_available: "MTP 可用", mtp_status_incompatible: "MTP 权重不兼容", mtp_status_unavailable: "未发现兼容的 MTP 权重",
       model_exists_locally: "模型 \"{name}\" 已存在于本地。",
       menu_start_needs_model: "尚未设置默认模型。请先下载一个模型并设为默认模型，IronMLX 会自动启动后端。",
@@ -3431,6 +3448,7 @@
       mtp_badge_available: "MTP", mtp_badge_enabled: "MTP",
       mtp_badge_available_title: "已發現相容的 MTP 權重。", mtp_badge_enabled_title: "此模型已使用 MTP 加速載入。",
       mtp_acceleration: "MTP 加速", mtp_weights: "MTP 權重", mtp_draft_tokens: "Draft Tokens",
+      prompt_lookup_acceleration: "PromptLookup 加速", prompt_lookup_cross_request: "在 App 請求之間重用已完成的歷史", prompt_lookup_clear: "清空共享歷史", prompt_lookup_cleared: "已清空共享 PromptLookup 歷史。",
       mtp_status_available: "MTP 可用", mtp_status_incompatible: "MTP 權重不相容", mtp_status_unavailable: "未發現相容的 MTP 權重",
       model_exists_locally: "模型 \"{name}\" 已存在於本地。",
       menu_start_needs_model: "尚未設定預設模型。請先下載一個模型並設為預設模型，IronMLX 會自動啟動後端。",
@@ -3688,6 +3706,7 @@
       mtp_badge_available: "MTP", mtp_badge_enabled: "MTP",
       mtp_badge_available_title: "互換性のある MTP ウェイトが見つかりました。", mtp_badge_enabled_title: "このモデルは MTP アクセラレーション付きでロードされています。",
       mtp_acceleration: "MTP アクセラレーション", mtp_weights: "MTP ウェイト", mtp_draft_tokens: "Draft Tokens",
+      prompt_lookup_acceleration: "PromptLookup アクセラレーション", prompt_lookup_cross_request: "App のリクエスト間で完了済み履歴を再利用", prompt_lookup_clear: "共有履歴を消去", prompt_lookup_cleared: "共有 PromptLookup 履歴を消去しました。",
       mtp_status_available: "MTP 利用可", mtp_status_incompatible: "MTP ウェイトは非互換です", mtp_status_unavailable: "互換性のある MTP ウェイトはありません",
       model_exists_locally: "モデル \"{name}\" はローカルに既に存在します。",
       menu_start_needs_model: "デフォルトモデルが設定されていません。モデルをダウンロードしてデフォルトに設定すると、IronMLX がバックエンドを自動起動します。",
@@ -3945,6 +3964,7 @@
       mtp_badge_available: "MTP", mtp_badge_enabled: "MTP",
       mtp_badge_available_title: "호환되는 MTP 가중치를 찾았습니다.", mtp_badge_enabled_title: "이 모델은 MTP 가속으로 로드되었습니다.",
       mtp_acceleration: "MTP 가속", mtp_weights: "MTP 가중치", mtp_draft_tokens: "Draft Tokens",
+      prompt_lookup_acceleration: "PromptLookup 가속", prompt_lookup_cross_request: "App 요청 간 완료된 기록 재사용", prompt_lookup_clear: "공유 기록 지우기", prompt_lookup_cleared: "공유 PromptLookup 기록을 지웠습니다.",
       mtp_status_available: "MTP 사용 가능", mtp_status_incompatible: "MTP 가중치가 호환되지 않습니다", mtp_status_unavailable: "호환되는 MTP 가중치 없음",
       model_exists_locally: "모델 \"{name}\"이(가) 이미 로컬에 존재합니다.",
       menu_start_needs_model: "기본 모델이 설정되어 있지 않습니다. 모델을 다운로드하고 기본값으로 선택하면 IronMLX가 백엔드를 자동으로 시작합니다.",
@@ -4460,13 +4480,16 @@
 
   function loadModel(modelId, btn, useMtp, mtpModelId) {
     const dict = I18N[currentLang] || I18N.en;
+    const saved = window.__MODEL_PARAMS__[modelId] || {};
     markModelActionLoading(btn, dict.action_loading || 'Loading...');
     updateModelStatusForAction(btn, 'model-busy', dict.status_loading || 'Loading...');
     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.loadModel) {
       window.webkit.messageHandlers.loadModel.postMessage(JSON.stringify({
         model: modelId,
         use_mtp: !!useMtp,
-        mtp_model_id: mtpModelId || ''
+        mtp_model_id: mtpModelId || '',
+        use_prompt_lookup: !!saved.prompt_lookup_enabled,
+        cross_request_prompt_lookup: !!saved.prompt_lookup_cross_request
       }));
     }
   }
@@ -4664,6 +4687,7 @@
     document.getElementById('modal-repeat-penalty').value = saved.repeat_penalty || generationDefaults.repetition_penalty || '';
     document.getElementById('modal-model-type').value = saved.model_type || 'auto';
     renderMtpParams(local, saved);
+    renderPromptLookupParams(saved);
     document.getElementById('model-params-modal').classList.add('open');
     applyI18n(currentLang);
   }
@@ -4696,6 +4720,22 @@
       : (mtp.status === 'incompatible'
         ? (dict.mtp_status_incompatible || 'MTP weights are incompatible')
         : (dict.mtp_status_unavailable || 'No compatible MTP weights'));
+  }
+
+  function renderPromptLookupParams(saved) {
+    const enabled = document.getElementById('modal-prompt-lookup-enabled');
+    const crossRequest = document.getElementById('modal-prompt-lookup-cross-request');
+    enabled.checked = !!saved.prompt_lookup_enabled;
+    crossRequest.checked = !!saved.prompt_lookup_cross_request && enabled.checked;
+    crossRequest.disabled = !enabled.checked;
+    enabled.onchange = () => {
+      crossRequest.disabled = !enabled.checked;
+      if (!enabled.checked) crossRequest.checked = false;
+    };
+  }
+
+  function clearSharedPromptLookup() {
+    apiPost('/admin/api/prompt-lookup/clear', {});
   }
   function closeParamsModal() {
     document.getElementById('model-params-modal').classList.remove('open');
@@ -4738,7 +4778,9 @@
       repeat_penalty: document.getElementById('modal-repeat-penalty').value,
       mtp_enabled: document.getElementById('modal-mtp-enabled').checked,
       mtp_model_id: document.getElementById('modal-mtp-model').value,
-      mtp_draft_tokens: mtpDraftTokensText
+      mtp_draft_tokens: mtpDraftTokensText,
+      prompt_lookup_enabled: document.getElementById('modal-prompt-lookup-enabled').checked,
+      prompt_lookup_cross_request: document.getElementById('modal-prompt-lookup-cross-request').checked
     };
     // Save locally
     window.__MODEL_PARAMS__[modelId] = params;
@@ -7190,6 +7232,13 @@
             }
           }
         } catch(e) {}
+      } else if (path === '/admin/api/prompt-lookup/clear') {
+        const result = JSON.parse(jsonStr || '{}');
+        if (result.success) {
+          showToast(dict.prompt_lookup_cleared || 'Shared PromptLookup history cleared.', 'success');
+        } else {
+          showToast(result.error || 'Failed to clear shared PromptLookup history.', 'warn');
+        }
       } else if (path === '/admin/api/models/load') {
         onModelLoadResult(jsonStr);
       } else if (path === '/admin/api/benchmark/preflight') {
