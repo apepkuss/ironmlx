@@ -5,17 +5,18 @@ import Testing
 
 @Test func localModelScannerSurfacesIncompleteShardedSnapshot() throws {
     let root = try temporaryDirectory()
-    let snapshot = root
-        .appendingPathComponent("models", isDirectory: true)
-        .appendingPathComponent("models--mlx-community--Sharded-4bit", isDirectory: true)
-        .appendingPathComponent("snapshots", isDirectory: true)
-        .appendingPathComponent("main", isDirectory: true)
-    try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
-    try Data("{}".utf8).write(to: snapshot.appendingPathComponent("config.json"))
-    try Data("""
+    let index = Data("""
     {"weight_map":{"layer.0":"model-00001-of-00002.safetensors","layer.1":"model-00002-of-00002.safetensors"}}
-    """.utf8).write(to: snapshot.appendingPathComponent("model.safetensors.index.json"))
-    try Data("partial".utf8).write(to: snapshot.appendingPathComponent("model-00001-of-00002.safetensors"))
+    """.utf8)
+    let snapshot = try writeVerifiedTestSnapshot(
+        root: root,
+        repoID: "mlx-community/Sharded-4bit",
+        files: [
+            "config.json": Data("{}".utf8),
+            "model.safetensors.index.json": index,
+            "model-00001-of-00002.safetensors": Data("partial".utf8),
+        ]
+    )
 
     let scanner = LocalModelScanner(rootURL: root)
 
@@ -25,6 +26,7 @@ import Testing
     #expect(scanner.resolveModelPath(for: "mlx-community/Sharded-4bit") == nil)
 
     try Data("complete".utf8).write(to: snapshot.appendingPathComponent("model-00002-of-00002.safetensors"))
+    try refreshTestSnapshotManifest(at: snapshot)
 
     #expect(scanner.scan().map(\.repoID) == ["mlx-community/Sharded-4bit"])
     #expect(scanner.scan().first?.readiness?.status == "ready")
@@ -166,6 +168,7 @@ import Testing
       }
     }
     """.utf8).write(to: snapshot.appendingPathComponent("optiq_metadata.json"))
+    try refreshTestSnapshotManifest(at: snapshot)
 
     let scanner = LocalModelScanner(rootURL: root)
     let incomplete = try #require(scanner.scan().first)
@@ -178,6 +181,7 @@ import Testing
         .appendingPathComponent("optiq_vision.safetensors")
     try FileManager.default.createDirectory(at: sidecar.deletingLastPathComponent(), withIntermediateDirectories: true)
     try Data("vision".utf8).write(to: sidecar)
+    try refreshTestSnapshotManifest(at: snapshot)
 
     let ready = try #require(scanner.scan().first)
     #expect(ready.readiness?.status == "ready")
@@ -201,21 +205,21 @@ import Testing
 
 @Test func localModelScannerReadsContextWindowFromConfig() throws {
     let root = try temporaryDirectory()
-    let snapshot = root
-        .appendingPathComponent("models", isDirectory: true)
-        .appendingPathComponent("models--mlx-community--LongContext-4bit", isDirectory: true)
-        .appendingPathComponent("snapshots", isDirectory: true)
-        .appendingPathComponent("main", isDirectory: true)
-    try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
-    try Data("""
-    {
-      "model_type": "qwen3_5",
-      "text_config": {
-        "max_position_embeddings": 262144
-      }
-    }
-    """.utf8).write(to: snapshot.appendingPathComponent("config.json"))
-    try Data("weights".utf8).write(to: snapshot.appendingPathComponent("model.safetensors"))
+    _ = try writeVerifiedTestSnapshot(
+        root: root,
+        repoID: "mlx-community/LongContext-4bit",
+        files: [
+            "config.json": Data("""
+            {
+              "model_type": "qwen3_5",
+              "text_config": {
+                "max_position_embeddings": 262144
+              }
+            }
+            """.utf8),
+            "model.safetensors": Data("weights".utf8),
+        ]
+    )
 
     let scanner = LocalModelScanner(rootURL: root)
 
@@ -224,20 +228,22 @@ import Testing
 
 @Test func localModelScannerCountsSymlinkedSnapshotTargetsForModelSize() throws {
     let root = try temporaryDirectory()
-    let modelRoot = root
-        .appendingPathComponent("models", isDirectory: true)
-        .appendingPathComponent("models--mlx-community--Symlinked-4bit", isDirectory: true)
-    let snapshot = modelRoot
-        .appendingPathComponent("snapshots", isDirectory: true)
-        .appendingPathComponent("main", isDirectory: true)
+    let snapshot = try writeVerifiedTestSnapshot(
+        root: root,
+        repoID: "mlx-community/Symlinked-4bit",
+        files: [
+            "config.json": Data("{}".utf8),
+            "model.safetensors": Data(repeating: 1, count: 2 * 1_048_576),
+        ]
+    )
+    let modelRoot = snapshot.deletingLastPathComponent().deletingLastPathComponent()
     let blobs = modelRoot.appendingPathComponent("blobs", isDirectory: true)
-    try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
     try FileManager.default.createDirectory(at: blobs, withIntermediateDirectories: true)
 
     let configBlob = blobs.appendingPathComponent("config-blob")
     let weightBlob = blobs.appendingPathComponent("weight-blob")
-    try Data("{}".utf8).write(to: configBlob)
-    try Data(repeating: 1, count: 2 * 1_048_576).write(to: weightBlob)
+    try FileManager.default.moveItem(at: snapshot.appendingPathComponent("config.json"), to: configBlob)
+    try FileManager.default.moveItem(at: snapshot.appendingPathComponent("model.safetensors"), to: weightBlob)
     try FileManager.default.createSymbolicLink(
         atPath: snapshot.appendingPathComponent("config.json").path,
         withDestinationPath: "../../blobs/config-blob"
@@ -295,7 +301,7 @@ import Testing
             .resolvingSymlinksInPath()
             .path == mtp.resolvingSymlinksInPath().path
     )
-    #expect(base.lastPathComponent == "main")
+    #expect(base.lastPathComponent == String(repeating: "a", count: 40))
 }
 
 @Test func localModelScannerAttachesCompatibleMoeMtpWeightsWithoutDenseIntermediateSize() throws {
@@ -372,15 +378,14 @@ private func writeSnapshot(
     repoID: String,
     configJSON: String
 ) throws -> URL {
-    let snapshot = root
-        .appendingPathComponent("models", isDirectory: true)
-        .appendingPathComponent("models--" + repoID.replacingOccurrences(of: "/", with: "--"), isDirectory: true)
-        .appendingPathComponent("snapshots", isDirectory: true)
-        .appendingPathComponent("main", isDirectory: true)
-    try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
-    try Data(configJSON.utf8).write(to: snapshot.appendingPathComponent("config.json"))
-    try Data("weights".utf8).write(to: snapshot.appendingPathComponent("model.safetensors"))
-    return snapshot
+    try writeVerifiedTestSnapshot(
+        root: root,
+        repoID: repoID,
+        files: [
+            "config.json": Data(configJSON.utf8),
+            "model.safetensors": Data("weights".utf8),
+        ]
+    )
 }
 
 private func qwen35Config(

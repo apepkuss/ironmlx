@@ -8,11 +8,16 @@ let package = Package(
         .macOS(.v13)
     ],
     products: [
-        .executable(name: "ironmlx-app", targets: ["IronMLXApp"])
+        .executable(name: "ironmlx-app", targets: ["IronMLXApp"]),
+        .executable(name: "ironmlx-model-migrate", targets: ["IronMLXModelMigrate"]),
     ],
     targets: [
         .executableTarget(
             name: "IronMLXApp",
+            dependencies: ["IronMLXAppCore"]
+        ),
+        .executableTarget(
+            name: "IronMLXModelMigrate",
             dependencies: ["IronMLXAppCore"]
         ),
         .target(

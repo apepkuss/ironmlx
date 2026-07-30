@@ -104,6 +104,10 @@ public final class DashboardWindowController {
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    public func cancelAllDownloads() {
+        bridge?.cancelAllDownloads()
+    }
+
     private static func applyVisibleActivationPolicy() {
         NSApp.setActivationPolicy(dashboardVisibleActivationPolicy)
     }

@@ -59,6 +59,26 @@ import WebKit
 }
 
 @MainActor
+@Test func dashboardSettingsPayloadParsesLoadIntegrityToggleWithoutRequiringRestart() throws {
+    let existing = AppConfig(verifyModelOnLoad: false)
+    let config = try DashboardBridge.config(
+        applyingSettingsJSON: #"{"verify_model_on_load":true}"#,
+        to: existing
+    )
+
+    #expect(config.verifyModelOnLoad == true)
+    #expect(!DashboardBridge.backendRestartRequired(from: existing, to: config))
+}
+
+@MainActor
+@Test func backendRuntimeSettingStillRequiresRestart() {
+    let existing = AppConfig(maxSequences: 1, verifyModelOnLoad: false)
+    let updated = AppConfig(maxSequences: 2, verifyModelOnLoad: true)
+
+    #expect(DashboardBridge.backendRestartRequired(from: existing, to: updated))
+}
+
+@MainActor
 @Test func dashboardSettingsPayloadParsesMemoryLimits() throws {
     let existing = AppConfig(
         memLimitTotal: nil,
@@ -263,14 +283,14 @@ private func dashboardBridgeNotificationModelRoot(repoID: String) throws -> URL 
 private func dashboardBridgeNotificationModelRoot(repoID: String, configJSON: String) throws -> URL {
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("ironmlx-dashboard-bridge-notification-\(UUID().uuidString)", isDirectory: true)
-    let snapshot = root
-        .appendingPathComponent("models", isDirectory: true)
-        .appendingPathComponent("models--" + repoID.replacingOccurrences(of: "/", with: "--"), isDirectory: true)
-        .appendingPathComponent("snapshots", isDirectory: true)
-        .appendingPathComponent("main", isDirectory: true)
-    try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
-    try Data(configJSON.utf8).write(to: snapshot.appendingPathComponent("config.json"))
-    try Data("weights".utf8).write(to: snapshot.appendingPathComponent("model.safetensors"))
+    _ = try writeVerifiedTestSnapshot(
+        root: root,
+        repoID: repoID,
+        files: [
+            "config.json": Data(configJSON.utf8),
+            "model.safetensors": Data("weights".utf8),
+        ]
+    )
     return root
 }
 

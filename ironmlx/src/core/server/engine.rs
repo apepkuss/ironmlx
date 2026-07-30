@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
+use std::fs::{File, OpenOptions};
 use std::net::SocketAddr;
+use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -697,6 +699,7 @@ enum EngineSlotState {
     },
     Loaded {
         engine: Arc<EngineVariant>,
+        snapshot_use_lease: Option<Arc<ModelSnapshotUseLease>>,
         loaded_unix_ms: u64,
         last_used_unix_ms: u64,
         load_attempts: u64,
@@ -956,6 +959,7 @@ enum EngineVariant {
 struct EngineLease {
     engine: Arc<EngineVariant>,
     active_requests: Option<Arc<AtomicUsize>>,
+    _snapshot_use_lease: Option<Arc<ModelSnapshotUseLease>>,
 }
 
 impl std::fmt::Debug for EngineLease {
@@ -965,10 +969,15 @@ impl std::fmt::Debug for EngineLease {
 }
 
 impl EngineLease {
-    fn new(engine: Arc<EngineVariant>, active_requests: Option<Arc<AtomicUsize>>) -> Self {
+    fn new(
+        engine: Arc<EngineVariant>,
+        active_requests: Option<Arc<AtomicUsize>>,
+        snapshot_use_lease: Option<Arc<ModelSnapshotUseLease>>,
+    ) -> Self {
         Self {
             engine,
             active_requests,
+            _snapshot_use_lease: snapshot_use_lease,
         }
     }
 
@@ -978,6 +987,68 @@ impl EngineLease {
 
     async fn anthropic_messages(&self, req: anthropic::MessagesRequest) -> Response {
         self.engine.anthropic_messages(req).await
+    }
+}
+
+#[derive(Debug)]
+struct ModelSnapshotUseLease {
+    file: File,
+}
+
+impl ModelSnapshotUseLease {
+    fn acquire(model_path: &std::path::Path) -> Result<Option<Self>> {
+        let canonical = std::fs::canonicalize(model_path)
+            .with_context(|| format!("resolving model path {}", model_path.display()))?;
+        let Some(commit) = canonical.file_name().and_then(|value| value.to_str()) else {
+            return Ok(None);
+        };
+        if commit.len() != 40 || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Ok(None);
+        }
+        let Some(snapshots) = canonical.parent() else {
+            return Ok(None);
+        };
+        if snapshots.file_name().and_then(|value| value.to_str()) != Some("snapshots") {
+            return Ok(None);
+        }
+        let Some(repository) = snapshots.parent() else {
+            return Ok(None);
+        };
+        let lock_directory = repository.join(".locks");
+        std::fs::create_dir_all(&lock_directory).with_context(|| {
+            format!(
+                "creating model snapshot use lock directory {}",
+                lock_directory.display()
+            )
+        })?;
+        let lock_path = lock_directory.join(format!("{}.use.lock", commit.to_ascii_lowercase()));
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .with_context(|| format!("opening model snapshot use lock {}", lock_path.display()))?;
+        // SAFETY: `file` owns a valid descriptor for the lifetime of this lease.
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) };
+        if result != 0 {
+            let error = std::io::Error::last_os_error();
+            bail!(
+                "acquiring model snapshot use lock {}: {}",
+                lock_path.display(),
+                error
+            );
+        }
+        Ok(Some(Self { file }))
+    }
+}
+
+impl Drop for ModelSnapshotUseLease {
+    fn drop(&mut self) {
+        // SAFETY: `self.file` remains open until after `drop` returns.
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
     }
 }
 
@@ -1900,6 +1971,7 @@ impl EngineSlot {
                 match &mut *state {
                     EngineSlotState::Loaded {
                         engine,
+                        snapshot_use_lease,
                         last_used_unix_ms,
                         request_count,
                         ..
@@ -1912,7 +1984,11 @@ impl EngineSlot {
                         } else {
                             None
                         };
-                        return Ok(EngineLease::new(engine.clone(), active_requests));
+                        return Ok(EngineLease::new(
+                            engine.clone(),
+                            active_requests,
+                            snapshot_use_lease.clone(),
+                        ));
                     }
                     EngineSlotState::Loading { .. } => Some(self.notify.notified()),
                     EngineSlotState::Draining { .. } => {
@@ -1951,6 +2027,7 @@ impl EngineSlot {
                 match &mut *state {
                     EngineSlotState::Loaded {
                         engine,
+                        snapshot_use_lease,
                         last_used_unix_ms,
                         request_count,
                         ..
@@ -1963,7 +2040,11 @@ impl EngineSlot {
                         } else {
                             None
                         };
-                        return Ok(EngineLease::new(engine.clone(), active_requests));
+                        return Ok(EngineLease::new(
+                            engine.clone(),
+                            active_requests,
+                            snapshot_use_lease.clone(),
+                        ));
                     }
                     EngineSlotState::Loading { .. } => {
                         continue;
@@ -2020,6 +2101,20 @@ impl EngineSlot {
                 load_attempts
             };
 
+            let snapshot_use_lease = match ModelSnapshotUseLease::acquire(&self.model.path) {
+                Ok(lease) => lease.map(Arc::new),
+                Err(error) => {
+                    let message = format!("{error:#}");
+                    let mut state = self.state.lock().await;
+                    *state = EngineSlotState::Failed {
+                        last_error: message,
+                        failed_unix_ms: unix_time_ms(),
+                        load_attempts,
+                    };
+                    self.notify.notify_waiters();
+                    return Err(error);
+                }
+            };
             let result = load_engine_variant(&self.model, &self.runtime).await;
             match result {
                 Ok(engine) => {
@@ -2052,6 +2147,7 @@ impl EngineSlot {
                     };
                     *state = EngineSlotState::Loaded {
                         engine: engine.clone(),
+                        snapshot_use_lease: snapshot_use_lease.clone(),
                         loaded_unix_ms: now,
                         last_used_unix_ms: now,
                         load_attempts,
@@ -2062,7 +2158,11 @@ impl EngineSlot {
                         },
                     };
                     self.notify.notify_waiters();
-                    return Ok(EngineLease::new(engine, active_requests));
+                    return Ok(EngineLease::new(
+                        engine,
+                        active_requests,
+                        snapshot_use_lease,
+                    ));
                 }
                 Err(error) => {
                     let message = format!("{error:#}");
@@ -3304,6 +3404,8 @@ impl LoadedEngineHealth {
 
 #[cfg(test)]
 mod tests {
+    use std::fs::OpenOptions;
+    use std::os::fd::AsRawFd;
     use std::path::{Path, PathBuf};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -3319,7 +3421,7 @@ mod tests {
         EngineModelConfig, EngineModelManifest, EngineMtpSettings, EnginePoolCapacityDecision,
         EnginePoolCapacityPolicy, EnginePoolConfig, EnginePoolManifest, EnginePoolMemoryLimits,
         EnginePoolRuntimeConfig, EnginePoolState, EngineRegistry, EngineRegistryError,
-        EngineRuntimeState, EngineSlot, EngineSlotState, ModelTtlCandidate,
+        EngineRuntimeState, EngineSlot, EngineSlotState, ModelSnapshotUseLease, ModelTtlCandidate,
     };
     use tokio::sync::{Mutex, Notify};
 
@@ -3406,6 +3508,48 @@ mod tests {
         )
         .expect("write config");
         dir
+    }
+
+    #[test]
+    fn snapshot_use_lease_blocks_exclusive_cleanup_until_released() {
+        let root = write_minimal_model_config("qwen3_5");
+        std::fs::remove_dir_all(&root).expect("reset temp root");
+        let commit = "a".repeat(40);
+        let snapshot = root
+            .join("huggingface")
+            .join("org--model")
+            .join("snapshots")
+            .join(&commit);
+        std::fs::create_dir_all(&snapshot).expect("create snapshot");
+
+        let lease = ModelSnapshotUseLease::acquire(&snapshot)
+            .expect("acquire snapshot use lease")
+            .expect("new layout must use a lease");
+        let lock_path = snapshot
+            .parent()
+            .expect("snapshots")
+            .parent()
+            .expect("repository")
+            .join(".locks")
+            .join(format!("{commit}.use.lock"));
+        let contender = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .expect("open contender");
+        // SAFETY: `contender` owns a valid descriptor for the duration of this check.
+        let blocked = unsafe { libc::flock(contender.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        assert_ne!(blocked, 0);
+
+        drop(lease);
+        // SAFETY: `contender` remains open until the end of the test.
+        let acquired = unsafe { libc::flock(contender.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        assert_eq!(acquired, 0);
+        // SAFETY: `contender` still owns the locked descriptor.
+        unsafe {
+            libc::flock(contender.as_raw_fd(), libc::LOCK_UN);
+        }
+        std::fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]

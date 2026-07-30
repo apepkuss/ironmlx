@@ -127,6 +127,34 @@ public struct BackendAPIClient: Sendable {
         reloadWhenIdle: Bool,
         samplingDefaults: BackendSamplingDefaults
     ) async throws -> BackendModelAdminResponse {
+        try await loadModel(
+            model: model,
+            modelDir: modelDir,
+            setDefault: setDefault,
+            maxCacheCap: maxCacheCap,
+            pinned: pinned,
+            mtpModelDir: mtpModelDir,
+            mtpDraftTokens: mtpDraftTokens,
+            promptLookup: promptLookup,
+            reloadWhenIdle: reloadWhenIdle,
+            deferWhenBusy: nil,
+            samplingDefaults: samplingDefaults
+        )
+    }
+
+    public func loadModel(
+        model: String,
+        modelDir: String,
+        setDefault: Bool = true,
+        maxCacheCap: Int? = nil,
+        pinned: Bool = false,
+        mtpModelDir: String? = nil,
+        mtpDraftTokens: Int? = nil,
+        promptLookup: BackendPromptLookupConfig? = nil,
+        reloadWhenIdle: Bool,
+        deferWhenBusy: Bool? = nil,
+        samplingDefaults: BackendSamplingDefaults
+    ) async throws -> BackendModelAdminResponse {
         let request = BackendLoadModelRequest(
             model: model,
             modelDir: modelDir,
@@ -137,6 +165,7 @@ public struct BackendAPIClient: Sendable {
             mtpDraftTokens: mtpDraftTokens,
             promptLookup: promptLookup,
             reloadWhenIdle: reloadWhenIdle,
+            deferWhenBusy: deferWhenBusy,
             samplingDefaults: samplingDefaults
         )
         let data = try await postJSON(path: "/admin/api/models/load", body: request)
@@ -237,6 +266,7 @@ public struct BackendLoadModelRequest: Codable, Equatable, Sendable {
     public var mtpDraftTokens: Int?
     public var promptLookup: BackendPromptLookupConfig?
     public var reloadWhenIdle: Bool?
+    public var deferWhenBusy: Bool?
     public var temperature: Double?
     public var topP: Double?
     public var topK: Int?
@@ -252,6 +282,7 @@ public struct BackendLoadModelRequest: Codable, Equatable, Sendable {
         case mtpDraftTokens = "mtp_draft_tokens"
         case promptLookup = "prompt_lookup"
         case reloadWhenIdle = "reload_when_idle"
+        case deferWhenBusy = "defer_when_busy"
         case temperature
         case topP = "top_p"
         case topK = "top_k"
@@ -268,6 +299,7 @@ public struct BackendLoadModelRequest: Codable, Equatable, Sendable {
         mtpDraftTokens: Int? = nil,
         promptLookup: BackendPromptLookupConfig? = nil,
         reloadWhenIdle: Bool? = nil,
+        deferWhenBusy: Bool? = nil,
         samplingDefaults: BackendSamplingDefaults = .empty
     ) {
         self.model = model
@@ -279,6 +311,7 @@ public struct BackendLoadModelRequest: Codable, Equatable, Sendable {
         self.mtpDraftTokens = mtpDraftTokens
         self.promptLookup = promptLookup
         self.reloadWhenIdle = reloadWhenIdle
+        self.deferWhenBusy = deferWhenBusy
         self.temperature = samplingDefaults.temperature
         self.topP = samplingDefaults.topP
         self.topK = samplingDefaults.topK

@@ -27,12 +27,33 @@ public enum ModelMtpRuntimeError: LocalizedError, Equatable {
 }
 
 public enum ModelMtpRuntimeResolver {
+    public static func runtimeAsync(
+        for modelID: String,
+        useMtp: Bool?,
+        explicitMtpModelID: String? = nil,
+        scanner: LocalModelScanner,
+        parameterStore: ModelParameterStore,
+        fullChecksum: Bool = false
+    ) async throws -> ModelMtpRuntime? {
+        try await Task.detached(priority: .userInitiated) {
+            try runtime(
+                for: modelID,
+                useMtp: useMtp,
+                explicitMtpModelID: explicitMtpModelID,
+                scanner: scanner,
+                parameterStore: parameterStore,
+                fullChecksum: fullChecksum
+            )
+        }.value
+    }
+
     public static func runtime(
         for modelID: String,
         useMtp: Bool?,
         explicitMtpModelID: String? = nil,
         scanner: LocalModelScanner,
-        parameterStore: ModelParameterStore
+        parameterStore: ModelParameterStore,
+        fullChecksum: Bool = false
     ) throws -> ModelMtpRuntime? {
         let parameters = parameterStore.parameters(for: modelID)
         let shouldUseMtp = useMtp ?? (parameters?.mtpEnabled == true)
@@ -46,7 +67,10 @@ public enum ModelMtpRuntimeResolver {
         guard let selected else {
             throw ModelMtpRuntimeError.noCompatibleMtp(model: modelID)
         }
-        guard let modelDir = scanner.resolveModelPath(for: selected) else {
+        guard let modelDir = try? scanner.verifiedModelPath(
+            for: selected,
+            fullChecksum: fullChecksum
+        ) else {
             throw ModelMtpRuntimeError.mtpPathNotFound(model: selected)
         }
         return ModelMtpRuntime(

@@ -1,5 +1,8 @@
 import Foundation
 
+public typealias BenchmarkModelPathValidator =
+    @Sendable (_ modelID: String, _ modelPath: String) async throws -> String
+
 public actor BenchmarkExclusiveSessionCoordinator {
     private var session: BenchmarkExclusiveSession?
 
@@ -34,7 +37,8 @@ public actor BenchmarkExclusiveSessionCoordinator {
     public func prepare(
         client: BackendModelManaging,
         targetModel: String,
-        targetModelPath: String
+        targetModelPath: String,
+        validateModelPath: BenchmarkModelPathValidator? = nil
     ) async throws -> BenchmarkExclusivePrepareResult {
         guard session == nil else {
             throw BenchmarkExclusiveSessionError.alreadyRunning
@@ -44,22 +48,31 @@ public actor BenchmarkExclusiveSessionCoordinator {
         try ensureIdle(health)
 
         let loadedModels = try await client.fetchLoadedModels()
+        let validatedTargetPath = try await validateModelPath?(targetModel, targetModelPath)
+            ?? targetModelPath
         let targetWasPinned = loadedModels.first {
-            matches(model: $0, targetModel: targetModel, targetModelPath: targetModelPath)
+            matches(model: $0, targetModel: targetModel, targetModelPath: validatedTargetPath)
         }?.pinned ?? false
         let targetPromptLookup = loadedModels.first {
-            matches(model: $0, targetModel: targetModel, targetModelPath: targetModelPath)
+            matches(model: $0, targetModel: targetModel, targetModelPath: validatedTargetPath)
         }?.promptLookup
         let snapshot = BenchmarkExclusiveSession(
             targetModel: targetModel,
-            targetModelPath: targetModelPath,
+            targetModelPath: validatedTargetPath,
             loadedModels: loadedModels.map(BenchmarkLoadedModelSnapshot.init),
             defaultModel: loadedModels.first(where: \.isDefault)?.id
         )
         session = snapshot
 
         let nonTargetModels = loadedModels
-            .filter { !$0.pinned && !matches(model: $0, targetModel: targetModel, targetModelPath: targetModelPath) }
+            .filter {
+                !$0.pinned
+                    && !matches(
+                        model: $0,
+                        targetModel: targetModel,
+                        targetModelPath: validatedTargetPath
+                    )
+            }
             .sorted { $0.id < $1.id }
         var unloaded: [String] = []
 
@@ -71,7 +84,7 @@ public actor BenchmarkExclusiveSessionCoordinator {
 
             _ = try await client.loadModel(
                 model: targetModel,
-                modelDir: targetModelPath,
+                modelDir: validatedTargetPath,
                 setDefault: true,
                 maxCacheCap: nil,
                 pinned: targetWasPinned,
@@ -85,7 +98,11 @@ public actor BenchmarkExclusiveSessionCoordinator {
                 unloadedModels: unloaded
             )
         } catch {
-            _ = try? await restoreFromSession(snapshot, client: client)
+            _ = try? await restoreFromSession(
+                snapshot,
+                client: client,
+                validateModelPath: validateModelPath
+            )
             session = nil
             throw error
         }
@@ -95,7 +112,10 @@ public actor BenchmarkExclusiveSessionCoordinator {
         session?.targetModel == targetModel
     }
 
-    public func restore(client: BackendModelManaging) async throws -> BenchmarkExclusiveRestoreResult {
+    public func restore(
+        client: BackendModelManaging,
+        validateModelPath: BenchmarkModelPathValidator? = nil
+    ) async throws -> BenchmarkExclusiveRestoreResult {
         guard let activeSession = session else {
             return BenchmarkExclusiveRestoreResult(
                 success: true,
@@ -108,13 +128,18 @@ public actor BenchmarkExclusiveSessionCoordinator {
         }
 
         defer { session = nil }
-        let result = try await restoreFromSession(activeSession, client: client)
+        let result = try await restoreFromSession(
+            activeSession,
+            client: client,
+            validateModelPath: validateModelPath
+        )
         return result
     }
 
     private func restoreFromSession(
         _ activeSession: BenchmarkExclusiveSession,
-        client: BackendModelManaging
+        client: BackendModelManaging,
+        validateModelPath: BenchmarkModelPathValidator?
     ) async throws -> BenchmarkExclusiveRestoreResult {
         let snapshotByID = Dictionary(uniqueKeysWithValues: activeSession.loadedModels.map { ($0.id, $0) })
         var currentByID = Dictionary(uniqueKeysWithValues: (try await client.fetchLoadedModels()).map { ($0.id, $0) })
@@ -134,9 +159,10 @@ public actor BenchmarkExclusiveSessionCoordinator {
 
         for model in activeSession.loadedModels.sorted(by: { $0.id < $1.id }) where currentByID[model.id] == nil {
             do {
+                let modelPath = try await validateModelPath?(model.id, model.path) ?? model.path
                 _ = try await client.loadModel(
                     model: model.id,
-                    modelDir: model.path,
+                    modelDir: modelPath,
                     setDefault: false,
                     maxCacheCap: nil,
                     pinned: model.pinned,

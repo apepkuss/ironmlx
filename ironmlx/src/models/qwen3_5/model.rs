@@ -1329,7 +1329,7 @@ mod tests {
         let model_dir = std::env::var("IRONMLX_MODEL_DIR")
             .or_else(|_| {
                 let glob = format!(
-                    "{}/.ironmlx/models/models--mlx-community--Qwen3.5-4B-MLX-4bit/snapshots",
+                    "{}/.ironmlx/models/huggingface/mlx-community--Qwen3.5-4B-MLX-4bit/snapshots",
                     std::env::var("HOME").unwrap()
                 );
                 let entries = std::fs::read_dir(&glob).map_err(|e| e.to_string())?;
@@ -1430,7 +1430,7 @@ mod tests {
 
         let model_dir = std::env::var("IRONMLX_MODEL_DIR").unwrap_or_else(|_| {
             let glob = format!(
-                "{}/.ironmlx/models/models--mlx-community--Qwen3.5-4B-MLX-4bit/snapshots",
+                "{}/.ironmlx/models/huggingface/mlx-community--Qwen3.5-4B-MLX-4bit/snapshots",
                 std::env::var("HOME").unwrap()
             );
             let entries = std::fs::read_dir(&glob).expect("snapshots dir");

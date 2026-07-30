@@ -4,8 +4,10 @@
 //! file under `src/cli/`.
 
 mod generate;
+mod hf_transfer;
 mod info;
 mod kv_quant;
+mod model_preflight;
 mod mtp_draft_cap;
 mod scheduler_autotune;
 mod scheduler_autotune_calibrate;
@@ -40,6 +42,10 @@ enum Command {
     SchedulerAutotune(scheduler_autotune::SchedulerAutotuneArgs),
     /// Recommend Gemma4 drafter caps from offline benchmark observations.
     MtpDraftCap(mtp_draft_cap::MtpDraftCapArgs),
+    /// Validate model metadata before downloading weight files.
+    ModelPreflight(model_preflight::ModelPreflightArgs),
+    /// Download one immutable Hugging Face file into IronMLX staging.
+    HfTransfer(hf_transfer::HfTransferArgs),
     /// Boot an OpenAI/Anthropic-compatible HTTP server (single-stream).
     Serve(Box<serve::ServeArgs>),
 }
@@ -51,6 +57,8 @@ impl Cli {
             Command::Generate(args) => generate::run(args),
             Command::SchedulerAutotune(args) => scheduler_autotune::run(args),
             Command::MtpDraftCap(args) => mtp_draft_cap::run(args),
+            Command::ModelPreflight(args) => model_preflight::run(args),
+            Command::HfTransfer(args) => hf_transfer::run(args),
             Command::Serve(args) => serve::run(*args),
         }
     }

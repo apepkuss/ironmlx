@@ -262,6 +262,9 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(!dashboardHTML(html, contains: "cfg-init-cache-blocks"))
     #expect(!dashboardHTML(html, contains: "init_cache_blocks"))
     #expect(dashboardHTML(html, contains: "setNumberInput('cfg-model-ttl', appConfig.model_ttl_minutes, 30)"))
+    #expect(dashboardHTML(html, contains: #"id="cfg-verify-model-on-load""#))
+    #expect(dashboardHTML(html, contains: "setCheckboxInput('cfg-verify-model-on-load', appConfig.verify_model_on_load, false)"))
+    #expect(dashboardHTML(html, contains: "verify_model_on_load: checkedInputValue('cfg-verify-model-on-load', false)"))
 }
 
 @Test func dashboardMaxModelsCopyDescribesExplicitLoadedModelLimit() throws {
@@ -367,6 +370,12 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(dashboardHTML(html, contains: #"<option value="" selected disabled hidden>"#))
     #expect(dashboardHTML(html, contains: "loadModelWithMtp"))
     #expect(dashboardHTML(html, contains: "renderMtpBadge"))
+    #expect(dashboardHTML(html, contains: "renderModelMoreActions"))
+    #expect(dashboardHTML(html, contains: "verifyModelIntegrity"))
+    #expect(dashboardHTML(html, contains: "onModelIntegrityStatus"))
+    #expect(dashboardHTML(html, contains: "status_verifying"))
+    #expect(dashboardHTML(html, contains: "status_verified"))
+    #expect(dashboardHTML(html, contains: "status_corrupt"))
     #expect(!dashboardHTML(html, contains: "model-action-group"))
 }
 
@@ -424,6 +433,10 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(dashboardHTML(html, contains: #".data-table td:nth-child(3),"#))
     #expect(dashboardHTML(html, contains: #".data-table th:nth-child(4),"#))
     #expect(dashboardHTML(html, contains: #".data-table td:nth-child(4),"#))
+    #expect(dashboardHTML(html, contains: #".data-table th:nth-child(5),"#))
+    #expect(dashboardHTML(html, contains: #".data-table td:nth-child(5),"#))
+    #expect(dashboardHTML(html, contains: #".data-table th:nth-child(6),"#))
+    #expect(dashboardHTML(html, contains: #".data-table td:nth-child(6),"#))
     #expect(dashboardHTML(html, contains: #".data-table th:nth-child(7),"#))
     #expect(dashboardHTML(html, contains: #".data-table td:nth-child(7),"#))
     #expect(dashboardHTML(html, contains: #".data-table th:nth-child(8),"#))
@@ -432,6 +445,384 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(dashboardHTML(html, contains: #".data-table .model-name-text"#))
     #expect(dashboardHTML(html, contains: #"min-width: 0;"#))
     #expect(dashboardHTML(html, contains: #"text-overflow: ellipsis;"#))
+}
+
+@Test func dashboardModelsPageKeepsHeaderAndTabsFixedAboveAnIndependentScroller() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(html, contains: #"class="models-page-header""#))
+    #expect(dashboardHTML(
+        html,
+        contains: #"class="models-page-scroll model-manager-active""#
+    ))
+    #expect(dashboardHTML(html, contains: #".content.models-page-active {"#))
+    #expect(dashboardHTML(html, contains: #"#page-models.active {"#))
+    #expect(dashboardHTML(html, contains: #"#page-models > .tab-bar {"#))
+    #expect(dashboardHTML(html, contains: #"overflow-y: hidden;"#))
+    #expect(dashboardHTML(html, contains: #"overflow-y: auto;"#))
+    #expect(dashboardHTML(html, contains: #"content.classList.toggle('models-page-active', page === 'models')"#))
+    #expect(dashboardHTML(html, contains: #"scrollContainer.scrollTop = 0"#))
+}
+
+@Test func dashboardSchedulerProfileUsesItsOwnModelsTab() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(
+        html,
+        contains: #"data-tab="models-scheduler" data-i18n="scheduler_profile_tab""#
+    ))
+    #expect(dashboardHTML(html, contains: #"id="tab-models-scheduler""#))
+    #expect(dashboardHTML(html, contains: #"scheduler_profile_tab: "调度配置""#))
+
+    let managerPanel = try #require(html.range(of: #"id="tab-models-manage""#))
+    let schedulerPanel = try #require(html.range(of: #"id="tab-models-scheduler""#))
+    let profileCard = try #require(html.range(of: #"id="profile-generation-card""#))
+    let downloadPanel = try #require(html.range(of: #"id="tab-models-download""#))
+
+    #expect(managerPanel.lowerBound < schedulerPanel.lowerBound)
+    #expect(schedulerPanel.lowerBound < profileCard.lowerBound)
+    #expect(profileCard.lowerBound < downloadPanel.lowerBound)
+}
+
+@Test func dashboardModelManagerKeepsTableHeaderAboveIndependentRowScroller() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(
+        html,
+        contains: #"class="models-page-scroll model-manager-active""#
+    ))
+    #expect(dashboardHTML(html, contains: #".models-page-scroll.model-manager-active {"#))
+    #expect(dashboardHTML(html, contains: #"#tab-models-manage.active {"#))
+    #expect(dashboardHTML(html, contains: #"#tab-models-manage > .card {"#))
+    #expect(dashboardHTML(html, contains: #"#tab-models-manage .data-table-wrapper {"#))
+    #expect(dashboardHTML(html, contains: #"#tab-models-manage .data-table thead th {"#))
+    #expect(dashboardHTML(html, contains: #"position: sticky;"#))
+    #expect(dashboardHTML(html, contains: #"scrollContainer.classList.toggle('model-manager-active', tabName === 'models-manage')"#))
+    #expect(dashboardHTML(
+        html,
+        contains: #"btn.addEventListener('click', () => switchToTab(btn.dataset.tab))"#
+    ))
+}
+
+@Test func dashboardHuggingFaceSearchResultStartsTheExistingDownloadFlow() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(html, contains: #"onclick="handleSearchResultAction(\'"#))
+    #expect(dashboardHTML(html, contains: #"function handleSearchResultAction(repoId, localState, commitSHA, button) {"#))
+    #expect(dashboardHTML(html, contains: #"function downloadSearchResult(repoId, button) {"#))
+    #expect(dashboardHTML(html, contains: #"startDownload(repoId);"#))
+    #expect(!dashboardHTML(html, contains: #"function fillRepoId(repoId) {"#))
+    #expect(dashboardHTML(
+        html,
+        contains: #"download_in_progress: "已有 HuggingFace 模型正在下载。""#
+    ))
+
+    let oneClickFlow = try #require(
+        html.range(of: #"function downloadSearchResult(repoId, button) {"#)
+    )
+    let start = try #require(
+        html.range(of: #"startDownload(repoId);"#, range: oneClickFlow.lowerBound ..< html.endIndex)
+    )
+    #expect(oneClickFlow.lowerBound < start.lowerBound)
+}
+
+@Test func dashboardHuggingFaceSearchDownloadButtonTracksTaskLifecycle() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(html, contains: #"\', this)">"#))
+    #expect(dashboardHTML(html, contains: #"activeHuggingFaceSearchRepoId = repoId;"#))
+    #expect(dashboardHTML(html, contains: #"setSearchResultDownloadState(button, true);"#))
+    #expect(dashboardHTML(html, contains: #"dict.download_btn_downloading || 'Downloading...'"#))
+    #expect(dashboardHTML(html, contains: #"finishSearchResultDownloadState();"#))
+    #expect(dashboardHTML(html, contains: #".search-result-dl:disabled {"#))
+    #expect(dashboardHTML(
+        html,
+        contains: #"const isDownloading = repoId === activeHuggingFaceSearchRepoId;"#
+    ))
+    #expect(dashboardHTML(
+        html,
+        contains: #"const isCompleted = repoId === completedHuggingFaceSearchRepoId;"#
+    ))
+}
+
+@Test func dashboardHuggingFaceDownloadActionsShareButtonAndIconStyling() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(
+        html,
+        contains: #"class="btn-accent hf-download-action search-result-dl""#
+    ))
+    #expect(dashboardHTML(html, contains: #".hf-download-action .download-button-icon {"#))
+    #expect(dashboardHTML(html, contains: #".search-result-dl {"#))
+    #expect(dashboardHTML(html, contains: #"min-width: 82px;"#))
+    #expect(dashboardHTML(html, contains: #"justify-content: center;"#))
+    #expect(
+        html.components(separatedBy: #"class="download-button-icon""#).count - 1 == 1
+    )
+}
+
+@Test func dashboardHuggingFaceSearchOwnsTokenResultsAndDownloadProgress() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(!dashboardHTML(html, contains: #"id="dl-repo-id""#))
+    #expect(!dashboardHTML(html, contains: #"id="dl-hf-token""#))
+    #expect(!dashboardHTML(html, contains: #"id="dl-download-btn""#))
+    #expect(dashboardHTML(html, contains: #"data-i18n="hf_model_query""#))
+    #expect(dashboardHTML(html, contains: #"id="search-hf-token""#))
+    #expect(dashboardHTML(html, contains: #"class="field-label-with-help""#))
+    #expect(dashboardHTML(html, contains: #"class="profile-help profile-help-fixed""#))
+    #expect(dashboardHTML(html, contains: #"aria-describedby="hf-token-help-tooltip""#))
+    #expect(
+        dashboardHTML(
+            html,
+            contains: #"class="profile-help-tooltip profile-help-tooltip-fixed" id="hf-token-help-tooltip" role="tooltip""#
+        )
+    )
+    #expect(dashboardHTML(html, contains: #"data-i18n="hf_token_help_title""#))
+    #expect(dashboardHTML(html, contains: #"data-i18n="hf_token_help_body""#))
+    #expect(
+        dashboardHTML(
+            html,
+            contains: #"hf_token_help_body: "通常无需填写。下载私有模型、已在 Hugging Face 接受许可的受限模型，或 Hugging Face 要求身份验证时，请输入访问令牌。令牌仅用于 Hugging Face 请求。""#
+        )
+    )
+    #expect(dashboardHTML(html, contains: #"data-i18n="sort_by""#))
+    #expect(dashboardHTML(html, contains: #".hf-search-controls {"#))
+    #expect(dashboardHTML(html, contains: #"token: token || null"#))
+    #expect(dashboardHTML(html, contains: #"request_id: requestId"#))
+    #expect(dashboardHTML(html, contains: #"function onSearchError(requestId, jsonStr) {"#))
+    #expect(dashboardHTML(html, contains: #"resultsDiv.replaceChildren(error);"#))
+
+    let query = try #require(html.range(of: #"id="search-hf-query""#))
+    let token = try #require(
+        html.range(of: #"id="search-hf-token""#, range: query.upperBound ..< html.endIndex)
+    )
+    let sort = try #require(
+        html.range(of: #"id="search-hf-sort""#, range: token.upperBound ..< html.endIndex)
+    )
+    let results = try #require(
+        html.range(of: #"id="search-results""#, range: sort.upperBound ..< html.endIndex)
+    )
+    let progress = try #require(
+        html.range(of: #"id="dl-progress""#, range: results.upperBound ..< html.endIndex)
+    )
+    #expect(query.lowerBound < token.lowerBound)
+    #expect(token.lowerBound < sort.lowerBound)
+    #expect(sort.lowerBound < results.lowerBound)
+    #expect(results.lowerBound < progress.lowerBound)
+}
+
+@Test func dashboardHuggingFaceSearchPlaceholderFollowsDashboardLanguage() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(
+        dashboardHTML(
+            html,
+            contains: #"data-i18n-placeholder="search_hf_placeholder""#
+        )
+    )
+    #expect(
+        dashboardHTML(
+            html,
+            contains: #"document.querySelectorAll('[data-i18n-placeholder]')"#
+        )
+    )
+    #expect(dashboardHTML(html, contains: #"const key = el.dataset.i18nPlaceholder;"#))
+    #expect(
+        dashboardHTML(
+            html,
+            contains: #"el.setAttribute('placeholder', dict[key]);"#
+        )
+    )
+    #expect(
+        dashboardHTML(
+            html,
+            contains: #"search_hf_placeholder: "输入模型名称或组织/模型""#
+        )
+    )
+}
+
+@Test func dashboardClearsHuggingFaceResultsAndRejectsStaleResponsesForEmptyQuery() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(html, contains: #"function onHuggingFaceQueryInput() {"#))
+    #expect(dashboardHTML(html, contains: #"activeHuggingFaceSearchRequestId = null;"#))
+    #expect(
+        dashboardHTML(
+            html,
+            contains: #"document.getElementById('search-results').replaceChildren();"#
+        )
+    )
+    #expect(
+        dashboardHTML(
+            html,
+            contains: #"huggingFaceSearchQueryInput.addEventListener('input', onHuggingFaceQueryInput);"#
+        )
+    )
+    #expect(dashboardHTML(html, contains: #"function onSearchResults(requestId, jsonStr) {"#))
+    #expect(
+        dashboardHTML(
+            html,
+            contains: #"if (requestId !== activeHuggingFaceSearchRequestId) return;"#
+        )
+    )
+    #expect(dashboardHTML(html, contains: #"request_id: requestId"#))
+}
+
+@Test func dashboardHuggingFaceSearchDebouncesTypingAndSupportsImmediateActions() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(html, contains: #"const HUGGING_FACE_SEARCH_DEBOUNCE_MS = 600;"#))
+    #expect(dashboardHTML(html, contains: #"const HUGGING_FACE_SEARCH_MIN_CHARACTERS = 2;"#))
+    #expect(
+        dashboardHTML(
+            html,
+            contains: #"huggingFaceSearchDebounceTimer = setTimeout(function() {"#
+        )
+    )
+    #expect(dashboardHTML(html, contains: #"searchHuggingFace(true);"#))
+    #expect(dashboardHTML(html, contains: #"function searchHuggingFace(automatic = false) {"#))
+    #expect(dashboardHTML(html, contains: #"activeHuggingFaceSearchShowsErrorToast = !automatic;"#))
+    #expect(dashboardHTML(html, contains: #"if (showErrorToast) showToast(message, 'warn');"#))
+    #expect(dashboardHTML(html, contains: #"window.webkit.messageHandlers.cancelHFSearch"#))
+    #expect(dashboardHTML(html, contains: #"'compositionstart'"#))
+    #expect(dashboardHTML(html, contains: #"'compositionend'"#))
+    #expect(dashboardHTML(html, contains: #"event.key !== 'Enter'"#))
+    #expect(dashboardHTML(html, contains: #"searchHuggingFace(false);"#))
+    #expect(
+        dashboardHTML(
+            html,
+            contains: #"document.getElementById('search-hf-sort').addEventListener('change'"#
+        )
+    )
+}
+
+@Test func dashboardHuggingFaceProgressFollowsSelectedResultAndPreservesCompletionState() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(html, contains: #"class="search-result-entry" data-repo-id=""#))
+    #expect(dashboardHTML(html, contains: #"id="hf-progress-home""#))
+    #expect(dashboardHTML(html, contains: #"function attachHuggingFaceDownloadProgress() {"#))
+    #expect(dashboardHTML(html, contains: #"entry.appendChild(progress);"#))
+    #expect(dashboardHTML(html, contains: #"results.prepend(progress);"#))
+    #expect(dashboardHTML(html, contains: #"huggingFaceProgressRepoId = repoId;"#))
+    #expect(dashboardHTML(html, contains: #"completedHuggingFaceSearchRepoId = repoId;"#))
+    #expect(dashboardHTML(html, contains: #"completedButton.dataset.idleLabel = dict.local_model_exists || '✓ Exists';"#))
+    #expect(dashboardHTML(html, contains: #"completedButton.dataset.idleDisabled = 'true';"#))
+    #expect(dashboardHTML(html, contains: #"setSearchResultCompletedState(completedButton, true);"#))
+    #expect(!dashboardHTML(html, contains: #"searchHuggingFace({ preserveCompletion: true });"#))
+    #expect(dashboardHTML(html, contains: #"local_model_completed: "✓ 已完成""#))
+    #expect(dashboardHTML(html, contains: #"data-session-completed=""#))
+    #expect(dashboardHTML(html, contains: #"if (page !== 'models') clearCompletedHuggingFaceSearchState();"#))
+    #expect(dashboardHTML(html, contains: #"if (source !== 'hf') clearCompletedHuggingFaceSearchState();"#))
+}
+
+@Test func dashboardModelMoreActionsUseBodyPortalOutsideClippedTableCells() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(html, contains: #".model-more-menu {"#))
+    #expect(dashboardHTML(html, contains: #"position: fixed;"#))
+    #expect(dashboardHTML(html, contains: #"document.body.appendChild(menu)"#))
+    #expect(dashboardHTML(html, contains: #"positionModelMoreActions(menu, trigger)"#))
+    #expect(dashboardHTML(html, contains: #"width: max-content;"#))
+    #expect(dashboardHTML(html, contains: #"gap: 0.45em;"#))
+    #expect(dashboardHTML(html, contains: #"width: 1em;"#))
+    #expect(dashboardHTML(html, contains: #"height: 1em;"#))
+    #expect(dashboardHTML(html, contains: #"font-size: 13px;"#))
+    #expect(dashboardHTML(html, contains: #"stroke-width', '1.4'"#))
+    #expect(dashboardHTML(html, contains: #"createModelMoreActionIcon('verify')"#))
+    #expect(dashboardHTML(html, contains: #"createModelMoreActionIcon('versions')"#))
+    #expect(dashboardHTML(html, contains: #"createModelMoreActionIcon('delete')"#))
+    #expect(dashboardHTML(html, contains: #"'M6 3h8l4 4v14H6V3Z'"#))
+    #expect(dashboardHTML(html, contains: #"'m9 14 2 2 4-4'"#))
+    #expect(dashboardHTML(html, contains: #"stroke', 'currentColor'"#))
+    #expect(dashboardHTML(html, contains: #"verifyButton.className = 'model-more-verify'"#))
+    #expect(dashboardHTML(html, contains: #"versionsButton.className = 'model-more-versions'"#))
+    #expect(dashboardHTML(html, contains: #"deleteButton.className = 'model-more-delete'"#))
+    #expect(dashboardHTML(html, contains: #"button.model-more-verify svg { color: var(--accent); }"#))
+    #expect(dashboardHTML(html, contains: #"button.model-more-versions svg { color: #7c6ee6; }"#))
+    #expect(dashboardHTML(html, contains: #"button.model-more-delete svg { color: var(--destructive); }"#))
+    #expect(dashboardHTML(html, contains: #"aria-haspopup="menu""#))
+    #expect(dashboardHTML(html, contains: #"closeModelMoreActions({ restoreFocus: true })"#))
+    #expect(dashboardHTML(html, contains: #"verify_integrity: "验证模型完整性""#))
+    #expect(dashboardHTML(html, contains: #"manage_versions: "管理版本""#))
+    #expect(dashboardHTML(html, contains: #"delete_model: "删除模型""#))
+    #expect(!dashboardHTML(html, contains: #".model-more-menu button.danger"#))
+    #expect(!dashboardHTML(html, contains: #"deleteButton.className = 'danger'"#))
+    #expect(!dashboardHTML(html, contains: #"<details class="model-more">"#))
+}
+
+@Test func dashboardModelVersionManagementSupportsActivationRollbackAndExplicitCleanup() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(html, contains: #"id="model-versions-modal""#))
+    #expect(dashboardHTML(html, contains: #"function openModelVersions(modelId) {"#))
+    #expect(dashboardHTML(html, contains: #"window.webkit.messageHandlers.listModelVersions"#))
+    #expect(dashboardHTML(html, contains: #"window.webkit.messageHandlers.activateModelVersion"#))
+    #expect(dashboardHTML(html, contains: #"window.webkit.messageHandlers.deleteModelVersions"#))
+    #expect(dashboardHTML(html, contains: #"t('rollback_reload', 'Roll back and reload')"#))
+    #expect(dashboardHTML(html, contains: #"class="model-version-checkbox""#))
+    #expect(dashboardHTML(html, contains: #"confirm_delete_versions: "确定删除所选 {n} 个版本并释放 {size}？此操作不可恢复。""#))
+}
+
+@Test func dashboardHuggingFaceSearchDistinguishesExactLocalAndUpdateStates() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(html, contains: #"const localState = m.local_state || 'available';"#))
+    #expect(dashboardHTML(html, contains: #"exists: dict.local_model_exists || '✓ Exists'"#))
+    #expect(dashboardHTML(html, contains: #"update_available: dict.local_model_update || 'Download update'"#))
+    #expect(dashboardHTML(html, contains: #"local_inactive: dict.local_model_inactive || 'Use local version'"#))
+    #expect(dashboardHTML(html, contains: #"repair: dict.local_model_repair || 'Repair download'"#))
+    #expect(dashboardHTML(html, contains: #"identity_unavailable: dict.local_model_identity_unavailable || 'Version unavailable'"#))
+    #expect(dashboardHTML(html, contains: #"localState === 'identity_unavailable'"#))
+    #expect(dashboardHTML(html, contains: #"const actionIcon = localState === 'exists' || isCompleted"#))
+    #expect(dashboardHTML(html, contains: #"+ actionIcon"#))
+    #expect(dashboardHTML(html, contains: #"local_model_exists: "✓ 已存在""#))
+    #expect(dashboardHTML(html, contains: #"local_model_completed: "✓ 已完成""#))
+    #expect(dashboardHTML(html, contains: #"local_model_update: "下载新版本""#))
+    #expect(dashboardHTML(html, contains: #"local_model_identity_unavailable: "版本身份无法确认""#))
 }
 
 @Test func dashboardModelTypeColumnUsesCapabilityLabels() throws {

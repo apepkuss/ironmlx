@@ -150,17 +150,17 @@ import Testing
 
 @Test func localModelScannerReadsGenerationConfigSamplingDefaults() throws {
     let root = try temporaryDirectory()
-    let snapshot = root
-        .appendingPathComponent("models", isDirectory: true)
-        .appendingPathComponent("models--mlx-community--SamplerDefaults-4bit", isDirectory: true)
-        .appendingPathComponent("snapshots", isDirectory: true)
-        .appendingPathComponent("main", isDirectory: true)
-    try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
-    try Data(#"{"max_position_embeddings":32768}"#.utf8)
-        .write(to: snapshot.appendingPathComponent("config.json"))
-    try Data(#"{"temperature":0.65,"top_p":0.9,"top_k":32,"repetition_penalty":1.08}"#.utf8)
-        .write(to: snapshot.appendingPathComponent("generation_config.json"))
-    try Data("weights".utf8).write(to: snapshot.appendingPathComponent("model.safetensors"))
+    _ = try writeVerifiedTestSnapshot(
+        root: root,
+        repoID: "mlx-community/SamplerDefaults-4bit",
+        files: [
+            "config.json": Data(#"{"max_position_embeddings":32768}"#.utf8),
+            "generation_config.json": Data(
+                #"{"temperature":0.65,"top_p":0.9,"top_k":32,"repetition_penalty":1.08}"#.utf8
+            ),
+            "model.safetensors": Data("weights".utf8),
+        ]
+    )
 
     let model = try #require(LocalModelScanner(rootURL: root).scan().first)
 
@@ -172,15 +172,7 @@ import Testing
 
 @Test func modelLoadParametersPreferSavedMaxTokensOverModelContextWindow() throws {
     let root = try temporaryDirectory()
-    let snapshot = root
-        .appendingPathComponent("models", isDirectory: true)
-        .appendingPathComponent("models--mlx-community--LongContext-4bit", isDirectory: true)
-        .appendingPathComponent("snapshots", isDirectory: true)
-        .appendingPathComponent("main", isDirectory: true)
-    try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
-    try Data(#"{"max_position_embeddings":262144}"#.utf8)
-        .write(to: snapshot.appendingPathComponent("config.json"))
-    try Data("weights".utf8).write(to: snapshot.appendingPathComponent("model.safetensors"))
+    _ = try writeLongContextSnapshot(root: root)
 
     let store = ModelParameterStore(url: root.appendingPathComponent("model_params.json"))
     try store.save(ModelParameters(modelID: "mlx-community/LongContext-4bit", maxTokens: "65536"))
@@ -197,15 +189,7 @@ import Testing
 
 @Test func modelLoadParametersUseSafeDefaultForLongContextWithoutActiveKvOffload() throws {
     let root = try temporaryDirectory()
-    let snapshot = root
-        .appendingPathComponent("models", isDirectory: true)
-        .appendingPathComponent("models--mlx-community--LongContext-4bit", isDirectory: true)
-        .appendingPathComponent("snapshots", isDirectory: true)
-        .appendingPathComponent("main", isDirectory: true)
-    try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
-    try Data(#"{"max_position_embeddings":262144}"#.utf8)
-        .write(to: snapshot.appendingPathComponent("config.json"))
-    try Data("weights".utf8).write(to: snapshot.appendingPathComponent("model.safetensors"))
+    _ = try writeLongContextSnapshot(root: root)
 
     let maxCacheCap = ModelLoadParameters.maxCacheCap(
         for: "mlx-community/LongContext-4bit",
@@ -219,15 +203,7 @@ import Testing
 
 @Test func modelLoadParametersAllowFullLongContextWithActiveKvOffload() throws {
     let root = try temporaryDirectory()
-    let snapshot = root
-        .appendingPathComponent("models", isDirectory: true)
-        .appendingPathComponent("models--mlx-community--LongContext-4bit", isDirectory: true)
-        .appendingPathComponent("snapshots", isDirectory: true)
-        .appendingPathComponent("main", isDirectory: true)
-    try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
-    try Data(#"{"max_position_embeddings":262144}"#.utf8)
-        .write(to: snapshot.appendingPathComponent("config.json"))
-    try Data("weights".utf8).write(to: snapshot.appendingPathComponent("model.safetensors"))
+    _ = try writeLongContextSnapshot(root: root)
 
     let maxCacheCap = ModelLoadParameters.maxCacheCap(
         for: "mlx-community/LongContext-4bit",
@@ -237,4 +213,15 @@ import Testing
     )
 
     #expect(maxCacheCap == 262144)
+}
+
+private func writeLongContextSnapshot(root: URL) throws -> URL {
+    try writeVerifiedTestSnapshot(
+        root: root,
+        repoID: "mlx-community/LongContext-4bit",
+        files: [
+            "config.json": Data(#"{"max_position_embeddings":262144}"#.utf8),
+            "model.safetensors": Data("weights".utf8),
+        ]
+    )
 }

@@ -32,10 +32,14 @@ public struct LocalModelDeletionService {
         var deleted: [String] = []
         for id in normalizedIDs {
             var removed = false
-            for cacheSubdirectory in ["models", "models-ms"] {
-                let directory = cacheDirectory(for: id, cacheSubdirectory: cacheSubdirectory)
+            for provider in ModelRepositoryProvider.allCases {
+                let directory = try ModelRepositoryLayout.repositoryRoot(
+                    rootURL: rootURL,
+                    provider: provider,
+                    repoID: id
+                )
                 if fileManager.fileExists(atPath: directory.path) {
-                    try fileManager.removeItem(at: directory)
+                    try deleteRepository(directory, provider: provider, repoID: id)
                     removed = true
                 }
             }
@@ -57,9 +61,16 @@ public struct LocalModelDeletionService {
         return LocalModelDeletionResult(deleted: deleted, clearedDefault: clearedDefault)
     }
 
-    private func cacheDirectory(for modelID: String, cacheSubdirectory: String) -> URL {
-        rootURL
-            .appendingPathComponent(cacheSubdirectory, isDirectory: true)
-            .appendingPathComponent("models--" + modelID.replacingOccurrences(of: "/", with: "--"), isDirectory: true)
+    private func deleteRepository(
+        _ directory: URL,
+        provider: ModelRepositoryProvider,
+        repoID: String
+    ) throws {
+        let lock = try ModelDownloadStore(rootURL: rootURL).acquireRepositoryLock(
+            provider: provider,
+            repoID: repoID
+        )
+        defer { withExtendedLifetime(lock) {} }
+        try fileManager.removeItem(at: directory)
     }
 }

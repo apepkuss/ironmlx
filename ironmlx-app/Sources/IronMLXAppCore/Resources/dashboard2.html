@@ -17,6 +17,7 @@
     --green: #34c759;
     --green-bg: #34c759;
     --warning: #ff9500;
+    --destructive: #ff3b30;
     --sidebar-w: 200px;
     --radius: 10px;
   }
@@ -34,6 +35,7 @@
       --green: #30d158;
       --green-bg: #30d158;
       --warning: #ff9f0a;
+      --destructive: #ff453a;
     }
   }
 
@@ -129,8 +131,62 @@
     padding: 32px;
   }
 
+  .content.models-page-active {
+    overflow-y: hidden;
+  }
+
   .page { display: none; }
   .page.active { display: block; }
+
+  #page-models.active {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
+
+  .models-page-header,
+  #page-models > .tab-bar {
+    flex: 0 0 auto;
+  }
+
+  .models-page-scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  .models-page-scroll.model-manager-active {
+    overflow-y: hidden;
+  }
+
+  #tab-models-manage.active {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
+
+  #tab-models-manage > .card {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  #tab-models-manage .data-table-wrapper {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    overscroll-behavior: contain;
+  }
+
+  #tab-models-manage .data-table thead th {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+  }
 
   .page-title {
     font-size: 24px;
@@ -169,6 +225,12 @@
     position: relative;
     display: inline-flex;
     align-items: center;
+  }
+
+  .field-label-with-help {
+    display: flex;
+    align-items: center;
+    gap: 6px;
   }
 
   .profile-help-trigger {
@@ -1113,6 +1175,10 @@
   .data-table td:nth-child(3),
   .data-table th:nth-child(4),
   .data-table td:nth-child(4),
+  .data-table th:nth-child(5),
+  .data-table td:nth-child(5),
+  .data-table th:nth-child(6),
+  .data-table td:nth-child(6),
   .data-table th:nth-child(7),
   .data-table td:nth-child(7),
   .data-table th:nth-child(8),
@@ -1181,6 +1247,7 @@
   .status-dot.model-busy { background: var(--warning); }
   .status-dot.model-incomplete,
   .status-dot.model-unsupported { background: var(--warning); }
+  .status-dot.model-corrupt { background: #e53e3e; }
 
   .action-btn {
     font-size: 11px;
@@ -1242,6 +1309,140 @@
   }
 
   .icon-btn:hover { background: var(--border); }
+
+  .model-more {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .model-more-menu {
+    position: fixed;
+    z-index: 10000;
+    display: grid;
+    width: max-content;
+    max-width: calc(100vw - 16px);
+    padding: 4px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: var(--card-bg);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  }
+
+  .model-more-menu button {
+    display: flex;
+    align-items: center;
+    gap: 0.45em;
+    width: 100%;
+    padding: 7px 9px;
+    border: none;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--text);
+    text-align: left;
+    white-space: nowrap;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 400;
+    line-height: 1.2;
+  }
+
+  .model-more-menu button svg {
+    width: 1em;
+    height: 1em;
+    flex: 0 0 auto;
+  }
+
+  .model-more-menu button.model-more-verify svg { color: var(--accent); }
+  .model-more-menu button.model-more-versions svg { color: #7c6ee6; }
+  .model-more-menu button.model-more-delete svg { color: var(--destructive); }
+  .model-more-menu button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .model-more-menu button:hover { background: var(--border); }
+
+  .model-versions-modal .modal-body {
+    display: block;
+    padding-top: 14px;
+  }
+
+  .model-version-summary {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 12px;
+    color: var(--text-secondary);
+    font-size: 12px;
+  }
+
+  .model-version-list {
+    border: 0.5px solid var(--border);
+    border-radius: 9px;
+    overflow: hidden;
+  }
+
+  .model-version-row {
+    display: grid;
+    grid-template-columns: 22px minmax(0, 1fr) auto;
+    gap: 10px;
+    align-items: center;
+    min-height: 64px;
+    padding: 10px 12px;
+    border-bottom: 0.5px solid var(--border);
+  }
+
+  .model-version-row:last-child { border-bottom: 0; }
+
+  .model-version-identity {
+    min-width: 0;
+  }
+
+  .model-version-commit {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  .model-version-meta {
+    margin-top: 4px;
+    color: var(--text-tertiary);
+    font-size: 11px;
+  }
+
+  .model-version-badges {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    margin-left: 8px;
+  }
+
+  .model-version-badge {
+    padding: 2px 6px;
+    border-radius: 999px;
+    background: var(--border);
+    color: var(--text-secondary);
+    font-family: inherit;
+    font-size: 10px;
+    font-weight: 500;
+  }
+
+  .model-version-badge.current { color: var(--accent); }
+  .model-version-badge.corrupt { color: var(--destructive); }
+
+  .model-version-actions {
+    display: flex;
+    gap: 6px;
+  }
+
+  .model-version-empty {
+    padding: 28px;
+    color: var(--text-secondary);
+    text-align: center;
+    font-size: 12px;
+  }
 
   /* ── Download form row ── */
   .dl-row {
@@ -1655,14 +1856,67 @@
     border-radius: var(--radius) var(--radius) 0 0;
   }
   @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-  .search-result-item {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 10px 0; border-bottom: 0.5px solid var(--border);
+  .search-result-entry {
+    border-bottom: 0.5px solid var(--border);
   }
-  .search-result-item:last-child { border-bottom: none; }
+  .search-result-entry:last-child {
+    border-bottom: none;
+  }
+  .search-result-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 0;
+  }
   .search-result-name { font-weight: 600; font-size: 13px; color: var(--text); }
   .search-result-meta { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
-  .search-result-dl { font-size: 12px; padding: 4px 12px; }
+  .hf-download-progress {
+    display: none;
+    margin: 0 0 10px;
+    padding: 12px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 12px;
+  }
+  #search-results > .hf-download-progress {
+    margin: 0 0 12px;
+  }
+  .hf-search-message {
+    padding: 16px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    text-align: center;
+  }
+  .hf-search-message.error {
+    color: var(--destructive);
+  }
+  .hf-search-controls {
+    flex-wrap: wrap;
+  }
+  .hf-search-query-field {
+    flex: 3 1 280px;
+  }
+  .hf-token-field {
+    flex: 1.5 1 190px;
+  }
+  .hf-search-sort-field {
+    flex: 1 1 140px;
+  }
+  .search-result-dl {
+    min-width: 82px;
+    padding-inline: 14px;
+    justify-content: center;
+  }
+  .search-result-dl:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
+  .hf-download-action .download-button-icon {
+    width: 14px;
+    height: 14px;
+    flex: 0 0 auto;
+  }
 </style>
 </head>
 <body>
@@ -1787,15 +2041,19 @@
 
   <!-- Models Page -->
   <div class="page" id="page-models">
-    <div class="page-title" data-i18n="nav_models">Models</div>
-    <div class="page-subtitle" data-i18n="models_subtitle">Manage and download models.</div>
+    <div class="models-page-header">
+      <div class="page-title" data-i18n="nav_models">Models</div>
+      <div class="page-subtitle" data-i18n="models_subtitle">Manage and download models.</div>
+    </div>
 
     <!-- Tabs -->
     <div class="tab-bar">
       <button class="tab-btn active" data-tab="models-manage" data-i18n="model_manager">Model Manager</button>
       <button class="tab-btn" data-tab="models-download" data-i18n="model_download">Model Download</button>
+      <button class="tab-btn" data-tab="models-scheduler" data-i18n="scheduler_profile_tab">Scheduling</button>
     </div>
 
+    <div class="models-page-scroll model-manager-active">
     <!-- Tab 1: Model Manager -->
     <div class="tab-panel active" id="tab-models-manage">
       <div class="card" style="padding:0;overflow:hidden;">
@@ -1844,8 +2102,11 @@
         </table>
         </div>
       </div>
+    </div>
 
-      <div class="card-settings" id="profile-generation-card" style="margin-top:20px;">
+    <!-- Tab 3: Scheduler Profile -->
+    <div class="tab-panel" id="tab-models-scheduler">
+      <div class="card-settings" id="profile-generation-card">
         <div class="card-header">
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="opacity:0.55;"><path d="M3 3.5h10M3 8h10M3 12.5h6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><circle cx="11.5" cy="12.5" r="1.8" stroke="currentColor" stroke-width="1.1"/></svg>
           <span data-i18n="scheduler_profile">Scheduler Profile</span>
@@ -1912,43 +2173,30 @@
       <div id="dl-panel-hf">
         <div class="card-settings">
           <div class="card-header">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="opacity:0.55;"><path d="M8 2v8M5 7l3 3 3-3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 11v2h10v-2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            <span data-i18n="dl_from_hf">Download from HuggingFace</span>
-          </div>
-          <div style="padding:16px 20px;">
-            <div class="dl-row">
-              <div class="dl-field" style="flex:3;">
-                <label data-i18n="repo_id">Repo ID</label>
-                <input type="text" placeholder="mlx-community/Qwen3-0.6B-4bit" id="dl-repo-id" autocapitalize="off" autocorrect="off">
-              </div>
-              <div class="dl-field" style="flex:1.5;">
-                <label>HF TOKEN <span style="color:var(--text-tertiary);font-weight:400;" data-i18n="optional">(optional)</span></label>
-                <input type="text" placeholder="hf_..." id="dl-hf-token" autocapitalize="off" autocorrect="off">
-              </div>
-              <button class="btn-accent" id="dl-download-btn" onclick="startDownload()"><svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 2v7M4.5 6.5L7 9l2.5-2.5" stroke="white" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/><path d="M2.5 9.5v2h9v-2" stroke="white" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg> <span data-i18n="download">Download</span></button>
-            </div>
-            <div id="dl-progress" style="display:none; margin-top:12px; padding:12px; background:var(--bg); border:1px solid var(--border); border-radius:8px; font-size:12px;">
-              <div style="display:flex; align-items:center; gap:8px;">
-                <span id="dl-progress-icon" style="animation:spin 1s linear infinite;">&#x21BB;</span>
-                <span id="dl-progress-text">Downloading...</span>
-              </div>
-              <div style="margin-top:8px; height:4px; background:var(--border); border-radius:2px; overflow:hidden;">
-                <div id="dl-progress-bar" style="height:100%; width:0%; background:var(--accent); border-radius:2px; transition:width 0.3s;"></div>
-              </div>
-            </div>
-          </div>
-        </div>
-        <div class="card-settings">
-          <div class="card-header">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="opacity:0.55;"><circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.3"/><line x1="10.5" y1="10.5" x2="14" y2="14" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
             <span data-i18n="search_hf">Search HuggingFace</span>
           </div>
           <div style="padding:16px 20px;">
-            <div class="dl-row">
-              <div class="dl-field" style="flex:3;">
+            <div class="dl-row hf-search-controls">
+              <div class="dl-field hf-search-query-field">
+                <label data-i18n="hf_model_query">Model name or repository ID</label>
                 <input type="text" data-i18n-placeholder="search_hf_placeholder" placeholder="Search models on HuggingFace..." id="search-hf-query" autocapitalize="off" autocorrect="off">
               </div>
-              <div class="dl-field" style="flex:1;min-width:120px;">
+              <div class="dl-field hf-token-field">
+                <div class="field-label-with-help">
+                  <label for="search-hf-token">HF TOKEN <span style="color:var(--text-tertiary);font-weight:400;" data-i18n="optional">(optional)</span></label>
+                  <span class="profile-help profile-help-fixed">
+                    <button type="button" class="profile-help-trigger" aria-describedby="hf-token-help-tooltip" aria-label="When is an HF token needed?">?</button>
+                    <span class="profile-help-tooltip profile-help-tooltip-fixed" id="hf-token-help-tooltip" role="tooltip">
+                      <span class="profile-help-tooltip-title" data-i18n="hf_token_help_title">When a token is needed</span>
+                      <span class="profile-help-tooltip-body" data-i18n="hf_token_help_body">Usually leave this blank. Enter a Hugging Face access token for private models, gated models whose license you have accepted, or when Hugging Face requires authentication. The token is used only for Hugging Face requests.</span>
+                    </span>
+                  </span>
+                </div>
+                <input type="text" placeholder="hf_..." id="search-hf-token" autocapitalize="off" autocorrect="off">
+              </div>
+              <div class="dl-field hf-search-sort-field">
+                <label data-i18n="sort_by">Sort by</label>
                 <select id="search-hf-sort">
                   <option value="trending" data-i18n="trending">Trending</option>
                   <option value="downloads" data-i18n="most_downloads" selected>Most Downloads</option>
@@ -1959,6 +2207,17 @@
               <button class="btn-accent" onclick="searchHuggingFace()"><svg width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="6" cy="6" r="4" stroke="white" stroke-width="1.3"/><line x1="9" y1="9" x2="12.5" y2="12.5" stroke="white" stroke-width="1.3" stroke-linecap="round"/></svg> <span data-i18n="search">Search</span></button>
             </div>
             <div id="search-results" style="margin-top:12px;"></div>
+            <div id="hf-progress-home">
+              <div id="dl-progress" class="hf-download-progress" role="status" aria-live="polite">
+                <div style="display:flex; align-items:center; gap:8px;">
+                  <span id="dl-progress-icon" style="animation:spin 1s linear infinite;">&#x21BB;</span>
+                  <span id="dl-progress-text">Downloading...</span>
+                </div>
+                <div style="margin-top:8px; height:4px; background:var(--border); border-radius:2px; overflow:hidden;">
+                  <div id="dl-progress-bar" style="height:100%; width:0%; background:var(--accent); border-radius:2px; transition:width 0.3s;"></div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -1995,6 +2254,7 @@
       </div>
     </div>
 
+    </div>
   </div>
 
   <!-- Benchmark Page -->
@@ -2481,7 +2741,19 @@
       </div>
     </div>
 
-    <!-- 3. Resource Management -->
+    <!-- 3. Model Runtime -->
+    <div class="card-settings">
+      <div class="card-header">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="opacity:0.55;"><path d="M3 3.5h10v9H3z" stroke="currentColor" stroke-width="1.2"/><path d="M6 1.5v2M10 1.5v2M6 12.5v2M10 12.5v2M1 6h2M13 6h2M1 10h2M13 10h2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+        <span data-i18n="model_runtime">Model Runtime</span>
+      </div>
+      <div class="settings-row">
+        <div class="settings-row-left"><div class="settings-row-label" data-i18n="verify_model_on_load">Full SHA-256 verification on load</div><div class="settings-row-desc" data-i18n="verify_model_on_load_desc">Recompute every snapshot file checksum immediately before each actual model load. Disabled by default.</div></div>
+        <div class="settings-row-right"><label class="toggle"><input type="checkbox" id="cfg-verify-model-on-load"><span class="toggle-slider"></span></label></div>
+      </div>
+    </div>
+
+    <!-- 4. Resource Management -->
     <div class="card-settings">
       <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;">
         <span style="display:flex;align-items:center;gap:8px;">
@@ -2500,7 +2772,7 @@
       </div>
     </div>
 
-    <!-- 4. Cache -->
+    <!-- 5. Cache -->
     <div class="card-settings">
       <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;">
         <span style="display:flex;align-items:center;gap:8px;">
@@ -2574,7 +2846,7 @@
       </div>
     </div>
 
-    <!-- 5. Advanced -->
+    <!-- 6. Advanced -->
     <div class="card-settings">
       <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;">
         <span style="display:flex;align-items:center;gap:8px;">
@@ -2833,6 +3105,30 @@
   </div>
 </div>
 
+<!-- Model Versions Modal -->
+<div class="modal-overlay" id="model-versions-modal">
+  <div class="modal model-versions-modal">
+    <button class="modal-close" onclick="closeModelVersions()">&times;</button>
+    <div class="modal-header">
+      <div class="modal-pre" data-i18n="manage_versions">Manage versions</div>
+      <h2 id="model-versions-name"></h2>
+    </div>
+    <div class="modal-body">
+      <div class="model-version-summary">
+        <span id="model-versions-summary"></span>
+        <span id="model-versions-reclaimable"></span>
+      </div>
+      <div class="model-version-list" id="model-version-list">
+        <div class="model-version-empty" data-i18n="model_versions_loading">Loading versions…</div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-cancel" onclick="closeModelVersions()" data-i18n="cancel">Cancel</button>
+      <button class="btn-primary" id="cleanup-model-versions-btn" onclick="cleanupSelectedModelVersions()" disabled data-i18n="cleanup_selected_versions">Clean up selected versions</button>
+    </div>
+  </div>
+</div>
+
 <script>
   // ── i18n translations ──
   const I18N = {
@@ -2884,7 +3180,7 @@
       total_tokens: "Total Tokens", cached_tokens: "Cached Tokens", cache_efficiency: "Cache Efficiency",
       active_kv_status: "Active KV Offload", active_kv_enabled: "On", active_kv_disabled: "Off", active_kv_parked: "parked {value}", active_kv_swaps: "swaps {out}/{in}", active_kv_errors: "errors {value}",
       gpu_memory: "GPU Memory", requests: "Requests", active_mem: "Active", peak_mem: "Peak", cache_mem: "Cache", stopped: "Stopped",
-      models_subtitle: "Manage and download models.", model_manager: "Model Manager", model_download: "Model Download",
+      models_subtitle: "Manage, download, and configure model scheduling.", model_manager: "Model Manager", model_download: "Model Download", scheduler_profile_tab: "Scheduling",
       col_model: "Model \u25B2", col_type: "Type", col_quant: "Quant", col_size: "Size", col_status: "Status", col_pinned: "Pinned", col_default: "Default", col_params: "Params", status_ready: "Not loaded",
       status_incomplete: "Incomplete", status_unsupported: "Unsupported", model_not_ready: "Model snapshot is not ready to load.", action_unavailable: "Unavailable",
       batch_delete: "Batch Delete", cancel: "Cancel", selected_count: "{n} selected",
@@ -2892,6 +3188,13 @@
       confirm_delete_batch: "Delete {n} selected models? This cannot be undone.",
       col_actions: "Actions", status_loaded: "Loaded", action_load: "Load", action_unload: "Unload",
       status_loading: "Loading...", status_unloading: "Unloading...",
+      status_verifying: "Verifying integrity… {pct}%", status_verified: "Verified {time}", status_corrupt: "Corrupt",
+      verify_integrity: "Verify model integrity", delete_model: "Delete model", more_actions: "More actions", manage_versions: "Manage versions",
+      model_versions_loading: "Loading versions…", model_versions_count: "{n} versions", reclaimable_space: "{size} reclaimable", current_version: "Current", loaded_version: "Loaded", verified_version: "Verified", unverified_version: "Unverified", corrupt_version: "Corrupt",
+      activate_version: "Use this version", rollback_reload: "Roll back and reload", delete_version: "Delete version", cleanup_selected_versions: "Clean up selected versions", confirm_delete_versions: "Delete {n} selected versions and reclaim {size}? This cannot be undone.", version_activated: "Model version activated.", versions_deleted: "Selected model versions deleted.",
+      local_model_exists: "✓ Exists", local_model_completed: "✓ Completed", local_model_update: "Download update", local_model_inactive: "Use local version", local_model_repair: "Repair download", local_model_identity_unavailable: "Version unavailable",
+      hf_token_help_title: "When a token is needed", hf_token_help_body: "Usually leave this blank. Enter a Hugging Face access token for private models, gated models whose license you have accepted, or when Hugging Face requires authentication. The token is used only for Hugging Face requests.",
+      integrity_verified_toast: "Model integrity verified.", integrity_corrupt_toast: "Integrity verification failed. This model is marked corrupt and cannot be loaded.",
       action_loading: "Loading...", action_unloading: "Unloading...", action_load_model_only: "Model only", action_load_mtp: "Model + MTP",
       pin_model_tooltip: "Pin loaded model: exempt from TTL auto-unload and automatic release policies. Manual unload is still available.",
       unpin_model_tooltip: "Pinned loaded model: click to unpin and restore TTL and automatic release policies.",
@@ -2906,6 +3209,7 @@
       model_downloading_start: "Downloading {name}...",
       model_downloading_file: "Downloading {name}... {pct}%",
       download_btn_downloading: "Downloading...",
+      download_in_progress: "A HuggingFace download is already in progress.",
       download_generic_failed: "Download failed.",
       ms_starting: "Starting download from ModelScope...",
       bench_no_prompt_size: "Select at least one pp setting before running benchmark.",
@@ -2955,6 +3259,7 @@
       err_memory_pressure: "GPU memory is too high to load a new model right now. Unload an existing model or free memory and retry.",
       err_gpu_memory_insufficient: "Not enough available GPU memory to safely load this model. Unload one or more unused loaded models to free GPU memory, then try again.",
       err_max_loaded_models_reached: "Maximum concurrent loaded models reached. Unload an unused loaded model before loading another model.",
+      err_model_reload_busy: "The model is processing requests. Wait for it to become idle before switching versions.",
       err_model_memory_limit_exceeded: "Model memory limit reached. Unload one or more loaded models, raise Memory Limit (Model Only), or set it to Auto, then try again.",
       err_total_memory_limit_exceeded: "Total memory limit reached. Unload one or more loaded models, raise Memory Limit (Total), or set it to Auto, then try again.",
       err_kv_memory_budget_exceeded: "KV cache memory budget is insufficient. For long-context models, enable Active KV Cache Offload with cache enabled, or lower Max Sequences / MAX TOKENS and retry.",
@@ -2994,7 +3299,7 @@
       mem_warning: "Warning: Insufficient GPU memory.\n\nRequired: {required}\nAvailable: {available}\n\nLoading this model may cause performance issues or crashes.\n\nContinue anyway?",
       dl_from_hf: "Download from HuggingFace", repo_id: "Repo ID", optional: "(optional)", download: "Download",
       dl_from_ms: "Download from ModelScope", ms_repo_id: "Repo ID", ms_browse: "Browse models at",
-      search_hf: "Search HuggingFace", trending: "Trending", most_downloads: "Most Downloads", recently_created: "Recently Created", recently_updated: "Recently Updated", most_params: "Most Params", least_params: "Least Params", search: "Search",
+      search_hf: "Search HuggingFace", hf_model_query: "Model name or repository ID", search_hf_placeholder: "Enter a model name or organization/model", sort_by: "Sort by", trending: "Trending", most_downloads: "Most Downloads", recently_created: "Recently Created", recently_updated: "Recently Updated", most_params: "Most Params", least_params: "Least Params", search: "Search",
       model_param_settings: "Model Param Settings", context_size: "CONTEXT SIZE",
       single_request_max_tokens: "MAX TOKENS",
       model_alias: "Model Alias", model_type: "Model Type", auto_detect: "Auto Detect",
@@ -3031,6 +3336,7 @@
       badge_restart: "restart", badge_live: "live", requires_restart: "requires restart",
       all_interfaces: "all interfaces (0.0.0.0)",
       appearance: "Appearance", interface_language: "Language", theme_mode: "Theme Mode", theme_light: "Light", theme_dark: "Dark", theme_system: "System",
+      model_runtime: "Model Runtime", verify_model_on_load: "Full SHA-256 verification on load", verify_model_on_load_desc: "Recompute every snapshot file checksum immediately before each actual model load. Disabled by default.",
       resource_mgmt: "Resource Management",
       mem_limit_total: "Memory Limit (Total)", mem_limit_total_desc: "Limits total memory used by the backend service, including models, KV Cache, and runtime overhead. Set 0 for auto.",
       mem_limit_model: "Memory Limit (Model Only)", mem_limit_model_desc: "Limits total memory used by loaded model weights. Set 0 for no limit.",
@@ -3159,7 +3465,7 @@
       total_tokens: "处理 Tokens", cached_tokens: "缓存 Tokens", cache_efficiency: "缓存命中率",
       active_kv_status: "Active KV 分层卸载", active_kv_enabled: "开启", active_kv_disabled: "关闭", active_kv_parked: "暂停 {value}", active_kv_swaps: "换出/换入 {out}/{in}", active_kv_errors: "错误 {value}",
       gpu_memory: "GPU 内存", requests: "请求数", active_mem: "活跃", peak_mem: "峰值", cache_mem: "缓存", stopped: "已停止",
-      models_subtitle: "管理和下载模型。", model_manager: "模型管理", model_download: "模型下载",
+      models_subtitle: "管理、下载模型和配置模型调度。", model_manager: "模型管理", model_download: "模型下载", scheduler_profile_tab: "调度配置",
       col_model: "模型 \u25B2", col_type: "类型", col_quant: "量化", col_size: "大小", col_status: "状态", col_pinned: "固定", col_default: "默认", col_params: "参数", status_ready: "未加载",
       status_incomplete: "不完整", status_unsupported: "不支持", model_not_ready: "模型快照尚未达到可加载状态。", action_unavailable: "不可用",
       batch_delete: "批量删除", cancel: "取消", selected_count: "已选 {n} 个",
@@ -3167,6 +3473,13 @@
       confirm_delete_batch: "确定删除 {n} 个模型？此操作不可恢复。",
       col_actions: "操作", status_loaded: "已加载", action_load: "加载", action_unload: "卸载",
       status_loading: "加载中...", status_unloading: "卸载中...",
+      status_verifying: "正在验证完整性… {pct}%", status_verified: "已验证 {time}", status_corrupt: "已损坏",
+      verify_integrity: "验证模型完整性", delete_model: "删除模型", more_actions: "更多操作", manage_versions: "管理版本",
+      model_versions_loading: "正在加载版本…", model_versions_count: "共 {n} 个版本", reclaimable_space: "可释放 {size}", current_version: "当前版本", loaded_version: "已加载", verified_version: "已验证", unverified_version: "未验证", corrupt_version: "已损坏",
+      activate_version: "切换到此版本", rollback_reload: "回滚并重新加载", delete_version: "删除版本", cleanup_selected_versions: "清理所选版本", confirm_delete_versions: "确定删除所选 {n} 个版本并释放 {size}？此操作不可恢复。", version_activated: "模型版本已切换。", versions_deleted: "所选模型版本已删除。",
+      local_model_exists: "✓ 已存在", local_model_completed: "✓ 已完成", local_model_update: "下载新版本", local_model_inactive: "设为当前版本", local_model_repair: "修复下载", local_model_identity_unavailable: "版本身份无法确认",
+      hf_token_help_title: "什么时候需要 Token", hf_token_help_body: "通常无需填写。下载私有模型、已在 Hugging Face 接受许可的受限模型，或 Hugging Face 要求身份验证时，请输入访问令牌。令牌仅用于 Hugging Face 请求。",
+      integrity_verified_toast: "模型完整性验证成功。", integrity_corrupt_toast: "完整性验证失败；该模型已标记为损坏，后续加载将被拒绝。",
       action_loading: "加载中...", action_unloading: "卸载中...", action_load_model_only: "仅模型", action_load_mtp: "模型+MTP",
       pin_model_tooltip: "固定加载：不会被 TTL 自动卸载，也不会参与自动释放策略。仍可手动卸载。",
       unpin_model_tooltip: "已固定加载：点击取消固定，恢复 TTL 和自动释放策略。",
@@ -3181,6 +3494,7 @@
       model_downloading_start: "正在下载 {name}…",
       model_downloading_file: "正在下载 {name}… {pct}%",
       download_btn_downloading: "下载中…",
+      download_in_progress: "已有 HuggingFace 模型正在下载。",
       download_generic_failed: "下载失败。",
       ms_starting: "正在连接 ModelScope…",
       bench_no_prompt_size: "请至少选择一个 pp 设定后再运行基准测试。",
@@ -3230,6 +3544,7 @@
       err_memory_pressure: "GPU 显存压力过高，暂时无法加载新模型。请先卸载已加载的模型或释放显存后重试。",
       err_gpu_memory_insufficient: "当前可用 GPU 内存不足，无法安全加载该模型。请先卸载暂不使用的已加载模型，释放显存后再重试。",
       err_max_loaded_models_reached: "已达到最大同时加载模型数，无法加载新模型。请先卸载暂不使用的已加载模型，再重试。",
+      err_model_reload_busy: "模型正在处理请求，请等待模型空闲后再切换版本。",
       err_model_memory_limit_exceeded: "已达到模型内存限制，无法加载新模型。请先卸载暂不使用的已加载模型，或在【设置】中调高「内存限制（仅模型）」/切换为自动后重试。",
       err_total_memory_limit_exceeded: "已达到总内存限制，无法加载新模型。请先卸载暂不使用的已加载模型，或在【设置】中调高「内存限制（总量）」/切换为自动后重试。",
       err_kv_memory_budget_exceeded: "KV cache 内存预算不足。长上下文模型请在启用缓存的同时开启【活跃 KV Cache 分层卸载】，或调低「最大序列数」/ MAX TOKENS 后重试。",
@@ -3269,7 +3584,7 @@
       mem_warning: "警告：GPU 内存不足。\n\n所需：{required}\n可用：{available}\n\n加载此模型可能导致性能问题或崩溃。\n\n是否继续？",
       dl_from_hf: "从 HuggingFace 下载", repo_id: "仓库 ID", optional: "（可选）", download: "下载",
       dl_from_ms: "从 ModelScope 下载", ms_repo_id: "仓库 ID", ms_browse: "浏览模型",
-      search_hf: "搜索 HuggingFace", trending: "热门趋势", most_downloads: "下载最多", recently_created: "最近创建", recently_updated: "最近更新", most_params: "参数最多", least_params: "参数最少", search: "搜索",
+      search_hf: "搜索 HuggingFace", hf_model_query: "模型名称或仓库 ID", search_hf_placeholder: "输入模型名称或组织/模型", sort_by: "排序方式", trending: "热门趋势", most_downloads: "下载最多", recently_created: "最近创建", recently_updated: "最近更新", most_params: "参数最多", least_params: "参数最少", search: "搜索",
       model_param_settings: "模型参数设置", context_size: "CONTEXT SIZE",
       single_request_max_tokens: "MAX TOKENS",
       model_alias: "模型别名", model_type: "模型类型", auto_detect: "自动检测",
@@ -3306,6 +3621,7 @@
       badge_restart: "重启", badge_live: "实时", requires_restart: "需要重启",
       all_interfaces: "所有接口 (0.0.0.0)",
       appearance: "外观", interface_language: "界面语言", theme_mode: "主题模式", theme_light: "浅色", theme_dark: "暗色", theme_system: "系统",
+      model_runtime: "模型运行", verify_model_on_load: "加载时完整性校验", verify_model_on_load_desc: "每次实际加载模型前重新计算 snapshot 全部文件的 SHA-256。默认关闭。",
       resource_mgmt: "资源管理",
       mem_limit_total: "内存限制（总量）", mem_limit_total_desc: "限制后端服务可使用的总内存，包括模型、KV Cache 和运行时开销。设为 0 表示自动。",
       mem_limit_model: "内存限制（仅模型）", mem_limit_model_desc: "限制已加载模型权重占用的总内存。设为 0 表示不限制。",
@@ -3434,7 +3750,7 @@
       total_tokens: "處理 Tokens", cached_tokens: "快取 Tokens", cache_efficiency: "快取命中率",
       active_kv_status: "Active KV 分層卸載", active_kv_enabled: "開啟", active_kv_disabled: "關閉", active_kv_parked: "暫停 {value}", active_kv_swaps: "換出/換入 {out}/{in}", active_kv_errors: "錯誤 {value}",
       gpu_memory: "GPU 記憶體", requests: "請求數", active_mem: "活躍", peak_mem: "峰值", cache_mem: "快取", stopped: "已停止",
-      models_subtitle: "管理和下載模型。", model_manager: "模型管理", model_download: "模型下載",
+      models_subtitle: "管理、下載模型和設定模型調度。", model_manager: "模型管理", model_download: "模型下載", scheduler_profile_tab: "調度設定",
       col_model: "模型 \u25B2", col_type: "類型", col_quant: "量化", col_size: "大小", col_status: "狀態", col_pinned: "固定", col_default: "預設", col_params: "參數", status_ready: "未載入",
       status_incomplete: "不完整", status_unsupported: "不支援", model_not_ready: "模型快照尚未達到可載入狀態。", action_unavailable: "不可用",
       batch_delete: "批量刪除", cancel: "取消", selected_count: "已選 {n} 個",
@@ -3442,6 +3758,13 @@
       confirm_delete_batch: "確定刪除 {n} 個模型？此操作不可復原。",
       col_actions: "操作", status_loaded: "已載入", action_load: "載入", action_unload: "卸載",
       status_loading: "載入中...", status_unloading: "卸載中...",
+      status_verifying: "正在驗證完整性… {pct}%", status_verified: "已驗證 {time}", status_corrupt: "已損壞",
+      verify_integrity: "驗證模型完整性", delete_model: "刪除模型", more_actions: "更多操作", manage_versions: "管理版本",
+      model_versions_loading: "正在載入版本…", model_versions_count: "共 {n} 個版本", reclaimable_space: "可釋放 {size}", current_version: "目前版本", loaded_version: "已載入", verified_version: "已驗證", unverified_version: "未驗證", corrupt_version: "已損壞",
+      activate_version: "切換到此版本", rollback_reload: "回滾並重新載入", delete_version: "刪除版本", cleanup_selected_versions: "清理所選版本", confirm_delete_versions: "確定刪除所選 {n} 個版本並釋放 {size}？此操作無法復原。", version_activated: "模型版本已切換。", versions_deleted: "所選模型版本已刪除。",
+      local_model_exists: "✓ 已存在", local_model_completed: "✓ 已完成", local_model_update: "下載新版本", local_model_inactive: "設為目前版本", local_model_repair: "修復下載", local_model_identity_unavailable: "無法確認版本身分",
+      hf_token_help_title: "何時需要 Token", hf_token_help_body: "通常無需填寫。下載私人模型、已在 Hugging Face 接受授權的受限模型，或 Hugging Face 要求驗證身分時，請輸入存取權杖。權杖僅用於 Hugging Face 請求。",
+      integrity_verified_toast: "模型完整性驗證成功。", integrity_corrupt_toast: "完整性驗證失敗；此模型已標記為損壞，後續載入將被拒絕。",
       action_loading: "載入中...", action_unloading: "卸載中...", action_load_model_only: "僅模型", action_load_mtp: "模型+MTP",
       pin_model_tooltip: "固定載入：不會被 TTL 自動卸載，也不會參與自動釋放策略。仍可手動卸載。",
       unpin_model_tooltip: "已固定載入：點擊取消固定，恢復 TTL 和自動釋放策略。",
@@ -3456,6 +3779,7 @@
       model_downloading_start: "正在下載 {name}…",
       model_downloading_file: "正在下載 {name}… {pct}%",
       download_btn_downloading: "下載中…",
+      download_in_progress: "已有 HuggingFace 模型正在下載。",
       download_generic_failed: "下載失敗。",
       ms_starting: "正在連線 ModelScope…",
       bench_no_prompt_size: "請至少選擇一個 pp 設定後再執行基準測試。",
@@ -3493,6 +3817,7 @@
       err_memory_pressure: "GPU 顯存壓力過高，暫時無法載入新模型。請先卸載已載入的模型或釋出顯存後重試。",
       err_gpu_memory_insufficient: "目前可用 GPU 記憶體不足，無法安全載入此模型。請先卸載暫不使用的已載入模型，釋放顯示記憶體後再重試。",
       err_max_loaded_models_reached: "已達到最大同時載入模型數，無法載入新模型。請先卸載暫不使用的已載入模型，再重試。",
+      err_model_reload_busy: "模型正在處理請求，請等待模型閒置後再切換版本。",
       err_model_memory_limit_exceeded: "已達到模型記憶體限制，無法載入新模型。請先卸載暫不使用的已載入模型，或在【設定】中調高「記憶體限制（僅模型）」/切換為自動後重試。",
       err_total_memory_limit_exceeded: "已達到總記憶體限制，無法載入新模型。請先卸載暫不使用的已載入模型，或在【設定】中調高「記憶體限制（總量）」/切換為自動後重試。",
       err_kv_memory_budget_exceeded: "KV cache 記憶體預算不足。長上下文模型請在啟用快取的同時開啟【活躍 KV Cache 分層卸載】，或調低「最大序列數」/ MAX TOKENS 後重試。",
@@ -3527,7 +3852,7 @@
       mem_warning: "警告：GPU 記憶體不足。\n\n所需：{required}\n可用：{available}\n\n載入此模型可能導致效能問題或當機。\n\n是否繼續？",
       dl_from_hf: "從 HuggingFace 下載", repo_id: "倉庫 ID", optional: "（可選）", download: "下載",
       dl_from_ms: "從 ModelScope 下載", ms_repo_id: "倉庫 ID", ms_browse: "瀏覽模型",
-      search_hf: "搜尋 HuggingFace", trending: "熱門趨勢", most_downloads: "下載最多", recently_created: "最近建立", recently_updated: "最近更新", most_params: "參數最多", least_params: "參數最少", search: "搜尋",
+      search_hf: "搜尋 HuggingFace", hf_model_query: "模型名稱或儲存庫 ID", search_hf_placeholder: "輸入模型名稱或組織/模型", sort_by: "排序方式", trending: "熱門趨勢", most_downloads: "下載最多", recently_created: "最近建立", recently_updated: "最近更新", most_params: "參數最多", least_params: "參數最少", search: "搜尋",
       single_request_max_tokens: "MAX TOKENS",
       model_param_settings: "模型參數設定", context_size: "CONTEXT SIZE",
       model_alias: "模型別名", model_type: "模型類型", auto_detect: "自動偵測",
@@ -3564,6 +3889,7 @@
       badge_restart: "重啟", badge_live: "即時", requires_restart: "需要重啟",
       all_interfaces: "所有介面 (0.0.0.0)",
       appearance: "外觀", interface_language: "介面語言", theme_mode: "主題模式", theme_light: "淺色", theme_dark: "暗色", theme_system: "系統",
+      model_runtime: "模型執行", verify_model_on_load: "載入時完整性驗證", verify_model_on_load_desc: "每次實際載入模型前重新計算 snapshot 全部檔案的 SHA-256。預設關閉。",
       resource_mgmt: "資源管理",
       mem_limit_total: "記憶體限制（總量）", mem_limit_total_desc: "限制後端服務可使用的總記憶體，包括模型、KV Cache 和執行階段開銷。設為 0 表示自動。",
       mem_limit_model: "記憶體限制（僅模型）", mem_limit_model_desc: "限制已載入模型權重占用的總記憶體。設為 0 表示不限制。",
@@ -3692,7 +4018,7 @@
       total_tokens: "処理 Tokens", cached_tokens: "キャッシュ Tokens", cache_efficiency: "キャッシュヒット率",
       active_kv_status: "Active KV オフロード", active_kv_enabled: "オン", active_kv_disabled: "オフ", active_kv_parked: "一時停止 {value}", active_kv_swaps: "退避/復元 {out}/{in}", active_kv_errors: "エラー {value}",
       gpu_memory: "GPU メモリ", requests: "リクエスト", active_mem: "アクティブ", peak_mem: "ピーク", cache_mem: "キャッシュ", stopped: "停止中",
-      models_subtitle: "モデルの管理とダウンロード。", model_manager: "モデル管理", model_download: "モデルダウンロード",
+      models_subtitle: "モデルの管理、ダウンロード、スケジューリング設定。", model_manager: "モデル管理", model_download: "モデルダウンロード", scheduler_profile_tab: "スケジューラ設定",
       col_model: "モデル \u25B2", col_type: "タイプ", col_quant: "量子化", col_size: "サイズ", col_status: "ステータス", col_pinned: "固定", col_default: "デフォルト", col_params: "パラメータ", status_ready: "未ロード",
       status_incomplete: "不完全", status_unsupported: "未対応", model_not_ready: "モデルスナップショットはまだロード可能な状態ではありません。", action_unavailable: "利用不可",
       batch_delete: "一括削除", cancel: "キャンセル", selected_count: "{n} 件選択中",
@@ -3700,6 +4026,13 @@
       confirm_delete_batch: "{n} 件のモデルを削除しますか？この操作は元に戻せません。",
       col_actions: "アクション", status_loaded: "ロード済み", action_load: "ロード", action_unload: "アンロード",
       status_loading: "ロード中...", status_unloading: "アンロード中...",
+      status_verifying: "整合性を検証中… {pct}%", status_verified: "検証済み {time}", status_corrupt: "破損",
+      verify_integrity: "モデルの整合性を検証", delete_model: "モデルを削除", more_actions: "その他の操作", manage_versions: "バージョン管理",
+      model_versions_loading: "バージョンを読み込み中…", model_versions_count: "{n} バージョン", reclaimable_space: "{size} 解放可能", current_version: "現在", loaded_version: "ロード済み", verified_version: "検証済み", unverified_version: "未検証", corrupt_version: "破損",
+      activate_version: "このバージョンを使用", rollback_reload: "ロールバックして再ロード", delete_version: "バージョンを削除", cleanup_selected_versions: "選択したバージョンを整理", confirm_delete_versions: "選択した {n} バージョンを削除して {size} 解放しますか？元に戻せません。", version_activated: "モデルバージョンを切り替えました。", versions_deleted: "選択したモデルバージョンを削除しました。",
+      local_model_exists: "✓ 既存", local_model_completed: "✓ 完了", local_model_update: "新バージョンを取得", local_model_inactive: "ローカル版を使用", local_model_repair: "再ダウンロード", local_model_identity_unavailable: "バージョンを確認できません",
+      hf_token_help_title: "Token が必要な場合", hf_token_help_body: "通常は空欄のままで構いません。非公開モデル、Hugging Face でライセンスに同意済みのアクセス制限モデル、または認証を求められた場合は、Hugging Face アクセストークンを入力してください。Token は Hugging Face へのリクエストにのみ使用されます。",
+      integrity_verified_toast: "モデルの整合性を確認しました。", integrity_corrupt_toast: "整合性検証に失敗しました。このモデルは破損としてマークされ、ロードできません。",
       action_loading: "ロード中...", action_unloading: "アンロード中...", action_load_model_only: "モデルのみ", action_load_mtp: "モデル+MTP",
       pin_model_tooltip: "固定ロード：TTL 自動アンロードや自動解放の対象外になります。手動アンロードは引き続き可能です。",
       unpin_model_tooltip: "固定ロード中：クリックすると固定を解除し、TTL と自動解放の対象に戻します。",
@@ -3714,6 +4047,7 @@
       model_downloading_start: "{name} をダウンロード中…",
       model_downloading_file: "{name} をダウンロード中… {pct}%",
       download_btn_downloading: "ダウンロード中…",
+      download_in_progress: "HuggingFace モデルをダウンロードしています。",
       download_generic_failed: "ダウンロードに失敗しました。",
       ms_starting: "ModelScope に接続中…",
       bench_no_prompt_size: "ベンチマークを実行する前に、少なくとも1つの pp 設定を選択してください。",
@@ -3751,6 +4085,7 @@
       err_memory_pressure: "GPU メモリが逼迫しているため、新しいモデルを読み込めません。既存のモデルを解放するなどしてから再度お試しください。",
       err_gpu_memory_insufficient: "利用可能な GPU メモリが不足しているため、このモデルを安全に読み込めません。使用していない読み込み済みモデルをアンロードして GPU メモリを解放してから再試行してください。",
       err_max_loaded_models_reached: "最大同時ロードモデル数に達しました。新しいモデルは読み込めません。使用していない読み込み済みモデルを手動でアンロードしてから再試行してください。",
+      err_model_reload_busy: "モデルはリクエストを処理中です。アイドル状態になってからバージョンを切り替えてください。",
       err_model_memory_limit_exceeded: "モデルメモリ制限に達しました。新しいモデルは読み込めません。使用していない読み込み済みモデルをアンロードするか、設定で「Memory Limit (Model Only)」を上げる/Auto にしてから再試行してください。",
       err_total_memory_limit_exceeded: "総メモリ制限に達しました。新しいモデルは読み込めません。使用していない読み込み済みモデルをアンロードするか、設定で「Memory Limit (Total)」を上げる/Auto にしてから再試行してください。",
       err_kv_memory_budget_exceeded: "KV cache のメモリ予算が不足しています。長いコンテキストのモデルでは、キャッシュを有効にしたうえで Active KV Cache オフロードを有効にするか、最大シーケンス数 / MAX TOKENS を下げて再試行してください。",
@@ -3785,7 +4120,7 @@
       mem_warning: "警告：GPU メモリが不足しています。\n\n必要：{required}\n利用可能：{available}\n\nこのモデルをロードするとパフォーマンスの問題やクラッシュが発生する可能性があります。\n\n続行しますか？",
       dl_from_hf: "HuggingFace からダウンロード", repo_id: "リポジトリ ID", optional: "（任意）", download: "ダウンロード",
       dl_from_ms: "ModelScope からダウンロード", ms_repo_id: "リポジトリ ID", ms_browse: "モデルを閲覧",
-      search_hf: "HuggingFace を検索", trending: "トレンド", most_downloads: "ダウンロード数順", recently_created: "最近作成順", recently_updated: "最近更新順", most_params: "パラメータ数順(多)", least_params: "パラメータ数順(少)", search: "検索",
+      search_hf: "HuggingFace を検索", hf_model_query: "モデル名またはリポジトリ ID", search_hf_placeholder: "モデル名または組織/モデルを入力", sort_by: "並び順", trending: "トレンド", most_downloads: "ダウンロード数順", recently_created: "最近作成順", recently_updated: "最近更新順", most_params: "パラメータ数順(多)", least_params: "パラメータ数順(少)", search: "検索",
       single_request_max_tokens: "MAX TOKENS",
       model_param_settings: "モデルパラメータ設定", context_size: "CONTEXT SIZE",
       model_alias: "モデルエイリアス", model_type: "モデルタイプ", auto_detect: "自動検出",
@@ -3822,6 +4157,7 @@
       badge_restart: "再起動", badge_live: "ライブ", requires_restart: "再起動が必要",
       all_interfaces: "全インターフェース (0.0.0.0)",
       appearance: "外観", interface_language: "インターフェース言語", theme_mode: "テーマモード", theme_light: "ライト", theme_dark: "ダーク", theme_system: "システム",
+      model_runtime: "モデルランタイム", verify_model_on_load: "ロード時の完全性検証", verify_model_on_load_desc: "モデルを実際にロードする直前に snapshot 全ファイルの SHA-256 を再計算します。デフォルトはオフです。",
       resource_mgmt: "リソース管理",
       mem_limit_total: "メモリ制限（合計）", mem_limit_total_desc: "バックエンドサービスが使用できる総メモリを制限します（モデル、KV Cache、ランタイムオーバーヘッドを含む）。0で自動。",
       mem_limit_model: "メモリ制限（モデルのみ）", mem_limit_model_desc: "ロード済みモデル重みが使用する総メモリを制限します。0で制限なし。",
@@ -3950,7 +4286,7 @@
       total_tokens: "처리 Tokens", cached_tokens: "캐시 Tokens", cache_efficiency: "캐시 적중률",
       active_kv_status: "Active KV 오프로드", active_kv_enabled: "켜짐", active_kv_disabled: "꺼짐", active_kv_parked: "일시 중지 {value}", active_kv_swaps: "내보내기/복원 {out}/{in}", active_kv_errors: "오류 {value}",
       gpu_memory: "GPU 메모리", requests: "요청", active_mem: "활성", peak_mem: "피크", cache_mem: "캐시", stopped: "중지됨",
-      models_subtitle: "모델 관리 및 다운로드.", model_manager: "모델 관리", model_download: "모델 다운로드",
+      models_subtitle: "모델 관리, 다운로드 및 스케줄링 설정.", model_manager: "모델 관리", model_download: "모델 다운로드", scheduler_profile_tab: "스케줄러 설정",
       col_model: "모델 \u25B2", col_type: "유형", col_quant: "양자화", col_size: "크기", col_status: "상태", col_pinned: "고정", col_default: "기본", col_params: "매개변수", status_ready: "로드 안 됨",
       status_incomplete: "불완전", status_unsupported: "지원 안 됨", model_not_ready: "모델 스냅샷을 아직 로드할 수 없습니다.", action_unavailable: "사용 불가",
       batch_delete: "일괄 삭제", cancel: "취소", selected_count: "{n}개 선택됨",
@@ -3958,6 +4294,13 @@
       confirm_delete_batch: "{n}개의 모델을 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.",
       col_actions: "작업", status_loaded: "로드됨", action_load: "로드", action_unload: "언로드",
       status_loading: "로딩 중...", status_unloading: "언로드 중...",
+      status_verifying: "무결성 확인 중… {pct}%", status_verified: "확인됨 {time}", status_corrupt: "손상됨",
+      verify_integrity: "모델 무결성 확인", delete_model: "모델 삭제", more_actions: "추가 작업", manage_versions: "버전 관리",
+      model_versions_loading: "버전을 불러오는 중…", model_versions_count: "{n}개 버전", reclaimable_space: "{size} 확보 가능", current_version: "현재", loaded_version: "로드됨", verified_version: "검증됨", unverified_version: "미검증", corrupt_version: "손상됨",
+      activate_version: "이 버전 사용", rollback_reload: "롤백 후 다시 로드", delete_version: "버전 삭제", cleanup_selected_versions: "선택한 버전 정리", confirm_delete_versions: "선택한 {n}개 버전을 삭제하고 {size}를 확보하시겠습니까? 되돌릴 수 없습니다.", version_activated: "모델 버전을 전환했습니다.", versions_deleted: "선택한 모델 버전을 삭제했습니다.",
+      local_model_exists: "✓ 존재함", local_model_completed: "✓ 완료", local_model_update: "새 버전 다운로드", local_model_inactive: "로컬 버전 사용", local_model_repair: "다시 다운로드", local_model_identity_unavailable: "버전을 확인할 수 없음",
+      hf_token_help_title: "Token이 필요한 경우", hf_token_help_body: "일반적으로 비워 두어도 됩니다. 비공개 모델, Hugging Face에서 라이선스에 동의한 접근 제한 모델 또는 인증이 필요한 경우 Hugging Face 액세스 토큰을 입력하세요. Token은 Hugging Face 요청에만 사용됩니다.",
+      integrity_verified_toast: "모델 무결성을 확인했습니다.", integrity_corrupt_toast: "무결성 확인에 실패했습니다. 이 모델은 손상됨으로 표시되어 로드할 수 없습니다.",
       action_loading: "로딩 중...", action_unloading: "언로드 중...", action_load_model_only: "모델만", action_load_mtp: "모델+MTP",
       pin_model_tooltip: "고정 로드: TTL 자동 언로드와 자동 해제 정책에서 제외됩니다. 수동 언로드는 계속 사용할 수 있습니다.",
       unpin_model_tooltip: "고정 로드됨: 클릭하면 고정을 해제하고 TTL 및 자동 해제 정책을 다시 적용합니다.",
@@ -3972,6 +4315,7 @@
       model_downloading_start: "{name} 다운로드 중…",
       model_downloading_file: "{name} 다운로드 중… {pct}%",
       download_btn_downloading: "다운로드 중…",
+      download_in_progress: "HuggingFace 모델을 다운로드하고 있습니다.",
       download_generic_failed: "다운로드에 실패했습니다.",
       ms_starting: "ModelScope에 연결 중…",
       bench_no_prompt_size: "벤치마크를 실행하기 전에 pp 설정을 하나 이상 선택하세요.",
@@ -4009,6 +4353,7 @@
       err_memory_pressure: "GPU 메모리 사용량이 높아 새 모델을 로드할 수 없습니다. 기존 모델을 언로드하거나 메모리를 확보한 후 다시 시도해 주세요.",
       err_gpu_memory_insufficient: "사용 가능한 GPU 메모리가 부족하여 이 모델을 안전하게 로드할 수 없습니다. 사용하지 않는 로드된 모델을 언로드하여 GPU 메모리를 확보한 뒤 다시 시도하세요.",
       err_max_loaded_models_reached: "최대 동시 로드 모델 수에 도달했습니다. 새 모델을 로드할 수 없습니다. 사용하지 않는 로드된 모델을 먼저 언로드한 뒤 다시 시도하세요.",
+      err_model_reload_busy: "모델이 요청을 처리 중입니다. 유휴 상태가 된 후 버전을 전환하세요.",
       err_model_memory_limit_exceeded: "모델 메모리 제한에 도달했습니다. 새 모델을 로드할 수 없습니다. 사용하지 않는 로드된 모델을 언로드하거나 설정에서 Memory Limit (Model Only)를 높이거나 Auto로 전환한 뒤 다시 시도하세요.",
       err_total_memory_limit_exceeded: "총 메모리 제한에 도달했습니다. 새 모델을 로드할 수 없습니다. 사용하지 않는 로드된 모델을 언로드하거나 설정에서 Memory Limit (Total)를 높이거나 Auto로 전환한 뒤 다시 시도하세요.",
       err_kv_memory_budget_exceeded: "KV cache 메모리 예산이 부족합니다. 긴 컨텍스트 모델은 캐시를 켠 상태에서 Active KV Cache 오프로드를 활성화하거나 Max Sequences / MAX TOKENS를 낮춘 뒤 다시 시도하세요.",
@@ -4043,7 +4388,7 @@
       mem_warning: "경고: GPU 메모리가 부족합니다.\n\n필요: {required}\n사용 가능: {available}\n\n이 모델을 로드하면 성능 문제나 충돌이 발생할 수 있습니다.\n\n계속하시겠습니까?",
       dl_from_hf: "HuggingFace에서 다운로드", repo_id: "저장소 ID", optional: "(선택 사항)", download: "다운로드",
       dl_from_ms: "ModelScope에서 다운로드", ms_repo_id: "저장소 ID", ms_browse: "모델 찾아보기",
-      search_hf: "HuggingFace 검색", trending: "인기 트렌드", most_downloads: "다운로드순", recently_created: "최근 생성순", recently_updated: "최근 업데이트순", most_params: "매개변수 많은순", least_params: "매개변수 적은순", search: "검색",
+      search_hf: "HuggingFace 검색", hf_model_query: "모델 이름 또는 저장소 ID", search_hf_placeholder: "모델 이름 또는 조직/모델 입력", sort_by: "정렬 방식", trending: "인기 트렌드", most_downloads: "다운로드순", recently_created: "최근 생성순", recently_updated: "최근 업데이트순", most_params: "매개변수 많은순", least_params: "매개변수 적은순", search: "검색",
       single_request_max_tokens: "MAX TOKENS",
       model_param_settings: "모델 매개변수 설정", context_size: "CONTEXT SIZE",
       model_alias: "모델 별칭", model_type: "모델 유형", auto_detect: "자동 감지",
@@ -4080,6 +4425,7 @@
       badge_restart: "재시작", badge_live: "실시간", requires_restart: "재시작 필요",
       all_interfaces: "모든 인터페이스 (0.0.0.0)",
       appearance: "외관", interface_language: "인터페이스 언어", theme_mode: "테마 모드", theme_light: "라이트", theme_dark: "다크", theme_system: "시스템",
+      model_runtime: "모델 런타임", verify_model_on_load: "로드 시 전체 무결성 확인", verify_model_on_load_desc: "모델을 실제로 로드하기 직전에 snapshot 모든 파일의 SHA-256을 다시 계산합니다. 기본값은 꺼짐입니다.",
       resource_mgmt: "리소스 관리",
       mem_limit_total: "메모리 제한 (전체)", mem_limit_total_desc: "백엔드 서비스가 사용할 수 있는 총 메모리를 제한합니다(모델, KV Cache, 런타임 오버헤드 포함). 0은 자동입니다.",
       mem_limit_model: "메모리 제한 (모델만)", mem_limit_model_desc: "로드된 모델 가중치가 사용하는 총 메모리를 제한합니다. 0은 제한 없음입니다.",
@@ -4174,6 +4520,10 @@
       const key = el.dataset.i18n;
       if (dict[key]) el.textContent = dict[key];
     });
+    document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
+      const key = el.dataset.i18nPlaceholder;
+      if (dict[key]) el.setAttribute('placeholder', dict[key]);
+    });
     // Settings subtitle with inline badge
     const sub = document.getElementById('settings-subtitle');
     if (sub && dict.settings_subtitle_html) {
@@ -4220,12 +4570,18 @@
       showToast(t('bench_locked_navigation', 'Benchmark is running. Stay on the Benchmark page until it finishes.'), 'info');
       return;
     }
+    if (page !== 'models') clearCompletedHuggingFaceSearchState();
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
     const navItem = document.querySelector('.nav-item[data-page="' + page + '"]');
     if (navItem) navItem.classList.add('active');
     const pageEl = document.getElementById('page-' + page);
     if (pageEl) pageEl.classList.add('active');
+    const content = document.querySelector('.content');
+    if (content) {
+      content.classList.toggle('models-page-active', page === 'models');
+      content.scrollTop = 0;
+    }
     updateStatusPollingInterval();
     // Re-sync loaded models when navigating to models page
     if (page === 'models') syncLoadedModels();
@@ -4256,18 +4612,29 @@
   function switchToTab(tabName) {
     const parent = document.getElementById('page-models');
     if (!parent) return;
+    if (tabName !== 'models-download') clearCompletedHuggingFaceSearchState();
     parent.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
     parent.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
     const btn = parent.querySelector('.tab-btn[data-tab="' + tabName + '"]');
     if (btn) btn.classList.add('active');
     const panel = document.getElementById('tab-' + tabName);
     if (panel) panel.classList.add('active');
+    const scrollContainer = parent.querySelector('.models-page-scroll');
+    if (scrollContainer) {
+      scrollContainer.classList.toggle('model-manager-active', tabName === 'models-manage');
+      scrollContainer.scrollTop = 0;
+    }
   }
 
   function showOnboarding() {
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
     document.getElementById('page-onboarding').classList.add('active');
+    const content = document.querySelector('.content');
+    if (content) {
+      content.classList.remove('models-page-active');
+      content.scrollTop = 0;
+    }
     updateStatusPollingInterval();
   }
 
@@ -4831,6 +5198,7 @@
 
   // ── Download Source Tab Switching ──
   function switchDlSource(source) {
+    if (source !== 'hf') clearCompletedHuggingFaceSearchState();
     document.getElementById('dl-panel-hf').style.display = source === 'hf' ? '' : 'none';
     document.getElementById('dl-panel-ms').style.display = source === 'ms' ? '' : 'none';
     const tabHf = document.getElementById('dl-tab-hf');
@@ -4861,16 +5229,17 @@
     apiPost('/admin/api/models/ms/download', { repo_id: repoId });
   }
 
-  function startDownload() {
+  function startDownload(repoId) {
     const dict = I18N[currentLang] || I18N.en;
-    const repoId = document.getElementById('dl-repo-id').value.trim();
     if (!repoId) { showToast(dict.enter_repo_id || 'Please enter a Repo ID.', 'info'); return; }
-    const token = document.getElementById('dl-hf-token').value.trim();
-    const btn = document.getElementById('dl-download-btn');
+    const token = document.getElementById('search-hf-token').value.trim();
     const progress = document.getElementById('dl-progress');
-    btn.disabled = true;
-    btn.style.opacity = '0.6';
+    clearTimeout(window.__HF_DL_RESET__);
+    huggingFaceProgressRepoId = repoId;
+    attachHuggingFaceDownloadProgress();
     progress.style.display = 'block';
+    document.getElementById('dl-progress-icon').style.animation = 'spin 1s linear infinite';
+    document.getElementById('dl-progress-icon').textContent = '↻';
     {
       const dict = I18N[currentLang] || I18N.en;
       const startMsg = (dict.model_downloading_start || 'Downloading {name}...').replace('{name}', repoId);
@@ -4894,19 +5263,118 @@
     document.getElementById('dl-progress-text').textContent = text;
   }
 
+  let activeHuggingFaceSearchRepoId = null;
+  let activeHuggingFaceSearchButton = null;
+  let completedHuggingFaceSearchRepoId = null;
+  let huggingFaceProgressRepoId = null;
+  let nextHuggingFaceSearchRequestId = 0;
+  let activeHuggingFaceSearchRequestId = null;
+  let huggingFaceSearchDebounceTimer = null;
+  let huggingFaceSearchIsComposing = false;
+  let activeHuggingFaceSearchShowsErrorToast = true;
+  const HUGGING_FACE_SEARCH_DEBOUNCE_MS = 600;
+  const HUGGING_FACE_SEARCH_MIN_CHARACTERS = 2;
+
+  function huggingFaceSearchResultEntry(repoId) {
+    return Array.from(document.querySelectorAll('.search-result-entry')).find(entry => {
+      return entry.dataset.repoId === repoId;
+    }) || null;
+  }
+
+  function parkHuggingFaceDownloadProgress() {
+    const home = document.getElementById('hf-progress-home');
+    const progress = document.getElementById('dl-progress');
+    if (home && progress && progress.parentElement !== home) {
+      home.appendChild(progress);
+    }
+  }
+
+  function attachHuggingFaceDownloadProgress() {
+    const progress = document.getElementById('dl-progress');
+    const results = document.getElementById('search-results');
+    if (!progress || !results || !huggingFaceProgressRepoId) return;
+    const query = document.getElementById('search-hf-query');
+    if (!query || !query.value.trim()) {
+      parkHuggingFaceDownloadProgress();
+      return;
+    }
+    const entry = huggingFaceSearchResultEntry(huggingFaceProgressRepoId);
+    if (entry) {
+      entry.appendChild(progress);
+    } else {
+      results.prepend(progress);
+    }
+  }
+
+  function setSearchResultCompletedState(button, completed) {
+    if (!button) return;
+    const icon = button.querySelector('.download-button-icon');
+    button.dataset.sessionCompleted = completed ? 'true' : 'false';
+    if (icon) icon.style.display = completed ? 'none' : '';
+    setSearchResultDownloadState(button, false);
+  }
+
+  function clearCompletedHuggingFaceSearchState() {
+    if (!completedHuggingFaceSearchRepoId) return;
+    const completedRepoId = completedHuggingFaceSearchRepoId;
+    completedHuggingFaceSearchRepoId = null;
+    const entry = huggingFaceSearchResultEntry(completedRepoId);
+    setSearchResultCompletedState(
+      entry && entry.querySelector('.search-result-dl'),
+      false
+    );
+    if (!activeHuggingFaceSearchRepoId && huggingFaceProgressRepoId === completedRepoId) {
+      clearTimeout(window.__HF_DL_RESET__);
+      document.getElementById('dl-progress').style.display = 'none';
+      huggingFaceProgressRepoId = null;
+      parkHuggingFaceDownloadProgress();
+    }
+  }
+
+  function setSearchResultDownloadState(button, downloading) {
+    if (!button) return;
+    const dict = I18N[currentLang] || I18N.en;
+    const label = button.querySelector('span');
+    const completed = button.dataset.sessionCompleted === 'true';
+    button.disabled = downloading || completed || button.dataset.idleDisabled === 'true';
+    if (label) {
+      label.textContent = downloading
+        ? (dict.download_btn_downloading || 'Downloading...')
+        : completed
+          ? (dict.local_model_completed || '✓ Completed')
+          : (button.dataset.idleLabel || dict.download || 'Download');
+    }
+  }
+
+  function finishSearchResultDownloadState() {
+    document.querySelectorAll('.search-result-dl:disabled').forEach(button => {
+      setSearchResultDownloadState(button, false);
+    });
+    setSearchResultDownloadState(activeHuggingFaceSearchButton, false);
+    activeHuggingFaceSearchRepoId = null;
+    activeHuggingFaceSearchButton = null;
+  }
+
   function onDownloadComplete(jsonStr) {
     let result = {};
     try { result = JSON.parse(jsonStr); } catch(e) {}
-    const btn = document.getElementById('dl-download-btn');
     const progress = document.getElementById('dl-progress');
-    btn.disabled = false;
-    btn.style.opacity = '1';
+    const repoId = result.repo_id || activeHuggingFaceSearchRepoId || '';
+    const completedButton = activeHuggingFaceSearchButton;
+    finishSearchResultDownloadState();
     if (result.success) {
+      const dict = I18N[currentLang] || I18N.en;
+      completedHuggingFaceSearchRepoId = repoId;
+      huggingFaceProgressRepoId = repoId;
+      if (completedButton) {
+        completedButton.dataset.idleLabel = dict.local_model_exists || '✓ Exists';
+        completedButton.dataset.idleDisabled = 'true';
+      }
+      setSearchResultCompletedState(completedButton, true);
+      attachHuggingFaceDownloadProgress();
       document.getElementById('dl-progress-bar').style.width = '100%';
       document.getElementById('dl-progress-icon').style.animation = 'none';
       document.getElementById('dl-progress-icon').textContent = '✓';
-      const dict = I18N[currentLang] || I18N.en;
-      const repoId = document.getElementById('dl-repo-id').value.trim();
       const localized = (dict.model_download_complete || 'Model "{name}" downloaded successfully.').replace('{name}', repoId);
       document.getElementById('dl-progress-text').textContent = localized;
       // Refresh model list
@@ -4921,7 +5389,10 @@
         document.getElementById('dl-progress-bar').style.width = '0%';
         document.getElementById('dl-progress-icon').style.animation = 'spin 1s linear infinite';
         document.getElementById('dl-progress-icon').textContent = '↻';
-        document.getElementById('dl-repo-id').value = '';
+        if (huggingFaceProgressRepoId === repoId) {
+          huggingFaceProgressRepoId = null;
+          parkHuggingFaceDownloadProgress();
+        }
       }, 10000);
     } else {
       const dict = I18N[currentLang] || I18N.en;
@@ -4936,9 +5407,11 @@
       // Legacy "already exists" uses its own dedicated i18n key and
       // toast layout. Preserve that flow.
       if ((result.error || '').includes('already exists')) {
-        const msg = (dict.model_exists_locally || 'Model "{name}" already exists locally.').replace('{name}', document.getElementById('dl-repo-id').value.trim());
+        const msg = (dict.model_exists_locally || 'Model "{name}" already exists locally.').replace('{name}', repoId);
         showToast(msg, 'warn');
         progress.style.display = 'none';
+        huggingFaceProgressRepoId = null;
+        parkHuggingFaceDownloadProgress();
       } else {
         document.getElementById('dl-progress-icon').style.animation = 'none';
         document.getElementById('dl-progress-icon').textContent = '✗';
@@ -4950,59 +5423,405 @@
   }
 
   // ── HuggingFace Search ──
-  function searchHuggingFace() {
+  function cancelActiveHuggingFaceSearch() {
+    if (activeHuggingFaceSearchRequestId === null) return;
+    activeHuggingFaceSearchRequestId = null;
+    const handler = window.webkit && window.webkit.messageHandlers
+      && window.webkit.messageHandlers.cancelHFSearch;
+    if (handler) handler.postMessage('');
+  }
+
+  function clearHuggingFaceSearchDebounce() {
+    if (huggingFaceSearchDebounceTimer === null) return;
+    clearTimeout(huggingFaceSearchDebounceTimer);
+    huggingFaceSearchDebounceTimer = null;
+  }
+
+  function clearHuggingFaceSearchResults() {
+    clearCompletedHuggingFaceSearchState();
+    parkHuggingFaceDownloadProgress();
+    document.getElementById('search-results').replaceChildren();
+  }
+
+  function huggingFaceSearchQueryLength(query) {
+    return Array.from(query).length;
+  }
+
+  function onHuggingFaceQueryInput() {
+    clearHuggingFaceSearchDebounce();
+    cancelActiveHuggingFaceSearch();
     const query = document.getElementById('search-hf-query').value.trim();
-    if (!query) return;
+    clearHuggingFaceSearchResults();
+    if (
+      !query
+      || huggingFaceSearchIsComposing
+      || huggingFaceSearchQueryLength(query) < HUGGING_FACE_SEARCH_MIN_CHARACTERS
+    ) {
+      return;
+    }
+    huggingFaceSearchDebounceTimer = setTimeout(function() {
+      huggingFaceSearchDebounceTimer = null;
+      searchHuggingFace(true);
+    }, HUGGING_FACE_SEARCH_DEBOUNCE_MS);
+  }
+
+  function searchHuggingFace(automatic = false) {
+    clearHuggingFaceSearchDebounce();
+    const query = document.getElementById('search-hf-query').value.trim();
+    if (
+      !query
+      || huggingFaceSearchQueryLength(query) < HUGGING_FACE_SEARCH_MIN_CHARACTERS
+    ) {
+      cancelActiveHuggingFaceSearch();
+      clearHuggingFaceSearchResults();
+      return;
+    }
+    cancelActiveHuggingFaceSearch();
+    clearCompletedHuggingFaceSearchState();
     const sort = document.getElementById('search-hf-sort').value;
+    const token = document.getElementById('search-hf-token').value.trim();
     const resultsDiv = document.getElementById('search-results');
+    parkHuggingFaceDownloadProgress();
     resultsDiv.innerHTML = '<div style="text-align:center;padding:16px;color:var(--text-secondary);font-size:12px;">Searching...</div>';
-    const payload = JSON.stringify({ query: query, sort: sort });
+    attachHuggingFaceDownloadProgress();
+    const requestId = ++nextHuggingFaceSearchRequestId;
+    activeHuggingFaceSearchRequestId = requestId;
+    activeHuggingFaceSearchShowsErrorToast = !automatic;
+    const payload = JSON.stringify({
+      query: query,
+      sort: sort,
+      token: token || null,
+      request_id: requestId
+    });
     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.searchHF) {
       window.webkit.messageHandlers.searchHF.postMessage(payload);
     }
   }
 
-  function onSearchResults(jsonStr) {
+  function onSearchResults(requestId, jsonStr) {
+    if (requestId !== activeHuggingFaceSearchRequestId) return;
+    activeHuggingFaceSearchRequestId = null;
     let models = [];
     try { models = JSON.parse(jsonStr); } catch(e) {}
     const resultsDiv = document.getElementById('search-results');
     const dict = I18N[currentLang] || I18N.en;
+    parkHuggingFaceDownloadProgress();
     if (!models.length) {
       resultsDiv.innerHTML = '<div style="text-align:center;padding:16px;color:var(--text-secondary);font-size:12px;">No results found.</div>';
+      attachHuggingFaceDownloadProgress();
       return;
     }
     let html = '';
     models.forEach(function(m) {
-      const downloads = m.downloads ? m.downloads.toLocaleString() : '0';
-      const likes = m.likes || 0;
-      html += '<div class="search-result-item">'
-        + '<div><div class="search-result-name">' + (m.id || m.modelId || '') + '</div>'
-        + '<div class="search-result-meta">↓ ' + downloads + ' · ♥ ' + likes + (m.pipeline_tag ? ' · ' + m.pipeline_tag : '') + '</div></div>'
-        + '<button class="btn-accent search-result-dl" onclick="fillRepoId(\'' + (m.id || m.modelId || '').replace(/'/g, "\\'") + '\')">' + (dict.download || 'Download') + '</button>'
-        + '</div>';
+      const repoId = m.id || m.modelId || '';
+      const isDownloading = repoId === activeHuggingFaceSearchRepoId;
+      const isCompleted = repoId === completedHuggingFaceSearchRepoId;
+      const localState = m.local_state || 'available';
+      const stateLabels = {
+        exists: dict.local_model_exists || '✓ Exists',
+        update_available: dict.local_model_update || 'Download update',
+        local_inactive: dict.local_model_inactive || 'Use local version',
+        repair: dict.local_model_repair || 'Repair download',
+        identity_unavailable: dict.local_model_identity_unavailable || 'Version unavailable',
+        available: dict.download || 'Download'
+      };
+      const idleLabel = stateLabels[localState] || stateLabels.available;
+      const idleDisabled = localState === 'exists' || localState === 'identity_unavailable';
+      const actionIcon = localState === 'exists' || isCompleted
+        ? ''
+        : '<svg class="download-button-icon" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M7 2v7M4.5 6.5L7 9l2.5-2.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/><path d="M2.5 9.5v2h9v-2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+      const metadata = [];
+      if (Number.isFinite(m.downloads)) metadata.push('↓ ' + m.downloads.toLocaleString());
+      if (Number.isFinite(m.likes)) metadata.push('♥ ' + m.likes.toLocaleString());
+      if (m.pipeline_tag) metadata.push(m.pipeline_tag);
+      html += '<div class="search-result-entry" data-repo-id="' + escapeAttr(repoId) + '">'
+        + '<div class="search-result-item">'
+        + '<div><div class="search-result-name">' + repoId + '</div>'
+        + (metadata.length ? '<div class="search-result-meta">' + metadata.join(' · ') + '</div>' : '') + '</div>'
+        + '<button class="btn-accent hf-download-action search-result-dl"'
+        + ((isDownloading || isCompleted || idleDisabled) ? ' disabled' : '')
+        + ' data-idle-label="' + escapeAttr(idleLabel) + '" data-idle-disabled="' + (idleDisabled ? 'true' : 'false') + '" data-session-completed="' + (isCompleted ? 'true' : 'false') + '"'
+        + ' onclick="handleSearchResultAction(\'' + repoId.replace(/'/g, "\\'") + '\', \'' + localState + '\', \'' + escapeAttr(m.sha || '') + '\', this)">'
+        + actionIcon
+        + '<span>' + (isDownloading
+          ? (dict.download_btn_downloading || 'Downloading...')
+          : isCompleted
+            ? (dict.local_model_completed || '✓ Completed')
+            : idleLabel) + '</span></button>'
+        + '</div></div>';
     });
     resultsDiv.innerHTML = html;
+    if (activeHuggingFaceSearchRepoId) {
+      const activeEntry = huggingFaceSearchResultEntry(activeHuggingFaceSearchRepoId);
+      activeHuggingFaceSearchButton = (activeEntry && activeEntry.querySelector('.search-result-dl'))
+        || activeHuggingFaceSearchButton;
+    }
+    attachHuggingFaceDownloadProgress();
   }
 
-  function fillRepoId(repoId) {
-    document.getElementById('dl-repo-id').value = repoId;
-    // Switch to download section focus
-    document.getElementById('dl-repo-id').scrollIntoView({ behavior: 'smooth' });
+  function onSearchError(requestId, jsonStr) {
+    if (requestId !== activeHuggingFaceSearchRequestId) return;
+    const showErrorToast = activeHuggingFaceSearchShowsErrorToast;
+    activeHuggingFaceSearchRequestId = null;
+    let result = {};
+    try { result = JSON.parse(jsonStr); } catch(e) {}
+    const dict = I18N[currentLang] || I18N.en;
+    const message = result.code
+      ? localizeErrorResult(result)
+      : (result.error || dict.download_generic_failed || 'HuggingFace search failed.');
+    const resultsDiv = document.getElementById('search-results');
+    parkHuggingFaceDownloadProgress();
+    const error = document.createElement('div');
+    error.className = 'hf-search-message error';
+    error.textContent = message;
+    resultsDiv.replaceChildren(error);
+    attachHuggingFaceDownloadProgress();
+    if (showErrorToast) showToast(message, 'warn');
   }
+
+  function downloadSearchResult(repoId, button) {
+    if (activeHuggingFaceSearchRepoId) {
+      const dict = I18N[currentLang] || I18N.en;
+      showToast(dict.download_in_progress || 'A HuggingFace download is already in progress.', 'info');
+      return;
+    }
+    clearCompletedHuggingFaceSearchState();
+    activeHuggingFaceSearchRepoId = repoId;
+    activeHuggingFaceSearchButton = button;
+    setSearchResultDownloadState(button, true);
+    startDownload(repoId);
+  }
+
+  function handleSearchResultAction(repoId, localState, commitSHA, button) {
+    if (localState === 'local_inactive' && commitSHA) {
+      const handler = window.webkit && window.webkit.messageHandlers
+        && window.webkit.messageHandlers.activateModelVersion;
+      if (handler) {
+        button.disabled = true;
+        handler.postMessage(JSON.stringify({
+          provider: 'huggingface',
+          repo_id: repoId,
+          commit_sha: commitSHA
+        }));
+      }
+      return;
+    }
+    downloadSearchResult(repoId, button);
+  }
+
+  const huggingFaceSearchQueryInput = document.getElementById('search-hf-query');
+  huggingFaceSearchQueryInput.addEventListener('input', onHuggingFaceQueryInput);
+  huggingFaceSearchQueryInput.addEventListener('compositionstart', function() {
+    huggingFaceSearchIsComposing = true;
+    clearHuggingFaceSearchDebounce();
+    cancelActiveHuggingFaceSearch();
+  });
+  huggingFaceSearchQueryInput.addEventListener('compositionend', function() {
+    huggingFaceSearchIsComposing = false;
+    onHuggingFaceQueryInput();
+  });
+  huggingFaceSearchQueryInput.addEventListener('keydown', function(event) {
+    if (event.key !== 'Enter' || event.isComposing || huggingFaceSearchIsComposing) return;
+    event.preventDefault();
+    searchHuggingFace(false);
+  });
+  document.getElementById('search-hf-sort').addEventListener('change', function() {
+    const query = huggingFaceSearchQueryInput.value.trim();
+    if (huggingFaceSearchQueryLength(query) >= HUGGING_FACE_SEARCH_MIN_CHARACTERS) {
+      searchHuggingFace(false);
+    }
+  });
 
   document.getElementById('model-params-modal').addEventListener('click', function(e) {
     if (e.target === this) closeParamsModal();
   });
 
+  let activeModelVersionRepository = null;
+  let activeModelVersionList = null;
+
+  function modelProvider(model) {
+    return model && model.source === 'ms' ? 'modelscope' : 'huggingface';
+  }
+
+  function formatVersionBytes(bytes) {
+    let value = Number(bytes || 0);
+    const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+    let unit = 0;
+    while (value >= 1024 && unit < units.length - 1) {
+      value /= 1024;
+      unit++;
+    }
+    return (unit === 0 ? Math.round(value) : value.toFixed(value >= 10 ? 1 : 2)) + ' ' + units[unit];
+  }
+
+  function openModelVersions(modelId) {
+    const model = window.__LOCAL_MODELS__ && window.__LOCAL_MODELS__[modelId];
+    if (!model) return;
+    activeModelVersionRepository = {
+      provider: modelProvider(model),
+      repo_id: model.repo_id || model.id
+    };
+    activeModelVersionList = null;
+    document.getElementById('model-versions-name').textContent = model.id;
+    document.getElementById('model-version-list').innerHTML =
+      '<div class="model-version-empty">' + escapeAttr(t('model_versions_loading', 'Loading versions…')) + '</div>';
+    document.getElementById('model-versions-summary').textContent = '';
+    document.getElementById('model-versions-reclaimable').textContent = '';
+    document.getElementById('cleanup-model-versions-btn').disabled = true;
+    document.getElementById('model-versions-modal').classList.add('open');
+    requestModelVersions();
+  }
+
+  function closeModelVersions() {
+    document.getElementById('model-versions-modal').classList.remove('open');
+    activeModelVersionRepository = null;
+    activeModelVersionList = null;
+  }
+
+  function requestModelVersions() {
+    if (!activeModelVersionRepository) return;
+    const handler = window.webkit && window.webkit.messageHandlers
+      && window.webkit.messageHandlers.listModelVersions;
+    if (handler) handler.postMessage(JSON.stringify(activeModelVersionRepository));
+  }
+
+  function versionBadge(label, cssClass) {
+    return '<span class="model-version-badge ' + (cssClass || '') + '">' + escapeAttr(label) + '</span>';
+  }
+
+  function onModelVersions(jsonStr) {
+    let list;
+    try { list = JSON.parse(jsonStr); } catch(e) { return; }
+    if (!activeModelVersionRepository
+        || list.provider !== activeModelVersionRepository.provider
+        || list.repo_id !== activeModelVersionRepository.repo_id) return;
+    activeModelVersionList = list;
+    const versions = list.versions || [];
+    document.getElementById('model-versions-summary').textContent =
+      t('model_versions_count', '{n} versions').replace('{n}', versions.length);
+    document.getElementById('model-versions-reclaimable').textContent =
+      t('reclaimable_space', '{size} reclaimable').replace('{size}', formatVersionBytes(list.reclaimable_bytes));
+    const container = document.getElementById('model-version-list');
+    if (!versions.length) {
+      container.innerHTML = '<div class="model-version-empty">—</div>';
+      return;
+    }
+    const anyLoaded = versions.some(v => v.is_loaded);
+    container.innerHTML = versions.map(function(version) {
+      const badges = [];
+      if (version.is_active) badges.push(versionBadge(t('current_version', 'Current'), 'current'));
+      if (version.is_loaded) badges.push(versionBadge(t('loaded_version', 'Loaded'), ''));
+      if (version.integrity_state === 'verified') badges.push(versionBadge(t('verified_version', 'Verified'), ''));
+      if (version.integrity_state === 'corrupt') badges.push(versionBadge(t('corrupt_version', 'Corrupt'), 'corrupt'));
+      if (version.integrity_state === 'unverified') badges.push(versionBadge(t('unverified_version', 'Unverified'), ''));
+      const published = version.published_at ? new Date(version.published_at).toLocaleString() : '—';
+      const verified = version.verified_at ? new Date(version.verified_at).toLocaleString() : '—';
+      const activateLabel = anyLoaded
+        ? t('rollback_reload', 'Roll back and reload')
+        : t('activate_version', 'Use this version');
+      const checkbox = version.can_delete
+        ? '<input type="checkbox" class="model-version-checkbox" value="' + escapeAttr(version.commit_sha) + '" onchange="updateVersionCleanupButton()">'
+        : '<span></span>';
+      let actions = '';
+      if (version.can_activate) {
+        actions += '<button class="btn-cancel" onclick="activateVersion(\'' + escapeAttr(version.commit_sha) + '\')">'
+          + escapeAttr(activateLabel) + '</button>';
+      }
+      if (version.can_delete) {
+        actions += '<button class="btn-cancel" onclick="deleteSingleVersion(\'' + escapeAttr(version.commit_sha) + '\')">'
+          + escapeAttr(t('delete_version', 'Delete version')) + '</button>';
+      }
+      return '<div class="model-version-row">'
+        + checkbox
+        + '<div class="model-version-identity"><div><span class="model-version-commit" title="' + escapeAttr(version.commit_sha) + '">'
+        + escapeAttr(version.commit_sha.slice(0, 12)) + '</span><span class="model-version-badges">' + badges.join('') + '</span></div>'
+        + '<div class="model-version-meta">' + escapeAttr(published) + ' · ' + formatVersionBytes(version.size_bytes)
+        + ' · ' + escapeAttr(t('verified_version', 'Verified')) + ': ' + escapeAttr(verified) + '</div></div>'
+        + '<div class="model-version-actions">' + actions + '</div></div>';
+    }).join('');
+    updateVersionCleanupButton();
+  }
+
+  function updateVersionCleanupButton() {
+    const selected = document.querySelectorAll('#model-version-list .model-version-checkbox:checked');
+    document.getElementById('cleanup-model-versions-btn').disabled = selected.length === 0;
+  }
+
+  function activateVersion(commitSHA) {
+    if (!activeModelVersionRepository) return;
+    const handler = window.webkit && window.webkit.messageHandlers
+      && window.webkit.messageHandlers.activateModelVersion;
+    if (!handler) return;
+    document.getElementById('model-version-list').style.pointerEvents = 'none';
+    handler.postMessage(JSON.stringify(Object.assign({}, activeModelVersionRepository, {
+      commit_sha: commitSHA
+    })));
+  }
+
+  function deleteSingleVersion(commitSHA) {
+    deleteModelVersions([commitSHA]);
+  }
+
+  function cleanupSelectedModelVersions() {
+    const commits = Array.from(
+      document.querySelectorAll('#model-version-list .model-version-checkbox:checked')
+    ).map(input => input.value);
+    deleteModelVersions(commits);
+  }
+
+  function deleteModelVersions(commits) {
+    if (!activeModelVersionRepository || !commits.length) return;
+    const versions = (activeModelVersionList && activeModelVersionList.versions) || [];
+    const bytes = versions
+      .filter(version => commits.includes(version.commit_sha))
+      .reduce((sum, version) => sum + Number(version.size_bytes || 0), 0);
+    const message = t('confirm_delete_versions', 'Delete {n} selected versions and reclaim {size}? This cannot be undone.')
+      .replace('{n}', commits.length)
+      .replace('{size}', formatVersionBytes(bytes));
+    showConfirmDialog(message).then(function(ok) {
+      if (!ok || !activeModelVersionRepository) return;
+      const handler = window.webkit && window.webkit.messageHandlers
+        && window.webkit.messageHandlers.deleteModelVersions;
+      if (!handler) return;
+      document.getElementById('model-version-list').style.pointerEvents = 'none';
+      handler.postMessage(JSON.stringify(Object.assign({}, activeModelVersionRepository, {
+        commit_shas: commits
+      })));
+    });
+  }
+
+  function onModelVersionOperation(jsonStr) {
+    let result = {};
+    try { result = JSON.parse(jsonStr); } catch(e) {}
+    const list = document.getElementById('model-version-list');
+    if (list) list.style.pointerEvents = '';
+    if (!result.success) {
+      showToast(result.error || t('unknown_error', 'Unknown error'), 'warn');
+      return;
+    }
+    const deleted = result.deleted_commit_shas && result.deleted_commit_shas.length;
+    showToast(
+      deleted ? t('versions_deleted', 'Selected model versions deleted.') : t('version_activated', 'Model version activated.'),
+      'info'
+    );
+    if (activeModelVersionRepository) requestModelVersions();
+    syncModelList();
+    const query = document.getElementById('search-hf-query').value.trim();
+    if (query) searchHuggingFace();
+  }
+
+  document.getElementById('model-versions-modal').addEventListener('click', function(e) {
+    if (e.target === this) closeModelVersions();
+  });
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape' && document.getElementById('model-versions-modal').classList.contains('open')) {
+      closeModelVersions();
+    }
+  });
+
   // Tab switching (Models page)
   document.querySelectorAll('.tab-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const parent = btn.closest('.page');
-      parent.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-      parent.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
-      btn.classList.add('active');
-      document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
-    });
+    btn.addEventListener('click', () => switchToTab(btn.dataset.tab));
   });
 
   // Theme segment buttons
@@ -5191,6 +6010,271 @@
     return readiness.message || readiness.reason_code || '';
   }
 
+  window.__MODEL_INTEGRITY_STATUS__ = window.__MODEL_INTEGRITY_STATUS__ || {};
+
+  function modelIntegrityStatus(model) {
+    return window.__MODEL_INTEGRITY_STATUS__[model.id] || model.integrity || null;
+  }
+
+  function formatIntegrityTime(value) {
+    if (!value) return '';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '';
+    return date.toLocaleString();
+  }
+
+  function modelStatusPresentation(model, isLoaded) {
+    const dict = I18N[currentLang] || I18N.en;
+    const integrity = modelIntegrityStatus(model);
+    if (integrity && integrity.state === 'verifying') {
+      const pct = Math.max(0, Math.min(100, Number(integrity.progress_pct) || 0)).toFixed(0);
+      return {
+        dot: 'model-busy',
+        text: (dict.status_verifying || 'Verifying integrity… {pct}%').replace('{pct}', pct),
+        title: integrity.current_file || ''
+      };
+    }
+    if ((integrity && integrity.state === 'corrupt') || modelReadiness(model).status === 'corrupt') {
+      return {
+        dot: 'model-corrupt',
+        text: dict.status_corrupt || 'Corrupt',
+        title: (integrity && integrity.error) || modelReadinessTitle(model)
+      };
+    }
+    if (integrity && integrity.state === 'verified' && integrity.verified_at) {
+      const verifiedText = (dict.status_verified || 'Verified {time}')
+        .replace('{time}', formatIntegrityTime(integrity.verified_at));
+      return {
+        dot: isLoaded ? 'model-loaded' : 'model-ready',
+        text: isLoaded ? (dict.status_loaded || 'Loaded') + ' · ' + verifiedText : verifiedText,
+        title: verifiedText
+      };
+    }
+    const readiness = modelReadiness(model);
+    if (isLoaded) {
+      return { dot: 'model-loaded', text: dict.status_loaded || 'Loaded', title: '' };
+    }
+    if (readiness.status === 'incomplete') {
+      return { dot: 'model-incomplete', text: dict.status_incomplete || 'Incomplete', title: modelReadinessTitle(model) };
+    }
+    if (readiness.status === 'unsupported') {
+      return { dot: 'model-unsupported', text: dict.status_unsupported || 'Unsupported', title: modelReadinessTitle(model) };
+    }
+    return { dot: 'model-ready', text: dict.status_ready || 'Ready', title: modelReadinessTitle(model) };
+  }
+
+  function updateModelIntegrityRow(modelId) {
+    const model = window.__LOCAL_MODELS__ && window.__LOCAL_MODELS__[modelId];
+    if (!model) return;
+    const row = Array.from(document.querySelectorAll('#tab-models-manage tbody tr'))
+      .find(candidate => candidate.dataset.modelId === modelId);
+    if (!row) return;
+    const status = modelStatusPresentation(model, !!model.loaded);
+    const cell = row.querySelector('.model-status-cell');
+    if (!cell) return;
+    cell.title = status.title || '';
+    const dot = cell.querySelector('.status-dot');
+    const label = cell.querySelector('.model-status-text');
+    if (dot) dot.className = 'status-dot ' + status.dot;
+    if (label) label.textContent = status.text;
+  }
+
+  function verifyModelIntegrity(modelId) {
+    const current = window.__MODEL_INTEGRITY_STATUS__[modelId];
+    if (current && current.state === 'verifying') return;
+    window.__MODEL_INTEGRITY_STATUS__[modelId] = {
+      repo_id: modelId,
+      state: 'verifying',
+      progress_pct: 0
+    };
+    updateModelIntegrityRow(modelId);
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.verifyModelIntegrity) {
+      window.webkit.messageHandlers.verifyModelIntegrity.postMessage(modelId);
+    }
+  }
+
+  function onModelIntegrityStatus(jsonStr) {
+    const dict = I18N[currentLang] || I18N.en;
+    let status = {};
+    try { status = JSON.parse(jsonStr); } catch(e) { return; }
+    const modelId = status.repo_id;
+    if (!modelId) return;
+    const previous = window.__MODEL_INTEGRITY_STATUS__[modelId];
+    window.__MODEL_INTEGRITY_STATUS__[modelId] = status;
+    const model = window.__LOCAL_MODELS__ && window.__LOCAL_MODELS__[modelId];
+    if (model) {
+      model.integrity = status;
+      if (status.state === 'corrupt') {
+        model.readiness = {
+          status: 'corrupt',
+          reason_code: 'snapshot_corrupt',
+          message: status.error || (dict.status_corrupt || 'Corrupt'),
+          missing_files: []
+        };
+      } else if (status.state === 'verified' && model.readiness && model.readiness.status === 'corrupt') {
+        model.readiness = { status: 'ready', missing_files: [] };
+      }
+    }
+    updateModelIntegrityRow(modelId);
+    if ((!previous || previous.state !== status.state) && status.state === 'verified') {
+      showToast(dict.integrity_verified_toast || 'Model integrity verified.', 'success');
+    } else if ((!previous || previous.state !== status.state) && status.state === 'corrupt') {
+      showToast(dict.integrity_corrupt_toast || 'Integrity verification failed. This model cannot be loaded.', 'warn');
+    } else if (status.state === 'error') {
+      showToast(status.error || 'Integrity verification failed.', 'warn');
+    }
+  }
+
+  let activeModelMoreMenu = null;
+  let activeModelMoreTrigger = null;
+
+  function closeModelMoreActions(options) {
+    const shouldRestoreFocus = options && options.restoreFocus;
+    const trigger = activeModelMoreTrigger;
+    if (activeModelMoreMenu) {
+      activeModelMoreMenu.remove();
+    }
+    if (trigger) {
+      trigger.setAttribute('aria-expanded', 'false');
+    }
+    activeModelMoreMenu = null;
+    activeModelMoreTrigger = null;
+    if (shouldRestoreFocus && trigger && trigger.isConnected) {
+      trigger.focus();
+    }
+  }
+
+  function positionModelMoreActions(menu, trigger) {
+    const viewportMargin = 8;
+    const triggerRect = trigger.getBoundingClientRect();
+    const menuRect = menu.getBoundingClientRect();
+    const maxLeft = Math.max(viewportMargin, window.innerWidth - menuRect.width - viewportMargin);
+    const left = Math.min(maxLeft, Math.max(viewportMargin, triggerRect.right - menuRect.width));
+    let top = triggerRect.bottom + 4;
+    if (top + menuRect.height > window.innerHeight - viewportMargin) {
+      top = Math.max(viewportMargin, triggerRect.top - menuRect.height - 4);
+    }
+    menu.style.left = Math.round(left) + 'px';
+    menu.style.top = Math.round(top) + 'px';
+  }
+
+  function createModelMoreActionIcon(kind) {
+    const namespace = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(namespace, 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('fill', 'none');
+    svg.setAttribute('stroke', 'currentColor');
+    svg.setAttribute('stroke-width', '1.4');
+    svg.setAttribute('stroke-linecap', 'round');
+    svg.setAttribute('stroke-linejoin', 'round');
+    svg.setAttribute('aria-hidden', 'true');
+
+    const paths = kind === 'verify'
+      ? ['M6 3h8l4 4v14H6V3Z', 'M14 3v5h4', 'm9 14 2 2 4-4']
+      : kind === 'versions'
+        ? ['M7 4h12v14H7', 'M4 7v14h12', 'M10 8h6', 'M10 12h6']
+        : ['M3 6h18', 'M8 6V4h8v2', 'M19 6l-1 15H6L5 6', 'M10 10v7', 'M14 10v7'];
+    paths.forEach(function(pathData) {
+      const path = document.createElementNS(namespace, 'path');
+      path.setAttribute('d', pathData);
+      svg.appendChild(path);
+    });
+    return svg;
+  }
+
+  function toggleModelMoreActions(modelId, trigger, event) {
+    if (event) event.stopPropagation();
+    if (activeModelMoreTrigger === trigger) {
+      closeModelMoreActions();
+      return;
+    }
+
+    closeModelMoreActions();
+    const dict = I18N[currentLang] || I18N.en;
+    const menu = document.createElement('div');
+    menu.className = 'model-more-menu';
+    menu.setAttribute('role', 'menu');
+
+    const verifyButton = document.createElement('button');
+    verifyButton.type = 'button';
+    verifyButton.className = 'model-more-verify';
+    verifyButton.setAttribute('role', 'menuitem');
+    verifyButton.appendChild(createModelMoreActionIcon('verify'));
+    const verifyLabel = document.createElement('span');
+    verifyLabel.textContent = dict.verify_integrity || 'Verify model integrity';
+    verifyButton.appendChild(verifyLabel);
+    const current = window.__MODEL_INTEGRITY_STATUS__[modelId];
+    verifyButton.disabled = !!(current && current.state === 'verifying');
+    verifyButton.addEventListener('click', function(menuEvent) {
+      menuEvent.stopPropagation();
+      closeModelMoreActions();
+      verifyModelIntegrity(modelId);
+    });
+
+    const versionsButton = document.createElement('button');
+    versionsButton.type = 'button';
+    versionsButton.className = 'model-more-versions';
+    versionsButton.setAttribute('role', 'menuitem');
+    versionsButton.appendChild(createModelMoreActionIcon('versions'));
+    const versionsLabel = document.createElement('span');
+    versionsLabel.textContent = dict.manage_versions || 'Manage versions';
+    versionsButton.appendChild(versionsLabel);
+    versionsButton.addEventListener('click', function(menuEvent) {
+      menuEvent.stopPropagation();
+      closeModelMoreActions();
+      openModelVersions(modelId);
+    });
+
+    const deleteButton = document.createElement('button');
+    deleteButton.type = 'button';
+    deleteButton.className = 'model-more-delete';
+    deleteButton.setAttribute('role', 'menuitem');
+    deleteButton.appendChild(createModelMoreActionIcon('delete'));
+    const deleteLabel = document.createElement('span');
+    deleteLabel.textContent = dict.delete_model || 'Delete model';
+    deleteButton.appendChild(deleteLabel);
+    deleteButton.addEventListener('click', function(menuEvent) {
+      menuEvent.stopPropagation();
+      closeModelMoreActions();
+      deleteSingleModel(modelId);
+    });
+
+    menu.appendChild(verifyButton);
+    menu.appendChild(versionsButton);
+    menu.appendChild(deleteButton);
+    document.body.appendChild(menu);
+    activeModelMoreMenu = menu;
+    activeModelMoreTrigger = trigger;
+    trigger.setAttribute('aria-expanded', 'true');
+    positionModelMoreActions(menu, trigger);
+  }
+
+  document.addEventListener('click', function(event) {
+    if (!activeModelMoreMenu) return;
+    if (activeModelMoreMenu.contains(event.target) || event.target === activeModelMoreTrigger) return;
+    closeModelMoreActions();
+  });
+  document.addEventListener('keydown', function(event) {
+    if (event.key === 'Escape' && activeModelMoreMenu) {
+      event.preventDefault();
+      closeModelMoreActions({ restoreFocus: true });
+    }
+  });
+  document.addEventListener('scroll', function() {
+    closeModelMoreActions();
+  }, true);
+  window.addEventListener('resize', function() {
+    closeModelMoreActions();
+  });
+
+  function renderModelMoreActions(model, escapedSq) {
+    const dict = I18N[currentLang] || I18N.en;
+    return '<button type="button" class="icon-btn model-more"'
+      + ' aria-haspopup="menu" aria-expanded="false"'
+      + ' title="' + escapeAttr(dict.more_actions || 'More actions') + '"'
+      + ' onclick="toggleModelMoreActions(\'' + escapedSq + '\', this, event)">⋯</button>';
+  }
+
   function renderModelType(model) {
     const type = String(model.type || 'llm').toLowerCase();
     const labels = {
@@ -5253,6 +6337,24 @@
     const dict = I18N[currentLang] || I18N.en;
     let models = [];
     try { models = JSON.parse(jsonStr); } catch(e) { return; }
+    closeModelMoreActions();
+    const presentModelIds = new Set(models.filter(m => m && m.id).map(m => m.id));
+    Object.keys(window.__MODEL_INTEGRITY_STATUS__ || {}).forEach(modelId => {
+      if (!presentModelIds.has(modelId)) {
+        delete window.__MODEL_INTEGRITY_STATUS__[modelId];
+      }
+    });
+    models.forEach(m => {
+      if (!m || !m.id) return;
+      if (m.integrity) {
+        window.__MODEL_INTEGRITY_STATUS__[m.id] = m.integrity;
+      } else {
+        const live = window.__MODEL_INTEGRITY_STATUS__[m.id];
+        if (!live || live.state !== 'verifying') {
+          delete window.__MODEL_INTEGRITY_STATUS__[m.id];
+        }
+      }
+    });
     window.__LOCAL_MODELS__ = {};
     models.forEach(m => { if (m && m.id) window.__LOCAL_MODELS__[m.id] = m; });
     const defaultModel = window.__DEFAULT_MODEL__ || '';
@@ -5266,17 +6368,11 @@
         const readiness = modelReadiness(m);
         const escaped = m.id.replace(/"/g, '&quot;');
         const escapedSq = m.id.replace(/'/g, "\\'");
-        const statusDot = isLoaded ? 'model-loaded' : (readiness.status === 'ready' ? 'model-ready' : 'model-' + readiness.status);
-        const statusText = isLoaded
-          ? (dict.status_loaded || 'Loaded')
-          : readiness.status === 'incomplete'
-            ? (dict.status_incomplete || 'Incomplete')
-            : readiness.status === 'unsupported'
-              ? (dict.status_unsupported || 'Unsupported')
-              : (dict.status_ready || 'Ready');
+        const status = modelStatusPresentation(m, isLoaded);
         const actionClass = isLoaded ? 'action-unload' : 'action-load';
         const actionText = isLoaded ? (dict.action_unload || 'Unload') : (dict.action_load || 'Load');
         const tr = document.createElement('tr');
+        tr.dataset.modelId = m.id;
         const msIcon = '<svg height="14" viewBox="0 0 24 24" width="14" xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle;opacity:0.7;" title="ModelScope"><path d="M0 7.967h2.667v2.667H0zM8 10.633h2.667V13.3H8z" fill="#36CED0"></path><path d="M0 10.633h2.667V13.3H0zM2.667 13.3h2.666v2.667H8v2.666H2.667V13.3zM2.667 5.3H8v2.667H5.333v2.666H2.667V5.3zM10.667 13.3h2.667v2.667h-2.667z" fill="#624AFF"></path><path d="M24 7.967h-2.667v2.667H24zM16 10.633h-2.667V13.3H16z" fill="#36CED0"></path><path d="M24 10.633h-2.667V13.3H24zM21.333 13.3h-2.666v2.667H16v2.666h5.333V13.3zM21.333 5.3H16v2.667h2.667v2.666h2.666V5.3z" fill="#624AFF"></path></svg>';
         const hfIcon = '<svg height="14" width="14" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle;opacity:0.8;" title="HuggingFace"><path d="M2.25 11.535c0-3.407 1.847-6.554 4.844-8.258a9.822 9.822 0 019.687 0c2.997 1.704 4.844 4.851 4.844 8.258 0 5.266-4.337 9.535-9.687 9.535S2.25 16.8 2.25 11.535z" fill="#FF9D0B"/><path d="M11.938 20.086c4.797 0 8.687-3.829 8.687-8.551 0-4.722-3.89-8.55-8.687-8.55-4.798 0-8.688 3.828-8.688 8.55 0 4.722 3.89 8.55 8.688 8.55z" fill="#FFD21E"/><path d="M14.76 9.21c.32.108.445.753.767.585.447-.233.707-.708.659-1.204a1.235 1.235 0 00-.879-1.059 1.262 1.262 0 00-1.33.394c-.322.384-.377.92-.14 1.36.153.283.638-.177.925-.079zm-5.887 0c-.32.108-.448.753-.768.585a1.226 1.226 0 01-.658-1.204c.048-.495.395-.913.878-1.059a1.262 1.262 0 011.33.394c.322.384.377.92.14 1.36-.152.283-.64-.177-.925-.079z" fill="#3A3B45"/></svg>';
         var sourceIcon = m.source === 'ms' ? msIcon : hfIcon;
@@ -5287,11 +6383,11 @@
           + '<td>' + renderModelType(m) + '</td>'
           + '<td>' + renderQuantBadge(m) + '</td>'
           + '<td>' + formatSize(m.size_mb) + '</td>'
-          + '<td class="model-status-cell" title="' + escapeAttr(modelReadinessTitle(m)) + '"><span class="status-dot ' + statusDot + '"></span> <span class="model-status-text">' + statusText + '</span></td>'
+          + '<td class="model-status-cell" title="' + escapeAttr(status.title || modelReadinessTitle(m)) + '"><span class="status-dot ' + status.dot + '"></span> <span class="model-status-text">' + status.text + '</span></td>'
           + '<td><input type="radio" name="default-model" value="' + escaped + '" ' + (isDefault ? 'checked' : '') + ' ' + (!isModelLoadable(m) ? 'disabled ' : '') + 'style="accent-color:var(--accent);" onchange="setDefaultModel(this.value)"></td>'
           + '<td><button class="icon-btn" onclick="openParamsModal(\'' + escapedSq + '\')"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1.5l1 2a4.5 4.5 0 0 1 1.5.9l2-.5.8 1.4-1.1 1.6a4.3 4.3 0 0 1 0 1.8l1.1 1.6-.8 1.4-2-.5a4.5 4.5 0 0 1-1.5.9l-1 2-1-2a4.5 4.5 0 0 1-1.5-.9l-2 .5-.8-1.4 1.1-1.6a4.3 4.3 0 0 1 0-1.8L2.2 5.8l.8-1.4 2 .5A4.5 4.5 0 0 1 6.5 4l1-2Z" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/><circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.1"/></svg></button></td>'
           + '<td>' + renderModelLoadActions(m, escapedSq, escaped, actionClass, actionText, isLoaded) + '</td>'
-          + '<td><button class="icon-btn" onclick="deleteSingleModel(\'' + escapedSq + '\')" title="Delete"><svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2M19 6v12a2 2 0 01-2 2H7a2 2 0 01-2-2V6" stroke="#e53e3e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M10 11v6M14 11v6" stroke="#e53e3e" stroke-width="1.5" stroke-linecap="round"/></svg></button></td>';
+          + '<td>' + renderModelMoreActions(m, escapedSq) + '</td>';
         tbody.appendChild(tr);
       });
     }
@@ -6644,6 +7740,7 @@
     setCheckboxInput('cfg-cache-enable', appConfig.cache_enable, true);
     setTextInput('cfg-cache-dir', appConfig.cache_dir, '~/.ironmlx/cache/paged_prefix_cache');
     setCheckboxInput('cfg-active-kv-offload', appConfig.active_kv_offload, false);
+    setCheckboxInput('cfg-verify-model-on-load', appConfig.verify_model_on_load, false);
     const cfgKvQuant = document.getElementById('cfg-kv-quant');
     if (cfgKvQuant) cfgKvQuant.value = normalizeKVQuantValue(window.__IRONMLX_KV_QUANT__);
     if (cfgKvQuant && appConfig.kv_quant !== undefined && appConfig.kv_quant !== null) {
@@ -6686,6 +7783,7 @@
       cache_enable: checkedInputValue('cfg-cache-enable', true),
       cache_dir: document.getElementById('cfg-cache-dir').value,
       active_kv_offload: checkedInputValue('cfg-active-kv-offload', false),
+      verify_model_on_load: checkedInputValue('cfg-verify-model-on-load', false),
       kv_quant: normalizeKVQuantValue(document.getElementById('cfg-kv-quant').value),
       max_sequences: Math.max(1, numberInputValue('cfg-max-sequences', 1)),
       max_models: Math.max(1, numberInputValue('cfg-max-models', 3)),

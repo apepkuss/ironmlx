@@ -16,8 +16,8 @@ import Testing
             "mlx-community/Other-4bit",
         ]
     ))
-    let hfDirectory = try createCachedModel(root: root, cacheSubdirectory: "models", repoID: "mlx-community/Tiny-4bit")
-    let msDirectory = try createCachedModel(root: root, cacheSubdirectory: "models-ms", repoID: "mlx-community/Tiny-4bit")
+    let hfDirectory = try createCachedModel(root: root, provider: .huggingFace, repoID: "mlx-community/Tiny-4bit")
+    let msDirectory = try createCachedModel(root: root, provider: .modelScope, repoID: "mlx-community/Tiny-4bit")
 
     let result = try LocalModelDeletionService(rootURL: root, configStore: configStore)
         .deleteModels(["mlx-community/Tiny-4bit"])
@@ -32,17 +32,18 @@ import Testing
 @MainActor
 @Test func dashboardBridgeRegistersModelDeletionHandler() {
     #expect(DashboardBridge.handlerNames.contains("deleteModels"))
+    #expect(DashboardBridge.handlerNames.contains("verifyModelIntegrity"))
 }
 
-private func createCachedModel(root: URL, cacheSubdirectory: String, repoID: String) throws -> URL {
-    let directory = root
-        .appendingPathComponent(cacheSubdirectory, isDirectory: true)
-        .appendingPathComponent("models--" + repoID.replacingOccurrences(of: "/", with: "--"), isDirectory: true)
-    let snapshot = directory
-        .appendingPathComponent("snapshots", isDirectory: true)
-        .appendingPathComponent("main", isDirectory: true)
-    try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
-    try Data("{}".utf8).write(to: snapshot.appendingPathComponent("config.json"))
-    try Data("weights".utf8).write(to: snapshot.appendingPathComponent("model.safetensors"))
-    return directory
+private func createCachedModel(root: URL, provider: ModelRepositoryProvider, repoID: String) throws -> URL {
+    _ = try writeVerifiedTestSnapshot(
+        root: root,
+        provider: provider,
+        repoID: repoID,
+        files: [
+            "config.json": Data("{}".utf8),
+            "model.safetensors": Data("weights".utf8),
+        ]
+    )
+    return try ModelRepositoryLayout.repositoryRoot(rootURL: root, provider: provider, repoID: repoID)
 }

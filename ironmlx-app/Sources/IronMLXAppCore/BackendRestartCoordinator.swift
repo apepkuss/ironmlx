@@ -140,18 +140,22 @@ public struct BackendRestartCoordinator {
             var lastErrorCode: String?
             for model in models {
                 do {
-                    let resolvedModel = scanner.resolveModelPath(for: model) ?? model
+                    let resolvedModel = try await scanner.verifiedModelPathAsync(
+                        for: model,
+                        fullChecksum: config.verifyModelOnLoad == true
+                    )
                     let maxCacheCap = ModelLoadParameters.maxCacheCap(
                         for: model,
                         scanner: scanner,
                         parameterStore: parameterStore,
                         activeKvOffloadEnabled: config.activeKvOffload == true
                     )
-                    let mtpRuntime = try? ModelMtpRuntimeResolver.runtime(
+                    let mtpRuntime = try? await ModelMtpRuntimeResolver.runtimeAsync(
                         for: model,
                         useMtp: nil,
                         scanner: scanner,
-                        parameterStore: parameterStore
+                        parameterStore: parameterStore,
+                        fullChecksum: config.verifyModelOnLoad == true
                     )
                     _ = try await client.loadModel(
                         model: model,
