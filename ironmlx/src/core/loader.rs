@@ -7,7 +7,7 @@ use std::path::Path;
 
 use anyhow::{anyhow, Context};
 use mlx::{Array, Dtype};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::Result;
 
@@ -64,6 +64,74 @@ pub struct QuantMeta {
     pub bits: i32,
     /// Quantization scheme.
     pub mode: QuantMode,
+}
+
+/// Metadata-only compatibility result used before weight transfer begins.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ModelMetadataPreflight {
+    pub model_type: String,
+    pub artifact_role: &'static str,
+    pub quantization: Option<QuantizationMetadataPreflight>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct QuantizationMetadataPreflight {
+    pub mode: &'static str,
+    pub bits: i32,
+    pub group_size: i32,
+    pub override_count: usize,
+}
+
+/// Validate architecture and quantization metadata without opening weights.
+///
+/// Tensor storage is still validated by [`Loader`] when the completed snapshot
+/// is opened.
+pub fn preflight_model_metadata(model_dir: &Path) -> Result<ModelMetadataPreflight> {
+    let config_path = model_dir.join("config.json");
+    let config_raw: serde_json::Value = serde_json::from_reader(
+        std::fs::File::open(&config_path)
+            .with_context(|| format!("opening {}", config_path.display()))?,
+    )
+    .with_context(|| format!("parsing {}", config_path.display()))?;
+    let model_type = config_raw
+        .get("model_type")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow!("config.json missing model_type"))?;
+
+    let artifact_role = match model_type {
+        "qwen3_5_mtp" => "qwen_mtp",
+        "gemma4_assistant" | "gemma4_unified_assistant" => "gemma4_drafter",
+        _ => {
+            crate::models::ModelArchitecture::from_model_type(model_type)?;
+            "base"
+        }
+    };
+
+    let optiq_metadata = load_optiq_metadata(model_dir)?;
+    let quant = parse_quant_meta_with_optiq(&config_raw, optiq_metadata.as_ref())?;
+    let quant_overrides = match quant {
+        Some(global) => {
+            parse_quant_overrides_with_optiq(&config_raw, global, optiq_metadata.as_ref())?
+        }
+        None => HashMap::new(),
+    };
+    let quantization = quant.map(|value| QuantizationMetadataPreflight {
+        mode: match value.mode {
+            QuantMode::Affine => "affine",
+            QuantMode::OptiQ => "optiq",
+            QuantMode::Mxfp4 => "mxfp4",
+            QuantMode::Mxfp8 => "mxfp8",
+        },
+        bits: value.bits,
+        group_size: value.group_size,
+        override_count: quant_overrides.len(),
+    });
+
+    Ok(ModelMetadataPreflight {
+        model_type: model_type.to_owned(),
+        artifact_role,
+        quantization,
+    })
 }
 
 pub(crate) fn logical_width_from_packed(packed_columns: i32, bits: i32) -> Result<i32> {
@@ -826,9 +894,10 @@ fn parse_quant_overrides_with_optiq(
         }
         let prefix = normalize_quant_prefix(key);
         let force_mode = (global.mode == QuantMode::OptiQ).then_some(QuantMode::OptiQ);
+        let default_mode = override_default_mode(global.mode, value);
         let meta = parse_quant_meta_value_with_mode(
             value,
-            Some(global.mode),
+            Some(default_mode),
             force_mode,
             &format!("quantization.{key}"),
         )?;
@@ -858,6 +927,16 @@ fn parse_quant_overrides_with_optiq(
     }
 
     Ok(overrides)
+}
+
+fn override_default_mode(global_mode: QuantMode, value: &serde_json::Value) -> QuantMode {
+    let bits = value.get("bits").and_then(serde_json::Value::as_i64);
+    let group_size = value.get("group_size").and_then(serde_json::Value::as_i64);
+    match global_mode {
+        QuantMode::Mxfp4 if bits != Some(4) || group_size != Some(32) => QuantMode::Affine,
+        QuantMode::Mxfp8 if bits != Some(8) || group_size != Some(32) => QuantMode::Affine,
+        mode => mode,
+    }
 }
 
 fn parse_quant_meta_value_with_mode(
@@ -1170,6 +1249,61 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
+    fn metadata_preflight_accepts_supported_architecture_and_quantization() {
+        let dir =
+            std::env::temp_dir().join(format!("ironmlx-model-preflight-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create preflight dir");
+        std::fs::write(
+            dir.join("config.json"),
+            r#"{"model_type":"llama","quantization":{"mode":"affine","bits":4,"group_size":64}}"#,
+        )
+        .expect("write config");
+
+        let result = preflight_model_metadata(&dir).expect("preflight supported metadata");
+
+        assert_eq!(result.model_type, "llama");
+        assert_eq!(result.artifact_role, "base");
+        let quantization = result.quantization.expect("quantization");
+        assert_eq!(quantization.mode, "affine");
+        assert_eq!(quantization.bits, 4);
+        assert_eq!(quantization.group_size, 64);
+        std::fs::remove_dir_all(dir).expect("cleanup preflight dir");
+    }
+
+    #[test]
+    fn metadata_preflight_rejects_unsupported_architecture_before_weights() {
+        let dir =
+            std::env::temp_dir().join(format!("ironmlx-model-preflight-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create preflight dir");
+        std::fs::write(dir.join("config.json"), r#"{"model_type":"not_supported"}"#)
+            .expect("write config");
+
+        let error = preflight_model_metadata(&dir).expect_err("reject unsupported architecture");
+
+        assert!(error.to_string().contains("unsupported model_type"));
+        std::fs::remove_dir_all(dir).expect("cleanup preflight dir");
+    }
+
+    #[test]
+    fn metadata_preflight_rejects_unsupported_quantization_before_weights() {
+        let dir =
+            std::env::temp_dir().join(format!("ironmlx-model-preflight-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create preflight dir");
+        std::fs::write(
+            dir.join("config.json"),
+            r#"{"model_type":"llama","quantization":{"mode":"nvfp4","bits":4,"group_size":16}}"#,
+        )
+        .expect("write config");
+
+        let error = preflight_model_metadata(&dir).expect_err("reject unsupported quantization");
+
+        let message = error.to_string();
+        assert!(message.contains("unsupported quantization.mode"));
+        assert!(message.contains("nvfp4"));
+        std::fs::remove_dir_all(dir).expect("cleanup preflight dir");
+    }
+
+    #[test]
     fn tokenizer_config_loads_standalone_chat_template() {
         let dir =
             std::env::temp_dir().join(format!("ironmlx-tokenizer-config-{}", uuid::Uuid::new_v4()));
@@ -1275,6 +1409,30 @@ mod tests {
             overrides["model.layers.0.mlp.down_proj"].mode,
             QuantMode::Mxfp4
         );
+    }
+
+    #[test]
+    fn parse_quant_overrides_infer_affine_when_mxfp_contract_does_not_match() {
+        let cfg = json!({
+            "quantization": {
+                "group_size": 32,
+                "bits": 4,
+                "mode": "mxfp4",
+                "model.decoder.layers.0.mlp.down_proj": {
+                    "group_size": 64,
+                    "bits": 8
+                }
+            }
+        });
+        let global = parse_quant_meta(&cfg).unwrap().expect("global quant");
+        let overrides = parse_quant_overrides(&cfg, global).unwrap();
+        let override_meta = overrides
+            .get("model.decoder.layers.0.mlp.down_proj")
+            .expect("mixed affine override");
+
+        assert_eq!(override_meta.mode, QuantMode::Affine);
+        assert_eq!(override_meta.bits, 8);
+        assert_eq!(override_meta.group_size, 64);
     }
 
     #[test]

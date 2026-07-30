@@ -173,14 +173,14 @@ private func restartModelRoot(repoID: String, root existingRoot: URL? = nil) thr
     } else {
         root = try restartTemporaryDirectory()
     }
-    let snapshot = root
-        .appendingPathComponent("models", isDirectory: true)
-        .appendingPathComponent("models--" + repoID.replacingOccurrences(of: "/", with: "--"), isDirectory: true)
-        .appendingPathComponent("snapshots", isDirectory: true)
-        .appendingPathComponent("main", isDirectory: true)
-    try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
-    try Data("{}".utf8).write(to: snapshot.appendingPathComponent("config.json"))
-    try Data("weights".utf8).write(to: snapshot.appendingPathComponent("model.safetensors"))
+    let snapshot = try writeVerifiedTestSnapshot(
+        root: root,
+        repoID: repoID,
+        files: [
+            "config.json": Data("{}".utf8),
+            "model.safetensors": Data("weights".utf8),
+        ]
+    )
     return (root, snapshot)
 }
 

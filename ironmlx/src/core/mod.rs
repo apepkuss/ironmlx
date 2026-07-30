@@ -21,7 +21,10 @@ pub use cache::KVCache;
 pub use chat_template::{ChatTemplate, Message};
 pub use generate::{build_position_ids, GenerateEvent, GenerateRequest, GenerationStream};
 pub(crate) use loader::logical_width_from_packed;
-pub use loader::{EosTokenId, Loader, QuantMeta, QuantMode, TokenizerConfig};
+pub use loader::{
+    preflight_model_metadata, EosTokenId, Loader, ModelMetadataPreflight, QuantMeta, QuantMode,
+    QuantizationMetadataPreflight, TokenizerConfig,
+};
 pub use model::Model;
 pub use sampler::Sampler;
 pub use scheduler::{Phase, RequestId, RequestState, Scheduler, SchedulerError, StepEvent};

@@ -24,6 +24,7 @@ public struct AppConfig: Codable, Equatable {
     public var maxSequences: Int?
     public var maxModels: Int?
     public var modelTtlMinutes: Int?
+    public var verifyModelOnLoad: Bool?
     public var distributedBackend: String?
     public var parallelMode: String?
     public var prefillChunkSize: Int?
@@ -59,6 +60,7 @@ public struct AppConfig: Codable, Equatable {
         maxSequences: Int? = nil,
         maxModels: Int? = nil,
         modelTtlMinutes: Int? = nil,
+        verifyModelOnLoad: Bool? = nil,
         distributedBackend: String? = nil,
         parallelMode: String? = nil,
         prefillChunkSize: Int? = nil,
@@ -93,6 +95,7 @@ public struct AppConfig: Codable, Equatable {
         self.maxSequences = maxSequences
         self.maxModels = maxModels
         self.modelTtlMinutes = modelTtlMinutes
+        self.verifyModelOnLoad = verifyModelOnLoad
         self.distributedBackend = distributedBackend
         self.parallelMode = parallelMode
         self.prefillChunkSize = prefillChunkSize
@@ -129,6 +132,7 @@ public struct AppConfig: Codable, Equatable {
         case maxSequences = "max_sequences"
         case maxModels = "max_models"
         case modelTtlMinutes = "model_ttl_minutes"
+        case verifyModelOnLoad = "verify_model_on_load"
         case distributedBackend = "distributed_backend"
         case parallelMode = "parallel_mode"
         case prefillChunkSize = "prefill_chunk_size"

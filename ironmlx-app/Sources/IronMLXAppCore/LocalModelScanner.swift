@@ -78,6 +78,7 @@ public struct LocalModel: Codable, Equatable, Sendable {
     public var mtp: LocalModelMtpInfo?
     public var quantization: LocalModelQuantization?
     public var readiness: LocalModelReadiness?
+    public var integrity: ModelIntegrityStatus?
 
     public init(
         id: String,
@@ -92,7 +93,8 @@ public struct LocalModel: Codable, Equatable, Sendable {
         generationDefaults: BackendSamplingDefaults? = nil,
         mtp: LocalModelMtpInfo? = nil,
         quantization: LocalModelQuantization? = nil,
-        readiness: LocalModelReadiness? = nil
+        readiness: LocalModelReadiness? = nil,
+        integrity: ModelIntegrityStatus? = nil
     ) {
         self.id = id
         self.repoID = repoID
@@ -107,6 +109,7 @@ public struct LocalModel: Codable, Equatable, Sendable {
         self.mtp = mtp
         self.quantization = quantization
         self.readiness = readiness
+        self.integrity = integrity
     }
 
     enum CodingKeys: String, CodingKey {
@@ -123,6 +126,7 @@ public struct LocalModel: Codable, Equatable, Sendable {
         case mtp
         case quantization
         case readiness
+        case integrity
     }
 }
 
@@ -338,13 +342,15 @@ public struct LocalModelScanner: Sendable {
     public func scan(loadedModels: Set<String>, pinnedModels: Set<String>, mtpEnabledModels: Set<String>) -> [LocalModel] {
         var artifacts: [LocalModelArtifact] = []
         artifacts += scanCacheDirectory(
-            rootURL.appendingPathComponent("models", isDirectory: true),
+            ModelRepositoryLayout.providerRoot(rootURL: rootURL, provider: .huggingFace),
+            provider: .huggingFace,
             source: "hf",
             loadedModels: loadedModels,
             pinnedModels: pinnedModels
         )
         artifacts += scanCacheDirectory(
-            rootURL.appendingPathComponent("models-ms", isDirectory: true),
+            ModelRepositoryLayout.providerRoot(rootURL: rootURL, provider: .modelScope),
+            provider: .modelScope,
             source: "ms",
             loadedModels: loadedModels,
             pinnedModels: pinnedModels
@@ -385,23 +391,135 @@ public struct LocalModelScanner: Sendable {
     public func resolveModelPath(for reference: String) -> String? {
         let direct = URL(fileURLWithPath: NSString(string: reference).expandingTildeInPath)
         if FileManager.default.fileExists(atPath: direct.path) {
-            return direct.path
+            return inspectSnapshot(direct)?.readiness.isLoadable == true ? direct.path : nil
         }
 
-        let dirName = "models--" + reference.replacingOccurrences(of: "/", with: "--")
-        let roots = [
-            rootURL.appendingPathComponent("models", isDirectory: true),
-            rootURL.appendingPathComponent("models-ms", isDirectory: true),
-        ]
-        for root in roots {
-            let snapshots = root
-                .appendingPathComponent(dirName, isDirectory: true)
-                .appendingPathComponent("snapshots", isDirectory: true)
-            if let snapshot = firstReadySnapshot(in: snapshots) {
-                return snapshot.path.path
+        for provider in ModelRepositoryProvider.allCases {
+            if let snapshot = referencedSnapshot(provider: provider, repoID: reference),
+               let inspection = inspectSnapshot(
+                   snapshot,
+                   expectedProvider: provider,
+                   expectedRepoID: reference
+               ),
+               inspection.readiness.isLoadable {
+                return snapshot.path
             }
         }
         return nil
+    }
+
+    public func verifiedModelPath(
+        for reference: String,
+        fullChecksum: Bool = false
+    ) throws -> String {
+        guard let path = resolveModelPath(for: reference) else {
+            throw ModelSnapshotVerificationError.manifestMissing
+        }
+        let snapshot = URL(fileURLWithPath: path, isDirectory: true)
+        if FileManager.default.fileExists(
+            atPath: URL(fileURLWithPath: NSString(string: reference).expandingTildeInPath).path
+        ) {
+            if fullChecksum {
+                try verifyFullSnapshot(
+                    snapshot,
+                    expectedProvider: nil,
+                    expectedRepoID: nil,
+                    requireCommitDirectory: false
+                )
+            } else {
+                _ = try ModelSnapshotVerifier().verifyStructure(
+                    snapshot: snapshot,
+                    requireCommitDirectory: false
+                )
+            }
+            return path
+        }
+        for provider in ModelRepositoryProvider.allCases {
+            if let expected = referencedSnapshot(provider: provider, repoID: reference),
+               expected.standardizedFileURL == snapshot.standardizedFileURL {
+                let lock = try ModelDownloadStore(rootURL: rootURL).acquireRepositoryLock(
+                    provider: provider,
+                    repoID: reference
+                )
+                defer { withExtendedLifetime(lock) {} }
+                guard let lockedSnapshot = referencedSnapshot(provider: provider, repoID: reference),
+                      lockedSnapshot.standardizedFileURL == snapshot.standardizedFileURL
+                else {
+                    throw ModelSnapshotVerificationError.identityMismatch(
+                        "active provider ref changed while preparing the model load"
+                    )
+                }
+                if fullChecksum {
+                    try verifyFullSnapshot(
+                        snapshot,
+                        expectedProvider: provider,
+                        expectedRepoID: reference,
+                        requireCommitDirectory: true
+                    )
+                } else {
+                    _ = try ModelSnapshotVerifier().verifyStructure(
+                        snapshot: snapshot,
+                        expectedProvider: provider,
+                        expectedRepoID: reference
+                    )
+                }
+                return path
+            }
+        }
+        throw ModelSnapshotVerificationError.identityMismatch("snapshot does not match the active provider ref")
+    }
+
+    public func verifiedModelPathAsync(
+        for reference: String,
+        fullChecksum: Bool = false
+    ) async throws -> String {
+        let scanner = self
+        return try await Task.detached(priority: .userInitiated) {
+            try scanner.verifiedModelPath(for: reference, fullChecksum: fullChecksum)
+        }.value
+    }
+
+    private func verifyFullSnapshot(
+        _ snapshot: URL,
+        expectedProvider: ModelRepositoryProvider?,
+        expectedRepoID: String?,
+        requireCommitDirectory: Bool
+    ) throws {
+        let verifier = ModelSnapshotVerifier()
+        do {
+            let manifest = try verifier.verify(
+                snapshot: snapshot,
+                expectedProvider: expectedProvider,
+                expectedRepoID: expectedRepoID,
+                requireCommitDirectory: requireCommitDirectory
+            )
+            try ModelDownloadStore.atomicWrite(
+                ModelSnapshotIntegrityRecord(
+                    provider: manifest.provider,
+                    repoID: manifest.repoID,
+                    commitSHA: manifest.commitSHA,
+                    state: .verified,
+                    verifiedAt: Date()
+                ),
+                to: snapshot.appendingPathComponent(ModelSnapshotIntegrityRecord.filename)
+            )
+        } catch {
+            if let manifest = try? verifier.loadManifest(at: snapshot),
+               expectedProvider == nil || manifest.provider == expectedProvider,
+               expectedRepoID == nil || manifest.repoID == expectedRepoID {
+                try? ModelDownloadStore.atomicWrite(
+                    ModelSnapshotIntegrityRecord(
+                        provider: manifest.provider,
+                        repoID: manifest.repoID,
+                        commitSHA: manifest.commitSHA,
+                        state: .corrupt,
+                        error: error.localizedDescription
+                    ),
+                    to: snapshot.appendingPathComponent(ModelSnapshotIntegrityRecord.filename)
+                )
+            }
+            throw error
+        }
     }
 
     public func readiness(for reference: String) -> LocalModelReadiness? {
@@ -410,16 +528,13 @@ public struct LocalModelScanner: Sendable {
             return inspectSnapshot(direct)?.readiness
         }
 
-        let dirName = "models--" + reference.replacingOccurrences(of: "/", with: "--")
-        let roots = [
-            rootURL.appendingPathComponent("models", isDirectory: true),
-            rootURL.appendingPathComponent("models-ms", isDirectory: true),
-        ]
-        for root in roots {
-            let snapshots = root
-                .appendingPathComponent(dirName, isDirectory: true)
-                .appendingPathComponent("snapshots", isDirectory: true)
-            if let inspection = firstSnapshotInspection(in: snapshots) {
+        for provider in ModelRepositoryProvider.allCases {
+            if let snapshot = referencedSnapshot(provider: provider, repoID: reference),
+               let inspection = inspectSnapshot(
+                   snapshot,
+                   expectedProvider: provider,
+                   expectedRepoID: reference
+               ) {
                 return inspection.readiness
             }
         }
@@ -439,6 +554,7 @@ public struct LocalModelScanner: Sendable {
 
     private func scanCacheDirectory(
         _ cacheURL: URL,
+        provider: ModelRepositoryProvider,
         source: String,
         loadedModels: Set<String>,
         pinnedModels: Set<String>
@@ -453,13 +569,20 @@ public struct LocalModelScanner: Sendable {
 
         return entries.compactMap { entry in
             let name = entry.lastPathComponent
-            guard name.hasPrefix("models--") else {
+            guard let separator = name.range(of: "--"),
+                  separator.lowerBound != name.startIndex,
+                  separator.upperBound != name.endIndex
+            else {
                 return nil
             }
-            let id = String(name.dropFirst("models--".count))
-                .replacingOccurrences(of: "--", with: "/")
-            let snapshots = entry.appendingPathComponent("snapshots", isDirectory: true)
-            guard let inspection = firstSnapshotInspection(in: snapshots) else {
+            let id = String(name[..<separator.lowerBound]) + "/" + String(name[separator.upperBound...])
+            guard let referenced = referencedSnapshot(provider: provider, repoID: id),
+                  let inspection = inspectSnapshot(
+                      referenced,
+                      expectedProvider: provider,
+                      expectedRepoID: id
+                  )
+            else {
                 return nil
             }
             let snapshot = inspection.path
@@ -480,7 +603,12 @@ public struct LocalModelScanner: Sendable {
                 maxPositionEmbeddings: maxPositionEmbeddings(in: snapshot),
                 generationDefaults: generationDefaults(in: snapshot),
                 quantization: inspection.quantization,
-                readiness: inspection.readiness
+                readiness: inspection.readiness,
+                integrity: integrityStatus(
+                    snapshot: snapshot,
+                    provider: provider,
+                    repoID: id
+                )
             ).artifact(kind: kind, path: snapshot, signature: signature)
         }
     }
@@ -810,28 +938,37 @@ public struct LocalModelScanner: Sendable {
         return parsed
     }
 
-    private func firstReadySnapshot(in snapshotsURL: URL) -> SnapshotInspection? {
-        firstSnapshotInspection(in: snapshotsURL) { $0.readiness.isLoadable }
-    }
-
-    private func firstSnapshotInspection(
-        in snapshotsURL: URL,
-        matching predicate: (SnapshotInspection) -> Bool = { _ in true }
-    ) -> SnapshotInspection? {
-        guard let entries = try? FileManager.default.contentsOfDirectory(
-            at: snapshotsURL,
-            includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles]
+    private func referencedSnapshot(provider: ModelRepositoryProvider, repoID: String) -> URL? {
+        guard let repository = try? ModelRepositoryLayout.repositoryRoot(
+            rootURL: rootURL,
+            provider: provider,
+            repoID: repoID
         ) else {
             return nil
         }
-
-        return entries.sorted { $0.lastPathComponent < $1.lastPathComponent }
-            .compactMap { inspectSnapshot($0) }
-            .first(where: predicate)
+        let ref = repository
+            .appendingPathComponent("refs", isDirectory: true)
+            .appendingPathComponent(provider.mutableRevision)
+        guard let data = try? Data(contentsOf: ref),
+              let raw = String(data: data, encoding: .utf8)
+        else {
+            return nil
+        }
+        let commit = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard ModelSnapshotVerifier.isCommitSHA(commit) else {
+            return nil
+        }
+        let snapshot = repository
+            .appendingPathComponent("snapshots", isDirectory: true)
+            .appendingPathComponent(commit, isDirectory: true)
+        return FileManager.default.fileExists(atPath: snapshot.path) ? snapshot : nil
     }
 
-    private func inspectSnapshot(_ url: URL) -> SnapshotInspection? {
+    private func inspectSnapshot(
+        _ url: URL,
+        expectedProvider: ModelRepositoryProvider? = nil,
+        expectedRepoID: String? = nil
+    ) -> SnapshotInspection? {
         let config = url.appendingPathComponent("config.json")
         guard FileManager.default.isReadableFile(atPath: config.path),
               let files = try? FileManager.default.contentsOfDirectory(
@@ -849,6 +986,50 @@ public struct LocalModelScanner: Sendable {
         missingFiles.append(contentsOf: quantization.missingFiles)
 
         let readiness: LocalModelReadiness
+        do {
+            _ = try ModelSnapshotVerifier().verifyStructure(
+                snapshot: url,
+                expectedProvider: expectedProvider,
+                expectedRepoID: expectedRepoID,
+                requireCommitDirectory: expectedProvider != nil
+            )
+        } catch let error as ModelSnapshotVerificationError {
+            let status: String
+            let reasonCode: String
+            switch error {
+            case .knownCorrupt, .checksumMismatch:
+                status = "corrupt"
+                reasonCode = "snapshot_corrupt"
+            default:
+                status = "unverified"
+                reasonCode = "snapshot_unverified"
+            }
+            readiness = LocalModelReadiness(
+                status: status,
+                reasonCode: reasonCode,
+                message: error.localizedDescription
+            )
+            return SnapshotInspection(
+                path: url,
+                config: configJSON,
+                capabilityType: capabilityType,
+                readiness: readiness,
+                quantization: quantization.quantization
+            )
+        } catch {
+            readiness = LocalModelReadiness(
+                status: "unverified",
+                reasonCode: "snapshot_unverified",
+                message: error.localizedDescription
+            )
+            return SnapshotInspection(
+                path: url,
+                config: configJSON,
+                capabilityType: capabilityType,
+                readiness: readiness,
+                quantization: quantization.quantization
+            )
+        }
         if let unsupportedReason = quantization.unsupportedReason {
             readiness = LocalModelReadiness(
                 status: "unsupported",
@@ -877,6 +1058,28 @@ public struct LocalModelScanner: Sendable {
             capabilityType: capabilityType,
             readiness: readiness,
             quantization: quantization.quantization
+        )
+    }
+
+    private func integrityStatus(
+        snapshot: URL,
+        provider: ModelRepositoryProvider,
+        repoID: String
+    ) -> ModelIntegrityStatus? {
+        guard let manifest = try? ModelSnapshotVerifier().loadManifest(at: snapshot),
+              let record = try? ModelSnapshotVerifier().loadIntegrityRecord(at: snapshot),
+              record.provider == provider,
+              record.repoID == repoID,
+              record.commitSHA == manifest.commitSHA
+        else {
+            return nil
+        }
+        return ModelIntegrityStatus(
+            repoID: repoID,
+            state: record.state.rawValue,
+            progressPct: record.state == .verified ? 100 : 0,
+            verifiedAt: record.verifiedAt,
+            error: record.error
         )
     }
 

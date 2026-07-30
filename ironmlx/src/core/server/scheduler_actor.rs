@@ -7524,7 +7524,7 @@ mod tests {
 
         let model_dir = std::env::var("IRONMLX_MODEL_DIR").unwrap_or_else(|_| {
             let glob = format!(
-                "{}/.ironmlx/models/models--mlx-community--Qwen3.5-4B-MLX-4bit/snapshots",
+                "{}/.ironmlx/models/huggingface/mlx-community--Qwen3.5-4B-MLX-4bit/snapshots",
                 std::env::var("HOME").unwrap()
             );
             std::fs::read_dir(&glob)
@@ -7634,7 +7634,7 @@ mod tests {
 
         let model_dir = std::env::var("IRONMLX_MODEL_DIR").unwrap_or_else(|_| {
             let glob = format!(
-                "{}/.ironmlx/models/models--mlx-community--Qwen3.5-4B-MLX-4bit/snapshots",
+                "{}/.ironmlx/models/huggingface/mlx-community--Qwen3.5-4B-MLX-4bit/snapshots",
                 std::env::var("HOME").unwrap()
             );
             std::fs::read_dir(&glob)

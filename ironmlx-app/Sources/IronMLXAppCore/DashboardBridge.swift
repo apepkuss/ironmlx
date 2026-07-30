@@ -10,6 +10,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     private let scanner: LocalModelScanner
     private let downloadService: ModelDownloadService
     private let deletionService: LocalModelDeletionService
+    private let integrityService: ModelIntegrityVerificationService
     private let profileGenerationService: SchedulerProfileGenerationService
     private let benchmarkService: BenchmarkService
     private let benchmarkSessionCoordinator: BenchmarkExclusiveSessionCoordinator
@@ -24,6 +25,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         scanner: LocalModelScanner = LocalModelScanner(),
         downloadService: ModelDownloadService = ModelDownloadService(),
         deletionService: LocalModelDeletionService? = nil,
+        integrityService: ModelIntegrityVerificationService = ModelIntegrityVerificationService(),
         profileGenerationService: SchedulerProfileGenerationService = SchedulerProfileGenerationService(),
         benchmarkService: BenchmarkService = BenchmarkService(),
         benchmarkSessionCoordinator: BenchmarkExclusiveSessionCoordinator = BenchmarkExclusiveSessionCoordinator(),
@@ -37,6 +39,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         self.scanner = scanner
         self.downloadService = downloadService
         self.deletionService = deletionService ?? LocalModelDeletionService(configStore: configStore)
+        self.integrityService = integrityService
         self.profileGenerationService = profileGenerationService
         self.benchmarkService = benchmarkService
         self.benchmarkSessionCoordinator = benchmarkSessionCoordinator
@@ -57,6 +60,16 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
 
     deinit {
         notificationCenter.removeObserver(self)
+        let downloadService = downloadService
+        Task {
+            await downloadService.cancelAllDownloads()
+        }
+    }
+
+    public func cancelAllDownloads() {
+        Task {
+            await downloadService.cancelAllDownloads()
+        }
     }
 
     public static let handlerNames = [
@@ -67,12 +80,14 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         "setTheme",
         "setDefaultModel",
         "deleteModels",
+        "verifyModelIntegrity",
         "saveSettings",
         "restartServer",
         "loadModel",
         "forceLoadModel",
         "unloadModel",
         "downloadModel",
+        "cancelModelDownload",
         "searchHF",
         "scanLocalModels",
         "syncLoadedModels",
@@ -115,6 +130,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             setBackendDefaultModelIfLoaded(model)
         case "deleteModels":
             deleteModels(json: stringBody(body))
+        case "verifyModelIntegrity":
+            verifyModelIntegrity(repoID: stringBody(body))
         case "saveSettings":
             saveSettings(json: stringBody(body))
         case "restartServer":
@@ -125,6 +142,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             unloadBackendModel(modelReference: stringBody(body), callback: .modelUnloaded)
         case "downloadModel":
             startHuggingFaceDownload(json: stringBody(body))
+        case "cancelModelDownload":
+            cancelModelDownload(json: stringBody(body))
         case "searchHF":
             searchHuggingFace(json: stringBody(body))
         case "scanLocalModels":
@@ -243,6 +262,14 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             } else {
                 sendFetchResult(path: payload.path, jsonString: "{\"success\":false,\"status\":\"error\",\"error\":\"missing repo_id\"}")
             }
+        case "/admin/api/models/download/cancel":
+            let repoID = payload.body["repo_id"]?.stringValue ?? ""
+            let provider = payload.body["provider"]?.stringValue ?? ModelRepositoryProvider.huggingFace.rawValue
+            cancelModelDownload(
+                repoID: repoID,
+                providerName: provider,
+                path: payload.path
+            )
         case "/admin/api/benchmark/preflight":
             preflightBenchmark(payload: payload)
         case "/admin/api/benchmark/prepare":
@@ -341,7 +368,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 let result = try await benchmarkSessionCoordinator.prepare(
                     client: client,
                     targetModel: target.model,
-                    targetModelPath: target.path
+                    targetModelPath: target.path,
+                    validateModelPath: self.benchmarkModelPathValidator(config: config)
                 )
                 let json = try Self.jsonString(result)
                 await MainActor.run {
@@ -359,9 +387,10 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     }
 
     private func runBenchmark(payload: APIPostPayload) {
+        let config = configStore.load()
         guard let model = payload.body["model"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
               !model.isEmpty,
-              let modelPath = scanner.resolveModelPath(for: model)
+              let modelPath = try? scanner.verifiedModelPath(for: model)
         else {
             sendFetchResult(
                 path: payload.path,
@@ -376,7 +405,6 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             maxTokens: payload.body["max_tokens"]?.intValue ?? 128,
             batchSize: payload.body["batch_size"]?.intValue ?? 1
         )
-        let config = configStore.load()
         let client = BackendAPIClient(host: config.host, port: config.port)
 
         Task {
@@ -410,7 +438,10 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
 
         Task {
             do {
-                let result = try await benchmarkSessionCoordinator.restore(client: client)
+                let result = try await benchmarkSessionCoordinator.restore(
+                    client: client,
+                    validateModelPath: self.benchmarkModelPathValidator(config: config)
+                )
                 let json = try Self.jsonString(result)
                 await MainActor.run {
                     if result.status != "not_active" {
@@ -504,6 +535,38 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         }
     }
 
+    private func cancelModelDownload(json: String) {
+        guard let data = json.data(using: .utf8),
+              let payload = try? JSONDecoder().decode(ModelDownloadCancellationPayload.self, from: data)
+        else {
+            return
+        }
+        cancelModelDownload(repoID: payload.repoID, providerName: payload.provider, path: nil)
+    }
+
+    private func cancelModelDownload(repoID: String, providerName: String, path: String?) {
+        guard let provider = ModelRepositoryProvider(rawValue: providerName) else {
+            if let path {
+                sendFetchResult(path: path, jsonString: "{\"success\":false,\"code\":\"invalid_download_identity\"}")
+            }
+            return
+        }
+        Task {
+            let cancelled = await downloadService.cancelDownload(
+                provider: provider,
+                repoID: repoID
+            )
+            let json = cancelled
+                ? "{\"success\":true,\"status\":\"cancelling\"}"
+                : "{\"success\":false,\"code\":\"download_not_active\"}"
+            await MainActor.run {
+                if let path {
+                    self.sendFetchResult(path: path, jsonString: json)
+                }
+            }
+        }
+    }
+
     private func deleteModels(json: String) {
         guard let data = json.data(using: .utf8),
               let modelIDs = try? JSONDecoder().decode([String].self, from: data)
@@ -525,6 +588,47 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         }
     }
 
+    private func verifyModelIntegrity(repoID: String) {
+        let repoID = repoID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !repoID.isEmpty else {
+            return
+        }
+        Task {
+            do {
+                let result = try await integrityService.verify(repoID: repoID) { [weak self] status in
+                    guard status.state == "verifying" else {
+                        return
+                    }
+                    let json = (try? Self.jsonString(status)) ?? "{}"
+                    Task { @MainActor in
+                        self?.sendJavaScript(
+                            "onModelIntegrityStatus(\(Self.jsStringLiteral(json)))"
+                        )
+                    }
+                }
+                let json = (try? Self.jsonString(result)) ?? "{}"
+                await MainActor.run {
+                    self.sendJavaScript(
+                        "onModelIntegrityStatus(\(Self.jsStringLiteral(json)))"
+                    )
+                    self.sendScannedModels()
+                }
+            } catch {
+                let status = ModelIntegrityStatus(
+                    repoID: repoID,
+                    state: "error",
+                    error: error.localizedDescription
+                )
+                let json = (try? Self.jsonString(status)) ?? "{}"
+                await MainActor.run {
+                    self.sendJavaScript(
+                        "onModelIntegrityStatus(\(Self.jsStringLiteral(json)))"
+                    )
+                }
+            }
+        }
+    }
+
     private func sendDownloadComplete(_ result: ModelDownloadCompletion) {
         let json = (try? Self.jsonString(result)) ?? "{\"success\":false,\"error\":\"Download failed.\"}"
         sendJavaScript("onDownloadComplete(\(Self.jsStringLiteral(json)))")
@@ -543,7 +647,16 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         }
         let config = configStore.load()
         let pinned = config.pinnedModelReferences.contains(model)
-        let resolvedModel = scanner.resolveModelPath(for: model) ?? model
+        let resolvedModel: String
+        do {
+            resolvedModel = try scanner.verifiedModelPath(
+                for: model,
+                fullChecksum: false
+            )
+        } catch {
+            deliverModelOperationResult(error: error.localizedDescription, callback: callback)
+            return
+        }
         let maxCacheCap = ModelLoadParameters.maxCacheCap(
             for: model,
             scanner: scanner,
@@ -558,7 +671,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 useMtp: instruction.useMtp,
                 explicitMtpModelID: instruction.mtpModelID,
                 scanner: scanner,
-                parameterStore: parameterStore
+                parameterStore: parameterStore,
+                fullChecksum: false
             )
         } catch {
             deliverModelOperationResult(error: error.localizedDescription, callback: callback)
@@ -566,6 +680,25 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         }
         Task {
             do {
+                let loadModelPath: String
+                let loadMtpRuntime: ModelMtpRuntime?
+                if config.verifyModelOnLoad == true {
+                    loadModelPath = try await self.scanner.verifiedModelPathAsync(
+                        for: model,
+                        fullChecksum: true
+                    )
+                    loadMtpRuntime = try await ModelMtpRuntimeResolver.runtimeAsync(
+                        for: model,
+                        useMtp: instruction.useMtp,
+                        explicitMtpModelID: instruction.mtpModelID,
+                        scanner: self.scanner,
+                        parameterStore: self.parameterStore,
+                        fullChecksum: true
+                    )
+                } else {
+                    loadModelPath = resolvedModel
+                    loadMtpRuntime = mtpRuntime
+                }
                 try await MainActor.run {
                     try self.backend.start()
                 }
@@ -580,12 +713,12 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 )
                 let response = try await client.loadModel(
                     model: model,
-                    modelDir: resolvedModel,
+                    modelDir: loadModelPath,
                     setDefault: setDefault,
                     maxCacheCap: maxCacheCap,
                     pinned: pinned,
-                    mtpModelDir: mtpRuntime?.modelDir,
-                    mtpDraftTokens: mtpRuntime?.draftTokens,
+                    mtpModelDir: loadMtpRuntime?.modelDir,
+                    mtpDraftTokens: loadMtpRuntime?.draftTokens,
                     promptLookup: promptLookup,
                     reloadWhenIdle: false,
                     samplingDefaults: self.parameterStore.parameters(for: model)?.samplingDefaults ?? .empty
@@ -595,7 +728,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                     self.persistMtpLoadPreferenceIfRequested(
                         model: model,
                         instruction: instruction,
-                        mtpRuntime: mtpRuntime
+                        mtpRuntime: loadMtpRuntime
                     )
                     self.persistBackendLoadedModels(response.loadedModels)
                     self.deliverModelOperationResult(jsonString: json, callback: callback)
@@ -758,16 +891,48 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     }
 
     private func saveSettings(json: String) {
+        let existing = configStore.load()
         let config: AppConfig
         do {
-            config = try Self.config(applyingSettingsJSON: json, to: configStore.load())
+            config = try Self.config(applyingSettingsJSON: json, to: existing)
         } catch {
             return
         }
 
         configStore.save(config)
         notifyMenuLanguageDidChange()
-        sendJavaScript("onSettingsSaved(\(Self.jsStringLiteral("{\"status\":\"ok\",\"needs_restart\":true}")))")
+        let needsRestart = Self.backendRestartRequired(from: existing, to: config)
+        let response = #"{"status":"ok","needs_restart":\#(needsRestart)}"#
+        sendJavaScript("onSettingsSaved(\(Self.jsStringLiteral(response)))")
+    }
+
+    static func backendRestartRequired(from existing: AppConfig, to updated: AppConfig) -> Bool {
+        existing.host != updated.host
+            || existing.port != updated.port
+            || existing.memLimitTotal != updated.memLimitTotal
+            || existing.memLimitModel != updated.memLimitModel
+            || existing.memTotalAuto != updated.memTotalAuto
+            || existing.memTotal != updated.memTotal
+            || existing.memModelAuto != updated.memModelAuto
+            || existing.memModel != updated.memModel
+            || existing.hotCache != updated.hotCache
+            || existing.coldCache != updated.coldCache
+            || existing.cacheEnable != updated.cacheEnable
+            || existing.cacheDir != updated.cacheDir
+            || existing.kvQuant != updated.kvQuant
+            || existing.activeKvOffload != updated.activeKvOffload
+            || existing.maxSequences != updated.maxSequences
+            || existing.maxModels != updated.maxModels
+            || existing.modelTtlMinutes != updated.modelTtlMinutes
+            || existing.distributedBackend != updated.distributedBackend
+            || existing.parallelMode != updated.parallelMode
+            || existing.prefillChunkSize != updated.prefillChunkSize
+            || existing.admissionDeadlineMs != updated.admissionDeadlineMs
+            || existing.admissionQueueMax != updated.admissionQueueMax
+            || existing.maxCacheCap != updated.maxCacheCap
+            || existing.decodeCadenceMidChunkCap != updated.decodeCadenceMidChunkCap
+            || existing.schedulerProfile != updated.schedulerProfile
+            || existing.schedulerAutotuneReport != updated.schedulerAutotuneReport
     }
 
     static func config(applyingSettingsJSON json: String, to existing: AppConfig) throws -> AppConfig {
@@ -813,6 +978,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         config.bMax = nil
         config.maxModels = intValue(object, "max_models") ?? config.maxModels
         config.modelTtlMinutes = intValue(object, "model_ttl_minutes") ?? config.modelTtlMinutes
+        config.verifyModelOnLoad = boolValue(object, "verify_model_on_load") ?? config.verifyModelOnLoad
         config.distributedBackend = stringValue(object, "distributed_backend") ?? config.distributedBackend
         config.parallelMode = stringValue(object, "parallel_mode") ?? config.parallelMode
         config.prefillChunkSize = intValue(object, "prefill_chunk_size") ?? config.prefillChunkSize
@@ -896,7 +1062,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             do {
                 let client = BackendAPIClient(host: config.host, port: config.port)
                 let response: BackendModelAdminResponse
-                if let resolvedModel = self.scanner.resolveModelPath(for: model) {
+                if let resolvedModel = try? self.scanner.verifiedModelPath(for: model) {
                     let mtpRuntime = try? ModelMtpRuntimeResolver.runtime(
                         for: model,
                         useMtp: nil,
@@ -963,12 +1129,16 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 }) else {
                     return
                 }
-                let resolvedModel = scanner.resolveModelPath(for: model) ?? loaded.path
-                let mtpRuntime = try ModelMtpRuntimeResolver.runtime(
+                let resolvedModel = try await scanner.verifiedModelPathAsync(
+                    for: model,
+                    fullChecksum: config.verifyModelOnLoad == true
+                )
+                let mtpRuntime = try await ModelMtpRuntimeResolver.runtimeAsync(
                     for: model,
                     useMtp: nil,
                     scanner: scanner,
-                    parameterStore: parameterStore
+                    parameterStore: parameterStore,
+                    fullChecksum: config.verifyModelOnLoad == true
                 )
                 let response = try await client.loadModel(
                     model: model,
@@ -1223,52 +1393,65 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             sendSchedulerProfileStatus(current)
             return
         }
-        let request: SchedulerProfileGenerationRequest
-        do {
-            request = try schedulerProfileGenerationRequest(json: json)
-        } catch {
-            sendSchedulerProfileStatus(
-                SchedulerProfileGenerationStatus.failed(request: nil, error: error.localizedDescription)
-            )
-            return
-        }
-
-        let shouldRestartBackend = backend.isRunning
-        if shouldRestartBackend {
-            backend.stop()
-        }
-        let started = profileGenerationService.start(request: request) { [weak self] status in
-            Task { @MainActor in
-                guard let self else {
-                    return
-                }
-                self.sendSchedulerProfileStatus(status)
+        Task {
+            do {
+                let request = try await schedulerProfileGenerationRequest(
+                    json: json,
+                    fullChecksum: configStore.load().verifyModelOnLoad == true
+                )
+                let shouldRestartBackend = backend.isRunning
                 if shouldRestartBackend {
-                    self.restartBackend()
+                    backend.stop()
                 }
+                let started = profileGenerationService.start(request: request) { [weak self] status in
+                    Task { @MainActor in
+                        guard let self else {
+                            return
+                        }
+                        self.sendSchedulerProfileStatus(status)
+                        if shouldRestartBackend {
+                            self.restartBackend()
+                        }
+                    }
+                }
+                sendSchedulerProfileStatus(started)
+            } catch {
+                sendSchedulerProfileStatus(
+                    SchedulerProfileGenerationStatus.failed(
+                        request: nil,
+                        error: error.localizedDescription
+                    )
+                )
             }
         }
-        sendSchedulerProfileStatus(started)
     }
 
     private func previewSchedulerProfileGeneration(json: String) {
         let payload = json.data(using: .utf8)
             .flatMap { try? JSONDecoder().decode(SchedulerProfileGenerationPayload.self, from: $0) }
-        do {
-            sendSchedulerProfilePreview(
-                SchedulerProfileGenerationPreview(
-                    request: try schedulerProfileGenerationRequest(json: json),
-                    requestToken: payload?.requestToken
+        Task {
+            do {
+                sendSchedulerProfilePreview(
+                    SchedulerProfileGenerationPreview(
+                        request: try await schedulerProfileGenerationRequest(
+                            json: json,
+                            fullChecksum: false
+                        ),
+                        requestToken: payload?.requestToken
+                    )
                 )
-            )
-        } catch {
-            sendSchedulerProfilePreview(
-                .failed(error: error.localizedDescription, requestToken: payload?.requestToken)
-            )
+            } catch {
+                sendSchedulerProfilePreview(
+                    .failed(error: error.localizedDescription, requestToken: payload?.requestToken)
+                )
+            }
         }
     }
 
-    private func schedulerProfileGenerationRequest(json: String) throws -> SchedulerProfileGenerationRequest {
+    private func schedulerProfileGenerationRequest(
+        json: String,
+        fullChecksum: Bool
+    ) async throws -> SchedulerProfileGenerationRequest {
         guard let data = json.data(using: .utf8),
               let payload = try? JSONDecoder().decode(SchedulerProfileGenerationPayload.self, from: data)
         else {
@@ -1278,16 +1461,21 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         guard !model.isEmpty else {
             throw SchedulerProfileGenerationRequestError.noModelSelected
         }
-        guard let modelPath = scanner.resolveModelPath(for: model) else {
+        let config = configStore.load()
+        guard let modelPath = try? await scanner.verifiedModelPathAsync(
+            for: model,
+            fullChecksum: fullChecksum
+        ) else {
             throw SchedulerProfileGenerationRequestError.modelNotFound(model)
         }
 
-        let launchOptions = BackendLaunchOptions(config: configStore.load())
-        let mtpRuntime = try ModelMtpRuntimeResolver.runtime(
+        let launchOptions = BackendLaunchOptions(config: config)
+        let mtpRuntime = try await ModelMtpRuntimeResolver.runtimeAsync(
             for: model,
             useMtp: nil,
             scanner: scanner,
-            parameterStore: parameterStore
+            parameterStore: parameterStore,
+            fullChecksum: fullChecksum
         )
         let maxCacheCap = ModelLoadParameters.maxCacheCap(
             for: model,
@@ -1378,11 +1566,23 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     private func benchmarkTarget(from payload: APIPostPayload) -> (model: String, path: String)? {
         guard let model = payload.body["model"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
               !model.isEmpty,
-              let path = scanner.resolveModelPath(for: model)
+              let path = try? scanner.verifiedModelPath(for: model)
         else {
             return nil
         }
         return (model, path)
+    }
+
+    private func benchmarkModelPathValidator(
+        config: AppConfig
+    ) -> BenchmarkModelPathValidator? {
+        guard config.verifyModelOnLoad == true else {
+            return nil
+        }
+        let scanner = scanner
+        return { modelID, _ in
+            try await scanner.verifiedModelPathAsync(for: modelID, fullChecksum: true)
+        }
     }
 
     private func benchmarkTargetUnavailableJSON() -> String {
@@ -1557,6 +1757,16 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         var sort: String
     }
 
+    private struct ModelDownloadCancellationPayload: Decodable {
+        var repoID: String
+        var provider: String
+
+        enum CodingKeys: String, CodingKey {
+            case repoID = "repo_id"
+            case provider
+        }
+    }
+
     private struct SchedulerProfileGenerationPayload: Decodable {
         var model: String
         var selectionProfile: String?
@@ -1667,13 +1877,13 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         }
     }
 
-    static func jsonString<T: Encodable>(_ value: T) throws -> String {
+    nonisolated static func jsonString<T: Encodable>(_ value: T) throws -> String {
         let encoder = JSONEncoder()
         let data = try encoder.encode(value)
         return String(data: data, encoding: .utf8) ?? "null"
     }
 
-    static func jsStringLiteral(_ value: String) -> String {
+    nonisolated static func jsStringLiteral(_ value: String) -> String {
         let data = try? JSONEncoder().encode(value)
         return data.flatMap { String(data: $0, encoding: .utf8) } ?? "\"\""
     }

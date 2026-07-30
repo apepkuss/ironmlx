@@ -262,6 +262,9 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(!dashboardHTML(html, contains: "cfg-init-cache-blocks"))
     #expect(!dashboardHTML(html, contains: "init_cache_blocks"))
     #expect(dashboardHTML(html, contains: "setNumberInput('cfg-model-ttl', appConfig.model_ttl_minutes, 30)"))
+    #expect(dashboardHTML(html, contains: #"id="cfg-verify-model-on-load""#))
+    #expect(dashboardHTML(html, contains: "setCheckboxInput('cfg-verify-model-on-load', appConfig.verify_model_on_load, false)"))
+    #expect(dashboardHTML(html, contains: "verify_model_on_load: checkedInputValue('cfg-verify-model-on-load', false)"))
 }
 
 @Test func dashboardMaxModelsCopyDescribesExplicitLoadedModelLimit() throws {
@@ -367,6 +370,12 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(dashboardHTML(html, contains: #"<option value="" selected disabled hidden>"#))
     #expect(dashboardHTML(html, contains: "loadModelWithMtp"))
     #expect(dashboardHTML(html, contains: "renderMtpBadge"))
+    #expect(dashboardHTML(html, contains: "renderModelMoreActions"))
+    #expect(dashboardHTML(html, contains: "verifyModelIntegrity"))
+    #expect(dashboardHTML(html, contains: "onModelIntegrityStatus"))
+    #expect(dashboardHTML(html, contains: "status_verifying"))
+    #expect(dashboardHTML(html, contains: "status_verified"))
+    #expect(dashboardHTML(html, contains: "status_corrupt"))
     #expect(!dashboardHTML(html, contains: "model-action-group"))
 }
 
@@ -424,6 +433,10 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(dashboardHTML(html, contains: #".data-table td:nth-child(3),"#))
     #expect(dashboardHTML(html, contains: #".data-table th:nth-child(4),"#))
     #expect(dashboardHTML(html, contains: #".data-table td:nth-child(4),"#))
+    #expect(dashboardHTML(html, contains: #".data-table th:nth-child(5),"#))
+    #expect(dashboardHTML(html, contains: #".data-table td:nth-child(5),"#))
+    #expect(dashboardHTML(html, contains: #".data-table th:nth-child(6),"#))
+    #expect(dashboardHTML(html, contains: #".data-table td:nth-child(6),"#))
     #expect(dashboardHTML(html, contains: #".data-table th:nth-child(7),"#))
     #expect(dashboardHTML(html, contains: #".data-table td:nth-child(7),"#))
     #expect(dashboardHTML(html, contains: #".data-table th:nth-child(8),"#))
@@ -432,6 +445,172 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(dashboardHTML(html, contains: #".data-table .model-name-text"#))
     #expect(dashboardHTML(html, contains: #"min-width: 0;"#))
     #expect(dashboardHTML(html, contains: #"text-overflow: ellipsis;"#))
+}
+
+@Test func dashboardModelsPageKeepsHeaderAndTabsFixedAboveAnIndependentScroller() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(html, contains: #"class="models-page-header""#))
+    #expect(dashboardHTML(
+        html,
+        contains: #"class="models-page-scroll model-manager-active""#
+    ))
+    #expect(dashboardHTML(html, contains: #".content.models-page-active {"#))
+    #expect(dashboardHTML(html, contains: #"#page-models.active {"#))
+    #expect(dashboardHTML(html, contains: #"#page-models > .tab-bar {"#))
+    #expect(dashboardHTML(html, contains: #"overflow-y: hidden;"#))
+    #expect(dashboardHTML(html, contains: #"overflow-y: auto;"#))
+    #expect(dashboardHTML(html, contains: #"content.classList.toggle('models-page-active', page === 'models')"#))
+    #expect(dashboardHTML(html, contains: #"scrollContainer.scrollTop = 0"#))
+}
+
+@Test func dashboardSchedulerProfileUsesItsOwnModelsTab() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(
+        html,
+        contains: #"data-tab="models-scheduler" data-i18n="scheduler_profile_tab""#
+    ))
+    #expect(dashboardHTML(html, contains: #"id="tab-models-scheduler""#))
+    #expect(dashboardHTML(html, contains: #"scheduler_profile_tab: "调度配置""#))
+
+    let managerPanel = try #require(html.range(of: #"id="tab-models-manage""#))
+    let schedulerPanel = try #require(html.range(of: #"id="tab-models-scheduler""#))
+    let profileCard = try #require(html.range(of: #"id="profile-generation-card""#))
+    let downloadPanel = try #require(html.range(of: #"id="tab-models-download""#))
+
+    #expect(managerPanel.lowerBound < schedulerPanel.lowerBound)
+    #expect(schedulerPanel.lowerBound < profileCard.lowerBound)
+    #expect(profileCard.lowerBound < downloadPanel.lowerBound)
+}
+
+@Test func dashboardModelManagerKeepsTableHeaderAboveIndependentRowScroller() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(
+        html,
+        contains: #"class="models-page-scroll model-manager-active""#
+    ))
+    #expect(dashboardHTML(html, contains: #".models-page-scroll.model-manager-active {"#))
+    #expect(dashboardHTML(html, contains: #"#tab-models-manage.active {"#))
+    #expect(dashboardHTML(html, contains: #"#tab-models-manage > .card {"#))
+    #expect(dashboardHTML(html, contains: #"#tab-models-manage .data-table-wrapper {"#))
+    #expect(dashboardHTML(html, contains: #"#tab-models-manage .data-table thead th {"#))
+    #expect(dashboardHTML(html, contains: #"position: sticky;"#))
+    #expect(dashboardHTML(html, contains: #"scrollContainer.classList.toggle('model-manager-active', tabName === 'models-manage')"#))
+    #expect(dashboardHTML(
+        html,
+        contains: #"btn.addEventListener('click', () => switchToTab(btn.dataset.tab))"#
+    ))
+}
+
+@Test func dashboardHuggingFaceSearchResultStartsTheExistingDownloadFlow() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(html, contains: #"onclick="downloadSearchResult(\'"#))
+    #expect(dashboardHTML(html, contains: #"function downloadSearchResult(repoId, button) {"#))
+    #expect(dashboardHTML(html, contains: #"fillRepoId(repoId);"#))
+    #expect(dashboardHTML(html, contains: #"startDownload();"#))
+    #expect(dashboardHTML(
+        html,
+        contains: #"download_in_progress: "已有 HuggingFace 模型正在下载。""#
+    ))
+
+    let oneClickFlow = try #require(
+        html.range(of: #"function downloadSearchResult(repoId, button) {"#)
+    )
+    let fill = try #require(
+        html.range(of: #"fillRepoId(repoId);"#, range: oneClickFlow.lowerBound ..< html.endIndex)
+    )
+    let start = try #require(
+        html.range(of: #"startDownload();"#, range: fill.upperBound ..< html.endIndex)
+    )
+    #expect(fill.lowerBound < start.lowerBound)
+}
+
+@Test func dashboardHuggingFaceSearchDownloadButtonTracksTaskLifecycle() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(html, contains: #"\', this)">"#))
+    #expect(dashboardHTML(html, contains: #"activeHuggingFaceSearchRepoId = repoId;"#))
+    #expect(dashboardHTML(html, contains: #"setSearchResultDownloadState(button, true);"#))
+    #expect(dashboardHTML(html, contains: #"dict.download_btn_downloading || 'Downloading...'"#))
+    #expect(dashboardHTML(html, contains: #"finishSearchResultDownloadState();"#))
+    #expect(dashboardHTML(html, contains: #".search-result-dl:disabled {"#))
+    #expect(dashboardHTML(
+        html,
+        contains: #"const isDownloading = repoId === activeHuggingFaceSearchRepoId;"#
+    ))
+}
+
+@Test func dashboardHuggingFaceDownloadActionsShareButtonAndIconStyling() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(
+        html,
+        contains: #"class="btn-accent hf-download-action" id="dl-download-btn""#
+    ))
+    #expect(dashboardHTML(
+        html,
+        contains: #"class="btn-accent hf-download-action search-result-dl""#
+    ))
+    #expect(dashboardHTML(html, contains: #".hf-download-action .download-button-icon {"#))
+    #expect(dashboardHTML(html, contains: #".search-result-dl { padding-inline: 14px; }"#))
+    #expect(
+        html.components(separatedBy: #"class="download-button-icon""#).count - 1 == 2
+    )
+}
+
+@Test func dashboardModelMoreActionsUseBodyPortalOutsideClippedTableCells() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(html, contains: #".model-more-menu {"#))
+    #expect(dashboardHTML(html, contains: #"position: fixed;"#))
+    #expect(dashboardHTML(html, contains: #"document.body.appendChild(menu)"#))
+    #expect(dashboardHTML(html, contains: #"positionModelMoreActions(menu, trigger)"#))
+    #expect(dashboardHTML(html, contains: #"width: max-content;"#))
+    #expect(dashboardHTML(html, contains: #"gap: 0.45em;"#))
+    #expect(dashboardHTML(html, contains: #"width: 1em;"#))
+    #expect(dashboardHTML(html, contains: #"height: 1em;"#))
+    #expect(dashboardHTML(html, contains: #"font-size: 13px;"#))
+    #expect(dashboardHTML(html, contains: #"stroke-width', '1.4'"#))
+    #expect(dashboardHTML(html, contains: #"createModelMoreActionIcon('verify')"#))
+    #expect(dashboardHTML(html, contains: #"createModelMoreActionIcon('delete')"#))
+    #expect(dashboardHTML(html, contains: #"'M6 3h8l4 4v14H6V3Z'"#))
+    #expect(dashboardHTML(html, contains: #"'m9 14 2 2 4-4'"#))
+    #expect(dashboardHTML(html, contains: #"stroke', 'currentColor'"#))
+    #expect(dashboardHTML(html, contains: #"verifyButton.className = 'model-more-verify'"#))
+    #expect(dashboardHTML(html, contains: #"deleteButton.className = 'model-more-delete'"#))
+    #expect(dashboardHTML(html, contains: #"button.model-more-verify svg { color: var(--accent); }"#))
+    #expect(dashboardHTML(html, contains: #"button.model-more-delete svg { color: var(--destructive); }"#))
+    #expect(dashboardHTML(html, contains: #"aria-haspopup="menu""#))
+    #expect(dashboardHTML(html, contains: #"closeModelMoreActions({ restoreFocus: true })"#))
+    #expect(dashboardHTML(html, contains: #"verify_integrity: "验证模型完整性""#))
+    #expect(dashboardHTML(html, contains: #"delete_model: "删除模型""#))
+    #expect(!dashboardHTML(html, contains: #".model-more-menu button.danger"#))
+    #expect(!dashboardHTML(html, contains: #"deleteButton.className = 'danger'"#))
+    #expect(!dashboardHTML(html, contains: #"<details class="model-more">"#))
 }
 
 @Test func dashboardModelTypeColumnUsesCapabilityLabels() throws {

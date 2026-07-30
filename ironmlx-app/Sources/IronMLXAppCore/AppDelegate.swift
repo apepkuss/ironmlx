@@ -66,13 +66,17 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                                     IronMLXAppLogger.error("Skipped restoring ironmlx model on app launch: \(model): \(detail)")
                                     continue
                                 }
-                                let resolvedModel = self.scanner.resolveModelPath(for: model) ?? model
+                                let resolvedModel = try await self.scanner.verifiedModelPathAsync(
+                                    for: model,
+                                    fullChecksum: config.verifyModelOnLoad == true
+                                )
                                 let setDefault = model == defaultModel || defaultModel == nil && model == models.first
-                                let mtpRuntime = try? ModelMtpRuntimeResolver.runtime(
+                                let mtpRuntime = try? await ModelMtpRuntimeResolver.runtimeAsync(
                                     for: model,
                                     useMtp: nil,
                                     scanner: self.scanner,
-                                    parameterStore: self.parameterStore
+                                    parameterStore: self.parameterStore,
+                                    fullChecksum: config.verifyModelOnLoad == true
                                 )
                                 latestResponse = try await client.loadModel(
                                     model: model,
@@ -124,12 +128,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     public func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        dashboard?.cancelAllDownloads()
         backend.stopForAppQuit()
         return .terminateNow
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
         IronMLXAppLogger.info("Application will terminate")
+        dashboard?.cancelAllDownloads()
         backend.stopForAppQuit()
     }
 

@@ -128,14 +128,14 @@ private final class MenuLoadedModelsNotificationProbe: NSObject {
 private func menuRestartModelRoot(repoID: String) throws -> (root: URL, snapshot: URL) {
     let root = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
         .appendingPathComponent("ironmlx-menu-restart-tests-\(UUID().uuidString)", isDirectory: true)
-    let snapshot = root
-        .appendingPathComponent("models", isDirectory: true)
-        .appendingPathComponent("models--" + repoID.replacingOccurrences(of: "/", with: "--"), isDirectory: true)
-        .appendingPathComponent("snapshots", isDirectory: true)
-        .appendingPathComponent("main", isDirectory: true)
-    try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
-    try Data("{}".utf8).write(to: snapshot.appendingPathComponent("config.json"))
-    try Data("weights".utf8).write(to: snapshot.appendingPathComponent("model.safetensors"))
+    let snapshot = try writeVerifiedTestSnapshot(
+        root: root,
+        repoID: repoID,
+        files: [
+            "config.json": Data("{}".utf8),
+            "model.safetensors": Data("weights".utf8),
+        ]
+    )
     return (root, snapshot)
 }
 

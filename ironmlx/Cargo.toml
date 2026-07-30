@@ -22,6 +22,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
 hf-hub = { version = "0.4", default-features = false, features = ["tokio", "rustls-tls"] }
+sha2 = "0.10"
 dirs = "6"
 anyhow = "1"
 smallvec = "1"
