@@ -184,22 +184,45 @@ private let testCommit = String(repeating: "a", count: 40)
     #expect(DashboardBridge.handlerNames.contains("downloadModel"))
     #expect(DashboardBridge.handlerNames.contains("cancelModelDownload"))
     #expect(DashboardBridge.handlerNames.contains("searchHF"))
+    #expect(DashboardBridge.handlerNames.contains("listModelVersions"))
+    #expect(DashboardBridge.handlerNames.contains("activateModelVersion"))
+    #expect(DashboardBridge.handlerNames.contains("deleteModelVersions"))
 }
 
 @Test func huggingFaceSearchUsesMlxFilterAndSort() async throws {
     let client = FakeModelDownloadHTTPClient()
-    client.dataResponses["https://huggingface.co/api/models?search=qwen&sort=downloads&direction=-1&limit=20&filter=mlx"] =
+    client.dataResponses["https://huggingface.co/api/models?search=qwen&sort=downloads&direction=-1&limit=20&filter=mlx&full=true"] =
         .success(Data("""
-        [{"id":"mlx-community/Qwen3-0.6B-4bit","downloads":123,"likes":4,"pipeline_tag":"text-generation"}]
+        [{"id":"mlx-community/Qwen3-0.6B-4bit","sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","downloads":123,"likes":4,"pipeline_tag":"text-generation"}]
         """.utf8))
     let service = ModelDownloadService(rootURL: try temporaryDirectory(), httpClient: client)
 
     let results = try await service.searchHuggingFace(query: "qwen", sort: "downloads")
 
     #expect(results.map(\.id) == ["mlx-community/Qwen3-0.6B-4bit"])
+    #expect(results.first?.sha == String(repeating: "a", count: 40))
     #expect(client.dataRequests == [
-        "https://huggingface.co/api/models?search=qwen&sort=downloads&direction=-1&limit=20&filter=mlx",
+        "https://huggingface.co/api/models?search=qwen&sort=downloads&direction=-1&limit=20&filter=mlx&full=true",
     ])
+}
+
+@Test func huggingFaceSearchResolvesMissingCommitFromRepositoryDetails() async throws {
+    let client = FakeModelDownloadHTTPClient()
+    let searchURL =
+        "https://huggingface.co/api/models?search=minicpm&sort=downloads&direction=-1&limit=20&filter=mlx&full=true"
+    let detailURL = "https://huggingface.co/api/models/mlx-community/MiniCPM-V-4.6-bf16?blobs=true"
+    client.dataResponses[searchURL] = .success(Data("""
+    [{"id":"mlx-community/MiniCPM-V-4.6-bf16","downloads":123}]
+    """.utf8))
+    client.dataResponses[detailURL] = .success(Data("""
+    {"sha":"\(testCommit)","siblings":[]}
+    """.utf8))
+    let service = ModelDownloadService(rootURL: try temporaryDirectory(), httpClient: client)
+
+    let results = try await service.searchHuggingFace(query: "minicpm", sort: "downloads")
+
+    #expect(results.first?.sha == testCommit)
+    #expect(client.dataRequests == [searchURL, detailURL])
 }
 
 @Test func huggingFaceDownloadPinsCommitVerifiesAndAtomicallyPublishes() async throws {
@@ -247,6 +270,69 @@ private let testCommit = String(repeating: "a", count: 40)
     #expect(!FileManager.default.fileExists(
         atPath: repository.appendingPathComponent(".downloads/\(testCommit)/snapshot").path
     ))
+}
+
+@Test func huggingFaceDownloadRepairsAKnownCorruptCommitWithoutDeletingItBeforePublish() async throws {
+    let root = try temporaryDirectory()
+    let client = FakeModelDownloadHTTPClient()
+    let repoID = "mlx-community/Tiny-4bit"
+    let weights = Data("weights".utf8)
+    configureHuggingFace(
+        client,
+        repoID: repoID,
+        files: [
+            ("config.json", Data(#"{"model_type":"llama"}"#.utf8), nil),
+            ("tokenizer.json", Data("{}".utf8), nil),
+            ("model.safetensors", weights, sha256(weights)),
+        ]
+    )
+    let service = ModelDownloadService(
+        rootURL: root,
+        httpClient: client,
+        metadataPreflight: AcceptingMetadataPreflight(),
+        fileDownloader: ResumableFileDownloader(httpClient: client),
+        telemetryLogger: { _ in }
+    )
+    #expect((await service.downloadHuggingFace(repoID: repoID, token: nil)).success)
+    let repository = try ModelRepositoryLayout.repositoryRoot(
+        rootURL: root,
+        provider: .huggingFace,
+        repoID: repoID
+    )
+    let snapshot = repository
+        .appendingPathComponent("snapshots", isDirectory: true)
+        .appendingPathComponent(testCommit, isDirectory: true)
+    try Data("damaged".utf8).write(
+        to: snapshot.appendingPathComponent("model.safetensors")
+    )
+    try ModelDownloadStore.atomicWrite(
+        ModelSnapshotIntegrityRecord(
+            provider: .huggingFace,
+            repoID: repoID,
+            commitSHA: testCommit,
+            state: .corrupt,
+            error: "test damage"
+        ),
+        to: snapshot.appendingPathComponent(ModelSnapshotIntegrityRecord.filename)
+    )
+
+    let repaired = await service.downloadHuggingFace(repoID: repoID, token: nil)
+
+    #expect(repaired.success)
+    _ = try ModelSnapshotVerifier().verify(
+        snapshot: snapshot,
+        expectedProvider: .huggingFace,
+        expectedRepoID: repoID
+    )
+    #expect(
+        try Data(contentsOf: snapshot.appendingPathComponent("model.safetensors"))
+            == weights
+    )
+    #expect(
+        try FileManager.default.contentsOfDirectory(
+            atPath: repository.appendingPathComponent(".trash", isDirectory: true).path
+        ).count == 1
+    )
 }
 
 @Test func unsupportedMetadataIsRejectedBeforeWeightRequest() async throws {

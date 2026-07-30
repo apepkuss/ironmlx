@@ -234,16 +234,22 @@ public struct ModelDownloadHTTPError: LocalizedError, Sendable {
 public struct HuggingFaceSearchResult: Codable, Equatable, Sendable {
     public var id: String
     public var modelId: String?
+    public var sha: String?
     public var downloads: Int?
     public var likes: Int?
     public var pipelineTag: String?
+    public var localState: ModelSearchLocalState?
+    public var localCommitSHA: String?
 
     enum CodingKeys: String, CodingKey {
         case id
         case modelId
+        case sha
         case downloads
         case likes
         case pipelineTag = "pipeline_tag"
+        case localState = "local_state"
+        case localCommitSHA = "local_commit_sha"
     }
 }
 
@@ -369,12 +375,29 @@ public actor ModelDownloadService {
             URLQueryItem(name: "direction", value: "-1"),
             URLQueryItem(name: "limit", value: "20"),
             URLQueryItem(name: "filter", value: "mlx"),
+            URLQueryItem(name: "full", value: "true"),
         ]
         guard let url = components?.url else {
             throw URLError(.badURL)
         }
         let (data, _) = try await httpClient.data(for: URLRequest(url: url))
-        return try JSONDecoder().decode([HuggingFaceSearchResult].self, from: data)
+        var results = try JSONDecoder().decode([HuggingFaceSearchResult].self, from: data)
+        for index in results.indices
+            where results[index].sha.map(ModelSnapshotVerifier.isCommitSHA) != true
+        {
+            let repoID = results[index].modelId ?? results[index].id
+            guard
+                let repository = try? await resolver.resolve(
+                    provider: .huggingFace,
+                    repoID: repoID,
+                    token: nil
+                )
+            else {
+                continue
+            }
+            results[index].sha = repository.commitSHA
+        }
+        return results
     }
 
     public func downloadHuggingFace(
@@ -523,22 +546,30 @@ public actor ModelDownloadService {
                 commitSHA: repository.commitSHA
             )
             if FileManager.default.fileExists(atPath: finalSnapshot.path) {
-                let manifest = try ModelSnapshotVerifier().verifyStructure(
+                let verifier = ModelSnapshotVerifier()
+                if let manifest = try? verifier.verifyStructure(
                     snapshot: finalSnapshot,
                     expectedProvider: provider,
                     expectedRepoID: repoID
-                )
-                try store.updateRef(for: manifest)
-                setStatus(
-                    key: key,
-                    provider: provider,
-                    repoID: repoID,
-                    phase: .completed,
-                    progressPct: 100,
-                    commitSHA: repository.commitSHA
-                )
-                await telemetry.finish(outcome: "already_present")
-                return success(repoID: repoID)
+                ),
+                   let record = try? verifier.loadIntegrityRecord(at: finalSnapshot),
+                   record.provider == provider,
+                   record.repoID == repoID,
+                   record.commitSHA == repository.commitSHA,
+                   record.state == .verified
+                {
+                    try store.updateRef(for: manifest)
+                    setStatus(
+                        key: key,
+                        provider: provider,
+                        repoID: repoID,
+                        phase: .completed,
+                        progressPct: 100,
+                        commitSHA: repository.commitSHA
+                    )
+                    await telemetry.finish(outcome: "already_present")
+                    return success(repoID: repoID)
+                }
             }
 
             let staging = try store.prepareStaging(

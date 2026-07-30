@@ -24,6 +24,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     public func applicationDidFinishLaunching(_ notification: Notification) {
         IronMLXAppLogger.startSession()
         IronMLXAppLogger.info("Application did finish launching")
+        Task.detached {
+            ModelVersionManagementService().purgeTrash()
+        }
         NSApp.mainMenu = ApplicationMenuBuilder.makeMainMenu()
         NSApp.setActivationPolicy(.accessory)
 

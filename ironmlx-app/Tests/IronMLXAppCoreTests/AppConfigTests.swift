@@ -104,6 +104,7 @@ import Testing
         setDefault: true,
         maxCacheCap: 65536,
         reloadWhenIdle: true,
+        deferWhenBusy: false,
         samplingDefaults: BackendSamplingDefaults(
             temperature: 0.7,
             topP: 0.8,
@@ -116,6 +117,7 @@ import Testing
     let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
 
     #expect(object["reload_when_idle"] as? Bool == true)
+    #expect(object["defer_when_busy"] as? Bool == false)
     #expect(object["temperature"] as? Double == 0.7)
     #expect(object["top_p"] as? Double == 0.8)
     #expect(object["top_k"] as? Int == 40)

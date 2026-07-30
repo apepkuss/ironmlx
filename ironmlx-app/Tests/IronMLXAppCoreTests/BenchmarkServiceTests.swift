@@ -519,7 +519,8 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
         encoding: .utf8
     )
 
-    #expect(dashboardHTML(html, contains: #"onclick="downloadSearchResult(\'"#))
+    #expect(dashboardHTML(html, contains: #"onclick="handleSearchResultAction(\'"#))
+    #expect(dashboardHTML(html, contains: #"function handleSearchResultAction(repoId, localState, commitSHA, button) {"#))
     #expect(dashboardHTML(html, contains: #"function downloadSearchResult(repoId, button) {"#))
     #expect(dashboardHTML(html, contains: #"fillRepoId(repoId);"#))
     #expect(dashboardHTML(html, contains: #"startDownload();"#))
@@ -573,7 +574,9 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
         contains: #"class="btn-accent hf-download-action search-result-dl""#
     ))
     #expect(dashboardHTML(html, contains: #".hf-download-action .download-button-icon {"#))
-    #expect(dashboardHTML(html, contains: #".search-result-dl { padding-inline: 14px; }"#))
+    #expect(dashboardHTML(html, contains: #".search-result-dl {"#))
+    #expect(dashboardHTML(html, contains: #"min-width: 82px;"#))
+    #expect(dashboardHTML(html, contains: #"justify-content: center;"#))
     #expect(
         html.components(separatedBy: #"class="download-button-icon""#).count - 1 == 2
     )
@@ -596,21 +599,61 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(dashboardHTML(html, contains: #"font-size: 13px;"#))
     #expect(dashboardHTML(html, contains: #"stroke-width', '1.4'"#))
     #expect(dashboardHTML(html, contains: #"createModelMoreActionIcon('verify')"#))
+    #expect(dashboardHTML(html, contains: #"createModelMoreActionIcon('versions')"#))
     #expect(dashboardHTML(html, contains: #"createModelMoreActionIcon('delete')"#))
     #expect(dashboardHTML(html, contains: #"'M6 3h8l4 4v14H6V3Z'"#))
     #expect(dashboardHTML(html, contains: #"'m9 14 2 2 4-4'"#))
     #expect(dashboardHTML(html, contains: #"stroke', 'currentColor'"#))
     #expect(dashboardHTML(html, contains: #"verifyButton.className = 'model-more-verify'"#))
+    #expect(dashboardHTML(html, contains: #"versionsButton.className = 'model-more-versions'"#))
     #expect(dashboardHTML(html, contains: #"deleteButton.className = 'model-more-delete'"#))
     #expect(dashboardHTML(html, contains: #"button.model-more-verify svg { color: var(--accent); }"#))
+    #expect(dashboardHTML(html, contains: #"button.model-more-versions svg { color: #7c6ee6; }"#))
     #expect(dashboardHTML(html, contains: #"button.model-more-delete svg { color: var(--destructive); }"#))
     #expect(dashboardHTML(html, contains: #"aria-haspopup="menu""#))
     #expect(dashboardHTML(html, contains: #"closeModelMoreActions({ restoreFocus: true })"#))
     #expect(dashboardHTML(html, contains: #"verify_integrity: "验证模型完整性""#))
+    #expect(dashboardHTML(html, contains: #"manage_versions: "管理版本""#))
     #expect(dashboardHTML(html, contains: #"delete_model: "删除模型""#))
     #expect(!dashboardHTML(html, contains: #".model-more-menu button.danger"#))
     #expect(!dashboardHTML(html, contains: #"deleteButton.className = 'danger'"#))
     #expect(!dashboardHTML(html, contains: #"<details class="model-more">"#))
+}
+
+@Test func dashboardModelVersionManagementSupportsActivationRollbackAndExplicitCleanup() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(html, contains: #"id="model-versions-modal""#))
+    #expect(dashboardHTML(html, contains: #"function openModelVersions(modelId) {"#))
+    #expect(dashboardHTML(html, contains: #"window.webkit.messageHandlers.listModelVersions"#))
+    #expect(dashboardHTML(html, contains: #"window.webkit.messageHandlers.activateModelVersion"#))
+    #expect(dashboardHTML(html, contains: #"window.webkit.messageHandlers.deleteModelVersions"#))
+    #expect(dashboardHTML(html, contains: #"t('rollback_reload', 'Roll back and reload')"#))
+    #expect(dashboardHTML(html, contains: #"class="model-version-checkbox""#))
+    #expect(dashboardHTML(html, contains: #"confirm_delete_versions: "确定删除所选 {n} 个版本并释放 {size}？此操作不可恢复。""#))
+}
+
+@Test func dashboardHuggingFaceSearchDistinguishesExactLocalAndUpdateStates() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(html, contains: #"const localState = m.local_state || 'available';"#))
+    #expect(dashboardHTML(html, contains: #"exists: dict.local_model_exists || '✓ Exists'"#))
+    #expect(dashboardHTML(html, contains: #"update_available: dict.local_model_update || 'Download update'"#))
+    #expect(dashboardHTML(html, contains: #"local_inactive: dict.local_model_inactive || 'Use local version'"#))
+    #expect(dashboardHTML(html, contains: #"repair: dict.local_model_repair || 'Repair download'"#))
+    #expect(dashboardHTML(html, contains: #"identity_unavailable: dict.local_model_identity_unavailable || 'Version unavailable'"#))
+    #expect(dashboardHTML(html, contains: #"localState === 'identity_unavailable'"#))
+    #expect(dashboardHTML(html, contains: #"const actionIcon = localState === 'exists'"#))
+    #expect(dashboardHTML(html, contains: #"+ actionIcon"#))
+    #expect(dashboardHTML(html, contains: #"local_model_exists: "✓ 已存在""#))
+    #expect(dashboardHTML(html, contains: #"local_model_update: "下载新版本""#))
+    #expect(dashboardHTML(html, contains: #"local_model_identity_unavailable: "版本身份无法确认""#))
 }
 
 @Test func dashboardModelTypeColumnUsesCapabilityLabels() throws {

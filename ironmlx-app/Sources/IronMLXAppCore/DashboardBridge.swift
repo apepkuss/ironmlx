@@ -11,6 +11,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     private let downloadService: ModelDownloadService
     private let deletionService: LocalModelDeletionService
     private let integrityService: ModelIntegrityVerificationService
+    private let versionService: ModelVersionManagementService
     private let profileGenerationService: SchedulerProfileGenerationService
     private let benchmarkService: BenchmarkService
     private let benchmarkSessionCoordinator: BenchmarkExclusiveSessionCoordinator
@@ -26,6 +27,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         downloadService: ModelDownloadService = ModelDownloadService(),
         deletionService: LocalModelDeletionService? = nil,
         integrityService: ModelIntegrityVerificationService = ModelIntegrityVerificationService(),
+        versionService: ModelVersionManagementService = ModelVersionManagementService(),
         profileGenerationService: SchedulerProfileGenerationService = SchedulerProfileGenerationService(),
         benchmarkService: BenchmarkService = BenchmarkService(),
         benchmarkSessionCoordinator: BenchmarkExclusiveSessionCoordinator = BenchmarkExclusiveSessionCoordinator(),
@@ -40,6 +42,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         self.downloadService = downloadService
         self.deletionService = deletionService ?? LocalModelDeletionService(configStore: configStore)
         self.integrityService = integrityService
+        self.versionService = versionService
         self.profileGenerationService = profileGenerationService
         self.benchmarkService = benchmarkService
         self.benchmarkSessionCoordinator = benchmarkSessionCoordinator
@@ -81,6 +84,9 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         "setDefaultModel",
         "deleteModels",
         "verifyModelIntegrity",
+        "listModelVersions",
+        "activateModelVersion",
+        "deleteModelVersions",
         "saveSettings",
         "restartServer",
         "loadModel",
@@ -132,6 +138,12 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             deleteModels(json: stringBody(body))
         case "verifyModelIntegrity":
             verifyModelIntegrity(repoID: stringBody(body))
+        case "listModelVersions":
+            listModelVersions(json: stringBody(body))
+        case "activateModelVersion":
+            activateModelVersion(json: stringBody(body))
+        case "deleteModelVersions":
+            deleteModelVersions(json: stringBody(body))
         case "saveSettings":
             saveSettings(json: stringBody(body))
         case "restartServer":
@@ -509,10 +521,23 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
 
         Task {
             do {
-                let results = try await downloadService.searchHuggingFace(
+                var results = try await downloadService.searchHuggingFace(
                     query: payload.query,
                     sort: payload.sort
                 )
+                let backendModels = await backendLoadedModels()
+                let loadedPaths = Set(backendModels.map(\.path))
+                for index in results.indices {
+                    let repoID = results[index].modelId ?? results[index].id
+                    let local = versionService.searchLocalState(
+                        provider: .huggingFace,
+                        repoID: repoID,
+                        remoteCommitSHA: results[index].sha,
+                        loadedModelPaths: loadedPaths
+                    )
+                    results[index].localState = local.state
+                    results[index].localCommitSHA = local.localCommitSHA
+                }
                 let json = (try? Self.jsonString(results)) ?? "[]"
                 await MainActor.run {
                     self.sendJavaScript("onSearchResults(\(Self.jsStringLiteral(json)))")
@@ -627,6 +652,203 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 }
             }
         }
+    }
+
+    private func listModelVersions(json: String) {
+        guard let payload = decodeVersionRepositoryPayload(json),
+              let provider = ModelRepositoryProvider(rawValue: payload.provider)
+        else {
+            sendModelVersionOperationError("Invalid model version request.")
+            return
+        }
+        Task {
+            let loadedModels = await backendLoadedModels()
+            let loadedPaths = Set(loadedModels.map(\.path))
+            let repoID = payload.repoID
+            do {
+                let service = versionService
+                let list = try await Task.detached {
+                    try service.versions(
+                        provider: provider,
+                        repoID: repoID,
+                        loadedModelPaths: loadedPaths
+                    )
+                }.value
+                let result = try Self.jsonString(list)
+                await MainActor.run {
+                    self.sendJavaScript(
+                        "onModelVersions(\(Self.jsStringLiteral(result)))"
+                    )
+                }
+            } catch {
+                await MainActor.run {
+                    self.sendModelVersionOperationError(error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    private func activateModelVersion(json: String) {
+        guard let data = json.data(using: .utf8),
+              let payload = try? JSONDecoder().decode(ModelVersionActivationPayload.self, from: data),
+              let provider = ModelRepositoryProvider(rawValue: payload.provider)
+        else {
+            sendModelVersionOperationError("Invalid model version activation request.")
+            return
+        }
+        let config = configStore.load()
+        let repoID = payload.repoID
+        let commitSHA = payload.commitSHA
+        let fullChecksum = config.verifyModelOnLoad == true
+        Task {
+            let service = versionService
+            do {
+                let loadedModels = try await requiredBackendLoadedModels()
+                let loaded = loadedModel(
+                    provider: provider,
+                    repoID: repoID,
+                    in: loadedModels
+                )
+                let activation = try await Task.detached {
+                    try service.activate(
+                        provider: provider,
+                        repoID: repoID,
+                        commitSHA: commitSHA,
+                        fullChecksum: fullChecksum
+                    )
+                }.value
+                var reloadStatus: String?
+                if let loaded {
+                    do {
+                        let client = BackendAPIClient(host: config.host, port: config.port)
+                        let targetPath = try await scanner.verifiedModelPathAsync(
+                            for: repoID,
+                            fullChecksum: false
+                        )
+                        let parameters = parameterStore.parameters(for: loaded.id)
+                            ?? parameterStore.parameters(for: repoID)
+                        let response = try await client.loadModel(
+                            model: loaded.id,
+                            modelDir: targetPath,
+                            setDefault: loaded.isDefault,
+                            maxCacheCap: parameters?.maxCacheCap,
+                            pinned: loaded.pinned,
+                            mtpModelDir: loaded.mtpModelDir,
+                            mtpDraftTokens: loaded.mtpDraftTokens,
+                            promptLookup: loaded.promptLookup,
+                            reloadWhenIdle: true,
+                            deferWhenBusy: false,
+                            samplingDefaults: parameters?.samplingDefaults ?? .empty
+                        )
+                        reloadStatus = response.status
+                        await MainActor.run {
+                            self.persistBackendLoadedModels(response.loadedModels)
+                        }
+                    } catch {
+                        if let previousCommit = activation.previousCommitSHA {
+                            _ = try? await Task.detached {
+                                try service.activate(
+                                    provider: provider,
+                                    repoID: repoID,
+                                    commitSHA: previousCommit,
+                                    fullChecksum: false
+                                )
+                            }.value
+                        }
+                        throw error
+                    }
+                }
+                let result = ModelVersionBridgeOperationResult(
+                    success: true,
+                    provider: provider.rawValue,
+                    repoID: repoID,
+                    activeCommitSHA: activation.activeCommitSHA,
+                    deletedCommitSHAs: nil,
+                    reclaimedBytes: nil,
+                    reloadStatus: reloadStatus,
+                    error: nil
+                )
+                let resultJSON = try Self.jsonString(result)
+                await MainActor.run {
+                    self.sendJavaScript(
+                        "onModelVersionOperation(\(Self.jsStringLiteral(resultJSON)))"
+                    )
+                    self.sendScannedModels()
+                    self.listModelVersions(json: json)
+                }
+            } catch {
+                await MainActor.run {
+                    self.sendModelVersionOperationError(error.localizedDescription)
+                    self.listModelVersions(json: json)
+                    self.sendScannedModels()
+                }
+            }
+        }
+    }
+
+    private func deleteModelVersions(json: String) {
+        guard let data = json.data(using: .utf8),
+              let payload = try? JSONDecoder().decode(ModelVersionDeletionPayload.self, from: data),
+              let provider = ModelRepositoryProvider(rawValue: payload.provider)
+        else {
+            sendModelVersionOperationError("Invalid model version deletion request.")
+            return
+        }
+        let repoID = payload.repoID
+        let commitSHAs = payload.commitSHAs
+        Task {
+            let service = versionService
+            do {
+                let loadedModels = try await requiredBackendLoadedModels()
+                let loadedPaths = Set(loadedModels.map(\.path))
+                let deletion = try await Task.detached {
+                    try service.deleteVersions(
+                        provider: provider,
+                        repoID: repoID,
+                        commitSHAs: commitSHAs,
+                        loadedModelPaths: loadedPaths
+                    )
+                }.value
+                let result = ModelVersionBridgeOperationResult(
+                    success: true,
+                    provider: provider.rawValue,
+                    repoID: repoID,
+                    activeCommitSHA: nil,
+                    deletedCommitSHAs: deletion.deletedCommitSHAs,
+                    reclaimedBytes: deletion.reclaimedBytes,
+                    reloadStatus: nil,
+                    error: nil
+                )
+                let resultJSON = try Self.jsonString(result)
+                await MainActor.run {
+                    self.sendJavaScript(
+                        "onModelVersionOperation(\(Self.jsStringLiteral(resultJSON)))"
+                    )
+                    self.sendScannedModels()
+                    self.listModelVersions(json: json)
+                }
+            } catch {
+                await MainActor.run {
+                    self.sendModelVersionOperationError(error.localizedDescription)
+                    self.listModelVersions(json: json)
+                }
+            }
+        }
+    }
+
+    private func sendModelVersionOperationError(_ message: String) {
+        let result = ModelVersionBridgeOperationResult(
+            success: false,
+            provider: nil,
+            repoID: nil,
+            activeCommitSHA: nil,
+            deletedCommitSHAs: nil,
+            reclaimedBytes: nil,
+            reloadStatus: nil,
+            error: message
+        )
+        let json = (try? Self.jsonString(result)) ?? #"{"success":false}"#
+        sendJavaScript("onModelVersionOperation(\(Self.jsStringLiteral(json)))")
     }
 
     private func sendDownloadComplete(_ result: ModelDownloadCompletion) {
@@ -1191,6 +1413,55 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         await loadedModelState().references
     }
 
+    private func backendLoadedModels() async -> [BackendLoadedModelInfo] {
+        guard backend.isRunning else {
+            return []
+        }
+        let config = configStore.load()
+        do {
+            return try await BackendAPIClient(host: config.host, port: config.port)
+                .fetchLoadedModels()
+        } catch {
+            IronMLXAppLogger.error("Failed to fetch loaded model paths: \(error)")
+            return []
+        }
+    }
+
+    private func requiredBackendLoadedModels() async throws -> [BackendLoadedModelInfo] {
+        guard backend.isRunning else {
+            return []
+        }
+        let config = configStore.load()
+        return try await BackendAPIClient(host: config.host, port: config.port)
+            .fetchLoadedModels()
+    }
+
+    private func loadedModel(
+        provider: ModelRepositoryProvider,
+        repoID: String,
+        in models: [BackendLoadedModelInfo]
+    ) -> BackendLoadedModelInfo? {
+        guard let repository = try? ModelRepositoryLayout.repositoryRoot(
+            rootURL: versionService.rootURL,
+            provider: provider,
+            repoID: repoID
+        ) else {
+            return nil
+        }
+        let snapshotsRoot = repository
+            .appendingPathComponent("snapshots", isDirectory: true)
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+            .path + "/"
+        return models.first { model in
+            let path = URL(fileURLWithPath: model.path)
+                .standardizedFileURL
+                .resolvingSymlinksInPath()
+                .path
+            return path.hasPrefix(snapshotsRoot)
+        }
+    }
+
     private func loadedModelState() async -> (references: Set<String>, pinnedModels: Set<String>, mtpEnabledModels: Set<String>) {
         let config = configStore.load()
         var loaded = Set<String>()
@@ -1634,6 +1905,13 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         return String(describing: body)
     }
 
+    private func decodeVersionRepositoryPayload(_ json: String) -> ModelVersionRepositoryPayload? {
+        guard let data = json.data(using: .utf8) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(ModelVersionRepositoryPayload.self, from: data)
+    }
+
     private static func modelLoadInstruction(from body: Any) -> ModelLoadInstruction {
         if let dictionary = body as? [String: Any] {
             return ModelLoadInstruction(
@@ -1755,6 +2033,62 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     private struct HuggingFaceSearchPayload: Decodable {
         var query: String
         var sort: String
+    }
+
+    private struct ModelVersionRepositoryPayload: Decodable {
+        var provider: String
+        var repoID: String
+
+        enum CodingKeys: String, CodingKey {
+            case provider
+            case repoID = "repo_id"
+        }
+    }
+
+    private struct ModelVersionActivationPayload: Decodable {
+        var provider: String
+        var repoID: String
+        var commitSHA: String
+
+        enum CodingKeys: String, CodingKey {
+            case provider
+            case repoID = "repo_id"
+            case commitSHA = "commit_sha"
+        }
+    }
+
+    private struct ModelVersionDeletionPayload: Decodable {
+        var provider: String
+        var repoID: String
+        var commitSHAs: [String]
+
+        enum CodingKeys: String, CodingKey {
+            case provider
+            case repoID = "repo_id"
+            case commitSHAs = "commit_shas"
+        }
+    }
+
+    private struct ModelVersionBridgeOperationResult: Encodable {
+        var success: Bool
+        var provider: String?
+        var repoID: String?
+        var activeCommitSHA: String?
+        var deletedCommitSHAs: [String]?
+        var reclaimedBytes: Int64?
+        var reloadStatus: String?
+        var error: String?
+
+        enum CodingKeys: String, CodingKey {
+            case success
+            case provider
+            case repoID = "repo_id"
+            case activeCommitSHA = "active_commit_sha"
+            case deletedCommitSHAs = "deleted_commit_shas"
+            case reclaimedBytes = "reclaimed_bytes"
+            case reloadStatus = "reload_status"
+            case error
+        }
     }
 
     private struct ModelDownloadCancellationPayload: Decodable {

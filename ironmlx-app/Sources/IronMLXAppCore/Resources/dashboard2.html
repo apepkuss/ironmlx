@@ -1349,6 +1349,7 @@
   }
 
   .model-more-menu button.model-more-verify svg { color: var(--accent); }
+  .model-more-menu button.model-more-versions svg { color: #7c6ee6; }
   .model-more-menu button.model-more-delete svg { color: var(--destructive); }
   .model-more-menu button:disabled {
     opacity: 0.5;
@@ -1356,6 +1357,86 @@
   }
 
   .model-more-menu button:hover { background: var(--border); }
+
+  .model-versions-modal .modal-body {
+    display: block;
+    padding-top: 14px;
+  }
+
+  .model-version-summary {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 12px;
+    color: var(--text-secondary);
+    font-size: 12px;
+  }
+
+  .model-version-list {
+    border: 0.5px solid var(--border);
+    border-radius: 9px;
+    overflow: hidden;
+  }
+
+  .model-version-row {
+    display: grid;
+    grid-template-columns: 22px minmax(0, 1fr) auto;
+    gap: 10px;
+    align-items: center;
+    min-height: 64px;
+    padding: 10px 12px;
+    border-bottom: 0.5px solid var(--border);
+  }
+
+  .model-version-row:last-child { border-bottom: 0; }
+
+  .model-version-identity {
+    min-width: 0;
+  }
+
+  .model-version-commit {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  .model-version-meta {
+    margin-top: 4px;
+    color: var(--text-tertiary);
+    font-size: 11px;
+  }
+
+  .model-version-badges {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    margin-left: 8px;
+  }
+
+  .model-version-badge {
+    padding: 2px 6px;
+    border-radius: 999px;
+    background: var(--border);
+    color: var(--text-secondary);
+    font-family: inherit;
+    font-size: 10px;
+    font-weight: 500;
+  }
+
+  .model-version-badge.current { color: var(--accent); }
+  .model-version-badge.corrupt { color: var(--destructive); }
+
+  .model-version-actions {
+    display: flex;
+    gap: 6px;
+  }
+
+  .model-version-empty {
+    padding: 28px;
+    color: var(--text-secondary);
+    text-align: center;
+    font-size: 12px;
+  }
 
   /* ── Download form row ── */
   .dl-row {
@@ -1776,7 +1857,11 @@
   .search-result-item:last-child { border-bottom: none; }
   .search-result-name { font-weight: 600; font-size: 13px; color: var(--text); }
   .search-result-meta { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
-  .search-result-dl { padding-inline: 14px; }
+  .search-result-dl {
+    min-width: 82px;
+    padding-inline: 14px;
+    justify-content: center;
+  }
   .search-result-dl:disabled {
     cursor: not-allowed;
     opacity: 0.6;
@@ -2976,6 +3061,30 @@
   </div>
 </div>
 
+<!-- Model Versions Modal -->
+<div class="modal-overlay" id="model-versions-modal">
+  <div class="modal model-versions-modal">
+    <button class="modal-close" onclick="closeModelVersions()">&times;</button>
+    <div class="modal-header">
+      <div class="modal-pre" data-i18n="manage_versions">Manage versions</div>
+      <h2 id="model-versions-name"></h2>
+    </div>
+    <div class="modal-body">
+      <div class="model-version-summary">
+        <span id="model-versions-summary"></span>
+        <span id="model-versions-reclaimable"></span>
+      </div>
+      <div class="model-version-list" id="model-version-list">
+        <div class="model-version-empty" data-i18n="model_versions_loading">Loading versions…</div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-cancel" onclick="closeModelVersions()" data-i18n="cancel">Cancel</button>
+      <button class="btn-primary" id="cleanup-model-versions-btn" onclick="cleanupSelectedModelVersions()" disabled data-i18n="cleanup_selected_versions">Clean up selected versions</button>
+    </div>
+  </div>
+</div>
+
 <script>
   // ── i18n translations ──
   const I18N = {
@@ -3036,7 +3145,10 @@
       col_actions: "Actions", status_loaded: "Loaded", action_load: "Load", action_unload: "Unload",
       status_loading: "Loading...", status_unloading: "Unloading...",
       status_verifying: "Verifying integrity… {pct}%", status_verified: "Verified {time}", status_corrupt: "Corrupt",
-      verify_integrity: "Verify model integrity", delete_model: "Delete model", more_actions: "More actions",
+      verify_integrity: "Verify model integrity", delete_model: "Delete model", more_actions: "More actions", manage_versions: "Manage versions",
+      model_versions_loading: "Loading versions…", model_versions_count: "{n} versions", reclaimable_space: "{size} reclaimable", current_version: "Current", loaded_version: "Loaded", verified_version: "Verified", unverified_version: "Unverified", corrupt_version: "Corrupt",
+      activate_version: "Use this version", rollback_reload: "Roll back and reload", delete_version: "Delete version", cleanup_selected_versions: "Clean up selected versions", confirm_delete_versions: "Delete {n} selected versions and reclaim {size}? This cannot be undone.", version_activated: "Model version activated.", versions_deleted: "Selected model versions deleted.",
+      local_model_exists: "✓ Exists", local_model_update: "Download update", local_model_inactive: "Use local version", local_model_repair: "Repair download", local_model_identity_unavailable: "Version unavailable",
       integrity_verified_toast: "Model integrity verified.", integrity_corrupt_toast: "Integrity verification failed. This model is marked corrupt and cannot be loaded.",
       action_loading: "Loading...", action_unloading: "Unloading...", action_load_model_only: "Model only", action_load_mtp: "Model + MTP",
       pin_model_tooltip: "Pin loaded model: exempt from TTL auto-unload and automatic release policies. Manual unload is still available.",
@@ -3102,6 +3214,7 @@
       err_memory_pressure: "GPU memory is too high to load a new model right now. Unload an existing model or free memory and retry.",
       err_gpu_memory_insufficient: "Not enough available GPU memory to safely load this model. Unload one or more unused loaded models to free GPU memory, then try again.",
       err_max_loaded_models_reached: "Maximum concurrent loaded models reached. Unload an unused loaded model before loading another model.",
+      err_model_reload_busy: "The model is processing requests. Wait for it to become idle before switching versions.",
       err_model_memory_limit_exceeded: "Model memory limit reached. Unload one or more loaded models, raise Memory Limit (Model Only), or set it to Auto, then try again.",
       err_total_memory_limit_exceeded: "Total memory limit reached. Unload one or more loaded models, raise Memory Limit (Total), or set it to Auto, then try again.",
       err_kv_memory_budget_exceeded: "KV cache memory budget is insufficient. For long-context models, enable Active KV Cache Offload with cache enabled, or lower Max Sequences / MAX TOKENS and retry.",
@@ -3316,7 +3429,10 @@
       col_actions: "操作", status_loaded: "已加载", action_load: "加载", action_unload: "卸载",
       status_loading: "加载中...", status_unloading: "卸载中...",
       status_verifying: "正在验证完整性… {pct}%", status_verified: "已验证 {time}", status_corrupt: "已损坏",
-      verify_integrity: "验证模型完整性", delete_model: "删除模型", more_actions: "更多操作",
+      verify_integrity: "验证模型完整性", delete_model: "删除模型", more_actions: "更多操作", manage_versions: "管理版本",
+      model_versions_loading: "正在加载版本…", model_versions_count: "共 {n} 个版本", reclaimable_space: "可释放 {size}", current_version: "当前版本", loaded_version: "已加载", verified_version: "已验证", unverified_version: "未验证", corrupt_version: "已损坏",
+      activate_version: "切换到此版本", rollback_reload: "回滚并重新加载", delete_version: "删除版本", cleanup_selected_versions: "清理所选版本", confirm_delete_versions: "确定删除所选 {n} 个版本并释放 {size}？此操作不可恢复。", version_activated: "模型版本已切换。", versions_deleted: "所选模型版本已删除。",
+      local_model_exists: "✓ 已存在", local_model_update: "下载新版本", local_model_inactive: "设为当前版本", local_model_repair: "修复下载", local_model_identity_unavailable: "版本身份无法确认",
       integrity_verified_toast: "模型完整性验证成功。", integrity_corrupt_toast: "完整性验证失败；该模型已标记为损坏，后续加载将被拒绝。",
       action_loading: "加载中...", action_unloading: "卸载中...", action_load_model_only: "仅模型", action_load_mtp: "模型+MTP",
       pin_model_tooltip: "固定加载：不会被 TTL 自动卸载，也不会参与自动释放策略。仍可手动卸载。",
@@ -3382,6 +3498,7 @@
       err_memory_pressure: "GPU 显存压力过高，暂时无法加载新模型。请先卸载已加载的模型或释放显存后重试。",
       err_gpu_memory_insufficient: "当前可用 GPU 内存不足，无法安全加载该模型。请先卸载暂不使用的已加载模型，释放显存后再重试。",
       err_max_loaded_models_reached: "已达到最大同时加载模型数，无法加载新模型。请先卸载暂不使用的已加载模型，再重试。",
+      err_model_reload_busy: "模型正在处理请求，请等待模型空闲后再切换版本。",
       err_model_memory_limit_exceeded: "已达到模型内存限制，无法加载新模型。请先卸载暂不使用的已加载模型，或在【设置】中调高「内存限制（仅模型）」/切换为自动后重试。",
       err_total_memory_limit_exceeded: "已达到总内存限制，无法加载新模型。请先卸载暂不使用的已加载模型，或在【设置】中调高「内存限制（总量）」/切换为自动后重试。",
       err_kv_memory_budget_exceeded: "KV cache 内存预算不足。长上下文模型请在启用缓存的同时开启【活跃 KV Cache 分层卸载】，或调低「最大序列数」/ MAX TOKENS 后重试。",
@@ -3596,7 +3713,10 @@
       col_actions: "操作", status_loaded: "已載入", action_load: "載入", action_unload: "卸載",
       status_loading: "載入中...", status_unloading: "卸載中...",
       status_verifying: "正在驗證完整性… {pct}%", status_verified: "已驗證 {time}", status_corrupt: "已損壞",
-      verify_integrity: "驗證模型完整性", delete_model: "刪除模型", more_actions: "更多操作",
+      verify_integrity: "驗證模型完整性", delete_model: "刪除模型", more_actions: "更多操作", manage_versions: "管理版本",
+      model_versions_loading: "正在載入版本…", model_versions_count: "共 {n} 個版本", reclaimable_space: "可釋放 {size}", current_version: "目前版本", loaded_version: "已載入", verified_version: "已驗證", unverified_version: "未驗證", corrupt_version: "已損壞",
+      activate_version: "切換到此版本", rollback_reload: "回滾並重新載入", delete_version: "刪除版本", cleanup_selected_versions: "清理所選版本", confirm_delete_versions: "確定刪除所選 {n} 個版本並釋放 {size}？此操作無法復原。", version_activated: "模型版本已切換。", versions_deleted: "所選模型版本已刪除。",
+      local_model_exists: "✓ 已存在", local_model_update: "下載新版本", local_model_inactive: "設為目前版本", local_model_repair: "修復下載", local_model_identity_unavailable: "無法確認版本身分",
       integrity_verified_toast: "模型完整性驗證成功。", integrity_corrupt_toast: "完整性驗證失敗；此模型已標記為損壞，後續載入將被拒絕。",
       action_loading: "載入中...", action_unloading: "卸載中...", action_load_model_only: "僅模型", action_load_mtp: "模型+MTP",
       pin_model_tooltip: "固定載入：不會被 TTL 自動卸載，也不會參與自動釋放策略。仍可手動卸載。",
@@ -3650,6 +3770,7 @@
       err_memory_pressure: "GPU 顯存壓力過高，暫時無法載入新模型。請先卸載已載入的模型或釋出顯存後重試。",
       err_gpu_memory_insufficient: "目前可用 GPU 記憶體不足，無法安全載入此模型。請先卸載暫不使用的已載入模型，釋放顯示記憶體後再重試。",
       err_max_loaded_models_reached: "已達到最大同時載入模型數，無法載入新模型。請先卸載暫不使用的已載入模型，再重試。",
+      err_model_reload_busy: "模型正在處理請求，請等待模型閒置後再切換版本。",
       err_model_memory_limit_exceeded: "已達到模型記憶體限制，無法載入新模型。請先卸載暫不使用的已載入模型，或在【設定】中調高「記憶體限制（僅模型）」/切換為自動後重試。",
       err_total_memory_limit_exceeded: "已達到總記憶體限制，無法載入新模型。請先卸載暫不使用的已載入模型，或在【設定】中調高「記憶體限制（總量）」/切換為自動後重試。",
       err_kv_memory_budget_exceeded: "KV cache 記憶體預算不足。長上下文模型請在啟用快取的同時開啟【活躍 KV Cache 分層卸載】，或調低「最大序列數」/ MAX TOKENS 後重試。",
@@ -3859,7 +3980,10 @@
       col_actions: "アクション", status_loaded: "ロード済み", action_load: "ロード", action_unload: "アンロード",
       status_loading: "ロード中...", status_unloading: "アンロード中...",
       status_verifying: "整合性を検証中… {pct}%", status_verified: "検証済み {time}", status_corrupt: "破損",
-      verify_integrity: "モデルの整合性を検証", delete_model: "モデルを削除", more_actions: "その他の操作",
+      verify_integrity: "モデルの整合性を検証", delete_model: "モデルを削除", more_actions: "その他の操作", manage_versions: "バージョン管理",
+      model_versions_loading: "バージョンを読み込み中…", model_versions_count: "{n} バージョン", reclaimable_space: "{size} 解放可能", current_version: "現在", loaded_version: "ロード済み", verified_version: "検証済み", unverified_version: "未検証", corrupt_version: "破損",
+      activate_version: "このバージョンを使用", rollback_reload: "ロールバックして再ロード", delete_version: "バージョンを削除", cleanup_selected_versions: "選択したバージョンを整理", confirm_delete_versions: "選択した {n} バージョンを削除して {size} 解放しますか？元に戻せません。", version_activated: "モデルバージョンを切り替えました。", versions_deleted: "選択したモデルバージョンを削除しました。",
+      local_model_exists: "✓ 既存", local_model_update: "新バージョンを取得", local_model_inactive: "ローカル版を使用", local_model_repair: "再ダウンロード", local_model_identity_unavailable: "バージョンを確認できません",
       integrity_verified_toast: "モデルの整合性を確認しました。", integrity_corrupt_toast: "整合性検証に失敗しました。このモデルは破損としてマークされ、ロードできません。",
       action_loading: "ロード中...", action_unloading: "アンロード中...", action_load_model_only: "モデルのみ", action_load_mtp: "モデル+MTP",
       pin_model_tooltip: "固定ロード：TTL 自動アンロードや自動解放の対象外になります。手動アンロードは引き続き可能です。",
@@ -3913,6 +4037,7 @@
       err_memory_pressure: "GPU メモリが逼迫しているため、新しいモデルを読み込めません。既存のモデルを解放するなどしてから再度お試しください。",
       err_gpu_memory_insufficient: "利用可能な GPU メモリが不足しているため、このモデルを安全に読み込めません。使用していない読み込み済みモデルをアンロードして GPU メモリを解放してから再試行してください。",
       err_max_loaded_models_reached: "最大同時ロードモデル数に達しました。新しいモデルは読み込めません。使用していない読み込み済みモデルを手動でアンロードしてから再試行してください。",
+      err_model_reload_busy: "モデルはリクエストを処理中です。アイドル状態になってからバージョンを切り替えてください。",
       err_model_memory_limit_exceeded: "モデルメモリ制限に達しました。新しいモデルは読み込めません。使用していない読み込み済みモデルをアンロードするか、設定で「Memory Limit (Model Only)」を上げる/Auto にしてから再試行してください。",
       err_total_memory_limit_exceeded: "総メモリ制限に達しました。新しいモデルは読み込めません。使用していない読み込み済みモデルをアンロードするか、設定で「Memory Limit (Total)」を上げる/Auto にしてから再試行してください。",
       err_kv_memory_budget_exceeded: "KV cache のメモリ予算が不足しています。長いコンテキストのモデルでは、キャッシュを有効にしたうえで Active KV Cache オフロードを有効にするか、最大シーケンス数 / MAX TOKENS を下げて再試行してください。",
@@ -4122,7 +4247,10 @@
       col_actions: "작업", status_loaded: "로드됨", action_load: "로드", action_unload: "언로드",
       status_loading: "로딩 중...", status_unloading: "언로드 중...",
       status_verifying: "무결성 확인 중… {pct}%", status_verified: "확인됨 {time}", status_corrupt: "손상됨",
-      verify_integrity: "모델 무결성 확인", delete_model: "모델 삭제", more_actions: "추가 작업",
+      verify_integrity: "모델 무결성 확인", delete_model: "모델 삭제", more_actions: "추가 작업", manage_versions: "버전 관리",
+      model_versions_loading: "버전을 불러오는 중…", model_versions_count: "{n}개 버전", reclaimable_space: "{size} 확보 가능", current_version: "현재", loaded_version: "로드됨", verified_version: "검증됨", unverified_version: "미검증", corrupt_version: "손상됨",
+      activate_version: "이 버전 사용", rollback_reload: "롤백 후 다시 로드", delete_version: "버전 삭제", cleanup_selected_versions: "선택한 버전 정리", confirm_delete_versions: "선택한 {n}개 버전을 삭제하고 {size}를 확보하시겠습니까? 되돌릴 수 없습니다.", version_activated: "모델 버전을 전환했습니다.", versions_deleted: "선택한 모델 버전을 삭제했습니다.",
+      local_model_exists: "✓ 존재함", local_model_update: "새 버전 다운로드", local_model_inactive: "로컬 버전 사용", local_model_repair: "다시 다운로드", local_model_identity_unavailable: "버전을 확인할 수 없음",
       integrity_verified_toast: "모델 무결성을 확인했습니다.", integrity_corrupt_toast: "무결성 확인에 실패했습니다. 이 모델은 손상됨으로 표시되어 로드할 수 없습니다.",
       action_loading: "로딩 중...", action_unloading: "언로드 중...", action_load_model_only: "모델만", action_load_mtp: "모델+MTP",
       pin_model_tooltip: "고정 로드: TTL 자동 언로드와 자동 해제 정책에서 제외됩니다. 수동 언로드는 계속 사용할 수 있습니다.",
@@ -4176,6 +4304,7 @@
       err_memory_pressure: "GPU 메모리 사용량이 높아 새 모델을 로드할 수 없습니다. 기존 모델을 언로드하거나 메모리를 확보한 후 다시 시도해 주세요.",
       err_gpu_memory_insufficient: "사용 가능한 GPU 메모리가 부족하여 이 모델을 안전하게 로드할 수 없습니다. 사용하지 않는 로드된 모델을 언로드하여 GPU 메모리를 확보한 뒤 다시 시도하세요.",
       err_max_loaded_models_reached: "최대 동시 로드 모델 수에 도달했습니다. 새 모델을 로드할 수 없습니다. 사용하지 않는 로드된 모델을 먼저 언로드한 뒤 다시 시도하세요.",
+      err_model_reload_busy: "모델이 요청을 처리 중입니다. 유휴 상태가 된 후 버전을 전환하세요.",
       err_model_memory_limit_exceeded: "모델 메모리 제한에 도달했습니다. 새 모델을 로드할 수 없습니다. 사용하지 않는 로드된 모델을 언로드하거나 설정에서 Memory Limit (Model Only)를 높이거나 Auto로 전환한 뒤 다시 시도하세요.",
       err_total_memory_limit_exceeded: "총 메모리 제한에 도달했습니다. 새 모델을 로드할 수 없습니다. 사용하지 않는 로드된 모델을 언로드하거나 설정에서 Memory Limit (Total)를 높이거나 Auto로 전환한 뒤 다시 시도하세요.",
       err_kv_memory_budget_exceeded: "KV cache 메모리 예산이 부족합니다. 긴 컨텍스트 모델은 캐시를 켠 상태에서 Active KV Cache 오프로드를 활성화하거나 Max Sequences / MAX TOKENS를 낮춘 뒤 다시 시도하세요.",
@@ -5088,11 +5217,11 @@
     if (!button) return;
     const dict = I18N[currentLang] || I18N.en;
     const label = button.querySelector('span');
-    button.disabled = downloading;
+    button.disabled = downloading || button.dataset.idleDisabled === 'true';
     if (label) {
       label.textContent = downloading
         ? (dict.download_btn_downloading || 'Downloading...')
-        : (dict.download || 'Download');
+        : (button.dataset.idleLabel || dict.download || 'Download');
     }
   }
 
@@ -5123,6 +5252,9 @@
       document.getElementById('dl-progress-text').textContent = localized;
       // Refresh model list
       syncModelList();
+      if (document.getElementById('search-hf-query').value.trim()) {
+        searchHuggingFace();
+      }
       // Auto-hide the progress card after a short success-dwell so
       // the section goes back to its default "empty & ready for
       // next download" state. A previous download's repo id and
@@ -5187,16 +5319,31 @@
     models.forEach(function(m) {
       const repoId = m.id || m.modelId || '';
       const isDownloading = repoId === activeHuggingFaceSearchRepoId;
+      const localState = m.local_state || 'available';
+      const stateLabels = {
+        exists: dict.local_model_exists || '✓ Exists',
+        update_available: dict.local_model_update || 'Download update',
+        local_inactive: dict.local_model_inactive || 'Use local version',
+        repair: dict.local_model_repair || 'Repair download',
+        identity_unavailable: dict.local_model_identity_unavailable || 'Version unavailable',
+        available: dict.download || 'Download'
+      };
+      const idleLabel = stateLabels[localState] || stateLabels.available;
+      const idleDisabled = localState === 'exists' || localState === 'identity_unavailable';
+      const actionIcon = localState === 'exists'
+        ? ''
+        : '<svg class="download-button-icon" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M7 2v7M4.5 6.5L7 9l2.5-2.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/><path d="M2.5 9.5v2h9v-2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>';
       const downloads = m.downloads ? m.downloads.toLocaleString() : '0';
       const likes = m.likes || 0;
       html += '<div class="search-result-item">'
         + '<div><div class="search-result-name">' + repoId + '</div>'
         + '<div class="search-result-meta">↓ ' + downloads + ' · ♥ ' + likes + (m.pipeline_tag ? ' · ' + m.pipeline_tag : '') + '</div></div>'
         + '<button class="btn-accent hf-download-action search-result-dl"'
-        + (isDownloading ? ' disabled' : '')
-        + ' onclick="downloadSearchResult(\'' + repoId.replace(/'/g, "\\'") + '\', this)">'
-        + '<svg class="download-button-icon" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M7 2v7M4.5 6.5L7 9l2.5-2.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/><path d="M2.5 9.5v2h9v-2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>'
-        + '<span>' + (isDownloading ? (dict.download_btn_downloading || 'Downloading...') : (dict.download || 'Download')) + '</span></button>'
+        + ((isDownloading || idleDisabled) ? ' disabled' : '')
+        + ' data-idle-label="' + escapeAttr(idleLabel) + '" data-idle-disabled="' + (idleDisabled ? 'true' : 'false') + '"'
+        + ' onclick="handleSearchResultAction(\'' + repoId.replace(/'/g, "\\'") + '\', \'' + localState + '\', \'' + escapeAttr(m.sha || '') + '\', this)">'
+        + actionIcon
+        + '<span>' + (isDownloading ? (dict.download_btn_downloading || 'Downloading...') : idleLabel) + '</span></button>'
         + '</div>';
     });
     resultsDiv.innerHTML = html;
@@ -5226,8 +5373,208 @@
     startDownload();
   }
 
+  function handleSearchResultAction(repoId, localState, commitSHA, button) {
+    if (localState === 'local_inactive' && commitSHA) {
+      const handler = window.webkit && window.webkit.messageHandlers
+        && window.webkit.messageHandlers.activateModelVersion;
+      if (handler) {
+        button.disabled = true;
+        handler.postMessage(JSON.stringify({
+          provider: 'huggingface',
+          repo_id: repoId,
+          commit_sha: commitSHA
+        }));
+      }
+      return;
+    }
+    downloadSearchResult(repoId, button);
+  }
+
   document.getElementById('model-params-modal').addEventListener('click', function(e) {
     if (e.target === this) closeParamsModal();
+  });
+
+  let activeModelVersionRepository = null;
+  let activeModelVersionList = null;
+
+  function modelProvider(model) {
+    return model && model.source === 'ms' ? 'modelscope' : 'huggingface';
+  }
+
+  function formatVersionBytes(bytes) {
+    let value = Number(bytes || 0);
+    const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+    let unit = 0;
+    while (value >= 1024 && unit < units.length - 1) {
+      value /= 1024;
+      unit++;
+    }
+    return (unit === 0 ? Math.round(value) : value.toFixed(value >= 10 ? 1 : 2)) + ' ' + units[unit];
+  }
+
+  function openModelVersions(modelId) {
+    const model = window.__LOCAL_MODELS__ && window.__LOCAL_MODELS__[modelId];
+    if (!model) return;
+    activeModelVersionRepository = {
+      provider: modelProvider(model),
+      repo_id: model.repo_id || model.id
+    };
+    activeModelVersionList = null;
+    document.getElementById('model-versions-name').textContent = model.id;
+    document.getElementById('model-version-list').innerHTML =
+      '<div class="model-version-empty">' + escapeAttr(t('model_versions_loading', 'Loading versions…')) + '</div>';
+    document.getElementById('model-versions-summary').textContent = '';
+    document.getElementById('model-versions-reclaimable').textContent = '';
+    document.getElementById('cleanup-model-versions-btn').disabled = true;
+    document.getElementById('model-versions-modal').classList.add('open');
+    requestModelVersions();
+  }
+
+  function closeModelVersions() {
+    document.getElementById('model-versions-modal').classList.remove('open');
+    activeModelVersionRepository = null;
+    activeModelVersionList = null;
+  }
+
+  function requestModelVersions() {
+    if (!activeModelVersionRepository) return;
+    const handler = window.webkit && window.webkit.messageHandlers
+      && window.webkit.messageHandlers.listModelVersions;
+    if (handler) handler.postMessage(JSON.stringify(activeModelVersionRepository));
+  }
+
+  function versionBadge(label, cssClass) {
+    return '<span class="model-version-badge ' + (cssClass || '') + '">' + escapeAttr(label) + '</span>';
+  }
+
+  function onModelVersions(jsonStr) {
+    let list;
+    try { list = JSON.parse(jsonStr); } catch(e) { return; }
+    if (!activeModelVersionRepository
+        || list.provider !== activeModelVersionRepository.provider
+        || list.repo_id !== activeModelVersionRepository.repo_id) return;
+    activeModelVersionList = list;
+    const versions = list.versions || [];
+    document.getElementById('model-versions-summary').textContent =
+      t('model_versions_count', '{n} versions').replace('{n}', versions.length);
+    document.getElementById('model-versions-reclaimable').textContent =
+      t('reclaimable_space', '{size} reclaimable').replace('{size}', formatVersionBytes(list.reclaimable_bytes));
+    const container = document.getElementById('model-version-list');
+    if (!versions.length) {
+      container.innerHTML = '<div class="model-version-empty">—</div>';
+      return;
+    }
+    const anyLoaded = versions.some(v => v.is_loaded);
+    container.innerHTML = versions.map(function(version) {
+      const badges = [];
+      if (version.is_active) badges.push(versionBadge(t('current_version', 'Current'), 'current'));
+      if (version.is_loaded) badges.push(versionBadge(t('loaded_version', 'Loaded'), ''));
+      if (version.integrity_state === 'verified') badges.push(versionBadge(t('verified_version', 'Verified'), ''));
+      if (version.integrity_state === 'corrupt') badges.push(versionBadge(t('corrupt_version', 'Corrupt'), 'corrupt'));
+      if (version.integrity_state === 'unverified') badges.push(versionBadge(t('unverified_version', 'Unverified'), ''));
+      const published = version.published_at ? new Date(version.published_at).toLocaleString() : '—';
+      const verified = version.verified_at ? new Date(version.verified_at).toLocaleString() : '—';
+      const activateLabel = anyLoaded
+        ? t('rollback_reload', 'Roll back and reload')
+        : t('activate_version', 'Use this version');
+      const checkbox = version.can_delete
+        ? '<input type="checkbox" class="model-version-checkbox" value="' + escapeAttr(version.commit_sha) + '" onchange="updateVersionCleanupButton()">'
+        : '<span></span>';
+      let actions = '';
+      if (version.can_activate) {
+        actions += '<button class="btn-cancel" onclick="activateVersion(\'' + escapeAttr(version.commit_sha) + '\')">'
+          + escapeAttr(activateLabel) + '</button>';
+      }
+      if (version.can_delete) {
+        actions += '<button class="btn-cancel" onclick="deleteSingleVersion(\'' + escapeAttr(version.commit_sha) + '\')">'
+          + escapeAttr(t('delete_version', 'Delete version')) + '</button>';
+      }
+      return '<div class="model-version-row">'
+        + checkbox
+        + '<div class="model-version-identity"><div><span class="model-version-commit" title="' + escapeAttr(version.commit_sha) + '">'
+        + escapeAttr(version.commit_sha.slice(0, 12)) + '</span><span class="model-version-badges">' + badges.join('') + '</span></div>'
+        + '<div class="model-version-meta">' + escapeAttr(published) + ' · ' + formatVersionBytes(version.size_bytes)
+        + ' · ' + escapeAttr(t('verified_version', 'Verified')) + ': ' + escapeAttr(verified) + '</div></div>'
+        + '<div class="model-version-actions">' + actions + '</div></div>';
+    }).join('');
+    updateVersionCleanupButton();
+  }
+
+  function updateVersionCleanupButton() {
+    const selected = document.querySelectorAll('#model-version-list .model-version-checkbox:checked');
+    document.getElementById('cleanup-model-versions-btn').disabled = selected.length === 0;
+  }
+
+  function activateVersion(commitSHA) {
+    if (!activeModelVersionRepository) return;
+    const handler = window.webkit && window.webkit.messageHandlers
+      && window.webkit.messageHandlers.activateModelVersion;
+    if (!handler) return;
+    document.getElementById('model-version-list').style.pointerEvents = 'none';
+    handler.postMessage(JSON.stringify(Object.assign({}, activeModelVersionRepository, {
+      commit_sha: commitSHA
+    })));
+  }
+
+  function deleteSingleVersion(commitSHA) {
+    deleteModelVersions([commitSHA]);
+  }
+
+  function cleanupSelectedModelVersions() {
+    const commits = Array.from(
+      document.querySelectorAll('#model-version-list .model-version-checkbox:checked')
+    ).map(input => input.value);
+    deleteModelVersions(commits);
+  }
+
+  function deleteModelVersions(commits) {
+    if (!activeModelVersionRepository || !commits.length) return;
+    const versions = (activeModelVersionList && activeModelVersionList.versions) || [];
+    const bytes = versions
+      .filter(version => commits.includes(version.commit_sha))
+      .reduce((sum, version) => sum + Number(version.size_bytes || 0), 0);
+    const message = t('confirm_delete_versions', 'Delete {n} selected versions and reclaim {size}? This cannot be undone.')
+      .replace('{n}', commits.length)
+      .replace('{size}', formatVersionBytes(bytes));
+    showConfirmDialog(message).then(function(ok) {
+      if (!ok || !activeModelVersionRepository) return;
+      const handler = window.webkit && window.webkit.messageHandlers
+        && window.webkit.messageHandlers.deleteModelVersions;
+      if (!handler) return;
+      document.getElementById('model-version-list').style.pointerEvents = 'none';
+      handler.postMessage(JSON.stringify(Object.assign({}, activeModelVersionRepository, {
+        commit_shas: commits
+      })));
+    });
+  }
+
+  function onModelVersionOperation(jsonStr) {
+    let result = {};
+    try { result = JSON.parse(jsonStr); } catch(e) {}
+    const list = document.getElementById('model-version-list');
+    if (list) list.style.pointerEvents = '';
+    if (!result.success) {
+      showToast(result.error || t('unknown_error', 'Unknown error'), 'warn');
+      return;
+    }
+    const deleted = result.deleted_commit_shas && result.deleted_commit_shas.length;
+    showToast(
+      deleted ? t('versions_deleted', 'Selected model versions deleted.') : t('version_activated', 'Model version activated.'),
+      'info'
+    );
+    if (activeModelVersionRepository) requestModelVersions();
+    syncModelList();
+    const query = document.getElementById('search-hf-query').value.trim();
+    if (query) searchHuggingFace();
+  }
+
+  document.getElementById('model-versions-modal').addEventListener('click', function(e) {
+    if (e.target === this) closeModelVersions();
+  });
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape' && document.getElementById('model-versions-modal').classList.contains('open')) {
+      closeModelVersions();
+    }
   });
 
   // Tab switching (Models page)
@@ -5582,7 +5929,9 @@
 
     const paths = kind === 'verify'
       ? ['M6 3h8l4 4v14H6V3Z', 'M14 3v5h4', 'm9 14 2 2 4-4']
-      : ['M3 6h18', 'M8 6V4h8v2', 'M19 6l-1 15H6L5 6', 'M10 10v7', 'M14 10v7'];
+      : kind === 'versions'
+        ? ['M7 4h12v14H7', 'M4 7v14h12', 'M10 8h6', 'M10 12h6']
+        : ['M3 6h18', 'M8 6V4h8v2', 'M19 6l-1 15H6L5 6', 'M10 10v7', 'M14 10v7'];
     paths.forEach(function(pathData) {
       const path = document.createElementNS(namespace, 'path');
       path.setAttribute('d', pathData);
@@ -5620,6 +5969,20 @@
       verifyModelIntegrity(modelId);
     });
 
+    const versionsButton = document.createElement('button');
+    versionsButton.type = 'button';
+    versionsButton.className = 'model-more-versions';
+    versionsButton.setAttribute('role', 'menuitem');
+    versionsButton.appendChild(createModelMoreActionIcon('versions'));
+    const versionsLabel = document.createElement('span');
+    versionsLabel.textContent = dict.manage_versions || 'Manage versions';
+    versionsButton.appendChild(versionsLabel);
+    versionsButton.addEventListener('click', function(menuEvent) {
+      menuEvent.stopPropagation();
+      closeModelMoreActions();
+      openModelVersions(modelId);
+    });
+
     const deleteButton = document.createElement('button');
     deleteButton.type = 'button';
     deleteButton.className = 'model-more-delete';
@@ -5635,6 +5998,7 @@
     });
 
     menu.appendChild(verifyButton);
+    menu.appendChild(versionsButton);
     menu.appendChild(deleteButton);
     document.body.appendChild(menu);
     activeModelMoreMenu = menu;

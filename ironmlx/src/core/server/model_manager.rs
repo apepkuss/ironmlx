@@ -66,6 +66,9 @@ const DEFAULT_PROFILE_WARNING: &str =
 const MODEL_RELOAD_DEFERRED_WARNING_CODE: &str = "model_reload_deferred";
 const MODEL_RELOAD_DEFERRED_WARNING: &str =
     "The model is processing requests. New parameters will be applied automatically after the model becomes idle.";
+const MODEL_RELOAD_BUSY_CODE: &str = "model_reload_busy";
+const MODEL_RELOAD_BUSY_MESSAGE: &str =
+    "The model is processing requests. Wait for it to become idle before switching versions.";
 const MTP_MODEL_DIR_REQUIRED_CODE: &str = "mtp_model_dir_required";
 const MTP_MODEL_DIR_REQUIRED_MESSAGE: &str = "MTP draft tokens require an MTP model directory.";
 const MTP_OK_CODE: &str = "ok";
@@ -118,6 +121,7 @@ impl ModelManager {
             prompt_lookup: parsed.prompt_lookup,
             pinned: parsed.pinned,
             set_default: parsed.set_default,
+            defer_when_busy: parsed.defer_when_busy,
         };
 
         let already_loaded = self.pool.is_model_loaded(&parsed.model_reference).await;
@@ -136,6 +140,12 @@ impl ModelManager {
                 .await
                 .is_some_and(|requests| requests > 0)
         {
+            if !parsed.defer_when_busy {
+                return Err(AdminError::conflict_with_code(
+                    MODEL_RELOAD_BUSY_MESSAGE,
+                    Some(MODEL_RELOAD_BUSY_CODE),
+                ));
+            }
             self.schedule_reload_when_idle(reload).await;
             return Ok(AdminModelResponse::ok(
                 "reload_deferred",
@@ -342,6 +352,12 @@ impl ModelManager {
             .await
             .is_some_and(|requests| requests > 0)
         {
+            if !reload.defer_when_busy {
+                return Err(AdminError::conflict_with_code(
+                    MODEL_RELOAD_BUSY_MESSAGE,
+                    Some(MODEL_RELOAD_BUSY_CODE),
+                ));
+            }
             self.schedule_reload_when_idle(reload.clone()).await;
             return Ok(AdminModelResponse::ok(
                 "reload_deferred",
@@ -467,6 +483,7 @@ struct PendingModelReload {
     prompt_lookup: Option<PromptLookupConfig>,
     pinned: bool,
     set_default: bool,
+    defer_when_busy: bool,
 }
 
 struct EngineModelLoad {
@@ -484,6 +501,7 @@ struct ParsedLoadModelRequest {
     pinned: bool,
     set_default: bool,
     reload_when_idle: bool,
+    defer_when_busy: bool,
 }
 
 impl ParsedLoadModelRequest {
@@ -548,6 +566,7 @@ impl ParsedLoadModelRequest {
             pinned: request.pinned.unwrap_or(false),
             set_default: request.set_default.unwrap_or(false),
             reload_when_idle: request.reload_when_idle.unwrap_or(false),
+            defer_when_busy: request.defer_when_busy.unwrap_or(true),
         })
     }
 }
@@ -1167,6 +1186,7 @@ struct LoadModelRequest {
     mtp_draft_tokens: Option<usize>,
     prompt_lookup: Option<PromptLookupConfig>,
     reload_when_idle: Option<bool>,
+    defer_when_busy: Option<bool>,
     #[serde(flatten)]
     sampling_defaults: SamplingDefaults,
 }
@@ -1397,6 +1417,14 @@ impl AdminError {
     fn not_found_with_code(message: impl Into<String>, code: Option<&'static str>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
+            message: message.into(),
+            code,
+        }
+    }
+
+    fn conflict_with_code(message: impl Into<String>, code: Option<&'static str>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
             message: message.into(),
             code,
         }
@@ -1867,6 +1895,7 @@ mod tests {
             "model": "mlx-community/LongContext-4bit",
             "model_dir": "/models/long",
             "reload_when_idle": true,
+            "defer_when_busy": false,
             "temperature": 0.7,
             "top_p": 0.8,
             "top_k": 40,
@@ -1875,6 +1904,7 @@ mod tests {
         .expect("load request");
 
         assert_eq!(request.reload_when_idle, Some(true));
+        assert_eq!(request.defer_when_busy, Some(false));
         assert_eq!(request.sampling_defaults.temperature, Some(0.7));
         assert_eq!(request.sampling_defaults.top_p, Some(0.8));
         assert_eq!(request.sampling_defaults.top_k, Some(40));

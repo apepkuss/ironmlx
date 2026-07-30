@@ -167,6 +167,53 @@ public final class ModelRepositoryLock: @unchecked Sendable {
     }
 }
 
+public enum ModelSnapshotUseLockError: LocalizedError {
+    case busy
+    case openFailed(Int32)
+    case lockFailed(Int32)
+
+    public var errorDescription: String? {
+        switch self {
+        case .busy:
+            "The model snapshot is currently in use."
+        case let .openFailed(code):
+            "Unable to open model snapshot use lock: errno \(code)."
+        case let .lockFailed(code):
+            "Unable to acquire model snapshot use lock: errno \(code)."
+        }
+    }
+}
+
+public final class ModelSnapshotUseLock: @unchecked Sendable {
+    private let descriptor: Int32
+
+    public init(lockURL: URL, exclusive: Bool) throws {
+        try FileManager.default.createDirectory(
+            at: lockURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let descriptor = Darwin.open(lockURL.path, O_CREAT | O_RDWR | O_CLOEXEC, S_IRUSR | S_IWUSR)
+        guard descriptor >= 0 else {
+            throw ModelSnapshotUseLockError.openFailed(errno)
+        }
+        let operation = (exclusive ? LOCK_EX : LOCK_SH) | LOCK_NB
+        guard flock(descriptor, operation) == 0 else {
+            let code = errno
+            Darwin.close(descriptor)
+            if code == EWOULDBLOCK {
+                throw ModelSnapshotUseLockError.busy
+            }
+            throw ModelSnapshotUseLockError.lockFailed(code)
+        }
+        self.descriptor = descriptor
+    }
+
+    deinit {
+        flock(descriptor, LOCK_UN)
+        Darwin.close(descriptor)
+    }
+}
+
 public struct ModelDownloadStore: Sendable {
     public let rootURL: URL
 
@@ -207,6 +254,37 @@ public struct ModelDownloadStore: Sendable {
         return try ModelRepositoryLock(lockURL: url)
     }
 
+    public func snapshotUseLockURL(
+        provider: ModelRepositoryProvider,
+        repoID: String,
+        commitSHA: String
+    ) throws -> URL {
+        guard ModelSnapshotVerifier.isCommitSHA(commitSHA) else {
+            throw ModelSnapshotVerificationError.identityMismatch(
+                "snapshot use lock requires a full commit SHA"
+            )
+        }
+        return try repositoryRoot(provider: provider, repoID: repoID)
+            .appendingPathComponent(".locks", isDirectory: true)
+            .appendingPathComponent("\(commitSHA.lowercased()).use.lock")
+    }
+
+    public func acquireSnapshotUseLock(
+        provider: ModelRepositoryProvider,
+        repoID: String,
+        commitSHA: String,
+        exclusive: Bool
+    ) throws -> ModelSnapshotUseLock {
+        try ModelSnapshotUseLock(
+            lockURL: snapshotUseLockURL(
+                provider: provider,
+                repoID: repoID,
+                commitSHA: commitSHA
+            ),
+            exclusive: exclusive
+        )
+    }
+
     public func prepareStaging(provider: ModelRepositoryProvider, repoID: String, commitSHA: String) throws -> URL {
         let staging = try stagingSnapshotURL(provider: provider, repoID: repoID, commitSHA: commitSHA)
         try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
@@ -245,11 +323,30 @@ public struct ModelDownloadStore: Sendable {
             withIntermediateDirectories: true
         )
         guard !FileManager.default.fileExists(atPath: destination.path) else {
-            let existing = try ModelSnapshotVerifier().verifyStructure(
-                snapshot: destination,
-                expectedProvider: manifest.provider,
-                expectedRepoID: manifest.repoID
-            )
+            let existing: ModelSnapshotManifest
+            do {
+                existing = try ModelSnapshotVerifier().verifyStructure(
+                    snapshot: destination,
+                    expectedProvider: manifest.provider,
+                    expectedRepoID: manifest.repoID
+                )
+                let record = try ModelSnapshotVerifier().loadIntegrityRecord(at: destination)
+                guard record.provider == manifest.provider,
+                      record.repoID == manifest.repoID,
+                      record.commitSHA == manifest.commitSHA,
+                      record.state == .verified
+                else {
+                    throw ModelSnapshotVerificationError.identityMismatch(
+                        "published commit does not have a matching verified integrity record"
+                    )
+                }
+            } catch {
+                return try replaceInvalidSnapshot(
+                    at: destination,
+                    with: staging,
+                    manifest: manifest
+                )
+            }
             guard existing.version == manifest.version,
                   existing.provider == manifest.provider,
                   existing.repoID == manifest.repoID,
@@ -271,6 +368,62 @@ public struct ModelDownloadStore: Sendable {
         }
         try Self.syncDirectory(destination.deletingLastPathComponent())
         try updateRef(for: manifest)
+        return destination
+    }
+
+    private func replaceInvalidSnapshot(
+        at destination: URL,
+        with staging: URL,
+        manifest: ModelSnapshotManifest
+    ) throws -> URL {
+        let useLock = try acquireSnapshotUseLock(
+            provider: manifest.provider,
+            repoID: manifest.repoID,
+            commitSHA: manifest.commitSHA,
+            exclusive: true
+        )
+        defer { withExtendedLifetime(useLock) {} }
+        guard renameatx_np(
+            AT_FDCWD,
+            staging.path,
+            AT_FDCWD,
+            destination.path,
+            UInt32(RENAME_SWAP)
+        ) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        do {
+            try Self.syncDirectory(destination.deletingLastPathComponent())
+            try updateRef(for: manifest)
+        } catch {
+            _ = renameatx_np(
+                AT_FDCWD,
+                staging.path,
+                AT_FDCWD,
+                destination.path,
+                UInt32(RENAME_SWAP)
+            )
+            try? Self.syncDirectory(destination.deletingLastPathComponent())
+            throw error
+        }
+
+        let repository = try repositoryRoot(
+            provider: manifest.provider,
+            repoID: manifest.repoID
+        )
+        let trashRoot = repository.appendingPathComponent(".trash", isDirectory: true)
+        try? FileManager.default.createDirectory(
+            at: trashRoot,
+            withIntermediateDirectories: true
+        )
+        let trash = trashRoot.appendingPathComponent(
+            "\(manifest.commitSHA)-repair-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        if rename(staging.path, trash.path) == 0 {
+            try? Self.syncDirectory(staging.deletingLastPathComponent())
+            try? Self.syncDirectory(trashRoot)
+        }
         return destination
     }
 
@@ -352,7 +505,7 @@ public struct ModelDownloadStore: Sendable {
         }
     }
 
-    private static func syncDirectory(_ url: URL) throws {
+    static func syncDirectory(_ url: URL) throws {
         let descriptor = Darwin.open(url.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
         guard descriptor >= 0 else {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
