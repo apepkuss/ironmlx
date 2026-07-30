@@ -18,6 +18,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     private let restartCoordinator: BackendRestartCoordinator
     private let parameterStore: ModelParameterStore
     private let notificationCenter: NotificationCenter
+    private var huggingFaceSearchTask: Task<Void, Never>?
 
     public init(
         webView: WKWebView,
@@ -62,6 +63,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     }
 
     deinit {
+        huggingFaceSearchTask?.cancel()
         notificationCenter.removeObserver(self)
         let downloadService = downloadService
         Task {
@@ -95,6 +97,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         "downloadModel",
         "cancelModelDownload",
         "searchHF",
+        "cancelHFSearch",
         "scanLocalModels",
         "syncLoadedModels",
         "getAppLogs",
@@ -158,6 +161,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             cancelModelDownload(json: stringBody(body))
         case "searchHF":
             searchHuggingFace(json: stringBody(body))
+        case "cancelHFSearch":
+            cancelHuggingFaceSearch()
         case "scanLocalModels":
             sendScannedModels()
         case "syncLoadedModels":
@@ -515,19 +520,28 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         guard let data = json.data(using: .utf8),
               let payload = try? JSONDecoder().decode(HuggingFaceSearchPayload.self, from: data)
         else {
-            sendJavaScript("onSearchResults(\(Self.jsStringLiteral("[]")))")
             return
         }
 
-        Task {
+        cancelHuggingFaceSearch()
+        let downloadService = downloadService
+        let versionService = versionService
+        huggingFaceSearchTask = Task { [weak self] in
             do {
                 var results = try await downloadService.searchHuggingFace(
                     query: payload.query,
-                    sort: payload.sort
+                    sort: payload.sort,
+                    token: payload.token
                 )
+                try Task.checkCancellation()
+                guard let self else {
+                    return
+                }
                 let backendModels = await backendLoadedModels()
+                try Task.checkCancellation()
                 let loadedPaths = Set(backendModels.map(\.path))
                 for index in results.indices {
+                    try Task.checkCancellation()
                     let repoID = results[index].modelId ?? results[index].id
                     let local = versionService.searchLocalState(
                         provider: .huggingFace,
@@ -539,15 +553,44 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                     results[index].localCommitSHA = local.localCommitSHA
                 }
                 let json = (try? Self.jsonString(results)) ?? "[]"
-                await MainActor.run {
-                    self.sendJavaScript("onSearchResults(\(Self.jsStringLiteral(json)))")
-                }
+                try Task.checkCancellation()
+                self.sendJavaScript(
+                    "onSearchResults(\(payload.requestID), \(Self.jsStringLiteral(json)))"
+                )
             } catch {
-                await MainActor.run {
-                    self.sendJavaScript("onSearchResults(\(Self.jsStringLiteral("[]")))")
+                guard !Task.isCancelled else {
+                    return
                 }
+                let code: String?
+                if let resolutionError = error as? RepositoryResolutionError {
+                    switch resolutionError {
+                    case .notFound:
+                        code = "repo_not_found"
+                    case .invalidCommit, .incompleteMetadata:
+                        code = nil
+                    }
+                } else {
+                    code = nil
+                }
+                let result = ModelDownloadCompletion(
+                    success: false,
+                    message: nil,
+                    error: error.localizedDescription,
+                    code: code,
+                    repoID: payload.query
+                )
+                let json = (try? Self.jsonString(result))
+                    ?? #"{"success":false,"error":"HuggingFace search failed."}"#
+                self?.sendJavaScript(
+                    "onSearchError(\(payload.requestID), \(Self.jsStringLiteral(json)))"
+                )
             }
         }
+    }
+
+    private func cancelHuggingFaceSearch() {
+        huggingFaceSearchTask?.cancel()
+        huggingFaceSearchTask = nil
     }
 
     private func startModelScopeDownload(repoID: String, path: String) {
@@ -2033,6 +2076,15 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     private struct HuggingFaceSearchPayload: Decodable {
         var query: String
         var sort: String
+        var token: String?
+        var requestID: Int
+
+        enum CodingKeys: String, CodingKey {
+            case query
+            case sort
+            case token
+            case requestID = "request_id"
+        }
     }
 
     private struct ModelVersionRepositoryPayload: Decodable {

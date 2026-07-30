@@ -184,6 +184,7 @@ private let testCommit = String(repeating: "a", count: 40)
     #expect(DashboardBridge.handlerNames.contains("downloadModel"))
     #expect(DashboardBridge.handlerNames.contains("cancelModelDownload"))
     #expect(DashboardBridge.handlerNames.contains("searchHF"))
+    #expect(DashboardBridge.handlerNames.contains("cancelHFSearch"))
     #expect(DashboardBridge.handlerNames.contains("listModelVersions"))
     #expect(DashboardBridge.handlerNames.contains("activateModelVersion"))
     #expect(DashboardBridge.handlerNames.contains("deleteModelVersions"))
@@ -197,13 +198,18 @@ private let testCommit = String(repeating: "a", count: 40)
         """.utf8))
     let service = ModelDownloadService(rootURL: try temporaryDirectory(), httpClient: client)
 
-    let results = try await service.searchHuggingFace(query: "qwen", sort: "downloads")
+    let results = try await service.searchHuggingFace(
+        query: "qwen",
+        sort: "downloads",
+        token: "hf_search"
+    )
 
     #expect(results.map(\.id) == ["mlx-community/Qwen3-0.6B-4bit"])
     #expect(results.first?.sha == String(repeating: "a", count: 40))
     #expect(client.dataRequests == [
         "https://huggingface.co/api/models?search=qwen&sort=downloads&direction=-1&limit=20&filter=mlx&full=true",
     ])
+    #expect(client.dataAuthorizationHeaders == ["Bearer hf_search"])
 }
 
 @Test func huggingFaceSearchResolvesMissingCommitFromRepositoryDetails() async throws {
@@ -219,10 +225,78 @@ private let testCommit = String(repeating: "a", count: 40)
     """.utf8))
     let service = ModelDownloadService(rootURL: try temporaryDirectory(), httpClient: client)
 
-    let results = try await service.searchHuggingFace(query: "minicpm", sort: "downloads")
+    let results = try await service.searchHuggingFace(
+        query: "minicpm",
+        sort: "downloads",
+        token: nil
+    )
 
     #expect(results.first?.sha == testCommit)
     #expect(client.dataRequests == [searchURL, detailURL])
+}
+
+@Test func huggingFaceSearchPropagatesCancellationWhileResolvingMissingCommit() async throws {
+    let resolutionStarted = StreamingSignal()
+    let client = CancellableHuggingFaceSearchHTTPClient(
+        resolutionStarted: resolutionStarted
+    )
+    let service = ModelDownloadService(
+        rootURL: try temporaryDirectory(),
+        httpClient: client
+    )
+    let search = Task {
+        try await service.searchHuggingFace(
+            query: "minicpm",
+            sort: "downloads",
+            token: nil
+        )
+    }
+
+    await resolutionStarted.wait()
+    search.cancel()
+
+    await #expect(throws: CancellationError.self) {
+        _ = try await search.value
+    }
+}
+
+@Test func huggingFaceCanonicalRepoIDUsesExactResolutionWithoutFuzzySearch() async throws {
+    let client = FakeModelDownloadHTTPClient()
+    let repoID = "mlx-community/MiniCPM-V-4.6-bf16"
+    let detailURL = "https://huggingface.co/api/models/\(repoID)?blobs=true"
+    client.dataResponses[detailURL] = .success(Data("""
+    {"sha":"\(testCommit)","siblings":[]}
+    """.utf8))
+    let service = ModelDownloadService(rootURL: try temporaryDirectory(), httpClient: client)
+
+    let results = try await service.searchHuggingFace(
+        query: repoID,
+        sort: "downloads",
+        token: "hf_private"
+    )
+
+    #expect(results.map(\.id) == [repoID])
+    #expect(results.first?.sha == testCommit)
+    #expect(client.dataRequests == [detailURL])
+    #expect(client.dataAuthorizationHeaders == ["Bearer hf_private"])
+}
+
+@Test func huggingFaceCanonicalRepoIDFailureDoesNotFallBackToFuzzySearch() async throws {
+    let client = FakeModelDownloadHTTPClient()
+    let repoID = "mlx-community/Does-Not-Exist"
+    let detailURL = "https://huggingface.co/api/models/\(repoID)?blobs=true"
+    client.dataResponses[detailURL] = .failure(ModelDownloadHTTPError(statusCode: 404))
+    let service = ModelDownloadService(rootURL: try temporaryDirectory(), httpClient: client)
+
+    await #expect(throws: RepositoryResolutionError.self) {
+        _ = try await service.searchHuggingFace(
+            query: repoID,
+            sort: "downloads",
+            token: nil
+        )
+    }
+
+    #expect(client.dataRequests == [detailURL])
 }
 
 @Test func huggingFaceDownloadPinsCommitVerifiesAndAtomicallyPublishes() async throws {
@@ -636,12 +710,16 @@ private final class FakeModelDownloadHTTPClient: ModelDownloadHTTPClient, @unche
     var dataResponses: [String: Result<Data, Error>] = [:]
     var streamResponses: [String: StreamFixture] = [:]
     private(set) var dataRequests: [String] = []
+    private(set) var dataAuthorizationHeaders: [String?] = []
     private(set) var streamRequests: [RecordedStreamRequest] = []
     private let lock = NSLock()
 
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         let key = try requestKey(request)
-        lock.withLock { dataRequests.append(key) }
+        lock.withLock {
+            dataRequests.append(key)
+            dataAuthorizationHeaders.append(request.value(forHTTPHeaderField: "Authorization"))
+        }
         guard let result = lock.withLock({ dataResponses[key] }) else {
             throw URLError(.fileDoesNotExist)
         }
@@ -691,6 +769,47 @@ private final class FakeModelDownloadHTTPClient: ModelDownloadHTTPClient, @unche
             httpVersion: nil,
             headerFields: headers
         )!
+    }
+}
+
+private final class CancellableHuggingFaceSearchHTTPClient:
+    ModelDownloadHTTPClient,
+    @unchecked Sendable
+{
+    private let resolutionStarted: StreamingSignal
+
+    init(resolutionStarted: StreamingSignal) {
+        self.resolutionStarted = resolutionStarted
+    }
+
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: nil
+        )!
+        if request.url?.query?.contains("search=") == true {
+            return (
+                Data(
+                    #"[{"id":"mlx-community/MiniCPM-V-4.6-bf16","downloads":123}]"#
+                        .utf8
+                ),
+                response
+            )
+        }
+
+        await resolutionStarted.signal()
+        try await Task.sleep(nanoseconds: 30_000_000_000)
+        throw URLError(.timedOut)
+    }
+
+    func stream(
+        for _: URLRequest,
+        onResponse _: @escaping @Sendable (HTTPURLResponse) async throws -> Void,
+        onData _: @escaping @Sendable (Data) async throws -> Void
+    ) async throws {
+        throw URLError(.unsupportedURL)
     }
 }
 

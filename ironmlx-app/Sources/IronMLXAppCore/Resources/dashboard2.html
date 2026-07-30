@@ -227,6 +227,12 @@
     align-items: center;
   }
 
+  .field-label-with-help {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
   .profile-help-trigger {
     width: 18px;
     height: 18px;
@@ -1850,13 +1856,53 @@
     border-radius: var(--radius) var(--radius) 0 0;
   }
   @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-  .search-result-item {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 10px 0; border-bottom: 0.5px solid var(--border);
+  .search-result-entry {
+    border-bottom: 0.5px solid var(--border);
   }
-  .search-result-item:last-child { border-bottom: none; }
+  .search-result-entry:last-child {
+    border-bottom: none;
+  }
+  .search-result-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 0;
+  }
   .search-result-name { font-weight: 600; font-size: 13px; color: var(--text); }
   .search-result-meta { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
+  .hf-download-progress {
+    display: none;
+    margin: 0 0 10px;
+    padding: 12px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 12px;
+  }
+  #search-results > .hf-download-progress {
+    margin: 0 0 12px;
+  }
+  .hf-search-message {
+    padding: 16px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    text-align: center;
+  }
+  .hf-search-message.error {
+    color: var(--destructive);
+  }
+  .hf-search-controls {
+    flex-wrap: wrap;
+  }
+  .hf-search-query-field {
+    flex: 3 1 280px;
+  }
+  .hf-token-field {
+    flex: 1.5 1 190px;
+  }
+  .hf-search-sort-field {
+    flex: 1 1 140px;
+  }
   .search-result-dl {
     min-width: 82px;
     padding-inline: 14px;
@@ -2127,43 +2173,30 @@
       <div id="dl-panel-hf">
         <div class="card-settings">
           <div class="card-header">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="opacity:0.55;"><path d="M8 2v8M5 7l3 3 3-3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 11v2h10v-2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            <span data-i18n="dl_from_hf">Download from HuggingFace</span>
-          </div>
-          <div style="padding:16px 20px;">
-            <div class="dl-row">
-              <div class="dl-field" style="flex:3;">
-                <label data-i18n="repo_id">Repo ID</label>
-                <input type="text" placeholder="mlx-community/Qwen3-0.6B-4bit" id="dl-repo-id" autocapitalize="off" autocorrect="off">
-              </div>
-              <div class="dl-field" style="flex:1.5;">
-                <label>HF TOKEN <span style="color:var(--text-tertiary);font-weight:400;" data-i18n="optional">(optional)</span></label>
-                <input type="text" placeholder="hf_..." id="dl-hf-token" autocapitalize="off" autocorrect="off">
-              </div>
-              <button class="btn-accent hf-download-action" id="dl-download-btn" onclick="startDownload()"><svg class="download-button-icon" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M7 2v7M4.5 6.5L7 9l2.5-2.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/><path d="M2.5 9.5v2h9v-2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg><span data-i18n="download">Download</span></button>
-            </div>
-            <div id="dl-progress" style="display:none; margin-top:12px; padding:12px; background:var(--bg); border:1px solid var(--border); border-radius:8px; font-size:12px;">
-              <div style="display:flex; align-items:center; gap:8px;">
-                <span id="dl-progress-icon" style="animation:spin 1s linear infinite;">&#x21BB;</span>
-                <span id="dl-progress-text">Downloading...</span>
-              </div>
-              <div style="margin-top:8px; height:4px; background:var(--border); border-radius:2px; overflow:hidden;">
-                <div id="dl-progress-bar" style="height:100%; width:0%; background:var(--accent); border-radius:2px; transition:width 0.3s;"></div>
-              </div>
-            </div>
-          </div>
-        </div>
-        <div class="card-settings">
-          <div class="card-header">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="opacity:0.55;"><circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.3"/><line x1="10.5" y1="10.5" x2="14" y2="14" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
             <span data-i18n="search_hf">Search HuggingFace</span>
           </div>
           <div style="padding:16px 20px;">
-            <div class="dl-row">
-              <div class="dl-field" style="flex:3;">
+            <div class="dl-row hf-search-controls">
+              <div class="dl-field hf-search-query-field">
+                <label data-i18n="hf_model_query">Model name or repository ID</label>
                 <input type="text" data-i18n-placeholder="search_hf_placeholder" placeholder="Search models on HuggingFace..." id="search-hf-query" autocapitalize="off" autocorrect="off">
               </div>
-              <div class="dl-field" style="flex:1;min-width:120px;">
+              <div class="dl-field hf-token-field">
+                <div class="field-label-with-help">
+                  <label for="search-hf-token">HF TOKEN <span style="color:var(--text-tertiary);font-weight:400;" data-i18n="optional">(optional)</span></label>
+                  <span class="profile-help profile-help-fixed">
+                    <button type="button" class="profile-help-trigger" aria-describedby="hf-token-help-tooltip" aria-label="When is an HF token needed?">?</button>
+                    <span class="profile-help-tooltip profile-help-tooltip-fixed" id="hf-token-help-tooltip" role="tooltip">
+                      <span class="profile-help-tooltip-title" data-i18n="hf_token_help_title">When a token is needed</span>
+                      <span class="profile-help-tooltip-body" data-i18n="hf_token_help_body">Usually leave this blank. Enter a Hugging Face access token for private models, gated models whose license you have accepted, or when Hugging Face requires authentication. The token is used only for Hugging Face requests.</span>
+                    </span>
+                  </span>
+                </div>
+                <input type="text" placeholder="hf_..." id="search-hf-token" autocapitalize="off" autocorrect="off">
+              </div>
+              <div class="dl-field hf-search-sort-field">
+                <label data-i18n="sort_by">Sort by</label>
                 <select id="search-hf-sort">
                   <option value="trending" data-i18n="trending">Trending</option>
                   <option value="downloads" data-i18n="most_downloads" selected>Most Downloads</option>
@@ -2174,6 +2207,17 @@
               <button class="btn-accent" onclick="searchHuggingFace()"><svg width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="6" cy="6" r="4" stroke="white" stroke-width="1.3"/><line x1="9" y1="9" x2="12.5" y2="12.5" stroke="white" stroke-width="1.3" stroke-linecap="round"/></svg> <span data-i18n="search">Search</span></button>
             </div>
             <div id="search-results" style="margin-top:12px;"></div>
+            <div id="hf-progress-home">
+              <div id="dl-progress" class="hf-download-progress" role="status" aria-live="polite">
+                <div style="display:flex; align-items:center; gap:8px;">
+                  <span id="dl-progress-icon" style="animation:spin 1s linear infinite;">&#x21BB;</span>
+                  <span id="dl-progress-text">Downloading...</span>
+                </div>
+                <div style="margin-top:8px; height:4px; background:var(--border); border-radius:2px; overflow:hidden;">
+                  <div id="dl-progress-bar" style="height:100%; width:0%; background:var(--accent); border-radius:2px; transition:width 0.3s;"></div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -3148,7 +3192,8 @@
       verify_integrity: "Verify model integrity", delete_model: "Delete model", more_actions: "More actions", manage_versions: "Manage versions",
       model_versions_loading: "Loading versions…", model_versions_count: "{n} versions", reclaimable_space: "{size} reclaimable", current_version: "Current", loaded_version: "Loaded", verified_version: "Verified", unverified_version: "Unverified", corrupt_version: "Corrupt",
       activate_version: "Use this version", rollback_reload: "Roll back and reload", delete_version: "Delete version", cleanup_selected_versions: "Clean up selected versions", confirm_delete_versions: "Delete {n} selected versions and reclaim {size}? This cannot be undone.", version_activated: "Model version activated.", versions_deleted: "Selected model versions deleted.",
-      local_model_exists: "✓ Exists", local_model_update: "Download update", local_model_inactive: "Use local version", local_model_repair: "Repair download", local_model_identity_unavailable: "Version unavailable",
+      local_model_exists: "✓ Exists", local_model_completed: "✓ Completed", local_model_update: "Download update", local_model_inactive: "Use local version", local_model_repair: "Repair download", local_model_identity_unavailable: "Version unavailable",
+      hf_token_help_title: "When a token is needed", hf_token_help_body: "Usually leave this blank. Enter a Hugging Face access token for private models, gated models whose license you have accepted, or when Hugging Face requires authentication. The token is used only for Hugging Face requests.",
       integrity_verified_toast: "Model integrity verified.", integrity_corrupt_toast: "Integrity verification failed. This model is marked corrupt and cannot be loaded.",
       action_loading: "Loading...", action_unloading: "Unloading...", action_load_model_only: "Model only", action_load_mtp: "Model + MTP",
       pin_model_tooltip: "Pin loaded model: exempt from TTL auto-unload and automatic release policies. Manual unload is still available.",
@@ -3254,7 +3299,7 @@
       mem_warning: "Warning: Insufficient GPU memory.\n\nRequired: {required}\nAvailable: {available}\n\nLoading this model may cause performance issues or crashes.\n\nContinue anyway?",
       dl_from_hf: "Download from HuggingFace", repo_id: "Repo ID", optional: "(optional)", download: "Download",
       dl_from_ms: "Download from ModelScope", ms_repo_id: "Repo ID", ms_browse: "Browse models at",
-      search_hf: "Search HuggingFace", trending: "Trending", most_downloads: "Most Downloads", recently_created: "Recently Created", recently_updated: "Recently Updated", most_params: "Most Params", least_params: "Least Params", search: "Search",
+      search_hf: "Search HuggingFace", hf_model_query: "Model name or repository ID", search_hf_placeholder: "Enter a model name or organization/model", sort_by: "Sort by", trending: "Trending", most_downloads: "Most Downloads", recently_created: "Recently Created", recently_updated: "Recently Updated", most_params: "Most Params", least_params: "Least Params", search: "Search",
       model_param_settings: "Model Param Settings", context_size: "CONTEXT SIZE",
       single_request_max_tokens: "MAX TOKENS",
       model_alias: "Model Alias", model_type: "Model Type", auto_detect: "Auto Detect",
@@ -3432,7 +3477,8 @@
       verify_integrity: "验证模型完整性", delete_model: "删除模型", more_actions: "更多操作", manage_versions: "管理版本",
       model_versions_loading: "正在加载版本…", model_versions_count: "共 {n} 个版本", reclaimable_space: "可释放 {size}", current_version: "当前版本", loaded_version: "已加载", verified_version: "已验证", unverified_version: "未验证", corrupt_version: "已损坏",
       activate_version: "切换到此版本", rollback_reload: "回滚并重新加载", delete_version: "删除版本", cleanup_selected_versions: "清理所选版本", confirm_delete_versions: "确定删除所选 {n} 个版本并释放 {size}？此操作不可恢复。", version_activated: "模型版本已切换。", versions_deleted: "所选模型版本已删除。",
-      local_model_exists: "✓ 已存在", local_model_update: "下载新版本", local_model_inactive: "设为当前版本", local_model_repair: "修复下载", local_model_identity_unavailable: "版本身份无法确认",
+      local_model_exists: "✓ 已存在", local_model_completed: "✓ 已完成", local_model_update: "下载新版本", local_model_inactive: "设为当前版本", local_model_repair: "修复下载", local_model_identity_unavailable: "版本身份无法确认",
+      hf_token_help_title: "什么时候需要 Token", hf_token_help_body: "通常无需填写。下载私有模型、已在 Hugging Face 接受许可的受限模型，或 Hugging Face 要求身份验证时，请输入访问令牌。令牌仅用于 Hugging Face 请求。",
       integrity_verified_toast: "模型完整性验证成功。", integrity_corrupt_toast: "完整性验证失败；该模型已标记为损坏，后续加载将被拒绝。",
       action_loading: "加载中...", action_unloading: "卸载中...", action_load_model_only: "仅模型", action_load_mtp: "模型+MTP",
       pin_model_tooltip: "固定加载：不会被 TTL 自动卸载，也不会参与自动释放策略。仍可手动卸载。",
@@ -3538,7 +3584,7 @@
       mem_warning: "警告：GPU 内存不足。\n\n所需：{required}\n可用：{available}\n\n加载此模型可能导致性能问题或崩溃。\n\n是否继续？",
       dl_from_hf: "从 HuggingFace 下载", repo_id: "仓库 ID", optional: "（可选）", download: "下载",
       dl_from_ms: "从 ModelScope 下载", ms_repo_id: "仓库 ID", ms_browse: "浏览模型",
-      search_hf: "搜索 HuggingFace", trending: "热门趋势", most_downloads: "下载最多", recently_created: "最近创建", recently_updated: "最近更新", most_params: "参数最多", least_params: "参数最少", search: "搜索",
+      search_hf: "搜索 HuggingFace", hf_model_query: "模型名称或仓库 ID", search_hf_placeholder: "输入模型名称或组织/模型", sort_by: "排序方式", trending: "热门趋势", most_downloads: "下载最多", recently_created: "最近创建", recently_updated: "最近更新", most_params: "参数最多", least_params: "参数最少", search: "搜索",
       model_param_settings: "模型参数设置", context_size: "CONTEXT SIZE",
       single_request_max_tokens: "MAX TOKENS",
       model_alias: "模型别名", model_type: "模型类型", auto_detect: "自动检测",
@@ -3716,7 +3762,8 @@
       verify_integrity: "驗證模型完整性", delete_model: "刪除模型", more_actions: "更多操作", manage_versions: "管理版本",
       model_versions_loading: "正在載入版本…", model_versions_count: "共 {n} 個版本", reclaimable_space: "可釋放 {size}", current_version: "目前版本", loaded_version: "已載入", verified_version: "已驗證", unverified_version: "未驗證", corrupt_version: "已損壞",
       activate_version: "切換到此版本", rollback_reload: "回滾並重新載入", delete_version: "刪除版本", cleanup_selected_versions: "清理所選版本", confirm_delete_versions: "確定刪除所選 {n} 個版本並釋放 {size}？此操作無法復原。", version_activated: "模型版本已切換。", versions_deleted: "所選模型版本已刪除。",
-      local_model_exists: "✓ 已存在", local_model_update: "下載新版本", local_model_inactive: "設為目前版本", local_model_repair: "修復下載", local_model_identity_unavailable: "無法確認版本身分",
+      local_model_exists: "✓ 已存在", local_model_completed: "✓ 已完成", local_model_update: "下載新版本", local_model_inactive: "設為目前版本", local_model_repair: "修復下載", local_model_identity_unavailable: "無法確認版本身分",
+      hf_token_help_title: "何時需要 Token", hf_token_help_body: "通常無需填寫。下載私人模型、已在 Hugging Face 接受授權的受限模型，或 Hugging Face 要求驗證身分時，請輸入存取權杖。權杖僅用於 Hugging Face 請求。",
       integrity_verified_toast: "模型完整性驗證成功。", integrity_corrupt_toast: "完整性驗證失敗；此模型已標記為損壞，後續載入將被拒絕。",
       action_loading: "載入中...", action_unloading: "卸載中...", action_load_model_only: "僅模型", action_load_mtp: "模型+MTP",
       pin_model_tooltip: "固定載入：不會被 TTL 自動卸載，也不會參與自動釋放策略。仍可手動卸載。",
@@ -3805,7 +3852,7 @@
       mem_warning: "警告：GPU 記憶體不足。\n\n所需：{required}\n可用：{available}\n\n載入此模型可能導致效能問題或當機。\n\n是否繼續？",
       dl_from_hf: "從 HuggingFace 下載", repo_id: "倉庫 ID", optional: "（可選）", download: "下載",
       dl_from_ms: "從 ModelScope 下載", ms_repo_id: "倉庫 ID", ms_browse: "瀏覽模型",
-      search_hf: "搜尋 HuggingFace", trending: "熱門趨勢", most_downloads: "下載最多", recently_created: "最近建立", recently_updated: "最近更新", most_params: "參數最多", least_params: "參數最少", search: "搜尋",
+      search_hf: "搜尋 HuggingFace", hf_model_query: "模型名稱或儲存庫 ID", search_hf_placeholder: "輸入模型名稱或組織/模型", sort_by: "排序方式", trending: "熱門趨勢", most_downloads: "下載最多", recently_created: "最近建立", recently_updated: "最近更新", most_params: "參數最多", least_params: "參數最少", search: "搜尋",
       single_request_max_tokens: "MAX TOKENS",
       model_param_settings: "模型參數設定", context_size: "CONTEXT SIZE",
       model_alias: "模型別名", model_type: "模型類型", auto_detect: "自動偵測",
@@ -3983,7 +4030,8 @@
       verify_integrity: "モデルの整合性を検証", delete_model: "モデルを削除", more_actions: "その他の操作", manage_versions: "バージョン管理",
       model_versions_loading: "バージョンを読み込み中…", model_versions_count: "{n} バージョン", reclaimable_space: "{size} 解放可能", current_version: "現在", loaded_version: "ロード済み", verified_version: "検証済み", unverified_version: "未検証", corrupt_version: "破損",
       activate_version: "このバージョンを使用", rollback_reload: "ロールバックして再ロード", delete_version: "バージョンを削除", cleanup_selected_versions: "選択したバージョンを整理", confirm_delete_versions: "選択した {n} バージョンを削除して {size} 解放しますか？元に戻せません。", version_activated: "モデルバージョンを切り替えました。", versions_deleted: "選択したモデルバージョンを削除しました。",
-      local_model_exists: "✓ 既存", local_model_update: "新バージョンを取得", local_model_inactive: "ローカル版を使用", local_model_repair: "再ダウンロード", local_model_identity_unavailable: "バージョンを確認できません",
+      local_model_exists: "✓ 既存", local_model_completed: "✓ 完了", local_model_update: "新バージョンを取得", local_model_inactive: "ローカル版を使用", local_model_repair: "再ダウンロード", local_model_identity_unavailable: "バージョンを確認できません",
+      hf_token_help_title: "Token が必要な場合", hf_token_help_body: "通常は空欄のままで構いません。非公開モデル、Hugging Face でライセンスに同意済みのアクセス制限モデル、または認証を求められた場合は、Hugging Face アクセストークンを入力してください。Token は Hugging Face へのリクエストにのみ使用されます。",
       integrity_verified_toast: "モデルの整合性を確認しました。", integrity_corrupt_toast: "整合性検証に失敗しました。このモデルは破損としてマークされ、ロードできません。",
       action_loading: "ロード中...", action_unloading: "アンロード中...", action_load_model_only: "モデルのみ", action_load_mtp: "モデル+MTP",
       pin_model_tooltip: "固定ロード：TTL 自動アンロードや自動解放の対象外になります。手動アンロードは引き続き可能です。",
@@ -4072,7 +4120,7 @@
       mem_warning: "警告：GPU メモリが不足しています。\n\n必要：{required}\n利用可能：{available}\n\nこのモデルをロードするとパフォーマンスの問題やクラッシュが発生する可能性があります。\n\n続行しますか？",
       dl_from_hf: "HuggingFace からダウンロード", repo_id: "リポジトリ ID", optional: "（任意）", download: "ダウンロード",
       dl_from_ms: "ModelScope からダウンロード", ms_repo_id: "リポジトリ ID", ms_browse: "モデルを閲覧",
-      search_hf: "HuggingFace を検索", trending: "トレンド", most_downloads: "ダウンロード数順", recently_created: "最近作成順", recently_updated: "最近更新順", most_params: "パラメータ数順(多)", least_params: "パラメータ数順(少)", search: "検索",
+      search_hf: "HuggingFace を検索", hf_model_query: "モデル名またはリポジトリ ID", search_hf_placeholder: "モデル名または組織/モデルを入力", sort_by: "並び順", trending: "トレンド", most_downloads: "ダウンロード数順", recently_created: "最近作成順", recently_updated: "最近更新順", most_params: "パラメータ数順(多)", least_params: "パラメータ数順(少)", search: "検索",
       single_request_max_tokens: "MAX TOKENS",
       model_param_settings: "モデルパラメータ設定", context_size: "CONTEXT SIZE",
       model_alias: "モデルエイリアス", model_type: "モデルタイプ", auto_detect: "自動検出",
@@ -4250,7 +4298,8 @@
       verify_integrity: "모델 무결성 확인", delete_model: "모델 삭제", more_actions: "추가 작업", manage_versions: "버전 관리",
       model_versions_loading: "버전을 불러오는 중…", model_versions_count: "{n}개 버전", reclaimable_space: "{size} 확보 가능", current_version: "현재", loaded_version: "로드됨", verified_version: "검증됨", unverified_version: "미검증", corrupt_version: "손상됨",
       activate_version: "이 버전 사용", rollback_reload: "롤백 후 다시 로드", delete_version: "버전 삭제", cleanup_selected_versions: "선택한 버전 정리", confirm_delete_versions: "선택한 {n}개 버전을 삭제하고 {size}를 확보하시겠습니까? 되돌릴 수 없습니다.", version_activated: "모델 버전을 전환했습니다.", versions_deleted: "선택한 모델 버전을 삭제했습니다.",
-      local_model_exists: "✓ 존재함", local_model_update: "새 버전 다운로드", local_model_inactive: "로컬 버전 사용", local_model_repair: "다시 다운로드", local_model_identity_unavailable: "버전을 확인할 수 없음",
+      local_model_exists: "✓ 존재함", local_model_completed: "✓ 완료", local_model_update: "새 버전 다운로드", local_model_inactive: "로컬 버전 사용", local_model_repair: "다시 다운로드", local_model_identity_unavailable: "버전을 확인할 수 없음",
+      hf_token_help_title: "Token이 필요한 경우", hf_token_help_body: "일반적으로 비워 두어도 됩니다. 비공개 모델, Hugging Face에서 라이선스에 동의한 접근 제한 모델 또는 인증이 필요한 경우 Hugging Face 액세스 토큰을 입력하세요. Token은 Hugging Face 요청에만 사용됩니다.",
       integrity_verified_toast: "모델 무결성을 확인했습니다.", integrity_corrupt_toast: "무결성 확인에 실패했습니다. 이 모델은 손상됨으로 표시되어 로드할 수 없습니다.",
       action_loading: "로딩 중...", action_unloading: "언로드 중...", action_load_model_only: "모델만", action_load_mtp: "모델+MTP",
       pin_model_tooltip: "고정 로드: TTL 자동 언로드와 자동 해제 정책에서 제외됩니다. 수동 언로드는 계속 사용할 수 있습니다.",
@@ -4339,7 +4388,7 @@
       mem_warning: "경고: GPU 메모리가 부족합니다.\n\n필요: {required}\n사용 가능: {available}\n\n이 모델을 로드하면 성능 문제나 충돌이 발생할 수 있습니다.\n\n계속하시겠습니까?",
       dl_from_hf: "HuggingFace에서 다운로드", repo_id: "저장소 ID", optional: "(선택 사항)", download: "다운로드",
       dl_from_ms: "ModelScope에서 다운로드", ms_repo_id: "저장소 ID", ms_browse: "모델 찾아보기",
-      search_hf: "HuggingFace 검색", trending: "인기 트렌드", most_downloads: "다운로드순", recently_created: "최근 생성순", recently_updated: "최근 업데이트순", most_params: "매개변수 많은순", least_params: "매개변수 적은순", search: "검색",
+      search_hf: "HuggingFace 검색", hf_model_query: "모델 이름 또는 저장소 ID", search_hf_placeholder: "모델 이름 또는 조직/모델 입력", sort_by: "정렬 방식", trending: "인기 트렌드", most_downloads: "다운로드순", recently_created: "최근 생성순", recently_updated: "최근 업데이트순", most_params: "매개변수 많은순", least_params: "매개변수 적은순", search: "검색",
       single_request_max_tokens: "MAX TOKENS",
       model_param_settings: "모델 매개변수 설정", context_size: "CONTEXT SIZE",
       model_alias: "모델 별칭", model_type: "모델 유형", auto_detect: "자동 감지",
@@ -4471,6 +4520,10 @@
       const key = el.dataset.i18n;
       if (dict[key]) el.textContent = dict[key];
     });
+    document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
+      const key = el.dataset.i18nPlaceholder;
+      if (dict[key]) el.setAttribute('placeholder', dict[key]);
+    });
     // Settings subtitle with inline badge
     const sub = document.getElementById('settings-subtitle');
     if (sub && dict.settings_subtitle_html) {
@@ -4517,6 +4570,7 @@
       showToast(t('bench_locked_navigation', 'Benchmark is running. Stay on the Benchmark page until it finishes.'), 'info');
       return;
     }
+    if (page !== 'models') clearCompletedHuggingFaceSearchState();
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
     const navItem = document.querySelector('.nav-item[data-page="' + page + '"]');
@@ -4558,6 +4612,7 @@
   function switchToTab(tabName) {
     const parent = document.getElementById('page-models');
     if (!parent) return;
+    if (tabName !== 'models-download') clearCompletedHuggingFaceSearchState();
     parent.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
     parent.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
     const btn = parent.querySelector('.tab-btn[data-tab="' + tabName + '"]');
@@ -5143,6 +5198,7 @@
 
   // ── Download Source Tab Switching ──
   function switchDlSource(source) {
+    if (source !== 'hf') clearCompletedHuggingFaceSearchState();
     document.getElementById('dl-panel-hf').style.display = source === 'hf' ? '' : 'none';
     document.getElementById('dl-panel-ms').style.display = source === 'ms' ? '' : 'none';
     const tabHf = document.getElementById('dl-tab-hf');
@@ -5173,20 +5229,17 @@
     apiPost('/admin/api/models/ms/download', { repo_id: repoId });
   }
 
-  function startDownload() {
+  function startDownload(repoId) {
     const dict = I18N[currentLang] || I18N.en;
-    const btn = document.getElementById('dl-download-btn');
-    if (btn.disabled) {
-      showToast(dict.download_in_progress || 'A HuggingFace download is already in progress.', 'info');
-      return;
-    }
-    const repoId = document.getElementById('dl-repo-id').value.trim();
     if (!repoId) { showToast(dict.enter_repo_id || 'Please enter a Repo ID.', 'info'); return; }
-    const token = document.getElementById('dl-hf-token').value.trim();
+    const token = document.getElementById('search-hf-token').value.trim();
     const progress = document.getElementById('dl-progress');
-    btn.disabled = true;
-    btn.style.opacity = '0.6';
+    clearTimeout(window.__HF_DL_RESET__);
+    huggingFaceProgressRepoId = repoId;
+    attachHuggingFaceDownloadProgress();
     progress.style.display = 'block';
+    document.getElementById('dl-progress-icon').style.animation = 'spin 1s linear infinite';
+    document.getElementById('dl-progress-icon').textContent = '↻';
     {
       const dict = I18N[currentLang] || I18N.en;
       const startMsg = (dict.model_downloading_start || 'Downloading {name}...').replace('{name}', repoId);
@@ -5212,16 +5265,84 @@
 
   let activeHuggingFaceSearchRepoId = null;
   let activeHuggingFaceSearchButton = null;
+  let completedHuggingFaceSearchRepoId = null;
+  let huggingFaceProgressRepoId = null;
+  let nextHuggingFaceSearchRequestId = 0;
+  let activeHuggingFaceSearchRequestId = null;
+  let huggingFaceSearchDebounceTimer = null;
+  let huggingFaceSearchIsComposing = false;
+  let activeHuggingFaceSearchShowsErrorToast = true;
+  const HUGGING_FACE_SEARCH_DEBOUNCE_MS = 600;
+  const HUGGING_FACE_SEARCH_MIN_CHARACTERS = 2;
+
+  function huggingFaceSearchResultEntry(repoId) {
+    return Array.from(document.querySelectorAll('.search-result-entry')).find(entry => {
+      return entry.dataset.repoId === repoId;
+    }) || null;
+  }
+
+  function parkHuggingFaceDownloadProgress() {
+    const home = document.getElementById('hf-progress-home');
+    const progress = document.getElementById('dl-progress');
+    if (home && progress && progress.parentElement !== home) {
+      home.appendChild(progress);
+    }
+  }
+
+  function attachHuggingFaceDownloadProgress() {
+    const progress = document.getElementById('dl-progress');
+    const results = document.getElementById('search-results');
+    if (!progress || !results || !huggingFaceProgressRepoId) return;
+    const query = document.getElementById('search-hf-query');
+    if (!query || !query.value.trim()) {
+      parkHuggingFaceDownloadProgress();
+      return;
+    }
+    const entry = huggingFaceSearchResultEntry(huggingFaceProgressRepoId);
+    if (entry) {
+      entry.appendChild(progress);
+    } else {
+      results.prepend(progress);
+    }
+  }
+
+  function setSearchResultCompletedState(button, completed) {
+    if (!button) return;
+    const icon = button.querySelector('.download-button-icon');
+    button.dataset.sessionCompleted = completed ? 'true' : 'false';
+    if (icon) icon.style.display = completed ? 'none' : '';
+    setSearchResultDownloadState(button, false);
+  }
+
+  function clearCompletedHuggingFaceSearchState() {
+    if (!completedHuggingFaceSearchRepoId) return;
+    const completedRepoId = completedHuggingFaceSearchRepoId;
+    completedHuggingFaceSearchRepoId = null;
+    const entry = huggingFaceSearchResultEntry(completedRepoId);
+    setSearchResultCompletedState(
+      entry && entry.querySelector('.search-result-dl'),
+      false
+    );
+    if (!activeHuggingFaceSearchRepoId && huggingFaceProgressRepoId === completedRepoId) {
+      clearTimeout(window.__HF_DL_RESET__);
+      document.getElementById('dl-progress').style.display = 'none';
+      huggingFaceProgressRepoId = null;
+      parkHuggingFaceDownloadProgress();
+    }
+  }
 
   function setSearchResultDownloadState(button, downloading) {
     if (!button) return;
     const dict = I18N[currentLang] || I18N.en;
     const label = button.querySelector('span');
-    button.disabled = downloading || button.dataset.idleDisabled === 'true';
+    const completed = button.dataset.sessionCompleted === 'true';
+    button.disabled = downloading || completed || button.dataset.idleDisabled === 'true';
     if (label) {
       label.textContent = downloading
         ? (dict.download_btn_downloading || 'Downloading...')
-        : (button.dataset.idleLabel || dict.download || 'Download');
+        : completed
+          ? (dict.local_model_completed || '✓ Completed')
+          : (button.dataset.idleLabel || dict.download || 'Download');
     }
   }
 
@@ -5237,24 +5358,27 @@
   function onDownloadComplete(jsonStr) {
     let result = {};
     try { result = JSON.parse(jsonStr); } catch(e) {}
-    const btn = document.getElementById('dl-download-btn');
     const progress = document.getElementById('dl-progress');
-    btn.disabled = false;
-    btn.style.opacity = '1';
+    const repoId = result.repo_id || activeHuggingFaceSearchRepoId || '';
+    const completedButton = activeHuggingFaceSearchButton;
     finishSearchResultDownloadState();
     if (result.success) {
+      const dict = I18N[currentLang] || I18N.en;
+      completedHuggingFaceSearchRepoId = repoId;
+      huggingFaceProgressRepoId = repoId;
+      if (completedButton) {
+        completedButton.dataset.idleLabel = dict.local_model_exists || '✓ Exists';
+        completedButton.dataset.idleDisabled = 'true';
+      }
+      setSearchResultCompletedState(completedButton, true);
+      attachHuggingFaceDownloadProgress();
       document.getElementById('dl-progress-bar').style.width = '100%';
       document.getElementById('dl-progress-icon').style.animation = 'none';
       document.getElementById('dl-progress-icon').textContent = '✓';
-      const dict = I18N[currentLang] || I18N.en;
-      const repoId = document.getElementById('dl-repo-id').value.trim();
       const localized = (dict.model_download_complete || 'Model "{name}" downloaded successfully.').replace('{name}', repoId);
       document.getElementById('dl-progress-text').textContent = localized;
       // Refresh model list
       syncModelList();
-      if (document.getElementById('search-hf-query').value.trim()) {
-        searchHuggingFace();
-      }
       // Auto-hide the progress card after a short success-dwell so
       // the section goes back to its default "empty & ready for
       // next download" state. A previous download's repo id and
@@ -5265,7 +5389,10 @@
         document.getElementById('dl-progress-bar').style.width = '0%';
         document.getElementById('dl-progress-icon').style.animation = 'spin 1s linear infinite';
         document.getElementById('dl-progress-icon').textContent = '↻';
-        document.getElementById('dl-repo-id').value = '';
+        if (huggingFaceProgressRepoId === repoId) {
+          huggingFaceProgressRepoId = null;
+          parkHuggingFaceDownloadProgress();
+        }
       }, 10000);
     } else {
       const dict = I18N[currentLang] || I18N.en;
@@ -5280,9 +5407,11 @@
       // Legacy "already exists" uses its own dedicated i18n key and
       // toast layout. Preserve that flow.
       if ((result.error || '').includes('already exists')) {
-        const msg = (dict.model_exists_locally || 'Model "{name}" already exists locally.').replace('{name}', document.getElementById('dl-repo-id').value.trim());
+        const msg = (dict.model_exists_locally || 'Model "{name}" already exists locally.').replace('{name}', repoId);
         showToast(msg, 'warn');
         progress.style.display = 'none';
+        huggingFaceProgressRepoId = null;
+        parkHuggingFaceDownloadProgress();
       } else {
         document.getElementById('dl-progress-icon').style.animation = 'none';
         document.getElementById('dl-progress-icon').textContent = '✗';
@@ -5294,31 +5423,99 @@
   }
 
   // ── HuggingFace Search ──
-  function searchHuggingFace() {
+  function cancelActiveHuggingFaceSearch() {
+    if (activeHuggingFaceSearchRequestId === null) return;
+    activeHuggingFaceSearchRequestId = null;
+    const handler = window.webkit && window.webkit.messageHandlers
+      && window.webkit.messageHandlers.cancelHFSearch;
+    if (handler) handler.postMessage('');
+  }
+
+  function clearHuggingFaceSearchDebounce() {
+    if (huggingFaceSearchDebounceTimer === null) return;
+    clearTimeout(huggingFaceSearchDebounceTimer);
+    huggingFaceSearchDebounceTimer = null;
+  }
+
+  function clearHuggingFaceSearchResults() {
+    clearCompletedHuggingFaceSearchState();
+    parkHuggingFaceDownloadProgress();
+    document.getElementById('search-results').replaceChildren();
+  }
+
+  function huggingFaceSearchQueryLength(query) {
+    return Array.from(query).length;
+  }
+
+  function onHuggingFaceQueryInput() {
+    clearHuggingFaceSearchDebounce();
+    cancelActiveHuggingFaceSearch();
     const query = document.getElementById('search-hf-query').value.trim();
-    if (!query) return;
+    clearHuggingFaceSearchResults();
+    if (
+      !query
+      || huggingFaceSearchIsComposing
+      || huggingFaceSearchQueryLength(query) < HUGGING_FACE_SEARCH_MIN_CHARACTERS
+    ) {
+      return;
+    }
+    huggingFaceSearchDebounceTimer = setTimeout(function() {
+      huggingFaceSearchDebounceTimer = null;
+      searchHuggingFace(true);
+    }, HUGGING_FACE_SEARCH_DEBOUNCE_MS);
+  }
+
+  function searchHuggingFace(automatic = false) {
+    clearHuggingFaceSearchDebounce();
+    const query = document.getElementById('search-hf-query').value.trim();
+    if (
+      !query
+      || huggingFaceSearchQueryLength(query) < HUGGING_FACE_SEARCH_MIN_CHARACTERS
+    ) {
+      cancelActiveHuggingFaceSearch();
+      clearHuggingFaceSearchResults();
+      return;
+    }
+    cancelActiveHuggingFaceSearch();
+    clearCompletedHuggingFaceSearchState();
     const sort = document.getElementById('search-hf-sort').value;
+    const token = document.getElementById('search-hf-token').value.trim();
     const resultsDiv = document.getElementById('search-results');
+    parkHuggingFaceDownloadProgress();
     resultsDiv.innerHTML = '<div style="text-align:center;padding:16px;color:var(--text-secondary);font-size:12px;">Searching...</div>';
-    const payload = JSON.stringify({ query: query, sort: sort });
+    attachHuggingFaceDownloadProgress();
+    const requestId = ++nextHuggingFaceSearchRequestId;
+    activeHuggingFaceSearchRequestId = requestId;
+    activeHuggingFaceSearchShowsErrorToast = !automatic;
+    const payload = JSON.stringify({
+      query: query,
+      sort: sort,
+      token: token || null,
+      request_id: requestId
+    });
     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.searchHF) {
       window.webkit.messageHandlers.searchHF.postMessage(payload);
     }
   }
 
-  function onSearchResults(jsonStr) {
+  function onSearchResults(requestId, jsonStr) {
+    if (requestId !== activeHuggingFaceSearchRequestId) return;
+    activeHuggingFaceSearchRequestId = null;
     let models = [];
     try { models = JSON.parse(jsonStr); } catch(e) {}
     const resultsDiv = document.getElementById('search-results');
     const dict = I18N[currentLang] || I18N.en;
+    parkHuggingFaceDownloadProgress();
     if (!models.length) {
       resultsDiv.innerHTML = '<div style="text-align:center;padding:16px;color:var(--text-secondary);font-size:12px;">No results found.</div>';
+      attachHuggingFaceDownloadProgress();
       return;
     }
     let html = '';
     models.forEach(function(m) {
       const repoId = m.id || m.modelId || '';
       const isDownloading = repoId === activeHuggingFaceSearchRepoId;
+      const isCompleted = repoId === completedHuggingFaceSearchRepoId;
       const localState = m.local_state || 'available';
       const stateLabels = {
         exists: dict.local_model_exists || '✓ Exists',
@@ -5330,47 +5527,69 @@
       };
       const idleLabel = stateLabels[localState] || stateLabels.available;
       const idleDisabled = localState === 'exists' || localState === 'identity_unavailable';
-      const actionIcon = localState === 'exists'
+      const actionIcon = localState === 'exists' || isCompleted
         ? ''
         : '<svg class="download-button-icon" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M7 2v7M4.5 6.5L7 9l2.5-2.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/><path d="M2.5 9.5v2h9v-2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-      const downloads = m.downloads ? m.downloads.toLocaleString() : '0';
-      const likes = m.likes || 0;
-      html += '<div class="search-result-item">'
+      const metadata = [];
+      if (Number.isFinite(m.downloads)) metadata.push('↓ ' + m.downloads.toLocaleString());
+      if (Number.isFinite(m.likes)) metadata.push('♥ ' + m.likes.toLocaleString());
+      if (m.pipeline_tag) metadata.push(m.pipeline_tag);
+      html += '<div class="search-result-entry" data-repo-id="' + escapeAttr(repoId) + '">'
+        + '<div class="search-result-item">'
         + '<div><div class="search-result-name">' + repoId + '</div>'
-        + '<div class="search-result-meta">↓ ' + downloads + ' · ♥ ' + likes + (m.pipeline_tag ? ' · ' + m.pipeline_tag : '') + '</div></div>'
+        + (metadata.length ? '<div class="search-result-meta">' + metadata.join(' · ') + '</div>' : '') + '</div>'
         + '<button class="btn-accent hf-download-action search-result-dl"'
-        + ((isDownloading || idleDisabled) ? ' disabled' : '')
-        + ' data-idle-label="' + escapeAttr(idleLabel) + '" data-idle-disabled="' + (idleDisabled ? 'true' : 'false') + '"'
+        + ((isDownloading || isCompleted || idleDisabled) ? ' disabled' : '')
+        + ' data-idle-label="' + escapeAttr(idleLabel) + '" data-idle-disabled="' + (idleDisabled ? 'true' : 'false') + '" data-session-completed="' + (isCompleted ? 'true' : 'false') + '"'
         + ' onclick="handleSearchResultAction(\'' + repoId.replace(/'/g, "\\'") + '\', \'' + localState + '\', \'' + escapeAttr(m.sha || '') + '\', this)">'
         + actionIcon
-        + '<span>' + (isDownloading ? (dict.download_btn_downloading || 'Downloading...') : idleLabel) + '</span></button>'
-        + '</div>';
+        + '<span>' + (isDownloading
+          ? (dict.download_btn_downloading || 'Downloading...')
+          : isCompleted
+            ? (dict.local_model_completed || '✓ Completed')
+            : idleLabel) + '</span></button>'
+        + '</div></div>';
     });
     resultsDiv.innerHTML = html;
     if (activeHuggingFaceSearchRepoId) {
-      activeHuggingFaceSearchButton = resultsDiv.querySelector('.search-result-dl:disabled')
+      const activeEntry = huggingFaceSearchResultEntry(activeHuggingFaceSearchRepoId);
+      activeHuggingFaceSearchButton = (activeEntry && activeEntry.querySelector('.search-result-dl'))
         || activeHuggingFaceSearchButton;
     }
+    attachHuggingFaceDownloadProgress();
   }
 
-  function fillRepoId(repoId) {
-    document.getElementById('dl-repo-id').value = repoId;
-    // Switch to download section focus
-    document.getElementById('dl-repo-id').scrollIntoView({ behavior: 'smooth' });
+  function onSearchError(requestId, jsonStr) {
+    if (requestId !== activeHuggingFaceSearchRequestId) return;
+    const showErrorToast = activeHuggingFaceSearchShowsErrorToast;
+    activeHuggingFaceSearchRequestId = null;
+    let result = {};
+    try { result = JSON.parse(jsonStr); } catch(e) {}
+    const dict = I18N[currentLang] || I18N.en;
+    const message = result.code
+      ? localizeErrorResult(result)
+      : (result.error || dict.download_generic_failed || 'HuggingFace search failed.');
+    const resultsDiv = document.getElementById('search-results');
+    parkHuggingFaceDownloadProgress();
+    const error = document.createElement('div');
+    error.className = 'hf-search-message error';
+    error.textContent = message;
+    resultsDiv.replaceChildren(error);
+    attachHuggingFaceDownloadProgress();
+    if (showErrorToast) showToast(message, 'warn');
   }
 
   function downloadSearchResult(repoId, button) {
-    const btn = document.getElementById('dl-download-btn');
-    if (btn.disabled) {
+    if (activeHuggingFaceSearchRepoId) {
       const dict = I18N[currentLang] || I18N.en;
       showToast(dict.download_in_progress || 'A HuggingFace download is already in progress.', 'info');
       return;
     }
+    clearCompletedHuggingFaceSearchState();
     activeHuggingFaceSearchRepoId = repoId;
     activeHuggingFaceSearchButton = button;
     setSearchResultDownloadState(button, true);
-    fillRepoId(repoId);
-    startDownload();
+    startDownload(repoId);
   }
 
   function handleSearchResultAction(repoId, localState, commitSHA, button) {
@@ -5389,6 +5608,29 @@
     }
     downloadSearchResult(repoId, button);
   }
+
+  const huggingFaceSearchQueryInput = document.getElementById('search-hf-query');
+  huggingFaceSearchQueryInput.addEventListener('input', onHuggingFaceQueryInput);
+  huggingFaceSearchQueryInput.addEventListener('compositionstart', function() {
+    huggingFaceSearchIsComposing = true;
+    clearHuggingFaceSearchDebounce();
+    cancelActiveHuggingFaceSearch();
+  });
+  huggingFaceSearchQueryInput.addEventListener('compositionend', function() {
+    huggingFaceSearchIsComposing = false;
+    onHuggingFaceQueryInput();
+  });
+  huggingFaceSearchQueryInput.addEventListener('keydown', function(event) {
+    if (event.key !== 'Enter' || event.isComposing || huggingFaceSearchIsComposing) return;
+    event.preventDefault();
+    searchHuggingFace(false);
+  });
+  document.getElementById('search-hf-sort').addEventListener('change', function() {
+    const query = huggingFaceSearchQueryInput.value.trim();
+    if (huggingFaceSearchQueryLength(query) >= HUGGING_FACE_SEARCH_MIN_CHARACTERS) {
+      searchHuggingFace(false);
+    }
+  });
 
   document.getElementById('model-params-modal').addEventListener('click', function(e) {
     if (e.target === this) closeParamsModal();

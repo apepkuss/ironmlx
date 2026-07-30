@@ -362,7 +362,32 @@ public actor ModelDownloadService {
         }
     }
 
-    public func searchHuggingFace(query: String, sort: String) async throws -> [HuggingFaceSearchResult] {
+    public func searchHuggingFace(
+        query: String,
+        sort: String,
+        token: String?
+    ) async throws -> [HuggingFaceSearchResult] {
+        let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if Self.isCanonicalHuggingFaceRepoID(normalizedQuery) {
+            let repository = try await resolver.resolve(
+                provider: .huggingFace,
+                repoID: normalizedQuery,
+                token: token
+            )
+            return [
+                HuggingFaceSearchResult(
+                    id: repository.repoID,
+                    modelId: repository.repoID,
+                    sha: repository.commitSHA,
+                    downloads: nil,
+                    likes: nil,
+                    pipelineTag: nil,
+                    localState: nil,
+                    localCommitSHA: nil
+                ),
+            ]
+        }
+
         var components = URLComponents(
             url: huggingFaceEndpoint
                 .appendingPathComponent("api")
@@ -370,7 +395,7 @@ public actor ModelDownloadService {
             resolvingAgainstBaseURL: false
         )
         components?.queryItems = [
-            URLQueryItem(name: "search", value: query),
+            URLQueryItem(name: "search", value: normalizedQuery),
             URLQueryItem(name: "sort", value: sort),
             URLQueryItem(name: "direction", value: "-1"),
             URLQueryItem(name: "limit", value: "20"),
@@ -380,24 +405,41 @@ public actor ModelDownloadService {
         guard let url = components?.url else {
             throw URLError(.badURL)
         }
-        let (data, _) = try await httpClient.data(for: URLRequest(url: url))
+        var request = URLRequest(url: url)
+        Self.applyHuggingFaceToken(token, to: &request)
+        let (data, _) = try await httpClient.data(for: request)
         var results = try JSONDecoder().decode([HuggingFaceSearchResult].self, from: data)
         for index in results.indices
             where results[index].sha.map(ModelSnapshotVerifier.isCommitSHA) != true
         {
+            try Task.checkCancellation()
             let repoID = results[index].modelId ?? results[index].id
-            guard
-                let repository = try? await resolver.resolve(
+            do {
+                let repository = try await resolver.resolve(
                     provider: .huggingFace,
                     repoID: repoID,
-                    token: nil
+                    token: token
                 )
-            else {
+                results[index].sha = repository.commitSHA
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
                 continue
             }
-            results[index].sha = repository.commitSHA
         }
+        try Task.checkCancellation()
         return results
+    }
+
+    public nonisolated static func isCanonicalHuggingFaceRepoID(_ value: String) -> Bool {
+        let components = value.split(separator: "/", omittingEmptySubsequences: false)
+        guard components.count == 2 else {
+            return false
+        }
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "._-"))
+        return components.allSatisfy { component in
+            !component.isEmpty && component.unicodeScalars.allSatisfy(allowed.contains)
+        }
     }
 
     public func downloadHuggingFace(
@@ -1263,6 +1305,18 @@ public actor ModelDownloadService {
 
     private static func taskKey(provider: ModelRepositoryProvider, repoID: String) -> String {
         "\(provider.rawValue):\(repoID)"
+    }
+
+    private nonisolated static func applyHuggingFaceToken(
+        _ token: String?,
+        to request: inout URLRequest
+    ) {
+        guard let token = token?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !token.isEmpty
+        else {
+            return
+        }
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
     }
 
     private static func status(from journal: ModelDownloadJournal) -> ModelDownloadStatus {
