@@ -456,15 +456,43 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(dashboardHTML(html, contains: #"class="models-page-header""#))
     #expect(dashboardHTML(
         html,
-        contains: #"class="models-page-scroll model-manager-active""#
+        contains: #"class="models-page-scroll page-body-scroll model-manager-active""#
     ))
-    #expect(dashboardHTML(html, contains: #".content.models-page-active {"#))
-    #expect(dashboardHTML(html, contains: #"#page-models.active {"#))
+    #expect(dashboardHTML(html, contains: #".content.page-scroll-managed {"#))
+    #expect(dashboardHTML(html, contains: #"#page-models.active,"#))
     #expect(dashboardHTML(html, contains: #"#page-models > .tab-bar {"#))
     #expect(dashboardHTML(html, contains: #"overflow-y: hidden;"#))
     #expect(dashboardHTML(html, contains: #"overflow-y: auto;"#))
-    #expect(dashboardHTML(html, contains: #"content.classList.toggle('models-page-active', page === 'models')"#))
+    #expect(dashboardHTML(
+        html,
+        contains: #"content.classList.toggle('page-scroll-managed', page === 'models' || page === 'settings')"#
+    ))
     #expect(dashboardHTML(html, contains: #"scrollContainer.scrollTop = 0"#))
+}
+
+@Test func dashboardSettingsPageKeepsHeaderFixedAboveAnIndependentScroller() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(html, contains: #"class="settings-page-header""#))
+    #expect(dashboardHTML(
+        html,
+        contains: #"class="settings-page-scroll page-body-scroll""#
+    ))
+    #expect(dashboardHTML(html, contains: #"#page-settings.active {"#))
+    #expect(dashboardHTML(html, contains: #".settings-page-header,"#))
+    #expect(dashboardHTML(html, contains: #".page-body-scroll {"#))
+    #expect(dashboardHTML(
+        html,
+        contains: #"content.classList.toggle('page-scroll-managed', page === 'models' || page === 'settings')"#
+    ))
+    #expect(dashboardHTML(
+        html,
+        contains: #"const pageScroll = pageEl && pageEl.querySelector('.page-body-scroll')"#
+    ))
+    #expect(dashboardHTML(html, contains: #"if (pageScroll) pageScroll.scrollTop = 0"#))
 }
 
 @Test func dashboardSchedulerProfileUsesItsOwnModelsTab() throws {
@@ -498,7 +526,7 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
 
     #expect(dashboardHTML(
         html,
-        contains: #"class="models-page-scroll model-manager-active""#
+        contains: #"class="models-page-scroll page-body-scroll model-manager-active""#
     ))
     #expect(dashboardHTML(html, contains: #".models-page-scroll.model-manager-active {"#))
     #expect(dashboardHTML(html, contains: #"#tab-models-manage.active {"#))

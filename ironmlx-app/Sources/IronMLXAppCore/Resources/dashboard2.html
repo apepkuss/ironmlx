@@ -131,14 +131,15 @@
     padding: 32px;
   }
 
-  .content.models-page-active {
+  .content.page-scroll-managed {
     overflow-y: hidden;
   }
 
   .page { display: none; }
   .page.active { display: block; }
 
-  #page-models.active {
+  #page-models.active,
+  #page-settings.active {
     display: flex;
     flex-direction: column;
     height: 100%;
@@ -146,11 +147,12 @@
   }
 
   .models-page-header,
+  .settings-page-header,
   #page-models > .tab-bar {
     flex: 0 0 auto;
   }
 
-  .models-page-scroll {
+  .page-body-scroll {
     flex: 1 1 auto;
     min-height: 0;
     overflow-y: auto;
@@ -2053,7 +2055,7 @@
       <button class="tab-btn" data-tab="models-scheduler" data-i18n="scheduler_profile_tab">Scheduling</button>
     </div>
 
-    <div class="models-page-scroll model-manager-active">
+    <div class="models-page-scroll page-body-scroll model-manager-active">
     <!-- Tab 1: Model Manager -->
     <div class="tab-panel active" id="tab-models-manage">
       <div class="card" style="padding:0;overflow:hidden;">
@@ -2688,8 +2690,12 @@
 
   <!-- Settings Page -->
   <div class="page" id="page-settings">
-    <div class="page-title" data-i18n="settings_title">App Settings</div>
-    <div class="page-subtitle" id="settings-subtitle">Settings marked with <span class="badge badge-restart">restart</span> require a server restart.</div>
+    <div class="settings-page-header">
+      <div class="page-title" data-i18n="settings_title">App Settings</div>
+      <div class="page-subtitle" id="settings-subtitle">Settings marked with <span class="badge badge-restart">restart</span> require a server restart.</div>
+    </div>
+
+    <div class="settings-page-scroll page-body-scroll">
 
     <!-- 1. Server -->
     <div class="card-settings">
@@ -2874,6 +2880,7 @@
       <button class="btn-accent" style="padding:10px 28px;" data-i18n="save_settings" onclick="saveSettings()">Save Settings</button>
     </div>
 
+    </div>
   </div>
 
   <!-- Cluster Page -->
@@ -4579,9 +4586,11 @@
     if (pageEl) pageEl.classList.add('active');
     const content = document.querySelector('.content');
     if (content) {
-      content.classList.toggle('models-page-active', page === 'models');
+      content.classList.toggle('page-scroll-managed', page === 'models' || page === 'settings');
       content.scrollTop = 0;
     }
+    const pageScroll = pageEl && pageEl.querySelector('.page-body-scroll');
+    if (pageScroll) pageScroll.scrollTop = 0;
     updateStatusPollingInterval();
     // Re-sync loaded models when navigating to models page
     if (page === 'models') syncLoadedModels();
@@ -4632,7 +4641,7 @@
     document.getElementById('page-onboarding').classList.add('active');
     const content = document.querySelector('.content');
     if (content) {
-      content.classList.remove('models-page-active');
+      content.classList.remove('page-scroll-managed');
       content.scrollTop = 0;
     }
     updateStatusPollingInterval();
