@@ -1,5 +1,6 @@
 //! `ironmlx serve` — boot HTTP server with OpenAI + Anthropic compatibility.
 
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -85,6 +86,21 @@ pub struct ServeArgs {
     /// Bind host.
     #[arg(long, default_value = "127.0.0.1")]
     pub host: String,
+
+    /// Network exposure mode. Local mode only accepts a loopback --host.
+    #[arg(long, value_enum, default_value = "local")]
+    pub network_mode: server::security::NetworkMode,
+
+    /// Concrete LAN interface address used by LAN mode. Wildcard addresses are rejected.
+    #[arg(long, requires = "security_bootstrap_stdin")]
+    pub lan_host: Option<IpAddr>,
+
+    /// Read the API-key digest and TLS material as one JSON object from stdin.
+    #[arg(long, default_value_t = false)]
+    pub security_bootstrap_stdin: bool,
+
+    #[arg(skip)]
+    pub(crate) network_config: Option<server::security::ServerNetworkConfig>,
 
     /// Prefill chunk size — max tokens per prefill forward call. `0`
     /// disables chunking (single-shot forward over the whole prompt).
@@ -235,6 +251,14 @@ pub struct ServeArgs {
     /// Defaults to ~/.ironmlx/cache/active_kv_offload when offload is enabled.
     #[arg(long = "active-kv-offload-dir")]
     pub active_kv_offload_dir: Option<PathBuf>,
+}
+
+impl ServeArgs {
+    pub(crate) fn resolved_network_config(&self) -> Result<server::security::ServerNetworkConfig> {
+        self.network_config
+            .clone()
+            .context("server network configuration was not initialized")
+    }
 }
 
 pub(crate) fn resolve_paged_prefix_cache_config(
@@ -1104,8 +1128,7 @@ where
             cfg,
             tokenizer,
             model_id,
-            &args.host,
-            args.port,
+            args.resolved_network_config()?,
             scheduler_config.prefill_chunk_size,
             scheduler_config.b_max,
             scheduler_config.admission_deadline_ms,
@@ -1126,8 +1149,7 @@ where
             model,
             tokenizer,
             model_id,
-            &args.host,
-            args.port,
+            args.resolved_network_config()?,
             scheduler_config.prefill_chunk_size,
             scheduler_config.b_max,
             scheduler_config.admission_deadline_ms,
@@ -1201,8 +1223,7 @@ where
         prompt_lookup,
         tokenizer,
         model_id,
-        &args.host,
-        args.port,
+        args.resolved_network_config()?,
         scheduler_config.prefill_chunk_size,
         scheduler_config.b_max,
         scheduler_config.admission_deadline_ms,
@@ -1286,8 +1307,7 @@ fn serve_with_gemma4_drafter_model(
         prompt_lookup,
         tokenizer,
         model_id,
-        &args.host,
-        args.port,
+        args.resolved_network_config()?,
         scheduler_config.prefill_chunk_size,
         scheduler_config.b_max,
         scheduler_config.admission_deadline_ms,
@@ -1321,8 +1341,7 @@ fn serve_with_diffusion_gemma_model(
         generation_config,
         model_id,
         model_weight_bytes,
-        &args.host,
-        args.port,
+        args.resolved_network_config()?,
         vision_input,
     ))
 }
@@ -1609,8 +1628,7 @@ fn run_engine_pool(args: ServeArgs, manifest_path: &Path) -> Result<()> {
     let active_kv_offload = resolve_active_kv_offload_config(&args)?;
     let model_ttl = resolve_model_ttl(&args)?;
     let runtime_config = server::engine::EnginePoolRuntimeConfig {
-        host: args.host,
-        port: args.port,
+        network: args.resolved_network_config()?,
         kv_cache_turboquant_bits: args.kv_quant.turboquant_bits(),
         scheduler_autotune_report: args.scheduler_autotune_report,
         paged_prefix_cache,
@@ -1650,7 +1668,14 @@ fn run_app_daemon(args: ServeArgs) -> Result<()> {
     runtime.block_on(server::model_manager::serve_app_daemon(args))
 }
 
-pub fn run(args: ServeArgs) -> Result<()> {
+pub fn run(mut args: ServeArgs) -> Result<()> {
+    args.network_config = Some(server::security::ServerNetworkConfig::resolve(
+        args.network_mode,
+        &args.host,
+        args.port,
+        args.lan_host,
+        args.security_bootstrap_stdin,
+    )?);
     if let Some(manifest_path) = args.model_manifest.clone() {
         return run_engine_pool(args, &manifest_path);
     }
@@ -1981,6 +2006,13 @@ mod scheduler_profile_tests {
             memory_limit_model_gb: None,
             port: 8080,
             host: "127.0.0.1".to_string(),
+            network_mode: crate::core::server::security::NetworkMode::Local,
+            lan_host: None,
+            security_bootstrap_stdin: false,
+            network_config: Some(
+                crate::core::server::security::ServerNetworkConfig::local("127.0.0.1", 8080)
+                    .unwrap(),
+            ),
             prefill_chunk_size: None,
             force_scheduler: false,
             b_max: None,

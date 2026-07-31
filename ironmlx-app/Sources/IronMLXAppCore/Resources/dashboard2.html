@@ -2751,8 +2751,16 @@
         <span data-i18n="server">Server</span>
       </div>
       <div class="settings-row">
-        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="host">Host</span> <span class="badge badge-restart" data-i18n="badge_restart">restart</span></div></div>
-        <div class="settings-row-right"><select id="cfg-host"><option value="127.0.0.1">localhost (127.0.0.1)</option><option value="0.0.0.0" data-i18n="all_interfaces">all interfaces (0.0.0.0)</option></select></div>
+        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="network_mode">Network Mode</span> <span class="badge badge-restart" data-i18n="badge_restart">restart</span></div><div class="settings-row-desc" data-i18n="network_mode_desc">Local only listens on loopback. LAN adds an authenticated HTTPS listener on one selected interface.</div></div>
+        <div class="settings-row-right"><select id="cfg-network-mode" onchange="refreshNetworkSecurityUI()"><option value="local" data-i18n="network_mode_local">Local only</option><option value="lan" data-i18n="network_mode_lan">LAN (HTTPS + API Key)</option></select></div>
+      </div>
+      <div class="settings-row" id="cfg-lan-host-row" style="display:none;">
+        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="lan_interface">LAN Interface</span> <span class="badge badge-restart" data-i18n="badge_restart">restart</span></div><div class="settings-row-desc" data-i18n="lan_interface_desc">Select one concrete active LAN address. Wildcard listening is not allowed.</div></div>
+        <div class="settings-row-right"><select id="cfg-lan-host"></select></div>
+      </div>
+      <div class="settings-row" id="cfg-lan-security-row" style="display:none;">
+        <div class="settings-row-left"><div class="settings-row-label" data-i18n="lan_access_credentials">LAN Access Credentials</div><div class="settings-row-desc" data-i18n="lan_access_credentials_desc" style="color:var(--orange,#ff9500);">LAN traffic requires certificate verification and a Bearer API Key. Never place the key in a URL.</div></div>
+        <div class="settings-row-right" style="display:flex;gap:8px;flex-wrap:wrap;"><button class="btn-secondary" type="button" onclick="copyLanAPIKey()" data-i18n="copy_api_key">Copy API Key</button><button class="btn-secondary" type="button" onclick="copyLanCACertificate()" data-i18n="copy_ca_certificate">Copy CA Certificate</button><button class="btn-secondary" type="button" onclick="rotateLanSecurity()" data-i18n="rotate_credentials">Rotate</button></div>
       </div>
       <div class="settings-row">
         <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="port">Port</span> <span class="badge badge-restart" data-i18n="badge_restart">restart</span></div></div>
@@ -3264,9 +3272,9 @@
       active_kv_incident: "Active KV tiering is degraded for {models}. Requests can continue, but cache offload may be impaired.",
       runtime_not_applicable: "Not applicable",
       status_subtitle: "Server status and resource usage overview.",
-      service_overview: "Service Overview", endpoints_listen: "Listening", endpoints_reachable: "Reachable endpoints", endpoints_local: "Local (this Mac only)", endpoints_lan: "LAN",
-      endpoints_hint_local: "Only this Mac can reach the server. To allow LAN access, set Host to \"all interfaces (0.0.0.0)\" in Settings and restart.",
-      endpoints_hint_lan: "⚠ This server has no authentication. Enable only on trusted networks (home / office Wi-Fi).",
+      service_overview: "Service Overview", endpoint_address: "Endpoint", copy_endpoint: "Copy endpoint", runtime_network_local: "Local", runtime_network_lan: "LAN", authentication_status: "Authentication", authentication_status_local: "Local access only; API Key not required", authentication_status_api_key: "API Key enabled",
+      endpoints_hint_local: "Only this Mac can reach the server. Enable LAN mode explicitly to add an authenticated HTTPS endpoint.",
+      endpoints_hint_lan: "⚠ LAN mode is enabled. The endpoint uses HTTPS and requires a Bearer API Key.",
       endpoints_unavailable: "Server endpoint info unavailable (backend not reachable).",
       server_status: "Server Status", running: "Running", uptime: "Uptime", model: "Model",
       gpu_memory: "GPU Memory", requests: "Requests", active_mem: "Active", peak_mem: "Peak", cache_mem: "Cache", stopped: "Stopped",
@@ -3423,8 +3431,12 @@
       log_server_offline: "Backend is not running", log_start_hint: "Load a local model from Models to start it and view logs.", log_no_entries: "No log entries", log_no_app_logs: "No app log entries",
       settings_title: "App Settings", settings_subtitle_html: 'Settings marked with <span class="badge badge-restart">restart</span> require a server restart.',
       server: "Server", host: "Host", port: "Port", log_level: "Log Level",
+      network_mode: "Network Mode", network_mode_desc: "Local only listens on loopback. LAN adds an authenticated HTTPS listener on one selected interface.", network_mode_local: "Local only", network_mode_lan: "LAN (HTTPS + API Key)",
+      lan_interface: "LAN Interface", lan_interface_desc: "Select one concrete active LAN address. Wildcard listening is not allowed.",
+      lan_access_credentials: "LAN Access Credentials", lan_access_credentials_desc: "LAN traffic requires certificate verification and a Bearer API Key. Never place the key in a URL.", copy_api_key: "Copy API Key", copy_ca_certificate: "Copy CA Certificate", rotate_credentials: "Rotate",
+      msg_lan_api_key_copied: "API Key copied. The clipboard will be cleared after 60 seconds if unchanged.", msg_lan_ca_certificate_copied: "CA certificate copied.", msg_lan_security_rotated_and_copied: "LAN credentials rotated. The new API Key was copied.",
+      err_lan_address_invalid: "Select a concrete active LAN interface before saving.", err_lan_keychain_unavailable: "IronMLX could not access the macOS Keychain (status {os_status}).", err_lan_security_material_missing: "LAN authentication or TLS material is missing.", err_lan_certificate_generation_failed: "IronMLX could not generate the LAN TLS certificate.", err_lan_mode_required: "Enable LAN mode before managing LAN access credentials.", err_lan_security_rotation_rolled_back: "Credential rotation failed. The previous LAN credential and network configuration were restored.", err_lan_security_rotation_failed: "LAN credential rotation failed.", err_lan_security_action_failed: "The LAN security action failed.", err_network_restart_rolled_back: "The new network configuration could not start. The previous configuration was restored.", err_settings_invalid: "The settings are invalid and were not saved.",
       badge_restart: "restart", badge_live: "live", requires_restart: "requires restart",
-      all_interfaces: "all interfaces (0.0.0.0)",
       appearance: "Appearance", interface_language: "Language", theme_mode: "Theme Mode", theme_light: "Light", theme_dark: "Dark", theme_system: "System",
       model_runtime: "Model Runtime", verify_model_on_load: "Full SHA-256 verification on load", verify_model_on_load_desc: "Recompute every snapshot file checksum immediately before each actual model load. Disabled by default.",
       resource_mgmt: "Resource Management",
@@ -3585,9 +3597,9 @@
       active_kv_incident: "模型 {models} 的 Active KV 分层卸载发生错误。请求仍可继续，但缓存卸载能力可能已降级。",
       runtime_not_applicable: "不适用",
       status_subtitle: "服务器状态与资源使用概览。",
-      service_overview: "服务概览", endpoints_listen: "监听", endpoints_reachable: "可访问端点", endpoints_local: "本机（仅当前 Mac）", endpoints_lan: "局域网",
-      endpoints_hint_local: "仅当前 Mac 可访问服务。若需局域网访问，请在设置中将 Host 改为「所有接口 (0.0.0.0)」并重启。",
-      endpoints_hint_lan: "⚠ 服务当前无认证，请仅在可信网络（家 / 办公室 Wi-Fi）开启。",
+      service_overview: "服务概览", endpoint_address: "端点地址", copy_endpoint: "复制端点地址", runtime_network_local: "本机", runtime_network_lan: "局域网", authentication_status: "认证状态", authentication_status_local: "仅限本机访问，无需 API Key", authentication_status_api_key: "API Key 已启用",
+      endpoints_hint_local: "仅当前 Mac 可访问服务。若需局域网访问，请在设置中显式启用 LAN 模式并选择一个具体接口。",
+      endpoints_hint_lan: "⚠ LAN 模式已启用。端点使用 HTTPS 并要求 Bearer API Key。",
       endpoints_unavailable: "无法获取服务端点信息（后端不可达）。",
       server_status: "服务器状态", running: "运行中", uptime: "运行时间", model: "模型",
       gpu_memory: "GPU 内存", requests: "请求数", active_mem: "活跃", peak_mem: "峰值", cache_mem: "缓存", stopped: "已停止",
@@ -3744,8 +3756,12 @@
       log_server_offline: "后端未运行", log_start_hint: "请在模型管理中加载本地模型以启动后端并查看日志。", log_no_entries: "暂无日志", log_no_app_logs: "暂无应用日志",
       settings_title: "应用设置", settings_subtitle_html: '标有 <span class="badge badge-restart">重启</span> 的设置需要重启服务。',
       server: "服务器", host: "主机", port: "端口", log_level: "日志级别",
+      network_mode: "网络模式", network_mode_desc: "本机模式仅监听回环地址；LAN 模式会在选定接口上增加一个经过认证的 HTTPS 监听端点。", network_mode_local: "仅本机", network_mode_lan: "局域网（HTTPS + API Key）",
+      lan_interface: "局域网接口", lan_interface_desc: "请选择一个具体且处于活动状态的局域网地址；不允许监听通配地址。",
+      lan_access_credentials: "局域网访问凭据", lan_access_credentials_desc: "LAN 流量必须验证证书并携带 Bearer API Key。请勿将 Key 放入 URL。", copy_api_key: "复制 API Key", copy_ca_certificate: "复制 CA 证书", rotate_credentials: "轮换",
+      msg_lan_api_key_copied: "API Key 已复制；若剪贴板内容未变化，将在 60 秒后自动清除。", msg_lan_ca_certificate_copied: "CA 证书已复制。", msg_lan_security_rotated_and_copied: "LAN 凭据已轮换，新 API Key 已复制。",
+      err_lan_address_invalid: "保存前请选择一个具体且处于活动状态的局域网接口。", err_lan_keychain_unavailable: "IronMLX 无法访问 macOS 钥匙串（状态 {os_status}）。", err_lan_security_material_missing: "缺少 LAN 认证信息或 TLS 材料。", err_lan_certificate_generation_failed: "IronMLX 无法生成 LAN TLS 证书。", err_lan_mode_required: "请先启用 LAN 模式，再管理局域网访问凭据。", err_lan_security_rotation_rolled_back: "凭据轮换失败，已恢复之前的 LAN 凭据和网络配置。", err_lan_security_rotation_failed: "LAN 凭据轮换失败。", err_lan_security_action_failed: "LAN 安全操作失败。", err_network_restart_rolled_back: "新网络配置无法启动，已恢复之前的配置。", err_settings_invalid: "设置无效，未保存任何更改。",
       badge_restart: "重启", badge_live: "实时", requires_restart: "需要重启",
-      all_interfaces: "所有接口 (0.0.0.0)",
       appearance: "外观", interface_language: "界面语言", theme_mode: "主题模式", theme_light: "浅色", theme_dark: "暗色", theme_system: "系统",
       model_runtime: "模型运行", verify_model_on_load: "加载时完整性校验", verify_model_on_load_desc: "每次实际加载模型前重新计算 snapshot 全部文件的 SHA-256。默认关闭。",
       resource_mgmt: "资源管理",
@@ -3906,9 +3922,9 @@
       active_kv_incident: "模型 {models} 的 Active KV 分層卸載發生錯誤。請求仍可繼續，但快取卸載能力可能已降級。",
       runtime_not_applicable: "不適用",
       status_subtitle: "伺服器狀態與資源使用概覽。",
-      service_overview: "服務概覽", endpoints_listen: "監聽", endpoints_reachable: "可存取端點", endpoints_local: "本機（僅目前 Mac）", endpoints_lan: "區域網路",
-      endpoints_hint_local: "僅目前 Mac 可存取服務。若需區域網路存取，請在設定中將 Host 改為「所有介面 (0.0.0.0)」並重啟。",
-      endpoints_hint_lan: "⚠ 服務目前無驗證，請僅在可信網路（家 / 辦公室 Wi-Fi）啟用。",
+      service_overview: "服務概覽", endpoint_address: "端點位址", copy_endpoint: "複製端點位址", runtime_network_local: "本機", runtime_network_lan: "區域網路", authentication_status: "驗證狀態", authentication_status_local: "僅限本機存取，無需 API Key", authentication_status_api_key: "API Key 已啟用",
+      endpoints_hint_local: "僅目前 Mac 可存取服務。若需區域網路存取，請在設定中明確啟用 LAN 模式並選擇一個具體介面。",
+      endpoints_hint_lan: "⚠ LAN 模式已啟用。端點使用 HTTPS 並要求 Bearer API Key。",
       endpoints_unavailable: "無法取得服務端點資訊（後端不可達）。",
       server_status: "伺服器狀態", running: "執行中", uptime: "執行時間", model: "模型",
       gpu_memory: "GPU 記憶體", requests: "請求數", active_mem: "活躍", peak_mem: "峰值", cache_mem: "快取", stopped: "已停止",
@@ -4048,8 +4064,12 @@
       log_server_offline: "後端未執行", log_start_hint: "請在模型管理中載入本地模型以啟動後端並檢視日誌。", log_no_entries: "暫無日誌", log_no_app_logs: "暫無應用日誌",
       settings_title: "應用設定", settings_subtitle_html: '標有 <span class="badge badge-restart">重啟</span> 的設定需要重啟服務。',
       server: "伺服器", host: "主機", port: "連接埠", log_level: "日誌等級",
+      network_mode: "網路模式", network_mode_desc: "本機模式僅監聽迴路位址；LAN 模式會在所選介面上新增一個經過驗證的 HTTPS 監聽端點。", network_mode_local: "僅本機", network_mode_lan: "區域網路（HTTPS + API Key）",
+      lan_interface: "區域網路介面", lan_interface_desc: "請選擇一個具體且處於使用中的區域網路位址；不允許監聽萬用位址。",
+      lan_access_credentials: "區域網路存取認證資訊", lan_access_credentials_desc: "LAN 流量必須驗證憑證並攜帶 Bearer API Key。請勿將 Key 放入 URL。", copy_api_key: "複製 API Key", copy_ca_certificate: "複製 CA 憑證", rotate_credentials: "輪替",
+      msg_lan_api_key_copied: "API Key 已複製；若剪貼簿內容未變更，將於 60 秒後自動清除。", msg_lan_ca_certificate_copied: "CA 憑證已複製。", msg_lan_security_rotated_and_copied: "LAN 憑證已輪替，新的 API Key 已複製。",
+      err_lan_address_invalid: "儲存前請選擇一個具體且處於使用中的區域網路介面。", err_lan_keychain_unavailable: "IronMLX 無法存取 macOS 鑰匙圈（狀態 {os_status}）。", err_lan_security_material_missing: "缺少 LAN 驗證資訊或 TLS 材料。", err_lan_certificate_generation_failed: "IronMLX 無法產生 LAN TLS 憑證。", err_lan_mode_required: "請先啟用 LAN 模式，再管理區域網路存取認證資訊。", err_lan_security_rotation_rolled_back: "憑證輪替失敗，已還原先前的 LAN 憑證與網路設定。", err_lan_security_rotation_failed: "LAN 憑證輪替失敗。", err_lan_security_action_failed: "LAN 安全操作失敗。", err_network_restart_rolled_back: "新網路設定無法啟動，已還原先前的設定。", err_settings_invalid: "設定無效，未儲存任何變更。",
       badge_restart: "重啟", badge_live: "即時", requires_restart: "需要重啟",
-      all_interfaces: "所有介面 (0.0.0.0)",
       appearance: "外觀", interface_language: "介面語言", theme_mode: "主題模式", theme_light: "淺色", theme_dark: "暗色", theme_system: "系統",
       model_runtime: "模型執行", verify_model_on_load: "載入時完整性驗證", verify_model_on_load_desc: "每次實際載入模型前重新計算 snapshot 全部檔案的 SHA-256。預設關閉。",
       resource_mgmt: "資源管理",
@@ -4210,9 +4230,9 @@
       active_kv_incident: "モデル {models} の Active KV 階層化でエラーが発生しました。リクエストは継続できますが、キャッシュのオフロード機能が低下している可能性があります。",
       runtime_not_applicable: "対象外",
       status_subtitle: "サーバーステータスとリソース使用状況の概要。",
-      service_overview: "サービス概要", endpoints_listen: "待受", endpoints_reachable: "アクセス可能なエンドポイント", endpoints_local: "ローカル（この Mac のみ）", endpoints_lan: "LAN",
-      endpoints_hint_local: "この Mac からのみアクセス可能です。LAN アクセスを許可するには、設定で Host を「すべてのインターフェース (0.0.0.0)」に変更して再起動してください。",
-      endpoints_hint_lan: "⚠ このサーバーには認証がありません。信頼できるネットワーク（自宅 / 職場 Wi-Fi）でのみ有効にしてください。",
+      service_overview: "サービス概要", endpoint_address: "エンドポイントアドレス", copy_endpoint: "エンドポイントをコピー", runtime_network_local: "ローカル", runtime_network_lan: "LAN", authentication_status: "認証状態", authentication_status_local: "この Mac からのみアクセス可能。API Key は不要", authentication_status_api_key: "API Key 有効",
+      endpoints_hint_local: "この Mac からのみアクセスできます。LAN アクセスが必要な場合は、設定で LAN モードを明示的に有効にし、具体的なインターフェースを選択してください。",
+      endpoints_hint_lan: "⚠ LAN モードが有効です。エンドポイントでは HTTPS と Bearer API Key が必要です。",
       endpoints_unavailable: "サーバーエンドポイント情報を取得できません（バックエンド未到達）。",
       server_status: "サーバーステータス", running: "実行中", uptime: "稼働時間", model: "モデル",
       gpu_memory: "GPU メモリ", requests: "リクエスト", active_mem: "アクティブ", peak_mem: "ピーク", cache_mem: "キャッシュ", stopped: "停止中",
@@ -4352,8 +4372,12 @@
       log_server_offline: "バックエンドが実行されていません", log_start_hint: "Models でローカルモデルを読み込むと起動し、ログを表示できます。", log_no_entries: "ログエントリなし", log_no_app_logs: "アプリログエントリなし",
       settings_title: "アプリ設定", settings_subtitle_html: '<span class="badge badge-restart">再起動</span> マーク付きの設定はサーバーの再起動が必要です。',
       server: "サーバー", host: "ホスト", port: "ポート", log_level: "ログレベル",
+      network_mode: "ネットワークモード", network_mode_desc: "ローカルモードはループバックのみで待ち受けます。LAN モードでは、選択したインターフェースに認証付き HTTPS リスナーを追加します。", network_mode_local: "ローカルのみ", network_mode_lan: "LAN（HTTPS + API Key）",
+      lan_interface: "LAN インターフェース", lan_interface_desc: "有効な具体的 LAN アドレスを1つ選択してください。ワイルドカードでの待ち受けは許可されません。",
+      lan_access_credentials: "LAN アクセス認証情報", lan_access_credentials_desc: "LAN 通信では証明書の検証と Bearer API Key が必要です。Key を URL に含めないでください。", copy_api_key: "API Key をコピー", copy_ca_certificate: "CA 証明書をコピー", rotate_credentials: "ローテーション",
+      msg_lan_api_key_copied: "API Key をコピーしました。クリップボードの内容が変わらない場合、60秒後に消去されます。", msg_lan_ca_certificate_copied: "CA 証明書をコピーしました。", msg_lan_security_rotated_and_copied: "LAN 認証情報をローテーションし、新しい API Key をコピーしました。",
+      err_lan_address_invalid: "保存する前に、有効な具体的 LAN インターフェースを選択してください。", err_lan_keychain_unavailable: "IronMLX は macOS キーチェーンにアクセスできませんでした（ステータス {os_status}）。", err_lan_security_material_missing: "LAN 認証情報または TLS マテリアルがありません。", err_lan_certificate_generation_failed: "IronMLX は LAN TLS 証明書を生成できませんでした。", err_lan_mode_required: "LAN アクセス認証情報を管理する前に LAN モードを有効にしてください。", err_lan_security_rotation_rolled_back: "認証情報のローテーションに失敗しました。以前の LAN 認証情報とネットワーク設定を復元しました。", err_lan_security_rotation_failed: "LAN 認証情報のローテーションに失敗しました。", err_lan_security_action_failed: "LAN セキュリティ操作に失敗しました。", err_network_restart_rolled_back: "新しいネットワーク設定を開始できなかったため、以前の設定を復元しました。", err_settings_invalid: "設定が無効なため、変更は保存されませんでした。",
       badge_restart: "再起動", badge_live: "ライブ", requires_restart: "再起動が必要",
-      all_interfaces: "全インターフェース (0.0.0.0)",
       appearance: "外観", interface_language: "インターフェース言語", theme_mode: "テーマモード", theme_light: "ライト", theme_dark: "ダーク", theme_system: "システム",
       model_runtime: "モデルランタイム", verify_model_on_load: "ロード時の完全性検証", verify_model_on_load_desc: "モデルを実際にロードする直前に snapshot 全ファイルの SHA-256 を再計算します。デフォルトはオフです。",
       resource_mgmt: "リソース管理",
@@ -4514,9 +4538,9 @@
       active_kv_incident: "모델 {models}의 Active KV 계층화에서 오류가 발생했습니다. 요청은 계속 처리할 수 있지만 캐시 오프로드 기능이 저하되었을 수 있습니다.",
       runtime_not_applicable: "해당 없음",
       status_subtitle: "서버 상태 및 리소스 사용 개요.",
-      service_overview: "서비스 개요", endpoints_listen: "수신", endpoints_reachable: "접근 가능한 엔드포인트", endpoints_local: "로컬 (이 Mac만)", endpoints_lan: "LAN",
-      endpoints_hint_local: "이 Mac에서만 서버에 접근할 수 있습니다. LAN 접근을 허용하려면 설정에서 Host를 \"모든 인터페이스 (0.0.0.0)\"로 변경한 후 재시작하세요.",
-      endpoints_hint_lan: "⚠ 이 서버는 인증이 없습니다. 신뢰할 수 있는 네트워크(가정 / 사무실 Wi-Fi)에서만 사용하세요.",
+      service_overview: "서비스 개요", endpoint_address: "엔드포인트 주소", copy_endpoint: "엔드포인트 주소 복사", runtime_network_local: "로컬", runtime_network_lan: "LAN", authentication_status: "인증 상태", authentication_status_local: "이 Mac에서만 접근 가능, API Key 불필요", authentication_status_api_key: "API Key 활성화됨",
+      endpoints_hint_local: "이 Mac에서만 서버에 접근할 수 있습니다. LAN 접근이 필요하면 설정에서 LAN 모드를 명시적으로 활성화하고 특정 인터페이스를 선택하세요.",
+      endpoints_hint_lan: "⚠ LAN 모드가 활성화되었습니다. 엔드포인트에는 HTTPS와 Bearer API Key가 필요합니다.",
       endpoints_unavailable: "서버 엔드포인트 정보를 가져올 수 없습니다 (백엔드 연결 불가).",
       server_status: "서버 상태", running: "실행 중", uptime: "가동 시간", model: "모델",
       gpu_memory: "GPU 메모리", requests: "요청", active_mem: "활성", peak_mem: "피크", cache_mem: "캐시", stopped: "중지됨",
@@ -4656,8 +4680,12 @@
       log_server_offline: "백엔드가 실행되고 있지 않습니다", log_start_hint: "Models에서 로컬 모델을 로드하면 시작되고 로그를 볼 수 있습니다.", log_no_entries: "로그 항목 없음", log_no_app_logs: "앱 로그 항목 없음",
       settings_title: "앱 설정", settings_subtitle_html: '<span class="badge badge-restart">재시작</span> 표시된 설정은 서버 재시작이 필요합니다.',
       server: "서버", host: "호스트", port: "포트", log_level: "로그 수준",
+      network_mode: "네트워크 모드", network_mode_desc: "로컬 모드는 루프백에서만 수신합니다. LAN 모드는 선택한 인터페이스에 인증된 HTTPS 리스너를 추가합니다.", network_mode_local: "로컬 전용", network_mode_lan: "LAN (HTTPS + API Key)",
+      lan_interface: "LAN 인터페이스", lan_interface_desc: "활성 상태인 구체적인 LAN 주소 하나를 선택하세요. 와일드카드 수신은 허용되지 않습니다.",
+      lan_access_credentials: "LAN 액세스 자격 증명", lan_access_credentials_desc: "LAN 트래픽에는 인증서 검증과 Bearer API Key가 필요합니다. Key를 URL에 넣지 마세요.", copy_api_key: "API Key 복사", copy_ca_certificate: "CA 인증서 복사", rotate_credentials: "교체",
+      msg_lan_api_key_copied: "API Key를 복사했습니다. 클립보드 내용이 변경되지 않으면 60초 후 지워집니다.", msg_lan_ca_certificate_copied: "CA 인증서를 복사했습니다.", msg_lan_security_rotated_and_copied: "LAN 자격 증명을 교체하고 새 API Key를 복사했습니다.",
+      err_lan_address_invalid: "저장하기 전에 활성 상태인 구체적인 LAN 인터페이스를 선택하세요.", err_lan_keychain_unavailable: "IronMLX가 macOS 키체인에 접근할 수 없습니다(상태 {os_status}).", err_lan_security_material_missing: "LAN 인증 정보 또는 TLS 자료가 없습니다.", err_lan_certificate_generation_failed: "IronMLX가 LAN TLS 인증서를 생성할 수 없습니다.", err_lan_mode_required: "LAN 액세스 자격 증명을 관리하기 전에 LAN 모드를 활성화하세요.", err_lan_security_rotation_rolled_back: "자격 증명 교체에 실패했습니다. 이전 LAN 자격 증명과 네트워크 설정을 복원했습니다.", err_lan_security_rotation_failed: "LAN 자격 증명 교체에 실패했습니다.", err_lan_security_action_failed: "LAN 보안 작업에 실패했습니다.", err_network_restart_rolled_back: "새 네트워크 설정을 시작할 수 없어 이전 설정을 복원했습니다.", err_settings_invalid: "설정이 올바르지 않아 변경 사항을 저장하지 않았습니다.",
       badge_restart: "재시작", badge_live: "실시간", requires_restart: "재시작 필요",
-      all_interfaces: "모든 인터페이스 (0.0.0.0)",
       appearance: "외관", interface_language: "인터페이스 언어", theme_mode: "테마 모드", theme_light: "라이트", theme_dark: "다크", theme_system: "시스템",
       model_runtime: "모델 런타임", verify_model_on_load: "로드 시 전체 무결성 확인", verify_model_on_load_desc: "모델을 실제로 로드하기 직전에 snapshot 모든 파일의 SHA-256을 다시 계산합니다. 기본값은 꺼짐입니다.",
       resource_mgmt: "리소스 관리",
@@ -7787,51 +7815,55 @@
       return;
     }
     const rows = [];
-    const listenAddress = data.host + ':' + data.port;
-    rows.push(buildEndpointSectionHeader(dict.endpoints_reachable || 'Reachable endpoints'));
-    // Loopback row (always reachable on this Mac).
-    const localUrl = 'http://' + data.loopback + ':' + data.port + '/v1';
-    rows.push(buildEndpointRow('🖥️', dict.endpoints_local || 'Local (this Mac only)', localUrl));
-    // LAN rows only when wildcard-bound.
-    if (data.interfaces && data.interfaces.length) {
-      data.interfaces.forEach(iface => {
-        const label = (dict.endpoints_lan || 'LAN') + ' (' + iface.name + ')' + (iface.is_thunderbolt ? ' ⚡' : '');
-        const url = 'http://' + iface.ip + ':' + data.port + '/v1';
-        rows.push(buildEndpointRow('🌐', label, url));
-      });
-    }
+    const isLAN = data.network_mode === 'lan';
+    const networkMode = isLAN
+      ? (dict.runtime_network_lan || 'LAN')
+      : (dict.runtime_network_local || 'Local');
+    const authentication = data.authentication === 'api_key'
+      ? (dict.authentication_status_api_key || 'API Key enabled')
+      : (dict.authentication_status_local || 'Local access only; API Key not required');
+    rows.push(buildEndpointStatusRow('↔', dict.network_mode || 'Network Mode', networkMode));
+    rows.push(buildEndpointStatusRow('🔑', dict.authentication_status || 'Authentication', authentication));
+    rows.push(buildEndpointStatusRow('🔗', dict.endpoint_address || 'Endpoint', data.endpoint_address, true, dict.copy_endpoint || 'Copy endpoint'));
     list.innerHTML = rows.join('');
     // Wire up copy buttons after DOM insertion.
     list.querySelectorAll('.endpoint-copy').forEach(btn => {
       btn.onclick = () => copyToClipboard(btn.getAttribute('data-url'), btn);
     });
-    // Hint text: depends on whether backend is bound wildcard or loopback-only.
-    const listenText = (dict.endpoints_listen || 'Listening') + ': ' + listenAddress;
-    if (data.host === '0.0.0.0' || data.host === '::') {
-      hint.innerHTML = '<span>' + (dict.endpoints_hint_lan || '⚠ This server has no authentication. Enable only on trusted networks (home / office Wi-Fi).') + '</span><br><span style="color:var(--text-tertiary);">' + listenText + '</span>';
+    const summary = isLAN
+      ? (dict.endpoints_hint_lan || '⚠ LAN mode is enabled. The endpoint uses HTTPS and requires a Bearer API Key.')
+      : (dict.endpoints_hint_local || 'Only this Mac can reach the server. Enable LAN mode explicitly to add an authenticated HTTPS endpoint.');
+    hint.textContent = summary;
+    if (isLAN) {
       hint.style.color = 'var(--orange, #ff9500)';
     } else {
-      hint.innerHTML = '<span>' + (dict.endpoints_hint_local || 'Only this Mac can reach the server. To allow LAN access, set Host to "all interfaces (0.0.0.0)" in Settings and restart.') + '</span><br><span style="color:var(--text-tertiary);">' + listenText + '</span>';
       hint.style.color = 'var(--text-secondary)';
     }
   }
 
-  function buildEndpointSectionHeader(label) {
-    return `<div style="font-size:11px;font-weight:600;color:var(--text-secondary);margin:2px 0 -2px;">${label}</div>`;
-  }
-
-  function buildEndpointRow(icon, label, url) {
-    const escapedUrl = url.replace(/"/g, '&quot;');
+  function buildEndpointStatusRow(icon, label, value, copyable = false, copyTitle = '') {
+    const escapedLabel = escapeHTML(String(label || ''));
+    const escapedValue = escapeHTML(String(value || '—'));
+    const escapedCopyTitle = escapeHTML(String(copyTitle));
+    const copyButton = copyable
+      ? `<button class="icon-btn endpoint-copy" data-url="${escapedValue}" title="${escapedCopyTitle}" style="padding:6px;">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="5" y="5" width="9" height="9" rx="1" stroke="currentColor" stroke-width="1.3"/><path d="M2 11V3a1 1 0 011-1h8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+      </button>`
+      : '';
     return `<div style="display:flex;align-items:center;gap:12px;padding:8px 12px;background:var(--bg);border-radius:8px;border:1px solid var(--border);">
       <span style="font-size:16px;">${icon}</span>
       <div style="flex:1;min-width:0;">
-        <div style="font-size:11px;color:var(--text-secondary);margin-bottom:2px;">${label}</div>
-        <div style="font-family:ui-monospace,Menlo,monospace;font-size:13px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${url}</div>
+        <div style="font-size:11px;color:var(--text-secondary);margin-bottom:2px;">${escapedLabel}</div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:13px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapedValue}</div>
       </div>
-      <button class="icon-btn endpoint-copy" data-url="${escapedUrl}" title="Copy" style="padding:6px;">
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="5" y="5" width="9" height="9" rx="1" stroke="currentColor" stroke-width="1.3"/><path d="M2 11V3a1 1 0 011-1h8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
-      </button>
+      ${copyButton}
     </div>`;
+  }
+
+  function escapeHTML(value) {
+    return value.replace(/[&<>"']/g, character => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    })[character]);
   }
 
   // ── Server Error Notification ──
@@ -8121,7 +8153,18 @@
 
   function applyPersistedSettingsToInputs() {
     const appConfig = window.__IRONMLX_APP_CONFIG__ || {};
-    setSelectInput('cfg-host', appConfig.host, '127.0.0.1');
+    setSelectInput('cfg-network-mode', appConfig.network_mode, 'local');
+    const lanHost = document.getElementById('cfg-lan-host');
+    if (lanHost) {
+      const interfaces = window.__IRONMLX_NETWORK_INTERFACES__ || [];
+      lanHost.replaceChildren(...interfaces.map(item => {
+        const option = document.createElement('option');
+        option.value = item.ip;
+        option.textContent = item.name + ' — ' + item.ip;
+        return option;
+      }));
+      if (appConfig.lan_host && interfaces.some(item => item.ip === appConfig.lan_host)) lanHost.value = appConfig.lan_host;
+    }
     setNumberInput('cfg-port', appConfig.port, 9068);
     setSelectInput('cfg-log-level', appConfig.log_level, 'INFO');
     setSelectInput('lang-select', LANG_MAP[appConfig.language] || appConfig.language, currentLang);
@@ -8151,6 +8194,30 @@
     setSelectInput('cfg-distributed-backend', appConfig.distributed_backend, 'auto');
     setSelectInput('cfg-parallel-mode', appConfig.parallel_mode, 'auto');
     refreshSettingsDerivedUI();
+    refreshNetworkSecurityUI();
+  }
+
+  function refreshNetworkSecurityUI() {
+    const mode = (document.getElementById('cfg-network-mode') || {}).value || 'local';
+    const lan = mode === 'lan';
+    const hostRow = document.getElementById('cfg-lan-host-row');
+    const securityRow = document.getElementById('cfg-lan-security-row');
+    if (hostRow) hostRow.style.display = lan ? '' : 'none';
+    if (securityRow) securityRow.style.display = lan ? '' : 'none';
+  }
+
+  function copyLanAPIKey() { window.webkit?.messageHandlers?.copyLanAPIKey?.postMessage('copy'); }
+  function copyLanCACertificate() { window.webkit?.messageHandlers?.copyLanCACertificate?.postMessage('copy'); }
+  function rotateLanSecurity() { window.webkit?.messageHandlers?.rotateLanSecurity?.postMessage('rotate'); }
+  function onLanSecretAction(jsonStr) {
+    let result = {}; try { result = JSON.parse(jsonStr); } catch (_) {}
+    const dict = I18N[currentLang] || I18N.en;
+    const key = (result.success ? 'msg_' : 'err_') + String(result.code || 'lan_security_action_failed');
+    const fallback = result.success ? dict.settings_saved : dict.err_lan_security_action_failed;
+    const message = (dict[key] || fallback).replace(/\{(\w+)\}/g, (match, field) =>
+      (field in result) ? result[field] : match
+    );
+    showToast(message, result.success ? 'success' : 'warn');
   }
 
   // ── Save Settings ──
@@ -8166,7 +8233,8 @@
       setNumberInput('cfg-cold-cache', coldCache, coldCache);
     }
     const settings = {
-      host: document.getElementById('cfg-host').value,
+      network_mode: (document.getElementById('cfg-network-mode') || {}).value || 'local',
+      lan_host: (document.getElementById('cfg-lan-host') || {}).value || '',
       port: numberInputValue('cfg-port', 9068),
       log_level: document.getElementById('cfg-log-level').value,
       language: document.getElementById('lang-select').value,
@@ -8225,7 +8293,7 @@
   // Fields whose value requires a backend restart to take effect. These
   // match the keys the Rust side checks in its `needs_restart` diff.
   const RESTART_FIELDS = [
-    'cfg-host', 'cfg-port',
+    'cfg-network-mode', 'cfg-lan-host', 'cfg-port',
     'cfg-mem-total', 'cfg-mem-total-auto',
     'cfg-mem-model', 'cfg-mem-model-auto',
     'cfg-hot-cache', 'cfg-hot-cache-auto',

@@ -432,8 +432,7 @@ async fn iron_bench_c8_with_queue_no_4xx() {
             model_for_serve,
             tokenizer_for_serve,
             "qwen35".to_string(),
-            "127.0.0.1",
-            port,
+            ironmlx::core::server::security::ServerNetworkConfig::local("127.0.0.1", port)?,
             2048,  // prefill_chunk_size default
             4,     // b_max
             5,     // admission_deadline_ms

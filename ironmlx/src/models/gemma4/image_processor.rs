@@ -56,7 +56,7 @@ pub fn preprocess(img_bytes: &[u8], cfg: &Gemma4VisionConfig) -> Result<Processe
     let profile = std::env::var_os("IRONMLX_GEMMA4_VL_PROFILE").is_some();
     let total_t0 = Instant::now();
     let t0 = Instant::now();
-    let img = image::load_from_memory(img_bytes)
+    let img = crate::core::image_input::load_from_memory_bounded(img_bytes)
         .map_err(|e| anyhow!("decode image: {e}"))?
         .to_rgb8();
     if profile {

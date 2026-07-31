@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -605,8 +604,7 @@ impl ParsedLoadModelRequest {
 
 fn engine_runtime_config(args: &ServeArgs) -> Result<EnginePoolRuntimeConfig> {
     Ok(EnginePoolRuntimeConfig {
-        host: args.host.clone(),
-        port: args.port,
+        network: args.resolved_network_config()?,
         kv_cache_turboquant_bits: args.kv_quant.turboquant_bits(),
         scheduler_autotune_report: args.scheduler_autotune_report,
         paged_prefix_cache: resolve_engine_paged_prefix_cache_settings(args)?,
@@ -1122,8 +1120,7 @@ fn apply_load_request_scheduler_overrides(
 }
 
 pub async fn serve_app_daemon(args: ServeArgs) -> Result<()> {
-    let host = args.host.clone();
-    let port = args.port;
+    let network = args.resolved_network_config()?;
     let manager = ModelManager::new(args)?;
     manager.start_model_ttl_sweeper();
     let app = Router::new()
@@ -1145,17 +1142,9 @@ pub async fn serve_app_daemon(args: ServeArgs) -> Result<()> {
         .route("/admin/api/models/default", post(set_default_model_handler))
         .with_state(manager);
 
-    let addr: SocketAddr = format!("{host}:{port}")
-        .parse()
-        .with_context(|| format!("parsing socket addr {host}:{port}"))?;
-    tracing::info!("ironmlx app daemon listening on http://{addr}");
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .with_context(|| format!("binding {addr}"))?;
-    let serve_result = axum::serve(listener, app).await;
+    let serve_result = super::security::serve_router(app, network, "ironmlx app daemon").await;
     crate::core::cache::shutdown_process_async_prefix_store_queue();
-    serve_result?;
-    Ok(())
+    serve_result
 }
 
 async fn app_openai_handler(
@@ -2681,6 +2670,13 @@ mod tests {
             memory_limit_model_gb: None,
             port: 8080,
             host: "127.0.0.1".to_string(),
+            network_mode: crate::core::server::security::NetworkMode::Local,
+            lan_host: None,
+            security_bootstrap_stdin: false,
+            network_config: Some(
+                crate::core::server::security::ServerNetworkConfig::local("127.0.0.1", 8080)
+                    .unwrap(),
+            ),
             prefill_chunk_size: None,
             force_scheduler: false,
             b_max: None,

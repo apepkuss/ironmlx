@@ -312,7 +312,7 @@ fn pack_patches(resized: &[u8], h: i32, w: i32) -> (Vec<f32>, i32, i32) {
 /// i.e. the exact bytes `SiglipEmbeddings::forward_on` consumes.
 pub fn preprocess(img_bytes: &[u8]) -> Result<(Array, i32, i32)> {
     // 1. Decode → RGB8 (matches PIL `.convert("RGB")`).
-    let img = image::load_from_memory(img_bytes)
+    let img = crate::core::image_input::load_from_memory_bounded(img_bytes)
         .map_err(|e| anyhow!("decode image: {e}"))?
         .to_rgb8();
     let (orig_w, orig_h) = (img.width() as i32, img.height() as i32);
@@ -554,7 +554,7 @@ fn preprocess_sliced_inner(
     max_slice_nums: i32,
 ) -> Result<(SlicedImages, Option<(i32, i32)>)> {
     // 1. Decode → RGB8 (matches PIL `.convert("RGB")`).
-    let img = image::load_from_memory(img_bytes)
+    let img = crate::core::image_input::load_from_memory_bounded(img_bytes)
         .map_err(|e| anyhow!("decode image: {e}"))?
         .to_rgb8();
     let (orig_w, orig_h) = (img.width() as i32, img.height() as i32);

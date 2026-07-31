@@ -91,6 +91,24 @@ pub fn derive_image_token_and_merge(
 /// Output of [`expand_decoded_messages`]: `(flat_text_messages, pixel_values, image_grid_thw)`.
 pub type ExpandedVisionInputs = (Vec<ChatMessage>, Option<Vec<Array>>, Vec<(i32, i32, i32)>);
 
+static IMAGE_PREPROCESS_SEMAPHORE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
+pub async fn expand_decoded_messages_bounded(
+    messages: Vec<DecodedMessage>,
+    vision_input: VisionInputConfig,
+) -> anyhow::Result<ExpandedVisionInputs> {
+    let permit = IMAGE_PREPROCESS_SEMAPHORE
+        .acquire()
+        .await
+        .map_err(|_| anyhow::anyhow!("image preprocessing is unavailable"))?;
+    let result =
+        tokio::task::spawn_blocking(move || expand_decoded_messages(messages, &vision_input))
+            .await
+            .map_err(|error| anyhow::anyhow!("image preprocessing task failed: {error}"))?;
+    drop(permit);
+    result
+}
+
 /// For each `DecodedPart::Image`, run the `vision_input`-specific preprocess
 /// (Qwen / Gemma4 / MiniCpmV46), collect `pixel_values` + `grid_thw`, and
 /// rewrite every message to plain text with placeholder tokens inserted at the

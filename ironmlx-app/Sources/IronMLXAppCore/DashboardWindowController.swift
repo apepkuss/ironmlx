@@ -130,6 +130,8 @@ public final class DashboardWindowController {
         )
         let coldCacheCapacityData = try encoder.encode(coldCacheCapacity)
         let coldCacheCapacityJSON = String(data: coldCacheCapacityData, encoding: .utf8) ?? "{}"
+        let networkInterfacesData = try encoder.encode(EndpointPayload.localNetworkInterfaces())
+        let networkInterfacesJSON = String(data: networkInterfacesData, encoding: .utf8) ?? "[]"
         return """
         window.__IRONMLX_APP_CONFIG__ = \(configJSON);
         window.__IRONMLX_PORT__ = \(config.port);
@@ -138,6 +140,7 @@ public final class DashboardWindowController {
         window.__IRONMLX_KV_QUANT__ = \(DashboardBridge.jsStringLiteral(BackendLaunchOptions.normalizedKVQuant(config.kvQuant) ?? "none"));
         window.__IRONMLX_AUTO_HOT_CACHE_BYTES__ = \(automaticHotCacheBytes);
         window.__IRONMLX_COLD_CACHE_CAPACITY__ = \(coldCacheCapacityJSON);
+        window.__IRONMLX_NETWORK_INTERFACES__ = \(networkInterfacesJSON);
         window.__IRONMLX_INITIAL_ROUTE__ = \(DashboardBridge.jsStringLiteral(route.rawValue));
         """
     }
