@@ -26,6 +26,7 @@ use crate::models::Qwen35TextModel;
 /// Top-level MiniCPM-V-4.6 model: Qwen3.5 text core + optional vision tower.
 pub struct MiniCpmV46Model {
     text: Qwen35TextModel,
+    prompt_lookup_verify_profile: super::qualification::PromptLookupVerifyProfile,
     /// `Some` when `!tie_word_embeddings`. MiniCPM-V-4.6 ties (`= None`).
     lm_head: Option<Linear>,
     /// Vision encoder; `Some` when opened via `open_multimodal` AND
@@ -125,9 +126,14 @@ impl MiniCpmV46Model {
             .unwrap_or(crate::core::generate::IMAGE_TOKEN_ID);
 
         let text = Qwen35TextModel::from_loader(loader, cfg)?;
+        let prompt_lookup_verify_profile = super::qualification::prompt_lookup_verify_profile(
+            loader.quant_meta(),
+            text.hidden_dtype(),
+        );
 
         Ok(Self {
             text,
+            prompt_lookup_verify_profile,
             lm_head,
             vision,
             vision_config: vcfg,
@@ -320,6 +326,20 @@ impl crate::core::model::Model for MiniCpmV46Model {
         cache: Option<&mut [crate::nn::LayerCache]>,
         target: mlx::StreamOrDevice,
     ) -> crate::Result<mlx::Array> {
+        let input_shape = input_ids.shape();
+        let input_shape = input_shape.as_slice();
+        let exact_batched_verify = crate::nn::verify_qmm::is_armed()
+            && input_shape.len() == 2
+            && super::qualification::exact_batched_verify_shape_qualified(
+                self.prompt_lookup_verify_profile,
+                input_shape[0] as usize,
+                input_shape[1] as usize,
+            );
+        let _position_stable_linear =
+            exact_batched_verify.then(crate::nn::position_stable_linear::scope);
+        let _position_stable_qmm = exact_batched_verify.then(crate::nn::position_stable_qmm::scope);
+        let _sequence_stable_gated_delta =
+            exact_batched_verify.then(crate::nn::sequence_stable_gated_delta::scope);
         self.text.forward_on(
             input_ids,
             position_ids,
@@ -335,10 +355,73 @@ impl crate::core::model::Model for MiniCpmV46Model {
         hidden: &mlx::Array,
         target: mlx::StreamOrDevice,
     ) -> crate::Result<mlx::Array> {
+        let hidden_shape = hidden.shape();
+        let hidden_shape = hidden_shape.as_slice();
+        let exact_batched_verify = crate::nn::verify_qmm::is_armed()
+            && hidden_shape.len() == 3
+            && super::qualification::exact_batched_verify_shape_qualified(
+                self.prompt_lookup_verify_profile,
+                hidden_shape[0] as usize,
+                hidden_shape[1] as usize,
+            );
+        if exact_batched_verify {
+            if let Some(head) = &self.lm_head {
+                let _position_stable_qmm = crate::nn::position_stable_qmm::scope();
+                return head.forward_on(hidden, target);
+            }
+            return crate::models::qwen3_5::speculative::project_positions_isolated_on(
+                hidden,
+                target,
+                |position_hidden, target| self.text.as_output_on(position_hidden, target),
+            );
+        }
         match &self.lm_head {
             Some(head) => head.forward_on(hidden, target),
             None => self.text.as_output_on(hidden, target),
         }
+    }
+
+    fn supports_exact_batched_speculative_verify(
+        &self,
+        batch_width: usize,
+        context_tokens: usize,
+        verify_width: usize,
+    ) -> bool {
+        super::qualification::exact_batched_verify_qualified(
+            self.prompt_lookup_verify_profile,
+            batch_width,
+            context_tokens,
+            verify_width,
+        )
+    }
+
+    fn supports_exact_batched_speculative_verify_for_kv_cache(
+        &self,
+        batch_width: usize,
+        context_tokens: usize,
+        verify_width: usize,
+        kv_bits: Option<crate::core::cache::TurboQuantKVBits>,
+    ) -> bool {
+        kv_bits.is_none()
+            && self.supports_exact_batched_speculative_verify(
+                batch_width,
+                context_tokens,
+                verify_width,
+            )
+    }
+
+    fn supports_sequential_prompt_lookup_verify(
+        &self,
+        batch_width: usize,
+        context_tokens: usize,
+        verify_width: usize,
+    ) -> bool {
+        super::qualification::sequential_prompt_lookup_verify_qualified(
+            self.prompt_lookup_verify_profile,
+            batch_width,
+            context_tokens,
+            verify_width,
+        )
     }
 
     fn model_meta(&self) -> crate::core::memory_budget::ModelMeta {

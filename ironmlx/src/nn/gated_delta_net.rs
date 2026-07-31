@@ -237,6 +237,16 @@ impl GatedDeltaNet {
 
         let batch = dims[0];
         let seq = dims[1];
+        if super::sequence_stable_gated_delta::is_armed() && seq > 1 {
+            return self.forward_sequence_stable_on(
+                x,
+                mask,
+                per_row_lens,
+                cache,
+                target,
+                layer_idx,
+            );
+        }
 
         // Step 1: reference-equivalent input projections.
         // Step 1a: in_proj_qkv + in_proj_z, then mask-zero qkv at pad
@@ -529,6 +539,62 @@ impl GatedDeltaNet {
         };
 
         Ok(out)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn forward_sequence_stable_on(
+        &self,
+        x: &Array,
+        mask: Option<&Array>,
+        per_row_lens: Option<&[i32]>,
+        mut cache: Option<&mut GatedDeltaCache>,
+        target: StreamOrDevice,
+        layer_idx: i32,
+    ) -> Result<Array> {
+        let shape = x.shape();
+        let [batch, sequence, hidden_size] = *<&[i32; 3]>::try_from(shape.as_slice())
+            .map_err(|_| anyhow!("sequence-stable GatedDelta requires [B,Q,H]"))?;
+        let mut outputs = Vec::with_capacity(sequence as usize);
+        for position in 0..sequence {
+            let step = mlx::ops::indexing::slice_strided_on(
+                x,
+                &[0_i32, position, 0][..],
+                &[batch, position + 1, hidden_size][..],
+                &[1_i32, 1, 1][..],
+                target,
+            )?;
+            let step_lens = per_row_lens.map(|lens| {
+                lens.iter()
+                    .map(|&len| i32::from(position < len))
+                    .collect::<Vec<_>>()
+            });
+            let derived_mask;
+            let step_mask = if let Some(mask) = mask {
+                Some(mlx::ops::indexing::slice_strided_on(
+                    mask,
+                    &[0_i32, position][..],
+                    &[batch, position + 1][..],
+                    &[1_i32, 1][..],
+                    target,
+                )?)
+            } else if let Some(lens) = step_lens.as_ref() {
+                let values = lens.iter().map(|&len| len != 0).collect::<Vec<_>>();
+                derived_mask = (&values[..], &[batch, 1_i32][..]).try_into()?;
+                Some(derived_mask)
+            } else {
+                None
+            };
+            outputs.push(self.forward_on(
+                &step,
+                step_mask.as_ref(),
+                step_lens.as_deref(),
+                cache.as_deref_mut(),
+                target,
+                layer_idx,
+            )?);
+        }
+        let refs = outputs.iter().collect::<Vec<_>>();
+        mlx::ops::shape::concatenate_on(&refs, 1, target).map_err(Into::into)
     }
 }
 

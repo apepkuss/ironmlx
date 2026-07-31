@@ -16,6 +16,7 @@
 pub mod config;
 pub mod image_processor;
 pub mod model;
+mod qualification;
 pub mod vision;
 
 pub use config::text_config_from_loader;
