@@ -138,7 +138,10 @@
   .page { display: none; }
   .page.active { display: block; }
 
+  #page-status.active,
   #page-models.active,
+  #page-benchmark.active,
+  #page-logs.active,
   #page-settings.active {
     display: flex;
     flex-direction: column;
@@ -146,7 +149,10 @@
     min-height: 0;
   }
 
+  .status-page-header,
   .models-page-header,
+  .benchmark-page-header,
+  .logs-page-header,
   .settings-page-header,
   #page-models > .tab-bar {
     flex: 0 0 auto;
@@ -609,29 +615,42 @@
     transform: translateX(18px);
   }
 
-  /* ── Stats grid ── */
-  .stats-grid {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 12px;
-    margin-bottom: 20px;
+  /* ── Service overview ── */
+  .service-overview-summary {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+    gap: 12px 24px;
+    padding-bottom: 14px;
+    margin-bottom: 12px;
+    border-bottom: 0.5px solid var(--border);
   }
 
-  .stat-card {
-    background: var(--card-bg);
-    border: 0.5px solid var(--border);
-    border-radius: 8px;
-    padding: 14px;
+  .service-overview-status,
+  .service-overview-uptime {
+    display: flex;
+    align-items: center;
+    flex: 0 0 auto;
+    gap: 8px;
+    white-space: nowrap;
   }
 
-  .stat-card .stat-label {
+  .service-status-dot {
+    width: 8px;
+    height: 8px;
+    flex: 0 0 auto;
+    border-radius: 50%;
+    background: var(--text-tertiary);
+  }
+
+  .service-overview-label {
     font-size: 11px;
     color: var(--text-secondary);
-    margin-bottom: 6px;
   }
 
-  .stat-card .stat-value {
-    font-size: 20px;
+  .service-overview-value {
+    font-size: 13px;
     font-weight: 600;
   }
 
@@ -1954,7 +1973,7 @@
 </div>
 
 <!-- Content -->
-<div class="content">
+<div class="content page-scroll-managed">
 
   <!-- Status Page -->
   <!-- Onboarding Page (shown when no model is configured) -->
@@ -1990,29 +2009,46 @@
   </div>
 
   <div class="page active" id="page-status">
-    <div class="page-title" data-i18n="nav_status">Status</div>
-    <div class="page-subtitle" data-i18n="status_subtitle">Server status and resource usage overview.</div>
+    <div class="status-page-header">
+      <div class="page-title" data-i18n="nav_status">Status</div>
+      <div class="page-subtitle" data-i18n="status_subtitle">Server status and resource usage overview.</div>
+    </div>
+
+    <div class="status-page-scroll page-body-scroll">
 
     <!-- Server Endpoints -->
     <div class="card-settings" id="server-endpoints-card" style="margin-bottom:16px;">
       <div class="card-header">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="opacity:0.55;"><path d="M8 1v6M8 9v6M1 8h6M9 8h6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><circle cx="8" cy="8" r="1.5" fill="currentColor"/></svg>
-        <span data-i18n="endpoints_title">Server Endpoints</span>
+        <span data-i18n="service_overview">Service Overview</span>
       </div>
       <div style="padding:14px 20px;">
+        <div class="service-overview-summary">
+          <div class="service-overview-status">
+            <span class="service-status-dot" id="server-status-dot"></span>
+            <span class="service-overview-label" data-i18n="server_status">Server Status</span>
+            <span class="service-overview-value" id="stat-server-status">&mdash;</span>
+          </div>
+          <div class="service-overview-uptime">
+            <span class="service-overview-label" data-i18n="uptime">Uptime</span>
+            <span class="service-overview-value" id="stat-uptime">&mdash;</span>
+          </div>
+        </div>
         <div id="endpoints-list" style="display:flex;flex-direction:column;gap:8px;"></div>
         <div id="endpoints-hint" style="margin-top:10px;font-size:12px;color:var(--text-secondary);line-height:1.6;"></div>
       </div>
     </div>
 
-    <div class="stats-grid">
-      <div class="stat-card"><div class="stat-label" data-i18n="server_status">Server Status</div><div class="stat-value" id="stat-server-status" style="font-size:14px;color:var(--green);">&mdash;</div></div>
-      <div class="stat-card"><div class="stat-label" data-i18n="uptime">Uptime</div><div class="stat-value" id="stat-uptime" style="font-size:14px;">&mdash;</div></div>
-      <div class="stat-card"><div class="stat-label" data-i18n="model">Model</div><div class="stat-value" id="stat-model" style="font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">&mdash;</div></div>
-      <div class="stat-card"><div class="stat-label" data-i18n="total_tokens">Total Tokens</div><div class="stat-value" id="stat-total-tokens" style="font-size:14px;">0</div></div>
-      <div class="stat-card"><div class="stat-label" data-i18n="cached_tokens">Cached Tokens</div><div class="stat-value" id="stat-cached-tokens" style="font-size:14px;">0</div></div>
-      <div class="stat-card"><div class="stat-label" data-i18n="cache_efficiency">Cache Efficiency</div><div class="stat-value" id="stat-cache-efficiency" style="font-size:14px;">--</div></div>
-      <div class="stat-card"><div class="stat-label" data-i18n="active_kv_status">Active KV Offload</div><div class="stat-value" id="stat-active-kv" style="font-size:13px;">--</div></div>
+    <div class="card" id="runtime-model-health-card" style="margin-bottom:16px;">
+      <div class="card-header">
+        <span class="card-title" data-i18n="runtime_models">Model Runtime Status</span>
+      </div>
+      <div id="runtime-model-health" style="display:grid;gap:8px;">
+        <div style="padding:18px 12px;text-align:center;border:1px dashed var(--border);border-radius:8px;background:var(--bg);">
+          <div data-i18n="runtime_empty_title" style="font-size:12px;font-weight:600;color:var(--text-secondary);">No models are currently running</div>
+          <div data-i18n="runtime_empty_description" style="font-size:11px;color:var(--text-tertiary);margin-top:4px;">Load a model to see request queues and cumulative usage here.</div>
+        </div>
+      </div>
     </div>
 
     <!-- GPU Memory Chart -->
@@ -2038,6 +2074,7 @@
         <span><span data-i18n="peak_mem">Peak</span>: <strong id="gpu-peak-val">-- MB</strong></span>
         <span><span data-i18n="cache_mem">Cache</span>: <strong id="gpu-cache-val">-- MB</strong></span>
       </div>
+    </div>
     </div>
   </div>
 
@@ -2261,8 +2298,12 @@
 
   <!-- Benchmark Page -->
   <div class="page" id="page-benchmark">
-    <div class="page-title" data-i18n="nav_benchmark">Benchmark</div>
-    <div class="page-subtitle" data-i18n="bench_subtitle">Configure benchmark parameters and run inference tests.</div>
+    <div class="benchmark-page-header">
+      <div class="page-title" data-i18n="nav_benchmark">Benchmark</div>
+      <div class="page-subtitle" data-i18n="bench_subtitle">Configure benchmark parameters and run inference tests.</div>
+    </div>
+
+    <div class="benchmark-page-scroll page-body-scroll">
     <div class="card">
       <div class="card-header">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="opacity:0.55;"><rect x="1" y="3" width="14" height="1.5" rx="0.75" fill="currentColor"/><rect x="1" y="7.25" width="14" height="1.5" rx="0.75" fill="currentColor"/><rect x="1" y="11.5" width="14" height="1.5" rx="0.75" fill="currentColor"/><circle cx="5" cy="3.75" r="2" fill="var(--bg)" stroke="currentColor" stroke-width="1.2"/><circle cx="11" cy="8" r="2" fill="var(--bg)" stroke="currentColor" stroke-width="1.2"/><circle cx="7" cy="12.25" r="2" fill="var(--bg)" stroke="currentColor" stroke-width="1.2"/></svg>
@@ -2377,12 +2418,17 @@
         </div>
       </div>
     </div>
+    </div>
   </div>
 
   <!-- Logs Page -->
   <div class="page" id="page-logs">
-    <div class="page-title" data-i18n="nav_logs">Logs</div>
-    <div class="page-subtitle" data-i18n="logs_subtitle">Server inference logs.</div>
+    <div class="logs-page-header">
+      <div class="page-title" data-i18n="nav_logs">Logs</div>
+      <div class="page-subtitle" data-i18n="logs_subtitle">Server inference logs.</div>
+    </div>
+
+    <div class="logs-page-scroll page-body-scroll">
 
     <!-- Log filter -->
     <div class="card-settings">
@@ -2438,6 +2484,7 @@
 2026-03-20 15:29:32,918 - omlx.engine_pool - INFO - [-] -- Discovered 1 model, max memory: 23.04GB
 2026-03-20 15:29:32,918 - omlx.server - INFO - [-] -- Model pool refreshed after download completion</div>
       <div class="log-terminal-footer">Last updated: <span id="log-timestamp">--:--:-- --</span></div>
+    </div>
     </div>
   </div>
 
@@ -3057,7 +3104,7 @@
         </div>
         <div class="modal-field" style="flex:1;">
           <label data-i18n="model_type">Model Type</label>
-          <select id="modal-model-type"><option value="auto" data-i18n="auto_detect">Auto Detect</option><option value="llm">LLM</option><option value="vlm">LLM/VLM</option><option value="embedding">Embedding</option><option value="reranker">Reranker</option><option value="asr">ASR</option><option value="tts">TTS</option></select>
+          <select id="modal-model-type"><option value="auto" data-i18n="auto_detect">Auto Detect</option><option value="llm">LLM</option><option value="vlm">LLM/VLM</option><option value="block_diffusion_vlm">Block Diffusion VLM</option><option value="embedding">Embedding</option><option value="reranker">Reranker</option><option value="asr">ASR</option><option value="tts">TTS</option></select>
         </div>
       </div>
       <div class="modal-row">
@@ -3065,12 +3112,12 @@
         <div class="modal-field"><label data-i18n="single_request_max_tokens">MAX TOKENS</label><input type="text" placeholder="--" id="modal-max-tokens"></div>
         <div class="modal-field"><label>TEMPERATURE</label><input type="text" placeholder="1.0" id="modal-temperature"></div>
       </div>
-      <div class="modal-row">
+      <div class="modal-row" id="modal-causal-sampling-row">
         <div class="modal-field"><label>TOP P</label><input type="text" placeholder="1.0" id="modal-top-p"></div>
         <div class="modal-field"><label>TOP K</label><input type="text" placeholder="-1" id="modal-top-k"></div>
         <div class="modal-field"><label>REPEAT PENALTY</label><input type="text" placeholder="1.0" id="modal-repeat-penalty"></div>
       </div>
-      <div style="margin-top:14px;border-top:0.5px solid var(--border);padding-top:14px;">
+      <div id="modal-mtp-section" style="margin-top:14px;border-top:0.5px solid var(--border);padding-top:14px;">
         <div class="modal-row" style="align-items:center;">
           <label style="display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;color:var(--text);">
             <input type="checkbox" id="modal-mtp-enabled" style="accent-color:var(--accent);">
@@ -3089,7 +3136,7 @@
           </div>
         </div>
       </div>
-      <div style="margin-top:14px;border-top:0.5px solid var(--border);padding-top:14px;">
+      <div id="modal-prompt-lookup-section" style="margin-top:14px;border-top:0.5px solid var(--border);padding-top:14px;">
         <div class="modal-row" style="align-items:center;">
           <label style="display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;color:var(--text);">
             <input type="checkbox" id="modal-prompt-lookup-enabled" style="accent-color:var(--accent);">
@@ -3175,17 +3222,53 @@
       ironhermes_uninstall: "Uninstall IronHermes", ironhermes_uninstall_confirm: "Are you sure you want to uninstall IronHermes?",
       ironhermes_install_success: "IronHermes installed successfully.", ironhermes_install_failed: "Installation failed", unknown_error: "Unknown error",
       ironhermes_config_hint: "Configure the LLM provider from the IronHermes WebUI. Point it to the Chat URL above to use ironmlx.",
-      server_crash_restarting: "Server exited unexpectedly ({detail}). Restarting...",
+      server_crash_restarting: "Server exited unexpectedly. Restarting...",
+      server_crash_recovering: "Server recovery is in progress...",
       server_crash_recovered: "Server has been restarted successfully.",
       server_crash_failed: "Server restart failed: {detail}",
+      server_crash_breaker: "Automatic recovery stopped after consecutive crashes. Check the logs, then retry manually.",
+      server_crash_retry: "Retry",
+      server_crash_logs: "View logs",
+      server_restore_summary: "Some models could not be restored.",
+      server_restore_details: "Model recovery details",
+      recovery_reason_memory: "Not enough available memory to load this model.",
+      recovery_reason_capacity: "The loaded-model limit has been reached.",
+      recovery_reason_missing: "Required local model files are missing.",
+      recovery_reason_corrupt: "The local model snapshot is damaged or failed verification.",
+      recovery_reason_config: "This model has settings that its runtime does not support.",
+      recovery_reason_unknown: "The model could not be loaded. See logs for technical details.",
+      recovery_action_models: "Manage models",
+      recovery_action_verify: "Verify model",
+      recovery_action_redownload: "Download again",
+      recovery_action_config: "Review settings",
+      recovery_action_runtime_settings: "Open runtime settings",
+      runtime_models: "Model Runtime Status",
+      runtime_empty_title: "No models are currently running",
+      runtime_empty_description: "Load a model to see request queues and cumulative usage here.",
+      runtime_continuous_batching: "Continuous batching",
+      runtime_serial_diffusion: "Serial block diffusion",
+      runtime_active: "Active",
+      runtime_queued: "Queued",
+      runtime_capacity: "Queue capacity",
+      runtime_cumulative_tokens: "Cumulative tokens",
+      runtime_cache_hit_tokens: "Cache-hit tokens",
+      runtime_cache_hit_rate: "Cache hit rate",
+      runtime_active_kv: "Active KV tiering",
+      runtime_active_kv_idle: "Idle",
+      runtime_active_kv_active: "Active",
+      runtime_active_kv_degraded: "Degraded",
+      runtime_active_kv_parked: "Parked requests",
+      runtime_active_kv_offloaded: "Offloaded",
+      runtime_active_kv_swaps: "Swap out/in",
+      runtime_active_kv_errors: "Errors",
+      active_kv_incident: "Active KV tiering is degraded for {models}. Requests can continue, but cache offload may be impaired.",
+      runtime_not_applicable: "Not applicable",
       status_subtitle: "Server status and resource usage overview.",
-      endpoints_title: "Server Endpoints", endpoints_listen: "Listening", endpoints_reachable: "Reachable endpoints", endpoints_local: "Local (this Mac only)", endpoints_lan: "LAN",
+      service_overview: "Service Overview", endpoints_listen: "Listening", endpoints_reachable: "Reachable endpoints", endpoints_local: "Local (this Mac only)", endpoints_lan: "LAN",
       endpoints_hint_local: "Only this Mac can reach the server. To allow LAN access, set Host to \"all interfaces (0.0.0.0)\" in Settings and restart.",
       endpoints_hint_lan: "⚠ This server has no authentication. Enable only on trusted networks (home / office Wi-Fi).",
       endpoints_unavailable: "Server endpoint info unavailable (backend not reachable).",
       server_status: "Server Status", running: "Running", uptime: "Uptime", model: "Model",
-      total_tokens: "Total Tokens", cached_tokens: "Cached Tokens", cache_efficiency: "Cache Efficiency",
-      active_kv_status: "Active KV Offload", active_kv_enabled: "On", active_kv_disabled: "Off", active_kv_parked: "parked {value}", active_kv_swaps: "swaps {out}/{in}", active_kv_errors: "errors {value}",
       gpu_memory: "GPU Memory", requests: "Requests", active_mem: "Active", peak_mem: "Peak", cache_mem: "Cache", stopped: "Stopped",
       models_subtitle: "Manage, download, and configure model scheduling.", model_manager: "Model Manager", model_download: "Model Download", scheduler_profile_tab: "Scheduling",
       col_model: "Model \u25B2", col_type: "Type", col_quant: "Quant", col_size: "Size", col_status: "Status", col_pinned: "Pinned", col_default: "Default", col_params: "Params", status_ready: "Not loaded",
@@ -3460,17 +3543,53 @@
       ironhermes_uninstall: "卸载 IronHermes", ironhermes_uninstall_confirm: "确定要卸载 IronHermes 吗？",
       ironhermes_install_success: "IronHermes 安装成功。", ironhermes_install_failed: "安装失败", unknown_error: "未知错误",
       ironhermes_config_hint: "在 IronHermes WebUI 中配置 LLM provider，指向上方 Chat URL 即可使用 ironmlx。",
-      server_crash_restarting: "服务异常退出（{detail}），正在重启...",
+      server_crash_restarting: "服务异常退出，正在重启...",
+      server_crash_recovering: "正在恢复服务...",
       server_crash_recovered: "服务已成功重启。",
       server_crash_failed: "服务重启失败：{detail}",
+      server_crash_breaker: "服务连续崩溃，已停止自动恢复。请检查日志后手动重试。",
+      server_crash_retry: "手动重试",
+      server_crash_logs: "查看日志",
+      server_restore_summary: "部分模型未能恢复。",
+      server_restore_details: "模型恢复详情",
+      recovery_reason_memory: "可用内存不足，无法加载该模型。",
+      recovery_reason_capacity: "已达到同时加载模型数量上限。",
+      recovery_reason_missing: "本地模型缺少必需文件。",
+      recovery_reason_corrupt: "本地模型快照已损坏或校验失败。",
+      recovery_reason_config: "该模型包含当前运行时不支持的设置。",
+      recovery_reason_unknown: "模型加载失败，请查看日志了解技术详情。",
+      recovery_action_models: "管理模型",
+      recovery_action_verify: "验证模型",
+      recovery_action_redownload: "重新下载",
+      recovery_action_config: "检查设置",
+      recovery_action_runtime_settings: "打开运行设置",
+      runtime_models: "模型运行状态",
+      runtime_empty_title: "暂无运行中的模型",
+      runtime_empty_description: "加载模型后，此处将显示各模型的请求队列与累计统计。",
+      runtime_continuous_batching: "连续批处理",
+      runtime_serial_diffusion: "串行块扩散",
+      runtime_active: "活跃请求",
+      runtime_queued: "排队请求",
+      runtime_capacity: "队列容量",
+      runtime_cumulative_tokens: "累计 Tokens",
+      runtime_cache_hit_tokens: "缓存命中 Tokens",
+      runtime_cache_hit_rate: "缓存命中率",
+      runtime_active_kv: "KV 分层",
+      runtime_active_kv_idle: "待命",
+      runtime_active_kv_active: "活跃",
+      runtime_active_kv_degraded: "异常",
+      runtime_active_kv_parked: "暂停请求",
+      runtime_active_kv_offloaded: "已卸载",
+      runtime_active_kv_swaps: "换出/恢复",
+      runtime_active_kv_errors: "错误",
+      active_kv_incident: "模型 {models} 的 Active KV 分层卸载发生错误。请求仍可继续，但缓存卸载能力可能已降级。",
+      runtime_not_applicable: "不适用",
       status_subtitle: "服务器状态与资源使用概览。",
-      endpoints_title: "服务端点", endpoints_listen: "监听", endpoints_reachable: "可访问端点", endpoints_local: "本机（仅当前 Mac）", endpoints_lan: "局域网",
+      service_overview: "服务概览", endpoints_listen: "监听", endpoints_reachable: "可访问端点", endpoints_local: "本机（仅当前 Mac）", endpoints_lan: "局域网",
       endpoints_hint_local: "仅当前 Mac 可访问服务。若需局域网访问，请在设置中将 Host 改为「所有接口 (0.0.0.0)」并重启。",
       endpoints_hint_lan: "⚠ 服务当前无认证，请仅在可信网络（家 / 办公室 Wi-Fi）开启。",
       endpoints_unavailable: "无法获取服务端点信息（后端不可达）。",
       server_status: "服务器状态", running: "运行中", uptime: "运行时间", model: "模型",
-      total_tokens: "处理 Tokens", cached_tokens: "缓存 Tokens", cache_efficiency: "缓存命中率",
-      active_kv_status: "Active KV 分层卸载", active_kv_enabled: "开启", active_kv_disabled: "关闭", active_kv_parked: "暂停 {value}", active_kv_swaps: "换出/换入 {out}/{in}", active_kv_errors: "错误 {value}",
       gpu_memory: "GPU 内存", requests: "请求数", active_mem: "活跃", peak_mem: "峰值", cache_mem: "缓存", stopped: "已停止",
       models_subtitle: "管理、下载模型和配置模型调度。", model_manager: "模型管理", model_download: "模型下载", scheduler_profile_tab: "调度配置",
       col_model: "模型 \u25B2", col_type: "类型", col_quant: "量化", col_size: "大小", col_status: "状态", col_pinned: "固定", col_default: "默认", col_params: "参数", status_ready: "未加载",
@@ -3745,17 +3864,53 @@
       ironhermes_uninstall: "解除安裝 IronHermes", ironhermes_uninstall_confirm: "確定要解除安裝 IronHermes 嗎？",
       ironhermes_install_success: "IronHermes 安裝成功。", ironhermes_install_failed: "安裝失敗", unknown_error: "未知錯誤",
       ironhermes_config_hint: "在 IronHermes WebUI 中設定 LLM provider，指向上方 Chat URL 即可使用 ironmlx。",
-      server_crash_restarting: "服務異常退出（{detail}），正在重啟...",
+      server_crash_restarting: "服務異常退出，正在重啟...",
+      server_crash_recovering: "正在恢復服務...",
       server_crash_recovered: "服務已成功重啟。",
       server_crash_failed: "服務重啟失敗：{detail}",
+      server_crash_breaker: "服務連續崩潰，已停止自動恢復。請檢查日誌後手動重試。",
+      server_crash_retry: "手動重試",
+      server_crash_logs: "檢視日誌",
+      server_restore_summary: "部分模型未能恢復。",
+      server_restore_details: "模型恢復詳情",
+      recovery_reason_memory: "可用記憶體不足，無法載入此模型。",
+      recovery_reason_capacity: "已達同時載入模型數量上限。",
+      recovery_reason_missing: "本機模型缺少必要檔案。",
+      recovery_reason_corrupt: "本機模型快照已損壞或驗證失敗。",
+      recovery_reason_config: "此模型包含目前執行階段不支援的設定。",
+      recovery_reason_unknown: "模型載入失敗，請檢視日誌了解技術詳情。",
+      recovery_action_models: "管理模型",
+      recovery_action_verify: "驗證模型",
+      recovery_action_redownload: "重新下載",
+      recovery_action_config: "檢查設定",
+      recovery_action_runtime_settings: "開啟執行設定",
+      runtime_models: "模型執行狀態",
+      runtime_empty_title: "目前沒有執行中的模型",
+      runtime_empty_description: "載入模型後，此處將顯示各模型的請求佇列與累計統計。",
+      runtime_continuous_batching: "連續批次處理",
+      runtime_serial_diffusion: "序列區塊擴散",
+      runtime_active: "作用中請求",
+      runtime_queued: "排隊請求",
+      runtime_capacity: "佇列容量",
+      runtime_cumulative_tokens: "累計 Tokens",
+      runtime_cache_hit_tokens: "快取命中 Tokens",
+      runtime_cache_hit_rate: "快取命中率",
+      runtime_active_kv: "KV 分層",
+      runtime_active_kv_idle: "待命",
+      runtime_active_kv_active: "作用中",
+      runtime_active_kv_degraded: "異常",
+      runtime_active_kv_parked: "暫停請求",
+      runtime_active_kv_offloaded: "已卸載",
+      runtime_active_kv_swaps: "換出/復原",
+      runtime_active_kv_errors: "錯誤",
+      active_kv_incident: "模型 {models} 的 Active KV 分層卸載發生錯誤。請求仍可繼續，但快取卸載能力可能已降級。",
+      runtime_not_applicable: "不適用",
       status_subtitle: "伺服器狀態與資源使用概覽。",
-      endpoints_title: "服務端點", endpoints_listen: "監聽", endpoints_reachable: "可存取端點", endpoints_local: "本機（僅目前 Mac）", endpoints_lan: "區域網路",
+      service_overview: "服務概覽", endpoints_listen: "監聽", endpoints_reachable: "可存取端點", endpoints_local: "本機（僅目前 Mac）", endpoints_lan: "區域網路",
       endpoints_hint_local: "僅目前 Mac 可存取服務。若需區域網路存取，請在設定中將 Host 改為「所有介面 (0.0.0.0)」並重啟。",
       endpoints_hint_lan: "⚠ 服務目前無驗證，請僅在可信網路（家 / 辦公室 Wi-Fi）啟用。",
       endpoints_unavailable: "無法取得服務端點資訊（後端不可達）。",
       server_status: "伺服器狀態", running: "執行中", uptime: "執行時間", model: "模型",
-      total_tokens: "處理 Tokens", cached_tokens: "快取 Tokens", cache_efficiency: "快取命中率",
-      active_kv_status: "Active KV 分層卸載", active_kv_enabled: "開啟", active_kv_disabled: "關閉", active_kv_parked: "暫停 {value}", active_kv_swaps: "換出/換入 {out}/{in}", active_kv_errors: "錯誤 {value}",
       gpu_memory: "GPU 記憶體", requests: "請求數", active_mem: "活躍", peak_mem: "峰值", cache_mem: "快取", stopped: "已停止",
       models_subtitle: "管理、下載模型和設定模型調度。", model_manager: "模型管理", model_download: "模型下載", scheduler_profile_tab: "調度設定",
       col_model: "模型 \u25B2", col_type: "類型", col_quant: "量化", col_size: "大小", col_status: "狀態", col_pinned: "固定", col_default: "預設", col_params: "參數", status_ready: "未載入",
@@ -4013,17 +4168,53 @@
       ironhermes_uninstall: "IronHermes をアンインストール", ironhermes_uninstall_confirm: "IronHermes をアンインストールしてもよろしいですか？",
       ironhermes_install_success: "IronHermes のインストールが完了しました。", ironhermes_install_failed: "インストールに失敗しました", unknown_error: "不明なエラー",
       ironhermes_config_hint: "IronHermes の WebUI で LLM プロバイダーを設定し、上記 Chat URL を指定すると ironmlx を利用できます。",
-      server_crash_restarting: "サーバーが異常終了しました（{detail}）。再起動中...",
+      server_crash_restarting: "サーバーが異常終了しました。再起動中...",
+      server_crash_recovering: "サーバーを復旧しています...",
       server_crash_recovered: "サーバーが正常に再起動しました。",
       server_crash_failed: "サーバーの再起動に失敗しました：{detail}",
+      server_crash_breaker: "連続クラッシュのため自動復旧を停止しました。ログを確認してから手動で再試行してください。",
+      server_crash_retry: "再試行",
+      server_crash_logs: "ログを表示",
+      server_restore_summary: "一部のモデルを復元できませんでした。",
+      server_restore_details: "モデル復元の詳細",
+      recovery_reason_memory: "利用可能なメモリが不足しています。",
+      recovery_reason_capacity: "同時に読み込めるモデル数の上限に達しました。",
+      recovery_reason_missing: "必要なローカルモデルファイルがありません。",
+      recovery_reason_corrupt: "モデルスナップショットが破損しているか、検証に失敗しました。",
+      recovery_reason_config: "このモデルにはランタイムが対応していない設定があります。",
+      recovery_reason_unknown: "モデルを読み込めませんでした。技術的な詳細はログを確認してください。",
+      recovery_action_models: "モデルを管理",
+      recovery_action_verify: "モデルを検証",
+      recovery_action_redownload: "再ダウンロード",
+      recovery_action_config: "設定を確認",
+      recovery_action_runtime_settings: "ランタイム設定を開く",
+      runtime_models: "モデル実行状況",
+      runtime_empty_title: "実行中のモデルはありません",
+      runtime_empty_description: "モデルを読み込むと、各モデルのリクエストキューと累計統計がここに表示されます。",
+      runtime_continuous_batching: "連続バッチ処理",
+      runtime_serial_diffusion: "直列ブロック拡散",
+      runtime_active: "実行中",
+      runtime_queued: "待機中",
+      runtime_capacity: "キュー容量",
+      runtime_cumulative_tokens: "累計 Tokens",
+      runtime_cache_hit_tokens: "キャッシュヒット Tokens",
+      runtime_cache_hit_rate: "キャッシュヒット率",
+      runtime_active_kv: "Active KV 階層化",
+      runtime_active_kv_idle: "待機",
+      runtime_active_kv_active: "動作中",
+      runtime_active_kv_degraded: "異常",
+      runtime_active_kv_parked: "一時停止中のリクエスト",
+      runtime_active_kv_offloaded: "オフロード済み",
+      runtime_active_kv_swaps: "退避/復元",
+      runtime_active_kv_errors: "エラー",
+      active_kv_incident: "モデル {models} の Active KV 階層化でエラーが発生しました。リクエストは継続できますが、キャッシュのオフロード機能が低下している可能性があります。",
+      runtime_not_applicable: "対象外",
       status_subtitle: "サーバーステータスとリソース使用状況の概要。",
-      endpoints_title: "サーバーエンドポイント", endpoints_listen: "待受", endpoints_reachable: "アクセス可能なエンドポイント", endpoints_local: "ローカル（この Mac のみ）", endpoints_lan: "LAN",
+      service_overview: "サービス概要", endpoints_listen: "待受", endpoints_reachable: "アクセス可能なエンドポイント", endpoints_local: "ローカル（この Mac のみ）", endpoints_lan: "LAN",
       endpoints_hint_local: "この Mac からのみアクセス可能です。LAN アクセスを許可するには、設定で Host を「すべてのインターフェース (0.0.0.0)」に変更して再起動してください。",
       endpoints_hint_lan: "⚠ このサーバーには認証がありません。信頼できるネットワーク（自宅 / 職場 Wi-Fi）でのみ有効にしてください。",
       endpoints_unavailable: "サーバーエンドポイント情報を取得できません（バックエンド未到達）。",
       server_status: "サーバーステータス", running: "実行中", uptime: "稼働時間", model: "モデル",
-      total_tokens: "処理 Tokens", cached_tokens: "キャッシュ Tokens", cache_efficiency: "キャッシュヒット率",
-      active_kv_status: "Active KV オフロード", active_kv_enabled: "オン", active_kv_disabled: "オフ", active_kv_parked: "一時停止 {value}", active_kv_swaps: "退避/復元 {out}/{in}", active_kv_errors: "エラー {value}",
       gpu_memory: "GPU メモリ", requests: "リクエスト", active_mem: "アクティブ", peak_mem: "ピーク", cache_mem: "キャッシュ", stopped: "停止中",
       models_subtitle: "モデルの管理、ダウンロード、スケジューリング設定。", model_manager: "モデル管理", model_download: "モデルダウンロード", scheduler_profile_tab: "スケジューラ設定",
       col_model: "モデル \u25B2", col_type: "タイプ", col_quant: "量子化", col_size: "サイズ", col_status: "ステータス", col_pinned: "固定", col_default: "デフォルト", col_params: "パラメータ", status_ready: "未ロード",
@@ -4281,17 +4472,53 @@
       ironhermes_uninstall: "IronHermes 제거", ironhermes_uninstall_confirm: "IronHermes를 제거하시겠습니까?",
       ironhermes_install_success: "IronHermes가 성공적으로 설치되었습니다.", ironhermes_install_failed: "설치 실패", unknown_error: "알 수 없는 오류",
       ironhermes_config_hint: "IronHermes WebUI에서 LLM 프로바이더를 설정하고 위의 Chat URL을 가리키면 ironmlx를 사용할 수 있습니다.",
-      server_crash_restarting: "서버가 비정상 종료되었습니다 ({detail}). 재시작 중...",
+      server_crash_restarting: "서버가 비정상 종료되었습니다. 재시작 중...",
+      server_crash_recovering: "서버를 복구하는 중입니다...",
       server_crash_recovered: "서버가 성공적으로 재시작되었습니다.",
       server_crash_failed: "서버 재시작 실패: {detail}",
+      server_crash_breaker: "연속 충돌로 자동 복구가 중지되었습니다. 로그를 확인한 후 수동으로 다시 시도하세요.",
+      server_crash_retry: "다시 시도",
+      server_crash_logs: "로그 보기",
+      server_restore_summary: "일부 모델을 복원하지 못했습니다.",
+      server_restore_details: "모델 복구 세부 정보",
+      recovery_reason_memory: "사용 가능한 메모리가 부족합니다.",
+      recovery_reason_capacity: "동시에 로드할 수 있는 모델 수 제한에 도달했습니다.",
+      recovery_reason_missing: "필수 로컬 모델 파일이 없습니다.",
+      recovery_reason_corrupt: "모델 스냅샷이 손상되었거나 검증에 실패했습니다.",
+      recovery_reason_config: "이 모델에 런타임이 지원하지 않는 설정이 있습니다.",
+      recovery_reason_unknown: "모델을 로드하지 못했습니다. 기술 세부 정보는 로그를 확인하세요.",
+      recovery_action_models: "모델 관리",
+      recovery_action_verify: "모델 검증",
+      recovery_action_redownload: "다시 다운로드",
+      recovery_action_config: "설정 확인",
+      recovery_action_runtime_settings: "런타임 설정 열기",
+      runtime_models: "모델 실행 상태",
+      runtime_empty_title: "실행 중인 모델이 없습니다",
+      runtime_empty_description: "모델을 로드하면 각 모델의 요청 대기열과 누적 통계가 여기에 표시됩니다.",
+      runtime_continuous_batching: "연속 배치 처리",
+      runtime_serial_diffusion: "직렬 블록 확산",
+      runtime_active: "활성 요청",
+      runtime_queued: "대기 요청",
+      runtime_capacity: "대기열 용량",
+      runtime_cumulative_tokens: "누적 Tokens",
+      runtime_cache_hit_tokens: "캐시 적중 Tokens",
+      runtime_cache_hit_rate: "캐시 적중률",
+      runtime_active_kv: "Active KV 계층화",
+      runtime_active_kv_idle: "대기",
+      runtime_active_kv_active: "활성",
+      runtime_active_kv_degraded: "오류",
+      runtime_active_kv_parked: "일시 중지 요청",
+      runtime_active_kv_offloaded: "오프로드됨",
+      runtime_active_kv_swaps: "내보내기/복원",
+      runtime_active_kv_errors: "오류",
+      active_kv_incident: "모델 {models}의 Active KV 계층화에서 오류가 발생했습니다. 요청은 계속 처리할 수 있지만 캐시 오프로드 기능이 저하되었을 수 있습니다.",
+      runtime_not_applicable: "해당 없음",
       status_subtitle: "서버 상태 및 리소스 사용 개요.",
-      endpoints_title: "서버 엔드포인트", endpoints_listen: "수신", endpoints_reachable: "접근 가능한 엔드포인트", endpoints_local: "로컬 (이 Mac만)", endpoints_lan: "LAN",
+      service_overview: "서비스 개요", endpoints_listen: "수신", endpoints_reachable: "접근 가능한 엔드포인트", endpoints_local: "로컬 (이 Mac만)", endpoints_lan: "LAN",
       endpoints_hint_local: "이 Mac에서만 서버에 접근할 수 있습니다. LAN 접근을 허용하려면 설정에서 Host를 \"모든 인터페이스 (0.0.0.0)\"로 변경한 후 재시작하세요.",
       endpoints_hint_lan: "⚠ 이 서버는 인증이 없습니다. 신뢰할 수 있는 네트워크(가정 / 사무실 Wi-Fi)에서만 사용하세요.",
       endpoints_unavailable: "서버 엔드포인트 정보를 가져올 수 없습니다 (백엔드 연결 불가).",
       server_status: "서버 상태", running: "실행 중", uptime: "가동 시간", model: "모델",
-      total_tokens: "처리 Tokens", cached_tokens: "캐시 Tokens", cache_efficiency: "캐시 적중률",
-      active_kv_status: "Active KV 오프로드", active_kv_enabled: "켜짐", active_kv_disabled: "꺼짐", active_kv_parked: "일시 중지 {value}", active_kv_swaps: "내보내기/복원 {out}/{in}", active_kv_errors: "오류 {value}",
       gpu_memory: "GPU 메모리", requests: "요청", active_mem: "활성", peak_mem: "피크", cache_mem: "캐시", stopped: "중지됨",
       models_subtitle: "모델 관리, 다운로드 및 스케줄링 설정.", model_manager: "모델 관리", model_download: "모델 다운로드", scheduler_profile_tab: "스케줄러 설정",
       col_model: "모델 \u25B2", col_type: "유형", col_quant: "양자화", col_size: "크기", col_status: "상태", col_pinned: "고정", col_default: "기본", col_params: "매개변수", status_ready: "로드 안 됨",
@@ -4552,6 +4779,7 @@
     if (sel) sel.value = i18nLang;
     // Re-render model list to update action buttons text
     syncModelList();
+    renderRuntimeModels(window.__RUNTIME_MODELS__ || []);
   }
 
   // Language select change handler
@@ -4560,6 +4788,7 @@
     currentLang = val;
     applyI18n(val);
     syncModelList();
+    renderRuntimeModels(window.__RUNTIME_MODELS__ || []);
     // Send to Rust via WKScriptMessageHandler
     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.setLanguage) {
       window.webkit.messageHandlers.setLanguage.postMessage(val);
@@ -4586,7 +4815,11 @@
     if (pageEl) pageEl.classList.add('active');
     const content = document.querySelector('.content');
     if (content) {
-      content.classList.toggle('page-scroll-managed', page === 'models' || page === 'settings');
+      content.classList.toggle(
+        'page-scroll-managed',
+        page === 'status' || page === 'models' || page === 'benchmark' ||
+          page === 'logs' || page === 'settings'
+      );
       content.scrollTop = 0;
     }
     const pageScroll = pageEl && pageEl.querySelector('.page-body-scroll');
@@ -4918,6 +5151,7 @@
       return;
     }
     if (result.success) {
+      clearServerBanner();
       if (result.warning) {
         showToast(localizeWarningResult(result), 'info');
       }
@@ -4971,6 +5205,10 @@
           return (k in result) ? result[k] : m;
         });
       }
+      if (String(result.code).indexOf('diffusion_gemma_') === 0) {
+        return dict.recovery_reason_config
+          || 'This model has settings that its runtime does not support.';
+      }
     }
     return localizeBackendErrorMessage(result.error);
   }
@@ -5019,6 +5257,7 @@
       return;
     }
     if (result.success) {
+      clearServerBanner();
       // Single source of truth: re-render from backend state
       syncModelList();
     } else if (result.error) {
@@ -5054,6 +5293,9 @@
     const saved = window.__MODEL_PARAMS__[name] || {};
     const local = window.__LOCAL_MODELS__[name] || {};
     const generationDefaults = local.generation_defaults || {};
+    const capabilities = local.capabilities || {};
+    const isBlockDiffusion = capabilities.runtime_kind === 'block_diffusion'
+      || local.type === 'block_diffusion_vlm';
     const contextWindow = local.max_position_embeddings || saved.context_size || '';
     document.getElementById('modal-context-size').value = contextWindow || '--';
     document.getElementById('modal-max-tokens').value = local.effective_max_tokens || saved.max_tokens || contextWindow || '';
@@ -5061,7 +5303,18 @@
     document.getElementById('modal-top-p').value = saved.top_p || generationDefaults.top_p || '';
     document.getElementById('modal-top-k').value = saved.top_k || generationDefaults.top_k || '';
     document.getElementById('modal-repeat-penalty').value = saved.repeat_penalty || generationDefaults.repetition_penalty || '';
-    document.getElementById('modal-model-type').value = saved.model_type || 'auto';
+    document.getElementById('modal-model-type').value = isBlockDiffusion
+      ? 'block_diffusion_vlm'
+      : (saved.model_type || 'auto');
+    document.getElementById('modal-model-type').disabled = isBlockDiffusion;
+    document.getElementById('modal-context-size').closest('.modal-field').style.display =
+      capabilities.supports_kv_cache === false ? 'none' : '';
+    document.getElementById('modal-causal-sampling-row').style.display =
+      isBlockDiffusion ? 'none' : '';
+    document.getElementById('modal-mtp-section').style.display =
+      capabilities.supports_mtp === false ? 'none' : '';
+    document.getElementById('modal-prompt-lookup-section').style.display =
+      capabilities.supports_prompt_lookup === false ? 'none' : '';
     renderMtpParams(local, saved);
     renderPromptLookupParams(saved);
     document.getElementById('model-params-modal').classList.add('open');
@@ -5115,12 +5368,17 @@
   }
   function closeParamsModal() {
     document.getElementById('model-params-modal').classList.remove('open');
+    document.getElementById('modal-model-type').disabled = false;
   }
 
   function saveModelParams() {
     const modelId = window.__CURRENT_PARAM_MODEL__;
     if (!modelId) return;
     const dict = I18N[currentLang] || I18N.en;
+    const local = window.__LOCAL_MODELS__[modelId] || {};
+    const capabilities = local.capabilities || {};
+    const isBlockDiffusion = capabilities.runtime_kind === 'block_diffusion'
+      || local.type === 'block_diffusion_vlm';
     const contextText = document.getElementById('modal-context-size').value;
     const maxTokensText = document.getElementById('modal-max-tokens').value;
     const maxTokens = parsePositiveInteger(maxTokensText);
@@ -5129,7 +5387,7 @@
       return;
     }
     const contextWindow = parsePositiveInteger(contextText);
-    if (contextWindow && maxTokens > contextWindow) {
+    if (!isBlockDiffusion && contextWindow && maxTokens > contextWindow) {
       showToast(
         (dict.params_max_tokens_exceeds_context || 'MAX TOKENS cannot exceed the model context window ({context}).')
           .replace('{context}', contextWindow),
@@ -5138,7 +5396,9 @@
       return;
     }
     const mtpDraftTokensText = document.getElementById('modal-mtp-draft-tokens').value;
-    if (mtpDraftTokensText.trim() && !parsePositiveInteger(mtpDraftTokensText)) {
+    if (capabilities.supports_mtp !== false
+        && mtpDraftTokensText.trim()
+        && !parsePositiveInteger(mtpDraftTokensText)) {
       showToast(dict.params_invalid_mtp_draft_tokens || 'MTP Draft Tokens must be a positive integer, or empty for Auto.', 'warn');
       return;
     }
@@ -5149,14 +5409,18 @@
       context_size: contextWindow ? String(contextWindow) : '',
       max_tokens: String(maxTokens),
       temperature: document.getElementById('modal-temperature').value,
-      top_p: document.getElementById('modal-top-p').value,
-      top_k: document.getElementById('modal-top-k').value,
-      repeat_penalty: document.getElementById('modal-repeat-penalty').value,
-      mtp_enabled: document.getElementById('modal-mtp-enabled').checked,
-      mtp_model_id: document.getElementById('modal-mtp-model').value,
-      mtp_draft_tokens: mtpDraftTokensText,
-      prompt_lookup_enabled: document.getElementById('modal-prompt-lookup-enabled').checked,
-      prompt_lookup_cross_request: document.getElementById('modal-prompt-lookup-cross-request').checked
+      top_p: isBlockDiffusion ? '' : document.getElementById('modal-top-p').value,
+      top_k: isBlockDiffusion ? '' : document.getElementById('modal-top-k').value,
+      repeat_penalty: isBlockDiffusion ? '' : document.getElementById('modal-repeat-penalty').value,
+      mtp_enabled: capabilities.supports_mtp !== false
+        && document.getElementById('modal-mtp-enabled').checked,
+      mtp_model_id: capabilities.supports_mtp === false
+        ? '' : document.getElementById('modal-mtp-model').value,
+      mtp_draft_tokens: capabilities.supports_mtp === false ? '' : mtpDraftTokensText,
+      prompt_lookup_enabled: capabilities.supports_prompt_lookup !== false
+        && document.getElementById('modal-prompt-lookup-enabled').checked,
+      prompt_lookup_cross_request: capabilities.supports_prompt_lookup !== false
+        && document.getElementById('modal-prompt-lookup-cross-request').checked
     };
     // Save locally
     window.__MODEL_PARAMS__[modelId] = params;
@@ -6286,9 +6550,10 @@
 
   function renderModelType(model) {
     const type = String(model.type || 'llm').toLowerCase();
-    const labels = {
+      const labels = {
       llm: 'LLM',
       vlm: 'LLM/VLM',
+      block_diffusion_vlm: 'Block Diffusion VLM',
       embedding: 'Embedding',
       reranker: 'Reranker',
       asr: 'ASR',
@@ -6412,13 +6677,15 @@
     if (!profileSelect) return;
     const current = profileSelect.value;
     profileSelect.innerHTML = '<option value="">' + (dict.select_model || 'Select a model...') + '</option>';
-    models.forEach(m => {
+    models.filter(m => m.capabilities?.runtime_kind !== 'block_diffusion').forEach(m => {
       const opt = document.createElement('option');
       opt.value = m.id;
       opt.textContent = m.id;
       profileSelect.appendChild(opt);
     });
-    if (current) profileSelect.value = current;
+    if (current && Array.from(profileSelect.options).some(option => option.value === current)) {
+      profileSelect.value = current;
+    }
     requestSchedulerProfilePreview();
   }
 
@@ -7495,7 +7762,7 @@
     }
   }
 
-  // Server Endpoints card — trigger backend fetch via the WKWebView API bridge.
+  // Service Overview endpoints — trigger backend fetch via the WKWebView API bridge.
   // Cross-origin fetch() to 127.0.0.1 is blocked in WKWebView; we use the same
   // apiFetch/onApiFetchResult pattern as the rest of the dashboard.
   function refreshEndpoints() {
@@ -7572,11 +7839,76 @@
     showServerBanner(message, '#ff3b30', '#ff3b3014', '#ff3b3040');
   }
 
+  function recoveryReason(failure, dict) {
+    const code = String((failure && failure.code) || '');
+    if (code === 'memory_budget_exceeded' || code === 'gpu_memory_insufficient'
+        || code === 'model_memory_limit_exceeded' || code === 'total_memory_limit_exceeded'
+        || code === 'kv_memory_budget_exceeded') return dict.recovery_reason_memory;
+    if (code === 'max_loaded_models_reached') return dict.recovery_reason_capacity;
+    if (code === 'model_path_not_found' || code === 'model_file_missing') return dict.recovery_reason_missing;
+    if (code === 'model_snapshot_corrupt' || code === 'model_verification_failed') return dict.recovery_reason_corrupt;
+    if (code.indexOf('diffusion_gemma_') === 0) return dict.recovery_reason_config;
+    return dict.recovery_reason_unknown;
+  }
+
+  function recoveryAction(failures, dict) {
+    const actions = (failures || []).map(item => item.action);
+    if (actions.includes('redownload_model')) {
+      return { label: dict.recovery_action_redownload || 'Download again', page: 'models' };
+    }
+    if (actions.includes('verify_model')) {
+      return { label: dict.recovery_action_verify || 'Verify model', page: 'models' };
+    }
+    if (actions.includes('review_configuration')) {
+      return { label: dict.recovery_action_config || 'Review settings', page: 'models' };
+    }
+    if (actions.includes('review_runtime_settings')) {
+      return { label: dict.recovery_action_runtime_settings || 'Open runtime settings', page: 'settings' };
+    }
+    if (actions.includes('unload_other_models')) {
+      return { label: dict.recovery_action_models || 'Manage models', page: 'models' };
+    }
+    return null;
+  }
+
+  function updateServerStatusVisual(text, color) {
+    const status = document.getElementById('stat-server-status');
+    if (status) {
+      status.textContent = text;
+      status.style.color = color;
+    }
+    const dot = document.getElementById('server-status-dot');
+    if (dot) {
+      dot.style.background = color;
+      dot.style.boxShadow = '0 0 0 3px color-mix(in srgb, ' + color + ' 16%, transparent)';
+    }
+  }
+
   function onServerCrash(phase, detail) {
     const dict = I18N[currentLang] || I18N.en;
+    let payload = {};
+    if (typeof detail === 'string') {
+      try { payload = JSON.parse(detail); }
+      catch (e) { payload = { detail: detail }; }
+    } else if (detail && typeof detail === 'object') {
+      payload = detail;
+    }
+    const canRetry = !!payload.can_retry;
+    const hasLogTail = typeof payload.log_tail === 'string' && payload.log_tail.length > 0;
+    if (payload.runtime_state) {
+      const statusColor = payload.runtime_state === 'running'
+        ? 'var(--green)'
+        : (payload.runtime_state === 'recovering' || payload.runtime_state === 'degraded')
+          ? '#ff9500'
+          : '#ff3b30';
+      updateServerStatusVisual(String(payload.runtime_state), statusColor);
+    }
     if (phase === 'exited') {
-      const msg = (dict.server_crash_restarting || 'Server exited unexpectedly ({detail}). Restarting...').replace('{detail}', detail);
-      showServerBanner(msg, '#ff9500', '#ff950014', '#ff950040');
+      const msg = dict.server_crash_restarting || 'Server exited unexpectedly. Restarting...';
+      showServerBanner(msg, '#ff9500', '#ff950014', '#ff950040', false, hasLogTail);
+    } else if (phase === 'recovering') {
+      const msg = dict.server_crash_recovering || 'Server recovery is in progress...';
+      showServerBanner(msg, '#ff9500', '#ff950014', '#ff950040', false, hasLogTail);
     } else if (phase === 'recovered') {
       const msg = dict.server_crash_recovered || 'Server has been restarted successfully.';
       showServerBanner(msg, '#34c759', '#34c75914', '#34c75940');
@@ -7586,23 +7918,81 @@
         if (banner) banner.remove();
       }, 10000);
     } else if (phase === 'failed') {
-      const msg = (dict.server_crash_failed || 'Server restart failed: {detail}').replace('{detail}', detail);
-      showServerBanner(msg, '#ff3b30', '#ff3b3014', '#ff3b3040');
+      const failures = Array.isArray(payload.failures) ? payload.failures : [];
+      const localizedDetails = failures.map(failure => {
+        const reason = recoveryReason(failure, dict);
+        return String(failure.model || '') + ': ' + reason;
+      });
+      const summary = failures.length
+        ? (dict.server_restore_summary || 'Some models could not be restored.')
+        : (dict.recovery_reason_unknown || 'The service could not be restored. See logs for technical details.');
+      const msg = (dict.server_crash_failed || 'Server restart failed: {detail}').replace('{detail}', summary);
+      showServerBanner(
+        msg,
+        '#ff3b30',
+        '#ff3b3014',
+        '#ff3b3040',
+        canRetry,
+        hasLogTail || failures.some(failure => failure.action === 'view_logs'),
+        localizedDetails,
+        recoveryAction(failures, dict)
+      );
+    } else if (phase === 'breaker') {
+      const msg = dict.server_crash_breaker
+        || 'Automatic recovery stopped after consecutive crashes. Check the logs, then retry manually.';
+      showServerBanner(msg, '#ff3b30', '#ff3b3014', '#ff3b3040', true, hasLogTail);
     }
   }
 
-  function showServerBanner(message, iconColor, bgColor, borderColor) {
+  function retryBackendRecovery() {
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.retryBackendRecovery) {
+      window.webkit.messageHandlers.retryBackendRecovery.postMessage('');
+    }
+  }
+
+  function clearServerBanner() {
+    const banner = document.getElementById('server-error-banner');
+    if (banner) banner.remove();
+  }
+
+  function showServerBanner(
+    message,
+    iconColor,
+    bgColor,
+    borderColor,
+    canRetry,
+    canViewLogs,
+    details,
+    primaryAction
+  ) {
     let banner = document.getElementById('server-error-banner');
     if (!banner) {
       banner = document.createElement('div');
       banner.id = 'server-error-banner';
-      const statusPage = document.getElementById('page-status');
-      if (statusPage) statusPage.insertBefore(banner, statusPage.children[2]);
+      const statusBody = document.querySelector('#page-status .status-page-scroll');
+      if (statusBody) statusBody.insertBefore(banner, statusBody.firstChild);
     }
     banner.style.cssText = 'background:' + bgColor + ';border:1px solid ' + borderColor + ';border-radius:8px;padding:12px 16px;margin-bottom:16px;display:flex;align-items:center;gap:10px;font-size:13px;color:var(--text);';
+    const retry = canRetry
+      ? '<button onclick="retryBackendRecovery()" class="btn btn-secondary" style="padding:4px 10px;">' + ((I18N[currentLang] || I18N.en).server_crash_retry || 'Retry') + '</button>'
+      : '';
+    const logs = canViewLogs
+      ? '<button onclick="navigateTo(\'logs\')" class="btn btn-secondary" style="padding:4px 10px;">' + ((I18N[currentLang] || I18N.en).server_crash_logs || 'View logs') + '</button>'
+      : '';
+    const action = primaryAction
+      ? '<button onclick="navigateTo(\'' + escapeAttr(primaryAction.page) + '\')" class="btn btn-secondary" style="padding:4px 10px;">' + escapeAttr(primaryAction.label) + '</button>'
+      : '';
+    const detailRows = Array.isArray(details) && details.length
+      ? '<details style="margin-top:6px;"><summary style="cursor:pointer;color:var(--text-secondary);">'
+        + escapeAttr((I18N[currentLang] || I18N.en).server_restore_details || 'Model recovery details')
+        + '</summary><div style="margin-top:5px;line-height:1.5;">'
+        + details.map(item => '<div>' + escapeAttr(item) + '</div>').join('')
+        + '</div></details>'
+      : '';
     banner.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="flex-shrink:0;"><circle cx="8" cy="8" r="7" stroke="' + iconColor + '" stroke-width="1.3"/><path d="M8 4.5v4M8 10.5v.5" stroke="' + iconColor + '" stroke-width="1.5" stroke-linecap="round"/></svg>'
-      + '<span>' + message + '</span>'
-      + '<button onclick="this.parentElement.remove()" style="margin-left:auto;background:none;border:none;color:var(--text-secondary);cursor:pointer;font-size:16px;">\u00d7</button>';
+      + '<span>' + escapeAttr(message) + detailRows + '</span>'
+      + '<span style="margin-left:auto;display:flex;align-items:center;gap:8px;">' + action + logs + retry
+      + '<button onclick="this.closest(\'#server-error-banner\').remove()" style="background:none;border:none;color:var(--text-secondary);cursor:pointer;font-size:16px;">\u00d7</button></span>';
   }
 
   function normalizeKVQuantValue(value) {
@@ -7917,10 +8307,13 @@
       const detail = localizeErrorResult(result);
       const msg = (dict.server_restart_model_failed || 'Server restarted, but the default model could not be loaded: {detail}').replace('{detail}', detail);
       showToast(msg, 'warn', 10000);
-    } else if (result.model_loaded) {
-      showToast(dict.server_restarted_model_loaded || 'Server has been restarted and the default model is loaded.', 'success');
     } else {
-      showToast(dict.server_restarted || 'Server has been restarted successfully.', 'success');
+      clearServerBanner();
+      if (result.model_loaded) {
+        showToast(dict.server_restarted_model_loaded || 'Server has been restarted and the default model is loaded.', 'success');
+      } else {
+        showToast(dict.server_restarted || 'Server has been restarted successfully.', 'success');
+      }
     }
     // Host/port may have changed; re-fetch the endpoints card.
     refreshEndpoints();
@@ -8133,42 +8526,12 @@
   // Dummy — status error display handled in onApiFetchResult
   function showStatusOffline() {
     const dict = I18N[currentLang] || I18N.en;
-    document.getElementById('stat-server-status').textContent = dict.stopped || 'Stopped';
-    document.getElementById('stat-server-status').style.color = 'var(--text-tertiary)';
+    updateServerStatusVisual(dict.stopped || 'Stopped', 'var(--text-tertiary)');
     document.getElementById('stat-uptime').textContent = '--';
-    document.getElementById('stat-model').textContent = '--';
-    const activeKvEl = document.getElementById('stat-active-kv');
-    if (activeKvEl) activeKvEl.textContent = '--';
+    renderRuntimeModels([]);
     document.getElementById('gpu-active-val').textContent = '-- MB';
     document.getElementById('gpu-peak-val').textContent = '-- MB';
     document.getElementById('gpu-cache-val').textContent = '-- MB';
-  }
-
-  function updateActiveKvStatus(info) {
-    const el = document.getElementById('stat-active-kv');
-    if (!el) return;
-    const dict = I18N[currentLang] || I18N.en;
-    if (!info || !info.enabled) {
-      el.textContent = dict.active_kv_disabled || 'Off';
-      el.style.color = 'var(--text-tertiary)';
-      return;
-    }
-    const parked = Number(info.parked_requests || 0);
-    const swapOut = Number(info.swap_out_count || 0);
-    const swapIn = Number(info.swap_in_count || 0);
-    const errors = Number(info.swap_error_count || 0);
-    const parts = [
-      dict.active_kv_enabled || 'On',
-      (dict.active_kv_parked || 'parked {value}').replace('{value}', parked.toLocaleString()),
-      (dict.active_kv_swaps || 'swaps {out}/{in}')
-        .replace('{out}', swapOut.toLocaleString())
-        .replace('{in}', swapIn.toLocaleString())
-    ];
-    if (errors > 0) {
-      parts.push((dict.active_kv_errors || 'errors {value}').replace('{value}', errors.toLocaleString()));
-    }
-    el.textContent = parts.join(' · ');
-    el.style.color = errors > 0 ? '#ff9500' : 'var(--text)';
   }
 
   function initStatusPolling() {
@@ -8206,6 +8569,195 @@
     }
   }
 
+  const runtimeActiveKvOpenModelIds = new Set();
+
+  function captureRuntimeActiveKvOpenState(container) {
+    container.querySelectorAll('details[data-active-kv-model-id]').forEach(details => {
+      const modelId = details.dataset.activeKvModelId || '';
+      if (!modelId) return;
+      if (details.open) {
+        runtimeActiveKvOpenModelIds.add(modelId);
+      } else {
+        runtimeActiveKvOpenModelIds.delete(modelId);
+      }
+    });
+  }
+
+  function dismissActiveKvIncident() {
+    window.__ACTIVE_KV_INCIDENT_DISMISSED__ = window.__ACTIVE_KV_INCIDENT_CURRENT__ || '';
+    const banner = document.getElementById('active-kv-error-banner');
+    if (banner) banner.remove();
+  }
+
+  function renderActiveKvIncident(models) {
+    const degradedModels = (models || []).filter(model => {
+      const info = model.active_kv_offload;
+      return info && (info.degraded || info.status === 'degraded'
+        || Number(info.swap_error_count || 0) > 0);
+    });
+    let banner = document.getElementById('active-kv-error-banner');
+    if (degradedModels.length === 0) {
+      window.__ACTIVE_KV_INCIDENT_CURRENT__ = '';
+      window.__ACTIVE_KV_INCIDENT_DISMISSED__ = '';
+      if (banner) banner.remove();
+      return;
+    }
+
+    const signature = degradedModels
+      .map(model => String(model.id || model.model || '') + ':'
+        + Number(model.active_kv_offload.swap_error_count || 0))
+      .sort()
+      .join('|');
+    window.__ACTIVE_KV_INCIDENT_CURRENT__ = signature;
+    if (window.__ACTIVE_KV_INCIDENT_DISMISSED__ === signature) {
+      if (banner) banner.remove();
+      return;
+    }
+
+    if (!banner) {
+      banner = document.createElement('div');
+      banner.id = 'active-kv-error-banner';
+      const statusPage = document.getElementById('page-status');
+      const runtimeCard = statusPage && statusPage.querySelector('#runtime-model-health-card');
+      const statusBody = statusPage && statusPage.querySelector('.status-page-scroll');
+      if (runtimeCard && runtimeCard.parentElement) {
+        runtimeCard.parentElement.insertBefore(banner, runtimeCard);
+      } else if (statusBody) {
+        statusBody.insertBefore(banner, statusBody.firstChild);
+      }
+    }
+    const dict = I18N[currentLang] || I18N.en;
+    const modelNames = degradedModels.map(model => String(model.id || model.model || ''));
+    const message = (dict.active_kv_incident
+      || 'Active KV tiering is degraded for {models}. Requests can continue, but cache offload may be impaired.')
+      .replace('{models}', modelNames.join(', '));
+    banner.style.cssText = 'background:#ff950014;border:1px solid #ff950040;border-radius:8px;padding:12px 16px;margin-bottom:16px;display:flex;align-items:center;gap:10px;font-size:13px;color:var(--text);';
+    banner.innerHTML =
+      '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="flex-shrink:0;"><circle cx="8" cy="8" r="7" stroke="#ff9500" stroke-width="1.3"/><path d="M8 4.5v4M8 10.5v.5" stroke="#ff9500" stroke-width="1.5" stroke-linecap="round"/></svg>'
+      + '<span>' + escapeAttr(message) + '</span>'
+      + '<span style="margin-left:auto;display:flex;align-items:center;gap:8px;">'
+      + '<button onclick="navigateTo(\'settings\')" class="btn btn-secondary" style="padding:4px 10px;">'
+      + escapeAttr(dict.recovery_action_runtime_settings || 'Open runtime settings') + '</button>'
+      + '<button onclick="navigateTo(\'logs\')" class="btn btn-secondary" style="padding:4px 10px;">'
+      + escapeAttr(dict.server_crash_logs || 'View logs') + '</button>'
+      + '<button onclick="dismissActiveKvIncident()" style="background:none;border:none;color:var(--text-secondary);cursor:pointer;font-size:16px;">\u00d7</button>'
+      + '</span>';
+  }
+
+  function renderRuntimeModels(models) {
+    const card = document.getElementById('runtime-model-health-card');
+    const container = document.getElementById('runtime-model-health');
+    if (!card || !container) return;
+    captureRuntimeActiveKvOpenState(container);
+    renderActiveKvIncident(Array.isArray(models) ? models : []);
+    if (!Array.isArray(models) || models.length === 0) {
+      window.__RUNTIME_MODELS__ = [];
+      runtimeActiveKvOpenModelIds.clear();
+      card.style.display = '';
+      const dict = I18N[currentLang] || I18N.en;
+      container.innerHTML =
+        '<div style="padding:18px 12px;text-align:center;border:1px dashed var(--border);border-radius:8px;background:var(--bg);">'
+        + '<div style="font-size:12px;font-weight:600;color:var(--text-secondary);">'
+        + escapeAttr(dict.runtime_empty_title || 'No models are currently running') + '</div>'
+        + '<div style="font-size:11px;color:var(--text-tertiary);margin-top:4px;">'
+        + escapeAttr(dict.runtime_empty_description || 'Load a model to see request queues and cumulative usage here.')
+        + '</div></div>';
+      return;
+    }
+    window.__RUNTIME_MODELS__ = models;
+    const dict = I18N[currentLang] || I18N.en;
+    const numberLocale = {
+      en: 'en-US',
+      'zh-Hans': 'zh-CN',
+      'zh-Hant': 'zh-TW',
+      ja: 'ja-JP',
+      ko: 'ko-KR'
+    }[currentLang] || 'en-US';
+    const activeKvModelIds = new Set(models
+      .filter(model => !!model.active_kv_offload)
+      .map(model => String(model.id || model.model || ''))
+      .filter(modelId => !!modelId));
+    runtimeActiveKvOpenModelIds.forEach(modelId => {
+      if (!activeKvModelIds.has(modelId)) runtimeActiveKvOpenModelIds.delete(modelId);
+    });
+    card.style.display = '';
+    container.innerHTML = models.map(model => {
+      const modelId = String(model.id || model.model || '');
+      const isDiffusion = model.runtime_kind === 'block_diffusion';
+      const scheduler = isDiffusion
+        ? (dict.runtime_serial_diffusion || 'Serial block diffusion')
+        : model.scheduler === 'continuous_batching'
+          ? (dict.runtime_continuous_batching || 'Continuous batching')
+          : String(model.scheduler || '');
+      const requestMetrics = [
+        (dict.runtime_active || 'Active') + ': ' + Number(model.active_requests || 0),
+        (dict.runtime_queued || 'Queued') + ': ' + Number(model.queued_requests || 0),
+        (dict.runtime_capacity || 'Queue capacity') + ': ' + Number(model.queue_capacity || 0)
+      ].join(' · ');
+      const usage = model.usage;
+      const tokenMetrics = [
+        (dict.runtime_cumulative_tokens || 'Cumulative tokens') + ': '
+          + Number(usage.cumulative_tokens).toLocaleString(numberLocale)
+      ];
+      if (usage.prefix_cache) {
+        const hitTokens = Number(usage.prefix_cache.hit_tokens);
+        const eligibleTokens = Number(usage.prefix_cache.eligible_tokens);
+        const hitRate = eligibleTokens > 0
+          ? (hitTokens / eligibleTokens * 100).toFixed(1) + '%'
+          : '—';
+        tokenMetrics.push(
+          (dict.runtime_cache_hit_tokens || 'Cache-hit tokens') + ': '
+            + hitTokens.toLocaleString(numberLocale),
+          (dict.runtime_cache_hit_rate || 'Cache hit rate') + ': ' + hitRate
+        );
+      }
+      const activeKv = model.active_kv_offload;
+      let activeKvDetails = '';
+      if (activeKv) {
+        const errors = Number(activeKv.swap_error_count || 0);
+        const degraded = !!activeKv.degraded || activeKv.status === 'degraded' || errors > 0;
+        const active = !!activeKv.active || activeKv.status === 'active';
+        const state = degraded
+          ? (dict.runtime_active_kv_degraded || 'Degraded')
+          : active
+            ? (dict.runtime_active_kv_active || 'Active')
+            : (dict.runtime_active_kv_idle || 'Idle');
+        const stateColor = degraded
+          ? '#ff9500'
+          : active
+            ? 'var(--accent)'
+            : 'var(--text-secondary)';
+        const metrics = [
+          (dict.runtime_active_kv_parked || 'Parked requests') + ': '
+            + Number(activeKv.parked_requests || 0).toLocaleString(numberLocale),
+          (dict.runtime_active_kv_offloaded || 'Offloaded') + ': '
+            + formatVersionBytes(activeKv.offloaded_bytes),
+          (dict.runtime_active_kv_swaps || 'Swap out/in') + ': '
+            + Number(activeKv.swap_out_count || 0).toLocaleString(numberLocale) + '/'
+            + Number(activeKv.swap_in_count || 0).toLocaleString(numberLocale),
+          (dict.runtime_active_kv_errors || 'Errors') + ': '
+            + errors.toLocaleString(numberLocale)
+        ].join(' · ');
+        const openAttribute = runtimeActiveKvOpenModelIds.has(modelId) ? ' open' : '';
+        activeKvDetails =
+          '<details data-active-kv-model-id="' + escapeAttr(modelId) + '"' + openAttribute
+          + ' style="font-size:11px;color:var(--text-secondary);margin-top:5px;">'
+          + '<summary style="cursor:pointer;color:' + stateColor + ';">'
+          + escapeAttr((dict.runtime_active_kv || 'Active KV tiering') + ': ' + state)
+          + '</summary><div style="margin-top:4px;">' + escapeAttr(metrics) + '</div></details>';
+      }
+      return '<div style="padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg);">'
+        + '<div style="display:flex;justify-content:space-between;gap:12px;">'
+        + '<strong style="font-size:12px;overflow:hidden;text-overflow:ellipsis;">'
+        + escapeAttr(model.id || model.model || '') + '</strong>'
+        + '<span class="badge badge-model-type">' + escapeAttr(scheduler) + '</span></div>'
+        + '<div style="font-size:11px;color:var(--text-secondary);margin-top:5px;">'
+        + escapeAttr(requestMetrics) + '</div>'
+        + '<div style="font-size:11px;color:var(--text-secondary);margin-top:3px;">'
+        + escapeAttr(tokenMetrics.join(' · ')) + '</div>' + activeKvDetails + '</div>';
+    }).join('');
+  }
+
   // Called from Rust with API response
   function onApiFetchResult(path, jsonStr) {
     const dict = I18N[currentLang] || I18N.en;
@@ -8217,11 +8769,10 @@
           return;
         }
         const data = JSON.parse(jsonStr);
-        document.getElementById('stat-server-status').textContent = dict.running || 'Running';
-        document.getElementById('stat-server-status').style.color = 'var(--green)';
+        const runtimeModels = Array.isArray(data.runtime_models) ? data.runtime_models : [];
+        renderRuntimeModels(runtimeModels);
+        updateServerStatusVisual(dict.running || 'Running', 'var(--green)');
         document.getElementById('stat-uptime').textContent = formatUptime(data.started_at);
-        const modelNames = (data.model || '--').split(',').map(s => s.trim().split('/').pop());
-        document.getElementById('stat-model').textContent = modelNames.length > 1 ? modelNames.length + ' models' : modelNames[0];
         // Sync loaded model state from health response (supports multiple models)
         if (data.model) {
           const currentIds = data.model.split(',').map(s => s.trim()).filter(s => s);
@@ -8261,17 +8812,6 @@
           document.getElementById('gpu-cache-val').textContent = formatMB(m.cache_mb);
           drawGpuChart();
         }
-        // Update token/cache stats
-        if (data.total_tokens !== undefined) {
-          document.getElementById('stat-total-tokens').textContent = data.total_tokens.toLocaleString();
-        }
-        if (data.cached_tokens !== undefined) {
-          document.getElementById('stat-cached-tokens').textContent = data.cached_tokens.toLocaleString();
-        }
-        if (data.cache_hit_rate !== undefined) {
-          document.getElementById('stat-cache-efficiency').textContent = (data.cache_hit_rate * 100).toFixed(1) + '%';
-        }
-        updateActiveKvStatus(data.active_kv_offload);
       } else if (path === '/admin/api/models/local') {
         onLocalModelsResult(jsonStr);
       } else if (path === '/admin/api/cache/capacity') {

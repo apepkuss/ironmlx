@@ -6,7 +6,7 @@ import WebKit
 public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     private weak var webView: WKWebView?
     private let configStore: AppConfigStore
-    private let backend: BackendProcessManager
+    private let backend: any BackendRuntimeManaging
     private let scanner: LocalModelScanner
     private let downloadService: ModelDownloadService
     private let deletionService: LocalModelDeletionService
@@ -15,7 +15,6 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     private let profileGenerationService: SchedulerProfileGenerationService
     private let benchmarkService: BenchmarkService
     private let benchmarkSessionCoordinator: BenchmarkExclusiveSessionCoordinator
-    private let restartCoordinator: BackendRestartCoordinator
     private let parameterStore: ModelParameterStore
     private let notificationCenter: NotificationCenter
     private var huggingFaceSearchTask: Task<Void, Never>?
@@ -23,7 +22,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     public init(
         webView: WKWebView,
         configStore: AppConfigStore,
-        backend: BackendProcessManager,
+        backend: any BackendRuntimeManaging,
         scanner: LocalModelScanner = LocalModelScanner(),
         downloadService: ModelDownloadService = ModelDownloadService(),
         deletionService: LocalModelDeletionService? = nil,
@@ -32,7 +31,6 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         profileGenerationService: SchedulerProfileGenerationService = SchedulerProfileGenerationService(),
         benchmarkService: BenchmarkService = BenchmarkService(),
         benchmarkSessionCoordinator: BenchmarkExclusiveSessionCoordinator = BenchmarkExclusiveSessionCoordinator(),
-        restartCoordinator: BackendRestartCoordinator? = nil,
         parameterStore: ModelParameterStore = .shared,
         notificationCenter: NotificationCenter = .default
     ) {
@@ -49,15 +47,17 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         self.benchmarkSessionCoordinator = benchmarkSessionCoordinator
         self.parameterStore = parameterStore
         self.notificationCenter = notificationCenter
-        self.restartCoordinator = restartCoordinator ?? BackendRestartCoordinator(
-            scanner: scanner,
-            parameterStore: parameterStore
-        )
         super.init()
         notificationCenter.addObserver(
             self,
             selector: #selector(loadedModelsDidChange(_:)),
             name: .ironMLXLoadedModelsDidChange,
+            object: nil
+        )
+        notificationCenter.addObserver(
+            self,
+            selector: #selector(backendRuntimeDidChange(_:)),
+            name: .ironMLXBackendRuntimeDidChange,
             object: nil
         )
     }
@@ -91,6 +91,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         "deleteModelVersions",
         "saveSettings",
         "restartServer",
+        "retryBackendRecovery",
         "loadModel",
         "forceLoadModel",
         "unloadModel",
@@ -150,6 +151,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         case "saveSettings":
             saveSettings(json: stringBody(body))
         case "restartServer":
+            restartBackend()
+        case "retryBackendRecovery":
             restartBackend()
         case "loadModel", "forceLoadModel":
             loadBackendModel(instruction: Self.modelLoadInstruction(from: body), callback: .modelLoaded)
@@ -378,9 +381,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
 
         Task {
             do {
-                try await MainActor.run {
-                    try self.backend.start()
-                }
+                try await self.backend.ensureRunning()
                 try await client.waitUntilReady()
                 let result = try await benchmarkSessionCoordinator.prepare(
                     client: client,
@@ -911,6 +912,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             return
         }
         let config = configStore.load()
+        let capabilities = scanner.model(for: model)?.capabilities
         let pinned = config.pinnedModelReferences.contains(model)
         let resolvedModel: String
         do {
@@ -922,23 +924,29 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             deliverModelOperationResult(error: error.localizedDescription, callback: callback)
             return
         }
-        let maxCacheCap = ModelLoadParameters.maxCacheCap(
-            for: model,
-            scanner: scanner,
-            parameterStore: parameterStore,
-            activeKvOffloadEnabled: config.activeKvOffload == true
-        )
-        let promptLookup = promptLookupConfig(for: model, instruction: instruction)
-        let mtpRuntime: ModelMtpRuntime?
-        do {
-            mtpRuntime = try ModelMtpRuntimeResolver.runtime(
+        let maxCacheCap = capabilities?.supportsKvCache != false
+            ? ModelLoadParameters.maxCacheCap(
                 for: model,
-                useMtp: instruction.useMtp,
-                explicitMtpModelID: instruction.mtpModelID,
                 scanner: scanner,
                 parameterStore: parameterStore,
-                fullChecksum: false
+                activeKvOffloadEnabled: config.activeKvOffload == true
             )
+            : nil
+        let promptLookup = capabilities?.supportsPromptLookup != false
+            ? promptLookupConfig(for: model, instruction: instruction)
+            : nil
+        let mtpRuntime: ModelMtpRuntime?
+        do {
+            mtpRuntime = capabilities?.supportsMtp != false
+                ? try ModelMtpRuntimeResolver.runtime(
+                    for: model,
+                    useMtp: instruction.useMtp,
+                    explicitMtpModelID: instruction.mtpModelID,
+                    scanner: scanner,
+                    parameterStore: parameterStore,
+                    fullChecksum: false
+                )
+                : nil
         } catch {
             deliverModelOperationResult(error: error.localizedDescription, callback: callback)
             return
@@ -952,21 +960,21 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                         for: model,
                         fullChecksum: true
                     )
-                    loadMtpRuntime = try await ModelMtpRuntimeResolver.runtimeAsync(
-                        for: model,
-                        useMtp: instruction.useMtp,
-                        explicitMtpModelID: instruction.mtpModelID,
-                        scanner: self.scanner,
-                        parameterStore: self.parameterStore,
-                        fullChecksum: true
-                    )
+                    loadMtpRuntime = capabilities?.supportsMtp != false
+                        ? try await ModelMtpRuntimeResolver.runtimeAsync(
+                            for: model,
+                            useMtp: instruction.useMtp,
+                            explicitMtpModelID: instruction.mtpModelID,
+                            scanner: self.scanner,
+                            parameterStore: self.parameterStore,
+                            fullChecksum: true
+                        )
+                        : nil
                 } else {
                     loadModelPath = resolvedModel
                     loadMtpRuntime = mtpRuntime
                 }
-                try await MainActor.run {
-                    try self.backend.start()
-                }
+                try await self.backend.ensureRunning()
                 let client = BackendAPIClient(host: config.host, port: config.port)
                 try await client.waitUntilReady()
                 await self.registerLocalModels(config: config, client: client)
@@ -986,7 +994,9 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                     mtpDraftTokens: loadMtpRuntime?.draftTokens,
                     promptLookup: promptLookup,
                     reloadWhenIdle: false,
-                    samplingDefaults: self.parameterStore.parameters(for: model)?.samplingDefaults ?? .empty
+                    samplingDefaults: (
+                        self.parameterStore.parameters(for: model)?.samplingDefaults ?? .empty
+                    ).filtered(for: capabilities)
                 )
                 let json = try Self.jsonString(response)
                 await MainActor.run {
@@ -995,7 +1005,10 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                         instruction: instruction,
                         mtpRuntime: loadMtpRuntime
                     )
-                    self.persistBackendLoadedModels(response.loadedModels)
+                    self.persistBackendLoadedModels(
+                        response.loadedModels,
+                        parameterConfirmedModelIDs: [model]
+                    )
                     self.deliverModelOperationResult(jsonString: json, callback: callback)
                     self.sendScannedModels()
                 }
@@ -1135,12 +1148,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     }
 
     private func restartBackend() {
-        let config = configStore.load()
         Task {
-            let result = await self.restartCoordinator.restartDefaultModel(
-                config: config,
-                backend: self.backend
-            )
+            let result = await self.backend.restart(intent: .plannedRestart)
             let json = (try? Self.jsonString(result)) ?? "{\"success\":false,\"status\":\"restart_failed\"}"
             await MainActor.run {
                 if result.success {
@@ -1419,7 +1428,10 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 )
                 let json = try Self.jsonString(response)
                 await MainActor.run {
-                    self.persistBackendLoadedModels(response.loadedModels)
+                    self.persistBackendLoadedModels(
+                        response.loadedModels,
+                        parameterConfirmedModelIDs: [model]
+                    )
                     self.sendJavaScript("onModelParamsReloaded(\(Self.jsStringLiteral(json)))")
                     self.sendScannedModels()
                 }
@@ -1561,7 +1573,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
 
     private func persistBackendLoadedModels(
         _ models: [BackendLoadedModelInfo],
-        preferredDefaultModel: String? = nil
+        preferredDefaultModel: String? = nil,
+        parameterConfirmedModelIDs: Set<String> = []
     ) {
         let loaded = models.map(\.id)
         let backendDefault = models.first(where: \.isDefault)?.id
@@ -1575,6 +1588,10 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             }
         }
         notificationCenter.post(name: .ironMLXLoadedModelsDidChange, object: self)
+        backend.confirmLoadedModels(
+            models,
+            parameterConfirmedModelIDs: parameterConfirmedModelIDs
+        )
         if let defaultModel {
             sendJavaScript("window.__DEFAULT_MODEL__ = \(Self.jsStringLiteral(defaultModel));")
         }
@@ -1715,7 +1732,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 )
                 let shouldRestartBackend = backend.isRunning
                 if shouldRestartBackend {
-                    backend.stop()
+                    await backend.stop(intent: .schedulerProfileGeneration)
                 }
                 let started = profileGenerationService.start(request: request) { [weak self] status in
                     Task { @MainActor in
@@ -1724,7 +1741,11 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                         }
                         self.sendSchedulerProfileStatus(status)
                         if shouldRestartBackend {
-                            self.restartBackend()
+                            Task {
+                                _ = await self.backend.restart(
+                                    intent: .schedulerProfileGeneration
+                                )
+                            }
                         }
                     }
                 }
@@ -1861,6 +1882,19 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             return
         }
         sendScannedModels()
+    }
+
+    @objc private func backendRuntimeDidChange(_ notification: Notification) {
+        guard let source = notification.object as AnyObject?,
+              source === backend,
+              let event = backend.lastEvent,
+              let json = try? Self.jsonString(event)
+        else {
+            return
+        }
+        sendJavaScript(
+            "onServerCrash(\(Self.jsStringLiteral(event.phase.rawValue)), \(Self.jsStringLiteral(json)))"
+        )
     }
 
     private func logText(from file: IronMLXLogFile) -> String {

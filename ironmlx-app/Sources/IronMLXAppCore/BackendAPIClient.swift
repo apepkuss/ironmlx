@@ -85,11 +85,11 @@ public struct BackendAPIClient: Sendable {
         var lastError: Error?
         repeat {
             do {
-                _ = try await fetchData(path: "/health")
+                _ = try await fetchHealthz()
                 return
             } catch {
                 lastError = error
-                try await Task.sleep(nanoseconds: 200_000_000)
+                try await Task.sleep(for: .milliseconds(200))
             }
         } while Date() < deadline
         throw lastError ?? URLError(.timedOut)
@@ -382,6 +382,19 @@ public struct BackendSamplingDefaults: Codable, Equatable, Sendable {
         self.topK = topK
         self.repetitionPenalty = repetitionPenalty
     }
+
+    public func filtered(for capabilities: BackendModelCapabilities?) -> BackendSamplingDefaults {
+        guard let capabilities else {
+            return self
+        }
+        let supported = Set(capabilities.supportedSamplingParameters)
+        return BackendSamplingDefaults(
+            temperature: supported.contains("temperature") ? temperature : nil,
+            topP: supported.contains("top_p") ? topP : nil,
+            topK: supported.contains("top_k") ? topK : nil,
+            repetitionPenalty: supported.contains("repetition_penalty") ? repetitionPenalty : nil
+        )
+    }
 }
 
 public struct BackendUnloadModelRequest: Codable, Equatable, Sendable {
@@ -444,6 +457,89 @@ public struct BackendModelAdminResponse: Codable, Equatable, Sendable {
     }
 }
 
+public struct BackendModelCapabilities: Codable, Equatable, Sendable {
+    public var runtimeKind: String
+    public var supportsStreaming: Bool
+    public var supportsVision: Bool
+    public var supportsMtp: Bool
+    public var supportsPromptLookup: Bool
+    public var supportsSpeculativeDecoding: Bool
+    public var supportsKvCache: Bool
+    public var supportedSamplingParameters: [String]
+
+    public init(
+        runtimeKind: String,
+        supportsStreaming: Bool,
+        supportsVision: Bool,
+        supportsMtp: Bool,
+        supportsPromptLookup: Bool,
+        supportsSpeculativeDecoding: Bool,
+        supportsKvCache: Bool,
+        supportedSamplingParameters: [String]
+    ) {
+        self.runtimeKind = runtimeKind
+        self.supportsStreaming = supportsStreaming
+        self.supportsVision = supportsVision
+        self.supportsMtp = supportsMtp
+        self.supportsPromptLookup = supportsPromptLookup
+        self.supportsSpeculativeDecoding = supportsSpeculativeDecoding
+        self.supportsKvCache = supportsKvCache
+        self.supportedSamplingParameters = supportedSamplingParameters
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case runtimeKind = "runtime_kind"
+        case supportsStreaming = "supports_streaming"
+        case supportsVision = "supports_vision"
+        case supportsMtp = "supports_mtp"
+        case supportsPromptLookup = "supports_prompt_lookup"
+        case supportsSpeculativeDecoding = "supports_speculative_decoding"
+        case supportsKvCache = "supports_kv_cache"
+        case supportedSamplingParameters = "supported_sampling_parameters"
+    }
+}
+
+public struct BackendPrefixCacheUsage: Codable, Equatable, Sendable {
+    public var hitTokens: UInt64
+    public var eligibleTokens: UInt64
+
+    public init(hitTokens: UInt64, eligibleTokens: UInt64) {
+        self.hitTokens = hitTokens
+        self.eligibleTokens = eligibleTokens
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case hitTokens = "hit_tokens"
+        case eligibleTokens = "eligible_tokens"
+    }
+}
+
+public struct BackendModelRuntimeUsage: Codable, Equatable, Sendable {
+    public var cumulativeTokens: UInt64
+    public var inputTokens: UInt64
+    public var outputTokens: UInt64
+    public var prefixCache: BackendPrefixCacheUsage?
+
+    public init(
+        cumulativeTokens: UInt64 = 0,
+        inputTokens: UInt64 = 0,
+        outputTokens: UInt64 = 0,
+        prefixCache: BackendPrefixCacheUsage? = nil
+    ) {
+        self.cumulativeTokens = cumulativeTokens
+        self.inputTokens = inputTokens
+        self.outputTokens = outputTokens
+        self.prefixCache = prefixCache
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case cumulativeTokens = "cumulative_tokens"
+        case inputTokens = "input_tokens"
+        case outputTokens = "output_tokens"
+        case prefixCache = "prefix_cache"
+    }
+}
+
 public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
     public var id: String
     public var model: String
@@ -456,6 +552,14 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
     public var mtpModelDir: String?
     public var mtpDraftTokens: Int?
     public var promptLookup: BackendPromptLookupConfig?
+    public var capabilities: BackendModelCapabilities
+    public var runtimeState: String
+    public var scheduler: String?
+    public var activeRequests: Int
+    public var queuedRequests: Int
+    public var queueCapacity: Int
+    public var usage: BackendModelRuntimeUsage
+    public var activeKvOffload: HealthzSnapshot.ActiveKvOffloadInfo?
 
     public init(
         id: String,
@@ -468,7 +572,26 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
         mtpEnabled: Bool = false,
         mtpModelDir: String? = nil,
         mtpDraftTokens: Int? = nil,
-        promptLookup: BackendPromptLookupConfig? = nil
+        promptLookup: BackendPromptLookupConfig? = nil,
+        capabilities: BackendModelCapabilities = BackendModelCapabilities(
+            runtimeKind: "causal",
+            supportsStreaming: true,
+            supportsVision: false,
+            supportsMtp: false,
+            supportsPromptLookup: true,
+            supportsSpeculativeDecoding: false,
+            supportsKvCache: true,
+            supportedSamplingParameters: [
+                "max_tokens", "temperature", "top_p", "top_k", "repetition_penalty", "seed",
+            ]
+        ),
+        runtimeState: String = "loaded",
+        scheduler: String? = nil,
+        activeRequests: Int = 0,
+        queuedRequests: Int = 0,
+        queueCapacity: Int = 0,
+        usage: BackendModelRuntimeUsage = BackendModelRuntimeUsage(),
+        activeKvOffload: HealthzSnapshot.ActiveKvOffloadInfo? = nil
     ) {
         self.id = id
         self.model = model
@@ -481,6 +604,14 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
         self.mtpModelDir = mtpModelDir
         self.mtpDraftTokens = mtpDraftTokens
         self.promptLookup = promptLookup
+        self.capabilities = capabilities
+        self.runtimeState = runtimeState
+        self.scheduler = scheduler
+        self.activeRequests = activeRequests
+        self.queuedRequests = queuedRequests
+        self.queueCapacity = queueCapacity
+        self.usage = usage
+        self.activeKvOffload = activeKvOffload
     }
 
     enum CodingKeys: String, CodingKey {
@@ -495,6 +626,21 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
         case mtpModelDir = "mtp_model_dir"
         case mtpDraftTokens = "mtp_draft_tokens"
         case promptLookup = "prompt_lookup"
+        case runtimeKind = "runtime_kind"
+        case supportsStreaming = "supports_streaming"
+        case supportsVision = "supports_vision"
+        case supportsMtp = "supports_mtp"
+        case supportsPromptLookup = "supports_prompt_lookup"
+        case supportsSpeculativeDecoding = "supports_speculative_decoding"
+        case supportsKvCache = "supports_kv_cache"
+        case supportedSamplingParameters = "supported_sampling_parameters"
+        case runtimeState = "runtime_state"
+        case scheduler
+        case activeRequests = "active_requests"
+        case queuedRequests = "queued_requests"
+        case queueCapacity = "queue_capacity"
+        case usage
+        case activeKvOffload = "active_kv_offload"
     }
 
     public init(from decoder: Decoder) throws {
@@ -513,5 +659,67 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
             BackendPromptLookupConfig.self,
             forKey: .promptLookup
         )
+        self.capabilities = BackendModelCapabilities(
+            runtimeKind: try container.decode(String.self, forKey: .runtimeKind),
+            supportsStreaming: try container.decode(Bool.self, forKey: .supportsStreaming),
+            supportsVision: try container.decode(Bool.self, forKey: .supportsVision),
+            supportsMtp: try container.decode(Bool.self, forKey: .supportsMtp),
+            supportsPromptLookup: try container.decode(Bool.self, forKey: .supportsPromptLookup),
+            supportsSpeculativeDecoding: try container.decode(
+                Bool.self,
+                forKey: .supportsSpeculativeDecoding
+            ),
+            supportsKvCache: try container.decode(Bool.self, forKey: .supportsKvCache),
+            supportedSamplingParameters: try container.decode(
+                [String].self,
+                forKey: .supportedSamplingParameters
+            )
+        )
+        self.runtimeState = try container.decode(String.self, forKey: .runtimeState)
+        self.scheduler = try container.decodeIfPresent(String.self, forKey: .scheduler)
+        self.activeRequests = try container.decode(Int.self, forKey: .activeRequests)
+        self.queuedRequests = try container.decode(Int.self, forKey: .queuedRequests)
+        self.queueCapacity = try container.decode(Int.self, forKey: .queueCapacity)
+        self.usage = try container.decode(BackendModelRuntimeUsage.self, forKey: .usage)
+        self.activeKvOffload = try container.decodeIfPresent(
+            HealthzSnapshot.ActiveKvOffloadInfo.self,
+            forKey: .activeKvOffload
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(model, forKey: .model)
+        try container.encode(path, forKey: .path)
+        try container.encode(architecture, forKey: .architecture)
+        try container.encode(isDefault, forKey: .isDefault)
+        try container.encode(maxPositionEmbeddings, forKey: .maxPositionEmbeddings)
+        try container.encode(pinned, forKey: .pinned)
+        try container.encode(mtpEnabled, forKey: .mtpEnabled)
+        try container.encodeIfPresent(mtpModelDir, forKey: .mtpModelDir)
+        try container.encodeIfPresent(mtpDraftTokens, forKey: .mtpDraftTokens)
+        try container.encodeIfPresent(promptLookup, forKey: .promptLookup)
+        try container.encode(capabilities.runtimeKind, forKey: .runtimeKind)
+        try container.encode(capabilities.supportsStreaming, forKey: .supportsStreaming)
+        try container.encode(capabilities.supportsVision, forKey: .supportsVision)
+        try container.encode(capabilities.supportsMtp, forKey: .supportsMtp)
+        try container.encode(capabilities.supportsPromptLookup, forKey: .supportsPromptLookup)
+        try container.encode(
+            capabilities.supportsSpeculativeDecoding,
+            forKey: .supportsSpeculativeDecoding
+        )
+        try container.encode(capabilities.supportsKvCache, forKey: .supportsKvCache)
+        try container.encode(
+            capabilities.supportedSamplingParameters,
+            forKey: .supportedSamplingParameters
+        )
+        try container.encode(runtimeState, forKey: .runtimeState)
+        try container.encodeIfPresent(scheduler, forKey: .scheduler)
+        try container.encode(activeRequests, forKey: .activeRequests)
+        try container.encode(queuedRequests, forKey: .queuedRequests)
+        try container.encode(queueCapacity, forKey: .queueCapacity)
+        try container.encode(usage, forKey: .usage)
+        try container.encodeIfPresent(activeKvOffload, forKey: .activeKvOffload)
     }
 }

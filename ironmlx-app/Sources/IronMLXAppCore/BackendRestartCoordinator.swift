@@ -1,15 +1,5 @@
 import Foundation
 
-@MainActor
-public protocol BackendProcessManaging: AnyObject {
-    var isRunning: Bool { get }
-
-    func start() throws
-    func stop()
-}
-
-extension BackendProcessManager: BackendProcessManaging {}
-
 public protocol BackendModelLoading: Sendable {
     func waitUntilReady(timeout: TimeInterval) async throws
     func registerModel(
@@ -39,7 +29,11 @@ public protocol BackendModelLoading: Sendable {
 
 extension BackendAPIClient: BackendModelLoading {}
 
-public struct BackendRestartResult: Codable, Equatable {
+public protocol BackendModelRestoring: Sendable {
+    func restore(_ snapshot: BackendRecoverySnapshot) async -> BackendRestartResult
+}
+
+public struct BackendRestartResult: Codable, Equatable, Sendable {
     public var success: Bool
     public var status: String
     public var port: UInt16
@@ -47,6 +41,7 @@ public struct BackendRestartResult: Codable, Equatable {
     public var modelLoaded: Bool
     public var loadedModels: [String]
     public var failedModels: [String]
+    public var failures: [BackendModelRecoveryFailure]
     public var errorCode: String?
     public var error: String?
 
@@ -58,6 +53,7 @@ public struct BackendRestartResult: Codable, Equatable {
         modelLoaded: Bool = false,
         loadedModels: [String] = [],
         failedModels: [String] = [],
+        failures: [BackendModelRecoveryFailure] = [],
         errorCode: String? = nil,
         error: String? = nil
     ) {
@@ -68,6 +64,7 @@ public struct BackendRestartResult: Codable, Equatable {
         self.modelLoaded = modelLoaded
         self.loadedModels = loadedModels
         self.failedModels = failedModels
+        self.failures = failures
         self.errorCode = errorCode
         self.error = error
     }
@@ -80,13 +77,14 @@ public struct BackendRestartResult: Codable, Equatable {
         case modelLoaded = "model_loaded"
         case loadedModels = "loaded_models"
         case failedModels = "failed_models"
+        case failures
         case errorCode = "code"
         case error
     }
 }
 
-public struct BackendRestartCoordinator {
-    public typealias ClientFactory = (String, UInt16) -> any BackendModelLoading
+public struct BackendRestartCoordinator: Sendable {
+    public typealias ClientFactory = @Sendable (String, UInt16) -> any BackendModelLoading
 
     private let scanner: LocalModelScanner
     private let parameterStore: ModelParameterStore
@@ -104,141 +102,121 @@ public struct BackendRestartCoordinator {
         self.clientFactory = clientFactory
     }
 
-    @MainActor
-    public func restartDefaultModel(
-        config: AppConfig,
-        backend: BackendProcessManaging
-    ) async -> BackendRestartResult {
-        backend.stop()
-
-        let models = config.restoredModelReferences
+    public func restore(_ snapshot: BackendRecoverySnapshot) async -> BackendRestartResult {
+        let config = snapshot.config
+        let client = clientFactory(config.host, config.port)
         let pinnedModels = Set(config.pinnedModelReferences)
-        let localModels = scanner.scan(loadedModels: Set(models), pinnedModels: pinnedModels, mtpEnabledModels: [])
-        guard !models.isEmpty || !localModels.isEmpty else {
-            return BackendRestartResult(
-                success: true,
-                status: "restarted",
-                port: config.port
-            )
-        }
+        let localModels = scanner.scan(
+            loadedModels: Set(snapshot.models.map(\.id)),
+            pinnedModels: pinnedModels,
+            mtpEnabledModels: []
+        )
+        let registrationFailures = await LocalModelBackendRegistrar.register(
+            localModels: localModels,
+            defaultModel: config.defaultModelReference,
+            scanner: scanner,
+            parameterStore: parameterStore,
+            activeKvOffloadEnabled: config.activeKvOffload == true,
+            client: client
+        )
 
-        do {
-            try backend.start()
-            let client = clientFactory(config.host, config.port)
-            try await client.waitUntilReady(timeout: 5.0)
-            await LocalModelBackendRegistrar.register(
-                localModels: localModels,
-                defaultModel: config.defaultModelReference,
-                scanner: scanner,
-                parameterStore: parameterStore,
-                activeKvOffloadEnabled: config.activeKvOffload == true,
-                client: client
-            )
-            var loadedModels: [String] = []
-            var failedModels: [String] = []
-            var lastError: String?
-            var lastErrorCode: String?
-            for model in models {
-                do {
-                    let resolvedModel = try await scanner.verifiedModelPathAsync(
-                        for: model,
-                        fullChecksum: config.verifyModelOnLoad == true
-                    )
-                    let maxCacheCap = ModelLoadParameters.maxCacheCap(
-                        for: model,
-                        scanner: scanner,
-                        parameterStore: parameterStore,
-                        activeKvOffloadEnabled: config.activeKvOffload == true
-                    )
-                    let mtpRuntime = try? await ModelMtpRuntimeResolver.runtimeAsync(
-                        for: model,
-                        useMtp: nil,
-                        scanner: scanner,
-                        parameterStore: parameterStore,
-                        fullChecksum: config.verifyModelOnLoad == true
-                    )
-                    _ = try await client.loadModel(
-                        model: model,
-                        modelDir: resolvedModel,
-                        setDefault: model == config.defaultModelReference
-                            || config.defaultModelReference == nil && loadedModels.isEmpty,
-                        maxCacheCap: maxCacheCap,
-                        pinned: pinnedModels.contains(model),
-                        mtpModelDir: mtpRuntime?.modelDir,
-                        mtpDraftTokens: mtpRuntime?.draftTokens,
-                        promptLookup: parameterStore.parameters(for: model)?.promptLookupConfig,
-                        reloadWhenIdle: false,
-                        samplingDefaults: parameterStore.parameters(for: model)?.samplingDefaults ?? .empty
-                    )
-                    loadedModels.append(model)
-                } catch {
-                    let details = Self.errorDetails(from: error)
-                    failedModels.append(model)
-                    lastError = details.message
-                    lastErrorCode = details.code
-                    IronMLXAppLogger.error("Failed to restore model after backend restart: \(model): \(details.message)")
-                }
-            }
-            if loadedModels.isEmpty, let lastError {
-                return BackendRestartResult(
-                    success: false,
-                    status: "model_load_failed",
-                    port: config.port,
-                    model: models.first,
-                    modelLoaded: false,
-                    loadedModels: loadedModels,
-                    failedModels: failedModels,
-                    errorCode: lastErrorCode,
-                    error: lastError
+        let recoveryModelIDs = Set(snapshot.models.map(\.id))
+        let relevantRegistrationFailures = Dictionary(
+            uniqueKeysWithValues: registrationFailures
+                .filter { recoveryModelIDs.contains($0.model) }
+                .map { ($0.model, $0) }
+        )
+        var loadedModels: [String] = []
+        var failures: [BackendModelRecoveryFailure] = []
+        let recoveryModels = snapshot.models.sorted(by: Self.recoveryOrder)
+        let hasConfirmedDefault = recoveryModels.contains(where: \.isDefault)
+
+        for (index, model) in recoveryModels.enumerated() {
+            do {
+                let resolvedModel = try await scanner.verifiedModelPathAsync(
+                    for: model.modelDir ?? model.id,
+                    fullChecksum: config.verifyModelOnLoad == true
+                )
+                _ = try await client.loadModel(
+                    model: model.id,
+                    modelDir: resolvedModel,
+                    setDefault: model.isDefault || !hasConfirmedDefault && index == 0,
+                    maxCacheCap: model.maxCacheCap,
+                    pinned: model.pinned,
+                    mtpModelDir: model.mtpModelDir,
+                    mtpDraftTokens: model.mtpDraftTokens,
+                    promptLookup: model.promptLookup,
+                    reloadWhenIdle: false,
+                    samplingDefaults: model.samplingDefaults
+                )
+                loadedModels.append(model.id)
+            } catch {
+                let failure = BackendRecoveryFailureClassifier.failure(
+                    model: model.id,
+                    stage: .loading,
+                    error: error
+                )
+                failures.append(failure)
+                IronMLXAppLogger.error(
+                    "Failed to restore model after backend restart: \(model.id): \(failure.message)"
                 )
             }
+        }
+
+        let loadedModelIDs = Set(loadedModels)
+        for failure in relevantRegistrationFailures.values
+        where !loadedModelIDs.contains(failure.model)
+            && !failures.contains(where: { $0.model == failure.model }) {
+            failures.append(failure)
+        }
+        failures.sort { lhs, rhs in
+            if lhs.model != rhs.model {
+                return lhs.model < rhs.model
+            }
+            return lhs.stage.rawValue < rhs.stage.rawValue
+        }
+        let failedModels = AppConfig.normalizedModelReferences(failures.map(\.model))
+        if !failedModels.isEmpty {
+            let partial = !loadedModels.isEmpty
+            let primaryFailure = failures.first
             return BackendRestartResult(
-                success: true,
-                status: loadedModels.isEmpty ? "restarted" : "models_loaded",
+                success: false,
+                status: partial ? "models_partially_loaded" : "model_load_failed",
                 port: config.port,
-                model: config.defaultModelReference ?? loadedModels.first,
+                model: config.defaultModelReference
+                    ?? recoveryModels.first(where: \.isDefault)?.id
+                    ?? loadedModels.first,
                 modelLoaded: !loadedModels.isEmpty,
                 loadedModels: loadedModels,
                 failedModels: failedModels,
-                errorCode: failedModels.isEmpty ? nil : lastErrorCode,
-                error: failedModels.isEmpty ? nil : lastError
-            )
-        } catch {
-            let details = Self.errorDetails(from: error)
-            IronMLXAppLogger.error("Failed to restart backend and restore models: \(details.message)")
-            return BackendRestartResult(
-                success: false,
-                status: "model_load_failed",
-                port: config.port,
-                model: models.first,
-                modelLoaded: false,
-                loadedModels: [],
-                failedModels: models,
-                errorCode: details.code,
-                error: details.message
+                failures: failures,
+                errorCode: primaryFailure?.code,
+                error: primaryFailure?.message
             )
         }
+
+        return BackendRestartResult(
+            success: true,
+            status: loadedModels.isEmpty ? "restarted" : "models_loaded",
+            port: config.port,
+            model: config.defaultModelReference
+                ?? recoveryModels.first(where: \.isDefault)?.id
+                ?? loadedModels.first,
+            modelLoaded: !loadedModels.isEmpty,
+            loadedModels: loadedModels
+        )
     }
 
-    private static func errorDetails(from error: Error) -> BackendErrorDetails {
-        if case BackendAPIError.serverResponse(statusCode: _, body: let body) = error,
-           let body,
-           let data = body.data(using: .utf8),
-           let payload = try? JSONDecoder().decode(BackendErrorPayload.self, from: data),
-           let message = payload.error?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !message.isEmpty {
-            return BackendErrorDetails(message: message, code: payload.code)
+    private static func recoveryOrder(
+        _ lhs: BackendRecoveryModel,
+        _ rhs: BackendRecoveryModel
+    ) -> Bool {
+        if lhs.isDefault != rhs.isDefault {
+            return lhs.isDefault
         }
-        return BackendErrorDetails(message: error.localizedDescription, code: nil)
+        return lhs.id < rhs.id
     }
 
-    private struct BackendErrorDetails {
-        var message: String
-        var code: String?
-    }
-
-    private struct BackendErrorPayload: Decodable {
-        var error: String?
-        var code: String?
-    }
 }
+
+extension BackendRestartCoordinator: BackendModelRestoring {}

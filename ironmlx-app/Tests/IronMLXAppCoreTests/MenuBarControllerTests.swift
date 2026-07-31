@@ -4,99 +4,68 @@ import Testing
 
 @testable import IronMLXAppCore
 
-@Test @MainActor func menuBarRestartShowsStartingStateImmediately() async throws {
-    let (root, _) = try menuRestartModelRoot(repoID: "mlx-community/Tiny-4bit")
-    let configURL = root
-        .appendingPathComponent("config", isDirectory: true)
-        .appendingPathComponent("app_config.json")
-    let configStore = AppConfigStore(url: configURL)
-    configStore.save(AppConfig(port: 19068))
-
-    let backend = FakeMenuRestartBackend()
-    let scanner = LocalModelScanner(rootURL: root)
-    let coordinator = BackendRestartCoordinator(
-        scanner: scanner,
-        parameterStore: ModelParameterStore(url: root.appendingPathComponent("model_params.json")),
-        clientFactory: { _, _ in FakeMenuRestartLoader() }
-    )
+@Test @MainActor
+func menuBarRefreshesImmediatelyForBackendRuntimeNotification() throws {
+    let root = try menuTemporaryDirectory()
+    let configStore = AppConfigStore(url: root.appendingPathComponent("app_config.json"))
+    let backend = TestRuntimeBackend(state: .running, isRunning: true)
     let notificationCenter = NotificationCenter()
-    let dashboardBackend = BackendProcessManager(configStore: configStore, scanner: scanner)
-    let dashboard = DashboardWindowController(configStore: configStore, backend: dashboardBackend)
+    let dashboard = DashboardWindowController(configStore: configStore, backend: backend)
     let controller = MenuBarController(
         configStore: configStore,
         backend: backend,
         dashboard: dashboard,
-        scanner: scanner,
-        restartCoordinator: coordinator,
         notificationCenter: notificationCenter
     )
 
-    backend.isRunning = true
-    controller.restartServer(NSMenuItem())
+    backend.state = .recovering
+    notificationCenter.post(name: .ironMLXBackendRuntimeDidChange, object: backend)
 
-    let snapshot = controller.rebuildMenu()
-    #expect(snapshot.state == .starting)
+    #expect(controller.rebuildMenu().state == .recovering)
 }
 
-@Test @MainActor func menuBarRestartUsesDashboardRestartSemanticsWhenNoModelIsLoaded() async throws {
-    let (root, snapshot) = try menuRestartModelRoot(repoID: "mlx-community/Tiny-4bit")
-    let configURL = root
-        .appendingPathComponent("config", isDirectory: true)
-        .appendingPathComponent("app_config.json")
-    let configStore = AppConfigStore(url: configURL)
-    configStore.save(AppConfig(port: 19068))
-
-    let backend = FakeMenuRestartBackend()
-    let loader = FakeMenuRestartLoader()
-    let scanner = LocalModelScanner(rootURL: root)
-    let coordinator = BackendRestartCoordinator(
-        scanner: scanner,
-        parameterStore: ModelParameterStore(url: root.appendingPathComponent("model_params.json")),
-        clientFactory: { _, _ in loader }
+@Test @MainActor
+func menuBarRestartUsesExplicitPlannedRestartIntent() async throws {
+    let root = try menuTemporaryDirectory()
+    let configStore = AppConfigStore(url: root.appendingPathComponent("app_config.json"))
+    let backend = TestRuntimeBackend(
+        state: .running,
+        isRunning: true,
+        restartResult: BackendRestartResult(
+            success: true,
+            status: "restarted",
+            port: 9068,
+            loadedModels: []
+        )
     )
     let notificationCenter = NotificationCenter()
-    let dashboardBackend = BackendProcessManager(configStore: configStore, scanner: scanner)
-    let dashboard = DashboardWindowController(configStore: configStore, backend: dashboardBackend)
+    let dashboard = DashboardWindowController(configStore: configStore, backend: backend)
     let controller = MenuBarController(
         configStore: configStore,
         backend: backend,
         dashboard: dashboard,
-        scanner: scanner,
-        restartCoordinator: coordinator,
         notificationCenter: notificationCenter
     )
 
-    backend.isRunning = true
     controller.restartServer(NSMenuItem())
 
-    try await waitForMenuRestart {
-        await loader.calls.contains("register:mlx-community/Tiny-4bit:\(snapshot.path):false:nil:false:nil:nil")
+    try await waitForMenuCondition {
+        backend.calls.contains("restart:plannedRestart")
     }
-    #expect(backend.calls == [
-        "stop",
-        "start",
-    ])
-    #expect(configStore.load().loadedModels == [])
+    #expect(backend.state == .running)
 }
 
-@Test @MainActor func menuBarStopServerNotifiesDashboardToRefreshLoadedModelState() async throws {
-    let (root, _) = try menuRestartModelRoot(repoID: "mlx-community/Tiny-4bit")
-    let configURL = root
-        .appendingPathComponent("config", isDirectory: true)
-        .appendingPathComponent("app_config.json")
-    let configStore = AppConfigStore(url: configURL)
-    configStore.save(AppConfig(port: 9068, loadedModels: ["mlx-community/Tiny-4bit"]))
-    let backend = FakeMenuRestartBackend()
-    backend.isRunning = true
-    let scanner = LocalModelScanner(rootURL: root)
+@Test @MainActor
+func menuBarStopUsesUserStopAndNotifiesLoadedModelObservers() async throws {
+    let root = try menuTemporaryDirectory()
+    let configStore = AppConfigStore(url: root.appendingPathComponent("app_config.json"))
+    let backend = TestRuntimeBackend(state: .running, isRunning: true)
     let notificationCenter = NotificationCenter()
-    let dashboardBackend = BackendProcessManager(configStore: configStore, scanner: scanner)
-    let dashboard = DashboardWindowController(configStore: configStore, backend: dashboardBackend)
+    let dashboard = DashboardWindowController(configStore: configStore, backend: backend)
     let controller = MenuBarController(
         configStore: configStore,
         backend: backend,
         dashboard: dashboard,
-        scanner: scanner,
         notificationCenter: notificationCenter
     )
     let probe = MenuLoadedModelsNotificationProbe()
@@ -112,8 +81,10 @@ import Testing
 
     controller.stopServer(NSMenuItem())
 
-    #expect(probe.notified)
-    #expect(backend.calls == ["stop"])
+    try await waitForMenuCondition {
+        backend.calls.contains("stop:userStop") && probe.notified
+    }
+    #expect(backend.state == .stopped)
 }
 
 @MainActor
@@ -125,123 +96,24 @@ private final class MenuLoadedModelsNotificationProbe: NSObject {
     }
 }
 
-private func menuRestartModelRoot(repoID: String) throws -> (root: URL, snapshot: URL) {
+private func menuTemporaryDirectory() throws -> URL {
     let root = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
-        .appendingPathComponent("ironmlx-menu-restart-tests-\(UUID().uuidString)", isDirectory: true)
-    let snapshot = try writeVerifiedTestSnapshot(
-        root: root,
-        repoID: repoID,
-        files: [
-            "config.json": Data("{}".utf8),
-            "model.safetensors": Data("weights".utf8),
-        ]
-    )
-    return (root, snapshot)
+        .appendingPathComponent("ironmlx-menu-tests-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    return root
 }
 
 @MainActor
-private func waitForMenuRestart(
+private func waitForMenuCondition(
     timeoutSeconds: TimeInterval = 2.0,
-    condition: @escaping () async -> Bool
+    condition: @escaping () -> Bool
 ) async throws {
     let deadline = Date().addingTimeInterval(timeoutSeconds)
     while Date() < deadline {
-        if await condition() {
+        if condition() {
             return
         }
-        try await Task.sleep(nanoseconds: 20_000_000)
+        try await Task.sleep(for: .milliseconds(20))
     }
-    Issue.record("Timed out waiting for menu restart")
-}
-
-@MainActor
-private final class FakeMenuRestartBackend: MenuBarBackendProcessManaging {
-    var isRunning = false
-    private(set) var state: BackendProcessState = .running
-    private(set) var calls: [String] = []
-
-    func start() throws {
-        calls.append("start")
-        isRunning = true
-        state = .running
-    }
-
-    func stop() {
-        calls.append("stop")
-        isRunning = false
-        state = .stopped
-    }
-
-    func stopForAppQuit() {
-        calls.append("stopForAppQuit")
-        isRunning = false
-        state = .stopped
-    }
-}
-
-private actor FakeMenuRestartLoader: BackendModelLoading {
-    private(set) var calls: [String] = []
-
-    func waitUntilReady(timeout: TimeInterval) async throws {
-        calls.append("waitUntilReady")
-    }
-
-    func registerModel(
-        model: String,
-        modelDir: String,
-        setDefault: Bool,
-        maxCacheCap: Int?,
-        pinned: Bool,
-        mtpModelDir: String?,
-        mtpDraftTokens: Int?,
-        promptLookup: BackendPromptLookupConfig?,
-        samplingDefaults: BackendSamplingDefaults
-    ) async throws -> BackendModelAdminResponse {
-        calls.append("register:\(model):\(modelDir):\(setDefault):\(maxCacheCap.map(String.init) ?? "nil"):\(pinned):\(mtpModelDir ?? "nil"):\(mtpDraftTokens.map(String.init) ?? "nil")")
-        return BackendModelAdminResponse(
-            success: true,
-            status: "registered",
-            code: nil,
-            model: model,
-            loadedModels: [],
-            warningCode: nil,
-            warning: nil,
-            error: nil
-        )
-    }
-
-    func loadModel(
-        model: String,
-        modelDir: String,
-        setDefault: Bool,
-        maxCacheCap: Int?,
-        pinned: Bool,
-        mtpModelDir: String?,
-        mtpDraftTokens: Int?,
-        promptLookup: BackendPromptLookupConfig?,
-        reloadWhenIdle: Bool,
-        samplingDefaults: BackendSamplingDefaults
-    ) async throws -> BackendModelAdminResponse {
-        calls.append("load:\(model):\(modelDir):\(setDefault):\(maxCacheCap.map(String.init) ?? "nil"):\(pinned):\(mtpModelDir ?? "nil"):\(mtpDraftTokens.map(String.init) ?? "nil")")
-        return BackendModelAdminResponse(
-            success: true,
-            status: "loaded",
-            code: nil,
-            model: model,
-            loadedModels: [
-                BackendLoadedModelInfo(
-                    id: model,
-                    model: model,
-                    path: modelDir,
-                    architecture: "llm",
-                    isDefault: true,
-                    maxPositionEmbeddings: 4096,
-                    pinned: pinned
-                ),
-            ],
-            warningCode: nil,
-            warning: nil,
-            error: nil
-        )
-    }
+    Issue.record("Timed out waiting for menu operation")
 }

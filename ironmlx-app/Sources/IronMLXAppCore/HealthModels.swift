@@ -2,6 +2,8 @@ import Foundation
 
 public struct HealthzSnapshot: Codable, Equatable, Sendable {
     public var status: String
+    public var mode: String = "single"
+    public var models: [BackendLoadedModelInfo] = []
     public var uptimeSecs: UInt64
     public var model: ModelInfo
     public var scheduler: SchedulerInfo
@@ -12,6 +14,8 @@ public struct HealthzSnapshot: Codable, Equatable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case status
+        case mode
+        case models
         case uptimeSecs = "uptime_secs"
         case model
         case scheduler
@@ -83,6 +87,9 @@ public struct HealthzSnapshot: Codable, Equatable, Sendable {
 
     public struct ActiveKvOffloadInfo: Codable, Equatable, Sendable {
         public var enabled: Bool
+        public var status: String
+        public var active: Bool
+        public var degraded: Bool
         public var mode: String
         public var storageDir: String?
         public var residentPages: UInt64
@@ -101,6 +108,9 @@ public struct HealthzSnapshot: Codable, Equatable, Sendable {
 
         enum CodingKeys: String, CodingKey {
             case enabled
+            case status
+            case active
+            case degraded
             case mode
             case storageDir = "storage_dir"
             case residentPages = "resident_pages"
@@ -129,6 +139,7 @@ public struct LegacyHealthStatus: Codable, Equatable, Sendable {
     public var cacheHitRate: Double
     public var activeKvOffload: HealthzSnapshot.ActiveKvOffloadInfo
     public var deviceName: String?
+    public var runtimeModels: [BackendLoadedModelInfo]
 
     enum CodingKeys: String, CodingKey {
         case startedAt = "started_at"
@@ -139,6 +150,7 @@ public struct LegacyHealthStatus: Codable, Equatable, Sendable {
         case cacheHitRate = "cache_hit_rate"
         case activeKvOffload = "active_kv_offload"
         case deviceName = "device_name"
+        case runtimeModels = "runtime_models"
     }
 }
 
@@ -184,7 +196,8 @@ public struct LegacyHealthAdapter {
             cachedTokens: 0,
             cacheHitRate: 0,
             activeKvOffload: snapshot.activeKvOffload,
-            deviceName: snapshot.deviceName
+            deviceName: snapshot.deviceName,
+            runtimeModels: snapshot.models
         )
     }
 

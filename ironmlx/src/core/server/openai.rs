@@ -656,6 +656,7 @@ where
             }
         };
         memory.commit();
+        state.record_request_started(prompt_tokens);
         if init_tx.send(Ok(())).is_err() {
             return;
         }
@@ -715,6 +716,7 @@ where
                     if content_send_result.is_err() {
                         break;
                     }
+                    state.runtime_usage.record_output_tokens(1);
                     if ev.finish_reason.is_some() {
                         break;
                     }
@@ -813,6 +815,7 @@ where
             return resp;
         }
     };
+    state.record_request_started(prompt_tokens);
 
     // Successful admission — proceed to spawn the forwarder using `event_rx`.
 
@@ -822,6 +825,7 @@ where
     let id_for_task = id.clone();
     let model_id_for_task = model_id.clone();
     let tokenizer = state.tokenizer.clone();
+    let runtime_usage = state.runtime_usage.clone();
 
     tokio::spawn(async move {
         // First chunk: role.
@@ -881,6 +885,7 @@ where
             if content_send_result.is_err() {
                 break;
             }
+            runtime_usage.record_output_tokens(1);
             if ev.finish_reason.is_some() {
                 break;
             }
@@ -923,6 +928,7 @@ where
             let tokenizer = &*state.tokenizer;
             let memory = super::begin_direct_request_memory(&state, &*model_guard, &request)?;
             let mut stream = GenerationStream::new(&*model_guard, tokenizer, request)?;
+            state.record_request_started(prompt_tokens);
             let mut buf = String::new();
             let mut finish: &'static str = "stop";
             let mut completion_tokens: u32 = 0;
@@ -942,6 +948,9 @@ where
                     break;
                 }
             }
+            state
+                .runtime_usage
+                .record_output_tokens(u64::from(completion_tokens));
             Ok((buf, finish, completion_tokens))
         })
         .await;
@@ -1019,6 +1028,7 @@ where
             return (StatusCode::SERVICE_UNAVAILABLE, "scheduler reply lost").into_response();
         }
     };
+    state.record_request_started(prompt_tokens);
 
     // 2. Collect all events, detokenize, build CompletionResponse.
     let mut detok = state.tokenizer.decode_stream(/* skip_special */ true);
@@ -1039,6 +1049,9 @@ where
             break;
         }
     }
+    state
+        .runtime_usage
+        .record_output_tokens(u64::from(completion_tokens));
 
     let resp = CompletionResponse {
         id,

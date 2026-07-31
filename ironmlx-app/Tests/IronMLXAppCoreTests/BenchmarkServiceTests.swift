@@ -465,9 +465,52 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(dashboardHTML(html, contains: #"overflow-y: auto;"#))
     #expect(dashboardHTML(
         html,
-        contains: #"content.classList.toggle('page-scroll-managed', page === 'models' || page === 'settings')"#
+        contains: #"page === 'status' || page === 'models' || page === 'benchmark'"#
     ))
     #expect(dashboardHTML(html, contains: #"scrollContainer.scrollTop = 0"#))
+}
+
+@Test func dashboardBenchmarkPageKeepsHeaderFixedAboveAnIndependentScroller() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(html, contains: #"class="benchmark-page-header""#))
+    #expect(dashboardHTML(
+        html,
+        contains: #"class="benchmark-page-scroll page-body-scroll""#
+    ))
+    #expect(dashboardHTML(html, contains: #"#page-benchmark.active,"#))
+    #expect(dashboardHTML(html, contains: #".benchmark-page-header,"#))
+    #expect(dashboardHTML(
+        html,
+        contains: #"page === 'models' || page === 'benchmark' ||"#
+    ))
+    #expect(dashboardHTML(
+        html,
+        contains: #"const pageScroll = pageEl && pageEl.querySelector('.page-body-scroll')"#
+    ))
+}
+
+@Test func dashboardLogsPageKeepsHeaderFixedAboveAnIndependentScroller() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(html, contains: #"class="logs-page-header""#))
+    #expect(dashboardHTML(
+        html,
+        contains: #"class="logs-page-scroll page-body-scroll""#
+    ))
+    #expect(dashboardHTML(html, contains: #"#page-logs.active,"#))
+    #expect(dashboardHTML(html, contains: #".logs-page-header,"#))
+    #expect(dashboardHTML(
+        html,
+        contains: #"page === 'logs' || page === 'settings'"#
+    ))
+    #expect(dashboardHTML(html, contains: #"logOutput.scrollTop = logOutput.scrollHeight"#))
 }
 
 @Test func dashboardSettingsPageKeepsHeaderFixedAboveAnIndependentScroller() throws {
@@ -486,13 +529,44 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(dashboardHTML(html, contains: #".page-body-scroll {"#))
     #expect(dashboardHTML(
         html,
-        contains: #"content.classList.toggle('page-scroll-managed', page === 'models' || page === 'settings')"#
+        contains: #"page === 'logs' || page === 'settings'"#
     ))
     #expect(dashboardHTML(
         html,
         contains: #"const pageScroll = pageEl && pageEl.querySelector('.page-body-scroll')"#
     ))
     #expect(dashboardHTML(html, contains: #"if (pageScroll) pageScroll.scrollTop = 0"#))
+}
+
+@Test func dashboardStatusPageKeepsHeaderFixedAboveAnIndependentScroller() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(html, contains: #"class="status-page-header""#))
+    #expect(
+        dashboardHTML(
+            html,
+            contains: #"class="status-page-scroll page-body-scroll""#
+        )
+    )
+    #expect(dashboardHTML(html, contains: #"#page-status.active,"#))
+    #expect(dashboardHTML(html, contains: #".status-page-header,"#))
+    #expect(dashboardHTML(html, contains: #"class="content page-scroll-managed""#))
+    #expect(dashboardHTML(html, contains: #"page === 'status' || page === 'models'"#))
+    #expect(
+        dashboardHTML(
+            html,
+            contains: #"document.querySelector('#page-status .status-page-scroll')"#
+        )
+    )
+    #expect(
+        dashboardHTML(
+            html,
+            contains: #"statusPage.querySelector('.status-page-scroll')"#
+        )
+    )
 }
 
 @Test func dashboardSchedulerProfileUsesItsOwnModelsTab() throws {
@@ -861,12 +935,19 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
 
     #expect(dashboardHTML(html, contains: "function renderModelType(model)"))
     #expect(dashboardHTML(html, contains: "vlm: 'LLM/VLM'"))
+    #expect(dashboardHTML(html, contains: "block_diffusion_vlm: 'Block Diffusion VLM'"))
     #expect(dashboardHTML(html, contains: "embedding: 'Embedding'"))
     #expect(dashboardHTML(html, contains: "reranker: 'Reranker'"))
     #expect(dashboardHTML(html, contains: "asr: 'ASR'"))
     #expect(dashboardHTML(html, contains: "tts: 'TTS'"))
     #expect(dashboardHTML(html, contains: "renderModelType(m)"))
     #expect(dashboardHTML(html, contains: #"option value="vlm">LLM/VLM</option>"#))
+    #expect(
+        dashboardHTML(
+            html,
+            contains: #"option value="block_diffusion_vlm">Block Diffusion VLM</option>"#
+        )
+    )
     #expect(dashboardHTML(html, contains: #"option value="asr">ASR</option>"#))
     #expect(dashboardHTML(html, contains: #"option value="tts">TTS</option>"#))
 }
@@ -896,6 +977,141 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(dashboardHTML(html, contains: "mtp_enabled"))
     #expect(dashboardHTML(html, contains: "mtp_model_id"))
     #expect(dashboardHTML(html, contains: "mtp_draft_tokens"))
+    #expect(dashboardHTML(html, contains: #"id="modal-causal-sampling-row""#))
+    #expect(dashboardHTML(html, contains: #"id="modal-mtp-section""#))
+    #expect(dashboardHTML(html, contains: #"id="modal-prompt-lookup-section""#))
+    #expect(dashboardHTML(html, contains: "capabilities.runtime_kind === 'block_diffusion'"))
+    #expect(dashboardHTML(html, contains: "capabilities.supports_mtp === false"))
+    #expect(dashboardHTML(html, contains: "capabilities.supports_prompt_lookup === false"))
+    #expect(
+        dashboardHTML(
+            html,
+            contains: "models.filter(m => m.capabilities?.runtime_kind !== 'block_diffusion')"
+        )
+    )
+}
+
+@Test func dashboardRendersBlockDiffusionRuntimeHealthSeparately() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(html, contains: #"id="runtime-model-health""#))
+    #expect(dashboardHTML(html, contains: "function renderRuntimeModels(models)"))
+    #expect(dashboardHTML(html, contains: "model.runtime_kind === 'block_diffusion'"))
+    #expect(dashboardHTML(html, contains: "runtime_continuous_batching"))
+    #expect(dashboardHTML(html, contains: "runtime_serial_diffusion"))
+    #expect(dashboardHTML(html, contains: "runtime_cumulative_tokens"))
+    #expect(dashboardHTML(html, contains: "runtime_cache_hit_tokens"))
+    #expect(dashboardHTML(html, contains: "runtime_cache_hit_rate"))
+    #expect(dashboardHTML(html, contains: "if (usage.prefix_cache)"))
+    #expect(dashboardHTML(html, contains: "eligibleTokens > 0"))
+    #expect(dashboardHTML(html, contains: "renderRuntimeModels(window.__RUNTIME_MODELS__ || [])"))
+    #expect(dashboardHTML(html, contains: "const activeKv = model.active_kv_offload"))
+    #expect(dashboardHTML(html, contains: "if (activeKv)"))
+    #expect(dashboardHTML(html, contains: #"runtime_not_applicable: "不适用""#))
+    #expect(dashboardHTML(html, contains: "renderRuntimeModels(runtimeModels)"))
+}
+
+@Test func dashboardKeepsRuntimeCardVisibleWithoutLoadedModels() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(
+        dashboardHTML(
+            html,
+            contains: #"id="runtime-model-health-card" style="margin-bottom:16px;""#
+        )
+    )
+    #expect(dashboardHTML(html, contains: #"runtime_models: "Model Runtime Status""#))
+    #expect(dashboardHTML(html, contains: #"runtime_models: "模型运行状态""#))
+    #expect(dashboardHTML(html, contains: #"runtime_models: "模型執行狀態""#))
+    #expect(dashboardHTML(html, contains: #"runtime_models: "モデル実行状況""#))
+    #expect(dashboardHTML(html, contains: #"runtime_models: "모델 실행 상태""#))
+    #expect(dashboardHTML(html, contains: #"runtime_empty_title: "暂无运行中的模型""#))
+    #expect(
+        dashboardHTML(
+            html,
+            contains: #"runtime_empty_description: "加载模型后，此处将显示各模型的请求队列与累计统计。""#
+        )
+    )
+    #expect(dashboardHTML(html, contains: "card.style.display = '';"))
+    #expect(dashboardHTML(html, contains: "dict.runtime_empty_title"))
+    #expect(dashboardHTML(html, contains: "dict.runtime_empty_description"))
+    #expect(
+        !dashboardHTML(
+            html,
+            contains: "window.__RUNTIME_MODELS__ = [];\n      card.style.display = 'none';"
+        )
+    )
+}
+
+@Test func dashboardPreservesActiveKVDetailsAcrossRuntimePolling() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(html, contains: "const runtimeActiveKvOpenModelIds = new Set();"))
+    #expect(dashboardHTML(html, contains: "function captureRuntimeActiveKvOpenState(container)"))
+    #expect(
+        dashboardHTML(
+            html,
+            contains: "container.querySelectorAll('details[data-active-kv-model-id]')"
+        )
+    )
+    #expect(dashboardHTML(html, contains: "captureRuntimeActiveKvOpenState(container);"))
+    #expect(dashboardHTML(html, contains: "runtimeActiveKvOpenModelIds.clear();"))
+    #expect(
+        dashboardHTML(
+            html,
+            contains: #"data-active-kv-model-id=""#
+        )
+    )
+    #expect(
+        dashboardHTML(
+            html,
+            contains: "runtimeActiveKvOpenModelIds.has(modelId) ? ' open' : ''"
+        )
+    )
+}
+
+@Test func dashboardGroupsServiceStatusAndUptimeIntoServiceOverview() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(!dashboardHTML(html, contains: #"id="stat-model""#))
+    #expect(!dashboardHTML(html, contains: #"id="stat-total-tokens""#))
+    #expect(!dashboardHTML(html, contains: #"id="stat-cached-tokens""#))
+    #expect(!dashboardHTML(html, contains: #"id="stat-cache-efficiency""#))
+    #expect(dashboardHTML(html, contains: #"id="stat-server-status""#))
+    #expect(dashboardHTML(html, contains: #"id="stat-uptime""#))
+    #expect(!dashboardHTML(html, contains: #"id="stat-active-kv""#))
+    #expect(dashboardHTML(html, contains: #"id="server-endpoints-card""#))
+    #expect(dashboardHTML(html, contains: #"class="service-overview-summary""#))
+    #expect(dashboardHTML(html, contains: #"id="server-status-dot""#))
+    #expect(dashboardHTML(html, contains: #"justify-content: flex-start;"#))
+    #expect(dashboardHTML(html, contains: #"flex: 0 0 auto;"#))
+    #expect(dashboardHTML(html, contains: #"white-space: nowrap;"#))
+    #expect(dashboardHTML(html, contains: #"id="endpoints-list""#))
+    #expect(dashboardHTML(html, contains: #"id="endpoints-hint""#))
+    #expect(dashboardHTML(html, contains: #"service_overview: "Service Overview""#))
+    #expect(dashboardHTML(html, contains: #"service_overview: "服务概览""#))
+    #expect(dashboardHTML(html, contains: #"service_overview: "服務概覽""#))
+    #expect(dashboardHTML(html, contains: #"service_overview: "サービス概要""#))
+    #expect(dashboardHTML(html, contains: #"service_overview: "서비스 개요""#))
+    #expect(dashboardHTML(html, contains: "function updateServerStatusVisual(text, color)"))
+    #expect(!dashboardHTML(html, contains: #"class="stats-grid""#))
+    #expect(!dashboardHTML(html, contains: #"class="stat-card""#))
+    #expect(dashboardHTML(html, contains: "statusPage.querySelector('#runtime-model-health-card')"))
+    #expect(!dashboardHTML(html, contains: #"total_tokens: "Total Tokens""#))
+    #expect(!dashboardHTML(html, contains: #"cached_tokens: "Cached Tokens""#))
+    #expect(!dashboardHTML(html, contains: #"cache_efficiency: "Cache Efficiency""#))
 }
 
 @Test func dashboardColdCacheUsesPositiveSsdLimit() throws {
@@ -944,6 +1160,48 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(!dashboardHTML(html, contains: "b_max={b_max}"))
     #expect(!dashboardHTML(html, contains: "b_max="))
     #expect(!dashboardHTML(html, contains: "请调低「最大序列数」或 Max Cache Cap"))
+}
+
+@Test func dashboardSuccessfulManualRecoveryClearsCrashBanner() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(html, contains: "function onServerRestarted(payload)"))
+    #expect(
+        dashboardHTML(
+            html,
+            contains: """
+            } else {
+                  clearServerBanner();
+                  if (result.model_loaded) {
+            """
+        )
+    )
+}
+
+@Test func dashboardCrashBannersDoNotExposeRawBackendDetails() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(html, contains: #"server_crash_restarting: "服务异常退出，正在重启...""#))
+    #expect(dashboardHTML(html, contains: #"server_crash_recovering: "正在恢复服务...""#))
+    #expect(
+        dashboardHTML(
+            html,
+            contains: #"server_crash_breaker: "服务连续崩溃，已停止自动恢复。请检查日志后手动重试。""#
+        )
+    )
+    #expect(!dashboardHTML(html, contains: #"server_crash_restarting: "服务异常退出（{detail}）"#))
+    #expect(
+        dashboardHTML(
+            html,
+            contains: "dict.recovery_reason_unknown || 'The service could not be restored."
+        )
+    )
 }
 
 @Test func dashboardLocalizesMaxLoadedModelsErrorCode() throws {

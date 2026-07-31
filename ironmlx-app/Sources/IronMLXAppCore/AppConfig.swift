@@ -1,6 +1,6 @@
 import Foundation
 
-public struct AppConfig: Codable, Equatable {
+public struct AppConfig: Codable, Equatable, Sendable {
     public var host: String
     public var port: UInt16
     public var defaultModel: String?

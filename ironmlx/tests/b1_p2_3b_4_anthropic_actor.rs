@@ -349,6 +349,9 @@ async fn anthropic_actor_scheduler_path_emits_6_event_sequence() {
         force_scheduler_for_greedy: true,
         prompt_lookup_enabled: false,
         health_collector,
+        runtime_usage: Arc::new(
+            ironmlx::core::runtime_usage::ModelRuntimeUsageCounters::default(),
+        ),
     };
 
     let req = make_request(prompt_ids, max_new_tokens, stop_token_ids);

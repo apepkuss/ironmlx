@@ -110,6 +110,17 @@ import Testing
     )
     _ = try writeSnapshot(
         root: root,
+        repoID: "mlx-community/DiffusionGemma-MXFP4",
+        configJSON: """
+        {
+          "model_type": "diffusion_gemma",
+          "vision_config": {"model_type": "siglip_vision_model"},
+          "quantization": {"group_size": 32, "bits": 4, "mode": "mxfp4"}
+        }
+        """
+    )
+    _ = try writeSnapshot(
+        root: root,
         repoID: "mlx-community/Text-Embedding",
         configJSON: #"{"pipeline_tag":"feature-extraction","architectures":["BertModel"]}"#
     )
@@ -135,6 +146,20 @@ import Testing
     #expect(models["mlx-community/Text-LLM"]?.readiness?.status == "ready")
     #expect(models["mlx-community/Vision-LM"]?.type == "vlm")
     #expect(models["mlx-community/Vision-LM"]?.readiness?.status == "ready")
+    let diffusion = try #require(models["mlx-community/DiffusionGemma-MXFP4"])
+    #expect(diffusion.type == "block_diffusion_vlm")
+    #expect(diffusion.architecture == "diffusion-gemma")
+    #expect(diffusion.readiness?.status == "ready")
+    #expect(diffusion.capabilities?.runtimeKind == "block_diffusion")
+    #expect(diffusion.capabilities?.supportsStreaming == true)
+    #expect(diffusion.capabilities?.supportsVision == true)
+    #expect(diffusion.capabilities?.supportsMtp == false)
+    #expect(diffusion.capabilities?.supportsPromptLookup == false)
+    #expect(diffusion.capabilities?.supportsKvCache == false)
+    #expect(
+        diffusion.capabilities?.supportedSamplingParameters
+            == ["max_tokens", "temperature", "seed"]
+    )
     for (id, type) in [
         ("mlx-community/Text-Embedding", "embedding"),
         ("mlx-community/Text-Reranker", "reranker"),

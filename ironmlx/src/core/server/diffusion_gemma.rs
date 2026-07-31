@@ -44,6 +44,7 @@ pub struct DiffusionGemmaAppState {
     pub model_weight_bytes: usize,
     pub vision_input: VisionInputConfig,
     pub lane: Arc<DiffusionGemmaLane>,
+    pub runtime_usage: Arc<crate::core::runtime_usage::ModelRuntimeUsageCounters>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -644,6 +645,9 @@ async fn generate_completion(
     default_finish: &'static str,
 ) -> std::result::Result<CompletionParts, CompletionError> {
     let lane_guard = state.lane.clone().enter().await?;
+    state
+        .runtime_usage
+        .record_input_tokens(request.prompt_ids.len() as u64);
     tokio::task::spawn_blocking(move || -> std::result::Result<CompletionParts, String> {
         let _lane_guard = lane_guard;
         let model_guard = state.model.blocking_lock();
@@ -684,7 +688,11 @@ async fn generate_completion(
             }
         };
         mlx::transforms::clear_cache();
-        Ok(collect_events(events, default_finish))
+        let completion = collect_events(events, default_finish);
+        state
+            .runtime_usage
+            .record_output_tokens(u64::from(completion.completion_tokens));
+        Ok(completion)
     })
     .await
     .map_err(|e| CompletionError::Internal(format!("join error: {e}")))?
@@ -751,6 +759,9 @@ async fn openai_stream_completion(
         Ok(guard) => guard,
         Err(err) => return CompletionError::from(err).into_response(),
     };
+    state
+        .runtime_usage
+        .record_input_tokens(request.prompt_ids.len() as u64);
     let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
     let id = gen_openai_id();
     let created = now_unix();
@@ -779,6 +790,9 @@ async fn openai_stream_completion(
                 {
                     connected = false;
                     return Ok(false);
+                }
+                if !diffusion_event_is_length_sentinel(&event) {
+                    state.runtime_usage.record_output_tokens(1);
                 }
                 Ok(true)
             };
@@ -834,6 +848,9 @@ async fn anthropic_stream_completion(
         Ok(guard) => guard,
         Err(err) => return CompletionError::from(err).into_response(),
     };
+    state
+        .runtime_usage
+        .record_input_tokens(u64::from(input_tokens));
     let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
     let id = gen_anthropic_id();
 
@@ -899,6 +916,7 @@ async fn anthropic_stream_completion(
                             return Ok(false);
                         }
                     }
+                    state.runtime_usage.record_output_tokens(1);
                 }
                 if let Some(reason) = event.finish_reason {
                     stop_reason = anthropic_stop_reason(reason);
@@ -1115,6 +1133,7 @@ pub(crate) fn build_diffusion_gemma_app_state(
         lane: Arc::new(DiffusionGemmaLane::new(
             DEFAULT_DIFFUSION_GEMMA_QUEUE_CAPACITY,
         )),
+        runtime_usage: Arc::new(crate::core::runtime_usage::ModelRuntimeUsageCounters::default()),
     }
 }
 

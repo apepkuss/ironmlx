@@ -28,8 +28,8 @@ use crate::models::{
 use crate::Result;
 
 use super::engine::{
-    EngineLoadPolicy, EngineLoadedModelInfo, EngineModelConfig, EnginePoolRuntimeConfig,
-    EnginePoolState, EngineRegistryError, EngineRuntimeState,
+    EngineLoadPolicy, EngineLoadedModelInfo, EngineModelCapabilities, EngineModelConfig,
+    EnginePoolRuntimeConfig, EnginePoolState, EngineRegistryError, EngineRuntimeState,
 };
 use super::health::{
     classify_status, system_free_ram_bytes, HealthSnapshot, HealthStatus, MemoryInfo, ModelInfo,
@@ -81,6 +81,34 @@ const MTP_INVALID_DRAFT_TOKENS_CODE: &str = "mtp_invalid_draft_tokens";
 const MTP_INCOMPATIBLE_CODE: &str = "mtp_incompatible";
 const MTP_INCOMPATIBLE_MESSAGE: &str =
     "MTP weights are not compatible with this model. Load the model without MTP or choose matching MTP weights.";
+const DIFFUSION_GEMMA_MTP_UNSUPPORTED_CODE: &str = "diffusion_gemma_mtp_unsupported";
+const DIFFUSION_GEMMA_MTP_UNSUPPORTED_MESSAGE: &str =
+    "DiffusionGemma uses block diffusion and does not support MTP or speculative decoding. Disable MTP and try again.";
+const DIFFUSION_GEMMA_PROMPT_LOOKUP_UNSUPPORTED_CODE: &str =
+    "diffusion_gemma_prompt_lookup_unsupported";
+const DIFFUSION_GEMMA_PROMPT_LOOKUP_UNSUPPORTED_MESSAGE: &str =
+    "DiffusionGemma uses block diffusion and does not support PromptLookup. Disable PromptLookup and try again.";
+const DIFFUSION_GEMMA_KV_CACHE_UNSUPPORTED_CODE: &str = "diffusion_gemma_kv_cache_unsupported";
+const DIFFUSION_GEMMA_KV_CACHE_UNSUPPORTED_MESSAGE: &str =
+    "DiffusionGemma does not use the causal KV cache. Remove the per-model MAX TOKENS cache override and try again.";
+const DIFFUSION_GEMMA_SAMPLING_UNSUPPORTED_CODE: &str =
+    "diffusion_gemma_sampling_parameter_unsupported";
+const DIFFUSION_GEMMA_SAMPLING_UNSUPPORTED_MESSAGE: &str =
+    "DiffusionGemma supports max_tokens, temperature, and seed. Remove top_p, top_k, and repetition_penalty overrides and try again.";
+
+#[derive(Debug)]
+struct ModelCapabilityError {
+    code: &'static str,
+    message: &'static str,
+}
+
+impl std::fmt::Display for ModelCapabilityError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.message)
+    }
+}
+
+impl std::error::Error for ModelCapabilityError {}
 
 #[derive(Clone)]
 pub struct ModelManager {
@@ -323,9 +351,13 @@ impl ModelManager {
             .collect()
     }
 
-    async fn health_snapshot(&self) -> HealthSnapshot {
+    async fn health_snapshot(&self) -> AppHealthSnapshot {
         let snapshots = self.pool.loaded_causal_health_snapshots().await;
-        aggregate_health(self.start_time, snapshots)
+        AppHealthSnapshot {
+            aggregate: aggregate_health(self.start_time, snapshots),
+            mode: "model_manager",
+            models: self.list_loaded().await,
+        }
     }
 
     async fn openai(&self, req: openai::ChatRequest) -> Response {
@@ -617,6 +649,32 @@ fn build_engine_model_config(
         prompt_lookup,
         pinned,
     } = request;
+    let model_type = read_model_type(model_dir)?;
+    let architecture = ModelArchitecture::from_model_type(&model_type)?;
+    let capabilities = engine_model_capabilities(architecture, model_dir)?;
+    if architecture == ModelArchitecture::DiffusionGemma {
+        validate_diffusion_gemma_model_request(
+            max_cache_cap_override,
+            sampling_defaults_override,
+            mtp.as_ref(),
+            prompt_lookup.as_ref(),
+        )?;
+        return Ok(EngineModelLoad {
+            config: EngineModelConfig {
+                id: model_id,
+                path: model_dir.to_path_buf(),
+                load_policy: EngineLoadPolicy::Lazy,
+                default: false,
+                pinned,
+                scheduler_runtime_profile: None,
+                mtp: None,
+                prompt_lookup: None,
+                sampling_defaults: sampling_defaults_override,
+                capabilities,
+            },
+            warning: None,
+        });
+    }
     let mut resolved = apply_load_request_scheduler_overrides(
         resolve_scheduler_for_model_with_speculative(
             args,
@@ -637,14 +695,6 @@ fn build_engine_model_config(
         )),
         Some(SchedulerProfileSource::Explicit | SchedulerProfileSource::Store) | None => None,
     };
-    let model_type = read_model_type(model_dir)?;
-    let architecture = ModelArchitecture::from_model_type(&model_type)?;
-    if architecture == ModelArchitecture::DiffusionGemma {
-        anyhow::bail!(
-            "DiffusionGemma is not supported by app model manager hot-load mode; \
-             use `ironmlx serve --model <path>` for the dedicated DiffusionGemma server lane"
-        );
-    }
     if let Some(settings) = mtp.as_ref() {
         let validation = validate_mtp_pair(model_dir, &settings.model_dir, settings.draft_tokens)?;
         if !validation.compatible {
@@ -669,13 +719,74 @@ fn build_engine_model_config(
             load_policy: EngineLoadPolicy::Lazy,
             default: false,
             pinned,
-            scheduler_runtime_profile: resolved.scheduler_runtime_profile,
+            scheduler_runtime_profile: Some(resolved.scheduler_runtime_profile),
             mtp,
             prompt_lookup,
             sampling_defaults,
+            capabilities,
         },
         warning,
     })
+}
+
+fn validate_diffusion_gemma_model_request(
+    max_cache_cap_override: Option<usize>,
+    sampling_defaults: SamplingDefaults,
+    mtp: Option<&super::engine::EngineMtpSettings>,
+    prompt_lookup: Option<&PromptLookupConfig>,
+) -> Result<()> {
+    let error = if mtp.is_some() {
+        Some(ModelCapabilityError {
+            code: DIFFUSION_GEMMA_MTP_UNSUPPORTED_CODE,
+            message: DIFFUSION_GEMMA_MTP_UNSUPPORTED_MESSAGE,
+        })
+    } else if prompt_lookup.is_some() {
+        Some(ModelCapabilityError {
+            code: DIFFUSION_GEMMA_PROMPT_LOOKUP_UNSUPPORTED_CODE,
+            message: DIFFUSION_GEMMA_PROMPT_LOOKUP_UNSUPPORTED_MESSAGE,
+        })
+    } else if max_cache_cap_override.is_some() {
+        Some(ModelCapabilityError {
+            code: DIFFUSION_GEMMA_KV_CACHE_UNSUPPORTED_CODE,
+            message: DIFFUSION_GEMMA_KV_CACHE_UNSUPPORTED_MESSAGE,
+        })
+    } else if sampling_defaults.top_p.is_some()
+        || sampling_defaults.top_k.is_some()
+        || sampling_defaults.repetition_penalty.is_some()
+    {
+        Some(ModelCapabilityError {
+            code: DIFFUSION_GEMMA_SAMPLING_UNSUPPORTED_CODE,
+            message: DIFFUSION_GEMMA_SAMPLING_UNSUPPORTED_MESSAGE,
+        })
+    } else {
+        None
+    };
+    match error {
+        Some(error) => Err(error.into()),
+        None => Ok(()),
+    }
+}
+
+fn engine_model_capabilities(
+    architecture: ModelArchitecture,
+    model_dir: &Path,
+) -> Result<EngineModelCapabilities> {
+    let config_path = model_dir.join("config.json");
+    let config_data = std::fs::read(&config_path)
+        .with_context(|| format!("reading model capabilities {}", config_path.display()))?;
+    let config: serde_json::Value = serde_json::from_slice(&config_data)
+        .with_context(|| format!("parsing model capabilities {}", config_path.display()))?;
+    let has_vision_config = config
+        .get("vision_config")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|vision| !vision.is_empty());
+    Ok(EngineModelCapabilities::for_architecture(
+        architecture,
+        matches!(
+            architecture,
+            ModelArchitecture::DiffusionGemma | ModelArchitecture::MiniCpmV46
+        ) || has_vision_config,
+    ))
 }
 
 fn read_generation_sampling_defaults(model_dir: &Path) -> Result<SamplingDefaults> {
@@ -1061,7 +1172,7 @@ async fn app_anthropic_handler(
     manager.anthropic(req).await
 }
 
-async fn app_healthz_handler(State(manager): State<ModelManager>) -> Json<HealthSnapshot> {
+async fn app_healthz_handler(State(manager): State<ModelManager>) -> Json<AppHealthSnapshot> {
     Json(manager.health_snapshot().await)
 }
 
@@ -1334,6 +1445,23 @@ struct LoadedModelInfo {
     model: String,
     path: String,
     architecture: String,
+    runtime_kind: &'static str,
+    supports_streaming: bool,
+    supports_vision: bool,
+    supports_mtp: bool,
+    supports_prompt_lookup: bool,
+    supports_speculative_decoding: bool,
+    supports_kv_cache: bool,
+    supported_sampling_parameters: &'static [&'static str],
+    runtime_state: EngineRuntimeState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scheduler: Option<&'static str>,
+    active_requests: usize,
+    queued_requests: usize,
+    queue_capacity: usize,
+    usage: crate::core::runtime_usage::ModelRuntimeUsageSnapshot,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    active_kv_offload: Option<crate::core::cache::ActiveKvOffloadHealth>,
     #[serde(rename = "default")]
     is_default: bool,
     pinned: bool,
@@ -1348,6 +1476,14 @@ struct LoadedModelInfo {
     prompt_lookup: Option<PromptLookupConfig>,
 }
 
+#[derive(Debug, Serialize)]
+struct AppHealthSnapshot {
+    #[serde(flatten)]
+    aggregate: HealthSnapshot,
+    mode: &'static str,
+    models: Vec<LoadedModelInfo>,
+}
+
 impl From<EngineLoadedModelInfo> for LoadedModelInfo {
     fn from(info: EngineLoadedModelInfo) -> Self {
         Self {
@@ -1355,6 +1491,21 @@ impl From<EngineLoadedModelInfo> for LoadedModelInfo {
             model: info.id,
             path: info.path,
             architecture: info.architecture,
+            runtime_kind: info.capabilities.runtime_kind,
+            supports_streaming: info.capabilities.supports_streaming,
+            supports_vision: info.capabilities.supports_vision,
+            supports_mtp: info.capabilities.supports_mtp,
+            supports_prompt_lookup: info.capabilities.supports_prompt_lookup,
+            supports_speculative_decoding: info.capabilities.supports_speculative_decoding,
+            supports_kv_cache: info.capabilities.supports_kv_cache,
+            supported_sampling_parameters: info.capabilities.supported_sampling_parameters,
+            runtime_state: info.runtime_state,
+            scheduler: info.scheduler,
+            active_requests: info.active_requests,
+            queued_requests: info.queued_requests,
+            queue_capacity: info.queue_capacity,
+            usage: info.usage,
+            active_kv_offload: info.active_kv_offload,
             is_default: info.is_default,
             pinned: info.pinned,
             max_position_embeddings: info.max_position_embeddings,
@@ -1452,6 +1603,9 @@ impl AdminError {
     }
 
     fn from_load_error(error: anyhow::Error) -> Self {
+        if let Some(error) = error.downcast_ref::<ModelCapabilityError>() {
+            return Self::bad_request_with_code(error.message, Some(error.code));
+        }
         let message = format!("{error:#}");
         if let Some(code) = mtp_error_code_from_message(&message) {
             let user_message = if code == MTP_MODEL_DIR_REQUIRED_CODE {
@@ -1875,6 +2029,57 @@ mod tests {
     use super::*;
 
     #[test]
+    fn loaded_model_info_serializes_only_enabled_per_model_active_kv_health() {
+        let active_config =
+            crate::core::cache::ActiveKvOffloadConfig::enabled("/tmp/model-active-kv");
+        let active_stats = crate::core::cache::ActiveKvOffloadSharedStats::new(&active_config);
+        active_stats.set_parked_requests(2);
+        active_stats.record_error();
+        let mut info = EngineLoadedModelInfo {
+            id: "model-a".to_string(),
+            path: "/models/model-a".to_string(),
+            architecture: "llama".to_string(),
+            capabilities: EngineModelCapabilities::for_architecture(
+                ModelArchitecture::Llama,
+                false,
+            ),
+            runtime_state: EngineRuntimeState::Loaded,
+            scheduler: Some("continuous_batching"),
+            active_requests: 0,
+            queued_requests: 0,
+            queue_capacity: 8,
+            usage: crate::core::runtime_usage::ModelRuntimeUsageSnapshot::default(),
+            active_kv_offload: Some(active_stats.snapshot()),
+            is_default: true,
+            pinned: false,
+            max_position_embeddings: 4096,
+            mtp_model_dir: None,
+            mtp_draft_tokens: None,
+            prompt_lookup: None,
+        };
+
+        let enabled = serde_json::to_value(LoadedModelInfo::from(info.clone()))
+            .expect("serialize enabled Active KV health");
+        assert_eq!(
+            enabled["active_kv_offload"]["status"],
+            serde_json::json!("degraded")
+        );
+        assert_eq!(
+            enabled["active_kv_offload"]["parked_requests"],
+            serde_json::json!(2)
+        );
+        assert_eq!(
+            enabled["active_kv_offload"]["swap_error_count"],
+            serde_json::json!(1)
+        );
+
+        info.active_kv_offload = None;
+        let hidden = serde_json::to_value(LoadedModelInfo::from(info))
+            .expect("serialize model without Active KV health");
+        assert!(hidden.get("active_kv_offload").is_none());
+    }
+
+    #[test]
     fn load_model_request_accepts_per_model_max_cache_cap() {
         let request: LoadModelRequest = serde_json::from_value(serde_json::json!({
             "model": "mlx-community/LongContext-4bit",
@@ -2048,7 +2253,110 @@ mod tests {
         )
         .expect("build app dynamic model config");
 
-        assert_eq!(load.config.scheduler_runtime_profile.config.b_max, 4);
+        assert_eq!(
+            load.config
+                .scheduler_runtime_profile
+                .as_ref()
+                .expect("causal scheduler profile")
+                .config
+                .b_max,
+            4
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn app_dynamic_diffusion_gemma_uses_block_diffusion_runtime_without_causal_scheduler() {
+        let root = unique_temp_dir("app-diffusion-gemma-runtime");
+        let model = root.join("model");
+        write_config(
+            &model,
+            r#"{
+                "model_type": "diffusion_gemma",
+                "vision_config": {"hidden_size": 1152}
+            }"#,
+        );
+
+        let load = build_engine_model_config(
+            &serve_args(),
+            EngineModelBuildRequest {
+                model_id: "diffusion-gemma-test".to_string(),
+                model_dir: &model,
+                max_cache_cap_override: None,
+                sampling_defaults_override: SamplingDefaults {
+                    temperature: Some(0.7),
+                    ..SamplingDefaults::default()
+                },
+                mtp: None,
+                prompt_lookup: None,
+                pinned: true,
+            },
+        )
+        .expect("build DiffusionGemma app model config");
+
+        assert!(load.config.scheduler_runtime_profile.is_none());
+        assert!(load.config.mtp.is_none());
+        assert!(load.config.prompt_lookup.is_none());
+        assert_eq!(load.config.capabilities.runtime_kind, "block_diffusion");
+        assert!(load.config.capabilities.supports_streaming);
+        assert!(load.config.capabilities.supports_vision);
+        assert!(!load.config.capabilities.supports_kv_cache);
+        assert_eq!(
+            load.config.capabilities.supported_sampling_parameters,
+            &["max_tokens", "temperature", "seed"]
+        );
+        assert!(load.config.pinned);
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn app_dynamic_minicpm_reports_vision_capability_without_nested_vision_config() {
+        let root = unique_temp_dir("app-minicpm-vision-capability");
+        let model = root.join("model");
+        write_config(&model, r#"{"model_type": "minicpmv4_6"}"#);
+
+        let capabilities = engine_model_capabilities(ModelArchitecture::MiniCpmV46, &model)
+            .expect("read MiniCPM capabilities");
+
+        assert!(capabilities.supports_vision);
+        assert_eq!(capabilities.runtime_kind, "causal");
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn app_dynamic_diffusion_gemma_rejects_causal_only_configuration_with_stable_code() {
+        let root = unique_temp_dir("app-diffusion-gemma-capability-error");
+        let model = root.join("model");
+        write_config(
+            &model,
+            r#"{"model_type": "diffusion_gemma", "vision_config": {"hidden_size": 1152}}"#,
+        );
+
+        let error = match build_engine_model_config(
+            &serve_args(),
+            EngineModelBuildRequest {
+                model_id: "diffusion-gemma-test".to_string(),
+                model_dir: &model,
+                max_cache_cap_override: Some(4096),
+                sampling_defaults_override: SamplingDefaults::default(),
+                mtp: None,
+                prompt_lookup: None,
+                pinned: false,
+            },
+        ) {
+            Ok(_) => panic!("DiffusionGemma must reject KV-cache settings"),
+            Err(error) => error,
+        };
+        let capability_error = error
+            .downcast_ref::<ModelCapabilityError>()
+            .expect("stable capability error");
+        assert_eq!(
+            capability_error.code,
+            DIFFUSION_GEMMA_KV_CACHE_UNSUPPORTED_CODE
+        );
+
+        let admin = AdminError::from_load_error(error);
+        assert_eq!(admin.code, Some(DIFFUSION_GEMMA_KV_CACHE_UNSUPPORTED_CODE));
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 

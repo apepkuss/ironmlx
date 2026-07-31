@@ -7,6 +7,36 @@ import Testing
     let healthz = """
     {
       "status": "healthy",
+      "mode": "app_daemon",
+      "models": [{
+        "id": "mlx-community/DiffusionGemma-MXFP4",
+        "model": "mlx-community/DiffusionGemma-MXFP4",
+        "path": "/models/diffusion-gemma",
+        "architecture": "diffusion_gemma",
+        "runtime_kind": "block_diffusion",
+        "supports_streaming": true,
+        "supports_vision": true,
+        "supports_mtp": false,
+        "supports_prompt_lookup": false,
+        "supports_speculative_decoding": false,
+        "supports_kv_cache": false,
+        "supported_sampling_parameters": ["max_tokens", "temperature", "seed"],
+        "runtime_state": "loaded",
+        "scheduler": "serial_block_diffusion",
+        "active_requests": 1,
+        "queued_requests": 2,
+        "queue_capacity": 8,
+        "usage": {
+          "cumulative_tokens": 42,
+          "input_tokens": 30,
+          "output_tokens": 12
+        },
+        "default": true,
+        "max_position_embeddings": 32768,
+        "pinned": true,
+        "mtp_enabled": false,
+        "prompt_lookup_enabled": false
+      }],
       "uptime_secs": 42,
       "model": {
         "name": "Qwen3",
@@ -37,6 +67,9 @@ import Testing
       },
       "active_kv_offload": {
         "enabled": true,
+        "status": "active",
+        "active": true,
+        "degraded": false,
         "mode": "request_residency_v1",
         "storage_dir": "/tmp/ironmlx-active-kv",
         "resident_pages": 2,
@@ -73,6 +106,14 @@ import Testing
     #expect(snapshot.memory.kvCacheResidentCapTokens == 1024)
     #expect(snapshot.memory.kvCacheBudgetPolicy == "active_kv_offload")
     #expect(legacy.activeKvOffload.enabled == true)
+    #expect(legacy.runtimeModels.first?.capabilities.runtimeKind == "block_diffusion")
+    #expect(legacy.runtimeModels.first?.scheduler == "serial_block_diffusion")
+    #expect(legacy.runtimeModels.first?.activeRequests == 1)
+    #expect(legacy.runtimeModels.first?.queuedRequests == 2)
+    #expect(legacy.runtimeModels.first?.queueCapacity == 8)
+    #expect(legacy.runtimeModels.first?.usage.cumulativeTokens == 42)
+    #expect(legacy.runtimeModels.first?.usage.prefixCache == nil)
+    #expect(legacy.runtimeModels.first?.activeKvOffload == nil)
     #expect(legacy.activeKvOffload.parkedRequests == 1)
     #expect(legacy.activeKvOffload.swapOutCount == 4)
     #expect(legacy.deviceName == "Apple M3 Max")
@@ -98,7 +139,7 @@ import Testing
     #expect(html.contains("window.__HEALTH_PENDING__"))
 }
 
-@Test func dashboardStatusPageRendersActiveKVOffloadState() throws {
+@Test func dashboardStatusPageRendersPerModelActiveKVStateAndIncidentActions() throws {
     let testFile = URL(fileURLWithPath: #filePath)
     let packageRoot = testFile
         .deletingLastPathComponent()
@@ -108,10 +149,19 @@ import Testing
         .appendingPathComponent("Sources/IronMLXAppCore/Resources/dashboard2.html")
     let html = try String(contentsOf: htmlURL, encoding: .utf8)
 
-    #expect(html.contains("id=\"stat-active-kv\""))
+    #expect(!html.contains("id=\"stat-active-kv\""))
     #expect(html.contains("data-i18n=\"active_kv_offload\""))
     #expect(html.contains("cfg-active-kv-offload"))
-    #expect(html.contains("updateActiveKvStatus(data.active_kv_offload)"))
+    #expect(html.contains("const activeKv = model.active_kv_offload"))
+    #expect(html.contains("runtime_active_kv_idle"))
+    #expect(html.contains("runtime_active_kv_active"))
+    #expect(html.contains("runtime_active_kv_degraded"))
+    #expect(html.contains("formatVersionBytes(activeKv.offloaded_bytes)"))
+    #expect(html.contains("id = 'active-kv-error-banner'"))
+    #expect(html.contains(#"navigateTo(\'settings\')"#))
+    #expect(html.contains(#"navigateTo(\'logs\')"#))
+    #expect(html.contains("dismissActiveKvIncident()"))
+    #expect(!html.contains("updateActiveKvStatus("))
 }
 
 @Test func dashboardEndpointCardShowsBindAddressAsSecondaryHint() throws {

@@ -4,19 +4,26 @@ import Foundation
 @MainActor
 public final class AppDelegate: NSObject, NSApplicationDelegate {
     private let configStore: AppConfigStore
-    private let backend: BackendProcessManager
+    private let backend: BackendRuntimeSupervisor
     private let scanner: LocalModelScanner
-    private let parameterStore: ModelParameterStore
     private let launchPlanner: AppLaunchPlanner
     private var dashboard: DashboardWindowController?
     private var menu: MenuBarController?
+    private var terminationReplyPending = false
 
     public override init() {
         let store = AppConfigStore.shared
+        let scanner = LocalModelScanner()
+        let parameterStore = ModelParameterStore.shared
+        let processManager = BackendProcessManager(configStore: store)
         self.configStore = store
-        self.backend = BackendProcessManager(configStore: store)
-        self.scanner = LocalModelScanner()
-        self.parameterStore = .shared
+        self.backend = BackendRuntimeSupervisor(
+            processManager: processManager,
+            configStore: store,
+            scanner: scanner,
+            parameterStore: parameterStore
+        )
+        self.scanner = scanner
         self.launchPlanner = AppLaunchPlanner()
         super.init()
     }
@@ -44,87 +51,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         let launchPlan = launchPlanner.plan(config: config, localModels: localModels)
         if !localModels.isEmpty || !launchPlan.backendModelReferences.isEmpty {
-            do {
-                try backend.start()
-                let models = launchPlan.backendModelReferences
-                let defaultModel = config.defaultModelReference
-                let localModelsToRegister = localModels
-                Task {
-                    do {
-                        let client = BackendAPIClient(host: config.host, port: config.port)
-                        try await client.waitUntilReady()
-                        await LocalModelBackendRegistrar.register(
-                            localModels: localModelsToRegister,
-                            defaultModel: defaultModel,
-                            scanner: self.scanner,
-                            parameterStore: self.parameterStore,
-                            activeKvOffloadEnabled: config.activeKvOffload == true,
-                            client: client
-                        )
-                        var latestResponse: BackendModelAdminResponse?
-                        for model in models {
-                            do {
-                                if let readiness = self.scanner.readiness(for: model), !readiness.isLoadable {
-                                    let detail = readiness.message ?? "model snapshot is not ready to load"
-                                    IronMLXAppLogger.error("Skipped restoring ironmlx model on app launch: \(model): \(detail)")
-                                    continue
-                                }
-                                let resolvedModel = try await self.scanner.verifiedModelPathAsync(
-                                    for: model,
-                                    fullChecksum: config.verifyModelOnLoad == true
-                                )
-                                let setDefault = model == defaultModel || defaultModel == nil && model == models.first
-                                let mtpRuntime = try? await ModelMtpRuntimeResolver.runtimeAsync(
-                                    for: model,
-                                    useMtp: nil,
-                                    scanner: self.scanner,
-                                    parameterStore: self.parameterStore,
-                                    fullChecksum: config.verifyModelOnLoad == true
-                                )
-                                latestResponse = try await client.loadModel(
-                                    model: model,
-                                    modelDir: resolvedModel,
-                                    setDefault: setDefault,
-                                    maxCacheCap: ModelLoadParameters.maxCacheCap(
-                                        for: model,
-                                        scanner: self.scanner,
-                                        parameterStore: self.parameterStore,
-                                        activeKvOffloadEnabled: config.activeKvOffload == true
-                                    ),
-                                    pinned: pinnedModels.contains(model),
-                                    mtpModelDir: mtpRuntime?.modelDir,
-                                    mtpDraftTokens: mtpRuntime?.draftTokens,
-                                    promptLookup: self.parameterStore.parameters(for: model)?.promptLookupConfig,
-                                    reloadWhenIdle: false,
-                                    samplingDefaults: self.parameterStore.parameters(for: model)?.samplingDefaults ?? .empty
-                                )
-                            } catch {
-                                IronMLXAppLogger.error("Failed to restore ironmlx model on app launch: \(model): \(error)")
-                            }
-                        }
-                        if let loadedModels = latestResponse?.loadedModels {
-                            await MainActor.run {
-                                var updatedConfig = self.configStore.load()
-                                updatedConfig.replaceLoadedModels(
-                                    loadedModels.map(\.id),
-                                    defaultModel: Self.defaultModelForLaunchRestore(
-                                        config: updatedConfig,
-                                        backendLoadedModels: loadedModels
-                                    )
-                                )
-                                updatedConfig.replacePinnedModels(loadedModels.filter(\.pinned).map(\.id))
-                                self.configStore.save(updatedConfig)
-                                NotificationCenter.default.post(name: .ironMLXLoadedModelsDidChange, object: self)
-                            }
-                        }
-                    } catch {
-                        IronMLXAppLogger.error("Failed to restore ironmlx models on app launch: \(error)")
-                    }
+            Task {
+                do {
+                    try await backend.ensureRunning()
+                } catch {
+                    IronMLXAppLogger.error(
+                        "Failed to start ironmlx backend on app launch: \(error)"
+                    )
                 }
-            } catch {
-                IronMLXAppLogger.error("Failed to start ironmlx backend on app launch: \(error)")
+                menu.rebuildMenu()
             }
-            menu.rebuildMenu()
         }
 
         dashboard.show(route: launchPlan.dashboardRoute)
@@ -132,20 +68,22 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     public func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         dashboard?.cancelAllDownloads()
-        backend.stopForAppQuit()
-        return .terminateNow
+        guard backend.state != .stopped else {
+            return .terminateNow
+        }
+        guard !terminationReplyPending else {
+            return .terminateLater
+        }
+        terminationReplyPending = true
+        Task {
+            await backend.stopForAppQuit()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
         IronMLXAppLogger.info("Application will terminate")
         dashboard?.cancelAllDownloads()
-        backend.stopForAppQuit()
-    }
-
-    nonisolated static func defaultModelForLaunchRestore(
-        config: AppConfig,
-        backendLoadedModels: [BackendLoadedModelInfo]
-    ) -> String? {
-        config.defaultModelReference ?? backendLoadedModels.first(where: \.isDefault)?.id
     }
 }

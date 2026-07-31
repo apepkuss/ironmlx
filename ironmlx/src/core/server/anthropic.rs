@@ -521,6 +521,7 @@ where
             }
         };
         memory.commit();
+        state.record_request_started(input_tokens);
         if init_tx.send(Ok(())).is_err() {
             return;
         }
@@ -583,6 +584,7 @@ where
                         }
                     }
                     output_tokens += 1;
+                    state.runtime_usage.record_output_tokens(1);
                     if let Some(reason) = ev.finish_reason {
                         stop_reason = match reason {
                             "stop" => "end_turn",
@@ -683,12 +685,14 @@ where
             return (StatusCode::SERVICE_UNAVAILABLE, "scheduler reply lost").into_response();
         }
     };
+    state.record_request_started(input_tokens);
 
     // 2. Spawn forwarder that emits the 6-event SSE sequence.
     let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
     let msg_id_for_task = msg_id.clone();
     let model_id_for_task = model_id.clone();
     let tokenizer = state.tokenizer.clone();
+    let runtime_usage = state.runtime_usage.clone();
 
     tokio::spawn(async move {
         // Event 1: message_start
@@ -755,6 +759,7 @@ where
                 }
             }
             output_tokens += 1;
+            runtime_usage.record_output_tokens(1);
             if let Some(reason) = ev.finish_reason {
                 stop_reason = match reason {
                     "stop" => "end_turn",
@@ -820,6 +825,7 @@ where
             let tokenizer = &*state.tokenizer;
             let memory = super::begin_direct_request_memory(&state, &*model_guard, &request)?;
             let mut stream = GenerationStream::new(&*model_guard, tokenizer, request)?;
+            state.record_request_started(input_tokens);
             let mut buf = String::new();
             let mut finish: &'static str = "end_turn";
             let mut output_tokens: u32 = 0;
@@ -843,6 +849,9 @@ where
                     break;
                 }
             }
+            state
+                .runtime_usage
+                .record_output_tokens(u64::from(output_tokens));
             Ok((buf, finish, output_tokens))
         })
         .await;
@@ -913,6 +922,7 @@ where
             return (StatusCode::SERVICE_UNAVAILABLE, "scheduler reply lost").into_response();
         }
     };
+    state.record_request_started(input_tokens);
 
     // 2. Drain events; build envelope.
     let mut detok = state.tokenizer.decode_stream(/* skip_special */ true);
@@ -935,6 +945,9 @@ where
             break;
         }
     }
+    state
+        .runtime_usage
+        .record_output_tokens(u64::from(output_tokens));
 
     let envelope = MessageEnvelope {
         id,

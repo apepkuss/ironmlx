@@ -133,13 +133,63 @@ import Testing
       "architecture": "llm",
       "default": false,
       "max_position_embeddings": 4096,
-      "pinned": true
+      "pinned": true,
+      "runtime_kind": "causal",
+      "supports_streaming": true,
+      "supports_vision": false,
+      "supports_mtp": false,
+      "supports_prompt_lookup": true,
+      "supports_speculative_decoding": false,
+      "supports_kv_cache": true,
+      "supported_sampling_parameters": ["max_tokens", "temperature"],
+      "runtime_state": "loaded",
+      "active_requests": 0,
+      "queued_requests": 0,
+      "queue_capacity": 8,
+      "usage": {
+        "cumulative_tokens": 42,
+        "input_tokens": 30,
+        "output_tokens": 12,
+        "prefix_cache": {
+          "hit_tokens": 10,
+          "eligible_tokens": 25
+        }
+      },
+      "active_kv_offload": {
+        "enabled": true,
+        "status": "active",
+        "active": true,
+        "degraded": false,
+        "mode": "request_preemption_hot_cold_tiering",
+        "storage_dir": "/tmp/model-active-kv",
+        "resident_pages": 4,
+        "offloaded_pages": 3,
+        "loading_pages": 0,
+        "dirty_pages": 1,
+        "parked_requests": 2,
+        "offloaded_bytes": 1048576,
+        "swap_out_count": 5,
+        "swap_in_count": 4,
+        "swap_error_count": 0,
+        "last_swap_out_us": 123,
+        "last_swap_in_us": 98,
+        "supported_cache_kinds": ["full_attention_paged"],
+        "not_applicable_cache_kinds": ["gated_delta_linear"]
+      }
     }
     """.utf8)
 
     let info = try JSONDecoder().decode(BackendLoadedModelInfo.self, from: data)
 
     #expect(info.pinned)
+    #expect(info.usage.cumulativeTokens == 42)
+    #expect(info.usage.inputTokens == 30)
+    #expect(info.usage.outputTokens == 12)
+    #expect(info.usage.prefixCache?.hitTokens == 10)
+    #expect(info.usage.prefixCache?.eligibleTokens == 25)
+    #expect(info.activeKvOffload?.status == "active")
+    #expect(info.activeKvOffload?.parkedRequests == 2)
+    #expect(info.activeKvOffload?.offloadedBytes == 1_048_576)
 }
 
 @Test func restoredModelReferencesExcludeUnloadedDefaultModel() {
@@ -156,53 +206,4 @@ import Testing
         "mlx-community/Other-4bit",
         "mlx-community/Third-4bit",
     ])
-}
-
-@Test func appLaunchRestoreKeepsUnloadedDefaultModelPreference() {
-    let config = AppConfig(defaultModel: "mlx-community/Default-4bit")
-    let backendLoadedModels = [
-        BackendLoadedModelInfo(
-            id: "mlx-community/Other-4bit",
-            model: "mlx-community/Other-4bit",
-            path: "/models/other",
-            architecture: "llm",
-            isDefault: true,
-            maxPositionEmbeddings: 4096
-        ),
-        BackendLoadedModelInfo(
-            id: "mlx-community/Third-4bit",
-            model: "mlx-community/Third-4bit",
-            path: "/models/third",
-            architecture: "llm",
-            isDefault: false,
-            maxPositionEmbeddings: 4096
-        ),
-    ]
-
-    let defaultModel = AppDelegate.defaultModelForLaunchRestore(
-        config: config,
-        backendLoadedModels: backendLoadedModels
-    )
-
-    #expect(defaultModel == "mlx-community/Default-4bit")
-}
-
-@Test func appLaunchRestoreUsesBackendDefaultWhenNoDefaultPreferenceExists() {
-    let backendLoadedModels = [
-        BackendLoadedModelInfo(
-            id: "mlx-community/Other-4bit",
-            model: "mlx-community/Other-4bit",
-            path: "/models/other",
-            architecture: "llm",
-            isDefault: true,
-            maxPositionEmbeddings: 4096
-        ),
-    ]
-
-    let defaultModel = AppDelegate.defaultModelForLaunchRestore(
-        config: AppConfig(),
-        backendLoadedModels: backendLoadedModels
-    )
-
-    #expect(defaultModel == "mlx-community/Other-4bit")
 }

@@ -8,8 +8,10 @@ import Testing
 struct DashboardJavaScriptSyntaxTests {
     @Test("dashboard script compiles")
     func dashboardScriptCompiles() throws {
-        let htmlURL = try #require(Bundle.module.url(forResource: "dashboard2", withExtension: "html"))
-        let html = try String(contentsOf: htmlURL, encoding: .utf8)
+        let html = try String(
+            contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+            encoding: .utf8
+        )
         let script = try #require(extractFirstScript(from: html))
         let context = JSContext()!
 
