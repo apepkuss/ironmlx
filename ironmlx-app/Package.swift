@@ -32,7 +32,10 @@ let package = Package(
         ),
         .testTarget(
             name: "IronMLXAppCoreTests",
-            dependencies: ["IronMLXAppCore"]
+            dependencies: ["IronMLXAppCore"],
+            resources: [
+                .copy("Fixtures/backend_crash_helper.py"),
+            ]
         ),
     ]
 )

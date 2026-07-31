@@ -2592,6 +2592,7 @@ pub struct SchedulerActorHandle {
     pub(super) control_tx: mpsc::Sender<SchedulerControlCommand>,
     pub(crate) cold_materialization_tracker:
         Arc<OnceLock<Arc<crate::core::process_memory::ColdMaterializationTracker>>>,
+    pub(crate) runtime_usage: Arc<crate::core::runtime_usage::ModelRuntimeUsageCounters>,
     /// Test-observable counter. Incremented by the driver every time
     /// `Scheduler::admit` succeeds. Doc-hidden because production code
     /// shouldn't read it — it exists for integration tests to assert
@@ -3285,6 +3286,7 @@ where
     // Array allocation) to the spawn_blocking worker thread.
     let memory_budget_exceeded_count = Arc::new(AtomicU64::new(0));
     let cold_materialization_tracker = Arc::new(OnceLock::new());
+    let runtime_usage = Arc::new(crate::core::runtime_usage::ModelRuntimeUsageCounters::default());
 
     // Healthz observables cloned from BudgetState (Arc<AtomicUsize> inside).
     let kv_cache_active_bytes = budget_state.shared_active();
@@ -3375,6 +3377,7 @@ where
     let active_kv_stats_for_task = active_kv_stats.clone();
     let immutable_prefix_stats_for_task = immutable_prefix_stats.clone();
     let cold_materialization_tracker_for_task = Arc::clone(&cold_materialization_tracker);
+    let runtime_usage_for_task = Arc::clone(&runtime_usage);
 
     // ── Step 3: Spawn driver — Scheduler::new_with_state constructed INSIDE
     //    spawn_blocking so MLX Array fields (prng_state) are allocated on the
@@ -3392,6 +3395,7 @@ where
             crate::core::process_memory::global_process_memory_governor(),
         );
         scheduler.share_cold_materialization_tracker(cold_materialization_tracker_for_task);
+        scheduler.share_runtime_usage(runtime_usage_for_task);
         if let Some(config) = paged_prefix_cache_for_task {
             scheduler
                 .enable_paged_prefix_cache(config)
@@ -3435,6 +3439,7 @@ where
         cmd_tx,
         control_tx,
         cold_materialization_tracker,
+        runtime_usage,
         admit_count,
         batch_count,
         saturate_triggered,

@@ -2,13 +2,9 @@ import AppKit
 import Foundation
 
 @MainActor
-public protocol MenuBarBackendProcessManaging: BackendProcessManaging {
-    var state: BackendProcessState { get }
+public protocol MenuBarBackendProcessManaging: BackendRuntimeManaging {}
 
-    func stopForAppQuit()
-}
-
-extension BackendProcessManager: MenuBarBackendProcessManaging {}
+extension BackendRuntimeSupervisor: MenuBarBackendProcessManaging {}
 
 @MainActor
 public final class MenuBarController: NSObject, NSMenuDelegate {
@@ -16,20 +12,16 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     private let configStore: AppConfigStore
     private let backend: any MenuBarBackendProcessManaging
     private let dashboard: DashboardWindowController
-    private let restartCoordinator: BackendRestartCoordinator
     private let fileManager: FileManager
     private let notificationCenter: NotificationCenter
     private var loadedModelNames: [String]?
     private var isRefreshingLoadedModelNames = false
-    private var menuStateOverride: BackendProcessState?
     private var refreshTimer: Timer?
 
     public init(
         configStore: AppConfigStore,
         backend: any MenuBarBackendProcessManaging,
         dashboard: DashboardWindowController,
-        scanner: LocalModelScanner = LocalModelScanner(),
-        restartCoordinator: BackendRestartCoordinator? = nil,
         fileManager: FileManager = .default,
         notificationCenter: NotificationCenter = .default
     ) {
@@ -37,16 +29,12 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         self.configStore = configStore
         self.backend = backend
         self.dashboard = dashboard
-        let parameterStore = ModelParameterStore.shared
-        self.restartCoordinator = restartCoordinator ?? BackendRestartCoordinator(
-            scanner: scanner,
-            parameterStore: parameterStore
-        )
         self.fileManager = fileManager
         self.notificationCenter = notificationCenter
         super.init()
         observeLanguageChanges()
         observeLoadedModelChanges()
+        observeBackendRuntimeChanges()
         configureStatusItem()
         startLoadedModelRefreshTimer()
         rebuildMenu()
@@ -101,11 +89,12 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     @objc public func stopServer(_ sender: NSMenuItem) {
-        menuStateOverride = nil
-        backend.stop()
-        loadedModelNames = []
-        notificationCenter.post(name: .ironMLXLoadedModelsDidChange, object: self)
-        rebuildMenu()
+        Task {
+            await backend.stop(intent: .userStop)
+            loadedModelNames = []
+            notificationCenter.post(name: .ironMLXLoadedModelsDidChange, object: self)
+            rebuildMenu()
+        }
     }
 
     @objc public func restartServer(_ sender: NSMenuItem) {
@@ -117,7 +106,6 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     @objc public func quit(_ sender: NSMenuItem) {
-        backend.stopForAppQuit()
         NSApp.terminate(nil)
     }
 
@@ -134,13 +122,20 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         rebuildMenu()
     }
 
+    @objc private func backendRuntimeDidChange(_ notification: Notification) {
+        if backend.state != .running, backend.state != .degraded {
+            loadedModelNames = []
+        }
+        rebuildMenu()
+    }
+
     public func menuWillOpen(_ menu: NSMenu) {
         refreshLoadedModelNamesIfNeeded(state: snapshot().state)
     }
 
     private func snapshot() -> MenuBarMenuSnapshot {
         let config = configStore.load()
-        let state = menuStateOverride ?? (backend.isRunning ? .running : backend.state)
+        let state = backend.state
         let modelNames = menuModelNames(config: config, state: state)
         return MenuBarMenuSnapshot(
             state: state,
@@ -171,6 +166,15 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         )
     }
 
+    private func observeBackendRuntimeChanges() {
+        notificationCenter.addObserver(
+            self,
+            selector: #selector(backendRuntimeDidChange(_:)),
+            name: .ironMLXBackendRuntimeDidChange,
+            object: nil
+        )
+    }
+
     private func startLoadedModelRefreshTimer() {
         refreshTimer?.invalidate()
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
@@ -193,8 +197,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     private func refreshLoadedModelNamesIfNeeded(state: BackendProcessState) {
-        guard menuStateOverride == nil,
-              state == .running || state == .starting,
+        guard state == .running || state == .starting || state == .degraded,
               !isRefreshingLoadedModelNames
         else {
             return
@@ -245,36 +248,32 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         config.replaceLoadedModels(loaded, defaultModel: backendDefault)
         config.replacePinnedModels(pinned)
         configStore.save(config)
+        backend.confirmLoadedModels(models, parameterConfirmedModelIDs: [])
         notificationCenter.post(name: .ironMLXLoadedModelsDidChange, object: self)
     }
 
     private func restartConfiguredBackendFromMenu() {
-        let config = configStore.load()
-        menuStateOverride = .starting
         loadedModelNames = []
         rebuildMenu()
 
         Task {
-            let result = await self.restartCoordinator.restartDefaultModel(config: config, backend: self.backend)
-            await MainActor.run {
-                self.menuStateOverride = nil
-                if result.success {
-                    var updatedConfig = self.configStore.load()
-                    updatedConfig.replaceLoadedModels(result.loadedModels, defaultModel: result.model)
-                    self.configStore.save(updatedConfig)
-                    self.loadedModelNames = result.loadedModels
-                    self.notificationCenter.post(name: .ironMLXLoadedModelsDidChange, object: self)
-                    IronMLXAppLogger.info(
-                        "Restarted ironmlx backend from menu: status=\(result.status) loaded_models=\(result.loadedModels.count)"
-                    )
-                } else {
-                    self.loadedModelNames = []
-                    IronMLXAppLogger.error(
-                        "Failed to restart ironmlx backend from menu: \(result.error ?? result.status)"
-                    )
-                }
-                self.rebuildMenu()
+            let result = await self.backend.restart(intent: .plannedRestart)
+            if result.success {
+                var updatedConfig = self.configStore.load()
+                updatedConfig.replaceLoadedModels(result.loadedModels, defaultModel: result.model)
+                self.configStore.save(updatedConfig)
+                self.loadedModelNames = result.loadedModels
+                self.notificationCenter.post(name: .ironMLXLoadedModelsDidChange, object: self)
+                IronMLXAppLogger.info(
+                    "Restarted ironmlx backend from menu: status=\(result.status) loaded_models=\(result.loadedModels.count)"
+                )
+            } else {
+                self.loadedModelNames = result.loadedModels
+                IronMLXAppLogger.error(
+                    "Failed to restart ironmlx backend from menu: \(result.error ?? result.status)"
+                )
             }
+            self.rebuildMenu()
         }
     }
 

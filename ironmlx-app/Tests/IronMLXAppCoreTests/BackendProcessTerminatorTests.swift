@@ -3,11 +3,11 @@ import Testing
 
 @testable import IronMLXAppCore
 
+@MainActor
 private class FakeBackendChildProcess: BackendChildProcess {
     var isRunning: Bool
     let processIdentifier: Int32
     private(set) var terminateCalled = false
-    private(set) var waitCalled = false
 
     init(processIdentifier: Int32 = 1234, isRunning: Bool = true) {
         self.processIdentifier = processIdentifier
@@ -17,13 +17,10 @@ private class FakeBackendChildProcess: BackendChildProcess {
     func terminate() {
         terminateCalled = true
     }
-
-    func waitUntilExit() {
-        waitCalled = true
-    }
 }
 
-@Test func appQuitTerminatesAndForceKillsStillRunningBackend() {
+@Test @MainActor
+func appQuitTerminatesAndForceKillsStillRunningBackend() async {
     let child = FakeBackendChildProcess()
     var kills: [(pid: pid_t, signal: Int32)] = []
     let terminator = BackendProcessTerminator(
@@ -35,16 +32,16 @@ private class FakeBackendChildProcess: BackendChildProcess {
         sleep: { _ in }
     )
 
-    terminator.stop(child, forceAfter: 0)
+    await terminator.stop(child, forceAfter: 0)
 
     #expect(child.terminateCalled)
     #expect(kills.count == 1)
     #expect(kills.first?.pid == 1234)
     #expect(kills.first?.signal == SIGKILL)
-    #expect(child.waitCalled)
 }
 
-@Test func appQuitDoesNotForceKillBackendThatStopsGracefully() {
+@Test @MainActor
+func appQuitDoesNotForceKillBackendThatStopsGracefully() async {
     final class GracefulChildProcess: FakeBackendChildProcess {
         override func terminate() {
             super.terminate()
@@ -62,9 +59,8 @@ private class FakeBackendChildProcess: BackendChildProcess {
         sleep: { _ in }
     )
 
-    terminator.stop(child, forceAfter: 0)
+    await terminator.stop(child, forceAfter: 0)
 
     #expect(child.terminateCalled)
     #expect(killCount == 0)
-    #expect(child.waitCalled)
 }

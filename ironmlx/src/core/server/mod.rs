@@ -135,6 +135,9 @@ pub struct AppState<M: Model + DenseVlMethods + Send + 'static> {
     /// Health snapshot collector for `/healthz`. Holds shared Arc atomics
     /// wired to the SchedulerActor driver loop + BudgetState. B1-p2.5 G3.
     pub health_collector: Arc<health::SchedulerHealthCollector>,
+    /// Per-loaded-engine token and prefix-cache usage. A new instance is
+    /// created whenever the model is loaded, so unload/reload resets it.
+    pub runtime_usage: Arc<crate::core::runtime_usage::ModelRuntimeUsageCounters>,
 }
 
 impl<M: Model + DenseVlMethods + Send + 'static> Clone for AppState<M> {
@@ -160,6 +163,7 @@ impl<M: Model + DenseVlMethods + Send + 'static> Clone for AppState<M> {
             force_scheduler_for_greedy: self.force_scheduler_for_greedy,
             prompt_lookup_enabled: self.prompt_lookup_enabled,
             health_collector: self.health_collector.clone(),
+            runtime_usage: self.runtime_usage.clone(),
         }
     }
 }
@@ -191,6 +195,15 @@ impl<M: Model + DenseVlMethods + Send + 'static> AppState<M> {
                 max_new_tokens,
                 effective_concurrency: active.saturating_add(queued).saturating_add(1),
             })
+    }
+
+    pub(crate) fn record_request_started(&self, input_tokens: u32) {
+        self.runtime_usage
+            .record_input_tokens(u64::from(input_tokens));
+        if self.paged_prefix_cache_enabled {
+            self.runtime_usage
+                .record_prefix_cache_eligible_tokens(u64::from(input_tokens.saturating_sub(1)));
+        }
     }
 }
 
@@ -1335,6 +1348,7 @@ where
         mtp_health,
         prompt_lookup_health,
     );
+    let runtime_usage = scheduler_handle.runtime_usage.clone();
 
     Ok(AppState {
         model,
@@ -1357,6 +1371,7 @@ where
         force_scheduler_for_greedy,
         prompt_lookup_enabled,
         health_collector,
+        runtime_usage,
     })
 }
 
@@ -1715,6 +1730,9 @@ mod tests {
             cmd_tx,
             control_tx,
             cold_materialization_tracker: Arc::new(std::sync::OnceLock::new()),
+            runtime_usage: Arc::new(
+                crate::core::runtime_usage::ModelRuntimeUsageCounters::default(),
+            ),
             admit_count: Arc::new(AtomicU64::new(0)),
             batch_count: Arc::new(AtomicU64::new(0)),
             saturate_triggered: Arc::new(AtomicU64::new(0)),

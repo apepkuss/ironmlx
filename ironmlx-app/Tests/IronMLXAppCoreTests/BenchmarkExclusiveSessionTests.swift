@@ -318,6 +318,9 @@ private func healthSnapshot(active: Int, queued: Int) -> HealthzSnapshot {
     )
     let activeKvOffload = HealthzSnapshot.ActiveKvOffloadInfo(
         enabled: false,
+        status: "disabled",
+        active: false,
+        degraded: false,
         mode: "disabled",
         storageDir: nil,
         residentPages: 0,

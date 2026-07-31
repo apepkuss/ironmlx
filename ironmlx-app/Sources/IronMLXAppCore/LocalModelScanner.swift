@@ -69,6 +69,8 @@ public struct LocalModel: Codable, Equatable, Sendable {
     public var repoID: String
     public var source: String
     public var type: String
+    public var architecture: String?
+    public var capabilities: BackendModelCapabilities?
     public var sizeMB: Double
     public var loaded: Bool
     public var pinned: Bool
@@ -85,6 +87,8 @@ public struct LocalModel: Codable, Equatable, Sendable {
         repoID: String,
         source: String,
         type: String = "llm",
+        architecture: String? = nil,
+        capabilities: BackendModelCapabilities? = nil,
         sizeMB: Double,
         loaded: Bool = false,
         pinned: Bool = false,
@@ -100,6 +104,8 @@ public struct LocalModel: Codable, Equatable, Sendable {
         self.repoID = repoID
         self.source = source
         self.type = type
+        self.architecture = architecture
+        self.capabilities = capabilities
         self.sizeMB = sizeMB
         self.loaded = loaded
         self.pinned = pinned
@@ -117,6 +123,8 @@ public struct LocalModel: Codable, Equatable, Sendable {
         case repoID = "repo_id"
         case source
         case type
+        case architecture
+        case capabilities
         case sizeMB = "size_mb"
         case loaded
         case pinned
@@ -127,6 +135,10 @@ public struct LocalModel: Codable, Equatable, Sendable {
         case quantization
         case readiness
         case integrity
+    }
+
+    public var isBlockDiffusion: Bool {
+        capabilities?.runtimeKind == "block_diffusion" || type == "block_diffusion_vlm"
     }
 }
 
@@ -552,6 +564,10 @@ public struct LocalModelScanner: Sendable {
         scan(loadedModels: []).first(where: { $0.id == reference })?.mtp?.candidates ?? []
     }
 
+    public func model(for reference: String) -> LocalModel? {
+        scan(loadedModels: []).first(where: { $0.id == reference })
+    }
+
     private func scanCacheDirectory(
         _ cacheURL: URL,
         provider: ModelRepositoryProvider,
@@ -592,11 +608,15 @@ public struct LocalModelScanner: Sendable {
             let config = inspection.config
             let kind = artifactKind(config)
             let signature = mtpCompatibilitySignature(config)
+            let architecture = normalizedString(config["model_type"])
+            let capabilities = runtimeCapabilities(config: config)
             return LocalModel(
                 id: id,
                 repoID: id,
                 source: source,
                 type: kind == .mtp ? "mtp" : inspection.capabilityType,
+                architecture: architecture,
+                capabilities: kind == .mtp ? nil : capabilities,
                 sizeMB: sizeMB,
                 loaded: loaded,
                 pinned: pinned,
@@ -628,6 +648,9 @@ public struct LocalModelScanner: Sendable {
         if isMtpModelType(modelType) {
             return "mtp"
         }
+        if modelType == "diffusion-gemma" {
+            return "block_diffusion_vlm"
+        }
         if signalsContainAny(signals, ["reranker", "rerank", "text-ranking"]) {
             return "reranker"
         }
@@ -650,6 +673,27 @@ public struct LocalModelScanner: Sendable {
             return "vlm"
         }
         return "llm"
+    }
+
+    private func runtimeCapabilities(config: [String: Any]) -> BackendModelCapabilities {
+        let modelType = normalizedString(config["model_type"]) ?? ""
+        let isDiffusion = modelType == "diffusion-gemma"
+        return BackendModelCapabilities(
+            runtimeKind: isDiffusion ? "block_diffusion" : "causal",
+            supportsStreaming: true,
+            supportsVision: hasVisionCapability(
+                config: config,
+                signals: modelCapabilitySignals(config: config)
+            ),
+            supportsMtp: !isDiffusion && mtpCompatibilitySignature(config)?.supportsMtp == true,
+            supportsPromptLookup: !isDiffusion,
+            supportsSpeculativeDecoding: !isDiffusion
+                && mtpCompatibilitySignature(config)?.supportsMtp == true,
+            supportsKvCache: !isDiffusion,
+            supportedSamplingParameters: isDiffusion
+                ? ["max_tokens", "temperature", "seed"]
+                : ["max_tokens", "temperature", "top_p", "top_k", "repetition_penalty", "seed"]
+        )
     }
 
     private func modelCapabilitySignals(config: [String: Any]) -> [String] {

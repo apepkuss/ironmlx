@@ -411,10 +411,63 @@ pub struct EngineModelConfig {
     pub load_policy: EngineLoadPolicy,
     pub default: bool,
     pub pinned: bool,
-    pub scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
+    pub scheduler_runtime_profile: Option<SchedulerAutotuneRuntimeProfile>,
     pub mtp: Option<EngineMtpSettings>,
     pub prompt_lookup: Option<PromptLookupConfig>,
     pub sampling_defaults: SamplingDefaults,
+    pub capabilities: EngineModelCapabilities,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineModelCapabilities {
+    pub runtime_kind: &'static str,
+    pub supports_streaming: bool,
+    pub supports_vision: bool,
+    pub supports_mtp: bool,
+    pub supports_prompt_lookup: bool,
+    pub supports_speculative_decoding: bool,
+    pub supports_kv_cache: bool,
+    pub supported_sampling_parameters: &'static [&'static str],
+}
+
+impl EngineModelCapabilities {
+    pub fn for_architecture(
+        architecture: ModelArchitecture,
+        supports_vision: bool,
+    ) -> EngineModelCapabilities {
+        let is_diffusion = architecture == ModelArchitecture::DiffusionGemma;
+        let supports_mtp = matches!(
+            architecture,
+            ModelArchitecture::Qwen35Dense
+                | ModelArchitecture::Qwen35Moe
+                | ModelArchitecture::Gemma4
+        );
+        EngineModelCapabilities {
+            runtime_kind: if is_diffusion {
+                "block_diffusion"
+            } else {
+                "causal"
+            },
+            supports_streaming: true,
+            supports_vision,
+            supports_mtp,
+            supports_prompt_lookup: architecture.supports_prompt_lookup(),
+            supports_speculative_decoding: supports_mtp,
+            supports_kv_cache: !is_diffusion,
+            supported_sampling_parameters: if is_diffusion {
+                &["max_tokens", "temperature", "seed"]
+            } else {
+                &[
+                    "max_tokens",
+                    "temperature",
+                    "top_p",
+                    "top_k",
+                    "repetition_penalty",
+                    "seed",
+                ]
+            },
+        }
+    }
 }
 
 impl EngineModelConfig {
@@ -661,6 +714,14 @@ pub(crate) struct EngineLoadedModelInfo {
     pub id: String,
     pub path: String,
     pub architecture: String,
+    pub capabilities: EngineModelCapabilities,
+    pub runtime_state: EngineRuntimeState,
+    pub scheduler: Option<&'static str>,
+    pub active_requests: usize,
+    pub queued_requests: usize,
+    pub queue_capacity: usize,
+    pub usage: crate::core::runtime_usage::ModelRuntimeUsageSnapshot,
+    pub active_kv_offload: Option<crate::core::cache::ActiveKvOffloadHealth>,
     pub is_default: bool,
     pub pinned: bool,
     pub max_position_embeddings: i32,
@@ -1541,10 +1602,44 @@ impl EnginePoolState {
                 continue;
             };
             let health = engine.loaded_health();
+            let usage = engine.runtime_usage_snapshot();
+            let active_kv_offload = match &health {
+                LoadedEngineHealth::Causal(snapshot) if snapshot.active_kv_offload.enabled => {
+                    Some(snapshot.active_kv_offload.clone())
+                }
+                LoadedEngineHealth::Causal(_) | LoadedEngineHealth::DiffusionGemma { .. } => None,
+            };
+            let (scheduler, active_requests, queued_requests, queue_capacity) = match &health {
+                LoadedEngineHealth::Causal(snapshot) => (
+                    Some("continuous_batching"),
+                    snapshot.scheduler.b_active,
+                    snapshot.scheduler.b_queued,
+                    snapshot.scheduler.queue_max,
+                ),
+                LoadedEngineHealth::DiffusionGemma {
+                    scheduler,
+                    active_requests,
+                    queued_requests,
+                    queue_capacity,
+                } => (
+                    Some(*scheduler),
+                    *active_requests,
+                    *queued_requests,
+                    *queue_capacity,
+                ),
+            };
             models.push(EngineLoadedModelInfo {
                 id: id.clone(),
                 path: slot.model.path.to_string_lossy().into_owned(),
                 architecture: engine.architecture().to_string(),
+                capabilities: slot.model.capabilities.clone(),
+                runtime_state: EngineRuntimeState::Loaded,
+                scheduler,
+                active_requests,
+                queued_requests,
+                queue_capacity,
+                usage,
+                active_kv_offload,
                 is_default: default_model.as_deref() == Some(id.as_str()),
                 max_position_embeddings: health.max_position_embeddings(),
                 pinned: slot.is_pinned(),
@@ -2514,6 +2609,20 @@ impl EngineVariant {
             }
         }
     }
+
+    fn runtime_usage_snapshot(&self) -> crate::core::runtime_usage::ModelRuntimeUsageSnapshot {
+        match self {
+            Self::Qwen35(state) => state.runtime_usage.snapshot(true),
+            Self::Qwen35Moe(state) => state.runtime_usage.snapshot(true),
+            Self::Qwen36Moe(state) => state.runtime_usage.snapshot(true),
+            Self::Gemma4(state) => state.runtime_usage.snapshot(true),
+            Self::Gemma4Drafter(state) => state.base.runtime_usage.snapshot(true),
+            Self::Glm4MoeLite(state) => state.runtime_usage.snapshot(true),
+            Self::Llama(state) => state.runtime_usage.snapshot(true),
+            Self::MiniCpmV46(state) => state.runtime_usage.snapshot(true),
+            Self::DiffusionGemma(state) => state.runtime_usage.snapshot(false),
+        }
+    }
 }
 
 fn causal_pending_requests<M>(state: &AppState<M>) -> usize
@@ -2605,12 +2714,41 @@ async fn load_engine_variant(
         .and_then(|value| value.as_str())
         .ok_or_else(|| anyhow::anyhow!("config.json missing model_type"))?;
     let architecture = ModelArchitecture::from_model_type(model_type)?;
+    if architecture == ModelArchitecture::DiffusionGemma {
+        let cfg = DiffusionGemmaConfig::from_loader(&loader)
+            .context("DiffusionGemmaConfig::from_loader")?;
+        let vision_config = cfg
+            .vision_config
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("DiffusionGemma config has no vision_config"))?;
+        let image_token_id = cfg.image_token_id;
+        let generation_config = DiffusionGemmaGenerationConfig::from_loader(&loader)
+            .context("DiffusionGemmaGenerationConfig::from_loader")?;
+        let model_impl = DiffusionGemmaModel::from_loader(&loader)
+            .context("DiffusionGemmaModel::from_loader")?;
+        let state = diffusion_gemma::build_diffusion_gemma_app_state(
+            model_impl,
+            tokenizer,
+            generation_config,
+            model.id.clone(),
+            static_memory_estimate.total_cold_bytes(),
+            VisionInputConfig::DiffusionGemma {
+                vision_config,
+                image_token_id,
+            },
+        );
+        return Ok(EngineVariant::DiffusionGemma(state));
+    }
     let mtp_config = resolve_engine_mtp_config(model, architecture, loader.config_raw_value())?;
     let prompt_lookup = model
         .prompt_lookup
         .map(PromptLookupConfig::validate)
         .transpose()?;
-    let scheduler_config = model.scheduler_runtime_profile.config;
+    let scheduler_config = model
+        .scheduler_runtime_profile
+        .as_ref()
+        .context("causal engine model is missing scheduler runtime profile")?
+        .config;
     let paged_prefix_cache = runtime.paged_prefix_cache_config(&model.id, scheduler_config)?;
     let prefix_lru_cache = runtime.prefix_lru_cache_config(paged_prefix_cache.as_ref())?;
 
@@ -2770,43 +2908,7 @@ async fn load_engine_variant(
             .await?;
             Ok(EngineVariant::MiniCpmV46(state))
         }
-        ModelArchitecture::DiffusionGemma => {
-            if model.mtp.is_some() {
-                bail!(
-                    "engine model `{}` configures MTP for DiffusionGemma",
-                    model.id
-                );
-            }
-            if model.prompt_lookup.is_some() && !architecture.supports_prompt_lookup() {
-                bail!(
-                    "engine model `{}` configures PromptLookup for DiffusionGemma",
-                    model.id
-                );
-            }
-            let cfg = DiffusionGemmaConfig::from_loader(&loader)
-                .context("DiffusionGemmaConfig::from_loader")?;
-            let vision_config = cfg
-                .vision_config
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("DiffusionGemma config has no vision_config"))?;
-            let image_token_id = cfg.image_token_id;
-            let generation_config = DiffusionGemmaGenerationConfig::from_loader(&loader)
-                .context("DiffusionGemmaGenerationConfig::from_loader")?;
-            let model_impl = DiffusionGemmaModel::from_loader(&loader)
-                .context("DiffusionGemmaModel::from_loader")?;
-            let state = diffusion_gemma::build_diffusion_gemma_app_state(
-                model_impl,
-                tokenizer,
-                generation_config,
-                model.id.clone(),
-                static_memory_estimate.total_cold_bytes(),
-                VisionInputConfig::DiffusionGemma {
-                    vision_config,
-                    image_token_id,
-                },
-            );
-            Ok(EngineVariant::DiffusionGemma(state))
-        }
+        ModelArchitecture::DiffusionGemma => unreachable!("handled before causal runtime setup"),
     }
 }
 
@@ -3002,7 +3104,10 @@ async fn build_plain_causal_state<M>(
 where
     M: Model + crate::core::scheduler::DenseVlMethods + Send + 'static,
 {
-    let profile = model.scheduler_runtime_profile.clone();
+    let profile = model
+        .scheduler_runtime_profile
+        .clone()
+        .context("causal engine model is missing scheduler runtime profile")?;
     let state = super::build_plain_app_state(
         model_impl,
         tokenizer,
@@ -3041,7 +3146,10 @@ async fn build_prompt_lookup_causal_state<M>(
 where
     M: Model + crate::core::scheduler::DenseVlMethods + Send + 'static,
 {
-    let profile = model.scheduler_runtime_profile.clone();
+    let profile = model
+        .scheduler_runtime_profile
+        .clone()
+        .context("causal engine model is missing scheduler runtime profile")?;
     let state = super::build_prompt_lookup_app_state(
         model_impl,
         prompt_lookup,
@@ -3089,7 +3197,10 @@ where
     let mtp = model_impl
         .load_mtp_head(&mtp_loader)
         .with_context(|| format!("loading MTP head from {}", mtp_config.model_dir.display()))?;
-    let profile = model.scheduler_runtime_profile.clone();
+    let profile = model
+        .scheduler_runtime_profile
+        .clone()
+        .context("causal engine model is missing scheduler runtime profile")?;
     let state = super::build_mtp_app_state(
         model_impl,
         mtp,
@@ -3143,7 +3254,10 @@ async fn build_gemma4_drafter_causal_state(
                 mtp_config.model_dir.display()
             )
         })?;
-    let profile = model.scheduler_runtime_profile.clone();
+    let profile = model
+        .scheduler_runtime_profile
+        .clone()
+        .context("causal engine model is missing scheduler runtime profile")?;
     let state = super::build_gemma4_drafter_app_state(
         model_impl,
         drafter,
@@ -3404,6 +3518,8 @@ impl LoadedEngineHealth {
 
 #[cfg(test)]
 mod tests {
+    use super::EngineModelCapabilities;
+    use crate::models::ModelArchitecture;
     use std::fs::OpenOptions;
     use std::os::fd::AsRawFd;
     use std::path::{Path, PathBuf};
@@ -3485,10 +3601,14 @@ mod tests {
             load_policy,
             default: false,
             pinned: false,
-            scheduler_runtime_profile: runtime_profile(),
+            scheduler_runtime_profile: Some(runtime_profile()),
             mtp: None,
             prompt_lookup: None,
             sampling_defaults: SamplingDefaults::default(),
+            capabilities: EngineModelCapabilities::for_architecture(
+                ModelArchitecture::Qwen35Dense,
+                false,
+            ),
         }
     }
 

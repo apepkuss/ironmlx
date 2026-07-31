@@ -150,10 +150,7 @@ import WebKit
     configStore.save(AppConfig(loadedModels: ["mlx-community/Tiny-4bit"]))
     let webView = CapturingDashboardWebView()
     let notificationCenter = NotificationCenter()
-    let backend = BackendProcessManager(
-        configStore: configStore,
-        scanner: LocalModelScanner(rootURL: root)
-    )
+    let backend = TestRuntimeBackend()
     let bridge = DashboardBridge(
         webView: webView,
         configStore: configStore,
@@ -172,6 +169,56 @@ import WebKit
 }
 
 @MainActor
+@Test func dashboardBridgePublishesStructuredBackendRuntimeEventImmediately() async throws {
+    let root = try dashboardBridgeNotificationModelRoot(repoID: "mlx-community/Tiny-4bit")
+    let configStore = AppConfigStore(url: root.appendingPathComponent("app_config.json"))
+    let webView = CapturingDashboardWebView()
+    let notificationCenter = NotificationCenter()
+    let backend = TestRuntimeBackend(state: .failed)
+    backend.lastEvent = BackendRuntimeEvent(
+        phase: .breaker,
+        runtimeState: .failed,
+        incidentID: UUID(),
+        launchID: UUID(),
+        pid: 1234,
+        terminationStatus: 9,
+        terminationReason: "uncaught_signal",
+        recoveryAttempt: 1,
+        detail: "Crash-loop breaker stopped automatic recovery.",
+        logTail: "backend log tail",
+        canRetry: true,
+        processHealthy: false
+    )
+    let bridge = DashboardBridge(
+        webView: webView,
+        configStore: configStore,
+        backend: backend,
+        scanner: LocalModelScanner(rootURL: root),
+        parameterStore: ModelParameterStore(
+            url: root.appendingPathComponent("model_params.json")
+        ),
+        notificationCenter: notificationCenter
+    )
+
+    notificationCenter.post(
+        name: .ironMLXBackendRuntimeDidChange,
+        object: NSObject()
+    )
+    #expect(await webView.waitForScript(containing: "onServerCrash") == false)
+
+    notificationCenter.post(
+        name: .ironMLXBackendRuntimeDidChange,
+        object: backend
+    )
+    let script = try #require(await webView.script(containing: "onServerCrash"))
+    #expect(script.contains("breaker"))
+    #expect(script.contains(#"\"termination_status\":9"#))
+    #expect(script.contains(#"\"can_retry\":true"#))
+    #expect(script.contains("backend log tail"))
+    withExtendedLifetime(bridge) {}
+}
+
+@MainActor
 @Test func dashboardScannedModelsExposeEffectiveMaxTokensUsedForLoad() async throws {
     let root = try dashboardBridgeNotificationModelRoot(
         repoID: "mlx-community/LongContext-4bit",
@@ -184,10 +231,7 @@ import WebKit
     let bridge = DashboardBridge(
         webView: webView,
         configStore: configStore,
-        backend: BackendProcessManager(
-            configStore: configStore,
-            scanner: LocalModelScanner(rootURL: root)
-        ),
+        backend: TestRuntimeBackend(),
         scanner: LocalModelScanner(rootURL: root),
         parameterStore: ModelParameterStore(url: root.appendingPathComponent("model_params.json")),
         notificationCenter: notificationCenter
@@ -217,10 +261,7 @@ import WebKit
     let bridge = DashboardBridge(
         webView: webView,
         configStore: configStore,
-        backend: BackendProcessManager(
-            configStore: configStore,
-            scanner: LocalModelScanner(rootURL: root)
-        ),
+        backend: TestRuntimeBackend(),
         scanner: LocalModelScanner(rootURL: root),
         parameterStore: ModelParameterStore(url: root.appendingPathComponent("model_params.json")),
         notificationCenter: notificationCenter

@@ -50,3 +50,18 @@ import Testing
     #expect(text.contains("previous"))
     #expect(text.contains("next"))
 }
+
+@Test func logStoreTailHonorsByteAndLineBoundsAcrossUTF8Boundary() throws {
+    let root = try temporaryDirectory().appendingPathComponent("logs", isDirectory: true)
+    let store = IronMLXLogStore(rootURL: root)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let lines = (0..<300).map { "\($0)-后台日志-🙂" }.joined(separator: "\n")
+    try lines.write(to: store.url(for: .backend), atomically: true, encoding: .utf8)
+
+    let tail = store.tailText(from: .backend, maxLines: 20, maxBytes: 512)
+    let tailLines = tail.split(separator: "\n")
+
+    #expect(tail.utf8.count <= 512)
+    #expect(tailLines.count <= 20)
+    #expect(tail.contains("299-后台日志-🙂"))
+}

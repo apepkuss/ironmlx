@@ -1464,12 +1464,16 @@ fn build_engine_model_config_for_pool(
             load_policy: model.load_policy,
             default: model.default,
             pinned: false,
-            scheduler_runtime_profile: default_scheduler_runtime_profile(
+            scheduler_runtime_profile: Some(default_scheduler_runtime_profile(
                 SchedulerAutotuneRuntimeContext::local_default(DEFAULT_MAX_CACHE_CAP),
-            ),
+            )),
             mtp,
             prompt_lookup,
             sampling_defaults: server::SamplingDefaults::default(),
+            capabilities: server::engine::EngineModelCapabilities::for_architecture(
+                crate::models::ModelArchitecture::Qwen35Dense,
+                false,
+            ),
         });
     }
     if !model.path.exists() {
@@ -1485,6 +1489,52 @@ fn build_engine_model_config_for_pool(
             model.id
         );
     }
+    let model_type = read_model_type(&model.path)?;
+    let architecture = crate::models::ModelArchitecture::from_model_type(&model_type)?;
+    let config_data = std::fs::read(model.path.join("config.json"))?;
+    let config: serde_json::Value = serde_json::from_slice(&config_data)?;
+    let supports_vision = matches!(
+        architecture,
+        crate::models::ModelArchitecture::DiffusionGemma
+            | crate::models::ModelArchitecture::MiniCpmV46
+    ) || config
+        .get("vision_config")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|vision| !vision.is_empty());
+    let capabilities =
+        server::engine::EngineModelCapabilities::for_architecture(architecture, supports_vision);
+    if architecture == crate::models::ModelArchitecture::DiffusionGemma {
+        if mtp.is_some() {
+            bail!(
+                "engine model `{}` configures MTP for DiffusionGemma",
+                model.id
+            );
+        }
+        if prompt_lookup.is_some() {
+            bail!(
+                "engine model `{}` configures PromptLookup for DiffusionGemma",
+                model.id
+            );
+        }
+        if model.scheduler_profile.is_some() {
+            bail!(
+                "engine model `{}` configures a causal scheduler profile for DiffusionGemma",
+                model.id
+            );
+        }
+        return Ok(server::engine::EngineModelConfig {
+            id: model.id,
+            path: model.path,
+            load_policy: model.load_policy,
+            default: model.default,
+            pinned: false,
+            scheduler_runtime_profile: None,
+            mtp: None,
+            prompt_lookup: None,
+            sampling_defaults: server::SamplingDefaults::default(),
+            capabilities,
+        });
+    }
     let mut resolved = resolve_engine_pool_scheduler_profile(
         args,
         &model.path,
@@ -1497,8 +1547,6 @@ fn build_engine_model_config_for_pool(
             prompt_lookup,
         },
     )?;
-    let model_type = read_model_type(&model.path)?;
-    let architecture = crate::models::ModelArchitecture::from_model_type(&model_type)?;
     if apply_adaptive_mtp_scheduler_defaults(args, architecture, mtp.is_some(), &mut resolved) {
         tracing::info!(
             "ironmlx serve: adaptive MTP scheduler default applied manifest_model={} b_max={}",
@@ -1512,10 +1560,11 @@ fn build_engine_model_config_for_pool(
         load_policy: model.load_policy,
         default: model.default,
         pinned: false,
-        scheduler_runtime_profile: resolved.scheduler_runtime_profile,
+        scheduler_runtime_profile: Some(resolved.scheduler_runtime_profile),
         mtp,
         prompt_lookup,
         sampling_defaults: server::SamplingDefaults::default(),
+        capabilities,
     })
 }
 
@@ -2140,7 +2189,15 @@ mod scheduler_profile_tests {
         let config = build_engine_model_config_for_pool(&args, manifest_model, None, "test-host")
             .expect("build manifest model config");
 
-        assert_eq!(config.scheduler_runtime_profile.config.b_max, 4);
+        assert_eq!(
+            config
+                .scheduler_runtime_profile
+                .as_ref()
+                .expect("causal scheduler profile")
+                .config
+                .b_max,
+            4
+        );
         std::fs::remove_dir_all(temp_dir).expect("cleanup");
     }
 
@@ -2178,6 +2235,8 @@ mod scheduler_profile_tests {
         assert_eq!(
             config
                 .scheduler_runtime_profile
+                .as_ref()
+                .expect("causal scheduler profile")
                 .runtime_context
                 .speculative
                 .mode,
@@ -2221,6 +2280,8 @@ mod scheduler_profile_tests {
         assert_eq!(
             config
                 .scheduler_runtime_profile
+                .as_ref()
+                .expect("causal scheduler profile")
                 .runtime_context
                 .speculative
                 .mode,

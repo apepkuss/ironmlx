@@ -4312,6 +4312,7 @@ struct BatchedTextPrefixReplay<'a> {
     dummy_position_ids: Option<&'a Array>,
     prefix_cache_config: Option<&'a PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<&'a PrefixLruCacheHandle>,
+    runtime_usage: &'a crate::core::runtime_usage::ModelRuntimeUsageCounters,
 }
 
 fn batched_text_input_ids(
@@ -4503,6 +4504,7 @@ fn forward_batched_text_with_paged_prefix<M: Model>(
         dummy_position_ids,
         prefix_cache_config,
         prefix_lru_cache,
+        runtime_usage,
     } = input;
     anyhow::ensure!(
         !prompt_ids.is_empty(),
@@ -4539,6 +4541,8 @@ fn forward_batched_text_with_paged_prefix<M: Model>(
             None,
         )?
         .unwrap_or(0) as usize;
+        runtime_usage
+            .record_prefix_cache_hit_tokens((restored as u64).saturating_mul(group.len() as u64));
         for row in group {
             replay_from[row] = restored;
         }
@@ -4694,6 +4698,7 @@ struct BatchedVlPrefixReplay<'a> {
     dummy_position_ids: Option<&'a Array>,
     prefix_cache_config: Option<&'a PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<&'a PrefixLruCacheHandle>,
+    runtime_usage: &'a crate::core::runtime_usage::ModelRuntimeUsageCounters,
 }
 
 fn batched_vl_input_ids(
@@ -4939,6 +4944,7 @@ fn forward_batched_vl_with_paged_prefix<M: Model + DenseVlMethods>(
         dummy_position_ids,
         prefix_cache_config,
         prefix_lru_cache,
+        runtime_usage,
     } = input;
     let b = prompt_ids.len();
     anyhow::ensure!(b > 0, "forward_batched_vl_with_paged_prefix: empty batch");
@@ -4984,6 +4990,8 @@ fn forward_batched_vl_with_paged_prefix<M: Model + DenseVlMethods>(
             fingerprints[first_row].as_deref(),
         )?
         .unwrap_or(0) as usize;
+        runtime_usage
+            .record_prefix_cache_hit_tokens((restored as u64).saturating_mul(group.len() as u64));
         for row in group {
             replay_from[row] = restored;
         }
@@ -5356,6 +5364,7 @@ pub struct Scheduler<M: Model> {
     process_memory_governor: Option<crate::core::process_memory::SharedProcessMemoryGovernor>,
     cold_materialization_tracker:
         Arc<OnceLock<Arc<crate::core::process_memory::ColdMaterializationTracker>>>,
+    runtime_usage: Arc<crate::core::runtime_usage::ModelRuntimeUsageCounters>,
     governor_admission_reservations:
         HashMap<RequestId, crate::core::process_memory::MemoryReservation>,
     _marker: PhantomData<fn(&M) -> ()>,
@@ -5471,6 +5480,9 @@ impl<M: Model> Scheduler<M> {
             active_kv_stats: None,
             process_memory_governor: None,
             cold_materialization_tracker: Arc::new(OnceLock::new()),
+            runtime_usage: Arc::new(
+                crate::core::runtime_usage::ModelRuntimeUsageCounters::default(),
+            ),
             governor_admission_reservations: HashMap::new(),
             _marker: PhantomData,
         })
@@ -5538,6 +5550,13 @@ impl<M: Model> Scheduler<M> {
         tracker: Arc<OnceLock<Arc<crate::core::process_memory::ColdMaterializationTracker>>>,
     ) {
         self.cold_materialization_tracker = tracker;
+    }
+
+    pub(crate) fn share_runtime_usage(
+        &mut self,
+        runtime_usage: Arc<crate::core::runtime_usage::ModelRuntimeUsageCounters>,
+    ) {
+        self.runtime_usage = runtime_usage;
     }
 
     fn begin_cold_materialization(
@@ -11701,6 +11720,8 @@ impl<M: Model> Scheduler<M> {
                 prefix_fingerprint.as_deref(),
             )?
         {
+            self.runtime_usage
+                .record_prefix_cache_hit_tokens(restore_len as u64);
             pos = restore_len;
             mtp_prev_hidden = Some(restored_last_hidden);
         }
@@ -14212,6 +14233,7 @@ impl<M: Model> Scheduler<M> {
             if let Some(cache) = self.cache.as_mut() {
                 for group in prefix_restore_groups(&prompt_ids, None)? {
                     let first_row = group[0];
+                    let group_len = group.len();
                     let restored = try_restore_paged_prefix_for_prompt_rows(
                         paged_prefix_cache_config.as_ref(),
                         prefix_lru_cache.as_ref(),
@@ -14221,6 +14243,9 @@ impl<M: Model> Scheduler<M> {
                         None,
                     )?
                     .unwrap_or(0) as usize;
+                    self.runtime_usage.record_prefix_cache_hit_tokens(
+                        (restored as u64).saturating_mul(group_len as u64),
+                    );
                     for row in group {
                         immutable_replay_from[row] = restored;
                         prefix_restore_attempted[row] = true;
@@ -14258,6 +14283,8 @@ impl<M: Model> Scheduler<M> {
                         *owner,
                         prompt_ids,
                     )? {
+                        self.runtime_usage
+                            .record_prefix_cache_hit_tokens(restored as u64);
                         immutable_replay_from[cache_row] = usize::try_from(restored)
                             .map_err(|_| anyhow!("negative immutable restore length"))?;
                         tracing::debug!(
@@ -14373,6 +14400,8 @@ impl<M: Model> Scheduler<M> {
                         &prompt_ids_u32,
                         vl_prefix_fingerprint.as_deref(),
                     )? {
+                        self.runtime_usage
+                            .record_prefix_cache_hit_tokens(start_pos as u64);
                         forward_single_vl_suffix(
                             model,
                             prefill_cache,
@@ -14511,6 +14540,7 @@ impl<M: Model> Scheduler<M> {
                             dummy_position_ids: dummy_position_ids.as_ref(),
                             prefix_cache_config: paged_prefix_cache_config.as_ref(),
                             prefix_lru_cache: prefix_lru_cache.as_ref(),
+                            runtime_usage: &self.runtime_usage,
                         },
                     )?
                 } else {
@@ -14563,6 +14593,8 @@ impl<M: Model> Scheduler<M> {
                     prompt_ids,
                     None,
                 )? {
+                    self.runtime_usage
+                        .record_prefix_cache_hit_tokens(start_pos as u64);
                     forward_single_text_suffix(
                         model,
                         prefill_cache,
@@ -14668,6 +14700,7 @@ impl<M: Model> Scheduler<M> {
                         dummy_position_ids: dummy_position_ids.as_ref(),
                         prefix_cache_config: paged_prefix_cache_config.as_ref(),
                         prefix_lru_cache: prefix_lru_cache.as_ref(),
+                        runtime_usage: &self.runtime_usage,
                     },
                 )?
             } else {
@@ -15382,6 +15415,8 @@ impl<M: Model> Scheduler<M> {
             )?
             .unwrap_or(0)
         };
+        self.runtime_usage
+            .record_prefix_cache_hit_tokens(prefix_restored_start as u64);
         let position_ids_required = model.requires_position_ids();
 
         let chunk_size = if prefill_chunk_size == 0 {
@@ -16065,6 +16100,8 @@ impl<M: Model> Scheduler<M> {
                 prefix_fingerprint.as_deref(),
             )?
         {
+            self.runtime_usage
+                .record_prefix_cache_hit_tokens(restore_len as u64);
             chunk_start = restore_len;
             image_pad_consumed = if is_vl {
                 count_image_pad(&prompt_ids[..chunk_start as usize], image_token_id)
@@ -25581,6 +25618,11 @@ mod tests {
         assert_eq!(hit_stats.physical.adopt_page_copies, 0);
         assert_eq!(hit_stats.physical.cow_page_copies, 0);
         assert_eq!(hit_stats.physical.orphan_pages, 0);
+        let usage = scheduler.runtime_usage.snapshot(true);
+        assert_eq!(
+            usage.prefix_cache.expect("causal prefix cache").hit_tokens,
+            4
+        );
         scheduler
             .validate_request_owned_kv_invariants()
             .expect("immutable hit invariants");

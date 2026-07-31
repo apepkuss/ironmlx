@@ -16,13 +16,13 @@ public final class DashboardWindowController {
     public static let dashboardHiddenActivationPolicy: NSApplication.ActivationPolicy = .accessory
 
     private let configStore: AppConfigStore
-    private let backend: BackendProcessManager
+    private let backend: any BackendRuntimeManaging
     private var window: NSWindow?
     private var webView: WKWebView?
     private var bridge: DashboardBridge?
     private var windowDelegate: DashboardWindowDelegate?
 
-    public init(configStore: AppConfigStore, backend: BackendProcessManager) {
+    public init(configStore: AppConfigStore, backend: any BackendRuntimeManaging) {
         self.configStore = configStore
         self.backend = backend
     }

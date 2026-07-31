@@ -36,7 +36,7 @@ public enum MenuBarMenuBuilder {
         config: AppConfig,
         state: BackendProcessState
     ) -> [String] {
-        guard state == .running || state == .starting else {
+        guard state == .running || state == .starting || state == .recovering || state == .degraded else {
             return []
         }
         if let cached {
@@ -120,6 +120,15 @@ public enum MenuBarMenuBuilder {
         case .starting:
             title = localized(.statusStarting, language: language)
             color = .systemYellow
+        case .stopping:
+            title = localized(.statusStopping, language: language)
+            color = .systemYellow
+        case .recovering:
+            title = localized(.statusRecovering, language: language)
+            color = .systemOrange
+        case .degraded:
+            title = localized(.statusDegraded, language: language)
+            color = .systemOrange
         case .failed:
             title = localized(.statusFailed, language: language)
             color = .systemRed
@@ -180,7 +189,7 @@ public enum MenuBarMenuBuilder {
         target: AnyObject?,
         to menu: NSMenu
     ) {
-        if state == .running || state == .starting {
+        if state == .running || state == .starting || state == .recovering || state == .degraded {
             menu.addItem(
                 item(
                     localized(.stop, language: language),
@@ -209,7 +218,7 @@ public enum MenuBarMenuBuilder {
             target: target,
             symbol: "arrow.clockwise"
         )
-        restart.isEnabled = state == .running
+        restart.isEnabled = state == .running || state == .degraded || state == .failed
         menu.addItem(restart)
     }
 
@@ -235,6 +244,12 @@ public enum MenuBarMenuBuilder {
             return "服务器运行中"
         case ("zh", .statusStarting):
             return "服务器启动中"
+        case ("zh", .statusStopping):
+            return "服务器停止中"
+        case ("zh", .statusRecovering):
+            return "服务器恢复中"
+        case ("zh", .statusDegraded):
+            return "服务器部分恢复"
         case ("zh", .statusFailed):
             return "服务器启动失败"
         case ("zh", .statusStopped):
@@ -260,6 +275,12 @@ public enum MenuBarMenuBuilder {
             return "伺服器執行中"
         case ("zh-Hant", .statusStarting):
             return "伺服器啟動中"
+        case ("zh-Hant", .statusStopping):
+            return "伺服器停止中"
+        case ("zh-Hant", .statusRecovering):
+            return "伺服器恢復中"
+        case ("zh-Hant", .statusDegraded):
+            return "伺服器部分恢復"
         case ("zh-Hant", .statusFailed):
             return "伺服器啟動失敗"
         case ("zh-Hant", .statusStopped):
@@ -285,6 +306,12 @@ public enum MenuBarMenuBuilder {
             return "サーバー: 実行中"
         case ("ja", .statusStarting):
             return "サーバー: 起動中"
+        case ("ja", .statusStopping):
+            return "サーバー: 停止中"
+        case ("ja", .statusRecovering):
+            return "サーバー: 復旧中"
+        case ("ja", .statusDegraded):
+            return "サーバー: 一部復旧"
         case ("ja", .statusFailed):
             return "サーバー: 失敗"
         case ("ja", .statusStopped):
@@ -310,6 +337,12 @@ public enum MenuBarMenuBuilder {
             return "서버: 실행 중"
         case ("ko", .statusStarting):
             return "서버: 시작 중"
+        case ("ko", .statusStopping):
+            return "서버: 정지 중"
+        case ("ko", .statusRecovering):
+            return "서버: 복구 중"
+        case ("ko", .statusDegraded):
+            return "서버: 부분 복구"
         case ("ko", .statusFailed):
             return "서버: 실패"
         case ("ko", .statusStopped):
@@ -357,6 +390,12 @@ public enum MenuBarMenuBuilder {
             return "Server: Running"
         case .statusStarting:
             return "Server: Starting"
+        case .statusStopping:
+            return "Server: Stopping"
+        case .statusRecovering:
+            return "Server: Recovering"
+        case .statusDegraded:
+            return "Server: Partially Recovered"
         case .statusFailed:
             return "Server: Failed"
         case .statusStopped:
@@ -416,6 +455,9 @@ private enum MenuTextKey {
     case quit
     case statusRunning
     case statusStarting
+    case statusStopping
+    case statusRecovering
+    case statusDegraded
     case statusFailed
     case statusStopped
 }
