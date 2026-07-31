@@ -23115,6 +23115,69 @@ mod tests {
 
     #[test]
     #[serial(mlx_metal)]
+    fn prompt_lookup_sequential_q1_rejection_restores_hybrid_cache() {
+        let mut scheduler = Scheduler::<ScriptedMtpSchedulerModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        let prompt = vec![1, 2, 3, 4, 1, 2, 3];
+        let id = scheduler.admit(mtp_req(prompt.clone(), 3)).expect("admit");
+        let model = ScriptedMtpSchedulerModel::new(4, Vec::new(), Vec::new())
+            .with_hybrid_cache()
+            .with_exact_verify_limits(0, 0, 0);
+
+        scheduler
+            .prefill_admitted_prompt_lookup(&model, prompt_lookup_cfg())
+            .expect("prompt lookup prefill");
+        model.clear_text_hidden_trace();
+        let events = scheduler
+            .step_prompt_lookup(&model)
+            .expect("sequential PromptLookup mismatch step");
+
+        assert_eq!(events[0].token, 4);
+        assert_eq!(
+            scheduler.get(id).expect("request state").generated_tokens,
+            vec![4, 4]
+        );
+        let row = scheduler
+            .prompt_lookup_state
+            .as_ref()
+            .expect("prompt lookup state")
+            .rows
+            .get(&0)
+            .expect("row lookup state");
+        let mut expected_history = prompt;
+        expected_history.extend([4, 4]);
+        assert_eq!(
+            row.lookup.as_ref().expect("lookup index").history(),
+            expected_history
+        );
+        let stats = scheduler
+            .prompt_lookup_stats()
+            .expect("prompt lookup stats");
+        assert_eq!(stats.drafted_tokens, 1);
+        assert_eq!(stats.accepted_tokens, 0);
+        assert_eq!(stats.rollback_count, 1);
+        assert_eq!(stats.exact_batched_verify_windows, 0);
+        assert_eq!(stats.sequential_verify_windows, 1);
+        let expected_offset = scheduler
+            .get(id)
+            .expect("request state")
+            .real_len
+            .saturating_sub(1);
+        for layer in scheduler.cache.as_deref().expect("scheduler cache") {
+            match layer {
+                LayerCache::Full(kv) => assert_eq!(kv.offsets(), &[expected_offset]),
+                LayerCache::Linear(gd) => assert_eq!(gd.offsets(), &[expected_offset]),
+                LayerCache::Mla(_) => panic!("unexpected MLA cache"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
     fn prompt_lookup_exact_hybrid_full_accept_commits_live_cache_without_replay() {
         let mut scheduler = Scheduler::<ScriptedMtpSchedulerModel>::new(
             1,

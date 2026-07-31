@@ -4,15 +4,16 @@
 //! forward. These ignored tests compare that reference against one Q>1
 //! teacher-forced forward from the same prefix and an independent cache.
 
-use std::path::{Path, PathBuf};
-
 use anyhow::{Context, Result};
 use ironmlx::core::cache::TurboQuantKVBits;
 use ironmlx::core::generate::{build_batched_append_attention_mask, build_position_ids};
 use ironmlx::core::{Loader, Model, Tokenizer};
-use ironmlx::models::{Gemma4Model, LlamaModel, Qwen35Model, Qwen35MoeModel, Qwen36MoeModel};
+use ironmlx::models::{
+    Gemma4Model, LlamaModel, MiniCpmV46Model, Qwen35Model, Qwen35MoeModel, Qwen36MoeModel,
+};
 use mlx::{Array, Dtype, StreamOrDevice};
 use serial_test::serial;
+use std::path::{Path, PathBuf};
 
 const QUALIFICATION_TEXT: &str = "\
 IronMLX verifies copied prompt continuations against the target model. \
@@ -894,6 +895,50 @@ fn qwen35_dense_qgt1_matches_sequential_verify() -> Result<()> {
     }
     qualify_model(&model, &tokenizer)?;
     qualify_qwen_cache_and_ragged(&model, &tokenizer)
+}
+
+#[test]
+#[ignore = "requires a real MiniCPM-V-4.6 checkpoint and Apple Silicon"]
+#[serial(mlx_metal)]
+fn minicpmv46_qgt1_matches_sequential_verify() -> Result<()> {
+    let Some(model_dir) = snapshot_from_env_or_cache(
+        "PROMPT_LOOKUP_VERIFY_MINICPMV46_MODEL",
+        "models--mlx-community--MiniCPM-V-4.6-4bit",
+    ) else {
+        eprintln!("skip: no MiniCPM-V-4.6 qualification checkpoint");
+        return Ok(());
+    };
+    let loader = Loader::open(&model_dir).context("opening MiniCPM-V-4.6 checkpoint")?;
+    let tokenizer = load_tokenizer(&loader, &model_dir)?;
+    let model = MiniCpmV46Model::from_loader(&loader).context("loading MiniCPM-V-4.6 model")?;
+    qualify_model(&model, &tokenizer)?;
+
+    let mut tokens = tokenizer
+        .encode(QUALIFICATION_TEXT, false)
+        .context("tokenizing MiniCPM-V-4.6 cache qualification text")?;
+    while tokens.len() < 8 * (128 + 5) {
+        let copy = tokens.clone();
+        tokens.extend(copy);
+    }
+    for cache_mode in [QualificationCache::Dense, QualificationCache::Paged] {
+        qualify_case(&model, &tokens, 4, 64, 5, cache_mode)?;
+        qualify_ragged_case_with_cache(&model, &tokens, 128, &[5, 1, 4, 0], cache_mode)?;
+    }
+    anyhow::ensure!(
+        !model.supports_exact_batched_speculative_verify_for_kv_cache(
+            1,
+            128,
+            2,
+            Some(TurboQuantKVBits::K3V4),
+        ) && !model.supports_exact_batched_speculative_verify_for_kv_cache(
+            1,
+            128,
+            2,
+            Some(TurboQuantKVBits::K4V4),
+        ),
+        "MiniCPM-V-4.6 TurboQuant KV exact verify must fail closed"
+    );
+    Ok(())
 }
 
 #[test]

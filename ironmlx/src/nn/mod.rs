@@ -19,8 +19,10 @@ pub mod mlp;
 pub mod mrope;
 pub mod mtp;
 pub mod norm;
+pub(crate) mod position_stable_linear;
 pub(crate) mod position_stable_qmm;
 pub(crate) mod product_stable_qmm;
+pub(crate) mod sequence_stable_gated_delta;
 pub(crate) mod sorted_moe_weighted_sum;
 pub(crate) mod verify_qmm;
 

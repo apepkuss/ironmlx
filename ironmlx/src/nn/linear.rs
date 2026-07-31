@@ -228,6 +228,13 @@ impl Linear {
     /// Stream-targeted forward pass.
     pub fn forward_on(&self, x: &Array, target: impl Into<StreamOrDevice>) -> Result<Array> {
         let target = target.into();
+        if super::position_stable_linear::is_armed()
+            && x.ndim() == 3
+            && x.shape().as_slice()[1] > 1
+            && matches!(self.inner, LinearImpl::Fp { .. })
+        {
+            return self.forward_fp_positions_isolated_on(x, target);
+        }
         if super::position_stable_qmm::is_armed()
             && x.ndim() == 3
             && x.shape().as_slice()[1] > 1
@@ -311,6 +318,27 @@ impl Linear {
                 Ok(y)
             }
         }
+    }
+
+    fn forward_fp_positions_isolated_on(&self, x: &Array, target: StreamOrDevice) -> Result<Array> {
+        let shape = x.shape();
+        let Some(&[batch, sequence, _]) = <&[i32; 3]>::try_from(shape.as_slice()).ok() else {
+            return self.forward_on(x, target);
+        };
+        if sequence <= 1 {
+            return self.forward_on(x, target);
+        }
+        let mut outputs = Vec::with_capacity(sequence as usize);
+        for position in 0..sequence {
+            let position_x = x.slice_on(
+                [0_i32, position, 0],
+                [batch, position + 1, x.shape().as_slice()[2]],
+                target,
+            )?;
+            outputs.push(self.forward_on(&position_x, target)?);
+        }
+        let output_refs: Vec<&Array> = outputs.iter().collect();
+        Ok(mlx::ops::concatenate_on(&output_refs, 1, target)?)
     }
 
     /// Project `[B, Q, K]` as Q independent `[B, K]` matrices, preserving the
@@ -440,6 +468,55 @@ mod tests {
         let y = layer.forward(&x).expect("forward");
         assert_eq!(x.dtype(), mlx::Dtype::Float32);
         assert_eq!(y.dtype(), mlx::Dtype::Float32);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn position_stable_fp_forward_matches_sequential_q1_shapes() {
+        let batch = 4_i32;
+        let sequence = 5_i32;
+        let out = 32_i32;
+        let in_dim = 64_i32;
+        let weight_data = (0..(out * in_dim))
+            .map(|idx| ((idx % 29) as f32 - 14.0) * 0.015)
+            .collect::<Vec<_>>();
+        let input_data = (0..(batch * sequence * in_dim))
+            .map(|idx| ((idx % 19) as f32 - 9.0) * 0.025)
+            .collect::<Vec<_>>();
+        let weight: Array = (weight_data.as_slice(), &[out, in_dim][..])
+            .try_into()
+            .unwrap();
+        let input: Array = (input_data.as_slice(), &[batch, sequence, in_dim][..])
+            .try_into()
+            .unwrap();
+        let weight = mlx::ops::cast::astype(&weight, mlx::Dtype::Bfloat16).unwrap();
+        let input = mlx::ops::cast::astype(&input, mlx::Dtype::Bfloat16).unwrap();
+        let layer = fp_linear(weight, None);
+
+        let mut expected = Vec::with_capacity(sequence as usize);
+        for depth in 0..sequence {
+            let position = mlx::ops::indexing::slice_strided(
+                &input,
+                &[0_i32, depth, 0][..],
+                &[batch, depth + 1, in_dim][..],
+                &[1_i32, 1, 1][..],
+            )
+            .unwrap();
+            expected.push(layer.forward(&position).unwrap());
+        }
+        let expected_refs = expected.iter().collect::<Vec<_>>();
+        let expected = mlx::ops::shape::concatenate(&expected_refs, 1).unwrap();
+        let actual = {
+            let _scope = crate::nn::position_stable_linear::scope();
+            layer.forward(&input).unwrap()
+        };
+        let expected = mlx::ops::cast::astype(&expected, mlx::Dtype::Float32).unwrap();
+        let actual = mlx::ops::cast::astype(&actual, mlx::Dtype::Float32).unwrap();
+
+        assert_eq!(
+            expected.to_vec::<f32>().unwrap(),
+            actual.to_vec::<f32>().unwrap()
+        );
     }
 
     #[test]
