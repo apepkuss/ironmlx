@@ -26,17 +26,48 @@ public struct EndpointPayload: Codable, Equatable {
     public var loopback: String
     public var port: UInt16
     public var interfaces: [NetworkInterface]
+    public var networkMode: String
+    public var authentication: String
+    public var endpointAddress: String
 
-    public init(host: String, port: UInt16, interfaces: [NetworkInterface]? = nil) {
+    public init(
+        host: String,
+        port: UInt16,
+        interfaces: [NetworkInterface]? = nil,
+        networkMode: String = "local",
+        lanHost: String? = nil,
+        authentication: String = "none"
+    ) {
         self.host = host
         self.loopback = "127.0.0.1"
         self.port = port
-        self.interfaces = interfaces ?? (Self.shouldPublishNetworkInterfaces(for: host) ? Self.localNetworkInterfaces() : [])
+        self.networkMode = networkMode
+        self.authentication = authentication
+        if networkMode == "lan", let lanHost {
+            self.interfaces = interfaces ?? Self.localNetworkInterfaces().filter { $0.ip == lanHost }
+            self.endpointAddress = "https://\(lanHost):\(port)/v1"
+        } else {
+            self.interfaces = []
+            self.endpointAddress = "http://127.0.0.1:\(port)/v1"
+        }
     }
 
     public static func shouldPublishNetworkInterfaces(for host: String) -> Bool {
-        let normalized = host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return normalized == "0.0.0.0" || normalized == "::" || normalized == "[::]"
+        isSafeLANAddress(host)
+    }
+
+    public static func isSafeLANAddress(_ host: String) -> Bool {
+        localNetworkInterfaces().contains { $0.ip == host }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case host
+        case loopback
+        case port
+        case interfaces
+        case networkMode = "network_mode"
+        case authentication
+        case endpointAddress = "endpoint_address"
     }
 
     public static func localNetworkInterfaces() -> [NetworkInterface] {

@@ -12,7 +12,6 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use base64::Engine;
 use mlx::Array;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -21,13 +20,14 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio::sync::oneshot;
 
 use crate::core::generate::{GenerateRequest, GenerationStream};
+use crate::core::image_input::{ImageInputError, ImageRequestBudget};
 use crate::core::model::Model;
 use crate::core::sampler::Sampler;
 use crate::core::scheduler::DenseVlMethods;
 use crate::core::server::chat_format::render_and_encode;
 use crate::core::server::chat_format::{ChatMessage, Content, ContentPart};
 use crate::core::server::scheduler_actor::{AdmitReply, SchedulerCommand};
-use crate::core::server::vision::{expand_decoded_messages, DecodedMessage, DecodedPart};
+use crate::core::server::vision::{expand_decoded_messages_bounded, DecodedMessage, DecodedPart};
 use crate::core::server::VisionInputConfig;
 use crate::core::speculative::MtpSpeculativeConfig;
 
@@ -231,25 +231,12 @@ struct CompletionResponse {
 // Image URL decoding (Step 19.1 + 19.2)
 // ---------------------------------------------------------------------------
 
-/// Decode an image URL to raw bytes.
-///
-/// Supports:
-/// - `data:<mime>;base64,<b64>` — decoded in-process (no network)
-/// - `http://` / `https://` — fetched via the provided async `reqwest::Client`
-pub async fn decode_image_url(url: &str, client: &reqwest::Client) -> anyhow::Result<Vec<u8>> {
-    if let Some(rest) = url.strip_prefix("data:") {
-        let (_meta, b64) = rest
-            .split_once(',')
-            .ok_or_else(|| anyhow::anyhow!("malformed data URL — missing ','"))?;
-        let bytes = base64::engine::general_purpose::STANDARD.decode(b64)?;
-        Ok(bytes)
-    } else if url.starts_with("http://") || url.starts_with("https://") {
-        let resp = client.get(url).send().await?;
-        let bytes = resp.bytes().await?.to_vec();
-        Ok(bytes)
-    } else {
-        anyhow::bail!("unsupported image_url scheme: {url}")
-    }
+/// Decode an in-request image data URL. Server-side URL fetching is forbidden.
+pub fn decode_image_url(
+    url: &str,
+    budget: &mut ImageRequestBudget,
+) -> Result<Vec<u8>, ImageInputError> {
+    budget.decode_data_url(url)
 }
 
 // ---------------------------------------------------------------------------
@@ -258,21 +245,27 @@ pub async fn decode_image_url(url: &str, client: &reqwest::Client) -> anyhow::Re
 
 /// Decode every OpenAI `image_url` content part into raw bytes, producing the
 /// wire-agnostic `DecodedMessage` list consumed by the shared vision core.
-pub async fn decode_openai_messages(
+pub fn decode_openai_messages(
     messages: Vec<ChatMessage>,
-    client: &reqwest::Client,
-) -> anyhow::Result<Vec<DecodedMessage>> {
+) -> Result<Vec<DecodedMessage>, ImageInputError> {
+    let mut budget = ImageRequestBudget::default();
     let mut out: Vec<DecodedMessage> = Vec::with_capacity(messages.len());
     for msg in messages {
         let mut parts: Vec<DecodedPart> = Vec::new();
         match msg.content {
-            Content::Text(t) => parts.push(DecodedPart::Text(t)),
+            Content::Text(t) => {
+                budget.add_text(&t)?;
+                parts.push(DecodedPart::Text(t));
+            }
             Content::Parts(ps) => {
                 for p in ps {
                     match p {
-                        ContentPart::Text { text } => parts.push(DecodedPart::Text(text)),
+                        ContentPart::Text { text } => {
+                            budget.add_text(&text)?;
+                            parts.push(DecodedPart::Text(text));
+                        }
                         ContentPart::ImageUrl { image_url } => {
-                            let bytes = decode_image_url(&image_url.url, client).await?;
+                            let bytes = decode_image_url(&image_url.url, &mut budget)?;
                             parts.push(DecodedPart::Image(bytes));
                         }
                     }
@@ -292,11 +285,10 @@ pub async fn decode_openai_messages(
 /// untouched; the body now delegates to the shared `vision` core.
 pub async fn expand_image_parts_in_messages(
     messages: Vec<ChatMessage>,
-    client: &reqwest::Client,
     vision_input: &VisionInputConfig,
 ) -> anyhow::Result<(Vec<ChatMessage>, Option<Vec<Array>>, Vec<(i32, i32, i32)>)> {
-    let decoded = decode_openai_messages(messages, client).await?;
-    expand_decoded_messages(decoded, vision_input)
+    let decoded = decode_openai_messages(messages)?;
+    expand_decoded_messages_bounded(decoded, vision_input.clone()).await
 }
 
 // ---------------------------------------------------------------------------
@@ -402,10 +394,6 @@ where
     }
     let chat_template_kwargs = req.chat_template_kwargs;
 
-    // Build a per-request reqwest client for image fetching.
-    // For text-only requests this is a cheap no-op (no images to fetch).
-    let http_client = reqwest::Client::new();
-
     let (image_token_id, spatial_merge_size) =
         crate::core::server::vision::derive_image_token_and_merge(
             &state.vision_input,
@@ -415,16 +403,9 @@ where
     // Expand multimodal content parts: decode images, build pixel_values,
     // rewrite messages to text-with-placeholder.
     let (flat_messages, pixel_values, image_grid_thw) =
-        match expand_image_parts_in_messages(req.messages, &http_client, &state.vision_input).await
-        {
+        match expand_image_parts_in_messages(req.messages, &state.vision_input).await {
             Ok(t) => t,
-            Err(e) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    format!("image decode/preprocess: {e}"),
-                )
-                    .into_response();
-            }
+            Err(e) => return super::security::image_error_response(e),
         };
 
     let image_grid_thw_opt = if image_grid_thw.is_empty() {
@@ -525,7 +506,6 @@ pub(crate) async fn chat_completions_with_gemma4_drafter_state(
         Err(e) => return (StatusCode::BAD_REQUEST, format!("{e:#}")).into_response(),
     };
     let chat_template_kwargs = req.chat_template_kwargs;
-    let http_client = reqwest::Client::new();
 
     let (image_token_id, spatial_merge_size) =
         crate::core::server::vision::derive_image_token_and_merge(
@@ -533,17 +513,9 @@ pub(crate) async fn chat_completions_with_gemma4_drafter_state(
             &state.base.tokenizer,
         );
     let (flat_messages, pixel_values, image_grid_thw) =
-        match expand_image_parts_in_messages(req.messages, &http_client, &state.base.vision_input)
-            .await
-        {
+        match expand_image_parts_in_messages(req.messages, &state.base.vision_input).await {
             Ok(t) => t,
-            Err(e) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    format!("image decode/preprocess: {e}"),
-                )
-                    .into_response();
-            }
+            Err(e) => return super::security::image_error_response(e),
         };
     let image_grid_thw_opt = if image_grid_thw.is_empty() {
         None
@@ -1273,18 +1245,12 @@ mod tests {
         assert_eq!(sampler.repetition_penalty, Some(1.05));
     }
 
-    #[tokio::test]
-    async fn data_url_decoded_to_bytes() {
-        // "/9j/4AAQABAA" is a truncated JPEG header (base64):
-        // 0xff 0xd8 0xff 0xe0 0x00 0x10 0x00 0x10 0x00
-        let url = "data:image/jpeg;base64,/9j/4AAQABAA";
-        let bytes = decode_image_url(url, &reqwest::Client::new())
-            .await
-            .unwrap();
-        assert_eq!(
-            bytes,
-            vec![0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x00, 0x10, 0x00]
-        );
+    #[test]
+    fn data_url_decoded_to_bytes() {
+        let url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+        let mut budget = ImageRequestBudget::default();
+        let bytes = decode_image_url(url, &mut budget).unwrap();
+        assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
     }
 
     #[tokio::test]

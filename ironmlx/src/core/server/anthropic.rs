@@ -19,9 +19,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 
-use base64::Engine;
-
 use crate::core::generate::{GenerateRequest, GenerationStream};
+use crate::core::image_input::{ImageInputError, ImageRequestBudget};
 use crate::core::model::Model;
 use crate::core::sampler::Sampler;
 use crate::core::scheduler::DenseVlMethods;
@@ -95,12 +94,7 @@ fn generation_err_to_response(err: anyhow::Error) -> Response {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AnthropicImageSource {
-    Base64 {
-        // informational; not validated
-        #[allow(dead_code)]
-        media_type: String,
-        data: String,
-    },
+    Base64 { media_type: String, data: String },
 }
 
 /// Anthropic native content block.
@@ -244,21 +238,26 @@ fn format_event(event_type: &str, payload: &serde_json::Value) -> Bytes {
 /// `media_type` is informational and not validated.
 pub(crate) fn decode_anthropic_messages(
     messages: Vec<AnthropicMessage>,
-) -> anyhow::Result<Vec<DecodedMessage>> {
+) -> Result<Vec<DecodedMessage>, ImageInputError> {
+    let mut budget = ImageRequestBudget::default();
     let mut out: Vec<DecodedMessage> = Vec::with_capacity(messages.len());
     for m in messages {
         let mut parts: Vec<DecodedPart> = Vec::new();
         match m.content {
-            AnthropicContent::Text(t) => parts.push(DecodedPart::Text(t)),
+            AnthropicContent::Text(t) => {
+                budget.add_text(&t)?;
+                parts.push(DecodedPart::Text(t));
+            }
             AnthropicContent::Parts(ps) => {
                 for p in ps {
                     match p {
-                        AnthropicContentPart::Text { text } => parts.push(DecodedPart::Text(text)),
+                        AnthropicContentPart::Text { text } => {
+                            budget.add_text(&text)?;
+                            parts.push(DecodedPart::Text(text));
+                        }
                         AnthropicContentPart::Image { source } => {
-                            let AnthropicImageSource::Base64 { data, .. } = source;
-                            let bytes = base64::engine::general_purpose::STANDARD
-                                .decode(data.as_bytes())
-                                .map_err(|e| anyhow::anyhow!("image base64 decode: {e}"))?;
+                            let AnthropicImageSource::Base64 { media_type, data } = source;
+                            let bytes = budget.decode_base64(&media_type, &data)?;
                             parts.push(DecodedPart::Image(bytes));
                         }
                     }
@@ -300,22 +299,19 @@ where
     // Decode Anthropic wire format -> neutral DecodedMessage (base64 -> bytes).
     let decoded = match decode_anthropic_messages(req.messages) {
         Ok(d) => d,
-        Err(e) => {
-            return (StatusCode::BAD_REQUEST, format!("image decode: {e}")).into_response();
-        }
+        Err(e) => return super::security::image_error_response(e.into()),
     };
 
     // Shared per-model preprocess + placeholder rewrite.
     let (flat_messages, pixel_values, image_grid_thw) =
-        match crate::core::server::vision::expand_decoded_messages(decoded, &state.vision_input) {
+        match crate::core::server::vision::expand_decoded_messages_bounded(
+            decoded,
+            state.vision_input.clone(),
+        )
+        .await
+        {
             Ok(t) => t,
-            Err(e) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    format!("image decode/preprocess: {e}"),
-                )
-                    .into_response();
-            }
+            Err(e) => return super::security::image_error_response(e),
         };
     let image_grid_thw_opt = if image_grid_thw.is_empty() {
         None
@@ -407,23 +403,17 @@ pub(crate) async fn messages_with_gemma4_drafter_state(
 
     let decoded = match decode_anthropic_messages(req.messages) {
         Ok(d) => d,
-        Err(e) => {
-            return (StatusCode::BAD_REQUEST, format!("image decode: {e}")).into_response();
-        }
+        Err(e) => return super::security::image_error_response(e.into()),
     };
     let (flat_messages, pixel_values, image_grid_thw) =
-        match crate::core::server::vision::expand_decoded_messages(
+        match crate::core::server::vision::expand_decoded_messages_bounded(
             decoded,
-            &state.base.vision_input,
-        ) {
+            state.base.vision_input.clone(),
+        )
+        .await
+        {
             Ok(t) => t,
-            Err(e) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    format!("image decode/preprocess: {e}"),
-                )
-                    .into_response();
-            }
+            Err(e) => return super::security::image_error_response(e),
         };
     let image_grid_thw_opt = if image_grid_thw.is_empty() {
         None
@@ -1166,6 +1156,7 @@ mod parity_tests {
     use crate::core::server::openai::decode_openai_messages;
     use crate::core::server::vision::expand_decoded_messages;
     use crate::core::server::VisionInputConfig;
+    use base64::Engine;
 
     /// Base64 of the real coco test image (shared by both endpoint paths so the
     /// decoded bytes are identical by construction; the test proves the two
@@ -1214,11 +1205,8 @@ mod parity_tests {
 
     async fn run_parity(vision_input: VisionInputConfig) {
         let b64 = coco_b64();
-        let client = reqwest::Client::new();
         // OpenAI path: data: URL → bytes → shared core.
-        let openai_decoded = decode_openai_messages(openai_one_image(&b64), &client)
-            .await
-            .unwrap();
+        let openai_decoded = decode_openai_messages(openai_one_image(&b64)).unwrap();
         let (o_flat, o_pv, o_grid) =
             expand_decoded_messages(openai_decoded, &vision_input).unwrap();
         // Anthropic path: raw base64 → bytes → shared core.

@@ -126,7 +126,7 @@ pub fn patchify(raw: &[f32], h: i32, w: i32) -> Result<(Array, i32, i32)> {
 /// Returns `(pixel_values, grid_h, grid_w)`.
 pub fn preprocess(img_bytes: &[u8]) -> Result<(Array, i32, i32)> {
     // 1. decode
-    let img = image::load_from_memory(img_bytes)
+    let img = crate::core::image_input::load_from_memory_bounded(img_bytes)
         .map_err(|e| anyhow!("decode image: {e}"))?
         .to_rgb8();
     let (orig_w, orig_h) = (img.width() as i32, img.height() as i32);

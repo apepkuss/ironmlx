@@ -14,6 +14,7 @@ import Testing
         "serve",
         "--host", "127.0.0.1",
         "--port", "9068",
+        "--network-mode", "local",
     ])
 }
 
@@ -39,6 +40,7 @@ import Testing
         "serve",
         "--host", "127.0.0.1",
         "--port", "9068",
+        "--network-mode", "local",
         "--prefill-chunk-size", "1024",
         "--max-sequences", "4",
         "--admission-deadline-ms", "9",
@@ -47,6 +49,23 @@ import Testing
         "--decode-cadence-mid-chunk-cap", "128",
         "--scheduler-profile", "/tmp/scheduler-profile.json",
         "--scheduler-autotune-report",
+    ])
+}
+
+@Test func lanServeArgumentsUseSelectedAddressAndStdinBootstrap() {
+    let config = BackendLaunchConfiguration(
+        executableURL: URL(fileURLWithPath: "/tmp/ironmlx"),
+        host: "127.0.0.1",
+        port: 9068,
+        networkMode: "lan",
+        lanHost: "192.168.1.24",
+        securityBootstrapStdin: true
+    )
+
+    #expect(config.arguments == [
+        "serve", "--host", "127.0.0.1", "--port", "9068",
+        "--network-mode", "lan", "--lan-host", "192.168.1.24",
+        "--security-bootstrap-stdin",
     ])
 }
 

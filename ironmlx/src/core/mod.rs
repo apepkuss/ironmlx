@@ -3,6 +3,7 @@
 pub mod cache;
 pub mod chat_template;
 pub mod generate;
+pub mod image_input;
 pub mod loader;
 pub mod memory_budget;
 pub mod model;

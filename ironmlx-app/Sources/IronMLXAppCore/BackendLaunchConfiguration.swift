@@ -6,8 +6,19 @@ public enum BackendLaunchValidationError: Error, Equatable, LocalizedError {
     }
 
     public var message: String {
-        switch self {}
+        switch self {
+        case .localBindAddressRequired:
+            return "Local mode requires a loopback host."
+        case .lanBindAddressRequired:
+            return "LAN mode requires a selected active LAN IP address."
+        case .lanSecurityMaterialMissing:
+            return "LAN mode requires API key and TLS material in Keychain."
+        }
     }
+
+    case localBindAddressRequired
+    case lanBindAddressRequired
+    case lanSecurityMaterialMissing
 }
 
 public struct BackendLaunchOptions: Equatable {
@@ -172,17 +183,42 @@ public struct BackendLaunchConfiguration: Equatable {
     public var host: String
     public var port: UInt16
     public var options: BackendLaunchOptions
+    public var networkMode: String
+    public var lanHost: String?
+    public var securityBootstrapStdin: Bool
 
     public init(
         executableURL: URL,
         host: String,
         port: UInt16,
-        options: BackendLaunchOptions = BackendLaunchOptions()
+        options: BackendLaunchOptions = BackendLaunchOptions(),
+        networkMode: String = "local",
+        lanHost: String? = nil,
+        securityBootstrapStdin: Bool = false
     ) {
         self.executableURL = executableURL
         self.host = host
         self.port = port
         self.options = options
+        self.networkMode = networkMode
+        self.lanHost = lanHost
+        self.securityBootstrapStdin = securityBootstrapStdin
+    }
+
+    public var validationError: BackendLaunchValidationError? {
+        let normalizedHost = host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard normalizedHost == "127.0.0.1" || normalizedHost == "::1" || normalizedHost == "[::1]" else {
+            return .localBindAddressRequired
+        }
+        if networkMode == "lan" {
+            guard let lanHost, EndpointPayload.isSafeLANAddress(lanHost) else {
+                return .lanBindAddressRequired
+            }
+            guard securityBootstrapStdin else {
+                return .lanSecurityMaterialMissing
+            }
+        }
+        return nil
     }
 
     public var arguments: [String] {
@@ -190,7 +226,14 @@ public struct BackendLaunchConfiguration: Equatable {
             "serve",
             "--host", host,
             "--port", String(port),
+            "--network-mode", networkMode,
         ]
+        if networkMode == "lan", let lanHost {
+            arguments += ["--lan-host", lanHost]
+            if securityBootstrapStdin {
+                arguments.append("--security-bootstrap-stdin")
+            }
+        }
         appendIntegerFlag("--prefill-chunk-size", options.prefillChunkSize, to: &arguments, allowsZero: true)
         appendIntegerFlag("--max-sequences", options.bMax, to: &arguments)
         appendIntegerFlag("--admission-deadline-ms", options.admissionDeadlineMs, to: &arguments, allowsZero: true)

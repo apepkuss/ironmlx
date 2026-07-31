@@ -17,6 +17,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     private let benchmarkSessionCoordinator: BenchmarkExclusiveSessionCoordinator
     private let parameterStore: ModelParameterStore
     private let notificationCenter: NotificationCenter
+    private let securityStore: LANSecurityMaterialStore
     private var huggingFaceSearchTask: Task<Void, Never>?
 
     public init(
@@ -32,6 +33,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         benchmarkService: BenchmarkService = BenchmarkService(),
         benchmarkSessionCoordinator: BenchmarkExclusiveSessionCoordinator = BenchmarkExclusiveSessionCoordinator(),
         parameterStore: ModelParameterStore = .shared,
+        securityStore: LANSecurityMaterialStore = .shared,
         notificationCenter: NotificationCenter = .default
     ) {
         self.webView = webView
@@ -47,6 +49,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         self.benchmarkSessionCoordinator = benchmarkSessionCoordinator
         self.parameterStore = parameterStore
         self.notificationCenter = notificationCenter
+        self.securityStore = securityStore
         super.init()
         notificationCenter.addObserver(
             self,
@@ -90,6 +93,9 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         "activateModelVersion",
         "deleteModelVersions",
         "saveSettings",
+        "copyLanAPIKey",
+        "copyLanCACertificate",
+        "rotateLanSecurity",
         "restartServer",
         "retryBackendRecovery",
         "loadModel",
@@ -150,6 +156,12 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             deleteModelVersions(json: stringBody(body))
         case "saveSettings":
             saveSettings(json: stringBody(body))
+        case "copyLanAPIKey":
+            copyLanAPIKey()
+        case "copyLanCACertificate":
+            copyLanCACertificate()
+        case "rotateLanSecurity":
+            rotateLanSecurity()
         case "restartServer":
             restartBackend()
         case "retryBackendRecovery":
@@ -218,7 +230,13 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             }
         case "/admin/api/endpoints":
             let config = configStore.load()
-            let payload = EndpointPayload(host: config.host, port: config.port)
+            let payload = EndpointPayload(
+                host: config.isLANMode ? (config.lanHost ?? config.host) : config.host,
+                port: config.port,
+                networkMode: config.isLANMode ? "lan" : "local",
+                lanHost: config.lanHost,
+                authentication: config.isLANMode ? "api_key" : "none"
+            )
             sendFetchResult(path: path, jsonString: (try? Self.jsonString(payload)) ?? "null")
         case "/admin/api/models/local":
             Task {
@@ -1166,23 +1184,240 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
 
     private func saveSettings(json: String) {
         let existing = configStore.load()
-        let config: AppConfig
+        var config: AppConfig
         do {
             config = try Self.config(applyingSettingsJSON: json, to: existing)
+            if config.isLANMode {
+                guard let lanHost = config.lanHost else {
+                    throw LANSecurityMaterialError.invalidLANAddress
+                }
+                let metadata = try securityStore.ensureMaterial(
+                    lanHost: lanHost,
+                    credentialID: config.lanCredentialID
+                )
+                config.lanCredentialID = metadata.credentialID
+                config.lanCertificateFingerprint = metadata.certificateFingerprint
+            } else {
+                config.host = "127.0.0.1"
+            }
         } catch {
+            sendJavaScript("onSettingsSaved(\(Self.jsStringLiteral(Self.settingsErrorJSON(error))))")
+            return
+        }
+        let needsRestart = Self.backendRestartRequired(from: existing, to: config)
+        guard needsRestart, backend.isRunning else {
+            configStore.save(config)
+            retireSupersededSecurityMaterial(from: existing, to: config)
+            notifyMenuLanguageDidChange()
+            let response = #"{"status":"ok","needs_restart":false}"#
+            sendJavaScript("onSettingsSaved(\(Self.jsStringLiteral(response)))")
             return
         }
 
         configStore.save(config)
-        notifyMenuLanguageDidChange()
-        let needsRestart = Self.backendRestartRequired(from: existing, to: config)
-        let response = #"{"status":"ok","needs_restart":\#(needsRestart)}"#
-        sendJavaScript("onSettingsSaved(\(Self.jsStringLiteral(response)))")
+        Task {
+            let result = await backend.restart(intent: .plannedRestart)
+            guard result.success else {
+                configStore.save(existing)
+                _ = await backend.restart(intent: .plannedRestart)
+                await MainActor.run {
+                    self.retireSupersededSecurityMaterial(from: config, to: existing)
+                }
+                let error = result.error ?? "The candidate network configuration failed to start; the previous configuration was restored."
+                let response = Self.settingsErrorJSON(message: error, code: "network_restart_rolled_back")
+                await MainActor.run {
+                    self.sendJavaScript("onSettingsSaved(\(Self.jsStringLiteral(response)))")
+                }
+                return
+            }
+            await MainActor.run {
+                self.retireSupersededSecurityMaterial(from: existing, to: config)
+                self.notifyMenuLanguageDidChange()
+                let response = #"{"status":"ok","needs_restart":false,"restarted":true}"#
+                self.sendJavaScript("onSettingsSaved(\(Self.jsStringLiteral(response)))")
+            }
+        }
+    }
+
+    private func copyLanAPIKey() {
+        let config = configStore.load()
+        guard config.isLANMode, let credentialID = config.lanCredentialID else {
+            sendLanSecretAction(success: false, code: "lan_security_material_missing")
+            return
+        }
+        do {
+            let apiKey = try securityStore.apiKey(credentialID: credentialID)
+            copyAPIKeyToPasteboard(apiKey)
+            sendLanSecretAction(success: true, code: "lan_api_key_copied")
+        } catch {
+            sendLanSecretAction(error: error, fallbackCode: "lan_security_material_missing")
+        }
+    }
+
+    private func copyLanCACertificate() {
+        let config = configStore.load()
+        guard config.isLANMode, let credentialID = config.lanCredentialID else {
+            sendLanSecretAction(success: false, code: "lan_security_material_missing")
+            return
+        }
+        do {
+            let certificate = try securityStore.caCertificate(credentialID: credentialID)
+            guard let value = String(data: certificate, encoding: .utf8) else {
+                throw LANSecurityMaterialError.materialMissing
+            }
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            pasteboard.setString(value, forType: .string)
+            sendLanSecretAction(success: true, code: "lan_ca_certificate_copied")
+        } catch {
+            sendLanSecretAction(error: error, fallbackCode: "lan_security_material_missing")
+        }
+    }
+
+    private func rotateLanSecurity() {
+        let existing = configStore.load()
+        guard existing.isLANMode, let lanHost = existing.lanHost else {
+            sendLanSecretAction(success: false, code: "lan_mode_required")
+            return
+        }
+        do {
+            let metadata = try securityStore.rotate(lanHost: lanHost)
+            let apiKey = try securityStore.apiKey(credentialID: metadata.credentialID)
+            copyAPIKeyToPasteboard(apiKey)
+            var candidate = existing
+            candidate.lanCredentialID = metadata.credentialID
+            candidate.lanCertificateFingerprint = metadata.certificateFingerprint
+            configStore.save(candidate)
+            guard backend.isRunning else {
+                retireSupersededSecurityMaterial(from: existing, to: candidate)
+                sendLanSecretAction(success: true, code: "lan_security_rotated_and_copied")
+                return
+            }
+            Task {
+                let result = await backend.restart(intent: .plannedRestart)
+                if result.success {
+                    await MainActor.run {
+                        self.retireSupersededSecurityMaterial(from: existing, to: candidate)
+                        self.sendLanSecretAction(success: true, code: "lan_security_rotated_and_copied")
+                    }
+                } else {
+                    configStore.save(existing)
+                    _ = await backend.restart(intent: .plannedRestart)
+                    await MainActor.run {
+                        self.clearPasteboardIfUnchanged(apiKey)
+                        self.retireSupersededSecurityMaterial(from: candidate, to: existing)
+                        self.sendLanSecretAction(success: false, code: "lan_security_rotation_rolled_back")
+                    }
+                }
+            }
+        } catch {
+            sendLanSecretAction(error: error, fallbackCode: "lan_security_rotation_failed")
+        }
+    }
+
+    private func copyAPIKeyToPasteboard(_ apiKey: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(apiKey, forType: .string)
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(60))
+            self.clearPasteboardIfUnchanged(apiKey)
+        }
+    }
+
+    private func clearPasteboardIfUnchanged(_ apiKey: String) {
+        let pasteboard = NSPasteboard.general
+        guard pasteboard.string(forType: .string) == apiKey else {
+            return
+        }
+        pasteboard.clearContents()
+    }
+
+    private func retireSupersededSecurityMaterial(from old: AppConfig, to new: AppConfig) {
+        guard let oldCredentialID = old.lanCredentialID,
+              oldCredentialID != new.lanCredentialID
+        else {
+            return
+        }
+        do {
+            try securityStore.deleteMaterial(credentialID: oldCredentialID)
+        } catch {
+            IronMLXAppLogger.error("Failed to retire superseded LAN credential: \(error)")
+        }
+    }
+
+    private func sendLanSecretAction(
+        success: Bool,
+        code: String,
+        fields: [String: Any] = [:]
+    ) {
+        var payload = ["success": success, "code": code] as [String: Any]
+        fields.forEach { payload[$0.key] = $0.value }
+        let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+        let json = data.flatMap { String(data: $0, encoding: .utf8) } ?? "{\"success\":false}"
+        sendJavaScript("onLanSecretAction(\(Self.jsStringLiteral(json)))")
+    }
+
+    private func sendLanSecretAction(error: Error, fallbackCode: String) {
+        if let securityError = error as? LANSecurityMaterialError,
+           case .keychain(let status) = securityError {
+            sendLanSecretAction(
+                success: false,
+                code: "lan_keychain_unavailable",
+                fields: ["os_status": Int(status)]
+            )
+            return
+        }
+        sendLanSecretAction(success: false, code: fallbackCode)
+    }
+
+    static func settingsErrorJSON(_ error: Error) -> String {
+        if let securityError = error as? LANSecurityMaterialError {
+            switch securityError {
+            case .invalidLANAddress:
+                return settingsErrorJSON(
+                    message: securityError.localizedDescription,
+                    code: "lan_address_invalid"
+                )
+            case .keychain(let status):
+                return settingsErrorJSON(
+                    message: securityError.localizedDescription,
+                    code: "lan_keychain_unavailable",
+                    fields: ["os_status": Int(status)]
+                )
+            case .materialMissing:
+                return settingsErrorJSON(
+                    message: securityError.localizedDescription,
+                    code: "lan_security_material_missing"
+                )
+            case .certificateGenerationFailed:
+                return settingsErrorJSON(
+                    message: securityError.localizedDescription,
+                    code: "lan_certificate_generation_failed"
+                )
+            }
+        }
+        return settingsErrorJSON(message: error.localizedDescription, code: "settings_invalid")
+    }
+
+    private static func settingsErrorJSON(
+        message: String,
+        code: String,
+        fields: [String: Any] = [:]
+    ) -> String {
+        var payload: [String: Any] = ["status": "error", "code": code, "error": message]
+        fields.forEach { payload[$0.key] = $0.value }
+        let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+        return data.flatMap { String(data: $0, encoding: .utf8) }
+            ?? "{\"status\":\"error\",\"code\":\"settings_invalid\"}"
     }
 
     static func backendRestartRequired(from existing: AppConfig, to updated: AppConfig) -> Bool {
         existing.host != updated.host
             || existing.port != updated.port
+            || existing.networkMode != updated.networkMode
+            || existing.lanHost != updated.lanHost
+            || existing.lanCredentialID != updated.lanCredentialID
             || existing.memLimitTotal != updated.memLimitTotal
             || existing.memLimitModel != updated.memLimitModel
             || existing.memTotalAuto != updated.memTotalAuto
@@ -1217,9 +1452,14 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         }
 
         var config = existing
-        if let host = object["host"] as? String, !host.isEmpty {
-            config.host = host
+        if let networkMode = stringValue(object, "network_mode") {
+            config.networkMode = networkMode == "lan" ? "lan" : "local"
         }
+        if let lanHost = stringValue(object, "lan_host") {
+            let trimmed = lanHost.trimmingCharacters(in: .whitespacesAndNewlines)
+            config.lanHost = trimmed.isEmpty ? nil : trimmed
+        }
+        config.host = "127.0.0.1"
         if let port = object["port"] as? UInt16 {
             config.port = port
         } else if let port = intValue(object, "port"), (1...65535).contains(port) {

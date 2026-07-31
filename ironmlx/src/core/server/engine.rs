@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
-use std::net::SocketAddr;
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::{
@@ -616,8 +615,7 @@ pub struct EnginePagedPrefixCacheSettings {
 
 #[derive(Debug, Clone)]
 pub struct EnginePoolRuntimeConfig {
-    pub host: String,
-    pub port: u16,
+    pub network: super::security::ServerNetworkConfig,
     pub kv_cache_turboquant_bits: Option<TurboQuantKVBits>,
     pub scheduler_autotune_report: bool,
     pub paged_prefix_cache: Option<EnginePagedPrefixCacheSettings>,
@@ -3288,24 +3286,16 @@ pub async fn serve_engine_pool(
     config: EnginePoolConfig,
     runtime: EnginePoolRuntimeConfig,
 ) -> Result<()> {
-    let host = runtime.host.clone();
-    let port = runtime.port;
+    let network = runtime.network.clone();
     let state = EnginePoolState::new(config, runtime).await?;
     state.start_model_ttl_sweeper();
     state.start_memory_governor_monitor();
     let app = engine_pool_router().with_state(state);
 
-    let addr: SocketAddr = format!("{host}:{port}")
-        .parse()
-        .with_context(|| format!("parsing socket addr {host}:{port}"))?;
-    tracing::info!("ironmlx EnginePool server listening on http://{addr}");
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .with_context(|| format!("binding {addr}"))?;
-    let serve_result = axum::serve(listener, app).await;
+    let serve_result =
+        super::security::serve_router(app, network, "ironmlx EnginePool server").await;
     crate::core::cache::shutdown_process_async_prefix_store_queue();
-    serve_result?;
-    Ok(())
+    serve_result
 }
 
 fn engine_pool_router() -> Router<EnginePoolState> {
@@ -3582,8 +3572,8 @@ mod tests {
 
     fn runtime_config() -> EnginePoolRuntimeConfig {
         EnginePoolRuntimeConfig {
-            host: "127.0.0.1".to_string(),
-            port: 0,
+            network: crate::core::server::security::ServerNetworkConfig::local("127.0.0.1", 0)
+                .unwrap(),
             kv_cache_turboquant_bits: None,
             scheduler_autotune_report: false,
             paged_prefix_cache: None,

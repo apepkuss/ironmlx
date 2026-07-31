@@ -3,6 +3,10 @@ import Foundation
 public struct AppConfig: Codable, Equatable, Sendable {
     public var host: String
     public var port: UInt16
+    public var networkMode: String?
+    public var lanHost: String?
+    public var lanCredentialID: String?
+    public var lanCertificateFingerprint: String?
     public var defaultModel: String?
     public var loadedModels: [String]?
     public var pinnedModels: [String]?
@@ -39,6 +43,10 @@ public struct AppConfig: Codable, Equatable, Sendable {
     public init(
         host: String = "127.0.0.1",
         port: UInt16 = 9068,
+        networkMode: String? = "local",
+        lanHost: String? = nil,
+        lanCredentialID: String? = nil,
+        lanCertificateFingerprint: String? = nil,
         defaultModel: String? = nil,
         loadedModels: [String]? = nil,
         pinnedModels: [String]? = nil,
@@ -74,6 +82,10 @@ public struct AppConfig: Codable, Equatable, Sendable {
     ) {
         self.host = host
         self.port = port
+        self.networkMode = networkMode
+        self.lanHost = lanHost
+        self.lanCredentialID = lanCredentialID
+        self.lanCertificateFingerprint = lanCertificateFingerprint
         self.defaultModel = defaultModel
         self.loadedModels = loadedModels
         self.pinnedModels = pinnedModels
@@ -111,6 +123,10 @@ public struct AppConfig: Codable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey {
         case host
         case port
+        case networkMode = "network_mode"
+        case lanHost = "lan_host"
+        case lanCredentialID = "lan_credential_id"
+        case lanCertificateFingerprint = "lan_certificate_fingerprint"
         case defaultModel = "default_model"
         case loadedModels = "loaded_models"
         case pinnedModels = "pinned_models"
@@ -147,6 +163,10 @@ public struct AppConfig: Codable, Equatable, Sendable {
 }
 
 public extension AppConfig {
+    var isLANMode: Bool {
+        networkMode?.lowercased() == "lan"
+    }
+
     var defaultModelReference: String? {
         Self.normalizedModelReference(defaultModel)
     }

@@ -60,11 +60,18 @@ public struct BackendProcessLaunchPlan: Sendable {
     public var processURL: URL
     public var arguments: [String]
     public var command: String
+    public var standardInputData: Data?
 
-    public init(processURL: URL, arguments: [String], command: String? = nil) {
+    public init(
+        processURL: URL,
+        arguments: [String],
+        command: String? = nil,
+        standardInputData: Data? = nil
+    ) {
         self.processURL = processURL
         self.arguments = arguments
         self.command = command ?? ([processURL.path] + arguments).joined(separator: " ")
+        self.standardInputData = standardInputData
     }
 }
 
@@ -97,6 +104,7 @@ public final class BackendProcessManager {
         terminator: BackendProcessTerminator = BackendProcessTerminator(),
         logStore: IronMLXLogStore = IronMLXLogStore(),
         notificationCenter: NotificationCenter = .default,
+        securityStore: LANSecurityMaterialStore = .shared,
         launchPlanProvider: LaunchPlanProvider? = nil,
         processFactory: @escaping ProcessFactory = Process.init
     ) {
@@ -113,14 +121,38 @@ public final class BackendProcessManager {
             }
             let launch = BackendLaunchConfiguration(
                 executableURL: executable,
-                host: config.host,
+                host: "127.0.0.1",
                 port: config.port,
-                options: options
+                options: options,
+                networkMode: config.isLANMode ? "lan" : "local",
+                lanHost: config.lanHost,
+                securityBootstrapStdin: config.isLANMode
             )
+            if let validationError = launch.validationError {
+                throw BackendProcessError.invalidLaunchConfiguration(validationError)
+            }
+            let standardInputData: Data?
+            if config.isLANMode {
+                guard let credentialID = config.lanCredentialID,
+                      let lanHost = config.lanHost
+                else {
+                    throw BackendProcessError.invalidLaunchConfiguration(.lanSecurityMaterialMissing)
+                }
+                standardInputData = try securityStore.bootstrap(
+                    credentialID: credentialID,
+                    lanHost: lanHost
+                )
+            } else {
+                standardInputData = nil
+            }
             let (processURL, arguments) = BackendBinaryResolver.resolvedExecutableAndArguments(
                 for: launch
             )
-            return BackendProcessLaunchPlan(processURL: processURL, arguments: arguments)
+            return BackendProcessLaunchPlan(
+                processURL: processURL,
+                arguments: arguments,
+                standardInputData: standardInputData
+            )
         }
     }
 
@@ -162,6 +194,8 @@ public final class BackendProcessManager {
             process.arguments = plan.arguments
             process.standardOutput = logHandle
             process.standardError = logHandle
+            let standardInputPipe = plan.standardInputData.map { _ in Pipe() }
+            process.standardInput = standardInputPipe
 
             launchGeneration &+= 1
             let launchID = UUID()
@@ -194,8 +228,16 @@ public final class BackendProcessManager {
             transition(to: initialState)
             do {
                 try process.run()
+                if let data = plan.standardInputData,
+                   let standardInputPipe {
+                    try standardInputPipe.fileHandleForWriting.write(contentsOf: data)
+                    try standardInputPipe.fileHandleForWriting.close()
+                }
             } catch {
                 process.terminationHandler = nil
+                if process.isRunning {
+                    process.terminate()
+                }
                 closeLogHandle(for: launch)
                 managedLaunches.removeValue(forKey: launchID)
                 currentLaunch = nil

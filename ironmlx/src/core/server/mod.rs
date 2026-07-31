@@ -3,11 +3,9 @@
 //! `serve()` owns the model behind a Mutex; concurrent requests serialize
 //! waiting for the lock (P4 contract — multi-stream scheduler is P8b).
 
-use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use anyhow::Context;
 use axum::{routing::get, routing::post, Router};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -35,6 +33,7 @@ pub mod health;
 pub mod model_manager;
 pub(crate) mod openai;
 pub mod scheduler_actor;
+pub mod security;
 pub mod vision;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -666,8 +665,7 @@ pub async fn serve<M>(
     model: M,
     tokenizer: Tokenizer,
     model_id: String,
-    host: &str,
-    port: u16,
+    network_config: security::ServerNetworkConfig,
     prefill_chunk_size: usize,
     b_max: usize,
     admission_deadline_ms: u64,
@@ -691,8 +689,7 @@ where
         model,
         tokenizer,
         model_id,
-        host,
-        port,
+        network_config,
         prefill_chunk_size,
         b_max,
         admission_deadline_ms,
@@ -721,8 +718,7 @@ pub async fn serve_with_prompt_lookup<M>(
     cfg: crate::core::prompt_lookup::PromptLookupConfig,
     tokenizer: Tokenizer,
     model_id: String,
-    host: &str,
-    port: u16,
+    network_config: security::ServerNetworkConfig,
     prefill_chunk_size: usize,
     b_max: usize,
     admission_deadline_ms: u64,
@@ -749,8 +745,7 @@ where
         model,
         tokenizer,
         model_id,
-        host,
-        port,
+        network_config,
         prefill_chunk_size,
         b_max,
         admission_deadline_ms,
@@ -782,8 +777,7 @@ pub async fn serve_with_mtp<M>(
     prompt_lookup: Option<crate::core::prompt_lookup::PromptLookupConfig>,
     tokenizer: Tokenizer,
     model_id: String,
-    host: &str,
-    port: u16,
+    network_config: security::ServerNetworkConfig,
     prefill_chunk_size: usize,
     b_max: usize,
     admission_deadline_ms: u64,
@@ -826,8 +820,7 @@ where
         model,
         tokenizer,
         model_id,
-        host,
-        port,
+        network_config,
         prefill_chunk_size,
         b_max,
         admission_deadline_ms,
@@ -864,8 +857,7 @@ pub async fn serve_with_gemma4_drafter(
     prompt_lookup: Option<crate::core::prompt_lookup::PromptLookupConfig>,
     tokenizer: Tokenizer,
     model_id: String,
-    host: &str,
-    port: u16,
+    network_config: security::ServerNetworkConfig,
     prefill_chunk_size: usize,
     b_max: usize,
     admission_deadline_ms: u64,
@@ -919,15 +911,7 @@ pub async fn serve_with_gemma4_drafter(
         .route("/v1/messages", post(anthropic::gemma4_drafter_messages))
         .with_state(state);
 
-    let addr: SocketAddr = format!("{host}:{port}")
-        .parse()
-        .with_context(|| format!("parsing socket addr {host}:{port}"))?;
-    tracing::info!("ironmlx Gemma4 drafter server listening on http://{addr}");
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .with_context(|| format!("binding {addr}"))?;
-    axum::serve(listener, app).await?;
-    Ok(())
+    security::serve_router(app, network_config, "ironmlx Gemma4 drafter server").await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1384,8 +1368,7 @@ async fn serve_inner<M, S>(
     model: M,
     tokenizer: Tokenizer,
     model_id: String,
-    host: &str,
-    port: u16,
+    network_config: security::ServerNetworkConfig,
     prefill_chunk_size: usize,
     b_max: usize,
     admission_deadline_ms: u64,
@@ -1434,15 +1417,7 @@ where
         .route("/v1/messages", post(anthropic::messages))
         .with_state(state);
 
-    let addr: SocketAddr = format!("{host}:{port}")
-        .parse()
-        .with_context(|| format!("parsing socket addr {host}:{port}"))?;
-    tracing::info!("ironmlx server listening on http://{addr}");
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .with_context(|| format!("binding {addr}"))?;
-    axum::serve(listener, app).await?;
-    Ok(())
+    security::serve_router(app, network_config, "ironmlx server").await
 }
 
 fn build_health_collector(

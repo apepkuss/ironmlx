@@ -5,12 +5,10 @@
 //! requests are admitted through a bounded serial lane and completed as either
 //! unary responses or SSE streams of committed block-diffusion output.
 
-use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::Context;
 use axum::{
     body::{Body, Bytes},
     extract::State,
@@ -533,23 +531,11 @@ async fn prepare_openai_request(
     state: &DiffusionGemmaAppState,
     req: super::openai::ChatRequest,
 ) -> std::result::Result<(PreparedRequest, u32), Response> {
-    let http_client = reqwest::Client::new();
     let (flat_messages, pixel_values, image_grid_thw) =
-        match super::openai::expand_image_parts_in_messages(
-            req.messages,
-            &http_client,
-            &state.vision_input,
-        )
-        .await
+        match super::openai::expand_image_parts_in_messages(req.messages, &state.vision_input).await
         {
             Ok(t) => t,
-            Err(e) => {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    format!("image decode/preprocess: {e}"),
-                )
-                    .into_response());
-            }
+            Err(e) => return Err(super::security::image_error_response(e)),
         };
     let prompt_ids = match render_and_encode(
         &state.tokenizer,
@@ -1085,8 +1071,7 @@ pub async fn serve_diffusion_gemma(
     generation_config: DiffusionGemmaGenerationConfig,
     model_id: String,
     model_weight_bytes: usize,
-    host: &str,
-    port: u16,
+    network_config: super::security::ServerNetworkConfig,
     vision_input: VisionInputConfig,
 ) -> Result<()> {
     let state = build_diffusion_gemma_app_state(
@@ -1104,15 +1089,7 @@ pub async fn serve_diffusion_gemma(
         .route("/v1/messages", post(anthropic_messages))
         .with_state(state);
 
-    let addr: SocketAddr = format!("{host}:{port}")
-        .parse()
-        .with_context(|| format!("parsing socket addr {host}:{port}"))?;
-    tracing::info!("ironmlx DiffusionGemma server listening on http://{addr}");
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .with_context(|| format!("binding {addr}"))?;
-    axum::serve(listener, app).await?;
-    Ok(())
+    super::security::serve_router(app, network_config, "ironmlx DiffusionGemma server").await
 }
 
 pub(crate) fn build_diffusion_gemma_app_state(

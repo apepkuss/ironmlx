@@ -164,7 +164,7 @@ import Testing
     #expect(!html.contains("updateActiveKvStatus("))
 }
 
-@Test func dashboardEndpointCardShowsBindAddressAsSecondaryHint() throws {
+@Test func dashboardEndpointCardShowsSecurityStatusWithoutBindAddress() throws {
     let testFile = URL(fileURLWithPath: #filePath)
     let packageRoot = testFile
         .deletingLastPathComponent()
@@ -174,15 +174,19 @@ import Testing
         .appendingPathComponent("Sources/IronMLXAppCore/Resources/dashboard2.html")
     let html = try String(contentsOf: htmlURL, encoding: .utf8)
 
-    #expect(html.contains("endpoints_listen"))
-    #expect(html.contains("endpoints_reachable"))
-    #expect(html.contains("监听"))
-    #expect(html.contains("可访问端点"))
-    #expect(html.contains("const listenAddress = data.host + ':' + data.port"))
-    #expect(html.contains("const listenText = (dict.endpoints_listen || 'Listening') + ': ' + listenAddress"))
-    #expect(html.contains("hint.innerHTML ="))
-    #expect(html.contains("rows.push(buildEndpointSectionHeader"))
-    #expect(!html.contains("buildEndpointListenRow"))
+    #expect(html.contains("authentication_status"))
+    #expect(html.contains("authentication_status_api_key"))
+    #expect(html.contains("endpoint_address"))
+    #expect(html.contains("认证状态"))
+    #expect(html.contains("端点地址"))
+    #expect(html.contains("data.network_mode === 'lan'"))
+    #expect(html.contains("data.authentication === 'api_key'"))
+    #expect(html.contains("data.endpoint_address, true"))
+    #expect(html.contains("hint.textContent = summary"))
+    #expect(!html.contains("endpoints_listen"))
+    #expect(!html.contains("listen_addresses"))
+    #expect(!html.contains("Agent endpoint"))
+    #expect(!html.contains("Agent 端点"))
 }
 
 @Test func dashboardActiveKVHelpWarningUsesGrayDefaultAndOrangeHover() throws {
