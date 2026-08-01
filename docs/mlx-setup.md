@@ -2,7 +2,7 @@
 
 本文档是 ironmlx 依赖的 MLX C++ 库的**安装真相来源**：如何构建、安装、补齐传递静态库，以及编译期/运行期所需的环境变量。`mlx-sys/build.rs` 通过 `MLX_DIR` 定位 MLX 安装前缀并静态链接。
 
-适用：Apple Silicon macOS。MLX 源码约定见仓库内存 `reference_mlx_source`（本机为 `/Users/xin/workspace/iron-rivals/mlx`）。
+适用：Apple Silicon（arm64）且 macOS 26.2 或更高版本。IronMLX v0.1 不支持 Intel Mac，也不支持 macOS 26.2 之前的系统。MLX 源码约定见仓库内存 `reference_mlx_source`（本机为 `/Users/xin/workspace/iron-rivals/mlx`）。
 
 ---
 
@@ -23,6 +23,8 @@ cmake .. \
   -DMLX_BUILD_EXAMPLES=OFF \
   -DMLX_BUILD_BENCHMARKS=OFF \
   -DMLX_BUILD_PYTHON_BINDINGS=OFF \
+  -DCMAKE_OSX_ARCHITECTURES=arm64 \
+  -DCMAKE_OSX_DEPLOYMENT_TARGET=26.2 \
   -DCMAKE_INSTALL_PREFIX="$MLX_PREFIX"
 make -j"$(sysctl -n hw.ncpu)"
 make install
@@ -76,9 +78,20 @@ export MLX_ROOT="$MLX_PREFIX"
 export MLX_DIR="$MLX_ROOT"
 export MLX_METAL_PATH="$MLX_ROOT/lib"
 export DYLD_LIBRARY_PATH="$MLX_ROOT/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+export MACOSX_DEPLOYMENT_TARGET=26.2
+export CMAKE_OSX_DEPLOYMENT_TARGET=26.2
 
 cargo build --release
 cargo test --all-features --workspace          # 全套测试（须先完成第 2 步补 libgguflib.a）
+```
+
+Swift App 使用相同的平台边界；`ironmlx-app/Package.swift` 声明 macOS 26.2。生成发布产物后，运行以下命令检查 App、后端 helper 和 Metal 库没有发生版本漂移：
+
+```bash
+scripts/verify-release-platform.sh \
+  target/release/ironmlx \
+  ironmlx-app/.build/release/ironmlx-app \
+  "$MLX_DIR/lib/mlx.metallib"
 ```
 
 CLI 生成（text）：

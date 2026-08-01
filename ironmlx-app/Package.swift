@@ -5,7 +5,7 @@ import PackageDescription
 let package = Package(
     name: "IronMLXApp",
     platforms: [
-        .macOS(.v13)
+        .macOS("26.2")
     ],
     products: [
         .executable(name: "ironmlx-app", targets: ["IronMLXApp"]),

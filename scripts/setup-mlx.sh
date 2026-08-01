@@ -15,14 +15,22 @@
 # After it finishes, source the printed env file in any shell that builds/runs
 # ironmlx:  source "$MLX_PREFIX/mlx-env.sh"
 #
-# Apple Silicon macOS only.
+# Apple Silicon (arm64) and macOS 26.2+ only.
 
 set -euo pipefail
+
+readonly IRONMLX_MACOS_DEPLOYMENT_TARGET="26.2"
+readonly IRONMLX_MACOS_ARCHITECTURE="arm64"
 
 MLX_SRC="${MLX_SRC:-/Users/xin/workspace/iron-rivals/mlx}"
 MLX_PREFIX="${MLX_PREFIX:-$HOME/.local/mlx}"
 JOBS="${JOBS:-$(sysctl -n hw.ncpu)}"
 BUILD_DIR="$MLX_SRC/build"
+
+if [ "$(uname -s)" != "Darwin" ] || [ "$(uname -m)" != "$IRONMLX_MACOS_ARCHITECTURE" ]; then
+  echo "error: IronMLX v0.1 supports only Apple Silicon (arm64) macOS" >&2
+  exit 1
+fi
 
 if [ ! -d "$MLX_SRC" ]; then
   echo "error: MLX_SRC not found: $MLX_SRC" >&2
@@ -39,6 +47,8 @@ cmake -S "$MLX_SRC" -B "$BUILD_DIR" \
   -DMLX_BUILD_EXAMPLES=OFF \
   -DMLX_BUILD_BENCHMARKS=OFF \
   -DMLX_BUILD_PYTHON_BINDINGS=OFF \
+  -DCMAKE_OSX_ARCHITECTURES="$IRONMLX_MACOS_ARCHITECTURE" \
+  -DCMAKE_OSX_DEPLOYMENT_TARGET="$IRONMLX_MACOS_DEPLOYMENT_TARGET" \
   -DCMAKE_INSTALL_PREFIX="$MLX_PREFIX"
 
 echo "==> Build MLX (-j$JOBS)"
@@ -79,6 +89,8 @@ export MLX_ROOT="$MLX_PREFIX"
 export MLX_DIR="\$MLX_ROOT"
 export MLX_METAL_PATH="\$MLX_ROOT/lib"
 export DYLD_LIBRARY_PATH="\$MLX_ROOT/lib\${DYLD_LIBRARY_PATH:+:\$DYLD_LIBRARY_PATH}"
+export MACOSX_DEPLOYMENT_TARGET="$IRONMLX_MACOS_DEPLOYMENT_TARGET"
+export CMAKE_OSX_DEPLOYMENT_TARGET="$IRONMLX_MACOS_DEPLOYMENT_TARGET"
 EOF
 
 echo
