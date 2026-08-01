@@ -6,7 +6,7 @@ Rust bindings to [Apple MLX](https://github.com/ml-explore/mlx) via the [cxx](ht
 
 ## Requirements
 
-- macOS, Apple Silicon
+- macOS 26.2 or newer on Apple Silicon (arm64); Intel Macs are not supported
 - Rust 1.94+
 - Prebuilt MLX 0.32+ at `$MLX_DIR`, built in Release mode with MLX Metal NAX kernels enabled
 
@@ -21,6 +21,8 @@ xcrun -sdk macosx --show-sdk-version
 printf '__METAL_VERSION__\n' | xcrun -sdk macosx metal -E -x metal -P - | tail -1
 cmake .. -DCMAKE_BUILD_TYPE=Release \
   -DBUILD_SHARED_LIBS=OFF \
+  -DCMAKE_OSX_ARCHITECTURES=arm64 \
+  -DCMAKE_OSX_DEPLOYMENT_TARGET=26.2 \
   -DMLX_METAL_PATH=$HOME/.local/mlx/lib \
   -DCMAKE_INSTALL_PREFIX=$HOME/.local/mlx
 if grep -q MLX_METAL_NO_NAX CMakeFiles/mlx.dir/flags.make; then
