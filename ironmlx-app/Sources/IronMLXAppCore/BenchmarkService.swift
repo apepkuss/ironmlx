@@ -64,11 +64,7 @@ public struct BenchmarkPlan: Equatable, Sendable {
                 "--warmup-duration", "0",
             ]
         }
-        if ironBenchURL.path == "/usr/bin/env" {
-            self.arguments = ["iron-bench"] + arguments
-        } else {
-            self.arguments = arguments
-        }
+        self.arguments = arguments
     }
 }
 
@@ -165,10 +161,7 @@ public struct BenchmarkService: Sendable {
         ironBenchURL: URL? = nil,
         durationSeconds: Int = 10
     ) {
-        let backendURL = BackendBinaryResolver.resolve()
-        self.ironBenchURL = ironBenchURL
-            ?? BackendBinaryResolver.resolveIronBenchBinary(near: backendURL)
-            ?? URL(fileURLWithPath: "/usr/bin/env")
+        self.ironBenchURL = ironBenchURL ?? BackendBinaryResolver.resolveIronBenchBinary()
         self.durationSeconds = durationSeconds
     }
 
@@ -178,6 +171,7 @@ public struct BenchmarkService: Sendable {
         port: UInt16,
         client: BackendAPIClient
     ) async throws -> BenchmarkResult {
+        try BackendBinaryResolver.validateBundledIronBenchIfNeeded(for: ironBenchURL)
         let plan = BenchmarkPlan(
             ironBenchURL: ironBenchURL,
             request: request,
@@ -188,6 +182,7 @@ public struct BenchmarkService: Sendable {
         let process = Process()
         process.executableURL = plan.processURL
         process.arguments = plan.arguments
+        process.environment = BundledChildProcessEnvironment.sanitized()
         let stdout = Pipe()
         let stderr = Pipe()
         process.standardOutput = stdout

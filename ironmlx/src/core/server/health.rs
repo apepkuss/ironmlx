@@ -841,33 +841,12 @@ pub fn classify_status(
 pub fn system_free_ram_bytes() -> usize {
     #[cfg(target_os = "macos")]
     {
-        use std::process::Command;
-        if let Ok(output) = Command::new("vm_stat").output() {
-            if let Ok(s) = std::str::from_utf8(&output.stdout) {
-                let mut page_size = 16_384_usize;
-                let mut pages_free = 0_usize;
-                for line in s.lines() {
-                    if let Some(rest) =
-                        line.strip_prefix("Mach Virtual Memory Statistics: (page size of ")
-                    {
-                        if let Some(num) = rest.split(' ').next() {
-                            if let Ok(p) = num.parse::<usize>() {
-                                page_size = p;
-                            }
-                        }
-                    }
-                    if let Some(rest) = line.strip_prefix("Pages free:") {
-                        let t = rest.trim().trim_end_matches('.');
-                        if let Ok(n) = t.parse::<usize>() {
-                            pages_free = n;
-                        }
-                    }
-                }
-                if pages_free > 0 {
-                    return pages_free * page_size;
-                }
-            }
+        if let Some(bytes) = macos_free_ram_bytes() {
+            return bytes;
         }
+        tracing::warn!(
+            "failed to query macOS free memory with /usr/bin/vm_stat; using 4 GiB fallback"
+        );
     }
     #[cfg(target_os = "linux")]
     {
@@ -886,11 +865,39 @@ pub fn system_free_ram_bytes() -> usize {
     4 * 1024 * 1024 * 1024
 }
 
+#[cfg(target_os = "macos")]
+fn macos_free_ram_bytes() -> Option<usize> {
+    let output = std::process::Command::new("/usr/bin/vm_stat")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let output = std::str::from_utf8(&output.stdout).ok()?;
+    let mut page_size = 16_384_usize;
+    let mut pages_free = None;
+    for line in output.lines() {
+        if let Some(rest) = line.strip_prefix("Mach Virtual Memory Statistics: (page size of ") {
+            page_size = rest.split(' ').next()?.parse::<usize>().ok()?;
+        }
+        if let Some(rest) = line.strip_prefix("Pages free:") {
+            pages_free = rest.trim().trim_end_matches('.').parse::<usize>().ok();
+        }
+    }
+    pages_free?.checked_mul(page_size)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, AtomicUsize};
     use std::sync::Arc;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_free_ram_query_uses_fixed_system_path() {
+        assert!(macos_free_ram_bytes().is_some());
+    }
 
     #[test]
     fn classify_healthy_when_all_green() {

@@ -43,8 +43,20 @@ pub enum SchedulerError {
     /// effective cap_max (the smaller of `--max-cache-cap` CLI flag and
     /// the model's `max_position_embeddings`). Maps to HTTP 413
     /// Payload Too Large. B1-p2.3f.
-    #[error("request too large: needs cap={needed} but server max_cache_cap={max}")]
-    RequestTooLarge { needed: usize, max: usize },
+    #[error(
+        "request requires {required_total_tokens} total tokens: {input_tokens} input tokens + \
+         {requested_max_output_tokens} maximum output tokens; the server maximum context capacity \
+         is {server_max_context_tokens} tokens (Dashboard → MAX CONTEXT TOKENS). Reduce request \
+         max_tokens to {max_allowed_output_tokens} or less, or increase MAX CONTEXT TOKENS in the \
+         Dashboard."
+    )]
+    RequestTooLarge {
+        required_total_tokens: usize,
+        input_tokens: usize,
+        requested_max_output_tokens: usize,
+        server_max_context_tokens: usize,
+        max_allowed_output_tokens: usize,
+    },
 
     /// Admission gate: request's KV cache bytes plus active bytes would
     /// exceed the soft limit (85% of total budget). Maps to HTTP 503
@@ -6677,8 +6689,13 @@ impl<M: Model> Scheduler<M> {
         let cap_needed = req.prompt_ids.len().saturating_add(req.max_new_tokens);
         if cap_needed > self.effective_cap_max {
             return Err(anyhow::Error::new(SchedulerError::RequestTooLarge {
-                needed: cap_needed,
-                max: self.effective_cap_max,
+                required_total_tokens: cap_needed,
+                input_tokens: req.prompt_ids.len(),
+                requested_max_output_tokens: req.max_new_tokens,
+                server_max_context_tokens: self.effective_cap_max,
+                max_allowed_output_tokens: self
+                    .effective_cap_max
+                    .saturating_sub(req.prompt_ids.len()),
             }));
         }
         if self.phase == Phase::Finished {
@@ -15259,8 +15276,13 @@ impl<M: Model> Scheduler<M> {
         let cap_needed = req.prompt_ids.len().saturating_add(req.max_new_tokens);
         if cap_needed > self.effective_cap_max {
             return Err(anyhow::Error::new(SchedulerError::RequestTooLarge {
-                needed: cap_needed,
-                max: self.effective_cap_max,
+                required_total_tokens: cap_needed,
+                input_tokens: req.prompt_ids.len(),
+                requested_max_output_tokens: req.max_new_tokens,
+                server_max_context_tokens: self.effective_cap_max,
+                max_allowed_output_tokens: self
+                    .effective_cap_max
+                    .saturating_sub(req.prompt_ids.len()),
             }));
         }
         if self.phase != Phase::Decoding {
@@ -27582,12 +27604,24 @@ mod tests {
             .downcast_ref::<SchedulerError>()
             .expect("err should be downcast-able to SchedulerError");
         match sched_err {
-            SchedulerError::RequestTooLarge { needed, max } => {
-                assert_eq!(*needed, 2100, "needed cap should be prompt+max_new");
+            SchedulerError::RequestTooLarge {
+                required_total_tokens,
+                input_tokens,
+                requested_max_output_tokens,
+                server_max_context_tokens,
+                max_allowed_output_tokens,
+            } => {
                 assert_eq!(
-                    *max, 1024,
-                    "max should be effective_cap_max from Scheduler::new"
+                    *required_total_tokens, 2100,
+                    "required total should be prompt+max_new"
                 );
+                assert_eq!(*input_tokens, 1500);
+                assert_eq!(*requested_max_output_tokens, 600);
+                assert_eq!(
+                    *server_max_context_tokens, 1024,
+                    "server max should be effective_cap_max from Scheduler::new"
+                );
+                assert_eq!(*max_allowed_output_tokens, 0);
             }
             other => panic!("expected RequestTooLarge, got {other:?}"),
         }
@@ -27601,6 +27635,7 @@ mod tests {
             msg.contains("1024"),
             "msg should contain max=1024, got: {msg}"
         );
+        assert!(msg.contains("Dashboard → MAX CONTEXT TOKENS"));
     }
 
     #[test]

@@ -979,6 +979,13 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(dashboardHTML(html, contains: "mtp_draft_tokens"))
     #expect(dashboardHTML(html, contains: #"id="modal-causal-sampling-row""#))
     #expect(dashboardHTML(html, contains: #"id="modal-mtp-section""#))
+    #expect(dashboardHTML(html, contains: #"class="modal-row mtp-header-row""#))
+    #expect(
+        dashboardHTML(
+            html,
+            contains: ".mtp-header-row {\n    align-items: center;\n    margin-bottom: 12px;"
+        )
+    )
     #expect(dashboardHTML(html, contains: #"id="modal-prompt-lookup-section""#))
     #expect(dashboardHTML(html, contains: "capabilities.runtime_kind === 'block_diffusion'"))
     #expect(dashboardHTML(html, contains: "capabilities.supports_mtp === false"))
@@ -1155,7 +1162,7 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(dashboardHTML(html, contains: "内存预算不足"))
     #expect(dashboardHTML(html, contains: "活跃 KV Cache 分层卸载"))
     #expect(dashboardHTML(html, contains: "logical cap"))
-    #expect(dashboardHTML(html, contains: "MAX TOKENS"))
+    #expect(dashboardHTML(html, contains: "MAX CONTEXT TOKENS"))
     #expect(dashboardHTML(html, contains: "最大序列数（{max_sequences}）"))
     #expect(!dashboardHTML(html, contains: "b_max={b_max}"))
     #expect(!dashboardHTML(html, contains: "b_max="))

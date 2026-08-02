@@ -31,7 +31,9 @@ use crate::core::server::vision::{expand_decoded_messages_bounded, DecodedMessag
 use crate::core::server::VisionInputConfig;
 use crate::core::speculative::MtpSpeculativeConfig;
 
-use super::{AppState, Gemma4DrafterAppState, SamplingDefaults};
+use super::{
+    request_token_capacity_error_response, AppState, Gemma4DrafterAppState, SamplingDefaults,
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -57,10 +59,8 @@ fn admit_err_to_response(err: anyhow::Error) -> Response {
                 .insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
             resp
         }
-        Some(SchedulerError::RequestTooLarge { .. }) => {
-            // 413 Payload Too Large — request needed cap exceeds server's
-            // effective_cap_max. Body includes needed + max via Display.
-            (StatusCode::PAYLOAD_TOO_LARGE, msg).into_response()
+        Some(error @ SchedulerError::RequestTooLarge { .. }) => {
+            request_token_capacity_error_response(error)
         }
         Some(
             SchedulerError::MemoryBudgetExceeded { .. }
@@ -1295,25 +1295,36 @@ mod tests {
 
         // 3f: typed SchedulerError::RequestTooLarge → 413 Payload Too Large.
         let err = anyhow::Error::new(crate::core::SchedulerError::RequestTooLarge {
-            needed: 50000,
-            max: 32768,
+            required_total_tokens: 273,
+            input_tokens: 17,
+            requested_max_output_tokens: 256,
+            server_max_context_tokens: 128,
+            max_allowed_output_tokens: 111,
         });
         let resp = admit_err_to_response(err);
         assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("application/json")
+        );
 
         // No Retry-After header for 413 (client error, not transient).
         assert!(resp.headers().get("retry-after").is_none());
 
         let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-        let body_str = String::from_utf8(body.to_vec()).unwrap();
-        assert!(
-            body_str.contains("50000"),
-            "body should mention needed=50000, got: {body_str}"
-        );
-        assert!(
-            body_str.contains("32768"),
-            "body should mention max=32768, got: {body_str}"
-        );
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["code"], "request_token_capacity_exceeded");
+        assert_eq!(body["required_total_tokens"], 273);
+        assert_eq!(body["input_tokens"], 17);
+        assert_eq!(body["requested_max_output_tokens"], 256);
+        assert_eq!(body["server_max_context_tokens"], 128);
+        assert_eq!(body["max_allowed_output_tokens"], 111);
+        assert!(body["message"]
+            .as_str()
+            .unwrap()
+            .contains("Dashboard → MAX CONTEXT TOKENS"));
     }
 
     #[test]

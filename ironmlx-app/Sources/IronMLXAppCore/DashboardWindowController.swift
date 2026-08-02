@@ -95,9 +95,10 @@ public final class DashboardWindowController {
         self.bridge = bridge
         self.windowDelegate = windowDelegate
 
-        if let htmlURL = Bundle.module.url(forResource: "dashboard2", withExtension: "html") {
-            webView.loadFileURL(htmlURL, allowingReadAccessTo: htmlURL.deletingLastPathComponent())
+        guard let htmlURL = IronMLXAppResourceResolver.url(forResource: "dashboard2", withExtension: "html") else {
+            preconditionFailure("IronMLX App Bundle is missing dashboard2.html")
         }
+        webView.loadFileURL(htmlURL, allowingReadAccessTo: htmlURL.deletingLastPathComponent())
 
         Self.applyVisibleActivationPolicy()
         window.makeKeyAndOrderFront(nil)

@@ -90,14 +90,10 @@ pub fn system_total_ram_bytes() -> usize {
     }
     #[cfg(target_os = "macos")]
     {
-        use std::process::Command;
-        if let Ok(output) = Command::new("sysctl").args(["-n", "hw.memsize"]).output() {
-            if let Ok(s) = std::str::from_utf8(&output.stdout) {
-                if let Ok(n) = s.trim().parse::<usize>() {
-                    return n;
-                }
-            }
+        if let Some(n) = macos_total_ram_bytes() {
+            return n;
         }
+        tracing::error!("failed to query macOS hw.memsize with sysctlbyname; using 8 GiB fallback");
     }
     #[cfg(target_os = "linux")]
     {
@@ -114,6 +110,26 @@ pub fn system_total_ram_bytes() -> usize {
         }
     }
     8 * 1024 * 1024 * 1024
+}
+
+#[cfg(target_os = "macos")]
+fn macos_total_ram_bytes() -> Option<usize> {
+    let mut value = 0_u64;
+    let mut value_size = std::mem::size_of::<u64>();
+    // SAFETY: `hw.memsize` is a NUL-terminated, immutable key. `value` and
+    // `value_size` are valid writable storage for the duration of the call.
+    let result = unsafe {
+        libc::sysctlbyname(
+            c"hw.memsize".as_ptr(),
+            (&mut value as *mut u64).cast(),
+            &mut value_size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (result == 0 && value_size == std::mem::size_of::<u64>() && value > 0)
+        .then(|| usize::try_from(value).ok())
+        .flatten()
 }
 
 pub fn available_budget_bytes(meta: &ModelMeta) -> usize {
@@ -362,6 +378,13 @@ pub fn test_meta_gemma4_12b() -> ModelMeta {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_total_ram_query_does_not_depend_on_path_lookup() {
+        let total = macos_total_ram_bytes().expect("sysctlbyname hw.memsize");
+        assert!(total >= 8 * 1024 * 1024 * 1024);
+    }
 
     fn validate_with_total_ram(
         b_max: usize,

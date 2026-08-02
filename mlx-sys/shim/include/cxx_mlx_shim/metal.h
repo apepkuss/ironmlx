@@ -19,6 +19,10 @@ namespace cxx_mlx {
 void start_capture(rust::Str path);
 void stop_capture();
 
+// Configure the exact MLX metallib loaded by this process. The App passes the
+// bundled resource path before any MLX device or array is initialized.
+void set_metallib_path(rust::Str path);
+
 // === Device architecture query (tile-lookup tables) ===
 //
 // Returns the Metal device's architecture name as reported by

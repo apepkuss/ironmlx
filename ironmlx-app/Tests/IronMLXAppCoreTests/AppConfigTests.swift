@@ -3,6 +3,50 @@ import Testing
 
 @testable import IronMLXAppCore
 
+@Test(arguments: [
+    (["en-US"], "en"),
+    (["zh-CN"], "zh-Hans"),
+    (["zh-Hans-SG"], "zh-Hans"),
+    (["zh-TW"], "zh-Hant"),
+    (["zh-Hant-HK"], "zh-Hant"),
+    (["zh-MO"], "zh-Hant"),
+    (["ja-JP"], "ja"),
+    (["ko-KR"], "ko"),
+    (["fr-FR"], "en"),
+    (["fr-FR", "ja-JP"], "en"),
+])
+func appLanguageResolverMatchesSupportedMacOSPreferences(
+    preferredLanguages: [String],
+    expected: String
+) {
+    #expect(AppLanguageResolver.resolve(preferredLanguages: preferredLanguages) == expected)
+}
+
+@Test func appConfigStorePersistsSystemLanguageOnlyWhenConfigIsMissing() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ironmlx-app-language-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let configURL = root.appendingPathComponent("app_config.json")
+    let store = AppConfigStore(
+        url: configURL,
+        preferredLanguages: { ["zh-Hant-TW"] }
+    )
+
+    let initial = store.load()
+
+    #expect(initial.language == "zh-Hant")
+    #expect(FileManager.default.fileExists(atPath: configURL.path))
+    #expect(store.load().language == "zh-Hant")
+
+    store.save(AppConfig(language: "ko"))
+    let existingConfigStore = AppConfigStore(
+        url: configURL,
+        preferredLanguages: { ["ja-JP"] }
+    )
+
+    #expect(existingConfigStore.load().language == "ko")
+}
+
 @Test func appConfigDecodesDashboardAndSchedulerSettings() throws {
     let json = """
     {

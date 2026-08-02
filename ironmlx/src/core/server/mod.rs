@@ -6,7 +6,13 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use axum::{routing::get, routing::post, Router};
+use axum::{
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::get,
+    routing::post,
+    Json, Router,
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
@@ -22,6 +28,7 @@ use crate::core::scheduler_autotune::{
 };
 use crate::core::speculative::{effective_mtp_draft_tokens_for_paged_prefix, MtpSpeculativeModel};
 use crate::core::tokenizer::Tokenizer;
+use crate::core::SchedulerError;
 use crate::Result;
 
 pub(crate) mod adaptive_admission;
@@ -35,6 +42,44 @@ pub(crate) mod openai;
 pub mod scheduler_actor;
 pub mod security;
 pub mod vision;
+
+#[derive(Debug, Serialize)]
+pub(crate) struct RequestTokenCapacityErrorResponse {
+    code: &'static str,
+    message: String,
+    required_total_tokens: usize,
+    input_tokens: usize,
+    requested_max_output_tokens: usize,
+    server_max_context_tokens: usize,
+    max_allowed_output_tokens: usize,
+}
+
+pub(crate) fn request_token_capacity_error_response(error: &SchedulerError) -> Response {
+    let SchedulerError::RequestTooLarge {
+        required_total_tokens,
+        input_tokens,
+        requested_max_output_tokens,
+        server_max_context_tokens,
+        max_allowed_output_tokens,
+    } = error
+    else {
+        unreachable!("request_token_capacity_error_response requires RequestTooLarge")
+    };
+
+    (
+        StatusCode::PAYLOAD_TOO_LARGE,
+        Json(RequestTokenCapacityErrorResponse {
+            code: "request_token_capacity_exceeded",
+            message: error.to_string(),
+            required_total_tokens: *required_total_tokens,
+            input_tokens: *input_tokens,
+            requested_max_output_tokens: *requested_max_output_tokens,
+            server_max_context_tokens: *server_max_context_tokens,
+            max_allowed_output_tokens: *max_allowed_output_tokens,
+        }),
+    )
+        .into_response()
+}
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct SamplingDefaults {

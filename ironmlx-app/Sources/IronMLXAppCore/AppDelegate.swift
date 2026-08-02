@@ -29,6 +29,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
+#if IRONMLX_APP_BUNDLE
+        do {
+            _ = try BundledRuntimeLayout.resolve()
+        } catch {
+            fatalError("Invalid IronMLX App Bundle: \(error.localizedDescription)")
+        }
+#endif
         IronMLXAppLogger.startSession()
         IronMLXAppLogger.info("Application did finish launching")
         Task.detached {

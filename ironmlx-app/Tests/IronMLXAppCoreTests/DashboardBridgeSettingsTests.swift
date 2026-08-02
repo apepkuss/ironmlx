@@ -295,12 +295,31 @@ import WebKit
     #expect(!html.contains("上下文大小"))
     #expect(!html.contains("コンテキストサイズ"))
     #expect(!html.contains("컨텍스트 크기"))
-    #expect(html.contains(#"<label data-i18n="single_request_max_tokens">MAX TOKENS</label>"#))
-    #expect(html.contains(#"single_request_max_tokens: "MAX TOKENS""#))
+    #expect(html.contains(#"<label data-i18n="max_context_tokens">MAX CONTEXT TOKENS</label>"#))
+    #expect(html.contains(#"max_context_tokens: "MAX CONTEXT TOKENS""#))
+    #expect(!html.contains("single_request_max_tokens"))
     #expect(!html.contains("单请求最大 Token 数"))
     #expect(!html.contains("單請求最大 Token 數"))
     #expect(!html.contains("リクエスト最大 Token 数"))
     #expect(!html.contains("단일 요청 최대 Token 수"))
+    #expect(!html.contains(">MAX TOKENS</label>"))
+}
+
+@Test func dashboardModelParamsKeepCapacityInputsAligned() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(html.contains(#"<div class="modal model-params-modal">"#))
+    #expect(
+        html.contains(
+            "<div class=\"modal-row model-params-capacity-row\">\n"
+                + "        <div class=\"modal-field\"><label data-i18n=\"context_size\">"
+        )
+    )
+    #expect(html.contains(".model-params-modal {\n    width: 480px;\n    max-width: calc(100vw - 32px);"))
+    #expect(html.contains(".model-params-capacity-row .modal-field > label {\n    white-space: nowrap;"))
 }
 
 @Test func dashboardExposesCrossRequestPromptLookupControlsAndClearAction() throws {
@@ -315,6 +334,130 @@ import WebKit
     #expect(html.contains(#"path === '/admin/api/prompt-lookup/clear'"#))
     #expect(html.contains("cross_request_prompt_lookup"))
     #expect(html.contains("prompt_lookup_cleared"))
+}
+
+@Test func dashboardPromptLookupControlsUseLocalizedAccessibleHelp() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(html.contains(#"class="prompt-lookup-label""#))
+    #expect(html.contains("font-weight: 400;"))
+    #expect(html.contains(#"data-i18n="prompt_lookup_acceleration_help""#))
+    #expect(html.contains(#"data-i18n="prompt_lookup_cross_request_help""#))
+    #expect(html.contains(#"data-i18n-aria-label="prompt_lookup_acceleration_help_label""#))
+    #expect(html.contains(#"data-i18n-aria-label="prompt_lookup_cross_request_help_label""#))
+    #expect(html.contains("document.querySelectorAll('[data-i18n-aria-label]')"))
+    #expect(html.contains("trigger.addEventListener('mouseenter', showTooltip)"))
+    #expect(html.contains("trigger.addEventListener('focus', showTooltip)"))
+    #expect(html.contains("trigger.addEventListener('click', showTooltip)"))
+
+    let localizedKeys = [
+        "prompt_lookup_acceleration_help_label",
+        "prompt_lookup_acceleration_help",
+        "prompt_lookup_cross_request_help_label",
+        "prompt_lookup_cross_request_help",
+        "prompt_lookup_clear_failed",
+    ]
+    for key in localizedKeys {
+        #expect(
+            html.components(separatedBy: "\(key):").count - 1 == 5,
+            "\(key) must be present in all five locale dictionaries"
+        )
+    }
+
+    for localizedLabel in [
+        "Repeated-Text Acceleration",
+        "重复文本加速",
+        "重複文字加速",
+        "繰り返しテキストの高速化",
+        "반복 텍스트 가속",
+        "Reuse Across Requests",
+        "跨请求复用",
+        "跨請求重用",
+        "リクエスト間で再利用",
+        "요청 간 재사용",
+    ] {
+        #expect(html.contains(localizedLabel), "Missing localized label: \(localizedLabel)")
+    }
+
+    for localizedDependency in [
+        "Requires Repeated-Text Acceleration to be enabled.",
+        "需先启用“重复文本加速”。",
+        "需先啟用「重複文字加速」。",
+        "先に「繰り返しテキストの高速化」を有効にする必要があります。",
+        "먼저 ‘반복 텍스트 가속’을 활성화해야 합니다.",
+    ] {
+        #expect(
+            html.contains(localizedDependency),
+            "Missing localized PromptLookup dependency: \(localizedDependency)"
+        )
+    }
+
+    #expect(!html.contains("PromptLookup Acceleration"))
+    #expect(!html.contains("在 App 请求之间复用已完成的历史"))
+}
+
+@Test func dashboardMtpControlUsesLocalizedAccessibleHelpAndKeepsFailureStatusVisible() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(html.contains(#"data-i18n-aria-label="mtp_help_label""#))
+    #expect(html.contains(#"data-i18n="mtp_help_title""#))
+    #expect(html.contains(#"data-i18n="mtp_help_body""#))
+    #expect(html.contains(#"data-i18n="mtp_help_requirement""#))
+    #expect(html.contains(#"data-i18n="mtp_help_draft_tokens""#))
+    #expect(html.contains(#"id="modal-mtp-help-status""#))
+    #expect(html.contains("status.hidden = hasCandidates;"))
+    #expect(html.contains("status.dataset.i18n = statusKey;"))
+    #expect(html.contains("helpStatus.dataset.i18n = helpStatusKey;"))
+
+    let localizedKeys = [
+        "mtp_help_label",
+        "mtp_help_title",
+        "mtp_help_body",
+        "mtp_help_requirement",
+        "mtp_help_draft_tokens",
+        "mtp_help_status_available",
+        "mtp_help_status_incompatible",
+        "mtp_help_status_unavailable",
+    ]
+    for key in localizedKeys {
+        #expect(
+            html.components(separatedBy: "\(key):").count - 1 == 5,
+            "\(key) must be present in all five locale dictionaries"
+        )
+    }
+}
+
+@Test func dashboardOnboardingOffersAVisiblePersistentLanguageSelector() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(html.contains(#"class="onboarding-language""#))
+    #expect(
+        html.contains(
+            #"class="visually-hidden" for="onboarding-lang-select" data-i18n="interface_language""#
+        )
+    )
+    #expect(html.contains(#"id="onboarding-lang-select""#))
+    #expect(html.contains(#"<option value="en">English</option>"#))
+    #expect(html.contains(#"<option value="zh-Hans">简体中文</option>"#))
+    #expect(html.contains(#"<option value="zh-Hant">繁體中文</option>"#))
+    #expect(html.contains(#"<option value="ja">日本語</option>"#))
+    #expect(html.contains(#"<option value="ko">한국어</option>"#))
+    #expect(html.contains("['lang-select', 'onboarding-lang-select'].forEach"))
+    #expect(html.contains("selectInterfaceLanguage(this.value);"))
+    #expect(html.contains("window.webkit.messageHandlers.setLanguage.postMessage(value);"))
+    #expect(html.contains(".visually-hidden {"))
+    #expect(html.contains(".onboarding-language {\n    position: absolute;"))
+    #expect(html.contains("gap: 6px;"))
+    #expect(html.contains(".onboarding-language select:focus"))
 }
 
 private func dashboardBridgeNotificationModelRoot(repoID: String) throws -> URL {
