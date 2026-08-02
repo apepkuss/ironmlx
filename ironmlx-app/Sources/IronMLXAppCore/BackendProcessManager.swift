@@ -114,13 +114,14 @@ public final class BackendProcessManager {
         self.processFactory = processFactory
         self.launchPlanProvider = launchPlanProvider ?? {
             let config = configStore.load()
-            let executable = BackendBinaryResolver.resolve()
+            let runtime = try BackendBinaryResolver.resolveValidatedRuntime()
             let options = BackendLaunchOptions(config: config)
             if let validationError = options.validationError {
                 throw BackendProcessError.invalidLaunchConfiguration(validationError)
             }
             let launch = BackendLaunchConfiguration(
-                executableURL: executable,
+                executableURL: runtime.backendURL,
+                metallibURL: runtime.metallibURL,
                 host: "127.0.0.1",
                 port: config.port,
                 options: options,
@@ -178,6 +179,15 @@ public final class BackendProcessManager {
         let plan: BackendProcessLaunchPlan
         do {
             plan = try launchPlanProvider()
+#if IRONMLX_APP_BUNDLE
+            let runtime = try BackendBinaryResolver.resolveValidatedRuntime()
+            guard plan.processURL.standardizedFileURL == runtime.backendURL.standardizedFileURL else {
+                throw BackendProcessError.externalHelperNotAllowed(plan.processURL.path)
+            }
+            guard plan.arguments.starts(with: ["--mlx-metallib", runtime.metallibURL.path]) else {
+                throw BackendProcessError.bundledMetallibArgumentRequired
+            }
+#endif
         } catch {
             transition(to: .failed, error: error.localizedDescription)
             throw error
@@ -192,6 +202,7 @@ public final class BackendProcessManager {
             let process = processFactory()
             process.executableURL = plan.processURL
             process.arguments = plan.arguments
+            process.environment = BundledChildProcessEnvironment.sanitized()
             process.standardOutput = logHandle
             process.standardError = logHandle
             let standardInputPipe = plan.standardInputData.map { _ in Pipe() }
@@ -399,11 +410,17 @@ private final class ManagedBackendLaunch {
 
 @frozen public enum BackendProcessError: LocalizedError {
     case invalidLaunchConfiguration(BackendLaunchValidationError)
+    case externalHelperNotAllowed(String)
+    case bundledMetallibArgumentRequired
 
     public var errorDescription: String? {
         switch self {
         case .invalidLaunchConfiguration(let error):
             return error.message
+        case .externalHelperNotAllowed(let path):
+            return "Release App cannot launch a helper outside its App Bundle: \(path)"
+        case .bundledMetallibArgumentRequired:
+            return "Release App must pass its bundled mlx.metallib to the backend helper."
         }
     }
 }

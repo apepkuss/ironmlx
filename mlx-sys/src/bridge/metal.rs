@@ -23,6 +23,9 @@ mod ffi_bridge {
         /// Finalize the in-progress capture. Throws if no capture is active.
         fn stop_capture() -> Result<()>;
 
+        /// Configure the exact MLX metallib loaded by this process.
+        fn set_metallib_path(path: &str) -> Result<()>;
+
         /// Return the Metal device's architecture name (e.g. `"apple_g13s"`
         /// for an M1 Pro 16-core GPU, `"apple_g15p"` for M3 Pro), as
         /// reported by `MTLDevice.architecture.name` and exposed via
@@ -36,5 +39,7 @@ mod ffi_bridge {
 }
 
 pub mod ffi {
-    pub use super::ffi_bridge::{device_architecture, start_capture, stop_capture};
+    pub use super::ffi_bridge::{
+        device_architecture, set_metallib_path, start_capture, stop_capture,
+    };
 }

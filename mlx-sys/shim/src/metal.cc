@@ -17,6 +17,13 @@ void stop_capture() {
   mlx::core::metal::stop_capture();
 }
 
+void set_metallib_path(rust::Str path) {
+  if (path.empty()) {
+    throw std::invalid_argument("MLX metallib path must not be empty");
+  }
+  mlx::core::metal::set_metallib_path(std::string(path));
+}
+
 rust::String device_architecture() {
   // mlx upstream relocated metal::device_info() to the device-agnostic
   // mlx::core::device_info(const Device&) entry point in mlx/device.h.

@@ -180,6 +180,7 @@ public struct BackendLaunchOptions: Equatable {
 
 public struct BackendLaunchConfiguration: Equatable {
     public var executableURL: URL
+    public var metallibURL: URL?
     public var host: String
     public var port: UInt16
     public var options: BackendLaunchOptions
@@ -189,6 +190,7 @@ public struct BackendLaunchConfiguration: Equatable {
 
     public init(
         executableURL: URL,
+        metallibURL: URL? = nil,
         host: String,
         port: UInt16,
         options: BackendLaunchOptions = BackendLaunchOptions(),
@@ -197,6 +199,7 @@ public struct BackendLaunchConfiguration: Equatable {
         securityBootstrapStdin: Bool = false
     ) {
         self.executableURL = executableURL
+        self.metallibURL = metallibURL
         self.host = host
         self.port = port
         self.options = options
@@ -222,7 +225,11 @@ public struct BackendLaunchConfiguration: Equatable {
     }
 
     public var arguments: [String] {
-        var arguments = [
+        var arguments: [String] = []
+        if let metallibURL {
+            arguments += ["--mlx-metallib", metallibURL.path]
+        }
+        arguments += [
             "serve",
             "--host", host,
             "--port", String(port),
@@ -280,35 +287,73 @@ public struct BackendLaunchConfiguration: Equatable {
 
 public enum BackendBinaryResolver {
     public static func resolve() -> URL {
-        let fileManager = FileManager.default
-        let environment = ProcessInfo.processInfo.environment
+        BundledRuntimeLayout.expected().backendURL
+    }
 
-        if let explicit = environment["IRONMLX_BIN"], !explicit.isEmpty {
-            return URL(fileURLWithPath: explicit)
+    public static func resolveIronBenchBinary() -> URL {
+        BundledRuntimeLayout.expected().ironBenchURL
+    }
+
+    public static func resolveMetallib() -> URL {
+        BundledRuntimeLayout.expected().metallibURL
+    }
+
+    public static func resolveValidatedRuntime() throws -> BundledRuntimeLayout {
+        try BundledRuntimeLayout.resolve()
+    }
+
+    public static func helperArguments(
+        _ commandArguments: [String],
+        executableURL: URL
+    ) -> [String] {
+        guard isBundledBackend(executableURL) else {
+            return commandArguments
         }
+        return ["--mlx-metallib", resolveMetallib().path] + commandArguments
+    }
 
-        let cwd = URL(fileURLWithPath: fileManager.currentDirectoryPath, isDirectory: true)
-        let candidates = [
-            cwd.appendingPathComponent("../target/debug/ironmlx").standardizedFileURL,
-            cwd.appendingPathComponent("../target/release/ironmlx").standardizedFileURL,
-            cwd.appendingPathComponent("target/debug/ironmlx").standardizedFileURL,
-            cwd.appendingPathComponent("target/release/ironmlx").standardizedFileURL,
-            Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("ironmlx"),
-        ]
-
-        for candidate in candidates where fileManager.isExecutableFile(atPath: candidate.path) {
-            return candidate
+    public static func validateBundledRuntimeIfNeeded(for executableURL: URL) throws {
+#if IRONMLX_APP_BUNDLE
+        guard isBundledBackend(executableURL) else {
+            throw BackendBinaryResolverError.externalExecutableNotAllowed(executableURL.path)
         }
+        _ = try resolveValidatedRuntime()
+#else
+        _ = executableURL
+#endif
+    }
 
-        return URL(fileURLWithPath: "/usr/bin/env")
+    public static func validateBundledIronBenchIfNeeded(for executableURL: URL) throws {
+        let isBundledIronBench = executableURL.standardizedFileURL
+            == resolveIronBenchBinary().standardizedFileURL
+#if IRONMLX_APP_BUNDLE
+        guard isBundledIronBench else {
+            throw BackendBinaryResolverError.externalExecutableNotAllowed(executableURL.path)
+        }
+        _ = try resolveValidatedRuntime()
+#else
+        _ = isBundledIronBench
+#endif
+    }
+
+    private static func isBundledBackend(_ executableURL: URL) -> Bool {
+        executableURL.standardizedFileURL == resolve().standardizedFileURL
     }
 
     public static func resolvedExecutableAndArguments(
         for configuration: BackendLaunchConfiguration
     ) -> (URL, [String]) {
-        if configuration.executableURL.path == "/usr/bin/env" {
-            return (configuration.executableURL, ["ironmlx"] + configuration.arguments)
-        }
         return (configuration.executableURL, configuration.arguments)
+    }
+}
+
+public enum BackendBinaryResolverError: LocalizedError, Equatable {
+    case externalExecutableNotAllowed(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .externalExecutableNotAllowed(let path):
+            return "Release App cannot launch an executable outside its App Bundle: \(path)"
+        }
     }
 }

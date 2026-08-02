@@ -255,6 +255,7 @@ public struct SchedulerProfileGenerationPreview: Codable, Equatable, Sendable {
 
 public struct SchedulerProfileGenerationPlan: Equatable, Sendable {
     public var processURL: URL
+    public var ironBenchURL: URL?
     public var arguments: [String]
     public var outputDirectoryURL: URL
     public var runtimeProfileURL: URL
@@ -263,6 +264,7 @@ public struct SchedulerProfileGenerationPlan: Equatable, Sendable {
     public init(
         executableURL: URL,
         ironBenchURL: URL?,
+        metallibURL: URL? = nil,
         request: SchedulerProfileGenerationRequest,
         outputRootURL: URL,
         timestamp: Date = Date()
@@ -271,12 +273,11 @@ public struct SchedulerProfileGenerationPlan: Equatable, Sendable {
         let outputDirectory = outputRootURL.appendingPathComponent(directoryName, isDirectory: true)
         let runtimeProfile = outputDirectory.appendingPathComponent("scheduler-profile.json")
         let processURL = executableURL
-        var arguments: [String]
-        if executableURL.path == "/usr/bin/env" {
-            arguments = ["ironmlx", "scheduler-autotune", "calibrate"]
-        } else {
-            arguments = ["scheduler-autotune", "calibrate"]
+        var arguments: [String] = []
+        if let metallibURL {
+            arguments += ["--mlx-metallib", metallibURL.path]
         }
+        arguments += ["scheduler-autotune", "calibrate"]
         arguments += [
             "--model", request.modelPath,
             "--model-name", request.model,
@@ -318,6 +319,7 @@ public struct SchedulerProfileGenerationPlan: Equatable, Sendable {
         }
 
         self.processURL = processURL
+        self.ironBenchURL = ironBenchURL
         self.arguments = arguments
         self.outputDirectoryURL = outputDirectory
         self.runtimeProfileURL = runtimeProfile
@@ -627,7 +629,10 @@ public final class SchedulerProfileGenerationService: @unchecked Sendable {
             }
             let plan = SchedulerProfileGenerationPlan(
                 executableURL: executableURL,
-                ironBenchURL: ironBenchURL ?? BackendBinaryResolver.resolveIronBenchBinary(near: executableURL),
+                ironBenchURL: ironBenchURL ?? BackendBinaryResolver.resolveIronBenchBinary(),
+                metallibURL: executableURL.standardizedFileURL == BackendBinaryResolver.resolve().standardizedFileURL
+                    ? BackendBinaryResolver.resolveMetallib()
+                    : nil,
                 request: request,
                 outputRootURL: outputRootURL
             )
@@ -653,6 +658,10 @@ public final class SchedulerProfileGenerationService: @unchecked Sendable {
         completion: @escaping @Sendable (SchedulerProfileGenerationStatus) -> Void
     ) {
         do {
+            try BackendBinaryResolver.validateBundledRuntimeIfNeeded(for: plan.processURL)
+            if let ironBenchURL = plan.ironBenchURL {
+                try BackendBinaryResolver.validateBundledIronBenchIfNeeded(for: ironBenchURL)
+            }
             try FileManager.default.createDirectory(
                 at: plan.outputDirectoryURL,
                 withIntermediateDirectories: true
@@ -666,6 +675,7 @@ public final class SchedulerProfileGenerationService: @unchecked Sendable {
             let process = Process()
             process.executableURL = plan.processURL
             process.arguments = plan.arguments
+            process.environment = BundledChildProcessEnvironment.sanitized()
             process.standardOutput = logHandle
             process.standardError = logHandle
             try process.run()
@@ -745,22 +755,5 @@ public final class SchedulerProfileGenerationService: @unchecked Sendable {
         try? handle.seek(toOffset: offset)
         let data = (try? handle.readToEnd()) ?? Data()
         return String(data: data, encoding: .utf8) ?? ""
-    }
-}
-
-extension BackendBinaryResolver {
-    public static func resolveIronBenchBinary(near executableURL: URL) -> URL? {
-        let environment = ProcessInfo.processInfo.environment
-        if let explicit = environment["IRON_BENCH_BIN"], !explicit.isEmpty {
-            return URL(fileURLWithPath: explicit)
-        }
-        if executableURL.path == "/usr/bin/env" {
-            return nil
-        }
-        let sibling = executableURL.deletingLastPathComponent().appendingPathComponent("iron-bench")
-        if FileManager.default.isExecutableFile(atPath: sibling.path) {
-            return sibling
-        }
-        return sibling
     }
 }

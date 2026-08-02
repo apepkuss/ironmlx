@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# Static release gate for an assembled IronMLX.app.
+
+set -euo pipefail
+
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+readonly APP_BUNDLE="${1:-$REPO_ROOT/dist/IronMLX.app}"
+readonly EXPECTED_ARCHITECTURE="arm64"
+readonly EXPECTED_MACOS_VERSION="26.2"
+
+fail() {
+  echo "error: $*" >&2
+  exit 1
+}
+
+require_file() {
+  [ -f "$1" ] || fail "required bundled file is missing: $1"
+}
+
+verify_macho() {
+  local label="$1"
+  local binary="$2"
+  local architectures
+  local minimum_version
+
+  require_file "$binary"
+  architectures="$(lipo -archs "$binary")"
+  [ "$architectures" = "$EXPECTED_ARCHITECTURE" ] || \
+    fail "$label must contain only $EXPECTED_ARCHITECTURE, found: $architectures"
+  minimum_version="$(otool -l "$binary" | awk '
+    /LC_BUILD_VERSION/ { in_build_version = 1; next }
+    in_build_version && $1 == "minos" { print $2; exit }
+  ')"
+  [ "$minimum_version" = "$EXPECTED_MACOS_VERSION" ] || \
+    fail "$label minimum macOS must be $EXPECTED_MACOS_VERSION, found: ${minimum_version:-missing}"
+
+  while IFS= read -r dependency; do
+    case "$dependency" in
+      /System/Library/*|/usr/lib/*) ;;
+      *) fail "$label has a non-system dynamic dependency: $dependency" ;;
+    esac
+  done < <(otool -L "$binary" | awk 'NR > 1 { print $1 }')
+  echo "ok: $label is arm64, minos 26.2, with system-only dynamic dependencies"
+}
+
+[ -d "$APP_BUNDLE/Contents" ] || fail "not an App Bundle: $APP_BUNDLE"
+require_file "$APP_BUNDLE/Contents/Info.plist"
+for file in \
+  Contents/MacOS/IronMLX \
+  Contents/Helpers/ironmlx \
+  Contents/Helpers/iron-bench \
+  Contents/Resources/mlx.metallib \
+  Contents/Resources/dashboard2.html \
+  Contents/Resources/AppIcon.icns \
+  Contents/Resources/menubar-icon.png \
+  Contents/Resources/menubar-icon@2x.png \
+  Contents/Resources/logo.png \
+  Contents/Resources/sidebar-logo@2x.png; do
+  require_file "$APP_BUNDLE/$file"
+done
+
+[ "$(plutil -extract CFBundleIdentifier raw "$APP_BUNDLE/Contents/Info.plist")" = "com.ironmlx.app" ] || \
+  fail "unexpected CFBundleIdentifier"
+[ "$(plutil -extract LSMinimumSystemVersion raw "$APP_BUNDLE/Contents/Info.plist")" = "$EXPECTED_MACOS_VERSION" ] || \
+  fail "Info.plist minimum macOS must be $EXPECTED_MACOS_VERSION"
+
+verify_macho "IronMLX App executable" "$APP_BUNDLE/Contents/MacOS/IronMLX"
+verify_macho "IronMLX backend helper" "$APP_BUNDLE/Contents/Helpers/ironmlx"
+verify_macho "iron-bench helper" "$APP_BUNDLE/Contents/Helpers/iron-bench"
+
+metallib="$APP_BUNDLE/Contents/Resources/mlx.metallib"
+file "$metallib" | grep -Fq "MetalLib executable (MacOS)" || fail "mlx.metallib is not a macOS metallib"
+LC_ALL=C grep -aEq 'air64_v[0-9]+-apple-macosx26\.2\.0' "$metallib" || \
+  fail "mlx.metallib does not target macOS 26.2"
+
+if find "$APP_BUNDLE" -type l -print -quit | grep -q .; then
+  fail "App Bundle must not contain symbolic links"
+fi
+while IFS= read -r -d '' bundled_file; do
+  if developer_paths="$(strings -a "$bundled_file" | LC_ALL=C grep -E '/Users/|target/(debug|release)')"; then
+    fail "App Bundle contains a developer or Cargo fallback path in $bundled_file: $developer_paths"
+  fi
+done < <(find "$APP_BUNDLE" -type f -print0)
+
+codesign --verify --deep --strict "$APP_BUNDLE"
+echo "IronMLX.app static bundle verification passed"

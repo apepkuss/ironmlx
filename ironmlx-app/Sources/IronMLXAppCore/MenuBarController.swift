@@ -61,13 +61,13 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         guard let button = statusItem.button else {
             return
         }
-        if let iconURL = Bundle.module.url(forResource: "menubar-icon", withExtension: "png"),
-           let image = NSImage(contentsOf: iconURL) {
-            image.isTemplate = true
-            button.image = image
-        } else {
-            button.title = "MLX"
+        guard let iconURL = IronMLXAppResourceResolver.url(forResource: "menubar-icon", withExtension: "png"),
+              let image = NSImage(contentsOf: iconURL)
+        else {
+            preconditionFailure("IronMLX App Bundle is missing menubar-icon.png")
         }
+        image.isTemplate = true
+        button.image = image
     }
 
     @objc public func openDashboard(_ sender: NSMenuItem) {

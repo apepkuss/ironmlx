@@ -40,25 +40,19 @@ public struct IronMLXModelMetadataPreflight: ModelMetadataPreflighting {
     public func validate(metadataDirectory: URL) async throws -> ModelMetadataPreflightResult {
         let executableURL = self.executableURL
         return try await Task.detached(priority: .utility) {
+            try BackendBinaryResolver.validateBundledRuntimeIfNeeded(for: executableURL)
             let process = Process()
             let standardOutput = Pipe()
             let standardError = Pipe()
-            if executableURL.path == "/usr/bin/env" {
-                process.executableURL = executableURL
-                process.arguments = [
-                    "ironmlx",
+            process.executableURL = executableURL
+            process.arguments = BackendBinaryResolver.helperArguments(
+                [
                     "model-preflight",
-                    "--metadata-dir",
-                    metadataDirectory.path,
-                ]
-            } else {
-                process.executableURL = executableURL
-                process.arguments = [
-                    "model-preflight",
-                    "--metadata-dir",
-                    metadataDirectory.path,
-                ]
-            }
+                    "--metadata-dir", metadataDirectory.path,
+                ],
+                executableURL: executableURL
+            )
+            process.environment = BundledChildProcessEnvironment.sanitized()
             process.standardOutput = standardOutput
             process.standardError = standardError
             try process.run()

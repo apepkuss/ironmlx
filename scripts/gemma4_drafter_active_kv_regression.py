@@ -460,7 +460,7 @@ def render_markdown(rows: List[Dict[str, Any]]) -> str:
             "Notes:",
             "",
             "- This is an opt-in heavy local regression. It requires local Gemma4 checkpoints.",
-            "- `resident/logical` must show Active KV charging less resident KV than the logical MAX TOKENS cap.",
+            "- `resident/logical` must show Active KV charging less resident KV than the logical MAX CONTEXT TOKENS cap.",
             "- Any `active kv` value other than `ok` is a production regression signal.",
             "",
         ]

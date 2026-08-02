@@ -40,7 +40,8 @@ const MODEL_REQUIRED_CODE: &str = "model_required";
 const MODEL_REQUIRED_MESSAGE: &str = "Model is required.";
 const MODEL_DIRECTORY_NOT_FOUND_CODE: &str = "model_directory_not_found";
 const INVALID_MAX_CACHE_CAP_CODE: &str = "invalid_max_cache_cap";
-const INVALID_MAX_CACHE_CAP_MESSAGE: &str = "MAX TOKENS must be greater than or equal to 1.";
+const INVALID_MAX_CACHE_CAP_MESSAGE: &str =
+    "MAX CONTEXT TOKENS must be greater than or equal to 1.";
 const MODEL_NOT_LOADED_CODE: &str = "model_not_loaded";
 const MODEL_NOT_REGISTERED_CODE: &str = "model_not_registered";
 const BACKEND_UNLOAD_ERROR_CODE: &str = "backend_unload_error";
@@ -58,7 +59,7 @@ const TOTAL_MEMORY_LIMIT_EXCEEDED_MESSAGE: &str =
     "Total memory limit reached. Unload one or more loaded models, raise Memory Limit (Total), or set it to Auto, then try again.";
 const KV_MEMORY_BUDGET_EXCEEDED_CODE: &str = "kv_memory_budget_exceeded";
 const KV_MEMORY_BUDGET_EXCEEDED_MESSAGE: &str =
-    "KV cache memory budget exceeded. Enable Active KV offload with paged prefix cache for long context, or lower MAX TOKENS, max_cache_cap, or b_max, then try again.";
+    "KV cache memory budget exceeded. Enable Active KV offload with paged prefix cache for long context, or lower MAX CONTEXT TOKENS or Max Sequences in the Dashboard, then try again.";
 const DEFAULT_PROFILE_WARNING_CODE: &str = "default_scheduler_profile_used";
 const DEFAULT_PROFILE_WARNING: &str =
     "No matching scheduler profile was found for this model. The model is running with the default scheduler configuration. Generate a dedicated profile with scheduler-autotune for better model-specific scheduling.";
@@ -89,7 +90,7 @@ const DIFFUSION_GEMMA_PROMPT_LOOKUP_UNSUPPORTED_MESSAGE: &str =
     "DiffusionGemma uses block diffusion and does not support PromptLookup. Disable PromptLookup and try again.";
 const DIFFUSION_GEMMA_KV_CACHE_UNSUPPORTED_CODE: &str = "diffusion_gemma_kv_cache_unsupported";
 const DIFFUSION_GEMMA_KV_CACHE_UNSUPPORTED_MESSAGE: &str =
-    "DiffusionGemma does not use the causal KV cache. Remove the per-model MAX TOKENS cache override and try again.";
+    "DiffusionGemma does not use the causal KV cache. Remove the per-model MAX CONTEXT TOKENS cache override and try again.";
 const DIFFUSION_GEMMA_SAMPLING_UNSUPPORTED_CODE: &str =
     "diffusion_gemma_sampling_parameter_unsupported";
 const DIFFUSION_GEMMA_SAMPLING_UNSUPPORTED_MESSAGE: &str =
@@ -2589,7 +2590,7 @@ mod tests {
         assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(error.code, Some("kv_memory_budget_exceeded"));
         assert!(error.message.contains("Active KV offload"));
-        assert!(error.message.contains("MAX TOKENS"));
+        assert!(error.message.contains("MAX CONTEXT TOKENS"));
     }
 
     #[test]

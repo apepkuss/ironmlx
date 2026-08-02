@@ -18,6 +18,7 @@ pub(crate) mod serve;
 pub(crate) use kv_quant::KvQuantArg;
 
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 
 use crate::Result;
 
@@ -28,6 +29,10 @@ use crate::Result;
     version
 )]
 pub struct Cli {
+    /// Exact MLX Metal library to load before initializing MLX.
+    #[arg(long, global = true, value_name = "PATH")]
+    mlx_metallib: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -52,6 +57,13 @@ enum Command {
 
 impl Cli {
     pub fn run(self) -> Result<()> {
+        if let Some(path) = self.mlx_metallib {
+            let path = path
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("--mlx-metallib must be representable as UTF-8"))?;
+            mlx::metal::set_metallib_path(path)?;
+        }
+
         match self.command {
             Command::Info(args) => info::run(args),
             Command::Generate(args) => generate::run(args),
@@ -67,8 +79,25 @@ impl Cli {
 #[cfg(test)]
 mod tests {
     use clap::Parser;
+    use std::path::PathBuf;
 
     use super::{Cli, Command, KvQuantArg};
+
+    #[test]
+    fn global_mlx_metallib_option_parses_before_subcommand() {
+        let cli = Cli::parse_from([
+            "ironmlx",
+            "--mlx-metallib",
+            "/Applications/IronMLX.app/Contents/Resources/mlx.metallib",
+            "info",
+        ]);
+
+        assert_eq!(
+            cli.mlx_metallib.expect("metallib path"),
+            PathBuf::from("/Applications/IronMLX.app/Contents/Resources/mlx.metallib")
+        );
+        assert!(matches!(cli.command, Command::Info(_)));
+    }
 
     #[test]
     fn mtp_draft_cap_subcommand_parses_inputs_and_threshold() {

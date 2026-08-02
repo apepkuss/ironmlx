@@ -162,6 +162,46 @@ public struct AppConfig: Codable, Equatable, Sendable {
     }
 }
 
+public enum AppLanguageResolver {
+    public static func resolve(preferredLanguages: [String]) -> String {
+        guard let identifier = preferredLanguages.first else {
+            return "en"
+        }
+        return resolve(identifier: identifier) ?? "en"
+    }
+
+    private static func resolve(identifier: String) -> String? {
+        let components = identifier
+            .replacingOccurrences(of: "_", with: "-")
+            .lowercased()
+            .split(separator: "-")
+            .map(String.init)
+        guard let language = components.first else {
+            return nil
+        }
+
+        switch language {
+        case "en":
+            return "en"
+        case "ja":
+            return "ja"
+        case "ko":
+            return "ko"
+        case "zh":
+            if components.contains("hant")
+                || components.contains("tw")
+                || components.contains("hk")
+                || components.contains("mo")
+            {
+                return "zh-Hant"
+            }
+            return "zh-Hans"
+        default:
+            return nil
+        }
+    }
+}
+
 public extension AppConfig {
     var isLANMode: Bool {
         networkMode?.lowercased() == "lan"
@@ -281,16 +321,26 @@ public final class AppConfigStore: @unchecked Sendable {
 
     public let url: URL
     private let fileManager: FileManager
+    private let preferredLanguages: @Sendable () -> [String]
 
     public init(
         url: URL = AppConfigStore.defaultConfigURL(),
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        preferredLanguages: @escaping @Sendable () -> [String] = { Locale.preferredLanguages }
     ) {
         self.url = url
         self.fileManager = fileManager
+        self.preferredLanguages = preferredLanguages
     }
 
     public func load() -> AppConfig {
+        guard fileManager.fileExists(atPath: url.path) else {
+            let config = AppConfig(
+                language: AppLanguageResolver.resolve(preferredLanguages: preferredLanguages())
+            )
+            save(config)
+            return config
+        }
         guard let data = try? Data(contentsOf: url) else {
             return AppConfig()
         }

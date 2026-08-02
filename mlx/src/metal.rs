@@ -29,6 +29,16 @@
 
 use crate::{Error, Result};
 
+/// Configure the exact MLX Metal library loaded by this process.
+///
+/// Call this before creating any MLX device, stream, or array. IronMLX's App
+/// launcher uses it to pin the helper to `IronMLX.app/Contents/Resources/
+/// mlx.metallib` without relying on an environment variable or MLX's internal
+/// fallback search order.
+pub fn set_metallib_path(path: &str) -> Result<()> {
+    mlx_sys::metal::ffi::set_metallib_path(path).map_err(Error::from)
+}
+
 /// Open an Xcode-compatible `.gputrace` file at `path` and start capturing
 /// every Metal command submitted on the default device until [`stop`] is
 /// called.

@@ -41,6 +41,18 @@
 
   * { margin: 0; padding: 0; box-sizing: border-box; }
 
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
   body {
     font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
     background: var(--bg);
@@ -1036,6 +1048,85 @@
     flex: 1;
   }
 
+  .mtp-header-row {
+    align-items: center;
+    margin-bottom: 12px;
+  }
+
+  .mtp-control {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+
+  .mtp-toggle-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  .mtp-status {
+    margin-left: auto;
+    color: var(--text-secondary);
+    font-size: 12px;
+  }
+
+  .model-params-modal {
+    width: 480px;
+    max-width: calc(100vw - 32px);
+  }
+
+  .model-params-capacity-row .modal-field > label {
+    white-space: nowrap;
+  }
+
+  .prompt-lookup-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-height: 30px;
+  }
+
+  .prompt-lookup-row + .prompt-lookup-row {
+    margin-top: 6px;
+  }
+
+  .prompt-lookup-control {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+
+  .prompt-lookup-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 400;
+    cursor: pointer;
+  }
+
+  .prompt-lookup-label input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    margin: 0;
+    flex-shrink: 0;
+    accent-color: var(--accent);
+  }
+
+  .prompt-lookup-clear {
+    flex-shrink: 0;
+    padding: 6px 0 6px 12px;
+  }
+
   .modal-hint {
     font-size: 11px;
     color: var(--text-tertiary);
@@ -1515,6 +1606,37 @@
   .btn-accent:hover { opacity: 0.85; }
 
   /* ── Onboarding ── */
+  #page-onboarding {
+    position: relative;
+    min-height: 100%;
+  }
+
+  .onboarding-language {
+    position: absolute;
+    top: 0;
+    right: 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-secondary);
+  }
+
+  .onboarding-language-icon {
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+  }
+
+  .onboarding-language select {
+    width: auto;
+    min-width: 138px;
+  }
+
+  .onboarding-language select:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(0, 122, 255, 0.14);
+  }
+
   .onboarding {
     display: flex;
     flex-direction: column;
@@ -1978,6 +2100,20 @@
   <!-- Status Page -->
   <!-- Onboarding Page (shown when no model is configured) -->
   <div class="page" id="page-onboarding">
+    <div class="onboarding-language">
+      <svg class="onboarding-language-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.2"/>
+        <path d="M2.5 8h11M8 2c1.6 1.7 2.4 3.7 2.4 6S9.6 12.3 8 14M8 2C6.4 3.7 5.6 5.7 5.6 8s.8 4.3 2.4 6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+      </svg>
+      <label class="visually-hidden" for="onboarding-lang-select" data-i18n="interface_language">Language</label>
+      <select id="onboarding-lang-select">
+        <option value="en">English</option>
+        <option value="zh-Hans">简体中文</option>
+        <option value="zh-Hant">繁體中文</option>
+        <option value="ja">日本語</option>
+        <option value="ko">한국어</option>
+      </select>
+    </div>
     <div class="onboarding">
       <div class="onboarding-logo">Fe</div>
       <h1 data-i18n="welcome_title">Welcome to IronMLX</h1>
@@ -2897,7 +3033,7 @@
               </span>
             </span>
           </div>
-          <div class="settings-row-desc" data-i18n="active_kv_offload_desc">Experimental. Keep a hot KV window resident and move paused active KV cache payloads to SSD for long logical MAX TOKENS.</div>
+          <div class="settings-row-desc" data-i18n="active_kv_offload_desc">Experimental. Keep a hot KV window resident and move paused active KV cache payloads to SSD for long logical MAX CONTEXT TOKENS.</div>
         </div>
         <div class="settings-row-right"><label class="toggle"><input type="checkbox" id="cfg-active-kv-offload"><span class="toggle-slider"></span></label></div>
       </div>
@@ -3098,7 +3234,7 @@
 
 <!-- Model Params Modal -->
 <div class="modal-overlay" id="model-params-modal">
-  <div class="modal" style="width:420px;">
+  <div class="modal model-params-modal">
     <button class="modal-close" onclick="closeParamsModal()">&times;</button>
     <div class="modal-header">
       <div class="modal-pre" data-i18n="model_param_settings">Model Param Settings</div>
@@ -3115,9 +3251,9 @@
           <select id="modal-model-type"><option value="auto" data-i18n="auto_detect">Auto Detect</option><option value="llm">LLM</option><option value="vlm">LLM/VLM</option><option value="block_diffusion_vlm">Block Diffusion VLM</option><option value="embedding">Embedding</option><option value="reranker">Reranker</option><option value="asr">ASR</option><option value="tts">TTS</option></select>
         </div>
       </div>
-      <div class="modal-row">
+      <div class="modal-row model-params-capacity-row">
         <div class="modal-field"><label data-i18n="context_size">CONTEXT SIZE</label><input type="text" placeholder="--" id="modal-context-size" readonly></div>
-        <div class="modal-field"><label data-i18n="single_request_max_tokens">MAX TOKENS</label><input type="text" placeholder="--" id="modal-max-tokens"></div>
+        <div class="modal-field"><label data-i18n="max_context_tokens">MAX CONTEXT TOKENS</label><input type="text" placeholder="--" id="modal-max-tokens"></div>
         <div class="modal-field"><label>TEMPERATURE</label><input type="text" placeholder="1.0" id="modal-temperature"></div>
       </div>
       <div class="modal-row" id="modal-causal-sampling-row">
@@ -3126,12 +3262,24 @@
         <div class="modal-field"><label>REPEAT PENALTY</label><input type="text" placeholder="1.0" id="modal-repeat-penalty"></div>
       </div>
       <div id="modal-mtp-section" style="margin-top:14px;border-top:0.5px solid var(--border);padding-top:14px;">
-        <div class="modal-row" style="align-items:center;">
-          <label style="display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;color:var(--text);">
-            <input type="checkbox" id="modal-mtp-enabled" style="accent-color:var(--accent);">
-            <span data-i18n="mtp_acceleration">MTP Acceleration</span>
-          </label>
-          <span id="modal-mtp-status" style="font-size:12px;color:var(--text-secondary);"></span>
+        <div class="modal-row mtp-header-row">
+          <div class="mtp-control">
+            <label class="mtp-toggle-label">
+              <input type="checkbox" id="modal-mtp-enabled" style="accent-color:var(--accent);">
+              <span data-i18n="mtp_acceleration">MTP Acceleration</span>
+            </label>
+            <span class="profile-help profile-help-fixed">
+              <button type="button" class="profile-help-trigger" aria-label="About MTP acceleration" aria-describedby="mtp-acceleration-help-tooltip" data-i18n-aria-label="mtp_help_label">?</button>
+              <span class="profile-help-tooltip profile-help-tooltip-fixed" id="mtp-acceleration-help-tooltip" role="tooltip">
+                <span class="profile-help-tooltip-title" data-i18n="mtp_help_title">How MTP acceleration works</span>
+                <span class="profile-help-tooltip-body" data-i18n="mtp_help_body">MTP uses companion prediction weights to propose multiple candidate tokens, which the main model then verifies. Accepted candidates can reduce generation steps and improve speed; actual gains depend on the model, sampling settings, and request content.</span>
+                <span class="profile-help-tooltip-flow" data-i18n="mtp_help_requirement">Requirement: compatible MTP weights for the current model must be downloaded.</span>
+                <span class="profile-help-tooltip-flow" data-i18n="mtp_help_draft_tokens">Draft Tokens sets the maximum number of candidates proposed in each round; Auto uses the automatic strategy.</span>
+                <span class="profile-help-tooltip-flow" id="modal-mtp-help-status"></span>
+              </span>
+            </span>
+          </div>
+          <span class="mtp-status" id="modal-mtp-status" aria-live="polite" hidden></span>
         </div>
         <div class="modal-row">
           <div class="modal-field" style="flex:2;">
@@ -3145,18 +3293,34 @@
         </div>
       </div>
       <div id="modal-prompt-lookup-section" style="margin-top:14px;border-top:0.5px solid var(--border);padding-top:14px;">
-        <div class="modal-row" style="align-items:center;">
-          <label style="display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;color:var(--text);">
-            <input type="checkbox" id="modal-prompt-lookup-enabled" style="accent-color:var(--accent);">
-            <span data-i18n="prompt_lookup_acceleration">PromptLookup Acceleration</span>
-          </label>
+        <div class="prompt-lookup-row">
+          <div class="prompt-lookup-control">
+            <label class="prompt-lookup-label">
+              <input type="checkbox" id="modal-prompt-lookup-enabled">
+              <span data-i18n="prompt_lookup_acceleration">Repeated-Text Acceleration</span>
+            </label>
+            <span class="profile-help profile-help-fixed">
+              <button type="button" class="profile-help-trigger" aria-label="About repeated-text acceleration" aria-describedby="prompt-lookup-acceleration-help-tooltip" data-i18n-aria-label="prompt_lookup_acceleration_help_label">?</button>
+              <span class="profile-help-tooltip profile-help-tooltip-fixed" id="prompt-lookup-acceleration-help-tooltip" role="tooltip">
+                <span class="profile-help-tooltip-body" data-i18n="prompt_lookup_acceleration_help">Uses repeated text in the current request to predict what comes next. When content repeats, this can reduce computation and improve generation speed.</span>
+              </span>
+            </span>
+          </div>
         </div>
-        <div class="modal-row" style="align-items:center;">
-          <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">
-            <input type="checkbox" id="modal-prompt-lookup-cross-request" style="accent-color:var(--accent);">
-            <span data-i18n="prompt_lookup_cross_request">Reuse completed history across App requests</span>
-          </label>
-          <button class="btn-cancel" type="button" onclick="clearSharedPromptLookup()" data-i18n="prompt_lookup_clear">Clear shared history</button>
+        <div class="prompt-lookup-row">
+          <div class="prompt-lookup-control">
+            <label class="prompt-lookup-label">
+              <input type="checkbox" id="modal-prompt-lookup-cross-request">
+              <span data-i18n="prompt_lookup_cross_request">Reuse Across Requests</span>
+            </label>
+            <span class="profile-help profile-help-fixed">
+              <button type="button" class="profile-help-trigger" aria-label="About reuse across requests" aria-describedby="prompt-lookup-cross-request-help-tooltip" data-i18n-aria-label="prompt_lookup_cross_request_help_label">?</button>
+              <span class="profile-help-tooltip profile-help-tooltip-fixed" id="prompt-lookup-cross-request-help-tooltip" role="tooltip">
+                <span class="profile-help-tooltip-body" data-i18n="prompt_lookup_cross_request_help">Requires Repeated-Text Acceleration to be enabled. Keeps matching history from completed requests so later similar requests can also benefit from repeated-text acceleration.</span>
+              </span>
+            </span>
+          </div>
+          <button class="btn-cancel prompt-lookup-clear" type="button" onclick="clearSharedPromptLookup()" data-i18n="prompt_lookup_clear">Clear Reuse History</button>
         </div>
       </div>
     </div>
@@ -3299,7 +3463,11 @@
       mtp_badge_available: "MTP", mtp_badge_enabled: "MTP",
       mtp_badge_available_title: "Compatible MTP weights are available.", mtp_badge_enabled_title: "This model is loaded with MTP acceleration.",
       mtp_acceleration: "MTP Acceleration", mtp_weights: "MTP Weights", mtp_draft_tokens: "Draft Tokens",
-      prompt_lookup_acceleration: "PromptLookup Acceleration", prompt_lookup_cross_request: "Reuse completed history across App requests", prompt_lookup_clear: "Clear shared history", prompt_lookup_cleared: "Shared PromptLookup history cleared.",
+      mtp_help_label: "About MTP acceleration", mtp_help_title: "How MTP acceleration works", mtp_help_body: "MTP uses companion prediction weights to propose multiple candidate tokens, which the main model then verifies. Accepted candidates can reduce generation steps and improve speed; actual gains depend on the model, sampling settings, and request content.",
+      mtp_help_requirement: "Requirement: compatible MTP weights for the current model must be downloaded.", mtp_help_draft_tokens: "Draft Tokens sets the maximum number of candidates proposed in each round; Auto uses the automatic strategy.",
+      mtp_help_status_available: "Current status: compatible MTP weights detected.", mtp_help_status_incompatible: "Current status: the detected MTP weights are incompatible with this model.", mtp_help_status_unavailable: "Current status: no compatible MTP weights were found.",
+      prompt_lookup_acceleration: "Repeated-Text Acceleration", prompt_lookup_acceleration_help_label: "About repeated-text acceleration", prompt_lookup_acceleration_help: "Uses repeated text in the current request to predict what comes next. When content repeats, this can reduce computation and improve generation speed.",
+      prompt_lookup_cross_request: "Reuse Across Requests", prompt_lookup_cross_request_help_label: "About reuse across requests", prompt_lookup_cross_request_help: "Requires Repeated-Text Acceleration to be enabled. Keeps matching history from completed requests so later similar requests can also benefit from repeated-text acceleration.", prompt_lookup_clear: "Clear Reuse History", prompt_lookup_cleared: "Reuse history cleared.", prompt_lookup_clear_failed: "Failed to clear reuse history.",
       mtp_status_available: "MTP available", mtp_status_incompatible: "MTP weights are incompatible", mtp_status_unavailable: "No compatible MTP weights",
       model_exists_locally: "Model \"{name}\" already exists locally.",
       menu_start_needs_model: "No default model is set. Download a model and choose it as the default; IronMLX will start the backend automatically.",
@@ -3350,7 +3518,7 @@
       err_backend_load_error: "Backend refused to load the model: {detail}",
       err_model_required: "Select a model before continuing.",
       err_model_directory_not_found: "The model directory does not exist. Download the model again or choose a valid local model.",
-      err_invalid_max_cache_cap: "MAX TOKENS must be greater than or equal to 1.",
+      err_invalid_max_cache_cap: "MAX CONTEXT TOKENS must be greater than or equal to 1.",
       err_model_not_loaded: "The model is not loaded. Load it first, then try again.",
       err_model_not_registered: "The model is not registered. Make sure it is downloaded and appears in Model Management.",
       err_all_models_pinned: "All loaded models are pinned. Unload a pinned model before loading another.",
@@ -3360,7 +3528,7 @@
       err_model_reload_busy: "The model is processing requests. Wait for it to become idle before switching versions.",
       err_model_memory_limit_exceeded: "Model memory limit reached. Unload one or more loaded models, raise Memory Limit (Model Only), or set it to Auto, then try again.",
       err_total_memory_limit_exceeded: "Total memory limit reached. Unload one or more loaded models, raise Memory Limit (Total), or set it to Auto, then try again.",
-      err_kv_memory_budget_exceeded: "KV cache memory budget is insufficient. For long-context models, enable Active KV Cache Offload with cache enabled, or lower Max Sequences / MAX TOKENS and retry.",
+      err_kv_memory_budget_exceeded: "KV cache memory budget is insufficient. For long-context models, enable Active KV Cache Offload with cache enabled, or lower Max Sequences / MAX CONTEXT TOKENS and retry.",
       err_mtp_model_dir_required: "Select local MTP weights before enabling MTP acceleration.",
       err_mtp_base_model_not_found: "The base model directory does not exist. Re-download the model and try again.",
       err_mtp_model_not_found: "The selected MTP weights are not available locally. Re-download the MTP weights or choose another one.",
@@ -3369,7 +3537,7 @@
       err_mtp_invalid_config: "The MTP weights config is invalid. Re-download the weights or choose another one.",
       err_mtp_invalid_draft_tokens: "MTP Draft Tokens must be a valid positive value.",
       err_mtp_incompatible: "The selected MTP weights are not compatible with this base model. Choose matching MTP weights and try again.",
-      err_memory_budget_exceeded: "KV cache memory budget is insufficient. Current Max Sequences ({max_sequences}) and this model's logical MAX TOKENS ({max_cache_cap}) exceed the resident budget. Enable Active KV Cache Offload with cache enabled for long contexts, or lower Max Sequences / MAX TOKENS and retry.",
+      err_memory_budget_exceeded: "KV cache memory budget is insufficient. Current Max Sequences ({max_sequences}) and this model's logical MAX CONTEXT TOKENS ({max_cache_cap}) exceed the resident budget. Enable Active KV Cache Offload with cache enabled for long contexts, or lower Max Sequences / MAX CONTEXT TOKENS and retry.",
       err_cache_init_failed: "Could not initialize the on-disk KV cache: {detail}",
       err_model_path_not_found: "Model not found locally: \"{name}\". Download it first from HuggingFace / ModelScope or check the repo ID.",
       err_hf_api_init_failed: "Could not initialize the HuggingFace downloader: {detail}",
@@ -3399,7 +3567,7 @@
       dl_from_ms: "Download from ModelScope", ms_repo_id: "Repo ID", ms_browse: "Browse models at",
       search_hf: "Search HuggingFace", hf_model_query: "Model name or repository ID", search_hf_placeholder: "Enter a model name or organization/model", sort_by: "Sort by", trending: "Trending", most_downloads: "Most Downloads", recently_created: "Recently Created", recently_updated: "Recently Updated", most_params: "Most Params", least_params: "Least Params", search: "Search",
       model_param_settings: "Model Param Settings", context_size: "CONTEXT SIZE",
-      single_request_max_tokens: "MAX TOKENS",
+      max_context_tokens: "MAX CONTEXT TOKENS",
       model_alias: "Model Alias", model_type: "Model Type", auto_detect: "Auto Detect",
       max_token_count: "Max Tokens", temperature: "Temperature", repeat_penalty: "Repeat Penalty", ttl_seconds: "TTL (seconds)",
       load_defaults: "Load Defaults", default_hint: "Leave empty to use global defaults",
@@ -3446,7 +3614,7 @@
       cold_cache: "Cold Cache Limit (SSD Cache)", cold_cache_desc: "Limits SSD Prefix Cache disk usage.", cold_cache_help_title: "How SSD cache works", cold_cache_help_body: "Persists Prefix Cache data on local SSD to reduce prefill work for repeated long prefixes. The maximum value is adjusted from available disk space. It follows the Enable Cache switch; turn off Enable Cache to disable it. Save settings and restart the service to apply changes.",
       auto: "Auto",
       cache: "Cache", enable_cache: "Enable Cache", ssd_cache_dir: "SSD Cache Directory",
-      active_kv_offload: "Active KV Cache Offload", active_kv_offload_desc: "Experimental. Keep a hot KV window resident and move paused active KV cache payloads to SSD for long logical MAX TOKENS.", active_kv_offload_help_title: "Experimental cache residency", active_kv_offload_help_body: "Moves paused active KV cache payloads to local SSD storage so new requests can run when sequence slots are full.", active_kv_offload_help_trigger: "Enabling it does not mean offload happens immediately. The system triggers it automatically when scheduling, KV residency pressure, or request park/restore requires it; it may stay idle when the system is idle or memory pressure is low.", active_kv_offload_help_applicable: "Applicable: Full Attention dense/paged, TurboQuant packed Full Attention, and MLA.", active_kv_offload_help_not_applicable: "Not applicable: GatedDelta/Linear and MTP speculative side cache.",
+      active_kv_offload: "Active KV Cache Offload", active_kv_offload_desc: "Experimental. Keep a hot KV window resident and move paused active KV cache payloads to SSD for long logical MAX CONTEXT TOKENS.", active_kv_offload_help_title: "Experimental cache residency", active_kv_offload_help_body: "Moves paused active KV cache payloads to local SSD storage so new requests can run when sequence slots are full.", active_kv_offload_help_trigger: "Enabling it does not mean offload happens immediately. The system triggers it automatically when scheduling, KV residency pressure, or request park/restore requires it; it may stay idle when the system is idle or memory pressure is low.", active_kv_offload_help_applicable: "Applicable: Full Attention dense/paged, TurboQuant packed Full Attention, and MLA.", active_kv_offload_help_not_applicable: "Not applicable: GatedDelta/Linear and MTP speculative side cache.",
       kv_quant: "KV Cache Compression", kv_quant_desc: "Use TurboQuant to reduce runtime KV Cache memory usage for long contexts. K3V3 saves more memory, K4V4 is more conservative, and K3V4 is the recommended balanced option.", kv_quant_off: "Off", model_ttl: "Model Auto-Unload (TTL)", model_ttl_desc: "Automatically unload loaded models after they stay idle for this many minutes. 0 = disabled. The default model preference is preserved.", minutes: "minutes",
       advanced: "Advanced", batch_processing: "Batch Processing",
       max_sequences: "Max Sequences", max_sequences_desc: "Maximum number of concurrent parallel requests.",
@@ -3459,8 +3627,8 @@
       params_saved: "Model parameters saved.",
       params_reloaded: "Model parameters applied. The model has been reloaded.",
       params_reload_deferred: "Model parameters saved. The model is processing requests and will reload automatically when it becomes idle.",
-      params_invalid_max_tokens: "MAX TOKENS must be a positive integer.",
-      params_max_tokens_exceeds_context: "MAX TOKENS cannot exceed the model context window ({context}).",
+      params_invalid_max_tokens: "MAX CONTEXT TOKENS must be a positive integer.",
+      params_max_tokens_exceeds_context: "MAX CONTEXT TOKENS cannot exceed the model context window ({context}).",
       params_invalid_mtp_draft_tokens: "MTP Draft Tokens must be a positive integer, or empty for Auto.",
       restart_confirm: "Some settings require a server restart to take effect. Restart now?",
       server_restarted: "Server has been restarted successfully.",
@@ -3624,7 +3792,11 @@
       mtp_badge_available: "MTP", mtp_badge_enabled: "MTP",
       mtp_badge_available_title: "已发现兼容的 MTP 权重。", mtp_badge_enabled_title: "该模型已使用 MTP 加速加载。",
       mtp_acceleration: "MTP 加速", mtp_weights: "MTP 权重", mtp_draft_tokens: "Draft Tokens",
-      prompt_lookup_acceleration: "PromptLookup 加速", prompt_lookup_cross_request: "在 App 请求之间复用已完成的历史", prompt_lookup_clear: "清空共享历史", prompt_lookup_cleared: "已清空共享 PromptLookup 历史。",
+      mtp_help_label: "了解 MTP 加速", mtp_help_title: "MTP 加速如何工作", mtp_help_body: "MTP 使用配套的预测权重预先生成多个候选 Token，再由主模型验证。候选被接受时，可以减少生成步骤并提升速度；实际效果取决于模型、采样参数和请求内容。",
+      mtp_help_requirement: "启用条件：已下载与当前模型兼容的 MTP 权重。", mtp_help_draft_tokens: "DRAFT TOKENS 控制每轮最多提出的候选 Token 数；Auto 使用自动策略。",
+      mtp_help_status_available: "当前状态：已检测到兼容的 MTP 权重。", mtp_help_status_incompatible: "当前状态：检测到的 MTP 权重与当前模型不兼容。", mtp_help_status_unavailable: "当前状态：未发现与当前模型兼容的 MTP 权重。",
+      prompt_lookup_acceleration: "重复文本加速", prompt_lookup_acceleration_help_label: "了解重复文本加速", prompt_lookup_acceleration_help: "利用当前请求中重复出现的文本预测后续内容；内容重复时可减少计算并提升生成速度。",
+      prompt_lookup_cross_request: "跨请求复用", prompt_lookup_cross_request_help_label: "了解跨请求复用", prompt_lookup_cross_request_help: "需先启用“重复文本加速”。启用后会保留已完成请求的匹配历史，让后续相似请求也能使用重复文本加速。", prompt_lookup_clear: "清空复用历史", prompt_lookup_cleared: "已清空重复文本复用历史。", prompt_lookup_clear_failed: "清空复用历史失败。",
       mtp_status_available: "MTP 可用", mtp_status_incompatible: "MTP 权重不兼容", mtp_status_unavailable: "未发现兼容的 MTP 权重",
       model_exists_locally: "模型 \"{name}\" 已存在于本地。",
       menu_start_needs_model: "尚未设置默认模型。请先下载一个模型并设为默认模型，IronMLX 会自动启动后端。",
@@ -3675,7 +3847,7 @@
       err_backend_load_error: "后端拒绝加载模型：{detail}",
       err_model_required: "请先选择一个模型。",
       err_model_directory_not_found: "模型目录不存在。请重新下载模型，或选择有效的本地模型。",
-      err_invalid_max_cache_cap: "MAX TOKENS 必须大于或等于 1。",
+      err_invalid_max_cache_cap: "MAX CONTEXT TOKENS 必须大于或等于 1。",
       err_model_not_loaded: "该模型尚未加载。请先加载模型后再重试。",
       err_model_not_registered: "该模型尚未注册。请先确认模型已下载，并已出现在模型管理列表中。",
       err_all_models_pinned: "所有已加载的模型都被固定，无法自动释放空间。请先取消固定后再加载。",
@@ -3685,7 +3857,7 @@
       err_model_reload_busy: "模型正在处理请求，请等待模型空闲后再切换版本。",
       err_model_memory_limit_exceeded: "已达到模型内存限制，无法加载新模型。请先卸载暂不使用的已加载模型，或在【设置】中调高「内存限制（仅模型）」/切换为自动后重试。",
       err_total_memory_limit_exceeded: "已达到总内存限制，无法加载新模型。请先卸载暂不使用的已加载模型，或在【设置】中调高「内存限制（总量）」/切换为自动后重试。",
-      err_kv_memory_budget_exceeded: "KV cache 内存预算不足。长上下文模型请在启用缓存的同时开启【活跃 KV Cache 分层卸载】，或调低「最大序列数」/ MAX TOKENS 后重试。",
+      err_kv_memory_budget_exceeded: "KV cache 内存预算不足。长上下文模型请在启用缓存的同时开启【活跃 KV Cache 分层卸载】，或调低「最大序列数」/ MAX CONTEXT TOKENS 后重试。",
       err_mtp_model_dir_required: "请先选择本地 MTP 权重，再启用 MTP 加速。",
       err_mtp_base_model_not_found: "基础模型目录不存在。请重新下载模型后再试。",
       err_mtp_model_not_found: "选择的 MTP 权重在本地不可用。请重新下载 MTP 权重，或选择其他权重。",
@@ -3694,7 +3866,7 @@
       err_mtp_invalid_config: "MTP 权重的配置文件无效。请重新下载权重，或选择其他权重。",
       err_mtp_invalid_draft_tokens: "MTP Draft Tokens 必须是有效的正数。",
       err_mtp_incompatible: "选择的 MTP 权重与当前基础模型不兼容。请选择匹配的 MTP 权重后重试。",
-      err_memory_budget_exceeded: "KV cache 内存预算不足。当前最大序列数（{max_sequences}）和该模型的逻辑 MAX TOKENS（{max_cache_cap}）会超过驻留预算。长上下文请在启用缓存的同时开启【活跃 KV Cache 分层卸载】，或调低「最大序列数」/ MAX TOKENS 后重试。",
+      err_memory_budget_exceeded: "KV cache 内存预算不足。当前最大序列数（{max_sequences}）和该模型的逻辑 MAX CONTEXT TOKENS（{max_cache_cap}）会超过驻留预算。长上下文请在启用缓存的同时开启【活跃 KV Cache 分层卸载】，或调低「最大序列数」/ MAX CONTEXT TOKENS 后重试。",
       err_cache_init_failed: "本地 KV 缓存初始化失败：{detail}",
       err_model_path_not_found: "本地找不到模型 \"{name}\"，请先从 HuggingFace 或 ModelScope 下载，或检查 Repo ID 是否正确。",
       err_hf_api_init_failed: "HuggingFace 下载器初始化失败：{detail}",
@@ -3724,7 +3896,7 @@
       dl_from_ms: "从 ModelScope 下载", ms_repo_id: "仓库 ID", ms_browse: "浏览模型",
       search_hf: "搜索 HuggingFace", hf_model_query: "模型名称或仓库 ID", search_hf_placeholder: "输入模型名称或组织/模型", sort_by: "排序方式", trending: "热门趋势", most_downloads: "下载最多", recently_created: "最近创建", recently_updated: "最近更新", most_params: "参数最多", least_params: "参数最少", search: "搜索",
       model_param_settings: "模型参数设置", context_size: "CONTEXT SIZE",
-      single_request_max_tokens: "MAX TOKENS",
+      max_context_tokens: "MAX CONTEXT TOKENS",
       model_alias: "模型别名", model_type: "模型类型", auto_detect: "自动检测",
       max_token_count: "最大 Token 数", temperature: "温度", repeat_penalty: "重复惩罚", ttl_seconds: "TTL（秒）",
       load_defaults: "加载默认值", default_hint: "留空则使用全局默认值",
@@ -3771,7 +3943,7 @@
       cold_cache: "冷缓存限制（SSD 缓存）", cold_cache_desc: "限制 SSD Prefix Cache 的最大磁盘占用。", cold_cache_help_title: "SSD 缓存的作用", cold_cache_help_body: "将 Prefix Cache 数据持久化到本地 SSD，降低重复长前缀请求的预填充成本。最大值会根据当前磁盘可用空间动态调整。该缓存受【启用缓存】总开关控制；如需禁用，请关闭【启用缓存】。保存设置并重启服务后生效。",
       auto: "自动",
       cache: "缓存", enable_cache: "启用缓存", ssd_cache_dir: "SSD 缓存目录",
-      active_kv_offload: "活跃 KV Cache 分层卸载", active_kv_offload_desc: "实验性能力。为长逻辑 MAX TOKENS 保持热 KV 窗口常驻，并将暂停中的活跃 KV Cache 写入 SSD。", active_kv_offload_help_title: "实验性缓存驻留", active_kv_offload_help_body: "当序列槽位已满时，可将暂停中的活跃 KV Cache 写入本地 SSD，让新的请求先继续运行。", active_kv_offload_help_trigger: "开启后不代表立即发生卸载。系统会在请求调度、KV 驻留压力或请求暂停/恢复需要时自动触发；空闲或内存压力较低时可能保持 idle。", active_kv_offload_help_applicable: "适用：Full Attention dense/paged、TurboQuant packed Full Attention、MLA。", active_kv_offload_help_not_applicable: "不适用：GatedDelta/Linear、MTP speculative side cache。",
+      active_kv_offload: "活跃 KV Cache 分层卸载", active_kv_offload_desc: "实验性能力。为长逻辑 MAX CONTEXT TOKENS 保持热 KV 窗口常驻，并将暂停中的活跃 KV Cache 写入 SSD。", active_kv_offload_help_title: "实验性缓存驻留", active_kv_offload_help_body: "当序列槽位已满时，可将暂停中的活跃 KV Cache 写入本地 SSD，让新的请求先继续运行。", active_kv_offload_help_trigger: "开启后不代表立即发生卸载。系统会在请求调度、KV 驻留压力或请求暂停/恢复需要时自动触发；空闲或内存压力较低时可能保持 idle。", active_kv_offload_help_applicable: "适用：Full Attention dense/paged、TurboQuant packed Full Attention、MLA。", active_kv_offload_help_not_applicable: "不适用：GatedDelta/Linear、MTP speculative side cache。",
       kv_quant: "KV 缓存压缩", kv_quant_desc: "使用 TurboQuant 降低长上下文运行时 KV Cache 的内存占用。K3V3 更省内存，K4V4 更保守，K3V4 为推荐均衡选项。", kv_quant_off: "无压缩", model_ttl: "模型自动卸载 (TTL)", model_ttl_desc: "已加载模型闲置超过指定分钟数后自动卸载。0 = 不启用；默认模型偏好会保留。", minutes: "分钟",
       advanced: "高级", batch_processing: "批处理",
       max_sequences: "最大序列数", max_sequences_desc: "并行处理的最大并发请求数。",
@@ -3784,8 +3956,8 @@
       params_saved: "模型参数已保存。",
       params_reloaded: "模型参数已生效，模型已重新加载。",
       params_reload_deferred: "模型参数已保存。该模型正在处理请求，将在空闲后自动重新加载。",
-      params_invalid_max_tokens: "MAX TOKENS 必须是正整数。",
-      params_max_tokens_exceeds_context: "MAX TOKENS 不能超过模型上下文窗口（{context}）。",
+      params_invalid_max_tokens: "MAX CONTEXT TOKENS 必须是正整数。",
+      params_max_tokens_exceeds_context: "MAX CONTEXT TOKENS 不能超过模型上下文窗口（{context}）。",
       params_invalid_mtp_draft_tokens: "MTP Draft Tokens 必须是正整数；留空则使用自动值。",
       restart_confirm: "部分设置需要重启服务才能生效。是否立即重启？",
       server_restarted: "服务已重启成功。",
@@ -3949,7 +4121,11 @@
       mtp_badge_available: "MTP", mtp_badge_enabled: "MTP",
       mtp_badge_available_title: "已發現相容的 MTP 權重。", mtp_badge_enabled_title: "此模型已使用 MTP 加速載入。",
       mtp_acceleration: "MTP 加速", mtp_weights: "MTP 權重", mtp_draft_tokens: "Draft Tokens",
-      prompt_lookup_acceleration: "PromptLookup 加速", prompt_lookup_cross_request: "在 App 請求之間重用已完成的歷史", prompt_lookup_clear: "清空共享歷史", prompt_lookup_cleared: "已清空共享 PromptLookup 歷史。",
+      mtp_help_label: "瞭解 MTP 加速", mtp_help_title: "MTP 加速如何運作", mtp_help_body: "MTP 使用配套的預測權重預先產生多個候選 Token，再由主模型驗證。候選被接受時，可以減少生成步驟並提升速度；實際效果取決於模型、取樣參數和請求內容。",
+      mtp_help_requirement: "啟用條件：已下載與目前模型相容的 MTP 權重。", mtp_help_draft_tokens: "DRAFT TOKENS 控制每輪最多提出的候選 Token 數；Auto 使用自動策略。",
+      mtp_help_status_available: "目前狀態：已偵測到相容的 MTP 權重。", mtp_help_status_incompatible: "目前狀態：偵測到的 MTP 權重與目前模型不相容。", mtp_help_status_unavailable: "目前狀態：未發現與目前模型相容的 MTP 權重。",
+      prompt_lookup_acceleration: "重複文字加速", prompt_lookup_acceleration_help_label: "瞭解重複文字加速", prompt_lookup_acceleration_help: "利用目前請求中重複出現的文字預測後續內容；內容重複時可減少運算並提升生成速度。",
+      prompt_lookup_cross_request: "跨請求重用", prompt_lookup_cross_request_help_label: "瞭解跨請求重用", prompt_lookup_cross_request_help: "需先啟用「重複文字加速」。啟用後會保留已完成請求的比對歷史，讓後續相似請求也能使用重複文字加速。", prompt_lookup_clear: "清除重用歷史", prompt_lookup_cleared: "已清除重複文字重用歷史。", prompt_lookup_clear_failed: "清除重用歷史失敗。",
       mtp_status_available: "MTP 可用", mtp_status_incompatible: "MTP 權重不相容", mtp_status_unavailable: "未發現相容的 MTP 權重",
       model_exists_locally: "模型 \"{name}\" 已存在於本地。",
       menu_start_needs_model: "尚未設定預設模型。請先下載一個模型並設為預設模型，IronMLX 會自動啟動後端。",
@@ -3988,7 +4164,7 @@
       err_backend_load_error: "後端拒絕載入模型：{detail}",
       err_model_required: "請先選擇一個模型。",
       err_model_directory_not_found: "模型目錄不存在。請重新下載模型，或選擇有效的本地模型。",
-      err_invalid_max_cache_cap: "MAX TOKENS 必須大於或等於 1。",
+      err_invalid_max_cache_cap: "MAX CONTEXT TOKENS 必須大於或等於 1。",
       err_model_not_loaded: "該模型尚未載入。請先載入模型後再重試。",
       err_model_not_registered: "該模型尚未註冊。請先確認模型已下載，並已出現在模型管理列表中。",
       err_all_models_pinned: "所有已載入的模型都被釘選，無法自動釋出空間。請先取消釘選後再載入。",
@@ -3998,7 +4174,7 @@
       err_model_reload_busy: "模型正在處理請求，請等待模型閒置後再切換版本。",
       err_model_memory_limit_exceeded: "已達到模型記憶體限制，無法載入新模型。請先卸載暫不使用的已載入模型，或在【設定】中調高「記憶體限制（僅模型）」/切換為自動後重試。",
       err_total_memory_limit_exceeded: "已達到總記憶體限制，無法載入新模型。請先卸載暫不使用的已載入模型，或在【設定】中調高「記憶體限制（總量）」/切換為自動後重試。",
-      err_kv_memory_budget_exceeded: "KV cache 記憶體預算不足。長上下文模型請在啟用快取的同時開啟【活躍 KV Cache 分層卸載】，或調低「最大序列數」/ MAX TOKENS 後重試。",
+      err_kv_memory_budget_exceeded: "KV cache 記憶體預算不足。長上下文模型請在啟用快取的同時開啟【活躍 KV Cache 分層卸載】，或調低「最大序列數」/ MAX CONTEXT TOKENS 後重試。",
       err_mtp_model_dir_required: "請先選擇本機 MTP 權重，再啟用 MTP 加速。",
       err_mtp_base_model_not_found: "基礎模型目錄不存在。請重新下載模型後再試。",
       err_mtp_model_not_found: "選擇的 MTP 權重在本機不可用。請重新下載 MTP 權重，或選擇其他權重。",
@@ -4007,7 +4183,7 @@
       err_mtp_invalid_config: "MTP 權重的設定檔無效。請重新下載權重，或選擇其他權重。",
       err_mtp_invalid_draft_tokens: "MTP Draft Tokens 必須是有效的正數。",
       err_mtp_incompatible: "選擇的 MTP 權重與目前基礎模型不相容。請選擇匹配的 MTP 權重後重試。",
-      err_memory_budget_exceeded: "KV cache 記憶體預算不足。目前最大序列數（{max_sequences}）和此模型的邏輯 MAX TOKENS（{max_cache_cap}）會超過駐留預算。長上下文請在啟用快取的同時開啟【活躍 KV Cache 分層卸載】，或調低「最大序列數」/ MAX TOKENS 後重試。",
+      err_memory_budget_exceeded: "KV cache 記憶體預算不足。目前最大序列數（{max_sequences}）和此模型的邏輯 MAX CONTEXT TOKENS（{max_cache_cap}）會超過駐留預算。長上下文請在啟用快取的同時開啟【活躍 KV Cache 分層卸載】，或調低「最大序列數」/ MAX CONTEXT TOKENS 後重試。",
       err_cache_init_failed: "本地 KV 快取初始化失敗：{detail}",
       err_model_path_not_found: "本地找不到模型 \"{name}\"，請先從 HuggingFace 或 ModelScope 下載，或檢查 Repo ID 是否正確。",
       err_hf_api_init_failed: "HuggingFace 下載器初始化失敗：{detail}",
@@ -4031,7 +4207,7 @@
       dl_from_hf: "從 HuggingFace 下載", repo_id: "倉庫 ID", optional: "（可選）", download: "下載",
       dl_from_ms: "從 ModelScope 下載", ms_repo_id: "倉庫 ID", ms_browse: "瀏覽模型",
       search_hf: "搜尋 HuggingFace", hf_model_query: "模型名稱或儲存庫 ID", search_hf_placeholder: "輸入模型名稱或組織/模型", sort_by: "排序方式", trending: "熱門趨勢", most_downloads: "下載最多", recently_created: "最近建立", recently_updated: "最近更新", most_params: "參數最多", least_params: "參數最少", search: "搜尋",
-      single_request_max_tokens: "MAX TOKENS",
+      max_context_tokens: "MAX CONTEXT TOKENS",
       model_param_settings: "模型參數設定", context_size: "CONTEXT SIZE",
       model_alias: "模型別名", model_type: "模型類型", auto_detect: "自動偵測",
       max_token_count: "最大 Token 數", temperature: "溫度", repeat_penalty: "重複懲罰", ttl_seconds: "TTL（秒）",
@@ -4079,7 +4255,7 @@
       cold_cache: "冷快取限制（SSD 快取）", cold_cache_desc: "限制 SSD Prefix Cache 的最大磁碟占用。", cold_cache_help_title: "SSD 快取的作用", cold_cache_help_body: "將 Prefix Cache 資料持久化到本地 SSD，降低重複長前綴請求的預填充成本。最大值會根據目前磁碟可用空間動態調整。此快取受【啟用快取】總開關控制；如需停用，請關閉【啟用快取】。儲存設定並重啟服務後生效。",
       auto: "自動",
       cache: "快取", enable_cache: "啟用快取", ssd_cache_dir: "SSD 快取目錄",
-      active_kv_offload: "活躍 KV Cache 分層卸載", active_kv_offload_desc: "實驗性能力。為長邏輯 MAX TOKENS 保持熱 KV 視窗常駐，並將暫停中的活躍 KV Cache 寫入 SSD。", active_kv_offload_help_title: "實驗性快取駐留", active_kv_offload_help_body: "當序列槽位已滿時，可將暫停中的活躍 KV Cache 寫入本地 SSD，讓新的請求先繼續執行。", active_kv_offload_help_trigger: "開啟後不代表立即發生卸載。系統會在請求調度、KV 駐留壓力或請求暫停/恢復需要時自動觸發；空閒或記憶體壓力較低時可能保持 idle。", active_kv_offload_help_applicable: "適用：Full Attention dense/paged、TurboQuant packed Full Attention、MLA。", active_kv_offload_help_not_applicable: "不適用：GatedDelta/Linear、MTP speculative side cache。",
+      active_kv_offload: "活躍 KV Cache 分層卸載", active_kv_offload_desc: "實驗性能力。為長邏輯 MAX CONTEXT TOKENS 保持熱 KV 視窗常駐，並將暫停中的活躍 KV Cache 寫入 SSD。", active_kv_offload_help_title: "實驗性快取駐留", active_kv_offload_help_body: "當序列槽位已滿時，可將暫停中的活躍 KV Cache 寫入本地 SSD，讓新的請求先繼續執行。", active_kv_offload_help_trigger: "開啟後不代表立即發生卸載。系統會在請求調度、KV 駐留壓力或請求暫停/恢復需要時自動觸發；空閒或記憶體壓力較低時可能保持 idle。", active_kv_offload_help_applicable: "適用：Full Attention dense/paged、TurboQuant packed Full Attention、MLA。", active_kv_offload_help_not_applicable: "不適用：GatedDelta/Linear、MTP speculative side cache。",
       advanced: "進階", batch_processing: "批次處理",
       max_sequences: "最大序列數", max_sequences_desc: "平行處理的最大並行請求數。",
       max_models: "最大同時載入模型數", max_models_desc: "App 同時保持載入狀態的模型數量上限。達到上限後，新模型不會自動替換舊模型；請先手動卸載暫不使用的模型，再載入新模型。",
@@ -4092,8 +4268,8 @@
       params_saved: "模型參數已儲存。",
       params_reloaded: "模型參數已生效，模型已重新載入。",
       params_reload_deferred: "模型參數已儲存。該模型正在處理請求，將在空閒後自動重新載入。",
-      params_invalid_max_tokens: "MAX TOKENS 必須是正整數。",
-      params_max_tokens_exceeds_context: "MAX TOKENS 不能超過模型上下文視窗（{context}）。",
+      params_invalid_max_tokens: "MAX CONTEXT TOKENS 必須是正整數。",
+      params_max_tokens_exceeds_context: "MAX CONTEXT TOKENS 不能超過模型上下文視窗（{context}）。",
       params_invalid_mtp_draft_tokens: "MTP Draft Tokens 必須是正整數；留空則使用自動值。",
       restart_confirm: "部分設定需要重啟服務才能生效。是否立即重啟？",
       server_restarted: "服務已重啟成功。",
@@ -4257,7 +4433,11 @@
       mtp_badge_available: "MTP", mtp_badge_enabled: "MTP",
       mtp_badge_available_title: "互換性のある MTP ウェイトが見つかりました。", mtp_badge_enabled_title: "このモデルは MTP アクセラレーション付きでロードされています。",
       mtp_acceleration: "MTP アクセラレーション", mtp_weights: "MTP ウェイト", mtp_draft_tokens: "Draft Tokens",
-      prompt_lookup_acceleration: "PromptLookup アクセラレーション", prompt_lookup_cross_request: "App のリクエスト間で完了済み履歴を再利用", prompt_lookup_clear: "共有履歴を消去", prompt_lookup_cleared: "共有 PromptLookup 履歴を消去しました。",
+      mtp_help_label: "MTP アクセラレーションについて", mtp_help_title: "MTP アクセラレーションの仕組み", mtp_help_body: "MTP は補助予測ウェイトで複数の候補 Token を先に生成し、メインモデルで検証します。候補が採用されると生成ステップが減り、速度が向上する可能性があります。実際の効果はモデル、サンプリング設定、リクエスト内容によって異なります。",
+      mtp_help_requirement: "有効化の条件：現在のモデルと互換性のある MTP ウェイトがダウンロード済みであること。", mtp_help_draft_tokens: "DRAFT TOKENS は各ラウンドで提案する候補 Token の最大数を指定します。Auto は自動戦略を使用します。",
+      mtp_help_status_available: "現在の状態：互換性のある MTP ウェイトが見つかりました。", mtp_help_status_incompatible: "現在の状態：検出された MTP ウェイトはこのモデルと互換性がありません。", mtp_help_status_unavailable: "現在の状態：このモデルと互換性のある MTP ウェイトが見つかりません。",
+      prompt_lookup_acceleration: "繰り返しテキストの高速化", prompt_lookup_acceleration_help_label: "繰り返しテキストの高速化について", prompt_lookup_acceleration_help: "現在のリクエスト内で繰り返されるテキストから続きを予測します。内容に繰り返しがある場合、計算量を減らして生成を高速化できます。",
+      prompt_lookup_cross_request: "リクエスト間で再利用", prompt_lookup_cross_request_help_label: "リクエスト間の再利用について", prompt_lookup_cross_request_help: "先に「繰り返しテキストの高速化」を有効にする必要があります。有効にすると、完了したリクエストの照合履歴が保持され、後続の類似リクエストでも繰り返しテキストによる高速化を利用できます。", prompt_lookup_clear: "再利用履歴を消去", prompt_lookup_cleared: "再利用履歴を消去しました。", prompt_lookup_clear_failed: "再利用履歴を消去できませんでした。",
       mtp_status_available: "MTP 利用可", mtp_status_incompatible: "MTP ウェイトは非互換です", mtp_status_unavailable: "互換性のある MTP ウェイトはありません",
       model_exists_locally: "モデル \"{name}\" はローカルに既に存在します。",
       menu_start_needs_model: "デフォルトモデルが設定されていません。モデルをダウンロードしてデフォルトに設定すると、IronMLX がバックエンドを自動起動します。",
@@ -4296,7 +4476,7 @@
       err_backend_load_error: "バックエンドがモデルの読み込みを拒否しました：{detail}",
       err_model_required: "先にモデルを選択してください。",
       err_model_directory_not_found: "モデルディレクトリが存在しません。モデルを再ダウンロードするか、有効なローカルモデルを選択してください。",
-      err_invalid_max_cache_cap: "MAX TOKENS は 1 以上にしてください。",
+      err_invalid_max_cache_cap: "MAX CONTEXT TOKENS は 1 以上にしてください。",
       err_model_not_loaded: "このモデルは読み込まれていません。先に読み込んでから再試行してください。",
       err_model_not_registered: "このモデルは登録されていません。ダウンロード済みで、モデル管理一覧に表示されていることを確認してください。",
       err_all_models_pinned: "読み込み済みのモデルがすべてピン留めされており、自動で空きを確保できません。先にピンを解除してください。",
@@ -4306,7 +4486,7 @@
       err_model_reload_busy: "モデルはリクエストを処理中です。アイドル状態になってからバージョンを切り替えてください。",
       err_model_memory_limit_exceeded: "モデルメモリ制限に達しました。新しいモデルは読み込めません。使用していない読み込み済みモデルをアンロードするか、設定で「Memory Limit (Model Only)」を上げる/Auto にしてから再試行してください。",
       err_total_memory_limit_exceeded: "総メモリ制限に達しました。新しいモデルは読み込めません。使用していない読み込み済みモデルをアンロードするか、設定で「Memory Limit (Total)」を上げる/Auto にしてから再試行してください。",
-      err_kv_memory_budget_exceeded: "KV cache のメモリ予算が不足しています。長いコンテキストのモデルでは、キャッシュを有効にしたうえで Active KV Cache オフロードを有効にするか、最大シーケンス数 / MAX TOKENS を下げて再試行してください。",
+      err_kv_memory_budget_exceeded: "KV cache のメモリ予算が不足しています。長いコンテキストのモデルでは、キャッシュを有効にしたうえで Active KV Cache オフロードを有効にするか、最大シーケンス数 / MAX CONTEXT TOKENS を下げて再試行してください。",
       err_mtp_model_dir_required: "MTP アクセラレーションを有効にする前に、ローカル MTP ウェイトを選択してください。",
       err_mtp_base_model_not_found: "ベースモデルのディレクトリが存在しません。モデルを再ダウンロードしてから再試行してください。",
       err_mtp_model_not_found: "選択した MTP ウェイトはローカルで利用できません。MTP ウェイトを再ダウンロードするか、別のウェイトを選択してください。",
@@ -4315,7 +4495,7 @@
       err_mtp_invalid_config: "MTP ウェイトの config が無効です。再ダウンロードするか、別のウェイトを選択してください。",
       err_mtp_invalid_draft_tokens: "MTP Draft Tokens は有効な正の値にしてください。",
       err_mtp_incompatible: "選択した MTP ウェイトはこのベースモデルと互換性がありません。対応する MTP ウェイトを選択してから再試行してください。",
-      err_memory_budget_exceeded: "KV cache のメモリ予算が不足しています。現在の最大シーケンス数（{max_sequences}）とこのモデルの論理 MAX TOKENS（{max_cache_cap}）が常駐予算を超えます。長いコンテキストでは、キャッシュを有効にしたうえで Active KV Cache オフロードを有効にするか、最大シーケンス数 / MAX TOKENS を下げて再試行してください。",
+      err_memory_budget_exceeded: "KV cache のメモリ予算が不足しています。現在の最大シーケンス数（{max_sequences}）とこのモデルの論理 MAX CONTEXT TOKENS（{max_cache_cap}）が常駐予算を超えます。長いコンテキストでは、キャッシュを有効にしたうえで Active KV Cache オフロードを有効にするか、最大シーケンス数 / MAX CONTEXT TOKENS を下げて再試行してください。",
       err_cache_init_failed: "ローカル KV キャッシュの初期化に失敗しました：{detail}",
       err_model_path_not_found: "モデル \"{name}\" が見つかりません。HuggingFace または ModelScope からダウンロードするか、Repo ID を確認してください。",
       err_hf_api_init_failed: "HuggingFace ダウンローダーの初期化に失敗しました：{detail}",
@@ -4339,7 +4519,7 @@
       dl_from_hf: "HuggingFace からダウンロード", repo_id: "リポジトリ ID", optional: "（任意）", download: "ダウンロード",
       dl_from_ms: "ModelScope からダウンロード", ms_repo_id: "リポジトリ ID", ms_browse: "モデルを閲覧",
       search_hf: "HuggingFace を検索", hf_model_query: "モデル名またはリポジトリ ID", search_hf_placeholder: "モデル名または組織/モデルを入力", sort_by: "並び順", trending: "トレンド", most_downloads: "ダウンロード数順", recently_created: "最近作成順", recently_updated: "最近更新順", most_params: "パラメータ数順(多)", least_params: "パラメータ数順(少)", search: "検索",
-      single_request_max_tokens: "MAX TOKENS",
+      max_context_tokens: "MAX CONTEXT TOKENS",
       model_param_settings: "モデルパラメータ設定", context_size: "CONTEXT SIZE",
       model_alias: "モデルエイリアス", model_type: "モデルタイプ", auto_detect: "自動検出",
       max_token_count: "最大トークン数", temperature: "温度", repeat_penalty: "繰り返しペナルティ", ttl_seconds: "TTL（秒）",
@@ -4387,7 +4567,7 @@
       cold_cache: "コールドキャッシュ制限（SSDキャッシュ）", cold_cache_desc: "SSD Prefix Cache の最大ディスク使用量です。", cold_cache_help_title: "SSD キャッシュの役割", cold_cache_help_body: "Prefix Cache データをローカル SSD に永続化し、繰り返される長いプレフィックスのプリフィルコストを減らします。最大値は現在のディスク空き容量に応じて調整されます。このキャッシュはキャッシュ有効化スイッチに従います。無効にするにはキャッシュをオフにしてください。設定を保存し、サービスを再起動すると反映されます。",
       auto: "自動",
       cache: "キャッシュ", enable_cache: "キャッシュを有効化", ssd_cache_dir: "SSDキャッシュディレクトリ",
-      active_kv_offload: "Active KV Cache オフロード", active_kv_offload_desc: "実験的機能。長い論理 MAX TOKENS では熱い KV ウィンドウだけを常駐させ、一時停止中の Active KV Cache を SSD に書き出します。", active_kv_offload_help_title: "実験的キャッシュ常駐管理", active_kv_offload_help_body: "シーケンススロットが満杯の場合、一時停止中の Active KV Cache をローカル SSD に書き出し、新しいリクエストを先に実行できます。", active_kv_offload_help_trigger: "有効にしても、すぐにオフロードが発生するとは限りません。スケジューリング、KV 常駐圧力、またはリクエストの一時停止/復元が必要な場合に自動で発動します。アイドル時やメモリ圧力が低い場合は idle のままになることがあります。", active_kv_offload_help_applicable: "適用: Full Attention dense/paged、TurboQuant packed Full Attention、MLA。", active_kv_offload_help_not_applicable: "非対象: GatedDelta/Linear、MTP speculative side cache。",
+      active_kv_offload: "Active KV Cache オフロード", active_kv_offload_desc: "実験的機能。長い論理 MAX CONTEXT TOKENS では熱い KV ウィンドウだけを常駐させ、一時停止中の Active KV Cache を SSD に書き出します。", active_kv_offload_help_title: "実験的キャッシュ常駐管理", active_kv_offload_help_body: "シーケンススロットが満杯の場合、一時停止中の Active KV Cache をローカル SSD に書き出し、新しいリクエストを先に実行できます。", active_kv_offload_help_trigger: "有効にしても、すぐにオフロードが発生するとは限りません。スケジューリング、KV 常駐圧力、またはリクエストの一時停止/復元が必要な場合に自動で発動します。アイドル時やメモリ圧力が低い場合は idle のままになることがあります。", active_kv_offload_help_applicable: "適用: Full Attention dense/paged、TurboQuant packed Full Attention、MLA。", active_kv_offload_help_not_applicable: "非対象: GatedDelta/Linear、MTP speculative side cache。",
       advanced: "詳細設定", batch_processing: "バッチ処理",
       max_sequences: "最大シーケンス数", max_sequences_desc: "並列処理の最大同時リクエスト数。",
       max_models: "最大同時ロードモデル数", max_models_desc: "App が同時に読み込み済みとして保持するモデル数の上限。上限に達すると新しいモデルの読み込みは拒否され、既存の読み込み済みモデルは自動的に置き換えられません。不要なモデルを手動でアンロードしてから読み込んでください。",
@@ -4400,8 +4580,8 @@
       params_saved: "モデルパラメータが保存されました。",
       params_reloaded: "モデルパラメータが適用され、モデルを再読み込みしました。",
       params_reload_deferred: "モデルパラメータを保存しました。モデルはリクエスト処理中のため、アイドル状態になった後に自動で再読み込みします。",
-      params_invalid_max_tokens: "MAX TOKENS は正の整数にしてください。",
-      params_max_tokens_exceeds_context: "MAX TOKENS はモデルのコンテキスト長（{context}）を超えられません。",
+      params_invalid_max_tokens: "MAX CONTEXT TOKENS は正の整数にしてください。",
+      params_max_tokens_exceeds_context: "MAX CONTEXT TOKENS はモデルのコンテキスト長（{context}）を超えられません。",
       params_invalid_mtp_draft_tokens: "MTP Draft Tokens は正の整数にしてください。空欄の場合は自動値を使用します。",
       restart_confirm: "一部の設定はサーバーの再起動が必要です。今すぐ再起動しますか？",
       server_restarted: "サーバーが正常に再起動されました。",
@@ -4565,7 +4745,11 @@
       mtp_badge_available: "MTP", mtp_badge_enabled: "MTP",
       mtp_badge_available_title: "호환되는 MTP 가중치를 찾았습니다.", mtp_badge_enabled_title: "이 모델은 MTP 가속으로 로드되었습니다.",
       mtp_acceleration: "MTP 가속", mtp_weights: "MTP 가중치", mtp_draft_tokens: "Draft Tokens",
-      prompt_lookup_acceleration: "PromptLookup 가속", prompt_lookup_cross_request: "App 요청 간 완료된 기록 재사용", prompt_lookup_clear: "공유 기록 지우기", prompt_lookup_cleared: "공유 PromptLookup 기록을 지웠습니다.",
+      mtp_help_label: "MTP 가속 정보", mtp_help_title: "MTP 가속 작동 방식", mtp_help_body: "MTP는 보조 예측 가중치로 여러 후보 Token을 먼저 생성한 뒤 주 모델이 이를 검증합니다. 후보가 채택되면 생성 단계를 줄이고 속도를 높일 수 있으며, 실제 효과는 모델, 샘플링 설정 및 요청 내용에 따라 달라집니다.",
+      mtp_help_requirement: "활성화 조건: 현재 모델과 호환되는 MTP 가중치를 다운로드해야 합니다.", mtp_help_draft_tokens: "DRAFT TOKENS는 각 라운드에서 제안할 후보 Token의 최대 수를 지정하며, Auto는 자동 전략을 사용합니다.",
+      mtp_help_status_available: "현재 상태: 호환되는 MTP 가중치를 찾았습니다.", mtp_help_status_incompatible: "현재 상태: 감지된 MTP 가중치가 이 모델과 호환되지 않습니다.", mtp_help_status_unavailable: "현재 상태: 이 모델과 호환되는 MTP 가중치를 찾지 못했습니다.",
+      prompt_lookup_acceleration: "반복 텍스트 가속", prompt_lookup_acceleration_help_label: "반복 텍스트 가속 정보", prompt_lookup_acceleration_help: "현재 요청에서 반복되는 텍스트를 이용해 다음 내용을 예측합니다. 내용이 반복되면 연산을 줄이고 생성 속도를 높일 수 있습니다.",
+      prompt_lookup_cross_request: "요청 간 재사용", prompt_lookup_cross_request_help_label: "요청 간 재사용 정보", prompt_lookup_cross_request_help: "먼저 ‘반복 텍스트 가속’을 활성화해야 합니다. 활성화하면 완료된 요청의 일치 기록을 보관하여 이후의 유사한 요청에서도 반복 텍스트 가속을 사용할 수 있습니다.", prompt_lookup_clear: "재사용 기록 지우기", prompt_lookup_cleared: "재사용 기록을 지웠습니다.", prompt_lookup_clear_failed: "재사용 기록을 지우지 못했습니다.",
       mtp_status_available: "MTP 사용 가능", mtp_status_incompatible: "MTP 가중치가 호환되지 않습니다", mtp_status_unavailable: "호환되는 MTP 가중치 없음",
       model_exists_locally: "모델 \"{name}\"이(가) 이미 로컬에 존재합니다.",
       menu_start_needs_model: "기본 모델이 설정되어 있지 않습니다. 모델을 다운로드하고 기본값으로 선택하면 IronMLX가 백엔드를 자동으로 시작합니다.",
@@ -4604,7 +4788,7 @@
       err_backend_load_error: "백엔드가 모델 로드를 거부했습니다: {detail}",
       err_model_required: "먼저 모델을 선택하세요.",
       err_model_directory_not_found: "모델 디렉터리가 존재하지 않습니다. 모델을 다시 다운로드하거나 유효한 로컬 모델을 선택하세요.",
-      err_invalid_max_cache_cap: "MAX TOKENS는 1 이상이어야 합니다.",
+      err_invalid_max_cache_cap: "MAX CONTEXT TOKENS는 1 이상이어야 합니다.",
       err_model_not_loaded: "이 모델은 로드되어 있지 않습니다. 먼저 로드한 뒤 다시 시도하세요.",
       err_model_not_registered: "이 모델은 등록되어 있지 않습니다. 모델이 다운로드되어 있고 모델 관리 목록에 표시되는지 확인하세요.",
       err_all_models_pinned: "로드된 모든 모델이 고정되어 자동으로 공간을 확보할 수 없습니다. 먼저 고정을 해제해 주세요.",
@@ -4614,7 +4798,7 @@
       err_model_reload_busy: "모델이 요청을 처리 중입니다. 유휴 상태가 된 후 버전을 전환하세요.",
       err_model_memory_limit_exceeded: "모델 메모리 제한에 도달했습니다. 새 모델을 로드할 수 없습니다. 사용하지 않는 로드된 모델을 언로드하거나 설정에서 Memory Limit (Model Only)를 높이거나 Auto로 전환한 뒤 다시 시도하세요.",
       err_total_memory_limit_exceeded: "총 메모리 제한에 도달했습니다. 새 모델을 로드할 수 없습니다. 사용하지 않는 로드된 모델을 언로드하거나 설정에서 Memory Limit (Total)를 높이거나 Auto로 전환한 뒤 다시 시도하세요.",
-      err_kv_memory_budget_exceeded: "KV cache 메모리 예산이 부족합니다. 긴 컨텍스트 모델은 캐시를 켠 상태에서 Active KV Cache 오프로드를 활성화하거나 Max Sequences / MAX TOKENS를 낮춘 뒤 다시 시도하세요.",
+      err_kv_memory_budget_exceeded: "KV cache 메모리 예산이 부족합니다. 긴 컨텍스트 모델은 캐시를 켠 상태에서 Active KV Cache 오프로드를 활성화하거나 Max Sequences / MAX CONTEXT TOKENS를 낮춘 뒤 다시 시도하세요.",
       err_mtp_model_dir_required: "MTP 가속을 켜기 전에 로컬 MTP 가중치를 선택하세요.",
       err_mtp_base_model_not_found: "기본 모델 디렉터리가 존재하지 않습니다. 모델을 다시 다운로드한 뒤 시도하세요.",
       err_mtp_model_not_found: "선택한 MTP 가중치를 로컬에서 사용할 수 없습니다. MTP 가중치를 다시 다운로드하거나 다른 가중치를 선택하세요.",
@@ -4623,7 +4807,7 @@
       err_mtp_invalid_config: "MTP 가중치 config가 유효하지 않습니다. 다시 다운로드하거나 다른 가중치를 선택하세요.",
       err_mtp_invalid_draft_tokens: "MTP Draft Tokens는 유효한 양수여야 합니다.",
       err_mtp_incompatible: "선택한 MTP 가중치는 이 기본 모델과 호환되지 않습니다. 일치하는 MTP 가중치를 선택한 뒤 다시 시도하세요.",
-      err_memory_budget_exceeded: "KV cache 메모리 예산이 부족합니다. 현재 최대 시퀀스 수({max_sequences})와 이 모델의 논리 MAX TOKENS({max_cache_cap})가 상주 예산을 초과합니다. 긴 컨텍스트에서는 캐시를 켠 상태에서 Active KV Cache 오프로드를 활성화하거나 Max Sequences / MAX TOKENS를 낮춘 뒤 다시 시도하세요.",
+      err_memory_budget_exceeded: "KV cache 메모리 예산이 부족합니다. 현재 최대 시퀀스 수({max_sequences})와 이 모델의 논리 MAX CONTEXT TOKENS({max_cache_cap})가 상주 예산을 초과합니다. 긴 컨텍스트에서는 캐시를 켠 상태에서 Active KV Cache 오프로드를 활성화하거나 Max Sequences / MAX CONTEXT TOKENS를 낮춘 뒤 다시 시도하세요.",
       err_cache_init_failed: "로컬 KV 캐시 초기화에 실패했습니다: {detail}",
       err_model_path_not_found: "모델 \"{name}\"을 찾을 수 없습니다. HuggingFace 또는 ModelScope에서 먼저 다운로드하거나 Repo ID를 확인하세요.",
       err_hf_api_init_failed: "HuggingFace 다운로더 초기화에 실패했습니다: {detail}",
@@ -4647,7 +4831,7 @@
       dl_from_hf: "HuggingFace에서 다운로드", repo_id: "저장소 ID", optional: "(선택 사항)", download: "다운로드",
       dl_from_ms: "ModelScope에서 다운로드", ms_repo_id: "저장소 ID", ms_browse: "모델 찾아보기",
       search_hf: "HuggingFace 검색", hf_model_query: "모델 이름 또는 저장소 ID", search_hf_placeholder: "모델 이름 또는 조직/모델 입력", sort_by: "정렬 방식", trending: "인기 트렌드", most_downloads: "다운로드순", recently_created: "최근 생성순", recently_updated: "최근 업데이트순", most_params: "매개변수 많은순", least_params: "매개변수 적은순", search: "검색",
-      single_request_max_tokens: "MAX TOKENS",
+      max_context_tokens: "MAX CONTEXT TOKENS",
       model_param_settings: "모델 매개변수 설정", context_size: "CONTEXT SIZE",
       model_alias: "모델 별칭", model_type: "모델 유형", auto_detect: "자동 감지",
       max_token_count: "최대 토큰 수", temperature: "온도", repeat_penalty: "반복 페널티", ttl_seconds: "TTL (초)",
@@ -4695,7 +4879,7 @@
       cold_cache: "콜드 캐시 제한 (SSD 캐시)", cold_cache_desc: "SSD Prefix Cache의 최대 디스크 사용량입니다.", cold_cache_help_title: "SSD 캐시 역할", cold_cache_help_body: "Prefix Cache 데이터를 로컬 SSD에 영구 저장해 반복되는 긴 프리픽스 요청의 프리필 비용을 줄입니다. 최대값은 현재 디스크 여유 공간에 따라 조정됩니다. 이 캐시는 캐시 활성화 스위치를 따르며, 비활성화하려면 캐시 활성화를 끄세요. 설정을 저장하고 서비스를 재시작하면 적용됩니다.",
       auto: "자동",
       cache: "캐시", enable_cache: "캐시 활성화", ssd_cache_dir: "SSD 캐시 디렉토리",
-      active_kv_offload: "Active KV Cache 오프로드", active_kv_offload_desc: "실험적 기능입니다. 긴 논리 MAX TOKENS에서는 뜨거운 KV 창만 상주시켜 두고, 일시 중지된 Active KV Cache를 SSD에 기록합니다.", active_kv_offload_help_title: "실험적 캐시 상주 관리", active_kv_offload_help_body: "시퀀스 슬롯이 가득 찼을 때 일시 중지된 Active KV Cache를 로컬 SSD에 기록하여 새 요청을 먼저 실행할 수 있습니다.", active_kv_offload_help_trigger: "켜도 즉시 오프로드가 발생하는 것은 아닙니다. 스케줄링, KV 상주 압력 또는 요청 일시 중지/복원이 필요할 때 시스템이 자동으로 트리거합니다. 유휴 상태이거나 메모리 압력이 낮으면 idle 상태로 유지될 수 있습니다.", active_kv_offload_help_applicable: "적용: Full Attention dense/paged, TurboQuant packed Full Attention, MLA.", active_kv_offload_help_not_applicable: "비대상: GatedDelta/Linear, MTP speculative side cache.",
+      active_kv_offload: "Active KV Cache 오프로드", active_kv_offload_desc: "실험적 기능입니다. 긴 논리 MAX CONTEXT TOKENS에서는 뜨거운 KV 창만 상주시켜 두고, 일시 중지된 Active KV Cache를 SSD에 기록합니다.", active_kv_offload_help_title: "실험적 캐시 상주 관리", active_kv_offload_help_body: "시퀀스 슬롯이 가득 찼을 때 일시 중지된 Active KV Cache를 로컬 SSD에 기록하여 새 요청을 먼저 실행할 수 있습니다.", active_kv_offload_help_trigger: "켜도 즉시 오프로드가 발생하는 것은 아닙니다. 스케줄링, KV 상주 압력 또는 요청 일시 중지/복원이 필요할 때 시스템이 자동으로 트리거합니다. 유휴 상태이거나 메모리 압력이 낮으면 idle 상태로 유지될 수 있습니다.", active_kv_offload_help_applicable: "적용: Full Attention dense/paged, TurboQuant packed Full Attention, MLA.", active_kv_offload_help_not_applicable: "비대상: GatedDelta/Linear, MTP speculative side cache.",
       advanced: "고급", batch_processing: "배치 처리",
       max_sequences: "최대 시퀀스 수", max_sequences_desc: "병렬 처리의 최대 동시 요청 수.",
       max_models: "최대 동시 로드 모델 수", max_models_desc: "App 이 동시에 로드 상태로 유지하는 모델 수의 상한입니다. 상한에 도달하면 새 모델 로드는 거부되고 기존 로드 모델은 자동으로 교체되지 않습니다. 사용하지 않는 모델을 수동으로 언로드한 뒤 다시 로드하세요.",
@@ -4708,8 +4892,8 @@
       params_saved: "모델 매개변수가 저장되었습니다.",
       params_reloaded: "모델 매개변수가 적용되었고 모델을 다시 로드했습니다.",
       params_reload_deferred: "모델 매개변수가 저장되었습니다. 모델이 요청을 처리 중이므로 유휴 상태가 되면 자동으로 다시 로드됩니다.",
-      params_invalid_max_tokens: "MAX TOKENS는 양의 정수여야 합니다.",
-      params_max_tokens_exceeds_context: "MAX TOKENS는 모델 컨텍스트 창({context})을 초과할 수 없습니다.",
+      params_invalid_max_tokens: "MAX CONTEXT TOKENS는 양의 정수여야 합니다.",
+      params_max_tokens_exceeds_context: "MAX CONTEXT TOKENS는 모델 컨텍스트 창({context})을 초과할 수 없습니다.",
       params_invalid_mtp_draft_tokens: "MTP Draft Tokens는 양의 정수여야 합니다. 비워 두면 자동값을 사용합니다.",
       restart_confirm: "일부 설정은 서버를 다시 시작해야 적용됩니다. 지금 다시 시작하시겠습니까?",
       server_restarted: "서버가 성공적으로 다시 시작되었습니다.",
@@ -4786,6 +4970,10 @@
       const key = el.dataset.i18nPlaceholder;
       if (dict[key]) el.setAttribute('placeholder', dict[key]);
     });
+    document.querySelectorAll('[data-i18n-aria-label]').forEach(el => {
+      const key = el.dataset.i18nAriaLabel;
+      if (dict[key]) el.setAttribute('aria-label', dict[key]);
+    });
     // Settings subtitle with inline badge
     const sub = document.getElementById('settings-subtitle');
     if (sub && dict.settings_subtitle_html) {
@@ -4802,25 +4990,28 @@
     const i18nLang = LANG_MAP[configLang] || configLang;
     currentLang = i18nLang;
     applyI18n(i18nLang);
-    // Sync dropdown
-    const sel = document.getElementById('lang-select');
-    if (sel) sel.value = i18nLang;
+    // Keep the onboarding and Settings language controls in sync.
+    ['lang-select', 'onboarding-lang-select'].forEach(function(id) {
+      const select = document.getElementById(id);
+      if (select) select.value = i18nLang;
+    });
     // Re-render model list to update action buttons text
     syncModelList();
     renderRuntimeModels(window.__RUNTIME_MODELS__ || []);
   }
 
-  // Language select change handler
-  document.getElementById('lang-select').addEventListener('change', function() {
-    const val = this.value;
-    currentLang = val;
-    applyI18n(val);
-    syncModelList();
-    renderRuntimeModels(window.__RUNTIME_MODELS__ || []);
-    // Send to Rust via WKScriptMessageHandler
+  function selectInterfaceLanguage(value) {
+    setLanguage(value);
     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.setLanguage) {
-      window.webkit.messageHandlers.setLanguage.postMessage(val);
+      window.webkit.messageHandlers.setLanguage.postMessage(value);
     }
+  }
+
+  // Language select change handlers
+  ['lang-select', 'onboarding-lang-select'].forEach(function(id) {
+    document.getElementById(id).addEventListener('change', function() {
+      selectInterfaceLanguage(this.value);
+    });
   });
 
   // Model params modal
@@ -5264,7 +5455,7 @@
         text.match(/\bcap=(\d+)/i) ||
         [])[1] || '--';
       return (dict.err_memory_budget_exceeded ||
-        'KV cache memory budget is insufficient. Current Max Sequences ({max_sequences}) and this model\'s logical MAX TOKENS ({max_cache_cap}) exceed the resident budget. Enable Active KV Cache Offload with cache enabled for long contexts, or lower Max Sequences / MAX TOKENS and retry.')
+        'KV cache memory budget is insufficient. Current Max Sequences ({max_sequences}) and this model\'s logical MAX CONTEXT TOKENS ({max_cache_cap}) exceed the resident budget. Enable Active KV Cache Offload with cache enabled for long contexts, or lower Max Sequences / MAX CONTEXT TOKENS and retry.')
         .replace('{max_sequences}', maxSequences)
         .replace('{max_cache_cap}', maxCacheCap);
     }
@@ -5357,6 +5548,7 @@
     const checkbox = document.getElementById('modal-mtp-enabled');
     const draft = document.getElementById('modal-mtp-draft-tokens');
     const status = document.getElementById('modal-mtp-status');
+    const helpStatus = document.getElementById('modal-mtp-help-status');
     select.innerHTML = '';
     candidates.forEach(c => {
       const opt = document.createElement('option');
@@ -5372,11 +5564,16 @@
     if (saved.mtp_model_id && hasCandidates) select.value = saved.mtp_model_id;
     else if (hasCandidates) select.value = candidates[0].id;
     draft.value = saved.mtp_draft_tokens || '';
-    status.textContent = hasCandidates
-      ? (dict.mtp_status_available || 'MTP available')
-      : (mtp.status === 'incompatible'
-        ? (dict.mtp_status_incompatible || 'MTP weights are incompatible')
-        : (dict.mtp_status_unavailable || 'No compatible MTP weights'));
+    const isIncompatible = !hasCandidates && mtp.status === 'incompatible';
+    const statusKey = isIncompatible ? 'mtp_status_incompatible' : 'mtp_status_unavailable';
+    const helpStatusKey = hasCandidates
+      ? 'mtp_help_status_available'
+      : (isIncompatible ? 'mtp_help_status_incompatible' : 'mtp_help_status_unavailable');
+    status.hidden = hasCandidates;
+    status.dataset.i18n = statusKey;
+    status.textContent = hasCandidates ? '' : (dict[statusKey] || 'No compatible MTP weights');
+    helpStatus.dataset.i18n = helpStatusKey;
+    helpStatus.textContent = dict[helpStatusKey] || 'Current status unavailable.';
   }
 
   function renderPromptLookupParams(saved) {
@@ -5411,13 +5608,13 @@
     const maxTokensText = document.getElementById('modal-max-tokens').value;
     const maxTokens = parsePositiveInteger(maxTokensText);
     if (!maxTokens) {
-      showToast(dict.params_invalid_max_tokens || 'MAX TOKENS must be a positive integer.', 'warn');
+      showToast(dict.params_invalid_max_tokens || 'MAX CONTEXT TOKENS must be a positive integer.', 'warn');
       return;
     }
     const contextWindow = parsePositiveInteger(contextText);
     if (!isBlockDiffusion && contextWindow && maxTokens > contextWindow) {
       showToast(
-        (dict.params_max_tokens_exceeds_context || 'MAX TOKENS cannot exceed the model context window ({context}).')
+        (dict.params_max_tokens_exceeds_context || 'MAX CONTEXT TOKENS cannot exceed the model context window ({context}).')
           .replace('{context}', contextWindow),
         'warn'
       );
@@ -8950,9 +9147,9 @@
       } else if (path === '/admin/api/prompt-lookup/clear') {
         const result = JSON.parse(jsonStr || '{}');
         if (result.success) {
-          showToast(dict.prompt_lookup_cleared || 'Shared PromptLookup history cleared.', 'success');
+          showToast(dict.prompt_lookup_cleared || 'Reuse history cleared.', 'success');
         } else {
-          showToast(result.error || 'Failed to clear shared PromptLookup history.', 'warn');
+          showToast(result.error || dict.prompt_lookup_clear_failed || 'Failed to clear reuse history.', 'warn');
         }
       } else if (path === '/admin/api/models/load') {
         onModelLoadResult(jsonStr);
@@ -9399,15 +9596,30 @@
       }
 
       trigger.addEventListener('mouseenter', showTooltip);
-      trigger.addEventListener('mouseleave', hideTooltip);
+      trigger.addEventListener('mouseleave', function() {
+        if (document.activeElement !== trigger) hideTooltip();
+      });
       trigger.addEventListener('focus', showTooltip);
       trigger.addEventListener('blur', hideTooltip);
+      trigger.addEventListener('click', showTooltip);
+      trigger.addEventListener('keydown', function(event) {
+        if (event.key === 'Escape') {
+          hideTooltip();
+          trigger.blur();
+        }
+      });
       window.addEventListener('resize', function() {
         if (wrapper.classList.contains('is-open')) positionTooltip();
       });
       const content = document.querySelector('.content');
       if (content) {
         content.addEventListener('scroll', function() {
+          if (wrapper.classList.contains('is-open')) positionTooltip();
+        }, { passive: true });
+      }
+      const modal = wrapper.closest('.modal');
+      if (modal) {
+        modal.addEventListener('scroll', function() {
           if (wrapper.classList.contains('is-open')) positionTooltip();
         }, { passive: true });
       }

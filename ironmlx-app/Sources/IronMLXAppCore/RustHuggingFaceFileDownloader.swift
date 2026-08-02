@@ -323,6 +323,7 @@ private struct RustHuggingFaceTransferCommand: Sendable {
         processBox: RustTransferProcessBox,
         progress: @escaping @Sendable (Int64) async -> Void
     ) throws -> RustHuggingFaceTransferResult {
+        try BackendBinaryResolver.validateBundledRuntimeIfNeeded(for: executableURL)
         let process = Process()
         let standardOutput = Pipe()
         let standardError = Pipe()
@@ -339,14 +340,12 @@ private struct RustHuggingFaceTransferCommand: Sendable {
             "--parallelism", String(parallelism),
             "--chunk-size", String(chunkSize),
         ]
-        if executableURL.path == "/usr/bin/env" {
-            process.executableURL = executableURL
-            process.arguments = ["ironmlx"] + commandArguments
-        } else {
-            process.executableURL = executableURL
-            process.arguments = commandArguments
-        }
-        var environment = ProcessInfo.processInfo.environment
+        process.executableURL = executableURL
+        process.arguments = BackendBinaryResolver.helperArguments(
+            commandArguments,
+            executableURL: executableURL
+        )
+        var environment = BundledChildProcessEnvironment.sanitized()
         if let token {
             environment["HF_TOKEN"] = token
         } else {
