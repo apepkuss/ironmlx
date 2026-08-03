@@ -8,6 +8,7 @@ readonly REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 readonly APP_BUNDLE="${1:-$REPO_ROOT/dist/IronMLX.app}"
 readonly EXPECTED_ARCHITECTURE="arm64"
 readonly EXPECTED_MACOS_VERSION="26.2"
+readonly EXPECTED_PRODUCT_VERSION="$(tr -d '[:space:]' < "$REPO_ROOT/VERSION")"
 
 fail() {
   echo "error: $*" >&2
@@ -56,14 +57,37 @@ for file in \
   Contents/Resources/menubar-icon.png \
   Contents/Resources/menubar-icon@2x.png \
   Contents/Resources/logo.png \
-  Contents/Resources/sidebar-logo@2x.png; do
+  Contents/Resources/sidebar-logo@2x.png \
+  Contents/Resources/Legal/THIRD_PARTY_NOTICES.md \
+  Contents/Resources/Legal/third-party-inventory.json; do
   require_file "$APP_BUNDLE/$file"
 done
+[ -d "$APP_BUNDLE/Contents/Resources/Legal/THIRD_PARTY_LICENSES" ] || \
+  fail "bundled third-party license directory is missing"
+diff -q \
+  "$REPO_ROOT/THIRD_PARTY_NOTICES.md" \
+  "$APP_BUNDLE/Contents/Resources/Legal/THIRD_PARTY_NOTICES.md" >/dev/null || \
+  fail "bundled third-party notices differ from the verified source material"
+diff -q \
+  "$REPO_ROOT/third-party-inventory.json" \
+  "$APP_BUNDLE/Contents/Resources/Legal/third-party-inventory.json" >/dev/null || \
+  fail "bundled third-party inventory differs from the verified source material"
+diff -qr \
+  "$REPO_ROOT/THIRD_PARTY_LICENSES" \
+  "$APP_BUNDLE/Contents/Resources/Legal/THIRD_PARTY_LICENSES" >/dev/null || \
+  fail "bundled third-party license texts differ from the verified source material"
 
 [ "$(plutil -extract CFBundleIdentifier raw "$APP_BUNDLE/Contents/Info.plist")" = "com.ironmlx.app" ] || \
   fail "unexpected CFBundleIdentifier"
 [ "$(plutil -extract LSMinimumSystemVersion raw "$APP_BUNDLE/Contents/Info.plist")" = "$EXPECTED_MACOS_VERSION" ] || \
   fail "Info.plist minimum macOS must be $EXPECTED_MACOS_VERSION"
+[ "$(plutil -extract CFBundleShortVersionString raw "$APP_BUNDLE/Contents/Info.plist")" = \
+  "$EXPECTED_PRODUCT_VERSION" ] || fail "Info.plist product version must be $EXPECTED_PRODUCT_VERSION"
+
+"$APP_BUNDLE/Contents/Helpers/ironmlx" --version | \
+  grep -Fxq "ironmlx $EXPECTED_PRODUCT_VERSION" || fail "ironmlx helper version mismatch"
+"$APP_BUNDLE/Contents/Helpers/iron-bench" --version | \
+  grep -Fxq "iron-bench $EXPECTED_PRODUCT_VERSION" || fail "iron-bench helper version mismatch"
 
 verify_macho "IronMLX App executable" "$APP_BUNDLE/Contents/MacOS/IronMLX"
 verify_macho "IronMLX backend helper" "$APP_BUNDLE/Contents/Helpers/ironmlx"

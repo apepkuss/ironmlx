@@ -1,0 +1,102 @@
+{
+  "dependencies": [
+    {
+      "component": "MLX C++ with bundled JACCL",
+      "license": "MIT",
+      "license_file": "native-mlx-mit.txt",
+      "license_sha256": "ccfab7ccb2ea306f71531c8ca77bb55507606cd90768b1e32b8b52ab5b48cf01",
+      "license_source": "mlx:LICENSE",
+      "repository": "https://github.com/apepkuss/mlx.git",
+      "revision": "16dea39b545cd641310fdcfdfc6fc62bb141ddd7",
+      "source_verification": {
+        "commit": "16dea39b545cd641310fdcfdfc6fc62bb141ddd7",
+        "source": "mlx:.",
+        "type": "git"
+      },
+      "upstream_repository": "https://github.com/ml-explore/mlx.git",
+      "upstream_revision": "973e27f82ffe68dbd626cda31ba34997045d1eb7"
+    },
+    {
+      "component": "metal-cpp",
+      "license": "Apache-2.0",
+      "license_file": "native-metal-cpp-apache-2.0.txt",
+      "license_sha256": "f4e92c7fe2aa066e294c0da9d08683dc9fb741ee6e6debbfad99a0c96e07c1f2",
+      "license_source": "mlx-build:_deps/metal_cpp-src/LICENSE.txt",
+      "repository": "https://developer.apple.com/metal/cpp/",
+      "revision": "metal-cpp_26.zip",
+      "source_verification": {
+        "sha256": "4df3c078b9aadcb516212e9cb03004cbc5ce9a3e9c068fa3144d021db585a3a4",
+        "source": "mlx-build:_deps/metal_cpp-subbuild/metal_cpp-populate-prefix/src/metal-cpp_26.zip",
+        "type": "archive"
+      }
+    },
+    {
+      "component": "fmt",
+      "license": "MIT",
+      "license_file": "native-fmt-mit.txt",
+      "license_sha256": "07580f2a3b35709ce703d523f447b242f6dfec7582a8c0df102c7fa2849375f8",
+      "license_source": "mlx-build:_deps/fmt-src/LICENSE",
+      "repository": "https://github.com/fmtlib/fmt.git",
+      "revision": "12.1.0",
+      "source_verification": {
+        "commit": "407c905e45ad75fc29bf0f9bb7c5c2fd3475976f",
+        "source": "mlx-build:_deps/fmt-src",
+        "type": "git"
+      }
+    },
+    {
+      "component": "nlohmann/json",
+      "license": "MIT",
+      "license_file": "native-nlohmann-json-mit.txt",
+      "license_sha256": "86b998c792894ccb911a1cb7994f7a9652894e7a094c0b5e45be2f553f45cf14",
+      "license_source": "mlx-build:_deps/json-src/LICENSE.MIT",
+      "repository": "https://github.com/nlohmann/json.git",
+      "revision": "3.11.3",
+      "source_verification": {
+        "sha256": "d6c65aca6b1ed68e7a182f4757257b107ae403032760ed6ef121c9d55e81757d",
+        "source": "mlx-build:_deps/json-subbuild/json-populate-prefix/src/json.tar.xz",
+        "type": "archive"
+      }
+    },
+    {
+      "component": "gguflib",
+      "license": "MIT",
+      "license_file": "native-gguflib-mit.txt",
+      "license_sha256": "7cce16d2bf2e2ce6a7d70b5ecd5fb43c6409a97aa0750ff75c11823e6e8c9d05",
+      "license_source": "mlx-build:_deps/gguflib-src/LICENSE",
+      "repository": "https://github.com/antirez/gguf-tools.git",
+      "revision": "8fa6eb65236618e28fd7710a0fba565f7faa1848",
+      "source_verification": {
+        "commit": "8fa6eb65236618e28fd7710a0fba565f7faa1848",
+        "source": "mlx-build:_deps/gguflib-src",
+        "type": "git"
+      }
+    }
+  ],
+  "excluded_system_components": [
+    {
+      "components": [
+        "Accelerate.framework",
+        "AppKit.framework",
+        "CFNetwork.framework",
+        "CoreFoundation.framework",
+        "CryptoKit.framework",
+        "Foundation.framework",
+        "Metal.framework",
+        "MetalPerformanceShaders.framework",
+        "MetalPerformanceShadersGraph.framework",
+        "QuartzCore.framework",
+        "Security.framework",
+        "SystemConfiguration.framework",
+        "WebKit.framework",
+        "Apple Swift runtime libraries under /usr/lib/swift",
+        "libSystem.B.dylib",
+        "libc++.1.dylib",
+        "libiconv.2.dylib",
+        "libobjc.A.dylib"
+      ],
+      "reason": "Provided by macOS and not redistributed inside IronMLX.app"
+    }
+  ],
+  "schema_version": 1
+}

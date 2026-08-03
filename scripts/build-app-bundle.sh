@@ -33,6 +33,8 @@ for tool in cargo cmake codesign git iconutil lipo plutil sips swift xcrun; do
   command -v "$tool" >/dev/null || fail "required build tool is missing: $tool"
 done
 
+"$SCRIPT_DIR/verify-version-consistency.sh"
+
 [ "$(uname -s)" = "Darwin" ] || fail "IronMLX.app can only be built on macOS"
 [ "$(uname -m)" = "$ARCHITECTURE" ] || fail "IronMLX.app requires an Apple Silicon build host"
 [ -d "$MLX_SOURCE/.git" ] || git -C "$MLX_SOURCE" rev-parse --git-dir >/dev/null 2>&1 || \
@@ -95,6 +97,11 @@ if grep -Fq 'MLX_METAL_NO_NAX' "$mlx_flags_file"; then
   fail "MLX was compiled without required NAX Metal kernels"
 fi
 
+echo "==> Verify tracked third-party dependency materials"
+MLX_SRC="$MLX_SOURCE" \
+  MLX_BUILD_DIR="$BUILD_ROOT/mlx-build" \
+  "$SCRIPT_DIR/verify-third-party-materials.sh"
+
 echo "==> Build Rust helpers (Release, isolated target directory)"
 env \
   MLX_DIR="$BUILD_ROOT/mlx-install" \
@@ -117,7 +124,10 @@ env MACOSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET" \
 
 echo "==> Assemble IronMLX.app"
 rm -rf "$APP_BUNDLE"
-mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Helpers" "$APP_BUNDLE/Contents/Resources"
+mkdir -p \
+  "$APP_BUNDLE/Contents/MacOS" \
+  "$APP_BUNDLE/Contents/Helpers" \
+  "$APP_BUNDLE/Contents/Resources/Legal"
 cp "$PACKAGING_DIR/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
 cp "$BUILD_ROOT/swift-build/release/ironmlx-app" "$APP_BUNDLE/Contents/MacOS/IronMLX"
 cp "$BUILD_ROOT/cargo-target/release/ironmlx" "$APP_BUNDLE/Contents/Helpers/ironmlx"
@@ -126,6 +136,9 @@ cp "$BUILD_ROOT/mlx-install/lib/mlx.metallib" "$APP_BUNDLE/Contents/Resources/ml
 for resource in dashboard2.html logo.png menubar-icon.png menubar-icon@2x.png sidebar-logo@2x.png; do
   cp "$APP_SOURCE_DIR/Sources/IronMLXAppCore/Resources/$resource" "$APP_BUNDLE/Contents/Resources/$resource"
 done
+cp "$REPO_ROOT/THIRD_PARTY_NOTICES.md" "$APP_BUNDLE/Contents/Resources/Legal/"
+cp "$REPO_ROOT/third-party-inventory.json" "$APP_BUNDLE/Contents/Resources/Legal/"
+cp -R "$REPO_ROOT/THIRD_PARTY_LICENSES" "$APP_BUNDLE/Contents/Resources/Legal/"
 
 iconset="$BUILD_ROOT/AppIcon.iconset"
 mkdir -p "$iconset"

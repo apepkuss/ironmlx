@@ -3,8 +3,8 @@ name = "iron-bench"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
 description = "Head-to-head HTTP benchmark harness for OpenAI-compatible LLM endpoints"
+publish = false
 
 [[bin]]
 name = "iron-bench"

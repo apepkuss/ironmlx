@@ -3,8 +3,8 @@ name = "ironmlx"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
 description = "Local LLM inference on Apple Silicon — Rust runtime backed by cxx-mlx"
+publish = false
 
 [[bin]]
 name = "ironmlx"
