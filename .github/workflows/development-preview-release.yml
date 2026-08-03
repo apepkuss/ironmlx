@@ -1,0 +1,161 @@
+name: Development Preview Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      acknowledge_unnotarized_preview:
+        description: Confirm this is an ad-hoc, non-notarized development preview
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: development-preview-release
+  cancel-in-progress: false
+
+jobs:
+  build-preview:
+    name: Build immutable development preview
+    runs-on: macos-26
+    timeout-minutes: 120
+    outputs:
+      preview_tag: ${{ steps.metadata.outputs.preview_tag }}
+      source_commit: ${{ steps.metadata.outputs.source_commit }}
+
+    steps:
+      - name: Enforce dev preview boundary
+        shell: bash
+        env:
+          ACKNOWLEDGED: ${{ inputs.acknowledge_unnotarized_preview }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF_TYPE" = "branch"
+          test "$GITHUB_REF_NAME" = "dev"
+          test "$ACKNOWLEDGED" = "true"
+
+      - name: Checkout selected immutable dev commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve preview metadata
+        id: metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=normal)"
+
+          preview_date="$(TZ=Asia/Tokyo date +%Y%m%d)"
+          short_sha="${GITHUB_SHA:0:7}"
+          preview_tag="preview-$preview_date-$short_sha"
+
+          if git ls-remote --exit-code --tags origin "refs/tags/$preview_tag" >/dev/null 2>&1; then
+            echo "error: preview tag already exists: $preview_tag" >&2
+            exit 1
+          fi
+
+          echo "preview_tag=$preview_tag" >> "$GITHUB_OUTPUT"
+          echo "source_commit=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.94.0 --profile minimal --component clippy,rustfmt
+          rustc --version --verbose
+
+      - name: Checkout clean immutable MLX source
+        shell: bash
+        run: scripts/checkout-release-mlx.sh "$RUNNER_TEMP/ironmlx-mlx-source"
+
+      - name: Build self-contained ad-hoc App Bundle
+        shell: bash
+        env:
+          MLX_SRC: ${{ runner.temp }}/ironmlx-mlx-source
+        run: scripts/build-app-bundle.sh
+
+      - name: Package and verify explicitly labeled preview assets
+        shell: bash
+        run: |
+          scripts/package-development-preview.sh \
+            "${{ steps.metadata.outputs.preview_tag }}" \
+            "${{ steps.metadata.outputs.source_commit }}"
+
+      - name: Upload preview candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: development-preview-${{ steps.metadata.outputs.preview_tag }}
+          path: .build/development-preview-release/assets
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  publish-prerelease:
+    name: Publish GitHub prerelease
+    needs: build-preview
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download verified preview candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: development-preview-${{ needs.build-preview.outputs.preview_tag }}
+          path: assets
+
+      - name: Verify downloaded checksums and warning metadata
+        shell: bash
+        env:
+          PREVIEW_TAG: ${{ needs.build-preview.outputs.preview_tag }}
+          SOURCE_COMMIT: ${{ needs.build-preview.outputs.source_commit }}
+          REQUIRED_WARNING: 未使用 Developer ID 签名、未经 Apple 公证，仅供开发验证
+        run: |
+          set -euo pipefail
+          cd assets
+          sha256sum --check SHA256SUMS
+          grep -Fq "$REQUIRED_WARNING" DEVELOPMENT-PREVIEW-NOTICE.txt
+          grep -Fq "$REQUIRED_WARNING" RELEASE-NOTES.md
+          test "$(jq -r .preview_tag PREVIEW-BUILD-METADATA.json)" = "$PREVIEW_TAG"
+          test "$(jq -r .ironmlx_commit PREVIEW-BUILD-METADATA.json)" = "$SOURCE_COMMIT"
+          test "$(jq -r .developer_id_signed PREVIEW-BUILD-METADATA.json)" = "false"
+          test "$(jq -r .apple_notarized PREVIEW-BUILD-METADATA.json)" = "false"
+
+      - name: Publish immutable-commit development prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREVIEW_TAG: ${{ needs.build-preview.outputs.preview_tag }}
+          SOURCE_COMMIT: ${{ needs.build-preview.outputs.source_commit }}
+          REQUIRED_WARNING: 未使用 Developer ID 签名、未经 Apple 公证，仅供开发验证
+        run: |
+          set -euo pipefail
+
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$PREVIEW_TAG" >/dev/null 2>&1; then
+            echo "error: preview tag already exists: $PREVIEW_TAG" >&2
+            exit 1
+          fi
+
+          title="IronMLX 开发预览 $PREVIEW_TAG（$REQUIRED_WARNING）"
+          gh release create "$PREVIEW_TAG" \
+            assets/*.dmg \
+            assets/*.zip \
+            assets/SHA256SUMS \
+            assets/DEVELOPMENT-PREVIEW-NOTICE.txt \
+            assets/PREVIEW-BUILD-METADATA.json \
+            assets/RELEASE-NOTES.md \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$SOURCE_COMMIT" \
+            --title "$title" \
+            --notes-file assets/RELEASE-NOTES.md \
+            --prerelease
+
+          test "$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$PREVIEW_TAG" --jq .prerelease)" = "true"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$PREVIEW_TAG" --jq .object.sha)" = "$SOURCE_COMMIT"

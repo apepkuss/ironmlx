@@ -4,14 +4,17 @@
 
 set -euo pipefail
 
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+readonly REPO_ROOT
+# shellcheck source=release-config.sh
+source "$SCRIPT_DIR/release-config.sh"
 readonly APP_SOURCE_DIR="$REPO_ROOT/ironmlx-app"
 readonly PACKAGING_DIR="$APP_SOURCE_DIR/Packaging"
 readonly BUILD_ROOT="$REPO_ROOT/.build/p0-1-app-bundle"
 readonly DIST_DIR="$REPO_ROOT/dist"
 readonly APP_BUNDLE="$DIST_DIR/IronMLX.app"
-readonly MLX_EXPECTED_COMMIT="16dea39b545cd641310fdcfdfc6fc62bb141ddd7"
 readonly DEPLOYMENT_TARGET="26.2"
 readonly ARCHITECTURE="arm64"
 readonly BUILDER_HOME="${HOME:?HOME must be set}"
@@ -26,7 +29,7 @@ fail() {
   exit 1
 }
 
-for tool in cargo cmake codesign git iconutil lipo plutil rg sips swift xcrun; do
+for tool in cargo cmake codesign git iconutil lipo plutil sips swift xcrun; do
   command -v "$tool" >/dev/null || fail "required build tool is missing: $tool"
 done
 
@@ -36,8 +39,8 @@ done
   fail "MLX_SRC is not a Git checkout: $MLX_SOURCE"
 
 mlx_commit="$(git -C "$MLX_SOURCE" rev-parse HEAD)"
-[ "$mlx_commit" = "$MLX_EXPECTED_COMMIT" ] || \
-  fail "MLX checkout must be pinned to $MLX_EXPECTED_COMMIT, found $mlx_commit"
+[ "$mlx_commit" = "$IRONMLX_MLX_COMMIT" ] || \
+  fail "MLX checkout must be pinned to $IRONMLX_MLX_COMMIT, found $mlx_commit"
 [ -z "$(git -C "$MLX_SOURCE" status --porcelain=v1 --untracked-files=normal)" ] || \
   fail "MLX checkout must be clean: $MLX_SOURCE"
 mlx_branch="$(git -C "$MLX_SOURCE" branch --show-current)"
@@ -50,7 +53,7 @@ esac
 rm -rf "$BUILD_ROOT"
 mkdir -p "$BUILD_ROOT/mlx-build" "$BUILD_ROOT/mlx-install" "$DIST_DIR"
 
-echo "==> Build MLX $MLX_EXPECTED_COMMIT (Release, arm64, macOS $DEPLOYMENT_TARGET)"
+echo "==> Build MLX $IRONMLX_MLX_COMMIT (Release, arm64, macOS $DEPLOYMENT_TARGET)"
 cmake -S "$MLX_SOURCE" -B "$BUILD_ROOT/mlx-build" \
   -DCMAKE_BUILD_TYPE=Release \
   -DBUILD_SHARED_LIBS=OFF \
@@ -86,7 +89,9 @@ cp "$metallib_build" "$BUILD_ROOT/mlx-install/lib/mlx.metallib"
 for artifact in include/mlx/array.h lib/libmlx.a lib/libgguflib.a lib/mlx.metallib; do
   [ -f "$BUILD_ROOT/mlx-install/$artifact" ] || fail "MLX install is incomplete: $artifact"
 done
-if rg -q 'MLX_METAL_NO_NAX' "$BUILD_ROOT/mlx-build"/CMakeFiles/mlx.dir/flags.make 2>/dev/null; then
+mlx_flags_file="$BUILD_ROOT/mlx-build/CMakeFiles/mlx.dir/flags.make"
+[ -f "$mlx_flags_file" ] || fail "MLX CMake flags file is missing: $mlx_flags_file"
+if grep -Fq 'MLX_METAL_NO_NAX' "$mlx_flags_file"; then
   fail "MLX was compiled without required NAX Metal kernels"
 fi
 
@@ -98,7 +103,7 @@ env \
   CFLAGS="$C_PATH_REMAP_FLAGS" \
   CXXFLAGS="$C_PATH_REMAP_FLAGS" \
   RUSTFLAGS="$RUST_PATH_REMAP_FLAG" \
-  cargo build --manifest-path "$REPO_ROOT/Cargo.toml" --release --bin ironmlx --bin iron-bench
+  cargo build --manifest-path "$REPO_ROOT/Cargo.toml" --locked --release --bin ironmlx --bin iron-bench
 
 echo "==> Build Swift App executable (Release, App-Bundle resource mode)"
 env MACOSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET" \
