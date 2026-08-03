@@ -5,6 +5,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
+readonly REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+readonly PRODUCT_VERSION="$(tr -d '[:space:]' < "$REPO_ROOT/VERSION")"
 # shellcheck source=release-config.sh
 source "$SCRIPT_DIR/release-config.sh"
 
@@ -21,7 +23,7 @@ fail() {
 [[ "$preview_tag" =~ ^preview-[0-9]{8}-[0-9a-f]{7}$ ]] || fail "invalid preview tag"
 [[ "$source_commit" =~ ^[0-9a-f]{40}$ ]] || fail "invalid source commit"
 
-package_name="IronMLX-$preview_tag-ADHOC-NOT-NOTARIZED"
+package_name="IronMLX-$PRODUCT_VERSION-$preview_tag-ADHOC-NOT-NOTARIZED"
 zip_path="$asset_dir/$package_name.zip"
 dmg_path="$asset_dir/$package_name.dmg"
 for required in \
@@ -29,6 +31,8 @@ for required in \
   "$dmg_path" \
   "$asset_dir/DEVELOPMENT-PREVIEW-NOTICE.txt" \
   "$asset_dir/PREVIEW-BUILD-METADATA.json" \
+  "$asset_dir/THIRD_PARTY_NOTICES.md" \
+  "$asset_dir/third-party-inventory.json" \
   "$asset_dir/RELEASE-NOTES.md" \
   "$asset_dir/SHA256SUMS"; do
   [ -f "$required" ] || fail "required preview asset is missing: $required"
@@ -43,10 +47,24 @@ grep -Fq "$IRONMLX_PREVIEW_WARNING_ZH" "$asset_dir/RELEASE-NOTES.md" || \
   fail "metadata preview tag mismatch"
 [ "$(plutil -extract ironmlx_commit raw "$asset_dir/PREVIEW-BUILD-METADATA.json")" = "$source_commit" ] || \
   fail "metadata source commit mismatch"
+[ "$(plutil -extract product_version raw "$asset_dir/PREVIEW-BUILD-METADATA.json")" = \
+  "$PRODUCT_VERSION" ] || fail "metadata product version mismatch"
+grep -Fq "Product version: \`$PRODUCT_VERSION\`" "$asset_dir/RELEASE-NOTES.md" || \
+  fail "release notes product version mismatch"
 [ "$(plutil -extract developer_id_signed raw "$asset_dir/PREVIEW-BUILD-METADATA.json")" = "false" ] || \
   fail "metadata must declare Developer ID signing disabled"
 [ "$(plutil -extract apple_notarized raw "$asset_dir/PREVIEW-BUILD-METADATA.json")" = "false" ] || \
   fail "metadata must declare Apple notarization disabled"
+[ "$(plutil -extract mlx_repository raw "$asset_dir/PREVIEW-BUILD-METADATA.json")" = \
+  "$IRONMLX_MLX_REPOSITORY" ] || fail "metadata MLX fork repository mismatch"
+[ "$(plutil -extract mlx_upstream_revision raw "$asset_dir/PREVIEW-BUILD-METADATA.json")" = \
+  "$IRONMLX_MLX_UPSTREAM_REVISION" ] || fail "metadata MLX upstream revision mismatch"
+diff -q "$REPO_ROOT/THIRD_PARTY_NOTICES.md" "$asset_dir/THIRD_PARTY_NOTICES.md" >/dev/null || \
+  fail "preview notice asset differs from the verified source material"
+diff -q "$REPO_ROOT/third-party-inventory.json" "$asset_dir/third-party-inventory.json" >/dev/null || \
+  fail "preview inventory asset differs from the verified source material"
+diff -qr "$REPO_ROOT/THIRD_PARTY_LICENSES" "$asset_dir/THIRD_PARTY_LICENSES" >/dev/null || \
+  fail "preview license assets differ from the verified source material"
 
 (
   cd "$asset_dir"
@@ -71,9 +89,16 @@ cleanup() {
 trap cleanup EXIT
 
 verify_preview_app() {
-  local preview_app="$1"
+  local package_root="$1"
+  local preview_app="$package_root/IronMLX Development Preview.app"
   local signature_details
 
+  diff -q "$REPO_ROOT/THIRD_PARTY_NOTICES.md" "$package_root/THIRD_PARTY_NOTICES.md" >/dev/null || \
+    fail "archive root third-party notices differ from the verified source material"
+  diff -q "$REPO_ROOT/third-party-inventory.json" "$package_root/third-party-inventory.json" >/dev/null || \
+    fail "archive root third-party inventory differs from the verified source material"
+  diff -qr "$REPO_ROOT/THIRD_PARTY_LICENSES" "$package_root/THIRD_PARTY_LICENSES" >/dev/null || \
+    fail "archive root third-party licenses differ from the verified source material"
   [ -d "$preview_app/Contents" ] || fail "preview App is missing: $preview_app"
   "$SCRIPT_DIR/verify-app-bundle.sh" "$preview_app"
   [ "$(plutil -extract CFBundleDisplayName raw "$preview_app/Contents/Info.plist")" = \
@@ -96,11 +121,11 @@ verify_preview_app() {
 
 mkdir -p "$zip_extract" "$dmg_mount"
 ditto -x -k "$zip_path" "$zip_extract"
-verify_preview_app "$zip_extract/$package_name/IronMLX Development Preview.app"
+verify_preview_app "$zip_extract/$package_name"
 
 hdiutil attach "$dmg_path" -readonly -nobrowse -mountpoint "$dmg_mount" -quiet
 mounted=1
-verify_preview_app "$dmg_mount/IronMLX Development Preview.app"
+verify_preview_app "$dmg_mount"
 hdiutil detach "$dmg_mount" -quiet
 mounted=0
 

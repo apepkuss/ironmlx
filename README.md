@@ -1,247 +1,68 @@
-# cxx-mlx
+# IronMLX
 
-Rust bindings to [Apple MLX](https://github.com/ml-explore/mlx) via the [cxx](https://cxx.rs) crate.
+IronMLX 是面向 Apple Silicon 的本地大语言模型推理 App 与服务运行时。它将
+Rust 推理引擎、MLX/Metal 运行时、模型管理 Dashboard，以及 OpenAI/Anthropic
+兼容 HTTP API 打包为一个自包含的 macOS App。
 
-**Status:** 🎉 **P6.5 complete** — Safe API Rust 化重构 (Shape newtype + IntoShape, std::ops 算子, random builders, ShapeMode, _mm rename, non_exhaustive enums, root re-export 收敛).
+当前产品版本：**0.1.0**
 
-## Requirements
+## 系统要求
 
-- macOS 26.2 or newer on Apple Silicon (arm64); Intel Macs are not supported
-- Rust 1.94+
-- Prebuilt MLX 0.32+ at `$MLX_DIR`, built in Release mode with MLX Metal NAX kernels enabled
+- Apple Silicon（arm64）；不支持 Intel Mac；
+- macOS 26.2 或更高版本；
+- 本地构建需要完整 Xcode、Rust 1.94 和项目锁定的 MLX 源码版本。
 
-## Quickstart
+## 核心能力
 
-Build MLX once (any prefix you like):
+- 本地模型搜索、不可变快照下载、断点续传与完整性校验；
+- 多模型加载、卸载、固定、TTL 与内存保护；
+- OpenAI `/v1/chat/completions` 和 Anthropic `/v1/messages`；
+- 流式输出、连续批处理、分页 KV/前缀缓存、MTP 与 Prompt Lookup；
+- 文本及受控 base64 图片输入；
+- 默认仅监听 loopback；可选 LAN 模式使用 HTTPS 与 API Key。
+
+## 快速开始
+
+当前仓库已生成与 macOS arm64 Release 产物对应的第三方依赖清单、Notices 和
+许可证文本，但在完成 P0-8B 法律复核、SBOM 与明确授权前，公开二进制分发仍被
+发布门禁阻止。开发者可以从源码构建并在本机验证：
 
 ```bash
-cd /path/to/mlx
-mkdir -p build && cd build
-xcrun -sdk macosx --show-sdk-version
-printf '__METAL_VERSION__\n' | xcrun -sdk macosx metal -E -x metal -P - | tail -1
-cmake .. -DCMAKE_BUILD_TYPE=Release \
-  -DBUILD_SHARED_LIBS=OFF \
-  -DCMAKE_OSX_ARCHITECTURES=arm64 \
-  -DCMAKE_OSX_DEPLOYMENT_TARGET=26.2 \
-  -DMLX_METAL_PATH=$HOME/.local/mlx/lib \
-  -DCMAKE_INSTALL_PREFIX=$HOME/.local/mlx
-if grep -q MLX_METAL_NO_NAX CMakeFiles/mlx.dir/flags.make; then
-  echo "MLX was configured without NAX Metal kernels; use full Xcode with macOS SDK 26.2+ / Metal 400+."
-  exit 1
-fi
-make -j$(sysctl -n hw.ncpu) && make install
-export MLX_DIR=$HOME/.local/mlx
+cargo install --locked --features cli --version 0.9.1 cargo-about
+scripts/checkout-release-mlx.sh /tmp/ironmlx-mlx-source
+MLX_SRC=/tmp/ironmlx-mlx-source scripts/build-app-bundle.sh
+open dist/IronMLX.app
 ```
 
-For Qwen3.6 MoE performance work, the MLX runtime build is part of the product
-surface. Command Line Tools SDKs can configure MLX with `MLX_METAL_NO_NAX`,
-which keeps correctness but substantially slows qmm and decode paths. Prefer the
-full Xcode toolchain and verify that the installed `$MLX_DIR/lib/mlx.metallib`
-comes from the same NAX-enabled Release build.
+构建产物位于 `dist/IronMLX.app`。详细步骤见
+[安装与构建](docs/installation.md)。
 
-Then in your project:
+## 文档
 
-```rust
-use mlx::{Array, Dtype};
+- [支持模型矩阵](docs/supported-models.md)
+- [API 示例](docs/api.md)
+- [隐私与网络边界](docs/privacy.md)
+- [数据位置与卸载](docs/storage-and-uninstall.md)
+- [故障排查](docs/troubleshooting.md)
+- [Known Issues](docs/known-issues.md)
+- [0.1.0 候选发布说明](docs/release-notes/0.1.0.md)
+- [版本与发布流程](docs/versioning-and-releases.md)
+- [第三方依赖与许可证材料](docs/third-party-materials.md)
+- [安全边界](docs/security-boundary.md)
 
-fn main() -> mlx::Result<()> {
-    let a = Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0], &[2, 2])?;
-    println!("{a:?}");
-    let v: Vec<f32> = a.to_vec()?;
-    println!("values: {v:?}");
-    Ok(())
-}
+## 开发验证
+
+```bash
+scripts/verify-version-consistency.sh
+cargo fmt --all -- --check
+cargo +nightly fmt --all -- --check
+cargo +nightly clippy --locked --all-features --workspace -- -D warnings
+cargo build --locked --release
+swift test --package-path ironmlx-app --configuration release --no-parallel
 ```
 
-## Operators
+App Bundle 的静态验证使用：
 
-`mlx::Array` supports the standard arithmetic operators with all 4 reference combinations (`a + b`, `&a + b`, `a + &b`, `&a + &b`) and scalar RHS for any `Element` type. Operators return `Result<Array>` because broadcasting validation, dtype mismatch, or MLX-side errors all surface as recoverable Rust errors:
-
-```rust
-use mlx::{Array, Dtype};
-
-fn main() -> mlx::Result<()> {
-    let a = Array::from_slice(&[1.0_f32, 2.0, 3.0], &[3])?;
-    let b = Array::from_slice(&[10.0_f32, 20.0, 30.0], &[3])?;
-
-    // Binary ops with all reference combos
-    let _r1 = (&a + &b)?;          // most common
-    let _r2 = (&a * 2.0_f32)?;     // scalar RHS
-
-    // Chained unary (free fn or method form)
-    let _y = (&a.exp()? - 1.0_f32)?;
-    let _z = mlx::ops::sigmoid(&a)?;
-
-    // Negation
-    let _n = (-&a)?;
-    Ok(())
-}
+```bash
+scripts/verify-app-bundle.sh dist/IronMLX.app
 ```
-
-NumPy-style broadcasting is validated in Rust before the FFI call; incompatible shapes return `Err(Error::BroadcastMismatch { lhs, rhs })` with structured fields rather than an opaque MLX exception string.
-
-**No scalar LHS** (`1.0 - &a`): blocked by Rust's orphan rule. Equivalent expressions: `(-&a)? + 1.0_f32`, or `Array::from_slice(&[1.0_f32], &[])? - a`.
-
-> **Tip:** Always type-suffix scalar literals (`1.0_f32`, not bare `1.0`). Without a suffix, Rust infers `f64`, and most arrays in inference workloads are `f32`/`f16`/`bf16`. Mixing `f64` scalars into a non-`f64` op surfaces as `Err(Error::Mlx("..."))` at runtime, not at compile time. The same applies to integer literals: prefer `1_i32` over `1`.
-
-Available unary ops: `exp`, `log`, `sqrt`, `tanh`, `sigmoid`, `square`, `rsqrt`, `erf`, `reciprocal` — sufficient to compose `softmax`, `gelu` (via `0.5 * x * (1 + erf(x / sqrt(2)))`), and `silu` once P1b2 adds the needed reductions.
-
-## Reductions, Shape, Matmul
-
-Reductions accept axes via the `IntoAxes` trait — pass `mlx::All` to reduce all axes, an `i32` for a single axis, or any of `&[i32]` / `Vec<i32>` / `[i32; N]` for multiple axes:
-
-```rust
-use mlx::ops::{self, All};
-use mlx::Array;
-
-fn main() -> mlx::Result<()> {
-    let x = Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3])?;
-
-    let _total = ops::sum(&x, All, false)?;          // scalar 21.0
-    let _row_sums = x.sum(-1, false)?;               // [6.0, 15.0]
-    let _row_sums_kd = x.sum(-1, true)?;             // [[6.0], [15.0]]
-
-    let _reshaped = x.reshape(&[3, 2])?;             // [3, 2]
-    let _auto = x.reshape(&[2, -1])?;                // -1 inferred → [2, 3]
-    let _t = x.t()?;                                 // [3, 2] (transpose)
-
-    // Matmul covers 2D, batched, and broadcasting on batch dims.
-    let q = Array::from_slice(&[0.0_f32; 24], &[2, 3, 4])?;
-    let k = Array::from_slice(&[0.0_f32; 24], &[2, 4, 3])?;
-    let _scores = q.matmul(&k)?;                     // [2, 3, 3]
-
-    Ok(())
-}
-```
-
-`softmax`, `gelu`, and `silu` compose directly atop these ops — see [`mlx/tests/p1b2a_compose.rs`](mlx/tests/p1b2a_compose.rs) for the canonical implementations.
-
-> **Gotcha:** `.t()` reverses **all** dims. For 4D attention (`Q @ K^T` where `Q`/`K` are `[B, H, S, D]`), use `k.transpose_axes(&[0, 1, 3, 2])` to swap just the last two dims, not `k.t()` (which would yield `[D, S, H, B]`). See [`matmul_using_t_for_attention`](mlx/tests/p1b2a_matmul.rs).
-
-## Indexing & SDPA
-
-`mlx::ops::where_` (trailing underscore, since `where` is a Rust keyword) selects element-wise from two arrays based on a condition mask. `take` / `take_along_axis` index along an axis (NumPy / PyTorch semantics). `slice` and `slice_strided` extract sub-arrays Python-style:
-
-```rust
-use mlx::{ops, Array};
-
-fn main() -> mlx::Result<()> {
-    let a = Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3])?;
-    let cond = Array::from_slice(&[1_u8, 0, 1, 0, 1, 0], &[2, 3])?;
-    let zeros = Array::from_slice(&[0.0_f32; 6], &[2, 3])?;
-
-    let _picked = ops::where_(&cond, &a, &zeros)?;             // element-wise select
-    let idx = Array::from_slice(&[0_u32, 2], &[2])?;
-    let _cols = a.take(&idx, 1)?;                              // [2, 2] — pick cols 0 and 2
-    let _sub = a.slice(&[0, 1], &[2, 3])?;                     // [2, 2] — rows 0..2, cols 1..3
-    Ok(())
-}
-```
-
-A complete SDPA (scaled dot-product attention) implementation composing matmul, transpose, mask-add, softmax, and matmul lives in [`mlx/tests/p1b2b_sdpa.rs`](mlx/tests/p1b2b_sdpa.rs). It's the canonical test that all of P1 (P0 + P1a + P1b1 + P1b2a + P1b2b) integrates correctly. P2b's [`fast::scaled_dot_product_attention`](mlx/tests/p2b_fast.rs) matches these numerics via a fused Metal kernel.
-
-## Streams & Devices
-
-`Device::cpu()` / `Device::gpu(index)` are the supported devices on Apple
-Silicon. Streams are MLX's execution queues — work on different streams may
-run concurrently. The default stream of the default device is used unless
-explicitly overridden:
-
-```rust
-use mlx::{Array, Device, Dtype};
-
-fn main() -> mlx::Result<()> {
-    println!("default device: {:?}", mlx::default_device());
-    println!("gpu count: {}", mlx::device_count(mlx::DeviceType::Gpu));
-
-    let _arr = Array::zeros(&[2, 3], Dtype::Float32)?;
-
-    // Optional: switch streams (thread-local).
-    let s = mlx::new_stream(Device::gpu(0))?;
-    mlx::set_default_stream(s);
-
-    Ok(())
-}
-```
-
-### Async evaluation
-
-`async_eval` returns a runtime-agnostic `Future`. It works under any
-executor — tokio, async-std, smol, or `futures_lite::future::block_on`:
-
-```rust
-use mlx::{Array, Dtype};
-
-# #[tokio::main]
-# async fn main() -> mlx::Result<()> {
-let a = Array::zeros(&[1024], Dtype::Float32)?;
-let b = Array::zeros(&[1024], Dtype::Float32)?;
-
-// Submit one or many arrays; await when ready.
-mlx::transforms::async_eval(&[&a, &b]).await?;
-
-// Or single-array convenience method:
-let c = Array::zeros(&[256], Dtype::Float32)?;
-c.async_eval().await?;
-# Ok(())
-# }
-```
-
-**Cancellation note**: dropping a future without awaiting does NOT cancel
-the submitted MLX work — MLX has no cancellation primitive. The work runs
-to completion in the background. Subsequent ops on the same arrays will
-implicitly synchronize.
-
-For sync contexts (no executor), use `mlx::transforms::synchronize()` (default stream)
-or `mlx::transforms::synchronize_stream(s)` (explicit stream) to block.
-
-## Threading
-
-`mlx::Array` implements `Send` but **not** `Sync`. Internally, MLX's
-`mlx::core::array` is backed by a `std::shared_ptr` whose refcount is atomic,
-so transferring ownership across threads is safe. However, MLX's "const"
-methods (e.g. `set_status`, `attach_event`, the lazy→available transition
-in `is_available`) mutate `ArrayDesc` without synchronization, so two
-threads concurrently holding `&Array` to the same instance is a data race.
-
-To share an array between threads, clone it (cheap — MLX refcounts the
-underlying storage):
-
-```rust
-let a = mlx::Array::zeros(&[2, 3], mlx::Dtype::Float32)?;
-let b = a.clone();   // Atomic refcount++; tensor data is not copied.
-std::thread::spawn(move || {
-    let _ = b.shape();
-});
-# Ok::<(), mlx::Error>(())
-```
-
-Avoid wrapping in `Arc<Mutex<Array>>` unless you genuinely need shared
-mutable access — `clone` is almost always the right answer.
-
-## Roadmap
-
-- ✅ **P0** — scaffold (zeros + eval + shape)
-- ✅ **P1a** — Array foundation (Element trait, 10 dtypes, from_slice/item/to_vec, Clone/Debug, Send, SmallVec shape)
-- ✅ **P1b1** — operators + element-wise unary + broadcasting
-- ✅ **P1b2a** — shape ops + reduction + matmul (compose softmax/gelu/silu)
-- ✅ **P1b2b** — indexing (take/take_along_axis/where/slice/gather) + u16/u32/u64 dtypes + SDPA integration
-- 🎉 **P1 complete** — full inference primitives ready
-- ✅ **P2a** — Stream / Device foundation + runtime-agnostic async_eval
-- ✅ **P2b** — `fast` ops (rms_norm / layer_norm / rope int+array offset / sdpa) — 12 integration tests
-- ✅ **P2c** — `io` (safetensors / gguf / npy + Reader/Writer streams) — 18 integration tests
-- ✅ **P3** — `quantization` (quantize/dequantize/quantized_matmul/qqmm/gather_qmm/fp8) — 8 integration tests
-- ✅ **P4** — `random` (key/seed/split + 17 distributions including categorical) — 23 integration tests
-- ✅ **P5** — `ops` 补漏 (8 matmul family ops) — 9 integration tests
-- ✅ **P6** — `compile` (closure JIT via extern "Rust" callback + ArrayVec opaque + CompiledFn) — 9 integration tests
-- ✅ **P6.5** — API style refactor (Rust idiomatic public surface)
-- ⏳ LLM inference example
-
-## Architecture
-
-Two-crate workspace following the standard Rust FFI convention:
-
-- [`mlx-sys`](mlx-sys/) — raw cxx FFI bindings + hand-written C++ shim that flattens MLX templates and overloads into cxx-friendly free functions
-- [`mlx`](mlx/) — safe, idiomatic Rust API on top of `mlx-sys`
-
-The `mlx-sys` `build.rs` locates a prebuilt MLX install via `$MLX_DIR` (it never writes to that prefix, so it's safe to share with sibling Rust/Python/Swift projects). A `bundled` feature for source-built MLX is planned for P2.

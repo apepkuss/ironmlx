@@ -10,9 +10,12 @@ readonly REPO_ROOT
 # shellcheck source=release-config.sh
 source "$SCRIPT_DIR/release-config.sh"
 
+"$SCRIPT_DIR/release-legal-gate.sh"
+
 readonly SOURCE_APP="$REPO_ROOT/dist/IronMLX.app"
 readonly BUILD_ROOT="$REPO_ROOT/.build/development-preview-release"
 readonly ASSET_DIR="$BUILD_ROOT/assets"
+readonly PRODUCT_VERSION="$(tr -d '[:space:]' < "$REPO_ROOT/VERSION")"
 
 preview_tag="${1:-}"
 source_commit="${2:-}"
@@ -33,15 +36,21 @@ for tool in codesign ditto hdiutil plutil shasum; do
   command -v "$tool" >/dev/null || fail "required packaging tool is missing: $tool"
 done
 
-package_name="IronMLX-$preview_tag-ADHOC-NOT-NOTARIZED"
+package_name="IronMLX-$PRODUCT_VERSION-$preview_tag-ADHOC-NOT-NOTARIZED"
 package_root="$BUILD_ROOT/$package_name"
 preview_app="$package_root/IronMLX Development Preview.app"
 notice_file="$package_root/DEVELOPMENT-PREVIEW-NOTICE.txt"
 metadata_file="$package_root/PREVIEW-BUILD-METADATA.json"
+third_party_notices="$package_root/THIRD_PARTY_NOTICES.md"
+third_party_inventory="$package_root/third-party-inventory.json"
+third_party_licenses="$package_root/THIRD_PARTY_LICENSES"
 
 rm -rf "$BUILD_ROOT"
 mkdir -p "$package_root" "$ASSET_DIR"
 ditto "$SOURCE_APP" "$preview_app"
+cp "$REPO_ROOT/THIRD_PARTY_NOTICES.md" "$third_party_notices"
+cp "$REPO_ROOT/third-party-inventory.json" "$third_party_inventory"
+cp -R "$REPO_ROOT/THIRD_PARTY_LICENSES" "$third_party_licenses"
 
 cat > "$notice_file" <<EOF
 IronMLX Development Preview / IronMLX 开发预览
@@ -67,6 +76,10 @@ cat > "$metadata_file" <<EOF
   "distribution_channel": "development-preview",
   "ironmlx_commit": "$source_commit",
   "mlx_commit": "$IRONMLX_MLX_COMMIT",
+  "mlx_repository": "$IRONMLX_MLX_REPOSITORY",
+  "mlx_upstream_repository": "$IRONMLX_MLX_UPSTREAM_REPOSITORY",
+  "mlx_upstream_revision": "$IRONMLX_MLX_UPSTREAM_REVISION",
+  "product_version": "$PRODUCT_VERSION",
   "preview_tag": "$preview_tag",
   "signature_type": "ad-hoc",
   "warning": "${IRONMLX_PREVIEW_WARNING_ZH}"
@@ -104,6 +117,9 @@ hdiutil create \
 
 cp "$notice_file" "$ASSET_DIR/DEVELOPMENT-PREVIEW-NOTICE.txt"
 cp "$metadata_file" "$ASSET_DIR/PREVIEW-BUILD-METADATA.json"
+cp "$third_party_notices" "$ASSET_DIR/THIRD_PARTY_NOTICES.md"
+cp "$third_party_inventory" "$ASSET_DIR/third-party-inventory.json"
+cp -R "$third_party_licenses" "$ASSET_DIR/THIRD_PARTY_LICENSES"
 
 cat > "$ASSET_DIR/RELEASE-NOTES.md" <<EOF
 # ⚠️ IronMLX 开发预览
@@ -113,9 +129,12 @@ cat > "$ASSET_DIR/RELEASE-NOTES.md" <<EOF
 This prerelease is **${IRONMLX_PREVIEW_WARNING_EN}**.
 
 - Channel: GitHub Actions development preview
+- Product version: \`$PRODUCT_VERSION\`
 - Preview tag: \`$preview_tag\`
 - IronMLX immutable commit: \`$source_commit\`
 - MLX immutable commit: \`$IRONMLX_MLX_COMMIT\`
+- MLX source: IronMLX fork \`$IRONMLX_MLX_REPOSITORY\`
+- MLX upstream base: \`$IRONMLX_MLX_UPSTREAM_REVISION\`
 - Platform: Apple Silicon arm64, macOS 26.2+
 - Signature: ad-hoc only; no Developer ID identity or Team ID
 - Apple notarization/stapling: not performed
@@ -133,7 +152,12 @@ EOF
     "$(basename "$zip_path")" \
     DEVELOPMENT-PREVIEW-NOTICE.txt \
     PREVIEW-BUILD-METADATA.json \
+    THIRD_PARTY_NOTICES.md \
+    third-party-inventory.json \
     RELEASE-NOTES.md > SHA256SUMS
+  find THIRD_PARTY_LICENSES -type f -print | LC_ALL=C sort | while IFS= read -r license_file; do
+    shasum -a 256 "$license_file"
+  done >> SHA256SUMS
 )
 
 "$SCRIPT_DIR/verify-development-preview.sh" "$ASSET_DIR" "$preview_tag" "$source_commit"

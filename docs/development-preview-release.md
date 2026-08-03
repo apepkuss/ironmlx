@@ -1,8 +1,9 @@
 # IronMLX GitHub Actions development previews
 
-IronMLX currently publishes development previews only. Every preview is built
-from the immutable commit selected by manually dispatching the workflow on the
-remote `dev` branch.
+The development-preview workflow is retained as a future distribution path,
+but public preview packaging and publication are currently disabled. Every
+future preview will be built from the immutable commit selected by manually
+dispatching the workflow on the remote `dev` branch.
 
 > **未使用 Developer ID 签名、未经 Apple 公证，仅供开发验证。**
 
@@ -30,18 +31,29 @@ The job:
 
 1. checks out the immutable IronMLX event commit;
 2. validates the event's commit range as Conventional Commits;
-3. creates a clean detached checkout of the MLX commit declared by
+3. installs the pinned `cargo-about 0.9.1` inventory tool and creates a clean
+   detached checkout of the MLX commit declared by
    `scripts/release-config.sh`;
-4. builds the self-contained Release App Bundle;
+4. verifies the tracked dependency inventory and license texts against the
+   actual native and Rust Release inputs, then builds the self-contained App;
 5. runs stable and pinned-nightly Rust formatting checks, all-feature workspace
    Clippy with warnings denied, and a locked Release build;
 6. runs Swift tests in Release mode;
 7. verifies the App, helpers, and Metal library as arm64 with `minos=26.2`,
    system-only dynamic dependencies, and no embedded developer paths.
 
-## Manual preview publication
+## Current legal-material gate
 
-Run `Development Preview Release` from the GitHub Actions UI:
+`scripts/release-legal-gate.sh` runs before packaging. It fails while
+`IRONMLX_PUBLIC_DISTRIBUTION_READY` is false. P0-8A now supplies reproducible
+third-party Notices, license texts, and an engineering inventory; P0-8B must
+review those materials, supply the CycloneDX SBOM, and explicitly authorize
+distribution before the flag can be enabled.
+
+## Manual preview publication after the gate is approved
+
+After that separate approval, run `Development Preview Release` from the
+GitHub Actions UI:
 
 1. select the `dev` branch;
 2. acknowledge that the result is ad-hoc signed and not notarized;
@@ -61,20 +73,24 @@ tag. Preview tags never use a semantic-version namespace reserved for a future
 stable release.
 
 The GitHub Release is always a prerelease. Its title and notes contain the
-required warning. The downloadable files use the
-`ADHOC-NOT-NOTARIZED` suffix, and both archives contain:
+required warning. The downloadable files include the product version and use
+the `ADHOC-NOT-NOTARIZED` suffix, and both archives contain:
 
 - `IronMLX Development Preview.app`;
 - `DEVELOPMENT-PREVIEW-NOTICE.txt`;
-- `PREVIEW-BUILD-METADATA.json`.
+- `PREVIEW-BUILD-METADATA.json`;
+- `THIRD_PARTY_NOTICES.md`, `third-party-inventory.json`, and
+  `THIRD_PARTY_LICENSES/`.
 
 The App's `Info.plist`, bundled notice, and metadata repeat that Developer ID
-signing and Apple notarization are disabled. `SHA256SUMS` covers the DMG, ZIP,
-notice, metadata, and release notes.
+signing and Apple notarization are disabled. Metadata identifies both the
+non-official MLX fork and its upstream base revision. `SHA256SUMS` covers the
+DMG, ZIP, notices, inventory, every license file, metadata, and release notes.
 
 ## Local packaging check
 
-After building `dist/IronMLX.app`, package a preview with:
+After the legal-material gate is approved and `dist/IronMLX.app` is built,
+package a preview with:
 
 ```bash
 scripts/package-development-preview.sh \

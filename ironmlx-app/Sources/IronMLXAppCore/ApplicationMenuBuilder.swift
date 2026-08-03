@@ -10,10 +10,25 @@ public enum ApplicationMenuBuilder {
     }
 
     private static func addApplicationMenu(to menu: NSMenu) {
-        let item = NSMenuItem(title: "ironmlx", action: nil, keyEquivalent: "")
-        let submenu = NSMenu(title: "ironmlx")
+        let item = NSMenuItem(title: "IronMLX", action: nil, keyEquivalent: "")
+        let submenu = NSMenu(title: "IronMLX")
+        let about = NSMenuItem(
+            title: "About IronMLX",
+            action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
+            keyEquivalent: ""
+        )
+        about.target = NSApp
+        submenu.addItem(about)
+        let thirdPartyNotices = NSMenuItem(
+            title: "Third-Party Notices…",
+            action: #selector(ApplicationLegalNoticesPresenter.showThirdPartyNotices(_:)),
+            keyEquivalent: ""
+        )
+        thirdPartyNotices.target = ApplicationLegalNoticesPresenter.shared
+        submenu.addItem(thirdPartyNotices)
+        submenu.addItem(.separator())
         let quit = NSMenuItem(
-            title: "Quit ironmlx",
+            title: "Quit IronMLX",
             action: #selector(NSApplication.terminate(_:)),
             keyEquivalent: "q"
         )

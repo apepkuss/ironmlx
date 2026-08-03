@@ -83,6 +83,17 @@ jobs:
           rustc --version --verbose
           rustc "+$RUST_NIGHTLY_TOOLCHAIN" --version --verbose
 
+      - name: Verify product version and publication boundary
+        shell: bash
+        run: scripts/verify-version-consistency.sh
+
+      - name: Install pinned license inventory tool
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install --locked --features cli --version 0.9.1 cargo-about
+          test "$(cargo-about --version)" = "cargo-about 0.9.1"
+
       - name: Checkout clean immutable MLX source
         shell: bash
         run: scripts/checkout-release-mlx.sh "$RUNNER_TEMP/ironmlx-mlx-source"

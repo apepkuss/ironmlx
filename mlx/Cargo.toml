@@ -3,12 +3,12 @@ name = "mlx"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
 repository.workspace = true
 description = "Safe, idiomatic Rust bindings to Apple MLX"
+publish = false
 
 [dependencies]
-mlx-sys = { path = "../mlx-sys", version = "0.0.1" }
+mlx-sys = { path = "../mlx-sys", version = "0.1.0" }
 cxx.workspace = true
 thiserror.workspace = true
 half = "2"

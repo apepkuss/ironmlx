@@ -23,6 +23,7 @@ jobs:
     timeout-minutes: 120
     outputs:
       preview_tag: ${{ steps.metadata.outputs.preview_tag }}
+      product_version: ${{ steps.metadata.outputs.product_version }}
       source_commit: ${{ steps.metadata.outputs.source_commit }}
 
     steps:
@@ -43,6 +44,24 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.94.0 --profile minimal --component clippy,rustfmt
+          rustc --version --verbose
+
+      - name: Install pinned license inventory tool
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install --locked --features cli --version 0.9.1 cargo-about
+          test "$(cargo-about --version)" = "cargo-about 0.9.1"
+
+      - name: Enforce deferred distribution materials
+        shell: bash
+        run: scripts/release-legal-gate.sh
+
       - name: Resolve preview metadata
         id: metadata
         shell: bash
@@ -50,10 +69,12 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test -z "$(git status --porcelain=v1 --untracked-files=normal)"
+          scripts/verify-version-consistency.sh
 
           preview_date="$(TZ=Asia/Tokyo date +%Y%m%d)"
           short_sha="${GITHUB_SHA:0:7}"
           preview_tag="preview-$preview_date-$short_sha"
+          product_version="$(tr -d '[:space:]' < VERSION)"
 
           if git ls-remote --exit-code --tags origin "refs/tags/$preview_tag" >/dev/null 2>&1; then
             echo "error: preview tag already exists: $preview_tag" >&2
@@ -61,14 +82,8 @@ jobs:
           fi
 
           echo "preview_tag=$preview_tag" >> "$GITHUB_OUTPUT"
+          echo "product_version=$product_version" >> "$GITHUB_OUTPUT"
           echo "source_commit=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
-
-      - name: Install pinned Rust toolchain
-        shell: bash
-        run: |
-          set -euo pipefail
-          rustup toolchain install 1.94.0 --profile minimal --component clippy,rustfmt
-          rustc --version --verbose
 
       - name: Checkout clean immutable MLX source
         shell: bash
@@ -115,6 +130,7 @@ jobs:
         shell: bash
         env:
           PREVIEW_TAG: ${{ needs.build-preview.outputs.preview_tag }}
+          PRODUCT_VERSION: ${{ needs.build-preview.outputs.product_version }}
           SOURCE_COMMIT: ${{ needs.build-preview.outputs.source_commit }}
           REQUIRED_WARNING: 未使用 Developer ID 签名、未经 Apple 公证，仅供开发验证
         run: |
@@ -124,6 +140,8 @@ jobs:
           grep -Fq "$REQUIRED_WARNING" DEVELOPMENT-PREVIEW-NOTICE.txt
           grep -Fq "$REQUIRED_WARNING" RELEASE-NOTES.md
           test "$(jq -r .preview_tag PREVIEW-BUILD-METADATA.json)" = "$PREVIEW_TAG"
+          test "$(jq -r .product_version PREVIEW-BUILD-METADATA.json)" = "$PRODUCT_VERSION"
+          grep -Fq "Product version: \`$PRODUCT_VERSION\`" RELEASE-NOTES.md
           test "$(jq -r .ironmlx_commit PREVIEW-BUILD-METADATA.json)" = "$SOURCE_COMMIT"
           test "$(jq -r .developer_id_signed PREVIEW-BUILD-METADATA.json)" = "false"
           test "$(jq -r .apple_notarized PREVIEW-BUILD-METADATA.json)" = "false"
@@ -133,6 +151,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PREVIEW_TAG: ${{ needs.build-preview.outputs.preview_tag }}
+          PRODUCT_VERSION: ${{ needs.build-preview.outputs.product_version }}
           SOURCE_COMMIT: ${{ needs.build-preview.outputs.source_commit }}
           REQUIRED_WARNING: 未使用 Developer ID 签名、未经 Apple 公证，仅供开发验证
         run: |
@@ -143,13 +162,15 @@ jobs:
             exit 1
           fi
 
-          title="IronMLX 开发预览 $PREVIEW_TAG（$REQUIRED_WARNING）"
+          title="IronMLX $PRODUCT_VERSION 开发预览 $PREVIEW_TAG（$REQUIRED_WARNING）"
           gh release create "$PREVIEW_TAG" \
             assets/*.dmg \
             assets/*.zip \
             assets/SHA256SUMS \
             assets/DEVELOPMENT-PREVIEW-NOTICE.txt \
             assets/PREVIEW-BUILD-METADATA.json \
+            assets/THIRD_PARTY_NOTICES.md \
+            assets/third-party-inventory.json \
             assets/RELEASE-NOTES.md \
             --repo "$GITHUB_REPOSITORY" \
             --target "$SOURCE_COMMIT" \

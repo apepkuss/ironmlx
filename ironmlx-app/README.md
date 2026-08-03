@@ -1,4 +1,4 @@
-# IronMLX App Bundle
+# IronMLX App Bundle 0.1.0
 
 P0-1 produces one self-contained `IronMLX.app` for Apple Silicon `arm64` on
 macOS 26.2 or newer. It does not support Intel or earlier macOS releases.
@@ -35,7 +35,11 @@ IronMLX.app/Contents/
     ├── menubar-icon.png
     ├── menubar-icon@2x.png
     ├── logo.png
-    └── sidebar-logo@2x.png
+    ├── sidebar-logo@2x.png
+    └── Legal/
+        ├── THIRD_PARTY_NOTICES.md
+        ├── third-party-inventory.json
+        └── THIRD_PARTY_LICENSES/
 ```
 
 The build is ad-hoc signed for local execution. Developer ID signing,
@@ -43,8 +47,10 @@ notarization, and DMG/PKG creation are outside P0-1.
 
 GitHub Actions development previews preserve this ad-hoc, non-notarized
 boundary and label it explicitly in the App, archives, release title, and
-release notes. See `docs/development-preview-release.md`. Preview artifacts are
-not stable releases and are only for development validation.
+release notes. Public preview packaging and publication are currently blocked
+by `scripts/release-legal-gate.sh` until P0-8B reviews the generated third-party
+materials, supplies an SBOM, and explicitly authorizes distribution. See
+`docs/development-preview-release.md`.
 
 ## Static verification
 
@@ -54,7 +60,8 @@ scripts/verify-app-bundle.sh dist/IronMLX.app
 
 This gate validates bundle contents, `arm64`, macOS 26.2 minimum versions,
 system-only dynamic dependencies, the metallib AIR target, absence of symlinks,
-absence of developer-home/Cargo fallback paths, and the ad-hoc signature.
+absence of developer-home/Cargo fallback paths, exact bundled legal materials,
+and the ad-hoc signature.
 
 Real release acceptance additionally requires launching this exact artifact in
 an environment without Rust, Xcode, an external MLX installation, or `MLX_*` /
