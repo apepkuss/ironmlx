@@ -1,0 +1,125 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+      - dev
+  push:
+    branches:
+      - main
+      - dev
+      - "feat/**"
+      - "fix/**"
+      - "test/**"
+      - "refactor/**"
+      - "perf/**"
+      - "build/**"
+      - "ci/**"
+      - "style/**"
+      - "chore/**"
+      - "revert/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+env:
+  RUST_NIGHTLY_TOOLCHAIN: nightly-2026-05-18
+
+jobs:
+  release-quality:
+    name: Rust, Swift, MLX, and App Bundle
+    runs-on: macos-26
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout immutable IronMLX commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify checkout identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=normal)"
+
+      - name: Verify Conventional Commits
+        shell: bash
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          case "$GITHUB_EVENT_NAME" in
+            pull_request)
+              base_sha="${PR_BASE_SHA:?missing pull request base SHA}"
+              head_sha="${PR_HEAD_SHA:?missing pull request head SHA}"
+              ;;
+            push)
+              base_sha="${PUSH_BEFORE_SHA:?missing push before SHA}"
+              head_sha="$GITHUB_SHA"
+              ;;
+            *)
+              echo "error: unsupported CI event: $GITHUB_EVENT_NAME" >&2
+              exit 1
+              ;;
+          esac
+          scripts/verify-conventional-commits.sh "$base_sha" "$head_sha"
+
+      - name: Install pinned Rust toolchains
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.94.0 --profile minimal --component clippy,rustfmt
+          rustup toolchain install "$RUST_NIGHTLY_TOOLCHAIN" --profile minimal --component clippy,rustfmt
+          rustc --version --verbose
+          rustc "+$RUST_NIGHTLY_TOOLCHAIN" --version --verbose
+
+      - name: Checkout clean immutable MLX source
+        shell: bash
+        run: scripts/checkout-release-mlx.sh "$RUNNER_TEMP/ironmlx-mlx-source"
+
+      - name: Build self-contained Release App Bundle
+        shell: bash
+        env:
+          MLX_SRC: ${{ runner.temp }}/ironmlx-mlx-source
+        run: scripts/build-app-bundle.sh
+
+      - name: Run required Rust gates
+        shell: bash
+        env:
+          MLX_DIR: ${{ github.workspace }}/.build/p0-1-app-bundle/mlx-install
+          MLX_METAL_PATH: ${{ github.workspace }}/.build/p0-1-app-bundle/mlx-install/lib
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo "+$RUST_NIGHTLY_TOOLCHAIN" fmt --all -- --check
+          cargo "+$RUST_NIGHTLY_TOOLCHAIN" clippy --locked --all-features --workspace -- -D warnings
+          cargo build --locked --release
+
+      - name: Run Swift Release tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          swift test \
+            --package-path ironmlx-app \
+            --configuration release \
+            --scratch-path .build/ci-swift \
+            --no-parallel
+
+      - name: Re-run static Bundle gate and protect tracked sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/verify-app-bundle.sh dist/IronMLX.app
+          git diff --check
+          git diff --exit-code
+          test -z "$(git status --porcelain=v1 --untracked-files=no)"

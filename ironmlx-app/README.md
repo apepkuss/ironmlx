@@ -41,6 +41,11 @@ IronMLX.app/Contents/
 The build is ad-hoc signed for local execution. Developer ID signing,
 notarization, and DMG/PKG creation are outside P0-1.
 
+GitHub Actions development previews preserve this ad-hoc, non-notarized
+boundary and label it explicitly in the App, archives, release title, and
+release notes. See `docs/development-preview-release.md`. Preview artifacts are
+not stable releases and are only for development validation.
+
 ## Static verification
 
 ```bash
