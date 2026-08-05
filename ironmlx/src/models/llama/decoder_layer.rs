@@ -34,6 +34,7 @@ impl LlamaDecoderLayer {
             cfg.num_key_value_heads,
             cfg.effective_head_dim(),
             cfg.rope_theta,
+            cfg.rope_scaling.as_ref(),
         )?;
         let post_attention_layernorm = RmsNorm::from_loader(
             loader,

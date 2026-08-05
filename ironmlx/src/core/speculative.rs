@@ -8,6 +8,7 @@ use mlx::{random, Array, Dtype, StreamOrDevice};
 use serde::{Deserialize, Serialize};
 
 use crate::core::cache::{MtpCache, MtpCacheSnapshot};
+use crate::core::constrained::{apply_speculative_token_masks, ConstraintSession};
 use crate::core::generate::{build_position_ids, GenerateEvent, GenerateRequest};
 #[cfg(test)]
 use crate::core::sampler::SamplingDistribution;
@@ -1806,6 +1807,7 @@ where
     adaptive_draft_tokens: usize,
     draft_policy: MtpDraftPolicyState,
     stats: MtpSpeculativeStats,
+    constraint: Option<ConstraintSession>,
 }
 
 impl<'m, M> MtpTextGenerationStream<'m, M>
@@ -1909,6 +1911,12 @@ where
         let first_logits =
             model.project_hidden_on(&last_prompt_hidden, StreamOrDevice::default())?;
         add_elapsed_us(&mut stats.projection_us, projection_start);
+        let mut constraint = request
+            .constraint
+            .as_ref()
+            .map(|plan| plan.start_session())
+            .transpose()?;
+        let first_logits = constrain_speculative_logits(&mut constraint, &first_logits, &[])?;
         let mut prng_state = mlx::random::key(request.sampler.seed)?;
         let sampling_start = Instant::now();
         let first_tokens = sample_logits_positions(
@@ -1921,6 +1929,7 @@ where
         let first_token = *first_tokens
             .first()
             .ok_or_else(|| anyhow!("MTP prefill produced no first token"))?;
+        commit_constraint_token(&mut constraint, first_token)?;
 
         let mut history = request.prompt_ids.clone();
         history.push(first_token);
@@ -1945,6 +1954,7 @@ where
             adaptive_draft_tokens: cfg.max_draft_tokens,
             draft_policy: MtpDraftPolicyState::new(cfg.max_draft_tokens),
             stats,
+            constraint,
         })
     }
 
@@ -1974,6 +1984,7 @@ where
         };
 
         if finish_reason.is_some() {
+            ensure_constraint_can_finish(&mut self.constraint, finish_reason)?;
             self.finished = true;
             return Ok(Some(GenerateEvent {
                 token,
@@ -2007,7 +2018,8 @@ where
             .adaptive_draft_tokens
             .clamp(1, self.cfg.max_draft_tokens)
             .min(remaining);
-        let draft_result = self.draft_tokens(current_token, draft_budget)?;
+        let mut draft_constraint = self.constraint.as_ref().map(ConstraintSession::fork);
+        let draft_result = self.draft_tokens(current_token, draft_budget, &mut draft_constraint)?;
         let draft_tokens = draft_result.tokens;
         let _draft_distributions = draft_result.distributions;
         let verify_input = verify_input(current_token, &draft_tokens);
@@ -2032,7 +2044,7 @@ where
             )?
         };
         add_elapsed_us(&mut self.stats.verify_forward_us, verify_forward_start);
-        let resolution = if self.request.sampler.is_pipelinable() {
+        let resolution = if self.request.sampler.is_pipelinable() && self.constraint.is_none() {
             resolve_greedy_verified_hidden_until_mismatch(
                 self.model,
                 &verified_hidden,
@@ -2046,14 +2058,25 @@ where
                 .model
                 .project_mtp_verify_hidden_on(&verified_hidden, ())?;
             add_elapsed_us(&mut self.stats.projection_us, projection_start);
-            let sampling_start = Instant::now();
-            let resolution = resolve_exact_deterministic_target_logits(
-                &draft_tokens,
+            let verified_logits = constrain_speculative_logits(
+                &mut self.constraint,
                 &verified_logits,
-                self.request.sampler,
-                &self.history,
-                &mut self.prng_state,
+                &draft_tokens,
             )?;
+            let sampling_start = Instant::now();
+            let resolution = if self.request.sampler.is_pipelinable() {
+                let verified_ids = mlx::ops::reduction::argmax(&verified_logits, -1, false)?;
+                let verified_tokens: Vec<u32> = verified_ids.to_vec()?;
+                resolve_speculative_tokens(&draft_tokens, &verified_tokens)?
+            } else {
+                resolve_exact_deterministic_target_logits(
+                    &draft_tokens,
+                    &verified_logits,
+                    self.request.sampler,
+                    &self.history,
+                    &mut self.prng_state,
+                )?
+            };
             add_elapsed_us(&mut self.stats.sampling_us, sampling_start);
             resolution
         };
@@ -2162,7 +2185,11 @@ where
             tokens_to_append.truncate(stop_idx + 1);
         }
         tokens_to_append.truncate(remaining);
+        if let Some(constraint) = self.constraint.as_ref() {
+            constraint.truncate_invalid_speculative_bonus(&mut tokens_to_append)?;
+        }
         for token in tokens_to_append {
+            commit_constraint_token(&mut self.constraint, token)?;
             self.history.push(token);
             self.pending_tokens.push_back(token);
         }
@@ -2170,7 +2197,12 @@ where
         Ok(())
     }
 
-    fn draft_tokens(&mut self, current_token: u32, draft_budget: usize) -> Result<MtpDraftResult> {
+    fn draft_tokens(
+        &mut self,
+        current_token: u32,
+        draft_budget: usize,
+        constraint: &mut Option<ConstraintSession>,
+    ) -> Result<MtpDraftResult> {
         let mtp_snapshot = self.mtp_cache.snapshot();
         let mut draft_tokens = Vec::with_capacity(draft_budget);
         let mut draft_history = self.history.clone();
@@ -2199,23 +2231,25 @@ where
                 (),
             )?;
             add_elapsed_us(&mut self.stats.draft_forward_us, draft_forward_start);
+            let draft_logits = constrain_speculative_logits(constraint, &output.logits, &[])?;
             let sampling_start = Instant::now();
             let (next_token, distribution) = if self.request.sampler.is_pipelinable() {
                 sample_draft_logits_position(
-                    &output.logits,
+                    &draft_logits,
                     self.request.sampler,
                     &draft_history,
                     None,
                 )?
             } else {
                 sample_draft_logits_position_with_uniform(
-                    &output.logits,
+                    &draft_logits,
                     self.request.sampler,
                     &draft_history,
                     draft_uniform,
                 )?
             };
             add_elapsed_us(&mut self.stats.sampling_us, sampling_start);
+            commit_constraint_token(constraint, next_token)?;
             draft_tokens.push(next_token);
             distributions.push(distribution);
             draft_history.push(next_token);
@@ -2236,6 +2270,41 @@ where
             None => build_position_ids(start_pos, len),
         }
     }
+}
+
+fn constrain_speculative_logits(
+    constraint: &mut Option<ConstraintSession>,
+    logits: &Array,
+    draft_tokens: &[u32],
+) -> Result<Array> {
+    match constraint {
+        Some(session) => {
+            apply_speculative_token_masks(logits, &[Some(session.speculative_masks(draft_tokens)?)])
+        }
+        None => Ok(logits.clone()),
+    }
+}
+
+fn commit_constraint_token(constraint: &mut Option<ConstraintSession>, token: u32) -> Result<()> {
+    if let Some(session) = constraint {
+        session.commit_token(token)?;
+    }
+    Ok(())
+}
+
+fn ensure_constraint_can_finish(
+    constraint: &mut Option<ConstraintSession>,
+    finish_reason: Option<&'static str>,
+) -> Result<()> {
+    if finish_reason == Some("length") {
+        if let Some(session) = constraint {
+            anyhow::ensure!(
+                session.is_accepting()?,
+                "max_new_tokens reached before constrained output became complete"
+            );
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn verify_input(current_token: u32, draft_tokens: &[u32]) -> Vec<u32> {

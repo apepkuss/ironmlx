@@ -5,9 +5,13 @@ use anyhow::{anyhow, Context};
 use mlx::compile::CompiledFn;
 use mlx::{random, Array, Device, Dtype, Stream, StreamOrDevice, ThreadLocalStream};
 
+use crate::core::constrained::{
+    apply_diffusion_token_masks, apply_token_mask, ConstraintPlan, ConstraintSession,
+};
 use crate::core::loader::EosTokenId;
 use crate::core::Tokenizer;
 use crate::Result;
+use llguidance::toktrie::SimpleVob;
 
 use super::config::DiffusionGemmaGenerationConfig;
 use super::model::{DiffusionGemmaEncoderInputs, DiffusionGemmaModel};
@@ -124,6 +128,36 @@ pub fn generate_text_with_events(
         temperature,
         seed,
         None,
+        None,
+        true,
+        emit,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn generate_text_with_events_constrained(
+    model: &DiffusionGemmaModel,
+    tokenizer: &Tokenizer,
+    prompt_ids: &[u32],
+    generation_config: &DiffusionGemmaGenerationConfig,
+    max_new_tokens: usize,
+    temperature: f32,
+    seed: Option<u64>,
+    constraint: &ConstraintPlan,
+    skip_special_tokens: bool,
+    emit: DiffusionGemmaEventSink<'_>,
+) -> Result<()> {
+    generate_impl(
+        model,
+        tokenizer,
+        prompt_ids,
+        generation_config,
+        max_new_tokens,
+        temperature,
+        seed,
+        None,
+        Some(constraint),
+        skip_special_tokens,
         emit,
     )
 }
@@ -188,6 +222,43 @@ pub fn generate_image_text_with_events(
             image_grid_thw,
             image_token_id,
         }),
+        None,
+        true,
+        emit,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn generate_image_text_with_events_constrained(
+    model: &DiffusionGemmaModel,
+    tokenizer: &Tokenizer,
+    prompt_ids: &[u32],
+    pixel_values: &[Array],
+    image_grid_thw: &[(i32, i32, i32)],
+    image_token_id: i32,
+    generation_config: &DiffusionGemmaGenerationConfig,
+    max_new_tokens: usize,
+    temperature: f32,
+    seed: Option<u64>,
+    constraint: &ConstraintPlan,
+    skip_special_tokens: bool,
+    emit: DiffusionGemmaEventSink<'_>,
+) -> Result<()> {
+    generate_impl(
+        model,
+        tokenizer,
+        prompt_ids,
+        generation_config,
+        max_new_tokens,
+        temperature,
+        seed,
+        Some(DiffusionGemmaMultimodalInput {
+            pixel_values,
+            image_grid_thw,
+            image_token_id,
+        }),
+        Some(constraint),
+        skip_special_tokens,
         emit,
     )
 }
@@ -202,6 +273,8 @@ fn generate_impl(
     temperature: f32,
     seed: Option<u64>,
     multimodal: Option<DiffusionGemmaMultimodalInput<'_>>,
+    constraint: Option<&ConstraintPlan>,
+    skip_special_tokens: bool,
     emit: DiffusionGemmaEventSink<'_>,
 ) -> Result<()> {
     if prompt_ids.is_empty() {
@@ -263,7 +336,8 @@ fn generate_impl(
     let mut rng = seed.map(random::key).transpose()?;
     let mut current_canvas: Option<Array> = None;
     let mut generated = 0usize;
-    let mut detok = tokenizer.decode_stream(true);
+    let mut detok = tokenizer.decode_stream(skip_special_tokens);
+    let mut constraint_session = constraint.map(ConstraintPlan::start_session).transpose()?;
 
     while generated < max_new_tokens {
         if let Some(canvas) = current_canvas.as_ref() {
@@ -289,13 +363,22 @@ fn generate_impl(
                 linear_temperature(cur_step, max_denoising_steps, generation_config);
             logits = super::ops::div_scalar_like_on(&logits, schedule_temperature, target)?;
 
-            argmax_canvas = argmax_canvas_on(&logits, target)?;
+            let constrained_logits;
+            if let Some(session) = constraint_session.as_ref() {
+                let projection = constrained_canvas_on(&logits, session, false, &mut rng, target)?;
+                constrained_logits = Some(apply_diffusion_token_masks(&logits, &projection.masks)?);
+                argmax_canvas = projection.canvas;
+            } else {
+                constrained_logits = None;
+                argmax_canvas = argmax_canvas_on(&logits, target)?;
+            }
             if cur_step == 1 {
                 break;
             }
 
+            let entropy_logits = constrained_logits.as_ref().unwrap_or(&logits);
             let (entropy, probs) =
-                entropy_probs_chain_on(&logits, Some(entropy_probs_chain), target)?;
+                entropy_probs_chain_on(entropy_logits, Some(entropy_probs_chain), target)?;
             if stable_and_confident_on(
                 &argmax_canvas,
                 &entropy,
@@ -318,13 +401,17 @@ fn generate_impl(
                 argmax_canvas.clone()
             } else {
                 let sample_logits = super::ops::div_scalar_like_on(&logits, temperature, target)?;
-                let sample_key = next_random_key(&mut rng)?;
-                let mut sampler = random::categorical(&sample_logits).axis(-1).stream(target);
-                if let Some(key) = sample_key.as_ref() {
-                    sampler = sampler.key(key);
+                if let Some(session) = constraint_session.as_ref() {
+                    constrained_canvas_on(&sample_logits, session, true, &mut rng, target)?.canvas
+                } else {
+                    let sample_key = next_random_key(&mut rng)?;
+                    let mut sampler = random::categorical(&sample_logits).axis(-1).stream(target);
+                    if let Some(key) = sample_key.as_ref() {
+                        sampler = sampler.key(key);
+                    }
+                    let sampled = sampler.sample()?;
+                    sampled.astype_on(Dtype::Int32, target)?
                 }
-                let sampled = sampler.sample()?;
-                sampled.astype_on(Dtype::Int32, target)?
             };
 
             let acceptance_mask = entropy_transfer_mask_on(
@@ -363,6 +450,9 @@ fn generate_impl(
         for token in token_ids {
             generated += 1;
             if stop_ids.contains(&token) {
+                if let Some(session) = constraint_session.as_mut() {
+                    session.commit_token(token)?;
+                }
                 let keep_going = emit(DiffusionGemmaGenerateEvent {
                     token,
                     text: String::new(),
@@ -370,6 +460,9 @@ fn generate_impl(
                 })?;
                 let _ = keep_going;
                 return Ok(());
+            }
+            if let Some(session) = constraint_session.as_mut() {
+                session.commit_token(token)?;
             }
             let text = detok.step(token)?.unwrap_or_default();
             if !emit(DiffusionGemmaGenerateEvent {
@@ -383,6 +476,13 @@ fn generate_impl(
                 break;
             }
         }
+    }
+
+    if let Some(session) = constraint_session.as_mut() {
+        anyhow::ensure!(
+            session.is_accepting()?,
+            "DiffusionGemma reached max_new_tokens before constrained output became complete"
+        );
     }
 
     let _ = emit(DiffusionGemmaGenerateEvent {
@@ -445,6 +545,88 @@ fn sample_diffusion_canvas_on(
 fn argmax_canvas_on(logits: &Array, target: StreamOrDevice) -> Result<Array> {
     let argmax = mlx::ops::argmax_on(logits, -1_i32, false, target)?;
     Ok(argmax.astype_on(Dtype::Int32, target)?)
+}
+
+struct ConstrainedCanvas {
+    canvas: Array,
+    masks: Vec<SimpleVob>,
+}
+
+fn constrained_canvas_on(
+    logits: &Array,
+    committed: &ConstraintSession,
+    sample: bool,
+    rng: &mut Option<Array>,
+    target: StreamOrDevice,
+) -> Result<ConstrainedCanvas> {
+    let shape = logits.shape();
+    let dims = shape.as_slice();
+    anyhow::ensure!(
+        dims.len() == 3 && dims[0] == 1,
+        "DiffusionGemma constrained logits must be [1,L,V], got {dims:?}"
+    );
+    let canvas_len = dims[1] as usize;
+    let vocab = dims[2] as usize;
+    anyhow::ensure!(
+        committed.vocab_size() <= vocab,
+        "DiffusionGemma constraint vocabulary {} exceeds model vocabulary {vocab}",
+        committed.vocab_size()
+    );
+
+    let mut session = committed.fork();
+    let mut masks = Vec::with_capacity(canvas_len);
+    let mut tokens = Vec::with_capacity(canvas_len);
+    let mut terminal_eos = None;
+
+    for position in 0..canvas_len {
+        if let Some(eos) = terminal_eos {
+            let mut mask = SimpleVob::alloc(committed.vocab_size());
+            mask.allow_token(eos);
+            masks.push(mask);
+            tokens.push(eos);
+            continue;
+        }
+
+        let mask = session.compute_mask()?;
+        let row = mlx::ops::indexing::slice_on(
+            logits,
+            [0_i32, position as i32, 0_i32],
+            [1_i32, position as i32 + 1, vocab as i32],
+            target,
+        )?;
+        let row = mlx::ops::shape::squeeze_on(&row, &[0_i32, 1_i32][..], target)?;
+        let masked = apply_token_mask(&row, &mask)?;
+        let token = if sample {
+            let key = next_random_key(rng)?;
+            let mut sampler = random::categorical(&masked).axis(-1).stream(target);
+            if let Some(key) = key.as_ref() {
+                sampler = sampler.key(key);
+            }
+            sampler.sample()?.item::<u32>()?
+        } else {
+            mlx::ops::argmax_on(&masked, -1_i32, false, target)?.item::<u32>()?
+        };
+        anyhow::ensure!(
+            mask.is_allowed(token),
+            "DiffusionGemma selected token {token} outside its constrained mask"
+        );
+        session.commit_token(token)?;
+        if session.eos_token_ids().contains(&token) {
+            terminal_eos = Some(token);
+        }
+        masks.push(mask);
+        tokens.push(token);
+    }
+
+    let token_ids = tokens
+        .into_iter()
+        .map(|token| i32::try_from(token).context("DiffusionGemma token id exceeds int32"))
+        .collect::<Result<Vec<_>>>()?;
+    let canvas: Array = (&token_ids[..], &[1_i32, canvas_len as i32][..]).try_into()?;
+    Ok(ConstrainedCanvas {
+        canvas: canvas.astype_on(Dtype::Int32, target)?,
+        masks,
+    })
 }
 
 fn token_ids_from_canvas(canvas: &Array) -> Result<Vec<u32>> {
@@ -640,6 +822,52 @@ mod tests {
         build_entropy_probs_chain, build_entropy_transfer_mask_chain, build_stable_confidence_chain,
     };
     use super::*;
+    use crate::core::constrained::{
+        ConstraintTokenizer, ToolChoiceConstraint, ToolConstraintOptions,
+    };
+    use crate::core::tool_calling::ToolDefinition;
+
+    fn gemma_tool_plan_and_tokens() -> (ConstraintPlan, Vec<u32>) {
+        let tokenizer = ConstraintTokenizer::byte_level_gemma().unwrap();
+        let plan = tokenizer
+            .compile_gemma_tools(
+                &[ToolDefinition {
+                    name: "get_weather".to_owned(),
+                    description: None,
+                    parameters: serde_json::json!({
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                        "additionalProperties": false
+                    }),
+                    strict: None,
+                }],
+                &ToolConstraintOptions {
+                    choice: ToolChoiceConstraint::Required,
+                    allow_parallel_calls: false,
+                },
+            )
+            .unwrap();
+        let mut expected = vec![256_u32];
+        expected.extend(b"call:get_weather{city:".iter().copied().map(u32::from));
+        expected.push(258);
+        expected.extend(b"Tokyo".iter().copied().map(u32::from));
+        expected.push(258);
+        expected.push(u32::from(b'}'));
+        expected.push(257);
+        expected.push(261);
+        (plan, expected)
+    }
+
+    fn logits_preferring(tokens: &[u32], vocab: usize) -> Array {
+        let mut values = vec![-100.0_f32; tokens.len() * vocab];
+        for (position, token) in tokens.iter().enumerate() {
+            values[position * vocab + *token as usize] = 100.0;
+        }
+        (&values[..], &[1_i32, tokens.len() as i32, vocab as i32][..])
+            .try_into()
+            .unwrap()
+    }
 
     #[test]
     fn multimodal_token_type_ids_mark_image_soft_tokens() {
@@ -679,6 +907,87 @@ mod tests {
         let argmax = argmax_canvas_on(&logits, StreamOrDevice::default()).unwrap();
         assert_eq!(argmax.dtype(), Dtype::Int32);
         assert_eq!(token_ids_from_canvas(&argmax).unwrap(), vec![1, 0, 0]);
+    }
+
+    #[test]
+    fn constrained_canvas_projects_one_prefix_legal_gemma_path_and_eos() {
+        let (plan, expected) = gemma_tool_plan_and_tokens();
+        let vocab = 262_usize;
+        let logits = logits_preferring(&expected, vocab);
+        let session = plan.start_session().unwrap();
+        let mut rng = None;
+        let projected = constrained_canvas_on(
+            &logits,
+            &session,
+            false,
+            &mut rng,
+            StreamOrDevice::default(),
+        )
+        .unwrap();
+        assert_eq!(token_ids_from_canvas(&projected.canvas).unwrap(), expected);
+
+        let masked = apply_diffusion_token_masks(&logits, &projected.masks).unwrap();
+        assert_eq!(
+            mlx::ops::reduction::argmax(&masked, -1, false)
+                .unwrap()
+                .to_vec::<u32>()
+                .unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn constrained_canvas_carries_committed_grammar_state_across_canvases() {
+        let (plan, expected) = gemma_tool_plan_and_tokens();
+        let split = 19_usize;
+        let mut committed = plan.start_session().unwrap();
+        let mut rng = None;
+
+        let first = constrained_canvas_on(
+            &logits_preferring(&expected[..split], 262),
+            &committed,
+            false,
+            &mut rng,
+            StreamOrDevice::default(),
+        )
+        .unwrap();
+        let first_tokens = token_ids_from_canvas(&first.canvas).unwrap();
+        assert_eq!(first_tokens, expected[..split]);
+        committed.commit_tokens(&first_tokens).unwrap();
+        assert!(!committed.is_accepting().unwrap());
+
+        let second = constrained_canvas_on(
+            &logits_preferring(&expected[split..], 262),
+            &committed,
+            false,
+            &mut rng,
+            StreamOrDevice::default(),
+        )
+        .unwrap();
+        let second_tokens = token_ids_from_canvas(&second.canvas).unwrap();
+        assert_eq!(second_tokens, expected[split..]);
+        committed.commit_tokens(&second_tokens).unwrap();
+        assert!(committed.is_accepting().unwrap());
+    }
+
+    #[test]
+    fn constrained_canvas_sampling_stays_on_a_complete_legal_path() {
+        let (plan, expected) = gemma_tool_plan_and_tokens();
+        let logits = logits_preferring(&expected, 262);
+        let session = plan.start_session().unwrap();
+        let mut rng = Some(random::key(7).unwrap());
+
+        let projected =
+            constrained_canvas_on(&logits, &session, true, &mut rng, StreamOrDevice::default())
+                .unwrap();
+        let sampled = token_ids_from_canvas(&projected.canvas).unwrap();
+        assert_eq!(sampled, expected);
+        assert_eq!(
+            session
+                .validate_tokens(&sampled[..sampled.len() - 1])
+                .unwrap(),
+            sampled.len() - 1
+        );
     }
 
     #[test]

@@ -10,6 +10,7 @@ use anyhow::anyhow;
 use mlx::{Array, Dtype};
 
 use crate::core::cache::TurboQuantKVBits;
+use crate::core::constrained::{apply_token_mask, ConstraintPlan, ConstraintSession};
 use crate::core::model::Model;
 use crate::core::sampler::Sampler;
 use crate::core::scheduler::DenseVlMethods;
@@ -65,6 +66,8 @@ pub struct GenerateRequest {
     /// (`248056` for Qwen3.5-VL). Sibling VL models with a different image-pad
     /// id must set this from `Tokenizer::token_to_id("<|image_pad|>")`.
     pub image_token_id: i32,
+    /// Optional immutable token-level decoding constraint for this request.
+    pub constraint: Option<ConstraintPlan>,
 }
 
 #[derive(Debug, Clone)]
@@ -149,6 +152,9 @@ pub struct GenerationStream<'m, M: Model> {
     /// Per-stream PRNG state `[2]` u32. Initialized from `request.sampler.seed`
     /// in `new()`. Advanced by each `Sampler::sample` call. (B1-p2.3e.2)
     prng_state: Array,
+    /// Request-local mutable grammar state. Speculative paths clone this state
+    /// for proposal verification and only commit emitted tokens.
+    constraint: Option<ConstraintSession>,
 }
 
 impl<M: Model> Drop for GenerationStream<'_, M> {
@@ -1369,6 +1375,11 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
         let history = request.prompt_ids.clone();
         let pipelined = request.sampler.is_pipelinable();
         let vl_profile = gemma4_vl_profile_enabled();
+        let mut constraint = request
+            .constraint
+            .as_ref()
+            .map(ConstraintPlan::start_session)
+            .transpose()?;
 
         // Initialize per-stream PRNG state from sampler seed. [2] u32.
         let mut prng_state = mlx::random::key(request.sampler.seed)?;
@@ -1378,7 +1389,8 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
             // pre-dispatched via async_eval so the GPU is already working on
             // it by the time the first next_token() call materialises it.
             let pending = {
-                let pending = request.sampler.sample_async_greedy(&last_logits)?;
+                let constrained_logits = constrain_logits(&mut constraint, &last_logits)?;
+                let pending = request.sampler.sample_async_greedy(&constrained_logits)?;
                 mlx::transforms::async_eval(&[&pending])?;
                 pending
             };
@@ -1403,14 +1415,18 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
                 capture_active,
                 capture_pending_decode,
                 prng_state,
+                constraint,
             })
         } else {
             // Sync path: existing pre-P8a behavior. First token sampled
             // synchronously here; pushed into history; initial text snapshot
             // captured for incremental diff.
-            let first_token = request
-                .sampler
-                .sample(&last_logits, &history, &mut prng_state)?;
+            let constrained_logits = constrain_logits(&mut constraint, &last_logits)?;
+            let first_token =
+                request
+                    .sampler
+                    .sample(&constrained_logits, &history, &mut prng_state)?;
+            commit_constraint_token(&mut constraint, first_token)?;
             let mut history = history;
             history.push(first_token);
 
@@ -1437,6 +1453,7 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
                 capture_active,
                 capture_pending_decode,
                 prng_state,
+                constraint,
             })
         }
     }
@@ -1533,9 +1550,15 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
         let pipelined = request.sampler.is_pipelinable();
         let vl_profile = gemma4_vl_profile_enabled();
         let mut prng_state = mlx::random::key(request.sampler.seed)?;
+        let mut constraint = request
+            .constraint
+            .as_ref()
+            .map(ConstraintPlan::start_session)
+            .transpose()?;
 
         if pipelined {
-            let pending = request.sampler.sample_async_greedy(&last_logits)?;
+            let constrained_logits = constrain_logits(&mut constraint, &last_logits)?;
+            let pending = request.sampler.sample_async_greedy(&constrained_logits)?;
             mlx::transforms::async_eval(&[&pending])?;
             let detok = tokenizer.decode_stream(/* skip_special */ true);
             Ok(Self {
@@ -1557,11 +1580,15 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
                 capture_active,
                 capture_pending_decode,
                 prng_state,
+                constraint,
             })
         } else {
-            let first_token = request
-                .sampler
-                .sample(&last_logits, &history, &mut prng_state)?;
+            let constrained_logits = constrain_logits(&mut constraint, &last_logits)?;
+            let first_token =
+                request
+                    .sampler
+                    .sample(&constrained_logits, &history, &mut prng_state)?;
+            commit_constraint_token(&mut constraint, first_token)?;
             let mut history = history;
             history.push(first_token);
             let initial_text = tokenizer
@@ -1586,6 +1613,7 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
                 capture_active,
                 capture_pending_decode,
                 prng_state,
+                constraint,
             })
         }
     }
@@ -1657,6 +1685,7 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
             .as_ref()
             .expect("pipelined mode invariant: pending_token_arr is Some");
         let token: u32 = pending.item()?;
+        commit_constraint_token(&mut self.constraint, token)?;
         log_gemma4_vl_profile_step_ms("decode_pipelined_pending_item", wait_start, decode_step);
 
         // 2. Push to history; produce incremental text via DecodeStream.
@@ -1680,6 +1709,7 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
         };
 
         if finish_reason.is_some() {
+            ensure_constraint_can_finish(&mut self.constraint, finish_reason)?;
             self.finished = true;
             // Drop pending_token_arr — no further dispatch on this terminal step.
             self.pending_token_arr = None;
@@ -1724,7 +1754,11 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
         log_gemma4_vl_profile_step_ms("decode_pipeline_logits_reshape", t0, decode_step);
 
         let t0 = pipeline_profile.then(Instant::now);
-        let next_arr = self.request.sampler.sample_async_greedy(&logits_flat)?;
+        let constrained_logits = constrain_logits(&mut self.constraint, &logits_flat)?;
+        let next_arr = self
+            .request
+            .sampler
+            .sample_async_greedy(&constrained_logits)?;
         log_gemma4_vl_profile_step_ms("decode_pipeline_sample_graph", t0, decode_step);
 
         let t0 = pipeline_profile.then(Instant::now);
@@ -1781,6 +1815,7 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
         };
 
         if finish_reason.is_some() {
+            ensure_constraint_can_finish(&mut self.constraint, finish_reason)?;
             self.finished = true;
             return Ok(Some(GenerateEvent {
                 token,
@@ -1805,10 +1840,13 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
         // Logits shape [1, 1, vocab] — flatten to [vocab].
         let vocab = logits.shape().as_slice()[2];
         let logits_flat = logits.reshape((vocab,))?;
-        let next =
-            self.request
-                .sampler
-                .sample(&logits_flat, &self.history, &mut self.prng_state)?;
+        let constrained_logits = constrain_logits(&mut self.constraint, &logits_flat)?;
+        let next = self.request.sampler.sample(
+            &constrained_logits,
+            &self.history,
+            &mut self.prng_state,
+        )?;
+        commit_constraint_token(&mut self.constraint, next)?;
         self.history.push(next);
         log_gemma4_vl_profile_step_ms(
             "decode_sync_forward_sample",
@@ -1847,6 +1885,36 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
     pub fn history(&self) -> &[u32] {
         &self.history
     }
+}
+
+fn constrain_logits(constraint: &mut Option<ConstraintSession>, logits: &Array) -> Result<Array> {
+    match constraint {
+        Some(session) => apply_token_mask(logits, &session.compute_mask()?),
+        None => Ok(logits.clone()),
+    }
+}
+
+fn commit_constraint_token(constraint: &mut Option<ConstraintSession>, token: u32) -> Result<()> {
+    if let Some(session) = constraint {
+        session.commit_token(token)?;
+    }
+    Ok(())
+}
+
+fn ensure_constraint_can_finish(
+    constraint: &mut Option<ConstraintSession>,
+    finish_reason: Option<&'static str>,
+) -> Result<()> {
+    if finish_reason == Some("length") {
+        if let Some(session) = constraint {
+            if !session.is_accepting()? {
+                return Err(anyhow!(
+                    "max_new_tokens reached before constrained output became complete"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1939,6 +2007,7 @@ mod tests {
             image_grid_thw: None,
             image_spatial_merge_size: 2,
             image_token_id: IMAGE_TOKEN_ID,
+            constraint: None,
         };
         assert!(req.pixel_values.is_none());
         assert!(req.image_grid_thw.is_none());

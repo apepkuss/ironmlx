@@ -76,6 +76,7 @@ fn run_b1_baseline(
         image_grid_thw: None,
         image_spatial_merge_size: 2,
         image_token_id: 248056,
+        constraint: None,
     };
     let mut stream = GenerationStream::new(model, tokenizer, req).expect("new stream");
     let mut tokens = Vec::new();
@@ -161,6 +162,7 @@ fn b1_p2_3b_1_b2_happy() {
             image_grid_thw: None,
             image_spatial_merge_size: 2,
             image_token_id: 248056,
+            constraint: None,
         })
         .expect("admit A");
     let id_b = sched
@@ -176,6 +178,7 @@ fn b1_p2_3b_1_b2_happy() {
             image_grid_thw: None,
             image_spatial_merge_size: 2,
             image_token_id: 248056,
+            constraint: None,
         })
         .expect("admit B");
 
@@ -258,6 +261,7 @@ fn b1_p2_3b_1_b2_happy() {
             image_grid_thw: None,
             image_spatial_merge_size: 2,
             image_token_id: 248056,
+            constraint: None,
         })
         .expect("admit C");
     let prefill_events_2 = sched.prefill_admitted(&model).expect("prefill_admitted #2");
@@ -342,6 +346,7 @@ fn b1_p2_3b_1_b4_happy() {
                     image_grid_thw: None,
                     image_spatial_merge_size: 2,
                     image_token_id: 248056,
+                    constraint: None,
                 })
                 .expect("admit")
         })
@@ -443,6 +448,7 @@ fn b1_p2_3b_1_mixed_finish() {
             image_grid_thw: None,
             image_spatial_merge_size: 2,
             image_token_id: 248056,
+            constraint: None,
         })
         .expect("admit A");
     let id_b = sched
@@ -458,6 +464,7 @@ fn b1_p2_3b_1_mixed_finish() {
             image_grid_thw: None,
             image_spatial_merge_size: 2,
             image_token_id: 248056,
+            constraint: None,
         })
         .expect("admit B");
 

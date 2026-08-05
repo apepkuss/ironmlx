@@ -352,6 +352,7 @@ where
         image_grid_thw: image_grid_thw_opt,
         image_spatial_merge_size,
         image_token_id,
+        constraint: None,
     };
 
     let use_scheduler = super::should_route_to_scheduler::<M>(
@@ -462,6 +463,7 @@ pub(crate) async fn messages_with_gemma4_drafter_state(
         image_grid_thw: image_grid_thw_opt,
         image_spatial_merge_size,
         image_token_id,
+        constraint: None,
     };
 
     if stream {
@@ -1237,6 +1239,8 @@ mod parity_tests {
                     },
                 },
             ]),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
         }]
     }
 

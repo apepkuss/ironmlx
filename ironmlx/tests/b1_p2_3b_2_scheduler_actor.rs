@@ -98,6 +98,7 @@ async fn scheduler_actor_b1_text_only_swap() {
         image_grid_thw: None,
         image_spatial_merge_size: 2,
         image_token_id: 248056,
+        constraint: None,
     };
 
     // 1. B=1 reference via direct GenerationStream.
@@ -190,6 +191,7 @@ async fn scheduler_actor_long_prompt_routes_to_gs() {
         image_grid_thw: None,
         image_spatial_merge_size: 2,
         image_token_id: 248056,
+        constraint: None,
     };
 
     // Verify the routing predicate selects GS — mirrors openai.rs:362-365.
@@ -263,6 +265,7 @@ async fn scheduler_actor_vl_routes_to_gs() {
         image_grid_thw: Some(dummy_grid),
         image_spatial_merge_size: 2,
         image_token_id: 248056,
+        constraint: None,
     };
 
     // Routing predicate must select GS path (mirrors openai.rs:362-365).

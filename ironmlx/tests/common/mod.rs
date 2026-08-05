@@ -2,4 +2,5 @@
 #![allow(dead_code)]
 
 pub mod clean_state;
+pub mod constrained;
 pub mod minicpmv46_parity;

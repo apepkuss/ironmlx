@@ -47,12 +47,20 @@ pub struct LlamaConfig {
     pub tie_word_embeddings: bool,
     #[serde(default = "default_max_position_embeddings")]
     pub max_position_embeddings: i32,
-    /// Long-context RoPE scaling block. MiniCPM5-1B ships `null`. A non-null
-    /// value (LongRoPE / YaRN / linear) changes the rotary frequencies (and,
-    /// for YaRN, the softmax scale) and is NOT implemented on this path → it is
-    /// rejected by [`LlamaConfig::validate`] rather than silently mis-applied.
+    /// Llama 3.1/3.2's exact frequency scaling contract. MiniCPM5-1B ships
+    /// `null`; other RoPE scaling families remain unsupported.
     #[serde(default)]
-    pub rope_scaling: Option<serde_json::Value>,
+    pub rope_scaling: Option<Llama3RopeScaling>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Llama3RopeScaling {
+    pub factor: f32,
+    pub high_freq_factor: f32,
+    pub low_freq_factor: f32,
+    pub original_max_position_embeddings: i32,
+    pub rope_type: String,
 }
 
 impl LlamaConfig {
@@ -81,12 +89,23 @@ impl LlamaConfig {
 
     /// Reject configurations this implementation does not support.
     pub fn validate(&self) -> Result<()> {
-        if self.rope_scaling.is_some() {
-            return Err(anyhow!(
-                "llama: rope_scaling must be null (LongRoPE/YaRN/linear scaling \
-                 not supported on this path); got {:?}",
-                self.rope_scaling
-            ));
+        if let Some(scaling) = &self.rope_scaling {
+            if scaling.rope_type != "llama3" {
+                return Err(anyhow!(
+                    "llama: unsupported rope_scaling.rope_type `{}`; only `llama3` is supported",
+                    scaling.rope_type
+                ));
+            }
+            if !scaling.factor.is_finite()
+                || scaling.factor < 1.0
+                || !scaling.low_freq_factor.is_finite()
+                || scaling.low_freq_factor <= 0.0
+                || !scaling.high_freq_factor.is_finite()
+                || scaling.high_freq_factor <= scaling.low_freq_factor
+                || scaling.original_max_position_embeddings <= 0
+            {
+                return Err(anyhow!("llama: invalid llama3 rope_scaling parameters"));
+            }
         }
         Ok(())
     }
@@ -148,10 +167,31 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_null_rope_scaling() {
+    fn accepts_exact_llama3_rope_scaling_and_rejects_other_families() {
+        let llama3 = MINICPM5.replace(
+            "\"rope_scaling\": null,",
+            concat!(
+                "\"rope_scaling\": {",
+                "\"factor\": 32.0,",
+                "\"high_freq_factor\": 4.0,",
+                "\"low_freq_factor\": 1.0,",
+                "\"original_max_position_embeddings\": 8192,",
+                "\"rope_type\": \"llama3\"},"
+            ),
+        );
+        let parsed = LlamaConfig::from_json_str(&llama3).unwrap();
+        assert_eq!(parsed.rope_scaling.unwrap().factor, 32.0);
+
         let raw = MINICPM5.replace(
             "\"rope_scaling\": null,",
-            "\"rope_scaling\": {\"rope_type\": \"longrope\"},",
+            concat!(
+                "\"rope_scaling\": {",
+                "\"factor\": 2.0,",
+                "\"high_freq_factor\": 4.0,",
+                "\"low_freq_factor\": 1.0,",
+                "\"original_max_position_embeddings\": 8192,",
+                "\"rope_type\": \"longrope\"},"
+            ),
         );
         assert!(LlamaConfig::from_json_str(&raw).is_err());
     }

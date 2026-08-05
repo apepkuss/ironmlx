@@ -200,6 +200,8 @@ pub fn expand_decoded_messages(
             ChatMessage {
                 role: msg.role,
                 content: Content::Text(out),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
             }
         })
         .collect();

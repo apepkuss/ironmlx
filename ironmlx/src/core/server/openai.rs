@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
     body::{Body, Bytes},
-    extract::State,
+    extract::{rejection::JsonRejection, State},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -19,6 +19,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use tokio::sync::oneshot;
 
+use crate::core::constrained::{ToolChoiceConstraint, ToolConstraintOptions};
 use crate::core::generate::{GenerateRequest, GenerationStream};
 use crate::core::image_input::{ImageInputError, ImageRequestBudget};
 use crate::core::model::Model;
@@ -30,6 +31,10 @@ use crate::core::server::scheduler_actor::{AdmitReply, SchedulerCommand};
 use crate::core::server::vision::{expand_decoded_messages_bounded, DecodedMessage, DecodedPart};
 use crate::core::server::VisionInputConfig;
 use crate::core::speculative::MtpSpeculativeConfig;
+use crate::core::tool_calling::{
+    validate_function_name, validate_tool_definitions, AgentMessage, AssistantOutputEvent,
+    TemplateToolCall, ToolCall, ToolCallParser, ToolDefinition, ToolDialect,
+};
 
 use super::{
     request_token_capacity_error_response, AppState, Gemma4DrafterAppState, SamplingDefaults,
@@ -102,6 +107,18 @@ pub struct ChatRequest {
     pub model: Option<String>,
     pub messages: Vec<ChatMessage>,
     #[serde(default)]
+    pub tools: Option<Vec<OpenAiTool>>,
+    #[serde(default)]
+    pub tool_choice: Option<serde_json::Value>,
+    #[serde(default)]
+    pub parallel_tool_calls: Option<bool>,
+    /// Deprecated OpenAI function-calling field. It is surfaced only so API-1
+    /// can reject it explicitly instead of silently ignoring it.
+    #[serde(default)]
+    pub function_call: Option<serde_json::Value>,
+    #[serde(default)]
+    pub functions: Option<serde_json::Value>,
+    #[serde(default)]
     pub stream: bool,
     #[serde(default)]
     pub stream_options: Option<StreamOptions>,
@@ -126,6 +143,43 @@ pub struct ChatRequest {
     /// `enable_thinking` toggle, vLLM's `tools` / `documents`, etc.
     #[serde(default)]
     pub chat_template_kwargs: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenAiTool {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub function: ToolDefinition,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedToolRequest {
+    pub(crate) dialect: ToolDialect,
+    pub(crate) wire_tools: Vec<OpenAiTool>,
+    pub(crate) definitions: Vec<ToolDefinition>,
+    pub(crate) constraint_options: Option<ToolConstraintOptions>,
+}
+
+#[derive(Debug)]
+struct ToolResponseContext {
+    dialect: ToolDialect,
+    definitions: Vec<ToolDefinition>,
+    constraint_options: ToolConstraintOptions,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NamedToolChoice {
+    #[serde(rename = "type")]
+    kind: String,
+    function: NamedFunctionChoice,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NamedFunctionChoice {
+    name: String,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -155,6 +209,28 @@ struct DeltaRole {
 #[derive(Debug, Serialize)]
 struct DeltaContent<'a> {
     content: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct DeltaToolCalls {
+    tool_calls: Vec<DeltaToolCall>,
+}
+
+#[derive(Debug, Serialize)]
+struct DeltaToolCall {
+    index: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    kind: Option<&'static str>,
+    function: DeltaFunctionCall,
+}
+
+#[derive(Debug, Serialize)]
+struct DeltaFunctionCall {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    arguments: String,
 }
 
 #[cfg(test)]
@@ -200,7 +276,23 @@ impl StreamUsageChunk {
 #[derive(Debug, Serialize)]
 struct CompletionMessage {
     role: &'static str,
-    content: String,
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tool_calls: Vec<CompletionToolCall>,
+}
+
+#[derive(Debug, Serialize)]
+struct CompletionToolCall {
+    id: String,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    function: CompletionFunctionCall,
+}
+
+#[derive(Debug, Serialize)]
+struct CompletionFunctionCall {
+    name: String,
+    arguments: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -306,6 +398,233 @@ fn gen_id() -> String {
     format!("chatcmpl-{}", now_unix())
 }
 
+pub(crate) fn prepare_tool_request(
+    req: &ChatRequest,
+    dialect: Option<ToolDialect>,
+) -> anyhow::Result<Option<PreparedToolRequest>> {
+    if req.function_call.is_some() || req.functions.is_some() {
+        anyhow::bail!(
+            "deprecated `functions` / `function_call` fields are not supported; use `tools`"
+        );
+    }
+    let Some(wire_tools) = req.tools.as_ref() else {
+        if req
+            .messages
+            .iter()
+            .any(|message| !message.tool_calls.is_empty() || message.tool_call_id.is_some())
+        {
+            anyhow::bail!("tool-call history requires a non-empty `tools` array");
+        }
+        if req.parallel_tool_calls.is_some() {
+            anyhow::bail!("parallel_tool_calls requires a non-empty `tools` array");
+        }
+        if let Some(choice) = &req.tool_choice {
+            if choice.as_str() != Some("none") {
+                anyhow::bail!("tool_choice requires a non-empty `tools` array");
+            }
+        }
+        return Ok(None);
+    };
+
+    let dialect = dialect.ok_or_else(|| {
+        anyhow::anyhow!(
+            "this model chat template does not support API-1 tools; supported native dialects: Qwen3.5/Qwen3.6, Gemma, GLM, Llama, and MiniCPM"
+        )
+    })?;
+    if wire_tools.len() > 128 {
+        anyhow::bail!("tools exceeds the supported maximum of 128 functions");
+    }
+    if req
+        .chat_template_kwargs
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|kwargs| kwargs.contains_key("tools"))
+    {
+        anyhow::bail!("chat_template_kwargs.tools conflicts with the top-level `tools` field");
+    }
+    let mut definitions = Vec::with_capacity(wire_tools.len());
+    for tool in wire_tools {
+        if tool.kind != "function" {
+            anyhow::bail!("only tools[].type=`function` is supported");
+        }
+        definitions.push(tool.function.clone());
+    }
+    validate_tool_definitions(&definitions)?;
+    let constraint_options = resolve_tool_constraint_options(req, &definitions)?;
+    Ok(Some(PreparedToolRequest {
+        dialect,
+        wire_tools: wire_tools.clone(),
+        definitions,
+        constraint_options,
+    }))
+}
+
+fn resolve_tool_constraint_options(
+    req: &ChatRequest,
+    definitions: &[ToolDefinition],
+) -> anyhow::Result<Option<ToolConstraintOptions>> {
+    let choice = match req.tool_choice.as_ref() {
+        None => ToolChoiceConstraint::Auto,
+        Some(choice) if choice.as_str() == Some("auto") => ToolChoiceConstraint::Auto,
+        Some(choice) if choice.as_str() == Some("none") => return Ok(None),
+        Some(choice) if choice.as_str() == Some("required") => ToolChoiceConstraint::Required,
+        Some(choice) if choice.is_object() => {
+            let selected: NamedToolChoice = serde_json::from_value(choice.clone()).map_err(|_| {
+                anyhow::anyhow!(
+                    "tool_choice object must be {{\"type\":\"function\",\"function\":{{\"name\":\"...\"}}}}"
+                )
+            })?;
+            anyhow::ensure!(
+                selected.kind == "function",
+                "tool_choice.type must be `function`"
+            );
+            validate_function_name(&selected.function.name)?;
+            anyhow::ensure!(
+                definitions
+                    .iter()
+                    .any(|definition| definition.name == selected.function.name),
+                "tool_choice references unknown function `{}`",
+                selected.function.name
+            );
+            ToolChoiceConstraint::Function(selected.function.name)
+        }
+        Some(_) => {
+            anyhow::bail!("tool_choice must be `auto`, `none`, `required`, or a specified function")
+        }
+    };
+    Ok(Some(ToolConstraintOptions {
+        choice,
+        allow_parallel_calls: req.parallel_tool_calls.unwrap_or(true),
+    }))
+}
+
+pub(crate) fn tool_template_kwargs(
+    base: Option<serde_json::Value>,
+    prepared: &PreparedToolRequest,
+) -> anyhow::Result<serde_json::Value> {
+    let mut object = match base {
+        Some(serde_json::Value::Object(object)) => object,
+        Some(_) => anyhow::bail!("chat_template_kwargs must be a JSON object"),
+        None => serde_json::Map::new(),
+    };
+    if prepared.constraint_options.is_some() {
+        object.insert(
+            "tools".to_owned(),
+            serde_json::to_value(&prepared.wire_tools)?,
+        );
+    }
+    Ok(serde_json::Value::Object(object))
+}
+
+pub(crate) fn build_agent_messages(
+    original: &[ChatMessage],
+    flattened: &[ChatMessage],
+) -> anyhow::Result<Vec<AgentMessage>> {
+    if original.len() != flattened.len() {
+        anyhow::bail!("internal message expansion changed conversation length");
+    }
+    let mut output = Vec::with_capacity(original.len());
+    let mut unresolved = std::collections::HashSet::<String>::new();
+    let mut seen_ids = std::collections::HashSet::<String>::new();
+
+    for (wire, flat) in original.iter().zip(flattened) {
+        let content = match &flat.content {
+            Content::Text(text) => text.clone(),
+            Content::Parts(_) => anyhow::bail!("message image parts were not flattened"),
+        };
+        match wire.role.as_str() {
+            "system" | "user" => {
+                if !unresolved.is_empty() {
+                    anyhow::bail!("all assistant tool calls must receive tool results before the next conversation turn");
+                }
+                if !wire.tool_calls.is_empty() || wire.tool_call_id.is_some() {
+                    anyhow::bail!("role `{}` cannot contain tool call fields", wire.role);
+                }
+                output.push(AgentMessage {
+                    role: wire.role.clone(),
+                    content: Some(content),
+                    tool_calls: Vec::new(),
+                    tool_call_id: None,
+                });
+            }
+            "assistant" => {
+                if !unresolved.is_empty() {
+                    anyhow::bail!("previous assistant tool calls are missing tool results");
+                }
+                if wire.tool_call_id.is_some() {
+                    anyhow::bail!("assistant messages cannot contain tool_call_id");
+                }
+                let mut calls = Vec::with_capacity(wire.tool_calls.len());
+                for call in &wire.tool_calls {
+                    if call.kind != "function" {
+                        anyhow::bail!("assistant tool_calls only support type=`function`");
+                    }
+                    validate_function_name(&call.function.name)?;
+                    if call.id.is_empty() || !seen_ids.insert(call.id.clone()) {
+                        anyhow::bail!("assistant tool call IDs must be non-empty and unique");
+                    }
+                    let arguments: serde_json::Value =
+                        serde_json::from_str(&call.function.arguments).map_err(|error| {
+                            anyhow::anyhow!(
+                                "assistant tool call `{}` arguments are not valid JSON: {error}",
+                                call.id
+                            )
+                        })?;
+                    if !arguments.is_object() {
+                        anyhow::bail!(
+                            "assistant tool call `{}` arguments must encode a JSON object",
+                            call.id
+                        );
+                    }
+                    unresolved.insert(call.id.clone());
+                    calls.push(TemplateToolCall::from(ToolCall {
+                        id: call.id.clone(),
+                        name: call.function.name.clone(),
+                        arguments,
+                    }));
+                }
+                output.push(AgentMessage {
+                    role: wire.role.clone(),
+                    content: (!content.is_empty()).then_some(content),
+                    tool_calls: calls,
+                    tool_call_id: None,
+                });
+            }
+            "tool" => {
+                if !wire.tool_calls.is_empty() {
+                    anyhow::bail!("tool result messages cannot contain tool_calls");
+                }
+                let call_id = wire
+                    .tool_call_id
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("tool result message requires tool_call_id"))?;
+                if !unresolved.remove(call_id) {
+                    anyhow::bail!("orphan or duplicate tool result for tool_call_id `{call_id}`");
+                }
+                output.push(AgentMessage {
+                    role: wire.role.clone(),
+                    content: Some(content),
+                    tool_calls: Vec::new(),
+                    tool_call_id: Some(call_id.clone()),
+                });
+            }
+            role => anyhow::bail!("unsupported message role `{role}` for tool calling"),
+        }
+    }
+    if !unresolved.is_empty() {
+        anyhow::bail!("assistant tool calls are missing corresponding tool result messages");
+    }
+    Ok(output)
+}
+
+fn render_tool_prompt(
+    tokenizer: &crate::core::Tokenizer,
+    messages: &[AgentMessage],
+    kwargs: &serde_json::Value,
+) -> anyhow::Result<Vec<u32>> {
+    tokenizer.render_and_encode_tool_prompt(messages, kwargs)
+}
+
 fn build_sampler(req: &ChatRequest, defaults: SamplingDefaults) -> Sampler {
     let mut s = Sampler::greedy();
     if let Some(t) = req.temperature.or(defaults.temperature) {
@@ -365,11 +684,21 @@ fn stop_token_ids_for_request(eos_token_ids: &[u32], ignore_eos: bool) -> Vec<u3
 
 pub async fn chat_completions<M>(
     State(state): State<AppState<M>>,
-    Json(req): Json<ChatRequest>,
+    payload: std::result::Result<Json<ChatRequest>, JsonRejection>,
 ) -> Response
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
+    let req = match payload {
+        Ok(Json(req)) => req,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("invalid Chat Completions request: {}", error.body_text()),
+            )
+                .into_response();
+        }
+    };
     chat_completions_with_state(state, req).await
 }
 
@@ -392,7 +721,12 @@ where
     {
         return (StatusCode::BAD_REQUEST, format!("{error:#}")).into_response();
     }
+    let prepared_tools = match prepare_tool_request(&req, state.tokenizer.tool_dialect()) {
+        Ok(prepared) => prepared,
+        Err(error) => return (StatusCode::BAD_REQUEST, format!("{error:#}")).into_response(),
+    };
     let chat_template_kwargs = req.chat_template_kwargs;
+    let original_messages = prepared_tools.as_ref().map(|_| req.messages.clone());
 
     let (image_token_id, spatial_merge_size) =
         crate::core::server::vision::derive_image_token_and_merge(
@@ -414,11 +748,25 @@ where
         Some(image_grid_thw)
     };
 
-    let prompt_ids = match render_and_encode(
-        &state.tokenizer,
-        &flat_messages,
-        chat_template_kwargs.as_ref(),
-    ) {
+    let prompt_ids_result = if let Some(prepared) = &prepared_tools {
+        let agent_messages = build_agent_messages(
+            original_messages
+                .as_deref()
+                .expect("captured for tool request"),
+            &flat_messages,
+        );
+        agent_messages.and_then(|messages| {
+            let kwargs = tool_template_kwargs(chat_template_kwargs, prepared)?;
+            render_tool_prompt(&state.tokenizer, &messages, &kwargs)
+        })
+    } else {
+        render_and_encode(
+            &state.tokenizer,
+            &flat_messages,
+            chat_template_kwargs.as_ref(),
+        )
+    };
+    let prompt_ids = match prompt_ids_result {
         Ok(ids) => ids,
         Err(e) => {
             return (
@@ -446,6 +794,29 @@ where
     );
 
     let stop_token_ids = stop_token_ids_for_request(state.tokenizer.eos_token_ids(), ignore_eos);
+    let constraint = match prepared_tools
+        .as_ref()
+        .filter(|prepared| prepared.constraint_options.is_some())
+        .map(|prepared| {
+            state.tokenizer.compile_tool_constraint(
+                &prepared.definitions,
+                prepared
+                    .constraint_options
+                    .as_ref()
+                    .expect("filtered constrained tool request"),
+            )
+        })
+        .transpose()
+    {
+        Ok(constraint) => constraint,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("compile tool decoding constraint: {error:#}"),
+            )
+                .into_response();
+        }
+    };
     let prompt_tokens = prompt_len as u32;
     let request = GenerateRequest {
         prompt_ids,
@@ -459,7 +830,46 @@ where
         image_grid_thw: image_grid_thw_opt,
         image_spatial_merge_size: spatial_merge_size,
         image_token_id,
+        constraint,
     };
+
+    if let Some(prepared) = prepared_tools.filter(|prepared| prepared.constraint_options.is_some())
+    {
+        let tool_context = ToolResponseContext {
+            dialect: prepared.dialect,
+            definitions: prepared.definitions,
+            constraint_options: prepared
+                .constraint_options
+                .expect("filtered constrained tool request"),
+        };
+        return match chat_completions_route(stream, use_scheduler) {
+            ChatCompletionsRoute::SchedulerStream | ChatCompletionsRoute::SchedulerUnary => {
+                serve_via_scheduler_tools(
+                    state,
+                    request,
+                    model_label,
+                    prompt_tokens,
+                    include_usage,
+                    stream,
+                    tool_context,
+                )
+                .await
+            }
+            ChatCompletionsRoute::GenerationStreamStream
+            | ChatCompletionsRoute::GenerationStreamUnary => {
+                serve_via_gs_tools(
+                    state,
+                    request,
+                    model_label,
+                    prompt_tokens,
+                    include_usage,
+                    stream,
+                    tool_context,
+                )
+                .await
+            }
+        };
+    }
 
     match chat_completions_route(stream, use_scheduler) {
         ChatCompletionsRoute::SchedulerStream => {
@@ -480,8 +890,18 @@ where
 
 pub(crate) async fn gemma4_drafter_chat_completions(
     State(state): State<Gemma4DrafterAppState>,
-    Json(req): Json<ChatRequest>,
+    payload: std::result::Result<Json<ChatRequest>, JsonRejection>,
 ) -> Response {
+    let req = match payload {
+        Ok(Json(req)) => req,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("invalid Chat Completions request: {}", error.body_text()),
+            )
+                .into_response();
+        }
+    };
     chat_completions_with_gemma4_drafter_state(state, req).await
 }
 
@@ -489,6 +909,11 @@ pub(crate) async fn chat_completions_with_gemma4_drafter_state(
     state: Gemma4DrafterAppState,
     req: ChatRequest,
 ) -> Response {
+    let prepared_tools = match prepare_tool_request(&req, state.base.tokenizer.tool_dialect()) {
+        Ok(prepared) => prepared,
+        Err(error) => return (StatusCode::BAD_REQUEST, format!("{error:#}")).into_response(),
+    };
+    let original_messages = prepared_tools.as_ref().map(|_| req.messages.clone());
     let stream = req.stream;
     let include_usage = req
         .stream_options
@@ -522,11 +947,25 @@ pub(crate) async fn chat_completions_with_gemma4_drafter_state(
     } else {
         Some(image_grid_thw)
     };
-    let prompt_ids = match render_and_encode(
-        &state.base.tokenizer,
-        &flat_messages,
-        chat_template_kwargs.as_ref(),
-    ) {
+    let prompt_ids_result = if let Some(prepared) = &prepared_tools {
+        build_agent_messages(
+            original_messages
+                .as_deref()
+                .expect("captured for tool request"),
+            &flat_messages,
+        )
+        .and_then(|messages| {
+            let kwargs = tool_template_kwargs(chat_template_kwargs, prepared)?;
+            render_tool_prompt(&state.base.tokenizer, &messages, &kwargs)
+        })
+    } else {
+        render_and_encode(
+            &state.base.tokenizer,
+            &flat_messages,
+            chat_template_kwargs.as_ref(),
+        )
+    };
+    let prompt_ids = match prompt_ids_result {
         Ok(ids) => ids,
         Err(e) => {
             return (
@@ -551,6 +990,29 @@ pub(crate) async fn chat_completions_with_gemma4_drafter_state(
     let scheduler_config = state.base.scheduler_request_config(prompt_len, max_tokens);
     let stop_token_ids =
         stop_token_ids_for_request(state.base.tokenizer.eos_token_ids(), ignore_eos);
+    let constraint = match prepared_tools
+        .as_ref()
+        .filter(|prepared| prepared.constraint_options.is_some())
+        .map(|prepared| {
+            state.base.tokenizer.compile_tool_constraint(
+                &prepared.definitions,
+                prepared
+                    .constraint_options
+                    .as_ref()
+                    .expect("filtered constrained tool request"),
+            )
+        })
+        .transpose()
+    {
+        Ok(constraint) => constraint,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("compile tool decoding constraint: {error:#}"),
+            )
+                .into_response();
+        }
+    };
     let prompt_tokens = prompt_len as u32;
     let request = GenerateRequest {
         prompt_ids,
@@ -564,7 +1026,29 @@ pub(crate) async fn chat_completions_with_gemma4_drafter_state(
         image_grid_thw: image_grid_thw_opt,
         image_spatial_merge_size: spatial_merge_size,
         image_token_id,
+        constraint,
     };
+
+    if let Some(prepared) = prepared_tools.filter(|prepared| prepared.constraint_options.is_some())
+    {
+        let tool_context = ToolResponseContext {
+            dialect: prepared.dialect,
+            definitions: prepared.definitions,
+            constraint_options: prepared
+                .constraint_options
+                .expect("filtered constrained tool request"),
+        };
+        return serve_via_scheduler_tools(
+            state.base,
+            request,
+            model_label,
+            prompt_tokens,
+            include_usage,
+            stream,
+            tool_context,
+        )
+        .await;
+    }
 
     if stream {
         serve_via_scheduler_stream(
@@ -578,6 +1062,878 @@ pub(crate) async fn chat_completions_with_gemma4_drafter_state(
     } else {
         serve_via_scheduler_unary(state.base, request, model_label, prompt_tokens).await
     }
+}
+
+#[derive(Debug)]
+struct ParsedAssistantOutput {
+    content: String,
+    tool_calls: Vec<ToolCall>,
+    finish_reason: &'static str,
+    completion_tokens: u32,
+}
+
+fn collect_parser_events(output: &mut ParsedAssistantOutput, events: Vec<AssistantOutputEvent>) {
+    for event in events {
+        match event {
+            AssistantOutputEvent::TextDelta(text) => output.content.push_str(&text),
+            AssistantOutputEvent::ToolCall(call) => output.tool_calls.push(call),
+        }
+    }
+}
+
+fn finish_tool_parser(
+    parser: ToolCallParser,
+    output: &mut ParsedAssistantOutput,
+) -> anyhow::Result<()> {
+    let (events, saw_tool_call) = parser.finish()?;
+    collect_parser_events(output, events);
+    if saw_tool_call {
+        output.finish_reason = "tool_calls";
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_tool_choice_output(
+    options: &ToolConstraintOptions,
+    call_names: &[String],
+) -> anyhow::Result<()> {
+    if !options.allow_parallel_calls {
+        anyhow::ensure!(
+            call_names.len() <= 1,
+            "parallel_tool_calls=false produced more than one tool call"
+        );
+    }
+    match &options.choice {
+        ToolChoiceConstraint::Auto => Ok(()),
+        ToolChoiceConstraint::Required => {
+            anyhow::ensure!(
+                !call_names.is_empty(),
+                "tool_choice=required completed without a tool call"
+            );
+            Ok(())
+        }
+        ToolChoiceConstraint::Function(expected) => {
+            anyhow::ensure!(
+                call_names.len() == 1 && call_names[0] == *expected,
+                "specified function `{expected}` must be called exactly once"
+            );
+            Ok(())
+        }
+    }
+}
+
+fn tool_completion_response(
+    id: String,
+    model_id: String,
+    prompt_tokens: u32,
+    output: ParsedAssistantOutput,
+) -> Response {
+    let message = CompletionMessage {
+        role: "assistant",
+        content: (!output.content.is_empty()).then_some(output.content),
+        tool_calls: output
+            .tool_calls
+            .into_iter()
+            .map(|call| CompletionToolCall {
+                id: call.id,
+                kind: "function",
+                function: CompletionFunctionCall {
+                    name: call.name,
+                    arguments: serde_json::to_string(&call.arguments)
+                        .expect("tool arguments are JSON values"),
+                },
+            })
+            .collect(),
+    };
+    let response = CompletionResponse {
+        id,
+        object: "chat.completion",
+        created: now_unix(),
+        model: model_id,
+        choices: vec![CompletionChoice {
+            index: 0,
+            message,
+            finish_reason: output.finish_reason,
+        }],
+        usage: Usage {
+            prompt_tokens,
+            completion_tokens: output.completion_tokens,
+            total_tokens: prompt_tokens + output.completion_tokens,
+        },
+    };
+    Json(response).into_response()
+}
+
+#[cfg(test)]
+fn tool_stream_response(
+    id: String,
+    model_id: String,
+    prompt_tokens: u32,
+    include_usage: bool,
+    output: ParsedAssistantOutput,
+) -> Response {
+    let mut frames = Vec::<std::result::Result<Bytes, std::io::Error>>::new();
+    frames.push(Ok(format_sse_data(&ChunkResponse {
+        id: id.clone(),
+        object: "chat.completion.chunk",
+        created: now_unix(),
+        model: model_id.clone(),
+        choices: vec![Choice {
+            index: 0,
+            delta: DeltaRole {
+                role: "assistant",
+                content: String::new(),
+            },
+            finish_reason: None,
+        }],
+    })));
+    if !output.content.is_empty() {
+        frames.push(Ok(format_sse_data(&ChunkResponse {
+            id: id.clone(),
+            object: "chat.completion.chunk",
+            created: now_unix(),
+            model: model_id.clone(),
+            choices: vec![Choice {
+                index: 0,
+                delta: DeltaContent {
+                    content: &output.content,
+                },
+                finish_reason: None,
+            }],
+        })));
+    }
+    for (index, call) in output.tool_calls.iter().enumerate() {
+        frames.push(Ok(format_sse_data(&ChunkResponse {
+            id: id.clone(),
+            object: "chat.completion.chunk",
+            created: now_unix(),
+            model: model_id.clone(),
+            choices: vec![Choice {
+                index: 0,
+                delta: DeltaToolCalls {
+                    tool_calls: vec![DeltaToolCall {
+                        index,
+                        id: Some(call.id.clone()),
+                        kind: Some("function"),
+                        function: DeltaFunctionCall {
+                            name: Some(call.name.clone()),
+                            arguments: String::new(),
+                        },
+                    }],
+                },
+                finish_reason: None,
+            }],
+        })));
+        let arguments =
+            serde_json::to_string(&call.arguments).expect("tool arguments are JSON values");
+        for fragment in utf8_fragments(&arguments, 64) {
+            frames.push(Ok(format_sse_data(&ChunkResponse {
+                id: id.clone(),
+                object: "chat.completion.chunk",
+                created: now_unix(),
+                model: model_id.clone(),
+                choices: vec![Choice {
+                    index: 0,
+                    delta: DeltaToolCalls {
+                        tool_calls: vec![DeltaToolCall {
+                            index,
+                            id: None,
+                            kind: None,
+                            function: DeltaFunctionCall {
+                                name: None,
+                                arguments: fragment.to_owned(),
+                            },
+                        }],
+                    },
+                    finish_reason: None,
+                }],
+            })));
+        }
+    }
+    frames.push(Ok(format_sse_data(&ChunkResponse {
+        id: id.clone(),
+        object: "chat.completion.chunk",
+        created: now_unix(),
+        model: model_id.clone(),
+        choices: vec![Choice {
+            index: 0,
+            delta: serde_json::json!({}),
+            finish_reason: Some(output.finish_reason),
+        }],
+    })));
+    if include_usage {
+        frames.push(Ok(format_sse_data(&StreamUsageChunk::new(
+            id,
+            model_id,
+            prompt_tokens,
+            output.completion_tokens,
+        ))));
+    }
+    frames.push(Ok(Bytes::from_static(b"data: [DONE]\n\n")));
+    let body = Body::from_stream(tokio_stream::iter(frames));
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(body)
+        .unwrap()
+}
+
+fn utf8_fragments(value: &str, max_bytes: usize) -> Vec<&str> {
+    if value.is_empty() {
+        return vec![""];
+    }
+    let mut fragments = Vec::new();
+    let mut start = 0;
+    while start < value.len() {
+        let mut end = (start + max_bytes).min(value.len());
+        while !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        fragments.push(&value[start..end]);
+        start = end;
+    }
+    fragments
+}
+
+fn format_tool_output_events(
+    id: &str,
+    model_id: &str,
+    events: Vec<AssistantOutputEvent>,
+    next_call_index: &mut usize,
+    call_names: &mut Vec<String>,
+) -> Vec<Bytes> {
+    let mut frames = Vec::new();
+    for event in events {
+        match event {
+            AssistantOutputEvent::TextDelta(text) => frames.push(format_sse_data(&ChunkResponse {
+                id: id.to_owned(),
+                object: "chat.completion.chunk",
+                created: now_unix(),
+                model: model_id.to_owned(),
+                choices: vec![Choice {
+                    index: 0,
+                    delta: DeltaContent { content: &text },
+                    finish_reason: None,
+                }],
+            })),
+            AssistantOutputEvent::ToolCall(call) => {
+                call_names.push(call.name.clone());
+                let index = *next_call_index;
+                *next_call_index += 1;
+                frames.push(format_sse_data(&ChunkResponse {
+                    id: id.to_owned(),
+                    object: "chat.completion.chunk",
+                    created: now_unix(),
+                    model: model_id.to_owned(),
+                    choices: vec![Choice {
+                        index: 0,
+                        delta: DeltaToolCalls {
+                            tool_calls: vec![DeltaToolCall {
+                                index,
+                                id: Some(call.id),
+                                kind: Some("function"),
+                                function: DeltaFunctionCall {
+                                    name: Some(call.name),
+                                    arguments: String::new(),
+                                },
+                            }],
+                        },
+                        finish_reason: None,
+                    }],
+                }));
+                let arguments =
+                    serde_json::to_string(&call.arguments).expect("tool arguments are JSON values");
+                for fragment in utf8_fragments(&arguments, 64) {
+                    frames.push(format_sse_data(&ChunkResponse {
+                        id: id.to_owned(),
+                        object: "chat.completion.chunk",
+                        created: now_unix(),
+                        model: model_id.to_owned(),
+                        choices: vec![Choice {
+                            index: 0,
+                            delta: DeltaToolCalls {
+                                tool_calls: vec![DeltaToolCall {
+                                    index,
+                                    id: None,
+                                    kind: None,
+                                    function: DeltaFunctionCall {
+                                        name: None,
+                                        arguments: fragment.to_owned(),
+                                    },
+                                }],
+                            },
+                            finish_reason: None,
+                        }],
+                    }));
+                }
+            }
+        }
+    }
+    frames
+}
+
+fn tool_role_chunk(id: &str, model_id: &str) -> Bytes {
+    format_sse_data(&ChunkResponse {
+        id: id.to_owned(),
+        object: "chat.completion.chunk",
+        created: now_unix(),
+        model: model_id.to_owned(),
+        choices: vec![Choice {
+            index: 0,
+            delta: DeltaRole {
+                role: "assistant",
+                content: String::new(),
+            },
+            finish_reason: None,
+        }],
+    })
+}
+
+fn tool_finish_chunk(id: &str, model_id: &str, finish_reason: &'static str) -> Bytes {
+    format_sse_data(&ChunkResponse {
+        id: id.to_owned(),
+        object: "chat.completion.chunk",
+        created: now_unix(),
+        model: model_id.to_owned(),
+        choices: vec![Choice {
+            index: 0,
+            delta: serde_json::json!({}),
+            finish_reason: Some(finish_reason),
+        }],
+    })
+}
+
+fn sse_body_response(rx: mpsc::Receiver<std::result::Result<Bytes, std::io::Error>>) -> Response {
+    let body = Body::from_stream(ReceiverStream::new(rx));
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(body)
+        .unwrap()
+}
+
+async fn serve_via_gs_tools_stream<M>(
+    state: AppState<M>,
+    request: GenerateRequest,
+    model_id: String,
+    prompt_tokens: u32,
+    include_usage: bool,
+    tool_context: ToolResponseContext,
+) -> Response
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    let ToolResponseContext {
+        dialect,
+        definitions: tools,
+        constraint_options,
+    } = tool_context;
+    let id = gen_id();
+    let id_for_task = id.clone();
+    let model_for_task = model_id.clone();
+    let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+    let (init_tx, init_rx) = oneshot::channel::<anyhow::Result<()>>();
+    tokio::task::spawn_blocking(move || {
+        let model_guard = state.model.blocking_lock();
+        let tokenizer = &*state.tokenizer;
+        let memory = match super::begin_direct_request_memory(&state, &*model_guard, &request) {
+            Ok(memory) => memory,
+            Err(error) => {
+                let _ = init_tx.send(Err(error));
+                return;
+            }
+        };
+        let mut generation = match GenerationStream::new(&*model_guard, tokenizer, request) {
+            Ok(generation) => generation,
+            Err(error) => {
+                let _ = init_tx.send(Err(error));
+                return;
+            }
+        };
+        let first_event = match generation.next_token() {
+            Ok(event) => event,
+            Err(error) => {
+                let _ = init_tx.send(Err(error));
+                return;
+            }
+        };
+        let mut parser =
+            match ToolCallParser::new(dialect, uuid::Uuid::new_v4().simple().to_string(), &tools) {
+                Ok(parser) => parser,
+                Err(error) => {
+                    let _ = init_tx.send(Err(error));
+                    return;
+                }
+            };
+        memory.commit();
+        state.record_request_started(prompt_tokens);
+        if init_tx.send(Ok(())).is_err()
+            || tx
+                .blocking_send(Ok(tool_role_chunk(&id_for_task, &model_for_task)))
+                .is_err()
+        {
+            return;
+        }
+
+        let mut completion_tokens = 0_u32;
+        let mut detok = tokenizer.decode_stream(dialect.skip_special_tokens());
+        let mut next_call_index = 0_usize;
+        let mut call_names = Vec::new();
+        let mut first_event = Some(first_event);
+        let mut model_finish = "stop";
+        loop {
+            let event_result = match first_event.take() {
+                Some(event) => Ok(event),
+                None => generation.next_token(),
+            };
+            let event = match event_result {
+                Ok(Some(event)) => event,
+                Ok(None) => break,
+                Err(error) => {
+                    let _ = tx.blocking_send(Ok(format_sse_error(&error)));
+                    return;
+                }
+            };
+            completion_tokens += 1;
+            state.runtime_usage.record_output_tokens(1);
+            let text = if event.finish_reason == Some("stop") {
+                String::new()
+            } else {
+                match detok.step(event.token) {
+                    Ok(Some(text)) => text,
+                    Ok(None) => String::new(),
+                    Err(error) => {
+                        let _ = tx.blocking_send(Ok(format_sse_error(&anyhow::anyhow!(
+                            "detok: {error}"
+                        ))));
+                        return;
+                    }
+                }
+            };
+            let events = match parser.push(&text) {
+                Ok(events) => events,
+                Err(error) => {
+                    let _ = tx.blocking_send(Ok(format_sse_error(&error)));
+                    return;
+                }
+            };
+            for frame in format_tool_output_events(
+                &id_for_task,
+                &model_for_task,
+                events,
+                &mut next_call_index,
+                &mut call_names,
+            ) {
+                if tx.blocking_send(Ok(frame)).is_err() {
+                    return;
+                }
+            }
+            if let Some(reason) = event.finish_reason {
+                model_finish = reason;
+                break;
+            }
+        }
+        let (events, saw_tool_call) = match parser.finish() {
+            Ok(result) => result,
+            Err(error) => {
+                let _ = tx.blocking_send(Ok(format_sse_error(&error)));
+                return;
+            }
+        };
+        for frame in format_tool_output_events(
+            &id_for_task,
+            &model_for_task,
+            events,
+            &mut next_call_index,
+            &mut call_names,
+        ) {
+            if tx.blocking_send(Ok(frame)).is_err() {
+                return;
+            }
+        }
+        if let Err(error) = validate_tool_choice_output(&constraint_options, &call_names) {
+            let _ = tx.blocking_send(Ok(format_sse_error(&error)));
+            return;
+        }
+        let finish = if saw_tool_call {
+            "tool_calls"
+        } else {
+            model_finish
+        };
+        if tx
+            .blocking_send(Ok(tool_finish_chunk(&id_for_task, &model_for_task, finish)))
+            .is_err()
+        {
+            return;
+        }
+        if include_usage {
+            let usage = StreamUsageChunk::new(
+                id_for_task,
+                model_for_task,
+                prompt_tokens,
+                completion_tokens,
+            );
+            if tx.blocking_send(Ok(format_sse_data(&usage))).is_err() {
+                return;
+            }
+        }
+        let _ = tx.blocking_send(Ok(Bytes::from_static(b"data: [DONE]\n\n")));
+    });
+
+    match init_rx.await {
+        Ok(Ok(())) => sse_body_response(rx),
+        Ok(Err(error)) => generation_err_to_response(error),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("generation initialization channel closed: {error}"),
+        )
+            .into_response(),
+    }
+}
+
+async fn serve_via_scheduler_tools_stream<M>(
+    state: AppState<M>,
+    request: GenerateRequest,
+    model_id: String,
+    prompt_tokens: u32,
+    include_usage: bool,
+    tool_context: ToolResponseContext,
+) -> Response
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    let ToolResponseContext {
+        dialect,
+        definitions: tools,
+        constraint_options,
+    } = tool_context;
+    let id = gen_id();
+    let (reply_tx, reply_rx) = oneshot::channel();
+    if state
+        .scheduler_handle
+        .cmd_tx
+        .send(SchedulerCommand::Admit { request, reply_tx })
+        .await
+        .is_err()
+    {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "scheduler actor unavailable",
+        )
+            .into_response();
+    }
+    let AdmitReply {
+        request_id: _,
+        mut event_rx,
+    } = match reply_rx.await {
+        Ok(Ok(reply)) => reply,
+        Ok(Err(error)) => return admit_err_to_response(error),
+        Err(_) => return (StatusCode::SERVICE_UNAVAILABLE, "scheduler reply lost").into_response(),
+    };
+    let mut parser =
+        match ToolCallParser::new(dialect, uuid::Uuid::new_v4().simple().to_string(), &tools) {
+            Ok(parser) => parser,
+            Err(error) => return (StatusCode::BAD_REQUEST, format!("{error:#}")).into_response(),
+        };
+    state.record_request_started(prompt_tokens);
+    let tokenizer = state.tokenizer.clone();
+    let runtime_usage = state.runtime_usage.clone();
+    let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+    tokio::spawn(async move {
+        if tx.send(Ok(tool_role_chunk(&id, &model_id))).await.is_err() {
+            return;
+        }
+        let mut detok = tokenizer.decode_stream(dialect.skip_special_tokens());
+        let mut completion_tokens = 0_u32;
+        let mut next_call_index = 0_usize;
+        let mut call_names = Vec::new();
+        let mut model_finish = "stop";
+        while let Some(event) = event_rx.recv().await {
+            completion_tokens += 1;
+            runtime_usage.record_output_tokens(1);
+            let text = if event.finish_reason == Some("stop") {
+                String::new()
+            } else {
+                match detok.step(event.token) {
+                    Ok(Some(text)) => text,
+                    Ok(None) => String::new(),
+                    Err(error) => {
+                        let _ = tx
+                            .send(Ok(format_sse_error(&anyhow::anyhow!("detok: {error}"))))
+                            .await;
+                        return;
+                    }
+                }
+            };
+            let events = match parser.push(&text) {
+                Ok(events) => events,
+                Err(error) => {
+                    let _ = tx.send(Ok(format_sse_error(&error))).await;
+                    return;
+                }
+            };
+            for frame in format_tool_output_events(
+                &id,
+                &model_id,
+                events,
+                &mut next_call_index,
+                &mut call_names,
+            ) {
+                if tx.send(Ok(frame)).await.is_err() {
+                    return;
+                }
+            }
+            if let Some(reason) = event.finish_reason {
+                model_finish = reason;
+                break;
+            }
+        }
+        let (events, saw_tool_call) = match parser.finish() {
+            Ok(result) => result,
+            Err(error) => {
+                let _ = tx.send(Ok(format_sse_error(&error))).await;
+                return;
+            }
+        };
+        for frame in format_tool_output_events(
+            &id,
+            &model_id,
+            events,
+            &mut next_call_index,
+            &mut call_names,
+        ) {
+            if tx.send(Ok(frame)).await.is_err() {
+                return;
+            }
+        }
+        if let Err(error) = validate_tool_choice_output(&constraint_options, &call_names) {
+            let _ = tx.send(Ok(format_sse_error(&error))).await;
+            return;
+        }
+        let finish = if saw_tool_call {
+            "tool_calls"
+        } else {
+            model_finish
+        };
+        if tx
+            .send(Ok(tool_finish_chunk(&id, &model_id, finish)))
+            .await
+            .is_err()
+        {
+            return;
+        }
+        if include_usage {
+            let usage = StreamUsageChunk::new(
+                id.clone(),
+                model_id.clone(),
+                prompt_tokens,
+                completion_tokens,
+            );
+            if tx.send(Ok(format_sse_data(&usage))).await.is_err() {
+                return;
+            }
+        }
+        let _ = tx.send(Ok(Bytes::from_static(b"data: [DONE]\n\n"))).await;
+    });
+    sse_body_response(rx)
+}
+
+async fn serve_via_gs_tools<M>(
+    state: AppState<M>,
+    request: GenerateRequest,
+    model_id: String,
+    prompt_tokens: u32,
+    include_usage: bool,
+    stream_response: bool,
+    tool_context: ToolResponseContext,
+) -> Response
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    if stream_response {
+        return serve_via_gs_tools_stream(
+            state,
+            request,
+            model_id,
+            prompt_tokens,
+            include_usage,
+            tool_context,
+        )
+        .await;
+    }
+    let ToolResponseContext {
+        dialect,
+        definitions: tools,
+        constraint_options,
+    } = tool_context;
+    let id = gen_id();
+    let parser_id = uuid::Uuid::new_v4().simple().to_string();
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<ParsedAssistantOutput> {
+        let model_guard = state.model.blocking_lock();
+        let tokenizer = &*state.tokenizer;
+        let memory = super::begin_direct_request_memory(&state, &*model_guard, &request)?;
+        let mut generation = GenerationStream::new(&*model_guard, tokenizer, request)?;
+        let mut parser = ToolCallParser::new(dialect, parser_id, &tools)?;
+        let mut detok = tokenizer.decode_stream(dialect.skip_special_tokens());
+        let mut output = ParsedAssistantOutput {
+            content: String::new(),
+            tool_calls: Vec::new(),
+            finish_reason: "stop",
+            completion_tokens: 0,
+        };
+        let mut memory = Some(memory);
+        loop {
+            let Some(event) = generation.next_token()? else {
+                break;
+            };
+            if let Some(memory) = memory.take() {
+                memory.commit();
+                state.record_request_started(prompt_tokens);
+            }
+            output.completion_tokens += 1;
+            let text = if event.finish_reason == Some("stop") {
+                String::new()
+            } else {
+                detok.step(event.token)?.unwrap_or_default()
+            };
+            collect_parser_events(&mut output, parser.push(&text)?);
+            if let Some(reason) = event.finish_reason {
+                output.finish_reason = reason;
+                break;
+            }
+        }
+        finish_tool_parser(parser, &mut output)?;
+        let call_names = output
+            .tool_calls
+            .iter()
+            .map(|call| call.name.clone())
+            .collect::<Vec<_>>();
+        validate_tool_choice_output(&constraint_options, &call_names)?;
+        state
+            .runtime_usage
+            .record_output_tokens(u64::from(output.completion_tokens));
+        Ok(output)
+    })
+    .await;
+    let output = match result {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => return generation_err_to_response(error),
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("join error: {error}"),
+            )
+                .into_response();
+        }
+    };
+    tool_completion_response(id, model_id, prompt_tokens, output)
+}
+
+async fn serve_via_scheduler_tools<M>(
+    state: AppState<M>,
+    request: GenerateRequest,
+    model_id: String,
+    prompt_tokens: u32,
+    include_usage: bool,
+    stream_response: bool,
+    tool_context: ToolResponseContext,
+) -> Response
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    if stream_response {
+        return serve_via_scheduler_tools_stream(
+            state,
+            request,
+            model_id,
+            prompt_tokens,
+            include_usage,
+            tool_context,
+        )
+        .await;
+    }
+    let ToolResponseContext {
+        dialect,
+        definitions: tools,
+        constraint_options,
+    } = tool_context;
+    let id = gen_id();
+    let (reply_tx, reply_rx) = oneshot::channel();
+    if state
+        .scheduler_handle
+        .cmd_tx
+        .send(SchedulerCommand::Admit { request, reply_tx })
+        .await
+        .is_err()
+    {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "scheduler actor unavailable",
+        )
+            .into_response();
+    }
+    let AdmitReply {
+        request_id: _,
+        mut event_rx,
+    } = match reply_rx.await {
+        Ok(Ok(reply)) => reply,
+        Ok(Err(error)) => return admit_err_to_response(error),
+        Err(_) => {
+            return (StatusCode::SERVICE_UNAVAILABLE, "scheduler reply lost").into_response();
+        }
+    };
+    state.record_request_started(prompt_tokens);
+    let parser_id = uuid::Uuid::new_v4().simple().to_string();
+    let mut parser = match ToolCallParser::new(dialect, parser_id, &tools) {
+        Ok(parser) => parser,
+        Err(error) => return (StatusCode::BAD_REQUEST, format!("{error:#}")).into_response(),
+    };
+    let mut detok = state.tokenizer.decode_stream(dialect.skip_special_tokens());
+    let mut output = ParsedAssistantOutput {
+        content: String::new(),
+        tool_calls: Vec::new(),
+        finish_reason: "stop",
+        completion_tokens: 0,
+    };
+    while let Some(event) = event_rx.recv().await {
+        output.completion_tokens += 1;
+        let decoded = if event.finish_reason == Some("stop") {
+            Ok(None)
+        } else {
+            detok.step(event.token)
+        };
+        match decoded {
+            Ok(Some(text)) => match parser.push(&text) {
+                Ok(events) => collect_parser_events(&mut output, events),
+                Err(error) => return generation_err_to_response(error),
+            },
+            Ok(None) => {}
+            Err(error) => {
+                return generation_err_to_response(anyhow::anyhow!("detok: {error}"));
+            }
+        }
+        if let Some(reason) = event.finish_reason {
+            output.finish_reason = reason;
+            break;
+        }
+    }
+    if let Err(error) = finish_tool_parser(parser, &mut output) {
+        return generation_err_to_response(error);
+    }
+    let call_names = output
+        .tool_calls
+        .iter()
+        .map(|call| call.name.clone())
+        .collect::<Vec<_>>();
+    if let Err(error) = validate_tool_choice_output(&constraint_options, &call_names) {
+        return generation_err_to_response(error);
+    }
+    state
+        .runtime_usage
+        .record_output_tokens(u64::from(output.completion_tokens));
+    tool_completion_response(id, model_id, prompt_tokens, output)
 }
 
 async fn serve_via_gs_stream<M>(
@@ -948,7 +2304,8 @@ where
             index: 0,
             message: CompletionMessage {
                 role: "assistant",
-                content,
+                content: Some(content),
+                tool_calls: Vec::new(),
             },
             finish_reason: finish,
         }],
@@ -1034,7 +2391,8 @@ where
             index: 0,
             message: CompletionMessage {
                 role: "assistant",
-                content,
+                content: Some(content),
+                tool_calls: Vec::new(),
             },
             finish_reason: finish,
         }],
@@ -1177,7 +2535,8 @@ mod tests {
                 index: 0,
                 message: CompletionMessage {
                     role: "assistant",
-                    content: "hi".into(),
+                    content: Some("hi".into()),
+                    tool_calls: Vec::new(),
                 },
                 finish_reason: "stop",
             }],
@@ -1195,6 +2554,314 @@ mod tests {
         assert!(s.contains("\"prompt_tokens\":5"));
         assert!(s.contains("\"completion_tokens\":1"));
         assert!(s.contains("\"total_tokens\":6"));
+    }
+
+    fn tool_request(extra: serde_json::Value) -> ChatRequest {
+        let mut request = serde_json::json!({
+            "messages": [{"role": "user", "content": "weather"}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"]
+                    }
+                }
+            }]
+        });
+        request
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(request).unwrap()
+    }
+
+    #[test]
+    fn tool_request_validation_maps_advanced_choice_semantics() {
+        let auto = tool_request(serde_json::json!({
+            "tool_choice": "auto",
+            "parallel_tool_calls": true
+        }));
+        let prepared = prepare_tool_request(&auto, Some(ToolDialect::Qwen35))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            prepared.constraint_options,
+            Some(ToolConstraintOptions::default())
+        );
+        assert_eq!(prepared.dialect, ToolDialect::Qwen35);
+
+        let prepared = prepare_tool_request(&auto, Some(ToolDialect::Llama))
+            .unwrap()
+            .unwrap();
+        assert_eq!(prepared.dialect, ToolDialect::Llama);
+        assert_eq!(
+            prepared.constraint_options,
+            Some(ToolConstraintOptions::default())
+        );
+
+        for dialect in [ToolDialect::MiniCpmV46, ToolDialect::MiniCpm5] {
+            let prepared = prepare_tool_request(&auto, Some(dialect)).unwrap().unwrap();
+            assert_eq!(prepared.dialect, dialect);
+            assert_eq!(
+                prepared.constraint_options,
+                Some(ToolConstraintOptions::default())
+            );
+        }
+
+        let prepared = prepare_tool_request(&auto, Some(ToolDialect::Gemma))
+            .unwrap()
+            .unwrap();
+        assert_eq!(prepared.dialect, ToolDialect::Gemma);
+        assert_eq!(
+            prepared.constraint_options,
+            Some(ToolConstraintOptions::default())
+        );
+
+        let prepared = prepare_tool_request(&auto, Some(ToolDialect::Glm))
+            .unwrap()
+            .unwrap();
+        assert_eq!(prepared.dialect, ToolDialect::Glm);
+        assert_eq!(
+            prepared.constraint_options,
+            Some(ToolConstraintOptions::default())
+        );
+
+        let required = tool_request(serde_json::json!({"tool_choice": "required"}));
+        let prepared = prepare_tool_request(&required, Some(ToolDialect::Qwen35))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            prepared.constraint_options.unwrap().choice,
+            ToolChoiceConstraint::Required
+        );
+
+        let forced = tool_request(serde_json::json!({
+            "tool_choice": {"type": "function", "function": {"name": "get_weather"}}
+        }));
+        let prepared = prepare_tool_request(&forced, Some(ToolDialect::Qwen35))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            prepared.constraint_options.unwrap().choice,
+            ToolChoiceConstraint::Function("get_weather".into())
+        );
+
+        let serial = tool_request(serde_json::json!({"parallel_tool_calls": false}));
+        let prepared = prepare_tool_request(&serial, Some(ToolDialect::Qwen35))
+            .unwrap()
+            .unwrap();
+        assert!(!prepared.constraint_options.unwrap().allow_parallel_calls);
+
+        let unsupported = tool_request(serde_json::json!({}));
+        assert!(prepare_tool_request(&unsupported, None)
+            .unwrap_err()
+            .to_string()
+            .contains("does not support"));
+    }
+
+    #[test]
+    fn tool_request_rejects_invalid_forced_function_choices() {
+        for (extra, expected) in [
+            (
+                serde_json::json!({"tool_choice": {"type": "function", "function": {"name": "missing"}}}),
+                "unknown function",
+            ),
+            (
+                serde_json::json!({"tool_choice": {"type": "function", "function": {"name": "get_weather", "extra": true}}}),
+                "tool_choice object",
+            ),
+            (
+                serde_json::json!({"tool_choice": {"type": "custom", "function": {"name": "get_weather"}}}),
+                "tool_choice.type",
+            ),
+        ] {
+            let request = tool_request(extra);
+            let error = prepare_tool_request(&request, Some(ToolDialect::Qwen35)).unwrap_err();
+            assert!(error.to_string().contains(expected), "{error:#}");
+        }
+    }
+
+    #[test]
+    fn strict_tool_request_accepts_only_official_strict_schema_shape() {
+        let mut valid = tool_request(serde_json::json!({}));
+        let function = &mut valid.tools.as_mut().unwrap()[0].function;
+        function.strict = Some(true);
+        function.parameters["additionalProperties"] = serde_json::Value::Bool(false);
+        prepare_tool_request(&valid, Some(ToolDialect::Qwen35)).unwrap();
+
+        let mut invalid = tool_request(serde_json::json!({}));
+        invalid.tools.as_mut().unwrap()[0].function.strict = Some(true);
+        let error = prepare_tool_request(&invalid, Some(ToolDialect::Qwen35)).unwrap_err();
+        assert!(error.to_string().contains("additionalProperties=false"));
+    }
+
+    #[test]
+    fn generated_calls_are_postvalidated_against_request_semantics() {
+        let auto = ToolConstraintOptions::default();
+        validate_tool_choice_output(&auto, &[]).unwrap();
+        validate_tool_choice_output(&auto, &["a".into(), "b".into()]).unwrap();
+
+        let required = ToolConstraintOptions {
+            choice: ToolChoiceConstraint::Required,
+            allow_parallel_calls: true,
+        };
+        assert!(validate_tool_choice_output(&required, &[]).is_err());
+        validate_tool_choice_output(&required, &["a".into()]).unwrap();
+
+        let serial = ToolConstraintOptions {
+            choice: ToolChoiceConstraint::Auto,
+            allow_parallel_calls: false,
+        };
+        assert!(validate_tool_choice_output(&serial, &["a".into(), "b".into()]).is_err());
+
+        let forced = ToolConstraintOptions {
+            choice: ToolChoiceConstraint::Function("a".into()),
+            allow_parallel_calls: true,
+        };
+        validate_tool_choice_output(&forced, &["a".into()]).unwrap();
+        assert!(validate_tool_choice_output(&forced, &[]).is_err());
+        assert!(validate_tool_choice_output(&forced, &["b".into()]).is_err());
+        assert!(validate_tool_choice_output(&forced, &["a".into(), "a".into()]).is_err());
+    }
+
+    #[tokio::test]
+    async fn fake_http_endpoint_rejects_invalid_tool_requests_with_400() {
+        use axum::http::Request;
+        use axum::routing::post;
+        use axum::Router;
+        use tower::ServiceExt;
+
+        async fn validate(
+            payload: std::result::Result<Json<ChatRequest>, JsonRejection>,
+        ) -> Response {
+            let req = match payload {
+                Ok(Json(req)) => req,
+                Err(error) => {
+                    return (StatusCode::BAD_REQUEST, error.body_text()).into_response();
+                }
+            };
+            match prepare_tool_request(&req, Some(ToolDialect::Qwen35)) {
+                Ok(_) => StatusCode::NO_CONTENT.into_response(),
+                Err(error) => (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+            }
+        }
+
+        let app = Router::new().route("/v1/chat/completions", post(validate));
+        for body in [
+            serde_json::json!({
+                "messages": [{"role": "user", "content": "x"}],
+                "tools": [{"type": "retrieval", "function": {
+                    "name": "x", "parameters": {"type": "object", "properties": {}}
+                }}]
+            }),
+            serde_json::json!({
+                "messages": [{"role": "user", "content": "x"}],
+                "tools": [{"type": "function", "function": {
+                    "name": "x", "parameters": []
+                }}]
+            }),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post("/v1/chat/completions")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[test]
+    fn tool_choice_none_validates_tools_but_disables_output_parser() {
+        let request = tool_request(serde_json::json!({"tool_choice": "none"}));
+        let prepared = prepare_tool_request(&request, Some(ToolDialect::Qwen35))
+            .unwrap()
+            .unwrap();
+        assert!(prepared.constraint_options.is_none());
+        let kwargs = tool_template_kwargs(None, &prepared).unwrap();
+        assert!(kwargs.get("tools").is_none());
+    }
+
+    #[test]
+    fn tool_history_requires_matching_results_and_json_arguments() {
+        let request: ChatRequest = serde_json::from_value(serde_json::json!({
+            "messages": [
+                {"role": "user", "content": "weather"},
+                {"role": "assistant", "content": "Need weather data.\n</think>\n\n", "tool_calls": [{
+                    "id": "call_1", "type": "function",
+                    "function": {"name": "get_weather", "arguments": "{\"city\":\"Tokyo\"}"}
+                }]},
+                {"role": "tool", "tool_call_id": "call_1", "content": "sunny"},
+                {"role": "user", "content": "thanks"}
+            ],
+            "tools": [{"type": "function", "function": {
+                "name": "get_weather",
+                "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}
+            }}]
+        }))
+        .unwrap();
+        let flattened = request.messages.clone();
+        let messages = build_agent_messages(&request.messages, &flattened).unwrap();
+        assert_eq!(messages[1].tool_calls.len(), 1);
+        assert_eq!(
+            messages[1].content.as_deref(),
+            Some("Need weather data.\n</think>\n\n")
+        );
+        assert_eq!(messages[2].tool_call_id.as_deref(), Some("call_1"));
+
+        let mut orphan = request.messages.clone();
+        orphan[2].tool_call_id = Some("call_missing".into());
+        assert!(build_agent_messages(&orphan, &orphan)
+            .unwrap_err()
+            .to_string()
+            .contains("orphan"));
+    }
+
+    #[tokio::test]
+    async fn tool_sse_reconstructs_parallel_calls_by_stable_index() {
+        let output = ParsedAssistantOutput {
+            content: String::new(),
+            tool_calls: vec![
+                ToolCall {
+                    id: "call_a".into(),
+                    name: "first".into(),
+                    arguments: serde_json::json!({"city": "东京"}),
+                },
+                ToolCall {
+                    id: "call_b".into(),
+                    name: "second".into(),
+                    arguments: serde_json::json!({"days": 3}),
+                },
+            ],
+            finish_reason: "tool_calls",
+            completion_tokens: 12,
+        };
+        let response = tool_stream_response("chatcmpl-x".into(), "qwen".into(), 8, true, output);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(body.contains("\"index\":0"));
+        assert!(body.contains("\"index\":1"));
+        assert!(body.contains("\"id\":\"call_a\""));
+        assert!(body.contains("\"finish_reason\":\"tool_calls\""));
+        assert!(body.contains("data: [DONE]\n\n"));
+    }
+
+    #[test]
+    fn utf8_argument_fragmentation_preserves_exact_json() {
+        let input = "{\"city\":\"东京大阪札幌\"}";
+        let fragments = utf8_fragments(input, 7);
+        assert_eq!(fragments.concat(), input);
+        assert!(fragments.iter().all(|fragment| fragment.len() <= 7));
     }
 
     #[test]

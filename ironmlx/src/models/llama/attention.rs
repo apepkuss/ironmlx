@@ -17,6 +17,82 @@ use crate::core::Loader;
 use crate::nn::Linear;
 use crate::Result;
 
+use super::config::Llama3RopeScaling;
+
+enum LlamaRope {
+    Default { dims: i32, base: f32 },
+    Llama3 { dims: i32, freqs: Array },
+}
+
+impl LlamaRope {
+    fn new(dims: i32, base: f32, scaling: Option<&Llama3RopeScaling>) -> Result<Self> {
+        match scaling {
+            None => Ok(Self::Default { dims, base }),
+            Some(scaling) => {
+                let values = llama3_frequency_denominators(dims, base, scaling)?;
+                let freqs: Array = (&values[..], &[values.len() as i32][..]).try_into()?;
+                Ok(Self::Llama3 { dims, freqs })
+            }
+        }
+    }
+
+    fn apply_on(&self, x: &Array, offset: &Array, target: StreamOrDevice) -> Result<Array> {
+        match self {
+            Self::Default { dims, base } => Ok(mlx::fast::rope_with_array_offset_on(
+                x,
+                *dims,
+                false,
+                Some(*base),
+                1.0,
+                offset,
+                None,
+                target,
+            )?),
+            Self::Llama3 { dims, freqs } => Ok(mlx::fast::rope_with_array_offset_on(
+                x,
+                *dims,
+                false,
+                None,
+                1.0,
+                offset,
+                Some(freqs),
+                target,
+            )?),
+        }
+    }
+}
+
+fn llama3_frequency_denominators(
+    dims: i32,
+    base: f32,
+    scaling: &Llama3RopeScaling,
+) -> Result<Vec<f32>> {
+    if dims <= 0 || dims % 2 != 0 || !base.is_finite() || base <= 0.0 {
+        return Err(anyhow!(
+            "Llama3 RoPE requires positive even dims and base, got dims={dims}, base={base}"
+        ));
+    }
+    let old_context = scaling.original_max_position_embeddings as f32;
+    let low_wavelength = old_context / scaling.low_freq_factor;
+    let high_wavelength = old_context / scaling.high_freq_factor;
+    let mut values = Vec::with_capacity((dims / 2) as usize);
+    for index in (0..dims).step_by(2) {
+        let denominator = base.powf(index as f32 / dims as f32);
+        let wavelength = std::f32::consts::TAU * denominator;
+        let scaled = if wavelength > low_wavelength {
+            denominator * scaling.factor
+        } else if wavelength < high_wavelength {
+            denominator
+        } else {
+            let smooth = (old_context / wavelength - scaling.low_freq_factor)
+                / (scaling.high_freq_factor - scaling.low_freq_factor);
+            1.0 / ((1.0 - smooth) / (denominator * scaling.factor) + smooth / denominator)
+        };
+        values.push(scaled);
+    }
+    Ok(values)
+}
+
 /// Standard GQA full-attention block (LLaMA / Mistral / MiniCPM5 style).
 pub struct LlamaAttention {
     q_proj: Linear,
@@ -26,7 +102,7 @@ pub struct LlamaAttention {
     num_heads: i32,
     num_kv_heads: i32,
     head_dim: i32,
-    rope_theta: f32,
+    rope: LlamaRope,
     scale: f32,
 }
 
@@ -41,6 +117,7 @@ impl LlamaAttention {
         num_kv_heads: i32,
         head_dim: i32,
         rope_theta: f32,
+        rope_scaling: Option<&Llama3RopeScaling>,
     ) -> Result<Self> {
         let q_proj = Linear::from_loader(loader, &format!("{prefix}.q_proj"))?;
         let k_proj = Linear::from_loader(loader, &format!("{prefix}.k_proj"))?;
@@ -55,7 +132,7 @@ impl LlamaAttention {
             num_heads,
             num_kv_heads,
             head_dim,
-            rope_theta,
+            rope: LlamaRope::new(head_dim, rope_theta, rope_scaling)?,
             scale,
         })
     }
@@ -104,26 +181,8 @@ impl LlamaAttention {
 
         // Standard HF-Llama RoPE: full rotary (dims = head_dim), split-half
         // (`traditional = false`, rotate_half), per-row array offset.
-        let q = mlx::fast::rope_with_array_offset_on(
-            &q,
-            self.head_dim,
-            false,
-            Some(self.rope_theta),
-            1.0,
-            offset,
-            None,
-            target,
-        )?;
-        let k = mlx::fast::rope_with_array_offset_on(
-            &k,
-            self.head_dim,
-            false,
-            Some(self.rope_theta),
-            1.0,
-            offset,
-            None,
-            target,
-        )?;
+        let q = self.rope.apply_on(&q, offset, target)?;
+        let k = self.rope.apply_on(&k, offset, target)?;
 
         // Write post-RoPE K/V into the cache. Decode-time TurboQuant caches
         // can answer SDPA directly from packed K/V.
@@ -307,4 +366,42 @@ fn query_position_isolated_attention_on(
     }
     let refs = outputs.iter().collect::<Vec<_>>();
     mlx::ops::shape::concatenate_on(&refs, 2, target).map_err(Into::into)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scaling() -> Llama3RopeScaling {
+        Llama3RopeScaling {
+            factor: 32.0,
+            high_freq_factor: 4.0,
+            low_freq_factor: 1.0,
+            original_max_position_embeddings: 8192,
+            rope_type: "llama3".into(),
+        }
+    }
+
+    #[test]
+    fn llama3_frequency_scaling_preserves_high_and_scales_low_frequencies() {
+        let base = 500_000.0;
+        let values = llama3_frequency_denominators(128, base, &scaling()).unwrap();
+        assert_eq!(values.len(), 64);
+        assert_eq!(values[0], 1.0);
+
+        let last_base = base.powf(126.0 / 128.0);
+        assert!((values[63] / last_base - 32.0).abs() < 1e-4);
+
+        let medium = values.iter().enumerate().find(|(index, value)| {
+            let unscaled = base.powf((index * 2) as f32 / 128.0);
+            **value > unscaled && **value < unscaled * 32.0
+        });
+        assert!(medium.is_some(), "expected a smoothly interpolated band");
+    }
+
+    #[test]
+    fn llama3_frequency_scaling_rejects_invalid_rotary_dimensions() {
+        assert!(llama3_frequency_denominators(127, 500_000.0, &scaling()).is_err());
+        assert!(llama3_frequency_denominators(0, 500_000.0, &scaling()).is_err());
+    }
 }

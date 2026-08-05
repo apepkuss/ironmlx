@@ -13,7 +13,7 @@ use crate::core::prompt_lookup::{
     PromptLookupConfig, PromptLookupSourceStats, PromptLookupStats, SHARED_PROMPT_LOOKUP_TTL_MS,
 };
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum HealthStatus {
     #[serde(rename = "healthy")]
     Healthy,
@@ -21,6 +21,20 @@ pub enum HealthStatus {
     Degraded,
     #[serde(rename = "down")]
     Down,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthDegradedReason {
+    SchedulerQueueHigh,
+    KvCacheNearSoftLimit,
+    ActiveKvOffloadDegraded,
+    PrefixStoreBackpressured,
+    ProcessMemoryTelemetryDegraded,
+    ProcessMemorySoft,
+    ProcessMemoryHard,
+    ProcessMemoryEmergency,
+    ModelFailed,
 }
 
 #[derive(Debug, Serialize)]
@@ -44,7 +58,12 @@ pub struct SchedulerInfo {
 #[derive(Debug, Serialize)]
 pub struct MemoryInfo {
     pub total_ram_bytes: usize,
+    /// Literal macOS `Pages free` telemetry. This is observational only and
+    /// does not determine health because it excludes reclaimable pages.
     pub free_ram_bytes: usize,
+    /// Governor-aligned host headroom: free + inactive + the configured
+    /// reclaimable fraction of active pages.
+    pub available_ram_bytes: Option<usize>,
     pub kv_cache_active_bytes: usize,
     pub kv_cache_soft_limit_bytes: usize,
     pub kv_cache_logical_cap_tokens: usize,
@@ -704,6 +723,7 @@ impl PromptLookupHealthConfig {
 #[derive(Debug, Serialize)]
 pub struct HealthSnapshot {
     pub status: HealthStatus,
+    pub degraded_reasons: Vec<HealthDegradedReason>,
     pub uptime_secs: u64,
     pub model: ModelInfo,
     pub scheduler: SchedulerInfo,
@@ -755,29 +775,20 @@ impl SchedulerHealthCollector {
         let prefix_store = crate::core::cache::process_async_prefix_store_queue().stats();
 
         let active_kv_offload = self.active_kv_offload.snapshot();
-        let mut status = classify_status(
+        let prefix_store_backpressured =
+            crate::core::cache::process_async_prefix_store_queue().is_backpressured();
+        let (status, degraded_reasons) = classify_status(
             b_queued,
             self.queue_max,
-            free_ram_bytes,
             kv_active,
             self.kv_cache_soft_limit_bytes,
+            active_kv_offload.degraded,
+            prefix_store_backpressured,
+            &process_governor,
         );
-        if active_kv_offload.degraded {
-            status = HealthStatus::Degraded;
-        }
-        if crate::core::cache::process_async_prefix_store_queue().is_backpressured() {
-            status = HealthStatus::Degraded;
-        }
-        if process_governor.pressure_level == crate::core::process_memory::PressureLevel::Emergency
-        {
-            status = HealthStatus::Down;
-        } else if process_governor.telemetry_degraded
-            || process_governor.pressure_level != crate::core::process_memory::PressureLevel::Normal
-        {
-            status = HealthStatus::Degraded;
-        }
         HealthSnapshot {
             status,
+            degraded_reasons,
             uptime_secs,
             model: ModelInfo {
                 name: self.model_name.clone(),
@@ -796,6 +807,7 @@ impl SchedulerHealthCollector {
             memory: MemoryInfo {
                 total_ram_bytes,
                 free_ram_bytes,
+                available_ram_bytes: process_governor.available_ram_bytes,
                 kv_cache_active_bytes: kv_active,
                 kv_cache_soft_limit_bytes: self.kv_cache_soft_limit_bytes,
                 kv_cache_logical_cap_tokens: self.kv_cache_logical_cap_tokens,
@@ -823,19 +835,57 @@ impl SchedulerHealthCollector {
 pub fn classify_status(
     b_queued: usize,
     queue_max: usize,
-    free_ram_bytes: usize,
     kv_cache_active_bytes: usize,
     kv_cache_soft_limit_bytes: usize,
-) -> HealthStatus {
+    active_kv_offload_degraded: bool,
+    prefix_store_backpressured: bool,
+    process_governor: &crate::core::process_memory::MemoryGovernorSnapshot,
+) -> (HealthStatus, Vec<HealthDegradedReason>) {
+    let mut reasons = Vec::new();
     let queue_high = queue_max > 0 && b_queued >= queue_max / 2;
-    let mem_low = free_ram_bytes < (1024 * 1024 * 1024);
     let budget_near = kv_cache_soft_limit_bytes > 0
         && kv_cache_active_bytes >= ((kv_cache_soft_limit_bytes as f64) * 0.9) as usize;
-    if queue_high || mem_low || budget_near {
-        HealthStatus::Degraded
-    } else {
-        HealthStatus::Healthy
+    if queue_high {
+        reasons.push(HealthDegradedReason::SchedulerQueueHigh);
     }
+    if budget_near {
+        reasons.push(HealthDegradedReason::KvCacheNearSoftLimit);
+    }
+    if active_kv_offload_degraded {
+        reasons.push(HealthDegradedReason::ActiveKvOffloadDegraded);
+    }
+    if prefix_store_backpressured {
+        reasons.push(HealthDegradedReason::PrefixStoreBackpressured);
+    }
+    classify_process_status(process_governor, reasons)
+}
+
+pub fn classify_process_status(
+    process_governor: &crate::core::process_memory::MemoryGovernorSnapshot,
+    mut reasons: Vec<HealthDegradedReason>,
+) -> (HealthStatus, Vec<HealthDegradedReason>) {
+    use crate::core::process_memory::PressureLevel;
+
+    if process_governor.telemetry_degraded {
+        reasons.push(HealthDegradedReason::ProcessMemoryTelemetryDegraded);
+    }
+    match process_governor.pressure_level {
+        PressureLevel::Normal => {}
+        PressureLevel::Soft if !process_governor.telemetry_degraded => {
+            reasons.push(HealthDegradedReason::ProcessMemorySoft);
+        }
+        PressureLevel::Soft => {}
+        PressureLevel::Hard => reasons.push(HealthDegradedReason::ProcessMemoryHard),
+        PressureLevel::Emergency => reasons.push(HealthDegradedReason::ProcessMemoryEmergency),
+    }
+    let status = if process_governor.pressure_level == PressureLevel::Emergency {
+        HealthStatus::Down
+    } else if reasons.is_empty() {
+        HealthStatus::Healthy
+    } else {
+        HealthStatus::Degraded
+    };
+    (status, reasons)
 }
 
 pub fn system_free_ram_bytes() -> usize {
@@ -901,26 +951,85 @@ mod tests {
 
     #[test]
     fn classify_healthy_when_all_green() {
-        let s = classify_status(0, 32, 8 * 1024 * 1024 * 1024, 1_000_000, 10_000_000);
-        assert!(matches!(s, HealthStatus::Healthy));
+        let mut governor = crate::core::process_memory::MemoryGovernorSnapshot::default();
+        governor.telemetry_degraded = false;
+        let (status, reasons) =
+            classify_status(0, 32, 1_000_000, 10_000_000, false, false, &governor);
+        assert_eq!(status, HealthStatus::Healthy);
+        assert!(reasons.is_empty());
     }
 
     #[test]
     fn classify_degraded_when_queue_half_full() {
-        let s = classify_status(16, 32, 8 * 1024 * 1024 * 1024, 0, 1);
-        assert!(matches!(s, HealthStatus::Degraded));
+        let mut governor = crate::core::process_memory::MemoryGovernorSnapshot::default();
+        governor.telemetry_degraded = false;
+        let (status, reasons) = classify_status(16, 32, 0, 10, false, false, &governor);
+        assert_eq!(status, HealthStatus::Degraded);
+        assert_eq!(reasons, vec![HealthDegradedReason::SchedulerQueueHigh]);
     }
 
     #[test]
-    fn classify_degraded_when_free_ram_low() {
-        let s = classify_status(0, 32, 500_000_000, 0, 1);
-        assert!(matches!(s, HealthStatus::Degraded));
+    fn raw_free_ram_is_observational_only() {
+        let mut governor = crate::core::process_memory::MemoryGovernorSnapshot::default();
+        governor.telemetry_degraded = false;
+        governor.available_ram_bytes = Some(8 * 1024 * 1024 * 1024);
+
+        // A low raw free-page count is deliberately absent from the health
+        // classifier. The governor's pressure level owns memory health.
+        let raw_free_ram_bytes = 1;
+        let (status, reasons) = classify_status(0, 32, 0, 10_000_000, false, false, &governor);
+
+        assert!(raw_free_ram_bytes < 1024 * 1024 * 1024);
+        assert_eq!(status, HealthStatus::Healthy);
+        assert!(reasons.is_empty());
     }
 
     #[test]
     fn classify_degraded_when_budget_near_soft_limit() {
-        let s = classify_status(0, 32, 8 * 1024 * 1024 * 1024, 9_500_000, 10_000_000);
-        assert!(matches!(s, HealthStatus::Degraded));
+        let mut governor = crate::core::process_memory::MemoryGovernorSnapshot::default();
+        governor.telemetry_degraded = false;
+        let (status, reasons) =
+            classify_status(0, 32, 9_500_000, 10_000_000, false, false, &governor);
+        assert_eq!(status, HealthStatus::Degraded);
+        assert_eq!(reasons, vec![HealthDegradedReason::KvCacheNearSoftLimit]);
+    }
+
+    #[test]
+    fn classify_process_pressure_and_telemetry_reasons() {
+        use crate::core::process_memory::PressureLevel;
+
+        for (level, expected_status, expected_reason) in [
+            (
+                PressureLevel::Soft,
+                HealthStatus::Degraded,
+                HealthDegradedReason::ProcessMemorySoft,
+            ),
+            (
+                PressureLevel::Hard,
+                HealthStatus::Degraded,
+                HealthDegradedReason::ProcessMemoryHard,
+            ),
+            (
+                PressureLevel::Emergency,
+                HealthStatus::Down,
+                HealthDegradedReason::ProcessMemoryEmergency,
+            ),
+        ] {
+            let mut governor = crate::core::process_memory::MemoryGovernorSnapshot::default();
+            governor.telemetry_degraded = false;
+            governor.pressure_level = level;
+            let (status, reasons) = classify_process_status(&governor, Vec::new());
+            assert_eq!(status, expected_status);
+            assert_eq!(reasons, vec![expected_reason]);
+        }
+
+        let governor = crate::core::process_memory::MemoryGovernorSnapshot::default();
+        let (status, reasons) = classify_process_status(&governor, Vec::new());
+        assert_eq!(status, HealthStatus::Degraded);
+        assert_eq!(
+            reasons,
+            vec![HealthDegradedReason::ProcessMemoryTelemetryDegraded]
+        );
     }
 
     fn test_collector(mtp: MtpHealthConfig) -> SchedulerHealthCollector {
@@ -1384,6 +1493,7 @@ mod tests {
     fn health_memory_serializes_mlx_allocator_fields() {
         let snapshot = HealthSnapshot {
             status: HealthStatus::Healthy,
+            degraded_reasons: Vec::new(),
             uptime_secs: 7,
             model: ModelInfo {
                 name: "test-model".to_string(),
@@ -1402,6 +1512,7 @@ mod tests {
             memory: MemoryInfo {
                 total_ram_bytes: 64,
                 free_ram_bytes: 32,
+                available_ram_bytes: Some(48),
                 kv_cache_active_bytes: 16,
                 kv_cache_soft_limit_bytes: 24,
                 kv_cache_logical_cap_tokens: 128,
@@ -1455,6 +1566,7 @@ mod tests {
 
         let value = serde_json::to_value(snapshot).expect("serialize health snapshot");
         assert_eq!(value["memory"]["mlx_total_bytes"], 55);
+        assert_eq!(value["memory"]["available_ram_bytes"], 48);
         assert_eq!(value["memory"]["mlx_max_recommended_bytes"], 66);
         assert_eq!(value["memory"]["mlx_active_bytes"], 11);
         assert_eq!(value["memory"]["mlx_cache_bytes"], 22);

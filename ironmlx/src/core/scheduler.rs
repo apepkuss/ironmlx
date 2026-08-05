@@ -1159,6 +1159,11 @@ pub struct RequestState {
     /// PRNG state lives in `Scheduler.prng_state` (centralized) — see
     /// `docs/superpowers/specs/2026-05-17-b1-p2-3e-2-prng-key-batching-design.md`.
     pub sampler: Sampler,
+    /// Immutable source plan retained for fresh prefill and rebase helpers.
+    pub constraint_plan: Option<crate::core::constrained::ConstraintPlan>,
+    /// Request-local token-level grammar state, advanced only by committed
+    /// generated tokens.
+    pub constraint: Option<crate::core::constrained::ConstraintSession>,
     /// Effective KV-cache length for this row: starts at `prompt_ids.len()`
     /// and is incremented by 1 per decode step (3b). Used by 3c to build
     /// the per-row decode mask.
@@ -1205,6 +1210,16 @@ fn completed_prompt_lookup_history(state: &RequestState) -> Option<Vec<u32>> {
     history.extend_from_slice(&state.prompt_ids);
     history.extend_from_slice(&state.generated_tokens);
     Some(history)
+}
+
+fn ensure_constraint_complete_at_length(state: &mut RequestState) -> Result<()> {
+    if let Some(constraint) = state.constraint.as_mut() {
+        anyhow::ensure!(
+            constraint.is_accepting()?,
+            "max_new_tokens reached before constrained output became complete"
+        );
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -1730,6 +1745,22 @@ fn slice_hidden_row_position(
     .map_err(Into::into)
 }
 
+fn slice_logits_row_position(logits: &Array, row_idx: usize, pos: usize) -> Result<Array> {
+    let shape = logits.shape();
+    let dims = shape.as_slice();
+    anyhow::ensure!(
+        dims.len() == 3 && row_idx < dims[0] as usize && pos < dims[1] as usize,
+        "slice_logits_row_position: row={row_idx} pos={pos} out of shape {dims:?}"
+    );
+    let sliced = mlx::ops::indexing::slice_strided(
+        logits,
+        &[row_idx as i32, pos as i32, 0_i32][..],
+        &[row_idx as i32 + 1, pos as i32 + 1, dims[2]][..],
+        &[1_i32, 1_i32, 1_i32][..],
+    )?;
+    sliced.reshape((dims[2],)).map_err(Into::into)
+}
+
 fn slice_hidden_row_prefix(
     hidden: &Array,
     row_idx: usize,
@@ -1908,8 +1939,9 @@ fn row_tokens_from_flat(
 fn append_resolved_gemma4_tokens(
     row_state: &mut SchedulerGemma4DrafterRowState,
     ctx: &Gemma4DrafterBatchedFillContext,
+    constraint: Option<&crate::core::constrained::ConstraintSession>,
     resolution: SpeculativeResolution,
-) -> usize {
+) -> Result<usize> {
     let mut tokens_to_append = resolution.tokens_to_append;
     if let Some(stop_idx) = tokens_to_append
         .iter()
@@ -1918,9 +1950,12 @@ fn append_resolved_gemma4_tokens(
         tokens_to_append.truncate(stop_idx + 1);
     }
     tokens_to_append.truncate(ctx.remaining);
+    if let Some(constraint) = constraint {
+        constraint.truncate_invalid_speculative_bonus(&mut tokens_to_append)?;
+    }
     let committed_tokens = tokens_to_append.len();
     row_state.pending_tokens.extend(tokens_to_append);
-    committed_tokens
+    Ok(committed_tokens)
 }
 
 fn active_kv_entry_supported(entry: &PagedPrefixEntry) -> bool {
@@ -2462,6 +2497,7 @@ fn generate_request_from_state(state: &RequestState) -> Result<GenerateRequest> 
         image_grid_thw: state.image_grid_thw.clone(),
         image_spatial_merge_size: state.image_spatial_merge_size,
         image_token_id: state.image_token_id,
+        constraint: state.constraint_plan.clone(),
     })
 }
 
@@ -2506,6 +2542,7 @@ fn generate_neural_rebase_request_from_state(state: &RequestState) -> Result<Gen
         image_grid_thw: state.image_grid_thw.clone(),
         image_spatial_merge_size: state.image_spatial_merge_size,
         image_token_id: state.image_token_id,
+        constraint: state.constraint_plan.clone(),
     })
 }
 
@@ -6776,6 +6813,12 @@ impl<M: Model> Scheduler<M> {
             prompt_len
         );
         let real_len = prompt_len as i32;
+        let constraint_plan = req.constraint.clone();
+        let constraint = req
+            .constraint
+            .as_ref()
+            .map(crate::core::constrained::ConstraintPlan::start_session)
+            .transpose()?;
         let state = RequestState {
             id,
             row_idx,
@@ -6784,6 +6827,8 @@ impl<M: Model> Scheduler<M> {
             max_new_tokens: req.max_new_tokens,
             stop_token_ids: req.stop_token_ids,
             sampler: req.sampler,
+            constraint_plan,
+            constraint,
             real_len,
             finished: false,
             finish_reason: None,
@@ -7169,11 +7214,20 @@ impl<M: Model> Scheduler<M> {
             ));
         }
         state.generated_tokens.push(token);
+        if let Some(constraint) = state.constraint.as_mut() {
+            constraint.commit_token(token)?;
+        }
         state.real_len += 1;
         if state.stop_token_ids.contains(&token) {
             state.finished = true;
             state.finish_reason = Some("stop");
         } else if state.generated_tokens.len() >= state.max_new_tokens {
+            if let Some(constraint) = state.constraint.as_mut() {
+                anyhow::ensure!(
+                    constraint.is_accepting()?,
+                    "max_new_tokens reached before constrained output became complete"
+                );
+            }
             state.finished = true;
             state.finish_reason = Some("length");
         }
@@ -9220,15 +9274,21 @@ impl<M: Model> Scheduler<M> {
                 Vec::with_capacity(slot.prompt_ids.len() + slot.generated_tokens.len());
             history.extend_from_slice(&slot.prompt_ids);
             history.extend_from_slice(&slot.generated_tokens);
+            let mut draft_tokens = proposal.tokens;
+            if let Some(constraint) = slot.constraint.as_ref() {
+                let valid_prefix = constraint.validate_tokens(&draft_tokens)?;
+                draft_tokens.truncate(valid_prefix);
+            }
+            let mtp_certified_draft_len = proposal.mtp_certified_draft_len.min(draft_tokens.len());
             contexts.push(PromptLookupBatchedFillContext {
                 row_idx,
                 current_token,
                 stop_token_ids: slot.stop_token_ids.clone(),
                 remaining,
                 verify_start_pos: slot.real_len,
-                draft_tokens: proposal.tokens,
+                draft_tokens,
                 proposal_source: proposal.source,
-                mtp_certified_draft_len: proposal.mtp_certified_draft_len,
+                mtp_certified_draft_len,
                 mtp_certified_bonus_token: proposal.mtp_certified_bonus_token,
                 mtp_policy_snapshot: proposal.mtp_policy_snapshot,
                 sampler: slot.sampler,
@@ -9513,6 +9573,20 @@ impl<M: Model> Scheduler<M> {
                 let refs = logits_steps.iter().collect::<Vec<_>>();
                 mlx::ops::shape::concatenate(&refs, 1)?
             };
+            let mut speculative_masks = vec![None; batch];
+            for (ctx_idx, ctx) in contexts.iter().enumerate() {
+                if let Some(constraint) = self.slots[ctx.row_idx]
+                    .as_ref()
+                    .and_then(|state| state.constraint.as_ref())
+                {
+                    speculative_masks[cache_row_for_ctx[ctx_idx]] =
+                        Some(constraint.speculative_masks(&ctx.draft_tokens)?);
+                }
+            }
+            let verify_logits = crate::core::constrained::apply_speculative_token_masks(
+                &verify_logits,
+                &speculative_masks,
+            )?;
             let all_greedy = contexts.iter().all(|ctx| ctx.sampler.is_pipelinable());
             let mut resolutions = (0..contexts.len())
                 .map(|_| None)
@@ -9632,6 +9706,15 @@ impl<M: Model> Scheduler<M> {
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
+            for (ctx, resolution) in contexts.iter().zip(resolutions.iter_mut()) {
+                if let Some(constraint) = self.slots[ctx.row_idx]
+                    .as_ref()
+                    .and_then(|slot| slot.constraint.as_ref())
+                {
+                    constraint
+                        .truncate_invalid_speculative_bonus(&mut resolution.tokens_to_append)?;
+                }
+            }
             let verify_round_us = elapsed_us_since(verify_round_start);
             stats.verify_round_us = stats.verify_round_us.saturating_add(verify_round_us);
             let local_verify_weight = contexts
@@ -11880,8 +11963,22 @@ impl<M: Model> Scheduler<M> {
         let last_prompt_hidden = last_prompt_hidden
             .ok_or_else(|| anyhow!("prefill_admitted_mtp_single produced no prompt hidden"))?;
 
+        let mut next_constraint = self.slots[row_idx]
+            .as_ref()
+            .expect("active row implies slot is Some")
+            .constraint
+            .clone();
         let first_token = match forced_current {
-            Some(token) => token,
+            Some(token) => {
+                if let Some(constraint) = next_constraint.as_mut() {
+                    let mask = constraint.compute_mask()?;
+                    anyhow::ensure!(
+                        mask.is_allowed(token),
+                        "forced MTP boundary token {token} violates decoding constraint"
+                    );
+                }
+                token
+            }
             None => {
                 let projection_start = Instant::now();
                 let first_logits =
@@ -11889,12 +11986,16 @@ impl<M: Model> Scheduler<M> {
                 add_elapsed_us(&mut stats.projection_us, projection_start);
                 let mut compact_prng = self.compact_prng_state_for_rows(&[row_idx])?;
                 let sampling_start = Instant::now();
-                let first_tokens = sample_logits_positions(
-                    &first_logits,
-                    sampler,
-                    &prompt_ids,
-                    &mut compact_prng,
-                )?;
+                let first_tokens = if let Some(constraint) = next_constraint.as_mut() {
+                    let row_logits = slice_logits_row(&first_logits, 0)?;
+                    let row_logits = crate::core::constrained::apply_token_mask(
+                        &row_logits,
+                        &constraint.compute_mask()?,
+                    )?;
+                    vec![sampler.sample(&row_logits, &prompt_ids, &mut compact_prng)?]
+                } else {
+                    sample_logits_positions(&first_logits, sampler, &prompt_ids, &mut compact_prng)?
+                };
                 add_elapsed_us(&mut stats.sampling_us, sampling_start);
                 self.scatter_prng_state_from_rows(&[row_idx], &compact_prng)?;
                 *first_tokens
@@ -11902,17 +12003,22 @@ impl<M: Model> Scheduler<M> {
                     .ok_or_else(|| anyhow!("prefill_admitted_mtp_single produced no first token"))?
             }
         };
+        if let Some(constraint) = next_constraint.as_mut() {
+            constraint.commit_token(first_token)?;
+        }
 
         let finish_reason = {
             let state = self.slots[row_idx]
                 .as_mut()
                 .expect("active row implies slot is Some");
+            state.constraint = next_constraint;
             state.generated_tokens.push(first_token);
             state.real_len += 1;
             if stop_token_ids.contains(&first_token) {
                 state.finished = true;
                 state.finish_reason = Some("stop");
             } else if state.generated_tokens.len() >= state.max_new_tokens {
+                ensure_constraint_complete_at_length(state)?;
                 state.finished = true;
                 state.finish_reason = Some("length");
             }
@@ -12093,6 +12199,7 @@ impl<M: Model> Scheduler<M> {
             slot.real_len = temp_slot.real_len;
             slot.finished = temp_slot.finished;
             slot.finish_reason = temp_slot.finish_reason;
+            slot.constraint = temp_slot.constraint.clone();
             adopt_cache_row_layers(
                 &mut final_cache,
                 &temp_cache,
@@ -12146,6 +12253,7 @@ impl<M: Model> Scheduler<M> {
             temp_state.real_len = state.real_len;
             temp_state.finished = state.finished;
             temp_state.finish_reason = state.finish_reason;
+            temp_state.constraint = state.constraint.clone();
         }
         temp.request_block_tables.remove(&temp_id);
         temp.request_block_tables
@@ -12182,6 +12290,15 @@ impl<M: Model> Scheduler<M> {
             .as_mut()
             .ok_or_else(|| anyhow!("temp_mtp_rebase_scheduler_for_row: temp slot absent"))?;
         temp_state.id = state.id;
+        temp_state.constraint = state
+            .constraint
+            .as_ref()
+            .map(|constraint| {
+                let mut constraint = constraint.fork();
+                constraint.rollback(1)?;
+                Ok::<_, anyhow::Error>(constraint)
+            })
+            .transpose()?;
         temp.request_block_tables.remove(&temp_id);
         temp.request_block_tables
             .insert(state.id, RequestBlockTable::new(state.id));
@@ -12301,6 +12418,7 @@ impl<M: Model> Scheduler<M> {
         slot.real_len = temp_slot.real_len;
         slot.finished = temp_slot.finished;
         slot.finish_reason = temp_slot.finish_reason;
+        slot.constraint = temp_slot.constraint.clone();
 
         let mut mtp_state = temp
             .mtp_state
@@ -12674,6 +12792,7 @@ impl<M: Model> Scheduler<M> {
         row_states: &mut HashMap<usize, SchedulerMtpRowState>,
         model: &M,
         mtp: &M::MtpHead,
+        draft_constraints: &mut HashMap<usize, crate::core::constrained::ConstraintSession>,
     ) -> Result<()>
     where
         M: MtpSpeculativeModel,
@@ -12720,14 +12839,26 @@ impl<M: Model> Scheduler<M> {
                 add_elapsed_us(&mut stats.draft_forward_us, draft_forward_start);
 
                 let sampling_start = Instant::now();
-                let sampled = mlx::ops::reduction::argmax(&output.logits, -1, false)?;
-                let next_token = mlx::ops::indexing::slice_strided_on(
-                    &sampled,
-                    &[0_i32, 1_i32][..],
-                    &[1_i32, 2_i32][..],
-                    &[1_i32, 1_i32][..],
-                    mlx::StreamOrDevice::default(),
-                )?;
+                let next_token = if let Some(constraint) = draft_constraints.get_mut(&ctx.row_idx) {
+                    let logits = slice_logits_row_position(&output.logits, 0, 1)?;
+                    let logits = crate::core::constrained::apply_token_mask(
+                        &logits,
+                        &constraint.compute_mask()?,
+                    )?;
+                    let sampled = mlx::ops::reduction::argmax(&logits, -1, false)?;
+                    let token: u32 = sampled.item()?;
+                    constraint.commit_token(token)?;
+                    (&[token][..], &[1_i32, 1_i32][..]).try_into()?
+                } else {
+                    let sampled = mlx::ops::reduction::argmax(&output.logits, -1, false)?;
+                    mlx::ops::indexing::slice_strided_on(
+                        &sampled,
+                        &[0_i32, 1_i32][..],
+                        &[1_i32, 2_i32][..],
+                        &[1_i32, 1_i32][..],
+                        mlx::StreamOrDevice::default(),
+                    )?
+                };
                 add_elapsed_us(&mut stats.sampling_us, sampling_start);
 
                 ctx.draft_tokens.push(next_token.clone());
@@ -12752,7 +12883,19 @@ impl<M: Model> Scheduler<M> {
                 add_elapsed_us(&mut stats.draft_forward_us, draft_forward_start);
 
                 let sampling_start = Instant::now();
-                let next_token = mlx::ops::reduction::argmax(&output.logits, -1, false)?;
+                let next_token = if let Some(constraint) = draft_constraints.get_mut(&ctx.row_idx) {
+                    let logits = slice_logits_row(&output.logits, 0)?;
+                    let logits = crate::core::constrained::apply_token_mask(
+                        &logits,
+                        &constraint.compute_mask()?,
+                    )?;
+                    let sampled = mlx::ops::reduction::argmax(&logits, -1, false)?;
+                    let token: u32 = sampled.item()?;
+                    constraint.commit_token(token)?;
+                    (&[token][..], &[1_i32, 1_i32][..]).try_into()?
+                } else {
+                    mlx::ops::reduction::argmax(&output.logits, -1, false)?
+                };
                 add_elapsed_us(&mut stats.sampling_us, sampling_start);
 
                 ctx.draft_tokens.push(next_token.clone());
@@ -12832,8 +12975,24 @@ impl<M: Model> Scheduler<M> {
         if contexts.is_empty() {
             return Ok(());
         }
+        let mut draft_constraints = contexts
+            .iter()
+            .filter_map(|ctx| {
+                self.slots[ctx.row_idx]
+                    .as_ref()
+                    .and_then(|state| state.constraint.clone())
+                    .map(|constraint| (ctx.row_idx, constraint))
+            })
+            .collect::<HashMap<_, _>>();
         let tail_commit_mode = if Self::should_use_row_cache_mtp_draft(&contexts) {
-            self.draft_mtp_windows_from_row_caches(&mut contexts, stats, row_states, model, mtp)?;
+            self.draft_mtp_windows_from_row_caches(
+                &mut contexts,
+                stats,
+                row_states,
+                model,
+                mtp,
+                &mut draft_constraints,
+            )?;
             MtpBatchedTailCommitMode::PerRowCache
         } else {
             let max_draft_budget = contexts
@@ -12955,7 +13114,27 @@ impl<M: Model> Scheduler<M> {
                 add_elapsed_us(&mut stats.draft_forward_us, draft_forward_start);
 
                 let sampling_start = Instant::now();
-                let sampled_arr = mlx::ops::reduction::argmax(&output.logits, -1, false)?;
+                let sampled_arr = if draft_constraints.is_empty() {
+                    mlx::ops::reduction::argmax(&output.logits, -1, false)?
+                } else {
+                    let vocab = output.logits.shape().as_slice()[2];
+                    let logits = output
+                        .logits
+                        .reshape(&[active_indices.len() as i32, vocab][..])?;
+                    let masks = active_indices
+                        .iter()
+                        .map(|&ctx_idx| {
+                            draft_constraints
+                                .get_mut(&contexts[ctx_idx].row_idx)
+                                .map(crate::core::constrained::ConstraintSession::compute_mask)
+                                .transpose()
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    let logits =
+                        crate::core::constrained::apply_batch_token_masks(&logits, &masks)?;
+                    mlx::ops::reduction::argmax(&logits, -1, false)?
+                        .reshape(&[active_indices.len() as i32, 1_i32][..])?
+                };
                 add_elapsed_us(&mut stats.sampling_us, sampling_start);
                 if sampled_arr.size() != active_indices.len() {
                     return Err(anyhow!(
@@ -12973,6 +13152,10 @@ impl<M: Model> Scheduler<M> {
                         mlx::StreamOrDevice::default(),
                     )?;
                     let ctx = &mut contexts[ctx_idx];
+                    if let Some(constraint) = draft_constraints.get_mut(&ctx.row_idx) {
+                        let token: u32 = next_token.item()?;
+                        constraint.commit_token(token)?;
+                    }
                     ctx.draft_tokens.push(next_token.clone());
                     ctx.input_token = next_token;
                     ctx.input_hidden = slice_hidden_row_position(
@@ -13109,6 +13292,29 @@ impl<M: Model> Scheduler<M> {
                     max_verify_len
                 ));
             }
+            let mut speculative_masks = vec![None; b];
+            for (ctx_idx, ctx) in contexts.iter().enumerate() {
+                let Some(constraint) = self.slots[ctx.row_idx]
+                    .as_ref()
+                    .and_then(|state| state.constraint.as_ref())
+                else {
+                    continue;
+                };
+                let sync_start = Instant::now();
+                let draft_tokens = ctx
+                    .draft_tokens
+                    .iter()
+                    .map(Array::item::<u32>)
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                stats.draft_host_sync_count = stats.draft_host_sync_count.saturating_add(1);
+                add_elapsed_us(&mut stats.draft_host_sync_us, sync_start);
+                speculative_masks[cache_row_for_ctx[ctx_idx]] =
+                    Some(constraint.speculative_masks(&draft_tokens)?);
+            }
+            let verified_logits = crate::core::constrained::apply_speculative_token_masks(
+                &verified_logits,
+                &speculative_masks,
+            )?;
             let sampling_start = Instant::now();
             let verified_ids = mlx::ops::reduction::argmax(&verified_logits, -1, false)?;
             add_elapsed_us(&mut stats.sampling_us, sampling_start);
@@ -13376,6 +13582,12 @@ impl<M: Model> Scheduler<M> {
                     tokens_to_append.truncate(stop_idx + 1);
                 }
                 tokens_to_append.truncate(ctx.remaining);
+                if let Some(constraint) = self.slots[ctx.row_idx]
+                    .as_ref()
+                    .and_then(|slot| slot.constraint.as_ref())
+                {
+                    constraint.truncate_invalid_speculative_bonus(&mut tokens_to_append)?;
+                }
                 row_state.pending_tokens.extend(tokens_to_append);
                 policy_inputs.push((
                     ctx.row_idx,
@@ -13593,21 +13805,8 @@ impl<M: Model> Scheduler<M> {
                 .ok_or_else(|| anyhow!("step_mtp_single: pending token queue is empty"))?
         };
 
-        let (id, finish_reason) = {
-            let state = self.slots[row_idx]
-                .as_mut()
-                .expect("unfinished row implies slot is Some");
-            state.generated_tokens.push(token);
-            state.real_len += 1;
-            if state.stop_token_ids.contains(&token) {
-                state.finished = true;
-                state.finish_reason = Some("stop");
-            } else if state.generated_tokens.len() >= state.max_new_tokens {
-                state.finished = true;
-                state.finish_reason = Some("length");
-            }
-            (state.id, state.finish_reason)
-        };
+        let event = self.emit_token_for_row(row_idx, token)?;
+        let finish_reason = event.finish_reason;
 
         if finish_reason.is_some() {
             self.phase = Phase::Finished;
@@ -13627,11 +13826,7 @@ impl<M: Model> Scheduler<M> {
             )?;
         }
 
-        Ok(vec![StepEvent {
-            id,
-            token,
-            finish_reason,
-        }])
+        Ok(vec![event])
     }
 
     fn fill_mtp_window_single(&mut self, row_idx: usize, model: &M, mtp: &M::MtpHead) -> Result<()>
@@ -13713,7 +13908,7 @@ impl<M: Model> Scheduler<M> {
             row: row_state,
             observations,
         } = state;
-        let (prompt_ids, generated_tokens, max_new_tokens, sampler, stop_token_ids) = {
+        let (prompt_ids, generated_tokens, max_new_tokens, sampler, stop_token_ids, constraint) = {
             let state = self.slots[row_idx]
                 .as_ref()
                 .ok_or_else(|| anyhow!("fill_mtp_window_single: row slot absent"))?;
@@ -13723,6 +13918,7 @@ impl<M: Model> Scheduler<M> {
                 state.max_new_tokens,
                 state.sampler,
                 state.stop_token_ids.clone(),
+                state.constraint.clone(),
             )
         };
         let emitted = generated_tokens.len();
@@ -13747,6 +13943,7 @@ impl<M: Model> Scheduler<M> {
             .clamp(1, max_supported_draft_tokens)
             .min(remaining);
         let mut compact_prng = self.compact_prng_state_for_rows(&[row_idx])?;
+        let mut draft_constraint = constraint.clone();
         let draft_result = self.draft_mtp_tokens_single_greedy_device(
             stats,
             row_state,
@@ -13755,6 +13952,7 @@ impl<M: Model> Scheduler<M> {
             current_token,
             draft_budget,
             history.len(),
+            draft_constraint.as_mut(),
         )?;
         let current: Array = (&[current_token][..], &[1_i32, 1_i32][..]).try_into()?;
         let mut token_steps = Vec::with_capacity(draft_result.tokens.len() + 1);
@@ -13762,7 +13960,7 @@ impl<M: Model> Scheduler<M> {
         token_steps.extend(draft_result.tokens.iter());
         let verify_arr =
             mlx::ops::shape::concatenate_on(&token_steps, 1, mlx::StreamOrDevice::default())?;
-        let draft_arr = if sampler.is_pipelinable() {
+        let draft_arr = if sampler.is_pipelinable() && constraint.is_none() {
             None
         } else {
             Some(mlx::ops::indexing::slice(
@@ -13809,6 +14007,21 @@ impl<M: Model> Scheduler<M> {
                 window.projection,
                 mlx::StreamOrDevice::default(),
             )?;
+            let verified_logits = if let Some(constraint) = constraint.as_ref() {
+                let draft_arr = draft_arr
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("constrained MTP draft array is absent"))?;
+                let sync_start = Instant::now();
+                let draft_tokens: Vec<u32> = draft_arr.to_vec()?;
+                stats.draft_host_sync_count = stats.draft_host_sync_count.saturating_add(1);
+                add_elapsed_us(&mut stats.draft_host_sync_us, sync_start);
+                crate::core::constrained::apply_speculative_token_masks(
+                    &verified_logits,
+                    &[Some(constraint.speculative_masks(&draft_tokens)?)],
+                )?
+            } else {
+                verified_logits
+            };
             add_elapsed_us(&mut stats.projection_us, projection_start);
             let sampling_start = Instant::now();
             let verified_ids = mlx::ops::reduction::argmax(&verified_logits, -1, false)?;
@@ -13842,6 +14055,14 @@ impl<M: Model> Scheduler<M> {
             let draft_tokens: Vec<u32> = draft_arr.to_vec()?;
             stats.draft_host_sync_count = stats.draft_host_sync_count.saturating_add(1);
             add_elapsed_us(&mut stats.draft_host_sync_us, sync_start);
+            let verified_logits = if let Some(constraint) = constraint.as_ref() {
+                crate::core::constrained::apply_speculative_token_masks(
+                    &verified_logits,
+                    &[Some(constraint.speculative_masks(&draft_tokens)?)],
+                )?
+            } else {
+                verified_logits
+            };
             let resolution = resolve_exact_deterministic_target_logits(
                 &draft_tokens,
                 &verified_logits,
@@ -13973,6 +14194,9 @@ impl<M: Model> Scheduler<M> {
             tokens_to_append.truncate(stop_idx + 1);
         }
         tokens_to_append.truncate(remaining);
+        if let Some(constraint) = constraint.as_ref() {
+            constraint.truncate_invalid_speculative_bonus(&mut tokens_to_append)?;
+        }
         row_state.pending_tokens.extend(tokens_to_append);
         self.scatter_prng_state_from_rows(&[row_idx], &compact_prng)?;
         Ok(())
@@ -13988,6 +14212,7 @@ impl<M: Model> Scheduler<M> {
         current_token: u32,
         draft_budget: usize,
         history_len: usize,
+        mut constraint: Option<&mut crate::core::constrained::ConstraintSession>,
     ) -> Result<MtpDeviceDraftResult>
     where
         M: MtpSpeculativeModel,
@@ -14015,7 +14240,19 @@ impl<M: Model> Scheduler<M> {
             )?;
             add_elapsed_us(&mut stats.draft_forward_us, draft_forward_start);
             let sampling_start = Instant::now();
-            let next_token = mlx::ops::reduction::argmax(&output.logits, -1, false)?;
+            let next_token = if let Some(constraint) = constraint.as_mut() {
+                let row_logits = slice_logits_row(&output.logits, 0)?;
+                let row_logits = crate::core::constrained::apply_token_mask(
+                    &row_logits,
+                    &constraint.compute_mask()?,
+                )?;
+                let next = mlx::ops::reduction::argmax(&row_logits, -1, false)?;
+                let token = next.item::<u32>()?;
+                constraint.commit_token(token)?;
+                (&[token][..], &[1_i32, 1_i32][..]).try_into()?
+            } else {
+                mlx::ops::reduction::argmax(&output.logits, -1, false)?
+            };
             add_elapsed_us(&mut stats.sampling_us, sampling_start);
             tokens.push(next_token.clone());
             input_hidden = output.hidden_states;
@@ -14801,6 +15038,20 @@ impl<M: Model> Scheduler<M> {
                 return Err(err);
             }
         };
+        let constraint_masks = prefill_rows
+            .iter()
+            .map(|&slot_row| {
+                self.slots[slot_row]
+                    .as_mut()
+                    .expect("prefill row is occupied")
+                    .constraint
+                    .as_mut()
+                    .map(crate::core::constrained::ConstraintSession::compute_mask)
+                    .transpose()
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let logits_bv =
+            crate::core::constrained::apply_batch_token_masks(&logits_bv, &constraint_masks)?;
 
         // Stage A — collect per-row sampler refs + histories in compact prefill order.
         let mut row_samplers: Vec<&Sampler> = Vec::with_capacity(b);
@@ -14884,12 +15135,16 @@ impl<M: Model> Scheduler<M> {
                 .expect("prefill_rows contain only occupied slots");
 
             state.generated_tokens.push(token);
+            if let Some(constraint) = state.constraint.as_mut() {
+                constraint.commit_token(token)?;
+            }
             state.real_len += 1;
 
             if state.stop_token_ids.contains(&token) {
                 state.finished = true;
                 state.finish_reason = Some("stop");
             } else if state.generated_tokens.len() >= state.max_new_tokens {
+                ensure_constraint_complete_at_length(state)?;
                 state.finished = true;
                 state.finish_reason = Some("length");
             }
@@ -15164,6 +15419,20 @@ impl<M: Model> Scheduler<M> {
         let logits_bv = logits
             .reshape(&[b as i32, vocab][..])
             .map_err(|e| anyhow!("step: reshape logits [B,1,vocab]->[B,vocab] failed: {e:?}"))?;
+        let constraint_masks = active_rows
+            .iter()
+            .map(|&slot_row| {
+                self.slots[slot_row]
+                    .as_mut()
+                    .expect("active row is occupied")
+                    .constraint
+                    .as_mut()
+                    .map(crate::core::constrained::ConstraintSession::compute_mask)
+                    .transpose()
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let logits_bv =
+            crate::core::constrained::apply_batch_token_masks(&logits_bv, &constraint_masks)?;
 
         // Stage A — collect per-row sampler refs + histories in compact
         // active-row order.
@@ -15204,6 +15473,9 @@ impl<M: Model> Scheduler<M> {
                 .expect("active_rows guaranteed Some");
 
             state.generated_tokens.push(token);
+            if let Some(constraint) = state.constraint.as_mut() {
+                constraint.commit_token(token)?;
+            }
             state.real_len += 1;
 
             // Termination: EOS check first, then max_new_tokens.
@@ -15211,6 +15483,7 @@ impl<M: Model> Scheduler<M> {
                 state.finished = true;
                 state.finish_reason = Some("stop");
             } else if state.generated_tokens.len() >= state.max_new_tokens {
+                ensure_constraint_complete_at_length(state)?;
                 state.finished = true;
                 state.finish_reason = Some("length");
             }
@@ -15938,6 +16211,16 @@ impl<M: Model> Scheduler<M> {
 
         // Sample first generated token using centralized PRNG state.
         let row_logits = slice_logits_row(&logits, 0)?;
+        let row_logits = if let Some(constraint) = self.slots[row_idx]
+            .as_mut()
+            .expect("admit_mid_begin reserved the slot")
+            .constraint
+            .as_mut()
+        {
+            crate::core::constrained::apply_token_mask(&row_logits, &constraint.compute_mask()?)?
+        } else {
+            row_logits
+        };
         let token = {
             let history: Vec<u32> = prompt_ids.clone();
             // Copy the sampler (Sampler: Copy post-3e.2) so we release the borrow on self.slots before
@@ -15961,11 +16244,15 @@ impl<M: Model> Scheduler<M> {
             .as_mut()
             .expect("admit_mid_begin reserved the slot");
         state.generated_tokens.push(token);
+        if let Some(constraint) = state.constraint.as_mut() {
+            constraint.commit_token(token)?;
+        }
         state.real_len += 1;
         if state.stop_token_ids.contains(&token) {
             state.finished = true;
             state.finish_reason = Some("stop");
         } else if state.generated_tokens.len() >= state.max_new_tokens {
+            ensure_constraint_complete_at_length(state)?;
             state.finished = true;
             state.finish_reason = Some("length");
         }
@@ -16439,8 +16726,19 @@ impl<M: Model> Scheduler<M> {
         add_elapsed_us(&mut stats.projection_us, projection_start);
         let mut compact_prng = self.compact_prng_state_for_rows(&[row_idx])?;
         let sampling_start = Instant::now();
-        let first_tokens =
-            sample_logits_positions(&first_logits, sampler, &prompt_ids, &mut compact_prng)?;
+        let first_tokens = if let Some(constraint) = self.slots[row_idx]
+            .as_mut()
+            .and_then(|state| state.constraint.as_mut())
+        {
+            let row_logits = slice_logits_row(&first_logits, 0)?;
+            let row_logits = crate::core::constrained::apply_token_mask(
+                &row_logits,
+                &constraint.compute_mask()?,
+            )?;
+            vec![sampler.sample(&row_logits, &prompt_ids, &mut compact_prng)?]
+        } else {
+            sample_logits_positions(&first_logits, sampler, &prompt_ids, &mut compact_prng)?
+        };
         add_elapsed_us(&mut stats.sampling_us, sampling_start);
         self.scatter_prng_state_from_rows(&[row_idx], &compact_prng)?;
         let first_token = *first_tokens
@@ -16452,11 +16750,15 @@ impl<M: Model> Scheduler<M> {
                 .as_mut()
                 .ok_or_else(|| anyhow!("admit_mid_finalize_mtp: row slot absent"))?;
             state.generated_tokens.push(first_token);
+            if let Some(constraint) = state.constraint.as_mut() {
+                constraint.commit_token(first_token)?;
+            }
             state.real_len += 1;
             if stop_token_ids.contains(&first_token) {
                 state.finished = true;
                 state.finish_reason = Some("stop");
             } else if state.generated_tokens.len() >= max_new_tokens {
+                ensure_constraint_complete_at_length(state)?;
                 state.finished = true;
                 state.finish_reason = Some("length");
             }
@@ -17048,8 +17350,19 @@ impl Scheduler<crate::models::Gemma4Model> {
         add_elapsed_us(&mut stats.projection_us, projection_start);
         let mut compact_prng = self.compact_prng_state_for_rows(&[row_idx])?;
         let sampling_start = Instant::now();
-        let first_tokens =
-            sample_logits_positions(&first_logits, sampler, &prompt_ids, &mut compact_prng)?;
+        let first_tokens = if let Some(constraint) = self.slots[row_idx]
+            .as_mut()
+            .and_then(|state| state.constraint.as_mut())
+        {
+            let row_logits = slice_logits_row(&first_logits, 0)?;
+            let row_logits = crate::core::constrained::apply_token_mask(
+                &row_logits,
+                &constraint.compute_mask()?,
+            )?;
+            vec![sampler.sample(&row_logits, &prompt_ids, &mut compact_prng)?]
+        } else {
+            sample_logits_positions(&first_logits, sampler, &prompt_ids, &mut compact_prng)?
+        };
         add_elapsed_us(&mut stats.sampling_us, sampling_start);
         self.scatter_prng_state_from_rows(&[row_idx], &compact_prng)?;
         let first_token = *first_tokens
@@ -17061,11 +17374,15 @@ impl Scheduler<crate::models::Gemma4Model> {
                 .as_mut()
                 .ok_or_else(|| anyhow!("admit_mid_finalize_gemma4_drafter: row slot absent"))?;
             state.generated_tokens.push(first_token);
+            if let Some(constraint) = state.constraint.as_mut() {
+                constraint.commit_token(first_token)?;
+            }
             state.real_len += 1;
             if stop_token_ids.contains(&first_token) {
                 state.finished = true;
                 state.finish_reason = Some("stop");
             } else if state.generated_tokens.len() >= max_new_tokens {
+                ensure_constraint_complete_at_length(state)?;
                 state.finished = true;
                 state.finish_reason = Some("length");
             }
@@ -17282,6 +17599,7 @@ impl Scheduler<crate::models::Gemma4Model> {
             slot.real_len = temp_slot.real_len;
             slot.finished = temp_slot.finished;
             slot.finish_reason = temp_slot.finish_reason;
+            slot.constraint = temp_slot.constraint.clone();
             temp_rows.push((row_idx, temp_cache));
             events.extend(event);
         }
@@ -17638,8 +17956,19 @@ impl Scheduler<crate::models::Gemma4Model> {
         add_elapsed_us(&mut stats.projection_us, projection_start);
         let mut compact_prng = self.compact_prng_state_for_rows(&[row_idx])?;
         let sampling_start = Instant::now();
-        let first_tokens =
-            sample_logits_positions(&first_logits, sampler, &prompt_ids, &mut compact_prng)?;
+        let first_tokens = if let Some(constraint) = self.slots[row_idx]
+            .as_mut()
+            .and_then(|state| state.constraint.as_mut())
+        {
+            let row_logits = slice_logits_row(&first_logits, 0)?;
+            let row_logits = crate::core::constrained::apply_token_mask(
+                &row_logits,
+                &constraint.compute_mask()?,
+            )?;
+            vec![sampler.sample(&row_logits, &prompt_ids, &mut compact_prng)?]
+        } else {
+            sample_logits_positions(&first_logits, sampler, &prompt_ids, &mut compact_prng)?
+        };
         add_elapsed_us(&mut stats.sampling_us, sampling_start);
         self.scatter_prng_state_from_rows(&[row_idx], &compact_prng)?;
         let first_token = *first_tokens.first().ok_or_else(|| {
@@ -17651,11 +17980,15 @@ impl Scheduler<crate::models::Gemma4Model> {
                 .as_mut()
                 .expect("active row implies slot is Some");
             state.generated_tokens.push(first_token);
+            if let Some(constraint) = state.constraint.as_mut() {
+                constraint.commit_token(first_token)?;
+            }
             state.real_len += 1;
             if stop_token_ids.contains(&first_token) {
                 state.finished = true;
                 state.finish_reason = Some("stop");
             } else if state.generated_tokens.len() >= state.max_new_tokens {
+                ensure_constraint_complete_at_length(state)?;
                 state.finished = true;
                 state.finish_reason = Some("length");
             }
@@ -17898,6 +18231,15 @@ impl Scheduler<crate::models::Gemma4Model> {
         if contexts.is_empty() {
             return Ok(());
         }
+        let mut draft_constraints = contexts
+            .iter()
+            .filter_map(|ctx| {
+                self.slots[ctx.row_idx]
+                    .as_ref()
+                    .and_then(|state| state.constraint.clone())
+                    .map(|constraint| (ctx.row_idx, constraint))
+            })
+            .collect::<HashMap<_, _>>();
 
         let max_draft_budget = contexts
             .iter()
@@ -17958,7 +18300,25 @@ impl Scheduler<crate::models::Gemma4Model> {
             add_elapsed_us(&mut stats.draft_forward_us, draft_forward_start);
 
             let sampling_start = Instant::now();
-            let sampled_arr = mlx::ops::reduction::argmax(&output.logits, -1, false)?;
+            let draft_logits = if draft_constraints.is_empty() {
+                output.logits.clone()
+            } else {
+                let vocab = output.logits.shape().as_slice()[2];
+                let logits = output
+                    .logits
+                    .reshape(&[active_indices.len() as i32, vocab][..])?;
+                let masks = active_indices
+                    .iter()
+                    .map(|&ctx_idx| {
+                        draft_constraints
+                            .get_mut(&contexts[ctx_idx].row_idx)
+                            .map(crate::core::constrained::ConstraintSession::compute_mask)
+                            .transpose()
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                crate::core::constrained::apply_batch_token_masks(&logits, &masks)?
+            };
+            let sampled_arr = mlx::ops::reduction::argmax(&draft_logits, -1, false)?;
             let sampled: Vec<u32> = sampled_arr.to_vec()?;
             add_elapsed_us(&mut stats.sampling_us, sampling_start);
             if sampled.len() != active_indices.len() {
@@ -17971,6 +18331,9 @@ impl Scheduler<crate::models::Gemma4Model> {
             for (compact_idx, &ctx_idx) in active_indices.iter().enumerate() {
                 let next_token = sampled[compact_idx];
                 let ctx = &mut contexts[ctx_idx];
+                if let Some(constraint) = draft_constraints.get_mut(&ctx.row_idx) {
+                    constraint.commit_token(next_token)?;
+                }
                 ctx.draft_tokens.push(next_token);
                 ctx.draft_history.push(next_token);
                 ctx.input_token = next_token;
@@ -18075,6 +18438,21 @@ impl Scheduler<crate::models::Gemma4Model> {
         let projection_start = Instant::now();
         let verified_logits =
             model.project_hidden_on(&verified.hidden, mlx::StreamOrDevice::default())?;
+        let mut speculative_masks = vec![None; active_rows.len()];
+        for (ctx_idx, ctx) in contexts.iter().enumerate() {
+            let Some(constraint) = self.slots[ctx.row_idx]
+                .as_ref()
+                .and_then(|state| state.constraint.as_ref())
+            else {
+                continue;
+            };
+            speculative_masks[cache_row_for_ctx[ctx_idx]] =
+                Some(constraint.speculative_masks(&ctx.draft_tokens)?);
+        }
+        let verified_logits = crate::core::constrained::apply_speculative_token_masks(
+            &verified_logits,
+            &speculative_masks,
+        )?;
         add_elapsed_us(&mut stats.projection_us, projection_start);
         let sampling_start = Instant::now();
         let verified_ids = mlx::ops::reduction::argmax(&verified_logits, -1, false)?;
@@ -18188,8 +18566,12 @@ impl Scheduler<crate::models::Gemma4Model> {
                     mlx::StreamOrDevice::default(),
                 )?
             };
-            committed_tokens = committed_tokens
-                .saturating_add(append_resolved_gemma4_tokens(row_state, ctx, resolution));
+            let constraint = self.slots[ctx.row_idx]
+                .as_ref()
+                .and_then(|state| state.constraint.as_ref());
+            committed_tokens = committed_tokens.saturating_add(append_resolved_gemma4_tokens(
+                row_state, ctx, constraint, resolution,
+            )?);
         }
 
         self.refresh_active_kv_residency_stats();
@@ -18342,7 +18724,7 @@ impl Scheduler<crate::models::Gemma4Model> {
             cfg,
             scheduler_batch_capacity,
         } = policy;
-        let (prompt_ids, generated_tokens, max_new_tokens, sampler, stop_token_ids) = {
+        let (prompt_ids, generated_tokens, max_new_tokens, sampler, stop_token_ids, constraint) = {
             let state = self.slots[row_idx]
                 .as_ref()
                 .ok_or_else(|| anyhow!("fill_gemma4_drafter_window_single: row slot absent"))?;
@@ -18352,6 +18734,7 @@ impl Scheduler<crate::models::Gemma4Model> {
                 state.max_new_tokens,
                 state.sampler,
                 state.stop_token_ids.clone(),
+                state.constraint.clone(),
             )
         };
         let emitted = generated_tokens.len();
@@ -18386,6 +18769,7 @@ impl Scheduler<crate::models::Gemma4Model> {
         } else {
             Some(split_speculative_draft_prng(&mut compact_prng)?)
         };
+        let mut draft_constraint = constraint.clone();
         let (draft_tokens, _draft_distributions) = self.draft_gemma4_drafter_tokens_single(
             stats,
             row_state,
@@ -18396,6 +18780,7 @@ impl Scheduler<crate::models::Gemma4Model> {
             &history,
             sampler,
             draft_prng.as_mut(),
+            draft_constraint.as_mut(),
         )?;
         let verify_input = verify_input(current_token, &draft_tokens);
         let verify_start_pos = (history.len() - 1) as i32;
@@ -18440,6 +18825,14 @@ impl Scheduler<crate::models::Gemma4Model> {
         let projection_start = Instant::now();
         let verified_logits =
             model.project_hidden_on(&verified.hidden, mlx::StreamOrDevice::default())?;
+        let verified_logits = if let Some(constraint) = constraint.as_ref() {
+            crate::core::constrained::apply_speculative_token_masks(
+                &verified_logits,
+                &[Some(constraint.speculative_masks(&draft_tokens)?)],
+            )?
+        } else {
+            verified_logits
+        };
         add_elapsed_us(&mut stats.projection_us, projection_start);
         let sampling_start = Instant::now();
         let resolution = if sampler.is_pipelinable() {
@@ -18517,6 +18910,9 @@ impl Scheduler<crate::models::Gemma4Model> {
             tokens_to_append.truncate(stop_idx + 1);
         }
         tokens_to_append.truncate(remaining);
+        if let Some(constraint) = constraint.as_ref() {
+            constraint.truncate_invalid_speculative_bonus(&mut tokens_to_append)?;
+        }
         let committed_tokens = tokens_to_append.len();
         row_state.pending_tokens.extend(tokens_to_append);
         self.refresh_active_kv_residency_stats();
@@ -18549,6 +18945,7 @@ impl Scheduler<crate::models::Gemma4Model> {
         history: &[u32],
         sampler: Sampler,
         draft_prng: Option<&mut Array>,
+        mut constraint: Option<&mut crate::core::constrained::ConstraintSession>,
     ) -> Result<(Vec<u32>, Vec<DraftTokenDistribution>)> {
         let mut draft_tokens = Vec::with_capacity(draft_budget);
         let mut draft_distributions = Vec::with_capacity(draft_budget);
@@ -18580,17 +18977,28 @@ impl Scheduler<crate::models::Gemma4Model> {
             )?;
             add_elapsed_us(&mut stats.draft_forward_us, draft_forward_start);
             let sampling_start = Instant::now();
+            let logits = if let Some(constraint) = constraint.as_mut() {
+                let vocab = output.logits.shape().as_slice()[2];
+                let row = output.logits.reshape((vocab,))?;
+                crate::core::constrained::apply_token_mask(&row, &constraint.compute_mask()?)?
+                    .reshape(&[1_i32, 1_i32, vocab][..])?
+            } else {
+                output.logits.clone()
+            };
             let (next_token, distribution) = if sampler.is_pipelinable() {
-                sample_draft_logits_position(&output.logits, sampler, &draft_history, None)?
+                sample_draft_logits_position(&logits, sampler, &draft_history, None)?
             } else {
                 sample_draft_logits_position_with_uniform(
-                    &output.logits,
+                    &logits,
                     sampler,
                     &draft_history,
                     draft_uniform,
                 )?
             };
             add_elapsed_us(&mut stats.sampling_us, sampling_start);
+            if let Some(constraint) = constraint.as_mut() {
+                constraint.commit_token(next_token)?;
+            }
             draft_tokens.push(next_token);
             draft_distributions.push(distribution);
             draft_history.push(next_token);
@@ -18649,6 +19057,7 @@ impl Scheduler<crate::models::Gemma4Model> {
             temp_state.real_len = state.real_len;
             temp_state.finished = state.finished;
             temp_state.finish_reason = state.finish_reason;
+            temp_state.constraint = state.constraint.clone();
         }
         temp.request_block_tables.remove(&temp_id);
         temp.request_block_tables
@@ -18690,6 +19099,15 @@ impl Scheduler<crate::models::Gemma4Model> {
             anyhow!("temp_gemma4_drafter_rebase_scheduler_for_row: temp slot absent")
         })?;
         temp_state.id = state.id;
+        temp_state.constraint = state
+            .constraint
+            .as_ref()
+            .map(|constraint| {
+                let mut constraint = constraint.fork();
+                constraint.rollback(1)?;
+                Ok::<_, anyhow::Error>(constraint)
+            })
+            .transpose()?;
         temp.request_block_tables.remove(&temp_id);
         temp.request_block_tables
             .insert(state.id, RequestBlockTable::new(state.id));
@@ -19240,6 +19658,7 @@ mod tests {
             image_grid_thw: None,
             image_spatial_merge_size: 2,
             image_token_id: 248056,
+            constraint: None,
         }
     }
 
@@ -26950,6 +27369,7 @@ mod tests {
             image_grid_thw: Some(vec![(1_i32, 2_i32, 2_i32)]),
             image_spatial_merge_size: 2,
             image_token_id: IMAGE_TOKEN_ID,
+            constraint: None,
         };
         let id = s.admit(req).expect("admit vl");
 
@@ -26994,6 +27414,7 @@ mod tests {
             image_grid_thw: Some(vec![(1_i32, 2_i32, 2_i32), (1_i32, 2_i32, 2_i32)]),
             image_spatial_merge_size: 2,
             image_token_id: IMAGE_TOKEN_ID,
+            constraint: None,
         };
         let id = s.admit(req).expect("admit vl");
 
@@ -27039,6 +27460,7 @@ mod tests {
             image_grid_thw: Some(vec![(1_i32, 2_i32, 2_i32)]),
             image_spatial_merge_size: 2,
             image_token_id: IMAGE_TOKEN_ID,
+            constraint: None,
         };
         let id_0 = s
             .admit(mk_vl_req(pixel_values.clone()))
@@ -27521,6 +27943,7 @@ mod tests {
             image_grid_thw: Some(grids.clone()),
             image_spatial_merge_size: 2,
             image_token_id: IMAGE_TOKEN_ID,
+            constraint: None,
         };
 
         let id = sched.admit(req).expect("admit");
@@ -27556,6 +27979,7 @@ mod tests {
             image_grid_thw: None,
             image_spatial_merge_size: 2,
             image_token_id: crate::core::generate::IMAGE_TOKEN_ID,
+            constraint: None,
         };
         let _id = s.admit(req).expect("admit");
         s.force_phase(Phase::Decoding);
@@ -27595,6 +28019,7 @@ mod tests {
             image_grid_thw: None,
             image_spatial_merge_size: 2,
             image_token_id: crate::core::generate::IMAGE_TOKEN_ID,
+            constraint: None,
         };
 
         let result = s.admit(oversize_req);
@@ -27659,6 +28084,7 @@ mod tests {
             image_grid_thw: None,
             image_spatial_merge_size: 2,
             image_token_id: crate::core::generate::IMAGE_TOKEN_ID,
+            constraint: None,
         };
 
         // Case A: slots_max well above the floor; cap_max does not bind.

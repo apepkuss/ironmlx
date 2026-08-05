@@ -21,12 +21,13 @@ clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
+llguidance = { version = "=1.7.6", default-features = false, features = ["ahash", "lark", "referencing"] }
 hf-hub = { version = "0.4", default-features = false, features = ["tokio", "rustls-tls"] }
 sha2 = "0.10"
 dirs = "6"
 anyhow = "1"
 smallvec = "1"
-minijinja = { version = "2", default-features = false, features = ["builtins", "loader", "macros", "serde"] }
+minijinja = { version = "2", default-features = false, features = ["adjacent_loop_items", "builtins", "loader", "macros", "serde"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 base64 = "0.22"
 tokio.workspace = true

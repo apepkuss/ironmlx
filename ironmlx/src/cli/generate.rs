@@ -365,6 +365,7 @@ fn build_generate_request<M: Model>(
         image_grid_thw: prepared_images.image_grid_thw,
         image_spatial_merge_size: prepared_images.image_spatial_merge_size,
         image_token_id: prepared_images.image_token_id,
+        constraint: None,
     })
 }
 

@@ -89,6 +89,7 @@ async fn admit_long_prompt_pp10k() {
         image_grid_thw: None,
         image_spatial_merge_size: 2,
         image_token_id: IMAGE_TOKEN_ID,
+        constraint: None,
     };
 
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();

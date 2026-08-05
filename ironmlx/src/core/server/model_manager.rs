@@ -31,8 +31,8 @@ use super::engine::{
     EnginePoolRuntimeConfig, EnginePoolState, EngineRegistryError, EngineRuntimeState,
 };
 use super::health::{
-    classify_status, system_free_ram_bytes, HealthSnapshot, HealthStatus, MemoryInfo, ModelInfo,
-    MtpHealthInfo, NeuralExactQualificationHealth, PromptLookupHealthInfo, SchedulerInfo,
+    classify_status, system_free_ram_bytes, HealthSnapshot, MemoryInfo, ModelInfo, MtpHealthInfo,
+    NeuralExactQualificationHealth, PromptLookupHealthInfo, SchedulerInfo,
 };
 use super::{anthropic, openai, SamplingDefaults};
 
@@ -1919,32 +1919,21 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
         None
     };
 
-    let mut status = match classify_status(
+    let prefix_store_backpressured =
+        crate::core::cache::process_async_prefix_store_queue().is_backpressured();
+    let (status, degraded_reasons) = classify_status(
         b_queued,
         queue_max,
-        free_ram_bytes,
         kv_cache_active_bytes,
         kv_cache_soft_limit_bytes,
-    ) {
-        HealthStatus::Healthy => HealthStatus::Healthy,
-        HealthStatus::Degraded | HealthStatus::Down => HealthStatus::Degraded,
-    };
-    if active_kv_offload.degraded {
-        status = HealthStatus::Degraded;
-    }
-    if crate::core::cache::process_async_prefix_store_queue().is_backpressured() {
-        status = HealthStatus::Degraded;
-    }
-    if process_governor.pressure_level == crate::core::process_memory::PressureLevel::Emergency {
-        status = HealthStatus::Down;
-    } else if process_governor.telemetry_degraded
-        || process_governor.pressure_level != crate::core::process_memory::PressureLevel::Normal
-    {
-        status = HealthStatus::Degraded;
-    }
+        active_kv_offload.degraded,
+        prefix_store_backpressured,
+        &process_governor,
+    );
 
     HealthSnapshot {
         status,
+        degraded_reasons,
         uptime_secs: start_time.elapsed().as_secs(),
         model: ModelInfo {
             name: names.join(","),
@@ -1963,6 +1952,7 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
         memory: MemoryInfo {
             total_ram_bytes,
             free_ram_bytes,
+            available_ram_bytes: process_governor.available_ram_bytes,
             kv_cache_active_bytes,
             kv_cache_soft_limit_bytes,
             kv_cache_logical_cap_tokens,
@@ -2353,7 +2343,8 @@ mod tests {
     #[test]
     fn aggregate_health_reports_loaded_mtp_state() {
         let snapshot = HealthSnapshot {
-            status: HealthStatus::Healthy,
+            status: crate::core::server::health::HealthStatus::Healthy,
+            degraded_reasons: Vec::new(),
             uptime_secs: 0,
             model: ModelInfo {
                 name: "gemma4".to_string(),
@@ -2372,6 +2363,7 @@ mod tests {
             memory: MemoryInfo {
                 total_ram_bytes: 0,
                 free_ram_bytes: 0,
+                available_ram_bytes: None,
                 kv_cache_active_bytes: 0,
                 kv_cache_soft_limit_bytes: 1024,
                 kv_cache_logical_cap_tokens: 262_144,
