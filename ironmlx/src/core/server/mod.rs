@@ -39,6 +39,7 @@ pub mod engine;
 pub mod health;
 pub mod model_manager;
 pub(crate) mod openai;
+pub(crate) mod responses;
 pub mod scheduler_actor;
 pub mod security;
 pub mod vision;
@@ -953,6 +954,7 @@ pub async fn serve_with_gemma4_drafter(
             "/v1/chat/completions",
             post(openai::gemma4_drafter_chat_completions),
         )
+        .route("/v1/responses", post(responses::gemma4_drafter_responses))
         .route("/v1/messages", post(anthropic::gemma4_drafter_messages))
         .with_state(state);
 
@@ -1459,6 +1461,7 @@ where
             post(clear_prompt_lookup_handler),
         )
         .route("/v1/chat/completions", post(openai::chat_completions))
+        .route("/v1/responses", post(responses::responses))
         .route("/v1/messages", post(anthropic::messages))
         .with_state(state);
 

@@ -39,8 +39,8 @@ use crate::models::{
 use crate::Result;
 
 use super::{
-    anthropic, diffusion_gemma, health, openai, AppState, Gemma4DrafterAppState, SamplingDefaults,
-    VisionInputConfig,
+    anthropic, diffusion_gemma, health, openai, responses, AppState, Gemma4DrafterAppState,
+    SamplingDefaults, VisionInputConfig,
 };
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1044,6 +1044,10 @@ impl EngineLease {
         self.engine.openai_chat_completions(req).await
     }
 
+    async fn openai_responses(&self, req: responses::ResponsesRequest) -> Response {
+        self.engine.openai_responses(req).await
+    }
+
     async fn anthropic_messages(&self, req: anthropic::MessagesRequest) -> Response {
         self.engine.anthropic_messages(req).await
     }
@@ -1330,6 +1334,18 @@ impl EnginePoolState {
             req.model = Some(model_id);
         }
         Ok(engine.openai_chat_completions(req).await)
+    }
+
+    pub(crate) async fn app_openai_responses(
+        &self,
+        mut req: responses::ResponsesRequest,
+    ) -> Result<Response> {
+        let requested = req.model.as_deref().filter(|model| !model.is_empty());
+        let (model_id, engine) = self.resolve_engine(requested).await?;
+        if req.model.is_none() {
+            req.model = Some(model_id);
+        }
+        Ok(engine.openai_responses(req).await)
     }
 
     pub(crate) async fn app_anthropic_messages(
@@ -2515,6 +2531,33 @@ impl EngineVariant {
         }
     }
 
+    async fn openai_responses(&self, req: responses::ResponsesRequest) -> Response {
+        match self {
+            Self::Qwen35(state) => responses::responses(State(state.clone()), Ok(Json(req))).await,
+            Self::Qwen35Moe(state) => {
+                responses::responses(State(state.clone()), Ok(Json(req))).await
+            }
+            Self::Qwen36Moe(state) => {
+                responses::responses(State(state.clone()), Ok(Json(req))).await
+            }
+            Self::Gemma4(state) => responses::responses(State(state.clone()), Ok(Json(req))).await,
+            Self::Gemma4Drafter(state) => {
+                responses::gemma4_drafter_responses(State(state.as_ref().clone()), Ok(Json(req)))
+                    .await
+            }
+            Self::Glm4MoeLite(state) => {
+                responses::responses(State(state.clone()), Ok(Json(req))).await
+            }
+            Self::Llama(state) => responses::responses(State(state.clone()), Ok(Json(req))).await,
+            Self::MiniCpmV46(state) => {
+                responses::responses(State(state.clone()), Ok(Json(req))).await
+            }
+            Self::DiffusionGemma(state) => {
+                diffusion_gemma::openai_responses(State(state.clone()), Ok(Json(req))).await
+            }
+        }
+    }
+
     async fn anthropic_messages(&self, req: anthropic::MessagesRequest) -> Response {
         match self {
             Self::Qwen35(state) => anthropic::messages(State(state.clone()), Json(req)).await,
@@ -3314,6 +3357,7 @@ fn engine_pool_router() -> Router<EnginePoolState> {
         .route("/v1/models/:model_id/load", post(load_model_handler))
         .route("/v1/models/:model_id/unload", post(unload_model_handler))
         .route("/v1/chat/completions", post(openai_chat_completions))
+        .route("/v1/responses", post(openai_responses))
         .route("/v1/messages", post(anthropic_messages))
 }
 
@@ -3330,6 +3374,34 @@ async fn openai_chat_completions(
         req.model = Some(model_id.to_string());
     }
     engine.openai_chat_completions(req).await
+}
+
+async fn openai_responses(
+    State(pool): State<EnginePoolState>,
+    payload: std::result::Result<
+        Json<responses::ResponsesRequest>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> Response {
+    let mut req = match payload {
+        Ok(Json(req)) => req,
+        Err(error) => {
+            return responses::error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_json",
+                format!("invalid Responses request: {}", error.body_text()),
+            );
+        }
+    };
+    let requested = req.model.as_deref().filter(|model| !model.is_empty());
+    let (model_id, engine) = match pool.resolve_engine(requested).await {
+        Ok(resolved) => resolved,
+        Err(error) => return engine_error_response(error),
+    };
+    if req.model.is_none() {
+        req.model = Some(model_id.to_string());
+    }
+    engine.openai_responses(req).await
 }
 
 async fn anthropic_messages(

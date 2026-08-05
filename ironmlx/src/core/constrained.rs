@@ -164,8 +164,20 @@ impl ConstraintTokenizer {
         tools: &[ToolDefinition],
         options: &ToolConstraintOptions,
     ) -> Result<ConstraintPlan> {
+        self.compile_qwen_tools_with_output(tools, options, None)
+    }
+
+    pub fn compile_qwen_tools_with_output(
+        &self,
+        tools: &[ToolDefinition],
+        options: &ToolConstraintOptions,
+        output_schema: Option<&Value>,
+    ) -> Result<ConstraintPlan> {
         validate_tool_schemas(tools)?;
-        let grammar_source = build_qwen_tool_grammar(tools, options)?;
+        if let Some(schema) = output_schema {
+            validate_constraint_output_schema(schema)?;
+        }
+        let grammar_source = build_qwen_tool_grammar(tools, options, output_schema)?;
         let grammar = TopLevelGrammar::from_lark(grammar_source.clone());
         let matcher = Matcher::new(self.factory.create_parser(grammar.clone()));
         if matcher.is_error() {
@@ -190,8 +202,20 @@ impl ConstraintTokenizer {
         tools: &[ToolDefinition],
         options: &ToolConstraintOptions,
     ) -> Result<ConstraintPlan> {
+        self.compile_gemma_tools_with_output(tools, options, None)
+    }
+
+    pub fn compile_gemma_tools_with_output(
+        &self,
+        tools: &[ToolDefinition],
+        options: &ToolConstraintOptions,
+        output_schema: Option<&Value>,
+    ) -> Result<ConstraintPlan> {
         validate_tool_schemas(tools)?;
-        let grammar_source = build_gemma_tool_grammar(tools, options)?;
+        if let Some(schema) = output_schema {
+            validate_constraint_output_schema(schema)?;
+        }
+        let grammar_source = build_gemma_tool_grammar(tools, options, output_schema)?;
         let grammar = TopLevelGrammar::from_lark(grammar_source.clone());
         let matcher = Matcher::new(self.factory.create_parser(grammar.clone()));
         if matcher.is_error() {
@@ -216,8 +240,20 @@ impl ConstraintTokenizer {
         tools: &[ToolDefinition],
         options: &ToolConstraintOptions,
     ) -> Result<ConstraintPlan> {
+        self.compile_glm_tools_with_output(tools, options, None)
+    }
+
+    pub fn compile_glm_tools_with_output(
+        &self,
+        tools: &[ToolDefinition],
+        options: &ToolConstraintOptions,
+        output_schema: Option<&Value>,
+    ) -> Result<ConstraintPlan> {
         validate_tool_schemas(tools)?;
-        let grammar_source = build_glm_tool_grammar(tools, options)?;
+        if let Some(schema) = output_schema {
+            validate_constraint_output_schema(schema)?;
+        }
+        let grammar_source = build_glm_tool_grammar(tools, options, output_schema)?;
         let grammar = TopLevelGrammar::from_lark(grammar_source.clone());
         let matcher = Matcher::new(self.factory.create_parser(grammar.clone()));
         if matcher.is_error() {
@@ -242,8 +278,20 @@ impl ConstraintTokenizer {
         tools: &[ToolDefinition],
         options: &ToolConstraintOptions,
     ) -> Result<ConstraintPlan> {
+        self.compile_llama_tools_with_output(tools, options, None)
+    }
+
+    pub fn compile_llama_tools_with_output(
+        &self,
+        tools: &[ToolDefinition],
+        options: &ToolConstraintOptions,
+        output_schema: Option<&Value>,
+    ) -> Result<ConstraintPlan> {
         validate_tool_schemas(tools)?;
-        let grammar_source = build_llama_tool_grammar(tools, options)?;
+        if let Some(schema) = output_schema {
+            validate_constraint_output_schema(schema)?;
+        }
+        let grammar_source = build_llama_tool_grammar(tools, options, output_schema)?;
         let grammar = TopLevelGrammar::from_lark(grammar_source.clone());
         let matcher = Matcher::new(self.factory.create_parser(grammar.clone()));
         if matcher.is_error() {
@@ -268,8 +316,20 @@ impl ConstraintTokenizer {
         tools: &[ToolDefinition],
         options: &ToolConstraintOptions,
     ) -> Result<ConstraintPlan> {
+        self.compile_minicpm5_tools_with_output(tools, options, None)
+    }
+
+    pub fn compile_minicpm5_tools_with_output(
+        &self,
+        tools: &[ToolDefinition],
+        options: &ToolConstraintOptions,
+        output_schema: Option<&Value>,
+    ) -> Result<ConstraintPlan> {
         validate_tool_schemas(tools)?;
-        let grammar_source = build_minicpm5_tool_grammar(tools, options)?;
+        if let Some(schema) = output_schema {
+            validate_constraint_output_schema(schema)?;
+        }
+        let grammar_source = build_minicpm5_tool_grammar(tools, options, output_schema)?;
         let grammar = TopLevelGrammar::from_lark(grammar_source.clone());
         let matcher = Matcher::new(self.factory.create_parser(grammar.clone()));
         if matcher.is_error() {
@@ -284,6 +344,30 @@ impl ConstraintTokenizer {
             factory: Arc::clone(&self.factory),
             grammar,
             grammar_source: Arc::from(grammar_source),
+            vocab_size: self.vocab_size,
+            eos_token_ids: Arc::clone(&self.eos_token_ids),
+        })
+    }
+
+    /// Compile a standalone JSON output constraint for Responses structured
+    /// output. The schema is validated by IronMLX before llguidance sees it so
+    /// request-time and post-generation validation use the same subset.
+    pub fn compile_json_output(&self, schema: &Value) -> Result<ConstraintPlan> {
+        validate_constraint_output_schema(schema)?;
+        let grammar = TopLevelGrammar::from_json_schema(schema.clone());
+        let matcher = Matcher::new(self.factory.create_parser(grammar.clone()));
+        if matcher.is_error() {
+            bail!(
+                "compile constrained JSON output: {}",
+                matcher
+                    .get_error()
+                    .unwrap_or_else(|| "unknown parser error".to_string())
+            );
+        }
+        Ok(ConstraintPlan {
+            factory: Arc::clone(&self.factory),
+            grammar,
+            grammar_source: Arc::from(serde_json::to_string(schema)?),
             vocab_size: self.vocab_size,
             eos_token_ids: Arc::clone(&self.eos_token_ids),
         })
@@ -436,10 +520,20 @@ impl ConstraintSession {
     }
 
     pub fn validate_tokens(&self, tokens: &[u32]) -> Result<usize> {
-        let mut scratch = self.matcher.deep_clone();
-        scratch
-            .try_consume_tokens(tokens)
-            .context("validate speculative tokens against constraint")
+        let mut scratch = self.fork();
+        for (index, token) in tokens.iter().copied().enumerate() {
+            let mask = scratch.compute_mask()?;
+            if !mask.is_allowed(token) {
+                return Ok(index);
+            }
+            scratch
+                .commit_token(token)
+                .context("validate speculative token against constraint")?;
+            if scratch.eos_token_ids.contains(&token) {
+                return Ok(index + 1);
+            }
+        }
+        Ok(tokens.len())
     }
 
     /// Keep a speculative resolution constraint-safe before it enters a pending queue.
@@ -669,6 +763,39 @@ pub fn validate_tool_schemas(tools: &[ToolDefinition]) -> Result<()> {
     Ok(())
 }
 
+/// Validate one Responses `json_schema` output contract against IronMLX's
+/// bounded constrained-decoding subset. OpenAI structured outputs require a
+/// root object; strict mode additionally applies the same recursive object
+/// rules as strict function tools.
+pub fn validate_json_output_schema(schema: &Value, strict: bool) -> Result<()> {
+    let root = schema
+        .as_object()
+        .ok_or_else(|| anyhow!("structured output schema must be a JSON object"))?;
+    anyhow::ensure!(
+        root.get("type").and_then(Value::as_str) == Some("object"),
+        "structured output schema root type must be `object`"
+    );
+    anyhow::ensure!(
+        root.get("properties").is_some(),
+        "structured output schema root must declare properties"
+    );
+    let mut nodes = 0_usize;
+    validate_schema_node(schema, 0, &mut nodes).context("unsupported structured output schema")?;
+    if strict {
+        validate_strict_schema_node(schema, "$structured_output")?;
+    }
+    Ok(())
+}
+
+fn validate_constraint_output_schema(schema: &Value) -> Result<()> {
+    if schema.as_object().is_some_and(|object| {
+        object.len() == 1 && object.get("type") == Some(&Value::String("object".to_owned()))
+    }) {
+        return Ok(());
+    }
+    validate_json_output_schema(schema, false)
+}
+
 /// Validate the additional JSON Schema rules required by OpenAI strict mode.
 pub fn validate_strict_tool_schema(tool: &ToolDefinition) -> Result<()> {
     validate_strict_schema_node(&tool.parameters, "$").map_err(|error| {
@@ -882,6 +1009,7 @@ fn type_contains(kind: Option<&Value>, expected: &str) -> bool {
 fn build_qwen_tool_grammar(
     tools: &[ToolDefinition],
     options: &ToolConstraintOptions,
+    output_schema: Option<&Value>,
 ) -> Result<String> {
     let selected_indexes = match &options.choice {
         ToolChoiceConstraint::Function(name) => vec![tools
@@ -894,16 +1022,26 @@ fn build_qwen_tool_grammar(
         && !matches!(&options.choice, ToolChoiceConstraint::Function(_));
 
     let mut grammar = String::new();
-    match &options.choice {
-        ToolChoiceConstraint::Auto => grammar.push_str("start: first_call more_calls ws | TEXT\n"),
-        ToolChoiceConstraint::Required | ToolChoiceConstraint::Function(_) => {
+    match (&options.choice, output_schema) {
+        (ToolChoiceConstraint::Auto, Some(_)) => {
+            grammar.push_str("start: structured_output | first_call more_calls ws\n")
+        }
+        (ToolChoiceConstraint::Auto, None) => {
+            grammar.push_str("start: first_call more_calls ws | TEXT\n")
+        }
+        (ToolChoiceConstraint::Required | ToolChoiceConstraint::Function(_), _) => {
             grammar.push_str("start: first_call more_calls ws\n");
         }
     }
-    grammar.push_str(
-        "first_call: first_head function_dispatch\n\
-         first_head[lazy]: TEXT \"<tool_call>\"\n",
-    );
+    append_structured_output_rule(&mut grammar, output_schema)?;
+    let first_text = if output_schema.is_some() {
+        "WS?"
+    } else {
+        "TEXT"
+    };
+    grammar.push_str(&format!(
+        "first_call: first_head function_dispatch\nfirst_head[lazy]: {first_text} \"<tool_call>\"\n"
+    ));
     if allows_multiple {
         grammar.push_str(
             "more_calls: next_call*\n\
@@ -987,21 +1125,32 @@ fn build_qwen_tool_grammar(
 fn build_gemma_tool_grammar(
     tools: &[ToolDefinition],
     options: &ToolConstraintOptions,
+    output_schema: Option<&Value>,
 ) -> Result<String> {
     let selected_indexes = selected_tool_indexes(tools, options)?;
     let allows_multiple = options.allow_parallel_calls
         && !matches!(&options.choice, ToolChoiceConstraint::Function(_));
     let mut grammar = String::new();
-    match &options.choice {
-        ToolChoiceConstraint::Auto => grammar.push_str("start: first_call more_calls ws | TEXT\n"),
-        ToolChoiceConstraint::Required | ToolChoiceConstraint::Function(_) => {
+    match (&options.choice, output_schema) {
+        (ToolChoiceConstraint::Auto, Some(_)) => {
+            grammar.push_str("start: structured_output | first_call more_calls ws\n")
+        }
+        (ToolChoiceConstraint::Auto, None) => {
+            grammar.push_str("start: first_call more_calls ws | TEXT\n")
+        }
+        (ToolChoiceConstraint::Required | ToolChoiceConstraint::Function(_), _) => {
             grammar.push_str("start: first_call more_calls ws\n");
         }
     }
-    grammar.push_str(
-        "first_call: first_head function_dispatch\n\
-         first_head[lazy]: TEXT \"<|tool_call>\"\n",
-    );
+    append_structured_output_rule(&mut grammar, output_schema)?;
+    let first_text = if output_schema.is_some() {
+        "WS?"
+    } else {
+        "TEXT"
+    };
+    grammar.push_str(&format!(
+        "first_call: first_head function_dispatch\nfirst_head[lazy]: {first_text} \"<|tool_call>\"\n"
+    ));
     if allows_multiple {
         grammar.push_str(
             "more_calls: next_call*\n\
@@ -1040,21 +1189,32 @@ fn build_gemma_tool_grammar(
 fn build_glm_tool_grammar(
     tools: &[ToolDefinition],
     options: &ToolConstraintOptions,
+    output_schema: Option<&Value>,
 ) -> Result<String> {
     let selected_indexes = selected_tool_indexes(tools, options)?;
     let allows_multiple = options.allow_parallel_calls
         && !matches!(&options.choice, ToolChoiceConstraint::Function(_));
     let mut grammar = String::new();
-    match &options.choice {
-        ToolChoiceConstraint::Auto => grammar.push_str("start: first_call more_calls | TEXT\n"),
-        ToolChoiceConstraint::Required | ToolChoiceConstraint::Function(_) => {
+    match (&options.choice, output_schema) {
+        (ToolChoiceConstraint::Auto, Some(_)) => {
+            grammar.push_str("start: structured_output | first_call more_calls\n")
+        }
+        (ToolChoiceConstraint::Auto, None) => {
+            grammar.push_str("start: first_call more_calls | TEXT\n")
+        }
+        (ToolChoiceConstraint::Required | ToolChoiceConstraint::Function(_), _) => {
             grammar.push_str("start: first_call more_calls\n");
         }
     }
-    grammar.push_str(
-        "first_call: first_head function_dispatch\n\
-         first_head[lazy]: TEXT \"<tool_call>\"\n",
-    );
+    append_structured_output_rule(&mut grammar, output_schema)?;
+    let first_text = if output_schema.is_some() {
+        "WS?"
+    } else {
+        "TEXT"
+    };
+    grammar.push_str(&format!(
+        "first_call: first_head function_dispatch\nfirst_head[lazy]: {first_text} \"<tool_call>\"\n"
+    ));
     if allows_multiple {
         grammar.push_str(
             "more_calls: next_call*\n\
@@ -1136,17 +1296,22 @@ fn build_glm_tool_grammar(
 fn build_llama_tool_grammar(
     tools: &[ToolDefinition],
     options: &ToolConstraintOptions,
+    output_schema: Option<&Value>,
 ) -> Result<String> {
     let selected_indexes = selected_tool_indexes(tools, options)?;
     let mut grammar = String::new();
-    match &options.choice {
-        ToolChoiceConstraint::Auto => {
+    match (&options.choice, output_schema) {
+        (ToolChoiceConstraint::Auto, Some(_)) => {
+            grammar.push_str("start: structured_output | ws function_dispatch ws\n")
+        }
+        (ToolChoiceConstraint::Auto, None) => {
             grammar.push_str("start: ws function_dispatch ws | PLAIN_TEXT\n")
         }
-        ToolChoiceConstraint::Required | ToolChoiceConstraint::Function(_) => {
+        (ToolChoiceConstraint::Required | ToolChoiceConstraint::Function(_), _) => {
             grammar.push_str("start: ws function_dispatch ws\n")
         }
     }
+    append_structured_output_rule(&mut grammar, output_schema)?;
     grammar.push_str("function_dispatch: ");
     for (position, index) in selected_indexes.into_iter().enumerate() {
         if position > 0 {
@@ -1182,18 +1347,32 @@ fn build_llama_tool_grammar(
 fn build_minicpm5_tool_grammar(
     tools: &[ToolDefinition],
     options: &ToolConstraintOptions,
+    output_schema: Option<&Value>,
 ) -> Result<String> {
     let selected_indexes = selected_tool_indexes(tools, options)?;
     let allows_multiple = options.allow_parallel_calls
         && !matches!(&options.choice, ToolChoiceConstraint::Function(_));
     let mut grammar = String::new();
-    match &options.choice {
-        ToolChoiceConstraint::Auto => grammar.push_str("start: first_call more_calls ws | TEXT\n"),
-        ToolChoiceConstraint::Required | ToolChoiceConstraint::Function(_) => {
+    match (&options.choice, output_schema) {
+        (ToolChoiceConstraint::Auto, Some(_)) => {
+            grammar.push_str("start: structured_output | first_call more_calls ws\n")
+        }
+        (ToolChoiceConstraint::Auto, None) => {
+            grammar.push_str("start: first_call more_calls ws | TEXT\n")
+        }
+        (ToolChoiceConstraint::Required | ToolChoiceConstraint::Function(_), _) => {
             grammar.push_str("start: first_call more_calls ws\n");
         }
     }
-    grammar.push_str("first_call: first_head function_dispatch\nfirst_head[lazy]: TEXT ");
+    append_structured_output_rule(&mut grammar, output_schema)?;
+    let first_text = if output_schema.is_some() {
+        "WS?"
+    } else {
+        "TEXT"
+    };
+    grammar.push_str(&format!(
+        "first_call: first_head function_dispatch\nfirst_head[lazy]: {first_text} "
+    ));
     grammar.push_str(&lark_literal("<function name=\"")?);
     grammar.push('\n');
     if allows_multiple {
@@ -1286,6 +1465,19 @@ fn selected_tool_indexes(
             Ok((0..tools.len()).collect())
         }
     }
+}
+
+fn append_structured_output_rule(
+    grammar: &mut String,
+    output_schema: Option<&Value>,
+) -> Result<()> {
+    if let Some(schema) = output_schema {
+        grammar.push_str(&format!(
+            "structured_output: %json {}\n",
+            serde_json::to_string(schema)?
+        ));
+    }
+    Ok(())
 }
 
 fn append_gemma_schema_rule(
@@ -2260,6 +2452,189 @@ mod tests {
     }
 
     #[test]
+    fn structured_output_schema_validation_enforces_root_and_strict_contracts() {
+        let supported = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "answer": {"type": "string"},
+                "confidence": {"type": ["number", "null"]}
+            },
+            "required": ["answer", "confidence"],
+            "additionalProperties": false
+        });
+        validate_json_output_schema(&supported, true).unwrap();
+
+        let non_object = serde_json::json!({"type": "string"});
+        assert!(validate_json_output_schema(&non_object, false).is_err());
+
+        let missing_property = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "answer": {"type": "string"},
+                "confidence": {"type": "number"}
+            },
+            "required": ["answer"],
+            "additionalProperties": false
+        });
+        assert!(validate_json_output_schema(&missing_property, true).is_err());
+
+        let open_object = serde_json::json!({
+            "type": "object",
+            "properties": {"answer": {"type": "string"}},
+            "required": ["answer"]
+        });
+        assert!(validate_json_output_schema(&open_object, true).is_err());
+    }
+
+    #[test]
+    fn standalone_structured_output_enforces_schema_during_decoding() {
+        let tokenizer = ConstraintTokenizer::byte_level().unwrap();
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "answer": {"enum": ["sunny", "rainy"]},
+                "days": {"type": "integer"}
+            },
+            "required": ["answer", "days"],
+            "additionalProperties": false
+        });
+        let plan = tokenizer.compile_json_output(&schema).unwrap();
+
+        let valid = br#"{"answer":"sunny","days":2}"#;
+        let mut session = plan.start_session().unwrap();
+        consume_bytes(&mut session, valid).unwrap();
+        assert!(session.is_accepting().unwrap());
+
+        let invalid = br#"{"answer":"cloudy","days":2}"#;
+        let tokens = invalid.iter().copied().map(u32::from).collect::<Vec<_>>();
+        assert!(
+            plan.start_session()
+                .unwrap()
+                .validate_tokens(&tokens)
+                .unwrap()
+                < tokens.len()
+        );
+    }
+
+    #[test]
+    fn auto_tool_grammars_accept_native_calls_or_structured_final_answers() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"answer": {"const": "sunny"}},
+            "required": ["answer"],
+            "additionalProperties": false
+        });
+        let structured = br#"{"answer":"sunny"}"#;
+        let options = ToolConstraintOptions::default();
+        let byte_tokenizer = ConstraintTokenizer::byte_level().unwrap();
+
+        let qwen = byte_tokenizer
+            .compile_qwen_tools_with_output(&[weather_tool()], &options, Some(&schema))
+            .unwrap();
+        let mut qwen_json = qwen.start_session().unwrap();
+        consume_bytes(&mut qwen_json, structured).unwrap();
+        assert!(qwen_json.is_accepting().unwrap());
+        let mut qwen_tool = qwen.start_session().unwrap();
+        consume_bytes(
+            &mut qwen_tool,
+            b"<tool_call><function=get_weather><parameter=city>Tokyo</parameter></function></tool_call>",
+        )
+        .unwrap();
+        assert!(qwen_tool.is_accepting().unwrap());
+        let mut qwen_plain = qwen.start_session().unwrap();
+        assert!(!qwen_plain
+            .compute_mask()
+            .unwrap()
+            .is_allowed(u32::from(b'o')));
+        let plain_result = consume_bytes(&mut qwen_plain, b"ordinary answer");
+        assert!(plain_result.is_err() || !qwen_plain.is_accepting().unwrap());
+
+        let glm = byte_tokenizer
+            .compile_glm_tools_with_output(&[weather_tool()], &options, Some(&schema))
+            .unwrap();
+        let mut glm_json = glm.start_session().unwrap();
+        consume_bytes(&mut glm_json, structured).unwrap();
+        assert!(glm_json.is_accepting().unwrap());
+        let mut glm_tool = glm.start_session().unwrap();
+        consume_bytes(
+            &mut glm_tool,
+            b"<tool_call>get_weather<arg_key>city</arg_key><arg_value>Tokyo</arg_value></tool_call>",
+        )
+        .unwrap();
+        assert!(glm_tool.is_accepting().unwrap());
+
+        let llama = byte_tokenizer
+            .compile_llama_tools_with_output(&[weather_tool()], &options, Some(&schema))
+            .unwrap();
+        let mut llama_json = llama.start_session().unwrap();
+        consume_bytes(&mut llama_json, structured).unwrap();
+        assert!(llama_json.is_accepting().unwrap());
+        let mut llama_tool = llama.start_session().unwrap();
+        consume_bytes(
+            &mut llama_tool,
+            br#"{"name":"get_weather","parameters":{"city":"Tokyo"}}"#,
+        )
+        .unwrap();
+        assert!(llama_tool.is_accepting().unwrap());
+
+        let minicpm5 = byte_tokenizer
+            .compile_minicpm5_tools_with_output(&[weather_tool()], &options, Some(&schema))
+            .unwrap();
+        let mut minicpm5_json = minicpm5.start_session().unwrap();
+        consume_bytes(&mut minicpm5_json, structured).unwrap();
+        assert!(minicpm5_json.is_accepting().unwrap());
+        let mut minicpm5_tool = minicpm5.start_session().unwrap();
+        consume_bytes(
+            &mut minicpm5_tool,
+            b"<function name=\"get_weather\"><param name=\"city\">Tokyo</param></function>",
+        )
+        .unwrap();
+        assert!(minicpm5_tool.is_accepting().unwrap());
+
+        let gemma_tokenizer = ConstraintTokenizer::byte_level_gemma().unwrap();
+        let gemma = gemma_tokenizer
+            .compile_gemma_tools_with_output(&[weather_tool()], &options, Some(&schema))
+            .unwrap();
+        let mut gemma_json = gemma.start_session().unwrap();
+        gemma_json
+            .commit_tokens(&gemma_tokens(std::str::from_utf8(structured).unwrap()))
+            .unwrap();
+        assert!(gemma_json.is_accepting().unwrap());
+        let mut gemma_tool = gemma.start_session().unwrap();
+        gemma_tool
+            .commit_tokens(&gemma_tokens(
+                "<|tool_call>call:get_weather{city:<|\"|>Tokyo<|\"|>}<tool_call|>",
+            ))
+            .unwrap();
+        assert!(gemma_tool.is_accepting().unwrap());
+    }
+
+    #[test]
+    fn required_tool_choice_does_not_admit_structured_final_output() {
+        let tokenizer = ConstraintTokenizer::byte_level().unwrap();
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"answer": {"type": "string"}},
+            "required": ["answer"],
+            "additionalProperties": false
+        });
+        let plan = tokenizer
+            .compile_qwen_tools_with_output(
+                &[weather_tool()],
+                &ToolConstraintOptions {
+                    choice: ToolChoiceConstraint::Required,
+                    allow_parallel_calls: true,
+                },
+                Some(&schema),
+            )
+            .unwrap();
+        let structured =
+            br#"{"answer":"sunny"}"#.iter().copied().map(u32::from).collect::<Vec<_>>();
+        let mut session = plan.start_session().unwrap();
+        assert!(session.commit_tokens(&structured).is_err());
+    }
+
+    #[test]
     fn grammar_uses_parametric_uniqueness_state() {
         let tokenizer = ConstraintTokenizer::byte_level().unwrap();
         let plan = tokenizer
@@ -2286,6 +2661,30 @@ mod tests {
         assert!(masks[0].is_allowed(u32::from(b'g')));
         assert!(masks[1].is_allowed(u32::from(b'g')));
         assert!(masks[2].is_allowed(u32::from(b'g')));
+    }
+
+    #[test]
+    fn speculative_validation_preserves_eos_after_accepting_output() {
+        let tokenizer = ConstraintTokenizer::byte_level().unwrap();
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "answer": {"type": "string", "const": "done"}
+            },
+            "required": ["answer"],
+            "additionalProperties": false
+        });
+        let plan = tokenizer.compile_json_output(&schema).unwrap();
+        let mut session = plan.start_session().unwrap();
+        consume_bytes(&mut session, br#"{"answer":"done"}"#).unwrap();
+        assert!(session.is_accepting().unwrap());
+
+        let mut resolved = vec![256];
+        session
+            .truncate_invalid_speculative_bonus(&mut resolved)
+            .unwrap();
+        assert_eq!(resolved, vec![256]);
+        session.commit_tokens(&resolved).unwrap();
     }
 
     #[test]
