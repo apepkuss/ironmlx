@@ -38,7 +38,9 @@ curl http://127.0.0.1:9068/v1/chat/completions \
 
 ### Function tools
 
-Qwen 3.5/3.6 模型可通过 Chat Completions 的 `tools` 字段请求客户端函数调用：
+具有受支持原生工具模板的 Qwen 3.5/3.6、Gemma 4、DiffusionGemma、GLM、
+Llama 和 MiniCPM 模型，可通过 Chat Completions 的 `tools` 字段请求客户端
+函数调用。具体模型与模板要求见[支持模型矩阵](supported-models.md)：
 
 ```json
 {
@@ -67,13 +69,19 @@ Qwen 3.5/3.6 模型可通过 Chat Completions 的 `tools` 字段请求客户端�
 请求。同步响应中的 `function.arguments` 是 JSON 字符串；SSE 使用稳定的
 `tool_calls[].index`/`id`，参数可跨多个 delta，结束原因是 `tool_calls`。
 
-API-1 当前边界：
+Chat tools 当前边界：
 
-- `tool_choice` 支持 `auto`、`none`；`required` 和指定函数会返回 400。
-- `parallel_tool_calls` 省略或设为 `true`；`false` 会返回 400。
-- 只支持 `type: "function"`，且拒绝 `strict: true`。
+- `tool_choice` 支持 `auto`、`none`、`required`，以及通过
+  `{"type":"function","function":{"name":"..."}}` 指定函数。
+- `parallel_tool_calls` 默认为 `true`；设为 `false` 时约束当前 assistant turn
+  最多生成一个调用。Llama 3.1/3.2 原生协议始终只支持单调用。
+- 只支持 `type: "function"`。`strict: true` 支持约束解码所覆盖的 JSON Schema
+  子集；对象 schema 必须递归设置 `additionalProperties: false`，且所有属性都
+  必须列入 `required`。不支持的 schema 关键字会在生成前返回 400。
 - 不支持旧 `functions` / `function_call` 字段，也不实现 `/v1/responses`。
-- 非 Qwen 3.5/3.6 原生模板的模型收到 `tools` 时会在生成前返回 400。
+- 当前支持经过精确模板契约检测的 Qwen 3.5/3.6、Gemma 4/Gemma 4 Unified、
+  DiffusionGemma、GLM-4 MoE Lite、Llama 3.1/3.2、MiniCPM-V 4.6 和 MiniCPM5
+  原生工具 dialect；其他模板收到 `tools` 时会在生成前返回 400。
 - 工具结果必须引用此前尚未完成的 assistant tool call；孤立、重复或缺失 ID
   会在生成前返回 400。
 

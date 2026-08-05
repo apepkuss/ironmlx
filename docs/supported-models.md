@@ -12,7 +12,7 @@
 | GLM-4 MoE Lite | `glm4_moe_lite` | 是 | 否 | 是，需原生工具模板 | 否 | 是 | 是 |
 | Llama GQA Dense（含兼容的 MiniCPM5-1B） | `llama` | 是 | 否 | 是，需 Llama 3.1/3.2 或 MiniCPM5 原生工具模板 | 否 | 是 | 是 |
 | MiniCPM-V 4.6 | `minicpmv4_6` | 是 | 是 | 是，需 MiniCPM-V 4.6 原生工具模板 | 否 | 是 | 是 |
-| DiffusionGemma | `diffusion_gemma` | 是 | 是 | 否 | 否 | 否 | 否 |
+| DiffusionGemma | `diffusion_gemma` | 是 | 是 | 是，需原生 Gemma 工具模板 | 否 | 否 | 否 |
 
 所有运行时均支持流式 HTTP 响应。DiffusionGemma 使用 block-diffusion 生成路径，
 只支持 `max_tokens`、`temperature` 与 `seed`；其他 causal 模型还支持 `top_p`、
