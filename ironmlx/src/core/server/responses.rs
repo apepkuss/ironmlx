@@ -1,0 +1,3232 @@
+//! OpenAI Responses API adapter (`POST /v1/responses`).
+//!
+//! IronMLX deliberately implements the stateless local-inference surface:
+//! callers send the complete typed input history and set `store: false`.
+//! Response persistence, conversations, hosted tools, and background jobs are
+//! not inference responsibilities and are rejected explicitly.
+
+use std::{
+    collections::HashMap,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use anyhow::Context;
+use axum::{
+    body::{Body, Bytes},
+    extract::{rejection::JsonRejection, State},
+    http::{header, StatusCode},
+    response::{IntoResponse, Response},
+    Json,
+};
+use serde::{Deserialize, Serialize};
+use tokio::sync::{mpsc, oneshot};
+use tokio_stream::wrappers::ReceiverStream;
+
+use crate::core::generate::{GenerateRequest, GenerationStream};
+use crate::core::model::Model;
+use crate::core::scheduler::DenseVlMethods;
+use crate::core::server::chat_format::{
+    ChatFunctionCall, ChatMessage, ChatToolCall, Content, ContentPart, ImageUrl,
+};
+use crate::core::server::scheduler_actor::{AdmitReply, SchedulerCommand};
+use crate::core::tool_calling::{AssistantOutputEvent, ToolCall, ToolCallParser, ToolDefinition};
+
+use super::{openai, AppState, Gemma4DrafterAppState};
+
+const DEFAULT_MAX_OUTPUT_TOKENS: usize = 256;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResponsesRequest {
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub instructions: Option<String>,
+    pub input: ResponsesInput,
+    #[serde(default)]
+    pub tools: Vec<ResponseTool>,
+    #[serde(default)]
+    pub tool_choice: Option<serde_json::Value>,
+    #[serde(default)]
+    pub parallel_tool_calls: Option<bool>,
+    #[serde(default)]
+    pub stream: bool,
+    #[serde(default)]
+    pub stream_options: Option<serde_json::Value>,
+    #[serde(default)]
+    pub store: Option<bool>,
+    #[serde(default)]
+    pub previous_response_id: Option<String>,
+    #[serde(default)]
+    pub conversation: Option<serde_json::Value>,
+    #[serde(default)]
+    pub background: Option<bool>,
+    #[serde(default)]
+    pub max_output_tokens: Option<usize>,
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    #[serde(default)]
+    pub top_p: Option<f32>,
+    #[serde(default)]
+    pub reasoning: Option<serde_json::Value>,
+    #[serde(default)]
+    pub include: Vec<String>,
+    #[serde(default)]
+    pub prompt_cache_key: Option<String>,
+    #[serde(default)]
+    pub client_metadata: Option<serde_json::Value>,
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
+    #[serde(default)]
+    pub text: Option<serde_json::Value>,
+    #[serde(default)]
+    pub service_tier: Option<String>,
+    #[serde(default)]
+    pub truncation: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum ResponseTextFormat {
+    #[default]
+    Text,
+    JsonObject,
+    JsonSchema {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        schema: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        strict: Option<bool>,
+    },
+}
+
+impl ResponseTextFormat {
+    fn constraint_schema(&self) -> Option<serde_json::Value> {
+        match self {
+            Self::Text => None,
+            Self::JsonObject => Some(serde_json::json!({"type":"object"})),
+            Self::JsonSchema { schema, .. } => Some(schema.clone()),
+        }
+    }
+
+    fn prompt_instruction(&self) -> Option<String> {
+        match self {
+            Self::Text => None,
+            Self::JsonObject => Some(
+                "When producing a final answer instead of a function call, return only one valid JSON object with no Markdown or surrounding prose."
+                    .to_owned(),
+            ),
+            Self::JsonSchema {
+                name,
+                description,
+                schema,
+                ..
+            } => {
+                let description = description
+                    .as_deref()
+                    .map(|value| format!("\nDescription: {value}"))
+                    .unwrap_or_default();
+                Some(format!(
+                    "When producing a final answer instead of a function call, return only one JSON object matching the `{name}` schema, with no Markdown or surrounding prose.{description}\nSchema: {}",
+                    serde_json::to_string(schema).expect("structured output schema serializes")
+                ))
+            }
+        }
+    }
+
+    fn validate_output(&self, text: &str) -> anyhow::Result<()> {
+        let value = match self {
+            Self::Text => return Ok(()),
+            Self::JsonObject | Self::JsonSchema { .. } => {
+                serde_json::from_str::<serde_json::Value>(text.trim()).map_err(|error| {
+                    anyhow::anyhow!("structured output is not valid JSON: {error}")
+                })?
+            }
+        };
+        match self {
+            Self::Text => Ok(()),
+            Self::JsonObject => {
+                anyhow::ensure!(
+                    value.is_object(),
+                    "json_object output must be a JSON object"
+                );
+                Ok(())
+            }
+            Self::JsonSchema { schema, .. } => {
+                crate::core::constrained::validate_schema_value(schema, &value)
+                    .context("structured output does not match text.format schema")
+            }
+        }
+    }
+
+    fn validate_completion(
+        &self,
+        text: &str,
+        has_tool_calls: bool,
+        finish_reason: &'static str,
+    ) -> anyhow::Result<()> {
+        if has_tool_calls || finish_reason == "length" {
+            return Ok(());
+        }
+        self.validate_output(text)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum ResponsesInput {
+    Text(String),
+    Items(Vec<ResponseInputItem>),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResponseInputItem {
+    Message {
+        role: String,
+        content: ResponseMessageContent,
+    },
+    FunctionCall {
+        #[serde(default)]
+        id: Option<String>,
+        call_id: String,
+        name: String,
+        arguments: String,
+        #[serde(default)]
+        status: Option<String>,
+        #[serde(default)]
+        namespace: Option<String>,
+    },
+    FunctionCallOutput {
+        call_id: String,
+        output: FunctionCallOutput,
+        #[serde(default)]
+        status: Option<String>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum ResponseMessageContent {
+    Text(String),
+    Parts(Vec<ResponseContentPart>),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResponseContentPart {
+    InputText {
+        text: String,
+    },
+    OutputText {
+        text: String,
+    },
+    InputImage {
+        #[serde(default)]
+        image_url: Option<String>,
+        #[serde(default)]
+        file_id: Option<String>,
+        #[serde(default)]
+        detail: Option<String>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum FunctionCallOutput {
+    Text(String),
+    Parts(Vec<FunctionCallOutputPart>),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum FunctionCallOutputPart {
+    InputText { text: String },
+    OutputText { text: String },
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ResponseTool {
+    Function {
+        name: String,
+        #[serde(default)]
+        description: Option<String>,
+        parameters: serde_json::Value,
+        #[serde(default)]
+        strict: Option<bool>,
+        #[serde(default)]
+        defer_loading: Option<bool>,
+    },
+    Namespace {
+        name: String,
+        description: String,
+        tools: Vec<ResponseNamespaceTool>,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ResponseNamespaceTool {
+    Function {
+        name: String,
+        #[serde(default)]
+        description: Option<String>,
+        parameters: serde_json::Value,
+        #[serde(default)]
+        strict: Option<bool>,
+        #[serde(default)]
+        defer_loading: Option<bool>,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct NamespaceDispatcher {
+    namespace: String,
+    children: HashMap<String, NamespaceArgumentEncoding>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum NamespaceArgumentEncoding {
+    Structured,
+    JsonString,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ToolAliases {
+    namespace_by_internal: HashMap<String, NamespaceDispatcher>,
+    internal_by_namespace: HashMap<String, String>,
+}
+
+impl ToolAliases {
+    fn insert_namespace(
+        &mut self,
+        internal: String,
+        namespace: String,
+        children: HashMap<String, NamespaceArgumentEncoding>,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.namespace_by_internal
+                .insert(
+                    internal.clone(),
+                    NamespaceDispatcher {
+                        namespace: namespace.clone(),
+                        children,
+                    },
+                )
+                .is_none(),
+            "duplicate internal namespace tool alias `{internal}`"
+        );
+        anyhow::ensure!(
+            self.internal_by_namespace
+                .insert(namespace.clone(), internal)
+                .is_none(),
+            "duplicate namespace `{namespace}`"
+        );
+        Ok(())
+    }
+
+    fn wrap_public_call(
+        &self,
+        namespace: &str,
+        name: &str,
+        arguments: &str,
+    ) -> anyhow::Result<(String, String)> {
+        let internal = self
+            .internal_by_namespace
+            .get(namespace)
+            .ok_or_else(|| anyhow::anyhow!("unknown tool namespace `{namespace}`"))?;
+        let dispatcher = self
+            .namespace_by_internal
+            .get(internal)
+            .expect("namespace maps are consistent");
+        let encoding = dispatcher
+            .children
+            .get(name)
+            .ok_or_else(|| anyhow::anyhow!("unknown namespace tool `{namespace}.{name}`"))?;
+        let arguments = serde_json::from_str::<serde_json::Value>(arguments)
+            .map_err(|error| anyhow::anyhow!("function_call arguments must be JSON: {error}"))?;
+        let envelope = match encoding {
+            NamespaceArgumentEncoding::Structured => serde_json::json!({
+                "name": name,
+                "arguments": arguments,
+            }),
+            NamespaceArgumentEncoding::JsonString => serde_json::json!({
+                "name": name,
+                "arguments_json": serde_json::to_string(&arguments)?,
+            }),
+        };
+        Ok((
+            internal.clone(),
+            serde_json::to_string(&envelope).expect("namespace function call serializes"),
+        ))
+    }
+
+    fn resolve_call(&self, call: ToolCall) -> anyhow::Result<(Option<String>, ToolCall)> {
+        let Some(dispatcher) = self.namespace_by_internal.get(&call.name) else {
+            return Ok((None, call));
+        };
+        let arguments = call
+            .arguments
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("namespace dispatcher arguments must be an object"))?;
+        let name = arguments
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("namespace dispatcher is missing its child name"))?;
+        let encoding = dispatcher.children.get(name).ok_or_else(|| {
+            anyhow::anyhow!(
+                "namespace dispatcher selected unknown tool `{}.{name}`",
+                dispatcher.namespace
+            )
+        })?;
+        let child_arguments = match encoding {
+            NamespaceArgumentEncoding::Structured => arguments
+                .get("arguments")
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("namespace dispatcher is missing arguments"))?,
+            NamespaceArgumentEncoding::JsonString => {
+                let encoded = arguments
+                    .get("arguments_json")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("namespace dispatcher is missing JSON arguments")
+                    })?;
+                serde_json::from_str(encoded).map_err(|error| {
+                    anyhow::anyhow!("namespace dispatcher produced invalid JSON arguments: {error}")
+                })?
+            }
+        };
+        Ok((
+            Some(dispatcher.namespace.clone()),
+            ToolCall {
+                id: call.id,
+                name: name.to_owned(),
+                arguments: child_arguments,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct NormalizedRequest {
+    pub(crate) chat: openai::ChatRequest,
+    pub(crate) instructions: Option<String>,
+    text_format: ResponseTextFormat,
+    pub(crate) response_tools: Vec<ResponseTool>,
+    pub(crate) response_tool_choice: serde_json::Value,
+    tool_aliases: ToolAliases,
+}
+
+impl NormalizedRequest {
+    pub(crate) fn output_schema(&self) -> Option<serde_json::Value> {
+        self.text_format.constraint_schema()
+    }
+}
+
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn response_id() -> String {
+    format!("resp_{}", uuid::Uuid::new_v4().simple())
+}
+
+fn message_id() -> String {
+    format!("msg_{}", uuid::Uuid::new_v4().simple())
+}
+
+fn function_item_id() -> String {
+    format!("fc_{}", uuid::Uuid::new_v4().simple())
+}
+
+fn parse_response_text_format(
+    text: Option<&serde_json::Value>,
+) -> anyhow::Result<ResponseTextFormat> {
+    let Some(text) = text else {
+        return Ok(ResponseTextFormat::Text);
+    };
+    let object = text
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("text must be a JSON object"))?;
+    let Some(format) = object.get("format") else {
+        return Ok(ResponseTextFormat::Text);
+    };
+    let format: ResponseTextFormat = serde_json::from_value(format.clone()).map_err(|error| {
+        anyhow::anyhow!(
+            "text.format must be `text`, `json_object`, or a valid `json_schema` object: {error}"
+        )
+    })?;
+    if let ResponseTextFormat::JsonSchema {
+        name,
+        schema,
+        strict,
+        ..
+    } = &format
+    {
+        crate::core::tool_calling::validate_function_name(name)
+            .context("invalid text.format.json_schema name")?;
+        crate::core::constrained::validate_json_output_schema(schema, strict.unwrap_or(false))?;
+    }
+    Ok(format)
+}
+
+#[derive(Debug, Serialize)]
+struct ErrorEnvelope {
+    error: ErrorObject,
+}
+
+#[derive(Debug, Serialize)]
+struct ErrorObject {
+    message: String,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    param: Option<&'static str>,
+    code: &'static str,
+}
+
+pub(crate) fn error_response(
+    status: StatusCode,
+    code: &'static str,
+    message: impl Into<String>,
+) -> Response {
+    (
+        status,
+        Json(ErrorEnvelope {
+            error: ErrorObject {
+                message: message.into(),
+                kind: "invalid_request_error",
+                param: None,
+                code,
+            },
+        }),
+    )
+        .into_response()
+}
+
+fn validate_advisory_fields(req: &ResponsesRequest) -> anyhow::Result<()> {
+    if let Some(model) = req.model.as_deref() {
+        anyhow::ensure!(!model.is_empty(), "model must not be empty");
+    }
+    if let Some(max_output_tokens) = req.max_output_tokens {
+        anyhow::ensure!(
+            max_output_tokens > 0,
+            "max_output_tokens must be greater than zero"
+        );
+    }
+    if let Some(temperature) = req.temperature {
+        anyhow::ensure!(
+            temperature.is_finite() && (0.0..=2.0).contains(&temperature),
+            "temperature must be finite and between 0 and 2"
+        );
+    }
+    if let Some(top_p) = req.top_p {
+        anyhow::ensure!(
+            top_p.is_finite() && top_p > 0.0 && top_p <= 1.0,
+            "top_p must be finite and in (0, 1]"
+        );
+    }
+    anyhow::ensure!(
+        req.store != Some(true),
+        "store=true is not supported by the stateless local Responses API; send store=false and the complete input history"
+    );
+    anyhow::ensure!(
+        req.previous_response_id.is_none(),
+        "previous_response_id requires server-side response storage and is not supported"
+    );
+    anyhow::ensure!(
+        req.conversation.is_none(),
+        "conversation state is not supported by the local inference server"
+    );
+    anyhow::ensure!(
+        req.background != Some(true),
+        "background responses are not supported"
+    );
+    if let Some(tier) = req.service_tier.as_deref() {
+        anyhow::ensure!(
+            matches!(tier, "auto" | "default"),
+            "service_tier must be `auto` or `default`"
+        );
+    }
+    if let Some(truncation) = req.truncation.as_deref() {
+        anyhow::ensure!(
+            truncation == "disabled",
+            "only truncation=`disabled` is supported"
+        );
+    }
+    for include in &req.include {
+        anyhow::ensure!(
+            include == "reasoning.encrypted_content",
+            "unsupported include value `{include}`"
+        );
+    }
+    if let Some(reasoning) = &req.reasoning {
+        anyhow::ensure!(reasoning.is_object(), "reasoning must be a JSON object");
+        let object = reasoning.as_object().expect("checked object");
+        if let Some(effort) = object.get("effort") {
+            anyhow::ensure!(
+                effort.is_null(),
+                "active reasoning effort is not supported by this model adapter"
+            );
+        }
+        if let Some(summary) = object.get("summary") {
+            anyhow::ensure!(
+                summary.is_null() || matches!(summary.as_str(), Some("auto" | "none")),
+                "reasoning.summary must be `auto`, `none`, or null"
+            );
+        }
+        anyhow::ensure!(
+            object
+                .keys()
+                .all(|key| matches!(key.as_str(), "effort" | "summary")),
+            "unsupported reasoning option"
+        );
+    }
+    parse_response_text_format(req.text.as_ref())?;
+    if let Some(stream_options) = &req.stream_options {
+        anyhow::ensure!(
+            stream_options.is_object(),
+            "stream_options must be a JSON object"
+        );
+    }
+    if let Some(key) = req.prompt_cache_key.as_deref() {
+        anyhow::ensure!(
+            !key.is_empty() && key.len() <= 256,
+            "prompt_cache_key must contain 1 to 256 bytes"
+        );
+    }
+    if let Some(client_metadata) = &req.client_metadata {
+        anyhow::ensure!(
+            client_metadata.is_object(),
+            "client_metadata must be a JSON object"
+        );
+    }
+    if let Some(metadata) = &req.metadata {
+        anyhow::ensure!(metadata.is_object(), "metadata must be a JSON object");
+    }
+    Ok(())
+}
+
+fn response_content_to_chat(
+    role: &str,
+    content: ResponseMessageContent,
+) -> anyhow::Result<Content> {
+    match content {
+        ResponseMessageContent::Text(text) => Ok(Content::Text(text)),
+        ResponseMessageContent::Parts(parts) => {
+            let mut output = Vec::with_capacity(parts.len());
+            for part in parts {
+                match part {
+                    ResponseContentPart::InputText { text }
+                    | ResponseContentPart::OutputText { text } => {
+                        output.push(ContentPart::Text { text });
+                    }
+                    ResponseContentPart::InputImage {
+                        image_url,
+                        file_id,
+                        detail,
+                    } => {
+                        anyhow::ensure!(
+                            matches!(role, "user" | "system" | "developer"),
+                            "input_image is not valid for role `{role}`"
+                        );
+                        anyhow::ensure!(
+                            file_id.is_none(),
+                            "file_id image inputs are not supported"
+                        );
+                        if let Some(detail) = detail.as_deref() {
+                            anyhow::ensure!(
+                                matches!(detail, "auto" | "low" | "high"),
+                                "input_image.detail must be `auto`, `low`, or `high`"
+                            );
+                        }
+                        let url = image_url.ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "input_image requires image_url; file_id is unsupported"
+                            )
+                        })?;
+                        output.push(ContentPart::ImageUrl {
+                            image_url: ImageUrl { url },
+                        });
+                    }
+                }
+            }
+            Ok(Content::Parts(output))
+        }
+    }
+}
+
+fn function_output_text(output: FunctionCallOutput) -> String {
+    match output {
+        FunctionCallOutput::Text(text) => text,
+        FunctionCallOutput::Parts(parts) => parts
+            .into_iter()
+            .map(|part| match part {
+                FunctionCallOutputPart::InputText { text }
+                | FunctionCallOutputPart::OutputText { text } => text,
+            })
+            .collect::<Vec<_>>()
+            .join(""),
+    }
+}
+
+fn append_function_call(
+    messages: &mut Vec<ChatMessage>,
+    call_id: String,
+    name: String,
+    arguments: String,
+) {
+    let call = ChatToolCall {
+        id: call_id,
+        kind: "function".to_owned(),
+        function: ChatFunctionCall { name, arguments },
+    };
+    if let Some(last) = messages.last_mut() {
+        if last.role == "assistant" && last.tool_call_id.is_none() {
+            last.tool_calls.push(call);
+            return;
+        }
+    }
+    messages.push(ChatMessage {
+        role: "assistant".to_owned(),
+        content: Content::Text(String::new()),
+        tool_calls: vec![call],
+        tool_call_id: None,
+    });
+}
+
+fn coalesce_system_messages(messages: &mut Vec<ChatMessage>) {
+    let mut system_contents = Vec::new();
+    messages.retain(|message| {
+        if message.role == "system" {
+            system_contents.push(message.content.clone());
+            false
+        } else {
+            true
+        }
+    });
+    if system_contents.is_empty() {
+        return;
+    }
+    let all_text = system_contents
+        .iter()
+        .all(|content| matches!(content, Content::Text(_)));
+    let content = if all_text {
+        Content::Text(
+            system_contents
+                .into_iter()
+                .filter_map(|content| match content {
+                    Content::Text(text) => Some(text),
+                    Content::Parts(_) => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        )
+    } else {
+        let mut parts = Vec::new();
+        for (index, content) in system_contents.into_iter().enumerate() {
+            if index > 0 {
+                parts.push(ContentPart::Text {
+                    text: "\n\n".to_owned(),
+                });
+            }
+            match content {
+                Content::Text(text) => parts.push(ContentPart::Text { text }),
+                Content::Parts(content_parts) => parts.extend(content_parts),
+            }
+        }
+        Content::Parts(parts)
+    };
+    messages.insert(
+        0,
+        ChatMessage {
+            role: "system".to_owned(),
+            content,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        },
+    );
+}
+
+fn convert_input(
+    instructions: Option<&str>,
+    input: ResponsesInput,
+    tool_aliases: &ToolAliases,
+) -> anyhow::Result<Vec<ChatMessage>> {
+    let mut messages = Vec::new();
+    if let Some(instructions) = instructions.filter(|value| !value.is_empty()) {
+        messages.push(ChatMessage::text("system", instructions));
+    }
+    match input {
+        ResponsesInput::Text(text) => messages.push(ChatMessage::text("user", text)),
+        ResponsesInput::Items(items) => {
+            for item in items {
+                match item {
+                    ResponseInputItem::Message { role, content } => {
+                        anyhow::ensure!(
+                            matches!(role.as_str(), "user" | "system" | "developer" | "assistant"),
+                            "unsupported Responses message role `{role}`"
+                        );
+                        let chat_role = if role == "developer" { "system" } else { &role };
+                        let content = response_content_to_chat(&role, content)?;
+                        messages.push(ChatMessage {
+                            role: chat_role.to_owned(),
+                            content,
+                            tool_calls: Vec::new(),
+                            tool_call_id: None,
+                        });
+                    }
+                    ResponseInputItem::FunctionCall {
+                        id,
+                        call_id,
+                        name,
+                        arguments,
+                        status,
+                        namespace,
+                    } => {
+                        if let Some(id) = id.as_deref() {
+                            anyhow::ensure!(!id.is_empty(), "function_call.id must not be empty");
+                        }
+                        if let Some(status) = status.as_deref() {
+                            anyhow::ensure!(
+                                matches!(status, "in_progress" | "completed" | "incomplete"),
+                                "unsupported function_call status `{status}`"
+                            );
+                        }
+                        let (name, arguments) = match namespace.as_deref() {
+                            Some(namespace) => {
+                                tool_aliases.wrap_public_call(namespace, &name, &arguments)?
+                            }
+                            None => (name, arguments),
+                        };
+                        append_function_call(&mut messages, call_id, name, arguments);
+                    }
+                    ResponseInputItem::FunctionCallOutput {
+                        call_id,
+                        output,
+                        status,
+                    } => {
+                        if let Some(status) = status.as_deref() {
+                            anyhow::ensure!(
+                                matches!(status, "in_progress" | "completed" | "incomplete"),
+                                "unsupported function_call_output status `{status}`"
+                            );
+                        }
+                        messages.push(ChatMessage {
+                            role: "tool".to_owned(),
+                            content: Content::Text(function_output_text(output)),
+                            tool_calls: Vec::new(),
+                            tool_call_id: Some(call_id),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    coalesce_system_messages(&mut messages);
+    anyhow::ensure!(!messages.is_empty(), "input must not be empty");
+    Ok(messages)
+}
+
+fn namespace_alias(namespace_index: usize, name: &str) -> String {
+    let prefix = format!("ns{namespace_index}_");
+    let available = 64_usize.saturating_sub(prefix.len());
+    let suffix = &name[..name.len().min(available)];
+    format!("{prefix}{suffix}")
+}
+
+fn flatten_response_tools(
+    tools: &[ResponseTool],
+) -> anyhow::Result<(Vec<openai::OpenAiTool>, ToolAliases)> {
+    let mut flattened = Vec::new();
+    let mut aliases = ToolAliases::default();
+    for (namespace_index, tool) in tools.iter().enumerate() {
+        match tool {
+            ResponseTool::Function {
+                name,
+                description,
+                parameters,
+                strict,
+                defer_loading: _,
+            } => flattened.push(openai::OpenAiTool {
+                kind: "function".to_owned(),
+                function: ToolDefinition {
+                    name: name.clone(),
+                    description: description.clone(),
+                    parameters: parameters.clone(),
+                    strict: *strict,
+                },
+            }),
+            ResponseTool::Namespace {
+                name: namespace,
+                description: namespace_description,
+                tools,
+            } => {
+                crate::core::tool_calling::validate_function_name(namespace)?;
+                anyhow::ensure!(!tools.is_empty(), "namespace `{namespace}` has no tools");
+                let alias = namespace_alias(namespace_index, namespace);
+                let mut children = HashMap::new();
+                let mut branches = Vec::with_capacity(tools.len());
+                for tool in tools {
+                    match tool {
+                        ResponseNamespaceTool::Function {
+                            name,
+                            description,
+                            parameters,
+                            strict,
+                            defer_loading: _,
+                        } => {
+                            crate::core::tool_calling::validate_function_name(name)?;
+                            let definition = ToolDefinition {
+                                name: name.clone(),
+                                description: description.clone(),
+                                parameters: parameters.clone(),
+                                strict: *strict,
+                            };
+                            let mut encoding = match crate::core::constrained::validate_tool_schemas(
+                                std::slice::from_ref(&definition),
+                            ) {
+                                Ok(()) => {
+                                    if *strict == Some(true) {
+                                        crate::core::constrained::validate_strict_tool_schema(
+                                            &definition,
+                                        )?;
+                                    }
+                                    NamespaceArgumentEncoding::Structured
+                                }
+                                Err(_) if *strict != Some(true) => {
+                                    NamespaceArgumentEncoding::JsonString
+                                }
+                                Err(error) => {
+                                    return Err(anyhow::anyhow!(
+                                        "unsupported strict schema for namespace tool `{namespace}.{name}`: {error:#}"
+                                    ));
+                                }
+                            };
+                            let structured_branch = serde_json::json!({
+                                "type":"object",
+                                "description": description,
+                                "properties": {
+                                    "name": {"type":"string", "const":name},
+                                    "arguments": parameters,
+                                },
+                                "required":["name", "arguments"],
+                                "additionalProperties":false,
+                            });
+                            if matches!(encoding, NamespaceArgumentEncoding::Structured) {
+                                let wrapped = ToolDefinition {
+                                    name: alias.clone(),
+                                    description: None,
+                                    parameters: serde_json::json!({
+                                        "type":"object",
+                                        "properties":{},
+                                        "anyOf":[structured_branch.clone()],
+                                    }),
+                                    strict: Some(false),
+                                };
+                                if let Err(error) = crate::core::constrained::validate_tool_schemas(
+                                    std::slice::from_ref(&wrapped),
+                                ) {
+                                    if *strict == Some(true) {
+                                        return Err(anyhow::anyhow!(
+                                            "namespace wrapper cannot preserve strict schema for `{namespace}.{name}`: {error:#}"
+                                        ));
+                                    }
+                                    encoding = NamespaceArgumentEncoding::JsonString;
+                                }
+                            }
+                            anyhow::ensure!(
+                                children.insert(name.clone(), encoding).is_none(),
+                                "duplicate namespace tool `{namespace}.{name}`"
+                            );
+                            match encoding {
+                                NamespaceArgumentEncoding::Structured => {
+                                    branches.push(structured_branch);
+                                }
+                                NamespaceArgumentEncoding::JsonString => {
+                                    let schema = serde_json::to_string(parameters)?;
+                                    branches.push(serde_json::json!({
+                                        "type":"object",
+                                        "description": description,
+                                        "properties": {
+                                            "name": {"type":"string", "const":name},
+                                            "arguments_json": {
+                                                "type":"string",
+                                                "description": format!(
+                                                    "JSON-encoded arguments for `{namespace}.{name}` matching this dynamic schema: {schema}"
+                                                ),
+                                            },
+                                        },
+                                        "required":["name", "arguments_json"],
+                                        "additionalProperties":false,
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                }
+                let mut dispatcher_description = format!(
+                    "Dispatch one function in namespace `{namespace}`. {namespace_description}"
+                );
+                let mut dispatcher_parameters = serde_json::json!({
+                    "type":"object",
+                    "properties":{},
+                    "anyOf":branches,
+                });
+                let aggregate = ToolDefinition {
+                    name: alias.clone(),
+                    description: None,
+                    parameters: dispatcher_parameters.clone(),
+                    strict: Some(false),
+                };
+                if let Err(error) = crate::core::constrained::validate_tool_schemas(
+                    std::slice::from_ref(&aggregate),
+                ) {
+                    let mut names = Vec::with_capacity(tools.len());
+                    let mut catalog = Vec::with_capacity(tools.len());
+                    for tool in tools {
+                        match tool {
+                            ResponseNamespaceTool::Function {
+                                name,
+                                description,
+                                parameters,
+                                strict,
+                                defer_loading: _,
+                            } => {
+                                anyhow::ensure!(
+                                    *strict != Some(true),
+                                    "namespace `{namespace}` is too complex for one dispatcher and cannot collapse strict tool `{name}`: {error:#}"
+                                );
+                                children
+                                    .insert(name.clone(), NamespaceArgumentEncoding::JsonString);
+                                names.push(name.clone());
+                                catalog.push(format!(
+                                    "`{name}`: {}; JSON schema: {}",
+                                    description.as_deref().unwrap_or("No description."),
+                                    serde_json::to_string(parameters)?
+                                ));
+                            }
+                        }
+                    }
+                    dispatcher_description.push_str(
+                        " Select `name` from the enum and put the selected function's JSON object arguments in `arguments_json`. Available functions: ",
+                    );
+                    dispatcher_description.push_str(&catalog.join("\n"));
+                    dispatcher_parameters = serde_json::json!({
+                        "type":"object",
+                        "properties":{
+                            "name":{"type":"string","enum":names},
+                            "arguments_json":{
+                                "type":"string",
+                                "description":"JSON-encoded object arguments for the selected namespace function."
+                            }
+                        },
+                        "required":["name","arguments_json"],
+                        "additionalProperties":false,
+                    });
+                    let collapsed = ToolDefinition {
+                        name: alias.clone(),
+                        description: None,
+                        parameters: dispatcher_parameters.clone(),
+                        strict: Some(false),
+                    };
+                    crate::core::constrained::validate_tool_schemas(std::slice::from_ref(
+                        &collapsed,
+                    ))?;
+                }
+                aliases.insert_namespace(alias.clone(), namespace.clone(), children)?;
+                flattened.push(openai::OpenAiTool {
+                    kind: "function".to_owned(),
+                    function: ToolDefinition {
+                        name: alias,
+                        description: Some(dispatcher_description),
+                        parameters: dispatcher_parameters,
+                        strict: Some(false),
+                    },
+                });
+            }
+        }
+    }
+    Ok((flattened, aliases))
+}
+
+fn normalize_tool_choice(choice: Option<serde_json::Value>) -> anyhow::Result<serde_json::Value> {
+    let Some(choice) = choice else {
+        return Ok(serde_json::Value::String("auto".to_owned()));
+    };
+    if choice.is_string() {
+        return Ok(choice);
+    }
+    let object = choice
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("tool_choice must be a string or function object"))?;
+    anyhow::ensure!(
+        object.get("type").and_then(serde_json::Value::as_str) == Some("function"),
+        "tool_choice.type must be `function`"
+    );
+    let name = object
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("function tool_choice requires name"))?;
+    anyhow::ensure!(
+        object.get("namespace").is_none(),
+        "named tool_choice for namespace children is not supported; use tool_choice=`auto` or `required`"
+    );
+    anyhow::ensure!(
+        object
+            .keys()
+            .all(|key| matches!(key.as_str(), "type" | "name" | "namespace")),
+        "function tool_choice contains unsupported fields"
+    );
+    Ok(serde_json::json!({
+        "type": "function",
+        "function": {"name": name}
+    }))
+}
+
+impl ResponsesRequest {
+    pub(crate) fn normalize(self) -> anyhow::Result<NormalizedRequest> {
+        validate_advisory_fields(&self)?;
+        let text_format = parse_response_text_format(self.text.as_ref())?;
+        let response_tools = self.tools.clone();
+        let (tools, tool_aliases) = flatten_response_tools(&self.tools)?;
+        let response_tool_choice = self
+            .tool_choice
+            .clone()
+            .unwrap_or_else(|| serde_json::Value::String("auto".to_owned()));
+        let chat_tool_choice = normalize_tool_choice(self.tool_choice)?;
+        let allows_final_output = matches!(chat_tool_choice.as_str(), Some("auto" | "none"));
+        let mut messages = convert_input(self.instructions.as_deref(), self.input, &tool_aliases)?;
+        if allows_final_output {
+            if let Some(instruction) = text_format.prompt_instruction() {
+                messages.push(ChatMessage::text("system", instruction));
+                coalesce_system_messages(&mut messages);
+            }
+        }
+        let tool_choice = if tools.is_empty() && chat_tool_choice.as_str() == Some("auto") {
+            None
+        } else {
+            Some(chat_tool_choice)
+        };
+        Ok(NormalizedRequest {
+            instructions: self.instructions,
+            text_format,
+            response_tools,
+            response_tool_choice,
+            tool_aliases,
+            chat: openai::ChatRequest {
+                model: self.model,
+                messages,
+                tools: (!tools.is_empty()).then_some(tools),
+                tool_choice,
+                parallel_tool_calls: self.parallel_tool_calls,
+                function_call: None,
+                functions: None,
+                stream: self.stream,
+                stream_options: None,
+                ignore_eos: false,
+                max_tokens: self.max_output_tokens.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS),
+                temperature: self.temperature,
+                top_p: self.top_p,
+                top_k: None,
+                repetition_penalty: None,
+                seed: None,
+                chat_template_kwargs: None,
+            },
+        })
+    }
+}
+
+#[derive(Debug)]
+struct ToolContext {
+    dialect: crate::core::tool_calling::ToolDialect,
+    definitions: Vec<ToolDefinition>,
+    constraint_options: crate::core::constrained::ToolConstraintOptions,
+    output_schema: Option<serde_json::Value>,
+}
+
+#[derive(Debug)]
+struct PreparedResponse {
+    request: GenerateRequest,
+    model: String,
+    prompt_tokens: u32,
+    use_scheduler: bool,
+    stream: bool,
+    max_output_tokens: usize,
+    instructions: Option<String>,
+    text_format: ResponseTextFormat,
+    tools: Vec<ResponseTool>,
+    tool_choice: serde_json::Value,
+    parallel_tool_calls: bool,
+    temperature: Option<f32>,
+    top_p: Option<f32>,
+    tool_context: Option<ToolContext>,
+    tool_aliases: ToolAliases,
+}
+
+async fn prepare_response<M>(
+    state: &AppState<M>,
+    normalized: NormalizedRequest,
+    force_scheduler: bool,
+) -> std::result::Result<PreparedResponse, Response>
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    let NormalizedRequest {
+        mut chat,
+        instructions,
+        text_format,
+        response_tools,
+        response_tool_choice,
+        tool_aliases,
+    } = normalized;
+    let stream = chat.stream;
+    let max_output_tokens = chat.max_tokens;
+    let model = chat.model.clone().unwrap_or_else(|| state.model_id.clone());
+    let temperature = chat.temperature;
+    let top_p = chat.top_p;
+    let parallel_tool_calls = chat.parallel_tool_calls.unwrap_or(true);
+    let sampler = openai::build_sampler(&chat, state.sampling_defaults);
+    if let Err(error) = super::validate_prompt_lookup_sampler(state.prompt_lookup_enabled, sampler)
+    {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_sampling_parameters",
+            format!("{error:#}"),
+        ));
+    }
+    let prepared_tools = match openai::prepare_tool_request(&chat, state.tokenizer.tool_dialect()) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_tools",
+                format!("{error:#}"),
+            ));
+        }
+    };
+    let original_messages = prepared_tools.as_ref().map(|_| chat.messages.clone());
+    let chat_template_kwargs = chat.chat_template_kwargs.take();
+    let (image_token_id, spatial_merge_size) =
+        super::vision::derive_image_token_and_merge(&state.vision_input, &state.tokenizer);
+    let (flat_messages, pixel_values, image_grid_thw) =
+        match openai::expand_image_parts_in_messages(chat.messages, &state.vision_input).await {
+            Ok(result) => result,
+            Err(error) => return Err(super::security::image_error_response(error)),
+        };
+    let prompt_ids = match if let Some(prepared) = &prepared_tools {
+        openai::build_agent_messages(
+            original_messages
+                .as_deref()
+                .expect("captured for Responses tool request"),
+            &flat_messages,
+        )
+        .and_then(|messages| {
+            let kwargs = openai::tool_template_kwargs(chat_template_kwargs, prepared)?;
+            openai::render_tool_prompt(&state.tokenizer, &messages, &kwargs)
+        })
+    } else {
+        super::chat_format::render_and_encode(
+            &state.tokenizer,
+            &flat_messages,
+            chat_template_kwargs.as_ref(),
+        )
+    } {
+        Ok(ids) => ids,
+        Err(error) => {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_prompt",
+                format!("chat template / tokenize: {error}"),
+            ));
+        }
+    };
+    let prompt_len = prompt_ids.len();
+    let scheduler_config = state.scheduler_request_config(prompt_len, max_output_tokens);
+    let use_scheduler = force_scheduler
+        || super::should_route_to_scheduler::<M>(
+            prompt_len,
+            scheduler_config.prefill_chunk_size,
+            state.b_max,
+            state.paged_prefix_cache_enabled,
+            state.force_scheduler_for_greedy && sampler.is_pipelinable(),
+        );
+    let output_schema = text_format.constraint_schema();
+    let constraint = match prepared_tools
+        .as_ref()
+        .and_then(|prepared| {
+            prepared
+                .constraint_options
+                .as_ref()
+                .map(|options| (prepared, options))
+        })
+        .map(|(prepared, options)| {
+            if matches!(
+                &options.choice,
+                crate::core::constrained::ToolChoiceConstraint::Auto
+            ) {
+                if let Some(schema) = output_schema.as_ref() {
+                    return state.tokenizer.compile_tool_or_json_constraint(
+                        &prepared.definitions,
+                        options,
+                        schema,
+                    );
+                }
+            }
+            state
+                .tokenizer
+                .compile_tool_constraint(&prepared.definitions, options)
+        })
+        .transpose()
+        .and_then(
+            |tool_constraint| match (tool_constraint, output_schema.as_ref()) {
+                (Some(constraint), _) => Ok(Some(constraint)),
+                (None, Some(schema)) => state
+                    .tokenizer
+                    .compile_json_output_constraint(schema)
+                    .map(Some),
+                (None, None) => Ok(None),
+            },
+        ) {
+        Ok(value) => value,
+        Err(error) => {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_output_schema",
+                format!("compile response decoding constraint: {error:#}"),
+            ));
+        }
+    };
+    let tool_context = prepared_tools.and_then(|prepared| {
+        prepared
+            .constraint_options
+            .map(|constraint_options| ToolContext {
+                dialect: prepared.dialect,
+                definitions: prepared.definitions,
+                output_schema: matches!(
+                    &constraint_options.choice,
+                    crate::core::constrained::ToolChoiceConstraint::Auto
+                )
+                .then(|| output_schema.clone())
+                .flatten(),
+                constraint_options,
+            })
+    });
+    Ok(PreparedResponse {
+        request: GenerateRequest {
+            prompt_ids,
+            max_new_tokens: max_output_tokens,
+            sampler,
+            stop_token_ids: openai::stop_token_ids_for_request(
+                state.tokenizer.eos_token_ids(),
+                false,
+            ),
+            prefill_chunk_size: scheduler_config.prefill_chunk_size,
+            decode_cadence_mid_chunk_cap: scheduler_config.decode_cadence_mid_chunk_cap,
+            kv_cache_turboquant_bits: state.kv_cache_turboquant_bits,
+            pixel_values,
+            image_grid_thw: (!image_grid_thw.is_empty()).then_some(image_grid_thw),
+            image_spatial_merge_size: spatial_merge_size,
+            image_token_id,
+            constraint,
+        },
+        model,
+        prompt_tokens: prompt_len as u32,
+        use_scheduler,
+        stream,
+        max_output_tokens,
+        instructions,
+        text_format,
+        tools: response_tools,
+        tool_choice: response_tool_choice,
+        parallel_tool_calls,
+        temperature,
+        top_p,
+        tool_context,
+        tool_aliases,
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct Usage {
+    input_tokens: u32,
+    input_tokens_details: InputTokenDetails,
+    output_tokens: u32,
+    output_tokens_details: OutputTokenDetails,
+    total_tokens: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct InputTokenDetails {
+    cached_tokens: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct OutputTokenDetails {
+    reasoning_tokens: u32,
+}
+
+impl Usage {
+    pub(crate) fn new(input_tokens: u32, output_tokens: u32) -> Self {
+        Self {
+            input_tokens,
+            input_tokens_details: InputTokenDetails { cached_tokens: 0 },
+            output_tokens,
+            output_tokens_details: OutputTokenDetails {
+                reasoning_tokens: 0,
+            },
+            total_tokens: input_tokens + output_tokens,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum OutputItem {
+    Message {
+        id: String,
+        status: &'static str,
+        role: &'static str,
+        content: Vec<OutputContent>,
+    },
+    FunctionCall {
+        id: String,
+        status: &'static str,
+        arguments: String,
+        call_id: String,
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum OutputContent {
+    OutputText {
+        annotations: Vec<serde_json::Value>,
+        logprobs: Vec<serde_json::Value>,
+        text: String,
+    },
+}
+
+fn message_item(id: String, text: String) -> OutputItem {
+    OutputItem::Message {
+        id,
+        status: "completed",
+        role: "assistant",
+        content: vec![OutputContent::OutputText {
+            annotations: Vec::new(),
+            logprobs: Vec::new(),
+            text,
+        }],
+    }
+}
+
+fn function_item(
+    id: String,
+    call: ToolCall,
+    tool_aliases: &ToolAliases,
+) -> anyhow::Result<OutputItem> {
+    let (namespace, call) = tool_aliases.resolve_call(call)?;
+    Ok(OutputItem::FunctionCall {
+        id,
+        status: "completed",
+        arguments: serde_json::to_string(&call.arguments).expect("tool arguments are JSON values"),
+        call_id: call.id,
+        name: call.name,
+        namespace,
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ResponseObject {
+    id: String,
+    object: &'static str,
+    created_at: u64,
+    status: &'static str,
+    background: bool,
+    error: Option<serde_json::Value>,
+    incomplete_details: Option<IncompleteDetails>,
+    instructions: Option<String>,
+    max_output_tokens: usize,
+    model: String,
+    output: Vec<OutputItem>,
+    parallel_tool_calls: bool,
+    previous_response_id: Option<String>,
+    reasoning: ReasoningInfo,
+    service_tier: &'static str,
+    store: bool,
+    temperature: Option<f32>,
+    text: TextConfig,
+    tool_choice: serde_json::Value,
+    tools: Vec<ResponseTool>,
+    top_p: Option<f32>,
+    truncation: &'static str,
+    usage: Option<Usage>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct IncompleteDetails {
+    reason: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ReasoningInfo {
+    effort: Option<String>,
+    summary: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TextConfig {
+    format: ResponseTextFormat,
+}
+
+#[derive(Debug)]
+pub(crate) struct ResponseMeta {
+    id: String,
+    created_at: u64,
+    instructions: Option<String>,
+    text_format: ResponseTextFormat,
+    max_output_tokens: usize,
+    model: String,
+    parallel_tool_calls: bool,
+    temperature: Option<f32>,
+    tool_choice: serde_json::Value,
+    tools: Vec<ResponseTool>,
+    top_p: Option<f32>,
+    tool_aliases: ToolAliases,
+}
+
+impl PreparedResponse {
+    fn meta(&self) -> ResponseMeta {
+        ResponseMeta {
+            id: response_id(),
+            created_at: now_unix(),
+            instructions: self.instructions.clone(),
+            text_format: self.text_format.clone(),
+            max_output_tokens: self.max_output_tokens,
+            model: self.model.clone(),
+            parallel_tool_calls: self.parallel_tool_calls,
+            temperature: self.temperature,
+            tool_choice: self.tool_choice.clone(),
+            tools: self.tools.clone(),
+            top_p: self.top_p,
+            tool_aliases: self.tool_aliases.clone(),
+        }
+    }
+}
+
+impl ResponseMeta {
+    pub(crate) fn from_normalized(normalized: &NormalizedRequest, model: String) -> Self {
+        Self {
+            id: response_id(),
+            created_at: now_unix(),
+            instructions: normalized.instructions.clone(),
+            text_format: normalized.text_format.clone(),
+            max_output_tokens: normalized.chat.max_tokens,
+            model,
+            parallel_tool_calls: normalized.chat.parallel_tool_calls.unwrap_or(true),
+            temperature: normalized.chat.temperature,
+            tool_choice: normalized.response_tool_choice.clone(),
+            tools: normalized.response_tools.clone(),
+            top_p: normalized.chat.top_p,
+            tool_aliases: normalized.tool_aliases.clone(),
+        }
+    }
+
+    fn object(
+        &self,
+        status: &'static str,
+        output: Vec<OutputItem>,
+        usage: Option<Usage>,
+    ) -> ResponseObject {
+        ResponseObject {
+            id: self.id.clone(),
+            object: "response",
+            created_at: self.created_at,
+            status,
+            background: false,
+            error: None,
+            incomplete_details: (status == "incomplete").then_some(IncompleteDetails {
+                reason: "max_output_tokens",
+            }),
+            instructions: self.instructions.clone(),
+            max_output_tokens: self.max_output_tokens,
+            model: self.model.clone(),
+            output,
+            parallel_tool_calls: self.parallel_tool_calls,
+            previous_response_id: None,
+            reasoning: ReasoningInfo {
+                effort: None,
+                summary: None,
+            },
+            service_tier: "default",
+            store: false,
+            temperature: self.temperature,
+            text: TextConfig {
+                format: self.text_format.clone(),
+            },
+            tool_choice: self.tool_choice.clone(),
+            tools: self.tools.clone(),
+            top_p: self.top_p,
+            truncation: "disabled",
+            usage,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct CollectedOutput {
+    pub(crate) content: String,
+    pub(crate) tool_calls: Vec<ToolCall>,
+    pub(crate) finish_reason: &'static str,
+    pub(crate) completion_tokens: u32,
+}
+
+impl CollectedOutput {
+    pub(crate) fn new() -> Self {
+        Self {
+            content: String::new(),
+            tool_calls: Vec::new(),
+            finish_reason: "stop",
+            completion_tokens: 0,
+        }
+    }
+
+    fn collect(&mut self, events: Vec<AssistantOutputEvent>) {
+        for event in events {
+            match event {
+                AssistantOutputEvent::TextDelta(text) => self.content.push_str(&text),
+                AssistantOutputEvent::ToolCall(call) => self.tool_calls.push(call),
+            }
+        }
+    }
+}
+
+fn validate_collected_output(
+    output: &CollectedOutput,
+    context: &ToolContext,
+) -> anyhow::Result<()> {
+    let call_names = output
+        .tool_calls
+        .iter()
+        .map(|call| call.name.clone())
+        .collect::<Vec<_>>();
+    openai::validate_tool_choice_output(&context.constraint_options, &call_names)
+}
+
+pub(crate) fn unary_response(
+    meta: ResponseMeta,
+    input_tokens: u32,
+    output: CollectedOutput,
+) -> Response {
+    if let Err(error) = meta.text_format.validate_completion(
+        &output.content,
+        !output.tool_calls.is_empty(),
+        output.finish_reason,
+    ) {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "structured_output_error",
+            format!("{error:#}"),
+        );
+    }
+    let mut items = Vec::new();
+    if !output.content.is_empty() {
+        items.push(message_item(message_id(), output.content));
+    }
+    for call in output.tool_calls {
+        match function_item(function_item_id(), call, &meta.tool_aliases) {
+            Ok(item) => items.push(item),
+            Err(error) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "tool_parse_error",
+                    format!("{error:#}"),
+                );
+            }
+        }
+    }
+    let status = if output.finish_reason == "length" {
+        "incomplete"
+    } else {
+        "completed"
+    };
+    Json(meta.object(
+        status,
+        items,
+        Some(Usage::new(input_tokens, output.completion_tokens)),
+    ))
+    .into_response()
+}
+
+#[derive(Debug, Serialize)]
+struct StreamEvent<T> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    sequence_number: u64,
+    #[serde(flatten)]
+    payload: T,
+}
+
+#[derive(Debug, Serialize)]
+struct ResponsePayload {
+    response: ResponseObject,
+}
+
+#[derive(Debug, Serialize)]
+struct ItemPayload {
+    item: OutputItem,
+    output_index: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct ContentPartPayload {
+    content_index: usize,
+    item_id: String,
+    output_index: usize,
+    part: OutputContent,
+}
+
+#[derive(Debug, Serialize)]
+struct TextDeltaPayload {
+    content_index: usize,
+    delta: String,
+    item_id: String,
+    logprobs: Vec<serde_json::Value>,
+    output_index: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct TextDonePayload {
+    content_index: usize,
+    item_id: String,
+    logprobs: Vec<serde_json::Value>,
+    output_index: usize,
+    text: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ArgumentsDeltaPayload {
+    delta: String,
+    item_id: String,
+    output_index: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct ArgumentsDonePayload {
+    arguments: String,
+    item_id: String,
+    name: String,
+    output_index: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct FailedPayload {
+    response: FailedResponse,
+}
+
+#[derive(Debug, Serialize)]
+struct FailedResponse {
+    id: String,
+    object: &'static str,
+    created_at: u64,
+    status: &'static str,
+    error: FailedError,
+}
+
+#[derive(Debug, Serialize)]
+struct FailedError {
+    code: &'static str,
+    message: String,
+}
+
+fn sse_event<T: Serialize>(kind: &'static str, sequence_number: u64, payload: T) -> Bytes {
+    let event = StreamEvent {
+        kind,
+        sequence_number,
+        payload,
+    };
+    let json = serde_json::to_string(&event).expect("Responses SSE event serializes");
+    Bytes::from(format!("event: {kind}\ndata: {json}\n\n"))
+}
+
+fn utf8_fragments(value: &str, max_bytes: usize) -> Vec<&str> {
+    if value.is_empty() {
+        return vec![""];
+    }
+    let mut fragments = Vec::new();
+    let mut start = 0;
+    while start < value.len() {
+        let mut end = (start + max_bytes).min(value.len());
+        while !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        fragments.push(&value[start..end]);
+        start = end;
+    }
+    fragments
+}
+
+pub(crate) struct ResponsesStream {
+    meta: ResponseMeta,
+    sequence: u64,
+    output: Vec<OutputItem>,
+    active_text: Option<(usize, String, String)>,
+}
+
+impl ResponsesStream {
+    pub(crate) fn new(meta: ResponseMeta) -> Self {
+        Self {
+            meta,
+            sequence: 0,
+            output: Vec::new(),
+            active_text: None,
+        }
+    }
+
+    fn event<T: Serialize>(&mut self, kind: &'static str, payload: T) -> Bytes {
+        let frame = sse_event(kind, self.sequence, payload);
+        self.sequence += 1;
+        frame
+    }
+
+    pub(crate) fn created(&mut self) -> Bytes {
+        self.event(
+            "response.created",
+            ResponsePayload {
+                response: self.meta.object("in_progress", Vec::new(), None),
+            },
+        )
+    }
+
+    pub(crate) fn text_delta(&mut self, delta: String) -> Vec<Bytes> {
+        let mut frames = Vec::new();
+        if self.active_text.is_none() {
+            let output_index = self.output.len();
+            let id = message_id();
+            frames.push(self.event(
+                "response.output_item.added",
+                ItemPayload {
+                    item: OutputItem::Message {
+                        id: id.clone(),
+                        status: "in_progress",
+                        role: "assistant",
+                        content: Vec::new(),
+                    },
+                    output_index,
+                },
+            ));
+            frames.push(self.event(
+                "response.content_part.added",
+                ContentPartPayload {
+                    content_index: 0,
+                    item_id: id.clone(),
+                    output_index,
+                    part: OutputContent::OutputText {
+                        annotations: Vec::new(),
+                        logprobs: Vec::new(),
+                        text: String::new(),
+                    },
+                },
+            ));
+            self.active_text = Some((output_index, id, String::new()));
+        }
+        let (output_index, id) = {
+            let (index, id, text) = self.active_text.as_mut().expect("created text item");
+            text.push_str(&delta);
+            (*index, id.clone())
+        };
+        frames.push(self.event(
+            "response.output_text.delta",
+            TextDeltaPayload {
+                content_index: 0,
+                delta,
+                item_id: id,
+                logprobs: Vec::new(),
+                output_index,
+            },
+        ));
+        frames
+    }
+
+    fn finish_text(&mut self) -> Vec<Bytes> {
+        let Some((output_index, id, text)) = self.active_text.take() else {
+            return Vec::new();
+        };
+        let mut frames = Vec::new();
+        frames.push(self.event(
+            "response.output_text.done",
+            TextDonePayload {
+                content_index: 0,
+                item_id: id.clone(),
+                logprobs: Vec::new(),
+                output_index,
+                text: text.clone(),
+            },
+        ));
+        frames.push(self.event(
+            "response.content_part.done",
+            ContentPartPayload {
+                content_index: 0,
+                item_id: id.clone(),
+                output_index,
+                part: OutputContent::OutputText {
+                    annotations: Vec::new(),
+                    logprobs: Vec::new(),
+                    text: text.clone(),
+                },
+            },
+        ));
+        let item = message_item(id, text);
+        frames.push(self.event(
+            "response.output_item.done",
+            ItemPayload {
+                item: item.clone(),
+                output_index,
+            },
+        ));
+        self.output.push(item);
+        frames
+    }
+
+    pub(crate) fn tool_call(&mut self, call: ToolCall) -> anyhow::Result<Vec<Bytes>> {
+        let mut frames = self.finish_text();
+        let output_index = self.output.len();
+        let item_id = function_item_id();
+        let (namespace, call) = self.meta.tool_aliases.resolve_call(call)?;
+        let public_name = call.name.clone();
+        let arguments =
+            serde_json::to_string(&call.arguments).expect("tool arguments are JSON values");
+        frames.push(self.event(
+            "response.output_item.added",
+            ItemPayload {
+                item: OutputItem::FunctionCall {
+                    id: item_id.clone(),
+                    status: "in_progress",
+                    arguments: String::new(),
+                    call_id: call.id.clone(),
+                    name: public_name.clone(),
+                    namespace: namespace.clone(),
+                },
+                output_index,
+            },
+        ));
+        for fragment in utf8_fragments(&arguments, 64) {
+            frames.push(self.event(
+                "response.function_call_arguments.delta",
+                ArgumentsDeltaPayload {
+                    delta: fragment.to_owned(),
+                    item_id: item_id.clone(),
+                    output_index,
+                },
+            ));
+        }
+        frames.push(self.event(
+            "response.function_call_arguments.done",
+            ArgumentsDonePayload {
+                arguments: arguments.clone(),
+                item_id: item_id.clone(),
+                name: public_name,
+                output_index,
+            },
+        ));
+        let item = OutputItem::FunctionCall {
+            id: item_id,
+            status: "completed",
+            arguments,
+            call_id: call.id,
+            name: call.name,
+            namespace,
+        };
+        frames.push(self.event(
+            "response.output_item.done",
+            ItemPayload {
+                item: item.clone(),
+                output_index,
+            },
+        ));
+        self.output.push(item);
+        Ok(frames)
+    }
+
+    pub(crate) fn completed(&mut self, finish_reason: &'static str, usage: Usage) -> Vec<Bytes> {
+        let has_tool_calls = self
+            .output
+            .iter()
+            .any(|item| matches!(item, OutputItem::FunctionCall { .. }));
+        let active_text = self
+            .active_text
+            .as_ref()
+            .map(|(_, _, text)| text.as_str())
+            .unwrap_or_default();
+        if let Err(error) =
+            self.meta
+                .text_format
+                .validate_completion(active_text, has_tool_calls, finish_reason)
+        {
+            return vec![self.failed(format!("{error:#}"))];
+        }
+        let mut frames = self.finish_text();
+        let (kind, status) = if finish_reason == "length" {
+            ("response.incomplete", "incomplete")
+        } else {
+            ("response.completed", "completed")
+        };
+        frames.push(self.event(
+            kind,
+            ResponsePayload {
+                response: self.meta.object(status, self.output.clone(), Some(usage)),
+            },
+        ));
+        frames
+    }
+
+    pub(crate) fn failed(&mut self, message: String) -> Bytes {
+        self.event(
+            "response.failed",
+            FailedPayload {
+                response: FailedResponse {
+                    id: self.meta.id.clone(),
+                    object: "response",
+                    created_at: self.meta.created_at,
+                    status: "failed",
+                    error: FailedError {
+                        code: "generation_error",
+                        message,
+                    },
+                },
+            },
+        )
+    }
+}
+
+fn stream_response(rx: mpsc::Receiver<std::result::Result<Bytes, std::io::Error>>) -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(Body::from_stream(ReceiverStream::new(rx)))
+        .expect("valid SSE response")
+}
+
+fn collect_tool_events(
+    output: &mut CollectedOutput,
+    parser: &mut ToolCallParser,
+    text: &str,
+) -> anyhow::Result<()> {
+    output.collect(parser.push(text)?);
+    Ok(())
+}
+
+fn finish_parser(
+    output: &mut CollectedOutput,
+    parser: ToolCallParser,
+    context: &ToolContext,
+) -> anyhow::Result<()> {
+    let (events, saw_tool_call) = parser.finish()?;
+    output.collect(events);
+    if saw_tool_call {
+        output.finish_reason = "tool_calls";
+    }
+    validate_collected_output(output, context)
+}
+
+async fn serve_unary_gs<M>(state: AppState<M>, prepared: PreparedResponse) -> Response
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    let meta = prepared.meta();
+    let input_tokens = prepared.prompt_tokens;
+    let tool_context = prepared.tool_context;
+    let request = prepared.request;
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<CollectedOutput> {
+        let model = state.model.blocking_lock();
+        let tokenizer = &*state.tokenizer;
+        let memory = super::begin_direct_request_memory(&state, &*model, &request)?;
+        let mut generation = GenerationStream::new(&*model, tokenizer, request)?;
+        let mut output = CollectedOutput::new();
+        let mut parser = tool_context
+            .as_ref()
+            .map(|context| {
+                ToolCallParser::new_with_output_schema(
+                    context.dialect,
+                    uuid::Uuid::new_v4().simple().to_string(),
+                    &context.definitions,
+                    context.output_schema.clone(),
+                )
+            })
+            .transpose()?;
+        let mut detok = tool_context
+            .as_ref()
+            .map(|context| tokenizer.decode_stream(context.dialect.skip_special_tokens()));
+        let mut memory = Some(memory);
+        loop {
+            let Some(event) = generation.next_token()? else {
+                break;
+            };
+            if let Some(memory) = memory.take() {
+                memory.commit();
+                state.record_request_started(input_tokens);
+            }
+            output.completion_tokens += 1;
+            if let (Some(parser), Some(detok)) = (parser.as_mut(), detok.as_mut()) {
+                let text = if event.finish_reason == Some("stop") {
+                    String::new()
+                } else {
+                    detok.step(event.token)?.unwrap_or_default()
+                };
+                collect_tool_events(&mut output, parser, &text)?;
+            } else {
+                output.content.push_str(&event.text);
+            }
+            if let Some(reason) = event.finish_reason {
+                output.finish_reason = reason;
+                break;
+            }
+        }
+        if let (Some(parser), Some(context)) = (parser, tool_context.as_ref()) {
+            finish_parser(&mut output, parser, context)?;
+        }
+        state
+            .runtime_usage
+            .record_output_tokens(u64::from(output.completion_tokens));
+        Ok(output)
+    })
+    .await;
+    match result {
+        Ok(Ok(output)) => unary_response(meta, input_tokens, output),
+        Ok(Err(error)) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "generation_error",
+            format!("{error:#}"),
+        ),
+        Err(error) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "generation_task_failed",
+            format!("generation task failed: {error}"),
+        ),
+    }
+}
+
+async fn admit_request<M>(
+    state: &AppState<M>,
+    request: GenerateRequest,
+) -> std::result::Result<AdmitReply, Response>
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    let (reply_tx, reply_rx) = oneshot::channel();
+    if state
+        .scheduler_handle
+        .cmd_tx
+        .send(SchedulerCommand::Admit { request, reply_tx })
+        .await
+        .is_err()
+    {
+        return Err(error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "scheduler_unavailable",
+            "scheduler actor unavailable",
+        ));
+    }
+    match reply_rx.await {
+        Ok(Ok(reply)) => Ok(reply),
+        Ok(Err(error)) => {
+            let status = if error
+                .downcast_ref::<crate::core::SchedulerError>()
+                .is_some_and(|error| {
+                    matches!(error, crate::core::SchedulerError::RequestTooLarge { .. })
+                }) {
+                StatusCode::PAYLOAD_TOO_LARGE
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
+            };
+            Err(error_response(
+                status,
+                "scheduler_rejected",
+                format!("{error:#}"),
+            ))
+        }
+        Err(_) => Err(error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "scheduler_reply_lost",
+            "scheduler reply lost",
+        )),
+    }
+}
+
+async fn serve_unary_scheduler<M>(state: AppState<M>, prepared: PreparedResponse) -> Response
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    let meta = prepared.meta();
+    let input_tokens = prepared.prompt_tokens;
+    let tool_context = prepared.tool_context;
+    let AdmitReply {
+        request_id: _,
+        mut event_rx,
+    } = match admit_request(&state, prepared.request).await {
+        Ok(reply) => reply,
+        Err(response) => return response,
+    };
+    state.record_request_started(input_tokens);
+    let mut output = CollectedOutput::new();
+    let mut parser = match tool_context
+        .as_ref()
+        .map(|context| {
+            ToolCallParser::new_with_output_schema(
+                context.dialect,
+                uuid::Uuid::new_v4().simple().to_string(),
+                &context.definitions,
+                context.output_schema.clone(),
+            )
+        })
+        .transpose()
+    {
+        Ok(parser) => parser,
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_tool_parser",
+                format!("{error:#}"),
+            );
+        }
+    };
+    let mut detok = state.tokenizer.decode_stream(
+        tool_context
+            .as_ref()
+            .map(|context| context.dialect.skip_special_tokens())
+            .unwrap_or(true),
+    );
+    while let Some(event) = event_rx.recv().await {
+        output.completion_tokens += 1;
+        let text = if event.finish_reason == Some("stop") {
+            String::new()
+        } else {
+            match detok.step(event.token) {
+                Ok(Some(text)) => text,
+                Ok(None) => String::new(),
+                Err(error) => {
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "detokenization_error",
+                        format!("detokenization failed: {error}"),
+                    );
+                }
+            }
+        };
+        if let Some(parser) = parser.as_mut() {
+            if let Err(error) = collect_tool_events(&mut output, parser, &text) {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "tool_parse_error",
+                    format!("{error:#}"),
+                );
+            }
+        } else {
+            output.content.push_str(&text);
+        }
+        if let Some(reason) = event.finish_reason {
+            output.finish_reason = reason;
+            break;
+        }
+    }
+    if let (Some(parser), Some(context)) = (parser, tool_context.as_ref()) {
+        if let Err(error) = finish_parser(&mut output, parser, context) {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "tool_parse_error",
+                format!("{error:#}"),
+            );
+        }
+    }
+    state
+        .runtime_usage
+        .record_output_tokens(u64::from(output.completion_tokens));
+    unary_response(meta, input_tokens, output)
+}
+
+fn stream_tool_events(
+    formatter: &mut ResponsesStream,
+    events: Vec<AssistantOutputEvent>,
+) -> anyhow::Result<Vec<Bytes>> {
+    let mut frames = Vec::new();
+    for event in events {
+        match event {
+            AssistantOutputEvent::TextDelta(text) => frames.extend(formatter.text_delta(text)),
+            AssistantOutputEvent::ToolCall(call) => frames.extend(formatter.tool_call(call)?),
+        }
+    }
+    Ok(frames)
+}
+
+async fn serve_stream_scheduler<M>(state: AppState<M>, prepared: PreparedResponse) -> Response
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    let meta = prepared.meta();
+    let input_tokens = prepared.prompt_tokens;
+    let tool_context = prepared.tool_context;
+    let AdmitReply {
+        request_id: _,
+        mut event_rx,
+    } = match admit_request(&state, prepared.request).await {
+        Ok(reply) => reply,
+        Err(response) => return response,
+    };
+    state.record_request_started(input_tokens);
+    let tokenizer = state.tokenizer.clone();
+    let runtime_usage = state.runtime_usage.clone();
+    let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+    tokio::spawn(async move {
+        let mut formatter = ResponsesStream::new(meta);
+        if tx.send(Ok(formatter.created())).await.is_err() {
+            return;
+        }
+        let mut parser = match tool_context
+            .as_ref()
+            .map(|context| {
+                ToolCallParser::new_with_output_schema(
+                    context.dialect,
+                    uuid::Uuid::new_v4().simple().to_string(),
+                    &context.definitions,
+                    context.output_schema.clone(),
+                )
+            })
+            .transpose()
+        {
+            Ok(parser) => parser,
+            Err(error) => {
+                let frame = formatter.failed(format!("{error:#}"));
+                let _ = tx.send(Ok(frame)).await;
+                return;
+            }
+        };
+        let mut detok = tokenizer.decode_stream(
+            tool_context
+                .as_ref()
+                .map(|context| context.dialect.skip_special_tokens())
+                .unwrap_or(true),
+        );
+        let mut output = CollectedOutput::new();
+        let mut call_names = Vec::new();
+        while let Some(event) = event_rx.recv().await {
+            output.completion_tokens += 1;
+            runtime_usage.record_output_tokens(1);
+            let text = if event.finish_reason == Some("stop") {
+                String::new()
+            } else {
+                match detok.step(event.token) {
+                    Ok(Some(text)) => text,
+                    Ok(None) => String::new(),
+                    Err(error) => {
+                        let frame = formatter.failed(format!("detokenization failed: {error}"));
+                        let _ = tx.send(Ok(frame)).await;
+                        return;
+                    }
+                }
+            };
+            let frames = if let Some(parser) = parser.as_mut() {
+                match parser.push(&text) {
+                    Ok(events) => {
+                        call_names.extend(events.iter().filter_map(|event| match event {
+                            AssistantOutputEvent::ToolCall(call) => Some(call.name.clone()),
+                            AssistantOutputEvent::TextDelta(_) => None,
+                        }));
+                        match stream_tool_events(&mut formatter, events) {
+                            Ok(frames) => frames,
+                            Err(error) => {
+                                let frame = formatter.failed(format!("{error:#}"));
+                                let _ = tx.send(Ok(frame)).await;
+                                return;
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let frame = formatter.failed(format!("{error:#}"));
+                        let _ = tx.send(Ok(frame)).await;
+                        return;
+                    }
+                }
+            } else {
+                formatter.text_delta(text)
+            };
+            for frame in frames {
+                if tx.send(Ok(frame)).await.is_err() {
+                    return;
+                }
+            }
+            if let Some(reason) = event.finish_reason {
+                output.finish_reason = reason;
+                break;
+            }
+        }
+        if let (Some(parser), Some(context)) = (parser, tool_context.as_ref()) {
+            match parser.finish() {
+                Ok((events, saw_tool_call)) => {
+                    call_names.extend(events.iter().filter_map(|event| match event {
+                        AssistantOutputEvent::ToolCall(call) => Some(call.name.clone()),
+                        AssistantOutputEvent::TextDelta(_) => None,
+                    }));
+                    if let Err(error) = openai::validate_tool_choice_output(
+                        &context.constraint_options,
+                        &call_names,
+                    ) {
+                        let frame = formatter.failed(format!("{error:#}"));
+                        let _ = tx.send(Ok(frame)).await;
+                        return;
+                    }
+                    let frames = match stream_tool_events(&mut formatter, events) {
+                        Ok(frames) => frames,
+                        Err(error) => {
+                            let frame = formatter.failed(format!("{error:#}"));
+                            let _ = tx.send(Ok(frame)).await;
+                            return;
+                        }
+                    };
+                    for frame in frames {
+                        if tx.send(Ok(frame)).await.is_err() {
+                            return;
+                        }
+                    }
+                    if saw_tool_call {
+                        output.finish_reason = "tool_calls";
+                    }
+                }
+                Err(error) => {
+                    let frame = formatter.failed(format!("{error:#}"));
+                    let _ = tx.send(Ok(frame)).await;
+                    return;
+                }
+            }
+        }
+        for frame in formatter.completed(
+            output.finish_reason,
+            Usage::new(input_tokens, output.completion_tokens),
+        ) {
+            if tx.send(Ok(frame)).await.is_err() {
+                return;
+            }
+        }
+    });
+    stream_response(rx)
+}
+
+async fn serve_stream_gs<M>(state: AppState<M>, prepared: PreparedResponse) -> Response
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    let meta = prepared.meta();
+    let input_tokens = prepared.prompt_tokens;
+    let tool_context = prepared.tool_context;
+    let request = prepared.request;
+    let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+    let (init_tx, init_rx) = oneshot::channel::<anyhow::Result<()>>();
+    tokio::task::spawn_blocking(move || {
+        let model = state.model.blocking_lock();
+        let tokenizer = &*state.tokenizer;
+        let memory = match super::begin_direct_request_memory(&state, &*model, &request) {
+            Ok(memory) => memory,
+            Err(error) => {
+                let _ = init_tx.send(Err(error));
+                return;
+            }
+        };
+        let mut generation = match GenerationStream::new(&*model, tokenizer, request) {
+            Ok(generation) => generation,
+            Err(error) => {
+                let _ = init_tx.send(Err(error));
+                return;
+            }
+        };
+        let first = match generation.next_token() {
+            Ok(first) => first,
+            Err(error) => {
+                let _ = init_tx.send(Err(error));
+                return;
+            }
+        };
+        memory.commit();
+        state.record_request_started(input_tokens);
+        if init_tx.send(Ok(())).is_err() {
+            return;
+        }
+        let mut formatter = ResponsesStream::new(meta);
+        if tx.blocking_send(Ok(formatter.created())).is_err() {
+            return;
+        }
+        let mut parser = match tool_context
+            .as_ref()
+            .map(|context| {
+                ToolCallParser::new_with_output_schema(
+                    context.dialect,
+                    uuid::Uuid::new_v4().simple().to_string(),
+                    &context.definitions,
+                    context.output_schema.clone(),
+                )
+            })
+            .transpose()
+        {
+            Ok(parser) => parser,
+            Err(error) => {
+                let _ = tx.blocking_send(Ok(formatter.failed(format!("{error:#}"))));
+                return;
+            }
+        };
+        let mut detok = tool_context
+            .as_ref()
+            .map(|context| tokenizer.decode_stream(context.dialect.skip_special_tokens()));
+        let mut completion_tokens = 0_u32;
+        let mut finish_reason = "stop";
+        let mut call_names = Vec::new();
+        let mut first = Some(first);
+        loop {
+            let event = match first.take() {
+                Some(event) => Ok(event),
+                None => generation.next_token(),
+            };
+            let event = match event {
+                Ok(Some(event)) => event,
+                Ok(None) => break,
+                Err(error) => {
+                    let _ = tx.blocking_send(Ok(formatter.failed(format!("{error:#}"))));
+                    return;
+                }
+            };
+            completion_tokens += 1;
+            state.runtime_usage.record_output_tokens(1);
+            let frames = if let (Some(parser), Some(detok)) = (parser.as_mut(), detok.as_mut()) {
+                let text = if event.finish_reason == Some("stop") {
+                    String::new()
+                } else {
+                    match detok.step(event.token) {
+                        Ok(Some(text)) => text,
+                        Ok(None) => String::new(),
+                        Err(error) => {
+                            let _ = tx.blocking_send(Ok(
+                                formatter.failed(format!("detokenization failed: {error}"))
+                            ));
+                            return;
+                        }
+                    }
+                };
+                match parser.push(&text) {
+                    Ok(events) => {
+                        call_names.extend(events.iter().filter_map(|event| match event {
+                            AssistantOutputEvent::ToolCall(call) => Some(call.name.clone()),
+                            AssistantOutputEvent::TextDelta(_) => None,
+                        }));
+                        match stream_tool_events(&mut formatter, events) {
+                            Ok(frames) => frames,
+                            Err(error) => {
+                                let _ =
+                                    tx.blocking_send(Ok(formatter.failed(format!("{error:#}"))));
+                                return;
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let _ = tx.blocking_send(Ok(formatter.failed(format!("{error:#}"))));
+                        return;
+                    }
+                }
+            } else {
+                formatter.text_delta(event.text)
+            };
+            for frame in frames {
+                if tx.blocking_send(Ok(frame)).is_err() {
+                    return;
+                }
+            }
+            if let Some(reason) = event.finish_reason {
+                finish_reason = reason;
+                break;
+            }
+        }
+        if let (Some(parser), Some(context)) = (parser, tool_context.as_ref()) {
+            match parser.finish() {
+                Ok((events, saw_tool_call)) => {
+                    call_names.extend(events.iter().filter_map(|event| match event {
+                        AssistantOutputEvent::ToolCall(call) => Some(call.name.clone()),
+                        AssistantOutputEvent::TextDelta(_) => None,
+                    }));
+                    if let Err(error) = openai::validate_tool_choice_output(
+                        &context.constraint_options,
+                        &call_names,
+                    ) {
+                        let _ = tx.blocking_send(Ok(formatter.failed(format!("{error:#}"))));
+                        return;
+                    }
+                    let frames = match stream_tool_events(&mut formatter, events) {
+                        Ok(frames) => frames,
+                        Err(error) => {
+                            let _ = tx.blocking_send(Ok(formatter.failed(format!("{error:#}"))));
+                            return;
+                        }
+                    };
+                    for frame in frames {
+                        if tx.blocking_send(Ok(frame)).is_err() {
+                            return;
+                        }
+                    }
+                    if saw_tool_call {
+                        finish_reason = "tool_calls";
+                    }
+                }
+                Err(error) => {
+                    let _ = tx.blocking_send(Ok(formatter.failed(format!("{error:#}"))));
+                    return;
+                }
+            }
+        }
+        for frame in formatter.completed(finish_reason, Usage::new(input_tokens, completion_tokens))
+        {
+            if tx.blocking_send(Ok(frame)).is_err() {
+                return;
+            }
+        }
+    });
+    match init_rx.await {
+        Ok(Ok(())) => stream_response(rx),
+        Ok(Err(error)) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "generation_initialization_error",
+            format!("{error:#}"),
+        ),
+        Err(error) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "generation_initialization_channel_closed",
+            format!("generation initialization channel closed: {error}"),
+        ),
+    }
+}
+
+pub async fn responses<M>(
+    State(state): State<AppState<M>>,
+    payload: std::result::Result<Json<ResponsesRequest>, JsonRejection>,
+) -> Response
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    let request = match payload {
+        Ok(Json(request)) => request,
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_json",
+                format!("invalid Responses request: {}", error.body_text()),
+            );
+        }
+    };
+    responses_with_state(state, request, false).await
+}
+
+pub(crate) async fn responses_with_state<M>(
+    state: AppState<M>,
+    request: ResponsesRequest,
+    force_scheduler: bool,
+) -> Response
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    let normalized = match request.normalize() {
+        Ok(normalized) => normalized,
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                format!("{error:#}"),
+            );
+        }
+    };
+    let prepared = match prepare_response(&state, normalized, force_scheduler).await {
+        Ok(prepared) => prepared,
+        Err(response) => return response,
+    };
+    match (prepared.stream, prepared.use_scheduler) {
+        (true, true) => serve_stream_scheduler(state, prepared).await,
+        (true, false) => serve_stream_gs(state, prepared).await,
+        (false, true) => serve_unary_scheduler(state, prepared).await,
+        (false, false) => serve_unary_gs(state, prepared).await,
+    }
+}
+
+pub(crate) async fn gemma4_drafter_responses(
+    State(state): State<Gemma4DrafterAppState>,
+    payload: std::result::Result<Json<ResponsesRequest>, JsonRejection>,
+) -> Response {
+    let request = match payload {
+        Ok(Json(request)) => request,
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_json",
+                format!("invalid Responses request: {}", error.body_text()),
+            );
+        }
+    };
+    responses_with_state(state.base, request, true).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(value: serde_json::Value) -> ResponsesRequest {
+        serde_json::from_value(value).expect("valid fixture")
+    }
+
+    #[test]
+    fn converts_codex_function_round_trip() {
+        let normalized = request(serde_json::json!({
+            "model": "local",
+            "instructions": "Be concise",
+            "input": [
+                {"type":"message","role":"user","content":[{"type":"input_text","text":"weather"}]},
+                {"type":"function_call","call_id":"call_1","name":"weather","arguments":"{\"city\":\"Tokyo\"}"},
+                {"type":"function_call_output","call_id":"call_1","output":"22 C"}
+            ],
+            "tools": [{
+                "type":"function",
+                "name":"weather",
+                "parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false},
+                "strict":true
+            }],
+            "tool_choice":"auto",
+            "parallel_tool_calls":false,
+            "store":false,
+            "stream":true,
+            "reasoning":{"effort":null,"summary":"auto"},
+            "include":["reasoning.encrypted_content"],
+            "prompt_cache_key":"session",
+            "client_metadata":{}
+        }))
+        .normalize()
+        .expect("Codex request normalizes");
+        assert_eq!(normalized.chat.messages.len(), 4);
+        assert_eq!(normalized.chat.messages[0].role, "system");
+        assert_eq!(normalized.chat.messages[2].tool_calls.len(), 1);
+        assert_eq!(
+            normalized.chat.messages[3].tool_call_id.as_deref(),
+            Some("call_1")
+        );
+    }
+
+    #[test]
+    fn coalesces_responses_instructions_and_developer_items() {
+        let normalized = request(serde_json::json!({
+            "model":"local",
+            "instructions":"Base instructions",
+            "input":[
+                {"type":"message","role":"developer","content":"Repository instructions"},
+                {"type":"message","role":"user","content":"First user message"},
+                {"type":"message","role":"system","content":"Later system policy"},
+                {"type":"message","role":"user","content":"Second user message"}
+            ]
+        }))
+        .normalize()
+        .expect("instructions normalize");
+        assert_eq!(normalized.chat.messages.len(), 3);
+        assert_eq!(normalized.chat.messages[0].role, "system");
+        assert!(matches!(
+            &normalized.chat.messages[0].content,
+            Content::Text(text)
+                if text == "Base instructions\n\nRepository instructions\n\nLater system policy"
+        ));
+        assert!(normalized.chat.messages[1..]
+            .iter()
+            .all(|message| message.role == "user"));
+    }
+
+    #[test]
+    fn converts_codex_namespace_tools_and_restores_wire_identity() {
+        let normalized = request(serde_json::json!({
+            "model":"local",
+            "input":[
+                {"type":"message","role":"user","content":"check time"},
+                {"type":"function_call","call_id":"call_1","namespace":"clock","name":"current_time","arguments":"{}"},
+                {"type":"function_call_output","call_id":"call_1","output":"12:00"}
+            ],
+            "tools":[{
+                "type":"namespace",
+                "name":"clock",
+                "description":"Local clock tools.",
+                "tools":[{
+                    "type":"function",
+                    "name":"current_time",
+                    "description":"Read local time.",
+                    "strict":false,
+                    "defer_loading":false,
+                    "parameters":{"type":"object","properties":{},"additionalProperties":false}
+                }]
+            }],
+            "tool_choice":"auto"
+        }))
+        .normalize()
+        .expect("namespace request normalizes");
+        let internal = normalized
+            .tool_aliases
+            .internal_by_namespace
+            .get("clock")
+            .expect("namespace alias")
+            .to_owned();
+        assert_eq!(
+            normalized.chat.messages[1].tool_calls[0].function.name,
+            internal
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(
+                &normalized.chat.messages[1].tool_calls[0].function.arguments
+            )
+            .expect("dispatcher arguments are JSON"),
+            serde_json::json!({"name":"current_time","arguments":{}})
+        );
+
+        let meta = ResponseMeta::from_normalized(&normalized, "local".into());
+        let response = function_item(
+            "fc_1".into(),
+            ToolCall {
+                id: "call_2".into(),
+                name: internal,
+                arguments: serde_json::json!({
+                    "name":"current_time",
+                    "arguments":{}
+                }),
+            },
+            &meta.tool_aliases,
+        )
+        .expect("namespace call resolves");
+        let value = serde_json::to_value(response).expect("response item serializes");
+        assert_eq!(value["namespace"], "clock");
+        assert_eq!(value["name"], "current_time");
+    }
+
+    #[test]
+    fn wraps_dynamic_non_strict_namespace_arguments_as_json() {
+        let normalized = request(serde_json::json!({
+            "model":"local",
+            "input":[
+                {"type":"message","role":"user","content":"update document"},
+                {
+                    "type":"function_call",
+                    "call_id":"call_1",
+                    "namespace":"documents",
+                    "name":"execute",
+                    "arguments":"{\"args\":{\"cell\":\"A1\",\"value\":7}}"
+                },
+                {"type":"function_call_output","call_id":"call_1","output":"ok"}
+            ],
+            "tools":[{
+                "type":"namespace",
+                "name":"documents",
+                "description":"Dynamic document tools.",
+                "tools":[{
+                    "type":"function",
+                    "name":"execute",
+                    "strict":false,
+                    "parameters":{
+                        "type":"object",
+                        "properties":{
+                            "args":{
+                                "type":"object",
+                                "properties":{},
+                                "additionalProperties":{}
+                            }
+                        },
+                        "required":["args"],
+                        "additionalProperties":false
+                    }
+                }]
+            }]
+        }))
+        .normalize()
+        .expect("dynamic namespace request normalizes");
+        let internal = normalized
+            .tool_aliases
+            .internal_by_namespace
+            .get("documents")
+            .expect("namespace alias")
+            .to_owned();
+        let envelope = serde_json::from_str::<serde_json::Value>(
+            &normalized.chat.messages[1].tool_calls[0].function.arguments,
+        )
+        .expect("dispatcher arguments are JSON");
+        assert_eq!(envelope["name"], "execute");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(
+                envelope["arguments_json"].as_str().expect("JSON envelope")
+            )
+            .expect("child arguments decode"),
+            serde_json::json!({"args":{"cell":"A1","value":7}})
+        );
+
+        let item = function_item(
+            "fc_1".into(),
+            ToolCall {
+                id: "call_2".into(),
+                name: internal,
+                arguments: serde_json::json!({
+                    "name":"execute",
+                    "arguments_json":"{\"args\":{\"cell\":\"B2\"}}"
+                }),
+            },
+            &normalized.tool_aliases,
+        )
+        .expect("dynamic namespace call resolves");
+        let value = serde_json::to_value(item).expect("response item serializes");
+        assert_eq!(value["namespace"], "documents");
+        assert_eq!(value["name"], "execute");
+        assert_eq!(value["arguments"], "{\"args\":{\"cell\":\"B2\"}}");
+    }
+
+    #[test]
+    fn collapses_large_non_strict_namespace_to_one_bounded_dispatcher() {
+        let children = (0..100)
+            .map(|index| ResponseNamespaceTool::Function {
+                name: format!("tool_{index}"),
+                description: Some(format!("Tool {index}")),
+                parameters: serde_json::json!({
+                    "type":"object",
+                    "properties":{"value":{"type":"string"}},
+                    "required":["value"],
+                    "additionalProperties":false
+                }),
+                strict: Some(false),
+                defer_loading: None,
+            })
+            .collect();
+        let (flattened, aliases) = flatten_response_tools(&[ResponseTool::Namespace {
+            name: "large".into(),
+            description: "Large tool catalog.".into(),
+            tools: children,
+        }])
+        .expect("large namespace collapses");
+        assert_eq!(flattened.len(), 1);
+        assert!(flattened[0].function.parameters.get("anyOf").is_none());
+        assert_eq!(
+            flattened[0].function.parameters["properties"]["name"]["enum"]
+                .as_array()
+                .expect("name enum")
+                .len(),
+            100
+        );
+        let dispatcher = aliases
+            .namespace_by_internal
+            .values()
+            .next()
+            .expect("namespace dispatcher");
+        assert!(dispatcher
+            .children
+            .values()
+            .all(|encoding| matches!(encoding, NamespaceArgumentEncoding::JsonString)));
+    }
+
+    #[test]
+    fn rejects_stateful_and_hosted_semantics() {
+        let error = request(serde_json::json!({
+            "model":"local",
+            "input":"hello",
+            "store":true
+        }))
+        .normalize()
+        .unwrap_err();
+        assert!(error.to_string().contains("store=true"));
+    }
+
+    #[test]
+    fn responses_stream_has_no_chat_done_sentinel() {
+        let meta = ResponseMeta {
+            id: "resp_test".into(),
+            created_at: 1,
+            instructions: None,
+            text_format: ResponseTextFormat::Text,
+            max_output_tokens: 10,
+            model: "local".into(),
+            parallel_tool_calls: true,
+            temperature: None,
+            tool_choice: serde_json::json!("auto"),
+            tools: Vec::new(),
+            top_p: None,
+            tool_aliases: ToolAliases::default(),
+        };
+        let mut stream = ResponsesStream::new(meta);
+        let mut frames = vec![stream.created()];
+        frames.extend(stream.text_delta("hello".into()));
+        frames.extend(stream.completed("stop", Usage::new(2, 1)));
+        let wire = frames
+            .into_iter()
+            .map(|frame| String::from_utf8(frame.to_vec()).unwrap())
+            .collect::<String>();
+        assert!(wire.contains("response.completed"));
+        assert!(!wire.contains("[DONE]"));
+    }
+
+    #[test]
+    fn function_stream_uses_native_responses_lifecycle() {
+        let meta = ResponseMeta {
+            id: "resp_test".into(),
+            created_at: 1,
+            instructions: None,
+            text_format: ResponseTextFormat::Text,
+            max_output_tokens: 32,
+            model: "local".into(),
+            parallel_tool_calls: false,
+            temperature: None,
+            tool_choice: serde_json::json!({"type":"function","name":"weather"}),
+            tools: Vec::new(),
+            top_p: None,
+            tool_aliases: ToolAliases::default(),
+        };
+        let mut stream = ResponsesStream::new(meta);
+        let mut frames = vec![stream.created()];
+        frames.extend(
+            stream
+                .tool_call(ToolCall {
+                    id: "call_1".into(),
+                    name: "weather".into(),
+                    arguments: serde_json::json!({"city":"東京"}),
+                })
+                .expect("function call formats"),
+        );
+        frames.extend(stream.completed("tool_calls", Usage::new(10, 5)));
+        let events = frames
+            .into_iter()
+            .map(|frame| {
+                let wire = String::from_utf8(frame.to_vec()).unwrap();
+                let data = wire
+                    .lines()
+                    .find_map(|line| line.strip_prefix("data: "))
+                    .unwrap();
+                serde_json::from_str::<serde_json::Value>(data).unwrap()
+            })
+            .collect::<Vec<_>>();
+        let kinds = events
+            .iter()
+            .map(|event| event["type"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            vec![
+                "response.created",
+                "response.output_item.added",
+                "response.function_call_arguments.delta",
+                "response.function_call_arguments.done",
+                "response.output_item.done",
+                "response.completed",
+            ]
+        );
+        for (sequence, event) in events.iter().enumerate() {
+            assert_eq!(event["sequence_number"], sequence as u64);
+        }
+        assert_eq!(events[4]["item"]["call_id"], "call_1");
+        assert_eq!(events[4]["item"]["arguments"], "{\"city\":\"東京\"}");
+    }
+
+    #[test]
+    fn normalizes_native_named_tool_choice() {
+        let normalized = request(serde_json::json!({
+            "model":"local",
+            "input":"weather",
+            "tools":[{
+                "type":"function",
+                "name":"weather",
+                "parameters":{"type":"object","properties":{},"additionalProperties":false}
+            }],
+            "tool_choice":{"type":"function","name":"weather"},
+            "store":false
+        }))
+        .normalize()
+        .unwrap();
+        assert_eq!(
+            normalized.chat.tool_choice,
+            Some(serde_json::json!({
+                "type":"function",
+                "function":{"name":"weather"}
+            }))
+        );
+    }
+
+    #[test]
+    fn rejects_file_ids_and_invalid_structured_text_format() {
+        let image_error = request(serde_json::json!({
+            "model":"local",
+            "input":[{"type":"message","role":"user","content":[{
+                "type":"input_image","file_id":"file_1"
+            }]}],
+            "store":false
+        }))
+        .normalize()
+        .unwrap_err();
+        assert!(image_error.to_string().contains("file_id"));
+
+        let format_error = request(serde_json::json!({
+            "model":"local",
+            "input":"hello",
+            "text":{"format":{"type":"json_schema","name":"answer","schema":{}}},
+            "store":false
+        }))
+        .normalize()
+        .unwrap_err();
+        assert!(format!("{format_error:#}").contains("root type must be `object`"));
+    }
+
+    #[test]
+    fn normalizes_json_object_and_strict_json_schema_formats() {
+        let json_object = request(serde_json::json!({
+            "model":"local",
+            "input":"Return an object",
+            "text":{"format":{"type":"json_object"}},
+            "store":false
+        }))
+        .normalize()
+        .unwrap();
+        assert!(matches!(
+            json_object.text_format,
+            ResponseTextFormat::JsonObject
+        ));
+        assert!(matches!(
+            &json_object.chat.messages[0].content,
+            Content::Text(text) if text.contains("return only one valid JSON object")
+        ));
+
+        let json_schema = request(serde_json::json!({
+            "model":"local",
+            "input":"Return weather",
+            "text":{"format":{
+                "type":"json_schema",
+                "name":"weather_answer",
+                "description":"A compact forecast.",
+                "schema":{
+                    "type":"object",
+                    "properties":{
+                        "city":{"type":"string"},
+                        "days":{"type":"integer"}
+                    },
+                    "required":["city","days"],
+                    "additionalProperties":false
+                },
+                "strict":true
+            }},
+            "store":false
+        }))
+        .normalize()
+        .unwrap();
+        assert!(matches!(
+            &json_schema.text_format,
+            ResponseTextFormat::JsonSchema { name, strict, .. }
+                if name == "weather_answer" && *strict == Some(true)
+        ));
+        assert!(matches!(
+            &json_schema.chat.messages[0].content,
+            Content::Text(text)
+                if text.contains("weather_answer")
+                    && text.contains("A compact forecast.")
+                    && text.find("\"city\"") < text.find("\"days\"")
+        ));
+    }
+
+    #[test]
+    fn strict_structured_format_rejects_non_strict_or_unsupported_schemas() {
+        let missing_required = request(serde_json::json!({
+            "model":"local",
+            "input":"hello",
+            "text":{"format":{
+                "type":"json_schema",
+                "name":"answer",
+                "schema":{
+                    "type":"object",
+                    "properties":{"answer":{"type":"string"}},
+                    "required":[],
+                    "additionalProperties":false
+                },
+                "strict":true
+            }},
+            "store":false
+        }))
+        .normalize()
+        .unwrap_err();
+        assert!(missing_required
+            .to_string()
+            .contains("must be listed in required"));
+
+        let unsupported = request(serde_json::json!({
+            "model":"local",
+            "input":"hello",
+            "text":{"format":{
+                "type":"json_schema",
+                "name":"answer",
+                "schema":{
+                    "type":"object",
+                    "properties":{"answer":{"type":"string","pattern":"x"}},
+                    "required":["answer"],
+                    "additionalProperties":false
+                }
+            }},
+            "store":false
+        }))
+        .normalize()
+        .unwrap_err();
+        assert!(format!("{unsupported:#}").contains("unsupported JSON Schema keyword `pattern`"));
+    }
+
+    #[test]
+    fn required_tools_do_not_inject_structured_final_answer_instructions() {
+        let normalized = request(serde_json::json!({
+            "model":"local",
+            "input":"Use the tool",
+            "tools":[{
+                "type":"function",
+                "name":"weather",
+                "parameters":{
+                    "type":"object",
+                    "properties":{},
+                    "required":[],
+                    "additionalProperties":false
+                }
+            }],
+            "tool_choice":"required",
+            "text":{"format":{"type":"json_object"}},
+            "store":false
+        }))
+        .normalize()
+        .unwrap();
+        assert!(normalized.chat.messages.iter().all(|message| !matches!(
+            &message.content,
+            Content::Text(text) if text.contains("return only one valid JSON object")
+        )));
+    }
+
+    #[test]
+    fn structured_stream_fails_without_emitting_completed_for_invalid_json() {
+        let meta = ResponseMeta {
+            id: "resp_structured".into(),
+            created_at: 1,
+            instructions: None,
+            text_format: ResponseTextFormat::JsonObject,
+            max_output_tokens: 32,
+            model: "local".into(),
+            parallel_tool_calls: true,
+            temperature: None,
+            tool_choice: serde_json::json!("none"),
+            tools: Vec::new(),
+            top_p: None,
+            tool_aliases: ToolAliases::default(),
+        };
+        let mut stream = ResponsesStream::new(meta);
+        stream.text_delta("not json".into());
+        let frames = stream.completed("stop", Usage::new(2, 2));
+        let wire = frames
+            .iter()
+            .map(|frame| String::from_utf8(frame.to_vec()).unwrap())
+            .collect::<String>();
+        assert!(wire.contains("response.failed"));
+        assert!(!wire.contains("response.completed"));
+    }
+}

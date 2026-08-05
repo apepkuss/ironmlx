@@ -19,6 +19,126 @@ curl http://127.0.0.1:9068/v1/models
 状态由 `process_governor.pressure_level` 决定，而不是固定的 raw-free 阈值。
 `degraded_reasons` 会列出队列、KV 缓存、内存压力、遥测或后端背压等具体原因。
 
+## OpenAI Responses API
+
+`POST /v1/responses` 是推荐给本地 Agent 客户端的新接口。IronMLX 实现无状态
+Responses 工作流：客户端发送完整 typed item 历史，服务执行本地模型推理，但不
+持久化 response、conversation，也不执行任何工具。
+
+```bash
+curl http://127.0.0.1:9068/v1/responses \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "your-model-id",
+    "instructions": "回答要简洁。",
+    "input": "用一句话介绍 Metal。",
+    "store": false,
+    "max_output_tokens": 128,
+    "stream": false
+  }'
+```
+
+流式响应使用原生 Responses SSE 生命周期，包括 `response.created`、typed output
+item、文本或函数参数 delta，以及终止事件 `response.completed`、
+`response.incomplete` 或 `response.failed`；不会发送 Chat Completions 的
+`[DONE]` 标记。
+
+### Responses function tools
+
+Responses 使用顶层 function tool 形状：
+
+```json
+{
+  "model": "your-model-id",
+  "input": "东京天气如何？",
+  "tools": [{
+    "type": "function",
+    "name": "get_weather",
+    "description": "查询城市天气",
+    "parameters": {
+      "type": "object",
+      "properties": {"city": {"type": "string"}},
+      "required": ["city"],
+      "additionalProperties": false
+    },
+    "strict": true
+  }],
+  "tool_choice": "auto",
+  "parallel_tool_calls": true,
+  "store": false
+}
+```
+
+模型产生 `function_call` item 后，客户端负责执行函数，并在下一次请求的完整
+`input` 历史中追加原调用和同一 `call_id` 的 `function_call_output`。支持文本、
+严格图片 `data:` URL message item、function call/output、同步和 SSE，以及现有全部
+模型工具 dialect 和约束选项。
+
+### Responses structured outputs
+
+`text.format` 支持 JSON mode 和受 Schema 约束的 Structured Outputs。JSON mode 使用：
+
+```json
+{"text":{"format":{"type":"json_object"}}}
+```
+
+Schema 模式使用：
+
+```json
+{
+  "text": {
+    "format": {
+      "type": "json_schema",
+      "name": "weather_answer",
+      "description": "结构化天气回答",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "city": {"type": "string"},
+          "days": {"type": "integer"}
+        },
+        "required": ["city", "days"],
+        "additionalProperties": false
+      },
+      "strict": true
+    }
+  }
+}
+```
+
+输出仍是 Responses 的 `message` / `output_text` item；客户端将其中的文本解析为
+JSON。IronMLX 在 token 采样前应用 grammar mask，并在生成结束后再次验证完整 JSON。
+支持的 Schema 子集为 `object`、`array`、`string`、`number`、`integer`、`boolean`、
+`null`、nullable type 数组、`properties`、`required`、
+`additionalProperties:false`、`items`、`enum`、`const` 和 `anyOf`。不支持的关键字
+会在生成前返回 400，不会静默弱化。`strict:true` 要求每层 object 都设置
+`additionalProperties:false`，并把所有 properties 列入 `required`。
+
+当请求同时包含 function tools 和 `text.format` 时：
+
+- `tool_choice:"none"`：只允许结构化 JSON 最终回答。
+- `tool_choice:"required"` 或指定函数：只允许工具调用。
+- `tool_choice:"auto"`：允许原生工具调用，或符合 Schema 的 JSON 最终回答。
+
+该联合约束适用于当前全部工具 dialect、普通生成、Scheduler、推测解码和
+DiffusionGemma canvas 解码路径。
+
+本地无状态边界：
+
+- `store` 只能省略或设为 `false`；不支持 `store:true`。
+- 不支持 `previous_response_id`、conversation、background response 或 response
+  retrieve/delete/cancel API。
+- 工具支持客户端执行的顶层 `type:"function"`，以及 Codex 使用的客户端
+  `type:"namespace"` 函数组。namespace 会编译为有界 dispatcher，并在
+  `function_call`/历史回灌时恢复公开的 `namespace`、函数名和参数；IronMLX
+  仍不执行工具。
+- 不支持托管 Web/File Search、托管 MCP、Code Interpreter 或 custom/freeform
+  工具。namespace 子函数的指定 `tool_choice` 暂不支持；应使用 `auto` 或
+  `required`。超出约束 Schema 子集的动态参数只允许用于 `strict:false` 的
+  namespace 子函数，并使用 JSON 参数信封；`strict:true` 不会降级。
+- 不支持持久 reasoning/refusal typed item、OpenAI file ID、音频输入/输出、图片输出
+  或图片形式的 function output；这些能力不会以普通 `output_text` 伪装。
+
 ## OpenAI Chat Completions
 
 ```bash
@@ -78,7 +198,8 @@ Chat tools 当前边界：
 - 只支持 `type: "function"`。`strict: true` 支持约束解码所覆盖的 JSON Schema
   子集；对象 schema 必须递归设置 `additionalProperties: false`，且所有属性都
   必须列入 `required`。不支持的 schema 关键字会在生成前返回 400。
-- 不支持旧 `functions` / `function_call` 字段，也不实现 `/v1/responses`。
+- 不支持旧 `functions` / `function_call` 字段；Responses 客户端应使用上文独立的
+  `/v1/responses` typed-item 协议。
 - 当前支持经过精确模板契约检测的 Qwen 3.5/3.6、Gemma 4/Gemma 4 Unified、
   DiffusionGemma、GLM-4 MoE Lite、Llama 3.1/3.2、MiniCPM-V 4.6 和 MiniCPM5
   原生工具 dialect；其他模板收到 `tools` 时会在生成前返回 400。

@@ -262,12 +262,25 @@ impl ToolCallParser {
         response_id: impl Into<String>,
         tools: &[ToolDefinition],
     ) -> anyhow::Result<Self> {
+        Self::new_with_output_schema(dialect, response_id, tools, None)
+    }
+
+    pub fn new_with_output_schema(
+        dialect: ToolDialect,
+        response_id: impl Into<String>,
+        tools: &[ToolDefinition],
+        output_schema: Option<Value>,
+    ) -> anyhow::Result<Self> {
         let response_id = response_id.into();
         match dialect {
             ToolDialect::Qwen35 => Ok(Self::Qwen(QwenToolCallParser::new(response_id, tools)?)),
             ToolDialect::Gemma => Ok(Self::Gemma(GemmaToolCallParser::new(response_id, tools)?)),
             ToolDialect::Glm => Ok(Self::Glm(GlmToolCallParser::new(response_id, tools)?)),
-            ToolDialect::Llama => Ok(Self::Llama(LlamaToolCallParser::new(response_id, tools)?)),
+            ToolDialect::Llama => Ok(Self::Llama(LlamaToolCallParser::new_with_output_schema(
+                response_id,
+                tools,
+                output_schema,
+            )?)),
             ToolDialect::MiniCpmV46 => Ok(Self::MiniCpmV46(QwenToolCallParser::new(
                 response_id,
                 tools,
@@ -934,6 +947,7 @@ struct LlamaNativeToolCall {
 pub struct LlamaToolCallParser {
     definitions: HashMap<String, ToolDefinition>,
     response_id: String,
+    output_schema: Option<Value>,
     pending: String,
     text_mode: bool,
     saw_tool_call: bool,
@@ -941,6 +955,14 @@ pub struct LlamaToolCallParser {
 
 impl LlamaToolCallParser {
     pub fn new(response_id: impl Into<String>, tools: &[ToolDefinition]) -> anyhow::Result<Self> {
+        Self::new_with_output_schema(response_id, tools, None)
+    }
+
+    pub fn new_with_output_schema(
+        response_id: impl Into<String>,
+        tools: &[ToolDefinition],
+        output_schema: Option<Value>,
+    ) -> anyhow::Result<Self> {
         validate_tool_definitions(tools)?;
         let definitions = tools
             .iter()
@@ -950,6 +972,7 @@ impl LlamaToolCallParser {
         Ok(Self {
             definitions,
             response_id: response_id.into(),
+            output_schema,
             pending: String::new(),
             text_mode: false,
             saw_tool_call: false,
@@ -1003,11 +1026,34 @@ impl LlamaToolCallParser {
             ))]);
         }
 
-        let native: LlamaNativeToolCall = match serde_json::from_str(&self.pending) {
-            Ok(native) => native,
+        if let Ok(native) = serde_json::from_str::<LlamaNativeToolCall>(&self.pending) {
+            if let Some(definition) = self.definitions.get(&native.name) {
+                if validate_schema_value(&definition.parameters, &native.parameters).is_ok() {
+                    self.pending.clear();
+                    self.saw_tool_call = true;
+                    return Ok(vec![AssistantOutputEvent::ToolCall(ToolCall {
+                        id: format!("call_{}_0", self.response_id),
+                        name: native.name,
+                        arguments: native.parameters,
+                    })]);
+                }
+            }
+        }
+        let value: Value = match serde_json::from_str(&self.pending) {
+            Ok(value) => value,
             Err(error) if !eof && error.is_eof() => return Ok(Vec::new()),
             Err(error) => bail!("invalid native Llama tool-call JSON: {error}"),
         };
+        if let Some(schema) = &self.output_schema {
+            validate_schema_value(schema, &value)
+                .context("structured Llama output does not match its response schema")?;
+            self.text_mode = true;
+            return Ok(vec![AssistantOutputEvent::TextDelta(std::mem::take(
+                &mut self.pending,
+            ))]);
+        }
+        let native: LlamaNativeToolCall = serde_json::from_str(&self.pending)
+            .context("native Llama JSON is not a function-call envelope")?;
         validate_function_name(&native.name)?;
         let definition = self
             .definitions
@@ -2077,6 +2123,57 @@ mod tests {
             .push(r#"{"name":"get_weather","parameters":{"city":"Tokyo"}"#)
             .unwrap();
         assert!(parser.finish().is_err());
+    }
+
+    #[test]
+    fn llama_parser_distinguishes_structured_json_and_prioritizes_tool_envelopes() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"answer": {"type": "string"}},
+            "required": ["answer"],
+            "additionalProperties": false
+        });
+        let mut structured = LlamaToolCallParser::new_with_output_schema(
+            "structured",
+            &[weather_tool()],
+            Some(schema.clone()),
+        )
+        .unwrap();
+        let json = r#"{"answer":"sunny"}"#;
+        assert_eq!(
+            structured.push(json).unwrap(),
+            vec![AssistantOutputEvent::TextDelta(json.into())]
+        );
+        assert!(!structured.finish().unwrap().1);
+
+        let overlap_schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                    "additionalProperties": false
+                }
+            },
+            "required": ["name", "parameters"],
+            "additionalProperties": false
+        });
+        let mut tool = LlamaToolCallParser::new_with_output_schema(
+            "precedence",
+            &[weather_tool()],
+            Some(overlap_schema),
+        )
+        .unwrap();
+        let events = tool
+            .push(r#"{"name":"get_weather","parameters":{"city":"Tokyo"}}"#)
+            .unwrap();
+        assert!(matches!(
+            events.as_slice(),
+            [AssistantOutputEvent::ToolCall(_)]
+        ));
+        assert!(tool.finish().unwrap().1);
     }
 
     #[test]

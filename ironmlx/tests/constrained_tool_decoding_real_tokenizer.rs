@@ -28,6 +28,141 @@ fn weather_tool() -> ToolDefinition {
     .expect("tool definition")
 }
 
+fn structured_output_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "answer": {"type": "string"},
+            "count": {"type": "integer", "enum": [1, 2, 3]}
+        },
+        "required": ["answer", "count"],
+        "additionalProperties": false
+    })
+}
+
+fn native_weather_call(dialect: ToolDialect) -> &'static str {
+    match dialect {
+        ToolDialect::Qwen35 => concat!(
+            "<tool_call>\n<function=get_weather>\n",
+            "<parameter=days>2</parameter>\n",
+            "<parameter=city>Tokyo</parameter>\n",
+            "</function>\n</tool_call>"
+        ),
+        ToolDialect::Gemma => concat!(
+            "<|tool_call>call:get_weather{days:2,",
+            "city:<|\"|>Tokyo<|\"|>}<tool_call|>"
+        ),
+        ToolDialect::Glm => concat!(
+            "<tool_call>get_weather",
+            "<arg_key>days</arg_key><arg_value>2</arg_value>",
+            "<arg_key>city</arg_key><arg_value>Tokyo</arg_value>",
+            "</tool_call>"
+        ),
+        ToolDialect::Llama => r#"{"name":"get_weather","parameters":{"city":"Tokyo","days":2}}"#,
+        ToolDialect::MiniCpmV46 => concat!(
+            "<tool_call>\n<function=get_weather>\n",
+            "<parameter=days>\n2\n</parameter>\n",
+            "<parameter=city>\nTokyo\n</parameter>\n",
+            "</function>\n</tool_call>"
+        ),
+        ToolDialect::MiniCpm5 => concat!(
+            "<function name=\"get_weather\">",
+            "<param name=\"city\"><![CDATA[Tokyo]]></param>",
+            "<param name=\"days\">2</param>",
+            "</function>"
+        ),
+    }
+}
+
+#[test]
+#[ignore = "requires IRONMLX_STRUCTURED_MODEL_DIR pointing to a supported tool model"]
+fn real_tokenizer_enforces_structured_output_and_auto_tool_union() {
+    let model_dir = PathBuf::from(
+        std::env::var("IRONMLX_STRUCTURED_MODEL_DIR")
+            .expect("IRONMLX_STRUCTURED_MODEL_DIR must be set"),
+    );
+    let tokenizer = Tokenizer::from_model_dir(&model_dir).expect("load tokenizer");
+    let dialect = tokenizer
+        .tool_dialect()
+        .expect("model must expose one supported tool dialect");
+    let schema = structured_output_schema();
+    let structured = r#"{"answer":"Tokyo","count":2}"#;
+    let structured_tokens = tokenizer
+        .encode(structured, false)
+        .expect("encode structured JSON");
+
+    let standalone = tokenizer
+        .compile_json_output_constraint(&schema)
+        .expect("compile standalone structured output");
+    let mut standalone_session = standalone
+        .start_session()
+        .expect("start standalone matcher");
+    standalone_session
+        .commit_tokens(&structured_tokens)
+        .expect("consume structured JSON");
+    assert!(standalone_session
+        .is_accepting()
+        .expect("standalone accepting state"));
+
+    let invalid = tokenizer
+        .encode(r#"{"answer":"Tokyo","count":4}"#, false)
+        .expect("encode invalid structured JSON");
+    assert!(
+        standalone
+            .start_session()
+            .expect("start invalid matcher")
+            .validate_tokens(&invalid)
+            .expect("validate invalid enum")
+            < invalid.len()
+    );
+
+    let tools = [weather_tool()];
+    let combined = tokenizer
+        .compile_tool_or_json_constraint(&tools, &ToolConstraintOptions::default(), &schema)
+        .expect("compile auto tool-or-JSON constraint");
+    let mut structured_session = combined.start_session().expect("start JSON union branch");
+    structured_session
+        .commit_tokens(&structured_tokens)
+        .expect("consume JSON union branch");
+    assert!(structured_session
+        .is_accepting()
+        .expect("JSON union accepting state"));
+
+    let native = native_weather_call(dialect);
+    let native_tokens = tokenizer
+        .encode(native, false)
+        .expect("encode native tool call");
+    let mut tool_session = combined.start_session().expect("start tool union branch");
+    tool_session
+        .commit_tokens(&native_tokens)
+        .expect("consume native tool branch");
+    assert!(tool_session
+        .is_accepting()
+        .expect("tool union accepting state"));
+
+    let mut detok = tokenizer.decode_stream(dialect.skip_special_tokens());
+    let mut parser =
+        ToolCallParser::new_with_output_schema(dialect, "structured-real", &tools, Some(schema))
+            .expect("create structured-output parser");
+    let mut events = Vec::new();
+    for token in structured_tokens {
+        if let Some(text) = detok.step(token).expect("decode structured token") {
+            events.extend(parser.push(&text).expect("parse structured token"));
+        }
+    }
+    let (tail, saw_tool_call) = parser.finish().expect("finish structured parser");
+    events.extend(tail);
+    assert!(!saw_tool_call);
+    let rendered = events
+        .into_iter()
+        .map(|event| match event {
+            AssistantOutputEvent::TextDelta(text) => text,
+            AssistantOutputEvent::ToolCall(_) => panic!("structured JSON classified as a tool"),
+        })
+        .collect::<String>();
+    assert_eq!(rendered, structured);
+}
+
 #[test]
 #[ignore = "requires IRONMLX_CONSTRAINT_MODEL_DIR pointing to a real Qwen3.5/3.6 model"]
 fn real_qwen_tokenizer_compiles_and_enforces_tool_grammar() {

@@ -374,6 +374,50 @@ impl Tokenizer {
             )),
         }
     }
+
+    /// Compile a native tool grammar whose `auto` branch may alternatively
+    /// produce one structured JSON final answer.
+    pub fn compile_tool_or_json_constraint(
+        &self,
+        tools: &[ToolDefinition],
+        options: &ToolConstraintOptions,
+        output_schema: &serde_json::Value,
+    ) -> Result<ConstraintPlan> {
+        match (self.tool_dialect, self.constraint.as_ref()) {
+            (Some(ToolDialect::Qwen35), Some(constraint)) => {
+                constraint.compile_qwen_tools_with_output(tools, options, Some(output_schema))
+            }
+            (Some(ToolDialect::Gemma), Some(constraint)) => {
+                constraint.compile_gemma_tools_with_output(tools, options, Some(output_schema))
+            }
+            (Some(ToolDialect::Glm), Some(constraint)) => {
+                constraint.compile_glm_tools_with_output(tools, options, Some(output_schema))
+            }
+            (Some(ToolDialect::Llama), Some(constraint)) => {
+                constraint.compile_llama_tools_with_output(tools, options, Some(output_schema))
+            }
+            (Some(ToolDialect::MiniCpmV46), Some(constraint)) => {
+                constraint.compile_qwen_tools_with_output(tools, options, Some(output_schema))
+            }
+            (Some(ToolDialect::MiniCpm5), Some(constraint)) => {
+                constraint.compile_minicpm5_tools_with_output(tools, options, Some(output_schema))
+            }
+            _ => Err(anyhow!(
+                "tokenizer does not provide a supported constrained tool dialect"
+            )),
+        }
+    }
+
+    /// Compile a standalone structured JSON output grammar.
+    pub fn compile_json_output_constraint(
+        &self,
+        schema: &serde_json::Value,
+    ) -> Result<ConstraintPlan> {
+        self.constraint
+            .as_ref()
+            .ok_or_else(|| anyhow!("tokenizer does not support constrained decoding"))?
+            .compile_json_output(schema)
+    }
 }
 
 fn tool_prompt_cache_identity(

@@ -177,10 +177,20 @@ struct OpenAiStreamRequest {
     tool_context: Option<ToolResponseContext>,
 }
 
+struct ResponsesStreamRequest {
+    max_tokens: usize,
+    temperature: f32,
+    seed: Option<u64>,
+    prompt_tokens: u32,
+    tool_context: Option<ToolResponseContext>,
+    meta: super::responses::ResponseMeta,
+}
+
 struct ToolResponseContext {
     dialect: ToolDialect,
     definitions: Vec<ToolDefinition>,
     constraint_options: ToolConstraintOptions,
+    output_schema: Option<serde_json::Value>,
 }
 
 struct CompletionParts {
@@ -434,10 +444,11 @@ fn collect_tool_events(
     context: ToolResponseContext,
     default_finish: &'static str,
 ) -> Result<CompletionParts> {
-    let mut parser = ToolCallParser::new(
+    let mut parser = ToolCallParser::new_with_output_schema(
         context.dialect,
         uuid::Uuid::new_v4().simple().to_string(),
         &context.definitions,
+        context.output_schema,
     )?;
     let mut content = String::new();
     let mut tool_calls = Vec::new();
@@ -756,6 +767,7 @@ fn anthropic_stream_frames(
 async fn prepare_openai_request(
     state: &DiffusionGemmaAppState,
     req: super::openai::ChatRequest,
+    output_schema: Option<serde_json::Value>,
 ) -> std::result::Result<(PreparedOpenAiRequest, u32), Response> {
     let prepared_tools =
         match super::openai::prepare_tool_request(&req, state.tokenizer.tool_dialect()) {
@@ -809,23 +821,45 @@ async fn prepare_openai_request(
     );
     let constraint = match prepared_tools
         .as_ref()
-        .filter(|prepared| prepared.constraint_options.is_some())
-        .map(|prepared| {
-            state.tokenizer.compile_tool_constraint(
-                &prepared.definitions,
-                prepared
-                    .constraint_options
-                    .as_ref()
-                    .expect("filtered DiffusionGemma tool constraint"),
-            )
+        .and_then(|prepared| {
+            prepared
+                .constraint_options
+                .as_ref()
+                .map(|options| (prepared, options))
+        })
+        .map(|(prepared, options)| {
+            if matches!(
+                &options.choice,
+                crate::core::constrained::ToolChoiceConstraint::Auto
+            ) {
+                if let Some(schema) = output_schema.as_ref() {
+                    return state.tokenizer.compile_tool_or_json_constraint(
+                        &prepared.definitions,
+                        options,
+                        schema,
+                    );
+                }
+            }
+            state
+                .tokenizer
+                .compile_tool_constraint(&prepared.definitions, options)
         })
         .transpose()
-    {
+        .and_then(
+            |tool_constraint| match (tool_constraint, output_schema.as_ref()) {
+                (Some(constraint), _) => Ok(Some(constraint)),
+                (None, Some(schema)) => state
+                    .tokenizer
+                    .compile_json_output_constraint(schema)
+                    .map(Some),
+                (None, None) => Ok(None),
+            },
+        ) {
         Ok(constraint) => constraint,
         Err(error) => {
             return Err((
                 StatusCode::BAD_REQUEST,
-                format!("compile DiffusionGemma tool constraint: {error:#}"),
+                format!("compile DiffusionGemma output constraint: {error:#}"),
             )
                 .into_response());
         }
@@ -836,6 +870,12 @@ async fn prepare_openai_request(
             .map(|constraint_options| ToolResponseContext {
                 dialect: prepared.dialect,
                 definitions: prepared.definitions,
+                output_schema: matches!(
+                    &constraint_options.choice,
+                    crate::core::constrained::ToolChoiceConstraint::Auto
+                )
+                .then(|| output_schema.clone())
+                .flatten(),
                 constraint_options,
             })
     });
@@ -1088,10 +1128,11 @@ async fn openai_stream_completion(
         let model_guard = state.model.blocking_lock();
         let tokenizer = &*state.tokenizer;
         if let Some(context) = tool_context {
-            let mut parser = match ToolCallParser::new(
+            let mut parser = match ToolCallParser::new_with_output_schema(
                 context.dialect,
                 uuid::Uuid::new_v4().simple().to_string(),
                 &context.definitions,
+                context.output_schema,
             ) {
                 Ok(parser) => parser,
                 Err(error) => {
@@ -1274,6 +1315,185 @@ async fn openai_stream_completion(
         .unwrap()
 }
 
+async fn responses_stream_completion(
+    state: DiffusionGemmaAppState,
+    request: PreparedRequest,
+    stream_request: ResponsesStreamRequest,
+) -> Response {
+    let ResponsesStreamRequest {
+        max_tokens,
+        temperature,
+        seed,
+        prompt_tokens,
+        tool_context,
+        meta,
+    } = stream_request;
+    let lane_guard = match state.lane.clone().enter().await {
+        Ok(guard) => guard,
+        Err(error) => {
+            return super::responses::error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "diffusion_lane_unavailable",
+                match error {
+                    DiffusionGemmaLaneError::Overloaded => {
+                        "DiffusionGemma serial lane is overloaded".to_owned()
+                    }
+                    DiffusionGemmaLaneError::Closed => {
+                        "DiffusionGemma serial lane is closed".to_owned()
+                    }
+                },
+            );
+        }
+    };
+    state
+        .runtime_usage
+        .record_input_tokens(request.prompt_ids.len() as u64);
+    let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+
+    tokio::task::spawn_blocking(move || {
+        let _lane_guard = lane_guard;
+        let mut formatter = super::responses::ResponsesStream::new(meta);
+        if tx.blocking_send(Ok(formatter.created())).is_err() {
+            return;
+        }
+        let model_guard = state.model.blocking_lock();
+        let tokenizer = &*state.tokenizer;
+        let mut parser = match tool_context
+            .as_ref()
+            .map(|context| {
+                ToolCallParser::new_with_output_schema(
+                    context.dialect,
+                    uuid::Uuid::new_v4().simple().to_string(),
+                    &context.definitions,
+                    context.output_schema.clone(),
+                )
+            })
+            .transpose()
+        {
+            Ok(parser) => parser,
+            Err(error) => {
+                let _ = tx.blocking_send(Ok(formatter.failed(format!("{error:#}"))));
+                return;
+            }
+        };
+        let mut call_names = Vec::new();
+        let mut completion_tokens = 0_u32;
+        let mut finish_reason = "stop";
+        let mut connected = true;
+        let generation_result = {
+            let mut emit = |event: DiffusionGemmaGenerateEvent| -> Result<bool> {
+                if !diffusion_event_is_length_sentinel(&event) {
+                    completion_tokens = completion_tokens.saturating_add(1);
+                    state.runtime_usage.record_output_tokens(1);
+                    let frames = if let Some(parser) = parser.as_mut() {
+                        let events = parser.push(&event.text)?;
+                        call_names.extend(events.iter().filter_map(|event| match event {
+                            AssistantOutputEvent::ToolCall(call) => Some(call.name.clone()),
+                            AssistantOutputEvent::TextDelta(_) => None,
+                        }));
+                        let mut frames = Vec::new();
+                        for event in events {
+                            match event {
+                                AssistantOutputEvent::TextDelta(text) => {
+                                    frames.extend(formatter.text_delta(text));
+                                }
+                                AssistantOutputEvent::ToolCall(call) => {
+                                    frames.extend(formatter.tool_call(call)?);
+                                }
+                            }
+                        }
+                        frames
+                    } else {
+                        formatter.text_delta(event.text.clone())
+                    };
+                    for frame in frames {
+                        if tx.blocking_send(Ok(frame)).is_err() {
+                            connected = false;
+                            return Ok(false);
+                        }
+                    }
+                }
+                if let Some(reason) = event.finish_reason {
+                    finish_reason = reason;
+                }
+                Ok(true)
+            };
+            run_generation_with_events(
+                &model_guard,
+                tokenizer,
+                &state.generation_config,
+                request,
+                max_tokens,
+                temperature,
+                seed,
+                &mut emit,
+            )
+        };
+        if !connected {
+            return;
+        }
+        if let Err(message) = generation_result {
+            let _ = tx.blocking_send(Ok(formatter.failed(message)));
+            return;
+        }
+        if let (Some(parser), Some(context)) = (parser, tool_context.as_ref()) {
+            let (events, saw_tool_call) = match parser.finish() {
+                Ok(result) => result,
+                Err(error) => {
+                    let _ = tx.blocking_send(Ok(formatter.failed(format!("{error:#}"))));
+                    return;
+                }
+            };
+            call_names.extend(events.iter().filter_map(|event| match event {
+                AssistantOutputEvent::ToolCall(call) => Some(call.name.clone()),
+                AssistantOutputEvent::TextDelta(_) => None,
+            }));
+            if let Err(error) =
+                super::openai::validate_tool_choice_output(&context.constraint_options, &call_names)
+            {
+                let _ = tx.blocking_send(Ok(formatter.failed(format!("{error:#}"))));
+                return;
+            }
+            for event in events {
+                let frames = match event {
+                    AssistantOutputEvent::TextDelta(text) => Ok(formatter.text_delta(text)),
+                    AssistantOutputEvent::ToolCall(call) => formatter.tool_call(call),
+                };
+                let frames = match frames {
+                    Ok(frames) => frames,
+                    Err(error) => {
+                        let _ = tx.blocking_send(Ok(formatter.failed(format!("{error:#}"))));
+                        return;
+                    }
+                };
+                for frame in frames {
+                    if tx.blocking_send(Ok(frame)).is_err() {
+                        return;
+                    }
+                }
+            }
+            if saw_tool_call {
+                finish_reason = "tool_calls";
+            }
+        }
+        for frame in formatter.completed(
+            finish_reason,
+            super::responses::Usage::new(prompt_tokens, completion_tokens),
+        ) {
+            if tx.blocking_send(Ok(frame)).is_err() {
+                return;
+            }
+        }
+    });
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(Body::from_stream(ReceiverStream::new(rx)))
+        .expect("valid Responses SSE response")
+}
+
 async fn anthropic_stream_completion(
     state: DiffusionGemmaAppState,
     request: PreparedRequest,
@@ -1441,7 +1661,7 @@ pub async fn openai_chat_completions(
     let temperature = req.temperature.unwrap_or(0.0);
     let seed = req.seed;
     let model_label = req.model.clone().unwrap_or_else(|| state.model_id.clone());
-    let (prepared, prompt_tokens) = match prepare_openai_request(&state, req).await {
+    let (prepared, prompt_tokens) = match prepare_openai_request(&state, req, None).await {
         Ok(t) => t,
         Err(resp) => return resp,
     };
@@ -1513,6 +1733,103 @@ pub async fn openai_chat_completions(
         },
     };
     Json(resp).into_response()
+}
+
+pub async fn openai_responses(
+    State(state): State<DiffusionGemmaAppState>,
+    payload: std::result::Result<
+        Json<super::responses::ResponsesRequest>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> Response {
+    let request = match payload {
+        Ok(Json(request)) => request,
+        Err(error) => {
+            return super::responses::error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_json",
+                format!("invalid Responses request: {}", error.body_text()),
+            );
+        }
+    };
+    let normalized = match request.normalize() {
+        Ok(normalized) => normalized,
+        Err(error) => {
+            return super::responses::error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                format!("{error:#}"),
+            );
+        }
+    };
+    let model_label = normalized
+        .chat
+        .model
+        .clone()
+        .unwrap_or_else(|| state.model_id.clone());
+    let meta = super::responses::ResponseMeta::from_normalized(&normalized, model_label);
+    let stream = normalized.chat.stream;
+    let max_tokens = normalized.chat.max_tokens;
+    let temperature = normalized.chat.temperature.unwrap_or(0.0);
+    let seed = normalized.chat.seed;
+    let output_schema = normalized.output_schema();
+    let (prepared, prompt_tokens) =
+        match prepare_openai_request(&state, normalized.chat, output_schema).await {
+            Ok(result) => result,
+            Err(response) => return response,
+        };
+    let PreparedOpenAiRequest {
+        generation,
+        tool_context,
+    } = prepared;
+    if stream {
+        return responses_stream_completion(
+            state,
+            generation,
+            ResponsesStreamRequest {
+                max_tokens,
+                temperature,
+                seed,
+                prompt_tokens,
+                tool_context,
+                meta,
+            },
+        )
+        .await;
+    }
+    let completion = match generate_completion(
+        state,
+        generation,
+        max_tokens,
+        temperature,
+        seed,
+        "stop",
+        tool_context,
+    )
+    .await
+    {
+        Ok(completion) => completion,
+        Err(error) => {
+            return super::responses::error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "generation_error",
+                match error {
+                    CompletionError::Overloaded => "DiffusionGemma lane overloaded".to_owned(),
+                    CompletionError::Internal(message) => message,
+                },
+            );
+        }
+    };
+    super::responses::unary_response(
+        meta,
+        prompt_tokens,
+        super::responses::CollectedOutput {
+            content: completion.content.unwrap_or_default(),
+            tool_calls: completion.tool_calls,
+            finish_reason: completion.finish_reason,
+            completion_tokens: completion.completion_tokens,
+        },
+    )
 }
 
 pub async fn anthropic_messages(
@@ -1588,6 +1905,7 @@ pub async fn serve_diffusion_gemma(
         .route("/health", get(|| async { "ok" }))
         .route("/healthz", get(diffusion_gemma_healthz))
         .route("/v1/chat/completions", post(openai_chat_completions))
+        .route("/v1/responses", post(openai_responses))
         .route("/v1/messages", post(anthropic_messages))
         .with_state(state);
 
@@ -1825,6 +2143,7 @@ mod tests {
             ToolResponseContext {
                 dialect: ToolDialect::Gemma,
                 definitions: vec![weather_tool()],
+                output_schema: None,
                 constraint_options: ToolConstraintOptions {
                     choice: crate::core::constrained::ToolChoiceConstraint::Required,
                     allow_parallel_calls: false,

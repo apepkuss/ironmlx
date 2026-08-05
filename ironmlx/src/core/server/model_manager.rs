@@ -34,7 +34,7 @@ use super::health::{
     classify_status, system_free_ram_bytes, HealthSnapshot, MemoryInfo, ModelInfo, MtpHealthInfo,
     NeuralExactQualificationHealth, PromptLookupHealthInfo, SchedulerInfo,
 };
-use super::{anthropic, openai, SamplingDefaults};
+use super::{anthropic, openai, responses, SamplingDefaults};
 
 const MODEL_REQUIRED_CODE: &str = "model_required";
 const MODEL_REQUIRED_MESSAGE: &str = "Model is required.";
@@ -362,6 +362,13 @@ impl ModelManager {
 
     async fn openai(&self, req: openai::ChatRequest) -> Response {
         match self.pool.app_openai_chat_completions(req).await {
+            Ok(response) => response,
+            Err(error) => resolve_error_response(error),
+        }
+    }
+
+    async fn responses(&self, req: responses::ResponsesRequest) -> Response {
+        match self.pool.app_openai_responses(req).await {
             Ok(response) => response,
             Err(error) => resolve_error_response(error),
         }
@@ -1128,6 +1135,7 @@ pub async fn serve_app_daemon(args: ServeArgs) -> Result<()> {
         .route("/health", get(|| async { "ok" }))
         .route("/healthz", get(app_healthz_handler))
         .route("/v1/chat/completions", post(app_openai_handler))
+        .route("/v1/responses", post(app_responses_handler))
         .route("/v1/messages", post(app_anthropic_handler))
         .route("/admin/api/models/loaded", get(list_loaded_handler))
         .route("/admin/api/models/register", post(register_model_handler))
@@ -1153,6 +1161,26 @@ async fn app_openai_handler(
     Json(req): Json<openai::ChatRequest>,
 ) -> Response {
     manager.openai(req).await
+}
+
+async fn app_responses_handler(
+    State(manager): State<ModelManager>,
+    payload: std::result::Result<
+        Json<responses::ResponsesRequest>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> Response {
+    let req = match payload {
+        Ok(Json(req)) => req,
+        Err(error) => {
+            return responses::error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_json",
+                format!("invalid Responses request: {}", error.body_text()),
+            );
+        }
+    };
+    manager.responses(req).await
 }
 
 async fn app_anthropic_handler(

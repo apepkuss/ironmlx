@@ -52,7 +52,7 @@ use super::{
 /// Pre-3e.3 used `err.to_string().contains("admission queue full")` string
 /// match (spec §9 R3 acknowledged-fragile). 3e.3 replaces with typed
 /// `anyhow::Error::downcast_ref::<SchedulerError>()`. 3f adds RequestTooLarge arm.
-fn admit_err_to_response(err: anyhow::Error) -> Response {
+pub(crate) fn admit_err_to_response(err: anyhow::Error) -> Response {
     use crate::core::SchedulerError;
     use axum::http::HeaderValue;
     let msg = format!("{err:#}");
@@ -89,7 +89,7 @@ fn admit_err_to_response(err: anyhow::Error) -> Response {
     }
 }
 
-fn generation_err_to_response(err: anyhow::Error) -> Response {
+pub(crate) fn generation_err_to_response(err: anyhow::Error) -> Response {
     if err.downcast_ref::<crate::core::SchedulerError>().is_some() {
         admit_err_to_response(err)
     } else {
@@ -617,7 +617,7 @@ pub(crate) fn build_agent_messages(
     Ok(output)
 }
 
-fn render_tool_prompt(
+pub(crate) fn render_tool_prompt(
     tokenizer: &crate::core::Tokenizer,
     messages: &[AgentMessage],
     kwargs: &serde_json::Value,
@@ -625,7 +625,7 @@ fn render_tool_prompt(
     tokenizer.render_and_encode_tool_prompt(messages, kwargs)
 }
 
-fn build_sampler(req: &ChatRequest, defaults: SamplingDefaults) -> Sampler {
+pub(crate) fn build_sampler(req: &ChatRequest, defaults: SamplingDefaults) -> Sampler {
     let mut s = Sampler::greedy();
     if let Some(t) = req.temperature.or(defaults.temperature) {
         if t > 0.0 {
@@ -670,7 +670,7 @@ fn chat_completions_route(stream: bool, use_scheduler: bool) -> ChatCompletionsR
     }
 }
 
-fn stop_token_ids_for_request(eos_token_ids: &[u32], ignore_eos: bool) -> Vec<u32> {
+pub(crate) fn stop_token_ids_for_request(eos_token_ids: &[u32], ignore_eos: bool) -> Vec<u32> {
     if ignore_eos {
         Vec::new()
     } else {
