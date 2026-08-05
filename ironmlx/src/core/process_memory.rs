@@ -1325,6 +1325,45 @@ fn macos_host_vm_statistics() -> Option<HostVmStatistics> {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "macos")]
+    const ISOLATED_PROCESS_MEMORY_TEST: &str = "IRONMLX_ISOLATED_PROCESS_MEMORY_TEST";
+
+    #[cfg(target_os = "macos")]
+    fn run_in_isolated_process(test_name: &str) -> bool {
+        if let Some(child_test) = std::env::var_os(ISOLATED_PROCESS_MEMORY_TEST) {
+            assert_eq!(
+                child_test,
+                std::ffi::OsStr::new(test_name),
+                "isolated process launched for an unexpected test"
+            );
+            println!("isolated-process-memory-test:{test_name}");
+            return true;
+        }
+
+        let output = std::process::Command::new(
+            std::env::current_exe().expect("locate the current Rust test executable"),
+        )
+        .args(["--exact", test_name, "--nocapture", "--test-threads=1"])
+        .env(ISOLATED_PROCESS_MEMORY_TEST, test_name)
+        .output()
+        .expect("launch isolated process-memory test");
+
+        assert!(
+            output.status.success(),
+            "isolated process-memory test {test_name} failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .contains(&format!("isolated-process-memory-test:{test_name}")),
+            "isolated process-memory test {test_name} did not execute\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        false
+    }
+
     fn gib(value: usize) -> usize {
         value * GIB
     }
@@ -1859,6 +1898,12 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[serial_test::serial(mlx_metal)]
     fn native_telemetry_tracks_physically_touched_process_memory() {
+        const TEST_NAME: &str =
+            "core::process_memory::tests::native_telemetry_tracks_physically_touched_process_memory";
+        if !run_in_isolated_process(TEST_NAME) {
+            return;
+        }
+
         let before = native_memory_telemetry();
         let before_footprint = before
             .phys_footprint_bytes
@@ -1869,19 +1914,34 @@ mod tests {
             "Metal memory limit must be available"
         );
 
-        let mut pressure = vec![0_u8; 64 * 1024 * 1024];
+        let mut pressure = vec![0_u8; 128 * MIB];
         for byte in pressure.iter_mut().step_by(4096) {
             *byte = 0xa5;
         }
         std::hint::black_box(&pressure);
 
-        let after = native_memory_telemetry();
+        let minimum_growth = 64 * MIB;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let after = loop {
+            let sample = native_memory_telemetry();
+            if sample.phys_footprint_bytes.is_some_and(|footprint| {
+                footprint >= before_footprint.saturating_add(minimum_growth)
+            }) {
+                break sample;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "phys_footprint did not track a live 128 MiB allocation: before={before_footprint} latest={:?}",
+                sample.phys_footprint_bytes
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
         let after_footprint = after
             .phys_footprint_bytes
             .expect("macOS phys_footprint must remain available");
         assert!(
-            after_footprint >= before_footprint,
-            "phys_footprint regressed under a live allocation: before={before_footprint} after={after_footprint}"
+            after_footprint >= before_footprint.saturating_add(minimum_growth),
+            "phys_footprint did not grow under a live allocation: before={before_footprint} after={after_footprint}"
         );
         let governor = ProcessMemoryGovernor::new(MemoryGovernorConfig::default()).unwrap();
         let snapshot = governor.update(after);
@@ -1894,6 +1954,12 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[serial_test::serial(mlx_metal)]
     fn real_physical_pressure_drives_emergency_and_stepwise_recovery() {
+        const TEST_NAME: &str =
+            "core::process_memory::tests::real_physical_pressure_drives_emergency_and_stepwise_recovery";
+        if !run_in_isolated_process(TEST_NAME) {
+            return;
+        }
+
         let before = native_memory_telemetry();
         let baseline = before
             .current_usage_bytes()
