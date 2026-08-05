@@ -109,6 +109,16 @@
         "version": "2.0.1"
       },
       {
+        "license_expression": "MIT OR Apache-2.0",
+        "license_files": [
+          "rust-license-0444c6991eead682.txt"
+        ],
+        "name": "ahash",
+        "repository": "https://github.com/tkaitchuck/ahash",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "0.8.12"
+      },
+      {
         "license_expression": "Unlicense OR MIT",
         "license_files": [
           "rust-license-0f96a83840e146e4.txt"
@@ -319,6 +329,16 @@
         "version": "1.6.2"
       },
       {
+        "license_expression": "MIT-0",
+        "license_files": [
+          "rust-license-fdef904ef5d29e4d.txt"
+        ],
+        "name": "borrow-or-share",
+        "repository": "https://github.com/yescallop/borrow-or-share",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "0.2.4"
+      },
+      {
         "license_expression": "Zlib OR Apache-2.0 OR MIT",
         "license_files": [
           "rust-license-9df9ba60a11af705.txt"
@@ -327,6 +347,16 @@
         "repository": "https://github.com/Lokathor/bytemuck",
         "source": "registry+https://github.com/rust-lang/crates.io-index",
         "version": "1.25.2"
+      },
+      {
+        "license_expression": "Zlib OR Apache-2.0 OR MIT",
+        "license_files": [
+          "rust-license-9df9ba60a11af705.txt"
+        ],
+        "name": "bytemuck_derive",
+        "repository": "https://github.com/Lokathor/bytemuck",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "1.11.0"
       },
       {
         "license_expression": "Unlicense OR MIT",
@@ -629,6 +659,16 @@
         "version": "0.20.2"
       },
       {
+        "license_expression": "MIT",
+        "license_files": [
+          "rust-license-3d4ada4e04d153d7.txt"
+        ],
+        "name": "derivre",
+        "repository": "https://github.com/microsoft/derivre",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "0.3.12"
+      },
+      {
         "license_expression": "MIT OR Apache-2.0",
         "license_files": [
           "rust-license-9e0dfd2dd4173a53.txt"
@@ -768,6 +808,16 @@
         "repository": "https://github.com/rust-lang/flate2-rs",
         "source": "registry+https://github.com/rust-lang/crates.io-index",
         "version": "1.1.9"
+      },
+      {
+        "license_expression": "MIT",
+        "license_files": [
+          "rust-license-e699bec719875d8e.txt"
+        ],
+        "name": "fluent-uri",
+        "repository": "https://github.com/yescallop/fluent-uri-rs",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "0.3.2"
       },
       {
         "license_expression": "Apache-2.0  OR  MIT",
@@ -1310,6 +1360,26 @@
         "version": "0.8.2"
       },
       {
+        "license_expression": "MIT",
+        "license_files": [
+          "rust-license-3d4ada4e04d153d7.txt"
+        ],
+        "name": "llguidance",
+        "repository": "https://github.com/guidance-ai/llguidance",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "1.7.6"
+      },
+      {
+        "license_expression": "MIT OR Apache-2.0",
+        "license_files": [
+          "rust-license-c9a75f18b9ab2927.txt"
+        ],
+        "name": "lock_api",
+        "repository": "https://github.com/Amanieu/parking_lot",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "0.4.14"
+      },
+      {
         "license_expression": "MIT OR Apache-2.0",
         "license_files": [
           "rust-license-6485b8ed310d3f03.txt"
@@ -1563,6 +1633,26 @@
       {
         "license_expression": "MIT OR Apache-2.0",
         "license_files": [
+          "rust-license-c9a75f18b9ab2927.txt"
+        ],
+        "name": "parking_lot",
+        "repository": "https://github.com/Amanieu/parking_lot",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "0.12.5"
+      },
+      {
+        "license_expression": "MIT OR Apache-2.0",
+        "license_files": [
+          "rust-license-c9a75f18b9ab2927.txt"
+        ],
+        "name": "parking_lot_core",
+        "repository": "https://github.com/Amanieu/parking_lot",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "0.9.12"
+      },
+      {
+        "license_expression": "MIT OR Apache-2.0",
+        "license_files": [
           "rust-license-23f18e03dc49df91.txt"
         ],
         "name": "paste",
@@ -1793,6 +1883,36 @@
       {
         "license_expression": "MIT OR Apache-2.0",
         "license_files": [
+          "rust-license-23f18e03dc49df91.txt"
+        ],
+        "name": "ref-cast",
+        "repository": "https://github.com/dtolnay/ref-cast",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "1.0.26"
+      },
+      {
+        "license_expression": "MIT OR Apache-2.0",
+        "license_files": [
+          "rust-license-23f18e03dc49df91.txt"
+        ],
+        "name": "ref-cast-impl",
+        "repository": "https://github.com/dtolnay/ref-cast",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "1.0.26"
+      },
+      {
+        "license_expression": "MIT",
+        "license_files": [
+          "rust-license-a573f030c2ae7eab.txt"
+        ],
+        "name": "referencing",
+        "repository": "https://github.com/Stranger6667/jsonschema",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "0.29.1"
+      },
+      {
+        "license_expression": "MIT OR Apache-2.0",
+        "license_files": [
           "rust-license-6485b8ed310d3f03.txt"
         ],
         "name": "regex",
@@ -1900,6 +2020,16 @@
         "repository": "https://github.com/dtolnay/ryu",
         "source": "registry+https://github.com/rust-lang/crates.io-index",
         "version": "1.0.23"
+      },
+      {
+        "license_expression": "MIT OR Apache-2.0",
+        "license_files": [
+          "rust-license-fb77f0a9c53e473a.txt"
+        ],
+        "name": "scopeguard",
+        "repository": "https://github.com/bluss/scopeguard",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "1.2.0"
       },
       {
         "license_expression": "MIT OR Apache-2.0",
@@ -2070,6 +2200,26 @@
         "repository": "https://github.com/rapidfuzz/strsim-rs",
         "source": "registry+https://github.com/rust-lang/crates.io-index",
         "version": "0.11.1"
+      },
+      {
+        "license_expression": "MIT",
+        "license_files": [
+          "rust-license-8bce3b45e49ecd14.txt"
+        ],
+        "name": "strum",
+        "repository": "https://github.com/Peternator7/strum",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "0.28.0"
+      },
+      {
+        "license_expression": "MIT",
+        "license_files": [
+          "rust-license-8bce3b45e49ecd14.txt"
+        ],
+        "name": "strum_macros",
+        "repository": "https://github.com/Peternator7/strum",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "0.28.0"
       },
       {
         "license_expression": "BSD-3-Clause",
@@ -2270,6 +2420,16 @@
         "repository": "https://github.com/tokio-rs/tokio",
         "source": "registry+https://github.com/rust-lang/crates.io-index",
         "version": "0.7.19"
+      },
+      {
+        "license_expression": "MIT",
+        "license_files": [
+          "rust-license-3d4ada4e04d153d7.txt"
+        ],
+        "name": "toktrie",
+        "repository": "https://github.com/guidance-ai/llguidance",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "1.7.6"
       },
       {
         "license_expression": "MIT",
@@ -2669,6 +2829,13 @@
         "sha256": "025436edff4cfcdde17a5811fdea78892d8482efd1abdec5a17872d07a4f2112"
       },
       {
+        "file": "rust-license-0444c6991eead682.txt",
+        "license_ids": [
+          "MIT"
+        ],
+        "sha256": "0444c6991eead6822f7b9102e654448d51624431119546492e8b231db42c48bb"
+      },
+      {
         "file": "rust-license-058f01fe181608d0.txt",
         "license_ids": [
           "MIT"
@@ -2870,6 +3037,13 @@
           "MIT"
         ],
         "sha256": "3c125f249fc6fb19f2415d027a0d9a170860583960ea53d08ea1d2b3f269d153"
+      },
+      {
+        "file": "rust-license-3d4ada4e04d153d7.txt",
+        "license_ids": [
+          "MIT"
+        ],
+        "sha256": "3d4ada4e04d153d74f5bc4e5e6aebd12ef20077716529c36089dc07f14fd0dcf"
       },
       {
         "file": "rust-license-3e1de3c527ab2512.txt",
@@ -3145,6 +3319,13 @@
         "sha256": "8b87502eddb2d7fa23d54ed2caf5681ab5fbbdc8eb553e8ade710240842f9097"
       },
       {
+        "file": "rust-license-8bce3b45e49ecd14.txt",
+        "license_ids": [
+          "MIT"
+        ],
+        "sha256": "8bce3b45e49ecd1461f223b46de133d8f62cd39f745cfdaf81bee554b908bd42"
+      },
+      {
         "file": "rust-license-8c7516d4b27b1e49.txt",
         "license_ids": [
           "MIT"
@@ -3227,6 +3408,13 @@
           "MIT"
         ],
         "sha256": "a47129d738752a6ae52247fea645b42cb320d19e9327f1eb2d1a7f99d9455ad3"
+      },
+      {
+        "file": "rust-license-a573f030c2ae7eab.txt",
+        "license_ids": [
+          "MIT"
+        ],
+        "sha256": "a573f030c2ae7eab837ab7d66440954ae54c5eabe6848c1a1fe9187215f50591"
       },
       {
         "file": "rust-license-a825bd853ab71619.txt",
@@ -3376,6 +3564,13 @@
         "sha256": "e4c9b06fa850cb9b540a5e400e9f6394cf15efcf4098144de477d1d3dae10150"
       },
       {
+        "file": "rust-license-e699bec719875d8e.txt",
+        "license_ids": [
+          "MIT"
+        ],
+        "sha256": "e699bec719875d8e37912f6e5f0cfd699f0e65c8cd45df4dc84f00baf47b1ae3"
+      },
+      {
         "file": "rust-license-e9c1238c5beb73c6.txt",
         "license_ids": [
           "MIT"
@@ -3437,6 +3632,20 @@
           "Unicode-3.0"
         ],
         "sha256": "f7db81051789b729fea528a63ec4c938fdcb93d9d61d97dc8cc2e9df6d47f2a1"
+      },
+      {
+        "file": "rust-license-fb77f0a9c53e473a.txt",
+        "license_ids": [
+          "MIT"
+        ],
+        "sha256": "fb77f0a9c53e473abe5103c8632ef9f0f2874d4fb3f17cb2d8c661aab9cee9d7"
+      },
+      {
+        "file": "rust-license-fdef904ef5d29e4d.txt",
+        "license_ids": [
+          "MIT-0"
+        ],
+        "sha256": "fdef904ef5d29e4d567d791b7934adb119a0fda3e31d3a10e004c7605506bd46"
       },
       {
         "file": "rust-license-ff3f1cd12af8866d.txt",

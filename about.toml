@@ -9,6 +9,7 @@ accepted = [
     "ISC",
     "Zlib",
     "0BSD",
+    "MIT-0",
     "Unlicense",
     "BSL-1.0",
     "CDLA-Permissive-2.0",
