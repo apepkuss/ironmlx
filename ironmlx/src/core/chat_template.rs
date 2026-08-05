@@ -13,9 +13,10 @@
 //! `minijinja` does not expose those methods by default; we install an
 //! `unknown_method_callback` that handles the subset used by supported models.
 
-use minijinja::value::{from_args, ValueKind};
+use minijinja::value::{from_args, Kwargs, ValueKind};
 use minijinja::{Environment, ErrorKind, Value};
 use serde::Serialize;
+use serde_json::ser::PrettyFormatter;
 
 use crate::Result;
 
@@ -63,8 +64,55 @@ impl ChatTemplate {
                 ))
             },
         );
+        env.add_filter(
+            "tojson",
+            |value: Value, kwargs: Kwargs| -> std::result::Result<String, minijinja::Error> {
+                let ensure_ascii: Option<bool> = kwargs.get("ensure_ascii")?;
+                let indent: Option<usize> = kwargs.get("indent")?;
+                kwargs.assert_all_used()?;
+                if ensure_ascii == Some(true) {
+                    return Err(minijinja::Error::new(
+                        minijinja::ErrorKind::InvalidOperation,
+                        "tojson ensure_ascii=true is not supported",
+                    ));
+                }
+                match indent {
+                    Some(indent) => {
+                        if indent > 16 {
+                            return Err(minijinja::Error::new(
+                                minijinja::ErrorKind::InvalidOperation,
+                                "tojson indent must be at most 16",
+                            ));
+                        }
+                        let indent = vec![b' '; indent];
+                        let formatter = PrettyFormatter::with_indent(&indent);
+                        let mut output = Vec::new();
+                        let mut serializer =
+                            serde_json::Serializer::with_formatter(&mut output, formatter);
+                        value.serialize(&mut serializer).map_err(|error| {
+                            minijinja::Error::new(
+                                minijinja::ErrorKind::InvalidOperation,
+                                format!("tojson serialization failed: {error}"),
+                            )
+                        })?;
+                        String::from_utf8(output).map_err(|error| {
+                            minijinja::Error::new(
+                                minijinja::ErrorKind::InvalidOperation,
+                                format!("tojson produced invalid UTF-8: {error}"),
+                            )
+                        })
+                    }
+                    None => serde_json::to_string(&value).map_err(|error| {
+                        minijinja::Error::new(
+                            minijinja::ErrorKind::InvalidOperation,
+                            format!("tojson serialization failed: {error}"),
+                        )
+                    }),
+                }
+            },
+        );
         // Python string method shim — covers the subset used by Qwen / HF templates.
-        env.set_unknown_method_callback(|_state, value, method, args| {
+        env.set_unknown_method_callback(|state, value, method, args| {
             match (value.kind(), method) {
                 (ValueKind::Map, "get") => {
                     let (key, default): (Value, Option<Value>) = from_args(args)?;
@@ -74,6 +122,10 @@ impl ChatTemplate {
                     } else {
                         item
                     });
+                }
+                (ValueKind::Map, "items") => {
+                    let _: () = from_args(args)?;
+                    return state.apply_filter("items", std::slice::from_ref(value));
                 }
                 (ValueKind::String, method) => {
                     let s = value.to_string();
@@ -87,16 +139,30 @@ impl ChatTemplate {
                             return Ok(Value::from(s.ends_with(suffix)));
                         }
                         "strip" => {
-                            let _: () = from_args(args)?;
-                            return Ok(Value::from(s.trim().to_owned()));
+                            let (chars,): (Option<String>,) = from_args(args)?;
+                            let stripped = match chars.as_deref() {
+                                Some(chars) => s.trim_matches(|c| chars.contains(c)).to_owned(),
+                                None => s.trim().to_owned(),
+                            };
+                            return Ok(Value::from(stripped));
                         }
                         "lstrip" => {
-                            let _: () = from_args(args)?;
-                            return Ok(Value::from(s.trim_start().to_owned()));
+                            let (chars,): (Option<String>,) = from_args(args)?;
+                            let stripped = match chars.as_deref() {
+                                Some(chars) => {
+                                    s.trim_start_matches(|c| chars.contains(c)).to_owned()
+                                }
+                                None => s.trim_start().to_owned(),
+                            };
+                            return Ok(Value::from(stripped));
                         }
                         "rstrip" => {
-                            let _: () = from_args(args)?;
-                            return Ok(Value::from(s.trim_end().to_owned()));
+                            let (chars,): (Option<String>,) = from_args(args)?;
+                            let stripped = match chars.as_deref() {
+                                Some(chars) => s.trim_end_matches(|c| chars.contains(c)).to_owned(),
+                                None => s.trim_end().to_owned(),
+                            };
+                            return Ok(Value::from(stripped));
                         }
                         "upper" => {
                             let _: () = from_args(args)?;
@@ -164,6 +230,16 @@ impl ChatTemplate {
     pub fn render(
         &self,
         messages: &[Message],
+        add_generation_prompt: bool,
+        extra_kwargs: Option<&serde_json::Value>,
+    ) -> Result<String> {
+        self.render_serializable(messages, add_generation_prompt, extra_kwargs)
+    }
+
+    /// Render a richer serializable message shape for tool-aware templates.
+    pub fn render_serializable<M: Serialize>(
+        &self,
+        messages: &[M],
         add_generation_prompt: bool,
         extra_kwargs: Option<&serde_json::Value>,
     ) -> Result<String> {
@@ -316,6 +392,56 @@ mod tests {
     }
 
     #[test]
+    fn glm_python_map_items_and_unicode_tojson_are_supported_exactly() {
+        let src = concat!(
+            "{%- for key, value in messages[0].items() -%}",
+            "{{ key }}={{ value }};",
+            "{%- endfor -%}|{{ messages[0] | tojson(ensure_ascii=False) }}"
+        );
+        let template = ChatTemplate::new(src).unwrap();
+        let messages = vec![Message {
+            role: "user".into(),
+            content: "东京".into(),
+        }];
+        let output = template.render(&messages, false, None).unwrap();
+        assert!(output.contains("role=user;"));
+        assert!(output.contains("content=东京;"));
+        assert!(output.contains("\"content\":\"东京\""));
+        assert!(!output.contains("\\u"));
+
+        let unsupported = ChatTemplate::new("{{ messages[0] | tojson(ensure_ascii=True) }}")
+            .unwrap()
+            .render(&messages, false, None)
+            .unwrap_err();
+        assert!(unsupported.to_string().contains("ensure_ascii=true"));
+    }
+
+    #[test]
+    fn llama_tojson_indent_matches_hugging_face_template_contract() {
+        let template = ChatTemplate::new("{{ messages[0] | tojson(indent=4) }}").unwrap();
+        let messages = vec![Message {
+            role: "user".into(),
+            content: "东京".into(),
+        }];
+        let output = template.render(&messages, false, None).unwrap();
+        assert_eq!(
+            output,
+            concat!(
+                "{\n",
+                "    \"content\": \"东京\",\n",
+                "    \"role\": \"user\"\n",
+                "}"
+            )
+        );
+
+        let unsupported = ChatTemplate::new("{{ messages[0] | tojson(indent=17) }}")
+            .unwrap()
+            .render(&messages, false, None)
+            .unwrap_err();
+        assert!(unsupported.to_string().contains("at most 16"));
+    }
+
+    #[test]
     fn string_split_method_supports_gemma_strip_thinking_macro() {
         let src = r#"{%- macro strip_thinking(text) -%}
     {%- set ns = namespace(result='') -%}
@@ -336,6 +462,41 @@ mod tests {
         }];
         let out = t.render(&msgs, false, None).unwrap();
         assert_eq!(out, "plain assistant answer");
+    }
+
+    #[test]
+    fn string_strip_methods_accept_python_chars_argument() {
+        let src = concat!(
+            "{{ messages[0].content.strip('\\nxy') }}|",
+            "{{ messages[0].content.lstrip('\\nxy') }}|",
+            "{{ messages[0].content.rstrip('\\nxy') }}",
+        );
+        let t = ChatTemplate::new(src).unwrap();
+        let msgs = vec![Message {
+            role: "assistant".into(),
+            content: "\nyxvaluexy\n".into(),
+        }];
+
+        let out = t.render(&msgs, false, None).unwrap();
+
+        assert_eq!(out, "value|valuexy\n|\nyxvalue");
+    }
+
+    #[test]
+    fn qwen_reasoning_expression_accepts_sdk_round_trip_content() {
+        let src = r#"{%- set content = messages[0].content -%}
+{%- set reasoning_content = content.split('</think>')[0].rstrip('\n').split('<think>')[-1].lstrip('\n') -%}
+{%- set content = content.split('</think>')[-1].lstrip('\n') -%}
+{{- reasoning_content + '|' + content -}}"#;
+        let t = ChatTemplate::new(src).unwrap();
+        let msgs = vec![Message {
+            role: "assistant".into(),
+            content: "Need weather data.\n</think>\n\nCalling the tool.".into(),
+        }];
+
+        let out = t.render(&msgs, false, None).unwrap();
+
+        assert_eq!(out, "Need weather data.|Calling the tool.");
     }
 
     #[test]

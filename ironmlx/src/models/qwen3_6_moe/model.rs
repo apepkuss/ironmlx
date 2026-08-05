@@ -925,6 +925,7 @@ mod tests {
                 .token_to_id("<|image_pad|>")
                 .map(|id| id as i32)
                 .unwrap_or(crate::core::generate::IMAGE_TOKEN_ID),
+            constraint: None,
         }
     }
 

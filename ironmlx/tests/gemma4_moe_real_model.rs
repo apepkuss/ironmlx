@@ -223,6 +223,7 @@ fn make_text_request(
         image_grid_thw: None,
         image_spatial_merge_size: 2,
         image_token_id: IMAGE_TOKEN_ID,
+        constraint: None,
     }
 }
 
@@ -276,6 +277,7 @@ fn make_image_request(
         image_grid_thw: Some(image_grid_thw),
         image_spatial_merge_size: spatial_merge_size,
         image_token_id,
+        constraint: None,
     }
 }
 

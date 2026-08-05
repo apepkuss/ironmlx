@@ -95,6 +95,7 @@ async fn b1_p2_5_admission_gate_rejects_when_full() {
         image_grid_thw: None,
         image_spatial_merge_size: 2,
         image_token_id: IMAGE_TOKEN_ID,
+        constraint: None,
     };
 
     // Send all 3 admits into the channel before the driver can drain any

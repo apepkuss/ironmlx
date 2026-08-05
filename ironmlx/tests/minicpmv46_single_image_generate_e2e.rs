@@ -157,6 +157,7 @@ fn minicpmv46_single_image_generate_e2e() {
         image_grid_thw: Some(vec![(1, gh, gw)]),
         image_spatial_merge_size: SPATIAL_MERGE_SIZE,
         image_token_id: IMAGE_TOKEN_ID,
+        constraint: None,
     };
 
     let mut stream =

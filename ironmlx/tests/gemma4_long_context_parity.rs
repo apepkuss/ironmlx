@@ -306,6 +306,7 @@ fn make_text_request(
         image_grid_thw: None,
         image_spatial_merge_size: 3,
         image_token_id: 0,
+        constraint: None,
     }
 }
 

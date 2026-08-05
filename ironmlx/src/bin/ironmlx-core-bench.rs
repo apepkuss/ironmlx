@@ -1888,6 +1888,7 @@ fn make_request<M: Model>(
             .token_to_id("<|image_pad|>")
             .map(|id| id as i32)
             .unwrap_or(248_056),
+        constraint: None,
     }
 }
 

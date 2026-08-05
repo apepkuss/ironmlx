@@ -1813,19 +1813,18 @@ impl EnginePoolState {
             .count();
         let process_governor = global_process_memory_governor().sample_process();
         let prefix_store = crate::core::cache::process_async_prefix_store_queue().stats();
-        let status = if process_governor.pressure_level == PressureLevel::Emergency {
-            "down"
-        } else if failed_models > 0
-            || process_governor.telemetry_degraded
-            || process_governor.pressure_level != PressureLevel::Normal
-            || crate::core::cache::process_async_prefix_store_queue().is_backpressured()
-        {
-            "degraded"
-        } else {
-            "healthy"
-        };
+        let mut initial_reasons = Vec::new();
+        if failed_models > 0 {
+            initial_reasons.push(health::HealthDegradedReason::ModelFailed);
+        }
+        if crate::core::cache::process_async_prefix_store_queue().is_backpressured() {
+            initial_reasons.push(health::HealthDegradedReason::PrefixStoreBackpressured);
+        }
+        let (status, degraded_reasons) =
+            health::classify_process_status(&process_governor, initial_reasons);
         EnginePoolHealth {
             status,
+            degraded_reasons,
             mode: "engine_pool",
             default_model,
             max_loaded_models,
@@ -2482,27 +2481,36 @@ impl EngineVariant {
 
     async fn openai_chat_completions(&self, req: openai::ChatRequest) -> Response {
         match self {
-            Self::Qwen35(state) => openai::chat_completions(State(state.clone()), Json(req)).await,
+            Self::Qwen35(state) => {
+                openai::chat_completions(State(state.clone()), Ok(Json(req))).await
+            }
             Self::Qwen35Moe(state) => {
-                openai::chat_completions(State(state.clone()), Json(req)).await
+                openai::chat_completions(State(state.clone()), Ok(Json(req))).await
             }
             Self::Qwen36Moe(state) => {
-                openai::chat_completions(State(state.clone()), Json(req)).await
+                openai::chat_completions(State(state.clone()), Ok(Json(req))).await
             }
-            Self::Gemma4(state) => openai::chat_completions(State(state.clone()), Json(req)).await,
+            Self::Gemma4(state) => {
+                openai::chat_completions(State(state.clone()), Ok(Json(req))).await
+            }
             Self::Gemma4Drafter(state) => {
-                openai::gemma4_drafter_chat_completions(State(state.as_ref().clone()), Json(req))
-                    .await
+                openai::gemma4_drafter_chat_completions(
+                    State(state.as_ref().clone()),
+                    Ok(Json(req)),
+                )
+                .await
             }
             Self::Glm4MoeLite(state) => {
-                openai::chat_completions(State(state.clone()), Json(req)).await
+                openai::chat_completions(State(state.clone()), Ok(Json(req))).await
             }
-            Self::Llama(state) => openai::chat_completions(State(state.clone()), Json(req)).await,
+            Self::Llama(state) => {
+                openai::chat_completions(State(state.clone()), Ok(Json(req))).await
+            }
             Self::MiniCpmV46(state) => {
-                openai::chat_completions(State(state.clone()), Json(req)).await
+                openai::chat_completions(State(state.clone()), Ok(Json(req))).await
             }
             Self::DiffusionGemma(state) => {
-                diffusion_gemma::openai_chat_completions(State(state.clone()), Json(req)).await
+                diffusion_gemma::openai_chat_completions(State(state.clone()), Ok(Json(req))).await
             }
         }
     }
@@ -3450,7 +3458,8 @@ pub(crate) struct EngineModelControlResult {
 
 #[derive(Debug, Serialize)]
 struct EnginePoolHealth {
-    status: &'static str,
+    status: health::HealthStatus,
+    degraded_reasons: Vec<health::HealthDegradedReason>,
     mode: &'static str,
     default_model: Option<String>,
     max_loaded_models: Option<usize>,

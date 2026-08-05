@@ -68,6 +68,7 @@ fn make_request(
         image_grid_thw: None,
         image_spatial_merge_size: 2,
         image_token_id: 248056,
+        constraint: None,
     }
 }
 

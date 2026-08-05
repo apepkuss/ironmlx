@@ -53,6 +53,7 @@ fn make_request(prompt_ids: Vec<u32>, max_new: usize, stop_token_ids: Vec<u32>) 
         image_grid_thw: None,
         image_spatial_merge_size: 2,
         image_token_id: IMAGE_TOKEN_ID,
+        constraint: None,
     }
 }
 

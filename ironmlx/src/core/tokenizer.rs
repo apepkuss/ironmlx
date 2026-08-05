@@ -1,19 +1,35 @@
 //! Tokenizer — thin wrapper around the `tokenizers` crate, plus an
 //! attached chat template (optional) and resolved EOS token ids.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use anyhow::anyhow;
 
-use crate::core::chat_template::{ChatTemplate, ChatTemplateSpecialTokens, Message};
+use serde::Serialize;
+use sha2::{Digest, Sha256};
+
+use crate::core::chat_template::{ChatTemplate, ChatTemplateSpecialTokens};
+use crate::core::constrained::{ConstraintPlan, ConstraintTokenizer, ToolConstraintOptions};
 use crate::core::loader::{EosTokenId, Loader, TokenizerConfig};
+use crate::core::tool_calling::{ToolDefinition, ToolDialect};
+use crate::core::tool_prompt_cache::{
+    CacheInsertKey, CacheLookupKey, CacheMatch, SafeBoundary, ToolPromptCache,
+};
 use crate::Result;
+
+pub use crate::core::tool_prompt_cache::ToolPromptCacheStats;
 
 /// Tokenizer + optional chat template + EOS token id list.
 pub struct Tokenizer {
     inner: tokenizers::Tokenizer,
     chat: Option<ChatTemplate>,
+    tool_dialect: Option<ToolDialect>,
+    constraint: Option<ConstraintTokenizer>,
     eos_token_ids: Vec<u32>,
+    tool_prompt_cache_identity: [u8; 32],
+    tool_prompt_cache_boundaries: HashSet<u32>,
+    tool_prompt_cache: ToolPromptCache,
 }
 
 /// Streaming detokenizer — owns its own state (does NOT delegate to
@@ -87,7 +103,12 @@ impl Tokenizer {
     /// model weights.
     pub fn from_model_dir(model_dir: &Path) -> Result<Self> {
         let config = TokenizerConfig::from_model_dir(model_dir)?;
-        Self::from_files(&model_dir.join("tokenizer.json"), &config)
+        let config_raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(model_dir.join("config.json"))?)?;
+        let model_type = config_raw
+            .get("model_type")
+            .and_then(serde_json::Value::as_str);
+        Self::from_files_with_model_type(&model_dir.join("tokenizer.json"), &config, model_type)
     }
 
     /// Build a [`Tokenizer`] from a [`Loader`]. Loads
@@ -95,14 +116,33 @@ impl Tokenizer {
     /// [`Loader::tokenizer_config`] for chat template + EOS resolution.
     pub fn from_loader(loader: &Loader) -> Result<Self> {
         let path = loader.model_dir().join("tokenizer.json");
-        Self::from_files(&path, loader.tokenizer_config())
+        let model_type = loader
+            .config_raw_value()
+            .get("model_type")
+            .and_then(serde_json::Value::as_str);
+        Self::from_files_with_model_type(&path, loader.tokenizer_config(), model_type)
     }
 
     /// Build directly from a `tokenizer.json` path and a parsed
     /// [`TokenizerConfig`].
     pub fn from_files(tokenizer_json: &Path, cfg: &TokenizerConfig) -> Result<Self> {
+        Self::from_files_with_model_type(tokenizer_json, cfg, None)
+    }
+
+    fn from_files_with_model_type(
+        tokenizer_json: &Path,
+        cfg: &TokenizerConfig,
+        model_type: Option<&str>,
+    ) -> Result<Self> {
+        let tokenizer_bytes = std::fs::read(tokenizer_json)?;
+        let tokenizer_value: serde_json::Value = serde_json::from_slice(&tokenizer_bytes)?;
         let inner = tokenizers::Tokenizer::from_file(tokenizer_json)
             .map_err(|e| anyhow!("tokenizers::from_file: {e}"))?;
+        let tool_dialect = model_type.and_then(|model_type| {
+            cfg.chat_template
+                .as_deref()
+                .and_then(|template| ToolDialect::detect(model_type, template))
+        });
         let chat = match cfg.chat_template.as_deref() {
             Some(src) => Some(ChatTemplate::new_with_special_tokens(
                 src,
@@ -115,10 +155,38 @@ impl Tokenizer {
             None => None,
         };
         let eos_token_ids = resolve_eos_token_ids(&inner, cfg);
+        let tool_prompt_cache_boundaries = inner
+            .get_added_tokens_decoder()
+            .into_iter()
+            .filter_map(|(id, token)| {
+                (token.special && !token.single_word && !token.rstrip && !token.normalized)
+                    .then_some(id)
+            })
+            .collect();
+        let tool_prompt_cache_identity = tool_prompt_cache_identity(
+            &tokenizer_bytes,
+            cfg.chat_template.as_deref(),
+            cfg,
+            model_type,
+        );
+        let constraint = tool_dialect
+            .map(|dialect| {
+                ConstraintTokenizer::from_tokenizer_json(
+                    &tokenizer_value,
+                    &eos_token_ids,
+                    dialect.ordinary_constraint_tokens(),
+                )
+            })
+            .transpose()?;
         Ok(Self {
             inner,
             chat,
+            tool_dialect,
+            constraint,
             eos_token_ids,
+            tool_prompt_cache_identity,
+            tool_prompt_cache_boundaries,
+            tool_prompt_cache: ToolPromptCache::default(),
         })
     }
 
@@ -169,9 +237,9 @@ impl Tokenizer {
     /// object whose top-level keys are merged into the template context
     /// (e.g. `{"enable_thinking": false}` from OpenAI's
     /// `chat_template_kwargs`).
-    pub fn apply_chat_template(
+    pub fn apply_chat_template<M: Serialize>(
         &self,
-        messages: &[Message],
+        messages: &[M],
         add_generation_prompt: bool,
         extra_kwargs: Option<&serde_json::Value>,
     ) -> Result<String> {
@@ -179,13 +247,154 @@ impl Tokenizer {
             .chat
             .as_ref()
             .ok_or_else(|| anyhow!("tokenizer has no chat template"))?;
-        chat.render(messages, add_generation_prompt, extra_kwargs)
+        chat.render_serializable(messages, add_generation_prompt, extra_kwargs)
+    }
+
+    /// Render and tokenize a native tool prompt with exact-result and safe-prefix caching.
+    /// Cache keys preserve the exact serialized messages and template kwargs. Prefix reuse is
+    /// restricted to context-independent special-token boundaries (not normalized, single-word,
+    /// or right-stripping), where tokenization of the following text is isolated from the cached
+    /// prefix.
+    pub fn render_and_encode_tool_prompt<M: Serialize>(
+        &self,
+        messages: &[M],
+        extra_kwargs: &serde_json::Value,
+    ) -> Result<Vec<u32>> {
+        let message_key = serde_json::to_vec(messages)?;
+        let kwargs_key = serde_json::to_vec(extra_kwargs)?;
+        let cache_key =
+            CacheLookupKey::new(&self.tool_prompt_cache_identity, &message_key, &kwargs_key);
+        if let Some(token_ids) = self.tool_prompt_cache.lookup_exact(&cache_key) {
+            return Ok(token_ids);
+        }
+
+        let prompt = self.apply_chat_template(messages, true, Some(extra_kwargs))?;
+        let (token_ids, boundaries) = match self
+            .tool_prompt_cache
+            .lookup_after_render(&cache_key, &prompt)
+        {
+            CacheMatch::Exact(token_ids) => return Ok(token_ids),
+            CacheMatch::Prefix(mut prefix) => {
+                let suffix = &prompt[prefix.byte_offset..];
+                let encoding = self
+                    .inner
+                    .encode(suffix, false)
+                    .map_err(|error| anyhow!("encode tool prompt suffix: {error}"))?;
+                let prefix_token_count = prefix.token_ids.len();
+                prefix.boundaries.extend(self.safe_boundaries(
+                    &encoding,
+                    prefix.byte_offset,
+                    prefix_token_count,
+                ));
+                prefix.token_ids.extend_from_slice(encoding.get_ids());
+                (prefix.token_ids, prefix.boundaries)
+            }
+            CacheMatch::Miss => {
+                let encoding = self
+                    .inner
+                    .encode(prompt.as_str(), false)
+                    .map_err(|error| anyhow!("encode tool prompt: {error}"))?;
+                let boundaries = self.safe_boundaries(&encoding, 0, 0);
+                (encoding.get_ids().to_vec(), boundaries)
+            }
+        };
+        self.tool_prompt_cache.insert(
+            CacheInsertKey::new(self.tool_prompt_cache_identity, message_key, kwargs_key),
+            prompt,
+            token_ids.clone(),
+            boundaries,
+        );
+        Ok(token_ids)
+    }
+
+    /// Snapshot counters and current occupancy for the native tool prompt cache.
+    pub fn tool_prompt_cache_stats(&self) -> ToolPromptCacheStats {
+        self.tool_prompt_cache.stats()
+    }
+
+    fn safe_boundaries(
+        &self,
+        encoding: &tokenizers::Encoding,
+        byte_offset: usize,
+        token_offset: usize,
+    ) -> Vec<SafeBoundary> {
+        encoding
+            .get_ids()
+            .iter()
+            .zip(encoding.get_offsets())
+            .enumerate()
+            .filter_map(|(index, (id, (_, end)))| {
+                (self.tool_prompt_cache_boundaries.contains(id) && *end > 0).then_some(
+                    SafeBoundary {
+                        byte_offset: byte_offset + *end,
+                        token_count: token_offset + index + 1,
+                    },
+                )
+            })
+            .collect()
     }
 
     /// True iff a chat template was provided.
     pub fn has_chat_template(&self) -> bool {
         self.chat.is_some()
     }
+
+    /// Native tool-call syntax recognized from the active chat template.
+    pub fn tool_dialect(&self) -> Option<ToolDialect> {
+        self.tool_dialect
+    }
+
+    /// Compile one immutable request plan for the active native tool dialect.
+    pub fn compile_tool_constraint(
+        &self,
+        tools: &[ToolDefinition],
+        options: &ToolConstraintOptions,
+    ) -> Result<ConstraintPlan> {
+        match (self.tool_dialect, self.constraint.as_ref()) {
+            (Some(ToolDialect::Qwen35), Some(constraint)) => {
+                constraint.compile_qwen_tools(tools, options)
+            }
+            (Some(ToolDialect::Gemma), Some(constraint)) => {
+                constraint.compile_gemma_tools(tools, options)
+            }
+            (Some(ToolDialect::Glm), Some(constraint)) => {
+                constraint.compile_glm_tools(tools, options)
+            }
+            (Some(ToolDialect::Llama), Some(constraint)) => {
+                constraint.compile_llama_tools(tools, options)
+            }
+            (Some(ToolDialect::MiniCpmV46), Some(constraint)) => {
+                constraint.compile_qwen_tools(tools, options)
+            }
+            (Some(ToolDialect::MiniCpm5), Some(constraint)) => {
+                constraint.compile_minicpm5_tools(tools, options)
+            }
+            _ => Err(anyhow!(
+                "tokenizer does not provide a supported constrained tool dialect"
+            )),
+        }
+    }
+}
+
+fn tool_prompt_cache_identity(
+    tokenizer_bytes: &[u8],
+    chat_template: Option<&str>,
+    cfg: &TokenizerConfig,
+    model_type: Option<&str>,
+) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    for part in [
+        tokenizer_bytes,
+        chat_template.unwrap_or_default().as_bytes(),
+        cfg.bos_token.as_deref().unwrap_or_default().as_bytes(),
+        cfg.eos_token.as_deref().unwrap_or_default().as_bytes(),
+        cfg.pad_token.as_deref().unwrap_or_default().as_bytes(),
+        model_type.unwrap_or_default().as_bytes(),
+    ] {
+        digest.update(part.len().to_le_bytes());
+        digest.update(part);
+    }
+    digest.finalize().into()
 }
 
 fn resolve_eos_token_ids(tok: &tokenizers::Tokenizer, cfg: &TokenizerConfig) -> Vec<u32> {

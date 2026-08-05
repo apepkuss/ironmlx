@@ -2,6 +2,7 @@
 
 pub mod cache;
 pub mod chat_template;
+pub mod constrained;
 pub mod generate;
 pub mod image_input;
 pub mod loader;
@@ -18,6 +19,8 @@ pub mod server;
 pub mod speculative;
 pub(crate) mod speculative_qualification;
 pub mod tokenizer;
+pub mod tool_calling;
+mod tool_prompt_cache;
 
 pub use cache::KVCache;
 pub use chat_template::{ChatTemplate, Message};
@@ -31,3 +34,4 @@ pub use model::Model;
 pub use sampler::Sampler;
 pub use scheduler::{Phase, RequestId, RequestState, Scheduler, SchedulerError, StepEvent};
 pub use tokenizer::Tokenizer;
+pub use tool_calling::{AgentMessage, ToolCall, ToolDefinition, ToolDialect};

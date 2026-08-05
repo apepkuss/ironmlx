@@ -1,7 +1,8 @@
 //! Standard Llama-family top-level model.
 //!
-//! `embed_tokens → [LlamaDecoderLayer; num_hidden_layers] → norm → lm_head`.
-//! Separate `lm_head` (`tie_word_embeddings = false` for MiniCPM5-1B).
+//! `embed_tokens → [LlamaDecoderLayer; num_hidden_layers] → norm → output`.
+//! The output is either a separate `lm_head` (MiniCPM5-1B) or the tied token
+//! embedding projection (Llama 3.1/3.2).
 //!
 //! # Engine contract notes
 //! - **`position_ids` is ignored.** Like `glm4_moe_lite`, the RoPE offset is
@@ -44,8 +45,8 @@ pub struct LlamaModel {
     embed_tokens: Embedding,
     layers: Vec<LlamaDecoderLayer>,
     norm: RmsNorm,
-    /// Output projection (separate weight; `tie_word_embeddings = false`).
-    lm_head: Linear,
+    /// Separate output projection when embeddings are not tied.
+    lm_head: Option<Linear>,
     exact_batched_verify_precision_qualified: bool,
     cfg: LlamaConfig,
 }
@@ -131,12 +132,6 @@ impl LlamaModel {
     }
 
     pub fn from_loader_with_config(loader: &Loader, cfg: LlamaConfig) -> Result<Self> {
-        if cfg.tie_word_embeddings {
-            return Err(anyhow!(
-                "LlamaModel: tie_word_embeddings = true not supported (MiniCPM5-1B \
-                 ships a separate lm_head); got true"
-            ));
-        }
         let embed_tokens = Embedding::from_loader(loader, "model.embed_tokens")
             .context("loading LlamaModel embed_tokens")?;
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers as usize);
@@ -148,11 +143,17 @@ impl LlamaModel {
         }
         let norm = RmsNorm::from_loader(loader, "model.norm", cfg.rms_norm_eps)
             .context("loading LlamaModel norm")?;
-        let lm_head =
-            Linear::from_loader(loader, "lm_head").context("loading LlamaModel lm_head")?;
+        let lm_head = (!cfg.tie_word_embeddings)
+            .then(|| Linear::from_loader(loader, "lm_head").context("loading LlamaModel lm_head"))
+            .transpose()?;
+        let output_prefix = if cfg.tie_word_embeddings {
+            "model.embed_tokens"
+        } else {
+            "lm_head"
+        };
         let exact_batched_verify_precision_qualified =
             super::speculative::exact_batched_verify_precision_qualified(
-                loader.quant_meta_for("lm_head"),
+                loader.quant_meta_for(output_prefix),
                 loader
                     .config_raw_value()
                     .get("torch_dtype")
@@ -188,8 +189,11 @@ impl LlamaModel {
         let attn = (h * nh * hd + 2 * h * nkv * hd + nh * hd * h) * l;
         // SwiGLU: gate, up [h×inter], down [inter×h].
         let mlp = 3 * h * inter * l;
-        // embed_tokens + lm_head (separate).
-        let embed_head = 2 * vocab * h;
+        let embed_head = if cfg.tie_word_embeddings {
+            vocab * h
+        } else {
+            2 * vocab * h
+        };
         attn + mlp + embed_head
     }
 
@@ -309,7 +313,7 @@ impl LlamaModel {
         } else {
             hidden
         };
-        self.lm_head.forward_on(&last_hidden, target)
+        self.project_hidden_on(&last_hidden, target)
     }
 
     /// Batched prefill returning per-row last-position logits `[B, 1, vocab]`.
@@ -334,7 +338,7 @@ impl LlamaModel {
         )?;
         let last_positions: Vec<i32> = per_row_lens.iter().map(|&l| l - 1).collect();
         let last_hidden = per_row_slice_last(&hidden, &last_positions, target)?;
-        self.lm_head.forward_on(&last_hidden, target)
+        self.project_hidden_on(&last_hidden, target)
     }
 
     /// Run transformer + final norm, returning hidden state `[B, S, H]` (no
@@ -362,9 +366,21 @@ impl LlamaModel {
             && hidden.ndim() == 3
             && hidden.shape().as_slice()[1] > 1
         {
-            self.lm_head.forward_positions_isolated_on(hidden, target)
+            match &self.lm_head {
+                Some(lm_head) => lm_head.forward_positions_isolated_on(hidden, target),
+                None => crate::models::qwen3_5::speculative::project_positions_isolated_on(
+                    hidden,
+                    target,
+                    |position_hidden, target| {
+                        self.embed_tokens.as_output_on(position_hidden, target)
+                    },
+                ),
+            }
         } else {
-            self.lm_head.forward_on(hidden, target)
+            match &self.lm_head {
+                Some(lm_head) => lm_head.forward_on(hidden, target),
+                None => self.embed_tokens.as_output_on(hidden, target),
+            }
         }
     }
 

@@ -475,6 +475,10 @@ impl MemoryTelemetry {
 pub struct MemoryGovernorSnapshot {
     pub pressure_level: PressureLevel,
     pub current_usage_bytes: usize,
+    /// Host memory that the governor considers reclaimable without exceeding
+    /// its dynamic process ceiling: free + inactive + the configured fraction
+    /// of active pages. `None` means host VM telemetry is unavailable.
+    pub available_ram_bytes: Option<usize>,
     pub reserved_bytes: usize,
     pub effective_ceiling_bytes: usize,
     pub static_ceiling_bytes: usize,
@@ -496,6 +500,7 @@ impl Default for MemoryGovernorSnapshot {
         Self {
             pressure_level: PressureLevel::Normal,
             current_usage_bytes: 0,
+            available_ram_bytes: None,
             reserved_bytes: 0,
             effective_ceiling_bytes: 0,
             static_ceiling_bytes: 0,
@@ -653,15 +658,16 @@ impl ProcessMemoryGovernor {
         let static_ceiling = total
             .saturating_sub(self.config.static_reserve_bytes)
             .max(1);
-        let dynamic_ceiling = telemetry.vm.map(|vm| {
-            current
-                .saturating_add(vm.free_bytes)
+        let available_ram_bytes = telemetry.vm.map(|vm| {
+            vm.free_bytes
                 .saturating_add(vm.inactive_bytes)
                 .saturating_add(
                     ((vm.active_bytes as f64) * self.config.active_reclaim_ratio) as usize,
                 )
                 .max(1)
         });
+        let dynamic_ceiling =
+            available_ram_bytes.map(|available| current.saturating_add(available).max(1));
         let metal_ceiling = telemetry.metal_limit_bytes.filter(|limit| *limit > 0);
         let mut effective_ceiling = static_ceiling;
         if let Some(dynamic) = dynamic_ceiling {
@@ -707,6 +713,7 @@ impl ProcessMemoryGovernor {
         }
 
         state.snapshot.current_usage_bytes = current;
+        state.snapshot.available_ram_bytes = available_ram_bytes;
         state.snapshot.effective_ceiling_bytes = effective_ceiling;
         state.snapshot.static_ceiling_bytes = static_ceiling;
         state.snapshot.dynamic_ceiling_bytes = dynamic_ceiling;
@@ -1353,6 +1360,7 @@ mod tests {
     fn effective_ceiling_is_minimum_of_static_dynamic_and_metal() {
         let governor = ProcessMemoryGovernor::new(config()).unwrap();
         let snapshot = governor.update(telemetry(gib(10)));
+        assert_eq!(snapshot.available_ram_bytes, Some(gib(14)));
         assert_eq!(snapshot.static_ceiling_bytes, gib(28));
         assert_eq!(snapshot.dynamic_ceiling_bytes, Some(gib(24)));
         assert_eq!(snapshot.metal_ceiling_bytes, Some(gib(24)));

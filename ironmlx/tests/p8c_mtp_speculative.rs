@@ -1,3 +1,7 @@
+mod common;
+
+use common::constrained::{byte_vocab_size, weather_constraint_plan_with_options};
+use ironmlx::core::constrained::{ToolChoiceConstraint, ToolConstraintOptions};
 use ironmlx::core::speculative::{
     resolve_speculative_tokens, MtpSpeculativeConfig, MtpSpeculativeModel, MtpTextGenerationStream,
 };
@@ -162,16 +166,17 @@ impl ironmlx::core::Model for FakeMtpModel {
             idx
         };
         let seq = hidden.shape().as_slice()[1] as usize;
-        let mut flat = vec![0.0_f32; seq * 128];
+        let vocab = byte_vocab_size();
+        let mut flat = vec![0.0_f32; seq * vocab];
         let tokens: Vec<usize> = match call_idx {
             0 => vec![10],
             1 => vec![11, 12, 13],
             _ => vec![0; seq],
         };
         for (row, token) in tokens.into_iter().enumerate().take(seq) {
-            flat[row * 128 + token] = 100.0;
+            flat[row * vocab + token] = 100.0;
         }
-        Ok((&flat[..], &[1_i32, seq as i32, 128_i32][..]).try_into()?)
+        Ok((&flat[..], &[1_i32, seq as i32, vocab as i32][..]).try_into()?)
     }
 
     fn model_meta(&self) -> ironmlx::core::memory_budget::ModelMeta {
@@ -253,11 +258,12 @@ impl MtpSpeculativeModel for FakeMtpModel {
             idx
         };
         let token = if call_idx == 0 { 11 } else { 99 };
-        let mut flat = vec![0.0_f32; 128];
+        let vocab = byte_vocab_size();
+        let mut flat = vec![0.0_f32; vocab];
         flat[token] = 100.0;
         Ok(ironmlx::nn::MtpStepOutput {
             hidden_states,
-            logits: (&flat[..], &[1_i32, 1_i32, 128_i32][..]).try_into()?,
+            logits: (&flat[..], &[1_i32, 1_i32, vocab as i32][..]).try_into()?,
         })
     }
 }
@@ -302,6 +308,7 @@ fn mtp_stream_commits_accepted_prefix_without_replay_after_partial_reject() {
         image_grid_thw: None,
         image_spatial_merge_size: 2,
         image_token_id: 248056,
+        constraint: None,
     };
     let cfg = MtpSpeculativeConfig::new(2, request.sampler).unwrap();
     let mut stream =
@@ -325,4 +332,86 @@ fn mtp_stream_commits_accepted_prefix_without_replay_after_partial_reject() {
     let third = stream.next_token().unwrap().unwrap();
     assert_eq!(third.token, 12);
     assert_eq!(third.finish_reason, Some("length"));
+}
+
+#[test]
+fn constrained_sampled_mtp_executes_exact_sampling_path() {
+    let model = FakeMtpModel::new();
+    let mtp = FakeMtpHead;
+    let tokenizer = minimal_tokenizer();
+    let request = GenerateRequest {
+        prompt_ids: vec![1, 2],
+        max_new_tokens: 3,
+        sampler: Sampler::greedy().with_temperature(0.7).with_seed(42),
+        stop_token_ids: vec![256],
+        prefill_chunk_size: 0,
+        decode_cadence_mid_chunk_cap: 256,
+        kv_cache_turboquant_bits: None,
+        pixel_values: None,
+        image_grid_thw: None,
+        image_spatial_merge_size: 2,
+        image_token_id: 248056,
+        constraint: Some(weather_constraint_plan_with_options(
+            &ToolConstraintOptions {
+                choice: ToolChoiceConstraint::Auto,
+                allow_parallel_calls: false,
+            },
+        )),
+    };
+    let cfg = MtpSpeculativeConfig::new(2, request.sampler).unwrap();
+    let mut stream =
+        MtpTextGenerationStream::new_text_only(&model, &mtp, &tokenizer, request, cfg).unwrap();
+
+    let first = stream.next_token().unwrap().unwrap();
+    assert_eq!(first.token, 10);
+    let stats = stream.stats();
+    assert_eq!(stats.windows, 1);
+    assert_eq!(stats.exact_sampling_windows, 1);
+    assert!(stats.exact_acceptance_draws > 0);
+
+    let second = stream.next_token().unwrap().unwrap();
+    assert_eq!(second.token, 11);
+    let third = stream.next_token().unwrap().unwrap();
+    assert_eq!(third.token, 12);
+    assert_eq!(third.finish_reason, Some("length"));
+}
+
+#[test]
+fn constrained_mtp_rejects_length_before_required_tool_call_is_complete() {
+    let model = FakeMtpModel::new();
+    let mtp = FakeMtpHead;
+    let tokenizer = minimal_tokenizer();
+    let request = GenerateRequest {
+        prompt_ids: vec![1, 2],
+        max_new_tokens: 3,
+        sampler: Sampler::greedy(),
+        stop_token_ids: vec![256],
+        prefill_chunk_size: 0,
+        decode_cadence_mid_chunk_cap: 256,
+        kv_cache_turboquant_bits: None,
+        pixel_values: None,
+        image_grid_thw: None,
+        image_spatial_merge_size: 2,
+        image_token_id: 248056,
+        constraint: Some(weather_constraint_plan_with_options(
+            &ToolConstraintOptions {
+                choice: ToolChoiceConstraint::Required,
+                allow_parallel_calls: false,
+            },
+        )),
+    };
+    let cfg = MtpSpeculativeConfig::new(2, request.sampler).unwrap();
+    let mut stream =
+        MtpTextGenerationStream::new_text_only(&model, &mtp, &tokenizer, request, cfg).unwrap();
+
+    assert!(stream.next_token().unwrap().is_some());
+    assert!(stream.next_token().unwrap().is_some());
+    let error = stream
+        .next_token()
+        .expect_err("an incomplete required tool call must not finish at the length limit");
+    assert!(
+        format!("{error:#}")
+            .contains("max_new_tokens reached before constrained output became complete"),
+        "unexpected error: {error:#}"
+    );
 }

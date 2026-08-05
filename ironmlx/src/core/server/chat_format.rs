@@ -83,7 +83,40 @@ impl Content {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ChatMessage {
     pub role: String,
+    #[serde(default = "empty_content", deserialize_with = "deserialize_content")]
     pub content: Content,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ChatToolCall>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatToolCall {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub function: ChatFunctionCall,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatFunctionCall {
+    pub name: String,
+    pub arguments: String,
+}
+
+fn empty_content() -> Content {
+    Content::Text(String::new())
+}
+
+fn deserialize_content<'de, D>(deserializer: D) -> std::result::Result<Content, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<Content>::deserialize(deserializer)
+        .map(|content| content.unwrap_or_else(empty_content))
 }
 
 impl ChatMessage {
@@ -92,6 +125,8 @@ impl ChatMessage {
         ChatMessage {
             role: role.into(),
             content: Content::Text(content.into()),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
         }
     }
 }
