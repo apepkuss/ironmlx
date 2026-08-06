@@ -219,6 +219,99 @@ curl http://127.0.0.1:9068/v1/messages \
   }'
 ```
 
+### Anthropic client tools
+
+`/v1/messages` 支持 Anthropic 原生客户端工具协议，并与 Chat Completions、Responses
+复用同一套模型工具模板、历史关联校验和 token 级约束解码：
+
+```json
+{
+  "model": "your-model-id",
+  "system": "回答要简洁。",
+  "messages": [{"role": "user", "content": "东京天气如何？"}],
+  "tools": [{
+    "name": "get_weather",
+    "description": "查询城市天气",
+    "input_schema": {
+      "type": "object",
+      "properties": {"city": {"type": "string"}},
+      "required": ["city"],
+      "additionalProperties": false
+    },
+    "strict": true
+  }],
+  "tool_choice": {"type": "auto"},
+  "max_tokens": 128,
+  "stream": false
+}
+```
+
+模型选择调用工具时，同步响应使用原生 `tool_use` content block，并以
+`stop_reason: "tool_use"` 结束：
+
+```json
+{
+  "type": "message",
+  "role": "assistant",
+  "content": [{
+    "type": "tool_use",
+    "id": "call_...",
+    "name": "get_weather",
+    "input": {"city": "东京"}
+  }],
+  "stop_reason": "tool_use"
+}
+```
+
+IronMLX 只生成调用信息，不执行函数、Shell、MCP、HTTP API 或其他外部工具。
+客户端执行工具后，必须在下一次请求中原样回灌 assistant `tool_use`，并在紧随的
+user message 中用同一 ID 提交 `tool_result`：
+
+```json
+{
+  "messages": [
+    {"role": "user", "content": "东京天气如何？"},
+    {"role": "assistant", "content": [{
+      "type": "tool_use",
+      "id": "toolu_123",
+      "name": "get_weather",
+      "input": {"city": "东京"}
+    }]},
+    {"role": "user", "content": [{
+      "type": "tool_result",
+      "tool_use_id": "toolu_123",
+      "content": "晴，26°C",
+      "is_error": false
+    }]}
+  ],
+  "tools": [{
+    "name": "get_weather",
+    "input_schema": {
+      "type": "object",
+      "properties": {"city": {"type": "string"}},
+      "required": ["city"],
+      "additionalProperties": false
+    }
+  }]
+}
+```
+
+工具协议边界：
+
+- `tool_choice` 支持 `auto`、`any`、指定 `tool` 和 `none`；前三种支持
+  `disable_parallel_tool_use`。`any` 要求至少一个调用，指定 `tool` 要求调用该工具，
+  禁用并行后一个 assistant turn 最多一个调用。
+- 一个 assistant message 可同时包含文本和一个或多个 `tool_use`；一个 user message
+  可回传多个 `tool_result`，随后继续附带文本或图片。调用 ID 必须非空、唯一且完整
+  配对；孤立、重复、遗漏或顺序错误会在生成前返回 400。
+- SSE 使用原生 `message_start` / `content_block_*` / `message_delta` /
+  `message_stop` 生命周期。工具块以 `tool_use` 开始，参数通过一个或多个
+  `input_json_delta.partial_json` 增量发送，客户端应拼接后再解析 JSON。
+- `input_schema` 与 `strict` 使用上文 Structured Outputs 所述的受支持 Schema 子集；
+  不支持的类型、关键字或模型模板会在生成前明确返回 400，不会静默降级为文本。
+- 支持范围是客户端定义的函数工具。Anthropic 托管工具、服务器工具、MCP、
+  computer use、Web Search、Code Execution 等不属于本地推理服务能力。
+
 ## 图片输入
 
 OpenAI 兼容接口只接受 JPEG、PNG 或 WebP 的严格 `data:` URL；不会抓取远程

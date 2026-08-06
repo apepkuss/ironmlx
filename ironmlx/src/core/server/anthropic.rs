@@ -1,16 +1,14 @@
 //! Anthropic-compatible Messages API: /v1/messages.
 //!
-//! Streaming uses 6-event SSE sequence:
-//!   message_start → content_block_start → N × content_block_delta
-//!     → content_block_stop → message_delta → message_stop
+//! Streaming uses the native SSE lifecycle:
+//!   message_start → one or more content_block_start/delta/stop groups
+//!     → message_delta → message_stop
 //!
 //! Each event is framed as `event: <type>\ndata: <json>\n\n`.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use axum::{
     body::{Body, Bytes},
-    extract::State,
+    extract::{rejection::JsonRejection, State},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -19,19 +17,28 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::core::constrained::ToolConstraintOptions;
 use crate::core::generate::{GenerateRequest, GenerationStream};
+#[cfg(test)]
 use crate::core::image_input::{ImageInputError, ImageRequestBudget};
 use crate::core::model::Model;
+#[cfg(test)]
 use crate::core::sampler::Sampler;
 use crate::core::scheduler::DenseVlMethods;
-use crate::core::server::chat_format::render_and_encode;
+use crate::core::server::chat_format::{
+    render_and_encode, ChatFunctionCall, ChatMessage, ChatToolCall, Content, ContentPart, ImageUrl,
+};
 use crate::core::server::scheduler_actor::{AdmitReply, SchedulerCommand};
+#[cfg(test)]
 use crate::core::server::vision::{DecodedMessage, DecodedPart};
 use crate::core::speculative::MtpSpeculativeConfig;
-
-use super::{
-    request_token_capacity_error_response, AppState, Gemma4DrafterAppState, SamplingDefaults,
+use crate::core::tool_calling::{
+    AssistantOutputEvent, ToolCall, ToolCallParser, ToolDefinition, ToolDialect,
 };
+
+#[cfg(test)]
+use super::SamplingDefaults;
+use super::{request_token_capacity_error_response, AppState, Gemma4DrafterAppState};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -90,8 +97,41 @@ fn generation_err_to_response(err: anyhow::Error) -> Response {
     }
 }
 
+pub(crate) fn anthropic_error_response(status: StatusCode, message: String) -> Response {
+    let error_type = if status.is_client_error() {
+        "invalid_request_error"
+    } else {
+        "api_error"
+    };
+    (
+        status,
+        Json(serde_json::json!({
+            "type": "error",
+            "error": {
+                "type": error_type,
+                "message": message
+            }
+        })),
+    )
+        .into_response()
+}
+
+fn format_stream_error(error: &anyhow::Error) -> Bytes {
+    format_event(
+        "error",
+        &serde_json::json!({
+            "type": "error",
+            "error": {
+                "type": "api_error",
+                "message": format!("{error:#}")
+            }
+        }),
+    )
+}
+
 /// Anthropic native image source — base64 only (URL source is out of scope).
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AnthropicImageSource {
     Base64 { media_type: String, data: String },
@@ -99,10 +139,86 @@ enum AnthropicImageSource {
 
 /// Anthropic native content block.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AnthropicContentPart {
+    Text {
+        text: String,
+    },
+    Image {
+        source: AnthropicImageSource,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+    ToolResult {
+        tool_use_id: String,
+        #[serde(default)]
+        content: Option<AnthropicToolResultContent>,
+        #[serde(default)]
+        is_error: bool,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum AnthropicToolResultContent {
+    Text(String),
+    Parts(Vec<AnthropicToolResultPart>),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum AnthropicToolResultPart {
     Text { text: String },
     Image { source: AnthropicImageSource },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum AnthropicSystemPrompt {
+    Text(String),
+    Parts(Vec<AnthropicSystemPart>),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum AnthropicSystemPart {
+    Text { text: String },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AnthropicToolDefinition {
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+    input_schema: serde_json::Value,
+    #[serde(default)]
+    strict: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum AnthropicToolChoice {
+    Auto {
+        #[serde(default)]
+        disable_parallel_tool_use: bool,
+    },
+    Any {
+        #[serde(default)]
+        disable_parallel_tool_use: bool,
+    },
+    Tool {
+        name: String,
+        #[serde(default)]
+        disable_parallel_tool_use: bool,
+    },
+    None,
 }
 
 /// Anthropic message content: plain string or an array of content blocks.
@@ -115,16 +231,24 @@ enum AnthropicContent {
 
 /// Anthropic message (private wire type; not shared with the OpenAI endpoint).
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct AnthropicMessage {
     role: String,
     content: AnthropicContent,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MessagesRequest {
     #[serde(default)]
     pub model: Option<String>,
     pub(crate) messages: Vec<AnthropicMessage>,
+    #[serde(default)]
+    system: Option<AnthropicSystemPrompt>,
+    #[serde(default)]
+    tools: Option<Vec<AnthropicToolDefinition>>,
+    #[serde(default)]
+    tool_choice: Option<AnthropicToolChoice>,
     #[serde(default = "default_max_tokens")]
     pub max_tokens: usize,
     #[serde(default)]
@@ -150,10 +274,16 @@ struct Usage {
 }
 
 #[derive(Debug, Serialize)]
-struct ContentBlockText {
-    #[serde(rename = "type")]
-    kind: &'static str,
-    text: String,
+#[serde(tag = "type", rename_all = "snake_case")]
+enum MessageContentBlock {
+    Text {
+        text: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -162,24 +292,18 @@ struct MessageEnvelope {
     #[serde(rename = "type")]
     kind: &'static str,
     role: &'static str,
-    content: Vec<ContentBlockText>,
+    content: Vec<MessageContentBlock>,
     model: String,
     stop_reason: Option<&'static str>,
     stop_sequence: Option<String>,
     usage: Usage,
 }
 
-fn now_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 fn gen_msg_id() -> String {
-    format!("msg_{}", now_unix())
+    format!("msg_{}", uuid::Uuid::new_v4().simple())
 }
 
+#[cfg(test)]
 fn build_sampler(req: &MessagesRequest, defaults: SamplingDefaults) -> Sampler {
     let mut s = Sampler::greedy();
     if let Some(t) = req.temperature.or(defaults.temperature) {
@@ -213,6 +337,12 @@ enum MessagesRoute {
     GenerationStreamUnary,
 }
 
+struct ToolResponseContext {
+    dialect: ToolDialect,
+    definitions: Vec<ToolDefinition>,
+    constraint_options: ToolConstraintOptions,
+}
+
 fn messages_route(stream: bool, use_scheduler: bool) -> MessagesRoute {
     match (stream, use_scheduler) {
         (true, true) => MessagesRoute::SchedulerStream,
@@ -233,9 +363,258 @@ fn format_event(event_type: &str, payload: &serde_json::Value) -> Bytes {
     Bytes::from(buf)
 }
 
+fn image_source_to_openai(source: AnthropicImageSource) -> ImageUrl {
+    let AnthropicImageSource::Base64 { media_type, data } = source;
+    ImageUrl {
+        url: format!("data:{media_type};base64,{data}"),
+    }
+}
+
+fn content_from_parts(parts: Vec<ContentPart>) -> Content {
+    if parts
+        .iter()
+        .all(|part| matches!(part, ContentPart::Text { .. }))
+    {
+        return Content::Text(
+            parts
+                .into_iter()
+                .map(|part| match part {
+                    ContentPart::Text { text } => text,
+                    ContentPart::ImageUrl { .. } => unreachable!("checked text-only parts"),
+                })
+                .collect(),
+        );
+    }
+    Content::Parts(parts)
+}
+
+fn tool_result_content(content: Option<AnthropicToolResultContent>, is_error: bool) -> Content {
+    let mut parts = match content {
+        None => Vec::new(),
+        Some(AnthropicToolResultContent::Text(text)) => vec![ContentPart::Text { text }],
+        Some(AnthropicToolResultContent::Parts(parts)) => parts
+            .into_iter()
+            .map(|part| match part {
+                AnthropicToolResultPart::Text { text } => ContentPart::Text { text },
+                AnthropicToolResultPart::Image { source } => ContentPart::ImageUrl {
+                    image_url: image_source_to_openai(source),
+                },
+            })
+            .collect(),
+    };
+    if is_error {
+        parts.insert(
+            0,
+            ContentPart::Text {
+                text: "{\"is_error\":true}\n".to_owned(),
+            },
+        );
+    }
+    content_from_parts(parts)
+}
+
+fn system_message(system: AnthropicSystemPrompt) -> ChatMessage {
+    let text = match system {
+        AnthropicSystemPrompt::Text(text) => text,
+        AnthropicSystemPrompt::Parts(parts) => parts
+            .into_iter()
+            .map(|part| match part {
+                AnthropicSystemPart::Text { text } => text,
+            })
+            .collect(),
+    };
+    ChatMessage::text("system", text)
+}
+
+fn normalize_user_message(content: AnthropicContent) -> anyhow::Result<Vec<ChatMessage>> {
+    let AnthropicContent::Parts(parts) = content else {
+        let AnthropicContent::Text(text) = content else {
+            unreachable!()
+        };
+        return Ok(vec![ChatMessage::text("user", text)]);
+    };
+
+    let mut output = Vec::new();
+    let mut ordinary = Vec::new();
+    for part in parts {
+        match part {
+            AnthropicContentPart::Text { text } => ordinary.push(ContentPart::Text { text }),
+            AnthropicContentPart::Image { source } => ordinary.push(ContentPart::ImageUrl {
+                image_url: image_source_to_openai(source),
+            }),
+            AnthropicContentPart::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                anyhow::ensure!(
+                    ordinary.is_empty(),
+                    "tool_result blocks must precede text or image blocks in a user message"
+                );
+                output.push(ChatMessage {
+                    role: "tool".to_owned(),
+                    content: tool_result_content(content, is_error),
+                    tool_calls: Vec::new(),
+                    tool_call_id: Some(tool_use_id),
+                });
+            }
+            AnthropicContentPart::ToolUse { .. } => {
+                anyhow::bail!("tool_use blocks are only valid in assistant messages")
+            }
+        }
+    }
+    if !ordinary.is_empty() || output.is_empty() {
+        output.push(ChatMessage {
+            role: "user".to_owned(),
+            content: content_from_parts(ordinary),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        });
+    }
+    Ok(output)
+}
+
+fn normalize_assistant_message(content: AnthropicContent) -> anyhow::Result<ChatMessage> {
+    let AnthropicContent::Parts(parts) = content else {
+        let AnthropicContent::Text(text) = content else {
+            unreachable!()
+        };
+        return Ok(ChatMessage::text("assistant", text));
+    };
+
+    let mut text = String::new();
+    let mut tool_calls = Vec::new();
+    let mut saw_tool_use = false;
+    for part in parts {
+        match part {
+            AnthropicContentPart::Text { text: delta } => {
+                anyhow::ensure!(
+                    !saw_tool_use,
+                    "assistant text blocks cannot follow a tool_use block"
+                );
+                text.push_str(&delta);
+            }
+            AnthropicContentPart::ToolUse { id, name, input } => {
+                anyhow::ensure!(input.is_object(), "tool_use.input must be a JSON object");
+                saw_tool_use = true;
+                tool_calls.push(ChatToolCall {
+                    id,
+                    kind: "function".to_owned(),
+                    function: ChatFunctionCall {
+                        name,
+                        arguments: serde_json::to_string(&input)?,
+                    },
+                });
+            }
+            AnthropicContentPart::Image { .. } => {
+                anyhow::bail!("image blocks are only valid in user messages")
+            }
+            AnthropicContentPart::ToolResult { .. } => {
+                anyhow::bail!("tool_result blocks are only valid in user messages")
+            }
+        }
+    }
+    Ok(ChatMessage {
+        role: "assistant".to_owned(),
+        content: Content::Text(text),
+        tool_calls,
+        tool_call_id: None,
+    })
+}
+
+fn normalize_messages(
+    system: Option<AnthropicSystemPrompt>,
+    messages: Vec<AnthropicMessage>,
+) -> anyhow::Result<Vec<ChatMessage>> {
+    let mut output = Vec::new();
+    if let Some(system) = system {
+        output.push(system_message(system));
+    }
+    for message in messages {
+        match message.role.as_str() {
+            "user" => output.extend(normalize_user_message(message.content)?),
+            "assistant" => output.push(normalize_assistant_message(message.content)?),
+            role => anyhow::bail!("unsupported Anthropic message role `{role}`"),
+        }
+    }
+    Ok(output)
+}
+
+fn normalize_tool_choice(
+    choice: Option<AnthropicToolChoice>,
+) -> (Option<serde_json::Value>, Option<bool>) {
+    match choice {
+        None => (None, None),
+        Some(AnthropicToolChoice::Auto {
+            disable_parallel_tool_use,
+        }) => (
+            Some(serde_json::json!("auto")),
+            Some(!disable_parallel_tool_use),
+        ),
+        Some(AnthropicToolChoice::Any {
+            disable_parallel_tool_use,
+        }) => (
+            Some(serde_json::json!("required")),
+            Some(!disable_parallel_tool_use),
+        ),
+        Some(AnthropicToolChoice::Tool {
+            name,
+            disable_parallel_tool_use,
+        }) => (
+            Some(serde_json::json!({
+                "type": "function",
+                "function": {"name": name}
+            })),
+            Some(!disable_parallel_tool_use),
+        ),
+        Some(AnthropicToolChoice::None) => (Some(serde_json::json!("none")), None),
+    }
+}
+
+impl MessagesRequest {
+    pub(crate) fn into_chat_request(self) -> anyhow::Result<super::openai::ChatRequest> {
+        let messages = normalize_messages(self.system, self.messages)?;
+        let tools = self.tools.map(|tools| {
+            tools
+                .into_iter()
+                .map(|tool| super::openai::OpenAiTool {
+                    kind: "function".to_owned(),
+                    function: ToolDefinition {
+                        name: tool.name,
+                        description: tool.description,
+                        parameters: tool.input_schema,
+                        strict: tool.strict,
+                    },
+                })
+                .collect()
+        });
+        let (tool_choice, parallel_tool_calls) = normalize_tool_choice(self.tool_choice);
+        Ok(super::openai::ChatRequest {
+            model: self.model,
+            messages,
+            tools,
+            tool_choice,
+            parallel_tool_calls,
+            function_call: None,
+            functions: None,
+            stream: self.stream,
+            stream_options: None,
+            ignore_eos: false,
+            max_tokens: self.max_tokens,
+            temperature: self.temperature,
+            top_p: self.top_p,
+            top_k: self.top_k,
+            repetition_penalty: self.repetition_penalty,
+            seed: None,
+            chat_template_kwargs: None,
+        })
+    }
+}
+
 /// Decode Anthropic native content blocks into the wire-agnostic
 /// `DecodedMessage` list. base64 source is decoded in-process (no network);
 /// `media_type` is informational and not validated.
+#[cfg(test)]
 pub(crate) fn decode_anthropic_messages(
     messages: Vec<AnthropicMessage>,
 ) -> Result<Vec<DecodedMessage>, ImageInputError> {
@@ -260,6 +639,10 @@ pub(crate) fn decode_anthropic_messages(
                             let bytes = budget.decode_base64(&media_type, &data)?;
                             parts.push(DecodedPart::Image(bytes));
                         }
+                        AnthropicContentPart::ToolUse { .. }
+                        | AnthropicContentPart::ToolResult { .. } => {
+                            return Err(ImageInputError::DecodeFailed);
+                        }
                     }
                 }
             }
@@ -274,11 +657,20 @@ pub(crate) fn decode_anthropic_messages(
 
 pub async fn messages<M>(
     State(state): State<AppState<M>>,
-    Json(req): Json<MessagesRequest>,
+    payload: std::result::Result<Json<MessagesRequest>, JsonRejection>,
 ) -> Response
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
+    let req = match payload {
+        Ok(Json(req)) => req,
+        Err(error) => {
+            return anthropic_error_response(
+                StatusCode::BAD_REQUEST,
+                format!("invalid Messages request: {}", error.body_text()),
+            );
+        }
+    };
     messages_with_state(state, req).await
 }
 
@@ -286,29 +678,31 @@ pub(crate) async fn messages_with_state<M>(state: AppState<M>, req: MessagesRequ
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
-    // Extract fields before partially moving req.messages.
+    let req = match req.into_chat_request() {
+        Ok(req) => req,
+        Err(error) => {
+            return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{error:#}"));
+        }
+    };
     let max_tokens = req.max_tokens;
     let stream = req.stream;
     let model_label = req.model.clone().unwrap_or_else(|| state.model_id.clone());
-    let sampler = build_sampler(&req, state.sampling_defaults);
+    let sampler = super::openai::build_sampler(&req, state.sampling_defaults);
     if let Err(error) = super::validate_prompt_lookup_sampler(state.prompt_lookup_enabled, sampler)
     {
-        return (StatusCode::BAD_REQUEST, format!("{error:#}")).into_response();
+        return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{error:#}"));
     }
+    let prepared_tools =
+        match super::openai::prepare_tool_request(&req, state.tokenizer.tool_dialect()) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{error:#}"));
+            }
+        };
+    let original_messages = prepared_tools.as_ref().map(|_| req.messages.clone());
 
-    // Decode Anthropic wire format -> neutral DecodedMessage (base64 -> bytes).
-    let decoded = match decode_anthropic_messages(req.messages) {
-        Ok(d) => d,
-        Err(e) => return super::security::image_error_response(e.into()),
-    };
-
-    // Shared per-model preprocess + placeholder rewrite.
     let (flat_messages, pixel_values, image_grid_thw) =
-        match crate::core::server::vision::expand_decoded_messages_bounded(
-            decoded,
-            state.vision_input.clone(),
-        )
-        .await
+        match super::openai::expand_image_parts_in_messages(req.messages, &state.vision_input).await
         {
             Ok(t) => t,
             Err(e) => return super::security::image_error_response(e),
@@ -324,22 +718,55 @@ where
             &state.tokenizer,
         );
 
-    // Anthropic /v1/messages doesn't surface chat_template_kwargs in its
-    // public schema; pass None.
-    let prompt_ids = match render_and_encode(&state.tokenizer, &flat_messages, None) {
+    let prompt_ids_result = if let Some(prepared) = &prepared_tools {
+        super::openai::build_agent_messages(
+            original_messages
+                .as_deref()
+                .expect("captured for tool request"),
+            &flat_messages,
+        )
+        .and_then(|messages| {
+            let kwargs = super::openai::tool_template_kwargs(None, prepared)?;
+            super::openai::render_tool_prompt(&state.tokenizer, &messages, &kwargs)
+        })
+    } else {
+        render_and_encode(&state.tokenizer, &flat_messages, None)
+    };
+    let prompt_ids = match prompt_ids_result {
         Ok(ids) => ids,
         Err(e) => {
-            return (
+            return anthropic_error_response(
                 StatusCode::BAD_REQUEST,
                 format!("chat template / tokenize: {e}"),
-            )
-                .into_response();
+            );
         }
     };
     let input_tokens = prompt_ids.len() as u32;
     let prompt_len = prompt_ids.len();
     let scheduler_config = state.scheduler_request_config(prompt_len, max_tokens);
     let stop_token_ids = state.tokenizer.eos_token_ids().to_vec();
+    let constraint = match prepared_tools
+        .as_ref()
+        .filter(|prepared| prepared.constraint_options.is_some())
+        .map(|prepared| {
+            state.tokenizer.compile_tool_constraint(
+                &prepared.definitions,
+                prepared
+                    .constraint_options
+                    .as_ref()
+                    .expect("filtered constrained tool request"),
+            )
+        })
+        .transpose()
+    {
+        Ok(constraint) => constraint,
+        Err(error) => {
+            return anthropic_error_response(
+                StatusCode::BAD_REQUEST,
+                format!("compile tool decoding constraint: {error:#}"),
+            );
+        }
+    };
     let request = GenerateRequest {
         prompt_ids,
         max_new_tokens: max_tokens,
@@ -352,7 +779,7 @@ where
         image_grid_thw: image_grid_thw_opt,
         image_spatial_merge_size,
         image_token_id,
-        constraint: None,
+        constraint,
     };
 
     let use_scheduler = super::should_route_to_scheduler::<M>(
@@ -362,6 +789,41 @@ where
         state.paged_prefix_cache_enabled,
         state.force_scheduler_for_greedy && sampler.is_pipelinable(),
     );
+
+    if let Some(prepared) = prepared_tools.filter(|prepared| prepared.constraint_options.is_some())
+    {
+        let tool_context = ToolResponseContext {
+            dialect: prepared.dialect,
+            definitions: prepared.definitions,
+            constraint_options: prepared
+                .constraint_options
+                .expect("filtered constrained tool request"),
+        };
+        return match messages_route(stream, use_scheduler) {
+            MessagesRoute::SchedulerStream | MessagesRoute::SchedulerUnary => {
+                serve_via_scheduler_tools(
+                    state,
+                    request,
+                    model_label,
+                    input_tokens,
+                    stream,
+                    tool_context,
+                )
+                .await
+            }
+            MessagesRoute::GenerationStreamStream | MessagesRoute::GenerationStreamUnary => {
+                serve_via_gs_tools(
+                    state,
+                    request,
+                    model_label,
+                    input_tokens,
+                    stream,
+                    tool_context,
+                )
+                .await
+            }
+        };
+    }
 
     match messages_route(stream, use_scheduler) {
         MessagesRoute::SchedulerStream => {
@@ -381,8 +843,17 @@ where
 
 pub(crate) async fn gemma4_drafter_messages(
     State(state): State<Gemma4DrafterAppState>,
-    Json(req): Json<MessagesRequest>,
+    payload: std::result::Result<Json<MessagesRequest>, JsonRejection>,
 ) -> Response {
+    let req = match payload {
+        Ok(Json(req)) => req,
+        Err(error) => {
+            return anthropic_error_response(
+                StatusCode::BAD_REQUEST,
+                format!("invalid Messages request: {}", error.body_text()),
+            );
+        }
+    };
     messages_with_gemma4_drafter_state(state, req).await
 }
 
@@ -390,28 +861,34 @@ pub(crate) async fn messages_with_gemma4_drafter_state(
     state: Gemma4DrafterAppState,
     req: MessagesRequest,
 ) -> Response {
+    let req = match req.into_chat_request() {
+        Ok(req) => req,
+        Err(error) => {
+            return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{error:#}"));
+        }
+    };
     let max_tokens = req.max_tokens;
     let stream = req.stream;
     let model_label = req
         .model
         .clone()
         .unwrap_or_else(|| state.base.model_id.clone());
-    let sampler = build_sampler(&req, state.base.sampling_defaults);
+    let sampler = super::openai::build_sampler(&req, state.base.sampling_defaults);
     let _cfg = match MtpSpeculativeConfig::new(state.mtp_draft_tokens, sampler) {
         Ok(cfg) => cfg,
-        Err(e) => return (StatusCode::BAD_REQUEST, format!("{e:#}")).into_response(),
+        Err(e) => return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{e:#}")),
     };
-
-    let decoded = match decode_anthropic_messages(req.messages) {
-        Ok(d) => d,
-        Err(e) => return super::security::image_error_response(e.into()),
-    };
+    let prepared_tools =
+        match super::openai::prepare_tool_request(&req, state.base.tokenizer.tool_dialect()) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{error:#}"));
+            }
+        };
+    let original_messages = prepared_tools.as_ref().map(|_| req.messages.clone());
     let (flat_messages, pixel_values, image_grid_thw) =
-        match crate::core::server::vision::expand_decoded_messages_bounded(
-            decoded,
-            state.base.vision_input.clone(),
-        )
-        .await
+        match super::openai::expand_image_parts_in_messages(req.messages, &state.base.vision_input)
+            .await
         {
             Ok(t) => t,
             Err(e) => return super::security::image_error_response(e),
@@ -426,31 +903,65 @@ pub(crate) async fn messages_with_gemma4_drafter_state(
             &state.base.vision_input,
             &state.base.tokenizer,
         );
-    let prompt_ids = match render_and_encode(&state.base.tokenizer, &flat_messages, None) {
+    let prompt_ids_result = if let Some(prepared) = &prepared_tools {
+        super::openai::build_agent_messages(
+            original_messages
+                .as_deref()
+                .expect("captured for tool request"),
+            &flat_messages,
+        )
+        .and_then(|messages| {
+            let kwargs = super::openai::tool_template_kwargs(None, prepared)?;
+            super::openai::render_tool_prompt(&state.base.tokenizer, &messages, &kwargs)
+        })
+    } else {
+        render_and_encode(&state.base.tokenizer, &flat_messages, None)
+    };
+    let prompt_ids = match prompt_ids_result {
         Ok(ids) => ids,
         Err(e) => {
-            return (
+            return anthropic_error_response(
                 StatusCode::BAD_REQUEST,
                 format!("chat template / tokenize: {e}"),
-            )
-                .into_response();
+            );
         }
     };
     let input_tokens = prompt_ids.len() as u32;
     let prompt_len = prompt_ids.len();
     let total_tokens = prompt_len.saturating_add(max_tokens);
     if total_tokens > state.base.effective_cap_max {
-        return (
+        return anthropic_error_response(
             StatusCode::PAYLOAD_TOO_LARGE,
             format!(
                 "request too large: prompt_len + max_tokens = {total_tokens}, max = {}",
                 state.base.effective_cap_max
             ),
-        )
-            .into_response();
+        );
     }
     let scheduler_config = state.base.scheduler_request_config(prompt_len, max_tokens);
     let stop_token_ids = state.base.tokenizer.eos_token_ids().to_vec();
+    let constraint = match prepared_tools
+        .as_ref()
+        .filter(|prepared| prepared.constraint_options.is_some())
+        .map(|prepared| {
+            state.base.tokenizer.compile_tool_constraint(
+                &prepared.definitions,
+                prepared
+                    .constraint_options
+                    .as_ref()
+                    .expect("filtered constrained tool request"),
+            )
+        })
+        .transpose()
+    {
+        Ok(constraint) => constraint,
+        Err(error) => {
+            return anthropic_error_response(
+                StatusCode::BAD_REQUEST,
+                format!("compile tool decoding constraint: {error:#}"),
+            );
+        }
+    };
     let request = GenerateRequest {
         prompt_ids,
         max_new_tokens: max_tokens,
@@ -463,14 +974,825 @@ pub(crate) async fn messages_with_gemma4_drafter_state(
         image_grid_thw: image_grid_thw_opt,
         image_spatial_merge_size,
         image_token_id,
-        constraint: None,
+        constraint,
     };
+
+    if let Some(prepared) = prepared_tools.filter(|prepared| prepared.constraint_options.is_some())
+    {
+        let tool_context = ToolResponseContext {
+            dialect: prepared.dialect,
+            definitions: prepared.definitions,
+            constraint_options: prepared
+                .constraint_options
+                .expect("filtered constrained tool request"),
+        };
+        return serve_via_scheduler_tools(
+            state.base,
+            request,
+            model_label,
+            input_tokens,
+            stream,
+            tool_context,
+        )
+        .await;
+    }
 
     if stream {
         serve_via_scheduler_stream(state.base, request, model_label, input_tokens).await
     } else {
         serve_via_scheduler_unary(state.base, request, model_label, input_tokens).await
     }
+}
+
+#[derive(Debug)]
+struct ParsedToolOutput {
+    content: String,
+    tool_calls: Vec<ToolCall>,
+    finish_reason: &'static str,
+    completion_tokens: u32,
+}
+
+fn collect_tool_events(output: &mut ParsedToolOutput, events: Vec<AssistantOutputEvent>) {
+    for event in events {
+        match event {
+            AssistantOutputEvent::TextDelta(text) => output.content.push_str(&text),
+            AssistantOutputEvent::ToolCall(call) => output.tool_calls.push(call),
+        }
+    }
+}
+
+fn validate_tool_output(options: &ToolConstraintOptions, calls: &[ToolCall]) -> anyhow::Result<()> {
+    let names = calls
+        .iter()
+        .map(|call| call.name.clone())
+        .collect::<Vec<_>>();
+    super::openai::validate_tool_choice_output(options, &names)
+}
+
+fn tool_unary_response(
+    id: String,
+    model_id: String,
+    input_tokens: u32,
+    output: ParsedToolOutput,
+) -> Response {
+    let has_tool_calls = !output.tool_calls.is_empty();
+    let mut content = Vec::new();
+    if !output.content.is_empty() {
+        content.push(MessageContentBlock::Text {
+            text: output.content,
+        });
+    }
+    content.extend(
+        output
+            .tool_calls
+            .into_iter()
+            .map(|call| MessageContentBlock::ToolUse {
+                id: call.id,
+                name: call.name,
+                input: call.arguments,
+            }),
+    );
+    if content.is_empty() {
+        content.push(MessageContentBlock::Text {
+            text: String::new(),
+        });
+    }
+    Json(MessageEnvelope {
+        id,
+        kind: "message",
+        role: "assistant",
+        content,
+        model: model_id,
+        stop_reason: Some(if has_tool_calls {
+            "tool_use"
+        } else {
+            output.finish_reason
+        }),
+        stop_sequence: None,
+        usage: Usage {
+            input_tokens,
+            output_tokens: output.completion_tokens,
+        },
+    })
+    .into_response()
+}
+
+pub(crate) fn collected_response(
+    model_id: String,
+    input_tokens: u32,
+    content: Option<String>,
+    tool_calls: Vec<ToolCall>,
+    finish_reason: &'static str,
+    completion_tokens: u32,
+) -> Response {
+    tool_unary_response(
+        gen_msg_id(),
+        model_id,
+        input_tokens,
+        ParsedToolOutput {
+            content: content.unwrap_or_default(),
+            tool_calls,
+            finish_reason,
+            completion_tokens,
+        },
+    )
+}
+
+fn utf8_fragments(value: &str, max_bytes: usize) -> Vec<&str> {
+    if value.is_empty() {
+        return vec![""];
+    }
+    let mut fragments = Vec::new();
+    let mut start = 0;
+    while start < value.len() {
+        let mut end = (start + max_bytes).min(value.len());
+        while !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        fragments.push(&value[start..end]);
+        start = end;
+    }
+    fragments
+}
+
+pub(crate) struct ToolStreamEncoder {
+    message_id: String,
+    model_id: String,
+    input_tokens: u32,
+    next_index: usize,
+    open_text_index: Option<usize>,
+    call_names: Vec<String>,
+}
+
+impl ToolStreamEncoder {
+    pub(crate) fn new(message_id: String, model_id: String, input_tokens: u32) -> Self {
+        Self {
+            message_id,
+            model_id,
+            input_tokens,
+            next_index: 0,
+            open_text_index: None,
+            call_names: Vec::new(),
+        }
+    }
+
+    pub(crate) fn message_start(&self) -> Bytes {
+        format_event(
+            "message_start",
+            &serde_json::json!({
+                "type": "message_start",
+                "message": {
+                    "id": self.message_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [],
+                    "model": self.model_id,
+                    "stop_reason": null,
+                    "stop_sequence": null,
+                    "usage": {"input_tokens": self.input_tokens, "output_tokens": 0}
+                }
+            }),
+        )
+    }
+
+    fn close_text(&mut self, frames: &mut Vec<Bytes>) {
+        if let Some(index) = self.open_text_index.take() {
+            frames.push(format_event(
+                "content_block_stop",
+                &serde_json::json!({"type": "content_block_stop", "index": index}),
+            ));
+        }
+    }
+
+    pub(crate) fn push_events(&mut self, events: Vec<AssistantOutputEvent>) -> Vec<Bytes> {
+        let mut frames = Vec::new();
+        for event in events {
+            match event {
+                AssistantOutputEvent::TextDelta(text) if !text.is_empty() => {
+                    let index = match self.open_text_index {
+                        Some(index) => index,
+                        None => {
+                            let index = self.next_index;
+                            self.next_index += 1;
+                            self.open_text_index = Some(index);
+                            frames.push(format_event(
+                                "content_block_start",
+                                &serde_json::json!({
+                                    "type": "content_block_start",
+                                    "index": index,
+                                    "content_block": {"type": "text", "text": ""}
+                                }),
+                            ));
+                            index
+                        }
+                    };
+                    frames.push(format_event(
+                        "content_block_delta",
+                        &serde_json::json!({
+                            "type": "content_block_delta",
+                            "index": index,
+                            "delta": {"type": "text_delta", "text": text}
+                        }),
+                    ));
+                }
+                AssistantOutputEvent::TextDelta(_) => {}
+                AssistantOutputEvent::ToolCall(call) => {
+                    self.close_text(&mut frames);
+                    let index = self.next_index;
+                    self.next_index += 1;
+                    self.call_names.push(call.name.clone());
+                    frames.push(format_event(
+                        "content_block_start",
+                        &serde_json::json!({
+                            "type": "content_block_start",
+                            "index": index,
+                            "content_block": {
+                                "type": "tool_use",
+                                "id": call.id,
+                                "name": call.name,
+                                "input": {}
+                            }
+                        }),
+                    ));
+                    let arguments = serde_json::to_string(&call.arguments)
+                        .expect("tool arguments are JSON values");
+                    for fragment in utf8_fragments(&arguments, 64) {
+                        frames.push(format_event(
+                            "content_block_delta",
+                            &serde_json::json!({
+                                "type": "content_block_delta",
+                                "index": index,
+                                "delta": {
+                                    "type": "input_json_delta",
+                                    "partial_json": fragment
+                                }
+                            }),
+                        ));
+                    }
+                    frames.push(format_event(
+                        "content_block_stop",
+                        &serde_json::json!({"type": "content_block_stop", "index": index}),
+                    ));
+                }
+            }
+        }
+        frames
+    }
+
+    pub(crate) fn finish(
+        mut self,
+        options: &ToolConstraintOptions,
+        model_finish: &'static str,
+        output_tokens: u32,
+    ) -> anyhow::Result<Vec<Bytes>> {
+        super::openai::validate_tool_choice_output(options, &self.call_names)?;
+        let mut frames = Vec::new();
+        self.close_text(&mut frames);
+        if self.next_index == 0 {
+            frames.push(format_event(
+                "content_block_start",
+                &serde_json::json!({
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {"type": "text", "text": ""}
+                }),
+            ));
+            frames.push(format_event(
+                "content_block_stop",
+                &serde_json::json!({"type": "content_block_stop", "index": 0}),
+            ));
+        }
+        let stop_reason = if self.call_names.is_empty() {
+            model_finish
+        } else {
+            "tool_use"
+        };
+        frames.push(format_event(
+            "message_delta",
+            &serde_json::json!({
+                "type": "message_delta",
+                "delta": {"stop_reason": stop_reason, "stop_sequence": null},
+                "usage": {"output_tokens": output_tokens}
+            }),
+        ));
+        frames.push(format_event(
+            "message_stop",
+            &serde_json::json!({"type": "message_stop"}),
+        ));
+        Ok(frames)
+    }
+}
+
+async fn serve_via_gs_tools<M>(
+    state: AppState<M>,
+    request: GenerateRequest,
+    model_id: String,
+    input_tokens: u32,
+    stream: bool,
+    context: ToolResponseContext,
+) -> Response
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    if stream {
+        serve_via_gs_tools_stream(state, request, model_id, input_tokens, context).await
+    } else {
+        serve_via_gs_tools_unary(state, request, model_id, input_tokens, context).await
+    }
+}
+
+async fn serve_via_scheduler_tools<M>(
+    state: AppState<M>,
+    request: GenerateRequest,
+    model_id: String,
+    input_tokens: u32,
+    stream: bool,
+    context: ToolResponseContext,
+) -> Response
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    if stream {
+        serve_via_scheduler_tools_stream(state, request, model_id, input_tokens, context).await
+    } else {
+        serve_via_scheduler_tools_unary(state, request, model_id, input_tokens, context).await
+    }
+}
+
+async fn serve_via_gs_tools_unary<M>(
+    state: AppState<M>,
+    request: GenerateRequest,
+    model_id: String,
+    input_tokens: u32,
+    context: ToolResponseContext,
+) -> Response
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    let id = gen_msg_id();
+    let ToolResponseContext {
+        dialect,
+        definitions,
+        constraint_options,
+    } = context;
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<ParsedToolOutput> {
+        let model_guard = state.model.blocking_lock();
+        let tokenizer = &*state.tokenizer;
+        let memory = super::begin_direct_request_memory(&state, &*model_guard, &request)?;
+        let mut generation = GenerationStream::new(&*model_guard, tokenizer, request)?;
+        let mut parser = ToolCallParser::new(
+            dialect,
+            uuid::Uuid::new_v4().simple().to_string(),
+            &definitions,
+        )?;
+        state.record_request_started(input_tokens);
+        let mut output = ParsedToolOutput {
+            content: String::new(),
+            tool_calls: Vec::new(),
+            finish_reason: "end_turn",
+            completion_tokens: 0,
+        };
+        let mut detok = tokenizer.decode_stream(dialect.skip_special_tokens());
+        let mut memory = Some(memory);
+        let mut finished = false;
+        while let Some(event) = generation.next_token()? {
+            if let Some(memory) = memory.take() {
+                memory.commit();
+            }
+            output.completion_tokens += 1;
+            state.runtime_usage.record_output_tokens(1);
+            let text = if event.finish_reason == Some("stop") {
+                String::new()
+            } else {
+                detok.step(event.token)?.unwrap_or_default()
+            };
+            collect_tool_events(&mut output, parser.push(&text)?);
+            if let Some(reason) = event.finish_reason {
+                output.finish_reason = match reason {
+                    "stop" => "end_turn",
+                    "length" => "max_tokens",
+                    other => other,
+                };
+                finished = true;
+                break;
+            }
+        }
+        anyhow::ensure!(finished, "generation ended before a terminal event");
+        let (events, _) = parser.finish()?;
+        collect_tool_events(&mut output, events);
+        validate_tool_output(&constraint_options, &output.tool_calls)?;
+        Ok(output)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(output)) => tool_unary_response(id, model_id, input_tokens, output),
+        Ok(Err(error)) => generation_err_to_response(error),
+        Err(error) => anthropic_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("generation task failed: {error}"),
+        ),
+    }
+}
+
+async fn admit_tool_request<M>(
+    state: &AppState<M>,
+    request: GenerateRequest,
+) -> std::result::Result<mpsc::UnboundedReceiver<crate::core::scheduler::StepEvent>, Response>
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    let (reply_tx, reply_rx) = oneshot::channel();
+    if state
+        .scheduler_handle
+        .cmd_tx
+        .send(SchedulerCommand::Admit { request, reply_tx })
+        .await
+        .is_err()
+    {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "scheduler actor unavailable",
+        )
+            .into_response());
+    }
+    match reply_rx.await {
+        Ok(Ok(AdmitReply { event_rx, .. })) => Ok(event_rx),
+        Ok(Err(error)) => Err(admit_err_to_response(error)),
+        Err(_) => Err((StatusCode::SERVICE_UNAVAILABLE, "scheduler reply lost").into_response()),
+    }
+}
+
+async fn serve_via_scheduler_tools_unary<M>(
+    state: AppState<M>,
+    request: GenerateRequest,
+    model_id: String,
+    input_tokens: u32,
+    context: ToolResponseContext,
+) -> Response
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    let id = gen_msg_id();
+    let mut event_rx = match admit_tool_request(&state, request).await {
+        Ok(event_rx) => event_rx,
+        Err(response) => return response,
+    };
+    let ToolResponseContext {
+        dialect,
+        definitions,
+        constraint_options,
+    } = context;
+    let mut parser = match ToolCallParser::new(
+        dialect,
+        uuid::Uuid::new_v4().simple().to_string(),
+        &definitions,
+    ) {
+        Ok(parser) => parser,
+        Err(error) => {
+            return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{error:#}"))
+        }
+    };
+    state.record_request_started(input_tokens);
+    let mut detok = state.tokenizer.decode_stream(dialect.skip_special_tokens());
+    let mut output = ParsedToolOutput {
+        content: String::new(),
+        tool_calls: Vec::new(),
+        finish_reason: "end_turn",
+        completion_tokens: 0,
+    };
+    let mut finished = false;
+    while let Some(event) = event_rx.recv().await {
+        output.completion_tokens += 1;
+        state.runtime_usage.record_output_tokens(1);
+        let text = if event.finish_reason == Some("stop") {
+            String::new()
+        } else {
+            match detok.step(event.token) {
+                Ok(text) => text.unwrap_or_default(),
+                Err(error) => {
+                    return anthropic_error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("detok: {error}"),
+                    );
+                }
+            }
+        };
+        let events = match parser.push(&text) {
+            Ok(events) => events,
+            Err(error) => {
+                return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{error:#}"))
+            }
+        };
+        collect_tool_events(&mut output, events);
+        if let Some(reason) = event.finish_reason {
+            output.finish_reason = match reason {
+                "stop" => "end_turn",
+                "length" => "max_tokens",
+                other => other,
+            };
+            finished = true;
+            break;
+        }
+    }
+    if !finished {
+        return anthropic_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "scheduler stream ended before a terminal event".to_owned(),
+        );
+    }
+    let (events, _) = match parser.finish() {
+        Ok(result) => result,
+        Err(error) => {
+            return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{error:#}"))
+        }
+    };
+    collect_tool_events(&mut output, events);
+    if let Err(error) = validate_tool_output(&constraint_options, &output.tool_calls) {
+        return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{error:#}"));
+    }
+    tool_unary_response(id, model_id, input_tokens, output)
+}
+
+fn tool_sse_response(rx: mpsc::Receiver<std::result::Result<Bytes, std::io::Error>>) -> Response {
+    let body = Body::from_stream(ReceiverStream::new(rx));
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(body)
+        .unwrap()
+}
+
+async fn serve_via_gs_tools_stream<M>(
+    state: AppState<M>,
+    request: GenerateRequest,
+    model_id: String,
+    input_tokens: u32,
+    context: ToolResponseContext,
+) -> Response
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+    let (init_tx, init_rx) = oneshot::channel::<anyhow::Result<()>>();
+    let message_id = gen_msg_id();
+    tokio::task::spawn_blocking(move || {
+        let ToolResponseContext {
+            dialect,
+            definitions,
+            constraint_options,
+        } = context;
+        let model_guard = state.model.blocking_lock();
+        let tokenizer = &*state.tokenizer;
+        let memory = match super::begin_direct_request_memory(&state, &*model_guard, &request) {
+            Ok(memory) => memory,
+            Err(error) => {
+                let _ = init_tx.send(Err(error));
+                return;
+            }
+        };
+        let mut generation = match GenerationStream::new(&*model_guard, tokenizer, request) {
+            Ok(generation) => generation,
+            Err(error) => {
+                let _ = init_tx.send(Err(error));
+                return;
+            }
+        };
+        let first_event = match generation.next_token() {
+            Ok(event) => event,
+            Err(error) => {
+                let _ = init_tx.send(Err(error));
+                return;
+            }
+        };
+        let mut parser = match ToolCallParser::new(
+            dialect,
+            uuid::Uuid::new_v4().simple().to_string(),
+            &definitions,
+        ) {
+            Ok(parser) => parser,
+            Err(error) => {
+                let _ = init_tx.send(Err(error));
+                return;
+            }
+        };
+        memory.commit();
+        state.record_request_started(input_tokens);
+        if init_tx.send(Ok(())).is_err() {
+            return;
+        }
+        let mut encoder = ToolStreamEncoder::new(message_id, model_id, input_tokens);
+        if tx.blocking_send(Ok(encoder.message_start())).is_err() {
+            return;
+        }
+        let mut detok = tokenizer.decode_stream(dialect.skip_special_tokens());
+        let mut output_tokens = 0_u32;
+        let mut model_finish = "end_turn";
+        let mut finished = false;
+        let mut first_event = first_event;
+        loop {
+            let event = match first_event.take() {
+                Some(event) => Some(event),
+                None => match generation.next_token() {
+                    Ok(event) => event,
+                    Err(error) => {
+                        let _ = tx.blocking_send(Ok(format_stream_error(&error)));
+                        return;
+                    }
+                },
+            };
+            let Some(event) = event else {
+                break;
+            };
+            output_tokens += 1;
+            state.runtime_usage.record_output_tokens(1);
+            let text = if event.finish_reason == Some("stop") {
+                String::new()
+            } else {
+                match detok.step(event.token) {
+                    Ok(text) => text.unwrap_or_default(),
+                    Err(error) => {
+                        let error = anyhow::anyhow!("detok: {error}");
+                        let _ = tx.blocking_send(Ok(format_stream_error(&error)));
+                        return;
+                    }
+                }
+            };
+            let events = match parser.push(&text) {
+                Ok(events) => events,
+                Err(error) => {
+                    let _ = tx.blocking_send(Ok(format_stream_error(&error)));
+                    return;
+                }
+            };
+            for frame in encoder.push_events(events) {
+                if tx.blocking_send(Ok(frame)).is_err() {
+                    return;
+                }
+            }
+            if let Some(reason) = event.finish_reason {
+                model_finish = match reason {
+                    "stop" => "end_turn",
+                    "length" => "max_tokens",
+                    other => other,
+                };
+                finished = true;
+                break;
+            }
+        }
+        if !finished {
+            let error = anyhow::anyhow!("generation ended before a terminal event");
+            let _ = tx.blocking_send(Ok(format_stream_error(&error)));
+            return;
+        }
+        let (events, _) = match parser.finish() {
+            Ok(result) => result,
+            Err(error) => {
+                let _ = tx.blocking_send(Ok(format_stream_error(&error)));
+                return;
+            }
+        };
+        for frame in encoder.push_events(events) {
+            if tx.blocking_send(Ok(frame)).is_err() {
+                return;
+            }
+        }
+        let frames = match encoder.finish(&constraint_options, model_finish, output_tokens) {
+            Ok(frames) => frames,
+            Err(error) => {
+                let _ = tx.blocking_send(Ok(format_stream_error(&error)));
+                return;
+            }
+        };
+        for frame in frames {
+            if tx.blocking_send(Ok(frame)).is_err() {
+                return;
+            }
+        }
+    });
+
+    match init_rx.await {
+        Ok(Ok(())) => tool_sse_response(rx),
+        Ok(Err(error)) => generation_err_to_response(error),
+        Err(error) => anthropic_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("generation initialization channel closed: {error}"),
+        ),
+    }
+}
+
+async fn serve_via_scheduler_tools_stream<M>(
+    state: AppState<M>,
+    request: GenerateRequest,
+    model_id: String,
+    input_tokens: u32,
+    context: ToolResponseContext,
+) -> Response
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    let mut event_rx = match admit_tool_request(&state, request).await {
+        Ok(event_rx) => event_rx,
+        Err(response) => return response,
+    };
+    let ToolResponseContext {
+        dialect,
+        definitions,
+        constraint_options,
+    } = context;
+    let mut parser = match ToolCallParser::new(
+        dialect,
+        uuid::Uuid::new_v4().simple().to_string(),
+        &definitions,
+    ) {
+        Ok(parser) => parser,
+        Err(error) => {
+            return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{error:#}"))
+        }
+    };
+    state.record_request_started(input_tokens);
+    let tokenizer = state.tokenizer.clone();
+    let runtime_usage = state.runtime_usage.clone();
+    let message_id = gen_msg_id();
+    let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+    tokio::spawn(async move {
+        let mut encoder = ToolStreamEncoder::new(message_id, model_id, input_tokens);
+        if tx.send(Ok(encoder.message_start())).await.is_err() {
+            return;
+        }
+        let mut detok = tokenizer.decode_stream(dialect.skip_special_tokens());
+        let mut output_tokens = 0_u32;
+        let mut model_finish = "end_turn";
+        let mut finished = false;
+        while let Some(event) = event_rx.recv().await {
+            output_tokens += 1;
+            runtime_usage.record_output_tokens(1);
+            let text = if event.finish_reason == Some("stop") {
+                String::new()
+            } else {
+                match detok.step(event.token) {
+                    Ok(text) => text.unwrap_or_default(),
+                    Err(error) => {
+                        let error = anyhow::anyhow!("detok: {error}");
+                        let _ = tx.send(Ok(format_stream_error(&error))).await;
+                        return;
+                    }
+                }
+            };
+            let events = match parser.push(&text) {
+                Ok(events) => events,
+                Err(error) => {
+                    let _ = tx.send(Ok(format_stream_error(&error))).await;
+                    return;
+                }
+            };
+            for frame in encoder.push_events(events) {
+                if tx.send(Ok(frame)).await.is_err() {
+                    return;
+                }
+            }
+            if let Some(reason) = event.finish_reason {
+                model_finish = match reason {
+                    "stop" => "end_turn",
+                    "length" => "max_tokens",
+                    other => other,
+                };
+                finished = true;
+                break;
+            }
+        }
+        if !finished {
+            let error = anyhow::anyhow!("scheduler stream ended before a terminal event");
+            let _ = tx.send(Ok(format_stream_error(&error))).await;
+            return;
+        }
+        let (events, _) = match parser.finish() {
+            Ok(result) => result,
+            Err(error) => {
+                let _ = tx.send(Ok(format_stream_error(&error))).await;
+                return;
+            }
+        };
+        for frame in encoder.push_events(events) {
+            if tx.send(Ok(frame)).await.is_err() {
+                return;
+            }
+        }
+        let frames = match encoder.finish(&constraint_options, model_finish, output_tokens) {
+            Ok(frames) => frames,
+            Err(error) => {
+                let _ = tx.send(Ok(format_stream_error(&error))).await;
+                return;
+            }
+        };
+        for frame in frames {
+            if tx.send(Ok(frame)).await.is_err() {
+                return;
+            }
+        }
+    });
+    tool_sse_response(rx)
 }
 
 async fn serve_via_gs_stream<M>(
@@ -860,10 +2182,7 @@ where
         id,
         kind: "message",
         role: "assistant",
-        content: vec![ContentBlockText {
-            kind: "text",
-            text: content,
-        }],
+        content: vec![MessageContentBlock::Text { text: content }],
         model: model_id,
         stop_reason: Some(stop_reason),
         stop_sequence: None,
@@ -945,10 +2264,7 @@ where
         id,
         kind: "message",
         role: "assistant",
-        content: vec![ContentBlockText {
-            kind: "text",
-            text: content,
-        }],
+        content: vec![MessageContentBlock::Text { text: content }],
         model: model_id,
         stop_reason: Some(stop_reason),
         stop_sequence: None,
@@ -1010,10 +2326,7 @@ mod tests {
             id: "msg_1".into(),
             kind: "message",
             role: "assistant",
-            content: vec![ContentBlockText {
-                kind: "text",
-                text: "hi".into(),
-            }],
+            content: vec![MessageContentBlock::Text { text: "hi".into() }],
             model: "qwen3.5-4b".into(),
             stop_reason: Some("end_turn"),
             stop_sequence: None,
@@ -1139,6 +2452,45 @@ mod tests {
     mod wire_tests {
         use super::*;
 
+        fn tool_schema() -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+                "additionalProperties": false
+            })
+        }
+
+        fn request_with_choice(choice: serde_json::Value) -> MessagesRequest {
+            serde_json::from_value(serde_json::json!({
+                "model": "local-model",
+                "system": [{"type": "text", "text": "Be exact."}],
+                "messages": [{"role": "user", "content": "weather?"}],
+                "tools": [{
+                    "name": "get_weather",
+                    "description": "Get weather",
+                    "input_schema": tool_schema(),
+                    "strict": true
+                }],
+                "tool_choice": choice,
+                "max_tokens": 32
+            }))
+            .unwrap()
+        }
+
+        fn event_payload(frame: &Bytes) -> serde_json::Value {
+            let text = std::str::from_utf8(frame).unwrap();
+            let data = text.split_once("\ndata: ").unwrap().1.trim();
+            serde_json::from_str(data).unwrap()
+        }
+
+        fn content_text(content: &Content) -> Option<&str> {
+            match content {
+                Content::Text(text) => Some(text),
+                Content::Parts(_) => None,
+            }
+        }
+
         #[test]
         fn parses_native_base64_image_block() {
             let body = r#"
@@ -1184,6 +2536,248 @@ mod tests {
                 ]
             }"#;
             assert!(serde_json::from_str::<AnthropicMessage>(body).is_err());
+        }
+
+        #[test]
+        fn normalizes_anthropic_tools_system_and_forced_choice() {
+            let chat = request_with_choice(serde_json::json!({
+                "type": "tool",
+                "name": "get_weather",
+                "disable_parallel_tool_use": true
+            }))
+            .into_chat_request()
+            .unwrap();
+
+            assert_eq!(chat.messages[0].role, "system");
+            assert_eq!(content_text(&chat.messages[0].content), Some("Be exact."));
+            let tools = chat.tools.as_ref().unwrap();
+            assert_eq!(tools.len(), 1);
+            assert_eq!(tools[0].function.name, "get_weather");
+            assert_eq!(tools[0].function.parameters, tool_schema());
+            assert_eq!(tools[0].function.strict, Some(true));
+            assert_eq!(
+                chat.tool_choice,
+                Some(serde_json::json!({
+                    "type": "function",
+                    "function": {"name": "get_weather"}
+                }))
+            );
+            assert_eq!(chat.parallel_tool_calls, Some(false));
+        }
+
+        #[test]
+        fn normalizes_tool_use_and_tool_result_lifecycle() {
+            let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+                "messages": [
+                    {"role": "user", "content": "weather?"},
+                    {"role": "assistant", "content": [
+                        {"type": "text", "text": "Checking."},
+                        {"type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": {"city": "Tokyo"}}
+                    ]},
+                    {"role": "user", "content": [
+                        {"type": "tool_result", "tool_use_id": "toolu_1", "content": "sunny"},
+                        {"type": "text", "text": "Summarize it."}
+                    ]}
+                ],
+                "tools": [{"name": "get_weather", "input_schema": tool_schema()}]
+            }))
+            .unwrap();
+            let chat = request.into_chat_request().unwrap();
+
+            assert_eq!(
+                chat.messages
+                    .iter()
+                    .map(|message| message.role.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["user", "assistant", "tool", "user"]
+            );
+            assert_eq!(chat.messages[1].tool_calls[0].id, "toolu_1");
+            assert_eq!(chat.messages[2].tool_call_id.as_deref(), Some("toolu_1"));
+            let agent =
+                super::super::super::openai::build_agent_messages(&chat.messages, &chat.messages)
+                    .unwrap();
+            assert_eq!(agent[1].tool_calls[0].id, "toolu_1");
+            assert_eq!(agent[2].tool_call_id.as_deref(), Some("toolu_1"));
+            assert_eq!(agent[2].content.as_deref(), Some("sunny"));
+        }
+
+        #[test]
+        fn preserves_tool_result_error_signal_for_native_templates() {
+            let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+                "messages": [
+                    {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {}}]},
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "is_error": true, "content": "timeout"}]}
+                ],
+                "tools": [{"name": "lookup", "input_schema": {"type": "object", "properties": {}, "additionalProperties": false}}]
+            }))
+            .unwrap();
+            let chat = request.into_chat_request().unwrap();
+            assert_eq!(
+                content_text(&chat.messages[1].content),
+                Some("{\"is_error\":true}\ntimeout")
+            );
+        }
+
+        #[test]
+        fn rejects_unknown_fields_and_invalid_block_roles() {
+            assert!(
+                serde_json::from_value::<MessagesRequest>(serde_json::json!({
+                    "messages": [],
+                    "unsupported": true
+                }))
+                .is_err()
+            );
+
+            let user_tool_use: MessagesRequest = serde_json::from_value(serde_json::json!({
+                "messages": [{"role": "user", "content": [{"type": "tool_use", "id": "x", "name": "f", "input": {}}]}]
+            }))
+            .unwrap();
+            assert!(user_tool_use.into_chat_request().is_err());
+
+            let scalar_input: MessagesRequest = serde_json::from_value(serde_json::json!({
+                "messages": [{"role": "assistant", "content": [{"type": "tool_use", "id": "x", "name": "f", "input": 1}]}]
+            }))
+            .unwrap();
+            assert!(scalar_input.into_chat_request().is_err());
+
+            let reordered_content: MessagesRequest = serde_json::from_value(serde_json::json!({
+                "messages": [{"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "x", "name": "f", "input": {}},
+                    {"type": "text", "text": "after"}
+                ]}]
+            }))
+            .unwrap();
+            assert!(reordered_content.into_chat_request().is_err());
+        }
+
+        #[test]
+        fn maps_all_anthropic_tool_choice_modes() {
+            let auto = request_with_choice(serde_json::json!({"type": "auto"}))
+                .into_chat_request()
+                .unwrap();
+            assert_eq!(auto.tool_choice, Some(serde_json::json!("auto")));
+            assert_eq!(auto.parallel_tool_calls, Some(true));
+
+            let any = request_with_choice(serde_json::json!({"type": "any"}))
+                .into_chat_request()
+                .unwrap();
+            assert_eq!(any.tool_choice, Some(serde_json::json!("required")));
+
+            let none = request_with_choice(serde_json::json!({"type": "none"}))
+                .into_chat_request()
+                .unwrap();
+            let prepared =
+                super::super::super::openai::prepare_tool_request(&none, Some(ToolDialect::Qwen35))
+                    .unwrap()
+                    .unwrap();
+            assert!(prepared.constraint_options.is_none());
+        }
+
+        #[tokio::test]
+        async fn unary_response_emits_native_tool_use_blocks() {
+            let response = collected_response(
+                "local-model".to_owned(),
+                12,
+                Some("I will check.".to_owned()),
+                vec![ToolCall {
+                    id: "toolu_1".to_owned(),
+                    name: "get_weather".to_owned(),
+                    arguments: serde_json::json!({"city": "Tokyo"}),
+                }],
+                "end_turn",
+                7,
+            );
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(value["stop_reason"], "tool_use");
+            assert_eq!(value["content"][0]["type"], "text");
+            assert_eq!(value["content"][1]["type"], "tool_use");
+            assert_eq!(value["content"][1]["id"], "toolu_1");
+            assert_eq!(value["content"][1]["input"]["city"], "Tokyo");
+        }
+
+        #[test]
+        fn stream_encoder_emits_parallel_tool_blocks_and_json_deltas() {
+            let mut encoder =
+                ToolStreamEncoder::new("msg_1".to_owned(), "local-model".to_owned(), 4);
+            let mut frames = vec![encoder.message_start()];
+            frames.extend(encoder.push_events(vec![
+                AssistantOutputEvent::TextDelta("Checking".to_owned()),
+                AssistantOutputEvent::ToolCall(ToolCall {
+                    id: "toolu_1".to_owned(),
+                    name: "weather".to_owned(),
+                    arguments: serde_json::json!({"city": "東京"}),
+                }),
+                AssistantOutputEvent::ToolCall(ToolCall {
+                    id: "toolu_2".to_owned(),
+                    name: "time".to_owned(),
+                    arguments: serde_json::json!({"zone": "Asia/Tokyo"}),
+                }),
+            ]));
+            frames.extend(
+                encoder
+                    .finish(&ToolConstraintOptions::default(), "end_turn", 9)
+                    .unwrap(),
+            );
+            let payloads = frames.iter().map(event_payload).collect::<Vec<_>>();
+            let starts = payloads
+                .iter()
+                .filter(|payload| payload["type"] == "content_block_start")
+                .collect::<Vec<_>>();
+            assert_eq!(starts.len(), 3);
+            assert_eq!(starts[0]["content_block"]["type"], "text");
+            assert_eq!(starts[1]["content_block"]["type"], "tool_use");
+            assert_eq!(starts[1]["index"], 1);
+            assert_eq!(starts[2]["index"], 2);
+
+            let partial_json = payloads
+                .iter()
+                .filter(|payload| payload["type"] == "content_block_delta" && payload["index"] == 1)
+                .filter_map(|payload| payload["delta"]["partial_json"].as_str())
+                .collect::<String>();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&partial_json).unwrap(),
+                serde_json::json!({"city": "東京"})
+            );
+            assert_eq!(
+                payloads
+                    .iter()
+                    .find(|payload| payload["type"] == "message_delta")
+                    .unwrap()["delta"]["stop_reason"],
+                "tool_use"
+            );
+        }
+
+        #[test]
+        fn stream_encoder_enforces_required_and_serial_choices() {
+            let required = ToolConstraintOptions {
+                choice: crate::core::constrained::ToolChoiceConstraint::Required,
+                allow_parallel_calls: true,
+            };
+            let encoder = ToolStreamEncoder::new("msg_1".to_owned(), "local-model".to_owned(), 1);
+            assert!(encoder.finish(&required, "end_turn", 1).is_err());
+
+            let serial = ToolConstraintOptions {
+                choice: crate::core::constrained::ToolChoiceConstraint::Auto,
+                allow_parallel_calls: false,
+            };
+            let mut encoder =
+                ToolStreamEncoder::new("msg_2".to_owned(), "local-model".to_owned(), 1);
+            encoder.push_events(vec![
+                AssistantOutputEvent::ToolCall(ToolCall {
+                    id: "a".to_owned(),
+                    name: "one".to_owned(),
+                    arguments: serde_json::json!({}),
+                }),
+                AssistantOutputEvent::ToolCall(ToolCall {
+                    id: "b".to_owned(),
+                    name: "two".to_owned(),
+                    arguments: serde_json::json!({}),
+                }),
+            ]);
+            assert!(encoder.finish(&serial, "end_turn", 1).is_err());
         }
     }
 }

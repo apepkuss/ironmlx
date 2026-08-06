@@ -4,7 +4,7 @@
 包含兼容的 `config.json`、tokenizer、chat template、权重布局和量化元数据。
 下载前预检与加载时完整性校验仍可能拒绝不兼容 checkpoint。
 
-| 模型族 | `model_type` | 文本 | 图片 | Chat/Responses tools | MTP/辅助 drafter | Prompt Lookup | KV cache |
+| 模型族 | `model_type` | 文本 | 图片 | Chat/Responses/Messages tools | MTP/辅助 drafter | Prompt Lookup | KV cache |
 | --- | --- | :---: | :---: | :---: | :---: | :---: | :---: |
 | Qwen 3.5 Dense / 声明相同类型的 Qwen 3.6 Dense | `qwen3_5` | 是 | 否 | 是，需原生工具模板 | 是 | 是 | 是 |
 | Qwen 3.5/3.6 MoE | `qwen3_5_moe` | 是 | 否 | 是，需原生工具模板 | 是 | 是 | 是 |
@@ -18,8 +18,9 @@
 只支持 `max_tokens`、`temperature` 与 `seed`；其他 causal 模型还支持 `top_p`、
 `top_k` 与 `repetition_penalty`。
 
-Chat/Responses tools 仅表示 OpenAI 协议的结构化函数调用生成与历史回灌；
-IronMLX 不执行工具。Responses API 为无状态接口，不持久化 response 或 conversation。
+Chat/Responses/Messages tools 仅表示 OpenAI 或 Anthropic 协议的结构化函数调用生成与
+历史回灌；IronMLX 不执行工具。Responses API 为无状态接口，不持久化 response 或
+conversation。
 即使其他模型的模板包含相似标记，也不会被推断为支持。
 Llama 3.1/3.2 的原生自定义函数协议只允许每个 assistant turn 产生一个工具调用；
 其独立的 built-in tool / `<|python_tag|>` 协议不属于 OpenAI `tools` 支持范围。

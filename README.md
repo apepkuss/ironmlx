@@ -16,7 +16,7 @@ Rust 推理引擎、MLX/Metal 运行时、模型管理 Dashboard，以及 OpenAI
 
 - 本地模型搜索、不可变快照下载、断点续传与完整性校验；
 - 多模型加载、卸载、固定、TTL 与内存保护；
-- OpenAI `/v1/chat/completions` 和 Anthropic `/v1/messages`；
+- OpenAI `/v1/chat/completions`、`/v1/responses` 和 Anthropic `/v1/messages`，均支持客户端函数工具调用协议；
 - 流式输出、连续批处理、分页 KV/前缀缓存、MTP 与 Prompt Lookup；
 - 文本及受控 base64 图片输入；
 - 默认仅监听 loopback；可选 LAN 模式使用 HTTPS 与 API Key。

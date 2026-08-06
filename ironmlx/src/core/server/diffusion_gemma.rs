@@ -24,7 +24,6 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::core::constrained::{ConstraintPlan, ToolConstraintOptions};
 use crate::core::server::chat_format::render_and_encode;
-use crate::core::server::vision::expand_decoded_messages;
 use crate::core::server::VisionInputConfig;
 use crate::core::tokenizer::Tokenizer;
 use crate::core::tool_calling::{
@@ -167,6 +166,29 @@ struct PreparedOpenAiRequest {
     tool_context: Option<ToolResponseContext>,
 }
 
+#[derive(Clone, Copy)]
+enum RequestProtocol {
+    OpenAi,
+    Responses,
+    Anthropic,
+}
+
+impl RequestProtocol {
+    fn invalid_request(self, message: String) -> Response {
+        match self {
+            Self::OpenAi => (StatusCode::BAD_REQUEST, message).into_response(),
+            Self::Responses => super::responses::error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                message,
+            ),
+            Self::Anthropic => {
+                super::anthropic::anthropic_error_response(StatusCode::BAD_REQUEST, message)
+            }
+        }
+    }
+}
+
 struct OpenAiStreamRequest {
     max_tokens: usize,
     temperature: f32,
@@ -281,32 +303,6 @@ struct OpenAiCompletionResponse {
     model: String,
     choices: Vec<OpenAiCompletionChoice>,
     usage: OpenAiUsage,
-}
-
-#[derive(Debug, Serialize)]
-struct AnthropicUsage {
-    input_tokens: u32,
-    output_tokens: u32,
-}
-
-#[derive(Debug, Serialize)]
-struct AnthropicContentBlockText {
-    #[serde(rename = "type")]
-    kind: &'static str,
-    text: String,
-}
-
-#[derive(Debug, Serialize)]
-struct AnthropicMessageEnvelope {
-    id: String,
-    #[serde(rename = "type")]
-    kind: &'static str,
-    role: &'static str,
-    content: Vec<AnthropicContentBlockText>,
-    model: String,
-    stop_reason: Option<&'static str>,
-    stop_sequence: Option<String>,
-    usage: AnthropicUsage,
 }
 
 #[derive(Debug, Serialize)]
@@ -697,7 +693,7 @@ fn format_anthropic_event(event_type: &str, payload: &serde_json::Value) -> Byte
 fn anthropic_error_event(message: &str) -> Bytes {
     let payload = serde_json::json!({
         "type": "error",
-        "error": {"message": message}
+        "error": {"type": "api_error", "message": message}
     });
     format_anthropic_event("error", &payload)
 }
@@ -768,12 +764,13 @@ async fn prepare_openai_request(
     state: &DiffusionGemmaAppState,
     req: super::openai::ChatRequest,
     output_schema: Option<serde_json::Value>,
+    protocol: RequestProtocol,
 ) -> std::result::Result<(PreparedOpenAiRequest, u32), Response> {
     let prepared_tools =
         match super::openai::prepare_tool_request(&req, state.tokenizer.tool_dialect()) {
             Ok(prepared) => prepared,
             Err(error) => {
-                return Err((StatusCode::BAD_REQUEST, format!("{error:#}")).into_response());
+                return Err(protocol.invalid_request(format!("{error:#}")));
             }
         };
     let original_messages = prepared_tools.as_ref().map(|_| req.messages.clone());
@@ -807,11 +804,7 @@ async fn prepare_openai_request(
     let prompt_ids = match prompt_ids_result {
         Ok(ids) => ids,
         Err(e) => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!("chat template / tokenize: {e}"),
-            )
-                .into_response());
+            return Err(protocol.invalid_request(format!("chat template / tokenize: {e}")));
         }
     };
     let input_tokens = prompt_ids.len() as u32;
@@ -857,11 +850,9 @@ async fn prepare_openai_request(
         ) {
         Ok(constraint) => constraint,
         Err(error) => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!("compile DiffusionGemma output constraint: {error:#}"),
-            )
-                .into_response());
+            return Err(protocol.invalid_request(format!(
+                "compile DiffusionGemma output constraint: {error:#}"
+            )));
         }
     };
     let tool_context = prepared_tools.and_then(|prepared| {
@@ -906,54 +897,14 @@ async fn prepare_openai_request(
 async fn prepare_anthropic_request(
     state: &DiffusionGemmaAppState,
     req: super::anthropic::MessagesRequest,
-) -> std::result::Result<(PreparedRequest, u32), Response> {
-    let decoded = match super::anthropic::decode_anthropic_messages(req.messages) {
-        Ok(d) => d,
-        Err(e) => {
-            return Err((StatusCode::BAD_REQUEST, format!("image decode: {e}")).into_response());
-        }
-    };
-    let (flat_messages, pixel_values, image_grid_thw) =
-        match expand_decoded_messages(decoded, &state.vision_input) {
-            Ok(t) => t,
-            Err(e) => {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    format!("image decode/preprocess: {e}"),
-                )
-                    .into_response());
-            }
-        };
-    let prompt_ids = match render_and_encode(&state.tokenizer, &flat_messages, None) {
-        Ok(ids) => ids,
-        Err(e) => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!("chat template / tokenize: {e}"),
-            )
-                .into_response());
-        }
-    };
-    let input_tokens = prompt_ids.len() as u32;
-    let (image_token_id, _) = crate::core::server::vision::derive_image_token_and_merge(
-        &state.vision_input,
-        &state.tokenizer,
-    );
-    Ok((
-        PreparedRequest {
-            prompt_ids,
-            pixel_values,
-            image_grid_thw: if image_grid_thw.is_empty() {
-                None
-            } else {
-                Some(image_grid_thw)
-            },
-            image_token_id,
-            constraint: None,
-            skip_special_tokens: true,
-        },
-        input_tokens,
-    ))
+) -> std::result::Result<(PreparedOpenAiRequest, u32), Response> {
+    let chat = req.into_chat_request().map_err(|error| {
+        super::anthropic::anthropic_error_response(
+            StatusCode::BAD_REQUEST,
+            format!("invalid Messages request: {error:#}"),
+        )
+    })?;
+    prepare_openai_request(state, chat, None, RequestProtocol::Anthropic).await
 }
 
 async fn generate_completion(
@@ -1501,6 +1452,7 @@ async fn anthropic_stream_completion(
     temperature: f32,
     model_label: String,
     input_tokens: u32,
+    tool_context: Option<ToolResponseContext>,
 ) -> Response {
     let lane_guard = match state.lane.clone().enter().await {
         Ok(guard) => guard,
@@ -1514,62 +1466,43 @@ async fn anthropic_stream_completion(
 
     tokio::task::spawn_blocking(move || {
         let _lane_guard = lane_guard;
-        let start_payload = serde_json::json!({
-            "type": "message_start",
-            "message": {
-                "id": id,
-                "type": "message",
-                "role": "assistant",
-                "content": [],
-                "model": model_label,
-                "stop_reason": null,
-                "stop_sequence": null,
-                "usage": {"input_tokens": input_tokens, "output_tokens": 0}
-            }
-        });
-        if tx
-            .blocking_send(Ok(format_anthropic_event("message_start", &start_payload)))
-            .is_err()
-        {
+        let mut encoder = super::anthropic::ToolStreamEncoder::new(id, model_label, input_tokens);
+        if tx.blocking_send(Ok(encoder.message_start())).is_err() {
             return;
         }
-        let block_start = serde_json::json!({
-            "type": "content_block_start",
-            "index": 0,
-            "content_block": {"type": "text", "text": ""}
-        });
-        if tx
-            .blocking_send(Ok(format_anthropic_event(
-                "content_block_start",
-                &block_start,
-            )))
-            .is_err()
-        {
-            return;
-        }
-
         let model_guard = state.model.blocking_lock();
         let tokenizer = &*state.tokenizer;
+        let mut parser = match tool_context
+            .as_ref()
+            .map(|context| {
+                ToolCallParser::new_with_output_schema(
+                    context.dialect,
+                    uuid::Uuid::new_v4().simple().to_string(),
+                    &context.definitions,
+                    context.output_schema.clone(),
+                )
+            })
+            .transpose()
+        {
+            Ok(parser) => parser,
+            Err(error) => {
+                let _ = tx.blocking_send(Ok(anthropic_error_event(&format!("{error:#}"))));
+                return;
+            }
+        };
         let mut connected = true;
         let mut output_tokens = 0_u32;
-        let mut stop_reason = "end_turn";
+        let mut model_finish = "end_turn";
         let generation_result = {
             let mut emit = |event: DiffusionGemmaGenerateEvent| -> Result<bool> {
                 if !diffusion_event_is_length_sentinel(&event) {
-                    output_tokens += 1;
-                    if !event.text.is_empty() {
-                        let delta = serde_json::json!({
-                            "type": "content_block_delta",
-                            "index": 0,
-                            "delta": {"type": "text_delta", "text": event.text}
-                        });
-                        if tx
-                            .blocking_send(Ok(format_anthropic_event(
-                                "content_block_delta",
-                                &delta,
-                            )))
-                            .is_err()
-                        {
+                    output_tokens = output_tokens.saturating_add(1);
+                    let events = match parser.as_mut() {
+                        Some(parser) => parser.push(&event.text)?,
+                        None => vec![AssistantOutputEvent::TextDelta(event.text)],
+                    };
+                    for frame in encoder.push_events(events) {
+                        if tx.blocking_send(Ok(frame)).is_err() {
                             connected = false;
                             return Ok(false);
                         }
@@ -1577,7 +1510,7 @@ async fn anthropic_stream_completion(
                     state.runtime_usage.record_output_tokens(1);
                 }
                 if let Some(reason) = event.finish_reason {
-                    stop_reason = anthropic_stop_reason(reason);
+                    model_finish = anthropic_stop_reason(reason);
                 }
                 Ok(true)
             };
@@ -1600,29 +1533,37 @@ async fn anthropic_stream_completion(
             let _ = tx.blocking_send(Ok(anthropic_error_event(&message)));
             return;
         }
-        let block_stop = serde_json::json!({"type": "content_block_stop", "index": 0});
-        if tx
-            .blocking_send(Ok(format_anthropic_event(
-                "content_block_stop",
-                &block_stop,
-            )))
-            .is_err()
-        {
-            return;
+        if let Some(parser) = parser {
+            let (events, _) = match parser.finish() {
+                Ok(result) => result,
+                Err(error) => {
+                    let _ = tx.blocking_send(Ok(anthropic_error_event(&format!("{error:#}"))));
+                    return;
+                }
+            };
+            for frame in encoder.push_events(events) {
+                if tx.blocking_send(Ok(frame)).is_err() {
+                    return;
+                }
+            }
         }
-        let msg_delta = serde_json::json!({
-            "type": "message_delta",
-            "delta": {"stop_reason": stop_reason, "stop_sequence": null},
-            "usage": {"output_tokens": output_tokens}
-        });
-        if tx
-            .blocking_send(Ok(format_anthropic_event("message_delta", &msg_delta)))
-            .is_err()
-        {
-            return;
+        let options = tool_context
+            .as_ref()
+            .map(|context| &context.constraint_options)
+            .cloned()
+            .unwrap_or_default();
+        let frames = match encoder.finish(&options, model_finish, output_tokens) {
+            Ok(frames) => frames,
+            Err(error) => {
+                let _ = tx.blocking_send(Ok(anthropic_error_event(&format!("{error:#}"))));
+                return;
+            }
+        };
+        for frame in frames {
+            if tx.blocking_send(Ok(frame)).is_err() {
+                return;
+            }
         }
-        let msg_stop = serde_json::json!({"type": "message_stop"});
-        let _ = tx.blocking_send(Ok(format_anthropic_event("message_stop", &msg_stop)));
     });
 
     let stream = ReceiverStream::new(rx);
@@ -1661,10 +1602,11 @@ pub async fn openai_chat_completions(
     let temperature = req.temperature.unwrap_or(0.0);
     let seed = req.seed;
     let model_label = req.model.clone().unwrap_or_else(|| state.model_id.clone());
-    let (prepared, prompt_tokens) = match prepare_openai_request(&state, req, None).await {
-        Ok(t) => t,
-        Err(resp) => return resp,
-    };
+    let (prepared, prompt_tokens) =
+        match prepare_openai_request(&state, req, None, RequestProtocol::OpenAi).await {
+            Ok(t) => t,
+            Err(resp) => return resp,
+        };
     let PreparedOpenAiRequest {
         generation,
         tool_context,
@@ -1773,11 +1715,17 @@ pub async fn openai_responses(
     let temperature = normalized.chat.temperature.unwrap_or(0.0);
     let seed = normalized.chat.seed;
     let output_schema = normalized.output_schema();
-    let (prepared, prompt_tokens) =
-        match prepare_openai_request(&state, normalized.chat, output_schema).await {
-            Ok(result) => result,
-            Err(response) => return response,
-        };
+    let (prepared, prompt_tokens) = match prepare_openai_request(
+        &state,
+        normalized.chat,
+        output_schema,
+        RequestProtocol::Responses,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(response) => return response,
+    };
     let PreparedOpenAiRequest {
         generation,
         tool_context,
@@ -1834,8 +1782,20 @@ pub async fn openai_responses(
 
 pub async fn anthropic_messages(
     State(state): State<DiffusionGemmaAppState>,
-    Json(req): Json<super::anthropic::MessagesRequest>,
+    payload: std::result::Result<
+        Json<super::anthropic::MessagesRequest>,
+        axum::extract::rejection::JsonRejection,
+    >,
 ) -> Response {
+    let req = match payload {
+        Ok(Json(req)) => req,
+        Err(error) => {
+            return super::anthropic::anthropic_error_response(
+                StatusCode::BAD_REQUEST,
+                format!("invalid Messages request: {}", error.body_text()),
+            );
+        }
+    };
     let stream = req.stream;
     let max_tokens = req.max_tokens;
     let temperature = req.temperature.unwrap_or(0.0);
@@ -1844,43 +1804,45 @@ pub async fn anthropic_messages(
         Ok(t) => t,
         Err(resp) => return resp,
     };
+    let PreparedOpenAiRequest {
+        generation,
+        tool_context,
+    } = prepared;
     if stream {
         return anthropic_stream_completion(
             state,
-            prepared,
+            generation,
             max_tokens,
             temperature,
             model_label,
             input_tokens,
+            tool_context,
         )
         .await;
     }
 
-    let completion =
-        match generate_completion(state, prepared, max_tokens, temperature, None, "stop", None)
-            .await
-        {
-            Ok(c) => c,
-            Err(err) => return err.into_response(),
-        };
-    let stop_reason = anthropic_stop_reason(completion.finish_reason);
-    let envelope = AnthropicMessageEnvelope {
-        id: gen_anthropic_id(),
-        kind: "message",
-        role: "assistant",
-        content: vec![AnthropicContentBlockText {
-            kind: "text",
-            text: completion.content.unwrap_or_default(),
-        }],
-        model: model_label,
-        stop_reason: Some(stop_reason),
-        stop_sequence: None,
-        usage: AnthropicUsage {
-            input_tokens,
-            output_tokens: completion.completion_tokens,
-        },
+    let completion = match generate_completion(
+        state,
+        generation,
+        max_tokens,
+        temperature,
+        None,
+        "stop",
+        tool_context,
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(err) => return err.into_response(),
     };
-    Json(envelope).into_response()
+    super::anthropic::collected_response(
+        model_label,
+        input_tokens,
+        completion.content,
+        completion.tool_calls,
+        anthropic_stop_reason(completion.finish_reason),
+        completion.completion_tokens,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
