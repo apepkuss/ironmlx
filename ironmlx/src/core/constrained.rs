@@ -34,6 +34,10 @@ pub struct ToolConstraintOptions {
     pub allow_parallel_calls: bool,
 }
 
+fn requires_accepting_state_at_length(options: &ToolConstraintOptions) -> bool {
+    !matches!(&options.choice, ToolChoiceConstraint::Auto)
+}
+
 impl Default for ToolConstraintOptions {
     fn default() -> Self {
         Self {
@@ -194,6 +198,7 @@ impl ConstraintTokenizer {
             grammar_source: Arc::from(grammar_source),
             vocab_size: self.vocab_size,
             eos_token_ids: Arc::clone(&self.eos_token_ids),
+            require_accepting_state_at_length: requires_accepting_state_at_length(options),
         })
     }
 
@@ -232,6 +237,7 @@ impl ConstraintTokenizer {
             grammar_source: Arc::from(grammar_source),
             vocab_size: self.vocab_size,
             eos_token_ids: Arc::clone(&self.eos_token_ids),
+            require_accepting_state_at_length: requires_accepting_state_at_length(options),
         })
     }
 
@@ -270,6 +276,7 @@ impl ConstraintTokenizer {
             grammar_source: Arc::from(grammar_source),
             vocab_size: self.vocab_size,
             eos_token_ids: Arc::clone(&self.eos_token_ids),
+            require_accepting_state_at_length: requires_accepting_state_at_length(options),
         })
     }
 
@@ -308,6 +315,7 @@ impl ConstraintTokenizer {
             grammar_source: Arc::from(grammar_source),
             vocab_size: self.vocab_size,
             eos_token_ids: Arc::clone(&self.eos_token_ids),
+            require_accepting_state_at_length: requires_accepting_state_at_length(options),
         })
     }
 
@@ -346,6 +354,7 @@ impl ConstraintTokenizer {
             grammar_source: Arc::from(grammar_source),
             vocab_size: self.vocab_size,
             eos_token_ids: Arc::clone(&self.eos_token_ids),
+            require_accepting_state_at_length: requires_accepting_state_at_length(options),
         })
     }
 
@@ -370,6 +379,7 @@ impl ConstraintTokenizer {
             grammar_source: Arc::from(serde_json::to_string(schema)?),
             vocab_size: self.vocab_size,
             eos_token_ids: Arc::clone(&self.eos_token_ids),
+            require_accepting_state_at_length: false,
         })
     }
 }
@@ -382,6 +392,7 @@ pub struct ConstraintPlan {
     grammar_source: Arc<str>,
     vocab_size: usize,
     eos_token_ids: Arc<[u32]>,
+    require_accepting_state_at_length: bool,
 }
 
 impl fmt::Debug for ConstraintPlan {
@@ -409,6 +420,7 @@ impl ConstraintPlan {
             vocab_size: self.vocab_size,
             committed_tokens: 0,
             eos_token_ids: Arc::clone(&self.eos_token_ids),
+            require_accepting_state_at_length: self.require_accepting_state_at_length,
         })
     }
 
@@ -424,6 +436,7 @@ pub struct ConstraintSession {
     vocab_size: usize,
     committed_tokens: usize,
     eos_token_ids: Arc<[u32]>,
+    require_accepting_state_at_length: bool,
 }
 
 impl Clone for ConstraintSession {
@@ -433,6 +446,7 @@ impl Clone for ConstraintSession {
             vocab_size: self.vocab_size,
             committed_tokens: self.committed_tokens,
             eos_token_ids: Arc::clone(&self.eos_token_ids),
+            require_accepting_state_at_length: self.require_accepting_state_at_length,
         }
     }
 }
@@ -458,6 +472,10 @@ impl ConstraintSession {
 
     pub fn eos_token_ids(&self) -> &[u32] {
         &self.eos_token_ids
+    }
+
+    pub(crate) fn requires_accepting_state_at_length(&self) -> bool {
+        self.require_accepting_state_at_length
     }
 
     pub fn compute_mask(&mut self) -> Result<SimpleVob> {
@@ -2130,6 +2148,50 @@ mod tests {
         consume_bytes(&mut two, call).unwrap();
         consume_bytes(&mut two, call).unwrap();
         assert!(two.is_accepting().unwrap());
+    }
+
+    #[test]
+    fn length_completion_policy_only_requires_tool_only_outputs_to_finish() {
+        let tokenizer = ConstraintTokenizer::byte_level().unwrap();
+        let auto = tokenizer
+            .compile_qwen_tools(&[weather_tool()], &ToolConstraintOptions::default())
+            .unwrap();
+        assert!(!auto
+            .start_session()
+            .unwrap()
+            .requires_accepting_state_at_length());
+
+        for choice in [
+            ToolChoiceConstraint::Required,
+            ToolChoiceConstraint::Function("get_weather".into()),
+        ] {
+            let tool_only = tokenizer
+                .compile_qwen_tools(
+                    &[weather_tool()],
+                    &ToolConstraintOptions {
+                        choice,
+                        allow_parallel_calls: false,
+                    },
+                )
+                .unwrap();
+            assert!(tool_only
+                .start_session()
+                .unwrap()
+                .requires_accepting_state_at_length());
+        }
+
+        let structured_output = tokenizer
+            .compile_json_output(&serde_json::json!({
+                "type": "object",
+                "properties": {"answer": {"type": "string"}},
+                "required": ["answer"],
+                "additionalProperties": false
+            }))
+            .unwrap();
+        assert!(!structured_output
+            .start_session()
+            .unwrap()
+            .requires_accepting_state_at_length());
     }
 
     #[test]

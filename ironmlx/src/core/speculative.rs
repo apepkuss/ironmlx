@@ -1983,6 +1983,17 @@ where
             None
         };
 
+        if finish_reason == Some("length") {
+            if let Some(constraint) = self.constraint.as_mut() {
+                if constraint.requires_accepting_state_at_length() && !constraint.is_accepting()? {
+                    self.finished = true;
+                    return Err(anyhow!(
+                        "max_new_tokens reached before constrained output became complete"
+                    ));
+                }
+            }
+        }
+
         if finish_reason.is_some() {
             self.finished = true;
             return Ok(Some(GenerateEvent {

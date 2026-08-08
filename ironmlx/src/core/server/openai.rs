@@ -162,12 +162,12 @@ pub(crate) enum ChatResponseFormat {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ChatJsonSchema {
-    name: String,
+    pub(crate) name: String,
     #[serde(default)]
-    description: Option<String>,
-    schema: serde_json::Value,
+    pub(crate) description: Option<String>,
+    pub(crate) schema: serde_json::Value,
     #[serde(default)]
-    strict: Option<bool>,
+    pub(crate) strict: Option<bool>,
 }
 
 impl ChatRequest {
@@ -598,7 +598,7 @@ pub(crate) fn compile_output_constraint(
         })
 }
 
-fn allows_structured_final_output(prepared_tools: Option<&PreparedToolRequest>) -> bool {
+pub(crate) fn allows_structured_final_output(prepared_tools: Option<&PreparedToolRequest>) -> bool {
     prepared_tools
         .and_then(|prepared| prepared.constraint_options.as_ref())
         .is_none_or(|options| matches!(&options.choice, ToolChoiceConstraint::Auto))

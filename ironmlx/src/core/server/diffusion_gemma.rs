@@ -213,6 +213,15 @@ struct OpenAiStreamRequest {
     output_format: StructuredOutputFormat,
 }
 
+struct AnthropicStreamRequest {
+    max_tokens: usize,
+    temperature: f32,
+    model_label: String,
+    input_tokens: u32,
+    tool_context: Option<ToolResponseContext>,
+    output_format: StructuredOutputFormat,
+}
+
 struct ResponsesStreamRequest {
     max_tokens: usize,
     temperature: f32,
@@ -983,14 +992,30 @@ async fn prepare_openai_request(
 async fn prepare_anthropic_request(
     state: &DiffusionGemmaAppState,
     req: super::anthropic::MessagesRequest,
-) -> std::result::Result<(PreparedOpenAiRequest, u32), Response> {
+) -> std::result::Result<
+    (
+        PreparedOpenAiRequest,
+        u32,
+        super::structured_output::StructuredOutputFormat,
+    ),
+    Response,
+> {
     let chat = req.into_chat_request().map_err(|error| {
         super::anthropic::anthropic_error_response(
             StatusCode::BAD_REQUEST,
             format!("invalid Messages request: {error:#}"),
         )
     })?;
-    prepare_openai_request(state, chat, None, RequestProtocol::Anthropic).await
+    let output_format = chat.structured_output_format().map_err(|error| {
+        super::anthropic::anthropic_error_response(
+            StatusCode::BAD_REQUEST,
+            format!("invalid Messages request: {error:#}"),
+        )
+    })?;
+    let output_schema = output_format.constraint_schema();
+    let (prepared, input_tokens) =
+        prepare_openai_request(state, chat, output_schema, RequestProtocol::Anthropic).await?;
+    Ok((prepared, input_tokens, output_format))
 }
 
 async fn generate_completion(
@@ -1594,12 +1619,16 @@ async fn responses_stream_completion(
 async fn anthropic_stream_completion(
     state: DiffusionGemmaAppState,
     request: PreparedRequest,
-    max_tokens: usize,
-    temperature: f32,
-    model_label: String,
-    input_tokens: u32,
-    tool_context: Option<ToolResponseContext>,
+    stream_request: AnthropicStreamRequest,
 ) -> Response {
+    let AnthropicStreamRequest {
+        max_tokens,
+        temperature,
+        model_label,
+        input_tokens,
+        tool_context,
+        output_format,
+    } = stream_request;
     let lane_guard = match state.lane.clone().enter().await {
         Ok(guard) => guard,
         Err(err) => return CompletionError::from(err).into_response(),
@@ -1612,7 +1641,8 @@ async fn anthropic_stream_completion(
 
     tokio::task::spawn_blocking(move || {
         let _lane_guard = lane_guard;
-        let mut encoder = super::anthropic::ToolStreamEncoder::new(id, model_label, input_tokens);
+        let mut encoder =
+            super::anthropic::ToolStreamEncoder::new(id, model_label, input_tokens, output_format);
         if tx.blocking_send(Ok(encoder.message_start())).is_err() {
             return;
         }
@@ -1985,7 +2015,8 @@ pub async fn anthropic_messages(
     let max_tokens = req.max_tokens;
     let temperature = req.temperature.unwrap_or(0.0);
     let model_label = req.model.clone().unwrap_or_else(|| state.model_id.clone());
-    let (prepared, input_tokens) = match prepare_anthropic_request(&state, req).await {
+    let (prepared, input_tokens, output_format) = match prepare_anthropic_request(&state, req).await
+    {
         Ok(t) => t,
         Err(resp) => return resp,
     };
@@ -1997,11 +2028,14 @@ pub async fn anthropic_messages(
         return anthropic_stream_completion(
             state,
             generation,
-            max_tokens,
-            temperature,
-            model_label,
-            input_tokens,
-            tool_context,
+            AnthropicStreamRequest {
+                max_tokens,
+                temperature,
+                model_label,
+                input_tokens,
+                tool_context,
+                output_format,
+            },
         )
         .await;
     }
@@ -2030,6 +2064,7 @@ pub async fn anthropic_messages(
         completion.tool_calls,
         anthropic_stop_reason(completion.finish_reason),
         completion.completion_tokens,
+        output_format,
     )
 }
 

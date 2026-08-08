@@ -291,6 +291,44 @@ curl http://127.0.0.1:9068/v1/messages \
   }'
 ```
 
+### Anthropic Structured Outputs
+
+Messages 通过 Anthropic 当前正式协议 `output_config.format` 支持受 JSON Schema
+约束的最终文本输出：
+
+```json
+{
+  "model": "your-model-id",
+  "messages": [{"role": "user", "content": "提取姓名和备注。"}],
+  "output_config": {
+    "format": {
+      "type": "json_schema",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string"},
+          "notes": {"type": "string"}
+        },
+        "required": ["name"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "max_tokens": 128
+}
+```
+
+符合 Schema 的 JSON 位于普通 `text` content block 中；同步与 SSE 使用相同的
+token 级约束。`output_config.format` 可与客户端 tools 同时使用：`auto` 允许工具
+调用或结构化最终回答，`none` 只允许结构化最终回答，`any` 和指定 `tool` 只允许
+工具调用。Schema 子集与本文件前述 Structured Outputs 约束一致，不支持的类型、
+关键字或字段形状会在生成前返回 400。
+
+若达到 token 上限，响应以 `stop_reason: "max_tokens"` 结束，此时 JSON 可能不完整。
+Structured Outputs 不允许以最后一条 assistant message 进行 prefill。仅支持正式的
+`output_config.format`；已废弃的顶层 `output_format` 不在兼容范围内。Anthropic
+`thinking`/extended thinking 也不属于本任务范围，请求该字段会明确返回 400。
+
 ### Anthropic client tools
 
 `/v1/messages` 支持 Anthropic 原生客户端工具协议，并与 Chat Completions、Responses

@@ -110,7 +110,7 @@ impl StructuredOutputFormat {
         has_tool_calls: bool,
         finish_reason: &'static str,
     ) -> anyhow::Result<()> {
-        if has_tool_calls || finish_reason == "length" {
+        if has_tool_calls || matches!(finish_reason, "length" | "max_tokens") {
             return Ok(());
         }
         self.validate_output(text)
@@ -200,6 +200,9 @@ mod tests {
             .is_err());
         format
             .validate_completion("{\"answer\":\"", false, "length")
+            .unwrap();
+        format
+            .validate_completion("{\"answer\":\"", false, "max_tokens")
             .unwrap();
         format.validate_completion("", true, "tool_calls").unwrap();
     }
