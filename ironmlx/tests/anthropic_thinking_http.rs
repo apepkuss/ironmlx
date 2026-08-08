@@ -114,6 +114,56 @@ fn adaptive_request(stream: bool) -> serde_json::Value {
     })
 }
 
+fn thinking_structured_request(stream: bool) -> serde_json::Value {
+    serde_json::json!({
+        "model": "qwen3.5-4b",
+        "messages": [{
+            "role": "user",
+            "content": "Compute 17 * 19. Return the result in the requested JSON schema."
+        }],
+        "thinking": {"type": "adaptive", "display": "summarized"},
+        "output_config": {
+            "effort": "high",
+            "format": {
+                "type": "json_schema",
+                "schema": {
+                    "type": "object",
+                    "properties": {"product": {"type": "integer"}},
+                    "required": ["product"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "temperature": 0,
+        "max_tokens": 128,
+        "stream": stream
+    })
+}
+
+fn structured_text(body: &serde_json::Value) -> serde_json::Value {
+    let block = body["content"]
+        .as_array()
+        .expect("content blocks")
+        .iter()
+        .find(|block| block["type"] == "text")
+        .expect("structured text block");
+    serde_json::from_str(block["text"].as_str().expect("structured text")).expect("structured JSON")
+}
+
+fn structured_sse_text(sse: &str) -> serde_json::Value {
+    let mut text = String::new();
+    for frame in sse.split("\n\n") {
+        let Some(data) = frame.lines().find_map(|line| line.strip_prefix("data: ")) else {
+            continue;
+        };
+        let value: serde_json::Value = serde_json::from_str(data).expect("SSE JSON");
+        if value["delta"]["type"] == "text_delta" {
+            text.push_str(value["delta"]["text"].as_str().expect("text delta"));
+        }
+    }
+    serde_json::from_str(&text).expect("structured SSE JSON")
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires QWEN35_MODEL pointing to a real Qwen3.5 checkpoint"]
 async fn anthropic_thinking_real_http_acceptance() {
@@ -183,6 +233,39 @@ async fn anthropic_thinking_real_http_acceptance() {
     assert!(sse
         .trim_end()
         .ends_with("data: {\"type\":\"message_stop\"}"));
+
+    let response = client
+        .post(&endpoint)
+        .json(&thinking_structured_request(false))
+        .send()
+        .await
+        .expect("thinking plus structured output request");
+    assert_eq!(response.status(), 200);
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .expect("thinking plus structured output body");
+    assert_eq!(body["content"][0]["type"], "thinking");
+    assert_eq!(structured_text(&body), serde_json::json!({"product": 323}));
+
+    let response = client
+        .post(&endpoint)
+        .json(&thinking_structured_request(true))
+        .send()
+        .await
+        .expect("thinking plus structured output SSE request");
+    assert_eq!(response.status(), 200);
+    let sse = response
+        .text()
+        .await
+        .expect("thinking plus structured output SSE body");
+    let thinking_delta = sse.find("\"type\":\"thinking_delta\"").unwrap();
+    let text_delta = sse.find("\"type\":\"text_delta\"").unwrap();
+    assert!(thinking_delta < text_delta);
+    assert_eq!(
+        structured_sse_text(&sse),
+        serde_json::json!({"product": 323})
+    );
 
     let response = client
         .post(&endpoint)

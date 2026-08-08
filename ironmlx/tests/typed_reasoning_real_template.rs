@@ -88,6 +88,35 @@ fn real_template_and_tokenizer_round_trip_native_reasoning() {
     let config = tokenizer
         .native_output_decoder_config(Some(&kwargs))
         .expect("resolve decoder config");
+
+    let structured_native = match dialect {
+        NativeOutputDialect::Gemma => {
+            "<|channel>thought\nnative plan<channel|>{\"answer\":\"sunny\"}"
+        }
+        _ => "native plan</think>\n\n{\"answer\":\"sunny\"}",
+    };
+    let structured_tokens = tokenizer
+        .encode(structured_native, false)
+        .expect("encode reasoning plus structured output");
+    let plan = tokenizer
+        .compile_json_output_constraint_with_reasoning(
+            &serde_json::json!({
+                "type": "object",
+                "properties": {"answer": {"const": "sunny"}},
+                "required": ["answer"],
+                "additionalProperties": false
+            }),
+            config.expect("reasoning-aware constraint config"),
+        )
+        .expect("compile reasoning-aware structured output constraint");
+    let mut constraint = plan.start_session().expect("start structured matcher");
+    constraint
+        .commit_tokens(&structured_tokens)
+        .expect("consume reasoning plus structured output");
+    assert!(constraint
+        .is_accepting()
+        .expect("structured accepting state"));
+
     let mut decoder = GeneratedOutputDecoder::new_with_native(&tokenizer, None, config)
         .expect("construct decoder");
     let mut reasoning = String::new();

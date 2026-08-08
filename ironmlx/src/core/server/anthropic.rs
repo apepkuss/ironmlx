@@ -766,14 +766,6 @@ impl MessagesRequest {
                 "output_config.effort requires thinking.type=`enabled` or `adaptive`"
             ),
         }
-        anyhow::ensure!(
-            !(has_output_format
-                && self
-                    .thinking
-                    .as_ref()
-                    .is_some_and(AnthropicThinkingConfig::enabled)),
-            "thinking is not supported together with output_config.format by the local constrained decoder"
-        );
         if has_output_format
             && self
                 .messages
@@ -1034,10 +1026,11 @@ where
     let prompt_len = prompt_ids.len();
     let scheduler_config = state.scheduler_request_config(prompt_len, max_tokens);
     let stop_token_ids = state.tokenizer.eos_token_ids().to_vec();
-    let constraint = match super::openai::compile_output_constraint(
+    let constraint = match super::openai::compile_output_constraint_with_native(
         &state.tokenizer,
         prepared_tools.as_ref(),
         output_schema.as_ref(),
+        native_output,
     ) {
         Ok(constraint) => constraint,
         Err(error) => {
@@ -1280,10 +1273,11 @@ pub(crate) async fn messages_with_gemma4_drafter_state(
     }
     let scheduler_config = state.base.scheduler_request_config(prompt_len, max_tokens);
     let stop_token_ids = state.base.tokenizer.eos_token_ids().to_vec();
-    let constraint = match super::openai::compile_output_constraint(
+    let constraint = match super::openai::compile_output_constraint_with_native(
         &state.base.tokenizer,
         prepared_tools.as_ref(),
         output_schema.as_ref(),
+        native_output,
     ) {
         Ok(constraint) => constraint,
         Err(error) => {
@@ -3191,20 +3185,47 @@ mod tests {
                     "thinking": {"type": "disabled"},
                     "output_config": {"effort": "low"}
                 }),
-                serde_json::json!({
-                    "messages": [],
-                    "thinking": {"type": "adaptive"},
-                    "output_config": {
-                        "format": {
-                            "type": "json_schema",
-                            "schema": {"type": "object"}
-                        }
-                    }
-                }),
             ] {
                 let request: MessagesRequest = serde_json::from_value(invalid).unwrap();
                 assert!(request.into_chat_request().is_err());
             }
+
+            let combined: MessagesRequest = serde_json::from_value(serde_json::json!({
+                "messages": [],
+                "thinking": {"type": "adaptive"},
+                "tools": [{
+                    "name": "get_weather",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                        "additionalProperties": false
+                    }
+                }],
+                "tool_choice": {"type": "auto"},
+                "output_config": {
+                    "format": {
+                        "type": "json_schema",
+                        "schema": {
+                            "type": "object",
+                            "properties": {"answer": {"type": "string"}},
+                            "required": ["answer"],
+                            "additionalProperties": false
+                        }
+                    }
+                }
+            }))
+            .unwrap();
+            let chat = combined.into_chat_request().unwrap();
+            assert_eq!(
+                chat.chat_template_kwargs,
+                Some(serde_json::json!({"enable_thinking": true}))
+            );
+            assert!(matches!(
+                chat.response_format,
+                Some(crate::core::server::openai::ChatResponseFormat::JsonSchema { .. })
+            ));
+            assert_eq!(chat.tools.as_ref().map(Vec::len), Some(1));
 
             assert!(
                 serde_json::from_value::<MessagesRequest>(serde_json::json!({

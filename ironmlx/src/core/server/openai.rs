@@ -571,6 +571,16 @@ pub(crate) fn compile_output_constraint(
     prepared_tools: Option<&PreparedToolRequest>,
     output_schema: Option<&serde_json::Value>,
 ) -> anyhow::Result<Option<crate::core::constrained::ConstraintPlan>> {
+    compile_output_constraint_with_native(tokenizer, prepared_tools, output_schema, None)
+}
+
+pub(crate) fn compile_output_constraint_with_native(
+    tokenizer: &crate::core::Tokenizer,
+    prepared_tools: Option<&PreparedToolRequest>,
+    output_schema: Option<&serde_json::Value>,
+    native_output: Option<crate::core::native_output::NativeOutputDecoderConfig>,
+) -> anyhow::Result<Option<crate::core::constrained::ConstraintPlan>> {
+    let enabled_reasoning = native_output.filter(|config| config.reasoning_enabled);
     prepared_tools
         .and_then(|prepared| {
             prepared
@@ -581,6 +591,14 @@ pub(crate) fn compile_output_constraint(
         .map(|(prepared, options)| {
             if matches!(&options.choice, ToolChoiceConstraint::Auto) {
                 if let Some(schema) = output_schema {
+                    if let Some(reasoning) = enabled_reasoning {
+                        return tokenizer.compile_tool_or_json_constraint_with_reasoning(
+                            &prepared.definitions,
+                            options,
+                            schema,
+                            reasoning,
+                        );
+                    }
                     return tokenizer.compile_tool_or_json_constraint(
                         &prepared.definitions,
                         options,
@@ -593,7 +611,12 @@ pub(crate) fn compile_output_constraint(
         .transpose()
         .and_then(|tool_constraint| match (tool_constraint, output_schema) {
             (Some(constraint), _) => Ok(Some(constraint)),
-            (None, Some(schema)) => tokenizer.compile_json_output_constraint(schema).map(Some),
+            (None, Some(schema)) => match enabled_reasoning {
+                Some(reasoning) => tokenizer
+                    .compile_json_output_constraint_with_reasoning(schema, reasoning)
+                    .map(Some),
+                None => tokenizer.compile_json_output_constraint(schema).map(Some),
+            },
             (None, None) => Ok(None),
         })
 }

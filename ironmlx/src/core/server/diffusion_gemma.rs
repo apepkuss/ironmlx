@@ -891,6 +891,7 @@ async fn prepare_openai_request(
     state: &DiffusionGemmaAppState,
     req: super::openai::ChatRequest,
     output_schema: Option<serde_json::Value>,
+    constraint_native_output: Option<NativeOutputDecoderConfig>,
     protocol: RequestProtocol,
 ) -> std::result::Result<(PreparedOpenAiRequest, u32), Response> {
     let prepared_tools =
@@ -939,10 +940,11 @@ async fn prepare_openai_request(
         &state.vision_input,
         &state.tokenizer,
     );
-    let constraint = match super::openai::compile_output_constraint(
+    let constraint = match super::openai::compile_output_constraint_with_native(
         &state.tokenizer,
         prepared_tools.as_ref(),
         output_schema.as_ref(),
+        constraint_native_output,
     ) {
         Ok(constraint) => constraint,
         Err(error) => {
@@ -1022,8 +1024,14 @@ async fn prepare_anthropic_request(
             )
         })?;
     let output_schema = output_format.constraint_schema();
-    let (mut prepared, input_tokens) =
-        prepare_openai_request(state, chat, output_schema, RequestProtocol::Anthropic).await?;
+    let (mut prepared, input_tokens) = prepare_openai_request(
+        state,
+        chat,
+        output_schema,
+        native_output,
+        RequestProtocol::Anthropic,
+    )
+    .await?;
     prepared.generation.skip_special_tokens &= native_output
         .map(|config| config.dialect.skip_special_tokens())
         .unwrap_or(true);
@@ -1810,7 +1818,9 @@ pub async fn openai_chat_completions(
     let seed = req.seed;
     let model_label = req.model.clone().unwrap_or_else(|| state.model_id.clone());
     let (prepared, prompt_tokens) =
-        match prepare_openai_request(&state, req, output_schema, RequestProtocol::OpenAi).await {
+        match prepare_openai_request(&state, req, output_schema, None, RequestProtocol::OpenAi)
+            .await
+        {
             Ok(t) => t,
             Err(resp) => return resp,
         };
@@ -1947,6 +1957,7 @@ pub async fn openai_responses(
         &state,
         normalized.chat,
         output_schema,
+        None,
         RequestProtocol::Responses,
     )
     .await

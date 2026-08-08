@@ -327,10 +327,12 @@ token 级约束。`output_config.format` 可与客户端 tools 同时使用：`a
 若达到 token 上限，响应以 `stop_reason: "max_tokens"` 结束，此时 JSON 可能不完整。
 Structured Outputs 不允许以最后一条 assistant message 进行 prefill。仅支持正式的
 `output_config.format`；已废弃的顶层 `output_format` 不在兼容范围内。
-由于当前 standalone JSON grammar 直接约束原始生成 token，
-`output_config.format` 不能与已启用的 `thinking` 同时使用；该组合会在生成前返回
-400。客户端 tools 使用可容纳原生 reasoning 前缀的组合 grammar，因此 tools 与
-thinking 可以同时使用。
+`output_config.format` 可以与已启用的 `thinking` 同时使用。IronMLX 对原生输出
+section 进行组合约束：thinking section 保持自由生成，最终 text section 才启用
+JSON Schema grammar。该语义同样覆盖同步、SSE、Scheduler、MTP/辅助 drafter 和
+DiffusionGemma。客户端 tools 可与两者组合；工具调用使用自己的参数 grammar，
+最终直接回答使用 `output_config.format` grammar。若本轮先返回 `tool_use`，客户端
+回灌 `tool_result` 后的下一轮会重新执行相同的 thinking/最终 JSON section 约束。
 
 ### Anthropic extended/adaptive thinking
 
@@ -362,10 +364,9 @@ reasoning token 计数。历史回灌接受一个位于 assistant 可见内容�
 返回 400。
 
 当前不支持 `display: "omitted"`、`redacted_thinking`、多个或交错 thinking block，
-以及 thinking 与 `output_config.format` 的组合，因为本地模型没有 Claude 的加密
-隐藏思考通道，也没有可保持 block 顺序的 interleaved-thinking 模板契约，而当前
-standalone JSON grammar 不能容纳原生 reasoning 前缀。这些形状会明确返回 400。
-来自 Claude 服务的签名不能作为 IronMLX 本地历史直接回灌。
+因为本地模型没有 Claude 的加密隐藏思考通道，也没有可保持 block 顺序的
+interleaved-thinking 模板契约。这些形状会明确返回 400。来自 Claude 服务的签名
+不能作为 IronMLX 本地历史直接回灌。
 
 ### Anthropic client tools
 

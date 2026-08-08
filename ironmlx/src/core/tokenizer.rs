@@ -455,6 +455,34 @@ impl Tokenizer {
         }
     }
 
+    /// Compile client tools plus a structured final answer while leaving the
+    /// model-native reasoning section unconstrained.
+    pub fn compile_tool_or_json_constraint_with_reasoning(
+        &self,
+        tools: &[ToolDefinition],
+        options: &ToolConstraintOptions,
+        output_schema: &serde_json::Value,
+        reasoning: NativeOutputDecoderConfig,
+    ) -> Result<ConstraintPlan> {
+        anyhow::ensure!(
+            reasoning.reasoning_enabled,
+            "reasoning-aware output constraint requires enabled native reasoning"
+        );
+        let tool_dialect = self.tool_dialect.ok_or_else(|| {
+            anyhow!("tokenizer does not provide a supported constrained tool dialect")
+        })?;
+        self.constraint
+            .as_ref()
+            .ok_or_else(|| anyhow!("tokenizer does not support constrained decoding"))?
+            .compile_tools_with_output_and_reasoning(
+                tool_dialect,
+                reasoning.dialect,
+                tools,
+                options,
+                output_schema,
+            )
+    }
+
     /// Compile a standalone structured JSON output grammar.
     pub fn compile_json_output_constraint(
         &self,
@@ -464,6 +492,23 @@ impl Tokenizer {
             .as_ref()
             .ok_or_else(|| anyhow!("tokenizer does not support constrained decoding"))?
             .compile_json_output(schema)
+    }
+
+    /// Compile a structured final answer after an unconstrained native
+    /// reasoning section.
+    pub fn compile_json_output_constraint_with_reasoning(
+        &self,
+        schema: &serde_json::Value,
+        reasoning: NativeOutputDecoderConfig,
+    ) -> Result<ConstraintPlan> {
+        anyhow::ensure!(
+            reasoning.reasoning_enabled,
+            "reasoning-aware output constraint requires enabled native reasoning"
+        );
+        self.constraint
+            .as_ref()
+            .ok_or_else(|| anyhow!("tokenizer does not support constrained decoding"))?
+            .compile_json_output_with_reasoning(schema, reasoning.dialect)
     }
 }
 
