@@ -43,6 +43,36 @@ item、文本或函数参数 delta，以及终止事件 `response.completed`、
 `response.incomplete` 或 `response.failed`；不会发送 Chat Completions 的
 `[DONE]` 标记。
 
+### Responses reasoning
+
+具备精确原生 reasoning 模板契约的模型可通过 `reasoning.effort` 开启或关闭思考
+通道。IronMLX 将模型原生 `<think>` 或 Gemma `thought` channel 解码为独立的
+Responses `reasoning` item；流式响应使用 `response.reasoning_text.delta` 和
+`response.reasoning_text.done`，不会把 reasoning 混入 `output_text`。
+
+```json
+{
+  "model": "your-model-id",
+  "input": "先分析，再简洁回答。",
+  "reasoning": {"effort": "high", "summary": "none"},
+  "store": false
+}
+```
+
+当前本地模板只提供 reasoning 开关，不提供可校准的分级预算，因此
+`minimal`、`low`、`medium`、`high`、`xhigh` 和 `max` 都表示启用模型原生
+reasoning；`none` 表示关闭。具体推理长度由 checkpoint 决定。未显式指定 effort
+时使用模型模板默认值。
+
+无状态历史回灌接受 `reasoning` item 中的明文 `reasoning_text`，并将它传给下一轮
+原生模板。IronMLX 不生成 OpenAI 托管的 `encrypted_content`；只有 encrypted
+content、没有明文 reasoning 的历史无法在本地重放，会返回 400。
+
+`reasoning.summary:"auto"` 仍可作为上游客户端的自动能力请求，但当前模型没有
+独立 summary 生成通道，因此不会把完整 reasoning 截断或改写成 summary。原生
+reasoning 支持以 [supported-models.md](supported-models.md) 的矩阵和精确模板检测
+为准。
+
 ### Responses function tools
 
 Responses 使用顶层 function tool 形状：
@@ -136,8 +166,10 @@ DiffusionGemma canvas 解码路径。
   工具。namespace 子函数的指定 `tool_choice` 暂不支持；应使用 `auto` 或
   `required`。超出约束 Schema 子集的动态参数只允许用于 `strict:false` 的
   namespace 子函数，并使用 JSON 参数信封；`strict:true` 不会降级。
-- 不支持持久 reasoning/refusal typed item、OpenAI file ID、音频输入/输出、图片输出
-  或图片形式的 function output；这些能力不会以普通 `output_text` 伪装。
+- 支持无状态明文 reasoning typed item 及历史回灌；不持久化 reasoning，也不生成
+  `encrypted_content`。
+- 不支持 reasoning summary、refusal typed item、OpenAI file ID、音频输入/输出、
+  图片输出或图片形式的 function output；这些能力不会以普通 `output_text` 伪装。
 
 ## OpenAI Chat Completions
 

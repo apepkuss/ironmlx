@@ -100,6 +100,7 @@ pub fn generate_text(
         max_new_tokens,
         temperature,
         seed,
+        true,
         &mut |event| {
             events.push(event);
             Ok(true)
@@ -117,6 +118,7 @@ pub fn generate_text_with_events(
     max_new_tokens: usize,
     temperature: f32,
     seed: Option<u64>,
+    skip_special_tokens: bool,
     emit: DiffusionGemmaEventSink<'_>,
 ) -> Result<()> {
     generate_impl(
@@ -129,7 +131,7 @@ pub fn generate_text_with_events(
         seed,
         None,
         None,
-        true,
+        skip_special_tokens,
         emit,
     )
 }
@@ -187,6 +189,7 @@ pub fn generate_image_text(
         max_new_tokens,
         temperature,
         seed,
+        true,
         &mut |event| {
             events.push(event);
             Ok(true)
@@ -207,6 +210,7 @@ pub fn generate_image_text_with_events(
     max_new_tokens: usize,
     temperature: f32,
     seed: Option<u64>,
+    skip_special_tokens: bool,
     emit: DiffusionGemmaEventSink<'_>,
 ) -> Result<()> {
     generate_impl(
@@ -223,7 +227,7 @@ pub fn generate_image_text_with_events(
             image_token_id,
         }),
         None,
-        true,
+        skip_special_tokens,
         emit,
     )
 }

@@ -23,13 +23,17 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::core::generate::{GenerateRequest, GenerationStream};
+use crate::core::generated_output::{
+    GeneratedOutputDecoder, GeneratedOutputEvent, ToolOutputDecoderConfig,
+};
 use crate::core::model::Model;
+use crate::core::native_output::NativeOutputDecoderConfig;
 use crate::core::scheduler::DenseVlMethods;
 use crate::core::server::chat_format::{
     ChatFunctionCall, ChatMessage, ChatToolCall, Content, ContentPart, ImageUrl,
 };
 use crate::core::server::scheduler_actor::{AdmitReply, SchedulerCommand};
-use crate::core::tool_calling::{AssistantOutputEvent, ToolCall, ToolCallParser, ToolDefinition};
+use crate::core::tool_calling::{ToolCall, ToolDefinition};
 
 use super::{openai, AppState, Gemma4DrafterAppState};
 
@@ -68,7 +72,7 @@ pub struct ResponsesRequest {
     #[serde(default)]
     pub top_p: Option<f32>,
     #[serde(default)]
-    pub reasoning: Option<serde_json::Value>,
+    pub reasoning: Option<ReasoningRequest>,
     #[serde(default)]
     pub include: Vec<String>,
     #[serde(default)]
@@ -204,6 +208,64 @@ pub enum ResponseInputItem {
         #[serde(default)]
         status: Option<String>,
     },
+    Reasoning {
+        #[serde(default)]
+        id: Option<String>,
+        #[serde(default)]
+        summary: Vec<ReasoningSummaryPart>,
+        #[serde(default)]
+        content: Vec<ReasoningContentPart>,
+        #[serde(default)]
+        encrypted_content: Option<String>,
+        #[serde(default)]
+        status: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
+
+impl ReasoningEffort {
+    fn enables_native_reasoning(self) -> bool {
+        self != Self::None
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningSummaryMode {
+    Auto,
+    None,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReasoningRequest {
+    #[serde(default)]
+    pub effort: Option<ReasoningEffort>,
+    #[serde(default)]
+    pub summary: Option<ReasoningSummaryMode>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ReasoningSummaryPart {
+    SummaryText { text: String },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ReasoningContentPart {
+    ReasoningText { text: String },
 }
 
 #[derive(Debug, Deserialize)]
@@ -416,12 +478,41 @@ pub(crate) struct NormalizedRequest {
     text_format: ResponseTextFormat,
     pub(crate) response_tools: Vec<ResponseTool>,
     pub(crate) response_tool_choice: serde_json::Value,
+    reasoning: ReasoningRequest,
     tool_aliases: ToolAliases,
 }
 
 impl NormalizedRequest {
     pub(crate) fn output_schema(&self) -> Option<serde_json::Value> {
         self.text_format.constraint_schema()
+    }
+
+    pub(crate) fn native_output_config(
+        &self,
+        tokenizer: &crate::core::Tokenizer,
+    ) -> anyhow::Result<Option<NativeOutputDecoderConfig>> {
+        let config =
+            tokenizer.native_output_decoder_config(self.chat.chat_template_kwargs.as_ref())?;
+        anyhow::ensure!(
+            !self.reasoning.explicitly_enables_reasoning() || config.is_some(),
+            "the loaded model does not expose a supported native reasoning channel"
+        );
+        Ok(config)
+    }
+}
+
+impl ReasoningRequest {
+    fn template_kwargs(&self) -> Option<serde_json::Value> {
+        self.effort.map(|effort| {
+            serde_json::json!({
+                "enable_thinking": effort.enables_native_reasoning()
+            })
+        })
+    }
+
+    fn explicitly_enables_reasoning(&self) -> bool {
+        self.effort
+            .is_some_and(ReasoningEffort::enables_native_reasoning)
     }
 }
 
@@ -565,28 +656,6 @@ fn validate_advisory_fields(req: &ResponsesRequest) -> anyhow::Result<()> {
             "unsupported include value `{include}`"
         );
     }
-    if let Some(reasoning) = &req.reasoning {
-        anyhow::ensure!(reasoning.is_object(), "reasoning must be a JSON object");
-        let object = reasoning.as_object().expect("checked object");
-        if let Some(effort) = object.get("effort") {
-            anyhow::ensure!(
-                effort.is_null(),
-                "active reasoning effort is not supported by this model adapter"
-            );
-        }
-        if let Some(summary) = object.get("summary") {
-            anyhow::ensure!(
-                summary.is_null() || matches!(summary.as_str(), Some("auto" | "none")),
-                "reasoning.summary must be `auto`, `none`, or null"
-            );
-        }
-        anyhow::ensure!(
-            object
-                .keys()
-                .all(|key| matches!(key.as_str(), "effort" | "summary")),
-            "unsupported reasoning option"
-        );
-    }
     parse_response_text_format(req.text.as_ref())?;
     if let Some(stream_options) = &req.stream_options {
         anyhow::ensure!(
@@ -680,6 +749,7 @@ fn append_function_call(
     call_id: String,
     name: String,
     arguments: String,
+    reasoning_content: Option<String>,
 ) {
     let call = ChatToolCall {
         id: call_id,
@@ -688,6 +758,9 @@ fn append_function_call(
     };
     if let Some(last) = messages.last_mut() {
         if last.role == "assistant" && last.tool_call_id.is_none() {
+            if last.reasoning_content.is_none() {
+                last.reasoning_content = reasoning_content;
+            }
             last.tool_calls.push(call);
             return;
         }
@@ -695,6 +768,7 @@ fn append_function_call(
     messages.push(ChatMessage {
         role: "assistant".to_owned(),
         content: Content::Text(String::new()),
+        reasoning_content,
         tool_calls: vec![call],
         tool_call_id: None,
     });
@@ -747,6 +821,7 @@ fn coalesce_system_messages(messages: &mut Vec<ChatMessage>) {
         ChatMessage {
             role: "system".to_owned(),
             content,
+            reasoning_content: None,
             tool_calls: Vec::new(),
             tool_call_id: None,
         },
@@ -759,6 +834,7 @@ fn convert_input(
     tool_aliases: &ToolAliases,
 ) -> anyhow::Result<Vec<ChatMessage>> {
     let mut messages = Vec::new();
+    let mut pending_reasoning = None::<String>;
     if let Some(instructions) = instructions.filter(|value| !value.is_empty()) {
         messages.push(ChatMessage::text("system", instructions));
     }
@@ -774,9 +850,19 @@ fn convert_input(
                         );
                         let chat_role = if role == "developer" { "system" } else { &role };
                         let content = response_content_to_chat(&role, content)?;
+                        let reasoning_content = if role == "assistant" {
+                            pending_reasoning.take()
+                        } else {
+                            anyhow::ensure!(
+                                pending_reasoning.is_none(),
+                                "reasoning input must be followed by an assistant message or function_call"
+                            );
+                            None
+                        };
                         messages.push(ChatMessage {
                             role: chat_role.to_owned(),
                             content,
+                            reasoning_content,
                             tool_calls: Vec::new(),
                             tool_call_id: None,
                         });
@@ -804,13 +890,23 @@ fn convert_input(
                             }
                             None => (name, arguments),
                         };
-                        append_function_call(&mut messages, call_id, name, arguments);
+                        append_function_call(
+                            &mut messages,
+                            call_id,
+                            name,
+                            arguments,
+                            pending_reasoning.take(),
+                        );
                     }
                     ResponseInputItem::FunctionCallOutput {
                         call_id,
                         output,
                         status,
                     } => {
+                        anyhow::ensure!(
+                            pending_reasoning.is_none(),
+                            "reasoning input must be followed by an assistant message or function_call"
+                        );
                         if let Some(status) = status.as_deref() {
                             anyhow::ensure!(
                                 matches!(status, "in_progress" | "completed" | "incomplete"),
@@ -820,14 +916,51 @@ fn convert_input(
                         messages.push(ChatMessage {
                             role: "tool".to_owned(),
                             content: Content::Text(function_output_text(output)),
+                            reasoning_content: None,
                             tool_calls: Vec::new(),
                             tool_call_id: Some(call_id),
                         });
+                    }
+                    ResponseInputItem::Reasoning {
+                        id,
+                        summary: _,
+                        content,
+                        encrypted_content,
+                        status,
+                    } => {
+                        if let Some(id) = id.as_deref() {
+                            anyhow::ensure!(!id.is_empty(), "reasoning.id must not be empty");
+                        }
+                        if let Some(status) = status.as_deref() {
+                            anyhow::ensure!(
+                                matches!(status, "in_progress" | "completed" | "incomplete"),
+                                "unsupported reasoning status `{status}`"
+                            );
+                        }
+                        anyhow::ensure!(
+                            pending_reasoning.is_none(),
+                            "consecutive reasoning input items are not supported"
+                        );
+                        anyhow::ensure!(
+                            encrypted_content.is_none() || !content.is_empty(),
+                            "encrypted reasoning cannot be replayed without reasoning_text content"
+                        );
+                        let text = content
+                            .into_iter()
+                            .map(|part| match part {
+                                ReasoningContentPart::ReasoningText { text } => text,
+                            })
+                            .collect::<String>();
+                        pending_reasoning = (!text.is_empty()).then_some(text);
                     }
                 }
             }
         }
     }
+    anyhow::ensure!(
+        pending_reasoning.is_none(),
+        "reasoning input must be followed by an assistant message or function_call"
+    );
     coalesce_system_messages(&mut messages);
     anyhow::ensure!(!messages.is_empty(), "input must not be empty");
     Ok(messages)
@@ -1092,6 +1225,7 @@ fn normalize_tool_choice(choice: Option<serde_json::Value>) -> anyhow::Result<se
 impl ResponsesRequest {
     pub(crate) fn normalize(self) -> anyhow::Result<NormalizedRequest> {
         validate_advisory_fields(&self)?;
+        let reasoning = self.reasoning.clone().unwrap_or_default();
         let text_format = parse_response_text_format(self.text.as_ref())?;
         let response_tools = self.tools.clone();
         let (tools, tool_aliases) = flatten_response_tools(&self.tools)?;
@@ -1118,6 +1252,7 @@ impl ResponsesRequest {
             text_format,
             response_tools,
             response_tool_choice,
+            reasoning: reasoning.clone(),
             tool_aliases,
             chat: openai::ChatRequest {
                 model: self.model,
@@ -1136,7 +1271,7 @@ impl ResponsesRequest {
                 top_k: None,
                 repetition_penalty: None,
                 seed: None,
-                chat_template_kwargs: None,
+                chat_template_kwargs: reasoning.template_kwargs(),
             },
         })
     }
@@ -1148,6 +1283,17 @@ struct ToolContext {
     definitions: Vec<ToolDefinition>,
     constraint_options: crate::core::constrained::ToolConstraintOptions,
     output_schema: Option<serde_json::Value>,
+}
+
+impl ToolContext {
+    fn decoder_config(&self) -> ToolOutputDecoderConfig {
+        ToolOutputDecoderConfig {
+            dialect: self.dialect,
+            response_id: uuid::Uuid::new_v4().simple().to_string(),
+            definitions: self.definitions.clone(),
+            output_schema: self.output_schema.clone(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1166,6 +1312,8 @@ struct PreparedResponse {
     temperature: Option<f32>,
     top_p: Option<f32>,
     tool_context: Option<ToolContext>,
+    native_output: Option<NativeOutputDecoderConfig>,
+    reasoning: ReasoningRequest,
     tool_aliases: ToolAliases,
 }
 
@@ -1177,12 +1325,23 @@ async fn prepare_response<M>(
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
+    let native_output = match normalized.native_output_config(&state.tokenizer) {
+        Ok(config) => config,
+        Err(error) => {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                "unsupported_reasoning",
+                format!("resolve native reasoning mode: {error:#}"),
+            ));
+        }
+    };
     let NormalizedRequest {
         mut chat,
         instructions,
         text_format,
         response_tools,
         response_tool_choice,
+        reasoning,
         tool_aliases,
     } = normalized;
     let stream = chat.stream;
@@ -1348,6 +1507,8 @@ where
         temperature,
         top_p,
         tool_context,
+        native_output,
+        reasoning,
         tool_aliases,
     })
 }
@@ -1383,11 +1544,23 @@ impl Usage {
             total_tokens: input_tokens + output_tokens,
         }
     }
+
+    pub(crate) fn with_reasoning_tokens(mut self, reasoning_tokens: u32) -> Self {
+        self.output_tokens_details.reasoning_tokens = reasoning_tokens;
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum OutputItem {
+    Reasoning {
+        id: String,
+        summary: Vec<ReasoningSummaryOutput>,
+        content: Vec<ReasoningContentOutput>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        encrypted_content: Option<String>,
+    },
     Message {
         id: String,
         status: &'static str,
@@ -1413,6 +1586,36 @@ enum OutputContent {
         logprobs: Vec<serde_json::Value>,
         text: String,
     },
+    ReasoningText {
+        text: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ReasoningSummaryOutput {
+    SummaryText { text: String },
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ReasoningContentOutput {
+    ReasoningText { text: String },
+}
+
+fn reasoning_item(id: String, reasoning: String, summary: String) -> OutputItem {
+    OutputItem::Reasoning {
+        id,
+        summary: (!summary.is_empty())
+            .then_some(ReasoningSummaryOutput::SummaryText { text: summary })
+            .into_iter()
+            .collect(),
+        content: (!reasoning.is_empty())
+            .then_some(ReasoningContentOutput::ReasoningText { text: reasoning })
+            .into_iter()
+            .collect(),
+        encrypted_content: None,
+    }
 }
 
 fn message_item(id: String, text: String) -> OutputItem {
@@ -1478,8 +1681,8 @@ struct IncompleteDetails {
 
 #[derive(Debug, Clone, Serialize)]
 struct ReasoningInfo {
-    effort: Option<String>,
-    summary: Option<String>,
+    effort: Option<ReasoningEffort>,
+    summary: Option<ReasoningSummaryMode>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1500,6 +1703,7 @@ pub(crate) struct ResponseMeta {
     tool_choice: serde_json::Value,
     tools: Vec<ResponseTool>,
     top_p: Option<f32>,
+    reasoning: ReasoningRequest,
     tool_aliases: ToolAliases,
 }
 
@@ -1517,6 +1721,7 @@ impl PreparedResponse {
             tool_choice: self.tool_choice.clone(),
             tools: self.tools.clone(),
             top_p: self.top_p,
+            reasoning: self.reasoning.clone(),
             tool_aliases: self.tool_aliases.clone(),
         }
     }
@@ -1536,6 +1741,7 @@ impl ResponseMeta {
             tool_choice: normalized.response_tool_choice.clone(),
             tools: normalized.response_tools.clone(),
             top_p: normalized.chat.top_p,
+            reasoning: normalized.reasoning.clone(),
             tool_aliases: normalized.tool_aliases.clone(),
         }
     }
@@ -1563,8 +1769,8 @@ impl ResponseMeta {
             parallel_tool_calls: self.parallel_tool_calls,
             previous_response_id: None,
             reasoning: ReasoningInfo {
-                effort: None,
-                summary: None,
+                effort: self.reasoning.effort,
+                summary: self.reasoning.summary,
             },
             service_tier: "default",
             store: false,
@@ -1584,28 +1790,44 @@ impl ResponseMeta {
 #[derive(Debug)]
 pub(crate) struct CollectedOutput {
     pub(crate) content: String,
+    pub(crate) reasoning: String,
+    pub(crate) reasoning_summary: String,
     pub(crate) tool_calls: Vec<ToolCall>,
     pub(crate) finish_reason: &'static str,
     pub(crate) completion_tokens: u32,
+    pub(crate) reasoning_tokens: u32,
 }
 
 impl CollectedOutput {
     pub(crate) fn new() -> Self {
         Self {
             content: String::new(),
+            reasoning: String::new(),
+            reasoning_summary: String::new(),
             tool_calls: Vec::new(),
             finish_reason: "stop",
             completion_tokens: 0,
+            reasoning_tokens: 0,
         }
     }
 
-    fn collect(&mut self, events: Vec<AssistantOutputEvent>) {
+    fn collect(&mut self, events: Vec<GeneratedOutputEvent>) -> anyhow::Result<()> {
         for event in events {
             match event {
-                AssistantOutputEvent::TextDelta(text) => self.content.push_str(&text),
-                AssistantOutputEvent::ToolCall(call) => self.tool_calls.push(call),
+                GeneratedOutputEvent::TextDelta(text) => self.content.push_str(&text),
+                GeneratedOutputEvent::ReasoningDelta(text) => self.reasoning.push_str(&text),
+                GeneratedOutputEvent::ReasoningSummaryDelta(text) => {
+                    self.reasoning_summary.push_str(&text);
+                }
+                GeneratedOutputEvent::ToolCall(call) => self.tool_calls.push(call),
+                GeneratedOutputEvent::Finished(reason) => self.finish_reason = reason.as_str(),
+                other => anyhow::bail!(
+                    "Responses adapter has no enabled producer mapping for generated {} output",
+                    other.kind()
+                ),
             }
         }
+        Ok(())
     }
 }
 
@@ -1638,6 +1860,13 @@ pub(crate) fn unary_response(
         );
     }
     let mut items = Vec::new();
+    if !output.reasoning.is_empty() || !output.reasoning_summary.is_empty() {
+        items.push(reasoning_item(
+            format!("rs_{}", uuid::Uuid::new_v4().simple()),
+            output.reasoning,
+            output.reasoning_summary,
+        ));
+    }
     if !output.content.is_empty() {
         items.push(message_item(message_id(), output.content));
     }
@@ -1658,11 +1887,16 @@ pub(crate) fn unary_response(
     } else {
         "completed"
     };
-    Json(meta.object(
-        status,
-        items,
-        Some(Usage::new(input_tokens, output.completion_tokens)),
-    ))
+    Json(
+        meta.object(
+            status,
+            items,
+            Some(
+                Usage::new(input_tokens, output.completion_tokens)
+                    .with_reasoning_tokens(output.reasoning_tokens),
+            ),
+        ),
+    )
     .into_response()
 }
 
@@ -1708,6 +1942,22 @@ struct TextDonePayload {
     content_index: usize,
     item_id: String,
     logprobs: Vec<serde_json::Value>,
+    output_index: usize,
+    text: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ReasoningDeltaPayload {
+    content_index: usize,
+    delta: String,
+    item_id: String,
+    output_index: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct ReasoningDonePayload {
+    content_index: usize,
+    item_id: String,
     output_index: usize,
     text: String,
 }
@@ -1778,6 +2028,7 @@ pub(crate) struct ResponsesStream {
     meta: ResponseMeta,
     sequence: u64,
     output: Vec<OutputItem>,
+    active_reasoning: Option<(usize, String, String)>,
     active_text: Option<(usize, String, String)>,
 }
 
@@ -1787,6 +2038,7 @@ impl ResponsesStream {
             meta,
             sequence: 0,
             output: Vec::new(),
+            active_reasoning: None,
             active_text: None,
         }
     }
@@ -1807,7 +2059,7 @@ impl ResponsesStream {
     }
 
     pub(crate) fn text_delta(&mut self, delta: String) -> Vec<Bytes> {
-        let mut frames = Vec::new();
+        let mut frames = self.finish_reasoning();
         if self.active_text.is_none() {
             let output_index = self.output.len();
             let id = message_id();
@@ -1856,6 +2108,91 @@ impl ResponsesStream {
         frames
     }
 
+    pub(crate) fn reasoning_delta(&mut self, delta: String) -> Vec<Bytes> {
+        let mut frames = self.finish_text();
+        if self.active_reasoning.is_none() {
+            let output_index = self.output.len();
+            let id = format!("rs_{}", uuid::Uuid::new_v4().simple());
+            frames.push(self.event(
+                "response.output_item.added",
+                ItemPayload {
+                    item: OutputItem::Reasoning {
+                        id: id.clone(),
+                        summary: Vec::new(),
+                        content: Vec::new(),
+                        encrypted_content: None,
+                    },
+                    output_index,
+                },
+            ));
+            frames.push(self.event(
+                "response.content_part.added",
+                ContentPartPayload {
+                    content_index: 0,
+                    item_id: id.clone(),
+                    output_index,
+                    part: OutputContent::ReasoningText {
+                        text: String::new(),
+                    },
+                },
+            ));
+            self.active_reasoning = Some((output_index, id, String::new()));
+        }
+        let (output_index, id) = {
+            let (index, id, text) = self
+                .active_reasoning
+                .as_mut()
+                .expect("created reasoning item");
+            text.push_str(&delta);
+            (*index, id.clone())
+        };
+        frames.push(self.event(
+            "response.reasoning_text.delta",
+            ReasoningDeltaPayload {
+                content_index: 0,
+                delta,
+                item_id: id,
+                output_index,
+            },
+        ));
+        frames
+    }
+
+    fn finish_reasoning(&mut self) -> Vec<Bytes> {
+        let Some((output_index, id, text)) = self.active_reasoning.take() else {
+            return Vec::new();
+        };
+        let mut frames = Vec::new();
+        frames.push(self.event(
+            "response.reasoning_text.done",
+            ReasoningDonePayload {
+                content_index: 0,
+                item_id: id.clone(),
+                output_index,
+                text: text.clone(),
+            },
+        ));
+        frames.push(self.event(
+            "response.content_part.done",
+            ContentPartPayload {
+                content_index: 0,
+                item_id: id.clone(),
+                output_index,
+                part: OutputContent::ReasoningText { text: text.clone() },
+            },
+        ));
+        let item = reasoning_item(id, text, String::new());
+        frames.push(self.event(
+            "response.output_item.done",
+            ItemPayload {
+                item: item.clone(),
+                output_index,
+            },
+        ));
+        self.output.push(item);
+        frames
+    }
+
     fn finish_text(&mut self) -> Vec<Bytes> {
         let Some((output_index, id, text)) = self.active_text.take() else {
             return Vec::new();
@@ -1897,7 +2234,8 @@ impl ResponsesStream {
     }
 
     pub(crate) fn tool_call(&mut self, call: ToolCall) -> anyhow::Result<Vec<Bytes>> {
-        let mut frames = self.finish_text();
+        let mut frames = self.finish_reasoning();
+        frames.extend(self.finish_text());
         let output_index = self.output.len();
         let item_id = function_item_id();
         let (namespace, call) = self.meta.tool_aliases.resolve_call(call)?;
@@ -1973,7 +2311,8 @@ impl ResponsesStream {
         {
             return vec![self.failed(format!("{error:#}"))];
         }
-        let mut frames = self.finish_text();
+        let mut frames = self.finish_reasoning();
+        frames.extend(self.finish_text());
         let (kind, status) = if finish_reason == "length" {
             ("response.incomplete", "incomplete")
         } else {
@@ -2016,25 +2355,13 @@ fn stream_response(rx: mpsc::Receiver<std::result::Result<Bytes, std::io::Error>
         .expect("valid SSE response")
 }
 
-fn collect_tool_events(
+fn finish_decoder(
     output: &mut CollectedOutput,
-    parser: &mut ToolCallParser,
-    text: &str,
-) -> anyhow::Result<()> {
-    output.collect(parser.push(text)?);
-    Ok(())
-}
-
-fn finish_parser(
-    output: &mut CollectedOutput,
-    parser: ToolCallParser,
+    decoder: &mut GeneratedOutputDecoder<'_>,
     context: &ToolContext,
+    model_finish: &'static str,
 ) -> anyhow::Result<()> {
-    let (events, saw_tool_call) = parser.finish()?;
-    output.collect(events);
-    if saw_tool_call {
-        output.finish_reason = "tool_calls";
-    }
+    output.collect(decoder.finish(model_finish)?)?;
     validate_collected_output(output, context)
 }
 
@@ -2045,6 +2372,7 @@ where
     let meta = prepared.meta();
     let input_tokens = prepared.prompt_tokens;
     let tool_context = prepared.tool_context;
+    let native_output = prepared.native_output;
     let request = prepared.request;
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<CollectedOutput> {
         let model = state.model.blocking_lock();
@@ -2052,20 +2380,11 @@ where
         let memory = super::begin_direct_request_memory(&state, &*model, &request)?;
         let mut generation = GenerationStream::new(&*model, tokenizer, request)?;
         let mut output = CollectedOutput::new();
-        let mut parser = tool_context
-            .as_ref()
-            .map(|context| {
-                ToolCallParser::new_with_output_schema(
-                    context.dialect,
-                    uuid::Uuid::new_v4().simple().to_string(),
-                    &context.definitions,
-                    context.output_schema.clone(),
-                )
-            })
-            .transpose()?;
-        let mut detok = tool_context
-            .as_ref()
-            .map(|context| tokenizer.decode_stream(context.dialect.skip_special_tokens()));
+        let mut decoder = GeneratedOutputDecoder::new_with_native(
+            tokenizer,
+            tool_context.as_ref().map(ToolContext::decoder_config),
+            native_output,
+        )?;
         let mut memory = Some(memory);
         loop {
             let Some(event) = generation.next_token()? else {
@@ -2076,23 +2395,25 @@ where
                 state.record_request_started(input_tokens);
             }
             output.completion_tokens += 1;
-            if let (Some(parser), Some(detok)) = (parser.as_mut(), detok.as_mut()) {
-                let text = if event.finish_reason == Some("stop") {
-                    String::new()
-                } else {
-                    detok.step(event.token)?.unwrap_or_default()
-                };
-                collect_tool_events(&mut output, parser, &text)?;
+            let events = if event.finish_reason == Some("stop") {
+                Vec::new()
             } else {
-                output.content.push_str(&event.text);
+                decoder.push_token(event.token)?
+            };
+            if decoder.last_token_was_reasoning() {
+                output.reasoning_tokens = output.reasoning_tokens.saturating_add(1);
             }
+            output.collect(events)?;
             if let Some(reason) = event.finish_reason {
                 output.finish_reason = reason;
                 break;
             }
         }
-        if let (Some(parser), Some(context)) = (parser, tool_context.as_ref()) {
-            finish_parser(&mut output, parser, context)?;
+        let model_finish = output.finish_reason;
+        if let Some(context) = tool_context.as_ref() {
+            finish_decoder(&mut output, &mut decoder, context, model_finish)?;
+        } else {
+            output.collect(decoder.finish(model_finish)?)?;
         }
         state
             .runtime_usage
@@ -2169,6 +2490,7 @@ where
     let meta = prepared.meta();
     let input_tokens = prepared.prompt_tokens;
     let tool_context = prepared.tool_context;
+    let native_output = prepared.native_output;
     let AdmitReply {
         request_id: _,
         mut event_rx,
@@ -2178,19 +2500,12 @@ where
     };
     state.record_request_started(input_tokens);
     let mut output = CollectedOutput::new();
-    let mut parser = match tool_context
-        .as_ref()
-        .map(|context| {
-            ToolCallParser::new_with_output_schema(
-                context.dialect,
-                uuid::Uuid::new_v4().simple().to_string(),
-                &context.definitions,
-                context.output_schema.clone(),
-            )
-        })
-        .transpose()
-    {
-        Ok(parser) => parser,
+    let mut decoder = match GeneratedOutputDecoder::new_with_native(
+        &state.tokenizer,
+        tool_context.as_ref().map(ToolContext::decoder_config),
+        native_output,
+    ) {
+        Ok(decoder) => decoder,
         Err(error) => {
             return error_response(
                 StatusCode::BAD_REQUEST,
@@ -2199,53 +2514,56 @@ where
             );
         }
     };
-    let mut detok = state.tokenizer.decode_stream(
-        tool_context
-            .as_ref()
-            .map(|context| context.dialect.skip_special_tokens())
-            .unwrap_or(true),
-    );
     while let Some(event) = event_rx.recv().await {
         output.completion_tokens += 1;
-        let text = if event.finish_reason == Some("stop") {
-            String::new()
+        let events = if event.finish_reason == Some("stop") {
+            Ok(Vec::new())
         } else {
-            match detok.step(event.token) {
-                Ok(Some(text)) => text,
-                Ok(None) => String::new(),
-                Err(error) => {
-                    return error_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "detokenization_error",
-                        format!("detokenization failed: {error}"),
-                    );
-                }
-            }
+            decoder.push_token(event.token)
         };
-        if let Some(parser) = parser.as_mut() {
-            if let Err(error) = collect_tool_events(&mut output, parser, &text) {
+        let events = match events {
+            Ok(events) => events,
+            Err(error) => {
                 return error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    "tool_parse_error",
+                    "generated_output_decode_error",
                     format!("{error:#}"),
                 );
             }
-        } else {
-            output.content.push_str(&text);
+        };
+        if decoder.last_token_was_reasoning() {
+            output.reasoning_tokens = output.reasoning_tokens.saturating_add(1);
+        }
+        if let Err(error) = output.collect(events) {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "generated_output_mapping_error",
+                format!("{error:#}"),
+            );
         }
         if let Some(reason) = event.finish_reason {
             output.finish_reason = reason;
             break;
         }
     }
-    if let (Some(parser), Some(context)) = (parser, tool_context.as_ref()) {
-        if let Err(error) = finish_parser(&mut output, parser, context) {
+    let model_finish = output.finish_reason;
+    if let Some(context) = tool_context.as_ref() {
+        if let Err(error) = finish_decoder(&mut output, &mut decoder, context, model_finish) {
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "tool_parse_error",
+                "generated_output_decode_error",
                 format!("{error:#}"),
             );
         }
+    } else if let Err(error) = decoder
+        .finish(model_finish)
+        .and_then(|events| output.collect(events))
+    {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "generated_output_decode_error",
+            format!("{error:#}"),
+        );
     }
     state
         .runtime_usage
@@ -2253,15 +2571,33 @@ where
     unary_response(meta, input_tokens, output)
 }
 
-fn stream_tool_events(
+pub(crate) fn stream_generated_events(
     formatter: &mut ResponsesStream,
-    events: Vec<AssistantOutputEvent>,
+    events: Vec<GeneratedOutputEvent>,
+    call_names: &mut Vec<String>,
+    finish_reason: &mut Option<&'static str>,
 ) -> anyhow::Result<Vec<Bytes>> {
     let mut frames = Vec::new();
     for event in events {
         match event {
-            AssistantOutputEvent::TextDelta(text) => frames.extend(formatter.text_delta(text)),
-            AssistantOutputEvent::ToolCall(call) => frames.extend(formatter.tool_call(call)?),
+            GeneratedOutputEvent::TextDelta(text) => frames.extend(formatter.text_delta(text)),
+            GeneratedOutputEvent::ReasoningDelta(text) => {
+                frames.extend(formatter.reasoning_delta(text));
+            }
+            GeneratedOutputEvent::ToolCall(call) => {
+                call_names.push(call.name.clone());
+                frames.extend(formatter.tool_call(call)?);
+            }
+            GeneratedOutputEvent::Finished(reason) => {
+                anyhow::ensure!(
+                    finish_reason.replace(reason.as_str()).is_none(),
+                    "generated output emitted more than one terminal event"
+                );
+            }
+            other => anyhow::bail!(
+                "Responses adapter has no enabled producer mapping for generated {} output",
+                other.kind()
+            ),
         }
     }
     Ok(frames)
@@ -2274,6 +2610,7 @@ where
     let meta = prepared.meta();
     let input_tokens = prepared.prompt_tokens;
     let tool_context = prepared.tool_context;
+    let native_output = prepared.native_output;
     let AdmitReply {
         request_id: _,
         mut event_rx,
@@ -2290,73 +2627,52 @@ where
         if tx.send(Ok(formatter.created())).await.is_err() {
             return;
         }
-        let mut parser = match tool_context
-            .as_ref()
-            .map(|context| {
-                ToolCallParser::new_with_output_schema(
-                    context.dialect,
-                    uuid::Uuid::new_v4().simple().to_string(),
-                    &context.definitions,
-                    context.output_schema.clone(),
-                )
-            })
-            .transpose()
-        {
-            Ok(parser) => parser,
+        let mut decoder = match GeneratedOutputDecoder::new_with_native(
+            &tokenizer,
+            tool_context.as_ref().map(ToolContext::decoder_config),
+            native_output,
+        ) {
+            Ok(decoder) => decoder,
             Err(error) => {
                 let frame = formatter.failed(format!("{error:#}"));
                 let _ = tx.send(Ok(frame)).await;
                 return;
             }
         };
-        let mut detok = tokenizer.decode_stream(
-            tool_context
-                .as_ref()
-                .map(|context| context.dialect.skip_special_tokens())
-                .unwrap_or(true),
-        );
         let mut output = CollectedOutput::new();
         let mut call_names = Vec::new();
+        let mut typed_finish = None;
         while let Some(event) = event_rx.recv().await {
             output.completion_tokens += 1;
             runtime_usage.record_output_tokens(1);
-            let text = if event.finish_reason == Some("stop") {
-                String::new()
+            let events = if event.finish_reason == Some("stop") {
+                Ok(Vec::new())
             } else {
-                match detok.step(event.token) {
-                    Ok(Some(text)) => text,
-                    Ok(None) => String::new(),
-                    Err(error) => {
-                        let frame = formatter.failed(format!("detokenization failed: {error}"));
-                        let _ = tx.send(Ok(frame)).await;
-                        return;
-                    }
+                decoder.push_token(event.token)
+            };
+            let events = match events {
+                Ok(events) => events,
+                Err(error) => {
+                    let frame = formatter.failed(format!("{error:#}"));
+                    let _ = tx.send(Ok(frame)).await;
+                    return;
                 }
             };
-            let frames = if let Some(parser) = parser.as_mut() {
-                match parser.push(&text) {
-                    Ok(events) => {
-                        call_names.extend(events.iter().filter_map(|event| match event {
-                            AssistantOutputEvent::ToolCall(call) => Some(call.name.clone()),
-                            AssistantOutputEvent::TextDelta(_) => None,
-                        }));
-                        match stream_tool_events(&mut formatter, events) {
-                            Ok(frames) => frames,
-                            Err(error) => {
-                                let frame = formatter.failed(format!("{error:#}"));
-                                let _ = tx.send(Ok(frame)).await;
-                                return;
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        let frame = formatter.failed(format!("{error:#}"));
-                        let _ = tx.send(Ok(frame)).await;
-                        return;
-                    }
+            if decoder.last_token_was_reasoning() {
+                output.reasoning_tokens = output.reasoning_tokens.saturating_add(1);
+            }
+            let frames = match stream_generated_events(
+                &mut formatter,
+                events,
+                &mut call_names,
+                &mut typed_finish,
+            ) {
+                Ok(frames) => frames,
+                Err(error) => {
+                    let frame = formatter.failed(format!("{error:#}"));
+                    let _ = tx.send(Ok(frame)).await;
+                    return;
                 }
-            } else {
-                formatter.text_delta(text)
             };
             for frame in frames {
                 if tx.send(Ok(frame)).await.is_err() {
@@ -2368,48 +2684,46 @@ where
                 break;
             }
         }
-        if let (Some(parser), Some(context)) = (parser, tool_context.as_ref()) {
-            match parser.finish() {
-                Ok((events, saw_tool_call)) => {
-                    call_names.extend(events.iter().filter_map(|event| match event {
-                        AssistantOutputEvent::ToolCall(call) => Some(call.name.clone()),
-                        AssistantOutputEvent::TextDelta(_) => None,
-                    }));
-                    if let Err(error) = openai::validate_tool_choice_output(
-                        &context.constraint_options,
-                        &call_names,
-                    ) {
-                        let frame = formatter.failed(format!("{error:#}"));
-                        let _ = tx.send(Ok(frame)).await;
-                        return;
-                    }
-                    let frames = match stream_tool_events(&mut formatter, events) {
-                        Ok(frames) => frames,
-                        Err(error) => {
-                            let frame = formatter.failed(format!("{error:#}"));
-                            let _ = tx.send(Ok(frame)).await;
-                            return;
-                        }
-                    };
-                    for frame in frames {
-                        if tx.send(Ok(frame)).await.is_err() {
-                            return;
-                        }
-                    }
-                    if saw_tool_call {
-                        output.finish_reason = "tool_calls";
-                    }
-                }
-                Err(error) => {
-                    let frame = formatter.failed(format!("{error:#}"));
-                    let _ = tx.send(Ok(frame)).await;
-                    return;
-                }
+        let events = match decoder.finish(output.finish_reason) {
+            Ok(events) => events,
+            Err(error) => {
+                let frame = formatter.failed(format!("{error:#}"));
+                let _ = tx.send(Ok(frame)).await;
+                return;
+            }
+        };
+        let frames = match stream_generated_events(
+            &mut formatter,
+            events,
+            &mut call_names,
+            &mut typed_finish,
+        ) {
+            Ok(frames) => frames,
+            Err(error) => {
+                let frame = formatter.failed(format!("{error:#}"));
+                let _ = tx.send(Ok(frame)).await;
+                return;
+            }
+        };
+        for frame in frames {
+            if tx.send(Ok(frame)).await.is_err() {
+                return;
             }
         }
+        if let Some(context) = tool_context.as_ref() {
+            if let Err(error) =
+                openai::validate_tool_choice_output(&context.constraint_options, &call_names)
+            {
+                let frame = formatter.failed(format!("{error:#}"));
+                let _ = tx.send(Ok(frame)).await;
+                return;
+            }
+        }
+        output.finish_reason = typed_finish.unwrap_or(output.finish_reason);
         for frame in formatter.completed(
             output.finish_reason,
-            Usage::new(input_tokens, output.completion_tokens),
+            Usage::new(input_tokens, output.completion_tokens)
+                .with_reasoning_tokens(output.reasoning_tokens),
         ) {
             if tx.send(Ok(frame)).await.is_err() {
                 return;
@@ -2426,6 +2740,7 @@ where
     let meta = prepared.meta();
     let input_tokens = prepared.prompt_tokens;
     let tool_context = prepared.tool_context;
+    let native_output = prepared.native_output;
     let request = prepared.request;
     let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
     let (init_tx, init_rx) = oneshot::channel::<anyhow::Result<()>>();
@@ -2462,30 +2777,22 @@ where
         if tx.blocking_send(Ok(formatter.created())).is_err() {
             return;
         }
-        let mut parser = match tool_context
-            .as_ref()
-            .map(|context| {
-                ToolCallParser::new_with_output_schema(
-                    context.dialect,
-                    uuid::Uuid::new_v4().simple().to_string(),
-                    &context.definitions,
-                    context.output_schema.clone(),
-                )
-            })
-            .transpose()
-        {
-            Ok(parser) => parser,
+        let mut decoder = match GeneratedOutputDecoder::new_with_native(
+            tokenizer,
+            tool_context.as_ref().map(ToolContext::decoder_config),
+            native_output,
+        ) {
+            Ok(decoder) => decoder,
             Err(error) => {
                 let _ = tx.blocking_send(Ok(formatter.failed(format!("{error:#}"))));
                 return;
             }
         };
-        let mut detok = tool_context
-            .as_ref()
-            .map(|context| tokenizer.decode_stream(context.dialect.skip_special_tokens()));
         let mut completion_tokens = 0_u32;
+        let mut reasoning_tokens = 0_u32;
         let mut finish_reason = "stop";
         let mut call_names = Vec::new();
+        let mut typed_finish = None;
         let mut first = Some(first);
         loop {
             let event = match first.take() {
@@ -2502,43 +2809,32 @@ where
             };
             completion_tokens += 1;
             state.runtime_usage.record_output_tokens(1);
-            let frames = if let (Some(parser), Some(detok)) = (parser.as_mut(), detok.as_mut()) {
-                let text = if event.finish_reason == Some("stop") {
-                    String::new()
-                } else {
-                    match detok.step(event.token) {
-                        Ok(Some(text)) => text,
-                        Ok(None) => String::new(),
-                        Err(error) => {
-                            let _ = tx.blocking_send(Ok(
-                                formatter.failed(format!("detokenization failed: {error}"))
-                            ));
-                            return;
-                        }
-                    }
-                };
-                match parser.push(&text) {
-                    Ok(events) => {
-                        call_names.extend(events.iter().filter_map(|event| match event {
-                            AssistantOutputEvent::ToolCall(call) => Some(call.name.clone()),
-                            AssistantOutputEvent::TextDelta(_) => None,
-                        }));
-                        match stream_tool_events(&mut formatter, events) {
-                            Ok(frames) => frames,
-                            Err(error) => {
-                                let _ =
-                                    tx.blocking_send(Ok(formatter.failed(format!("{error:#}"))));
-                                return;
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        let _ = tx.blocking_send(Ok(formatter.failed(format!("{error:#}"))));
-                        return;
-                    }
-                }
+            let events = if event.finish_reason == Some("stop") {
+                Ok(Vec::new())
             } else {
-                formatter.text_delta(event.text)
+                decoder.push_token(event.token)
+            };
+            let events = match events {
+                Ok(events) => events,
+                Err(error) => {
+                    let _ = tx.blocking_send(Ok(formatter.failed(format!("{error:#}"))));
+                    return;
+                }
+            };
+            if decoder.last_token_was_reasoning() {
+                reasoning_tokens = reasoning_tokens.saturating_add(1);
+            }
+            let frames = match stream_generated_events(
+                &mut formatter,
+                events,
+                &mut call_names,
+                &mut typed_finish,
+            ) {
+                Ok(frames) => frames,
+                Err(error) => {
+                    let _ = tx.blocking_send(Ok(formatter.failed(format!("{error:#}"))));
+                    return;
+                }
             };
             for frame in frames {
                 if tx.blocking_send(Ok(frame)).is_err() {
@@ -2550,44 +2846,43 @@ where
                 break;
             }
         }
-        if let (Some(parser), Some(context)) = (parser, tool_context.as_ref()) {
-            match parser.finish() {
-                Ok((events, saw_tool_call)) => {
-                    call_names.extend(events.iter().filter_map(|event| match event {
-                        AssistantOutputEvent::ToolCall(call) => Some(call.name.clone()),
-                        AssistantOutputEvent::TextDelta(_) => None,
-                    }));
-                    if let Err(error) = openai::validate_tool_choice_output(
-                        &context.constraint_options,
-                        &call_names,
-                    ) {
-                        let _ = tx.blocking_send(Ok(formatter.failed(format!("{error:#}"))));
-                        return;
-                    }
-                    let frames = match stream_tool_events(&mut formatter, events) {
-                        Ok(frames) => frames,
-                        Err(error) => {
-                            let _ = tx.blocking_send(Ok(formatter.failed(format!("{error:#}"))));
-                            return;
-                        }
-                    };
-                    for frame in frames {
-                        if tx.blocking_send(Ok(frame)).is_err() {
-                            return;
-                        }
-                    }
-                    if saw_tool_call {
-                        finish_reason = "tool_calls";
-                    }
-                }
-                Err(error) => {
-                    let _ = tx.blocking_send(Ok(formatter.failed(format!("{error:#}"))));
-                    return;
-                }
+        let events = match decoder.finish(finish_reason) {
+            Ok(events) => events,
+            Err(error) => {
+                let _ = tx.blocking_send(Ok(formatter.failed(format!("{error:#}"))));
+                return;
+            }
+        };
+        let frames = match stream_generated_events(
+            &mut formatter,
+            events,
+            &mut call_names,
+            &mut typed_finish,
+        ) {
+            Ok(frames) => frames,
+            Err(error) => {
+                let _ = tx.blocking_send(Ok(formatter.failed(format!("{error:#}"))));
+                return;
+            }
+        };
+        for frame in frames {
+            if tx.blocking_send(Ok(frame)).is_err() {
+                return;
             }
         }
-        for frame in formatter.completed(finish_reason, Usage::new(input_tokens, completion_tokens))
-        {
+        if let Some(context) = tool_context.as_ref() {
+            if let Err(error) =
+                openai::validate_tool_choice_output(&context.constraint_options, &call_names)
+            {
+                let _ = tx.blocking_send(Ok(formatter.failed(format!("{error:#}"))));
+                return;
+            }
+        }
+        finish_reason = typed_finish.unwrap_or(finish_reason);
+        for frame in formatter.completed(
+            finish_reason,
+            Usage::new(input_tokens, completion_tokens).with_reasoning_tokens(reasoning_tokens),
+        ) {
             if tx.blocking_send(Ok(frame)).is_err() {
                 return;
             }
@@ -2679,6 +2974,20 @@ pub(crate) async fn gemma4_drafter_responses(
 mod tests {
     use super::*;
 
+    #[test]
+    fn responses_adapter_rejects_typed_output_without_an_enabled_producer_mapping() {
+        let mut output = CollectedOutput::new();
+        let error = output
+            .collect(vec![GeneratedOutputEvent::RefusalDelta(
+                "cannot comply".to_owned(),
+            )])
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("no enabled producer mapping for generated refusal"));
+        assert!(output.content.is_empty());
+    }
+
     fn request(value: serde_json::Value) -> ResponsesRequest {
         serde_json::from_value(value).expect("valid fixture")
     }
@@ -2717,6 +3026,71 @@ mod tests {
             normalized.chat.messages[3].tool_call_id.as_deref(),
             Some("call_1")
         );
+    }
+
+    #[test]
+    fn reasoning_effort_controls_native_template_and_round_trip_history() {
+        let normalized = request(serde_json::json!({
+            "model":"local",
+            "input":[
+                {
+                    "type":"reasoning",
+                    "id":"rs_1",
+                    "summary":[],
+                    "content":[{"type":"reasoning_text","text":"inspect the weather first"}],
+                    "status":"completed"
+                },
+                {
+                    "type":"function_call",
+                    "call_id":"call_1",
+                    "name":"weather",
+                    "arguments":"{\"city\":\"Tokyo\"}"
+                },
+                {"type":"function_call_output","call_id":"call_1","output":"22 C"}
+            ],
+            "tools":[{
+                "type":"function",
+                "name":"weather",
+                "parameters":{"type":"object","properties":{"city":{"type":"string"}}}
+            }],
+            "reasoning":{"effort":"high","summary":"none"}
+        }))
+        .normalize()
+        .expect("reasoning request normalizes");
+        assert_eq!(
+            normalized.chat.chat_template_kwargs,
+            Some(serde_json::json!({"enable_thinking":true}))
+        );
+        assert_eq!(
+            normalized.chat.messages[0].reasoning_content.as_deref(),
+            Some("inspect the weather first")
+        );
+        assert_eq!(normalized.reasoning.effort, Some(ReasoningEffort::High));
+        assert_eq!(
+            normalized.reasoning.summary,
+            Some(ReasoningSummaryMode::None)
+        );
+    }
+
+    #[test]
+    fn encrypted_reasoning_without_plaintext_cannot_be_replayed() {
+        let error = request(serde_json::json!({
+            "model":"local",
+            "input":[
+                {
+                    "type":"reasoning",
+                    "encrypted_content":"opaque",
+                    "summary":[],
+                    "content":[]
+                },
+                {"type":"message","role":"assistant","content":"done"}
+            ]
+        }))
+        .normalize()
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("encrypted reasoning cannot be replayed"));
     }
 
     #[test]
@@ -2954,6 +3328,7 @@ mod tests {
             tool_choice: serde_json::json!("auto"),
             tools: Vec::new(),
             top_p: None,
+            reasoning: ReasoningRequest::default(),
             tool_aliases: ToolAliases::default(),
         };
         let mut stream = ResponsesStream::new(meta);
@@ -2966,6 +3341,148 @@ mod tests {
             .collect::<String>();
         assert!(wire.contains("response.completed"));
         assert!(!wire.contains("[DONE]"));
+    }
+
+    #[test]
+    fn reasoning_stream_uses_native_responses_lifecycle() {
+        let meta = ResponseMeta {
+            id: "resp_reasoning".into(),
+            created_at: 1,
+            instructions: None,
+            text_format: ResponseTextFormat::Text,
+            max_output_tokens: 32,
+            model: "local".into(),
+            parallel_tool_calls: true,
+            temperature: None,
+            tool_choice: serde_json::json!("auto"),
+            tools: Vec::new(),
+            top_p: None,
+            reasoning: ReasoningRequest {
+                effort: Some(ReasoningEffort::Medium),
+                summary: Some(ReasoningSummaryMode::None),
+            },
+            tool_aliases: ToolAliases::default(),
+        };
+        let mut stream = ResponsesStream::new(meta);
+        let mut frames = vec![stream.created()];
+        frames.extend(stream.reasoning_delta("check".into()));
+        frames.extend(stream.text_delta("answer".into()));
+        frames.extend(stream.completed("stop", Usage::new(4, 3).with_reasoning_tokens(2)));
+        let events = frames
+            .into_iter()
+            .map(|frame| {
+                let wire = String::from_utf8(frame.to_vec()).unwrap();
+                let data = wire
+                    .lines()
+                    .find_map(|line| line.strip_prefix("data: "))
+                    .unwrap();
+                serde_json::from_str::<serde_json::Value>(data).unwrap()
+            })
+            .collect::<Vec<_>>();
+        let kinds = events
+            .iter()
+            .map(|event| event["type"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            vec![
+                "response.created",
+                "response.output_item.added",
+                "response.content_part.added",
+                "response.reasoning_text.delta",
+                "response.reasoning_text.done",
+                "response.content_part.done",
+                "response.output_item.done",
+                "response.output_item.added",
+                "response.content_part.added",
+                "response.output_text.delta",
+                "response.output_text.done",
+                "response.content_part.done",
+                "response.output_item.done",
+                "response.completed",
+            ]
+        );
+        let completed = events.last().unwrap();
+        assert_eq!(
+            completed["response"]["usage"]["output_tokens_details"]["reasoning_tokens"],
+            2
+        );
+        assert_eq!(completed["response"]["reasoning"]["effort"], "medium");
+    }
+
+    #[test]
+    fn reasoning_item_uses_native_responses_wire_shape() {
+        let value = serde_json::to_value(reasoning_item(
+            "rs_1".into(),
+            "inspect inputs".into(),
+            String::new(),
+        ))
+        .expect("reasoning item serializes");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "type":"reasoning",
+                "id":"rs_1",
+                "summary":[],
+                "content":[{"type":"reasoning_text","text":"inspect inputs"}]
+            })
+        );
+    }
+
+    #[test]
+    fn reasoning_stream_closes_before_function_call() {
+        let meta = ResponseMeta {
+            id: "resp_reasoning_tool".into(),
+            created_at: 1,
+            instructions: None,
+            text_format: ResponseTextFormat::Text,
+            max_output_tokens: 32,
+            model: "local".into(),
+            parallel_tool_calls: false,
+            temperature: None,
+            tool_choice: serde_json::json!({"type":"function","name":"weather"}),
+            tools: Vec::new(),
+            top_p: None,
+            reasoning: ReasoningRequest {
+                effort: Some(ReasoningEffort::High),
+                summary: Some(ReasoningSummaryMode::None),
+            },
+            tool_aliases: ToolAliases::default(),
+        };
+        let mut stream = ResponsesStream::new(meta);
+        let mut frames = stream.reasoning_delta("inspect weather".into());
+        frames.extend(
+            stream
+                .tool_call(ToolCall {
+                    id: "call_1".into(),
+                    name: "weather".into(),
+                    arguments: serde_json::json!({"city":"Tokyo"}),
+                })
+                .expect("function call formats"),
+        );
+        let kinds = frames
+            .into_iter()
+            .map(|frame| {
+                let wire = String::from_utf8(frame.to_vec()).unwrap();
+                let data = wire
+                    .lines()
+                    .find_map(|line| line.strip_prefix("data: "))
+                    .unwrap();
+                serde_json::from_str::<serde_json::Value>(data).unwrap()["type"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        let reasoning_done = kinds
+            .iter()
+            .position(|kind| kind == "response.output_item.done")
+            .expect("reasoning item closes");
+        assert_eq!(
+            kinds[reasoning_done + 1],
+            "response.output_item.added",
+            "function item must start only after reasoning item is complete"
+        );
     }
 
     #[test]
@@ -2982,6 +3499,7 @@ mod tests {
             tool_choice: serde_json::json!({"type":"function","name":"weather"}),
             tools: Vec::new(),
             top_p: None,
+            reasoning: ReasoningRequest::default(),
             tool_aliases: ToolAliases::default(),
         };
         let mut stream = ResponsesStream::new(meta);
@@ -3217,6 +3735,7 @@ mod tests {
             tool_choice: serde_json::json!("none"),
             tools: Vec::new(),
             top_p: None,
+            reasoning: ReasoningRequest::default(),
             tool_aliases: ToolAliases::default(),
         };
         let mut stream = ResponsesStream::new(meta);

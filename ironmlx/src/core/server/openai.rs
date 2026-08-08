@@ -21,6 +21,9 @@ use tokio::sync::oneshot;
 
 use crate::core::constrained::{ToolChoiceConstraint, ToolConstraintOptions};
 use crate::core::generate::{GenerateRequest, GenerationStream};
+use crate::core::generated_output::{
+    GeneratedOutputDecoder, GeneratedOutputEvent, ToolOutputDecoderConfig,
+};
 use crate::core::image_input::{ImageInputError, ImageRequestBudget};
 use crate::core::model::Model;
 use crate::core::sampler::Sampler;
@@ -32,8 +35,8 @@ use crate::core::server::vision::{expand_decoded_messages_bounded, DecodedMessag
 use crate::core::server::VisionInputConfig;
 use crate::core::speculative::MtpSpeculativeConfig;
 use crate::core::tool_calling::{
-    validate_function_name, validate_tool_definitions, AgentMessage, AssistantOutputEvent,
-    TemplateToolCall, ToolCall, ToolCallParser, ToolDefinition, ToolDialect,
+    validate_function_name, validate_tool_definitions, AgentMessage, TemplateToolCall, ToolCall,
+    ToolDefinition, ToolDialect,
 };
 
 use super::{
@@ -367,6 +370,7 @@ pub fn decode_openai_messages(
         out.push(DecodedMessage {
             role: msg.role,
             parts,
+            reasoning_content: msg.reasoning_content,
         });
     }
     Ok(out)
@@ -543,6 +547,7 @@ pub(crate) fn build_agent_messages(
                 output.push(AgentMessage {
                     role: wire.role.clone(),
                     content: Some(content),
+                    reasoning_content: wire.reasoning_content.clone(),
                     tool_calls: Vec::new(),
                     tool_call_id: None,
                 });
@@ -586,6 +591,7 @@ pub(crate) fn build_agent_messages(
                 output.push(AgentMessage {
                     role: wire.role.clone(),
                     content: (!content.is_empty()).then_some(content),
+                    reasoning_content: wire.reasoning_content.clone(),
                     tool_calls: calls,
                     tool_call_id: None,
                 });
@@ -604,6 +610,7 @@ pub(crate) fn build_agent_messages(
                 output.push(AgentMessage {
                     role: wire.role.clone(),
                     content: Some(content),
+                    reasoning_content: wire.reasoning_content.clone(),
                     tool_calls: Vec::new(),
                     tool_call_id: Some(call_id.clone()),
                 });
@@ -1072,25 +1079,30 @@ struct ParsedAssistantOutput {
     completion_tokens: u32,
 }
 
-fn collect_parser_events(output: &mut ParsedAssistantOutput, events: Vec<AssistantOutputEvent>) {
+fn collect_generated_events(
+    output: &mut ParsedAssistantOutput,
+    events: Vec<GeneratedOutputEvent>,
+) -> anyhow::Result<()> {
     for event in events {
         match event {
-            AssistantOutputEvent::TextDelta(text) => output.content.push_str(&text),
-            AssistantOutputEvent::ToolCall(call) => output.tool_calls.push(call),
+            GeneratedOutputEvent::TextDelta(text) => output.content.push_str(&text),
+            GeneratedOutputEvent::ToolCall(call) => output.tool_calls.push(call),
+            GeneratedOutputEvent::Finished(reason) => output.finish_reason = reason.as_str(),
+            other => anyhow::bail!(
+                "Chat Completions cannot represent generated {} output",
+                other.kind()
+            ),
         }
     }
+    Ok(())
 }
 
-fn finish_tool_parser(
-    parser: ToolCallParser,
+fn finish_output_decoder(
+    decoder: &mut GeneratedOutputDecoder<'_>,
     output: &mut ParsedAssistantOutput,
+    model_finish: &'static str,
 ) -> anyhow::Result<()> {
-    let (events, saw_tool_call) = parser.finish()?;
-    collect_parser_events(output, events);
-    if saw_tool_call {
-        output.finish_reason = "tool_calls";
-    }
-    Ok(())
+    collect_generated_events(output, decoder.finish(model_finish)?)
 }
 
 pub(crate) fn validate_tool_choice_output(
@@ -1299,14 +1311,15 @@ fn utf8_fragments(value: &str, max_bytes: usize) -> Vec<&str> {
 fn format_tool_output_events(
     id: &str,
     model_id: &str,
-    events: Vec<AssistantOutputEvent>,
+    events: Vec<GeneratedOutputEvent>,
     next_call_index: &mut usize,
     call_names: &mut Vec<String>,
-) -> Vec<Bytes> {
+    finish_reason: &mut Option<&'static str>,
+) -> anyhow::Result<Vec<Bytes>> {
     let mut frames = Vec::new();
     for event in events {
         match event {
-            AssistantOutputEvent::TextDelta(text) => frames.push(format_sse_data(&ChunkResponse {
+            GeneratedOutputEvent::TextDelta(text) => frames.push(format_sse_data(&ChunkResponse {
                 id: id.to_owned(),
                 object: "chat.completion.chunk",
                 created: now_unix(),
@@ -1317,7 +1330,7 @@ fn format_tool_output_events(
                     finish_reason: None,
                 }],
             })),
-            AssistantOutputEvent::ToolCall(call) => {
+            GeneratedOutputEvent::ToolCall(call) => {
                 call_names.push(call.name.clone());
                 let index = *next_call_index;
                 *next_call_index += 1;
@@ -1368,9 +1381,19 @@ fn format_tool_output_events(
                     }));
                 }
             }
+            GeneratedOutputEvent::Finished(reason) => {
+                anyhow::ensure!(
+                    finish_reason.replace(reason.as_str()).is_none(),
+                    "generated output emitted more than one terminal event"
+                );
+            }
+            other => anyhow::bail!(
+                "Chat Completions cannot represent generated {} output",
+                other.kind()
+            ),
         }
     }
-    frames
+    Ok(frames)
 }
 
 fn tool_role_chunk(id: &str, model_id: &str) -> Bytes {
@@ -1459,14 +1482,21 @@ where
                 return;
             }
         };
-        let mut parser =
-            match ToolCallParser::new(dialect, uuid::Uuid::new_v4().simple().to_string(), &tools) {
-                Ok(parser) => parser,
-                Err(error) => {
-                    let _ = init_tx.send(Err(error));
-                    return;
-                }
-            };
+        let mut decoder = match GeneratedOutputDecoder::new(
+            tokenizer,
+            Some(ToolOutputDecoderConfig {
+                dialect,
+                response_id: uuid::Uuid::new_v4().simple().to_string(),
+                definitions: tools,
+                output_schema: None,
+            }),
+        ) {
+            Ok(decoder) => decoder,
+            Err(error) => {
+                let _ = init_tx.send(Err(error));
+                return;
+            }
+        };
         memory.commit();
         state.record_request_started(prompt_tokens);
         if init_tx.send(Ok(())).is_err()
@@ -1478,11 +1508,11 @@ where
         }
 
         let mut completion_tokens = 0_u32;
-        let mut detok = tokenizer.decode_stream(dialect.skip_special_tokens());
         let mut next_call_index = 0_usize;
         let mut call_names = Vec::new();
         let mut first_event = Some(first_event);
         let mut model_finish = "stop";
+        let mut typed_finish = None;
         loop {
             let event_result = match first_event.take() {
                 Some(event) => Ok(event),
@@ -1498,34 +1528,32 @@ where
             };
             completion_tokens += 1;
             state.runtime_usage.record_output_tokens(1);
-            let text = if event.finish_reason == Some("stop") {
-                String::new()
+            let events = if event.finish_reason == Some("stop") {
+                Ok(Vec::new())
             } else {
-                match detok.step(event.token) {
-                    Ok(Some(text)) => text,
-                    Ok(None) => String::new(),
-                    Err(error) => {
-                        let _ = tx.blocking_send(Ok(format_sse_error(&anyhow::anyhow!(
-                            "detok: {error}"
-                        ))));
-                        return;
-                    }
-                }
+                decoder.push_token(event.token)
             };
-            let events = match parser.push(&text) {
+            let events = match events {
                 Ok(events) => events,
                 Err(error) => {
                     let _ = tx.blocking_send(Ok(format_sse_error(&error)));
                     return;
                 }
             };
-            for frame in format_tool_output_events(
+            for frame in match format_tool_output_events(
                 &id_for_task,
                 &model_for_task,
                 events,
                 &mut next_call_index,
                 &mut call_names,
+                &mut typed_finish,
             ) {
+                Ok(frames) => frames,
+                Err(error) => {
+                    let _ = tx.blocking_send(Ok(format_sse_error(&error)));
+                    return;
+                }
+            } {
                 if tx.blocking_send(Ok(frame)).is_err() {
                     return;
                 }
@@ -1535,20 +1563,27 @@ where
                 break;
             }
         }
-        let (events, saw_tool_call) = match parser.finish() {
-            Ok(result) => result,
+        let events = match decoder.finish(model_finish) {
+            Ok(events) => events,
             Err(error) => {
                 let _ = tx.blocking_send(Ok(format_sse_error(&error)));
                 return;
             }
         };
-        for frame in format_tool_output_events(
+        for frame in match format_tool_output_events(
             &id_for_task,
             &model_for_task,
             events,
             &mut next_call_index,
             &mut call_names,
+            &mut typed_finish,
         ) {
+            Ok(frames) => frames,
+            Err(error) => {
+                let _ = tx.blocking_send(Ok(format_sse_error(&error)));
+                return;
+            }
+        } {
             if tx.blocking_send(Ok(frame)).is_err() {
                 return;
             }
@@ -1557,11 +1592,7 @@ where
             let _ = tx.blocking_send(Ok(format_sse_error(&error)));
             return;
         }
-        let finish = if saw_tool_call {
-            "tool_calls"
-        } else {
-            model_finish
-        };
+        let finish = typed_finish.unwrap_or(model_finish);
         if tx
             .blocking_send(Ok(tool_finish_chunk(&id_for_task, &model_for_task, finish)))
             .is_err()
@@ -1632,55 +1663,61 @@ where
         Ok(Err(error)) => return admit_err_to_response(error),
         Err(_) => return (StatusCode::SERVICE_UNAVAILABLE, "scheduler reply lost").into_response(),
     };
-    let mut parser =
-        match ToolCallParser::new(dialect, uuid::Uuid::new_v4().simple().to_string(), &tools) {
-            Ok(parser) => parser,
-            Err(error) => return (StatusCode::BAD_REQUEST, format!("{error:#}")).into_response(),
-        };
+    let decoder_config = ToolOutputDecoderConfig {
+        dialect,
+        response_id: uuid::Uuid::new_v4().simple().to_string(),
+        definitions: tools,
+        output_schema: None,
+    };
     state.record_request_started(prompt_tokens);
     let tokenizer = state.tokenizer.clone();
     let runtime_usage = state.runtime_usage.clone();
     let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
     tokio::spawn(async move {
+        let mut decoder = match GeneratedOutputDecoder::new(&tokenizer, Some(decoder_config)) {
+            Ok(decoder) => decoder,
+            Err(error) => {
+                let _ = tx.send(Ok(format_sse_error(&error))).await;
+                return;
+            }
+        };
         if tx.send(Ok(tool_role_chunk(&id, &model_id))).await.is_err() {
             return;
         }
-        let mut detok = tokenizer.decode_stream(dialect.skip_special_tokens());
         let mut completion_tokens = 0_u32;
         let mut next_call_index = 0_usize;
         let mut call_names = Vec::new();
         let mut model_finish = "stop";
+        let mut typed_finish = None;
         while let Some(event) = event_rx.recv().await {
             completion_tokens += 1;
             runtime_usage.record_output_tokens(1);
-            let text = if event.finish_reason == Some("stop") {
-                String::new()
+            let events = if event.finish_reason == Some("stop") {
+                Ok(Vec::new())
             } else {
-                match detok.step(event.token) {
-                    Ok(Some(text)) => text,
-                    Ok(None) => String::new(),
-                    Err(error) => {
-                        let _ = tx
-                            .send(Ok(format_sse_error(&anyhow::anyhow!("detok: {error}"))))
-                            .await;
-                        return;
-                    }
-                }
+                decoder.push_token(event.token)
             };
-            let events = match parser.push(&text) {
+            let events = match events {
                 Ok(events) => events,
                 Err(error) => {
                     let _ = tx.send(Ok(format_sse_error(&error))).await;
                     return;
                 }
             };
-            for frame in format_tool_output_events(
+            for frame in match format_tool_output_events(
                 &id,
                 &model_id,
                 events,
                 &mut next_call_index,
                 &mut call_names,
+                &mut typed_finish,
             ) {
+                Ok(frames) => frames,
+                Err(error) => {
+                    let _ = tx.send(Ok(format_sse_error(&error))).await;
+                    return;
+                }
+            } {
                 if tx.send(Ok(frame)).await.is_err() {
                     return;
                 }
@@ -1690,20 +1727,27 @@ where
                 break;
             }
         }
-        let (events, saw_tool_call) = match parser.finish() {
-            Ok(result) => result,
+        let events = match decoder.finish(model_finish) {
+            Ok(events) => events,
             Err(error) => {
                 let _ = tx.send(Ok(format_sse_error(&error))).await;
                 return;
             }
         };
-        for frame in format_tool_output_events(
+        for frame in match format_tool_output_events(
             &id,
             &model_id,
             events,
             &mut next_call_index,
             &mut call_names,
+            &mut typed_finish,
         ) {
+            Ok(frames) => frames,
+            Err(error) => {
+                let _ = tx.send(Ok(format_sse_error(&error))).await;
+                return;
+            }
+        } {
             if tx.send(Ok(frame)).await.is_err() {
                 return;
             }
@@ -1712,11 +1756,7 @@ where
             let _ = tx.send(Ok(format_sse_error(&error))).await;
             return;
         }
-        let finish = if saw_tool_call {
-            "tool_calls"
-        } else {
-            model_finish
-        };
+        let finish = typed_finish.unwrap_or(model_finish);
         if tx
             .send(Ok(tool_finish_chunk(&id, &model_id, finish)))
             .await
@@ -1769,14 +1809,18 @@ where
         constraint_options,
     } = tool_context;
     let id = gen_id();
-    let parser_id = uuid::Uuid::new_v4().simple().to_string();
+    let decoder_config = ToolOutputDecoderConfig {
+        dialect,
+        response_id: uuid::Uuid::new_v4().simple().to_string(),
+        definitions: tools,
+        output_schema: None,
+    };
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<ParsedAssistantOutput> {
         let model_guard = state.model.blocking_lock();
         let tokenizer = &*state.tokenizer;
         let memory = super::begin_direct_request_memory(&state, &*model_guard, &request)?;
         let mut generation = GenerationStream::new(&*model_guard, tokenizer, request)?;
-        let mut parser = ToolCallParser::new(dialect, parser_id, &tools)?;
-        let mut detok = tokenizer.decode_stream(dialect.skip_special_tokens());
+        let mut decoder = GeneratedOutputDecoder::new(tokenizer, Some(decoder_config))?;
         let mut output = ParsedAssistantOutput {
             content: String::new(),
             tool_calls: Vec::new(),
@@ -1793,18 +1837,19 @@ where
                 state.record_request_started(prompt_tokens);
             }
             output.completion_tokens += 1;
-            let text = if event.finish_reason == Some("stop") {
-                String::new()
+            let events = if event.finish_reason == Some("stop") {
+                Vec::new()
             } else {
-                detok.step(event.token)?.unwrap_or_default()
+                decoder.push_token(event.token)?
             };
-            collect_parser_events(&mut output, parser.push(&text)?);
+            collect_generated_events(&mut output, events)?;
             if let Some(reason) = event.finish_reason {
                 output.finish_reason = reason;
                 break;
             }
         }
-        finish_tool_parser(parser, &mut output)?;
+        let model_finish = output.finish_reason;
+        finish_output_decoder(&mut decoder, &mut output, model_finish)?;
         let call_names = output
             .tool_calls
             .iter()
@@ -1885,12 +1930,18 @@ where
         }
     };
     state.record_request_started(prompt_tokens);
-    let parser_id = uuid::Uuid::new_v4().simple().to_string();
-    let mut parser = match ToolCallParser::new(dialect, parser_id, &tools) {
-        Ok(parser) => parser,
+    let mut decoder = match GeneratedOutputDecoder::new(
+        &state.tokenizer,
+        Some(ToolOutputDecoderConfig {
+            dialect,
+            response_id: uuid::Uuid::new_v4().simple().to_string(),
+            definitions: tools,
+            output_schema: None,
+        }),
+    ) {
+        Ok(decoder) => decoder,
         Err(error) => return (StatusCode::BAD_REQUEST, format!("{error:#}")).into_response(),
     };
-    let mut detok = state.tokenizer.decode_stream(dialect.skip_special_tokens());
     let mut output = ParsedAssistantOutput {
         content: String::new(),
         tool_calls: Vec::new(),
@@ -1899,19 +1950,19 @@ where
     };
     while let Some(event) = event_rx.recv().await {
         output.completion_tokens += 1;
-        let decoded = if event.finish_reason == Some("stop") {
-            Ok(None)
+        let events = if event.finish_reason == Some("stop") {
+            Ok(Vec::new())
         } else {
-            detok.step(event.token)
+            decoder.push_token(event.token)
         };
-        match decoded {
-            Ok(Some(text)) => match parser.push(&text) {
-                Ok(events) => collect_parser_events(&mut output, events),
-                Err(error) => return generation_err_to_response(error),
-            },
-            Ok(None) => {}
+        match events {
+            Ok(events) => {
+                if let Err(error) = collect_generated_events(&mut output, events) {
+                    return generation_err_to_response(error);
+                }
+            }
             Err(error) => {
-                return generation_err_to_response(anyhow::anyhow!("detok: {error}"));
+                return generation_err_to_response(error);
             }
         }
         if let Some(reason) = event.finish_reason {
@@ -1919,7 +1970,8 @@ where
             break;
         }
     }
-    if let Err(error) = finish_tool_parser(parser, &mut output) {
+    let model_finish = output.finish_reason;
+    if let Err(error) = finish_output_decoder(&mut decoder, &mut output, model_finish) {
         return generation_err_to_response(error);
     }
     let call_names = output
@@ -2013,8 +2065,18 @@ where
             return;
         }
 
+        let mut decoder = match GeneratedOutputDecoder::new(tokenizer, None) {
+            Ok(decoder) => decoder,
+            Err(error) => {
+                let _ = tx.blocking_send(Ok(format_sse_error(&error)));
+                return;
+            }
+        };
         let mut completion_tokens = 0_u32;
         let mut first_event = Some(first_event);
+        let mut finish_reason = None;
+        let mut next_call_index = 0_usize;
+        let mut call_names = Vec::new();
         loop {
             let ev_result = match first_event.take() {
                 Some(event) => Ok(event),
@@ -2024,25 +2086,44 @@ where
             match ev_result {
                 Ok(Some(ev)) => {
                     completion_tokens += 1;
-                    let chunk = ChunkResponse {
-                        id: id_for_task.clone(),
-                        object: "chat.completion.chunk",
-                        created: now_unix(),
-                        model: model_id_for_task.clone(),
-                        choices: vec![Choice {
-                            index: 0,
-                            delta: DeltaContent { content: &ev.text },
-                            finish_reason: ev.finish_reason,
-                        }],
+                    let mut events = if ev.finish_reason == Some("stop") {
+                        Vec::new()
+                    } else {
+                        match decoder.push_token(ev.token) {
+                            Ok(events) => events,
+                            Err(error) => {
+                                let _ = tx.blocking_send(Ok(format_sse_error(&error)));
+                                return;
+                            }
+                        }
                     };
-
-                    // T0a.8 Step 5 (content): wrap first non-empty content send
-                    // in detok_format_first_content_chunk + close root after.
-
-                    let content_send_result = tx.blocking_send(Ok(format_sse_data(&chunk)));
-
-                    if content_send_result.is_err() {
-                        break;
+                    if let Some(reason) = ev.finish_reason {
+                        match decoder.finish(reason) {
+                            Ok(tail) => events.extend(tail),
+                            Err(error) => {
+                                let _ = tx.blocking_send(Ok(format_sse_error(&error)));
+                                return;
+                            }
+                        }
+                    }
+                    let frames = match format_tool_output_events(
+                        &id_for_task,
+                        &model_id_for_task,
+                        events,
+                        &mut next_call_index,
+                        &mut call_names,
+                        &mut finish_reason,
+                    ) {
+                        Ok(frames) => frames,
+                        Err(error) => {
+                            let _ = tx.blocking_send(Ok(format_sse_error(&error)));
+                            return;
+                        }
+                    };
+                    for frame in frames {
+                        if tx.blocking_send(Ok(frame)).is_err() {
+                            return;
+                        }
                     }
                     state.runtime_usage.record_output_tokens(1);
                     if ev.finish_reason.is_some() {
@@ -2055,6 +2136,13 @@ where
                     break;
                 }
             }
+        }
+        if let Some(reason) = finish_reason {
+            let _ = tx.blocking_send(Ok(tool_finish_chunk(
+                &id_for_task,
+                &model_id_for_task,
+                reason,
+            )));
         }
         if include_usage {
             let usage = StreamUsageChunk::new(
@@ -2178,45 +2266,71 @@ where
             return;
         }
 
-        let mut detok = tokenizer.decode_stream(/* skip_special */ true);
+        let mut decoder = match GeneratedOutputDecoder::new(&tokenizer, None) {
+            Ok(decoder) => decoder,
+            Err(error) => {
+                let _ = tx.send(Ok(format_sse_error(&error))).await;
+                return;
+            }
+        };
         let mut completion_tokens = 0_u32;
+        let mut finish_reason = None;
+        let mut next_call_index = 0_usize;
+        let mut call_names = Vec::new();
         while let Some(ev) = event_rx.recv().await {
             completion_tokens += 1;
-            let text = match detok.step(ev.token) {
-                Ok(Some(s)) => s,
-                Ok(None) => String::new(),
-                Err(e) => {
-                    let _ = tx
-                        .send(Ok(format_sse_error(&anyhow::anyhow!("detok: {e}"))))
-                        .await;
-                    break;
+            let mut events = if ev.finish_reason == Some("stop") {
+                Vec::new()
+            } else {
+                match decoder.push_token(ev.token) {
+                    Ok(events) => events,
+                    Err(error) => {
+                        let _ = tx.send(Ok(format_sse_error(&error))).await;
+                        return;
+                    }
                 }
             };
-
-            let chunk = ChunkResponse {
-                id: id_for_task.clone(),
-                object: "chat.completion.chunk",
-                created: now_unix(),
-                model: model_id_for_task.clone(),
-                choices: vec![Choice {
-                    index: 0,
-                    delta: DeltaContent { content: &text },
-                    finish_reason: ev.finish_reason,
-                }],
+            if let Some(reason) = ev.finish_reason {
+                match decoder.finish(reason) {
+                    Ok(tail) => events.extend(tail),
+                    Err(error) => {
+                        let _ = tx.send(Ok(format_sse_error(&error))).await;
+                        return;
+                    }
+                }
+            }
+            let frames = match format_tool_output_events(
+                &id_for_task,
+                &model_id_for_task,
+                events,
+                &mut next_call_index,
+                &mut call_names,
+                &mut finish_reason,
+            ) {
+                Ok(frames) => frames,
+                Err(error) => {
+                    let _ = tx.send(Ok(format_sse_error(&error))).await;
+                    return;
+                }
             };
-            let content_send_result = tx.send(Ok(format_sse_data(&chunk))).await;
-
-            // Close the content_span on BOTH send success and error
-            // paths (prevents OPEN_SPAN_REGISTRY leak — per Codex plan
-            // review v10 P2 #4).
-
-            if content_send_result.is_err() {
-                break;
+            for frame in frames {
+                if tx.send(Ok(frame)).await.is_err() {
+                    return;
+                }
             }
             runtime_usage.record_output_tokens(1);
             if ev.finish_reason.is_some() {
                 break;
             }
+        }
+        if let Some(reason) = finish_reason {
+            let _ = tx
+                .send(Ok(tool_finish_chunk(
+                    &id_for_task,
+                    &model_id_for_task,
+                    reason,
+                )))
+                .await;
         }
         if include_usage {
             let usage = StreamUsageChunk::new(
@@ -2250,41 +2364,52 @@ where
     M: Model + DenseVlMethods + Send + 'static,
 {
     let id = gen_id();
-    let result =
-        tokio::task::spawn_blocking(move || -> anyhow::Result<(String, &'static str, u32)> {
-            let model_guard = state.model.blocking_lock();
-            let tokenizer = &*state.tokenizer;
-            let memory = super::begin_direct_request_memory(&state, &*model_guard, &request)?;
-            let mut stream = GenerationStream::new(&*model_guard, tokenizer, request)?;
-            state.record_request_started(prompt_tokens);
-            let mut buf = String::new();
-            let mut finish: &'static str = "stop";
-            let mut completion_tokens: u32 = 0;
-            let mut memory = Some(memory);
-            loop {
-                let next = stream.next_token()?;
-                if let Some(memory) = memory.take() {
-                    memory.commit();
-                }
-                let Some(ev) = next else {
-                    break;
-                };
-                buf.push_str(&ev.text);
-                completion_tokens += 1;
-                if let Some(reason) = ev.finish_reason {
-                    finish = reason;
-                    break;
-                }
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<ParsedAssistantOutput> {
+        let model_guard = state.model.blocking_lock();
+        let tokenizer = &*state.tokenizer;
+        let memory = super::begin_direct_request_memory(&state, &*model_guard, &request)?;
+        let mut stream = GenerationStream::new(&*model_guard, tokenizer, request)?;
+        let mut decoder = GeneratedOutputDecoder::new(tokenizer, None)?;
+        state.record_request_started(prompt_tokens);
+        let mut output = ParsedAssistantOutput {
+            content: String::new(),
+            tool_calls: Vec::new(),
+            finish_reason: "stop",
+            completion_tokens: 0,
+        };
+        let mut memory = Some(memory);
+        let mut finished = false;
+        loop {
+            let next = stream.next_token()?;
+            if let Some(memory) = memory.take() {
+                memory.commit();
             }
-            state
-                .runtime_usage
-                .record_output_tokens(u64::from(completion_tokens));
-            Ok((buf, finish, completion_tokens))
-        })
-        .await;
+            let Some(ev) = next else {
+                break;
+            };
+            let events = if ev.finish_reason == Some("stop") {
+                Vec::new()
+            } else {
+                decoder.push_token(ev.token)?
+            };
+            collect_generated_events(&mut output, events)?;
+            output.completion_tokens += 1;
+            if let Some(reason) = ev.finish_reason {
+                collect_generated_events(&mut output, decoder.finish(reason)?)?;
+                finished = true;
+                break;
+            }
+        }
+        anyhow::ensure!(finished, "generation ended before a terminal event");
+        state
+            .runtime_usage
+            .record_output_tokens(u64::from(output.completion_tokens));
+        Ok(output)
+    })
+    .await;
 
-    let (content, finish, completion_tokens) = match result {
-        Ok(Ok(t)) => t,
+    let output = match result {
+        Ok(Ok(output)) => output,
         Ok(Err(err)) => return generation_err_to_response(err),
         Err(e) => {
             return (
@@ -2304,15 +2429,15 @@ where
             index: 0,
             message: CompletionMessage {
                 role: "assistant",
-                content: Some(content),
+                content: Some(output.content),
                 tool_calls: Vec::new(),
             },
-            finish_reason: finish,
+            finish_reason: output.finish_reason,
         }],
         usage: Usage {
             prompt_tokens,
-            completion_tokens,
-            total_tokens: prompt_tokens + completion_tokens,
+            completion_tokens: output.completion_tokens,
+            total_tokens: prompt_tokens + output.completion_tokens,
         },
     };
     Json(resp).into_response()
@@ -2359,28 +2484,48 @@ where
     };
     state.record_request_started(prompt_tokens);
 
-    // 2. Collect all events, detokenize, build CompletionResponse.
-    let mut detok = state.tokenizer.decode_stream(/* skip_special */ true);
-    let mut content = String::new();
-    let mut finish: &'static str = "stop";
-    let mut completion_tokens: u32 = 0;
+    // 2. Collect all committed tokens through the protocol-neutral decoder.
+    let mut decoder = match GeneratedOutputDecoder::new(&state.tokenizer, None) {
+        Ok(decoder) => decoder,
+        Err(error) => return generation_err_to_response(error),
+    };
+    let mut output = ParsedAssistantOutput {
+        content: String::new(),
+        tool_calls: Vec::new(),
+        finish_reason: "stop",
+        completion_tokens: 0,
+    };
+    let mut finished = false;
     while let Some(ev) = event_rx.recv().await {
-        completion_tokens += 1;
-        match detok.step(ev.token) {
-            Ok(Some(s)) => content.push_str(&s),
-            Ok(None) => { /* BPE mid-codepoint */ }
-            Err(e) => {
-                return (StatusCode::INTERNAL_SERVER_ERROR, format!("detok: {e}")).into_response();
-            }
+        output.completion_tokens += 1;
+        let events = if ev.finish_reason == Some("stop") {
+            Ok(Vec::new())
+        } else {
+            decoder.push_token(ev.token)
+        };
+        if let Err(error) = events.and_then(|events| collect_generated_events(&mut output, events))
+        {
+            return generation_err_to_response(error);
         }
         if let Some(reason) = ev.finish_reason {
-            finish = reason;
+            if let Err(error) = decoder
+                .finish(reason)
+                .and_then(|events| collect_generated_events(&mut output, events))
+            {
+                return generation_err_to_response(error);
+            }
+            finished = true;
             break;
         }
     }
+    if !finished {
+        return generation_err_to_response(anyhow::anyhow!(
+            "scheduler stream ended before a terminal event"
+        ));
+    }
     state
         .runtime_usage
-        .record_output_tokens(u64::from(completion_tokens));
+        .record_output_tokens(u64::from(output.completion_tokens));
 
     let resp = CompletionResponse {
         id,
@@ -2391,15 +2536,15 @@ where
             index: 0,
             message: CompletionMessage {
                 role: "assistant",
-                content: Some(content),
+                content: Some(output.content),
                 tool_calls: Vec::new(),
             },
-            finish_reason: finish,
+            finish_reason: output.finish_reason,
         }],
         usage: Usage {
             prompt_tokens,
-            completion_tokens,
-            total_tokens: prompt_tokens + completion_tokens,
+            completion_tokens: output.completion_tokens,
+            total_tokens: prompt_tokens + output.completion_tokens,
         },
     };
     Json(resp).into_response()
@@ -2423,6 +2568,25 @@ fn format_sse_error(e: &anyhow::Error) -> Bytes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_adapter_rejects_unmapped_typed_output() {
+        let mut output = ParsedAssistantOutput {
+            content: String::new(),
+            tool_calls: Vec::new(),
+            finish_reason: "stop",
+            completion_tokens: 0,
+        };
+        let error = collect_generated_events(
+            &mut output,
+            vec![GeneratedOutputEvent::ReasoningDelta("hidden".to_owned())],
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("cannot represent generated reasoning"));
+        assert!(output.content.is_empty());
+    }
 
     #[test]
     fn sse_data_format_includes_prefix_and_double_newline() {

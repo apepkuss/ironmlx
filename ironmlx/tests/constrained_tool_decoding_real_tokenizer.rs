@@ -3,10 +3,23 @@
 use std::path::PathBuf;
 
 use ironmlx::core::constrained::{ToolChoiceConstraint, ToolConstraintOptions};
-use ironmlx::core::tool_calling::{
-    AssistantOutputEvent, ToolCallParser, ToolDefinition, ToolDialect,
-};
-use ironmlx::core::Tokenizer;
+use ironmlx::core::tool_calling::{ToolCallParser, ToolDefinition, ToolDialect};
+use ironmlx::core::{GeneratedOutputEvent, Tokenizer};
+
+fn assert_typed_generation_capabilities(tokenizer: &Tokenizer, image_input: bool) {
+    let profile = tokenizer.capability_profile(image_input);
+    assert!(profile.input.text.is_supported());
+    assert_eq!(profile.input.image.is_supported(), image_input);
+    assert!(!profile.input.audio.is_supported());
+    assert!(profile.output.text.is_supported());
+    assert!(!profile.output.reasoning.is_supported());
+    assert!(!profile.output.reasoning_summary.is_supported());
+    assert!(!profile.output.refusal.is_supported());
+    assert!(!profile.output.audio.is_supported());
+    assert!(!profile.output.image.is_supported());
+    assert!(profile.function_tools.is_supported());
+    assert!(profile.structured_output.is_supported());
+}
 
 fn weather_tool() -> ToolDefinition {
     serde_json::from_value(serde_json::json!({
@@ -82,6 +95,7 @@ fn real_tokenizer_enforces_structured_output_and_auto_tool_union() {
             .expect("IRONMLX_STRUCTURED_MODEL_DIR must be set"),
     );
     let tokenizer = Tokenizer::from_model_dir(&model_dir).expect("load tokenizer");
+    assert_typed_generation_capabilities(&tokenizer, false);
     let dialect = tokenizer
         .tool_dialect()
         .expect("model must expose one supported tool dialect");
@@ -156,8 +170,9 @@ fn real_tokenizer_enforces_structured_output_and_auto_tool_union() {
     let rendered = events
         .into_iter()
         .map(|event| match event {
-            AssistantOutputEvent::TextDelta(text) => text,
-            AssistantOutputEvent::ToolCall(_) => panic!("structured JSON classified as a tool"),
+            GeneratedOutputEvent::TextDelta(text) => text,
+            GeneratedOutputEvent::ToolCall(_) => panic!("structured JSON classified as a tool"),
+            other => panic!("unexpected {} event", other.kind()),
         })
         .collect::<String>();
     assert_eq!(rendered, structured);
@@ -171,6 +186,7 @@ fn real_qwen_tokenizer_compiles_and_enforces_tool_grammar() {
             .expect("IRONMLX_CONSTRAINT_MODEL_DIR must be set"),
     );
     let tokenizer = Tokenizer::from_model_dir(&model_dir).expect("load tokenizer");
+    assert_typed_generation_capabilities(&tokenizer, false);
     assert_eq!(tokenizer.tool_dialect(), Some(ToolDialect::Qwen35));
     let plan = tokenizer
         .compile_tool_constraint(&[weather_tool()], &ToolConstraintOptions::default())
@@ -198,7 +214,7 @@ fn real_qwen_tokenizer_compiles_and_enforces_tool_grammar() {
     assert!(saw_tool_call);
     assert!(matches!(
         events.as_slice(),
-        [AssistantOutputEvent::ToolCall(_)]
+        [GeneratedOutputEvent::ToolCall(_)]
     ));
 
     let invalid = "<tool_call><function=unknown>";
@@ -258,6 +274,7 @@ fn real_qwen_tokenizer_compiles_and_enforces_tool_grammar() {
 fn real_gemma_tokenizer_compiles_and_enforces_tool_grammar() {
     let model_dir = PathBuf::from(std::env::var("GEMMA4_MODEL").expect("GEMMA4_MODEL must be set"));
     let tokenizer = Tokenizer::from_model_dir(&model_dir).expect("load tokenizer");
+    assert_typed_generation_capabilities(&tokenizer, false);
     assert_eq!(tokenizer.tool_dialect(), Some(ToolDialect::Gemma));
     let plan = tokenizer
         .compile_tool_constraint(
@@ -392,6 +409,7 @@ fn real_gemma_tokenizer_compiles_and_enforces_tool_grammar() {
 fn real_glm_tokenizer_compiles_and_enforces_tool_grammar() {
     let model_dir = PathBuf::from(std::env::var("GLM47_MODEL").expect("GLM47_MODEL must be set"));
     let tokenizer = Tokenizer::from_model_dir(&model_dir).expect("load tokenizer");
+    assert_typed_generation_capabilities(&tokenizer, false);
     assert_eq!(tokenizer.tool_dialect(), Some(ToolDialect::Glm));
     let plan = tokenizer
         .compile_tool_constraint(
@@ -442,7 +460,7 @@ fn real_glm_tokenizer_compiles_and_enforces_tool_grammar() {
     assert!(saw_tool_call);
     assert!(matches!(
         events.as_slice(),
-        [AssistantOutputEvent::ToolCall(_)]
+        [GeneratedOutputEvent::ToolCall(_)]
     ));
 
     let parallel_plan = tokenizer
@@ -492,7 +510,7 @@ fn real_glm_tokenizer_compiles_and_enforces_tool_grammar() {
     assert_eq!(events.len(), 2);
     assert!(events
         .iter()
-        .all(|event| matches!(event, AssistantOutputEvent::ToolCall(_))));
+        .all(|event| matches!(event, GeneratedOutputEvent::ToolCall(_))));
 
     let empty_string = concat!(
         "<tool_call>get_weather",
@@ -549,6 +567,7 @@ fn real_llama_tokenizer_compiles_parses_and_enforces_single_json_call() {
     let model_dir =
         PathBuf::from(std::env::var("LLAMA32_MODEL").expect("LLAMA32_MODEL must be set"));
     let tokenizer = Tokenizer::from_model_dir(&model_dir).expect("load tokenizer");
+    assert_typed_generation_capabilities(&tokenizer, false);
     assert_eq!(tokenizer.tool_dialect(), Some(ToolDialect::Llama));
 
     let required = tokenizer
@@ -589,7 +608,7 @@ fn real_llama_tokenizer_compiles_parses_and_enforces_single_json_call() {
     assert!(saw_tool_call);
     assert!(matches!(
         events.as_slice(),
-        [AssistantOutputEvent::ToolCall(_)]
+        [GeneratedOutputEvent::ToolCall(_)]
     ));
 
     let plain = tokenizer
@@ -631,6 +650,7 @@ fn real_minicpmv46_tokenizer_compiles_parses_and_enforces_native_xml() {
     let model_dir =
         PathBuf::from(std::env::var("MINICPMV46_MODEL").expect("MINICPMV46_MODEL must be set"));
     let tokenizer = Tokenizer::from_model_dir(&model_dir).expect("load tokenizer");
+    assert_typed_generation_capabilities(&tokenizer, true);
     assert_eq!(tokenizer.tool_dialect(), Some(ToolDialect::MiniCpmV46));
 
     let required = tokenizer
@@ -673,7 +693,7 @@ fn real_minicpmv46_tokenizer_compiles_parses_and_enforces_native_xml() {
     assert_eq!(events.len(), 2);
     assert!(events
         .iter()
-        .all(|event| matches!(event, AssistantOutputEvent::ToolCall(_))));
+        .all(|event| matches!(event, GeneratedOutputEvent::ToolCall(_))));
 }
 
 #[test]
@@ -682,6 +702,7 @@ fn real_minicpm5_tokenizer_compiles_parses_and_enforces_xml_cdata() {
     let model_dir =
         PathBuf::from(std::env::var("MINICPM5_MODEL").expect("MINICPM5_MODEL must be set"));
     let tokenizer = Tokenizer::from_model_dir(&model_dir).expect("load tokenizer");
+    assert_typed_generation_capabilities(&tokenizer, false);
     assert_eq!(tokenizer.tool_dialect(), Some(ToolDialect::MiniCpm5));
 
     let required = tokenizer
@@ -728,7 +749,7 @@ fn real_minicpm5_tokenizer_compiles_parses_and_enforces_xml_cdata() {
     assert!(saw_tool_call);
     assert!(matches!(
         events.as_slice(),
-        [AssistantOutputEvent::ToolCall(_)]
+        [GeneratedOutputEvent::ToolCall(_)]
     ));
 
     let auto = tokenizer

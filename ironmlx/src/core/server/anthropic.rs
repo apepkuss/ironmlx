@@ -19,6 +19,9 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::core::constrained::ToolConstraintOptions;
 use crate::core::generate::{GenerateRequest, GenerationStream};
+use crate::core::generated_output::{
+    GeneratedFinishReason, GeneratedOutputDecoder, GeneratedOutputEvent, ToolOutputDecoderConfig,
+};
 #[cfg(test)]
 use crate::core::image_input::{ImageInputError, ImageRequestBudget};
 use crate::core::model::Model;
@@ -32,9 +35,7 @@ use crate::core::server::scheduler_actor::{AdmitReply, SchedulerCommand};
 #[cfg(test)]
 use crate::core::server::vision::{DecodedMessage, DecodedPart};
 use crate::core::speculative::MtpSpeculativeConfig;
-use crate::core::tool_calling::{
-    AssistantOutputEvent, ToolCall, ToolCallParser, ToolDefinition, ToolDialect,
-};
+use crate::core::tool_calling::{ToolCall, ToolDefinition, ToolDialect};
 
 #[cfg(test)]
 use super::SamplingDefaults;
@@ -343,6 +344,17 @@ struct ToolResponseContext {
     constraint_options: ToolConstraintOptions,
 }
 
+impl ToolResponseContext {
+    fn decoder_config(&self) -> ToolOutputDecoderConfig {
+        ToolOutputDecoderConfig {
+            dialect: self.dialect,
+            response_id: uuid::Uuid::new_v4().simple().to_string(),
+            definitions: self.definitions.clone(),
+            output_schema: None,
+        }
+    }
+}
+
 fn messages_route(stream: bool, use_scheduler: bool) -> MessagesRoute {
     match (stream, use_scheduler) {
         (true, true) => MessagesRoute::SchedulerStream,
@@ -454,6 +466,7 @@ fn normalize_user_message(content: AnthropicContent) -> anyhow::Result<Vec<ChatM
                 output.push(ChatMessage {
                     role: "tool".to_owned(),
                     content: tool_result_content(content, is_error),
+                    reasoning_content: None,
                     tool_calls: Vec::new(),
                     tool_call_id: Some(tool_use_id),
                 });
@@ -467,6 +480,7 @@ fn normalize_user_message(content: AnthropicContent) -> anyhow::Result<Vec<ChatM
         output.push(ChatMessage {
             role: "user".to_owned(),
             content: content_from_parts(ordinary),
+            reasoning_content: None,
             tool_calls: Vec::new(),
             tool_call_id: None,
         });
@@ -517,6 +531,7 @@ fn normalize_assistant_message(content: AnthropicContent) -> anyhow::Result<Chat
     Ok(ChatMessage {
         role: "assistant".to_owned(),
         content: Content::Text(text),
+        reasoning_content: None,
         tool_calls,
         tool_call_id: None,
     })
@@ -650,6 +665,7 @@ pub(crate) fn decode_anthropic_messages(
         out.push(DecodedMessage {
             role: m.role,
             parts,
+            reasoning_content: None,
         });
     }
     Ok(out)
@@ -1012,13 +1028,32 @@ struct ParsedToolOutput {
     completion_tokens: u32,
 }
 
-fn collect_tool_events(output: &mut ParsedToolOutput, events: Vec<AssistantOutputEvent>) {
+fn anthropic_finish_reason(reason: GeneratedFinishReason) -> &'static str {
+    match reason {
+        GeneratedFinishReason::Stop => "end_turn",
+        GeneratedFinishReason::Length => "max_tokens",
+        GeneratedFinishReason::ToolCalls => "tool_use",
+    }
+}
+
+fn collect_tool_events(
+    output: &mut ParsedToolOutput,
+    events: Vec<GeneratedOutputEvent>,
+) -> anyhow::Result<()> {
     for event in events {
         match event {
-            AssistantOutputEvent::TextDelta(text) => output.content.push_str(&text),
-            AssistantOutputEvent::ToolCall(call) => output.tool_calls.push(call),
+            GeneratedOutputEvent::TextDelta(text) => output.content.push_str(&text),
+            GeneratedOutputEvent::ToolCall(call) => output.tool_calls.push(call),
+            GeneratedOutputEvent::Finished(reason) => {
+                output.finish_reason = anthropic_finish_reason(reason);
+            }
+            other => anyhow::bail!(
+                "Anthropic Messages cannot represent generated {} output",
+                other.kind()
+            ),
         }
     }
+    Ok(())
 }
 
 fn validate_tool_output(options: &ToolConstraintOptions, calls: &[ToolCall]) -> anyhow::Result<()> {
@@ -1164,11 +1199,14 @@ impl ToolStreamEncoder {
         }
     }
 
-    pub(crate) fn push_events(&mut self, events: Vec<AssistantOutputEvent>) -> Vec<Bytes> {
+    pub(crate) fn push_events(
+        &mut self,
+        events: Vec<GeneratedOutputEvent>,
+    ) -> anyhow::Result<Vec<Bytes>> {
         let mut frames = Vec::new();
         for event in events {
             match event {
-                AssistantOutputEvent::TextDelta(text) if !text.is_empty() => {
+                GeneratedOutputEvent::TextDelta(text) if !text.is_empty() => {
                     let index = match self.open_text_index {
                         Some(index) => index,
                         None => {
@@ -1195,8 +1233,8 @@ impl ToolStreamEncoder {
                         }),
                     ));
                 }
-                AssistantOutputEvent::TextDelta(_) => {}
-                AssistantOutputEvent::ToolCall(call) => {
+                GeneratedOutputEvent::TextDelta(_) => {}
+                GeneratedOutputEvent::ToolCall(call) => {
                     self.close_text(&mut frames);
                     let index = self.next_index;
                     self.next_index += 1;
@@ -1234,9 +1272,14 @@ impl ToolStreamEncoder {
                         &serde_json::json!({"type": "content_block_stop", "index": index}),
                     ));
                 }
+                GeneratedOutputEvent::Finished(_) => {}
+                other => anyhow::bail!(
+                    "Anthropic Messages cannot represent generated {} output",
+                    other.kind()
+                ),
             }
         }
-        frames
+        Ok(frames)
     }
 
     pub(crate) fn finish(
@@ -1330,21 +1373,14 @@ where
     M: Model + DenseVlMethods + Send + 'static,
 {
     let id = gen_msg_id();
-    let ToolResponseContext {
-        dialect,
-        definitions,
-        constraint_options,
-    } = context;
+    let decoder_config = context.decoder_config();
+    let constraint_options = context.constraint_options;
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<ParsedToolOutput> {
         let model_guard = state.model.blocking_lock();
         let tokenizer = &*state.tokenizer;
         let memory = super::begin_direct_request_memory(&state, &*model_guard, &request)?;
         let mut generation = GenerationStream::new(&*model_guard, tokenizer, request)?;
-        let mut parser = ToolCallParser::new(
-            dialect,
-            uuid::Uuid::new_v4().simple().to_string(),
-            &definitions,
-        )?;
+        let mut decoder = GeneratedOutputDecoder::new(tokenizer, Some(decoder_config))?;
         state.record_request_started(input_tokens);
         let mut output = ParsedToolOutput {
             content: String::new(),
@@ -1352,22 +1388,23 @@ where
             finish_reason: "end_turn",
             completion_tokens: 0,
         };
-        let mut detok = tokenizer.decode_stream(dialect.skip_special_tokens());
         let mut memory = Some(memory);
         let mut finished = false;
+        let mut model_finish = "stop";
         while let Some(event) = generation.next_token()? {
             if let Some(memory) = memory.take() {
                 memory.commit();
             }
             output.completion_tokens += 1;
             state.runtime_usage.record_output_tokens(1);
-            let text = if event.finish_reason == Some("stop") {
-                String::new()
+            let events = if event.finish_reason == Some("stop") {
+                Vec::new()
             } else {
-                detok.step(event.token)?.unwrap_or_default()
+                decoder.push_token(event.token)?
             };
-            collect_tool_events(&mut output, parser.push(&text)?);
+            collect_tool_events(&mut output, events)?;
             if let Some(reason) = event.finish_reason {
+                model_finish = reason;
                 output.finish_reason = match reason {
                     "stop" => "end_turn",
                     "length" => "max_tokens",
@@ -1378,8 +1415,8 @@ where
             }
         }
         anyhow::ensure!(finished, "generation ended before a terminal event");
-        let (events, _) = parser.finish()?;
-        collect_tool_events(&mut output, events);
+        let events = decoder.finish(model_finish)?;
+        collect_tool_events(&mut output, events)?;
         validate_tool_output(&constraint_options, &output.tool_calls)?;
         Ok(output)
     })
@@ -1438,23 +1475,15 @@ where
         Ok(event_rx) => event_rx,
         Err(response) => return response,
     };
-    let ToolResponseContext {
-        dialect,
-        definitions,
-        constraint_options,
-    } = context;
-    let mut parser = match ToolCallParser::new(
-        dialect,
-        uuid::Uuid::new_v4().simple().to_string(),
-        &definitions,
-    ) {
-        Ok(parser) => parser,
+    let decoder_config = context.decoder_config();
+    let constraint_options = context.constraint_options;
+    let mut decoder = match GeneratedOutputDecoder::new(&state.tokenizer, Some(decoder_config)) {
+        Ok(decoder) => decoder,
         Err(error) => {
             return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{error:#}"))
         }
     };
     state.record_request_started(input_tokens);
-    let mut detok = state.tokenizer.decode_stream(dialect.skip_special_tokens());
     let mut output = ParsedToolOutput {
         content: String::new(),
         tool_calls: Vec::new(),
@@ -1462,30 +1491,26 @@ where
         completion_tokens: 0,
     };
     let mut finished = false;
+    let mut model_finish = "stop";
     while let Some(event) = event_rx.recv().await {
         output.completion_tokens += 1;
         state.runtime_usage.record_output_tokens(1);
-        let text = if event.finish_reason == Some("stop") {
-            String::new()
+        let events = if event.finish_reason == Some("stop") {
+            Ok(Vec::new())
         } else {
-            match detok.step(event.token) {
-                Ok(text) => text.unwrap_or_default(),
-                Err(error) => {
-                    return anthropic_error_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("detok: {error}"),
-                    );
-                }
-            }
+            decoder.push_token(event.token)
         };
-        let events = match parser.push(&text) {
+        let events = match events {
             Ok(events) => events,
             Err(error) => {
                 return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{error:#}"))
             }
         };
-        collect_tool_events(&mut output, events);
+        if let Err(error) = collect_tool_events(&mut output, events) {
+            return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{error:#}"));
+        }
         if let Some(reason) = event.finish_reason {
+            model_finish = reason;
             output.finish_reason = match reason {
                 "stop" => "end_turn",
                 "length" => "max_tokens",
@@ -1501,13 +1526,15 @@ where
             "scheduler stream ended before a terminal event".to_owned(),
         );
     }
-    let (events, _) = match parser.finish() {
-        Ok(result) => result,
+    let events = match decoder.finish(model_finish) {
+        Ok(events) => events,
         Err(error) => {
             return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{error:#}"))
         }
     };
-    collect_tool_events(&mut output, events);
+    if let Err(error) = collect_tool_events(&mut output, events) {
+        return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{error:#}"));
+    }
     if let Err(error) = validate_tool_output(&constraint_options, &output.tool_calls) {
         return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{error:#}"));
     }
@@ -1538,11 +1565,8 @@ where
     let (init_tx, init_rx) = oneshot::channel::<anyhow::Result<()>>();
     let message_id = gen_msg_id();
     tokio::task::spawn_blocking(move || {
-        let ToolResponseContext {
-            dialect,
-            definitions,
-            constraint_options,
-        } = context;
+        let decoder_config = context.decoder_config();
+        let constraint_options = context.constraint_options;
         let model_guard = state.model.blocking_lock();
         let tokenizer = &*state.tokenizer;
         let memory = match super::begin_direct_request_memory(&state, &*model_guard, &request) {
@@ -1566,12 +1590,8 @@ where
                 return;
             }
         };
-        let mut parser = match ToolCallParser::new(
-            dialect,
-            uuid::Uuid::new_v4().simple().to_string(),
-            &definitions,
-        ) {
-            Ok(parser) => parser,
+        let mut decoder = match GeneratedOutputDecoder::new(tokenizer, Some(decoder_config)) {
+            Ok(decoder) => decoder,
             Err(error) => {
                 let _ = init_tx.send(Err(error));
                 return;
@@ -1586,9 +1606,8 @@ where
         if tx.blocking_send(Ok(encoder.message_start())).is_err() {
             return;
         }
-        let mut detok = tokenizer.decode_stream(dialect.skip_special_tokens());
         let mut output_tokens = 0_u32;
-        let mut model_finish = "end_turn";
+        let mut model_finish = "stop";
         let mut finished = false;
         let mut first_event = first_event;
         loop {
@@ -1607,36 +1626,32 @@ where
             };
             output_tokens += 1;
             state.runtime_usage.record_output_tokens(1);
-            let text = if event.finish_reason == Some("stop") {
-                String::new()
+            let events = if event.finish_reason == Some("stop") {
+                Ok(Vec::new())
             } else {
-                match detok.step(event.token) {
-                    Ok(text) => text.unwrap_or_default(),
-                    Err(error) => {
-                        let error = anyhow::anyhow!("detok: {error}");
-                        let _ = tx.blocking_send(Ok(format_stream_error(&error)));
-                        return;
-                    }
-                }
+                decoder.push_token(event.token)
             };
-            let events = match parser.push(&text) {
+            let events = match events {
                 Ok(events) => events,
                 Err(error) => {
                     let _ = tx.blocking_send(Ok(format_stream_error(&error)));
                     return;
                 }
             };
-            for frame in encoder.push_events(events) {
+            let frames = match encoder.push_events(events) {
+                Ok(frames) => frames,
+                Err(error) => {
+                    let _ = tx.blocking_send(Ok(format_stream_error(&error)));
+                    return;
+                }
+            };
+            for frame in frames {
                 if tx.blocking_send(Ok(frame)).is_err() {
                     return;
                 }
             }
             if let Some(reason) = event.finish_reason {
-                model_finish = match reason {
-                    "stop" => "end_turn",
-                    "length" => "max_tokens",
-                    other => other,
-                };
+                model_finish = reason;
                 finished = true;
                 break;
             }
@@ -1646,19 +1661,30 @@ where
             let _ = tx.blocking_send(Ok(format_stream_error(&error)));
             return;
         }
-        let (events, _) = match parser.finish() {
-            Ok(result) => result,
+        let events = match decoder.finish(model_finish) {
+            Ok(events) => events,
             Err(error) => {
                 let _ = tx.blocking_send(Ok(format_stream_error(&error)));
                 return;
             }
         };
-        for frame in encoder.push_events(events) {
+        let frames = match encoder.push_events(events) {
+            Ok(frames) => frames,
+            Err(error) => {
+                let _ = tx.blocking_send(Ok(format_stream_error(&error)));
+                return;
+            }
+        };
+        for frame in frames {
             if tx.blocking_send(Ok(frame)).is_err() {
                 return;
             }
         }
-        let frames = match encoder.finish(&constraint_options, model_finish, output_tokens) {
+        let stop_reason = anthropic_finish_reason(
+            GeneratedFinishReason::from_generation(model_finish, !encoder.call_names.is_empty())
+                .expect("generation finish reason already validated"),
+        );
+        let frames = match encoder.finish(&constraint_options, stop_reason, output_tokens) {
             Ok(frames) => frames,
             Err(error) => {
                 let _ = tx.blocking_send(Ok(format_stream_error(&error)));
@@ -1696,68 +1722,57 @@ where
         Ok(event_rx) => event_rx,
         Err(response) => return response,
     };
-    let ToolResponseContext {
-        dialect,
-        definitions,
-        constraint_options,
-    } = context;
-    let mut parser = match ToolCallParser::new(
-        dialect,
-        uuid::Uuid::new_v4().simple().to_string(),
-        &definitions,
-    ) {
-        Ok(parser) => parser,
-        Err(error) => {
-            return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{error:#}"))
-        }
-    };
+    let decoder_config = context.decoder_config();
+    let constraint_options = context.constraint_options;
     state.record_request_started(input_tokens);
     let tokenizer = state.tokenizer.clone();
     let runtime_usage = state.runtime_usage.clone();
     let message_id = gen_msg_id();
     let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
     tokio::spawn(async move {
+        let mut decoder = match GeneratedOutputDecoder::new(&tokenizer, Some(decoder_config)) {
+            Ok(decoder) => decoder,
+            Err(error) => {
+                let _ = tx.send(Ok(format_stream_error(&error))).await;
+                return;
+            }
+        };
         let mut encoder = ToolStreamEncoder::new(message_id, model_id, input_tokens);
         if tx.send(Ok(encoder.message_start())).await.is_err() {
             return;
         }
-        let mut detok = tokenizer.decode_stream(dialect.skip_special_tokens());
         let mut output_tokens = 0_u32;
-        let mut model_finish = "end_turn";
+        let mut model_finish = "stop";
         let mut finished = false;
         while let Some(event) = event_rx.recv().await {
             output_tokens += 1;
             runtime_usage.record_output_tokens(1);
-            let text = if event.finish_reason == Some("stop") {
-                String::new()
+            let events = if event.finish_reason == Some("stop") {
+                Ok(Vec::new())
             } else {
-                match detok.step(event.token) {
-                    Ok(text) => text.unwrap_or_default(),
-                    Err(error) => {
-                        let error = anyhow::anyhow!("detok: {error}");
-                        let _ = tx.send(Ok(format_stream_error(&error))).await;
-                        return;
-                    }
-                }
+                decoder.push_token(event.token)
             };
-            let events = match parser.push(&text) {
+            let events = match events {
                 Ok(events) => events,
                 Err(error) => {
                     let _ = tx.send(Ok(format_stream_error(&error))).await;
                     return;
                 }
             };
-            for frame in encoder.push_events(events) {
+            let frames = match encoder.push_events(events) {
+                Ok(frames) => frames,
+                Err(error) => {
+                    let _ = tx.send(Ok(format_stream_error(&error))).await;
+                    return;
+                }
+            };
+            for frame in frames {
                 if tx.send(Ok(frame)).await.is_err() {
                     return;
                 }
             }
             if let Some(reason) = event.finish_reason {
-                model_finish = match reason {
-                    "stop" => "end_turn",
-                    "length" => "max_tokens",
-                    other => other,
-                };
+                model_finish = reason;
                 finished = true;
                 break;
             }
@@ -1767,19 +1782,30 @@ where
             let _ = tx.send(Ok(format_stream_error(&error))).await;
             return;
         }
-        let (events, _) = match parser.finish() {
-            Ok(result) => result,
+        let events = match decoder.finish(model_finish) {
+            Ok(events) => events,
             Err(error) => {
                 let _ = tx.send(Ok(format_stream_error(&error))).await;
                 return;
             }
         };
-        for frame in encoder.push_events(events) {
+        let frames = match encoder.push_events(events) {
+            Ok(frames) => frames,
+            Err(error) => {
+                let _ = tx.send(Ok(format_stream_error(&error))).await;
+                return;
+            }
+        };
+        for frame in frames {
             if tx.send(Ok(frame)).await.is_err() {
                 return;
             }
         }
-        let frames = match encoder.finish(&constraint_options, model_finish, output_tokens) {
+        let stop_reason = anthropic_finish_reason(
+            GeneratedFinishReason::from_generation(model_finish, !encoder.call_names.is_empty())
+                .expect("generation finish reason already validated"),
+        );
+        let frames = match encoder.finish(&constraint_options, stop_reason, output_tokens) {
             Ok(frames) => frames,
             Err(error) => {
                 let _ = tx.send(Ok(format_stream_error(&error))).await;
@@ -1860,22 +1886,19 @@ where
         {
             return;
         }
-        // 2. content_block_start
-        let block_start = serde_json::json!({
-            "type": "content_block_start",
-            "index": 0,
-            "content_block": {"type": "text", "text": ""}
-        });
-        if tx
-            .blocking_send(Ok(format_event("content_block_start", &block_start)))
-            .is_err()
-        {
-            return;
-        }
+        let mut decoder = match GeneratedOutputDecoder::new(tokenizer, None) {
+            Ok(decoder) => decoder,
+            Err(error) => {
+                let _ = tx.blocking_send(Ok(format_stream_error(&error)));
+                return;
+            }
+        };
+        let mut encoder = ToolStreamEncoder::new(id_for_task, model_id_for_task, input_tokens);
 
-        // 3. N × content_block_delta + final stop_reason capture.
+        // 2..N. Protocol-neutral events become Anthropic content blocks.
         let mut output_tokens: u32 = 0;
-        let mut stop_reason: &'static str = "end_turn";
+        let mut model_finish: &'static str = "stop";
+        let mut finished = false;
         let mut first_event = Some(first_event);
         loop {
             let event = match first_event.take() {
@@ -1884,27 +1907,43 @@ where
             };
             match event {
                 Ok(Some(ev)) => {
-                    if !ev.text.is_empty() {
-                        let delta = serde_json::json!({
-                            "type": "content_block_delta",
-                            "index": 0,
-                            "delta": {"type": "text_delta", "text": ev.text}
-                        });
-                        if tx
-                            .blocking_send(Ok(format_event("content_block_delta", &delta)))
-                            .is_err()
-                        {
+                    let mut events = if ev.finish_reason == Some("stop") {
+                        Vec::new()
+                    } else {
+                        match decoder.push_token(ev.token) {
+                            Ok(events) => events,
+                            Err(error) => {
+                                let _ = tx.blocking_send(Ok(format_stream_error(&error)));
+                                return;
+                            }
+                        }
+                    };
+                    if let Some(reason) = ev.finish_reason {
+                        model_finish = reason;
+                        match decoder.finish(reason) {
+                            Ok(tail) => events.extend(tail),
+                            Err(error) => {
+                                let _ = tx.blocking_send(Ok(format_stream_error(&error)));
+                                return;
+                            }
+                        }
+                        finished = true;
+                    }
+                    let frames = match encoder.push_events(events) {
+                        Ok(frames) => frames,
+                        Err(error) => {
+                            let _ = tx.blocking_send(Ok(format_stream_error(&error)));
+                            return;
+                        }
+                    };
+                    for frame in frames {
+                        if tx.blocking_send(Ok(frame)).is_err() {
                             return;
                         }
                     }
                     output_tokens += 1;
                     state.runtime_usage.record_output_tokens(1);
-                    if let Some(reason) = ev.finish_reason {
-                        stop_reason = match reason {
-                            "stop" => "end_turn",
-                            "length" => "max_tokens",
-                            other => other,
-                        };
+                    if ev.finish_reason.is_some() {
                         break;
                     }
                 }
@@ -1919,20 +1958,31 @@ where
                 }
             }
         }
-
-        // 4. content_block_stop
-        let block_stop = serde_json::json!({"type": "content_block_stop", "index": 0});
-        let _ = tx.blocking_send(Ok(format_event("content_block_stop", &block_stop)));
-        // 5. message_delta
-        let msg_delta = serde_json::json!({
-            "type": "message_delta",
-            "delta": {"stop_reason": stop_reason, "stop_sequence": null},
-            "usage": {"output_tokens": output_tokens}
-        });
-        let _ = tx.blocking_send(Ok(format_event("message_delta", &msg_delta)));
-        // 6. message_stop
-        let msg_stop = serde_json::json!({"type": "message_stop"});
-        let _ = tx.blocking_send(Ok(format_event("message_stop", &msg_stop)));
+        if !finished {
+            let error = anyhow::anyhow!("generation ended before a terminal event");
+            let _ = tx.blocking_send(Ok(format_stream_error(&error)));
+            return;
+        }
+        let stop_reason = anthropic_finish_reason(
+            GeneratedFinishReason::from_generation(model_finish, false)
+                .expect("generation finish reason already validated"),
+        );
+        let frames = match encoder.finish(
+            &ToolConstraintOptions::default(),
+            stop_reason,
+            output_tokens,
+        ) {
+            Ok(frames) => frames,
+            Err(error) => {
+                let _ = tx.blocking_send(Ok(format_stream_error(&error)));
+                return;
+            }
+        };
+        for frame in frames {
+            if tx.blocking_send(Ok(frame)).is_err() {
+                return;
+            }
+        }
     });
 
     match init_rx.await {
@@ -2009,108 +2059,86 @@ where
     let runtime_usage = state.runtime_usage.clone();
 
     tokio::spawn(async move {
-        // Event 1: message_start
-        let start_payload = serde_json::json!({
-            "type": "message_start",
-            "message": {
-                "id": msg_id_for_task,
-                "type": "message",
-                "role": "assistant",
-                "content": [],
-                "model": model_id_for_task,
-                "stop_reason": null,
-                "stop_sequence": null,
-                "usage": {"input_tokens": input_tokens, "output_tokens": 0}
+        let mut decoder = match GeneratedOutputDecoder::new(&tokenizer, None) {
+            Ok(decoder) => decoder,
+            Err(error) => {
+                let _ = tx.send(Ok(format_stream_error(&error))).await;
+                return;
             }
-        });
-        if tx
-            .send(Ok(format_event("message_start", &start_payload)))
-            .await
-            .is_err()
-        {
+        };
+        let mut encoder = ToolStreamEncoder::new(msg_id_for_task, model_id_for_task, input_tokens);
+        if tx.send(Ok(encoder.message_start())).await.is_err() {
             return;
         }
-
-        // Event 2: content_block_start
-        let block_start = serde_json::json!({
-            "type": "content_block_start",
-            "index": 0,
-            "content_block": {"type": "text", "text": ""}
-        });
-        if tx
-            .send(Ok(format_event("content_block_start", &block_start)))
-            .await
-            .is_err()
-        {
-            return;
-        }
-
-        // Events 3..N+2: content_block_delta per non-empty detok output.
-        // output_tokens increments UNCONDITIONALLY per StepEvent (mirrors
-        // GS path line 277 — counter reflects generated tokens, NOT
-        // emitted deltas. Tokens whose detok output is empty still count.)
-        let mut detok = tokenizer.decode_stream(/* skip_special */ true);
         let mut output_tokens: u32 = 0;
-        let mut stop_reason: &'static str = "end_turn";
+        let mut model_finish: &'static str = "stop";
+        let mut finished = false;
         while let Some(ev) = event_rx.recv().await {
-            let text = match detok.step(ev.token) {
-                Ok(Some(s)) => s,
-                Ok(None) => String::new(), // BPE mid-codepoint
-                Err(_) => String::new(),   // best-effort; skip emit
+            let mut events = if ev.finish_reason == Some("stop") {
+                Vec::new()
+            } else {
+                match decoder.push_token(ev.token) {
+                    Ok(events) => events,
+                    Err(error) => {
+                        let _ = tx.send(Ok(format_stream_error(&error))).await;
+                        return;
+                    }
+                }
             };
-            if !text.is_empty() {
-                let delta = serde_json::json!({
-                    "type": "content_block_delta",
-                    "index": 0,
-                    "delta": {"type": "text_delta", "text": text}
-                });
-                if tx
-                    .send(Ok(format_event("content_block_delta", &delta)))
-                    .await
-                    .is_err()
-                {
+            if let Some(reason) = ev.finish_reason {
+                model_finish = reason;
+                match decoder.finish(reason) {
+                    Ok(tail) => events.extend(tail),
+                    Err(error) => {
+                        let _ = tx.send(Ok(format_stream_error(&error))).await;
+                        return;
+                    }
+                }
+                finished = true;
+            }
+            let frames = match encoder.push_events(events) {
+                Ok(frames) => frames,
+                Err(error) => {
+                    let _ = tx.send(Ok(format_stream_error(&error))).await;
+                    return;
+                }
+            };
+            for frame in frames {
+                if tx.send(Ok(frame)).await.is_err() {
                     return;
                 }
             }
             output_tokens += 1;
             runtime_usage.record_output_tokens(1);
-            if let Some(reason) = ev.finish_reason {
-                stop_reason = match reason {
-                    "stop" => "end_turn",
-                    "length" => "max_tokens",
-                    other => other,
-                };
+            if ev.finish_reason.is_some() {
                 break;
             }
         }
-
-        // Event N+3: content_block_stop
-        let block_stop = serde_json::json!({"type": "content_block_stop", "index": 0});
-        if tx
-            .send(Ok(format_event("content_block_stop", &block_stop)))
-            .await
-            .is_err()
-        {
+        if !finished {
+            let error = anyhow::anyhow!("scheduler stream ended before a terminal event");
+            let _ = tx.send(Ok(format_stream_error(&error))).await;
             return;
         }
-
-        // Event N+4: message_delta (carries final stop_reason + output_tokens)
-        let msg_delta = serde_json::json!({
-            "type": "message_delta",
-            "delta": {"stop_reason": stop_reason, "stop_sequence": null},
-            "usage": {"output_tokens": output_tokens}
-        });
-        if tx
-            .send(Ok(format_event("message_delta", &msg_delta)))
-            .await
-            .is_err()
-        {
-            return;
+        let stop_reason = anthropic_finish_reason(
+            GeneratedFinishReason::from_generation(model_finish, false)
+                .expect("generation finish reason already validated"),
+        );
+        let frames = match encoder.finish(
+            &ToolConstraintOptions::default(),
+            stop_reason,
+            output_tokens,
+        ) {
+            Ok(frames) => frames,
+            Err(error) => {
+                let _ = tx.send(Ok(format_stream_error(&error))).await;
+                return;
+            }
+        };
+        for frame in frames {
+            if tx.send(Ok(frame)).await.is_err() {
+                return;
+            }
         }
-
-        // Event N+5: message_stop
-        let msg_stop = serde_json::json!({"type": "message_stop"});
-        let _ = tx.send(Ok(format_event("message_stop", &msg_stop))).await;
     });
 
     let stream = ReceiverStream::new(rx);
@@ -2133,65 +2161,59 @@ where
     M: Model + DenseVlMethods + Send + 'static,
 {
     let id = gen_msg_id();
-    let result =
-        tokio::task::spawn_blocking(move || -> anyhow::Result<(String, &'static str, u32)> {
-            let model_guard = state.model.blocking_lock();
-            let tokenizer = &*state.tokenizer;
-            let memory = super::begin_direct_request_memory(&state, &*model_guard, &request)?;
-            let mut stream = GenerationStream::new(&*model_guard, tokenizer, request)?;
-            state.record_request_started(input_tokens);
-            let mut buf = String::new();
-            let mut finish: &'static str = "end_turn";
-            let mut output_tokens: u32 = 0;
-            let mut memory = Some(memory);
-            loop {
-                let next = stream.next_token()?;
-                if let Some(memory) = memory.take() {
-                    memory.commit();
-                }
-                let Some(ev) = next else {
-                    break;
-                };
-                buf.push_str(&ev.text);
-                output_tokens += 1;
-                if let Some(reason) = ev.finish_reason {
-                    finish = match reason {
-                        "stop" => "end_turn",
-                        "length" => "max_tokens",
-                        other => other,
-                    };
-                    break;
-                }
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<ParsedToolOutput> {
+        let model_guard = state.model.blocking_lock();
+        let tokenizer = &*state.tokenizer;
+        let memory = super::begin_direct_request_memory(&state, &*model_guard, &request)?;
+        let mut stream = GenerationStream::new(&*model_guard, tokenizer, request)?;
+        let mut decoder = GeneratedOutputDecoder::new(tokenizer, None)?;
+        state.record_request_started(input_tokens);
+        let mut output = ParsedToolOutput {
+            content: String::new(),
+            tool_calls: Vec::new(),
+            finish_reason: "end_turn",
+            completion_tokens: 0,
+        };
+        let mut memory = Some(memory);
+        let mut finished = false;
+        loop {
+            let next = stream.next_token()?;
+            if let Some(memory) = memory.take() {
+                memory.commit();
             }
-            state
-                .runtime_usage
-                .record_output_tokens(u64::from(output_tokens));
-            Ok((buf, finish, output_tokens))
-        })
-        .await;
+            let Some(ev) = next else {
+                break;
+            };
+            let events = if ev.finish_reason == Some("stop") {
+                Vec::new()
+            } else {
+                decoder.push_token(ev.token)?
+            };
+            collect_tool_events(&mut output, events)?;
+            output.completion_tokens += 1;
+            if let Some(reason) = ev.finish_reason {
+                collect_tool_events(&mut output, decoder.finish(reason)?)?;
+                finished = true;
+                break;
+            }
+        }
+        anyhow::ensure!(finished, "generation ended before a terminal event");
+        state
+            .runtime_usage
+            .record_output_tokens(u64::from(output.completion_tokens));
+        Ok(output)
+    })
+    .await;
 
-    let (content, stop_reason, output_tokens) = match result {
-        Ok(Ok(t)) => t,
+    let output = match result {
+        Ok(Ok(output)) => output,
         Ok(Err(err)) => return generation_err_to_response(err),
         Err(e) => {
             return (StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")).into_response();
         }
     };
 
-    let envelope = MessageEnvelope {
-        id,
-        kind: "message",
-        role: "assistant",
-        content: vec![MessageContentBlock::Text { text: content }],
-        model: model_id,
-        stop_reason: Some(stop_reason),
-        stop_sequence: None,
-        usage: Usage {
-            input_tokens,
-            output_tokens,
-        },
-    };
-    Json(envelope).into_response()
+    tool_unary_response(id, model_id, input_tokens, output)
 }
 
 /// Text-only short-prompt unary path via SchedulerActor (3b-4 swap-in).
@@ -2235,50 +2257,80 @@ where
     };
     state.record_request_started(input_tokens);
 
-    // 2. Drain events; build envelope.
-    let mut detok = state.tokenizer.decode_stream(/* skip_special */ true);
-    let mut content = String::new();
-    let mut output_tokens: u32 = 0;
-    let mut stop_reason: &'static str = "end_turn";
+    // 2. Drain committed tokens through the protocol-neutral decoder.
+    let mut decoder = match GeneratedOutputDecoder::new(&state.tokenizer, None) {
+        Ok(decoder) => decoder,
+        Err(error) => return generation_err_to_response(error),
+    };
+    let mut output = ParsedToolOutput {
+        content: String::new(),
+        tool_calls: Vec::new(),
+        finish_reason: "end_turn",
+        completion_tokens: 0,
+    };
+    let mut finished = false;
     while let Some(ev) = event_rx.recv().await {
-        match detok.step(ev.token) {
-            Ok(Some(s)) => content.push_str(&s),
-            Ok(None) => { /* BPE mid-codepoint */ }
-            Err(_) => { /* best-effort */ }
+        output.completion_tokens += 1;
+        let events = if ev.finish_reason == Some("stop") {
+            Ok(Vec::new())
+        } else {
+            decoder.push_token(ev.token)
+        };
+        if let Err(error) = events.and_then(|events| collect_tool_events(&mut output, events)) {
+            return generation_err_to_response(error);
         }
-        output_tokens += 1;
         if let Some(reason) = ev.finish_reason {
-            stop_reason = match reason {
-                "stop" => "end_turn",
-                "length" => "max_tokens",
-                other => other,
-            };
+            if let Err(error) = decoder
+                .finish(reason)
+                .and_then(|events| collect_tool_events(&mut output, events))
+            {
+                return generation_err_to_response(error);
+            }
+            finished = true;
             break;
         }
     }
+    if !finished {
+        return generation_err_to_response(anyhow::anyhow!(
+            "scheduler stream ended before a terminal event"
+        ));
+    }
     state
         .runtime_usage
-        .record_output_tokens(u64::from(output_tokens));
+        .record_output_tokens(u64::from(output.completion_tokens));
 
-    let envelope = MessageEnvelope {
-        id,
-        kind: "message",
-        role: "assistant",
-        content: vec![MessageContentBlock::Text { text: content }],
-        model: model_id,
-        stop_reason: Some(stop_reason),
-        stop_sequence: None,
-        usage: Usage {
-            input_tokens,
-            output_tokens,
-        },
-    };
-    Json(envelope).into_response()
+    tool_unary_response(id, model_id, input_tokens, output)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn anthropic_adapter_rejects_unmapped_typed_output() {
+        let mut output = ParsedToolOutput {
+            content: String::new(),
+            tool_calls: Vec::new(),
+            finish_reason: "end_turn",
+            completion_tokens: 0,
+        };
+        let error = collect_tool_events(
+            &mut output,
+            vec![GeneratedOutputEvent::AudioDelta(
+                crate::core::generated_output::AudioChunk {
+                    data: vec![1],
+                    mime_type: "audio/pcm".to_owned(),
+                    sample_rate_hz: None,
+                    channels: None,
+                },
+            )],
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("cannot represent generated audio"));
+        assert!(output.content.is_empty());
+    }
 
     #[test]
     fn event_format_uses_event_line_prefix_and_double_newline() {
@@ -2703,19 +2755,23 @@ mod tests {
             let mut encoder =
                 ToolStreamEncoder::new("msg_1".to_owned(), "local-model".to_owned(), 4);
             let mut frames = vec![encoder.message_start()];
-            frames.extend(encoder.push_events(vec![
-                AssistantOutputEvent::TextDelta("Checking".to_owned()),
-                AssistantOutputEvent::ToolCall(ToolCall {
-                    id: "toolu_1".to_owned(),
-                    name: "weather".to_owned(),
-                    arguments: serde_json::json!({"city": "東京"}),
-                }),
-                AssistantOutputEvent::ToolCall(ToolCall {
-                    id: "toolu_2".to_owned(),
-                    name: "time".to_owned(),
-                    arguments: serde_json::json!({"zone": "Asia/Tokyo"}),
-                }),
-            ]));
+            frames.extend(
+                encoder
+                    .push_events(vec![
+                        GeneratedOutputEvent::TextDelta("Checking".to_owned()),
+                        GeneratedOutputEvent::ToolCall(ToolCall {
+                            id: "toolu_1".to_owned(),
+                            name: "weather".to_owned(),
+                            arguments: serde_json::json!({"city": "東京"}),
+                        }),
+                        GeneratedOutputEvent::ToolCall(ToolCall {
+                            id: "toolu_2".to_owned(),
+                            name: "time".to_owned(),
+                            arguments: serde_json::json!({"zone": "Asia/Tokyo"}),
+                        }),
+                    ])
+                    .unwrap(),
+            );
             frames.extend(
                 encoder
                     .finish(&ToolConstraintOptions::default(), "end_turn", 9)
@@ -2765,18 +2821,20 @@ mod tests {
             };
             let mut encoder =
                 ToolStreamEncoder::new("msg_2".to_owned(), "local-model".to_owned(), 1);
-            encoder.push_events(vec![
-                AssistantOutputEvent::ToolCall(ToolCall {
-                    id: "a".to_owned(),
-                    name: "one".to_owned(),
-                    arguments: serde_json::json!({}),
-                }),
-                AssistantOutputEvent::ToolCall(ToolCall {
-                    id: "b".to_owned(),
-                    name: "two".to_owned(),
-                    arguments: serde_json::json!({}),
-                }),
-            ]);
+            encoder
+                .push_events(vec![
+                    GeneratedOutputEvent::ToolCall(ToolCall {
+                        id: "a".to_owned(),
+                        name: "one".to_owned(),
+                        arguments: serde_json::json!({}),
+                    }),
+                    GeneratedOutputEvent::ToolCall(ToolCall {
+                        id: "b".to_owned(),
+                        name: "two".to_owned(),
+                        arguments: serde_json::json!({}),
+                    }),
+                ])
+                .unwrap();
             assert!(encoder.finish(&serial, "end_turn", 1).is_err());
         }
     }
@@ -2833,6 +2891,7 @@ mod parity_tests {
                     },
                 },
             ]),
+            reasoning_content: None,
             tool_calls: Vec::new(),
             tool_call_id: None,
         }]

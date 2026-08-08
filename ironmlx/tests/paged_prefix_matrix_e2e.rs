@@ -566,6 +566,7 @@ fn gemma4_prompt_inputs(
             DecodedPart::Text("Describe the image.".to_owned()),
             DecodedPart::Image(bytes),
         ],
+        reasoning_content: None,
     }];
     let (flat_messages, pixel_values, grid_thw) =
         expand_decoded_messages(messages, vision).expect("expand Gemma4 VL messages");
