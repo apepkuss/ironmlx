@@ -117,7 +117,7 @@ impl ConstraintTokenizer {
     }
 
     #[cfg(test)]
-    fn byte_level() -> Result<Self> {
+    pub(crate) fn byte_level() -> Result<Self> {
         let mut token_bytes = (0_u16..=255)
             .map(|byte| vec![byte as u8])
             .collect::<Vec<_>>();

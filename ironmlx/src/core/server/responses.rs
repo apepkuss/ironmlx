@@ -10,7 +10,6 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::Context;
 use axum::{
     body::{Body, Bytes},
     extract::{rejection::JsonRejection, State},
@@ -35,6 +34,7 @@ use crate::core::server::chat_format::{
 use crate::core::server::scheduler_actor::{AdmitReply, SchedulerCommand};
 use crate::core::tool_calling::{ToolCall, ToolDefinition};
 
+use super::structured_output::{coalesce_system_messages, StructuredOutputFormat};
 use super::{openai, AppState, Gemma4DrafterAppState};
 
 const DEFAULT_MAX_OUTPUT_TOKENS: usize = 256;
@@ -89,93 +89,7 @@ pub struct ResponsesRequest {
     pub truncation: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-enum ResponseTextFormat {
-    #[default]
-    Text,
-    JsonObject,
-    JsonSchema {
-        name: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        description: Option<String>,
-        schema: serde_json::Value,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        strict: Option<bool>,
-    },
-}
-
-impl ResponseTextFormat {
-    fn constraint_schema(&self) -> Option<serde_json::Value> {
-        match self {
-            Self::Text => None,
-            Self::JsonObject => Some(serde_json::json!({"type":"object"})),
-            Self::JsonSchema { schema, .. } => Some(schema.clone()),
-        }
-    }
-
-    fn prompt_instruction(&self) -> Option<String> {
-        match self {
-            Self::Text => None,
-            Self::JsonObject => Some(
-                "When producing a final answer instead of a function call, return only one valid JSON object with no Markdown or surrounding prose."
-                    .to_owned(),
-            ),
-            Self::JsonSchema {
-                name,
-                description,
-                schema,
-                ..
-            } => {
-                let description = description
-                    .as_deref()
-                    .map(|value| format!("\nDescription: {value}"))
-                    .unwrap_or_default();
-                Some(format!(
-                    "When producing a final answer instead of a function call, return only one JSON object matching the `{name}` schema, with no Markdown or surrounding prose.{description}\nSchema: {}",
-                    serde_json::to_string(schema).expect("structured output schema serializes")
-                ))
-            }
-        }
-    }
-
-    fn validate_output(&self, text: &str) -> anyhow::Result<()> {
-        let value = match self {
-            Self::Text => return Ok(()),
-            Self::JsonObject | Self::JsonSchema { .. } => {
-                serde_json::from_str::<serde_json::Value>(text.trim()).map_err(|error| {
-                    anyhow::anyhow!("structured output is not valid JSON: {error}")
-                })?
-            }
-        };
-        match self {
-            Self::Text => Ok(()),
-            Self::JsonObject => {
-                anyhow::ensure!(
-                    value.is_object(),
-                    "json_object output must be a JSON object"
-                );
-                Ok(())
-            }
-            Self::JsonSchema { schema, .. } => {
-                crate::core::constrained::validate_schema_value(schema, &value)
-                    .context("structured output does not match text.format schema")
-            }
-        }
-    }
-
-    fn validate_completion(
-        &self,
-        text: &str,
-        has_tool_calls: bool,
-        finish_reason: &'static str,
-    ) -> anyhow::Result<()> {
-        if has_tool_calls || finish_reason == "length" {
-            return Ok(());
-        }
-        self.validate_output(text)
-    }
-}
+type ResponseTextFormat = StructuredOutputFormat;
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
@@ -552,17 +466,7 @@ fn parse_response_text_format(
             "text.format must be `text`, `json_object`, or a valid `json_schema` object: {error}"
         )
     })?;
-    if let ResponseTextFormat::JsonSchema {
-        name,
-        schema,
-        strict,
-        ..
-    } = &format
-    {
-        crate::core::tool_calling::validate_function_name(name)
-            .context("invalid text.format.json_schema name")?;
-        crate::core::constrained::validate_json_output_schema(schema, strict.unwrap_or(false))?;
-    }
+    format.validate_contract("text.format")?;
     Ok(format)
 }
 
@@ -772,60 +676,6 @@ fn append_function_call(
         tool_calls: vec![call],
         tool_call_id: None,
     });
-}
-
-fn coalesce_system_messages(messages: &mut Vec<ChatMessage>) {
-    let mut system_contents = Vec::new();
-    messages.retain(|message| {
-        if message.role == "system" {
-            system_contents.push(message.content.clone());
-            false
-        } else {
-            true
-        }
-    });
-    if system_contents.is_empty() {
-        return;
-    }
-    let all_text = system_contents
-        .iter()
-        .all(|content| matches!(content, Content::Text(_)));
-    let content = if all_text {
-        Content::Text(
-            system_contents
-                .into_iter()
-                .filter_map(|content| match content {
-                    Content::Text(text) => Some(text),
-                    Content::Parts(_) => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n\n"),
-        )
-    } else {
-        let mut parts = Vec::new();
-        for (index, content) in system_contents.into_iter().enumerate() {
-            if index > 0 {
-                parts.push(ContentPart::Text {
-                    text: "\n\n".to_owned(),
-                });
-            }
-            match content {
-                Content::Text(text) => parts.push(ContentPart::Text { text }),
-                Content::Parts(content_parts) => parts.extend(content_parts),
-            }
-        }
-        Content::Parts(parts)
-    };
-    messages.insert(
-        0,
-        ChatMessage {
-            role: "system".to_owned(),
-            content,
-            reasoning_content: None,
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-        },
-    );
 }
 
 fn convert_input(
@@ -1237,10 +1087,7 @@ impl ResponsesRequest {
         let allows_final_output = matches!(chat_tool_choice.as_str(), Some("auto" | "none"));
         let mut messages = convert_input(self.instructions.as_deref(), self.input, &tool_aliases)?;
         if allows_final_output {
-            if let Some(instruction) = text_format.prompt_instruction() {
-                messages.push(ChatMessage::text("system", instruction));
-                coalesce_system_messages(&mut messages);
-            }
+            text_format.apply_prompt_instruction(&mut messages);
         }
         let tool_choice = if tools.is_empty() && chat_tool_choice.as_str() == Some("auto") {
             None
@@ -1262,6 +1109,7 @@ impl ResponsesRequest {
                 parallel_tool_calls: self.parallel_tool_calls,
                 function_call: None,
                 functions: None,
+                response_format: None,
                 stream: self.stream,
                 stream_options: None,
                 ignore_eos: false,
@@ -1416,42 +1264,11 @@ where
             state.force_scheduler_for_greedy && sampler.is_pipelinable(),
         );
     let output_schema = text_format.constraint_schema();
-    let constraint = match prepared_tools
-        .as_ref()
-        .and_then(|prepared| {
-            prepared
-                .constraint_options
-                .as_ref()
-                .map(|options| (prepared, options))
-        })
-        .map(|(prepared, options)| {
-            if matches!(
-                &options.choice,
-                crate::core::constrained::ToolChoiceConstraint::Auto
-            ) {
-                if let Some(schema) = output_schema.as_ref() {
-                    return state.tokenizer.compile_tool_or_json_constraint(
-                        &prepared.definitions,
-                        options,
-                        schema,
-                    );
-                }
-            }
-            state
-                .tokenizer
-                .compile_tool_constraint(&prepared.definitions, options)
-        })
-        .transpose()
-        .and_then(
-            |tool_constraint| match (tool_constraint, output_schema.as_ref()) {
-                (Some(constraint), _) => Ok(Some(constraint)),
-                (None, Some(schema)) => state
-                    .tokenizer
-                    .compile_json_output_constraint(schema)
-                    .map(Some),
-                (None, None) => Ok(None),
-            },
-        ) {
+    let constraint = match openai::compile_output_constraint(
+        &state.tokenizer,
+        prepared_tools.as_ref(),
+        output_schema.as_ref(),
+    ) {
         Ok(value) => value,
         Err(error) => {
             return Err(error_response(

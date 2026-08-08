@@ -612,6 +612,7 @@ impl MessagesRequest {
             parallel_tool_calls,
             function_call: None,
             functions: None,
+            response_format: None,
             stream: self.stream,
             stream_options: None,
             ignore_eos: false,

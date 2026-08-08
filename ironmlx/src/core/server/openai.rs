@@ -31,6 +31,7 @@ use crate::core::scheduler::DenseVlMethods;
 use crate::core::server::chat_format::render_and_encode;
 use crate::core::server::chat_format::{ChatMessage, Content, ContentPart};
 use crate::core::server::scheduler_actor::{AdmitReply, SchedulerCommand};
+use crate::core::server::structured_output::StructuredOutputFormat;
 use crate::core::server::vision::{expand_decoded_messages_bounded, DecodedMessage, DecodedPart};
 use crate::core::server::VisionInputConfig;
 use crate::core::speculative::MtpSpeculativeConfig;
@@ -122,6 +123,8 @@ pub struct ChatRequest {
     #[serde(default)]
     pub functions: Option<serde_json::Value>,
     #[serde(default)]
+    pub(crate) response_format: Option<ChatResponseFormat>,
+    #[serde(default)]
     pub stream: bool,
     #[serde(default)]
     pub stream_options: Option<StreamOptions>,
@@ -148,6 +151,44 @@ pub struct ChatRequest {
     pub chat_template_kwargs: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum ChatResponseFormat {
+    Text {},
+    JsonObject {},
+    JsonSchema { json_schema: ChatJsonSchema },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ChatJsonSchema {
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+    schema: serde_json::Value,
+    #[serde(default)]
+    strict: Option<bool>,
+}
+
+impl ChatRequest {
+    pub(crate) fn structured_output_format(&self) -> anyhow::Result<StructuredOutputFormat> {
+        let format = match self.response_format.clone() {
+            None | Some(ChatResponseFormat::Text {}) => StructuredOutputFormat::Text,
+            Some(ChatResponseFormat::JsonObject {}) => StructuredOutputFormat::JsonObject,
+            Some(ChatResponseFormat::JsonSchema { json_schema }) => {
+                StructuredOutputFormat::JsonSchema {
+                    name: json_schema.name,
+                    description: json_schema.description,
+                    schema: json_schema.schema,
+                    strict: json_schema.strict,
+                }
+            }
+        };
+        format.validate_contract("response_format")?;
+        Ok(format)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct OpenAiTool {
@@ -169,6 +210,29 @@ struct ToolResponseContext {
     dialect: ToolDialect,
     definitions: Vec<ToolDefinition>,
     constraint_options: ToolConstraintOptions,
+    output_schema: Option<serde_json::Value>,
+    output_format: StructuredOutputFormat,
+}
+
+impl ToolResponseContext {
+    fn decoder_config(
+        self,
+    ) -> (
+        ToolOutputDecoderConfig,
+        ToolConstraintOptions,
+        StructuredOutputFormat,
+    ) {
+        (
+            ToolOutputDecoderConfig {
+                dialect: self.dialect,
+                response_id: uuid::Uuid::new_v4().simple().to_string(),
+                definitions: self.definitions,
+                output_schema: self.output_schema,
+            },
+            self.constraint_options,
+            self.output_format,
+        )
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -502,6 +566,44 @@ fn resolve_tool_constraint_options(
     }))
 }
 
+pub(crate) fn compile_output_constraint(
+    tokenizer: &crate::core::Tokenizer,
+    prepared_tools: Option<&PreparedToolRequest>,
+    output_schema: Option<&serde_json::Value>,
+) -> anyhow::Result<Option<crate::core::constrained::ConstraintPlan>> {
+    prepared_tools
+        .and_then(|prepared| {
+            prepared
+                .constraint_options
+                .as_ref()
+                .map(|options| (prepared, options))
+        })
+        .map(|(prepared, options)| {
+            if matches!(&options.choice, ToolChoiceConstraint::Auto) {
+                if let Some(schema) = output_schema {
+                    return tokenizer.compile_tool_or_json_constraint(
+                        &prepared.definitions,
+                        options,
+                        schema,
+                    );
+                }
+            }
+            tokenizer.compile_tool_constraint(&prepared.definitions, options)
+        })
+        .transpose()
+        .and_then(|tool_constraint| match (tool_constraint, output_schema) {
+            (Some(constraint), _) => Ok(Some(constraint)),
+            (None, Some(schema)) => tokenizer.compile_json_output_constraint(schema).map(Some),
+            (None, None) => Ok(None),
+        })
+}
+
+fn allows_structured_final_output(prepared_tools: Option<&PreparedToolRequest>) -> bool {
+    prepared_tools
+        .and_then(|prepared| prepared.constraint_options.as_ref())
+        .is_none_or(|options| matches!(&options.choice, ToolChoiceConstraint::Auto))
+}
+
 pub(crate) fn tool_template_kwargs(
     base: Option<serde_json::Value>,
     prepared: &PreparedToolRequest,
@@ -709,7 +811,10 @@ where
     chat_completions_with_state(state, req).await
 }
 
-pub(crate) async fn chat_completions_with_state<M>(state: AppState<M>, req: ChatRequest) -> Response
+pub(crate) async fn chat_completions_with_state<M>(
+    state: AppState<M>,
+    mut req: ChatRequest,
+) -> Response
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
@@ -728,10 +833,18 @@ where
     {
         return (StatusCode::BAD_REQUEST, format!("{error:#}")).into_response();
     }
+    let output_format = match req.structured_output_format() {
+        Ok(format) => format,
+        Err(error) => return (StatusCode::BAD_REQUEST, format!("{error:#}")).into_response(),
+    };
+    let output_schema = output_format.constraint_schema();
     let prepared_tools = match prepare_tool_request(&req, state.tokenizer.tool_dialect()) {
         Ok(prepared) => prepared,
         Err(error) => return (StatusCode::BAD_REQUEST, format!("{error:#}")).into_response(),
     };
+    if allows_structured_final_output(prepared_tools.as_ref()) {
+        output_format.apply_prompt_instruction(&mut req.messages);
+    }
     let chat_template_kwargs = req.chat_template_kwargs;
     let original_messages = prepared_tools.as_ref().map(|_| req.messages.clone());
 
@@ -801,25 +914,16 @@ where
     );
 
     let stop_token_ids = stop_token_ids_for_request(state.tokenizer.eos_token_ids(), ignore_eos);
-    let constraint = match prepared_tools
-        .as_ref()
-        .filter(|prepared| prepared.constraint_options.is_some())
-        .map(|prepared| {
-            state.tokenizer.compile_tool_constraint(
-                &prepared.definitions,
-                prepared
-                    .constraint_options
-                    .as_ref()
-                    .expect("filtered constrained tool request"),
-            )
-        })
-        .transpose()
-    {
+    let constraint = match compile_output_constraint(
+        &state.tokenizer,
+        prepared_tools.as_ref(),
+        output_schema.as_ref(),
+    ) {
         Ok(constraint) => constraint,
         Err(error) => {
             return (
                 StatusCode::BAD_REQUEST,
-                format!("compile tool decoding constraint: {error:#}"),
+                format!("compile output decoding constraint: {error:#}"),
             )
                 .into_response();
         }
@@ -842,12 +946,17 @@ where
 
     if let Some(prepared) = prepared_tools.filter(|prepared| prepared.constraint_options.is_some())
     {
+        let constraint_options = prepared
+            .constraint_options
+            .expect("filtered constrained tool request");
         let tool_context = ToolResponseContext {
             dialect: prepared.dialect,
             definitions: prepared.definitions,
-            constraint_options: prepared
-                .constraint_options
-                .expect("filtered constrained tool request"),
+            output_schema: matches!(&constraint_options.choice, ToolChoiceConstraint::Auto)
+                .then(|| output_schema.clone())
+                .flatten(),
+            output_format: output_format.clone(),
+            constraint_options,
         };
         return match chat_completions_route(stream, use_scheduler) {
             ChatCompletionsRoute::SchedulerStream | ChatCompletionsRoute::SchedulerUnary => {
@@ -880,17 +989,33 @@ where
 
     match chat_completions_route(stream, use_scheduler) {
         ChatCompletionsRoute::SchedulerStream => {
-            serve_via_scheduler_stream(state, request, model_label, prompt_tokens, include_usage)
-                .await
+            serve_via_scheduler_stream(
+                state,
+                request,
+                model_label,
+                prompt_tokens,
+                include_usage,
+                output_format,
+            )
+            .await
         }
         ChatCompletionsRoute::GenerationStreamStream => {
-            serve_via_gs_stream(state, request, model_label, prompt_tokens, include_usage).await
+            serve_via_gs_stream(
+                state,
+                request,
+                model_label,
+                prompt_tokens,
+                include_usage,
+                output_format,
+            )
+            .await
         }
         ChatCompletionsRoute::SchedulerUnary => {
-            serve_via_scheduler_unary(state, request, model_label, prompt_tokens).await
+            serve_via_scheduler_unary(state, request, model_label, prompt_tokens, output_format)
+                .await
         }
         ChatCompletionsRoute::GenerationStreamUnary => {
-            serve_via_gs_unary(state, request, model_label, prompt_tokens).await
+            serve_via_gs_unary(state, request, model_label, prompt_tokens, output_format).await
         }
     }
 }
@@ -914,12 +1039,20 @@ pub(crate) async fn gemma4_drafter_chat_completions(
 
 pub(crate) async fn chat_completions_with_gemma4_drafter_state(
     state: Gemma4DrafterAppState,
-    req: ChatRequest,
+    mut req: ChatRequest,
 ) -> Response {
+    let output_format = match req.structured_output_format() {
+        Ok(format) => format,
+        Err(error) => return (StatusCode::BAD_REQUEST, format!("{error:#}")).into_response(),
+    };
+    let output_schema = output_format.constraint_schema();
     let prepared_tools = match prepare_tool_request(&req, state.base.tokenizer.tool_dialect()) {
         Ok(prepared) => prepared,
         Err(error) => return (StatusCode::BAD_REQUEST, format!("{error:#}")).into_response(),
     };
+    if allows_structured_final_output(prepared_tools.as_ref()) {
+        output_format.apply_prompt_instruction(&mut req.messages);
+    }
     let original_messages = prepared_tools.as_ref().map(|_| req.messages.clone());
     let stream = req.stream;
     let include_usage = req
@@ -997,25 +1130,16 @@ pub(crate) async fn chat_completions_with_gemma4_drafter_state(
     let scheduler_config = state.base.scheduler_request_config(prompt_len, max_tokens);
     let stop_token_ids =
         stop_token_ids_for_request(state.base.tokenizer.eos_token_ids(), ignore_eos);
-    let constraint = match prepared_tools
-        .as_ref()
-        .filter(|prepared| prepared.constraint_options.is_some())
-        .map(|prepared| {
-            state.base.tokenizer.compile_tool_constraint(
-                &prepared.definitions,
-                prepared
-                    .constraint_options
-                    .as_ref()
-                    .expect("filtered constrained tool request"),
-            )
-        })
-        .transpose()
-    {
+    let constraint = match compile_output_constraint(
+        &state.base.tokenizer,
+        prepared_tools.as_ref(),
+        output_schema.as_ref(),
+    ) {
         Ok(constraint) => constraint,
         Err(error) => {
             return (
                 StatusCode::BAD_REQUEST,
-                format!("compile tool decoding constraint: {error:#}"),
+                format!("compile output decoding constraint: {error:#}"),
             )
                 .into_response();
         }
@@ -1038,12 +1162,17 @@ pub(crate) async fn chat_completions_with_gemma4_drafter_state(
 
     if let Some(prepared) = prepared_tools.filter(|prepared| prepared.constraint_options.is_some())
     {
+        let constraint_options = prepared
+            .constraint_options
+            .expect("filtered constrained tool request");
         let tool_context = ToolResponseContext {
             dialect: prepared.dialect,
             definitions: prepared.definitions,
-            constraint_options: prepared
-                .constraint_options
-                .expect("filtered constrained tool request"),
+            output_schema: matches!(&constraint_options.choice, ToolChoiceConstraint::Auto)
+                .then(|| output_schema.clone())
+                .flatten(),
+            output_format: output_format.clone(),
+            constraint_options,
         };
         return serve_via_scheduler_tools(
             state.base,
@@ -1064,10 +1193,18 @@ pub(crate) async fn chat_completions_with_gemma4_drafter_state(
             model_label,
             prompt_tokens,
             include_usage,
+            output_format,
         )
         .await
     } else {
-        serve_via_scheduler_unary(state.base, request, model_label, prompt_tokens).await
+        serve_via_scheduler_unary(
+            state.base,
+            request,
+            model_label,
+            prompt_tokens,
+            output_format,
+        )
+        .await
     }
 }
 
@@ -1315,21 +1452,25 @@ fn format_tool_output_events(
     next_call_index: &mut usize,
     call_names: &mut Vec<String>,
     finish_reason: &mut Option<&'static str>,
+    content: &mut String,
 ) -> anyhow::Result<Vec<Bytes>> {
     let mut frames = Vec::new();
     for event in events {
         match event {
-            GeneratedOutputEvent::TextDelta(text) => frames.push(format_sse_data(&ChunkResponse {
-                id: id.to_owned(),
-                object: "chat.completion.chunk",
-                created: now_unix(),
-                model: model_id.to_owned(),
-                choices: vec![Choice {
-                    index: 0,
-                    delta: DeltaContent { content: &text },
-                    finish_reason: None,
-                }],
-            })),
+            GeneratedOutputEvent::TextDelta(text) => {
+                content.push_str(&text);
+                frames.push(format_sse_data(&ChunkResponse {
+                    id: id.to_owned(),
+                    object: "chat.completion.chunk",
+                    created: now_unix(),
+                    model: model_id.to_owned(),
+                    choices: vec![Choice {
+                        index: 0,
+                        delta: DeltaContent { content: &text },
+                        finish_reason: None,
+                    }],
+                }));
+            }
             GeneratedOutputEvent::ToolCall(call) => {
                 call_names.push(call.name.clone());
                 let index = *next_call_index;
@@ -1448,11 +1589,7 @@ async fn serve_via_gs_tools_stream<M>(
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
-    let ToolResponseContext {
-        dialect,
-        definitions: tools,
-        constraint_options,
-    } = tool_context;
+    let (decoder_config, constraint_options, output_format) = tool_context.decoder_config();
     let id = gen_id();
     let id_for_task = id.clone();
     let model_for_task = model_id.clone();
@@ -1482,15 +1619,7 @@ where
                 return;
             }
         };
-        let mut decoder = match GeneratedOutputDecoder::new(
-            tokenizer,
-            Some(ToolOutputDecoderConfig {
-                dialect,
-                response_id: uuid::Uuid::new_v4().simple().to_string(),
-                definitions: tools,
-                output_schema: None,
-            }),
-        ) {
+        let mut decoder = match GeneratedOutputDecoder::new(tokenizer, Some(decoder_config)) {
             Ok(decoder) => decoder,
             Err(error) => {
                 let _ = init_tx.send(Err(error));
@@ -1513,6 +1642,7 @@ where
         let mut first_event = Some(first_event);
         let mut model_finish = "stop";
         let mut typed_finish = None;
+        let mut content = String::new();
         loop {
             let event_result = match first_event.take() {
                 Some(event) => Ok(event),
@@ -1547,6 +1677,7 @@ where
                 &mut next_call_index,
                 &mut call_names,
                 &mut typed_finish,
+                &mut content,
             ) {
                 Ok(frames) => frames,
                 Err(error) => {
@@ -1577,6 +1708,7 @@ where
             &mut next_call_index,
             &mut call_names,
             &mut typed_finish,
+            &mut content,
         ) {
             Ok(frames) => frames,
             Err(error) => {
@@ -1593,6 +1725,12 @@ where
             return;
         }
         let finish = typed_finish.unwrap_or(model_finish);
+        if let Err(error) =
+            output_format.validate_completion(&content, !call_names.is_empty(), finish)
+        {
+            let _ = tx.blocking_send(Ok(format_sse_error(&error)));
+            return;
+        }
         if tx
             .blocking_send(Ok(tool_finish_chunk(&id_for_task, &model_for_task, finish)))
             .is_err()
@@ -1635,11 +1773,7 @@ async fn serve_via_scheduler_tools_stream<M>(
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
-    let ToolResponseContext {
-        dialect,
-        definitions: tools,
-        constraint_options,
-    } = tool_context;
+    let (decoder_config, constraint_options, output_format) = tool_context.decoder_config();
     let id = gen_id();
     let (reply_tx, reply_rx) = oneshot::channel();
     if state
@@ -1663,12 +1797,6 @@ where
         Ok(Err(error)) => return admit_err_to_response(error),
         Err(_) => return (StatusCode::SERVICE_UNAVAILABLE, "scheduler reply lost").into_response(),
     };
-    let decoder_config = ToolOutputDecoderConfig {
-        dialect,
-        response_id: uuid::Uuid::new_v4().simple().to_string(),
-        definitions: tools,
-        output_schema: None,
-    };
     state.record_request_started(prompt_tokens);
     let tokenizer = state.tokenizer.clone();
     let runtime_usage = state.runtime_usage.clone();
@@ -1689,6 +1817,7 @@ where
         let mut call_names = Vec::new();
         let mut model_finish = "stop";
         let mut typed_finish = None;
+        let mut content = String::new();
         while let Some(event) = event_rx.recv().await {
             completion_tokens += 1;
             runtime_usage.record_output_tokens(1);
@@ -1711,6 +1840,7 @@ where
                 &mut next_call_index,
                 &mut call_names,
                 &mut typed_finish,
+                &mut content,
             ) {
                 Ok(frames) => frames,
                 Err(error) => {
@@ -1741,6 +1871,7 @@ where
             &mut next_call_index,
             &mut call_names,
             &mut typed_finish,
+            &mut content,
         ) {
             Ok(frames) => frames,
             Err(error) => {
@@ -1757,6 +1888,12 @@ where
             return;
         }
         let finish = typed_finish.unwrap_or(model_finish);
+        if let Err(error) =
+            output_format.validate_completion(&content, !call_names.is_empty(), finish)
+        {
+            let _ = tx.send(Ok(format_sse_error(&error))).await;
+            return;
+        }
         if tx
             .send(Ok(tool_finish_chunk(&id, &model_id, finish)))
             .await
@@ -1803,18 +1940,8 @@ where
         )
         .await;
     }
-    let ToolResponseContext {
-        dialect,
-        definitions: tools,
-        constraint_options,
-    } = tool_context;
+    let (decoder_config, constraint_options, output_format) = tool_context.decoder_config();
     let id = gen_id();
-    let decoder_config = ToolOutputDecoderConfig {
-        dialect,
-        response_id: uuid::Uuid::new_v4().simple().to_string(),
-        definitions: tools,
-        output_schema: None,
-    };
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<ParsedAssistantOutput> {
         let model_guard = state.model.blocking_lock();
         let tokenizer = &*state.tokenizer;
@@ -1856,6 +1983,11 @@ where
             .map(|call| call.name.clone())
             .collect::<Vec<_>>();
         validate_tool_choice_output(&constraint_options, &call_names)?;
+        output_format.validate_completion(
+            &output.content,
+            !output.tool_calls.is_empty(),
+            output.finish_reason,
+        )?;
         state
             .runtime_usage
             .record_output_tokens(u64::from(output.completion_tokens));
@@ -1899,11 +2031,7 @@ where
         )
         .await;
     }
-    let ToolResponseContext {
-        dialect,
-        definitions: tools,
-        constraint_options,
-    } = tool_context;
+    let (decoder_config, constraint_options, output_format) = tool_context.decoder_config();
     let id = gen_id();
     let (reply_tx, reply_rx) = oneshot::channel();
     if state
@@ -1930,15 +2058,7 @@ where
         }
     };
     state.record_request_started(prompt_tokens);
-    let mut decoder = match GeneratedOutputDecoder::new(
-        &state.tokenizer,
-        Some(ToolOutputDecoderConfig {
-            dialect,
-            response_id: uuid::Uuid::new_v4().simple().to_string(),
-            definitions: tools,
-            output_schema: None,
-        }),
-    ) {
+    let mut decoder = match GeneratedOutputDecoder::new(&state.tokenizer, Some(decoder_config)) {
         Ok(decoder) => decoder,
         Err(error) => return (StatusCode::BAD_REQUEST, format!("{error:#}")).into_response(),
     };
@@ -1982,6 +2102,13 @@ where
     if let Err(error) = validate_tool_choice_output(&constraint_options, &call_names) {
         return generation_err_to_response(error);
     }
+    if let Err(error) = output_format.validate_completion(
+        &output.content,
+        !output.tool_calls.is_empty(),
+        output.finish_reason,
+    ) {
+        return generation_err_to_response(error);
+    }
     state
         .runtime_usage
         .record_output_tokens(u64::from(output.completion_tokens));
@@ -1994,6 +2121,7 @@ async fn serve_via_gs_stream<M>(
     model_id: String,
     prompt_tokens: u32,
     include_usage: bool,
+    output_format: StructuredOutputFormat,
 ) -> Response
 where
     M: Model + DenseVlMethods + Send + 'static,
@@ -2077,6 +2205,7 @@ where
         let mut finish_reason = None;
         let mut next_call_index = 0_usize;
         let mut call_names = Vec::new();
+        let mut content = String::new();
         loop {
             let ev_result = match first_event.take() {
                 Some(event) => Ok(event),
@@ -2113,6 +2242,7 @@ where
                         &mut next_call_index,
                         &mut call_names,
                         &mut finish_reason,
+                        &mut content,
                     ) {
                         Ok(frames) => frames,
                         Err(error) => {
@@ -2138,6 +2268,10 @@ where
             }
         }
         if let Some(reason) = finish_reason {
+            if let Err(error) = output_format.validate_completion(&content, false, reason) {
+                let _ = tx.blocking_send(Ok(format_sse_error(&error)));
+                return;
+            }
             let _ = tx.blocking_send(Ok(tool_finish_chunk(
                 &id_for_task,
                 &model_id_for_task,
@@ -2185,6 +2319,7 @@ async fn serve_via_scheduler_stream<M>(
     model_id: String,
     prompt_tokens: u32,
     include_usage: bool,
+    output_format: StructuredOutputFormat,
 ) -> Response
 where
     M: Model + DenseVlMethods + Send + 'static,
@@ -2277,6 +2412,7 @@ where
         let mut finish_reason = None;
         let mut next_call_index = 0_usize;
         let mut call_names = Vec::new();
+        let mut content = String::new();
         while let Some(ev) = event_rx.recv().await {
             completion_tokens += 1;
             let mut events = if ev.finish_reason == Some("stop") {
@@ -2306,6 +2442,7 @@ where
                 &mut next_call_index,
                 &mut call_names,
                 &mut finish_reason,
+                &mut content,
             ) {
                 Ok(frames) => frames,
                 Err(error) => {
@@ -2324,6 +2461,10 @@ where
             }
         }
         if let Some(reason) = finish_reason {
+            if let Err(error) = output_format.validate_completion(&content, false, reason) {
+                let _ = tx.send(Ok(format_sse_error(&error))).await;
+                return;
+            }
             let _ = tx
                 .send(Ok(tool_finish_chunk(
                     &id_for_task,
@@ -2359,6 +2500,7 @@ async fn serve_via_gs_unary<M>(
     request: GenerateRequest,
     model_id: String,
     prompt_tokens: u32,
+    output_format: StructuredOutputFormat,
 ) -> Response
 where
     M: Model + DenseVlMethods + Send + 'static,
@@ -2401,6 +2543,7 @@ where
             }
         }
         anyhow::ensure!(finished, "generation ended before a terminal event");
+        output_format.validate_completion(&output.content, false, output.finish_reason)?;
         state
             .runtime_usage
             .record_output_tokens(u64::from(output.completion_tokens));
@@ -2449,6 +2592,7 @@ async fn serve_via_scheduler_unary<M>(
     request: GenerateRequest,
     model_id: String,
     prompt_tokens: u32,
+    output_format: StructuredOutputFormat,
 ) -> Response
 where
     M: Model + DenseVlMethods + Send + 'static,
@@ -2522,6 +2666,11 @@ where
         return generation_err_to_response(anyhow::anyhow!(
             "scheduler stream ended before a terminal event"
         ));
+    }
+    if let Err(error) =
+        output_format.validate_completion(&output.content, false, output.finish_reason)
+    {
+        return generation_err_to_response(error);
     }
     state
         .runtime_usage
@@ -2632,6 +2781,112 @@ mod tests {
         assert!(req.stream_options.expect("stream options").include_usage);
         assert!(stop_token_ids_for_request(&[1, 2], true).is_empty());
         assert_eq!(stop_token_ids_for_request(&[1, 2], false), vec![1, 2]);
+    }
+
+    #[test]
+    fn chat_request_parses_official_structured_output_wire_shapes() {
+        let json_object: ChatRequest = serde_json::from_value(serde_json::json!({
+            "messages": [{"role": "user", "content": "Return JSON"}],
+            "response_format": {"type": "json_object"}
+        }))
+        .unwrap();
+        assert!(matches!(
+            json_object.structured_output_format().unwrap(),
+            StructuredOutputFormat::JsonObject
+        ));
+
+        let json_schema: ChatRequest = serde_json::from_value(serde_json::json!({
+            "messages": [{"role": "user", "content": "Return weather"}],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "weather",
+                    "description": "A forecast",
+                    "schema": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                        "additionalProperties": false
+                    },
+                    "strict": true
+                }
+            }
+        }))
+        .unwrap();
+        assert!(matches!(
+            json_schema.structured_output_format().unwrap(),
+            StructuredOutputFormat::JsonSchema {
+                name,
+                strict: Some(true),
+                ..
+            } if name == "weather"
+        ));
+    }
+
+    #[test]
+    fn chat_request_rejects_responses_wire_shape_and_invalid_strict_schema() {
+        let wrong_shape = serde_json::from_value::<ChatRequest>(serde_json::json!({
+            "messages": [{"role": "user", "content": "Return JSON"}],
+            "response_format": {
+                "type": "json_schema",
+                "name": "answer",
+                "schema": {"type": "object", "properties": {}}
+            }
+        }));
+        assert!(wrong_shape.is_err());
+
+        let invalid: ChatRequest = serde_json::from_value(serde_json::json!({
+            "messages": [{"role": "user", "content": "Return JSON"}],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "answer",
+                    "schema": {
+                        "type": "object",
+                        "properties": {"answer": {"type": "string"}},
+                        "required": [],
+                        "additionalProperties": false
+                    },
+                    "strict": true
+                }
+            }
+        }))
+        .unwrap();
+        assert!(invalid
+            .structured_output_format()
+            .unwrap_err()
+            .to_string()
+            .contains("must be listed in required"));
+    }
+
+    #[test]
+    fn chat_request_rejects_unknown_response_format_fields() {
+        let json_object = serde_json::from_value::<ChatRequest>(serde_json::json!({
+            "messages": [{"role": "user", "content": "Return JSON"}],
+            "response_format": {"type": "json_object", "extra": true}
+        }));
+        assert!(json_object.is_err());
+
+        let text = serde_json::from_value::<ChatRequest>(serde_json::json!({
+            "messages": [{"role": "user", "content": "Return text"}],
+            "response_format": {"type": "text", "extra": true}
+        }));
+        assert!(text.is_err());
+    }
+
+    #[test]
+    fn structured_final_answer_is_available_only_for_auto_or_disabled_tools() {
+        let auto = tool_request(serde_json::json!({"tool_choice": "auto"}));
+        let prepared = prepare_tool_request(&auto, Some(ToolDialect::Qwen35)).unwrap();
+        assert!(allows_structured_final_output(prepared.as_ref()));
+
+        let none = tool_request(serde_json::json!({"tool_choice": "none"}));
+        let prepared = prepare_tool_request(&none, Some(ToolDialect::Qwen35)).unwrap();
+        assert!(allows_structured_final_output(prepared.as_ref()));
+
+        let required = tool_request(serde_json::json!({"tool_choice": "required"}));
+        let prepared = prepare_tool_request(&required, Some(ToolDialect::Qwen35)).unwrap();
+        assert!(!allows_structured_final_output(prepared.as_ref()));
     }
 
     #[test]

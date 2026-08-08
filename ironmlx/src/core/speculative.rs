@@ -1984,7 +1984,6 @@ where
         };
 
         if finish_reason.is_some() {
-            ensure_constraint_can_finish(&mut self.constraint, finish_reason)?;
             self.finished = true;
             return Ok(Some(GenerateEvent {
                 token,
@@ -2288,21 +2287,6 @@ fn constrain_speculative_logits(
 fn commit_constraint_token(constraint: &mut Option<ConstraintSession>, token: u32) -> Result<()> {
     if let Some(session) = constraint {
         session.commit_token(token)?;
-    }
-    Ok(())
-}
-
-fn ensure_constraint_can_finish(
-    constraint: &mut Option<ConstraintSession>,
-    finish_reason: Option<&'static str>,
-) -> Result<()> {
-    if finish_reason == Some("length") {
-        if let Some(session) = constraint {
-            anyhow::ensure!(
-                session.is_accepting()?,
-                "max_new_tokens reached before constrained output became complete"
-            );
-        }
     }
     Ok(())
 }

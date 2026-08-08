@@ -42,6 +42,7 @@ pub(crate) mod openai;
 pub(crate) mod responses;
 pub mod scheduler_actor;
 pub mod security;
+pub(crate) mod structured_output;
 pub mod vision;
 
 #[derive(Debug, Serialize)]

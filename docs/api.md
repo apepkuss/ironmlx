@@ -188,6 +188,46 @@ curl http://127.0.0.1:9068/v1/chat/completions \
 流式响应将 `stream` 设为 `true`；如需最终 usage chunk，可同时传入
 `"stream_options":{"include_usage":true}`。
 
+### Structured Outputs
+
+Chat Completions 通过标准 `response_format` 支持 JSON mode 和受 Schema 约束的
+Structured Outputs：
+
+```json
+{
+  "model": "your-model-id",
+  "messages": [{"role": "user", "content": "返回东京的天气。"}],
+  "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "weather_answer",
+      "description": "结构化天气回答",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "city": {"type": "string"},
+          "days": {"type": "integer"}
+        },
+        "required": ["city", "days"],
+        "additionalProperties": false
+      },
+      "strict": true
+    }
+  }
+}
+```
+
+JSON mode 使用 `{"response_format":{"type":"json_object"}}`。Chat 的
+`json_schema` 定义位于 `response_format.json_schema`；不要使用 Responses API
+扁平的 `text.format` 形状。支持的 Schema 子集与上文 Responses Structured
+Outputs 相同，不支持的 schema 或字段形状会在生成前返回 400。
+
+`response_format` 可与 function tools 同时使用：`tool_choice:"auto"` 允许工具调用
+或符合 Schema 的 JSON 最终回答；`none` 只允许 JSON 最终回答；`required` 或指定
+函数时只允许工具调用。三种约束共用同一编译路径，适用于同步、SSE、Scheduler、
+MTP/辅助 drafter 和 DiffusionGemma。若因 token 上限以 `finish_reason:"length"`
+结束，JSON 可能不完整，客户端应按截断结果处理。
+
 ### Function tools
 
 具有受支持原生工具模板的 Qwen 3.5/3.6、Gemma 4、DiffusionGemma、GLM、

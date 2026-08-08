@@ -28,6 +28,7 @@ use crate::core::generated_output::{
 };
 use crate::core::native_output::NativeOutputDecoderConfig;
 use crate::core::server::chat_format::render_and_encode;
+use crate::core::server::structured_output::StructuredOutputFormat;
 use crate::core::server::VisionInputConfig;
 use crate::core::tokenizer::Tokenizer;
 use crate::core::tool_calling::{ToolCall, ToolDefinition, ToolDialect};
@@ -209,6 +210,7 @@ struct OpenAiStreamRequest {
     prompt_tokens: u32,
     include_usage: bool,
     tool_context: Option<ToolResponseContext>,
+    output_format: StructuredOutputFormat,
 }
 
 struct ResponsesStreamRequest {
@@ -745,6 +747,14 @@ fn openai_tool_event_frames(
     Ok(frames)
 }
 
+fn append_generated_text(content: &mut String, events: &[GeneratedOutputEvent]) {
+    for event in events {
+        if let GeneratedOutputEvent::TextDelta(text) = event {
+            content.push_str(text);
+        }
+    }
+}
+
 fn utf8_fragments(value: &str, max_bytes: usize) -> Vec<&str> {
     if value.is_empty() {
         return vec![""];
@@ -919,42 +929,11 @@ async fn prepare_openai_request(
         &state.vision_input,
         &state.tokenizer,
     );
-    let constraint = match prepared_tools
-        .as_ref()
-        .and_then(|prepared| {
-            prepared
-                .constraint_options
-                .as_ref()
-                .map(|options| (prepared, options))
-        })
-        .map(|(prepared, options)| {
-            if matches!(
-                &options.choice,
-                crate::core::constrained::ToolChoiceConstraint::Auto
-            ) {
-                if let Some(schema) = output_schema.as_ref() {
-                    return state.tokenizer.compile_tool_or_json_constraint(
-                        &prepared.definitions,
-                        options,
-                        schema,
-                    );
-                }
-            }
-            state
-                .tokenizer
-                .compile_tool_constraint(&prepared.definitions, options)
-        })
-        .transpose()
-        .and_then(
-            |tool_constraint| match (tool_constraint, output_schema.as_ref()) {
-                (Some(constraint), _) => Ok(Some(constraint)),
-                (None, Some(schema)) => state
-                    .tokenizer
-                    .compile_json_output_constraint(schema)
-                    .map(Some),
-                (None, None) => Ok(None),
-            },
-        ) {
+    let constraint = match super::openai::compile_output_constraint(
+        &state.tokenizer,
+        prepared_tools.as_ref(),
+        output_schema.as_ref(),
+    ) {
         Ok(constraint) => constraint,
         Err(error) => {
             return Err(protocol.invalid_request(format!(
@@ -1165,6 +1144,7 @@ async fn openai_stream_completion(
         prompt_tokens,
         include_usage,
         tool_context,
+        output_format,
     } = stream_request;
     let lane_guard = match state.lane.clone().enter().await {
         Ok(guard) => guard,
@@ -1204,12 +1184,14 @@ async fn openai_stream_completion(
             let mut next_call_index = 0_usize;
             let mut call_names = Vec::new();
             let mut typed_finish = None;
+            let mut content = String::new();
             let generation_result = {
                 let mut emit = |event: DiffusionGemmaGenerateEvent| -> Result<bool> {
                     if !diffusion_event_is_length_sentinel(&event) {
                         completion_tokens = completion_tokens.saturating_add(1);
                         state.runtime_usage.record_output_tokens(1);
                         let events = decoder.push_text_delta(&event.text)?;
+                        append_generated_text(&mut content, &events);
                         let frames = openai_tool_event_frames(
                             &id,
                             &model_label,
@@ -1258,6 +1240,7 @@ async fn openai_stream_completion(
                     return;
                 }
             };
+            append_generated_text(&mut content, &tail);
             let frames = match openai_tool_event_frames(
                 &id,
                 &model_label,
@@ -1287,6 +1270,13 @@ async fn openai_stream_completion(
                 return;
             }
             let finish_reason = typed_finish.unwrap_or(model_finish);
+            if let Err(error) =
+                output_format.validate_completion(&content, !call_names.is_empty(), finish_reason)
+            {
+                let _ = tx.blocking_send(Ok(openai_error_frame(&format!("{error:#}"))));
+                let _ = tx.blocking_send(Ok(openai_done_frame()));
+                return;
+            }
             if tx
                 .blocking_send(Ok(openai_finish_frame(
                     &id,
@@ -1334,11 +1324,13 @@ async fn openai_stream_completion(
         let mut next_call_index = 0_usize;
         let mut call_names = Vec::new();
         let mut typed_finish = None;
+        let mut content = String::new();
         let generation_result = {
             let mut emit = |event: DiffusionGemmaGenerateEvent| -> Result<bool> {
                 if !diffusion_event_is_length_sentinel(&event) {
                     state.runtime_usage.record_output_tokens(1);
                     let events = decoder.push_text_delta(&event.text)?;
+                    append_generated_text(&mut content, &events);
                     let frames = openai_tool_event_frames(
                         &id,
                         &model_label,
@@ -1388,6 +1380,7 @@ async fn openai_stream_completion(
                 return;
             }
         };
+        append_generated_text(&mut content, &events);
         let frames = match openai_tool_event_frames(
             &id,
             &model_label,
@@ -1409,12 +1402,18 @@ async fn openai_stream_completion(
                 return;
             }
         }
+        let finish_reason = typed_finish.unwrap_or(model_finish);
+        if let Err(error) = output_format.validate_completion(&content, false, finish_reason) {
+            let _ = tx.blocking_send(Ok(openai_error_frame(&format!("{error:#}"))));
+            let _ = tx.blocking_send(Ok(openai_done_frame()));
+            return;
+        }
         if tx
             .blocking_send(Ok(openai_finish_frame(
                 &id,
                 &model_label,
                 created,
-                typed_finish.unwrap_or(model_finish),
+                finish_reason,
             )))
             .is_err()
         {
@@ -1727,7 +1726,7 @@ pub async fn openai_chat_completions(
         axum::extract::rejection::JsonRejection,
     >,
 ) -> Response {
-    let req = match payload {
+    let mut req = match payload {
         Ok(Json(req)) => req,
         Err(error) => {
             return (
@@ -1737,6 +1736,18 @@ pub async fn openai_chat_completions(
                 .into_response();
         }
     };
+    let output_format = match req.structured_output_format() {
+        Ok(format) => format,
+        Err(error) => return (StatusCode::BAD_REQUEST, format!("{error:#}")).into_response(),
+    };
+    let output_schema = output_format.constraint_schema();
+    let allows_final_output = req
+        .tool_choice
+        .as_ref()
+        .is_none_or(|choice| matches!(choice.as_str(), Some("auto" | "none")));
+    if allows_final_output {
+        output_format.apply_prompt_instruction(&mut req.messages);
+    }
     let stream = req.stream;
     let include_usage = req
         .stream_options
@@ -1747,7 +1758,7 @@ pub async fn openai_chat_completions(
     let seed = req.seed;
     let model_label = req.model.clone().unwrap_or_else(|| state.model_id.clone());
     let (prepared, prompt_tokens) =
-        match prepare_openai_request(&state, req, None, RequestProtocol::OpenAi).await {
+        match prepare_openai_request(&state, req, output_schema, RequestProtocol::OpenAi).await {
             Ok(t) => t,
             Err(resp) => return resp,
         };
@@ -1767,6 +1778,7 @@ pub async fn openai_chat_completions(
                 prompt_tokens,
                 include_usage,
                 tool_context,
+                output_format,
             },
         )
         .await;
@@ -1789,6 +1801,13 @@ pub async fn openai_chat_completions(
         Ok(c) => c,
         Err(err) => return err.into_response(),
     };
+    if let Err(error) = output_format.validate_completion(
+        completion.content.as_deref().unwrap_or_default(),
+        !completion.tool_calls.is_empty(),
+        completion.finish_reason,
+    ) {
+        return internal_error_response(format!("{error:#}"));
+    }
     let resp = OpenAiCompletionResponse {
         id: gen_openai_id(),
         object: "chat.completion",
