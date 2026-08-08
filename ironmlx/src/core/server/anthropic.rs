@@ -14,6 +14,7 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -25,6 +26,7 @@ use crate::core::generated_output::{
 #[cfg(test)]
 use crate::core::image_input::{ImageInputError, ImageRequestBudget};
 use crate::core::model::Model;
+use crate::core::native_output::NativeOutputDecoderConfig;
 #[cfg(test)]
 use crate::core::sampler::Sampler;
 use crate::core::scheduler::DenseVlMethods;
@@ -162,6 +164,13 @@ enum AnthropicContentPart {
         #[serde(default)]
         is_error: bool,
     },
+    Thinking {
+        thinking: String,
+        signature: String,
+    },
+    RedactedThinking {
+        data: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -226,13 +235,91 @@ pub(crate) enum AnthropicToolChoice {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AnthropicOutputConfig {
-    format: AnthropicOutputFormat,
+    #[serde(default)]
+    format: Option<AnthropicOutputFormat>,
+    #[serde(default)]
+    effort: Option<AnthropicEffort>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum AnthropicOutputFormat {
     JsonSchema { schema: serde_json::Value },
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum AnthropicEffort {
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum AnthropicThinkingDisplay {
+    Summarized,
+    Omitted,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum AnthropicThinkingConfig {
+    Disabled,
+    Enabled {
+        budget_tokens: usize,
+        #[serde(default)]
+        display: Option<AnthropicThinkingDisplay>,
+    },
+    Adaptive {
+        #[serde(default)]
+        display: Option<AnthropicThinkingDisplay>,
+    },
+}
+
+impl AnthropicThinkingConfig {
+    fn enabled(&self) -> bool {
+        !matches!(self, Self::Disabled)
+    }
+
+    fn template_kwargs(&self) -> serde_json::Value {
+        serde_json::json!({"enable_thinking": self.enabled()})
+    }
+
+    fn validate(&self, max_tokens: usize, effort: Option<AnthropicEffort>) -> anyhow::Result<()> {
+        match self {
+            Self::Disabled => anyhow::ensure!(
+                effort.is_none(),
+                "output_config.effort requires thinking.type=`enabled` or `adaptive`"
+            ),
+            Self::Enabled {
+                budget_tokens,
+                display,
+            } => {
+                anyhow::ensure!(
+                    *budget_tokens >= 1024,
+                    "thinking.budget_tokens must be at least 1024"
+                );
+                anyhow::ensure!(
+                    *budget_tokens < max_tokens,
+                    "thinking.budget_tokens must be less than max_tokens"
+                );
+                validate_thinking_display(*display)?;
+            }
+            Self::Adaptive { display } => validate_thinking_display(*display)?,
+        }
+        Ok(())
+    }
+}
+
+fn validate_thinking_display(display: Option<AnthropicThinkingDisplay>) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !matches!(display, Some(AnthropicThinkingDisplay::Omitted)),
+        "thinking.display=`omitted` is not supported because local models do not provide an encrypted hidden-thinking channel"
+    );
+    Ok(())
 }
 
 /// Anthropic message content: plain string or an array of content blocks.
@@ -265,6 +352,8 @@ pub struct MessagesRequest {
     tool_choice: Option<AnthropicToolChoice>,
     #[serde(default)]
     output_config: Option<AnthropicOutputConfig>,
+    #[serde(default)]
+    thinking: Option<AnthropicThinkingConfig>,
     #[serde(default = "default_max_tokens")]
     pub max_tokens: usize,
     #[serde(default)]
@@ -287,11 +376,22 @@ fn default_max_tokens() -> usize {
 struct Usage {
     input_tokens: u32,
     output_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_tokens_details: Option<OutputTokensDetails>,
+}
+
+#[derive(Debug, Serialize)]
+struct OutputTokensDetails {
+    thinking_tokens: u32,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum MessageContentBlock {
+    Thinking {
+        thinking: String,
+        signature: String,
+    },
     Text {
         text: String,
     },
@@ -317,6 +417,18 @@ struct MessageEnvelope {
 
 fn gen_msg_id() -> String {
     format!("msg_{}", uuid::Uuid::new_v4().simple())
+}
+
+fn thinking_signature(thinking: &str) -> String {
+    format!("ironmlx-v1:{:x}", Sha256::digest(thinking.as_bytes()))
+}
+
+fn validate_thinking_signature(thinking: &str, signature: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        signature == thinking_signature(thinking),
+        "thinking block signature does not match its content"
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -359,6 +471,7 @@ struct ToolResponseContext {
     constraint_options: ToolConstraintOptions,
     output_schema: Option<serde_json::Value>,
     output_format: StructuredOutputFormat,
+    native_output: Option<NativeOutputDecoderConfig>,
 }
 
 impl ToolResponseContext {
@@ -491,6 +604,10 @@ fn normalize_user_message(content: AnthropicContent) -> anyhow::Result<Vec<ChatM
             AnthropicContentPart::ToolUse { .. } => {
                 anyhow::bail!("tool_use blocks are only valid in assistant messages")
             }
+            AnthropicContentPart::Thinking { .. }
+            | AnthropicContentPart::RedactedThinking { .. } => {
+                anyhow::bail!("thinking blocks are only valid in assistant messages")
+            }
         }
     }
     if !ordinary.is_empty() || output.is_empty() {
@@ -514,8 +631,10 @@ fn normalize_assistant_message(content: AnthropicContent) -> anyhow::Result<Chat
     };
 
     let mut text = String::new();
+    let mut reasoning_content = None;
     let mut tool_calls = Vec::new();
     let mut saw_tool_use = false;
+    let mut saw_visible_content = false;
     for part in parts {
         match part {
             AnthropicContentPart::Text { text: delta } => {
@@ -523,10 +642,12 @@ fn normalize_assistant_message(content: AnthropicContent) -> anyhow::Result<Chat
                     !saw_tool_use,
                     "assistant text blocks cannot follow a tool_use block"
                 );
+                saw_visible_content = true;
                 text.push_str(&delta);
             }
             AnthropicContentPart::ToolUse { id, name, input } => {
                 anyhow::ensure!(input.is_object(), "tool_use.input must be a JSON object");
+                saw_visible_content = true;
                 saw_tool_use = true;
                 tool_calls.push(ChatToolCall {
                     id,
@@ -543,12 +664,33 @@ fn normalize_assistant_message(content: AnthropicContent) -> anyhow::Result<Chat
             AnthropicContentPart::ToolResult { .. } => {
                 anyhow::bail!("tool_result blocks are only valid in user messages")
             }
+            AnthropicContentPart::Thinking {
+                thinking,
+                signature,
+            } => {
+                anyhow::ensure!(
+                    !saw_visible_content,
+                    "thinking blocks must precede assistant text and tool_use blocks"
+                );
+                anyhow::ensure!(
+                    reasoning_content.is_none(),
+                    "multiple thinking blocks in one assistant message are not supported"
+                );
+                validate_thinking_signature(&thinking, &signature)?;
+                reasoning_content = Some(thinking);
+            }
+            AnthropicContentPart::RedactedThinking { data } => {
+                anyhow::bail!(
+                    "redacted_thinking is not supported because local models cannot decrypt opaque thinking data ({} bytes)",
+                    data.len()
+                )
+            }
         }
     }
     Ok(ChatMessage {
         role: "assistant".to_owned(),
         content: Content::Text(text),
-        reasoning_content: None,
+        reasoning_content,
         tool_calls,
         tool_call_id: None,
     })
@@ -605,7 +747,33 @@ fn normalize_tool_choice(
 
 impl MessagesRequest {
     pub(crate) fn into_chat_request(self) -> anyhow::Result<super::openai::ChatRequest> {
-        let has_output_format = self.output_config.is_some();
+        let has_output_format = self
+            .output_config
+            .as_ref()
+            .and_then(|config| config.format.as_ref())
+            .is_some();
+        let effort = self.output_config.as_ref().and_then(|config| config.effort);
+        if let Some(config) = self.output_config.as_ref() {
+            anyhow::ensure!(
+                config.format.is_some() || config.effort.is_some(),
+                "output_config must include `format` or `effort`"
+            );
+        }
+        match self.thinking.as_ref() {
+            Some(thinking) => thinking.validate(self.max_tokens, effort)?,
+            None => anyhow::ensure!(
+                effort.is_none(),
+                "output_config.effort requires thinking.type=`enabled` or `adaptive`"
+            ),
+        }
+        anyhow::ensure!(
+            !(has_output_format
+                && self
+                    .thinking
+                    .as_ref()
+                    .is_some_and(AnthropicThinkingConfig::enabled)),
+            "thinking is not supported together with output_config.format by the local constrained decoder"
+        );
         if has_output_format
             && self
                 .messages
@@ -621,18 +789,21 @@ impl MessagesRequest {
             )
         });
         let mut messages = normalize_messages(self.system, self.messages)?;
-        let response_format = self.output_config.map(|config| match config.format {
-            AnthropicOutputFormat::JsonSchema { schema } => {
-                super::openai::ChatResponseFormat::JsonSchema {
-                    json_schema: super::openai::ChatJsonSchema {
-                        name: "anthropic_output".to_owned(),
-                        description: None,
-                        schema,
-                        strict: Some(false),
-                    },
+        let response_format = self
+            .output_config
+            .and_then(|config| config.format)
+            .map(|format| match format {
+                AnthropicOutputFormat::JsonSchema { schema } => {
+                    super::openai::ChatResponseFormat::JsonSchema {
+                        json_schema: super::openai::ChatJsonSchema {
+                            name: "anthropic_output".to_owned(),
+                            description: None,
+                            schema,
+                            strict: Some(false),
+                        },
+                    }
                 }
-            }
-        });
+            });
         if allows_final_output {
             let output_format = match response_format.as_ref() {
                 Some(super::openai::ChatResponseFormat::JsonSchema { json_schema }) => {
@@ -680,9 +851,31 @@ impl MessagesRequest {
             top_k: self.top_k,
             repetition_penalty: self.repetition_penalty,
             seed: None,
-            chat_template_kwargs: None,
+            chat_template_kwargs: self
+                .thinking
+                .as_ref()
+                .map(AnthropicThinkingConfig::template_kwargs),
         })
     }
+}
+
+pub(crate) fn messages_native_output_config(
+    tokenizer: &crate::core::Tokenizer,
+    req: &super::openai::ChatRequest,
+) -> anyhow::Result<Option<NativeOutputDecoderConfig>> {
+    let config = tokenizer.native_output_decoder_config(req.chat_template_kwargs.as_ref())?;
+    let explicitly_enabled = req
+        .chat_template_kwargs
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .and_then(|kwargs| kwargs.get("enable_thinking"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
+    anyhow::ensure!(
+        !explicitly_enabled || config.is_some(),
+        "the loaded model does not expose a supported native thinking channel"
+    );
+    Ok(config)
 }
 
 /// Decode Anthropic native content blocks into the wire-agnostic
@@ -714,7 +907,9 @@ pub(crate) fn decode_anthropic_messages(
                             parts.push(DecodedPart::Image(bytes));
                         }
                         AnthropicContentPart::ToolUse { .. }
-                        | AnthropicContentPart::ToolResult { .. } => {
+                        | AnthropicContentPart::ToolResult { .. }
+                        | AnthropicContentPart::Thinking { .. }
+                        | AnthropicContentPart::RedactedThinking { .. } => {
                             return Err(ImageInputError::DecodeFailed);
                         }
                     }
@@ -759,6 +954,12 @@ where
             return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{error:#}"));
         }
     };
+    let native_output = match messages_native_output_config(&state.tokenizer, &req) {
+        Ok(config) => config,
+        Err(error) => {
+            return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{error:#}"));
+        }
+    };
     let output_format = match req.structured_output_format() {
         Ok(format) => format,
         Err(error) => {
@@ -781,6 +982,7 @@ where
                 return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{error:#}"));
             }
         };
+    let chat_template_kwargs = req.chat_template_kwargs.clone();
     let original_messages = prepared_tools.as_ref().map(|_| req.messages.clone());
 
     let (flat_messages, pixel_values, image_grid_thw) =
@@ -808,11 +1010,16 @@ where
             &flat_messages,
         )
         .and_then(|messages| {
-            let kwargs = super::openai::tool_template_kwargs(None, prepared)?;
+            let kwargs =
+                super::openai::tool_template_kwargs(chat_template_kwargs.clone(), prepared)?;
             super::openai::render_tool_prompt(&state.tokenizer, &messages, &kwargs)
         })
     } else {
-        render_and_encode(&state.tokenizer, &flat_messages, None)
+        render_and_encode(
+            &state.tokenizer,
+            &flat_messages,
+            chat_template_kwargs.as_ref(),
+        )
     };
     let prompt_ids = match prompt_ids_result {
         Ok(ids) => ids,
@@ -879,6 +1086,7 @@ where
             .flatten(),
             output_format: output_format.clone(),
             constraint_options,
+            native_output,
         };
         return match messages_route(stream, use_scheduler) {
             MessagesRoute::SchedulerStream | MessagesRoute::SchedulerUnary => {
@@ -914,11 +1122,20 @@ where
                 model_label,
                 input_tokens,
                 output_format,
+                native_output,
             )
             .await
         }
         MessagesRoute::GenerationStreamStream => {
-            serve_via_gs_stream(state, request, model_label, input_tokens, output_format).await
+            serve_via_gs_stream(
+                state,
+                request,
+                model_label,
+                input_tokens,
+                output_format,
+                native_output,
+            )
+            .await
         }
         MessagesRoute::SchedulerUnary => {
             serve_via_scheduler_unary_with_output_format(
@@ -927,11 +1144,20 @@ where
                 model_label,
                 input_tokens,
                 output_format,
+                native_output,
             )
             .await
         }
         MessagesRoute::GenerationStreamUnary => {
-            serve_via_gs_unary(state, request, model_label, input_tokens, output_format).await
+            serve_via_gs_unary(
+                state,
+                request,
+                model_label,
+                input_tokens,
+                output_format,
+                native_output,
+            )
+            .await
         }
     }
 }
@@ -962,6 +1188,12 @@ pub(crate) async fn messages_with_gemma4_drafter_state(
             return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{error:#}"));
         }
     };
+    let native_output = match messages_native_output_config(&state.base.tokenizer, &req) {
+        Ok(config) => config,
+        Err(error) => {
+            return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{error:#}"));
+        }
+    };
     let output_format = match req.structured_output_format() {
         Ok(format) => format,
         Err(error) => {
@@ -987,6 +1219,7 @@ pub(crate) async fn messages_with_gemma4_drafter_state(
                 return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{error:#}"));
             }
         };
+    let chat_template_kwargs = req.chat_template_kwargs.clone();
     let original_messages = prepared_tools.as_ref().map(|_| req.messages.clone());
     let (flat_messages, pixel_values, image_grid_thw) =
         match super::openai::expand_image_parts_in_messages(req.messages, &state.base.vision_input)
@@ -1013,11 +1246,16 @@ pub(crate) async fn messages_with_gemma4_drafter_state(
             &flat_messages,
         )
         .and_then(|messages| {
-            let kwargs = super::openai::tool_template_kwargs(None, prepared)?;
+            let kwargs =
+                super::openai::tool_template_kwargs(chat_template_kwargs.clone(), prepared)?;
             super::openai::render_tool_prompt(&state.base.tokenizer, &messages, &kwargs)
         })
     } else {
-        render_and_encode(&state.base.tokenizer, &flat_messages, None)
+        render_and_encode(
+            &state.base.tokenizer,
+            &flat_messages,
+            chat_template_kwargs.as_ref(),
+        )
     };
     let prompt_ids = match prompt_ids_result {
         Ok(ids) => ids,
@@ -1086,6 +1324,7 @@ pub(crate) async fn messages_with_gemma4_drafter_state(
             .flatten(),
             output_format: output_format.clone(),
             constraint_options,
+            native_output,
         };
         return serve_via_scheduler_tools(
             state.base,
@@ -1105,6 +1344,7 @@ pub(crate) async fn messages_with_gemma4_drafter_state(
             model_label,
             input_tokens,
             output_format,
+            native_output,
         )
         .await
     } else {
@@ -1114,6 +1354,7 @@ pub(crate) async fn messages_with_gemma4_drafter_state(
             model_label,
             input_tokens,
             output_format,
+            native_output,
         )
         .await
     }
@@ -1122,9 +1363,11 @@ pub(crate) async fn messages_with_gemma4_drafter_state(
 #[derive(Debug)]
 struct ParsedToolOutput {
     content: String,
+    reasoning: String,
     tool_calls: Vec<ToolCall>,
     finish_reason: &'static str,
     completion_tokens: u32,
+    thinking_tokens: u32,
 }
 
 fn anthropic_finish_reason(reason: GeneratedFinishReason) -> &'static str {
@@ -1142,6 +1385,7 @@ fn collect_tool_events(
     for event in events {
         match event {
             GeneratedOutputEvent::TextDelta(text) => output.content.push_str(&text),
+            GeneratedOutputEvent::ReasoningDelta(text) => output.reasoning.push_str(&text),
             GeneratedOutputEvent::ToolCall(call) => output.tool_calls.push(call),
             GeneratedOutputEvent::Finished(reason) => {
                 output.finish_reason = anthropic_finish_reason(reason);
@@ -1177,6 +1421,12 @@ fn tool_unary_response(
         return anthropic_error_response(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}"));
     }
     let mut content = Vec::new();
+    if !output.reasoning.is_empty() {
+        content.push(MessageContentBlock::Thinking {
+            signature: thinking_signature(&output.reasoning),
+            thinking: output.reasoning,
+        });
+    }
     if !output.content.is_empty() {
         content.push(MessageContentBlock::Text {
             text: output.content,
@@ -1212,18 +1462,27 @@ fn tool_unary_response(
         usage: Usage {
             input_tokens,
             output_tokens: output.completion_tokens,
+            output_tokens_details: (output.thinking_tokens > 0).then_some(OutputTokensDetails {
+                thinking_tokens: output.thinking_tokens,
+            }),
         },
     })
     .into_response()
 }
 
+pub(crate) struct CollectedOutput {
+    pub(crate) content: Option<String>,
+    pub(crate) reasoning: String,
+    pub(crate) tool_calls: Vec<ToolCall>,
+    pub(crate) finish_reason: &'static str,
+    pub(crate) completion_tokens: u32,
+    pub(crate) thinking_tokens: u32,
+}
+
 pub(crate) fn collected_response(
     model_id: String,
     input_tokens: u32,
-    content: Option<String>,
-    tool_calls: Vec<ToolCall>,
-    finish_reason: &'static str,
-    completion_tokens: u32,
+    output: CollectedOutput,
     output_format: StructuredOutputFormat,
 ) -> Response {
     tool_unary_response(
@@ -1231,10 +1490,12 @@ pub(crate) fn collected_response(
         model_id,
         input_tokens,
         ParsedToolOutput {
-            content: content.unwrap_or_default(),
-            tool_calls,
-            finish_reason,
-            completion_tokens,
+            content: output.content.unwrap_or_default(),
+            reasoning: output.reasoning,
+            tool_calls: output.tool_calls,
+            finish_reason: output.finish_reason,
+            completion_tokens: output.completion_tokens,
+            thinking_tokens: output.thinking_tokens,
         },
         output_format,
     )
@@ -1262,6 +1523,7 @@ pub(crate) struct ToolStreamEncoder {
     model_id: String,
     input_tokens: u32,
     next_index: usize,
+    open_thinking: Option<(usize, String)>,
     open_text_index: Option<usize>,
     call_names: Vec<String>,
     content: String,
@@ -1280,6 +1542,7 @@ impl ToolStreamEncoder {
             model_id,
             input_tokens,
             next_index: 0,
+            open_thinking: None,
             open_text_index: None,
             call_names: Vec::new(),
             content: String::new(),
@@ -1315,6 +1578,26 @@ impl ToolStreamEncoder {
         }
     }
 
+    fn close_thinking(&mut self, frames: &mut Vec<Bytes>) {
+        if let Some((index, thinking)) = self.open_thinking.take() {
+            frames.push(format_event(
+                "content_block_delta",
+                &serde_json::json!({
+                    "type": "content_block_delta",
+                    "index": index,
+                    "delta": {
+                        "type": "signature_delta",
+                        "signature": thinking_signature(&thinking)
+                    }
+                }),
+            ));
+            frames.push(format_event(
+                "content_block_stop",
+                &serde_json::json!({"type": "content_block_stop", "index": index}),
+            ));
+        }
+    }
+
     pub(crate) fn push_events(
         &mut self,
         events: Vec<GeneratedOutputEvent>,
@@ -1322,7 +1605,44 @@ impl ToolStreamEncoder {
         let mut frames = Vec::new();
         for event in events {
             match event {
+                GeneratedOutputEvent::ReasoningDelta(thinking) if !thinking.is_empty() => {
+                    self.close_text(&mut frames);
+                    let index = match self.open_thinking.as_mut() {
+                        Some((index, accumulated)) => {
+                            accumulated.push_str(&thinking);
+                            *index
+                        }
+                        None => {
+                            let index = self.next_index;
+                            self.next_index += 1;
+                            self.open_thinking = Some((index, thinking.clone()));
+                            frames.push(format_event(
+                                "content_block_start",
+                                &serde_json::json!({
+                                    "type": "content_block_start",
+                                    "index": index,
+                                    "content_block": {
+                                        "type": "thinking",
+                                        "thinking": "",
+                                        "signature": ""
+                                    }
+                                }),
+                            ));
+                            index
+                        }
+                    };
+                    frames.push(format_event(
+                        "content_block_delta",
+                        &serde_json::json!({
+                            "type": "content_block_delta",
+                            "index": index,
+                            "delta": {"type": "thinking_delta", "thinking": thinking}
+                        }),
+                    ));
+                }
+                GeneratedOutputEvent::ReasoningDelta(_) => {}
                 GeneratedOutputEvent::TextDelta(text) if !text.is_empty() => {
+                    self.close_thinking(&mut frames);
                     self.content.push_str(&text);
                     let index = match self.open_text_index {
                         Some(index) => index,
@@ -1352,6 +1672,7 @@ impl ToolStreamEncoder {
                 }
                 GeneratedOutputEvent::TextDelta(_) => {}
                 GeneratedOutputEvent::ToolCall(call) => {
+                    self.close_thinking(&mut frames);
                     self.close_text(&mut frames);
                     let index = self.next_index;
                     self.next_index += 1;
@@ -1404,9 +1725,11 @@ impl ToolStreamEncoder {
         options: &ToolConstraintOptions,
         model_finish: &'static str,
         output_tokens: u32,
+        thinking_tokens: u32,
     ) -> anyhow::Result<Vec<Bytes>> {
         super::openai::validate_tool_choice_output(options, &self.call_names)?;
         let mut frames = Vec::new();
+        self.close_thinking(&mut frames);
         self.close_text(&mut frames);
         if self.next_index == 0 {
             frames.push(format_event(
@@ -1432,12 +1755,20 @@ impl ToolStreamEncoder {
             !self.call_names.is_empty(),
             stop_reason,
         )?;
+        let usage = if thinking_tokens > 0 {
+            serde_json::json!({
+                "output_tokens": output_tokens,
+                "output_tokens_details": {"thinking_tokens": thinking_tokens}
+            })
+        } else {
+            serde_json::json!({"output_tokens": output_tokens})
+        };
         frames.push(format_event(
             "message_delta",
             &serde_json::json!({
                 "type": "message_delta",
                 "delta": {"stop_reason": stop_reason, "stop_sequence": null},
-                "usage": {"output_tokens": output_tokens}
+                "usage": usage
             }),
         ));
         frames.push(format_event(
@@ -1496,6 +1827,7 @@ where
 {
     let id = gen_msg_id();
     let decoder_config = context.decoder_config();
+    let native_output = context.native_output;
     let output_format = context.output_format.clone();
     let constraint_options = context.constraint_options;
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<ParsedToolOutput> {
@@ -1503,13 +1835,19 @@ where
         let tokenizer = &*state.tokenizer;
         let memory = super::begin_direct_request_memory(&state, &*model_guard, &request)?;
         let mut generation = GenerationStream::new(&*model_guard, tokenizer, request)?;
-        let mut decoder = GeneratedOutputDecoder::new(tokenizer, Some(decoder_config))?;
+        let mut decoder = GeneratedOutputDecoder::new_with_native(
+            tokenizer,
+            Some(decoder_config),
+            native_output,
+        )?;
         state.record_request_started(input_tokens);
         let mut output = ParsedToolOutput {
             content: String::new(),
+            reasoning: String::new(),
             tool_calls: Vec::new(),
             finish_reason: "end_turn",
             completion_tokens: 0,
+            thinking_tokens: 0,
         };
         let mut memory = Some(memory);
         let mut finished = false;
@@ -1525,6 +1863,9 @@ where
             } else {
                 decoder.push_token(event.token)?
             };
+            if event.finish_reason != Some("stop") && decoder.last_token_was_reasoning() {
+                output.thinking_tokens += 1;
+            }
             collect_tool_events(&mut output, events)?;
             if let Some(reason) = event.finish_reason {
                 model_finish = reason;
@@ -1599,9 +1940,14 @@ where
         Err(response) => return response,
     };
     let decoder_config = context.decoder_config();
+    let native_output = context.native_output;
     let output_format = context.output_format.clone();
     let constraint_options = context.constraint_options;
-    let mut decoder = match GeneratedOutputDecoder::new(&state.tokenizer, Some(decoder_config)) {
+    let mut decoder = match GeneratedOutputDecoder::new_with_native(
+        &state.tokenizer,
+        Some(decoder_config),
+        native_output,
+    ) {
         Ok(decoder) => decoder,
         Err(error) => {
             return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{error:#}"))
@@ -1610,9 +1956,11 @@ where
     state.record_request_started(input_tokens);
     let mut output = ParsedToolOutput {
         content: String::new(),
+        reasoning: String::new(),
         tool_calls: Vec::new(),
         finish_reason: "end_turn",
         completion_tokens: 0,
+        thinking_tokens: 0,
     };
     let mut finished = false;
     let mut model_finish = "stop";
@@ -1624,6 +1972,9 @@ where
         } else {
             decoder.push_token(event.token)
         };
+        if event.finish_reason != Some("stop") && decoder.last_token_was_reasoning() {
+            output.thinking_tokens += 1;
+        }
         let events = match events {
             Ok(events) => events,
             Err(error) => {
@@ -1690,6 +2041,7 @@ where
     let message_id = gen_msg_id();
     tokio::task::spawn_blocking(move || {
         let decoder_config = context.decoder_config();
+        let native_output = context.native_output;
         let output_format = context.output_format.clone();
         let constraint_options = context.constraint_options;
         let model_guard = state.model.blocking_lock();
@@ -1715,7 +2067,11 @@ where
                 return;
             }
         };
-        let mut decoder = match GeneratedOutputDecoder::new(tokenizer, Some(decoder_config)) {
+        let mut decoder = match GeneratedOutputDecoder::new_with_native(
+            tokenizer,
+            Some(decoder_config),
+            native_output,
+        ) {
             Ok(decoder) => decoder,
             Err(error) => {
                 let _ = init_tx.send(Err(error));
@@ -1732,6 +2088,7 @@ where
             return;
         }
         let mut output_tokens = 0_u32;
+        let mut thinking_tokens = 0_u32;
         let mut model_finish = "stop";
         let mut finished = false;
         let mut first_event = first_event;
@@ -1756,6 +2113,9 @@ where
             } else {
                 decoder.push_token(event.token)
             };
+            if event.finish_reason != Some("stop") && decoder.last_token_was_reasoning() {
+                thinking_tokens += 1;
+            }
             let events = match events {
                 Ok(events) => events,
                 Err(error) => {
@@ -1809,7 +2169,12 @@ where
             GeneratedFinishReason::from_generation(model_finish, !encoder.call_names.is_empty())
                 .expect("generation finish reason already validated"),
         );
-        let frames = match encoder.finish(&constraint_options, stop_reason, output_tokens) {
+        let frames = match encoder.finish(
+            &constraint_options,
+            stop_reason,
+            output_tokens,
+            thinking_tokens,
+        ) {
             Ok(frames) => frames,
             Err(error) => {
                 let _ = tx.blocking_send(Ok(format_stream_error(&error)));
@@ -1848,6 +2213,7 @@ where
         Err(response) => return response,
     };
     let decoder_config = context.decoder_config();
+    let native_output = context.native_output;
     let output_format = context.output_format.clone();
     let constraint_options = context.constraint_options;
     state.record_request_started(input_tokens);
@@ -1856,7 +2222,11 @@ where
     let message_id = gen_msg_id();
     let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
     tokio::spawn(async move {
-        let mut decoder = match GeneratedOutputDecoder::new(&tokenizer, Some(decoder_config)) {
+        let mut decoder = match GeneratedOutputDecoder::new_with_native(
+            &tokenizer,
+            Some(decoder_config),
+            native_output,
+        ) {
             Ok(decoder) => decoder,
             Err(error) => {
                 let _ = tx.send(Ok(format_stream_error(&error))).await;
@@ -1868,6 +2238,7 @@ where
             return;
         }
         let mut output_tokens = 0_u32;
+        let mut thinking_tokens = 0_u32;
         let mut model_finish = "stop";
         let mut finished = false;
         while let Some(event) = event_rx.recv().await {
@@ -1878,6 +2249,9 @@ where
             } else {
                 decoder.push_token(event.token)
             };
+            if event.finish_reason != Some("stop") && decoder.last_token_was_reasoning() {
+                thinking_tokens += 1;
+            }
             let events = match events {
                 Ok(events) => events,
                 Err(error) => {
@@ -1931,7 +2305,12 @@ where
             GeneratedFinishReason::from_generation(model_finish, !encoder.call_names.is_empty())
                 .expect("generation finish reason already validated"),
         );
-        let frames = match encoder.finish(&constraint_options, stop_reason, output_tokens) {
+        let frames = match encoder.finish(
+            &constraint_options,
+            stop_reason,
+            output_tokens,
+            thinking_tokens,
+        ) {
             Ok(frames) => frames,
             Err(error) => {
                 let _ = tx.send(Ok(format_stream_error(&error))).await;
@@ -1953,6 +2332,7 @@ async fn serve_via_gs_stream<M>(
     model_id: String,
     input_tokens: u32,
     output_format: StructuredOutputFormat,
+    native_output: Option<NativeOutputDecoderConfig>,
 ) -> Response
 where
     M: Model + DenseVlMethods + Send + 'static,
@@ -2013,18 +2393,20 @@ where
         {
             return;
         }
-        let mut decoder = match GeneratedOutputDecoder::new(tokenizer, None) {
-            Ok(decoder) => decoder,
-            Err(error) => {
-                let _ = tx.blocking_send(Ok(format_stream_error(&error)));
-                return;
-            }
-        };
+        let mut decoder =
+            match GeneratedOutputDecoder::new_with_native(tokenizer, None, native_output) {
+                Ok(decoder) => decoder,
+                Err(error) => {
+                    let _ = tx.blocking_send(Ok(format_stream_error(&error)));
+                    return;
+                }
+            };
         let mut encoder =
             ToolStreamEncoder::new(id_for_task, model_id_for_task, input_tokens, output_format);
 
         // 2..N. Protocol-neutral events become Anthropic content blocks.
         let mut output_tokens: u32 = 0;
+        let mut thinking_tokens: u32 = 0;
         let mut model_finish: &'static str = "stop";
         let mut finished = false;
         let mut first_event = Some(first_event);
@@ -2046,6 +2428,9 @@ where
                             }
                         }
                     };
+                    if ev.finish_reason != Some("stop") && decoder.last_token_was_reasoning() {
+                        thinking_tokens += 1;
+                    }
                     if let Some(reason) = ev.finish_reason {
                         model_finish = reason;
                         match decoder.finish(reason) {
@@ -2099,6 +2484,7 @@ where
             &ToolConstraintOptions::default(),
             stop_reason,
             output_tokens,
+            thinking_tokens,
         ) {
             Ok(frames) => frames,
             Err(error) => {
@@ -2154,6 +2540,7 @@ where
         model_id,
         input_tokens,
         StructuredOutputFormat::Text,
+        None,
     )
     .await
 }
@@ -2164,6 +2551,7 @@ async fn serve_via_scheduler_stream_with_output_format<M>(
     model_id: String,
     input_tokens: u32,
     output_format: StructuredOutputFormat,
+    native_output: Option<NativeOutputDecoderConfig>,
 ) -> Response
 where
     M: Model + DenseVlMethods + Send + 'static,
@@ -2207,13 +2595,14 @@ where
     let runtime_usage = state.runtime_usage.clone();
 
     tokio::spawn(async move {
-        let mut decoder = match GeneratedOutputDecoder::new(&tokenizer, None) {
-            Ok(decoder) => decoder,
-            Err(error) => {
-                let _ = tx.send(Ok(format_stream_error(&error))).await;
-                return;
-            }
-        };
+        let mut decoder =
+            match GeneratedOutputDecoder::new_with_native(&tokenizer, None, native_output) {
+                Ok(decoder) => decoder,
+                Err(error) => {
+                    let _ = tx.send(Ok(format_stream_error(&error))).await;
+                    return;
+                }
+            };
         let mut encoder = ToolStreamEncoder::new(
             msg_id_for_task,
             model_id_for_task,
@@ -2224,6 +2613,7 @@ where
             return;
         }
         let mut output_tokens: u32 = 0;
+        let mut thinking_tokens: u32 = 0;
         let mut model_finish: &'static str = "stop";
         let mut finished = false;
         while let Some(ev) = event_rx.recv().await {
@@ -2238,6 +2628,9 @@ where
                     }
                 }
             };
+            if ev.finish_reason != Some("stop") && decoder.last_token_was_reasoning() {
+                thinking_tokens += 1;
+            }
             if let Some(reason) = ev.finish_reason {
                 model_finish = reason;
                 match decoder.finish(reason) {
@@ -2280,6 +2673,7 @@ where
             &ToolConstraintOptions::default(),
             stop_reason,
             output_tokens,
+            thinking_tokens,
         ) {
             Ok(frames) => frames,
             Err(error) => {
@@ -2310,6 +2704,7 @@ async fn serve_via_gs_unary<M>(
     model_id: String,
     input_tokens: u32,
     output_format: StructuredOutputFormat,
+    native_output: Option<NativeOutputDecoderConfig>,
 ) -> Response
 where
     M: Model + DenseVlMethods + Send + 'static,
@@ -2320,13 +2715,15 @@ where
         let tokenizer = &*state.tokenizer;
         let memory = super::begin_direct_request_memory(&state, &*model_guard, &request)?;
         let mut stream = GenerationStream::new(&*model_guard, tokenizer, request)?;
-        let mut decoder = GeneratedOutputDecoder::new(tokenizer, None)?;
+        let mut decoder = GeneratedOutputDecoder::new_with_native(tokenizer, None, native_output)?;
         state.record_request_started(input_tokens);
         let mut output = ParsedToolOutput {
             content: String::new(),
+            reasoning: String::new(),
             tool_calls: Vec::new(),
             finish_reason: "end_turn",
             completion_tokens: 0,
+            thinking_tokens: 0,
         };
         let mut memory = Some(memory);
         let mut finished = false;
@@ -2343,6 +2740,9 @@ where
             } else {
                 decoder.push_token(ev.token)?
             };
+            if ev.finish_reason != Some("stop") && decoder.last_token_was_reasoning() {
+                output.thinking_tokens += 1;
+            }
             collect_tool_events(&mut output, events)?;
             output.completion_tokens += 1;
             if let Some(reason) = ev.finish_reason {
@@ -2386,6 +2786,7 @@ where
         model_id,
         input_tokens,
         StructuredOutputFormat::Text,
+        None,
     )
     .await
 }
@@ -2396,6 +2797,7 @@ async fn serve_via_scheduler_unary_with_output_format<M>(
     model_id: String,
     input_tokens: u32,
     output_format: StructuredOutputFormat,
+    native_output: Option<NativeOutputDecoderConfig>,
 ) -> Response
 where
     M: Model + DenseVlMethods + Send + 'static,
@@ -2432,15 +2834,18 @@ where
     state.record_request_started(input_tokens);
 
     // 2. Drain committed tokens through the protocol-neutral decoder.
-    let mut decoder = match GeneratedOutputDecoder::new(&state.tokenizer, None) {
-        Ok(decoder) => decoder,
-        Err(error) => return generation_err_to_response(error),
-    };
+    let mut decoder =
+        match GeneratedOutputDecoder::new_with_native(&state.tokenizer, None, native_output) {
+            Ok(decoder) => decoder,
+            Err(error) => return generation_err_to_response(error),
+        };
     let mut output = ParsedToolOutput {
         content: String::new(),
+        reasoning: String::new(),
         tool_calls: Vec::new(),
         finish_reason: "end_turn",
         completion_tokens: 0,
+        thinking_tokens: 0,
     };
     let mut finished = false;
     while let Some(ev) = event_rx.recv().await {
@@ -2450,6 +2855,9 @@ where
         } else {
             decoder.push_token(ev.token)
         };
+        if ev.finish_reason != Some("stop") && decoder.last_token_was_reasoning() {
+            output.thinking_tokens += 1;
+        }
         if let Err(error) = events.and_then(|events| collect_tool_events(&mut output, events)) {
             return generation_err_to_response(error);
         }
@@ -2484,9 +2892,11 @@ mod tests {
     fn anthropic_adapter_rejects_unmapped_typed_output() {
         let mut output = ParsedToolOutput {
             content: String::new(),
+            reasoning: String::new(),
             tool_calls: Vec::new(),
             finish_reason: "end_turn",
             completion_tokens: 0,
+            thinking_tokens: 0,
         };
         let error = collect_tool_events(
             &mut output,
@@ -2559,6 +2969,7 @@ mod tests {
             usage: Usage {
                 input_tokens: 3,
                 output_tokens: 1,
+                output_tokens_details: None,
             },
         };
         let s = serde_json::to_string(&env).unwrap();
@@ -2718,6 +3129,149 @@ mod tests {
         }
 
         #[test]
+        fn maps_adaptive_and_manual_thinking_to_native_template_kwargs() {
+            let adaptive: MessagesRequest = serde_json::from_value(serde_json::json!({
+                "messages": [{"role": "user", "content": "Solve it."}],
+                "max_tokens": 4096,
+                "thinking": {"type": "adaptive", "display": "summarized"},
+                "output_config": {"effort": "medium"}
+            }))
+            .unwrap();
+            let adaptive = adaptive.into_chat_request().unwrap();
+            assert_eq!(
+                adaptive.chat_template_kwargs,
+                Some(serde_json::json!({"enable_thinking": true}))
+            );
+
+            let manual: MessagesRequest = serde_json::from_value(serde_json::json!({
+                "messages": [{"role": "user", "content": "Solve it."}],
+                "max_tokens": 2048,
+                "thinking": {"type": "enabled", "budget_tokens": 1024}
+            }))
+            .unwrap();
+            assert_eq!(
+                manual.into_chat_request().unwrap().chat_template_kwargs,
+                Some(serde_json::json!({"enable_thinking": true}))
+            );
+
+            let disabled: MessagesRequest = serde_json::from_value(serde_json::json!({
+                "messages": [{"role": "user", "content": "Answer directly."}],
+                "thinking": {"type": "disabled"}
+            }))
+            .unwrap();
+            assert_eq!(
+                disabled.into_chat_request().unwrap().chat_template_kwargs,
+                Some(serde_json::json!({"enable_thinking": false}))
+            );
+        }
+
+        #[test]
+        fn validates_thinking_budget_effort_and_display_contracts() {
+            for invalid in [
+                serde_json::json!({
+                    "messages": [],
+                    "max_tokens": 2048,
+                    "thinking": {"type": "enabled", "budget_tokens": 1023}
+                }),
+                serde_json::json!({
+                    "messages": [],
+                    "max_tokens": 1024,
+                    "thinking": {"type": "enabled", "budget_tokens": 1024}
+                }),
+                serde_json::json!({
+                    "messages": [],
+                    "thinking": {"type": "adaptive", "display": "omitted"}
+                }),
+                serde_json::json!({
+                    "messages": [],
+                    "output_config": {"effort": "high"}
+                }),
+                serde_json::json!({
+                    "messages": [],
+                    "thinking": {"type": "disabled"},
+                    "output_config": {"effort": "low"}
+                }),
+                serde_json::json!({
+                    "messages": [],
+                    "thinking": {"type": "adaptive"},
+                    "output_config": {
+                        "format": {
+                            "type": "json_schema",
+                            "schema": {"type": "object"}
+                        }
+                    }
+                }),
+            ] {
+                let request: MessagesRequest = serde_json::from_value(invalid).unwrap();
+                assert!(request.into_chat_request().is_err());
+            }
+
+            assert!(
+                serde_json::from_value::<MessagesRequest>(serde_json::json!({
+                    "messages": [],
+                    "thinking": {"type": "adaptive"},
+                    "output_config": {"effort": "ultra"}
+                }))
+                .is_err()
+            );
+        }
+
+        #[test]
+        fn round_trips_signed_leading_thinking_history() {
+            let reasoning = "inspect the inputs first";
+            let signature = thinking_signature(reasoning);
+            let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+                "messages": [{
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": reasoning, "signature": signature},
+                        {"type": "text", "text": "answer"}
+                    ]
+                }]
+            }))
+            .unwrap();
+            let chat = request.into_chat_request().unwrap();
+            assert_eq!(
+                chat.messages[0].reasoning_content.as_deref(),
+                Some(reasoning)
+            );
+
+            let tampered: MessagesRequest = serde_json::from_value(serde_json::json!({
+                "messages": [{
+                    "role": "assistant",
+                    "content": [{
+                        "type": "thinking",
+                        "thinking": "modified",
+                        "signature": thinking_signature(reasoning)
+                    }]
+                }]
+            }))
+            .unwrap();
+            assert!(tampered.into_chat_request().is_err());
+
+            let interleaved: MessagesRequest = serde_json::from_value(serde_json::json!({
+                "messages": [{
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "visible"},
+                        {"type": "thinking", "thinking": reasoning, "signature": thinking_signature(reasoning)}
+                    ]
+                }]
+            }))
+            .unwrap();
+            assert!(interleaved.into_chat_request().is_err());
+
+            let redacted: MessagesRequest = serde_json::from_value(serde_json::json!({
+                "messages": [{
+                    "role": "assistant",
+                    "content": [{"type": "redacted_thinking", "data": "opaque"}]
+                }]
+            }))
+            .unwrap();
+            assert!(redacted.into_chat_request().is_err());
+        }
+
+        #[test]
         fn parses_native_base64_image_block() {
             let body = r#"
             {
@@ -2808,7 +3362,7 @@ mod tests {
         }
 
         #[test]
-        fn structured_outputs_reject_prefill_thinking_deprecated_and_unknown_shapes() {
+        fn structured_outputs_reject_prefill_deprecated_and_unknown_shapes() {
             let schema = serde_json::json!({
                 "type": "object",
                 "properties": {"answer": {"type": "string"}},
@@ -2825,10 +3379,6 @@ mod tests {
             assert!(prefill.into_chat_request().is_err());
 
             for invalid in [
-                serde_json::json!({
-                    "messages": [],
-                    "thinking": {"type": "enabled", "budget_tokens": 1024}
-                }),
                 serde_json::json!({
                     "messages": [],
                     "output_format": {"type": "json_schema", "schema": schema}
@@ -3002,14 +3552,18 @@ mod tests {
             let response = collected_response(
                 "local-model".to_owned(),
                 12,
-                Some("I will check.".to_owned()),
-                vec![ToolCall {
-                    id: "toolu_1".to_owned(),
-                    name: "get_weather".to_owned(),
-                    arguments: serde_json::json!({"city": "Tokyo"}),
-                }],
-                "end_turn",
-                7,
+                CollectedOutput {
+                    content: Some("I will check.".to_owned()),
+                    reasoning: String::new(),
+                    tool_calls: vec![ToolCall {
+                        id: "toolu_1".to_owned(),
+                        name: "get_weather".to_owned(),
+                        arguments: serde_json::json!({"city": "Tokyo"}),
+                    }],
+                    finish_reason: "end_turn",
+                    completion_tokens: 7,
+                    thinking_tokens: 0,
+                },
                 StructuredOutputFormat::Text,
             );
             let body = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -3021,6 +3575,100 @@ mod tests {
             assert_eq!(value["content"][1]["type"], "tool_use");
             assert_eq!(value["content"][1]["id"], "toolu_1");
             assert_eq!(value["content"][1]["input"]["city"], "Tokyo");
+        }
+
+        #[tokio::test]
+        async fn unary_response_emits_signed_thinking_before_text_and_usage_details() {
+            let reasoning = "check the evidence".to_owned();
+            let response = collected_response(
+                "local-model".to_owned(),
+                12,
+                CollectedOutput {
+                    content: Some("final answer".to_owned()),
+                    reasoning: reasoning.clone(),
+                    tool_calls: Vec::new(),
+                    finish_reason: "end_turn",
+                    completion_tokens: 7,
+                    thinking_tokens: 4,
+                },
+                StructuredOutputFormat::Text,
+            );
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(value["content"][0]["type"], "thinking");
+            assert_eq!(value["content"][0]["thinking"], reasoning);
+            assert_eq!(
+                value["content"][0]["signature"],
+                thinking_signature("check the evidence")
+            );
+            assert_eq!(value["content"][1]["type"], "text");
+            assert_eq!(
+                value["usage"]["output_tokens_details"]["thinking_tokens"],
+                4
+            );
+        }
+
+        #[test]
+        fn stream_encoder_emits_thinking_signature_then_text() {
+            let mut encoder = ToolStreamEncoder::new(
+                "msg_thinking".to_owned(),
+                "local-model".to_owned(),
+                4,
+                StructuredOutputFormat::Text,
+            );
+            let mut frames = vec![encoder.message_start()];
+            frames.extend(
+                encoder
+                    .push_events(vec![
+                        GeneratedOutputEvent::ReasoningDelta("check ".to_owned()),
+                        GeneratedOutputEvent::ReasoningDelta("evidence".to_owned()),
+                        GeneratedOutputEvent::TextDelta("answer".to_owned()),
+                    ])
+                    .unwrap(),
+            );
+            frames.extend(
+                encoder
+                    .finish(&ToolConstraintOptions::default(), "end_turn", 3, 2)
+                    .unwrap(),
+            );
+            let payloads = frames.iter().map(event_payload).collect::<Vec<_>>();
+            let kinds = payloads
+                .iter()
+                .filter_map(|payload| payload["delta"]["type"].as_str().map(ToOwned::to_owned))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                kinds,
+                vec![
+                    "thinking_delta",
+                    "thinking_delta",
+                    "signature_delta",
+                    "text_delta"
+                ]
+            );
+            let starts = payloads
+                .iter()
+                .filter(|payload| payload["type"] == "content_block_start")
+                .collect::<Vec<_>>();
+            assert_eq!(starts[0]["content_block"]["type"], "thinking");
+            assert_eq!(starts[1]["content_block"]["type"], "text");
+            let signature = payloads
+                .iter()
+                .find(|payload| payload["delta"]["type"] == "signature_delta")
+                .unwrap();
+            assert_eq!(
+                signature["delta"]["signature"],
+                thinking_signature("check evidence")
+            );
+            let message_delta = payloads
+                .iter()
+                .find(|payload| payload["type"] == "message_delta")
+                .unwrap();
+            assert_eq!(
+                message_delta["usage"]["output_tokens_details"]["thinking_tokens"],
+                2
+            );
         }
 
         #[test]
@@ -3051,7 +3699,7 @@ mod tests {
             );
             frames.extend(
                 encoder
-                    .finish(&ToolConstraintOptions::default(), "end_turn", 9)
+                    .finish(&ToolConstraintOptions::default(), "end_turn", 9, 0)
                     .unwrap(),
             );
             let payloads = frames.iter().map(event_payload).collect::<Vec<_>>();
@@ -3095,7 +3743,7 @@ mod tests {
                 1,
                 StructuredOutputFormat::Text,
             );
-            assert!(encoder.finish(&required, "end_turn", 1).is_err());
+            assert!(encoder.finish(&required, "end_turn", 1, 0).is_err());
 
             let serial = ToolConstraintOptions {
                 choice: crate::core::constrained::ToolChoiceConstraint::Auto,
@@ -3121,7 +3769,7 @@ mod tests {
                     }),
                 ])
                 .unwrap();
-            assert!(encoder.finish(&serial, "end_turn", 1).is_err());
+            assert!(encoder.finish(&serial, "end_turn", 1, 0).is_err());
         }
     }
 }

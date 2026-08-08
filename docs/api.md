@@ -326,8 +326,46 @@ token 级约束。`output_config.format` 可与客户端 tools 同时使用：`a
 
 若达到 token 上限，响应以 `stop_reason: "max_tokens"` 结束，此时 JSON 可能不完整。
 Structured Outputs 不允许以最后一条 assistant message 进行 prefill。仅支持正式的
-`output_config.format`；已废弃的顶层 `output_format` 不在兼容范围内。Anthropic
-`thinking`/extended thinking 也不属于本任务范围，请求该字段会明确返回 400。
+`output_config.format`；已废弃的顶层 `output_format` 不在兼容范围内。
+由于当前 standalone JSON grammar 直接约束原始生成 token，
+`output_config.format` 不能与已启用的 `thinking` 同时使用；该组合会在生成前返回
+400。客户端 tools 使用可容纳原生 reasoning 前缀的组合 grammar，因此 tools 与
+thinking 可以同时使用。
+
+### Anthropic extended/adaptive thinking
+
+具备精确原生 reasoning 模板契约的模型支持 Anthropic `thinking`：
+
+```json
+{
+  "model": "your-model-id",
+  "messages": [{"role": "user", "content": "请仔细分析后回答。"}],
+  "thinking": {"type": "adaptive", "display": "summarized"},
+  "output_config": {"effort": "high"},
+  "max_tokens": 4096
+}
+```
+
+支持 `disabled`、`enabled` 和 `adaptive`。手动模式要求 `budget_tokens >= 1024` 且
+小于 `max_tokens`；adaptive 模式可通过 `output_config.effort` 接收 `low`、
+`medium`、`high`、`xhigh` 或 `max`。本地 checkpoint 只提供
+`enable_thinking` 布尔模板开关，没有 Claude 服务端的分级预算控制器，因此
+`budget_tokens` 与 `effort` 会被严格校验并决定是否启用原生 thinking，但不会被
+描述为已经校准的 token 预算或质量档位。总生成硬上限仍为 `max_tokens`，具体
+thinking 长度由 checkpoint 决定。
+
+同步响应将原生 reasoning 放入位于 `text`/`tool_use` 之前的 `thinking` content
+block；流式响应依次发出 `thinking_delta`、`signature_delta` 和
+`content_block_stop`。`usage.output_tokens_details.thinking_tokens` 提供本地原生
+reasoning token 计数。历史回灌接受一个位于 assistant 可见内容之前的
+`thinking` block，并校验 IronMLX 生成的本地完整性 signature；修改后的 block
+返回 400。
+
+当前不支持 `display: "omitted"`、`redacted_thinking`、多个或交错 thinking block，
+以及 thinking 与 `output_config.format` 的组合，因为本地模型没有 Claude 的加密
+隐藏思考通道，也没有可保持 block 顺序的 interleaved-thinking 模板契约，而当前
+standalone JSON grammar 不能容纳原生 reasoning 前缀。这些形状会明确返回 400。
+来自 Claude 服务的签名不能作为 IronMLX 本地历史直接回灌。
 
 ### Anthropic client tools
 

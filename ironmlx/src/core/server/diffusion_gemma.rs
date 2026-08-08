@@ -220,6 +220,7 @@ struct AnthropicStreamRequest {
     input_tokens: u32,
     tool_context: Option<ToolResponseContext>,
     output_format: StructuredOutputFormat,
+    native_output: Option<NativeOutputDecoderConfig>,
 }
 
 struct ResponsesStreamRequest {
@@ -997,6 +998,7 @@ async fn prepare_anthropic_request(
         PreparedOpenAiRequest,
         u32,
         super::structured_output::StructuredOutputFormat,
+        Option<NativeOutputDecoderConfig>,
     ),
     Response,
 > {
@@ -1012,10 +1014,20 @@ async fn prepare_anthropic_request(
             format!("invalid Messages request: {error:#}"),
         )
     })?;
+    let native_output = super::anthropic::messages_native_output_config(&state.tokenizer, &chat)
+        .map_err(|error| {
+            super::anthropic::anthropic_error_response(
+                StatusCode::BAD_REQUEST,
+                format!("invalid Messages request: {error:#}"),
+            )
+        })?;
     let output_schema = output_format.constraint_schema();
-    let (prepared, input_tokens) =
+    let (mut prepared, input_tokens) =
         prepare_openai_request(state, chat, output_schema, RequestProtocol::Anthropic).await?;
-    Ok((prepared, input_tokens, output_format))
+    prepared.generation.skip_special_tokens &= native_output
+        .map(|config| config.dialect.skip_special_tokens())
+        .unwrap_or(true);
+    Ok((prepared, input_tokens, output_format, native_output))
 }
 
 async fn generate_completion(
@@ -1628,6 +1640,7 @@ async fn anthropic_stream_completion(
         input_tokens,
         tool_context,
         output_format,
+        native_output,
     } = stream_request;
     let lane_guard = match state.lane.clone().enter().await {
         Ok(guard) => guard,
@@ -1648,10 +1661,11 @@ async fn anthropic_stream_completion(
         }
         let model_guard = state.model.blocking_lock();
         let tokenizer = &*state.tokenizer;
-        let mut decoder = match GeneratedOutputDecoder::from_decoded(
+        let mut decoder = match GeneratedOutputDecoder::from_decoded_with_native(
             tool_context
                 .as_ref()
                 .map(ToolResponseContext::decoder_config),
+            native_output,
         ) {
             Ok(decoder) => decoder,
             Err(error) => {
@@ -1661,12 +1675,16 @@ async fn anthropic_stream_completion(
         };
         let mut connected = true;
         let mut output_tokens = 0_u32;
+        let mut thinking_tokens = 0_u32;
         let mut model_finish = "stop";
         let generation_result = {
             let mut emit = |event: DiffusionGemmaGenerateEvent| -> Result<bool> {
                 if !diffusion_event_is_length_sentinel(&event) {
                     output_tokens = output_tokens.saturating_add(1);
                     let events = decoder.push_text_delta(&event.text)?;
+                    if decoder.last_token_was_reasoning() {
+                        thinking_tokens = thinking_tokens.saturating_add(1);
+                    }
                     let frames = encoder.push_events(events)?;
                     for frame in frames {
                         if tx.blocking_send(Ok(frame)).is_err() {
@@ -1724,14 +1742,18 @@ async fn anthropic_stream_completion(
             .map(|context| &context.constraint_options)
             .cloned()
             .unwrap_or_default();
-        let frames =
-            match encoder.finish(&options, anthropic_stop_reason(model_finish), output_tokens) {
-                Ok(frames) => frames,
-                Err(error) => {
-                    let _ = tx.blocking_send(Ok(anthropic_error_event(&format!("{error:#}"))));
-                    return;
-                }
-            };
+        let frames = match encoder.finish(
+            &options,
+            anthropic_stop_reason(model_finish),
+            output_tokens,
+            thinking_tokens,
+        ) {
+            Ok(frames) => frames,
+            Err(error) => {
+                let _ = tx.blocking_send(Ok(anthropic_error_event(&format!("{error:#}"))));
+                return;
+            }
+        };
         for frame in frames {
             if tx.blocking_send(Ok(frame)).is_err() {
                 return;
@@ -2015,11 +2037,11 @@ pub async fn anthropic_messages(
     let max_tokens = req.max_tokens;
     let temperature = req.temperature.unwrap_or(0.0);
     let model_label = req.model.clone().unwrap_or_else(|| state.model_id.clone());
-    let (prepared, input_tokens, output_format) = match prepare_anthropic_request(&state, req).await
-    {
-        Ok(t) => t,
-        Err(resp) => return resp,
-    };
+    let (prepared, input_tokens, output_format, native_output) =
+        match prepare_anthropic_request(&state, req).await {
+            Ok(t) => t,
+            Err(resp) => return resp,
+        };
     let PreparedOpenAiRequest {
         generation,
         tool_context,
@@ -2035,6 +2057,7 @@ pub async fn anthropic_messages(
                 input_tokens,
                 tool_context,
                 output_format,
+                native_output,
             },
         )
         .await;
@@ -2049,7 +2072,7 @@ pub async fn anthropic_messages(
             seed: None,
             default_finish: "stop",
             tool_context,
-            native_output: None,
+            native_output,
         },
     )
     .await
@@ -2060,10 +2083,14 @@ pub async fn anthropic_messages(
     super::anthropic::collected_response(
         model_label,
         input_tokens,
-        completion.content,
-        completion.tool_calls,
-        anthropic_stop_reason(completion.finish_reason),
-        completion.completion_tokens,
+        super::anthropic::CollectedOutput {
+            content: completion.content,
+            reasoning: completion.reasoning,
+            tool_calls: completion.tool_calls,
+            finish_reason: anthropic_stop_reason(completion.finish_reason),
+            completion_tokens: completion.completion_tokens,
+            thinking_tokens: completion.reasoning_tokens,
+        },
         output_format,
     )
 }
