@@ -1212,16 +1212,6 @@ fn completed_prompt_lookup_history(state: &RequestState) -> Option<Vec<u32>> {
     Some(history)
 }
 
-fn ensure_constraint_complete_at_length(state: &mut RequestState) -> Result<()> {
-    if let Some(constraint) = state.constraint.as_mut() {
-        anyhow::ensure!(
-            constraint.is_accepting()?,
-            "max_new_tokens reached before constrained output became complete"
-        );
-    }
-    Ok(())
-}
-
 #[derive(Debug, Clone)]
 pub struct ActiveKvParkedRequest {
     pub id: RequestId,
@@ -7222,12 +7212,6 @@ impl<M: Model> Scheduler<M> {
             state.finished = true;
             state.finish_reason = Some("stop");
         } else if state.generated_tokens.len() >= state.max_new_tokens {
-            if let Some(constraint) = state.constraint.as_mut() {
-                anyhow::ensure!(
-                    constraint.is_accepting()?,
-                    "max_new_tokens reached before constrained output became complete"
-                );
-            }
             state.finished = true;
             state.finish_reason = Some("length");
         }
@@ -12018,7 +12002,6 @@ impl<M: Model> Scheduler<M> {
                 state.finished = true;
                 state.finish_reason = Some("stop");
             } else if state.generated_tokens.len() >= state.max_new_tokens {
-                ensure_constraint_complete_at_length(state)?;
                 state.finished = true;
                 state.finish_reason = Some("length");
             }
@@ -15144,7 +15127,6 @@ impl<M: Model> Scheduler<M> {
                 state.finished = true;
                 state.finish_reason = Some("stop");
             } else if state.generated_tokens.len() >= state.max_new_tokens {
-                ensure_constraint_complete_at_length(state)?;
                 state.finished = true;
                 state.finish_reason = Some("length");
             }
@@ -15483,7 +15465,6 @@ impl<M: Model> Scheduler<M> {
                 state.finished = true;
                 state.finish_reason = Some("stop");
             } else if state.generated_tokens.len() >= state.max_new_tokens {
-                ensure_constraint_complete_at_length(state)?;
                 state.finished = true;
                 state.finish_reason = Some("length");
             }
@@ -16252,7 +16233,6 @@ impl<M: Model> Scheduler<M> {
             state.finished = true;
             state.finish_reason = Some("stop");
         } else if state.generated_tokens.len() >= state.max_new_tokens {
-            ensure_constraint_complete_at_length(state)?;
             state.finished = true;
             state.finish_reason = Some("length");
         }
@@ -16758,7 +16738,6 @@ impl<M: Model> Scheduler<M> {
                 state.finished = true;
                 state.finish_reason = Some("stop");
             } else if state.generated_tokens.len() >= max_new_tokens {
-                ensure_constraint_complete_at_length(state)?;
                 state.finished = true;
                 state.finish_reason = Some("length");
             }
@@ -17382,7 +17361,6 @@ impl Scheduler<crate::models::Gemma4Model> {
                 state.finished = true;
                 state.finish_reason = Some("stop");
             } else if state.generated_tokens.len() >= max_new_tokens {
-                ensure_constraint_complete_at_length(state)?;
                 state.finished = true;
                 state.finish_reason = Some("length");
             }
@@ -17988,7 +17966,6 @@ impl Scheduler<crate::models::Gemma4Model> {
                 state.finished = true;
                 state.finish_reason = Some("stop");
             } else if state.generated_tokens.len() >= state.max_new_tokens {
-                ensure_constraint_complete_at_length(state)?;
                 state.finished = true;
                 state.finish_reason = Some("length");
             }
@@ -25219,6 +25196,51 @@ mod tests {
         assert_eq!(state.real_len, 4);
         assert!(state.finished);
         assert_eq!(state.finish_reason, Some("length"));
+    }
+
+    #[test]
+    fn constrained_pending_token_allows_incomplete_prefix_at_length() {
+        let tokenizer = crate::core::constrained::ConstraintTokenizer::byte_level()
+            .expect("byte-level constraint tokenizer");
+        let plan = tokenizer
+            .compile_json_output(&serde_json::json!({
+                "type": "object",
+                "properties": {"answer": {"type": "string"}},
+                "required": ["answer"],
+                "additionalProperties": false
+            }))
+            .expect("JSON constraint");
+        let mut scheduler =
+            TestScheduler::new(1, 32768, crate::core::memory_budget::test_meta_qwen35())
+                .expect("scheduler startup");
+        let mut request = mk_req(vec![1, 2, 3]);
+        request.stop_token_ids = vec![256];
+        request.max_new_tokens = 1;
+        request.constraint = Some(plan);
+        let id = scheduler.admit(request).expect("admit constrained row");
+        let mut pending_tokens = VecDeque::from([u32::from(b'{')]);
+
+        let event = scheduler
+            .emit_pending_token_for_row(0, &mut pending_tokens)
+            .expect("length truncation must not require an accepting grammar state");
+
+        assert_eq!(
+            event,
+            StepEvent {
+                id,
+                token: u32::from(b'{'),
+                finish_reason: Some("length")
+            }
+        );
+        let state = scheduler.get_mut(id).expect("row state");
+        assert!(state.finished);
+        assert_eq!(state.finish_reason, Some("length"));
+        assert!(!state
+            .constraint
+            .as_mut()
+            .expect("constraint session")
+            .is_accepting()
+            .expect("grammar state"));
     }
 
     #[test]

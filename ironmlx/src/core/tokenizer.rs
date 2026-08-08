@@ -4,14 +4,16 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use anyhow::anyhow;
+use anyhow::{anyhow, Context};
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::core::chat_template::{ChatTemplate, ChatTemplateSpecialTokens};
 use crate::core::constrained::{ConstraintPlan, ConstraintTokenizer, ToolConstraintOptions};
+use crate::core::generated_output::ModelCapabilityProfile;
 use crate::core::loader::{EosTokenId, Loader, TokenizerConfig};
+use crate::core::native_output::{NativeOutputDecoderConfig, NativeOutputDialect};
 use crate::core::tool_calling::{ToolDefinition, ToolDialect};
 use crate::core::tool_prompt_cache::{
     CacheInsertKey, CacheLookupKey, CacheMatch, SafeBoundary, ToolPromptCache,
@@ -25,6 +27,7 @@ pub struct Tokenizer {
     inner: tokenizers::Tokenizer,
     chat: Option<ChatTemplate>,
     tool_dialect: Option<ToolDialect>,
+    native_output_dialect: Option<NativeOutputDialect>,
     constraint: Option<ConstraintTokenizer>,
     eos_token_ids: Vec<u32>,
     tool_prompt_cache_identity: [u8; 32],
@@ -105,6 +108,7 @@ impl Tokenizer {
         let config = TokenizerConfig::from_model_dir(model_dir)?;
         let config_raw: serde_json::Value =
             serde_json::from_slice(&std::fs::read(model_dir.join("config.json"))?)?;
+        let config = merge_model_eos_token_ids(config, &config_raw)?;
         let model_type = config_raw
             .get("model_type")
             .and_then(serde_json::Value::as_str);
@@ -120,7 +124,11 @@ impl Tokenizer {
             .config_raw_value()
             .get("model_type")
             .and_then(serde_json::Value::as_str);
-        Self::from_files_with_model_type(&path, loader.tokenizer_config(), model_type)
+        let config = merge_model_eos_token_ids(
+            loader.tokenizer_config().clone(),
+            loader.config_raw_value(),
+        )?;
+        Self::from_files_with_model_type(&path, &config, model_type)
     }
 
     /// Build directly from a `tokenizer.json` path and a parsed
@@ -142,6 +150,11 @@ impl Tokenizer {
             cfg.chat_template
                 .as_deref()
                 .and_then(|template| ToolDialect::detect(model_type, template))
+        });
+        let native_output_dialect = model_type.and_then(|model_type| {
+            cfg.chat_template
+                .as_deref()
+                .and_then(|template| NativeOutputDialect::detect(model_type, template))
         });
         let chat = match cfg.chat_template.as_deref() {
             Some(src) => Some(ChatTemplate::new_with_special_tokens(
@@ -182,6 +195,7 @@ impl Tokenizer {
             inner,
             chat,
             tool_dialect,
+            native_output_dialect,
             constraint,
             eos_token_ids,
             tool_prompt_cache_identity,
@@ -344,6 +358,39 @@ impl Tokenizer {
         self.tool_dialect
     }
 
+    /// Native reasoning/thought syntax recognized from the active template.
+    pub fn native_output_dialect(&self) -> Option<NativeOutputDialect> {
+        self.native_output_dialect
+    }
+
+    /// Build the request-local native output decoder configuration using the
+    /// same template kwargs that rendered the prompt.
+    pub fn native_output_decoder_config(
+        &self,
+        chat_template_kwargs: Option<&serde_json::Value>,
+    ) -> Result<Option<NativeOutputDecoderConfig>> {
+        self.native_output_dialect
+            .map(|dialect| {
+                Ok(NativeOutputDecoderConfig {
+                    dialect,
+                    reasoning_enabled: dialect.reasoning_enabled(chat_template_kwargs)?,
+                })
+            })
+            .transpose()
+    }
+
+    /// Capabilities derived from the components and exact template contract
+    /// loaded for this tokenizer. Optional output channels remain disabled
+    /// until a model-specific producer is registered and validated.
+    pub fn capability_profile(&self, supports_image_input: bool) -> ModelCapabilityProfile {
+        ModelCapabilityProfile::from_loaded_contract(
+            supports_image_input,
+            self.tool_dialect,
+            self.constraint.is_some(),
+            self.native_output_dialect.is_some(),
+        )
+    }
+
     /// Compile one immutable request plan for the active native tool dialect.
     pub fn compile_tool_constraint(
         &self,
@@ -408,6 +455,34 @@ impl Tokenizer {
         }
     }
 
+    /// Compile client tools plus a structured final answer while leaving the
+    /// model-native reasoning section unconstrained.
+    pub fn compile_tool_or_json_constraint_with_reasoning(
+        &self,
+        tools: &[ToolDefinition],
+        options: &ToolConstraintOptions,
+        output_schema: &serde_json::Value,
+        reasoning: NativeOutputDecoderConfig,
+    ) -> Result<ConstraintPlan> {
+        anyhow::ensure!(
+            reasoning.reasoning_enabled,
+            "reasoning-aware output constraint requires enabled native reasoning"
+        );
+        let tool_dialect = self.tool_dialect.ok_or_else(|| {
+            anyhow!("tokenizer does not provide a supported constrained tool dialect")
+        })?;
+        self.constraint
+            .as_ref()
+            .ok_or_else(|| anyhow!("tokenizer does not support constrained decoding"))?
+            .compile_tools_with_output_and_reasoning(
+                tool_dialect,
+                reasoning.dialect,
+                tools,
+                options,
+                output_schema,
+            )
+    }
+
     /// Compile a standalone structured JSON output grammar.
     pub fn compile_json_output_constraint(
         &self,
@@ -417,6 +492,23 @@ impl Tokenizer {
             .as_ref()
             .ok_or_else(|| anyhow!("tokenizer does not support constrained decoding"))?
             .compile_json_output(schema)
+    }
+
+    /// Compile a structured final answer after an unconstrained native
+    /// reasoning section.
+    pub fn compile_json_output_constraint_with_reasoning(
+        &self,
+        schema: &serde_json::Value,
+        reasoning: NativeOutputDecoderConfig,
+    ) -> Result<ConstraintPlan> {
+        anyhow::ensure!(
+            reasoning.reasoning_enabled,
+            "reasoning-aware output constraint requires enabled native reasoning"
+        );
+        self.constraint
+            .as_ref()
+            .ok_or_else(|| anyhow!("tokenizer does not support constrained decoding"))?
+            .compile_json_output_with_reasoning(schema, reasoning.dialect)
     }
 }
 
@@ -439,6 +531,21 @@ fn tool_prompt_cache_identity(
         digest.update(part);
     }
     digest.finalize().into()
+}
+
+fn merge_model_eos_token_ids(
+    mut config: TokenizerConfig,
+    model_config: &serde_json::Value,
+) -> Result<TokenizerConfig> {
+    if config.eos_token_id.is_none() {
+        config.eos_token_id = model_config
+            .get("eos_token_id")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .context("parsing config.json eos_token_id")?;
+    }
+    Ok(config)
 }
 
 fn resolve_eos_token_ids(tok: &tokenizers::Tokenizer, cfg: &TokenizerConfig) -> Vec<u32> {
@@ -490,5 +597,49 @@ mod tests {
             EosTokenId::Single(i) => assert_eq!(*i, 7),
             EosTokenId::Multi(_) => panic!("expected Single"),
         }
+    }
+
+    #[test]
+    fn model_config_multi_eos_shape_deserializes() {
+        let ids: EosTokenId = serde_json::from_value(serde_json::json!([154820, 154827, 154829]))
+            .expect("multi EOS ids");
+        match ids {
+            EosTokenId::Multi(ids) => assert_eq!(ids, vec![154820, 154827, 154829]),
+            EosTokenId::Single(_) => panic!("expected multi EOS ids"),
+        }
+    }
+
+    #[test]
+    fn model_config_supplies_eos_ids_only_when_tokenizer_config_omits_them() {
+        let config = TokenizerConfig {
+            chat_template: None,
+            eos_token: None,
+            bos_token: None,
+            pad_token: None,
+            eos_token_id: None,
+        };
+        let merged = merge_model_eos_token_ids(
+            config,
+            &serde_json::json!({"eos_token_id": [154820, 154827, 154829]}),
+        )
+        .expect("model EOS ids");
+        assert!(matches!(
+            merged.eos_token_id,
+            Some(EosTokenId::Multi(ref ids)) if ids == &[154820, 154827, 154829]
+        ));
+
+        let explicit = TokenizerConfig {
+            chat_template: None,
+            eos_token: None,
+            bos_token: None,
+            pad_token: None,
+            eos_token_id: Some(EosTokenId::Single(7)),
+        };
+        let merged = merge_model_eos_token_ids(
+            explicit,
+            &serde_json::json!({"eos_token_id": [154820, 154827, 154829]}),
+        )
+        .expect("explicit tokenizer EOS id");
+        assert!(matches!(merged.eos_token_id, Some(EosTokenId::Single(7))));
     }
 }

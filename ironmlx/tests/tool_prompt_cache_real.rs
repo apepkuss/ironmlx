@@ -10,6 +10,7 @@ fn user(content: &str) -> AgentMessage {
     AgentMessage {
         role: "user".to_owned(),
         content: Some(content.to_owned()),
+        reasoning_content: None,
         tool_calls: Vec::new(),
         tool_call_id: None,
     }
@@ -19,6 +20,7 @@ fn assistant(content: &str) -> AgentMessage {
     AgentMessage {
         role: "assistant".to_owned(),
         content: Some(content.to_owned()),
+        reasoning_content: None,
         tool_calls: Vec::new(),
         tool_call_id: None,
     }

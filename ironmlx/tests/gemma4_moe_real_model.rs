@@ -249,6 +249,7 @@ fn make_image_request(
             DecodedPart::Text(prompt.to_owned()),
             DecodedPart::Image(image),
         ],
+        reasoning_content: None,
     }];
     let (flat_messages, pixel_values, image_grid_thw) =
         expand_decoded_messages(messages, &vision_input).expect("expand Gemma4 MoE image prompt");

@@ -85,6 +85,8 @@ pub struct ChatMessage {
     pub role: String,
     #[serde(default = "empty_content", deserialize_with = "deserialize_content")]
     pub content: Content,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ChatToolCall>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -125,6 +127,7 @@ impl ChatMessage {
         ChatMessage {
             role: role.into(),
             content: Content::Text(content.into()),
+            reasoning_content: None,
             tool_calls: Vec::new(),
             tool_call_id: None,
         }

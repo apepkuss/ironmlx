@@ -1185,8 +1185,20 @@ async fn app_responses_handler(
 
 async fn app_anthropic_handler(
     State(manager): State<ModelManager>,
-    Json(req): Json<anthropic::MessagesRequest>,
+    payload: std::result::Result<
+        Json<anthropic::MessagesRequest>,
+        axum::extract::rejection::JsonRejection,
+    >,
 ) -> Response {
+    let req = match payload {
+        Ok(Json(req)) => req,
+        Err(error) => {
+            return anthropic::anthropic_error_response(
+                StatusCode::BAD_REQUEST,
+                format!("invalid Messages request: {}", error.body_text()),
+            );
+        }
+    };
     manager.anthropic(req).await
 }
 

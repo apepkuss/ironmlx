@@ -23,6 +23,7 @@ pub enum DecodedPart {
 pub struct DecodedMessage {
     pub role: String,
     pub parts: Vec<DecodedPart>,
+    pub reasoning_content: Option<String>,
 }
 
 /// Qwen3.5-VL placeholder: `<|vision_start|>` + N × `<|image_pad|>` + `<|vision_end|>`.
@@ -200,6 +201,7 @@ pub fn expand_decoded_messages(
             ChatMessage {
                 role: msg.role,
                 content: Content::Text(out),
+                reasoning_content: msg.reasoning_content,
                 tool_calls: Vec::new(),
                 tool_call_id: None,
             }
@@ -243,6 +245,7 @@ mod tests {
         let msgs = vec![DecodedMessage {
             role: "user".to_string(),
             parts: vec![DecodedPart::Text("hello".to_string())],
+            reasoning_content: None,
         }];
         let (flat, pv, grid) = expand_decoded_messages(
             msgs,
@@ -412,6 +415,7 @@ mod tests {
                 DecodedPart::Image(img_bytes),
                 DecodedPart::Text(" c".to_string()),
             ],
+            reasoning_content: None,
         }];
 
         let (flat, pv, grid) = expand_decoded_messages(

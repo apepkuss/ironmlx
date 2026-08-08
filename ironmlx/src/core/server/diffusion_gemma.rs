@@ -23,13 +23,15 @@ use tokio::sync::{mpsc, Mutex, OwnedSemaphorePermit, Semaphore, TryAcquireError}
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::core::constrained::{ConstraintPlan, ToolConstraintOptions};
+use crate::core::generated_output::{
+    GeneratedOutputDecoder, GeneratedOutputEvent, ToolOutputDecoderConfig,
+};
+use crate::core::native_output::NativeOutputDecoderConfig;
 use crate::core::server::chat_format::render_and_encode;
-use crate::core::server::vision::expand_decoded_messages;
+use crate::core::server::structured_output::StructuredOutputFormat;
 use crate::core::server::VisionInputConfig;
 use crate::core::tokenizer::Tokenizer;
-use crate::core::tool_calling::{
-    AssistantOutputEvent, ToolCall, ToolCallParser, ToolDefinition, ToolDialect,
-};
+use crate::core::tool_calling::{ToolCall, ToolDefinition, ToolDialect};
 use crate::models::{
     DiffusionGemmaGenerateEvent, DiffusionGemmaGenerationConfig, DiffusionGemmaModel,
 };
@@ -167,6 +169,39 @@ struct PreparedOpenAiRequest {
     tool_context: Option<ToolResponseContext>,
 }
 
+fn skip_special_tokens_with_native_output(
+    current: bool,
+    native_output: Option<NativeOutputDecoderConfig>,
+) -> bool {
+    current
+        && native_output
+            .map(|config| config.dialect.skip_special_tokens())
+            .unwrap_or(true)
+}
+
+#[derive(Clone, Copy)]
+enum RequestProtocol {
+    OpenAi,
+    Responses,
+    Anthropic,
+}
+
+impl RequestProtocol {
+    fn invalid_request(self, message: String) -> Response {
+        match self {
+            Self::OpenAi => (StatusCode::BAD_REQUEST, message).into_response(),
+            Self::Responses => super::responses::error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                message,
+            ),
+            Self::Anthropic => {
+                super::anthropic::anthropic_error_response(StatusCode::BAD_REQUEST, message)
+            }
+        }
+    }
+}
+
 struct OpenAiStreamRequest {
     max_tokens: usize,
     temperature: f32,
@@ -175,6 +210,17 @@ struct OpenAiStreamRequest {
     prompt_tokens: u32,
     include_usage: bool,
     tool_context: Option<ToolResponseContext>,
+    output_format: StructuredOutputFormat,
+}
+
+struct AnthropicStreamRequest {
+    max_tokens: usize,
+    temperature: f32,
+    model_label: String,
+    input_tokens: u32,
+    tool_context: Option<ToolResponseContext>,
+    output_format: StructuredOutputFormat,
+    native_output: Option<NativeOutputDecoderConfig>,
 }
 
 struct ResponsesStreamRequest {
@@ -183,6 +229,7 @@ struct ResponsesStreamRequest {
     seed: Option<u64>,
     prompt_tokens: u32,
     tool_context: Option<ToolResponseContext>,
+    native_output: Option<NativeOutputDecoderConfig>,
     meta: super::responses::ResponseMeta,
 }
 
@@ -193,11 +240,35 @@ struct ToolResponseContext {
     output_schema: Option<serde_json::Value>,
 }
 
+impl ToolResponseContext {
+    fn decoder_config(&self) -> ToolOutputDecoderConfig {
+        ToolOutputDecoderConfig {
+            dialect: self.dialect,
+            response_id: uuid::Uuid::new_v4().simple().to_string(),
+            definitions: self.definitions.clone(),
+            output_schema: self.output_schema.clone(),
+        }
+    }
+}
+
 struct CompletionParts {
     content: Option<String>,
+    reasoning: String,
+    reasoning_summary: String,
     tool_calls: Vec<ToolCall>,
     finish_reason: &'static str,
     completion_tokens: u32,
+    reasoning_tokens: u32,
+}
+
+struct CompletionRequest {
+    generation: PreparedRequest,
+    max_tokens: usize,
+    temperature: f32,
+    seed: Option<u64>,
+    default_finish: &'static str,
+    tool_context: Option<ToolResponseContext>,
+    native_output: Option<NativeOutputDecoderConfig>,
 }
 
 enum CompletionError {
@@ -281,32 +352,6 @@ struct OpenAiCompletionResponse {
     model: String,
     choices: Vec<OpenAiCompletionChoice>,
     usage: OpenAiUsage,
-}
-
-#[derive(Debug, Serialize)]
-struct AnthropicUsage {
-    input_tokens: u32,
-    output_tokens: u32,
-}
-
-#[derive(Debug, Serialize)]
-struct AnthropicContentBlockText {
-    #[serde(rename = "type")]
-    kind: &'static str,
-    text: String,
-}
-
-#[derive(Debug, Serialize)]
-struct AnthropicMessageEnvelope {
-    id: String,
-    #[serde(rename = "type")]
-    kind: &'static str,
-    role: &'static str,
-    content: Vec<AnthropicContentBlockText>,
-    model: String,
-    stop_reason: Option<&'static str>,
-    stop_sequence: Option<String>,
-    usage: AnthropicUsage,
 }
 
 #[derive(Debug, Serialize)]
@@ -417,13 +462,29 @@ fn diffusion_event_is_length_sentinel(event: &DiffusionGemmaGenerateEvent) -> bo
 fn collect_events(
     events: Vec<DiffusionGemmaGenerateEvent>,
     default_finish: &'static str,
-) -> CompletionParts {
+    native_output: Option<NativeOutputDecoderConfig>,
+) -> Result<CompletionParts> {
+    let mut decoder = GeneratedOutputDecoder::from_decoded_with_native(None, native_output)?;
     let mut content = String::new();
+    let mut reasoning = String::new();
+    let mut reasoning_summary = String::new();
+    let mut tool_calls = Vec::new();
     let mut finish_reason = default_finish;
     let mut completion_tokens = 0_u32;
+    let mut reasoning_tokens = 0_u32;
     for event in events {
         if !diffusion_event_is_length_sentinel(&event) {
-            content.push_str(&event.text);
+            collect_tool_parser_events(
+                &mut content,
+                &mut reasoning,
+                &mut reasoning_summary,
+                &mut tool_calls,
+                decoder.push_text_delta(&event.text)?,
+                &mut finish_reason,
+            )?;
+            if decoder.last_token_was_reasoning() {
+                reasoning_tokens = reasoning_tokens.saturating_add(1);
+            }
             completion_tokens += 1;
         }
         if let Some(reason) = event.finish_reason {
@@ -431,68 +492,111 @@ fn collect_events(
             break;
         }
     }
-    CompletionParts {
+    collect_tool_parser_events(
+        &mut content,
+        &mut reasoning,
+        &mut reasoning_summary,
+        &mut tool_calls,
+        decoder.finish(finish_reason)?,
+        &mut finish_reason,
+    )?;
+    Ok(CompletionParts {
         content: Some(content),
-        tool_calls: Vec::new(),
+        reasoning,
+        reasoning_summary,
+        tool_calls,
         finish_reason,
         completion_tokens,
-    }
+        reasoning_tokens,
+    })
 }
 
 fn collect_tool_events(
     events: Vec<DiffusionGemmaGenerateEvent>,
     context: ToolResponseContext,
     default_finish: &'static str,
+    native_output: Option<NativeOutputDecoderConfig>,
 ) -> Result<CompletionParts> {
-    let mut parser = ToolCallParser::new_with_output_schema(
-        context.dialect,
-        uuid::Uuid::new_v4().simple().to_string(),
-        &context.definitions,
-        context.output_schema,
+    let mut decoder = GeneratedOutputDecoder::from_decoded_with_native(
+        Some(context.decoder_config()),
+        native_output,
     )?;
     let mut content = String::new();
+    let mut reasoning = String::new();
+    let mut reasoning_summary = String::new();
     let mut tool_calls = Vec::new();
     let mut finish_reason = default_finish;
     let mut completion_tokens = 0_u32;
+    let mut reasoning_tokens = 0_u32;
     for event in events {
         if !diffusion_event_is_length_sentinel(&event) {
             completion_tokens = completion_tokens.saturating_add(1);
-            collect_tool_parser_events(&mut content, &mut tool_calls, parser.push(&event.text)?);
+            collect_tool_parser_events(
+                &mut content,
+                &mut reasoning,
+                &mut reasoning_summary,
+                &mut tool_calls,
+                decoder.push_text_delta(&event.text)?,
+                &mut finish_reason,
+            )?;
+            if decoder.last_token_was_reasoning() {
+                reasoning_tokens = reasoning_tokens.saturating_add(1);
+            }
         }
         if let Some(reason) = event.finish_reason {
             finish_reason = reason;
             break;
         }
     }
-    let (tail, saw_tool_call) = parser.finish()?;
-    collect_tool_parser_events(&mut content, &mut tool_calls, tail);
+    let tail = decoder.finish(finish_reason)?;
+    collect_tool_parser_events(
+        &mut content,
+        &mut reasoning,
+        &mut reasoning_summary,
+        &mut tool_calls,
+        tail,
+        &mut finish_reason,
+    )?;
     let call_names = tool_calls
         .iter()
         .map(|call| call.name.clone())
         .collect::<Vec<_>>();
     super::openai::validate_tool_choice_output(&context.constraint_options, &call_names)?;
-    if saw_tool_call {
-        finish_reason = "tool_calls";
-    }
     Ok(CompletionParts {
         content: (!content.is_empty()).then_some(content),
+        reasoning,
+        reasoning_summary,
         tool_calls,
         finish_reason,
         completion_tokens,
+        reasoning_tokens,
     })
 }
 
 fn collect_tool_parser_events(
     content: &mut String,
+    reasoning: &mut String,
+    reasoning_summary: &mut String,
     tool_calls: &mut Vec<ToolCall>,
-    events: Vec<AssistantOutputEvent>,
-) {
+    events: Vec<GeneratedOutputEvent>,
+    finish_reason: &mut &'static str,
+) -> Result<()> {
     for event in events {
         match event {
-            AssistantOutputEvent::TextDelta(text) => content.push_str(&text),
-            AssistantOutputEvent::ToolCall(call) => tool_calls.push(call),
+            GeneratedOutputEvent::TextDelta(text) => content.push_str(&text),
+            GeneratedOutputEvent::ReasoningDelta(text) => reasoning.push_str(&text),
+            GeneratedOutputEvent::ReasoningSummaryDelta(text) => {
+                reasoning_summary.push_str(&text);
+            }
+            GeneratedOutputEvent::ToolCall(call) => tool_calls.push(call),
+            GeneratedOutputEvent::Finished(reason) => *finish_reason = reason.as_str(),
+            other => anyhow::bail!(
+                "DiffusionGemma adapter has no enabled producer mapping for generated {} output",
+                other.kind()
+            ),
         }
     }
+    Ok(())
 }
 
 fn anthropic_stop_reason(reason: &'static str) -> &'static str {
@@ -569,14 +673,15 @@ fn openai_tool_event_frames(
     id: &str,
     model: &str,
     created: u64,
-    events: Vec<AssistantOutputEvent>,
+    events: Vec<GeneratedOutputEvent>,
     next_call_index: &mut usize,
     call_names: &mut Vec<String>,
-) -> Vec<Bytes> {
+    finish_reason: &mut Option<&'static str>,
+) -> Result<Vec<Bytes>> {
     let mut frames = Vec::new();
     for event in events {
         match event {
-            AssistantOutputEvent::TextDelta(text) => {
+            GeneratedOutputEvent::TextDelta(text) => {
                 let event = DiffusionGemmaGenerateEvent {
                     token: 0,
                     text,
@@ -584,7 +689,7 @@ fn openai_tool_event_frames(
                 };
                 frames.push(openai_event_frame(id, model, created, &event));
             }
-            AssistantOutputEvent::ToolCall(call) => {
+            GeneratedOutputEvent::ToolCall(call) => {
                 call_names.push(call.name.clone());
                 let index = *next_call_index;
                 *next_call_index += 1;
@@ -637,9 +742,27 @@ fn openai_tool_event_frames(
                     frames.push(format_openai_sse_data(&chunk));
                 }
             }
+            GeneratedOutputEvent::Finished(reason) => {
+                anyhow::ensure!(
+                    finish_reason.replace(reason.as_str()).is_none(),
+                    "generated output emitted more than one terminal event"
+                );
+            }
+            other => anyhow::bail!(
+                "Chat Completions cannot represent generated {} output",
+                other.kind()
+            ),
         }
     }
-    frames
+    Ok(frames)
+}
+
+fn append_generated_text(content: &mut String, events: &[GeneratedOutputEvent]) {
+    for event in events {
+        if let GeneratedOutputEvent::TextDelta(text) = event {
+            content.push_str(text);
+        }
+    }
 }
 
 fn utf8_fragments(value: &str, max_bytes: usize) -> Vec<&str> {
@@ -697,7 +820,7 @@ fn format_anthropic_event(event_type: &str, payload: &serde_json::Value) -> Byte
 fn anthropic_error_event(message: &str) -> Bytes {
     let payload = serde_json::json!({
         "type": "error",
-        "error": {"message": message}
+        "error": {"type": "api_error", "message": message}
     });
     format_anthropic_event("error", &payload)
 }
@@ -768,12 +891,14 @@ async fn prepare_openai_request(
     state: &DiffusionGemmaAppState,
     req: super::openai::ChatRequest,
     output_schema: Option<serde_json::Value>,
+    constraint_native_output: Option<NativeOutputDecoderConfig>,
+    protocol: RequestProtocol,
 ) -> std::result::Result<(PreparedOpenAiRequest, u32), Response> {
     let prepared_tools =
         match super::openai::prepare_tool_request(&req, state.tokenizer.tool_dialect()) {
             Ok(prepared) => prepared,
             Err(error) => {
-                return Err((StatusCode::BAD_REQUEST, format!("{error:#}")).into_response());
+                return Err(protocol.invalid_request(format!("{error:#}")));
             }
         };
     let original_messages = prepared_tools.as_ref().map(|_| req.messages.clone());
@@ -807,11 +932,7 @@ async fn prepare_openai_request(
     let prompt_ids = match prompt_ids_result {
         Ok(ids) => ids,
         Err(e) => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!("chat template / tokenize: {e}"),
-            )
-                .into_response());
+            return Err(protocol.invalid_request(format!("chat template / tokenize: {e}")));
         }
     };
     let input_tokens = prompt_ids.len() as u32;
@@ -819,49 +940,17 @@ async fn prepare_openai_request(
         &state.vision_input,
         &state.tokenizer,
     );
-    let constraint = match prepared_tools
-        .as_ref()
-        .and_then(|prepared| {
-            prepared
-                .constraint_options
-                .as_ref()
-                .map(|options| (prepared, options))
-        })
-        .map(|(prepared, options)| {
-            if matches!(
-                &options.choice,
-                crate::core::constrained::ToolChoiceConstraint::Auto
-            ) {
-                if let Some(schema) = output_schema.as_ref() {
-                    return state.tokenizer.compile_tool_or_json_constraint(
-                        &prepared.definitions,
-                        options,
-                        schema,
-                    );
-                }
-            }
-            state
-                .tokenizer
-                .compile_tool_constraint(&prepared.definitions, options)
-        })
-        .transpose()
-        .and_then(
-            |tool_constraint| match (tool_constraint, output_schema.as_ref()) {
-                (Some(constraint), _) => Ok(Some(constraint)),
-                (None, Some(schema)) => state
-                    .tokenizer
-                    .compile_json_output_constraint(schema)
-                    .map(Some),
-                (None, None) => Ok(None),
-            },
-        ) {
+    let constraint = match super::openai::compile_output_constraint_with_native(
+        &state.tokenizer,
+        prepared_tools.as_ref(),
+        output_schema.as_ref(),
+        constraint_native_output,
+    ) {
         Ok(constraint) => constraint,
         Err(error) => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!("compile DiffusionGemma output constraint: {error:#}"),
-            )
-                .into_response());
+            return Err(protocol.invalid_request(format!(
+                "compile DiffusionGemma output constraint: {error:#}"
+            )));
         }
     };
     let tool_context = prepared_tools.and_then(|prepared| {
@@ -906,69 +995,57 @@ async fn prepare_openai_request(
 async fn prepare_anthropic_request(
     state: &DiffusionGemmaAppState,
     req: super::anthropic::MessagesRequest,
-) -> std::result::Result<(PreparedRequest, u32), Response> {
-    let decoded = match super::anthropic::decode_anthropic_messages(req.messages) {
-        Ok(d) => d,
-        Err(e) => {
-            return Err((StatusCode::BAD_REQUEST, format!("image decode: {e}")).into_response());
-        }
-    };
-    let (flat_messages, pixel_values, image_grid_thw) =
-        match expand_decoded_messages(decoded, &state.vision_input) {
-            Ok(t) => t,
-            Err(e) => {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    format!("image decode/preprocess: {e}"),
-                )
-                    .into_response());
-            }
-        };
-    let prompt_ids = match render_and_encode(&state.tokenizer, &flat_messages, None) {
-        Ok(ids) => ids,
-        Err(e) => {
-            return Err((
+) -> std::result::Result<
+    (
+        PreparedOpenAiRequest,
+        u32,
+        super::structured_output::StructuredOutputFormat,
+        Option<NativeOutputDecoderConfig>,
+    ),
+    Response,
+> {
+    let chat = req.into_chat_request().map_err(|error| {
+        super::anthropic::anthropic_error_response(
+            StatusCode::BAD_REQUEST,
+            format!("invalid Messages request: {error:#}"),
+        )
+    })?;
+    let output_format = chat.structured_output_format().map_err(|error| {
+        super::anthropic::anthropic_error_response(
+            StatusCode::BAD_REQUEST,
+            format!("invalid Messages request: {error:#}"),
+        )
+    })?;
+    let native_output = super::anthropic::messages_native_output_config(&state.tokenizer, &chat)
+        .map_err(|error| {
+            super::anthropic::anthropic_error_response(
                 StatusCode::BAD_REQUEST,
-                format!("chat template / tokenize: {e}"),
+                format!("invalid Messages request: {error:#}"),
             )
-                .into_response());
-        }
-    };
-    let input_tokens = prompt_ids.len() as u32;
-    let (image_token_id, _) = crate::core::server::vision::derive_image_token_and_merge(
-        &state.vision_input,
-        &state.tokenizer,
-    );
-    Ok((
-        PreparedRequest {
-            prompt_ids,
-            pixel_values,
-            image_grid_thw: if image_grid_thw.is_empty() {
-                None
-            } else {
-                Some(image_grid_thw)
-            },
-            image_token_id,
-            constraint: None,
-            skip_special_tokens: true,
-        },
-        input_tokens,
-    ))
+        })?;
+    let output_schema = output_format.constraint_schema();
+    let (mut prepared, input_tokens) = prepare_openai_request(
+        state,
+        chat,
+        output_schema,
+        native_output,
+        RequestProtocol::Anthropic,
+    )
+    .await?;
+    prepared.generation.skip_special_tokens &= native_output
+        .map(|config| config.dialect.skip_special_tokens())
+        .unwrap_or(true);
+    Ok((prepared, input_tokens, output_format, native_output))
 }
 
 async fn generate_completion(
     state: DiffusionGemmaAppState,
-    request: PreparedRequest,
-    max_tokens: usize,
-    temperature: f32,
-    seed: Option<u64>,
-    default_finish: &'static str,
-    tool_context: Option<ToolResponseContext>,
+    request: CompletionRequest,
 ) -> std::result::Result<CompletionParts, CompletionError> {
     let lane_guard = state.lane.clone().enter().await?;
     state
         .runtime_usage
-        .record_input_tokens(request.prompt_ids.len() as u64);
+        .record_input_tokens(request.generation.prompt_ids.len() as u64);
     tokio::task::spawn_blocking(move || -> std::result::Result<CompletionParts, String> {
         let _lane_guard = lane_guard;
         let model_guard = state.model.blocking_lock();
@@ -978,20 +1055,26 @@ async fn generate_completion(
             &model_guard,
             tokenizer,
             &state.generation_config,
-            request,
-            max_tokens,
-            temperature,
-            seed,
+            request.generation,
+            request.max_tokens,
+            request.temperature,
+            request.seed,
             &mut |event| {
                 events.push(event);
                 Ok(true)
             },
         )?;
         mlx::transforms::clear_cache();
-        let completion = match tool_context {
-            Some(context) => collect_tool_events(events, context, default_finish)
-                .map_err(|error| format!("parse DiffusionGemma tool output: {error:#}"))?,
-            None => collect_events(events, default_finish),
+        let completion = match request.tool_context {
+            Some(context) => collect_tool_events(
+                events,
+                context,
+                request.default_finish,
+                request.native_output,
+            )
+            .map_err(|error| format!("parse DiffusionGemma tool output: {error:#}"))?,
+            None => collect_events(events, request.default_finish, request.native_output)
+                .map_err(|error| format!("decode DiffusionGemma output: {error:#}"))?,
         };
         state
             .runtime_usage
@@ -1053,6 +1136,7 @@ fn run_generation_with_events(
                 max_tokens,
                 temperature,
                 seed,
+                skip_special_tokens,
                 emit,
             )
             .map_err(|e| e.to_string()),
@@ -1081,6 +1165,7 @@ fn run_generation_with_events(
                 max_tokens,
                 temperature,
                 seed,
+                skip_special_tokens,
                 emit,
             )
             .map_err(|e| e.to_string()),
@@ -1104,6 +1189,7 @@ async fn openai_stream_completion(
         prompt_tokens,
         include_usage,
         tool_context,
+        output_format,
     } = stream_request;
     let lane_guard = match state.lane.clone().enter().await {
         Ok(guard) => guard,
@@ -1128,38 +1214,39 @@ async fn openai_stream_completion(
         let model_guard = state.model.blocking_lock();
         let tokenizer = &*state.tokenizer;
         if let Some(context) = tool_context {
-            let mut parser = match ToolCallParser::new_with_output_schema(
-                context.dialect,
-                uuid::Uuid::new_v4().simple().to_string(),
-                &context.definitions,
-                context.output_schema,
-            ) {
-                Ok(parser) => parser,
-                Err(error) => {
-                    let _ = tx.blocking_send(Ok(openai_error_frame(&format!("{error:#}"))));
-                    let _ = tx.blocking_send(Ok(openai_done_frame()));
-                    return;
-                }
-            };
+            let mut decoder =
+                match GeneratedOutputDecoder::from_decoded(Some(context.decoder_config())) {
+                    Ok(decoder) => decoder,
+                    Err(error) => {
+                        let _ = tx.blocking_send(Ok(openai_error_frame(&format!("{error:#}"))));
+                        let _ = tx.blocking_send(Ok(openai_done_frame()));
+                        return;
+                    }
+                };
             let mut connected = true;
             let mut completion_tokens = 0_u32;
             let mut model_finish = "stop";
             let mut next_call_index = 0_usize;
             let mut call_names = Vec::new();
+            let mut typed_finish = None;
+            let mut content = String::new();
             let generation_result = {
                 let mut emit = |event: DiffusionGemmaGenerateEvent| -> Result<bool> {
                     if !diffusion_event_is_length_sentinel(&event) {
                         completion_tokens = completion_tokens.saturating_add(1);
                         state.runtime_usage.record_output_tokens(1);
-                        let events = parser.push(&event.text)?;
-                        for frame in openai_tool_event_frames(
+                        let events = decoder.push_text_delta(&event.text)?;
+                        append_generated_text(&mut content, &events);
+                        let frames = openai_tool_event_frames(
                             &id,
                             &model_label,
                             created,
                             events,
                             &mut next_call_index,
                             &mut call_names,
-                        ) {
+                            &mut typed_finish,
+                        )?;
+                        for frame in frames {
                             if tx.blocking_send(Ok(frame)).is_err() {
                                 connected = false;
                                 return Ok(false);
@@ -1190,22 +1277,32 @@ async fn openai_stream_completion(
                 let _ = tx.blocking_send(Ok(openai_done_frame()));
                 return;
             }
-            let (tail, saw_tool_call) = match parser.finish() {
-                Ok(result) => result,
+            let tail = match decoder.finish(model_finish) {
+                Ok(events) => events,
                 Err(error) => {
                     let _ = tx.blocking_send(Ok(openai_error_frame(&format!("{error:#}"))));
                     let _ = tx.blocking_send(Ok(openai_done_frame()));
                     return;
                 }
             };
-            for frame in openai_tool_event_frames(
+            append_generated_text(&mut content, &tail);
+            let frames = match openai_tool_event_frames(
                 &id,
                 &model_label,
                 created,
                 tail,
                 &mut next_call_index,
                 &mut call_names,
+                &mut typed_finish,
             ) {
+                Ok(frames) => frames,
+                Err(error) => {
+                    let _ = tx.blocking_send(Ok(openai_error_frame(&format!("{error:#}"))));
+                    let _ = tx.blocking_send(Ok(openai_done_frame()));
+                    return;
+                }
+            };
+            for frame in frames {
                 if tx.blocking_send(Ok(frame)).is_err() {
                     return;
                 }
@@ -1217,11 +1314,14 @@ async fn openai_stream_completion(
                 let _ = tx.blocking_send(Ok(openai_done_frame()));
                 return;
             }
-            let finish_reason = if saw_tool_call {
-                "tool_calls"
-            } else {
-                model_finish
-            };
+            let finish_reason = typed_finish.unwrap_or(model_finish);
+            if let Err(error) =
+                output_format.validate_completion(&content, !call_names.is_empty(), finish_reason)
+            {
+                let _ = tx.blocking_send(Ok(openai_error_frame(&format!("{error:#}"))));
+                let _ = tx.blocking_send(Ok(openai_done_frame()));
+                return;
+            }
             if tx
                 .blocking_send(Ok(openai_finish_frame(
                     &id,
@@ -1256,22 +1356,44 @@ async fn openai_stream_completion(
             let _ = tx.blocking_send(Ok(openai_done_frame()));
             return;
         }
+        let mut decoder = match GeneratedOutputDecoder::from_decoded(None) {
+            Ok(decoder) => decoder,
+            Err(error) => {
+                let _ = tx.blocking_send(Ok(openai_error_frame(&format!("{error:#}"))));
+                let _ = tx.blocking_send(Ok(openai_done_frame()));
+                return;
+            }
+        };
         let mut connected = true;
-        let mut saw_finish = false;
+        let mut model_finish = "stop";
+        let mut next_call_index = 0_usize;
+        let mut call_names = Vec::new();
+        let mut typed_finish = None;
+        let mut content = String::new();
         let generation_result = {
             let mut emit = |event: DiffusionGemmaGenerateEvent| -> Result<bool> {
-                if event.finish_reason.is_some() {
-                    saw_finish = true;
-                }
-                if tx
-                    .blocking_send(Ok(openai_event_frame(&id, &model_label, created, &event)))
-                    .is_err()
-                {
-                    connected = false;
-                    return Ok(false);
-                }
                 if !diffusion_event_is_length_sentinel(&event) {
                     state.runtime_usage.record_output_tokens(1);
+                    let events = decoder.push_text_delta(&event.text)?;
+                    append_generated_text(&mut content, &events);
+                    let frames = openai_tool_event_frames(
+                        &id,
+                        &model_label,
+                        created,
+                        events,
+                        &mut next_call_index,
+                        &mut call_names,
+                        &mut typed_finish,
+                    )?;
+                    for frame in frames {
+                        if tx.blocking_send(Ok(frame)).is_err() {
+                            connected = false;
+                            return Ok(false);
+                        }
+                    }
+                }
+                if let Some(reason) = event.finish_reason {
+                    model_finish = reason;
                 }
                 Ok(true)
             };
@@ -1295,10 +1417,50 @@ async fn openai_stream_completion(
             let _ = tx.blocking_send(Ok(openai_done_frame()));
             return;
         }
-        if !saw_finish
-            && tx
-                .blocking_send(Ok(openai_finish_frame(&id, &model_label, created, "stop")))
-                .is_err()
+        let events = match decoder.finish(model_finish) {
+            Ok(events) => events,
+            Err(error) => {
+                let _ = tx.blocking_send(Ok(openai_error_frame(&format!("{error:#}"))));
+                let _ = tx.blocking_send(Ok(openai_done_frame()));
+                return;
+            }
+        };
+        append_generated_text(&mut content, &events);
+        let frames = match openai_tool_event_frames(
+            &id,
+            &model_label,
+            created,
+            events,
+            &mut next_call_index,
+            &mut call_names,
+            &mut typed_finish,
+        ) {
+            Ok(frames) => frames,
+            Err(error) => {
+                let _ = tx.blocking_send(Ok(openai_error_frame(&format!("{error:#}"))));
+                let _ = tx.blocking_send(Ok(openai_done_frame()));
+                return;
+            }
+        };
+        for frame in frames {
+            if tx.blocking_send(Ok(frame)).is_err() {
+                return;
+            }
+        }
+        let finish_reason = typed_finish.unwrap_or(model_finish);
+        if let Err(error) = output_format.validate_completion(&content, false, finish_reason) {
+            let _ = tx.blocking_send(Ok(openai_error_frame(&format!("{error:#}"))));
+            let _ = tx.blocking_send(Ok(openai_done_frame()));
+            return;
+        }
+        if tx
+            .blocking_send(Ok(openai_finish_frame(
+                &id,
+                &model_label,
+                created,
+                finish_reason,
+            )))
+            .is_err()
         {
             return;
         }
@@ -1326,6 +1488,7 @@ async fn responses_stream_completion(
         seed,
         prompt_tokens,
         tool_context,
+        native_output,
         meta,
     } = stream_request;
     let lane_guard = match state.lane.clone().enter().await {
@@ -1358,19 +1521,13 @@ async fn responses_stream_completion(
         }
         let model_guard = state.model.blocking_lock();
         let tokenizer = &*state.tokenizer;
-        let mut parser = match tool_context
-            .as_ref()
-            .map(|context| {
-                ToolCallParser::new_with_output_schema(
-                    context.dialect,
-                    uuid::Uuid::new_v4().simple().to_string(),
-                    &context.definitions,
-                    context.output_schema.clone(),
-                )
-            })
-            .transpose()
-        {
-            Ok(parser) => parser,
+        let mut decoder = match GeneratedOutputDecoder::from_decoded_with_native(
+            tool_context
+                .as_ref()
+                .map(ToolResponseContext::decoder_config),
+            native_output,
+        ) {
+            Ok(decoder) => decoder,
             Err(error) => {
                 let _ = tx.blocking_send(Ok(formatter.failed(format!("{error:#}"))));
                 return;
@@ -1378,34 +1535,25 @@ async fn responses_stream_completion(
         };
         let mut call_names = Vec::new();
         let mut completion_tokens = 0_u32;
+        let mut reasoning_tokens = 0_u32;
         let mut finish_reason = "stop";
+        let mut typed_finish = None;
         let mut connected = true;
         let generation_result = {
             let mut emit = |event: DiffusionGemmaGenerateEvent| -> Result<bool> {
                 if !diffusion_event_is_length_sentinel(&event) {
                     completion_tokens = completion_tokens.saturating_add(1);
                     state.runtime_usage.record_output_tokens(1);
-                    let frames = if let Some(parser) = parser.as_mut() {
-                        let events = parser.push(&event.text)?;
-                        call_names.extend(events.iter().filter_map(|event| match event {
-                            AssistantOutputEvent::ToolCall(call) => Some(call.name.clone()),
-                            AssistantOutputEvent::TextDelta(_) => None,
-                        }));
-                        let mut frames = Vec::new();
-                        for event in events {
-                            match event {
-                                AssistantOutputEvent::TextDelta(text) => {
-                                    frames.extend(formatter.text_delta(text));
-                                }
-                                AssistantOutputEvent::ToolCall(call) => {
-                                    frames.extend(formatter.tool_call(call)?);
-                                }
-                            }
-                        }
-                        frames
-                    } else {
-                        formatter.text_delta(event.text.clone())
-                    };
+                    let events = decoder.push_text_delta(&event.text)?;
+                    if decoder.last_token_was_reasoning() {
+                        reasoning_tokens = reasoning_tokens.saturating_add(1);
+                    }
+                    let frames = super::responses::stream_generated_events(
+                        &mut formatter,
+                        events,
+                        &mut call_names,
+                        &mut typed_finish,
+                    )?;
                     for frame in frames {
                         if tx.blocking_send(Ok(frame)).is_err() {
                             connected = false;
@@ -1436,49 +1584,43 @@ async fn responses_stream_completion(
             let _ = tx.blocking_send(Ok(formatter.failed(message)));
             return;
         }
-        if let (Some(parser), Some(context)) = (parser, tool_context.as_ref()) {
-            let (events, saw_tool_call) = match parser.finish() {
-                Ok(result) => result,
-                Err(error) => {
-                    let _ = tx.blocking_send(Ok(formatter.failed(format!("{error:#}"))));
-                    return;
-                }
-            };
-            call_names.extend(events.iter().filter_map(|event| match event {
-                AssistantOutputEvent::ToolCall(call) => Some(call.name.clone()),
-                AssistantOutputEvent::TextDelta(_) => None,
-            }));
+        let events = match decoder.finish(finish_reason) {
+            Ok(events) => events,
+            Err(error) => {
+                let _ = tx.blocking_send(Ok(formatter.failed(format!("{error:#}"))));
+                return;
+            }
+        };
+        let frames = match super::responses::stream_generated_events(
+            &mut formatter,
+            events,
+            &mut call_names,
+            &mut typed_finish,
+        ) {
+            Ok(frames) => frames,
+            Err(error) => {
+                let _ = tx.blocking_send(Ok(formatter.failed(format!("{error:#}"))));
+                return;
+            }
+        };
+        for frame in frames {
+            if tx.blocking_send(Ok(frame)).is_err() {
+                return;
+            }
+        }
+        if let Some(context) = tool_context.as_ref() {
             if let Err(error) =
                 super::openai::validate_tool_choice_output(&context.constraint_options, &call_names)
             {
                 let _ = tx.blocking_send(Ok(formatter.failed(format!("{error:#}"))));
                 return;
             }
-            for event in events {
-                let frames = match event {
-                    AssistantOutputEvent::TextDelta(text) => Ok(formatter.text_delta(text)),
-                    AssistantOutputEvent::ToolCall(call) => formatter.tool_call(call),
-                };
-                let frames = match frames {
-                    Ok(frames) => frames,
-                    Err(error) => {
-                        let _ = tx.blocking_send(Ok(formatter.failed(format!("{error:#}"))));
-                        return;
-                    }
-                };
-                for frame in frames {
-                    if tx.blocking_send(Ok(frame)).is_err() {
-                        return;
-                    }
-                }
-            }
-            if saw_tool_call {
-                finish_reason = "tool_calls";
-            }
         }
+        finish_reason = typed_finish.unwrap_or(finish_reason);
         for frame in formatter.completed(
             finish_reason,
-            super::responses::Usage::new(prompt_tokens, completion_tokens),
+            super::responses::Usage::new(prompt_tokens, completion_tokens)
+                .with_reasoning_tokens(reasoning_tokens),
         ) {
             if tx.blocking_send(Ok(frame)).is_err() {
                 return;
@@ -1497,11 +1639,17 @@ async fn responses_stream_completion(
 async fn anthropic_stream_completion(
     state: DiffusionGemmaAppState,
     request: PreparedRequest,
-    max_tokens: usize,
-    temperature: f32,
-    model_label: String,
-    input_tokens: u32,
+    stream_request: AnthropicStreamRequest,
 ) -> Response {
+    let AnthropicStreamRequest {
+        max_tokens,
+        temperature,
+        model_label,
+        input_tokens,
+        tool_context,
+        output_format,
+        native_output,
+    } = stream_request;
     let lane_guard = match state.lane.clone().enter().await {
         Ok(guard) => guard,
         Err(err) => return CompletionError::from(err).into_response(),
@@ -1514,62 +1662,40 @@ async fn anthropic_stream_completion(
 
     tokio::task::spawn_blocking(move || {
         let _lane_guard = lane_guard;
-        let start_payload = serde_json::json!({
-            "type": "message_start",
-            "message": {
-                "id": id,
-                "type": "message",
-                "role": "assistant",
-                "content": [],
-                "model": model_label,
-                "stop_reason": null,
-                "stop_sequence": null,
-                "usage": {"input_tokens": input_tokens, "output_tokens": 0}
-            }
-        });
-        if tx
-            .blocking_send(Ok(format_anthropic_event("message_start", &start_payload)))
-            .is_err()
-        {
+        let mut encoder =
+            super::anthropic::ToolStreamEncoder::new(id, model_label, input_tokens, output_format);
+        if tx.blocking_send(Ok(encoder.message_start())).is_err() {
             return;
         }
-        let block_start = serde_json::json!({
-            "type": "content_block_start",
-            "index": 0,
-            "content_block": {"type": "text", "text": ""}
-        });
-        if tx
-            .blocking_send(Ok(format_anthropic_event(
-                "content_block_start",
-                &block_start,
-            )))
-            .is_err()
-        {
-            return;
-        }
-
         let model_guard = state.model.blocking_lock();
         let tokenizer = &*state.tokenizer;
+        let mut decoder = match GeneratedOutputDecoder::from_decoded_with_native(
+            tool_context
+                .as_ref()
+                .map(ToolResponseContext::decoder_config),
+            native_output,
+        ) {
+            Ok(decoder) => decoder,
+            Err(error) => {
+                let _ = tx.blocking_send(Ok(anthropic_error_event(&format!("{error:#}"))));
+                return;
+            }
+        };
         let mut connected = true;
         let mut output_tokens = 0_u32;
-        let mut stop_reason = "end_turn";
+        let mut thinking_tokens = 0_u32;
+        let mut model_finish = "stop";
         let generation_result = {
             let mut emit = |event: DiffusionGemmaGenerateEvent| -> Result<bool> {
                 if !diffusion_event_is_length_sentinel(&event) {
-                    output_tokens += 1;
-                    if !event.text.is_empty() {
-                        let delta = serde_json::json!({
-                            "type": "content_block_delta",
-                            "index": 0,
-                            "delta": {"type": "text_delta", "text": event.text}
-                        });
-                        if tx
-                            .blocking_send(Ok(format_anthropic_event(
-                                "content_block_delta",
-                                &delta,
-                            )))
-                            .is_err()
-                        {
+                    output_tokens = output_tokens.saturating_add(1);
+                    let events = decoder.push_text_delta(&event.text)?;
+                    if decoder.last_token_was_reasoning() {
+                        thinking_tokens = thinking_tokens.saturating_add(1);
+                    }
+                    let frames = encoder.push_events(events)?;
+                    for frame in frames {
+                        if tx.blocking_send(Ok(frame)).is_err() {
                             connected = false;
                             return Ok(false);
                         }
@@ -1577,7 +1703,7 @@ async fn anthropic_stream_completion(
                     state.runtime_usage.record_output_tokens(1);
                 }
                 if let Some(reason) = event.finish_reason {
-                    stop_reason = anthropic_stop_reason(reason);
+                    model_finish = reason;
                 }
                 Ok(true)
             };
@@ -1600,29 +1726,47 @@ async fn anthropic_stream_completion(
             let _ = tx.blocking_send(Ok(anthropic_error_event(&message)));
             return;
         }
-        let block_stop = serde_json::json!({"type": "content_block_stop", "index": 0});
-        if tx
-            .blocking_send(Ok(format_anthropic_event(
-                "content_block_stop",
-                &block_stop,
-            )))
-            .is_err()
-        {
-            return;
+        let events = match decoder.finish(model_finish) {
+            Ok(events) => events,
+            Err(error) => {
+                let _ = tx.blocking_send(Ok(anthropic_error_event(&format!("{error:#}"))));
+                return;
+            }
+        };
+        let frames = match encoder.push_events(events) {
+            Ok(frames) => frames,
+            Err(error) => {
+                let _ = tx.blocking_send(Ok(anthropic_error_event(&format!("{error:#}"))));
+                return;
+            }
+        };
+        for frame in frames {
+            if tx.blocking_send(Ok(frame)).is_err() {
+                return;
+            }
         }
-        let msg_delta = serde_json::json!({
-            "type": "message_delta",
-            "delta": {"stop_reason": stop_reason, "stop_sequence": null},
-            "usage": {"output_tokens": output_tokens}
-        });
-        if tx
-            .blocking_send(Ok(format_anthropic_event("message_delta", &msg_delta)))
-            .is_err()
-        {
-            return;
+        let options = tool_context
+            .as_ref()
+            .map(|context| &context.constraint_options)
+            .cloned()
+            .unwrap_or_default();
+        let frames = match encoder.finish(
+            &options,
+            anthropic_stop_reason(model_finish),
+            output_tokens,
+            thinking_tokens,
+        ) {
+            Ok(frames) => frames,
+            Err(error) => {
+                let _ = tx.blocking_send(Ok(anthropic_error_event(&format!("{error:#}"))));
+                return;
+            }
+        };
+        for frame in frames {
+            if tx.blocking_send(Ok(frame)).is_err() {
+                return;
+            }
         }
-        let msg_stop = serde_json::json!({"type": "message_stop"});
-        let _ = tx.blocking_send(Ok(format_anthropic_event("message_stop", &msg_stop)));
     });
 
     let stream = ReceiverStream::new(rx);
@@ -1642,7 +1786,7 @@ pub async fn openai_chat_completions(
         axum::extract::rejection::JsonRejection,
     >,
 ) -> Response {
-    let req = match payload {
+    let mut req = match payload {
         Ok(Json(req)) => req,
         Err(error) => {
             return (
@@ -1652,6 +1796,18 @@ pub async fn openai_chat_completions(
                 .into_response();
         }
     };
+    let output_format = match req.structured_output_format() {
+        Ok(format) => format,
+        Err(error) => return (StatusCode::BAD_REQUEST, format!("{error:#}")).into_response(),
+    };
+    let output_schema = output_format.constraint_schema();
+    let allows_final_output = req
+        .tool_choice
+        .as_ref()
+        .is_none_or(|choice| matches!(choice.as_str(), Some("auto" | "none")));
+    if allows_final_output {
+        output_format.apply_prompt_instruction(&mut req.messages);
+    }
     let stream = req.stream;
     let include_usage = req
         .stream_options
@@ -1661,10 +1817,13 @@ pub async fn openai_chat_completions(
     let temperature = req.temperature.unwrap_or(0.0);
     let seed = req.seed;
     let model_label = req.model.clone().unwrap_or_else(|| state.model_id.clone());
-    let (prepared, prompt_tokens) = match prepare_openai_request(&state, req, None).await {
-        Ok(t) => t,
-        Err(resp) => return resp,
-    };
+    let (prepared, prompt_tokens) =
+        match prepare_openai_request(&state, req, output_schema, None, RequestProtocol::OpenAi)
+            .await
+        {
+            Ok(t) => t,
+            Err(resp) => return resp,
+        };
     let PreparedOpenAiRequest {
         generation,
         tool_context,
@@ -1681,6 +1840,7 @@ pub async fn openai_chat_completions(
                 prompt_tokens,
                 include_usage,
                 tool_context,
+                output_format,
             },
         )
         .await;
@@ -1688,18 +1848,28 @@ pub async fn openai_chat_completions(
 
     let completion = match generate_completion(
         state,
-        generation,
-        max_tokens,
-        temperature,
-        seed,
-        "stop",
-        tool_context,
+        CompletionRequest {
+            generation,
+            max_tokens,
+            temperature,
+            seed,
+            default_finish: "stop",
+            tool_context,
+            native_output: None,
+        },
     )
     .await
     {
         Ok(c) => c,
         Err(err) => return err.into_response(),
     };
+    if let Err(error) = output_format.validate_completion(
+        completion.content.as_deref().unwrap_or_default(),
+        !completion.tool_calls.is_empty(),
+        completion.finish_reason,
+    ) {
+        return internal_error_response(format!("{error:#}"));
+    }
     let resp = OpenAiCompletionResponse {
         id: gen_openai_id(),
         object: "chat.completion",
@@ -1762,6 +1932,16 @@ pub async fn openai_responses(
             );
         }
     };
+    let native_output = match normalized.native_output_config(&state.tokenizer) {
+        Ok(config) => config,
+        Err(error) => {
+            return super::responses::error_response(
+                StatusCode::BAD_REQUEST,
+                "unsupported_reasoning",
+                format!("resolve native reasoning mode: {error:#}"),
+            );
+        }
+    };
     let model_label = normalized
         .chat
         .model
@@ -1773,15 +1953,24 @@ pub async fn openai_responses(
     let temperature = normalized.chat.temperature.unwrap_or(0.0);
     let seed = normalized.chat.seed;
     let output_schema = normalized.output_schema();
-    let (prepared, prompt_tokens) =
-        match prepare_openai_request(&state, normalized.chat, output_schema).await {
-            Ok(result) => result,
-            Err(response) => return response,
-        };
+    let (prepared, prompt_tokens) = match prepare_openai_request(
+        &state,
+        normalized.chat,
+        output_schema,
+        None,
+        RequestProtocol::Responses,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(response) => return response,
+    };
     let PreparedOpenAiRequest {
-        generation,
+        mut generation,
         tool_context,
     } = prepared;
+    generation.skip_special_tokens =
+        skip_special_tokens_with_native_output(generation.skip_special_tokens, native_output);
     if stream {
         return responses_stream_completion(
             state,
@@ -1792,6 +1981,7 @@ pub async fn openai_responses(
                 seed,
                 prompt_tokens,
                 tool_context,
+                native_output,
                 meta,
             },
         )
@@ -1799,12 +1989,15 @@ pub async fn openai_responses(
     }
     let completion = match generate_completion(
         state,
-        generation,
-        max_tokens,
-        temperature,
-        seed,
-        "stop",
-        tool_context,
+        CompletionRequest {
+            generation,
+            max_tokens,
+            temperature,
+            seed,
+            default_finish: "stop",
+            tool_context,
+            native_output,
+        },
     )
     .await
     {
@@ -1825,62 +2018,92 @@ pub async fn openai_responses(
         prompt_tokens,
         super::responses::CollectedOutput {
             content: completion.content.unwrap_or_default(),
+            reasoning: completion.reasoning,
+            reasoning_summary: completion.reasoning_summary,
             tool_calls: completion.tool_calls,
             finish_reason: completion.finish_reason,
             completion_tokens: completion.completion_tokens,
+            reasoning_tokens: completion.reasoning_tokens,
         },
     )
 }
 
 pub async fn anthropic_messages(
     State(state): State<DiffusionGemmaAppState>,
-    Json(req): Json<super::anthropic::MessagesRequest>,
+    payload: std::result::Result<
+        Json<super::anthropic::MessagesRequest>,
+        axum::extract::rejection::JsonRejection,
+    >,
 ) -> Response {
+    let req = match payload {
+        Ok(Json(req)) => req,
+        Err(error) => {
+            return super::anthropic::anthropic_error_response(
+                StatusCode::BAD_REQUEST,
+                format!("invalid Messages request: {}", error.body_text()),
+            );
+        }
+    };
     let stream = req.stream;
     let max_tokens = req.max_tokens;
     let temperature = req.temperature.unwrap_or(0.0);
     let model_label = req.model.clone().unwrap_or_else(|| state.model_id.clone());
-    let (prepared, input_tokens) = match prepare_anthropic_request(&state, req).await {
-        Ok(t) => t,
-        Err(resp) => return resp,
-    };
+    let (prepared, input_tokens, output_format, native_output) =
+        match prepare_anthropic_request(&state, req).await {
+            Ok(t) => t,
+            Err(resp) => return resp,
+        };
+    let PreparedOpenAiRequest {
+        generation,
+        tool_context,
+    } = prepared;
     if stream {
         return anthropic_stream_completion(
             state,
-            prepared,
-            max_tokens,
-            temperature,
-            model_label,
-            input_tokens,
+            generation,
+            AnthropicStreamRequest {
+                max_tokens,
+                temperature,
+                model_label,
+                input_tokens,
+                tool_context,
+                output_format,
+                native_output,
+            },
         )
         .await;
     }
 
-    let completion =
-        match generate_completion(state, prepared, max_tokens, temperature, None, "stop", None)
-            .await
-        {
-            Ok(c) => c,
-            Err(err) => return err.into_response(),
-        };
-    let stop_reason = anthropic_stop_reason(completion.finish_reason);
-    let envelope = AnthropicMessageEnvelope {
-        id: gen_anthropic_id(),
-        kind: "message",
-        role: "assistant",
-        content: vec![AnthropicContentBlockText {
-            kind: "text",
-            text: completion.content.unwrap_or_default(),
-        }],
-        model: model_label,
-        stop_reason: Some(stop_reason),
-        stop_sequence: None,
-        usage: AnthropicUsage {
-            input_tokens,
-            output_tokens: completion.completion_tokens,
+    let completion = match generate_completion(
+        state,
+        CompletionRequest {
+            generation,
+            max_tokens,
+            temperature,
+            seed: None,
+            default_finish: "stop",
+            tool_context,
+            native_output,
         },
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(err) => return err.into_response(),
     };
-    Json(envelope).into_response()
+    super::anthropic::collected_response(
+        model_label,
+        input_tokens,
+        super::anthropic::CollectedOutput {
+            content: completion.content,
+            reasoning: completion.reasoning,
+            tool_calls: completion.tool_calls,
+            finish_reason: anthropic_stop_reason(completion.finish_reason),
+            completion_tokens: completion.completion_tokens,
+            thinking_tokens: completion.reasoning_tokens,
+        },
+        output_format,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1949,6 +2172,46 @@ async fn diffusion_gemma_healthz(State(state): State<DiffusionGemmaAppState>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn responses_preserve_gemma_native_channel_tokens_without_tools() {
+        let native = NativeOutputDecoderConfig {
+            dialect: crate::core::native_output::NativeOutputDialect::Gemma,
+            reasoning_enabled: true,
+        };
+        assert!(!skip_special_tokens_with_native_output(true, Some(native)));
+        assert!(skip_special_tokens_with_native_output(true, None));
+    }
+
+    #[test]
+    fn diffusion_adapter_rejects_unmapped_typed_output() {
+        let mut content = String::new();
+        let mut reasoning = String::new();
+        let mut reasoning_summary = String::new();
+        let mut calls = Vec::new();
+        let mut finish = "stop";
+        let error = collect_tool_parser_events(
+            &mut content,
+            &mut reasoning,
+            &mut reasoning_summary,
+            &mut calls,
+            vec![GeneratedOutputEvent::ImageOutput(
+                crate::core::generated_output::ImageArtifact {
+                    data: vec![1],
+                    mime_type: "image/png".to_owned(),
+                    width: None,
+                    height: None,
+                },
+            )],
+            &mut finish,
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("no enabled producer mapping for generated image"));
+        assert!(content.is_empty());
+        assert!(calls.is_empty());
+    }
 
     fn weather_tool() -> ToolDefinition {
         ToolDefinition {
@@ -2113,7 +2376,7 @@ mod tests {
             },
         ];
 
-        let completion = collect_events(events, "stop");
+        let completion = collect_events(events, "stop", None).unwrap();
         assert_eq!(completion.content.as_deref(), Some("hello"));
         assert_eq!(completion.finish_reason, "length");
         assert_eq!(completion.completion_tokens, 2);
@@ -2150,6 +2413,7 @@ mod tests {
                 },
             },
             "stop",
+            None,
         )
         .unwrap();
         assert_eq!(completion.finish_reason, "tool_calls");
@@ -2167,18 +2431,21 @@ mod tests {
     fn openai_tool_frames_emit_name_then_json_arguments() {
         let mut next = 0;
         let mut names = Vec::new();
+        let mut finish_reason = None;
         let frames = openai_tool_event_frames(
             "chatcmpl-test",
             "diffusion-gemma",
             0,
-            vec![AssistantOutputEvent::ToolCall(ToolCall {
+            vec![GeneratedOutputEvent::ToolCall(ToolCall {
                 id: "call_test_0".to_owned(),
                 name: "get_weather".to_owned(),
                 arguments: serde_json::json!({"city": "东京", "days": 2}),
             })],
             &mut next,
             &mut names,
-        );
+            &mut finish_reason,
+        )
+        .unwrap();
         let rendered = frames
             .iter()
             .map(|frame| String::from_utf8(frame.to_vec()).unwrap())

@@ -2560,18 +2560,27 @@ impl EngineVariant {
 
     async fn anthropic_messages(&self, req: anthropic::MessagesRequest) -> Response {
         match self {
-            Self::Qwen35(state) => anthropic::messages(State(state.clone()), Json(req)).await,
-            Self::Qwen35Moe(state) => anthropic::messages(State(state.clone()), Json(req)).await,
-            Self::Qwen36Moe(state) => anthropic::messages(State(state.clone()), Json(req)).await,
-            Self::Gemma4(state) => anthropic::messages(State(state.clone()), Json(req)).await,
-            Self::Gemma4Drafter(state) => {
-                anthropic::gemma4_drafter_messages(State(state.as_ref().clone()), Json(req)).await
+            Self::Qwen35(state) => anthropic::messages(State(state.clone()), Ok(Json(req))).await,
+            Self::Qwen35Moe(state) => {
+                anthropic::messages(State(state.clone()), Ok(Json(req))).await
             }
-            Self::Glm4MoeLite(state) => anthropic::messages(State(state.clone()), Json(req)).await,
-            Self::Llama(state) => anthropic::messages(State(state.clone()), Json(req)).await,
-            Self::MiniCpmV46(state) => anthropic::messages(State(state.clone()), Json(req)).await,
+            Self::Qwen36Moe(state) => {
+                anthropic::messages(State(state.clone()), Ok(Json(req))).await
+            }
+            Self::Gemma4(state) => anthropic::messages(State(state.clone()), Ok(Json(req))).await,
+            Self::Gemma4Drafter(state) => {
+                anthropic::gemma4_drafter_messages(State(state.as_ref().clone()), Ok(Json(req)))
+                    .await
+            }
+            Self::Glm4MoeLite(state) => {
+                anthropic::messages(State(state.clone()), Ok(Json(req))).await
+            }
+            Self::Llama(state) => anthropic::messages(State(state.clone()), Ok(Json(req))).await,
+            Self::MiniCpmV46(state) => {
+                anthropic::messages(State(state.clone()), Ok(Json(req))).await
+            }
             Self::DiffusionGemma(state) => {
-                diffusion_gemma::anthropic_messages(State(state.clone()), Json(req)).await
+                diffusion_gemma::anthropic_messages(State(state.clone()), Ok(Json(req))).await
             }
         }
     }
@@ -3406,8 +3415,20 @@ async fn openai_responses(
 
 async fn anthropic_messages(
     State(pool): State<EnginePoolState>,
-    Json(mut req): Json<anthropic::MessagesRequest>,
+    payload: std::result::Result<
+        Json<anthropic::MessagesRequest>,
+        axum::extract::rejection::JsonRejection,
+    >,
 ) -> Response {
+    let mut req = match payload {
+        Ok(Json(req)) => req,
+        Err(error) => {
+            return anthropic::anthropic_error_response(
+                StatusCode::BAD_REQUEST,
+                format!("invalid Messages request: {}", error.body_text()),
+            );
+        }
+    };
     let requested = req.model.as_deref().filter(|model| !model.is_empty());
     let (model_id, engine) = match pool.resolve_engine(requested).await {
         Ok(resolved) => resolved,

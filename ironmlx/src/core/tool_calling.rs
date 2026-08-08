@@ -11,6 +11,7 @@ use crate::core::constrained::{
     schema_accepts_string, schema_is_string_only, validate_schema_value,
     validate_strict_tool_schema, validate_tool_schemas,
 };
+use crate::core::generated_output::GeneratedOutputEvent;
 
 const TOOL_CALL_OPEN: &str = "<tool_call>";
 const FUNCTION_OPEN: &str = "<function=";
@@ -204,6 +205,8 @@ pub struct ToolCall {
 pub struct AgentMessage {
     pub role: String,
     pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<TemplateToolCall>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -236,14 +239,6 @@ impl From<ToolCall> for TemplateToolCall {
             },
         }
     }
-}
-
-/// Incremental parser output. Tool calls become visible only after their native
-/// closing marker, when a valid JSON argument object can be constructed.
-#[derive(Debug, Clone, PartialEq)]
-pub enum AssistantOutputEvent {
-    TextDelta(String),
-    ToolCall(ToolCall),
 }
 
 /// Dialect-dispatched incremental parser used by protocol adapters.
@@ -292,7 +287,7 @@ impl ToolCallParser {
         }
     }
 
-    pub fn push(&mut self, delta: &str) -> anyhow::Result<Vec<AssistantOutputEvent>> {
+    pub fn push(&mut self, delta: &str) -> anyhow::Result<Vec<GeneratedOutputEvent>> {
         match self {
             Self::Qwen(parser) => parser.push(delta),
             Self::Gemma(parser) => parser.push(delta),
@@ -303,7 +298,7 @@ impl ToolCallParser {
         }
     }
 
-    pub fn finish(self) -> anyhow::Result<(Vec<AssistantOutputEvent>, bool)> {
+    pub fn finish(self) -> anyhow::Result<(Vec<GeneratedOutputEvent>, bool)> {
         match self {
             Self::Qwen(parser) => parser.finish(),
             Self::Gemma(parser) => parser.finish(),
@@ -364,7 +359,7 @@ impl QwenToolCallParser {
         })
     }
 
-    pub fn push(&mut self, delta: &str) -> anyhow::Result<Vec<AssistantOutputEvent>> {
+    pub fn push(&mut self, delta: &str) -> anyhow::Result<Vec<GeneratedOutputEvent>> {
         self.pending.push_str(delta);
         if self.pending.len() > MAX_PENDING_BYTES {
             bail!("tool-call parser pending buffer exceeds {MAX_PENDING_BYTES} bytes");
@@ -372,7 +367,7 @@ impl QwenToolCallParser {
         self.advance(false)
     }
 
-    pub fn finish(mut self) -> anyhow::Result<(Vec<AssistantOutputEvent>, bool)> {
+    pub fn finish(mut self) -> anyhow::Result<(Vec<GeneratedOutputEvent>, bool)> {
         let events = self.advance(true)?;
         if !matches!(self.state, ParseState::Text) {
             bail!("incomplete native tool-call output");
@@ -383,7 +378,7 @@ impl QwenToolCallParser {
         Ok((events, self.saw_tool_call))
     }
 
-    fn advance(&mut self, eof: bool) -> anyhow::Result<Vec<AssistantOutputEvent>> {
+    fn advance(&mut self, eof: bool) -> anyhow::Result<Vec<GeneratedOutputEvent>> {
         let mut events = Vec::new();
         loop {
             let state = std::mem::replace(&mut self.state, ParseState::Text);
@@ -396,7 +391,7 @@ impl QwenToolCallParser {
                             bail!("unexpected text between native tool calls");
                         }
                         if !text.is_empty() && !self.saw_tool_call {
-                            events.push(AssistantOutputEvent::TextDelta(text));
+                            events.push(GeneratedOutputEvent::TextDelta(text));
                         }
                         self.saw_tool_call = true;
                         self.state = ParseState::FunctionStart;
@@ -407,7 +402,7 @@ impl QwenToolCallParser {
                             bail!("unexpected text after native tool call");
                         }
                         if !self.pending.is_empty() && !self.saw_tool_call {
-                            events.push(AssistantOutputEvent::TextDelta(std::mem::take(
+                            events.push(GeneratedOutputEvent::TextDelta(std::mem::take(
                                 &mut self.pending,
                             )));
                         } else {
@@ -426,7 +421,7 @@ impl QwenToolCallParser {
                         if emit_len > 0 {
                             let text = self.pending[..emit_len].to_owned();
                             self.pending.drain(..emit_len);
-                            events.push(AssistantOutputEvent::TextDelta(text));
+                            events.push(GeneratedOutputEvent::TextDelta(text));
                         }
                     }
                     self.state = ParseState::Text;
@@ -564,7 +559,7 @@ impl QwenToolCallParser {
                         arguments: Value::Object(arguments),
                     };
                     self.next_index += 1;
-                    events.push(AssistantOutputEvent::ToolCall(call));
+                    events.push(GeneratedOutputEvent::ToolCall(call));
                     self.state = ParseState::Text;
                 }
             }
@@ -627,7 +622,7 @@ impl MiniCpm5ToolCallParser {
         })
     }
 
-    pub fn push(&mut self, delta: &str) -> anyhow::Result<Vec<AssistantOutputEvent>> {
+    pub fn push(&mut self, delta: &str) -> anyhow::Result<Vec<GeneratedOutputEvent>> {
         self.pending.push_str(delta);
         if self.pending.len() > MAX_PENDING_BYTES {
             bail!("tool-call parser pending buffer exceeds {MAX_PENDING_BYTES} bytes");
@@ -635,7 +630,7 @@ impl MiniCpm5ToolCallParser {
         self.advance(false)
     }
 
-    pub fn finish(mut self) -> anyhow::Result<(Vec<AssistantOutputEvent>, bool)> {
+    pub fn finish(mut self) -> anyhow::Result<(Vec<GeneratedOutputEvent>, bool)> {
         let events = self.advance(true)?;
         if !matches!(self.state, MiniCpm5ParseState::Text) {
             bail!("incomplete native MiniCPM5 tool-call output");
@@ -646,7 +641,7 @@ impl MiniCpm5ToolCallParser {
         Ok((events, self.saw_tool_call))
     }
 
-    fn advance(&mut self, eof: bool) -> anyhow::Result<Vec<AssistantOutputEvent>> {
+    fn advance(&mut self, eof: bool) -> anyhow::Result<Vec<GeneratedOutputEvent>> {
         let mut events = Vec::new();
         loop {
             let state = std::mem::replace(&mut self.state, MiniCpm5ParseState::Text);
@@ -659,7 +654,7 @@ impl MiniCpm5ToolCallParser {
                             bail!("unexpected text between native MiniCPM5 tool calls");
                         }
                         if !text.is_empty() && !self.saw_tool_call {
-                            events.push(AssistantOutputEvent::TextDelta(text));
+                            events.push(GeneratedOutputEvent::TextDelta(text));
                         }
                         self.saw_tool_call = true;
                         self.state = MiniCpm5ParseState::FunctionName;
@@ -670,7 +665,7 @@ impl MiniCpm5ToolCallParser {
                             bail!("unexpected text after native MiniCPM5 tool call");
                         }
                         if !self.pending.is_empty() && !self.saw_tool_call {
-                            events.push(AssistantOutputEvent::TextDelta(std::mem::take(
+                            events.push(GeneratedOutputEvent::TextDelta(std::mem::take(
                                 &mut self.pending,
                             )));
                         } else {
@@ -687,7 +682,7 @@ impl MiniCpm5ToolCallParser {
                                     bail!("unexpected text after native MiniCPM5 tool call");
                                 }
                             } else {
-                                events.push(AssistantOutputEvent::TextDelta(text));
+                                events.push(GeneratedOutputEvent::TextDelta(text));
                             }
                         }
                     }
@@ -727,7 +722,7 @@ impl MiniCpm5ToolCallParser {
                         .with_context(|| {
                             format!("tool `{name}` arguments do not match its schema")
                         })?;
-                        events.push(AssistantOutputEvent::ToolCall(ToolCall {
+                        events.push(GeneratedOutputEvent::ToolCall(ToolCall {
                             id: format!("call_{}_{}", self.response_id, self.next_index),
                             name,
                             arguments: Value::Object(arguments),
@@ -979,10 +974,10 @@ impl LlamaToolCallParser {
         })
     }
 
-    pub fn push(&mut self, delta: &str) -> anyhow::Result<Vec<AssistantOutputEvent>> {
+    pub fn push(&mut self, delta: &str) -> anyhow::Result<Vec<GeneratedOutputEvent>> {
         if self.text_mode {
             return Ok((!delta.is_empty())
-                .then(|| AssistantOutputEvent::TextDelta(delta.to_owned()))
+                .then(|| GeneratedOutputEvent::TextDelta(delta.to_owned()))
                 .into_iter()
                 .collect());
         }
@@ -1000,12 +995,12 @@ impl LlamaToolCallParser {
         self.advance(false)
     }
 
-    pub fn finish(mut self) -> anyhow::Result<(Vec<AssistantOutputEvent>, bool)> {
+    pub fn finish(mut self) -> anyhow::Result<(Vec<GeneratedOutputEvent>, bool)> {
         let events = self.advance(true)?;
         Ok((events, self.saw_tool_call))
     }
 
-    fn advance(&mut self, eof: bool) -> anyhow::Result<Vec<AssistantOutputEvent>> {
+    fn advance(&mut self, eof: bool) -> anyhow::Result<Vec<GeneratedOutputEvent>> {
         let Some(first) = self
             .pending
             .chars()
@@ -1013,7 +1008,7 @@ impl LlamaToolCallParser {
         else {
             if eof && !self.pending.is_empty() {
                 self.text_mode = true;
-                return Ok(vec![AssistantOutputEvent::TextDelta(std::mem::take(
+                return Ok(vec![GeneratedOutputEvent::TextDelta(std::mem::take(
                     &mut self.pending,
                 ))]);
             }
@@ -1021,7 +1016,7 @@ impl LlamaToolCallParser {
         };
         if first != '{' {
             self.text_mode = true;
-            return Ok(vec![AssistantOutputEvent::TextDelta(std::mem::take(
+            return Ok(vec![GeneratedOutputEvent::TextDelta(std::mem::take(
                 &mut self.pending,
             ))]);
         }
@@ -1031,7 +1026,7 @@ impl LlamaToolCallParser {
                 if validate_schema_value(&definition.parameters, &native.parameters).is_ok() {
                     self.pending.clear();
                     self.saw_tool_call = true;
-                    return Ok(vec![AssistantOutputEvent::ToolCall(ToolCall {
+                    return Ok(vec![GeneratedOutputEvent::ToolCall(ToolCall {
                         id: format!("call_{}_0", self.response_id),
                         name: native.name,
                         arguments: native.parameters,
@@ -1048,7 +1043,7 @@ impl LlamaToolCallParser {
             validate_schema_value(schema, &value)
                 .context("structured Llama output does not match its response schema")?;
             self.text_mode = true;
-            return Ok(vec![AssistantOutputEvent::TextDelta(std::mem::take(
+            return Ok(vec![GeneratedOutputEvent::TextDelta(std::mem::take(
                 &mut self.pending,
             ))]);
         }
@@ -1063,7 +1058,7 @@ impl LlamaToolCallParser {
             .with_context(|| format!("tool `{}` arguments do not match its schema", native.name))?;
         self.pending.clear();
         self.saw_tool_call = true;
-        Ok(vec![AssistantOutputEvent::ToolCall(ToolCall {
+        Ok(vec![GeneratedOutputEvent::ToolCall(ToolCall {
             id: format!("call_{}_0", self.response_id),
             name: native.name,
             arguments: native.parameters,
@@ -1121,7 +1116,7 @@ impl GlmToolCallParser {
         })
     }
 
-    pub fn push(&mut self, delta: &str) -> anyhow::Result<Vec<AssistantOutputEvent>> {
+    pub fn push(&mut self, delta: &str) -> anyhow::Result<Vec<GeneratedOutputEvent>> {
         self.pending.push_str(delta);
         if self.pending.len() > MAX_PENDING_BYTES {
             bail!("tool-call parser pending buffer exceeds {MAX_PENDING_BYTES} bytes");
@@ -1129,7 +1124,7 @@ impl GlmToolCallParser {
         self.advance(false)
     }
 
-    pub fn finish(mut self) -> anyhow::Result<(Vec<AssistantOutputEvent>, bool)> {
+    pub fn finish(mut self) -> anyhow::Result<(Vec<GeneratedOutputEvent>, bool)> {
         let events = self.advance(true)?;
         if !matches!(self.state, GlmParseState::Text) {
             bail!("incomplete native GLM tool-call output");
@@ -1140,7 +1135,7 @@ impl GlmToolCallParser {
         Ok((events, self.saw_tool_call))
     }
 
-    fn advance(&mut self, eof: bool) -> anyhow::Result<Vec<AssistantOutputEvent>> {
+    fn advance(&mut self, eof: bool) -> anyhow::Result<Vec<GeneratedOutputEvent>> {
         let mut events = Vec::new();
         loop {
             let state = std::mem::replace(&mut self.state, GlmParseState::Text);
@@ -1157,7 +1152,7 @@ impl GlmToolCallParser {
                             bail!("unexpected text between native GLM tool calls");
                         }
                         if !text.is_empty() && !self.saw_tool_call {
-                            events.push(AssistantOutputEvent::TextDelta(text));
+                            events.push(GeneratedOutputEvent::TextDelta(text));
                         }
                         if marker == TOOL_CALL_OPEN {
                             self.saw_tool_call = true;
@@ -1175,7 +1170,7 @@ impl GlmToolCallParser {
                             bail!("unexpected text after native GLM tool call");
                         }
                         if !self.pending.is_empty() && !self.saw_tool_call {
-                            events.push(AssistantOutputEvent::TextDelta(std::mem::take(
+                            events.push(GeneratedOutputEvent::TextDelta(std::mem::take(
                                 &mut self.pending,
                             )));
                         } else {
@@ -1196,7 +1191,7 @@ impl GlmToolCallParser {
                                     bail!("unexpected text after native GLM tool call");
                                 }
                             } else {
-                                events.push(AssistantOutputEvent::TextDelta(text));
+                                events.push(GeneratedOutputEvent::TextDelta(text));
                             }
                         }
                     }
@@ -1237,7 +1232,7 @@ impl GlmToolCallParser {
                         .with_context(|| {
                             format!("GLM tool `{name}` arguments do not match its schema")
                         })?;
-                        events.push(AssistantOutputEvent::ToolCall(ToolCall {
+                        events.push(GeneratedOutputEvent::ToolCall(ToolCall {
                             id: format!("call_{}_{}", self.response_id, self.next_index),
                             name,
                             arguments: Value::Object(arguments),
@@ -1390,7 +1385,7 @@ impl GemmaToolCallParser {
         })
     }
 
-    pub fn push(&mut self, delta: &str) -> anyhow::Result<Vec<AssistantOutputEvent>> {
+    pub fn push(&mut self, delta: &str) -> anyhow::Result<Vec<GeneratedOutputEvent>> {
         self.pending.push_str(delta);
         if self.pending.len() > MAX_PENDING_BYTES {
             bail!("tool-call parser pending buffer exceeds {MAX_PENDING_BYTES} bytes");
@@ -1398,7 +1393,7 @@ impl GemmaToolCallParser {
         self.advance(false)
     }
 
-    pub fn finish(mut self) -> anyhow::Result<(Vec<AssistantOutputEvent>, bool)> {
+    pub fn finish(mut self) -> anyhow::Result<(Vec<GeneratedOutputEvent>, bool)> {
         let events = self.advance(true)?;
         if self.in_call {
             bail!("incomplete native Gemma tool-call output");
@@ -1411,7 +1406,7 @@ impl GemmaToolCallParser {
         Ok((events, self.saw_tool_call))
     }
 
-    fn advance(&mut self, eof: bool) -> anyhow::Result<Vec<AssistantOutputEvent>> {
+    fn advance(&mut self, eof: bool) -> anyhow::Result<Vec<GeneratedOutputEvent>> {
         let mut events = Vec::new();
         loop {
             if self.in_call {
@@ -1430,7 +1425,7 @@ impl GemmaToolCallParser {
                     .ok_or_else(|| anyhow!("model requested unknown tool `{name}`"))?;
                 validate_schema_value(&definition.parameters, &Value::Object(arguments.clone()))
                     .with_context(|| format!("tool `{name}` arguments do not match its schema"))?;
-                events.push(AssistantOutputEvent::ToolCall(ToolCall {
+                events.push(GeneratedOutputEvent::ToolCall(ToolCall {
                     id: format!("call_{}_{}", self.response_id, self.next_index),
                     name,
                     arguments: Value::Object(arguments),
@@ -1448,7 +1443,7 @@ impl GemmaToolCallParser {
                     bail!("unexpected text between native tool calls");
                 }
                 if !text.is_empty() && !self.saw_tool_call {
-                    events.push(AssistantOutputEvent::TextDelta(text));
+                    events.push(GeneratedOutputEvent::TextDelta(text));
                 }
                 self.pending.drain(..start + GEMMA_TOOL_CALL_OPEN.len());
                 self.in_call = true;
@@ -1462,7 +1457,7 @@ impl GemmaToolCallParser {
                     bail!("unexpected text after native tool call");
                 }
                 if !text.is_empty() && !self.saw_tool_call {
-                    events.push(AssistantOutputEvent::TextDelta(text));
+                    events.push(GeneratedOutputEvent::TextDelta(text));
                 }
             } else {
                 let keep = gemma_partial_marker_suffix_len(&self.pending);
@@ -1475,7 +1470,7 @@ impl GemmaToolCallParser {
                         bail!("unexpected text after native tool call");
                     }
                     if !text.is_empty() && !self.saw_tool_call {
-                        events.push(AssistantOutputEvent::TextDelta(text));
+                        events.push(GeneratedOutputEvent::TextDelta(text));
                     }
                 }
             }
@@ -1933,7 +1928,7 @@ mod tests {
         assert!(saw_tool_call);
         assert_eq!(
             events,
-            vec![AssistantOutputEvent::ToolCall(ToolCall {
+            vec![GeneratedOutputEvent::ToolCall(ToolCall {
                 id: "call_abc_0".into(),
                 name: "get_weather".into(),
                 arguments: serde_json::json!({"city": "东京", "days": 3}),
@@ -1959,8 +1954,8 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                AssistantOutputEvent::TextDelta("checking\n".into()),
-                AssistantOutputEvent::ToolCall(ToolCall {
+                GeneratedOutputEvent::TextDelta("checking\n".into()),
+                GeneratedOutputEvent::ToolCall(ToolCall {
                     id: "call_mini_0".into(),
                     name: "get_weather".into(),
                     arguments: serde_json::json!({"city": "Tokyo\n<&", "days": 2}),
@@ -1982,8 +1977,9 @@ mod tests {
             events
                 .iter()
                 .map(|event| match event {
-                    AssistantOutputEvent::ToolCall(call) => call.id.as_str(),
-                    AssistantOutputEvent::TextDelta(_) => panic!("unexpected text event"),
+                    GeneratedOutputEvent::ToolCall(call) => call.id.as_str(),
+                    GeneratedOutputEvent::TextDelta(_) => panic!("unexpected text event"),
+                    other => panic!("unexpected {} event", other.kind()),
                 })
                 .collect::<Vec<_>>(),
             ["call_parallel_0", "call_parallel_1"]
@@ -2016,12 +2012,12 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                AssistantOutputEvent::ToolCall(ToolCall {
+                GeneratedOutputEvent::ToolCall(ToolCall {
                     id: "call_abc_0".into(),
                     name: "get_weather".into(),
                     arguments: serde_json::json!({"city": "Tokyo"}),
                 }),
-                AssistantOutputEvent::ToolCall(ToolCall {
+                GeneratedOutputEvent::ToolCall(ToolCall {
                     id: "call_abc_1".into(),
                     name: "get_weather".into(),
                     arguments: serde_json::json!({"city": "Osaka", "days": 2}),
@@ -2057,7 +2053,7 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert!(events
             .iter()
-            .all(|event| matches!(event, AssistantOutputEvent::ToolCall(_))));
+            .all(|event| matches!(event, GeneratedOutputEvent::ToolCall(_))));
     }
 
     #[test]
@@ -2066,7 +2062,7 @@ mod tests {
         let events = parser.push("ordinary answer").unwrap();
         assert_eq!(
             events,
-            vec![AssistantOutputEvent::TextDelta("ordinary answer".into())]
+            vec![GeneratedOutputEvent::TextDelta("ordinary answer".into())]
         );
         let (tail, saw_tool_call) = parser.finish().unwrap();
         assert!(!saw_tool_call);
@@ -2082,7 +2078,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             events,
-            vec![AssistantOutputEvent::ToolCall(ToolCall {
+            vec![GeneratedOutputEvent::ToolCall(ToolCall {
                 id: "call_llama_0".into(),
                 name: "get_weather".into(),
                 arguments: serde_json::json!({"city": "东京", "days": 2}),
@@ -2095,11 +2091,11 @@ mod tests {
         assert!(text.push("  ").unwrap().is_empty());
         assert_eq!(
             text.push("ordinary").unwrap(),
-            vec![AssistantOutputEvent::TextDelta("  ordinary".into())]
+            vec![GeneratedOutputEvent::TextDelta("  ordinary".into())]
         );
         assert_eq!(
             text.push(" answer").unwrap(),
-            vec![AssistantOutputEvent::TextDelta(" answer".into())]
+            vec![GeneratedOutputEvent::TextDelta(" answer".into())]
         );
         assert!(!text.finish().unwrap().1);
     }
@@ -2142,7 +2138,7 @@ mod tests {
         let json = r#"{"answer":"sunny"}"#;
         assert_eq!(
             structured.push(json).unwrap(),
-            vec![AssistantOutputEvent::TextDelta(json.into())]
+            vec![GeneratedOutputEvent::TextDelta(json.into())]
         );
         assert!(!structured.finish().unwrap().1);
 
@@ -2171,7 +2167,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             events.as_slice(),
-            [AssistantOutputEvent::ToolCall(_)]
+            [GeneratedOutputEvent::ToolCall(_)]
         ));
         assert!(tool.finish().unwrap().1);
     }
@@ -2212,8 +2208,8 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                AssistantOutputEvent::TextDelta("需要查询。".into()),
-                AssistantOutputEvent::ToolCall(ToolCall {
+                GeneratedOutputEvent::TextDelta("需要查询。".into()),
+                GeneratedOutputEvent::ToolCall(ToolCall {
                     id: "call_glm_0".into(),
                     name: "get_weather".into(),
                     arguments: serde_json::json!({"city": "东京", "days": 3}),
@@ -2237,7 +2233,7 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(
             events[1],
-            AssistantOutputEvent::ToolCall(ToolCall {
+            GeneratedOutputEvent::ToolCall(ToolCall {
                 id: "call_glm_1".into(),
                 name: "get_weather".into(),
                 arguments: serde_json::json!({"city": "Osaka", "days": 2}),
@@ -2287,8 +2283,8 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                AssistantOutputEvent::TextDelta("需要查询。\n".into()),
-                AssistantOutputEvent::ToolCall(ToolCall {
+                GeneratedOutputEvent::TextDelta("需要查询。\n".into()),
+                GeneratedOutputEvent::ToolCall(ToolCall {
                     id: "call_gemma_0".into(),
                     name: "get_weather".into(),
                     arguments: serde_json::json!({"city": "东京", "days": 3}),
@@ -2327,7 +2323,7 @@ mod tests {
         assert!(parser.finish().unwrap().1);
         assert_eq!(
             events,
-            vec![AssistantOutputEvent::ToolCall(ToolCall {
+            vec![GeneratedOutputEvent::ToolCall(ToolCall {
                 id: "call_gemma_0".into(),
                 name: "search".into(),
                 arguments: serde_json::json!({

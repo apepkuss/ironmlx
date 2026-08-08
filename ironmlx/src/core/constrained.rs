@@ -12,6 +12,8 @@ use serde_json::{Map, Value};
 
 use mlx::Array;
 
+use crate::core::native_output::NativeOutputDialect;
+use crate::core::tool_calling::ToolDialect;
 use crate::core::tool_calling::{ToolDefinition, GEMMA_STRING_DELIMITER};
 use crate::Result;
 
@@ -32,6 +34,10 @@ pub enum ToolChoiceConstraint {
 pub struct ToolConstraintOptions {
     pub choice: ToolChoiceConstraint,
     pub allow_parallel_calls: bool,
+}
+
+fn requires_accepting_state_at_length(options: &ToolConstraintOptions) -> bool {
+    !matches!(&options.choice, ToolChoiceConstraint::Auto)
 }
 
 impl Default for ToolConstraintOptions {
@@ -117,7 +123,7 @@ impl ConstraintTokenizer {
     }
 
     #[cfg(test)]
-    fn byte_level() -> Result<Self> {
+    pub(crate) fn byte_level() -> Result<Self> {
         let mut token_bytes = (0_u16..=255)
             .map(|byte| vec![byte as u8])
             .collect::<Vec<_>>();
@@ -194,6 +200,7 @@ impl ConstraintTokenizer {
             grammar_source: Arc::from(grammar_source),
             vocab_size: self.vocab_size,
             eos_token_ids: Arc::clone(&self.eos_token_ids),
+            require_accepting_state_at_length: requires_accepting_state_at_length(options),
         })
     }
 
@@ -232,6 +239,7 @@ impl ConstraintTokenizer {
             grammar_source: Arc::from(grammar_source),
             vocab_size: self.vocab_size,
             eos_token_ids: Arc::clone(&self.eos_token_ids),
+            require_accepting_state_at_length: requires_accepting_state_at_length(options),
         })
     }
 
@@ -270,6 +278,7 @@ impl ConstraintTokenizer {
             grammar_source: Arc::from(grammar_source),
             vocab_size: self.vocab_size,
             eos_token_ids: Arc::clone(&self.eos_token_ids),
+            require_accepting_state_at_length: requires_accepting_state_at_length(options),
         })
     }
 
@@ -308,6 +317,7 @@ impl ConstraintTokenizer {
             grammar_source: Arc::from(grammar_source),
             vocab_size: self.vocab_size,
             eos_token_ids: Arc::clone(&self.eos_token_ids),
+            require_accepting_state_at_length: requires_accepting_state_at_length(options),
         })
     }
 
@@ -346,6 +356,7 @@ impl ConstraintTokenizer {
             grammar_source: Arc::from(grammar_source),
             vocab_size: self.vocab_size,
             eos_token_ids: Arc::clone(&self.eos_token_ids),
+            require_accepting_state_at_length: requires_accepting_state_at_length(options),
         })
     }
 
@@ -370,6 +381,80 @@ impl ConstraintTokenizer {
             grammar_source: Arc::from(serde_json::to_string(schema)?),
             vocab_size: self.vocab_size,
             eos_token_ids: Arc::clone(&self.eos_token_ids),
+            require_accepting_state_at_length: false,
+        })
+    }
+
+    /// Compile one grammar whose native reasoning section remains
+    /// unconstrained while the final direct output must match `schema`.
+    ///
+    /// Tagged dialects begin generation inside the reasoning channel and must
+    /// emit `</think>` before the final answer. Gemma opens an explicit thought
+    /// channel and may skip it, so its reasoning prefix is optional.
+    pub fn compile_json_output_with_reasoning(
+        &self,
+        schema: &Value,
+        reasoning_dialect: NativeOutputDialect,
+    ) -> Result<ConstraintPlan> {
+        validate_constraint_output_schema(schema)?;
+        let grammar_source = build_json_output_grammar(schema)?;
+        self.compile_reasoning_wrapped_lark(grammar_source, reasoning_dialect, false)
+    }
+
+    /// Compile the `tool_choice=auto` grammar used when a request enables
+    /// native reasoning, client tools, and a structured final answer together.
+    pub fn compile_tools_with_output_and_reasoning(
+        &self,
+        tool_dialect: ToolDialect,
+        reasoning_dialect: NativeOutputDialect,
+        tools: &[ToolDefinition],
+        options: &ToolConstraintOptions,
+        output_schema: &Value,
+    ) -> Result<ConstraintPlan> {
+        validate_tool_schemas(tools)?;
+        validate_constraint_output_schema(output_schema)?;
+        let grammar_source = match tool_dialect {
+            ToolDialect::Qwen35 | ToolDialect::MiniCpmV46 => {
+                build_qwen_tool_grammar(tools, options, Some(output_schema))?
+            }
+            ToolDialect::Gemma => build_gemma_tool_grammar(tools, options, Some(output_schema))?,
+            ToolDialect::Glm => build_glm_tool_grammar(tools, options, Some(output_schema))?,
+            ToolDialect::Llama => build_llama_tool_grammar(tools, options, Some(output_schema))?,
+            ToolDialect::MiniCpm5 => {
+                build_minicpm5_tool_grammar(tools, options, Some(output_schema))?
+            }
+        };
+        self.compile_reasoning_wrapped_lark(
+            grammar_source,
+            reasoning_dialect,
+            requires_accepting_state_at_length(options),
+        )
+    }
+
+    fn compile_reasoning_wrapped_lark(
+        &self,
+        grammar_source: String,
+        reasoning_dialect: NativeOutputDialect,
+        require_accepting_state_at_length: bool,
+    ) -> Result<ConstraintPlan> {
+        let grammar_source = wrap_with_native_reasoning(grammar_source, reasoning_dialect)?;
+        let grammar = TopLevelGrammar::from_lark(grammar_source.clone());
+        let matcher = Matcher::new(self.factory.create_parser(grammar.clone()));
+        if matcher.is_error() {
+            bail!(
+                "compile reasoning-aware output grammar: {}",
+                matcher
+                    .get_error()
+                    .unwrap_or_else(|| "unknown parser error".to_string())
+            );
+        }
+        Ok(ConstraintPlan {
+            factory: Arc::clone(&self.factory),
+            grammar,
+            grammar_source: Arc::from(grammar_source),
+            vocab_size: self.vocab_size,
+            eos_token_ids: Arc::clone(&self.eos_token_ids),
+            require_accepting_state_at_length,
         })
     }
 }
@@ -382,6 +467,7 @@ pub struct ConstraintPlan {
     grammar_source: Arc<str>,
     vocab_size: usize,
     eos_token_ids: Arc<[u32]>,
+    require_accepting_state_at_length: bool,
 }
 
 impl fmt::Debug for ConstraintPlan {
@@ -409,6 +495,7 @@ impl ConstraintPlan {
             vocab_size: self.vocab_size,
             committed_tokens: 0,
             eos_token_ids: Arc::clone(&self.eos_token_ids),
+            require_accepting_state_at_length: self.require_accepting_state_at_length,
         })
     }
 
@@ -424,6 +511,7 @@ pub struct ConstraintSession {
     vocab_size: usize,
     committed_tokens: usize,
     eos_token_ids: Arc<[u32]>,
+    require_accepting_state_at_length: bool,
 }
 
 impl Clone for ConstraintSession {
@@ -433,6 +521,7 @@ impl Clone for ConstraintSession {
             vocab_size: self.vocab_size,
             committed_tokens: self.committed_tokens,
             eos_token_ids: Arc::clone(&self.eos_token_ids),
+            require_accepting_state_at_length: self.require_accepting_state_at_length,
         }
     }
 }
@@ -458,6 +547,10 @@ impl ConstraintSession {
 
     pub fn eos_token_ids(&self) -> &[u32] {
         &self.eos_token_ids
+    }
+
+    pub(crate) fn requires_accepting_state_at_length(&self) -> bool {
+        self.require_accepting_state_at_length
     }
 
     pub fn compute_mask(&mut self) -> Result<SimpleVob> {
@@ -1004,6 +1097,40 @@ fn type_contains(kind: Option<&Value>, expected: &str) -> bool {
         Some(Value::Array(kinds)) => kinds.iter().any(|kind| kind.as_str() == Some(expected)),
         _ => false,
     }
+}
+
+fn build_json_output_grammar(schema: &Value) -> Result<String> {
+    Ok(format!(
+        "start: structured_output\nstructured_output: %json {}\nws: WS?\nWS: /[ \\t\\r\\n]+/\n",
+        serde_json::to_string(schema)?
+    ))
+}
+
+fn wrap_with_native_reasoning(
+    grammar_source: String,
+    dialect: NativeOutputDialect,
+) -> Result<String> {
+    let grammar_source = grammar_source
+        .strip_prefix("start:")
+        .ok_or_else(|| anyhow!("reasoning-aware output grammar must begin with a start rule"))?;
+    let output_grammar = format!("native_output:{grammar_source}");
+    let prefix = match dialect {
+        NativeOutputDialect::Gemma => concat!(
+            "start: native_reasoning? ws native_output\n",
+            "native_reasoning[lazy]: \"<|channel>thought\\n\" REASONING_TEXT \"<channel|>\"\n",
+        ),
+        NativeOutputDialect::Qwen35
+        | NativeOutputDialect::Qwen36
+        | NativeOutputDialect::Glm
+        | NativeOutputDialect::MiniCpmV46
+        | NativeOutputDialect::MiniCpm5 => concat!(
+            "start: native_reasoning ws native_output\n",
+            "native_reasoning[lazy]: REASONING_TEXT \"</think>\"\n",
+        ),
+    };
+    Ok(format!(
+        "{prefix}{output_grammar}REASONING_TEXT: /(.|\\n)*/\n"
+    ))
 }
 
 fn build_qwen_tool_grammar(
@@ -2133,6 +2260,50 @@ mod tests {
     }
 
     #[test]
+    fn length_completion_policy_only_requires_tool_only_outputs_to_finish() {
+        let tokenizer = ConstraintTokenizer::byte_level().unwrap();
+        let auto = tokenizer
+            .compile_qwen_tools(&[weather_tool()], &ToolConstraintOptions::default())
+            .unwrap();
+        assert!(!auto
+            .start_session()
+            .unwrap()
+            .requires_accepting_state_at_length());
+
+        for choice in [
+            ToolChoiceConstraint::Required,
+            ToolChoiceConstraint::Function("get_weather".into()),
+        ] {
+            let tool_only = tokenizer
+                .compile_qwen_tools(
+                    &[weather_tool()],
+                    &ToolConstraintOptions {
+                        choice,
+                        allow_parallel_calls: false,
+                    },
+                )
+                .unwrap();
+            assert!(tool_only
+                .start_session()
+                .unwrap()
+                .requires_accepting_state_at_length());
+        }
+
+        let structured_output = tokenizer
+            .compile_json_output(&serde_json::json!({
+                "type": "object",
+                "properties": {"answer": {"type": "string"}},
+                "required": ["answer"],
+                "additionalProperties": false
+            }))
+            .unwrap();
+        assert!(!structured_output
+            .start_session()
+            .unwrap()
+            .requires_accepting_state_at_length());
+    }
+
+    #[test]
     fn disabled_parallel_calls_allows_zero_or_one_call() {
         let tokenizer = ConstraintTokenizer::byte_level().unwrap();
         let options = ToolConstraintOptions {
@@ -2514,6 +2685,165 @@ mod tests {
                 .unwrap()
                 < tokens.len()
         );
+    }
+
+    #[test]
+    fn reasoning_aware_structured_output_constrains_only_the_final_section() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"answer": {"const": "sunny"}},
+            "required": ["answer"],
+            "additionalProperties": false
+        });
+        let byte_tokenizer = ConstraintTokenizer::byte_level().unwrap();
+        let tagged = byte_tokenizer
+            .compile_json_output_with_reasoning(&schema, NativeOutputDialect::Qwen35)
+            .unwrap();
+        let mut tagged_valid = tagged.start_session().unwrap();
+        consume_bytes(
+            &mut tagged_valid,
+            br#"inspect freely</think>
+
+{"answer":"sunny"}"#,
+        )
+        .unwrap();
+        assert!(tagged_valid.is_accepting().unwrap());
+
+        let tagged_invalid = br#"inspect freely</think>{"answer":"cloudy"}"#
+            .iter()
+            .copied()
+            .map(u32::from)
+            .collect::<Vec<_>>();
+        assert!(
+            tagged
+                .start_session()
+                .unwrap()
+                .validate_tokens(&tagged_invalid)
+                .unwrap()
+                < tagged_invalid.len()
+        );
+
+        let gemma_tokenizer = ConstraintTokenizer::byte_level_gemma().unwrap();
+        let gemma = gemma_tokenizer
+            .compile_json_output_with_reasoning(&schema, NativeOutputDialect::Gemma)
+            .unwrap();
+        for output in [
+            "<|channel>thought\ninspect freely<channel|>{\"answer\":\"sunny\"}",
+            "{\"answer\":\"sunny\"}",
+        ] {
+            let mut session = gemma.start_session().unwrap();
+            session.commit_tokens(&gemma_tokens(output)).unwrap();
+            assert!(session.is_accepting().unwrap());
+        }
+    }
+
+    #[test]
+    fn reasoning_aware_auto_tools_allow_calls_or_structured_final_answers() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"answer": {"const": "sunny"}},
+            "required": ["answer"],
+            "additionalProperties": false
+        });
+        let options = ToolConstraintOptions::default();
+        let tokenizer = ConstraintTokenizer::byte_level().unwrap();
+        let plan = tokenizer
+            .compile_tools_with_output_and_reasoning(
+                ToolDialect::Qwen35,
+                NativeOutputDialect::Qwen35,
+                &[weather_tool()],
+                &options,
+                &schema,
+            )
+            .unwrap();
+        for output in [
+            br#"inspect</think>{"answer":"sunny"}"#.as_slice(),
+            b"inspect</think><tool_call><function=get_weather><parameter=city>Tokyo</parameter></function></tool_call>".as_slice(),
+        ] {
+            let mut session = plan.start_session().unwrap();
+            consume_bytes(&mut session, output).unwrap();
+            assert!(session.is_accepting().unwrap());
+        }
+
+        let glm = tokenizer
+            .compile_tools_with_output_and_reasoning(
+                ToolDialect::Glm,
+                NativeOutputDialect::Glm,
+                &[weather_tool()],
+                &options,
+                &schema,
+            )
+            .unwrap();
+        let mut glm_tool = glm.start_session().unwrap();
+        consume_bytes(
+            &mut glm_tool,
+            b"inspect</think><tool_call>get_weather<arg_key>city</arg_key><arg_value>Tokyo</arg_value></tool_call>",
+        )
+        .unwrap();
+        assert!(glm_tool.is_accepting().unwrap());
+
+        let minicpm5 = tokenizer
+            .compile_tools_with_output_and_reasoning(
+                ToolDialect::MiniCpm5,
+                NativeOutputDialect::MiniCpm5,
+                &[weather_tool()],
+                &options,
+                &schema,
+            )
+            .unwrap();
+        let mut minicpm5_tool = minicpm5.start_session().unwrap();
+        consume_bytes(
+            &mut minicpm5_tool,
+            b"inspect</think><function name=\"get_weather\"><param name=\"city\">Tokyo</param></function>",
+        )
+        .unwrap();
+        assert!(minicpm5_tool.is_accepting().unwrap());
+
+        let gemma_tokenizer = ConstraintTokenizer::byte_level_gemma().unwrap();
+        let gemma = gemma_tokenizer
+            .compile_tools_with_output_and_reasoning(
+                ToolDialect::Gemma,
+                NativeOutputDialect::Gemma,
+                &[weather_tool()],
+                &options,
+                &schema,
+            )
+            .unwrap();
+        for output in [
+            "<|channel>thought\ninspect<channel|>{\"answer\":\"sunny\"}",
+            "<|channel>thought\ninspect<channel|><|tool_call>call:get_weather{city:<|\"|>Tokyo<|\"|>}<tool_call|>",
+        ] {
+            let mut session = gemma.start_session().unwrap();
+            session.commit_tokens(&gemma_tokens(output)).unwrap();
+            assert!(session.is_accepting().unwrap());
+        }
+    }
+
+    #[test]
+    fn reasoning_aware_speculative_masks_cross_into_structured_output() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"answer": {"const": "sunny"}},
+            "required": ["answer"],
+            "additionalProperties": false
+        });
+        let tokenizer = ConstraintTokenizer::byte_level().unwrap();
+        let plan = tokenizer
+            .compile_json_output_with_reasoning(&schema, NativeOutputDialect::Qwen35)
+            .unwrap();
+        let mut session = plan.start_session().unwrap();
+        consume_bytes(&mut session, b"inspect freely</think>").unwrap();
+
+        let draft = br#"{"answer":"sunny"}"#.iter().copied().map(u32::from).collect::<Vec<_>>();
+        let masks = session.speculative_masks(&draft).unwrap();
+        assert_eq!(masks.len(), draft.len() + 1);
+        assert!(masks
+            .iter()
+            .zip(&draft)
+            .all(|(mask, token)| mask.is_allowed(*token)));
+
+        session.commit_tokens(&draft).unwrap();
+        assert!(session.is_accepting().unwrap());
     }
 
     #[test]

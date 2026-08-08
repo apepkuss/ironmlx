@@ -43,6 +43,36 @@ item、文本或函数参数 delta，以及终止事件 `response.completed`、
 `response.incomplete` 或 `response.failed`；不会发送 Chat Completions 的
 `[DONE]` 标记。
 
+### Responses reasoning
+
+具备精确原生 reasoning 模板契约的模型可通过 `reasoning.effort` 开启或关闭思考
+通道。IronMLX 将模型原生 `<think>` 或 Gemma `thought` channel 解码为独立的
+Responses `reasoning` item；流式响应使用 `response.reasoning_text.delta` 和
+`response.reasoning_text.done`，不会把 reasoning 混入 `output_text`。
+
+```json
+{
+  "model": "your-model-id",
+  "input": "先分析，再简洁回答。",
+  "reasoning": {"effort": "high", "summary": "none"},
+  "store": false
+}
+```
+
+当前本地模板只提供 reasoning 开关，不提供可校准的分级预算，因此
+`minimal`、`low`、`medium`、`high`、`xhigh` 和 `max` 都表示启用模型原生
+reasoning；`none` 表示关闭。具体推理长度由 checkpoint 决定。未显式指定 effort
+时使用模型模板默认值。
+
+无状态历史回灌接受 `reasoning` item 中的明文 `reasoning_text`，并将它传给下一轮
+原生模板。IronMLX 不生成 OpenAI 托管的 `encrypted_content`；只有 encrypted
+content、没有明文 reasoning 的历史无法在本地重放，会返回 400。
+
+`reasoning.summary:"auto"` 仍可作为上游客户端的自动能力请求，但当前模型没有
+独立 summary 生成通道，因此不会把完整 reasoning 截断或改写成 summary。原生
+reasoning 支持以 [supported-models.md](supported-models.md) 的矩阵和精确模板检测
+为准。
+
 ### Responses function tools
 
 Responses 使用顶层 function tool 形状：
@@ -136,8 +166,10 @@ DiffusionGemma canvas 解码路径。
   工具。namespace 子函数的指定 `tool_choice` 暂不支持；应使用 `auto` 或
   `required`。超出约束 Schema 子集的动态参数只允许用于 `strict:false` 的
   namespace 子函数，并使用 JSON 参数信封；`strict:true` 不会降级。
-- 不支持持久 reasoning/refusal typed item、OpenAI file ID、音频输入/输出、图片输出
-  或图片形式的 function output；这些能力不会以普通 `output_text` 伪装。
+- 支持无状态明文 reasoning typed item 及历史回灌；不持久化 reasoning，也不生成
+  `encrypted_content`。
+- 不支持 reasoning summary、refusal typed item、OpenAI file ID、音频输入/输出、
+  图片输出或图片形式的 function output；这些能力不会以普通 `output_text` 伪装。
 
 ## OpenAI Chat Completions
 
@@ -155,6 +187,46 @@ curl http://127.0.0.1:9068/v1/chat/completions \
 
 流式响应将 `stream` 设为 `true`；如需最终 usage chunk，可同时传入
 `"stream_options":{"include_usage":true}`。
+
+### Structured Outputs
+
+Chat Completions 通过标准 `response_format` 支持 JSON mode 和受 Schema 约束的
+Structured Outputs：
+
+```json
+{
+  "model": "your-model-id",
+  "messages": [{"role": "user", "content": "返回东京的天气。"}],
+  "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "weather_answer",
+      "description": "结构化天气回答",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "city": {"type": "string"},
+          "days": {"type": "integer"}
+        },
+        "required": ["city", "days"],
+        "additionalProperties": false
+      },
+      "strict": true
+    }
+  }
+}
+```
+
+JSON mode 使用 `{"response_format":{"type":"json_object"}}`。Chat 的
+`json_schema` 定义位于 `response_format.json_schema`；不要使用 Responses API
+扁平的 `text.format` 形状。支持的 Schema 子集与上文 Responses Structured
+Outputs 相同，不支持的 schema 或字段形状会在生成前返回 400。
+
+`response_format` 可与 function tools 同时使用：`tool_choice:"auto"` 允许工具调用
+或符合 Schema 的 JSON 最终回答；`none` 只允许 JSON 最终回答；`required` 或指定
+函数时只允许工具调用。三种约束共用同一编译路径，适用于同步、SSE、Scheduler、
+MTP/辅助 drafter 和 DiffusionGemma。若因 token 上限以 `finish_reason:"length"`
+结束，JSON 可能不完整，客户端应按截断结果处理。
 
 ### Function tools
 
@@ -218,6 +290,176 @@ curl http://127.0.0.1:9068/v1/messages \
     "stream": false
   }'
 ```
+
+### Anthropic Structured Outputs
+
+Messages 通过 Anthropic 当前正式协议 `output_config.format` 支持受 JSON Schema
+约束的最终文本输出：
+
+```json
+{
+  "model": "your-model-id",
+  "messages": [{"role": "user", "content": "提取姓名和备注。"}],
+  "output_config": {
+    "format": {
+      "type": "json_schema",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string"},
+          "notes": {"type": "string"}
+        },
+        "required": ["name"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "max_tokens": 128
+}
+```
+
+符合 Schema 的 JSON 位于普通 `text` content block 中；同步与 SSE 使用相同的
+token 级约束。`output_config.format` 可与客户端 tools 同时使用：`auto` 允许工具
+调用或结构化最终回答，`none` 只允许结构化最终回答，`any` 和指定 `tool` 只允许
+工具调用。Schema 子集与本文件前述 Structured Outputs 约束一致，不支持的类型、
+关键字或字段形状会在生成前返回 400。
+
+若达到 token 上限，响应以 `stop_reason: "max_tokens"` 结束，此时 JSON 可能不完整。
+Structured Outputs 不允许以最后一条 assistant message 进行 prefill。仅支持正式的
+`output_config.format`；已废弃的顶层 `output_format` 不在兼容范围内。
+`output_config.format` 可以与已启用的 `thinking` 同时使用。IronMLX 对原生输出
+section 进行组合约束：thinking section 保持自由生成，最终 text section 才启用
+JSON Schema grammar。该语义同样覆盖同步、SSE、Scheduler、MTP/辅助 drafter 和
+DiffusionGemma。客户端 tools 可与两者组合；工具调用使用自己的参数 grammar，
+最终直接回答使用 `output_config.format` grammar。若本轮先返回 `tool_use`，客户端
+回灌 `tool_result` 后的下一轮会重新执行相同的 thinking/最终 JSON section 约束。
+
+### Anthropic extended/adaptive thinking
+
+具备精确原生 reasoning 模板契约的模型支持 Anthropic `thinking`：
+
+```json
+{
+  "model": "your-model-id",
+  "messages": [{"role": "user", "content": "请仔细分析后回答。"}],
+  "thinking": {"type": "adaptive", "display": "summarized"},
+  "output_config": {"effort": "high"},
+  "max_tokens": 4096
+}
+```
+
+支持 `disabled`、`enabled` 和 `adaptive`。手动模式要求 `budget_tokens >= 1024` 且
+小于 `max_tokens`；adaptive 模式可通过 `output_config.effort` 接收 `low`、
+`medium`、`high`、`xhigh` 或 `max`。本地 checkpoint 只提供
+`enable_thinking` 布尔模板开关，没有 Claude 服务端的分级预算控制器，因此
+`budget_tokens` 与 `effort` 会被严格校验并决定是否启用原生 thinking，但不会被
+描述为已经校准的 token 预算或质量档位。总生成硬上限仍为 `max_tokens`，具体
+thinking 长度由 checkpoint 决定。
+
+同步响应将原生 reasoning 放入位于 `text`/`tool_use` 之前的 `thinking` content
+block；流式响应依次发出 `thinking_delta`、`signature_delta` 和
+`content_block_stop`。`usage.output_tokens_details.thinking_tokens` 提供本地原生
+reasoning token 计数。历史回灌接受一个位于 assistant 可见内容之前的
+`thinking` block，并校验 IronMLX 生成的本地完整性 signature；修改后的 block
+返回 400。
+
+当前不支持 `display: "omitted"`、`redacted_thinking`、多个或交错 thinking block，
+因为本地模型没有 Claude 的加密隐藏思考通道，也没有可保持 block 顺序的
+interleaved-thinking 模板契约。这些形状会明确返回 400。来自 Claude 服务的签名
+不能作为 IronMLX 本地历史直接回灌。
+
+### Anthropic client tools
+
+`/v1/messages` 支持 Anthropic 原生客户端工具协议，并与 Chat Completions、Responses
+复用同一套模型工具模板、历史关联校验和 token 级约束解码：
+
+```json
+{
+  "model": "your-model-id",
+  "system": "回答要简洁。",
+  "messages": [{"role": "user", "content": "东京天气如何？"}],
+  "tools": [{
+    "name": "get_weather",
+    "description": "查询城市天气",
+    "input_schema": {
+      "type": "object",
+      "properties": {"city": {"type": "string"}},
+      "required": ["city"],
+      "additionalProperties": false
+    },
+    "strict": true
+  }],
+  "tool_choice": {"type": "auto"},
+  "max_tokens": 128,
+  "stream": false
+}
+```
+
+模型选择调用工具时，同步响应使用原生 `tool_use` content block，并以
+`stop_reason: "tool_use"` 结束：
+
+```json
+{
+  "type": "message",
+  "role": "assistant",
+  "content": [{
+    "type": "tool_use",
+    "id": "call_...",
+    "name": "get_weather",
+    "input": {"city": "东京"}
+  }],
+  "stop_reason": "tool_use"
+}
+```
+
+IronMLX 只生成调用信息，不执行函数、Shell、MCP、HTTP API 或其他外部工具。
+客户端执行工具后，必须在下一次请求中原样回灌 assistant `tool_use`，并在紧随的
+user message 中用同一 ID 提交 `tool_result`：
+
+```json
+{
+  "messages": [
+    {"role": "user", "content": "东京天气如何？"},
+    {"role": "assistant", "content": [{
+      "type": "tool_use",
+      "id": "toolu_123",
+      "name": "get_weather",
+      "input": {"city": "东京"}
+    }]},
+    {"role": "user", "content": [{
+      "type": "tool_result",
+      "tool_use_id": "toolu_123",
+      "content": "晴，26°C",
+      "is_error": false
+    }]}
+  ],
+  "tools": [{
+    "name": "get_weather",
+    "input_schema": {
+      "type": "object",
+      "properties": {"city": {"type": "string"}},
+      "required": ["city"],
+      "additionalProperties": false
+    }
+  }]
+}
+```
+
+工具协议边界：
+
+- `tool_choice` 支持 `auto`、`any`、指定 `tool` 和 `none`；前三种支持
+  `disable_parallel_tool_use`。`any` 要求至少一个调用，指定 `tool` 要求调用该工具，
+  禁用并行后一个 assistant turn 最多一个调用。
+- 一个 assistant message 可同时包含文本和一个或多个 `tool_use`；一个 user message
+  可回传多个 `tool_result`，随后继续附带文本或图片。调用 ID 必须非空、唯一且完整
+  配对；孤立、重复、遗漏或顺序错误会在生成前返回 400。
+- SSE 使用原生 `message_start` / `content_block_*` / `message_delta` /
+  `message_stop` 生命周期。工具块以 `tool_use` 开始，参数通过一个或多个
+  `input_json_delta.partial_json` 增量发送，客户端应拼接后再解析 JSON。
+- `input_schema` 与 `strict` 使用上文 Structured Outputs 所述的受支持 Schema 子集；
+  不支持的类型、关键字或模型模板会在生成前明确返回 400，不会静默降级为文本。
+- 支持范围是客户端定义的函数工具。Anthropic 托管工具、服务器工具、MCP、
+  computer use、Web Search、Code Execution 等不属于本地推理服务能力。
 
 ## 图片输入
 
