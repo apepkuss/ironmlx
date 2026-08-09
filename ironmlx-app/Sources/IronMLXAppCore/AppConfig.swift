@@ -322,6 +322,11 @@ public final class AppConfigStore: @unchecked Sendable {
     public let url: URL
     private let fileManager: FileManager
     private let preferredLanguages: @Sendable () -> [String]
+    private let recoveryState = ConfigurationRecoveryState()
+
+    public var recoveryIssue: ConfigurationRecoveryIssue? {
+        recoveryState.issue
+    }
 
     public init(
         url: URL = AppConfigStore.defaultConfigURL(),
@@ -335,30 +340,90 @@ public final class AppConfigStore: @unchecked Sendable {
 
     public func load() -> AppConfig {
         guard fileManager.fileExists(atPath: url.path) else {
+            recoveryState.clear()
             let config = AppConfig(
                 language: AppLanguageResolver.resolve(preferredLanguages: preferredLanguages())
             )
             save(config)
             return config
         }
-        guard let data = try? Data(contentsOf: url) else {
-            return AppConfig()
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            recordCorruption(data: nil, error: error)
+            return fallbackConfig()
         }
-        return (try? JSONDecoder().decode(AppConfig.self, from: data)) ?? AppConfig()
+        do {
+            let config = try JSONDecoder().decode(AppConfig.self, from: data)
+            recoveryState.clear()
+            return config
+        } catch {
+            recordCorruption(data: data, error: error)
+            return fallbackConfig()
+        }
     }
 
-    public func save(_ config: AppConfig) {
-        do {
-            try fileManager.createDirectory(
-                at: url.deletingLastPathComponent(),
-                withIntermediateDirectories: true
+    @discardableResult
+    public func save(_ config: AppConfig) -> Bool {
+        guard recoveryIssue == nil else {
+            IronMLXAppLogger.error(
+                "Refusing to overwrite unreadable ironmlx app config before explicit recovery: \(url.path)"
             )
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            let data = try encoder.encode(config)
-            try data.write(to: url, options: .atomic)
+            return false
+        }
+        do {
+            try write(config)
+            return true
         } catch {
             IronMLXAppLogger.error("Failed to save ironmlx app config: \(error)")
+            return false
+        }
+    }
+
+    public func resetAfterCorruption() throws {
+        guard let recoveryIssue else {
+            return
+        }
+        guard let preservedURL = recoveryIssue.preservedURL,
+              fileManager.fileExists(atPath: preservedURL.path)
+        else {
+            throw ConfigurationRecoveryResetError.preservedCopyMissing(url)
+        }
+        try write(fallbackConfig())
+        recoveryState.clear()
+    }
+
+    private func fallbackConfig() -> AppConfig {
+        AppConfig(
+            language: AppLanguageResolver.resolve(preferredLanguages: preferredLanguages())
+        )
+    }
+
+    private func write(_ config: AppConfig) throws {
+        try fileManager.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(config)
+        try data.write(to: url, options: .atomic)
+    }
+
+    private func recordCorruption(data: Data?, error: Error) {
+        if recoveryState.recordIfNeeded({
+            ConfigurationCorruptionPreserver.makeIssue(
+                kind: .appConfig,
+                sourceURL: url,
+                data: data,
+                error: error,
+                fileManager: fileManager
+            )
+        }) {
+            IronMLXAppLogger.error(
+                "IronMLX app config is unreadable and requires explicit recovery: \(url.path); \(error)"
+            )
         }
     }
 

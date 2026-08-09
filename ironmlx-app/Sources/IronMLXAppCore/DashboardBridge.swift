@@ -1206,7 +1206,22 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         }
         let needsRestart = Self.backendRestartRequired(from: existing, to: config)
         guard needsRestart, backend.isRunning else {
-            configStore.save(config)
+            guard configStore.recoveryIssue == nil else {
+                let response = Self.settingsErrorJSON(
+                    message: "Configuration recovery is required before settings can be saved.",
+                    code: "configuration_recovery_required"
+                )
+                sendJavaScript("onSettingsSaved(\(Self.jsStringLiteral(response)))")
+                return
+            }
+            guard configStore.save(config) else {
+                let response = Self.settingsErrorJSON(
+                    message: "IronMLX could not persist the application settings.",
+                    code: "settings_persist_failed"
+                )
+                sendJavaScript("onSettingsSaved(\(Self.jsStringLiteral(response)))")
+                return
+            }
             retireSupersededSecurityMaterial(from: existing, to: config)
             notifyMenuLanguageDidChange()
             let response = #"{"status":"ok","needs_restart":false}"#
@@ -1214,7 +1229,22 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             return
         }
 
-        configStore.save(config)
+        guard configStore.recoveryIssue == nil else {
+            let response = Self.settingsErrorJSON(
+                message: "Configuration recovery is required before settings can be saved.",
+                code: "configuration_recovery_required"
+            )
+            sendJavaScript("onSettingsSaved(\(Self.jsStringLiteral(response)))")
+            return
+        }
+        guard configStore.save(config) else {
+            let response = Self.settingsErrorJSON(
+                message: "IronMLX could not persist the application settings.",
+                code: "settings_persist_failed"
+            )
+            sendJavaScript("onSettingsSaved(\(Self.jsStringLiteral(response)))")
+            return
+        }
         Task {
             let result = await backend.restart(intent: .plannedRestart)
             guard result.success else {

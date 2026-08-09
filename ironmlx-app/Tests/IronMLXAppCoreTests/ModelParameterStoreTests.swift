@@ -26,6 +26,62 @@ import Testing
     #expect(loaded["mlx-community/LongContext-4bit"]?.maxCacheCap == 65536)
 }
 
+@Test func modelParameterStorePreservesCorruptFileAndRequiresExplicitReset() throws {
+    let root = try temporaryDirectory()
+    let url = root.appendingPathComponent("model_params.json")
+    let corruptData = Data(#"{"mlx-community/Broken": }"#.utf8)
+    try corruptData.write(to: url)
+    let store = ModelParameterStore(url: url)
+
+    #expect(throws: (any Error).self) {
+        _ = try store.loadAll()
+    }
+    let issue = try #require(store.recoveryIssue)
+    let preservedURL = try #require(issue.preservedURL)
+
+    #expect(issue.kind == .modelParameters)
+    #expect(try Data(contentsOf: url) == corruptData)
+    #expect(try Data(contentsOf: preservedURL) == corruptData)
+    #expect(store.parameters(for: "mlx-community/Broken") == nil)
+    #expect(store.jsonString() == "{}")
+    #expect(throws: ConfigurationRecoveryWriteError.unresolvedCorruption(url)) {
+        try store.save(ModelParameters(modelID: "mlx-community/New"))
+    }
+    #expect(try Data(contentsOf: url) == corruptData)
+
+    try store.resetAfterCorruption()
+
+    #expect(store.recoveryIssue == nil)
+    #expect(try store.loadAll().isEmpty)
+    #expect(try Data(contentsOf: preservedURL) == corruptData)
+}
+
+@Test @MainActor
+func configurationRecoveryManagerInspectsAndResetsBothStores() throws {
+    let root = try temporaryDirectory()
+    let configURL = root.appendingPathComponent("app_config.json")
+    let parametersURL = root.appendingPathComponent("model_params.json")
+    try Data("bad-app-config".utf8).write(to: configURL)
+    try Data("bad-model-parameters".utf8).write(to: parametersURL)
+    let configStore = AppConfigStore(url: configURL)
+    let parameterStore = ModelParameterStore(url: parametersURL)
+    let manager = ConfigurationRecoveryManager(
+        appConfigStore: configStore,
+        modelParameterStore: parameterStore
+    )
+
+    manager.inspect()
+
+    #expect(manager.hasIssues)
+    #expect(Set(manager.issues.map(\.kind)) == [.appConfig, .modelParameters])
+
+    try manager.resetAffectedConfigurations()
+
+    #expect(!manager.hasIssues)
+    #expect(configStore.recoveryIssue == nil)
+    #expect(parameterStore.recoveryIssue == nil)
+}
+
 @Test func modelParameterStoreIgnoresNonPositiveMaxTokensForBackendCap() throws {
     let params = ModelParameters(
         modelID: "mlx-community/Tiny-4bit",

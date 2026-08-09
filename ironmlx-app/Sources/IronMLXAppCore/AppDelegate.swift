@@ -7,6 +7,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private let backend: BackendRuntimeSupervisor
     private let scanner: LocalModelScanner
     private let launchPlanner: AppLaunchPlanner
+    private let configurationRecovery: ConfigurationRecoveryManager
     private var dashboard: DashboardWindowController?
     private var menu: MenuBarController?
     private var updateManager: (any AppUpdateManaging)?
@@ -16,6 +17,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         let store = AppConfigStore.shared
         let scanner = LocalModelScanner()
         let parameterStore = ModelParameterStore.shared
+        let configurationRecovery = ConfigurationRecoveryManager(
+            appConfigStore: store,
+            modelParameterStore: parameterStore
+        )
         let processManager = BackendProcessManager(configStore: store)
         self.configStore = store
         self.backend = BackendRuntimeSupervisor(
@@ -26,6 +31,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         self.scanner = scanner
         self.launchPlanner = AppLaunchPlanner()
+        self.configurationRecovery = configurationRecovery
         super.init()
     }
 
@@ -44,6 +50,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         NSApp.mainMenu = ApplicationMenuBuilder.makeMainMenu()
         NSApp.setActivationPolicy(.accessory)
+        configurationRecovery.inspect()
 
         let dashboard = DashboardWindowController(configStore: configStore, backend: backend)
         let updateManager = SparkleAppUpdateManager.make()
@@ -51,11 +58,17 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             configStore: configStore,
             backend: backend,
             dashboard: dashboard,
-            updateManager: updateManager
+            updateManager: updateManager,
+            configurationRecovery: configurationRecovery
         )
         self.dashboard = dashboard
         self.menu = menu
         self.updateManager = updateManager
+
+        if configurationRecovery.hasIssues {
+            configurationRecovery.presentRecovery(nil)
+            menu.rebuildMenu()
+        }
 
         let config = configStore.load()
         let pinnedModels = Set(config.pinnedModelReferences)
