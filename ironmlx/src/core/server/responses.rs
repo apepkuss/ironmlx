@@ -470,38 +470,13 @@ fn parse_response_text_format(
     Ok(format)
 }
 
-#[derive(Debug, Serialize)]
-struct ErrorEnvelope {
-    error: ErrorObject,
-}
-
-#[derive(Debug, Serialize)]
-struct ErrorObject {
-    message: String,
-    #[serde(rename = "type")]
-    kind: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    param: Option<&'static str>,
-    code: &'static str,
-}
-
 pub(crate) fn error_response(
     status: StatusCode,
     code: &'static str,
     message: impl Into<String>,
 ) -> Response {
-    (
-        status,
-        Json(ErrorEnvelope {
-            error: ErrorObject {
-                message: message.into(),
-                kind: "invalid_request_error",
-                param: None,
-                code,
-            },
-        }),
-    )
-        .into_response()
+    super::api_error::ApiError::from_status(status, code, message)
+        .into_response(super::api_error::ApiProtocol::OpenAi)
 }
 
 fn validate_advisory_fields(req: &ResponsesRequest) -> anyhow::Result<()> {
@@ -1222,7 +1197,12 @@ where
     let (flat_messages, pixel_values, image_grid_thw) =
         match openai::expand_image_parts_in_messages(chat.messages, &state.vision_input).await {
             Ok(result) => result,
-            Err(error) => return Err(super::security::image_error_response(error)),
+            Err(error) => {
+                return Err(super::security::image_error_response(
+                    error,
+                    super::api_error::ApiProtocol::OpenAi,
+                ))
+            }
         };
     let prompt_ids = match if let Some(prepared) = &prepared_tools {
         openai::build_agent_messages(
@@ -2274,22 +2254,8 @@ where
     }
     match reply_rx.await {
         Ok(Ok(reply)) => Ok(reply),
-        Ok(Err(error)) => {
-            let status = if error
-                .downcast_ref::<crate::core::SchedulerError>()
-                .is_some_and(|error| {
-                    matches!(error, crate::core::SchedulerError::RequestTooLarge { .. })
-                }) {
-                StatusCode::PAYLOAD_TOO_LARGE
-            } else {
-                StatusCode::SERVICE_UNAVAILABLE
-            };
-            Err(error_response(
-                status,
-                "scheduler_rejected",
-                format!("{error:#}"),
-            ))
-        }
+        Ok(Err(error)) => Err(super::api_error::ApiError::scheduler_admission(error)
+            .into_response(super::api_error::ApiProtocol::OpenAi)),
         Err(_) => Err(error_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "scheduler_reply_lost",
@@ -2788,6 +2754,42 @@ pub(crate) async fn gemma4_drafter_responses(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn responses_errors_use_openai_json_and_retry_contracts() {
+        let overloaded = crate::core::server::api_error::ApiError::scheduler_admission(
+            crate::core::SchedulerError::QueueFull { capacity: 8 }.into(),
+        )
+        .into_response(crate::core::server::api_error::ApiProtocol::OpenAi);
+        assert_eq!(overloaded.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(overloaded.headers()[header::RETRY_AFTER], "5");
+        let bytes = axum::body::to_bytes(overloaded.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["type"], "server_error");
+        assert_eq!(body["error"]["code"], "scheduler_queue_full");
+
+        let too_large = crate::core::server::api_error::ApiError::scheduler_admission(
+            crate::core::SchedulerError::RequestTooLarge {
+                required_total_tokens: 273,
+                input_tokens: 17,
+                requested_max_output_tokens: 256,
+                server_max_context_tokens: 128,
+                max_allowed_output_tokens: 111,
+            }
+            .into(),
+        )
+        .into_response(crate::core::server::api_error::ApiProtocol::OpenAi);
+        assert_eq!(too_large.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(too_large.headers().get(header::RETRY_AFTER).is_none());
+        let bytes = axum::body::to_bytes(too_large.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], "request_token_capacity_exceeded");
+        assert_eq!(body["error"]["details"]["input_tokens"], 17);
+    }
 
     #[test]
     fn responses_adapter_rejects_typed_output_without_an_enabled_producer_mapping() {

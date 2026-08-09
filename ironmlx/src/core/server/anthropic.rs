@@ -40,7 +40,7 @@ use crate::core::speculative::MtpSpeculativeConfig;
 use crate::core::tool_calling::{ToolCall, ToolDefinition, ToolDialect};
 
 use super::SamplingDefaults;
-use super::{request_token_capacity_error_response, AppState, Gemma4DrafterAppState};
+use super::{AppState, Gemma4DrafterAppState};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -49,73 +49,45 @@ use super::{request_token_capacity_error_response, AppState, Gemma4DrafterAppSta
 /// Map a SchedulerActor admit Err into an HTTP response. Spec §4.7 + §2 G7:
 /// - `SchedulerError::QueueFull` → 503 Service Unavailable + Retry-After: 5
 /// - `SchedulerError::RequestTooLarge` → 413 Payload Too Large (no Retry-After)
-/// - Other anyhow Errs (prompt parsing, OOM, etc.) → 400 Bad Request
-///
-/// Pre-3e.3 used `err.to_string().contains("admission queue full")` string
-/// match (spec §9 R3 acknowledged-fragile). 3e.3 replaces with typed
-/// `anyhow::Error::downcast_ref::<SchedulerError>()`. 3f adds RequestTooLarge arm.
+/// - Memory governor and prefix-store backpressure errors → retryable 503
+/// - Non-scheduler admission errors → 400 Bad Request
 fn admit_err_to_response(err: anyhow::Error) -> Response {
-    use crate::core::SchedulerError;
-    use axum::http::HeaderValue;
-    let msg = format!("{err:#}");
-    match err.downcast_ref::<SchedulerError>() {
-        Some(SchedulerError::QueueFull { .. }) => {
-            // 503 Service Unavailable + Retry-After
-            let mut resp = (StatusCode::SERVICE_UNAVAILABLE, msg).into_response();
-            resp.headers_mut()
-                .insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
-            resp
-        }
-        Some(error @ SchedulerError::RequestTooLarge { .. }) => {
-            request_token_capacity_error_response(error)
-        }
-        Some(
-            SchedulerError::MemoryBudgetExceeded { .. }
-            | SchedulerError::MemoryPressure { .. }
-            | SchedulerError::PrefillPeakUnsafe { .. }
-            | SchedulerError::VisionPrefillPeakUnsafe { .. }
-            | SchedulerError::ColdMaterializationUnsafe { .. }
-            | SchedulerError::StoreBackpressure { .. },
-        ) => {
-            // 503 Service Unavailable — runtime KV budget soft-limit hit.
-            // Retry-After: 5s (fixed conservative backoff). B1-p2.5 §4.1.4.
-            let mut resp = (StatusCode::SERVICE_UNAVAILABLE, msg).into_response();
-            resp.headers_mut()
-                .insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
-            resp
-        }
-        None => {
-            // Other anyhow Errs (prompt parsing, OOM, etc.) → 400 Bad Request.
-            (StatusCode::BAD_REQUEST, msg).into_response()
-        }
-    }
+    super::api_error::ApiError::scheduler_admission(err)
+        .into_response(super::api_error::ApiProtocol::Anthropic)
 }
 
 fn generation_err_to_response(err: anyhow::Error) -> Response {
-    if err.downcast_ref::<crate::core::SchedulerError>().is_some() {
-        admit_err_to_response(err)
-    } else {
-        (StatusCode::INTERNAL_SERVER_ERROR, format!("{err:#}")).into_response()
-    }
+    super::api_error::ApiError::generation(err)
+        .into_response(super::api_error::ApiProtocol::Anthropic)
 }
 
 pub(crate) fn anthropic_error_response(status: StatusCode, message: String) -> Response {
-    let error_type = if status.is_client_error() {
-        "invalid_request_error"
-    } else {
-        "api_error"
+    let code = match status {
+        StatusCode::BAD_REQUEST => "invalid_request",
+        StatusCode::PAYLOAD_TOO_LARGE => "request_too_large",
+        StatusCode::SERVICE_UNAVAILABLE => "service_overloaded",
+        StatusCode::NOT_FOUND => "not_found",
+        StatusCode::INTERNAL_SERVER_ERROR => "internal_error",
+        _ => "api_error",
     };
-    (
-        status,
-        Json(serde_json::json!({
-            "type": "error",
-            "error": {
-                "type": error_type,
-                "message": message
-            }
-        })),
-    )
-        .into_response()
+    anthropic_error_response_with_code(status, code, message)
+}
+
+pub(crate) fn anthropic_error_response_with_code(
+    status: StatusCode,
+    code: &'static str,
+    message: impl Into<String>,
+) -> Response {
+    super::api_error::ApiError::from_status(status, code, message)
+        .into_response(super::api_error::ApiProtocol::Anthropic)
+}
+
+fn service_unavailable_response(code: &'static str, message: impl Into<String>) -> Response {
+    anthropic_error_response_with_code(StatusCode::SERVICE_UNAVAILABLE, code, message)
+}
+
+fn internal_error_response(code: &'static str, message: impl Into<String>) -> Response {
+    anthropic_error_response_with_code(StatusCode::INTERNAL_SERVER_ERROR, code, message)
 }
 
 fn format_stream_error(error: &anyhow::Error) -> Bytes {
@@ -941,8 +913,9 @@ where
     let req = match payload {
         Ok(Json(req)) => req,
         Err(error) => {
-            return anthropic_error_response(
+            return anthropic_error_response_with_code(
                 StatusCode::BAD_REQUEST,
+                "invalid_json",
                 format!("invalid Messages request: {}", error.body_text()),
             );
         }
@@ -998,7 +971,12 @@ where
         match super::openai::expand_image_parts_in_messages(req.messages, &state.vision_input).await
         {
             Ok(t) => t,
-            Err(e) => return super::security::image_error_response(e),
+            Err(e) => {
+                return super::security::image_error_response(
+                    e,
+                    super::api_error::ApiProtocol::Anthropic,
+                )
+            }
         };
     let image_grid_thw_opt = if image_grid_thw.is_empty() {
         None
@@ -1179,8 +1157,9 @@ pub(crate) async fn gemma4_drafter_messages(
     let req = match payload {
         Ok(Json(req)) => req,
         Err(error) => {
-            return anthropic_error_response(
+            return anthropic_error_response_with_code(
                 StatusCode::BAD_REQUEST,
+                "invalid_json",
                 format!("invalid Messages request: {}", error.body_text()),
             );
         }
@@ -1239,7 +1218,12 @@ pub(crate) async fn messages_with_gemma4_drafter_state(
             .await
         {
             Ok(t) => t,
-            Err(e) => return super::security::image_error_response(e),
+            Err(e) => {
+                return super::security::image_error_response(
+                    e,
+                    super::api_error::ApiProtocol::Anthropic,
+                )
+            }
         };
     let image_grid_thw_opt = if image_grid_thw.is_empty() {
         None
@@ -1283,13 +1267,15 @@ pub(crate) async fn messages_with_gemma4_drafter_state(
     let prompt_len = prompt_ids.len();
     let total_tokens = prompt_len.saturating_add(max_tokens);
     if total_tokens > state.base.effective_cap_max {
-        return anthropic_error_response(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            format!(
-                "request too large: prompt_len + max_tokens = {total_tokens}, max = {}",
-                state.base.effective_cap_max
-            ),
-        );
+        let error = crate::core::SchedulerError::RequestTooLarge {
+            required_total_tokens: total_tokens,
+            input_tokens: prompt_len,
+            requested_max_output_tokens: max_tokens,
+            server_max_context_tokens: state.base.effective_cap_max,
+            max_allowed_output_tokens: state.base.effective_cap_max.saturating_sub(prompt_len),
+        };
+        return super::api_error::ApiError::request_token_capacity(&error)
+            .into_response(super::api_error::ApiProtocol::Anthropic);
     }
     let scheduler_config = state.base.scheduler_request_config(prompt_len, max_tokens);
     let stop_token_ids = state.base.tokenizer.eos_token_ids().to_vec();
@@ -1903,8 +1889,8 @@ where
     match result {
         Ok(Ok(output)) => tool_unary_response(id, model_id, input_tokens, output, output_format),
         Ok(Err(error)) => generation_err_to_response(error),
-        Err(error) => anthropic_error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
+        Err(error) => internal_error_response(
+            "generation_task_failed",
             format!("generation task failed: {error}"),
         ),
     }
@@ -1925,16 +1911,18 @@ where
         .await
         .is_err()
     {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
+        return Err(service_unavailable_response(
+            "scheduler_unavailable",
             "scheduler actor unavailable",
-        )
-            .into_response());
+        ));
     }
     match reply_rx.await {
         Ok(Ok(AdmitReply { event_rx, .. })) => Ok(event_rx),
         Ok(Err(error)) => Err(admit_err_to_response(error)),
-        Err(_) => Err((StatusCode::SERVICE_UNAVAILABLE, "scheduler reply lost").into_response()),
+        Err(_) => Err(service_unavailable_response(
+            "scheduler_reply_lost",
+            "scheduler reply lost",
+        )),
     }
 }
 
@@ -2517,11 +2505,10 @@ where
         Ok(Ok(())) => {}
         Ok(Err(error)) => return generation_err_to_response(error),
         Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
+            return internal_error_response(
+                "generation_initialization_channel_closed",
                 format!("generation initialization channel closed: {error}"),
-            )
-                .into_response();
+            );
         }
     }
 
@@ -2581,11 +2568,10 @@ where
         .await
         .is_err()
     {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
+        return service_unavailable_response(
+            "scheduler_unavailable",
             "scheduler actor unavailable",
-        )
-            .into_response();
+        );
     }
     let AdmitReply {
         request_id: _,
@@ -2596,7 +2582,7 @@ where
             return admit_err_to_response(e);
         }
         Err(_) => {
-            return (StatusCode::SERVICE_UNAVAILABLE, "scheduler reply lost").into_response();
+            return service_unavailable_response("scheduler_reply_lost", "scheduler reply lost");
         }
     };
     state.record_request_started(input_tokens);
@@ -2777,7 +2763,7 @@ where
         Ok(Ok(output)) => output,
         Ok(Err(err)) => return generation_err_to_response(err),
         Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")).into_response();
+            return internal_error_response("generation_task_failed", format!("join: {e}"));
         }
     };
 
@@ -2827,11 +2813,10 @@ where
         .await
         .is_err()
     {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
+        return service_unavailable_response(
+            "scheduler_unavailable",
             "scheduler actor unavailable",
-        )
-            .into_response();
+        );
     }
     let AdmitReply {
         request_id: _,
@@ -2842,7 +2827,7 @@ where
             return admit_err_to_response(e);
         }
         Err(_) => {
-            return (StatusCode::SERVICE_UNAVAILABLE, "scheduler reply lost").into_response();
+            return service_unavailable_response("scheduler_reply_lost", "scheduler reply lost");
         }
     };
     state.record_request_started(input_tokens);
@@ -3171,25 +3156,32 @@ mod tests {
             Some("application/json")
         );
         assert!(response.headers().get(header::RETRY_AFTER).is_none());
+        let request_id = response.headers()["request-id"]
+            .to_str()
+            .unwrap()
+            .to_owned();
 
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(body["code"], "request_token_capacity_exceeded");
-        assert_eq!(body["required_total_tokens"], 273);
-        assert_eq!(body["input_tokens"], 17);
-        assert_eq!(body["requested_max_output_tokens"], 256);
-        assert_eq!(body["server_max_context_tokens"], 128);
-        assert_eq!(body["max_allowed_output_tokens"], 111);
-        assert!(body["message"]
+        assert_eq!(body["type"], "error");
+        assert_eq!(body["error"]["type"], "request_too_large");
+        assert_eq!(body["error"]["code"], "request_token_capacity_exceeded");
+        assert_eq!(body["error"]["details"]["required_total_tokens"], 273);
+        assert_eq!(body["error"]["details"]["input_tokens"], 17);
+        assert_eq!(body["error"]["details"]["requested_max_output_tokens"], 256);
+        assert_eq!(body["error"]["details"]["server_max_context_tokens"], 128);
+        assert_eq!(body["error"]["details"]["max_allowed_output_tokens"], 111);
+        assert!(body["error"]["message"]
             .as_str()
             .unwrap()
             .contains("Dashboard → MAX CONTEXT TOKENS"));
+        assert_eq!(body["request_id"], request_id);
     }
 
-    #[test]
-    fn cold_materialization_rejection_is_retryable_http_503() {
+    #[tokio::test]
+    async fn cold_materialization_rejection_is_retryable_http_503() {
         let error = crate::core::SchedulerError::ColdMaterializationUnsafe {
             requested_bytes: 3 * 1024 * 1024 * 1024,
             current_bytes: 20 * 1024 * 1024 * 1024,
@@ -3206,6 +3198,18 @@ mod tests {
                 .expect("Retry-After header"),
             "5"
         );
+        let request_id = response.headers()["request-id"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["type"], "error");
+        assert_eq!(body["error"]["type"], "overloaded_error");
+        assert_eq!(body["error"]["code"], "cold_materialization_unsafe");
+        assert_eq!(body["request_id"], request_id);
     }
 
     mod wire_tests {

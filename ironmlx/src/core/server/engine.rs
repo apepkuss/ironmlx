@@ -3372,12 +3372,25 @@ fn engine_pool_router() -> Router<EnginePoolState> {
 
 async fn openai_chat_completions(
     State(pool): State<EnginePoolState>,
-    Json(mut req): Json<openai::ChatRequest>,
+    payload: std::result::Result<
+        Json<openai::ChatRequest>,
+        axum::extract::rejection::JsonRejection,
+    >,
 ) -> Response {
+    let mut req = match payload {
+        Ok(Json(req)) => req,
+        Err(error) => {
+            return super::api_error::ApiError::invalid_request(
+                "invalid_json",
+                format!("invalid Chat Completions request: {}", error.body_text()),
+            )
+            .into_response(super::api_error::ApiProtocol::OpenAi)
+        }
+    };
     let requested = req.model.as_deref().filter(|model| !model.is_empty());
     let (model_id, engine) = match pool.resolve_engine(requested).await {
         Ok(resolved) => resolved,
-        Err(error) => return engine_error_response(error),
+        Err(error) => return engine_error_response(error, super::api_error::ApiProtocol::OpenAi),
     };
     if req.model.is_none() {
         req.model = Some(model_id.to_string());
@@ -3405,7 +3418,7 @@ async fn openai_responses(
     let requested = req.model.as_deref().filter(|model| !model.is_empty());
     let (model_id, engine) = match pool.resolve_engine(requested).await {
         Ok(resolved) => resolved,
-        Err(error) => return engine_error_response(error),
+        Err(error) => return engine_error_response(error, super::api_error::ApiProtocol::OpenAi),
     };
     if req.model.is_none() {
         req.model = Some(model_id.to_string());
@@ -3423,8 +3436,9 @@ async fn anthropic_messages(
     let mut req = match payload {
         Ok(Json(req)) => req,
         Err(error) => {
-            return anthropic::anthropic_error_response(
+            return anthropic::anthropic_error_response_with_code(
                 StatusCode::BAD_REQUEST,
+                "invalid_json",
                 format!("invalid Messages request: {}", error.body_text()),
             );
         }
@@ -3432,7 +3446,9 @@ async fn anthropic_messages(
     let requested = req.model.as_deref().filter(|model| !model.is_empty());
     let (model_id, engine) = match pool.resolve_engine(requested).await {
         Ok(resolved) => resolved,
-        Err(error) => return engine_error_response(error),
+        Err(error) => {
+            return engine_error_response(error, super::api_error::ApiProtocol::Anthropic)
+        }
     };
     if req.model.is_none() {
         req.model = Some(model_id.to_string());
@@ -3450,7 +3466,7 @@ async fn load_model_handler(
 ) -> Response {
     match pool.load_model(&model_id).await {
         Ok(result) => Json(result).into_response(),
-        Err(error) => engine_error_response(error),
+        Err(error) => engine_error_response(error, super::api_error::ApiProtocol::OpenAi),
     }
 }
 
@@ -3460,7 +3476,7 @@ async fn unload_model_handler(
 ) -> Response {
     match pool.unload_model(&model_id).await {
         Ok(result) => Json(result).into_response(),
-        Err(error) => engine_error_response(error),
+        Err(error) => engine_error_response(error, super::api_error::ApiProtocol::OpenAi),
     }
 }
 
@@ -3468,39 +3484,31 @@ async fn healthz_handler(State(pool): State<EnginePoolState>) -> Json<EnginePool
     Json(pool.health_snapshot().await)
 }
 
-fn engine_error_response(error: anyhow::Error) -> Response {
-    let status = if let Some(registry) = error.downcast_ref::<EngineRegistryError>() {
+fn engine_error_response(
+    error: anyhow::Error,
+    protocol: super::api_error::ApiProtocol,
+) -> Response {
+    let message = format!("{error:#}");
+    let api_error = if let Some(registry) = error.downcast_ref::<EngineRegistryError>() {
         match registry {
             EngineRegistryError::UnknownModel { .. }
-            | EngineRegistryError::ModelDisabled { .. } => StatusCode::NOT_FOUND,
-            EngineRegistryError::AmbiguousDefault => StatusCode::BAD_REQUEST,
-            _ => StatusCode::BAD_REQUEST,
+            | EngineRegistryError::ModelDisabled { .. } => super::api_error::ApiError::from_status(
+                StatusCode::NOT_FOUND,
+                "model_not_found",
+                message,
+            ),
+            EngineRegistryError::AmbiguousDefault => {
+                super::api_error::ApiError::invalid_request("model_required", message)
+            }
+            _ => super::api_error::ApiError::invalid_request(
+                "engine_pool_invalid_configuration",
+                message,
+            ),
         }
     } else {
-        StatusCode::SERVICE_UNAVAILABLE
+        super::api_error::ApiError::service_unavailable("engine_unavailable", message)
     };
-    (
-        status,
-        Json(EngineErrorEnvelope {
-            error: EngineErrorBody {
-                message: format!("{error:#}"),
-                kind: "engine_pool_error",
-            },
-        }),
-    )
-        .into_response()
-}
-
-#[derive(Debug, Serialize)]
-struct EngineErrorEnvelope {
-    error: EngineErrorBody,
-}
-
-#[derive(Debug, Serialize)]
-struct EngineErrorBody {
-    message: String,
-    #[serde(rename = "type")]
-    kind: &'static str,
+    api_error.into_response(protocol)
 }
 
 #[derive(Debug, Serialize)]
@@ -3632,6 +3640,44 @@ mod tests {
         EngineRuntimeState, EngineSlot, EngineSlotState, ModelSnapshotUseLease, ModelTtlCandidate,
     };
     use tokio::sync::{Mutex, Notify};
+
+    #[tokio::test]
+    async fn engine_pool_errors_render_for_each_public_protocol() {
+        let openai = super::engine_error_response(
+            EngineRegistryError::UnknownModel {
+                id: "missing".to_owned(),
+            }
+            .into(),
+            crate::core::server::api_error::ApiProtocol::OpenAi,
+        );
+        assert_eq!(openai.status(), axum::http::StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(openai.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["code"], "model_not_found");
+
+        let anthropic = super::engine_error_response(
+            anyhow::anyhow!("engine failed"),
+            crate::core::server::api_error::ApiProtocol::Anthropic,
+        );
+        assert_eq!(
+            anthropic.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(anthropic.headers()[axum::http::header::RETRY_AFTER], "5");
+        let request_id = anthropic.headers()["request-id"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let body = axum::body::to_bytes(anthropic.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["type"], "overloaded_error");
+        assert_eq!(body["error"]["code"], "engine_unavailable");
+        assert_eq!(body["request_id"], request_id);
+    }
 
     fn model(id: &str) -> EngineModelManifest {
         EngineModelManifest {

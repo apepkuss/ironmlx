@@ -19,6 +19,54 @@ curl http://127.0.0.1:9068/v1/models
 状态由 `process_governor.pressure_level` 决定，而不是固定的 raw-free 阈值。
 `degraded_reasons` 会列出队列、KV 缓存、内存压力、遥测或后端背压等具体原因。
 
+## 错误契约
+
+Chat Completions 与 Responses 的非流式错误使用 OpenAI 风格信封：
+
+```json
+{
+  "error": {
+    "message": "...",
+    "type": "invalid_request_error",
+    "param": null,
+    "code": "invalid_json"
+  }
+}
+```
+
+Anthropic Messages 的非流式错误使用 Anthropic 风格信封，并返回与响应体
+`request_id` 相同的 `request-id` header：
+
+```json
+{
+  "type": "error",
+  "error": {
+    "type": "invalid_request_error",
+    "message": "...",
+    "code": "invalid_json"
+  },
+  "request_id": "req_..."
+}
+```
+
+`error.code` 是 IronMLX 的稳定机器可读错误码；Messages 响应中的该字段属于
+IronMLX 扩展。客户端应按 HTTP status 和 `error.type` 判断错误类别，使用
+`error.code` 区分同一类别的具体原因。
+
+| HTTP status | 稳定 `error.code` | 语义 | `Retry-After` |
+|---:|---|---|---|
+| 400 | `invalid_json` 及各字段/约束错误码 | JSON、字段、采样或输出约束不合法 | 无 |
+| 413 | `request_body_too_large` | HTTP request body 超过 32 MiB | 无 |
+| 413 | `request_token_capacity_exceeded` | 输入 token 与请求输出预算超过模型上下文容量；`error.details` 提供容量明细 | 无 |
+| 503 | `scheduler_queue_full`、`scheduler_unavailable`、`scheduler_reply_lost` | 调度器暂时不可用 | `5` 秒 |
+| 503 | `memory_budget_exceeded`、`memory_pressure`、`prefill_peak_unsafe`、`vision_prefill_peak_unsafe`、`cold_materialization_unsafe`、`prefix_store_backpressure` | 内存 governor 或存储背压暂时拒绝请求 | `5` 秒 |
+| 503 | `engine_unavailable`、`diffusion_lane_overloaded` | 模型引擎或 DiffusionGemma lane 暂时不可用 | `5` 秒 |
+| 500 | `generation_error` 及内部任务错误码 | 非预期服务端错误 | 无 |
+
+所有可重试 503 都返回 JSON 和 `Retry-After: 5`。IronMLX 的 Messages 本地契约使用
+HTTP 503 + `overloaded_error` 表达暂时过载；413 使用 `request_too_large`，并通过
+上述两个稳定 code 区分传输体上限与模型上下文容量上限。
+
 ## OpenAI Responses API
 
 `POST /v1/responses` 是推荐给本地 Agent 客户端的新接口。IronMLX 实现无状态

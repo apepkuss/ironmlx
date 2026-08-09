@@ -187,18 +187,16 @@ enum RequestProtocol {
 }
 
 impl RequestProtocol {
-    fn invalid_request(self, message: String) -> Response {
+    fn api_protocol(self) -> super::api_error::ApiProtocol {
         match self {
-            Self::OpenAi => (StatusCode::BAD_REQUEST, message).into_response(),
-            Self::Responses => super::responses::error_response(
-                StatusCode::BAD_REQUEST,
-                "invalid_request",
-                message,
-            ),
-            Self::Anthropic => {
-                super::anthropic::anthropic_error_response(StatusCode::BAD_REQUEST, message)
-            }
+            Self::OpenAi | Self::Responses => super::api_error::ApiProtocol::OpenAi,
+            Self::Anthropic => super::api_error::ApiProtocol::Anthropic,
         }
+    }
+
+    fn invalid_request(self, message: String) -> Response {
+        super::api_error::ApiError::invalid_request("invalid_request", message)
+            .into_response(self.api_protocol())
     }
 }
 
@@ -288,24 +286,12 @@ impl From<DiffusionGemmaLaneError> for CompletionError {
 }
 
 impl CompletionError {
-    fn into_response(self) -> Response {
+    fn into_response(self, protocol: RequestProtocol) -> Response {
         match self {
-            Self::Overloaded => overloaded_response(),
-            Self::Internal(message) => internal_error_response(message),
+            Self::Overloaded => overloaded_response(protocol),
+            Self::Internal(message) => internal_error_response(protocol, message),
         }
     }
-}
-
-#[derive(Debug, Serialize)]
-struct ErrorBody {
-    message: &'static str,
-    #[serde(rename = "type")]
-    kind: &'static str,
-}
-
-#[derive(Debug, Serialize)]
-struct ErrorEnvelope {
-    error: ErrorBody,
 }
 
 #[derive(Debug, Serialize)]
@@ -438,21 +424,17 @@ fn gen_anthropic_id() -> String {
     format!("msg_{}", now_unix())
 }
 
-fn overloaded_response() -> Response {
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(ErrorEnvelope {
-            error: ErrorBody {
-                message: "DiffusionGemma serial lane is overloaded; retry later",
-                kind: "overloaded",
-            },
-        }),
+fn overloaded_response(protocol: RequestProtocol) -> Response {
+    super::api_error::ApiError::service_unavailable(
+        "diffusion_lane_overloaded",
+        "DiffusionGemma serial lane is overloaded; retry later",
     )
-        .into_response()
+    .into_response(protocol.api_protocol())
 }
 
-fn internal_error_response(message: String) -> Response {
-    (StatusCode::INTERNAL_SERVER_ERROR, message).into_response()
+fn internal_error_response(protocol: RequestProtocol, message: String) -> Response {
+    super::api_error::ApiError::internal("generation_error", message)
+        .into_response(protocol.api_protocol())
 }
 
 fn diffusion_event_is_length_sentinel(event: &DiffusionGemmaGenerateEvent) -> bool {
@@ -907,7 +889,12 @@ async fn prepare_openai_request(
         match super::openai::expand_image_parts_in_messages(req.messages, &state.vision_input).await
         {
             Ok(t) => t,
-            Err(e) => return Err(super::security::image_error_response(e)),
+            Err(e) => {
+                return Err(super::security::image_error_response(
+                    e,
+                    protocol.api_protocol(),
+                ))
+            }
         };
     let prompt_ids_result = if let Some(prepared) = &prepared_tools {
         super::openai::build_agent_messages(
@@ -1193,7 +1180,9 @@ async fn openai_stream_completion(
     } = stream_request;
     let lane_guard = match state.lane.clone().enter().await {
         Ok(guard) => guard,
-        Err(err) => return CompletionError::from(err).into_response(),
+        Err(err) => {
+            return CompletionError::from(err).into_response(RequestProtocol::OpenAi);
+        }
     };
     state
         .runtime_usage
@@ -1494,18 +1483,7 @@ async fn responses_stream_completion(
     let lane_guard = match state.lane.clone().enter().await {
         Ok(guard) => guard,
         Err(error) => {
-            return super::responses::error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "diffusion_lane_unavailable",
-                match error {
-                    DiffusionGemmaLaneError::Overloaded => {
-                        "DiffusionGemma serial lane is overloaded".to_owned()
-                    }
-                    DiffusionGemmaLaneError::Closed => {
-                        "DiffusionGemma serial lane is closed".to_owned()
-                    }
-                },
-            );
+            return CompletionError::from(error).into_response(RequestProtocol::Responses);
         }
     };
     state
@@ -1652,7 +1630,9 @@ async fn anthropic_stream_completion(
     } = stream_request;
     let lane_guard = match state.lane.clone().enter().await {
         Ok(guard) => guard,
-        Err(err) => return CompletionError::from(err).into_response(),
+        Err(err) => {
+            return CompletionError::from(err).into_response(RequestProtocol::Anthropic);
+        }
     };
     state
         .runtime_usage
@@ -1789,16 +1769,18 @@ pub async fn openai_chat_completions(
     let mut req = match payload {
         Ok(Json(req)) => req,
         Err(error) => {
-            return (
-                StatusCode::BAD_REQUEST,
+            return super::api_error::ApiError::invalid_request(
+                "invalid_json",
                 format!("invalid Chat Completions request: {}", error.body_text()),
             )
-                .into_response();
+            .into_response(super::api_error::ApiProtocol::OpenAi);
         }
     };
     let output_format = match req.structured_output_format() {
         Ok(format) => format,
-        Err(error) => return (StatusCode::BAD_REQUEST, format!("{error:#}")).into_response(),
+        Err(error) => {
+            return RequestProtocol::OpenAi.invalid_request(format!("{error:#}"));
+        }
     };
     let output_schema = output_format.constraint_schema();
     let allows_final_output = req
@@ -1861,14 +1843,14 @@ pub async fn openai_chat_completions(
     .await
     {
         Ok(c) => c,
-        Err(err) => return err.into_response(),
+        Err(err) => return err.into_response(RequestProtocol::OpenAi),
     };
     if let Err(error) = output_format.validate_completion(
         completion.content.as_deref().unwrap_or_default(),
         !completion.tool_calls.is_empty(),
         completion.finish_reason,
     ) {
-        return internal_error_response(format!("{error:#}"));
+        return internal_error_response(RequestProtocol::OpenAi, format!("{error:#}"));
     }
     let resp = OpenAiCompletionResponse {
         id: gen_openai_id(),
@@ -2002,16 +1984,7 @@ pub async fn openai_responses(
     .await
     {
         Ok(completion) => completion,
-        Err(error) => {
-            return super::responses::error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "generation_error",
-                match error {
-                    CompletionError::Overloaded => "DiffusionGemma lane overloaded".to_owned(),
-                    CompletionError::Internal(message) => message,
-                },
-            );
-        }
+        Err(error) => return error.into_response(RequestProtocol::Responses),
     };
     super::responses::unary_response(
         meta,
@@ -2038,8 +2011,9 @@ pub async fn anthropic_messages(
     let req = match payload {
         Ok(Json(req)) => req,
         Err(error) => {
-            return super::anthropic::anthropic_error_response(
+            return super::anthropic::anthropic_error_response_with_code(
                 StatusCode::BAD_REQUEST,
+                "invalid_json",
                 format!("invalid Messages request: {}", error.body_text()),
             );
         }
@@ -2089,7 +2063,7 @@ pub async fn anthropic_messages(
     .await
     {
         Ok(c) => c,
-        Err(err) => return err.into_response(),
+        Err(err) => return err.into_response(RequestProtocol::Anthropic),
     };
     super::anthropic::collected_response(
         model_label,
