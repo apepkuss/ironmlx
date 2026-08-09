@@ -562,6 +562,10 @@ user message 中用同一 ID 提交 `tool_result`：
 
 ## API contract 与官方 SDK 门禁
 
+完整的 v0.1 逐字段、错误、拓扑和 SDK 版本兼容矩阵见
+[API 兼容矩阵](api-compatibility-matrix.md)。本文继续作为各协议的使用说明和示例；
+矩阵是发布承诺边界，若两者出现冲突，以矩阵中明确的“支持/受限/拒绝”定义为准。
+
 CI 固定执行服务端 contract 测试和官方 Python SDK 黑盒测试。SDK 测试通过真实的
 loopback HTTP/SSE 连接发送请求，不调用 SDK 内部模型构造器，也不以 `curl` 形状的
 JSON 代替 SDK 解析。
