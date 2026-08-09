@@ -23,15 +23,43 @@ readonly RUST_PATH_REMAP_FLAG="--remap-path-prefix=$BUILDER_HOME=."
 
 MLX_SOURCE="${MLX_SRC:-$REPO_ROOT/../iron-rivals/mlx}"
 JOBS="${JOBS:-$(sysctl -n hw.ncpu)}"
+UPDATE_CHANNEL="${IRONMLX_UPDATE_CHANNEL:-disabled}"
+UPDATE_FEED_URL="${IRONMLX_UPDATE_FEED_URL:-}"
+UPDATE_PUBLIC_ED_KEY="${IRONMLX_UPDATE_PUBLIC_ED_KEY:-}"
+APP_BUILD_NUMBER="${IRONMLX_APP_BUILD_NUMBER:-}"
 
 fail() {
   echo "error: $*" >&2
   exit 1
 }
 
-for tool in cargo cmake codesign git iconutil lipo plutil sips swift xcrun; do
+for tool in base64 cargo cmake codesign ditto git iconutil lipo plutil realpath sips swift xcrun; do
   command -v "$tool" >/dev/null || fail "required build tool is missing: $tool"
 done
+
+case "$UPDATE_CHANNEL" in
+  disabled)
+    [ -z "$UPDATE_FEED_URL" ] || fail "disabled updates must not provide IRONMLX_UPDATE_FEED_URL"
+    [ -z "$UPDATE_PUBLIC_ED_KEY" ] || fail "disabled updates must not provide IRONMLX_UPDATE_PUBLIC_ED_KEY"
+    ;;
+  development)
+    [[ "$UPDATE_FEED_URL" =~ ^https://(localhost|127\.0\.0\.1|\[::1\])(:[0-9]+)?/ ]] || \
+      fail "development update feed must use HTTPS on a loopback host"
+    [ -n "$UPDATE_PUBLIC_ED_KEY" ] || fail "development updates require IRONMLX_UPDATE_PUBLIC_ED_KEY"
+    decoded_update_key_length="$(
+      printf '%s' "$UPDATE_PUBLIC_ED_KEY" | base64 -D 2>/dev/null | wc -c | tr -d '[:space:]'
+    )" || fail "development update public EdDSA key is not valid base64"
+    [ "$decoded_update_key_length" = 32 ] || \
+      fail "development update public EdDSA key must decode to 32 bytes"
+    ;;
+  *)
+    fail "unsupported phase-one update channel: $UPDATE_CHANNEL"
+    ;;
+esac
+if [ -n "$APP_BUILD_NUMBER" ]; then
+  [[ "$APP_BUILD_NUMBER" =~ ^[1-9][0-9]*$ ]] || \
+    fail "IRONMLX_APP_BUILD_NUMBER must be a positive integer"
+fi
 
 "$SCRIPT_DIR/verify-version-consistency.sh"
 
@@ -119,6 +147,8 @@ env MACOSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET" \
     --configuration release \
     --scratch-path "$BUILD_ROOT/swift-build" \
     --product ironmlx-app \
+    -Xlinker -rpath \
+    -Xlinker @executable_path/../Frameworks \
     -Xswiftc=-DIRONMLX_APP_BUNDLE \
     -Xswiftc=-gnone
 
@@ -127,9 +157,26 @@ rm -rf "$APP_BUNDLE"
 mkdir -p \
   "$APP_BUNDLE/Contents/MacOS" \
   "$APP_BUNDLE/Contents/Helpers" \
+  "$APP_BUNDLE/Contents/Frameworks" \
   "$APP_BUNDLE/Contents/Resources/Legal"
 cp "$PACKAGING_DIR/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
+if [ -n "$APP_BUILD_NUMBER" ]; then
+  plutil -replace CFBundleVersion -string "$APP_BUILD_NUMBER" "$APP_BUNDLE/Contents/Info.plist"
+fi
+if [ "$UPDATE_CHANNEL" = "development" ]; then
+  plutil -insert IronMLXUpdateChannel -string development "$APP_BUNDLE/Contents/Info.plist"
+  plutil -insert SUFeedURL -string "$UPDATE_FEED_URL" "$APP_BUNDLE/Contents/Info.plist"
+  plutil -insert SUPublicEDKey -string "$UPDATE_PUBLIC_ED_KEY" "$APP_BUNDLE/Contents/Info.plist"
+  plutil -insert SUEnableAutomaticChecks -bool YES "$APP_BUNDLE/Contents/Info.plist"
+  plutil -insert SUAutomaticallyUpdate -bool YES "$APP_BUNDLE/Contents/Info.plist"
+  plutil -insert SUEnableSystemProfiling -bool NO "$APP_BUNDLE/Contents/Info.plist"
+  plutil -insert SURequireSignedFeed -bool YES "$APP_BUNDLE/Contents/Info.plist"
+  plutil -insert SUVerifyUpdateBeforeExtraction -bool YES "$APP_BUNDLE/Contents/Info.plist"
+fi
 cp "$BUILD_ROOT/swift-build/release/ironmlx-app" "$APP_BUNDLE/Contents/MacOS/IronMLX"
+sparkle_framework="$BUILD_ROOT/swift-build/release/Sparkle.framework"
+[ -d "$sparkle_framework" ] || fail "Swift build did not produce Sparkle.framework"
+ditto "$sparkle_framework" "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
 cp "$BUILD_ROOT/cargo-target/release/ironmlx" "$APP_BUNDLE/Contents/Helpers/ironmlx"
 cp "$BUILD_ROOT/cargo-target/release/iron-bench" "$APP_BUNDLE/Contents/Helpers/iron-bench"
 cp "$BUILD_ROOT/mlx-install/lib/mlx.metallib" "$APP_BUNDLE/Contents/Resources/mlx.metallib"
@@ -156,8 +203,38 @@ chmod 0755 \
   "$APP_BUNDLE/Contents/Helpers/ironmlx" \
   "$APP_BUNDLE/Contents/Helpers/iron-bench"
 
-echo "==> Ad-hoc sign assembled bundle"
-codesign --force --deep --sign - "$APP_BUNDLE"
+echo "==> Thin Sparkle to the supported arm64 product architecture"
+while IFS= read -r -d '' bundled_file; do
+  if file "$bundled_file" | grep -q "Mach-O"; then
+    architectures="$(lipo -archs "$bundled_file")"
+    if [ "$architectures" != "$ARCHITECTURE" ]; then
+      thin_file="$bundled_file.arm64"
+      original_mode="$(stat -f '%Lp' "$bundled_file")"
+      lipo "$bundled_file" -thin "$ARCHITECTURE" -output "$thin_file"
+      chmod "$original_mode" "$thin_file"
+      mv "$thin_file" "$bundled_file"
+    fi
+  fi
+done < <(find "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework" -type f -print0)
+
+echo "==> Ad-hoc sign nested code from the inside out"
+while IFS= read -r -d '' bundled_file; do
+  if file "$bundled_file" | grep -q "Mach-O"; then
+    codesign --force --sign - "$bundled_file"
+  fi
+done < <(find "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework" -type f -print0)
+while IFS= read -r nested_bundle; do
+  codesign --force --sign - "$nested_bundle"
+done < <(
+  find "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework" -type d \
+    \( -name '*.app' -o -name '*.xpc' \) -print | awk '{ print length, $0 }' | \
+    sort -rn | cut -d ' ' -f 2-
+)
+codesign --force --sign - "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
+codesign --force --sign - "$APP_BUNDLE/Contents/Helpers/ironmlx"
+codesign --force --sign - "$APP_BUNDLE/Contents/Helpers/iron-bench"
+codesign --force --sign - "$APP_BUNDLE/Contents/MacOS/IronMLX"
+codesign --force --sign - "$APP_BUNDLE"
 
 "$SCRIPT_DIR/verify-app-bundle.sh" "$APP_BUNDLE"
 echo "Built: $APP_BUNDLE"

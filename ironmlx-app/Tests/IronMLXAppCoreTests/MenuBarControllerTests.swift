@@ -87,12 +87,54 @@ func menuBarStopUsesUserStopAndNotifiesLoadedModelObservers() async throws {
     #expect(backend.state == .stopped)
 }
 
+@Test @MainActor
+func menuBarReflectsUpdaterAvailabilityAndForwardsManualCheck() throws {
+    let root = try menuTemporaryDirectory()
+    let configStore = AppConfigStore(url: root.appendingPathComponent("app_config.json"))
+    let backend = TestRuntimeBackend(state: .stopped, isRunning: false)
+    let dashboard = DashboardWindowController(configStore: configStore, backend: backend)
+    let updateManager = TestAppUpdateManager(canCheckForUpdates: true)
+    let controller = MenuBarController(
+        configStore: configStore,
+        backend: backend,
+        dashboard: dashboard,
+        updateManager: updateManager
+    )
+
+    #expect(controller.rebuildMenu().updatesEnabled)
+    controller.checkForUpdates(NSMenuItem())
+    #expect(updateManager.checkCount == 1)
+
+    let menu = MenuBarMenuBuilder.makeMenu(
+        snapshot: controller.rebuildMenu(),
+        target: controller
+    )
+    updateManager.canCheckForUpdates = false
+    controller.menuWillOpen(menu)
+    let updateItem = menu.items.first { $0.action == #selector(MenuBarController.checkForUpdates(_:)) }
+    #expect(updateItem?.isEnabled == false)
+}
+
 @MainActor
 private final class MenuLoadedModelsNotificationProbe: NSObject {
     private(set) var notified = false
 
     @objc func loadedModelsDidChange(_ notification: Notification) {
         notified = true
+    }
+}
+
+@MainActor
+private final class TestAppUpdateManager: AppUpdateManaging {
+    var canCheckForUpdates: Bool
+    private(set) var checkCount = 0
+
+    init(canCheckForUpdates: Bool) {
+        self.canCheckForUpdates = canCheckForUpdates
+    }
+
+    func checkForUpdates(_ sender: Any?) {
+        checkCount += 1
     }
 }
 

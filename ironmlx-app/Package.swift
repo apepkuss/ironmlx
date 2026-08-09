@@ -11,6 +11,12 @@ let package = Package(
         .executable(name: "ironmlx-app", targets: ["IronMLXApp"]),
         .executable(name: "ironmlx-model-migrate", targets: ["IronMLXModelMigrate"]),
     ],
+    dependencies: [
+        .package(
+            url: "https://github.com/sparkle-project/Sparkle.git",
+            exact: "2.9.5"
+        ),
+    ],
     targets: [
         .executableTarget(
             name: "IronMLXApp",
@@ -22,6 +28,9 @@ let package = Package(
         ),
         .target(
             name: "IronMLXAppCore",
+            dependencies: [
+                .product(name: "Sparkle", package: "Sparkle"),
+            ],
             resources: [
                 .copy("Resources/dashboard2.html"),
                 .copy("Resources/logo.png"),

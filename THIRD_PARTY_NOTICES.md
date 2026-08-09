@@ -301,8 +301,9 @@ development dependencies excluded, build dependencies retained.
 
 ## Swift dependencies
 
-The Release App currently uses only repository-local SwiftPM targets;
-there are no external Swift package dependencies.
+| Package | Version | Revision | License | License text | Source |
+|---|---|---|---|---|---|
+| Sparkle | 2.9.5 | `79bc9e872948e47877e76f194cb0c8e0412b0b90` | MIT and bundled third-party notices | `THIRD_PARTY_LICENSES/swift-sparkle-license.txt` | https://github.com/sparkle-project/Sparkle.git |
 
 ## Explicit exclusions
 

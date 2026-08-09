@@ -50,6 +50,7 @@ done
 
 swift package --package-path "$REPO_ROOT/ironmlx-app" dump-package \
   > "$temp_root/swift-package.json"
+swift package --package-path "$REPO_ROOT/ironmlx-app" resolve
 
 python3 "$SCRIPT_DIR/generate-third-party-materials.py" \
   --cargo-about-json "$temp_root/cargo-about-ironmlx.json" \
@@ -59,6 +60,9 @@ python3 "$SCRIPT_DIR/generate-third-party-materials.py" \
   --mlx-build "$MLX_BUILD" \
   --swift-manifest "$REPO_ROOT/ironmlx-app/Package.swift" \
   --swift-package-json "$temp_root/swift-package.json" \
+  --swift-dependency-manifest "$REPO_ROOT/compliance/swift-dependencies.json" \
+  --swift-package-resolved "$REPO_ROOT/ironmlx-app/Package.resolved" \
+  --swift-checkout-root "$REPO_ROOT/ironmlx-app/.build/checkouts" \
   --output-root "$OUTPUT_ROOT"
 
 echo "Generated third-party materials in: $OUTPUT_ROOT"
