@@ -39,6 +39,7 @@ verify_macho() {
   while IFS= read -r dependency; do
     case "$dependency" in
       /System/Library/*|/usr/lib/*) ;;
+      @rpath/Sparkle.framework/Versions/B/Sparkle) ;;
       *) fail "$label has a non-system dynamic dependency: $dependency" ;;
     esac
   done < <(otool -L "$binary" | awk 'NR > 1 { print $1 }')
@@ -51,6 +52,7 @@ for file in \
   Contents/MacOS/IronMLX \
   Contents/Helpers/ironmlx \
   Contents/Helpers/iron-bench \
+  Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle \
   Contents/Resources/mlx.metallib \
   Contents/Resources/dashboard2.html \
   Contents/Resources/AppIcon.icns \
@@ -93,14 +95,45 @@ verify_macho "IronMLX App executable" "$APP_BUNDLE/Contents/MacOS/IronMLX"
 verify_macho "IronMLX backend helper" "$APP_BUNDLE/Contents/Helpers/ironmlx"
 verify_macho "iron-bench helper" "$APP_BUNDLE/Contents/Helpers/iron-bench"
 
+app_rpaths="$(otool -l "$APP_BUNDLE/Contents/MacOS/IronMLX" | awk '
+  /LC_RPATH/ { in_rpath = 1; next }
+  in_rpath && $1 == "path" { print $2; in_rpath = 0 }
+')"
+grep -Fxq '@executable_path/../Frameworks' <<< "$app_rpaths" || \
+  fail "IronMLX App executable is missing the Bundle-local Frameworks rpath"
+
+while IFS= read -r -d '' bundled_file; do
+  if file "$bundled_file" | grep -q "Mach-O"; then
+    architectures="$(lipo -archs "$bundled_file")"
+    [ "$architectures" = "$EXPECTED_ARCHITECTURE" ] || \
+      fail "bundled Sparkle code must contain only arm64: $bundled_file ($architectures)"
+    while IFS= read -r dependency; do
+      case "$dependency" in
+        /System/Library/*|/usr/lib/*|@rpath/Sparkle.framework/Versions/B/Sparkle) ;;
+        *) fail "bundled Sparkle code has an external dependency: $bundled_file -> $dependency" ;;
+      esac
+    done < <(otool -L "$bundled_file" | awk 'NR > 1 { print $1 }')
+  fi
+done < <(find "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework" -type f -print0)
+
 metallib="$APP_BUNDLE/Contents/Resources/mlx.metallib"
 file "$metallib" | grep -Fq "MetalLib executable (MacOS)" || fail "mlx.metallib is not a macOS metallib"
 LC_ALL=C grep -aEq 'air64_v[0-9]+-apple-macosx26\.2\.0' "$metallib" || \
   fail "mlx.metallib does not target macOS 26.2"
 
-if find "$APP_BUNDLE" -type l -print -quit | grep -q .; then
-  fail "App Bundle must not contain symbolic links"
-fi
+sparkle_root="$(realpath "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework")"
+while IFS= read -r -d '' bundle_link; do
+  case "$bundle_link" in
+    "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"/*)
+      resolved_link="$(realpath "$bundle_link")"
+      case "$resolved_link" in
+        "$sparkle_root"/*) ;;
+        *) fail "Sparkle framework symlink escapes its Bundle root: $bundle_link" ;;
+      esac
+      ;;
+    *) fail "unexpected App Bundle symbolic link: $bundle_link" ;;
+  esac
+done < <(find "$APP_BUNDLE" -type l -print0)
 while IFS= read -r -d '' bundled_file; do
   if developer_paths="$(strings -a "$bundled_file" | LC_ALL=C grep -E '/Users/|target/(debug|release)')"; then
     fail "App Bundle contains a developer or Cargo fallback path in $bundled_file: $developer_paths"

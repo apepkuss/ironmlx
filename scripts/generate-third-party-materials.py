@@ -165,6 +165,80 @@ def native_materials(
     return dependencies
 
 
+def swift_materials(
+    manifest: dict[str, Any],
+    package_resolved: dict[str, Any],
+    checkout_root: Path,
+    licenses_dir: Path,
+) -> list[dict[str, Any]]:
+    pins = {pin["identity"]: pin for pin in package_resolved.get("pins", [])}
+    expected_identities = {entry["identity"] for entry in manifest["dependencies"]}
+    if set(pins) != expected_identities:
+        raise ValueError(
+            "Swift dependency lock differs from reviewed inventory: "
+            f"expected {sorted(expected_identities)}, found {sorted(pins)}"
+        )
+
+    dependencies: list[dict[str, Any]] = []
+    for dependency in manifest["dependencies"]:
+        identity = dependency["identity"]
+        state = pins[identity]["state"]
+        if state.get("version") != dependency["version"]:
+            raise ValueError(
+                f"Swift package version mismatch for {identity}: "
+                f"expected {dependency['version']}, found {state.get('version')}"
+            )
+        if state.get("revision") != dependency["revision"]:
+            raise ValueError(
+                f"Swift package revision mismatch for {identity}: "
+                f"expected {dependency['revision']}, found {state.get('revision')}"
+            )
+
+        checkout = (checkout_root / identity).resolve()
+        if not checkout.is_dir():
+            raise ValueError(f"Swift package checkout is missing: {checkout}")
+        actual_revision = subprocess.run(
+            ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        if actual_revision != dependency["revision"]:
+            raise ValueError(
+                f"Swift checkout revision mismatch for {identity}: "
+                f"expected {dependency['revision']}, found {actual_revision}"
+            )
+
+        license_path = (checkout / dependency["license_source"]).resolve()
+        if checkout != license_path and checkout not in license_path.parents:
+            raise ValueError(f"Swift license source escapes checkout: {license_path}")
+        if not license_path.is_file():
+            raise ValueError(f"Swift license source is missing: {license_path}")
+        license_content = license_path.read_bytes()
+        actual_hash = sha256_bytes(license_content)
+        if actual_hash != dependency["license_sha256"]:
+            raise ValueError(
+                f"Swift license hash mismatch for {identity}: "
+                f"expected {dependency['license_sha256']}, found {actual_hash}"
+            )
+        shutil.copyfile(license_path, licenses_dir / dependency["license_file"])
+
+        dependencies.append(
+            {
+                "component": dependency["component"],
+                "identity": identity,
+                "license": dependency["license"],
+                "license_file": dependency["license_file"],
+                "license_sha256": actual_hash,
+                "repository": dependency["repository"],
+                "revision": dependency["revision"],
+                "version": dependency["version"],
+            }
+        )
+    dependencies.sort(key=lambda entry: entry["component"].casefold())
+    return dependencies
+
+
 def render_notices(inventory: dict[str, Any]) -> str:
     lines = [
         "# IronMLX Third-Party Notices",
@@ -219,8 +293,20 @@ def render_notices(inventory: dict[str, Any]) -> str:
             "",
             "## Swift dependencies",
             "",
-            "The Release App currently uses only repository-local SwiftPM targets;",
-            "there are no external Swift package dependencies.",
+            "| Package | Version | Revision | License | License text | Source |",
+            "|---|---|---|---|---|---|",
+        ]
+    )
+    for dependency in inventory["swift"]["external_packages"]:
+        lines.append(
+            f"| {dependency['component']} | {dependency['version']} | "
+            f"`{dependency['revision']}` | {dependency['license']} | "
+            f"`THIRD_PARTY_LICENSES/{dependency['license_file']}` | "
+            f"{dependency['repository']} |"
+        )
+
+    lines.extend(
+        [
             "",
             "## Explicit exclusions",
             "",
@@ -251,6 +337,9 @@ def main() -> None:
     parser.add_argument("--mlx-build", required=True, type=Path)
     parser.add_argument("--swift-manifest", required=True, type=Path)
     parser.add_argument("--swift-package-json", required=True, type=Path)
+    parser.add_argument("--swift-dependency-manifest", required=True, type=Path)
+    parser.add_argument("--swift-package-resolved", required=True, type=Path)
+    parser.add_argument("--swift-checkout-root", required=True, type=Path)
     parser.add_argument("--output-root", required=True, type=Path)
     args = parser.parse_args()
 
@@ -267,10 +356,17 @@ def main() -> None:
     swift_hash = sha256_bytes(args.swift_manifest.read_bytes())
     swift_package = read_json(args.swift_package_json)
     swift_dependencies = swift_package.get("dependencies", [])
-    if swift_dependencies:
+    swift_dependency_manifest = read_json(args.swift_dependency_manifest)
+    if len(swift_dependencies) != len(swift_dependency_manifest["dependencies"]):
         raise ValueError(
-            "external Swift package dependencies require inventory support before generation"
+            "Swift package manifest dependency count differs from reviewed inventory"
         )
+    swift_external_packages = swift_materials(
+        swift_dependency_manifest,
+        read_json(args.swift_package_resolved),
+        args.swift_checkout_root,
+        licenses_dir,
+    )
 
     inventory = {
         "generation": {
@@ -292,7 +388,7 @@ def main() -> None:
         },
         "schema_version": 1,
         "swift": {
-            "external_packages": [],
+            "external_packages": swift_external_packages,
             "manifest": "ironmlx-app/Package.swift",
             "manifest_sha256": swift_hash,
         },

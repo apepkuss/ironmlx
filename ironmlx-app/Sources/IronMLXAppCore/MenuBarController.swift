@@ -12,6 +12,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     private let configStore: AppConfigStore
     private let backend: any MenuBarBackendProcessManaging
     private let dashboard: DashboardWindowController
+    private let updateManager: any AppUpdateManaging
     private let fileManager: FileManager
     private let notificationCenter: NotificationCenter
     private var loadedModelNames: [String]?
@@ -22,6 +23,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         configStore: AppConfigStore,
         backend: any MenuBarBackendProcessManaging,
         dashboard: DashboardWindowController,
+        updateManager: any AppUpdateManaging = DisabledAppUpdateManager(),
         fileManager: FileManager = .default,
         notificationCenter: NotificationCenter = .default
     ) {
@@ -29,6 +31,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         self.configStore = configStore
         self.backend = backend
         self.dashboard = dashboard
+        self.updateManager = updateManager
         self.fileManager = fileManager
         self.notificationCenter = notificationCenter
         super.init()
@@ -102,7 +105,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     @objc public func checkForUpdates(_ sender: NSMenuItem) {
-        dashboard.show()
+        updateManager.checkForUpdates(sender)
     }
 
     @objc public func quit(_ sender: NSMenuItem) {
@@ -130,6 +133,8 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     public func menuWillOpen(_ menu: NSMenu) {
+        menu.items.first(where: { $0.action == #selector(checkForUpdates(_:)) })?.isEnabled =
+            updateManager.canCheckForUpdates
         refreshLoadedModelNamesIfNeeded(state: snapshot().state)
     }
 
@@ -143,7 +148,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
             openClawInstalled: fileManager.fileExists(atPath: openClawCLIPath().path),
             openClawGatewayConfigured: fileManager.fileExists(atPath: openClawGatewayPlistPath().path),
             ironHermesInstalled: fileManager.fileExists(atPath: ironHermesBinaryPath().path),
-            updatesEnabled: false,
+            updatesEnabled: updateManager.canCheckForUpdates,
             language: config.language
         )
     }

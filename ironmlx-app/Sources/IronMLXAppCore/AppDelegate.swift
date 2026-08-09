@@ -9,6 +9,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private let launchPlanner: AppLaunchPlanner
     private var dashboard: DashboardWindowController?
     private var menu: MenuBarController?
+    private var updateManager: (any AppUpdateManaging)?
     private var terminationReplyPending = false
 
     public override init() {
@@ -45,9 +46,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
 
         let dashboard = DashboardWindowController(configStore: configStore, backend: backend)
-        let menu = MenuBarController(configStore: configStore, backend: backend, dashboard: dashboard)
+        let updateManager = SparkleAppUpdateManager.make()
+        let menu = MenuBarController(
+            configStore: configStore,
+            backend: backend,
+            dashboard: dashboard,
+            updateManager: updateManager
+        )
         self.dashboard = dashboard
         self.menu = menu
+        self.updateManager = updateManager
 
         let config = configStore.load()
         let pinnedModels = Set(config.pinnedModelReferences)

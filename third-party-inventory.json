@@ -3666,8 +3666,19 @@
   },
   "schema_version": 1,
   "swift": {
-    "external_packages": [],
+    "external_packages": [
+      {
+        "component": "Sparkle",
+        "identity": "sparkle",
+        "license": "MIT and bundled third-party notices",
+        "license_file": "swift-sparkle-license.txt",
+        "license_sha256": "389a4e4e9a32f059775b13a06e25a591445ba229d2838d26dd3e7c0c45127cfe",
+        "repository": "https://github.com/sparkle-project/Sparkle.git",
+        "revision": "79bc9e872948e47877e76f194cb0c8e0412b0b90",
+        "version": "2.9.5"
+      }
+    ],
     "manifest": "ironmlx-app/Package.swift",
-    "manifest_sha256": "09883026d2dc7eb8d1c5fab2eb4871eb5c18b599f2ae5503a758ffedf0249f55"
+    "manifest_sha256": "e01f1b886eca96fca8f627dd74eb276e104a9f9c576af5b34da213a7b6aeabeb"
   }
 }
