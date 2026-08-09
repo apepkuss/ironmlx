@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use axum::{
     body::{Body, Bytes},
     extract::State,
-    http::{header, StatusCode},
+    http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -36,6 +36,8 @@ use crate::models::{
     DiffusionGemmaGenerateEvent, DiffusionGemmaGenerationConfig, DiffusionGemmaModel,
 };
 use crate::Result;
+
+use super::api_transport::ApiJson;
 
 const DEFAULT_DIFFUSION_GEMMA_QUEUE_CAPACITY: usize = 8;
 
@@ -1458,12 +1460,7 @@ async fn openai_stream_completion(
 
     let stream = ReceiverStream::new(rx);
     let body = Body::from_stream(stream);
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/event-stream")
-        .header(header::CACHE_CONTROL, "no-cache")
-        .body(body)
-        .unwrap()
+    super::api_transport::sse_response(body)
 }
 
 async fn responses_stream_completion(
@@ -1606,12 +1603,7 @@ async fn responses_stream_completion(
         }
     });
 
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/event-stream")
-        .header(header::CACHE_CONTROL, "no-cache")
-        .body(Body::from_stream(ReceiverStream::new(rx)))
-        .expect("valid Responses SSE response")
+    super::api_transport::sse_response(Body::from_stream(ReceiverStream::new(rx)))
 }
 
 async fn anthropic_stream_completion(
@@ -1751,31 +1743,20 @@ async fn anthropic_stream_completion(
 
     let stream = ReceiverStream::new(rx);
     let body = Body::from_stream(stream);
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/event-stream")
-        .header(header::CACHE_CONTROL, "no-cache")
-        .body(body)
-        .unwrap()
+    super::api_transport::sse_response(body)
 }
 
-pub async fn openai_chat_completions(
+pub(crate) async fn openai_chat_completions(
     State(state): State<DiffusionGemmaAppState>,
-    payload: std::result::Result<
-        Json<super::openai::ChatRequest>,
-        axum::extract::rejection::JsonRejection,
-    >,
+    ApiJson(req): ApiJson<super::openai::ChatRequest>,
 ) -> Response {
-    let mut req = match payload {
-        Ok(Json(req)) => req,
-        Err(error) => {
-            return super::api_error::ApiError::invalid_request(
-                "invalid_json",
-                format!("invalid Chat Completions request: {}", error.body_text()),
-            )
-            .into_response(super::api_error::ApiProtocol::OpenAi);
-        }
-    };
+    openai_chat_completions_with_state(state, req).await
+}
+
+pub(crate) async fn openai_chat_completions_with_state(
+    state: DiffusionGemmaAppState,
+    mut req: super::openai::ChatRequest,
+) -> Response {
     let output_format = match req.structured_output_format() {
         Ok(format) => format,
         Err(error) => {
@@ -1887,23 +1868,17 @@ pub async fn openai_chat_completions(
     Json(resp).into_response()
 }
 
-pub async fn openai_responses(
+pub(crate) async fn openai_responses(
     State(state): State<DiffusionGemmaAppState>,
-    payload: std::result::Result<
-        Json<super::responses::ResponsesRequest>,
-        axum::extract::rejection::JsonRejection,
-    >,
+    ApiJson(request): ApiJson<super::responses::ResponsesRequest>,
 ) -> Response {
-    let request = match payload {
-        Ok(Json(request)) => request,
-        Err(error) => {
-            return super::responses::error_response(
-                StatusCode::BAD_REQUEST,
-                "invalid_json",
-                format!("invalid Responses request: {}", error.body_text()),
-            );
-        }
-    };
+    openai_responses_with_state(state, request).await
+}
+
+pub(crate) async fn openai_responses_with_state(
+    state: DiffusionGemmaAppState,
+    request: super::responses::ResponsesRequest,
+) -> Response {
     let normalized = match request.normalize() {
         Ok(normalized) => normalized,
         Err(error) => {
@@ -2001,23 +1976,17 @@ pub async fn openai_responses(
     )
 }
 
-pub async fn anthropic_messages(
+pub(crate) async fn anthropic_messages(
     State(state): State<DiffusionGemmaAppState>,
-    payload: std::result::Result<
-        Json<super::anthropic::MessagesRequest>,
-        axum::extract::rejection::JsonRejection,
-    >,
+    ApiJson(req): ApiJson<super::anthropic::MessagesRequest>,
 ) -> Response {
-    let req = match payload {
-        Ok(Json(req)) => req,
-        Err(error) => {
-            return super::anthropic::anthropic_error_response_with_code(
-                StatusCode::BAD_REQUEST,
-                "invalid_json",
-                format!("invalid Messages request: {}", error.body_text()),
-            );
-        }
-    };
+    anthropic_messages_with_state(state, req).await
+}
+
+pub(crate) async fn anthropic_messages_with_state(
+    state: DiffusionGemmaAppState,
+    req: super::anthropic::MessagesRequest,
+) -> Response {
     let stream = req.stream;
     let max_tokens = req.max_tokens;
     let temperature = req.temperature.unwrap_or(0.0);

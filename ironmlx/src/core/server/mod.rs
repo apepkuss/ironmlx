@@ -27,6 +27,7 @@ use crate::Result;
 pub(crate) mod adaptive_admission;
 pub mod anthropic;
 pub(crate) mod api_error;
+pub(crate) mod api_transport;
 pub mod chat_format;
 pub mod diffusion_gemma;
 pub mod engine;

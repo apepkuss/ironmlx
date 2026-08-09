@@ -34,7 +34,7 @@ use super::health::{
     classify_status, system_free_ram_bytes, HealthSnapshot, MemoryInfo, ModelInfo, MtpHealthInfo,
     NeuralExactQualificationHealth, PromptLookupHealthInfo, SchedulerInfo,
 };
-use super::{anthropic, openai, responses, SamplingDefaults};
+use super::{anthropic, api_transport::ApiJson, openai, responses, SamplingDefaults};
 
 const MODEL_REQUIRED_CODE: &str = "model_required";
 const MODEL_REQUIRED_MESSAGE: &str = "Model is required.";
@@ -363,21 +363,24 @@ impl ModelManager {
     async fn openai(&self, req: openai::ChatRequest) -> Response {
         match self.pool.app_openai_chat_completions(req).await {
             Ok(response) => response,
-            Err(error) => resolve_error_response(error, super::api_error::ApiProtocol::OpenAi),
+            Err(error) => super::api_error::ApiError::engine_resolution(error)
+                .into_response(super::api_error::ApiProtocol::OpenAi),
         }
     }
 
     async fn responses(&self, req: responses::ResponsesRequest) -> Response {
         match self.pool.app_openai_responses(req).await {
             Ok(response) => response,
-            Err(error) => resolve_error_response(error, super::api_error::ApiProtocol::OpenAi),
+            Err(error) => super::api_error::ApiError::engine_resolution(error)
+                .into_response(super::api_error::ApiProtocol::OpenAi),
         }
     }
 
     async fn anthropic(&self, req: anthropic::MessagesRequest) -> Response {
         match self.pool.app_anthropic_messages(req).await {
             Ok(response) => response,
-            Err(error) => resolve_error_response(error, super::api_error::ApiProtocol::Anthropic),
+            Err(error) => super::api_error::ApiError::engine_resolution(error)
+                .into_response(super::api_error::ApiProtocol::Anthropic),
         }
     }
 
@@ -1158,61 +1161,22 @@ pub async fn serve_app_daemon(args: ServeArgs) -> Result<()> {
 
 async fn app_openai_handler(
     State(manager): State<ModelManager>,
-    payload: std::result::Result<
-        Json<openai::ChatRequest>,
-        axum::extract::rejection::JsonRejection,
-    >,
+    ApiJson(req): ApiJson<openai::ChatRequest>,
 ) -> Response {
-    let req = match payload {
-        Ok(Json(req)) => req,
-        Err(error) => {
-            return super::api_error::ApiError::invalid_request(
-                "invalid_json",
-                format!("invalid Chat Completions request: {}", error.body_text()),
-            )
-            .into_response(super::api_error::ApiProtocol::OpenAi)
-        }
-    };
     manager.openai(req).await
 }
 
 async fn app_responses_handler(
     State(manager): State<ModelManager>,
-    payload: std::result::Result<
-        Json<responses::ResponsesRequest>,
-        axum::extract::rejection::JsonRejection,
-    >,
+    ApiJson(req): ApiJson<responses::ResponsesRequest>,
 ) -> Response {
-    let req = match payload {
-        Ok(Json(req)) => req,
-        Err(error) => {
-            return responses::error_response(
-                StatusCode::BAD_REQUEST,
-                "invalid_json",
-                format!("invalid Responses request: {}", error.body_text()),
-            );
-        }
-    };
     manager.responses(req).await
 }
 
 async fn app_anthropic_handler(
     State(manager): State<ModelManager>,
-    payload: std::result::Result<
-        Json<anthropic::MessagesRequest>,
-        axum::extract::rejection::JsonRejection,
-    >,
+    ApiJson(req): ApiJson<anthropic::MessagesRequest>,
 ) -> Response {
-    let req = match payload {
-        Ok(Json(req)) => req,
-        Err(error) => {
-            return anthropic::anthropic_error_response_with_code(
-                StatusCode::BAD_REQUEST,
-                "invalid_json",
-                format!("invalid Messages request: {}", error.body_text()),
-            );
-        }
-    };
     manager.anthropic(req).await
 }
 
@@ -1310,33 +1274,6 @@ async fn set_default_model_handler(
         Ok(response) => Json(response).into_response(),
         Err(error) => error.into_response(),
     }
-}
-
-fn resolve_error_response(
-    error: anyhow::Error,
-    protocol: super::api_error::ApiProtocol,
-) -> Response {
-    let message = format!("{error:#}");
-    if let Some(registry) = error.downcast_ref::<EngineRegistryError>() {
-        let api_error = match registry {
-            EngineRegistryError::UnknownModel { .. }
-            | EngineRegistryError::ModelDisabled { .. } => super::api_error::ApiError::from_status(
-                StatusCode::NOT_FOUND,
-                "model_not_found",
-                message,
-            ),
-            EngineRegistryError::AmbiguousDefault => {
-                super::api_error::ApiError::invalid_request("model_required", message)
-            }
-            _ => super::api_error::ApiError::invalid_request(
-                "engine_pool_invalid_configuration",
-                message,
-            ),
-        };
-        return api_error.into_response(protocol);
-    }
-    super::api_error::ApiError::service_unavailable("engine_unavailable", message)
-        .into_response(protocol)
 }
 
 #[derive(Debug, Deserialize)]
@@ -2074,10 +2011,10 @@ mod tests {
 
     #[tokio::test]
     async fn app_daemon_resolve_errors_follow_protocol_contract() {
-        let openai = resolve_error_response(
+        let openai = crate::core::server::api_error::ApiError::engine_resolution(
             EngineRegistryError::AmbiguousDefault.into(),
-            crate::core::server::api_error::ApiProtocol::OpenAi,
-        );
+        )
+        .into_response(crate::core::server::api_error::ApiProtocol::OpenAi);
         assert_eq!(openai.status(), StatusCode::BAD_REQUEST);
         let body = axum::body::to_bytes(openai.into_body(), usize::MAX)
             .await
@@ -2085,13 +2022,13 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["error"]["code"], "model_required");
 
-        let anthropic = resolve_error_response(
+        let anthropic = crate::core::server::api_error::ApiError::engine_resolution(
             EngineRegistryError::UnknownModel {
                 id: "missing".to_owned(),
             }
             .into(),
-            crate::core::server::api_error::ApiProtocol::Anthropic,
-        );
+        )
+        .into_response(crate::core::server::api_error::ApiProtocol::Anthropic);
         assert_eq!(anthropic.status(), StatusCode::NOT_FOUND);
         let request_id = anthropic.headers()["request-id"]
             .to_str()

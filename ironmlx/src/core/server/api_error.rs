@@ -165,6 +165,23 @@ impl ApiError {
         }
     }
 
+    pub(crate) fn engine_resolution(error: anyhow::Error) -> Self {
+        let message = format!("{error:#}");
+        if let Some(registry) = error.downcast_ref::<super::engine::EngineRegistryError>() {
+            return match registry {
+                super::engine::EngineRegistryError::UnknownModel { .. }
+                | super::engine::EngineRegistryError::ModelDisabled { .. } => {
+                    Self::from_status(StatusCode::NOT_FOUND, "model_not_found", message)
+                }
+                super::engine::EngineRegistryError::AmbiguousDefault => {
+                    Self::invalid_request("model_required", message)
+                }
+                _ => Self::invalid_request("engine_pool_invalid_configuration", message),
+            };
+        }
+        Self::service_unavailable("engine_unavailable", message)
+    }
+
     pub(crate) fn into_response(self, protocol: ApiProtocol) -> Response {
         let mut response = match protocol {
             ApiProtocol::OpenAi => self.openai_response(),
@@ -345,5 +362,27 @@ mod tests {
             ApiProtocol::OpenAi
         );
         assert_eq!(ApiProtocol::from_path("/v1/responses"), ApiProtocol::OpenAi);
+    }
+
+    #[tokio::test]
+    async fn engine_resolution_errors_render_identically_for_routing_topologies() {
+        let openai = ApiError::engine_resolution(
+            super::super::engine::EngineRegistryError::UnknownModel {
+                id: "missing".to_owned(),
+            }
+            .into(),
+        )
+        .into_response(ApiProtocol::OpenAi);
+        assert_eq!(openai.status(), StatusCode::NOT_FOUND);
+        let body = json(openai).await;
+        assert_eq!(body["error"]["code"], "model_not_found");
+
+        let anthropic = ApiError::engine_resolution(anyhow::anyhow!("engine failed"))
+            .into_response(ApiProtocol::Anthropic);
+        assert_eq!(anthropic.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(anthropic.headers()[header::RETRY_AFTER], "5");
+        let body = json(anthropic).await;
+        assert_eq!(body["error"]["type"], "overloaded_error");
+        assert_eq!(body["error"]["code"], "engine_unavailable");
     }
 }

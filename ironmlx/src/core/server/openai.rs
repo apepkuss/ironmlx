@@ -5,10 +5,11 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(test)]
+use axum::http::{header, StatusCode};
 use axum::{
     body::{Body, Bytes},
-    extract::{rejection::JsonRejection, State},
-    http::{header, StatusCode},
+    extract::State,
     response::{IntoResponse, Response},
     Json,
 };
@@ -40,6 +41,7 @@ use crate::core::tool_calling::{
     ToolDefinition, ToolDialect,
 };
 
+use super::api_transport::ApiJson;
 use super::{AppState, Gemma4DrafterAppState, SamplingDefaults};
 
 // ---------------------------------------------------------------------------
@@ -802,22 +804,13 @@ pub(crate) fn stop_token_ids_for_request(eos_token_ids: &[u32], ignore_eos: bool
 // Handler (Step 19.3)
 // ---------------------------------------------------------------------------
 
-pub async fn chat_completions<M>(
+pub(crate) async fn chat_completions<M>(
     State(state): State<AppState<M>>,
-    payload: std::result::Result<Json<ChatRequest>, JsonRejection>,
+    ApiJson(req): ApiJson<ChatRequest>,
 ) -> Response
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
-    let req = match payload {
-        Ok(Json(req)) => req,
-        Err(error) => {
-            return bad_request_response(
-                "invalid_json",
-                format!("invalid Chat Completions request: {}", error.body_text()),
-            );
-        }
-    };
     chat_completions_with_state(state, req).await
 }
 
@@ -1038,17 +1031,8 @@ where
 
 pub(crate) async fn gemma4_drafter_chat_completions(
     State(state): State<Gemma4DrafterAppState>,
-    payload: std::result::Result<Json<ChatRequest>, JsonRejection>,
+    ApiJson(req): ApiJson<ChatRequest>,
 ) -> Response {
-    let req = match payload {
-        Ok(Json(req)) => req,
-        Err(error) => {
-            return bad_request_response(
-                "invalid_json",
-                format!("invalid Chat Completions request: {}", error.body_text()),
-            );
-        }
-    };
     chat_completions_with_gemma4_drafter_state(state, req).await
 }
 
@@ -1442,12 +1426,7 @@ fn tool_stream_response(
     }
     frames.push(Ok(Bytes::from_static(b"data: [DONE]\n\n")));
     let body = Body::from_stream(tokio_stream::iter(frames));
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/event-stream")
-        .header(header::CACHE_CONTROL, "no-cache")
-        .body(body)
-        .unwrap()
+    super::api_transport::sse_response(body)
 }
 
 fn utf8_fragments(value: &str, max_bytes: usize) -> Vec<&str> {
@@ -1592,12 +1571,7 @@ fn tool_finish_chunk(id: &str, model_id: &str, finish_reason: &'static str) -> B
 
 fn sse_body_response(rx: mpsc::Receiver<std::result::Result<Bytes, std::io::Error>>) -> Response {
     let body = Body::from_stream(ReceiverStream::new(rx));
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/event-stream")
-        .header(header::CACHE_CONTROL, "no-cache")
-        .body(body)
-        .unwrap()
+    super::api_transport::sse_response(body)
 }
 
 async fn serve_via_gs_tools_stream<M>(
@@ -2323,12 +2297,7 @@ where
 
     let stream = ReceiverStream::new(rx);
     let body = Body::from_stream(stream);
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/event-stream")
-        .header(header::CACHE_CONTROL, "no-cache")
-        .body(body)
-        .unwrap()
+    super::api_transport::sse_response(body)
 }
 
 /// Text-only short-prompt SSE path via SchedulerActor (3b-2 swap-in).
@@ -2506,12 +2475,7 @@ where
 
     let stream = ReceiverStream::new(rx);
     let body = Body::from_stream(stream);
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/event-stream")
-        .header(header::CACHE_CONTROL, "no-cache")
-        .body(body)
-        .unwrap()
+    super::api_transport::sse_response(body)
 }
 
 async fn serve_via_gs_unary<M>(
@@ -3168,15 +3132,7 @@ mod tests {
         use axum::Router;
         use tower::ServiceExt;
 
-        async fn validate(
-            payload: std::result::Result<Json<ChatRequest>, JsonRejection>,
-        ) -> Response {
-            let req = match payload {
-                Ok(Json(req)) => req,
-                Err(error) => {
-                    return (StatusCode::BAD_REQUEST, error.body_text()).into_response();
-                }
-            };
+        async fn validate(ApiJson(req): ApiJson<ChatRequest>) -> Response {
             match prepare_tool_request(&req, Some(ToolDialect::Qwen35)) {
                 Ok(_) => StatusCode::NO_CONTENT.into_response(),
                 Err(error) => (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
@@ -3219,19 +3175,8 @@ mod tests {
         use axum::Router;
         use tower::ServiceExt;
 
-        async fn validate(
-            payload: std::result::Result<Json<ChatRequest>, JsonRejection>,
-        ) -> Response {
-            let req = match payload {
-                Ok(Json(req)) => req,
-                Err(error) => {
-                    return (StatusCode::BAD_REQUEST, error.body_text()).into_response();
-                }
-            };
-            match req.validate_sampling() {
-                Ok(()) => StatusCode::NO_CONTENT.into_response(),
-                Err(error) => (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
-            }
+        async fn validate(ApiJson(_req): ApiJson<ChatRequest>) -> Response {
+            StatusCode::NO_CONTENT.into_response()
         }
 
         let app = Router::new().route("/v1/chat/completions", post(validate));

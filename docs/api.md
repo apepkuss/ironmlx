@@ -67,6 +67,25 @@ IronMLX 扩展。客户端应按 HTTP status 和 `error.type` 判断错误类别
 HTTP 503 + `overloaded_error` 表达暂时过载；413 使用 `request_too_large`，并通过
 上述两个稳定 code 区分传输体上限与模型上下文容量上限。
 
+### 运行拓扑一致性
+
+公开推理 API 的 transport 契约不随服务器启动方式变化。普通 causal 服务、
+Gemma4 drafter、DiffusionGemma、EnginePool 和 App daemon 共用同一请求提取、
+模型无关字段校验、协议错误渲染和 SSE header 构造路径。
+
+| 行为 | 普通服务 | Gemma4 drafter | DiffusionGemma | EnginePool | App daemon |
+|---|---|---|---|---|---|
+| Chat/Responses/Messages 严格 JSON 与模型无关字段校验 | 相同 | 相同 | 相同 | 相同 | 相同 |
+| OpenAI/Anthropic 错误 envelope、413/503 与 `Retry-After` | 相同 | 相同 | 相同 | 相同 | 相同 |
+| SSE transport headers | `text/event-stream` + `no-cache` | 相同 | 相同 | 相同 | 相同 |
+| typed request 进入模型实现 | 直接 | 直接 | 直接进入 block-diffusion lane | 解析模型后直接分派 | 解析模型后直接分派 |
+| 模型选择 | 启动时固定 | 启动时固定 | 启动时固定 | request `model` 或唯一/default model | request `model` 或唯一/default model |
+
+该一致性只约束 HTTP transport、协议错误和模型分派语义，不表示所有模型架构拥有
+相同推理能力。DiffusionGemma 的 sampling、MTP、KV cache 和 PromptLookup 限制仍按
+其 capability 描述明确拒绝。`/v1/models` 和 `/admin/api/models/*` 等模型管理路由也
+只在对应的 EnginePool 或 App daemon 拓扑公开。
+
 ## OpenAI Responses API
 
 `POST /v1/responses` 是推荐给本地 Agent 客户端的新接口。IronMLX 实现无状态

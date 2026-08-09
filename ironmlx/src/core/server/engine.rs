@@ -11,7 +11,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{bail, Context};
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -39,8 +38,8 @@ use crate::models::{
 use crate::Result;
 
 use super::{
-    anthropic, diffusion_gemma, health, openai, responses, AppState, Gemma4DrafterAppState,
-    SamplingDefaults, VisionInputConfig,
+    anthropic, api_transport::ApiJson, diffusion_gemma, health, openai, responses, AppState,
+    Gemma4DrafterAppState, SamplingDefaults, VisionInputConfig,
 };
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -707,6 +706,41 @@ pub struct EnginePoolState {
     inner: Arc<EnginePoolInner>,
 }
 
+trait EngineRoutedRequest {
+    fn model(&self) -> Option<&str>;
+    fn set_model(&mut self, model: String);
+}
+
+impl EngineRoutedRequest for openai::ChatRequest {
+    fn model(&self) -> Option<&str> {
+        self.model.as_deref()
+    }
+
+    fn set_model(&mut self, model: String) {
+        self.model = Some(model);
+    }
+}
+
+impl EngineRoutedRequest for responses::ResponsesRequest {
+    fn model(&self) -> Option<&str> {
+        self.model.as_deref()
+    }
+
+    fn set_model(&mut self, model: String) {
+        self.model = Some(model);
+    }
+}
+
+impl EngineRoutedRequest for anthropic::MessagesRequest {
+    fn model(&self) -> Option<&str> {
+        self.model.as_deref()
+    }
+
+    fn set_model(&mut self, model: String) {
+        self.model = Some(model);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EngineLoadedModelInfo {
     pub id: String,
@@ -1324,15 +1358,26 @@ impl EnginePoolState {
         Ok((model_id, engine))
     }
 
+    async fn resolve_request_engine<R>(&self, request: &mut R) -> Result<EngineLease>
+    where
+        R: EngineRoutedRequest,
+    {
+        let requested = request
+            .model()
+            .filter(|model| !model.is_empty())
+            .map(str::to_owned);
+        let (model_id, engine) = self.resolve_engine(requested.as_deref()).await?;
+        if requested.is_none() {
+            request.set_model(model_id);
+        }
+        Ok(engine)
+    }
+
     pub(crate) async fn app_openai_chat_completions(
         &self,
         mut req: openai::ChatRequest,
     ) -> Result<Response> {
-        let requested = req.model.as_deref().filter(|model| !model.is_empty());
-        let (model_id, engine) = self.resolve_engine(requested).await?;
-        if req.model.is_none() {
-            req.model = Some(model_id);
-        }
+        let engine = self.resolve_request_engine(&mut req).await?;
         Ok(engine.openai_chat_completions(req).await)
     }
 
@@ -1340,11 +1385,7 @@ impl EnginePoolState {
         &self,
         mut req: responses::ResponsesRequest,
     ) -> Result<Response> {
-        let requested = req.model.as_deref().filter(|model| !model.is_empty());
-        let (model_id, engine) = self.resolve_engine(requested).await?;
-        if req.model.is_none() {
-            req.model = Some(model_id);
-        }
+        let engine = self.resolve_request_engine(&mut req).await?;
         Ok(engine.openai_responses(req).await)
     }
 
@@ -1352,11 +1393,7 @@ impl EnginePoolState {
         &self,
         mut req: anthropic::MessagesRequest,
     ) -> Result<Response> {
-        let requested = req.model.as_deref().filter(|model| !model.is_empty());
-        let (model_id, engine) = self.resolve_engine(requested).await?;
-        if req.model.is_none() {
-            req.model = Some(model_id);
-        }
+        let engine = self.resolve_request_engine(&mut req).await?;
         Ok(engine.anthropic_messages(req).await)
     }
 
@@ -2497,90 +2534,67 @@ impl EngineVariant {
 
     async fn openai_chat_completions(&self, req: openai::ChatRequest) -> Response {
         match self {
-            Self::Qwen35(state) => {
-                openai::chat_completions(State(state.clone()), Ok(Json(req))).await
-            }
-            Self::Qwen35Moe(state) => {
-                openai::chat_completions(State(state.clone()), Ok(Json(req))).await
-            }
-            Self::Qwen36Moe(state) => {
-                openai::chat_completions(State(state.clone()), Ok(Json(req))).await
-            }
-            Self::Gemma4(state) => {
-                openai::chat_completions(State(state.clone()), Ok(Json(req))).await
-            }
+            Self::Qwen35(state) => openai::chat_completions_with_state(state.clone(), req).await,
+            Self::Qwen35Moe(state) => openai::chat_completions_with_state(state.clone(), req).await,
+            Self::Qwen36Moe(state) => openai::chat_completions_with_state(state.clone(), req).await,
+            Self::Gemma4(state) => openai::chat_completions_with_state(state.clone(), req).await,
             Self::Gemma4Drafter(state) => {
-                openai::gemma4_drafter_chat_completions(
-                    State(state.as_ref().clone()),
-                    Ok(Json(req)),
-                )
-                .await
+                openai::chat_completions_with_gemma4_drafter_state(state.as_ref().clone(), req)
+                    .await
             }
             Self::Glm4MoeLite(state) => {
-                openai::chat_completions(State(state.clone()), Ok(Json(req))).await
+                openai::chat_completions_with_state(state.clone(), req).await
             }
-            Self::Llama(state) => {
-                openai::chat_completions(State(state.clone()), Ok(Json(req))).await
-            }
+            Self::Llama(state) => openai::chat_completions_with_state(state.clone(), req).await,
             Self::MiniCpmV46(state) => {
-                openai::chat_completions(State(state.clone()), Ok(Json(req))).await
+                openai::chat_completions_with_state(state.clone(), req).await
             }
             Self::DiffusionGemma(state) => {
-                diffusion_gemma::openai_chat_completions(State(state.clone()), Ok(Json(req))).await
+                diffusion_gemma::openai_chat_completions_with_state(state.clone(), req).await
             }
         }
     }
 
     async fn openai_responses(&self, req: responses::ResponsesRequest) -> Response {
         match self {
-            Self::Qwen35(state) => responses::responses(State(state.clone()), Ok(Json(req))).await,
+            Self::Qwen35(state) => responses::responses_with_state(state.clone(), req, false).await,
             Self::Qwen35Moe(state) => {
-                responses::responses(State(state.clone()), Ok(Json(req))).await
+                responses::responses_with_state(state.clone(), req, false).await
             }
             Self::Qwen36Moe(state) => {
-                responses::responses(State(state.clone()), Ok(Json(req))).await
+                responses::responses_with_state(state.clone(), req, false).await
             }
-            Self::Gemma4(state) => responses::responses(State(state.clone()), Ok(Json(req))).await,
+            Self::Gemma4(state) => responses::responses_with_state(state.clone(), req, false).await,
             Self::Gemma4Drafter(state) => {
-                responses::gemma4_drafter_responses(State(state.as_ref().clone()), Ok(Json(req)))
-                    .await
+                responses::responses_with_state(state.base.clone(), req, true).await
             }
             Self::Glm4MoeLite(state) => {
-                responses::responses(State(state.clone()), Ok(Json(req))).await
+                responses::responses_with_state(state.clone(), req, false).await
             }
-            Self::Llama(state) => responses::responses(State(state.clone()), Ok(Json(req))).await,
+            Self::Llama(state) => responses::responses_with_state(state.clone(), req, false).await,
             Self::MiniCpmV46(state) => {
-                responses::responses(State(state.clone()), Ok(Json(req))).await
+                responses::responses_with_state(state.clone(), req, false).await
             }
             Self::DiffusionGemma(state) => {
-                diffusion_gemma::openai_responses(State(state.clone()), Ok(Json(req))).await
+                diffusion_gemma::openai_responses_with_state(state.clone(), req).await
             }
         }
     }
 
     async fn anthropic_messages(&self, req: anthropic::MessagesRequest) -> Response {
         match self {
-            Self::Qwen35(state) => anthropic::messages(State(state.clone()), Ok(Json(req))).await,
-            Self::Qwen35Moe(state) => {
-                anthropic::messages(State(state.clone()), Ok(Json(req))).await
-            }
-            Self::Qwen36Moe(state) => {
-                anthropic::messages(State(state.clone()), Ok(Json(req))).await
-            }
-            Self::Gemma4(state) => anthropic::messages(State(state.clone()), Ok(Json(req))).await,
+            Self::Qwen35(state) => anthropic::messages_with_state(state.clone(), req).await,
+            Self::Qwen35Moe(state) => anthropic::messages_with_state(state.clone(), req).await,
+            Self::Qwen36Moe(state) => anthropic::messages_with_state(state.clone(), req).await,
+            Self::Gemma4(state) => anthropic::messages_with_state(state.clone(), req).await,
             Self::Gemma4Drafter(state) => {
-                anthropic::gemma4_drafter_messages(State(state.as_ref().clone()), Ok(Json(req)))
-                    .await
+                anthropic::messages_with_gemma4_drafter_state(state.as_ref().clone(), req).await
             }
-            Self::Glm4MoeLite(state) => {
-                anthropic::messages(State(state.clone()), Ok(Json(req))).await
-            }
-            Self::Llama(state) => anthropic::messages(State(state.clone()), Ok(Json(req))).await,
-            Self::MiniCpmV46(state) => {
-                anthropic::messages(State(state.clone()), Ok(Json(req))).await
-            }
+            Self::Glm4MoeLite(state) => anthropic::messages_with_state(state.clone(), req).await,
+            Self::Llama(state) => anthropic::messages_with_state(state.clone(), req).await,
+            Self::MiniCpmV46(state) => anthropic::messages_with_state(state.clone(), req).await,
             Self::DiffusionGemma(state) => {
-                diffusion_gemma::anthropic_messages(State(state.clone()), Ok(Json(req))).await
+                diffusion_gemma::anthropic_messages_with_state(state.clone(), req).await
             }
         }
     }
@@ -3372,87 +3386,43 @@ fn engine_pool_router() -> Router<EnginePoolState> {
 
 async fn openai_chat_completions(
     State(pool): State<EnginePoolState>,
-    payload: std::result::Result<
-        Json<openai::ChatRequest>,
-        axum::extract::rejection::JsonRejection,
-    >,
+    ApiJson(mut req): ApiJson<openai::ChatRequest>,
 ) -> Response {
-    let mut req = match payload {
-        Ok(Json(req)) => req,
+    let engine = match pool.resolve_request_engine(&mut req).await {
+        Ok(engine) => engine,
         Err(error) => {
-            return super::api_error::ApiError::invalid_request(
-                "invalid_json",
-                format!("invalid Chat Completions request: {}", error.body_text()),
-            )
-            .into_response(super::api_error::ApiProtocol::OpenAi)
+            return super::api_error::ApiError::engine_resolution(error)
+                .into_response(super::api_error::ApiProtocol::OpenAi)
         }
     };
-    let requested = req.model.as_deref().filter(|model| !model.is_empty());
-    let (model_id, engine) = match pool.resolve_engine(requested).await {
-        Ok(resolved) => resolved,
-        Err(error) => return engine_error_response(error, super::api_error::ApiProtocol::OpenAi),
-    };
-    if req.model.is_none() {
-        req.model = Some(model_id.to_string());
-    }
     engine.openai_chat_completions(req).await
 }
 
 async fn openai_responses(
     State(pool): State<EnginePoolState>,
-    payload: std::result::Result<
-        Json<responses::ResponsesRequest>,
-        axum::extract::rejection::JsonRejection,
-    >,
+    ApiJson(mut req): ApiJson<responses::ResponsesRequest>,
 ) -> Response {
-    let mut req = match payload {
-        Ok(Json(req)) => req,
+    let engine = match pool.resolve_request_engine(&mut req).await {
+        Ok(engine) => engine,
         Err(error) => {
-            return responses::error_response(
-                StatusCode::BAD_REQUEST,
-                "invalid_json",
-                format!("invalid Responses request: {}", error.body_text()),
-            );
+            return super::api_error::ApiError::engine_resolution(error)
+                .into_response(super::api_error::ApiProtocol::OpenAi)
         }
     };
-    let requested = req.model.as_deref().filter(|model| !model.is_empty());
-    let (model_id, engine) = match pool.resolve_engine(requested).await {
-        Ok(resolved) => resolved,
-        Err(error) => return engine_error_response(error, super::api_error::ApiProtocol::OpenAi),
-    };
-    if req.model.is_none() {
-        req.model = Some(model_id.to_string());
-    }
     engine.openai_responses(req).await
 }
 
 async fn anthropic_messages(
     State(pool): State<EnginePoolState>,
-    payload: std::result::Result<
-        Json<anthropic::MessagesRequest>,
-        axum::extract::rejection::JsonRejection,
-    >,
+    ApiJson(mut req): ApiJson<anthropic::MessagesRequest>,
 ) -> Response {
-    let mut req = match payload {
-        Ok(Json(req)) => req,
+    let engine = match pool.resolve_request_engine(&mut req).await {
+        Ok(engine) => engine,
         Err(error) => {
-            return anthropic::anthropic_error_response_with_code(
-                StatusCode::BAD_REQUEST,
-                "invalid_json",
-                format!("invalid Messages request: {}", error.body_text()),
-            );
+            return super::api_error::ApiError::engine_resolution(error)
+                .into_response(super::api_error::ApiProtocol::Anthropic)
         }
     };
-    let requested = req.model.as_deref().filter(|model| !model.is_empty());
-    let (model_id, engine) = match pool.resolve_engine(requested).await {
-        Ok(resolved) => resolved,
-        Err(error) => {
-            return engine_error_response(error, super::api_error::ApiProtocol::Anthropic)
-        }
-    };
-    if req.model.is_none() {
-        req.model = Some(model_id.to_string());
-    }
     engine.anthropic_messages(req).await
 }
 
@@ -3466,7 +3436,8 @@ async fn load_model_handler(
 ) -> Response {
     match pool.load_model(&model_id).await {
         Ok(result) => Json(result).into_response(),
-        Err(error) => engine_error_response(error, super::api_error::ApiProtocol::OpenAi),
+        Err(error) => super::api_error::ApiError::engine_resolution(error)
+            .into_response(super::api_error::ApiProtocol::OpenAi),
     }
 }
 
@@ -3476,39 +3447,13 @@ async fn unload_model_handler(
 ) -> Response {
     match pool.unload_model(&model_id).await {
         Ok(result) => Json(result).into_response(),
-        Err(error) => engine_error_response(error, super::api_error::ApiProtocol::OpenAi),
+        Err(error) => super::api_error::ApiError::engine_resolution(error)
+            .into_response(super::api_error::ApiProtocol::OpenAi),
     }
 }
 
 async fn healthz_handler(State(pool): State<EnginePoolState>) -> Json<EnginePoolHealth> {
     Json(pool.health_snapshot().await)
-}
-
-fn engine_error_response(
-    error: anyhow::Error,
-    protocol: super::api_error::ApiProtocol,
-) -> Response {
-    let message = format!("{error:#}");
-    let api_error = if let Some(registry) = error.downcast_ref::<EngineRegistryError>() {
-        match registry {
-            EngineRegistryError::UnknownModel { .. }
-            | EngineRegistryError::ModelDisabled { .. } => super::api_error::ApiError::from_status(
-                StatusCode::NOT_FOUND,
-                "model_not_found",
-                message,
-            ),
-            EngineRegistryError::AmbiguousDefault => {
-                super::api_error::ApiError::invalid_request("model_required", message)
-            }
-            _ => super::api_error::ApiError::invalid_request(
-                "engine_pool_invalid_configuration",
-                message,
-            ),
-        }
-    } else {
-        super::api_error::ApiError::service_unavailable("engine_unavailable", message)
-    };
-    api_error.into_response(protocol)
 }
 
 #[derive(Debug, Serialize)]
@@ -3643,13 +3588,13 @@ mod tests {
 
     #[tokio::test]
     async fn engine_pool_errors_render_for_each_public_protocol() {
-        let openai = super::engine_error_response(
+        let openai = crate::core::server::api_error::ApiError::engine_resolution(
             EngineRegistryError::UnknownModel {
                 id: "missing".to_owned(),
             }
             .into(),
-            crate::core::server::api_error::ApiProtocol::OpenAi,
-        );
+        )
+        .into_response(crate::core::server::api_error::ApiProtocol::OpenAi);
         assert_eq!(openai.status(), axum::http::StatusCode::NOT_FOUND);
         let body = axum::body::to_bytes(openai.into_body(), usize::MAX)
             .await
@@ -3657,10 +3602,10 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["error"]["code"], "model_not_found");
 
-        let anthropic = super::engine_error_response(
+        let anthropic = crate::core::server::api_error::ApiError::engine_resolution(
             anyhow::anyhow!("engine failed"),
-            crate::core::server::api_error::ApiProtocol::Anthropic,
-        );
+        )
+        .into_response(crate::core::server::api_error::ApiProtocol::Anthropic);
         assert_eq!(
             anthropic.status(),
             axum::http::StatusCode::SERVICE_UNAVAILABLE

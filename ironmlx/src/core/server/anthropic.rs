@@ -6,10 +6,12 @@
 //!
 //! Each event is framed as `event: <type>\ndata: <json>\n\n`.
 
+#[cfg(test)]
+use axum::http::header;
 use axum::{
     body::{Body, Bytes},
-    extract::{rejection::JsonRejection, State},
-    http::{header, StatusCode},
+    extract::State,
+    http::StatusCode,
     response::{IntoResponse, Response},
     Json,
 };
@@ -39,6 +41,7 @@ use crate::core::server::vision::{DecodedMessage, DecodedPart};
 use crate::core::speculative::MtpSpeculativeConfig;
 use crate::core::tool_calling::{ToolCall, ToolDefinition, ToolDialect};
 
+use super::api_transport::ApiJson;
 use super::SamplingDefaults;
 use super::{AppState, Gemma4DrafterAppState};
 
@@ -352,6 +355,38 @@ impl MessagesRequest {
         }
         if let Some(top_k) = self.top_k {
             anyhow::ensure!(top_k > 0, "top_k must be greater than zero");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_topology_contract(&self) -> anyhow::Result<()> {
+        self.validate_sampling()?;
+        let has_output_format = self
+            .output_config
+            .as_ref()
+            .and_then(|config| config.format.as_ref())
+            .is_some();
+        let effort = self.output_config.as_ref().and_then(|config| config.effort);
+        if let Some(config) = self.output_config.as_ref() {
+            anyhow::ensure!(
+                config.format.is_some() || config.effort.is_some(),
+                "output_config must include `format` or `effort`"
+            );
+        }
+        match self.thinking.as_ref() {
+            Some(thinking) => thinking.validate(self.max_tokens, effort)?,
+            None => anyhow::ensure!(
+                effort.is_none(),
+                "output_config.effort requires thinking.type=`enabled` or `adaptive`"
+            ),
+        }
+        if has_output_format
+            && self
+                .messages
+                .last()
+                .is_some_and(|message| message.role == "assistant")
+        {
+            anyhow::bail!("output_config.format is incompatible with assistant message prefilling");
         }
         Ok(())
     }
@@ -735,33 +770,7 @@ fn normalize_tool_choice(
 
 impl MessagesRequest {
     pub(crate) fn into_chat_request(self) -> anyhow::Result<super::openai::ChatRequest> {
-        let has_output_format = self
-            .output_config
-            .as_ref()
-            .and_then(|config| config.format.as_ref())
-            .is_some();
-        let effort = self.output_config.as_ref().and_then(|config| config.effort);
-        if let Some(config) = self.output_config.as_ref() {
-            anyhow::ensure!(
-                config.format.is_some() || config.effort.is_some(),
-                "output_config must include `format` or `effort`"
-            );
-        }
-        match self.thinking.as_ref() {
-            Some(thinking) => thinking.validate(self.max_tokens, effort)?,
-            None => anyhow::ensure!(
-                effort.is_none(),
-                "output_config.effort requires thinking.type=`enabled` or `adaptive`"
-            ),
-        }
-        if has_output_format
-            && self
-                .messages
-                .last()
-                .is_some_and(|message| message.role == "assistant")
-        {
-            anyhow::bail!("output_config.format is incompatible with assistant message prefilling");
-        }
+        self.validate_topology_contract()?;
         let allows_final_output = self.tool_choice.as_ref().is_none_or(|choice| {
             matches!(
                 choice,
@@ -903,23 +912,13 @@ pub(crate) fn decode_anthropic_messages(
     Ok(out)
 }
 
-pub async fn messages<M>(
+pub(crate) async fn messages<M>(
     State(state): State<AppState<M>>,
-    payload: std::result::Result<Json<MessagesRequest>, JsonRejection>,
+    ApiJson(req): ApiJson<MessagesRequest>,
 ) -> Response
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
-    let req = match payload {
-        Ok(Json(req)) => req,
-        Err(error) => {
-            return anthropic_error_response_with_code(
-                StatusCode::BAD_REQUEST,
-                "invalid_json",
-                format!("invalid Messages request: {}", error.body_text()),
-            );
-        }
-    };
     messages_with_state(state, req).await
 }
 
@@ -1152,18 +1151,8 @@ where
 
 pub(crate) async fn gemma4_drafter_messages(
     State(state): State<Gemma4DrafterAppState>,
-    payload: std::result::Result<Json<MessagesRequest>, JsonRejection>,
+    ApiJson(req): ApiJson<MessagesRequest>,
 ) -> Response {
-    let req = match payload {
-        Ok(Json(req)) => req,
-        Err(error) => {
-            return anthropic_error_response_with_code(
-                StatusCode::BAD_REQUEST,
-                "invalid_json",
-                format!("invalid Messages request: {}", error.body_text()),
-            );
-        }
-    };
     messages_with_gemma4_drafter_state(state, req).await
 }
 
@@ -2020,12 +2009,7 @@ where
 
 fn tool_sse_response(rx: mpsc::Receiver<std::result::Result<Bytes, std::io::Error>>) -> Response {
     let body = Body::from_stream(ReceiverStream::new(rx));
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/event-stream")
-        .header(header::CACHE_CONTROL, "no-cache")
-        .body(body)
-        .unwrap()
+    super::api_transport::sse_response(body)
 }
 
 async fn serve_via_gs_tools_stream<M>(
@@ -2514,12 +2498,7 @@ where
 
     let stream = ReceiverStream::new(rx);
     let body = Body::from_stream(stream);
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/event-stream")
-        .header(header::CACHE_CONTROL, "no-cache")
-        .body(body)
-        .unwrap()
+    super::api_transport::sse_response(body)
 }
 
 /// Text-only short-prompt streaming path via SchedulerActor (3b-4 swap-in).
@@ -2690,12 +2669,7 @@ where
 
     let stream = ReceiverStream::new(rx);
     let body = Body::from_stream(stream);
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/event-stream")
-        .header(header::CACHE_CONTROL, "no-cache")
-        .body(body)
-        .unwrap()
+    super::api_transport::sse_response(body)
 }
 
 async fn serve_via_gs_unary<M>(
@@ -3074,25 +3048,13 @@ mod tests {
     #[tokio::test]
     async fn messages_http_contract_rejects_unknown_and_invalid_sampling_fields_with_400() {
         use axum::body::Body;
-        use axum::extract::rejection::JsonRejection;
         use axum::http::Request;
         use axum::routing::post;
         use axum::Router;
         use tower::ServiceExt;
 
-        async fn validate(
-            payload: std::result::Result<Json<MessagesRequest>, JsonRejection>,
-        ) -> Response {
-            let req = match payload {
-                Ok(Json(req)) => req,
-                Err(error) => {
-                    return anthropic_error_response(StatusCode::BAD_REQUEST, error.body_text());
-                }
-            };
-            match req.validate_sampling() {
-                Ok(()) => StatusCode::NO_CONTENT.into_response(),
-                Err(error) => anthropic_error_response(StatusCode::BAD_REQUEST, error.to_string()),
-            }
+        async fn validate(ApiJson(_req): ApiJson<MessagesRequest>) -> Response {
+            StatusCode::NO_CONTENT.into_response()
         }
 
         let app = Router::new().route("/v1/messages", post(validate));

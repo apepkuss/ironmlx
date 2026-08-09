@@ -10,10 +10,12 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(test)]
+use axum::http::header;
 use axum::{
     body::{Body, Bytes},
-    extract::{rejection::JsonRejection, State},
-    http::{header, StatusCode},
+    extract::State,
+    http::StatusCode,
     response::{IntoResponse, Response},
     Json,
 };
@@ -34,6 +36,7 @@ use crate::core::server::chat_format::{
 use crate::core::server::scheduler_actor::{AdmitReply, SchedulerCommand};
 use crate::core::tool_calling::{ToolCall, ToolDefinition};
 
+use super::api_transport::ApiJson;
 use super::structured_output::{coalesce_system_messages, StructuredOutputFormat};
 use super::{openai, AppState, Gemma4DrafterAppState};
 
@@ -125,6 +128,9 @@ pub enum ResponseInputItem {
     Reasoning {
         #[serde(default)]
         id: Option<String>,
+        // Summary metadata is accepted in replay history but the full
+        // reasoning content remains the authoritative local prompt input.
+        #[allow(dead_code)]
         #[serde(default)]
         summary: Vec<ReasoningSummaryPart>,
         #[serde(default)]
@@ -170,6 +176,7 @@ pub struct ReasoningRequest {
     pub summary: Option<ReasoningSummaryMode>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ReasoningSummaryPart {
@@ -477,6 +484,12 @@ pub(crate) fn error_response(
 ) -> Response {
     super::api_error::ApiError::from_status(status, code, message)
         .into_response(super::api_error::ApiProtocol::OpenAi)
+}
+
+impl ResponsesRequest {
+    pub(crate) fn validate_topology_contract(&self) -> anyhow::Result<()> {
+        validate_advisory_fields(self)
+    }
 }
 
 fn validate_advisory_fields(req: &ResponsesRequest) -> anyhow::Result<()> {
@@ -2142,12 +2155,7 @@ impl ResponsesStream {
 }
 
 fn stream_response(rx: mpsc::Receiver<std::result::Result<Bytes, std::io::Error>>) -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/event-stream")
-        .header(header::CACHE_CONTROL, "no-cache")
-        .body(Body::from_stream(ReceiverStream::new(rx)))
-        .expect("valid SSE response")
+    super::api_transport::sse_response(Body::from_stream(ReceiverStream::new(rx)))
 }
 
 fn finish_decoder(
@@ -2684,23 +2692,13 @@ where
     }
 }
 
-pub async fn responses<M>(
+pub(crate) async fn responses<M>(
     State(state): State<AppState<M>>,
-    payload: std::result::Result<Json<ResponsesRequest>, JsonRejection>,
+    ApiJson(request): ApiJson<ResponsesRequest>,
 ) -> Response
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
-    let request = match payload {
-        Ok(Json(request)) => request,
-        Err(error) => {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                "invalid_json",
-                format!("invalid Responses request: {}", error.body_text()),
-            );
-        }
-    };
     responses_with_state(state, request, false).await
 }
 
@@ -2736,18 +2734,8 @@ where
 
 pub(crate) async fn gemma4_drafter_responses(
     State(state): State<Gemma4DrafterAppState>,
-    payload: std::result::Result<Json<ResponsesRequest>, JsonRejection>,
+    ApiJson(request): ApiJson<ResponsesRequest>,
 ) -> Response {
-    let request = match payload {
-        Ok(Json(request)) => request,
-        Err(error) => {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                "invalid_json",
-                format!("invalid Responses request: {}", error.body_text()),
-            );
-        }
-    };
     responses_with_state(state.base, request, true).await
 }
 
