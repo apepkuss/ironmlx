@@ -115,6 +115,25 @@ func menuBarReflectsUpdaterAvailabilityAndForwardsManualCheck() throws {
     #expect(updateItem?.isEnabled == false)
 }
 
+@Test @MainActor
+func menuBarReflectsConfigurationRecoveryAndForwardsRecoveryAction() throws {
+    let root = try menuTemporaryDirectory()
+    let configStore = AppConfigStore(url: root.appendingPathComponent("app_config.json"))
+    let backend = TestRuntimeBackend(state: .stopped, isRunning: false)
+    let dashboard = DashboardWindowController(configStore: configStore, backend: backend)
+    let recovery = TestConfigurationRecoveryManager(hasIssues: true)
+    let controller = MenuBarController(
+        configStore: configStore,
+        backend: backend,
+        dashboard: dashboard,
+        configurationRecovery: recovery
+    )
+
+    #expect(controller.rebuildMenu().configurationRecoveryAvailable)
+    controller.showConfigurationRecovery(NSMenuItem())
+    #expect(recovery.presentationCount == 1)
+}
+
 @MainActor
 private final class MenuLoadedModelsNotificationProbe: NSObject {
     private(set) var notified = false
@@ -135,6 +154,22 @@ private final class TestAppUpdateManager: AppUpdateManaging {
 
     func checkForUpdates(_ sender: Any?) {
         checkCount += 1
+    }
+}
+
+@MainActor
+private final class TestConfigurationRecoveryManager: ConfigurationRecoveryManaging {
+    var hasIssues: Bool
+    private(set) var presentationCount = 0
+
+    init(hasIssues: Bool) {
+        self.hasIssues = hasIssues
+    }
+
+    func inspect() {}
+
+    func presentRecovery(_ sender: Any?) {
+        presentationCount += 1
     }
 }
 

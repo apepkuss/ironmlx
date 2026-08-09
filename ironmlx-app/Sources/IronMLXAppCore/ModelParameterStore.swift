@@ -129,6 +129,11 @@ public final class ModelParameterStore: @unchecked Sendable {
 
     public let url: URL
     private let fileManager: FileManager
+    private let recoveryState = ConfigurationRecoveryState()
+
+    public var recoveryIssue: ConfigurationRecoveryIssue? {
+        recoveryState.issue
+    }
 
     public init(
         url: URL = ModelParameterStore.defaultURL(),
@@ -140,10 +145,24 @@ public final class ModelParameterStore: @unchecked Sendable {
 
     public func loadAll() throws -> [String: ModelParameters] {
         guard fileManager.fileExists(atPath: url.path) else {
+            recoveryState.clear()
             return [:]
         }
-        let data = try Data(contentsOf: url)
-        return try JSONDecoder().decode([String: ModelParameters].self, from: data)
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            recordCorruption(data: nil, error: error)
+            throw error
+        }
+        do {
+            let parameters = try JSONDecoder().decode([String: ModelParameters].self, from: data)
+            recoveryState.clear()
+            return parameters
+        } catch {
+            recordCorruption(data: data, error: error)
+            throw error
+        }
     }
 
     public func parameters(for modelID: String) -> ModelParameters? {
@@ -155,6 +174,9 @@ public final class ModelParameterStore: @unchecked Sendable {
     }
 
     public func save(_ parameters: ModelParameters) throws {
+        guard recoveryIssue == nil else {
+            throw ConfigurationRecoveryWriteError.unresolvedCorruption(url)
+        }
         let key = parameters.modelID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty else {
             return
@@ -174,6 +196,9 @@ public final class ModelParameterStore: @unchecked Sendable {
         enabled: Bool,
         mtpModelID: String?
     ) throws {
+        guard recoveryIssue == nil else {
+            throw ConfigurationRecoveryWriteError.unresolvedCorruption(url)
+        }
         let key = modelID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty else {
             return
@@ -203,10 +228,55 @@ public final class ModelParameterStore: @unchecked Sendable {
         return string
     }
 
+    public func resetAfterCorruption() throws {
+        guard let recoveryIssue else {
+            return
+        }
+        guard let preservedURL = recoveryIssue.preservedURL,
+              fileManager.fileExists(atPath: preservedURL.path)
+        else {
+            throw ConfigurationRecoveryResetError.preservedCopyMissing(url)
+        }
+        try fileManager.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let data = try JSONEncoder.prettyIronMLX.encode([String: ModelParameters]())
+        try data.write(to: url, options: .atomic)
+        recoveryState.clear()
+    }
+
+    private func recordCorruption(data: Data?, error: Error) {
+        if recoveryState.recordIfNeeded({
+            ConfigurationCorruptionPreserver.makeIssue(
+                kind: .modelParameters,
+                sourceURL: url,
+                data: data,
+                error: error,
+                fileManager: fileManager
+            )
+        }) {
+            IronMLXAppLogger.error(
+                "IronMLX model parameters are unreadable and require explicit recovery: \(url.path); \(error)"
+            )
+        }
+    }
+
     public static func defaultURL() -> URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".ironmlx", isDirectory: true)
             .appendingPathComponent("model_params.json")
+    }
+}
+
+public enum ConfigurationRecoveryWriteError: LocalizedError, Equatable {
+    case unresolvedCorruption(URL)
+
+    public var errorDescription: String? {
+        switch self {
+        case let .unresolvedCorruption(url):
+            "Refusing to overwrite unreadable configuration before explicit recovery: \(url.path)"
+        }
     }
 }
 

@@ -47,6 +47,107 @@ func appLanguageResolverMatchesSupportedMacOSPreferences(
     #expect(existingConfigStore.load().language == "ko")
 }
 
+@Test func appConfigStorePreservesCorruptFileAndBlocksImplicitOverwrite() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ironmlx-app-config-corrupt-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let configURL = root.appendingPathComponent("app_config.json")
+    let corruptData = Data(#"{"host": "127.0.0.1", "port": }"#.utf8)
+    try corruptData.write(to: configURL)
+    let store = AppConfigStore(
+        url: configURL,
+        preferredLanguages: { ["ja-JP"] }
+    )
+
+    let fallback = store.load()
+    let issue = try #require(store.recoveryIssue)
+
+    #expect(fallback.language == "ja")
+    #expect(issue.kind == .appConfig)
+    #expect(issue.sourceURL == configURL)
+    #expect(try Data(contentsOf: configURL) == corruptData)
+    let preservedURL = try #require(issue.preservedURL)
+    #expect(try Data(contentsOf: preservedURL) == corruptData)
+
+    let didSave = store.save(AppConfig(language: "ko"))
+
+    #expect(!didSave)
+    #expect(try Data(contentsOf: configURL) == corruptData)
+    #expect(store.recoveryIssue != nil)
+}
+
+@Test func appConfigStoreRequiresExplicitResetAndRetainsPreservedCopy() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ironmlx-app-config-reset-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let configURL = root.appendingPathComponent("app_config.json")
+    let corruptData = Data("not-json".utf8)
+    try corruptData.write(to: configURL)
+    let store = AppConfigStore(
+        url: configURL,
+        preferredLanguages: { ["zh-Hant-TW"] }
+    )
+
+    _ = store.load()
+    let preservedURL = try #require(store.recoveryIssue?.preservedURL)
+    try store.resetAfterCorruption()
+
+    #expect(store.recoveryIssue == nil)
+    #expect(store.load().language == "zh-Hant")
+    #expect(try Data(contentsOf: preservedURL) == corruptData)
+}
+
+@Test func appConfigStoreRefusesResetWhenPreservedCopyIsMissing() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ironmlx-app-config-missing-backup-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let configURL = root.appendingPathComponent("app_config.json")
+    let corruptData = Data("not-json".utf8)
+    try corruptData.write(to: configURL)
+    let store = AppConfigStore(url: configURL)
+
+    _ = store.load()
+    let preservedURL = try #require(store.recoveryIssue?.preservedURL)
+    try FileManager.default.removeItem(at: preservedURL)
+
+    #expect(throws: ConfigurationRecoveryResetError.preservedCopyMissing(configURL)) {
+        try store.resetAfterCorruption()
+    }
+    #expect(try Data(contentsOf: configURL) == corruptData)
+    #expect(store.recoveryIssue != nil)
+}
+
+@Test func appConfigStoreCreatesOnePreservedCopyUnderConcurrentDetection() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ironmlx-app-config-concurrent-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let configURL = root.appendingPathComponent("app_config.json")
+    let corruptData = Data("not-json".utf8)
+    try corruptData.write(to: configURL)
+    let store = AppConfigStore(url: configURL)
+
+    DispatchQueue.concurrentPerform(iterations: 32) { _ in
+        _ = store.load()
+    }
+
+    let recoveryDirectory = root.appendingPathComponent("recovery", isDirectory: true)
+    let preservedFiles = try FileManager.default.contentsOfDirectory(
+        at: recoveryDirectory,
+        includingPropertiesForKeys: nil
+    )
+    #expect(preservedFiles.count == 1)
+    #expect(try Data(contentsOf: preservedFiles[0]) == corruptData)
+    let issueURL = try #require(store.recoveryIssue?.preservedURL)
+    #expect(
+        issueURL.resolvingSymlinksInPath()
+            == preservedFiles[0].resolvingSymlinksInPath()
+    )
+}
+
 @Test func appConfigDecodesDashboardAndSchedulerSettings() throws {
     let json = """
     {

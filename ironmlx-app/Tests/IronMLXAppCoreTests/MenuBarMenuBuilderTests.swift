@@ -165,6 +165,25 @@ import Testing
     ])
 }
 
+@MainActor
+@Test func menuBarMenuExposesLocalizedConfigurationRecoveryEntry() {
+    let menu = MenuBarMenuBuilder.makeMenu(
+        snapshot: MenuBarMenuSnapshot(
+            state: .stopped,
+            modelNames: [],
+            openClawInstalled: false,
+            openClawGatewayConfigured: false,
+            ironHermesInstalled: false,
+            updatesEnabled: false,
+            configurationRecoveryAvailable: true,
+            language: "zh-Hans"
+        ),
+        target: nil
+    )
+
+    #expect(menu.item(withTitle: "配置恢复...") != nil)
+}
+
 @Test func menuBarSnapshotModelNamesFallBackToPersistedLoadedModels() {
     let names = MenuBarMenuBuilder.snapshotModelNames(
         cached: nil,

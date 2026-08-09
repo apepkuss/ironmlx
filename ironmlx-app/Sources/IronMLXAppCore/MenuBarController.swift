@@ -13,6 +13,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     private let backend: any MenuBarBackendProcessManaging
     private let dashboard: DashboardWindowController
     private let updateManager: any AppUpdateManaging
+    private let configurationRecovery: any ConfigurationRecoveryManaging
     private let fileManager: FileManager
     private let notificationCenter: NotificationCenter
     private var loadedModelNames: [String]?
@@ -24,6 +25,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         backend: any MenuBarBackendProcessManaging,
         dashboard: DashboardWindowController,
         updateManager: any AppUpdateManaging = DisabledAppUpdateManager(),
+        configurationRecovery: any ConfigurationRecoveryManaging = DisabledConfigurationRecoveryManager(),
         fileManager: FileManager = .default,
         notificationCenter: NotificationCenter = .default
     ) {
@@ -32,6 +34,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         self.backend = backend
         self.dashboard = dashboard
         self.updateManager = updateManager
+        self.configurationRecovery = configurationRecovery
         self.fileManager = fileManager
         self.notificationCenter = notificationCenter
         super.init()
@@ -108,6 +111,11 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         updateManager.checkForUpdates(sender)
     }
 
+    @objc public func showConfigurationRecovery(_ sender: NSMenuItem) {
+        configurationRecovery.presentRecovery(sender)
+        rebuildMenu()
+    }
+
     @objc public func quit(_ sender: NSMenuItem) {
         NSApp.terminate(nil)
     }
@@ -149,6 +157,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
             openClawGatewayConfigured: fileManager.fileExists(atPath: openClawGatewayPlistPath().path),
             ironHermesInstalled: fileManager.fileExists(atPath: ironHermesBinaryPath().path),
             updatesEnabled: updateManager.canCheckForUpdates,
+            configurationRecoveryAvailable: configurationRecovery.hasIssues,
             language: config.language
         )
     }
@@ -187,8 +196,15 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
                 guard let self else {
                     return
                 }
-                let state = self.snapshot().state
-                self.refreshLoadedModelNamesIfNeeded(state: state)
+                let snapshot = self.snapshot()
+                let menuHasRecoveryItem = self.statusItem.menu?.items.contains {
+                    $0.action == #selector(MenuBarController.showConfigurationRecovery(_:))
+                } ?? false
+                if menuHasRecoveryItem != snapshot.configurationRecoveryAvailable {
+                    self.rebuildMenu()
+                    return
+                }
+                self.refreshLoadedModelNamesIfNeeded(state: snapshot.state)
             }
         }
     }

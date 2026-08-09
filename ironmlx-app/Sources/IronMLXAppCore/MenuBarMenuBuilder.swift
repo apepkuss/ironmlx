@@ -8,6 +8,7 @@ public struct MenuBarMenuSnapshot: Equatable {
     public var openClawGatewayConfigured: Bool
     public var ironHermesInstalled: Bool
     public var updatesEnabled: Bool
+    public var configurationRecoveryAvailable: Bool
     public var language: String
 
     public init(
@@ -17,6 +18,7 @@ public struct MenuBarMenuSnapshot: Equatable {
         openClawGatewayConfigured: Bool,
         ironHermesInstalled: Bool,
         updatesEnabled: Bool,
+        configurationRecoveryAvailable: Bool = false,
         language: String = "en"
     ) {
         self.state = state
@@ -25,6 +27,7 @@ public struct MenuBarMenuSnapshot: Equatable {
         self.openClawGatewayConfigured = openClawGatewayConfigured
         self.ironHermesInstalled = ironHermesInstalled
         self.updatesEnabled = updatesEnabled
+        self.configurationRecoveryAvailable = configurationRecoveryAvailable
         self.language = language
     }
 }
@@ -86,6 +89,19 @@ public enum MenuBarMenuBuilder {
 
         addBackendControlItems(snapshot.state, language: snapshot.language, target: target, to: menu)
         menu.addItem(.separator())
+
+        if snapshot.configurationRecoveryAvailable {
+            menu.addItem(
+                item(
+                    localized(.configurationRecovery, language: snapshot.language),
+                    #selector(MenuBarController.showConfigurationRecovery(_:)),
+                    "",
+                    target: target,
+                    symbol: "exclamationmark.triangle"
+                )
+            )
+            menu.addItem(.separator())
+        }
 
         let updates = item(
             localized(.updates, language: snapshot.language),
@@ -238,6 +254,8 @@ public enum MenuBarMenuBuilder {
             return "重启服务"
         case ("zh", .updates):
             return "检查更新..."
+        case ("zh", .configurationRecovery):
+            return "配置恢复..."
         case ("zh", .quit):
             return "退出"
         case ("zh", .statusRunning):
@@ -269,6 +287,8 @@ public enum MenuBarMenuBuilder {
             return "重啟服務"
         case ("zh-Hant", .updates):
             return "檢查更新..."
+        case ("zh-Hant", .configurationRecovery):
+            return "設定恢復..."
         case ("zh-Hant", .quit):
             return "退出"
         case ("zh-Hant", .statusRunning):
@@ -300,6 +320,8 @@ public enum MenuBarMenuBuilder {
             return "サーバー再起動"
         case ("ja", .updates):
             return "アップデート確認..."
+        case ("ja", .configurationRecovery):
+            return "設定を復旧..."
         case ("ja", .quit):
             return "終了"
         case ("ja", .statusRunning):
@@ -331,6 +353,8 @@ public enum MenuBarMenuBuilder {
             return "서버 재시작"
         case ("ko", .updates):
             return "업데이트 확인..."
+        case ("ko", .configurationRecovery):
+            return "설정 복구..."
         case ("ko", .quit):
             return "종료"
         case ("ko", .statusRunning):
@@ -384,6 +408,8 @@ public enum MenuBarMenuBuilder {
             return "Restart Server"
         case .updates:
             return "Check for Updates..."
+        case .configurationRecovery:
+            return "Configuration Recovery..."
         case .quit:
             return "Quit"
         case .statusRunning:
@@ -452,6 +478,7 @@ private enum MenuTextKey {
     case start
     case restart
     case updates
+    case configurationRecovery
     case quit
     case statusRunning
     case statusStarting
