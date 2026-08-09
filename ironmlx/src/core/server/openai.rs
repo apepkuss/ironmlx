@@ -6,18 +6,18 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
-use axum::http::{header, StatusCode};
 use axum::{
-    body::{Body, Bytes},
+    body::Body,
+    http::{header, StatusCode},
+};
+use axum::{
+    body::Bytes,
     extract::State,
     response::{IntoResponse, Response},
     Json,
 };
 use mlx::Array;
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
-
 use tokio::sync::oneshot;
 
 use crate::core::constrained::{ToolChoiceConstraint, ToolConstraintOptions};
@@ -1569,11 +1569,6 @@ fn tool_finish_chunk(id: &str, model_id: &str, finish_reason: &'static str) -> B
     })
 }
 
-fn sse_body_response(rx: mpsc::Receiver<std::result::Result<Bytes, std::io::Error>>) -> Response {
-    let body = Body::from_stream(ReceiverStream::new(rx));
-    super::api_transport::sse_response(body)
-}
-
 async fn serve_via_gs_tools_stream<M>(
     state: AppState<M>,
     request: GenerateRequest,
@@ -1589,7 +1584,7 @@ where
     let id = gen_id();
     let id_for_task = id.clone();
     let model_for_task = model_id.clone();
-    let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+    let (tx, rx, disconnect) = super::api_transport::disconnect_aware_sse_channel(8);
     let (init_tx, init_rx) = oneshot::channel::<anyhow::Result<()>>();
     tokio::task::spawn_blocking(move || {
         let model_guard = state.model.blocking_lock();
@@ -1640,6 +1635,9 @@ where
         let mut typed_finish = None;
         let mut content = String::new();
         loop {
+            if disconnect.is_cancelled() {
+                return;
+            }
             let event_result = match first_event.take() {
                 Some(event) => Ok(event),
                 None => generation.next_token(),
@@ -1689,6 +1687,9 @@ where
                 model_finish = reason;
                 break;
             }
+        }
+        if disconnect.is_cancelled() {
+            return;
         }
         let events = match decoder.finish(model_finish) {
             Ok(events) => events,
@@ -1748,7 +1749,7 @@ where
     });
 
     match init_rx.await {
-        Ok(Ok(())) => sse_body_response(rx),
+        Ok(Ok(())) => super::api_transport::disconnect_aware_sse_response(rx),
         Ok(Err(error)) => generation_err_to_response(error),
         Err(error) => internal_error_response(
             "generation_initialization_channel_closed",
@@ -1796,7 +1797,7 @@ where
     state.record_request_started(prompt_tokens);
     let tokenizer = state.tokenizer.clone();
     let runtime_usage = state.runtime_usage.clone();
-    let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+    let (tx, rx, disconnect) = super::api_transport::disconnect_aware_sse_channel(8);
     tokio::spawn(async move {
         let mut decoder = match GeneratedOutputDecoder::new(&tokenizer, Some(decoder_config)) {
             Ok(decoder) => decoder,
@@ -1814,7 +1815,9 @@ where
         let mut model_finish = "stop";
         let mut typed_finish = None;
         let mut content = String::new();
-        while let Some(event) = event_rx.recv().await {
+        while let Some(event) =
+            super::api_transport::recv_or_disconnect(&disconnect, &mut event_rx).await
+        {
             completion_tokens += 1;
             runtime_usage.record_output_tokens(1);
             let events = if event.finish_reason == Some("stop") {
@@ -1910,7 +1913,7 @@ where
         }
         let _ = tx.send(Ok(Bytes::from_static(b"data: [DONE]\n\n"))).await;
     });
-    sse_body_response(rx)
+    super::api_transport::disconnect_aware_sse_response(rx)
 }
 
 async fn serve_via_gs_tools<M>(
@@ -2120,7 +2123,7 @@ async fn serve_via_gs_stream<M>(
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
-    let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+    let (tx, rx, disconnect) = super::api_transport::disconnect_aware_sse_channel(8);
     let (init_tx, init_rx) = oneshot::channel::<anyhow::Result<()>>();
     let id = gen_id();
     let id_for_task = id.clone();
@@ -2201,6 +2204,9 @@ where
         let mut call_names = Vec::new();
         let mut content = String::new();
         loop {
+            if disconnect.is_cancelled() {
+                return;
+            }
             let ev_result = match first_event.take() {
                 Some(event) => Ok(event),
                 None => stream.next_token(),
@@ -2261,6 +2267,9 @@ where
                 }
             }
         }
+        if disconnect.is_cancelled() {
+            return;
+        }
         if let Some(reason) = finish_reason {
             if let Err(error) = output_format.validate_completion(&content, false, reason) {
                 let _ = tx.blocking_send(Ok(format_sse_error(&error)));
@@ -2295,9 +2304,7 @@ where
         }
     }
 
-    let stream = ReceiverStream::new(rx);
-    let body = Body::from_stream(stream);
-    super::api_transport::sse_response(body)
+    super::api_transport::disconnect_aware_sse_response(rx)
 }
 
 /// Text-only short-prompt SSE path via SchedulerActor (3b-2 swap-in).
@@ -2360,7 +2367,7 @@ where
 
     // 2. Stream events as SSE. Spawn a forwarder task that detokenizes
     // per-event and pushes formatted SSE chunks to a bounded channel.
-    let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+    let (tx, rx, disconnect) = super::api_transport::disconnect_aware_sse_channel(8);
     let id_for_task = id.clone();
     let model_id_for_task = model_id.clone();
     let tokenizer = state.tokenizer.clone();
@@ -2401,7 +2408,9 @@ where
         let mut next_call_index = 0_usize;
         let mut call_names = Vec::new();
         let mut content = String::new();
-        while let Some(ev) = event_rx.recv().await {
+        while let Some(ev) =
+            super::api_transport::recv_or_disconnect(&disconnect, &mut event_rx).await
+        {
             completion_tokens += 1;
             let mut events = if ev.finish_reason == Some("stop") {
                 Vec::new()
@@ -2473,9 +2482,7 @@ where
         let _ = tx.send(Ok(Bytes::from_static(b"data: [DONE]\n\n"))).await;
     });
 
-    let stream = ReceiverStream::new(rx);
-    let body = Body::from_stream(stream);
-    super::api_transport::sse_response(body)
+    super::api_transport::disconnect_aware_sse_response(rx)
 }
 
 async fn serve_via_gs_unary<M>(

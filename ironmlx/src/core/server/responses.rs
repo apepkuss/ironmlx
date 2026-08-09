@@ -13,15 +13,14 @@ use std::{
 #[cfg(test)]
 use axum::http::header;
 use axum::{
-    body::{Body, Bytes},
+    body::Bytes,
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, oneshot};
-use tokio_stream::wrappers::ReceiverStream;
+use tokio::sync::oneshot;
 
 use crate::core::generate::{GenerateRequest, GenerationStream};
 use crate::core::generated_output::{
@@ -2154,10 +2153,6 @@ impl ResponsesStream {
     }
 }
 
-fn stream_response(rx: mpsc::Receiver<std::result::Result<Bytes, std::io::Error>>) -> Response {
-    super::api_transport::sse_response(Body::from_stream(ReceiverStream::new(rx)))
-}
-
 fn finish_decoder(
     output: &mut CollectedOutput,
     decoder: &mut GeneratedOutputDecoder<'_>,
@@ -2410,7 +2405,7 @@ where
     state.record_request_started(input_tokens);
     let tokenizer = state.tokenizer.clone();
     let runtime_usage = state.runtime_usage.clone();
-    let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+    let (tx, rx, disconnect) = super::api_transport::disconnect_aware_sse_channel(8);
     tokio::spawn(async move {
         let mut formatter = ResponsesStream::new(meta);
         if tx.send(Ok(formatter.created())).await.is_err() {
@@ -2431,7 +2426,9 @@ where
         let mut output = CollectedOutput::new();
         let mut call_names = Vec::new();
         let mut typed_finish = None;
-        while let Some(event) = event_rx.recv().await {
+        while let Some(event) =
+            super::api_transport::recv_or_disconnect(&disconnect, &mut event_rx).await
+        {
             output.completion_tokens += 1;
             runtime_usage.record_output_tokens(1);
             let events = if event.finish_reason == Some("stop") {
@@ -2519,7 +2516,7 @@ where
             }
         }
     });
-    stream_response(rx)
+    super::api_transport::disconnect_aware_sse_response(rx)
 }
 
 async fn serve_stream_gs<M>(state: AppState<M>, prepared: PreparedResponse) -> Response
@@ -2531,7 +2528,7 @@ where
     let tool_context = prepared.tool_context;
     let native_output = prepared.native_output;
     let request = prepared.request;
-    let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+    let (tx, rx, disconnect) = super::api_transport::disconnect_aware_sse_channel(8);
     let (init_tx, init_rx) = oneshot::channel::<anyhow::Result<()>>();
     tokio::task::spawn_blocking(move || {
         let model = state.model.blocking_lock();
@@ -2584,6 +2581,9 @@ where
         let mut typed_finish = None;
         let mut first = Some(first);
         loop {
+            if disconnect.is_cancelled() {
+                return;
+            }
             let event = match first.take() {
                 Some(event) => Ok(event),
                 None => generation.next_token(),
@@ -2635,6 +2635,9 @@ where
                 break;
             }
         }
+        if disconnect.is_cancelled() {
+            return;
+        }
         let events = match decoder.finish(finish_reason) {
             Ok(events) => events,
             Err(error) => {
@@ -2678,7 +2681,7 @@ where
         }
     });
     match init_rx.await {
-        Ok(Ok(())) => stream_response(rx),
+        Ok(Ok(())) => super::api_transport::disconnect_aware_sse_response(rx),
         Ok(Err(error)) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "generation_initialization_error",

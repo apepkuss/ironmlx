@@ -1,12 +1,19 @@
+use std::{
+    pin::Pin,
+    task::{Context, Poll},
+};
+
 use axum::{
     async_trait,
-    body::Body,
+    body::{Body, Bytes},
     extract::{FromRequest, Request},
     http::header,
     response::Response,
     Json,
 };
 use serde::de::DeserializeOwned;
+use tokio::sync::{mpsc, watch};
+use tokio_stream::{wrappers::ReceiverStream, Stream};
 
 use super::api_error::{ApiError, ApiProtocol};
 
@@ -97,6 +104,86 @@ pub(crate) fn sse_response(body: Body) -> Response {
         .header(header::CACHE_CONTROL, "no-cache")
         .body(body)
         .expect("fixed SSE response headers are valid")
+}
+
+pub(crate) type SseItem = std::result::Result<Bytes, std::io::Error>;
+
+#[derive(Clone)]
+pub(crate) struct SseDisconnect {
+    receiver: watch::Receiver<bool>,
+}
+
+impl SseDisconnect {
+    pub(crate) fn is_cancelled(&self) -> bool {
+        *self.receiver.borrow()
+    }
+
+    pub(crate) async fn cancelled(&self) {
+        let mut receiver = self.receiver.clone();
+        if *receiver.borrow() {
+            return;
+        }
+        while receiver.changed().await.is_ok() {
+            if *receiver.borrow_and_update() {
+                return;
+            }
+        }
+    }
+}
+
+pub(crate) struct DisconnectAwareSseReceiver {
+    inner: ReceiverStream<SseItem>,
+    disconnect_tx: watch::Sender<bool>,
+}
+
+impl Stream for DisconnectAwareSseReceiver {
+    type Item = SseItem;
+
+    fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.inner).poll_next(context)
+    }
+}
+
+impl Drop for DisconnectAwareSseReceiver {
+    fn drop(&mut self) {
+        let _ = self.disconnect_tx.send(true);
+    }
+}
+
+pub(crate) fn disconnect_aware_sse_channel(
+    capacity: usize,
+) -> (
+    mpsc::Sender<SseItem>,
+    DisconnectAwareSseReceiver,
+    SseDisconnect,
+) {
+    let (tx, rx) = mpsc::channel(capacity);
+    let (disconnect_tx, disconnect_rx) = watch::channel(false);
+    (
+        tx,
+        DisconnectAwareSseReceiver {
+            inner: ReceiverStream::new(rx),
+            disconnect_tx,
+        },
+        SseDisconnect {
+            receiver: disconnect_rx,
+        },
+    )
+}
+
+pub(crate) fn disconnect_aware_sse_response(rx: DisconnectAwareSseReceiver) -> Response {
+    sse_response(Body::from_stream(rx))
+}
+
+pub(crate) async fn recv_or_disconnect<T>(
+    disconnect: &SseDisconnect,
+    receiver: &mut mpsc::UnboundedReceiver<T>,
+) -> Option<T> {
+    tokio::select! {
+        biased;
+        _ = disconnect.cancelled() => None,
+        event = receiver.recv() => event,
+    }
 }
 
 #[cfg(test)]
@@ -243,5 +330,31 @@ mod tests {
             "text/event-stream"
         );
         assert_eq!(response.headers()[header::CACHE_CONTROL], "no-cache");
+    }
+
+    #[tokio::test]
+    async fn dropping_sse_body_publishes_disconnect() {
+        let (_tx, rx, disconnect) = disconnect_aware_sse_channel(1);
+        let response = disconnect_aware_sse_response(rx);
+        assert!(!disconnect.is_cancelled());
+
+        drop(response);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), disconnect.cancelled())
+            .await
+            .expect("SSE body drop must publish disconnect");
+        assert!(disconnect.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn disconnect_wins_over_an_already_buffered_terminal_event() {
+        let (_body_tx, body_rx, disconnect) = disconnect_aware_sse_channel(1);
+        let response = disconnect_aware_sse_response(body_rx);
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        event_tx.send("terminal").unwrap();
+
+        drop(response);
+
+        assert_eq!(recv_or_disconnect(&disconnect, &mut event_rx).await, None);
     }
 }

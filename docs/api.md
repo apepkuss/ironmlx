@@ -86,6 +86,24 @@ Gemma4 drafter、DiffusionGemma、EnginePool 和 App daemon 共用同一请求�
 其 capability 描述明确拒绝。`/v1/models` 和 `/admin/api/models/*` 等模型管理路由也
 只在对应的 EnginePool 或 App daemon 拓扑公开。
 
+### SSE 断连与取消契约
+
+Chat Completions、Responses 和 Anthropic Messages 的流式请求在 SSE 响应开始后
+支持客户端断连取消。HTTP response body 被丢弃时，transport 会立即发布协议无关的
+断连信号；各协议的流式编码器停止消费生成事件，也不会在已观测到断连后继续构造
+协议终止事件。
+
+| 生成路径 | 取消生效点 | 释放内容 |
+|---|---|---|
+| Scheduler（包括 MTP/辅助 drafter） | 当前模型 forward 结束后的下一次安全调度边界 | 活跃请求、调度槽、KV cache 与内存预算 |
+| 直接 `GenerationStream` | 当前 token forward 结束后的下一次 token 边界 | 生成状态与直接请求内存预留 |
+| DiffusionGemma | 当前 block-diffusion 步骤结束后的下一次事件边界 | generation lane 与请求状态 |
+
+取消不会强行中断正在执行的 Metal forward；这是为了避免在设备工作未完成时破坏模型
+和 KV 状态。因此，从 TCP 断开到资源归还可能包含一个当前 forward/扩散步骤的尾延迟。
+本契约只承诺已经开始返回 SSE 的流式请求；v0.1 不承诺非流式 HTTP 请求在客户端断开
+后取消底层生成。
+
 ## OpenAI Responses API
 
 `POST /v1/responses` 是推荐给本地 Agent 客户端的新接口。IronMLX 实现无状态

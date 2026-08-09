@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
-    body::{Body, Bytes},
+    body::Bytes,
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -19,8 +19,7 @@ use axum::{
 };
 use mlx::Array;
 use serde::Serialize;
-use tokio::sync::{mpsc, Mutex, OwnedSemaphorePermit, Semaphore, TryAcquireError};
-use tokio_stream::wrappers::ReceiverStream;
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
 use crate::core::constrained::{ConstraintPlan, ToolConstraintOptions};
 use crate::core::generated_output::{
@@ -1189,7 +1188,7 @@ async fn openai_stream_completion(
     state
         .runtime_usage
         .record_input_tokens(request.prompt_ids.len() as u64);
-    let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+    let (tx, rx, disconnect) = super::api_transport::disconnect_aware_sse_channel(8);
     let id = gen_openai_id();
     let created = now_unix();
 
@@ -1223,6 +1222,10 @@ async fn openai_stream_completion(
             let mut content = String::new();
             let generation_result = {
                 let mut emit = |event: DiffusionGemmaGenerateEvent| -> Result<bool> {
+                    if disconnect.is_cancelled() {
+                        connected = false;
+                        return Ok(false);
+                    }
                     if !diffusion_event_is_length_sentinel(&event) {
                         completion_tokens = completion_tokens.saturating_add(1);
                         state.runtime_usage.record_output_tokens(1);
@@ -1363,6 +1366,10 @@ async fn openai_stream_completion(
         let mut content = String::new();
         let generation_result = {
             let mut emit = |event: DiffusionGemmaGenerateEvent| -> Result<bool> {
+                if disconnect.is_cancelled() {
+                    connected = false;
+                    return Ok(false);
+                }
                 if !diffusion_event_is_length_sentinel(&event) {
                     state.runtime_usage.record_output_tokens(1);
                     let events = decoder.push_text_delta(&event.text)?;
@@ -1458,9 +1465,7 @@ async fn openai_stream_completion(
         let _ = tx.blocking_send(Ok(openai_done_frame()));
     });
 
-    let stream = ReceiverStream::new(rx);
-    let body = Body::from_stream(stream);
-    super::api_transport::sse_response(body)
+    super::api_transport::disconnect_aware_sse_response(rx)
 }
 
 async fn responses_stream_completion(
@@ -1486,7 +1491,7 @@ async fn responses_stream_completion(
     state
         .runtime_usage
         .record_input_tokens(request.prompt_ids.len() as u64);
-    let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+    let (tx, rx, disconnect) = super::api_transport::disconnect_aware_sse_channel(8);
 
     tokio::task::spawn_blocking(move || {
         let _lane_guard = lane_guard;
@@ -1516,6 +1521,10 @@ async fn responses_stream_completion(
         let mut connected = true;
         let generation_result = {
             let mut emit = |event: DiffusionGemmaGenerateEvent| -> Result<bool> {
+                if disconnect.is_cancelled() {
+                    connected = false;
+                    return Ok(false);
+                }
                 if !diffusion_event_is_length_sentinel(&event) {
                     completion_tokens = completion_tokens.saturating_add(1);
                     state.runtime_usage.record_output_tokens(1);
@@ -1603,7 +1612,7 @@ async fn responses_stream_completion(
         }
     });
 
-    super::api_transport::sse_response(Body::from_stream(ReceiverStream::new(rx)))
+    super::api_transport::disconnect_aware_sse_response(rx)
 }
 
 async fn anthropic_stream_completion(
@@ -1629,7 +1638,7 @@ async fn anthropic_stream_completion(
     state
         .runtime_usage
         .record_input_tokens(u64::from(input_tokens));
-    let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+    let (tx, rx, disconnect) = super::api_transport::disconnect_aware_sse_channel(8);
     let id = gen_anthropic_id();
 
     tokio::task::spawn_blocking(move || {
@@ -1659,6 +1668,10 @@ async fn anthropic_stream_completion(
         let mut model_finish = "stop";
         let generation_result = {
             let mut emit = |event: DiffusionGemmaGenerateEvent| -> Result<bool> {
+                if disconnect.is_cancelled() {
+                    connected = false;
+                    return Ok(false);
+                }
                 if !diffusion_event_is_length_sentinel(&event) {
                     output_tokens = output_tokens.saturating_add(1);
                     let events = decoder.push_text_delta(&event.text)?;
@@ -1741,9 +1754,7 @@ async fn anthropic_stream_completion(
         }
     });
 
-    let stream = ReceiverStream::new(rx);
-    let body = Body::from_stream(stream);
-    super::api_transport::sse_response(body)
+    super::api_transport::disconnect_aware_sse_response(rx)
 }
 
 pub(crate) async fn openai_chat_completions(

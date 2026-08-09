@@ -9,7 +9,7 @@
 #[cfg(test)]
 use axum::http::header;
 use axum::{
-    body::{Body, Bytes},
+    body::Bytes,
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -18,7 +18,6 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, oneshot};
-use tokio_stream::wrappers::ReceiverStream;
 
 use crate::core::constrained::ToolConstraintOptions;
 use crate::core::generate::{GenerateRequest, GenerationStream};
@@ -2007,11 +2006,6 @@ where
     tool_unary_response(id, model_id, input_tokens, output, output_format)
 }
 
-fn tool_sse_response(rx: mpsc::Receiver<std::result::Result<Bytes, std::io::Error>>) -> Response {
-    let body = Body::from_stream(ReceiverStream::new(rx));
-    super::api_transport::sse_response(body)
-}
-
 async fn serve_via_gs_tools_stream<M>(
     state: AppState<M>,
     request: GenerateRequest,
@@ -2022,7 +2016,7 @@ async fn serve_via_gs_tools_stream<M>(
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
-    let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+    let (tx, rx, disconnect) = super::api_transport::disconnect_aware_sse_channel(8);
     let (init_tx, init_rx) = oneshot::channel::<anyhow::Result<()>>();
     let message_id = gen_msg_id();
     tokio::task::spawn_blocking(move || {
@@ -2079,6 +2073,9 @@ where
         let mut finished = false;
         let mut first_event = first_event;
         loop {
+            if disconnect.is_cancelled() {
+                return;
+            }
             let event = match first_event.take() {
                 Some(event) => Some(event),
                 None => match generation.next_token() {
@@ -2126,6 +2123,9 @@ where
                 finished = true;
                 break;
             }
+        }
+        if disconnect.is_cancelled() {
+            return;
         }
         if !finished {
             let error = anyhow::anyhow!("generation ended before a terminal event");
@@ -2175,7 +2175,7 @@ where
     });
 
     match init_rx.await {
-        Ok(Ok(())) => tool_sse_response(rx),
+        Ok(Ok(())) => super::api_transport::disconnect_aware_sse_response(rx),
         Ok(Err(error)) => generation_err_to_response(error),
         Err(error) => anthropic_error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -2206,7 +2206,7 @@ where
     let tokenizer = state.tokenizer.clone();
     let runtime_usage = state.runtime_usage.clone();
     let message_id = gen_msg_id();
-    let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+    let (tx, rx, disconnect) = super::api_transport::disconnect_aware_sse_channel(8);
     tokio::spawn(async move {
         let mut decoder = match GeneratedOutputDecoder::new_with_native(
             &tokenizer,
@@ -2227,7 +2227,9 @@ where
         let mut thinking_tokens = 0_u32;
         let mut model_finish = "stop";
         let mut finished = false;
-        while let Some(event) = event_rx.recv().await {
+        while let Some(event) =
+            super::api_transport::recv_or_disconnect(&disconnect, &mut event_rx).await
+        {
             output_tokens += 1;
             runtime_usage.record_output_tokens(1);
             let events = if event.finish_reason == Some("stop") {
@@ -2309,7 +2311,7 @@ where
             }
         }
     });
-    tool_sse_response(rx)
+    super::api_transport::disconnect_aware_sse_response(rx)
 }
 
 async fn serve_via_gs_stream<M>(
@@ -2323,7 +2325,7 @@ async fn serve_via_gs_stream<M>(
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
-    let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+    let (tx, rx, disconnect) = super::api_transport::disconnect_aware_sse_channel(8);
     let (init_tx, init_rx) = oneshot::channel::<anyhow::Result<()>>();
     let id = gen_msg_id();
     let id_for_task = id.clone();
@@ -2397,6 +2399,9 @@ where
         let mut finished = false;
         let mut first_event = Some(first_event);
         loop {
+            if disconnect.is_cancelled() {
+                return;
+            }
             let event = match first_event.take() {
                 Some(event) => Ok(event),
                 None => stream.next_token(),
@@ -2457,6 +2462,9 @@ where
                 }
             }
         }
+        if disconnect.is_cancelled() {
+            return;
+        }
         if !finished {
             let error = anyhow::anyhow!("generation ended before a terminal event");
             let _ = tx.blocking_send(Ok(format_stream_error(&error)));
@@ -2496,9 +2504,7 @@ where
         }
     }
 
-    let stream = ReceiverStream::new(rx);
-    let body = Body::from_stream(stream);
-    super::api_transport::sse_response(body)
+    super::api_transport::disconnect_aware_sse_response(rx)
 }
 
 /// Text-only short-prompt streaming path via SchedulerActor (3b-4 swap-in).
@@ -2567,7 +2573,7 @@ where
     state.record_request_started(input_tokens);
 
     // 2. Spawn forwarder that emits the 6-event SSE sequence.
-    let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+    let (tx, rx, disconnect) = super::api_transport::disconnect_aware_sse_channel(8);
     let msg_id_for_task = msg_id.clone();
     let model_id_for_task = model_id.clone();
     let tokenizer = state.tokenizer.clone();
@@ -2595,7 +2601,9 @@ where
         let mut thinking_tokens: u32 = 0;
         let mut model_finish: &'static str = "stop";
         let mut finished = false;
-        while let Some(ev) = event_rx.recv().await {
+        while let Some(ev) =
+            super::api_transport::recv_or_disconnect(&disconnect, &mut event_rx).await
+        {
             let mut events = if ev.finish_reason == Some("stop") {
                 Vec::new()
             } else {
@@ -2667,9 +2675,7 @@ where
         }
     });
 
-    let stream = ReceiverStream::new(rx);
-    let body = Body::from_stream(stream);
-    super::api_transport::sse_response(body)
+    super::api_transport::disconnect_aware_sse_response(rx)
 }
 
 async fn serve_via_gs_unary<M>(
