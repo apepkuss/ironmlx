@@ -107,8 +107,8 @@ jobs:
       - name: Run required Rust gates
         shell: bash
         env:
-          MLX_DIR: ${{ github.workspace }}/.build/p0-1-app-bundle/mlx-install
-          MLX_METAL_PATH: ${{ github.workspace }}/.build/p0-1-app-bundle/mlx-install/lib
+          MLX_DIR: ${{ github.workspace }}/.build/app-bundle/mlx-install
+          MLX_METAL_PATH: ${{ github.workspace }}/.build/app-bundle/mlx-install/lib
         run: |
           set -euo pipefail
           cargo fmt --all -- --check
@@ -119,11 +119,17 @@ jobs:
       - name: Run public API contract tests
         shell: bash
         env:
-          MLX_DIR: ${{ github.workspace }}/.build/p0-1-app-bundle/mlx-install
-          MLX_METAL_PATH: ${{ github.workspace }}/.build/p0-1-app-bundle/mlx-install/lib
+          MLX_DIR: ${{ github.workspace }}/.build/app-bundle/mlx-install
+          MLX_METAL_PATH: ${{ github.workspace }}/.build/app-bundle/mlx-install/lib
         run: |
           set -euo pipefail
-          cargo test --locked --all-features -p ironmlx --lib core::server::
+          test -f "$MLX_DIR/lib/mlx.metallib"
+          metallib="$GITHUB_WORKSPACE/ironmlx/mlx.metallib"
+          trap 'rm -f "$metallib"' EXIT
+          cp "$MLX_DIR/lib/mlx.metallib" "$metallib"
+          cargo test --locked --all-features \
+            --manifest-path "$GITHUB_WORKSPACE/Cargo.toml" \
+            -p ironmlx --lib core::server::
 
       - name: Run pinned official SDK contract tests
         shell: bash

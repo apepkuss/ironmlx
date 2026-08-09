@@ -6,7 +6,7 @@ set -euo pipefail
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 readonly MLX_SOURCE="${MLX_SRC:-$REPO_ROOT/../iron-rivals/mlx}"
-readonly MLX_BUILD="${MLX_BUILD_DIR:-$REPO_ROOT/.build/p0-1-app-bundle/mlx-build}"
+readonly MLX_BUILD="${MLX_BUILD_DIR:-$REPO_ROOT/.build/app-bundle/mlx-build}"
 readonly OUTPUT_ROOT="${1:-$REPO_ROOT}"
 readonly CARGO_ABOUT="${CARGO_ABOUT:-cargo-about}"
 

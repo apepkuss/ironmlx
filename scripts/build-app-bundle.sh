@@ -12,7 +12,7 @@ readonly REPO_ROOT
 source "$SCRIPT_DIR/release-config.sh"
 readonly APP_SOURCE_DIR="$REPO_ROOT/ironmlx-app"
 readonly PACKAGING_DIR="$APP_SOURCE_DIR/Packaging"
-readonly BUILD_ROOT="$REPO_ROOT/.build/p0-1-app-bundle"
+readonly BUILD_ROOT="$REPO_ROOT/.build/app-bundle"
 readonly DIST_DIR="$REPO_ROOT/dist"
 readonly APP_BUNDLE="$DIST_DIR/IronMLX.app"
 readonly DEPLOYMENT_TARGET="26.2"
