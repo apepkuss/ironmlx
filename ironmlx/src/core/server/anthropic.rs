@@ -27,7 +27,6 @@ use crate::core::generated_output::{
 use crate::core::image_input::{ImageInputError, ImageRequestBudget};
 use crate::core::model::Model;
 use crate::core::native_output::NativeOutputDecoderConfig;
-#[cfg(test)]
 use crate::core::sampler::Sampler;
 use crate::core::scheduler::DenseVlMethods;
 use crate::core::server::chat_format::{
@@ -40,7 +39,6 @@ use crate::core::server::vision::{DecodedMessage, DecodedPart};
 use crate::core::speculative::MtpSpeculativeConfig;
 use crate::core::tool_calling::{ToolCall, ToolDefinition, ToolDialect};
 
-#[cfg(test)]
 use super::SamplingDefaults;
 use super::{request_token_capacity_error_response, AppState, Gemma4DrafterAppState};
 
@@ -364,8 +362,27 @@ pub struct MessagesRequest {
     pub top_p: Option<f32>,
     #[serde(default)]
     pub top_k: Option<i32>,
-    #[serde(default)]
-    pub repetition_penalty: Option<f32>,
+}
+
+impl MessagesRequest {
+    fn validate_sampling(&self) -> anyhow::Result<()> {
+        if let Some(temperature) = self.temperature {
+            anyhow::ensure!(
+                temperature.is_finite() && (0.0..=1.0).contains(&temperature),
+                "temperature must be finite and between 0 and 1"
+            );
+        }
+        if let Some(top_p) = self.top_p {
+            anyhow::ensure!(
+                top_p.is_finite() && top_p > 0.0 && top_p <= 1.0,
+                "top_p must be finite and in (0, 1]"
+            );
+        }
+        if let Some(top_k) = self.top_k {
+            anyhow::ensure!(top_k > 0, "top_k must be greater than zero");
+        }
+        Ok(())
+    }
 }
 
 fn default_max_tokens() -> usize {
@@ -431,7 +448,6 @@ fn validate_thinking_signature(thinking: &str, signature: &str) -> anyhow::Resul
     Ok(())
 }
 
-#[cfg(test)]
 fn build_sampler(req: &MessagesRequest, defaults: SamplingDefaults) -> Sampler {
     let mut s = Sampler::greedy();
     if let Some(t) = req.temperature.or(defaults.temperature) {
@@ -449,7 +465,7 @@ fn build_sampler(req: &MessagesRequest, defaults: SamplingDefaults) -> Sampler {
             s = s.with_top_k(k);
         }
     }
-    if let Some(penalty) = req.repetition_penalty.or(defaults.repetition_penalty) {
+    if let Some(penalty) = defaults.repetition_penalty {
         if penalty > 0.0 && penalty != 1.0 {
             s = s.with_repetition_penalty(penalty);
         }
@@ -840,8 +856,6 @@ impl MessagesRequest {
             max_tokens: self.max_tokens,
             temperature: self.temperature,
             top_p: self.top_p,
-            top_k: self.top_k,
-            repetition_penalty: self.repetition_penalty,
             seed: None,
             chat_template_kwargs: self
                 .thinking
@@ -940,6 +954,10 @@ pub(crate) async fn messages_with_state<M>(state: AppState<M>, req: MessagesRequ
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
+    if let Err(error) = req.validate_sampling() {
+        return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{error:#}"));
+    }
+    let sampler = build_sampler(&req, state.sampling_defaults);
     let req = match req.into_chat_request() {
         Ok(req) => req,
         Err(error) => {
@@ -962,7 +980,6 @@ where
     let max_tokens = req.max_tokens;
     let stream = req.stream;
     let model_label = req.model.clone().unwrap_or_else(|| state.model_id.clone());
-    let sampler = super::openai::build_sampler(&req, state.sampling_defaults);
     if let Err(error) = super::validate_prompt_lookup_sampler(state.prompt_lookup_enabled, sampler)
     {
         return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{error:#}"));
@@ -1175,6 +1192,10 @@ pub(crate) async fn messages_with_gemma4_drafter_state(
     state: Gemma4DrafterAppState,
     req: MessagesRequest,
 ) -> Response {
+    if let Err(error) = req.validate_sampling() {
+        return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{error:#}"));
+    }
+    let sampler = build_sampler(&req, state.base.sampling_defaults);
     let req = match req.into_chat_request() {
         Ok(req) => req,
         Err(error) => {
@@ -1200,7 +1221,6 @@ pub(crate) async fn messages_with_gemma4_drafter_state(
         .model
         .clone()
         .unwrap_or_else(|| state.base.model_id.clone());
-    let sampler = super::openai::build_sampler(&req, state.base.sampling_defaults);
     let _cfg = match MtpSpeculativeConfig::new(state.mtp_draft_tokens, sampler) {
         Ok(cfg) => cfg,
         Err(e) => return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{e:#}")),
@@ -2998,14 +3018,13 @@ mod tests {
     }
 
     #[test]
-    fn build_sampler_prefers_request_values_over_model_defaults() {
+    fn build_sampler_prefers_native_request_values_and_keeps_internal_penalty_default() {
         let req: MessagesRequest = serde_json::from_value(serde_json::json!({
             "messages": [],
             "max_tokens": 8,
             "temperature": 0.2,
             "top_p": 0.6,
-            "top_k": 16,
-            "repetition_penalty": 1.05
+            "top_k": 16
         }))
         .expect("messages request");
         let defaults = super::super::SamplingDefaults {
@@ -3020,7 +3039,116 @@ mod tests {
         assert_eq!(sampler.temperature, 0.2);
         assert_eq!(sampler.top_p, Some(0.6));
         assert_eq!(sampler.top_k, Some(16));
-        assert_eq!(sampler.repetition_penalty, Some(1.05));
+        assert_eq!(sampler.repetition_penalty, Some(1.1));
+    }
+
+    #[test]
+    fn messages_request_rejects_nonstandard_repetition_penalty() {
+        let error = serde_json::from_value::<MessagesRequest>(serde_json::json!({
+            "messages": [],
+            "repetition_penalty": 1.1
+        }))
+        .unwrap_err();
+        assert!(error.to_string().contains("repetition_penalty"), "{error}");
+    }
+
+    #[test]
+    fn messages_sampling_contract_accepts_boundaries_and_rejects_invalid_values() {
+        for (temperature, top_p, top_k) in [(0.0, 0.01, 1), (1.0, 1.0, 128)] {
+            let req: MessagesRequest = serde_json::from_value(serde_json::json!({
+                "messages": [],
+                "temperature": temperature,
+                "top_p": top_p,
+                "top_k": top_k
+            }))
+            .unwrap();
+            req.validate_sampling().unwrap();
+        }
+
+        for body in [
+            serde_json::json!({"messages": [], "temperature": -0.1}),
+            serde_json::json!({"messages": [], "temperature": 1.1}),
+            serde_json::json!({"messages": [], "top_p": 0.0}),
+            serde_json::json!({"messages": [], "top_p": 1.1}),
+            serde_json::json!({"messages": [], "top_k": 0}),
+            serde_json::json!({"messages": [], "top_k": -1}),
+        ] {
+            let req: MessagesRequest = serde_json::from_value(body).unwrap();
+            assert!(req.validate_sampling().is_err());
+        }
+
+        let mut non_finite: MessagesRequest =
+            serde_json::from_value(serde_json::json!({"messages": []})).unwrap();
+        non_finite.temperature = Some(f32::NAN);
+        assert!(non_finite.validate_sampling().is_err());
+        non_finite.temperature = None;
+        non_finite.top_p = Some(f32::INFINITY);
+        assert!(non_finite.validate_sampling().is_err());
+    }
+
+    #[tokio::test]
+    async fn messages_http_contract_rejects_unknown_and_invalid_sampling_fields_with_400() {
+        use axum::body::Body;
+        use axum::extract::rejection::JsonRejection;
+        use axum::http::Request;
+        use axum::routing::post;
+        use axum::Router;
+        use tower::ServiceExt;
+
+        async fn validate(
+            payload: std::result::Result<Json<MessagesRequest>, JsonRejection>,
+        ) -> Response {
+            let req = match payload {
+                Ok(Json(req)) => req,
+                Err(error) => {
+                    return anthropic_error_response(StatusCode::BAD_REQUEST, error.body_text());
+                }
+            };
+            match req.validate_sampling() {
+                Ok(()) => StatusCode::NO_CONTENT.into_response(),
+                Err(error) => anthropic_error_response(StatusCode::BAD_REQUEST, error.to_string()),
+            }
+        }
+
+        let app = Router::new().route("/v1/messages", post(validate));
+        for body in [
+            serde_json::json!({"messages": [], "repetition_penalty": 1.1}),
+            serde_json::json!({"messages": [], "unsupported": true}),
+            serde_json::json!({"messages": [], "temperature": 1.1}),
+            serde_json::json!({"messages": [], "top_p": 0.0}),
+            serde_json::json!({"messages": [], "top_k": 0}),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post("/v1/messages")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body}");
+        }
+
+        let response = app
+            .oneshot(
+                Request::post("/v1/messages")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "messages": [],
+                            "temperature": 1.0,
+                            "top_p": 1.0,
+                            "top_k": 1
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]

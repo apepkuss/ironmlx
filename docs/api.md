@@ -170,6 +170,9 @@ DiffusionGemma canvas 解码路径。
   `encrypted_content`。
 - 不支持 reasoning summary、refusal typed item、OpenAI file ID、音频输入/输出、
   图片输出或图片形式的 function output；这些能力不会以普通 `output_text` 伪装。
+- sampling 公开字段仅为 `temperature`（有限数且位于 `[0, 2]`）和 `top_p`
+  （有限数且位于 `(0, 1]`）。`top_k`、`repetition_penalty` 不是 Responses
+  标准字段，发送后会返回 400；其他未知字段同样不会被静默忽略。
 
 ## OpenAI Chat Completions
 
@@ -187,6 +190,12 @@ curl http://127.0.0.1:9068/v1/chat/completions \
 
 流式响应将 `stream` 设为 `true`；如需最终 usage chunk，可同时传入
 `"stream_options":{"include_usage":true}`。
+
+Chat Completions 对顶层请求、message、content part、`image_url` payload 和
+`stream_options` 使用严格字段契约；未在本节公开的字段会返回 400，不会被静默
+忽略。sampling 公开字段仅为 `temperature`（有限数且位于 `[0, 2]`）和 `top_p`
+（有限数且位于 `(0, 1]`）。`top_k` 与 `repetition_penalty` 不属于公开的 Chat
+Completions 字段。
 
 ### Structured Outputs
 
@@ -290,6 +299,11 @@ curl http://127.0.0.1:9068/v1/messages \
     "stream": false
   }'
 ```
+
+Messages 对请求和嵌套 content block 使用严格字段契约。sampling 公开字段为
+`temperature`（有限数且位于 `[0, 1]`）、`top_p`（有限数且位于 `(0, 1]`）和
+正整数 `top_k`。`repetition_penalty` 不是 Anthropic Messages 字段，发送后会返回
+400；其他未知字段同样不会被静默忽略。
 
 ### Anthropic Structured Outputs
 

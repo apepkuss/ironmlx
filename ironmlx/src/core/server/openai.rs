@@ -106,6 +106,7 @@ pub(crate) fn generation_err_to_response(err: anyhow::Error) -> Response {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChatRequest {
     #[serde(default)]
     pub model: Option<String>,
@@ -139,10 +140,6 @@ pub struct ChatRequest {
     #[serde(default)]
     pub top_p: Option<f32>,
     #[serde(default)]
-    pub top_k: Option<i32>,
-    #[serde(default)]
-    pub repetition_penalty: Option<f32>,
-    #[serde(default)]
     pub seed: Option<u64>,
     /// HuggingFace `apply_chat_template` extra kwargs — passed through as
     /// top-level template render-context variables. Honors Qwen3+'s
@@ -171,6 +168,22 @@ pub(crate) struct ChatJsonSchema {
 }
 
 impl ChatRequest {
+    pub(crate) fn validate_sampling(&self) -> anyhow::Result<()> {
+        if let Some(temperature) = self.temperature {
+            anyhow::ensure!(
+                temperature.is_finite() && (0.0..=2.0).contains(&temperature),
+                "temperature must be finite and between 0 and 2"
+            );
+        }
+        if let Some(top_p) = self.top_p {
+            anyhow::ensure!(
+                top_p.is_finite() && top_p > 0.0 && top_p <= 1.0,
+                "top_p must be finite and in (0, 1]"
+            );
+        }
+        Ok(())
+    }
+
     pub(crate) fn structured_output_format(&self) -> anyhow::Result<StructuredOutputFormat> {
         let format = match self.response_format.clone() {
             None | Some(ChatResponseFormat::Text {}) => StructuredOutputFormat::Text,
@@ -250,6 +263,7 @@ struct NamedFunctionChoice {
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StreamOptions {
     #[serde(default)]
     pub include_usage: bool,
@@ -769,12 +783,12 @@ pub(crate) fn build_sampler(req: &ChatRequest, defaults: SamplingDefaults) -> Sa
             s = s.with_top_p(p);
         }
     }
-    if let Some(k) = req.top_k.or(defaults.top_k) {
+    if let Some(k) = defaults.top_k {
         if k > 0 {
             s = s.with_top_k(k);
         }
     }
-    if let Some(penalty) = req.repetition_penalty.or(defaults.repetition_penalty) {
+    if let Some(penalty) = defaults.repetition_penalty {
         if penalty > 0.0 && penalty != 1.0 {
             s = s.with_repetition_penalty(penalty);
         }
@@ -841,6 +855,9 @@ pub(crate) async fn chat_completions_with_state<M>(
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
+    if let Err(error) = req.validate_sampling() {
+        return (StatusCode::BAD_REQUEST, format!("{error:#}")).into_response();
+    }
     // Extract fields we need after consuming req.messages.
     let stream = req.stream;
     let include_usage = req
@@ -1064,6 +1081,9 @@ pub(crate) async fn chat_completions_with_gemma4_drafter_state(
     state: Gemma4DrafterAppState,
     mut req: ChatRequest,
 ) -> Response {
+    if let Err(error) = req.validate_sampling() {
+        return (StatusCode::BAD_REQUEST, format!("{error:#}")).into_response();
+    }
     let output_format = match req.structured_output_format() {
         Ok(format) => format,
         Err(error) => return (StatusCode::BAD_REQUEST, format!("{error:#}")).into_response(),
@@ -3221,6 +3241,69 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn chat_http_contract_rejects_unknown_and_invalid_sampling_fields_with_400() {
+        use axum::http::Request;
+        use axum::routing::post;
+        use axum::Router;
+        use tower::ServiceExt;
+
+        async fn validate(
+            payload: std::result::Result<Json<ChatRequest>, JsonRejection>,
+        ) -> Response {
+            let req = match payload {
+                Ok(Json(req)) => req,
+                Err(error) => {
+                    return (StatusCode::BAD_REQUEST, error.body_text()).into_response();
+                }
+            };
+            match req.validate_sampling() {
+                Ok(()) => StatusCode::NO_CONTENT.into_response(),
+                Err(error) => (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+            }
+        }
+
+        let app = Router::new().route("/v1/chat/completions", post(validate));
+        for body in [
+            serde_json::json!({"messages": [], "top_k": 16}),
+            serde_json::json!({"messages": [], "repetition_penalty": 1.1}),
+            serde_json::json!({"messages": [], "max_completion_tokens": 8}),
+            serde_json::json!({"messages": [{"role": "user", "content": "hi", "name": "alice"}]}),
+            serde_json::json!({"messages": [], "temperature": -0.1}),
+            serde_json::json!({"messages": [], "top_p": 0.0}),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post("/v1/chat/completions")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body}");
+        }
+
+        let response = app
+            .oneshot(
+                Request::post("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "messages": [],
+                            "temperature": 2.0,
+                            "top_p": 1.0
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
     #[test]
     fn tool_choice_none_validates_tools_but_disables_output_parser() {
         let request = tool_request(serde_json::json!({"tool_choice": "none"}));
@@ -3329,14 +3412,12 @@ mod tests {
     }
 
     #[test]
-    fn build_sampler_prefers_request_values_over_model_defaults() {
+    fn build_sampler_prefers_public_request_values_and_keeps_internal_defaults() {
         let req: ChatRequest = serde_json::from_value(serde_json::json!({
             "messages": [],
             "max_tokens": 8,
             "temperature": 0.2,
-            "top_p": 0.6,
-            "top_k": 16,
-            "repetition_penalty": 1.05
+            "top_p": 0.6
         }))
         .expect("chat request");
         let defaults = super::super::SamplingDefaults {
@@ -3350,8 +3431,88 @@ mod tests {
 
         assert_eq!(sampler.temperature, 0.2);
         assert_eq!(sampler.top_p, Some(0.6));
-        assert_eq!(sampler.top_k, Some(16));
-        assert_eq!(sampler.repetition_penalty, Some(1.05));
+        assert_eq!(sampler.top_k, Some(40));
+        assert_eq!(sampler.repetition_penalty, Some(1.1));
+    }
+
+    #[test]
+    fn chat_request_rejects_unknown_fields_at_every_public_level() {
+        for body in [
+            serde_json::json!({
+                "messages": [],
+                "max_completion_tokens": 8
+            }),
+            serde_json::json!({
+                "messages": [{"role": "user", "content": "hi", "name": "alice"}]
+            }),
+            serde_json::json!({
+                "messages": [{
+                    "role": "user",
+                    "content": [{"type": "text", "text": "hi", "extra": true}]
+                }]
+            }),
+            serde_json::json!({
+                "messages": [{
+                    "role": "user",
+                    "content": [{
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,aA==", "detail": "low"}
+                    }]
+                }]
+            }),
+            serde_json::json!({
+                "messages": [],
+                "stream_options": {"include_usage": true, "extra": true}
+            }),
+        ] {
+            assert!(
+                serde_json::from_value::<ChatRequest>(body).is_err(),
+                "unknown field must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn chat_request_rejects_nonstandard_sampling_fields() {
+        for field in ["top_k", "repetition_penalty"] {
+            let mut body = serde_json::json!({"messages": []});
+            body.as_object_mut()
+                .unwrap()
+                .insert(field.to_owned(), serde_json::json!(1));
+            let error = serde_json::from_value::<ChatRequest>(body).unwrap_err();
+            assert!(error.to_string().contains(field), "{error}");
+        }
+    }
+
+    #[test]
+    fn chat_sampling_contract_accepts_boundaries_and_rejects_invalid_values() {
+        for (temperature, top_p) in [(0.0, 0.01), (2.0, 1.0)] {
+            let req: ChatRequest = serde_json::from_value(serde_json::json!({
+                "messages": [],
+                "temperature": temperature,
+                "top_p": top_p
+            }))
+            .unwrap();
+            req.validate_sampling().unwrap();
+        }
+
+        for body in [
+            serde_json::json!({"messages": [], "temperature": -0.1}),
+            serde_json::json!({"messages": [], "temperature": 2.1}),
+            serde_json::json!({"messages": [], "top_p": 0.0}),
+            serde_json::json!({"messages": [], "top_p": 1.1}),
+        ] {
+            let req: ChatRequest = serde_json::from_value(body).unwrap();
+            assert!(req.validate_sampling().is_err());
+        }
+
+        let mut non_finite: ChatRequest =
+            serde_json::from_value(serde_json::json!({"messages": []})).unwrap();
+        non_finite.temperature = Some(f32::NAN);
+        assert!(non_finite.validate_sampling().is_err());
+        non_finite.temperature = None;
+        non_finite.top_p = Some(f32::INFINITY);
+        assert!(non_finite.validate_sampling().is_err());
     }
 
     #[test]

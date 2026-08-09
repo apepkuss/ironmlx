@@ -1116,8 +1116,6 @@ impl ResponsesRequest {
                 max_tokens: self.max_output_tokens.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS),
                 temperature: self.temperature,
                 top_p: self.top_p,
-                top_k: None,
-                repetition_penalty: None,
                 seed: None,
                 chat_template_kwargs: reasoning.template_kwargs(),
             },
@@ -2807,6 +2805,38 @@ mod tests {
 
     fn request(value: serde_json::Value) -> ResponsesRequest {
         serde_json::from_value(value).expect("valid fixture")
+    }
+
+    #[test]
+    fn responses_sampling_contract_rejects_nonstandard_and_invalid_fields() {
+        for field in ["top_k", "repetition_penalty"] {
+            let mut body = serde_json::json!({"model": "local", "input": "hi"});
+            body.as_object_mut()
+                .unwrap()
+                .insert(field.to_owned(), serde_json::json!(1));
+            let error = serde_json::from_value::<ResponsesRequest>(body).unwrap_err();
+            assert!(error.to_string().contains(field), "{error}");
+        }
+
+        for body in [
+            serde_json::json!({"model": "local", "input": "hi", "temperature": -0.1}),
+            serde_json::json!({"model": "local", "input": "hi", "temperature": 2.1}),
+            serde_json::json!({"model": "local", "input": "hi", "top_p": 0.0}),
+            serde_json::json!({"model": "local", "input": "hi", "top_p": 1.1}),
+        ] {
+            assert!(request(body).normalize().is_err());
+        }
+
+        for (temperature, top_p) in [(0.0, 0.01), (2.0, 1.0)] {
+            request(serde_json::json!({
+                "model": "local",
+                "input": "hi",
+                "temperature": temperature,
+                "top_p": top_p
+            }))
+            .normalize()
+            .unwrap();
+        }
     }
 
     #[test]
