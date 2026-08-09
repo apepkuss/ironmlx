@@ -116,6 +116,28 @@ jobs:
           cargo "+$RUST_NIGHTLY_TOOLCHAIN" clippy --locked --all-features --workspace -- -D warnings
           cargo build --locked --release
 
+      - name: Run public API contract tests
+        shell: bash
+        env:
+          MLX_DIR: ${{ github.workspace }}/.build/p0-1-app-bundle/mlx-install
+          MLX_METAL_PATH: ${{ github.workspace }}/.build/p0-1-app-bundle/mlx-install/lib
+        run: |
+          set -euo pipefail
+          cargo test --locked --all-features -p ironmlx --lib core::server::
+
+      - name: Run pinned official SDK contract tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          contract_venv="$RUNNER_TEMP/ironmlx-api-contract-sdk"
+          python3 -m venv "$contract_venv"
+          "$contract_venv/bin/python" -m pip install \
+            --disable-pip-version-check \
+            --requirement scripts/api-contract-sdk/requirements.txt
+          "$contract_venv/bin/python" \
+            scripts/api-contract-sdk/contract.py \
+            --fixture
+
       - name: Run Swift Release tests
         shell: bash
         run: |

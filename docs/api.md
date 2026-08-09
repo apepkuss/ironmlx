@@ -560,6 +560,41 @@ user message 中用同一 ID 提交 `tool_result`：
 - 支持范围是客户端定义的函数工具。Anthropic 托管工具、服务器工具、MCP、
   computer use、Web Search、Code Execution 等不属于本地推理服务能力。
 
+## API contract 与官方 SDK 门禁
+
+CI 固定执行服务端 contract 测试和官方 Python SDK 黑盒测试。SDK 测试通过真实的
+loopback HTTP/SSE 连接发送请求，不调用 SDK 内部模型构造器，也不以 `curl` 形状的
+JSON 代替 SDK 解析。
+
+| 协议 | 固定客户端 | 自动验收范围 |
+|---|---|---|
+| Chat Completions | OpenAI Python SDK `2.48.0` | 同步、SSE、function tools、Structured Outputs 请求、usage、400 错误 |
+| Responses | OpenAI Python SDK `2.48.0` | 同步 typed output/reasoning、SSE typed events、function tools、Structured Outputs 请求、413/503 与 `Retry-After` |
+| Anthropic Messages | Anthropic Python SDK `0.121.0` | 同步、原生 SSE、tool use、Structured Outputs + adaptive thinking 请求、400/413/503、`request-id` 与 `Retry-After` |
+
+三套由固定 SDK 实际生成的复杂请求保存在
+`ironmlx/tests/fixtures/api_contract_sdk/`。Rust 测试会把相同字节送入生产
+`ApiJson` extractor 和共享的预调度校验，因此 SDK fixture、公开 DTO 与模型无关
+字段契约不能独立漂移。官方 SDK 测试服务器返回按当前公开契约固定的 JSON/SSE
+fixture，用于验证客户端 typed object、stream event 和异常类型解析；生产 serializer
+则由同一 CI 门禁中的 Rust 服务端测试独立验证。
+
+本地执行：
+
+```bash
+python3 -m venv /tmp/ironmlx-api-contract-sdk
+/tmp/ironmlx-api-contract-sdk/bin/python -m pip install \
+  --requirement scripts/api-contract-sdk/requirements.txt
+/tmp/ironmlx-api-contract-sdk/bin/python \
+  scripts/api-contract-sdk/contract.py --fixture
+
+cargo test --locked --all-features -p ironmlx --lib core::server::
+```
+
+该门禁不加载 checkpoint，因此证明的是协议、transport 和官方客户端解析兼容性，
+不证明特定模型的生成质量、工具选择准确率或 Structured Outputs 成功率。真实模型
+HTTP/SDK smoke 仍作为发布候选的独立验收层；不能用 fixture 结果替代。
+
 ## 图片输入
 
 OpenAI 兼容接口只接受 JPEG、PNG 或 WebP 的严格 `data:` URL；不会抓取远程

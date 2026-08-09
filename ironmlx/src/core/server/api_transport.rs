@@ -245,6 +245,40 @@ mod tests {
         raw_request(router, path, body.to_string()).await
     }
 
+    fn sdk_request_fixture(contents: &str) -> Value {
+        serde_json::from_str(contents).expect("official SDK request fixture is valid JSON")
+    }
+
+    #[tokio::test]
+    async fn pinned_official_sdk_requests_pass_the_shared_public_contract() {
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let router = Router::new()
+            .route("/v1/chat/completions", post(chat))
+            .route("/v1/responses", post(responses))
+            .route("/v1/messages", post(messages))
+            .with_state(dispatches.clone());
+
+        for (path, fixture) in [
+            (
+                "/v1/chat/completions",
+                include_str!("../../../tests/fixtures/api_contract_sdk/chat_request.json"),
+            ),
+            (
+                "/v1/responses",
+                include_str!("../../../tests/fixtures/api_contract_sdk/responses_request.json"),
+            ),
+            (
+                "/v1/messages",
+                include_str!("../../../tests/fixtures/api_contract_sdk/messages_request.json"),
+            ),
+        ] {
+            let response = request(router.clone(), path, sdk_request_fixture(fixture)).await;
+            assert_eq!(response.status(), StatusCode::NO_CONTENT, "{path}");
+        }
+
+        assert_eq!(dispatches.load(Ordering::Relaxed), 3);
+    }
+
     #[tokio::test]
     async fn public_request_contract_is_validated_before_topology_dispatch() {
         let dispatches = Arc::new(AtomicUsize::new(0));
