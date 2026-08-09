@@ -10,17 +10,16 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
-    body::{Body, Bytes},
+    body::Bytes,
     extract::State,
-    http::{header, StatusCode},
+    http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
 use mlx::Array;
 use serde::Serialize;
-use tokio::sync::{mpsc, Mutex, OwnedSemaphorePermit, Semaphore, TryAcquireError};
-use tokio_stream::wrappers::ReceiverStream;
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
 use crate::core::constrained::{ConstraintPlan, ToolConstraintOptions};
 use crate::core::generated_output::{
@@ -36,6 +35,8 @@ use crate::models::{
     DiffusionGemmaGenerateEvent, DiffusionGemmaGenerationConfig, DiffusionGemmaModel,
 };
 use crate::Result;
+
+use super::api_transport::ApiJson;
 
 const DEFAULT_DIFFUSION_GEMMA_QUEUE_CAPACITY: usize = 8;
 
@@ -187,18 +188,16 @@ enum RequestProtocol {
 }
 
 impl RequestProtocol {
-    fn invalid_request(self, message: String) -> Response {
+    fn api_protocol(self) -> super::api_error::ApiProtocol {
         match self {
-            Self::OpenAi => (StatusCode::BAD_REQUEST, message).into_response(),
-            Self::Responses => super::responses::error_response(
-                StatusCode::BAD_REQUEST,
-                "invalid_request",
-                message,
-            ),
-            Self::Anthropic => {
-                super::anthropic::anthropic_error_response(StatusCode::BAD_REQUEST, message)
-            }
+            Self::OpenAi | Self::Responses => super::api_error::ApiProtocol::OpenAi,
+            Self::Anthropic => super::api_error::ApiProtocol::Anthropic,
         }
+    }
+
+    fn invalid_request(self, message: String) -> Response {
+        super::api_error::ApiError::invalid_request("invalid_request", message)
+            .into_response(self.api_protocol())
     }
 }
 
@@ -288,24 +287,12 @@ impl From<DiffusionGemmaLaneError> for CompletionError {
 }
 
 impl CompletionError {
-    fn into_response(self) -> Response {
+    fn into_response(self, protocol: RequestProtocol) -> Response {
         match self {
-            Self::Overloaded => overloaded_response(),
-            Self::Internal(message) => internal_error_response(message),
+            Self::Overloaded => overloaded_response(protocol),
+            Self::Internal(message) => internal_error_response(protocol, message),
         }
     }
-}
-
-#[derive(Debug, Serialize)]
-struct ErrorBody {
-    message: &'static str,
-    #[serde(rename = "type")]
-    kind: &'static str,
-}
-
-#[derive(Debug, Serialize)]
-struct ErrorEnvelope {
-    error: ErrorBody,
 }
 
 #[derive(Debug, Serialize)]
@@ -438,21 +425,17 @@ fn gen_anthropic_id() -> String {
     format!("msg_{}", now_unix())
 }
 
-fn overloaded_response() -> Response {
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(ErrorEnvelope {
-            error: ErrorBody {
-                message: "DiffusionGemma serial lane is overloaded; retry later",
-                kind: "overloaded",
-            },
-        }),
+fn overloaded_response(protocol: RequestProtocol) -> Response {
+    super::api_error::ApiError::service_unavailable(
+        "diffusion_lane_overloaded",
+        "DiffusionGemma serial lane is overloaded; retry later",
     )
-        .into_response()
+    .into_response(protocol.api_protocol())
 }
 
-fn internal_error_response(message: String) -> Response {
-    (StatusCode::INTERNAL_SERVER_ERROR, message).into_response()
+fn internal_error_response(protocol: RequestProtocol, message: String) -> Response {
+    super::api_error::ApiError::internal("generation_error", message)
+        .into_response(protocol.api_protocol())
 }
 
 fn diffusion_event_is_length_sentinel(event: &DiffusionGemmaGenerateEvent) -> bool {
@@ -907,7 +890,12 @@ async fn prepare_openai_request(
         match super::openai::expand_image_parts_in_messages(req.messages, &state.vision_input).await
         {
             Ok(t) => t,
-            Err(e) => return Err(super::security::image_error_response(e)),
+            Err(e) => {
+                return Err(super::security::image_error_response(
+                    e,
+                    protocol.api_protocol(),
+                ))
+            }
         };
     let prompt_ids_result = if let Some(prepared) = &prepared_tools {
         super::openai::build_agent_messages(
@@ -1193,12 +1181,14 @@ async fn openai_stream_completion(
     } = stream_request;
     let lane_guard = match state.lane.clone().enter().await {
         Ok(guard) => guard,
-        Err(err) => return CompletionError::from(err).into_response(),
+        Err(err) => {
+            return CompletionError::from(err).into_response(RequestProtocol::OpenAi);
+        }
     };
     state
         .runtime_usage
         .record_input_tokens(request.prompt_ids.len() as u64);
-    let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+    let (tx, rx, disconnect) = super::api_transport::disconnect_aware_sse_channel(8);
     let id = gen_openai_id();
     let created = now_unix();
 
@@ -1232,6 +1222,10 @@ async fn openai_stream_completion(
             let mut content = String::new();
             let generation_result = {
                 let mut emit = |event: DiffusionGemmaGenerateEvent| -> Result<bool> {
+                    if disconnect.is_cancelled() {
+                        connected = false;
+                        return Ok(false);
+                    }
                     if !diffusion_event_is_length_sentinel(&event) {
                         completion_tokens = completion_tokens.saturating_add(1);
                         state.runtime_usage.record_output_tokens(1);
@@ -1372,6 +1366,10 @@ async fn openai_stream_completion(
         let mut content = String::new();
         let generation_result = {
             let mut emit = |event: DiffusionGemmaGenerateEvent| -> Result<bool> {
+                if disconnect.is_cancelled() {
+                    connected = false;
+                    return Ok(false);
+                }
                 if !diffusion_event_is_length_sentinel(&event) {
                     state.runtime_usage.record_output_tokens(1);
                     let events = decoder.push_text_delta(&event.text)?;
@@ -1467,14 +1465,7 @@ async fn openai_stream_completion(
         let _ = tx.blocking_send(Ok(openai_done_frame()));
     });
 
-    let stream = ReceiverStream::new(rx);
-    let body = Body::from_stream(stream);
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/event-stream")
-        .header(header::CACHE_CONTROL, "no-cache")
-        .body(body)
-        .unwrap()
+    super::api_transport::disconnect_aware_sse_response(rx)
 }
 
 async fn responses_stream_completion(
@@ -1494,24 +1485,13 @@ async fn responses_stream_completion(
     let lane_guard = match state.lane.clone().enter().await {
         Ok(guard) => guard,
         Err(error) => {
-            return super::responses::error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "diffusion_lane_unavailable",
-                match error {
-                    DiffusionGemmaLaneError::Overloaded => {
-                        "DiffusionGemma serial lane is overloaded".to_owned()
-                    }
-                    DiffusionGemmaLaneError::Closed => {
-                        "DiffusionGemma serial lane is closed".to_owned()
-                    }
-                },
-            );
+            return CompletionError::from(error).into_response(RequestProtocol::Responses);
         }
     };
     state
         .runtime_usage
         .record_input_tokens(request.prompt_ids.len() as u64);
-    let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+    let (tx, rx, disconnect) = super::api_transport::disconnect_aware_sse_channel(8);
 
     tokio::task::spawn_blocking(move || {
         let _lane_guard = lane_guard;
@@ -1541,6 +1521,10 @@ async fn responses_stream_completion(
         let mut connected = true;
         let generation_result = {
             let mut emit = |event: DiffusionGemmaGenerateEvent| -> Result<bool> {
+                if disconnect.is_cancelled() {
+                    connected = false;
+                    return Ok(false);
+                }
                 if !diffusion_event_is_length_sentinel(&event) {
                     completion_tokens = completion_tokens.saturating_add(1);
                     state.runtime_usage.record_output_tokens(1);
@@ -1628,12 +1612,7 @@ async fn responses_stream_completion(
         }
     });
 
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/event-stream")
-        .header(header::CACHE_CONTROL, "no-cache")
-        .body(Body::from_stream(ReceiverStream::new(rx)))
-        .expect("valid Responses SSE response")
+    super::api_transport::disconnect_aware_sse_response(rx)
 }
 
 async fn anthropic_stream_completion(
@@ -1652,12 +1631,14 @@ async fn anthropic_stream_completion(
     } = stream_request;
     let lane_guard = match state.lane.clone().enter().await {
         Ok(guard) => guard,
-        Err(err) => return CompletionError::from(err).into_response(),
+        Err(err) => {
+            return CompletionError::from(err).into_response(RequestProtocol::Anthropic);
+        }
     };
     state
         .runtime_usage
         .record_input_tokens(u64::from(input_tokens));
-    let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+    let (tx, rx, disconnect) = super::api_transport::disconnect_aware_sse_channel(8);
     let id = gen_anthropic_id();
 
     tokio::task::spawn_blocking(move || {
@@ -1687,6 +1668,10 @@ async fn anthropic_stream_completion(
         let mut model_finish = "stop";
         let generation_result = {
             let mut emit = |event: DiffusionGemmaGenerateEvent| -> Result<bool> {
+                if disconnect.is_cancelled() {
+                    connected = false;
+                    return Ok(false);
+                }
                 if !diffusion_event_is_length_sentinel(&event) {
                     output_tokens = output_tokens.saturating_add(1);
                     let events = decoder.push_text_delta(&event.text)?;
@@ -1769,36 +1754,25 @@ async fn anthropic_stream_completion(
         }
     });
 
-    let stream = ReceiverStream::new(rx);
-    let body = Body::from_stream(stream);
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/event-stream")
-        .header(header::CACHE_CONTROL, "no-cache")
-        .body(body)
-        .unwrap()
+    super::api_transport::disconnect_aware_sse_response(rx)
 }
 
-pub async fn openai_chat_completions(
+pub(crate) async fn openai_chat_completions(
     State(state): State<DiffusionGemmaAppState>,
-    payload: std::result::Result<
-        Json<super::openai::ChatRequest>,
-        axum::extract::rejection::JsonRejection,
-    >,
+    ApiJson(req): ApiJson<super::openai::ChatRequest>,
 ) -> Response {
-    let mut req = match payload {
-        Ok(Json(req)) => req,
-        Err(error) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                format!("invalid Chat Completions request: {}", error.body_text()),
-            )
-                .into_response();
-        }
-    };
+    openai_chat_completions_with_state(state, req).await
+}
+
+pub(crate) async fn openai_chat_completions_with_state(
+    state: DiffusionGemmaAppState,
+    mut req: super::openai::ChatRequest,
+) -> Response {
     let output_format = match req.structured_output_format() {
         Ok(format) => format,
-        Err(error) => return (StatusCode::BAD_REQUEST, format!("{error:#}")).into_response(),
+        Err(error) => {
+            return RequestProtocol::OpenAi.invalid_request(format!("{error:#}"));
+        }
     };
     let output_schema = output_format.constraint_schema();
     let allows_final_output = req
@@ -1861,14 +1835,14 @@ pub async fn openai_chat_completions(
     .await
     {
         Ok(c) => c,
-        Err(err) => return err.into_response(),
+        Err(err) => return err.into_response(RequestProtocol::OpenAi),
     };
     if let Err(error) = output_format.validate_completion(
         completion.content.as_deref().unwrap_or_default(),
         !completion.tool_calls.is_empty(),
         completion.finish_reason,
     ) {
-        return internal_error_response(format!("{error:#}"));
+        return internal_error_response(RequestProtocol::OpenAi, format!("{error:#}"));
     }
     let resp = OpenAiCompletionResponse {
         id: gen_openai_id(),
@@ -1905,23 +1879,17 @@ pub async fn openai_chat_completions(
     Json(resp).into_response()
 }
 
-pub async fn openai_responses(
+pub(crate) async fn openai_responses(
     State(state): State<DiffusionGemmaAppState>,
-    payload: std::result::Result<
-        Json<super::responses::ResponsesRequest>,
-        axum::extract::rejection::JsonRejection,
-    >,
+    ApiJson(request): ApiJson<super::responses::ResponsesRequest>,
 ) -> Response {
-    let request = match payload {
-        Ok(Json(request)) => request,
-        Err(error) => {
-            return super::responses::error_response(
-                StatusCode::BAD_REQUEST,
-                "invalid_json",
-                format!("invalid Responses request: {}", error.body_text()),
-            );
-        }
-    };
+    openai_responses_with_state(state, request).await
+}
+
+pub(crate) async fn openai_responses_with_state(
+    state: DiffusionGemmaAppState,
+    request: super::responses::ResponsesRequest,
+) -> Response {
     let normalized = match request.normalize() {
         Ok(normalized) => normalized,
         Err(error) => {
@@ -2002,16 +1970,7 @@ pub async fn openai_responses(
     .await
     {
         Ok(completion) => completion,
-        Err(error) => {
-            return super::responses::error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "generation_error",
-                match error {
-                    CompletionError::Overloaded => "DiffusionGemma lane overloaded".to_owned(),
-                    CompletionError::Internal(message) => message,
-                },
-            );
-        }
+        Err(error) => return error.into_response(RequestProtocol::Responses),
     };
     super::responses::unary_response(
         meta,
@@ -2028,22 +1987,17 @@ pub async fn openai_responses(
     )
 }
 
-pub async fn anthropic_messages(
+pub(crate) async fn anthropic_messages(
     State(state): State<DiffusionGemmaAppState>,
-    payload: std::result::Result<
-        Json<super::anthropic::MessagesRequest>,
-        axum::extract::rejection::JsonRejection,
-    >,
+    ApiJson(req): ApiJson<super::anthropic::MessagesRequest>,
 ) -> Response {
-    let req = match payload {
-        Ok(Json(req)) => req,
-        Err(error) => {
-            return super::anthropic::anthropic_error_response(
-                StatusCode::BAD_REQUEST,
-                format!("invalid Messages request: {}", error.body_text()),
-            );
-        }
-    };
+    anthropic_messages_with_state(state, req).await
+}
+
+pub(crate) async fn anthropic_messages_with_state(
+    state: DiffusionGemmaAppState,
+    req: super::anthropic::MessagesRequest,
+) -> Response {
     let stream = req.stream;
     let max_tokens = req.max_tokens;
     let temperature = req.temperature.unwrap_or(0.0);
@@ -2089,7 +2043,7 @@ pub async fn anthropic_messages(
     .await
     {
         Ok(c) => c,
-        Err(err) => return err.into_response(),
+        Err(err) => return err.into_response(RequestProtocol::Anthropic),
     };
     super::anthropic::collected_response(
         model_label,

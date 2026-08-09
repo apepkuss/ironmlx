@@ -7,10 +7,10 @@ use axum::body::{to_bytes, Body};
 use axum::extract::{Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::{self, Next};
-use axum::response::{IntoResponse, Response};
-use axum::{Json, Router};
+use axum::response::Response;
+use axum::Router;
 use base64::Engine;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
@@ -157,42 +157,36 @@ fn decode_base64_field(value: &str, field: &str) -> Result<Vec<u8>> {
         .with_context(|| format!("lan_security_material_invalid: invalid {field}"))
 }
 
-#[derive(Serialize)]
-struct ErrorEnvelope {
-    error: ErrorBody,
+pub fn error_response(status: StatusCode, code: &'static str, message: &'static str) -> Response {
+    protocol_error_response(status, code, message, super::api_error::ApiProtocol::OpenAi)
 }
 
-#[derive(Serialize)]
-struct ErrorBody {
-    #[serde(rename = "type")]
-    kind: &'static str,
+fn protocol_error_response(
+    status: StatusCode,
     code: &'static str,
     message: &'static str,
+    protocol: super::api_error::ApiProtocol,
+) -> Response {
+    super::api_error::ApiError::from_status(status, code, message).into_response(protocol)
 }
 
-pub fn error_response(status: StatusCode, code: &'static str, message: &'static str) -> Response {
-    (
-        status,
-        Json(ErrorEnvelope {
-            error: ErrorBody {
-                kind: "invalid_request_error",
-                code,
-                message,
-            },
-        }),
-    )
-        .into_response()
-}
-
-pub fn image_error_response(error: anyhow::Error) -> Response {
+pub(crate) fn image_error_response(
+    error: anyhow::Error,
+    protocol: super::api_error::ApiProtocol,
+) -> Response {
     if let Some(error) = error.downcast_ref::<crate::core::image_input::ImageInputError>() {
-        return error_response(error.status(), error.code(), error.message());
+        return super::api_error::ApiError::from_status(
+            error.status(),
+            error.code(),
+            error.message(),
+        )
+        .into_response(protocol);
     }
-    error_response(
-        StatusCode::BAD_REQUEST,
+    super::api_error::ApiError::invalid_request(
         "image_decode_failed",
         "The image could not be decoded safely.",
     )
+    .into_response(protocol)
 }
 
 async fn authenticate_lan(
@@ -200,39 +194,45 @@ async fn authenticate_lan(
     request: Request,
     next: Next,
 ) -> Response {
+    let protocol = super::api_error::ApiProtocol::from_path(request.uri().path());
     let Some(value) = request.headers().get(header::AUTHORIZATION) else {
-        return error_response(
+        return protocol_error_response(
             StatusCode::UNAUTHORIZED,
             "auth_invalid",
             "A valid Bearer API key is required.",
+            protocol,
         );
     };
     let Ok(value) = value.to_str() else {
-        return error_response(
+        return protocol_error_response(
             StatusCode::UNAUTHORIZED,
             "auth_invalid",
             "A valid Bearer API key is required.",
+            protocol,
         );
     };
     let Some(api_key) = value.strip_prefix("Bearer ") else {
-        return error_response(
+        return protocol_error_response(
             StatusCode::UNAUTHORIZED,
             "auth_invalid",
             "A valid Bearer API key is required.",
+            protocol,
         );
     };
     let digest: [u8; 32] = Sha256::digest(api_key.as_bytes()).into();
     if digest.ct_eq(&expected).unwrap_u8() != 1 {
-        return error_response(
+        return protocol_error_response(
             StatusCode::UNAUTHORIZED,
             "auth_invalid",
             "A valid Bearer API key is required.",
+            protocol,
         );
     }
     next.run(request).await
 }
 
 async fn enforce_request_body_limit(request: Request, next: Next) -> Response {
+    let protocol = super::api_error::ApiProtocol::from_path(request.uri().path());
     if request
         .headers()
         .get(header::CONTENT_LENGTH)
@@ -240,21 +240,23 @@ async fn enforce_request_body_limit(request: Request, next: Next) -> Response {
         .and_then(|value| value.parse::<usize>().ok())
         .is_some_and(|length| length > MAX_REQUEST_BODY_BYTES)
     {
-        return error_response(
+        return super::api_error::ApiError::from_status(
             StatusCode::PAYLOAD_TOO_LARGE,
             "request_body_too_large",
             "The request body exceeds the 32 MiB limit.",
-        );
+        )
+        .into_response(protocol);
     }
     let (parts, body) = request.into_parts();
     let bytes = match to_bytes(body, MAX_REQUEST_BODY_BYTES).await {
         Ok(bytes) => bytes,
         Err(_) => {
-            return error_response(
+            return super::api_error::ApiError::from_status(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "request_body_too_large",
                 "The request body exceeds the 32 MiB limit.",
-            );
+            )
+            .into_response(protocol);
         }
     };
     next.run(Request::from_parts(parts, Body::from(bytes)))
@@ -361,8 +363,12 @@ mod tests {
 
     fn protected_test_router(api_key: &str) -> Router {
         let expected: [u8; 32] = Sha256::digest(api_key.as_bytes()).into();
-        bounded_router(Router::new().route("/admin/api/test", get(|| async { "ok" })))
-            .layer(middleware::from_fn_with_state(expected, authenticate_lan))
+        bounded_router(
+            Router::new()
+                .route("/admin/api/test", get(|| async { "ok" }))
+                .route("/v1/messages", get(|| async { "ok" })),
+        )
+        .layer(middleware::from_fn_with_state(expected, authenticate_lan))
     }
 
     #[tokio::test]
@@ -395,6 +401,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn messages_auth_failure_uses_anthropic_error_contract() {
+        let response = protected_test_router("imx_correct")
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/messages")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let request_id = response.headers()["request-id"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["type"], "error");
+        assert_eq!(body["error"]["type"], "authentication_error");
+        assert_eq!(body["error"]["code"], "auth_invalid");
+        assert_eq!(body["request_id"], request_id);
+    }
+
+    #[tokio::test]
     async fn oversized_body_is_rejected_with_stable_code() {
         let router = bounded_router(Router::new().route("/", get(|| async { "ok" })));
         let request = Request::builder()
@@ -406,5 +436,29 @@ mod tests {
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
         let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
         assert!(String::from_utf8_lossy(&bytes).contains("request_body_too_large"));
+    }
+
+    #[tokio::test]
+    async fn messages_body_limit_uses_anthropic_error_contract() {
+        let router =
+            bounded_router(Router::new().route("/v1/messages", get(|| async { "unreachable" })));
+        let request = Request::builder()
+            .uri("/v1/messages")
+            .header(header::CONTENT_LENGTH, MAX_REQUEST_BODY_BYTES + 1)
+            .body(Body::empty())
+            .unwrap();
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(response.headers().get(header::RETRY_AFTER).is_none());
+        let request_id = response.headers()["request-id"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["type"], "error");
+        assert_eq!(body["error"]["type"], "request_too_large");
+        assert_eq!(body["error"]["code"], "request_body_too_large");
+        assert_eq!(body["request_id"], request_id);
     }
 }

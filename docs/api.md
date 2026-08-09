@@ -19,6 +19,91 @@ curl http://127.0.0.1:9068/v1/models
 状态由 `process_governor.pressure_level` 决定，而不是固定的 raw-free 阈值。
 `degraded_reasons` 会列出队列、KV 缓存、内存压力、遥测或后端背压等具体原因。
 
+## 错误契约
+
+Chat Completions 与 Responses 的非流式错误使用 OpenAI 风格信封：
+
+```json
+{
+  "error": {
+    "message": "...",
+    "type": "invalid_request_error",
+    "param": null,
+    "code": "invalid_json"
+  }
+}
+```
+
+Anthropic Messages 的非流式错误使用 Anthropic 风格信封，并返回与响应体
+`request_id` 相同的 `request-id` header：
+
+```json
+{
+  "type": "error",
+  "error": {
+    "type": "invalid_request_error",
+    "message": "...",
+    "code": "invalid_json"
+  },
+  "request_id": "req_..."
+}
+```
+
+`error.code` 是 IronMLX 的稳定机器可读错误码；Messages 响应中的该字段属于
+IronMLX 扩展。客户端应按 HTTP status 和 `error.type` 判断错误类别，使用
+`error.code` 区分同一类别的具体原因。
+
+| HTTP status | 稳定 `error.code` | 语义 | `Retry-After` |
+|---:|---|---|---|
+| 400 | `invalid_json` 及各字段/约束错误码 | JSON、字段、采样或输出约束不合法 | 无 |
+| 413 | `request_body_too_large` | HTTP request body 超过 32 MiB | 无 |
+| 413 | `request_token_capacity_exceeded` | 输入 token 与请求输出预算超过模型上下文容量；`error.details` 提供容量明细 | 无 |
+| 503 | `scheduler_queue_full`、`scheduler_unavailable`、`scheduler_reply_lost` | 调度器暂时不可用 | `5` 秒 |
+| 503 | `memory_budget_exceeded`、`memory_pressure`、`prefill_peak_unsafe`、`vision_prefill_peak_unsafe`、`cold_materialization_unsafe`、`prefix_store_backpressure` | 内存 governor 或存储背压暂时拒绝请求 | `5` 秒 |
+| 503 | `engine_unavailable`、`diffusion_lane_overloaded` | 模型引擎或 DiffusionGemma lane 暂时不可用 | `5` 秒 |
+| 500 | `generation_error` 及内部任务错误码 | 非预期服务端错误 | 无 |
+
+所有可重试 503 都返回 JSON 和 `Retry-After: 5`。IronMLX 的 Messages 本地契约使用
+HTTP 503 + `overloaded_error` 表达暂时过载；413 使用 `request_too_large`，并通过
+上述两个稳定 code 区分传输体上限与模型上下文容量上限。
+
+### 运行拓扑一致性
+
+公开推理 API 的 transport 契约不随服务器启动方式变化。普通 causal 服务、
+Gemma4 drafter、DiffusionGemma、EnginePool 和 App daemon 共用同一请求提取、
+模型无关字段校验、协议错误渲染和 SSE header 构造路径。
+
+| 行为 | 普通服务 | Gemma4 drafter | DiffusionGemma | EnginePool | App daemon |
+|---|---|---|---|---|---|
+| Chat/Responses/Messages 严格 JSON 与模型无关字段校验 | 相同 | 相同 | 相同 | 相同 | 相同 |
+| OpenAI/Anthropic 错误 envelope、413/503 与 `Retry-After` | 相同 | 相同 | 相同 | 相同 | 相同 |
+| SSE transport headers | `text/event-stream` + `no-cache` | 相同 | 相同 | 相同 | 相同 |
+| typed request 进入模型实现 | 直接 | 直接 | 直接进入 block-diffusion lane | 解析模型后直接分派 | 解析模型后直接分派 |
+| 模型选择 | 启动时固定 | 启动时固定 | 启动时固定 | request `model` 或唯一/default model | request `model` 或唯一/default model |
+
+该一致性只约束 HTTP transport、协议错误和模型分派语义，不表示所有模型架构拥有
+相同推理能力。DiffusionGemma 的 sampling、MTP、KV cache 和 PromptLookup 限制仍按
+其 capability 描述明确拒绝。`/v1/models` 和 `/admin/api/models/*` 等模型管理路由也
+只在对应的 EnginePool 或 App daemon 拓扑公开。
+
+### SSE 断连与取消契约
+
+Chat Completions、Responses 和 Anthropic Messages 的流式请求在 SSE 响应开始后
+支持客户端断连取消。HTTP response body 被丢弃时，transport 会立即发布协议无关的
+断连信号；各协议的流式编码器停止消费生成事件，也不会在已观测到断连后继续构造
+协议终止事件。
+
+| 生成路径 | 取消生效点 | 释放内容 |
+|---|---|---|
+| Scheduler（包括 MTP/辅助 drafter） | 当前模型 forward 结束后的下一次安全调度边界 | 活跃请求、调度槽、KV cache 与内存预算 |
+| 直接 `GenerationStream` | 当前 token forward 结束后的下一次 token 边界 | 生成状态与直接请求内存预留 |
+| DiffusionGemma | 当前 block-diffusion 步骤结束后的下一次事件边界 | generation lane 与请求状态 |
+
+取消不会强行中断正在执行的 Metal forward；这是为了避免在设备工作未完成时破坏模型
+和 KV 状态。因此，从 TCP 断开到资源归还可能包含一个当前 forward/扩散步骤的尾延迟。
+本契约只承诺已经开始返回 SSE 的流式请求；v0.1 不承诺非流式 HTTP 请求在客户端断开
+后取消底层生成。
+
 ## OpenAI Responses API
 
 `POST /v1/responses` 是推荐给本地 Agent 客户端的新接口。IronMLX 实现无状态
@@ -170,6 +255,9 @@ DiffusionGemma canvas 解码路径。
   `encrypted_content`。
 - 不支持 reasoning summary、refusal typed item、OpenAI file ID、音频输入/输出、
   图片输出或图片形式的 function output；这些能力不会以普通 `output_text` 伪装。
+- sampling 公开字段仅为 `temperature`（有限数且位于 `[0, 2]`）和 `top_p`
+  （有限数且位于 `(0, 1]`）。`top_k`、`repetition_penalty` 不是 Responses
+  标准字段，发送后会返回 400；其他未知字段同样不会被静默忽略。
 
 ## OpenAI Chat Completions
 
@@ -187,6 +275,12 @@ curl http://127.0.0.1:9068/v1/chat/completions \
 
 流式响应将 `stream` 设为 `true`；如需最终 usage chunk，可同时传入
 `"stream_options":{"include_usage":true}`。
+
+Chat Completions 对顶层请求、message、content part、`image_url` payload 和
+`stream_options` 使用严格字段契约；未在本节公开的字段会返回 400，不会被静默
+忽略。sampling 公开字段仅为 `temperature`（有限数且位于 `[0, 2]`）和 `top_p`
+（有限数且位于 `(0, 1]`）。`top_k` 与 `repetition_penalty` 不属于公开的 Chat
+Completions 字段。
 
 ### Structured Outputs
 
@@ -290,6 +384,11 @@ curl http://127.0.0.1:9068/v1/messages \
     "stream": false
   }'
 ```
+
+Messages 对请求和嵌套 content block 使用严格字段契约。sampling 公开字段为
+`temperature`（有限数且位于 `[0, 1]`）、`top_p`（有限数且位于 `(0, 1]`）和
+正整数 `top_k`。`repetition_penalty` 不是 Anthropic Messages 字段，发送后会返回
+400；其他未知字段同样不会被静默忽略。
 
 ### Anthropic Structured Outputs
 
@@ -460,6 +559,45 @@ user message 中用同一 ID 提交 `tool_result`：
   不支持的类型、关键字或模型模板会在生成前明确返回 400，不会静默降级为文本。
 - 支持范围是客户端定义的函数工具。Anthropic 托管工具、服务器工具、MCP、
   computer use、Web Search、Code Execution 等不属于本地推理服务能力。
+
+## API contract 与官方 SDK 门禁
+
+完整的 v0.1 逐字段、错误、拓扑和 SDK 版本兼容矩阵见
+[API 兼容矩阵](api-compatibility-matrix.md)。本文继续作为各协议的使用说明和示例；
+矩阵是发布承诺边界，若两者出现冲突，以矩阵中明确的“支持/受限/拒绝”定义为准。
+
+CI 固定执行服务端 contract 测试和官方 Python SDK 黑盒测试。SDK 测试通过真实的
+loopback HTTP/SSE 连接发送请求，不调用 SDK 内部模型构造器，也不以 `curl` 形状的
+JSON 代替 SDK 解析。
+
+| 协议 | 固定客户端 | 自动验收范围 |
+|---|---|---|
+| Chat Completions | OpenAI Python SDK `2.48.0` | 同步、SSE、function tools、Structured Outputs 请求、usage、400 错误 |
+| Responses | OpenAI Python SDK `2.48.0` | 同步 typed output/reasoning、SSE typed events、function tools、Structured Outputs 请求、413/503 与 `Retry-After` |
+| Anthropic Messages | Anthropic Python SDK `0.121.0` | 同步、原生 SSE、tool use、Structured Outputs + adaptive thinking 请求、400/413/503、`request-id` 与 `Retry-After` |
+
+三套由固定 SDK 实际生成的复杂请求保存在
+`ironmlx/tests/fixtures/api_contract_sdk/`。Rust 测试会把相同字节送入生产
+`ApiJson` extractor 和共享的预调度校验，因此 SDK fixture、公开 DTO 与模型无关
+字段契约不能独立漂移。官方 SDK 测试服务器返回按当前公开契约固定的 JSON/SSE
+fixture，用于验证客户端 typed object、stream event 和异常类型解析；生产 serializer
+则由同一 CI 门禁中的 Rust 服务端测试独立验证。
+
+本地执行：
+
+```bash
+python3 -m venv /tmp/ironmlx-api-contract-sdk
+/tmp/ironmlx-api-contract-sdk/bin/python -m pip install \
+  --requirement scripts/api-contract-sdk/requirements.txt
+/tmp/ironmlx-api-contract-sdk/bin/python \
+  scripts/api-contract-sdk/contract.py --fixture
+
+cargo test --locked --all-features -p ironmlx --lib core::server::
+```
+
+该门禁不加载 checkpoint，因此证明的是协议、transport 和官方客户端解析兼容性，
+不证明特定模型的生成质量、工具选择准确率或 Structured Outputs 成功率。真实模型
+HTTP/SDK smoke 仍作为发布候选的独立验收层；不能用 fixture 结果替代。
 
 ## 图片输入
 

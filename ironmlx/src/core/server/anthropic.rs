@@ -6,17 +6,18 @@
 //!
 //! Each event is framed as `event: <type>\ndata: <json>\n\n`.
 
+#[cfg(test)]
+use axum::http::header;
 use axum::{
-    body::{Body, Bytes},
-    extract::{rejection::JsonRejection, State},
-    http::{header, StatusCode},
+    body::Bytes,
+    extract::State,
+    http::StatusCode,
     response::{IntoResponse, Response},
     Json,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, oneshot};
-use tokio_stream::wrappers::ReceiverStream;
 
 use crate::core::constrained::ToolConstraintOptions;
 use crate::core::generate::{GenerateRequest, GenerationStream};
@@ -27,7 +28,6 @@ use crate::core::generated_output::{
 use crate::core::image_input::{ImageInputError, ImageRequestBudget};
 use crate::core::model::Model;
 use crate::core::native_output::NativeOutputDecoderConfig;
-#[cfg(test)]
 use crate::core::sampler::Sampler;
 use crate::core::scheduler::DenseVlMethods;
 use crate::core::server::chat_format::{
@@ -40,9 +40,9 @@ use crate::core::server::vision::{DecodedMessage, DecodedPart};
 use crate::core::speculative::MtpSpeculativeConfig;
 use crate::core::tool_calling::{ToolCall, ToolDefinition, ToolDialect};
 
-#[cfg(test)]
+use super::api_transport::ApiJson;
 use super::SamplingDefaults;
-use super::{request_token_capacity_error_response, AppState, Gemma4DrafterAppState};
+use super::{AppState, Gemma4DrafterAppState};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -51,73 +51,45 @@ use super::{request_token_capacity_error_response, AppState, Gemma4DrafterAppSta
 /// Map a SchedulerActor admit Err into an HTTP response. Spec §4.7 + §2 G7:
 /// - `SchedulerError::QueueFull` → 503 Service Unavailable + Retry-After: 5
 /// - `SchedulerError::RequestTooLarge` → 413 Payload Too Large (no Retry-After)
-/// - Other anyhow Errs (prompt parsing, OOM, etc.) → 400 Bad Request
-///
-/// Pre-3e.3 used `err.to_string().contains("admission queue full")` string
-/// match (spec §9 R3 acknowledged-fragile). 3e.3 replaces with typed
-/// `anyhow::Error::downcast_ref::<SchedulerError>()`. 3f adds RequestTooLarge arm.
+/// - Memory governor and prefix-store backpressure errors → retryable 503
+/// - Non-scheduler admission errors → 400 Bad Request
 fn admit_err_to_response(err: anyhow::Error) -> Response {
-    use crate::core::SchedulerError;
-    use axum::http::HeaderValue;
-    let msg = format!("{err:#}");
-    match err.downcast_ref::<SchedulerError>() {
-        Some(SchedulerError::QueueFull { .. }) => {
-            // 503 Service Unavailable + Retry-After
-            let mut resp = (StatusCode::SERVICE_UNAVAILABLE, msg).into_response();
-            resp.headers_mut()
-                .insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
-            resp
-        }
-        Some(error @ SchedulerError::RequestTooLarge { .. }) => {
-            request_token_capacity_error_response(error)
-        }
-        Some(
-            SchedulerError::MemoryBudgetExceeded { .. }
-            | SchedulerError::MemoryPressure { .. }
-            | SchedulerError::PrefillPeakUnsafe { .. }
-            | SchedulerError::VisionPrefillPeakUnsafe { .. }
-            | SchedulerError::ColdMaterializationUnsafe { .. }
-            | SchedulerError::StoreBackpressure { .. },
-        ) => {
-            // 503 Service Unavailable — runtime KV budget soft-limit hit.
-            // Retry-After: 5s (fixed conservative backoff). B1-p2.5 §4.1.4.
-            let mut resp = (StatusCode::SERVICE_UNAVAILABLE, msg).into_response();
-            resp.headers_mut()
-                .insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
-            resp
-        }
-        None => {
-            // Other anyhow Errs (prompt parsing, OOM, etc.) → 400 Bad Request.
-            (StatusCode::BAD_REQUEST, msg).into_response()
-        }
-    }
+    super::api_error::ApiError::scheduler_admission(err)
+        .into_response(super::api_error::ApiProtocol::Anthropic)
 }
 
 fn generation_err_to_response(err: anyhow::Error) -> Response {
-    if err.downcast_ref::<crate::core::SchedulerError>().is_some() {
-        admit_err_to_response(err)
-    } else {
-        (StatusCode::INTERNAL_SERVER_ERROR, format!("{err:#}")).into_response()
-    }
+    super::api_error::ApiError::generation(err)
+        .into_response(super::api_error::ApiProtocol::Anthropic)
 }
 
 pub(crate) fn anthropic_error_response(status: StatusCode, message: String) -> Response {
-    let error_type = if status.is_client_error() {
-        "invalid_request_error"
-    } else {
-        "api_error"
+    let code = match status {
+        StatusCode::BAD_REQUEST => "invalid_request",
+        StatusCode::PAYLOAD_TOO_LARGE => "request_too_large",
+        StatusCode::SERVICE_UNAVAILABLE => "service_overloaded",
+        StatusCode::NOT_FOUND => "not_found",
+        StatusCode::INTERNAL_SERVER_ERROR => "internal_error",
+        _ => "api_error",
     };
-    (
-        status,
-        Json(serde_json::json!({
-            "type": "error",
-            "error": {
-                "type": error_type,
-                "message": message
-            }
-        })),
-    )
-        .into_response()
+    anthropic_error_response_with_code(status, code, message)
+}
+
+pub(crate) fn anthropic_error_response_with_code(
+    status: StatusCode,
+    code: &'static str,
+    message: impl Into<String>,
+) -> Response {
+    super::api_error::ApiError::from_status(status, code, message)
+        .into_response(super::api_error::ApiProtocol::Anthropic)
+}
+
+fn service_unavailable_response(code: &'static str, message: impl Into<String>) -> Response {
+    anthropic_error_response_with_code(StatusCode::SERVICE_UNAVAILABLE, code, message)
+}
+
+fn internal_error_response(code: &'static str, message: impl Into<String>) -> Response {
+    anthropic_error_response_with_code(StatusCode::INTERNAL_SERVER_ERROR, code, message)
 }
 
 fn format_stream_error(error: &anyhow::Error) -> Bytes {
@@ -364,8 +336,59 @@ pub struct MessagesRequest {
     pub top_p: Option<f32>,
     #[serde(default)]
     pub top_k: Option<i32>,
-    #[serde(default)]
-    pub repetition_penalty: Option<f32>,
+}
+
+impl MessagesRequest {
+    fn validate_sampling(&self) -> anyhow::Result<()> {
+        if let Some(temperature) = self.temperature {
+            anyhow::ensure!(
+                temperature.is_finite() && (0.0..=1.0).contains(&temperature),
+                "temperature must be finite and between 0 and 1"
+            );
+        }
+        if let Some(top_p) = self.top_p {
+            anyhow::ensure!(
+                top_p.is_finite() && top_p > 0.0 && top_p <= 1.0,
+                "top_p must be finite and in (0, 1]"
+            );
+        }
+        if let Some(top_k) = self.top_k {
+            anyhow::ensure!(top_k > 0, "top_k must be greater than zero");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_topology_contract(&self) -> anyhow::Result<()> {
+        self.validate_sampling()?;
+        let has_output_format = self
+            .output_config
+            .as_ref()
+            .and_then(|config| config.format.as_ref())
+            .is_some();
+        let effort = self.output_config.as_ref().and_then(|config| config.effort);
+        if let Some(config) = self.output_config.as_ref() {
+            anyhow::ensure!(
+                config.format.is_some() || config.effort.is_some(),
+                "output_config must include `format` or `effort`"
+            );
+        }
+        match self.thinking.as_ref() {
+            Some(thinking) => thinking.validate(self.max_tokens, effort)?,
+            None => anyhow::ensure!(
+                effort.is_none(),
+                "output_config.effort requires thinking.type=`enabled` or `adaptive`"
+            ),
+        }
+        if has_output_format
+            && self
+                .messages
+                .last()
+                .is_some_and(|message| message.role == "assistant")
+        {
+            anyhow::bail!("output_config.format is incompatible with assistant message prefilling");
+        }
+        Ok(())
+    }
 }
 
 fn default_max_tokens() -> usize {
@@ -431,7 +454,6 @@ fn validate_thinking_signature(thinking: &str, signature: &str) -> anyhow::Resul
     Ok(())
 }
 
-#[cfg(test)]
 fn build_sampler(req: &MessagesRequest, defaults: SamplingDefaults) -> Sampler {
     let mut s = Sampler::greedy();
     if let Some(t) = req.temperature.or(defaults.temperature) {
@@ -449,7 +471,7 @@ fn build_sampler(req: &MessagesRequest, defaults: SamplingDefaults) -> Sampler {
             s = s.with_top_k(k);
         }
     }
-    if let Some(penalty) = req.repetition_penalty.or(defaults.repetition_penalty) {
+    if let Some(penalty) = defaults.repetition_penalty {
         if penalty > 0.0 && penalty != 1.0 {
             s = s.with_repetition_penalty(penalty);
         }
@@ -747,33 +769,7 @@ fn normalize_tool_choice(
 
 impl MessagesRequest {
     pub(crate) fn into_chat_request(self) -> anyhow::Result<super::openai::ChatRequest> {
-        let has_output_format = self
-            .output_config
-            .as_ref()
-            .and_then(|config| config.format.as_ref())
-            .is_some();
-        let effort = self.output_config.as_ref().and_then(|config| config.effort);
-        if let Some(config) = self.output_config.as_ref() {
-            anyhow::ensure!(
-                config.format.is_some() || config.effort.is_some(),
-                "output_config must include `format` or `effort`"
-            );
-        }
-        match self.thinking.as_ref() {
-            Some(thinking) => thinking.validate(self.max_tokens, effort)?,
-            None => anyhow::ensure!(
-                effort.is_none(),
-                "output_config.effort requires thinking.type=`enabled` or `adaptive`"
-            ),
-        }
-        if has_output_format
-            && self
-                .messages
-                .last()
-                .is_some_and(|message| message.role == "assistant")
-        {
-            anyhow::bail!("output_config.format is incompatible with assistant message prefilling");
-        }
+        self.validate_topology_contract()?;
         let allows_final_output = self.tool_choice.as_ref().is_none_or(|choice| {
             matches!(
                 choice,
@@ -840,8 +836,6 @@ impl MessagesRequest {
             max_tokens: self.max_tokens,
             temperature: self.temperature,
             top_p: self.top_p,
-            top_k: self.top_k,
-            repetition_penalty: self.repetition_penalty,
             seed: None,
             chat_template_kwargs: self
                 .thinking
@@ -917,22 +911,13 @@ pub(crate) fn decode_anthropic_messages(
     Ok(out)
 }
 
-pub async fn messages<M>(
+pub(crate) async fn messages<M>(
     State(state): State<AppState<M>>,
-    payload: std::result::Result<Json<MessagesRequest>, JsonRejection>,
+    ApiJson(req): ApiJson<MessagesRequest>,
 ) -> Response
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
-    let req = match payload {
-        Ok(Json(req)) => req,
-        Err(error) => {
-            return anthropic_error_response(
-                StatusCode::BAD_REQUEST,
-                format!("invalid Messages request: {}", error.body_text()),
-            );
-        }
-    };
     messages_with_state(state, req).await
 }
 
@@ -940,6 +925,10 @@ pub(crate) async fn messages_with_state<M>(state: AppState<M>, req: MessagesRequ
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
+    if let Err(error) = req.validate_sampling() {
+        return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{error:#}"));
+    }
+    let sampler = build_sampler(&req, state.sampling_defaults);
     let req = match req.into_chat_request() {
         Ok(req) => req,
         Err(error) => {
@@ -962,7 +951,6 @@ where
     let max_tokens = req.max_tokens;
     let stream = req.stream;
     let model_label = req.model.clone().unwrap_or_else(|| state.model_id.clone());
-    let sampler = super::openai::build_sampler(&req, state.sampling_defaults);
     if let Err(error) = super::validate_prompt_lookup_sampler(state.prompt_lookup_enabled, sampler)
     {
         return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{error:#}"));
@@ -981,7 +969,12 @@ where
         match super::openai::expand_image_parts_in_messages(req.messages, &state.vision_input).await
         {
             Ok(t) => t,
-            Err(e) => return super::security::image_error_response(e),
+            Err(e) => {
+                return super::security::image_error_response(
+                    e,
+                    super::api_error::ApiProtocol::Anthropic,
+                )
+            }
         };
     let image_grid_thw_opt = if image_grid_thw.is_empty() {
         None
@@ -1157,17 +1150,8 @@ where
 
 pub(crate) async fn gemma4_drafter_messages(
     State(state): State<Gemma4DrafterAppState>,
-    payload: std::result::Result<Json<MessagesRequest>, JsonRejection>,
+    ApiJson(req): ApiJson<MessagesRequest>,
 ) -> Response {
-    let req = match payload {
-        Ok(Json(req)) => req,
-        Err(error) => {
-            return anthropic_error_response(
-                StatusCode::BAD_REQUEST,
-                format!("invalid Messages request: {}", error.body_text()),
-            );
-        }
-    };
     messages_with_gemma4_drafter_state(state, req).await
 }
 
@@ -1175,6 +1159,10 @@ pub(crate) async fn messages_with_gemma4_drafter_state(
     state: Gemma4DrafterAppState,
     req: MessagesRequest,
 ) -> Response {
+    if let Err(error) = req.validate_sampling() {
+        return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{error:#}"));
+    }
+    let sampler = build_sampler(&req, state.base.sampling_defaults);
     let req = match req.into_chat_request() {
         Ok(req) => req,
         Err(error) => {
@@ -1200,7 +1188,6 @@ pub(crate) async fn messages_with_gemma4_drafter_state(
         .model
         .clone()
         .unwrap_or_else(|| state.base.model_id.clone());
-    let sampler = super::openai::build_sampler(&req, state.base.sampling_defaults);
     let _cfg = match MtpSpeculativeConfig::new(state.mtp_draft_tokens, sampler) {
         Ok(cfg) => cfg,
         Err(e) => return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{e:#}")),
@@ -1219,7 +1206,12 @@ pub(crate) async fn messages_with_gemma4_drafter_state(
             .await
         {
             Ok(t) => t,
-            Err(e) => return super::security::image_error_response(e),
+            Err(e) => {
+                return super::security::image_error_response(
+                    e,
+                    super::api_error::ApiProtocol::Anthropic,
+                )
+            }
         };
     let image_grid_thw_opt = if image_grid_thw.is_empty() {
         None
@@ -1263,13 +1255,15 @@ pub(crate) async fn messages_with_gemma4_drafter_state(
     let prompt_len = prompt_ids.len();
     let total_tokens = prompt_len.saturating_add(max_tokens);
     if total_tokens > state.base.effective_cap_max {
-        return anthropic_error_response(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            format!(
-                "request too large: prompt_len + max_tokens = {total_tokens}, max = {}",
-                state.base.effective_cap_max
-            ),
-        );
+        let error = crate::core::SchedulerError::RequestTooLarge {
+            required_total_tokens: total_tokens,
+            input_tokens: prompt_len,
+            requested_max_output_tokens: max_tokens,
+            server_max_context_tokens: state.base.effective_cap_max,
+            max_allowed_output_tokens: state.base.effective_cap_max.saturating_sub(prompt_len),
+        };
+        return super::api_error::ApiError::request_token_capacity(&error)
+            .into_response(super::api_error::ApiProtocol::Anthropic);
     }
     let scheduler_config = state.base.scheduler_request_config(prompt_len, max_tokens);
     let stop_token_ids = state.base.tokenizer.eos_token_ids().to_vec();
@@ -1883,8 +1877,8 @@ where
     match result {
         Ok(Ok(output)) => tool_unary_response(id, model_id, input_tokens, output, output_format),
         Ok(Err(error)) => generation_err_to_response(error),
-        Err(error) => anthropic_error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
+        Err(error) => internal_error_response(
+            "generation_task_failed",
             format!("generation task failed: {error}"),
         ),
     }
@@ -1905,16 +1899,18 @@ where
         .await
         .is_err()
     {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
+        return Err(service_unavailable_response(
+            "scheduler_unavailable",
             "scheduler actor unavailable",
-        )
-            .into_response());
+        ));
     }
     match reply_rx.await {
         Ok(Ok(AdmitReply { event_rx, .. })) => Ok(event_rx),
         Ok(Err(error)) => Err(admit_err_to_response(error)),
-        Err(_) => Err((StatusCode::SERVICE_UNAVAILABLE, "scheduler reply lost").into_response()),
+        Err(_) => Err(service_unavailable_response(
+            "scheduler_reply_lost",
+            "scheduler reply lost",
+        )),
     }
 }
 
@@ -2010,16 +2006,6 @@ where
     tool_unary_response(id, model_id, input_tokens, output, output_format)
 }
 
-fn tool_sse_response(rx: mpsc::Receiver<std::result::Result<Bytes, std::io::Error>>) -> Response {
-    let body = Body::from_stream(ReceiverStream::new(rx));
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/event-stream")
-        .header(header::CACHE_CONTROL, "no-cache")
-        .body(body)
-        .unwrap()
-}
-
 async fn serve_via_gs_tools_stream<M>(
     state: AppState<M>,
     request: GenerateRequest,
@@ -2030,7 +2016,7 @@ async fn serve_via_gs_tools_stream<M>(
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
-    let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+    let (tx, rx, disconnect) = super::api_transport::disconnect_aware_sse_channel(8);
     let (init_tx, init_rx) = oneshot::channel::<anyhow::Result<()>>();
     let message_id = gen_msg_id();
     tokio::task::spawn_blocking(move || {
@@ -2087,6 +2073,9 @@ where
         let mut finished = false;
         let mut first_event = first_event;
         loop {
+            if disconnect.is_cancelled() {
+                return;
+            }
             let event = match first_event.take() {
                 Some(event) => Some(event),
                 None => match generation.next_token() {
@@ -2134,6 +2123,9 @@ where
                 finished = true;
                 break;
             }
+        }
+        if disconnect.is_cancelled() {
+            return;
         }
         if !finished {
             let error = anyhow::anyhow!("generation ended before a terminal event");
@@ -2183,7 +2175,7 @@ where
     });
 
     match init_rx.await {
-        Ok(Ok(())) => tool_sse_response(rx),
+        Ok(Ok(())) => super::api_transport::disconnect_aware_sse_response(rx),
         Ok(Err(error)) => generation_err_to_response(error),
         Err(error) => anthropic_error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -2214,7 +2206,7 @@ where
     let tokenizer = state.tokenizer.clone();
     let runtime_usage = state.runtime_usage.clone();
     let message_id = gen_msg_id();
-    let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+    let (tx, rx, disconnect) = super::api_transport::disconnect_aware_sse_channel(8);
     tokio::spawn(async move {
         let mut decoder = match GeneratedOutputDecoder::new_with_native(
             &tokenizer,
@@ -2235,7 +2227,9 @@ where
         let mut thinking_tokens = 0_u32;
         let mut model_finish = "stop";
         let mut finished = false;
-        while let Some(event) = event_rx.recv().await {
+        while let Some(event) =
+            super::api_transport::recv_or_disconnect(&disconnect, &mut event_rx).await
+        {
             output_tokens += 1;
             runtime_usage.record_output_tokens(1);
             let events = if event.finish_reason == Some("stop") {
@@ -2317,7 +2311,7 @@ where
             }
         }
     });
-    tool_sse_response(rx)
+    super::api_transport::disconnect_aware_sse_response(rx)
 }
 
 async fn serve_via_gs_stream<M>(
@@ -2331,7 +2325,7 @@ async fn serve_via_gs_stream<M>(
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
-    let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+    let (tx, rx, disconnect) = super::api_transport::disconnect_aware_sse_channel(8);
     let (init_tx, init_rx) = oneshot::channel::<anyhow::Result<()>>();
     let id = gen_msg_id();
     let id_for_task = id.clone();
@@ -2405,6 +2399,9 @@ where
         let mut finished = false;
         let mut first_event = Some(first_event);
         loop {
+            if disconnect.is_cancelled() {
+                return;
+            }
             let event = match first_event.take() {
                 Some(event) => Ok(event),
                 None => stream.next_token(),
@@ -2465,6 +2462,9 @@ where
                 }
             }
         }
+        if disconnect.is_cancelled() {
+            return;
+        }
         if !finished {
             let error = anyhow::anyhow!("generation ended before a terminal event");
             let _ = tx.blocking_send(Ok(format_stream_error(&error)));
@@ -2497,22 +2497,14 @@ where
         Ok(Ok(())) => {}
         Ok(Err(error)) => return generation_err_to_response(error),
         Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
+            return internal_error_response(
+                "generation_initialization_channel_closed",
                 format!("generation initialization channel closed: {error}"),
-            )
-                .into_response();
+            );
         }
     }
 
-    let stream = ReceiverStream::new(rx);
-    let body = Body::from_stream(stream);
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/event-stream")
-        .header(header::CACHE_CONTROL, "no-cache")
-        .body(body)
-        .unwrap()
+    super::api_transport::disconnect_aware_sse_response(rx)
 }
 
 /// Text-only short-prompt streaming path via SchedulerActor (3b-4 swap-in).
@@ -2561,11 +2553,10 @@ where
         .await
         .is_err()
     {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
+        return service_unavailable_response(
+            "scheduler_unavailable",
             "scheduler actor unavailable",
-        )
-            .into_response();
+        );
     }
     let AdmitReply {
         request_id: _,
@@ -2576,13 +2567,13 @@ where
             return admit_err_to_response(e);
         }
         Err(_) => {
-            return (StatusCode::SERVICE_UNAVAILABLE, "scheduler reply lost").into_response();
+            return service_unavailable_response("scheduler_reply_lost", "scheduler reply lost");
         }
     };
     state.record_request_started(input_tokens);
 
     // 2. Spawn forwarder that emits the 6-event SSE sequence.
-    let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+    let (tx, rx, disconnect) = super::api_transport::disconnect_aware_sse_channel(8);
     let msg_id_for_task = msg_id.clone();
     let model_id_for_task = model_id.clone();
     let tokenizer = state.tokenizer.clone();
@@ -2610,7 +2601,9 @@ where
         let mut thinking_tokens: u32 = 0;
         let mut model_finish: &'static str = "stop";
         let mut finished = false;
-        while let Some(ev) = event_rx.recv().await {
+        while let Some(ev) =
+            super::api_transport::recv_or_disconnect(&disconnect, &mut event_rx).await
+        {
             let mut events = if ev.finish_reason == Some("stop") {
                 Vec::new()
             } else {
@@ -2682,14 +2675,7 @@ where
         }
     });
 
-    let stream = ReceiverStream::new(rx);
-    let body = Body::from_stream(stream);
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/event-stream")
-        .header(header::CACHE_CONTROL, "no-cache")
-        .body(body)
-        .unwrap()
+    super::api_transport::disconnect_aware_sse_response(rx)
 }
 
 async fn serve_via_gs_unary<M>(
@@ -2757,7 +2743,7 @@ where
         Ok(Ok(output)) => output,
         Ok(Err(err)) => return generation_err_to_response(err),
         Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")).into_response();
+            return internal_error_response("generation_task_failed", format!("join: {e}"));
         }
     };
 
@@ -2807,11 +2793,10 @@ where
         .await
         .is_err()
     {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
+        return service_unavailable_response(
+            "scheduler_unavailable",
             "scheduler actor unavailable",
-        )
-            .into_response();
+        );
     }
     let AdmitReply {
         request_id: _,
@@ -2822,7 +2807,7 @@ where
             return admit_err_to_response(e);
         }
         Err(_) => {
-            return (StatusCode::SERVICE_UNAVAILABLE, "scheduler reply lost").into_response();
+            return service_unavailable_response("scheduler_reply_lost", "scheduler reply lost");
         }
     };
     state.record_request_started(input_tokens);
@@ -2998,14 +2983,13 @@ mod tests {
     }
 
     #[test]
-    fn build_sampler_prefers_request_values_over_model_defaults() {
+    fn build_sampler_prefers_native_request_values_and_keeps_internal_penalty_default() {
         let req: MessagesRequest = serde_json::from_value(serde_json::json!({
             "messages": [],
             "max_tokens": 8,
             "temperature": 0.2,
             "top_p": 0.6,
-            "top_k": 16,
-            "repetition_penalty": 1.05
+            "top_k": 16
         }))
         .expect("messages request");
         let defaults = super::super::SamplingDefaults {
@@ -3020,7 +3004,104 @@ mod tests {
         assert_eq!(sampler.temperature, 0.2);
         assert_eq!(sampler.top_p, Some(0.6));
         assert_eq!(sampler.top_k, Some(16));
-        assert_eq!(sampler.repetition_penalty, Some(1.05));
+        assert_eq!(sampler.repetition_penalty, Some(1.1));
+    }
+
+    #[test]
+    fn messages_request_rejects_nonstandard_repetition_penalty() {
+        let error = serde_json::from_value::<MessagesRequest>(serde_json::json!({
+            "messages": [],
+            "repetition_penalty": 1.1
+        }))
+        .unwrap_err();
+        assert!(error.to_string().contains("repetition_penalty"), "{error}");
+    }
+
+    #[test]
+    fn messages_sampling_contract_accepts_boundaries_and_rejects_invalid_values() {
+        for (temperature, top_p, top_k) in [(0.0, 0.01, 1), (1.0, 1.0, 128)] {
+            let req: MessagesRequest = serde_json::from_value(serde_json::json!({
+                "messages": [],
+                "temperature": temperature,
+                "top_p": top_p,
+                "top_k": top_k
+            }))
+            .unwrap();
+            req.validate_sampling().unwrap();
+        }
+
+        for body in [
+            serde_json::json!({"messages": [], "temperature": -0.1}),
+            serde_json::json!({"messages": [], "temperature": 1.1}),
+            serde_json::json!({"messages": [], "top_p": 0.0}),
+            serde_json::json!({"messages": [], "top_p": 1.1}),
+            serde_json::json!({"messages": [], "top_k": 0}),
+            serde_json::json!({"messages": [], "top_k": -1}),
+        ] {
+            let req: MessagesRequest = serde_json::from_value(body).unwrap();
+            assert!(req.validate_sampling().is_err());
+        }
+
+        let mut non_finite: MessagesRequest =
+            serde_json::from_value(serde_json::json!({"messages": []})).unwrap();
+        non_finite.temperature = Some(f32::NAN);
+        assert!(non_finite.validate_sampling().is_err());
+        non_finite.temperature = None;
+        non_finite.top_p = Some(f32::INFINITY);
+        assert!(non_finite.validate_sampling().is_err());
+    }
+
+    #[tokio::test]
+    async fn messages_http_contract_rejects_unknown_and_invalid_sampling_fields_with_400() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use axum::routing::post;
+        use axum::Router;
+        use tower::ServiceExt;
+
+        async fn validate(ApiJson(_req): ApiJson<MessagesRequest>) -> Response {
+            StatusCode::NO_CONTENT.into_response()
+        }
+
+        let app = Router::new().route("/v1/messages", post(validate));
+        for body in [
+            serde_json::json!({"messages": [], "repetition_penalty": 1.1}),
+            serde_json::json!({"messages": [], "unsupported": true}),
+            serde_json::json!({"messages": [], "temperature": 1.1}),
+            serde_json::json!({"messages": [], "top_p": 0.0}),
+            serde_json::json!({"messages": [], "top_k": 0}),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post("/v1/messages")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body}");
+        }
+
+        let response = app
+            .oneshot(
+                Request::post("/v1/messages")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "messages": [],
+                            "temperature": 1.0,
+                            "top_p": 1.0,
+                            "top_k": 1
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]
@@ -3043,25 +3124,32 @@ mod tests {
             Some("application/json")
         );
         assert!(response.headers().get(header::RETRY_AFTER).is_none());
+        let request_id = response.headers()["request-id"]
+            .to_str()
+            .unwrap()
+            .to_owned();
 
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(body["code"], "request_token_capacity_exceeded");
-        assert_eq!(body["required_total_tokens"], 273);
-        assert_eq!(body["input_tokens"], 17);
-        assert_eq!(body["requested_max_output_tokens"], 256);
-        assert_eq!(body["server_max_context_tokens"], 128);
-        assert_eq!(body["max_allowed_output_tokens"], 111);
-        assert!(body["message"]
+        assert_eq!(body["type"], "error");
+        assert_eq!(body["error"]["type"], "request_too_large");
+        assert_eq!(body["error"]["code"], "request_token_capacity_exceeded");
+        assert_eq!(body["error"]["details"]["required_total_tokens"], 273);
+        assert_eq!(body["error"]["details"]["input_tokens"], 17);
+        assert_eq!(body["error"]["details"]["requested_max_output_tokens"], 256);
+        assert_eq!(body["error"]["details"]["server_max_context_tokens"], 128);
+        assert_eq!(body["error"]["details"]["max_allowed_output_tokens"], 111);
+        assert!(body["error"]["message"]
             .as_str()
             .unwrap()
             .contains("Dashboard → MAX CONTEXT TOKENS"));
+        assert_eq!(body["request_id"], request_id);
     }
 
-    #[test]
-    fn cold_materialization_rejection_is_retryable_http_503() {
+    #[tokio::test]
+    async fn cold_materialization_rejection_is_retryable_http_503() {
         let error = crate::core::SchedulerError::ColdMaterializationUnsafe {
             requested_bytes: 3 * 1024 * 1024 * 1024,
             current_bytes: 20 * 1024 * 1024 * 1024,
@@ -3078,6 +3166,18 @@ mod tests {
                 .expect("Retry-After header"),
             "5"
         );
+        let request_id = response.headers()["request-id"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["type"], "error");
+        assert_eq!(body["error"]["type"], "overloaded_error");
+        assert_eq!(body["error"]["code"], "cold_materialization_unsafe");
+        assert_eq!(body["request_id"], request_id);
     }
 
     mod wire_tests {

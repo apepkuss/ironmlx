@@ -10,16 +10,17 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(test)]
+use axum::http::header;
 use axum::{
-    body::{Body, Bytes},
-    extract::{rejection::JsonRejection, State},
-    http::{header, StatusCode},
+    body::Bytes,
+    extract::State,
+    http::StatusCode,
     response::{IntoResponse, Response},
     Json,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, oneshot};
-use tokio_stream::wrappers::ReceiverStream;
+use tokio::sync::oneshot;
 
 use crate::core::generate::{GenerateRequest, GenerationStream};
 use crate::core::generated_output::{
@@ -34,6 +35,7 @@ use crate::core::server::chat_format::{
 use crate::core::server::scheduler_actor::{AdmitReply, SchedulerCommand};
 use crate::core::tool_calling::{ToolCall, ToolDefinition};
 
+use super::api_transport::ApiJson;
 use super::structured_output::{coalesce_system_messages, StructuredOutputFormat};
 use super::{openai, AppState, Gemma4DrafterAppState};
 
@@ -125,6 +127,9 @@ pub enum ResponseInputItem {
     Reasoning {
         #[serde(default)]
         id: Option<String>,
+        // Summary metadata is accepted in replay history but the full
+        // reasoning content remains the authoritative local prompt input.
+        #[allow(dead_code)]
         #[serde(default)]
         summary: Vec<ReasoningSummaryPart>,
         #[serde(default)]
@@ -170,6 +175,7 @@ pub struct ReasoningRequest {
     pub summary: Option<ReasoningSummaryMode>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ReasoningSummaryPart {
@@ -470,38 +476,19 @@ fn parse_response_text_format(
     Ok(format)
 }
 
-#[derive(Debug, Serialize)]
-struct ErrorEnvelope {
-    error: ErrorObject,
-}
-
-#[derive(Debug, Serialize)]
-struct ErrorObject {
-    message: String,
-    #[serde(rename = "type")]
-    kind: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    param: Option<&'static str>,
-    code: &'static str,
-}
-
 pub(crate) fn error_response(
     status: StatusCode,
     code: &'static str,
     message: impl Into<String>,
 ) -> Response {
-    (
-        status,
-        Json(ErrorEnvelope {
-            error: ErrorObject {
-                message: message.into(),
-                kind: "invalid_request_error",
-                param: None,
-                code,
-            },
-        }),
-    )
-        .into_response()
+    super::api_error::ApiError::from_status(status, code, message)
+        .into_response(super::api_error::ApiProtocol::OpenAi)
+}
+
+impl ResponsesRequest {
+    pub(crate) fn validate_topology_contract(&self) -> anyhow::Result<()> {
+        validate_advisory_fields(self)
+    }
 }
 
 fn validate_advisory_fields(req: &ResponsesRequest) -> anyhow::Result<()> {
@@ -1116,8 +1103,6 @@ impl ResponsesRequest {
                 max_tokens: self.max_output_tokens.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS),
                 temperature: self.temperature,
                 top_p: self.top_p,
-                top_k: None,
-                repetition_penalty: None,
                 seed: None,
                 chat_template_kwargs: reasoning.template_kwargs(),
             },
@@ -1224,7 +1209,12 @@ where
     let (flat_messages, pixel_values, image_grid_thw) =
         match openai::expand_image_parts_in_messages(chat.messages, &state.vision_input).await {
             Ok(result) => result,
-            Err(error) => return Err(super::security::image_error_response(error)),
+            Err(error) => {
+                return Err(super::security::image_error_response(
+                    error,
+                    super::api_error::ApiProtocol::OpenAi,
+                ))
+            }
         };
     let prompt_ids = match if let Some(prepared) = &prepared_tools {
         openai::build_agent_messages(
@@ -2163,15 +2153,6 @@ impl ResponsesStream {
     }
 }
 
-fn stream_response(rx: mpsc::Receiver<std::result::Result<Bytes, std::io::Error>>) -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/event-stream")
-        .header(header::CACHE_CONTROL, "no-cache")
-        .body(Body::from_stream(ReceiverStream::new(rx)))
-        .expect("valid SSE response")
-}
-
 fn finish_decoder(
     output: &mut CollectedOutput,
     decoder: &mut GeneratedOutputDecoder<'_>,
@@ -2276,22 +2257,8 @@ where
     }
     match reply_rx.await {
         Ok(Ok(reply)) => Ok(reply),
-        Ok(Err(error)) => {
-            let status = if error
-                .downcast_ref::<crate::core::SchedulerError>()
-                .is_some_and(|error| {
-                    matches!(error, crate::core::SchedulerError::RequestTooLarge { .. })
-                }) {
-                StatusCode::PAYLOAD_TOO_LARGE
-            } else {
-                StatusCode::SERVICE_UNAVAILABLE
-            };
-            Err(error_response(
-                status,
-                "scheduler_rejected",
-                format!("{error:#}"),
-            ))
-        }
+        Ok(Err(error)) => Err(super::api_error::ApiError::scheduler_admission(error)
+            .into_response(super::api_error::ApiProtocol::OpenAi)),
         Err(_) => Err(error_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "scheduler_reply_lost",
@@ -2438,7 +2405,7 @@ where
     state.record_request_started(input_tokens);
     let tokenizer = state.tokenizer.clone();
     let runtime_usage = state.runtime_usage.clone();
-    let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+    let (tx, rx, disconnect) = super::api_transport::disconnect_aware_sse_channel(8);
     tokio::spawn(async move {
         let mut formatter = ResponsesStream::new(meta);
         if tx.send(Ok(formatter.created())).await.is_err() {
@@ -2459,7 +2426,9 @@ where
         let mut output = CollectedOutput::new();
         let mut call_names = Vec::new();
         let mut typed_finish = None;
-        while let Some(event) = event_rx.recv().await {
+        while let Some(event) =
+            super::api_transport::recv_or_disconnect(&disconnect, &mut event_rx).await
+        {
             output.completion_tokens += 1;
             runtime_usage.record_output_tokens(1);
             let events = if event.finish_reason == Some("stop") {
@@ -2547,7 +2516,7 @@ where
             }
         }
     });
-    stream_response(rx)
+    super::api_transport::disconnect_aware_sse_response(rx)
 }
 
 async fn serve_stream_gs<M>(state: AppState<M>, prepared: PreparedResponse) -> Response
@@ -2559,7 +2528,7 @@ where
     let tool_context = prepared.tool_context;
     let native_output = prepared.native_output;
     let request = prepared.request;
-    let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+    let (tx, rx, disconnect) = super::api_transport::disconnect_aware_sse_channel(8);
     let (init_tx, init_rx) = oneshot::channel::<anyhow::Result<()>>();
     tokio::task::spawn_blocking(move || {
         let model = state.model.blocking_lock();
@@ -2612,6 +2581,9 @@ where
         let mut typed_finish = None;
         let mut first = Some(first);
         loop {
+            if disconnect.is_cancelled() {
+                return;
+            }
             let event = match first.take() {
                 Some(event) => Ok(event),
                 None => generation.next_token(),
@@ -2663,6 +2635,9 @@ where
                 break;
             }
         }
+        if disconnect.is_cancelled() {
+            return;
+        }
         let events = match decoder.finish(finish_reason) {
             Ok(events) => events,
             Err(error) => {
@@ -2706,7 +2681,7 @@ where
         }
     });
     match init_rx.await {
-        Ok(Ok(())) => stream_response(rx),
+        Ok(Ok(())) => super::api_transport::disconnect_aware_sse_response(rx),
         Ok(Err(error)) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "generation_initialization_error",
@@ -2720,23 +2695,13 @@ where
     }
 }
 
-pub async fn responses<M>(
+pub(crate) async fn responses<M>(
     State(state): State<AppState<M>>,
-    payload: std::result::Result<Json<ResponsesRequest>, JsonRejection>,
+    ApiJson(request): ApiJson<ResponsesRequest>,
 ) -> Response
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
-    let request = match payload {
-        Ok(Json(request)) => request,
-        Err(error) => {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                "invalid_json",
-                format!("invalid Responses request: {}", error.body_text()),
-            );
-        }
-    };
     responses_with_state(state, request, false).await
 }
 
@@ -2772,24 +2737,50 @@ where
 
 pub(crate) async fn gemma4_drafter_responses(
     State(state): State<Gemma4DrafterAppState>,
-    payload: std::result::Result<Json<ResponsesRequest>, JsonRejection>,
+    ApiJson(request): ApiJson<ResponsesRequest>,
 ) -> Response {
-    let request = match payload {
-        Ok(Json(request)) => request,
-        Err(error) => {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                "invalid_json",
-                format!("invalid Responses request: {}", error.body_text()),
-            );
-        }
-    };
     responses_with_state(state.base, request, true).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn responses_errors_use_openai_json_and_retry_contracts() {
+        let overloaded = crate::core::server::api_error::ApiError::scheduler_admission(
+            crate::core::SchedulerError::QueueFull { capacity: 8 }.into(),
+        )
+        .into_response(crate::core::server::api_error::ApiProtocol::OpenAi);
+        assert_eq!(overloaded.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(overloaded.headers()[header::RETRY_AFTER], "5");
+        let bytes = axum::body::to_bytes(overloaded.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["type"], "server_error");
+        assert_eq!(body["error"]["code"], "scheduler_queue_full");
+
+        let too_large = crate::core::server::api_error::ApiError::scheduler_admission(
+            crate::core::SchedulerError::RequestTooLarge {
+                required_total_tokens: 273,
+                input_tokens: 17,
+                requested_max_output_tokens: 256,
+                server_max_context_tokens: 128,
+                max_allowed_output_tokens: 111,
+            }
+            .into(),
+        )
+        .into_response(crate::core::server::api_error::ApiProtocol::OpenAi);
+        assert_eq!(too_large.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(too_large.headers().get(header::RETRY_AFTER).is_none());
+        let bytes = axum::body::to_bytes(too_large.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], "request_token_capacity_exceeded");
+        assert_eq!(body["error"]["details"]["input_tokens"], 17);
+    }
 
     #[test]
     fn responses_adapter_rejects_typed_output_without_an_enabled_producer_mapping() {
@@ -2807,6 +2798,38 @@ mod tests {
 
     fn request(value: serde_json::Value) -> ResponsesRequest {
         serde_json::from_value(value).expect("valid fixture")
+    }
+
+    #[test]
+    fn responses_sampling_contract_rejects_nonstandard_and_invalid_fields() {
+        for field in ["top_k", "repetition_penalty"] {
+            let mut body = serde_json::json!({"model": "local", "input": "hi"});
+            body.as_object_mut()
+                .unwrap()
+                .insert(field.to_owned(), serde_json::json!(1));
+            let error = serde_json::from_value::<ResponsesRequest>(body).unwrap_err();
+            assert!(error.to_string().contains(field), "{error}");
+        }
+
+        for body in [
+            serde_json::json!({"model": "local", "input": "hi", "temperature": -0.1}),
+            serde_json::json!({"model": "local", "input": "hi", "temperature": 2.1}),
+            serde_json::json!({"model": "local", "input": "hi", "top_p": 0.0}),
+            serde_json::json!({"model": "local", "input": "hi", "top_p": 1.1}),
+        ] {
+            assert!(request(body).normalize().is_err());
+        }
+
+        for (temperature, top_p) in [(0.0, 0.01), (2.0, 1.0)] {
+            request(serde_json::json!({
+                "model": "local",
+                "input": "hi",
+                "temperature": temperature,
+                "top_p": top_p
+            }))
+            .normalize()
+            .unwrap();
+        }
     }
 
     #[test]

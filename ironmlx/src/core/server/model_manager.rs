@@ -34,7 +34,7 @@ use super::health::{
     classify_status, system_free_ram_bytes, HealthSnapshot, MemoryInfo, ModelInfo, MtpHealthInfo,
     NeuralExactQualificationHealth, PromptLookupHealthInfo, SchedulerInfo,
 };
-use super::{anthropic, openai, responses, SamplingDefaults};
+use super::{anthropic, api_transport::ApiJson, openai, responses, SamplingDefaults};
 
 const MODEL_REQUIRED_CODE: &str = "model_required";
 const MODEL_REQUIRED_MESSAGE: &str = "Model is required.";
@@ -363,21 +363,24 @@ impl ModelManager {
     async fn openai(&self, req: openai::ChatRequest) -> Response {
         match self.pool.app_openai_chat_completions(req).await {
             Ok(response) => response,
-            Err(error) => resolve_error_response(error),
+            Err(error) => super::api_error::ApiError::engine_resolution(error)
+                .into_response(super::api_error::ApiProtocol::OpenAi),
         }
     }
 
     async fn responses(&self, req: responses::ResponsesRequest) -> Response {
         match self.pool.app_openai_responses(req).await {
             Ok(response) => response,
-            Err(error) => resolve_error_response(error),
+            Err(error) => super::api_error::ApiError::engine_resolution(error)
+                .into_response(super::api_error::ApiProtocol::OpenAi),
         }
     }
 
     async fn anthropic(&self, req: anthropic::MessagesRequest) -> Response {
         match self.pool.app_anthropic_messages(req).await {
             Ok(response) => response,
-            Err(error) => resolve_error_response(error),
+            Err(error) => super::api_error::ApiError::engine_resolution(error)
+                .into_response(super::api_error::ApiProtocol::Anthropic),
         }
     }
 
@@ -1158,47 +1161,22 @@ pub async fn serve_app_daemon(args: ServeArgs) -> Result<()> {
 
 async fn app_openai_handler(
     State(manager): State<ModelManager>,
-    Json(req): Json<openai::ChatRequest>,
+    ApiJson(req): ApiJson<openai::ChatRequest>,
 ) -> Response {
     manager.openai(req).await
 }
 
 async fn app_responses_handler(
     State(manager): State<ModelManager>,
-    payload: std::result::Result<
-        Json<responses::ResponsesRequest>,
-        axum::extract::rejection::JsonRejection,
-    >,
+    ApiJson(req): ApiJson<responses::ResponsesRequest>,
 ) -> Response {
-    let req = match payload {
-        Ok(Json(req)) => req,
-        Err(error) => {
-            return responses::error_response(
-                StatusCode::BAD_REQUEST,
-                "invalid_json",
-                format!("invalid Responses request: {}", error.body_text()),
-            );
-        }
-    };
     manager.responses(req).await
 }
 
 async fn app_anthropic_handler(
     State(manager): State<ModelManager>,
-    payload: std::result::Result<
-        Json<anthropic::MessagesRequest>,
-        axum::extract::rejection::JsonRejection,
-    >,
+    ApiJson(req): ApiJson<anthropic::MessagesRequest>,
 ) -> Response {
-    let req = match payload {
-        Ok(Json(req)) => req,
-        Err(error) => {
-            return anthropic::anthropic_error_response(
-                StatusCode::BAD_REQUEST,
-                format!("invalid Messages request: {}", error.body_text()),
-            );
-        }
-    };
     manager.anthropic(req).await
 }
 
@@ -1296,23 +1274,6 @@ async fn set_default_model_handler(
         Ok(response) => Json(response).into_response(),
         Err(error) => error.into_response(),
     }
-}
-
-fn resolve_error_response(error: anyhow::Error) -> Response {
-    if let Some(registry) = error.downcast_ref::<EngineRegistryError>() {
-        return match registry {
-            EngineRegistryError::UnknownModel { id } => {
-                (StatusCode::NOT_FOUND, format!("model is not registered: {id}")).into_response()
-            }
-            EngineRegistryError::AmbiguousDefault => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "No default model is loaded. Load a model or specify an already loaded model in the request.",
-            )
-                .into_response(),
-            _ => (StatusCode::BAD_REQUEST, format!("{error:#}")).into_response(),
-        };
-    }
-    (StatusCode::SERVICE_UNAVAILABLE, format!("{error:#}")).into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -2047,6 +2008,40 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn app_daemon_resolve_errors_follow_protocol_contract() {
+        let openai = crate::core::server::api_error::ApiError::engine_resolution(
+            EngineRegistryError::AmbiguousDefault.into(),
+        )
+        .into_response(crate::core::server::api_error::ApiProtocol::OpenAi);
+        assert_eq!(openai.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(openai.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["code"], "model_required");
+
+        let anthropic = crate::core::server::api_error::ApiError::engine_resolution(
+            EngineRegistryError::UnknownModel {
+                id: "missing".to_owned(),
+            }
+            .into(),
+        )
+        .into_response(crate::core::server::api_error::ApiProtocol::Anthropic);
+        assert_eq!(anthropic.status(), StatusCode::NOT_FOUND);
+        let request_id = anthropic.headers()["request-id"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let body = axum::body::to_bytes(anthropic.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["type"], "not_found_error");
+        assert_eq!(body["error"]["code"], "model_not_found");
+        assert_eq!(body["request_id"], request_id);
+    }
 
     #[test]
     fn loaded_model_info_serializes_only_enabled_per_model_active_kv_health() {

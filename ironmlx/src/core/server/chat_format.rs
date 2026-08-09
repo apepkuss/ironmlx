@@ -13,13 +13,14 @@ use crate::Result;
 
 /// URL payload inside an `image_url` content part.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ImageUrl {
     pub url: String,
 }
 
 /// A single part in a multimodal content array.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ContentPart {
     Text { text: String },
     ImageUrl { image_url: ImageUrl },
@@ -81,6 +82,7 @@ impl Content {
 /// `content` may be either a plain string (text-only messages) or an array of
 /// typed content parts (multimodal messages).
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChatMessage {
     pub role: String,
     #[serde(default = "empty_content", deserialize_with = "deserialize_content")]

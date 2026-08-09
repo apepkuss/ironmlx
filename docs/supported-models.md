@@ -15,8 +15,12 @@
 | DiffusionGemma | `diffusion_gemma` | 是 | 是 | 是，需原生 `thought` channel | 是，需原生 Gemma 工具模板 | 否 | 否 | 否 |
 
 所有运行时均支持流式 HTTP 响应。DiffusionGemma 使用 block-diffusion 生成路径，
-只支持 `max_tokens`、`temperature` 与 `seed`；其他 causal 模型还支持 `top_p`、
-`top_k` 与 `repetition_penalty`。
+只支持 `max_tokens`、`temperature` 与 `seed`；其他 causal 模型的内部 sampler 与
+模型 profile 还支持 `top_p`、`top_k` 与 `repetition_penalty`。公开 HTTP 请求字段
+按协议收口：Chat Completions 和 Responses 接受 `temperature`、`top_p`，Anthropic
+Messages 额外接受 `top_k`；`repetition_penalty` 不属于这三套公开协议字段，
+Chat/Responses 也不接受 `top_k`。内部模型 profile 仍可提供 `top_k` 与
+`repetition_penalty` 默认值。
 
 Chat/Responses/Messages tools 仅表示 OpenAI 或 Anthropic 协议的结构化函数调用生成与
 历史回灌；IronMLX 不执行工具。Responses API 为无状态接口，不持久化 response 或
