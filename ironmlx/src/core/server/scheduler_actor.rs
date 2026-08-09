@@ -5377,6 +5377,28 @@ mod tests {
         forward_delay: Duration::ZERO,
     };
 
+    /// Keep scheduler behavior tests independent from the host's physical RAM.
+    fn test_scheduler(
+        b_max: usize,
+        effective_cap_max: usize,
+    ) -> Scheduler<SchedulerActorFakeModel> {
+        let meta = crate::core::memory_budget::test_meta_qwen35();
+        let budget_state = crate::core::memory_budget::BudgetState::with_soft_limit(
+            crate::core::memory_budget::kv_cache_bytes(b_max, effective_cap_max, &meta),
+            effective_cap_max,
+            effective_cap_max,
+            crate::core::memory_budget::KvBudgetPolicy::FullResident,
+        );
+        Scheduler::new_with_state(
+            b_max,
+            effective_cap_max,
+            budget_state,
+            Arc::new(AtomicU64::new(0)),
+            meta,
+        )
+        .expect("test scheduler startup")
+    }
+
     impl SchedulerActorFakeModel {
         fn with_forward_delay(forward_delay: Duration) -> Self {
             Self { forward_delay }
@@ -6193,12 +6215,7 @@ mod tests {
 
     #[test]
     fn actor_mtp_mode_prefill_and_step_use_mtp_for_eligible_request() {
-        let mut scheduler = Scheduler::<SchedulerActorFakeModel>::new(
-            1,
-            32,
-            crate::core::memory_budget::test_meta_qwen35(),
-        )
-        .expect("scheduler");
+        let mut scheduler = test_scheduler(1, 32);
         scheduler.admit(mk_req(11)).expect("admit");
         let counters = test_mtp_counters();
         let mut mode = SchedulerActorMtp::new(SchedulerActorFakeMtpHead, 1);
@@ -6364,12 +6381,7 @@ mod tests {
             cross_request: false,
         };
         let mut mode = SchedulerActorPromptLookup::new(cfg, qualification).expect("lookup mode");
-        let mut scheduler = Scheduler::<SchedulerActorFakeModel>::new(
-            1,
-            32,
-            crate::core::memory_budget::test_meta_qwen35(),
-        )
-        .expect("scheduler");
+        let mut scheduler = test_scheduler(1, 32);
         let mut request = mk_req(1);
         request.prompt_ids = vec![1, 2, 4, 5, 6];
         scheduler.admit(request).expect("admit");
@@ -6442,12 +6454,7 @@ mod tests {
             cross_request: false,
         };
         let mut mode = SchedulerActorPromptLookup::new(cfg, qualification).expect("lookup mode");
-        let mut scheduler = Scheduler::<SchedulerActorFakeModel>::new(
-            1,
-            32,
-            crate::core::memory_budget::test_meta_qwen35(),
-        )
-        .expect("scheduler");
+        let mut scheduler = test_scheduler(1, 32);
         let mut request = mk_req(1);
         request.prompt_ids = vec![1, 2, 3, 4, 1, 2];
         scheduler.admit(request).expect("admit");
@@ -6823,12 +6830,7 @@ mod tests {
 
     #[test]
     fn recovered_prefill_failure_publishes_idle_scheduler_depth() {
-        let mut scheduler = Scheduler::<SchedulerActorFakeModel>::new(
-            4,
-            32,
-            crate::core::memory_budget::test_meta_qwen35(),
-        )
-        .expect("scheduler");
+        let mut scheduler = test_scheduler(4, 32);
         scheduler.admit(mk_req(11)).expect("admit");
         scheduler.evict_all().expect("recover failed prefill");
 
@@ -6842,12 +6844,7 @@ mod tests {
 
     #[test]
     fn actor_mtp_mode_prefill_uses_mtp_for_eligible_vl_request() {
-        let mut scheduler = Scheduler::<SchedulerActorFakeModel>::new(
-            1,
-            32,
-            crate::core::memory_budget::test_meta_qwen35(),
-        )
-        .expect("scheduler");
+        let mut scheduler = test_scheduler(1, 32);
         scheduler.admit(mk_vl_req()).expect("admit");
         let counters = test_mtp_counters();
         let mut mode = SchedulerActorMtp::new(SchedulerActorFakeMtpHead, 1);
@@ -6867,12 +6864,7 @@ mod tests {
 
     #[test]
     fn actor_mtp_mode_prefill_uses_exact_mtp_for_sampled_b1_request() {
-        let mut scheduler = Scheduler::<SchedulerActorFakeModel>::new(
-            1,
-            32,
-            crate::core::memory_budget::test_meta_qwen35(),
-        )
-        .expect("scheduler");
+        let mut scheduler = test_scheduler(1, 32);
         let mut request = mk_req(11);
         request.sampler = Sampler::greedy().with_temperature(0.7);
         scheduler.admit(request).expect("admit");
@@ -6945,12 +6937,7 @@ mod tests {
 
     #[test]
     fn abandoned_event_receiver_evicts_request_and_releases_slot() {
-        let mut scheduler = Scheduler::<SchedulerActorFakeModel>::new(
-            1,
-            32,
-            crate::core::memory_budget::test_meta_qwen35(),
-        )
-        .expect("scheduler");
+        let mut scheduler = test_scheduler(1, 32);
         let id = scheduler.admit(mk_req(11)).expect("admit");
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         drop(event_rx);
@@ -7043,12 +7030,7 @@ mod tests {
 
     #[test]
     fn scheduler_has_decodable_rows_requires_generated_token() {
-        let mut scheduler = Scheduler::<SchedulerActorFakeModel>::new(
-            1,
-            32,
-            crate::core::memory_budget::test_meta_qwen35(),
-        )
-        .expect("scheduler");
+        let mut scheduler = test_scheduler(1, 32);
         scheduler.admit(mk_req(11)).expect("admit");
 
         assert!(!scheduler_has_decodable_rows(&scheduler));
@@ -7160,12 +7142,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn qwen_mtp_fresh_window_batches_compatible_greedy_long_requests() {
-        let mut scheduler = Scheduler::<SchedulerActorFakeModel>::new(
-            4,
-            32768,
-            crate::core::memory_budget::test_meta_qwen35(),
-        )
-        .expect("scheduler startup");
+        let mut scheduler = test_scheduler(4, 32768);
         let mut first = mk_req(11);
         first.prompt_ids = (0..4096).collect();
         first.prefill_chunk_size = 2048;
@@ -7222,12 +7199,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn qwen_mtp_fresh_window_does_not_mix_short_batch_with_long_prompt() {
-        let mut scheduler = Scheduler::<SchedulerActorFakeModel>::new(
-            4,
-            32768,
-            crate::core::memory_budget::test_meta_qwen35(),
-        )
-        .expect("scheduler startup");
+        let mut scheduler = test_scheduler(4, 32768);
         let first = mk_req(11);
         scheduler.admit(first.clone()).expect("admit first");
 
@@ -7279,12 +7251,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn qwen_mtp_fresh_window_does_not_mix_non_pipelinable_long_prompt() {
-        let mut scheduler = Scheduler::<SchedulerActorFakeModel>::new(
-            4,
-            32768,
-            crate::core::memory_budget::test_meta_qwen35(),
-        )
-        .expect("scheduler startup");
+        let mut scheduler = test_scheduler(4, 32768);
         let mut first = mk_req(11);
         first.prompt_ids = (0..4096).collect();
         first.prefill_chunk_size = 2048;
@@ -7339,12 +7306,7 @@ mod tests {
 
     #[test]
     fn qwen_mtp_long_mid_admit_rejects_decode_hot_path() {
-        let mut scheduler = Scheduler::<SchedulerActorFakeModel>::new(
-            4,
-            32768,
-            crate::core::memory_budget::test_meta_qwen35(),
-        )
-        .expect("scheduler startup");
+        let mut scheduler = test_scheduler(4, 32768);
         let mut active = mk_req(11);
         active.max_new_tokens = 64;
         let active_id = scheduler.admit(active).expect("admit active");
@@ -7388,12 +7350,7 @@ mod tests {
 
     #[test]
     fn qwen_mtp_long_mid_admit_stays_blocked_after_active_row_removal() {
-        let mut scheduler = Scheduler::<SchedulerActorFakeModel>::new(
-            4,
-            32768,
-            crate::core::memory_budget::test_meta_qwen35(),
-        )
-        .expect("scheduler startup");
+        let mut scheduler = test_scheduler(4, 32768);
         let mut high_budget_active = mk_req(11);
         high_budget_active.max_new_tokens = 512;
         let high_budget_id = scheduler
@@ -7444,12 +7401,7 @@ mod tests {
     #[test]
     fn drain_admission_queue_limits_successful_mid_admit_to_one_per_turn() {
         let model = Arc::new(Mutex::new(SchedulerActorFakeModel));
-        let mut sched = Scheduler::<SchedulerActorFakeModel>::new(
-            4,
-            32768,
-            crate::core::memory_budget::test_meta_qwen35(),
-        )
-        .expect("scheduler startup");
+        let mut sched = test_scheduler(4, 32768);
         sched.admit(mk_req(11)).expect("initial admit");
         let prefill_events = sched
             .prefill_admitted(&SchedulerActorFakeModel)
@@ -7499,12 +7451,7 @@ mod tests {
     #[test]
     fn drain_admission_queue_respects_rolling_prefill_batch_limit() {
         let model = Arc::new(Mutex::new(SchedulerActorFakeModel));
-        let mut sched = Scheduler::<SchedulerActorFakeModel>::new(
-            4,
-            32768,
-            crate::core::memory_budget::test_meta_qwen35(),
-        )
-        .expect("scheduler startup");
+        let mut sched = test_scheduler(4, 32768);
         sched.admit(mk_req(11)).expect("initial admit 1");
         sched.admit(mk_req(12)).expect("initial admit 2");
         let prefill_events = sched
@@ -7555,12 +7502,7 @@ mod tests {
     #[test]
     fn drain_admission_queue_starts_chunked_mid_admit_beyond_rolling_limit() {
         let model = Arc::new(Mutex::new(SchedulerActorFakeModel));
-        let mut sched = Scheduler::<SchedulerActorFakeModel>::new(
-            4,
-            32768,
-            crate::core::memory_budget::test_meta_qwen35(),
-        )
-        .expect("scheduler startup");
+        let mut sched = test_scheduler(4, 32768);
         sched.admit(mk_req(11)).expect("initial admit 1");
         sched.admit(mk_req(12)).expect("initial admit 2");
         let prefill_events = sched
@@ -7620,12 +7562,7 @@ mod tests {
     #[test]
     fn drain_admission_queue_caps_chunked_mid_admit_when_decode_rows_are_active() {
         let model = Arc::new(Mutex::new(SchedulerActorFakeModel));
-        let mut sched = Scheduler::<SchedulerActorFakeModel>::new(
-            4,
-            32768,
-            crate::core::memory_budget::test_meta_qwen35(),
-        )
-        .expect("scheduler startup");
+        let mut sched = test_scheduler(4, 32768);
         sched.admit(mk_req(11)).expect("initial admit 1");
         sched.admit(mk_req(12)).expect("initial admit 2");
         let prefill_events = sched
