@@ -17,6 +17,16 @@ public enum BackendRecoveryAction: String, Codable, Equatable, Sendable {
     case viewLogs = "view_logs"
 }
 
+public enum BackendRecoveryFailureReason: String, Codable, Equatable, Sendable {
+    case memoryInsufficient = "memory_insufficient"
+    case modelLimitReached = "model_limit_reached"
+    case modelFilesMissing = "model_files_missing"
+    case modelSnapshotInvalid = "model_snapshot_invalid"
+    case incompatibleConfiguration = "incompatible_configuration"
+    case unknownModelLoadFailure = "unknown_model_load_failure"
+    case crashLoopBreaker = "crash_loop_breaker"
+}
+
 public struct BackendModelRecoveryFailure: Codable, Equatable, Sendable {
     public var model: String
     public var stage: BackendRecoveryStage
@@ -24,6 +34,7 @@ public struct BackendModelRecoveryFailure: Codable, Equatable, Sendable {
     public var message: String
     public var retryable: Bool
     public var action: BackendRecoveryAction
+    public var reason: BackendRecoveryFailureReason
 
     public init(
         model: String,
@@ -31,7 +42,8 @@ public struct BackendModelRecoveryFailure: Codable, Equatable, Sendable {
         code: String,
         message: String,
         retryable: Bool,
-        action: BackendRecoveryAction
+        action: BackendRecoveryAction,
+        reason: BackendRecoveryFailureReason? = nil
     ) {
         self.model = model
         self.stage = stage
@@ -39,10 +51,62 @@ public struct BackendModelRecoveryFailure: Codable, Equatable, Sendable {
         self.message = message
         self.retryable = retryable
         self.action = action
+        self.reason = reason ?? BackendRecoveryFailureClassifier.reason(for: code)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case model
+        case stage
+        case code
+        case message
+        case retryable
+        case action
+        case reason
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        model = try container.decode(String.self, forKey: .model)
+        stage = try container.decode(BackendRecoveryStage.self, forKey: .stage)
+        code = try container.decode(String.self, forKey: .code)
+        message = try container.decode(String.self, forKey: .message)
+        retryable = try container.decode(Bool.self, forKey: .retryable)
+        action = try container.decode(BackendRecoveryAction.self, forKey: .action)
+        reason = try container.decodeIfPresent(
+            BackendRecoveryFailureReason.self,
+            forKey: .reason
+        ) ?? BackendRecoveryFailureClassifier.reason(for: code)
     }
 }
 
 enum BackendRecoveryFailureClassifier {
+    static func reason(for code: String) -> BackendRecoveryFailureReason {
+        switch code {
+        case "memory_budget_exceeded", "gpu_memory_insufficient",
+             "model_memory_limit_exceeded", "total_memory_limit_exceeded",
+             "kv_memory_budget_exceeded", "insufficient_memory":
+            .memoryInsufficient
+        case "max_loaded_models_reached":
+            .modelLimitReached
+        case "model_path_not_found", "model_directory_not_found", "model_file_missing",
+             "model_not_found", "mtp_model_not_found", "mtp_base_model_not_found":
+            .modelFilesMissing
+        case "model_snapshot_corrupt", "model_verification_failed", "snapshot_corrupt",
+             "snapshot_unverified":
+            .modelSnapshotInvalid
+        case let value where value.hasPrefix("diffusion_gemma_"):
+            .incompatibleConfiguration
+        case let value where value.hasPrefix("mtp_"):
+            .incompatibleConfiguration
+        case let value where value.hasPrefix("unsupported_"):
+            .incompatibleConfiguration
+        case "incompatible", "model_name_mismatch":
+            .incompatibleConfiguration
+        default:
+            .unknownModelLoadFailure
+        }
+    }
+
     static func failure(
         model: String,
         stage: BackendRecoveryStage,

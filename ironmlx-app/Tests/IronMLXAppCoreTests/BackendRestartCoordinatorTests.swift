@@ -121,8 +121,32 @@ import Testing
 
     #expect(gpuFailure.retryable)
     #expect(gpuFailure.action == .unloadOtherModels)
+    #expect(gpuFailure.reason == .memoryInsufficient)
     #expect(!kvFailure.retryable)
     #expect(kvFailure.action == .reviewRuntimeSettings)
+    #expect(kvFailure.reason == .memoryInsufficient)
+}
+
+@Test func recoveryFailureClassifierExposesStableUserFacingReasonCategories() {
+    let cases: [(String, BackendRecoveryFailureReason)] = [
+        ("max_loaded_models_reached", .modelLimitReached),
+        ("model_file_missing", .modelFilesMissing),
+        ("model_snapshot_corrupt", .modelSnapshotInvalid),
+        ("unsupported_quantization", .incompatibleConfiguration),
+        ("unknown_backend_error", .unknownModelLoadFailure),
+    ]
+
+    for (code, expected) in cases {
+        let failure = BackendRecoveryFailureClassifier.failure(
+            model: "mlx-community/Tiny-4bit",
+            stage: .loading,
+            error: BackendAPIError.serverResponse(
+                statusCode: 400,
+                body: "{\"code\":\"\(code)\",\"error\":\"structured failure\"}"
+            )
+        )
+        #expect(failure.reason == expected)
+    }
 }
 
 @Test @MainActor func restartDefaultModelRestoresMultipleLoadedModels() async throws {
