@@ -3765,6 +3765,9 @@
       msg_lan_api_key_copied: "API Key copied. The clipboard will be cleared after 60 seconds if unchanged.", msg_lan_ca_certificate_copied: "CA certificate copied.", msg_lan_security_rotated_and_copied: "LAN credentials rotated. The new API Key was copied.",
       err_lan_address_invalid: "Select a concrete active LAN interface before saving.", err_lan_keychain_unavailable: "IronMLX could not access the macOS Keychain (status {os_status}).", err_lan_security_material_missing: "LAN authentication or TLS material is missing.", err_lan_certificate_generation_failed: "IronMLX could not generate the LAN TLS certificate.", err_lan_mode_required: "Enable LAN mode before managing LAN access credentials.", err_lan_security_rotation_rolled_back: "Credential rotation failed. The previous LAN credential and network configuration were restored.", err_lan_security_rotation_failed: "LAN credential rotation failed.", err_lan_security_action_failed: "The LAN security action failed.", err_network_restart_rolled_back: "The new network configuration could not start. The previous configuration was restored.", err_settings_invalid: "The settings are invalid and were not saved.",
       err_configuration_recovery_required: "Recover the damaged configuration before saving settings.",
+      err_configuration_migration_failed: "Configuration migration failed. Open Configuration Recovery before saving.",
+      err_configuration_version_unsupported: "This configuration was created by a newer IronMLX version. Update IronMLX before saving.",
+      err_configuration_lkg_unavailable: "The last-known-good configuration is unavailable or invalid.",
       err_settings_persist_failed: "IronMLX could not save the application settings. Check file permissions and available disk space.",
       badge_restart: "restart", badge_live: "live", requires_restart: "requires restart",
       appearance: "Appearance", interface_language: "Language", theme_mode: "Theme Mode", theme_light: "Light", theme_dark: "Dark", theme_system: "System",
@@ -4104,6 +4107,9 @@
       msg_lan_api_key_copied: "API Key 已复制；若剪贴板内容未变化，将在 60 秒后自动清除。", msg_lan_ca_certificate_copied: "CA 证书已复制。", msg_lan_security_rotated_and_copied: "LAN 凭据已轮换，新 API Key 已复制。",
       err_lan_address_invalid: "保存前请选择一个具体且处于活动状态的局域网接口。", err_lan_keychain_unavailable: "IronMLX 无法访问 macOS 钥匙串（状态 {os_status}）。", err_lan_security_material_missing: "缺少 LAN 认证信息或 TLS 材料。", err_lan_certificate_generation_failed: "IronMLX 无法生成 LAN TLS 证书。", err_lan_mode_required: "请先启用 LAN 模式，再管理局域网访问凭据。", err_lan_security_rotation_rolled_back: "凭据轮换失败，已恢复之前的 LAN 凭据和网络配置。", err_lan_security_rotation_failed: "LAN 凭据轮换失败。", err_lan_security_action_failed: "LAN 安全操作失败。", err_network_restart_rolled_back: "新网络配置无法启动，已恢复之前的配置。", err_settings_invalid: "设置无效，未保存任何更改。",
       err_configuration_recovery_required: "请先恢复损坏的配置，再保存设置。",
+      err_configuration_migration_failed: "配置迁移失败，请先打开“配置恢复”再保存。",
+      err_configuration_version_unsupported: "此配置由更高版本的 IronMLX 创建，请先更新 IronMLX。",
+      err_configuration_lkg_unavailable: "最后有效配置缺失或无效。",
       err_settings_persist_failed: "IronMLX 无法保存应用设置，请检查文件权限和可用磁盘空间。",
       badge_restart: "重启", badge_live: "实时", requires_restart: "需要重启",
       appearance: "外观", interface_language: "界面语言", theme_mode: "主题模式", theme_light: "浅色", theme_dark: "暗色", theme_system: "系统",
@@ -4426,6 +4432,9 @@
       msg_lan_api_key_copied: "API Key 已複製；若剪貼簿內容未變更，將於 60 秒後自動清除。", msg_lan_ca_certificate_copied: "CA 憑證已複製。", msg_lan_security_rotated_and_copied: "LAN 憑證已輪替，新的 API Key 已複製。",
       err_lan_address_invalid: "儲存前請選擇一個具體且處於使用中的區域網路介面。", err_lan_keychain_unavailable: "IronMLX 無法存取 macOS 鑰匙圈（狀態 {os_status}）。", err_lan_security_material_missing: "缺少 LAN 驗證資訊或 TLS 材料。", err_lan_certificate_generation_failed: "IronMLX 無法產生 LAN TLS 憑證。", err_lan_mode_required: "請先啟用 LAN 模式，再管理區域網路存取認證資訊。", err_lan_security_rotation_rolled_back: "憑證輪替失敗，已還原先前的 LAN 憑證與網路設定。", err_lan_security_rotation_failed: "LAN 憑證輪替失敗。", err_lan_security_action_failed: "LAN 安全操作失敗。", err_network_restart_rolled_back: "新網路設定無法啟動，已還原先前的設定。", err_settings_invalid: "設定無效，未儲存任何變更。",
       err_configuration_recovery_required: "請先恢復損壞的設定，再儲存變更。",
+      err_configuration_migration_failed: "設定移轉失敗，請先開啟「設定恢復」再儲存。",
+      err_configuration_version_unsupported: "此設定由較新版本的 IronMLX 建立，請先更新 IronMLX。",
+      err_configuration_lkg_unavailable: "最後有效設定遺失或無效。",
       err_settings_persist_failed: "IronMLX 無法儲存應用設定，請檢查檔案權限和可用磁碟空間。",
       badge_restart: "重啟", badge_live: "即時", requires_restart: "需要重啟",
       appearance: "外觀", interface_language: "介面語言", theme_mode: "主題模式", theme_light: "淺色", theme_dark: "暗色", theme_system: "系統",
@@ -4748,6 +4757,9 @@
       msg_lan_api_key_copied: "API Key をコピーしました。クリップボードの内容が変わらない場合、60秒後に消去されます。", msg_lan_ca_certificate_copied: "CA 証明書をコピーしました。", msg_lan_security_rotated_and_copied: "LAN 認証情報をローテーションし、新しい API Key をコピーしました。",
       err_lan_address_invalid: "保存する前に、有効な具体的 LAN インターフェースを選択してください。", err_lan_keychain_unavailable: "IronMLX は macOS キーチェーンにアクセスできませんでした（ステータス {os_status}）。", err_lan_security_material_missing: "LAN 認証情報または TLS マテリアルがありません。", err_lan_certificate_generation_failed: "IronMLX は LAN TLS 証明書を生成できませんでした。", err_lan_mode_required: "LAN アクセス認証情報を管理する前に LAN モードを有効にしてください。", err_lan_security_rotation_rolled_back: "認証情報のローテーションに失敗しました。以前の LAN 認証情報とネットワーク設定を復元しました。", err_lan_security_rotation_failed: "LAN 認証情報のローテーションに失敗しました。", err_lan_security_action_failed: "LAN セキュリティ操作に失敗しました。", err_network_restart_rolled_back: "新しいネットワーク設定を開始できなかったため、以前の設定を復元しました。", err_settings_invalid: "設定が無効なため、変更は保存されませんでした。",
       err_configuration_recovery_required: "破損した設定を復旧してから保存してください。",
+      err_configuration_migration_failed: "設定の移行に失敗しました。保存する前に「設定の復旧」を開いてください。",
+      err_configuration_version_unsupported: "この設定は新しい IronMLX で作成されています。先に IronMLX を更新してください。",
+      err_configuration_lkg_unavailable: "最後の有効な設定が見つからないか、無効です。",
       err_settings_persist_failed: "アプリ設定を保存できませんでした。ファイル権限と空きディスク容量を確認してください。",
       badge_restart: "再起動", badge_live: "ライブ", requires_restart: "再起動が必要",
       appearance: "外観", interface_language: "インターフェース言語", theme_mode: "テーマモード", theme_light: "ライト", theme_dark: "ダーク", theme_system: "システム",
@@ -5070,6 +5082,9 @@
       msg_lan_api_key_copied: "API Key를 복사했습니다. 클립보드 내용이 변경되지 않으면 60초 후 지워집니다.", msg_lan_ca_certificate_copied: "CA 인증서를 복사했습니다.", msg_lan_security_rotated_and_copied: "LAN 자격 증명을 교체하고 새 API Key를 복사했습니다.",
       err_lan_address_invalid: "저장하기 전에 활성 상태인 구체적인 LAN 인터페이스를 선택하세요.", err_lan_keychain_unavailable: "IronMLX가 macOS 키체인에 접근할 수 없습니다(상태 {os_status}).", err_lan_security_material_missing: "LAN 인증 정보 또는 TLS 자료가 없습니다.", err_lan_certificate_generation_failed: "IronMLX가 LAN TLS 인증서를 생성할 수 없습니다.", err_lan_mode_required: "LAN 액세스 자격 증명을 관리하기 전에 LAN 모드를 활성화하세요.", err_lan_security_rotation_rolled_back: "자격 증명 교체에 실패했습니다. 이전 LAN 자격 증명과 네트워크 설정을 복원했습니다.", err_lan_security_rotation_failed: "LAN 자격 증명 교체에 실패했습니다.", err_lan_security_action_failed: "LAN 보안 작업에 실패했습니다.", err_network_restart_rolled_back: "새 네트워크 설정을 시작할 수 없어 이전 설정을 복원했습니다.", err_settings_invalid: "설정이 올바르지 않아 변경 사항을 저장하지 않았습니다.",
       err_configuration_recovery_required: "손상된 설정을 복구한 후 저장하세요.",
+      err_configuration_migration_failed: "설정 마이그레이션에 실패했습니다. 저장하기 전에 설정 복구를 여세요.",
+      err_configuration_version_unsupported: "이 설정은 더 최신 IronMLX에서 생성되었습니다. 먼저 IronMLX를 업데이트하세요.",
+      err_configuration_lkg_unavailable: "마지막 유효 설정이 없거나 올바르지 않습니다.",
       err_settings_persist_failed: "앱 설정을 저장하지 못했습니다. 파일 권한과 사용 가능한 디스크 공간을 확인하세요.",
       badge_restart: "재시작", badge_live: "실시간", requires_restart: "재시작 필요",
       appearance: "외관", interface_language: "인터페이스 언어", theme_mode: "테마 모드", theme_light: "라이트", theme_dark: "다크", theme_system: "시스템",
@@ -5850,13 +5865,22 @@
       prompt_lookup_cross_request: capabilities.supports_prompt_lookup !== false
         && document.getElementById('modal-prompt-lookup-cross-request').checked
     };
-    // Save locally
-    window.__MODEL_PARAMS__[modelId] = params;
-    // Send to Rust for persistence
+    // Persist first. Swift sends the authoritative model parameter map back only
+    // after the versioned configuration transaction commits successfully.
     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveModelParams) {
       window.webkit.messageHandlers.saveModelParams.postMessage(JSON.stringify(params));
     }
     closeParamsModal();
+  }
+
+  function onModelParamsSaved(jsonStr) {
+    let result = {};
+    try { result = JSON.parse(jsonStr); } catch(e) { return; }
+    const dict = I18N[currentLang] || I18N.en;
+    if (result.status === 'error' || result.code) {
+      showToast(localizeErrorResult(result), 'warn');
+      return;
+    }
     showToast(dict.params_saved || 'Model parameters saved.', 'success');
   }
 

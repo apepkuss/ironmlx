@@ -333,10 +333,13 @@ private func containsFlagValue(_ arguments: [String], flag: String, value: Strin
     let root = try temporaryDirectory()
     let outputRoot = root.appendingPathComponent("reports", isDirectory: true)
     let executable = root.appendingPathComponent("fake-ironmlx")
+    let readyURL = root.appendingPathComponent("calibration-ready")
+    let releaseURL = root.appendingPathComponent("calibration-release")
     try """
     #!/bin/sh
     echo "calibration started"
-    sleep 1
+    touch "\(readyURL.path)"
+    while [ ! -f "\(releaseURL.path)" ]; do sleep 0.02; done
     echo "runtime_profile: /tmp/runtime-profile.json"
     echo "stored_runtime_profile: /tmp/stored-profile.json"
     """.write(to: executable, atomically: true, encoding: .utf8)
@@ -349,27 +352,33 @@ private func containsFlagValue(_ arguments: [String], flag: String, value: Strin
         selectionProfile: "balanced"
     )
     _ = service.start(executableURL: executable, ironBenchURL: nil, request: request)
+    defer {
+        try? Data().write(to: releaseURL)
+    }
 
-    var observed: SchedulerProfileGenerationStatus?
-    for _ in 0..<50 {
-        let status = service.currentStatus()
-        if status.state == "running",
-           status.logTail?.contains("calibration started") == true {
-            observed = status
+    for _ in 0..<250 {
+        if FileManager.default.fileExists(atPath: readyURL.path) {
             break
         }
         try await Task.sleep(nanoseconds: 20_000_000)
     }
+    try #require(FileManager.default.fileExists(atPath: readyURL.path))
 
-    #expect(observed?.state == "running")
-    #expect(observed?.logTail?.contains("calibration started") == true)
+    let observed = service.currentStatus()
+    #expect(observed.state == "running")
+    #expect(observed.logTail?.contains("calibration started") == true)
 
-    for _ in 0..<80 {
-        if service.currentStatus().state != "running" {
+    try Data().write(to: releaseURL)
+
+    for _ in 0..<250 {
+        let status = service.currentStatus()
+        if status.state != "running" {
+            #expect(status.state == "succeeded")
             return
         }
         try await Task.sleep(nanoseconds: 20_000_000)
     }
+    Issue.record("calibration did not finish after the test released it")
 }
 
 @Test func schedulerProfileGenerationCanBeCancelledCooperatively() async throws {

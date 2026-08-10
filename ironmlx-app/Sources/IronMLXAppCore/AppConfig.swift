@@ -316,13 +316,25 @@ public extension AppConfig {
     }
 }
 
+private struct AppConfigEnvelope: Codable, Equatable {
+    let schemaVersion: Int
+    let payload: AppConfig
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case payload
+    }
+}
+
 public final class AppConfigStore: @unchecked Sendable {
     public static let shared = AppConfigStore()
+    public static let currentSchemaVersion = 1
 
     public let url: URL
     private let fileManager: FileManager
     private let preferredLanguages: @Sendable () -> [String]
     private let recoveryState = ConfigurationRecoveryState()
+    private let coordinator: ConfigurationFileCoordinator
 
     public var recoveryIssue: ConfigurationRecoveryIssue? {
         recoveryState.issue
@@ -336,62 +348,125 @@ public final class AppConfigStore: @unchecked Sendable {
         self.url = url
         self.fileManager = fileManager
         self.preferredLanguages = preferredLanguages
+        self.coordinator = ConfigurationFileCoordinator(activeURL: url, fileManager: fileManager)
     }
 
     public func load() -> AppConfig {
-        guard fileManager.fileExists(atPath: url.path) else {
-            recoveryState.clear()
-            let config = AppConfig(
-                language: AppLanguageResolver.resolve(preferredLanguages: preferredLanguages())
-            )
-            save(config)
-            return config
-        }
-        let data: Data
-        do {
-            data = try Data(contentsOf: url)
-        } catch {
-            recordCorruption(data: nil, error: error)
-            return fallbackConfig()
-        }
-        do {
-            let config = try JSONDecoder().decode(AppConfig.self, from: data)
-            recoveryState.clear()
-            return config
-        } catch {
-            recordCorruption(data: data, error: error)
-            return fallbackConfig()
+        coordinator.withLock {
+            do {
+                try coordinator.recoverInterruptedTransactionIfNeeded()
+                guard fileManager.fileExists(atPath: url.path) else {
+                    let config = fallbackConfig()
+                    let data = try encodedV1(config)
+                    try coordinator.commitActiveAndLKG(data)
+                    _ = try decodeV1(data)
+                    recoveryState.clear()
+                    return config
+                }
+                let data = try Data(contentsOf: url)
+                let object = try ConfigurationJSON.object(from: data)
+                if object.keys.contains("schema_version") {
+                    let config = try decodeVersioned(data, object: object)
+                    try refreshLKGIfNeeded(data)
+                    recoveryState.clear()
+                    return config
+                }
+                return try migrateV0(data, object: object)
+            } catch let error as ConfigurationPersistenceError {
+                switch error {
+                case let .unsupportedSchemaVersion(found, supported):
+                    recordIssue(
+                        data: nil,
+                        reason: .unsupportedVersion(found: found, supported: supported),
+                        error: error,
+                        preservedURL: nil,
+                        preservationError: nil
+                    )
+                default:
+                    recordCorruption(data: try? Data(contentsOf: url), error: error)
+                }
+                return fallbackConfig()
+            } catch {
+                recordCorruption(data: try? Data(contentsOf: url), error: error)
+                return fallbackConfig()
+            }
         }
     }
 
     @discardableResult
     public func save(_ config: AppConfig) -> Bool {
-        guard recoveryIssue == nil else {
-            IronMLXAppLogger.error(
-                "Refusing to overwrite unreadable ironmlx app config before explicit recovery: \(url.path)"
-            )
-            return false
+        coordinator.withLock {
+            guard recoveryIssue == nil else {
+                IronMLXAppLogger.error(
+                    "Refusing to overwrite unresolved ironmlx app configuration: \(url.path)"
+                )
+                return false
+            }
+            do {
+                try coordinator.recoverInterruptedTransactionIfNeeded()
+                try validate(config)
+                let data = try encodedV1(config)
+                _ = try decodeV1(data)
+                try coordinator.commitActiveAndLKG(data)
+                _ = try decodeV1(Data(contentsOf: url))
+                recoveryState.clear()
+                return true
+            } catch {
+                IronMLXAppLogger.error("Failed to save ironmlx app config: \(error)")
+                return false
+            }
         }
-        do {
-            try write(config)
-            return true
-        } catch {
-            IronMLXAppLogger.error("Failed to save ironmlx app config: \(error)")
-            return false
+    }
+
+    @discardableResult
+    public func update(_ mutate: (inout AppConfig) -> Void) -> Bool {
+        coordinator.withLock {
+            let current = load()
+            guard recoveryIssue == nil else {
+                return false
+            }
+            var updated = current
+            mutate(&updated)
+            return save(updated)
         }
     }
 
     public func resetAfterCorruption() throws {
-        guard let recoveryIssue else {
-            return
+        try coordinator.withLock {
+            guard let recoveryIssue else {
+                return
+            }
+            guard case .unsupportedVersion = recoveryIssue.reason else {
+                guard let preservedURL = recoveryIssue.preservedURL,
+                      fileManager.fileExists(atPath: preservedURL.path) else {
+                    throw ConfigurationRecoveryResetError.preservedCopyMissing(url)
+                }
+                let config = fallbackConfig()
+                let data = try encodedV1(config)
+                try coordinator.commitActiveAndLKG(data)
+                _ = try decodeV1(Data(contentsOf: url))
+                recoveryState.clear()
+                return
+            }
+            throw ConfigurationRecoveryResetError.unsupportedVersion(url)
         }
-        guard let preservedURL = recoveryIssue.preservedURL,
-              fileManager.fileExists(atPath: preservedURL.path)
-        else {
-            throw ConfigurationRecoveryResetError.preservedCopyMissing(url)
+    }
+
+    public func restoreFromLKG() throws {
+        try coordinator.withLock {
+            guard let recoveryIssue else {
+                return
+            }
+            guard case .unsupportedVersion = recoveryIssue.reason else {
+                let data = try Data(contentsOf: coordinator.layout.lkgURL)
+                _ = try decodeV1(data)
+                try coordinator.commitActiveAndLKG(data)
+                _ = try decodeV1(Data(contentsOf: url))
+                recoveryState.clear()
+                return
+            }
+            throw ConfigurationRecoveryResetError.unsupportedVersion(url)
         }
-        try write(fallbackConfig())
-        recoveryState.clear()
     }
 
     private func fallbackConfig() -> AppConfig {
@@ -400,15 +475,120 @@ public final class AppConfigStore: @unchecked Sendable {
         )
     }
 
-    private func write(_ config: AppConfig) throws {
-        try fileManager.createDirectory(
-            at: url.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
+    private func encodedV1(_ config: AppConfig) throws -> Data {
+        try validate(config)
         let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let data = try encoder.encode(config)
-        try data.write(to: url, options: .atomic)
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        return try encoder.encode(
+            AppConfigEnvelope(schemaVersion: Self.currentSchemaVersion, payload: config)
+        )
+    }
+
+    private func decodeVersioned(_ data: Data, object: [String: Any]) throws -> AppConfig {
+        guard let version = try ConfigurationJSON.schemaVersion(in: object) else {
+            throw ConfigurationPersistenceError.invalidSchemaVersion
+        }
+        guard version <= Self.currentSchemaVersion else {
+            throw ConfigurationPersistenceError.unsupportedSchemaVersion(
+                found: version,
+                supported: Self.currentSchemaVersion
+            )
+        }
+        guard version == Self.currentSchemaVersion else {
+            throw ConfigurationPersistenceError.invalidSchemaVersion
+        }
+        return try decodeV1(data)
+    }
+
+    private func decodeV1(_ data: Data) throws -> AppConfig {
+        let object = try ConfigurationJSON.object(from: data)
+        try ConfigurationJSON.requireKeys(
+            Set(object.keys),
+            allowed: ["schema_version", "payload"]
+        )
+        guard object["payload"] is [String: Any] else {
+            throw ConfigurationPersistenceError.invalidValue("payload")
+        }
+        guard try ConfigurationJSON.schemaVersion(in: object) == Self.currentSchemaVersion else {
+            throw ConfigurationPersistenceError.invalidSchemaVersion
+        }
+        let payload = object["payload"] as! [String: Any]
+        try ConfigurationJSON.requireKeys(Set(payload.keys), allowed: Self.v1Keys)
+        let envelope = try JSONDecoder().decode(AppConfigEnvelope.self, from: data)
+        try validate(envelope.payload)
+        return envelope.payload
+    }
+
+    private func migrateV0(_ data: Data, object: [String: Any]) throws -> AppConfig {
+        var preservedURL: URL?
+        do {
+            preservedURL = try coordinator.preservePreMigration(data, schemaVersion: 0)
+            try ConfigurationJSON.requireKeys(Set(object.keys), allowed: Self.v0Keys)
+            let config = try JSONDecoder().decode(AppConfig.self, from: data)
+            try validate(config)
+            let candidate = try encodedV1(config)
+            _ = try decodeV1(candidate)
+            try coordinator.commitActiveAndLKG(candidate)
+            let verified = try decodeV1(Data(contentsOf: url))
+            recoveryState.clear()
+            let removed = Set(object.keys).intersection(Self.retiredV0Keys).sorted()
+            IronMLXAppLogger.info(
+                "event=configuration_migrated kind=app_config from_schema=0 to_schema=1 removed_keys=\(removed.joined(separator: ","))"
+            )
+            return verified
+        } catch {
+            recordIssue(
+                data: nil,
+                reason: .migrationFailed(from: 0, to: 1),
+                error: error,
+                preservedURL: preservedURL,
+                preservationError: preservedURL == nil ? error.localizedDescription : nil
+            )
+            throw AppConfigMigrationRecordedError.underlying(error.localizedDescription)
+        }
+    }
+
+    private func validate(_ config: AppConfig) throws {
+        guard !config.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ConfigurationPersistenceError.invalidValue("host")
+        }
+        guard config.port > 0 else {
+            throw ConfigurationPersistenceError.invalidValue("port")
+        }
+        let languages = Set(["en", "zh", "zh-Hans", "zh-Hant", "ja", "ko"])
+        guard languages.contains(config.language) else {
+            throw ConfigurationPersistenceError.invalidValue("language")
+        }
+        if let networkMode = config.networkMode,
+           !["local", "lan"].contains(networkMode.lowercased()) {
+            throw ConfigurationPersistenceError.invalidValue("network_mode")
+        }
+        try validateReferences(config.loadedModels, field: "loaded_models")
+        try validateReferences(config.pinnedModels, field: "pinned_models")
+        if let pinned = config.pinnedModels, let loaded = config.loadedModels,
+           !Set(pinned).isSubset(of: Set(loaded)) {
+            throw ConfigurationPersistenceError.invalidValue("pinned_models")
+        }
+    }
+
+    private func validateReferences(_ values: [String]?, field: String) throws {
+        guard let values else {
+            return
+        }
+        guard values == AppConfig.normalizedModelReferences(values) else {
+            throw ConfigurationPersistenceError.invalidValue(field)
+        }
+    }
+
+    private func refreshLKGIfNeeded(_ data: Data) throws {
+        do {
+            if fileManager.fileExists(atPath: coordinator.layout.lkgURL.path) {
+                _ = try decodeV1(Data(contentsOf: coordinator.layout.lkgURL))
+            }
+            try coordinator.refreshLKG(data)
+        } catch {
+            IronMLXAppLogger.warning("Failed to refresh app configuration LKG: \(error)")
+        }
     }
 
     private func recordCorruption(data: Data?, error: Error) {
@@ -418,7 +598,9 @@ public final class AppConfigStore: @unchecked Sendable {
                 sourceURL: url,
                 data: data,
                 error: error,
-                fileManager: fileManager
+                fileManager: fileManager,
+                lkgURL: coordinator.layout.lkgURL,
+                lkgErrorDescription: lkgErrorDescription()
             )
         }) {
             IronMLXAppLogger.error(
@@ -427,11 +609,77 @@ public final class AppConfigStore: @unchecked Sendable {
         }
     }
 
+    private func recordIssue(
+        data: Data?,
+        reason: ConfigurationRecoveryIssue.Reason,
+        error: Error,
+        preservedURL: URL?,
+        preservationError: String?
+    ) {
+        if recoveryState.recordIfNeeded({
+            ConfigurationRecoveryIssue(
+                kind: .appConfig,
+                sourceURL: url,
+                preservedURL: preservedURL,
+                lkgURL: coordinator.layout.lkgURL,
+                lkgErrorDescription: lkgErrorDescription(),
+                reason: reason,
+                errorDescription: error.localizedDescription,
+                preservationErrorDescription: preservationError
+            )
+        }) {
+            IronMLXAppLogger.error(
+                "IronMLX app configuration requires explicit recovery: \(url.path); \(error)"
+            )
+        }
+    }
+
+    private func lkgErrorDescription() -> String? {
+        guard fileManager.fileExists(atPath: coordinator.layout.lkgURL.path) else {
+            return ConfigurationPersistenceError.lkgUnavailable(coordinator.layout.lkgURL).localizedDescription
+        }
+        do {
+            _ = try decodeV1(Data(contentsOf: coordinator.layout.lkgURL))
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    private static let retiredV0Keys: Set<String> = [
+        "last_model", "init_cache_blocks", "auto_start",
+    ]
+
+    private static let v1Keys: Set<String> = [
+        "host", "port", "network_mode", "lan_host", "lan_credential_id",
+        "lan_certificate_fingerprint", "default_model", "loaded_models", "pinned_models",
+        "language", "theme", "log_level", "mem_limit_total", "mem_limit_model",
+        "mem_total_auto", "mem_total", "mem_model_auto", "mem_model", "hot_cache",
+        "cold_cache", "cache_enable", "cache_dir", "kv_quant", "active_kv_offload",
+        "max_sequences", "max_models", "model_ttl_minutes", "verify_model_on_load",
+        "distributed_backend", "parallel_mode", "prefill_chunk_size", "b_max",
+        "admission_deadline_ms", "admission_queue_max", "max_cache_cap",
+        "decode_cadence_mid_chunk_cap", "scheduler_profile", "scheduler_autotune_report",
+    ]
+
+    private static let v0Keys = v1Keys.union(retiredV0Keys)
+
     public static func defaultConfigURL() -> URL {
         let home = FileManager.default.homeDirectoryForCurrentUser
         return home
             .appendingPathComponent(".ironmlx", isDirectory: true)
             .appendingPathComponent("config", isDirectory: true)
             .appendingPathComponent("app_config.json")
+    }
+}
+
+private enum AppConfigMigrationRecordedError: LocalizedError {
+    case underlying(String)
+
+    var errorDescription: String? {
+        switch self {
+        case let .underlying(description):
+            description
+        }
     }
 }
