@@ -366,6 +366,8 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
             throw CancellationError()
         }
 
+        appendRecoveryStep(.readinessCheckPassed, incidentID: incidentID)
+        appendRecoveryStep(.modelRestoreStarted, incidentID: incidentID)
         let result = await restartCoordinator.restore(snapshot)
         guard processManager.currentLaunchID == launchID, processManager.isRunning else {
             throw CancellationError()
@@ -434,6 +436,10 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
             breakerActive = true
             activeIncident.record.recoveryResult = "breaker"
             activeIncident.record.error = "Backend exited again before the stable window completed."
+            activeIncident.record.logTail = BackendIncidentRecord.sanitizedLogTail(
+                termination.logTail
+            )
+            activeIncident.record.appendRecoveryStep(.automaticRecoveryStopped)
             self.activeIncident = activeIncident
             lastIncident = activeIncident.record
             processManager.transition(
@@ -496,6 +502,7 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
                 return
             }
             active.record.recoveryAttempt += 1
+            active.record.appendRecoveryStep(.automaticRestartStarted)
             record = active.record
             self.activeIncident = active
             self.processManager.transition(to: .recovering)
@@ -534,6 +541,7 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
                     ? "recovered"
                     : result.loadedModels.isEmpty ? "failed" : "degraded"
                 completed.record.error = result.error
+                completed.record.updatedAt = Date()
                 self.activeIncident = completed
                 self.lastIncident = completed.record
                 self.persistIncident(completed.record)
@@ -550,6 +558,7 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
                 }
                 failed.record.recoveryResult = "failed"
                 failed.record.error = error.localizedDescription
+                failed.record.updatedAt = Date()
                 self.activeIncident = failed
                 self.lastIncident = failed.record
                 self.persistIncident(failed.record)
@@ -558,6 +567,7 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
     }
 
     private func startStableWindow(for incidentID: UUID) {
+        appendRecoveryStep(.stableWindowStarted, incidentID: incidentID)
         stableWindowTask?.cancel()
         stableWindowTask = Task { [weak self] in
             guard let self else {
@@ -598,6 +608,22 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
         } catch {
             IronMLXAppLogger.error("Failed to persist backend incident: \(error)")
         }
+    }
+
+    private func appendRecoveryStep(
+        _ action: BackendIncidentRecoveryAction,
+        incidentID: UUID?
+    ) {
+        guard let incidentID,
+              var activeIncident,
+              activeIncident.record.id == incidentID
+        else {
+            return
+        }
+        activeIncident.record.appendRecoveryStep(action)
+        self.activeIncident = activeIncident
+        lastIncident = activeIncident.record
+        persistIncident(activeIncident.record)
     }
 
     private func publish(_ event: BackendRuntimeEvent) {

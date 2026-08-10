@@ -122,6 +122,13 @@ func realHelperKill9RecoversOnceThenTripsBreakerAndAllowsManualRetry() async thr
     #expect(supervisor.lastIncident?.recoveryAttempt == 1)
     #expect(supervisor.lastIncident?.recoveredModels == [modelID])
     #expect(supervisor.lastIncident?.failures.isEmpty == true)
+    #expect(supervisor.lastIncident?.recoveryStatus == .recovered)
+    #expect(supervisor.lastIncident?.recoverySteps.map(\.action) == [
+        .automaticRestartStarted,
+        .readinessCheckPassed,
+        .modelRestoreStarted,
+        .stableWindowStarted,
+    ])
 
     let recoveredPID = try #require(processManager.currentProcessIdentifier)
     #expect(Darwin.kill(pid_t(recoveredPID), SIGKILL) == 0)
@@ -133,6 +140,9 @@ func realHelperKill9RecoversOnceThenTripsBreakerAndAllowsManualRetry() async thr
     #expect(!supervisor.isRunning)
     #expect(launchCount == 2)
     #expect(supervisor.lastIncident?.recoveryResult == "breaker")
+    #expect(supervisor.lastIncident?.recoveryStatus == .automaticRecoveryStopped)
+    #expect(supervisor.lastIncident?.primaryFailureReason == .crashLoopBreaker)
+    #expect(supervisor.lastIncident?.recoverySteps.last?.action == .automaticRecoveryStopped)
     #expect(supervisor.lastIncident?.terminationStatus == SIGKILL)
     #expect(supervisor.lastIncident?.terminationReason == "uncaught_signal")
     #expect(supervisor.lastIncident?.logTail.contains("helper") == true)

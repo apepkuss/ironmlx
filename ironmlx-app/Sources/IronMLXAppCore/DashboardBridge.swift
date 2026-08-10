@@ -16,6 +16,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     private let benchmarkService: BenchmarkService
     private let benchmarkSessionCoordinator: BenchmarkExclusiveSessionCoordinator
     private let parameterStore: ModelParameterStore
+    private let incidentStore: BackendIncidentStore
     private let notificationCenter: NotificationCenter
     private let securityStore: LANSecurityMaterialStore
     private var huggingFaceSearchTask: Task<Void, Never>?
@@ -33,6 +34,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         benchmarkService: BenchmarkService = BenchmarkService(),
         benchmarkSessionCoordinator: BenchmarkExclusiveSessionCoordinator = BenchmarkExclusiveSessionCoordinator(),
         parameterStore: ModelParameterStore = .shared,
+        incidentStore: BackendIncidentStore = BackendIncidentStore(),
         securityStore: LANSecurityMaterialStore = .shared,
         notificationCenter: NotificationCenter = .default
     ) {
@@ -48,6 +50,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         self.benchmarkService = benchmarkService
         self.benchmarkSessionCoordinator = benchmarkSessionCoordinator
         self.parameterStore = parameterStore
+        self.incidentStore = incidentStore
         self.notificationCenter = notificationCenter
         self.securityStore = securityStore
         super.init()
@@ -208,6 +211,10 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     }
 
     private func handleFetch(path: String) {
+        if path.hasPrefix("/admin/api/incidents") {
+            handleIncidentFetch(path: path)
+            return
+        }
         switch path {
         case "/health":
             let config = configStore.load()
@@ -277,6 +284,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         }
 
         switch payload.path {
+        case "/admin/api/incidents/clear":
+            clearIncidentHistory(path: payload.path)
         case "/admin/api/models/load":
             if let model = payload.body["model"]?.stringValue
                 ?? payload.body["model_dir"]?.stringValue
@@ -320,6 +329,116 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             sendColdCacheCapacity(payload: payload)
         default:
             sendFetchResult(path: payload.path, jsonString: emptyPayload(for: payload.path))
+        }
+    }
+
+    private func handleIncidentFetch(path: String) {
+        do {
+            let request = try Self.incidentRequest(from: path)
+            switch request.route {
+            case .list:
+                let payload = incidentStore.listPayload(matching: request.query)
+                sendFetchResult(path: path, jsonString: try Self.incidentJSONString(payload))
+            case .detail(let id):
+                guard let incident = incidentStore.detail(id: id) else {
+                    sendFetchResult(
+                        path: path,
+                        jsonString: Self.incidentErrorJSON(
+                            code: "incident_not_found",
+                            error: "The requested incident does not exist."
+                        )
+                    )
+                    return
+                }
+                sendFetchResult(
+                    path: path,
+                    jsonString: try Self.incidentJSONString(
+                        BackendIncidentDetailPayload(incident: incident)
+                    )
+                )
+            case .export:
+                exportIncidentHistory(path: path, query: request.query)
+            }
+        } catch {
+            sendFetchResult(
+                path: path,
+                jsonString: Self.incidentErrorJSON(
+                    code: "invalid_incident_query",
+                    error: error.localizedDescription
+                )
+            )
+        }
+    }
+
+    private func clearIncidentHistory(path: String) {
+        do {
+            try incidentStore.clear()
+            sendFetchResult(
+                path: path,
+                jsonString: #"{"success":true,"status":"cleared"}"#
+            )
+        } catch {
+            sendFetchResult(
+                path: path,
+                jsonString: Self.incidentErrorJSON(
+                    code: "incident_clear_failed",
+                    error: error.localizedDescription
+                )
+            )
+        }
+    }
+
+    private func exportIncidentHistory(path: String, query: BackendIncidentQuery) {
+        let data: Data
+        do {
+            data = try incidentStore.exportData(matching: query)
+        } catch {
+            sendFetchResult(
+                path: path,
+                jsonString: Self.incidentErrorJSON(
+                    code: "incident_export_failed",
+                    error: error.localizedDescription
+                )
+            )
+            return
+        }
+
+        let panel = NSSavePanel()
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+            .replacingOccurrences(of: ":", with: "-")
+        panel.nameFieldStringValue = "ironmlx-incidents-\(timestamp).json"
+        panel.canCreateDirectories = true
+        let completion: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard let self else {
+                return
+            }
+            guard response == .OK, let destination = panel.url else {
+                self.sendFetchResult(
+                    path: path,
+                    jsonString: #"{"success":true,"status":"cancelled"}"#
+                )
+                return
+            }
+            do {
+                try data.write(to: destination, options: .atomic)
+                self.sendFetchResult(
+                    path: path,
+                    jsonString: #"{"success":true,"status":"exported"}"#
+                )
+            } catch {
+                self.sendFetchResult(
+                    path: path,
+                    jsonString: Self.incidentErrorJSON(
+                        code: "incident_export_write_failed",
+                        error: error.localizedDescription
+                    )
+                )
+            }
+        }
+        if let window = webView?.window {
+            panel.beginSheetModal(for: window, completionHandler: completion)
+        } else {
+            panel.begin(completionHandler: completion)
         }
     }
 
@@ -2503,6 +2622,49 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         var error: String
     }
 
+    private struct IncidentErrorPayload: Encodable {
+        var success = false
+        var code: String
+        var error: String
+    }
+
+    private enum IncidentRoute {
+        case list
+        case detail(UUID)
+        case export
+    }
+
+    private struct IncidentRequest {
+        var route: IncidentRoute
+        var query: BackendIncidentQuery
+    }
+
+    private enum IncidentRequestError: LocalizedError {
+        case invalidPath
+        case invalidIdentifier
+        case invalidStatus
+        case invalidReason
+        case invalidDate(String)
+        case invalidLimit
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidPath:
+                "The incident API path is invalid."
+            case .invalidIdentifier:
+                "The incident identifier is invalid."
+            case .invalidStatus:
+                "The incident status filter is invalid."
+            case .invalidReason:
+                "The incident reason filter is invalid."
+            case .invalidDate(let name):
+                "The incident \(name) date filter is invalid."
+            case .invalidLimit:
+                "The incident limit must be a positive integer."
+            }
+        }
+    }
+
     private struct BenchmarkExclusiveErrorPayload: Encodable {
         var success: Bool
         var code: String
@@ -2571,6 +2733,103 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         let encoder = JSONEncoder()
         let data = try encoder.encode(value)
         return String(data: data, encoding: .utf8) ?? "null"
+    }
+
+    static func incidentQuery(from path: String) throws -> BackendIncidentQuery {
+        try incidentRequest(from: path).query
+    }
+
+    private static func incidentRequest(from path: String) throws -> IncidentRequest {
+        guard let components = URLComponents(string: "ironmlx://dashboard\(path)") else {
+            throw IncidentRequestError.invalidPath
+        }
+        let route: IncidentRoute
+        switch components.path {
+        case "/admin/api/incidents":
+            route = .list
+        case "/admin/api/incidents/export":
+            route = .export
+        default:
+            let prefix = "/admin/api/incidents/"
+            guard components.path.hasPrefix(prefix) else {
+                throw IncidentRequestError.invalidPath
+            }
+            let rawID = String(components.path.dropFirst(prefix.count))
+            guard !rawID.isEmpty, !rawID.contains("/"), let id = UUID(uuidString: rawID) else {
+                throw IncidentRequestError.invalidIdentifier
+            }
+            route = .detail(id)
+        }
+
+        let values = (components.queryItems ?? []).reduce(into: [String: String]()) {
+            $0[$1.name] = $1.value ?? ""
+        }
+        let status: BackendIncidentRecoveryStatus?
+        if let value = values["status"], !value.isEmpty {
+            guard let parsed = BackendIncidentRecoveryStatus(rawValue: value) else {
+                throw IncidentRequestError.invalidStatus
+            }
+            status = parsed
+        } else {
+            status = nil
+        }
+        let reason: BackendRecoveryFailureReason?
+        if let value = values["reason"], !value.isEmpty {
+            guard let parsed = BackendRecoveryFailureReason(rawValue: value) else {
+                throw IncidentRequestError.invalidReason
+            }
+            reason = parsed
+        } else {
+            reason = nil
+        }
+        let from = try incidentDate(values["from"], name: "from")
+        let to = try incidentDate(values["to"], name: "to")
+        let limit: Int?
+        if let value = values["limit"], !value.isEmpty {
+            guard let parsed = Int(value), parsed > 0 else {
+                throw IncidentRequestError.invalidLimit
+            }
+            limit = parsed
+        } else {
+            limit = nil
+        }
+        return IncidentRequest(
+            route: route,
+            query: BackendIncidentQuery(
+                status: status,
+                model: values["model"],
+                reason: reason,
+                from: from,
+                to: to,
+                limit: limit
+            )
+        )
+    }
+
+    private static func incidentDate(_ value: String?, name: String) throws -> Date? {
+        guard let value, !value.isEmpty else {
+            return nil
+        }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: value) {
+            return date
+        }
+        formatter.formatOptions = [.withInternetDateTime]
+        guard let date = formatter.date(from: value) else {
+            throw IncidentRequestError.invalidDate(name)
+        }
+        return date
+    }
+
+    private static func incidentJSONString<T: Encodable>(_ value: T) throws -> String {
+        let data = try JSONEncoder.ironMLXIncident.encode(value)
+        return String(data: data, encoding: .utf8) ?? "null"
+    }
+
+    private static func incidentErrorJSON(code: String, error: String) -> String {
+        (try? incidentJSONString(IncidentErrorPayload(code: code, error: error)))
+            ?? #"{"success":false,"code":"incident_api_failed","error":"Incident API failed."}"#
     }
 
     nonisolated static func jsStringLiteral(_ value: String) -> String {
