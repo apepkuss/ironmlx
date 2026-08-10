@@ -460,6 +460,29 @@ import WebKit
     #expect(html.contains(".onboarding-language select:focus"))
 }
 
+@Test func dashboardConfigurationRecoveryCodesAreLocalizedWithoutNewVisibleUI() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    for key in [
+        "err_configuration_recovery_required",
+        "err_configuration_migration_failed",
+        "err_configuration_version_unsupported",
+        "err_configuration_lkg_unavailable",
+    ] {
+        #expect(
+            html.components(separatedBy: "\(key):").count - 1 == 5,
+            "\(key) must be present in all five locale dictionaries"
+        )
+    }
+    #expect(html.contains("function onModelParamsSaved(jsonStr)"))
+    #expect(html.contains("showToast(localizeErrorResult(result), 'warn')"))
+    #expect(!html.contains("id=\"configuration-schema"))
+    #expect(!html.contains("id=\"configuration-lkg"))
+}
+
 private func dashboardBridgeNotificationModelRoot(repoID: String) throws -> URL {
     try dashboardBridgeNotificationModelRoot(repoID: repoID, configJSON: "{}")
 }

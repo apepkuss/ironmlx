@@ -256,7 +256,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         let loaded = AppConfig.normalizedModelReferences(models.map(\.id))
         let pinned = AppConfig.normalizedModelReferences(models.filter(\.pinned).map(\.id))
         let backendDefault = AppConfig.normalizedModelReference(models.first(where: \.isDefault)?.id)
-        var config = configStore.load()
+        let config = configStore.load()
         let persistedLoaded = AppConfig.normalizedModelReferences(config.loadedModels ?? [])
         let persistedPinned = config.pinnedModelReferences
         let defaultChanged = backendDefault != nil && backendDefault != config.defaultModelReference
@@ -266,9 +266,10 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         else {
             return
         }
-        config.replaceLoadedModels(loaded, defaultModel: backendDefault)
-        config.replacePinnedModels(pinned)
-        configStore.save(config)
+        configStore.update { config in
+            config.replaceLoadedModels(loaded, defaultModel: backendDefault)
+            config.replacePinnedModels(pinned)
+        }
         backend.confirmLoadedModels(models, parameterConfirmedModelIDs: [])
         notificationCenter.post(name: .ironMLXLoadedModelsDidChange, object: self)
     }
@@ -280,9 +281,12 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         Task {
             let result = await self.backend.restart(intent: .plannedRestart)
             if result.success {
-                var updatedConfig = self.configStore.load()
-                updatedConfig.replaceLoadedModels(result.loadedModels, defaultModel: result.model)
-                self.configStore.save(updatedConfig)
+                self.configStore.update { updatedConfig in
+                    updatedConfig.replaceLoadedModels(
+                        result.loadedModels,
+                        defaultModel: result.model
+                    )
+                }
                 self.loadedModelNames = result.loadedModels
                 self.notificationCenter.post(name: .ironMLXLoadedModelsDidChange, object: self)
                 IronMLXAppLogger.info(

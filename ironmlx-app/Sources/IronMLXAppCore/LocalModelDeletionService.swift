@@ -48,15 +48,17 @@ public struct LocalModelDeletionService {
             }
         }
 
-        var config = configStore.load()
-        let clearedDefault = config.defaultModel.map { normalizedIDs.contains($0) } ?? false
-        let remainingLoadedModels = AppConfig.normalizedModelReferences(config.loadedModels ?? [])
-            .filter { !normalizedIDs.contains($0) }
-        config.loadedModels = remainingLoadedModels
-        if clearedDefault {
-            config.defaultModel = remainingLoadedModels.first
+        var clearedDefault = false
+        configStore.update { config in
+            clearedDefault = config.defaultModel.map { normalizedIDs.contains($0) } ?? false
+            let remainingLoadedModels = AppConfig.normalizedModelReferences(
+                config.loadedModels ?? []
+            ).filter { !normalizedIDs.contains($0) }
+            config.loadedModels = remainingLoadedModels
+            if clearedDefault {
+                config.defaultModel = remainingLoadedModels.first
+            }
         }
-        configStore.save(config)
 
         return LocalModelDeletionResult(deleted: deleted, clearedDefault: clearedDefault)
     }

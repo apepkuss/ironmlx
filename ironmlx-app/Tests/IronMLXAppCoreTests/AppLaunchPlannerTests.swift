@@ -8,7 +8,6 @@ import Testing
     {
       "host": "127.0.0.1",
       "port": 9068,
-      "auto_start": false,
       "default_model": "  mlx-community/Qwen3-0.6B-4bit  ",
       "language": "en"
     }

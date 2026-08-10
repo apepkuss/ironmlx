@@ -148,12 +148,182 @@ func appLanguageResolverMatchesSupportedMacOSPreferences(
     )
 }
 
+@Test func appConfigStoreSerializesConcurrentReadModifyWriteUpdates() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ironmlx-app-config-update-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let configURL = root.appendingPathComponent("app_config.json")
+    let store = AppConfigStore(url: configURL)
+    #expect(store.save(AppConfig(port: 1)))
+
+    DispatchQueue.concurrentPerform(iterations: 32) { _ in
+        #expect(store.update { $0.port += 1 })
+    }
+
+    #expect(store.load().port == 33)
+    let object = try #require(
+        JSONSerialization.jsonObject(with: Data(contentsOf: configURL)) as? [String: Any]
+    )
+    #expect(object["schema_version"] as? Int == 1)
+}
+
+@Test func appConfigV0MigratesAllCurrentFieldsRemovesRetiredKeysAndCreatesLKG() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ironmlx-app-config-v0-migration-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let configURL = root.appendingPathComponent("app_config.json")
+    let expected = AppConfig(
+        host: "127.0.0.1", port: 9443, networkMode: "lan", lanHost: "192.168.1.20",
+        lanCredentialID: "credential-id", lanCertificateFingerprint: "fingerprint",
+        defaultModel: "mlx-community/Alpha-4bit",
+        loadedModels: ["mlx-community/Alpha-4bit", "mlx-community/Beta-4bit"],
+        pinnedModels: ["mlx-community/Alpha-4bit"], language: "zh-Hans", theme: "dark",
+        logLevel: "debug", memLimitTotal: 64, memLimitModel: 40, memTotalAuto: false,
+        memTotal: 64, memModelAuto: false, memModel: 40, hotCache: 8, coldCache: 20,
+        cacheEnable: true, cacheDir: "/tmp/cache", kvQuant: "k3v4", activeKvOffload: true,
+        maxSequences: 4, maxModels: 3, modelTtlMinutes: 15, verifyModelOnLoad: true,
+        distributedBackend: "auto", parallelMode: "auto", prefillChunkSize: 1024, bMax: 4,
+        admissionDeadlineMs: 9, admissionQueueMax: 24, maxCacheCap: 32768,
+        decodeCadenceMidChunkCap: 128, schedulerProfile: "/tmp/profile.json",
+        schedulerAutotuneReport: true
+    )
+    let encoded = try JSONEncoder().encode(expected)
+    var object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+    object["last_model"] = "retired-model"
+    object["init_cache_blocks"] = 128
+    object["auto_start"] = false
+    let v0 = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+    try v0.write(to: configURL)
+
+    let store = AppConfigStore(url: configURL)
+    let migrated = store.load()
+
+    #expect(migrated == expected)
+    #expect(store.recoveryIssue == nil)
+    let active = try #require(
+        JSONSerialization.jsonObject(with: Data(contentsOf: configURL)) as? [String: Any]
+    )
+    #expect(active["schema_version"] as? Int == 1)
+    let payload = try #require(active["payload"] as? [String: Any])
+    #expect(payload["last_model"] == nil)
+    #expect(payload["init_cache_blocks"] == nil)
+    #expect(payload["auto_start"] == nil)
+    let layout = ConfigurationFileLayout(activeURL: configURL)
+    #expect(try Data(contentsOf: layout.lkgURL) == Data(contentsOf: configURL))
+    let evidence = try FileManager.default.contentsOfDirectory(
+        at: layout.recoveryDirectoryURL,
+        includingPropertiesForKeys: nil
+    ).filter { $0.lastPathComponent.contains("pre-migration-v0-") }
+    #expect(evidence.count == 1)
+    #expect(try Data(contentsOf: evidence[0]) == v0)
+}
+
+@Test func appConfigV1DoesNotMigrateAgain() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ironmlx-app-config-v1-stable-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let configURL = root.appendingPathComponent("app_config.json")
+    let store = AppConfigStore(url: configURL)
+    #expect(store.save(AppConfig(language: "ja")))
+    let before = try Data(contentsOf: configURL)
+
+    #expect(store.load().language == "ja")
+
+    #expect(try Data(contentsOf: configURL) == before)
+    let files = try FileManager.default.contentsOfDirectory(
+        at: ConfigurationFileLayout(activeURL: configURL).recoveryDirectoryURL,
+        includingPropertiesForKeys: nil
+    )
+    #expect(!files.contains { $0.lastPathComponent.contains("pre-migration") })
+}
+
+@Test func appConfigFutureVersionIsNotCorruptionAndCannotBeOverwritten() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ironmlx-app-config-future-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let configURL = root.appendingPathComponent("app_config.json")
+    let future = Data(#"{"schema_version":2,"payload":{"host":"127.0.0.1","port":9068,"language":"en"}}"#.utf8)
+    try future.write(to: configURL)
+    let store = AppConfigStore(url: configURL)
+
+    _ = store.load()
+    let issue = try #require(store.recoveryIssue)
+
+    #expect(issue.reason == .unsupportedVersion(found: 2, supported: 1))
+    #expect(issue.preservedURL == nil)
+    #expect(issue.dashboardErrorCode == "configuration_version_unsupported")
+    #expect(!store.save(AppConfig()))
+    #expect(try Data(contentsOf: configURL) == future)
+}
+
+@Test func appConfigUnknownV0KeyFailsMigrationWithoutChangingActiveOrLKG() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ironmlx-app-config-unknown-v0-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let configURL = root.appendingPathComponent("app_config.json")
+    let seedStore = AppConfigStore(url: configURL)
+    #expect(seedStore.save(AppConfig(language: "ko")))
+    let layout = ConfigurationFileLayout(activeURL: configURL)
+    let oldLKG = try Data(contentsOf: layout.lkgURL)
+    let v0 = Data(#"{"host":"127.0.0.1","port":9068,"language":"en","mystery":true}"#.utf8)
+    try v0.write(to: configURL)
+    let store = AppConfigStore(url: configURL)
+
+    _ = store.load()
+    let issue = try #require(store.recoveryIssue)
+
+    #expect(issue.reason == .migrationFailed(from: 0, to: 1))
+    #expect(try Data(contentsOf: configURL) == v0)
+    #expect(try Data(contentsOf: layout.lkgURL) == oldLKG)
+    #expect(try #require(issue.preservedURL).path.contains("pre-migration-v0-"))
+}
+
+@Test func appConfigCorruptionCanBeRestoredExplicitlyFromValidatedLKG() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ironmlx-app-config-lkg-restore-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let configURL = root.appendingPathComponent("app_config.json")
+    let expected = AppConfig(language: "zh-Hant", theme: "dark")
+    #expect(AppConfigStore(url: configURL).save(expected))
+    try Data("broken".utf8).write(to: configURL)
+    let store = AppConfigStore(url: configURL)
+    _ = store.load()
+    #expect(try #require(store.recoveryIssue).hasValidLKG)
+
+    try store.restoreFromLKG()
+
+    #expect(store.recoveryIssue == nil)
+    #expect(store.load() == expected)
+}
+
+@Test func appConfigRejectsInvalidLKGRestore() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ironmlx-app-config-invalid-lkg-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let configURL = root.appendingPathComponent("app_config.json")
+    #expect(AppConfigStore(url: configURL).save(AppConfig()))
+    let layout = ConfigurationFileLayout(activeURL: configURL)
+    try Data("invalid-lkg".utf8).write(to: layout.lkgURL)
+    try Data("invalid-active".utf8).write(to: configURL)
+    let store = AppConfigStore(url: configURL)
+    _ = store.load()
+    #expect(!(try #require(store.recoveryIssue).hasValidLKG))
+
+    #expect(throws: (any Error).self) {
+        try store.restoreFromLKG()
+    }
+    #expect(try Data(contentsOf: configURL) == Data("invalid-active".utf8))
+    #expect(try Data(contentsOf: layout.lkgURL) == Data("invalid-lkg".utf8))
+}
+
 @Test func appConfigDecodesDashboardAndSchedulerSettings() throws {
     let json = """
     {
       "host": "127.0.0.1",
       "port": 9068,
-      "auto_start": false,
       "default_model": "mlx-community/Qwen3-0.6B-4bit",
       "loaded_models": ["mlx-community/Other-4bit", "mlx-community/Qwen3-0.6B-4bit"],
       "pinned_models": ["mlx-community/Qwen3-0.6B-4bit"],

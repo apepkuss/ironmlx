@@ -1303,6 +1303,14 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
 
     private func saveSettings(json: String) {
         let existing = configStore.load()
+        if let issue = configStore.recoveryIssue {
+            let response = Self.settingsErrorJSON(
+                message: issue.errorDescription,
+                code: issue.dashboardErrorCode
+            )
+            sendJavaScript("onSettingsSaved(\(Self.jsStringLiteral(response)))")
+            return
+        }
         var config: AppConfig
         do {
             config = try Self.config(applyingSettingsJSON: json, to: existing)
@@ -1326,9 +1334,11 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         let needsRestart = Self.backendRestartRequired(from: existing, to: config)
         guard needsRestart, backend.isRunning else {
             guard configStore.recoveryIssue == nil else {
+                let issue = configStore.recoveryIssue
                 let response = Self.settingsErrorJSON(
-                    message: "Configuration recovery is required before settings can be saved.",
-                    code: "configuration_recovery_required"
+                    message: issue?.errorDescription
+                        ?? "Configuration recovery is required before settings can be saved.",
+                    code: issue?.dashboardErrorCode ?? "configuration_recovery_required"
                 )
                 sendJavaScript("onSettingsSaved(\(Self.jsStringLiteral(response)))")
                 return
@@ -1349,9 +1359,11 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         }
 
         guard configStore.recoveryIssue == nil else {
+            let issue = configStore.recoveryIssue
             let response = Self.settingsErrorJSON(
-                message: "Configuration recovery is required before settings can be saved.",
-                code: "configuration_recovery_required"
+                message: issue?.errorDescription
+                    ?? "Configuration recovery is required before settings can be saved.",
+                code: issue?.dashboardErrorCode ?? "configuration_recovery_required"
             )
             sendJavaScript("onSettingsSaved(\(Self.jsStringLiteral(response)))")
             return
@@ -1763,17 +1775,25 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     private func saveModelParams(json: String) {
         guard let data = json.data(using: .utf8),
               let parameters = try? JSONDecoder().decode(ModelParameters.self, from: data) else {
-            sendJavaScript("showToast(\(Self.jsStringLiteral("Invalid model parameters.")), 'warn')")
+            let response = Self.settingsErrorJSON(
+                message: "Invalid model parameters.",
+                code: "settings_invalid"
+            )
+            sendJavaScript("onModelParamsSaved(\(Self.jsStringLiteral(response)))")
             return
         }
         do {
             try parameterStore.save(parameters)
             sendModelParameters()
+            sendJavaScript("onModelParamsSaved(\(Self.jsStringLiteral(#"{"status":"ok"}"#)))")
             scheduleModelParameterReloadIfNeeded(parameters)
         } catch {
-            sendJavaScript(
-                "showToast(\(Self.jsStringLiteral("Failed to save model parameters: \(error.localizedDescription)")), 'warn')"
+            let issue = parameterStore.recoveryIssue
+            let response = Self.settingsErrorJSON(
+                message: issue?.errorDescription ?? error.localizedDescription,
+                code: issue?.dashboardErrorCode ?? "settings_persist_failed"
             )
+            sendJavaScript("onModelParamsSaved(\(Self.jsStringLiteral(response)))")
         }
     }
 
@@ -2256,9 +2276,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     }
 
     private func updateConfig(_ mutate: (inout AppConfig) -> Void) {
-        var config = configStore.load()
-        mutate(&config)
-        configStore.save(config)
+        configStore.update(mutate)
     }
 
     private func notifyMenuLanguageDidChange() {

@@ -26,6 +26,129 @@ import Testing
     #expect(loaded["mlx-community/LongContext-4bit"]?.maxCacheCap == 65536)
 }
 
+@Test func modelParameterV0MigratesAllFieldsAndCreatesIndependentLKG() throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let url = root.appendingPathComponent("model_params.json")
+    let expected = ModelParameters(
+        modelID: "mlx-community/Full-4bit", alias: "Full", modelType: "llm",
+        contextSize: "131072", maxTokens: "32768", temperature: "0.7", topP: "0.95",
+        topK: "40", repeatPenalty: "1.05", mtpEnabled: true,
+        mtpModelID: "mlx-community/Full-MTP-4bit", mtpDraftTokens: "3",
+        promptLookupEnabled: true, promptLookupCrossRequest: true
+    )
+    let v0 = try JSONEncoder().encode([expected.modelID: expected])
+    try v0.write(to: url)
+
+    let store = ModelParameterStore(url: url)
+    let migrated = try store.loadAll()
+
+    #expect(migrated == [expected.modelID: expected])
+    let active = try #require(
+        JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
+    )
+    #expect(active["schema_version"] as? Int == 1)
+    #expect((active["models"] as? [String: Any])?.keys.contains(expected.modelID) == true)
+    let layout = ConfigurationFileLayout(activeURL: url)
+    #expect(try Data(contentsOf: layout.lkgURL) == Data(contentsOf: url))
+    let evidence = try FileManager.default.contentsOfDirectory(
+        at: layout.recoveryDirectoryURL,
+        includingPropertiesForKeys: nil
+    ).filter { $0.lastPathComponent.contains("pre-migration-v0-") }
+    #expect(evidence.count == 1)
+    #expect(try Data(contentsOf: evidence[0]) == v0)
+}
+
+@Test func modelParameterV0AllowsModelIDNamedSchemaVersion() throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let url = root.appendingPathComponent("model_params.json")
+    let parameters = ModelParameters(modelID: "schema_version", maxTokens: "4096")
+    try JSONEncoder().encode(["schema_version": parameters]).write(to: url)
+
+    let loaded = try ModelParameterStore(url: url).loadAll()
+
+    #expect(loaded["schema_version"] == parameters)
+}
+
+@Test func modelParameterV1DoesNotMigrateAgain() throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let url = root.appendingPathComponent("model_params.json")
+    let store = ModelParameterStore(url: url)
+    try store.save(ModelParameters(modelID: "stable", maxTokens: "2048"))
+    let before = try Data(contentsOf: url)
+
+    #expect(try store.loadAll()["stable"]?.maxTokens == "2048")
+
+    #expect(try Data(contentsOf: url) == before)
+    let files = try FileManager.default.contentsOfDirectory(
+        at: ConfigurationFileLayout(activeURL: url).recoveryDirectoryURL,
+        includingPropertiesForKeys: nil
+    )
+    #expect(!files.contains { $0.lastPathComponent.contains("pre-migration") })
+}
+
+@Test func modelParameterFutureVersionIsRejectedWithoutCorruptionCopy() throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let url = root.appendingPathComponent("model_params.json")
+    let future = Data(#"{"schema_version":7,"models":{}}"#.utf8)
+    try future.write(to: url)
+    let store = ModelParameterStore(url: url)
+
+    #expect(throws: ConfigurationPersistenceError.unsupportedSchemaVersion(found: 7, supported: 1)) {
+        _ = try store.loadAll()
+    }
+    let issue = try #require(store.recoveryIssue)
+    #expect(issue.reason == .unsupportedVersion(found: 7, supported: 1))
+    #expect(issue.preservedURL == nil)
+    #expect(try Data(contentsOf: url) == future)
+    #expect(throws: ConfigurationRecoveryWriteError.unresolvedIssue(url, "configuration_version_unsupported")) {
+        try store.save(ModelParameters(modelID: "new"))
+    }
+}
+
+@Test func modelParameterCorruptionRestoresExplicitlyFromLKG() throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let url = root.appendingPathComponent("model_params.json")
+    let expected = ModelParameters(modelID: "mlx-community/Restore-4bit", maxTokens: "8192")
+    try ModelParameterStore(url: url).save(expected)
+    try Data("broken".utf8).write(to: url)
+    let store = ModelParameterStore(url: url)
+    #expect(throws: (any Error).self) { _ = try store.loadAll() }
+    #expect(try #require(store.recoveryIssue).hasValidLKG)
+
+    try store.restoreFromLKG()
+
+    #expect(try store.loadAll()[expected.modelID] == expected)
+}
+
+@Test func concurrentModelParameterSavesPreserveEveryModelAndValidEnvelope() throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let url = root.appendingPathComponent("model_params.json")
+    let store = ModelParameterStore(url: url)
+    let errors = ConcurrentConfigurationErrorBox()
+
+    DispatchQueue.concurrentPerform(iterations: 24) { index in
+        do {
+            try store.save(ModelParameters(modelID: "model-\(index)", maxTokens: "\(index + 1)"))
+        } catch {
+            errors.append(error)
+        }
+    }
+
+    #expect(errors.isEmpty)
+    #expect(try store.loadAll().count == 24)
+    let object = try #require(
+        JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
+    )
+    #expect(object["schema_version"] as? Int == 1)
+    #expect((object["models"] as? [String: Any])?.count == 24)
+}
+
 @Test func modelParameterStorePreservesCorruptFileAndRequiresExplicitReset() throws {
     let root = try temporaryDirectory()
     let url = root.appendingPathComponent("model_params.json")
@@ -44,7 +167,7 @@ import Testing
     #expect(try Data(contentsOf: preservedURL) == corruptData)
     #expect(store.parameters(for: "mlx-community/Broken") == nil)
     #expect(store.jsonString() == "{}")
-    #expect(throws: ConfigurationRecoveryWriteError.unresolvedCorruption(url)) {
+    #expect(throws: ConfigurationRecoveryWriteError.unresolvedIssue(url, "configuration_recovery_required")) {
         try store.save(ModelParameters(modelID: "mlx-community/New"))
     }
     #expect(try Data(contentsOf: url) == corruptData)
@@ -280,4 +403,17 @@ private func writeLongContextSnapshot(root: URL) throws -> URL {
             "model.safetensors": Data("weights".utf8),
         ]
     )
+}
+
+private final class ConcurrentConfigurationErrorBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var errors: [Error] = []
+
+    var isEmpty: Bool {
+        lock.withLock { errors.isEmpty }
+    }
+
+    func append(_ error: Error) {
+        lock.withLock { errors.append(error) }
+    }
 }
