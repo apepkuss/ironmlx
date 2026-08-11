@@ -161,7 +161,12 @@ import WebKit
     )
 
     notificationCenter.post(name: .ironMLXLoadedModelsDidChange, object: bridge)
-    #expect(await webView.waitForScript(containing: "onLocalModelsScanned") == false)
+    #expect(
+        await webView.waitForScript(
+            containing: "onLocalModelsScanned",
+            timeoutSeconds: 0.4
+        ) == false
+    )
 
     notificationCenter.post(name: .ironMLXLoadedModelsDidChange, object: nil)
 
@@ -204,7 +209,12 @@ import WebKit
         name: .ironMLXBackendRuntimeDidChange,
         object: NSObject()
     )
-    #expect(await webView.waitForScript(containing: "onServerCrash") == false)
+    #expect(
+        await webView.waitForScript(
+            containing: "onServerCrash",
+            timeoutSeconds: 0.4
+        ) == false
+    )
 
     notificationCenter.post(
         name: .ironMLXBackendRuntimeDidChange,
@@ -512,35 +522,57 @@ private func decodedJavaScriptStringArgument(from script: String, functionName: 
 
 @MainActor
 private final class CapturingDashboardWebView: WKWebView {
+    private struct ScriptWaiter {
+        let needle: String
+        let continuation: CheckedContinuation<String?, Never>
+        let timeoutTask: Task<Void, Never>
+    }
+
     private var scripts: [String] = []
+    private var scriptWaiters: [UUID: ScriptWaiter] = [:]
 
     override func evaluateJavaScript(
         _ javaScriptString: String,
         completionHandler: (@MainActor @Sendable (Any?, (any Error)?) -> Void)? = nil
     ) {
         scripts.append(javaScriptString)
+        let matchingWaiterIDs = scriptWaiters.compactMap { id, waiter in
+            javaScriptString.contains(waiter.needle) ? id : nil
+        }
+        for id in matchingWaiterIDs {
+            resolveScriptWaiter(id: id, script: javaScriptString)
+        }
         completionHandler?(nil, nil)
     }
 
-    func waitForScript(containing needle: String, timeoutSeconds: TimeInterval = 0.4) async -> Bool {
-        let deadline = Date().addingTimeInterval(timeoutSeconds)
-        while Date() < deadline {
-            if scripts.contains(where: { $0.contains(needle) }) {
-                return true
-            }
-            try? await Task.sleep(nanoseconds: 20_000_000)
-        }
-        return false
+    func waitForScript(containing needle: String, timeoutSeconds: TimeInterval = 5) async -> Bool {
+        await script(containing: needle, timeoutSeconds: timeoutSeconds) != nil
     }
 
-    func script(containing needle: String, timeoutSeconds: TimeInterval = 0.4) async -> String? {
-        let deadline = Date().addingTimeInterval(timeoutSeconds)
-        while Date() < deadline {
-            if let script = scripts.first(where: { $0.contains(needle) }) {
-                return script
-            }
-            try? await Task.sleep(nanoseconds: 20_000_000)
+    func script(containing needle: String, timeoutSeconds: TimeInterval = 5) async -> String? {
+        if let script = scripts.first(where: { $0.contains(needle) }) {
+            return script
         }
-        return nil
+
+        let waiterID = UUID()
+        return await withCheckedContinuation { continuation in
+            let timeoutNanoseconds = UInt64(max(0, timeoutSeconds) * 1_000_000_000)
+            let timeoutTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: timeoutNanoseconds)
+                guard !Task.isCancelled else { return }
+                self?.resolveScriptWaiter(id: waiterID, script: nil)
+            }
+            scriptWaiters[waiterID] = ScriptWaiter(
+                needle: needle,
+                continuation: continuation,
+                timeoutTask: timeoutTask
+            )
+        }
+    }
+
+    private func resolveScriptWaiter(id: UUID, script: String?) {
+        guard let waiter = scriptWaiters.removeValue(forKey: id) else { return }
+        waiter.timeoutTask.cancel()
+        waiter.continuation.resume(returning: script)
     }
 }
