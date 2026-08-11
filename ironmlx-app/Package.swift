@@ -16,6 +16,10 @@ let package = Package(
             url: "https://github.com/sparkle-project/Sparkle.git",
             exact: "2.9.5"
         ),
+        .package(
+            url: "https://github.com/weichsel/ZIPFoundation.git",
+            exact: "0.9.20"
+        ),
     ],
     targets: [
         .executableTarget(
@@ -30,6 +34,7 @@ let package = Package(
             name: "IronMLXAppCore",
             dependencies: [
                 .product(name: "Sparkle", package: "Sparkle"),
+                .product(name: "ZIPFoundation", package: "ZIPFoundation"),
             ],
             resources: [
                 .copy("Resources/dashboard2.html"),
@@ -41,7 +46,10 @@ let package = Package(
         ),
         .testTarget(
             name: "IronMLXAppCoreTests",
-            dependencies: ["IronMLXAppCore"],
+            dependencies: [
+                "IronMLXAppCore",
+                .product(name: "ZIPFoundation", package: "ZIPFoundation"),
+            ],
             resources: [
                 .copy("Fixtures/backend_crash_helper.py"),
             ]

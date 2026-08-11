@@ -90,12 +90,16 @@ cp "$notice_file" "$preview_app/Contents/Resources/DEVELOPMENT-PREVIEW-NOTICE.tx
 cp "$metadata_file" "$preview_app/Contents/Resources/PREVIEW-BUILD-METADATA.json"
 plutil -replace CFBundleDisplayName -string "IronMLX Development Preview" \
   "$preview_app/Contents/Info.plist"
-plutil -insert IronMLXDistributionChannel -string "development-preview" \
+plutil -replace IronMLXDistributionChannel -string "development-preview" \
   "$preview_app/Contents/Info.plist"
-plutil -insert IronMLXDeveloperIDSigned -bool NO "$preview_app/Contents/Info.plist"
+plutil -replace IronMLXDeveloperIDSigned -string unsigned "$preview_app/Contents/Info.plist"
+plutil -replace IronMLXNotarizationStatus -string not_notarized "$preview_app/Contents/Info.plist"
 plutil -insert IronMLXAppleNotarized -bool NO "$preview_app/Contents/Info.plist"
 plutil -insert IronMLXPreviewTag -string "$preview_tag" "$preview_app/Contents/Info.plist"
-plutil -insert IronMLXSourceCommit -string "$source_commit" "$preview_app/Contents/Info.plist"
+plutil -replace IronMLXSourceCommit -string "$source_commit" "$preview_app/Contents/Info.plist"
+source_tree_state="$(plutil -extract IronMLXSourceTreeState raw "$preview_app/Contents/Info.plist")"
+[[ "$source_tree_state" =~ ^(clean|dirty)$ ]] || fail "source App has invalid IronMLXSourceTreeState"
+plutil -replace IronMLXMLXCommit -string "$IRONMLX_MLX_COMMIT" "$preview_app/Contents/Info.plist"
 
 codesign --force --deep --sign - "$preview_app"
 "$SCRIPT_DIR/verify-app-bundle.sh" "$preview_app"

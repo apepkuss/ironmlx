@@ -105,8 +105,10 @@ verify_preview_app() {
     "IronMLX Development Preview" ] || fail "preview display name is not explicit"
   [ "$(plutil -extract IronMLXDistributionChannel raw "$preview_app/Contents/Info.plist")" = \
     "development-preview" ] || fail "preview distribution channel is missing"
-  [ "$(plutil -extract IronMLXDeveloperIDSigned raw "$preview_app/Contents/Info.plist")" = "false" ] || \
+  [ "$(plutil -extract IronMLXDeveloperIDSigned raw "$preview_app/Contents/Info.plist")" = "unsigned" ] || \
     fail "preview App must declare Developer ID signing disabled"
+  [ "$(plutil -extract IronMLXNotarizationStatus raw "$preview_app/Contents/Info.plist")" = \
+    "not_notarized" ] || fail "preview App must declare notarization not performed"
   [ "$(plutil -extract IronMLXAppleNotarized raw "$preview_app/Contents/Info.plist")" = "false" ] || \
     fail "preview App must declare Apple notarization disabled"
   grep -Fq "$IRONMLX_PREVIEW_WARNING_ZH" \

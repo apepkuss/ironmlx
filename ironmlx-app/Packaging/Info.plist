@@ -24,8 +24,20 @@
     <array>
         <string>MacOSX</string>
     </array>
-    <key>CFBundleVersion</key>
-    <string>1</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>IronMLXSourceCommit</key>
+	<string>unavailable</string>
+	<key>IronMLXSourceTreeState</key>
+	<string>unavailable</string>
+	<key>IronMLXMLXCommit</key>
+	<string>unavailable</string>
+	<key>IronMLXDistributionChannel</key>
+	<string>unpackaged</string>
+	<key>IronMLXDeveloperIDSigned</key>
+	<string>unsigned</string>
+	<key>IronMLXNotarizationStatus</key>
+	<string>not_notarized</string>
     <key>LSArchitecturePriority</key>
     <array>
         <string>arm64</string>

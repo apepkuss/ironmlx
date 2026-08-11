@@ -5,6 +5,8 @@ set -euo pipefail
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=release-config.sh
+source "$SCRIPT_DIR/release-config.sh"
 readonly APP_BUNDLE="${1:-$REPO_ROOT/dist/IronMLX.app}"
 readonly EXPECTED_ARCHITECTURE="arm64"
 readonly EXPECTED_MACOS_VERSION="26.2"
@@ -85,6 +87,20 @@ diff -qr \
   fail "Info.plist minimum macOS must be $EXPECTED_MACOS_VERSION"
 [ "$(plutil -extract CFBundleShortVersionString raw "$APP_BUNDLE/Contents/Info.plist")" = \
   "$EXPECTED_PRODUCT_VERSION" ] || fail "Info.plist product version must be $EXPECTED_PRODUCT_VERSION"
+source_commit="$(plutil -extract IronMLXSourceCommit raw "$APP_BUNDLE/Contents/Info.plist")"
+[[ "$source_commit" =~ ^[0-9a-f]{40}$ ]] || fail "IronMLXSourceCommit must be a full lowercase SHA"
+source_tree_state="$(plutil -extract IronMLXSourceTreeState raw "$APP_BUNDLE/Contents/Info.plist")"
+[[ "$source_tree_state" =~ ^(clean|dirty)$ ]] || fail "invalid IronMLXSourceTreeState: $source_tree_state"
+[ "$(plutil -extract IronMLXMLXCommit raw "$APP_BUNDLE/Contents/Info.plist")" = "$IRONMLX_MLX_COMMIT" ] || \
+  fail "IronMLXMLXCommit does not match the pinned MLX commit"
+[ -n "$(plutil -extract IronMLXDistributionChannel raw "$APP_BUNDLE/Contents/Info.plist")" ] || \
+  fail "IronMLXDistributionChannel is missing"
+developer_id_status="$(plutil -extract IronMLXDeveloperIDSigned raw "$APP_BUNDLE/Contents/Info.plist")"
+[[ "$developer_id_status" =~ ^(unsigned|developer_id|unavailable)$ ]] || \
+  fail "invalid IronMLXDeveloperIDSigned: $developer_id_status"
+notarization_status="$(plutil -extract IronMLXNotarizationStatus raw "$APP_BUNDLE/Contents/Info.plist")"
+[[ "$notarization_status" =~ ^(not_notarized|stapled|unavailable)$ ]] || \
+  fail "invalid IronMLXNotarizationStatus: $notarization_status"
 
 "$APP_BUNDLE/Contents/Helpers/ironmlx" --version | \
   grep -Fxq "ironmlx $EXPECTED_PRODUCT_VERSION" || fail "ironmlx helper version mismatch"

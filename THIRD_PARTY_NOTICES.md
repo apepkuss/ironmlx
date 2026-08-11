@@ -304,6 +304,7 @@ development dependencies excluded, build dependencies retained.
 | Package | Version | Revision | License | License text | Source |
 |---|---|---|---|---|---|
 | Sparkle | 2.9.5 | `79bc9e872948e47877e76f194cb0c8e0412b0b90` | MIT and bundled third-party notices | `THIRD_PARTY_LICENSES/swift-sparkle-license.txt` | https://github.com/sparkle-project/Sparkle.git |
+| ZIPFoundation | 0.9.20 | `22787ffb59de99e5dc1fbfe80b19c97a904ad48d` | MIT | `THIRD_PARTY_LICENSES/swift-zipfoundation-license.txt` | https://github.com/weichsel/ZIPFoundation.git |
 
 ## Explicit exclusions
 

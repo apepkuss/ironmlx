@@ -65,3 +65,26 @@ import Testing
     #expect(tailLines.count <= 20)
     #expect(tail.contains("299-后台日志-🙂"))
 }
+
+@Test func diagnosticLogTailRejectsSymlinksAndBoundsRegularFiles() throws {
+    let root = try temporaryDirectory().appendingPathComponent("logs", isDirectory: true)
+    let store = IronMLXLogStore(rootURL: root)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let outside = root.deletingLastPathComponent().appendingPathComponent("outside.log")
+    try "secret outside".write(to: outside, atomically: true, encoding: .utf8)
+    try FileManager.default.createSymbolicLink(at: store.url(for: .app), withDestinationURL: outside)
+
+    let rejected = store.diagnosticTail(from: .app, maxLines: 10, maxBytes: 100)
+    #expect(rejected.status == "unreadable")
+    #expect(rejected.text.isEmpty)
+
+    try FileManager.default.removeItem(at: store.url(for: .app))
+    try String(repeating: "line\n", count: 1_000).write(
+        to: store.url(for: .app), atomically: true, encoding: .utf8
+    )
+    let bounded = store.diagnosticTail(from: .app, maxLines: 20, maxBytes: 512)
+    #expect(bounded.status == "available")
+    #expect(bounded.truncated)
+    #expect(bounded.text.utf8.count <= 512)
+    #expect(bounded.text.split(separator: "\n").count <= 20)
+}

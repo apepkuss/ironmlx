@@ -32,6 +32,83 @@ func dashboardIncidentQueryRejectsUnknownStructuredFilters() {
 }
 
 @Test @MainActor
+func dashboardSeparatesFullDiagnosticsFromFilteredIncidentExport() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(DashboardBridge.handlerNames.contains("exportDiagnosticBundle"))
+    #expect(html.contains(#"id="diagnostic-export-btn""#))
+    #expect(html.contains("messageHandlers.exportDiagnosticBundle"))
+    #expect(html.contains("handler.postMessage('export')"))
+    #expect(html.contains("const path = incidentFilterPath('/admin/api/incidents/export')"))
+    #expect(html.contains("if (path) apiFetch(path)"))
+    #expect(!html.contains("exportDiagnosticBundle(incidentFilterPath"))
+    #expect(html.contains(#"aria-describedby="diagnostic-export-tooltip""#))
+    #expect(html.contains(#"aria-describedby="incident-export-tooltip""#))
+    #expect(html.contains(".diagnostic-export-help:focus-within"))
+    #expect(html.contains("diagnosticExportBusy"))
+    #expect(html.contains("button.disabled = diagnosticExportBusy"))
+    #expect(html.contains(#"incident_export: "Export Incident Records""#))
+    #expect(html.contains(#"incident_export: "导出故障记录""#))
+    #expect(html.contains(#"incident_export: "匯出故障記錄""#))
+    #expect(html.contains(#"incident_export: "障害記録をエクスポート""#))
+    #expect(html.contains(#"incident_export: "장애 기록 내보내기""#))
+    #expect(!html.contains(#"incident_export: "导出故障信息""#))
+
+    for key in [
+        "diagnostic_export:", "diagnostic_export_collecting:",
+        "diagnostic_export_tooltip:", "diagnostic_export_accessible_label:",
+        "diagnostic_exported:", "diagnostic_export_cancelled:",
+        "incident_export_tooltip:", "incident_export_accessible_label:",
+    ] {
+        #expect(html.components(separatedBy: key).count - 1 == 5, "missing locale for \(key)")
+    }
+}
+
+@Test
+func dashboardIncidentTimesUseExplicit24HourControlsAndFormatting() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(!html.contains(#"type="datetime-local" id="incident-filter-from""#))
+    #expect(!html.contains(#"type="datetime-local" id="incident-filter-to""#))
+    for id in [
+        "incident-filter-from-date",
+        "incident-filter-from-time",
+        "incident-filter-to-date",
+        "incident-filter-to-time",
+    ] {
+        #expect(html.contains(#"id="\#(id)""#), "missing 24-hour filter control \(id)")
+    }
+    #expect(html.contains(#"class="incident-datetime-control""#))
+    #expect(html.contains(#"class="incident-time-input""#))
+    #expect(html.contains(#"placeholder="HH:mm""#))
+    #expect(html.contains("normalizeIncidentTimeInput(input)"))
+    #expect(html.contains("hour > 23 || minute < 0 || minute > 59"))
+    #expect(html.contains("initializeIncidentDateTimeFilter('from', '00:00')"))
+    #expect(html.contains("initializeIncidentDateTimeFilter('to', '23:59')"))
+    #expect(html.components(separatedBy: "synchronizeTimeAvailability();").count - 1 == 1)
+    #expect(html.contains("const fromValue = incidentFilterDateTimeValue('from')"))
+    #expect(html.contains("const toValue = incidentFilterDateTimeValue('to')"))
+    #expect(html.contains("pad(date.getHours()) + ':'"))
+    #expect(!html.contains("hourCycle: 'h23'"))
+
+    for key in [
+        "incident_from_date_accessible_label:",
+        "incident_from_time_accessible_label:",
+        "incident_to_date_accessible_label:",
+        "incident_to_time_accessible_label:",
+        "incident_time_invalid:",
+    ] {
+        #expect(html.components(separatedBy: key).count - 1 == 5, "missing locale for \(key)")
+    }
+}
+
+@Test @MainActor
 func dashboardIncidentPayloadUsesStableVersionedJSONKeys() throws {
     let root = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
         .appendingPathComponent("ironmlx-dashboard-incident-api-\(UUID().uuidString)")

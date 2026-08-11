@@ -1,8 +1,21 @@
+import Darwin
 import Foundation
 
 public enum IronMLXLogFile: String, Sendable {
     case app = "app.log"
     case backend = "backend.log"
+}
+
+public struct DiagnosticLogTail: Sendable, Equatable {
+    public var text: String
+    public var truncated: Bool
+    public var status: String
+
+    public init(text: String, truncated: Bool, status: String) {
+        self.text = text
+        self.truncated = truncated
+        self.status = status
+    }
 }
 
 public struct IronMLXLogStore: Sendable {
@@ -92,6 +105,67 @@ public struct IronMLXLogStore: Sendable {
         }
         let lines = text.split(separator: "\n").suffix(maxLines).map(String.init)
         return lines.joined(separator: "\n")
+    }
+
+    public func diagnosticTail(
+        from file: IronMLXLogFile,
+        maxLines: Int,
+        maxBytes: Int
+    ) -> DiagnosticLogTail {
+        guard maxLines > 0, maxBytes > 0 else {
+            return DiagnosticLogTail(text: "", truncated: false, status: "invalid_limit")
+        }
+        let path = url(for: file).path
+        let descriptor = Darwin.open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+        guard descriptor >= 0 else {
+            return DiagnosticLogTail(
+                text: "",
+                truncated: false,
+                status: errno == ENOENT ? "missing" : "unreadable"
+            )
+        }
+        defer { Darwin.close(descriptor) }
+
+        var metadata = stat()
+        guard fstat(descriptor, &metadata) == 0, (metadata.st_mode & S_IFMT) == S_IFREG else {
+            return DiagnosticLogTail(text: "", truncated: false, status: "not_regular_file")
+        }
+        let fileSize = max(0, Int64(metadata.st_size))
+        let byteLimit = Int64(maxBytes)
+        let offset = max(0, fileSize - byteLimit)
+        guard lseek(descriptor, off_t(offset), SEEK_SET) >= 0 else {
+            return DiagnosticLogTail(text: "", truncated: false, status: "unreadable")
+        }
+
+        var buffer = [UInt8](repeating: 0, count: min(maxBytes, Int(fileSize - offset)))
+        let bufferCount = buffer.count
+        var received = 0
+        while received < bufferCount {
+            let remaining = bufferCount - received
+            let count = buffer.withUnsafeMutableBytes { rawBuffer in
+                Darwin.read(
+                    descriptor,
+                    rawBuffer.baseAddress!.advanced(by: received),
+                    remaining
+                )
+            }
+            if count < 0, errno == EINTR { continue }
+            guard count > 0 else { break }
+            received += count
+        }
+        buffer.removeSubrange(received..<bufferCount)
+        var text = String(decoding: buffer, as: UTF8.self)
+        if offset > 0, let newline = text.firstIndex(of: "\n") {
+            text.removeSubrange(...newline)
+        }
+        let allLines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        let lineTruncated = allLines.count > maxLines
+        text = allLines.suffix(maxLines).joined(separator: "\n")
+        return DiagnosticLogTail(
+            text: text,
+            truncated: offset > 0 || lineTruncated,
+            status: "available"
+        )
     }
 
     private func ensureLogDirectory() throws {

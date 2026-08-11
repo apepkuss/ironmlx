@@ -589,43 +589,11 @@ enum BackendIncidentPrivacy {
     static let maximumLogTailBytes = 32_768
 
     static func sanitizedLogTail(_ text: String) -> String {
-        sanitizedText(text, maximumBytes: maximumLogTailBytes)
+        DiagnosticPrivacy.sanitizedLog(text, maximumBytes: maximumLogTailBytes)
     }
 
     static func sanitizedText(_ text: String, maximumBytes: Int) -> String {
-        let patterns: [(String, String)] = [
-            (
-                #"(?i)(\"(?:prompt|messages|input|request[_-]?body|body)\"\s*:\s*)(?:\"(?:\\.|[^\"])*\"|\[[^\r\n]*\]|\{[^\r\n]*\})"#,
-                "$1\"<redacted>\""
-            ),
-            (#"(?i)(request\s+body\s*[:=]\s*)[^\r\n]*"#, "$1<redacted>"),
-            (#"(?i)(\"(?:authorization|api[_-]?key|token)\"\s*:\s*\")([^\"]+)\""#, "$1<redacted>\""),
-            (#"(?i)(authorization\s*[:=]\s*)(?:bearer\s+)?([^\s,;]+)"#, "$1<redacted>"),
-            (#"(?i)(bearer\s+)([A-Za-z0-9._~+/=-]+)"#, "$1<redacted>"),
-            (#"(?i)((?:api[_-]?key|token)\s*[:=]\s*)([^\s,;]+)"#, "$1<redacted>"),
-        ]
-        var value = patterns.reduce(text) { value, item in
-            guard let expression = try? NSRegularExpression(pattern: item.0) else {
-                return value
-            }
-            let range = NSRange(value.startIndex..., in: value)
-            return expression.stringByReplacingMatches(
-                in: value,
-                range: range,
-                withTemplate: item.1
-            )
-        }
-        let home = NSHomeDirectory()
-        if !home.isEmpty {
-            value = value.replacingOccurrences(of: home, with: "~")
-        }
-        let data = Data(value.utf8)
-        guard data.count > maximumBytes else {
-            return value
-        }
-        let marker = Data("[truncated]\n".utf8)
-        let available = max(0, maximumBytes - marker.count)
-        return String(decoding: marker + data.suffix(available), as: UTF8.self)
+        DiagnosticPrivacy.sanitizedText(text, maximumBytes: maximumBytes)
     }
 }
 
