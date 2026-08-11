@@ -511,6 +511,35 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
         contains: #"page === 'logs' || page === 'settings'"#
     ))
     #expect(dashboardHTML(html, contains: #"logOutput.scrollTop = logOutput.scrollHeight"#))
+
+    let tabBarStart = try #require(html.range(of: ".log-tab-bar {"))
+    let tabBarEnd = try #require(html[tabBarStart.upperBound...].firstIndex(of: "}"))
+    let tabBarRule = String(html[tabBarStart.lowerBound...tabBarEnd])
+    #expect(tabBarRule.contains("position: sticky;"))
+    #expect(tabBarRule.contains("top: 0;"))
+    #expect(tabBarRule.contains("z-index: 10;"))
+    #expect(tabBarRule.contains("background: var(--bg);"))
+}
+
+@Test func dashboardLogsPageDescriptionCoversRuntimeLogsAndIncidentHistory() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    let expectedDescriptions = [
+        "View runtime logs and incident history to understand service status and troubleshoot issues.",
+        "查看运行日志与故障历史，帮助了解服务状态并排查问题。",
+        "查看執行日誌與故障歷史，協助了解服務狀態並排查問題。",
+        "実行ログと障害履歴を確認し、サービスの状態把握と問題の調査に役立てます。",
+        "실행 로그와 장애 기록을 확인하여 서비스 상태를 파악하고 문제를 해결합니다.",
+    ]
+
+    for description in expectedDescriptions {
+        #expect(dashboardHTML(html, contains: description))
+    }
+    #expect(!dashboardHTML(html, contains: "Server inference logs."))
+    #expect(!dashboardHTML(html, contains: "服务器推理日志。"))
 }
 
 @Test func dashboardSettingsPageKeepsHeaderFixedAboveAnIndependentScroller() throws {
