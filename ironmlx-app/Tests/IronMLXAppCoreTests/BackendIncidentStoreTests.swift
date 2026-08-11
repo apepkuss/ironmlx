@@ -93,11 +93,19 @@ func incidentStoreFiltersDetailsAndClearWithoutTouchingOtherFiles() throws {
     )
     #expect(matches.map(\.id) == [failed.id])
     #expect(store.detail(id: failed.id)?.recoveryStatus == .recoveryFailed)
-    #expect(store.listPayload(matching: BackendIncidentQuery()).total == 2)
+    let filteredPayload = store.listPayload(
+        matching: BackendIncidentQuery(
+            status: .recoveryFailed,
+            limit: 1
+        )
+    )
+    #expect(filteredPayload.total == 1)
+    #expect(filteredPayload.oldestRetainedOccurredAt == recovered.occurredAt)
 
     try store.clear()
 
     #expect(store.records().isEmpty)
+    #expect(store.listPayload(matching: BackendIncidentQuery()).oldestRetainedOccurredAt == nil)
     #expect(try String(contentsOf: unrelatedLogURL, encoding: .utf8) == "runtime log")
 }
 

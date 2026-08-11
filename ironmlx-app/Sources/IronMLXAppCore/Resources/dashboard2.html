@@ -258,6 +258,65 @@
     visibility: visible;
   }
 
+  .incident-filter-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .incident-history-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    justify-content: flex-end;
+    gap: 16px;
+    margin-bottom: 12px;
+  }
+
+  .incident-history-export-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    max-width: 100%;
+  }
+
+  .incident-history-toolbar button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 34px;
+    font-family: inherit;
+    line-height: 1;
+  }
+
+  .incident-history-toolbar #incident-clear-btn {
+    border: 1px solid transparent;
+    background-clip: padding-box;
+  }
+
+  .incident-filter-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+
+  @media (max-width: 760px) {
+    .incident-filter-header {
+      flex-direction: column;
+      align-items: stretch;
+    }
+
+    .incident-filter-actions {
+      justify-content: flex-start;
+    }
+
+    .incident-history-toolbar {
+      justify-content: flex-start;
+    }
+  }
+
   /* ── Card ── */
   .card {
     background: var(--card-bg);
@@ -2780,15 +2839,6 @@
           <div class="page-title" data-i18n="nav_logs">Logs</div>
           <div class="page-subtitle" data-i18n="logs_subtitle">Server inference logs.</div>
         </div>
-        <span class="diagnostic-export-help">
-          <button class="btn-secondary" type="button" id="diagnostic-export-btn"
-            aria-describedby="diagnostic-export-tooltip"
-            aria-label="Export Diagnostics"
-            data-i18n="diagnostic_export"
-            data-i18n-aria-label="diagnostic_export_accessible_label">Export Diagnostics</button>
-          <span class="diagnostic-export-tooltip" id="diagnostic-export-tooltip" role="tooltip"
-            data-i18n="diagnostic_export_tooltip">Export system, version, model, runtime status, incidents, and redacted logs for troubleshooting.</span>
-        </span>
       </div>
     </div>
 
@@ -2859,43 +2909,59 @@
     </div>
 
     <div id="log-tab-content-incidents" style="display:none;">
+      <div class="incident-history-toolbar" role="toolbar" aria-label="Incident history actions"
+        data-i18n-aria-label="incident_history_actions_accessible_label">
+        <div class="incident-history-export-actions">
+          <span class="diagnostic-export-help">
+            <button class="btn-secondary" type="button" id="incident-export-btn"
+              aria-describedby="incident-export-tooltip"
+              aria-label="Export Incident Records"
+              data-i18n="incident_export"
+              data-i18n-aria-label="incident_export_accessible_label">Export Incident Records</button>
+            <span class="diagnostic-export-tooltip" id="incident-export-tooltip" role="tooltip"
+              data-i18n="incident_export_tooltip">Export incidents matching the current filters as JSON.</span>
+          </span>
+          <span class="diagnostic-export-help">
+            <button class="btn-secondary" type="button" id="diagnostic-export-btn"
+              aria-describedby="diagnostic-export-tooltip"
+              aria-label="Export Diagnostics"
+              data-i18n="diagnostic_export"
+              data-i18n-aria-label="diagnostic_export_accessible_label">Export Diagnostics</button>
+            <span class="diagnostic-export-tooltip" id="diagnostic-export-tooltip" role="tooltip"
+              data-i18n="diagnostic_export_tooltip">Export system, version, model, runtime status, incidents, and redacted logs for troubleshooting.</span>
+          </span>
+        </div>
+        <button class="btn-danger" type="button" id="incident-clear-btn" data-i18n="incident_clear">Clear All Records</button>
+      </div>
       <div class="card-settings">
-        <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;">
+        <div class="card-header incident-filter-header">
           <span data-i18n="incident_filters">Incident Filters</span>
-          <div style="display:flex;gap:8px;">
-            <span class="diagnostic-export-help">
-              <button class="btn-secondary" id="incident-export-btn"
-                aria-describedby="incident-export-tooltip"
-                aria-label="Export Incident Records"
-                data-i18n="incident_export"
-                data-i18n-aria-label="incident_export_accessible_label">Export Incident Records</button>
-              <span class="diagnostic-export-tooltip" id="incident-export-tooltip" role="tooltip"
-                data-i18n="incident_export_tooltip">Export incidents matching the current filters as JSON.</span>
-            </span>
-            <button class="btn-danger" id="incident-clear-btn" data-i18n="incident_clear">Clear History</button>
+          <div class="incident-filter-actions">
+            <button class="btn-accent" type="button" id="incident-refresh-btn"
+              data-i18n="incident_query">Query</button>
           </div>
         </div>
         <div class="incident-filter-grid">
           <fieldset class="incident-datetime-field">
             <legend data-i18n="incident_from">From</legend>
             <div class="incident-datetime-control">
-              <input type="date" id="incident-filter-from-date" aria-label="Start date"
+              <input type="date" id="incident-filter-from-date" required aria-label="Start date"
                 data-i18n-aria-label="incident_from_date_accessible_label">
               <span class="incident-datetime-divider" aria-hidden="true"></span>
               <input class="incident-time-input" type="text" id="incident-filter-from-time"
-                inputmode="numeric" maxlength="5" placeholder="HH:mm" autocomplete="off" spellcheck="false"
-                aria-label="Start time, 24-hour clock" data-i18n-aria-label="incident_from_time_accessible_label" disabled>
+                inputmode="numeric" maxlength="5" value="00:00" placeholder="HH:mm" autocomplete="off" spellcheck="false"
+                aria-label="Start time, 24-hour clock" data-i18n-aria-label="incident_from_time_accessible_label">
             </div>
           </fieldset>
           <fieldset class="incident-datetime-field">
             <legend data-i18n="incident_to">To</legend>
             <div class="incident-datetime-control">
-              <input type="date" id="incident-filter-to-date" aria-label="End date"
+              <input type="date" id="incident-filter-to-date" required aria-label="End date"
                 data-i18n-aria-label="incident_to_date_accessible_label">
               <span class="incident-datetime-divider" aria-hidden="true"></span>
               <input class="incident-time-input" type="text" id="incident-filter-to-time"
-                inputmode="numeric" maxlength="5" placeholder="HH:mm" autocomplete="off" spellcheck="false"
-                aria-label="End time, 24-hour clock" data-i18n-aria-label="incident_to_time_accessible_label" disabled>
+                inputmode="numeric" maxlength="5" value="23:59" placeholder="HH:mm" autocomplete="off" spellcheck="false"
+                aria-label="End time, 24-hour clock" data-i18n-aria-label="incident_to_time_accessible_label">
             </div>
           </fieldset>
           <label><span data-i18n="incident_status">Status</span>
@@ -2922,7 +2988,6 @@
               <option value="crash_loop_breaker" data-i18n="recovery_reason_breaker">Crash-loop breaker</option>
             </select>
           </label>
-          <label><span>&nbsp;</span><button class="btn-accent" id="incident-refresh-btn" data-i18n="refresh">Refresh</button></label>
         </div>
       </div>
       <div class="incident-list" id="incident-list"></div>
@@ -3722,16 +3787,17 @@
       recovery_action_config: "Review settings",
       recovery_action_runtime_settings: "Open runtime settings",
       recovery_action_retry: "Retry", recovery_action_view_logs: "View logs", recovery_reason_breaker: "Consecutive crashes triggered the automatic recovery breaker.",
-      runtime_logs: "Runtime Logs", incident_history: "Incident History", incident_filters: "Incident Filters", incident_export: "Export Incident Records", incident_clear: "Clear History",
-      diagnostic_export: "Export Diagnostics", diagnostic_export_collecting: "Collecting…", diagnostic_export_tooltip: "Export system, version, model, runtime status, incidents, and redacted logs for troubleshooting.", diagnostic_export_accessible_label: "Export diagnostic information", diagnostic_exported: "Diagnostic information exported.", diagnostic_export_cancelled: "Diagnostic export cancelled.", diagnostic_export_failed: "Diagnostic export failed.",
-      incident_export_tooltip: "Export incidents matching the current filters as a JSON file.", incident_export_accessible_label: "Export filtered incident records",
+      runtime_logs: "Runtime Logs", incident_history: "Incident History", incident_filters: "Incident Filters", incident_query: "Query", incident_export: "Export Incident Records", incident_clear: "Clear All Records", incident_history_actions_accessible_label: "Incident history actions",
+      diagnostic_export: "Export Diagnostics", diagnostic_export_collecting: "Collecting…", diagnostic_export_tooltip: "Export system, version, model, runtime status, incidents, and redacted logs for troubleshooting.", diagnostic_export_accessible_label: "Export diagnostic information", diagnostic_exported: "Diagnostic information exported.", diagnostic_export_failed: "Diagnostic export failed.",
+      incident_export_tooltip: "Export incident records from the most recent query as a JSON file.", incident_export_accessible_label: "Export queried incident records",
+      incident_export_all_title: "Export all incident records?", incident_export_all_message: "No filters are currently applied. This will export all incident records currently retained by the system.", incident_export_unapplied_message: "You changed the filter conditions but have not queried them. Those changes will not be used for this export.", incident_export_all_confirm: "Export All Records", incident_export_current_title: "Export current results?", incident_export_current_message: "This export will use the filters applied to the incident list currently displayed.", incident_export_current_confirm: "Export Current Results", incident_return_to_filters: "Return to Filters",
       incident_from: "From", incident_to: "To", incident_status: "Status", incident_all: "All", incident_model: "Model", incident_model_placeholder: "Model name", incident_reason: "Failure reason",
       incident_from_date_accessible_label: "Start date", incident_from_time_accessible_label: "Start time, 24-hour clock", incident_to_date_accessible_label: "End date", incident_to_time_accessible_label: "End time, 24-hour clock", incident_time_invalid: "Use 24-hour time HH:mm (00:00–23:59).",
       incident_status_pending: "Recovery pending", incident_status_recovering: "Recovering", incident_status_recovered: "Recovered", incident_status_partial: "Partially recovered", incident_status_failed: "Recovery failed", incident_status_stopped: "Automatic recovery stopped",
       incident_empty: "No incidents match the current filters.", incident_type_backend_exit: "Unexpected backend exit", incident_view_details: "Details", incident_no_models: "No models",
       incident_id: "Incident ID", incident_occurred_at: "Occurred at", incident_launch_id: "Backend launch ID", incident_process: "Process", incident_exit_reason: "Exit reason", incident_models_before: "Models before incident", incident_recovered_models: "Recovered models", incident_failed_models: "Failed models", incident_attempts: "Automatic recovery attempts", incident_final_status: "Final recovery status", incident_failures: "Structured failures", incident_actions: "Recovery actions", incident_log_tail: "Sanitized log tail",
       incident_step_restart: "Automatic backend restart started", incident_step_readiness: "Backend readiness check passed", incident_step_restore: "Confirmed model restore started", incident_step_stable: "Stability observation window started", incident_step_stopped: "Automatic recovery stopped",
-      incident_clear_confirm: "Clear all incident history? This does not affect runtime state or logs.", incident_cleared: "Incident history cleared.", incident_clear_failed: "Could not clear incident history.", incident_exported: "Incident information exported.", incident_export_failed: "Incident export failed.", incident_load_failed: "Could not load incident history.",
+      incident_clear_title: "Clear all incident records?", incident_clear_confirm: "This permanently deletes all incident records and cannot be undone. Runtime logs are not affected.", incident_cleared: "All incident records cleared.", incident_clear_failed: "Could not clear incident history.", incident_exported: "Incident information exported.", incident_export_failed: "Incident export failed.", incident_load_failed: "Could not load incident history.",
       runtime_models: "Model Runtime Status",
       runtime_empty_title: "No models are currently running",
       runtime_empty_description: "Load a model to see request queues and cumulative usage here.",
@@ -4067,16 +4133,17 @@
       recovery_action_config: "检查设置",
       recovery_action_runtime_settings: "打开运行设置",
       recovery_action_retry: "重试", recovery_action_view_logs: "查看日志", recovery_reason_breaker: "连续崩溃已触发自动恢复熔断。",
-      runtime_logs: "运行日志", incident_history: "故障历史", incident_filters: "故障筛选", incident_export: "导出故障记录", incident_clear: "清除历史",
-      diagnostic_export: "导出诊断信息", diagnostic_export_collecting: "正在收集……", diagnostic_export_tooltip: "导出系统、版本、模型、运行状态、故障记录及脱敏日志，用于问题诊断。", diagnostic_export_accessible_label: "导出诊断信息", diagnostic_exported: "诊断信息已导出。", diagnostic_export_cancelled: "已取消导出诊断信息。", diagnostic_export_failed: "诊断信息导出失败。",
-      incident_export_tooltip: "将当前筛选条件下的故障记录导出为 JSON 文件。", incident_export_accessible_label: "导出当前筛选条件下的故障记录",
+      runtime_logs: "运行日志", incident_history: "故障历史", incident_filters: "故障筛选", incident_query: "查询", incident_export: "导出故障记录", incident_clear: "清除全部记录", incident_history_actions_accessible_label: "故障历史操作",
+      diagnostic_export: "导出诊断信息", diagnostic_export_collecting: "正在收集……", diagnostic_export_tooltip: "导出系统、版本、模型、运行状态、故障记录及脱敏日志，用于问题诊断。", diagnostic_export_accessible_label: "导出诊断信息", diagnostic_exported: "诊断信息已导出。", diagnostic_export_failed: "诊断信息导出失败。",
+      incident_export_tooltip: "将最近一次查询结果中的故障记录导出为 JSON 文件。", incident_export_accessible_label: "导出最近一次查询的故障记录",
+      incident_export_all_title: "导出全部故障记录？", incident_export_all_message: "当前未应用任何筛选条件。本次操作将导出系统当前保留的全部故障记录。", incident_export_unapplied_message: "你已修改筛选条件，但尚未点击查询；这些修改不会用于本次导出。", incident_export_all_confirm: "导出全部记录", incident_export_current_title: "导出当前结果？", incident_export_current_message: "本次导出将使用当前故障列表已经应用的筛选条件。", incident_export_current_confirm: "导出当前结果", incident_return_to_filters: "返回筛选",
       incident_from: "开始时间", incident_to: "结束时间", incident_status: "状态", incident_all: "全部", incident_model: "模型", incident_model_placeholder: "模型名称", incident_reason: "失败原因",
       incident_from_date_accessible_label: "开始日期", incident_from_time_accessible_label: "开始时间，24 小时制", incident_to_date_accessible_label: "结束日期", incident_to_time_accessible_label: "结束时间，24 小时制", incident_time_invalid: "请输入 24 小时制时间 HH:mm（00:00–23:59）。",
       incident_status_pending: "等待恢复", incident_status_recovering: "正在恢复", incident_status_recovered: "已恢复", incident_status_partial: "部分恢复", incident_status_failed: "恢复失败", incident_status_stopped: "自动恢复已停止",
       incident_empty: "没有符合当前筛选条件的故障。", incident_type_backend_exit: "后端异常退出", incident_view_details: "查看详情", incident_no_models: "无受影响模型",
       incident_id: "事故 ID", incident_occurred_at: "发生时间", incident_launch_id: "后端启动 ID", incident_process: "进程信息", incident_exit_reason: "退出原因", incident_models_before: "故障前模型", incident_recovered_models: "成功恢复模型", incident_failed_models: "恢复失败模型", incident_attempts: "自动恢复尝试次数", incident_final_status: "最终恢复结果", incident_failures: "结构化失败", incident_actions: "已执行恢复动作", incident_log_tail: "脱敏日志尾部",
       incident_step_restart: "开始自动重启后端", incident_step_readiness: "后端健康检查通过", incident_step_restore: "开始恢复已确认模型", incident_step_stable: "开始稳定性观察窗口", incident_step_stopped: "停止自动恢复",
-      incident_clear_confirm: "确定清除全部故障历史吗？当前运行状态和普通日志不会受到影响。", incident_cleared: "故障历史已清除。", incident_clear_failed: "无法清除故障历史。", incident_exported: "故障信息已导出。", incident_export_failed: "故障信息导出失败。", incident_load_failed: "无法加载故障历史。",
+      incident_clear_title: "清除全部故障记录？", incident_clear_confirm: "此操作将永久删除所有故障历史记录，删除后无法恢复。运行日志不会受到影响。", incident_cleared: "全部故障记录已清除。", incident_clear_failed: "无法清除故障历史。", incident_exported: "故障信息已导出。", incident_export_failed: "故障信息导出失败。", incident_load_failed: "无法加载故障历史。",
       runtime_models: "模型运行状态",
       runtime_empty_title: "暂无运行中的模型",
       runtime_empty_description: "加载模型后，此处将显示各模型的请求队列与累计统计。",
@@ -4412,16 +4479,17 @@
       recovery_action_config: "檢查設定",
       recovery_action_runtime_settings: "開啟執行設定",
       recovery_action_retry: "重試", recovery_action_view_logs: "檢視日誌", recovery_reason_breaker: "連續崩潰已觸發自動恢復熔斷。",
-      runtime_logs: "執行日誌", incident_history: "故障歷史", incident_filters: "故障篩選", incident_export: "匯出故障記錄", incident_clear: "清除歷史",
-      diagnostic_export: "匯出診斷資訊", diagnostic_export_collecting: "正在收集……", diagnostic_export_tooltip: "匯出系統、版本、模型、執行狀態、故障記錄及脫敏日誌，用於問題診斷。", diagnostic_export_accessible_label: "匯出診斷資訊", diagnostic_exported: "診斷資訊已匯出。", diagnostic_export_cancelled: "已取消匯出診斷資訊。", diagnostic_export_failed: "診斷資訊匯出失敗。",
-      incident_export_tooltip: "將目前篩選條件下的故障記錄匯出為 JSON 檔案。", incident_export_accessible_label: "匯出目前篩選條件下的故障記錄",
+      runtime_logs: "執行日誌", incident_history: "故障歷史", incident_filters: "故障篩選", incident_query: "查詢", incident_export: "匯出故障記錄", incident_clear: "清除全部記錄", incident_history_actions_accessible_label: "故障歷史操作",
+      diagnostic_export: "匯出診斷資訊", diagnostic_export_collecting: "正在收集……", diagnostic_export_tooltip: "匯出系統、版本、模型、執行狀態、故障記錄及脫敏日誌，用於問題診斷。", diagnostic_export_accessible_label: "匯出診斷資訊", diagnostic_exported: "診斷資訊已匯出。", diagnostic_export_failed: "診斷資訊匯出失敗。",
+      incident_export_tooltip: "將最近一次查詢結果中的故障記錄匯出為 JSON 檔案。", incident_export_accessible_label: "匯出最近一次查詢的故障記錄",
+      incident_export_all_title: "匯出全部故障記錄？", incident_export_all_message: "目前未套用任何篩選條件。本次操作將匯出系統目前保留的全部故障記錄。", incident_export_unapplied_message: "你已修改篩選條件，但尚未查詢；這些修改不會用於本次匯出。", incident_export_all_confirm: "匯出全部記錄", incident_export_current_title: "匯出目前結果？", incident_export_current_message: "本次匯出將使用目前故障清單已套用的篩選條件。", incident_export_current_confirm: "匯出目前結果", incident_return_to_filters: "返回篩選",
       incident_from: "開始時間", incident_to: "結束時間", incident_status: "狀態", incident_all: "全部", incident_model: "模型", incident_model_placeholder: "模型名稱", incident_reason: "失敗原因",
       incident_from_date_accessible_label: "開始日期", incident_from_time_accessible_label: "開始時間，24 小時制", incident_to_date_accessible_label: "結束日期", incident_to_time_accessible_label: "結束時間，24 小時制", incident_time_invalid: "請輸入 24 小時制時間 HH:mm（00:00–23:59）。",
       incident_status_pending: "等待恢復", incident_status_recovering: "正在恢復", incident_status_recovered: "已恢復", incident_status_partial: "部分恢復", incident_status_failed: "恢復失敗", incident_status_stopped: "自動恢復已停止",
       incident_empty: "沒有符合目前篩選條件的故障。", incident_type_backend_exit: "後端異常退出", incident_view_details: "檢視詳情", incident_no_models: "無受影響模型",
       incident_id: "事故 ID", incident_occurred_at: "發生時間", incident_launch_id: "後端啟動 ID", incident_process: "程序資訊", incident_exit_reason: "退出原因", incident_models_before: "故障前模型", incident_recovered_models: "成功恢復模型", incident_failed_models: "恢復失敗模型", incident_attempts: "自動恢復嘗試次數", incident_final_status: "最終恢復結果", incident_failures: "結構化失敗", incident_actions: "已執行恢復動作", incident_log_tail: "脫敏日誌尾部",
       incident_step_restart: "開始自動重新啟動後端", incident_step_readiness: "後端健康檢查通過", incident_step_restore: "開始恢復已確認模型", incident_step_stable: "開始穩定性觀察視窗", incident_step_stopped: "停止自動恢復",
-      incident_clear_confirm: "確定清除全部故障歷史嗎？目前執行狀態和一般日誌不會受到影響。", incident_cleared: "故障歷史已清除。", incident_clear_failed: "無法清除故障歷史。", incident_exported: "故障資訊已匯出。", incident_export_failed: "故障資訊匯出失敗。", incident_load_failed: "無法載入故障歷史。",
+      incident_clear_title: "清除全部故障記錄？", incident_clear_confirm: "此操作將永久刪除所有故障歷史記錄，刪除後無法復原。執行日誌不會受到影響。", incident_cleared: "全部故障記錄已清除。", incident_clear_failed: "無法清除故障歷史。", incident_exported: "故障資訊已匯出。", incident_export_failed: "故障資訊匯出失敗。", incident_load_failed: "無法載入故障歷史。",
       runtime_models: "模型執行狀態",
       runtime_empty_title: "目前沒有執行中的模型",
       runtime_empty_description: "載入模型後，此處將顯示各模型的請求佇列與累計統計。",
@@ -4740,16 +4808,17 @@
       recovery_action_config: "設定を確認",
       recovery_action_runtime_settings: "ランタイム設定を開く",
       recovery_action_retry: "再試行", recovery_action_view_logs: "ログを表示", recovery_reason_breaker: "連続クラッシュにより自動復旧ブレーカーが作動しました。",
-      runtime_logs: "実行ログ", incident_history: "障害履歴", incident_filters: "障害フィルター", incident_export: "障害記録をエクスポート", incident_clear: "履歴を消去",
-      diagnostic_export: "診断情報をエクスポート", diagnostic_export_collecting: "収集中…", diagnostic_export_tooltip: "トラブルシューティング用に、システム、バージョン、モデル、実行状態、障害記録、匿名化ログをエクスポートします。", diagnostic_export_accessible_label: "診断情報をエクスポート", diagnostic_exported: "診断情報をエクスポートしました。", diagnostic_export_cancelled: "診断情報のエクスポートをキャンセルしました。", diagnostic_export_failed: "診断情報のエクスポートに失敗しました。",
-      incident_export_tooltip: "現在のフィルターに一致する障害記録を JSON ファイルとしてエクスポートします。", incident_export_accessible_label: "フィルター済み障害記録をエクスポート",
+      runtime_logs: "実行ログ", incident_history: "障害履歴", incident_filters: "障害フィルター", incident_query: "検索", incident_export: "障害記録をエクスポート", incident_clear: "すべての記録を消去", incident_history_actions_accessible_label: "障害履歴の操作",
+      diagnostic_export: "診断情報をエクスポート", diagnostic_export_collecting: "収集中…", diagnostic_export_tooltip: "トラブルシューティング用に、システム、バージョン、モデル、実行状態、障害記録、匿名化ログをエクスポートします。", diagnostic_export_accessible_label: "診断情報をエクスポート", diagnostic_exported: "診断情報をエクスポートしました。", diagnostic_export_failed: "診断情報のエクスポートに失敗しました。",
+      incident_export_tooltip: "直近の検索結果の障害記録を JSON ファイルとしてエクスポートします。", incident_export_accessible_label: "直近の検索結果の障害記録をエクスポート",
+      incident_export_all_title: "すべての障害記録をエクスポートしますか？", incident_export_all_message: "現在、フィルターは適用されていません。システムが現在保持しているすべての障害記録をエクスポートします。", incident_export_unapplied_message: "フィルター条件は変更されていますが、まだ検索されていません。その変更は今回のエクスポートには使用されません。", incident_export_all_confirm: "すべての記録をエクスポート", incident_export_current_title: "現在の結果をエクスポートしますか？", incident_export_current_message: "現在表示されている障害リストに適用済みのフィルター条件を使用します。", incident_export_current_confirm: "現在の結果をエクスポート", incident_return_to_filters: "フィルターに戻る",
       incident_from: "開始", incident_to: "終了", incident_status: "状態", incident_all: "すべて", incident_model: "モデル", incident_model_placeholder: "モデル名", incident_reason: "失敗理由",
       incident_from_date_accessible_label: "開始日", incident_from_time_accessible_label: "開始時刻、24 時間制", incident_to_date_accessible_label: "終了日", incident_to_time_accessible_label: "終了時刻、24 時間制", incident_time_invalid: "24 時間制の HH:mm（00:00〜23:59）で入力してください。",
       incident_status_pending: "復旧待ち", incident_status_recovering: "復旧中", incident_status_recovered: "復旧済み", incident_status_partial: "一部復旧", incident_status_failed: "復旧失敗", incident_status_stopped: "自動復旧停止",
       incident_empty: "現在のフィルターに一致する障害はありません。", incident_type_backend_exit: "バックエンドの予期しない終了", incident_view_details: "詳細", incident_no_models: "影響モデルなし",
       incident_id: "障害 ID", incident_occurred_at: "発生日時", incident_launch_id: "バックエンド起動 ID", incident_process: "プロセス情報", incident_exit_reason: "終了理由", incident_models_before: "障害前のモデル", incident_recovered_models: "復旧したモデル", incident_failed_models: "復旧失敗モデル", incident_attempts: "自動復旧試行回数", incident_final_status: "最終復旧結果", incident_failures: "構造化された失敗", incident_actions: "実行した復旧操作", incident_log_tail: "秘匿化済みログ末尾",
       incident_step_restart: "バックエンドの自動再起動を開始", incident_step_readiness: "バックエンドの正常性確認に成功", incident_step_restore: "確認済みモデルの復元を開始", incident_step_stable: "安定性監視を開始", incident_step_stopped: "自動復旧を停止",
-      incident_clear_confirm: "障害履歴をすべて消去しますか？実行状態と通常ログには影響しません。", incident_cleared: "障害履歴を消去しました。", incident_clear_failed: "障害履歴を消去できませんでした。", incident_exported: "障害情報をエクスポートしました。", incident_export_failed: "障害情報のエクスポートに失敗しました。", incident_load_failed: "障害履歴を読み込めませんでした。",
+      incident_clear_title: "すべての障害記録を消去しますか？", incident_clear_confirm: "この操作により、すべての障害履歴が完全に削除され、元に戻すことはできません。実行ログには影響しません。", incident_cleared: "すべての障害記録を消去しました。", incident_clear_failed: "障害履歴を消去できませんでした。", incident_exported: "障害情報をエクスポートしました。", incident_export_failed: "障害情報のエクスポートに失敗しました。", incident_load_failed: "障害履歴を読み込めませんでした。",
       runtime_models: "モデル実行状況",
       runtime_empty_title: "実行中のモデルはありません",
       runtime_empty_description: "モデルを読み込むと、各モデルのリクエストキューと累計統計がここに表示されます。",
@@ -5068,16 +5137,17 @@
       recovery_action_config: "설정 확인",
       recovery_action_runtime_settings: "런타임 설정 열기",
       recovery_action_retry: "다시 시도", recovery_action_view_logs: "로그 보기", recovery_reason_breaker: "연속 충돌로 자동 복구 차단기가 작동했습니다.",
-      runtime_logs: "실행 로그", incident_history: "장애 기록", incident_filters: "장애 필터", incident_export: "장애 기록 내보내기", incident_clear: "기록 지우기",
-      diagnostic_export: "진단 정보 내보내기", diagnostic_export_collecting: "수집 중…", diagnostic_export_tooltip: "문제 진단을 위해 시스템, 버전, 모델, 실행 상태, 장애 기록 및 비식별화된 로그를 내보냅니다.", diagnostic_export_accessible_label: "진단 정보 내보내기", diagnostic_exported: "진단 정보를 내보냈습니다.", diagnostic_export_cancelled: "진단 정보 내보내기를 취소했습니다.", diagnostic_export_failed: "진단 정보 내보내기에 실패했습니다.",
-      incident_export_tooltip: "현재 필터 조건에 맞는 장애 기록을 JSON 파일로 내보냅니다.", incident_export_accessible_label: "필터링된 장애 기록 내보내기",
+      runtime_logs: "실행 로그", incident_history: "장애 기록", incident_filters: "장애 필터", incident_query: "조회", incident_export: "장애 기록 내보내기", incident_clear: "모든 기록 지우기", incident_history_actions_accessible_label: "장애 기록 작업",
+      diagnostic_export: "진단 정보 내보내기", diagnostic_export_collecting: "수집 중…", diagnostic_export_tooltip: "문제 진단을 위해 시스템, 버전, 모델, 실행 상태, 장애 기록 및 비식별화된 로그를 내보냅니다.", diagnostic_export_accessible_label: "진단 정보 내보내기", diagnostic_exported: "진단 정보를 내보냈습니다.", diagnostic_export_failed: "진단 정보 내보내기에 실패했습니다.",
+      incident_export_tooltip: "가장 최근 조회 결과의 장애 기록을 JSON 파일로 내보냅니다.", incident_export_accessible_label: "가장 최근 조회 결과의 장애 기록 내보내기",
+      incident_export_all_title: "모든 장애 기록을 내보내시겠습니까?", incident_export_all_message: "현재 적용된 필터가 없습니다. 시스템에 현재 보관된 모든 장애 기록을 내보냅니다.", incident_export_unapplied_message: "필터 조건을 변경했지만 아직 조회하지 않았습니다. 변경 사항은 이번 내보내기에 사용되지 않습니다.", incident_export_all_confirm: "모든 기록 내보내기", incident_export_current_title: "현재 결과를 내보내시겠습니까?", incident_export_current_message: "현재 표시된 장애 목록에 적용된 필터 조건을 사용합니다.", incident_export_current_confirm: "현재 결과 내보내기", incident_return_to_filters: "필터로 돌아가기",
       incident_from: "시작", incident_to: "종료", incident_status: "상태", incident_all: "전체", incident_model: "모델", incident_model_placeholder: "모델 이름", incident_reason: "실패 원인",
       incident_from_date_accessible_label: "시작 날짜", incident_from_time_accessible_label: "시작 시각, 24시간제", incident_to_date_accessible_label: "종료 날짜", incident_to_time_accessible_label: "종료 시각, 24시간제", incident_time_invalid: "24시간제 HH:mm(00:00~23:59) 형식으로 입력하세요.",
       incident_status_pending: "복구 대기", incident_status_recovering: "복구 중", incident_status_recovered: "복구됨", incident_status_partial: "부분 복구", incident_status_failed: "복구 실패", incident_status_stopped: "자동 복구 중지",
       incident_empty: "현재 필터와 일치하는 장애가 없습니다.", incident_type_backend_exit: "백엔드 비정상 종료", incident_view_details: "세부 정보", incident_no_models: "영향받은 모델 없음",
       incident_id: "장애 ID", incident_occurred_at: "발생 시간", incident_launch_id: "백엔드 시작 ID", incident_process: "프로세스 정보", incident_exit_reason: "종료 원인", incident_models_before: "장애 전 모델", incident_recovered_models: "복구된 모델", incident_failed_models: "복구 실패 모델", incident_attempts: "자동 복구 시도 횟수", incident_final_status: "최종 복구 결과", incident_failures: "구조화된 실패", incident_actions: "실행된 복구 작업", incident_log_tail: "민감정보 제거 로그 끝부분",
       incident_step_restart: "백엔드 자동 재시작 시작", incident_step_readiness: "백엔드 상태 확인 통과", incident_step_restore: "확인된 모델 복원 시작", incident_step_stable: "안정성 관찰 시작", incident_step_stopped: "자동 복구 중지",
-      incident_clear_confirm: "모든 장애 기록을 지우시겠습니까? 실행 상태와 일반 로그에는 영향을 주지 않습니다.", incident_cleared: "장애 기록을 지웠습니다.", incident_clear_failed: "장애 기록을 지울 수 없습니다.", incident_exported: "장애 정보를 내보냈습니다.", incident_export_failed: "장애 정보 내보내기에 실패했습니다.", incident_load_failed: "장애 기록을 불러올 수 없습니다.",
+      incident_clear_title: "모든 장애 기록을 지우시겠습니까?", incident_clear_confirm: "이 작업은 모든 장애 기록을 영구적으로 삭제하며 되돌릴 수 없습니다. 실행 로그에는 영향을 주지 않습니다.", incident_cleared: "모든 장애 기록을 지웠습니다.", incident_clear_failed: "장애 기록을 지울 수 없습니다.", incident_exported: "장애 정보를 내보냈습니다.", incident_export_failed: "장애 정보 내보내기에 실패했습니다.", incident_load_failed: "장애 기록을 불러올 수 없습니다.",
       runtime_models: "모델 실행 상태",
       runtime_empty_title: "실행 중인 모델이 없습니다",
       runtime_empty_description: "모델을 로드하면 각 모델의 요청 대기열과 누적 통계가 여기에 표시됩니다.",
@@ -6865,7 +6935,31 @@
 
   let activeLogTab = 'runtime';
   let incidentSummaries = [];
+  let incidentDateDefaultsInitialized = false;
+  const incidentDateFilterTouched = { from: false, to: false };
   const incidentSeenStorageKey = 'ironmlx.incidents.last-seen.v1';
+  let incidentDefaultFilterSignature = null;
+  let incidentFilterChangeGeneration = 0;
+  let appliedIncidentFilterGeneration = 0;
+  let appliedIncidentExportPath = '/admin/api/incidents/export';
+  let appliedIncidentFilterIsAll = true;
+  const pendingIncidentQueries = new Map();
+
+  function incidentFilterSignature() {
+    return JSON.stringify({
+      fromDate: document.getElementById('incident-filter-from-date').value,
+      fromTime: document.getElementById('incident-filter-from-time').value,
+      toDate: document.getElementById('incident-filter-to-date').value,
+      toTime: document.getElementById('incident-filter-to-time').value,
+      status: document.getElementById('incident-filter-status').value,
+      model: document.getElementById('incident-filter-model').value.trim(),
+      reason: document.getElementById('incident-filter-reason').value
+    });
+  }
+
+  function markIncidentFiltersChanged() {
+    incidentFilterChangeGeneration += 1;
+  }
 
   function setIncidentTimeValidity(input, isValid) {
     input.setCustomValidity(isValid ? '' : t(
@@ -6896,18 +6990,17 @@
   function initializeIncidentDateTimeFilter(kind, defaultTime) {
     const dateInput = document.getElementById('incident-filter-' + kind + '-date');
     const timeInput = document.getElementById('incident-filter-' + kind + '-time');
-    function synchronizeTimeAvailability() {
-      if (!dateInput.value) {
-        timeInput.value = '';
-        timeInput.disabled = true;
-        setIncidentTimeValidity(timeInput, true);
-        return;
-      }
-      timeInput.disabled = false;
-      if (!timeInput.value) timeInput.value = defaultTime;
-    }
-    dateInput.addEventListener('change', synchronizeTimeAvailability);
+    if (!timeInput.value) timeInput.value = defaultTime;
+    dateInput.addEventListener('input', function() {
+      incidentDateFilterTouched[kind] = true;
+      markIncidentFiltersChanged();
+    });
+    dateInput.addEventListener('change', function() {
+      incidentDateFilterTouched[kind] = true;
+      markIncidentFiltersChanged();
+    });
     timeInput.addEventListener('input', function() {
+      markIncidentFiltersChanged();
       setIncidentTimeValidity(timeInput, true);
     });
     timeInput.addEventListener('blur', function() {
@@ -6916,7 +7009,6 @@
     timeInput.addEventListener('keydown', function(event) {
       if (event.key === 'Enter') refreshIncidentHistory(true);
     });
-    synchronizeTimeAvailability();
   }
 
   function initializeIncidentDateTimeFilters() {
@@ -6924,9 +7016,46 @@
     initializeIncidentDateTimeFilter('to', '23:59');
   }
 
+  function incidentDateInputValue(value) {
+    const date = value ? new Date(value) : new Date();
+    const normalized = Number.isNaN(date.getTime()) ? new Date() : date;
+    const pad = number => String(number).padStart(2, '0');
+    return normalized.getFullYear() + '-'
+      + pad(normalized.getMonth() + 1) + '-'
+      + pad(normalized.getDate());
+  }
+
+  function initializeIncidentDateDefaults(payload) {
+    if (incidentDateDefaultsInitialized) return;
+    const today = incidentDateInputValue(null);
+    const oldest = incidentDateInputValue(payload.oldest_retained_occurred_at || null);
+    if (!incidentDateFilterTouched.from) {
+      document.getElementById('incident-filter-from-date').value = oldest;
+    }
+    if (!incidentDateFilterTouched.to) {
+      document.getElementById('incident-filter-to-date').value = today;
+    }
+    incidentDateDefaultsInitialized = true;
+    incidentDefaultFilterSignature = JSON.stringify({
+      fromDate: oldest,
+      fromTime: '00:00',
+      toDate: today,
+      toTime: '23:59',
+      status: '',
+      model: '',
+      reason: ''
+    });
+  }
+
   function incidentFilterDateTimeValue(kind) {
-    const dateValue = document.getElementById('incident-filter-' + kind + '-date').value;
-    if (!dateValue) return '';
+    const dateInput = document.getElementById('incident-filter-' + kind + '-date');
+    const dateValue = dateInput.value;
+    if (!dateValue) {
+      if (!incidentDateDefaultsInitialized) return '';
+      dateInput.reportValidity();
+      dateInput.focus();
+      return null;
+    }
     const timeInput = document.getElementById('incident-filter-' + kind + '-time');
     if (!timeInput.value) timeInput.value = kind === 'to' ? '23:59' : '00:00';
     const timeValue = normalizeIncidentTimeInput(timeInput);
@@ -6937,9 +7066,10 @@
     }
     const timeParts = timeValue.split(':').map(Number);
     const dateParts = dateValue.split('-').map(Number);
+    const isEnd = kind === 'to';
     return new Date(
       dateParts[0], dateParts[1] - 1, dateParts[2],
-      timeParts[0], timeParts[1], 0, 0
+      timeParts[0], timeParts[1], isEnd ? 59 : 0, isEnd ? 999 : 0
     ).toISOString();
   }
 
@@ -6982,9 +7112,23 @@
     return endpoint + (query ? '?' + query : '');
   }
 
+  function incidentExportPathForQuery(path) {
+    const queryStart = path.indexOf('?');
+    const params = new URLSearchParams(queryStart >= 0 ? path.slice(queryStart + 1) : '');
+    params.delete('limit');
+    const query = params.toString();
+    return '/admin/api/incidents/export' + (query ? '?' + query : '');
+  }
+
   function refreshIncidentHistory(markSeen) {
     const path = incidentFilterPath('/admin/api/incidents');
     if (!path) return;
+    const signature = incidentFilterSignature();
+    pendingIncidentQueries.set(path, {
+      exportPath: incidentExportPathForQuery(path),
+      generation: incidentFilterChangeGeneration,
+      isAll: incidentDefaultFilterSignature === null || signature === incidentDefaultFilterSignature
+    });
     apiFetch(path);
     apiFetch('/admin/api/incidents?limit=20&unread=1&mark_seen=' + (markSeen ? '1' : '0'));
   }
@@ -7046,6 +7190,7 @@
     const list = document.getElementById('incident-list');
     const empty = document.getElementById('incident-empty');
     const dict = I18N[currentLang] || I18N.en;
+    initializeIncidentDateDefaults(payload);
     incidentSummaries = Array.isArray(payload.incidents) ? payload.incidents : [];
     empty.style.display = incidentSummaries.length ? 'none' : '';
     list.innerHTML = incidentSummaries.map(item => {
@@ -7135,13 +7280,62 @@
 
   function clearIncidentHistory() {
     const dict = I18N[currentLang] || I18N.en;
-    if (!confirm(dict.incident_clear_confirm || 'Clear all incident history?')) return;
-    apiPost('/admin/api/incidents/clear', {});
+    showConfirmDialog(
+      dict.incident_clear_confirm || 'This permanently deletes all incident records and cannot be undone. Runtime logs are not affected.',
+      {
+        title: dict.incident_clear_title || 'Clear all incident records?',
+        confirmText: dict.incident_clear || 'Clear All Records',
+        danger: true
+      }
+    ).then(function(confirmed) {
+      if (confirmed) apiPost('/admin/api/incidents/clear', {});
+    });
+  }
+
+  function focusIncidentFilters() {
+    const filterCard = document.querySelector('#log-tab-content-incidents .card-settings');
+    if (filterCard) filterCard.scrollIntoView({ block: 'nearest' });
+    document.getElementById('incident-filter-from-date').focus();
   }
 
   function exportIncidentHistory() {
-    const path = incidentFilterPath('/admin/api/incidents/export');
-    if (path) apiFetch(path);
+    if (!appliedIncidentExportPath) return;
+    const dict = I18N[currentLang] || I18N.en;
+    const hasUnappliedChanges = incidentFilterChangeGeneration !== appliedIncidentFilterGeneration;
+    let title = '';
+    let message = '';
+    let confirmText = '';
+    if (appliedIncidentFilterIsAll) {
+      title = dict.incident_export_all_title || 'Export all incident records?';
+      message = dict.incident_export_all_message
+        || 'No filters are currently applied. This will export all incident records currently retained by the system.';
+      confirmText = dict.incident_export_all_confirm || 'Export All Records';
+      if (hasUnappliedChanges) {
+        message += '\n\n' + (dict.incident_export_unapplied_message
+          || 'You changed the filter conditions but have not queried them. Those changes will not be used for this export.');
+      }
+    } else if (hasUnappliedChanges) {
+      title = dict.incident_export_current_title || 'Export current results?';
+      message = (dict.incident_export_unapplied_message
+        || 'You changed the filter conditions but have not queried them. Those changes will not be used for this export.')
+        + '\n\n' + (dict.incident_export_current_message
+          || 'This export will use the filters applied to the incident list currently displayed.');
+      confirmText = dict.incident_export_current_confirm || 'Export Current Results';
+    } else {
+      apiFetch(appliedIncidentExportPath);
+      return;
+    }
+    showConfirmDialog(message, {
+      title: title,
+      confirmText: confirmText,
+      cancelText: dict.incident_return_to_filters || 'Return to Filters'
+    }).then(function(confirmed) {
+      if (confirmed) {
+        apiFetch(appliedIncidentExportPath);
+      } else {
+        focusIncidentFilters();
+      }
+    });
   }
 
   let diagnosticExportBusy = false;
@@ -7175,9 +7369,7 @@
     updateDiagnosticExportButton();
     if (result.status === 'exported') {
       showToast(t('diagnostic_exported', 'Diagnostic information exported.'), 'success');
-    } else if (result.status === 'cancelled') {
-      showToast(t('diagnostic_export_cancelled', 'Diagnostic export cancelled.'), 'info');
-    } else if (result.status !== 'busy') {
+    } else if (result.status !== 'cancelled' && result.status !== 'busy') {
       showToast(t('diagnostic_export_failed', 'Diagnostic export failed.'), 'warn');
     }
   }
@@ -9786,9 +9978,17 @@
           if (path.includes('unread=1')) {
             updateIncidentUnreadBadge(result.incidents || [], path.includes('mark_seen=1'));
           } else {
+            const pendingQuery = pendingIncidentQueries.get(path);
+            pendingIncidentQueries.delete(path);
             renderIncidentHistory(result);
+            if (pendingQuery) {
+              appliedIncidentExportPath = pendingQuery.exportPath;
+              appliedIncidentFilterGeneration = pendingQuery.generation;
+              appliedIncidentFilterIsAll = pendingQuery.isAll;
+            }
           }
         } else {
+          pendingIncidentQueries.delete(path);
           showToast(result.error || dict.incident_load_failed || 'Could not load incident history.', 'warn');
         }
       } else if (path === '/health') {
@@ -9991,6 +10191,9 @@
   document.getElementById('diagnostic-export-btn').addEventListener('click', exportDiagnosticBundle);
   document.getElementById('incident-export-btn').addEventListener('click', exportIncidentHistory);
   document.getElementById('incident-clear-btn').addEventListener('click', clearIncidentHistory);
+  document.getElementById('incident-filter-status').addEventListener('change', markIncidentFiltersChanged);
+  document.getElementById('incident-filter-model').addEventListener('input', markIncidentFiltersChanged);
+  document.getElementById('incident-filter-reason').addEventListener('change', markIncidentFiltersChanged);
   document.getElementById('incident-filter-model').addEventListener('keydown', event => {
     if (event.key === 'Enter') refreshIncidentHistory(true);
   });
