@@ -360,6 +360,7 @@ public struct BackendIncidentListPayload: Codable, Equatable, Sendable {
     public var total: Int
     public var returned: Int
     public var retentionLimit: Int
+    public var oldestRetainedOccurredAt: Date?
     public var incidents: [BackendIncidentSummary]
 
     enum CodingKeys: String, CodingKey {
@@ -368,6 +369,7 @@ public struct BackendIncidentListPayload: Codable, Equatable, Sendable {
         case total
         case returned
         case retentionLimit = "retention_limit"
+        case oldestRetainedOccurredAt = "oldest_retained_occurred_at"
         case incidents
     }
 }
@@ -464,13 +466,15 @@ public final class BackendIncidentStore {
     }
 
     public func listPayload(matching query: BackendIncidentQuery) -> BackendIncidentListPayload {
-        let allMatches = records().reversed().filter(query.matches)
+        let retainedRecords = records()
+        let allMatches = retainedRecords.reversed().filter(query.matches)
         let limit = min(max(1, query.limit ?? retainedIncidents), retainedIncidents)
         let selected = Array(allMatches.prefix(limit))
         return BackendIncidentListPayload(
             total: allMatches.count,
             returned: selected.count,
             retentionLimit: retainedIncidents,
+            oldestRetainedOccurredAt: retainedRecords.first?.occurredAt,
             incidents: selected.map(BackendIncidentSummary.init)
         )
     }
