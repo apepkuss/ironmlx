@@ -81,7 +81,8 @@ public final class DashboardWindowController {
             exitFullScreen: { [weak window] in
                 window?.toggleFullScreen(nil)
             },
-            hideWindow: { [weak window] in
+            hideWindow: { [weak window, weak bridge] in
+                bridge?.cancelDiagnosticExport()
                 window?.orderOut(nil)
             },
             restoreAccessoryActivation: {

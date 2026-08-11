@@ -3676,9 +3676,19 @@
         "repository": "https://github.com/sparkle-project/Sparkle.git",
         "revision": "79bc9e872948e47877e76f194cb0c8e0412b0b90",
         "version": "2.9.5"
+      },
+      {
+        "component": "ZIPFoundation",
+        "identity": "zipfoundation",
+        "license": "MIT",
+        "license_file": "swift-zipfoundation-license.txt",
+        "license_sha256": "93a5b6f4c4fcfbca71aaf17f5758d249cf205d5d1c237becc37f14e43af09f6b",
+        "repository": "https://github.com/weichsel/ZIPFoundation.git",
+        "revision": "22787ffb59de99e5dc1fbfe80b19c97a904ad48d",
+        "version": "0.9.20"
       }
     ],
     "manifest": "ironmlx-app/Package.swift",
-    "manifest_sha256": "e01f1b886eca96fca8f627dd74eb276e104a9f9c576af5b34da213a7b6aeabeb"
+    "manifest_sha256": "2b903b507a3a5bc1063bf670da27974adaea67b4f1fa16a5453099d0cc6c0370"
   }
 }

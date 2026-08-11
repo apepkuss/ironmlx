@@ -80,6 +80,24 @@ public struct BackendAPIClient: Sendable {
         return try JSONDecoder().decode(HealthzSnapshot.self, from: data)
     }
 
+    public func fetchHealthz(timeout: TimeInterval) async throws -> HealthzSnapshot {
+        guard let url = URL(string: "http://\(host):\(port)/healthz") else {
+            throw URLError(.badURL)
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = timeout
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = timeout
+        configuration.timeoutIntervalForResource = timeout
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let (data, response) = try await session.data(for: request)
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            throw URLError(.badServerResponse)
+        }
+        return try JSONDecoder().decode(HealthzSnapshot.self, from: data)
+    }
+
     public func waitUntilReady(timeout: TimeInterval = 5.0) async throws {
         let deadline = Date().addingTimeInterval(timeout)
         var lastError: Error?

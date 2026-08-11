@@ -20,6 +20,14 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     private let notificationCenter: NotificationCenter
     private let securityStore: LANSecurityMaterialStore
     private var huggingFaceSearchTask: Task<Void, Never>?
+    private lazy var diagnosticExportCoordinator = DiagnosticExportCoordinator(
+        window: webView?.window,
+        service: DiagnosticBundleService(
+            scanner: scanner,
+            versionService: versionService,
+            incidentStore: incidentStore
+        )
+    )
 
     public init(
         webView: WKWebView,
@@ -78,9 +86,14 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     }
 
     public func cancelAllDownloads() {
+        diagnosticExportCoordinator.cancel()
         Task {
             await downloadService.cancelAllDownloads()
         }
+    }
+
+    public func cancelDiagnosticExport() {
+        diagnosticExportCoordinator.cancel()
     }
 
     public static let handlerNames = [
@@ -112,6 +125,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         "syncLoadedModels",
         "getAppLogs",
         "dashboardLog",
+        "exportDiagnosticBundle",
         "previewSchedulerProfileGeneration",
         "generateSchedulerProfile",
         "cancelSchedulerProfileGeneration",
@@ -189,6 +203,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             sendAppLogs()
         case "dashboardLog":
             logDashboardMessage(json: stringBody(body))
+        case "exportDiagnosticBundle":
+            exportDiagnosticBundle()
         case "previewSchedulerProfileGeneration":
             previewSchedulerProfileGeneration(json: stringBody(body))
         case "generateSchedulerProfile":
@@ -439,6 +455,16 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             panel.beginSheetModal(for: window, completionHandler: completion)
         } else {
             panel.begin(completionHandler: completion)
+        }
+    }
+
+    private func exportDiagnosticBundle() {
+        let config = configStore.load()
+        diagnosticExportCoordinator.export(config: config, backendRunning: backend.isRunning) { [weak self] result in
+            guard let self,
+                  let data = try? JSONEncoder().encode(result),
+                  let json = String(data: data, encoding: .utf8) else { return }
+            self.sendJavaScript("onDiagnosticExportResult(\(Self.jsStringLiteral(json)))")
         }
     }
 

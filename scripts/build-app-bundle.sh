@@ -27,6 +27,7 @@ UPDATE_CHANNEL="${IRONMLX_UPDATE_CHANNEL:-disabled}"
 UPDATE_FEED_URL="${IRONMLX_UPDATE_FEED_URL:-}"
 UPDATE_PUBLIC_ED_KEY="${IRONMLX_UPDATE_PUBLIC_ED_KEY:-}"
 APP_BUILD_NUMBER="${IRONMLX_APP_BUILD_NUMBER:-}"
+DISTRIBUTION_CHANNEL="${IRONMLX_DISTRIBUTION_CHANNEL:-local-release}"
 
 fail() {
   echo "error: $*" >&2
@@ -79,6 +80,12 @@ case "$mlx_branch" in
     fail "diagnostic MLX branches are excluded from P0-1 builds: $mlx_branch"
     ;;
 esac
+
+source_commit="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+source_tree_state="clean"
+if [ -n "$(git -C "$REPO_ROOT" status --porcelain=v1 --untracked-files=normal)" ]; then
+  source_tree_state="dirty"
+fi
 
 rm -rf "$BUILD_ROOT"
 mkdir -p "$BUILD_ROOT/mlx-build" "$BUILD_ROOT/mlx-install" "$DIST_DIR"
@@ -160,6 +167,12 @@ mkdir -p \
   "$APP_BUNDLE/Contents/Frameworks" \
   "$APP_BUNDLE/Contents/Resources/Legal"
 cp "$PACKAGING_DIR/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
+plutil -replace IronMLXSourceCommit -string "$source_commit" "$APP_BUNDLE/Contents/Info.plist"
+plutil -replace IronMLXSourceTreeState -string "$source_tree_state" "$APP_BUNDLE/Contents/Info.plist"
+plutil -replace IronMLXMLXCommit -string "$mlx_commit" "$APP_BUNDLE/Contents/Info.plist"
+plutil -replace IronMLXDistributionChannel -string "$DISTRIBUTION_CHANNEL" "$APP_BUNDLE/Contents/Info.plist"
+plutil -replace IronMLXDeveloperIDSigned -string unsigned "$APP_BUNDLE/Contents/Info.plist"
+plutil -replace IronMLXNotarizationStatus -string not_notarized "$APP_BUNDLE/Contents/Info.plist"
 if [ -n "$APP_BUILD_NUMBER" ]; then
   plutil -replace CFBundleVersion -string "$APP_BUILD_NUMBER" "$APP_BUNDLE/Contents/Info.plist"
 fi
