@@ -2046,10 +2046,14 @@
   }
 
   .log-tab-bar {
+    position: sticky;
+    top: 0;
+    z-index: 10;
     display: flex;
     gap: 0;
     margin-bottom: 16px;
     border-bottom: 1px solid var(--border);
+    background: var(--bg);
   }
 
   .log-tab {
@@ -2837,7 +2841,7 @@
       <div class="logs-page-heading-row">
         <div>
           <div class="page-title" data-i18n="nav_logs">Logs</div>
-          <div class="page-subtitle" data-i18n="logs_subtitle">Server inference logs.</div>
+          <div class="page-subtitle" data-i18n="logs_subtitle">View runtime logs and incident history to understand service status and troubleshoot issues.</div>
         </div>
       </div>
     </div>
@@ -3978,7 +3982,7 @@
       batch_size_label: "Batch Size", batch_size_desc: "Number of concurrent requests processed simultaneously. Larger batches increase throughput but add per-request latency.",
       speedup_label: "Speedup", speedup_desc: "Token generation throughput multiplier relative to single-request baseline (1x). Higher is better.",
       pp_tps_req_label: "(Per-request Prompt TPS)", pp_tps_req_desc: "Prompt processing throughput divided by batch size. Shows per-request prefill speed under batch load.",
-      logs_subtitle: "Server inference logs.",
+      logs_subtitle: "View runtime logs and incident history to understand service status and troubleshoot issues.",
       log_viewer: "Log Viewer", auto_refresh: "Auto Refresh", log_lines: "Lines:", log_interval: "Interval:", log_interval_hint: "sec (0=off)", log_file: "File:", log_level_filter: "Level:", log_level_all: "ALL", log_search: "Search:", refresh: "Refresh", auto_scroll: "Auto Scroll", log_showing: "Showing", log_lines_unit: "lines", export_log: "Export Log",
       log_server_offline: "Backend is not running", log_start_hint: "Load a local model from Models to start it and view logs.", log_no_entries: "No log entries", log_no_app_logs: "No app log entries",
       settings_title: "App Settings", settings_subtitle_html: 'Settings marked with <span class="badge badge-restart">restart</span> require a server restart.',
@@ -4324,7 +4328,7 @@
       batch_size_label: "批量大小", batch_size_desc: "同时处理的并发请求数。批量越大总吞吐量越高，但每个请求的延迟会增加。",
       speedup_label: "加速比", speedup_desc: "相对于单请求基准（1x）的 Token 生成吞吐量倍数。越高越好。",
       pp_tps_req_label: "（每请求提示词处理 TPS）", pp_tps_req_desc: "提示词处理吞吐量除以批量大小。显示批量负载下每个请求的预填充速度。",
-      logs_subtitle: "服务器推理日志。",
+      logs_subtitle: "查看运行日志与故障历史，帮助了解服务状态并排查问题。",
       log_viewer: "日志查看器", auto_refresh: "自动刷新", log_lines: "行数：", log_interval: "刷新间隔：", log_interval_hint: "秒（0=关闭）", log_file: "文件：", log_level_filter: "级别：", log_level_all: "全部", log_search: "搜索：", refresh: "刷新", auto_scroll: "自动滚动", log_showing: "显示", log_lines_unit: "行", export_log: "导出日志",
       log_server_offline: "后端未运行", log_start_hint: "请在模型管理中加载本地模型以启动后端并查看日志。", log_no_entries: "暂无日志", log_no_app_logs: "暂无应用日志",
       settings_title: "应用设置", settings_subtitle_html: '标有 <span class="badge badge-restart">重启</span> 的设置需要重启服务。',
@@ -4653,7 +4657,7 @@
       batch_size_label: "批次大小", batch_size_desc: "同時處理的並行請求數。批次越大總吞吐量越高，但每個請求的延遲會增加。",
       speedup_label: "加速比", speedup_desc: "相對於單請求基準（1x）的 Token 生成吞吐量倍數。越高越好。",
       pp_tps_req_label: "（每請求提示詞處理 TPS）", pp_tps_req_desc: "提示詞處理吞吐量除以批次大小。顯示批次負載下每個請求的預填充速度。",
-      logs_subtitle: "伺服器推理日誌。",
+      logs_subtitle: "查看執行日誌與故障歷史，協助了解服務狀態並排查問題。",
       log_viewer: "日誌檢視器", auto_refresh: "自動重新整理", log_lines: "行數：", log_interval: "重新整理間隔：", log_interval_hint: "秒（0=關閉）", log_file: "檔案：", log_level_filter: "級別：", log_level_all: "全部", log_search: "搜尋：", refresh: "重新整理", auto_scroll: "自動捲動", log_showing: "顯示", log_lines_unit: "行", export_log: "匯出日誌",
       log_server_offline: "後端未執行", log_start_hint: "請在模型管理中載入本地模型以啟動後端並檢視日誌。", log_no_entries: "暫無日誌", log_no_app_logs: "暫無應用日誌",
       settings_title: "應用設定", settings_subtitle_html: '標有 <span class="badge badge-restart">重啟</span> 的設定需要重啟服務。',
@@ -4982,7 +4986,7 @@
       batch_size_label: "バッチサイズ", batch_size_desc: "同時に処理される並行リクエスト数。バッチが大きいほどスループットは向上するが、リクエストあたりの遅延が増加。",
       speedup_label: "高速化率", speedup_desc: "単一リクエストベースライン(1x)に対するトークン生成スループットの倍率。高いほど良い。",
       pp_tps_req_label: "（リクエストあたりプロンプトTPS）", pp_tps_req_desc: "プロンプト処理スループットをバッチサイズで割った値。バッチ負荷下のリクエストあたりのプリフィル速度を表示。",
-      logs_subtitle: "サーバー推論ログ。",
+      logs_subtitle: "実行ログと障害履歴を確認し、サービスの状態把握と問題の調査に役立てます。",
       log_viewer: "ログビューア", auto_refresh: "自動更新", log_lines: "行数：", log_interval: "更新間隔：", log_interval_hint: "秒（0=オフ）", log_file: "ファイル：", log_level_filter: "レベル：", log_level_all: "すべて", log_search: "検索：", refresh: "更新", auto_scroll: "自動スクロール", log_showing: "表示", log_lines_unit: "行", export_log: "ログエクスポート",
       log_server_offline: "バックエンドが実行されていません", log_start_hint: "Models でローカルモデルを読み込むと起動し、ログを表示できます。", log_no_entries: "ログエントリなし", log_no_app_logs: "アプリログエントリなし",
       settings_title: "アプリ設定", settings_subtitle_html: '<span class="badge badge-restart">再起動</span> マーク付きの設定はサーバーの再起動が必要です。',
@@ -5311,7 +5315,7 @@
       batch_size_label: "배치 크기", batch_size_desc: "동시에 처리되는 병렬 요청 수. 배치가 클수록 처리량은 증가하지만 요청당 지연이 증가.",
       speedup_label: "속도 향상", speedup_desc: "단일 요청 기준(1x) 대비 토큰 생성 처리량 배율. 높을수록 좋음.",
       pp_tps_req_label: "(요청당 프롬프트 TPS)", pp_tps_req_desc: "프롬프트 처리 처리량을 배치 크기로 나눈 값. 배치 부하에서 요청당 프리필 속도 표시.",
-      logs_subtitle: "서버 추론 로그.",
+      logs_subtitle: "실행 로그와 장애 기록을 확인하여 서비스 상태를 파악하고 문제를 해결합니다.",
       log_viewer: "로그 뷰어", auto_refresh: "자동 새로고침", log_lines: "줄 수:", log_interval: "새로고침 간격:", log_interval_hint: "초 (0=끄기)", log_file: "파일:", log_level_filter: "레벨:", log_level_all: "전체", log_search: "검색:", refresh: "새로고침", auto_scroll: "자동 스크롤", log_showing: "표시", log_lines_unit: "줄", export_log: "로그 내보내기",
       log_server_offline: "백엔드가 실행되고 있지 않습니다", log_start_hint: "Models에서 로컬 모델을 로드하면 시작되고 로그를 볼 수 있습니다.", log_no_entries: "로그 항목 없음", log_no_app_logs: "앱 로그 항목 없음",
       settings_title: "앱 설정", settings_subtitle_html: '<span class="badge badge-restart">재시작</span> 표시된 설정은 서버 재시작이 필요합니다.',
