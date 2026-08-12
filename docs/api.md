@@ -212,6 +212,12 @@ Hermes Agent 应使用无状态 Responses transport。配置方法和验证命�
 [Hermes Agent 集成指南](hermes-agent.md)。Hermes 执行客户端工具，IronMLX 只负责
 推理和生成结构化调用。
 
+#### oh-my-pi
+
+oh-my-pi 应使用 `openai-responses` provider。配置方法和验证命令见
+[oh-my-pi 集成指南](oh-my-pi.md)。OMP 执行客户端工具，IronMLX 只负责推理和
+生成结构化调用。
+
 ### Responses structured outputs
 
 `text.format` 支持 JSON mode 和受 Schema 约束的 Structured Outputs。JSON mode 使用：
