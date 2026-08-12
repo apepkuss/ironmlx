@@ -45,6 +45,15 @@ IronMLX.app/Contents/
 The build is ad-hoc signed for local execution. Developer ID signing,
 notarization, and DMG/PKG creation are outside P0-1.
 
+The bundled helper shares the same per-user backend lock as direct
+`ironmlx serve` CLI launches. Only one IronMLX backend may run for a macOS
+user, regardless of App instance or port. When another backend owns the lock,
+the App reports the conflict before creating its Dashboard or menu-bar UI,
+does not enter automatic helper recovery, and exits after the alert is dismissed.
+The App always starts the model-manager helper first, even when no local model
+is configured; after the helper is healthy, the UI is shown and confirmed models
+continue restoring asynchronously.
+
 GitHub Actions development previews preserve this ad-hoc, non-notarized
 boundary and label it explicitly in the App, archives, release title, and
 release notes. Public preview packaging and publication are currently blocked

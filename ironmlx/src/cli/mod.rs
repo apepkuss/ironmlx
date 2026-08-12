@@ -3,6 +3,7 @@
 //! Subcommands are dispatched here. Each subcommand lives in its own
 //! file under `src/cli/`.
 
+mod backend_instance_lock;
 mod generate;
 mod hf_transfer;
 mod info;
@@ -21,6 +22,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 use crate::Result;
+use backend_instance_lock::BackendInstanceLock;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -57,6 +59,14 @@ enum Command {
 
 impl Cli {
     pub fn run(self) -> Result<()> {
+        // The process-wide backend lock must be acquired before configuring MLX or
+        // loading its metallib. Keep the guard alive until the serve command exits.
+        let _backend_instance_lock = if matches!(&self.command, Command::Serve(_)) {
+            Some(BackendInstanceLock::acquire()?)
+        } else {
+            None
+        };
+
         if let Some(path) = self.mlx_metallib {
             let path = path
                 .to_str()

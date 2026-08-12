@@ -54,6 +54,10 @@ public struct BackendProcessTermination: Codable, Equatable, Sendable {
         self.stopIntent = stopIntent
         self.logTail = logTail
     }
+
+    public var failureCode: BackendRuntimeFailureCode? {
+        BackendRuntimeFailureCode.detect(in: logTail)
+    }
 }
 
 public struct BackendProcessLaunchPlan: Sendable {
@@ -199,6 +203,7 @@ public final class BackendProcessManager {
                 sessionHeader: IronMLXAppLogger.backendSessionHeader(command: plan.command)
             )
             let logHandle = try logStore.openFileForAppend(.backend)
+            let logStartOffset = try logHandle.offset()
             let process = processFactory()
             process.executableURL = plan.processURL
             process.arguments = plan.arguments
@@ -215,7 +220,8 @@ public final class BackendProcessManager {
                 launchID: launchID,
                 generation: generation,
                 process: process,
-                logHandle: logHandle
+                logHandle: logHandle,
+                logStartOffset: logStartOffset
             )
             process.terminationHandler = { [weak self] terminatedProcess in
                 let reason = Self.terminationReasonName(terminatedProcess.terminationReason)
@@ -332,7 +338,12 @@ public final class BackendProcessManager {
             terminationStatus: status,
             terminationReason: reason,
             stopIntent: launch.stopIntent,
-            logTail: logStore.tailText(from: .backend, maxLines: 200, maxBytes: 65_536)
+            logTail: logStore.tailText(
+                from: .backend,
+                startingAt: launch.logStartOffset,
+                maxLines: 200,
+                maxBytes: 65_536
+            )
         )
         lastTermination = termination
         currentLaunch = nil
@@ -392,6 +403,7 @@ private final class ManagedBackendLaunch {
     let generation: UInt64
     let process: Process
     let logHandle: FileHandle
+    let logStartOffset: UInt64
     var stopIntent: BackendStopIntent = .unexpected
     var logClosed = false
 
@@ -399,12 +411,14 @@ private final class ManagedBackendLaunch {
         launchID: UUID,
         generation: UInt64,
         process: Process,
-        logHandle: FileHandle
+        logHandle: FileHandle,
+        logStartOffset: UInt64
     ) {
         self.launchID = launchID
         self.generation = generation
         self.process = process
         self.logHandle = logHandle
+        self.logStartOffset = logStartOffset
     }
 }
 

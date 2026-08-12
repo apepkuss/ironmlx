@@ -107,6 +107,41 @@ public struct IronMLXLogStore: Sendable {
         return lines.joined(separator: "\n")
     }
 
+    public func tailText(
+        from file: IronMLXLogFile,
+        startingAt startOffset: UInt64,
+        maxLines: Int = 500,
+        maxBytes: Int = 65_536
+    ) -> String {
+        guard maxLines > 0, maxBytes > 0,
+              let handle = try? FileHandle(forReadingFrom: url(for: file))
+        else {
+            return ""
+        }
+        defer {
+            try? handle.close()
+        }
+        let size = (try? handle.seekToEnd()) ?? 0
+        let launchOffset = min(startOffset, size)
+        let boundedOffset = size > UInt64(maxBytes) ? size - UInt64(maxBytes) : 0
+        let readOffset = max(launchOffset, boundedOffset)
+        try? handle.seek(toOffset: readOffset)
+        var data = (try? handle.readToEnd()) ?? Data()
+        if readOffset > launchOffset {
+            while let first = data.first, first & 0b1100_0000 == 0b1000_0000 {
+                data.removeFirst()
+            }
+        }
+        guard var text = String(data: data, encoding: .utf8) else {
+            return ""
+        }
+        if readOffset > launchOffset, let newline = text.firstIndex(of: "\n") {
+            text.removeSubrange(...newline)
+        }
+        return text.split(separator: "\n").suffix(maxLines).map(String.init)
+            .joined(separator: "\n")
+    }
+
     public func diagnosticTail(
         from file: IronMLXLogFile,
         maxLines: Int,

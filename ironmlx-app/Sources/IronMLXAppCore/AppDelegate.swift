@@ -52,6 +52,45 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
         configurationRecovery.inspect()
 
+        let config = configStore.load()
+        let pinnedModels = Set(config.pinnedModelReferences)
+        let localModels = scanner.scan(
+            loadedModels: Set(config.restoredModelReferences),
+            pinnedModels: pinnedModels,
+            mtpEnabledModels: []
+        )
+        let launchPlan = launchPlanner.plan(config: config, localModels: localModels)
+        Task {
+            do {
+                try await backend.ensureRunning { [weak self] in
+                    self?.showInterface(route: launchPlan.dashboardRoute)
+                }
+                menu?.rebuildMenu()
+            } catch {
+                IronMLXAppLogger.error(
+                    "Failed to start ironmlx backend on app launch: \(error)"
+                )
+                if (error as? BackendRuntimeSupervisorError)?.failureCode
+                    == .instanceAlreadyRunning {
+                    BackendInstanceConflictPresentation.presentAlert(
+                        language: configStore.load().language
+                    )
+                    NSApp.terminate(nil)
+                    return
+                }
+                // Preserve the existing diagnostics path for launch failures that
+                // are unrelated to a competing backend instance.
+                showInterface(route: launchPlan.dashboardRoute)
+            }
+        }
+    }
+
+    private func showInterface(route: DashboardInitialRoute) {
+        if let dashboard {
+            dashboard.show(route: route)
+            return
+        }
+
         let dashboard = DashboardWindowController(configStore: configStore, backend: backend)
         let updateManager = SparkleAppUpdateManager.make()
         let menu = MenuBarController(
@@ -65,33 +104,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         self.menu = menu
         self.updateManager = updateManager
 
+        dashboard.show(route: route)
         if configurationRecovery.hasIssues {
             configurationRecovery.presentRecovery(nil)
             menu.rebuildMenu()
         }
-
-        let config = configStore.load()
-        let pinnedModels = Set(config.pinnedModelReferences)
-        let localModels = scanner.scan(
-            loadedModels: Set(config.restoredModelReferences),
-            pinnedModels: pinnedModels,
-            mtpEnabledModels: []
-        )
-        let launchPlan = launchPlanner.plan(config: config, localModels: localModels)
-        if !localModels.isEmpty || !launchPlan.backendModelReferences.isEmpty {
-            Task {
-                do {
-                    try await backend.ensureRunning()
-                } catch {
-                    IronMLXAppLogger.error(
-                        "Failed to start ironmlx backend on app launch: \(error)"
-                    )
-                }
-                menu.rebuildMenu()
-            }
-        }
-
-        dashboard.show(route: launchPlan.dashboardRoute)
     }
 
     public func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {

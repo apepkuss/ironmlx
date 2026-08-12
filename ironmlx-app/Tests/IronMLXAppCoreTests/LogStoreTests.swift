@@ -66,6 +66,20 @@ import Testing
     #expect(tail.contains("299-后台日志-🙂"))
 }
 
+@Test func logStoreTailCanBeScopedToCurrentLaunchOffset() throws {
+    let root = try temporaryDirectory().appendingPathComponent("logs", isDirectory: true)
+    let store = IronMLXLogStore(rootURL: root)
+    try store.appendLine("old launch failure", to: .backend)
+    let handle = try store.openFileForAppend(.backend)
+    let offset = try handle.offset()
+    try handle.write(contentsOf: Data("current launch failure\n".utf8))
+    try handle.close()
+
+    let tail = store.tailText(from: .backend, startingAt: offset)
+
+    #expect(tail == "current launch failure")
+}
+
 @Test func diagnosticLogTailRejectsSymlinksAndBoundsRegularFiles() throws {
     let root = try temporaryDirectory().appendingPathComponent("logs", isDirectory: true)
     let store = IronMLXLogStore(rootURL: root)

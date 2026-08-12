@@ -3,6 +3,18 @@
 App 默认在 `http://127.0.0.1:9068` 提供服务。直接运行 CLI 时默认端口为 8080，
 应以实际启动参数或 Dashboard 显示的 endpoint 为准。
 
+## 后端单实例约束
+
+同一 macOS 用户只能运行一个 `ironmlx serve` 后端，不同 App、CLI 参数或监听端口
+也不能绕过该约束。后端会在初始化 MLX、加载 metallib 或模型之前，对
+`~/.ironmlx/run/backend.lock` 获取非阻塞独占文件锁，并持有锁文件描述符直到进程
+退出。正常退出、崩溃或 `SIGKILL` 都由系统自动释放锁；锁文件本身可以保留，不应作为
+进程是否存活的判断依据。
+
+第二个后端会立即退出，并在标准错误输出稳定错误码
+`ironmlx_instance_already_running`。IronMLX App 会停止自动恢复循环，并提示用户先
+退出已有实例。
+
 ## 健康与模型列表
 
 ```bash

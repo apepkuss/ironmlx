@@ -297,6 +297,11 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
                 IronMLXAppLogger.error(
                     "Failed to restart ironmlx backend from menu: \(result.error ?? result.status)"
                 )
+                if result.errorCode == BackendRuntimeFailureCode.instanceAlreadyRunning.rawValue {
+                    BackendInstanceConflictPresentation.presentAlert(
+                        language: self.configStore.load().language
+                    )
+                }
             }
             self.rebuildMenu()
         }
