@@ -68,6 +68,33 @@ func plannedRestartCreatesNewGenerationWithoutOldTerminationPollution() async th
 }
 
 @Test @MainActor
+func processReadyCallbackRunsBeforeModelRestoreCompletes() async throws {
+    let restorer = GatedModelRestorer()
+    let harness = try runtimeHarness(restorer: restorer)
+    let readyCount = MainActorCounter()
+
+    let startup = Task {
+        try await harness.supervisor.ensureRunning {
+            readyCount.value += 1
+        }
+    }
+    let deadline = Date().addingTimeInterval(2)
+    while await !restorer.didStart, Date() < deadline {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    #expect(await restorer.didStart)
+    #expect(readyCount.value == 1)
+    #expect(harness.supervisor.isRunning)
+    #expect(harness.supervisor.state == .starting)
+
+    await restorer.release()
+    try await startup.value
+    #expect(harness.supervisor.state == .running)
+    await harness.supervisor.stop(intent: .userStop)
+}
+
+@Test @MainActor
 func benchmarkAndSchedulerPlannedRestartsPreserveLifecycleSemantics() async throws {
     for intent in [BackendStopIntent.benchmarkExclusive, .schedulerProfileGeneration] {
         let harness = try runtimeHarness()
@@ -217,6 +244,168 @@ func processRunFailureEntersFailedWithoutClaimingRunning() async throws {
     #expect(!supervisor.isRunning)
     #expect(manager.currentLaunchID == nil)
     #expect(manager.lastError?.isEmpty == false)
+}
+
+@Test @MainActor
+func instanceConflictStopsAutomaticRecoveryAndPublishesStableFailure() async throws {
+    let root = try runtimeTemporaryDirectory()
+    let configStore = AppConfigStore(url: root.appendingPathComponent("app_config.json"))
+    configStore.save(AppConfig())
+    let launchCount = MainActorCounter()
+    let processManager = BackendProcessManager(
+        configStore: configStore,
+        logStore: IronMLXLogStore(rootURL: root.appendingPathComponent("logs")),
+        launchPlanProvider: {
+            launchCount.value += 1
+            return BackendProcessLaunchPlan(
+                processURL: URL(fileURLWithPath: "/bin/sh"),
+                arguments: [
+                    "-c",
+                    "printf '%s\\n' 'Error: ironmlx_instance_already_running: lock held' >&2; exit 73",
+                ]
+            )
+        }
+    )
+    let incidentStore = BackendIncidentStore(url: root.appendingPathComponent("incidents.json"))
+    let supervisor = BackendRuntimeSupervisor(
+        processManager: processManager,
+        configStore: configStore,
+        scanner: LocalModelScanner(rootURL: root),
+        parameterStore: ModelParameterStore(
+            url: root.appendingPathComponent("model_params.json")
+        ),
+        restartCoordinator: FixedModelRestorer(result: .successful(port: 9068)),
+        incidentStore: incidentStore,
+        policy: BackendRecoveryPolicy(
+            maximumAutomaticRecoveryAttempts: 3,
+            automaticRecoveryDelay: 0,
+            stableWindow: 60,
+            readinessTimeout: 1
+        ),
+        readinessWaiter: { _, _ in
+            try await Task.sleep(for: .milliseconds(100))
+            throw RuntimeSupervisorTestError.readiness
+        }
+    )
+    let readyCount = MainActorCounter()
+
+    do {
+        try await supervisor.ensureRunning {
+            readyCount.value += 1
+        }
+        Issue.record("Expected the second backend launch to fail")
+    } catch let error as BackendRuntimeSupervisorError {
+        #expect(error == .instanceAlreadyRunning)
+    }
+    try await Task.sleep(for: .milliseconds(100))
+
+    #expect(supervisor.state == .failed)
+    #expect(!supervisor.isRunning)
+    #expect(supervisor.lastError?.contains("already running") == true)
+    #expect(supervisor.lastEvent?.phase == .failed)
+    #expect(supervisor.lastEvent?.errorCode == .instanceAlreadyRunning)
+    #expect(supervisor.lastEvent?.canRetry == false)
+    #expect(supervisor.lastIncident == nil)
+    #expect(incidentStore.records().isEmpty)
+    #expect(launchCount.value == 1)
+    #expect(readyCount.value == 0)
+}
+
+@Test @MainActor
+func instanceConflictDuringCrashRecoveryStopsWithoutAnotherLaunch() async throws {
+    let root = try runtimeTemporaryDirectory()
+    let configStore = AppConfigStore(url: root.appendingPathComponent("app_config.json"))
+    configStore.save(AppConfig())
+    let launchCount = MainActorCounter()
+    let processManager = BackendProcessManager(
+        configStore: configStore,
+        logStore: IronMLXLogStore(rootURL: root.appendingPathComponent("logs")),
+        launchPlanProvider: {
+            launchCount.value += 1
+            if launchCount.value == 1 {
+                return BackendProcessLaunchPlan(
+                    processURL: URL(fileURLWithPath: "/bin/sleep"),
+                    arguments: ["30"]
+                )
+            }
+            return BackendProcessLaunchPlan(
+                processURL: URL(fileURLWithPath: "/bin/sh"),
+                arguments: [
+                    "-c",
+                    "printf '%s\\n' 'Error: ironmlx_instance_already_running: lock held' >&2; exit 73",
+                ]
+            )
+        }
+    )
+    let incidentStore = BackendIncidentStore(url: root.appendingPathComponent("incidents.json"))
+    let supervisor = BackendRuntimeSupervisor(
+        processManager: processManager,
+        configStore: configStore,
+        scanner: LocalModelScanner(rootURL: root),
+        parameterStore: ModelParameterStore(
+            url: root.appendingPathComponent("model_params.json")
+        ),
+        restartCoordinator: FixedModelRestorer(result: .successful(port: 9068)),
+        incidentStore: incidentStore,
+        policy: BackendRecoveryPolicy(
+            maximumAutomaticRecoveryAttempts: 3,
+            automaticRecoveryDelay: 0,
+            stableWindow: 60,
+            readinessTimeout: 1
+        ),
+        readinessWaiter: { _, _ in
+            try await Task.sleep(for: .milliseconds(100))
+        }
+    )
+
+    try await supervisor.ensureRunning()
+    let firstPID = try #require(processManager.currentProcessIdentifier)
+    #expect(Darwin.kill(pid_t(firstPID), SIGKILL) == 0)
+    let deadline = Date().addingTimeInterval(3)
+    while supervisor.lastEvent?.errorCode != .instanceAlreadyRunning, Date() < deadline {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    try await Task.sleep(for: .milliseconds(100))
+
+    #expect(supervisor.state == .failed)
+    #expect(!supervisor.isRunning)
+    #expect(supervisor.lastEvent?.errorCode == .instanceAlreadyRunning)
+    #expect(supervisor.lastEvent?.canRetry == false)
+    #expect(supervisor.lastIncident?.recoveryResult == "failed")
+    #expect(supervisor.lastIncident?.recoverySteps.last?.action == .automaticRecoveryStopped)
+    #expect(incidentStore.records().last?.recoveryResult == "failed")
+    #expect(launchCount.value == 2)
+}
+
+@Test @MainActor
+func staleInstanceConflictLogCannotMisclassifyANewerLaunch() async throws {
+    let root = try runtimeTemporaryDirectory()
+    let logStore = IronMLXLogStore(rootURL: root.appendingPathComponent("logs"))
+    try logStore.appendLine(
+        "Error: ironmlx_instance_already_running: stale failure",
+        to: .backend
+    )
+    let manager = BackendProcessManager(
+        configStore: AppConfigStore(url: root.appendingPathComponent("app_config.json")),
+        logStore: logStore,
+        launchPlanProvider: {
+            BackendProcessLaunchPlan(
+                processURL: URL(fileURLWithPath: "/bin/sh"),
+                arguments: ["-c", "printf '%s\\n' 'new launch failure' >&2; exit 17"]
+            )
+        }
+    )
+
+    _ = try manager.startProcess()
+    let deadline = Date().addingTimeInterval(2)
+    while manager.lastTermination == nil, Date() < deadline {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let termination = try #require(manager.lastTermination)
+    #expect(termination.failureCode == nil)
+    #expect(termination.logTail.contains("new launch failure"))
+    #expect(!termination.logTail.contains("stale failure"))
 }
 
 @Test @MainActor
@@ -461,6 +650,28 @@ private struct FixedModelRestorer: BackendModelRestoring {
 
     func restore(_ snapshot: BackendRecoverySnapshot) async -> BackendRestartResult {
         result
+    }
+}
+
+private actor GatedModelRestorer: BackendModelRestoring {
+    private(set) var didStart = false
+    private var released = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func restore(_ snapshot: BackendRecoverySnapshot) async -> BackendRestartResult {
+        didStart = true
+        if !released {
+            await withCheckedContinuation { continuation in
+                self.continuation = continuation
+            }
+        }
+        return BackendRestartResult(success: true, status: "restarted", port: snapshot.config.port)
+    }
+
+    func release() {
+        released = true
+        continuation?.resume()
+        continuation = nil
     }
 }
 

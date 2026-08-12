@@ -39,6 +39,7 @@ public struct BackendRuntimeEvent: Codable, Equatable, Sendable {
     public var recoveredModels: [String]
     public var failedModels: [String]
     public var failures: [BackendModelRecoveryFailure]
+    public var errorCode: BackendRuntimeFailureCode?
     public var detail: String
     public var logTail: String?
     public var canRetry: Bool
@@ -56,6 +57,7 @@ public struct BackendRuntimeEvent: Codable, Equatable, Sendable {
         recoveredModels: [String] = [],
         failedModels: [String] = [],
         failures: [BackendModelRecoveryFailure] = [],
+        errorCode: BackendRuntimeFailureCode? = nil,
         detail: String,
         logTail: String? = nil,
         canRetry: Bool,
@@ -72,6 +74,7 @@ public struct BackendRuntimeEvent: Codable, Equatable, Sendable {
         self.recoveredModels = recoveredModels
         self.failedModels = failedModels
         self.failures = failures
+        self.errorCode = errorCode
         self.detail = detail
         self.logTail = logTail
         self.canRetry = canRetry
@@ -90,6 +93,7 @@ public struct BackendRuntimeEvent: Codable, Equatable, Sendable {
         case recoveredModels = "recovered_models"
         case failedModels = "failed_models"
         case failures
+        case errorCode = "error_code"
         case detail
         case logTail = "log_tail"
         case canRetry = "can_retry"
@@ -198,16 +202,26 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
     }
 
     public func ensureRunning() async throws {
+        try await ensureRunning(onProcessReady: nil)
+    }
+
+    public func ensureRunning(
+        onProcessReady: (@MainActor @Sendable () -> Void)?
+    ) async throws {
         if processManager.isRunning {
             if let launchID = processManager.currentLaunchID,
                state == .starting || state == .recovering {
                 await waitForLaunchCompletion(launchID)
                 guard processManager.isRunning else {
+                    if processManager.lastTermination?.failureCode == .instanceAlreadyRunning {
+                        throw BackendRuntimeSupervisorError.instanceAlreadyRunning
+                    }
                     throw BackendRuntimeSupervisorError.launchFailed(
                         processManager.lastError ?? "Backend launch was interrupted."
                     )
                 }
             }
+            onProcessReady?()
             return
         }
         clearBreakerForExplicitStart()
@@ -216,7 +230,8 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
             snapshot: snapshot,
             launchState: .starting,
             incidentID: nil,
-            isAutomaticRecovery: false
+            isAutomaticRecovery: false,
+            onProcessReady: onProcessReady
         )
     }
 
@@ -234,15 +249,18 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
                 snapshot: snapshot,
                 launchState: .starting,
                 incidentID: nil,
-                isAutomaticRecovery: false
+                isAutomaticRecovery: false,
+                onProcessReady: nil
             )
         } catch {
+            let failureCode = (error as? BackendRuntimeSupervisorError)?.failureCode
             return BackendRestartResult(
                 success: false,
                 status: "restart_failed",
                 port: snapshot.config.port,
                 model: snapshot.config.defaultModelReference,
                 failedModels: snapshot.models.map(\.id),
+                errorCode: failureCode?.rawValue,
                 error: error.localizedDescription
             )
         }
@@ -327,7 +345,8 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
         snapshot: BackendRecoverySnapshot,
         launchState: BackendProcessState,
         incidentID: UUID?,
-        isAutomaticRecovery: Bool
+        isAutomaticRecovery: Bool,
+        onProcessReady: (@MainActor @Sendable () -> Void)?
     ) async throws -> BackendRestartResult {
         let launchID = try processManager.startProcess(initialState: launchState)
         defer {
@@ -342,6 +361,9 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
                         ? .recoveryFailureCleanup
                         : .startupFailureCleanup
                 )
+            }
+            if launchFailure(for: launchID) == .instanceAlreadyRunning {
+                throw BackendRuntimeSupervisorError.instanceAlreadyRunning
             }
             guard !Task.isCancelled else {
                 throw CancellationError()
@@ -363,10 +385,14 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
         }
 
         guard processManager.currentLaunchID == launchID, processManager.isRunning else {
+            if launchFailure(for: launchID) == .instanceAlreadyRunning {
+                throw BackendRuntimeSupervisorError.instanceAlreadyRunning
+            }
             throw CancellationError()
         }
 
         appendRecoveryStep(.readinessCheckPassed, incidentID: incidentID)
+        onProcessReady?()
         appendRecoveryStep(.modelRestoreStarted, incidentID: incidentID)
         let result = await restartCoordinator.restore(snapshot)
         guard processManager.currentLaunchID == launchID, processManager.isRunning else {
@@ -426,6 +452,40 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
     private func processDidTerminate(_ termination: BackendProcessTermination) {
         if termination.stopIntent.isPlanned {
             processManager.transition(to: .stopped)
+            return
+        }
+
+        if termination.failureCode == .instanceAlreadyRunning {
+            stableWindowTask?.cancel()
+            breakerActive = false
+            let error = BackendRuntimeSupervisorError.instanceAlreadyRunning
+            if var activeIncident {
+                activeIncident.record.recoveryResult = "failed"
+                activeIncident.record.error = error.localizedDescription
+                activeIncident.record.updatedAt = Date()
+                activeIncident.record.appendRecoveryStep(.automaticRecoveryStopped)
+                self.activeIncident = activeIncident
+                lastIncident = activeIncident.record
+                persistIncident(activeIncident.record)
+            }
+            processManager.transition(to: .failed, error: error.localizedDescription)
+            publish(
+                BackendRuntimeEvent(
+                    phase: .failed,
+                    runtimeState: .failed,
+                    incidentID: activeIncident?.record.id,
+                    launchID: termination.launchID,
+                    pid: termination.pid,
+                    terminationStatus: termination.terminationStatus,
+                    terminationReason: termination.terminationReason,
+                    recoveryAttempt: activeIncident?.record.recoveryAttempt ?? 0,
+                    errorCode: .instanceAlreadyRunning,
+                    detail: error.localizedDescription,
+                    logTail: BackendIncidentRecord.sanitizedLogTail(termination.logTail),
+                    canRetry: false,
+                    processHealthy: false
+                )
+            )
             return
         }
 
@@ -525,7 +585,8 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
                     snapshot: active.snapshot,
                     launchState: .recovering,
                     incidentID: incidentID,
-                    isAutomaticRecovery: true
+                    isAutomaticRecovery: true,
+                    onProcessReady: nil
                 )
                 guard !Task.isCancelled,
                       var completed = self.activeIncident,
@@ -647,6 +708,13 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
         waiters.forEach { $0.resume() }
     }
 
+    private func launchFailure(for launchID: UUID) -> BackendRuntimeFailureCode? {
+        guard processManager.lastTermination?.launchID == launchID else {
+            return nil
+        }
+        return processManager.lastTermination?.failureCode
+    }
+
     nonisolated private static func terminationDetail(
         _ termination: BackendProcessTermination
     ) -> String {
@@ -663,11 +731,23 @@ private struct ActiveBackendIncident {
 }
 
 public enum BackendRuntimeSupervisorError: LocalizedError, Equatable {
+    case instanceAlreadyRunning
     case readinessFailed(String)
     case launchFailed(String)
 
+    public var failureCode: BackendRuntimeFailureCode? {
+        switch self {
+        case .instanceAlreadyRunning:
+            .instanceAlreadyRunning
+        case .readinessFailed, .launchFailed:
+            nil
+        }
+    }
+
     public var errorDescription: String? {
         switch self {
+        case .instanceAlreadyRunning:
+            return "Another IronMLX backend is already running for this macOS user."
         case .readinessFailed(let detail):
             return "Backend did not become healthy: \(detail)"
         case .launchFailed(let detail):

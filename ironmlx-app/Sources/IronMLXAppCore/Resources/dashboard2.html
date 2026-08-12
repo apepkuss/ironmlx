@@ -3774,6 +3774,7 @@
       server_crash_recovering: "Server recovery is in progress...",
       server_crash_recovered: "Server has been restarted successfully.",
       server_crash_failed: "Server restart failed: {detail}",
+      server_instance_already_running: "Another IronMLX instance is already running for this macOS user. Quit it before retrying.",
       server_crash_breaker: "Automatic recovery stopped after consecutive crashes. Check the logs, then retry manually.",
       server_crash_retry: "Retry",
       server_crash_logs: "View logs",
@@ -4120,6 +4121,7 @@
       server_crash_recovering: "正在恢复服务...",
       server_crash_recovered: "服务已成功重启。",
       server_crash_failed: "服务重启失败：{detail}",
+      server_instance_already_running: "当前 macOS 用户已有一个 IronMLX 实例正在运行。请先退出该实例，然后重试。",
       server_crash_breaker: "服务连续崩溃，已停止自动恢复。请检查日志后手动重试。",
       server_crash_retry: "手动重试",
       server_crash_logs: "查看日志",
@@ -4466,6 +4468,7 @@
       server_crash_recovering: "正在恢復服務...",
       server_crash_recovered: "服務已成功重啟。",
       server_crash_failed: "服務重啟失敗：{detail}",
+      server_instance_already_running: "目前 macOS 使用者已有一個 IronMLX 執行個體正在執行。請先結束該執行個體，然後重試。",
       server_crash_breaker: "服務連續崩潰，已停止自動恢復。請檢查日誌後手動重試。",
       server_crash_retry: "手動重試",
       server_crash_logs: "檢視日誌",
@@ -4795,6 +4798,7 @@
       server_crash_recovering: "サーバーを復旧しています...",
       server_crash_recovered: "サーバーが正常に再起動しました。",
       server_crash_failed: "サーバーの再起動に失敗しました：{detail}",
+      server_instance_already_running: "この macOS ユーザーでは別の IronMLX インスタンスがすでに実行中です。終了してから再試行してください。",
       server_crash_breaker: "連続クラッシュのため自動復旧を停止しました。ログを確認してから手動で再試行してください。",
       server_crash_retry: "再試行",
       server_crash_logs: "ログを表示",
@@ -5124,6 +5128,7 @@
       server_crash_recovering: "서버를 복구하는 중입니다...",
       server_crash_recovered: "서버가 성공적으로 재시작되었습니다.",
       server_crash_failed: "서버 재시작 실패: {detail}",
+      server_instance_already_running: "이 macOS 사용자에게 다른 IronMLX 인스턴스가 이미 실행 중입니다. 종료한 후 다시 시도하십시오.",
       server_crash_breaker: "연속 충돌로 자동 복구가 중지되었습니다. 로그를 확인한 후 수동으로 다시 시도하세요.",
       server_crash_retry: "다시 시도",
       server_crash_logs: "로그 보기",
@@ -9073,6 +9078,12 @@
         if (banner) banner.remove();
       }, 10000);
     } else if (phase === 'failed') {
+      if (payload.error_code === 'ironmlx_instance_already_running') {
+        const msg = dict.server_instance_already_running
+          || 'Another IronMLX instance is already running for this macOS user. Quit it before retrying.';
+        showServerBanner(msg, '#ff3b30', '#ff3b3014', '#ff3b3040', false, false);
+        return;
+      }
       const failures = Array.isArray(payload.failures) ? payload.failures : [];
       const localizedDetails = failures.map(failure => {
         const reason = recoveryReason(failure, dict);
