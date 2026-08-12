@@ -41,6 +41,7 @@ open dist/IronMLX.app
 
 - [支持模型矩阵](docs/supported-models.md)
 - [API 示例](docs/api.md)
+- [Hermes Agent 集成](docs/hermes-agent.md)
 - [隐私与网络边界](docs/privacy.md)
 - [数据位置与卸载](docs/storage-and-uninstall.md)
 - [故障排查](docs/troubleshooting.md)

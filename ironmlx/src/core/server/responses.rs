@@ -837,6 +837,65 @@ fn namespace_alias(namespace_index: usize, name: &str) -> String {
     format!("{prefix}{suffix}")
 }
 
+/// Make JSON Schema's implicit open-object default explicit for nested dynamic
+/// values before handing Responses tools to the bounded decoder.
+///
+/// The public tool root remains unchanged: IronMLX still requires an object
+/// schema with declared `properties`. Nested `{ "type": "object" }` values,
+/// however, are valid JSON Schema and mean `additionalProperties: true`.
+fn normalize_response_tool_schema(schema: &serde_json::Value) -> serde_json::Value {
+    fn visit(schema: &mut serde_json::Value, depth: usize) {
+        let Some(object) = schema.as_object_mut() else {
+            return;
+        };
+        let is_object = match object.get("type") {
+            Some(serde_json::Value::String(kind)) => kind == "object",
+            Some(serde_json::Value::Array(kinds)) => {
+                kinds.iter().any(|kind| kind.as_str() == Some("object"))
+            }
+            _ => false,
+        };
+        if depth > 0
+            && is_object
+            && !object.contains_key("properties")
+            && !object.contains_key("additionalProperties")
+        {
+            object.insert(
+                "additionalProperties".to_owned(),
+                serde_json::Value::Bool(true),
+            );
+        }
+        if let Some(properties) = object
+            .get_mut("properties")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            for property in properties.values_mut() {
+                visit(property, depth + 1);
+            }
+        }
+        if let Some(branches) = object
+            .get_mut("anyOf")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for branch in branches {
+                visit(branch, depth + 1);
+            }
+        }
+        if let Some(items) = object.get_mut("items") {
+            visit(items, depth + 1);
+        }
+        if let Some(additional) = object.get_mut("additionalProperties") {
+            if additional.is_object() {
+                visit(additional, depth + 1);
+            }
+        }
+    }
+
+    let mut normalized = schema.clone();
+    visit(&mut normalized, 0);
+    normalized
+}
+
 fn flatten_response_tools(
     tools: &[ResponseTool],
 ) -> anyhow::Result<(Vec<openai::OpenAiTool>, ToolAliases)> {
@@ -855,7 +914,7 @@ fn flatten_response_tools(
                 function: ToolDefinition {
                     name: name.clone(),
                     description: description.clone(),
-                    parameters: parameters.clone(),
+                    parameters: normalize_response_tool_schema(parameters),
                     strict: *strict,
                 },
             }),
@@ -879,10 +938,11 @@ fn flatten_response_tools(
                             defer_loading: _,
                         } => {
                             crate::core::tool_calling::validate_function_name(name)?;
+                            let normalized_parameters = normalize_response_tool_schema(parameters);
                             let definition = ToolDefinition {
                                 name: name.clone(),
                                 description: description.clone(),
-                                parameters: parameters.clone(),
+                                parameters: normalized_parameters.clone(),
                                 strict: *strict,
                             };
                             let mut encoding = match crate::core::constrained::validate_tool_schemas(
@@ -910,7 +970,7 @@ fn flatten_response_tools(
                                 "description": description,
                                 "properties": {
                                     "name": {"type":"string", "const":name},
-                                    "arguments": parameters,
+                                    "arguments": normalized_parameters,
                                 },
                                 "required":["name", "arguments"],
                                 "additionalProperties":false,
@@ -2892,6 +2952,81 @@ mod tests {
         assert_eq!(
             normalized.chat.messages[3].tool_call_id.as_deref(),
             Some("call_1")
+        );
+    }
+
+    #[test]
+    fn accepts_hermes_responses_dynamic_tool_bridge_without_changing_chat() {
+        let normalized = request(serde_json::json!({
+            "model": "local",
+            "instructions": "Be concise.",
+            "input": [{"role":"user","content":"Use the deferred tool."}],
+            "tools": [{
+                "type": "function",
+                "name": "tool_call",
+                "description": "Invoke a deferred tool by name with the given arguments.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type":"string"},
+                        "arguments": {
+                            "type":"object",
+                            "description":"Arguments matching the deferred tool schema."
+                        }
+                    },
+                    "required": ["name", "arguments"]
+                },
+                "strict": false
+            }],
+            "tool_choice": "auto",
+            "parallel_tool_calls": true,
+            "store": false,
+            "reasoning": {"effort":"medium","summary":"auto"},
+            "include": ["reasoning.encrypted_content"],
+            "prompt_cache_key": "hermes-session"
+        }))
+        .normalize()
+        .expect("Hermes Responses request normalizes");
+
+        let tools = normalized.chat.tools.as_ref().expect("tool survives");
+        assert_eq!(
+            tools[0].function.parameters["properties"]["arguments"]["additionalProperties"],
+            true
+        );
+        openai::prepare_tool_request(
+            &normalized.chat,
+            Some(crate::core::tool_calling::ToolDialect::Qwen35),
+        )
+        .expect("Hermes bridge compiles for Responses")
+        .expect("prepared tools");
+
+        let chat: openai::ChatRequest = serde_json::from_value(serde_json::json!({
+            "messages": [{"role":"user","content":"Use the deferred tool."}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "tool_call",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type":"string"},
+                            "arguments": {"type":"object"}
+                        },
+                        "required": ["name", "arguments"]
+                    }
+                }
+            }]
+        }))
+        .expect("valid Chat request shape");
+        let error = openai::prepare_tool_request(
+            &chat,
+            Some(crate::core::tool_calling::ToolDialect::Qwen35),
+        )
+        .expect_err("Chat schema behavior remains unchanged");
+        assert!(
+            format!("{error:#}")
+                .contains("object schemas require properties or open additionalProperties"),
+            "{error:#}"
         );
     }
 

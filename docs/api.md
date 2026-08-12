@@ -206,6 +206,12 @@ Responses 使用顶层 function tool 形状：
 严格图片 `data:` URL message item、function call/output、同步和 SSE，以及现有全部
 模型工具 dialect 和约束选项。
 
+#### Hermes Agent
+
+Hermes Agent 应使用无状态 Responses transport。配置方法和验证命令见
+[Hermes Agent 集成指南](hermes-agent.md)。Hermes 执行客户端工具，IronMLX 只负责
+推理和生成结构化调用。
+
 ### Responses structured outputs
 
 `text.format` 支持 JSON mode 和受 Schema 约束的 Structured Outputs。JSON mode 使用：
