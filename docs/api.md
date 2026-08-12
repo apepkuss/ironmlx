@@ -14,6 +14,11 @@ curl http://127.0.0.1:9068/v1/models
 `/health` 只表示 HTTP 进程可响应；`/healthz` 返回包含产品版本、模型、调度器、
 缓存和内存状态的 JSON 快照。
 
+App daemon 与 EnginePool 的 `GET /v1/models` 返回 OpenAI-compatible 模型列表；
+`data[]` 至少包含 `id`、`object:"model"`、`created` 和 `owned_by`，并附带 IronMLX
+模型加载策略与运行状态字段。列表来自当前可服务的注册模型，因此 OMP 等客户端可通过
+OpenAI models-list discovery 自动发现已经注册但尚未加载或已经加载的模型。
+
 `/healthz.memory.free_ram_bytes` 是操作系统报告的原始空闲页，仅用于观测；
 `available_ram_bytes` 使用与进程内存 governor 相同的可回收内存口径。内存健康
 状态由 `process_governor.pressure_level` 决定，而不是固定的 raw-free 阈值。
@@ -83,8 +88,8 @@ Gemma4 drafter、DiffusionGemma、EnginePool 和 App daemon 共用同一请求�
 
 该一致性只约束 HTTP transport、协议错误和模型分派语义，不表示所有模型架构拥有
 相同推理能力。DiffusionGemma 的 sampling、MTP、KV cache 和 PromptLookup 限制仍按
-其 capability 描述明确拒绝。`/v1/models` 和 `/admin/api/models/*` 等模型管理路由也
-只在对应的 EnginePool 或 App daemon 拓扑公开。
+其 capability 描述明确拒绝。`/v1/models` 只在 EnginePool 和 App daemon 拓扑公开；
+`/admin/api/models/*` 只在 App daemon 拓扑公开。
 
 ### SSE 断连与取消契约
 
@@ -224,10 +229,13 @@ Schema 模式使用：
 输出仍是 Responses 的 `message` / `output_text` item；客户端将其中的文本解析为
 JSON。IronMLX 在 token 采样前应用 grammar mask，并在生成结束后再次验证完整 JSON。
 支持的 Schema 子集为 `object`、`array`、`string`、`number`、`integer`、`boolean`、
-`null`、nullable type 数组、`properties`、`required`、
-`additionalProperties:false`、`items`、`enum`、`const` 和 `anyOf`。不支持的关键字
-会在生成前返回 400，不会静默弱化。`strict:true` 要求每层 object 都设置
-`additionalProperties:false`，并把所有 properties 列入 `required`。
+`null`、nullable type 数组、`properties`、`required`、`items`、`enum`、`const`、
+`anyOf`、`minItems`、`maxItems`、`minLength`、`maxLength`、`minimum`、`maximum`、
+`exclusiveMinimum` 和 `exclusiveMaximum`。非 strict 工具的嵌套 object 还支持
+`additionalProperties:true` 或以受支持 Schema 约束动态属性值；顶层工具参数对象仍
+必须封闭。Schema 最大深度为 8。不支持的关键字会在生成前返回 400，不会静默弱化。
+`strict:true` 要求每层 object 都设置 `additionalProperties:false`，并把所有
+properties 列入 `required`。
 
 当请求同时包含 function tools 和 `text.format` 时：
 

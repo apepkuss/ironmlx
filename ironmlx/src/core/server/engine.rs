@@ -1777,7 +1777,7 @@ impl EnginePoolState {
         Ok((engines.len(), cleared_entries))
     }
 
-    async fn model_list(&self) -> OpenAiModelList {
+    pub(super) async fn model_list(&self) -> OpenAiModelList {
         let mut data = Vec::new();
         let models = self.inner.registry.lock().await.servable_models_owned();
         for model in models {
@@ -3457,7 +3457,7 @@ async fn healthz_handler(State(pool): State<EnginePoolState>) -> Json<EnginePool
 }
 
 #[derive(Debug, Serialize)]
-struct OpenAiModelList {
+pub(super) struct OpenAiModelList {
     object: &'static str,
     data: Vec<OpenAiModelInfo>,
 }

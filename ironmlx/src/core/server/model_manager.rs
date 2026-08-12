@@ -1134,9 +1134,18 @@ pub async fn serve_app_daemon(args: ServeArgs) -> Result<()> {
     let network = args.resolved_network_config()?;
     let manager = ModelManager::new(args)?;
     manager.start_model_ttl_sweeper();
-    let app = Router::new()
+    let app = app_router(manager);
+
+    let serve_result = super::security::serve_router(app, network, "ironmlx app daemon").await;
+    crate::core::cache::shutdown_process_async_prefix_store_queue();
+    serve_result
+}
+
+fn app_router(manager: ModelManager) -> Router {
+    Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/healthz", get(app_healthz_handler))
+        .route("/v1/models", get(app_models_handler))
         .route("/v1/chat/completions", post(app_openai_handler))
         .route("/v1/responses", post(app_responses_handler))
         .route("/v1/messages", post(app_anthropic_handler))
@@ -1152,11 +1161,7 @@ pub async fn serve_app_daemon(args: ServeArgs) -> Result<()> {
         .route("/admin/api/models/pin", post(pin_model_handler))
         .route("/admin/api/models/unpin", post(unpin_model_handler))
         .route("/admin/api/models/default", post(set_default_model_handler))
-        .with_state(manager);
-
-    let serve_result = super::security::serve_router(app, network, "ironmlx app daemon").await;
-    crate::core::cache::shutdown_process_async_prefix_store_queue();
-    serve_result
+        .with_state(manager)
 }
 
 async fn app_openai_handler(
@@ -1182,6 +1187,12 @@ async fn app_anthropic_handler(
 
 async fn app_healthz_handler(State(manager): State<ModelManager>) -> Json<AppHealthSnapshot> {
     Json(manager.health_snapshot().await)
+}
+
+async fn app_models_handler(
+    State(manager): State<ModelManager>,
+) -> Json<super::engine::OpenAiModelList> {
+    Json(manager.pool.model_list().await)
 }
 
 async fn list_loaded_handler(State(manager): State<ModelManager>) -> Json<Vec<LoadedModelInfo>> {
@@ -2008,6 +2019,60 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn app_daemon_models_route_exposes_registered_models() {
+        let model_dir = unique_temp_dir("app-models-route");
+        write_config(&model_dir, r#"{"model_type":"qwen3_5"}"#);
+        let manager = ModelManager::new(serve_args()).expect("model manager");
+        manager
+            .pool
+            .register_dynamic_model(
+                EngineModelConfig {
+                    id: "mlx-community/Qwen3.6-27B-4bit".to_string(),
+                    path: model_dir.clone(),
+                    load_policy: EngineLoadPolicy::Lazy,
+                    default: false,
+                    pinned: false,
+                    scheduler_runtime_profile: None,
+                    mtp: None,
+                    prompt_lookup: None,
+                    sampling_defaults: SamplingDefaults::default(),
+                    capabilities: EngineModelCapabilities::for_architecture(
+                        ModelArchitecture::Qwen35Dense,
+                        false,
+                    ),
+                },
+                true,
+            )
+            .await
+            .expect("register model");
+
+        let response = app_router(manager)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/v1/models")
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("models response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("models body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("models json");
+        std::fs::remove_dir_all(model_dir).expect("remove temp model dir");
+
+        assert_eq!(body["object"], "list");
+        assert_eq!(body["data"].as_array().map(Vec::len), Some(1));
+        assert_eq!(body["data"][0]["id"], "mlx-community/Qwen3.6-27B-4bit");
+        assert_eq!(body["data"][0]["object"], "model");
+        assert_eq!(body["data"][0]["created"], 0);
+        assert_eq!(body["data"][0]["owned_by"], "ironmlx");
+        assert_eq!(body["data"][0]["state"], "unloaded");
+    }
 
     #[tokio::test]
     async fn app_daemon_resolve_errors_follow_protocol_contract() {

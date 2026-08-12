@@ -906,9 +906,7 @@ async fn prepare_openai_request(
         )
         .and_then(|messages| {
             let kwargs = super::openai::tool_template_kwargs(chat_template_kwargs, prepared)?;
-            state
-                .tokenizer
-                .render_and_encode_tool_prompt(&messages, &kwargs)
+            super::openai::render_tool_prompt(&state.tokenizer, &messages, &kwargs, prepared)
         })
     } else {
         render_and_encode(

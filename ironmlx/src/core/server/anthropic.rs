@@ -997,7 +997,7 @@ where
         .and_then(|messages| {
             let kwargs =
                 super::openai::tool_template_kwargs(chat_template_kwargs.clone(), prepared)?;
-            super::openai::render_tool_prompt(&state.tokenizer, &messages, &kwargs)
+            super::openai::render_tool_prompt(&state.tokenizer, &messages, &kwargs, prepared)
         })
     } else {
         render_and_encode(
@@ -1233,7 +1233,7 @@ pub(crate) async fn messages_with_gemma4_drafter_state(
         .and_then(|messages| {
             let kwargs =
                 super::openai::tool_template_kwargs(chat_template_kwargs.clone(), prepared)?;
-            super::openai::render_tool_prompt(&state.base.tokenizer, &messages, &kwargs)
+            super::openai::render_tool_prompt(&state.base.tokenizer, &messages, &kwargs, prepared)
         })
     } else {
         render_and_encode(
