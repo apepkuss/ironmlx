@@ -17,9 +17,10 @@ use crate::core::tool_calling::ToolDialect;
 use crate::core::tool_calling::{ToolDefinition, GEMMA_STRING_DELIMITER};
 use crate::Result;
 
-const MAX_SCHEMA_DEPTH: usize = 5;
+const MAX_SCHEMA_DEPTH: usize = 8;
 const MAX_SCHEMA_NODES: usize = 256;
 const MAX_TOP_LEVEL_PARAMETERS: usize = 64;
+const MAX_SCHEMA_LENGTH_BOUND: u64 = 1_048_576;
 
 /// Request-level tool selection semantics compiled into one grammar plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -218,7 +219,7 @@ impl ConstraintTokenizer {
         options: &ToolConstraintOptions,
         output_schema: Option<&Value>,
     ) -> Result<ConstraintPlan> {
-        validate_tool_schemas(tools)?;
+        validate_gemma_model_tool_schemas(tools)?;
         if let Some(schema) = output_schema {
             validate_constraint_output_schema(schema)?;
         }
@@ -830,6 +831,28 @@ pub fn apply_diffusion_token_masks(logits: &Array, masks: &[SimpleVob]) -> Resul
 }
 
 pub fn validate_tool_schemas(tools: &[ToolDefinition]) -> Result<()> {
+    validate_tool_schemas_with_limits(tools, MAX_SCHEMA_DEPTH, MAX_SCHEMA_NODES)
+}
+
+/// Validate the deterministic Gemma-facing projection of tool schemas.
+///
+/// Callers must validate the original client schemas first. The projection
+/// replaces open objects with arrays of key/value entries, which adds bounded
+/// implementation-only nodes and depth without widening the public schema
+/// contract.
+pub(crate) fn validate_gemma_model_tool_schemas(tools: &[ToolDefinition]) -> Result<()> {
+    validate_tool_schemas_with_limits(
+        tools,
+        MAX_SCHEMA_DEPTH.saturating_mul(3).saturating_add(2),
+        MAX_SCHEMA_NODES.saturating_mul(4),
+    )
+}
+
+fn validate_tool_schemas_with_limits(
+    tools: &[ToolDefinition],
+    max_depth: usize,
+    max_nodes: usize,
+) -> Result<()> {
     for tool in tools {
         let root = tool
             .parameters
@@ -850,7 +873,7 @@ pub fn validate_tool_schemas(tools: &[ToolDefinition]) -> Result<()> {
             );
         }
         let mut nodes = 0_usize;
-        validate_schema_node(&tool.parameters, 0, &mut nodes)
+        validate_schema_node_with_limits(&tool.parameters, 0, &mut nodes, max_depth, max_nodes)
             .with_context(|| format!("unsupported schema for tool `{}`", tool.name))?;
     }
     Ok(())
@@ -946,15 +969,22 @@ fn validate_strict_schema_node(schema: &Value, path: &str) -> Result<()> {
 }
 
 fn validate_schema_node(schema: &Value, depth: usize, nodes: &mut usize) -> Result<()> {
+    validate_schema_node_with_limits(schema, depth, nodes, MAX_SCHEMA_DEPTH, MAX_SCHEMA_NODES)
+}
+
+fn validate_schema_node_with_limits(
+    schema: &Value,
+    depth: usize,
+    nodes: &mut usize,
+    max_depth: usize,
+    max_nodes: usize,
+) -> Result<()> {
     anyhow::ensure!(
-        depth <= MAX_SCHEMA_DEPTH,
-        "schema nesting exceeds {MAX_SCHEMA_DEPTH} levels"
+        depth <= max_depth,
+        "schema nesting exceeds {max_depth} levels"
     );
     *nodes = nodes.saturating_add(1);
-    anyhow::ensure!(
-        *nodes <= MAX_SCHEMA_NODES,
-        "schema exceeds {MAX_SCHEMA_NODES} nodes"
-    );
+    anyhow::ensure!(*nodes <= max_nodes, "schema exceeds {max_nodes} nodes");
     let object = schema
         .as_object()
         .ok_or_else(|| anyhow!("schema node must be an object"))?;
@@ -964,6 +994,14 @@ fn validate_schema_node(schema: &Value, depth: usize, nodes: &mut usize) -> Resu
         "required",
         "additionalProperties",
         "items",
+        "minItems",
+        "maxItems",
+        "minLength",
+        "maxLength",
+        "minimum",
+        "maximum",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
         "enum",
         "const",
         "anyOf",
@@ -986,7 +1024,7 @@ fn validate_schema_node(schema: &Value, depth: usize, nodes: &mut usize) -> Resu
             .ok_or_else(|| anyhow!("anyOf must be an array"))?;
         anyhow::ensure!(!branches.is_empty(), "anyOf must not be empty");
         for branch in branches {
-            validate_schema_node(branch, depth + 1, nodes)?;
+            validate_schema_node_with_limits(branch, depth + 1, nodes, max_depth, max_nodes)?;
         }
     }
     if let Some(properties) = object.get("properties") {
@@ -995,26 +1033,45 @@ fn validate_schema_node(schema: &Value, depth: usize, nodes: &mut usize) -> Resu
             .ok_or_else(|| anyhow!("properties must be an object"))?;
         for (name, property) in properties {
             validate_parameter_name(name)?;
-            validate_schema_node(property, depth + 1, nodes)?;
+            validate_schema_node_with_limits(property, depth + 1, nodes, max_depth, max_nodes)?;
         }
         validate_required(object, properties)?;
     } else if object.contains_key("required") {
         bail!("required requires properties");
     }
     if let Some(additional) = object.get("additionalProperties") {
-        anyhow::ensure!(
-            additional == &Value::Bool(false),
-            "additionalProperties only supports false"
-        );
+        match additional {
+            Value::Bool(false) => {}
+            Value::Bool(true) => {
+                anyhow::ensure!(depth > 0, "top-level additionalProperties must be false")
+            }
+            Value::Object(_) => {
+                anyhow::ensure!(depth > 0, "top-level additionalProperties must be false");
+                validate_schema_node_with_limits(
+                    additional,
+                    depth + 1,
+                    nodes,
+                    max_depth,
+                    max_nodes,
+                )?;
+            }
+            _ => bail!("additionalProperties must be a boolean or schema object"),
+        }
     }
     if let Some(items) = object.get("items") {
-        validate_schema_node(items, depth + 1, nodes)?;
+        validate_schema_node_with_limits(items, depth + 1, nodes, max_depth, max_nodes)?;
     }
     if type_contains(object.get("type"), "array") && !object.contains_key("items") {
         bail!("array schemas require items");
     }
-    if type_contains(object.get("type"), "object") && !object.contains_key("properties") {
-        bail!("object schemas require properties");
+    if type_contains(object.get("type"), "object")
+        && !object.contains_key("properties")
+        && !matches!(
+            object.get("additionalProperties"),
+            Some(Value::Bool(true) | Value::Object(_))
+        )
+    {
+        bail!("object schemas require properties or open additionalProperties");
     }
     if let Some(values) = object.get("enum") {
         let values = values
@@ -1028,6 +1085,83 @@ fn validate_schema_node(schema: &Value, depth: usize, nodes: &mut usize) -> Resu
         && !object.contains_key("const")
     {
         bail!("schema node requires type, anyOf, enum, or const");
+    }
+    validate_length_bounds(object, "minLength", "maxLength", "string")?;
+    validate_length_bounds(object, "minItems", "maxItems", "array")?;
+    validate_numeric_bounds(object)?;
+    Ok(())
+}
+
+fn validate_length_bounds(
+    object: &Map<String, Value>,
+    minimum_name: &str,
+    maximum_name: &str,
+    expected_type: &str,
+) -> Result<()> {
+    let minimum = schema_non_negative_integer(object, minimum_name)?;
+    let maximum = schema_non_negative_integer(object, maximum_name)?;
+    if minimum.is_some() || maximum.is_some() {
+        anyhow::ensure!(
+            type_contains(object.get("type"), expected_type),
+            "{minimum_name}/{maximum_name} require type `{expected_type}`"
+        );
+    }
+    if let (Some(minimum), Some(maximum)) = (minimum, maximum) {
+        anyhow::ensure!(
+            minimum <= maximum,
+            "{minimum_name} must not exceed {maximum_name}"
+        );
+    }
+    Ok(())
+}
+
+fn schema_non_negative_integer(object: &Map<String, Value>, name: &str) -> Result<Option<u64>> {
+    let Some(value) = object.get(name) else {
+        return Ok(None);
+    };
+    let value = value
+        .as_u64()
+        .ok_or_else(|| anyhow!("{name} must be a non-negative integer"))?;
+    anyhow::ensure!(
+        value <= MAX_SCHEMA_LENGTH_BOUND,
+        "{name} exceeds {MAX_SCHEMA_LENGTH_BOUND}"
+    );
+    Ok(Some(value))
+}
+
+fn validate_numeric_bounds(object: &Map<String, Value>) -> Result<()> {
+    const BOUNDS: &[&str] = &["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"];
+    let has_bound = BOUNDS.iter().any(|name| object.contains_key(*name));
+    if !has_bound {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        type_contains(object.get("type"), "number") || type_contains(object.get("type"), "integer"),
+        "numeric bounds require type `number` or `integer`"
+    );
+    for name in BOUNDS {
+        if let Some(value) = object.get(*name) {
+            anyhow::ensure!(value.is_number(), "{name} must be a number");
+        }
+    }
+    anyhow::ensure!(
+        !(object.contains_key("minimum") && object.contains_key("exclusiveMinimum")),
+        "minimum and exclusiveMinimum cannot both be set"
+    );
+    anyhow::ensure!(
+        !(object.contains_key("maximum") && object.contains_key("exclusiveMaximum")),
+        "maximum and exclusiveMaximum cannot both be set"
+    );
+    let lower = object
+        .get("minimum")
+        .or_else(|| object.get("exclusiveMinimum"))
+        .and_then(Value::as_f64);
+    let upper = object
+        .get("maximum")
+        .or_else(|| object.get("exclusiveMaximum"))
+        .and_then(Value::as_f64);
+    if let (Some(lower), Some(upper)) = (lower, upper) {
+        anyhow::ensure!(lower <= upper, "minimum must not exceed maximum");
     }
     Ok(())
 }
@@ -1654,6 +1788,14 @@ fn append_gemma_schema_rule(
         return Ok(());
     }
 
+    if schema_requires_json_value_grammar(object) {
+        grammar.push_str(&format!(
+            "{rule}: %json {}\n",
+            serde_json::to_string(schema)?
+        ));
+        return Ok(());
+    }
+
     match kinds[0] {
         "string" => {
             let body_rule = fresh_gemma_rule(next_rule);
@@ -1864,7 +2006,8 @@ fn append_tagged_value_rule(
             }
             grammar.push('\n');
         } else {
-            grammar.push_str(&format!("{rule}[lazy]: /(.|\\n)*/ {close}\n"));
+            let repetition = schema_length_repetition(object, "minLength", "maxLength")?;
+            grammar.push_str(&format!("{rule}[lazy]: /(.|\\n){repetition}/ {close}\n"));
         }
     } else {
         if allow_native_line_padding {
@@ -1939,9 +2082,10 @@ fn append_minicpm5_value_rule(
             grammar.push('\n');
         } else {
             let cdata_rule = fresh_tagged_rule(next_rule);
+            let repetition = schema_length_repetition(object, "minLength", "maxLength")?;
             grammar.push_str(&format!(
-                "{rule}: /[^<\\r\\n&]*/ {close} | \"<![CDATA[\" {cdata_rule}\n\
-                 {cdata_rule}[lazy]: /(.|\\n)*/ \"]]>\" {close}\n"
+                "{rule}: /[^<\\r\\n&]{repetition}/ {close} | \"<![CDATA[\" {cdata_rule}\n\
+                 {cdata_rule}[lazy]: /(.|\\n){repetition}/ \"]]>\" {close}\n"
             ));
         }
     } else {
@@ -1957,6 +2101,54 @@ fn fresh_tagged_rule(next_rule: &mut usize) -> String {
     let rule = format!("tagged_value_{}", *next_rule);
     *next_rule += 1;
     rule
+}
+
+fn schema_requires_json_value_grammar(schema: &Map<String, Value>) -> bool {
+    matches!(
+        schema.get("additionalProperties"),
+        Some(Value::Bool(true) | Value::Object(_))
+    ) || [
+        "minItems",
+        "maxItems",
+        "minLength",
+        "maxLength",
+        "minimum",
+        "maximum",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
+    ]
+    .iter()
+    .any(|name| schema.contains_key(*name))
+}
+
+fn schema_length_repetition(
+    schema: &Map<String, Value>,
+    minimum_name: &str,
+    maximum_name: &str,
+) -> Result<String> {
+    let minimum = schema
+        .get(minimum_name)
+        .map(|value| {
+            value
+                .as_u64()
+                .ok_or_else(|| anyhow!("{minimum_name} must be a non-negative integer"))
+        })
+        .transpose()?
+        .unwrap_or(0);
+    let maximum = schema
+        .get(maximum_name)
+        .map(|value| {
+            value
+                .as_u64()
+                .ok_or_else(|| anyhow!("{maximum_name} must be a non-negative integer"))
+        })
+        .transpose()?;
+    Ok(match maximum {
+        Some(maximum) if minimum == maximum => format!("{{{minimum}}}"),
+        Some(maximum) => format!("{{{minimum},{maximum}}}"),
+        None if minimum == 0 => "*".to_owned(),
+        None => format!("{{{minimum},}}"),
+    })
 }
 
 pub fn schema_is_string_only(schema: &Value) -> bool {
@@ -2063,28 +2255,34 @@ pub fn validate_schema_value(schema: &Value, value: &Value) -> Result<()> {
         };
         anyhow::ensure!(matches, "value does not match schema type");
     }
-    if let Some(properties) = object.get("properties").and_then(Value::as_object) {
+    if type_contains(object.get("type"), "object") {
         let value_object = value
             .as_object()
             .ok_or_else(|| anyhow!("expected object value"))?;
+        let empty_properties = Map::new();
+        let properties = object
+            .get("properties")
+            .and_then(Value::as_object)
+            .unwrap_or(&empty_properties);
         if let Some(required) = object.get("required").and_then(Value::as_array) {
             for name in required {
                 let name = name.as_str().expect("schema validated");
                 anyhow::ensure!(value_object.contains_key(name), "missing required `{name}`");
             }
         }
-        if object.get("additionalProperties") == Some(&Value::Bool(false)) {
-            for name in value_object.keys() {
-                anyhow::ensure!(
-                    properties.contains_key(name),
-                    "undeclared property `{name}`"
-                );
-            }
-        }
-        for (name, child_schema) in properties {
-            if let Some(child) = value_object.get(name) {
+        let additional = object.get("additionalProperties");
+        for (name, child) in value_object {
+            if let Some(child_schema) = properties.get(name) {
                 validate_schema_value(child_schema, child)
                     .with_context(|| format!("property `{name}`"))?;
+                continue;
+            }
+            match additional {
+                Some(Value::Bool(false)) => bail!("undeclared property `{name}`"),
+                Some(schema @ Value::Object(_)) => validate_schema_value(schema, child)
+                    .with_context(|| format!("additional property `{name}`"))?,
+                Some(Value::Bool(true)) | None => {}
+                Some(_) => unreachable!("schema validated before generation"),
             }
         }
     }
@@ -2092,9 +2290,54 @@ pub fn validate_schema_value(schema: &Value, value: &Value) -> Result<()> {
         let array = value
             .as_array()
             .ok_or_else(|| anyhow!("expected array value"))?;
+        validate_collection_length(object, array.len(), "minItems", "maxItems")?;
         for (index, item) in array.iter().enumerate() {
             validate_schema_value(items, item).with_context(|| format!("item {index}"))?;
         }
+    }
+    if let Some(text) = value.as_str() {
+        validate_collection_length(object, text.chars().count(), "minLength", "maxLength")?;
+    }
+    if value.is_number() {
+        validate_numeric_value(object, value)?;
+    }
+    Ok(())
+}
+
+fn validate_collection_length(
+    schema: &Map<String, Value>,
+    actual: usize,
+    minimum_name: &str,
+    maximum_name: &str,
+) -> Result<()> {
+    if let Some(minimum) = schema.get(minimum_name).and_then(Value::as_u64) {
+        anyhow::ensure!(
+            actual as u64 >= minimum,
+            "value is shorter than {minimum_name}"
+        );
+    }
+    if let Some(maximum) = schema.get(maximum_name).and_then(Value::as_u64) {
+        anyhow::ensure!(
+            actual as u64 <= maximum,
+            "value is longer than {maximum_name}"
+        );
+    }
+    Ok(())
+}
+
+fn validate_numeric_value(schema: &Map<String, Value>, value: &Value) -> Result<()> {
+    let actual = value.as_f64().expect("numeric value");
+    if let Some(minimum) = schema.get("minimum").and_then(Value::as_f64) {
+        anyhow::ensure!(actual >= minimum, "value is below minimum");
+    }
+    if let Some(maximum) = schema.get("maximum").and_then(Value::as_f64) {
+        anyhow::ensure!(actual <= maximum, "value is above maximum");
+    }
+    if let Some(minimum) = schema.get("exclusiveMinimum").and_then(Value::as_f64) {
+        anyhow::ensure!(actual > minimum, "value is at or below exclusiveMinimum");
+    }
+    if let Some(maximum) = schema.get("exclusiveMaximum").and_then(Value::as_f64) {
+        anyhow::ensure!(actual < maximum, "value is at or above exclusiveMaximum");
     }
     Ok(())
 }
@@ -2169,6 +2412,89 @@ mod tests {
                 "type": "object",
                 "properties": {},
                 "required": [],
+                "additionalProperties": false
+            }
+        }))
+        .unwrap()
+    }
+
+    fn omp_bash_tool() -> ToolDefinition {
+        serde_json::from_value(serde_json::json!({
+            "name": "bash",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string"},
+                    "env": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"}
+                    }
+                },
+                "required": ["command"],
+                "additionalProperties": false
+            }
+        }))
+        .unwrap()
+    }
+
+    fn omp_hub_tool() -> ToolDefinition {
+        serde_json::from_value(serde_json::json!({
+            "name": "hub",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "op": {"type": "string", "enum": ["start", "stop"]},
+                    "name": {"type": "string", "maxLength": 48},
+                    "application": {"type": "string", "minLength": 1},
+                    "timeout": {"type": "number", "exclusiveMinimum": 0},
+                    "env": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"}
+                    }
+                },
+                "required": ["op"],
+                "additionalProperties": false
+            }
+        }))
+        .unwrap()
+    }
+
+    fn omp_ask_tool() -> ToolDefinition {
+        serde_json::from_value(serde_json::json!({
+            "name": "ask",
+            "strict": true,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "questions": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "options": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "label": {"type": "string"},
+                                            "description": {
+                                                "anyOf": [
+                                                    {"type": "string"},
+                                                    {"type": "null"}
+                                                ]
+                                            }
+                                        },
+                                        "required": ["label", "description"],
+                                        "additionalProperties": false
+                                    }
+                                }
+                            },
+                            "required": ["options"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["questions"],
                 "additionalProperties": false
             }
         }))
@@ -2620,6 +2946,118 @@ mod tests {
         let bad = serde_json::json!({"type": "string", "pattern": "x"});
         let mut nodes = 0;
         assert!(validate_schema_node(&bad, 0, &mut nodes).is_err());
+    }
+
+    #[test]
+    fn accepts_omp_default_tool_schema_blockers_without_weakening_strict_mode() {
+        let tools = [omp_bash_tool(), omp_hub_tool(), omp_ask_tool()];
+        validate_tool_schemas(&tools).unwrap();
+        validate_strict_tool_schema(&tools[2]).unwrap();
+
+        assert!(validate_strict_tool_schema(&tools[0]).is_err());
+        let open_root: ToolDefinition = serde_json::from_value(serde_json::json!({
+            "name": "unsafe_root",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": {"type": "string"}
+            }
+        }))
+        .unwrap();
+        assert!(validate_tool_schemas(&[open_root]).is_err());
+    }
+
+    #[test]
+    fn validates_dynamic_properties_and_omp_length_numeric_bounds_at_runtime() {
+        let bash = omp_bash_tool();
+        validate_schema_value(
+            &bash.parameters,
+            &serde_json::json!({"command": "echo", "env": {"FOO": "bar"}}),
+        )
+        .unwrap();
+        assert!(validate_schema_value(
+            &bash.parameters,
+            &serde_json::json!({"command": "echo", "env": {"FOO": 3}}),
+        )
+        .is_err());
+
+        let hub = omp_hub_tool();
+        validate_schema_value(
+            &hub.parameters,
+            &serde_json::json!({
+                "op": "start",
+                "name": "worker",
+                "application": "agent",
+                "timeout": 0.5,
+                "env": {"MODE": "safe"}
+            }),
+        )
+        .unwrap();
+        for invalid in [
+            serde_json::json!({"op": "start", "name": "x".repeat(49)}),
+            serde_json::json!({"op": "start", "application": ""}),
+            serde_json::json!({"op": "start", "timeout": 0}),
+        ] {
+            assert!(validate_schema_value(&hub.parameters, &invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn all_tool_dialects_accept_omp_dynamic_env_objects() {
+        let options = ToolConstraintOptions {
+            choice: ToolChoiceConstraint::Required,
+            allow_parallel_calls: false,
+        };
+        let tool = omp_bash_tool();
+        let tokenizer = ConstraintTokenizer::byte_level().unwrap();
+        let cases = [
+            (
+                tokenizer
+                    .compile_qwen_tools(&[tool.clone(), omp_hub_tool()], &options)
+                    .unwrap(),
+                b"<tool_call><function=bash><parameter=command>echo</parameter><parameter=env>{\"FOO\":\"bar\"}</parameter></function></tool_call>".as_slice(),
+            ),
+            (
+                tokenizer
+                    .compile_glm_tools(&[tool.clone(), omp_hub_tool()], &options)
+                    .unwrap(),
+                b"<tool_call>bash<arg_key>command</arg_key><arg_value>echo</arg_value><arg_key>env</arg_key><arg_value>{\"FOO\":\"bar\"}</arg_value></tool_call>".as_slice(),
+            ),
+            (
+                tokenizer
+                    .compile_llama_tools(&[tool.clone(), omp_hub_tool()], &options)
+                    .unwrap(),
+                b"{\"name\":\"bash\",\"parameters\":{\"command\":\"echo\",\"env\":{\"FOO\":\"bar\"}}}".as_slice(),
+            ),
+            (
+                tokenizer
+                    .compile_minicpm5_tools(&[tool.clone(), omp_hub_tool()], &options)
+                    .unwrap(),
+                b"<function name=\"bash\"><param name=\"command\">echo</param><param name=\"env\">{\"FOO\":\"bar\"}</param></function>".as_slice(),
+            ),
+        ];
+        for (plan, output) in cases {
+            let mut session = plan.start_session().unwrap();
+            consume_bytes(&mut session, output).unwrap();
+            assert!(session.is_accepting().unwrap());
+        }
+
+        let gemma_tokenizer = ConstraintTokenizer::byte_level_gemma().unwrap();
+        let lowered =
+            crate::core::tool_calling::lower_gemma_tool_definitions(&[tool, omp_hub_tool()])
+                .unwrap();
+        let gemma = gemma_tokenizer
+            .compile_gemma_tools(&lowered, &options)
+            .unwrap();
+        let mut session = gemma.start_session().unwrap();
+        session
+            .commit_tokens(&gemma_tokens(concat!(
+                "<|tool_call>call:bash{command:<|\"|>echo<|\"|>,",
+                "env:[{key:<|\"|>FOO<|\"|>,value:<|\"|>bar<|\"|>}]}",
+                "<tool_call|>"
+            )))
+            .unwrap();
+        assert!(session.is_accepting().unwrap());
     }
 
     #[test]

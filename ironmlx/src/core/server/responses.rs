@@ -97,7 +97,34 @@ type ResponseTextFormat = StructuredOutputFormat;
 #[serde(untagged)]
 pub enum ResponsesInput {
     Text(String),
-    Items(Vec<ResponseInputItem>),
+    Items(#[serde(deserialize_with = "deserialize_response_input_items")] Vec<ResponseInputItem>),
+}
+
+fn deserialize_response_input_items<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<ResponseInputItem>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let mut items = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    for item in &mut items {
+        let Some(object) = item.as_object_mut() else {
+            continue;
+        };
+        if !object.contains_key("type")
+            && object.contains_key("role")
+            && object.contains_key("content")
+        {
+            object.insert(
+                "type".to_owned(),
+                serde_json::Value::String("message".to_owned()),
+            );
+        }
+    }
+    items
+        .into_iter()
+        .map(|item| serde_json::from_value(item).map_err(serde::de::Error::custom))
+        .collect()
 }
 
 #[derive(Debug, Deserialize)]
@@ -1225,7 +1252,7 @@ where
         )
         .and_then(|messages| {
             let kwargs = openai::tool_template_kwargs(chat_template_kwargs, prepared)?;
-            openai::render_tool_prompt(&state.tokenizer, &messages, &kwargs)
+            openai::render_tool_prompt(&state.tokenizer, &messages, &kwargs, prepared)
         })
     } else {
         super::chat_format::render_and_encode(
@@ -2866,6 +2893,162 @@ mod tests {
             normalized.chat.messages[3].tool_call_id.as_deref(),
             Some("call_1")
         );
+    }
+
+    #[test]
+    fn accepts_oh_my_pi_easy_input_message_without_type() {
+        let normalized = request(serde_json::json!({
+            "model": "local",
+            "instructions": "Use tools only when required",
+            "input": [{
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "请只回复：IronMLX connection OK"
+                }]
+            }],
+            "stream": true,
+            "prompt_cache_key": "omp-session",
+            "store": false,
+            "max_output_tokens": 1024,
+            "tools": [{
+                "type": "function",
+                "name": "bash",
+                "description": "Run a command",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string"},
+                        "env": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": {"type": "string"}
+                        }
+                    },
+                    "required": ["command"],
+                    "additionalProperties": false
+                }
+            }]
+        }))
+        .normalize()
+        .expect("OMP easy input message normalizes");
+
+        assert_eq!(normalized.chat.messages.len(), 2);
+        assert_eq!(normalized.chat.messages[0].role, "system");
+        assert_eq!(normalized.chat.messages[1].role, "user");
+        assert_eq!(
+            normalized.chat.messages[1]
+                .content
+                .to_flat_string(&mut std::collections::VecDeque::new()),
+            "请只回复：IronMLX connection OK"
+        );
+        let tools = normalized
+            .chat
+            .tools
+            .expect("OMP tools survive normalization");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].function.name, "bash");
+    }
+
+    #[test]
+    fn rejects_untyped_responses_item_without_easy_message_shape() {
+        let result = serde_json::from_value::<ResponsesRequest>(serde_json::json!({
+            "model": "local",
+            "input": [{"role": "user"}]
+        }));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn accepts_oh_my_pi_blocking_tool_schemas_through_responses_normalization() {
+        let normalized = request(serde_json::json!({
+            "model": "local",
+            "input": "Use the agent tools",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "bash",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "command": {"type": "string"},
+                            "env": {
+                                "type": "object",
+                                "additionalProperties": {"type": "string"}
+                            }
+                        },
+                        "required": ["command"],
+                        "additionalProperties": false
+                    }
+                },
+                {
+                    "type": "function",
+                    "name": "hub",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "op": {"type": "string"},
+                            "name": {"type": "string", "maxLength": 48},
+                            "application": {"type": "string", "minLength": 1},
+                            "timeout": {"type": "number", "exclusiveMinimum": 0}
+                        },
+                        "required": ["op"],
+                        "additionalProperties": false
+                    }
+                },
+                {
+                    "type": "function",
+                    "name": "ask",
+                    "strict": true,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "questions": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "options": {
+                                            "type": "array",
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "label": {"type": "string"},
+                                                    "description": {
+                                                        "anyOf": [
+                                                            {"type": "string"},
+                                                            {"type": "null"}
+                                                        ]
+                                                    }
+                                                },
+                                                "required": ["label", "description"],
+                                                "additionalProperties": false
+                                            }
+                                        }
+                                    },
+                                    "required": ["options"],
+                                    "additionalProperties": false
+                                }
+                            }
+                        },
+                        "required": ["questions"],
+                        "additionalProperties": false
+                    }
+                }
+            ],
+            "store": false
+        }))
+        .normalize()
+        .unwrap();
+
+        let prepared = openai::prepare_tool_request(
+            &normalized.chat,
+            Some(crate::core::tool_calling::ToolDialect::Qwen35),
+        )
+        .unwrap()
+        .expect("tools prepared");
+        assert_eq!(prepared.definitions.len(), 3);
     }
 
     #[test]

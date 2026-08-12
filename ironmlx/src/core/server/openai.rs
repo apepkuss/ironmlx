@@ -37,8 +37,9 @@ use crate::core::server::vision::{expand_decoded_messages_bounded, DecodedMessag
 use crate::core::server::VisionInputConfig;
 use crate::core::speculative::MtpSpeculativeConfig;
 use crate::core::tool_calling::{
-    validate_function_name, validate_tool_definitions, AgentMessage, TemplateToolCall, ToolCall,
-    ToolDefinition, ToolDialect,
+    lower_gemma_tool_arguments, lower_gemma_tool_definitions, validate_function_name,
+    validate_tool_definitions, AgentMessage, TemplateToolCall, ToolCall, ToolDefinition,
+    ToolDialect,
 };
 
 use super::api_transport::ApiJson;
@@ -191,6 +192,7 @@ pub(crate) struct PreparedToolRequest {
     pub(crate) dialect: ToolDialect,
     pub(crate) wire_tools: Vec<OpenAiTool>,
     pub(crate) definitions: Vec<ToolDefinition>,
+    pub(crate) model_definitions: Vec<ToolDefinition>,
     pub(crate) constraint_options: Option<ToolConstraintOptions>,
 }
 
@@ -509,10 +511,24 @@ pub(crate) fn prepare_tool_request(
     }
     validate_tool_definitions(&definitions)?;
     let constraint_options = resolve_tool_constraint_options(req, &definitions)?;
+    let model_definitions = if dialect == ToolDialect::Gemma {
+        lower_gemma_tool_definitions(&definitions)?
+    } else {
+        definitions.clone()
+    };
+    let model_wire_tools = wire_tools
+        .iter()
+        .zip(&model_definitions)
+        .map(|(wire, definition)| OpenAiTool {
+            kind: wire.kind.clone(),
+            function: definition.clone(),
+        })
+        .collect();
     Ok(Some(PreparedToolRequest {
         dialect,
-        wire_tools: wire_tools.clone(),
+        wire_tools: model_wire_tools,
         definitions,
+        model_definitions,
         constraint_options,
     }))
 }
@@ -583,20 +599,20 @@ pub(crate) fn compile_output_constraint_with_native(
                 if let Some(schema) = output_schema {
                     if let Some(reasoning) = enabled_reasoning {
                         return tokenizer.compile_tool_or_json_constraint_with_reasoning(
-                            &prepared.definitions,
+                            &prepared.model_definitions,
                             options,
                             schema,
                             reasoning,
                         );
                     }
                     return tokenizer.compile_tool_or_json_constraint(
-                        &prepared.definitions,
+                        &prepared.model_definitions,
                         options,
                         schema,
                     );
                 }
             }
-            tokenizer.compile_tool_constraint(&prepared.definitions, options)
+            tokenizer.compile_tool_constraint(&prepared.model_definitions, options)
         })
         .transpose()
         .and_then(|tool_constraint| match (tool_constraint, output_schema) {
@@ -743,8 +759,22 @@ pub(crate) fn render_tool_prompt(
     tokenizer: &crate::core::Tokenizer,
     messages: &[AgentMessage],
     kwargs: &serde_json::Value,
+    prepared: &PreparedToolRequest,
 ) -> anyhow::Result<Vec<u32>> {
-    tokenizer.render_and_encode_tool_prompt(messages, kwargs)
+    if prepared.dialect != ToolDialect::Gemma {
+        return tokenizer.render_and_encode_tool_prompt(messages, kwargs);
+    }
+    let mut lowered = messages.to_vec();
+    for message in &mut lowered {
+        for call in &mut message.tool_calls {
+            call.function.arguments = lower_gemma_tool_arguments(
+                &prepared.definitions,
+                &call.function.name,
+                &call.function.arguments,
+            )?;
+        }
+    }
+    tokenizer.render_and_encode_tool_prompt(&lowered, kwargs)
 }
 
 pub(crate) fn build_sampler(req: &ChatRequest, defaults: SamplingDefaults) -> Sampler {
@@ -888,7 +918,7 @@ where
         );
         agent_messages.and_then(|messages| {
             let kwargs = tool_template_kwargs(chat_template_kwargs, prepared)?;
-            render_tool_prompt(&state.tokenizer, &messages, &kwargs)
+            render_tool_prompt(&state.tokenizer, &messages, &kwargs, prepared)
         })
     } else {
         render_and_encode(
@@ -1103,7 +1133,7 @@ pub(crate) async fn chat_completions_with_gemma4_drafter_state(
         )
         .and_then(|messages| {
             let kwargs = tool_template_kwargs(chat_template_kwargs, prepared)?;
-            render_tool_prompt(&state.base.tokenizer, &messages, &kwargs)
+            render_tool_prompt(&state.base.tokenizer, &messages, &kwargs, prepared)
         })
     } else {
         render_and_encode(
@@ -3065,6 +3095,54 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("does not support"));
+    }
+
+    #[test]
+    fn gemma_preparation_keeps_original_tools_and_projects_dynamic_objects() {
+        let request: ChatRequest = serde_json::from_value(serde_json::json!({
+            "messages": [{"role": "user", "content": "run pwd"}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "bash",
+                    "strict": false,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "command": {"type": "string"},
+                            "env": {
+                                "type": "object",
+                                "additionalProperties": {"type": "string"}
+                            }
+                        },
+                        "required": ["command"],
+                        "additionalProperties": false
+                    }
+                }
+            }]
+        }))
+        .unwrap();
+        let prepared = prepare_tool_request(&request, Some(ToolDialect::Gemma))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            prepared.definitions[0].parameters["properties"]["env"]["type"],
+            "object"
+        );
+        assert_eq!(
+            prepared.model_definitions[0].parameters["properties"]["env"]["type"],
+            "array"
+        );
+        assert_eq!(
+            prepared.wire_tools[0].function.parameters["properties"]["env"]["type"],
+            "array"
+        );
+        assert!(
+            !prepared.wire_tools[0].function.parameters["properties"]["env"]["items"]["properties"]
+                .as_object()
+                .unwrap()
+                .contains_key("additionalProperties")
+        );
     }
 
     #[test]

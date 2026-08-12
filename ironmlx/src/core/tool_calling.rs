@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::core::constrained::{
-    schema_accepts_string, schema_is_string_only, validate_schema_value,
-    validate_strict_tool_schema, validate_tool_schemas,
+    schema_accepts_string, schema_is_string_only, validate_gemma_model_tool_schemas,
+    validate_schema_value, validate_strict_tool_schema, validate_tool_schemas,
 };
 use crate::core::generated_output::GeneratedOutputEvent;
 
@@ -189,6 +189,434 @@ pub struct ToolDefinition {
     pub parameters: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strict: Option<bool>,
+}
+
+const GEMMA_DYNAMIC_ENTRIES_PROPERTY: &str = "__ironmlx_dynamic_entries";
+const GEMMA_DYNAMIC_KEY_PROPERTY: &str = "key";
+const GEMMA_DYNAMIC_VALUE_PROPERTY: &str = "value";
+const GEMMA_DYNAMIC_JSON_VALUE_PROPERTY: &str = "json_value";
+
+/// Project schemas with open object members into a fixed Gemma-facing shape.
+///
+/// Gemma's native tool template renders `additionalProperties` as though it
+/// were a declared argument name. The projection avoids that ambiguity by
+/// representing dynamic members as deterministic key/value entries. External
+/// APIs, runtime validation, and emitted tool calls continue to use the
+/// caller's original object schema and value shape.
+pub(crate) fn lower_gemma_tool_definitions(
+    tools: &[ToolDefinition],
+) -> anyhow::Result<Vec<ToolDefinition>> {
+    tools
+        .iter()
+        .map(|tool| {
+            Ok(ToolDefinition {
+                name: tool.name.clone(),
+                description: tool.description.clone(),
+                parameters: lower_gemma_schema(&tool.parameters)?,
+                strict: tool.strict,
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn lower_gemma_tool_arguments(
+    tools: &[ToolDefinition],
+    name: &str,
+    arguments: &Value,
+) -> anyhow::Result<Value> {
+    let tool = tools
+        .iter()
+        .find(|tool| tool.name == name)
+        .ok_or_else(|| anyhow!("tool-call history references unknown function `{name}`"))?;
+    validate_schema_value(&tool.parameters, arguments)
+        .with_context(|| format!("tool `{name}` history arguments do not match its schema"))?;
+    lower_gemma_value(&tool.parameters, arguments)
+}
+
+fn lower_gemma_schema(schema: &Value) -> anyhow::Result<Value> {
+    let object = schema
+        .as_object()
+        .ok_or_else(|| anyhow!("schema node must be an object"))?;
+    if let Some(branches) = object.get("anyOf").and_then(Value::as_array) {
+        let mut lowered = object.clone();
+        lowered.insert(
+            "anyOf".to_owned(),
+            Value::Array(
+                branches
+                    .iter()
+                    .map(lower_gemma_schema)
+                    .collect::<anyhow::Result<Vec<_>>>()?,
+            ),
+        );
+        return Ok(Value::Object(lowered));
+    }
+    if let Some(kinds) = object.get("type").and_then(Value::as_array) {
+        if kinds.len() > 1 && kinds.iter().any(|kind| kind.as_str() == Some("object")) {
+            let branches = kinds
+                .iter()
+                .map(|kind| {
+                    let mut branch = object.clone();
+                    branch.insert("type".to_owned(), kind.clone());
+                    lower_gemma_schema(&Value::Object(branch))
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            let mut lowered = Map::new();
+            lowered.insert("anyOf".to_owned(), Value::Array(branches));
+            for key in ["description", "title"] {
+                if let Some(value) = object.get(key) {
+                    lowered.insert(key.to_owned(), value.clone());
+                }
+            }
+            return Ok(Value::Object(lowered));
+        }
+    }
+
+    let mut lowered = object.clone();
+    if schema_has_type(object, "object") {
+        let properties = object
+            .get("properties")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let additional = object.get("additionalProperties");
+        if matches!(additional, Some(Value::Bool(true) | Value::Object(_))) {
+            let entries = gemma_dynamic_entries_schema(additional.expect("matched"))?;
+            if properties.is_empty() {
+                return Ok(entries);
+            }
+            let entries_name = gemma_entries_property_name(&properties);
+            let mut lowered_properties = properties
+                .iter()
+                .map(|(name, child)| Ok((name.clone(), lower_gemma_schema(child)?)))
+                .collect::<anyhow::Result<Map<_, _>>>()?;
+            lowered_properties.insert(entries_name, entries);
+            lowered.insert("properties".to_owned(), Value::Object(lowered_properties));
+            lowered.insert("additionalProperties".to_owned(), Value::Bool(false));
+            return Ok(Value::Object(lowered));
+        }
+        if let Some(properties) = object.get("properties").and_then(Value::as_object) {
+            lowered.insert(
+                "properties".to_owned(),
+                Value::Object(
+                    properties
+                        .iter()
+                        .map(|(name, child)| Ok((name.clone(), lower_gemma_schema(child)?)))
+                        .collect::<anyhow::Result<Map<_, _>>>()?,
+                ),
+            );
+        }
+    }
+    if let Some(items) = object.get("items") {
+        lowered.insert("items".to_owned(), lower_gemma_schema(items)?);
+    }
+    Ok(Value::Object(lowered))
+}
+
+fn gemma_dynamic_entries_schema(additional: &Value) -> anyhow::Result<Value> {
+    let (value_name, value_schema, value_description) = match additional {
+        Value::Object(_) => (
+            GEMMA_DYNAMIC_VALUE_PROPERTY,
+            lower_gemma_schema(additional)?,
+            "The value for this dynamic object property.",
+        ),
+        Value::Bool(true) => (
+            GEMMA_DYNAMIC_JSON_VALUE_PROPERTY,
+            serde_json::json!({"type":"string"}),
+            "A valid JSON-encoded value, including JSON quotes when the value is a string.",
+        ),
+        _ => unreachable!("caller only lowers open object schemas"),
+    };
+    let mut properties = Map::new();
+    properties.insert(
+        GEMMA_DYNAMIC_KEY_PROPERTY.to_owned(),
+        serde_json::json!({
+            "type": "string",
+            "description": "The actual object property name requested by the user."
+        }),
+    );
+    properties.insert(
+        value_name.to_owned(),
+        merge_schema_description(value_schema, value_description),
+    );
+    Ok(serde_json::json!({
+        "type": "array",
+        "description": "Entries of an object map. Emit one item per requested property; `additionalProperties` is a schema rule and must never be used as a key.",
+        "items": {
+            "type": "object",
+            "properties": properties,
+            "required": [GEMMA_DYNAMIC_KEY_PROPERTY, value_name],
+            "additionalProperties": false
+        }
+    }))
+}
+
+fn merge_schema_description(mut schema: Value, description: &str) -> Value {
+    if let Some(object) = schema.as_object_mut() {
+        let combined = object
+            .get("description")
+            .and_then(Value::as_str)
+            .map(|current| format!("{current} {description}"))
+            .unwrap_or_else(|| description.to_owned());
+        object.insert("description".to_owned(), Value::String(combined));
+    }
+    schema
+}
+
+fn schema_has_type(schema: &Map<String, Value>, expected: &str) -> bool {
+    match schema.get("type") {
+        Some(Value::String(kind)) => kind == expected,
+        Some(Value::Array(kinds)) => kinds.iter().any(|kind| kind.as_str() == Some(expected)),
+        _ => false,
+    }
+}
+
+fn gemma_entries_property_name(properties: &Map<String, Value>) -> String {
+    let mut name = GEMMA_DYNAMIC_ENTRIES_PROPERTY.to_owned();
+    while properties.contains_key(&name) {
+        name.push('_');
+    }
+    name
+}
+
+fn lower_gemma_value(schema: &Value, value: &Value) -> anyhow::Result<Value> {
+    let object = schema.as_object().expect("validated schema");
+    if let Some(branches) = object.get("anyOf").and_then(Value::as_array) {
+        for branch in branches {
+            if validate_schema_value(branch, value).is_ok() {
+                return lower_gemma_value(branch, value);
+            }
+        }
+        bail!("value does not match any anyOf branch");
+    }
+    if let Some(kinds) = object.get("type").and_then(Value::as_array) {
+        if kinds.len() > 1 {
+            for kind in kinds {
+                let mut branch = object.clone();
+                branch.insert("type".to_owned(), kind.clone());
+                let branch = Value::Object(branch);
+                if validate_schema_value(&branch, value).is_ok() {
+                    return lower_gemma_value(&branch, value);
+                }
+            }
+        }
+    }
+    if schema_has_type(object, "object") {
+        let value_object = value
+            .as_object()
+            .ok_or_else(|| anyhow!("expected object value"))?;
+        let properties = object
+            .get("properties")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        if let Some(additional @ (Value::Bool(true) | Value::Object(_))) =
+            object.get("additionalProperties")
+        {
+            let entries = lower_gemma_dynamic_entries(&properties, additional, value_object)?;
+            if properties.is_empty() {
+                return Ok(Value::Array(entries));
+            }
+            let mut lowered = Map::new();
+            for (name, child_schema) in &properties {
+                if let Some(child) = value_object.get(name) {
+                    lowered.insert(name.clone(), lower_gemma_value(child_schema, child)?);
+                }
+            }
+            if !entries.is_empty() {
+                lowered.insert(
+                    gemma_entries_property_name(&properties),
+                    Value::Array(entries),
+                );
+            }
+            return Ok(Value::Object(lowered));
+        }
+        let mut lowered = Map::new();
+        for (name, child) in value_object {
+            let child_schema = properties
+                .get(name)
+                .ok_or_else(|| anyhow!("undeclared property `{name}`"))?;
+            lowered.insert(name.clone(), lower_gemma_value(child_schema, child)?);
+        }
+        return Ok(Value::Object(lowered));
+    }
+    if let Some(items) = object.get("items") {
+        return Ok(Value::Array(
+            value
+                .as_array()
+                .ok_or_else(|| anyhow!("expected array value"))?
+                .iter()
+                .map(|item| lower_gemma_value(items, item))
+                .collect::<anyhow::Result<Vec<_>>>()?,
+        ));
+    }
+    Ok(value.clone())
+}
+
+fn lower_gemma_dynamic_entries(
+    properties: &Map<String, Value>,
+    additional: &Value,
+    value: &Map<String, Value>,
+) -> anyhow::Result<Vec<Value>> {
+    value
+        .iter()
+        .filter(|(name, _)| !properties.contains_key(*name))
+        .map(|(name, child)| {
+            let mut entry = Map::new();
+            entry.insert(
+                GEMMA_DYNAMIC_KEY_PROPERTY.to_owned(),
+                Value::String(name.clone()),
+            );
+            match additional {
+                Value::Object(_) => {
+                    entry.insert(
+                        GEMMA_DYNAMIC_VALUE_PROPERTY.to_owned(),
+                        lower_gemma_value(additional, child)?,
+                    );
+                }
+                Value::Bool(true) => {
+                    entry.insert(
+                        GEMMA_DYNAMIC_JSON_VALUE_PROPERTY.to_owned(),
+                        Value::String(serde_json::to_string(child)?),
+                    );
+                }
+                _ => unreachable!("caller only lowers open object schemas"),
+            }
+            Ok(Value::Object(entry))
+        })
+        .collect()
+}
+
+fn restore_gemma_value(schema: &Value, value: &Value) -> anyhow::Result<Value> {
+    let object = schema.as_object().expect("validated schema");
+    if let Some(branches) = object.get("anyOf").and_then(Value::as_array) {
+        for branch in branches {
+            let lowered = lower_gemma_schema(branch)?;
+            if validate_schema_value(&lowered, value).is_ok() {
+                if let Ok(restored) = restore_gemma_value(branch, value) {
+                    if validate_schema_value(branch, &restored).is_ok() {
+                        return Ok(restored);
+                    }
+                }
+            }
+        }
+        bail!("lowered value does not match any original anyOf branch");
+    }
+    if let Some(kinds) = object.get("type").and_then(Value::as_array) {
+        if kinds.len() > 1 {
+            for kind in kinds {
+                let mut branch = object.clone();
+                branch.insert("type".to_owned(), kind.clone());
+                let branch = Value::Object(branch);
+                let lowered = lower_gemma_schema(&branch)?;
+                if validate_schema_value(&lowered, value).is_ok() {
+                    if let Ok(restored) = restore_gemma_value(&branch, value) {
+                        if validate_schema_value(&branch, &restored).is_ok() {
+                            return Ok(restored);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if schema_has_type(object, "object") {
+        let properties = object
+            .get("properties")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        if let Some(additional @ (Value::Bool(true) | Value::Object(_))) =
+            object.get("additionalProperties")
+        {
+            let (mut restored, entries) = if properties.is_empty() {
+                (
+                    Map::new(),
+                    value
+                        .as_array()
+                        .ok_or_else(|| anyhow!("lowered dynamic object must be an entries array"))?
+                        .as_slice(),
+                )
+            } else {
+                let lowered = value
+                    .as_object()
+                    .ok_or_else(|| anyhow!("lowered mixed object must be an object"))?;
+                let entries_name = gemma_entries_property_name(&properties);
+                let mut restored = Map::new();
+                for (name, child_schema) in &properties {
+                    if let Some(child) = lowered.get(name) {
+                        restored.insert(name.clone(), restore_gemma_value(child_schema, child)?);
+                    }
+                }
+                let entries = lowered
+                    .get(&entries_name)
+                    .map(|entries| {
+                        entries
+                            .as_array()
+                            .ok_or_else(|| anyhow!("`{entries_name}` must be an array"))
+                    })
+                    .transpose()?
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                (restored, entries)
+            };
+            for entry in entries {
+                let entry = entry
+                    .as_object()
+                    .ok_or_else(|| anyhow!("dynamic object entry must be an object"))?;
+                let name = entry
+                    .get(GEMMA_DYNAMIC_KEY_PROPERTY)
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("dynamic object entry requires a string `key`"))?;
+                anyhow::ensure!(
+                    !restored.contains_key(name),
+                    "dynamic object contains duplicate key `{name}`"
+                );
+                let child = match additional {
+                    Value::Object(_) => restore_gemma_value(
+                        additional,
+                        entry
+                            .get(GEMMA_DYNAMIC_VALUE_PROPERTY)
+                            .ok_or_else(|| anyhow!("dynamic object entry requires `value`"))?,
+                    )?,
+                    Value::Bool(true) => {
+                        let json = entry
+                            .get(GEMMA_DYNAMIC_JSON_VALUE_PROPERTY)
+                            .and_then(Value::as_str)
+                            .ok_or_else(|| {
+                                anyhow!("dynamic object entry requires string `json_value`")
+                            })?;
+                        serde_json::from_str(json).with_context(|| {
+                            format!("dynamic object entry `{name}` has invalid JSON value")
+                        })?
+                    }
+                    _ => unreachable!("caller only restores open object schemas"),
+                };
+                restored.insert(name.to_owned(), child);
+            }
+            return Ok(Value::Object(restored));
+        }
+        let lowered = value
+            .as_object()
+            .ok_or_else(|| anyhow!("expected object value"))?;
+        let mut restored = Map::new();
+        for (name, child) in lowered {
+            let child_schema = properties
+                .get(name)
+                .ok_or_else(|| anyhow!("undeclared property `{name}`"))?;
+            restored.insert(name.clone(), restore_gemma_value(child_schema, child)?);
+        }
+        return Ok(Value::Object(restored));
+    }
+    if let Some(items) = object.get("items") {
+        return Ok(Value::Array(
+            value
+                .as_array()
+                .ok_or_else(|| anyhow!("expected array value"))?
+                .iter()
+                .map(|item| restore_gemma_value(items, item))
+                .collect::<anyhow::Result<Vec<_>>>()?,
+        ));
+    }
+    Ok(value.clone())
 }
 
 /// A model-requested function invocation. `arguments` is structured internally;
@@ -1357,6 +1785,7 @@ impl GlmToolCallParser {
 /// surrounding call and string delimiters are tokenizer special tokens, so
 /// callers must decode with `skip_special_tokens=false` for this dialect.
 pub struct GemmaToolCallParser {
+    original_definitions: HashMap<String, ToolDefinition>,
     definitions: HashMap<String, ToolDefinition>,
     response_id: String,
     pending: String,
@@ -1369,12 +1798,20 @@ pub struct GemmaToolCallParser {
 impl GemmaToolCallParser {
     pub fn new(response_id: impl Into<String>, tools: &[ToolDefinition]) -> anyhow::Result<Self> {
         validate_tool_definitions(tools)?;
-        let definitions = tools
+        let original_definitions = tools
             .iter()
             .cloned()
             .map(|tool| (tool.name.clone(), tool))
             .collect();
+        let lowered = lower_gemma_tool_definitions(tools)?;
+        validate_gemma_model_tool_schemas(&lowered)
+            .context("validate lowered Gemma tool definitions")?;
+        let definitions = lowered
+            .into_iter()
+            .map(|tool| (tool.name.clone(), tool))
+            .collect();
         Ok(Self {
+            original_definitions,
             definitions,
             response_id: response_id.into(),
             pending: String::new(),
@@ -1424,11 +1861,22 @@ impl GemmaToolCallParser {
                     .get(&name)
                     .ok_or_else(|| anyhow!("model requested unknown tool `{name}`"))?;
                 validate_schema_value(&definition.parameters, &Value::Object(arguments.clone()))
-                    .with_context(|| format!("tool `{name}` arguments do not match its schema"))?;
+                    .with_context(|| {
+                        format!("tool `{name}` lowered arguments do not match its Gemma schema")
+                    })?;
+                let original = self
+                    .original_definitions
+                    .get(&name)
+                    .expect("lowered definition has original definition");
+                let arguments =
+                    restore_gemma_value(&original.parameters, &Value::Object(arguments))?;
+                validate_schema_value(&original.parameters, &arguments).with_context(|| {
+                    format!("tool `{name}` restored arguments do not match its original schema")
+                })?;
                 events.push(GeneratedOutputEvent::ToolCall(ToolCall {
                     id: format!("call_{}_{}", self.response_id, self.next_index),
                     name,
-                    arguments: Value::Object(arguments),
+                    arguments,
                 }));
                 self.next_index += 1;
                 self.saw_tool_call = true;
@@ -1618,11 +2066,36 @@ impl<'a> GemmaValueParser<'a> {
             return Ok(Value::String(value));
         }
         match self.remaining().chars().next() {
+            Some('"') => self.parse_json_string(),
             Some('{') => self.parse_object(),
             Some('[') => self.parse_array(),
             Some(_) => self.parse_scalar(),
             None => bail!("expected Gemma argument value"),
         }
+    }
+
+    fn parse_json_string(&mut self) -> anyhow::Result<Value> {
+        let remaining = self.remaining();
+        anyhow::ensure!(remaining.starts_with('"'), "expected JSON string");
+        let mut escaped = false;
+        for (index, byte) in remaining.as_bytes().iter().copied().enumerate().skip(1) {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match byte {
+                b'\\' => escaped = true,
+                b'"' => {
+                    let raw = &remaining[..=index];
+                    let value = serde_json::from_str::<String>(raw)
+                        .context("invalid JSON string in Gemma argument")?;
+                    self.offset += index + 1;
+                    return Ok(Value::String(value));
+                }
+                _ => {}
+            }
+        }
+        bail!("unterminated JSON string in Gemma argument")
     }
 
     fn parse_object(&mut self) -> anyhow::Result<Value> {
@@ -1633,11 +2106,14 @@ impl<'a> GemmaValueParser<'a> {
             return Ok(Value::Object(object));
         }
         loop {
-            let colon = self
-                .remaining()
-                .find(':')
-                .ok_or_else(|| anyhow!("Gemma object key is missing `:`"))?;
-            let key = self.remaining()[..colon].trim().to_owned();
+            let colon = self.find_object_key_colon()?;
+            let raw_key = self.remaining()[..colon].trim();
+            let key = if raw_key.starts_with('"') {
+                serde_json::from_str::<String>(raw_key)
+                    .context("invalid quoted Gemma object key")?
+            } else {
+                raw_key.to_owned()
+            };
             validate_parameter_name(&key)?;
             self.offset += colon + 1;
             let value = self.parse_value()?;
@@ -1656,6 +2132,24 @@ impl<'a> GemmaValueParser<'a> {
             self.skip_whitespace();
         }
         Ok(Value::Object(object))
+    }
+
+    fn find_object_key_colon(&self) -> anyhow::Result<usize> {
+        let mut quoted = false;
+        let mut escaped = false;
+        for (index, byte) in self.remaining().as_bytes().iter().copied().enumerate() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match byte {
+                b'\\' if quoted => escaped = true,
+                b'"' => quoted = !quoted,
+                b':' if !quoted => return Ok(index),
+                _ => {}
+            }
+        }
+        bail!("Gemma object key is missing `:`")
     }
 
     fn parse_array(&mut self) -> anyhow::Result<Value> {
@@ -2331,6 +2825,289 @@ mod tests {
                 }),
             })]
         );
+    }
+
+    #[test]
+    fn parses_standard_json_subvalues_for_dynamic_gemma_objects() {
+        let tool: ToolDefinition = serde_json::from_value(serde_json::json!({
+            "name": "search",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filters": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"}
+                    }
+                },
+                "required": ["filters"],
+                "additionalProperties": false
+            }
+        }))
+        .unwrap();
+        let mut parser = GemmaToolCallParser::new("gemma", &[tool]).unwrap();
+        let events = parser
+            .push(concat!(
+                "<|tool_call>call:search{filters:[",
+                "{key:<|\"|>tag<|\"|>,value:<|\"|>rust<|\"|>},",
+                "{key:<|\"|>note<|\"|>,value:<|\"|>a,b:c<|\"|>}",
+                "]}<tool_call|>"
+            ))
+            .unwrap();
+        assert!(parser.finish().unwrap().1);
+        assert_eq!(
+            events,
+            vec![GeneratedOutputEvent::ToolCall(ToolCall {
+                id: "call_gemma_0".into(),
+                name: "search".into(),
+                arguments: serde_json::json!({
+                    "filters": {"tag": "rust", "note": "a,b:c"}
+                }),
+            })]
+        );
+    }
+
+    #[test]
+    fn gemma_dynamic_object_lowering_round_trips_schema_values_and_history() {
+        let tool: ToolDefinition = serde_json::from_value(serde_json::json!({
+            "name": "bash",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string"},
+                    "env": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"}
+                    }
+                },
+                "required": ["command"],
+                "additionalProperties": false
+            }
+        }))
+        .unwrap();
+        let lowered = lower_gemma_tool_definitions(std::slice::from_ref(&tool)).unwrap();
+        assert_eq!(lowered[0].parameters["properties"]["env"]["type"], "array");
+        assert!(lowered[0].parameters["properties"]["env"]
+            .to_string()
+            .contains("never be used as a key"));
+        assert!(
+            !lowered[0].parameters["properties"]["env"]["items"]["properties"]
+                .as_object()
+                .unwrap()
+                .contains_key("additionalProperties")
+        );
+
+        let original = serde_json::json!({
+            "command": "pwd",
+            "env": {"LANG": "C", "MODE": "safe"}
+        });
+        let history =
+            lower_gemma_tool_arguments(std::slice::from_ref(&tool), "bash", &original).unwrap();
+        assert_eq!(
+            history,
+            serde_json::json!({
+                "command": "pwd",
+                "env": [
+                    {"key": "LANG", "value": "C"},
+                    {"key": "MODE", "value": "safe"}
+                ]
+            })
+        );
+
+        let mut parser = GemmaToolCallParser::new("roundtrip", &[tool]).unwrap();
+        let events = parser
+            .push(concat!(
+                "<|tool_call>call:bash{command:<|\"|>pwd<|\"|>,env:[",
+                "{key:<|\"|>LANG<|\"|>,value:<|\"|>C<|\"|>},",
+                "{key:<|\"|>MODE<|\"|>,value:<|\"|>safe<|\"|>}",
+                "]}<tool_call|>"
+            ))
+            .unwrap();
+        assert!(parser.finish().unwrap().1);
+        assert_eq!(
+            events,
+            vec![GeneratedOutputEvent::ToolCall(ToolCall {
+                id: "call_roundtrip_0".into(),
+                name: "bash".into(),
+                arguments: original,
+            })]
+        );
+    }
+
+    #[test]
+    fn gemma_true_additional_properties_round_trip_json_values() {
+        let tool: ToolDefinition = serde_json::from_value(serde_json::json!({
+            "name": "task",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "outputSchema": {
+                        "type": "object",
+                        "additionalProperties": true
+                    }
+                },
+                "required": ["outputSchema"],
+                "additionalProperties": false
+            }
+        }))
+        .unwrap();
+        let mut parser = GemmaToolCallParser::new("json", &[tool]).unwrap();
+        let events = parser
+            .push(concat!(
+                "<|tool_call>call:task{outputSchema:[",
+                "{key:<|\"|>type<|\"|>,json_value:<|\"|>\"object\"<|\"|>},",
+                "{key:<|\"|>strict<|\"|>,json_value:<|\"|>true<|\"|>},",
+                "{key:<|\"|>required<|\"|>,json_value:<|\"|>[\"answer\"]<|\"|>}",
+                "]}<tool_call|>"
+            ))
+            .unwrap();
+        assert!(parser.finish().unwrap().1);
+        assert_eq!(
+            events[0],
+            GeneratedOutputEvent::ToolCall(ToolCall {
+                id: "call_json_0".into(),
+                name: "task".into(),
+                arguments: serde_json::json!({
+                    "outputSchema": {
+                        "type": "object",
+                        "strict": true,
+                        "required": ["answer"]
+                    }
+                }),
+            })
+        );
+    }
+
+    #[test]
+    fn gemma_omp_task_output_schema_union_round_trips_in_batch_shape() {
+        let tool: ToolDefinition = serde_json::from_value(serde_json::json!({
+            "name": "task",
+            "strict": false,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "context": {"type": "string"},
+                    "tasks": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "task": {"type": "string"},
+                                "outputSchema": {
+                                    "anyOf": [
+                                        {"type": "object", "additionalProperties": true},
+                                        {"type": "boolean"},
+                                        {"type": "string"},
+                                        {"type": "null"}
+                                    ]
+                                }
+                            },
+                            "required": ["task"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["context", "tasks"],
+                "additionalProperties": false
+            }
+        }))
+        .unwrap();
+        let lowered = lower_gemma_tool_definitions(std::slice::from_ref(&tool)).unwrap();
+        crate::core::constrained::ConstraintTokenizer::byte_level_gemma()
+            .unwrap()
+            .compile_gemma_tools(
+                &lowered,
+                &crate::core::constrained::ToolConstraintOptions {
+                    choice: crate::core::constrained::ToolChoiceConstraint::Auto,
+                    allow_parallel_calls: true,
+                },
+            )
+            .unwrap();
+        let mut parser = GemmaToolCallParser::new("omp", &[tool]).unwrap();
+        let events = parser
+            .push(concat!(
+                "<|tool_call>call:task{context:<|\"|>audit<|\"|>,tasks:[{",
+                "task:<|\"|>inspect<|\"|>,outputSchema:[",
+                "{key:<|\"|>type<|\"|>,json_value:<|\"|>\"object\"<|\"|>},",
+                "{key:<|\"|>required<|\"|>,json_value:<|\"|>[\"answer\"]<|\"|>}",
+                "]}]}<tool_call|>"
+            ))
+            .unwrap();
+        assert!(parser.finish().unwrap().1);
+        assert_eq!(
+            events[0],
+            GeneratedOutputEvent::ToolCall(ToolCall {
+                id: "call_omp_0".into(),
+                name: "task".into(),
+                arguments: serde_json::json!({
+                    "context": "audit",
+                    "tasks": [{
+                        "task": "inspect",
+                        "outputSchema": {
+                            "type": "object",
+                            "required": ["answer"]
+                        }
+                    }]
+                }),
+            })
+        );
+    }
+
+    #[test]
+    fn gemma_dynamic_object_rejects_duplicate_lowered_keys() {
+        let tool: ToolDefinition = serde_json::from_value(serde_json::json!({
+            "name": "search",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filters": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"}
+                    }
+                },
+                "required": ["filters"],
+                "additionalProperties": false
+            }
+        }))
+        .unwrap();
+        let mut parser = GemmaToolCallParser::new("duplicate", &[tool]).unwrap();
+        let error = parser
+            .push(concat!(
+                "<|tool_call>call:search{filters:[",
+                "{key:<|\"|>tag<|\"|>,value:<|\"|>rust<|\"|>},",
+                "{key:<|\"|>tag<|\"|>,value:<|\"|>mlx<|\"|>}",
+                "]}<tool_call|>"
+            ))
+            .unwrap_err();
+        assert!(error.to_string().contains("duplicate key `tag`"));
+    }
+
+    #[test]
+    fn gemma_lowering_does_not_reduce_the_public_schema_depth_limit() {
+        let mut nested = serde_json::json!({
+            "type": "object",
+            "additionalProperties": {"type": "string"}
+        });
+        for index in (0..7).rev() {
+            let name = format!("level_{index}");
+            nested = serde_json::json!({
+                "type": "object",
+                "properties": {name.clone(): nested},
+                "required": [name],
+                "additionalProperties": false
+            });
+        }
+        let tool = ToolDefinition {
+            name: "deep_map".to_owned(),
+            description: None,
+            parameters: nested,
+            strict: None,
+        };
+
+        validate_tool_definitions(std::slice::from_ref(&tool)).unwrap();
+        let lowered = lower_gemma_tool_definitions(std::slice::from_ref(&tool)).unwrap();
+        let public_error = validate_tool_definitions(&lowered).unwrap_err();
+        assert!(format!("{public_error:#}").contains("schema nesting exceeds 8 levels"));
+        GemmaToolCallParser::new("deep", &[tool]).unwrap();
     }
 
     #[test]

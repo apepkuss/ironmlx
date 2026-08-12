@@ -34,6 +34,12 @@ Llama 3.1/3.2 的原生自定义函数协议只允许每个 assistant turn 产�
 其独立的 built-in tool / `<|python_tag|>` 协议不属于 OpenAI `tools` 支持范围。
 MiniCPM-V 4.6 与 MiniCPM5 使用不同的原生 XML 工具协议；两者均支持多调用，
 MiniCPM5 对含 `<`、`&` 或换行的字符串参数使用 CDATA。
+全部工具方言均支持非 strict 工具中嵌套的动态 object 属性（`additionalProperties`
+为 `true` 或受支持 Schema），以及字符串、数组和数值边界关键字；顶层工具参数对象
+仍必须封闭，`strict:true` 仍要求递归 `additionalProperties:false` 和完整
+`required`。Gemma 会在提示词、约束解码和历史调用中透明地把动态 object 投影为确定性
+键值条目，并在响应阶段恢复为原始 object；HTTP 请求与响应始终保持客户端提交的 Schema
+和参数形状。IronMLX 只生成并验证函数调用，不执行函数或外部工具。
 
 ## 权重量化
 
