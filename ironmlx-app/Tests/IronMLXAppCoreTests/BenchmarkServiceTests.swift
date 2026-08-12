@@ -1299,4 +1299,18 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     for expectedKey in expectedKeys {
         #expect(dashboardHTML(html, contains: expectedKey), "\(expectedKey) should be localized")
     }
+
+    let expectedMTPArchitectureMessages = [
+        "MTP acceleration currently supports Qwen dense/MoE and Gemma4 models only.",
+        "当前 MTP 加速仅支持 Qwen dense/MoE 和 Gemma4 模型。",
+        "目前 MTP 加速僅支援 Qwen dense/MoE 和 Gemma4 模型。",
+        "MTP アクセラレーションは現在 Qwen dense/MoE および Gemma4 モデルのみ対応しています。",
+        "MTP 가속은 현재 Qwen dense/MoE 및 Gemma4 모델만 지원합니다.",
+    ]
+    for expectedMessage in expectedMTPArchitectureMessages {
+        #expect(
+            dashboardHTML(html, contains: expectedMessage),
+            "MTP architecture error should include Gemma4 in every supported language"
+        )
+    }
 }
