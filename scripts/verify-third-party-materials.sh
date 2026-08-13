@@ -15,6 +15,10 @@ for tracked in THIRD_PARTY_NOTICES.md third-party-inventory.json THIRD_PARTY_LIC
   [ -e "$REPO_ROOT/$tracked" ] || fail "tracked third-party material is missing: $tracked"
 done
 
+python3 -m unittest discover \
+  -s "$REPO_ROOT/scripts/tests" \
+  -p 'test_generate_third_party_materials.py'
+
 temp_root="$(mktemp -d "${TMPDIR:-/tmp}/ironmlx-third-party-verify.XXXXXX")"
 trap 'rm -rf "$temp_root"' EXIT
 
@@ -25,4 +29,4 @@ for tracked in THIRD_PARTY_NOTICES.md third-party-inventory.json THIRD_PARTY_LIC
     "third-party materials have drifted; regenerate them after reviewing the dependency change"
 done
 
-echo "Third-party dependency materials are complete and reproducible"
+echo "Third-party materials are complete and reproducible"

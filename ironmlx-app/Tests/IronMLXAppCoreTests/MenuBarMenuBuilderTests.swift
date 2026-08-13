@@ -9,9 +9,6 @@ import Testing
         snapshot: MenuBarMenuSnapshot(
             state: .stopped,
             modelNames: [],
-            openClawInstalled: false,
-            openClawGatewayConfigured: false,
-            ironHermesInstalled: false,
             updatesEnabled: false,
             language: "en"
         ),
@@ -40,14 +37,11 @@ import Testing
 }
 
 @MainActor
-@Test func menuBarMenuKeepsOriginalRunningServerItemsWithModelsAndAgents() {
+@Test func menuBarMenuKeepsRunningServerItemsWithModels() {
     let menu = MenuBarMenuBuilder.makeMenu(
         snapshot: MenuBarMenuSnapshot(
             state: .running,
             modelNames: ["mlx-community/Qwen3-0.6B-4bit"],
-            openClawInstalled: true,
-            openClawGatewayConfigured: false,
-            ironHermesInstalled: true,
             updatesEnabled: false,
             language: "en"
         ),
@@ -60,9 +54,6 @@ import Testing
         "-",
         "Dashboard",
         "-",
-        "Chat with OpenClaw",
-        "Chat with IronHermes",
-        "-",
         "Stop Server",
         "Restart Server",
         "-",
@@ -71,8 +62,6 @@ import Testing
         "Quit",
     ])
     #expect(menu.item(withTitle: "Qwen3-0.6B-4bit")?.isEnabled == false)
-    #expect(menu.item(withTitle: "Chat with OpenClaw")?.isEnabled == false)
-    #expect(menu.item(withTitle: "Chat with IronHermes")?.isEnabled == true)
     #expect(menu.item(withTitle: "Stop Server")?.isEnabled == true)
     #expect(menu.item(withTitle: "Restart Server")?.isEnabled == true)
 }
@@ -86,9 +75,6 @@ import Testing
                 "mlx-community/Qwen3.5-35B-A3B-4bit",
                 "mlx-community/Qwen3.5-4B-MLX-4bit",
             ],
-            openClawInstalled: false,
-            openClawGatewayConfigured: false,
-            ironHermesInstalled: false,
             updatesEnabled: false,
             language: "zh-Hans"
         ),
@@ -108,9 +94,6 @@ import Testing
         snapshot: MenuBarMenuSnapshot(
             state: .running,
             modelNames: ["mlx-community/Qwen3-0.6B-4bit"],
-            openClawInstalled: true,
-            openClawGatewayConfigured: true,
-            ironHermesInstalled: true,
             updatesEnabled: false,
             language: "zh-Hans"
         ),
@@ -122,9 +105,6 @@ import Testing
         "Qwen3-0.6B-4bit",
         "-",
         "仪表盘",
-        "-",
-        "与 OpenClaw 聊天",
-        "与 IronHermes 聊天",
         "-",
         "停止服务",
         "重启服务",
@@ -141,9 +121,6 @@ import Testing
         snapshot: MenuBarMenuSnapshot(
             state: .stopped,
             modelNames: [],
-            openClawInstalled: false,
-            openClawGatewayConfigured: false,
-            ironHermesInstalled: false,
             updatesEnabled: false,
             language: "ja"
         ),
@@ -171,9 +148,6 @@ import Testing
         snapshot: MenuBarMenuSnapshot(
             state: .stopped,
             modelNames: [],
-            openClawInstalled: false,
-            openClawGatewayConfigured: false,
-            ironHermesInstalled: false,
             updatesEnabled: false,
             configurationRecoveryAvailable: true,
             language: "zh-Hans"

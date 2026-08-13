@@ -1,9 +1,50 @@
 {
+  "bundled_assets": {
+    "assets": [
+      {
+        "bundled_modifications": "Wrapped the upstream PNG in SVG for local Bundle loading; artwork unchanged.",
+        "bundled_path": "ironmlx-app/Sources/IronMLXAppCore/Resources/hermes-agent-logo.svg",
+        "bundled_sha256": "81ee441b8ee6e4e0cf086d7606d358fa8a8ebd143fd33e206a6ad9e5705bbceb",
+        "component": "Hermes Agent logo",
+        "copyright": "Copyright (c) 2025 Nous Research",
+        "license": "MIT",
+        "license_file": "asset-hermes-agent-mit.txt",
+        "license_sha256": "821556e6336796450ab852d375117b48a4887e71d255794fd6318d99982a5ab6",
+        "license_url": "https://github.com/NousResearch/hermes-agent/blob/1706502aa70485440a64127475f780c193784d6d/LICENSE",
+        "repository": "https://github.com/NousResearch/hermes-agent",
+        "revision": "1706502aa70485440a64127475f780c193784d6d",
+        "source_path": "website/static/img/apple-touch-icon.png",
+        "source_url": "https://github.com/NousResearch/hermes-agent/blob/1706502aa70485440a64127475f780c193784d6d/website/static/img/apple-touch-icon.png",
+        "upstream_sha256": "5847654a3b7c692a8edcf3a2138bc2b5c1072362fe99c2dae033d2672d2a075a",
+        "usage": "Identifies the supported Hermes Agent integration."
+      },
+      {
+        "bundled_modifications": "Removed fixed presentation dimensions and comments, then added accessible SVG metadata; artwork geometry and colors unchanged.",
+        "bundled_path": "ironmlx-app/Sources/IronMLXAppCore/Resources/oh-my-pi-logo.svg",
+        "bundled_sha256": "1c9b81e8ffb4ba0b3cb58a5817798ff1055f62f65af5f553df77feaf0b2ad162",
+        "component": "oh-my-pi logo",
+        "copyright": "Copyright (c) 2025 Mario Zechner; Copyright (c) 2025-2026 Can Bölük",
+        "license": "MIT",
+        "license_file": "asset-oh-my-pi-mit.txt",
+        "license_sha256": "545636e19386d3d4e0ae6d77354527499999c3ebfbca61b9fa5aa4ead7c0b308",
+        "license_url": "https://github.com/can1357/oh-my-pi/blob/45e12e5bb758198a920c6070e7e64cb33b21beac/LICENSE",
+        "repository": "https://github.com/can1357/oh-my-pi",
+        "revision": "45e12e5bb758198a920c6070e7e64cb33b21beac",
+        "source_path": "assets/icon.svg",
+        "source_url": "https://github.com/can1357/oh-my-pi/blob/45e12e5bb758198a920c6070e7e64cb33b21beac/assets/icon.svg",
+        "upstream_sha256": "727019727006f26fe3d1f187d3fe9830f26213733a51721096a2044ab059cf61",
+        "usage": "Identifies the supported oh-my-pi integration.",
+        "version": "v17.2.12"
+      }
+    ],
+    "manifest": "compliance/bundled-assets.json",
+    "manifest_sha256": "9033b78265a33ef5e43f3e77412816924830c5d1c487c406a8443dbe78958949"
+  },
   "generation": {
     "cargo_about_config": "about.toml",
     "cargo_about_mode": "offline after locked target fetch",
     "cargo_about_version": "0.9.1",
-    "scope": "ironmlx and iron-bench macOS arm64 Release binaries"
+    "scope": "IronMLX macOS arm64 Release binaries and bundled third-party assets"
   },
   "native": {
     "dependencies": [
@@ -3664,7 +3705,7 @@
     ],
     "target": "aarch64-apple-darwin"
   },
-  "schema_version": 1,
+  "schema_version": 2,
   "swift": {
     "external_packages": [
       {
@@ -3689,6 +3730,6 @@
       }
     ],
     "manifest": "ironmlx-app/Package.swift",
-    "manifest_sha256": "2b903b507a3a5bc1063bf670da27974adaea67b4f1fa16a5453099d0cc6c0370"
+    "manifest_sha256": "1c5752ccd7eb99847deb2011eabb51c70ba37dd25b18d93b5617cc7f47b4c9a5"
   }
 }

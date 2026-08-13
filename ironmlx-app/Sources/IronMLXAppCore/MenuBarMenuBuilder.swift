@@ -4,9 +4,6 @@ import Foundation
 public struct MenuBarMenuSnapshot: Equatable {
     public var state: BackendProcessState
     public var modelNames: [String]
-    public var openClawInstalled: Bool
-    public var openClawGatewayConfigured: Bool
-    public var ironHermesInstalled: Bool
     public var updatesEnabled: Bool
     public var configurationRecoveryAvailable: Bool
     public var language: String
@@ -14,18 +11,12 @@ public struct MenuBarMenuSnapshot: Equatable {
     public init(
         state: BackendProcessState,
         modelNames: [String],
-        openClawInstalled: Bool,
-        openClawGatewayConfigured: Bool,
-        ironHermesInstalled: Bool,
         updatesEnabled: Bool,
         configurationRecoveryAvailable: Bool = false,
         language: String = "en"
     ) {
         self.state = state
         self.modelNames = modelNames
-        self.openClawInstalled = openClawInstalled
-        self.openClawGatewayConfigured = openClawGatewayConfigured
-        self.ironHermesInstalled = ironHermesInstalled
         self.updatesEnabled = updatesEnabled
         self.configurationRecoveryAvailable = configurationRecoveryAvailable
         self.language = language
@@ -82,10 +73,6 @@ public enum MenuBarMenuBuilder {
             )
         )
         menu.addItem(.separator())
-
-        if addAgentItems(snapshot, target: target, to: menu) {
-            menu.addItem(.separator())
-        }
 
         addBackendControlItems(snapshot.state, language: snapshot.language, target: target, to: menu)
         menu.addItem(.separator())
@@ -169,36 +156,6 @@ public enum MenuBarMenuBuilder {
         }
     }
 
-    private static func addAgentItems(_ snapshot: MenuBarMenuSnapshot, target: AnyObject?, to menu: NSMenu) -> Bool {
-        var didAddItem = false
-        if snapshot.openClawInstalled {
-            let openClaw = item(
-                localized(.chatOpenClaw, language: snapshot.language),
-                #selector(MenuBarController.openOpenClawChat(_:)),
-                "",
-                target: target,
-                symbol: "bubble.left.and.text.bubble.right"
-            )
-            openClaw.isEnabled = snapshot.openClawGatewayConfigured
-            menu.addItem(openClaw)
-            didAddItem = true
-        }
-
-        if snapshot.ironHermesInstalled {
-            menu.addItem(
-                item(
-                    localized(.chatIronHermes, language: snapshot.language),
-                    #selector(MenuBarController.openIronHermes(_:)),
-                    "",
-                    target: target,
-                    symbol: "bubble.left.and.bubble.right"
-                )
-            )
-            didAddItem = true
-        }
-        return didAddItem
-    }
-
     private static func addBackendControlItems(
         _ state: BackendProcessState,
         language: String,
@@ -242,10 +199,6 @@ public enum MenuBarMenuBuilder {
         switch (normalizedLanguage(language), key) {
         case ("zh", .dashboard):
             return "仪表盘"
-        case ("zh", .chatOpenClaw):
-            return "与 OpenClaw 聊天"
-        case ("zh", .chatIronHermes):
-            return "与 IronHermes 聊天"
         case ("zh", .stop):
             return "停止服务"
         case ("zh", .start):
@@ -275,10 +228,6 @@ public enum MenuBarMenuBuilder {
 
         case ("zh-Hant", .dashboard):
             return "儀表板"
-        case ("zh-Hant", .chatOpenClaw):
-            return "與 OpenClaw 聊天"
-        case ("zh-Hant", .chatIronHermes):
-            return "與 IronHermes 聊天"
         case ("zh-Hant", .stop):
             return "停止服務"
         case ("zh-Hant", .start):
@@ -308,10 +257,6 @@ public enum MenuBarMenuBuilder {
 
         case ("ja", .dashboard):
             return "ダッシュボード"
-        case ("ja", .chatOpenClaw):
-            return "OpenClaw でチャット"
-        case ("ja", .chatIronHermes):
-            return "IronHermes とチャット"
         case ("ja", .stop):
             return "サーバー停止"
         case ("ja", .start):
@@ -341,10 +286,6 @@ public enum MenuBarMenuBuilder {
 
         case ("ko", .dashboard):
             return "대시보드"
-        case ("ko", .chatOpenClaw):
-            return "OpenClaw로 채팅"
-        case ("ko", .chatIronHermes):
-            return "IronHermes와 채팅"
         case ("ko", .stop):
             return "서버 정지"
         case ("ko", .start):
@@ -396,10 +337,6 @@ public enum MenuBarMenuBuilder {
         switch key {
         case .dashboard:
             return "Dashboard"
-        case .chatOpenClaw:
-            return "Chat with OpenClaw"
-        case .chatIronHermes:
-            return "Chat with IronHermes"
         case .stop:
             return "Stop Server"
         case .start:
@@ -472,8 +409,6 @@ public enum MenuBarMenuBuilder {
 
 private enum MenuTextKey {
     case dashboard
-    case chatOpenClaw
-    case chatIronHermes
     case stop
     case start
     case restart

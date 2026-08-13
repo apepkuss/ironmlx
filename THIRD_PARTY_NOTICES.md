@@ -1,9 +1,10 @@
 # IronMLX Third-Party Notices
 
-This engineering inventory describes third-party software included in the
-Apple Silicon macOS Release product. It is generated from the locked Rust
-dependency graph and the pinned native MLX build inputs. It is not legal
-advice or approval to distribute the product.
+This engineering inventory describes third-party software and assets included in
+the Apple Silicon macOS Release product. It is generated from the locked Rust
+dependency graph, pinned native and Swift inputs, and reviewed bundled
+third-party assets. It is not legal advice or approval to distribute the
+product.
 
 ## Native dependencies
 
@@ -305,6 +306,17 @@ development dependencies excluded, build dependencies retained.
 |---|---|---|---|---|---|
 | Sparkle | 2.9.5 | `79bc9e872948e47877e76f194cb0c8e0412b0b90` | MIT and bundled third-party notices | `THIRD_PARTY_LICENSES/swift-sparkle-license.txt` | https://github.com/sparkle-project/Sparkle.git |
 | ZIPFoundation | 0.9.20 | `22787ffb59de99e5dc1fbfe80b19c97a904ad48d` | MIT | `THIRD_PARTY_LICENSES/swift-zipfoundation-license.txt` | https://github.com/weichsel/ZIPFoundation.git |
+
+## Bundled third-party assets
+
+| Asset | Source revision | Copyright | License | License text | Bundled file | Source |
+|---|---|---|---|---|---|---|
+| Hermes Agent logo | `1706502aa70485440a64127475f780c193784d6d` | Copyright (c) 2025 Nous Research | MIT | `THIRD_PARTY_LICENSES/asset-hermes-agent-mit.txt` | `ironmlx-app/Sources/IronMLXAppCore/Resources/hermes-agent-logo.svg` | https://github.com/NousResearch/hermes-agent/blob/1706502aa70485440a64127475f780c193784d6d/website/static/img/apple-touch-icon.png |
+| oh-my-pi logo | `v17.2.12` | Copyright (c) 2025 Mario Zechner; Copyright (c) 2025-2026 Can Bölük | MIT | `THIRD_PARTY_LICENSES/asset-oh-my-pi-mit.txt` | `ironmlx-app/Sources/IronMLXAppCore/Resources/oh-my-pi-logo.svg` | https://github.com/can1357/oh-my-pi/blob/45e12e5bb758198a920c6070e7e64cb33b21beac/assets/icon.svg |
+
+Hermes Agent and oh-my-pi names and logos are used solely to identify
+supported third-party integrations. No affiliation or endorsement is
+implied. All trademarks remain the property of their respective owners.
 
 ## Explicit exclusions
 
