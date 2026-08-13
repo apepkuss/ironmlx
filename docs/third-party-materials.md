@@ -7,9 +7,10 @@ P0-8A 为实际打入 `IronMLX.app` 的 macOS arm64 Release 产品建立可复�
 
 - `ironmlx` 与 `iron-bench` 两个 Release 二进制的默认 feature 依赖；
 - `aarch64-apple-darwin` 目标，排除 dev dependencies，保留 build dependencies；
-- Swift App 的外部 SwiftPM 包（当前为零）；
+- Swift App 的外部 SwiftPM 包（当前为 Sparkle 与 ZIPFoundation）；
 - MLX C++ 分叉及其 Release 构建实际纳入的 metal-cpp、fmt、nlohmann/json、
   gguflib；JACCL 是锁定 MLX checkout 内的组成部分；
+- 直接打入 App Bundle 的第三方图形与品牌资源；
 - 明确排除由 macOS 提供且未复制进 App 的系统 frameworks，以及由用户另行下载、
   受各自条款约束的模型权重。
 
@@ -22,14 +23,17 @@ P0-8A 为实际打入 `IronMLX.app` 的 macOS arm64 Release 产品建立可复�
 - `scripts/release-config.sh` 锁定的非官方 MLX 分叉 commit；
 - `compliance/native-dependencies.json` 中锁定的原生依赖版本、源码完整性和许可证
   文件 SHA-256；
+- `compliance/bundled-assets.json` 中锁定的第三方资源来源、上游与 Bundle 文件
+  SHA-256、版权及许可证材料；
 - `third-party-inventory.json`：规范化机器可读工程清单；
 - `THIRD_PARTY_NOTICES.md`：组件、版本、许可表达式与许可证文件映射；
 - `THIRD_PARTY_LICENSES/`：从锁定依赖源码提取的完整许可证原文。
 
 MLX 条目标明 IronMLX 使用 `apepkuss/mlx` 分叉，而不是官方 MLX repo，并同时
 记录精确 fork commit、官方 upstream repo 与 upstream base revision。生成器还会
-验证 MLX/fmt/gguflib 的 Git commit，以及 metal-cpp/nlohmann JSON 下载归档和所有
-原生许可证文件的 SHA-256。
+验证 MLX/fmt/gguflib 的 Git commit，以及 metal-cpp/nlohmann JSON 下载归档、
+第三方资源 Bundle 文件和所有许可证文件的 SHA-256。上游资源 SHA-256 作为已审查
+的来源锁记录保留在规范输入中；离线生成器验证经过 App 适配后的 Bundle 文件。
 
 ## 更新流程
 

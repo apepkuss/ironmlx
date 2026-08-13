@@ -27,6 +27,21 @@ def write_text(path: Path, value: str) -> None:
     path.write_text(value, encoding="utf-8")
 
 
+def resolve_repository_file(repository_root: Path, relative_path: str) -> Path:
+    candidate = (repository_root / relative_path).resolve()
+    root = repository_root.resolve()
+    if candidate != root and root not in candidate.parents:
+        raise ValueError(f"repository file escapes its root: {relative_path}")
+    if not candidate.is_file():
+        raise ValueError(f"repository file is missing: {relative_path}")
+    return candidate
+
+
+def validate_output_filename(filename: str) -> None:
+    if Path(filename).name != filename or filename in {"", ".", ".."}:
+        raise ValueError(f"invalid generated license filename: {filename}")
+
+
 def resolve_native_source(source: str, mlx_source: Path, mlx_build: Path) -> Path:
     prefix, separator, relative = source.partition(":")
     if not separator or not relative:
@@ -165,6 +180,58 @@ def native_materials(
     return dependencies
 
 
+def bundled_asset_materials(
+    manifest: dict[str, Any], repository_root: Path, licenses_dir: Path
+) -> list[dict[str, Any]]:
+    if manifest.get("schema_version") != 1:
+        raise ValueError("unsupported bundled asset manifest schema")
+
+    assets: list[dict[str, Any]] = []
+    bundled_paths: set[str] = set()
+    license_files: set[str] = set()
+    for asset in manifest["assets"]:
+        bundled_path = asset["bundled_path"]
+        if bundled_path in bundled_paths:
+            raise ValueError(f"duplicate bundled asset path: {bundled_path}")
+        bundled_paths.add(bundled_path)
+
+        license_file = asset["license_file"]
+        validate_output_filename(license_file)
+        if license_file in license_files:
+            raise ValueError(f"duplicate bundled asset license file: {license_file}")
+        license_files.add(license_file)
+
+        source_path = resolve_repository_file(repository_root, bundled_path)
+        actual_asset_hash = sha256_bytes(source_path.read_bytes())
+        if actual_asset_hash != asset["bundled_sha256"]:
+            raise ValueError(
+                f"bundled asset hash mismatch for {asset['component']}: "
+                f"expected {asset['bundled_sha256']}, found {actual_asset_hash}"
+            )
+
+        license_path = resolve_repository_file(
+            repository_root, asset["license_source"]
+        )
+        license_content = license_path.read_bytes()
+        actual_license_hash = sha256_bytes(license_content)
+        if actual_license_hash != asset["license_sha256"]:
+            raise ValueError(
+                f"bundled asset license hash mismatch for {asset['component']}: "
+                f"expected {asset['license_sha256']}, found {actual_license_hash}"
+            )
+        shutil.copyfile(license_path, licenses_dir / license_file)
+
+        normalized = {
+            key: value for key, value in asset.items() if key != "license_source"
+        }
+        normalized["bundled_sha256"] = actual_asset_hash
+        normalized["license_sha256"] = actual_license_hash
+        assets.append(normalized)
+
+    assets.sort(key=lambda entry: entry["component"].casefold())
+    return assets
+
+
 def swift_materials(
     manifest: dict[str, Any],
     package_resolved: dict[str, Any],
@@ -243,10 +310,11 @@ def render_notices(inventory: dict[str, Any]) -> str:
     lines = [
         "# IronMLX Third-Party Notices",
         "",
-        "This engineering inventory describes third-party software included in the",
-        "Apple Silicon macOS Release product. It is generated from the locked Rust",
-        "dependency graph and the pinned native MLX build inputs. It is not legal",
-        "advice or approval to distribute the product.",
+        "This engineering inventory describes third-party software and assets included in",
+        "the Apple Silicon macOS Release product. It is generated from the locked Rust",
+        "dependency graph, pinned native and Swift inputs, and reviewed bundled",
+        "third-party assets. It is not legal advice or approval to distribute the",
+        "product.",
         "",
         "## Native dependencies",
         "",
@@ -308,6 +376,34 @@ def render_notices(inventory: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
+            "## Bundled third-party assets",
+            "",
+            "| Asset | Source revision | Copyright | License | License text | "
+            "Bundled file | Source |",
+            "|---|---|---|---|---|---|---|",
+        ]
+    )
+    for asset in inventory["bundled_assets"]["assets"]:
+        source_revision = asset.get("version") or asset["revision"]
+        lines.append(
+            f"| {asset['component']} | `{source_revision}` | "
+            f"{asset['copyright']} | {asset['license']} | "
+            f"`THIRD_PARTY_LICENSES/{asset['license_file']}` | "
+            f"`{asset['bundled_path']}` | {asset['source_url']} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "Hermes Agent and oh-my-pi names and logos are used solely to identify",
+            "supported third-party integrations. No affiliation or endorsement is",
+            "implied. All trademarks remain the property of their respective owners.",
+        ]
+    )
+
+    lines.extend(
+        [
+            "",
             "## Explicit exclusions",
             "",
             "Apple system frameworks are supplied by macOS and are not copied into the",
@@ -333,6 +429,8 @@ def main() -> None:
         "--cargo-about-json", required=True, action="append", type=Path
     )
     parser.add_argument("--native-manifest", required=True, type=Path)
+    parser.add_argument("--bundled-assets-manifest", required=True, type=Path)
+    parser.add_argument("--repository-root", required=True, type=Path)
     parser.add_argument("--mlx-source", required=True, type=Path)
     parser.add_argument("--mlx-build", required=True, type=Path)
     parser.add_argument("--swift-manifest", required=True, type=Path)
@@ -349,6 +447,10 @@ def main() -> None:
 
     cargo_about_documents = [read_json(path) for path in args.cargo_about_json]
     native_manifest = read_json(args.native_manifest)
+    bundled_asset_manifest = read_json(args.bundled_assets_manifest)
+    bundled_assets = bundled_asset_materials(
+        bundled_asset_manifest, args.repository_root, licenses_dir
+    )
     rust_crates, rust_licenses = rust_materials(cargo_about_documents, licenses_dir)
     native_dependencies = native_materials(
         native_manifest, args.mlx_source, args.mlx_build, licenses_dir
@@ -369,11 +471,20 @@ def main() -> None:
     )
 
     inventory = {
+        "bundled_assets": {
+            "assets": bundled_assets,
+            "manifest": "compliance/bundled-assets.json",
+            "manifest_sha256": sha256_bytes(
+                args.bundled_assets_manifest.read_bytes()
+            ),
+        },
         "generation": {
             "cargo_about_config": "about.toml",
             "cargo_about_mode": "offline after locked target fetch",
             "cargo_about_version": "0.9.1",
-            "scope": "ironmlx and iron-bench macOS arm64 Release binaries",
+            "scope": (
+                "IronMLX macOS arm64 Release binaries and bundled third-party assets"
+            ),
         },
         "native": {
             "dependencies": native_dependencies,
@@ -386,7 +497,7 @@ def main() -> None:
             "license_texts": rust_licenses,
             "target": "aarch64-apple-darwin",
         },
-        "schema_version": 1,
+        "schema_version": 2,
         "swift": {
             "external_packages": swift_external_packages,
             "manifest": "ironmlx-app/Package.swift",

@@ -131,10 +131,6 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         "cancelSchedulerProfileGeneration",
         "refreshSchedulerProfileStatus",
         "saveModelParams",
-        "openOpenClawChat",
-        "openOpenClawDashboard",
-        "checkOpenClaw",
-        "checkIronHermes",
     ]
 
     public func userContentController(
@@ -215,12 +211,6 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             sendSchedulerProfileStatus()
         case "saveModelParams":
             saveModelParams(json: stringBody(body))
-        case "openOpenClawChat", "openOpenClawDashboard":
-            NSWorkspace.shared.open(URL(string: "http://127.0.0.1:18789")!)
-        case "checkOpenClaw":
-            sendJavaScript("onOpenClawStatus(\(Self.jsStringLiteral("{\"installed\":false,\"gatewayRunning\":false}")))")
-        case "checkIronHermes":
-            sendJavaScript("onIronHermesStatus(\(Self.jsStringLiteral("{\"installed\":false,\"running\":false}")))")
         default:
             break
         }

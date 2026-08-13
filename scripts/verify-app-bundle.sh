@@ -57,6 +57,8 @@ for file in \
   Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle \
   Contents/Resources/mlx.metallib \
   Contents/Resources/dashboard2.html \
+  Contents/Resources/hermes-agent-logo.svg \
+  Contents/Resources/oh-my-pi-logo.svg \
   Contents/Resources/AppIcon.icns \
   Contents/Resources/menubar-icon.png \
   Contents/Resources/menubar-icon@2x.png \

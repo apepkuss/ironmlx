@@ -193,7 +193,14 @@ ditto "$sparkle_framework" "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
 cp "$BUILD_ROOT/cargo-target/release/ironmlx" "$APP_BUNDLE/Contents/Helpers/ironmlx"
 cp "$BUILD_ROOT/cargo-target/release/iron-bench" "$APP_BUNDLE/Contents/Helpers/iron-bench"
 cp "$BUILD_ROOT/mlx-install/lib/mlx.metallib" "$APP_BUNDLE/Contents/Resources/mlx.metallib"
-for resource in dashboard2.html logo.png menubar-icon.png menubar-icon@2x.png sidebar-logo@2x.png; do
+for resource in \
+  dashboard2.html \
+  hermes-agent-logo.svg \
+  logo.png \
+  menubar-icon.png \
+  menubar-icon@2x.png \
+  oh-my-pi-logo.svg \
+  sidebar-logo@2x.png; do
   cp "$APP_SOURCE_DIR/Sources/IronMLXAppCore/Resources/$resource" "$APP_BUNDLE/Contents/Resources/$resource"
 done
 cp "$REPO_ROOT/THIRD_PARTY_NOTICES.md" "$APP_BUNDLE/Contents/Resources/Legal/"

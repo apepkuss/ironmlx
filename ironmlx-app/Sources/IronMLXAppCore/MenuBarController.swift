@@ -14,7 +14,6 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     private let dashboard: DashboardWindowController
     private let updateManager: any AppUpdateManaging
     private let configurationRecovery: any ConfigurationRecoveryManaging
-    private let fileManager: FileManager
     private let notificationCenter: NotificationCenter
     private var loadedModelNames: [String]?
     private var isRefreshingLoadedModelNames = false
@@ -26,7 +25,6 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         dashboard: DashboardWindowController,
         updateManager: any AppUpdateManaging = DisabledAppUpdateManager(),
         configurationRecovery: any ConfigurationRecoveryManaging = DisabledConfigurationRecoveryManager(),
-        fileManager: FileManager = .default,
         notificationCenter: NotificationCenter = .default
     ) {
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -35,7 +33,6 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         self.dashboard = dashboard
         self.updateManager = updateManager
         self.configurationRecovery = configurationRecovery
-        self.fileManager = fileManager
         self.notificationCenter = notificationCenter
         super.init()
         observeLanguageChanges()
@@ -78,16 +75,6 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
 
     @objc public func openDashboard(_ sender: NSMenuItem) {
         dashboard.show()
-    }
-
-    @objc public func openOpenClawChat(_ sender: NSMenuItem) {
-        startOpenClawGatewayIfConfigured()
-        openOpenClawURL(path: "openclaw")
-    }
-
-    @objc public func openIronHermes(_ sender: NSMenuItem) {
-        startIronHermesIfInstalled()
-        NSWorkspace.shared.open(URL(string: "http://127.0.0.1:9069")!)
     }
 
     @objc public func startServer(_ sender: NSMenuItem) {
@@ -153,9 +140,6 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         return MenuBarMenuSnapshot(
             state: state,
             modelNames: modelNames,
-            openClawInstalled: fileManager.fileExists(atPath: openClawCLIPath().path),
-            openClawGatewayConfigured: fileManager.fileExists(atPath: openClawGatewayPlistPath().path),
-            ironHermesInstalled: fileManager.fileExists(atPath: ironHermesBinaryPath().path),
             updatesEnabled: updateManager.canCheckForUpdates,
             configurationRecoveryAvailable: configurationRecovery.hasIssues,
             language: config.language
@@ -307,65 +291,4 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         }
     }
 
-    private func openOpenClawURL(path: String) {
-        let token = openClawGatewayToken()
-        let suffix = token.isEmpty ? "" : "#token=\(token)"
-        NSWorkspace.shared.open(URL(string: "http://127.0.0.1:18789/\(path)\(suffix)")!)
-    }
-
-    private func startOpenClawGatewayIfConfigured() {
-        guard fileManager.fileExists(atPath: openClawGatewayPlistPath().path) else {
-            return
-        }
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        process.arguments = ["start", "ai.openclaw.gateway"]
-        try? process.run()
-    }
-
-    private func startIronHermesIfInstalled() {
-        let binary = ironHermesBinaryPath()
-        guard fileManager.fileExists(atPath: binary.path) else {
-            return
-        }
-        let process = Process()
-        process.executableURL = binary
-        try? process.run()
-    }
-
-    private func openClawGatewayToken() -> String {
-        let configURL = fileManager.homeDirectoryForCurrentUser
-            .appendingPathComponent(".openclaw", isDirectory: true)
-            .appendingPathComponent("openclaw.json")
-        guard let data = try? Data(contentsOf: configURL),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return ""
-        }
-        if let gateway = object["gateway"] as? [String: Any],
-           let token = gateway["token"] as? String {
-            return token
-        }
-        return object["gateway_token"] as? String ?? ""
-    }
-
-    private func openClawCLIPath() -> URL {
-        fileManager.homeDirectoryForCurrentUser
-            .appendingPathComponent(".openclaw", isDirectory: true)
-            .appendingPathComponent("bin", isDirectory: true)
-            .appendingPathComponent("openclaw")
-    }
-
-    private func openClawGatewayPlistPath() -> URL {
-        fileManager.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library", isDirectory: true)
-            .appendingPathComponent("LaunchAgents", isDirectory: true)
-            .appendingPathComponent("ai.openclaw.gateway.plist")
-    }
-
-    private func ironHermesBinaryPath() -> URL {
-        fileManager.homeDirectoryForCurrentUser
-            .appendingPathComponent(".iron-hermes", isDirectory: true)
-            .appendingPathComponent("bin", isDirectory: true)
-            .appendingPathComponent("iron-hermes")
-    }
 }

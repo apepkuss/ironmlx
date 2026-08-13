@@ -1,6 +1,23 @@
 import AppKit
 
 @MainActor
+public final class ApplicationAboutPresenter: NSObject {
+    public static let shared = ApplicationAboutPresenter()
+
+    public static func panelOptions(bundle: Bundle = .main) -> [NSApplication.AboutPanelOptionKey: Any] {
+        let applicationVersion = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
+        return [
+            .applicationVersion: applicationVersion,
+            .version: "",
+        ]
+    }
+
+    @objc public func showAbout(_ sender: Any?) {
+        NSApp.orderFrontStandardAboutPanel(options: Self.panelOptions())
+    }
+}
+
+@MainActor
 public enum ApplicationMenuBuilder {
     public static func makeMainMenu() -> NSMenu {
         let menu = NSMenu()
@@ -14,10 +31,10 @@ public enum ApplicationMenuBuilder {
         let submenu = NSMenu(title: "IronMLX")
         let about = NSMenuItem(
             title: "About IronMLX",
-            action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
+            action: #selector(ApplicationAboutPresenter.showAbout(_:)),
             keyEquivalent: ""
         )
-        about.target = NSApp
+        about.target = ApplicationAboutPresenter.shared
         submenu.addItem(about)
         let thirdPartyNotices = NSMenuItem(
             title: "Third-Party Notices…",

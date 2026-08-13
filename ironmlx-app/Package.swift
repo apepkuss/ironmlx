@@ -38,9 +38,11 @@ let package = Package(
             ],
             resources: [
                 .copy("Resources/dashboard2.html"),
+                .copy("Resources/hermes-agent-logo.svg"),
                 .copy("Resources/logo.png"),
                 .copy("Resources/menubar-icon.png"),
                 .copy("Resources/menubar-icon@2x.png"),
+                .copy("Resources/oh-my-pi-logo.svg"),
                 .copy("Resources/sidebar-logo@2x.png"),
             ]
         ),

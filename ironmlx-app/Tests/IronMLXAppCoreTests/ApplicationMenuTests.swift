@@ -10,9 +10,12 @@ import Testing
 
     #expect(
         applicationMenu?.item(withTitle: "About IronMLX")?.action
-            == #selector(NSApplication.orderFrontStandardAboutPanel(_:))
+            == #selector(ApplicationAboutPresenter.showAbout(_:))
     )
-    #expect(applicationMenu?.item(withTitle: "About IronMLX")?.target === NSApp)
+    #expect(
+        applicationMenu?.item(withTitle: "About IronMLX")?.target
+            === ApplicationAboutPresenter.shared
+    )
     #expect(
         applicationMenu?.item(withTitle: "Third-Party Notices…")?.action
             == #selector(ApplicationLegalNoticesPresenter.showThirdPartyNotices(_:))
@@ -23,6 +26,35 @@ import Testing
     )
     #expect(applicationMenu?.item(withTitle: "Quit IronMLX")?.action == #selector(NSApplication.terminate(_:)))
     #expect(applicationMenu?.item(withTitle: "Quit IronMLX")?.keyEquivalent == "q")
+}
+
+@MainActor
+@Test func applicationAboutPanelShowsMarketingVersionWithoutBuildNumber() throws {
+    let bundleURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: bundleURL, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: bundleURL) }
+
+    let infoPlist: [String: Any] = [
+        "CFBundleIdentifier": "com.ironmlx.about-panel-test",
+        "CFBundleName": "IronMLX",
+        "CFBundlePackageType": "BNDL",
+        "CFBundleShortVersionString": "0.1.0",
+        "CFBundleVersion": "42",
+    ]
+    let infoData = try PropertyListSerialization.data(
+        fromPropertyList: infoPlist,
+        format: .xml,
+        options: 0
+    )
+    try infoData.write(to: bundleURL.appendingPathComponent("Info.plist"))
+    let bundle = try #require(Bundle(url: bundleURL))
+
+    let options = ApplicationAboutPresenter.panelOptions(bundle: bundle)
+
+    #expect(options[.applicationVersion] as? String == "0.1.0")
+    #expect(options[.version] as? String == "")
+    #expect(bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String == "42")
 }
 
 @MainActor

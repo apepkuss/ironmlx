@@ -55,7 +55,9 @@ swift package --package-path "$REPO_ROOT/ironmlx-app" resolve
 python3 "$SCRIPT_DIR/generate-third-party-materials.py" \
   --cargo-about-json "$temp_root/cargo-about-ironmlx.json" \
   --cargo-about-json "$temp_root/cargo-about-iron-bench.json" \
+  --bundled-assets-manifest "$REPO_ROOT/compliance/bundled-assets.json" \
   --native-manifest "$REPO_ROOT/compliance/native-dependencies.json" \
+  --repository-root "$REPO_ROOT" \
   --mlx-source "$MLX_SOURCE" \
   --mlx-build "$MLX_BUILD" \
   --swift-manifest "$REPO_ROOT/ironmlx-app/Package.swift" \
