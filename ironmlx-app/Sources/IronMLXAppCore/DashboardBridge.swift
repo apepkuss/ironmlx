@@ -151,8 +151,10 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             updateConfig { $0.language = stringBody(body) }
             notifyMenuLanguageDidChange()
         case "setTheme":
-            let value = stringBody(body)
-            updateConfig { $0.theme = value == "system" ? nil : value }
+            let theme = DashboardThemeAppearance.normalizedPreference(stringBody(body))
+            if updateConfig({ $0.theme = theme }) {
+                applyTheme(theme)
+            }
         case "setDefaultModel":
             let model = stringBody(body).trimmingCharacters(in: .whitespacesAndNewlines)
             updateConfig { $0.defaultModel = model }
@@ -1367,6 +1369,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 sendJavaScript("onSettingsSaved(\(Self.jsStringLiteral(response)))")
                 return
             }
+            applyTheme(config.theme)
             retireSupersededSecurityMaterial(from: existing, to: config)
             notifyMenuLanguageDidChange()
             let response = #"{"status":"ok","needs_restart":false}"#
@@ -1392,6 +1395,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             sendJavaScript("onSettingsSaved(\(Self.jsStringLiteral(response)))")
             return
         }
+        applyTheme(config.theme)
         Task {
             let result = await backend.restart(intent: .plannedRestart)
             guard result.success else {
@@ -1399,6 +1403,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 _ = await backend.restart(intent: .plannedRestart)
                 await MainActor.run {
                     self.retireSupersededSecurityMaterial(from: config, to: existing)
+                    self.applyTheme(existing.theme)
                 }
                 let error = result.error ?? "The candidate network configuration failed to start; the previous configuration was restored."
                 let response = Self.settingsErrorJSON(message: error, code: "network_restart_rolled_back")
@@ -1648,7 +1653,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             config.language = language
         }
         if let theme = object["theme"] as? String {
-            config.theme = theme == "system" ? nil : theme
+            config.theme = DashboardThemeAppearance.normalizedPreference(theme)
         }
         if let logLevel = stringValue(object, "log_level"), !logLevel.isEmpty {
             config.logLevel = logLevel
@@ -2291,8 +2296,16 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         }
     }
 
-    private func updateConfig(_ mutate: (inout AppConfig) -> Void) {
+    @discardableResult
+    private func updateConfig(_ mutate: (inout AppConfig) -> Void) -> Bool {
         configStore.update(mutate)
+    }
+
+    private func applyTheme(_ theme: String?) {
+        guard let webView else {
+            return
+        }
+        DashboardThemeAppearance.apply(theme, to: webView)
     }
 
     private func notifyMenuLanguageDidChange() {

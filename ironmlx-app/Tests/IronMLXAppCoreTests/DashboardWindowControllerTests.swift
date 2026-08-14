@@ -18,6 +18,39 @@ import Testing
 }
 
 @MainActor
+@Test func dashboardThemeAppearanceForcesLightDarkAndRestoresSystemPreference() {
+    let view = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 240))
+    let window = NSWindow(
+        contentRect: view.frame,
+        styleMask: DashboardWindowController.dashboardWindowStyleMask,
+        backing: .buffered,
+        defer: true
+    )
+    window.contentView = view
+
+    DashboardThemeAppearance.apply("dark", to: view)
+    #expect(view.appearance?.name == .darkAqua)
+    #expect(window.appearance?.name == .darkAqua)
+
+    DashboardThemeAppearance.apply("light", to: view)
+    #expect(view.appearance?.name == .aqua)
+    #expect(window.appearance?.name == .aqua)
+
+    DashboardThemeAppearance.apply("system", to: view)
+    #expect(view.appearance == nil)
+    #expect(window.appearance == nil)
+}
+
+@MainActor
+@Test func dashboardThemeAppearanceRejectsUnknownPreferences() {
+    #expect(DashboardThemeAppearance.normalizedPreference("light") == "light")
+    #expect(DashboardThemeAppearance.normalizedPreference("dark") == "dark")
+    #expect(DashboardThemeAppearance.normalizedPreference("system") == nil)
+    #expect(DashboardThemeAppearance.normalizedPreference("unknown") == nil)
+    #expect(DashboardThemeAppearance.normalizedPreference(nil) == nil)
+}
+
+@MainActor
 @Test func dashboardWindowDelegateHidesRegularWindowInsteadOfClosing() {
     var hideWindowCalls = 0
     var exitFullScreenCalls = 0
