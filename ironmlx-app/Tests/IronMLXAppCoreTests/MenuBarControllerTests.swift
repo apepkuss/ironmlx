@@ -5,6 +5,29 @@ import Testing
 @testable import IronMLXAppCore
 
 @Test @MainActor
+func menuBarIconIncludesStandardAndRetinaRepresentations() throws {
+    let image = try #require(MenuBarIconLoader.load())
+
+    #expect(image.size == NSSize(width: 34, height: 22))
+    #expect(image.isTemplate)
+    #expect(image.representations.count == 2)
+    #expect(
+        image.representations.contains {
+            $0.size == NSSize(width: 34, height: 22)
+                && $0.pixelsWide == 34
+                && $0.pixelsHigh == 22
+        }
+    )
+    #expect(
+        image.representations.contains {
+            $0.size == NSSize(width: 34, height: 22)
+                && $0.pixelsWide == 68
+                && $0.pixelsHigh == 44
+        }
+    )
+}
+
+@Test @MainActor
 func menuBarRefreshesImmediatelyForBackendRuntimeNotification() throws {
     let root = try menuTemporaryDirectory()
     let configStore = AppConfigStore(url: root.appendingPathComponent("app_config.json"))
