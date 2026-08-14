@@ -6,6 +6,50 @@ public protocol MenuBarBackendProcessManaging: BackendRuntimeManaging {}
 
 extension BackendRuntimeSupervisor: MenuBarBackendProcessManaging {}
 
+enum MenuBarIconLoader {
+    static let logicalSize = NSSize(width: 34, height: 22)
+
+    static func load() -> NSImage? {
+        guard
+            let iconURL = IronMLXAppResourceResolver.url(
+                forResource: "menubar-icon",
+                withExtension: "png"
+            ),
+            let retinaIconURL = IronMLXAppResourceResolver.url(
+                forResource: "menubar-icon@2x",
+                withExtension: "png"
+            )
+        else {
+            return nil
+        }
+        return load(iconURL: iconURL, retinaIconURL: retinaIconURL)
+    }
+
+    static func load(iconURL: URL, retinaIconURL: URL) -> NSImage? {
+        guard
+            let iconData = try? Data(contentsOf: iconURL),
+            let retinaIconData = try? Data(contentsOf: retinaIconURL),
+            let iconRepresentation = NSBitmapImageRep(data: iconData),
+            let retinaIconRepresentation = NSBitmapImageRep(data: retinaIconData),
+            iconRepresentation.pixelsWide == 34,
+            iconRepresentation.pixelsHigh == 22,
+            retinaIconRepresentation.pixelsWide == 68,
+            retinaIconRepresentation.pixelsHigh == 44
+        else {
+            return nil
+        }
+
+        iconRepresentation.size = logicalSize
+        retinaIconRepresentation.size = logicalSize
+
+        let image = NSImage(size: logicalSize)
+        image.addRepresentation(iconRepresentation)
+        image.addRepresentation(retinaIconRepresentation)
+        image.isTemplate = true
+        return image
+    }
+}
+
 @MainActor
 public final class MenuBarController: NSObject, NSMenuDelegate {
     private let statusItem: NSStatusItem
@@ -64,12 +108,9 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         guard let button = statusItem.button else {
             return
         }
-        guard let iconURL = IronMLXAppResourceResolver.url(forResource: "menubar-icon", withExtension: "png"),
-              let image = NSImage(contentsOf: iconURL)
-        else {
-            preconditionFailure("IronMLX App Bundle is missing menubar-icon.png")
+        guard let image = MenuBarIconLoader.load() else {
+            preconditionFailure("IronMLX App Bundle has invalid menu bar icon resources")
         }
-        image.isTemplate = true
         button.image = image
     }
 
