@@ -468,6 +468,13 @@ func appLanguageResolverMatchesSupportedMacOSPreferences(
         "prefix_cache": {
           "hit_tokens": 10,
           "eligible_tokens": 25
+        },
+        "performance": {
+          "window_seconds": 60,
+          "completed_requests": 3,
+          "prefill_tokens_per_second": 412.5,
+          "decode_tokens_per_second": 28.4,
+          "ttft_ms": 184.2
         }
       },
       "active_kv_offload": {
@@ -502,6 +509,11 @@ func appLanguageResolverMatchesSupportedMacOSPreferences(
     #expect(info.usage.outputTokens == 12)
     #expect(info.usage.prefixCache?.hitTokens == 10)
     #expect(info.usage.prefixCache?.eligibleTokens == 25)
+    #expect(info.usage.performance.windowSeconds == 60)
+    #expect(info.usage.performance.completedRequests == 3)
+    #expect(info.usage.performance.prefillTokensPerSecond == 412.5)
+    #expect(info.usage.performance.decodeTokensPerSecond == 28.4)
+    #expect(info.usage.performance.ttftMs == 184.2)
     #expect(info.activeKvOffload?.status == "active")
     #expect(info.activeKvOffload?.parkedRequests == 2)
     #expect(info.activeKvOffload?.offloadedBytes == 1_048_576)

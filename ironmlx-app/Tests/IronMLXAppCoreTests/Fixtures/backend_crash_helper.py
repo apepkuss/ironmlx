@@ -55,6 +55,13 @@ def model_info(body):
             "prefix_cache": None
             if is_diffusion
             else {"hit_tokens": 0, "eligible_tokens": 0},
+            "performance": {
+                "window_seconds": 60,
+                "completed_requests": 0,
+                "prefill_tokens_per_second": None,
+                "decode_tokens_per_second": None,
+                "ttft_ms": None,
+            },
         },
     }
 

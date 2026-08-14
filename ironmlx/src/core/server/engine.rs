@@ -741,7 +741,7 @@ impl EngineRoutedRequest for anthropic::MessagesRequest {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct EngineLoadedModelInfo {
     pub id: String,
     pub path: String,

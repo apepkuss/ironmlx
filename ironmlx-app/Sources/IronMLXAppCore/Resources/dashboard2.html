@@ -345,6 +345,68 @@
     margin-bottom: 16px;
   }
 
+  .runtime-performance-rail {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    margin-top: 9px;
+    padding: 9px 0 7px;
+    border-top: 0.5px solid var(--border);
+    border-bottom: 0.5px solid var(--border);
+  }
+
+  .runtime-performance-metric {
+    min-width: 0;
+    padding: 0 12px;
+  }
+
+  .runtime-performance-metric:first-child {
+    padding-left: 0;
+  }
+
+  .runtime-performance-metric + .runtime-performance-metric {
+    border-left: 0.5px solid var(--border);
+  }
+
+  .runtime-performance-label {
+    display: block;
+    color: var(--text-tertiary);
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    line-height: 1.2;
+  }
+
+  .runtime-performance-value {
+    display: block;
+    margin-top: 3px;
+    color: var(--text-primary);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 15px;
+    font-variant-numeric: tabular-nums;
+    font-weight: 650;
+    letter-spacing: -0.02em;
+    line-height: 1.2;
+    white-space: nowrap;
+  }
+
+  .runtime-performance-metric-primary .runtime-performance-value {
+    color: var(--accent);
+  }
+
+  .runtime-performance-unit {
+    color: var(--text-tertiary);
+    font-size: 9px;
+    font-weight: 500;
+    letter-spacing: 0;
+  }
+
+  .runtime-performance-meta {
+    margin-top: 5px;
+    color: var(--text-tertiary);
+    font-size: 9px;
+    line-height: 1.35;
+  }
+
   .profile-help {
     position: relative;
     display: inline-flex;
@@ -4099,6 +4161,14 @@
       runtime_cumulative_tokens: "Cumulative tokens",
       runtime_cache_hit_tokens: "Cache-hit tokens",
       runtime_cache_hit_rate: "Cache hit rate",
+      runtime_prefill_rate: "Prefill",
+      runtime_decode_rate: "Decode",
+      runtime_ttft: "TTFT",
+      runtime_prefill_help: "Effective input throughput from inference start to the first output token.",
+      runtime_decode_help: "Output token rate after the first token.",
+      runtime_ttft_help: "Inference start to the first output token.",
+      runtime_performance_window: "Recent performance · P50 · Last {seconds}s · {requests} completed",
+      runtime_performance_empty: "Recent performance · Complete a request to begin sampling",
       runtime_active_kv: "Active KV tiering",
       runtime_active_kv_idle: "Idle",
       runtime_active_kv_active: "Active",
@@ -4428,6 +4498,14 @@
       runtime_cumulative_tokens: "累计 Tokens",
       runtime_cache_hit_tokens: "缓存命中 Tokens",
       runtime_cache_hit_rate: "缓存命中率",
+      runtime_prefill_rate: "预填充",
+      runtime_decode_rate: "解码",
+      runtime_ttft: "首 Token 延迟",
+      runtime_prefill_help: "从推理开始到首个输出 Token 的有效输入吞吐。",
+      runtime_decode_help: "首个 Token 之后的输出 Token 速度。",
+      runtime_ttft_help: "从推理开始到生成首个输出 Token 的时间。",
+      runtime_performance_window: "近期性能 · P50 · 近 {seconds} 秒 · {requests} 个完成请求",
+      runtime_performance_empty: "近期性能 · 完成一次请求后开始采样",
       runtime_active_kv: "KV 分层",
       runtime_active_kv_idle: "待命",
       runtime_active_kv_active: "活跃",
@@ -4757,6 +4835,14 @@
       runtime_cumulative_tokens: "累計 Tokens",
       runtime_cache_hit_tokens: "快取命中 Tokens",
       runtime_cache_hit_rate: "快取命中率",
+      runtime_prefill_rate: "預填充",
+      runtime_decode_rate: "解碼",
+      runtime_ttft: "首 Token 延遲",
+      runtime_prefill_help: "從推理開始到首個輸出 Token 的有效輸入吞吐。",
+      runtime_decode_help: "首個 Token 之後的輸出 Token 速度。",
+      runtime_ttft_help: "從推理開始到產生首個輸出 Token 的時間。",
+      runtime_performance_window: "近期效能 · P50 · 近 {seconds} 秒 · {requests} 個完成請求",
+      runtime_performance_empty: "近期效能 · 完成一次請求後開始取樣",
       runtime_active_kv: "KV 分層",
       runtime_active_kv_idle: "待命",
       runtime_active_kv_active: "作用中",
@@ -5069,6 +5155,14 @@
       runtime_cumulative_tokens: "累計 Tokens",
       runtime_cache_hit_tokens: "キャッシュヒット Tokens",
       runtime_cache_hit_rate: "キャッシュヒット率",
+      runtime_prefill_rate: "プリフィル",
+      runtime_decode_rate: "デコード",
+      runtime_ttft: "TTFT",
+      runtime_prefill_help: "推論開始から最初の出力 Token までの実効入力スループット。",
+      runtime_decode_help: "最初の Token 以降の出力 Token 速度。",
+      runtime_ttft_help: "推論開始から最初の出力 Token までの時間。",
+      runtime_performance_window: "直近の性能 · P50 · 過去 {seconds} 秒 · 完了 {requests} 件",
+      runtime_performance_empty: "直近の性能 · リクエスト完了後に計測を開始します",
       runtime_active_kv: "Active KV 階層化",
       runtime_active_kv_idle: "待機",
       runtime_active_kv_active: "動作中",
@@ -5381,6 +5475,14 @@
       runtime_cumulative_tokens: "누적 Tokens",
       runtime_cache_hit_tokens: "캐시 적중 Tokens",
       runtime_cache_hit_rate: "캐시 적중률",
+      runtime_prefill_rate: "프리필",
+      runtime_decode_rate: "디코드",
+      runtime_ttft: "TTFT",
+      runtime_prefill_help: "추론 시작부터 첫 출력 Token까지의 유효 입력 처리량입니다.",
+      runtime_decode_help: "첫 Token 이후의 출력 Token 속도입니다.",
+      runtime_ttft_help: "추론 시작부터 첫 출력 Token까지 걸린 시간입니다.",
+      runtime_performance_window: "최근 성능 · P50 · 최근 {seconds}초 · 완료 {requests}건",
+      runtime_performance_empty: "최근 성능 · 요청을 완료하면 측정을 시작합니다",
       runtime_active_kv: "Active KV 계층화",
       runtime_active_kv_idle: "대기",
       runtime_active_kv_active: "활성",
@@ -9881,6 +9983,63 @@
           (dict.runtime_cache_hit_rate || 'Cache hit rate') + ': ' + hitRate
         );
       }
+      let performanceDetails = '';
+      if (!isDiffusion) {
+        const performance = usage.performance;
+        const completedRequests = Number(performance.completed_requests);
+        const windowSeconds = Number(performance.window_seconds);
+        const metric = (label, help, value, unit, digits, primary) => {
+          const available = value !== null && Number.isFinite(Number(value));
+          const number = available
+            ? Number(value).toLocaleString(numberLocale, {
+                minimumFractionDigits: digits,
+                maximumFractionDigits: digits
+              })
+            : '—';
+          return '<div class="runtime-performance-metric'
+            + (primary ? ' runtime-performance-metric-primary' : '')
+            + '" title="' + escapeAttr(help) + '">'
+            + '<span class="runtime-performance-label">' + escapeAttr(label) + '</span>'
+            + '<span class="runtime-performance-value">' + escapeAttr(number)
+            + (available ? ' <span class="runtime-performance-unit">' + escapeAttr(unit) + '</span>' : '')
+            + '</span></div>';
+        };
+        const performanceMeta = completedRequests > 0
+          ? (dict.runtime_performance_window
+              || 'Recent performance · P50 · Last {seconds}s · {requests} completed')
+              .replace('{seconds}', String(windowSeconds))
+              .replace('{requests}', completedRequests.toLocaleString(numberLocale))
+          : (dict.runtime_performance_empty
+              || 'Recent performance · Complete a request to begin sampling');
+        performanceDetails = '<div class="runtime-performance-rail" aria-label="'
+          + escapeAttr(performanceMeta) + '">'
+          + metric(
+              dict.runtime_prefill_rate || 'Prefill',
+              dict.runtime_prefill_help || 'Effective input throughput from inference start to the first output token.',
+              performance.prefill_tokens_per_second,
+              'tok/s',
+              1,
+              false
+            )
+          + metric(
+              dict.runtime_decode_rate || 'Decode',
+              dict.runtime_decode_help || 'Output token rate after the first token.',
+              performance.decode_tokens_per_second,
+              'tok/s',
+              1,
+              true
+            )
+          + metric(
+              dict.runtime_ttft || 'TTFT',
+              dict.runtime_ttft_help || 'Inference start to the first output token.',
+              performance.ttft_ms,
+              'ms',
+              1,
+              false
+            )
+          + '</div><div class="runtime-performance-meta">'
+          + escapeAttr(performanceMeta) + '</div>';
+      }
       const activeKv = model.active_kv_offload;
       let activeKvDetails = '';
       if (activeKv) {
@@ -9924,7 +10083,8 @@
         + '<div style="font-size:11px;color:var(--text-secondary);margin-top:5px;">'
         + escapeAttr(requestMetrics) + '</div>'
         + '<div style="font-size:11px;color:var(--text-secondary);margin-top:3px;">'
-        + escapeAttr(tokenMetrics.join(' · ')) + '</div>' + activeKvDetails + '</div>';
+        + escapeAttr(tokenMetrics.join(' · ')) + '</div>'
+        + performanceDetails + activeKvDetails + '</div>';
     }).join('');
   }
 

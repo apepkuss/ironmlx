@@ -29,7 +29,14 @@ import Testing
         "usage": {
           "cumulative_tokens": 42,
           "input_tokens": 30,
-          "output_tokens": 12
+          "output_tokens": 12,
+          "performance": {
+            "window_seconds": 60,
+            "completed_requests": 0,
+            "prefill_tokens_per_second": null,
+            "decode_tokens_per_second": null,
+            "ttft_ms": null
+          }
         },
         "default": true,
         "max_position_embeddings": 32768,
