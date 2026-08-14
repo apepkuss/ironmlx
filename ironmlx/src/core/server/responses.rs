@@ -7,7 +7,7 @@
 
 use std::{
     collections::HashMap,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(test)]
@@ -2254,6 +2254,7 @@ async fn serve_unary_gs<M>(state: AppState<M>, prepared: PreparedResponse) -> Re
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
+    let started_at = Instant::now();
     let meta = prepared.meta();
     let input_tokens = prepared.prompt_tokens;
     let tool_context = prepared.tool_context;
@@ -2271,15 +2272,20 @@ where
             native_output,
         )?;
         let mut memory = Some(memory);
+        let mut performance = None;
         loop {
             let Some(event) = generation.next_token()? else {
                 break;
             };
             if let Some(memory) = memory.take() {
                 memory.commit();
-                state.record_request_started(input_tokens);
+                performance = Some(state.record_request_started(input_tokens, started_at));
             }
             output.completion_tokens += 1;
+            performance
+                .as_mut()
+                .expect("performance tracker starts with the first generated token")
+                .record_output_tokens(1);
             let events = if event.finish_reason == Some("stop") {
                 Vec::new()
             } else {
@@ -2300,9 +2306,9 @@ where
         } else {
             output.collect(decoder.finish(model_finish)?)?;
         }
-        state
-            .runtime_usage
-            .record_output_tokens(u64::from(output.completion_tokens));
+        performance
+            .ok_or_else(|| anyhow::anyhow!("generation ended before producing a token"))?
+            .complete();
         Ok(output)
     })
     .await;
@@ -2358,6 +2364,7 @@ async fn serve_unary_scheduler<M>(state: AppState<M>, prepared: PreparedResponse
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
+    let started_at = Instant::now();
     let meta = prepared.meta();
     let input_tokens = prepared.prompt_tokens;
     let tool_context = prepared.tool_context;
@@ -2369,7 +2376,7 @@ where
         Ok(reply) => reply,
         Err(response) => return response,
     };
-    state.record_request_started(input_tokens);
+    let mut performance = state.record_request_started(input_tokens, started_at);
     let mut output = CollectedOutput::new();
     let mut decoder = match GeneratedOutputDecoder::new_with_native(
         &state.tokenizer,
@@ -2387,6 +2394,7 @@ where
     };
     while let Some(event) = event_rx.recv().await {
         output.completion_tokens += 1;
+        performance.record_output_tokens(1);
         let events = if event.finish_reason == Some("stop") {
             Ok(Vec::new())
         } else {
@@ -2436,9 +2444,7 @@ where
             format!("{error:#}"),
         );
     }
-    state
-        .runtime_usage
-        .record_output_tokens(u64::from(output.completion_tokens));
+    performance.complete();
     unary_response(meta, input_tokens, output)
 }
 
@@ -2478,6 +2484,7 @@ async fn serve_stream_scheduler<M>(state: AppState<M>, prepared: PreparedRespons
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
+    let started_at = Instant::now();
     let meta = prepared.meta();
     let input_tokens = prepared.prompt_tokens;
     let tool_context = prepared.tool_context;
@@ -2489,9 +2496,8 @@ where
         Ok(reply) => reply,
         Err(response) => return response,
     };
-    state.record_request_started(input_tokens);
+    let mut performance = state.record_request_started(input_tokens, started_at);
     let tokenizer = state.tokenizer.clone();
-    let runtime_usage = state.runtime_usage.clone();
     let (tx, rx, disconnect) = super::api_transport::disconnect_aware_sse_channel(8);
     tokio::spawn(async move {
         let mut formatter = ResponsesStream::new(meta);
@@ -2513,11 +2519,12 @@ where
         let mut output = CollectedOutput::new();
         let mut call_names = Vec::new();
         let mut typed_finish = None;
+        let mut finished = false;
         while let Some(event) =
             super::api_transport::recv_or_disconnect(&disconnect, &mut event_rx).await
         {
             output.completion_tokens += 1;
-            runtime_usage.record_output_tokens(1);
+            performance.record_output_tokens(1);
             let events = if event.finish_reason == Some("stop") {
                 Ok(Vec::new())
             } else {
@@ -2554,6 +2561,7 @@ where
             }
             if let Some(reason) = event.finish_reason {
                 output.finish_reason = reason;
+                finished = true;
                 break;
             }
         }
@@ -2593,6 +2601,9 @@ where
             }
         }
         output.finish_reason = typed_finish.unwrap_or(output.finish_reason);
+        if finished {
+            performance.complete();
+        }
         for frame in formatter.completed(
             output.finish_reason,
             Usage::new(input_tokens, output.completion_tokens)
@@ -2610,6 +2621,7 @@ async fn serve_stream_gs<M>(state: AppState<M>, prepared: PreparedResponse) -> R
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
+    let started_at = Instant::now();
     let meta = prepared.meta();
     let input_tokens = prepared.prompt_tokens;
     let tool_context = prepared.tool_context;
@@ -2642,7 +2654,7 @@ where
             }
         };
         memory.commit();
-        state.record_request_started(input_tokens);
+        let mut performance = state.record_request_started(input_tokens, started_at);
         if init_tx.send(Ok(())).is_err() {
             return;
         }
@@ -2667,6 +2679,7 @@ where
         let mut call_names = Vec::new();
         let mut typed_finish = None;
         let mut first = Some(first);
+        let mut finished = false;
         loop {
             if disconnect.is_cancelled() {
                 return;
@@ -2684,7 +2697,7 @@ where
                 }
             };
             completion_tokens += 1;
-            state.runtime_usage.record_output_tokens(1);
+            performance.record_output_tokens(1);
             let events = if event.finish_reason == Some("stop") {
                 Ok(Vec::new())
             } else {
@@ -2719,6 +2732,7 @@ where
             }
             if let Some(reason) = event.finish_reason {
                 finish_reason = reason;
+                finished = true;
                 break;
             }
         }
@@ -2758,6 +2772,9 @@ where
             }
         }
         finish_reason = typed_finish.unwrap_or(finish_reason);
+        if finished {
+            performance.complete();
+        }
         for frame in formatter.completed(
             finish_reason,
             Usage::new(input_tokens, completion_tokens).with_reasoning_tokens(reasoning_tokens),

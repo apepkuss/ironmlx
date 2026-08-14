@@ -6,6 +6,8 @@
 //!
 //! Each event is framed as `event: <type>\ndata: <json>\n\n`.
 
+use std::time::Instant;
+
 #[cfg(test)]
 use axum::http::header;
 use axum::{
@@ -1813,6 +1815,7 @@ async fn serve_via_gs_tools_unary<M>(
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
+    let started_at = Instant::now();
     let id = gen_msg_id();
     let decoder_config = context.decoder_config();
     let native_output = context.native_output;
@@ -1828,7 +1831,7 @@ where
             Some(decoder_config),
             native_output,
         )?;
-        state.record_request_started(input_tokens);
+        let mut performance = state.record_request_started(input_tokens, started_at);
         let mut output = ParsedToolOutput {
             content: String::new(),
             reasoning: String::new(),
@@ -1845,7 +1848,7 @@ where
                 memory.commit();
             }
             output.completion_tokens += 1;
-            state.runtime_usage.record_output_tokens(1);
+            performance.record_output_tokens(1);
             let events = if event.finish_reason == Some("stop") {
                 Vec::new()
             } else {
@@ -1870,6 +1873,7 @@ where
         let events = decoder.finish(model_finish)?;
         collect_tool_events(&mut output, events)?;
         validate_tool_output(&constraint_options, &output.tool_calls)?;
+        performance.complete();
         Ok(output)
     })
     .await;
@@ -1924,6 +1928,7 @@ async fn serve_via_scheduler_tools_unary<M>(
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
+    let started_at = Instant::now();
     let id = gen_msg_id();
     let mut event_rx = match admit_tool_request(&state, request).await {
         Ok(event_rx) => event_rx,
@@ -1943,7 +1948,7 @@ where
             return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{error:#}"))
         }
     };
-    state.record_request_started(input_tokens);
+    let mut performance = state.record_request_started(input_tokens, started_at);
     let mut output = ParsedToolOutput {
         content: String::new(),
         reasoning: String::new(),
@@ -1956,7 +1961,7 @@ where
     let mut model_finish = "stop";
     while let Some(event) = event_rx.recv().await {
         output.completion_tokens += 1;
-        state.runtime_usage.record_output_tokens(1);
+        performance.record_output_tokens(1);
         let events = if event.finish_reason == Some("stop") {
             Ok(Vec::new())
         } else {
@@ -2003,6 +2008,7 @@ where
     if let Err(error) = validate_tool_output(&constraint_options, &output.tool_calls) {
         return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{error:#}"));
     }
+    performance.complete();
     tool_unary_response(id, model_id, input_tokens, output, output_format)
 }
 
@@ -2016,6 +2022,7 @@ async fn serve_via_gs_tools_stream<M>(
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
+    let started_at = Instant::now();
     let (tx, rx, disconnect) = super::api_transport::disconnect_aware_sse_channel(8);
     let (init_tx, init_rx) = oneshot::channel::<anyhow::Result<()>>();
     let message_id = gen_msg_id();
@@ -2059,7 +2066,7 @@ where
             }
         };
         memory.commit();
-        state.record_request_started(input_tokens);
+        let mut performance = state.record_request_started(input_tokens, started_at);
         if init_tx.send(Ok(())).is_err() {
             return;
         }
@@ -2090,7 +2097,7 @@ where
                 break;
             };
             output_tokens += 1;
-            state.runtime_usage.record_output_tokens(1);
+            performance.record_output_tokens(1);
             let events = if event.finish_reason == Some("stop") {
                 Ok(Vec::new())
             } else {
@@ -2172,6 +2179,7 @@ where
                 return;
             }
         }
+        performance.complete();
     });
 
     match init_rx.await {
@@ -2194,6 +2202,7 @@ async fn serve_via_scheduler_tools_stream<M>(
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
+    let started_at = Instant::now();
     let mut event_rx = match admit_tool_request(&state, request).await {
         Ok(event_rx) => event_rx,
         Err(response) => return response,
@@ -2202,9 +2211,8 @@ where
     let native_output = context.native_output;
     let output_format = context.output_format.clone();
     let constraint_options = context.constraint_options;
-    state.record_request_started(input_tokens);
+    let mut performance = state.record_request_started(input_tokens, started_at);
     let tokenizer = state.tokenizer.clone();
-    let runtime_usage = state.runtime_usage.clone();
     let message_id = gen_msg_id();
     let (tx, rx, disconnect) = super::api_transport::disconnect_aware_sse_channel(8);
     tokio::spawn(async move {
@@ -2231,7 +2239,7 @@ where
             super::api_transport::recv_or_disconnect(&disconnect, &mut event_rx).await
         {
             output_tokens += 1;
-            runtime_usage.record_output_tokens(1);
+            performance.record_output_tokens(1);
             let events = if event.finish_reason == Some("stop") {
                 Ok(Vec::new())
             } else {
@@ -2310,6 +2318,7 @@ where
                 return;
             }
         }
+        performance.complete();
     });
     super::api_transport::disconnect_aware_sse_response(rx)
 }
@@ -2325,6 +2334,7 @@ async fn serve_via_gs_stream<M>(
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
+    let started_at = Instant::now();
     let (tx, rx, disconnect) = super::api_transport::disconnect_aware_sse_channel(8);
     let (init_tx, init_rx) = oneshot::channel::<anyhow::Result<()>>();
     let id = gen_msg_id();
@@ -2356,7 +2366,7 @@ where
             }
         };
         memory.commit();
-        state.record_request_started(input_tokens);
+        let mut performance = state.record_request_started(input_tokens, started_at);
         if init_tx.send(Ok(())).is_err() {
             return;
         }
@@ -2446,7 +2456,7 @@ where
                         }
                     }
                     output_tokens += 1;
-                    state.runtime_usage.record_output_tokens(1);
+                    performance.record_output_tokens(1);
                     if ev.finish_reason.is_some() {
                         break;
                     }
@@ -2491,6 +2501,7 @@ where
                 return;
             }
         }
+        performance.complete();
     });
 
     match init_rx.await {
@@ -2542,6 +2553,7 @@ async fn serve_via_scheduler_stream_with_output_format<M>(
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
+    let started_at = Instant::now();
     let msg_id = gen_msg_id();
 
     // 1. Admit request to the actor.
@@ -2570,14 +2582,13 @@ where
             return service_unavailable_response("scheduler_reply_lost", "scheduler reply lost");
         }
     };
-    state.record_request_started(input_tokens);
+    let mut performance = state.record_request_started(input_tokens, started_at);
 
     // 2. Spawn forwarder that emits the 6-event SSE sequence.
     let (tx, rx, disconnect) = super::api_transport::disconnect_aware_sse_channel(8);
     let msg_id_for_task = msg_id.clone();
     let model_id_for_task = model_id.clone();
     let tokenizer = state.tokenizer.clone();
-    let runtime_usage = state.runtime_usage.clone();
 
     tokio::spawn(async move {
         let mut decoder =
@@ -2642,7 +2653,7 @@ where
                 }
             }
             output_tokens += 1;
-            runtime_usage.record_output_tokens(1);
+            performance.record_output_tokens(1);
             if ev.finish_reason.is_some() {
                 break;
             }
@@ -2673,6 +2684,7 @@ where
                 return;
             }
         }
+        performance.complete();
     });
 
     super::api_transport::disconnect_aware_sse_response(rx)
@@ -2689,6 +2701,7 @@ async fn serve_via_gs_unary<M>(
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
+    let started_at = Instant::now();
     let id = gen_msg_id();
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<ParsedToolOutput> {
         let model_guard = state.model.blocking_lock();
@@ -2696,7 +2709,7 @@ where
         let memory = super::begin_direct_request_memory(&state, &*model_guard, &request)?;
         let mut stream = GenerationStream::new(&*model_guard, tokenizer, request)?;
         let mut decoder = GeneratedOutputDecoder::new_with_native(tokenizer, None, native_output)?;
-        state.record_request_started(input_tokens);
+        let mut performance = state.record_request_started(input_tokens, started_at);
         let mut output = ParsedToolOutput {
             content: String::new(),
             reasoning: String::new(),
@@ -2715,6 +2728,7 @@ where
             let Some(ev) = next else {
                 break;
             };
+            performance.record_output_tokens(1);
             let events = if ev.finish_reason == Some("stop") {
                 Vec::new()
             } else {
@@ -2732,9 +2746,7 @@ where
             }
         }
         anyhow::ensure!(finished, "generation ended before a terminal event");
-        state
-            .runtime_usage
-            .record_output_tokens(u64::from(output.completion_tokens));
+        performance.complete();
         Ok(output)
     })
     .await;
@@ -2782,6 +2794,7 @@ async fn serve_via_scheduler_unary_with_output_format<M>(
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
+    let started_at = Instant::now();
     let id = gen_msg_id();
 
     // 1. Admit.
@@ -2810,7 +2823,7 @@ where
             return service_unavailable_response("scheduler_reply_lost", "scheduler reply lost");
         }
     };
-    state.record_request_started(input_tokens);
+    let mut performance = state.record_request_started(input_tokens, started_at);
 
     // 2. Drain committed tokens through the protocol-neutral decoder.
     let mut decoder =
@@ -2829,6 +2842,7 @@ where
     let mut finished = false;
     while let Some(ev) = event_rx.recv().await {
         output.completion_tokens += 1;
+        performance.record_output_tokens(1);
         let events = if ev.finish_reason == Some("stop") {
             Ok(Vec::new())
         } else {
@@ -2856,9 +2870,7 @@ where
             "scheduler stream ended before a terminal event"
         ));
     }
-    state
-        .runtime_usage
-        .record_output_tokens(u64::from(output.completion_tokens));
+    performance.complete();
 
     tool_unary_response(id, model_id, input_tokens, output, output_format)
 }

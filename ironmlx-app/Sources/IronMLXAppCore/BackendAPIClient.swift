@@ -532,22 +532,55 @@ public struct BackendPrefixCacheUsage: Codable, Equatable, Sendable {
     }
 }
 
+public struct BackendModelRuntimePerformance: Codable, Equatable, Sendable {
+    public var windowSeconds: UInt64
+    public var completedRequests: Int
+    public var prefillTokensPerSecond: Double?
+    public var decodeTokensPerSecond: Double?
+    public var ttftMs: Double?
+
+    public init(
+        windowSeconds: UInt64 = 60,
+        completedRequests: Int = 0,
+        prefillTokensPerSecond: Double? = nil,
+        decodeTokensPerSecond: Double? = nil,
+        ttftMs: Double? = nil
+    ) {
+        self.windowSeconds = windowSeconds
+        self.completedRequests = completedRequests
+        self.prefillTokensPerSecond = prefillTokensPerSecond
+        self.decodeTokensPerSecond = decodeTokensPerSecond
+        self.ttftMs = ttftMs
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case windowSeconds = "window_seconds"
+        case completedRequests = "completed_requests"
+        case prefillTokensPerSecond = "prefill_tokens_per_second"
+        case decodeTokensPerSecond = "decode_tokens_per_second"
+        case ttftMs = "ttft_ms"
+    }
+}
+
 public struct BackendModelRuntimeUsage: Codable, Equatable, Sendable {
     public var cumulativeTokens: UInt64
     public var inputTokens: UInt64
     public var outputTokens: UInt64
     public var prefixCache: BackendPrefixCacheUsage?
+    public var performance: BackendModelRuntimePerformance
 
     public init(
         cumulativeTokens: UInt64 = 0,
         inputTokens: UInt64 = 0,
         outputTokens: UInt64 = 0,
-        prefixCache: BackendPrefixCacheUsage? = nil
+        prefixCache: BackendPrefixCacheUsage? = nil,
+        performance: BackendModelRuntimePerformance = BackendModelRuntimePerformance()
     ) {
         self.cumulativeTokens = cumulativeTokens
         self.inputTokens = inputTokens
         self.outputTokens = outputTokens
         self.prefixCache = prefixCache
+        self.performance = performance
     }
 
     enum CodingKeys: String, CodingKey {
@@ -555,6 +588,7 @@ public struct BackendModelRuntimeUsage: Codable, Equatable, Sendable {
         case inputTokens = "input_tokens"
         case outputTokens = "output_tokens"
         case prefixCache = "prefix_cache"
+        case performance
     }
 }
 

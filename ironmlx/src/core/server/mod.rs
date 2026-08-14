@@ -200,13 +200,19 @@ impl<M: Model + DenseVlMethods + Send + 'static> AppState<M> {
             })
     }
 
-    pub(crate) fn record_request_started(&self, input_tokens: u32) {
-        self.runtime_usage
-            .record_input_tokens(u64::from(input_tokens));
+    pub(crate) fn record_request_started(
+        &self,
+        input_tokens: u32,
+        started_at: std::time::Instant,
+    ) -> crate::core::runtime_usage::ModelRuntimeRequestTracker {
+        let tracker = self
+            .runtime_usage
+            .start_request(u64::from(input_tokens), started_at);
         if self.paged_prefix_cache_enabled {
             self.runtime_usage
                 .record_prefix_cache_eligible_tokens(u64::from(input_tokens.saturating_sub(1)));
         }
+        tracker
     }
 }
 
