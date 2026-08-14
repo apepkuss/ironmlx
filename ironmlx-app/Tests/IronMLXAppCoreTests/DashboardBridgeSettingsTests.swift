@@ -71,6 +71,28 @@ import WebKit
 }
 
 @MainActor
+@Test func dashboardSettingsPayloadNormalizesThemePreference() throws {
+    let existing = AppConfig(theme: "dark")
+
+    let light = try DashboardBridge.config(
+        applyingSettingsJSON: #"{"theme":"light"}"#,
+        to: existing
+    )
+    let system = try DashboardBridge.config(
+        applyingSettingsJSON: #"{"theme":"system"}"#,
+        to: existing
+    )
+    let unknown = try DashboardBridge.config(
+        applyingSettingsJSON: #"{"theme":"unknown"}"#,
+        to: existing
+    )
+
+    #expect(light.theme == "light")
+    #expect(system.theme == nil)
+    #expect(unknown.theme == nil)
+}
+
+@MainActor
 @Test func backendRuntimeSettingStillRequiresRestart() {
     let existing = AppConfig(maxSequences: 1, verifyModelOnLoad: false)
     let updated = AppConfig(maxSequences: 2, verifyModelOnLoad: true)

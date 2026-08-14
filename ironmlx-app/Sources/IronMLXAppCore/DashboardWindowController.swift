@@ -3,6 +3,35 @@ import Foundation
 import WebKit
 
 @MainActor
+enum DashboardThemeAppearance {
+    static func normalizedPreference(_ value: String?) -> String? {
+        switch value {
+        case "light", "dark":
+            return value
+        default:
+            return nil
+        }
+    }
+
+    static func appearance(for preference: String?) -> NSAppearance? {
+        switch normalizedPreference(preference) {
+        case "light":
+            return NSAppearance(named: .aqua)
+        case "dark":
+            return NSAppearance(named: .darkAqua)
+        default:
+            return nil
+        }
+    }
+
+    static func apply(_ preference: String?, to view: NSView) {
+        let appearance = appearance(for: preference)
+        view.appearance = appearance
+        view.window?.appearance = appearance
+    }
+}
+
+@MainActor
 public final class DashboardWindowController {
     public static let dashboardWindowStyleMask: NSWindow.StyleMask = [
         .titled,
@@ -74,6 +103,7 @@ public final class DashboardWindowController {
         window.center()
         window.contentView = webView
         window.isReleasedWhenClosed = false
+        DashboardThemeAppearance.apply(config.theme, to: webView)
         let windowDelegate = DashboardWindowDelegate(
             isFullScreen: { [weak window] in
                 window?.styleMask.contains(.fullScreen) == true
