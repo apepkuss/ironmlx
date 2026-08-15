@@ -758,7 +758,7 @@ enum ParseState {
     },
 }
 
-/// Strict bounded incremental parser for the Qwen3.5/Qwen3.6 native tool
+/// Strict bounded incremental parser for the Qwen3.5/Qwen3.6/Qwen3.8 native tool
 /// syntax. It never treats malformed native syntax as ordinary assistant text.
 pub struct QwenToolCallParser {
     definitions: HashMap<String, ToolDefinition>,

@@ -105,6 +105,12 @@ fn qwen36_dense_text_generate_with_mtp_accepts_request() {
 }
 
 #[test]
+#[ignore = "requires QWEN38_DENSE_MODEL, QWEN38_DENSE_MTP_MODEL, and MLX_DIR pointing to real local checkpoints"]
+fn qwen38_dense_text_generate_with_mtp_accepts_request() {
+    run_text_generate_smoke("QWEN38_DENSE_MODEL", "QWEN38_DENSE_MTP_MODEL");
+}
+
+#[test]
 #[ignore = "requires QWEN36_MOE_MODEL, QWEN36_MOE_MTP_MODEL, and MLX_DIR pointing to real local checkpoints"]
 fn qwen36_moe_text_generate_with_mtp_accepts_request() {
     run_text_generate_smoke("QWEN36_MOE_MODEL", "QWEN36_MOE_MTP_MODEL");

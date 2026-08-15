@@ -258,8 +258,27 @@ impl AnthropicThinkingConfig {
         !matches!(self, Self::Disabled)
     }
 
-    fn template_kwargs(&self) -> serde_json::Value {
-        serde_json::json!({"enable_thinking": self.enabled()})
+    fn template_kwargs(&self, effort: Option<AnthropicEffort>) -> serde_json::Value {
+        let mut kwargs = serde_json::Map::new();
+        kwargs.insert(
+            "enable_thinking".to_owned(),
+            serde_json::Value::Bool(self.enabled()),
+        );
+        let model_effort = match effort {
+            None => None,
+            Some(AnthropicEffort::Low) => Some("low"),
+            Some(AnthropicEffort::Medium) => Some("medium"),
+            Some(AnthropicEffort::High | AnthropicEffort::Xhigh | AnthropicEffort::Max) => {
+                Some("xhigh")
+            }
+        };
+        if let Some(model_effort) = model_effort {
+            kwargs.insert(
+                "reasoning_effort".to_owned(),
+                serde_json::Value::String(model_effort.to_owned()),
+            );
+        }
+        serde_json::Value::Object(kwargs)
     }
 
     fn validate(&self, max_tokens: usize, effort: Option<AnthropicEffort>) -> anyhow::Result<()> {
@@ -779,8 +798,9 @@ impl MessagesRequest {
             )
         });
         let mut messages = normalize_messages(self.system, self.messages)?;
-        let response_format = self
-            .output_config
+        let output_config = self.output_config;
+        let reasoning_effort = output_config.as_ref().and_then(|config| config.effort);
+        let response_format = output_config
             .and_then(|config| config.format)
             .map(|format| match format {
                 AnthropicOutputFormat::JsonSchema { schema } => {
@@ -839,10 +859,11 @@ impl MessagesRequest {
             temperature: self.temperature,
             top_p: self.top_p,
             seed: None,
+            reasoning_effort: None,
             chat_template_kwargs: self
                 .thinking
                 .as_ref()
-                .map(AnthropicThinkingConfig::template_kwargs),
+                .map(|thinking| thinking.template_kwargs(reasoning_effort)),
         })
     }
 }
@@ -3246,7 +3267,10 @@ mod tests {
             let adaptive = adaptive.into_chat_request().unwrap();
             assert_eq!(
                 adaptive.chat_template_kwargs,
-                Some(serde_json::json!({"enable_thinking": true}))
+                Some(serde_json::json!({
+                    "enable_thinking": true,
+                    "reasoning_effort": "medium"
+                }))
             );
 
             let manual: MessagesRequest = serde_json::from_value(serde_json::json!({

@@ -29,6 +29,27 @@ fn qwen_declared_model_types_map_to_execution_architectures() {
         ModelArchitecture::Qwen35Dense
     );
 
+    let qwen38_27b_dense = json!({
+        "model_type": "qwen3_5",
+        "architectures": ["Qwen3_5ForConditionalGeneration"],
+        "text_config": {
+            "model_type": "qwen3_5_text",
+            "num_hidden_layers": 64,
+            "hidden_size": 5120,
+            "vocab_size": 248320
+        },
+        "vision_config": {
+            "model_type": "qwen3_5",
+            "depth": 27,
+            "out_hidden_size": 5120
+        },
+        "quantization": {"bits": 4, "group_size": 64, "mode": "affine"}
+    });
+    assert_eq!(
+        ModelArchitecture::from_config_value(&qwen38_27b_dense).unwrap(),
+        ModelArchitecture::Qwen35Dense
+    );
+
     let qwen36_moe = json!({
         "model_type": "qwen3_5_moe",
         "architectures": ["Qwen3_5MoeForConditionalGeneration"],

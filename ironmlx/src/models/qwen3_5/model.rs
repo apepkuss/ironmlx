@@ -208,7 +208,7 @@ impl Qwen35Model {
     }
 
     pub fn load_mtp_head(&self, loader: &Loader) -> Result<Mtp> {
-        let mtp_text_cfg = Qwen35Config::from_loader(loader)
+        let mtp_text_cfg = Qwen35Config::from_mtp_loader(loader)
             .context("parsing Qwen35 MTP text_config from loader")?;
         self.config()
             .ensure_mtp_compatible(&mtp_text_cfg)

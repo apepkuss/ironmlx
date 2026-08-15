@@ -20,6 +20,7 @@ const MAX_PENDING_BYTES: usize = 1 << 20;
 pub enum NativeOutputDialect {
     Qwen35,
     Qwen36,
+    Qwen38,
     Glm,
     MiniCpmV46,
     MiniCpm5,
@@ -31,6 +32,17 @@ impl NativeOutputDialect {
     /// markers. Similar-looking templates are deliberately not enabled.
     pub fn detect(model_type: &str, template: &str) -> Option<Self> {
         if matches!(model_type, "qwen3_5" | "qwen3_5_moe") {
+            let qwen38 = [
+                "message.reasoning_content is string",
+                "reasoning_effort|default('xhigh')",
+                "resolved_reasoning_effort not in ('xhigh', 'medium', 'low')",
+                "preserve_thinking is undefined or preserve_thinking is true",
+                "'<think>\\n'",
+                "'<think>\\n\\n</think>\\n\\n'",
+            ];
+            if qwen38.iter().all(|needle| template.contains(needle)) {
+                return Some(Self::Qwen38);
+            }
             let common = [
                 "message.reasoning_content is string",
                 "content.split('</think>')",
@@ -95,7 +107,7 @@ impl NativeOutputDialect {
     /// Whether the template opens its native reasoning channel when callers
     /// do not explicitly supply `enable_thinking`.
     pub fn default_reasoning_enabled(self) -> bool {
-        matches!(self, Self::Qwen36 | Self::Glm)
+        matches!(self, Self::Qwen36 | Self::Qwen38 | Self::Glm)
     }
 
     /// Resolve the template's effective reasoning mode from request kwargs.
@@ -354,6 +366,7 @@ mod tests {
     fn detects_exact_reasoning_contracts() {
         let qwen35 = "message.reasoning_content is string content.split('</think>') '<think>\\n' '<think>\\n\\n</think>\\n\\n'";
         let qwen36 = format!("{qwen35} preserve_thinking is defined");
+        let qwen38 = "message.reasoning_content is string reasoning_effort|default('xhigh') resolved_reasoning_effort not in ('xhigh', 'medium', 'low') preserve_thinking is undefined or preserve_thinking is true '<think>\\n' '<think>\\n\\n</think>\\n\\n'";
         assert_eq!(
             NativeOutputDialect::detect("qwen3_5", qwen35),
             Some(NativeOutputDialect::Qwen35)
@@ -362,7 +375,23 @@ mod tests {
             NativeOutputDialect::detect("qwen3_5", &qwen36),
             Some(NativeOutputDialect::Qwen36)
         );
+        assert_eq!(
+            NativeOutputDialect::detect("qwen3_5", qwen38),
+            Some(NativeOutputDialect::Qwen38)
+        );
         assert_eq!(NativeOutputDialect::detect("llama", qwen35), None);
+    }
+
+    #[test]
+    fn qwen38_reasoning_is_enabled_by_default_and_honors_explicit_disable() {
+        let dialect = NativeOutputDialect::Qwen38;
+        assert!(dialect.reasoning_enabled(None).unwrap());
+        assert!(dialect
+            .reasoning_enabled(Some(&serde_json::json!({"reasoning_effort": "low"})))
+            .unwrap());
+        assert!(!dialect
+            .reasoning_enabled(Some(&serde_json::json!({"enable_thinking": false})))
+            .unwrap());
     }
 
     #[test]
