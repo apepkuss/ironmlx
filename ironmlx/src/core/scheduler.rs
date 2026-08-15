@@ -116,14 +116,15 @@ pub enum SchedulerError {
 }
 
 use crate::core::cache::{
-    timed, ActiveKvOffloadConfig, ActiveKvOffloadSharedStats, ActiveKvOffloadStore,
-    ActiveKvResidencySummary, ActiveKvStoredPayload, AsyncPrefixStoreAdmission,
-    AsyncPrefixStoreCancellation, AsyncPrefixStorePermit, AsyncPrefixStoreSubmit, MtpCache,
-    MtpCacheSnapshot, PagedKvBlockOwner, PagedKvHotColdConfig, PagedKvImmutableBlockHandle,
-    PagedKvPhysicalStats, PagedPrefixCacheConfig, PagedPrefixEntry, PagedPrefixEntryStats,
-    PagedPrefixKeySpec, PagedPrefixLayer, PagedPrefixLoadStatus, PagedPrefixStore, PrefixEntryKind,
-    PrefixLayerPayload, PrefixLruCache, PrefixLruCacheConfig, PrefixLruInsertStatus,
-    PrefixMtpLayerSpec, PrefixTensorSpec, SharedPrefixLruCache, TurboQuantKVBits,
+    timed, ActiveKvEntryChunkReader, ActiveKvOffloadConfig, ActiveKvOffloadSharedStats,
+    ActiveKvOffloadStore, ActiveKvResidencySummary, ActiveKvStoredPayload,
+    AsyncPrefixStoreAdmission, AsyncPrefixStoreCancellation, AsyncPrefixStorePermit,
+    AsyncPrefixStoreSubmit, MtpCache, MtpCacheSnapshot, PagedKvBlockOwner, PagedKvHotColdConfig,
+    PagedKvImmutableBlockHandle, PagedKvPhysicalStats, PagedPrefixCacheConfig, PagedPrefixEntry,
+    PagedPrefixEntryStats, PagedPrefixKeySpec, PagedPrefixLayer, PagedPrefixLoadStatus,
+    PagedPrefixStore, PrefixEntryKind, PrefixLayerPayload, PrefixLruCache, PrefixLruCacheConfig,
+    PrefixLruInsertStatus, PrefixMtpLayerSpec, PrefixTensorSpec, SharedPrefixLruCache,
+    TurboQuantKVBits,
 };
 use crate::core::generate::{
     build_batch_attention_mask, build_batch_linear_mask, build_batched_append_attention_mask,
@@ -169,7 +170,7 @@ type PrefixLruCacheHandle = SharedPrefixLruCache;
 
 const MTP_BATCH_DRAFT_ROW_CACHE_MIN_OFFSET: i32 = 4096;
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct MtpDeferredTailCommit {
     token: u32,
     prev_hidden: Array,
@@ -189,6 +190,18 @@ struct SchedulerMtpState {
     cfg: MtpSpeculativeConfig,
     rows: HashMap<usize, SchedulerMtpRowState>,
     stats: MtpSpeculativeStats,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveKvParkedMtpRowState {
+    cfg: MtpSpeculativeConfig,
+    stats: MtpSpeculativeStats,
+    pending_tokens: VecDeque<u32>,
+    deferred_tail_commit: Option<MtpDeferredTailCommit>,
+    adaptive_draft_tokens: usize,
+    draft_policy: MtpDraftPolicyState,
+    cached_len: i32,
+    cache_cap: i32,
 }
 
 struct MtpBatchedFillContext {
@@ -1221,6 +1234,7 @@ pub struct ActiveKvParkedRequest {
     cache_cap: i32,
     cache_dtype: Dtype,
     prompt_lookup_row: Option<SchedulerPromptLookupRowState>,
+    mtp_row: Option<ActiveKvParkedMtpRowState>,
 }
 
 /// Read pre-write per-row offsets from the first cache layer that tracks
@@ -1949,18 +1963,12 @@ fn append_resolved_gemma4_tokens(
 }
 
 fn active_kv_entry_supported(entry: &PagedPrefixEntry) -> bool {
-    entry.mtp_layers.is_empty()
-        && entry.mtp_last_hidden.is_none()
+    !entry.main_layers.is_empty()
+        && (entry.mtp_layers.is_empty() == entry.mtp_last_hidden.is_none())
         && entry.gemma4_drafter_last_hidden.is_none()
-        && entry.main_layers.iter().all(|layer| {
-            matches!(
-                layer,
-                PrefixLayerPayload::FullDense { .. }
-                    | PrefixLayerPayload::FullPaged { .. }
-                    | PrefixLayerPayload::FullTurboQuantPacked { .. }
-                    | PrefixLayerPayload::Mla { .. }
-            )
-        })
+        && ActiveKvEntryChunkReader::new(entry)
+            .chunks()
+            .all(|chunk| chunk.kind.is_supported_for_active_offload())
 }
 
 #[allow(clippy::manual_div_ceil)]
@@ -2052,6 +2060,14 @@ pub(crate) fn active_kv_chunk_pages_for_budget(
 }
 
 fn cached_token_prefix_for_state(state: &RequestState, cached_len: i32) -> Result<Vec<u32>> {
+    cached_token_prefix_for_state_and_pending(state, None, cached_len)
+}
+
+fn cached_token_prefix_for_state_and_pending(
+    state: &RequestState,
+    pending_tokens: Option<&VecDeque<u32>>,
+    cached_len: i32,
+) -> Result<Vec<u32>> {
     anyhow::ensure!(
         cached_len >= 0,
         "cached_token_prefix_for_state: cached_len {cached_len} is negative"
@@ -2061,6 +2077,9 @@ fn cached_token_prefix_for_state(state: &RequestState, cached_len: i32) -> Resul
     let mut tokens = Vec::with_capacity(state.prompt_ids.len() + state.generated_tokens.len());
     tokens.extend_from_slice(&state.prompt_ids);
     tokens.extend_from_slice(&state.generated_tokens);
+    if let Some(pending_tokens) = pending_tokens {
+        tokens.extend(pending_tokens.iter().copied());
+    }
     anyhow::ensure!(
         cached_len <= tokens.len(),
         "cached_token_prefix_for_state: cached_len {cached_len} exceeds available tokens {}",
@@ -5830,7 +5849,7 @@ impl<M: Model> Scheduler<M> {
     where
         T: Model,
     {
-        let budget_state = crate::core::memory_budget::BudgetState::with_caps(
+        let budget_state = crate::core::memory_budget::BudgetState::with_soft_limit(
             self.budget_state.soft_limit(),
             self.budget_state.logical_cap(),
             self.budget_state.resident_cap(),
@@ -5911,13 +5930,9 @@ impl<M: Model> Scheduler<M> {
             .position(|slot| matches!(slot, Some(state) if state.id == id))
             .ok_or_else(|| anyhow!("request id {} not found", id.0))?;
         if self
-            .mtp_state
+            .gemma4_drafter_state
             .as_ref()
-            .is_some_and(|mtp_state| mtp_state.rows.contains_key(&row_idx))
-            || self
-                .gemma4_drafter_state
-                .as_ref()
-                .is_some_and(|state| state.rows.contains_key(&row_idx))
+            .is_some_and(|state| state.rows.contains_key(&row_idx))
         {
             return Ok(None);
         }
@@ -5942,13 +5957,43 @@ impl<M: Model> Scheduler<M> {
             return Ok(None);
         };
         let (cache_cap, cache_dtype) = cache_cap_and_dtype(cache)?;
-        let Some((entry, cached_len)) = prefix_entry_for_row(cache, cache_row)? else {
+        let Some((mut entry, cached_len)) = prefix_entry_for_row(cache, cache_row)? else {
             return Ok(None);
         };
+        let parked_mtp_row = self
+            .mtp_state
+            .as_ref()
+            .and_then(|mtp_state| {
+                mtp_state
+                    .rows
+                    .get(&row_idx)
+                    .map(|row| (mtp_state.cfg, mtp_state.stats.clone(), row))
+            })
+            .map(|(cfg, stats, row)| -> Result<ActiveKvParkedMtpRowState> {
+                let (mtp_layers, mtp_cached_len) = row.mtp_cache.prefix_layers_for_row_on(0, ())?;
+                let mtp_cache_cap = row.mtp_cache.layer(0).cap();
+                entry.mtp_layers = mtp_layers;
+                entry.mtp_last_hidden = Some(row.last_hidden.clone());
+                Ok(ActiveKvParkedMtpRowState {
+                    cfg,
+                    stats,
+                    pending_tokens: row.pending_tokens.clone(),
+                    deferred_tail_commit: row.deferred_tail_commit.clone(),
+                    adaptive_draft_tokens: row.adaptive_draft_tokens,
+                    draft_policy: row.draft_policy.clone(),
+                    cached_len: mtp_cached_len,
+                    cache_cap: mtp_cache_cap,
+                })
+            })
+            .transpose()?;
         if cached_len <= 0 || !active_kv_entry_supported(&entry) {
             return Ok(None);
         }
-        let cached_token_ids = cached_token_prefix_for_state(state, cached_len)?;
+        let cached_token_ids = cached_token_prefix_for_state_and_pending(
+            state,
+            parked_mtp_row.as_ref().map(|row| &row.pending_tokens),
+            cached_len,
+        )?;
         let prng_key = self.prng_key_for_row(row_idx)?;
 
         let (payload, elapsed_us) =
@@ -5986,6 +6031,14 @@ impl<M: Model> Scheduler<M> {
         if let Some(state) = self.prompt_lookup_state.as_mut() {
             Self::refresh_prompt_lookup_index_stats(state);
         }
+        if parked_mtp_row.is_some() {
+            self.mtp_state
+                .as_mut()
+                .expect("parked MTP row was read from MTP state")
+                .rows
+                .remove(&row_idx)
+                .expect("parked MTP row still exists after main cache rebuild");
+        }
         let state = self.slots[row_idx]
             .take()
             .expect("row_idx still occupied after cache layout rebuild");
@@ -6001,6 +6054,7 @@ impl<M: Model> Scheduler<M> {
             cache_cap,
             cache_dtype,
             prompt_lookup_row,
+            mtp_row: parked_mtp_row,
         }))
     }
 
@@ -6047,9 +6101,55 @@ impl<M: Model> Scheduler<M> {
                 soft_limit_bytes: soft_limit,
             }));
         }
-
-        let (entry, elapsed_us) = match timed(|| store.load(&parked.payload)) {
-            Ok(loaded) => loaded,
+        let prepared = (|| -> Result<(PagedPrefixEntry, u64, Option<SchedulerMtpRowState>)> {
+            let (entry, elapsed_us) = timed(|| store.load(&parked.payload))?;
+            let restored_mtp_row = match parked.mtp_row.as_ref() {
+                Some(parked_mtp) => {
+                    if let Some(mtp_state) = self.mtp_state.as_ref() {
+                        anyhow::ensure!(
+                            mtp_state.cfg == parked_mtp.cfg,
+                            "active KV restore: MTP config changed while request was parked"
+                        );
+                        anyhow::ensure!(
+                            !mtp_state.rows.contains_key(&row_idx),
+                            "active KV restore: destination row {row_idx} already has MTP state"
+                        );
+                    }
+                    let last_hidden = entry.mtp_last_hidden.clone().ok_or_else(|| {
+                        anyhow!("active KV restore: MTP payload is missing last_hidden")
+                    })?;
+                    let (mtp_cache, restored_cached_len) =
+                        MtpCache::from_prefix_layers_for_single_row(
+                            &entry.mtp_layers,
+                            parked_mtp.cache_cap,
+                            (),
+                        )?;
+                    anyhow::ensure!(
+                        restored_cached_len == parked_mtp.cached_len,
+                        "active KV restore: MTP cached length {restored_cached_len} != parked {}",
+                        parked_mtp.cached_len
+                    );
+                    Some(SchedulerMtpRowState {
+                        mtp_cache,
+                        pending_tokens: parked_mtp.pending_tokens.clone(),
+                        last_hidden,
+                        deferred_tail_commit: parked_mtp.deferred_tail_commit.clone(),
+                        adaptive_draft_tokens: parked_mtp.adaptive_draft_tokens,
+                        draft_policy: parked_mtp.draft_policy.clone(),
+                    })
+                }
+                None => {
+                    anyhow::ensure!(
+                        entry.mtp_layers.is_empty() && entry.mtp_last_hidden.is_none(),
+                        "active KV restore: unexpected MTP payload without parked MTP state"
+                    );
+                    None
+                }
+            };
+            Ok((entry, elapsed_us, restored_mtp_row))
+        })();
+        let (entry, elapsed_us, restored_mtp_row) = match prepared {
+            Ok(prepared) => prepared,
             Err(err) => {
                 self.budget_state.release(parked.state.kv_bytes_admitted);
                 if let Some(stats) = &stats {
@@ -6098,6 +6198,20 @@ impl<M: Model> Scheduler<M> {
                     });
             state.rows.insert(row_idx, prompt_lookup_row);
             Self::refresh_prompt_lookup_index_stats(state);
+        }
+        if let Some(mtp_row) = restored_mtp_row {
+            let parked_mtp = parked
+                .mtp_row
+                .as_ref()
+                .expect("restored MTP row has parked metadata");
+            self.mtp_state
+                .get_or_insert_with(|| SchedulerMtpState {
+                    cfg: parked_mtp.cfg,
+                    rows: HashMap::new(),
+                    stats: parked_mtp.stats.clone(),
+                })
+                .rows
+                .insert(row_idx, mtp_row);
         }
         if matches!(self.phase, Phase::Idle | Phase::Finished) {
             self.phase = Phase::Decoding;
@@ -19610,6 +19724,7 @@ mod tests {
         scheduler
             .admit(mk_req(vec![1, 2, 3, 4]))
             .expect("admit request");
+        let parent_soft_limit = scheduler.budget_state.soft_limit();
 
         let temp = scheduler
             .temp_gemma4_drafter_scheduler_for_row(0)
@@ -19617,6 +19732,7 @@ mod tests {
 
         assert_eq!(temp.budget_state.policy().name(), "active_kv_offload");
         assert_eq!(temp.budget_state.resident_cap(), resident_cap);
+        assert_eq!(temp.budget_state.soft_limit(), parent_soft_limit);
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -20362,6 +20478,7 @@ mod tests {
 
     #[derive(Default)]
     struct StepDecodeMaskModel {
+        hybrid_cache: bool,
         decode_lens_seen: std::sync::Mutex<Vec<Vec<i32>>>,
         decode_mask_seen: std::sync::Mutex<Vec<bool>>,
         forward_seq_lens: std::sync::Mutex<Vec<i32>>,
@@ -20371,7 +20488,14 @@ mod tests {
     }
 
     impl StepDecodeMaskModel {
-        fn bump_first_full_cache(
+        fn hybrid() -> Self {
+            Self {
+                hybrid_cache: true,
+                ..Self::default()
+            }
+        }
+
+        fn advance_cache(
             cache: Option<&mut [crate::nn::LayerCache]>,
             input_ids: &mlx::Array,
             per_row_lens: Option<&[i32]>,
@@ -20395,9 +20519,12 @@ mod tests {
             let v = mlx::Array::zeros((batch, 1_i32, seq, 1_i32), mlx::Dtype::Bfloat16)
                 .map_err(|e| anyhow::anyhow!("fake v failed: {e:?}"))?;
             for layer in cache {
-                if let crate::nn::LayerCache::Full(kv) = layer {
-                    kv.update_and_fetch(&k, &v, lens)?;
-                    break;
+                match layer {
+                    crate::nn::LayerCache::Full(kv) => {
+                        kv.update_and_fetch(&k, &v, lens)?;
+                    }
+                    crate::nn::LayerCache::Linear(gd) => gd.advance(lens)?,
+                    crate::nn::LayerCache::Mla(_) => {}
                 }
             }
             Ok(())
@@ -20435,9 +20562,17 @@ mod tests {
             cap: i32,
             dtype: mlx::Dtype,
         ) -> crate::Result<Vec<crate::nn::LayerCache>> {
-            Ok(vec![crate::nn::LayerCache::Full(
-                crate::core::KVCache::new(batch, 1, 1, 1, dtype, cap),
-            )])
+            let mut cache = vec![crate::nn::LayerCache::Full(crate::core::KVCache::new(
+                batch, 1, 1, 1, dtype, cap,
+            ))];
+            if self.hybrid_cache {
+                cache.push(crate::nn::LayerCache::Linear(
+                    crate::core::cache::GatedDeltaCache::new_with_cap(
+                        batch, 2, 2, 1, 1, 1, dtype, cap,
+                    )?,
+                ));
+            }
+            Ok(cache)
         }
 
         fn forward_on(
@@ -20459,7 +20594,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(decode_mask.is_some());
-            Self::bump_first_full_cache(cache, input_ids, per_row_lens)?;
+            Self::advance_cache(cache, input_ids, per_row_lens)?;
             fake_logits_for_batch(dims[0])
         }
 
@@ -20481,7 +20616,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(per_row_lens.to_vec());
-            Self::bump_first_full_cache(cache, input_ids, Some(per_row_lens))?;
+            Self::advance_cache(cache, input_ids, Some(per_row_lens))?;
             fake_logits_for_batch(input_ids.shape().as_slice()[0])
         }
 
@@ -20494,7 +20629,7 @@ mod tests {
             cache: Option<&mut [crate::nn::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
-            Self::bump_first_full_cache(cache, input_ids, per_row_lens)?;
+            Self::advance_cache(cache, input_ids, per_row_lens)?;
             let dims = input_ids.shape();
             let dims = dims.as_slice();
             self.hidden_seq_lens.lock().unwrap().push(dims[1]);
@@ -20507,7 +20642,11 @@ mod tests {
         }
 
         fn num_hidden_layers(&self) -> usize {
-            1
+            if self.hybrid_cache {
+                2
+            } else {
+                1
+            }
         }
     }
 
@@ -20533,7 +20672,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(per_row_lens.to_vec());
-            Self::bump_first_full_cache(cache, input_ids, Some(per_row_lens))?;
+            Self::advance_cache(cache, input_ids, Some(per_row_lens))?;
             fake_logits_for_batch(input_ids.shape().as_slice()[0])
         }
 
@@ -20575,7 +20714,7 @@ mod tests {
             let dims = input_ids.shape();
             let dims = dims.as_slice();
             self.forward_seq_lens.lock().unwrap().push(dims[1]);
-            Self::bump_first_full_cache(cache, input_ids, per_row_lens)?;
+            Self::advance_cache(cache, input_ids, per_row_lens)?;
             fake_logits_for_batch(dims[0])
         }
 
@@ -20590,7 +20729,7 @@ mod tests {
             _image_token_id: i32,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
-            Self::bump_first_full_cache(cache, input_ids, per_row_lens)?;
+            Self::advance_cache(cache, input_ids, per_row_lens)?;
             let dims = input_ids.shape();
             let dims = dims.as_slice();
             self.hidden_seq_lens.lock().unwrap().push(dims[1]);
@@ -21229,6 +21368,7 @@ mod tests {
         scheduler
             .admit(mtp_req(vec![1, 2, 3, 4], 16))
             .expect("admit request");
+        let parent_soft_limit = scheduler.budget_state.soft_limit();
 
         let temp = scheduler
             .temp_mtp_scheduler_for_row(0)
@@ -21236,6 +21376,7 @@ mod tests {
 
         assert_eq!(temp.budget_state.policy().name(), "active_kv_offload");
         assert_eq!(temp.budget_state.resident_cap(), resident_cap);
+        assert_eq!(temp.budget_state.soft_limit(), parent_soft_limit);
     }
 
     #[test]
@@ -25435,6 +25576,325 @@ mod tests {
         assert_eq!(decode_events[0].id, id);
         assert_eq!(stats.snapshot().swap_in_count, 1);
         assert!(!parked.payload.path.exists());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn active_kv_offload_parks_and_restores_mtp_speculative_side_state() {
+        let model = ScriptedMtpSchedulerModel::new(3, vec![4], vec![vec![4, 5]]);
+        let root = std::env::temp_dir().join(format!(
+            "ironmlx-active-kv-mtp-scheduler-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let config = crate::core::cache::ActiveKvOffloadConfig::enabled(root.clone());
+        let stats = crate::core::cache::ActiveKvOffloadSharedStats::new(&config);
+        let mut scheduler = Scheduler::<ScriptedMtpSchedulerModel>::new(
+            1,
+            64,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        scheduler
+            .enable_active_kv_offload(config, stats.clone())
+            .expect("enable active KV offload");
+
+        let id = scheduler
+            .admit(mtp_req(vec![1, 2], 4))
+            .expect("admit MTP request");
+        let cfg = MtpSpeculativeConfig::new(1, Sampler::greedy()).expect("MTP cfg");
+        let first = scheduler
+            .prefill_admitted_mtp_single(&model, &FakeMtpHead, cfg)
+            .expect("MTP prefill");
+        assert_eq!(first.len(), 1);
+        let before_row = scheduler
+            .mtp_state
+            .as_ref()
+            .and_then(|state| state.rows.get(&0))
+            .expect("MTP row before park");
+        let pending_before = before_row.pending_tokens.clone();
+        let policy_before = before_row.draft_policy.snapshot();
+        let mtp_len_before =
+            mtp_cache_row_cached_len(&before_row.mtp_cache, 0).expect("MTP length before park");
+        let mtp_stats_before = scheduler.mtp_stats().expect("MTP stats before park");
+        assert!(!pending_before.is_empty());
+
+        let parked = scheduler
+            .park_active_kv_request(id, &model)
+            .expect("park MTP request")
+            .expect("MTP request should be eligible");
+        assert_eq!(scheduler.active_count(), 0);
+        assert!(scheduler
+            .mtp_state
+            .as_ref()
+            .expect("MTP scheduler state remains")
+            .rows
+            .is_empty());
+        assert!(parked.mtp_row.is_some());
+        let stored = scheduler
+            .active_kv_store
+            .as_ref()
+            .expect("active KV store")
+            .load(&parked.payload)
+            .expect("load parked MTP payload");
+        assert!(!stored.mtp_layers.is_empty());
+        assert!(stored.mtp_last_hidden.is_some());
+        assert_eq!(stats.snapshot().swap_out_count, 1);
+        scheduler.mtp_state = None;
+
+        assert_eq!(
+            scheduler
+                .restore_active_kv_request(&parked, &model)
+                .expect("restore MTP request"),
+            id
+        );
+        assert_eq!(scheduler.mtp_stats(), Some(mtp_stats_before));
+        let restored_row = scheduler
+            .mtp_state
+            .as_ref()
+            .and_then(|state| state.rows.get(&0))
+            .expect("restored MTP row");
+        assert_eq!(restored_row.pending_tokens, pending_before);
+        assert_eq!(restored_row.draft_policy.snapshot(), policy_before);
+        assert_eq!(
+            mtp_cache_row_cached_len(&restored_row.mtp_cache, 0).expect("restored MTP length"),
+            mtp_len_before
+        );
+        assert_eq!(
+            restored_row.mtp_cache.layer(0).cap(),
+            parked.mtp_row.as_ref().expect("parked MTP row").cache_cap
+        );
+        assert_eq!(stats.snapshot().swap_in_count, 1);
+
+        let next = scheduler
+            .step_mtp_single(&model, &FakeMtpHead)
+            .expect("continue MTP decode after restore");
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].id, id);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn active_kv_offload_preserves_mtp_deferred_tail_and_independent_cache_length() {
+        let model = ScriptedMtpSchedulerModel::new(3, vec![4], vec![vec![4, 5]]);
+        let root = std::env::temp_dir().join(format!(
+            "ironmlx-active-kv-mtp-deferred-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let config = crate::core::cache::ActiveKvOffloadConfig::enabled(root.clone());
+        let mut scheduler = Scheduler::<ScriptedMtpSchedulerModel>::new(
+            1,
+            64,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        scheduler
+            .enable_active_kv_offload(
+                config.clone(),
+                crate::core::cache::ActiveKvOffloadSharedStats::new(&config),
+            )
+            .expect("enable active KV offload");
+        let id = scheduler
+            .admit(mtp_req(vec![1, 2], 4))
+            .expect("admit MTP request");
+        let cfg = MtpSpeculativeConfig::new(1, Sampler::greedy()).expect("MTP cfg");
+        scheduler
+            .prefill_admitted_mtp_single(&model, &FakeMtpHead, cfg)
+            .expect("MTP prefill");
+
+        let main_cached_len =
+            cache_row_cached_len(scheduler.cache.as_deref().expect("main cache"), 0)
+                .expect("main cached len")
+                .expect("main cache has a sequence length");
+        assert!(main_cached_len > 1);
+        let mtp_row = scheduler
+            .mtp_state
+            .as_mut()
+            .and_then(|state| state.rows.get_mut(&0))
+            .expect("MTP row");
+        for layer_idx in 0..mtp_row.mtp_cache.num_layers() {
+            mtp_row
+                .mtp_cache
+                .layer_mut(layer_idx)
+                .restore_offsets(&[main_cached_len - 1])
+                .expect("trim MTP layer for deferred tail fixture");
+        }
+        let deferred_token = 91;
+        let deferred_hidden =
+            Array::zeros(&[1_i32, 1, 1][..], Dtype::Float32).expect("deferred hidden");
+        let deferred_positions =
+            Array::zeros(&[1_i32, 1][..], Dtype::Int32).expect("deferred positions");
+        mtp_row.deferred_tail_commit = Some(MtpDeferredTailCommit {
+            token: deferred_token,
+            prev_hidden: deferred_hidden,
+            position_ids: deferred_positions,
+        });
+
+        let parked = scheduler
+            .park_active_kv_request(id, &model)
+            .expect("park MTP request with deferred tail")
+            .expect("deferred-tail MTP request should be eligible");
+        assert_eq!(
+            parked.mtp_row.as_ref().expect("parked MTP row").cached_len,
+            main_cached_len - 1
+        );
+        scheduler
+            .restore_active_kv_request(&parked, &model)
+            .expect("restore deferred-tail MTP request");
+        let restored = scheduler
+            .mtp_state
+            .as_ref()
+            .and_then(|state| state.rows.get(&0))
+            .expect("restored MTP row");
+        assert_eq!(
+            mtp_cache_row_cached_len(&restored.mtp_cache, 0).expect("restored MTP length"),
+            main_cached_len - 1
+        );
+        assert_eq!(
+            restored
+                .deferred_tail_commit
+                .as_ref()
+                .expect("restored deferred tail")
+                .token,
+            deferred_token
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn active_kv_offload_preserves_hybrid_full_and_linear_cache_rows() {
+        fn linear_state(entry: &PagedPrefixEntry) -> (Vec<f32>, Vec<f32>) {
+            let (conv_state, recurrent_state) = entry
+                .main_layers
+                .iter()
+                .find_map(|layer| match layer {
+                    PrefixLayerPayload::Linear {
+                        conv_state,
+                        recurrent_state,
+                    } => Some((conv_state, recurrent_state)),
+                    _ => None,
+                })
+                .expect("hybrid entry must contain a Linear layer");
+            let conv_state = mlx::ops::cast::astype(conv_state, Dtype::Float32)
+                .expect("cast conv state")
+                .to_vec::<f32>()
+                .expect("read conv state");
+            let recurrent_state = mlx::ops::cast::astype(recurrent_state, Dtype::Float32)
+                .expect("cast recurrent state")
+                .to_vec::<f32>()
+                .expect("read recurrent state");
+            (conv_state, recurrent_state)
+        }
+
+        let model = StepDecodeMaskModel::hybrid();
+        let root = std::env::temp_dir().join(format!(
+            "ironmlx-active-kv-hybrid-scheduler-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let config = crate::core::cache::ActiveKvOffloadConfig::enabled(root.clone());
+        let stats = crate::core::cache::ActiveKvOffloadSharedStats::new(&config);
+        let mut scheduler = Scheduler::<StepDecodeMaskModel>::new(
+            2,
+            64,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        scheduler
+            .enable_active_kv_offload(config, stats.clone())
+            .expect("enable active KV offload");
+
+        let first_id = scheduler
+            .admit(mk_req(vec![1, 2, 3, 4]))
+            .expect("admit first request");
+        let second_id = scheduler
+            .admit(mk_req(vec![5, 6, 7, 8]))
+            .expect("admit second request");
+        assert_eq!(
+            scheduler
+                .prefill_admitted(&model)
+                .expect("prefill hybrid requests")
+                .len(),
+            2
+        );
+
+        let cache = scheduler.cache.as_mut().expect("hybrid cache");
+        let linear = cache
+            .iter_mut()
+            .find_map(|layer| match layer {
+                LayerCache::Linear(cache) => Some(cache),
+                _ => None,
+            })
+            .expect("linear cache");
+        let conv_state: Array = (&[1.0_f32, 2.0, 3.0, 4.0][..], &[2_i32, 1_i32, 2_i32][..])
+            .try_into()
+            .expect("conv state");
+        linear.update_conv(
+            mlx::ops::cast::astype(&conv_state, linear.conv_state().dtype())
+                .expect("cast conv state"),
+        );
+        let recurrent_state: Array = (&[5.0_f32, 6.0][..], &[2_i32, 1_i32, 1_i32, 1_i32][..])
+            .try_into()
+            .expect("recurrent state");
+        linear.update_recurrent(recurrent_state);
+
+        let (first_before, first_len) =
+            prefix_entry_for_row(scheduler.cache.as_deref().expect("cache before park"), 0)
+                .expect("export first row")
+                .expect("first row entry");
+        let (second_before, second_len) =
+            prefix_entry_for_row(scheduler.cache.as_deref().expect("cache before park"), 1)
+                .expect("export second row")
+                .expect("second row entry");
+        assert_eq!(first_len, second_len);
+
+        let parked = scheduler
+            .park_active_kv_request(first_id, &model)
+            .expect("park hybrid request")
+            .expect("hybrid Full + Linear request should be eligible");
+        assert_eq!(scheduler.active_count(), 1);
+        assert_eq!(stats.snapshot().swap_out_count, 1);
+
+        let (second_compacted, compacted_len) =
+            prefix_entry_for_row(scheduler.cache.as_deref().expect("compacted cache"), 0)
+                .expect("export compacted second row")
+                .expect("compacted second row entry");
+        assert_eq!(compacted_len, second_len);
+        assert_eq!(
+            linear_state(&second_compacted),
+            linear_state(&second_before)
+        );
+
+        assert_eq!(
+            scheduler
+                .restore_active_kv_request(&parked, &model)
+                .expect("restore hybrid request"),
+            first_id
+        );
+        assert_eq!(scheduler.active_count(), 2);
+        assert_eq!(stats.snapshot().swap_in_count, 1);
+
+        let (first_restored, restored_first_len) =
+            prefix_entry_for_row(scheduler.cache.as_deref().expect("restored cache"), 0)
+                .expect("export restored first row")
+                .expect("restored first row entry");
+        let (second_restored, restored_second_len) =
+            prefix_entry_for_row(scheduler.cache.as_deref().expect("restored cache"), 1)
+                .expect("export restored second row")
+                .expect("restored second row entry");
+        assert_eq!(restored_first_len, first_len);
+        assert_eq!(restored_second_len, second_len);
+        assert_eq!(linear_state(&first_restored), linear_state(&first_before));
+        assert_eq!(linear_state(&second_restored), linear_state(&second_before));
+
+        let events = scheduler.step(&model).expect("decode after hybrid restore");
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().any(|event| event.id == first_id));
+        assert!(events.iter().any(|event| event.id == second_id));
 
         let _ = std::fs::remove_dir_all(root);
     }

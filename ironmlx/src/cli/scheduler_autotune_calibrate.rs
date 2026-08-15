@@ -16,6 +16,7 @@ use crate::core::scheduler_autotune::{
     SchedulerAutotuneCalibrationInput, SchedulerAutotuneMergeOptions,
     SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeContext,
     SchedulerAutotuneSelectionOptions, SchedulerAutotuneSelectionProfile, SchedulerSpeculativeMode,
+    SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
 };
 use crate::core::server::chat_format::{render_and_encode, ChatMessage};
 use crate::core::Tokenizer;
@@ -513,6 +514,13 @@ fn run_with_cancellation(
             cache_state_label(job.cache_state),
         );
         run_iron_bench(&bench_invocation, &output_json, &stderr_log, cancellation)?;
+        let output = read_calibration(&output_json)?;
+        validate_benchmark_calibration(
+            &output,
+            &resolved.model_name,
+            &resolved.runtime_context,
+            &output_json,
+        )?;
         candidate_outputs.push(output_json);
         eprintln!(
             "[scheduler-autotune] job {}/{} stage=completed elapsed_s={:.1}",
@@ -1123,6 +1131,39 @@ fn read_calibration(path: &Path) -> Result<SchedulerAutotuneCalibrationInput> {
     serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
 }
 
+fn validate_benchmark_calibration(
+    input: &SchedulerAutotuneCalibrationInput,
+    expected_model_name: &str,
+    expected_runtime_context: &SchedulerAutotuneRuntimeContext,
+    path: &Path,
+) -> Result<()> {
+    anyhow::ensure!(
+        input.schema_version == SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+        "benchmark output {} schema_version mismatch: expected {}, got {}",
+        path.display(),
+        SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+        input.schema_version,
+    );
+    anyhow::ensure!(
+        input.model_name == expected_model_name,
+        "benchmark output {} model_name mismatch: expected {:?}, got {:?}",
+        path.display(),
+        expected_model_name,
+        input.model_name,
+    );
+    anyhow::ensure!(
+        input.runtime_context == *expected_runtime_context,
+        "benchmark output {} runtime_context does not match the calibration context",
+        path.display(),
+    );
+    anyhow::ensure!(
+        !input.measurements.is_empty(),
+        "benchmark output {} has no measurements",
+        path.display(),
+    );
+    Ok(())
+}
+
 fn persist_runtime_profile_from_artifact(
     store: &SchedulerProfileStore,
     model_path: &Path,
@@ -1181,9 +1222,10 @@ mod tests {
         build_candidate_benchmark_plan, build_iron_bench_invocation, build_serve_invocation,
         candidate_artifact_path, health_url, last_stderr_line, parse_candidate_config,
         partial_artifact_path, persist_runtime_profile_from_artifact,
-        resolve_run_config_with_context, run_iron_bench, validate_matrix, write_final_outputs,
-        write_run_order_manifest, CalibrationCancellation, CalibrationCancelled,
-        FinalArtifactPaths, ProcessInvocation, SchedulerAutotuneCalibrateArgs,
+        resolve_run_config_with_context, run_iron_bench, validate_benchmark_calibration,
+        validate_matrix, write_final_outputs, write_run_order_manifest, CalibrationCancellation,
+        CalibrationCancelled, FinalArtifactPaths, ProcessInvocation,
+        SchedulerAutotuneCalibrateArgs,
     };
     use crate::cli::scheduler_autotune::SchedulerAutotuneSelectionProfileArg;
     use crate::cli::scheduler_profile_context::SchedulerProfileRuntimeArgs;
@@ -1641,6 +1683,23 @@ mod tests {
         assert!(profile.contains("\"prefill_chunk_size\": 1024"));
 
         std::fs::remove_dir_all(temp_dir).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn benchmark_output_validation_rejects_schema_drift() {
+        let runtime_context = sample_runtime_context();
+        let mut input = sample_calibration(profile_config());
+        input.schema_version = SCHEDULER_AUTOTUNE_SCHEMA_VERSION - 1;
+
+        let error = validate_benchmark_calibration(
+            &input,
+            &input.model_name,
+            &runtime_context,
+            Path::new("/tmp/candidate.json"),
+        )
+        .expect_err("stale benchmark schema must fail immediately");
+
+        assert!(format!("{error:#}").contains("schema_version mismatch"));
     }
 
     #[test]

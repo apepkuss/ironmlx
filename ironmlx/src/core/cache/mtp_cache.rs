@@ -60,6 +60,81 @@ impl MtpCache {
         Ok(Self { layers })
     }
 
+    /// Rebuild a single-row MTP cache from an offloaded prefix payload.
+    ///
+    /// The payload carries its own logical sequence length, which may differ
+    /// from the main model cache while a deferred speculative tail commit is
+    /// pending. All MTP layers must still share one homogeneous cache layout
+    /// and advance in lockstep.
+    pub fn from_prefix_layers_for_single_row(
+        layers: &[PrefixMtpLayerPayload],
+        cap: i32,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<(Self, i32)> {
+        let first = layers
+            .first()
+            .ok_or_else(|| anyhow!("MtpCache::from_prefix_layers_for_single_row: empty payload"))?;
+        let k_shape = first.k.shape();
+        let v_shape = first.v.shape();
+        let k_dims = k_shape.as_slice();
+        let v_dims = v_shape.as_slice();
+        if k_dims.len() != 4 || v_dims.len() != 4 {
+            return Err(anyhow!(
+                "MtpCache::from_prefix_layers_for_single_row: expected rank-4 K/V, got {:?}/{:?}",
+                k_dims,
+                v_dims
+            ));
+        }
+        let batch = k_dims[0];
+        let n_kv_heads = k_dims[1];
+        let cached_len = k_dims[2];
+        let head_dim = k_dims[3];
+        let v_head_dim = v_dims[3];
+        anyhow::ensure!(
+            batch == 1
+                && v_dims[0] == batch
+                && v_dims[1] == n_kv_heads
+                && v_dims[2] == cached_len,
+            "MtpCache::from_prefix_layers_for_single_row: incompatible first-layer K/V shapes {:?}/{:?}",
+            k_dims,
+            v_dims
+        );
+        anyhow::ensure!(
+            cached_len >= 0 && cached_len <= cap,
+            "MtpCache::from_prefix_layers_for_single_row: cached_len {cached_len} outside [0, {cap}]"
+        );
+        let dtype = first.k.dtype();
+        anyhow::ensure!(
+            first.v.dtype() == dtype,
+            "MtpCache::from_prefix_layers_for_single_row: first-layer K/V dtype mismatch {:?}/{:?}",
+            dtype,
+            first.v.dtype()
+        );
+        for (idx, layer) in layers.iter().enumerate().skip(1) {
+            let layer_k_shape = layer.k.shape();
+            let layer_v_shape = layer.v.shape();
+            anyhow::ensure!(
+                layer_k_shape.as_slice() == k_dims
+                    && layer_v_shape.as_slice() == v_dims
+                    && layer.k.dtype() == dtype
+                    && layer.v.dtype() == dtype,
+                "MtpCache::from_prefix_layers_for_single_row: layer {idx} layout differs from layer 0"
+            );
+        }
+
+        let mut cache = Self::new_with_cap(
+            layers.len(),
+            batch,
+            n_kv_heads,
+            head_dim,
+            v_head_dim,
+            dtype,
+            cap,
+        )?;
+        cache.restore_prefix_layers_for_row_on(layers, 0, cached_len, target)?;
+        Ok((cache, cached_len))
+    }
+
     /// Number of cached layers (fixed at construction).
     pub fn num_layers(&self) -> usize {
         self.layers.len()
@@ -365,6 +440,58 @@ mod tests {
             v_full.to_vec::<f32>().unwrap(),
             vec![10.0, 20.0, 30.0, 40.0]
         );
+    }
+
+    #[test]
+    fn mtp_cache_rebuilds_single_row_from_offloaded_prefix_layers() {
+        let mut src = MtpCache::new_with_cap(2, 1, 1, 1, 1, Dtype::Float32, 8).expect("src");
+        for layer_idx in 0..src.num_layers() {
+            let k: mlx::Array = (&[1.0_f32, 2.0, 3.0][..], &[1_i32, 1, 3, 1][..])
+                .try_into()
+                .expect("k");
+            let v: mlx::Array = (&[4.0_f32, 5.0, 6.0][..], &[1_i32, 1, 3, 1][..])
+                .try_into()
+                .expect("v");
+            src.layer_mut(layer_idx)
+                .restore_dense_prefix_layer_for_row_on(&k, &v, 0, 3, ())
+                .expect("seed source layer");
+        }
+        let (payloads, cached_len) = src.prefix_layers_for_row_on(0, ()).expect("export source");
+        assert_eq!(cached_len, 3);
+
+        let (restored, restored_len) =
+            MtpCache::from_prefix_layers_for_single_row(&payloads, 8, ())
+                .expect("restore offloaded MTP cache");
+        assert_eq!(restored_len, 3);
+        assert_eq!(restored.num_layers(), 2);
+        assert_eq!(restored.layer(0).offsets(), &[3]);
+        assert_eq!(restored.layer(1).offsets(), &[3]);
+    }
+
+    #[test]
+    fn mtp_cache_rejects_offloaded_layers_with_different_lengths() {
+        let first = PrefixMtpLayerPayload {
+            k: (&[1.0_f32, 2.0][..], &[1_i32, 1, 2, 1][..])
+                .try_into()
+                .expect("first k"),
+            v: (&[3.0_f32, 4.0][..], &[1_i32, 1, 2, 1][..])
+                .try_into()
+                .expect("first v"),
+        };
+        let second = PrefixMtpLayerPayload {
+            k: (&[5.0_f32][..], &[1_i32, 1, 1, 1][..])
+                .try_into()
+                .expect("second k"),
+            v: (&[6.0_f32][..], &[1_i32, 1, 1, 1][..])
+                .try_into()
+                .expect("second v"),
+        };
+
+        let error = match MtpCache::from_prefix_layers_for_single_row(&[first, second], 8, ()) {
+            Ok(_) => panic!("mixed layer lengths must fail"),
+            Err(error) => error,
+        };
+        assert!(format!("{error:#}").contains("layer 1 layout differs"));
     }
 
     #[test]

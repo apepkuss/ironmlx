@@ -128,7 +128,12 @@ impl ActiveKvLayerChunkKind {
     pub fn is_supported_for_active_offload(self) -> bool {
         matches!(
             self,
-            Self::FullDense | Self::FullPaged | Self::FullTurboQuantPacked | Self::Mla
+            Self::FullDense
+                | Self::FullPaged
+                | Self::FullTurboQuantPacked
+                | Self::Mla
+                | Self::GatedDeltaLinear
+                | Self::MtpSpeculativeSideCache
         )
     }
 }
@@ -488,8 +493,10 @@ impl ActiveKvOffloadSharedStats {
                 "full_attention_paged",
                 "turboquant_full_attention_packed",
                 "mla",
+                "gated_delta_linear",
+                "mtp_speculative_side_cache",
             ],
-            not_applicable_cache_kinds: vec!["gated_delta_linear", "mtp_speculative_side_cache"],
+            not_applicable_cache_kinds: Vec::new(),
         };
         health.refresh_status();
         health
