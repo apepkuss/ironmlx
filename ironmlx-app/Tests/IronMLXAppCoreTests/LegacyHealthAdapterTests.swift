@@ -250,8 +250,8 @@ import Testing
 
     #expect(html.contains(#"data-i18n="active_kv_offload_help_applicable""#))
     #expect(html.contains(#"data-i18n="active_kv_offload_help_not_applicable""#))
-    #expect(html.contains("适用：Full Attention dense/paged、TurboQuant packed Full Attention、MLA。"))
-    #expect(html.contains("不适用：GatedDelta/Linear、MTP speculative side cache。"))
+    #expect(html.contains("适用：Full Attention dense/paged、TurboQuant packed Full Attention、MLA、GatedDelta/Linear。"))
+    #expect(html.contains("不适用：MTP speculative side cache。"))
     #expect(!html.contains("支持：Full Attention dense/paged、TurboQuant packed Full Attention、MLA。不适用"))
 }
 

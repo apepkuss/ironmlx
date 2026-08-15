@@ -2,7 +2,7 @@ use ironmlx::core::cache::{
     ActiveKvEntryChunkReader, ActiveKvLayerChunkKind, ActiveKvOffloadConfig,
     ActiveKvOffloadSharedStats, ActiveKvOffloadStatus, ActiveKvOffloadStore, ActiveKvPageResidency,
     ActiveKvResidencyState, ActiveKvResidencySummary, ActiveKvResidencyTracker, PagedPrefixEntry,
-    PagedPrefixEntryStats, PrefixLayerPayload,
+    PagedPrefixEntryStats, PrefixLayerPayload, PrefixMtpLayerPayload,
 };
 use mlx::{Array, Dtype};
 
@@ -30,6 +30,31 @@ fn sample_dense_entry() -> PagedPrefixEntry {
         mtp_last_hidden: None,
         gemma4_drafter_last_hidden: None,
     }
+}
+
+fn sample_linear_entry() -> PagedPrefixEntry {
+    let conv_state = Array::zeros(&[1_i32, 3_i32, 8_i32][..], Dtype::Bfloat16).expect("conv state");
+    let recurrent_state =
+        Array::zeros(&[1_i32, 2_i32, 4_i32, 4_i32][..], Dtype::Float32).expect("recurrent state");
+    PagedPrefixEntry {
+        main_layers: vec![PrefixLayerPayload::Linear {
+            conv_state,
+            recurrent_state,
+        }],
+        mtp_layers: Vec::new(),
+        mtp_last_hidden: None,
+        gemma4_drafter_last_hidden: None,
+    }
+}
+
+fn sample_mtp_entry() -> PagedPrefixEntry {
+    let mut entry = sample_dense_entry();
+    let k = Array::zeros(&[1_i32, 1_i32, 3_i32, 2_i32][..], Dtype::Float32).expect("MTP k");
+    let v = Array::zeros(&[1_i32, 1_i32, 3_i32, 2_i32][..], Dtype::Float32).expect("MTP v");
+    entry.mtp_layers = vec![PrefixMtpLayerPayload { k, v }];
+    entry.mtp_last_hidden =
+        Some(Array::zeros(&[1_i32, 1_i32, 4_i32][..], Dtype::Float32).expect("MTP last hidden"));
+    entry
 }
 
 #[test]
@@ -106,6 +131,16 @@ fn shared_stats_reports_production_status_flags() {
     assert_eq!(idle.status, ActiveKvOffloadStatus::Idle);
     assert!(!idle.active);
     assert!(!idle.degraded);
+    assert!(idle.supported_cache_kinds.contains(&"gated_delta_linear"));
+    assert!(idle
+        .supported_cache_kinds
+        .contains(&"mtp_speculative_side_cache"));
+    assert!(!idle
+        .not_applicable_cache_kinds
+        .contains(&"gated_delta_linear"));
+    assert!(!idle
+        .not_applicable_cache_kinds
+        .contains(&"mtp_speculative_side_cache"));
 
     stats.set_residency_summary(ActiveKvResidencySummary {
         offloaded_pages: 2,
@@ -138,6 +173,57 @@ fn active_kv_offload_store_round_trips_dense_full_kv_entry() {
         loaded.main_layers.as_slice(),
         [PrefixLayerPayload::FullDense { .. }]
     ));
+
+    store.cleanup_all().expect("cleanup active kv store");
+    assert!(!root.exists());
+}
+
+#[test]
+fn active_kv_offload_store_round_trips_gated_delta_linear_entry() {
+    let root = temp_dir("ironmlx-active-kv-linear-store");
+    let store = ActiveKvOffloadStore::new(ActiveKvOffloadConfig::enabled(root.clone()))
+        .expect("active kv store");
+    let entry = sample_linear_entry();
+    let payload = store
+        .save(8, &[1, 2, 3, 4], 4, &entry)
+        .expect("save Linear active kv payload");
+
+    let loaded = store.load(&payload).expect("load Linear active kv payload");
+    assert!(matches!(
+        loaded.main_layers.as_slice(),
+        [PrefixLayerPayload::Linear { .. }]
+    ));
+    let chunks: Vec<_> = ActiveKvEntryChunkReader::new(&loaded).chunks().collect();
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0].kind, ActiveKvLayerChunkKind::GatedDeltaLinear);
+    assert!(chunks[0].kind.is_supported_for_active_offload());
+
+    store.cleanup_all().expect("cleanup active kv store");
+    assert!(!root.exists());
+}
+
+#[test]
+fn active_kv_offload_store_round_trips_mtp_side_cache_with_independent_length() {
+    let root = temp_dir("ironmlx-active-kv-mtp-store");
+    let store = ActiveKvOffloadStore::new(ActiveKvOffloadConfig::enabled(root.clone()))
+        .expect("active kv store");
+    let entry = sample_mtp_entry();
+    let payload = store
+        .save(10, &[1, 2, 3, 4], 4, &entry)
+        .expect("save MTP active kv payload");
+
+    let loaded = store.load(&payload).expect("load MTP active kv payload");
+    assert_eq!(loaded.mtp_layers.len(), 1);
+    assert_eq!(loaded.mtp_layers[0].k.shape().as_slice()[2], 3);
+    assert_eq!(loaded.mtp_layers[0].v.shape().as_slice()[2], 3);
+    assert!(loaded.mtp_last_hidden.is_some());
+    let chunks: Vec<_> = ActiveKvEntryChunkReader::new(&loaded).chunks().collect();
+    assert_eq!(chunks.len(), 2);
+    assert_eq!(
+        chunks[1].kind,
+        ActiveKvLayerChunkKind::MtpSpeculativeSideCache
+    );
+    assert!(chunks[1].kind.is_supported_for_active_offload());
 
     store.cleanup_all().expect("cleanup active kv store");
     assert!(!root.exists());

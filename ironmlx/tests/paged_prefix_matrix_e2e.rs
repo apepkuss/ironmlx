@@ -6,6 +6,10 @@
 //! ```text
 //! MLX_DIR=$HOME/.local/mlx \
 //! QWEN35_MODEL=/path/to/Qwen3.5-4B-MLX-4bit/snapshots/<sha> \
+//! QWEN36_DENSE_MODEL=/path/to/Qwen3.6-27B-4bit/snapshots/<sha> \
+//! QWEN36_DENSE_MTP_MODEL=/path/to/Qwen3.6-27B-MTP-4bit/snapshots/<sha> \
+//! QWEN38_DENSE_MODEL=/path/to/Qwen3.8-27B-4bit/snapshots/<sha> \
+//! QWEN38_DENSE_MTP_MODEL=/path/to/Qwen3.8-27B-MTP-4bit/snapshots/<sha> \
 //! GLM47_MODEL_DIR=/path/to/GLM-4.7-Flash-4bit/snapshots/<sha> \
 //! cargo test --release -p ironmlx --test paged_prefix_matrix_e2e \
 //!   -- --ignored --test-threads=1 --nocapture
@@ -45,7 +49,7 @@ impl ServerProcess {
         port: u16,
         max_sequences: usize,
     ) -> Self {
-        Self::spawn_with_options(model_dir, cache_dir, None, None, port, max_sequences)
+        Self::spawn_with_options(model_dir, cache_dir, None, None, None, port, max_sequences)
     }
 
     fn spawn_with_kv_quant(
@@ -59,6 +63,7 @@ impl ServerProcess {
             model_dir,
             cache_dir,
             Some(kv_quant),
+            None,
             None,
             port,
             max_sequences,
@@ -77,6 +82,26 @@ impl ServerProcess {
             cache_dir,
             None,
             Some(active_kv_dir),
+            None,
+            port,
+            max_sequences,
+        )
+    }
+
+    fn spawn_with_mtp_and_active_kv(
+        model_dir: &Path,
+        mtp_model_dir: &Path,
+        cache_dir: &Path,
+        active_kv_dir: &Path,
+        port: u16,
+        max_sequences: usize,
+    ) -> Self {
+        Self::spawn_with_options(
+            model_dir,
+            cache_dir,
+            None,
+            Some(active_kv_dir),
+            Some(mtp_model_dir),
             port,
             max_sequences,
         )
@@ -95,6 +120,7 @@ impl ServerProcess {
             cache_dir,
             Some(kv_quant),
             Some(active_kv_dir),
+            None,
             port,
             max_sequences,
         )
@@ -105,6 +131,7 @@ impl ServerProcess {
         cache_dir: &Path,
         kv_quant: Option<&str>,
         active_kv_dir: Option<&Path>,
+        mtp_model_dir: Option<&Path>,
         port: u16,
         max_sequences: usize,
     ) -> Self {
@@ -154,6 +181,17 @@ impl ServerProcess {
                     .expect("active KV path must be valid UTF-8")
                     .to_owned(),
             );
+        }
+        if let Some(mtp_model_dir) = mtp_model_dir {
+            args.push("--mtp-model-dir".to_owned());
+            args.push(
+                mtp_model_dir
+                    .to_str()
+                    .expect("MTP model path must be valid UTF-8")
+                    .to_owned(),
+            );
+            args.push("--mtp-draft-tokens".to_owned());
+            args.push("2".to_owned());
         }
         let mut cmd = Command::new(bin);
         cmd.current_dir(env!("CARGO_MANIFEST_DIR"));
@@ -247,6 +285,34 @@ fn snapshot_from_env_or_default(env_name: &str, repo_dir: &str) -> PathBuf {
 
 fn qwen35_model_dir() -> PathBuf {
     snapshot_from_env_or_default("QWEN35_MODEL", "models--mlx-community--Qwen3.5-4B-MLX-4bit")
+}
+
+fn qwen36_dense_model_dir() -> PathBuf {
+    snapshot_from_env_or_default(
+        "QWEN36_DENSE_MODEL",
+        "huggingface/mlx-community--Qwen3.6-27B-4bit",
+    )
+}
+
+fn qwen36_dense_mtp_model_dir() -> PathBuf {
+    snapshot_from_env_or_default(
+        "QWEN36_DENSE_MTP_MODEL",
+        "huggingface/mlx-community--Qwen3.6-27B-MTP-4bit",
+    )
+}
+
+fn qwen38_dense_model_dir() -> PathBuf {
+    snapshot_from_env_or_default(
+        "QWEN38_DENSE_MODEL",
+        "huggingface/mlx-community--Qwen3.8-27B-4bit",
+    )
+}
+
+fn qwen38_dense_mtp_model_dir() -> PathBuf {
+    snapshot_from_env_or_default(
+        "QWEN38_DENSE_MTP_MODEL",
+        "huggingface/mlx-community--Qwen3.8-27B-MTP-4bit",
+    )
 }
 
 fn glm47_model_dir() -> PathBuf {
@@ -1012,6 +1078,188 @@ async fn qwen35_text_linear_paged_prefix_cache_batched_exact_hit() {
         qwen35_model_dir(),
         &["full_paged", "linear"],
         "For prefix cache validation, answer with one concise sentence about deterministic reuse.",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires QWEN36_DENSE_MODEL/MLX_DIR or default local Qwen3.6-27B checkpoint"]
+async fn qwen36_dense_active_kv_offload_restores_gated_delta_linear_state() {
+    let cache_dir = unique_temp_dir("qwen36-dense-active-kv-prefix");
+    let active_kv_dir = unique_temp_dir("qwen36-dense-active-kv-offload");
+    std::fs::create_dir_all(&cache_dir).expect("create prefix cache dir");
+
+    let port = alloc_port().await;
+    let mut server = ServerProcess::spawn_with_active_kv(
+        &qwen36_dense_model_dir(),
+        &cache_dir,
+        &active_kv_dir,
+        port,
+        2,
+    );
+    let client = client();
+    wait_ready(&client, port, &mut server).await;
+
+    let before = healthz(&client, port).await;
+    assert_active_kv_health(&before);
+    assert_eq!(
+        before["active_kv_offload"]["supported_cache_kinds"],
+        serde_json::json!([
+            "full_attention_dense",
+            "full_attention_paged",
+            "turboquant_full_attention_packed",
+            "mla",
+            "gated_delta_linear",
+            "mtp_speculative_side_cache"
+        ]),
+        "Qwen3.6 Active KV health must advertise GatedDelta/Linear support: {before}"
+    );
+
+    let body = serde_json::json!({
+        "model": "paged-prefix-matrix",
+        "messages": [{
+            "role": "user",
+            "content": "Continue with a concise numbered sequence and do not stop before ten items."
+        }],
+        "max_tokens": 32,
+        "temperature": 0.0,
+        "stream": false
+    });
+    let responses = post_same_body_concurrently(&client, port, body, 3).await;
+    assert_eq!(responses.len(), 3);
+
+    let after = healthz(&client, port).await;
+    assert_active_kv_health(&after);
+    assert!(
+        after["active_kv_offload"]["swap_out_count"]
+            .as_u64()
+            .unwrap_or_default()
+            >= 1,
+        "Qwen3.6 mixed Full + Linear cache should swap out: {after}"
+    );
+    assert!(
+        after["active_kv_offload"]["swap_in_count"]
+            .as_u64()
+            .unwrap_or_default()
+            >= 1,
+        "Qwen3.6 mixed Full + Linear cache should swap in: {after}"
+    );
+    assert_eq!(
+        after["active_kv_offload"]["parked_requests"].as_u64(),
+        Some(0),
+        "Qwen3.6 Active KV should not leak parked requests: {after}"
+    );
+
+    drop(server);
+    std::fs::remove_dir_all(&cache_dir).expect("cleanup prefix cache dir");
+    std::fs::remove_dir_all(&active_kv_dir).ok();
+}
+
+async fn run_qwen_dense_mtp_active_kv_offload_case(
+    model_name: &str,
+    temp_name: &str,
+    model_dir: PathBuf,
+    mtp_model_dir: PathBuf,
+) {
+    let cache_dir = unique_temp_dir(&format!("{temp_name}-mtp-active-kv-prefix"));
+    let active_kv_dir = unique_temp_dir(&format!("{temp_name}-mtp-active-kv-offload"));
+    std::fs::create_dir_all(&cache_dir).expect("create prefix cache dir");
+
+    let port = alloc_port().await;
+    let mut server = ServerProcess::spawn_with_mtp_and_active_kv(
+        &model_dir,
+        &mtp_model_dir,
+        &cache_dir,
+        &active_kv_dir,
+        port,
+        2,
+    );
+    let client = client();
+    wait_ready(&client, port, &mut server).await;
+
+    let before = healthz(&client, port).await;
+    assert_active_kv_health(&before);
+    assert_eq!(
+        before["mtp"]["enabled"], true,
+        "{model_name} MTP must be enabled: {before}"
+    );
+    assert_eq!(
+        before["active_kv_offload"]["supported_cache_kinds"],
+        serde_json::json!([
+            "full_attention_dense",
+            "full_attention_paged",
+            "turboquant_full_attention_packed",
+            "mla",
+            "gated_delta_linear",
+            "mtp_speculative_side_cache"
+        ]),
+        "{model_name} Active KV health must advertise MTP speculative side-cache support: {before}"
+    );
+
+    let body = serde_json::json!({
+        "model": "paged-prefix-matrix",
+        "messages": [{
+            "role": "user",
+            "content": "Continue with a concise numbered sequence and do not stop before twenty items."
+        }],
+        "max_tokens": 64,
+        "temperature": 0.0,
+        "stream": false
+    });
+    let responses = post_same_body_concurrently(&client, port, body, 3).await;
+    assert_eq!(responses.len(), 3);
+
+    let after = healthz(&client, port).await;
+    assert_active_kv_health(&after);
+    assert!(
+        after["mtp"]["drafted_tokens"].as_u64().unwrap_or_default() > 0,
+        "{model_name} requests must exercise MTP drafting: {after}"
+    );
+    assert!(
+        after["active_kv_offload"]["swap_out_count"]
+            .as_u64()
+            .unwrap_or_default()
+            >= 1,
+        "{model_name} MTP request should swap out: {after}"
+    );
+    assert!(
+        after["active_kv_offload"]["swap_in_count"]
+            .as_u64()
+            .unwrap_or_default()
+            >= 1,
+        "{model_name} MTP request should swap in: {after}"
+    );
+    assert_eq!(
+        after["active_kv_offload"]["parked_requests"].as_u64(),
+        Some(0),
+        "{model_name} MTP Active KV should not leak parked requests: {after}"
+    );
+
+    drop(server);
+    std::fs::remove_dir_all(&cache_dir).expect("cleanup prefix cache dir");
+    std::fs::remove_dir_all(&active_kv_dir).ok();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires QWEN36_DENSE_MODEL, QWEN36_DENSE_MTP_MODEL, and MLX_DIR pointing to real local checkpoints"]
+async fn qwen36_dense_mtp_active_kv_offload_restores_speculative_side_cache() {
+    run_qwen_dense_mtp_active_kv_offload_case(
+        "Qwen3.6",
+        "qwen36-dense",
+        qwen36_dense_model_dir(),
+        qwen36_dense_mtp_model_dir(),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires QWEN38_DENSE_MODEL, QWEN38_DENSE_MTP_MODEL, and MLX_DIR pointing to real local checkpoints"]
+async fn qwen38_dense_mtp_active_kv_offload_restores_speculative_side_cache() {
+    run_qwen_dense_mtp_active_kv_offload_case(
+        "Qwen3.8",
+        "qwen38-dense",
+        qwen38_dense_model_dir(),
+        qwen38_dense_mtp_model_dir(),
     )
     .await;
 }

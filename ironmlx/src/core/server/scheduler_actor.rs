@@ -1537,6 +1537,10 @@ where
 {
     type MidAdmitHandle = SchedulerActorMtpMidAdmitHandle;
 
+    fn can_start_rolling_mid_admit(&self, sched: &Scheduler<M>) -> bool {
+        sched.mtp_stats().is_none() || sched.mtp_at_batch_window_boundary()
+    }
+
     fn mid_admit_request_id(handle: &Self::MidAdmitHandle) -> RequestId {
         match handle {
             SchedulerActorMtpMidAdmitHandle::Generic(handle) => handle.request_id,
@@ -1631,7 +1635,7 @@ where
         sched: &mut Scheduler<M>,
         model: &M,
         counters: &SchedulerActorMtpCounters,
-        _admission_pending: bool,
+        admission_pending: bool,
     ) -> Result<Vec<StepEvent>> {
         let action = self
             .exact_episode
@@ -1649,7 +1653,11 @@ where
         let started = Instant::now();
         let events = if action == NeuralExactAction::Exact && sched.mtp_stats().is_some() {
             counters.mtp_step_count.fetch_add(1, Ordering::Relaxed);
-            let events = sched.step_mtp_batch(model, &self.mtp)?;
+            let events = if admission_pending {
+                sched.step_mtp_batch_without_postfill(model, &self.mtp)?
+            } else {
+                sched.step_mtp_batch(model, &self.mtp)?
+            };
             counters.store_stats(sched.mtp_stats());
             events
         } else {
@@ -3854,6 +3862,7 @@ fn driver_loop<M, A>(
                             adaptive_policy,
                         );
                         if in_flight_mid_admit.is_none()
+                            && can_park_for_rolling_admission(&sched)
                             && can_start_after_park
                             && try_park_one_active_kv_request(
                                 &mut sched,
@@ -4036,6 +4045,7 @@ fn driver_loop<M, A>(
                                 && in_flight_mid_admit.is_none()
                                 && !admission_queue.is_empty()
                                 && sched.active_count() >= b_max
+                                && can_park_for_rolling_admission(&sched)
                             {
                                 let _ = try_park_one_active_kv_request(
                                     &mut sched,
@@ -4924,6 +4934,14 @@ where
     false
 }
 
+fn can_park_for_rolling_admission<M: Model>(sched: &Scheduler<M>) -> bool {
+    // Rolling mid-admit requires at least one active decode row. Parking the
+    // final row cannot make admission progress: the empty-scheduler handoff
+    // restores that same parked row before draining queued work, creating a
+    // park/restore cycle on every decode step.
+    sched.active_count() > 1
+}
+
 fn try_restore_one_active_kv_request<M>(
     sched: &mut Scheduler<M>,
     model: &Arc<Mutex<M>>,
@@ -5399,6 +5417,16 @@ mod tests {
         .expect("test scheduler startup")
     }
 
+    #[test]
+    fn rolling_admission_parking_requires_a_remaining_decode_row() {
+        let mut scheduler = test_scheduler(2, 32);
+        scheduler.admit(mk_req(11)).expect("admit first row");
+        assert!(!can_park_for_rolling_admission(&scheduler));
+
+        scheduler.admit(mk_req(22)).expect("admit second row");
+        assert!(can_park_for_rolling_admission(&scheduler));
+    }
+
     impl SchedulerActorFakeModel {
         fn with_forward_delay(forward_delay: Duration) -> Self {
             Self { forward_delay }
@@ -5510,9 +5538,9 @@ mod tests {
             hidden: &mlx::Array,
             _target: mlx::StreamOrDevice,
         ) -> Result<mlx::Array> {
+            let batch = hidden.shape().as_slice()[0] as usize;
             let seq = hidden.shape().as_slice()[1] as usize;
-            let tokens: Vec<u32> = if seq == 1 { vec![3] } else { vec![4; seq] };
-            fake_logits_for_tokens(&tokens)
+            fake_batched_logits(batch, seq, if seq == 1 { 3 } else { 4 })
         }
 
         fn fresh_prefill_batch_limit(_prompt_len: usize, b_max: usize) -> usize
@@ -5657,12 +5685,15 @@ mod tests {
             _target: impl Into<mlx::StreamOrDevice>,
         ) -> Result<mlx::Array> {
             if let Some(cache) = mtp_cache {
+                let batch = next_token_ids.shape().as_slice()[0];
                 let seq = next_token_ids.shape().as_slice()[1];
-                let k = mlx::Array::zeros((1_i32, 1_i32, seq, 1_i32), mlx::Dtype::Bfloat16)
+                let k = mlx::Array::zeros((batch, 1_i32, seq, 1_i32), mlx::Dtype::Bfloat16)
                     .map_err(|e| anyhow::anyhow!("fake mtp k failed: {e:?}"))?;
-                let v = mlx::Array::zeros((1_i32, 1_i32, seq, 1_i32), mlx::Dtype::Bfloat16)
+                let v = mlx::Array::zeros((batch, 1_i32, seq, 1_i32), mlx::Dtype::Bfloat16)
                     .map_err(|e| anyhow::anyhow!("fake mtp v failed: {e:?}"))?;
-                cache.layer_mut(0).update_and_fetch(&k, &v, &[seq])?;
+                cache
+                    .layer_mut(0)
+                    .update_and_fetch(&k, &v, &vec![seq; batch as usize])?;
             }
             Ok(hidden_states.clone())
         }
@@ -5686,9 +5717,11 @@ mod tests {
                 mtp_cache,
                 target,
             )?;
+            let batch = next_token_ids.shape().as_slice()[0] as usize;
+            let seq = next_token_ids.shape().as_slice()[1] as usize;
             Ok(MtpStepOutput {
                 hidden_states,
-                logits: fake_logits_for_tokens(&[4])?,
+                logits: fake_batched_logits(batch, seq, 4)?,
             })
         }
     }
@@ -5707,15 +5740,15 @@ mod tests {
             .map_err(|e| anyhow::anyhow!("fake logits reshape failed: {e:?}"))
     }
 
-    fn fake_logits_for_tokens(tokens: &[u32]) -> Result<mlx::Array> {
+    fn fake_batched_logits(batch: usize, seq: usize, token: u32) -> Result<mlx::Array> {
         let vocab = 8_usize;
-        let mut flat = vec![0.0_f32; tokens.len() * vocab];
-        for (pos, &token) in tokens.iter().enumerate() {
-            flat[pos * vocab + token as usize] = 100.0;
+        let mut flat = vec![0.0_f32; batch * seq * vocab];
+        for position in 0..batch * seq {
+            flat[position * vocab + token as usize] = 100.0;
         }
-        (&flat[..], &[1_i32, tokens.len() as i32, vocab as i32][..])
+        (&flat[..], &[batch as i32, seq as i32, vocab as i32][..])
             .try_into()
-            .map_err(|e| anyhow::anyhow!("fake logits Array failed: {e:?}"))
+            .map_err(|e| anyhow::anyhow!("fake batched logits Array failed: {e:?}"))
     }
 
     fn mk_req(prompt_token: u32) -> GenerateRequest {
@@ -6003,7 +6036,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn actor_active_kv_offload_parks_and_restores_full_slot_request() {
+    async fn actor_active_kv_offload_does_not_park_only_decode_row_for_admission() {
         let root = unique_temp_dir("actor-active-kv");
         let model = Arc::new(Mutex::new(SchedulerActorFakeModel::with_forward_delay(
             Duration::from_millis(25),
@@ -6072,7 +6105,7 @@ mod tests {
         }
         assert!(
             second_finished,
-            "second request should finish while first is parked"
+            "second request should finish after the first releases the slot"
         );
 
         let mut first_finished = false;
@@ -6085,11 +6118,11 @@ mod tests {
                 break;
             }
         }
-        assert!(first_finished, "first request should restore and finish");
+        assert!(first_finished, "first request should finish normally");
 
         let health = handle.active_kv_offload.snapshot();
-        assert!(health.swap_out_count >= 1, "expected at least one swap out");
-        assert!(health.swap_in_count >= 1, "expected at least one swap in");
+        assert_eq!(health.swap_out_count, 0, "last row must not be swapped out");
+        assert_eq!(health.swap_in_count, 0, "last row must not be swapped in");
         assert_eq!(health.swap_error_count, 0);
         assert_eq!(health.parked_requests, 0);
 
@@ -6098,7 +6131,219 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn actor_restores_parked_request_before_admitting_next_queued_request() {
+    async fn mtp_actor_active_kv_offload_does_not_park_only_speculative_row_for_admission() {
+        let root = unique_temp_dir("actor-active-kv-mtp");
+        let qualification = NeuralExactQualificationRuntimeConfig::for_test(
+            NeuralExactSource::QwenMtp,
+            "fake-qwen-mtp-active-kv",
+            root.join("qualification.json"),
+        );
+        let model = Arc::new(Mutex::new(SchedulerActorFakeModel::with_forward_delay(
+            Duration::from_millis(25),
+        )));
+        let handle = spawn_scheduler_actor_with_mtp_and_active_kv(
+            model,
+            SchedulerActorFakeMtpHead,
+            1,
+            qualification,
+            1,
+            Duration::from_millis(1),
+            4,
+            32,
+            256,
+            crate::core::memory_budget::test_meta_qwen35(),
+            None,
+            None,
+            ActiveKvOffloadConfig::enabled(root.clone()),
+        )
+        .expect("spawn MTP actor with active KV offload");
+
+        let (reply_tx_1, reply_rx_1) = oneshot::channel();
+        let mut request_1 = mk_req(11);
+        request_1.max_new_tokens = 4;
+        handle
+            .cmd_tx
+            .send(SchedulerCommand::Admit {
+                request: request_1,
+                reply_tx: reply_tx_1,
+            })
+            .await
+            .expect("send first MTP request");
+        let mut events_1 = reply_rx_1
+            .await
+            .expect("first reply")
+            .expect("first admit")
+            .event_rx;
+        let first_event = tokio::time::timeout(Duration::from_secs(2), events_1.recv())
+            .await
+            .expect("first MTP event timeout")
+            .expect("first MTP event");
+        assert_eq!(first_event.finish_reason, None);
+
+        let (reply_tx_2, reply_rx_2) = oneshot::channel();
+        let mut request_2 = mk_req(22);
+        request_2.max_new_tokens = 1;
+        handle
+            .cmd_tx
+            .send(SchedulerCommand::Admit {
+                request: request_2,
+                reply_tx: reply_tx_2,
+            })
+            .await
+            .expect("send second request");
+        let mut events_2 = tokio::time::timeout(Duration::from_secs(2), reply_rx_2)
+            .await
+            .expect("second reply timeout")
+            .expect("second reply")
+            .expect("second admit")
+            .event_rx;
+
+        while let Some(event) = tokio::time::timeout(Duration::from_secs(2), events_2.recv())
+            .await
+            .expect("second event timeout")
+        {
+            if event.finish_reason.is_some() {
+                break;
+            }
+        }
+        let mut first_finished = false;
+        while let Some(event) = tokio::time::timeout(Duration::from_secs(2), events_1.recv())
+            .await
+            .expect("restored MTP event timeout")
+        {
+            if event.finish_reason.is_some() {
+                first_finished = true;
+                break;
+            }
+        }
+        assert!(first_finished, "first MTP request should finish normally");
+
+        let health = handle.active_kv_offload.snapshot();
+        assert_eq!(health.swap_out_count, 0, "last MTP row must stay resident");
+        assert_eq!(health.swap_in_count, 0, "last MTP row must stay resident");
+        assert_eq!(health.swap_error_count, 0);
+        assert_eq!(health.parked_requests, 0);
+
+        drop(handle);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mtp_actor_active_kv_offload_parks_when_decode_row_remains() {
+        let root = unique_temp_dir("actor-active-kv-mtp-useful-park");
+        let qualification = NeuralExactQualificationRuntimeConfig::for_test(
+            NeuralExactSource::QwenMtp,
+            "fake-qwen-mtp-active-kv",
+            root.join("qualification.json"),
+        );
+        let model = Arc::new(Mutex::new(SchedulerActorFakeModel::with_forward_delay(
+            Duration::from_millis(25),
+        )));
+        let handle = spawn_scheduler_actor_with_mtp_and_active_kv(
+            model,
+            SchedulerActorFakeMtpHead,
+            1,
+            qualification,
+            2,
+            Duration::from_millis(1),
+            8,
+            2048,
+            256,
+            crate::core::memory_budget::test_meta_qwen35(),
+            None,
+            None,
+            ActiveKvOffloadConfig::enabled(root.clone()),
+        )
+        .expect("spawn MTP actor with active KV offload");
+
+        let (reply_tx_1, reply_rx_1) = oneshot::channel();
+        let mut request_1 = mk_req(11);
+        request_1.max_new_tokens = 1_000;
+        handle
+            .cmd_tx
+            .send(SchedulerCommand::Admit {
+                request: request_1,
+                reply_tx: reply_tx_1,
+            })
+            .await
+            .expect("send first MTP request");
+        let mut events_1 = reply_rx_1
+            .await
+            .expect("first reply")
+            .expect("first admit")
+            .event_rx;
+        let first_event = tokio::time::timeout(Duration::from_secs(2), events_1.recv())
+            .await
+            .expect("first MTP event timeout")
+            .expect("first MTP event");
+        assert_eq!(first_event.finish_reason, None);
+
+        let (reply_tx_2, reply_rx_2) = oneshot::channel();
+        let mut request_2 = mk_req(22);
+        request_2.max_new_tokens = 1_000;
+        handle
+            .cmd_tx
+            .send(SchedulerCommand::Admit {
+                request: request_2,
+                reply_tx: reply_tx_2,
+            })
+            .await
+            .expect("send second MTP request");
+        let mut events_2 = reply_rx_2
+            .await
+            .expect("second reply")
+            .expect("second admit")
+            .event_rx;
+
+        let (reply_tx_3, reply_rx_3) = oneshot::channel();
+        let mut request_3 = mk_req(33);
+        request_3.max_new_tokens = 1;
+        handle
+            .cmd_tx
+            .send(SchedulerCommand::Admit {
+                request: request_3,
+                reply_tx: reply_tx_3,
+            })
+            .await
+            .expect("send third MTP request");
+        let mut events_3 = tokio::time::timeout(Duration::from_secs(2), reply_rx_3)
+            .await
+            .expect("third reply timeout")
+            .expect("third reply")
+            .expect("third admit")
+            .event_rx;
+        let third_event = tokio::time::timeout(Duration::from_secs(2), events_3.recv())
+            .await
+            .expect("third event timeout")
+            .expect("third event");
+        assert_eq!(third_event.finish_reason, Some("length"));
+
+        for (events, label) in [(&mut events_1, "first"), (&mut events_2, "second")] {
+            while let Some(event) = tokio::time::timeout(Duration::from_secs(2), events.recv())
+                .await
+                .unwrap_or_else(|_| panic!("{label} restored event timeout"))
+            {
+                if event.finish_reason.is_some() {
+                    break;
+                }
+            }
+        }
+
+        let health = handle.active_kv_offload.snapshot();
+        assert!(
+            health.swap_out_count >= 1,
+            "expected useful MTP swap out: {health:?}"
+        );
+        assert!(health.swap_in_count >= 1, "expected useful MTP swap in");
+        assert_eq!(health.swap_error_count, 0);
+        assert_eq!(health.parked_requests, 0);
+
+        drop(handle);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn actor_preserves_queue_order_without_parking_only_decode_row() {
         let root = unique_temp_dir("actor-active-kv-fairness");
         let model = Arc::new(Mutex::new(SchedulerActorFakeModel::with_forward_delay(
             Duration::from_millis(25),
@@ -6148,25 +6393,29 @@ mod tests {
             })
             .await
             .expect("send second request");
-        let mut events_2 = tokio::time::timeout(Duration::from_secs(2), reply_rx_2)
+        let mut reply_rx_2 = Box::pin(reply_rx_2);
+        loop {
+            tokio::select! {
+                biased;
+                second = &mut reply_rx_2 => {
+                    let _ = second.expect("second reply channel").expect("second admit");
+                    panic!("second queued request was admitted before the resident first request finished");
+                }
+                event = events_1.recv() => {
+                    let event = event.expect("first request event");
+                    if event.finish_reason.is_some() {
+                        break;
+                    }
+                }
+            }
+        }
+
+        let mut events_2 = tokio::time::timeout(Duration::from_secs(2), &mut reply_rx_2)
             .await
             .expect("second reply timeout")
             .expect("second reply")
             .expect("second admit")
             .event_rx;
-
-        let (reply_tx_3, reply_rx_3) = oneshot::channel();
-        let mut request_3 = mk_req(33);
-        request_3.max_new_tokens = 1;
-        handle
-            .cmd_tx
-            .send(SchedulerCommand::Admit {
-                request: request_3,
-                reply_tx: reply_tx_3,
-            })
-            .await
-            .expect("send third request");
-
         while let Some(event) = tokio::time::timeout(Duration::from_secs(2), events_2.recv())
             .await
             .expect("second event timeout")
@@ -6176,36 +6425,9 @@ mod tests {
             }
         }
 
-        let mut reply_rx_3 = Box::pin(reply_rx_3);
-        loop {
-            tokio::select! {
-                biased;
-                third = &mut reply_rx_3 => {
-                    let _ = third.expect("third reply channel").expect("third admit");
-                    panic!("third queued request was admitted before the parked first request finished");
-                }
-                event = events_1.recv() => {
-                    let event = event.expect("restored first request event");
-                    if event.finish_reason.is_some() {
-                        break;
-                    }
-                }
-            }
-        }
-
-        let mut events_3 = tokio::time::timeout(Duration::from_secs(2), &mut reply_rx_3)
-            .await
-            .expect("third reply timeout")
-            .expect("third reply")
-            .expect("third admit")
-            .event_rx;
-        let third_event = tokio::time::timeout(Duration::from_secs(2), events_3.recv())
-            .await
-            .expect("third event timeout")
-            .expect("third event");
-        assert_eq!(third_event.finish_reason, Some("length"));
-
         let health = handle.active_kv_offload.snapshot();
+        assert_eq!(health.swap_out_count, 0);
+        assert_eq!(health.swap_in_count, 0);
         assert_eq!(health.swap_error_count, 0);
         assert_eq!(health.parked_requests, 0);
 

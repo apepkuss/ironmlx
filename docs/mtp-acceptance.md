@@ -98,6 +98,28 @@ cargo test --release -p ironmlx --test cli_generate_mtp_e2e \
 
 ## Server Real-Checkpoint Smoke Tests
 
+Qwen3.6-27B MTP Active KV swap-out/swap-in coverage:
+
+```sh
+MLX_DIR=$HOME/.local/mlx \
+QWEN36_DENSE_MODEL=/path/to/Qwen3.6-27B-4bit/snapshots/<sha> \
+QWEN36_DENSE_MTP_MODEL=/path/to/Qwen3.6-27B-MTP-4bit/snapshots/<sha> \
+cargo test --release -p ironmlx --test paged_prefix_matrix_e2e \
+  qwen36_dense_mtp_active_kv_offload_restores_speculative_side_cache \
+  -- --ignored --test-threads=1 --nocapture
+```
+
+Qwen3.8-27B MTP Active KV swap-out/swap-in coverage:
+
+```sh
+MLX_DIR=$HOME/.local/mlx \
+QWEN38_DENSE_MODEL=/path/to/Qwen3.8-27B-4bit/snapshots/<sha> \
+QWEN38_DENSE_MTP_MODEL=/path/to/Qwen3.8-27B-MTP-4bit/snapshots/<sha> \
+cargo test --release -p ironmlx --test paged_prefix_matrix_e2e \
+  qwen38_dense_mtp_active_kv_offload_restores_speculative_side_cache \
+  -- --ignored --test-threads=1 --nocapture
+```
+
 ```sh
 MLX_DIR=$HOME/.local/mlx \
 QWEN35_MODEL=/path/to/Qwen3.5-4B-MLX-4bit/snapshots/<sha> \
