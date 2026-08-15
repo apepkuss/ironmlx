@@ -1255,6 +1255,7 @@ fn wrap_with_native_reasoning(
         ),
         NativeOutputDialect::Qwen35
         | NativeOutputDialect::Qwen36
+        | NativeOutputDialect::Qwen38
         | NativeOutputDialect::Glm
         | NativeOutputDialect::MiniCpmV46
         | NativeOutputDialect::MiniCpm5 => concat!(

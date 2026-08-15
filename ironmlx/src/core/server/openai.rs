@@ -118,11 +118,33 @@ pub struct ChatRequest {
     pub top_p: Option<f32>,
     #[serde(default)]
     pub seed: Option<u64>,
+    /// Qwen3.8 native reasoning depth. The model's official template accepts
+    /// exactly `low`, `medium`, and `xhigh`.
+    #[serde(default)]
+    pub reasoning_effort: Option<QwenReasoningEffort>,
     /// HuggingFace `apply_chat_template` extra kwargs — passed through as
     /// top-level template render-context variables. Honors Qwen3+'s
     /// `enable_thinking` toggle, vLLM's `tools` / `documents`, etc.
     #[serde(default)]
     pub chat_template_kwargs: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum QwenReasoningEffort {
+    Low,
+    Medium,
+    Xhigh,
+}
+
+impl QwenReasoningEffort {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::Xhigh => "xhigh",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -145,6 +167,26 @@ pub(crate) struct ChatJsonSchema {
 }
 
 impl ChatRequest {
+    fn resolved_chat_template_kwargs(&self) -> anyhow::Result<Option<serde_json::Value>> {
+        let Some(reasoning_effort) = self.reasoning_effort else {
+            return Ok(self.chat_template_kwargs.clone());
+        };
+        let mut kwargs = match self.chat_template_kwargs.clone() {
+            None => serde_json::Map::new(),
+            Some(serde_json::Value::Object(kwargs)) => kwargs,
+            Some(_) => anyhow::bail!("chat_template_kwargs must be a JSON object"),
+        };
+        let reasoning_effort = serde_json::Value::String(reasoning_effort.as_str().to_owned());
+        if let Some(existing) = kwargs.get("reasoning_effort") {
+            anyhow::ensure!(
+                existing == &reasoning_effort,
+                "reasoning_effort conflicts with chat_template_kwargs.reasoning_effort"
+            );
+        }
+        kwargs.insert("reasoning_effort".to_owned(), reasoning_effort);
+        Ok(Some(serde_json::Value::Object(kwargs)))
+    }
+
     pub(crate) fn validate_sampling(&self) -> anyhow::Result<()> {
         if let Some(temperature) = self.temperature {
             anyhow::ensure!(
@@ -488,7 +530,7 @@ pub(crate) fn prepare_tool_request(
 
     let dialect = dialect.ok_or_else(|| {
         anyhow::anyhow!(
-            "this model chat template does not support API-1 tools; supported native dialects: Qwen3.5/Qwen3.6, Gemma, GLM, Llama, and MiniCPM"
+            "this model chat template does not support API-1 tools; supported native dialects: Qwen3.5/Qwen3.6/Qwen3.8, Gemma, GLM, Llama, and MiniCPM"
         )
     })?;
     if wire_tools.len() > 128 {
@@ -881,7 +923,12 @@ where
     if allows_structured_final_output(prepared_tools.as_ref()) {
         output_format.apply_prompt_instruction(&mut req.messages);
     }
-    let chat_template_kwargs = req.chat_template_kwargs;
+    let chat_template_kwargs = match req.resolved_chat_template_kwargs() {
+        Ok(kwargs) => kwargs,
+        Err(error) => {
+            return bad_request_response("invalid_reasoning_effort", format!("{error:#}"))
+        }
+    };
     let original_messages = prepared_tools.as_ref().map(|_| req.messages.clone());
 
     let (image_token_id, spatial_merge_size) =
@@ -1102,7 +1149,12 @@ pub(crate) async fn chat_completions_with_gemma4_drafter_state(
         Ok(cfg) => cfg,
         Err(e) => return bad_request_response("invalid_sampling_parameters", format!("{e:#}")),
     };
-    let chat_template_kwargs = req.chat_template_kwargs;
+    let chat_template_kwargs = match req.resolved_chat_template_kwargs() {
+        Ok(kwargs) => kwargs,
+        Err(error) => {
+            return bad_request_response("invalid_reasoning_effort", format!("{error:#}"))
+        }
+    };
 
     let (image_token_id, spatial_merge_size) =
         crate::core::server::vision::derive_image_token_and_merge(
@@ -2899,6 +2951,44 @@ mod tests {
             "response_format": {"type": "text", "extra": true}
         }));
         assert!(text.is_err());
+    }
+
+    #[test]
+    fn qwen38_reasoning_effort_merges_into_template_kwargs() {
+        let request: ChatRequest = serde_json::from_value(serde_json::json!({
+            "messages": [{"role": "user", "content": "Solve it"}],
+            "reasoning_effort": "medium",
+            "chat_template_kwargs": {"preserve_thinking": false}
+        }))
+        .unwrap();
+        assert_eq!(
+            request.resolved_chat_template_kwargs().unwrap(),
+            Some(serde_json::json!({
+                "preserve_thinking": false,
+                "reasoning_effort": "medium"
+            }))
+        );
+
+        let unsupported = serde_json::from_value::<ChatRequest>(serde_json::json!({
+            "messages": [{"role": "user", "content": "Solve it"}],
+            "reasoning_effort": "high"
+        }));
+        assert!(unsupported.is_err());
+    }
+
+    #[test]
+    fn qwen38_reasoning_effort_rejects_conflicting_template_kwarg() {
+        let request: ChatRequest = serde_json::from_value(serde_json::json!({
+            "messages": [{"role": "user", "content": "Solve it"}],
+            "reasoning_effort": "low",
+            "chat_template_kwargs": {"reasoning_effort": "xhigh"}
+        }))
+        .unwrap();
+        assert!(request
+            .resolved_chat_template_kwargs()
+            .unwrap_err()
+            .to_string()
+            .contains("conflicts"));
     }
 
     #[test]

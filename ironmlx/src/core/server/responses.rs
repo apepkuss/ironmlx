@@ -451,9 +451,26 @@ impl NormalizedRequest {
 impl ReasoningRequest {
     fn template_kwargs(&self) -> Option<serde_json::Value> {
         self.effort.map(|effort| {
-            serde_json::json!({
-                "enable_thinking": effort.enables_native_reasoning()
-            })
+            let mut kwargs = serde_json::Map::new();
+            kwargs.insert(
+                "enable_thinking".to_owned(),
+                serde_json::Value::Bool(effort.enables_native_reasoning()),
+            );
+            let model_effort = match effort {
+                ReasoningEffort::None => None,
+                ReasoningEffort::Minimal | ReasoningEffort::Low => Some("low"),
+                ReasoningEffort::Medium => Some("medium"),
+                ReasoningEffort::High | ReasoningEffort::Xhigh | ReasoningEffort::Max => {
+                    Some("xhigh")
+                }
+            };
+            if let Some(model_effort) = model_effort {
+                kwargs.insert(
+                    "reasoning_effort".to_owned(),
+                    serde_json::Value::String(model_effort.to_owned()),
+                );
+            }
+            serde_json::Value::Object(kwargs)
         })
     }
 
@@ -1191,6 +1208,7 @@ impl ResponsesRequest {
                 temperature: self.temperature,
                 top_p: self.top_p,
                 seed: None,
+                reasoning_effort: None,
                 chat_template_kwargs: reasoning.template_kwargs(),
             },
         })
@@ -1341,10 +1359,11 @@ where
             state.force_scheduler_for_greedy && sampler.is_pipelinable(),
         );
     let output_schema = text_format.constraint_schema();
-    let constraint = match openai::compile_output_constraint(
+    let constraint = match openai::compile_output_constraint_with_native(
         &state.tokenizer,
         prepared_tools.as_ref(),
         output_schema.as_ref(),
+        native_output,
     ) {
         Ok(value) => value,
         Err(error) => {
@@ -3234,7 +3253,10 @@ mod tests {
         .expect("reasoning request normalizes");
         assert_eq!(
             normalized.chat.chat_template_kwargs,
-            Some(serde_json::json!({"enable_thinking":true}))
+            Some(serde_json::json!({
+                "enable_thinking": true,
+                "reasoning_effort": "xhigh"
+            }))
         );
         assert_eq!(
             normalized.chat.messages[0].reasoning_content.as_deref(),
@@ -3245,6 +3267,95 @@ mod tests {
             normalized.reasoning.summary,
             Some(ReasoningSummaryMode::None)
         );
+    }
+
+    #[test]
+    fn reasoning_efforts_map_to_qwen38_native_levels() {
+        for (effort, expected) in [
+            (ReasoningEffort::Minimal, "low"),
+            (ReasoningEffort::Low, "low"),
+            (ReasoningEffort::Medium, "medium"),
+            (ReasoningEffort::High, "xhigh"),
+            (ReasoningEffort::Xhigh, "xhigh"),
+            (ReasoningEffort::Max, "xhigh"),
+        ] {
+            let kwargs = ReasoningRequest {
+                effort: Some(effort),
+                summary: None,
+            }
+            .template_kwargs()
+            .unwrap();
+            assert_eq!(kwargs["enable_thinking"], true);
+            assert_eq!(kwargs["reasoning_effort"], expected);
+        }
+
+        let disabled = ReasoningRequest {
+            effort: Some(ReasoningEffort::None),
+            summary: None,
+        }
+        .template_kwargs()
+        .unwrap();
+        assert_eq!(disabled, serde_json::json!({"enable_thinking": false}));
+    }
+
+    #[test]
+    fn qwen38_responses_structured_constraint_preserves_native_reasoning() {
+        let Some(home) = dirs::home_dir() else {
+            eprintln!("home directory absent — skipping Qwen3.8 constraint test");
+            return;
+        };
+        let snapshots =
+            home.join(".ironmlx/models/models--mlx-community--Qwen3.8-27B-4bit/snapshots");
+        let Some(model_dir) = std::fs::read_dir(snapshots)
+            .ok()
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| path.join("chat_template.jinja").is_file())
+        else {
+            eprintln!("Qwen3.8 metadata absent — skipping constraint test");
+            return;
+        };
+        let tokenizer = crate::core::Tokenizer::from_model_dir(&model_dir).expect("tokenizer");
+        let normalized = request(serde_json::json!({
+            "model":"local",
+            "input":"Return Tokyo weather",
+            "reasoning":{"effort":"low","summary":"none"},
+            "text":{"format":{
+                "type":"json_schema",
+                "name":"weather",
+                "schema":{
+                    "type":"object",
+                    "properties":{"city":{"type":"string"}},
+                    "required":["city"],
+                    "additionalProperties":false
+                },
+                "strict":true
+            }}
+        }))
+        .normalize()
+        .expect("normalize Responses request");
+        let native_output = normalized
+            .native_output_config(&tokenizer)
+            .expect("native output config");
+        let output_schema = normalized.output_schema();
+        let constraint = openai::compile_output_constraint_with_native(
+            &tokenizer,
+            None,
+            output_schema.as_ref(),
+            native_output,
+        )
+        .expect("compile reasoning-aware Responses constraint")
+        .expect("structured output constraint");
+        let output = tokenizer
+            .encode("inspect freely</think>\n\n{\"city\":\"Tokyo\"}", false)
+            .expect("encode native reasoning plus JSON");
+        let mut session = constraint.start_session().expect("constraint session");
+        session
+            .commit_tokens(&output)
+            .expect("accept native reasoning plus structured output");
+        assert!(session.is_accepting().expect("accepting state"));
     }
 
     #[test]

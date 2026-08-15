@@ -109,15 +109,19 @@ impl Default for RopeParams {
 }
 
 impl Qwen35Config {
+    fn text_config_from_raw(raw: &serde_json::Value) -> Result<Self> {
+        let text_config = raw
+            .get("text_config")
+            .ok_or_else(|| anyhow!("config.json missing text_config field"))?;
+        serde_json::from_value(text_config.clone())
+            .context("failed to deserialize Qwen35Config from text_config")
+    }
+
     /// Parse from a [`Loader`]'s `config.json`. Reads `config["text_config"]`.
     /// For multimodal models, also reads top-level `config["vision_config"]`.
     pub fn from_loader(loader: &Loader) -> Result<Self> {
         let raw = loader.config_raw_value();
-        let text_config = raw
-            .get("text_config")
-            .ok_or_else(|| anyhow!("config.json missing text_config field"))?;
-        let mut cfg: Qwen35Config = serde_json::from_value(text_config.clone())
-            .context("failed to deserialize Qwen35Config from text_config")?;
+        let mut cfg = Self::text_config_from_raw(raw)?;
         // 顶层也可能有 vision_config（multimodal model）
         if let Some(vc) = raw.get("vision_config") {
             cfg.vision_config = Some(
@@ -125,6 +129,12 @@ impl Qwen35Config {
             );
         }
         Ok(cfg)
+    }
+
+    /// Parse the text-only contract used by a Qwen MTP head. MTP checkpoints
+    /// do not carry a vision tower, so top-level vision metadata is irrelevant.
+    pub fn from_mtp_loader(loader: &Loader) -> Result<Self> {
+        Self::text_config_from_raw(loader.config_raw_value())
     }
 
     /// Effective per-head dim: `head_dim` if specified, else `hidden_size / num_attention_heads`.
@@ -339,5 +349,20 @@ mod tests {
         assert_eq!(mtp_cfg.layer.num_heads, cfg.num_attention_heads);
         assert_eq!(mtp_cfg.layer.num_kv_heads, cfg.num_key_value_heads);
         assert_eq!(mtp_cfg.layer.head_dim, cfg.effective_head_dim());
+    }
+
+    #[test]
+    fn mtp_text_config_ignores_empty_top_level_vision_metadata() {
+        let raw = serde_json::json!({
+            "model_type": "qwen3_5_mtp",
+            "text_config": realistic_text_config_json(),
+            "vision_config": {}
+        });
+
+        let cfg = Qwen35Config::text_config_from_raw(&raw).expect("parse MTP text config");
+
+        assert!(cfg.vision_config.is_none());
+        assert_eq!(cfg.hidden_size, 2560);
+        assert_eq!(cfg.vocab_size, 248064);
     }
 }

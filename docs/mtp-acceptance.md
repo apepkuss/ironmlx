@@ -1,8 +1,13 @@
 # MTP Acceptance Checklist
 
-This checklist covers usage-layer validation for Qwen3.5/Qwen3.6 MTP support.
+This checklist covers usage-layer validation for Qwen3.5/Qwen3.6/Qwen3.8 MTP support.
 Real-checkpoint tests are ignored by default because they require local model
 snapshots and an MLX runtime.
+
+MTP capability acceptance requires output-equivalent greedy generation plus
+non-zero draft activity. It does not imply a speedup for every checkpoint,
+prompt, context length, or draft depth; performance claims require a balanced
+fixed-condition comparison against the same base model without MTP.
 
 ## Environment Variables
 
@@ -13,6 +18,8 @@ snapshots and an MLX runtime.
 | `QWEN35_MTP_MODEL` | `mlx-community/Qwen3.5-4B-MTP-4bit` snapshot. |
 | `QWEN36_DENSE_MODEL` | `mlx-community/Qwen3.6-27B-4bit` snapshot. |
 | `QWEN36_DENSE_MTP_MODEL` | `mlx-community/Qwen3.6-27B-MTP-4bit` snapshot. |
+| `QWEN38_DENSE_MODEL` | `mlx-community/Qwen3.8-27B-4bit` snapshot. |
+| `QWEN38_DENSE_MTP_MODEL` | `mlx-community/Qwen3.8-27B-MTP-4bit` snapshot. |
 | `QWEN36_MOE_MODEL` | `mlx-community/Qwen3.6-35B-A3B-4bit` snapshot. |
 | `QWEN36_MOE_MTP_MODEL` | `mlx-community/Qwen3.6-35B-A3B-MTP-4bit` snapshot. |
 
@@ -48,6 +55,15 @@ QWEN36_DENSE_MODEL=/path/to/Qwen3.6-27B-4bit/snapshots/<sha> \
 QWEN36_DENSE_MTP_MODEL=/path/to/Qwen3.6-27B-MTP-4bit/snapshots/<sha> \
 cargo test --release -p ironmlx --test cli_generate_mtp_e2e \
   qwen36_dense_text_generate_with_mtp_accepts_request \
+  -- --ignored --test-threads=1 --nocapture
+```
+
+```sh
+MLX_DIR=$HOME/.local/mlx \
+QWEN38_DENSE_MODEL=/path/to/Qwen3.8-27B-4bit/snapshots/<sha> \
+QWEN38_DENSE_MTP_MODEL=/path/to/Qwen3.8-27B-MTP-4bit/snapshots/<sha> \
+cargo test --release -p ironmlx --test cli_generate_mtp_e2e \
+  qwen38_dense_text_generate_with_mtp_accepts_request \
   -- --ignored --test-threads=1 --nocapture
 ```
 

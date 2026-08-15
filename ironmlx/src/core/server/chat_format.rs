@@ -4,7 +4,6 @@ use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 
 use crate::core::tokenizer::Tokenizer;
-use crate::core::Message;
 use crate::Result;
 
 // ---------------------------------------------------------------------------
@@ -162,7 +161,7 @@ pub fn render_and_encode(
             "tokenizer has no chat_template — cannot serve /v1/chat/completions or /v1/messages"
         ));
     }
-    let internal: Vec<Message> = messages
+    let template_messages: Vec<ChatMessage> = messages
         .iter()
         .map(|m| {
             let text = match &m.content {
@@ -174,14 +173,13 @@ pub fn render_and_encode(
                         .to_flat_string(&mut std::collections::VecDeque::new())
                 }
             };
-            Message {
-                role: m.role.clone(),
-                content: text,
-            }
+            let mut message = m.clone();
+            message.content = Content::Text(text);
+            message
         })
         .collect();
     let prompt = tokenizer.apply_chat_template(
-        &internal,
+        &template_messages,
         /* add_generation_prompt = */ true,
         chat_template_kwargs,
     )?;
@@ -210,12 +208,22 @@ mod tests {
             Content::Text(t) => t.clone(),
             Content::Parts(_) => panic!("expected Text"),
         };
-        let im = Message {
-            role: cm.role.clone(),
-            content: flat,
+        assert_eq!(cm.role, "assistant");
+        assert_eq!(flat, "ok");
+    }
+
+    #[test]
+    fn chat_message_serialization_preserves_reasoning_history_for_templates() {
+        let message = ChatMessage {
+            role: "assistant".to_owned(),
+            content: Content::Text("final answer".to_owned()),
+            reasoning_content: Some("inspect inputs".to_owned()),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
         };
-        assert_eq!(im.role, "assistant");
-        assert_eq!(im.content, "ok");
+        let serialized = serde_json::to_value(&message).unwrap();
+        assert_eq!(serialized["content"], "final answer");
+        assert_eq!(serialized["reasoning_content"], "inspect inputs");
     }
 
     #[test]

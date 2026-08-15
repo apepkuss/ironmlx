@@ -5,8 +5,8 @@ use crate::Result;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelArchitecture {
-    /// Qwen3.5 dense execution graph. This also covers Qwen3.6 dense
-    /// checkpoints that declare `model_type = "qwen3_5"`.
+    /// Qwen3.5 dense execution graph. This also covers Qwen3.6 and Qwen3.8
+    /// dense checkpoints that declare `model_type = "qwen3_5"`.
     Qwen35Dense,
     /// Qwen3.5 MoE execution graph. This also covers Qwen3.6 MoE checkpoints
     /// that declare `model_type = "qwen3_5_moe"`.

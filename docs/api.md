@@ -161,10 +161,10 @@ Responses `reasoning` item；流式响应使用 `response.reasoning_text.delta` 
 }
 ```
 
-当前本地模板只提供 reasoning 开关，不提供可校准的分级预算，因此
-`minimal`、`low`、`medium`、`high`、`xhigh` 和 `max` 都表示启用模型原生
-reasoning；`none` 表示关闭。具体推理长度由 checkpoint 决定。未显式指定 effort
-时使用模型模板默认值。
+Qwen3.8 原生模板支持三档 reasoning effort：Responses 的 `minimal`/`low` 映射为
+`low`，`medium` 映射为 `medium`，`high`/`xhigh`/`max` 映射为 `xhigh`；`none`
+表示关闭。未实现分档模板的其他模型只把非 `none` effort 作为原生 reasoning 开关。
+具体推理长度仍由 checkpoint 决定；未显式指定 effort 时使用模型模板默认值。
 
 无状态历史回灌接受 `reasoning` item 中的明文 `reasoning_text`，并将它传给下一轮
 原生模板。IronMLX 不生成 OpenAI 托管的 `encrypted_content`；只有 encrypted
@@ -314,6 +314,12 @@ Chat Completions 对顶层请求、message、content part、`image_url` payload 
 （有限数且位于 `(0, 1]`）。`top_k` 与 `repetition_penalty` 不属于公开的 Chat
 Completions 字段。
 
+Qwen3.8 原生模板额外支持顶层 `reasoning_effort`，有效值为 `low`、`medium`、
+`xhigh`（默认）。`chat_template_kwargs.enable_thinking=false` 可关闭思考，
+`chat_template_kwargs.preserve_thinking=false` 可不保留旧 assistant 消息中的
+`reasoning_content`。需要独立 reasoning 输出 item/block 时，应使用 Responses 或
+Anthropic Messages。
+
 ### Structured Outputs
 
 Chat Completions 通过标准 `response_format` 支持 JSON mode 和受 Schema 约束的
@@ -356,7 +362,7 @@ MTP/辅助 drafter 和 DiffusionGemma。若因 token 上限以 `finish_reason:"l
 
 ### Function tools
 
-具有受支持原生工具模板的 Qwen 3.5/3.6、Gemma 4、DiffusionGemma、GLM、
+具有受支持原生工具模板的 Qwen 3.5/3.6/3.8、Gemma 4、DiffusionGemma、GLM、
 Llama 和 MiniCPM 模型，可通过 Chat Completions 的 `tools` 字段请求客户端
 函数调用。具体模型与模板要求见[支持模型矩阵](supported-models.md)：
 
@@ -398,7 +404,7 @@ Chat tools 当前边界：
   必须列入 `required`。不支持的 schema 关键字会在生成前返回 400。
 - 不支持旧 `functions` / `function_call` 字段；Responses 客户端应使用上文独立的
   `/v1/responses` typed-item 协议。
-- 当前支持经过精确模板契约检测的 Qwen 3.5/3.6、Gemma 4/Gemma 4 Unified、
+- 当前支持经过精确模板契约检测的 Qwen 3.5/3.6/3.8、Gemma 4/Gemma 4 Unified、
   DiffusionGemma、GLM-4 MoE Lite、Llama 3.1/3.2、MiniCPM-V 4.6 和 MiniCPM5
   原生工具 dialect；其他模板收到 `tools` 时会在生成前返回 400。
 - 工具结果必须引用此前尚未完成的 assistant tool call；孤立、重复或缺失 ID
@@ -481,11 +487,11 @@ DiffusionGemma。客户端 tools 可与两者组合；工具调用使用自己�
 
 支持 `disabled`、`enabled` 和 `adaptive`。手动模式要求 `budget_tokens >= 1024` 且
 小于 `max_tokens`；adaptive 模式可通过 `output_config.effort` 接收 `low`、
-`medium`、`high`、`xhigh` 或 `max`。本地 checkpoint 只提供
-`enable_thinking` 布尔模板开关，没有 Claude 服务端的分级预算控制器，因此
-`budget_tokens` 与 `effort` 会被严格校验并决定是否启用原生 thinking，但不会被
-描述为已经校准的 token 预算或质量档位。总生成硬上限仍为 `max_tokens`，具体
-thinking 长度由 checkpoint 决定。
+`medium`、`high`、`xhigh` 或 `max`。Qwen3.8 将其映射到原生 `low`、`medium`、
+`xhigh` 三档；其他当前本地模板只使用 `enable_thinking` 布尔开关。两者都没有
+Claude 服务端的分级预算控制器，因此 `budget_tokens` 与 `effort` 会被严格校验并
+控制原生模板，但不会被描述为已经校准的 token 预算或质量档位。总生成硬上限仍为
+`max_tokens`，具体 thinking 长度由 checkpoint 决定。
 
 同步响应将原生 reasoning 放入位于 `text`/`tool_use` 之前的 `thinking` content
 block；流式响应依次发出 `thinking_delta`、`signature_delta` 和
