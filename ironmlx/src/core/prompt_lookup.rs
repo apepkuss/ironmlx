@@ -2127,7 +2127,7 @@ pub(crate) struct SharedPromptLookupPublishResult {
     pub evicted_entries: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SharedPromptLookupMtpCertification {
     pub continuation: usize,
     pub draft_len: usize,
@@ -2290,7 +2290,7 @@ impl SharedPromptLookupPool {
                 })
                 .flatten();
             let mtp_policy_snapshot =
-                certification.map(|certification| certification.policy_snapshot);
+                certification.map(|certification| certification.policy_snapshot.clone());
             for n in self.config.min_ngram..=self.config.max_ngram {
                 if continuation < n || continuation - n < window_start {
                     continue;
@@ -2304,7 +2304,7 @@ impl SharedPromptLookupPool {
                         draft: history[continuation..draft_end].into(),
                         mtp_certified_draft_len,
                         mtp_certified_history,
-                        mtp_policy_snapshot,
+                        mtp_policy_snapshot: mtp_policy_snapshot.clone(),
                         now_ms,
                     },
                 );
@@ -2387,7 +2387,7 @@ impl SharedPromptLookupPool {
                 .filter(|fingerprint| *fingerprint == history_fingerprint)
                 .map_or(0, |_| candidate.mtp_certified_draft_len.min(draft.len()));
             let mtp_policy_snapshot = (mtp_certified_draft_len > 0)
-                .then_some(candidate.mtp_policy_snapshot)
+                .then_some(candidate.mtp_policy_snapshot.clone())
                 .flatten();
             let mtp_certified_bonus_token = (mtp_certified_draft_len > 0)
                 .then(|| draft.get(mtp_certified_draft_len).copied())
@@ -3055,7 +3055,7 @@ mod tests {
             &[SharedPromptLookupMtpCertification {
                 continuation: 3,
                 draft_len: 2,
-                policy_snapshot,
+                policy_snapshot: policy_snapshot.clone(),
             }],
         );
 

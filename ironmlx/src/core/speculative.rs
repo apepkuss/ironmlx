@@ -1333,6 +1333,11 @@ pub(crate) struct MtpDraftResult {
 pub(crate) struct MtpDraftPolicyWindow {
     pub attempted_draft_tokens: usize,
     pub accepted_draft_tokens: usize,
+    pub committed_tokens: usize,
+    pub total_us: u64,
+    pub context_tokens: usize,
+    pub batch_width: usize,
+    pub kv_state: MtpDraftPolicyKvState,
     pub draft_forward_us: u64,
     pub verify_forward_us: u64,
     pub projection_us: u64,
@@ -1345,15 +1350,53 @@ pub(crate) struct MtpDraftPolicyWindow {
     pub mtp_cache_restore_us: u64,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub(crate) enum MtpDraftPolicyKvState {
+    #[default]
+    Contiguous,
+    Paged,
+    PagedActiveKv,
+}
+
+impl MtpDraftPolicyKvState {
+    pub(crate) fn from_runtime(paged: bool, active_kv: bool) -> Self {
+        if active_kv {
+            Self::PagedActiveKv
+        } else if paged {
+            Self::Paged
+        } else {
+            Self::Contiguous
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct MtpDraftPolicyRegime {
+    context_bucket: MtpDraftCapContextBucket,
+    batch_width: usize,
+    kv_state: MtpDraftPolicyKvState,
+}
+
 impl MtpDraftPolicyWindow {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_stats_delta(
         attempted_draft_tokens: usize,
         accepted_draft_tokens: usize,
+        committed_tokens: usize,
+        total_us: u64,
+        context_tokens: usize,
+        batch_width: usize,
+        kv_state: MtpDraftPolicyKvState,
         delta: &MtpSpeculativeStats,
     ) -> Self {
         Self {
             attempted_draft_tokens,
             accepted_draft_tokens,
+            committed_tokens,
+            total_us,
+            context_tokens,
+            batch_width,
+            kv_state,
             draft_forward_us: delta.draft_forward_us,
             verify_forward_us: delta.verify_forward_us,
             projection_us: delta.projection_us,
@@ -1367,14 +1410,28 @@ impl MtpDraftPolicyWindow {
         }
     }
 
-    fn non_verify_overhead_us(self) -> u64 {
+    fn measured_components_us(self) -> u64 {
         self.draft_forward_us
+            .saturating_add(self.verify_forward_us)
             .saturating_add(self.projection_us)
             .saturating_add(self.sampling_us)
             .saturating_add(self.verify_accept_host_sync_us)
             .saturating_add(self.main_rollback_us)
             .saturating_add(self.mtp_decode_cache_commit_us)
             .saturating_add(self.mtp_cache_restore_us)
+    }
+
+    fn cost_per_committed_token_us(self) -> f64 {
+        self.total_us.max(self.measured_components_us()) as f64
+            / self.committed_tokens.max(1) as f64
+    }
+
+    fn regime(self) -> MtpDraftPolicyRegime {
+        MtpDraftPolicyRegime {
+            context_bucket: MtpDraftCapContextBucket::for_tokens(self.context_tokens),
+            batch_width: self.batch_width.max(1),
+            kv_state: self.kv_state,
+        }
     }
 
     fn acceptance_rate(self) -> f64 {
@@ -1384,10 +1441,6 @@ impl MtpDraftPolicyWindow {
             self.accepted_draft_tokens.min(self.attempted_draft_tokens) as f64
                 / self.attempted_draft_tokens as f64
         }
-    }
-
-    fn overhead_ratio(self) -> f64 {
-        self.non_verify_overhead_us() as f64 / self.verify_forward_us.max(1) as f64
     }
 }
 
@@ -1402,27 +1455,56 @@ pub(crate) struct MtpDraftPolicyState {
     max_draft_tokens: usize,
     current_budget: usize,
     acceptance_ewma: Option<f64>,
-    overhead_ratio_ewma: Option<f64>,
+    active_regime: Option<MtpDraftPolicyRegime>,
+    cost_estimates: Vec<MtpDraftCostEstimate>,
+    probe_budget: Option<usize>,
+    probe_origin_budget: Option<usize>,
+    probe_windows_remaining: usize,
     cooldown_windows: usize,
+    next_probe_cooldown_windows: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MtpDraftPolicySnapshot {
     max_draft_tokens: usize,
     current_budget: usize,
     acceptance_ewma_bits: Option<u64>,
-    overhead_ratio_ewma_bits: Option<u64>,
+    active_regime: Option<MtpDraftPolicyRegime>,
+    cost_estimates: Vec<MtpDraftCostEstimateSnapshot>,
+    probe_budget: Option<usize>,
+    probe_origin_budget: Option<usize>,
+    probe_windows_remaining: usize,
     cooldown_windows: usize,
+    next_probe_cooldown_windows: usize,
+}
+
+#[derive(Debug, Clone)]
+struct MtpDraftCostEstimate {
+    regime: MtpDraftPolicyRegime,
+    draft_tokens: usize,
+    cost_ewma: f64,
+    acceptance_ewma: f64,
+    samples: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MtpDraftCostEstimateSnapshot {
+    regime: MtpDraftPolicyRegime,
+    draft_tokens: usize,
+    cost_ewma_bits: u64,
+    acceptance_ewma_bits: u64,
+    samples: usize,
 }
 
 impl MtpDraftPolicyState {
     const EWMA_ALPHA: f64 = 0.35;
-    const HIGH_OVERHEAD_RATIO: f64 = 1.50;
-    const VERY_HIGH_OVERHEAD_RATIO: f64 = 3.00;
     const LOW_ACCEPTANCE: f64 = 0.50;
     const HIGH_ACCEPTANCE: f64 = 0.85;
-    const MIN_POSITION_ATTEMPTS: usize = 4;
-    const LOW_POSITION_ACCEPTANCE: f64 = 0.45;
+    const MIN_COST_SAMPLES: usize = 2;
+    const PROBE_WINDOWS: usize = 2;
+    const INITIAL_PROBE_COOLDOWN_WINDOWS: usize = 8;
+    const MAX_PROBE_COOLDOWN_WINDOWS: usize = 64;
+    const COST_IMPROVEMENT_RATIO: f64 = 0.95;
 
     pub(crate) fn new(max_draft_tokens: usize) -> Self {
         let max_draft_tokens = max_draft_tokens.max(1);
@@ -1430,8 +1512,14 @@ impl MtpDraftPolicyState {
             max_draft_tokens,
             current_budget: max_draft_tokens,
             acceptance_ewma: None,
-            overhead_ratio_ewma: None,
+            active_regime: None,
+            cost_estimates: Vec::new(),
+            probe_budget: None,
+            probe_origin_budget: None,
+            probe_windows_remaining: 0,
             cooldown_windows: 0,
+            next_probe_cooldown_windows: (Self::INITIAL_PROBE_COOLDOWN_WINDOWS * 2)
+                .min(Self::MAX_PROBE_COOLDOWN_WINDOWS),
         }
     }
 
@@ -1444,8 +1532,23 @@ impl MtpDraftPolicyState {
             max_draft_tokens: self.max_draft_tokens,
             current_budget: self.current_budget,
             acceptance_ewma_bits: self.acceptance_ewma.map(f64::to_bits),
-            overhead_ratio_ewma_bits: self.overhead_ratio_ewma.map(f64::to_bits),
+            active_regime: self.active_regime,
+            cost_estimates: self
+                .cost_estimates
+                .iter()
+                .map(|estimate| MtpDraftCostEstimateSnapshot {
+                    regime: estimate.regime,
+                    draft_tokens: estimate.draft_tokens,
+                    cost_ewma_bits: estimate.cost_ewma.to_bits(),
+                    acceptance_ewma_bits: estimate.acceptance_ewma.to_bits(),
+                    samples: estimate.samples,
+                })
+                .collect(),
+            probe_budget: self.probe_budget,
+            probe_origin_budget: self.probe_origin_budget,
+            probe_windows_remaining: self.probe_windows_remaining,
             cooldown_windows: self.cooldown_windows,
+            next_probe_cooldown_windows: self.next_probe_cooldown_windows,
         }
     }
 
@@ -1464,77 +1567,244 @@ impl MtpDraftPolicyState {
         );
         self.current_budget = snapshot.current_budget;
         self.acceptance_ewma = snapshot.acceptance_ewma_bits.map(f64::from_bits);
-        self.overhead_ratio_ewma = snapshot.overhead_ratio_ewma_bits.map(f64::from_bits);
+        self.active_regime = snapshot.active_regime;
+        self.cost_estimates = snapshot
+            .cost_estimates
+            .into_iter()
+            .map(|estimate| MtpDraftCostEstimate {
+                regime: estimate.regime,
+                draft_tokens: estimate.draft_tokens,
+                cost_ewma: f64::from_bits(estimate.cost_ewma_bits),
+                acceptance_ewma: f64::from_bits(estimate.acceptance_ewma_bits),
+                samples: estimate.samples,
+            })
+            .collect();
+        self.probe_budget = snapshot.probe_budget;
+        self.probe_origin_budget = snapshot.probe_origin_budget;
+        self.probe_windows_remaining = snapshot.probe_windows_remaining;
         self.cooldown_windows = snapshot.cooldown_windows;
+        self.next_probe_cooldown_windows = snapshot.next_probe_cooldown_windows;
         Ok(())
     }
 
-    pub(crate) fn observe_window(
-        &mut self,
-        window: MtpDraftPolicyWindow,
-        cumulative_stats: &MtpSpeculativeStats,
-    ) -> MtpDraftBudgetChange {
-        let old = self.current_budget();
+    pub(crate) fn observe_window(&mut self, window: MtpDraftPolicyWindow) -> MtpDraftBudgetChange {
+        let previous = self.current_budget();
         if self.max_draft_tokens <= 1 || window.attempted_draft_tokens == 0 {
             self.current_budget = self.max_draft_tokens.max(1);
-            return budget_change(old, self.current_budget);
+            return budget_change(previous, self.current_budget);
         }
 
+        let regime = window.regime();
+        if self.active_regime != Some(regime) {
+            self.active_regime = Some(regime);
+            self.acceptance_ewma = None;
+            self.cost_estimates.clear();
+            self.probe_budget = None;
+            self.probe_origin_budget = None;
+            self.probe_windows_remaining = 0;
+            self.cooldown_windows = 0;
+            self.next_probe_cooldown_windows =
+                (Self::INITIAL_PROBE_COOLDOWN_WINDOWS * 2).min(Self::MAX_PROBE_COOLDOWN_WINDOWS);
+        }
+        let old = self.current_budget();
+
         let acceptance = window.acceptance_rate();
-        let overhead_ratio = window.overhead_ratio();
         self.acceptance_ewma = Some(update_ewma(
             self.acceptance_ewma,
             acceptance,
             Self::EWMA_ALPHA,
         ));
-        self.overhead_ratio_ewma = Some(update_ewma(
-            self.overhead_ratio_ewma,
-            overhead_ratio,
-            Self::EWMA_ALPHA,
-        ));
+        self.record_cost(
+            regime,
+            window.attempted_draft_tokens,
+            window.cost_per_committed_token_us(),
+            acceptance,
+        );
+        if window.attempted_draft_tokens != old {
+            return MtpDraftBudgetChange::default();
+        }
 
-        let mut next = if self.cooldown_windows > 0 {
-            self.cooldown_windows -= 1;
-            if window.accepted_draft_tokens == window.attempted_draft_tokens
-                && overhead_ratio <= Self::HIGH_OVERHEAD_RATIO
-            {
-                old.saturating_add(1)
+        let mut next = old;
+        let full_accept = window.accepted_draft_tokens == window.attempted_draft_tokens;
+        if !full_accept {
+            let rejected_probe = self.probe_budget == Some(old);
+            next = window.accepted_draft_tokens.saturating_add(1).min(old);
+            self.probe_budget = None;
+            self.probe_origin_budget = None;
+            self.probe_windows_remaining = 0;
+            if rejected_probe {
+                self.back_off_next_probe();
             } else {
-                1
+                self.arm_initial_probe_cooldown();
             }
-        } else if window.accepted_draft_tokens == window.attempted_draft_tokens {
-            if overhead_ratio > Self::HIGH_OVERHEAD_RATIO {
-                old
-            } else {
-                old.saturating_add(1)
+        } else if self.probe_budget == Some(old) {
+            self.probe_windows_remaining = self.probe_windows_remaining.saturating_sub(1);
+            if self.probe_windows_remaining == 0 {
+                self.probe_budget = None;
+                let origin = self.probe_origin_budget.take();
+                next = origin.map_or(old, |origin| {
+                    self.preferred_probe_budget(regime, origin, old)
+                });
+                if origin.is_some_and(|origin| next == origin) {
+                    self.back_off_next_probe();
+                } else {
+                    self.arm_initial_probe_cooldown();
+                }
             }
         } else {
-            window.accepted_draft_tokens.saturating_add(1)
-        };
+            next = self.best_measured_budget(regime, old);
+            if next > old && self.acceptance_ewma.unwrap_or(acceptance) < Self::HIGH_ACCEPTANCE {
+                next = old;
+            }
+            if next == old {
+                if self.cooldown_windows > 0 {
+                    self.cooldown_windows -= 1;
+                } else if self
+                    .cost_estimate(regime, old)
+                    .is_some_and(|estimate| estimate.samples >= Self::MIN_COST_SAMPLES)
+                    && self.acceptance_ewma.unwrap_or(acceptance) >= Self::HIGH_ACCEPTANCE
+                {
+                    if let Some(probe) = self.next_probe_budget(regime, old) {
+                        next = probe;
+                        self.probe_budget = Some(probe);
+                        self.probe_origin_budget = Some(old);
+                        self.probe_windows_remaining = Self::PROBE_WINDOWS;
+                    }
+                }
+            }
+        }
 
         let smoothed_acceptance = self.acceptance_ewma.unwrap_or(acceptance);
-        let smoothed_overhead_ratio = self.overhead_ratio_ewma.unwrap_or(overhead_ratio);
-        if smoothed_acceptance < Self::LOW_ACCEPTANCE
-            && smoothed_overhead_ratio > Self::HIGH_OVERHEAD_RATIO
-        {
+        if smoothed_acceptance < Self::LOW_ACCEPTANCE {
             next = next.min(old.saturating_sub(1).max(1));
         }
-        if acceptance < Self::LOW_ACCEPTANCE && overhead_ratio > Self::VERY_HIGH_OVERHEAD_RATIO {
+        if acceptance == 0.0 {
             next = 1;
-            self.cooldown_windows = self.cooldown_windows.max(1);
-        }
-        if smoothed_acceptance >= Self::HIGH_ACCEPTANCE
-            && smoothed_overhead_ratio <= Self::HIGH_OVERHEAD_RATIO
-            && window.accepted_draft_tokens == window.attempted_draft_tokens
-        {
-            next = next.max(old.saturating_add(1));
-        }
-        if let Some(position_cap) = position_acceptance_budget_cap(cumulative_stats) {
-            next = next.min(position_cap);
+            self.probe_budget = None;
+            self.probe_origin_budget = None;
+            self.probe_windows_remaining = 0;
+            self.arm_initial_probe_cooldown();
         }
 
         self.current_budget = next.clamp(1, self.max_draft_tokens);
         budget_change(old, self.current_budget)
+    }
+
+    fn arm_initial_probe_cooldown(&mut self) {
+        self.cooldown_windows = Self::INITIAL_PROBE_COOLDOWN_WINDOWS;
+        self.next_probe_cooldown_windows =
+            (Self::INITIAL_PROBE_COOLDOWN_WINDOWS * 2).min(Self::MAX_PROBE_COOLDOWN_WINDOWS);
+    }
+
+    fn back_off_next_probe(&mut self) {
+        self.cooldown_windows = self.next_probe_cooldown_windows.clamp(
+            Self::INITIAL_PROBE_COOLDOWN_WINDOWS,
+            Self::MAX_PROBE_COOLDOWN_WINDOWS,
+        );
+        self.next_probe_cooldown_windows = self
+            .cooldown_windows
+            .saturating_mul(2)
+            .min(Self::MAX_PROBE_COOLDOWN_WINDOWS);
+    }
+
+    fn record_cost(
+        &mut self,
+        regime: MtpDraftPolicyRegime,
+        draft_tokens: usize,
+        cost: f64,
+        acceptance: f64,
+    ) {
+        if let Some(estimate) = self
+            .cost_estimates
+            .iter_mut()
+            .find(|estimate| estimate.regime == regime && estimate.draft_tokens == draft_tokens)
+        {
+            estimate.cost_ewma = update_ewma(Some(estimate.cost_ewma), cost, Self::EWMA_ALPHA);
+            estimate.acceptance_ewma =
+                update_ewma(Some(estimate.acceptance_ewma), acceptance, Self::EWMA_ALPHA);
+            estimate.samples = estimate.samples.saturating_add(1);
+        } else {
+            self.cost_estimates.push(MtpDraftCostEstimate {
+                regime,
+                draft_tokens,
+                cost_ewma: cost,
+                acceptance_ewma: acceptance,
+                samples: 1,
+            });
+        }
+    }
+
+    fn cost_estimate(
+        &self,
+        regime: MtpDraftPolicyRegime,
+        draft_tokens: usize,
+    ) -> Option<&MtpDraftCostEstimate> {
+        self.cost_estimates
+            .iter()
+            .find(|estimate| estimate.regime == regime && estimate.draft_tokens == draft_tokens)
+    }
+
+    fn best_measured_budget(&self, regime: MtpDraftPolicyRegime, current: usize) -> usize {
+        let Some(current_estimate) = self.cost_estimate(regime, current) else {
+            return current;
+        };
+        if current_estimate.samples < Self::MIN_COST_SAMPLES {
+            return current;
+        }
+        self.cost_estimates
+            .iter()
+            .filter(|estimate| {
+                estimate.regime == regime
+                    && estimate.samples >= Self::MIN_COST_SAMPLES
+                    && (estimate.draft_tokens <= current
+                        || estimate.acceptance_ewma >= Self::HIGH_ACCEPTANCE)
+                    && estimate.cost_ewma
+                        < current_estimate.cost_ewma * Self::COST_IMPROVEMENT_RATIO
+            })
+            .min_by(|left, right| left.cost_ewma.total_cmp(&right.cost_ewma))
+            .map_or(current, |estimate| estimate.draft_tokens)
+    }
+
+    fn next_probe_budget(&self, regime: MtpDraftPolicyRegime, current: usize) -> Option<usize> {
+        let lower = current.checked_sub(1).filter(|&budget| budget >= 1);
+        let upper = current
+            .checked_add(1)
+            .filter(|&budget| budget <= self.max_draft_tokens);
+        [lower, upper]
+            .into_iter()
+            .flatten()
+            .filter(|&budget| {
+                budget <= current
+                    || self
+                        .cost_estimate(regime, budget)
+                        .is_none_or(|estimate| estimate.acceptance_ewma >= Self::HIGH_ACCEPTANCE)
+            })
+            .min_by_key(|&budget| {
+                self.cost_estimate(regime, budget)
+                    .map_or(0, |estimate| estimate.samples)
+            })
+    }
+
+    fn preferred_probe_budget(
+        &self,
+        regime: MtpDraftPolicyRegime,
+        origin: usize,
+        probe: usize,
+    ) -> usize {
+        let Some(origin_cost) = self.cost_estimate(regime, origin) else {
+            return probe;
+        };
+        let Some(probe_cost) = self.cost_estimate(regime, probe) else {
+            return origin;
+        };
+        if probe_cost.samples >= Self::MIN_COST_SAMPLES
+            && (probe <= origin || probe_cost.acceptance_ewma >= Self::HIGH_ACCEPTANCE)
+            && probe_cost.cost_ewma < origin_cost.cost_ewma * Self::COST_IMPROVEMENT_RATIO
+        {
+            probe
+        } else {
+            origin
+        }
     }
 }
 
@@ -1547,48 +1817,6 @@ fn budget_change(old: usize, new: usize) -> MtpDraftBudgetChange {
         reduced: new < old,
         increased: new > old,
     }
-}
-
-fn position_acceptance_budget_cap(stats: &MtpSpeculativeStats) -> Option<usize> {
-    stats
-        .draft_attempts_by_position
-        .iter()
-        .zip(stats.draft_accepts_by_position.iter())
-        .enumerate()
-        .find_map(|(idx, (&attempts, &accepts))| {
-            if attempts < MtpDraftPolicyState::MIN_POSITION_ATTEMPTS {
-                return None;
-            }
-            let acceptance = accepts as f64 / attempts.max(1) as f64;
-            (acceptance < MtpDraftPolicyState::LOW_POSITION_ACCEPTANCE).then_some(idx.max(1))
-        })
-}
-
-pub(crate) fn adjust_mtp_draft_budget(
-    max_draft_tokens: usize,
-    adaptive_draft_tokens: &mut usize,
-    attempted_draft_tokens: usize,
-    accepted_draft_tokens: usize,
-    stats: &mut MtpSpeculativeStats,
-) {
-    if max_draft_tokens <= 1 || attempted_draft_tokens == 0 {
-        *adaptive_draft_tokens = max_draft_tokens.max(1);
-        return;
-    }
-    let old = (*adaptive_draft_tokens).clamp(1, max_draft_tokens);
-    let next = if accepted_draft_tokens == attempted_draft_tokens {
-        old.saturating_add(1).min(max_draft_tokens)
-    } else {
-        accepted_draft_tokens
-            .saturating_add(1)
-            .clamp(1, max_draft_tokens)
-    };
-    if next < old {
-        stats.draft_budget_reductions = stats.draft_budget_reductions.saturating_add(1);
-    } else if next > old {
-        stats.draft_budget_increases = stats.draft_budget_increases.saturating_add(1);
-    }
-    *adaptive_draft_tokens = next;
 }
 
 pub(crate) fn zero_hidden_like_position(hidden: &Array) -> Result<Array> {
@@ -2011,7 +2239,10 @@ where
             return Ok(());
         }
 
+        let window_started = Instant::now();
         let stats_before_window = self.stats.clone();
+        let timing_before = self.stats.draft_cap_timing();
+        let context_tokens = self.history.len();
         let draft_budget = self
             .adaptive_draft_tokens
             .clamp(1, self.cfg.max_draft_tokens)
@@ -2158,23 +2389,6 @@ where
         }
         self.last_hidden = accepted_last_hidden;
 
-        let stats_delta = self.stats.saturating_delta_since(&stats_before_window);
-        let change = self.draft_policy.observe_window(
-            MtpDraftPolicyWindow::from_stats_delta(
-                draft_tokens.len(),
-                resolution.accepted_draft_len,
-                &stats_delta,
-            ),
-            &self.stats,
-        );
-        if change.reduced {
-            self.stats.draft_budget_reductions =
-                self.stats.draft_budget_reductions.saturating_add(1);
-        } else if change.increased {
-            self.stats.draft_budget_increases = self.stats.draft_budget_increases.saturating_add(1);
-        }
-        self.adaptive_draft_tokens = self.draft_policy.current_budget();
-
         let mut tokens_to_append = resolution.tokens_to_append;
         if let Some(stop_idx) = tokens_to_append
             .iter()
@@ -2186,11 +2400,48 @@ where
         if let Some(constraint) = self.constraint.as_ref() {
             constraint.truncate_invalid_speculative_bonus(&mut tokens_to_append)?;
         }
+        let committed_tokens = tokens_to_append.len();
         for token in tokens_to_append {
             commit_constraint_token(&mut self.constraint, token)?;
             self.history.push(token);
             self.pending_tokens.push_back(token);
         }
+
+        let total_us = elapsed_us_since(window_started);
+        let stats_delta = self.stats.saturating_delta_since(&stats_before_window);
+        let change = self
+            .draft_policy
+            .observe_window(MtpDraftPolicyWindow::from_stats_delta(
+                draft_tokens.len(),
+                resolution.accepted_draft_len,
+                committed_tokens,
+                total_us,
+                context_tokens,
+                1,
+                MtpDraftPolicyKvState::Contiguous,
+                &stats_delta,
+            ));
+        if change.reduced {
+            self.stats.draft_budget_reductions =
+                self.stats.draft_budget_reductions.saturating_add(1);
+        } else if change.increased {
+            self.stats.draft_budget_increases = self.stats.draft_budget_increases.saturating_add(1);
+        }
+        self.adaptive_draft_tokens = self.draft_policy.current_budget();
+        let timing_delta = self
+            .stats
+            .draft_cap_timing()
+            .saturating_delta_since(timing_before);
+        self.stats.record_draft_cap_observation(
+            self.cfg.max_draft_tokens,
+            &[draft_tokens.len()],
+            &[context_tokens],
+            resolution.accepted_draft_len,
+            committed_tokens,
+            usize::from(resolution.needs_rollback),
+            total_us,
+            timing_delta,
+        );
 
         Ok(())
     }
@@ -3353,148 +3604,156 @@ mod tests {
         assert_eq!(mixed.context_bucket, MtpDraftCapContextBucket::UpTo8k);
     }
 
-    #[test]
-    fn mtp_cost_aware_policy_reduces_high_overhead_low_acceptance_window() {
-        let mut policy = MtpDraftPolicyState::new(4);
-        let mut stats = MtpSpeculativeStats::default();
-        stats.record_window_acceptance(4, 0);
-
-        let change = policy.observe_window(
-            MtpDraftPolicyWindow {
-                attempted_draft_tokens: 4,
-                accepted_draft_tokens: 0,
-                draft_forward_us: 1_000,
-                verify_forward_us: 500,
-                projection_us: 600,
-                sampling_us: 800,
-                verify_accept_host_sync_us: 400,
-                main_rollback_us: 200,
-                mtp_cache_commit_us: 900,
-                mtp_prefill_cache_commit_us: 0,
-                mtp_decode_cache_commit_us: 900,
-                mtp_cache_restore_us: 300,
-            },
-            &stats,
-        );
-
-        assert_eq!(policy.current_budget(), 1);
-        assert!(change.reduced);
-    }
-
-    #[test]
-    fn mtp_cost_aware_policy_accounts_for_acceptance_host_sync() {
-        let mut policy = MtpDraftPolicyState::new(4);
-        let mut stats = MtpSpeculativeStats::default();
-        stats.record_window_acceptance(4, 0);
-
-        let change = policy.observe_window(
-            MtpDraftPolicyWindow {
-                attempted_draft_tokens: 4,
-                accepted_draft_tokens: 0,
-                draft_forward_us: 0,
-                verify_forward_us: 500,
-                projection_us: 0,
-                sampling_us: 0,
-                verify_accept_host_sync_us: 2_000,
-                main_rollback_us: 0,
-                mtp_cache_commit_us: 0,
-                mtp_prefill_cache_commit_us: 0,
-                mtp_decode_cache_commit_us: 0,
-                mtp_cache_restore_us: 0,
-            },
-            &stats,
-        );
-
-        assert_eq!(policy.current_budget(), 1);
-        assert!(change.reduced);
-    }
-
-    #[test]
-    fn mtp_cost_aware_policy_restores_after_cheap_full_accept_windows() {
-        let mut policy = MtpDraftPolicyState::new(4);
-        let mut stats = MtpSpeculativeStats::default();
-
-        stats.record_window_acceptance(4, 0);
-        policy.observe_window(
-            MtpDraftPolicyWindow {
-                attempted_draft_tokens: 4,
-                accepted_draft_tokens: 0,
-                draft_forward_us: 1_000,
-                verify_forward_us: 500,
-                projection_us: 600,
-                sampling_us: 800,
-                verify_accept_host_sync_us: 400,
-                main_rollback_us: 200,
-                mtp_cache_commit_us: 900,
-                mtp_prefill_cache_commit_us: 0,
-                mtp_decode_cache_commit_us: 900,
-                mtp_cache_restore_us: 300,
-            },
-            &stats,
-        );
-        assert_eq!(policy.current_budget(), 1);
-
-        for _ in 0..4 {
-            stats.record_window_acceptance(policy.current_budget(), policy.current_budget());
-            let change = policy.observe_window(
-                MtpDraftPolicyWindow {
-                    attempted_draft_tokens: policy.current_budget(),
-                    accepted_draft_tokens: policy.current_budget(),
-                    draft_forward_us: 50,
-                    verify_forward_us: 1_000,
-                    projection_us: 20,
-                    sampling_us: 20,
-                    verify_accept_host_sync_us: 10,
-                    main_rollback_us: 0,
-                    mtp_cache_commit_us: 30,
-                    mtp_prefill_cache_commit_us: 0,
-                    mtp_decode_cache_commit_us: 30,
-                    mtp_cache_restore_us: 0,
-                },
-                &stats,
-            );
-            assert!(!change.reduced);
+    fn policy_window(
+        draft_tokens: usize,
+        committed_tokens: usize,
+        total_us: u64,
+    ) -> MtpDraftPolicyWindow {
+        MtpDraftPolicyWindow {
+            attempted_draft_tokens: draft_tokens,
+            accepted_draft_tokens: draft_tokens,
+            committed_tokens,
+            total_us,
+            context_tokens: 1_024,
+            batch_width: 1,
+            kv_state: MtpDraftPolicyKvState::Contiguous,
+            ..MtpDraftPolicyWindow::default()
         }
+    }
+
+    #[test]
+    fn mtp_cost_aware_policy_immediately_reduces_zero_acceptance() {
+        let mut policy = MtpDraftPolicyState::new(4);
+        let mut window = policy_window(4, 1, 4_000);
+        window.accepted_draft_tokens = 0;
+        window.main_rollback_us = 500;
+        window.mtp_cache_restore_us = 300;
+
+        let change = policy.observe_window(window);
+
+        assert_eq!(policy.current_budget(), 1);
+        assert!(change.reduced);
+    }
+
+    #[test]
+    fn mtp_cost_aware_policy_rejects_a_more_expensive_probe() {
+        let mut policy = MtpDraftPolicyState::new(4);
+
+        policy.observe_window(policy_window(4, 4, 400));
+        assert_eq!(
+            policy.observe_window(policy_window(4, 4, 400)).reduced,
+            true
+        );
+        assert_eq!(policy.current_budget(), 3);
+        policy.observe_window(policy_window(3, 3, 600));
+        let change = policy.observe_window(policy_window(3, 3, 600));
 
         assert_eq!(policy.current_budget(), 4);
+        assert!(change.increased);
     }
 
     #[test]
-    fn mtp_cost_aware_policy_caps_depth_from_position_acceptance() {
+    fn mtp_cost_aware_policy_backs_off_rejected_probe() {
         let mut policy = MtpDraftPolicyState::new(4);
-        let mut stats = MtpSpeculativeStats::default();
-        for _ in 0..6 {
-            stats.record_window_acceptance(4, 2);
+
+        policy.observe_window(policy_window(4, 4, 400));
+        policy.observe_window(policy_window(4, 4, 400));
+        policy.observe_window(policy_window(3, 3, 600));
+        policy.observe_window(policy_window(3, 3, 600));
+        assert_eq!(policy.current_budget(), 4);
+
+        for _ in 0..16 {
+            policy.observe_window(policy_window(4, 4, 400));
+            assert_eq!(policy.current_budget(), 4);
         }
+        assert!(policy.observe_window(policy_window(4, 4, 400)).reduced);
+        assert_eq!(policy.current_budget(), 3);
+    }
 
-        let change = policy.observe_window(
-            MtpDraftPolicyWindow {
-                attempted_draft_tokens: 4,
-                accepted_draft_tokens: 4,
-                draft_forward_us: 50,
-                verify_forward_us: 1_000,
-                projection_us: 20,
-                sampling_us: 20,
-                verify_accept_host_sync_us: 10,
-                main_rollback_us: 0,
-                mtp_cache_commit_us: 30,
-                mtp_prefill_cache_commit_us: 0,
-                mtp_decode_cache_commit_us: 30,
-                mtp_cache_restore_us: 0,
-            },
-            &stats,
-        );
+    #[test]
+    fn mtp_cost_aware_policy_does_not_promote_low_acceptance_regime() {
+        let mut policy = MtpDraftPolicyState::new(2);
+        policy.observe_window(policy_window(2, 2, 100));
+        let mut rejected = policy_window(2, 1, 100);
+        rejected.accepted_draft_tokens = 0;
+        policy.observe_window(rejected);
+        assert_eq!(policy.current_budget(), 1);
 
-        assert_eq!(policy.current_budget(), 2);
-        assert!(change.reduced);
+        let mut rejected_single = policy_window(1, 1, 1_000);
+        rejected_single.accepted_draft_tokens = 0;
+        policy.observe_window(rejected_single);
+        policy.observe_window(policy_window(1, 1, 1_000));
+
+        assert_eq!(policy.current_budget(), 1);
+    }
+
+    #[test]
+    fn mtp_cost_aware_policy_keeps_a_cheaper_probe() {
+        let mut policy = MtpDraftPolicyState::new(4);
+
+        policy.observe_window(policy_window(4, 4, 800));
+        policy.observe_window(policy_window(4, 4, 800));
+        policy.observe_window(policy_window(3, 3, 300));
+        let change = policy.observe_window(policy_window(3, 3, 300));
+
+        assert_eq!(policy.current_budget(), 3);
+        assert!(!change.reduced);
+        assert!(!change.increased);
+    }
+
+    #[test]
+    fn mtp_cost_aware_policy_separates_context_batch_and_kv_regimes() {
+        let base = policy_window(2, 2, 200);
+        let long_context = MtpDraftPolicyWindow {
+            context_tokens: 32_000,
+            ..base
+        };
+        let batched = MtpDraftPolicyWindow {
+            batch_width: 4,
+            ..base
+        };
+        let paged = MtpDraftPolicyWindow {
+            kv_state: MtpDraftPolicyKvState::PagedActiveKv,
+            ..base
+        };
+
+        assert_ne!(base.regime(), long_context.regime());
+        assert_ne!(base.regime(), batched.regime());
+        assert_ne!(base.regime(), paged.regime());
+    }
+
+    #[test]
+    fn mtp_cost_aware_policy_uses_actual_committed_tokens_and_cache_costs() {
+        let cheap = policy_window(2, 2, 200);
+        let fewer_commits = policy_window(2, 1, 200);
+        let cache_restore = MtpDraftPolicyWindow {
+            total_us: 0,
+            verify_forward_us: 100,
+            mtp_cache_restore_us: 300,
+            ..policy_window(2, 2, 0)
+        };
+
+        assert_eq!(cheap.cost_per_committed_token_us(), 100.0);
+        assert_eq!(fewer_commits.cost_per_committed_token_us(), 200.0);
+        assert_eq!(cache_restore.cost_per_committed_token_us(), 200.0);
+    }
+
+    #[test]
+    fn mtp_cost_aware_policy_snapshot_restores_cost_history() {
+        let mut source = MtpDraftPolicyState::new(2);
+        source.observe_window(policy_window(2, 2, 200));
+        let snapshot = source.snapshot();
+        let mut restored = MtpDraftPolicyState::new(2);
+
+        restored.restore_snapshot(snapshot.clone()).unwrap();
+
+        assert_eq!(restored.snapshot(), snapshot);
     }
 
     #[test]
     fn mtp_cost_aware_policy_keeps_single_budget_for_zero_attempt_window() {
         let mut policy = MtpDraftPolicyState::new(1);
-        let stats = MtpSpeculativeStats::default();
-
-        let change = policy.observe_window(MtpDraftPolicyWindow::default(), &stats);
+        let change = policy.observe_window(MtpDraftPolicyWindow::default());
 
         assert_eq!(policy.current_budget(), 1);
         assert!(!change.reduced);

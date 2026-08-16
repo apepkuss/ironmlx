@@ -144,16 +144,16 @@ use crate::core::prompt_lookup::{
 use crate::core::sampler::{draw_uniforms, sample_target_tokens_with_uniforms_batch, Sampler};
 use crate::core::speculative::{
     add_elapsed_us, add_mtp_decode_cache_commit_us, add_mtp_prefill_cache_commit_us,
-    adjust_mtp_draft_budget, commit_mtp_cache_hidden_prefix, commit_mtp_cache_hidden_tail,
-    elapsed_us_since, layer_cache_supports_accepted_prefix_trim,
-    resolve_exact_deterministic_target_logits, resolve_exact_deterministic_target_tokens,
-    resolve_speculative_tokens, restore_layer_cache, rollback_main_cache_to_accepted_prefix,
-    sample_draft_logits_position, sample_draft_logits_position_with_uniform,
-    sample_logits_positions, slice_hidden_position, slice_position_ids_prefix,
-    split_speculative_draft_prng, trim_full_layer_cache_rows_to_accepted_prefix, verify_input,
-    zero_hidden_like_position, DraftTokenDistribution, MainCacheRollbackInput,
-    MtpDraftPolicySnapshot, MtpDraftPolicyState, MtpDraftPolicyWindow, MtpSpeculativeConfig,
-    MtpSpeculativeModel, MtpSpeculativeStats, SpeculativeResolution,
+    commit_mtp_cache_hidden_prefix, commit_mtp_cache_hidden_tail, elapsed_us_since,
+    layer_cache_supports_accepted_prefix_trim, resolve_exact_deterministic_target_logits,
+    resolve_exact_deterministic_target_tokens, resolve_speculative_tokens, restore_layer_cache,
+    rollback_main_cache_to_accepted_prefix, sample_draft_logits_position,
+    sample_draft_logits_position_with_uniform, sample_logits_positions, slice_hidden_position,
+    slice_position_ids_prefix, split_speculative_draft_prng,
+    trim_full_layer_cache_rows_to_accepted_prefix, verify_input, zero_hidden_like_position,
+    DraftTokenDistribution, MainCacheRollbackInput, MtpDraftPolicyKvState, MtpDraftPolicySnapshot,
+    MtpDraftPolicyState, MtpDraftPolicyWindow, MtpSpeculativeConfig, MtpSpeculativeModel,
+    MtpSpeculativeStats, SpeculativeResolution,
 };
 use crate::core::speculative_qualification::{NeuralExactRegime, NeuralExactSource};
 use crate::nn::{
@@ -259,6 +259,7 @@ struct SchedulerGemma4DrafterRowState {
     last_hidden: Array,
     shared_kv: crate::models::gemma4::Gemma4SharedKvStates,
     adaptive_draft_tokens: usize,
+    draft_policy: MtpDraftPolicyState,
 }
 
 fn project_mtp_target_hidden<M: MtpSpeculativeModel>(
@@ -394,6 +395,7 @@ struct PromptLookupMtpCanonicalTransaction {
     snapshots: Vec<PromptLookupMtpCanonicalRowSnapshot>,
     mtp_stats_before: MtpSpeculativeStats,
     prompt_stats_before: PromptLookupStats,
+    kv_state: MtpDraftPolicyKvState,
 }
 
 #[derive(Debug)]
@@ -2520,6 +2522,23 @@ fn generate_neural_rebase_request_from_state(state: &RequestState) -> Result<Gen
 
 fn add_mtp_stats(dst: &mut MtpSpeculativeStats, src: MtpSpeculativeStats) {
     dst.merge_from(src);
+}
+
+fn divided_mtp_stats_timing(stats: &MtpSpeculativeStats, divisor: u64) -> MtpSpeculativeStats {
+    debug_assert!(divisor > 0);
+    MtpSpeculativeStats {
+        draft_forward_us: stats.draft_forward_us / divisor,
+        verify_forward_us: stats.verify_forward_us / divisor,
+        projection_us: stats.projection_us / divisor,
+        sampling_us: stats.sampling_us / divisor,
+        verify_accept_host_sync_us: stats.verify_accept_host_sync_us / divisor,
+        main_rollback_us: stats.main_rollback_us / divisor,
+        mtp_cache_commit_us: stats.mtp_cache_commit_us / divisor,
+        mtp_prefill_cache_commit_us: stats.mtp_prefill_cache_commit_us / divisor,
+        mtp_decode_cache_commit_us: stats.mtp_decode_cache_commit_us / divisor,
+        mtp_cache_restore_us: stats.mtp_cache_restore_us / divisor,
+        ..MtpSpeculativeStats::default()
+    }
 }
 
 pub(crate) fn paged_prefix_fingerprint_for_request(
@@ -8665,6 +8684,10 @@ impl<M: Model> Scheduler<M> {
     where
         M: MtpSpeculativeModel,
     {
+        let policy_kv_state = MtpDraftPolicyKvState::from_runtime(
+            self.paged_prefix_cache.is_some(),
+            self.active_kv_config.enabled,
+        );
         let mut mtp_state = self
             .mtp_state
             .take()
@@ -8687,6 +8710,7 @@ impl<M: Model> Scheduler<M> {
                         &mut mtp_state,
                         inputs,
                         stats,
+                        policy_kv_state,
                     )?;
                     canonical_transaction = Some(transaction);
                     Ok(PromptLookupMtpShadowOutput::Prepared(device_drafts))
@@ -9180,7 +9204,7 @@ impl<M: Model> Scheduler<M> {
                     })
                     .flatten();
                 let mtp_policy_snapshot =
-                    certification.map(|certification| certification.policy_snapshot);
+                    certification.map(|certification| certification.policy_snapshot.clone());
                 Some((
                     proposal.tokens,
                     PromptLookupProposalSource::Local,
@@ -10137,7 +10161,7 @@ impl<M: Model> Scheduler<M> {
                         position_ids,
                         canonical_replay: require_canonical_shared_full_accept,
                         mtp_policy_snapshot: require_canonical_shared_full_accept
-                            .then_some(ctx.mtp_policy_snapshot)
+                            .then_some(ctx.mtp_policy_snapshot.clone())
                             .flatten(),
                     });
                 }
@@ -10322,6 +10346,7 @@ impl<M: Model> Scheduler<M> {
         mtp_state: &mut SchedulerMtpState,
         inputs: &[PromptLookupMtpDraftInput],
         stats: &mut PromptLookupStats,
+        kv_state: MtpDraftPolicyKvState,
     ) -> Result<(PromptLookupMtpCanonicalTransaction, Vec<Vec<Array>>)>
     where
         M: MtpSpeculativeModel,
@@ -10734,6 +10759,7 @@ impl<M: Model> Scheduler<M> {
                 snapshots,
                 mtp_stats_before,
                 prompt_stats_before,
+                kv_state,
             },
             device_drafts,
         ))
@@ -10891,25 +10917,25 @@ impl<M: Model> Scheduler<M> {
                 mtp_state
                     .stats
                     .record_window_acceptance(attempted, attempted);
-                let change = row.draft_policy.observe_window(
-                    MtpDraftPolicyWindow {
-                        attempted_draft_tokens: attempted,
-                        accepted_draft_tokens: attempted,
-                        draft_forward_us: mtp_delta.draft_forward_us / divisor,
-                        verify_forward_us: prompt_delta.verify_forward_us / divisor,
-                        projection_us: prompt_delta.projection_us / divisor,
-                        sampling_us: mtp_delta.sampling_us / divisor,
-                        verify_accept_host_sync_us: prompt_delta.verify_accept_host_sync_us
-                            / divisor,
-                        main_rollback_us: prompt_delta.rollback_us / divisor,
-                        mtp_cache_commit_us: mtp_delta.mtp_cache_commit_us / divisor,
-                        mtp_prefill_cache_commit_us: mtp_delta.mtp_prefill_cache_commit_us
-                            / divisor,
-                        mtp_decode_cache_commit_us: mtp_delta.mtp_decode_cache_commit_us / divisor,
-                        mtp_cache_restore_us: mtp_delta.mtp_cache_restore_us / divisor,
-                    },
-                    &mtp_state.stats,
-                );
+                let change = row.draft_policy.observe_window(MtpDraftPolicyWindow {
+                    attempted_draft_tokens: attempted,
+                    accepted_draft_tokens: attempted,
+                    committed_tokens: input.input_tokens.len(),
+                    total_us: 0,
+                    context_tokens: ctx.verify_start_pos.max(0) as usize + 1,
+                    batch_width: accepted.len(),
+                    kv_state: transaction.kv_state,
+                    draft_forward_us: mtp_delta.draft_forward_us / divisor,
+                    verify_forward_us: prompt_delta.verify_forward_us / divisor,
+                    projection_us: prompt_delta.projection_us / divisor,
+                    sampling_us: mtp_delta.sampling_us / divisor,
+                    verify_accept_host_sync_us: prompt_delta.verify_accept_host_sync_us / divisor,
+                    main_rollback_us: prompt_delta.rollback_us / divisor,
+                    mtp_cache_commit_us: mtp_delta.mtp_cache_commit_us / divisor,
+                    mtp_prefill_cache_commit_us: mtp_delta.mtp_prefill_cache_commit_us / divisor,
+                    mtp_decode_cache_commit_us: mtp_delta.mtp_decode_cache_commit_us / divisor,
+                    mtp_cache_restore_us: mtp_delta.mtp_cache_restore_us / divisor,
+                });
                 if change.reduced {
                     mtp_state.stats.draft_budget_reductions =
                         mtp_state.stats.draft_budget_reductions.saturating_add(1);
@@ -11578,7 +11604,7 @@ impl<M: Model> Scheduler<M> {
                     mlx::StreamOrDevice::default(),
                 )?;
                 row.last_hidden = accepted_last_hidden;
-                if let Some(policy_snapshot) = input.mtp_policy_snapshot {
+                if let Some(policy_snapshot) = input.mtp_policy_snapshot.clone() {
                     row.draft_policy.restore_snapshot(policy_snapshot)?;
                     row.adaptive_draft_tokens = row
                         .draft_policy
@@ -12982,8 +13008,13 @@ impl<M: Model> Scheduler<M> {
         if rows_to_fill.is_empty() {
             return Ok(());
         }
+        let window_started = Instant::now();
         let max_supported_draft_tokens = cfg.max_draft_tokens;
         let stats_before_batch = stats.clone();
+        let kv_state = MtpDraftPolicyKvState::from_runtime(
+            self.paged_prefix_cache.is_some(),
+            self.active_kv_config.enabled,
+        );
         let mut contexts = Vec::with_capacity(rows_to_fill.len());
         for &row_idx in rows_to_fill {
             let slot = self.slots[row_idx]
@@ -13642,12 +13673,14 @@ impl<M: Model> Scheduler<M> {
                 {
                     constraint.truncate_invalid_speculative_bonus(&mut tokens_to_append)?;
                 }
+                let committed_tokens = tokens_to_append.len();
                 row_state.pending_tokens.extend(tokens_to_append);
                 policy_inputs.push((
                     ctx.row_idx,
                     resolved_draft_tokens[ctx_idx].len(),
                     resolution.accepted_draft_len,
                     ctx.verify_start_pos.max(0) as usize + 1,
+                    committed_tokens,
                 ));
             }
 
@@ -13744,32 +13777,27 @@ impl<M: Model> Scheduler<M> {
 
             let stats_delta = stats.saturating_delta_since(&stats_before_batch);
             let divisor = contexts.len() as u64;
-            for (row_idx, attempted, accepted, continuation) in policy_inputs {
+            let total_us = elapsed_us_since(window_started) / divisor;
+            for (row_idx, attempted, accepted, context_tokens, committed_tokens) in policy_inputs {
                 let row_state = row_states.get_mut(&row_idx).ok_or_else(|| {
                     anyhow!(
                         "fill_mtp_windows_batched: row {row_idx} state absent for policy update"
                     )
                 })?;
-                let change = row_state.draft_policy.observe_window(
-                    MtpDraftPolicyWindow {
-                        attempted_draft_tokens: attempted,
-                        accepted_draft_tokens: accepted,
-                        draft_forward_us: stats_delta.draft_forward_us / divisor,
-                        verify_forward_us: stats_delta.verify_forward_us / divisor,
-                        projection_us: stats_delta.projection_us / divisor,
-                        sampling_us: stats_delta.sampling_us / divisor,
-                        verify_accept_host_sync_us: stats_delta.verify_accept_host_sync_us
-                            / divisor,
-                        main_rollback_us: stats_delta.main_rollback_us / divisor,
-                        mtp_cache_commit_us: stats_delta.mtp_cache_commit_us / divisor,
-                        mtp_prefill_cache_commit_us: stats_delta.mtp_prefill_cache_commit_us
-                            / divisor,
-                        mtp_decode_cache_commit_us: stats_delta.mtp_decode_cache_commit_us
-                            / divisor,
-                        mtp_cache_restore_us: stats_delta.mtp_cache_restore_us / divisor,
-                    },
-                    stats,
-                );
+                let per_row_delta = divided_mtp_stats_timing(&stats_delta, divisor);
+                let change =
+                    row_state
+                        .draft_policy
+                        .observe_window(MtpDraftPolicyWindow::from_stats_delta(
+                            attempted,
+                            accepted,
+                            committed_tokens,
+                            total_us,
+                            context_tokens,
+                            contexts.len(),
+                            kv_state,
+                            &per_row_delta,
+                        ));
                 if change.reduced {
                     stats.draft_budget_reductions = stats.draft_budget_reductions.saturating_add(1);
                 } else if change.increased {
@@ -13783,7 +13811,7 @@ impl<M: Model> Scheduler<M> {
                 if accepted == attempted {
                     self.record_prompt_lookup_mtp_certification(
                         row_idx,
-                        continuation,
+                        context_tokens,
                         attempted,
                         policy_snapshot,
                     );
@@ -13987,7 +14015,13 @@ impl<M: Model> Scheduler<M> {
         history.extend_from_slice(&prompt_ids);
         history.extend_from_slice(&generated_tokens);
 
+        let window_started = Instant::now();
         let stats_before_window = stats.clone();
+        let context_tokens = history.len();
+        let kv_state = MtpDraftPolicyKvState::from_runtime(
+            self.paged_prefix_cache.is_some(),
+            self.active_kv_config.enabled,
+        );
         let max_supported_draft_tokens = window.speculative.max_draft_tokens;
         let draft_budget = row_state
             .adaptive_draft_tokens
@@ -14210,15 +14244,32 @@ impl<M: Model> Scheduler<M> {
         }
         row_state.last_hidden = accepted_last_hidden;
 
+        let mut tokens_to_append = resolution.tokens_to_append;
+        if let Some(stop_idx) = tokens_to_append
+            .iter()
+            .position(|token| stop_token_ids.contains(token))
+        {
+            tokens_to_append.truncate(stop_idx + 1);
+        }
+        tokens_to_append.truncate(remaining);
+        if let Some(constraint) = constraint.as_ref() {
+            constraint.truncate_invalid_speculative_bonus(&mut tokens_to_append)?;
+        }
+        let committed_tokens = tokens_to_append.len();
+        row_state.pending_tokens.extend(tokens_to_append);
         let stats_delta = stats.saturating_delta_since(&stats_before_window);
-        let change = row_state.draft_policy.observe_window(
-            MtpDraftPolicyWindow::from_stats_delta(
+        let change = row_state
+            .draft_policy
+            .observe_window(MtpDraftPolicyWindow::from_stats_delta(
                 draft_tokens.len(),
                 resolution.accepted_draft_len,
+                committed_tokens,
+                elapsed_us_since(window_started),
+                context_tokens,
+                1,
+                kv_state,
                 &stats_delta,
-            ),
-            stats,
-        );
+            ));
         if change.reduced {
             stats.draft_budget_reductions = stats.draft_budget_reductions.saturating_add(1);
         } else if change.increased {
@@ -14236,19 +14287,6 @@ impl<M: Model> Scheduler<M> {
                 row_state.draft_policy.snapshot(),
             );
         }
-
-        let mut tokens_to_append = resolution.tokens_to_append;
-        if let Some(stop_idx) = tokens_to_append
-            .iter()
-            .position(|token| stop_token_ids.contains(token))
-        {
-            tokens_to_append.truncate(stop_idx + 1);
-        }
-        tokens_to_append.truncate(remaining);
-        if let Some(constraint) = constraint.as_ref() {
-            constraint.truncate_invalid_speculative_bonus(&mut tokens_to_append)?;
-        }
-        row_state.pending_tokens.extend(tokens_to_append);
         self.scatter_prng_state_from_rows(&[row_idx], &compact_prng)?;
         Ok(())
     }
@@ -17447,6 +17485,7 @@ impl Scheduler<crate::models::Gemma4Model> {
                     last_hidden: last_prompt_hidden,
                     shared_kv,
                     adaptive_draft_tokens: drafter_state.cfg.max_draft_tokens,
+                    draft_policy: MtpDraftPolicyState::new(drafter_state.cfg.max_draft_tokens),
                 },
             );
         }
@@ -18044,6 +18083,7 @@ impl Scheduler<crate::models::Gemma4Model> {
                     last_hidden: last_prompt_hidden,
                     shared_kv,
                     adaptive_draft_tokens: cfg.max_draft_tokens,
+                    draft_policy: MtpDraftPolicyState::new(cfg.max_draft_tokens),
                 },
             )]),
             stats,
@@ -18204,7 +18244,12 @@ impl Scheduler<crate::models::Gemma4Model> {
         }
 
         let window_started = Instant::now();
+        let stats_before_window = stats.clone();
         let timing_before = stats.draft_cap_timing();
+        let kv_state = MtpDraftPolicyKvState::from_runtime(
+            self.paged_prefix_cache.is_some(),
+            self.active_kv_config.enabled,
+        );
         let kv_bits = self.kv_cache_turboquant_bits_for_rows(rows_to_fill)?;
 
         let mut contexts = Vec::with_capacity(rows_to_fill.len());
@@ -18539,6 +18584,7 @@ impl Scheduler<crate::models::Gemma4Model> {
         // returns the full padded cache view and must use each row's offset.
         let single_row_layout = active_rows.len() == 1;
         let mut committed_tokens = 0usize;
+        let mut policy_inputs = Vec::with_capacity(contexts.len());
         for (ctx_idx, (ctx, resolution)) in contexts.iter().zip(resolutions).enumerate() {
             let compact_row = cache_row_for_ctx[ctx_idx];
             let accepted_len = resolution.accepted_verify_input_len;
@@ -18548,13 +18594,7 @@ impl Scheduler<crate::models::Gemma4Model> {
                     ctx.row_idx
                 )
             })?;
-            adjust_mtp_draft_budget(
-                ctx.effective_max_draft_tokens,
-                &mut row_state.adaptive_draft_tokens,
-                ctx.draft_tokens.len(),
-                resolution.accepted_draft_len,
-                stats,
-            );
+            let accepted_draft_len = resolution.accepted_draft_len;
             row_state.last_hidden = slice_hidden_row_position(
                 &verified.hidden,
                 compact_row,
@@ -18592,12 +18632,57 @@ impl Scheduler<crate::models::Gemma4Model> {
             let constraint = self.slots[ctx.row_idx]
                 .as_ref()
                 .and_then(|state| state.constraint.as_ref());
-            committed_tokens = committed_tokens.saturating_add(append_resolved_gemma4_tokens(
-                row_state, ctx, constraint, resolution,
-            )?);
+            let row_committed_tokens =
+                append_resolved_gemma4_tokens(row_state, ctx, constraint, resolution)?;
+            committed_tokens = committed_tokens.saturating_add(row_committed_tokens);
+            policy_inputs.push((
+                ctx.row_idx,
+                ctx.draft_tokens.len(),
+                accepted_draft_len,
+                usize::try_from(ctx.kv_valid_len)
+                    .unwrap_or(0)
+                    .saturating_add(1),
+                row_committed_tokens,
+                ctx.effective_max_draft_tokens,
+            ));
         }
 
         self.refresh_active_kv_residency_stats();
+        let stats_delta = stats.saturating_delta_since(&stats_before_window);
+        let divisor = contexts.len() as u64;
+        let per_row_delta = divided_mtp_stats_timing(&stats_delta, divisor);
+        let total_us = elapsed_us_since(window_started);
+        for (row_idx, attempted, accepted, context_tokens, committed, max_draft_tokens) in
+            policy_inputs
+        {
+            let row_state = row_states.get_mut(&row_idx).ok_or_else(|| {
+                anyhow!(
+                    "fill_gemma4_drafter_windows_batched: row {row_idx} state absent for policy update"
+                )
+            })?;
+            let change =
+                row_state
+                    .draft_policy
+                    .observe_window(MtpDraftPolicyWindow::from_stats_delta(
+                        attempted,
+                        accepted,
+                        committed,
+                        total_us / divisor,
+                        context_tokens,
+                        contexts.len(),
+                        kv_state,
+                        &per_row_delta,
+                    ));
+            if change.reduced {
+                stats.draft_budget_reductions = stats.draft_budget_reductions.saturating_add(1);
+            } else if change.increased {
+                stats.draft_budget_increases = stats.draft_budget_increases.saturating_add(1);
+            }
+            row_state.adaptive_draft_tokens = row_state
+                .draft_policy
+                .current_budget()
+                .min(max_draft_tokens);
+        }
         let timing_delta = stats
             .draft_cap_timing()
             .saturating_delta_since(timing_before);
@@ -18620,7 +18705,7 @@ impl Scheduler<crate::models::Gemma4Model> {
             accepted_draft_tokens,
             committed_tokens,
             rollback_count,
-            elapsed_us_since(window_started),
+            total_us,
             timing_delta,
         );
         Ok(())
@@ -18768,8 +18853,13 @@ impl Scheduler<crate::models::Gemma4Model> {
         history.extend_from_slice(&generated_tokens);
 
         let window_started = Instant::now();
+        let stats_before_window = stats.clone();
         let timing_before = stats.draft_cap_timing();
         let context_tokens = history.len();
+        let kv_state = MtpDraftPolicyKvState::from_runtime(
+            self.paged_prefix_cache.is_some(),
+            self.active_kv_config.enabled,
+        );
 
         let effective_max_draft_tokens = cfg.max_draft_tokens;
         let draft_budget = row_state
@@ -18870,14 +18960,6 @@ impl Scheduler<crate::models::Gemma4Model> {
         if resolution.needs_rollback {
             stats.rollback_count += 1;
         }
-        adjust_mtp_draft_budget(
-            effective_max_draft_tokens,
-            &mut row_state.adaptive_draft_tokens,
-            draft_tokens.len(),
-            resolution.accepted_draft_len,
-            stats,
-        );
-
         let accepted_len = resolution.accepted_verify_input_len;
         let accepted_last_hidden =
             slice_hidden_position(&verified.hidden, i32::try_from(accepted_len)? - 1)?;
@@ -18927,6 +19009,29 @@ impl Scheduler<crate::models::Gemma4Model> {
         let committed_tokens = tokens_to_append.len();
         row_state.pending_tokens.extend(tokens_to_append);
         self.refresh_active_kv_residency_stats();
+        let total_us = elapsed_us_since(window_started);
+        let stats_delta = stats.saturating_delta_since(&stats_before_window);
+        let change = row_state
+            .draft_policy
+            .observe_window(MtpDraftPolicyWindow::from_stats_delta(
+                draft_tokens.len(),
+                accepted_draft_len,
+                committed_tokens,
+                total_us,
+                context_tokens,
+                1,
+                kv_state,
+                &stats_delta,
+            ));
+        if change.reduced {
+            stats.draft_budget_reductions = stats.draft_budget_reductions.saturating_add(1);
+        } else if change.increased {
+            stats.draft_budget_increases = stats.draft_budget_increases.saturating_add(1);
+        }
+        row_state.adaptive_draft_tokens = row_state
+            .draft_policy
+            .current_budget()
+            .min(effective_max_draft_tokens);
         let timing_delta = stats
             .draft_cap_timing()
             .saturating_delta_since(timing_before);
@@ -18937,7 +19042,7 @@ impl Scheduler<crate::models::Gemma4Model> {
             accepted_draft_len,
             committed_tokens,
             rollback_count,
-            elapsed_us_since(window_started),
+            total_us,
             timing_delta,
         );
         self.scatter_prng_state_from_rows(&[row_idx], &compact_prng)?;
@@ -23321,6 +23426,7 @@ mod tests {
                 &mut state,
                 &inputs,
                 &mut stats,
+                MtpDraftPolicyKvState::Contiguous,
             )
             .expect("canonical MTP prepare");
         assert_eq!(
@@ -23414,6 +23520,7 @@ mod tests {
                 &mut state,
                 &inputs,
                 &mut stats,
+                MtpDraftPolicyKvState::Contiguous,
             )
             .expect("canonical MTP prepare");
         assert_eq!(state.rows[&0].mtp_cache.offset(), 1);
@@ -23476,6 +23583,7 @@ mod tests {
                 &mut state,
                 &inputs,
                 &mut stats,
+                MtpDraftPolicyKvState::Contiguous,
             ) {
                 Ok(_) => panic!("destination MTP proposal mismatch must fail closed"),
                 Err(error) => error,
@@ -28198,6 +28306,7 @@ mod tests {
                             .expect("last_hidden row 0"),
                         shared_kv: crate::models::gemma4::Gemma4SharedKvStates::default(),
                         adaptive_draft_tokens: 2,
+                        draft_policy: MtpDraftPolicyState::new(2),
                     },
                 ),
                 (
@@ -28209,6 +28318,7 @@ mod tests {
                             .expect("last_hidden row 1"),
                         shared_kv: crate::models::gemma4::Gemma4SharedKvStates::default(),
                         adaptive_draft_tokens: 2,
+                        draft_policy: MtpDraftPolicyState::new(2),
                     },
                 ),
             ]),
@@ -28267,6 +28377,7 @@ mod tests {
                             .expect("last_hidden row 0"),
                         shared_kv: crate::models::gemma4::Gemma4SharedKvStates::default(),
                         adaptive_draft_tokens: 2,
+                        draft_policy: MtpDraftPolicyState::new(2),
                     },
                 ),
                 (
@@ -28278,6 +28389,7 @@ mod tests {
                             .expect("last_hidden row 1"),
                         shared_kv: crate::models::gemma4::Gemma4SharedKvStates::default(),
                         adaptive_draft_tokens: 2,
+                        draft_policy: MtpDraftPolicyState::new(2),
                     },
                 ),
             ]),
