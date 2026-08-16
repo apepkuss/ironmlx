@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex, MutexGuard,
@@ -22,8 +22,10 @@ const PERFORMANCE_SAMPLE_LIMIT: usize = 20;
 pub struct ModelRuntimePerformanceSnapshot {
     pub window_seconds: u64,
     pub completed_requests: usize,
+    pub live_decode_tokens_per_second: Option<f64>,
     pub prefill_tokens_per_second: Option<f64>,
     pub decode_tokens_per_second: Option<f64>,
+    pub session_decode_tokens_per_second: Option<f64>,
     pub ttft_ms: Option<f64>,
 }
 
@@ -32,8 +34,10 @@ impl Default for ModelRuntimePerformanceSnapshot {
         Self {
             window_seconds: PERFORMANCE_WINDOW.as_secs(),
             completed_requests: 0,
+            live_decode_tokens_per_second: None,
             prefill_tokens_per_second: None,
             decode_tokens_per_second: None,
+            session_decode_tokens_per_second: None,
             ttft_ms: None,
         }
     }
@@ -57,12 +61,27 @@ struct ModelRuntimePerformanceSample {
     ttft_ms: f64,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ActiveDecodeRequest {
+    first_token_at: Instant,
+    decode_tokens: u64,
+}
+
+#[derive(Debug, Default)]
+struct ModelRuntimeDecodeState {
+    active_requests: HashMap<u64, ActiveDecodeRequest>,
+    session_decode_tokens: u64,
+    session_decode_duration: Duration,
+}
+
 #[derive(Debug, Default)]
 pub struct ModelRuntimeUsageCounters {
     input_tokens: AtomicU64,
     output_tokens: AtomicU64,
     prefix_cache_hit_tokens: AtomicU64,
     prefix_cache_eligible_tokens: AtomicU64,
+    next_request_id: AtomicU64,
+    decode_state: Mutex<ModelRuntimeDecodeState>,
     performance_samples: Mutex<VecDeque<ModelRuntimePerformanceSample>>,
 }
 
@@ -70,10 +89,12 @@ pub struct ModelRuntimeUsageCounters {
 #[must_use = "request performance samples must be completed or intentionally dropped"]
 pub struct ModelRuntimeRequestTracker {
     counters: Arc<ModelRuntimeUsageCounters>,
+    request_id: u64,
     input_tokens: u64,
     started_at: Instant,
     first_token_at: Option<Instant>,
     output_tokens: u64,
+    finished: bool,
 }
 
 impl ModelRuntimeUsageCounters {
@@ -93,10 +114,12 @@ impl ModelRuntimeUsageCounters {
         self.record_input_tokens(input_tokens);
         ModelRuntimeRequestTracker {
             counters: self.clone(),
+            request_id: self.next_request_id.fetch_add(1, Ordering::Relaxed),
             input_tokens,
             started_at,
             first_token_at: None,
             output_tokens: 0,
+            finished: false,
         }
     }
 
@@ -150,21 +173,87 @@ impl ModelRuntimeUsageCounters {
     fn performance_snapshot_at(&self, now: Instant) -> ModelRuntimePerformanceSnapshot {
         let mut samples = self.performance_samples();
         prune_performance_samples(&mut samples, now);
+        let completed_requests = samples.len();
+        let prefill_tokens_per_second = median(
+            samples
+                .iter()
+                .map(|sample| sample.prefill_tokens_per_second),
+        );
+        let decode_tokens_per_second = median(
+            samples
+                .iter()
+                .filter_map(|sample| sample.decode_tokens_per_second),
+        );
+        let ttft_ms = median(samples.iter().map(|sample| sample.ttft_ms));
+        drop(samples);
+
+        let decode_state = self.decode_state();
+        let (live_decode_sum, live_decode_samples) = decode_state
+            .active_requests
+            .values()
+            .filter_map(|request| {
+                tokens_per_second(
+                    request.decode_tokens,
+                    now.saturating_duration_since(request.first_token_at),
+                )
+            })
+            .fold((0.0, 0_usize), |(sum, count), rate| (sum + rate, count + 1));
+        let live_decode_tokens_per_second = (live_decode_samples > 0).then_some(live_decode_sum);
+        let session_decode_tokens_per_second = tokens_per_second(
+            decode_state.session_decode_tokens,
+            decode_state.session_decode_duration,
+        );
+
         ModelRuntimePerformanceSnapshot {
             window_seconds: PERFORMANCE_WINDOW.as_secs(),
-            completed_requests: samples.len(),
-            prefill_tokens_per_second: median(
-                samples
-                    .iter()
-                    .map(|sample| sample.prefill_tokens_per_second),
-            ),
-            decode_tokens_per_second: median(
-                samples
-                    .iter()
-                    .filter_map(|sample| sample.decode_tokens_per_second),
-            ),
-            ttft_ms: median(samples.iter().map(|sample| sample.ttft_ms)),
+            completed_requests,
+            live_decode_tokens_per_second,
+            prefill_tokens_per_second,
+            decode_tokens_per_second,
+            session_decode_tokens_per_second,
+            ttft_ms,
         }
+    }
+
+    fn update_active_decode_request(
+        &self,
+        request_id: u64,
+        first_token_at: Instant,
+        decode_tokens: u64,
+    ) {
+        self.decode_state().active_requests.insert(
+            request_id,
+            ActiveDecodeRequest {
+                first_token_at,
+                decode_tokens,
+            },
+        );
+    }
+
+    fn finish_decode_request(
+        &self,
+        request_id: u64,
+        decode_tokens: u64,
+        decode_duration: Duration,
+    ) {
+        let mut state = self.decode_state();
+        state.active_requests.remove(&request_id);
+        if decode_tokens > 0 && !decode_duration.is_zero() {
+            state.session_decode_tokens = state.session_decode_tokens.saturating_add(decode_tokens);
+            state.session_decode_duration = state
+                .session_decode_duration
+                .saturating_add(decode_duration);
+        }
+    }
+
+    fn remove_active_decode_request(&self, request_id: u64) {
+        self.decode_state().active_requests.remove(&request_id);
+    }
+
+    fn decode_state(&self) -> MutexGuard<'_, ModelRuntimeDecodeState> {
+        self.decode_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn performance_samples(&self) -> MutexGuard<'_, VecDeque<ModelRuntimePerformanceSample>> {
@@ -187,21 +276,33 @@ impl ModelRuntimeRequestTracker {
         if tokens == 0 {
             return;
         }
-        self.first_token_at.get_or_insert(now);
+        let first_token_at = *self.first_token_at.get_or_insert(now);
         self.output_tokens = self.output_tokens.saturating_add(tokens);
         self.counters.record_output_tokens(tokens);
+        self.counters.update_active_decode_request(
+            self.request_id,
+            first_token_at,
+            self.output_tokens.saturating_sub(1),
+        );
     }
 
     fn complete_at(&mut self, completed_at: Instant) {
-        let Some(first_token_at) = self.first_token_at else {
+        if self.finished {
             return;
-        };
-        let ttft = first_token_at.saturating_duration_since(self.started_at);
-        let Some(prefill_tokens_per_second) = tokens_per_second(self.input_tokens, ttft) else {
+        }
+        self.finished = true;
+        let Some(first_token_at) = self.first_token_at else {
+            self.counters.remove_active_decode_request(self.request_id);
             return;
         };
         let decode_tokens = self.output_tokens.saturating_sub(1);
         let decode_duration = completed_at.saturating_duration_since(first_token_at);
+        self.counters
+            .finish_decode_request(self.request_id, decode_tokens, decode_duration);
+        let ttft = first_token_at.saturating_duration_since(self.started_at);
+        let Some(prefill_tokens_per_second) = tokens_per_second(self.input_tokens, ttft) else {
+            return;
+        };
         self.counters
             .record_performance_sample(ModelRuntimePerformanceSample {
                 completed_at,
@@ -209,6 +310,14 @@ impl ModelRuntimeRequestTracker {
                 decode_tokens_per_second: tokens_per_second(decode_tokens, decode_duration),
                 ttft_ms: ttft.as_secs_f64() * 1_000.0,
             });
+    }
+}
+
+impl Drop for ModelRuntimeRequestTracker {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.counters.remove_active_decode_request(self.request_id);
+        }
     }
 }
 
@@ -272,14 +381,107 @@ mod tests {
         let mut request = counters.start_request(100, started_at);
         request.record_output_tokens_at(1, started_at + Duration::from_millis(200));
         request.record_output_tokens_at(9, started_at + Duration::from_millis(1_100));
+        let live_snapshot = counters.snapshot_at(true, started_at + Duration::from_millis(1_100));
+        assert_eq!(
+            live_snapshot.performance.live_decode_tokens_per_second,
+            Some(10.0)
+        );
+        assert_eq!(
+            live_snapshot.performance.session_decode_tokens_per_second,
+            None
+        );
         request.complete_at(started_at + Duration::from_millis(1_100));
 
         let snapshot = counters.snapshot_at(true, started_at + Duration::from_millis(1_100));
         assert_eq!(snapshot.cumulative_tokens, 110);
         assert_eq!(snapshot.performance.completed_requests, 1);
+        assert_eq!(snapshot.performance.live_decode_tokens_per_second, None);
         assert_eq!(snapshot.performance.prefill_tokens_per_second, Some(500.0));
         assert_eq!(snapshot.performance.decode_tokens_per_second, Some(10.0));
+        assert_eq!(
+            snapshot.performance.session_decode_tokens_per_second,
+            Some(10.0)
+        );
         assert_eq!(snapshot.performance.ttft_ms, Some(200.0));
+    }
+
+    #[test]
+    fn live_decode_sums_active_model_requests_and_session_average_is_weighted() {
+        let counters = Arc::new(ModelRuntimeUsageCounters::default());
+        let started_at = Instant::now();
+        let mut first = counters.start_request(10, started_at);
+        first.record_output_tokens_at(1, started_at + Duration::from_millis(100));
+        first.record_output_tokens_at(4, started_at + Duration::from_millis(500));
+
+        let mut second = counters.start_request(10, started_at);
+        second.record_output_tokens_at(1, started_at + Duration::from_millis(300));
+        second.record_output_tokens_at(2, started_at + Duration::from_millis(500));
+
+        let concurrent = counters.snapshot_at(true, started_at + Duration::from_millis(500));
+        assert_eq!(
+            concurrent.performance.live_decode_tokens_per_second,
+            Some(20.0)
+        );
+
+        first.complete_at(started_at + Duration::from_millis(500));
+        let one_active = counters.snapshot_at(true, started_at + Duration::from_millis(500));
+        assert_eq!(
+            one_active.performance.live_decode_tokens_per_second,
+            Some(10.0)
+        );
+        assert_eq!(
+            one_active.performance.session_decode_tokens_per_second,
+            Some(10.0)
+        );
+
+        second.complete_at(started_at + Duration::from_millis(700));
+        let completed = counters.snapshot_at(true, started_at + Duration::from_millis(700));
+        assert_eq!(completed.performance.live_decode_tokens_per_second, None);
+        assert_eq!(
+            completed.performance.session_decode_tokens_per_second,
+            Some(7.5)
+        );
+    }
+
+    #[test]
+    fn performance_counters_are_independent_per_loaded_model() {
+        let started_at = Instant::now();
+        let first_model = Arc::new(ModelRuntimeUsageCounters::default());
+        let second_model = Arc::new(ModelRuntimeUsageCounters::default());
+
+        let mut first_request = first_model.start_request(10, started_at);
+        first_request.record_output_tokens_at(1, started_at + Duration::from_millis(100));
+        first_request.record_output_tokens_at(4, started_at + Duration::from_millis(500));
+
+        assert_eq!(
+            first_model
+                .snapshot_at(true, started_at + Duration::from_millis(500))
+                .performance
+                .live_decode_tokens_per_second,
+            Some(10.0)
+        );
+        assert_eq!(
+            second_model
+                .snapshot_at(true, started_at + Duration::from_millis(500))
+                .performance,
+            ModelRuntimePerformanceSnapshot::default()
+        );
+
+        first_request.complete_at(started_at + Duration::from_millis(500));
+        assert_eq!(
+            first_model
+                .snapshot_at(true, started_at + Duration::from_millis(500))
+                .performance
+                .session_decode_tokens_per_second,
+            Some(10.0)
+        );
+        assert_eq!(
+            second_model
+                .snapshot_at(true, started_at + Duration::from_millis(500))
+                .performance
+                .session_decode_tokens_per_second,
+            None
+        );
     }
 
     #[test]
@@ -288,6 +490,14 @@ mod tests {
         let started_at = Instant::now();
         let mut incomplete = counters.start_request(10, started_at);
         incomplete.record_output_tokens_at(1, started_at + Duration::from_millis(10));
+        incomplete.record_output_tokens_at(1, started_at + Duration::from_millis(20));
+        assert_eq!(
+            counters
+                .snapshot_at(true, started_at + Duration::from_millis(20))
+                .performance
+                .live_decode_tokens_per_second,
+            Some(100.0)
+        );
         drop(incomplete);
         assert_eq!(
             counters
@@ -298,13 +508,14 @@ mod tests {
 
         let mut completed = counters.start_request(10, started_at);
         completed.record_output_tokens_at(1, started_at + Duration::from_millis(10));
+        completed.record_output_tokens_at(1, started_at + Duration::from_millis(20));
         completed.complete_at(started_at + Duration::from_millis(20));
+        let expired = counters.snapshot_at(true, started_at + Duration::from_secs(61));
+        assert_eq!(expired.performance.completed_requests, 0);
+        assert_eq!(expired.performance.decode_tokens_per_second, None);
         assert_eq!(
-            counters
-                .snapshot_at(true, started_at + Duration::from_secs(61))
-                .performance
-                .completed_requests,
-            0
+            expired.performance.session_decode_tokens_per_second,
+            Some(100.0)
         );
     }
 }

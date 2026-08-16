@@ -1027,7 +1027,7 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     )
 }
 
-@Test func dashboardRendersBlockDiffusionRuntimeHealthSeparately() throws {
+@Test func dashboardRendersUnifiedRuntimeHealth() throws {
     let html = try String(
         contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
         encoding: .utf8
@@ -1036,18 +1036,27 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(dashboardHTML(html, contains: #"id="runtime-model-health""#))
     #expect(dashboardHTML(html, contains: "function renderRuntimeModels(models)"))
     #expect(dashboardHTML(html, contains: "model.runtime_kind === 'block_diffusion'"))
-    #expect(dashboardHTML(html, contains: "runtime_continuous_batching"))
-    #expect(dashboardHTML(html, contains: "runtime_serial_diffusion"))
+    #expect(!dashboardHTML(html, contains: "const scheduler ="))
+    #expect(dashboardHTML(html, contains: "runtime-model-card"))
+    #expect(dashboardHTML(html, contains: "runtime-status-rail"))
+    #expect(dashboardHTML(html, contains: "runtime-performance-rail"))
+    #expect(dashboardHTML(html, contains: "runtime-model-footer"))
+    #expect(dashboardHTML(html, contains: "runtime-kv-disclosure"))
+    #expect(dashboardHTML(html, contains: "model.mtp_enabled === true"))
+    #expect(dashboardHTML(html, contains: "badge-mtp-enabled"))
     #expect(dashboardHTML(html, contains: "runtime_cumulative_tokens"))
     #expect(dashboardHTML(html, contains: "runtime_cache_hit_tokens"))
     #expect(dashboardHTML(html, contains: "runtime_cache_hit_rate"))
     #expect(dashboardHTML(html, contains: "runtime_prefill_rate"))
-    #expect(dashboardHTML(html, contains: "runtime_decode_rate"))
+    #expect(dashboardHTML(html, contains: "runtime_live_decode_rate"))
+    #expect(dashboardHTML(html, contains: "runtime_recent_decode_rate"))
+    #expect(dashboardHTML(html, contains: "runtime_session_decode_rate"))
     #expect(dashboardHTML(html, contains: "runtime_ttft"))
-    #expect(dashboardHTML(html, contains: "runtime-performance-rail"))
     #expect(dashboardHTML(html, contains: "performance.completed_requests"))
+    #expect(dashboardHTML(html, contains: "performance.live_decode_tokens_per_second"))
     #expect(dashboardHTML(html, contains: "performance.prefill_tokens_per_second"))
     #expect(dashboardHTML(html, contains: "performance.decode_tokens_per_second"))
+    #expect(dashboardHTML(html, contains: "performance.session_decode_tokens_per_second"))
     #expect(dashboardHTML(html, contains: "performance.ttft_ms"))
     #expect(dashboardHTML(html, contains: "if (!isDiffusion)"))
     #expect(dashboardHTML(html, contains: "if (usage.prefix_cache)"))

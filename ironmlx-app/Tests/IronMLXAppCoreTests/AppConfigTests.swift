@@ -472,8 +472,10 @@ func appLanguageResolverMatchesSupportedMacOSPreferences(
         "performance": {
           "window_seconds": 60,
           "completed_requests": 3,
+          "live_decode_tokens_per_second": 31.2,
           "prefill_tokens_per_second": 412.5,
           "decode_tokens_per_second": 28.4,
+          "session_decode_tokens_per_second": 29.1,
           "ttft_ms": 184.2
         }
       },
@@ -511,8 +513,10 @@ func appLanguageResolverMatchesSupportedMacOSPreferences(
     #expect(info.usage.prefixCache?.eligibleTokens == 25)
     #expect(info.usage.performance.windowSeconds == 60)
     #expect(info.usage.performance.completedRequests == 3)
+    #expect(info.usage.performance.liveDecodeTokensPerSecond == 31.2)
     #expect(info.usage.performance.prefillTokensPerSecond == 412.5)
     #expect(info.usage.performance.decodeTokensPerSecond == 28.4)
+    #expect(info.usage.performance.sessionDecodeTokensPerSecond == 29.1)
     #expect(info.usage.performance.ttftMs == 184.2)
     #expect(info.activeKvOffload?.status == "active")
     #expect(info.activeKvOffload?.parkedRequests == 2)

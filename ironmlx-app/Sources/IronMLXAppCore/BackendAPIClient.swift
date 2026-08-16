@@ -535,29 +535,37 @@ public struct BackendPrefixCacheUsage: Codable, Equatable, Sendable {
 public struct BackendModelRuntimePerformance: Codable, Equatable, Sendable {
     public var windowSeconds: UInt64
     public var completedRequests: Int
+    public var liveDecodeTokensPerSecond: Double?
     public var prefillTokensPerSecond: Double?
     public var decodeTokensPerSecond: Double?
+    public var sessionDecodeTokensPerSecond: Double?
     public var ttftMs: Double?
 
     public init(
         windowSeconds: UInt64 = 60,
         completedRequests: Int = 0,
+        liveDecodeTokensPerSecond: Double? = nil,
         prefillTokensPerSecond: Double? = nil,
         decodeTokensPerSecond: Double? = nil,
+        sessionDecodeTokensPerSecond: Double? = nil,
         ttftMs: Double? = nil
     ) {
         self.windowSeconds = windowSeconds
         self.completedRequests = completedRequests
+        self.liveDecodeTokensPerSecond = liveDecodeTokensPerSecond
         self.prefillTokensPerSecond = prefillTokensPerSecond
         self.decodeTokensPerSecond = decodeTokensPerSecond
+        self.sessionDecodeTokensPerSecond = sessionDecodeTokensPerSecond
         self.ttftMs = ttftMs
     }
 
     enum CodingKeys: String, CodingKey {
         case windowSeconds = "window_seconds"
         case completedRequests = "completed_requests"
+        case liveDecodeTokensPerSecond = "live_decode_tokens_per_second"
         case prefillTokensPerSecond = "prefill_tokens_per_second"
         case decodeTokensPerSecond = "decode_tokens_per_second"
+        case sessionDecodeTokensPerSecond = "session_decode_tokens_per_second"
         case ttftMs = "ttft_ms"
     }
 }

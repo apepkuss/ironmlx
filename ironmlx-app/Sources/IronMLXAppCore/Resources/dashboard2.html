@@ -345,40 +345,116 @@
     margin-bottom: 16px;
   }
 
-  .runtime-performance-rail {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    margin-top: 9px;
-    padding: 9px 0 7px;
-    border-top: 0.5px solid var(--border);
+  .runtime-model-card {
+    overflow: hidden;
+    border: 0.5px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg);
+  }
+
+  .runtime-model-header {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    padding: 13px 16px 12px;
     border-bottom: 0.5px solid var(--border);
   }
 
-  .runtime-performance-metric {
+  .runtime-model-identity {
+    display: flex;
+    align-items: center;
     min-width: 0;
-    padding: 0 12px;
+    gap: 6px;
   }
 
-  .runtime-performance-metric:first-child {
-    padding-left: 0;
+  .runtime-model-identity .badge-mtp {
+    margin-left: 0;
   }
 
-  .runtime-performance-metric + .runtime-performance-metric {
+  .runtime-model-name {
+    overflow: hidden;
+    color: var(--text-primary);
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1.35;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .runtime-model-section {
+    padding: 12px 16px 14px;
+  }
+
+  .runtime-model-section + .runtime-model-section {
+    border-top: 0.5px solid var(--border);
+  }
+
+  .runtime-section-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 7px;
+  }
+
+  .runtime-section-title {
+    color: var(--text-secondary);
+    font-size: 10px;
+    font-weight: 650;
+    letter-spacing: 0.02em;
+  }
+
+  .runtime-section-meta {
+    overflow: hidden;
+    color: var(--text-tertiary);
+    font-size: 9px;
+    line-height: 1.3;
+    text-align: right;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .runtime-metric-rail {
+    display: grid;
+    overflow: hidden;
+    border: 0.5px solid var(--border);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--card-bg) 70%, var(--bg));
+  }
+
+  .runtime-status-rail {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .runtime-performance-rail {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+
+  .runtime-metric {
+    min-width: 0;
+    padding: 9px 12px 10px;
+  }
+
+  .runtime-metric + .runtime-metric {
     border-left: 0.5px solid var(--border);
   }
 
-  .runtime-performance-label {
+  .runtime-metric-label {
     display: block;
+    overflow: hidden;
     color: var(--text-tertiary);
     font-size: 9px;
     font-weight: 600;
-    letter-spacing: 0.04em;
-    line-height: 1.2;
+    letter-spacing: 0.035em;
+    line-height: 1.25;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
-  .runtime-performance-value {
+  .runtime-metric-value {
     display: block;
-    margin-top: 3px;
+    overflow: hidden;
+    margin-top: 4px;
     color: var(--text-primary);
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     font-size: 15px;
@@ -386,25 +462,206 @@
     font-weight: 650;
     letter-spacing: -0.02em;
     line-height: 1.2;
+    text-overflow: ellipsis;
     white-space: nowrap;
   }
 
-  .runtime-performance-metric-primary .runtime-performance-value {
+  .runtime-metric-primary .runtime-metric-value {
     color: var(--accent);
   }
 
-  .runtime-performance-unit {
+  .runtime-metric-unit {
     color: var(--text-tertiary);
     font-size: 9px;
     font-weight: 500;
     letter-spacing: 0;
   }
 
-  .runtime-performance-meta {
-    margin-top: 5px;
+  .runtime-state-value {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .runtime-state-dot {
+    width: 6px;
+    height: 6px;
+    flex: 0 0 auto;
+    border-radius: 50%;
+    background: var(--text-tertiary);
+  }
+
+  .runtime-state-busy .runtime-state-dot {
+    background: var(--green);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 16%, transparent);
+  }
+
+  .runtime-model-footer {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(220px, auto);
+    align-items: center;
+    gap: 12px;
+    padding: 9px 16px;
+    border-top: 0.5px solid var(--border);
+    background: color-mix(in srgb, var(--card-bg) 45%, var(--bg));
+  }
+
+  .runtime-usage-summary {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    flex-wrap: wrap;
+    gap: 5px 14px;
+    color: var(--text-secondary);
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .runtime-usage-item strong {
+    margin-left: 4px;
+    color: var(--text-primary);
+    font-weight: 650;
+  }
+
+  .runtime-kv-disclosure {
+    min-width: 220px;
+  }
+
+  .runtime-kv-disclosure[open] {
+    grid-column: 1 / -1;
+  }
+
+  .runtime-kv-disclosure summary {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 7px;
+    color: var(--text-secondary);
+    font-size: 10px;
+    cursor: pointer;
+    list-style: none;
+    user-select: none;
+  }
+
+  .runtime-kv-disclosure summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .runtime-kv-disclosure summary:focus-visible {
+    border-radius: 4px;
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+  }
+
+  .runtime-kv-state {
+    font-weight: 650;
+  }
+
+  .runtime-kv-state-active {
+    color: var(--accent);
+  }
+
+  .runtime-kv-state-degraded {
+    color: #ff9500;
+  }
+
+  .runtime-kv-chevron {
+    color: var(--text-tertiary);
+    font-size: 12px;
+    transform: rotate(0deg);
+    transition: transform 140ms ease;
+  }
+
+  .runtime-kv-disclosure[open] .runtime-kv-chevron {
+    transform: rotate(90deg);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .runtime-kv-chevron {
+      transition: none;
+    }
+  }
+
+  .runtime-kv-details {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-column: 1 / -1;
+    gap: 8px;
+    margin-top: 9px;
+    padding-top: 9px;
+    border-top: 0.5px solid var(--border);
+  }
+
+  .runtime-kv-detail {
+    min-width: 0;
+  }
+
+  .runtime-kv-detail-label {
+    display: block;
     color: var(--text-tertiary);
     font-size: 9px;
-    line-height: 1.35;
+  }
+
+  .runtime-kv-detail-value {
+    display: block;
+    overflow: hidden;
+    margin-top: 2px;
+    color: var(--text-primary);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  @media (max-width: 900px) {
+    .runtime-performance-rail {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .runtime-performance-rail .runtime-metric:nth-child(4) {
+      border-left: 0;
+    }
+
+    .runtime-performance-rail .runtime-metric:nth-child(n+4) {
+      border-top: 0.5px solid var(--border);
+    }
+  }
+
+  @media (max-width: 620px) {
+    .runtime-status-rail,
+    .runtime-performance-rail {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .runtime-status-rail .runtime-metric:nth-child(odd),
+    .runtime-performance-rail .runtime-metric:nth-child(odd) {
+      border-left: 0;
+    }
+
+    .runtime-performance-rail .runtime-metric:nth-child(4) {
+      border-left: 0.5px solid var(--border);
+    }
+
+    .runtime-status-rail .runtime-metric:nth-child(n+3),
+    .runtime-performance-rail .runtime-metric:nth-child(n+3) {
+      border-top: 0.5px solid var(--border);
+    }
+
+    .runtime-model-footer {
+      grid-template-columns: 1fr;
+    }
+
+    .runtime-kv-disclosure,
+    .runtime-kv-disclosure summary {
+      min-width: 0;
+      justify-content: flex-start;
+    }
+
+    .runtime-kv-details {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
   }
 
   .profile-help {
@@ -4153,19 +4410,26 @@
       runtime_models: "Model Runtime Status",
       runtime_empty_title: "No models are currently running",
       runtime_empty_description: "Load a model to see request queues and cumulative usage here.",
-      runtime_continuous_batching: "Continuous batching",
-      runtime_serial_diffusion: "Serial block diffusion",
+      runtime_requests: "Requests",
+      runtime_operational_state: "State",
+      runtime_state_idle: "Idle",
+      runtime_state_busy: "Processing",
+      runtime_performance: "Performance",
       runtime_active: "Active",
       runtime_queued: "Queued",
       runtime_capacity: "Queue capacity",
       runtime_cumulative_tokens: "Cumulative tokens",
       runtime_cache_hit_tokens: "Cache-hit tokens",
       runtime_cache_hit_rate: "Cache hit rate",
+      runtime_live_decode_rate: "Live decode",
+      runtime_recent_decode_rate: "Recent P50",
+      runtime_session_decode_rate: "Session average",
       runtime_prefill_rate: "Prefill",
-      runtime_decode_rate: "Decode",
       runtime_ttft: "TTFT",
+      runtime_live_decode_help: "Aggregate output rate of this model's active decode requests.",
+      runtime_recent_decode_help: "Median output rate of this model's completed requests in the last 60 seconds.",
+      runtime_session_decode_help: "Average output rate across completed requests since this model was loaded.",
       runtime_prefill_help: "Effective input throughput from inference start to the first output token.",
-      runtime_decode_help: "Output token rate after the first token.",
       runtime_ttft_help: "Inference start to the first output token.",
       runtime_performance_window: "Recent performance · P50 · Last {seconds}s · {requests} completed",
       runtime_performance_empty: "Recent performance · Complete a request to begin sampling",
@@ -4490,19 +4754,26 @@
       runtime_models: "模型运行状态",
       runtime_empty_title: "暂无运行中的模型",
       runtime_empty_description: "加载模型后，此处将显示各模型的请求队列与累计统计。",
-      runtime_continuous_batching: "连续批处理",
-      runtime_serial_diffusion: "串行块扩散",
+      runtime_requests: "请求",
+      runtime_operational_state: "运行状态",
+      runtime_state_idle: "空闲",
+      runtime_state_busy: "处理中",
+      runtime_performance: "性能",
       runtime_active: "活跃请求",
       runtime_queued: "排队请求",
       runtime_capacity: "队列容量",
       runtime_cumulative_tokens: "累计 Tokens",
       runtime_cache_hit_tokens: "缓存命中 Tokens",
       runtime_cache_hit_rate: "缓存命中率",
+      runtime_live_decode_rate: "实时解码",
+      runtime_recent_decode_rate: "近期 P50",
+      runtime_session_decode_rate: "会话平均",
       runtime_prefill_rate: "预填充",
-      runtime_decode_rate: "解码",
       runtime_ttft: "首 Token 延迟",
+      runtime_live_decode_help: "当前模型所有活动解码请求的总输出速度。",
+      runtime_recent_decode_help: "当前模型近 60 秒完成请求的输出速度中位数。",
+      runtime_session_decode_help: "当前模型自本次加载以来所有完成请求的平均输出速度。",
       runtime_prefill_help: "从推理开始到首个输出 Token 的有效输入吞吐。",
-      runtime_decode_help: "首个 Token 之后的输出 Token 速度。",
       runtime_ttft_help: "从推理开始到生成首个输出 Token 的时间。",
       runtime_performance_window: "近期性能 · P50 · 近 {seconds} 秒 · {requests} 个完成请求",
       runtime_performance_empty: "近期性能 · 完成一次请求后开始采样",
@@ -4827,19 +5098,26 @@
       runtime_models: "模型執行狀態",
       runtime_empty_title: "目前沒有執行中的模型",
       runtime_empty_description: "載入模型後，此處將顯示各模型的請求佇列與累計統計。",
-      runtime_continuous_batching: "連續批次處理",
-      runtime_serial_diffusion: "序列區塊擴散",
+      runtime_requests: "請求",
+      runtime_operational_state: "執行狀態",
+      runtime_state_idle: "閒置",
+      runtime_state_busy: "處理中",
+      runtime_performance: "效能",
       runtime_active: "作用中請求",
       runtime_queued: "排隊請求",
       runtime_capacity: "佇列容量",
       runtime_cumulative_tokens: "累計 Tokens",
       runtime_cache_hit_tokens: "快取命中 Tokens",
       runtime_cache_hit_rate: "快取命中率",
+      runtime_live_decode_rate: "即時解碼",
+      runtime_recent_decode_rate: "近期 P50",
+      runtime_session_decode_rate: "工作階段平均",
       runtime_prefill_rate: "預填充",
-      runtime_decode_rate: "解碼",
       runtime_ttft: "首 Token 延遲",
+      runtime_live_decode_help: "目前模型所有作用中解碼請求的總輸出速度。",
+      runtime_recent_decode_help: "目前模型近 60 秒已完成請求的輸出速度中位數。",
+      runtime_session_decode_help: "目前模型自本次載入以來所有已完成請求的平均輸出速度。",
       runtime_prefill_help: "從推理開始到首個輸出 Token 的有效輸入吞吐。",
-      runtime_decode_help: "首個 Token 之後的輸出 Token 速度。",
       runtime_ttft_help: "從推理開始到產生首個輸出 Token 的時間。",
       runtime_performance_window: "近期效能 · P50 · 近 {seconds} 秒 · {requests} 個完成請求",
       runtime_performance_empty: "近期效能 · 完成一次請求後開始取樣",
@@ -5147,19 +5425,26 @@
       runtime_models: "モデル実行状況",
       runtime_empty_title: "実行中のモデルはありません",
       runtime_empty_description: "モデルを読み込むと、各モデルのリクエストキューと累計統計がここに表示されます。",
-      runtime_continuous_batching: "連続バッチ処理",
-      runtime_serial_diffusion: "直列ブロック拡散",
+      runtime_requests: "リクエスト",
+      runtime_operational_state: "実行状態",
+      runtime_state_idle: "待機中",
+      runtime_state_busy: "処理中",
+      runtime_performance: "パフォーマンス",
       runtime_active: "実行中",
       runtime_queued: "待機中",
       runtime_capacity: "キュー容量",
       runtime_cumulative_tokens: "累計 Tokens",
       runtime_cache_hit_tokens: "キャッシュヒット Tokens",
       runtime_cache_hit_rate: "キャッシュヒット率",
+      runtime_live_decode_rate: "リアルタイム",
+      runtime_recent_decode_rate: "直近 P50",
+      runtime_session_decode_rate: "セッション平均",
       runtime_prefill_rate: "プリフィル",
-      runtime_decode_rate: "デコード",
       runtime_ttft: "TTFT",
+      runtime_live_decode_help: "このモデルで実行中の全デコードリクエストを合計した出力速度。",
+      runtime_recent_decode_help: "このモデルで直近 60 秒以内に完了したリクエストの出力速度中央値。",
+      runtime_session_decode_help: "このモデルを読み込んでから完了した全リクエストの平均出力速度。",
       runtime_prefill_help: "推論開始から最初の出力 Token までの実効入力スループット。",
-      runtime_decode_help: "最初の Token 以降の出力 Token 速度。",
       runtime_ttft_help: "推論開始から最初の出力 Token までの時間。",
       runtime_performance_window: "直近の性能 · P50 · 過去 {seconds} 秒 · 完了 {requests} 件",
       runtime_performance_empty: "直近の性能 · リクエスト完了後に計測を開始します",
@@ -5467,19 +5752,26 @@
       runtime_models: "모델 실행 상태",
       runtime_empty_title: "실행 중인 모델이 없습니다",
       runtime_empty_description: "모델을 로드하면 각 모델의 요청 대기열과 누적 통계가 여기에 표시됩니다.",
-      runtime_continuous_batching: "연속 배치 처리",
-      runtime_serial_diffusion: "직렬 블록 확산",
+      runtime_requests: "요청",
+      runtime_operational_state: "실행 상태",
+      runtime_state_idle: "대기",
+      runtime_state_busy: "처리 중",
+      runtime_performance: "성능",
       runtime_active: "활성 요청",
       runtime_queued: "대기 요청",
       runtime_capacity: "대기열 용량",
       runtime_cumulative_tokens: "누적 Tokens",
       runtime_cache_hit_tokens: "캐시 적중 Tokens",
       runtime_cache_hit_rate: "캐시 적중률",
+      runtime_live_decode_rate: "실시간 디코드",
+      runtime_recent_decode_rate: "최근 P50",
+      runtime_session_decode_rate: "세션 평균",
       runtime_prefill_rate: "프리필",
-      runtime_decode_rate: "디코드",
       runtime_ttft: "TTFT",
+      runtime_live_decode_help: "현재 모델의 모든 활성 디코드 요청을 합산한 출력 속도입니다.",
+      runtime_recent_decode_help: "현재 모델에서 최근 60초 내 완료된 요청의 출력 속도 중앙값입니다.",
+      runtime_session_decode_help: "현재 모델을 로드한 후 완료된 모든 요청의 평균 출력 속도입니다.",
       runtime_prefill_help: "추론 시작부터 첫 출력 Token까지의 유효 입력 처리량입니다.",
-      runtime_decode_help: "첫 Token 이후의 출력 Token 속도입니다.",
       runtime_ttft_help: "추론 시작부터 첫 출력 Token까지 걸린 시간입니다.",
       runtime_performance_window: "최근 성능 · P50 · 최근 {seconds}초 · 완료 {requests}건",
       runtime_performance_empty: "최근 성능 · 요청을 완료하면 측정을 시작합니다",
@@ -9956,20 +10248,46 @@
     container.innerHTML = models.map(model => {
       const modelId = String(model.id || model.model || '');
       const isDiffusion = model.runtime_kind === 'block_diffusion';
-      const scheduler = isDiffusion
-        ? (dict.runtime_serial_diffusion || 'Serial block diffusion')
-        : model.scheduler === 'continuous_batching'
-          ? (dict.runtime_continuous_batching || 'Continuous batching')
-          : String(model.scheduler || '');
-      const requestMetrics = [
-        (dict.runtime_active || 'Active') + ': ' + Number(model.active_requests || 0),
-        (dict.runtime_queued || 'Queued') + ': ' + Number(model.queued_requests || 0),
-        (dict.runtime_capacity || 'Queue capacity') + ': ' + Number(model.queue_capacity || 0)
-      ].join(' · ');
-      const usage = model.usage;
-      const tokenMetrics = [
-        (dict.runtime_cumulative_tokens || 'Cumulative tokens') + ': '
-          + Number(usage.cumulative_tokens).toLocaleString(numberLocale)
+      const activeRequests = Number(model.active_requests || 0);
+      const queuedRequests = Number(model.queued_requests || 0);
+      const queueCapacity = Number(model.queue_capacity || 0);
+      const isBusy = activeRequests > 0 || queuedRequests > 0;
+      const usage = model.usage || {};
+      const metric = (label, help, value, unit, digits, primary) => {
+        const available = value !== null && Number.isFinite(Number(value));
+        const number = available
+          ? Number(value).toLocaleString(numberLocale, {
+              minimumFractionDigits: digits,
+              maximumFractionDigits: digits
+            })
+          : '—';
+        return '<div class="runtime-metric'
+          + (primary && available ? ' runtime-metric-primary' : '')
+          + '" title="' + escapeAttr(help || label) + '">'
+          + '<span class="runtime-metric-label">' + escapeAttr(label) + '</span>'
+          + '<span class="runtime-metric-value">' + escapeAttr(number)
+          + (available && unit ? ' <span class="runtime-metric-unit">' + escapeAttr(unit) + '</span>' : '')
+          + '</span></div>';
+      };
+      const requestDetails = '<div class="runtime-model-section">'
+        + '<div class="runtime-section-header"><span class="runtime-section-title">'
+        + escapeAttr(dict.runtime_requests || 'Requests') + '</span></div>'
+        + '<div class="runtime-metric-rail runtime-status-rail">'
+        + '<div class="runtime-metric"><span class="runtime-metric-label">'
+        + escapeAttr(dict.runtime_operational_state || 'State') + '</span>'
+        + '<span class="runtime-metric-value runtime-state-value '
+        + (isBusy ? 'runtime-state-busy' : 'runtime-state-idle') + '">'
+        + '<span class="runtime-state-dot"></span>'
+        + escapeAttr(isBusy ? (dict.runtime_state_busy || 'Processing') : (dict.runtime_state_idle || 'Idle'))
+        + '</span></div>'
+        + metric(dict.runtime_active || 'Active', '', activeRequests, '', 0, false)
+        + metric(dict.runtime_queued || 'Queued', '', queuedRequests, '', 0, false)
+        + metric(dict.runtime_capacity || 'Queue capacity', '', queueCapacity, '', 0, false)
+        + '</div></div>';
+      const usageItems = [
+        '<span class="runtime-usage-item">'
+          + escapeAttr(dict.runtime_cumulative_tokens || 'Cumulative tokens')
+          + '<strong>' + Number(usage.cumulative_tokens || 0).toLocaleString(numberLocale) + '</strong></span>'
       ];
       if (usage.prefix_cache) {
         const hitTokens = Number(usage.prefix_cache.hit_tokens);
@@ -9977,33 +10295,20 @@
         const hitRate = eligibleTokens > 0
           ? (hitTokens / eligibleTokens * 100).toFixed(1) + '%'
           : '—';
-        tokenMetrics.push(
-          (dict.runtime_cache_hit_tokens || 'Cache-hit tokens') + ': '
-            + hitTokens.toLocaleString(numberLocale),
-          (dict.runtime_cache_hit_rate || 'Cache hit rate') + ': ' + hitRate
+        usageItems.push(
+          '<span class="runtime-usage-item">'
+            + escapeAttr(dict.runtime_cache_hit_tokens || 'Cache-hit tokens')
+            + '<strong>' + hitTokens.toLocaleString(numberLocale) + '</strong></span>',
+          '<span class="runtime-usage-item">'
+            + escapeAttr(dict.runtime_cache_hit_rate || 'Cache hit rate')
+            + '<strong>' + escapeAttr(hitRate) + '</strong></span>'
         );
       }
       let performanceDetails = '';
       if (!isDiffusion) {
-        const performance = usage.performance;
+        const performance = usage.performance || {};
         const completedRequests = Number(performance.completed_requests);
         const windowSeconds = Number(performance.window_seconds);
-        const metric = (label, help, value, unit, digits, primary) => {
-          const available = value !== null && Number.isFinite(Number(value));
-          const number = available
-            ? Number(value).toLocaleString(numberLocale, {
-                minimumFractionDigits: digits,
-                maximumFractionDigits: digits
-              })
-            : '—';
-          return '<div class="runtime-performance-metric'
-            + (primary ? ' runtime-performance-metric-primary' : '')
-            + '" title="' + escapeAttr(help) + '">'
-            + '<span class="runtime-performance-label">' + escapeAttr(label) + '</span>'
-            + '<span class="runtime-performance-value">' + escapeAttr(number)
-            + (available ? ' <span class="runtime-performance-unit">' + escapeAttr(unit) + '</span>' : '')
-            + '</span></div>';
-        };
         const performanceMeta = completedRequests > 0
           ? (dict.runtime_performance_window
               || 'Recent performance · P50 · Last {seconds}s · {requests} completed')
@@ -10011,8 +10316,36 @@
               .replace('{requests}', completedRequests.toLocaleString(numberLocale))
           : (dict.runtime_performance_empty
               || 'Recent performance · Complete a request to begin sampling');
-        performanceDetails = '<div class="runtime-performance-rail" aria-label="'
-          + escapeAttr(performanceMeta) + '">'
+        performanceDetails = '<div class="runtime-model-section">'
+          + '<div class="runtime-section-header"><span class="runtime-section-title">'
+          + escapeAttr(dict.runtime_performance || 'Performance') + '</span>'
+          + '<span class="runtime-section-meta">' + escapeAttr(performanceMeta) + '</span></div>'
+          + '<div class="runtime-metric-rail runtime-performance-rail" aria-label="'
+          + escapeAttr(dict.runtime_performance || 'Performance') + '">'
+          + metric(
+              dict.runtime_live_decode_rate || 'Live decode',
+              dict.runtime_live_decode_help || "Aggregate output rate of this model's active decode requests.",
+              performance.live_decode_tokens_per_second,
+              'tok/s',
+              1,
+              true
+            )
+          + metric(
+              dict.runtime_recent_decode_rate || 'Recent P50',
+              dict.runtime_recent_decode_help || "Median output rate of this model's completed requests in the last 60 seconds.",
+              performance.decode_tokens_per_second,
+              'tok/s',
+              1,
+              false
+            )
+          + metric(
+              dict.runtime_session_decode_rate || 'Session average',
+              dict.runtime_session_decode_help || 'Average output rate across completed requests since this model was loaded.',
+              performance.session_decode_tokens_per_second,
+              'tok/s',
+              1,
+              false
+            )
           + metric(
               dict.runtime_prefill_rate || 'Prefill',
               dict.runtime_prefill_help || 'Effective input throughput from inference start to the first output token.',
@@ -10022,14 +10355,6 @@
               false
             )
           + metric(
-              dict.runtime_decode_rate || 'Decode',
-              dict.runtime_decode_help || 'Output token rate after the first token.',
-              performance.decode_tokens_per_second,
-              'tok/s',
-              1,
-              true
-            )
-          + metric(
               dict.runtime_ttft || 'TTFT',
               dict.runtime_ttft_help || 'Inference start to the first output token.',
               performance.ttft_ms,
@@ -10037,8 +10362,7 @@
               1,
               false
             )
-          + '</div><div class="runtime-performance-meta">'
-          + escapeAttr(performanceMeta) + '</div>';
+          + '</div></div>';
       }
       const activeKv = model.active_kv_offload;
       let activeKvDetails = '';
@@ -10051,40 +10375,45 @@
           : active
             ? (dict.runtime_active_kv_active || 'Active')
             : (dict.runtime_active_kv_idle || 'Idle');
-        const stateColor = degraded
-          ? '#ff9500'
-          : active
-            ? 'var(--accent)'
-            : 'var(--text-secondary)';
-        const metrics = [
-          (dict.runtime_active_kv_parked || 'Parked requests') + ': '
-            + Number(activeKv.parked_requests || 0).toLocaleString(numberLocale),
-          (dict.runtime_active_kv_offloaded || 'Offloaded') + ': '
-            + formatVersionBytes(activeKv.offloaded_bytes),
-          (dict.runtime_active_kv_swaps || 'Swap out/in') + ': '
-            + Number(activeKv.swap_out_count || 0).toLocaleString(numberLocale) + '/'
-            + Number(activeKv.swap_in_count || 0).toLocaleString(numberLocale),
-          (dict.runtime_active_kv_errors || 'Errors') + ': '
-            + errors.toLocaleString(numberLocale)
-        ].join(' · ');
+        const stateClass = degraded
+          ? 'runtime-kv-state-degraded'
+          : active ? 'runtime-kv-state-active' : 'runtime-kv-state-idle';
+        const kvMetric = (label, value) => '<div class="runtime-kv-detail">'
+          + '<span class="runtime-kv-detail-label">' + escapeAttr(label) + '</span>'
+          + '<span class="runtime-kv-detail-value">' + escapeAttr(value) + '</span></div>';
         const openAttribute = runtimeActiveKvOpenModelIds.has(modelId) ? ' open' : '';
         activeKvDetails =
           '<details data-active-kv-model-id="' + escapeAttr(modelId) + '"' + openAttribute
-          + ' style="font-size:11px;color:var(--text-secondary);margin-top:5px;">'
-          + '<summary style="cursor:pointer;color:' + stateColor + ';">'
-          + escapeAttr((dict.runtime_active_kv || 'Active KV tiering') + ': ' + state)
-          + '</summary><div style="margin-top:4px;">' + escapeAttr(metrics) + '</div></details>';
+          + ' class="runtime-kv-disclosure">'
+          + '<summary><span>' + escapeAttr(dict.runtime_active_kv || 'Active KV tiering') + '</span>'
+          + '<span class="runtime-kv-state ' + stateClass + '">' + escapeAttr(state) + '</span>'
+          + '<span class="runtime-kv-chevron" aria-hidden="true">›</span></summary>'
+          + '<div class="runtime-kv-details">'
+          + kvMetric(
+              dict.runtime_active_kv_parked || 'Parked requests',
+              Number(activeKv.parked_requests || 0).toLocaleString(numberLocale)
+            )
+          + kvMetric(dict.runtime_active_kv_offloaded || 'Offloaded', formatVersionBytes(activeKv.offloaded_bytes))
+          + kvMetric(
+              dict.runtime_active_kv_swaps || 'Swap out/in',
+              Number(activeKv.swap_out_count || 0).toLocaleString(numberLocale) + '/'
+                + Number(activeKv.swap_in_count || 0).toLocaleString(numberLocale)
+            )
+          + kvMetric(dict.runtime_active_kv_errors || 'Errors', errors.toLocaleString(numberLocale))
+          + '</div></details>';
       }
-      return '<div style="padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg);">'
-        + '<div style="display:flex;justify-content:space-between;gap:12px;">'
-        + '<strong style="font-size:12px;overflow:hidden;text-overflow:ellipsis;">'
-        + escapeAttr(model.id || model.model || '') + '</strong>'
-        + '<span class="badge badge-model-type">' + escapeAttr(scheduler) + '</span></div>'
-        + '<div style="font-size:11px;color:var(--text-secondary);margin-top:5px;">'
-        + escapeAttr(requestMetrics) + '</div>'
-        + '<div style="font-size:11px;color:var(--text-secondary);margin-top:3px;">'
-        + escapeAttr(tokenMetrics.join(' · ')) + '</div>'
-        + performanceDetails + activeKvDetails + '</div>';
+      const mtpBadge = model.mtp_enabled === true
+        ? '<span class="badge badge-mtp badge-mtp-enabled" title="'
+          + escapeAttr(dict.mtp_badge_enabled_title || 'This model is loaded with MTP acceleration.')
+          + '">' + escapeAttr(dict.mtp_badge_enabled || 'MTP') + '</span>'
+        : '';
+      return '<div class="runtime-model-card">'
+        + '<div class="runtime-model-header"><div class="runtime-model-identity">'
+        + '<strong class="runtime-model-name">' + escapeAttr(model.id || model.model || '') + '</strong>'
+        + mtpBadge + '</div></div>'
+        + requestDetails + performanceDetails
+        + '<div class="runtime-model-footer"><div class="runtime-usage-summary">'
+        + usageItems.join('') + '</div>' + activeKvDetails + '</div></div>';
     }).join('');
   }
 
