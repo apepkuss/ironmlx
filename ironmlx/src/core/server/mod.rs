@@ -20,7 +20,7 @@ use crate::core::scheduler_autotune::{
     SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeProfile,
     SchedulerAutotuneRuntimeRequest,
 };
-use crate::core::speculative::{effective_mtp_draft_tokens_for_paged_prefix, MtpSpeculativeModel};
+use crate::core::speculative::MtpSpeculativeModel;
 use crate::core::tokenizer::Tokenizer;
 use crate::Result;
 
@@ -807,11 +807,6 @@ where
     M: Model + DenseVlMethods + MtpSpeculativeModel + Send + 'static,
     M::MtpHead: Send + 'static,
 {
-    let requested_mtp_draft_tokens = mtp_draft_tokens;
-    let effective_mtp_draft_tokens = effective_mtp_draft_tokens_for_paged_prefix(
-        requested_mtp_draft_tokens,
-        paged_prefix_cache.is_some(),
-    );
     let prompt_lookup = prompt_lookup
         .map(|cfg| -> Result<_> {
             let qualification = crate::core::prompt_lookup::PromptLookupQualificationRuntimeConfig::for_scheduler_profile_with_baseline(
@@ -843,12 +838,12 @@ where
         vision_input_override,
         static_memory_estimate,
         Some(MtpHealthDraftTokens {
-            requested: requested_mtp_draft_tokens,
-            effective: effective_mtp_draft_tokens,
+            requested: mtp_draft_tokens,
+            effective: mtp_draft_tokens,
         }),
         MtpSchedulerActorSpawner {
             mtp,
-            mtp_draft_tokens: effective_mtp_draft_tokens,
+            mtp_draft_tokens,
             exact_qualification,
             prompt_lookup,
             paged_prefix_cache,
@@ -1056,8 +1051,6 @@ where
     M: Model + DenseVlMethods + MtpSpeculativeModel + Send + 'static,
     M::MtpHead: Send + 'static,
 {
-    let effective_mtp_draft_tokens =
-        effective_mtp_draft_tokens_for_paged_prefix(mtp_draft_tokens, paged_prefix_cache.is_some());
     let prompt_lookup = prompt_lookup
         .map(|cfg| -> Result<_> {
             let qualification = crate::core::prompt_lookup::PromptLookupQualificationRuntimeConfig::for_scheduler_profile_with_baseline(
@@ -1089,11 +1082,11 @@ where
         static_memory_estimate,
         Some(MtpHealthDraftTokens {
             requested: mtp_draft_tokens,
-            effective: effective_mtp_draft_tokens,
+            effective: mtp_draft_tokens,
         }),
         MtpSchedulerActorSpawner {
             mtp,
-            mtp_draft_tokens: effective_mtp_draft_tokens,
+            mtp_draft_tokens,
             exact_qualification,
             prompt_lookup,
             paged_prefix_cache,
@@ -1127,31 +1120,17 @@ pub(crate) async fn build_gemma4_drafter_app_state(
     static_memory_estimate: crate::core::process_memory::StaticMemoryEstimate,
     active_kv_offload: ActiveKvOffloadConfig,
 ) -> Result<Gemma4DrafterAppState> {
-    let effective_mtp_draft_tokens =
-        effective_mtp_draft_tokens_for_paged_prefix(mtp_draft_tokens, paged_prefix_cache.is_some());
     let kv_cache_profile = kv_cache_turboquant_bits
         .map(|bits| bits.to_string())
         .unwrap_or_else(|| "unquantized".to_string());
-    if effective_mtp_draft_tokens < mtp_draft_tokens {
-        tracing::warn!(
-            requested_draft_tokens = mtp_draft_tokens,
-            effective_draft_tokens = effective_mtp_draft_tokens,
-            scheduler_b_max = b_max,
-            kv_cache = %kv_cache_profile,
-            paged_prefix_cache_enabled = paged_prefix_cache.is_some(),
-            constraint = "paged_prefix_cache",
-            "Gemma4 drafter cap constrained"
-        );
-    } else {
-        tracing::info!(
-            requested_draft_tokens = mtp_draft_tokens,
-            effective_draft_tokens = effective_mtp_draft_tokens,
-            scheduler_b_max = b_max,
-            kv_cache = %kv_cache_profile,
-            paged_prefix_cache_enabled = paged_prefix_cache.is_some(),
-            "Gemma4 drafter cap resolved"
-        );
-    }
+    tracing::info!(
+        requested_draft_tokens = mtp_draft_tokens,
+        effective_draft_tokens = mtp_draft_tokens,
+        scheduler_b_max = b_max,
+        kv_cache = %kv_cache_profile,
+        paged_prefix_cache_enabled = paged_prefix_cache.is_some(),
+        "Gemma4 drafter cap resolved"
+    );
     let prompt_lookup = prompt_lookup
         .map(|cfg| -> Result<_> {
             let qualification = crate::core::prompt_lookup::PromptLookupQualificationRuntimeConfig::for_scheduler_profile_with_baseline(
@@ -1184,11 +1163,11 @@ pub(crate) async fn build_gemma4_drafter_app_state(
         static_memory_estimate,
         Some(MtpHealthDraftTokens {
             requested: mtp_draft_tokens,
-            effective: effective_mtp_draft_tokens,
+            effective: mtp_draft_tokens,
         }),
         Gemma4DrafterSchedulerActorSpawner {
             drafter,
-            mtp_draft_tokens: effective_mtp_draft_tokens,
+            mtp_draft_tokens,
             exact_qualification,
             prompt_lookup,
             paged_prefix_cache,
@@ -1200,7 +1179,7 @@ pub(crate) async fn build_gemma4_drafter_app_state(
 
     Ok(Gemma4DrafterAppState {
         base,
-        mtp_draft_tokens: effective_mtp_draft_tokens,
+        mtp_draft_tokens,
     })
 }
 

@@ -45,10 +45,7 @@ use crate::core::scheduler::{
 use crate::core::server::adaptive_admission::{
     AdaptiveAdmissionPolicy, AdmissionRequestShape, ROLLING_DECODE_STEPS_AFTER_ADMISSION_WORK,
 };
-use crate::core::speculative::{
-    effective_mtp_draft_tokens_for_paged_prefix, MtpSpeculativeConfig, MtpSpeculativeModel,
-    MtpSpeculativeStats,
-};
+use crate::core::speculative::{MtpSpeculativeConfig, MtpSpeculativeModel, MtpSpeculativeStats};
 use crate::core::speculative_qualification::{
     NeuralExactAction, NeuralExactCostController, NeuralExactQualificationRuntimeConfig,
     NeuralExactQualificationStats, NeuralExactRegime, NeuralExactSampleCounters, NeuralExactSource,
@@ -2952,8 +2949,6 @@ where
     M: Model + DenseVlMethods + MtpSpeculativeModel + Send + 'static,
     M::MtpHead: Send + 'static,
 {
-    let mtp_draft_tokens =
-        effective_mtp_draft_tokens_for_paged_prefix(mtp_draft_tokens, paged_prefix_cache.is_some());
     let mode = SchedulerActorMtp::new_with_exact_qualification(
         mtp,
         mtp_draft_tokens,
@@ -2996,8 +2991,6 @@ where
     M: Model + DenseVlMethods + MtpSpeculativeModel + Send + 'static,
     M::MtpHead: Send + 'static,
 {
-    let mtp_draft_tokens =
-        effective_mtp_draft_tokens_for_paged_prefix(mtp_draft_tokens, paged_prefix_cache.is_some());
     let mode = SchedulerActorMtpPromptLookupHybrid::new(
         mtp,
         mtp_draft_tokens,
@@ -3075,8 +3068,6 @@ where
     M: Model + DenseVlMethods + MtpSpeculativeModel + Send + 'static,
     M::MtpHead: Send + 'static,
 {
-    let mtp_draft_tokens =
-        effective_mtp_draft_tokens_for_paged_prefix(mtp_draft_tokens, paged_prefix_cache.is_some());
     let mode = SchedulerActorMtp::new_with_exact_qualification(
         mtp,
         mtp_draft_tokens,

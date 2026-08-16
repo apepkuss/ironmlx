@@ -133,6 +133,32 @@ The request must increase `prefill_count`, `step_count`, `drafted_tokens`, and
 separate 1024/4096 context cap; the model context limit, `--max-cache-cap`, and
 memory budget still apply.
 
+Paged KV multi-token MTP must match the same checkpoint at `draft=1` exactly:
+
+```sh
+MLX_DIR=$HOME/.local/mlx \
+QWEN38_DENSE_MODEL=/path/to/Qwen3.8-27B-4bit/snapshots/<sha> \
+QWEN38_DENSE_MTP_MODEL=/path/to/Qwen3.8-27B-MTP-4bit/snapshots/<sha> \
+cargo test --release -p ironmlx --test paged_prefix_matrix_e2e \
+  qwen38_dense_paged_kv_multi_token_matches_single_token_mtp \
+  -- --ignored --test-threads=1 --nocapture
+```
+
+The generated message, finish reason, and completion length must match exactly.
+For the `draft=2` run, `/healthz` must report both requested and effective draft
+width as 2, with `drafted_tokens > windows` proving a multi-token window ran.
+
+Run the same Paged KV check for the independent Gemma4 drafter path:
+
+```sh
+MLX_DIR=$HOME/.local/mlx \
+GEMMA4_LONG_CONTEXT_MODEL=/path/to/gemma4-base/snapshots/<sha> \
+GEMMA4_LONG_CONTEXT_DRAFTER=/path/to/gemma4-assistant/snapshots/<sha> \
+cargo test --release -p ironmlx --test paged_prefix_matrix_e2e \
+  gemma4_unified_paged_kv_multi_token_matches_single_token_drafter \
+  -- --ignored --test-threads=1 --nocapture
+```
+
 Gemma4 and Gemma4 Unified long-context assistant-drafter parity (defaults to
 8K, 32K, and 64K contexts with 64 generated tokens):
 

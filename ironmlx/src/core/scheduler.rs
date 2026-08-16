@@ -145,16 +145,15 @@ use crate::core::sampler::{draw_uniforms, sample_target_tokens_with_uniforms_bat
 use crate::core::speculative::{
     add_elapsed_us, add_mtp_decode_cache_commit_us, add_mtp_prefill_cache_commit_us,
     adjust_mtp_draft_budget, commit_mtp_cache_hidden_prefix, commit_mtp_cache_hidden_tail,
-    effective_mtp_draft_tokens_for_paged_prefix, elapsed_us_since,
-    layer_cache_supports_accepted_prefix_trim, resolve_exact_deterministic_target_logits,
-    resolve_exact_deterministic_target_tokens, resolve_speculative_tokens, restore_layer_cache,
-    rollback_main_cache_to_accepted_prefix, sample_draft_logits_position,
-    sample_draft_logits_position_with_uniform, sample_logits_positions, slice_hidden_position,
-    slice_position_ids_prefix, split_speculative_draft_prng,
-    trim_full_layer_cache_rows_to_accepted_prefix, verify_input, zero_hidden_like_position,
-    DraftTokenDistribution, MainCacheRollbackInput, MtpDraftPolicySnapshot, MtpDraftPolicyState,
-    MtpDraftPolicyWindow, MtpSpeculativeConfig, MtpSpeculativeModel, MtpSpeculativeStats,
-    SpeculativeResolution,
+    elapsed_us_since, layer_cache_supports_accepted_prefix_trim,
+    resolve_exact_deterministic_target_logits, resolve_exact_deterministic_target_tokens,
+    resolve_speculative_tokens, restore_layer_cache, rollback_main_cache_to_accepted_prefix,
+    sample_draft_logits_position, sample_draft_logits_position_with_uniform,
+    sample_logits_positions, slice_hidden_position, slice_position_ids_prefix,
+    split_speculative_draft_prng, trim_full_layer_cache_rows_to_accepted_prefix, verify_input,
+    zero_hidden_like_position, DraftTokenDistribution, MainCacheRollbackInput,
+    MtpDraftPolicySnapshot, MtpDraftPolicyState, MtpDraftPolicyWindow, MtpSpeculativeConfig,
+    MtpSpeculativeModel, MtpSpeculativeStats, SpeculativeResolution,
 };
 use crate::core::speculative_qualification::{NeuralExactRegime, NeuralExactSource};
 use crate::nn::{
@@ -1331,22 +1330,6 @@ fn cache_cap_and_dtype(cache: &[LayerCache]) -> Result<(i32, Dtype)> {
     linear_cap
         .map(|cap| (cap, Dtype::Bfloat16))
         .ok_or_else(|| anyhow!("cache_cap_and_dtype: cache has no layers"))
-}
-
-fn cache_has_paged_full_attention(cache: &[LayerCache]) -> bool {
-    cache
-        .iter()
-        .any(|layer| matches!(layer, LayerCache::Full(kv) if kv.paged().is_some()))
-}
-
-fn mtp_supported_max_draft_tokens(
-    cache: Option<&[LayerCache]>,
-    cfg_max_draft_tokens: usize,
-) -> usize {
-    effective_mtp_draft_tokens_for_paged_prefix(
-        cfg_max_draft_tokens,
-        cache.is_some_and(cache_has_paged_full_attention),
-    )
 }
 
 fn full_layer_cache_row_offset(cache: &[LayerCache], row: usize) -> Result<i32> {
@@ -6789,19 +6772,6 @@ impl<M: Model> Scheduler<M> {
         Ok(())
     }
 
-    fn effective_mtp_config(&self, cfg: MtpSpeculativeConfig) -> MtpSpeculativeConfig {
-        MtpSpeculativeConfig {
-            max_draft_tokens: effective_mtp_draft_tokens_for_paged_prefix(
-                cfg.max_draft_tokens,
-                self.paged_prefix_cache.is_some()
-                    || self
-                        .cache
-                        .as_deref()
-                        .is_some_and(cache_has_paged_full_attention),
-            ),
-        }
-    }
-
     fn mtp_position_ids(&mut self, model: &M, start_pos: i32, len: i32) -> Result<Array> {
         if model.requires_position_ids() {
             build_position_ids(start_pos, len)
@@ -7092,9 +7062,7 @@ impl<M: Model> Scheduler<M> {
         remaining_tokens: usize,
         kv_bits: Option<TurboQuantKVBits>,
     ) -> bool {
-        let max_draft_tokens =
-            mtp_supported_max_draft_tokens(self.cache.as_deref(), cfg.max_draft_tokens)
-                .min(remaining_tokens);
+        let max_draft_tokens = cfg.max_draft_tokens.min(remaining_tokens);
         max_draft_tokens > 0
             && model.supports_exact_batched_speculative_verify_for_kv_cache(
                 batch_width,
@@ -8043,8 +8011,7 @@ impl<M: Model> Scheduler<M> {
         let Some(mtp_state) = self.mtp_state.as_ref() else {
             return Ok(false);
         };
-        let max_supported_draft_tokens =
-            mtp_supported_max_draft_tokens(self.cache.as_deref(), mtp_state.cfg.max_draft_tokens);
+        let max_supported_draft_tokens = mtp_state.cfg.max_draft_tokens;
         let mut draft_budgets = Vec::new();
         for (&row_idx, row_state) in &mtp_state.rows {
             let slot = self
@@ -11763,7 +11730,6 @@ impl<M: Model> Scheduler<M> {
                 "prefill_admitted_mtp_single currently requires b_max 1"
             ));
         }
-        let cfg = self.effective_mtp_config(cfg);
         match self.phase {
             Phase::Idle | Phase::Admitting => {}
             Phase::Decoding | Phase::Finished => {
@@ -12222,8 +12188,6 @@ impl<M: Model> Scheduler<M> {
                 "prefill_admitted_mtp_batch: cache already allocated before prefill"
             ));
         }
-        let cfg = self.effective_mtp_config(cfg);
-
         let active_rows: Vec<usize> = self
             .slots
             .iter()
@@ -13018,8 +12982,7 @@ impl<M: Model> Scheduler<M> {
         if rows_to_fill.is_empty() {
             return Ok(());
         }
-        let max_supported_draft_tokens =
-            mtp_supported_max_draft_tokens(self.cache.as_deref(), cfg.max_draft_tokens);
+        let max_supported_draft_tokens = cfg.max_draft_tokens;
         let stats_before_batch = stats.clone();
         let mut contexts = Vec::with_capacity(rows_to_fill.len());
         for &row_idx in rows_to_fill {
@@ -14025,10 +13988,7 @@ impl<M: Model> Scheduler<M> {
         history.extend_from_slice(&generated_tokens);
 
         let stats_before_window = stats.clone();
-        let max_supported_draft_tokens = mtp_supported_max_draft_tokens(
-            self.cache.as_deref(),
-            window.speculative.max_draft_tokens,
-        );
+        let max_supported_draft_tokens = window.speculative.max_draft_tokens;
         let draft_budget = row_state
             .adaptive_draft_tokens
             .clamp(1, max_supported_draft_tokens)
@@ -16437,7 +16397,6 @@ impl<M: Model> Scheduler<M> {
                 "admit_mid_begin_mtp: image_grid_thw present but pixel_values is None"
             ));
         }
-        let cfg = self.effective_mtp_config(cfg);
         MtpSpeculativeConfig::new(cfg.max_draft_tokens, sampler)?;
 
         let prompt_len = prompt_len_usz as i32;
@@ -24120,7 +24079,7 @@ mod tests {
 
     #[test]
     #[serial(mlx_metal)]
-    fn mtp_paged_main_cache_clamps_single_window_draft_budget_to_one() {
+    fn mtp_paged_main_cache_runs_multi_token_single_window() {
         let root = std::env::temp_dir().join(format!(
             "ironmlx-paged-prefix-mtp-single-budget-{}",
             uuid::Uuid::new_v4().simple()
@@ -24149,10 +24108,11 @@ mod tests {
         }
         let stats = s.mtp_stats().expect("mtp stats");
         assert_eq!(
-            stats.drafted_tokens, 1,
-            "paged main KV decode only supports one-token append per speculative verify window"
+            stats.drafted_tokens, 2,
+            "paged main KV should preserve the configured multi-token draft window"
         );
-        assert_eq!(stats.draft_attempts_by_position, vec![1]);
+        assert_eq!(stats.draft_attempts_by_position, vec![1, 1]);
+        assert_eq!(stats.rollback_count, 1);
 
         crate::core::cache::process_async_prefix_store_queue().wait_idle();
 
@@ -24161,7 +24121,7 @@ mod tests {
 
     #[test]
     #[serial(mlx_metal)]
-    fn mtp_paged_prefix_clamps_runtime_config_to_one() {
+    fn mtp_paged_prefix_preserves_runtime_configured_draft_width() {
         let root = std::env::temp_dir().join(format!(
             "ironmlx-paged-prefix-mtp-config-budget-{}",
             uuid::Uuid::new_v4().simple()
@@ -24186,8 +24146,8 @@ mod tests {
 
         let mtp_state = s.mtp_state.as_ref().expect("scheduler MTP state");
         assert_eq!(
-            mtp_state.cfg.max_draft_tokens, 1,
-            "paged prefix cache must make the whole MTP runtime state d=1, not only clamp one window"
+            mtp_state.cfg.max_draft_tokens, 2,
+            "paged prefix cache must preserve the explicitly configured MTP draft width"
         );
 
         crate::core::cache::process_async_prefix_store_queue().wait_idle();
@@ -24197,7 +24157,7 @@ mod tests {
 
     #[test]
     #[serial(mlx_metal)]
-    fn mtp_paged_main_cache_clamps_batched_window_draft_budget_to_one_per_row() {
+    fn mtp_paged_main_cache_runs_multi_token_batched_windows() {
         let root = std::env::temp_dir().join(format!(
             "ironmlx-paged-prefix-mtp-batch-budget-{}",
             uuid::Uuid::new_v4().simple()
@@ -24235,8 +24195,8 @@ mod tests {
         let fill_model = ScriptedMtpSchedulerModel::new_with_first_token_calls(
             0,
             0,
-            vec![8, 9],
-            vec![vec![8, 10], vec![9, 11]],
+            vec![8, 9, 10, 11],
+            vec![vec![8, 10, 12], vec![9, 11, 13]],
         );
         let fill_cfg = MtpSpeculativeConfig::new(2, Sampler::greedy()).expect("mtp cfg");
         s.fill_mtp_windows_batched(
@@ -24252,14 +24212,14 @@ mod tests {
         .expect("batched MTP fill");
 
         assert_eq!(
-            mtp_state.stats.drafted_tokens, 2,
-            "paged main KV decode should draft one token per active row"
+            mtp_state.stats.drafted_tokens, 4,
+            "paged main KV should draft two tokens per active row"
         );
-        assert_eq!(mtp_state.stats.draft_attempts_by_position, vec![2]);
+        assert_eq!(mtp_state.stats.draft_attempts_by_position, vec![2, 2]);
         assert_eq!(
             fill_model.mtp_hidden_batch_sizes(),
-            vec![2, 2],
-            "batched fill should run one draft step and one accepted-tail commit"
+            vec![2, 2, 2],
+            "batched fill should run two draft steps and one accepted-tail commit"
         );
         s.mtp_state = Some(mtp_state);
 

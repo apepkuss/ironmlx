@@ -45,18 +45,6 @@ pub fn default_mtp_draft_tokens_for_config(_raw_config: &serde_json::Value) -> u
     1
 }
 
-pub fn effective_mtp_draft_tokens_for_paged_prefix(
-    draft_tokens: usize,
-    paged_prefix_cache_enabled: bool,
-) -> usize {
-    let draft_tokens = draft_tokens.max(1);
-    if paged_prefix_cache_enabled {
-        1
-    } else {
-        draft_tokens
-    }
-}
-
 impl MtpSpeculativeConfig {
     pub fn new(max_draft_tokens: usize, sampler: Sampler) -> Result<Self> {
         if max_draft_tokens == 0 {

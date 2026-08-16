@@ -1195,15 +1195,9 @@ where
 
     let model_id = single_model_id(args)?;
     let paged_prefix_cache = resolve_paged_prefix_cache_config(args, scheduler_config, &model_id)?;
-    let effective_draft_tokens =
-        crate::core::speculative::effective_mtp_draft_tokens_for_paged_prefix(
-            mtp_config.draft_tokens,
-            paged_prefix_cache.is_some(),
-        );
     tracing::info!(
-        "ironmlx serve: MTP enabled model_dir={} draft_tokens={} requested_draft_tokens={}",
+        "ironmlx serve: MTP enabled model_dir={} draft_tokens={}",
         mtp_config.model_dir.display(),
-        effective_draft_tokens,
         mtp_config.draft_tokens
     );
     let prefix_lru_cache = resolve_prefix_lru_cache_config(args, paged_prefix_cache.as_ref())?;
