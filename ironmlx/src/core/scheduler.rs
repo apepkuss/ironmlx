@@ -444,7 +444,6 @@ struct Gemma4DrafterBatchedFillContext {
 #[derive(Clone, Copy)]
 struct Gemma4DrafterWindowPolicy {
     cfg: MtpSpeculativeConfig,
-    scheduler_batch_capacity: usize,
 }
 
 /// Extension trait for VL-capable models, intentionally NOT part of `core::Model`
@@ -1399,33 +1398,14 @@ fn gemma4_drafter_mid_admit_chunk_cap(
     }
 }
 
-fn gemma4_drafter_effective_budget_for_context(
-    kv_bits: Option<TurboQuantKVBits>,
-    draft_budget: usize,
-    context_tokens: usize,
-    scheduler_batch_capacity: usize,
-) -> usize {
-    if kv_bits == Some(TurboQuantKVBits::K3V4)
-        && context_tokens > GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS
-        && scheduler_batch_capacity > 1
-    {
-        draft_budget.min(1)
-    } else {
-        draft_budget
-    }
-}
-
 fn gemma4_k3v4_long_verify_needs_stable_attention(
     kv_bits: Option<TurboQuantKVBits>,
     context_tokens: usize,
     verify_len: usize,
-    scheduler_batch_capacity: usize,
-    active_batch_width: usize,
 ) -> bool {
     kv_bits == Some(TurboQuantKVBits::K3V4)
         && context_tokens > GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS
         && verify_len > 1
-        && (scheduler_batch_capacity == 1 || active_batch_width > 1)
 }
 
 fn build_gemma4_drafter_batched_verify_input(
@@ -5832,6 +5812,20 @@ impl<M: Model> Scheduler<M> {
     fn commit_governor_admission(&mut self, id: RequestId) {
         if let Some(reservation) = self.governor_admission_reservations.remove(&id) {
             reservation.commit();
+        }
+    }
+
+    fn commit_governor_admission_after_materialization(&mut self, id: RequestId) {
+        let Some(reservation) = self.governor_admission_reservations.remove(&id) else {
+            return;
+        };
+        reservation.commit();
+        if let Some(governor) = self.process_memory_governor.as_ref() {
+            // Admission reserves the full KV cap before the first model step.
+            // Once that step has been evaluated, one-shot KV buffers are part
+            // of the authoritative footprint; retaining the reservation would
+            // count the same bytes again when planning the next prefill chunk.
+            governor.refresh_process();
         }
     }
 
@@ -17623,8 +17617,7 @@ impl Scheduler<crate::models::Gemma4Model> {
             ));
         }
         if active_rows.len() == 1 {
-            return self
-                .prefill_admitted_gemma4_drafter_single(model, drafter, cfg, self.b_max, true);
+            return self.prefill_admitted_gemma4_drafter_single(model, drafter, cfg, true);
         }
         for &row_idx in &active_rows {
             let state = self.slots[row_idx]
@@ -17649,18 +17642,10 @@ impl Scheduler<crate::models::Gemma4Model> {
         let mut events = Vec::with_capacity(active_rows.len());
         let mut final_cap = MIN_KV_CACHE_CAP_FOR_GPU_PERF;
         let dtype = model.cache_dtype();
-        let scheduler_batch_capacity = self.b_max;
-
         for &row_idx in &active_rows {
             let mut temp = self.temp_gemma4_drafter_scheduler_for_row(row_idx)?;
             let event = temp
-                .prefill_admitted_gemma4_drafter_single(
-                    model,
-                    drafter,
-                    cfg,
-                    scheduler_batch_capacity,
-                    true,
-                )
+                .prefill_admitted_gemma4_drafter_single(model, drafter, cfg, true)
                 .map_err(|err| {
                     anyhow!("prefill_admitted_gemma4_drafter_batch row {row_idx}: {err:#}")
                 })?;
@@ -17745,7 +17730,6 @@ impl Scheduler<crate::models::Gemma4Model> {
         model: &crate::models::Gemma4Model,
         drafter: &crate::models::gemma4::Gemma4AssistantModel,
         cfg: MtpSpeculativeConfig,
-        scheduler_batch_capacity: usize,
         fill_initial_window: bool,
     ) -> Result<Vec<StepEvent>> {
         match self.phase {
@@ -18007,6 +17991,7 @@ impl Scheduler<crate::models::Gemma4Model> {
             add_elapsed_us(&mut stats.verify_forward_us, forward_start);
             let chunk_last_hidden = slice_hidden_position(&out.hidden, n - 1)?;
             mlx::transforms::eval(&[&out.hidden, &chunk_last_hidden])?;
+            self.commit_governor_admission_after_materialization(id);
             let new_pos = pos + n;
             if let Some(cache) = self.cache.as_ref() {
                 match prefix_cache.try_save(
@@ -18106,12 +18091,7 @@ impl Scheduler<crate::models::Gemma4Model> {
         });
 
         if finish_reason.is_none() && fill_initial_window {
-            self.fill_gemma4_drafter_window_single(
-                row_idx,
-                model,
-                drafter,
-                scheduler_batch_capacity,
-            )?;
+            self.fill_gemma4_drafter_window_single(row_idx, model, drafter)?;
         }
 
         Ok(vec![StepEvent {
@@ -18291,12 +18271,7 @@ impl Scheduler<crate::models::Gemma4Model> {
                 Vec::with_capacity(slot.prompt_ids.len() + slot.generated_tokens.len());
             history.extend_from_slice(&slot.prompt_ids);
             history.extend_from_slice(&slot.generated_tokens);
-            let effective_max_draft_tokens = gemma4_drafter_effective_budget_for_context(
-                kv_bits,
-                cfg.max_draft_tokens,
-                history.len(),
-                self.b_max,
-            );
+            let effective_max_draft_tokens = cfg.max_draft_tokens;
             let draft_budget = row_state
                 .adaptive_draft_tokens
                 .clamp(1, effective_max_draft_tokens)
@@ -18498,8 +18473,6 @@ impl Scheduler<crate::models::Gemma4Model> {
                 .max()
                 .unwrap_or(0),
             max_verify_len,
-            self.b_max,
-            active_rows.len(),
         );
         let stable_k3v4_verify = gemma4_verify_needs_batch_stable_qmm(
             self.kv_cache_turboquant_bits_for_rows(rows_to_fill)?,
@@ -18735,7 +18708,7 @@ impl Scheduler<crate::models::Gemma4Model> {
             .pending_tokens
             .is_empty()
         {
-            self.fill_gemma4_drafter_window_single(row_idx, model, drafter, self.b_max)?;
+            self.fill_gemma4_drafter_window_single(row_idx, model, drafter)?;
         }
 
         let token = {
@@ -18766,7 +18739,7 @@ impl Scheduler<crate::models::Gemma4Model> {
                 .and_then(|state| state.rows.get(&row_idx))
                 .is_some_and(|state| state.pending_tokens.is_empty())
         {
-            self.fill_gemma4_drafter_window_single(row_idx, model, drafter, self.b_max)?;
+            self.fill_gemma4_drafter_window_single(row_idx, model, drafter)?;
         }
 
         Ok(vec![event])
@@ -18777,7 +18750,6 @@ impl Scheduler<crate::models::Gemma4Model> {
         row_idx: usize,
         model: &crate::models::Gemma4Model,
         drafter: &crate::models::gemma4::Gemma4AssistantModel,
-        scheduler_batch_capacity: usize,
     ) -> Result<()> {
         let mut drafter_state = self
             .gemma4_drafter_state
@@ -18790,7 +18762,6 @@ impl Scheduler<crate::models::Gemma4Model> {
             row_idx,
             Gemma4DrafterWindowPolicy {
                 cfg: drafter_state.cfg,
-                scheduler_batch_capacity,
             },
             &mut drafter_state.stats,
             &mut row_state,
@@ -18811,10 +18782,7 @@ impl Scheduler<crate::models::Gemma4Model> {
         model: &crate::models::Gemma4Model,
         drafter: &crate::models::gemma4::Gemma4AssistantModel,
     ) -> Result<()> {
-        let Gemma4DrafterWindowPolicy {
-            cfg,
-            scheduler_batch_capacity,
-        } = policy;
+        let Gemma4DrafterWindowPolicy { cfg } = policy;
         let (prompt_ids, generated_tokens, max_new_tokens, sampler, stop_token_ids, constraint) = {
             let state = self.slots[row_idx]
                 .as_ref()
@@ -18844,12 +18812,7 @@ impl Scheduler<crate::models::Gemma4Model> {
         let timing_before = stats.draft_cap_timing();
         let context_tokens = history.len();
 
-        let effective_max_draft_tokens = gemma4_drafter_effective_budget_for_context(
-            self.kv_cache_turboquant_bits_for_rows(&[row_idx])?,
-            cfg.max_draft_tokens,
-            context_tokens,
-            scheduler_batch_capacity,
-        );
+        let effective_max_draft_tokens = cfg.max_draft_tokens;
         let draft_budget = row_state
             .adaptive_draft_tokens
             .clamp(1, effective_max_draft_tokens)
@@ -18893,8 +18856,6 @@ impl Scheduler<crate::models::Gemma4Model> {
                 self.kv_cache_turboquant_bits_for_rows(&[row_idx])?,
                 context_tokens,
                 verify_input.len(),
-                scheduler_batch_capacity,
-                1,
             );
             let _stable_attention =
                 stable_attention.then(crate::nn::gemma4_verify_attention::scope);
@@ -19259,7 +19220,7 @@ impl Scheduler<crate::models::Gemma4Model> {
                 })?;
             let mut temp = self.temp_gemma4_drafter_rebase_scheduler_for_row(row_idx)?;
             let events = temp
-                .prefill_admitted_gemma4_drafter_single(model, drafter, cfg, self.b_max, false)
+                .prefill_admitted_gemma4_drafter_single(model, drafter, cfg, false)
                 .map_err(|error| {
                     anyhow!("rebase_gemma4_drafter_from_committed_history row {row_idx}: {error:#}")
                 })?;
@@ -19463,68 +19424,31 @@ mod tests {
     }
 
     #[test]
-    fn gemma4_k3v4_long_context_stabilizes_every_multi_token_b1_verify() {
-        assert_eq!(
-            gemma4_drafter_effective_budget_for_context(
-                Some(TurboQuantKVBits::K3V4),
-                2,
-                GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
-                1,
-            ),
-            2
-        );
-        assert_eq!(
-            gemma4_drafter_effective_budget_for_context(
-                Some(TurboQuantKVBits::K3V4),
-                2,
-                GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
-                4,
-            ),
-            1
-        );
-        assert_eq!(
-            gemma4_drafter_effective_budget_for_context(
-                Some(TurboQuantKVBits::K3V4),
-                2,
-                GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS,
-                4,
-            ),
-            2
-        );
+    fn gemma4_k3v4_long_context_stabilizes_every_multi_token_verify() {
         assert!(gemma4_k3v4_long_verify_needs_stable_attention(
             Some(TurboQuantKVBits::K3V4),
             GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
             3,
-            1,
-            1,
         ));
         assert!(gemma4_k3v4_long_verify_needs_stable_attention(
             Some(TurboQuantKVBits::K3V4),
             GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
             2,
-            4,
-            4,
         ));
         assert!(!gemma4_k3v4_long_verify_needs_stable_attention(
             Some(TurboQuantKVBits::K3V4),
             GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
             1,
-            4,
-            4,
         ));
         assert!(!gemma4_k3v4_long_verify_needs_stable_attention(
             Some(TurboQuantKVBits::K3V4),
-            GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
-            2,
-            4,
-            1,
+            GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS,
+            3,
         ));
         assert!(!gemma4_k3v4_long_verify_needs_stable_attention(
             Some(TurboQuantKVBits::K4V4),
             GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
             3,
-            4,
-            4,
         ));
     }
 
@@ -19939,6 +19863,54 @@ mod tests {
         assert!(error.downcast_ref::<SchedulerError>().is_some());
         assert_eq!(governor.snapshot().reserved_bytes, 0);
         assert_eq!(scheduler.budget_state.active_bytes(), 0);
+    }
+
+    #[test]
+    fn process_governor_materialized_admission_settles_reservation() {
+        use crate::core::process_memory::{
+            HostVmStatistics, MemoryGovernorConfig, MemoryTelemetry, ProcessMemoryGovernor,
+        };
+
+        let gib = 1024 * 1024 * 1024;
+        let governor = Arc::new(
+            ProcessMemoryGovernor::new(MemoryGovernorConfig {
+                static_reserve_bytes: 4 * gib,
+                minimum_prefill_chunk_tokens: 1,
+                ..MemoryGovernorConfig::default()
+            })
+            .expect("governor"),
+        );
+        governor.update(MemoryTelemetry {
+            total_ram_bytes: 32 * gib,
+            phys_footprint_bytes: Some(4 * gib),
+            vm: Some(HostVmStatistics {
+                free_bytes: 8 * gib,
+                inactive_bytes: 2 * gib,
+                active_bytes: 8 * gib,
+                wired_bytes: 8 * gib,
+            }),
+            mlx_active_bytes: Some(4 * gib),
+            mlx_cache_bytes: Some(0),
+            metal_limit_bytes: Some(24 * gib),
+        });
+
+        let mut scheduler = Scheduler::<FinishedPhaseFakeModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler");
+        scheduler.process_memory_governor = Some(Arc::clone(&governor));
+        let id = scheduler.admit(mk_req(vec![1, 2, 3, 4])).expect("admit");
+        assert!(governor.snapshot().reserved_bytes > 0);
+        let sample_sequence = governor.snapshot().sample_sequence;
+
+        scheduler.commit_governor_admission_after_materialization(id);
+
+        assert_eq!(governor.snapshot().reserved_bytes, 0);
+        assert!(governor.snapshot().sample_sequence > sample_sequence);
+        assert!(!scheduler.governor_admission_reservations.contains_key(&id));
+        assert!(scheduler.budget_state.active_bytes() > 0);
     }
 
     #[test]

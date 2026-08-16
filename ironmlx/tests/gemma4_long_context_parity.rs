@@ -7,9 +7,11 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{ensure, Context, Result};
+use ironmlx::core::cache::TurboQuantKVBits;
 use ironmlx::core::generate::build_position_ids;
-use ironmlx::core::generate::GenerateRequest;
+use ironmlx::core::generate::{GenerateRequest, GenerationStream};
 use ironmlx::core::sampler::Sampler;
+use ironmlx::core::scheduler::Scheduler;
 use ironmlx::core::speculative::MtpSpeculativeConfig;
 use ironmlx::core::tokenizer::Tokenizer;
 use ironmlx::core::{Loader, Model};
@@ -310,6 +312,166 @@ fn make_text_request(
     }
 }
 
+fn long_context_lengths() -> Result<Vec<usize>> {
+    std::env::var("GEMMA4_LONG_CONTEXT_TOKENS")
+        .unwrap_or_else(|_| "8192,32768,65536".to_string())
+        .split(',')
+        .map(|raw| {
+            let value = raw.trim().parse::<usize>()?;
+            ensure!(value > 0, "Gemma4 long-context length must be positive");
+            Ok(value)
+        })
+        .collect()
+}
+
+fn exact_length_prompt_ids(tokenizer: &Tokenizer, context_tokens: usize) -> Result<Vec<u32>> {
+    let seed = tokenizer.encode(
+        "Long-context exact speculative verification must preserve every target token. ",
+        false,
+    )?;
+    ensure!(!seed.is_empty(), "Gemma4 long-context seed encoded empty");
+    Ok(seed.into_iter().cycle().take(context_tokens).collect())
+}
+
+fn collect_base_tokens(
+    model: &Gemma4Model,
+    tokenizer: &Tokenizer,
+    request: GenerateRequest,
+) -> Result<Vec<u32>> {
+    let mut stream = GenerationStream::new_text_only(model, tokenizer, request)?;
+    let mut tokens = Vec::new();
+    while let Some(event) = stream.next_token()? {
+        tokens.push(event.token);
+        if event.finish_reason.is_some() {
+            break;
+        }
+    }
+    Ok(tokens)
+}
+
+fn collect_drafter_tokens(
+    model: &Gemma4Model,
+    drafter: &Gemma4AssistantModel,
+    tokenizer: &Tokenizer,
+    request: GenerateRequest,
+    draft_tokens: usize,
+) -> Result<(Vec<u32>, ironmlx::core::speculative::MtpSpeculativeStats)> {
+    let cfg = MtpSpeculativeConfig::new(draft_tokens, request.sampler)?;
+    let mut stream = Gemma4DrafterGenerationStream::new(model, drafter, tokenizer, request, cfg)?;
+    let mut tokens = Vec::new();
+    while let Some(event) = stream.next_token()? {
+        tokens.push(event.token);
+        if event.finish_reason.is_some() {
+            break;
+        }
+    }
+    Ok((tokens, stream.stats()))
+}
+
+fn record_scheduler_events(
+    request_ids: &[ironmlx::core::scheduler::RequestId],
+    outputs: &mut [Vec<u32>],
+    finished: &mut [bool],
+    events: Vec<ironmlx::core::scheduler::StepEvent>,
+) -> Result<()> {
+    for event in events {
+        let row = request_ids
+            .iter()
+            .position(|id| *id == event.id)
+            .context("scheduler emitted an unknown request id")?;
+        outputs[row].push(event.token);
+        finished[row] = event.finish_reason.is_some();
+    }
+    Ok(())
+}
+
+fn collect_scheduled_k3v4_base_tokens(
+    model: &Gemma4Model,
+    requests: Vec<GenerateRequest>,
+    b_max: usize,
+) -> Result<Vec<Vec<u32>>> {
+    ensure!(!requests.is_empty(), "scheduler test requires requests");
+    ensure!(requests.len() <= b_max, "request count exceeds b_max");
+    let effective_cap_max = requests
+        .iter()
+        .map(|request| request.prompt_ids.len() + request.max_new_tokens)
+        .max()
+        .context("scheduler test requires requests")?;
+    let mut scheduler =
+        Scheduler::<Gemma4Model>::new(b_max, effective_cap_max, model.model_meta())?;
+    let mut request_ids = Vec::with_capacity(requests.len());
+    for mut request in requests {
+        request.kv_cache_turboquant_bits = Some(TurboQuantKVBits::K3V4);
+        request_ids.push(scheduler.admit(request)?);
+    }
+
+    let mut outputs = vec![Vec::new(); request_ids.len()];
+    let mut finished = vec![false; request_ids.len()];
+    record_scheduler_events(
+        &request_ids,
+        &mut outputs,
+        &mut finished,
+        scheduler.prefill_admitted(model)?,
+    )?;
+    while !finished.iter().all(|done| *done) {
+        let events = scheduler.step(model)?;
+        ensure!(
+            !events.is_empty(),
+            "scheduler stopped before all requests finished"
+        );
+        record_scheduler_events(&request_ids, &mut outputs, &mut finished, events)?;
+    }
+    Ok(outputs)
+}
+
+fn collect_scheduled_k3v4_drafter_tokens(
+    model: &Gemma4Model,
+    drafter: &Gemma4AssistantModel,
+    requests: Vec<GenerateRequest>,
+    b_max: usize,
+    draft_tokens: usize,
+) -> Result<(
+    Vec<Vec<u32>>,
+    ironmlx::core::speculative::MtpSpeculativeStats,
+)> {
+    ensure!(!requests.is_empty(), "scheduler test requires requests");
+    ensure!(requests.len() <= b_max, "request count exceeds b_max");
+    let effective_cap_max = requests
+        .iter()
+        .map(|request| request.prompt_ids.len() + request.max_new_tokens)
+        .max()
+        .context("scheduler test requires requests")?;
+    let mut scheduler =
+        Scheduler::<Gemma4Model>::new(b_max, effective_cap_max, model.model_meta())?;
+    let mut request_ids = Vec::with_capacity(requests.len());
+    for mut request in requests {
+        request.kv_cache_turboquant_bits = Some(TurboQuantKVBits::K3V4);
+        request_ids.push(scheduler.admit(request)?);
+    }
+
+    let cfg = MtpSpeculativeConfig::new(draft_tokens, Sampler::greedy())?;
+    let mut outputs = vec![Vec::new(); request_ids.len()];
+    let mut finished = vec![false; request_ids.len()];
+    record_scheduler_events(
+        &request_ids,
+        &mut outputs,
+        &mut finished,
+        scheduler.prefill_admitted_gemma4_drafter_batch(model, drafter, cfg)?,
+    )?;
+    while !finished.iter().all(|done| *done) {
+        let events = scheduler.step_gemma4_drafter_batch(model, drafter)?;
+        ensure!(
+            !events.is_empty(),
+            "scheduler stopped before all requests finished"
+        );
+        record_scheduler_events(&request_ids, &mut outputs, &mut finished, events)?;
+    }
+    let stats = scheduler
+        .gemma4_drafter_stats()
+        .context("scheduler produced no Gemma4 drafter stats")?;
+    Ok((outputs, stats))
+}
+
 fn check_drafter_first_round_case(
     model: &Gemma4Model,
     drafter: &Gemma4AssistantModel,
@@ -465,6 +627,154 @@ fn gemma4_12b_drafter_first_round_matches_reference() -> Result<()> {
         .context("Gemma4AssistantModel::from_loader")?;
     for case in cases {
         check_drafter_first_round_case(&model, &drafter, &tokenizer, case)?;
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires GEMMA4_LONG_CONTEXT_MODEL and GEMMA4_LONG_CONTEXT_DRAFTER"]
+fn gemma4_drafter_long_context_tokens_match_ordinary_q1_exactly() -> Result<()> {
+    let model_dir = PathBuf::from(
+        std::env::var("GEMMA4_LONG_CONTEXT_MODEL")
+            .context("GEMMA4_LONG_CONTEXT_MODEL must point to a real Gemma4 checkpoint")?,
+    );
+    let drafter_dir = PathBuf::from(
+        std::env::var("GEMMA4_LONG_CONTEXT_DRAFTER")
+            .context("GEMMA4_LONG_CONTEXT_DRAFTER must point to a matching assistant checkpoint")?,
+    );
+    let output_tokens = std::env::var("GEMMA4_LONG_CONTEXT_OUTPUT_TOKENS")
+        .unwrap_or_else(|_| "64".to_string())
+        .parse::<usize>()?;
+    let draft_tokens = std::env::var("GEMMA4_LONG_CONTEXT_DRAFT_TOKENS")
+        .unwrap_or_else(|_| "2".to_string())
+        .parse::<usize>()?;
+    ensure!(output_tokens > 1, "output token count must exceed one");
+    ensure!(draft_tokens > 0, "draft token count must be positive");
+
+    let loader = Loader::open(&model_dir).context("Loader::open")?;
+    let tokenizer = Tokenizer::from_loader(&loader).context("Tokenizer::from_loader")?;
+    let model = Gemma4Model::from_loader(&loader).context("Gemma4Model::from_loader")?;
+    let drafter_loader =
+        Loader::open_gemma4_drafter(&drafter_dir).context("Loader::open_gemma4_drafter")?;
+    let drafter = Gemma4AssistantModel::from_loader(&drafter_loader)
+        .context("Gemma4AssistantModel::from_loader")?;
+
+    for context_tokens in long_context_lengths()? {
+        let prompt_ids = exact_length_prompt_ids(&tokenizer, context_tokens)?;
+        let request = make_text_request(prompt_ids, output_tokens, PREFILL_STEP_SIZE);
+        let ordinary_tokens = collect_base_tokens(&model, &tokenizer, request.clone())?;
+        mlx::clear_cache();
+        let (drafter_tokens_out, stats) =
+            collect_drafter_tokens(&model, &drafter, &tokenizer, request, draft_tokens)?;
+
+        assert_eq!(
+            drafter_tokens_out, ordinary_tokens,
+            "Gemma4 drafter output diverged from ordinary Q1 at context {context_tokens}"
+        );
+        assert_eq!(ordinary_tokens.len(), output_tokens);
+        assert!(stats.windows > 0, "drafter produced no verify windows");
+        assert!(stats.drafted_tokens > 0, "drafter proposed no tokens");
+        assert!(
+            stats.accepted_draft_tokens <= stats.drafted_tokens,
+            "accepted draft tokens exceeded proposed tokens"
+        );
+        eprintln!(
+            "Gemma4 long-context exact parity: context={context_tokens} output={} \
+             windows={} drafted={} accepted={} rollback={}",
+            ordinary_tokens.len(),
+            stats.windows,
+            stats.drafted_tokens,
+            stats.accepted_draft_tokens,
+            stats.rollback_count
+        );
+        mlx::clear_cache();
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires GEMMA4_LONG_CONTEXT_MODEL and GEMMA4_LONG_CONTEXT_DRAFTER"]
+fn gemma4_k3v4_long_context_scheduler_uses_multi_token_verify_exactly() -> Result<()> {
+    let model_dir = PathBuf::from(
+        std::env::var("GEMMA4_LONG_CONTEXT_MODEL")
+            .context("GEMMA4_LONG_CONTEXT_MODEL must point to a real Gemma4 checkpoint")?,
+    );
+    let drafter_dir = PathBuf::from(
+        std::env::var("GEMMA4_LONG_CONTEXT_DRAFTER")
+            .context("GEMMA4_LONG_CONTEXT_DRAFTER must point to a matching assistant checkpoint")?,
+    );
+    let context_tokens = std::env::var("GEMMA4_K3V4_CONTEXT_TOKENS")
+        .unwrap_or_else(|_| "8192".to_string())
+        .parse::<usize>()?;
+    let output_tokens = std::env::var("GEMMA4_LONG_CONTEXT_OUTPUT_TOKENS")
+        .unwrap_or_else(|_| "64".to_string())
+        .parse::<usize>()?;
+    let draft_tokens = std::env::var("GEMMA4_LONG_CONTEXT_DRAFT_TOKENS")
+        .unwrap_or_else(|_| "2".to_string())
+        .parse::<usize>()?;
+    let active_request_counts = std::env::var("GEMMA4_K3V4_ACTIVE_REQUESTS")
+        .unwrap_or_else(|_| "1,2".to_string())
+        .split(',')
+        .map(|raw| {
+            raw.trim()
+                .parse::<usize>()
+                .context("parsing active requests")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    ensure!(
+        context_tokens > 1024,
+        "K3V4 regression requires >1024 tokens"
+    );
+    ensure!(output_tokens > 1, "output token count must exceed one");
+    ensure!(draft_tokens > 1, "regression requires multi-token drafting");
+    ensure!(
+        !active_request_counts.is_empty()
+            && active_request_counts
+                .iter()
+                .all(|count| (1..=2).contains(count)),
+        "active request counts must contain only 1 or 2"
+    );
+
+    let loader = Loader::open(&model_dir).context("Loader::open")?;
+    let tokenizer = Tokenizer::from_loader(&loader).context("Tokenizer::from_loader")?;
+    let model = Gemma4Model::from_loader(&loader).context("Gemma4Model::from_loader")?;
+    let drafter_loader =
+        Loader::open_gemma4_drafter(&drafter_dir).context("Loader::open_gemma4_drafter")?;
+    let drafter = Gemma4AssistantModel::from_loader(&drafter_loader)
+        .context("Gemma4AssistantModel::from_loader")?;
+    let prompt_ids = exact_length_prompt_ids(&tokenizer, context_tokens)?;
+    let request = make_text_request(prompt_ids, output_tokens, PREFILL_STEP_SIZE);
+
+    for active_requests in active_request_counts {
+        let requests = vec![request.clone(); active_requests];
+        let ordinary_tokens = collect_scheduled_k3v4_base_tokens(&model, requests.clone(), 4)?;
+        mlx::clear_cache();
+        let (scheduled_tokens, stats) =
+            collect_scheduled_k3v4_drafter_tokens(&model, &drafter, requests, 4, draft_tokens)?;
+        for (row, tokens) in scheduled_tokens.iter().enumerate() {
+            assert_eq!(
+                tokens, &ordinary_tokens[row],
+                "K3V4 scheduler row {row} diverged at B={active_requests}"
+            );
+        }
+        assert!(
+            ordinary_tokens
+                .iter()
+                .all(|tokens| tokens.len() == output_tokens),
+            "ordinary K3V4 scheduler emitted an unexpected token count"
+        );
+        assert!(
+            stats.draft_attempts_by_position.get(1).copied().unwrap_or(0) > 0,
+            "K3V4 long-context scheduler never attempted the second draft position at B={active_requests}"
+        );
+        eprintln!(
+            "Gemma4 K3V4 scheduler exact parity: context={context_tokens} B={active_requests} \
+             output={} attempts={:?} accepted={}",
+            ordinary_tokens[0].len(),
+            stats.draft_attempts_by_position,
+            stats.accepted_draft_tokens
+        );
+        mlx::clear_cache();
     }
     Ok(())
 }

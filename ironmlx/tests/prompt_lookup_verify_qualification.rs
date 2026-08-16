@@ -23,6 +23,7 @@ IronMLX verifies copied prompt continuations against the target model. \
 This qualification sentence intentionally repeats: exact batched verification \
 must match sequential verification token by token. \
 The final clause supplies enough continuation tokens for every verify width.";
+const LONG_CONTEXT_TOKENS: usize = 65_536;
 
 #[derive(Clone, Copy, Debug)]
 enum QualificationCache {
@@ -312,6 +313,15 @@ fn qualify_case<M: Model>(
          max_hidden_abs={max_hidden_diff:.6}, max_logit_abs={max_logit_diff:.6}",
         std::any::type_name::<M>()
     );
+    if std::env::var_os("PROMPT_LOOKUP_VERIFY_REQUIRE_ZERO_DIFF").is_some() {
+        anyhow::ensure!(
+            max_hidden_diff == 0.0 && max_logit_diff == 0.0,
+            "strict exact verify mismatch for model={} cache={cache_mode:?} batch={batch} \
+             prefix_len={prefix_len} verify_width={verify_width}: \
+             max_hidden_abs={max_hidden_diff:.6}, max_logit_abs={max_logit_diff:.6}",
+            std::any::type_name::<M>()
+        );
+    }
 
     let mut tail_input = sequential_tokens
         .iter()
@@ -870,27 +880,31 @@ fn qwen35_dense_qgt1_matches_sequential_verify() -> Result<()> {
     let quant_bits = loader.quant_meta().map(|quant| quant.bits);
     if quant_bits == Some(8) {
         anyhow::ensure!(
-            model.supports_exact_batched_speculative_verify(1, 4_096, 5)
-                && model.supports_exact_batched_speculative_verify(2, 4_096, 4)
-                && model.supports_exact_batched_speculative_verify(4, 4_096, 2),
+            model.supports_exact_batched_speculative_verify(1, LONG_CONTEXT_TOKENS, 5)
+                && model.supports_exact_batched_speculative_verify(2, LONG_CONTEXT_TOKENS, 4)
+                && model.supports_exact_batched_speculative_verify(4, LONG_CONTEXT_TOKENS, 2),
             "Qwen3.5 Dense Affine8 checkpoint is missing its exact qualification staircase"
         );
         anyhow::ensure!(
-            !model.supports_exact_batched_speculative_verify(2, 4_096, 5)
-                && !model.supports_exact_batched_speculative_verify(4, 4_096, 3)
-                && !model.supports_exact_batched_speculative_verify(8, 4_096, 2),
+            !model.supports_exact_batched_speculative_verify(2, LONG_CONTEXT_TOKENS, 5)
+                && !model.supports_exact_batched_speculative_verify(4, LONG_CONTEXT_TOKENS, 3)
+                && !model.supports_exact_batched_speculative_verify(8, LONG_CONTEXT_TOKENS, 2),
             "Qwen3.5 Dense Affine8 checkpoint exceeded its qualified exact shape"
         );
     } else if matches!(quant_bits, Some(5 | 6)) {
         anyhow::ensure!(
-            model.supports_exact_batched_speculative_verify(1, 4_096, 5)
-                && model.supports_exact_batched_speculative_verify(2, 4_096, 4)
-                && model.supports_exact_batched_speculative_verify(4, 4_096, 2)
-                && !model.supports_exact_batched_speculative_verify(2, 4_096, 5)
-                && !model.supports_exact_batched_speculative_verify(4, 4_096, 4)
-                && !model.supports_exact_batched_speculative_verify(8, 4_096, 2)
-                && !model.supports_exact_batched_speculative_verify(1, 4_097, 5),
+            model.supports_exact_batched_speculative_verify(1, LONG_CONTEXT_TOKENS, 5)
+                && model.supports_exact_batched_speculative_verify(2, LONG_CONTEXT_TOKENS, 4)
+                && model.supports_exact_batched_speculative_verify(4, LONG_CONTEXT_TOKENS, 2)
+                && !model.supports_exact_batched_speculative_verify(2, LONG_CONTEXT_TOKENS, 5)
+                && !model.supports_exact_batched_speculative_verify(4, LONG_CONTEXT_TOKENS, 4)
+                && !model.supports_exact_batched_speculative_verify(8, LONG_CONTEXT_TOKENS, 2),
             "Qwen3.5 Dense Affine5/6 checkpoint exceeded its exact qualification staircase"
+        );
+    } else if quant_bits == Some(4) {
+        anyhow::ensure!(
+            model.supports_exact_batched_speculative_verify(8, LONG_CONTEXT_TOKENS, 5),
+            "Qwen3.5 Dense Affine4 checkpoint is missing long-context exact qualification"
         );
     }
     qualify_model(&model, &tokenizer)?;
@@ -958,21 +972,19 @@ fn qwen35_moe_qgt1_matches_sequential_verify() -> Result<()> {
     let quant_bits = loader.quant_meta().map(|quant| quant.bits);
     if quant_bits == Some(8) {
         anyhow::ensure!(
-            model.supports_exact_batched_speculative_verify(8, 1_024, 2)
-                && !model.supports_exact_batched_speculative_verify(8, 1_025, 2)
-                && !model.supports_exact_batched_speculative_verify(1, 1_024, 4),
+            model.supports_exact_batched_speculative_verify(8, LONG_CONTEXT_TOKENS, 2)
+                && !model.supports_exact_batched_speculative_verify(1, LONG_CONTEXT_TOKENS, 4),
             "Qwen3.5 MoE Affine8 checkpoint exceeded its exact Q2 qualification"
         );
     } else if matches!(quant_bits, Some(5 | 6)) {
         anyhow::ensure!(
-            model.supports_exact_batched_speculative_verify(8, 1_024, 5)
-                && !model.supports_exact_batched_speculative_verify(8, 1_025, 5)
-                && !model.supports_exact_batched_speculative_verify(8, 1_024, 6),
+            model.supports_exact_batched_speculative_verify(8, LONG_CONTEXT_TOKENS, 5)
+                && !model.supports_exact_batched_speculative_verify(8, LONG_CONTEXT_TOKENS, 6),
             "Qwen3.5 MoE Affine5/6 checkpoint exceeded its exact qualification"
         );
     } else {
         anyhow::ensure!(
-            model.supports_exact_batched_speculative_verify(8, 4_096, 5),
+            model.supports_exact_batched_speculative_verify(8, LONG_CONTEXT_TOKENS, 5),
             "Qwen3.5 MoE checkpoint is not exact-verify precision qualified"
         );
     }
@@ -1015,21 +1027,19 @@ fn qwen36_moe_qgt1_matches_sequential_verify() -> Result<()> {
     let quant_bits = loader.quant_meta().map(|quant| quant.bits);
     if !force_candidate && quant_bits == Some(8) {
         anyhow::ensure!(
-            model.supports_exact_batched_speculative_verify(8, 1_024, 2)
-                && !model.supports_exact_batched_speculative_verify(8, 1_025, 2)
-                && !model.supports_exact_batched_speculative_verify(1, 1_024, 4),
+            model.supports_exact_batched_speculative_verify(8, LONG_CONTEXT_TOKENS, 2)
+                && !model.supports_exact_batched_speculative_verify(1, LONG_CONTEXT_TOKENS, 4),
             "Qwen3.6 MoE Affine8 checkpoint exceeded its exact Q2 qualification"
         );
     } else if !force_candidate && matches!(quant_bits, Some(5 | 6)) {
         anyhow::ensure!(
-            model.supports_exact_batched_speculative_verify(8, 1_024, 5)
-                && !model.supports_exact_batched_speculative_verify(8, 1_025, 5)
-                && !model.supports_exact_batched_speculative_verify(8, 1_024, 6),
+            model.supports_exact_batched_speculative_verify(8, LONG_CONTEXT_TOKENS, 5)
+                && !model.supports_exact_batched_speculative_verify(8, LONG_CONTEXT_TOKENS, 6),
             "Qwen3.6 MoE Affine5/6 checkpoint exceeded its exact qualification"
         );
     } else if !force_candidate {
         anyhow::ensure!(
-            model.supports_exact_batched_speculative_verify(8, 4_096, 5),
+            model.supports_exact_batched_speculative_verify(8, LONG_CONTEXT_TOKENS, 5),
             "Qwen3.6 MoE checkpoint is not exact-verify precision qualified"
         );
     }
@@ -1066,16 +1076,15 @@ fn gemma4_qgt1_matches_sequential_verify() -> Result<()> {
     if !force_candidate && quant_bits == Some(8) {
         if is_moe {
             anyhow::ensure!(
-                model.supports_exact_batched_speculative_verify(2, 1_024, 5)
+                model.supports_exact_batched_speculative_verify(2, LONG_CONTEXT_TOKENS, 5)
                     && !model.supports_exact_batched_speculative_verify(4, 1_024, 2)
-                    && !model.supports_exact_batched_speculative_verify(2, 1_025, 5),
+                    && !model.supports_exact_batched_speculative_verify(4, LONG_CONTEXT_TOKENS, 2),
                 "Gemma4 MoE Affine8 checkpoint exceeded its B1-B2 exact qualification"
             );
         } else {
             anyhow::ensure!(
-                model.supports_exact_batched_speculative_verify(8, 1_024, 5)
-                    && !model.supports_exact_batched_speculative_verify(8, 1_025, 5)
-                    && !model.supports_exact_batched_speculative_verify(8, 1_024, 6),
+                model.supports_exact_batched_speculative_verify(8, LONG_CONTEXT_TOKENS, 5)
+                    && !model.supports_exact_batched_speculative_verify(8, LONG_CONTEXT_TOKENS, 6),
                 "Gemma4 Dense Affine8 checkpoint exceeded its exact qualification"
             );
         }
@@ -1087,26 +1096,46 @@ fn gemma4_qgt1_matches_sequential_verify() -> Result<()> {
             );
         } else {
             anyhow::ensure!(
-                model.supports_exact_batched_speculative_verify(8, 1_024, 5)
-                    && !model.supports_exact_batched_speculative_verify(8, 1_025, 5)
-                    && !model.supports_exact_batched_speculative_verify(8, 1_024, 6)
-                    && model
-                        .supports_exact_batched_speculative_verify_for_kv_cache(8, 1_024, 5, None,)
+                model.supports_exact_batched_speculative_verify(8, LONG_CONTEXT_TOKENS, 5)
+                    && !model.supports_exact_batched_speculative_verify(8, LONG_CONTEXT_TOKENS, 6)
+                    && model.supports_exact_batched_speculative_verify_for_kv_cache(
+                        8,
+                        LONG_CONTEXT_TOKENS,
+                        5,
+                        None,
+                    )
                     && !model.supports_exact_batched_speculative_verify_for_kv_cache(
                         8,
-                        1_024,
+                        LONG_CONTEXT_TOKENS,
                         2,
                         Some(TurboQuantKVBits::K3V4),
                     )
                     && !model.supports_exact_batched_speculative_verify_for_kv_cache(
                         8,
-                        1_024,
+                        LONG_CONTEXT_TOKENS,
                         2,
                         Some(TurboQuantKVBits::K4V4),
                     ),
                 "Gemma4 Dense Affine5/6 checkpoint exceeded its exact qualification"
             );
         }
+    } else if !force_candidate && quant_bits == Some(4) {
+        anyhow::ensure!(
+            model.supports_exact_batched_speculative_verify(8, LONG_CONTEXT_TOKENS, 5)
+                && !model.supports_exact_batched_speculative_verify_for_kv_cache(
+                    8,
+                    LONG_CONTEXT_TOKENS,
+                    2,
+                    Some(TurboQuantKVBits::K3V4),
+                )
+                && !model.supports_exact_batched_speculative_verify_for_kv_cache(
+                    8,
+                    LONG_CONTEXT_TOKENS,
+                    5,
+                    Some(TurboQuantKVBits::K4V4),
+                ),
+            "Gemma4 Affine4 checkpoint is missing long-context exact qualification"
+        );
     }
     if !force_turboquant_candidate {
         qualify_model(&model, &tokenizer)?;
