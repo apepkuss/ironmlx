@@ -798,6 +798,13 @@ impl Model for Qwen35MoeModel {
         )
     }
 
+    fn max_prompt_lookup_draft_tokens(&self, configured_max_draft_tokens: usize) -> usize {
+        crate::models::qwen3_5::speculative::prompt_lookup_max_draft_tokens(
+            self.exact_batched_verify_profile,
+            configured_max_draft_tokens,
+        )
+    }
+
     fn model_meta(&self) -> ModelMeta {
         Qwen35MoeModel::model_meta(self)
     }

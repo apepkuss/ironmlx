@@ -995,6 +995,13 @@ impl crate::core::model::Model for Qwen35Model {
         )
     }
 
+    fn max_prompt_lookup_draft_tokens(&self, configured_max_draft_tokens: usize) -> usize {
+        super::speculative::prompt_lookup_max_draft_tokens(
+            self.exact_batched_verify_profile,
+            configured_max_draft_tokens,
+        )
+    }
+
     fn model_meta(&self) -> crate::core::memory_budget::ModelMeta {
         Qwen35Model::model_meta(self)
     }

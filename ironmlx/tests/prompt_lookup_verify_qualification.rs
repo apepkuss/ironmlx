@@ -1,8 +1,8 @@
 //! Real-model qualification for exact multi-token PromptLookup verification.
 //!
-//! The safe production path verifies each token with a sequential Q=1
-//! forward. These ignored tests compare that reference against one Q>1
-//! teacher-forced forward from the same prefix and an independent cache.
+//! These ignored tests compare the ordinary sequential Q=1 reference against
+//! one position-isolated Q>1 teacher-forced forward from the same prefix and
+//! an independent cache.
 
 use anyhow::{Context, Result};
 use ironmlx::core::cache::TurboQuantKVBits;
@@ -608,7 +608,7 @@ fn qualify_qwen_cache_and_ragged<M: Model>(model: &M, tokenizer: &Tokenizer) -> 
     let mut tokens = tokenizer
         .encode(QUALIFICATION_TEXT, false)
         .context("tokenizing Qwen cache qualification text")?;
-    while tokens.len() < 8 * (128 + 5) {
+    while tokens.len() < 8 * (128 + 8) {
         let copy = tokens.clone();
         tokens.extend(copy);
     }
@@ -617,7 +617,9 @@ fn qualify_qwen_cache_and_ragged<M: Model>(model: &M, tokenizer: &Tokenizer) -> 
         QualificationCache::TurboQuant(TurboQuantKVBits::K3V4),
         QualificationCache::TurboQuant(TurboQuantKVBits::K4V4),
     ] {
-        if model.supports_exact_batched_speculative_verify(4, 64, 5) {
+        if model.supports_exact_batched_speculative_verify(8, 64, 8) {
+            qualify_case(model, &tokens, 4, 64, 8, cache_mode)?;
+        } else if model.supports_exact_batched_speculative_verify(4, 64, 5) {
             qualify_case(model, &tokens, 4, 64, 5, cache_mode)?;
         } else if model.supports_exact_batched_speculative_verify(8, 64, 2) {
             for &batch in &[1_usize, 4, 8] {
@@ -633,7 +635,10 @@ fn qualify_qwen_cache_and_ragged<M: Model>(model: &M, tokenizer: &Tokenizer) -> 
             }
         }
     }
-    if model.supports_exact_batched_speculative_verify(8, 128, 5) {
+    if model.supports_exact_batched_speculative_verify(8, 128, 8) {
+        qualify_ragged_case(model, &tokens, 64, &[8, 7, 2, 0])?;
+        qualify_ragged_case(model, &tokens, 128, &[8, 1, 7, 0, 3, 2, 8, 0])
+    } else if model.supports_exact_batched_speculative_verify(8, 128, 5) {
         qualify_ragged_case(model, &tokens, 64, &[5, 4, 2, 0])?;
         qualify_ragged_case(model, &tokens, 128, &[5, 1, 4, 0, 3, 2, 5, 0])
     } else if model.supports_exact_batched_speculative_verify(8, 128, 2) {

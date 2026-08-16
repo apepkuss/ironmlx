@@ -150,6 +150,16 @@ pub trait Model {
         true
     }
 
+    /// Clamp PromptLookup's configured proposal width to the largest draft
+    /// window this model has qualified for production verification.
+    ///
+    /// The limit is applied before proposal construction so shared-MTP
+    /// certification metadata and bonus tokens are derived from the same
+    /// window that will be verified.
+    fn max_prompt_lookup_draft_tokens(&self, configured_max_draft_tokens: usize) -> usize {
+        configured_max_draft_tokens
+    }
+
     /// Whether q=1 speculative verification must materialize each device
     /// result before host-side cache offsets advance to the next depth.
     ///

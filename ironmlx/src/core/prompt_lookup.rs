@@ -629,6 +629,13 @@ impl PromptLookupDraftLimits {
     pub(crate) fn shared(self) -> usize {
         self.shared
     }
+
+    pub(crate) fn capped(self, max_draft_tokens: usize) -> Self {
+        Self::new(
+            self.local.min(max_draft_tokens),
+            self.shared.min(max_draft_tokens),
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -3382,6 +3389,14 @@ mod tests {
         assert_eq!(controller.stats().adaptive_draft_width_reductions, 1);
         assert_eq!(controller.stats().adaptive_draft_width_increases, 1);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn draft_limits_cap_each_proposal_source_without_raising_small_limits() {
+        assert_eq!(
+            PromptLookupDraftLimits::new(9, 5).capped(7),
+            PromptLookupDraftLimits::new(7, 5)
+        );
     }
 
     #[test]

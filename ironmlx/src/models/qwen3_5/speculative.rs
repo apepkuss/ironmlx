@@ -86,7 +86,15 @@ pub(crate) fn exact_batched_verify_shape_qualified(
         ExactBatchedVerifyProfile::Affine4
         | ExactBatchedVerifyProfile::Affine5Moe
         | ExactBatchedVerifyProfile::Affine6Moe => {
-            batch_width > 0 && batch_width <= 8 && verify_width > 1 && verify_width <= 5
+            let max_verify_width = if profile == ExactBatchedVerifyProfile::Affine4 {
+                8
+            } else {
+                5
+            };
+            batch_width > 0
+                && batch_width <= 8
+                && verify_width > 1
+                && verify_width <= max_verify_width
         }
         ExactBatchedVerifyProfile::Affine5Dense
         | ExactBatchedVerifyProfile::Affine6Dense
@@ -104,10 +112,26 @@ pub(crate) fn exact_batched_verify_shape_qualified(
 
 pub(crate) fn sequential_prompt_lookup_verify_qualified(
     profile: ExactBatchedVerifyProfile,
-    context_tokens: usize,
+    _context_tokens: usize,
 ) -> bool {
-    // The same Affine4 counterexample persists with chained transactional Q1 verify.
-    profile != ExactBatchedVerifyProfile::Affine4 || context_tokens <= 1_024
+    // Affine4 has a real mixed-source counterexample even with chained
+    // transactional Q1 verify. Keep it on the position-isolated exact path at
+    // every context length instead of introducing a context-dependent mode
+    // switch.
+    profile != ExactBatchedVerifyProfile::Affine4
+}
+
+pub(crate) fn prompt_lookup_max_draft_tokens(
+    profile: ExactBatchedVerifyProfile,
+    configured_max_draft_tokens: usize,
+) -> usize {
+    // Affine4 exact verification is qualified through Q8, which represents
+    // the current token plus at most seven copied draft tokens.
+    if profile == ExactBatchedVerifyProfile::Affine4 {
+        configured_max_draft_tokens.min(7)
+    } else {
+        configured_max_draft_tokens
+    }
 }
 
 pub(crate) fn project_positions_isolated_on(
@@ -211,7 +235,13 @@ mod tests {
                 ExactBatchedVerifyProfile::Affine4,
                 8,
                 context_tokens,
-                5
+                8
+            ));
+            assert!(!exact_batched_verify_qualified(
+                ExactBatchedVerifyProfile::Affine4,
+                8,
+                context_tokens,
+                9
             ));
         }
         assert!(!exact_batched_verify_qualified(
@@ -226,7 +256,7 @@ mod tests {
             65_536,
             5,
         ));
-        assert!(sequential_prompt_lookup_verify_qualified(
+        assert!(!sequential_prompt_lookup_verify_qualified(
             ExactBatchedVerifyProfile::Affine4,
             1_024
         ));
@@ -238,6 +268,14 @@ mod tests {
             ExactBatchedVerifyProfile::Affine5Dense,
             4_096
         ));
+        assert_eq!(
+            prompt_lookup_max_draft_tokens(ExactBatchedVerifyProfile::Affine4, 32),
+            7
+        );
+        assert_eq!(
+            prompt_lookup_max_draft_tokens(ExactBatchedVerifyProfile::Affine5Dense, 32),
+            32
+        );
         for profile in [
             ExactBatchedVerifyProfile::Affine5Dense,
             ExactBatchedVerifyProfile::Affine6Dense,
@@ -272,9 +310,9 @@ mod tests {
         assert!(!exact_batched_verify_qualified(affine8_moe, 8, 65_536, 4));
 
         let affine4 = ExactBatchedVerifyProfile::Affine4;
-        assert!(exact_batched_verify_shape_qualified(affine4, 8, 5));
-        assert!(!exact_batched_verify_shape_qualified(affine4, 9, 5));
-        assert!(!exact_batched_verify_shape_qualified(affine4, 8, 6));
+        assert!(exact_batched_verify_shape_qualified(affine4, 8, 8));
+        assert!(!exact_batched_verify_shape_qualified(affine4, 9, 8));
+        assert!(!exact_batched_verify_shape_qualified(affine4, 8, 9));
     }
 
     #[test]

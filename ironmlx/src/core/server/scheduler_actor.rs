@@ -1081,7 +1081,8 @@ impl SchedulerActorPromptLookup {
                         .adaptive_draft_limits(regime, self.cfg.max_draft_tokens)
                 },
             )
-        };
+        }
+        .capped(model.max_prompt_lookup_draft_tokens(self.cfg.max_draft_tokens));
         let miss_query_scope = Self::miss_query_scope(sched, base_regime, allow_cross_request);
         let query_scope = base_regime.map(|base_regime| PromptLookupQueryScope {
             base_regime,

@@ -109,7 +109,8 @@ PROMPT_LOOKUP_VERIFY_QWEN35_MODEL=/path/to/Qwen3.8-27B-4bit/snapshots/<sha> \
 PROMPT_LOOKUP_VERIFY_REQUIRE_ZERO_DIFF=1 \
 PROMPT_LOOKUP_VERIFY_BATCHES=1,2,4,8 \
 PROMPT_LOOKUP_VERIFY_PREFIX_LENS=1024,1025,4096,4097,8192,32768,65536 \
-PROMPT_LOOKUP_VERIFY_WIDTHS=2,3,4,5 \
+PROMPT_LOOKUP_VERIFY_WIDTHS=2,3,4,5,6,8 \
+PROMPT_LOOKUP_VERIFY_MAX_WIDTH=8 \
 cargo test --release -p ironmlx --test prompt_lookup_verify_qualification \
   qwen35_dense_qgt1_matches_sequential_verify \
   -- --ignored --test-threads=1 --nocapture
