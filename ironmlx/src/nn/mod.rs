@@ -52,3 +52,21 @@ pub use norm::{LayerNorm, RmsNorm, RmsNormGated};
 pub fn verify_qmm_scope() -> impl Drop {
     verify_qmm::armed_scope()
 }
+
+/// Preserve independent Q=1 numerical behavior for quantized projections.
+///
+/// This is exposed only for qualification benchmarks that compare the current
+/// exact speculative route with the ordinary multi-token execution path.
+#[doc(hidden)]
+pub fn position_stable_qmm_scope() -> impl Drop {
+    position_stable_qmm::scope()
+}
+
+/// Preserve repeated Q=1 state transitions in GatedDeltaNet layers.
+///
+/// This is exposed only for qualification benchmarks that compare the current
+/// exact speculative route with the ordinary multi-token execution path.
+#[doc(hidden)]
+pub fn sequence_stable_gated_delta_scope() -> impl Drop {
+    sequence_stable_gated_delta::scope()
+}

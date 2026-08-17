@@ -162,6 +162,10 @@ impl Qwen35MoeModel {
                 hidden_shape[1] as usize,
             );
         if exact_batched_verify {
+            if hidden_shape[0] == 1 {
+                let _product_stable = crate::nn::product_stable_qmm::scope();
+                return self.project_hidden_unisolated_on(hidden, target);
+            }
             return crate::models::qwen3_5::speculative::project_positions_isolated_on(
                 hidden,
                 target,
@@ -193,6 +197,10 @@ impl Qwen35MoeModel {
             .get(1)
             .is_some_and(|&sequence| sequence > 1)
         {
+            if shape.as_slice().first() == Some(&1) {
+                let _product_stable = crate::nn::product_stable_qmm::scope();
+                return self.project_hidden_unisolated_on(hidden, target);
+            }
             return crate::models::qwen3_5::speculative::project_positions_isolated_on(
                 hidden,
                 target,

@@ -146,14 +146,14 @@ use crate::core::speculative::{
     add_elapsed_us, add_mtp_decode_cache_commit_us, add_mtp_prefill_cache_commit_us,
     commit_mtp_cache_hidden_prefix, commit_mtp_cache_hidden_tail, elapsed_us_since,
     layer_cache_supports_accepted_prefix_trim, resolve_exact_deterministic_target_logits,
-    resolve_exact_deterministic_target_tokens, resolve_speculative_tokens, restore_layer_cache,
-    rollback_main_cache_to_accepted_prefix, sample_draft_logits_position,
-    sample_draft_logits_position_with_uniform, sample_logits_positions, slice_hidden_position,
-    slice_position_ids_prefix, split_speculative_draft_prng,
-    trim_full_layer_cache_rows_to_accepted_prefix, verify_input, zero_hidden_like_position,
-    DraftTokenDistribution, MainCacheRollbackInput, MtpDraftPolicyKvState, MtpDraftPolicySnapshot,
-    MtpDraftPolicyState, MtpDraftPolicyWindow, MtpSpeculativeConfig, MtpSpeculativeModel,
-    MtpSpeculativeStats, SpeculativeResolution,
+    resolve_exact_deterministic_target_tokens, resolve_greedy_verified_hidden_until_mismatch,
+    resolve_speculative_tokens, restore_layer_cache, rollback_main_cache_to_accepted_prefix,
+    sample_draft_logits_position, sample_draft_logits_position_with_uniform,
+    sample_logits_positions, slice_hidden_position, slice_position_ids_prefix,
+    split_speculative_draft_prng, trim_full_layer_cache_rows_to_accepted_prefix, verify_input,
+    zero_hidden_like_position, DraftTokenDistribution, MainCacheRollbackInput,
+    MtpDraftPolicyKvState, MtpDraftPolicySnapshot, MtpDraftPolicyState, MtpDraftPolicyWindow,
+    MtpSpeculativeConfig, MtpSpeculativeModel, MtpSpeculativeStats, SpeculativeResolution,
 };
 use crate::core::speculative_qualification::{NeuralExactRegime, NeuralExactSource};
 use crate::nn::{
@@ -1442,7 +1442,7 @@ fn build_mtp_device_verify_input(
     max_len: usize,
     target: mlx::StreamOrDevice,
 ) -> Result<(Array, Vec<i32>)> {
-    if batch == 0 || max_len < 2 {
+    if batch == 0 || max_len == 0 {
         return Err(anyhow!(
             "build_mtp_device_verify_input: invalid batch={batch} max_len={max_len}"
         ));
@@ -8053,8 +8053,11 @@ impl<M: Model> Scheduler<M> {
             }
             let draft_budget = row_state
                 .adaptive_draft_tokens
-                .clamp(1, max_supported_draft_tokens)
+                .min(max_supported_draft_tokens)
                 .min(remaining);
+            if draft_budget == 0 {
+                return Ok(false);
+            }
             draft_budgets.push((row_idx, slot.id, draft_budget));
         }
         if draft_budgets.is_empty() {
@@ -11887,6 +11890,7 @@ impl<M: Model> Scheduler<M> {
         let mut last_prompt_hidden = None;
         let mut mtp_prev_hidden: Option<Array> = None;
         let mut pos = 0_i32;
+        let mut ordinary_prefill_is_adaptive_chunked = false;
         if let Some((restore_len, restored_last_hidden)) =
             try_restore_paged_prefix_for_prompt_with_mtp(
                 self.paged_prefix_cache.as_ref(),
@@ -11925,10 +11929,19 @@ impl<M: Model> Scheduler<M> {
             if let Some(plan) = prefill_plan.as_ref() {
                 n = plan.selected_tokens as i32;
             }
-            if self.paged_prefix_cache.is_some()
-                && pos + n == prompt_len_i32
-                && pos < prompt_len_i32 - 1
-            {
+            if pos == 0 && n < prompt_len_i32 {
+                ordinary_prefill_is_adaptive_chunked = true;
+            }
+            // Mirror ordinary Scheduler prefill exactly. A prompt that fits
+            // the initial prefill allocation is evaluated as [N - 1] + [1],
+            // while an adaptive chunked prompt preserves every selected
+            // chunk (except the existing paged-prefix final-token boundary).
+            // Affine projections are shape-sensitive, so inventing a final
+            // [chunk - 1] + [1] split only on the MTP side can leave the main
+            // cache numerically different before speculative decode starts.
+            let split_final_token =
+                self.paged_prefix_cache.is_some() || !ordinary_prefill_is_adaptive_chunked;
+            if split_final_token && pos + n == prompt_len_i32 && pos < prompt_len_i32 - 1 {
                 n = prompt_len_i32 - 1 - pos;
             }
             let chunk_ids = &prompt_ids[pos as usize..(pos as usize + n as usize)];
@@ -13011,6 +13024,7 @@ impl<M: Model> Scheduler<M> {
         let window_started = Instant::now();
         let max_supported_draft_tokens = cfg.max_draft_tokens;
         let stats_before_batch = stats.clone();
+        let timing_before = stats.draft_cap_timing();
         let kv_state = MtpDraftPolicyKvState::from_runtime(
             self.paged_prefix_cache.is_some(),
             self.active_kv_config.enabled,
@@ -13040,7 +13054,7 @@ impl<M: Model> Scheduler<M> {
             history.extend_from_slice(&slot.generated_tokens);
             let draft_budget = row_state
                 .adaptive_draft_tokens
-                .clamp(1, max_supported_draft_tokens)
+                .min(max_supported_draft_tokens)
                 .min(remaining);
             let input_token: Array = (&[current_token][..], &[1_i32, 1_i32][..]).try_into()?;
             contexts.push(MtpBatchedFillContext {
@@ -13290,6 +13304,7 @@ impl<M: Model> Scheduler<M> {
         // Preserve the qualified model-facing batch width. Rows without a new
         // draft window use zero sequence lengths in the verify tensors.
         self.rebuild_cache_layout(model, &active_rows)?;
+        let has_draft_tokens = contexts.iter().any(|ctx| !ctx.draft_tokens.is_empty());
 
         let verify_result = (|| -> Result<()> {
             let cache_row_for_ctx = contexts
@@ -13308,12 +13323,14 @@ impl<M: Model> Scheduler<M> {
                 })
                 .collect::<Result<Vec<_>>>()?;
 
-            let base_snapshot = {
+            let base_snapshot = if has_draft_tokens {
                 let cache = self
                     .cache
                     .as_ref()
                     .ok_or_else(|| anyhow!("fill_mtp_windows_batched: main cache absent"))?;
-                cache.iter().map(LayerCache::snapshot).collect::<Vec<_>>()
+                Some(cache.iter().map(LayerCache::snapshot).collect::<Vec<_>>())
+            } else {
+                None
             };
             let b = self.cache_rows.len();
             let mut verify_starts = vec![0_i32; b];
@@ -13341,7 +13358,10 @@ impl<M: Model> Scheduler<M> {
             };
             let verify_forward_start = Instant::now();
             let verified_hidden = {
-                let _verify_qmm = crate::nn::verify_qmm::armed_scope();
+                // Once every row selected draft=0, this is an ordinary
+                // batched target decode. Exact speculative QMM and rollback
+                // snapshots are needed only while at least one row drafts.
+                let _verify_qmm = has_draft_tokens.then(crate::nn::verify_qmm::armed_scope);
                 let cache = self
                     .cache
                     .as_mut()
@@ -13494,7 +13514,9 @@ impl<M: Model> Scheduler<M> {
                         })?;
                         trim_full_layer_cache_rows_to_accepted_prefix(
                             cache.as_mut_slice(),
-                            &base_snapshot,
+                            base_snapshot.as_ref().ok_or_else(|| {
+                                anyhow!("fill_mtp_windows_batched: rollback snapshot absent")
+                            })?,
                             &mismatch_rows,
                         )?;
                     }
@@ -13506,7 +13528,12 @@ impl<M: Model> Scheduler<M> {
                         let cache = self.cache.as_mut().ok_or_else(|| {
                             anyhow!("fill_mtp_windows_batched: main cache absent")
                         })?;
-                        restore_layer_cache(cache.as_mut_slice(), &base_snapshot)?;
+                        restore_layer_cache(
+                            cache.as_mut_slice(),
+                            base_snapshot.as_ref().ok_or_else(|| {
+                                anyhow!("fill_mtp_windows_batched: replay snapshot absent")
+                            })?,
+                        )?;
                     }
 
                     let accepted_lens = resolutions
@@ -13618,6 +13645,7 @@ impl<M: Model> Scheduler<M> {
                     )
                 })?;
                 let pre_window_hidden = row_state.last_hidden.clone();
+                let maintain_mtp_cache = row_state.draft_policy.should_maintain_mtp_cache();
                 if resolution.needs_rollback {
                     let trim_start = Instant::now();
                     let accepted_mtp_input_len =
@@ -13628,7 +13656,7 @@ impl<M: Model> Scheduler<M> {
                         accepted_mtp_input_len,
                     )?;
                     add_elapsed_us(&mut stats.mtp_cache_restore_us, trim_start);
-                } else {
+                } else if maintain_mtp_cache {
                     let tail_idx = accepted_input.len() - 1;
                     let tail_prev_hidden = if tail_idx == 0 {
                         pre_window_hidden.clone()
@@ -13777,8 +13805,10 @@ impl<M: Model> Scheduler<M> {
 
             let stats_delta = stats.saturating_delta_since(&stats_before_batch);
             let divisor = contexts.len() as u64;
-            let total_us = elapsed_us_since(window_started) / divisor;
-            for (row_idx, attempted, accepted, context_tokens, committed_tokens) in policy_inputs {
+            let batch_total_us = elapsed_us_since(window_started);
+            let per_row_total_us = batch_total_us / divisor;
+            for &(row_idx, attempted, accepted, context_tokens, committed_tokens) in &policy_inputs
+            {
                 let row_state = row_states.get_mut(&row_idx).ok_or_else(|| {
                     anyhow!(
                         "fill_mtp_windows_batched: row {row_idx} state absent for policy update"
@@ -13792,7 +13822,7 @@ impl<M: Model> Scheduler<M> {
                             attempted,
                             accepted,
                             committed_tokens,
-                            total_us,
+                            per_row_total_us,
                             context_tokens,
                             contexts.len(),
                             kv_state,
@@ -13808,7 +13838,7 @@ impl<M: Model> Scheduler<M> {
                     .current_budget()
                     .min(max_supported_draft_tokens);
                 let policy_snapshot = row_state.draft_policy.snapshot();
-                if accepted == attempted {
+                if attempted > 0 && accepted == attempted {
                     self.record_prompt_lookup_mtp_certification(
                         row_idx,
                         context_tokens,
@@ -13817,6 +13847,35 @@ impl<M: Model> Scheduler<M> {
                     );
                 }
             }
+            let timing_delta = stats
+                .draft_cap_timing()
+                .saturating_delta_since(timing_before);
+            let draft_tokens_by_row = policy_inputs
+                .iter()
+                .map(|(_, attempted, _, _, _)| *attempted)
+                .collect::<Vec<_>>();
+            let context_tokens_by_row = policy_inputs
+                .iter()
+                .map(|(_, _, _, context_tokens, _)| *context_tokens)
+                .collect::<Vec<_>>();
+            let accepted_draft_tokens = policy_inputs
+                .iter()
+                .map(|(_, _, accepted, _, _)| *accepted)
+                .sum();
+            let committed_tokens = policy_inputs
+                .iter()
+                .map(|(_, _, _, _, committed)| *committed)
+                .sum();
+            stats.record_draft_cap_observation(
+                max_supported_draft_tokens,
+                &draft_tokens_by_row,
+                &context_tokens_by_row,
+                accepted_draft_tokens,
+                committed_tokens,
+                stats_delta.rollback_count,
+                batch_total_us,
+                timing_delta,
+            );
 
             Ok(())
         })();
@@ -14017,6 +14076,7 @@ impl<M: Model> Scheduler<M> {
 
         let window_started = Instant::now();
         let stats_before_window = stats.clone();
+        let timing_before = stats.draft_cap_timing();
         let context_tokens = history.len();
         let kv_state = MtpDraftPolicyKvState::from_runtime(
             self.paged_prefix_cache.is_some(),
@@ -14025,8 +14085,9 @@ impl<M: Model> Scheduler<M> {
         let max_supported_draft_tokens = window.speculative.max_draft_tokens;
         let draft_budget = row_state
             .adaptive_draft_tokens
-            .clamp(1, max_supported_draft_tokens)
+            .min(max_supported_draft_tokens)
             .min(remaining);
+        let maintain_mtp_cache = row_state.draft_policy.should_maintain_mtp_cache();
         let mut compact_prng = self.compact_prng_state_for_rows(&[row_idx])?;
         let mut draft_constraint = constraint.clone();
         let draft_result = self.draft_mtp_tokens_single_greedy_device(
@@ -14040,11 +14101,14 @@ impl<M: Model> Scheduler<M> {
             draft_constraint.as_mut(),
         )?;
         let current: Array = (&[current_token][..], &[1_i32, 1_i32][..]).try_into()?;
-        let mut token_steps = Vec::with_capacity(draft_result.tokens.len() + 1);
-        token_steps.push(&current);
-        token_steps.extend(draft_result.tokens.iter());
-        let verify_arr =
-            mlx::ops::shape::concatenate_on(&token_steps, 1, mlx::StreamOrDevice::default())?;
+        let verify_arr = if draft_result.tokens.is_empty() {
+            current.clone()
+        } else {
+            let mut token_steps = Vec::with_capacity(draft_result.tokens.len() + 1);
+            token_steps.push(&current);
+            token_steps.extend(draft_result.tokens.iter());
+            mlx::ops::shape::concatenate_on(&token_steps, 1, mlx::StreamOrDevice::default())?
+        };
         let draft_arr = if sampler.is_pipelinable() && constraint.is_none() {
             None
         } else {
@@ -14060,15 +14124,18 @@ impl<M: Model> Scheduler<M> {
         let verify_pos_ids = self.mtp_position_ids(model, verify_start_pos, verify_len as i32)?;
         let pre_window_hidden = row_state.last_hidden.clone();
 
-        let base_snapshot = {
+        let base_snapshot = (draft_budget > 0).then(|| {
             let cache = self
                 .cache
                 .as_ref()
-                .ok_or_else(|| anyhow!("fill_mtp_window_single: main cache absent"))?;
+                .expect("main cache was initialized before MTP decode");
             cache.iter().map(LayerCache::snapshot).collect::<Vec<_>>()
-        };
+        });
         let verify_forward_start = Instant::now();
-        let _verify_qmm = crate::nn::verify_qmm::armed_scope();
+        // A zero-draft window is an ordinary single-token target decode. Do
+        // not force it through the exact speculative QMM path; there is no
+        // drafted position whose result needs cross-shape verification.
+        let _verify_qmm = (draft_budget > 0).then(crate::nn::verify_qmm::armed_scope);
         let verified_hidden = {
             let cache = self
                 .cache
@@ -14084,81 +14151,91 @@ impl<M: Model> Scheduler<M> {
             )?
         };
         add_elapsed_us(&mut stats.verify_forward_us, verify_forward_start);
-        let (draft_tokens, resolution) = if sampler.is_pipelinable() {
-            let projection_start = Instant::now();
-            let verified_logits = project_mtp_target_hidden(
-                model,
-                &verified_hidden,
-                window.projection,
-                mlx::StreamOrDevice::default(),
-            )?;
-            let verified_logits = if let Some(constraint) = constraint.as_ref() {
-                let draft_arr = draft_arr
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("constrained MTP draft array is absent"))?;
+        let (draft_tokens, resolution) =
+            if draft_budget == 0 && sampler.is_pipelinable() && constraint.is_none() {
+                let resolution = resolve_greedy_verified_hidden_until_mismatch(
+                    model,
+                    &verified_hidden,
+                    &[],
+                    stats,
+                    mlx::StreamOrDevice::default(),
+                )?;
+                (Vec::new(), resolution)
+            } else if sampler.is_pipelinable() {
+                let projection_start = Instant::now();
+                let verified_logits = project_mtp_target_hidden(
+                    model,
+                    &verified_hidden,
+                    window.projection,
+                    mlx::StreamOrDevice::default(),
+                )?;
+                let verified_logits = if let Some(constraint) = constraint.as_ref() {
+                    let draft_arr = draft_arr
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("constrained MTP draft array is absent"))?;
+                    let sync_start = Instant::now();
+                    let draft_tokens: Vec<u32> = draft_arr.to_vec()?;
+                    stats.draft_host_sync_count = stats.draft_host_sync_count.saturating_add(1);
+                    add_elapsed_us(&mut stats.draft_host_sync_us, sync_start);
+                    crate::core::constrained::apply_speculative_token_masks(
+                        &verified_logits,
+                        &[Some(constraint.speculative_masks(&draft_tokens)?)],
+                    )?
+                } else {
+                    verified_logits
+                };
+                add_elapsed_us(&mut stats.projection_us, projection_start);
+                let sampling_start = Instant::now();
+                let verified_ids = mlx::ops::reduction::argmax(&verified_logits, -1, false)?;
+                let packed = pack_greedy_acceptance_on(
+                    &verify_arr,
+                    &[verify_len as i32],
+                    &verified_ids,
+                    mlx::StreamOrDevice::default(),
+                )?;
+                add_elapsed_us(&mut stats.sampling_us, sampling_start);
+                let accept_sync_start = Instant::now();
+                let packed: Vec<u32> = packed.to_vec()?;
+                stats.verify_accept_host_sync_count =
+                    stats.verify_accept_host_sync_count.saturating_add(1);
+                add_elapsed_us(&mut stats.verify_accept_host_sync_us, accept_sync_start);
+                resolve_packed_greedy_acceptance(&packed, verify_len + 1, 0, draft_budget)?
+            } else {
+                let projection_start = Instant::now();
+                let verified_logits = project_mtp_target_hidden(
+                    model,
+                    &verified_hidden,
+                    window.projection,
+                    mlx::StreamOrDevice::default(),
+                )?;
+                add_elapsed_us(&mut stats.projection_us, projection_start);
+                let sampling_start = Instant::now();
+                let draft_arr = draft_arr.as_ref().ok_or_else(|| {
+                    anyhow!("fill_mtp_window_single: non-greedy draft array absent")
+                })?;
                 let sync_start = Instant::now();
                 let draft_tokens: Vec<u32> = draft_arr.to_vec()?;
                 stats.draft_host_sync_count = stats.draft_host_sync_count.saturating_add(1);
                 add_elapsed_us(&mut stats.draft_host_sync_us, sync_start);
-                crate::core::constrained::apply_speculative_token_masks(
+                let verified_logits = if let Some(constraint) = constraint.as_ref() {
+                    crate::core::constrained::apply_speculative_token_masks(
+                        &verified_logits,
+                        &[Some(constraint.speculative_masks(&draft_tokens)?)],
+                    )?
+                } else {
+                    verified_logits
+                };
+                let resolution = resolve_exact_deterministic_target_logits(
+                    &draft_tokens,
                     &verified_logits,
-                    &[Some(constraint.speculative_masks(&draft_tokens)?)],
-                )?
-            } else {
-                verified_logits
+                    sampler,
+                    &history,
+                    &mut compact_prng,
+                )?;
+                let (draft_tokens, resolution) = (draft_tokens, resolution);
+                add_elapsed_us(&mut stats.sampling_us, sampling_start);
+                (draft_tokens, resolution)
             };
-            add_elapsed_us(&mut stats.projection_us, projection_start);
-            let sampling_start = Instant::now();
-            let verified_ids = mlx::ops::reduction::argmax(&verified_logits, -1, false)?;
-            let packed = pack_greedy_acceptance_on(
-                &verify_arr,
-                &[verify_len as i32],
-                &verified_ids,
-                mlx::StreamOrDevice::default(),
-            )?;
-            add_elapsed_us(&mut stats.sampling_us, sampling_start);
-            let accept_sync_start = Instant::now();
-            let packed: Vec<u32> = packed.to_vec()?;
-            stats.verify_accept_host_sync_count =
-                stats.verify_accept_host_sync_count.saturating_add(1);
-            add_elapsed_us(&mut stats.verify_accept_host_sync_us, accept_sync_start);
-            resolve_packed_greedy_acceptance(&packed, verify_len + 1, 0, draft_budget)?
-        } else {
-            let projection_start = Instant::now();
-            let verified_logits = project_mtp_target_hidden(
-                model,
-                &verified_hidden,
-                window.projection,
-                mlx::StreamOrDevice::default(),
-            )?;
-            add_elapsed_us(&mut stats.projection_us, projection_start);
-            let sampling_start = Instant::now();
-            let draft_arr = draft_arr
-                .as_ref()
-                .ok_or_else(|| anyhow!("fill_mtp_window_single: non-greedy draft array absent"))?;
-            let sync_start = Instant::now();
-            let draft_tokens: Vec<u32> = draft_arr.to_vec()?;
-            stats.draft_host_sync_count = stats.draft_host_sync_count.saturating_add(1);
-            add_elapsed_us(&mut stats.draft_host_sync_us, sync_start);
-            let verified_logits = if let Some(constraint) = constraint.as_ref() {
-                crate::core::constrained::apply_speculative_token_masks(
-                    &verified_logits,
-                    &[Some(constraint.speculative_masks(&draft_tokens)?)],
-                )?
-            } else {
-                verified_logits
-            };
-            let resolution = resolve_exact_deterministic_target_logits(
-                &draft_tokens,
-                &verified_logits,
-                sampler,
-                &history,
-                &mut compact_prng,
-            )?;
-            let (draft_tokens, resolution) = (draft_tokens, resolution);
-            add_elapsed_us(&mut stats.sampling_us, sampling_start);
-            (draft_tokens, resolution)
-        };
         let verify_input = verify_input(current_token, &draft_tokens);
         if let Some(observations) = observations {
             observations.push(CanonicalMtpWindowObservation {
@@ -14188,10 +14265,13 @@ impl<M: Model> Scheduler<M> {
                     .cache
                     .as_mut()
                     .ok_or_else(|| anyhow!("fill_mtp_window_single: main cache absent"))?;
+                let base_snapshot = base_snapshot
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("fill_mtp_window_single: rollback snapshot absent"))?;
                 rollback_main_cache_to_accepted_prefix(
                     model,
                     cache.as_mut_slice(),
-                    &base_snapshot,
+                    base_snapshot,
                     MainCacheRollbackInput {
                         accepted_by_row: &[(0, accepted_len)],
                         verify_input: &verify_input,
@@ -14224,7 +14304,7 @@ impl<M: Model> Scheduler<M> {
                 accepted_input.len(),
             )?;
             add_elapsed_us(&mut stats.mtp_cache_restore_us, trim_start);
-        } else {
+        } else if maintain_mtp_cache {
             let commit_start = Instant::now();
             commit_mtp_cache_hidden_tail(
                 model,
@@ -14257,6 +14337,7 @@ impl<M: Model> Scheduler<M> {
         }
         let committed_tokens = tokens_to_append.len();
         row_state.pending_tokens.extend(tokens_to_append);
+        let total_us = elapsed_us_since(window_started);
         let stats_delta = stats.saturating_delta_since(&stats_before_window);
         let change = row_state
             .draft_policy
@@ -14264,7 +14345,7 @@ impl<M: Model> Scheduler<M> {
                 draft_tokens.len(),
                 resolution.accepted_draft_len,
                 committed_tokens,
-                elapsed_us_since(window_started),
+                total_us,
                 context_tokens,
                 1,
                 kv_state,
@@ -14279,7 +14360,20 @@ impl<M: Model> Scheduler<M> {
             .draft_policy
             .current_budget()
             .min(max_supported_draft_tokens);
-        if resolution.accepted_draft_len == draft_tokens.len() {
+        let timing_delta = stats
+            .draft_cap_timing()
+            .saturating_delta_since(timing_before);
+        stats.record_draft_cap_observation(
+            max_supported_draft_tokens,
+            &[draft_tokens.len()],
+            &[context_tokens],
+            resolution.accepted_draft_len,
+            committed_tokens,
+            stats_delta.rollback_count,
+            total_us,
+            timing_delta,
+        );
+        if !draft_tokens.is_empty() && resolution.accepted_draft_len == draft_tokens.len() {
             self.record_prompt_lookup_mtp_certification(
                 row_idx,
                 verify_start_pos.max(0) as usize + 1,
@@ -15454,16 +15548,11 @@ impl<M: Model> Scheduler<M> {
         // them. Gemma4 derives positions from KV offsets, so the hot path can
         // reuse a placeholder without changing model semantics.
         let position_ids = if model.requires_position_ids() {
-            let per_row_pos: Vec<i32> = active_rows
-                .iter()
-                .map(|&slot_row| {
-                    self.slots[slot_row]
-                        .as_ref()
-                        .expect("active row implies Some")
-                        .real_len
-                })
-                .collect();
-            build_decode_position_ids(&per_row_pos)?
+            // The cache offset is the zero-based position where the current
+            // token will be written. `RequestState::real_len` already includes
+            // that emitted-but-not-yet-cached token, so using it directly here
+            // shifts every ordinary Scheduler decode position by one.
+            build_decode_position_ids(&pre_offsets)?
         } else {
             self.reusable_dummy_position_ids()?
         };
@@ -18278,7 +18367,7 @@ impl Scheduler<crate::models::Gemma4Model> {
             let effective_max_draft_tokens = cfg.max_draft_tokens;
             let draft_budget = row_state
                 .adaptive_draft_tokens
-                .clamp(1, effective_max_draft_tokens)
+                .min(effective_max_draft_tokens)
                 .min(remaining);
             let kv_valid_len = (history.len() - 1) as i32;
             contexts.push(Gemma4DrafterBatchedFillContext {
@@ -18864,7 +18953,7 @@ impl Scheduler<crate::models::Gemma4Model> {
         let effective_max_draft_tokens = cfg.max_draft_tokens;
         let draft_budget = row_state
             .adaptive_draft_tokens
-            .clamp(1, effective_max_draft_tokens)
+            .min(effective_max_draft_tokens)
             .min(remaining);
         let mut compact_prng = self.compact_prng_state_for_rows(&[row_idx])?;
         let mut draft_prng = if sampler.is_pipelinable() {
@@ -20516,6 +20605,7 @@ mod tests {
     struct StepDecodeMaskModel {
         hybrid_cache: bool,
         decode_lens_seen: std::sync::Mutex<Vec<Vec<i32>>>,
+        decode_positions_seen: std::sync::Mutex<Vec<Vec<i32>>>,
         decode_mask_seen: std::sync::Mutex<Vec<bool>>,
         forward_seq_lens: std::sync::Mutex<Vec<i32>>,
         hidden_seq_lens: std::sync::Mutex<Vec<i32>>,
@@ -20589,6 +20679,10 @@ mod tests {
         fn decode_mask_seen(&self) -> Vec<bool> {
             self.decode_mask_seen.lock().unwrap().clone()
         }
+
+        fn decode_positions_seen(&self) -> Vec<Vec<i32>> {
+            self.decode_positions_seen.lock().unwrap().clone()
+        }
     }
 
     impl crate::core::model::Model for StepDecodeMaskModel {
@@ -20614,7 +20708,7 @@ mod tests {
         fn forward_on(
             &self,
             input_ids: &mlx::Array,
-            _position_ids: &mlx::Array,
+            position_ids: &mlx::Array,
             per_row_lens: Option<&[i32]>,
             decode_mask: Option<&mlx::Array>,
             cache: Option<&mut [crate::nn::LayerCache]>,
@@ -20625,6 +20719,12 @@ mod tests {
             self.forward_seq_lens.lock().unwrap().push(dims[1]);
             if let Some(lens) = per_row_lens {
                 self.decode_lens_seen.lock().unwrap().push(lens.to_vec());
+                if dims[1] == 1 {
+                    self.decode_positions_seen
+                        .lock()
+                        .unwrap()
+                        .push(position_ids.to_vec::<i32>()?);
+                }
             }
             self.decode_mask_seen
                 .lock()
@@ -21092,7 +21192,23 @@ mod tests {
             let mut expecting_first_token_projection =
                 self.expecting_first_token_projection.lock().unwrap();
             let mut sequences = self.verify_sequences.lock().unwrap();
-            let tokens = if seq == 1
+            let tokens = if batch > 1 || seq > 1 {
+                let mut sequence = Vec::with_capacity(batch * seq);
+                for _ in 0..batch {
+                    let row_sequence = sequences.pop_front().expect("verify sequence available");
+                    assert!(
+                        row_sequence.len() <= seq,
+                        "batched project row sequence length {} must not exceed hidden seq {}",
+                        row_sequence.len(),
+                        seq
+                    );
+                    let row_len = row_sequence.len();
+                    sequence.extend(row_sequence);
+                    sequence.extend(std::iter::repeat_n(0, seq - row_len));
+                }
+                *expecting_first_token_projection = true;
+                sequence
+            } else if seq == 1
                 && *first_token_calls_remaining > 0
                 && (*expecting_first_token_projection || sequences.is_empty())
             {
@@ -21110,21 +21226,7 @@ mod tests {
                 }
                 vec![token]
             } else {
-                let mut sequence = Vec::with_capacity(batch * seq);
-                for _ in 0..batch {
-                    let row_sequence = sequences.pop_front().expect("verify sequence available");
-                    assert!(
-                        row_sequence.len() <= seq,
-                        "batched project row sequence length {} must not exceed hidden seq {}",
-                        row_sequence.len(),
-                        seq
-                    );
-                    let row_len = row_sequence.len();
-                    sequence.extend(row_sequence);
-                    sequence.extend(std::iter::repeat_n(0, seq - row_len));
-                }
-                *expecting_first_token_projection = true;
-                sequence
+                unreachable!("scripted projection requires at least one position")
             };
             *calls += 1;
             assert_eq!(
@@ -24180,8 +24282,32 @@ mod tests {
 
         assert_eq!(
             model.mtp_hidden_seq_lens(),
-            vec![2, 1, 1, 1],
-            "full-accept window should reuse the two draft cache steps and commit only the missing tail token"
+            vec![1, 1, 1, 1, 1],
+            "MTP prefill should preserve the ordinary [N - 1] + [1] boundary, then reuse the two draft cache steps and commit only the missing tail token"
+        );
+    }
+
+    #[test]
+    fn mtp_adaptive_chunked_prefill_preserves_ordinary_final_chunk_shape() {
+        let mut s = Scheduler::<ScriptedMtpSchedulerModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        let mut request = mtp_req(vec![1, 2, 3, 4, 5], 4);
+        request.prefill_chunk_size = 2;
+        s.admit(request).expect("admit");
+        let model = ScriptedMtpSchedulerModel::new(6, vec![7], vec![vec![7, 8]]);
+        let cfg = MtpSpeculativeConfig::new(1, Sampler::greedy()).expect("mtp cfg");
+
+        s.prefill_admitted_mtp_single(&model, &FakeMtpHead, cfg)
+            .expect("mtp prefill");
+
+        assert!(
+            model.mtp_hidden_seq_lens().starts_with(&[2, 2, 1]),
+            "adaptive MTP prefill must keep the same [2, 2, 1] chunks as ordinary Scheduler prefill: {:?}",
+            model.mtp_hidden_seq_lens(),
         );
     }
 
@@ -24337,6 +24463,91 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
+    fn mtp_batch_zero_budget_uses_ordinary_target_decode_without_tail_commit() {
+        let mut scheduler = Scheduler::<ScriptedMtpSchedulerModel>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        scheduler
+            .admit(mtp_req(vec![1, 2], 6))
+            .expect("admit row 0");
+        scheduler
+            .admit(mtp_req(vec![10, 11], 6))
+            .expect("admit row 1");
+        let prefill_model = ScriptedMtpSchedulerModel::new_with_first_token_calls(
+            3,
+            2,
+            vec![4, 6],
+            vec![vec![4, 5], vec![6, 7]],
+        );
+        let cfg = MtpSpeculativeConfig::new(1, Sampler::greedy()).expect("mtp cfg");
+        scheduler
+            .prefill_admitted_mtp_batch(&prefill_model, &FakeMtpHead, cfg)
+            .expect("mtp batch prefill");
+
+        let mut mtp_state = scheduler.mtp_state.take().expect("scheduler MTP state");
+        for row_state in mtp_state.rows.values_mut() {
+            row_state.pending_tokens.clear();
+            // Match the policy's eight-window minimum before comparing the
+            // ordinary zero-draft control path.
+            for _ in 0..8 {
+                row_state.draft_policy.observe_window(MtpDraftPolicyWindow {
+                    attempted_draft_tokens: 1,
+                    accepted_draft_tokens: 1,
+                    committed_tokens: 2,
+                    total_us: 200,
+                    context_tokens: 16,
+                    batch_width: 2,
+                    ..MtpDraftPolicyWindow::default()
+                });
+            }
+            for _ in 0..4 {
+                row_state.draft_policy.observe_window(MtpDraftPolicyWindow {
+                    attempted_draft_tokens: 0,
+                    committed_tokens: 1,
+                    total_us: 50,
+                    context_tokens: 16,
+                    batch_width: 2,
+                    ..MtpDraftPolicyWindow::default()
+                });
+            }
+            assert!(!row_state.draft_policy.should_maintain_mtp_cache());
+            row_state.adaptive_draft_tokens = row_state.draft_policy.current_budget();
+        }
+        mtp_state.stats = MtpSpeculativeStats::default();
+        let model = ScriptedMtpSchedulerModel::new_with_first_token_calls(
+            0,
+            0,
+            Vec::new(),
+            vec![vec![8], vec![9]],
+        );
+        scheduler
+            .fill_mtp_windows_batched(
+                &[0, 1],
+                cfg,
+                &mut mtp_state.stats,
+                &mut mtp_state.rows,
+                &model,
+                &FakeMtpHead,
+                MtpTargetProjection::Neural,
+                None,
+            )
+            .expect("zero-budget batch fill");
+
+        assert_eq!(model.text_hidden_batch_sizes(), vec![2]);
+        assert_eq!(model.text_hidden_seq_lens(), vec![1]);
+        assert!(
+            model.mtp_hidden_batch_sizes().is_empty(),
+            "committed draft=0 rows must not execute an MTP tail-cache forward"
+        );
+        assert_eq!(mtp_state.rows[&0].pending_tokens, VecDeque::from([8_u32]));
+        assert_eq!(mtp_state.rows[&1].pending_tokens, VecDeque::from([9_u32]));
+    }
+
+    #[test]
     fn mtp_adaptive_budget_reduces_after_first_token_mismatch() {
         let mut s = Scheduler::<ScriptedMtpSchedulerModel>::new(
             1,
@@ -24401,8 +24612,8 @@ mod tests {
         );
         assert_eq!(
             model.text_hidden_seq_lens(),
-            vec![2, 2],
-            "mismatch should trim the verified cache prefix without replaying accepted tokens"
+            vec![1, 1, 2],
+            "MTP should mirror ordinary [N - 1] + [1] prefill, then trim the mismatched verify prefix without replaying accepted tokens"
         );
 
         let step = s
@@ -27818,6 +28029,7 @@ mod tests {
         let step_events = s.step(&model).expect("step");
         assert_eq!(step_events.len(), 2);
         assert_eq!(model.decode_lens_seen(), vec![vec![3, 3], vec![1, 1]]);
+        assert_eq!(model.decode_positions_seen(), vec![vec![3, 3, 3, 3, 3, 3]]);
         assert_eq!(model.decode_mask_seen(), vec![false, false]);
     }
 
@@ -27838,6 +28050,7 @@ mod tests {
         let step_events = s.step(&model).expect("step");
         assert_eq!(step_events.len(), 2);
         assert_eq!(model.decode_lens_seen(), vec![vec![1, 1]]);
+        assert_eq!(model.decode_positions_seen(), vec![vec![3, 4, 3, 4, 3, 4]]);
         assert_eq!(model.decode_mask_seen(), vec![true]);
     }
 

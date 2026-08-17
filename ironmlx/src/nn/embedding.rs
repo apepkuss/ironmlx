@@ -191,9 +191,9 @@ impl Embedding {
             } => {
                 let product_stable = super::product_stable_qmm::is_armed()
                     && hidden.ndim() == 3
-                    && hidden.shape().as_slice()[0] > 1
-                    && *bits == 4
-                    && mode.uses_affine_storage();
+                    && hidden.shape().as_slice()[..2].iter().product::<i32>() > 1
+                    && matches!(*bits, 4 | 5 | 6 | 8)
+                    && *mode == QuantMode::Affine;
                 if product_stable {
                     Ok(mlx::quantization::quantized_matmul_product_stable_on(
                         hidden,

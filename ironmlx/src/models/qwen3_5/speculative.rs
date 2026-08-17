@@ -71,8 +71,9 @@ pub(crate) fn exact_batched_verify_qualified(
     verify_width: usize,
 ) -> bool {
     // Context length does not change the Q>1 execution morphology. Exactness
-    // is guaranteed by position-isolated backbone/MoE execution and by
-    // replaying the final projection as contiguous Q=1 inputs.
+    // is guaranteed by position-isolated backbone/MoE execution, sequence-stable
+    // GatedDelta state transitions, and replaying the final projection as
+    // contiguous Q=1 inputs.
     exact_batched_verify_shape_qualified(profile, batch_width, verify_width)
 }
 

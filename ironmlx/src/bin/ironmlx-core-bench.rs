@@ -73,6 +73,11 @@ struct Args {
     #[arg(long, default_value_t = 7)]
     runs: usize,
 
+    /// For Qwen scheduler MTP benchmarks, interleave ordinary scheduler runs
+    /// in the same loaded-model process and write them to this JSON path.
+    #[arg(long = "scheduler-baseline-out")]
+    scheduler_baseline_out: Option<PathBuf>,
+
     /// Warmup runs, excluded from summary.
     #[arg(long, default_value_t = 1)]
     warmup_runs: usize,
@@ -182,7 +187,7 @@ struct BenchOutput {
     records: Vec<Record>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct Meta {
     backend: &'static str,
     mode: BenchMode,
@@ -535,6 +540,15 @@ fn validate_args(args: &Args) -> Result<()> {
             "scheduler prompt count {} exceeds --b-max {}",
             args.prompt_file.len(),
             args.b_max
+        ));
+    }
+    if args.scheduler_baseline_out.is_some()
+        && (args.mode != BenchMode::Scheduler
+            || args.mtp_model_dir.is_none()
+            || args.prompt_file.len() != 1)
+    {
+        return Err(anyhow!(
+            "--scheduler-baseline-out requires single-prompt --mode scheduler-text with --mtp-model-dir"
         ));
     }
     if args.paged_prefix_cache_block_size <= 0 {
@@ -931,8 +945,20 @@ where
         None
     };
 
+    let mut baseline_warmups = Vec::with_capacity(args.warmup_runs);
     let mut warmups = Vec::with_capacity(args.warmup_runs);
-    for _ in 0..args.warmup_runs {
+    for index in 0..args.warmup_runs {
+        if args.scheduler_baseline_out.is_some() && index % 2 == 0 {
+            baseline_warmups.push(run_once_qwen(
+                model,
+                None,
+                tokenizer,
+                &prompt_ids,
+                args,
+                scheduler_config,
+                None,
+            )?);
+        }
         warmups.push(run_once_qwen(
             model,
             mtp.as_ref(),
@@ -942,10 +968,33 @@ where
             scheduler_config,
             mtp_draft_tokens,
         )?);
+        if args.scheduler_baseline_out.is_some() && index % 2 == 1 {
+            baseline_warmups.push(run_once_qwen(
+                model,
+                None,
+                tokenizer,
+                &prompt_ids,
+                args,
+                scheduler_config,
+                None,
+            )?);
+        }
     }
 
+    let mut baseline_records = Vec::with_capacity(args.runs);
     let mut records = Vec::with_capacity(args.runs);
-    for _ in 0..args.runs {
+    for index in 0..args.runs {
+        if args.scheduler_baseline_out.is_some() && index % 2 == 0 {
+            baseline_records.push(run_once_qwen(
+                model,
+                None,
+                tokenizer,
+                &prompt_ids,
+                args,
+                scheduler_config,
+                None,
+            )?);
+        }
         records.push(run_once_qwen(
             model,
             mtp.as_ref(),
@@ -955,57 +1004,87 @@ where
             scheduler_config,
             mtp_draft_tokens,
         )?);
+        if args.scheduler_baseline_out.is_some() && index % 2 == 1 {
+            baseline_records.push(run_once_qwen(
+                model,
+                None,
+                tokenizer,
+                &prompt_ids,
+                args,
+                scheduler_config,
+                None,
+            )?);
+        }
+    }
+
+    let meta = Meta {
+        backend: "ironmlx-core",
+        mode: args.mode,
+        speculative_source: mtp.as_ref().map(|_| "qwen-mtp"),
+        model_dir: args.model.display().to_string(),
+        mtp_model_dir: args
+            .mtp_model_dir
+            .as_ref()
+            .map(|dir| dir.display().to_string()),
+        mtp_draft_tokens,
+        mtp_trace_windows: args.mtp_trace_windows,
+        prompt_file: primary_prompt_file(args).display().to_string(),
+        prompt_tokens: primary_prompt_ids.len(),
+        scheduler_prompt_files: scheduler_prompt_files(args),
+        scheduler_prompt_tokens: prompt_ids.iter().map(Vec::len).collect(),
+        scheduler_batch_width: prompt_ids.len(),
+        max_tokens: args.max_tokens,
+        prefill_chunk_size: args.prefill_chunk_size,
+        kv_quant: args.kv_quant,
+        paged_prefix_cache_dir: scheduler_features
+            .paged_prefix_cache
+            .as_ref()
+            .map(|config| config.root.display().to_string()),
+        paged_prefix_cache_block_size: args.paged_prefix_cache_block_size,
+        paged_prefix_cache_max_pages: scheduler_features
+            .paged_prefix_cache
+            .as_ref()
+            .map(|config| config.max_pages),
+        active_kv_offload: scheduler_features.active_kv_offload.enabled,
+        active_kv_offload_dir: scheduler_features.active_kv_offload.enabled.then(|| {
+            scheduler_features
+                .active_kv_offload
+                .root
+                .display()
+                .to_string()
+        }),
+        active_kv_hot_window_pages: scheduler_features
+            .active_kv_offload
+            .hot_window_pages_override,
+        active_kv_chunk_pages: scheduler_features.active_kv_offload.chunk_pages_override,
+        b_max: args.b_max,
+        effective_cap_max,
+        warmup_runs: args.warmup_runs,
+        measured_runs: args.runs,
+        load_ms,
+        device_name: mlx::memory::snapshot().device_name,
+        ironmlx_version: env!("CARGO_PKG_VERSION"),
+    };
+    if let Some(baseline_out) = args.scheduler_baseline_out.as_ref() {
+        let mut baseline_meta = meta.clone();
+        baseline_meta.speculative_source = None;
+        baseline_meta.mtp_model_dir = None;
+        baseline_meta.mtp_draft_tokens = None;
+        let baseline_output = BenchOutput {
+            meta: baseline_meta,
+            summary: summarize(&baseline_records),
+            warmups: baseline_warmups,
+            records: baseline_records,
+        };
+        std::fs::write(
+            baseline_out,
+            serde_json::to_string_pretty(&baseline_output)? + "\n",
+        )
+        .with_context(|| format!("writing {}", baseline_out.display()))?;
     }
 
     let output = BenchOutput {
-        meta: Meta {
-            backend: "ironmlx-core",
-            mode: args.mode,
-            speculative_source: mtp.as_ref().map(|_| "qwen-mtp"),
-            model_dir: args.model.display().to_string(),
-            mtp_model_dir: args
-                .mtp_model_dir
-                .as_ref()
-                .map(|dir| dir.display().to_string()),
-            mtp_draft_tokens,
-            mtp_trace_windows: args.mtp_trace_windows,
-            prompt_file: primary_prompt_file(args).display().to_string(),
-            prompt_tokens: primary_prompt_ids.len(),
-            scheduler_prompt_files: scheduler_prompt_files(args),
-            scheduler_prompt_tokens: prompt_ids.iter().map(Vec::len).collect(),
-            scheduler_batch_width: prompt_ids.len(),
-            max_tokens: args.max_tokens,
-            prefill_chunk_size: args.prefill_chunk_size,
-            kv_quant: args.kv_quant,
-            paged_prefix_cache_dir: scheduler_features
-                .paged_prefix_cache
-                .as_ref()
-                .map(|config| config.root.display().to_string()),
-            paged_prefix_cache_block_size: args.paged_prefix_cache_block_size,
-            paged_prefix_cache_max_pages: scheduler_features
-                .paged_prefix_cache
-                .as_ref()
-                .map(|config| config.max_pages),
-            active_kv_offload: scheduler_features.active_kv_offload.enabled,
-            active_kv_offload_dir: scheduler_features.active_kv_offload.enabled.then(|| {
-                scheduler_features
-                    .active_kv_offload
-                    .root
-                    .display()
-                    .to_string()
-            }),
-            active_kv_hot_window_pages: scheduler_features
-                .active_kv_offload
-                .hot_window_pages_override,
-            active_kv_chunk_pages: scheduler_features.active_kv_offload.chunk_pages_override,
-            b_max: args.b_max,
-            effective_cap_max,
-            warmup_runs: args.warmup_runs,
-            measured_runs: args.runs,
-            load_ms,
-            device_name: mlx::memory::snapshot().device_name,
-            ironmlx_version: env!("CARGO_PKG_VERSION"),
-        },
+        meta,
         summary: summarize(&records),
         warmups,
         records,
@@ -2166,6 +2245,55 @@ mod tests {
         ]);
         assert_eq!(args.b_max, 2);
         assert_eq!(args.paged_prefix_cache_block_size, 128);
+    }
+
+    #[test]
+    fn scheduler_baseline_out_requires_scheduler_mtp() {
+        let args = parse_args(&[
+            "ironmlx-core-bench",
+            "--model",
+            "/tmp/model",
+            "--prompt-file",
+            "/tmp/prompt.txt",
+            "--mode",
+            "scheduler-text",
+            "--scheduler-baseline-out",
+            "/tmp/baseline.json",
+            "--out",
+            "/tmp/out.json",
+        ]);
+
+        let err = validate_args(&args).unwrap_err();
+
+        assert!(err.to_string().contains("--mtp-model-dir"));
+    }
+
+    #[test]
+    fn scheduler_baseline_out_accepts_single_prompt_scheduler_mtp() {
+        let mtp_dir = temp_mtp_dir("scheduler-baseline-out");
+        let mtp_dir_arg = mtp_dir.to_string_lossy().into_owned();
+        let args = parse_args(&[
+            "ironmlx-core-bench",
+            "--model",
+            "/tmp/model",
+            "--prompt-file",
+            "/tmp/prompt.txt",
+            "--mode",
+            "scheduler-text",
+            "--mtp-model-dir",
+            &mtp_dir_arg,
+            "--scheduler-baseline-out",
+            "/tmp/baseline.json",
+            "--out",
+            "/tmp/out.json",
+        ]);
+
+        validate_args(&args).unwrap();
+        assert_eq!(
+            args.scheduler_baseline_out,
+            Some(PathBuf::from("/tmp/baseline.json"))
+        );
+        std::fs::remove_dir_all(mtp_dir).expect("remove temp mtp dir");
     }
 
     #[test]

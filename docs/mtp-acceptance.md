@@ -116,6 +116,38 @@ cargo test --release -p ironmlx --test prompt_lookup_verify_qualification \
   -- --ignored --test-threads=1 --nocapture
 ```
 
+Qwen3.6 Affine5 long-context exact-state coverage:
+
+```sh
+MLX_DIR=$HOME/.local/mlx \
+PROMPT_LOOKUP_VERIFY_QWEN36_DENSE_MODEL=/path/to/Qwen3.6-27B-5bit/snapshots/<sha> \
+PROMPT_LOOKUP_VERIFY_REQUIRE_ZERO_DIFF=1 \
+PROMPT_LOOKUP_VERIFY_BATCHES=1 \
+PROMPT_LOOKUP_VERIFY_PREFIX_LENS=8192,32768 \
+PROMPT_LOOKUP_VERIFY_WIDTHS=2,3 \
+PROMPT_LOOKUP_VERIFY_MAX_WIDTH=3 \
+cargo test --release -p ironmlx --test prompt_lookup_verify_qualification \
+  qwen36_dense_long_context_qgt1_matches_sequential_verify \
+  -- --ignored --test-threads=1 --nocapture
+
+MLX_DIR=$HOME/.local/mlx \
+PROMPT_LOOKUP_VERIFY_QWEN36_MOE_MODEL=/path/to/Qwen3.6-35B-A3B-5bit/snapshots/<sha> \
+PROMPT_LOOKUP_VERIFY_REQUIRE_ZERO_DIFF=1 \
+PROMPT_LOOKUP_VERIFY_BATCHES=1 \
+PROMPT_LOOKUP_VERIFY_PREFIX_LENS=8192,32768 \
+PROMPT_LOOKUP_VERIFY_WIDTHS=2,3 \
+PROMPT_LOOKUP_VERIFY_MAX_WIDTH=3 \
+cargo test --release -p ironmlx --test prompt_lookup_verify_qualification \
+  qwen36_moe_long_context_qgt1_matches_sequential_verify \
+  -- --ignored --test-threads=1 --nocapture
+```
+
+These focused B1 gates cover the Dense and MoE hybrid Full-KV/GatedDelta state
+after Q>1 verification; hidden states, logits, greedy tokens, and the subsequent
+Q1 tail must match the ordinary sequential reference exactly. Run the existing
+`qwen36_moe_qgt1_matches_sequential_verify` test separately for Paged,
+TurboQuant, and ragged-batch token-equivalence coverage.
+
 Qwen3.8-27B long-context exact-path coverage (default 8K; set
 `MTP_LONG_CONTEXT_TOKENS=32768` or `65536` for the extended matrix):
 

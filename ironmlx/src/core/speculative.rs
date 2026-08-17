@@ -1502,9 +1502,16 @@ impl MtpDraftPolicyState {
     const HIGH_ACCEPTANCE: f64 = 0.85;
     const MIN_COST_SAMPLES: usize = 2;
     const PROBE_WINDOWS: usize = 2;
+    const ZERO_DRAFT_MIN_COST_SAMPLES: usize = 8;
+    const ZERO_DRAFT_PROBE_WINDOWS: usize = 4;
     const INITIAL_PROBE_COOLDOWN_WINDOWS: usize = 8;
     const MAX_PROBE_COOLDOWN_WINDOWS: usize = 64;
     const COST_IMPROVEMENT_RATIO: f64 = 0.95;
+    // Ordinary decode is the safe control path. Require only a small measured
+    // margin before bypassing MTP so a 5-10% speculative regression is not
+    // hidden by overly conservative hysteresis. The four-window probe and
+    // EWMA still absorb single-window timing noise.
+    const ZERO_DRAFT_COST_IMPROVEMENT_RATIO: f64 = 0.98;
 
     pub(crate) fn new(max_draft_tokens: usize) -> Self {
         let max_draft_tokens = max_draft_tokens.max(1);
@@ -1524,7 +1531,11 @@ impl MtpDraftPolicyState {
     }
 
     pub(crate) fn current_budget(&self) -> usize {
-        self.current_budget.clamp(1, self.max_draft_tokens)
+        self.current_budget.min(self.max_draft_tokens)
+    }
+
+    pub(crate) fn should_maintain_mtp_cache(&self) -> bool {
+        self.current_budget() > 0 || self.probe_budget.is_some()
     }
 
     pub(crate) fn snapshot(&self) -> MtpDraftPolicySnapshot {
@@ -1560,8 +1571,8 @@ impl MtpDraftPolicyState {
             self.max_draft_tokens
         );
         anyhow::ensure!(
-            (1..=snapshot.max_draft_tokens).contains(&snapshot.current_budget),
-            "MTP draft policy snapshot budget {} is outside [1, {}]",
+            snapshot.current_budget <= snapshot.max_draft_tokens,
+            "MTP draft policy snapshot budget {} is outside [0, {}]",
             snapshot.current_budget,
             snapshot.max_draft_tokens
         );
@@ -1588,12 +1599,6 @@ impl MtpDraftPolicyState {
     }
 
     pub(crate) fn observe_window(&mut self, window: MtpDraftPolicyWindow) -> MtpDraftBudgetChange {
-        let previous = self.current_budget();
-        if self.max_draft_tokens <= 1 || window.attempted_draft_tokens == 0 {
-            self.current_budget = self.max_draft_tokens.max(1);
-            return budget_change(previous, self.current_budget);
-        }
-
         let regime = window.regime();
         if self.active_regime != Some(regime) {
             self.active_regime = Some(regime);
@@ -1624,6 +1629,43 @@ impl MtpDraftPolicyState {
             return MtpDraftBudgetChange::default();
         }
 
+        if old == 1
+            && self.probe_budget.is_none()
+            && self.cost_estimate(regime, 0).is_none()
+            && self
+                .cost_estimate(regime, old)
+                .is_some_and(|estimate| estimate.samples >= Self::ZERO_DRAFT_MIN_COST_SAMPLES)
+        {
+            self.current_budget = 0;
+            self.probe_budget = Some(0);
+            self.probe_origin_budget = Some(old);
+            self.probe_windows_remaining = Self::ZERO_DRAFT_PROBE_WINDOWS;
+            return budget_change(old, self.current_budget);
+        }
+        if old == 0 && self.probe_budget.is_none() {
+            return MtpDraftBudgetChange::default();
+        }
+        if old == 1
+            && self.probe_budget.is_none()
+            && self.cost_estimate(regime, 0).is_some()
+            && self.cooldown_windows == 0
+            && self
+                .cost_estimate(regime, 1)
+                .is_some_and(|estimate| estimate.samples >= Self::ZERO_DRAFT_MIN_COST_SAMPLES)
+        {
+            // A previous zero-draft sample is stale once the response enters
+            // a different acceptance/cost phase. Re-test ordinary decode only
+            // while the MTP cache is still synchronized, and discard the old
+            // control estimate so it cannot drive an uncontrolled switch.
+            self.cost_estimates
+                .retain(|estimate| estimate.regime != regime || estimate.draft_tokens != 0);
+            self.current_budget = 0;
+            self.probe_budget = Some(0);
+            self.probe_origin_budget = Some(old);
+            self.probe_windows_remaining = Self::ZERO_DRAFT_PROBE_WINDOWS;
+            return budget_change(old, self.current_budget);
+        }
+
         let mut next = old;
         let full_accept = window.accepted_draft_tokens == window.attempted_draft_tokens;
         if !full_accept {
@@ -1634,18 +1676,20 @@ impl MtpDraftPolicyState {
             self.probe_windows_remaining = 0;
             if rejected_probe {
                 self.back_off_next_probe();
+            } else if old == 1 {
+                self.cooldown_windows = self.cooldown_windows.saturating_sub(1);
             } else {
                 self.arm_initial_probe_cooldown();
             }
         } else if self.probe_budget == Some(old) {
             self.probe_windows_remaining = self.probe_windows_remaining.saturating_sub(1);
             if self.probe_windows_remaining == 0 {
-                self.probe_budget = None;
                 let origin = self.probe_origin_budget.take();
+                self.probe_budget = None;
                 next = origin.map_or(old, |origin| {
                     self.preferred_probe_budget(regime, origin, old)
                 });
-                if origin.is_some_and(|origin| next == origin) {
+                if origin.is_some_and(|origin| next == origin) && origin != Some(0) {
                     self.back_off_next_probe();
                 } else {
                     self.arm_initial_probe_cooldown();
@@ -1662,31 +1706,41 @@ impl MtpDraftPolicyState {
                 } else if self
                     .cost_estimate(regime, old)
                     .is_some_and(|estimate| estimate.samples >= Self::MIN_COST_SAMPLES)
-                    && self.acceptance_ewma.unwrap_or(acceptance) >= Self::HIGH_ACCEPTANCE
                 {
                     if let Some(probe) = self.next_probe_budget(regime, old) {
-                        next = probe;
-                        self.probe_budget = Some(probe);
-                        self.probe_origin_budget = Some(old);
-                        self.probe_windows_remaining = Self::PROBE_WINDOWS;
+                        if probe < old
+                            || self.acceptance_ewma.unwrap_or(acceptance) >= Self::HIGH_ACCEPTANCE
+                        {
+                            next = probe;
+                            self.probe_budget = Some(probe);
+                            self.probe_origin_budget = Some(old);
+                            self.probe_windows_remaining = Self::PROBE_WINDOWS;
+                        }
                     }
                 }
             }
         }
 
         let smoothed_acceptance = self.acceptance_ewma.unwrap_or(acceptance);
-        if smoothed_acceptance < Self::LOW_ACCEPTANCE {
-            next = next.min(old.saturating_sub(1).max(1));
+        if smoothed_acceptance < Self::LOW_ACCEPTANCE && old > 1 {
+            next = next.min(old - 1);
         }
         if acceptance == 0.0 {
-            next = 1;
+            next = next.min(1);
             self.probe_budget = None;
             self.probe_origin_budget = None;
             self.probe_windows_remaining = 0;
-            self.arm_initial_probe_cooldown();
+            // A rejected wider probe should back off before it is retried.
+            // At budget 1, however, repeatedly re-arming this cooldown makes
+            // an unprofitable MTP path impossible to compare with ordinary
+            // decode: every zero-acceptance window resets the countdown. Keep
+            // the existing countdown moving toward a fresh zero-draft probe.
+            if old > 1 {
+                self.arm_initial_probe_cooldown();
+            }
         }
 
-        self.current_budget = next.clamp(1, self.max_draft_tokens);
+        self.current_budget = next.min(self.max_draft_tokens);
         budget_change(old, self.current_budget)
     }
 
@@ -1755,6 +1809,7 @@ impl MtpDraftPolicyState {
             .iter()
             .filter(|estimate| {
                 estimate.regime == regime
+                    && estimate.draft_tokens > 0
                     && estimate.samples >= Self::MIN_COST_SAMPLES
                     && (estimate.draft_tokens <= current
                         || estimate.acceptance_ewma >= Self::HIGH_ACCEPTANCE)
@@ -1766,7 +1821,7 @@ impl MtpDraftPolicyState {
     }
 
     fn next_probe_budget(&self, regime: MtpDraftPolicyRegime, current: usize) -> Option<usize> {
-        let lower = current.checked_sub(1).filter(|&budget| budget >= 1);
+        let lower = current.checked_sub(1);
         let upper = current
             .checked_add(1)
             .filter(|&budget| budget <= self.max_draft_tokens);
@@ -1774,7 +1829,20 @@ impl MtpDraftPolicyState {
             .into_iter()
             .flatten()
             .filter(|&budget| {
+                if budget == 0 && current > 0 {
+                    // Wait for a controlled zero-draft probe. Once sampled,
+                    // refreshes are scheduled explicitly after cooldown rather
+                    // than by the generic adjacent-budget probe path.
+                    if self.cost_estimate(regime, 0).is_some()
+                        || self.cost_estimate(regime, current).is_none_or(|estimate| {
+                            estimate.samples < Self::ZERO_DRAFT_MIN_COST_SAMPLES
+                        })
+                    {
+                        return false;
+                    }
+                }
                 budget <= current
+                    || current == 0
                     || self
                         .cost_estimate(regime, budget)
                         .is_none_or(|estimate| estimate.acceptance_ewma >= Self::HIGH_ACCEPTANCE)
@@ -1797,9 +1865,16 @@ impl MtpDraftPolicyState {
         let Some(probe_cost) = self.cost_estimate(regime, probe) else {
             return origin;
         };
+        let improvement_ratio = if probe == 0 {
+            Self::ZERO_DRAFT_COST_IMPROVEMENT_RATIO
+        } else {
+            Self::COST_IMPROVEMENT_RATIO
+        };
         if probe_cost.samples >= Self::MIN_COST_SAMPLES
-            && (probe <= origin || probe_cost.acceptance_ewma >= Self::HIGH_ACCEPTANCE)
-            && probe_cost.cost_ewma < origin_cost.cost_ewma * Self::COST_IMPROVEMENT_RATIO
+            && (probe <= origin
+                || origin == 0
+                || probe_cost.acceptance_ewma >= Self::HIGH_ACCEPTANCE)
+            && probe_cost.cost_ewma < origin_cost.cost_ewma * improvement_ratio
         {
             probe
         } else {
@@ -2245,8 +2320,9 @@ where
         let context_tokens = self.history.len();
         let draft_budget = self
             .adaptive_draft_tokens
-            .clamp(1, self.cfg.max_draft_tokens)
+            .min(self.cfg.max_draft_tokens)
             .min(remaining);
+        let maintain_mtp_cache = self.draft_policy.should_maintain_mtp_cache();
         let mut draft_constraint = self.constraint.as_ref().map(ConstraintSession::fork);
         let draft_result = self.draft_tokens(current_token, draft_budget, &mut draft_constraint)?;
         let draft_tokens = draft_result.tokens;
@@ -2258,11 +2334,18 @@ where
             (&verify_input[..], &[1_i32, verify_input.len() as i32][..]).try_into()?;
         let pre_window_hidden = self.last_hidden.clone();
 
-        let base_snapshot: Vec<LayerCacheSnapshot> =
-            self.cache.iter().map(LayerCache::snapshot).collect();
+        let base_snapshot = (draft_budget > 0).then(|| {
+            self.cache
+                .iter()
+                .map(LayerCache::snapshot)
+                .collect::<Vec<_>>()
+        });
         let verify_forward_start = Instant::now();
         let verified_hidden = {
-            let _verify_qmm = crate::nn::verify_qmm::armed_scope();
+            // A zero-draft window is the ordinary single-token target path.
+            // Exact speculative QMM is required only when target positions
+            // must be compared against drafted tokens.
+            let _verify_qmm = (draft_budget > 0).then(crate::nn::verify_qmm::armed_scope);
             self.model.forward_text_hidden(
                 &verify_arr,
                 &verify_pos_ids,
@@ -2318,7 +2401,6 @@ where
         if resolution.needs_rollback {
             self.stats.rollback_count += 1;
         }
-
         let accepted_len = resolution.accepted_verify_input_len;
         let (accepted_hidden, accepted_position_ids, accepted_last_hidden) = if resolution
             .needs_rollback
@@ -2328,7 +2410,9 @@ where
             let accepted_hidden = rollback_main_cache_to_accepted_prefix(
                 self.model,
                 &mut self.cache,
-                &base_snapshot,
+                base_snapshot
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("MTP rollback snapshot absent"))?,
                 MainCacheRollbackInput {
                     accepted_by_row: &[(0, accepted_len)],
                     verify_input: &verify_input,
@@ -2368,7 +2452,7 @@ where
                 (),
             )?;
             add_mtp_decode_cache_commit_us(&mut self.stats, commit_start);
-        } else {
+        } else if maintain_mtp_cache {
             let commit_start = Instant::now();
             commit_mtp_cache_hidden_tail(
                 self.model,
@@ -3751,12 +3835,91 @@ mod tests {
     }
 
     #[test]
-    fn mtp_cost_aware_policy_keeps_single_budget_for_zero_attempt_window() {
+    fn mtp_cost_aware_policy_keeps_a_cheaper_zero_draft_probe() {
         let mut policy = MtpDraftPolicyState::new(1);
-        let change = policy.observe_window(MtpDraftPolicyWindow::default());
+        for _ in 0..MtpDraftPolicyState::ZERO_DRAFT_MIN_COST_SAMPLES - 1 {
+            policy.observe_window(policy_window(1, 2, 200));
+        }
+        let change = policy.observe_window(policy_window(1, 2, 200));
+
+        assert_eq!(policy.current_budget(), 0);
+        assert!(change.reduced);
+        for _ in 0..MtpDraftPolicyState::ZERO_DRAFT_PROBE_WINDOWS {
+            policy.observe_window(policy_window(0, 1, 50));
+        }
+        assert_eq!(policy.current_budget(), 0);
+        assert!(!policy.should_maintain_mtp_cache());
+    }
+
+    #[test]
+    fn mtp_cost_aware_policy_rejects_a_more_expensive_zero_draft_probe() {
+        let mut policy = MtpDraftPolicyState::new(1);
+        for _ in 0..MtpDraftPolicyState::ZERO_DRAFT_MIN_COST_SAMPLES {
+            policy.observe_window(policy_window(1, 2, 200));
+        }
+        for _ in 0..MtpDraftPolicyState::ZERO_DRAFT_PROBE_WINDOWS - 1 {
+            policy.observe_window(policy_window(0, 1, 99));
+        }
+        let decision = policy.observe_window(policy_window(0, 1, 99));
+        assert!(decision.increased);
 
         assert_eq!(policy.current_budget(), 1);
-        assert!(!change.reduced);
-        assert!(!change.increased);
+        assert!(policy.should_maintain_mtp_cache());
+    }
+
+    #[test]
+    fn mtp_cost_aware_policy_refreshes_zero_draft_cost_before_switching() {
+        let mut policy = MtpDraftPolicyState::new(1);
+        for _ in 0..MtpDraftPolicyState::ZERO_DRAFT_MIN_COST_SAMPLES {
+            policy.observe_window(policy_window(1, 2, 200));
+        }
+        for _ in 0..MtpDraftPolicyState::ZERO_DRAFT_PROBE_WINDOWS {
+            policy.observe_window(policy_window(0, 1, 99));
+        }
+        assert_eq!(policy.current_budget(), 1);
+
+        for _ in 0..16 {
+            policy.observe_window(policy_window(1, 2, 300));
+            assert_eq!(
+                policy.current_budget(),
+                1,
+                "an old zero-draft sample must not trigger an uncontrolled mode switch"
+            );
+        }
+
+        let change = policy.observe_window(policy_window(1, 2, 300));
+        assert!(change.reduced);
+        assert_eq!(policy.current_budget(), 0);
+        for _ in 0..MtpDraftPolicyState::ZERO_DRAFT_PROBE_WINDOWS - 1 {
+            policy.observe_window(policy_window(0, 1, 200));
+        }
+        let decision = policy.observe_window(policy_window(0, 1, 200));
+
+        assert!(decision.increased);
+        assert_eq!(policy.current_budget(), 1);
+    }
+
+    #[test]
+    fn mtp_cost_aware_policy_reprobes_ordinary_decode_after_single_draft_rejections() {
+        let mut policy = MtpDraftPolicyState::new(1);
+        for _ in 0..MtpDraftPolicyState::ZERO_DRAFT_MIN_COST_SAMPLES {
+            policy.observe_window(policy_window(1, 2, 200));
+        }
+        for _ in 0..MtpDraftPolicyState::ZERO_DRAFT_PROBE_WINDOWS {
+            policy.observe_window(policy_window(0, 1, 99));
+        }
+        assert_eq!(policy.current_budget(), 1);
+
+        let mut rejected = policy_window(1, 1, 300);
+        rejected.accepted_draft_tokens = 0;
+        for _ in 0..16 {
+            let change = policy.observe_window(rejected);
+            assert!(!change.reduced);
+            assert_eq!(policy.current_budget(), 1);
+        }
+
+        let change = policy.observe_window(rejected);
+        assert!(change.reduced);
+        assert_eq!(policy.current_budget(), 0);
     }
 }

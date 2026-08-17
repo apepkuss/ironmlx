@@ -917,6 +917,23 @@ fn qwen35_dense_qgt1_matches_sequential_verify() -> Result<()> {
 }
 
 #[test]
+#[ignore = "requires a real Qwen3.6 Dense checkpoint and Apple Silicon"]
+#[serial(mlx_metal)]
+fn qwen36_dense_long_context_qgt1_matches_sequential_verify() -> Result<()> {
+    let Some(model_dir) = snapshot_from_env_or_cache(
+        "PROMPT_LOOKUP_VERIFY_QWEN36_DENSE_MODEL",
+        "models--mlx-community--Qwen3.6-27B-4bit",
+    ) else {
+        eprintln!("skip: no Qwen3.6 Dense qualification checkpoint");
+        return Ok(());
+    };
+    let loader = Loader::open(&model_dir).context("opening Qwen3.6 Dense checkpoint")?;
+    let tokenizer = load_tokenizer(&loader, &model_dir)?;
+    let model = Qwen35Model::from_loader(&loader).context("loading Qwen3.6 Dense model")?;
+    qualify_model(&model, &tokenizer)
+}
+
+#[test]
 #[ignore = "requires a real MiniCPM-V-4.6 checkpoint and Apple Silicon"]
 #[serial(mlx_metal)]
 fn minicpmv46_qgt1_matches_sequential_verify() -> Result<()> {
@@ -1053,6 +1070,23 @@ fn qwen36_moe_qgt1_matches_sequential_verify() -> Result<()> {
         return Ok(());
     }
     qualify_qwen_cache_and_ragged(&model, &tokenizer)
+}
+
+#[test]
+#[ignore = "requires a real Qwen3.6 MoE checkpoint and Apple Silicon"]
+#[serial(mlx_metal)]
+fn qwen36_moe_long_context_qgt1_matches_sequential_verify() -> Result<()> {
+    let Some(model_dir) = snapshot_from_env_or_cache(
+        "PROMPT_LOOKUP_VERIFY_QWEN36_MOE_MODEL",
+        "models--mlx-community--Qwen3.6-35B-A3B-4bit",
+    ) else {
+        eprintln!("skip: no Qwen3.6 MoE qualification checkpoint");
+        return Ok(());
+    };
+    let loader = Loader::open(&model_dir).context("opening Qwen3.6 MoE checkpoint")?;
+    let tokenizer = load_tokenizer(&loader, &model_dir)?;
+    let model = Qwen36MoeModel::from_loader(&loader).context("loading Qwen3.6 MoE model")?;
+    qualify_model(&model, &tokenizer)
 }
 
 #[test]

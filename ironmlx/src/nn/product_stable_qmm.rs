@@ -1,4 +1,4 @@
-//! Scoped routing for product-stable affine4 quantized projections.
+//! Scoped routing for product-stable affine quantized projections.
 //!
 //! Qwen MTP uses this for its complete draft head and draft-logit projection.
 //! The underlying MLX primitive preserves the single-row accumulation tree
