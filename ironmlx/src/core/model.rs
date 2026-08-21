@@ -65,6 +65,12 @@ pub trait Model {
         )
     }
 
+    /// Whether an equal-length text batch must preserve the single-row
+    /// scheduler's `[N - 1] + [1]` prefill morphology for greedy-token parity.
+    fn requires_split_batched_prefill_for_token_parity(&self) -> bool {
+        false
+    }
+
     /// Forward through embed + transformer + final RmsNorm, returning the
     /// hidden states (NOT projected to logits). Used by the chunked-prefill
     /// path for intermediate (non-last) chunks where only KV cache needs to

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::sampler::Sampler;
 use crate::core::scheduler_autotune::SchedulerAutotuneRuntimeProfile;
-use crate::core::speculative::MtpDraftPolicySnapshot;
+use crate::core::speculative::QwenMtpDraftPolicySnapshot;
 use crate::Result;
 
 const POSITIONS_PER_NGRAM: usize = 2;
@@ -2100,7 +2100,7 @@ struct SharedPromptLookupCandidate {
     draft: Box<[u32]>,
     mtp_certified_draft_len: usize,
     mtp_certified_history: Option<PromptLookupHistoryFingerprint>,
-    mtp_policy_snapshot: Option<MtpDraftPolicySnapshot>,
+    mtp_policy_snapshot: Option<QwenMtpDraftPolicySnapshot>,
     expires_at_ms: u64,
     last_access: u64,
 }
@@ -2111,7 +2111,7 @@ struct SharedPromptLookupCandidatePayload {
     draft: Box<[u32]>,
     mtp_certified_draft_len: usize,
     mtp_certified_history: Option<PromptLookupHistoryFingerprint>,
-    mtp_policy_snapshot: Option<MtpDraftPolicySnapshot>,
+    mtp_policy_snapshot: Option<QwenMtpDraftPolicySnapshot>,
     now_ms: u64,
 }
 
@@ -2131,7 +2131,7 @@ pub(crate) struct SharedPromptLookupPublishResult {
 pub(crate) struct SharedPromptLookupMtpCertification {
     pub continuation: usize,
     pub draft_len: usize,
-    pub policy_snapshot: MtpDraftPolicySnapshot,
+    pub policy_snapshot: QwenMtpDraftPolicySnapshot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2140,7 +2140,7 @@ pub(crate) struct SharedPromptLookupProposal {
     pub tokens: Vec<u32>,
     pub mtp_certified_draft_len: usize,
     pub mtp_certified_bonus_token: Option<u32>,
-    pub mtp_policy_snapshot: Option<MtpDraftPolicySnapshot>,
+    pub mtp_policy_snapshot: Option<QwenMtpDraftPolicySnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3049,7 +3049,7 @@ mod tests {
             ..cfg()
         };
         let mut pool = SharedPromptLookupPool::new(config).unwrap();
-        let policy_snapshot = crate::core::speculative::MtpDraftPolicyState::new(4).snapshot();
+        let policy_snapshot = crate::core::speculative::QwenMtpDraftPolicyState::new(4).snapshot();
         pool.publish_history_with_mtp_certifications(
             &[1, 2, 3, 4, 5, 6],
             &[SharedPromptLookupMtpCertification {

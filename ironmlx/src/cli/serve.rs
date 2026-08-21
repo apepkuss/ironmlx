@@ -2697,7 +2697,7 @@ mod scheduler_profile_tests {
     }
 
     #[test]
-    fn serve_mtp_config_accepts_qwen36_latency_first_default_draft_tokens() {
+    fn serve_mtp_config_accepts_qwen36_architecture_default_draft_tokens() {
         let temp_dir = unique_temp_dir("serve-mtp-qwen36-default");
         std::fs::create_dir_all(&temp_dir).expect("create mtp dir");
         let mut args = base_args();
@@ -2716,7 +2716,7 @@ mod scheduler_profile_tests {
         .expect("enabled");
 
         assert_eq!(cfg.model_dir, temp_dir);
-        assert_eq!(cfg.draft_tokens, 1);
+        assert_eq!(cfg.draft_tokens, 2);
         std::fs::remove_dir_all(cfg.model_dir).expect("cleanup");
     }
 

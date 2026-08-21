@@ -350,9 +350,12 @@ impl Gemma4Attention {
         let (batch, seq) = (dims[0], dims[1]);
         let reuses_shared_kv = shared_kv.is_some();
         let stable_verify_attention = crate::nn::gemma4_verify_attention::is_armed() && seq > 1;
-        let position_stable_full = crate::nn::position_stable_qmm::is_armed()
-            && seq > 1
-            && self.layer_kind == Gemma4LayerKind::Full;
+        // Long-context verify has an architecture-aware stable-attention
+        // implementation below. Do not let the broader position-stable QMM
+        // guard override it with per-query full-attention isolation: that is
+        // exact, but becomes prohibitively expensive at 32K/64K.
+        let position_stable_attention =
+            crate::nn::position_stable_qmm::is_armed() && seq > 1 && !stable_verify_attention;
         let segment_stable_verify = stable_verify_attention && batch == 1;
         let batch_stable_verify = stable_verify_attention && batch > 1;
         let query_isolated =
@@ -554,7 +557,7 @@ impl Gemma4Attention {
                 Some(self.sliding_window),
                 target,
             )?
-        } else if position_stable_full {
+        } else if position_stable_attention {
             query_position_isolated_full_attention_on(
                 &q,
                 &kv,
@@ -564,7 +567,7 @@ impl Gemma4Attention {
                 target,
             )?
         } else if query_isolated {
-            query_isolated_full_attention_on(&q, &kv, per_row_lens, offsets.values(), target)?
+            query_isolated_full_attention_on(&q, &kv, mask, per_row_lens, offsets.values(), target)?
         } else if batch_stable_full {
             row_isolated_causal_attention_on(
                 &q,
@@ -674,6 +677,7 @@ impl Gemma4Attention {
 fn query_isolated_full_attention_on(
     queries: &Array,
     kv: &SharedKv,
+    mask: Option<&Array>,
     per_row_lens: Option<&[i32]>,
     offsets: &[i32],
     target: StreamOrDevice,
@@ -696,6 +700,29 @@ fn query_isolated_full_attention_on(
             offsets.len(),
             lens.len()
         ));
+    }
+    if batch == 1 && lens == [query_len] {
+        if let Some(mask) = mask {
+            let mask_shape = mask.shape();
+            let mask_dims = mask_shape.as_slice();
+            if mask_dims == [1, 1, query_len, kv_len] {
+                // The reduction axis remains K, so evaluating every causal
+                // query in one Q segment preserves the per-position result
+                // while allowing MLX to reuse K/V within a single attention
+                // graph. This is essential at 32K/64K, where treating Q as a
+                // synthetic batch repeats the full K/V read for each token.
+                return Ok(mlx::fast::scaled_dot_product_attention_on(
+                    queries,
+                    &kv.keys,
+                    &kv.values,
+                    1.0,
+                    "",
+                    Some(mask),
+                    None,
+                    target,
+                )?);
+            }
+        }
     }
     let mut batch_outputs = Vec::with_capacity(batch as usize);
     for row in 0..batch {
@@ -1043,7 +1070,7 @@ fn row_isolated_causal_attention_on(
         }
         let key_end = offsets[row as usize] + valid_query_len;
         let key_start = sliding_window.map_or(0, |window| {
-            key_end - window.saturating_add(valid_query_len).saturating_sub(1)
+            (key_end - window.saturating_add(valid_query_len).saturating_sub(1)).max(0)
         });
         if key_start < 0 || key_end > kv_len {
             return Err(anyhow!(
@@ -1138,8 +1165,8 @@ fn stable_sliding_query_window(
     sliding_window: i32,
 ) -> Result<(i32, i32)> {
     let key_end = offset + query_idx + 1;
-    let key_start = key_end - sliding_window;
-    if query_idx < 0 || sliding_window <= 0 || key_start < 0 || key_end > kv_len {
+    let key_start = (key_end - sliding_window).max(0);
+    if query_idx < 0 || sliding_window <= 0 || key_end > kv_len {
         return Err(anyhow!(
             "Gemma4 segment-stable sliding window is invalid: kv_len={kv_len}, offset={offset}, query_idx={query_idx}, window={sliding_window}"
         ));
@@ -1269,6 +1296,7 @@ mod tests {
         let out = query_isolated_full_attention_on(
             &queries,
             &SharedKv { keys, values },
+            None,
             Some(&[2, 1]),
             &[1, 2],
             ().into(),
@@ -1280,6 +1308,55 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
+    fn query_isolated_full_attention_reuses_single_row_causal_segment() {
+        let queries: Array = (&[1.0_f32, 0.0, 0.0, 1.0][..], &[1_i32, 1, 2, 2][..])
+            .try_into()
+            .unwrap();
+        let keys: Array = (
+            &[1.0_f32, 0.0, 0.0, 1.0, 1.0, 1.0][..],
+            &[1_i32, 1, 3, 2][..],
+        )
+            .try_into()
+            .unwrap();
+        let values = keys.clone();
+        let mask: Array = (
+            &[0.0_f32, 0.0, f32::NEG_INFINITY, 0.0, 0.0, 0.0][..],
+            &[1_i32, 1, 2, 3][..],
+        )
+            .try_into()
+            .unwrap();
+
+        let out = query_isolated_full_attention_on(
+            &queries,
+            &SharedKv {
+                keys: keys.clone(),
+                values: values.clone(),
+            },
+            Some(&mask),
+            Some(&[2]),
+            &[1],
+            ().into(),
+        )
+        .unwrap();
+        let expected = mlx::fast::scaled_dot_product_attention(
+            &queries,
+            &keys,
+            &values,
+            1.0,
+            "",
+            Some(&mask),
+            None,
+        )
+        .unwrap();
+        assert_eq!(out.shape().as_slice(), &[1, 1, 2, 2]);
+        assert_eq!(
+            out.to_vec::<f32>().unwrap(),
+            expected.to_vec::<f32>().unwrap()
+        );
+    }
+
+    #[test]
     fn sliding_attention_view_keeps_window_plus_query_minus_one() {
         assert_eq!(sliding_attention_view_len(20_400, 2_048, 1_024), 3_071);
         assert_eq!(sliding_attention_view_len(20_400, 1, 1_024), 1_024);
@@ -1288,6 +1365,10 @@ mod tests {
 
     #[test]
     fn stable_sliding_windows_preserve_the_same_absolute_causal_prefix() {
+        assert_eq!(
+            stable_sliding_query_window(33, 31, 0, 1_024).unwrap(),
+            (0, 32)
+        );
         assert_eq!(
             stable_sliding_query_window(513, 511, 1, 512).unwrap(),
             (1, 513)

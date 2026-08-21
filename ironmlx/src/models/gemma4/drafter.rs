@@ -23,7 +23,7 @@ use crate::core::speculative::{
     resolve_speculative_tokens, sample_draft_logits_position,
     sample_draft_logits_position_with_uniform, sample_logits_positions, slice_hidden_position,
     split_speculative_draft_prng, trim_full_layer_cache_rows_to_accepted_prefix, verify_input,
-    DraftTokenDistribution, MtpDraftPolicyKvState, MtpDraftPolicyState, MtpDraftPolicyWindow,
+    DraftTokenDistribution, Gemma4DrafterPolicyState, MtpDraftPolicyKvState, MtpDraftPolicyWindow,
     MtpSpeculativeConfig, MtpSpeculativeStats,
 };
 use crate::core::tokenizer::{DecodeStream, Tokenizer};
@@ -870,7 +870,7 @@ pub struct Gemma4DrafterGenerationStream<'m> {
     dummy_position_ids: Option<Array>,
     prng_state: Array,
     adaptive_draft_tokens: usize,
-    draft_policy: MtpDraftPolicyState,
+    draft_policy: Gemma4DrafterPolicyState,
     stats: MtpSpeculativeStats,
     trace_window_limit: usize,
     trace_windows: Vec<Gemma4DrafterTraceWindow>,
@@ -1144,7 +1144,7 @@ impl<'m> Gemma4DrafterGenerationStream<'m> {
             dummy_position_ids,
             prng_state,
             adaptive_draft_tokens: cfg.max_draft_tokens,
-            draft_policy: MtpDraftPolicyState::new(cfg.max_draft_tokens),
+            draft_policy: Gemma4DrafterPolicyState::new(cfg.max_draft_tokens),
             stats,
             trace_window_limit: 0,
             trace_windows: Vec::new(),
@@ -1217,10 +1217,11 @@ impl<'m> Gemma4DrafterGenerationStream<'m> {
         let timing_before = self.stats.draft_cap_timing();
         let context_tokens = self.history.len();
 
-        let draft_budget = self
-            .adaptive_draft_tokens
-            .clamp(1, self.cfg.max_draft_tokens)
-            .min(remaining);
+        let draft_budget = effective_draft_budget(
+            self.adaptive_draft_tokens,
+            self.cfg.max_draft_tokens,
+            remaining,
+        );
         let (draft_tokens, _draft_distributions) =
             self.draft_tokens(current_token, draft_budget)?;
         let verify_input = verify_input(current_token, &draft_tokens);
@@ -1229,9 +1230,20 @@ impl<'m> Gemma4DrafterGenerationStream<'m> {
         let verify_arr: Array =
             (&verify_input[..], &[1_i32, verify_input.len() as i32][..]).try_into()?;
 
-        let base_snapshot: Vec<LayerCacheSnapshot> =
-            self.cache.iter().map(LayerCache::snapshot).collect();
+        let base_snapshot: Vec<LayerCacheSnapshot> = self
+            .cache
+            .iter()
+            .map(LayerCache::append_snapshot)
+            .collect::<Result<_>>()?;
         let verify_forward_start = Instant::now();
+        let position_stable_verify = verify_input.len() > 1;
+        let _position_stable_linear =
+            position_stable_verify.then(crate::nn::position_stable_linear::scope);
+        let _position_stable_qmm =
+            position_stable_verify.then(crate::nn::position_stable_qmm::scope);
+        let stable_attention = position_stable_verify
+            && context_tokens > self.model.config().sliding_window.max(0) as usize;
+        let _stable_attention = stable_attention.then(crate::nn::gemma4_verify_attention::scope);
         let verified = self.model.forward_text_hidden_with_shared_kv_on(
             &verify_arr,
             &verify_pos_ids,
@@ -1444,6 +1456,10 @@ impl<'m> Gemma4DrafterGenerationStream<'m> {
             None => build_position_ids(start_pos, len),
         }
     }
+}
+
+fn effective_draft_budget(adaptive: usize, configured: usize, remaining: usize) -> usize {
+    adaptive.min(configured).min(remaining)
 }
 
 struct MaskedEmbedder {
@@ -1995,6 +2011,12 @@ fn stack_shared_kv_kind_for_test(
 mod tests {
     use super::*;
     use crate::core::cache::KVCache;
+
+    #[test]
+    fn standalone_drafter_can_fall_back_to_ordinary_decode() {
+        assert_eq!(effective_draft_budget(0, 4, 32), 0);
+        assert_eq!(effective_draft_budget(3, 4, 2), 2);
+    }
 
     #[test]
     fn draft_position_uses_previous_target_hidden_position() {

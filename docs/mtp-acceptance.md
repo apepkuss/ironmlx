@@ -208,6 +208,22 @@ non-zero verify windows and drafted tokens at every context length. Performance
 must be measured separately against the same base checkpoint without a drafter;
 passing parity does not imply a decode or end-to-end speedup.
 
+For fixed-work performance runs, `ironmlx-core-bench` accepts
+`--prompt-target-tokens 8192|32768|65536`, `--ignore-eos`, and
+`--scheduler-baseline-out <path>`. Repeat `--prompt-file` to create B2; paired
+baseline/drafter runs clear the MLX allocator cache between sides. Scheduler
+benchmarks enable the production process-memory governor, and Gemma4 runs
+reject an assistant whose model type, backbone hidden size, or vocabulary does
+not match the base checkpoint.
+
+The 2026-08-20 Dense/MoE B1/B2 performance matrix and its evidence boundaries
+are recorded in
+[`docs/benchmarks/gemma4-drafter-performance/2026-08-20/summary.md`](benchmarks/gemma4-drafter-performance/2026-08-20/summary.md).
+
+The 2026-08-21 Qwen/Gemma4 policy-split 32K cross-commit regression gate is
+recorded in
+[`docs/benchmarks/mtp-policy-split/2026-08-21/summary.md`](benchmarks/mtp-policy-split/2026-08-21/summary.md).
+
 Gemma4 PromptLookup exact verify has no separate 1024-token context cap. Verify
 the production qualification at boundary and long-context lengths:
 
@@ -226,10 +242,12 @@ Affine4 Gemma4 checkpoints use sequential Q1 PromptLookup verification with
 TurboQuant KV because K3V4/K4V4 Q>1 is not token exact. This does not affect the
 separate assistant-drafter K3V4 path below.
 
-For assistant-drafter K3V4, long-context Q>1 verify uses the stable attention
-path regardless of reserved scheduler capacity. This test covers both one and
-two active requests under `b_max=4`, requires exact Q1 token parity, and checks
-that the second draft position is attempted:
+For assistant-drafter K3V4, long-context Q>1 verify uses stable attention.
+Quantized profiles outside the exact batched qualification evaluate the
+complete target as sequential `[B,1]` positions for both B1 and multi-row
+batches. This test covers both one and two active requests under `b_max=4`,
+requires exact Q1 token parity, and checks that the second draft position is
+attempted:
 
 ```sh
 MLX_DIR=$HOME/.local/mlx \

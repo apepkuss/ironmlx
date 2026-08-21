@@ -801,6 +801,60 @@ impl Model for Gemma4Model {
         self.slice_last_and_project(&hidden, Some(&last_positions), target)
     }
 
+    fn batched_prefill_causal(
+        &self,
+        input_ids: &Array,
+        position_ids: &Array,
+        per_row_lens: &[i32],
+        cache: Option<&mut [LayerCache]>,
+        target: StreamOrDevice,
+    ) -> Result<Array> {
+        let shape = input_ids.shape();
+        let dims = shape.as_slice();
+        anyhow::ensure!(
+            dims.len() == 2
+                && per_row_lens.len() == dims[0] as usize
+                && per_row_lens.iter().all(|&len| len == dims[1]),
+            "Gemma4 causal batched prefill requires every row to fill [B,T], got shape={dims:?}, lens={per_row_lens:?}"
+        );
+        const CHUNK_SIZE: i32 = 2_048;
+        let batch = dims[0];
+        let total = dims[1];
+        let mut cache = cache;
+        let mut start = 0_i32;
+        loop {
+            let end = (start + CHUNK_SIZE).min(total);
+            let chunk = mlx::ops::indexing::slice_strided_on(
+                input_ids,
+                &[0_i32, start][..],
+                &[batch, end][..],
+                &[1_i32, 1][..],
+                target,
+            )?;
+            if end == total {
+                return Gemma4Model::forward_on(
+                    self,
+                    &chunk,
+                    position_ids,
+                    None,
+                    None,
+                    cache,
+                    target,
+                );
+            }
+            let hidden = self.forward_text_hidden(
+                &chunk,
+                position_ids,
+                None,
+                None,
+                cache.as_deref_mut(),
+                target,
+            )?;
+            mlx::transforms::eval(&[&hidden])?;
+            start = end;
+        }
+    }
+
     fn forward_text_hidden(
         &self,
         input_ids: &Array,

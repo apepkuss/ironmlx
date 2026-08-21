@@ -1,0 +1,17 @@
+context,architecture,batch,kv_mode,baseline_tps,drafter_tps,delta_pct,correctness,evidence
+short,dense,1,default,48.656,49.044,0.80,exact,repeated_6_after_2_warmups
+short,dense,2,default,85.274,85.216,-0.07,exact,repeated_6_after_2_warmups
+short,moe,1,default,48.887,49.280,0.80,exact,repeated_6_after_2_warmups
+short,moe,2,default,85.422,84.680,-0.87,exact,repeated_6_after_2_warmups
+8192,dense,1,default,34.490,38.889,12.76,exact,single_paired_directional
+8192,dense,2,default,52.626,56.924,8.17,exact,single_paired_directional
+8192,moe,1,default,34.660,75.502,117.84,exact,single_paired_directional
+8192,moe,2,default,54.717,101.355,85.23,exact,single_paired_directional
+32768,dense,1,default,27.583,39.129,41.86,exact,single_paired_directional
+32768,dense,2,default,28.542,33.943,18.92,exact,single_paired_directional
+32768,moe,1,default,23.652,40.970,73.22,exact,single_paired_directional
+32768,moe,2,default,35.587,51.536,44.82,exact,single_paired_directional
+65536,dense,1,default,11.763,40.487,244.21,exact,single_paired_directional
+65536,dense,2,k3v4,,,,memory_admission_rejected,capacity_boundary
+65536,moe,1,k3v4,4.171,7.229,73.32,exact,single_paired_directional
+65536,moe,2,default,3.396,10.887,220.53,exact,high_memory_diagnostic
