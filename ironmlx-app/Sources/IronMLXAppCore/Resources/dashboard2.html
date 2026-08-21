@@ -3001,6 +3001,61 @@
     height: 14px;
     flex: 0 0 auto;
   }
+  .download-recovery {
+    display: none;
+    margin-bottom: 16px;
+    padding: 14px 16px;
+    border: 1px solid rgba(255, 159, 10, 0.4);
+    border-radius: 10px;
+    background: rgba(255, 159, 10, 0.08);
+  }
+  .download-recovery-header,
+  .download-queue-header,
+  .download-task-main,
+  .download-task-meta,
+  .download-recovery-actions {
+    display: flex;
+    align-items: center;
+  }
+  .download-recovery-header,
+  .download-queue-header,
+  .download-task-main { justify-content: space-between; gap: 12px; }
+  .download-recovery-title { font-size: 13px; font-weight: 650; }
+  .download-recovery-copy { margin-top: 4px; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
+  .download-recovery-list { margin-top: 10px; display: grid; gap: 6px; }
+  .download-recovery-item {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: center;
+    padding: 8px 10px;
+    border-radius: 7px;
+    background: var(--card-bg);
+    border: 0.5px solid var(--border);
+    font-size: 12px;
+  }
+  .download-recovery-actions { gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  .download-queue-header { padding: 12px 16px; background: var(--bg); border-bottom: 0.5px solid var(--border); }
+  .download-queue-title { font-size: 13px; font-weight: 600; }
+  .download-queue-header-actions { display: flex; align-items: center; gap: 10px; }
+  .download-queue-summary { font-size: 11px; color: var(--text-secondary); }
+  .download-queue-clear { min-height: 26px; padding: 4px 9px; font-size: 11px; }
+  .download-task-list { display: grid; }
+  .download-task { padding: 11px 16px; border-bottom: 0.5px solid var(--border); }
+  .download-task:last-child { border-bottom: none; }
+  .download-task-identity { min-width: 0; }
+  .download-task-name { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .download-task-meta { gap: 7px; margin-top: 4px; color: var(--text-secondary); font-size: 10px; }
+  .download-provider { padding: 1px 5px; border-radius: 4px; background: var(--bg); border: 0.5px solid var(--border); }
+  .download-task-status { color: var(--accent); }
+  .download-task-status.terminal { color: var(--text-secondary); }
+  .download-task-status.failed { color: var(--destructive); }
+  .download-task-progress { height: 3px; margin-top: 9px; overflow: hidden; border-radius: 2px; background: var(--border); }
+  .download-task-progress-bar { height: 100%; border-radius: inherit; background: var(--accent); transition: width 0.25s ease; }
+  .download-task-cancel { flex: 0 0 auto; }
+  @media (prefers-reduced-motion: reduce) {
+    .download-task-progress-bar { transition: none; }
+  }
 </style>
 </head>
 <body>
@@ -3279,6 +3334,31 @@
 
     <!-- Tab 2: Model Download -->
     <div class="tab-panel" id="tab-models-download">
+      <div id="download-recovery" class="download-recovery" role="status" aria-live="polite">
+        <div class="download-recovery-header">
+          <div>
+            <div class="download-recovery-title" data-i18n="download_recovery_title">Previous download queue was not restored</div>
+            <div class="download-recovery-copy" data-i18n="download_recovery_copy">Queued tasks are not resumed after restarting IronMLX. Re-add the tasks you still need.</div>
+          </div>
+        </div>
+        <div id="download-recovery-list" class="download-recovery-list"></div>
+        <div class="download-recovery-actions">
+          <button class="btn-secondary" id="download-readd-public" type="button" onclick="readdPublicDownloadReminders()" data-i18n="download_readd_public">Re-add tasks without credentials</button>
+          <button class="btn-secondary" type="button" onclick="dismissDownloadReminders()" data-i18n="dismiss">Dismiss</button>
+        </div>
+      </div>
+
+      <div class="card-settings" id="download-queue-card" style="display:none;">
+        <div class="download-queue-header">
+          <div class="download-queue-title" data-i18n="download_tasks">Download tasks</div>
+          <div class="download-queue-header-actions">
+            <div class="download-queue-summary" id="download-queue-summary"></div>
+            <button class="btn-secondary download-queue-clear" id="download-clear-finished" type="button" style="display:none;" onclick="clearFinishedDownloadTasks()" aria-label="Clear all finished download task records" data-i18n="download_clear_finished" data-i18n-aria-label="download_clear_finished_accessible_label">Clear records</button>
+          </div>
+        </div>
+        <div id="download-task-list" class="download-task-list" aria-live="polite"></div>
+      </div>
+
       <!-- Source Tabs -->
       <div style="display:flex; gap:0; margin-bottom:16px; border-bottom:1px solid var(--border);">
         <button class="dl-source-tab active" id="dl-tab-hf" onclick="switchDlSource('hf')" style="padding:8px 20px; border:none; background:none; cursor:pointer; font-size:13px; font-weight:500; border-bottom:2px solid var(--accent); color:var(--text-primary);"><svg height="14" width="14" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle;margin-right:4px;"><path d="M2.25 11.535c0-3.407 1.847-6.554 4.844-8.258a9.822 9.822 0 019.687 0c2.997 1.704 4.844 4.851 4.844 8.258 0 5.266-4.337 9.535-9.687 9.535S2.25 16.8 2.25 11.535z" fill="#FF9D0B"/><path d="M11.938 20.086c4.797 0 8.687-3.829 8.687-8.551 0-4.722-3.89-8.55-8.687-8.55-4.798 0-8.688 3.828-8.688 8.55 0 4.722 3.89 8.55 8.688 8.55z" fill="#FFD21E"/><path d="M14.76 9.21c.32.108.445.753.767.585.447-.233.707-.708.659-1.204a1.235 1.235 0 00-.879-1.059 1.262 1.262 0 00-1.33.394c-.322.384-.377.92-.14 1.36.153.283.638-.177.925-.079zm-5.887 0c-.32.108-.448.753-.768.585a1.226 1.226 0 01-.658-1.204c.048-.495.395-.913.878-1.059a1.262 1.262 0 011.33.394c.322.384.377.92.14 1.36-.152.283-.64-.177-.925-.079z" fill="#3A3B45"/></svg>HuggingFace</button>
@@ -3323,17 +3403,6 @@
               <button class="btn-accent" onclick="searchHuggingFace()"><svg width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="6" cy="6" r="4" stroke="white" stroke-width="1.3"/><line x1="9" y1="9" x2="12.5" y2="12.5" stroke="white" stroke-width="1.3" stroke-linecap="round"/></svg> <span data-i18n="search">Search</span></button>
             </div>
             <div id="search-results" style="margin-top:12px;"></div>
-            <div id="hf-progress-home">
-              <div id="dl-progress" class="hf-download-progress" role="status" aria-live="polite">
-                <div style="display:flex; align-items:center; gap:8px;">
-                  <span id="dl-progress-icon" style="animation:spin 1s linear infinite;">&#x21BB;</span>
-                  <span id="dl-progress-text">Downloading...</span>
-                </div>
-                <div style="margin-top:8px; height:4px; background:var(--border); border-radius:2px; overflow:hidden;">
-                  <div id="dl-progress-bar" style="height:100%; width:0%; background:var(--accent); border-radius:2px; transition:width 0.3s;"></div>
-                </div>
-              </div>
-            </div>
           </div>
         </div>
       </div>
@@ -3352,15 +3421,6 @@
                 <input type="text" placeholder="mlx-community/Qwen3-4B-4bit" id="dl-ms-repo-id" autocapitalize="off" autocorrect="off">
               </div>
               <button class="btn-accent" id="dl-ms-download-btn" onclick="startMsDownload()"><svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 2v7M4.5 6.5L7 9l2.5-2.5" stroke="white" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/><path d="M2.5 9.5v2h9v-2" stroke="white" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg> <span data-i18n="download">Download</span></button>
-            </div>
-            <div id="dl-ms-progress" style="display:none; margin-top:12px; padding:12px; background:var(--bg); border:1px solid var(--border); border-radius:8px; font-size:12px;">
-              <div style="display:flex; align-items:center; gap:8px;">
-                <span id="dl-ms-progress-icon" style="animation:spin 1s linear infinite;">&#x21BB;</span>
-                <span id="dl-ms-progress-text">Downloading...</span>
-              </div>
-              <div style="margin-top:8px; height:4px; background:var(--border); border-radius:2px; overflow:hidden;">
-                <div id="dl-ms-progress-bar" style="height:100%; width:0%; background:#624AFF; border-radius:2px; transition:width 0.3s;"></div>
-              </div>
             </div>
             <div style="margin-top:12px; font-size:12px; color:var(--text-tertiary);">
               <span data-i18n="ms_browse">Browse models at</span> <a href="https://modelscope.cn/organization/mlx-community" target="_blank" style="color:#624AFF;">modelscope.cn/mlx-community</a>
@@ -4484,6 +4544,9 @@
       model_downloading_file: "Downloading {name}... {pct}%",
       download_btn_downloading: "Downloading...",
       download_in_progress: "A HuggingFace download is already in progress.",
+      download_tasks: "Download tasks", download_queue_summary: "{active} of {limit} downloading · {queued} queued", download_remaining: "{size} remaining", download_clear_finished: "Clear records", download_clear_finished_accessible_label: "Clear all finished download task records",
+      download_status_queued: "Queued", download_status_queued_position: "Queued · #{position}", download_status_resolving: "Resolving repository", download_status_preflighting: "Checking files and disk", download_status_downloading: "Downloading", download_status_verifying: "Verifying", download_status_publishing: "Publishing", download_status_completed: "Completed", download_status_cancelled: "Cancelled", download_status_rejected: "Rejected", download_status_interrupted: "Interrupted", download_status_corrupt: "Corrupt", download_status_failed: "Failed",
+      download_recovery_title: "Previous download queue was not restored", download_recovery_copy: "Queued tasks are not resumed after restarting IronMLX. Re-add the tasks you still need.", download_readd_public: "Re-add tasks without credentials", download_readd: "Re-add", download_ignore: "Ignore", download_token_required: "Token required", download_enter_token: "Enter token", download_token_prompt: "Enter the Hugging Face token, then add the task again.", dismiss: "Dismiss",
       download_generic_failed: "Download failed.",
       ms_starting: "Starting download from ModelScope...",
       bench_no_prompt_size: "Select at least one pp setting before running benchmark.",
@@ -4828,6 +4891,9 @@
       model_downloading_file: "正在下载 {name}… {pct}%",
       download_btn_downloading: "下载中…",
       download_in_progress: "已有 HuggingFace 模型正在下载。",
+      download_tasks: "下载任务", download_queue_summary: "正在下载 {active}/{limit} · 排队 {queued}", download_remaining: "剩余 {size}", download_clear_finished: "清除记录", download_clear_finished_accessible_label: "清除所有已结束的下载任务记录",
+      download_status_queued: "排队中", download_status_queued_position: "排队中 · 第 {position} 位", download_status_resolving: "解析仓库", download_status_preflighting: "检查文件与磁盘", download_status_downloading: "下载中", download_status_verifying: "校验中", download_status_publishing: "发布中", download_status_completed: "已完成", download_status_cancelled: "已取消", download_status_rejected: "已拒绝", download_status_interrupted: "已中断", download_status_corrupt: "文件损坏", download_status_failed: "失败",
+      download_recovery_title: "上次下载队列未恢复", download_recovery_copy: "IronMLX 重启后不会自动恢复排队任务。请重新添加仍需下载的任务。", download_readd_public: "重新添加无需凭证的任务", download_readd: "重新添加", download_ignore: "忽略此项", download_token_required: "需要 Token", download_enter_token: "输入 Token", download_token_prompt: "请输入 Hugging Face Token，然后重新添加该任务。", dismiss: "全部忽略",
       download_generic_failed: "下载失败。",
       ms_starting: "正在连接 ModelScope…",
       bench_no_prompt_size: "请至少选择一个 pp 设定后再运行基准测试。",
@@ -5172,6 +5238,9 @@
       model_downloading_file: "正在下載 {name}… {pct}%",
       download_btn_downloading: "下載中…",
       download_in_progress: "已有 HuggingFace 模型正在下載。",
+      download_tasks: "下載任務", download_queue_summary: "正在下載 {active}/{limit} · 排隊 {queued}", download_remaining: "剩餘 {size}", download_clear_finished: "清除記錄", download_clear_finished_accessible_label: "清除所有已結束的下載任務記錄",
+      download_status_queued: "排隊中", download_status_queued_position: "排隊中 · 第 {position} 位", download_status_resolving: "解析儲存庫", download_status_preflighting: "檢查檔案與磁碟", download_status_downloading: "下載中", download_status_verifying: "驗證中", download_status_publishing: "發佈中", download_status_completed: "已完成", download_status_cancelled: "已取消", download_status_rejected: "已拒絕", download_status_interrupted: "已中斷", download_status_corrupt: "檔案損壞", download_status_failed: "失敗",
+      download_recovery_title: "上次下載佇列未恢復", download_recovery_copy: "IronMLX 重新啟動後不會自動恢復排隊任務。請重新加入仍需下載的任務。", download_readd_public: "重新加入無需憑證的任務", download_readd: "重新加入", download_ignore: "略過此項", download_token_required: "需要 Token", download_enter_token: "輸入 Token", download_token_prompt: "請輸入 Hugging Face Token，然後重新加入該任務。", dismiss: "全部略過",
       download_generic_failed: "下載失敗。",
       ms_starting: "正在連線 ModelScope…",
       bench_no_prompt_size: "請至少選擇一個 pp 設定後再執行基準測試。",
@@ -5499,6 +5568,9 @@
       model_downloading_file: "{name} をダウンロード中… {pct}%",
       download_btn_downloading: "ダウンロード中…",
       download_in_progress: "HuggingFace モデルをダウンロードしています。",
+      download_tasks: "ダウンロードタスク", download_queue_summary: "ダウンロード中 {active}/{limit} · 待機 {queued}", download_remaining: "残り {size}", download_clear_finished: "記録を消去", download_clear_finished_accessible_label: "終了したダウンロードタスクの記録をすべて消去",
+      download_status_queued: "待機中", download_status_queued_position: "待機中 · {position} 番目", download_status_resolving: "リポジトリを解析中", download_status_preflighting: "ファイルとディスクを確認中", download_status_downloading: "ダウンロード中", download_status_verifying: "検証中", download_status_publishing: "公開処理中", download_status_completed: "完了", download_status_cancelled: "キャンセル済み", download_status_rejected: "拒否", download_status_interrupted: "中断", download_status_corrupt: "破損", download_status_failed: "失敗",
+      download_recovery_title: "前回のダウンロードキューは復元されませんでした", download_recovery_copy: "IronMLX の再起動後、待機中タスクは自動再開されません。必要なタスクを再追加してください。", download_readd_public: "認証不要のタスクを再追加", download_readd: "再追加", download_ignore: "無視", download_token_required: "Token が必要", download_enter_token: "Token を入力", download_token_prompt: "Hugging Face Token を入力してからタスクを再追加してください。", dismiss: "すべて閉じる",
       download_generic_failed: "ダウンロードに失敗しました。",
       ms_starting: "ModelScope に接続中…",
       bench_no_prompt_size: "ベンチマークを実行する前に、少なくとも1つの pp 設定を選択してください。",
@@ -5826,6 +5898,9 @@
       model_downloading_file: "{name} 다운로드 중… {pct}%",
       download_btn_downloading: "다운로드 중…",
       download_in_progress: "HuggingFace 모델을 다운로드하고 있습니다.",
+      download_tasks: "다운로드 작업", download_queue_summary: "다운로드 중 {active}/{limit} · 대기 {queued}", download_remaining: "{size} 남음", download_clear_finished: "기록 지우기", download_clear_finished_accessible_label: "종료된 다운로드 작업 기록 모두 지우기",
+      download_status_queued: "대기 중", download_status_queued_position: "대기 중 · {position}번째", download_status_resolving: "저장소 확인 중", download_status_preflighting: "파일 및 디스크 확인 중", download_status_downloading: "다운로드 중", download_status_verifying: "검증 중", download_status_publishing: "게시 중", download_status_completed: "완료", download_status_cancelled: "취소됨", download_status_rejected: "거부됨", download_status_interrupted: "중단됨", download_status_corrupt: "손상됨", download_status_failed: "실패",
+      download_recovery_title: "이전 다운로드 대기열이 복원되지 않았습니다", download_recovery_copy: "IronMLX 재시작 후 대기 중인 작업은 자동으로 복원되지 않습니다. 필요한 작업을 다시 추가하세요.", download_readd_public: "자격 증명 없는 작업 다시 추가", download_readd: "다시 추가", download_ignore: "이 항목 무시", download_token_required: "Token 필요", download_enter_token: "Token 입력", download_token_prompt: "Hugging Face Token을 입력한 다음 작업을 다시 추가하세요.", dismiss: "모두 무시",
       download_generic_failed: "다운로드에 실패했습니다.",
       ms_starting: "ModelScope에 연결 중…",
       bench_no_prompt_size: "벤치마크를 실행하기 전에 pp 설정을 하나 이상 선택하세요.",
@@ -6075,6 +6150,7 @@
     syncModelList();
     renderRuntimeModels(window.__RUNTIME_MODELS__ || []);
     if (incidentSummaries.length) renderIncidentHistory({ incidents: incidentSummaries });
+    if (typeof renderDownloadQueue === 'function') renderDownloadQueue(downloadQueueSnapshot);
   }
 
   function selectInterfaceLanguage(value) {
@@ -6797,61 +6873,197 @@
     }
   }
 
+  const ACTIVE_DOWNLOAD_PHASES = new Set([
+    'queued', 'resolving', 'preflighting', 'downloading', 'verifying', 'publishing'
+  ]);
+  let downloadQueueSnapshot = {
+    max_concurrent: 3,
+    active_count: 0,
+    queued_count: 0,
+    tasks: [],
+    recovery_reminders: []
+  };
+
+  function downloadTask(provider, repoId) {
+    return (downloadQueueSnapshot.tasks || []).find(task => {
+      return task.provider === provider && task.repo_id === repoId;
+    }) || null;
+  }
+
+  function isActiveDownload(task) {
+    return !!task && ACTIVE_DOWNLOAD_PHASES.has(task.status);
+  }
+
+  function downloadStatusLabel(task) {
+    const dict = I18N[currentLang] || I18N.en;
+    if (task.status === 'queued' && task.queue_position) {
+      return (dict.download_status_queued_position || 'Queued · #{position}')
+        .replace('{position}', task.queue_position);
+    }
+    return dict['download_status_' + task.status] || task.status;
+  }
+
+  function renderDownloadQueue(snapshot) {
+    const previousTasks = new Map((downloadQueueSnapshot.tasks || []).map(task => [
+      task.provider + ':' + task.repo_id,
+      task.status
+    ]));
+    downloadQueueSnapshot = snapshot && !Array.isArray(snapshot) ? snapshot : downloadQueueSnapshot;
+    const dict = I18N[currentLang] || I18N.en;
+    const tasks = downloadQueueSnapshot.tasks || [];
+    const card = document.getElementById('download-queue-card');
+    const list = document.getElementById('download-task-list');
+    card.style.display = tasks.length ? '' : 'none';
+    document.getElementById('download-queue-summary').textContent =
+      (dict.download_queue_summary || '{active} of {limit} downloading · {queued} queued')
+        .replace('{active}', downloadQueueSnapshot.active_count || 0)
+        .replace('{limit}', downloadQueueSnapshot.max_concurrent || 3)
+        .replace('{queued}', downloadQueueSnapshot.queued_count || 0);
+    document.getElementById('download-clear-finished').style.display = tasks.some(task => !isActiveDownload(task))
+      ? '' : 'none';
+    list.innerHTML = tasks.map(task => {
+      const active = isActiveDownload(task);
+      const failed = ['failed', 'rejected', 'interrupted', 'corrupt'].includes(task.status);
+      const pct = Math.max(0, Math.min(100, Number(task.progress_pct || 0)));
+      const statusClass = failed ? 'failed' : (active ? '' : 'terminal');
+      const remaining = Number(task.remaining_bytes || 0);
+      const detail = remaining > 0
+        ? (dict.download_remaining || '{size} remaining').replace('{size}', formatVersionBytes(remaining))
+        : (task.current_file || '');
+      return '<div class="download-task">'
+        + '<div class="download-task-main"><div class="download-task-identity">'
+        + '<div class="download-task-name">' + escapeAttr(task.repo_id || '') + '</div>'
+        + '<div class="download-task-meta"><span class="download-provider">'
+        + escapeAttr(task.provider === 'modelscope' ? 'ModelScope' : 'Hugging Face') + '</span>'
+        + '<span class="download-task-status ' + statusClass + '">' + escapeAttr(downloadStatusLabel(task)) + '</span>'
+        + (detail ? '<span>·</span><span>' + escapeAttr(detail) + '</span>' : '')
+        + '</div></div>'
+        + (active ? '<button class="btn-secondary download-task-cancel" type="button" onclick="cancelQueuedDownload(\''
+          + task.provider + '\',\'' + task.repo_id + '\')">' + escapeAttr(dict.cancel || 'Cancel') + '</button>' : '')
+        + '</div><div class="download-task-progress"><div class="download-task-progress-bar" style="width:'
+        + pct + '%"></div></div></div>';
+    }).join('');
+    renderDownloadRecovery(downloadQueueSnapshot.recovery_reminders || []);
+    refreshSearchResultDownloadStates();
+    const completedModelScopeTask = tasks.find(task => {
+      const previousStatus = previousTasks.get(task.provider + ':' + task.repo_id);
+      return task.provider === 'modelscope'
+        && task.status === 'completed'
+        && previousStatus
+        && previousStatus !== 'completed';
+    });
+    if (completedModelScopeTask) {
+      const localized = (dict.model_download_complete || 'Model "{name}" downloaded successfully.')
+        .replace('{name}', completedModelScopeTask.repo_id || '');
+      showToast(localized, 'success');
+      syncModelList();
+    }
+  }
+
+  function renderDownloadRecovery(reminders) {
+    const dict = I18N[currentLang] || I18N.en;
+    const banner = document.getElementById('download-recovery');
+    banner.style.display = reminders.length ? '' : 'none';
+    document.getElementById('download-recovery-list').innerHTML = reminders.map(reminder => {
+      const credential = reminder.used_credential
+        ? '<span class="badge badge-restart">' + escapeAttr(dict.download_token_required || 'Token required') + '</span>'
+        : '';
+      const action = reminder.used_credential
+        ? 'prepareCredentialDownloadReminder'
+        : 'readdDownloadReminder';
+      return '<div class="download-recovery-item"><span><strong>'
+        + escapeAttr(reminder.repo_id) + '</strong> · '
+        + escapeAttr(reminder.provider === 'modelscope' ? 'ModelScope' : 'Hugging Face')
+        + ' ' + credential + '</span><span class="download-recovery-actions" style="margin-top:0;"><button class="btn-secondary" type="button" onclick="'
+        + action + '(\'' + reminder.provider + '\',\'' + reminder.repo_id + '\')">'
+        + escapeAttr(reminder.used_credential
+          ? (dict.download_enter_token || 'Enter token')
+          : (dict.download_readd || 'Re-add')) + '</button><button class="btn-secondary" type="button" onclick="dismissDownloadReminder(\''
+        + reminder.provider + '\',\'' + reminder.repo_id + '\')">'
+        + escapeAttr(dict.download_ignore || 'Ignore') + '</button></span></div>';
+    }).join('');
+    document.getElementById('download-readd-public').style.display = reminders.some(reminder => !reminder.used_credential)
+      ? '' : 'none';
+  }
+
+  function refreshDownloadQueue() {
+    apiFetch('/admin/api/models/downloads');
+  }
+
+  function cancelQueuedDownload(provider, repoId) {
+    apiPost('/admin/api/models/download/cancel', { provider: provider, repo_id: repoId });
+    setTimeout(refreshDownloadQueue, 150);
+  }
+
+  function clearFinishedDownloadTasks() {
+    apiPost('/admin/api/models/downloads/clear-finished', {});
+  }
+
+  function dismissDownloadReminder(provider, repoId) {
+    const body = provider && repoId ? { provider: provider, repo_id: repoId } : {};
+    apiPost('/admin/api/models/download/reminders/dismiss', body);
+    setTimeout(refreshDownloadQueue, 150);
+  }
+
+  function dismissDownloadReminders() {
+    dismissDownloadReminder(null, null);
+  }
+
+  function readdDownloadReminder(provider, repoId) {
+    if (provider === 'modelscope') {
+      apiPost('/admin/api/models/ms/download', { repo_id: repoId });
+    } else {
+      startDownload(repoId, null);
+    }
+    dismissDownloadReminder(provider, repoId);
+  }
+
+  function readdPublicDownloadReminders() {
+    (downloadQueueSnapshot.recovery_reminders || [])
+      .filter(reminder => !reminder.used_credential)
+      .forEach(reminder => readdDownloadReminder(reminder.provider, reminder.repo_id));
+  }
+
+  function prepareCredentialDownloadReminder(provider, repoId) {
+    switchDlSource('hf');
+    document.getElementById('search-hf-query').value = repoId;
+    const token = document.getElementById('search-hf-token');
+    token.focus();
+    const dict = I18N[currentLang] || I18N.en;
+    showToast(dict.download_token_prompt || 'Enter the Hugging Face token, then add the task again.', 'info');
+  }
+
   // ── ModelScope Download ──
   function startMsDownload() {
     const dict = I18N[currentLang] || I18N.en;
     const repoId = document.getElementById('dl-ms-repo-id').value.trim();
     if (!repoId) { showToast(dict.ms_repo_id || 'Please enter a ModelScope Repo ID.', 'info'); return; }
-    const btn = document.getElementById('dl-ms-download-btn');
-    btn.disabled = true; btn.textContent = (dict.download_btn_downloading || 'Downloading...');
-    document.getElementById('dl-ms-progress').style.display = '';
-    document.getElementById('dl-ms-progress-text').textContent = (dict.ms_starting || 'Starting download from ModelScope...');
-    document.getElementById('dl-ms-progress-bar').style.width = '0%';
-
-    // Start download via Rust bridge (avoids WKWebView fetch restrictions)
-    window.__MS_DL_REPO__ = repoId;
-    window.__MS_DL_BTN__ = btn;
     apiPost('/admin/api/models/ms/download', { repo_id: repoId });
+    setTimeout(refreshDownloadQueue, 150);
   }
 
-  function startDownload(repoId) {
+  function startDownload(repoId, explicitToken) {
     const dict = I18N[currentLang] || I18N.en;
     if (!repoId) { showToast(dict.enter_repo_id || 'Please enter a Repo ID.', 'info'); return; }
-    const token = document.getElementById('search-hf-token').value.trim();
-    const progress = document.getElementById('dl-progress');
-    clearTimeout(window.__HF_DL_RESET__);
-    huggingFaceProgressRepoId = repoId;
-    attachHuggingFaceDownloadProgress();
-    progress.style.display = 'block';
-    document.getElementById('dl-progress-icon').style.animation = 'spin 1s linear infinite';
-    document.getElementById('dl-progress-icon').textContent = '↻';
-    {
-      const dict = I18N[currentLang] || I18N.en;
-      const startMsg = (dict.model_downloading_start || 'Downloading {name}...').replace('{name}', repoId);
-      document.getElementById('dl-progress-text').textContent = startMsg;
-    }
-    document.getElementById('dl-progress-bar').style.width = '0%';
+    const token = explicitToken === null
+      ? ''
+      : (explicitToken || document.getElementById('search-hf-token').value.trim());
     const payload = JSON.stringify({ repo_id: repoId, token: token || null });
     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.downloadModel) {
       window.webkit.messageHandlers.downloadModel.postMessage(payload);
+      setTimeout(refreshDownloadQueue, 150);
     }
   }
 
-  function onDownloadProgress(pct, filename) {
-    // Rust (HfProgress) sends the raw filename plus an overall
-    // percent; dashboard formats the localized message. Keeps the
-    // user visible string consistent across en / zh / zh-Hant / ja / ko.
-    const dict = I18N[currentLang] || I18N.en;
-    document.getElementById('dl-progress-bar').style.width = pct + '%';
-    const template = dict.model_downloading_file || 'Downloading {name}... {pct}%';
-    const text = template.replace('{name}', filename || '').replace('{pct}', Math.round(pct));
-    document.getElementById('dl-progress-text').textContent = text;
+  function onDownloadProgress(provider, repoId, pct, filename) {
+    const task = downloadTask(provider, repoId);
+    if (task) {
+      task.progress_pct = pct;
+      task.current_file = filename;
+      renderDownloadQueue(downloadQueueSnapshot);
+    }
   }
 
-  let activeHuggingFaceSearchRepoId = null;
-  let activeHuggingFaceSearchButton = null;
-  let completedHuggingFaceSearchRepoId = null;
-  let huggingFaceProgressRepoId = null;
   let nextHuggingFaceSearchRequestId = 0;
   let activeHuggingFaceSearchRequestId = null;
   let huggingFaceSearchDebounceTimer = null;
@@ -6866,145 +7078,48 @@
     }) || null;
   }
 
-  function parkHuggingFaceDownloadProgress() {
-    const home = document.getElementById('hf-progress-home');
-    const progress = document.getElementById('dl-progress');
-    if (home && progress && progress.parentElement !== home) {
-      home.appendChild(progress);
-    }
-  }
-
-  function attachHuggingFaceDownloadProgress() {
-    const progress = document.getElementById('dl-progress');
-    const results = document.getElementById('search-results');
-    if (!progress || !results || !huggingFaceProgressRepoId) return;
-    const query = document.getElementById('search-hf-query');
-    if (!query || !query.value.trim()) {
-      parkHuggingFaceDownloadProgress();
-      return;
-    }
-    const entry = huggingFaceSearchResultEntry(huggingFaceProgressRepoId);
-    if (entry) {
-      entry.appendChild(progress);
-    } else {
-      results.prepend(progress);
-    }
-  }
-
-  function setSearchResultCompletedState(button, completed) {
-    if (!button) return;
-    const icon = button.querySelector('.download-button-icon');
-    button.dataset.sessionCompleted = completed ? 'true' : 'false';
-    if (icon) icon.style.display = completed ? 'none' : '';
-    setSearchResultDownloadState(button, false);
-  }
-
-  function clearCompletedHuggingFaceSearchState() {
-    if (!completedHuggingFaceSearchRepoId) return;
-    const completedRepoId = completedHuggingFaceSearchRepoId;
-    completedHuggingFaceSearchRepoId = null;
-    const entry = huggingFaceSearchResultEntry(completedRepoId);
-    setSearchResultCompletedState(
-      entry && entry.querySelector('.search-result-dl'),
-      false
-    );
-    if (!activeHuggingFaceSearchRepoId && huggingFaceProgressRepoId === completedRepoId) {
-      clearTimeout(window.__HF_DL_RESET__);
-      document.getElementById('dl-progress').style.display = 'none';
-      huggingFaceProgressRepoId = null;
-      parkHuggingFaceDownloadProgress();
-    }
-  }
+  function clearCompletedHuggingFaceSearchState() {}
 
   function setSearchResultDownloadState(button, downloading) {
     if (!button) return;
     const dict = I18N[currentLang] || I18N.en;
     const label = button.querySelector('span');
-    const completed = button.dataset.sessionCompleted === 'true';
-    button.disabled = downloading || completed || button.dataset.idleDisabled === 'true';
+    button.disabled = downloading || button.dataset.idleDisabled === 'true';
     if (label) {
       label.textContent = downloading
         ? (dict.download_btn_downloading || 'Downloading...')
-        : completed
-          ? (dict.local_model_completed || '✓ Completed')
-          : (button.dataset.idleLabel || dict.download || 'Download');
+        : (button.dataset.idleLabel || dict.download || 'Download');
     }
   }
 
-  function finishSearchResultDownloadState() {
-    document.querySelectorAll('.search-result-dl:disabled').forEach(button => {
-      setSearchResultDownloadState(button, false);
+  function refreshSearchResultDownloadStates() {
+    document.querySelectorAll('.search-result-entry').forEach(entry => {
+      const task = downloadTask('huggingface', entry.dataset.repoId || '');
+      const button = entry.querySelector('.search-result-dl');
+      if (button && task && task.status === 'completed') {
+        const dict = I18N[currentLang] || I18N.en;
+        button.dataset.idleLabel = dict.local_model_exists || '✓ Exists';
+        button.dataset.idleDisabled = 'true';
+      }
+      setSearchResultDownloadState(button, isActiveDownload(task));
     });
-    setSearchResultDownloadState(activeHuggingFaceSearchButton, false);
-    activeHuggingFaceSearchRepoId = null;
-    activeHuggingFaceSearchButton = null;
   }
 
   function onDownloadComplete(jsonStr) {
     let result = {};
     try { result = JSON.parse(jsonStr); } catch(e) {}
-    const progress = document.getElementById('dl-progress');
-    const repoId = result.repo_id || activeHuggingFaceSearchRepoId || '';
-    const completedButton = activeHuggingFaceSearchButton;
-    finishSearchResultDownloadState();
+    const repoId = result.repo_id || '';
+    const dict = I18N[currentLang] || I18N.en;
     if (result.success) {
-      const dict = I18N[currentLang] || I18N.en;
-      completedHuggingFaceSearchRepoId = repoId;
-      huggingFaceProgressRepoId = repoId;
-      if (completedButton) {
-        completedButton.dataset.idleLabel = dict.local_model_exists || '✓ Exists';
-        completedButton.dataset.idleDisabled = 'true';
-      }
-      setSearchResultCompletedState(completedButton, true);
-      attachHuggingFaceDownloadProgress();
-      document.getElementById('dl-progress-bar').style.width = '100%';
-      document.getElementById('dl-progress-icon').style.animation = 'none';
-      document.getElementById('dl-progress-icon').textContent = '✓';
       const localized = (dict.model_download_complete || 'Model "{name}" downloaded successfully.').replace('{name}', repoId);
-      document.getElementById('dl-progress-text').textContent = localized;
-      // Refresh model list
+      showToast(localized, 'success');
       syncModelList();
-      // Auto-hide the progress card after a short success-dwell so
-      // the section goes back to its default "empty & ready for
-      // next download" state. A previous download's repo id and
-      // 100% bar would otherwise stay visible indefinitely.
-      clearTimeout(window.__HF_DL_RESET__);
-      window.__HF_DL_RESET__ = setTimeout(() => {
-        progress.style.display = 'none';
-        document.getElementById('dl-progress-bar').style.width = '0%';
-        document.getElementById('dl-progress-icon').style.animation = 'spin 1s linear infinite';
-        document.getElementById('dl-progress-icon').textContent = '↻';
-        if (huggingFaceProgressRepoId === repoId) {
-          huggingFaceProgressRepoId = null;
-          parkHuggingFaceDownloadProgress();
-        }
-      }, 10000);
     } else {
-      const dict = I18N[currentLang] || I18N.en;
-      let errMsg;
-      if (result.code) {
-        // Structured error from Rust (e.g. repo_not_found) — prefer
-        // the localized dictionary entry over the raw fallback.
-        errMsg = localizeErrorResult(result);
-      } else {
-        errMsg = result.error || (dict.download_generic_failed || 'Download failed.');
-      }
-      // Legacy "already exists" uses its own dedicated i18n key and
-      // toast layout. Preserve that flow.
-      if ((result.error || '').includes('already exists')) {
-        const msg = (dict.model_exists_locally || 'Model "{name}" already exists locally.').replace('{name}', repoId);
-        showToast(msg, 'warn');
-        progress.style.display = 'none';
-        huggingFaceProgressRepoId = null;
-        parkHuggingFaceDownloadProgress();
-      } else {
-        document.getElementById('dl-progress-icon').style.animation = 'none';
-        document.getElementById('dl-progress-icon').textContent = '✗';
-        document.getElementById('dl-progress-text').textContent = errMsg;
-        document.getElementById('dl-progress-bar').style.width = '0%';
-        showToast(errMsg, 'warn');
-      }
+      const errMsg = result.code ? localizeErrorResult(result)
+        : (result.error || dict.download_generic_failed || 'Download failed.');
+      showToast(errMsg, 'warn');
     }
+    refreshDownloadQueue();
   }
 
   // ── HuggingFace Search ──
@@ -7024,7 +7139,6 @@
 
   function clearHuggingFaceSearchResults() {
     clearCompletedHuggingFaceSearchState();
-    parkHuggingFaceDownloadProgress();
     document.getElementById('search-results').replaceChildren();
   }
 
@@ -7066,9 +7180,7 @@
     const sort = document.getElementById('search-hf-sort').value;
     const token = document.getElementById('search-hf-token').value.trim();
     const resultsDiv = document.getElementById('search-results');
-    parkHuggingFaceDownloadProgress();
     resultsDiv.innerHTML = '<div style="text-align:center;padding:16px;color:var(--text-secondary);font-size:12px;">Searching...</div>';
-    attachHuggingFaceDownloadProgress();
     const requestId = ++nextHuggingFaceSearchRequestId;
     activeHuggingFaceSearchRequestId = requestId;
     activeHuggingFaceSearchShowsErrorToast = !automatic;
@@ -7090,17 +7202,16 @@
     try { models = JSON.parse(jsonStr); } catch(e) {}
     const resultsDiv = document.getElementById('search-results');
     const dict = I18N[currentLang] || I18N.en;
-    parkHuggingFaceDownloadProgress();
     if (!models.length) {
       resultsDiv.innerHTML = '<div style="text-align:center;padding:16px;color:var(--text-secondary);font-size:12px;">No results found.</div>';
-      attachHuggingFaceDownloadProgress();
       return;
     }
     let html = '';
     models.forEach(function(m) {
       const repoId = m.id || m.modelId || '';
-      const isDownloading = repoId === activeHuggingFaceSearchRepoId;
-      const isCompleted = repoId === completedHuggingFaceSearchRepoId;
+      const task = downloadTask('huggingface', repoId);
+      const isDownloading = isActiveDownload(task);
+      const isCompleted = task && task.status === 'completed';
       const localState = m.local_state || 'available';
       const stateLabels = {
         exists: dict.local_model_exists || '✓ Exists',
@@ -7136,12 +7247,7 @@
         + '</div></div>';
     });
     resultsDiv.innerHTML = html;
-    if (activeHuggingFaceSearchRepoId) {
-      const activeEntry = huggingFaceSearchResultEntry(activeHuggingFaceSearchRepoId);
-      activeHuggingFaceSearchButton = (activeEntry && activeEntry.querySelector('.search-result-dl'))
-        || activeHuggingFaceSearchButton;
-    }
-    attachHuggingFaceDownloadProgress();
+    refreshSearchResultDownloadStates();
   }
 
   function onSearchError(requestId, jsonStr) {
@@ -7155,24 +7261,15 @@
       ? localizeErrorResult(result)
       : (result.error || dict.download_generic_failed || 'HuggingFace search failed.');
     const resultsDiv = document.getElementById('search-results');
-    parkHuggingFaceDownloadProgress();
     const error = document.createElement('div');
     error.className = 'hf-search-message error';
     error.textContent = message;
     resultsDiv.replaceChildren(error);
-    attachHuggingFaceDownloadProgress();
     if (showErrorToast) showToast(message, 'warn');
   }
 
   function downloadSearchResult(repoId, button) {
-    if (activeHuggingFaceSearchRepoId) {
-      const dict = I18N[currentLang] || I18N.en;
-      showToast(dict.download_in_progress || 'A HuggingFace download is already in progress.', 'info');
-      return;
-    }
     clearCompletedHuggingFaceSearchState();
-    activeHuggingFaceSearchRepoId = repoId;
-    activeHuggingFaceSearchButton = button;
     setSearchResultDownloadState(button, true);
     startDownload(repoId);
   }
@@ -10517,65 +10614,15 @@
       } else if (path === '/admin/api/endpoints') {
         renderEndpoints(jsonStr);
       } else if (path === '/admin/api/models/ms/download') {
-        // MS download request result
-        if (jsonStr && jsonStr.includes('already exists')) {
-          const msg = (dict.model_exists_locally || 'Model "{name}" already exists locally.').replace('{name}', window.__MS_DL_REPO__ || '');
-          showToast(msg, 'warn');
-          if (window.__MS_DL_BTN__) { window.__MS_DL_BTN__.disabled = false; window.__MS_DL_BTN__.textContent = (dict.download || 'Download'); }
-          document.getElementById('dl-ms-progress').style.display = 'none';
-        } else {
-          // Start polling progress
-          window.__MS_DL_POLL__ = setInterval(() => { apiFetch('/admin/api/models/downloads'); }, 2000);
-        }
+        const result = JSON.parse(jsonStr || '{}');
+        if (!result.success) showToast(result.error || dict.download_generic_failed || 'Download failed.', 'warn');
+        refreshDownloadQueue();
       } else if (path === '/admin/api/models/downloads') {
-        // MS download progress poll
-        try {
-          const data = JSON.parse(jsonStr);
-          const repoId = window.__MS_DL_REPO__;
-          if (repoId && Array.isArray(data)) {
-            const dl = data.find(d => d.repo_id === repoId);
-            if (dl) {
-              document.getElementById('dl-ms-progress-bar').style.width = dl.progress_pct + '%';
-              let statusText;
-              if (dl.status === 'completed') {
-                statusText = (dict.model_download_complete || 'Model "{name}" downloaded successfully.').replace('{name}', repoId);
-              } else if (dl.status === 'failed') {
-                // Prefer localized message when backend emitted an error_code
-                statusText = localizeErrorResult({
-                  code: dl.error_code,
-                  error: dl.error,
-                  repo_id: repoId,
-                });
-              } else {
-                statusText = (dict.model_downloading_start || 'Downloading {name}...').replace('{name}', repoId) + ' ' + Math.round(dl.progress_pct) + '%';
-              }
-              document.getElementById('dl-ms-progress-text').textContent = statusText;
-              if (dl.status === 'failed') {
-                showToast(statusText, 'warn');
-              }
-              if (dl.status !== 'downloading') {
-                clearInterval(window.__MS_DL_POLL__);
-                if (window.__MS_DL_BTN__) { window.__MS_DL_BTN__.disabled = false; window.__MS_DL_BTN__.textContent = (dict.download || 'Download'); }
-                document.getElementById('dl-ms-progress-icon').style.animation = 'none';
-                if (dl.status === 'completed') {
-                  refreshModelList();
-                  // Mirror HF's auto-hide so the MS section resets
-                  // back to an empty state and the previous repo id
-                  // + filled progress bar don't stick around.
-                  clearTimeout(window.__MS_DL_RESET__);
-                  window.__MS_DL_RESET__ = setTimeout(() => {
-                    document.getElementById('dl-ms-progress').style.display = 'none';
-                    document.getElementById('dl-ms-progress-bar').style.width = '0%';
-                    document.getElementById('dl-ms-progress-icon').style.animation = 'spin 1s linear infinite';
-                    document.getElementById('dl-ms-progress-icon').textContent = '↻';
-                    const msInput = document.getElementById('dl-ms-repo-id');
-                    if (msInput) msInput.value = '';
-                  }, 10000);
-                }
-              }
-            }
-          }
-        } catch(e) {}
+        renderDownloadQueue(JSON.parse(jsonStr || '{}'));
+      } else if (path === '/admin/api/models/download/cancel'
+          || path === '/admin/api/models/downloads/clear-finished'
+          || path === '/admin/api/models/download/reminders/dismiss') {
+        refreshDownloadQueue();
       } else if (path === '/admin/api/prompt-lookup/clear') {
         const result = JSON.parse(jsonStr || '{}');
         if (result.success) {
@@ -11076,6 +11123,8 @@
     selectAgentGuide('hermes');
     setupFixedTooltips();
     initStatusPolling();
+    refreshDownloadQueue();
+    window.__DOWNLOAD_QUEUE_POLL__ = setInterval(refreshDownloadQueue, 1500);
   })();
 </script>
 <div class="toast" id="toast-msg"><span class="toast-icon" id="toast-icon"></span><span id="toast-text"></span></div>

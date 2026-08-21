@@ -280,6 +280,7 @@ public struct ModelDownloadStartResponse: Codable, Equatable, Sendable {
     public var repoID: String
     public var error: String?
     public var code: String?
+    public var queuePosition: Int? = nil
 
     enum CodingKeys: String, CodingKey {
         case success
@@ -287,6 +288,7 @@ public struct ModelDownloadStartResponse: Codable, Equatable, Sendable {
         case repoID = "repo_id"
         case error
         case code
+        case queuePosition = "queue_position"
     }
 }
 
@@ -299,6 +301,10 @@ public struct ModelDownloadStatus: Codable, Equatable, Sendable {
     public var commitSHA: String?
     public var error: String?
     public var errorCode: String?
+    public var queuePosition: Int? = nil
+    public var totalBytes: Int64? = nil
+    public var remainingBytes: Int64? = nil
+    public var enqueuedAt: Date? = nil
 
     enum CodingKeys: String, CodingKey {
         case repoID = "repo_id"
@@ -309,6 +315,26 @@ public struct ModelDownloadStatus: Codable, Equatable, Sendable {
         case commitSHA = "commit_sha"
         case error
         case errorCode = "error_code"
+        case queuePosition = "queue_position"
+        case totalBytes = "total_bytes"
+        case remainingBytes = "remaining_bytes"
+        case enqueuedAt = "enqueued_at"
+    }
+}
+
+public struct ModelDownloadQueueSnapshot: Codable, Equatable, Sendable {
+    public var maxConcurrent: Int
+    public var activeCount: Int
+    public var queuedCount: Int
+    public var tasks: [ModelDownloadStatus]
+    public var recoveryReminders: [ModelDownloadRecoveryReminder]
+
+    enum CodingKeys: String, CodingKey {
+        case maxConcurrent = "max_concurrent"
+        case activeCount = "active_count"
+        case queuedCount = "queued_count"
+        case tasks
+        case recoveryReminders = "recovery_reminders"
     }
 }
 
@@ -317,7 +343,31 @@ private struct ModelDownloadResumePlan {
     var resumedBytesByPath: [String: Int64] = [:]
 }
 
+private struct QueuedModelDownload: Sendable {
+    var provider: ModelRepositoryProvider
+    var repoID: String
+    var token: String?
+    var progress: @Sendable (ModelDownloadProgress) async -> Void
+    var order: Int
+    var enqueuedAt: Date
+}
+
+private enum DownloadPreparationState: Equatable, Sendable {
+    case awaiting
+    case preflighting
+    case ready
+}
+
+private struct DownloadQueuePreflightEstimate: Sendable {
+    var commitSHA: String
+    var totalBytes: Int64
+    var remainingBytes: Int64
+    var observedBytesByPath: [String: Int64]
+}
+
 public actor ModelDownloadService {
+    public static let defaultMaxConcurrentDownloads = 3
+
     private let rootURL: URL
     private let httpClient: any ModelDownloadHTTPClient
     private let huggingFaceEndpoint: URL
@@ -326,8 +376,24 @@ public actor ModelDownloadService {
     private let downloader: any ModelFileDownloading
     private let metadataPreflight: any ModelMetadataPreflighting
     private let telemetryLogger: @Sendable (String) -> Void
+    private let maxConcurrentDownloads: Int
+    private let availableCapacityProvider: @Sendable (URL) -> Int64?
+    private let reminderStore: ModelDownloadQueueReminderStore
     private var statuses: [String: ModelDownloadStatus] = [:]
-    private var tasks: [String: Task<ModelDownloadCompletion, Never>] = [:]
+    private var activeTasks: [String: Task<ModelDownloadCompletion, Never>] = [:]
+    private var pendingDownloads: [QueuedModelDownload] = []
+    private var preparationStates: [String: DownloadPreparationState] = [:]
+    private var activePreflightKey: String?
+    private var activePreflightTask: Task<Void, Never>?
+    private var completionResults: [String: ModelDownloadCompletion] = [:]
+    private var completionWaiters: [String: [CheckedContinuation<ModelDownloadCompletion, Never>]] = [:]
+    private var recoveryReminders: [String: ModelDownloadRecoveryReminder] = [:]
+    private var currentReminders: [String: ModelDownloadRecoveryReminder] = [:]
+    private var shutdownReminderKeys: Set<String> = []
+    private var isShuttingDown = false
+    private var diskReservations: [String: Int64] = [:]
+    private var reservationObservedBytes: [String: [String: Int64]] = [:]
+    private var nextQueueOrder = 0
 
     public init(
         rootURL: URL = FileManager.default.homeDirectoryForCurrentUser
@@ -338,6 +404,8 @@ public actor ModelDownloadService {
         modelScopeGitEndpoint: URL = URL(string: "https://www.modelscope.cn")!,
         metadataPreflight: any ModelMetadataPreflighting = IronMLXModelMetadataPreflight(),
         fileDownloader: (any ModelFileDownloading)? = nil,
+        maxConcurrentDownloads: Int = ModelDownloadService.defaultMaxConcurrentDownloads,
+        availableCapacityProvider: (@Sendable (URL) -> Int64?)? = nil,
         telemetryLogger: @escaping @Sendable (String) -> Void = {
             IronMLXAppLogger.info($0)
         }
@@ -352,14 +420,25 @@ public actor ModelDownloadService {
             modelScopeGitEndpoint: modelScopeGitEndpoint
         )
         store = ModelDownloadStore(rootURL: rootURL)
+        reminderStore = ModelDownloadQueueReminderStore(rootURL: rootURL)
         downloader = fileDownloader ?? ProviderModelFileDownloader(httpClient: httpClient)
         self.metadataPreflight = metadataPreflight
+        self.maxConcurrentDownloads = max(1, maxConcurrentDownloads)
+        self.availableCapacityProvider = availableCapacityProvider ?? { url in
+            Self.systemAvailableCapacity(at: url)
+        }
         self.telemetryLogger = telemetryLogger
 
-        for journal in store.recoverInterruptedJournals() {
-            let key = Self.taskKey(provider: journal.provider, repoID: journal.repoID)
-            statuses[key] = Self.status(from: journal)
+        for reminder in reminderStore.load() {
+            let key = Self.taskKey(provider: reminder.provider, repoID: reminder.repoID)
+            recoveryReminders[key] = reminder
+            nextQueueOrder = max(nextQueueOrder, reminder.queueOrder + 1)
         }
+
+        // Journals are durable integrity/recovery records, not the current App
+        // session's queue history. Recover interrupted writes on launch without
+        // flooding the queue UI with every previously completed download.
+        _ = store.recoverInterruptedJournals()
     }
 
     public func searchHuggingFace(
@@ -447,7 +526,20 @@ public actor ModelDownloadService {
         token: String?,
         progress: @escaping @Sendable (ModelDownloadProgress) async -> Void = { _ in }
     ) async -> ModelDownloadCompletion {
-        await download(
+        await downloadAndWait(
+            provider: .huggingFace,
+            repoID: repoID,
+            token: token,
+            progress: progress
+        )
+    }
+
+    public func startHuggingFaceDownload(
+        repoID: String,
+        token: String?,
+        progress: @escaping @Sendable (ModelDownloadProgress) async -> Void = { _ in }
+    ) -> ModelDownloadStartResponse {
+        enqueueDownload(
             provider: .huggingFace,
             repoID: repoID,
             token: token,
@@ -456,7 +548,140 @@ public actor ModelDownloadService {
     }
 
     public func startModelScopeDownload(repoID: String) async -> ModelDownloadStartResponse {
-        let repoID = repoID.trimmingCharacters(in: .whitespacesAndNewlines)
+        enqueueDownload(
+            provider: .modelScope,
+            repoID: repoID,
+            token: nil,
+            progress: { _ in }
+        )
+    }
+
+    public func cancelDownload(provider: ModelRepositoryProvider, repoID: String) -> Bool {
+        let key = Self.taskKey(provider: provider, repoID: repoID)
+        if activePreflightKey == key {
+            activePreflightTask?.cancel()
+            return true
+        }
+        if let index = pendingDownloads.firstIndex(where: { Self.taskKey(provider: $0.provider, repoID: $0.repoID) == key }) {
+            let request = pendingDownloads.remove(at: index)
+            preparationStates[key] = nil
+            releaseDiskReservation(key: key)
+            setFailureStatus(
+                key: key,
+                provider: request.provider,
+                repoID: request.repoID,
+                journal: nil,
+                phase: .cancelled,
+                code: "cancelled",
+                message: "Download cancelled."
+            )
+            finishQueuedTask(
+                key: key,
+                result: failure(message: "Download cancelled.", code: "cancelled", repoID: request.repoID)
+            )
+            refreshQueuePositions()
+            pumpPreflightQueue()
+            pumpDownloadQueue()
+            return true
+        }
+        guard let task = activeTasks[key] else {
+            return false
+        }
+        task.cancel()
+        return true
+    }
+
+    public func cancelAllDownloads() {
+        isShuttingDown = true
+        shutdownReminderKeys.formUnion(currentReminders.keys)
+        persistReminderState()
+        activePreflightTask?.cancel()
+        for task in activeTasks.values {
+            task.cancel()
+        }
+    }
+
+    public func downloadStatuses() -> [ModelDownloadStatus] {
+        sortedStatuses()
+    }
+
+    public func downloadQueueSnapshot() -> ModelDownloadQueueSnapshot {
+        ModelDownloadQueueSnapshot(
+            maxConcurrent: maxConcurrentDownloads,
+            activeCount: activeTasks.count,
+            queuedCount: pendingDownloads.count,
+            tasks: sortedStatuses(),
+            recoveryReminders: recoveryReminders.values.sorted { $0.queueOrder < $1.queueOrder }
+        )
+    }
+
+    @discardableResult
+    public func clearFinishedDownloads() -> Int {
+        let finishedKeys = statuses.compactMap { key, status in
+            Self.isActiveStatus(status.status) ? nil : key
+        }
+        for key in finishedKeys {
+            statuses[key] = nil
+            completionResults[key] = nil
+        }
+        return finishedKeys.count
+    }
+
+    public func dismissRecoveryReminders(provider: ModelRepositoryProvider?, repoID: String?) {
+        if let provider, let repoID {
+            recoveryReminders[Self.taskKey(provider: provider, repoID: repoID)] = nil
+        } else if provider == nil, repoID == nil {
+            recoveryReminders.removeAll()
+        } else {
+            return
+        }
+        persistReminderState()
+    }
+
+    private func downloadAndWait(
+        provider: ModelRepositoryProvider,
+        repoID rawRepoID: String,
+        token: String?,
+        progress: @escaping @Sendable (ModelDownloadProgress) async -> Void
+    ) async -> ModelDownloadCompletion {
+        let response = enqueueDownload(
+            provider: provider,
+            repoID: rawRepoID,
+            token: token,
+            progress: progress
+        )
+        guard response.success else {
+            return failure(
+                message: response.error ?? "Download could not be queued.",
+                code: response.code,
+                repoID: response.repoID
+            )
+        }
+        let key = Self.taskKey(provider: provider, repoID: response.repoID)
+        if let result = completionResults[key] {
+            return result
+        }
+        return await withCheckedContinuation { continuation in
+            completionWaiters[key, default: []].append(continuation)
+        }
+    }
+
+    private func enqueueDownload(
+        provider: ModelRepositoryProvider,
+        repoID rawRepoID: String,
+        token: String?,
+        progress: @escaping @Sendable (ModelDownloadProgress) async -> Void
+    ) -> ModelDownloadStartResponse {
+        let repoID = rawRepoID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !isShuttingDown else {
+            return ModelDownloadStartResponse(
+                success: false,
+                status: "error",
+                repoID: repoID,
+                error: "The application is shutting down.",
+                code: "app_shutting_down"
+            )
+        }
         guard isValidRepoID(repoID) else {
             return ModelDownloadStartResponse(
                 success: false,
@@ -466,92 +691,444 @@ public actor ModelDownloadService {
                 code: "invalid_repo_id"
             )
         }
-        let key = Self.taskKey(provider: .modelScope, repoID: repoID)
-        guard tasks[key] == nil else {
+        let key = Self.taskKey(provider: provider, repoID: repoID)
+        if activeTasks[key] != nil || preparationStates[key] != nil {
             return ModelDownloadStartResponse(
-                success: false,
-                status: "error",
+                success: true,
+                status: statuses[key]?.status ?? ModelDownloadPhase.queued.rawValue,
                 repoID: repoID,
-                error: "\(repoID) is already downloading",
-                code: "download_in_progress"
+                error: nil,
+                code: "download_already_queued",
+                queuePosition: statuses[key]?.queuePosition
             )
         }
-        let task = Task {
-            await self.executeDownload(
-                provider: .modelScope,
-                repoID: repoID,
-                token: nil,
-                progress: { _ in }
-            )
-        }
-        tasks[key] = task
-        Task {
-            _ = await task.value
-            self.clearTask(key)
-        }
+
+        completionResults[key] = nil
+        recoveryReminders[key] = nil
+        let credential = token?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let request = QueuedModelDownload(
+            provider: provider,
+            repoID: repoID,
+            token: credential?.isEmpty == false ? credential : nil,
+            progress: progress,
+            order: nextQueueOrder,
+            enqueuedAt: Date()
+        )
+        nextQueueOrder += 1
+        pendingDownloads.append(request)
+        preparationStates[key] = .awaiting
+        setStatus(
+            key: key,
+            provider: provider,
+            repoID: repoID,
+            phase: .queued,
+            enqueuedAt: request.enqueuedAt
+        )
+        currentReminders[key] = ModelDownloadRecoveryReminder(
+            provider: provider,
+            repoID: repoID,
+            queueOrder: request.order,
+            previousStatus: ModelDownloadPhase.queued.rawValue,
+            usedCredential: request.token != nil,
+            enqueuedAt: request.enqueuedAt
+        )
+        refreshQueuePositions()
+        persistReminderState()
+        pumpPreflightQueue()
+        pumpDownloadQueue()
         return ModelDownloadStartResponse(
             success: true,
-            status: "accepted",
+            status: statuses[key]?.status ?? ModelDownloadPhase.queued.rawValue,
             repoID: repoID,
             error: nil,
-            code: nil
+            code: nil,
+            queuePosition: statuses[key]?.queuePosition
         )
     }
 
-    public func cancelDownload(provider: ModelRepositoryProvider, repoID: String) -> Bool {
-        let key = Self.taskKey(provider: provider, repoID: repoID)
-        guard let task = tasks[key] else {
+    private func pumpPreflightQueue() {
+        guard !isShuttingDown,
+              activePreflightTask == nil,
+              let request = pendingDownloads.first(where: {
+                  preparationStates[Self.taskKey(provider: $0.provider, repoID: $0.repoID)] == .awaiting
+              })
+        else {
+            return
+        }
+        let key = Self.taskKey(provider: request.provider, repoID: request.repoID)
+        preparationStates[key] = .preflighting
+        activePreflightKey = key
+        setStatus(
+            key: key,
+            provider: request.provider,
+            repoID: request.repoID,
+            phase: .preflighting,
+            enqueuedAt: request.enqueuedAt
+        )
+        updateCurrentReminderStatus(key: key, status: ModelDownloadPhase.preflighting.rawValue)
+        refreshQueuePositions()
+        let task = Task {
+            do {
+                let estimate = try await self.preflightQueuedDownload(request)
+                self.finishQueuePreflight(key: key, estimate: estimate, error: nil)
+            } catch {
+                self.finishQueuePreflight(key: key, estimate: nil, error: error)
+            }
+        }
+        activePreflightTask = task
+    }
+
+    private func preflightQueuedDownload(
+        _ request: QueuedModelDownload
+    ) async throws -> DownloadQueuePreflightEstimate {
+        try Task.checkCancellation()
+        let repository = try await resolver.resolve(
+            provider: request.provider,
+            repoID: request.repoID,
+            token: request.token
+        )
+        let staging = try store.stagingSnapshotURL(
+            provider: request.provider,
+            repoID: request.repoID,
+            commitSHA: repository.commitSHA
+        )
+        var totalBytes: Int64 = 0
+        var remainingBytes: Int64 = 0
+        var observedBytesByPath: [String: Int64] = [:]
+        let downloadableFiles = repository.files.filter { file in
+            file.isWeight || Self.isRuntimeMetadata(file)
+        }
+        for file in downloadableFiles {
+            try Task.checkCancellation()
+            guard file.size >= 0 else {
+                throw DownloadFailure(
+                    repoID: request.repoID,
+                    code: "repo_size_invalid",
+                    message: "Repository \(request.repoID) reports an invalid file size."
+                )
+            }
+            let totalResult = totalBytes.addingReportingOverflow(file.size)
+            guard !totalResult.overflow else {
+                throw DownloadFailure(
+                    repoID: request.repoID,
+                    code: "repo_size_overflow",
+                    message: "Repository \(request.repoID) reports an invalid total file size."
+                )
+            }
+            totalBytes = totalResult.partialValue
+
+            var existing: Int64 = 0
+            if let sha256 = file.sha256,
+               sha256.count == 64,
+               sha256.allSatisfy(\.isHexDigit)
+            {
+                let destination = try ModelSnapshotVerifier.safeFileURL(path: file.path, beneath: staging)
+                existing = recoverableBytes(
+                    destination: destination,
+                    identity: ModelPartialIdentity(
+                        provider: request.provider,
+                        repoID: request.repoID,
+                        commitSHA: repository.commitSHA,
+                        path: file.path,
+                        expectedSize: file.size,
+                        expectedSHA256: sha256,
+                        etag: file.etag
+                    )
+                )
+            }
+            observedBytesByPath[file.path] = existing
+            let remainingResult = remainingBytes.addingReportingOverflow(max(0, file.size - existing))
+            guard !remainingResult.overflow else {
+                throw DownloadFailure(
+                    repoID: request.repoID,
+                    code: "repo_size_overflow",
+                    message: "Repository \(request.repoID) reports an invalid total file size."
+                )
+            }
+            remainingBytes = remainingResult.partialValue
+        }
+        return DownloadQueuePreflightEstimate(
+            commitSHA: repository.commitSHA,
+            totalBytes: totalBytes,
+            remainingBytes: remainingBytes,
+            observedBytesByPath: observedBytesByPath
+        )
+    }
+
+    private func finishQueuePreflight(
+        key: String,
+        estimate: DownloadQueuePreflightEstimate?,
+        error: (any Error)?
+    ) {
+        guard activePreflightKey == key else {
+            return
+        }
+        activePreflightKey = nil
+        activePreflightTask = nil
+        guard let index = pendingDownloads.firstIndex(where: {
+            Self.taskKey(provider: $0.provider, repoID: $0.repoID) == key
+        }) else {
+            pumpPreflightQueue()
+            return
+        }
+        let request = pendingDownloads[index]
+
+        do {
+            if let error {
+                throw error
+            }
+            guard let estimate else {
+                throw CancellationError()
+            }
+            try reserveDisk(
+                key: key,
+                remainingBytes: estimate.remainingBytes,
+                observedBytesByPath: estimate.observedBytesByPath
+            )
+            preparationStates[key] = .ready
+            setStatus(
+                key: key,
+                provider: request.provider,
+                repoID: request.repoID,
+                phase: .queued,
+                commitSHA: estimate.commitSHA,
+                totalBytes: estimate.totalBytes,
+                remainingBytes: estimate.remainingBytes,
+                enqueuedAt: request.enqueuedAt
+            )
+            updateCurrentReminderStatus(key: key, status: ModelDownloadPhase.queued.rawValue)
+        } catch {
+            pendingDownloads.remove(at: index)
+            preparationStates[key] = nil
+            releaseDiskReservation(key: key)
+            let failure = queuePreflightFailure(error: error, repoID: request.repoID)
+            setFailureStatus(
+                key: key,
+                provider: request.provider,
+                repoID: request.repoID,
+                journal: nil,
+                phase: error is CancellationError ? .cancelled : .rejected,
+                code: failure.code,
+                message: failure.error ?? "Download preflight failed."
+            )
+            finishQueuedTask(key: key, result: failure)
+        }
+        refreshQueuePositions()
+        persistReminderState()
+        pumpDownloadQueue()
+        pumpPreflightQueue()
+    }
+
+    private func pumpDownloadQueue() {
+        guard !isShuttingDown else {
+            return
+        }
+        while activeTasks.count < maxConcurrentDownloads,
+              let request = pendingDownloads.first
+        {
+            let key = Self.taskKey(provider: request.provider, repoID: request.repoID)
+            guard preparationStates[key] == .ready else {
+                return
+            }
+            do {
+                try validateDiskReservations()
+            } catch {
+                pendingDownloads.removeFirst()
+                preparationStates[key] = nil
+                releaseDiskReservation(key: key)
+                let result = queuePreflightFailure(error: error, repoID: request.repoID)
+                setFailureStatus(
+                    key: key,
+                    provider: request.provider,
+                    repoID: request.repoID,
+                    journal: nil,
+                    phase: .rejected,
+                    code: result.code,
+                    message: result.error ?? "Insufficient disk space."
+                )
+                finishQueuedTask(key: key, result: result)
+                refreshQueuePositions()
+                continue
+            }
+
+            pendingDownloads.removeFirst()
+            preparationStates[key] = nil
+            refreshQueuePositions()
+            updateCurrentReminderStatus(key: key, status: ModelDownloadPhase.resolving.rawValue)
+            persistReminderState()
+            let task = Task {
+                await self.executeDownload(
+                    provider: request.provider,
+                    repoID: request.repoID,
+                    token: request.token,
+                    progress: request.progress
+                )
+            }
+            activeTasks[key] = task
+            Task {
+                let result = await task.value
+                self.finishActiveDownload(key: key, result: result)
+            }
+        }
+    }
+
+    private func finishActiveDownload(key: String, result: ModelDownloadCompletion) {
+        activeTasks[key] = nil
+        releaseDiskReservation(key: key)
+        finishQueuedTask(key: key, result: result)
+        pumpDownloadQueue()
+        pumpPreflightQueue()
+    }
+
+    private func finishQueuedTask(key: String, result: ModelDownloadCompletion) {
+        completionResults[key] = result
+        if !shutdownReminderKeys.contains(key) {
+            currentReminders[key] = nil
+        }
+        persistReminderState()
+        let waiters = completionWaiters.removeValue(forKey: key) ?? []
+        for waiter in waiters {
+            waiter.resume(returning: result)
+        }
+    }
+
+    private func queuePreflightFailure(error: any Error, repoID: String) -> ModelDownloadCompletion {
+        if error is CancellationError {
+            return failure(message: "Download cancelled.", code: "cancelled", repoID: repoID)
+        }
+        if let failure = error as? DownloadFailure {
+            return self.failure(message: failure.message, code: failure.code, repoID: repoID)
+        }
+        if let resourceError = error as? ModelResourcePreflightError {
+            let code: String
+            switch resourceError {
+            case .insufficientDisk:
+                code = "insufficient_disk"
+            case .insufficientMemory:
+                code = "insufficient_memory"
+            }
+            return failure(message: resourceError.localizedDescription, code: code, repoID: repoID)
+        }
+        return failure(message: error.localizedDescription, code: "download_failed", repoID: repoID)
+    }
+
+    private func reserveDisk(
+        key: String,
+        remainingBytes: Int64,
+        observedBytesByPath: [String: Int64]
+    ) throws {
+        let previous = diskReservations.removeValue(forKey: key) ?? 0
+        defer {
+            if diskReservations[key] == nil, previous > 0 {
+                diskReservations[key] = previous
+            }
+        }
+        let reserved = diskReservations.values.reduce(Int64(0)) { total, value in
+            let result = total.addingReportingOverflow(value)
+            return result.overflow ? Int64.max : result.partialValue
+        }
+        let candidateResult = reserved.addingReportingOverflow(max(0, remainingBytes))
+        let withSafety = candidateResult.partialValue.addingReportingOverflow(ModelResourcePreflight.diskSafetyBytes)
+        let required = candidateResult.overflow || withSafety.overflow ? Int64.max : withSafety.partialValue
+        if let available = availableCapacityProvider(rootURL), required > available {
+            throw ModelResourcePreflightError.insufficientDisk(required: required, available: available)
+        }
+        diskReservations[key] = max(0, remainingBytes)
+        reservationObservedBytes[key] = observedBytesByPath
+    }
+
+    private func validateDiskReservations() throws {
+        let reserved = diskReservations.values.reduce(Int64(0)) { total, value in
+            let result = total.addingReportingOverflow(value)
+            return result.overflow ? Int64.max : result.partialValue
+        }
+        let withSafety = reserved.addingReportingOverflow(ModelResourcePreflight.diskSafetyBytes)
+        let required = withSafety.overflow ? Int64.max : withSafety.partialValue
+        if let available = availableCapacityProvider(rootURL), required > available {
+            throw ModelResourcePreflightError.insufficientDisk(required: required, available: available)
+        }
+    }
+
+    private func adjustDiskReservation(
+        key: String,
+        remainingBytes: Int64,
+        observedBytesByPath: [String: Int64]
+    ) throws {
+        try reserveDisk(
+            key: key,
+            remainingBytes: remainingBytes,
+            observedBytesByPath: observedBytesByPath
+        )
+    }
+
+    private func consumeDiskReservation(key: String, path: String, availableBytes: Int64) {
+        guard var reservation = diskReservations[key] else {
+            return
+        }
+        var observed = reservationObservedBytes[key] ?? [:]
+        let previous = observed[path] ?? 0
+        let current = max(previous, availableBytes)
+        reservation = max(0, reservation - max(0, current - previous))
+        observed[path] = current
+        diskReservations[key] = reservation
+        reservationObservedBytes[key] = observed
+        statuses[key]?.remainingBytes = reservation
+    }
+
+    private func releaseDiskReservation(key: String) {
+        diskReservations[key] = nil
+        reservationObservedBytes[key] = nil
+    }
+
+    private func refreshQueuePositions() {
+        for (index, request) in pendingDownloads.enumerated() {
+            let key = Self.taskKey(provider: request.provider, repoID: request.repoID)
+            statuses[key]?.queuePosition = index + 1
+        }
+        for key in activeTasks.keys {
+            statuses[key]?.queuePosition = nil
+        }
+    }
+
+    private func sortedStatuses() -> [ModelDownloadStatus] {
+        statuses.values.sorted {
+            let lhsActive = Self.isActiveStatus($0.status)
+            let rhsActive = Self.isActiveStatus($1.status)
+            if lhsActive != rhsActive {
+                return lhsActive
+            }
+            if let lhsPosition = $0.queuePosition, let rhsPosition = $1.queuePosition,
+               lhsPosition != rhsPosition
+            {
+                return lhsPosition < rhsPosition
+            }
+            return ($0.enqueuedAt ?? .distantPast) > ($1.enqueuedAt ?? .distantPast)
+        }
+    }
+
+    private static func isActiveStatus(_ status: String) -> Bool {
+        guard let phase = ModelDownloadPhase(rawValue: status) else {
             return false
         }
-        task.cancel()
-        return true
+        return phase.isActive
     }
 
-    public func cancelAllDownloads() {
-        for task in tasks.values {
-            task.cancel()
+    private func updateCurrentReminderStatus(key: String, status: String) {
+        guard var reminder = currentReminders[key] else {
+            return
         }
+        reminder.previousStatus = status
+        currentReminders[key] = reminder
+        persistReminderState()
     }
 
-    public func downloadStatuses() -> [ModelDownloadStatus] {
-        statuses.values.sorted {
-            if $0.repoID == $1.repoID {
-                return $0.provider < $1.provider
-            }
-            return $0.repoID.localizedStandardCompare($1.repoID) == .orderedAscending
+    private func persistReminderState() {
+        let reminders = Array(recoveryReminders.values) + Array(currentReminders.values)
+        do {
+            try reminderStore.save(reminders.sorted { $0.queueOrder < $1.queueOrder })
+        } catch {
+            telemetryLogger("model_download_reminder_persist_failed error=\(error.localizedDescription)")
         }
-    }
-
-    private func download(
-        provider: ModelRepositoryProvider,
-        repoID rawRepoID: String,
-        token: String?,
-        progress: @escaping @Sendable (ModelDownloadProgress) async -> Void
-    ) async -> ModelDownloadCompletion {
-        let repoID = rawRepoID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard isValidRepoID(repoID) else {
-            return failure(message: "repo_id must be organization/model", code: "invalid_repo_id", repoID: repoID)
-        }
-        let key = Self.taskKey(provider: provider, repoID: repoID)
-        guard tasks[key] == nil else {
-            return failure(
-                message: "\(repoID) is already downloading",
-                code: "download_in_progress",
-                repoID: repoID
-            )
-        }
-        let task = Task {
-            await self.executeDownload(
-                provider: provider,
-                repoID: repoID,
-                token: token,
-                progress: progress
-            )
-        }
-        tasks[key] = task
-        let result = await task.value
-        tasks[key] = nil
-        return result
     }
 
     private func executeDownload(
@@ -680,10 +1257,15 @@ public actor ModelDownloadService {
                 repository: repository
             )
             let remainingBytes = resumePlan.remainingBytes
+            try adjustDiskReservation(
+                key: key,
+                remainingBytes: remainingBytes,
+                observedBytesByPath: resumePlan.resumedBytesByPath
+            )
             let resources = ModelResourcePreflight(
                 weightBytes: weightBytes,
                 remainingDownloadBytes: remainingBytes,
-                availableDiskBytes: availableCapacity(at: rootURL),
+                availableDiskBytes: nil,
                 physicalMemoryBytes: Int64(clamping: ProcessInfo.processInfo.physicalMemory)
             )
             try resources.validate()
@@ -702,6 +1284,15 @@ public actor ModelDownloadService {
                 )
             }
             let totalBytes = totalResult.partialValue
+            setStatus(
+                key: key,
+                provider: provider,
+                repoID: repoID,
+                phase: .downloading,
+                commitSHA: repository.commitSHA,
+                totalBytes: totalBytes,
+                remainingBytes: remainingBytes
+            )
             await telemetry.setExpectedBytes(totalBytes)
             var completedBase = metadataBytes
             journal?.phase = .downloading
@@ -741,6 +1332,11 @@ public actor ModelDownloadService {
                         destination: destination
                     ),
                     progress: { fileBytes in
+                        await self.consumeDiskReservation(
+                            key: key,
+                            path: weight.path,
+                            availableBytes: fileBytes
+                        )
                         await telemetry.recordProgress(
                             path: weight.path,
                             availableBytes: fileBytes
@@ -1186,7 +1782,7 @@ public actor ModelDownloadService {
         }
     }
 
-    private func availableCapacity(at url: URL) -> Int64? {
+    private nonisolated static func systemAvailableCapacity(at url: URL) -> Int64? {
         let existing = Self.existingAncestor(of: url)
         guard let values = try? existing.resourceValues(forKeys: [
             .volumeAvailableCapacityForImportantUsageKey,
@@ -1222,8 +1818,13 @@ public actor ModelDownloadService {
         phase: ModelDownloadPhase,
         progressPct: Double = 0,
         currentFile: String? = nil,
-        commitSHA: String? = nil
+        commitSHA: String? = nil,
+        queuePosition: Int? = nil,
+        totalBytes: Int64? = nil,
+        remainingBytes: Int64? = nil,
+        enqueuedAt: Date? = nil
     ) {
+        let existing = statuses[key]
         statuses[key] = ModelDownloadStatus(
             repoID: repoID,
             provider: provider.rawValue,
@@ -1232,8 +1833,15 @@ public actor ModelDownloadService {
             currentFile: currentFile,
             commitSHA: commitSHA,
             error: nil,
-            errorCode: nil
+            errorCode: nil,
+            queuePosition: queuePosition ?? existing?.queuePosition,
+            totalBytes: totalBytes ?? existing?.totalBytes,
+            remainingBytes: remainingBytes ?? existing?.remainingBytes,
+            enqueuedAt: enqueuedAt ?? existing?.enqueuedAt
         )
+        if currentReminders[key] != nil {
+            updateCurrentReminderStatus(key: key, status: phase.rawValue)
+        }
     }
 
     private func setFailureStatus(
@@ -1245,6 +1853,7 @@ public actor ModelDownloadService {
         code: String?,
         message: String
     ) {
+        let existing = statuses[key]
         statuses[key] = ModelDownloadStatus(
             repoID: repoID,
             provider: provider.rawValue,
@@ -1255,7 +1864,11 @@ public actor ModelDownloadService {
             currentFile: journal?.currentFile,
             commitSHA: journal?.commitSHA,
             error: message,
-            errorCode: code
+            errorCode: code,
+            queuePosition: nil,
+            totalBytes: journal?.totalBytes ?? existing?.totalBytes,
+            remainingBytes: existing?.remainingBytes,
+            enqueuedAt: existing?.enqueuedAt
         )
     }
 
@@ -1273,10 +1886,6 @@ public actor ModelDownloadService {
         journal?.error = message
         journal?.updatedAt = Date()
         try? store.writeJournal(journal!)
-    }
-
-    private func clearTask(_ key: String) {
-        tasks[key] = nil
     }
 
     private func isValidRepoID(_ repoID: String) -> Bool {
@@ -1330,7 +1939,11 @@ public actor ModelDownloadService {
             currentFile: journal.currentFile,
             commitSHA: journal.commitSHA,
             error: journal.error,
-            errorCode: journal.errorCode
+            errorCode: journal.errorCode,
+            queuePosition: nil,
+            totalBytes: journal.totalBytes,
+            remainingBytes: max(0, journal.totalBytes - journal.progressBytes),
+            enqueuedAt: journal.updatedAt
         )
     }
 

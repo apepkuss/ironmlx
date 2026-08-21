@@ -437,6 +437,133 @@ private let testCommit = String(repeating: "a", count: 40)
     #expect(!client.streamRequests.contains { $0.url.hasSuffix("model.safetensors") })
 }
 
+@Test func modelDownloadQueueRunsThreeTasksAndKeepsTheFourthInFIFOOrder() async throws {
+    let root = try temporaryDirectory()
+    let client = FakeModelDownloadHTTPClient()
+    let preflight = BlockingMetadataPreflight()
+    let repoIDs = (1 ... 4).map { "org/queue-model-\($0)" }
+    for repoID in repoIDs {
+        configureTinyHuggingFace(client, repoID: repoID)
+    }
+    let service = ModelDownloadService(
+        rootURL: root,
+        httpClient: client,
+        metadataPreflight: preflight,
+        fileDownloader: ResumableFileDownloader(httpClient: client),
+        maxConcurrentDownloads: 3,
+        telemetryLogger: { _ in }
+    )
+
+    for repoID in repoIDs {
+        let response = await service.startHuggingFaceDownload(repoID: repoID, token: nil)
+        #expect(response.success)
+    }
+    try await waitForDownloadCondition {
+        let snapshot = await service.downloadQueueSnapshot()
+        let preflightCalls = await preflight.totalCalls()
+        return snapshot.activeCount == 3
+            && snapshot.queuedCount == 1
+            && preflightCalls == 3
+    }
+    let queued = await service.downloadQueueSnapshot().tasks.first { $0.repoID == repoIDs[3] }
+    #expect(queued?.status == ModelDownloadPhase.queued.rawValue)
+    #expect(queued?.queuePosition == 1)
+    #expect(await preflight.maximumConcurrentCalls() == 3)
+
+    await preflight.releaseOne()
+    try await waitForDownloadCondition {
+        await preflight.totalCalls() == 4
+    }
+    #expect(await preflight.maximumConcurrentCalls() == 3)
+
+    await preflight.releaseAll()
+    try await waitForDownloadCondition {
+        let snapshot = await service.downloadQueueSnapshot()
+        return snapshot.activeCount == 0
+            && snapshot.queuedCount == 0
+            && snapshot.tasks.filter { $0.status == ModelDownloadPhase.completed.rawValue }.count == 4
+    }
+    #expect(await service.clearFinishedDownloads() == 4)
+    #expect(await service.downloadQueueSnapshot().tasks.isEmpty)
+}
+
+@Test func modelDownloadQueueAggregatesDiskReservationsAcrossTasks() async throws {
+    let root = try temporaryDirectory()
+    let client = FakeModelDownloadHTTPClient()
+    let preflight = BlockingMetadataPreflight()
+    let first = "org/disk-first"
+    let second = "org/disk-second"
+    let repositoryBytes = configureTinyHuggingFace(client, repoID: first)
+    _ = configureTinyHuggingFace(client, repoID: second)
+    let capacity = ModelResourcePreflight.diskSafetyBytes + repositoryBytes + 1
+    let service = ModelDownloadService(
+        rootURL: root,
+        httpClient: client,
+        metadataPreflight: preflight,
+        fileDownloader: ResumableFileDownloader(httpClient: client),
+        maxConcurrentDownloads: 3,
+        availableCapacityProvider: { _ in capacity },
+        telemetryLogger: { _ in }
+    )
+
+    #expect(await service.startHuggingFaceDownload(repoID: first, token: nil).success)
+    #expect(await service.startHuggingFaceDownload(repoID: second, token: nil).success)
+    try await waitForDownloadCondition {
+        let task = await service.downloadQueueSnapshot().tasks.first { $0.repoID == second }
+        return task?.status == ModelDownloadPhase.rejected.rawValue
+    }
+    let rejected = await service.downloadQueueSnapshot().tasks.first { $0.repoID == second }
+    #expect(rejected?.errorCode == "insufficient_disk")
+    #expect(await service.clearFinishedDownloads() == 1)
+    let afterClear = await service.downloadQueueSnapshot()
+    #expect(afterClear.tasks.contains { $0.repoID == first && ModelDownloadPhase(rawValue: $0.status)?.isActive == true })
+    #expect(!afterClear.tasks.contains { $0.repoID == second })
+
+    await service.cancelAllDownloads()
+    await preflight.releaseAll()
+    try await waitForDownloadCondition {
+        await service.downloadQueueSnapshot().activeCount == 0
+    }
+}
+
+@Test func modelDownloadRestartReminderPersistsIdentityWithoutToken() async throws {
+    let root = try temporaryDirectory()
+    let client = FakeModelDownloadHTTPClient()
+    let preflight = BlockingMetadataPreflight()
+    let repoID = "org/private-model"
+    configureTinyHuggingFace(client, repoID: repoID)
+    let service = ModelDownloadService(
+        rootURL: root,
+        httpClient: client,
+        metadataPreflight: preflight,
+        fileDownloader: ResumableFileDownloader(httpClient: client),
+        telemetryLogger: { _ in }
+    )
+
+    #expect(await service.startHuggingFaceDownload(repoID: repoID, token: "hf_secret_value").success)
+    try await waitForDownloadCondition {
+        await service.downloadQueueSnapshot().activeCount == 1
+    }
+    await service.cancelAllDownloads()
+    await preflight.releaseAll()
+    try await waitForDownloadCondition {
+        await service.downloadQueueSnapshot().activeCount == 0
+    }
+
+    let reminderURL = root.appendingPathComponent("state/model-download-reminders.json")
+    let persisted = try String(contentsOf: reminderURL, encoding: .utf8)
+    #expect(!persisted.contains("hf_secret_value"))
+    #expect(persisted.contains(#""used_credential" : true"#))
+
+    let relaunched = ModelDownloadService(rootURL: root, httpClient: client)
+    let relaunchedSnapshot = await relaunched.downloadQueueSnapshot()
+    let reminders = relaunchedSnapshot.recoveryReminders
+    #expect(reminders.count == 1)
+    #expect(reminders.first?.repoID == repoID)
+    #expect(reminders.first?.usedCredential == true)
+    #expect(relaunchedSnapshot.tasks.isEmpty)
+}
+
 @Test func resumableDownloaderUsesRangeAndKeepsValidPartialAcrossRestart() async throws {
     let root = try temporaryDirectory()
     let destination = root.appendingPathComponent("model.safetensors")
@@ -856,6 +983,69 @@ private actor StreamingSignal {
     }
 }
 
+private actor BlockingMetadataPreflight: ModelMetadataPreflighting {
+    private var calls = 0
+    private var activeCalls = 0
+    private var maximumCalls = 0
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func validate(metadataDirectory _: URL) async throws -> ModelMetadataPreflightResult {
+        calls += 1
+        activeCalls += 1
+        maximumCalls = max(maximumCalls, activeCalls)
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+        activeCalls -= 1
+        try Task.checkCancellation()
+        return ModelMetadataPreflightResult(
+            modelType: "llama",
+            artifactRole: "base",
+            quantization: nil
+        )
+    }
+
+    func totalCalls() -> Int {
+        calls
+    }
+
+    func maximumConcurrentCalls() -> Int {
+        maximumCalls
+    }
+
+    func releaseOne() {
+        guard !waiters.isEmpty else {
+            return
+        }
+        waiters.removeFirst().resume()
+    }
+
+    func releaseAll() {
+        let pending = waiters
+        waiters.removeAll()
+        for waiter in pending {
+            waiter.resume()
+        }
+    }
+}
+
+private enum DownloadQueueTestError: Error {
+    case timedOut
+}
+
+private func waitForDownloadCondition(
+    attempts: Int = 300,
+    condition: @escaping @Sendable () async -> Bool
+) async throws {
+    for _ in 0 ..< attempts {
+        if await condition() {
+            return
+        }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    throw DownloadQueueTestError.timedOut
+}
+
 private extension UInt64 {
     var littleEndianData: Data {
         var value = littleEndian
@@ -959,6 +1149,20 @@ private func configureHuggingFace(
             client.streamResponses[url] = StreamFixture(data: file.data)
         }
     }
+}
+
+@discardableResult
+private func configureTinyHuggingFace(
+    _ client: FakeModelDownloadHTTPClient,
+    repoID: String
+) -> Int64 {
+    let files: [(path: String, data: Data, sha256: String?)] = [
+        ("config.json", Data(#"{"model_type":"llama"}"#.utf8), nil),
+        ("tokenizer.json", Data("{}".utf8), nil),
+        ("model.safetensors", Data("weights".utf8), sha256(Data("weights".utf8))),
+    ]
+    configureHuggingFace(client, repoID: repoID, files: files)
+    return files.reduce(Int64(0)) { $0 + Int64($1.data.count) }
 }
 
 private func sha256(_ data: Data) -> String {

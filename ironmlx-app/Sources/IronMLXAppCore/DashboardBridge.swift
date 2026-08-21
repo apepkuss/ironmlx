@@ -271,8 +271,9 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             }
         case "/admin/api/models/downloads":
             Task {
-                let statuses = await self.downloadService.downloadStatuses()
-                let json = (try? Self.jsonString(statuses)) ?? "[]"
+                let snapshot = await self.downloadService.downloadQueueSnapshot()
+                let json = (try? Self.jsonString(snapshot))
+                    ?? #"{"max_concurrent":3,"active_count":0,"queued_count":0,"tasks":[],"recovery_reminders":[]}"#
                 await MainActor.run {
                     self.sendFetchResult(path: path, jsonString: json)
                 }
@@ -325,6 +326,28 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 providerName: provider,
                 path: payload.path
             )
+        case "/admin/api/models/downloads/clear-finished":
+            Task {
+                let clearedCount = await downloadService.clearFinishedDownloads()
+                await MainActor.run {
+                    self.sendFetchResult(
+                        path: payload.path,
+                        jsonString: #"{"success":true,"status":"cleared","cleared_count":\#(clearedCount)}"#
+                    )
+                }
+            }
+        case "/admin/api/models/download/reminders/dismiss":
+            let provider = payload.body["provider"]?.stringValue.flatMap(ModelRepositoryProvider.init(rawValue:))
+            let repoID = payload.body["repo_id"]?.stringValue
+            Task {
+                await downloadService.dismissRecoveryReminders(provider: provider, repoID: repoID)
+                await MainActor.run {
+                    self.sendFetchResult(
+                        path: payload.path,
+                        jsonString: #"{"success":true,"status":"dismissed"}"#
+                    )
+                }
+            }
         case "/admin/api/benchmark/preflight":
             preflightBenchmark(payload: payload)
         case "/admin/api/benchmark/prepare":
@@ -658,7 +681,11 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 progress: { [weak self] progress in
                     await MainActor.run {
                         self?.sendJavaScript(
-                            "onDownloadProgress(\(progress.percent), \(Self.jsStringLiteral(progress.filename)))"
+                            "onDownloadProgress("
+                                + "\(Self.jsStringLiteral(ModelRepositoryProvider.huggingFace.rawValue)), "
+                                + "\(Self.jsStringLiteral(payload.repoID)), "
+                                + "\(progress.percent), "
+                                + "\(Self.jsStringLiteral(progress.filename)))"
                         )
                     }
                 }

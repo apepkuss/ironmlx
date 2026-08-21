@@ -676,19 +676,18 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     )
 
     #expect(dashboardHTML(html, contains: #"\', this)">"#))
-    #expect(dashboardHTML(html, contains: #"activeHuggingFaceSearchRepoId = repoId;"#))
     #expect(dashboardHTML(html, contains: #"setSearchResultDownloadState(button, true);"#))
     #expect(dashboardHTML(html, contains: #"dict.download_btn_downloading || 'Downloading...'"#))
-    #expect(dashboardHTML(html, contains: #"finishSearchResultDownloadState();"#))
     #expect(dashboardHTML(html, contains: #".search-result-dl:disabled {"#))
     #expect(dashboardHTML(
         html,
-        contains: #"const isDownloading = repoId === activeHuggingFaceSearchRepoId;"#
+        contains: #"const task = downloadTask('huggingface', repoId);"#
     ))
     #expect(dashboardHTML(
         html,
-        contains: #"const isCompleted = repoId === completedHuggingFaceSearchRepoId;"#
+        contains: #"const isDownloading = isActiveDownload(task);"#
     ))
+    #expect(dashboardHTML(html, contains: #"refreshSearchResultDownloadStates();"#))
 }
 
 @Test func dashboardHuggingFaceDownloadActionsShareButtonAndIconStyling() throws {
@@ -755,13 +754,11 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     let results = try #require(
         html.range(of: #"id="search-results""#, range: sort.upperBound ..< html.endIndex)
     )
-    let progress = try #require(
-        html.range(of: #"id="dl-progress""#, range: results.upperBound ..< html.endIndex)
-    )
     #expect(query.lowerBound < token.lowerBound)
     #expect(token.lowerBound < sort.lowerBound)
     #expect(sort.lowerBound < results.lowerBound)
-    #expect(results.lowerBound < progress.lowerBound)
+    #expect(dashboardHTML(html, contains: #"id="download-task-list""#))
+    #expect(dashboardHTML(html, contains: #"function onDownloadProgress(provider, repoId, pct, filename) {"#))
 }
 
 @Test func dashboardHuggingFaceSearchPlaceholderFollowsDashboardLanguage() throws {
@@ -858,27 +855,26 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     )
 }
 
-@Test func dashboardHuggingFaceProgressFollowsSelectedResultAndPreservesCompletionState() throws {
+@Test func dashboardUsesUnifiedDownloadQueueAndRestartRecoveryReminder() throws {
     let html = try String(
         contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
         encoding: .utf8
     )
 
     #expect(dashboardHTML(html, contains: #"class="search-result-entry" data-repo-id=""#))
-    #expect(dashboardHTML(html, contains: #"id="hf-progress-home""#))
-    #expect(dashboardHTML(html, contains: #"function attachHuggingFaceDownloadProgress() {"#))
-    #expect(dashboardHTML(html, contains: #"entry.appendChild(progress);"#))
-    #expect(dashboardHTML(html, contains: #"results.prepend(progress);"#))
-    #expect(dashboardHTML(html, contains: #"huggingFaceProgressRepoId = repoId;"#))
-    #expect(dashboardHTML(html, contains: #"completedHuggingFaceSearchRepoId = repoId;"#))
-    #expect(dashboardHTML(html, contains: #"completedButton.dataset.idleLabel = dict.local_model_exists || '✓ Exists';"#))
-    #expect(dashboardHTML(html, contains: #"completedButton.dataset.idleDisabled = 'true';"#))
-    #expect(dashboardHTML(html, contains: #"setSearchResultCompletedState(completedButton, true);"#))
-    #expect(!dashboardHTML(html, contains: #"searchHuggingFace({ preserveCompletion: true });"#))
-    #expect(dashboardHTML(html, contains: #"local_model_completed: "✓ 已完成""#))
-    #expect(dashboardHTML(html, contains: #"data-session-completed=""#))
-    #expect(dashboardHTML(html, contains: #"if (page !== 'models') clearCompletedHuggingFaceSearchState();"#))
-    #expect(dashboardHTML(html, contains: #"if (source !== 'hf') clearCompletedHuggingFaceSearchState();"#))
+    #expect(dashboardHTML(html, contains: #"id="download-queue-card""#))
+    #expect(dashboardHTML(html, contains: #"id="download-recovery""#))
+    #expect(dashboardHTML(html, contains: #"const ACTIVE_DOWNLOAD_PHASES = new Set(["#))
+    #expect(dashboardHTML(html, contains: #"function renderDownloadQueue(snapshot) {"#))
+    #expect(dashboardHTML(html, contains: #"id="download-clear-finished""#))
+    #expect(dashboardHTML(html, contains: #"download_clear_finished: "清除记录""#))
+    #expect(dashboardHTML(html, contains: #"data-i18n-aria-label="download_clear_finished_accessible_label""#))
+    #expect(dashboardHTML(html, contains: #"function clearFinishedDownloadTasks() {"#))
+    #expect(dashboardHTML(html, contains: #"apiPost('/admin/api/models/downloads/clear-finished', {});"#))
+    #expect(dashboardHTML(html, contains: #"function readdPublicDownloadReminders() {"#))
+    #expect(dashboardHTML(html, contains: #"window.__DOWNLOAD_QUEUE_POLL__ = setInterval(refreshDownloadQueue, 1500);"#))
+    #expect(!dashboardHTML(html, contains: #"id="hf-progress-home""#))
+    #expect(!dashboardHTML(html, contains: #"id="dl-ms-progress""#))
 }
 
 @Test func dashboardModelMoreActionsUseBodyPortalOutsideClippedTableCells() throws {
