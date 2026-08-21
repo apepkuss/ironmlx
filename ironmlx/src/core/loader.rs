@@ -82,6 +82,105 @@ pub struct QuantizationMetadataPreflight {
     pub override_count: usize,
 }
 
+fn is_dflash2_draft_metadata(config: &serde_json::Value) -> bool {
+    config
+        .get("architectures")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|architectures| {
+            architectures
+                .iter()
+                .any(|value| value.as_str() == Some("DFlash2DraftModel"))
+        })
+}
+
+fn positive_integer(config: &serde_json::Value, key: &str) -> Result<i64> {
+    let value = config
+        .get(key)
+        .and_then(serde_json::Value::as_i64)
+        .ok_or_else(|| anyhow!("DFlash2 config missing integer {key}"))?;
+    if value <= 0 {
+        return Err(anyhow!(
+            "DFlash2 config {key} must be positive, got {value}"
+        ));
+    }
+    Ok(value)
+}
+
+fn validate_dflash2_draft_metadata(config: &serde_json::Value) -> Result<()> {
+    if config.get("model_type").and_then(serde_json::Value::as_str) != Some("qwen3") {
+        return Err(anyhow!("DFlash2 draft model_type must be qwen3"));
+    }
+
+    let hidden_size = positive_integer(config, "hidden_size")?;
+    let vocab_size = positive_integer(config, "vocab_size")?;
+    let num_hidden_layers = positive_integer(config, "num_hidden_layers")?;
+    let num_target_layers = positive_integer(config, "num_target_layers")?;
+    let dflash = config
+        .get("dflash_config")
+        .ok_or_else(|| anyhow!("DFlash2 config missing dflash_config"))?;
+    let block_size = positive_integer(dflash, "block_size")?;
+    let conv_group_size = positive_integer(dflash, "conv_group_size")?;
+    let _conv_kernel_size = positive_integer(dflash, "conv_kernel_size")?;
+    let _selector_rank = positive_integer(dflash, "selector_rank")?;
+    let selector_top_k = positive_integer(dflash, "selector_top_k")?;
+
+    if block_size < 2 {
+        return Err(anyhow!(
+            "DFlash2 config block_size must be at least 2, got {block_size}"
+        ));
+    }
+    if hidden_size % conv_group_size != 0 {
+        return Err(anyhow!(
+            "DFlash2 conv_group_size {conv_group_size} must divide hidden_size {hidden_size}"
+        ));
+    }
+    if selector_top_k > vocab_size {
+        return Err(anyhow!(
+            "DFlash2 selector_top_k {selector_top_k} exceeds vocab_size {vocab_size}"
+        ));
+    }
+
+    let mask_token_id = dflash
+        .get("mask_token_id")
+        .and_then(serde_json::Value::as_i64)
+        .ok_or_else(|| anyhow!("DFlash2 config missing integer mask_token_id"))?;
+    if !(0..vocab_size).contains(&mask_token_id) {
+        return Err(anyhow!(
+            "DFlash2 mask_token_id {mask_token_id} is outside vocab_size {vocab_size}"
+        ));
+    }
+
+    let target_layer_ids = dflash
+        .get("target_layer_ids")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| anyhow!("DFlash2 config missing target_layer_ids"))?;
+    if target_layer_ids.len() != num_hidden_layers as usize {
+        return Err(anyhow!(
+            "DFlash2 target_layer_ids count {} does not match num_hidden_layers {num_hidden_layers}",
+            target_layer_ids.len()
+        ));
+    }
+    let mut previous = None;
+    for value in target_layer_ids {
+        let layer_id = value
+            .as_i64()
+            .ok_or_else(|| anyhow!("DFlash2 target_layer_ids must contain integers"))?;
+        if !(0..num_target_layers).contains(&layer_id) {
+            return Err(anyhow!(
+                "DFlash2 target layer {layer_id} is outside num_target_layers {num_target_layers}"
+            ));
+        }
+        if previous.is_some_and(|prior| layer_id <= prior) {
+            return Err(anyhow!(
+                "DFlash2 target_layer_ids must be unique and strictly increasing"
+            ));
+        }
+        previous = Some(layer_id);
+    }
+
+    Ok(())
+}
+
 /// Validate architecture and quantization metadata without opening weights.
 ///
 /// Tensor storage is still validated by [`Loader`] when the completed snapshot
@@ -98,12 +197,17 @@ pub fn preflight_model_metadata(model_dir: &Path) -> Result<ModelMetadataPreflig
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| anyhow!("config.json missing model_type"))?;
 
-    let artifact_role = match model_type {
-        "qwen3_5_mtp" => "qwen_mtp",
-        "gemma4_assistant" | "gemma4_unified_assistant" => "gemma4_drafter",
-        _ => {
-            crate::models::ModelArchitecture::from_model_type(model_type)?;
-            "base"
+    let artifact_role = if is_dflash2_draft_metadata(&config_raw) {
+        validate_dflash2_draft_metadata(&config_raw)?;
+        "dflash2_drafter"
+    } else {
+        match model_type {
+            "qwen3_5_mtp" => "qwen_mtp",
+            "gemma4_assistant" | "gemma4_unified_assistant" => "gemma4_drafter",
+            _ => {
+                crate::models::ModelArchitecture::from_model_type(model_type)?;
+                "base"
+            }
         }
     };
 
@@ -1300,6 +1404,91 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("unsupported quantization.mode"));
         assert!(message.contains("nvfp4"));
+        std::fs::remove_dir_all(dir).expect("cleanup preflight dir");
+    }
+
+    #[test]
+    fn metadata_preflight_accepts_dflash2_draft_without_base_architecture_support() {
+        let dir =
+            std::env::temp_dir().join(format!("ironmlx-model-preflight-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create preflight dir");
+        std::fs::write(
+            dir.join("config.json"),
+            serde_json::to_vec(&json!({
+                "architectures": ["DFlash2DraftModel"],
+                "dflash_config": {
+                    "block_size": 8,
+                    "conv_group_size": 16,
+                    "conv_kernel_size": 2,
+                    "mask_token_id": 248070,
+                    "selector_rank": 256,
+                    "selector_top_k": 16,
+                    "target_layer_ids": [5, 19, 33, 47, 61]
+                },
+                "hidden_size": 5120,
+                "model_type": "qwen3",
+                "num_hidden_layers": 5,
+                "num_target_layers": 64,
+                "vocab_size": 248320
+            }))
+            .expect("encode config"),
+        )
+        .expect("write config");
+
+        let result = preflight_model_metadata(&dir).expect("preflight DFlash2 metadata");
+
+        assert_eq!(result.model_type, "qwen3");
+        assert_eq!(result.artifact_role, "dflash2_drafter");
+        assert_eq!(result.quantization, None);
+        std::fs::remove_dir_all(dir).expect("cleanup preflight dir");
+    }
+
+    #[test]
+    fn metadata_preflight_rejects_malformed_dflash2_draft() {
+        let dir =
+            std::env::temp_dir().join(format!("ironmlx-model-preflight-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create preflight dir");
+        std::fs::write(
+            dir.join("config.json"),
+            serde_json::to_vec(&json!({
+                "architectures": ["DFlash2DraftModel"],
+                "dflash_config": {
+                    "block_size": 8,
+                    "conv_group_size": 16,
+                    "conv_kernel_size": 2,
+                    "mask_token_id": 248070,
+                    "selector_rank": 256,
+                    "selector_top_k": 16,
+                    "target_layer_ids": [5, 19, 19, 47, 61]
+                },
+                "hidden_size": 5120,
+                "model_type": "qwen3",
+                "num_hidden_layers": 5,
+                "num_target_layers": 64,
+                "vocab_size": 248320
+            }))
+            .expect("encode config"),
+        )
+        .expect("write config");
+
+        let error = preflight_model_metadata(&dir).expect_err("reject malformed DFlash2 metadata");
+
+        assert!(error
+            .to_string()
+            .contains("target_layer_ids must be unique and strictly increasing"));
+        std::fs::remove_dir_all(dir).expect("cleanup preflight dir");
+    }
+
+    #[test]
+    fn metadata_preflight_does_not_treat_plain_qwen3_as_dflash2() {
+        let dir =
+            std::env::temp_dir().join(format!("ironmlx-model-preflight-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create preflight dir");
+        std::fs::write(dir.join("config.json"), r#"{"model_type":"qwen3"}"#).expect("write config");
+
+        let error = preflight_model_metadata(&dir).expect_err("reject plain qwen3 metadata");
+
+        assert!(error.to_string().contains("unsupported model_type"));
         std::fs::remove_dir_all(dir).expect("cleanup preflight dir");
     }
 

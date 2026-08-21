@@ -1246,6 +1246,14 @@ public actor ModelDownloadService {
                     message: error.localizedDescription
                 )
             }
+            if compatibility.artifactRole != ModelArtifactRole.dflash2Drafter,
+               !metadata.contains(where: { $0.path == "tokenizer.json" }) {
+                throw DownloadFailure(
+                    repoID: repoID,
+                    code: "repo_missing_metadata",
+                    message: "Repository \(repoID) is missing tokenizer.json."
+                )
+            }
             let weightBytes = try checkedTotalBytes(
                 weights,
                 repoID: repoID,
@@ -1537,7 +1545,7 @@ public actor ModelDownloadService {
         staging: URL,
         telemetry: ModelDownloadTelemetryTracker
     ) async throws -> (files: [ModelSnapshotFile], validations: [ModelValidatedFile]) {
-        let required = ["config.json", "tokenizer.json"]
+        let required = ["config.json"]
         let byPath = Dictionary(uniqueKeysWithValues: repository.files.map { ($0.path, $0) })
         for path in required where byPath[path] == nil {
             throw DownloadFailure(

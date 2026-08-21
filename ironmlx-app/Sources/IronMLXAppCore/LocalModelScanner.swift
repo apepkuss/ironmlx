@@ -145,6 +145,7 @@ public struct LocalModel: Codable, Equatable, Sendable {
 private enum LocalModelArtifactKind {
     case base
     case mtp
+    case dflash2Draft
 }
 
 private struct LocalModelArtifact {
@@ -168,6 +169,7 @@ private struct LocalModelArtifact {
 private struct SnapshotInspection {
     var path: URL
     var config: [String: Any]
+    var artifactRole: String?
     var capabilityType: String
     var readiness: LocalModelReadiness
     var quantization: LocalModelQuantization
@@ -403,7 +405,10 @@ public struct LocalModelScanner: Sendable {
     public func resolveModelPath(for reference: String) -> String? {
         let direct = URL(fileURLWithPath: NSString(string: reference).expandingTildeInPath)
         if FileManager.default.fileExists(atPath: direct.path) {
-            return inspectSnapshot(direct)?.readiness.isLoadable == true ? direct.path : nil
+            guard let inspection = inspectSnapshot(direct), isStandaloneLoadable(inspection) else {
+                return nil
+            }
+            return direct.path
         }
 
         for provider in ModelRepositoryProvider.allCases {
@@ -413,7 +418,7 @@ public struct LocalModelScanner: Sendable {
                    expectedProvider: provider,
                    expectedRepoID: reference
                ),
-               inspection.readiness.isLoadable {
+               isStandaloneLoadable(inspection) {
                 return snapshot.path
             }
         }
@@ -606,17 +611,27 @@ public struct LocalModelScanner: Sendable {
             let loaded = loadedModels.contains(id) || loadedModels.contains(snapshot.path)
             let pinned = loaded && (pinnedModels.contains(id) || pinnedModels.contains(snapshot.path))
             let config = inspection.config
-            let kind = artifactKind(config)
+            let kind = artifactKind(config, artifactRole: inspection.artifactRole)
             let signature = mtpCompatibilitySignature(config)
             let architecture = normalizedString(config["model_type"])
             let capabilities = runtimeCapabilities(config: config)
+            let type: String
+            switch kind {
+            case .base:
+                type = inspection.capabilityType
+            case .mtp:
+                type = "mtp"
+            case .dflash2Draft:
+                type = "dflash2_drafter"
+            }
+            let runtimeCapabilities = kind == .base ? capabilities : nil
             return LocalModel(
                 id: id,
                 repoID: id,
                 source: source,
-                type: kind == .mtp ? "mtp" : inspection.capabilityType,
+                type: type,
                 architecture: architecture,
-                capabilities: kind == .mtp ? nil : capabilities,
+                capabilities: runtimeCapabilities,
                 sizeMB: sizeMB,
                 loaded: loaded,
                 pinned: pinned,
@@ -763,7 +778,13 @@ public struct LocalModelScanner: Sendable {
         }
     }
 
-    private func artifactKind(_ config: [String: Any]?) -> LocalModelArtifactKind {
+    private func artifactKind(
+        _ config: [String: Any]?,
+        artifactRole: String? = nil
+    ) -> LocalModelArtifactKind {
+        if artifactRole == ModelArtifactRole.dflash2Drafter || isDFlash2DraftConfig(config) {
+            return .dflash2Draft
+        }
         guard let modelType = config?["model_type"] as? String else {
             return .base
         }
@@ -773,6 +794,21 @@ public struct LocalModelScanner: Sendable {
         default:
             return .base
         }
+    }
+
+    private func isDFlash2DraftConfig(_ config: [String: Any]?) -> Bool {
+        guard config?["dflash_config"] is [String: Any] else {
+            return false
+        }
+        return stringArray(config?["architectures"]).contains("DFlash2DraftModel")
+    }
+
+    private func isStandaloneLoadable(_ inspection: SnapshotInspection) -> Bool {
+        inspection.readiness.isLoadable
+            && artifactKind(
+                inspection.config,
+                artifactRole: inspection.artifactRole
+            ) != .dflash2Draft
     }
 
     private func mtpCompatibilitySignature(_ config: [String: Any]?) -> MtpCompatibilitySignature? {
@@ -1030,8 +1066,9 @@ public struct LocalModelScanner: Sendable {
         missingFiles.append(contentsOf: quantization.missingFiles)
 
         let readiness: LocalModelReadiness
+        let manifest: ModelSnapshotManifest
         do {
-            _ = try ModelSnapshotVerifier().verifyStructure(
+            manifest = try ModelSnapshotVerifier().verifyStructure(
                 snapshot: url,
                 expectedProvider: expectedProvider,
                 expectedRepoID: expectedRepoID,
@@ -1056,6 +1093,7 @@ public struct LocalModelScanner: Sendable {
             return SnapshotInspection(
                 path: url,
                 config: configJSON,
+                artifactRole: nil,
                 capabilityType: capabilityType,
                 readiness: readiness,
                 quantization: quantization.quantization
@@ -1069,6 +1107,7 @@ public struct LocalModelScanner: Sendable {
             return SnapshotInspection(
                 path: url,
                 config: configJSON,
+                artifactRole: nil,
                 capabilityType: capabilityType,
                 readiness: readiness,
                 quantization: quantization.quantization
@@ -1099,6 +1138,7 @@ public struct LocalModelScanner: Sendable {
         return SnapshotInspection(
             path: url,
             config: configJSON,
+            artifactRole: manifest.compatibility.artifactRole,
             capabilityType: capabilityType,
             readiness: readiness,
             quantization: quantization.quantization

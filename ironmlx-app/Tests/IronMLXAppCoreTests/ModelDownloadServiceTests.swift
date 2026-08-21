@@ -346,6 +346,81 @@ private let testCommit = String(repeating: "a", count: 40)
     ))
 }
 
+@Test func dflash2DraftDownloadAllowsMissingTokenizerAndPublishesAuxiliaryArtifact() async throws {
+    let root = try temporaryDirectory()
+    let client = FakeModelDownloadHTTPClient()
+    let repoID = "z-lab/Qwen3.8-27B-DFlash2"
+    let config = Data(#"{"architectures":["DFlash2DraftModel"],"dflash_config":{"block_size":8},"model_type":"qwen3"}"#.utf8)
+    let weights = Data("dflash2-weights".utf8)
+    configureHuggingFace(
+        client,
+        repoID: repoID,
+        files: [
+            ("config.json", config, nil),
+            ("model.safetensors", weights, sha256(weights)),
+        ]
+    )
+    let service = ModelDownloadService(
+        rootURL: root,
+        httpClient: client,
+        metadataPreflight: AcceptingDFlash2MetadataPreflight(),
+        fileDownloader: ResumableFileDownloader(httpClient: client),
+        telemetryLogger: { _ in }
+    )
+
+    let result = await service.downloadHuggingFace(repoID: repoID, token: nil)
+
+    #expect(result.success)
+    let repository = try ModelRepositoryLayout.repositoryRoot(
+        rootURL: root,
+        provider: .huggingFace,
+        repoID: repoID
+    )
+    let snapshot = repository
+        .appendingPathComponent("snapshots", isDirectory: true)
+        .appendingPathComponent(testCommit, isDirectory: true)
+    let manifest = try ModelSnapshotVerifier().verify(
+        snapshot: snapshot,
+        expectedProvider: .huggingFace,
+        expectedRepoID: repoID
+    )
+    #expect(manifest.compatibility.modelType == "qwen3")
+    #expect(manifest.compatibility.artifactRole == ModelArtifactRole.dflash2Drafter)
+    #expect(!FileManager.default.fileExists(atPath: snapshot.appendingPathComponent("tokenizer.json").path))
+    #expect(client.streamRequests.contains { $0.url.hasSuffix("model.safetensors") })
+    let scanner = LocalModelScanner(rootURL: root)
+    #expect(scanner.scan().isEmpty)
+    #expect(scanner.resolveModelPath(for: repoID) == nil)
+}
+
+@Test func baseDownloadWithoutTokenizerIsRejectedBeforeWeightRequest() async throws {
+    let root = try temporaryDirectory()
+    let client = FakeModelDownloadHTTPClient()
+    let repoID = "mlx-community/Base-Without-Tokenizer"
+    let weights = Data("weights".utf8)
+    configureHuggingFace(
+        client,
+        repoID: repoID,
+        files: [
+            ("config.json", Data(#"{"model_type":"llama"}"#.utf8), nil),
+            ("model.safetensors", weights, sha256(weights)),
+        ]
+    )
+    let service = ModelDownloadService(
+        rootURL: root,
+        httpClient: client,
+        metadataPreflight: AcceptingMetadataPreflight(),
+        fileDownloader: ResumableFileDownloader(httpClient: client),
+        telemetryLogger: { _ in }
+    )
+
+    let result = await service.downloadHuggingFace(repoID: repoID, token: nil)
+
+    #expect(!result.success)
+    #expect(result.code == "repo_missing_metadata")
+    #expect(!client.streamRequests.contains { $0.url.hasSuffix("model.safetensors") })
+}
+
 @Test func huggingFaceDownloadRepairsAKnownCorruptCommitWithoutDeletingItBeforePublish() async throws {
     let root = try temporaryDirectory()
     let client = FakeModelDownloadHTTPClient()
@@ -810,6 +885,16 @@ private struct AcceptingMetadataPreflight: ModelMetadataPreflighting {
         ModelMetadataPreflightResult(
             modelType: "llama",
             artifactRole: "base",
+            quantization: nil
+        )
+    }
+}
+
+private struct AcceptingDFlash2MetadataPreflight: ModelMetadataPreflighting {
+    func validate(metadataDirectory _: URL) async throws -> ModelMetadataPreflightResult {
+        ModelMetadataPreflightResult(
+            modelType: "qwen3",
+            artifactRole: ModelArtifactRole.dflash2Drafter,
             quantization: nil
         )
     }

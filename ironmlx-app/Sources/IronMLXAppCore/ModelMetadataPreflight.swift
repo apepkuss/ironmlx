@@ -1,5 +1,9 @@
 import Foundation
 
+enum ModelArtifactRole {
+    static let dflash2Drafter = "dflash2_drafter"
+}
+
 public protocol ModelMetadataPreflighting: Sendable {
     func validate(metadataDirectory: URL) async throws -> ModelMetadataPreflightResult
 }
