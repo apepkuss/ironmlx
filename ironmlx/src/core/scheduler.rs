@@ -144,16 +144,16 @@ use crate::core::prompt_lookup::{
 use crate::core::sampler::{draw_uniforms, sample_target_tokens_with_uniforms_batch, Sampler};
 use crate::core::speculative::{
     add_elapsed_us, add_mtp_decode_cache_commit_us, add_mtp_prefill_cache_commit_us,
-    adjust_mtp_draft_budget, commit_mtp_cache_hidden_prefix, commit_mtp_cache_hidden_tail,
-    effective_mtp_draft_tokens_for_paged_prefix, elapsed_us_since,
+    commit_mtp_cache_hidden_prefix, commit_mtp_cache_hidden_tail, elapsed_us_since,
     layer_cache_supports_accepted_prefix_trim, resolve_exact_deterministic_target_logits,
-    resolve_exact_deterministic_target_tokens, resolve_speculative_tokens, restore_layer_cache,
-    rollback_main_cache_to_accepted_prefix, sample_draft_logits_position,
-    sample_draft_logits_position_with_uniform, sample_logits_positions, slice_hidden_position,
-    slice_position_ids_prefix, split_speculative_draft_prng,
-    trim_full_layer_cache_rows_to_accepted_prefix, verify_input, zero_hidden_like_position,
-    DraftTokenDistribution, MainCacheRollbackInput, MtpDraftPolicySnapshot, MtpDraftPolicyState,
-    MtpDraftPolicyWindow, MtpSpeculativeConfig, MtpSpeculativeModel, MtpSpeculativeStats,
+    resolve_exact_deterministic_target_tokens, resolve_greedy_verified_hidden_until_mismatch,
+    resolve_speculative_tokens, restore_layer_cache, rollback_main_cache_to_accepted_prefix,
+    sample_draft_logits_position, sample_draft_logits_position_with_uniform,
+    sample_logits_positions, slice_hidden_position, slice_position_ids_prefix,
+    split_speculative_draft_prng, trim_full_layer_cache_rows_to_accepted_prefix, verify_input,
+    zero_hidden_like_position, DraftTokenDistribution, Gemma4DrafterPolicyState,
+    MainCacheRollbackInput, MtpDraftPolicyKvState, MtpDraftPolicyWindow, MtpSpeculativeConfig,
+    MtpSpeculativeModel, MtpSpeculativeStats, QwenMtpDraftPolicySnapshot, QwenMtpDraftPolicyState,
     SpeculativeResolution,
 };
 use crate::core::speculative_qualification::{NeuralExactRegime, NeuralExactSource};
@@ -183,7 +183,7 @@ struct SchedulerMtpRowState {
     last_hidden: Array,
     deferred_tail_commit: Option<MtpDeferredTailCommit>,
     adaptive_draft_tokens: usize,
-    draft_policy: MtpDraftPolicyState,
+    draft_policy: QwenMtpDraftPolicyState,
 }
 
 struct SchedulerMtpState {
@@ -199,7 +199,7 @@ struct ActiveKvParkedMtpRowState {
     pending_tokens: VecDeque<u32>,
     deferred_tail_commit: Option<MtpDeferredTailCommit>,
     adaptive_draft_tokens: usize,
-    draft_policy: MtpDraftPolicyState,
+    draft_policy: QwenMtpDraftPolicyState,
     cached_len: i32,
     cache_cap: i32,
 }
@@ -260,6 +260,7 @@ struct SchedulerGemma4DrafterRowState {
     last_hidden: Array,
     shared_kv: crate::models::gemma4::Gemma4SharedKvStates,
     adaptive_draft_tokens: usize,
+    draft_policy: Gemma4DrafterPolicyState,
 }
 
 fn project_mtp_target_hidden<M: MtpSpeculativeModel>(
@@ -295,7 +296,7 @@ struct PreparedPromptLookupProposal {
     source: PromptLookupProposalSource,
     mtp_certified_draft_len: usize,
     mtp_certified_bonus_token: Option<u32>,
-    mtp_policy_snapshot: Option<MtpDraftPolicySnapshot>,
+    mtp_policy_snapshot: Option<QwenMtpDraftPolicySnapshot>,
 }
 
 struct SchedulerPromptLookupState {
@@ -314,7 +315,7 @@ struct PromptLookupBatchedFillContext {
     proposal_source: PromptLookupProposalSource,
     mtp_certified_draft_len: usize,
     mtp_certified_bonus_token: Option<u32>,
-    mtp_policy_snapshot: Option<MtpDraftPolicySnapshot>,
+    mtp_policy_snapshot: Option<QwenMtpDraftPolicySnapshot>,
     sampler: Sampler,
     history: Vec<u32>,
 }
@@ -342,7 +343,7 @@ struct PromptLookupMtpAcceptedInput {
     input_hidden: Array,
     position_ids: Array,
     canonical_replay: bool,
-    mtp_policy_snapshot: Option<MtpDraftPolicySnapshot>,
+    mtp_policy_snapshot: Option<QwenMtpDraftPolicySnapshot>,
 }
 
 struct PromptLookupMtpDraftInput {
@@ -386,7 +387,7 @@ struct PromptLookupMtpCanonicalRowSnapshot {
     last_hidden: Array,
     deferred_tail_commit: Option<MtpDeferredTailCommit>,
     adaptive_draft_tokens: usize,
-    draft_policy: MtpDraftPolicyState,
+    draft_policy: QwenMtpDraftPolicyState,
 }
 
 struct PromptLookupMtpCanonicalTransaction {
@@ -395,6 +396,7 @@ struct PromptLookupMtpCanonicalTransaction {
     snapshots: Vec<PromptLookupMtpCanonicalRowSnapshot>,
     mtp_stats_before: MtpSpeculativeStats,
     prompt_stats_before: PromptLookupStats,
+    kv_state: MtpDraftPolicyKvState,
 }
 
 #[derive(Debug)]
@@ -444,7 +446,6 @@ struct Gemma4DrafterBatchedFillContext {
 #[derive(Clone, Copy)]
 struct Gemma4DrafterWindowPolicy {
     cfg: MtpSpeculativeConfig,
-    scheduler_batch_capacity: usize,
 }
 
 /// Extension trait for VL-capable models, intentionally NOT part of `core::Model`
@@ -1334,22 +1335,6 @@ fn cache_cap_and_dtype(cache: &[LayerCache]) -> Result<(i32, Dtype)> {
         .ok_or_else(|| anyhow!("cache_cap_and_dtype: cache has no layers"))
 }
 
-fn cache_has_paged_full_attention(cache: &[LayerCache]) -> bool {
-    cache
-        .iter()
-        .any(|layer| matches!(layer, LayerCache::Full(kv) if kv.paged().is_some()))
-}
-
-fn mtp_supported_max_draft_tokens(
-    cache: Option<&[LayerCache]>,
-    cfg_max_draft_tokens: usize,
-) -> usize {
-    effective_mtp_draft_tokens_for_paged_prefix(
-        cfg_max_draft_tokens,
-        cache.is_some_and(cache_has_paged_full_attention),
-    )
-}
-
 fn full_layer_cache_row_offset(cache: &[LayerCache], row: usize) -> Result<i32> {
     let mut expected = None;
     for (layer_idx, layer) in cache.iter().enumerate() {
@@ -1382,7 +1367,7 @@ fn gemma4_verify_needs_batch_stable_qmm(
     kv_bits == Some(TurboQuantKVBits::K3V4) && batch_width > 1 && verify_len > 2
 }
 
-const GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS: usize = 1024;
+const GEMMA4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS: usize = 1024;
 
 fn gemma4_drafter_mid_admit_chunk_cap(
     kv_bits: Option<TurboQuantKVBits>,
@@ -1391,7 +1376,7 @@ fn gemma4_drafter_mid_admit_chunk_cap(
     decode_cadence_mid_chunk_cap: usize,
 ) -> usize {
     if kv_bits == Some(TurboQuantKVBits::K3V4)
-        && context_tokens > GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS
+        && context_tokens > GEMMA4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS
     {
         decode_cadence_mid_chunk_cap.max(prefill_chunk_size.max(1) as usize)
     } else {
@@ -1399,33 +1384,27 @@ fn gemma4_drafter_mid_admit_chunk_cap(
     }
 }
 
-fn gemma4_drafter_effective_budget_for_context(
-    kv_bits: Option<TurboQuantKVBits>,
-    draft_budget: usize,
-    context_tokens: usize,
-    scheduler_batch_capacity: usize,
-) -> usize {
-    if kv_bits == Some(TurboQuantKVBits::K3V4)
-        && context_tokens > GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS
-        && scheduler_batch_capacity > 1
-    {
-        draft_budget.min(1)
-    } else {
-        draft_budget
-    }
-}
-
-fn gemma4_k3v4_long_verify_needs_stable_attention(
-    kv_bits: Option<TurboQuantKVBits>,
+fn gemma4_long_verify_needs_stable_attention(
+    _kv_bits: Option<TurboQuantKVBits>,
     context_tokens: usize,
     verify_len: usize,
-    scheduler_batch_capacity: usize,
-    active_batch_width: usize,
+    batch_width: usize,
 ) -> bool {
-    kv_bits == Some(TurboQuantKVBits::K3V4)
-        && context_tokens > GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS
-        && verify_len > 1
-        && (scheduler_batch_capacity == 1 || active_batch_width > 1)
+    context_tokens > GEMMA4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS && verify_len > 1 && batch_width > 0
+}
+
+fn gemma4_verify_requires_sequential_q1(
+    exact_batched_qualified: bool,
+    kv_bits: Option<TurboQuantKVBits>,
+    batch_width: usize,
+    verify_lens: &[i32],
+    verify_width: usize,
+) -> bool {
+    !exact_batched_qualified
+        && kv_bits.is_some()
+        && batch_width > 0
+        && verify_width > 1
+        && verify_lens.iter().all(|&len| len == verify_width as i32)
 }
 
 fn build_gemma4_drafter_batched_verify_input(
@@ -1477,7 +1456,7 @@ fn build_mtp_device_verify_input(
     max_len: usize,
     target: mlx::StreamOrDevice,
 ) -> Result<(Array, Vec<i32>)> {
-    if batch == 0 || max_len < 2 {
+    if batch == 0 || max_len == 0 {
         return Err(anyhow!(
             "build_mtp_device_verify_input: invalid batch={batch} max_len={max_len}"
         ));
@@ -2557,6 +2536,23 @@ fn generate_neural_rebase_request_from_state(state: &RequestState) -> Result<Gen
 
 fn add_mtp_stats(dst: &mut MtpSpeculativeStats, src: MtpSpeculativeStats) {
     dst.merge_from(src);
+}
+
+fn divided_mtp_stats_timing(stats: &MtpSpeculativeStats, divisor: u64) -> MtpSpeculativeStats {
+    debug_assert!(divisor > 0);
+    MtpSpeculativeStats {
+        draft_forward_us: stats.draft_forward_us / divisor,
+        verify_forward_us: stats.verify_forward_us / divisor,
+        projection_us: stats.projection_us / divisor,
+        sampling_us: stats.sampling_us / divisor,
+        verify_accept_host_sync_us: stats.verify_accept_host_sync_us / divisor,
+        main_rollback_us: stats.main_rollback_us / divisor,
+        mtp_cache_commit_us: stats.mtp_cache_commit_us / divisor,
+        mtp_prefill_cache_commit_us: stats.mtp_prefill_cache_commit_us / divisor,
+        mtp_decode_cache_commit_us: stats.mtp_decode_cache_commit_us / divisor,
+        mtp_cache_restore_us: stats.mtp_cache_restore_us / divisor,
+        ..MtpSpeculativeStats::default()
+    }
 }
 
 pub(crate) fn paged_prefix_fingerprint_for_request(
@@ -5835,6 +5831,20 @@ impl<M: Model> Scheduler<M> {
         }
     }
 
+    fn commit_governor_admission_after_materialization(&mut self, id: RequestId) {
+        let Some(reservation) = self.governor_admission_reservations.remove(&id) else {
+            return;
+        };
+        reservation.commit();
+        if let Some(governor) = self.process_memory_governor.as_ref() {
+            // Admission reserves the full KV cap before the first model step.
+            // Once that step has been evaluated, one-shot KV buffers are part
+            // of the authoritative footprint; retaining the reservation would
+            // count the same bytes again when planning the next prefill chunk.
+            governor.refresh_process();
+        }
+    }
+
     fn commit_all_governor_admissions(&mut self) {
         for (_, reservation) in self.governor_admission_reservations.drain() {
             reservation.commit();
@@ -6795,19 +6805,6 @@ impl<M: Model> Scheduler<M> {
         Ok(())
     }
 
-    fn effective_mtp_config(&self, cfg: MtpSpeculativeConfig) -> MtpSpeculativeConfig {
-        MtpSpeculativeConfig {
-            max_draft_tokens: effective_mtp_draft_tokens_for_paged_prefix(
-                cfg.max_draft_tokens,
-                self.paged_prefix_cache.is_some()
-                    || self
-                        .cache
-                        .as_deref()
-                        .is_some_and(cache_has_paged_full_attention),
-            ),
-        }
-    }
-
     fn mtp_position_ids(&mut self, model: &M, start_pos: i32, len: i32) -> Result<Array> {
         if model.requires_position_ids() {
             build_position_ids(start_pos, len)
@@ -7098,9 +7095,7 @@ impl<M: Model> Scheduler<M> {
         remaining_tokens: usize,
         kv_bits: Option<TurboQuantKVBits>,
     ) -> bool {
-        let max_draft_tokens =
-            mtp_supported_max_draft_tokens(self.cache.as_deref(), cfg.max_draft_tokens)
-                .min(remaining_tokens);
+        let max_draft_tokens = cfg.max_draft_tokens.min(remaining_tokens);
         max_draft_tokens > 0
             && model.supports_exact_batched_speculative_verify_for_kv_cache(
                 batch_width,
@@ -8049,8 +8044,7 @@ impl<M: Model> Scheduler<M> {
         let Some(mtp_state) = self.mtp_state.as_ref() else {
             return Ok(false);
         };
-        let max_supported_draft_tokens =
-            mtp_supported_max_draft_tokens(self.cache.as_deref(), mtp_state.cfg.max_draft_tokens);
+        let max_supported_draft_tokens = mtp_state.cfg.max_draft_tokens;
         let mut draft_budgets = Vec::new();
         for (&row_idx, row_state) in &mtp_state.rows {
             let slot = self
@@ -8073,8 +8067,11 @@ impl<M: Model> Scheduler<M> {
             }
             let draft_budget = row_state
                 .adaptive_draft_tokens
-                .clamp(1, max_supported_draft_tokens)
+                .min(max_supported_draft_tokens)
                 .min(remaining);
+            if draft_budget == 0 {
+                return Ok(false);
+            }
             draft_budgets.push((row_idx, slot.id, draft_budget));
         }
         if draft_budgets.is_empty() {
@@ -8300,7 +8297,7 @@ impl<M: Model> Scheduler<M> {
         row_idx: usize,
         continuation: usize,
         draft_len: usize,
-        policy_snapshot: MtpDraftPolicySnapshot,
+        policy_snapshot: QwenMtpDraftPolicySnapshot,
     ) {
         if draft_len == 0 {
             return;
@@ -8704,6 +8701,10 @@ impl<M: Model> Scheduler<M> {
     where
         M: MtpSpeculativeModel,
     {
+        let policy_kv_state = MtpDraftPolicyKvState::from_runtime(
+            self.paged_prefix_cache.is_some(),
+            self.active_kv_config.enabled,
+        );
         let mut mtp_state = self
             .mtp_state
             .take()
@@ -8726,6 +8727,7 @@ impl<M: Model> Scheduler<M> {
                         &mut mtp_state,
                         inputs,
                         stats,
+                        policy_kv_state,
                     )?;
                     canonical_transaction = Some(transaction);
                     Ok(PromptLookupMtpShadowOutput::Prepared(device_drafts))
@@ -9219,7 +9221,7 @@ impl<M: Model> Scheduler<M> {
                     })
                     .flatten();
                 let mtp_policy_snapshot =
-                    certification.map(|certification| certification.policy_snapshot);
+                    certification.map(|certification| certification.policy_snapshot.clone());
                 Some((
                     proposal.tokens,
                     PromptLookupProposalSource::Local,
@@ -10176,7 +10178,7 @@ impl<M: Model> Scheduler<M> {
                         position_ids,
                         canonical_replay: require_canonical_shared_full_accept,
                         mtp_policy_snapshot: require_canonical_shared_full_accept
-                            .then_some(ctx.mtp_policy_snapshot)
+                            .then_some(ctx.mtp_policy_snapshot.clone())
                             .flatten(),
                     });
                 }
@@ -10361,6 +10363,7 @@ impl<M: Model> Scheduler<M> {
         mtp_state: &mut SchedulerMtpState,
         inputs: &[PromptLookupMtpDraftInput],
         stats: &mut PromptLookupStats,
+        kv_state: MtpDraftPolicyKvState,
     ) -> Result<(PromptLookupMtpCanonicalTransaction, Vec<Vec<Array>>)>
     where
         M: MtpSpeculativeModel,
@@ -10773,6 +10776,7 @@ impl<M: Model> Scheduler<M> {
                 snapshots,
                 mtp_stats_before,
                 prompt_stats_before,
+                kv_state,
             },
             device_drafts,
         ))
@@ -10930,25 +10934,25 @@ impl<M: Model> Scheduler<M> {
                 mtp_state
                     .stats
                     .record_window_acceptance(attempted, attempted);
-                let change = row.draft_policy.observe_window(
-                    MtpDraftPolicyWindow {
-                        attempted_draft_tokens: attempted,
-                        accepted_draft_tokens: attempted,
-                        draft_forward_us: mtp_delta.draft_forward_us / divisor,
-                        verify_forward_us: prompt_delta.verify_forward_us / divisor,
-                        projection_us: prompt_delta.projection_us / divisor,
-                        sampling_us: mtp_delta.sampling_us / divisor,
-                        verify_accept_host_sync_us: prompt_delta.verify_accept_host_sync_us
-                            / divisor,
-                        main_rollback_us: prompt_delta.rollback_us / divisor,
-                        mtp_cache_commit_us: mtp_delta.mtp_cache_commit_us / divisor,
-                        mtp_prefill_cache_commit_us: mtp_delta.mtp_prefill_cache_commit_us
-                            / divisor,
-                        mtp_decode_cache_commit_us: mtp_delta.mtp_decode_cache_commit_us / divisor,
-                        mtp_cache_restore_us: mtp_delta.mtp_cache_restore_us / divisor,
-                    },
-                    &mtp_state.stats,
-                );
+                let change = row.draft_policy.observe_window(MtpDraftPolicyWindow {
+                    attempted_draft_tokens: attempted,
+                    accepted_draft_tokens: attempted,
+                    committed_tokens: input.input_tokens.len(),
+                    total_us: 0,
+                    context_tokens: ctx.verify_start_pos.max(0) as usize + 1,
+                    batch_width: accepted.len(),
+                    kv_state: transaction.kv_state,
+                    draft_forward_us: mtp_delta.draft_forward_us / divisor,
+                    verify_forward_us: prompt_delta.verify_forward_us / divisor,
+                    projection_us: prompt_delta.projection_us / divisor,
+                    sampling_us: mtp_delta.sampling_us / divisor,
+                    verify_accept_host_sync_us: prompt_delta.verify_accept_host_sync_us / divisor,
+                    main_rollback_us: prompt_delta.rollback_us / divisor,
+                    mtp_cache_commit_us: mtp_delta.mtp_cache_commit_us / divisor,
+                    mtp_prefill_cache_commit_us: mtp_delta.mtp_prefill_cache_commit_us / divisor,
+                    mtp_decode_cache_commit_us: mtp_delta.mtp_decode_cache_commit_us / divisor,
+                    mtp_cache_restore_us: mtp_delta.mtp_cache_restore_us / divisor,
+                });
                 if change.reduced {
                     mtp_state.stats.draft_budget_reductions =
                         mtp_state.stats.draft_budget_reductions.saturating_add(1);
@@ -11617,7 +11621,7 @@ impl<M: Model> Scheduler<M> {
                     mlx::StreamOrDevice::default(),
                 )?;
                 row.last_hidden = accepted_last_hidden;
-                if let Some(policy_snapshot) = input.mtp_policy_snapshot {
+                if let Some(policy_snapshot) = input.mtp_policy_snapshot.clone() {
                     row.draft_policy.restore_snapshot(policy_snapshot)?;
                     row.adaptive_draft_tokens = row
                         .draft_policy
@@ -11769,7 +11773,6 @@ impl<M: Model> Scheduler<M> {
                 "prefill_admitted_mtp_single currently requires b_max 1"
             ));
         }
-        let cfg = self.effective_mtp_config(cfg);
         match self.phase {
             Phase::Idle | Phase::Admitting => {}
             Phase::Decoding | Phase::Finished => {
@@ -11901,6 +11904,7 @@ impl<M: Model> Scheduler<M> {
         let mut last_prompt_hidden = None;
         let mut mtp_prev_hidden: Option<Array> = None;
         let mut pos = 0_i32;
+        let mut ordinary_prefill_is_adaptive_chunked = false;
         if let Some((restore_len, restored_last_hidden)) =
             try_restore_paged_prefix_for_prompt_with_mtp(
                 self.paged_prefix_cache.as_ref(),
@@ -11939,10 +11943,19 @@ impl<M: Model> Scheduler<M> {
             if let Some(plan) = prefill_plan.as_ref() {
                 n = plan.selected_tokens as i32;
             }
-            if self.paged_prefix_cache.is_some()
-                && pos + n == prompt_len_i32
-                && pos < prompt_len_i32 - 1
-            {
+            if pos == 0 && n < prompt_len_i32 {
+                ordinary_prefill_is_adaptive_chunked = true;
+            }
+            // Mirror ordinary Scheduler prefill exactly. A prompt that fits
+            // the initial prefill allocation is evaluated as [N - 1] + [1],
+            // while an adaptive chunked prompt preserves every selected
+            // chunk (except the existing paged-prefix final-token boundary).
+            // Affine projections are shape-sensitive, so inventing a final
+            // [chunk - 1] + [1] split only on the MTP side can leave the main
+            // cache numerically different before speculative decode starts.
+            let split_final_token =
+                self.paged_prefix_cache.is_some() || !ordinary_prefill_is_adaptive_chunked;
+            if split_final_token && pos + n == prompt_len_i32 && pos < prompt_len_i32 - 1 {
                 n = prompt_len_i32 - 1 - pos;
             }
             let chunk_ids = &prompt_ids[pos as usize..(pos as usize + n as usize)];
@@ -12137,7 +12150,7 @@ impl<M: Model> Scheduler<M> {
                     last_hidden: last_prompt_hidden,
                     deferred_tail_commit: None,
                     adaptive_draft_tokens: cfg.max_draft_tokens,
-                    draft_policy: MtpDraftPolicyState::new(cfg.max_draft_tokens),
+                    draft_policy: QwenMtpDraftPolicyState::new(cfg.max_draft_tokens),
                 },
             )]),
             stats,
@@ -12228,8 +12241,6 @@ impl<M: Model> Scheduler<M> {
                 "prefill_admitted_mtp_batch: cache already allocated before prefill"
             ));
         }
-        let cfg = self.effective_mtp_config(cfg);
-
         let active_rows: Vec<usize> = self
             .slots
             .iter()
@@ -12269,11 +12280,24 @@ impl<M: Model> Scheduler<M> {
         let turboquant_bits = self.kv_cache_turboquant_bits_for_rows(&active_rows)?;
         let mut final_cache =
             self.make_model_cache_for_rows(model, &active_rows, final_cap, dtype, turboquant_bits)?;
+        let fill_single_row_initial_window = active_rows.len() == 1;
 
         for (dst_row, &row_idx) in active_rows.iter().enumerate() {
             let mut temp = self.temp_mtp_scheduler_for_row(row_idx)?;
             let event = temp
-                .prefill_admitted_mtp_single_with_options(model, mtp, cfg, None, true, projection)
+                // For B>1, materialize only the prompt and first target token
+                // in each temporary scheduler. Drafting here would select
+                // tokens with B=1 execution morphology before the rows are
+                // assembled into the production batch. A true B=1 request
+                // retains the established single-row fast path.
+                .prefill_admitted_mtp_single_with_options(
+                    model,
+                    mtp,
+                    cfg,
+                    None,
+                    fill_single_row_initial_window,
+                    projection,
+                )
                 .map_err(|err| anyhow!("prefill_admitted_mtp_batch row {row_idx}: {err:#}"))?;
             let temp_cache = temp.cache.take().ok_or_else(|| {
                 anyhow!("prefill_admitted_mtp_batch row {row_idx}: temp cache absent")
@@ -12314,17 +12338,30 @@ impl<M: Model> Scheduler<M> {
                 .finished
         });
         self.cache = Some(final_cache);
-        self.cache_rows = active_rows;
+        self.cache_rows = active_rows.clone();
         self.phase = if all_finished {
             Phase::Finished
         } else {
             Phase::Decoding
         };
-        self.mtp_state = Some(SchedulerMtpState {
+        let mut mtp_state = SchedulerMtpState {
             cfg,
             rows: row_states,
             stats,
-        });
+        };
+        if !all_finished && active_rows.len() > 1 {
+            self.fill_mtp_windows_batched(
+                &active_rows,
+                cfg,
+                &mut mtp_state.stats,
+                &mut mtp_state.rows,
+                model,
+                mtp,
+                projection,
+                None,
+            )?;
+        }
+        self.mtp_state = Some(mtp_state);
 
         Ok(events)
     }
@@ -12703,6 +12740,22 @@ impl<M: Model> Scheduler<M> {
             self.mtp_state = Some(mtp_state);
             return Ok(Vec::new());
         }
+        let has_ordinary_fallback = active_rows.iter().any(|row_idx| {
+            mtp_state
+                .rows
+                .get(row_idx)
+                .is_some_and(|row| row.draft_policy.uses_ordinary_decode())
+        });
+        let at_window_boundary = active_rows.iter().all(|row_idx| {
+            mtp_state
+                .rows
+                .get(row_idx)
+                .is_some_and(|row| row.pending_tokens.is_empty())
+        });
+        if has_ordinary_fallback && at_window_boundary {
+            self.mtp_state = Some(mtp_state);
+            return self.step_inner(model);
+        }
         if active_rows.len() == 1
             && self.active_count() == 1
             && self.cache_rows.as_slice() == active_rows.as_slice()
@@ -12907,6 +12960,21 @@ impl<M: Model> Scheduler<M> {
 
             if let Some(tail) = ctx.deferred_tail_commit.as_ref() {
                 let tail_token: Array = (&[tail.token][..], &[1_i32, 1_i32][..]).try_into()?;
+                if ctx.draft_budget == 0 {
+                    let commit_start = Instant::now();
+                    let hidden = model.mtp_forward_hidden_on(
+                        mtp,
+                        &tail.prev_hidden,
+                        &tail_token,
+                        &tail.position_ids,
+                        None,
+                        Some(&mut row_state.mtp_cache),
+                        mlx::StreamOrDevice::default(),
+                    )?;
+                    mlx::transforms::eval(&[&hidden])?;
+                    add_mtp_decode_cache_commit_us(stats, commit_start);
+                    continue;
+                }
                 let token_arr = mlx::ops::shape::concatenate_on(
                     &[&tail_token, &input_token],
                     1,
@@ -13024,9 +13092,14 @@ impl<M: Model> Scheduler<M> {
         if rows_to_fill.is_empty() {
             return Ok(());
         }
-        let max_supported_draft_tokens =
-            mtp_supported_max_draft_tokens(self.cache.as_deref(), cfg.max_draft_tokens);
+        let window_started = Instant::now();
+        let max_supported_draft_tokens = cfg.max_draft_tokens;
         let stats_before_batch = stats.clone();
+        let timing_before = stats.draft_cap_timing();
+        let kv_state = MtpDraftPolicyKvState::from_runtime(
+            self.paged_prefix_cache.is_some(),
+            self.active_kv_config.enabled,
+        );
         let mut contexts = Vec::with_capacity(rows_to_fill.len());
         for &row_idx in rows_to_fill {
             let slot = self.slots[row_idx]
@@ -13052,7 +13125,7 @@ impl<M: Model> Scheduler<M> {
             history.extend_from_slice(&slot.generated_tokens);
             let draft_budget = row_state
                 .adaptive_draft_tokens
-                .clamp(1, max_supported_draft_tokens)
+                .min(max_supported_draft_tokens)
                 .min(remaining);
             let input_token: Array = (&[current_token][..], &[1_i32, 1_i32][..]).try_into()?;
             contexts.push(MtpBatchedFillContext {
@@ -13072,6 +13145,15 @@ impl<M: Model> Scheduler<M> {
         if contexts.is_empty() {
             return Ok(());
         }
+        let policy_batch_width = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter(|(row_idx, slot)| {
+                matches!(slot, Some(state) if !state.finished) && row_states.contains_key(row_idx)
+            })
+            .count()
+            .max(1);
         let mut draft_constraints = contexts
             .iter()
             .filter_map(|ctx| {
@@ -13302,6 +13384,7 @@ impl<M: Model> Scheduler<M> {
         // Preserve the qualified model-facing batch width. Rows without a new
         // draft window use zero sequence lengths in the verify tensors.
         self.rebuild_cache_layout(model, &active_rows)?;
+        let has_draft_tokens = contexts.iter().any(|ctx| !ctx.draft_tokens.is_empty());
 
         let verify_result = (|| -> Result<()> {
             let cache_row_for_ctx = contexts
@@ -13320,12 +13403,14 @@ impl<M: Model> Scheduler<M> {
                 })
                 .collect::<Result<Vec<_>>>()?;
 
-            let base_snapshot = {
+            let base_snapshot = if has_draft_tokens {
                 let cache = self
                     .cache
                     .as_ref()
                     .ok_or_else(|| anyhow!("fill_mtp_windows_batched: main cache absent"))?;
-                cache.iter().map(LayerCache::snapshot).collect::<Vec<_>>()
+                Some(cache.iter().map(LayerCache::snapshot).collect::<Vec<_>>())
+            } else {
+                None
             };
             let b = self.cache_rows.len();
             let mut verify_starts = vec![0_i32; b];
@@ -13353,7 +13438,10 @@ impl<M: Model> Scheduler<M> {
             };
             let verify_forward_start = Instant::now();
             let verified_hidden = {
-                let _verify_qmm = crate::nn::verify_qmm::armed_scope();
+                // Once every row selected draft=0, this is an ordinary
+                // batched target decode. Exact speculative QMM and rollback
+                // snapshots are needed only while at least one row drafts.
+                let _verify_qmm = has_draft_tokens.then(crate::nn::verify_qmm::armed_scope);
                 let cache = self
                     .cache
                     .as_mut()
@@ -13506,7 +13594,9 @@ impl<M: Model> Scheduler<M> {
                         })?;
                         trim_full_layer_cache_rows_to_accepted_prefix(
                             cache.as_mut_slice(),
-                            &base_snapshot,
+                            base_snapshot.as_ref().ok_or_else(|| {
+                                anyhow!("fill_mtp_windows_batched: rollback snapshot absent")
+                            })?,
                             &mismatch_rows,
                         )?;
                     }
@@ -13518,7 +13608,12 @@ impl<M: Model> Scheduler<M> {
                         let cache = self.cache.as_mut().ok_or_else(|| {
                             anyhow!("fill_mtp_windows_batched: main cache absent")
                         })?;
-                        restore_layer_cache(cache.as_mut_slice(), &base_snapshot)?;
+                        restore_layer_cache(
+                            cache.as_mut_slice(),
+                            base_snapshot.as_ref().ok_or_else(|| {
+                                anyhow!("fill_mtp_windows_batched: replay snapshot absent")
+                            })?,
+                        )?;
                     }
 
                     let accepted_lens = resolutions
@@ -13630,6 +13725,7 @@ impl<M: Model> Scheduler<M> {
                     )
                 })?;
                 let pre_window_hidden = row_state.last_hidden.clone();
+                let maintain_mtp_cache = row_state.draft_policy.should_maintain_mtp_cache();
                 if resolution.needs_rollback {
                     let trim_start = Instant::now();
                     let accepted_mtp_input_len =
@@ -13640,7 +13736,7 @@ impl<M: Model> Scheduler<M> {
                         accepted_mtp_input_len,
                     )?;
                     add_elapsed_us(&mut stats.mtp_cache_restore_us, trim_start);
-                } else {
+                } else if maintain_mtp_cache {
                     let tail_idx = accepted_input.len() - 1;
                     let tail_prev_hidden = if tail_idx == 0 {
                         pre_window_hidden.clone()
@@ -13685,12 +13781,14 @@ impl<M: Model> Scheduler<M> {
                 {
                     constraint.truncate_invalid_speculative_bonus(&mut tokens_to_append)?;
                 }
+                let committed_tokens = tokens_to_append.len();
                 row_state.pending_tokens.extend(tokens_to_append);
                 policy_inputs.push((
                     ctx.row_idx,
                     resolved_draft_tokens[ctx_idx].len(),
                     resolution.accepted_draft_len,
                     ctx.verify_start_pos.max(0) as usize + 1,
+                    committed_tokens,
                 ));
             }
 
@@ -13787,32 +13885,29 @@ impl<M: Model> Scheduler<M> {
 
             let stats_delta = stats.saturating_delta_since(&stats_before_batch);
             let divisor = contexts.len() as u64;
-            for (row_idx, attempted, accepted, continuation) in policy_inputs {
+            let batch_total_us = elapsed_us_since(window_started);
+            let per_row_total_us = batch_total_us / divisor;
+            for &(row_idx, attempted, accepted, context_tokens, committed_tokens) in &policy_inputs
+            {
                 let row_state = row_states.get_mut(&row_idx).ok_or_else(|| {
                     anyhow!(
                         "fill_mtp_windows_batched: row {row_idx} state absent for policy update"
                     )
                 })?;
-                let change = row_state.draft_policy.observe_window(
-                    MtpDraftPolicyWindow {
-                        attempted_draft_tokens: attempted,
-                        accepted_draft_tokens: accepted,
-                        draft_forward_us: stats_delta.draft_forward_us / divisor,
-                        verify_forward_us: stats_delta.verify_forward_us / divisor,
-                        projection_us: stats_delta.projection_us / divisor,
-                        sampling_us: stats_delta.sampling_us / divisor,
-                        verify_accept_host_sync_us: stats_delta.verify_accept_host_sync_us
-                            / divisor,
-                        main_rollback_us: stats_delta.main_rollback_us / divisor,
-                        mtp_cache_commit_us: stats_delta.mtp_cache_commit_us / divisor,
-                        mtp_prefill_cache_commit_us: stats_delta.mtp_prefill_cache_commit_us
-                            / divisor,
-                        mtp_decode_cache_commit_us: stats_delta.mtp_decode_cache_commit_us
-                            / divisor,
-                        mtp_cache_restore_us: stats_delta.mtp_cache_restore_us / divisor,
-                    },
-                    stats,
-                );
+                let per_row_delta = divided_mtp_stats_timing(&stats_delta, divisor);
+                let change =
+                    row_state
+                        .draft_policy
+                        .observe_window(MtpDraftPolicyWindow::from_stats_delta(
+                            attempted,
+                            accepted,
+                            committed_tokens,
+                            per_row_total_us,
+                            context_tokens,
+                            policy_batch_width,
+                            kv_state,
+                            &per_row_delta,
+                        ));
                 if change.reduced {
                     stats.draft_budget_reductions = stats.draft_budget_reductions.saturating_add(1);
                 } else if change.increased {
@@ -13823,15 +13918,44 @@ impl<M: Model> Scheduler<M> {
                     .current_budget()
                     .min(max_supported_draft_tokens);
                 let policy_snapshot = row_state.draft_policy.snapshot();
-                if accepted == attempted {
+                if attempted > 0 && accepted == attempted {
                     self.record_prompt_lookup_mtp_certification(
                         row_idx,
-                        continuation,
+                        context_tokens,
                         attempted,
                         policy_snapshot,
                     );
                 }
             }
+            let timing_delta = stats
+                .draft_cap_timing()
+                .saturating_delta_since(timing_before);
+            let draft_tokens_by_row = policy_inputs
+                .iter()
+                .map(|(_, attempted, _, _, _)| *attempted)
+                .collect::<Vec<_>>();
+            let context_tokens_by_row = policy_inputs
+                .iter()
+                .map(|(_, _, _, context_tokens, _)| *context_tokens)
+                .collect::<Vec<_>>();
+            let accepted_draft_tokens = policy_inputs
+                .iter()
+                .map(|(_, _, accepted, _, _)| *accepted)
+                .sum();
+            let committed_tokens = policy_inputs
+                .iter()
+                .map(|(_, _, _, _, committed)| *committed)
+                .sum();
+            stats.record_draft_cap_observation(
+                max_supported_draft_tokens,
+                &draft_tokens_by_row,
+                &context_tokens_by_row,
+                accepted_draft_tokens,
+                committed_tokens,
+                stats_delta.rollback_count,
+                batch_total_us,
+                timing_delta,
+            );
 
             Ok(())
         })();
@@ -13868,6 +13992,17 @@ impl<M: Model> Scheduler<M> {
             self.active_count() == 1 && self.cache_rows.as_slice() == [row_idx],
             "step_mtp_single requires one active row with matching cache layout"
         );
+
+        let ordinary_fallback = self
+            .mtp_state
+            .as_ref()
+            .and_then(|state| state.rows.get(&row_idx))
+            .is_some_and(|row| {
+                row.pending_tokens.is_empty() && row.draft_policy.uses_ordinary_decode()
+            });
+        if ordinary_fallback {
+            return self.step_inner(model);
+        }
 
         if self
             .mtp_state
@@ -14030,15 +14165,21 @@ impl<M: Model> Scheduler<M> {
         history.extend_from_slice(&prompt_ids);
         history.extend_from_slice(&generated_tokens);
 
+        let window_started = Instant::now();
         let stats_before_window = stats.clone();
-        let max_supported_draft_tokens = mtp_supported_max_draft_tokens(
-            self.cache.as_deref(),
-            window.speculative.max_draft_tokens,
+        let timing_before = stats.draft_cap_timing();
+        let context_tokens = history.len();
+        let kv_state = MtpDraftPolicyKvState::from_runtime(
+            self.paged_prefix_cache.is_some(),
+            self.active_kv_config.enabled,
         );
+
+        let max_supported_draft_tokens = window.speculative.max_draft_tokens;
         let draft_budget = row_state
             .adaptive_draft_tokens
-            .clamp(1, max_supported_draft_tokens)
+            .min(max_supported_draft_tokens)
             .min(remaining);
+        let maintain_mtp_cache = row_state.draft_policy.should_maintain_mtp_cache();
         let mut compact_prng = self.compact_prng_state_for_rows(&[row_idx])?;
         let mut draft_constraint = constraint.clone();
         let draft_result = self.draft_mtp_tokens_single_greedy_device(
@@ -14052,11 +14193,14 @@ impl<M: Model> Scheduler<M> {
             draft_constraint.as_mut(),
         )?;
         let current: Array = (&[current_token][..], &[1_i32, 1_i32][..]).try_into()?;
-        let mut token_steps = Vec::with_capacity(draft_result.tokens.len() + 1);
-        token_steps.push(&current);
-        token_steps.extend(draft_result.tokens.iter());
-        let verify_arr =
-            mlx::ops::shape::concatenate_on(&token_steps, 1, mlx::StreamOrDevice::default())?;
+        let verify_arr = if draft_result.tokens.is_empty() {
+            current.clone()
+        } else {
+            let mut token_steps = Vec::with_capacity(draft_result.tokens.len() + 1);
+            token_steps.push(&current);
+            token_steps.extend(draft_result.tokens.iter());
+            mlx::ops::shape::concatenate_on(&token_steps, 1, mlx::StreamOrDevice::default())?
+        };
         let draft_arr = if sampler.is_pipelinable() && constraint.is_none() {
             None
         } else {
@@ -14072,15 +14216,18 @@ impl<M: Model> Scheduler<M> {
         let verify_pos_ids = self.mtp_position_ids(model, verify_start_pos, verify_len as i32)?;
         let pre_window_hidden = row_state.last_hidden.clone();
 
-        let base_snapshot = {
+        let base_snapshot = (draft_budget > 0).then(|| {
             let cache = self
                 .cache
                 .as_ref()
-                .ok_or_else(|| anyhow!("fill_mtp_window_single: main cache absent"))?;
+                .expect("main cache was initialized before MTP decode");
             cache.iter().map(LayerCache::snapshot).collect::<Vec<_>>()
-        };
+        });
         let verify_forward_start = Instant::now();
-        let _verify_qmm = crate::nn::verify_qmm::armed_scope();
+        // A zero-draft window is an ordinary single-token target decode. Do
+        // not force it through the exact speculative QMM path; there is no
+        // drafted position whose result needs cross-shape verification.
+        let _verify_qmm = (draft_budget > 0).then(crate::nn::verify_qmm::armed_scope);
         let verified_hidden = {
             let cache = self
                 .cache
@@ -14096,81 +14243,91 @@ impl<M: Model> Scheduler<M> {
             )?
         };
         add_elapsed_us(&mut stats.verify_forward_us, verify_forward_start);
-        let (draft_tokens, resolution) = if sampler.is_pipelinable() {
-            let projection_start = Instant::now();
-            let verified_logits = project_mtp_target_hidden(
-                model,
-                &verified_hidden,
-                window.projection,
-                mlx::StreamOrDevice::default(),
-            )?;
-            let verified_logits = if let Some(constraint) = constraint.as_ref() {
-                let draft_arr = draft_arr
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("constrained MTP draft array is absent"))?;
+        let (draft_tokens, resolution) =
+            if draft_budget == 0 && sampler.is_pipelinable() && constraint.is_none() {
+                let resolution = resolve_greedy_verified_hidden_until_mismatch(
+                    model,
+                    &verified_hidden,
+                    &[],
+                    stats,
+                    mlx::StreamOrDevice::default(),
+                )?;
+                (Vec::new(), resolution)
+            } else if sampler.is_pipelinable() {
+                let projection_start = Instant::now();
+                let verified_logits = project_mtp_target_hidden(
+                    model,
+                    &verified_hidden,
+                    window.projection,
+                    mlx::StreamOrDevice::default(),
+                )?;
+                let verified_logits = if let Some(constraint) = constraint.as_ref() {
+                    let draft_arr = draft_arr
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("constrained MTP draft array is absent"))?;
+                    let sync_start = Instant::now();
+                    let draft_tokens: Vec<u32> = draft_arr.to_vec()?;
+                    stats.draft_host_sync_count = stats.draft_host_sync_count.saturating_add(1);
+                    add_elapsed_us(&mut stats.draft_host_sync_us, sync_start);
+                    crate::core::constrained::apply_speculative_token_masks(
+                        &verified_logits,
+                        &[Some(constraint.speculative_masks(&draft_tokens)?)],
+                    )?
+                } else {
+                    verified_logits
+                };
+                add_elapsed_us(&mut stats.projection_us, projection_start);
+                let sampling_start = Instant::now();
+                let verified_ids = mlx::ops::reduction::argmax(&verified_logits, -1, false)?;
+                let packed = pack_greedy_acceptance_on(
+                    &verify_arr,
+                    &[verify_len as i32],
+                    &verified_ids,
+                    mlx::StreamOrDevice::default(),
+                )?;
+                add_elapsed_us(&mut stats.sampling_us, sampling_start);
+                let accept_sync_start = Instant::now();
+                let packed: Vec<u32> = packed.to_vec()?;
+                stats.verify_accept_host_sync_count =
+                    stats.verify_accept_host_sync_count.saturating_add(1);
+                add_elapsed_us(&mut stats.verify_accept_host_sync_us, accept_sync_start);
+                resolve_packed_greedy_acceptance(&packed, verify_len + 1, 0, draft_budget)?
+            } else {
+                let projection_start = Instant::now();
+                let verified_logits = project_mtp_target_hidden(
+                    model,
+                    &verified_hidden,
+                    window.projection,
+                    mlx::StreamOrDevice::default(),
+                )?;
+                add_elapsed_us(&mut stats.projection_us, projection_start);
+                let sampling_start = Instant::now();
+                let draft_arr = draft_arr.as_ref().ok_or_else(|| {
+                    anyhow!("fill_mtp_window_single: non-greedy draft array absent")
+                })?;
                 let sync_start = Instant::now();
                 let draft_tokens: Vec<u32> = draft_arr.to_vec()?;
                 stats.draft_host_sync_count = stats.draft_host_sync_count.saturating_add(1);
                 add_elapsed_us(&mut stats.draft_host_sync_us, sync_start);
-                crate::core::constrained::apply_speculative_token_masks(
+                let verified_logits = if let Some(constraint) = constraint.as_ref() {
+                    crate::core::constrained::apply_speculative_token_masks(
+                        &verified_logits,
+                        &[Some(constraint.speculative_masks(&draft_tokens)?)],
+                    )?
+                } else {
+                    verified_logits
+                };
+                let resolution = resolve_exact_deterministic_target_logits(
+                    &draft_tokens,
                     &verified_logits,
-                    &[Some(constraint.speculative_masks(&draft_tokens)?)],
-                )?
-            } else {
-                verified_logits
+                    sampler,
+                    &history,
+                    &mut compact_prng,
+                )?;
+                let (draft_tokens, resolution) = (draft_tokens, resolution);
+                add_elapsed_us(&mut stats.sampling_us, sampling_start);
+                (draft_tokens, resolution)
             };
-            add_elapsed_us(&mut stats.projection_us, projection_start);
-            let sampling_start = Instant::now();
-            let verified_ids = mlx::ops::reduction::argmax(&verified_logits, -1, false)?;
-            let packed = pack_greedy_acceptance_on(
-                &verify_arr,
-                &[verify_len as i32],
-                &verified_ids,
-                mlx::StreamOrDevice::default(),
-            )?;
-            add_elapsed_us(&mut stats.sampling_us, sampling_start);
-            let accept_sync_start = Instant::now();
-            let packed: Vec<u32> = packed.to_vec()?;
-            stats.verify_accept_host_sync_count =
-                stats.verify_accept_host_sync_count.saturating_add(1);
-            add_elapsed_us(&mut stats.verify_accept_host_sync_us, accept_sync_start);
-            resolve_packed_greedy_acceptance(&packed, verify_len + 1, 0, draft_budget)?
-        } else {
-            let projection_start = Instant::now();
-            let verified_logits = project_mtp_target_hidden(
-                model,
-                &verified_hidden,
-                window.projection,
-                mlx::StreamOrDevice::default(),
-            )?;
-            add_elapsed_us(&mut stats.projection_us, projection_start);
-            let sampling_start = Instant::now();
-            let draft_arr = draft_arr
-                .as_ref()
-                .ok_or_else(|| anyhow!("fill_mtp_window_single: non-greedy draft array absent"))?;
-            let sync_start = Instant::now();
-            let draft_tokens: Vec<u32> = draft_arr.to_vec()?;
-            stats.draft_host_sync_count = stats.draft_host_sync_count.saturating_add(1);
-            add_elapsed_us(&mut stats.draft_host_sync_us, sync_start);
-            let verified_logits = if let Some(constraint) = constraint.as_ref() {
-                crate::core::constrained::apply_speculative_token_masks(
-                    &verified_logits,
-                    &[Some(constraint.speculative_masks(&draft_tokens)?)],
-                )?
-            } else {
-                verified_logits
-            };
-            let resolution = resolve_exact_deterministic_target_logits(
-                &draft_tokens,
-                &verified_logits,
-                sampler,
-                &history,
-                &mut compact_prng,
-            )?;
-            let (draft_tokens, resolution) = (draft_tokens, resolution);
-            add_elapsed_us(&mut stats.sampling_us, sampling_start);
-            (draft_tokens, resolution)
-        };
         let verify_input = verify_input(current_token, &draft_tokens);
         if let Some(observations) = observations {
             observations.push(CanonicalMtpWindowObservation {
@@ -14200,10 +14357,13 @@ impl<M: Model> Scheduler<M> {
                     .cache
                     .as_mut()
                     .ok_or_else(|| anyhow!("fill_mtp_window_single: main cache absent"))?;
+                let base_snapshot = base_snapshot
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("fill_mtp_window_single: rollback snapshot absent"))?;
                 rollback_main_cache_to_accepted_prefix(
                     model,
                     cache.as_mut_slice(),
-                    &base_snapshot,
+                    base_snapshot,
                     MainCacheRollbackInput {
                         accepted_by_row: &[(0, accepted_len)],
                         verify_input: &verify_input,
@@ -14236,7 +14396,7 @@ impl<M: Model> Scheduler<M> {
                 accepted_input.len(),
             )?;
             add_elapsed_us(&mut stats.mtp_cache_restore_us, trim_start);
-        } else {
+        } else if maintain_mtp_cache {
             let commit_start = Instant::now();
             commit_mtp_cache_hidden_tail(
                 model,
@@ -14256,33 +14416,6 @@ impl<M: Model> Scheduler<M> {
         }
         row_state.last_hidden = accepted_last_hidden;
 
-        let stats_delta = stats.saturating_delta_since(&stats_before_window);
-        let change = row_state.draft_policy.observe_window(
-            MtpDraftPolicyWindow::from_stats_delta(
-                draft_tokens.len(),
-                resolution.accepted_draft_len,
-                &stats_delta,
-            ),
-            stats,
-        );
-        if change.reduced {
-            stats.draft_budget_reductions = stats.draft_budget_reductions.saturating_add(1);
-        } else if change.increased {
-            stats.draft_budget_increases = stats.draft_budget_increases.saturating_add(1);
-        }
-        row_state.adaptive_draft_tokens = row_state
-            .draft_policy
-            .current_budget()
-            .min(max_supported_draft_tokens);
-        if resolution.accepted_draft_len == draft_tokens.len() {
-            self.record_prompt_lookup_mtp_certification(
-                row_idx,
-                verify_start_pos.max(0) as usize + 1,
-                draft_tokens.len(),
-                row_state.draft_policy.snapshot(),
-            );
-        }
-
         let mut tokens_to_append = resolution.tokens_to_append;
         if let Some(stop_idx) = tokens_to_append
             .iter()
@@ -14294,7 +14427,52 @@ impl<M: Model> Scheduler<M> {
         if let Some(constraint) = constraint.as_ref() {
             constraint.truncate_invalid_speculative_bonus(&mut tokens_to_append)?;
         }
+        let committed_tokens = tokens_to_append.len();
         row_state.pending_tokens.extend(tokens_to_append);
+        let total_us = elapsed_us_since(window_started);
+        let stats_delta = stats.saturating_delta_since(&stats_before_window);
+        let change = row_state
+            .draft_policy
+            .observe_window(MtpDraftPolicyWindow::from_stats_delta(
+                draft_tokens.len(),
+                resolution.accepted_draft_len,
+                committed_tokens,
+                total_us,
+                context_tokens,
+                1,
+                kv_state,
+                &stats_delta,
+            ));
+        if change.reduced {
+            stats.draft_budget_reductions = stats.draft_budget_reductions.saturating_add(1);
+        } else if change.increased {
+            stats.draft_budget_increases = stats.draft_budget_increases.saturating_add(1);
+        }
+        row_state.adaptive_draft_tokens = row_state
+            .draft_policy
+            .current_budget()
+            .min(max_supported_draft_tokens);
+        let timing_delta = stats
+            .draft_cap_timing()
+            .saturating_delta_since(timing_before);
+        stats.record_draft_cap_observation(
+            max_supported_draft_tokens,
+            &[draft_tokens.len()],
+            &[context_tokens],
+            resolution.accepted_draft_len,
+            committed_tokens,
+            stats_delta.rollback_count,
+            total_us,
+            timing_delta,
+        );
+        if !draft_tokens.is_empty() && resolution.accepted_draft_len == draft_tokens.len() {
+            self.record_prompt_lookup_mtp_certification(
+                row_idx,
+                verify_start_pos.max(0) as usize + 1,
+                draft_tokens.len(),
+                row_state.draft_policy.snapshot(),
+            );
+        }
         self.scatter_prng_state_from_rows(&[row_idx], &compact_prng)?;
         Ok(())
     }
@@ -14412,6 +14590,76 @@ impl<M: Model> Scheduler<M> {
         }
     }
 
+    fn prefill_admitted_row_isolated(
+        &mut self,
+        model: &M,
+        active_rows: &[usize],
+    ) -> Result<Vec<StepEvent>>
+    where
+        M: DenseVlMethods,
+    {
+        self.discard_retained_immutable_prefix_cache();
+        anyhow::ensure!(
+            self.cache.is_none(),
+            "prefill_admitted_row_isolated: cache already allocated before prefill"
+        );
+        let final_cap = self.prefill_cache_cap();
+        let turboquant_bits = self.kv_cache_turboquant_bits_for_rows(active_rows)?;
+        let mut final_cache = self.make_model_cache_for_rows(
+            model,
+            active_rows,
+            final_cap,
+            model.cache_dtype(),
+            turboquant_bits,
+        )?;
+        let mut events = Vec::with_capacity(active_rows.len());
+
+        for (compact_row, &row_idx) in active_rows.iter().enumerate() {
+            let mut temp = self.temp_mtp_scheduler_for_row(row_idx)?;
+            let row_events = temp.prefill_admitted_inner(model).map_err(|error| {
+                anyhow!("prefill_admitted_row_isolated row {row_idx}: {error:#}")
+            })?;
+            temp.commit_all_governor_admissions();
+            let temp_cache = temp.cache.take().ok_or_else(|| {
+                anyhow!("prefill_admitted_row_isolated row {row_idx}: temp cache absent")
+            })?;
+            let temp_slot = temp.slots[0].as_ref().ok_or_else(|| {
+                anyhow!("prefill_admitted_row_isolated row {row_idx}: temp slot absent")
+            })?;
+            let slot = self.slots[row_idx]
+                .as_mut()
+                .expect("active row implies slot is Some");
+            slot.generated_tokens = temp_slot.generated_tokens.clone();
+            slot.real_len = temp_slot.real_len;
+            slot.finished = temp_slot.finished;
+            slot.finish_reason = temp_slot.finish_reason;
+            slot.constraint = temp_slot.constraint.clone();
+            adopt_cache_row_layers(
+                &mut final_cache,
+                &temp_cache,
+                compact_row,
+                0,
+                "prefill_admitted_row_isolated",
+            )?;
+            events.extend(row_events);
+        }
+
+        let all_finished = active_rows.iter().all(|&row| {
+            self.slots[row]
+                .as_ref()
+                .expect("active row implies slot is Some")
+                .finished
+        });
+        self.cache = Some(final_cache);
+        self.cache_rows = active_rows.to_vec();
+        self.phase = if all_finished {
+            Phase::Finished
+        } else {
+            Phase::Decoding
+        };
+        Ok(events)
+    }
+
     fn prefill_admitted_inner(&mut self, model: &M) -> Result<Vec<StepEvent>>
     where
         M: DenseVlMethods,
@@ -14433,6 +14681,17 @@ impl<M: Model> Scheduler<M> {
             .collect();
         if active_rows.is_empty() {
             return Err(anyhow!("prefill_admitted: no admitted requests to prefill"));
+        }
+
+        if active_rows.len() > 1
+            && model.requires_split_batched_prefill_for_token_parity()
+            && active_rows.iter().all(|&row| {
+                self.slots[row]
+                    .as_ref()
+                    .is_some_and(|state| state.pixel_values.is_none())
+            })
+        {
+            return self.prefill_admitted_row_isolated(model, &active_rows);
         }
 
         let prefill_rows = active_rows;
@@ -15462,16 +15721,11 @@ impl<M: Model> Scheduler<M> {
         // them. Gemma4 derives positions from KV offsets, so the hot path can
         // reuse a placeholder without changing model semantics.
         let position_ids = if model.requires_position_ids() {
-            let per_row_pos: Vec<i32> = active_rows
-                .iter()
-                .map(|&slot_row| {
-                    self.slots[slot_row]
-                        .as_ref()
-                        .expect("active row implies Some")
-                        .real_len
-                })
-                .collect();
-            build_decode_position_ids(&per_row_pos)?
+            // The cache offset is the zero-based position where the current
+            // token will be written. `RequestState::real_len` already includes
+            // that emitted-but-not-yet-cached token, so using it directly here
+            // shifts every ordinary Scheduler decode position by one.
+            build_decode_position_ids(&pre_offsets)?
         } else {
             self.reusable_dummy_position_ids()?
         };
@@ -16443,7 +16697,6 @@ impl<M: Model> Scheduler<M> {
                 "admit_mid_begin_mtp: image_grid_thw present but pixel_values is None"
             ));
         }
-        let cfg = self.effective_mtp_config(cfg);
         MtpSpeculativeConfig::new(cfg.max_draft_tokens, sampler)?;
 
         let prompt_len = prompt_len_usz as i32;
@@ -16870,7 +17123,7 @@ impl<M: Model> Scheduler<M> {
                 last_hidden: last_prompt_hidden,
                 deferred_tail_commit: None,
                 adaptive_draft_tokens: mtp_state.cfg.max_draft_tokens,
-                draft_policy: MtpDraftPolicyState::new(mtp_state.cfg.max_draft_tokens),
+                draft_policy: QwenMtpDraftPolicyState::new(mtp_state.cfg.max_draft_tokens),
             };
             let fill_result = (|| {
                 let mut temp = self.build_temp_mtp_step_scheduler(
@@ -17494,6 +17747,7 @@ impl Scheduler<crate::models::Gemma4Model> {
                     last_hidden: last_prompt_hidden,
                     shared_kv,
                     adaptive_draft_tokens: drafter_state.cfg.max_draft_tokens,
+                    draft_policy: Gemma4DrafterPolicyState::new(drafter_state.cfg.max_draft_tokens),
                 },
             );
         }
@@ -17623,8 +17877,7 @@ impl Scheduler<crate::models::Gemma4Model> {
             ));
         }
         if active_rows.len() == 1 {
-            return self
-                .prefill_admitted_gemma4_drafter_single(model, drafter, cfg, self.b_max, true);
+            return self.prefill_admitted_gemma4_drafter_single(model, drafter, cfg, true);
         }
         for &row_idx in &active_rows {
             let state = self.slots[row_idx]
@@ -17642,6 +17895,18 @@ impl Scheduler<crate::models::Gemma4Model> {
             }
             MtpSpeculativeConfig::new(cfg.max_draft_tokens, state.sampler)?;
         }
+        if active_rows.iter().all(|&row_idx| {
+            self.slots[row_idx]
+                .as_ref()
+                .is_some_and(|state| state.pixel_values.is_none())
+        }) {
+            return self.prefill_admitted_gemma4_drafter_text_batch_direct(
+                &active_rows,
+                model,
+                drafter,
+                cfg,
+            );
+        }
 
         let mut temp_rows = Vec::with_capacity(active_rows.len());
         let mut row_states = HashMap::with_capacity(active_rows.len());
@@ -17649,18 +17914,15 @@ impl Scheduler<crate::models::Gemma4Model> {
         let mut events = Vec::with_capacity(active_rows.len());
         let mut final_cap = MIN_KV_CACHE_CAP_FOR_GPU_PERF;
         let dtype = model.cache_dtype();
-        let scheduler_batch_capacity = self.b_max;
-
         for &row_idx in &active_rows {
             let mut temp = self.temp_gemma4_drafter_scheduler_for_row(row_idx)?;
             let event = temp
-                .prefill_admitted_gemma4_drafter_single(
-                    model,
-                    drafter,
-                    cfg,
-                    scheduler_batch_capacity,
-                    true,
-                )
+                // Only materialize each row's prompt and first target token
+                // here. Filling an initial speculative window inside the
+                // temporary B=1 scheduler would select tokens using B=1
+                // execution morphology before the rows are assembled into
+                // the production batch.
+                .prefill_admitted_gemma4_drafter_single(model, drafter, cfg, false)
                 .map_err(|err| {
                     anyhow!("prefill_admitted_gemma4_drafter_batch row {row_idx}: {err:#}")
                 })?;
@@ -17724,19 +17986,263 @@ impl Scheduler<crate::models::Gemma4Model> {
                 .finished
         });
         self.cache = Some(final_cache);
-        self.cache_rows = active_rows;
+        self.cache_rows = active_rows.clone();
         self.phase = if all_finished {
             Phase::Finished
         } else {
             Phase::Decoding
         };
-        self.gemma4_drafter_state = Some(SchedulerGemma4DrafterState {
+        let mut drafter_state = SchedulerGemma4DrafterState {
             cfg,
             rows: row_states,
             stats,
-        });
+        };
+        if !all_finished {
+            self.fill_gemma4_drafter_windows_batched(
+                &active_rows,
+                cfg,
+                &mut drafter_state.stats,
+                &mut drafter_state.rows,
+                model,
+                drafter,
+            )?;
+        }
+        self.gemma4_drafter_state = Some(drafter_state);
         self.refresh_active_kv_residency_stats();
 
+        Ok(events)
+    }
+
+    fn prefill_admitted_gemma4_drafter_text_batch_direct(
+        &mut self,
+        active_rows: &[usize],
+        model: &crate::models::Gemma4Model,
+        drafter: &crate::models::gemma4::Gemma4AssistantModel,
+        cfg: MtpSpeculativeConfig,
+    ) -> Result<Vec<StepEvent>> {
+        let prompt_lens = active_rows
+            .iter()
+            .map(|&row_idx| {
+                i32::try_from(
+                    self.slots[row_idx]
+                        .as_ref()
+                        .expect("active Gemma4 row is occupied")
+                        .prompt_ids
+                        .len(),
+                )
+                .map_err(anyhow::Error::from)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let max_prompt_len = prompt_lens.iter().copied().max().unwrap_or(0);
+        anyhow::ensure!(
+            max_prompt_len > 0,
+            "Gemma4 drafter direct batch prefill requires non-empty prompts"
+        );
+        let batch = active_rows.len();
+        let max_prompt_len_usize = usize::try_from(max_prompt_len)?;
+        let mut flat = vec![0_u32; batch * max_prompt_len_usize];
+        for (compact_row, &row_idx) in active_rows.iter().enumerate() {
+            let prompt_ids = &self.slots[row_idx]
+                .as_ref()
+                .expect("active Gemma4 row is occupied")
+                .prompt_ids;
+            let start = compact_row * max_prompt_len_usize;
+            flat[start..start + prompt_ids.len()].copy_from_slice(prompt_ids);
+        }
+        let input_ids: Array =
+            (&flat[..], &[i32::try_from(batch)?, max_prompt_len][..]).try_into()?;
+        let cap = self.prefill_cache_cap();
+        let turboquant_bits = self.kv_cache_turboquant_bits_for_rows(active_rows)?;
+        self.install_initial_cache_for_rows(
+            model,
+            active_rows,
+            cap,
+            model.cache_dtype(),
+            turboquant_bits,
+        )?;
+        let position_ids = self.reusable_dummy_position_ids()?;
+        let mut stats = MtpSpeculativeStats::default();
+        let forward_start = Instant::now();
+        let uniform_prompt_lens = prompt_lens.iter().all(|&len| len == max_prompt_len);
+        let (output, output_start) = if uniform_prompt_lens && max_prompt_len > 2_048 {
+            let mut start = 0_i32;
+            let mut final_output = None;
+            let mut final_start = 0_i32;
+            while start < max_prompt_len {
+                let requested_tokens = usize::try_from((max_prompt_len - start).min(2_048))?;
+                let prefill_plan =
+                    self.plan_prefill_chunk(requested_tokens, usize::try_from(start)?, batch)?;
+                let selected_tokens = prefill_plan
+                    .as_ref()
+                    .map_or(requested_tokens, |plan| plan.selected_tokens);
+                let end = start + i32::try_from(selected_tokens)?;
+                let chunk = mlx::ops::indexing::slice_strided_on(
+                    &input_ids,
+                    &[0_i32, start][..],
+                    &[i32::try_from(batch)?, end][..],
+                    &[1_i32, 1][..],
+                    mlx::StreamOrDevice::default(),
+                )?;
+                let output = {
+                    let cache = self.cache.as_mut().ok_or_else(|| {
+                        anyhow!("Gemma4 drafter direct batch prefill cache is absent")
+                    })?;
+                    model.forward_text_hidden_with_shared_kv_on(
+                        &chunk,
+                        &position_ids,
+                        None,
+                        None,
+                        Some(cache.as_mut_slice()),
+                        mlx::StreamOrDevice::default(),
+                    )?
+                };
+                mlx::transforms::eval(&[&output.hidden])?;
+                drop(prefill_plan);
+                final_start = start;
+                final_output = Some(output);
+                start = end;
+            }
+            (
+                final_output
+                    .ok_or_else(|| anyhow!("Gemma4 drafter batch prefill produced no output"))?,
+                final_start,
+            )
+        } else {
+            let cache = self
+                .cache
+                .as_mut()
+                .ok_or_else(|| anyhow!("Gemma4 drafter direct batch prefill cache is absent"))?;
+            (
+                model.forward_text_hidden_with_shared_kv_on(
+                    &input_ids,
+                    &position_ids,
+                    (!uniform_prompt_lens).then_some(prompt_lens.as_slice()),
+                    None,
+                    Some(cache.as_mut_slice()),
+                    mlx::StreamOrDevice::default(),
+                )?,
+                0,
+            )
+        };
+        let mut last_hidden_rows = Vec::with_capacity(batch);
+        for (compact_row, &prompt_len) in prompt_lens.iter().enumerate() {
+            last_hidden_rows.push(slice_hidden_row_position(
+                &output.hidden,
+                compact_row,
+                usize::try_from(prompt_len - output_start - 1)?,
+                mlx::StreamOrDevice::default(),
+            )?);
+        }
+        mlx::transforms::eval(&[&output.hidden])?;
+        add_elapsed_us(&mut stats.verify_forward_us, forward_start);
+        let last_hidden_refs = last_hidden_rows.iter().collect::<Vec<_>>();
+        let last_hidden =
+            mlx::ops::shape::concatenate_on(&last_hidden_refs, 0, mlx::StreamOrDevice::default())?;
+        let projection_start = Instant::now();
+        let first_logits = model.project_hidden_on(&last_hidden, mlx::StreamOrDevice::default())?;
+        add_elapsed_us(&mut stats.projection_us, projection_start);
+
+        let constraint_masks = active_rows
+            .iter()
+            .map(|&row_idx| {
+                self.slots[row_idx]
+                    .as_mut()
+                    .expect("active Gemma4 row is occupied")
+                    .constraint
+                    .as_mut()
+                    .map(crate::core::constrained::ConstraintSession::compute_mask)
+                    .transpose()
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let logits_shape = first_logits.shape();
+        let vocab = logits_shape.as_slice()[2];
+        let first_logits = first_logits.reshape(&[i32::try_from(batch)?, vocab][..])?;
+        let first_logits =
+            crate::core::constrained::apply_batch_token_masks(&first_logits, &constraint_masks)?;
+        let row_samplers = active_rows
+            .iter()
+            .map(|&row_idx| {
+                &self.slots[row_idx]
+                    .as_ref()
+                    .expect("active Gemma4 row is occupied")
+                    .sampler
+            })
+            .collect::<Vec<_>>();
+        let row_histories = active_rows
+            .iter()
+            .map(|&row_idx| {
+                self.slots[row_idx]
+                    .as_ref()
+                    .expect("active Gemma4 row is occupied")
+                    .prompt_ids
+                    .as_slice()
+            })
+            .collect::<Vec<_>>();
+        let mut compact_prng = self.compact_prng_state_for_rows(active_rows)?;
+        let sampling_start = Instant::now();
+        let first_tokens = crate::core::sampler::sample_batch(
+            &row_samplers,
+            &first_logits,
+            &row_histories,
+            &mut compact_prng,
+        )?;
+        add_elapsed_us(&mut stats.sampling_us, sampling_start);
+        self.scatter_prng_state_from_rows(active_rows, &compact_prng)?;
+
+        let mut row_states = HashMap::with_capacity(batch);
+        let mut events = Vec::with_capacity(batch);
+        for (compact_row, (&row_idx, &first_token)) in
+            active_rows.iter().zip(first_tokens.iter()).enumerate()
+        {
+            let prompt_len = prompt_lens[compact_row];
+            let shared_kv = crate::models::gemma4::shared_kv_row_prefix_on(
+                &output.shared_kv,
+                compact_row,
+                prompt_len,
+                mlx::StreamOrDevice::default(),
+            )?;
+            row_states.insert(
+                row_idx,
+                SchedulerGemma4DrafterRowState {
+                    pending_tokens: VecDeque::new(),
+                    last_hidden: last_hidden_rows[compact_row].clone(),
+                    shared_kv,
+                    adaptive_draft_tokens: cfg.max_draft_tokens,
+                    draft_policy: Gemma4DrafterPolicyState::new(cfg.max_draft_tokens),
+                },
+            );
+            let event = self.emit_token_for_row(row_idx, first_token)?;
+            events.push(event);
+        }
+        self.cache_rows = active_rows.to_vec();
+        let all_finished = active_rows.iter().all(|&row_idx| {
+            self.slots[row_idx]
+                .as_ref()
+                .expect("active Gemma4 row is occupied")
+                .finished
+        });
+        self.phase = if all_finished {
+            Phase::Finished
+        } else {
+            Phase::Decoding
+        };
+        let mut drafter_state = SchedulerGemma4DrafterState {
+            cfg,
+            rows: row_states,
+            stats,
+        };
+        if !all_finished {
+            self.fill_gemma4_drafter_windows_batched(
+                active_rows,
+                cfg,
+                &mut drafter_state.stats,
+                &mut drafter_state.rows,
+                model,
+                drafter,
+            )?;
+        }
+        self.gemma4_drafter_state = Some(drafter_state);
+        self.refresh_active_kv_residency_stats();
         Ok(events)
     }
 
@@ -17745,7 +18251,6 @@ impl Scheduler<crate::models::Gemma4Model> {
         model: &crate::models::Gemma4Model,
         drafter: &crate::models::gemma4::Gemma4AssistantModel,
         cfg: MtpSpeculativeConfig,
-        scheduler_batch_capacity: usize,
         fill_initial_window: bool,
     ) -> Result<Vec<StepEvent>> {
         match self.phase {
@@ -17880,6 +18385,7 @@ impl Scheduler<crate::models::Gemma4Model> {
         };
         let mut last_prompt_hidden = None;
         let mut last_shared_kv = None;
+        let mut ordinary_prefill_is_adaptive_chunked = false;
 
         if let Some(restored) = {
             let cache = self
@@ -17910,6 +18416,19 @@ impl Scheduler<crate::models::Gemma4Model> {
             let mut prefill_plan = self.plan_prefill_chunk(n as usize, pos as usize, 1)?;
             if let Some(plan) = prefill_plan.as_ref() {
                 n = plan.selected_tokens as i32;
+            }
+            if pos == 0 && n < prompt_len_i32 {
+                ordinary_prefill_is_adaptive_chunked = true;
+            }
+            // Match ordinary Scheduler prefill morphology. A prompt that fits
+            // the initial prefill allocation is evaluated as [N - 1] + [1].
+            // Shape-sensitive Gemma4 MoE projections otherwise leave the
+            // drafter path with a different main/shared KV state before the
+            // first speculative window.
+            let split_final_token =
+                prefix_cache.is_enabled() || !ordinary_prefill_is_adaptive_chunked;
+            if split_final_token && pos + n == prompt_len_i32 && pos < prompt_len_i32 - 1 {
+                n = prompt_len_i32 - 1 - pos;
             }
             if n <= 0 {
                 return Err(anyhow!(
@@ -18007,6 +18526,7 @@ impl Scheduler<crate::models::Gemma4Model> {
             add_elapsed_us(&mut stats.verify_forward_us, forward_start);
             let chunk_last_hidden = slice_hidden_position(&out.hidden, n - 1)?;
             mlx::transforms::eval(&[&out.hidden, &chunk_last_hidden])?;
+            self.commit_governor_admission_after_materialization(id);
             let new_pos = pos + n;
             if let Some(cache) = self.cache.as_ref() {
                 match prefix_cache.try_save(
@@ -18100,18 +18620,14 @@ impl Scheduler<crate::models::Gemma4Model> {
                     last_hidden: last_prompt_hidden,
                     shared_kv,
                     adaptive_draft_tokens: cfg.max_draft_tokens,
+                    draft_policy: Gemma4DrafterPolicyState::new(cfg.max_draft_tokens),
                 },
             )]),
             stats,
         });
 
         if finish_reason.is_none() && fill_initial_window {
-            self.fill_gemma4_drafter_window_single(
-                row_idx,
-                model,
-                drafter,
-                scheduler_batch_capacity,
-            )?;
+            self.fill_gemma4_drafter_window_single(row_idx, model, drafter)?;
         }
 
         Ok(vec![StepEvent {
@@ -18160,6 +18676,22 @@ impl Scheduler<crate::models::Gemma4Model> {
             };
             self.gemma4_drafter_state = Some(drafter_state);
             return Ok(Vec::new());
+        }
+        let has_ordinary_fallback = active_rows.iter().any(|row_idx| {
+            drafter_state
+                .rows
+                .get(row_idx)
+                .is_some_and(|row| row.draft_policy.uses_ordinary_decode())
+        });
+        let at_window_boundary = active_rows.iter().all(|row_idx| {
+            drafter_state
+                .rows
+                .get(row_idx)
+                .is_some_and(|row| row.pending_tokens.is_empty())
+        });
+        if has_ordinary_fallback && at_window_boundary {
+            self.gemma4_drafter_state = Some(drafter_state);
+            return self.step_inner(model);
         }
         if active_rows.len() == 1
             && self.active_count() == 1
@@ -18220,7 +18752,7 @@ impl Scheduler<crate::models::Gemma4Model> {
                     .is_some_and(|row| row.pending_tokens.is_empty())
             })
             .collect::<Vec<_>>();
-        if refill_after_emit {
+        if refill_after_emit && !has_ordinary_fallback {
             self.fill_gemma4_drafter_windows_batched(
                 &rows_needing_postfill,
                 cfg,
@@ -18265,7 +18797,12 @@ impl Scheduler<crate::models::Gemma4Model> {
         }
 
         let window_started = Instant::now();
+        let stats_before_window = stats.clone();
         let timing_before = stats.draft_cap_timing();
+        let kv_state = MtpDraftPolicyKvState::from_runtime(
+            self.paged_prefix_cache.is_some(),
+            self.active_kv_config.enabled,
+        );
         let kv_bits = self.kv_cache_turboquant_bits_for_rows(rows_to_fill)?;
 
         let mut contexts = Vec::with_capacity(rows_to_fill.len());
@@ -18284,22 +18821,20 @@ impl Scheduler<crate::models::Gemma4Model> {
             let current_token = *slot.generated_tokens.last().ok_or_else(|| {
                 anyhow!("fill_gemma4_drafter_windows_batched: row {row_idx} has no current token")
             })?;
-            let row_state = row_states.get(&row_idx).ok_or_else(|| {
+            let row_state = row_states.get_mut(&row_idx).ok_or_else(|| {
                 anyhow!("fill_gemma4_drafter_windows_batched: row {row_idx} state absent")
             })?;
             let mut history =
                 Vec::with_capacity(slot.prompt_ids.len() + slot.generated_tokens.len());
             history.extend_from_slice(&slot.prompt_ids);
             history.extend_from_slice(&slot.generated_tokens);
-            let effective_max_draft_tokens = gemma4_drafter_effective_budget_for_context(
-                kv_bits,
-                cfg.max_draft_tokens,
-                history.len(),
-                self.b_max,
-            );
+            if history.len() > 32_768 && row_state.draft_policy.seed_initial_budget(1) {
+                row_state.adaptive_draft_tokens = row_state.draft_policy.current_budget();
+            }
+            let effective_max_draft_tokens = cfg.max_draft_tokens;
             let draft_budget = row_state
                 .adaptive_draft_tokens
-                .clamp(1, effective_max_draft_tokens)
+                .min(effective_max_draft_tokens)
                 .min(remaining);
             let kv_valid_len = (history.len() - 1) as i32;
             contexts.push(Gemma4DrafterBatchedFillContext {
@@ -18322,6 +18857,15 @@ impl Scheduler<crate::models::Gemma4Model> {
         if contexts.is_empty() {
             return Ok(());
         }
+        let policy_batch_width = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter(|(row_idx, slot)| {
+                matches!(slot, Some(state) if !state.finished) && row_states.contains_key(row_idx)
+            })
+            .count()
+            .max(1);
         let mut draft_constraints = contexts
             .iter()
             .filter_map(|ctx| {
@@ -18480,7 +19024,10 @@ impl Scheduler<crate::models::Gemma4Model> {
                 .cache
                 .as_ref()
                 .ok_or_else(|| anyhow!("fill_gemma4_drafter_windows_batched: main cache absent"))?;
-            cache.iter().map(LayerCache::snapshot).collect::<Vec<_>>()
+            cache
+                .iter()
+                .map(LayerCache::append_snapshot)
+                .collect::<Result<Vec<_>>>()?
         };
         let (verify_arr, verify_lens) = build_gemma4_drafter_batched_verify_input(
             &active_rows,
@@ -18490,7 +19037,7 @@ impl Scheduler<crate::models::Gemma4Model> {
         )?;
         let verify_pos_ids = self.reusable_dummy_position_ids()?;
         let verify_forward_start = Instant::now();
-        let stable_attention = gemma4_k3v4_long_verify_needs_stable_attention(
+        let stable_attention = gemma4_long_verify_needs_stable_attention(
             kv_bits,
             contexts
                 .iter()
@@ -18498,12 +19045,37 @@ impl Scheduler<crate::models::Gemma4Model> {
                 .max()
                 .unwrap_or(0),
             max_verify_len,
-            self.b_max,
             active_rows.len(),
         );
         let stable_k3v4_verify = gemma4_verify_needs_batch_stable_qmm(
             self.kv_cache_turboquant_bits_for_rows(rows_to_fill)?,
             active_rows.len(),
+            max_verify_len,
+        );
+        // Preserve repeated [B, 1] target-decode numerics for every packed
+        // verify position. These guards intentionally remain alive through
+        // lm_head projection as that projection is also shape-sensitive.
+        let position_stable_verify = max_verify_len > 1;
+        let _position_stable_linear =
+            position_stable_verify.then(crate::nn::position_stable_linear::scope);
+        let _position_stable_qmm =
+            position_stable_verify.then(crate::nn::position_stable_qmm::scope);
+        let max_context_tokens = contexts
+            .iter()
+            .map(|ctx| ctx.draft_history.len())
+            .max()
+            .unwrap_or(0);
+        let exact_batched_qualified = model.supports_exact_batched_speculative_verify_for_kv_cache(
+            active_rows.len(),
+            max_context_tokens,
+            max_verify_len,
+            kv_bits,
+        );
+        let sequential_q1_verify = gemma4_verify_requires_sequential_q1(
+            exact_batched_qualified,
+            kv_bits,
+            active_rows.len(),
+            &verify_lens,
             max_verify_len,
         );
         let verified = {
@@ -18514,14 +19086,70 @@ impl Scheduler<crate::models::Gemma4Model> {
                 .cache
                 .as_mut()
                 .ok_or_else(|| anyhow!("fill_gemma4_drafter_windows_batched: main cache absent"))?;
-            model.forward_text_hidden_with_shared_kv_on(
-                &verify_arr,
-                &verify_pos_ids,
-                Some(&verify_lens),
-                None,
-                Some(cache.as_mut_slice()),
-                mlx::StreamOrDevice::default(),
-            )?
+            // A zero-draft B=1 window is the cost-aware control path and
+            // must retain ordinary single-token decode morphology. Passing
+            // `Some(&[1])` disables Gemma4's single-row decode fast path,
+            // builds explicit masks, and makes the control path roughly 3x
+            // slower than the actual Scheduler baseline.
+            let verify_lens = if active_rows.len() == 1 && max_verify_len == 1 {
+                None
+            } else {
+                Some(verify_lens.as_slice())
+            };
+            if sequential_q1_verify {
+                // Quantized KV profiles outside the model's exact batched
+                // qualification must retain the complete ordinary [B, 1]
+                // target shape, not only position-stable projections or
+                // attention. This preserves strict argmax parity without a
+                // context-length hard limit; accepted drafts and the online
+                // cost policy remain active above the sequential verifier.
+                let mut hidden_positions = Vec::with_capacity(max_verify_len);
+                let mut final_output = None;
+                // B1 ordinary decode deliberately omits per-row lengths so
+                // Gemma4 keeps its single-row decode fast path and exact
+                // numerical morphology. Multi-row Q1 still needs explicit
+                // lengths to describe every compact cache row.
+                let step_lens = (active_rows.len() > 1).then(|| vec![1_i32; active_rows.len()]);
+                for position in 0..max_verify_len as i32 {
+                    let input = mlx::ops::indexing::slice_strided_on(
+                        &verify_arr,
+                        &[0_i32, position][..],
+                        &[active_rows.len() as i32, position + 1][..],
+                        &[1_i32, 1][..],
+                        mlx::StreamOrDevice::default(),
+                    )?;
+                    let output = model.forward_text_hidden_with_shared_kv_on(
+                        &input,
+                        &verify_pos_ids,
+                        step_lens.as_deref(),
+                        None,
+                        Some(cache.as_mut_slice()),
+                        mlx::StreamOrDevice::default(),
+                    )?;
+                    mlx::transforms::eval(&[&output.hidden])?;
+                    hidden_positions.push(output.hidden.clone());
+                    final_output = Some(output);
+                }
+                let hidden_refs = hidden_positions.iter().collect::<Vec<_>>();
+                let mut output = final_output.ok_or_else(|| {
+                    anyhow!("Gemma4 sequential Q1 verify produced no target positions")
+                })?;
+                output.hidden = mlx::ops::shape::concatenate_on(
+                    &hidden_refs,
+                    1,
+                    mlx::StreamOrDevice::default(),
+                )?;
+                output
+            } else {
+                model.forward_text_hidden_with_shared_kv_on(
+                    &verify_arr,
+                    &verify_pos_ids,
+                    verify_lens,
+                    None,
+                    Some(cache.as_mut_slice()),
+                    mlx::StreamOrDevice::default(),
+                )?
+            }
         };
         self.refresh_active_kv_residency_stats();
         add_elapsed_us(&mut stats.verify_forward_us, verify_forward_start);
@@ -18607,6 +19235,7 @@ impl Scheduler<crate::models::Gemma4Model> {
         // returns the full padded cache view and must use each row's offset.
         let single_row_layout = active_rows.len() == 1;
         let mut committed_tokens = 0usize;
+        let mut policy_inputs = Vec::with_capacity(contexts.len());
         for (ctx_idx, (ctx, resolution)) in contexts.iter().zip(resolutions).enumerate() {
             let compact_row = cache_row_for_ctx[ctx_idx];
             let accepted_len = resolution.accepted_verify_input_len;
@@ -18616,13 +19245,7 @@ impl Scheduler<crate::models::Gemma4Model> {
                     ctx.row_idx
                 )
             })?;
-            adjust_mtp_draft_budget(
-                ctx.effective_max_draft_tokens,
-                &mut row_state.adaptive_draft_tokens,
-                ctx.draft_tokens.len(),
-                resolution.accepted_draft_len,
-                stats,
-            );
+            let accepted_draft_len = resolution.accepted_draft_len;
             row_state.last_hidden = slice_hidden_row_position(
                 &verified.hidden,
                 compact_row,
@@ -18660,12 +19283,55 @@ impl Scheduler<crate::models::Gemma4Model> {
             let constraint = self.slots[ctx.row_idx]
                 .as_ref()
                 .and_then(|state| state.constraint.as_ref());
-            committed_tokens = committed_tokens.saturating_add(append_resolved_gemma4_tokens(
-                row_state, ctx, constraint, resolution,
-            )?);
+            let row_committed_tokens =
+                append_resolved_gemma4_tokens(row_state, ctx, constraint, resolution)?;
+            committed_tokens = committed_tokens.saturating_add(row_committed_tokens);
+            policy_inputs.push((
+                ctx.row_idx,
+                ctx.draft_tokens.len(),
+                accepted_draft_len,
+                usize::try_from(ctx.kv_valid_len)
+                    .unwrap_or(0)
+                    .saturating_add(1),
+                row_committed_tokens,
+                ctx.effective_max_draft_tokens,
+            ));
         }
 
         self.refresh_active_kv_residency_stats();
+        let stats_delta = stats.saturating_delta_since(&stats_before_window);
+        let divisor = contexts.len() as u64;
+        let per_row_delta = divided_mtp_stats_timing(&stats_delta, divisor);
+        let total_us = elapsed_us_since(window_started);
+        for (row_idx, attempted, accepted, context_tokens, committed, max_draft_tokens) in
+            policy_inputs
+        {
+            let row_state = row_states.get_mut(&row_idx).ok_or_else(|| {
+                anyhow!(
+                    "fill_gemma4_drafter_windows_batched: row {row_idx} state absent for policy update"
+                )
+            })?;
+            let policy_window = MtpDraftPolicyWindow::from_stats_delta(
+                attempted,
+                accepted,
+                committed,
+                total_us / divisor,
+                context_tokens,
+                policy_batch_width,
+                kv_state,
+                &per_row_delta,
+            );
+            let change = row_state.draft_policy.observe_window(policy_window);
+            if change.reduced {
+                stats.draft_budget_reductions = stats.draft_budget_reductions.saturating_add(1);
+            } else if change.increased {
+                stats.draft_budget_increases = stats.draft_budget_increases.saturating_add(1);
+            }
+            row_state.adaptive_draft_tokens = row_state
+                .draft_policy
+                .current_budget()
+                .min(max_draft_tokens);
+        }
         let timing_delta = stats
             .draft_cap_timing()
             .saturating_delta_since(timing_before);
@@ -18688,7 +19354,7 @@ impl Scheduler<crate::models::Gemma4Model> {
             accepted_draft_tokens,
             committed_tokens,
             rollback_count,
-            elapsed_us_since(window_started),
+            total_us,
             timing_delta,
         );
         Ok(())
@@ -18719,6 +19385,16 @@ impl Scheduler<crate::models::Gemma4Model> {
             ));
         }
         let row_idx = active_rows[0];
+        let ordinary_fallback = self
+            .gemma4_drafter_state
+            .as_ref()
+            .and_then(|state| state.rows.get(&row_idx))
+            .is_some_and(|row| {
+                row.pending_tokens.is_empty() && row.draft_policy.uses_ordinary_decode()
+            });
+        if ordinary_fallback {
+            return self.step_inner(model);
+        }
         if self.cache_rows.as_slice() != active_rows.as_slice() {
             return Err(anyhow!(
                 "step_gemma4_drafter_single requires single-row cache layout for row {row_idx}, got {:?}",
@@ -18735,7 +19411,7 @@ impl Scheduler<crate::models::Gemma4Model> {
             .pending_tokens
             .is_empty()
         {
-            self.fill_gemma4_drafter_window_single(row_idx, model, drafter, self.b_max)?;
+            self.fill_gemma4_drafter_window_single(row_idx, model, drafter)?;
         }
 
         let token = {
@@ -18764,9 +19440,11 @@ impl Scheduler<crate::models::Gemma4Model> {
                 .gemma4_drafter_state
                 .as_ref()
                 .and_then(|state| state.rows.get(&row_idx))
-                .is_some_and(|state| state.pending_tokens.is_empty())
+                .is_some_and(|state| {
+                    state.pending_tokens.is_empty() && !state.draft_policy.uses_ordinary_decode()
+                })
         {
-            self.fill_gemma4_drafter_window_single(row_idx, model, drafter, self.b_max)?;
+            self.fill_gemma4_drafter_window_single(row_idx, model, drafter)?;
         }
 
         Ok(vec![event])
@@ -18777,7 +19455,6 @@ impl Scheduler<crate::models::Gemma4Model> {
         row_idx: usize,
         model: &crate::models::Gemma4Model,
         drafter: &crate::models::gemma4::Gemma4AssistantModel,
-        scheduler_batch_capacity: usize,
     ) -> Result<()> {
         let mut drafter_state = self
             .gemma4_drafter_state
@@ -18790,7 +19467,6 @@ impl Scheduler<crate::models::Gemma4Model> {
             row_idx,
             Gemma4DrafterWindowPolicy {
                 cfg: drafter_state.cfg,
-                scheduler_batch_capacity,
             },
             &mut drafter_state.stats,
             &mut row_state,
@@ -18811,10 +19487,7 @@ impl Scheduler<crate::models::Gemma4Model> {
         model: &crate::models::Gemma4Model,
         drafter: &crate::models::gemma4::Gemma4AssistantModel,
     ) -> Result<()> {
-        let Gemma4DrafterWindowPolicy {
-            cfg,
-            scheduler_batch_capacity,
-        } = policy;
+        let Gemma4DrafterWindowPolicy { cfg } = policy;
         let (prompt_ids, generated_tokens, max_new_tokens, sampler, stop_token_ids, constraint) = {
             let state = self.slots[row_idx]
                 .as_ref()
@@ -18841,18 +19514,21 @@ impl Scheduler<crate::models::Gemma4Model> {
         history.extend_from_slice(&generated_tokens);
 
         let window_started = Instant::now();
+        let stats_before_window = stats.clone();
         let timing_before = stats.draft_cap_timing();
         let context_tokens = history.len();
-
-        let effective_max_draft_tokens = gemma4_drafter_effective_budget_for_context(
-            self.kv_cache_turboquant_bits_for_rows(&[row_idx])?,
-            cfg.max_draft_tokens,
-            context_tokens,
-            scheduler_batch_capacity,
+        let kv_state = MtpDraftPolicyKvState::from_runtime(
+            self.paged_prefix_cache.is_some(),
+            self.active_kv_config.enabled,
         );
+
+        if context_tokens > 32_768 && row_state.draft_policy.seed_initial_budget(1) {
+            row_state.adaptive_draft_tokens = row_state.draft_policy.current_budget();
+        }
+        let effective_max_draft_tokens = cfg.max_draft_tokens;
         let draft_budget = row_state
             .adaptive_draft_tokens
-            .clamp(1, effective_max_draft_tokens)
+            .min(effective_max_draft_tokens)
             .min(remaining);
         let mut compact_prng = self.compact_prng_state_for_rows(&[row_idx])?;
         let mut draft_prng = if sampler.is_pipelinable() {
@@ -18879,21 +19555,43 @@ impl Scheduler<crate::models::Gemma4Model> {
             self.gemma4_drafter_position_ids(model, verify_start_pos, verify_input.len() as i32)?;
         let verify_arr: Array =
             (&verify_input[..], &[1_i32, verify_input.len() as i32][..]).try_into()?;
+        let kv_bits = self.kv_cache_turboquant_bits_for_rows(&[row_idx])?;
+        let exact_batched_qualified = model.supports_exact_batched_speculative_verify_for_kv_cache(
+            1,
+            context_tokens,
+            verify_input.len(),
+            kv_bits,
+        );
+        let verify_lens = [i32::try_from(verify_input.len())?];
+        let sequential_q1_verify = gemma4_verify_requires_sequential_q1(
+            exact_batched_qualified,
+            kv_bits,
+            1,
+            &verify_lens,
+            verify_input.len(),
+        );
 
         let base_snapshot = {
             let cache = self
                 .cache
                 .as_ref()
                 .ok_or_else(|| anyhow!("fill_gemma4_drafter_window_single: main cache absent"))?;
-            cache.iter().map(LayerCache::snapshot).collect::<Vec<_>>()
+            cache
+                .iter()
+                .map(LayerCache::append_snapshot)
+                .collect::<Result<Vec<_>>>()?
         };
         let verify_forward_start = Instant::now();
+        let position_stable_verify = verify_input.len() > 1;
+        let _position_stable_linear =
+            position_stable_verify.then(crate::nn::position_stable_linear::scope);
+        let _position_stable_qmm =
+            position_stable_verify.then(crate::nn::position_stable_qmm::scope);
         let verified = {
-            let stable_attention = gemma4_k3v4_long_verify_needs_stable_attention(
-                self.kv_cache_turboquant_bits_for_rows(&[row_idx])?,
+            let stable_attention = gemma4_long_verify_needs_stable_attention(
+                kv_bits,
                 context_tokens,
                 verify_input.len(),
-                scheduler_batch_capacity,
                 1,
             );
             let _stable_attention =
@@ -18902,14 +19600,49 @@ impl Scheduler<crate::models::Gemma4Model> {
                 .cache
                 .as_mut()
                 .ok_or_else(|| anyhow!("fill_gemma4_drafter_window_single: main cache absent"))?;
-            model.forward_text_hidden_with_shared_kv_on(
-                &verify_arr,
-                &verify_pos_ids,
-                None,
-                None,
-                Some(cache.as_mut_slice()),
-                mlx::StreamOrDevice::default(),
-            )?
+            if sequential_q1_verify {
+                let mut hidden_positions = Vec::with_capacity(verify_input.len());
+                let mut final_output = None;
+                for position in 0..i32::try_from(verify_input.len())? {
+                    let input = mlx::ops::indexing::slice_strided_on(
+                        &verify_arr,
+                        &[0_i32, position][..],
+                        &[1_i32, position + 1][..],
+                        &[1_i32, 1][..],
+                        mlx::StreamOrDevice::default(),
+                    )?;
+                    let output = model.forward_text_hidden_with_shared_kv_on(
+                        &input,
+                        &verify_pos_ids,
+                        None,
+                        None,
+                        Some(cache.as_mut_slice()),
+                        mlx::StreamOrDevice::default(),
+                    )?;
+                    mlx::transforms::eval(&[&output.hidden])?;
+                    hidden_positions.push(output.hidden.clone());
+                    final_output = Some(output);
+                }
+                let hidden_refs = hidden_positions.iter().collect::<Vec<_>>();
+                let mut output = final_output.ok_or_else(|| {
+                    anyhow!("Gemma4 sequential B1 verify produced no target positions")
+                })?;
+                output.hidden = mlx::ops::shape::concatenate_on(
+                    &hidden_refs,
+                    1,
+                    mlx::StreamOrDevice::default(),
+                )?;
+                output
+            } else {
+                model.forward_text_hidden_with_shared_kv_on(
+                    &verify_arr,
+                    &verify_pos_ids,
+                    None,
+                    None,
+                    Some(cache.as_mut_slice()),
+                    mlx::StreamOrDevice::default(),
+                )?
+            }
         };
         self.refresh_active_kv_residency_stats();
         add_elapsed_us(&mut stats.verify_forward_us, verify_forward_start);
@@ -18950,14 +19683,6 @@ impl Scheduler<crate::models::Gemma4Model> {
         if resolution.needs_rollback {
             stats.rollback_count += 1;
         }
-        adjust_mtp_draft_budget(
-            effective_max_draft_tokens,
-            &mut row_state.adaptive_draft_tokens,
-            draft_tokens.len(),
-            resolution.accepted_draft_len,
-            stats,
-        );
-
         let accepted_len = resolution.accepted_verify_input_len;
         let accepted_last_hidden =
             slice_hidden_position(&verified.hidden, i32::try_from(accepted_len)? - 1)?;
@@ -19007,6 +19732,28 @@ impl Scheduler<crate::models::Gemma4Model> {
         let committed_tokens = tokens_to_append.len();
         row_state.pending_tokens.extend(tokens_to_append);
         self.refresh_active_kv_residency_stats();
+        let total_us = elapsed_us_since(window_started);
+        let stats_delta = stats.saturating_delta_since(&stats_before_window);
+        let policy_window = MtpDraftPolicyWindow::from_stats_delta(
+            draft_tokens.len(),
+            accepted_draft_len,
+            committed_tokens,
+            total_us,
+            context_tokens,
+            1,
+            kv_state,
+            &stats_delta,
+        );
+        let change = row_state.draft_policy.observe_window(policy_window);
+        if change.reduced {
+            stats.draft_budget_reductions = stats.draft_budget_reductions.saturating_add(1);
+        } else if change.increased {
+            stats.draft_budget_increases = stats.draft_budget_increases.saturating_add(1);
+        }
+        row_state.adaptive_draft_tokens = row_state
+            .draft_policy
+            .current_budget()
+            .min(effective_max_draft_tokens);
         let timing_delta = stats
             .draft_cap_timing()
             .saturating_delta_since(timing_before);
@@ -19017,7 +19764,7 @@ impl Scheduler<crate::models::Gemma4Model> {
             accepted_draft_len,
             committed_tokens,
             rollback_count,
-            elapsed_us_since(window_started),
+            total_us,
             timing_delta,
         );
         self.scatter_prng_state_from_rows(&[row_idx], &compact_prng)?;
@@ -19259,7 +20006,7 @@ impl Scheduler<crate::models::Gemma4Model> {
                 })?;
             let mut temp = self.temp_gemma4_drafter_rebase_scheduler_for_row(row_idx)?;
             let events = temp
-                .prefill_admitted_gemma4_drafter_single(model, drafter, cfg, self.b_max, false)
+                .prefill_admitted_gemma4_drafter_single(model, drafter, cfg, false)
                 .map_err(|error| {
                     anyhow!("rebase_gemma4_drafter_from_committed_history row {row_idx}: {error:#}")
                 })?;
@@ -19463,68 +20210,93 @@ mod tests {
     }
 
     #[test]
-    fn gemma4_k3v4_long_context_stabilizes_every_multi_token_b1_verify() {
-        assert_eq!(
-            gemma4_drafter_effective_budget_for_context(
-                Some(TurboQuantKVBits::K3V4),
-                2,
-                GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
-                1,
-            ),
-            2
-        );
-        assert_eq!(
-            gemma4_drafter_effective_budget_for_context(
-                Some(TurboQuantKVBits::K3V4),
-                2,
-                GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
-                4,
-            ),
-            1
-        );
-        assert_eq!(
-            gemma4_drafter_effective_budget_for_context(
-                Some(TurboQuantKVBits::K3V4),
-                2,
-                GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS,
-                4,
-            ),
-            2
-        );
-        assert!(gemma4_k3v4_long_verify_needs_stable_attention(
+    fn gemma4_long_context_stable_attention_respects_context_and_shape() {
+        assert!(gemma4_long_verify_needs_stable_attention(
             Some(TurboQuantKVBits::K3V4),
-            GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
+            GEMMA4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
             3,
-            1,
-            1,
-        ));
-        assert!(gemma4_k3v4_long_verify_needs_stable_attention(
-            Some(TurboQuantKVBits::K3V4),
-            GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
             2,
-            4,
-            4,
         ));
-        assert!(!gemma4_k3v4_long_verify_needs_stable_attention(
+        assert!(gemma4_long_verify_needs_stable_attention(
             Some(TurboQuantKVBits::K3V4),
-            GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
-            1,
-            4,
-            4,
-        ));
-        assert!(!gemma4_k3v4_long_verify_needs_stable_attention(
-            Some(TurboQuantKVBits::K3V4),
-            GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
+            GEMMA4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
             2,
-            4,
-            1,
+            2,
         ));
-        assert!(!gemma4_k3v4_long_verify_needs_stable_attention(
+        assert!(!gemma4_long_verify_needs_stable_attention(
+            Some(TurboQuantKVBits::K3V4),
+            GEMMA4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
+            1,
+            2,
+        ));
+        assert!(!gemma4_long_verify_needs_stable_attention(
+            Some(TurboQuantKVBits::K3V4),
+            GEMMA4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS,
+            3,
+            2,
+        ));
+        assert!(gemma4_long_verify_needs_stable_attention(
             Some(TurboQuantKVBits::K4V4),
-            GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
+            GEMMA4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
             3,
-            4,
-            4,
+            2,
+        ));
+        assert!(gemma4_long_verify_needs_stable_attention(
+            None,
+            GEMMA4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
+            3,
+            2,
+        ));
+        assert!(gemma4_long_verify_needs_stable_attention(
+            None,
+            GEMMA4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
+            3,
+            1,
+        ));
+        assert!(gemma4_long_verify_needs_stable_attention(
+            None,
+            GEMMA4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
+            3,
+            2,
+        ));
+    }
+
+    #[test]
+    fn gemma4_unqualified_quantized_verify_uses_sequential_q1() {
+        assert!(gemma4_verify_requires_sequential_q1(
+            false,
+            Some(TurboQuantKVBits::K3V4),
+            1,
+            &[2],
+            2,
+        ));
+        assert!(gemma4_verify_requires_sequential_q1(
+            false,
+            Some(TurboQuantKVBits::K3V4),
+            2,
+            &[2, 2],
+            2,
+        ));
+        assert!(!gemma4_verify_requires_sequential_q1(
+            true,
+            Some(TurboQuantKVBits::K3V4),
+            2,
+            &[2, 2],
+            2,
+        ));
+        assert!(!gemma4_verify_requires_sequential_q1(
+            false,
+            None,
+            2,
+            &[2, 2],
+            2,
+        ));
+        assert!(!gemma4_verify_requires_sequential_q1(
+            false,
+            Some(TurboQuantKVBits::K3V4),
+            2,
+            &[2, 1],
+            2,
         ));
     }
 
@@ -19533,7 +20305,7 @@ mod tests {
         assert_eq!(
             gemma4_drafter_mid_admit_chunk_cap(
                 Some(TurboQuantKVBits::K3V4),
-                GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
+                GEMMA4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
                 2048,
                 256,
             ),
@@ -19542,7 +20314,7 @@ mod tests {
         assert_eq!(
             gemma4_drafter_mid_admit_chunk_cap(
                 Some(TurboQuantKVBits::K3V4),
-                GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS,
+                GEMMA4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS,
                 2048,
                 256,
             ),
@@ -19551,7 +20323,7 @@ mod tests {
         assert_eq!(
             gemma4_drafter_mid_admit_chunk_cap(
                 Some(TurboQuantKVBits::K4V4),
-                GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
+                GEMMA4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
                 2048,
                 256,
             ),
@@ -19560,7 +20332,7 @@ mod tests {
         assert_eq!(
             gemma4_drafter_mid_admit_chunk_cap(
                 Some(TurboQuantKVBits::K3V4),
-                GEMMA4_K3V4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
+                GEMMA4_STABLE_ATTENTION_MIN_CONTEXT_TOKENS + 1,
                 2048,
                 4096,
             ),
@@ -19939,6 +20711,54 @@ mod tests {
         assert!(error.downcast_ref::<SchedulerError>().is_some());
         assert_eq!(governor.snapshot().reserved_bytes, 0);
         assert_eq!(scheduler.budget_state.active_bytes(), 0);
+    }
+
+    #[test]
+    fn process_governor_materialized_admission_settles_reservation() {
+        use crate::core::process_memory::{
+            HostVmStatistics, MemoryGovernorConfig, MemoryTelemetry, ProcessMemoryGovernor,
+        };
+
+        let gib = 1024 * 1024 * 1024;
+        let governor = Arc::new(
+            ProcessMemoryGovernor::new(MemoryGovernorConfig {
+                static_reserve_bytes: 4 * gib,
+                minimum_prefill_chunk_tokens: 1,
+                ..MemoryGovernorConfig::default()
+            })
+            .expect("governor"),
+        );
+        governor.update(MemoryTelemetry {
+            total_ram_bytes: 32 * gib,
+            phys_footprint_bytes: Some(4 * gib),
+            vm: Some(HostVmStatistics {
+                free_bytes: 8 * gib,
+                inactive_bytes: 2 * gib,
+                active_bytes: 8 * gib,
+                wired_bytes: 8 * gib,
+            }),
+            mlx_active_bytes: Some(4 * gib),
+            mlx_cache_bytes: Some(0),
+            metal_limit_bytes: Some(24 * gib),
+        });
+
+        let mut scheduler = Scheduler::<FinishedPhaseFakeModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler");
+        scheduler.process_memory_governor = Some(Arc::clone(&governor));
+        let id = scheduler.admit(mk_req(vec![1, 2, 3, 4])).expect("admit");
+        assert!(governor.snapshot().reserved_bytes > 0);
+        let sample_sequence = governor.snapshot().sample_sequence;
+
+        scheduler.commit_governor_admission_after_materialization(id);
+
+        assert_eq!(governor.snapshot().reserved_bytes, 0);
+        assert!(governor.snapshot().sample_sequence > sample_sequence);
+        assert!(!scheduler.governor_admission_reservations.contains_key(&id));
+        assert!(scheduler.budget_state.active_bytes() > 0);
     }
 
     #[test]
@@ -20480,6 +21300,7 @@ mod tests {
     struct StepDecodeMaskModel {
         hybrid_cache: bool,
         decode_lens_seen: std::sync::Mutex<Vec<Vec<i32>>>,
+        decode_positions_seen: std::sync::Mutex<Vec<Vec<i32>>>,
         decode_mask_seen: std::sync::Mutex<Vec<bool>>,
         forward_seq_lens: std::sync::Mutex<Vec<i32>>,
         hidden_seq_lens: std::sync::Mutex<Vec<i32>>,
@@ -20553,6 +21374,10 @@ mod tests {
         fn decode_mask_seen(&self) -> Vec<bool> {
             self.decode_mask_seen.lock().unwrap().clone()
         }
+
+        fn decode_positions_seen(&self) -> Vec<Vec<i32>> {
+            self.decode_positions_seen.lock().unwrap().clone()
+        }
     }
 
     impl crate::core::model::Model for StepDecodeMaskModel {
@@ -20578,7 +21403,7 @@ mod tests {
         fn forward_on(
             &self,
             input_ids: &mlx::Array,
-            _position_ids: &mlx::Array,
+            position_ids: &mlx::Array,
             per_row_lens: Option<&[i32]>,
             decode_mask: Option<&mlx::Array>,
             cache: Option<&mut [crate::nn::LayerCache]>,
@@ -20589,6 +21414,12 @@ mod tests {
             self.forward_seq_lens.lock().unwrap().push(dims[1]);
             if let Some(lens) = per_row_lens {
                 self.decode_lens_seen.lock().unwrap().push(lens.to_vec());
+                if dims[1] == 1 {
+                    self.decode_positions_seen
+                        .lock()
+                        .unwrap()
+                        .push(position_ids.to_vec::<i32>()?);
+                }
             }
             self.decode_mask_seen
                 .lock()
@@ -20745,7 +21576,6 @@ mod tests {
     struct ScriptedMtpSchedulerModel {
         first_token: u32,
         first_token_calls_remaining: std::sync::Mutex<usize>,
-        expecting_first_token_projection: std::sync::Mutex<bool>,
         draft_tokens: std::sync::Mutex<VecDeque<u32>>,
         verify_sequences: std::sync::Mutex<VecDeque<Vec<u32>>>,
         text_hidden_seq_lens: std::sync::Mutex<Vec<i32>>,
@@ -20779,7 +21609,6 @@ mod tests {
             Self {
                 first_token,
                 first_token_calls_remaining: std::sync::Mutex::new(first_token_calls),
-                expecting_first_token_projection: std::sync::Mutex::new(true),
                 draft_tokens: std::sync::Mutex::new(draft_tokens.into()),
                 verify_sequences: std::sync::Mutex::new(verify_sequences.into()),
                 text_hidden_seq_lens: std::sync::Mutex::new(Vec::new()),
@@ -20805,6 +21634,11 @@ mod tests {
             self
         }
 
+        fn arm_first_token_projections(&self, count: usize) {
+            let mut remaining = self.first_token_calls_remaining.lock().unwrap();
+            *remaining = remaining.saturating_add(count);
+        }
+
         fn with_verify_projection_failure(mut self) -> Self {
             self.fail_verify_projection = true;
             self
@@ -20826,7 +21660,6 @@ mod tests {
             Self {
                 first_token,
                 first_token_calls_remaining: std::sync::Mutex::new(1),
-                expecting_first_token_projection: std::sync::Mutex::new(true),
                 draft_tokens: std::sync::Mutex::new(VecDeque::new()),
                 verify_sequences: std::sync::Mutex::new(VecDeque::new()),
                 text_hidden_seq_lens: std::sync::Mutex::new(Vec::new()),
@@ -21003,7 +21836,8 @@ mod tests {
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
             Self::bump_first_full_cache(cache, input_ids, per_row_lens)?;
-            fake_logits_for_token_sequence(&[self.first_token])
+            let batch = input_ids.shape()[0] as usize;
+            fake_logits_for_batch_token_sequences(batch, 1, &vec![self.first_token; batch])
         }
 
         fn batched_prefill(
@@ -21053,27 +21887,8 @@ mod tests {
             if self.fail_verify_projection && seq > 1 {
                 return Err(anyhow!("injected verify projection failure"));
             }
-            let mut expecting_first_token_projection =
-                self.expecting_first_token_projection.lock().unwrap();
             let mut sequences = self.verify_sequences.lock().unwrap();
-            let tokens = if seq == 1
-                && *first_token_calls_remaining > 0
-                && (*expecting_first_token_projection || sequences.is_empty())
-            {
-                *first_token_calls_remaining -= 1;
-                *expecting_first_token_projection = false;
-                vec![self.first_token]
-            } else if seq == 1 {
-                let sequence = sequences
-                    .front_mut()
-                    .expect("verify sequence available for single-position projection");
-                let token = sequence.remove(0);
-                if sequence.is_empty() {
-                    sequences.pop_front();
-                    *expecting_first_token_projection = true;
-                }
-                vec![token]
-            } else {
+            let tokens = if batch > 1 || seq > 1 {
                 let mut sequence = Vec::with_capacity(batch * seq);
                 for _ in 0..batch {
                     let row_sequence = sequences.pop_front().expect("verify sequence available");
@@ -21087,8 +21902,21 @@ mod tests {
                     sequence.extend(row_sequence);
                     sequence.extend(std::iter::repeat_n(0, seq - row_len));
                 }
-                *expecting_first_token_projection = true;
                 sequence
+            } else if seq == 1 && *first_token_calls_remaining > 0 {
+                *first_token_calls_remaining -= 1;
+                vec![self.first_token]
+            } else if seq == 1 {
+                let sequence = sequences
+                    .front_mut()
+                    .expect("verify sequence available for single-position projection");
+                let token = sequence.remove(0);
+                if sequence.is_empty() {
+                    sequences.pop_front();
+                }
+                vec![token]
+            } else {
+                unreachable!("scripted projection requires at least one position")
             };
             *calls += 1;
             assert_eq!(
@@ -22015,7 +22843,7 @@ mod tests {
             .push(SharedPromptLookupMtpCertification {
                 continuation: 4,
                 draft_len: 2,
-                policy_snapshot: MtpDraftPolicyState::new(2).snapshot(),
+                policy_snapshot: QwenMtpDraftPolicyState::new(2).snapshot(),
             });
         scheduler
             .shared_prompt_lookup_pool
@@ -22111,7 +22939,7 @@ mod tests {
             source: PromptLookupProposalSource::Shared,
             mtp_certified_draft_len: 2,
             mtp_certified_bonus_token: Some(9),
-            mtp_policy_snapshot: Some(MtpDraftPolicyState::new(2).snapshot()),
+            mtp_policy_snapshot: Some(QwenMtpDraftPolicyState::new(2).snapshot()),
         });
 
         let expectations = scheduler
@@ -22174,7 +23002,7 @@ mod tests {
             source: PromptLookupProposalSource::Local,
             mtp_certified_draft_len: 2,
             mtp_certified_bonus_token: Some(9),
-            mtp_policy_snapshot: Some(MtpDraftPolicyState::new(2).snapshot()),
+            mtp_policy_snapshot: Some(QwenMtpDraftPolicyState::new(2).snapshot()),
         });
 
         let expectations = scheduler
@@ -22235,7 +23063,7 @@ mod tests {
                 source: PromptLookupProposalSource::Shared,
                 mtp_certified_draft_len: 2,
                 mtp_certified_bonus_token: Some(9 + worker),
-                mtp_policy_snapshot: Some(MtpDraftPolicyState::new(2).snapshot()),
+                mtp_policy_snapshot: Some(QwenMtpDraftPolicyState::new(2).snapshot()),
             });
         }
 
@@ -22293,7 +23121,7 @@ mod tests {
             source: PromptLookupProposalSource::Shared,
             mtp_certified_draft_len: 2,
             mtp_certified_bonus_token: Some(9),
-            mtp_policy_snapshot: Some(MtpDraftPolicyState::new(2).snapshot()),
+            mtp_policy_snapshot: Some(QwenMtpDraftPolicyState::new(2).snapshot()),
         });
 
         let expectations = scheduler
@@ -22935,7 +23763,7 @@ mod tests {
                             position_ids: build_position_ids(0, 1).expect("tail position"),
                         }),
                         adaptive_draft_tokens: 4,
-                        draft_policy: MtpDraftPolicyState::new(4),
+                        draft_policy: QwenMtpDraftPolicyState::new(4),
                     },
                 ),
                 (
@@ -22947,7 +23775,7 @@ mod tests {
                         last_hidden: last_hidden1,
                         deferred_tail_commit: None,
                         adaptive_draft_tokens: 4,
-                        draft_policy: MtpDraftPolicyState::new(4),
+                        draft_policy: QwenMtpDraftPolicyState::new(4),
                     },
                 ),
             ]),
@@ -23062,7 +23890,7 @@ mod tests {
                         last_hidden: last_hidden0,
                         deferred_tail_commit: None,
                         adaptive_draft_tokens: 4,
-                        draft_policy: MtpDraftPolicyState::new(4),
+                        draft_policy: QwenMtpDraftPolicyState::new(4),
                     },
                 ),
                 (
@@ -23074,7 +23902,7 @@ mod tests {
                         last_hidden: last_hidden1,
                         deferred_tail_commit: None,
                         adaptive_draft_tokens: 4,
-                        draft_policy: MtpDraftPolicyState::new(4),
+                        draft_policy: QwenMtpDraftPolicyState::new(4),
                     },
                 ),
             ]),
@@ -23178,7 +24006,7 @@ mod tests {
                     last_hidden,
                     deferred_tail_commit: None,
                     adaptive_draft_tokens: 4,
-                    draft_policy: MtpDraftPolicyState::new(4),
+                    draft_policy: QwenMtpDraftPolicyState::new(4),
                 },
             )]),
             stats: MtpSpeculativeStats::default(),
@@ -23239,7 +24067,7 @@ mod tests {
                     last_hidden: last_hidden.clone(),
                     deferred_tail_commit: None,
                     adaptive_draft_tokens: 4,
-                    draft_policy: MtpDraftPolicyState::new(4),
+                    draft_policy: QwenMtpDraftPolicyState::new(4),
                 },
             )]),
             stats: MtpSpeculativeStats::default(),
@@ -23302,7 +24130,7 @@ mod tests {
                     last_hidden: last_hidden.clone(),
                     deferred_tail_commit: None,
                     adaptive_draft_tokens: 4,
-                    draft_policy: MtpDraftPolicyState::new(4),
+                    draft_policy: QwenMtpDraftPolicyState::new(4),
                 },
             )]),
             stats: MtpSpeculativeStats::default(),
@@ -23370,7 +24198,7 @@ mod tests {
                     last_hidden,
                     deferred_tail_commit: None,
                     adaptive_draft_tokens: 4,
-                    draft_policy: MtpDraftPolicyState::new(4),
+                    draft_policy: QwenMtpDraftPolicyState::new(4),
                 },
             )]),
             stats: MtpSpeculativeStats::default(),
@@ -23390,6 +24218,7 @@ mod tests {
                 &mut state,
                 &inputs,
                 &mut stats,
+                MtpDraftPolicyKvState::Contiguous,
             )
             .expect("canonical MTP prepare");
         assert_eq!(
@@ -23462,7 +24291,7 @@ mod tests {
                     last_hidden: last_hidden.clone(),
                     deferred_tail_commit: None,
                     adaptive_draft_tokens: 4,
-                    draft_policy: MtpDraftPolicyState::new(4),
+                    draft_policy: QwenMtpDraftPolicyState::new(4),
                 },
             )]),
             stats: MtpSpeculativeStats::default(),
@@ -23483,6 +24312,7 @@ mod tests {
                 &mut state,
                 &inputs,
                 &mut stats,
+                MtpDraftPolicyKvState::Contiguous,
             )
             .expect("canonical MTP prepare");
         assert_eq!(state.rows[&0].mtp_cache.offset(), 1);
@@ -23525,7 +24355,7 @@ mod tests {
                     last_hidden: last_hidden.clone(),
                     deferred_tail_commit: None,
                     adaptive_draft_tokens: 4,
-                    draft_policy: MtpDraftPolicyState::new(4),
+                    draft_policy: QwenMtpDraftPolicyState::new(4),
                 },
             )]),
             stats: MtpSpeculativeStats::default(),
@@ -23545,6 +24375,7 @@ mod tests {
                 &mut state,
                 &inputs,
                 &mut stats,
+                MtpDraftPolicyKvState::Contiguous,
             ) {
                 Ok(_) => panic!("destination MTP proposal mismatch must fail closed"),
                 Err(error) => error,
@@ -24141,14 +24972,38 @@ mod tests {
 
         assert_eq!(
             model.mtp_hidden_seq_lens(),
-            vec![2, 1, 1, 1],
-            "full-accept window should reuse the two draft cache steps and commit only the missing tail token"
+            vec![1, 1, 1, 1, 1],
+            "MTP prefill should preserve the ordinary [N - 1] + [1] boundary, then reuse the two draft cache steps and commit only the missing tail token"
+        );
+    }
+
+    #[test]
+    fn mtp_adaptive_chunked_prefill_preserves_ordinary_final_chunk_shape() {
+        let mut s = Scheduler::<ScriptedMtpSchedulerModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        let mut request = mtp_req(vec![1, 2, 3, 4, 5], 4);
+        request.prefill_chunk_size = 2;
+        s.admit(request).expect("admit");
+        let model = ScriptedMtpSchedulerModel::new(6, vec![7], vec![vec![7, 8]]);
+        let cfg = MtpSpeculativeConfig::new(1, Sampler::greedy()).expect("mtp cfg");
+
+        s.prefill_admitted_mtp_single(&model, &FakeMtpHead, cfg)
+            .expect("mtp prefill");
+
+        assert!(
+            model.mtp_hidden_seq_lens().starts_with(&[2, 2, 1]),
+            "adaptive MTP prefill must keep the same [2, 2, 1] chunks as ordinary Scheduler prefill: {:?}",
+            model.mtp_hidden_seq_lens(),
         );
     }
 
     #[test]
     #[serial(mlx_metal)]
-    fn mtp_paged_main_cache_clamps_single_window_draft_budget_to_one() {
+    fn mtp_paged_main_cache_runs_multi_token_single_window() {
         let root = std::env::temp_dir().join(format!(
             "ironmlx-paged-prefix-mtp-single-budget-{}",
             uuid::Uuid::new_v4().simple()
@@ -24177,10 +25032,11 @@ mod tests {
         }
         let stats = s.mtp_stats().expect("mtp stats");
         assert_eq!(
-            stats.drafted_tokens, 1,
-            "paged main KV decode only supports one-token append per speculative verify window"
+            stats.drafted_tokens, 2,
+            "paged main KV should preserve the configured multi-token draft window"
         );
-        assert_eq!(stats.draft_attempts_by_position, vec![1]);
+        assert_eq!(stats.draft_attempts_by_position, vec![1, 1]);
+        assert_eq!(stats.rollback_count, 1);
 
         crate::core::cache::process_async_prefix_store_queue().wait_idle();
 
@@ -24189,7 +25045,7 @@ mod tests {
 
     #[test]
     #[serial(mlx_metal)]
-    fn mtp_paged_prefix_clamps_runtime_config_to_one() {
+    fn mtp_paged_prefix_preserves_runtime_configured_draft_width() {
         let root = std::env::temp_dir().join(format!(
             "ironmlx-paged-prefix-mtp-config-budget-{}",
             uuid::Uuid::new_v4().simple()
@@ -24214,8 +25070,8 @@ mod tests {
 
         let mtp_state = s.mtp_state.as_ref().expect("scheduler MTP state");
         assert_eq!(
-            mtp_state.cfg.max_draft_tokens, 1,
-            "paged prefix cache must make the whole MTP runtime state d=1, not only clamp one window"
+            mtp_state.cfg.max_draft_tokens, 2,
+            "paged prefix cache must preserve the explicitly configured MTP draft width"
         );
 
         crate::core::cache::process_async_prefix_store_queue().wait_idle();
@@ -24225,7 +25081,7 @@ mod tests {
 
     #[test]
     #[serial(mlx_metal)]
-    fn mtp_paged_main_cache_clamps_batched_window_draft_budget_to_one_per_row() {
+    fn mtp_paged_main_cache_runs_multi_token_batched_windows() {
         let root = std::env::temp_dir().join(format!(
             "ironmlx-paged-prefix-mtp-batch-budget-{}",
             uuid::Uuid::new_v4().simple()
@@ -24257,14 +25113,14 @@ mod tests {
         for row_state in mtp_state.rows.values_mut() {
             row_state.pending_tokens.clear();
             row_state.adaptive_draft_tokens = 2;
-            row_state.draft_policy = MtpDraftPolicyState::new(2);
+            row_state.draft_policy = QwenMtpDraftPolicyState::new(2);
         }
         mtp_state.stats = MtpSpeculativeStats::default();
         let fill_model = ScriptedMtpSchedulerModel::new_with_first_token_calls(
             0,
             0,
-            vec![8, 9],
-            vec![vec![8, 10], vec![9, 11]],
+            vec![8, 9, 10, 11],
+            vec![vec![8, 10, 12], vec![9, 11, 13]],
         );
         let fill_cfg = MtpSpeculativeConfig::new(2, Sampler::greedy()).expect("mtp cfg");
         s.fill_mtp_windows_batched(
@@ -24280,20 +25136,190 @@ mod tests {
         .expect("batched MTP fill");
 
         assert_eq!(
-            mtp_state.stats.drafted_tokens, 2,
-            "paged main KV decode should draft one token per active row"
+            mtp_state.stats.drafted_tokens, 4,
+            "paged main KV should draft two tokens per active row"
         );
-        assert_eq!(mtp_state.stats.draft_attempts_by_position, vec![2]);
+        assert_eq!(mtp_state.stats.draft_attempts_by_position, vec![2, 2]);
         assert_eq!(
             fill_model.mtp_hidden_batch_sizes(),
-            vec![2, 2],
-            "batched fill should run one draft step and one accepted-tail commit"
+            vec![2, 2, 2],
+            "batched fill should run two draft steps and one accepted-tail commit"
         );
         s.mtp_state = Some(mtp_state);
 
         crate::core::cache::process_async_prefix_store_queue().wait_idle();
 
         std::fs::remove_dir_all(root).expect("cleanup prefix cache");
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn mtp_batch_committed_zero_budget_bypasses_speculative_path() {
+        let mut scheduler = Scheduler::<ScriptedMtpSchedulerModel>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        scheduler
+            .admit(mtp_req(vec![1, 2], 6))
+            .expect("admit row 0");
+        scheduler
+            .admit(mtp_req(vec![10, 11], 6))
+            .expect("admit row 1");
+        let prefill_model = ScriptedMtpSchedulerModel::new_with_first_token_calls(
+            3,
+            2,
+            vec![4, 6],
+            vec![vec![4, 5], vec![6, 7]],
+        );
+        let cfg = MtpSpeculativeConfig::new(1, Sampler::greedy()).expect("mtp cfg");
+        scheduler
+            .prefill_admitted_mtp_batch(&prefill_model, &FakeMtpHead, cfg)
+            .expect("mtp batch prefill");
+
+        let mut mtp_state = scheduler.mtp_state.take().expect("scheduler MTP state");
+        for row_state in mtp_state.rows.values_mut() {
+            row_state.pending_tokens.clear();
+            // Match the policy's eight-window minimum before comparing the
+            // ordinary zero-draft control path.
+            for _ in 0..8 {
+                row_state.draft_policy.observe_window(MtpDraftPolicyWindow {
+                    attempted_draft_tokens: 1,
+                    accepted_draft_tokens: 1,
+                    committed_tokens: 2,
+                    total_us: 200,
+                    context_tokens: 16,
+                    batch_width: 2,
+                    ..MtpDraftPolicyWindow::default()
+                });
+            }
+            for _ in 0..4 {
+                row_state.draft_policy.observe_window(MtpDraftPolicyWindow {
+                    attempted_draft_tokens: 0,
+                    committed_tokens: 1,
+                    total_us: 50,
+                    context_tokens: 16,
+                    batch_width: 2,
+                    ..MtpDraftPolicyWindow::default()
+                });
+            }
+            // Qwen commits to ordinary decode only after returning to MTP for
+            // a four-window confirmation phase (A-B-A).
+            for _ in 0..4 {
+                row_state.draft_policy.observe_window(MtpDraftPolicyWindow {
+                    attempted_draft_tokens: 1,
+                    accepted_draft_tokens: 1,
+                    committed_tokens: 2,
+                    total_us: 200,
+                    context_tokens: 16,
+                    batch_width: 2,
+                    ..MtpDraftPolicyWindow::default()
+                });
+            }
+            assert!(!row_state.draft_policy.should_maintain_mtp_cache());
+            row_state.adaptive_draft_tokens = row_state.draft_policy.current_budget();
+        }
+        mtp_state.stats = MtpSpeculativeStats::default();
+        let model =
+            ScriptedMtpSchedulerModel::new_with_first_token_calls(8, 0, Vec::new(), Vec::new());
+        scheduler.mtp_state = Some(mtp_state);
+        let events = scheduler
+            .step_mtp_batch(&model, &FakeMtpHead)
+            .expect("ordinary fallback step");
+
+        assert!(
+            model.mtp_hidden_batch_sizes().is_empty(),
+            "committed draft=0 rows must bypass the speculative path"
+        );
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].token, 8);
+        assert_eq!(events[1].token, 8);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn mtp_batch_zero_budget_probe_commits_deferred_tail_without_drafting() {
+        let mut scheduler = Scheduler::<ScriptedMtpSchedulerModel>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        scheduler
+            .admit(mtp_req(vec![1, 2], 6))
+            .expect("admit row 0");
+        scheduler
+            .admit(mtp_req(vec![10, 11], 6))
+            .expect("admit row 1");
+        let prefill_model = ScriptedMtpSchedulerModel::new_with_first_token_calls(
+            3,
+            2,
+            vec![4, 6],
+            vec![vec![4, 5], vec![6, 7]],
+        );
+        let cfg = MtpSpeculativeConfig::new(1, Sampler::greedy()).expect("mtp cfg");
+        scheduler
+            .prefill_admitted_mtp_batch(&prefill_model, &FakeMtpHead, cfg)
+            .expect("mtp batch prefill");
+
+        let mut mtp_state = scheduler.mtp_state.take().expect("scheduler MTP state");
+        for (&row_idx, row_state) in &mut mtp_state.rows {
+            row_state.pending_tokens.clear();
+            row_state.deferred_tail_commit = Some(MtpDeferredTailCommit {
+                token: if row_idx == 0 { 4 } else { 6 },
+                prev_hidden: row_state.last_hidden.clone(),
+                position_ids: build_position_ids(2, 1).expect("tail position"),
+            });
+            let mut policy = QwenMtpDraftPolicyState::new(1);
+            let long_window = MtpDraftPolicyWindow {
+                attempted_draft_tokens: 1,
+                accepted_draft_tokens: 1,
+                committed_tokens: 2,
+                total_us: 200,
+                context_tokens: 65_536,
+                batch_width: 2,
+                ..MtpDraftPolicyWindow::default()
+            };
+            for _ in 0..8 {
+                policy.observe_window(long_window);
+            }
+            assert_eq!(policy.current_budget(), 0);
+            assert!(policy.should_maintain_mtp_cache());
+            row_state.draft_policy = policy;
+            row_state.adaptive_draft_tokens = 0;
+        }
+        mtp_state.stats = MtpSpeculativeStats::default();
+        let model = ScriptedMtpSchedulerModel::new_with_first_token_calls(
+            0,
+            0,
+            Vec::new(),
+            vec![vec![8], vec![9]],
+        );
+
+        scheduler
+            .fill_mtp_windows_batched(
+                &[0, 1],
+                cfg,
+                &mut mtp_state.stats,
+                &mut mtp_state.rows,
+                &model,
+                &FakeMtpHead,
+                MtpTargetProjection::Neural,
+                None,
+            )
+            .expect("zero-budget probe fill");
+
+        assert_eq!(mtp_state.stats.drafted_tokens, 0);
+        assert_eq!(
+            mtp_state.stats.draft_attempts_by_position,
+            Vec::<usize>::new()
+        );
+        assert_eq!(model.mtp_hidden_batch_sizes(), vec![2]);
+        assert_eq!(model.mtp_hidden_seq_lens(), vec![1]);
+        assert_eq!(model.text_hidden_batch_sizes(), vec![2]);
+        assert_eq!(mtp_state.rows[&0].pending_tokens, VecDeque::from([8_u32]));
+        assert_eq!(mtp_state.rows[&1].pending_tokens, VecDeque::from([9_u32]));
     }
 
     #[test]
@@ -24361,8 +25387,8 @@ mod tests {
         );
         assert_eq!(
             model.text_hidden_seq_lens(),
-            vec![2, 2],
-            "mismatch should trim the verified cache prefix without replaying accepted tokens"
+            vec![1, 1, 2],
+            "MTP should mirror ordinary [N - 1] + [1] prefill, then trim the mismatched verify prefix without replaying accepted tokens"
         );
 
         let step = s
@@ -24700,6 +25726,12 @@ mod tests {
                 }
             ]
         );
+        let prefill_stats = s.mtp_stats().expect("MTP stats");
+        assert_eq!(prefill_stats.windows, 2);
+        assert!(prefill_stats
+            .draft_cap_observations
+            .iter()
+            .all(|observation| observation.batch_width == 2));
 
         s.step_mtp_batch(&model, &FakeMtpHead)
             .expect("first pending batch step");
@@ -24743,8 +25775,8 @@ mod tests {
         assert_eq!(stats.draft_host_sync_count, 0);
         assert_eq!(stats.windows, 4);
         assert_eq!(
-            stats.verify_accept_host_sync_count, 3,
-            "two single-row prefill windows and one batched postfill should each synchronize acceptance once"
+            stats.verify_accept_host_sync_count, 2,
+            "two batched fills should synchronize acceptance once per active row group"
         );
     }
 
@@ -24768,7 +25800,7 @@ mod tests {
         let model = ScriptedMtpSchedulerModel::new_with_first_token_calls(
             3,
             2,
-            vec![4, 6, 8, 9, 10, 12, 11, 13],
+            vec![4, 6, 20, 8, 21, 9, 22, 12, 23, 13],
             vec![
                 vec![4, 5],
                 vec![6, 7],
@@ -24812,8 +25844,8 @@ mod tests {
         );
         assert_eq!(
             model.mtp_hidden_seq_lens(),
-            vec![1, 1],
-            "first long-context postfill should no longer run accepted-tail commit forwards"
+            vec![2, 2],
+            "the first batched long-context postfill should fuse the deferred tail produced by the initial batched window"
         );
         assert_eq!(
             model.text_hidden_batch_sizes(),
@@ -24884,7 +25916,7 @@ mod tests {
         let model = ScriptedMtpSchedulerModel::new_with_first_token_calls(
             3,
             2,
-            vec![4, 6, 8, 9, 10, 12, 11, 13],
+            vec![4, 6, 20, 8, 21, 9, 22, 12, 23, 13],
             vec![
                 vec![4, 5],
                 vec![6, 7],
@@ -25129,7 +26161,7 @@ mod tests {
         let id0 = s.admit(mtp_req(vec![1, 2], 3)).expect("admit row 0");
         let model = ScriptedMtpSchedulerModel::new_with_first_token_calls(
             3,
-            2,
+            1,
             vec![4, 6],
             vec![vec![4, 5], vec![6, 7]],
         );
@@ -25146,6 +26178,7 @@ mod tests {
                 finish_reason: None
             }]
         );
+        model.arm_first_token_projections(1);
 
         let mut handle = s
             .admit_mid_begin_mtp(mtp_req(vec![10, 11], 3), &model, &FakeMtpHead, cfg)
@@ -27778,6 +28811,7 @@ mod tests {
         let step_events = s.step(&model).expect("step");
         assert_eq!(step_events.len(), 2);
         assert_eq!(model.decode_lens_seen(), vec![vec![3, 3], vec![1, 1]]);
+        assert_eq!(model.decode_positions_seen(), vec![vec![3, 3, 3, 3, 3, 3]]);
         assert_eq!(model.decode_mask_seen(), vec![false, false]);
     }
 
@@ -27798,6 +28832,7 @@ mod tests {
         let step_events = s.step(&model).expect("step");
         assert_eq!(step_events.len(), 2);
         assert_eq!(model.decode_lens_seen(), vec![vec![1, 1]]);
+        assert_eq!(model.decode_positions_seen(), vec![vec![3, 4, 3, 4, 3, 4]]);
         assert_eq!(model.decode_mask_seen(), vec![true]);
     }
 
@@ -28266,6 +29301,7 @@ mod tests {
                             .expect("last_hidden row 0"),
                         shared_kv: crate::models::gemma4::Gemma4SharedKvStates::default(),
                         adaptive_draft_tokens: 2,
+                        draft_policy: Gemma4DrafterPolicyState::new(2),
                     },
                 ),
                 (
@@ -28277,6 +29313,7 @@ mod tests {
                             .expect("last_hidden row 1"),
                         shared_kv: crate::models::gemma4::Gemma4SharedKvStates::default(),
                         adaptive_draft_tokens: 2,
+                        draft_policy: Gemma4DrafterPolicyState::new(2),
                     },
                 ),
             ]),
@@ -28335,6 +29372,7 @@ mod tests {
                             .expect("last_hidden row 0"),
                         shared_kv: crate::models::gemma4::Gemma4SharedKvStates::default(),
                         adaptive_draft_tokens: 2,
+                        draft_policy: Gemma4DrafterPolicyState::new(2),
                     },
                 ),
                 (
@@ -28346,6 +29384,7 @@ mod tests {
                             .expect("last_hidden row 1"),
                         shared_kv: crate::models::gemma4::Gemma4SharedKvStates::default(),
                         adaptive_draft_tokens: 2,
+                        draft_policy: Gemma4DrafterPolicyState::new(2),
                     },
                 ),
             ]),

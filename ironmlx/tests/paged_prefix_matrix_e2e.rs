@@ -107,6 +107,46 @@ impl ServerProcess {
         )
     }
 
+    fn spawn_with_mtp_long_context(
+        model_dir: &Path,
+        mtp_model_dir: &Path,
+        cache_dir: &Path,
+        port: u16,
+        max_cache_cap: usize,
+    ) -> Self {
+        Self::spawn_with_options_and_max_cache_cap(
+            model_dir,
+            cache_dir,
+            None,
+            None,
+            Some(mtp_model_dir),
+            port,
+            1,
+            max_cache_cap,
+            2,
+        )
+    }
+
+    fn spawn_with_mtp_draft_tokens(
+        model_dir: &Path,
+        mtp_model_dir: &Path,
+        cache_dir: &Path,
+        port: u16,
+        draft_tokens: usize,
+    ) -> Self {
+        Self::spawn_with_options_and_max_cache_cap(
+            model_dir,
+            cache_dir,
+            None,
+            None,
+            Some(mtp_model_dir),
+            port,
+            1,
+            4_096,
+            draft_tokens,
+        )
+    }
+
     fn spawn_with_kv_quant_and_active_kv(
         model_dir: &Path,
         cache_dir: &Path,
@@ -135,8 +175,34 @@ impl ServerProcess {
         port: u16,
         max_sequences: usize,
     ) -> Self {
+        Self::spawn_with_options_and_max_cache_cap(
+            model_dir,
+            cache_dir,
+            kv_quant,
+            active_kv_dir,
+            mtp_model_dir,
+            port,
+            max_sequences,
+            4_096,
+            2,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_with_options_and_max_cache_cap(
+        model_dir: &Path,
+        cache_dir: &Path,
+        kv_quant: Option<&str>,
+        active_kv_dir: Option<&Path>,
+        mtp_model_dir: Option<&Path>,
+        port: u16,
+        max_sequences: usize,
+        max_cache_cap: usize,
+        mtp_draft_tokens: usize,
+    ) -> Self {
         let bin = env!("CARGO_BIN_EXE_ironmlx");
         let mlx_dir = std::env::var("MLX_DIR").expect("MLX_DIR must be set");
+        let prefix_cache_max_pages = max_cache_cap.div_ceil(16).max(4_096);
         let mut args = vec![
             "serve".to_owned(),
             "--model".to_owned(),
@@ -152,7 +218,7 @@ impl ServerProcess {
             "--paged-prefix-cache-block-size".to_owned(),
             "16".to_owned(),
             "--paged-prefix-cache-max-pages".to_owned(),
-            "4096".to_owned(),
+            prefix_cache_max_pages.to_string(),
             "--host".to_owned(),
             "127.0.0.1".to_owned(),
             "--port".to_owned(),
@@ -166,7 +232,7 @@ impl ServerProcess {
             "--prefill-chunk-size".to_owned(),
             "0".to_owned(),
             "--max-cache-cap".to_owned(),
-            "4096".to_owned(),
+            max_cache_cap.to_string(),
         ];
         if let Some(kv_quant) = kv_quant {
             args.push("--kv-quant".to_owned());
@@ -191,7 +257,7 @@ impl ServerProcess {
                     .to_owned(),
             );
             args.push("--mtp-draft-tokens".to_owned());
-            args.push("2".to_owned());
+            args.push(mtp_draft_tokens.to_string());
         }
         let mut cmd = Command::new(bin);
         cmd.current_dir(env!("CARGO_MANIFEST_DIR"));
@@ -315,6 +381,20 @@ fn qwen38_dense_mtp_model_dir() -> PathBuf {
     )
 }
 
+fn gemma4_unified_model_dir() -> PathBuf {
+    snapshot_from_env_or_default(
+        "GEMMA4_LONG_CONTEXT_MODEL",
+        "huggingface/mlx-community--gemma-4-12B-it-4bit",
+    )
+}
+
+fn gemma4_unified_drafter_model_dir() -> PathBuf {
+    snapshot_from_env_or_default(
+        "GEMMA4_LONG_CONTEXT_DRAFTER",
+        "huggingface/mlx-community--gemma-4-12B-it-assistant-4bit",
+    )
+}
+
 fn glm47_model_dir() -> PathBuf {
     snapshot_from_env_or_default(
         "GLM47_MODEL_DIR",
@@ -399,6 +479,35 @@ fn client() -> reqwest::Client {
         .expect("reqwest client")
 }
 
+fn long_context_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(1_200))
+        .no_proxy()
+        .build()
+        .expect("long-context reqwest client")
+}
+
+fn long_context_prompt(model_dir: &Path, minimum_tokens: usize) -> String {
+    let tokenizer = Tokenizer::from_model_dir(model_dir).expect("load long-context tokenizer");
+    let unit = " exact verification";
+    let unit_tokens = tokenizer
+        .encode(unit, false)
+        .expect("encode long-context unit")
+        .len()
+        .max(1);
+    let mut prompt = unit.repeat(minimum_tokens.div_ceil(unit_tokens));
+    while tokenizer
+        .encode(&prompt, false)
+        .expect("encode long-context prompt")
+        .len()
+        < minimum_tokens
+    {
+        prompt.push_str(unit);
+    }
+    prompt.push_str("\nAnswer with a short deterministic sentence.");
+    prompt
+}
+
 async fn wait_ready(client: &reqwest::Client, port: u16, server: &mut ServerProcess) {
     let deadline = Instant::now() + Duration::from_secs(240);
     loop {
@@ -455,6 +564,40 @@ async fn post_chat(
     json
 }
 
+async fn post_chat_with_server_diagnostics(
+    client: &reqwest::Client,
+    port: u16,
+    body: serde_json::Value,
+    server: &ServerProcess,
+) -> serde_json::Value {
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .json(&body)
+        .send()
+        .await
+        .expect("chat completion send");
+    let status = resp.status();
+    let text = resp.text().await.expect("chat completion body");
+    assert_eq!(
+        status,
+        200,
+        "chat completion failed: {text}; server stderr:\n{}",
+        server.stderr_text()
+    );
+    let json: serde_json::Value = serde_json::from_str(&text).expect("chat completion json");
+    assert!(
+        json["choices"][0]["message"]["content"]
+            .as_str()
+            .is_some_and(|content| !content.is_empty()),
+        "assistant content must not be empty: {json}"
+    );
+    assert!(
+        json["usage"]["prompt_tokens"].as_u64().unwrap_or_default() > 0,
+        "prompt token count must be present: {json}"
+    );
+    json
+}
+
 async fn healthz(client: &reqwest::Client, port: u16) -> serde_json::Value {
     let resp = client
         .get(format!("http://127.0.0.1:{port}/healthz"))
@@ -497,6 +640,24 @@ fn assert_active_kv_health(health: &serde_json::Value) {
         health["active_kv_offload"]["swap_error_count"].as_u64(),
         Some(0),
         "Active KV swap errors: {health}"
+    );
+}
+
+fn assert_mtp_draft_width(health: &serde_json::Value, expected: u64) {
+    assert_eq!(
+        health["mtp"]["enabled"].as_bool(),
+        Some(true),
+        "MTP must be enabled: {health}"
+    );
+    assert_eq!(
+        health["mtp"]["requested_draft_tokens"].as_u64(),
+        Some(expected),
+        "unexpected requested MTP draft width: {health}"
+    );
+    assert_eq!(
+        health["mtp"]["draft_tokens"].as_u64(),
+        Some(expected),
+        "runtime must preserve the requested MTP draft width: {health}"
     );
 }
 
@@ -1179,10 +1340,7 @@ async fn run_qwen_dense_mtp_active_kv_offload_case(
 
     let before = healthz(&client, port).await;
     assert_active_kv_health(&before);
-    assert_eq!(
-        before["mtp"]["enabled"], true,
-        "{model_name} MTP must be enabled: {before}"
-    );
+    assert_mtp_draft_width(&before, 2);
     assert_eq!(
         before["active_kv_offload"]["supported_cache_kinds"],
         serde_json::json!([
@@ -1214,6 +1372,11 @@ async fn run_qwen_dense_mtp_active_kv_offload_case(
     assert!(
         after["mtp"]["drafted_tokens"].as_u64().unwrap_or_default() > 0,
         "{model_name} requests must exercise MTP drafting: {after}"
+    );
+    assert!(
+        after["mtp"]["drafted_tokens"].as_u64().unwrap_or_default()
+            > after["mtp"]["windows"].as_u64().unwrap_or_default(),
+        "{model_name} Paged KV requests must execute at least one multi-token MTP window: {after}"
     );
     assert!(
         after["active_kv_offload"]["swap_out_count"]
@@ -1262,6 +1425,208 @@ async fn qwen38_dense_mtp_active_kv_offload_restores_speculative_side_cache() {
         qwen38_dense_mtp_model_dir(),
     )
     .await;
+}
+
+async fn run_paged_kv_multi_token_parity_case(
+    model_name: &str,
+    temp_name: &str,
+    model_dir: PathBuf,
+    mtp_model_dir: PathBuf,
+    prompt: &str,
+) {
+    let body = serde_json::json!({
+        "model": "paged-prefix-matrix",
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 64,
+        "temperature": 0.0,
+        "stream": false
+    });
+
+    let single_cache_dir = unique_temp_dir(&format!("{temp_name}-mtp-paged-d1"));
+    std::fs::create_dir_all(&single_cache_dir).expect("create single-token prefix cache dir");
+    let single_port = alloc_port().await;
+    let mut single_server = ServerProcess::spawn_with_mtp_draft_tokens(
+        &model_dir,
+        &mtp_model_dir,
+        &single_cache_dir,
+        single_port,
+        1,
+    );
+    let client = client();
+    wait_ready(&client, single_port, &mut single_server).await;
+    assert_mtp_draft_width(&healthz(&client, single_port).await, 1);
+    let single =
+        post_chat_with_server_diagnostics(&client, single_port, body.clone(), &single_server).await;
+    drop(single_server);
+    std::fs::remove_dir_all(&single_cache_dir).expect("cleanup single-token prefix cache dir");
+
+    let multi_cache_dir = unique_temp_dir(&format!("{temp_name}-mtp-paged-d2"));
+    std::fs::create_dir_all(&multi_cache_dir).expect("create multi-token prefix cache dir");
+    let multi_port = alloc_port().await;
+    let mut multi_server = ServerProcess::spawn_with_mtp_draft_tokens(
+        &model_dir,
+        &mtp_model_dir,
+        &multi_cache_dir,
+        multi_port,
+        2,
+    );
+    wait_ready(&client, multi_port, &mut multi_server).await;
+    let before = healthz(&client, multi_port).await;
+    assert_mtp_draft_width(&before, 2);
+    let multi = post_chat_with_server_diagnostics(&client, multi_port, body, &multi_server).await;
+    let after = healthz(&client, multi_port).await;
+
+    assert_eq!(
+        multi["choices"][0]["message"], single["choices"][0]["message"],
+        "{model_name} Paged KV multi-token MTP must preserve the exact generated message"
+    );
+    assert_eq!(
+        multi["choices"][0]["finish_reason"], single["choices"][0]["finish_reason"],
+        "{model_name} Paged KV multi-token MTP must preserve the finish reason"
+    );
+    assert_eq!(
+        multi["usage"]["completion_tokens"], single["usage"]["completion_tokens"],
+        "{model_name} Paged KV multi-token MTP must preserve the completion length"
+    );
+    assert!(
+        after["mtp"]["drafted_tokens"].as_u64().unwrap_or_default()
+            > after["mtp"]["windows"].as_u64().unwrap_or_default(),
+        "{model_name} draft=2 must execute at least one multi-token MTP window: before={before}, after={after}"
+    );
+    assert_eq!(
+        after["scheduler"]["b_active"].as_u64(),
+        Some(0),
+        "{model_name} request must release its scheduler slot: {after}"
+    );
+
+    drop(multi_server);
+    std::fs::remove_dir_all(&multi_cache_dir).expect("cleanup multi-token prefix cache dir");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires QWEN38_DENSE_MODEL, QWEN38_DENSE_MTP_MODEL, and MLX_DIR pointing to real local checkpoints"]
+async fn qwen38_dense_paged_kv_multi_token_matches_single_token_mtp() {
+    run_paged_kv_multi_token_parity_case(
+        "Qwen3.8",
+        "qwen38-dense",
+        qwen38_dense_model_dir(),
+        qwen38_dense_mtp_model_dir(),
+        "In one deterministic paragraph, explain why transaction rollback must restore the exact accepted KV prefix.",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires GEMMA4_LONG_CONTEXT_MODEL, GEMMA4_LONG_CONTEXT_DRAFTER, and MLX_DIR pointing to real local checkpoints"]
+async fn gemma4_unified_paged_kv_multi_token_matches_single_token_drafter() {
+    run_paged_kv_multi_token_parity_case(
+        "Gemma4 Unified 12B",
+        "gemma4-unified-12b",
+        gemma4_unified_model_dir(),
+        gemma4_unified_drafter_model_dir(),
+        "In one deterministic paragraph, explain why an accepted speculative prefix must be committed atomically.",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires QWEN38_DENSE_MODEL, QWEN38_DENSE_MTP_MODEL, and MLX_DIR pointing to real local checkpoints"]
+async fn qwen38_dense_mtp_long_context_remains_on_exact_path() {
+    let minimum_context_tokens = std::env::var("MTP_LONG_CONTEXT_TOKENS")
+        .ok()
+        .map(|value| value.parse::<usize>())
+        .transpose()
+        .expect("parse MTP_LONG_CONTEXT_TOKENS")
+        .unwrap_or(8_192);
+    assert!(
+        minimum_context_tokens > 4_096,
+        "long-context MTP acceptance must cross the former 4096-token cap"
+    );
+
+    let model_dir = qwen38_dense_model_dir();
+    let mtp_model_dir = qwen38_dense_mtp_model_dir();
+    let cache_dir = unique_temp_dir("qwen38-dense-mtp-long-context-prefix");
+    std::fs::create_dir_all(&cache_dir).expect("create prefix cache dir");
+    let max_cache_cap = minimum_context_tokens.saturating_add(4_096);
+    let port = alloc_port().await;
+    let mut server = ServerProcess::spawn_with_mtp_long_context(
+        &model_dir,
+        &mtp_model_dir,
+        &cache_dir,
+        port,
+        max_cache_cap,
+    );
+    let client = long_context_client();
+    wait_ready(&client, port, &mut server).await;
+
+    let before = healthz(&client, port).await;
+    assert_mtp_draft_width(&before, 2);
+    let body = serde_json::json!({
+        "model": "paged-prefix-matrix",
+        "messages": [{
+            "role": "user",
+            "content": long_context_prompt(&model_dir, minimum_context_tokens)
+        }],
+        "max_tokens": 32,
+        "temperature": 0.0,
+        "stream": false
+    });
+    let response = post_chat_with_server_diagnostics(&client, port, body, &server).await;
+    assert!(
+        response["usage"]["prompt_tokens"]
+            .as_u64()
+            .unwrap_or_default()
+            >= minimum_context_tokens as u64,
+        "request did not reach the requested long context: {response}"
+    );
+
+    let after = healthz(&client, port).await;
+    for field in [
+        "prefill_count",
+        "step_count",
+        "drafted_tokens",
+        "accepted_draft_tokens",
+    ] {
+        assert!(
+            after["mtp"][field].as_u64().unwrap_or_default()
+                > before["mtp"][field].as_u64().unwrap_or_default(),
+            "long-context request must increase mtp.{field}: before={before}, after={after}"
+        );
+    }
+    assert_eq!(
+        after["mtp"]["fallback_prefill_count"], before["mtp"]["fallback_prefill_count"],
+        "long-context request must not fall back from MTP: before={before}, after={after}"
+    );
+    assert!(
+        after["mtp"]["accepted_draft_tokens"]
+            .as_u64()
+            .unwrap_or_default()
+            <= after["mtp"]["drafted_tokens"].as_u64().unwrap_or_default(),
+        "accepted MTP drafts cannot exceed proposed drafts: {after}"
+    );
+    assert!(
+        after["mtp"]["drafted_tokens"].as_u64().unwrap_or_default()
+            > after["mtp"]["windows"].as_u64().unwrap_or_default(),
+        "long-context Paged KV must execute at least one multi-token MTP window: {after}"
+    );
+    assert_eq!(
+        after["scheduler"]["b_active"].as_u64(),
+        Some(0),
+        "long-context MTP request must release its scheduler slot: {after}"
+    );
+    eprintln!(
+        "Qwen3.8 MTP long-context acceptance: prompt_tokens={} prefill_count={} step_count={} \
+         drafted_tokens={} accepted_draft_tokens={} fallback_prefill_count={}",
+        response["usage"]["prompt_tokens"],
+        after["mtp"]["prefill_count"],
+        after["mtp"]["step_count"],
+        after["mtp"]["drafted_tokens"],
+        after["mtp"]["accepted_draft_tokens"],
+        after["mtp"]["fallback_prefill_count"]
+    );
+
+    drop(server);
+    std::fs::remove_dir_all(&cache_dir).expect("cleanup prefix cache dir");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -65,6 +65,12 @@ pub trait Model {
         )
     }
 
+    /// Whether an equal-length text batch must preserve the single-row
+    /// scheduler's `[N - 1] + [1]` prefill morphology for greedy-token parity.
+    fn requires_split_batched_prefill_for_token_parity(&self) -> bool {
+        false
+    }
+
     /// Forward through embed + transformer + final RmsNorm, returning the
     /// hidden states (NOT projected to logits). Used by the chunked-prefill
     /// path for intermediate (non-last) chunks where only KV cache needs to
@@ -148,6 +154,16 @@ pub trait Model {
         _verify_width: usize,
     ) -> bool {
         true
+    }
+
+    /// Clamp PromptLookup's configured proposal width to the largest draft
+    /// window this model has qualified for production verification.
+    ///
+    /// The limit is applied before proposal construction so shared-MTP
+    /// certification metadata and bonus tokens are derived from the same
+    /// window that will be verified.
+    fn max_prompt_lookup_draft_tokens(&self, configured_max_draft_tokens: usize) -> usize {
+        configured_max_draft_tokens
     }
 
     /// Whether q=1 speculative verification must materialize each device

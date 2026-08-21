@@ -270,8 +270,8 @@ impl Linear {
                 let product_stable = super::product_stable_qmm::is_armed()
                     && x.ndim() >= 2
                     && x.shape().as_slice()[..x.ndim() - 1].iter().product::<i32>() > 1
-                    && *bits == 4
-                    && mode.uses_affine_storage();
+                    && matches!(*bits, 4 | 5 | 6 | 8)
+                    && *mode == QuantMode::Affine;
                 let mut y = if product_stable {
                     mlx::quantization::quantized_matmul_product_stable_on(
                         x,
@@ -370,23 +370,39 @@ impl Linear {
         else {
             return self.forward_on(x, target);
         };
-        let isolated = x.transpose_axes_on(&[1_i32, 0, 2][..], target)?;
-        let mut output = mlx::quantization::quantized_matmul_batch_isolated_on(
-            &isolated,
-            weight,
-            scales,
-            biases.as_ref(),
-            true,
-            Some(*group_size),
-            Some(*bits),
-            mode.mlx_backend_mode(),
-            target,
-        )?;
+        let product_stable =
+            batch == 1 && matches!(*bits, 4 | 5 | 6 | 8) && *mode == QuantMode::Affine;
+        let mut output = if product_stable {
+            mlx::quantization::quantized_matmul_product_stable_on(
+                x,
+                weight,
+                scales,
+                biases.as_ref(),
+                true,
+                Some(*group_size),
+                Some(*bits),
+                mode.mlx_backend_mode(),
+                target,
+            )?
+        } else {
+            let isolated = x.transpose_axes_on(&[1_i32, 0, 2][..], target)?;
+            let output = mlx::quantization::quantized_matmul_batch_isolated_on(
+                &isolated,
+                weight,
+                scales,
+                biases.as_ref(),
+                true,
+                Some(*group_size),
+                Some(*bits),
+                mode.mlx_backend_mode(),
+                target,
+            )?;
+            output.transpose_axes_on(&[1_i32, 0, 2][..], target)?
+        };
         if let Some(bias) = bias {
             output = &output + bias;
         }
         let output_width = output.shape().as_slice()[2];
-        let output = output.transpose_axes_on(&[1_i32, 0, 2][..], target)?;
         debug_assert_eq!(output.shape().as_slice(), &[batch, sequence, output_width]);
         Ok(output)
     }
@@ -671,7 +687,6 @@ mod tests {
     #[test]
     #[serial(mlx_metal)]
     fn position_stable_quantized_forward_matches_sequential_q1_shapes() {
-        let batch = 4_i32;
         let sequence = 5_i32;
         let out = 32_i32;
         let in_dim = 64_i32;
@@ -679,56 +694,66 @@ mod tests {
         let weight_data = (0..(out * in_dim))
             .map(|idx| ((idx % 29) as f32 - 14.0) * 0.015)
             .collect::<Vec<_>>();
-        let input_data = (0..(batch * sequence * in_dim))
-            .map(|idx| ((idx % 19) as f32 - 9.0) * 0.025)
-            .collect::<Vec<_>>();
         let weight: Array = (weight_data.as_slice(), &[out, in_dim][..])
             .try_into()
             .unwrap();
-        let input: Array = (input_data.as_slice(), &[batch, sequence, in_dim][..])
-            .try_into()
-            .unwrap();
         let weight = mlx::ops::cast::astype(&weight, mlx::Dtype::Bfloat16).unwrap();
-        let input = mlx::ops::cast::astype(&input, mlx::Dtype::Bfloat16).unwrap();
-        let quantized =
-            mlx::quantization::quantize(&weight, Some(group_size), Some(8), "affine", None)
+        for batch in [1_i32, 4] {
+            let input_data = (0..(batch * sequence * in_dim))
+                .map(|idx| ((idx % 19) as f32 - 9.0) * 0.025)
+                .collect::<Vec<_>>();
+            let input: Array = (input_data.as_slice(), &[batch, sequence, in_dim][..])
+                .try_into()
                 .unwrap();
-        let layer = Linear::new_quant(
-            quantized[0].clone(),
-            quantized[1].clone(),
-            Some(quantized[2].clone()),
-            None,
-            group_size,
-            8,
-        );
+            let input = mlx::ops::cast::astype(&input, mlx::Dtype::Bfloat16).unwrap();
+            let bit_widths: &[i32] = if batch == 1 { &[4, 5, 6, 8] } else { &[8] };
+            for &bits in bit_widths {
+                let quantized = mlx::quantization::quantize(
+                    &weight,
+                    Some(group_size),
+                    Some(bits),
+                    "affine",
+                    None,
+                )
+                .unwrap();
+                let layer = Linear::new_quant(
+                    quantized[0].clone(),
+                    quantized[1].clone(),
+                    Some(quantized[2].clone()),
+                    None,
+                    group_size,
+                    bits,
+                );
 
-        let mut expected = Vec::with_capacity(sequence as usize);
-        for depth in 0..sequence {
-            let position = mlx::ops::indexing::slice_strided(
-                &input,
-                &[0_i32, depth, 0][..],
-                &[batch, depth + 1, in_dim][..],
-                &[1_i32, 1, 1][..],
-            )
-            .unwrap();
-            expected.push(layer.forward(&position).unwrap());
+                let mut expected = Vec::with_capacity(sequence as usize);
+                for depth in 0..sequence {
+                    let position = mlx::ops::indexing::slice_strided(
+                        &input,
+                        &[0_i32, depth, 0][..],
+                        &[batch, depth + 1, in_dim][..],
+                        &[1_i32, 1, 1][..],
+                    )
+                    .unwrap();
+                    expected.push(layer.forward(&position).unwrap());
+                }
+                let expected_refs = expected.iter().collect::<Vec<_>>();
+                let expected = mlx::ops::shape::concatenate(&expected_refs, 1).unwrap();
+                let actual = {
+                    let _scope = crate::nn::position_stable_qmm::scope();
+                    layer.forward(&input).unwrap()
+                };
+
+                let expected = mlx::ops::cast::astype(&expected, mlx::Dtype::Float32)
+                    .unwrap()
+                    .to_vec::<f32>()
+                    .unwrap();
+                let actual = mlx::ops::cast::astype(&actual, mlx::Dtype::Float32)
+                    .unwrap()
+                    .to_vec::<f32>()
+                    .unwrap();
+                assert_eq!(actual, expected, "batch={batch} bits={bits}");
+            }
         }
-        let expected_refs = expected.iter().collect::<Vec<_>>();
-        let expected = mlx::ops::shape::concatenate(&expected_refs, 1).unwrap();
-        let actual = {
-            let _scope = crate::nn::position_stable_qmm::scope();
-            layer.forward(&input).unwrap()
-        };
-
-        let expected = mlx::ops::cast::astype(&expected, mlx::Dtype::Float32)
-            .unwrap()
-            .to_vec::<f32>()
-            .unwrap();
-        let actual = mlx::ops::cast::astype(&actual, mlx::Dtype::Float32)
-            .unwrap()
-            .to_vec::<f32>()
-            .unwrap();
-        assert_eq!(actual, expected);
     }
 
     #[test]

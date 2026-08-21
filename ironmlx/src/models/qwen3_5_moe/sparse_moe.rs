@@ -1010,6 +1010,10 @@ impl SparseMoeBlock {
             ));
         }
         let (b, s, h) = (dvec[0], dvec[1], dvec[2]);
+        if crate::nn::position_stable_qmm::is_armed() && b == 1 && s > 1 {
+            let _product_stable = crate::nn::product_stable_qmm::scope();
+            return self.forward_unisolated_on(x, target, layer_idx);
+        }
         if crate::nn::position_stable_qmm::is_armed() && s > 1 {
             let mut positions = Vec::with_capacity(s as usize);
             for position in 0..s {
@@ -1028,6 +1032,21 @@ impl SparseMoeBlock {
                 .context("SparseMoeBlock: concatenating exact verify positions");
         }
         self.forward_unisolated_on(x, target, layer_idx)
+    }
+
+    fn forward_shared_on(&self, flat_x: &Array, target: StreamOrDevice) -> Result<Array> {
+        let shared_y = self
+            .shared_expert
+            .forward_on(flat_x, target)
+            .context("SparseMoeBlock: shared_expert forward")?;
+        let gate_logit = self
+            .shared_expert_gate
+            .forward_on(flat_x, target)
+            .context("SparseMoeBlock: shared_expert_gate forward")?;
+        let gate = gate_logit
+            .sigmoid_on(target)
+            .context("SparseMoeBlock: shared gate sigmoid")?;
+        Ok(&shared_y * &gate)
     }
 
     fn forward_unisolated_on(
@@ -1093,18 +1112,7 @@ impl SparseMoeBlock {
             )?;
 
             // (7) Shared expert with independent sigmoid gate.
-            let shared_y = self
-                .shared_expert
-                .forward_on(&flat_x, target)
-                .context("SparseMoeBlock: shared_expert forward")?; // [BS, H]
-            let gate_logit = self
-                .shared_expert_gate
-                .forward_on(&flat_x, target)
-                .context("SparseMoeBlock: shared_expert_gate forward")?; // [BS, 1]
-            let gate_sig2 = gate_logit
-                .sigmoid_on(target)
-                .context("SparseMoeBlock: shared gate sigmoid")?; // [BS, 1]
-            let shared_gated = &shared_y * &gate_sig2; // [BS, H]
+            let shared_gated = self.forward_shared_on(&flat_x, target)?; // [BS, H]
 
             // (8) Combine routed + shared, then reshape back to [B, S, H].
             let out_flat = &routed_y + &shared_gated; // [BS, H]

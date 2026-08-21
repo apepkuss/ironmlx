@@ -201,6 +201,19 @@ impl LayerCache {
         }
     }
 
+    /// Capture an offsets-only checkpoint for append-only Full-KV verify.
+    pub fn append_snapshot(&self) -> anyhow::Result<LayerCacheSnapshot> {
+        match self {
+            LayerCache::Full(kv) => Ok(LayerCacheSnapshot::Full(kv.append_snapshot())),
+            LayerCache::Linear(_) => {
+                anyhow::bail!("LayerCache::append_snapshot does not support Linear cache")
+            }
+            LayerCache::Mla(_) => {
+                anyhow::bail!("LayerCache::append_snapshot does not support MLA cache")
+            }
+        }
+    }
+
     /// Restore this layer cache from a matching checkpoint.
     pub fn restore(&mut self, snapshot: &LayerCacheSnapshot) -> anyhow::Result<()> {
         match (self, snapshot) {

@@ -46,6 +46,14 @@ struct Args {
     #[arg(long, value_enum, default_value_t = CacheMode::All)]
     cache_mode: CacheMode,
 
+    /// Simulated cache offset. Values above zero use non-zero steady-state cache tensors.
+    #[arg(long, default_value_t = 0)]
+    cache_offset: i32,
+
+    /// Execution routes to measure. Pass multiple times; defaults to both.
+    #[arg(long, value_enum)]
+    route: Vec<GdnRoute>,
+
     /// PRNG seed for synthetic hidden states.
     #[arg(long, default_value_t = 20260528)]
     seed: u64,
@@ -62,6 +70,15 @@ enum CacheMode {
     NoCache,
     CacheOutOnly,
     CacheStateEval,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum GdnRoute {
+    Regular,
+    PositionStable,
+    SequenceStable,
+    ExactVerify,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -100,10 +117,22 @@ struct Meta {
 #[derive(Serialize)]
 struct Record {
     seq: i32,
+    route: GdnRoute,
     shape: BenchShape,
+    exactness: Exactness,
     summary: Summary,
     warmups: Vec<f64>,
     values_ms: Vec<f64>,
+}
+
+#[derive(Serialize)]
+struct Exactness {
+    output_exact: bool,
+    output_max_abs_diff: f32,
+    conv_state_exact: Option<bool>,
+    conv_state_max_abs_diff: Option<f32>,
+    recurrent_state_exact: Option<bool>,
+    recurrent_state_max_abs_diff: Option<f32>,
 }
 
 #[derive(Serialize)]
@@ -142,6 +171,16 @@ fn main() -> Result<()> {
     let load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
 
     let shapes = shapes_for_mode(args.cache_mode);
+    let routes = if args.route.is_empty() {
+        vec![
+            GdnRoute::Regular,
+            GdnRoute::PositionStable,
+            GdnRoute::SequenceStable,
+            GdnRoute::ExactVerify,
+        ]
+    } else {
+        args.route.clone()
+    };
     let mut records = Vec::new();
     for &seq in &seqs {
         if seq <= 0 {
@@ -155,16 +194,22 @@ fn main() -> Result<()> {
             .sample()
             .context("sample synthetic hidden states")?;
         mlx::transforms::eval(&[&x])?;
-        for &shape in &shapes {
-            records.push(run_shape(
-                &gdn,
-                gdn_cfg,
-                &x,
-                seq,
-                shape,
-                args.warmup_runs,
-                args.runs,
-            )?);
+        for &route in &routes {
+            for &shape in &shapes {
+                records.push(run_shape(
+                    &gdn,
+                    gdn_cfg,
+                    &x,
+                    RunShapeConfig {
+                        seq,
+                        route,
+                        shape,
+                        cache_offset: args.cache_offset,
+                        warmup_runs: args.warmup_runs,
+                        runs: args.runs,
+                    },
+                )?);
+            }
         }
     }
 
@@ -278,28 +323,53 @@ fn shapes_for_mode(mode: CacheMode) -> Vec<BenchShape> {
     }
 }
 
+#[derive(Clone, Copy)]
+struct RunShapeConfig {
+    seq: i32,
+    route: GdnRoute,
+    shape: BenchShape,
+    cache_offset: i32,
+    warmup_runs: usize,
+    runs: usize,
+}
+
 fn run_shape(
     gdn: &GatedDeltaNet,
     cfg: GatedDeltaNetConfig,
     x: &Array,
-    seq: i32,
-    shape: BenchShape,
-    warmup_runs: usize,
-    runs: usize,
+    run: RunShapeConfig,
 ) -> Result<Record> {
-    let mut warmups = Vec::with_capacity(warmup_runs);
-    for _ in 0..warmup_runs {
-        warmups.push(run_once(gdn, cfg, x, seq, shape)?);
+    let mut warmups = Vec::with_capacity(run.warmup_runs);
+    for _ in 0..run.warmup_runs {
+        warmups.push(run_once(
+            gdn,
+            cfg,
+            x,
+            run.seq,
+            run.route,
+            run.shape,
+            run.cache_offset,
+        )?);
     }
 
-    let mut values_ms = Vec::with_capacity(runs);
-    for _ in 0..runs {
-        values_ms.push(run_once(gdn, cfg, x, seq, shape)?);
+    let mut values_ms = Vec::with_capacity(run.runs);
+    for _ in 0..run.runs {
+        values_ms.push(run_once(
+            gdn,
+            cfg,
+            x,
+            run.seq,
+            run.route,
+            run.shape,
+            run.cache_offset,
+        )?);
     }
 
     Ok(Record {
-        seq,
-        shape,
+        seq: run.seq,
+        route: run.route,
+        shape: run.shape,
+        exactness: qualify_route(gdn, cfg, x, run.seq, run.route, run.shape, run.cache_offset)?,
         summary: summarize(&values_ms),
         warmups,
         values_ms,
@@ -311,15 +381,12 @@ fn run_once(
     cfg: GatedDeltaNetConfig,
     x: &Array,
     seq: i32,
+    route: GdnRoute,
     shape: BenchShape,
+    cache_offset: i32,
 ) -> Result<f64> {
-    let mut cache = match shape {
-        BenchShape::NoCache => None,
-        BenchShape::CacheOutOnly | BenchShape::CacheStateEval => Some(make_cache(cfg, seq)?),
-    };
-
     let started = Instant::now();
-    let out = gdn.forward_on(x, None, None, cache.as_mut(), (), 0)?;
+    let (out, cache) = forward_route(gdn, cfg, x, seq, route, shape, cache_offset)?;
     match (shape, cache.as_ref()) {
         (BenchShape::CacheStateEval, Some(cache)) => {
             mlx::transforms::eval(&[&out, cache.conv_state(), cache.recurrent_state()])?;
@@ -332,8 +399,135 @@ fn run_once(
     Ok(started.elapsed().as_secs_f64() * 1000.0)
 }
 
-fn make_cache(cfg: GatedDeltaNetConfig, seq: i32) -> Result<GatedDeltaCache> {
-    GatedDeltaCache::new_with_cap(
+fn forward_route(
+    gdn: &GatedDeltaNet,
+    cfg: GatedDeltaNetConfig,
+    x: &Array,
+    seq: i32,
+    route: GdnRoute,
+    shape: BenchShape,
+    cache_offset: i32,
+) -> Result<(Array, Option<GatedDeltaCache>)> {
+    let mut cache = match shape {
+        BenchShape::NoCache => None,
+        BenchShape::CacheOutOnly | BenchShape::CacheStateEval => {
+            Some(make_cache(cfg, seq, cache_offset)?)
+        }
+    };
+    let position_stable = matches!(route, GdnRoute::PositionStable | GdnRoute::ExactVerify);
+    let sequence_stable = matches!(route, GdnRoute::SequenceStable | GdnRoute::ExactVerify);
+    let _position_stable = position_stable.then(ironmlx::nn::position_stable_qmm_scope);
+    let _sequence_stable = sequence_stable.then(ironmlx::nn::sequence_stable_gated_delta_scope);
+    let out = gdn.forward_on(x, None, None, cache.as_mut(), (), 0)?;
+    Ok((out, cache))
+}
+
+fn qualify_route(
+    gdn: &GatedDeltaNet,
+    cfg: GatedDeltaNetConfig,
+    x: &Array,
+    seq: i32,
+    route: GdnRoute,
+    shape: BenchShape,
+    cache_offset: i32,
+) -> Result<Exactness> {
+    let (actual_out, actual_cache) = forward_route(gdn, cfg, x, seq, route, shape, cache_offset)?;
+    let (expected_out, expected_cache) =
+        forward_sequential_q1(gdn, cfg, x, seq, shape, cache_offset)?;
+
+    let actual_out = materialize_f32(&actual_out)?;
+    let expected_out = materialize_f32(&expected_out)?;
+    let output_max_abs_diff = max_abs_diff(&actual_out, &expected_out)?;
+
+    let (
+        conv_state_exact,
+        conv_state_max_abs_diff,
+        recurrent_state_exact,
+        recurrent_state_max_abs_diff,
+    ) = match (actual_cache.as_ref(), expected_cache.as_ref()) {
+        (Some(actual), Some(expected)) => {
+            let actual_conv = materialize_f32(actual.conv_state())?;
+            let expected_conv = materialize_f32(expected.conv_state())?;
+            let conv_diff = max_abs_diff(&actual_conv, &expected_conv)?;
+            let actual_recurrent = materialize_f32(actual.recurrent_state())?;
+            let expected_recurrent = materialize_f32(expected.recurrent_state())?;
+            let recurrent_diff = max_abs_diff(&actual_recurrent, &expected_recurrent)?;
+            (
+                Some(actual_conv == expected_conv),
+                Some(conv_diff),
+                Some(actual_recurrent == expected_recurrent),
+                Some(recurrent_diff),
+            )
+        }
+        (None, None) => (None, None, None, None),
+        _ => return Err(anyhow!("candidate/reference cache presence mismatch")),
+    };
+
+    Ok(Exactness {
+        output_exact: actual_out == expected_out,
+        output_max_abs_diff,
+        conv_state_exact,
+        conv_state_max_abs_diff,
+        recurrent_state_exact,
+        recurrent_state_max_abs_diff,
+    })
+}
+
+fn forward_sequential_q1(
+    gdn: &GatedDeltaNet,
+    cfg: GatedDeltaNetConfig,
+    x: &Array,
+    seq: i32,
+    shape: BenchShape,
+    cache_offset: i32,
+) -> Result<(Array, Option<GatedDeltaCache>)> {
+    let mut cache = match shape {
+        BenchShape::NoCache => None,
+        BenchShape::CacheOutOnly | BenchShape::CacheStateEval => {
+            Some(make_cache(cfg, seq, cache_offset)?)
+        }
+    };
+    let hidden = x.shape().as_slice()[2];
+    let mut outputs = Vec::with_capacity(seq as usize);
+    for position in 0..seq {
+        let step = mlx::ops::indexing::slice_strided(
+            x,
+            &[0_i32, position, 0][..],
+            &[1_i32, position + 1, hidden][..],
+            &[1_i32, 1, 1][..],
+        )?;
+        outputs.push(gdn.forward_on(&step, None, None, cache.as_mut(), (), 0)?);
+    }
+    let refs = outputs.iter().collect::<Vec<_>>();
+    let out = mlx::ops::shape::concatenate(&refs, 1)?;
+    Ok((out, cache))
+}
+
+fn materialize_f32(value: &Array) -> Result<Vec<f32>> {
+    let value = mlx::ops::cast::astype(value, Dtype::Float32)?;
+    value.to_vec::<f32>().map_err(Into::into)
+}
+
+fn max_abs_diff(actual: &[f32], expected: &[f32]) -> Result<f32> {
+    if actual.len() != expected.len() {
+        return Err(anyhow!(
+            "candidate/reference element count mismatch: {} != {}",
+            actual.len(),
+            expected.len()
+        ));
+    }
+    Ok(actual
+        .iter()
+        .zip(expected)
+        .map(|(actual, expected)| (actual - expected).abs())
+        .fold(0.0_f32, f32::max))
+}
+
+fn make_cache(cfg: GatedDeltaNetConfig, seq: i32, cache_offset: i32) -> Result<GatedDeltaCache> {
+    if cache_offset < 0 {
+        return Err(anyhow!("cache-offset must be non-negative"));
+    }
+    let mut cache = GatedDeltaCache::new_with_cap(
         1,
         cfg.conv_kernel_size,
         cfg.conv_dim(),
@@ -341,8 +535,28 @@ fn make_cache(cfg: GatedDeltaNetConfig, seq: i32) -> Result<GatedDeltaCache> {
         cfg.head_v_dim,
         cfg.head_k_dim,
         Dtype::Bfloat16,
-        seq.max(1) + 1,
-    )
+        cache_offset + seq.max(1) + 1,
+    )?;
+    if cache_offset > 0 {
+        let conv_key = random::key(7_001 + cache_offset as u64)?;
+        let recurrent_key = random::key(7_002 + cache_offset as u64)?;
+        cache.update_conv(
+            random::normal()
+                .shape((1, cfg.conv_kernel_size - 1, cfg.conv_dim()))
+                .dtype(Dtype::Bfloat16)
+                .key(&conv_key)
+                .sample()?,
+        );
+        cache.update_recurrent(
+            random::normal()
+                .shape((1, cfg.num_v_heads, cfg.head_v_dim, cfg.head_k_dim))
+                .dtype(Dtype::Float32)
+                .key(&recurrent_key)
+                .sample()?,
+        );
+        cache.advance(&[cache_offset])?;
+    }
+    Ok(cache)
 }
 
 fn summarize(values: &[f64]) -> Summary {

@@ -5018,6 +5018,131 @@ mod tests {
 
     #[test]
     #[serial_test::serial(mlx_metal)]
+    fn paged_kv_multi_token_append_trims_to_accepted_prefix_and_rewrites_tail() {
+        let mut cache =
+            PagedKVCache::new(1, 1, 2, 2, Dtype::Float32, 12, 2, 12).expect("paged cache");
+        let mut offsets = vec![0_i32];
+        let prefix: Array = (
+            &[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0][..],
+            (1_i32, 1_i32, 3_i32, 2_i32),
+        )
+            .try_into()
+            .unwrap();
+        cache
+            .update_and_fetch_on(&prefix, &prefix, &mut offsets, &[3], ())
+            .expect("append prefix");
+
+        let speculative: Array = (
+            &[7.0_f32, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0][..],
+            (1_i32, 1_i32, 4_i32, 2_i32),
+        )
+            .try_into()
+            .unwrap();
+        cache
+            .update_and_fetch_on(&speculative, &speculative, &mut offsets, &[4], ())
+            .expect("append speculative window across pages");
+        assert_eq!(offsets, vec![7]);
+
+        cache
+            .restore_offsets(&mut offsets, &[5])
+            .expect("trim to two accepted verify inputs");
+        assert_eq!(offsets, vec![5]);
+
+        let corrected: Array = (
+            &[21.0_f32, 22.0, 23.0, 24.0][..],
+            (1_i32, 1_i32, 2_i32, 2_i32),
+        )
+            .try_into()
+            .unwrap();
+        cache
+            .update_and_fetch_on(&corrected, &corrected, &mut offsets, &[2], ())
+            .expect("rewrite rejected tail");
+        let (actual, _) = cache
+            .materialize_prefix_on(&offsets, 7, ())
+            .expect("materialize committed prefix");
+        assert_eq!(
+            actual.to_vec::<f32>().unwrap(),
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 21.0, 22.0, 23.0, 24.0]
+        );
+        let stats = cache.physical_stats();
+        assert_eq!(stats.physical_pages_referenced, 4);
+        assert_eq!(stats.orphan_pages, 0);
+        cache.validate_owner_invariants().expect("owner invariants");
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn paged_kv_forked_multi_token_rollback_preserves_source_and_cow_tail() {
+        let source = PagedKvBlockOwner::Request(31);
+        let destination = PagedKvBlockOwner::Request(32);
+        let mut cache =
+            PagedKVCache::new(1, 1, 2, 2, Dtype::Float32, 12, 2, 12).expect("paged cache");
+        let mut offsets = vec![0_i32];
+        cache
+            .bind_execution_rows(&[source], &mut offsets)
+            .expect("bind source owner");
+        let prefix: Array = (
+            &[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0][..],
+            (1_i32, 1_i32, 3_i32, 2_i32),
+        )
+            .try_into()
+            .unwrap();
+        cache
+            .update_and_fetch_on(&prefix, &prefix, &mut offsets, &[3], ())
+            .expect("append source prefix");
+        cache
+            .fork_owner(source, destination, &mut offsets)
+            .expect("fork destination");
+        cache
+            .bind_execution_rows(&[source, destination], &mut offsets)
+            .expect("bind forked owners");
+
+        let speculative: Array = (
+            &[
+                0.0_f32, 0.0, 0.0, 0.0, 0.0, 0.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+            ][..],
+            (2_i32, 1_i32, 3_i32, 2_i32),
+        )
+            .try_into()
+            .unwrap();
+        cache
+            .update_and_fetch_on(&speculative, &speculative, &mut offsets, &[0, 3], ())
+            .expect("append destination speculative window");
+        assert_eq!(offsets, vec![3, 6]);
+        assert_eq!(cache.physical_stats().cow_page_copies, 1);
+
+        cache
+            .restore_offsets(&mut offsets, &[3, 4])
+            .expect("rollback destination to accepted prefix");
+        let corrected: Array = (
+            &[0.0_f32, 0.0, 0.0, 0.0, 13.0, 14.0, 15.0, 16.0][..],
+            (2_i32, 1_i32, 2_i32, 2_i32),
+        )
+            .try_into()
+            .unwrap();
+        cache
+            .update_and_fetch_on(&corrected, &corrected, &mut offsets, &[0, 2], ())
+            .expect("rewrite destination rejected suffix");
+
+        let (actual, _) = cache
+            .materialize_prefix_on(&offsets, 6, ())
+            .expect("materialize forked rows");
+        assert_eq!(
+            actual.to_vec::<f32>().unwrap(),
+            vec![
+                1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 4.0,
+                5.0, 6.0, 7.0, 8.0, 13.0, 14.0, 15.0, 16.0,
+            ]
+        );
+        let stats = cache.physical_stats();
+        assert_eq!(stats.cow_page_copies, 1);
+        assert_eq!(stats.shared_physical_pages, 1);
+        assert_eq!(stats.orphan_pages, 0);
+        cache.validate_owner_invariants().expect("owner invariants");
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
     fn paged_kv_immutable_blocks_share_complete_pages_and_keep_tails_private() {
         let source = PagedKvBlockOwner::Request(11);
         let destination = PagedKvBlockOwner::Request(22);

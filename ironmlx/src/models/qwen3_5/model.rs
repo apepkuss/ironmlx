@@ -232,14 +232,21 @@ impl Qwen35Model {
                 hidden_shape[1] as usize,
             );
         if exact_batched_verify {
-            if self.lm_head.is_some() {
-                let _position_stable_qmm = crate::nn::position_stable_qmm::scope();
-                return self.project_hidden_unisolated_on(hidden, target);
+            if hidden_shape[0] == 1 {
+                return match &self.lm_head {
+                    Some(head) => head.forward_positions_isolated_on(hidden, target),
+                    None => {
+                        let _product_stable = crate::nn::product_stable_qmm::scope();
+                        self.text.as_output_on(hidden, target)
+                    }
+                };
             }
             return crate::models::qwen3_5::speculative::project_positions_isolated_on(
                 hidden,
                 target,
-                |position_hidden, target| self.text.as_output_on(position_hidden, target),
+                |position_hidden, target| {
+                    self.project_hidden_unisolated_on(position_hidden, target)
+                },
             );
         }
         self.project_hidden_unisolated_on(hidden, target)
@@ -262,10 +269,30 @@ impl Qwen35Model {
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
         let target = target.into();
-        match &self.lm_head {
-            Some(head) => head.forward_mtp_verify_on(hidden, target),
-            None => self.text.as_output_on(hidden, target),
+        let shape = hidden.shape();
+        if shape
+            .as_slice()
+            .get(1)
+            .is_some_and(|&sequence| sequence > 1)
+        {
+            if shape.as_slice().first() == Some(&1) {
+                return match &self.lm_head {
+                    Some(head) => head.forward_positions_isolated_on(hidden, target),
+                    None => {
+                        let _product_stable = crate::nn::product_stable_qmm::scope();
+                        self.text.as_output_on(hidden, target)
+                    }
+                };
+            }
+            return crate::models::qwen3_5::speculative::project_positions_isolated_on(
+                hidden,
+                target,
+                |position_hidden, target| {
+                    self.project_hidden_unisolated_on(position_hidden, target)
+                },
+            );
         }
+        self.project_hidden_unisolated_on(hidden, target)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -923,6 +950,10 @@ impl crate::core::model::Model for Qwen35Model {
         )
     }
 
+    fn requires_split_batched_prefill_for_token_parity(&self) -> bool {
+        true
+    }
+
     fn forward_text_hidden(
         &self,
         input_ids: &mlx::Array,
@@ -983,6 +1014,13 @@ impl crate::core::model::Model for Qwen35Model {
         super::speculative::sequential_prompt_lookup_verify_qualified(
             self.exact_batched_verify_profile,
             context_tokens,
+        )
+    }
+
+    fn max_prompt_lookup_draft_tokens(&self, configured_max_draft_tokens: usize) -> usize {
+        super::speculative::prompt_lookup_max_draft_tokens(
+            self.exact_batched_verify_profile,
+            configured_max_draft_tokens,
         )
     }
 

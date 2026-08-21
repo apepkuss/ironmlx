@@ -1,5 +1,9 @@
 # MTP Phase 4 Policy Benchmark
 
+> Historical benchmark snapshot. This document records the model-aware
+> omitted-argument policy used by that build. Current IronMLX defaults to one
+> MTP draft token unless a different value is explicitly configured.
+
 - Date: 2026-06-07
 - Branch: `codex/mtp-phase4-policy`
 - Base: Phase 3 commit `82982a6` (`codex/mtp-phase3-performance`)

@@ -118,11 +118,10 @@ fn exact_batched_verify_profile(
 fn exact_batched_verify_qualified(
     profile: ExactBatchedVerifyProfile,
     batch_width: usize,
-    context_tokens: usize,
+    _context_tokens: usize,
     verify_width: usize,
 ) -> bool {
     const MAX_QUALIFIED_BATCH: usize = 8;
-    const MAX_QUALIFIED_CONTEXT_TOKENS: usize = 1_024;
     const MAX_QUALIFIED_VERIFY_WIDTH: usize = 5;
 
     let batch_qualified = match profile {
@@ -135,10 +134,10 @@ fn exact_batched_verify_qualified(
         }
         ExactBatchedVerifyProfile::Affine8Moe => batch_width > 0 && batch_width <= 2,
     };
-    batch_qualified
-        && context_tokens <= MAX_QUALIFIED_CONTEXT_TOKENS
-        && verify_width > 1
-        && verify_width <= MAX_QUALIFIED_VERIFY_WIDTH
+    // Context length does not change the Q>1 execution morphology. The
+    // qualification remains scoped by checkpoint precision, batch shape,
+    // verify width, and KV layout.
+    batch_qualified && verify_width > 1 && verify_width <= MAX_QUALIFIED_VERIFY_WIDTH
 }
 
 fn exact_batched_verify_qualified_for_kv_cache(
@@ -159,7 +158,11 @@ fn exact_batched_verify_qualified_for_kv_cache(
         ExactBatchedVerifyProfile::Affine5Dense | ExactBatchedVerifyProfile::Affine6Dense => {
             kv_bits.is_none()
         }
-        _ => kv_bits != Some(TurboQuantKVBits::K3V4) || verify_width <= 2,
+        ExactBatchedVerifyProfile::Standard => kv_bits.is_none(),
+        ExactBatchedVerifyProfile::Affine8Dense => {
+            kv_bits != Some(TurboQuantKVBits::K3V4) || verify_width <= 2
+        }
+        ExactBatchedVerifyProfile::Disabled => false,
     };
     exact_batched_verify_qualified(profile, batch_width, context_tokens, verify_width)
         && kv_cache_qualified
@@ -798,6 +801,60 @@ impl Model for Gemma4Model {
         self.slice_last_and_project(&hidden, Some(&last_positions), target)
     }
 
+    fn batched_prefill_causal(
+        &self,
+        input_ids: &Array,
+        position_ids: &Array,
+        per_row_lens: &[i32],
+        cache: Option<&mut [LayerCache]>,
+        target: StreamOrDevice,
+    ) -> Result<Array> {
+        let shape = input_ids.shape();
+        let dims = shape.as_slice();
+        anyhow::ensure!(
+            dims.len() == 2
+                && per_row_lens.len() == dims[0] as usize
+                && per_row_lens.iter().all(|&len| len == dims[1]),
+            "Gemma4 causal batched prefill requires every row to fill [B,T], got shape={dims:?}, lens={per_row_lens:?}"
+        );
+        const CHUNK_SIZE: i32 = 2_048;
+        let batch = dims[0];
+        let total = dims[1];
+        let mut cache = cache;
+        let mut start = 0_i32;
+        loop {
+            let end = (start + CHUNK_SIZE).min(total);
+            let chunk = mlx::ops::indexing::slice_strided_on(
+                input_ids,
+                &[0_i32, start][..],
+                &[batch, end][..],
+                &[1_i32, 1][..],
+                target,
+            )?;
+            if end == total {
+                return Gemma4Model::forward_on(
+                    self,
+                    &chunk,
+                    position_ids,
+                    None,
+                    None,
+                    cache,
+                    target,
+                );
+            }
+            let hidden = self.forward_text_hidden(
+                &chunk,
+                position_ids,
+                None,
+                None,
+                cache.as_deref_mut(),
+                target,
+            )?;
+            mlx::transforms::eval(&[&hidden])?;
+            start = end;
+        }
+    }
+
     fn forward_text_hidden(
         &self,
         input_ids: &Array,
@@ -1426,79 +1483,84 @@ mod tests {
             exact_batched_verify_profile(None, None, false),
             ExactBatchedVerifyProfile::Disabled
         );
-        for profile in [
-            ExactBatchedVerifyProfile::Affine5Dense,
-            ExactBatchedVerifyProfile::Affine6Dense,
-        ] {
-            assert!(exact_batched_verify_qualified(profile, 8, 1_024, 5));
-            assert!(!exact_batched_verify_qualified(profile, 8, 1_025, 5));
+        const LONG_CONTEXTS: [usize; 7] = [1_024, 1_025, 4_096, 4_097, 8_192, 32_768, 65_536];
+        for context_tokens in LONG_CONTEXTS {
+            for profile in [
+                ExactBatchedVerifyProfile::Standard,
+                ExactBatchedVerifyProfile::Affine5Dense,
+                ExactBatchedVerifyProfile::Affine6Dense,
+                ExactBatchedVerifyProfile::Affine8Dense,
+            ] {
+                assert!(exact_batched_verify_qualified(
+                    profile,
+                    8,
+                    context_tokens,
+                    5
+                ));
+            }
+            assert!(exact_batched_verify_qualified(
+                ExactBatchedVerifyProfile::Affine8Moe,
+                2,
+                context_tokens,
+                5
+            ));
         }
-        assert!(exact_batched_verify_qualified(
-            ExactBatchedVerifyProfile::Standard,
-            8,
-            1_024,
-            5
-        ));
-        assert!(exact_batched_verify_qualified(
-            ExactBatchedVerifyProfile::Affine8Dense,
-            8,
-            1_024,
-            5
-        ));
-        assert!(exact_batched_verify_qualified(
-            ExactBatchedVerifyProfile::Affine8Moe,
-            2,
-            1_024,
-            5
-        ));
         assert!(!exact_batched_verify_qualified(
             ExactBatchedVerifyProfile::Affine8Moe,
             4,
-            1_024,
+            65_536,
             2
         ));
         assert!(!exact_batched_verify_qualified(
             ExactBatchedVerifyProfile::Disabled,
             8,
-            1_024,
+            65_536,
             5
         ));
         assert!(!exact_batched_verify_qualified(
             ExactBatchedVerifyProfile::Standard,
             9,
-            1_024,
+            65_536,
             5
         ));
         assert!(!exact_batched_verify_qualified(
             ExactBatchedVerifyProfile::Affine8Dense,
             8,
-            1_025,
-            5
-        ));
-        assert!(!exact_batched_verify_qualified(
-            ExactBatchedVerifyProfile::Affine8Dense,
-            8,
-            1_024,
+            65_536,
             6
+        ));
+        assert!(!exact_batched_verify_qualified_for_kv_cache(
+            ExactBatchedVerifyProfile::Standard,
+            8,
+            65_536,
+            2,
+            Some(TurboQuantKVBits::K3V4)
+        ));
+        assert!(!exact_batched_verify_qualified_for_kv_cache(
+            ExactBatchedVerifyProfile::Standard,
+            8,
+            65_536,
+            5,
+            Some(TurboQuantKVBits::K4V4)
         ));
         assert!(exact_batched_verify_qualified_for_kv_cache(
             ExactBatchedVerifyProfile::Affine8Dense,
             8,
-            1_024,
+            65_536,
             2,
             Some(TurboQuantKVBits::K3V4)
         ));
         assert!(!exact_batched_verify_qualified_for_kv_cache(
             ExactBatchedVerifyProfile::Affine8Dense,
             8,
-            1_024,
+            65_536,
             3,
             Some(TurboQuantKVBits::K3V4)
         ));
         assert!(exact_batched_verify_qualified_for_kv_cache(
             ExactBatchedVerifyProfile::Affine8Dense,
             8,
-            1_024,
+            65_536,
             5,
             Some(TurboQuantKVBits::K4V4)
         ));
@@ -1507,19 +1569,19 @@ mod tests {
             ExactBatchedVerifyProfile::Affine6Dense,
         ] {
             assert!(exact_batched_verify_qualified_for_kv_cache(
-                profile, 8, 1_024, 5, None
+                profile, 8, 65_536, 5, None
             ));
             assert!(!exact_batched_verify_qualified_for_kv_cache(
                 profile,
                 8,
-                1_024,
+                65_536,
                 2,
                 Some(TurboQuantKVBits::K3V4)
             ));
             assert!(!exact_batched_verify_qualified_for_kv_cache(
                 profile,
                 8,
-                1_024,
+                65_536,
                 2,
                 Some(TurboQuantKVBits::K4V4)
             ));
@@ -1527,21 +1589,21 @@ mod tests {
         assert!(exact_batched_verify_qualified_for_kv_cache(
             ExactBatchedVerifyProfile::Affine8Moe,
             2,
-            1_024,
+            65_536,
             2,
             Some(TurboQuantKVBits::K3V4)
         ));
         assert!(exact_batched_verify_qualified_for_kv_cache(
             ExactBatchedVerifyProfile::Affine8Moe,
             2,
-            1_024,
+            65_536,
             5,
             Some(TurboQuantKVBits::K4V4)
         ));
         assert!(exact_batched_verify_qualified_for_kv_cache(
             ExactBatchedVerifyProfile::Affine8Moe,
             2,
-            1_024,
+            65_536,
             5,
             None
         ));

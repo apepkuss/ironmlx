@@ -191,6 +191,15 @@ fn main() -> Result<()> {
                 args.runs,
                 || projection.position_isolated(&input, target),
             )?);
+            records.push(bench_morphology(
+                batch,
+                verify_width,
+                "product-stable",
+                &reference,
+                args.warmup_runs,
+                args.runs,
+                || projection.product_stable(&input, target),
+            )?);
             if batch == 1 {
                 records.push(bench_morphology(
                     batch,
@@ -327,6 +336,24 @@ impl QuantProjection {
             output = &output + bias;
         }
         Ok(output.transpose_axes_on(&[1_i32, 0, 2][..], target)?)
+    }
+
+    fn product_stable(&self, input: &Array, target: StreamOrDevice) -> Result<Array> {
+        let mut output = mlx::quantization::quantized_matmul_product_stable_on(
+            input,
+            &self.weight,
+            &self.scales,
+            Some(&self.biases),
+            true,
+            Some(self.group_size),
+            Some(self.bits),
+            "affine",
+            target,
+        )?;
+        if let Some(bias) = &self.bias {
+            output = &output + bias;
+        }
+        Ok(output)
     }
 
     fn sequential_q1(&self, input: &Array, target: StreamOrDevice, eager: bool) -> Result<Array> {

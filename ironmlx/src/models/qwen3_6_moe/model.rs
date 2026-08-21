@@ -407,6 +407,11 @@ impl Model for Qwen36MoeModel {
         )
     }
 
+    fn max_prompt_lookup_draft_tokens(&self, configured_max_draft_tokens: usize) -> usize {
+        self.inner
+            .max_prompt_lookup_draft_tokens(configured_max_draft_tokens)
+    }
+
     fn model_meta(&self) -> ModelMeta {
         Qwen36MoeModel::model_meta(self)
     }

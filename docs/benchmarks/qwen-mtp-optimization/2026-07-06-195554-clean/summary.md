@@ -1,5 +1,10 @@
 # Qwen3.5/Qwen3.6 MTP Optimization Benchmark
 
+> Historical benchmark snapshot. The measurements and production readout below
+> reflect the recorded build and runtime policy at the time of this run. Current
+> IronMLX defaults to one MTP draft token unless a different value is explicitly
+> configured; historical `d=2` default conclusions are not the current default.
+
 Date: 2026-07-06
 
 Environment: Apple M5 Max, `max_cache_cap=32768`, `prefill_chunk_size=2048`, `admission_deadline_ms=5`, benchmark duration 20s with 3s warmup, prompt lengths 256 and 8192, `max_tokens=64`.

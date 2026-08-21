@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::sampler::Sampler;
 use crate::core::scheduler_autotune::SchedulerAutotuneRuntimeProfile;
-use crate::core::speculative::MtpDraftPolicySnapshot;
+use crate::core::speculative::QwenMtpDraftPolicySnapshot;
 use crate::Result;
 
 const POSITIONS_PER_NGRAM: usize = 2;
@@ -628,6 +628,13 @@ impl PromptLookupDraftLimits {
 
     pub(crate) fn shared(self) -> usize {
         self.shared
+    }
+
+    pub(crate) fn capped(self, max_draft_tokens: usize) -> Self {
+        Self::new(
+            self.local.min(max_draft_tokens),
+            self.shared.min(max_draft_tokens),
+        )
     }
 }
 
@@ -2093,7 +2100,7 @@ struct SharedPromptLookupCandidate {
     draft: Box<[u32]>,
     mtp_certified_draft_len: usize,
     mtp_certified_history: Option<PromptLookupHistoryFingerprint>,
-    mtp_policy_snapshot: Option<MtpDraftPolicySnapshot>,
+    mtp_policy_snapshot: Option<QwenMtpDraftPolicySnapshot>,
     expires_at_ms: u64,
     last_access: u64,
 }
@@ -2104,7 +2111,7 @@ struct SharedPromptLookupCandidatePayload {
     draft: Box<[u32]>,
     mtp_certified_draft_len: usize,
     mtp_certified_history: Option<PromptLookupHistoryFingerprint>,
-    mtp_policy_snapshot: Option<MtpDraftPolicySnapshot>,
+    mtp_policy_snapshot: Option<QwenMtpDraftPolicySnapshot>,
     now_ms: u64,
 }
 
@@ -2120,11 +2127,11 @@ pub(crate) struct SharedPromptLookupPublishResult {
     pub evicted_entries: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SharedPromptLookupMtpCertification {
     pub continuation: usize,
     pub draft_len: usize,
-    pub policy_snapshot: MtpDraftPolicySnapshot,
+    pub policy_snapshot: QwenMtpDraftPolicySnapshot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2133,7 +2140,7 @@ pub(crate) struct SharedPromptLookupProposal {
     pub tokens: Vec<u32>,
     pub mtp_certified_draft_len: usize,
     pub mtp_certified_bonus_token: Option<u32>,
-    pub mtp_policy_snapshot: Option<MtpDraftPolicySnapshot>,
+    pub mtp_policy_snapshot: Option<QwenMtpDraftPolicySnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2283,7 +2290,7 @@ impl SharedPromptLookupPool {
                 })
                 .flatten();
             let mtp_policy_snapshot =
-                certification.map(|certification| certification.policy_snapshot);
+                certification.map(|certification| certification.policy_snapshot.clone());
             for n in self.config.min_ngram..=self.config.max_ngram {
                 if continuation < n || continuation - n < window_start {
                     continue;
@@ -2297,7 +2304,7 @@ impl SharedPromptLookupPool {
                         draft: history[continuation..draft_end].into(),
                         mtp_certified_draft_len,
                         mtp_certified_history,
-                        mtp_policy_snapshot,
+                        mtp_policy_snapshot: mtp_policy_snapshot.clone(),
                         now_ms,
                     },
                 );
@@ -2380,7 +2387,7 @@ impl SharedPromptLookupPool {
                 .filter(|fingerprint| *fingerprint == history_fingerprint)
                 .map_or(0, |_| candidate.mtp_certified_draft_len.min(draft.len()));
             let mtp_policy_snapshot = (mtp_certified_draft_len > 0)
-                .then_some(candidate.mtp_policy_snapshot)
+                .then_some(candidate.mtp_policy_snapshot.clone())
                 .flatten();
             let mtp_certified_bonus_token = (mtp_certified_draft_len > 0)
                 .then(|| draft.get(mtp_certified_draft_len).copied())
@@ -3042,13 +3049,13 @@ mod tests {
             ..cfg()
         };
         let mut pool = SharedPromptLookupPool::new(config).unwrap();
-        let policy_snapshot = crate::core::speculative::MtpDraftPolicyState::new(4).snapshot();
+        let policy_snapshot = crate::core::speculative::QwenMtpDraftPolicyState::new(4).snapshot();
         pool.publish_history_with_mtp_certifications(
             &[1, 2, 3, 4, 5, 6],
             &[SharedPromptLookupMtpCertification {
                 continuation: 3,
                 draft_len: 2,
-                policy_snapshot,
+                policy_snapshot: policy_snapshot.clone(),
             }],
         );
 
@@ -3382,6 +3389,14 @@ mod tests {
         assert_eq!(controller.stats().adaptive_draft_width_reductions, 1);
         assert_eq!(controller.stats().adaptive_draft_width_increases, 1);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn draft_limits_cap_each_proposal_source_without_raising_small_limits() {
+        assert_eq!(
+            PromptLookupDraftLimits::new(9, 5).capped(7),
+            PromptLookupDraftLimits::new(7, 5)
+        );
     }
 
     #[test]

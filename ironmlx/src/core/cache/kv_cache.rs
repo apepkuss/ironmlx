@@ -847,6 +847,22 @@ impl KVCache {
         }
     }
 
+    /// Capture only logical offsets for an append-only transaction.
+    ///
+    /// Callers may use this checkpoint only when rollback truncates the
+    /// newly appended suffix and never overwrites an existing prefix. Unlike
+    /// [`Self::snapshot`], this deliberately does not retain dense Array
+    /// handles, allowing MLX to donate cache buffers during long-context
+    /// speculative verification instead of copy-on-write duplicating them.
+    pub fn append_snapshot(&self) -> KVCacheSnapshot {
+        KVCacheSnapshot {
+            offsets: self.offsets.clone(),
+            dense_keys: None,
+            dense_values: None,
+            restores_dense_storage: false,
+        }
+    }
+
     /// Restore offsets and, for dense storage, the exact pre-verify K/V graph.
     ///
     /// Paged and TurboQuant backends retain their backend-owned data and use
@@ -2164,6 +2180,45 @@ mod tests {
 
         c.restore_offsets(&[5, 9]).expect("restore accepted prefix");
         assert_eq!(c.offsets(), &[5, 9]);
+    }
+
+    #[test]
+    fn kvcache_append_snapshot_restores_only_offsets() {
+        let mut c = make_cache_b(2, 16);
+        let (initial_k, initial_v) = make_kv_b(2, 4);
+        c.update_and_fetch(&initial_k, &initial_v, &[4, 4])
+            .expect("initial append");
+        let snapshot = c.append_snapshot();
+
+        let total = 2 * 4 * 2 * 256;
+        let appended_k = vec![7.0_f32; total];
+        let appended_v = vec![8.0_f32; total];
+        let appended_k: Array = (&appended_k[..], (2_i32, 4_i32, 2_i32, 256_i32))
+            .try_into()
+            .unwrap();
+        let appended_v: Array = (&appended_v[..], (2_i32, 4_i32, 2_i32, 256_i32))
+            .try_into()
+            .unwrap();
+        c.update_and_fetch(&appended_k, &appended_v, &[2, 2])
+            .expect("speculative append");
+        assert_eq!(c.offsets(), &[6, 6]);
+
+        c.restore(&snapshot).expect("restore append snapshot");
+        assert_eq!(c.offsets(), &[4, 4]);
+        c.restore_offsets(&[6, 6])
+            .expect("re-expose accepted append");
+        let appended = c
+            .dense_prefix_layer_for_row_on(0, ())
+            .expect("accepted append prefix")
+            .0
+            .to_vec::<f32>()
+            .expect("accepted append values");
+        for head in 0..4 {
+            let start = (head * 6 + 4) * 256;
+            assert!(appended[start..start + 2 * 256]
+                .iter()
+                .all(|&value| value == 7.0));
+        }
     }
 
     #[test]

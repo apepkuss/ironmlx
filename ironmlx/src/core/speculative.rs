@@ -38,22 +38,34 @@ pub fn resolve_mtp_draft_tokens(raw_config: &serde_json::Value, arg: MtpDraftTok
     }
 }
 
-pub fn default_mtp_draft_tokens_for_config(_raw_config: &serde_json::Value) -> usize {
-    // Cap 2 remains available through explicit runtime configuration and
-    // scheduler profiles, but is not safe as an unconditional default across
-    // Gemma4 context and batch regimes.
-    1
-}
+pub fn default_mtp_draft_tokens_for_config(raw_config: &serde_json::Value) -> usize {
+    let model_type = raw_config
+        .get("model_type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let text = raw_config
+        .get("text_config")
+        .and_then(serde_json::Value::as_object);
+    let hidden_size = text
+        .and_then(|value| value.get("hidden_size"))
+        .and_then(serde_json::Value::as_i64);
+    let layers = text
+        .and_then(|value| value.get("num_hidden_layers"))
+        .and_then(serde_json::Value::as_i64);
+    let experts = text
+        .and_then(|value| value.get("num_experts"))
+        .and_then(serde_json::Value::as_i64);
+    let experts_per_tok = text
+        .and_then(|value| value.get("num_experts_per_tok"))
+        .and_then(serde_json::Value::as_i64);
 
-pub fn effective_mtp_draft_tokens_for_paged_prefix(
-    draft_tokens: usize,
-    paged_prefix_cache_enabled: bool,
-) -> usize {
-    let draft_tokens = draft_tokens.max(1);
-    if paged_prefix_cache_enabled {
-        1
-    } else {
-        draft_tokens
+    match (model_type, hidden_size, layers, experts, experts_per_tok) {
+        // Qwen3.6-27B Dense and Qwen3.8-27B Dense share this text
+        // architecture and retain their pre-Gemma d=2 default.
+        ("qwen3_5", Some(5120), Some(64), None, None) => 2,
+        ("qwen3_5_moe", Some(2048), Some(40), Some(256), Some(8)) => 2,
+        // Qwen3.5-4B and Gemma4 keep the conservative d=1 default.
+        _ => 1,
     }
 }
 
@@ -1345,6 +1357,11 @@ pub(crate) struct MtpDraftResult {
 pub(crate) struct MtpDraftPolicyWindow {
     pub attempted_draft_tokens: usize,
     pub accepted_draft_tokens: usize,
+    pub committed_tokens: usize,
+    pub total_us: u64,
+    pub context_tokens: usize,
+    pub batch_width: usize,
+    pub kv_state: MtpDraftPolicyKvState,
     pub draft_forward_us: u64,
     pub verify_forward_us: u64,
     pub projection_us: u64,
@@ -1357,15 +1374,53 @@ pub(crate) struct MtpDraftPolicyWindow {
     pub mtp_cache_restore_us: u64,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub(crate) enum MtpDraftPolicyKvState {
+    #[default]
+    Contiguous,
+    Paged,
+    PagedActiveKv,
+}
+
+impl MtpDraftPolicyKvState {
+    pub(crate) fn from_runtime(paged: bool, active_kv: bool) -> Self {
+        if active_kv {
+            Self::PagedActiveKv
+        } else if paged {
+            Self::Paged
+        } else {
+            Self::Contiguous
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct MtpDraftPolicyRegime {
+    context_bucket: MtpDraftCapContextBucket,
+    batch_width: usize,
+    kv_state: MtpDraftPolicyKvState,
+}
+
 impl MtpDraftPolicyWindow {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_stats_delta(
         attempted_draft_tokens: usize,
         accepted_draft_tokens: usize,
+        committed_tokens: usize,
+        total_us: u64,
+        context_tokens: usize,
+        batch_width: usize,
+        kv_state: MtpDraftPolicyKvState,
         delta: &MtpSpeculativeStats,
     ) -> Self {
         Self {
             attempted_draft_tokens,
             accepted_draft_tokens,
+            committed_tokens,
+            total_us,
+            context_tokens,
+            batch_width,
+            kv_state,
             draft_forward_us: delta.draft_forward_us,
             verify_forward_us: delta.verify_forward_us,
             projection_us: delta.projection_us,
@@ -1379,14 +1434,43 @@ impl MtpDraftPolicyWindow {
         }
     }
 
-    fn non_verify_overhead_us(self) -> u64 {
+    fn measured_components_us(self) -> u64 {
         self.draft_forward_us
+            .saturating_add(self.verify_forward_us)
             .saturating_add(self.projection_us)
             .saturating_add(self.sampling_us)
             .saturating_add(self.verify_accept_host_sync_us)
             .saturating_add(self.main_rollback_us)
             .saturating_add(self.mtp_decode_cache_commit_us)
             .saturating_add(self.mtp_cache_restore_us)
+    }
+
+    fn gemma4_cost_per_committed_token_us(self) -> f64 {
+        let measured_components_us = self.measured_components_us();
+        let comparable_us = if self.attempted_draft_tokens == 0 && measured_components_us > 0 {
+            // A zero-draft control window still runs inside speculative
+            // bookkeeping so the drafter cache can be resumed if it wins.
+            // Snapshot/resolve/state-maintenance overhead disappears after a
+            // permanent switch to the ordinary scheduler and must not make
+            // that control path look artificially expensive.
+            measured_components_us
+        } else {
+            self.total_us.max(measured_components_us)
+        };
+        comparable_us as f64 / self.committed_tokens.max(1) as f64
+    }
+
+    fn qwen_cost_per_committed_token_us(self) -> f64 {
+        self.total_us.max(self.measured_components_us()) as f64
+            / self.committed_tokens.max(1) as f64
+    }
+
+    fn regime(self) -> MtpDraftPolicyRegime {
+        MtpDraftPolicyRegime {
+            context_bucket: MtpDraftCapContextBucket::for_tokens(self.context_tokens),
+            batch_width: self.batch_width.max(1),
+            kv_state: self.kv_state,
+        }
     }
 
     fn acceptance_rate(self) -> f64 {
@@ -1397,10 +1481,6 @@ impl MtpDraftPolicyWindow {
                 / self.attempted_draft_tokens as f64
         }
     }
-
-    fn overhead_ratio(self) -> f64 {
-        self.non_verify_overhead_us() as f64 / self.verify_forward_us.max(1) as f64
-    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1410,31 +1490,74 @@ pub(crate) struct MtpDraftBudgetChange {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct MtpDraftPolicyState {
+pub(crate) struct Gemma4DrafterPolicyState {
     max_draft_tokens: usize,
     current_budget: usize,
     acceptance_ewma: Option<f64>,
-    overhead_ratio_ewma: Option<f64>,
+    active_regime: Option<MtpDraftPolicyRegime>,
+    cost_estimates: Vec<MtpDraftCostEstimate>,
+    probe_budget: Option<usize>,
+    probe_origin_budget: Option<usize>,
+    probe_windows_remaining: usize,
     cooldown_windows: usize,
+    next_probe_cooldown_windows: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct MtpDraftPolicySnapshot {
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(test)]
+pub(crate) struct Gemma4DrafterPolicySnapshot {
     max_draft_tokens: usize,
     current_budget: usize,
     acceptance_ewma_bits: Option<u64>,
-    overhead_ratio_ewma_bits: Option<u64>,
+    active_regime: Option<MtpDraftPolicyRegime>,
+    cost_estimates: Vec<MtpDraftCostEstimateSnapshot>,
+    probe_budget: Option<usize>,
+    probe_origin_budget: Option<usize>,
+    probe_windows_remaining: usize,
     cooldown_windows: usize,
+    next_probe_cooldown_windows: usize,
 }
 
-impl MtpDraftPolicyState {
+#[derive(Debug, Clone)]
+struct MtpDraftCostEstimate {
+    regime: MtpDraftPolicyRegime,
+    draft_tokens: usize,
+    cost_ewma: f64,
+    acceptance_ewma: f64,
+    samples: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MtpDraftCostEstimateSnapshot {
+    regime: MtpDraftPolicyRegime,
+    draft_tokens: usize,
+    cost_ewma_bits: u64,
+    acceptance_ewma_bits: u64,
+    samples: usize,
+}
+
+impl Gemma4DrafterPolicyState {
     const EWMA_ALPHA: f64 = 0.35;
-    const HIGH_OVERHEAD_RATIO: f64 = 1.50;
-    const VERY_HIGH_OVERHEAD_RATIO: f64 = 3.00;
     const LOW_ACCEPTANCE: f64 = 0.50;
     const HIGH_ACCEPTANCE: f64 = 0.85;
-    const MIN_POSITION_ATTEMPTS: usize = 4;
-    const LOW_POSITION_ACCEPTANCE: f64 = 0.45;
+    const MIN_COST_SAMPLES: usize = 2;
+    const PROBE_WINDOWS: usize = 2;
+    const ZERO_DRAFT_MIN_COST_SAMPLES: usize = 8;
+    // At >32K, waiting for eight single-draft windows before measuring
+    // ordinary decode allows a costly path to consume most of a typical
+    // response. Two complete MTP windows already include target, draft,
+    // sampling, and cache costs; the separate four-window ordinary probe
+    // remains the noise filter for the final decision.
+    const LONG_CONTEXT_ZERO_DRAFT_MIN_COST_SAMPLES: usize = 2;
+    const ZERO_DRAFT_PROBE_WINDOWS: usize = 4;
+    const INITIAL_PROBE_COOLDOWN_WINDOWS: usize = 8;
+    const MAX_PROBE_COOLDOWN_WINDOWS: usize = 64;
+    const COST_IMPROVEMENT_RATIO: f64 = 0.95;
+    // Ordinary decode is the safe control path. Require only a small measured
+    // margin before bypassing MTP so a 5-10% speculative regression is not
+    // hidden by overly conservative hysteresis. The four-window probe and
+    // EWMA still absorb single-window timing noise.
+    const ZERO_DRAFT_COST_IMPROVEMENT_RATIO: f64 = 0.98;
 
     pub(crate) fn new(max_draft_tokens: usize) -> Self {
         let max_draft_tokens = max_draft_tokens.max(1);
@@ -1442,26 +1565,71 @@ impl MtpDraftPolicyState {
             max_draft_tokens,
             current_budget: max_draft_tokens,
             acceptance_ewma: None,
-            overhead_ratio_ewma: None,
+            active_regime: None,
+            cost_estimates: Vec::new(),
+            probe_budget: None,
+            probe_origin_budget: None,
+            probe_windows_remaining: 0,
             cooldown_windows: 0,
+            next_probe_cooldown_windows: (Self::INITIAL_PROBE_COOLDOWN_WINDOWS * 2)
+                .min(Self::MAX_PROBE_COOLDOWN_WINDOWS),
         }
     }
 
     pub(crate) fn current_budget(&self) -> usize {
-        self.current_budget.clamp(1, self.max_draft_tokens)
+        self.current_budget.min(self.max_draft_tokens)
     }
 
-    pub(crate) fn snapshot(&self) -> MtpDraftPolicySnapshot {
-        MtpDraftPolicySnapshot {
+    pub(crate) fn seed_initial_budget(&mut self, budget: usize) -> bool {
+        if self.active_regime.is_some()
+            || !self.cost_estimates.is_empty()
+            || self.probe_budget.is_some()
+        {
+            return false;
+        }
+        let seeded = budget.clamp(1, self.max_draft_tokens);
+        let changed = seeded != self.current_budget;
+        self.current_budget = seeded;
+        changed
+    }
+
+    #[cfg(test)]
+    pub(crate) fn should_maintain_mtp_cache(&self) -> bool {
+        self.current_budget() > 0 || self.probe_budget.is_some()
+    }
+
+    pub(crate) fn uses_ordinary_decode(&self) -> bool {
+        self.current_budget() == 0 && self.probe_budget.is_none()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn snapshot(&self) -> Gemma4DrafterPolicySnapshot {
+        Gemma4DrafterPolicySnapshot {
             max_draft_tokens: self.max_draft_tokens,
             current_budget: self.current_budget,
             acceptance_ewma_bits: self.acceptance_ewma.map(f64::to_bits),
-            overhead_ratio_ewma_bits: self.overhead_ratio_ewma.map(f64::to_bits),
+            active_regime: self.active_regime,
+            cost_estimates: self
+                .cost_estimates
+                .iter()
+                .map(|estimate| MtpDraftCostEstimateSnapshot {
+                    regime: estimate.regime,
+                    draft_tokens: estimate.draft_tokens,
+                    cost_ewma_bits: estimate.cost_ewma.to_bits(),
+                    acceptance_ewma_bits: estimate.acceptance_ewma.to_bits(),
+                    samples: estimate.samples,
+                })
+                .collect(),
+            probe_budget: self.probe_budget,
+            probe_origin_budget: self.probe_origin_budget,
+            probe_windows_remaining: self.probe_windows_remaining,
             cooldown_windows: self.cooldown_windows,
+            next_probe_cooldown_windows: self.next_probe_cooldown_windows,
         }
     }
 
-    pub(crate) fn restore_snapshot(&mut self, snapshot: MtpDraftPolicySnapshot) -> Result<()> {
+    #[cfg(test)]
+    pub(crate) fn restore_snapshot(&mut self, snapshot: Gemma4DrafterPolicySnapshot) -> Result<()> {
         anyhow::ensure!(
             snapshot.max_draft_tokens == self.max_draft_tokens,
             "MTP draft policy snapshot max {} != destination max {}",
@@ -1469,84 +1637,822 @@ impl MtpDraftPolicyState {
             self.max_draft_tokens
         );
         anyhow::ensure!(
-            (1..=snapshot.max_draft_tokens).contains(&snapshot.current_budget),
-            "MTP draft policy snapshot budget {} is outside [1, {}]",
+            snapshot.current_budget <= snapshot.max_draft_tokens,
+            "MTP draft policy snapshot budget {} is outside [0, {}]",
             snapshot.current_budget,
             snapshot.max_draft_tokens
         );
         self.current_budget = snapshot.current_budget;
         self.acceptance_ewma = snapshot.acceptance_ewma_bits.map(f64::from_bits);
-        self.overhead_ratio_ewma = snapshot.overhead_ratio_ewma_bits.map(f64::from_bits);
+        self.active_regime = snapshot.active_regime;
+        self.cost_estimates = snapshot
+            .cost_estimates
+            .into_iter()
+            .map(|estimate| MtpDraftCostEstimate {
+                regime: estimate.regime,
+                draft_tokens: estimate.draft_tokens,
+                cost_ewma: f64::from_bits(estimate.cost_ewma_bits),
+                acceptance_ewma: f64::from_bits(estimate.acceptance_ewma_bits),
+                samples: estimate.samples,
+            })
+            .collect();
+        self.probe_budget = snapshot.probe_budget;
+        self.probe_origin_budget = snapshot.probe_origin_budget;
+        self.probe_windows_remaining = snapshot.probe_windows_remaining;
         self.cooldown_windows = snapshot.cooldown_windows;
+        self.next_probe_cooldown_windows = snapshot.next_probe_cooldown_windows;
         Ok(())
     }
 
-    pub(crate) fn observe_window(
-        &mut self,
-        window: MtpDraftPolicyWindow,
-        cumulative_stats: &MtpSpeculativeStats,
-    ) -> MtpDraftBudgetChange {
-        let old = self.current_budget();
-        if self.max_draft_tokens <= 1 || window.attempted_draft_tokens == 0 {
-            self.current_budget = self.max_draft_tokens.max(1);
-            return budget_change(old, self.current_budget);
+    pub(crate) fn observe_window(&mut self, window: MtpDraftPolicyWindow) -> MtpDraftBudgetChange {
+        let regime = window.regime();
+        if self.active_regime != Some(regime) {
+            self.active_regime = Some(regime);
+            self.acceptance_ewma = None;
+            self.cost_estimates.clear();
+            self.probe_budget = None;
+            self.probe_origin_budget = None;
+            self.probe_windows_remaining = 0;
+            self.cooldown_windows = 0;
+            self.next_probe_cooldown_windows =
+                (Self::INITIAL_PROBE_COOLDOWN_WINDOWS * 2).min(Self::MAX_PROBE_COOLDOWN_WINDOWS);
         }
+        let old = self.current_budget();
 
         let acceptance = window.acceptance_rate();
-        let overhead_ratio = window.overhead_ratio();
         self.acceptance_ewma = Some(update_ewma(
             self.acceptance_ewma,
             acceptance,
             Self::EWMA_ALPHA,
         ));
-        self.overhead_ratio_ewma = Some(update_ewma(
-            self.overhead_ratio_ewma,
-            overhead_ratio,
-            Self::EWMA_ALPHA,
-        ));
+        self.record_cost(
+            regime,
+            window.attempted_draft_tokens,
+            window.gemma4_cost_per_committed_token_us(),
+            acceptance,
+        );
+        if window.attempted_draft_tokens != old {
+            return MtpDraftBudgetChange::default();
+        }
 
-        let mut next = if self.cooldown_windows > 0 {
-            self.cooldown_windows -= 1;
-            if window.accepted_draft_tokens == window.attempted_draft_tokens
-                && overhead_ratio <= Self::HIGH_OVERHEAD_RATIO
-            {
-                old.saturating_add(1)
+        let zero_draft_probe_min_samples =
+            if self.acceptance_ewma.unwrap_or(acceptance) < Self::LOW_ACCEPTANCE {
+                Self::MIN_COST_SAMPLES
+            } else if matches!(
+                regime.context_bucket,
+                MtpDraftCapContextBucket::UpTo128k | MtpDraftCapContextBucket::Above128k
+            ) {
+                Self::LONG_CONTEXT_ZERO_DRAFT_MIN_COST_SAMPLES
             } else {
-                1
+                Self::ZERO_DRAFT_MIN_COST_SAMPLES
+            };
+        if old == 1
+            && self.probe_budget.is_none()
+            && self.cost_estimate(regime, 0).is_none()
+            && self
+                .cost_estimate(regime, old)
+                .is_some_and(|estimate| estimate.samples >= zero_draft_probe_min_samples)
+        {
+            self.current_budget = 0;
+            if self.acceptance_ewma.unwrap_or(acceptance) < Self::LOW_ACCEPTANCE {
+                // At persistently low acceptance, a one-token drafter cannot
+                // amortize target verification. Commit directly to ordinary
+                // decode so architecture-specific schedulers can leave the
+                // speculative path instead of benchmarking a slower
+                // zero-draft emulation of it.
+                self.probe_budget = None;
+                self.probe_origin_budget = None;
+                self.probe_windows_remaining = 0;
+            } else {
+                self.probe_budget = Some(0);
+                self.probe_origin_budget = Some(old);
+                self.probe_windows_remaining = Self::ZERO_DRAFT_PROBE_WINDOWS;
             }
-        } else if window.accepted_draft_tokens == window.attempted_draft_tokens {
-            if overhead_ratio > Self::HIGH_OVERHEAD_RATIO {
-                old
+            return budget_change(old, self.current_budget);
+        }
+        if old == 0 && self.probe_budget.is_none() {
+            return MtpDraftBudgetChange::default();
+        }
+        if old == 1
+            && self.probe_budget.is_none()
+            && self.cost_estimate(regime, 0).is_some()
+            && self.cooldown_windows == 0
+            && self
+                .cost_estimate(regime, 1)
+                .is_some_and(|estimate| estimate.samples >= Self::ZERO_DRAFT_MIN_COST_SAMPLES)
+        {
+            // A previous zero-draft sample is stale once the response enters
+            // a different acceptance/cost phase. Re-test ordinary decode only
+            // while the MTP cache is still synchronized, and discard the old
+            // control estimate so it cannot drive an uncontrolled switch.
+            self.cost_estimates
+                .retain(|estimate| estimate.regime != regime || estimate.draft_tokens != 0);
+            self.current_budget = 0;
+            self.probe_budget = Some(0);
+            self.probe_origin_budget = Some(old);
+            self.probe_windows_remaining = Self::ZERO_DRAFT_PROBE_WINDOWS;
+            return budget_change(old, self.current_budget);
+        }
+
+        let mut next = old;
+        let full_accept = window.accepted_draft_tokens == window.attempted_draft_tokens;
+        if !full_accept {
+            let rejected_probe = self.probe_budget == Some(old);
+            next = window.accepted_draft_tokens.saturating_add(1).min(old);
+            self.probe_budget = None;
+            self.probe_origin_budget = None;
+            self.probe_windows_remaining = 0;
+            if rejected_probe {
+                self.back_off_next_probe();
+            } else if old == 1 {
+                self.cooldown_windows = self.cooldown_windows.saturating_sub(1);
             } else {
-                old.saturating_add(1)
+                self.arm_initial_probe_cooldown();
+            }
+        } else if self.probe_budget == Some(old) {
+            self.probe_windows_remaining = self.probe_windows_remaining.saturating_sub(1);
+            if self.probe_windows_remaining == 0 {
+                let origin = self.probe_origin_budget.take();
+                self.probe_budget = None;
+                next = origin.map_or(old, |origin| {
+                    self.preferred_probe_budget(regime, origin, old)
+                });
+                if origin.is_some_and(|origin| next == origin) && origin != Some(0) {
+                    self.back_off_next_probe();
+                } else {
+                    self.arm_initial_probe_cooldown();
+                }
             }
         } else {
-            window.accepted_draft_tokens.saturating_add(1)
-        };
+            next = self.best_measured_budget(regime, old);
+            if next > old && self.acceptance_ewma.unwrap_or(acceptance) < Self::HIGH_ACCEPTANCE {
+                next = old;
+            }
+            if next == old {
+                if self.cooldown_windows > 0 {
+                    self.cooldown_windows -= 1;
+                } else if self
+                    .cost_estimate(regime, old)
+                    .is_some_and(|estimate| estimate.samples >= Self::MIN_COST_SAMPLES)
+                {
+                    if let Some(probe) = self.next_probe_budget(regime, old) {
+                        if probe < old
+                            || self.acceptance_ewma.unwrap_or(acceptance) >= Self::HIGH_ACCEPTANCE
+                        {
+                            next = probe;
+                            self.probe_budget = Some(probe);
+                            self.probe_origin_budget = Some(old);
+                            self.probe_windows_remaining = Self::PROBE_WINDOWS;
+                        }
+                    }
+                }
+            }
+        }
 
         let smoothed_acceptance = self.acceptance_ewma.unwrap_or(acceptance);
-        let smoothed_overhead_ratio = self.overhead_ratio_ewma.unwrap_or(overhead_ratio);
-        if smoothed_acceptance < Self::LOW_ACCEPTANCE
-            && smoothed_overhead_ratio > Self::HIGH_OVERHEAD_RATIO
-        {
-            next = next.min(old.saturating_sub(1).max(1));
+        if smoothed_acceptance < Self::LOW_ACCEPTANCE && old > 1 {
+            next = next.min(old - 1);
         }
-        if acceptance < Self::LOW_ACCEPTANCE && overhead_ratio > Self::VERY_HIGH_OVERHEAD_RATIO {
-            next = 1;
-            self.cooldown_windows = self.cooldown_windows.max(1);
-        }
-        if smoothed_acceptance >= Self::HIGH_ACCEPTANCE
-            && smoothed_overhead_ratio <= Self::HIGH_OVERHEAD_RATIO
-            && window.accepted_draft_tokens == window.attempted_draft_tokens
-        {
-            next = next.max(old.saturating_add(1));
-        }
-        if let Some(position_cap) = position_acceptance_budget_cap(cumulative_stats) {
-            next = next.min(position_cap);
+        if acceptance == 0.0 {
+            next = next.min(1);
+            self.probe_budget = None;
+            self.probe_origin_budget = None;
+            self.probe_windows_remaining = 0;
+            // A rejected wider probe should back off before it is retried.
+            // At budget 1, however, repeatedly re-arming this cooldown makes
+            // an unprofitable MTP path impossible to compare with ordinary
+            // decode: every zero-acceptance window resets the countdown. Keep
+            // the existing countdown moving toward a fresh zero-draft probe.
+            if old > 1 {
+                self.arm_initial_probe_cooldown();
+            }
         }
 
-        self.current_budget = next.clamp(1, self.max_draft_tokens);
+        self.current_budget = next.min(self.max_draft_tokens);
         budget_change(old, self.current_budget)
+    }
+
+    fn arm_initial_probe_cooldown(&mut self) {
+        self.cooldown_windows = Self::INITIAL_PROBE_COOLDOWN_WINDOWS;
+        self.next_probe_cooldown_windows =
+            (Self::INITIAL_PROBE_COOLDOWN_WINDOWS * 2).min(Self::MAX_PROBE_COOLDOWN_WINDOWS);
+    }
+
+    fn back_off_next_probe(&mut self) {
+        self.cooldown_windows = self.next_probe_cooldown_windows.clamp(
+            Self::INITIAL_PROBE_COOLDOWN_WINDOWS,
+            Self::MAX_PROBE_COOLDOWN_WINDOWS,
+        );
+        self.next_probe_cooldown_windows = self
+            .cooldown_windows
+            .saturating_mul(2)
+            .min(Self::MAX_PROBE_COOLDOWN_WINDOWS);
+    }
+
+    fn record_cost(
+        &mut self,
+        regime: MtpDraftPolicyRegime,
+        draft_tokens: usize,
+        cost: f64,
+        acceptance: f64,
+    ) {
+        if let Some(estimate) = self
+            .cost_estimates
+            .iter_mut()
+            .find(|estimate| estimate.regime == regime && estimate.draft_tokens == draft_tokens)
+        {
+            if estimate.samples == 0 {
+                estimate.cost_ewma = cost;
+                estimate.acceptance_ewma = acceptance;
+            } else {
+                estimate.cost_ewma = update_ewma(Some(estimate.cost_ewma), cost, Self::EWMA_ALPHA);
+                estimate.acceptance_ewma =
+                    update_ewma(Some(estimate.acceptance_ewma), acceptance, Self::EWMA_ALPHA);
+            }
+            estimate.samples = estimate.samples.saturating_add(1);
+        } else {
+            // Draft=0 activates the ordinary Q=1 target shape for the first
+            // time in this response. That first control window can include a
+            // one-off Metal graph compilation which has already been paid by
+            // the time the policy makes its decision. Keep the marker but do
+            // not let cold compilation bias the steady-state comparison.
+            let samples = usize::from(draft_tokens != 0);
+            self.cost_estimates.push(MtpDraftCostEstimate {
+                regime,
+                draft_tokens,
+                cost_ewma: cost,
+                acceptance_ewma: acceptance,
+                samples,
+            });
+        }
+    }
+
+    fn cost_estimate(
+        &self,
+        regime: MtpDraftPolicyRegime,
+        draft_tokens: usize,
+    ) -> Option<&MtpDraftCostEstimate> {
+        self.cost_estimates
+            .iter()
+            .find(|estimate| estimate.regime == regime && estimate.draft_tokens == draft_tokens)
+    }
+
+    fn best_measured_budget(&self, regime: MtpDraftPolicyRegime, current: usize) -> usize {
+        let Some(current_estimate) = self.cost_estimate(regime, current) else {
+            return current;
+        };
+        if current_estimate.samples < Self::MIN_COST_SAMPLES {
+            return current;
+        }
+        self.cost_estimates
+            .iter()
+            .filter(|estimate| {
+                estimate.regime == regime
+                    && estimate.draft_tokens > 0
+                    && estimate.samples >= Self::MIN_COST_SAMPLES
+                    && (estimate.draft_tokens <= current
+                        || estimate.acceptance_ewma >= Self::HIGH_ACCEPTANCE)
+                    && estimate.cost_ewma
+                        < current_estimate.cost_ewma * Self::COST_IMPROVEMENT_RATIO
+            })
+            .min_by(|left, right| left.cost_ewma.total_cmp(&right.cost_ewma))
+            .map_or(current, |estimate| estimate.draft_tokens)
+    }
+
+    fn next_probe_budget(&self, regime: MtpDraftPolicyRegime, current: usize) -> Option<usize> {
+        let lower = current.checked_sub(1);
+        let upper = current
+            .checked_add(1)
+            .filter(|&budget| budget <= self.max_draft_tokens);
+        [lower, upper]
+            .into_iter()
+            .flatten()
+            .filter(|&budget| {
+                if budget == 0 && current > 0 {
+                    // Wait for a controlled zero-draft probe. Once sampled,
+                    // refreshes are scheduled explicitly after cooldown rather
+                    // than by the generic adjacent-budget probe path.
+                    if self.cost_estimate(regime, 0).is_some()
+                        || self.cost_estimate(regime, current).is_none_or(|estimate| {
+                            estimate.samples < Self::ZERO_DRAFT_MIN_COST_SAMPLES
+                        })
+                    {
+                        return false;
+                    }
+                }
+                budget <= current
+                    || current == 0
+                    || self
+                        .cost_estimate(regime, budget)
+                        .is_none_or(|estimate| estimate.acceptance_ewma >= Self::HIGH_ACCEPTANCE)
+            })
+            .min_by_key(|&budget| {
+                self.cost_estimate(regime, budget)
+                    .map_or(0, |estimate| estimate.samples)
+            })
+    }
+
+    fn preferred_probe_budget(
+        &self,
+        regime: MtpDraftPolicyRegime,
+        origin: usize,
+        probe: usize,
+    ) -> usize {
+        let Some(origin_cost) = self.cost_estimate(regime, origin) else {
+            return probe;
+        };
+        let Some(probe_cost) = self.cost_estimate(regime, probe) else {
+            return origin;
+        };
+        let improvement_ratio = if probe == 0 {
+            Self::ZERO_DRAFT_COST_IMPROVEMENT_RATIO
+        } else {
+            Self::COST_IMPROVEMENT_RATIO
+        };
+        if probe_cost.samples >= Self::MIN_COST_SAMPLES
+            && (probe <= origin
+                || origin == 0
+                || probe_cost.acceptance_ewma >= Self::HIGH_ACCEPTANCE)
+            && probe_cost.cost_ewma < origin_cost.cost_ewma * improvement_ratio
+        {
+            probe
+        } else {
+            origin
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct QwenMtpDraftPolicyState {
+    max_draft_tokens: usize,
+    current_budget: usize,
+    acceptance_ewma: Option<f64>,
+    active_regime: Option<MtpDraftPolicyRegime>,
+    cost_estimates: Vec<MtpDraftCostEstimate>,
+    probe_budget: Option<usize>,
+    probe_origin_budget: Option<usize>,
+    probe_windows_remaining: usize,
+    cooldown_windows: usize,
+    next_probe_cooldown_windows: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct QwenMtpDraftPolicySnapshot {
+    max_draft_tokens: usize,
+    current_budget: usize,
+    acceptance_ewma_bits: Option<u64>,
+    active_regime: Option<MtpDraftPolicyRegime>,
+    cost_estimates: Vec<MtpDraftCostEstimateSnapshot>,
+    probe_budget: Option<usize>,
+    probe_origin_budget: Option<usize>,
+    probe_windows_remaining: usize,
+    cooldown_windows: usize,
+    next_probe_cooldown_windows: usize,
+}
+
+impl QwenMtpDraftPolicyState {
+    const EWMA_ALPHA: f64 = 0.35;
+    const LOW_ACCEPTANCE: f64 = 0.50;
+    const HIGH_ACCEPTANCE: f64 = 0.85;
+    const MIN_COST_SAMPLES: usize = 2;
+    const PROBE_WINDOWS: usize = 2;
+    const ZERO_DRAFT_MIN_COST_SAMPLES: usize = 8;
+    // A 32K prompt enters the UpTo128k regime as soon as the prefill token is
+    // committed. Waiting for eight d=1 windows can spend most of a short
+    // response on an unprofitable exact-verify path before ordinary decode is
+    // measured. Keep the pre-Gemma policy at shorter contexts, but sample the
+    // ordinary control after one complete long-context window.
+    const LONG_CONTEXT_ZERO_DRAFT_MIN_COST_SAMPLES: usize = 1;
+    const ZERO_DRAFT_PROBE_WINDOWS: usize = 4;
+    const INITIAL_PROBE_COOLDOWN_WINDOWS: usize = 8;
+    const MAX_PROBE_COOLDOWN_WINDOWS: usize = 64;
+    const COST_IMPROVEMENT_RATIO: f64 = 0.95;
+    // Ordinary decode is the safe control path. Require only a small measured
+    // margin before bypassing MTP so a 5-10% speculative regression is not
+    // hidden by overly conservative hysteresis. The four-window probe and
+    // EWMA still absorb single-window timing noise.
+    const ZERO_DRAFT_COST_IMPROVEMENT_RATIO: f64 = 0.98;
+
+    pub(crate) fn new(max_draft_tokens: usize) -> Self {
+        let max_draft_tokens = max_draft_tokens.max(1);
+        Self {
+            max_draft_tokens,
+            current_budget: max_draft_tokens,
+            acceptance_ewma: None,
+            active_regime: None,
+            cost_estimates: Vec::new(),
+            probe_budget: None,
+            probe_origin_budget: None,
+            probe_windows_remaining: 0,
+            cooldown_windows: 0,
+            next_probe_cooldown_windows: (Self::INITIAL_PROBE_COOLDOWN_WINDOWS * 2)
+                .min(Self::MAX_PROBE_COOLDOWN_WINDOWS),
+        }
+    }
+
+    pub(crate) fn current_budget(&self) -> usize {
+        self.current_budget.min(self.max_draft_tokens)
+    }
+
+    pub(crate) fn should_maintain_mtp_cache(&self) -> bool {
+        self.current_budget() > 0 || self.probe_budget.is_some()
+    }
+
+    pub(crate) fn uses_ordinary_decode(&self) -> bool {
+        self.current_budget() == 0 && self.probe_budget.is_none()
+    }
+
+    pub(crate) fn snapshot(&self) -> QwenMtpDraftPolicySnapshot {
+        QwenMtpDraftPolicySnapshot {
+            max_draft_tokens: self.max_draft_tokens,
+            current_budget: self.current_budget,
+            acceptance_ewma_bits: self.acceptance_ewma.map(f64::to_bits),
+            active_regime: self.active_regime,
+            cost_estimates: self
+                .cost_estimates
+                .iter()
+                .map(|estimate| MtpDraftCostEstimateSnapshot {
+                    regime: estimate.regime,
+                    draft_tokens: estimate.draft_tokens,
+                    cost_ewma_bits: estimate.cost_ewma.to_bits(),
+                    acceptance_ewma_bits: estimate.acceptance_ewma.to_bits(),
+                    samples: estimate.samples,
+                })
+                .collect(),
+            probe_budget: self.probe_budget,
+            probe_origin_budget: self.probe_origin_budget,
+            probe_windows_remaining: self.probe_windows_remaining,
+            cooldown_windows: self.cooldown_windows,
+            next_probe_cooldown_windows: self.next_probe_cooldown_windows,
+        }
+    }
+
+    pub(crate) fn restore_snapshot(&mut self, snapshot: QwenMtpDraftPolicySnapshot) -> Result<()> {
+        anyhow::ensure!(
+            snapshot.max_draft_tokens == self.max_draft_tokens,
+            "MTP draft policy snapshot max {} != destination max {}",
+            snapshot.max_draft_tokens,
+            self.max_draft_tokens
+        );
+        anyhow::ensure!(
+            snapshot.current_budget <= snapshot.max_draft_tokens,
+            "MTP draft policy snapshot budget {} is outside [0, {}]",
+            snapshot.current_budget,
+            snapshot.max_draft_tokens
+        );
+        self.current_budget = snapshot.current_budget;
+        self.acceptance_ewma = snapshot.acceptance_ewma_bits.map(f64::from_bits);
+        self.active_regime = snapshot.active_regime;
+        self.cost_estimates = snapshot
+            .cost_estimates
+            .into_iter()
+            .map(|estimate| MtpDraftCostEstimate {
+                regime: estimate.regime,
+                draft_tokens: estimate.draft_tokens,
+                cost_ewma: f64::from_bits(estimate.cost_ewma_bits),
+                acceptance_ewma: f64::from_bits(estimate.acceptance_ewma_bits),
+                samples: estimate.samples,
+            })
+            .collect();
+        self.probe_budget = snapshot.probe_budget;
+        self.probe_origin_budget = snapshot.probe_origin_budget;
+        self.probe_windows_remaining = snapshot.probe_windows_remaining;
+        self.cooldown_windows = snapshot.cooldown_windows;
+        self.next_probe_cooldown_windows = snapshot.next_probe_cooldown_windows;
+        Ok(())
+    }
+
+    pub(crate) fn observe_window(&mut self, window: MtpDraftPolicyWindow) -> MtpDraftBudgetChange {
+        let regime = window.regime();
+        if self.active_regime != Some(regime) {
+            self.active_regime = Some(regime);
+            self.acceptance_ewma = None;
+            self.cost_estimates.clear();
+            self.probe_budget = None;
+            self.probe_origin_budget = None;
+            self.probe_windows_remaining = 0;
+            self.cooldown_windows = 0;
+            self.next_probe_cooldown_windows =
+                (Self::INITIAL_PROBE_COOLDOWN_WINDOWS * 2).min(Self::MAX_PROBE_COOLDOWN_WINDOWS);
+        }
+        let old = self.current_budget();
+
+        let acceptance = window.acceptance_rate();
+        self.acceptance_ewma = Some(update_ewma(
+            self.acceptance_ewma,
+            acceptance,
+            Self::EWMA_ALPHA,
+        ));
+        self.record_cost(
+            regime,
+            window.attempted_draft_tokens,
+            window.qwen_cost_per_committed_token_us(),
+            acceptance,
+        );
+        if window.attempted_draft_tokens != old {
+            return MtpDraftBudgetChange::default();
+        }
+
+        let long_context = matches!(
+            regime.context_bucket,
+            MtpDraftCapContextBucket::UpTo128k | MtpDraftCapContextBucket::Above128k
+        );
+        let zero_draft_probe_min_samples = if long_context {
+            Self::LONG_CONTEXT_ZERO_DRAFT_MIN_COST_SAMPLES
+        } else {
+            Self::ZERO_DRAFT_MIN_COST_SAMPLES
+        };
+        if long_context
+            && old > 0
+            && self.probe_budget.is_none()
+            && self.cost_estimate(regime, 0).is_none()
+            && self
+                .cost_estimate(regime, old)
+                .is_some_and(|estimate| estimate.samples >= 1)
+        {
+            // At 32K+, first compare the configured production depth directly
+            // with ordinary decode. Traversing every adjacent depth before the
+            // control path makes the exploration cost dominate short replies.
+            self.current_budget = 0;
+            self.probe_budget = Some(0);
+            self.probe_origin_budget = Some(old);
+            self.probe_windows_remaining = Self::ZERO_DRAFT_PROBE_WINDOWS;
+            return budget_change(old, self.current_budget);
+        }
+        if old == 1
+            && self.probe_budget.is_none()
+            && self.cost_estimate(regime, 0).is_none()
+            && self
+                .cost_estimate(regime, old)
+                .is_some_and(|estimate| estimate.samples >= zero_draft_probe_min_samples)
+        {
+            self.current_budget = 0;
+            self.probe_budget = Some(0);
+            self.probe_origin_budget = Some(old);
+            self.probe_windows_remaining = Self::ZERO_DRAFT_PROBE_WINDOWS;
+            return budget_change(old, self.current_budget);
+        }
+        if old == 0 && self.probe_budget.is_none() {
+            return MtpDraftBudgetChange::default();
+        }
+        if old == 1
+            && self.probe_budget.is_none()
+            && self.cost_estimate(regime, 0).is_some()
+            && self.cooldown_windows == 0
+            && self
+                .cost_estimate(regime, 1)
+                .is_some_and(|estimate| estimate.samples >= Self::ZERO_DRAFT_MIN_COST_SAMPLES)
+        {
+            // A previous zero-draft sample is stale once the response enters
+            // a different acceptance/cost phase. Re-test ordinary decode only
+            // while the MTP cache is still synchronized, and discard the old
+            // control estimate so it cannot drive an uncontrolled switch.
+            self.cost_estimates
+                .retain(|estimate| estimate.regime != regime || estimate.draft_tokens != 0);
+            self.current_budget = 0;
+            self.probe_budget = Some(0);
+            self.probe_origin_budget = Some(old);
+            self.probe_windows_remaining = Self::ZERO_DRAFT_PROBE_WINDOWS;
+            return budget_change(old, self.current_budget);
+        }
+
+        let mut next = old;
+        let full_accept = window.accepted_draft_tokens == window.attempted_draft_tokens;
+        if !full_accept {
+            let rejected_probe = self.probe_budget == Some(old);
+            next = if long_context && old > 1 {
+                // At long context, every extra verifier position carries the
+                // full attention/cache-read cost. If depth d did not fully
+                // accept, probe the actually useful depth next instead of
+                // spending another window at d.
+                window.accepted_draft_tokens.max(1).min(old)
+            } else {
+                window.accepted_draft_tokens.saturating_add(1).min(old)
+            };
+            self.probe_budget = None;
+            self.probe_origin_budget = None;
+            self.probe_windows_remaining = 0;
+            if rejected_probe {
+                self.back_off_next_probe();
+            } else if old == 1 {
+                self.cooldown_windows = self.cooldown_windows.saturating_sub(1);
+            } else {
+                self.arm_initial_probe_cooldown();
+            }
+        } else if self.probe_budget == Some(old) {
+            self.probe_windows_remaining = self.probe_windows_remaining.saturating_sub(1);
+            if self.probe_windows_remaining == 0 {
+                let origin = self.probe_origin_budget.take();
+                self.probe_budget = None;
+                next = origin.map_or(old, |origin| {
+                    self.preferred_probe_budget(regime, origin, old)
+                });
+                if origin.is_some_and(|origin| next == origin) && origin != Some(0) {
+                    self.back_off_next_probe();
+                } else {
+                    self.arm_initial_probe_cooldown();
+                }
+            }
+        } else {
+            next = self.best_measured_budget(regime, old);
+            if next > old && self.acceptance_ewma.unwrap_or(acceptance) < Self::HIGH_ACCEPTANCE {
+                next = old;
+            }
+            let adjacent_probe_min_samples = if long_context {
+                1
+            } else {
+                Self::MIN_COST_SAMPLES
+            };
+            if next == old {
+                if self.cooldown_windows > 0 {
+                    self.cooldown_windows -= 1;
+                } else if self
+                    .cost_estimate(regime, old)
+                    .is_some_and(|estimate| estimate.samples >= adjacent_probe_min_samples)
+                {
+                    if let Some(probe) = self.next_probe_budget(regime, old) {
+                        if probe < old
+                            || self.acceptance_ewma.unwrap_or(acceptance) >= Self::HIGH_ACCEPTANCE
+                        {
+                            next = probe;
+                            if long_context && probe < old {
+                                // Adopt the cheaper-depth candidate directly
+                                // for one window. The next d=1 observation
+                                // immediately compares against ordinary decode,
+                                // avoiding a multi-window nested probe at 32K+.
+                                self.probe_budget = None;
+                                self.probe_origin_budget = None;
+                                self.probe_windows_remaining = 0;
+                            } else {
+                                self.probe_budget = Some(probe);
+                                self.probe_origin_budget = Some(old);
+                                self.probe_windows_remaining = Self::PROBE_WINDOWS;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let smoothed_acceptance = self.acceptance_ewma.unwrap_or(acceptance);
+        if smoothed_acceptance < Self::LOW_ACCEPTANCE && old > 1 {
+            next = next.min(old - 1);
+        }
+        if acceptance == 0.0 {
+            next = next.min(1);
+            self.probe_budget = None;
+            self.probe_origin_budget = None;
+            self.probe_windows_remaining = 0;
+            // A rejected wider probe should back off before it is retried.
+            // At budget 1, however, repeatedly re-arming this cooldown makes
+            // an unprofitable MTP path impossible to compare with ordinary
+            // decode: every zero-acceptance window resets the countdown. Keep
+            // the existing countdown moving toward a fresh zero-draft probe.
+            if old > 1 {
+                self.arm_initial_probe_cooldown();
+            }
+        }
+
+        self.current_budget = next.min(self.max_draft_tokens);
+        budget_change(old, self.current_budget)
+    }
+
+    fn arm_initial_probe_cooldown(&mut self) {
+        self.cooldown_windows = Self::INITIAL_PROBE_COOLDOWN_WINDOWS;
+        self.next_probe_cooldown_windows =
+            (Self::INITIAL_PROBE_COOLDOWN_WINDOWS * 2).min(Self::MAX_PROBE_COOLDOWN_WINDOWS);
+    }
+
+    fn back_off_next_probe(&mut self) {
+        self.cooldown_windows = self.next_probe_cooldown_windows.clamp(
+            Self::INITIAL_PROBE_COOLDOWN_WINDOWS,
+            Self::MAX_PROBE_COOLDOWN_WINDOWS,
+        );
+        self.next_probe_cooldown_windows = self
+            .cooldown_windows
+            .saturating_mul(2)
+            .min(Self::MAX_PROBE_COOLDOWN_WINDOWS);
+    }
+
+    fn record_cost(
+        &mut self,
+        regime: MtpDraftPolicyRegime,
+        draft_tokens: usize,
+        cost: f64,
+        acceptance: f64,
+    ) {
+        if let Some(estimate) = self
+            .cost_estimates
+            .iter_mut()
+            .find(|estimate| estimate.regime == regime && estimate.draft_tokens == draft_tokens)
+        {
+            estimate.cost_ewma = update_ewma(Some(estimate.cost_ewma), cost, Self::EWMA_ALPHA);
+            estimate.acceptance_ewma =
+                update_ewma(Some(estimate.acceptance_ewma), acceptance, Self::EWMA_ALPHA);
+            estimate.samples = estimate.samples.saturating_add(1);
+        } else {
+            self.cost_estimates.push(MtpDraftCostEstimate {
+                regime,
+                draft_tokens,
+                cost_ewma: cost,
+                acceptance_ewma: acceptance,
+                samples: 1,
+            });
+        }
+    }
+
+    fn cost_estimate(
+        &self,
+        regime: MtpDraftPolicyRegime,
+        draft_tokens: usize,
+    ) -> Option<&MtpDraftCostEstimate> {
+        self.cost_estimates
+            .iter()
+            .find(|estimate| estimate.regime == regime && estimate.draft_tokens == draft_tokens)
+    }
+
+    fn best_measured_budget(&self, regime: MtpDraftPolicyRegime, current: usize) -> usize {
+        let Some(current_estimate) = self.cost_estimate(regime, current) else {
+            return current;
+        };
+        if current_estimate.samples < Self::MIN_COST_SAMPLES {
+            return current;
+        }
+        self.cost_estimates
+            .iter()
+            .filter(|estimate| {
+                estimate.regime == regime
+                    && estimate.draft_tokens > 0
+                    && estimate.samples >= Self::MIN_COST_SAMPLES
+                    && (estimate.draft_tokens <= current
+                        || estimate.acceptance_ewma >= Self::HIGH_ACCEPTANCE)
+                    && estimate.cost_ewma
+                        < current_estimate.cost_ewma * Self::COST_IMPROVEMENT_RATIO
+            })
+            .min_by(|left, right| left.cost_ewma.total_cmp(&right.cost_ewma))
+            .map_or(current, |estimate| estimate.draft_tokens)
+    }
+
+    fn next_probe_budget(&self, regime: MtpDraftPolicyRegime, current: usize) -> Option<usize> {
+        let lower = current.checked_sub(1);
+        let upper = current
+            .checked_add(1)
+            .filter(|&budget| budget <= self.max_draft_tokens);
+        [lower, upper]
+            .into_iter()
+            .flatten()
+            .filter(|&budget| {
+                if budget == 0 && current > 0 {
+                    // Wait for a controlled zero-draft probe. Once sampled,
+                    // refreshes are scheduled explicitly after cooldown rather
+                    // than by the generic adjacent-budget probe path.
+                    if self.cost_estimate(regime, 0).is_some()
+                        || self.cost_estimate(regime, current).is_none_or(|estimate| {
+                            estimate.samples < Self::ZERO_DRAFT_MIN_COST_SAMPLES
+                        })
+                    {
+                        return false;
+                    }
+                }
+                budget <= current
+                    || current == 0
+                    || self
+                        .cost_estimate(regime, budget)
+                        .is_none_or(|estimate| estimate.acceptance_ewma >= Self::HIGH_ACCEPTANCE)
+            })
+            .min_by_key(|&budget| {
+                self.cost_estimate(regime, budget)
+                    .map_or(0, |estimate| estimate.samples)
+            })
+    }
+
+    fn preferred_probe_budget(
+        &self,
+        regime: MtpDraftPolicyRegime,
+        origin: usize,
+        probe: usize,
+    ) -> usize {
+        let Some(origin_cost) = self.cost_estimate(regime, origin) else {
+            return probe;
+        };
+        let Some(probe_cost) = self.cost_estimate(regime, probe) else {
+            return origin;
+        };
+        let improvement_ratio = if probe == 0 {
+            Self::ZERO_DRAFT_COST_IMPROVEMENT_RATIO
+        } else {
+            Self::COST_IMPROVEMENT_RATIO
+        };
+        if probe_cost.samples >= Self::MIN_COST_SAMPLES
+            && (probe <= origin
+                || origin == 0
+                || probe_cost.acceptance_ewma >= Self::HIGH_ACCEPTANCE)
+            && probe_cost.cost_ewma < origin_cost.cost_ewma * improvement_ratio
+        {
+            probe
+        } else {
+            origin
+        }
     }
 }
 
@@ -1559,48 +2465,6 @@ fn budget_change(old: usize, new: usize) -> MtpDraftBudgetChange {
         reduced: new < old,
         increased: new > old,
     }
-}
-
-fn position_acceptance_budget_cap(stats: &MtpSpeculativeStats) -> Option<usize> {
-    stats
-        .draft_attempts_by_position
-        .iter()
-        .zip(stats.draft_accepts_by_position.iter())
-        .enumerate()
-        .find_map(|(idx, (&attempts, &accepts))| {
-            if attempts < MtpDraftPolicyState::MIN_POSITION_ATTEMPTS {
-                return None;
-            }
-            let acceptance = accepts as f64 / attempts.max(1) as f64;
-            (acceptance < MtpDraftPolicyState::LOW_POSITION_ACCEPTANCE).then_some(idx.max(1))
-        })
-}
-
-pub(crate) fn adjust_mtp_draft_budget(
-    max_draft_tokens: usize,
-    adaptive_draft_tokens: &mut usize,
-    attempted_draft_tokens: usize,
-    accepted_draft_tokens: usize,
-    stats: &mut MtpSpeculativeStats,
-) {
-    if max_draft_tokens <= 1 || attempted_draft_tokens == 0 {
-        *adaptive_draft_tokens = max_draft_tokens.max(1);
-        return;
-    }
-    let old = (*adaptive_draft_tokens).clamp(1, max_draft_tokens);
-    let next = if accepted_draft_tokens == attempted_draft_tokens {
-        old.saturating_add(1).min(max_draft_tokens)
-    } else {
-        accepted_draft_tokens
-            .saturating_add(1)
-            .clamp(1, max_draft_tokens)
-    };
-    if next < old {
-        stats.draft_budget_reductions = stats.draft_budget_reductions.saturating_add(1);
-    } else if next > old {
-        stats.draft_budget_increases = stats.draft_budget_increases.saturating_add(1);
-    }
-    *adaptive_draft_tokens = next;
 }
 
 pub(crate) fn zero_hidden_like_position(hidden: &Array) -> Result<Array> {
@@ -1805,7 +2669,7 @@ where
     dummy_position_ids: Option<Array>,
     prng_state: Array,
     adaptive_draft_tokens: usize,
-    draft_policy: MtpDraftPolicyState,
+    draft_policy: QwenMtpDraftPolicyState,
     stats: MtpSpeculativeStats,
     constraint: Option<ConstraintSession>,
 }
@@ -1952,7 +2816,7 @@ where
             dummy_position_ids,
             prng_state,
             adaptive_draft_tokens: cfg.max_draft_tokens,
-            draft_policy: MtpDraftPolicyState::new(cfg.max_draft_tokens),
+            draft_policy: QwenMtpDraftPolicyState::new(cfg.max_draft_tokens),
             stats,
             constraint,
         })
@@ -2023,11 +2887,15 @@ where
             return Ok(());
         }
 
+        let window_started = Instant::now();
         let stats_before_window = self.stats.clone();
+        let timing_before = self.stats.draft_cap_timing();
+        let context_tokens = self.history.len();
         let draft_budget = self
             .adaptive_draft_tokens
-            .clamp(1, self.cfg.max_draft_tokens)
+            .min(self.cfg.max_draft_tokens)
             .min(remaining);
+        let maintain_mtp_cache = self.draft_policy.should_maintain_mtp_cache();
         let mut draft_constraint = self.constraint.as_ref().map(ConstraintSession::fork);
         let draft_result = self.draft_tokens(current_token, draft_budget, &mut draft_constraint)?;
         let draft_tokens = draft_result.tokens;
@@ -2039,11 +2907,18 @@ where
             (&verify_input[..], &[1_i32, verify_input.len() as i32][..]).try_into()?;
         let pre_window_hidden = self.last_hidden.clone();
 
-        let base_snapshot: Vec<LayerCacheSnapshot> =
-            self.cache.iter().map(LayerCache::snapshot).collect();
+        let base_snapshot = (draft_budget > 0).then(|| {
+            self.cache
+                .iter()
+                .map(LayerCache::snapshot)
+                .collect::<Vec<_>>()
+        });
         let verify_forward_start = Instant::now();
         let verified_hidden = {
-            let _verify_qmm = crate::nn::verify_qmm::armed_scope();
+            // A zero-draft window is the ordinary single-token target path.
+            // Exact speculative QMM is required only when target positions
+            // must be compared against drafted tokens.
+            let _verify_qmm = (draft_budget > 0).then(crate::nn::verify_qmm::armed_scope);
             self.model.forward_text_hidden(
                 &verify_arr,
                 &verify_pos_ids,
@@ -2099,7 +2974,6 @@ where
         if resolution.needs_rollback {
             self.stats.rollback_count += 1;
         }
-
         let accepted_len = resolution.accepted_verify_input_len;
         let (accepted_hidden, accepted_position_ids, accepted_last_hidden) = if resolution
             .needs_rollback
@@ -2109,7 +2983,9 @@ where
             let accepted_hidden = rollback_main_cache_to_accepted_prefix(
                 self.model,
                 &mut self.cache,
-                &base_snapshot,
+                base_snapshot
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("MTP rollback snapshot absent"))?,
                 MainCacheRollbackInput {
                     accepted_by_row: &[(0, accepted_len)],
                     verify_input: &verify_input,
@@ -2149,7 +3025,7 @@ where
                 (),
             )?;
             add_mtp_decode_cache_commit_us(&mut self.stats, commit_start);
-        } else {
+        } else if maintain_mtp_cache {
             let commit_start = Instant::now();
             commit_mtp_cache_hidden_tail(
                 self.model,
@@ -2170,23 +3046,6 @@ where
         }
         self.last_hidden = accepted_last_hidden;
 
-        let stats_delta = self.stats.saturating_delta_since(&stats_before_window);
-        let change = self.draft_policy.observe_window(
-            MtpDraftPolicyWindow::from_stats_delta(
-                draft_tokens.len(),
-                resolution.accepted_draft_len,
-                &stats_delta,
-            ),
-            &self.stats,
-        );
-        if change.reduced {
-            self.stats.draft_budget_reductions =
-                self.stats.draft_budget_reductions.saturating_add(1);
-        } else if change.increased {
-            self.stats.draft_budget_increases = self.stats.draft_budget_increases.saturating_add(1);
-        }
-        self.adaptive_draft_tokens = self.draft_policy.current_budget();
-
         let mut tokens_to_append = resolution.tokens_to_append;
         if let Some(stop_idx) = tokens_to_append
             .iter()
@@ -2198,11 +3057,48 @@ where
         if let Some(constraint) = self.constraint.as_ref() {
             constraint.truncate_invalid_speculative_bonus(&mut tokens_to_append)?;
         }
+        let committed_tokens = tokens_to_append.len();
         for token in tokens_to_append {
             commit_constraint_token(&mut self.constraint, token)?;
             self.history.push(token);
             self.pending_tokens.push_back(token);
         }
+
+        let total_us = elapsed_us_since(window_started);
+        let stats_delta = self.stats.saturating_delta_since(&stats_before_window);
+        let change = self
+            .draft_policy
+            .observe_window(MtpDraftPolicyWindow::from_stats_delta(
+                draft_tokens.len(),
+                resolution.accepted_draft_len,
+                committed_tokens,
+                total_us,
+                context_tokens,
+                1,
+                MtpDraftPolicyKvState::Contiguous,
+                &stats_delta,
+            ));
+        if change.reduced {
+            self.stats.draft_budget_reductions =
+                self.stats.draft_budget_reductions.saturating_add(1);
+        } else if change.increased {
+            self.stats.draft_budget_increases = self.stats.draft_budget_increases.saturating_add(1);
+        }
+        self.adaptive_draft_tokens = self.draft_policy.current_budget();
+        let timing_delta = self
+            .stats
+            .draft_cap_timing()
+            .saturating_delta_since(timing_before);
+        self.stats.record_draft_cap_observation(
+            self.cfg.max_draft_tokens,
+            &[draft_tokens.len()],
+            &[context_tokens],
+            resolution.accepted_draft_len,
+            committed_tokens,
+            usize::from(resolution.needs_rollback),
+            total_us,
+            timing_delta,
+        );
 
         Ok(())
     }
@@ -3238,7 +4134,7 @@ mod tests {
     }
 
     #[test]
-    fn mtp_policy_defaults_qwen36_dense_27b_to_d1() {
+    fn mtp_policy_defaults_qwen36_and_qwen38_dense_27b_to_d2() {
         let raw = serde_json::json!({
             "model_type": "qwen3_5",
             "text_config": {
@@ -3248,11 +4144,11 @@ mod tests {
             }
         });
 
-        assert_eq!(default_mtp_draft_tokens_for_config(&raw), 1);
+        assert_eq!(default_mtp_draft_tokens_for_config(&raw), 2);
     }
 
     #[test]
-    fn mtp_policy_defaults_qwen36_moe_35b_a3b_to_d1() {
+    fn mtp_policy_defaults_qwen36_moe_35b_a3b_to_d2() {
         let raw = serde_json::json!({
             "model_type": "qwen3_5_moe",
             "text_config": {
@@ -3264,7 +4160,7 @@ mod tests {
             }
         });
 
-        assert_eq!(default_mtp_draft_tokens_for_config(&raw), 1);
+        assert_eq!(default_mtp_draft_tokens_for_config(&raw), 2);
     }
 
     #[test]
@@ -3365,151 +4261,486 @@ mod tests {
         assert_eq!(mixed.context_bucket, MtpDraftCapContextBucket::UpTo8k);
     }
 
-    #[test]
-    fn mtp_cost_aware_policy_reduces_high_overhead_low_acceptance_window() {
-        let mut policy = MtpDraftPolicyState::new(4);
-        let mut stats = MtpSpeculativeStats::default();
-        stats.record_window_acceptance(4, 0);
-
-        let change = policy.observe_window(
-            MtpDraftPolicyWindow {
-                attempted_draft_tokens: 4,
-                accepted_draft_tokens: 0,
-                draft_forward_us: 1_000,
-                verify_forward_us: 500,
-                projection_us: 600,
-                sampling_us: 800,
-                verify_accept_host_sync_us: 400,
-                main_rollback_us: 200,
-                mtp_cache_commit_us: 900,
-                mtp_prefill_cache_commit_us: 0,
-                mtp_decode_cache_commit_us: 900,
-                mtp_cache_restore_us: 300,
-            },
-            &stats,
-        );
-
-        assert_eq!(policy.current_budget(), 1);
-        assert!(change.reduced);
-    }
-
-    #[test]
-    fn mtp_cost_aware_policy_accounts_for_acceptance_host_sync() {
-        let mut policy = MtpDraftPolicyState::new(4);
-        let mut stats = MtpSpeculativeStats::default();
-        stats.record_window_acceptance(4, 0);
-
-        let change = policy.observe_window(
-            MtpDraftPolicyWindow {
-                attempted_draft_tokens: 4,
-                accepted_draft_tokens: 0,
-                draft_forward_us: 0,
-                verify_forward_us: 500,
-                projection_us: 0,
-                sampling_us: 0,
-                verify_accept_host_sync_us: 2_000,
-                main_rollback_us: 0,
-                mtp_cache_commit_us: 0,
-                mtp_prefill_cache_commit_us: 0,
-                mtp_decode_cache_commit_us: 0,
-                mtp_cache_restore_us: 0,
-            },
-            &stats,
-        );
-
-        assert_eq!(policy.current_budget(), 1);
-        assert!(change.reduced);
-    }
-
-    #[test]
-    fn mtp_cost_aware_policy_restores_after_cheap_full_accept_windows() {
-        let mut policy = MtpDraftPolicyState::new(4);
-        let mut stats = MtpSpeculativeStats::default();
-
-        stats.record_window_acceptance(4, 0);
-        policy.observe_window(
-            MtpDraftPolicyWindow {
-                attempted_draft_tokens: 4,
-                accepted_draft_tokens: 0,
-                draft_forward_us: 1_000,
-                verify_forward_us: 500,
-                projection_us: 600,
-                sampling_us: 800,
-                verify_accept_host_sync_us: 400,
-                main_rollback_us: 200,
-                mtp_cache_commit_us: 900,
-                mtp_prefill_cache_commit_us: 0,
-                mtp_decode_cache_commit_us: 900,
-                mtp_cache_restore_us: 300,
-            },
-            &stats,
-        );
-        assert_eq!(policy.current_budget(), 1);
-
-        for _ in 0..4 {
-            stats.record_window_acceptance(policy.current_budget(), policy.current_budget());
-            let change = policy.observe_window(
-                MtpDraftPolicyWindow {
-                    attempted_draft_tokens: policy.current_budget(),
-                    accepted_draft_tokens: policy.current_budget(),
-                    draft_forward_us: 50,
-                    verify_forward_us: 1_000,
-                    projection_us: 20,
-                    sampling_us: 20,
-                    verify_accept_host_sync_us: 10,
-                    main_rollback_us: 0,
-                    mtp_cache_commit_us: 30,
-                    mtp_prefill_cache_commit_us: 0,
-                    mtp_decode_cache_commit_us: 30,
-                    mtp_cache_restore_us: 0,
-                },
-                &stats,
-            );
-            assert!(!change.reduced);
+    fn policy_window(
+        draft_tokens: usize,
+        committed_tokens: usize,
+        total_us: u64,
+    ) -> MtpDraftPolicyWindow {
+        MtpDraftPolicyWindow {
+            attempted_draft_tokens: draft_tokens,
+            accepted_draft_tokens: draft_tokens,
+            committed_tokens,
+            total_us,
+            context_tokens: 1_024,
+            batch_width: 1,
+            kv_state: MtpDraftPolicyKvState::Contiguous,
+            ..MtpDraftPolicyWindow::default()
         }
+    }
+
+    #[test]
+    fn mtp_cost_aware_policy_immediately_reduces_zero_acceptance() {
+        let mut policy = Gemma4DrafterPolicyState::new(4);
+        let mut window = policy_window(4, 1, 4_000);
+        window.accepted_draft_tokens = 0;
+        window.main_rollback_us = 500;
+        window.mtp_cache_restore_us = 300;
+
+        let change = policy.observe_window(window);
+
+        assert_eq!(policy.current_budget(), 1);
+        assert!(change.reduced);
+    }
+
+    #[test]
+    fn mtp_cost_aware_policy_rejects_a_more_expensive_probe() {
+        let mut policy = Gemma4DrafterPolicyState::new(4);
+
+        policy.observe_window(policy_window(4, 4, 400));
+        let regime = policy_window(4, 4, 400).regime();
+        policy.record_cost(regime, 0, 1_000.0, 1.0);
+        assert_eq!(
+            policy.observe_window(policy_window(4, 4, 400)).reduced,
+            true
+        );
+        assert_eq!(policy.current_budget(), 3);
+        policy.observe_window(policy_window(3, 3, 600));
+        let change = policy.observe_window(policy_window(3, 3, 600));
 
         assert_eq!(policy.current_budget(), 4);
+        assert!(change.increased);
     }
 
     #[test]
-    fn mtp_cost_aware_policy_caps_depth_from_position_acceptance() {
-        let mut policy = MtpDraftPolicyState::new(4);
-        let mut stats = MtpSpeculativeStats::default();
-        for _ in 0..6 {
-            stats.record_window_acceptance(4, 2);
+    fn mtp_cost_aware_policy_backs_off_rejected_probe() {
+        let mut policy = Gemma4DrafterPolicyState::new(4);
+
+        policy.observe_window(policy_window(4, 4, 400));
+        let regime = policy_window(4, 4, 400).regime();
+        policy.record_cost(regime, 0, 1_000.0, 1.0);
+        policy.observe_window(policy_window(4, 4, 400));
+        policy.observe_window(policy_window(3, 3, 600));
+        policy.observe_window(policy_window(3, 3, 600));
+        assert_eq!(policy.current_budget(), 4);
+
+        for _ in 0..16 {
+            policy.observe_window(policy_window(4, 4, 400));
+            assert_eq!(policy.current_budget(), 4);
+        }
+        assert!(policy.observe_window(policy_window(4, 4, 400)).reduced);
+        assert_eq!(policy.current_budget(), 3);
+    }
+
+    #[test]
+    fn mtp_cost_aware_policy_transitions_through_single_draft_before_ordinary_decode() {
+        let mut policy = Gemma4DrafterPolicyState::new(2);
+        policy.observe_window(policy_window(2, 2, 100));
+        let mut rejected = policy_window(2, 1, 100);
+        rejected.accepted_draft_tokens = 0;
+        policy.observe_window(rejected);
+        assert_eq!(policy.current_budget(), 1);
+
+        let mut rejected_single = policy_window(1, 1, 100);
+        rejected_single.accepted_draft_tokens = 0;
+        policy.observe_window(rejected_single);
+        policy.observe_window(rejected_single);
+        assert_eq!(policy.current_budget(), 0);
+        assert!(policy.uses_ordinary_decode());
+    }
+
+    #[test]
+    fn mtp_cost_aware_policy_seeds_only_an_unobserved_regime() {
+        let mut policy = Gemma4DrafterPolicyState::new(4);
+        assert!(policy.seed_initial_budget(1));
+        assert_eq!(policy.current_budget(), 1);
+
+        policy.observe_window(policy_window(1, 2, 100));
+        assert!(!policy.seed_initial_budget(3));
+        assert_eq!(policy.current_budget(), 1);
+    }
+
+    #[test]
+    fn mtp_cost_aware_policy_probes_ordinary_decode_early_for_low_acceptance() {
+        let mut policy = Gemma4DrafterPolicyState::new(2);
+        let mut rejected_wide = policy_window(2, 1, 2_000);
+        rejected_wide.accepted_draft_tokens = 0;
+        policy.observe_window(rejected_wide);
+        assert_eq!(policy.current_budget(), 1);
+
+        let mut rejected_single = policy_window(1, 1, 1_000);
+        rejected_single.accepted_draft_tokens = 0;
+        policy.observe_window(rejected_single);
+        let change = policy.observe_window(rejected_single);
+
+        assert!(change.reduced);
+        assert_eq!(policy.current_budget(), 0);
+        assert!(policy.uses_ordinary_decode());
+        assert!(!policy.should_maintain_mtp_cache());
+    }
+
+    #[test]
+    fn mtp_cost_aware_policy_probes_ordinary_decode_early_at_long_context() {
+        let mut policy = Gemma4DrafterPolicyState::new(1);
+        let long_window = MtpDraftPolicyWindow {
+            context_tokens: 65_536,
+            ..policy_window(1, 2, 200)
+        };
+
+        policy.observe_window(long_window);
+        let change = policy.observe_window(long_window);
+
+        assert!(change.reduced);
+        assert_eq!(policy.current_budget(), 0);
+        assert!(policy.should_maintain_mtp_cache());
+        for _ in 0..Gemma4DrafterPolicyState::ZERO_DRAFT_PROBE_WINDOWS {
+            policy.observe_window(MtpDraftPolicyWindow {
+                context_tokens: 65_536,
+                ..policy_window(0, 1, 50)
+            });
+        }
+        assert!(policy.uses_ordinary_decode());
+    }
+
+    #[test]
+    fn mtp_cost_aware_policy_does_not_collapse_wide_full_acceptance_into_ordinary_probe() {
+        let mut policy = Gemma4DrafterPolicyState::new(2);
+
+        for _ in 0..64 {
+            let budget = policy.current_budget();
+            policy.observe_window(policy_window(budget, budget + 1, 200));
         }
 
-        let change = policy.observe_window(
-            MtpDraftPolicyWindow {
-                attempted_draft_tokens: 4,
-                accepted_draft_tokens: 4,
-                draft_forward_us: 50,
-                verify_forward_us: 1_000,
-                projection_us: 20,
-                sampling_us: 20,
-                verify_accept_host_sync_us: 10,
-                main_rollback_us: 0,
-                mtp_cache_commit_us: 30,
-                mtp_prefill_cache_commit_us: 0,
-                mtp_decode_cache_commit_us: 30,
-                mtp_cache_restore_us: 0,
-            },
-            &stats,
-        );
-
         assert_eq!(policy.current_budget(), 2);
-        assert!(change.reduced);
+        assert!(!policy.uses_ordinary_decode());
     }
 
     #[test]
-    fn mtp_cost_aware_policy_keeps_single_budget_for_zero_attempt_window() {
-        let mut policy = MtpDraftPolicyState::new(1);
-        let stats = MtpSpeculativeStats::default();
+    fn mtp_cost_aware_policy_keeps_a_cheaper_probe() {
+        let mut policy = Gemma4DrafterPolicyState::new(4);
 
-        let change = policy.observe_window(MtpDraftPolicyWindow::default(), &stats);
+        policy.observe_window(policy_window(4, 4, 800));
+        let regime = policy_window(4, 4, 800).regime();
+        policy.record_cost(regime, 0, 1_000.0, 1.0);
+        policy.observe_window(policy_window(4, 4, 800));
+        policy.observe_window(policy_window(3, 3, 300));
+        let change = policy.observe_window(policy_window(3, 3, 300));
 
-        assert_eq!(policy.current_budget(), 1);
+        assert_eq!(policy.current_budget(), 3);
         assert!(!change.reduced);
         assert!(!change.increased);
+    }
+
+    #[test]
+    fn mtp_cost_aware_policy_separates_context_batch_and_kv_regimes() {
+        let base = policy_window(2, 2, 200);
+        let long_context = MtpDraftPolicyWindow {
+            context_tokens: 32_000,
+            ..base
+        };
+        let batched = MtpDraftPolicyWindow {
+            batch_width: 4,
+            ..base
+        };
+        let paged = MtpDraftPolicyWindow {
+            kv_state: MtpDraftPolicyKvState::PagedActiveKv,
+            ..base
+        };
+
+        assert_ne!(base.regime(), long_context.regime());
+        assert_ne!(base.regime(), batched.regime());
+        assert_ne!(base.regime(), paged.regime());
+    }
+
+    #[test]
+    fn mtp_cost_aware_policy_uses_actual_committed_tokens_and_cache_costs() {
+        let cheap = policy_window(2, 2, 200);
+        let fewer_commits = policy_window(2, 1, 200);
+        let cache_restore = MtpDraftPolicyWindow {
+            total_us: 0,
+            verify_forward_us: 100,
+            mtp_cache_restore_us: 300,
+            ..policy_window(2, 2, 0)
+        };
+
+        assert_eq!(cheap.gemma4_cost_per_committed_token_us(), 100.0);
+        assert_eq!(cheap.qwen_cost_per_committed_token_us(), 100.0);
+        assert_eq!(fewer_commits.gemma4_cost_per_committed_token_us(), 200.0);
+        assert_eq!(fewer_commits.qwen_cost_per_committed_token_us(), 200.0);
+        assert_eq!(cache_restore.gemma4_cost_per_committed_token_us(), 200.0);
+        assert_eq!(cache_restore.qwen_cost_per_committed_token_us(), 200.0);
+    }
+
+    #[test]
+    fn mtp_cost_aware_policy_compares_zero_draft_without_speculative_overhead() {
+        let control = MtpDraftPolicyWindow {
+            attempted_draft_tokens: 0,
+            committed_tokens: 1,
+            total_us: 1_000,
+            sampling_us: 100,
+            ..policy_window(0, 1, 0)
+        };
+
+        assert_eq!(control.gemma4_cost_per_committed_token_us(), 100.0);
+        assert_eq!(control.qwen_cost_per_committed_token_us(), 1_000.0);
+    }
+
+    #[test]
+    fn mtp_cost_aware_policy_excludes_cold_ordinary_compile_cost() {
+        let mut policy = Gemma4DrafterPolicyState::new(1);
+        let regime = policy_window(0, 1, 1_000).regime();
+
+        policy.record_cost(regime, 0, 1_000.0, 1.0);
+        let cold = policy.cost_estimate(regime, 0).unwrap();
+        assert_eq!(cold.samples, 0);
+
+        policy.record_cost(regime, 0, 100.0, 1.0);
+        let warm = policy.cost_estimate(regime, 0).unwrap();
+        assert_eq!(warm.samples, 1);
+        assert_eq!(warm.cost_ewma, 100.0);
+    }
+
+    #[test]
+    fn qwen_mtp_policy_keeps_the_pre_gemma_control_cost_sampling() {
+        let mut policy = QwenMtpDraftPolicyState::new(1);
+        let regime = policy_window(0, 1, 1_000).regime();
+
+        policy.record_cost(regime, 0, 1_000.0, 1.0);
+        let first = policy.cost_estimate(regime, 0).unwrap();
+        assert_eq!(first.samples, 1);
+        assert_eq!(first.cost_ewma, 1_000.0);
+
+        policy.record_cost(regime, 0, 100.0, 1.0);
+        let second = policy.cost_estimate(regime, 0).unwrap();
+        assert_eq!(second.samples, 2);
+        assert_eq!(second.cost_ewma, 685.0);
+    }
+
+    #[test]
+    fn mtp_cost_aware_policy_snapshot_restores_cost_history() {
+        let mut source = Gemma4DrafterPolicyState::new(2);
+        source.observe_window(policy_window(2, 2, 200));
+        let snapshot = source.snapshot();
+        let mut restored = Gemma4DrafterPolicyState::new(2);
+
+        restored.restore_snapshot(snapshot.clone()).unwrap();
+
+        assert_eq!(restored.snapshot(), snapshot);
+    }
+
+    #[test]
+    fn mtp_cost_aware_policy_keeps_a_cheaper_zero_draft_probe() {
+        let mut policy = Gemma4DrafterPolicyState::new(1);
+        for _ in 0..Gemma4DrafterPolicyState::ZERO_DRAFT_MIN_COST_SAMPLES - 1 {
+            policy.observe_window(policy_window(1, 2, 200));
+        }
+        let change = policy.observe_window(policy_window(1, 2, 200));
+
+        assert_eq!(policy.current_budget(), 0);
+        assert!(change.reduced);
+        for _ in 0..Gemma4DrafterPolicyState::ZERO_DRAFT_PROBE_WINDOWS {
+            policy.observe_window(policy_window(0, 1, 50));
+        }
+        assert_eq!(policy.current_budget(), 0);
+        assert!(!policy.should_maintain_mtp_cache());
+    }
+
+    #[test]
+    fn mtp_cost_aware_policy_rejects_a_more_expensive_zero_draft_probe() {
+        let mut policy = Gemma4DrafterPolicyState::new(1);
+        for _ in 0..Gemma4DrafterPolicyState::ZERO_DRAFT_MIN_COST_SAMPLES {
+            policy.observe_window(policy_window(1, 2, 200));
+        }
+        for _ in 0..Gemma4DrafterPolicyState::ZERO_DRAFT_PROBE_WINDOWS - 1 {
+            policy.observe_window(policy_window(0, 1, 99));
+        }
+        let decision = policy.observe_window(policy_window(0, 1, 99));
+        assert!(decision.increased);
+
+        assert_eq!(policy.current_budget(), 1);
+        assert!(policy.should_maintain_mtp_cache());
+    }
+
+    #[test]
+    fn mtp_cost_aware_policy_refreshes_zero_draft_cost_before_switching() {
+        let mut policy = Gemma4DrafterPolicyState::new(1);
+        for _ in 0..Gemma4DrafterPolicyState::ZERO_DRAFT_MIN_COST_SAMPLES {
+            policy.observe_window(policy_window(1, 2, 200));
+        }
+        for _ in 0..Gemma4DrafterPolicyState::ZERO_DRAFT_PROBE_WINDOWS {
+            policy.observe_window(policy_window(0, 1, 99));
+        }
+        assert_eq!(policy.current_budget(), 1);
+
+        for _ in 0..16 {
+            policy.observe_window(policy_window(1, 2, 300));
+            assert_eq!(
+                policy.current_budget(),
+                1,
+                "an old zero-draft sample must not trigger an uncontrolled mode switch"
+            );
+        }
+
+        let change = policy.observe_window(policy_window(1, 2, 300));
+        assert!(change.reduced);
+        assert_eq!(policy.current_budget(), 0);
+        for _ in 0..Gemma4DrafterPolicyState::ZERO_DRAFT_PROBE_WINDOWS - 1 {
+            policy.observe_window(policy_window(0, 1, 200));
+        }
+        let decision = policy.observe_window(policy_window(0, 1, 200));
+
+        assert!(decision.increased);
+        assert_eq!(policy.current_budget(), 1);
+    }
+
+    #[test]
+    fn mtp_cost_aware_policy_reprobes_ordinary_decode_after_single_draft_rejections() {
+        let mut policy = Gemma4DrafterPolicyState::new(1);
+        for _ in 0..Gemma4DrafterPolicyState::ZERO_DRAFT_MIN_COST_SAMPLES {
+            policy.observe_window(policy_window(1, 2, 200));
+        }
+        for _ in 0..Gemma4DrafterPolicyState::ZERO_DRAFT_PROBE_WINDOWS {
+            policy.observe_window(policy_window(0, 1, 99));
+        }
+        assert_eq!(policy.current_budget(), 1);
+
+        let mut rejected = policy_window(1, 1, 300);
+        rejected.accepted_draft_tokens = 0;
+        for _ in 0..16 {
+            let change = policy.observe_window(rejected);
+            assert!(!change.reduced);
+            assert_eq!(policy.current_budget(), 1);
+        }
+
+        let change = policy.observe_window(rejected);
+        assert!(change.reduced);
+        assert_eq!(policy.current_budget(), 0);
+    }
+
+    #[test]
+    fn qwen_mtp_policy_keeps_the_pre_gemma_zero_draft_decision_flow() {
+        let mut policy = QwenMtpDraftPolicyState::new(1);
+        for _ in 0..QwenMtpDraftPolicyState::ZERO_DRAFT_MIN_COST_SAMPLES {
+            policy.observe_window(policy_window(1, 2, 200));
+        }
+        assert_eq!(policy.current_budget(), 0);
+        assert!(policy.should_maintain_mtp_cache());
+
+        for _ in 0..QwenMtpDraftPolicyState::ZERO_DRAFT_PROBE_WINDOWS {
+            policy.observe_window(policy_window(0, 1, 80));
+        }
+
+        assert_eq!(policy.current_budget(), 0);
+        assert!(policy.uses_ordinary_decode());
+        assert!(!policy.should_maintain_mtp_cache());
+    }
+
+    #[test]
+    fn qwen_mtp_policy_probes_ordinary_decode_early_after_32k() {
+        let mut policy = QwenMtpDraftPolicyState::new(1);
+        let mut long_window = policy_window(1, 2, 200);
+        long_window.context_tokens = 32_769;
+
+        for _ in 0..QwenMtpDraftPolicyState::LONG_CONTEXT_ZERO_DRAFT_MIN_COST_SAMPLES - 1 {
+            let change = policy.observe_window(long_window);
+            assert!(!change.reduced);
+            assert_eq!(policy.current_budget(), 1);
+        }
+        let change = policy.observe_window(long_window);
+
+        assert!(change.reduced);
+        assert_eq!(policy.current_budget(), 0);
+        assert!(policy.should_maintain_mtp_cache());
+    }
+
+    #[test]
+    fn qwen_mtp_policy_compares_partial_long_context_window_with_ordinary_decode() {
+        let mut policy = QwenMtpDraftPolicyState::new(2);
+        let mut long_window = policy_window(2, 2, 200);
+        long_window.context_tokens = 32_769;
+        long_window.accepted_draft_tokens = 1;
+
+        let change = policy.observe_window(long_window);
+
+        assert!(change.reduced);
+        assert_eq!(policy.current_budget(), 0);
+        assert_eq!(policy.probe_budget, Some(0));
+        assert_eq!(policy.probe_origin_budget, Some(2));
+    }
+
+    #[test]
+    fn qwen_mtp_policy_preserves_short_context_partial_acceptance_rule() {
+        let mut policy = QwenMtpDraftPolicyState::new(2);
+        let mut short_window = policy_window(2, 2, 200);
+        short_window.context_tokens = 8_192;
+        short_window.accepted_draft_tokens = 1;
+
+        let change = policy.observe_window(short_window);
+
+        assert!(!change.reduced);
+        assert_eq!(policy.current_budget(), 2);
+    }
+
+    #[test]
+    fn qwen_mtp_policy_compares_full_long_context_window_with_ordinary_decode() {
+        let mut policy = QwenMtpDraftPolicyState::new(2);
+        let mut long_window = policy_window(2, 3, 200);
+        long_window.context_tokens = 32_769;
+
+        let change = policy.observe_window(long_window);
+
+        assert!(change.reduced);
+        assert_eq!(policy.current_budget(), 0);
+        assert_eq!(policy.probe_budget, Some(0));
+        assert_eq!(policy.probe_origin_budget, Some(2));
+    }
+
+    #[test]
+    fn qwen_mtp_policy_keeps_short_context_depth_after_one_full_window() {
+        let mut policy = QwenMtpDraftPolicyState::new(2);
+        let mut short_window = policy_window(2, 3, 200);
+        short_window.context_tokens = 8_192;
+
+        let change = policy.observe_window(short_window);
+
+        assert!(!change.reduced);
+        assert_eq!(policy.current_budget(), 2);
+    }
+
+    #[test]
+    fn qwen_mtp_policy_keeps_mtp_when_ordinary_decode_is_not_cheaper() {
+        let mut policy = QwenMtpDraftPolicyState::new(1);
+        for _ in 0..QwenMtpDraftPolicyState::ZERO_DRAFT_MIN_COST_SAMPLES {
+            policy.observe_window(policy_window(1, 2, 80));
+        }
+        assert_eq!(policy.current_budget(), 0);
+
+        for _ in 0..QwenMtpDraftPolicyState::ZERO_DRAFT_PROBE_WINDOWS {
+            policy.observe_window(policy_window(0, 1, 200));
+        }
+
+        assert_eq!(policy.current_budget(), 1);
+        assert!(!policy.uses_ordinary_decode());
+    }
+
+    #[test]
+    fn qwen_mtp_policy_snapshot_preserves_zero_draft_probe() {
+        let mut source = QwenMtpDraftPolicyState::new(1);
+        for _ in 0..QwenMtpDraftPolicyState::ZERO_DRAFT_MIN_COST_SAMPLES {
+            source.observe_window(policy_window(1, 2, 200));
+        }
+        source.observe_window(policy_window(0, 1, 80));
+        let snapshot = source.snapshot();
+
+        let mut restored = QwenMtpDraftPolicyState::new(1);
+        restored.restore_snapshot(snapshot.clone()).unwrap();
+
+        assert_eq!(restored.snapshot(), snapshot);
+        for _ in 1..QwenMtpDraftPolicyState::ZERO_DRAFT_PROBE_WINDOWS {
+            let window = policy_window(0, 1, 80);
+            source.observe_window(window);
+            restored.observe_window(window);
+        }
+        assert_eq!(restored.snapshot(), source.snapshot());
+        assert!(restored.uses_ordinary_decode());
     }
 }

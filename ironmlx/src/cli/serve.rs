@@ -1195,15 +1195,9 @@ where
 
     let model_id = single_model_id(args)?;
     let paged_prefix_cache = resolve_paged_prefix_cache_config(args, scheduler_config, &model_id)?;
-    let effective_draft_tokens =
-        crate::core::speculative::effective_mtp_draft_tokens_for_paged_prefix(
-            mtp_config.draft_tokens,
-            paged_prefix_cache.is_some(),
-        );
     tracing::info!(
-        "ironmlx serve: MTP enabled model_dir={} draft_tokens={} requested_draft_tokens={}",
+        "ironmlx serve: MTP enabled model_dir={} draft_tokens={}",
         mtp_config.model_dir.display(),
-        effective_draft_tokens,
         mtp_config.draft_tokens
     );
     let prefix_lru_cache = resolve_prefix_lru_cache_config(args, paged_prefix_cache.as_ref())?;
@@ -2703,7 +2697,7 @@ mod scheduler_profile_tests {
     }
 
     #[test]
-    fn serve_mtp_config_accepts_qwen36_latency_first_default_draft_tokens() {
+    fn serve_mtp_config_accepts_qwen36_architecture_default_draft_tokens() {
         let temp_dir = unique_temp_dir("serve-mtp-qwen36-default");
         std::fs::create_dir_all(&temp_dir).expect("create mtp dir");
         let mut args = base_args();
@@ -2722,7 +2716,7 @@ mod scheduler_profile_tests {
         .expect("enabled");
 
         assert_eq!(cfg.model_dir, temp_dir);
-        assert_eq!(cfg.draft_tokens, 1);
+        assert_eq!(cfg.draft_tokens, 2);
         std::fs::remove_dir_all(cfg.model_dir).expect("cleanup");
     }
 
