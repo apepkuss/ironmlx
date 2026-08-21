@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 
 public enum ModelDownloadPhase: String, Codable, Sendable {
+    case queued
     case resolving
     case preflighting
     case downloading
@@ -15,7 +16,7 @@ public enum ModelDownloadPhase: String, Codable, Sendable {
 
     var isActive: Bool {
         switch self {
-        case .resolving, .preflighting, .downloading, .verifying, .publishing:
+        case .queued, .resolving, .preflighting, .downloading, .verifying, .publishing:
             true
         case .completed, .cancelled, .interrupted, .rejected, .corrupt:
             false
