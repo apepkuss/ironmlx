@@ -69,10 +69,7 @@ impl GatedDeltaNetConfig {
 /// - `out_proj` — back to `hidden_size`
 /// - `a_log` / `dt_bias` — per-head learned parameters for compute_g
 pub struct GatedDeltaNet {
-    in_proj_qkv: Linear,
-    in_proj_z: Linear,
-    in_proj_b: Linear,
-    in_proj_a: Linear,
+    input_projections: GatedDeltaInputProjections,
     conv1d: Conv1d,
     norm: RmsNormGated,
     out_proj: Linear,
@@ -85,13 +82,80 @@ pub struct GatedDeltaNet {
     kernel_zero_state_masked: OnceLock<MetalKernel>,
 }
 
+enum GatedDeltaInputProjections {
+    Separate {
+        qkv: Linear,
+        z: Linear,
+        b: Linear,
+        a: Linear,
+    },
+    Fused {
+        projection: Linear,
+        qkv: Linear,
+        z: Linear,
+        b: Linear,
+        a: Linear,
+        qkv_width: i32,
+        z_width: i32,
+        b_width: i32,
+    },
+}
+
 impl GatedDeltaNet {
     /// Production constructor: load all weight tensors + a_log + dt_bias.
     pub fn from_loader(loader: &Loader, prefix: &str, cfg: GatedDeltaNetConfig) -> Result<Self> {
+        Self::from_loader_impl(loader, prefix, cfg, false)
+    }
+
+    pub(crate) fn from_loader_dflash2(
+        loader: &Loader,
+        prefix: &str,
+        cfg: GatedDeltaNetConfig,
+    ) -> Result<Self> {
+        Self::from_loader_impl(loader, prefix, cfg, true)
+    }
+
+    fn from_loader_impl(
+        loader: &Loader,
+        prefix: &str,
+        cfg: GatedDeltaNetConfig,
+        fuse_dflash2: bool,
+    ) -> Result<Self> {
         let in_proj_qkv = Linear::from_loader(loader, &format!("{prefix}.in_proj_qkv"))?;
         let in_proj_z = Linear::from_loader(loader, &format!("{prefix}.in_proj_z"))?;
         let in_proj_b = Linear::from_loader(loader, &format!("{prefix}.in_proj_b"))?;
         let in_proj_a = Linear::from_loader(loader, &format!("{prefix}.in_proj_a"))?;
+        let input_projections = if fuse_dflash2 {
+            let output_widths = [
+                in_proj_qkv.out_features(),
+                in_proj_z.out_features(),
+                in_proj_b.out_features(),
+                in_proj_a.out_features(),
+            ];
+            let projection = Linear::fuse_quantized_outputs(
+                &[&in_proj_qkv, &in_proj_z, &in_proj_b, &in_proj_a],
+                "DFlash2 fused GDN input projections",
+            )?;
+            let mut separate = projection
+                .split_quantized_outputs(&output_widths, "DFlash2 split GDN input projections")?;
+            GatedDeltaInputProjections::Fused {
+                projection,
+                qkv: separate.remove(0),
+                z: separate.remove(0),
+                b: separate.remove(0),
+                a: separate.remove(0),
+                qkv_width: i32::try_from(output_widths[0])?,
+                z_width: i32::try_from(output_widths[1])?,
+                b_width: i32::try_from(output_widths[2])?,
+            }
+        } else {
+            GatedDeltaInputProjections::Separate {
+                qkv: in_proj_qkv,
+                z: in_proj_z,
+                b: in_proj_b,
+                a: in_proj_a,
+            }
+        };
         let conv1d_cfg = Conv1dConfig {
             in_channels: cfg.conv_dim(),
             out_channels: cfg.conv_dim(),
@@ -108,10 +172,7 @@ impl GatedDeltaNet {
         let dt_bias = loader.tensor(&format!("{prefix}.dt_bias"))?.clone();
 
         Ok(Self {
-            in_proj_qkv,
-            in_proj_z,
-            in_proj_b,
-            in_proj_a,
+            input_projections,
             conv1d,
             norm,
             out_proj,
@@ -144,10 +205,12 @@ impl GatedDeltaNet {
         cfg: GatedDeltaNetConfig,
     ) -> Self {
         Self {
-            in_proj_qkv,
-            in_proj_z,
-            in_proj_b,
-            in_proj_a,
+            input_projections: GatedDeltaInputProjections::Separate {
+                qkv: in_proj_qkv,
+                z: in_proj_z,
+                b: in_proj_b,
+                a: in_proj_a,
+            },
             conv1d,
             norm,
             out_proj,
@@ -248,52 +311,106 @@ impl GatedDeltaNet {
             );
         }
 
-        // Step 1: reference-equivalent input projections.
-        // Step 1a: in_proj_qkv + in_proj_z, then mask-zero qkv at pad
-        // positions. The mask multiply stays bundled with qkv projection
-        // because it is the immediate downstream consumer before conv1d.
-        //
-        // Mask-zero rationale (preserved from the prior standalone block):
-        // The conv1d is temporal — its output at real-token position t uses
-        // input positions `t-(k-1)..t` as history. Under right-padded batched
-        // prefill, real qkv occupies positions `[0, L_i)` and the trailing
-        // `[L_i, max_len)` positions are pad; conv1d output AT real positions
-        // (t < L_i) only consumes earlier real positions (causal kernel), so
-        // it stays clean even without zeroing pad qkv. However, conv1d output
-        // AT pad positions reads back into the real-tail (positions
-        // `[L_i - (k-1), L_i)`), and the kernel post-write of conv_state then
-        // captures those pad-slot outputs — so we zero pad qkv up front to
-        // keep pad-slot conv1d output benign and avoid leaking pad embeddings
-        // (which are non-zero garbage from in_proj_qkv) into the cache
-        // update path's per-row slice.
-        //
-        // The gated_delta_step kernel's per-token mask only skips compute at
-        // pad positions; it does not undo conv1d contamination of real
-        // positions. Zeroing qkv at pad positions before conv1d gives real
-        // tokens the same zero-history as per-stream forward_on.
-        //
-        // The same argument applies to `z` (used in RmsNormGated at output);
-        // however, `z` is only consumed at REAL positions (gated_delta_step
-        // emits zero at pad positions), so pad-position `z` values are
-        // discarded anyway. We zero `qkv` only.
-        let (qkv, z) = {
-            let qkv = self.in_proj_qkv.forward_on(x, target)?;
-            let z = self.in_proj_z.forward_on(x, target)?;
-            let qkv = if let Some(m) = mask {
-                let m_dtype = mlx::ops::cast::astype(m, qkv.dtype())?;
-                let m_broadcast = m_dtype.reshape_on((batch, seq, 1), target)?;
-                &qkv * &m_broadcast
-            } else {
-                qkv
-            };
-            (qkv, z)
-        };
+        // Step 1: reference-equivalent input projections. DFlash2 reuses
+        // these tensors to rebuild an accepted recurrent prefix after a
+        // rejection. Quantized products can otherwise vary with sequence
+        // width, so isolate only the GDN state-input projections while that
+        // capture is active; larger MLP/attention projections stay batched.
+        let capture_active = cache
+            .as_deref()
+            .is_some_and(GatedDeltaCache::speculative_prefix_capture_active);
+        let ((qkv, z), (b, a)) = {
+            let _stable_linear = capture_active.then(super::position_stable_linear::scope);
+            let _stable_qmm = capture_active.then(super::position_stable_qmm::scope);
 
-        // Step 1b: in_proj_b + in_proj_a.
-        let (b, a) = {
-            let b = self.in_proj_b.forward_on(x, target)?;
-            let a = self.in_proj_a.forward_on(x, target)?;
-            (b, a)
+            // Step 1a: in_proj_qkv + in_proj_z, then mask-zero qkv at pad
+            // positions. The mask multiply stays bundled with qkv projection
+            // because it is the immediate downstream consumer before conv1d.
+            //
+            // Mask-zero rationale (preserved from the prior standalone block):
+            // The conv1d is temporal — its output at real-token position t uses
+            // input positions `t-(k-1)..t` as history. Under right-padded batched
+            // prefill, real qkv occupies positions `[0, L_i)` and the trailing
+            // `[L_i, max_len)` positions are pad; conv1d output AT real positions
+            // (t < L_i) only consumes earlier real positions (causal kernel), so
+            // it stays clean even without zeroing pad qkv. However, conv1d output
+            // AT pad positions reads back into the real-tail (positions
+            // `[L_i - (k-1), L_i)`), and the kernel post-write of conv_state then
+            // captures those pad-slot outputs — so we zero pad qkv up front to
+            // keep pad-slot conv1d output benign and avoid leaking pad embeddings
+            // (which are non-zero garbage from in_proj_qkv) into the cache
+            // update path's per-row slice.
+            //
+            // The gated_delta_step kernel's per-token mask only skips compute at
+            // pad positions; it does not undo conv1d contamination of real
+            // positions. Zeroing qkv at pad positions before conv1d gives real
+            // tokens the same zero-history as per-stream forward_on.
+            //
+            // The same argument applies to `z` (used in RmsNormGated at output);
+            // however, `z` is only consumed at REAL positions (gated_delta_step
+            // emits zero at pad positions), so pad-position `z` values are
+            // discarded anyway. We zero `qkv` only.
+            let (qkv, z, b, a) = match &self.input_projections {
+                GatedDeltaInputProjections::Separate { qkv, z, b, a } => (
+                    qkv.forward_on(x, target)?,
+                    z.forward_on(x, target)?,
+                    b.forward_on(x, target)?,
+                    a.forward_on(x, target)?,
+                ),
+                GatedDeltaInputProjections::Fused {
+                    projection,
+                    qkv,
+                    z,
+                    b,
+                    a,
+                    qkv_width,
+                    z_width,
+                    b_width,
+                } => {
+                    if super::product_stable_qmm::is_armed() {
+                        let output = projection.forward_on(x, target)?;
+                        let mut parts = mlx::ops::shape::split_at_on(
+                            &output,
+                            &[
+                                *qkv_width,
+                                *qkv_width + *z_width,
+                                *qkv_width + *z_width + *b_width,
+                            ],
+                            -1,
+                            target,
+                        )?;
+                        if parts.len() != 4 {
+                            return Err(anyhow!(
+                                "DFlash2 fused GDN input projection returned {} parts",
+                                parts.len()
+                            ));
+                        }
+                        (
+                            parts.remove(0),
+                            parts.remove(0),
+                            parts.remove(0),
+                            parts.remove(0),
+                        )
+                    } else {
+                        (
+                            qkv.forward_on(x, target)?,
+                            z.forward_on(x, target)?,
+                            b.forward_on(x, target)?,
+                            a.forward_on(x, target)?,
+                        )
+                    }
+                }
+            };
+            let qkv = {
+                if let Some(m) = mask {
+                    let m_dtype = mlx::ops::cast::astype(m, qkv.dtype())?;
+                    let m_broadcast = m_dtype.reshape_on((batch, seq, 1), target)?;
+                    &qkv * &m_broadcast
+                } else {
+                    qkv
+                }
+            };
+            ((qkv, z), (b, a))
         };
 
         // Step 2a: prepend conv_state
@@ -527,6 +644,21 @@ impl GatedDeltaNet {
             y
         };
 
+        if let Some(c) = cache {
+            if c.speculative_prefix_capture_active() {
+                c.record_speculative_replay(
+                    &conv_input,
+                    &q_scaled,
+                    &k_scaled,
+                    &v_per_head,
+                    &g,
+                    &beta,
+                    mask,
+                    target,
+                )?;
+            }
+        }
+
         // Step 8: RmsNormGated(y, z) + reshape + out_proj
         let out = {
             let z_per_head = z.reshape_on(
@@ -539,6 +671,150 @@ impl GatedDeltaNet {
         };
 
         Ok(out)
+    }
+
+    pub(crate) fn restore_speculative_prefix_on(
+        &self,
+        cache: &mut GatedDeltaCache,
+        accepted_len: usize,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<()> {
+        if accepted_len == 0 {
+            return Err(anyhow!(
+                "GatedDeltaNet speculative accepted prefix cannot be empty"
+            ));
+        }
+        let target = target.into();
+        let capture = cache.take_speculative_replay()?;
+        let sequence = usize::try_from(capture.q.shape().as_slice()[1])?;
+        if accepted_len > sequence {
+            return Err(anyhow!(
+                "GatedDeltaNet accepted prefix {accepted_len} exceeds captured sequence {sequence}"
+            ));
+        }
+        if capture.prefix_states.len() == sequence {
+            cache.restore(&capture.prefix_states[accepted_len - 1])?;
+            return Ok(());
+        }
+        cache.restore(&capture.base)?;
+
+        let accepted_len_i32 = i32::try_from(accepted_len)?;
+        let q = slice_sequence_prefix_on(&capture.q, accepted_len_i32, target)?;
+        let k = slice_sequence_prefix_on(&capture.k, accepted_len_i32, target)?;
+        let v = slice_sequence_prefix_on(&capture.v, accepted_len_i32, target)?;
+        let g = slice_sequence_prefix_on(&capture.g, accepted_len_i32, target)?;
+        let beta = slice_sequence_prefix_on(&capture.beta, accepted_len_i32, target)?;
+        let mask = capture
+            .mask
+            .as_ref()
+            .map(|mask| slice_sequence_prefix_on(mask, accepted_len_i32, target))
+            .transpose()?;
+
+        let batch = q.shape().as_slice()[0];
+        let kernel = if mask.is_some() {
+            self.kernel_masked
+                .get_or_init(|| build_gated_delta_kernel(true).expect("build masked kernel"))
+        } else {
+            self.kernel_no_mask
+                .get_or_init(|| build_gated_delta_kernel(false).expect("build no-mask kernel"))
+        };
+        let t_arr: Array = (&[accepted_len_i32][..], ()).try_into()?;
+        let mut kernel_inputs = vec![&q, &k, &v, &g, &beta, cache.recurrent_state(), &t_arr];
+        if let Some(mask) = mask.as_ref() {
+            kernel_inputs.push(mask);
+        }
+        let mut outputs = kernel
+            .dispatch_builder()
+            .inputs(&kernel_inputs)
+            .output_shapes(&[
+                Shape::from((
+                    batch,
+                    accepted_len_i32,
+                    self.cfg.num_v_heads,
+                    self.cfg.head_v_dim,
+                )),
+                Shape::from((
+                    batch,
+                    self.cfg.num_v_heads,
+                    self.cfg.head_v_dim,
+                    self.cfg.head_k_dim,
+                )),
+            ])
+            .output_dtypes(&[q.dtype(), Dtype::Float32])
+            .grid(32, self.cfg.head_v_dim, batch * self.cfg.num_v_heads)
+            .threadgroup(32, 4, 1)
+            .template_int("Dk", self.cfg.head_k_dim)
+            .template_int("Dv", self.cfg.head_v_dim)
+            .template_int("Hk", self.cfg.num_k_heads)
+            .template_int("Hv", self.cfg.num_v_heads)
+            .template_dtype("InT", q.dtype())
+            .template_dtype("StT", Dtype::Float32)
+            .stream(target)
+            .dispatch()?;
+        let _unused_output = outputs.take_at(0)?;
+        let new_state = outputs.take_at(0)?;
+
+        let keep = self.cfg.conv_kernel_size - 1;
+        let conv_shape = capture.conv_input.shape();
+        let conv_dims = conv_shape.as_slice();
+        let new_conv_state = mlx::ops::indexing::slice_strided_on(
+            &capture.conv_input,
+            &[0_i32, accepted_len_i32, 0][..],
+            &[batch, accepted_len_i32 + keep, conv_dims[2]][..],
+            &[1_i32, 1, 1][..],
+            target,
+        )?;
+        cache.update_conv(new_conv_state);
+        cache.update_recurrent(new_state);
+        cache.advance(&vec![accepted_len_i32; batch as usize])?;
+        Ok(())
+    }
+
+    pub(crate) fn restore_speculative_prefix_rows_on(
+        &self,
+        cache: &mut GatedDeltaCache,
+        accepted_lens: &[usize],
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<()> {
+        let target = target.into();
+        if accepted_lens.is_empty() || accepted_lens.contains(&0) {
+            return Err(anyhow!(
+                "GatedDeltaNet speculative accepted prefixes cannot be empty"
+            ));
+        }
+        let capture = cache.take_speculative_replay()?;
+        let sequence = usize::try_from(capture.q.shape().as_slice()[1])?;
+        if accepted_lens.len() != cache.offsets().len() {
+            return Err(anyhow!(
+                "GatedDeltaNet accepted prefix rows {} != cache batch {}",
+                accepted_lens.len(),
+                cache.offsets().len()
+            ));
+        }
+        if accepted_lens.iter().any(|&accepted| accepted > sequence) {
+            return Err(anyhow!(
+                "GatedDeltaNet accepted prefix exceeds captured sequence {sequence}"
+            ));
+        }
+        if capture.prefix_states.len() != sequence {
+            return Err(anyhow!(
+                "GatedDeltaNet per-row restore requires position-stable capture, got {} states for sequence {sequence}",
+                capture.prefix_states.len()
+            ));
+        }
+        for (row, &accepted_len) in accepted_lens.iter().enumerate() {
+            let snapshot = &capture.prefix_states[accepted_len - 1];
+            let (conv_state, recurrent_state, cached_len) =
+                snapshot.prefix_state_for_row_on(row, target)?;
+            cache.restore_prefix_state_for_row_on(
+                &conv_state,
+                &recurrent_state,
+                row,
+                cached_len,
+                target,
+            )?;
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -596,6 +872,28 @@ impl GatedDeltaNet {
         let refs = outputs.iter().collect::<Vec<_>>();
         mlx::ops::shape::concatenate_on(&refs, 1, target).map_err(Into::into)
     }
+}
+
+fn slice_sequence_prefix_on(array: &Array, length: i32, target: StreamOrDevice) -> Result<Array> {
+    let shape = array.shape();
+    let dims = shape.as_slice();
+    if dims.len() < 2 || length < 0 || length > dims[1] {
+        return Err(anyhow!(
+            "sequence prefix length {length} is invalid for shape {dims:?}"
+        ));
+    }
+    let starts = vec![0_i32; dims.len()];
+    let mut stops = dims.to_vec();
+    stops[1] = length;
+    let strides = vec![1_i32; dims.len()];
+    mlx::ops::indexing::slice_strided_on(
+        array,
+        starts.as_slice(),
+        stops.as_slice(),
+        strides.as_slice(),
+        target,
+    )
+    .map_err(Into::into)
 }
 
 /// Build the `gated_delta_step` MetalKernel (no-mask or masked variant).
@@ -811,6 +1109,63 @@ mod tests {
         assert_eq!(cfg.num_v_heads, 4);
         assert_eq!(cfg.num_k_heads, 2);
         assert_eq!(cfg.conv_kernel_size, 4);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn dflash2_fused_ba_matches_separate_product_stable_projections() {
+        let input_width = 64_i32;
+        let output_width = 32_i32;
+        let group_size = 32_i32;
+        let make_linear = |offset: i32| {
+            let values = (0..output_width * input_width)
+                .map(|index| (((index + offset) % 37) as f32 - 18.0) * 0.01)
+                .collect::<Vec<_>>();
+            let weight: Array = (values.as_slice(), &[output_width, input_width][..])
+                .try_into()
+                .expect("weight");
+            let quantized =
+                mlx::quantization::quantize(&weight, Some(group_size), Some(4), "affine", None)
+                    .expect("quantize");
+            Linear::new_quant(
+                quantized[0].clone(),
+                quantized[1].clone(),
+                Some(quantized[2].clone()),
+                None,
+                group_size,
+                4,
+            )
+        };
+        let b = make_linear(0);
+        let a = make_linear(11);
+        let fused =
+            Linear::fuse_quantized_outputs(&[&b, &a], "DFlash2 test fused GDN b/a").expect("fuse");
+        let input_values = (0..4 * input_width)
+            .map(|index| ((index % 29) as f32 - 14.0) * 0.02)
+            .collect::<Vec<_>>();
+        let input: Array = (input_values.as_slice(), &[1_i32, 4, input_width][..])
+            .try_into()
+            .expect("input");
+
+        let separate = {
+            let _stable = crate::nn::position_stable_qmm::scope();
+            let b = b.forward(&input).expect("b");
+            let a = a.forward(&input).expect("a");
+            mlx::ops::shape::concatenate(&[&b, &a], -1).expect("concatenate")
+        };
+        let fused = {
+            let _stable = crate::nn::position_stable_qmm::scope();
+            fused.forward(&input).expect("fused forward")
+        };
+        let separate = mlx::ops::cast::astype(&separate, Dtype::Float32)
+            .expect("cast separate")
+            .to_vec::<f32>()
+            .expect("materialize separate");
+        let fused = mlx::ops::cast::astype(&fused, Dtype::Float32)
+            .expect("cast fused")
+            .to_vec::<f32>()
+            .expect("materialize fused");
+        assert_eq!(fused, separate);
     }
 
     #[test]

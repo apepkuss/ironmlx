@@ -31,6 +31,79 @@ import Testing
     ], "\(loaderCalls)")
 }
 
+@Test @MainActor func restartRecognizesExclusiveDFlash2ActorWithoutAdminModelCalls() async throws {
+    let root = try restartTemporaryDirectory()
+    let targetID = "mlx-community/Qwen3.8-27B-4bit"
+    let draftID = "z-lab/Qwen3.8-27B-DFlash2"
+    let target = try writeVerifiedTestSnapshot(
+        root: root,
+        repoID: targetID,
+        files: [
+            "config.json": Data(dflash2RestartTargetConfig.utf8),
+            "model.safetensors": Data("weights".utf8),
+        ]
+    )
+    let draft = try writeVerifiedTestSnapshot(
+        root: root,
+        repoID: draftID,
+        files: [
+            "config.json": Data(dflash2RestartDraftConfig.utf8),
+            "model.safetensors": Data("weights".utf8),
+        ],
+        commitSHA: String(repeating: "b", count: 40)
+    )
+    let scanner = LocalModelScanner(rootURL: root)
+    let parameterStore = ModelParameterStore(url: root.appendingPathComponent("model_params.json"))
+    try parameterStore.save(
+        ModelParameters(
+            modelID: targetID,
+            maxTokens: "65536",
+            dflash2Enabled: true,
+            dflash2ModelID: draftID,
+            dflash2BlockSize: "6",
+            dflash2DraftBits: "8",
+            dflash2TensorBatchMaxWidth: "4"
+        )
+    )
+    let config = AppConfig(
+        port: 9068,
+        defaultModel: targetID,
+        loadedModels: [targetID]
+    )
+    let resolvedDFlash2Runtime = try ModelDFlash2RuntimeResolver.runtime(
+        for: targetID,
+        useDFlash2: nil,
+        scanner: scanner,
+        parameterStore: parameterStore
+    )
+    let dflash2Runtime = try #require(resolvedDFlash2Runtime)
+    #expect(dflash2Runtime.maxCacheCap == 65_536)
+    let snapshot = BackendRecoverySnapshot.capture(
+        config: config,
+        scanner: scanner,
+        parameterStore: parameterStore
+    )
+    let recoveredModel = try #require(snapshot.models.first)
+    #expect(recoveredModel.modelDir == target.path)
+    #expect(recoveredModel.dflash2ModelDir == draft.path)
+    #expect(recoveredModel.dflash2BlockSize == 6)
+    #expect(recoveredModel.dflash2DraftBits == 8)
+    #expect(recoveredModel.dflash2TensorBatchMaxWidth == 4)
+
+    let loader = FakeRestartModelLoader()
+    let coordinator = BackendRestartCoordinator(
+        scanner: scanner,
+        parameterStore: parameterStore,
+        clientFactory: { _, _ in loader }
+    )
+    let result = await coordinator.restore(snapshot)
+
+    #expect(result.success)
+    #expect(result.status == "dflash2_model_loaded")
+    #expect(result.loadedModels == [targetID])
+    #expect(await loader.calls.isEmpty)
+}
+
 @Test @MainActor func restartDefaultModelReportsLoadFailure() async throws {
     let (root, _) = try restartModelRoot(repoID: "mlx-community/Tiny-4bit")
     let loader = FakeRestartModelLoader(
@@ -368,6 +441,54 @@ private func restartTemporaryDirectory() throws -> URL {
     try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     return url
 }
+
+private let dflash2RestartTargetConfig = """
+{
+  "model_type": "qwen3_5",
+  "text_config": {
+    "hidden_size": 5120,
+    "intermediate_size": 17408,
+    "num_hidden_layers": 64,
+    "vocab_size": 248320,
+    "max_position_embeddings": 262144,
+    "rms_norm_eps": 0.000001,
+    "rope_parameters": {"rope_type": "default", "rope_theta": 10000000}
+  }
+}
+"""
+
+private let dflash2RestartDraftConfig = """
+{
+  "architectures": ["DFlash2DraftModel"],
+  "model_type": "qwen3",
+  "dtype": "bfloat16",
+  "hidden_act": "silu",
+  "attention_bias": false,
+  "is_causal": false,
+  "hidden_size": 5120,
+  "intermediate_size": 17408,
+  "vocab_size": 248320,
+  "max_position_embeddings": 262144,
+  "head_dim": 128,
+  "num_attention_heads": 32,
+  "num_hidden_layers": 5,
+  "num_key_value_heads": 8,
+  "num_target_layers": 64,
+  "rms_norm_eps": 0.000001,
+  "rope_parameters": {"rope_type": "default", "rope_theta": 10000000},
+  "sliding_window": 2048,
+  "layer_types": ["sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention"],
+  "dflash_config": {
+    "block_size": 8,
+    "conv_group_size": 16,
+    "conv_kernel_size": 2,
+    "mask_token_id": 248070,
+    "selector_rank": 256,
+    "selector_top_k": 16,
+    "target_layer_ids": [5, 19, 33, 47, 61]
+  }
+}
+"""
 
 private actor FakeRestartModelLoader: BackendModelLoading {
     private let loadError: Error?

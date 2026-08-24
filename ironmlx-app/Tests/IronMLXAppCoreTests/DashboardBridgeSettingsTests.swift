@@ -166,6 +166,21 @@ import WebKit
 }
 
 @MainActor
+@Test func dashboardModelOperationErrorPreservesStructuredFailureCode() throws {
+    let json = DashboardBridge.modelOperationErrorJSON(
+        error: "Backend did not become healthy.",
+        code: BackendRuntimeFailureCode.backendReadinessFailed.rawValue
+    )
+    let data = try #require(json.data(using: .utf8))
+    let payload = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+
+    #expect(payload["success"] as? Bool == false)
+    #expect(payload["status"] as? String == "error")
+    #expect(payload["code"] as? String == "backend_readiness_failed")
+    #expect(payload["error"] as? String == "Backend did not become healthy.")
+}
+
+@MainActor
 @Test func dashboardBridgeRefreshesModelListWhenLoadedModelsNotificationArrives() async throws {
     let root = try dashboardBridgeNotificationModelRoot(repoID: "mlx-community/Tiny-4bit")
     let configStore = AppConfigStore(url: root.appendingPathComponent("app_config.json"))
@@ -313,6 +328,120 @@ import WebKit
     #expect(quantization["bits"] as? Int == 6)
     #expect(quantization["label"] as? String == "affine 6-bit")
     #expect(readiness["status"] as? String == "ready")
+    withExtendedLifetime(bridge) {}
+}
+
+@MainActor
+@Test func dashboardKeepsUnloadedDFlash2PreferenceAvailableForLoad() async throws {
+    let targetID = "mlx-community/Qwen3.8-27B-4bit"
+    let draftID = "z-lab/Qwen3.8-27B-DFlash2"
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ironmlx-dashboard-dflash2-\(UUID().uuidString)", isDirectory: true)
+    _ = try writeVerifiedTestSnapshot(
+        root: root,
+        repoID: targetID,
+        files: [
+            "config.json": Data(dashboardDFlash2TargetConfig.utf8),
+            "model.safetensors": Data("target-weights".utf8),
+        ]
+    )
+    _ = try writeVerifiedTestSnapshot(
+        root: root,
+        repoID: draftID,
+        files: [
+            "config.json": Data(dashboardDFlash2DraftConfig.utf8),
+            "model.safetensors": Data("draft-weights".utf8),
+        ]
+    )
+    let configStore = AppConfigStore(url: root.appendingPathComponent("app_config.json"))
+    configStore.save(AppConfig(defaultModel: targetID, loadedModels: []))
+    let parameterStore = ModelParameterStore(url: root.appendingPathComponent("model_params.json"))
+    try parameterStore.save(ModelParameters(
+        modelID: targetID,
+        dflash2Enabled: true,
+        dflash2ModelID: draftID
+    ))
+    let webView = CapturingDashboardWebView()
+    let notificationCenter = NotificationCenter()
+    let bridge = DashboardBridge(
+        webView: webView,
+        configStore: configStore,
+        backend: TestRuntimeBackend(),
+        scanner: LocalModelScanner(rootURL: root),
+        parameterStore: parameterStore,
+        notificationCenter: notificationCenter
+    )
+
+    notificationCenter.post(name: .ironMLXLoadedModelsDidChange, object: nil)
+
+    let script = try #require(await webView.script(containing: "onLocalModelsScanned"))
+    let payload = try decodedJavaScriptStringArgument(from: script, functionName: "onLocalModelsScanned")
+    let data = try #require(payload.data(using: .utf8))
+    let models = try #require(JSONSerialization.jsonObject(with: data) as? [[String: Any]])
+    let target = try #require(models.first(where: { $0["id"] as? String == targetID }))
+    let dflash2 = try #require(target["dflash2"] as? [String: Any])
+    let candidates = try #require(dflash2["candidates"] as? [[String: Any]])
+
+    #expect(target["loaded"] as? Bool == false)
+    #expect(dflash2["status"] as? String == "available")
+    #expect(dflash2["enabled"] as? Bool == false)
+    #expect(candidates.map { $0["id"] as? String } == [draftID])
+    withExtendedLifetime(bridge) {}
+}
+
+@MainActor
+@Test func dashboardTreatsConfiguredDFlash2TargetAsLoadedDuringActorTransition() async throws {
+    let targetID = "mlx-community/Qwen3.8-27B-4bit"
+    let draftID = "z-lab/Qwen3.8-27B-DFlash2"
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ironmlx-dashboard-dflash2-running-\(UUID().uuidString)", isDirectory: true)
+    _ = try writeVerifiedTestSnapshot(
+        root: root,
+        repoID: targetID,
+        files: [
+            "config.json": Data(dashboardDFlash2TargetConfig.utf8),
+            "model.safetensors": Data("target-weights".utf8),
+        ]
+    )
+    _ = try writeVerifiedTestSnapshot(
+        root: root,
+        repoID: draftID,
+        files: [
+            "config.json": Data(dashboardDFlash2DraftConfig.utf8),
+            "model.safetensors": Data("draft-weights".utf8),
+        ]
+    )
+    let configStore = AppConfigStore(url: root.appendingPathComponent("app_config.json"))
+    configStore.save(AppConfig(defaultModel: targetID, loadedModels: [targetID]))
+    let parameterStore = ModelParameterStore(url: root.appendingPathComponent("model_params.json"))
+    try parameterStore.save(ModelParameters(
+        modelID: targetID,
+        dflash2Enabled: true,
+        dflash2ModelID: draftID
+    ))
+    let webView = CapturingDashboardWebView()
+    let notificationCenter = NotificationCenter()
+    let bridge = DashboardBridge(
+        webView: webView,
+        configStore: configStore,
+        backend: TestRuntimeBackend(state: .running, isRunning: true),
+        scanner: LocalModelScanner(rootURL: root),
+        parameterStore: parameterStore,
+        notificationCenter: notificationCenter
+    )
+
+    notificationCenter.post(name: .ironMLXLoadedModelsDidChange, object: nil)
+
+    let script = try #require(await webView.script(containing: "onLocalModelsScanned"))
+    let payload = try decodedJavaScriptStringArgument(from: script, functionName: "onLocalModelsScanned")
+    let data = try #require(payload.data(using: .utf8))
+    let models = try #require(JSONSerialization.jsonObject(with: data) as? [[String: Any]])
+    let target = try #require(models.first(where: { $0["id"] as? String == targetID }))
+    let dflash2 = try #require(target["dflash2"] as? [String: Any])
+
+    #expect(target["loaded"] as? Bool == true)
+    #expect(dflash2["enabled"] as? Bool == true)
+    #expect(configStore.load().restoredModelReferences == [targetID])
     withExtendedLifetime(bridge) {}
 }
 
@@ -541,6 +670,66 @@ private func decodedJavaScriptStringArgument(from script: String, functionName: 
     let literal = String(script.dropFirst(prefix.count).dropLast())
     return try JSONDecoder().decode(String.self, from: Data(literal.utf8))
 }
+
+private let dashboardDFlash2TargetConfig = """
+{
+  "model_type": "qwen3_5",
+  "text_config": {
+    "hidden_size": 5120,
+    "intermediate_size": 17408,
+    "num_hidden_layers": 64,
+    "vocab_size": 248320,
+    "max_position_embeddings": 262144,
+    "rms_norm_eps": 0.000001,
+    "rope_parameters": {
+      "rope_type": "default",
+      "rope_theta": 10000000
+    }
+  }
+}
+"""
+
+private let dashboardDFlash2DraftConfig = """
+{
+  "architectures": ["DFlash2DraftModel"],
+  "model_type": "qwen3",
+  "dtype": "bfloat16",
+  "hidden_act": "silu",
+  "attention_bias": false,
+  "is_causal": false,
+  "hidden_size": 5120,
+  "intermediate_size": 17408,
+  "vocab_size": 248320,
+  "max_position_embeddings": 262144,
+  "head_dim": 128,
+  "num_attention_heads": 32,
+  "num_hidden_layers": 5,
+  "num_key_value_heads": 8,
+  "num_target_layers": 64,
+  "rms_norm_eps": 0.000001,
+  "rope_parameters": {
+    "rope_type": "default",
+    "rope_theta": 10000000
+  },
+  "sliding_window": 2048,
+  "layer_types": [
+    "sliding_attention",
+    "sliding_attention",
+    "sliding_attention",
+    "sliding_attention",
+    "sliding_attention"
+  ],
+  "dflash_config": {
+    "block_size": 8,
+    "conv_group_size": 16,
+    "conv_kernel_size": 2,
+    "mask_token_id": 248070,
+    "selector_rank": 256,
+    "selector_top_k": 16,
+    "target_layer_ids": [5, 19, 33, 47, 61]
+  }
+}
+"""
 
 @MainActor
 private final class CapturingDashboardWebView: WKWebView {

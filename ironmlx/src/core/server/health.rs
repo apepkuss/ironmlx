@@ -112,6 +112,232 @@ pub struct MtpHealthInfo {
     pub sampled_exact_qualification: NeuralExactQualificationHealth,
 }
 
+#[derive(Debug, Serialize)]
+pub struct DFlash2HealthInfo {
+    pub enabled: bool,
+    pub block_size: Option<usize>,
+    pub draft_quantization_bits: Option<i32>,
+    pub requests: u64,
+    pub windows: u64,
+    pub drafted_tokens: u64,
+    pub accepted_draft_tokens: u64,
+    pub rollback_count: u64,
+    pub tensor_batch_windows: u64,
+    pub tensor_batch_divergent_splits: u64,
+    pub tensor_batch_groups_created: u64,
+    pub tensor_batch_width_limit: usize,
+    pub tensor_batch_max_width: usize,
+    pub sampled_requests: u64,
+    pub exact_sampling_windows: u64,
+    pub exact_acceptance_draws: u64,
+    pub exact_residual_corrections: u64,
+    pub exact_bonus_samples: u64,
+    pub sampling_us: u64,
+    pub latest_generation_tps: f64,
+    pub latest_acceptance_rate: f64,
+    pub peak_memory_bytes: usize,
+    pub prefix_cache_enabled: bool,
+    pub prefix_cache_max_bytes: Option<usize>,
+    pub prefix_cache_entries: usize,
+    pub prefix_cache_bytes: usize,
+    pub prefix_cache_hits: u64,
+    pub prefix_cache_misses: u64,
+    pub prefix_cache_saves: u64,
+    pub prefix_cache_evictions: u64,
+    pub prefix_cache_hit_tokens: u64,
+    pub runtime_usage: crate::core::runtime_usage::ModelRuntimeUsageSnapshot,
+}
+
+#[derive(Clone)]
+pub struct DFlash2HealthConfig {
+    enabled: bool,
+    block_size: Option<usize>,
+    draft_quantization_bits: Option<i32>,
+    requests: Arc<AtomicU64>,
+    windows: Arc<AtomicU64>,
+    drafted_tokens: Arc<AtomicU64>,
+    accepted_draft_tokens: Arc<AtomicU64>,
+    rollback_count: Arc<AtomicU64>,
+    tensor_batch_windows: Arc<AtomicU64>,
+    tensor_batch_divergent_splits: Arc<AtomicU64>,
+    tensor_batch_groups_created: Arc<AtomicU64>,
+    tensor_batch_width_limit: usize,
+    tensor_batch_max_width: Arc<AtomicUsize>,
+    sampled_requests: Arc<AtomicU64>,
+    exact_sampling_windows: Arc<AtomicU64>,
+    exact_acceptance_draws: Arc<AtomicU64>,
+    exact_residual_corrections: Arc<AtomicU64>,
+    exact_bonus_samples: Arc<AtomicU64>,
+    sampling_us: Arc<AtomicU64>,
+    latest_generation_tps_bits: Arc<AtomicU64>,
+    latest_acceptance_rate_bits: Arc<AtomicU64>,
+    peak_memory_bytes: Arc<AtomicUsize>,
+    prefix_cache_enabled: bool,
+    prefix_cache_max_bytes: Option<usize>,
+    prefix_cache_entries: Arc<AtomicUsize>,
+    prefix_cache_bytes: Arc<AtomicUsize>,
+    prefix_cache_hits: Arc<AtomicU64>,
+    prefix_cache_misses: Arc<AtomicU64>,
+    prefix_cache_saves: Arc<AtomicU64>,
+    prefix_cache_evictions: Arc<AtomicU64>,
+    prefix_cache_hit_tokens: Arc<AtomicU64>,
+    runtime_usage: Arc<crate::core::runtime_usage::ModelRuntimeUsageCounters>,
+}
+
+impl DFlash2HealthConfig {
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            block_size: None,
+            draft_quantization_bits: None,
+            requests: Arc::new(AtomicU64::new(0)),
+            windows: Arc::new(AtomicU64::new(0)),
+            drafted_tokens: Arc::new(AtomicU64::new(0)),
+            accepted_draft_tokens: Arc::new(AtomicU64::new(0)),
+            rollback_count: Arc::new(AtomicU64::new(0)),
+            tensor_batch_windows: Arc::new(AtomicU64::new(0)),
+            tensor_batch_divergent_splits: Arc::new(AtomicU64::new(0)),
+            tensor_batch_groups_created: Arc::new(AtomicU64::new(0)),
+            tensor_batch_width_limit: 0,
+            tensor_batch_max_width: Arc::new(AtomicUsize::new(0)),
+            sampled_requests: Arc::new(AtomicU64::new(0)),
+            exact_sampling_windows: Arc::new(AtomicU64::new(0)),
+            exact_acceptance_draws: Arc::new(AtomicU64::new(0)),
+            exact_residual_corrections: Arc::new(AtomicU64::new(0)),
+            exact_bonus_samples: Arc::new(AtomicU64::new(0)),
+            sampling_us: Arc::new(AtomicU64::new(0)),
+            latest_generation_tps_bits: Arc::new(AtomicU64::new(0_f64.to_bits())),
+            latest_acceptance_rate_bits: Arc::new(AtomicU64::new(0_f64.to_bits())),
+            peak_memory_bytes: Arc::new(AtomicUsize::new(0)),
+            prefix_cache_enabled: false,
+            prefix_cache_max_bytes: None,
+            prefix_cache_entries: Arc::new(AtomicUsize::new(0)),
+            prefix_cache_bytes: Arc::new(AtomicUsize::new(0)),
+            prefix_cache_hits: Arc::new(AtomicU64::new(0)),
+            prefix_cache_misses: Arc::new(AtomicU64::new(0)),
+            prefix_cache_saves: Arc::new(AtomicU64::new(0)),
+            prefix_cache_evictions: Arc::new(AtomicU64::new(0)),
+            prefix_cache_hit_tokens: Arc::new(AtomicU64::new(0)),
+            runtime_usage: Arc::new(
+                crate::core::runtime_usage::ModelRuntimeUsageCounters::default(),
+            ),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn enabled(
+        block_size: usize,
+        draft_quantization_bits: Option<i32>,
+        requests: Arc<AtomicU64>,
+        windows: Arc<AtomicU64>,
+        drafted_tokens: Arc<AtomicU64>,
+        accepted_draft_tokens: Arc<AtomicU64>,
+        rollback_count: Arc<AtomicU64>,
+        tensor_batch_windows: Arc<AtomicU64>,
+        tensor_batch_divergent_splits: Arc<AtomicU64>,
+        tensor_batch_groups_created: Arc<AtomicU64>,
+        tensor_batch_width_limit: usize,
+        tensor_batch_max_width: Arc<AtomicUsize>,
+        sampled_requests: Arc<AtomicU64>,
+        exact_sampling_windows: Arc<AtomicU64>,
+        exact_acceptance_draws: Arc<AtomicU64>,
+        exact_residual_corrections: Arc<AtomicU64>,
+        exact_bonus_samples: Arc<AtomicU64>,
+        sampling_us: Arc<AtomicU64>,
+        latest_generation_tps_bits: Arc<AtomicU64>,
+        latest_acceptance_rate_bits: Arc<AtomicU64>,
+        peak_memory_bytes: Arc<AtomicUsize>,
+        prefix_cache_enabled: bool,
+        prefix_cache_max_bytes: Option<usize>,
+        prefix_cache_entries: Arc<AtomicUsize>,
+        prefix_cache_bytes: Arc<AtomicUsize>,
+        prefix_cache_hits: Arc<AtomicU64>,
+        prefix_cache_misses: Arc<AtomicU64>,
+        prefix_cache_saves: Arc<AtomicU64>,
+        prefix_cache_evictions: Arc<AtomicU64>,
+        prefix_cache_hit_tokens: Arc<AtomicU64>,
+        runtime_usage: Arc<crate::core::runtime_usage::ModelRuntimeUsageCounters>,
+    ) -> Self {
+        Self {
+            enabled: true,
+            block_size: Some(block_size),
+            draft_quantization_bits,
+            requests,
+            windows,
+            drafted_tokens,
+            accepted_draft_tokens,
+            rollback_count,
+            tensor_batch_windows,
+            tensor_batch_divergent_splits,
+            tensor_batch_groups_created,
+            tensor_batch_width_limit,
+            tensor_batch_max_width,
+            sampled_requests,
+            exact_sampling_windows,
+            exact_acceptance_draws,
+            exact_residual_corrections,
+            exact_bonus_samples,
+            sampling_us,
+            latest_generation_tps_bits,
+            latest_acceptance_rate_bits,
+            peak_memory_bytes,
+            prefix_cache_enabled,
+            prefix_cache_max_bytes,
+            prefix_cache_entries,
+            prefix_cache_bytes,
+            prefix_cache_hits,
+            prefix_cache_misses,
+            prefix_cache_saves,
+            prefix_cache_evictions,
+            prefix_cache_hit_tokens,
+            runtime_usage,
+        }
+    }
+
+    pub(crate) fn snapshot(&self) -> DFlash2HealthInfo {
+        DFlash2HealthInfo {
+            enabled: self.enabled,
+            block_size: self.block_size,
+            draft_quantization_bits: self.draft_quantization_bits,
+            requests: self.requests.load(Ordering::Relaxed),
+            windows: self.windows.load(Ordering::Relaxed),
+            drafted_tokens: self.drafted_tokens.load(Ordering::Relaxed),
+            accepted_draft_tokens: self.accepted_draft_tokens.load(Ordering::Relaxed),
+            rollback_count: self.rollback_count.load(Ordering::Relaxed),
+            tensor_batch_windows: self.tensor_batch_windows.load(Ordering::Relaxed),
+            tensor_batch_divergent_splits: self
+                .tensor_batch_divergent_splits
+                .load(Ordering::Relaxed),
+            tensor_batch_groups_created: self.tensor_batch_groups_created.load(Ordering::Relaxed),
+            tensor_batch_width_limit: self.tensor_batch_width_limit,
+            tensor_batch_max_width: self.tensor_batch_max_width.load(Ordering::Relaxed),
+            sampled_requests: self.sampled_requests.load(Ordering::Relaxed),
+            exact_sampling_windows: self.exact_sampling_windows.load(Ordering::Relaxed),
+            exact_acceptance_draws: self.exact_acceptance_draws.load(Ordering::Relaxed),
+            exact_residual_corrections: self.exact_residual_corrections.load(Ordering::Relaxed),
+            exact_bonus_samples: self.exact_bonus_samples.load(Ordering::Relaxed),
+            sampling_us: self.sampling_us.load(Ordering::Relaxed),
+            latest_generation_tps: f64::from_bits(
+                self.latest_generation_tps_bits.load(Ordering::Relaxed),
+            ),
+            latest_acceptance_rate: f64::from_bits(
+                self.latest_acceptance_rate_bits.load(Ordering::Relaxed),
+            ),
+            peak_memory_bytes: self.peak_memory_bytes.load(Ordering::Relaxed),
+            prefix_cache_enabled: self.prefix_cache_enabled,
+            prefix_cache_max_bytes: self.prefix_cache_max_bytes,
+            prefix_cache_entries: self.prefix_cache_entries.load(Ordering::Relaxed),
+            prefix_cache_bytes: self.prefix_cache_bytes.load(Ordering::Relaxed),
+            prefix_cache_hits: self.prefix_cache_hits.load(Ordering::Relaxed),
+            prefix_cache_misses: self.prefix_cache_misses.load(Ordering::Relaxed),
+            prefix_cache_saves: self.prefix_cache_saves.load(Ordering::Relaxed),
+            prefix_cache_evictions: self.prefix_cache_evictions.load(Ordering::Relaxed),
+            prefix_cache_hit_tokens: self.prefix_cache_hit_tokens.load(Ordering::Relaxed),
+            runtime_usage: self.runtime_usage.snapshot(self.prefix_cache_enabled),
+        }
+    }
+}
+
 #[derive(Debug, Default, Serialize)]
 pub struct NeuralExactQualificationHealth {
     pub ordinary_cost_samples: u64,
@@ -729,6 +955,7 @@ pub struct HealthSnapshot {
     pub scheduler: SchedulerInfo,
     pub memory: MemoryInfo,
     pub mtp: MtpHealthInfo,
+    pub dflash2: DFlash2HealthInfo,
     pub prompt_lookup: PromptLookupHealthInfo,
     pub active_kv_offload: ActiveKvOffloadHealth,
     pub device_name: Option<String>,
@@ -753,6 +980,7 @@ pub struct SchedulerHealthCollector {
     pub kv_cache_resident_cap_tokens: usize,
     pub kv_cache_budget_policy: String,
     pub mtp: MtpHealthConfig,
+    pub dflash2: DFlash2HealthConfig,
     pub prompt_lookup: PromptLookupHealthConfig,
     pub active_kv_offload: ActiveKvOffloadSharedStats,
     pub immutable_prefix_blocks:
@@ -824,6 +1052,7 @@ impl SchedulerHealthCollector {
                 immutable_prefix_blocks: self.immutable_prefix_blocks.snapshot(),
             },
             mtp: self.mtp.snapshot(),
+            dflash2: self.dflash2.snapshot(),
             prompt_lookup: self.prompt_lookup.snapshot(),
             active_kv_offload,
             device_name: mlx_memory.device_name,
@@ -1061,6 +1290,7 @@ mod tests {
             kv_cache_resident_cap_tokens: 1_024,
             kv_cache_budget_policy: "active_kv_offload".to_string(),
             mtp,
+            dflash2: DFlash2HealthConfig::disabled(),
             prompt_lookup: PromptLookupHealthConfig::disabled(),
             active_kv_offload,
             immutable_prefix_blocks:
@@ -1102,6 +1332,131 @@ mod tests {
         assert_eq!(snapshot.mtp.main_rollback_us, 0);
         assert_eq!(snapshot.mtp.cache_commit_us, 0);
         assert_eq!(snapshot.mtp.cache_restore_us, 0);
+    }
+
+    #[test]
+    fn snapshot_dflash2_reports_config_and_live_metrics() {
+        let requests = Arc::new(AtomicU64::new(3));
+        let windows = Arc::new(AtomicU64::new(17));
+        let drafted_tokens = Arc::new(AtomicU64::new(68));
+        let accepted_draft_tokens = Arc::new(AtomicU64::new(51));
+        let rollback_count = Arc::new(AtomicU64::new(4));
+        let tensor_batch_windows = Arc::new(AtomicU64::new(11));
+        let tensor_batch_divergent_splits = Arc::new(AtomicU64::new(3));
+        let tensor_batch_groups_created = Arc::new(AtomicU64::new(5));
+        let tensor_batch_max_width = Arc::new(AtomicUsize::new(4));
+        let sampled_requests = Arc::new(AtomicU64::new(2));
+        let exact_sampling_windows = Arc::new(AtomicU64::new(9));
+        let exact_acceptance_draws = Arc::new(AtomicU64::new(21));
+        let exact_residual_corrections = Arc::new(AtomicU64::new(5));
+        let exact_bonus_samples = Arc::new(AtomicU64::new(4));
+        let sampling_us = Arc::new(AtomicU64::new(12_345));
+        let latest_generation_tps_bits = Arc::new(AtomicU64::new(48.5_f64.to_bits()));
+        let latest_acceptance_rate_bits = Arc::new(AtomicU64::new(0.75_f64.to_bits()));
+        let peak_memory_bytes = Arc::new(AtomicUsize::new(20_000_000_000));
+        let prefix_cache_entries = Arc::new(AtomicUsize::new(2));
+        let prefix_cache_bytes = Arc::new(AtomicUsize::new(1_500_000_000));
+        let prefix_cache_hits = Arc::new(AtomicU64::new(4));
+        let prefix_cache_misses = Arc::new(AtomicU64::new(1));
+        let prefix_cache_saves = Arc::new(AtomicU64::new(3));
+        let prefix_cache_evictions = Arc::new(AtomicU64::new(1));
+        let prefix_cache_hit_tokens = Arc::new(AtomicU64::new(16_384));
+        let runtime_usage =
+            Arc::new(crate::core::runtime_usage::ModelRuntimeUsageCounters::default());
+        runtime_usage.record_prefix_cache_lookup(700, 512);
+        let mut completed = runtime_usage.start_request(768, Instant::now());
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        completed.record_output_tokens(256);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        completed.complete();
+        let mut active = runtime_usage.start_request(64, Instant::now());
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        active.record_output_tokens(2);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        let mut collector = test_collector(MtpHealthConfig::disabled());
+        collector.dflash2 = DFlash2HealthConfig::enabled(
+            4,
+            Some(4),
+            requests,
+            windows,
+            drafted_tokens,
+            accepted_draft_tokens,
+            rollback_count,
+            tensor_batch_windows,
+            tensor_batch_divergent_splits,
+            tensor_batch_groups_created,
+            6,
+            tensor_batch_max_width,
+            sampled_requests,
+            exact_sampling_windows,
+            exact_acceptance_draws,
+            exact_residual_corrections,
+            exact_bonus_samples,
+            sampling_us,
+            latest_generation_tps_bits,
+            latest_acceptance_rate_bits,
+            peak_memory_bytes,
+            true,
+            Some(8_589_934_592),
+            prefix_cache_entries,
+            prefix_cache_bytes,
+            prefix_cache_hits,
+            prefix_cache_misses,
+            prefix_cache_saves,
+            prefix_cache_evictions,
+            prefix_cache_hit_tokens,
+            runtime_usage,
+        );
+
+        let snapshot = collector.snapshot();
+
+        assert!(snapshot.dflash2.enabled);
+        assert_eq!(snapshot.dflash2.block_size, Some(4));
+        assert_eq!(snapshot.dflash2.draft_quantization_bits, Some(4));
+        assert_eq!(snapshot.dflash2.requests, 3);
+        assert_eq!(snapshot.dflash2.windows, 17);
+        assert_eq!(snapshot.dflash2.drafted_tokens, 68);
+        assert_eq!(snapshot.dflash2.accepted_draft_tokens, 51);
+        assert_eq!(snapshot.dflash2.rollback_count, 4);
+        assert_eq!(snapshot.dflash2.tensor_batch_windows, 11);
+        assert_eq!(snapshot.dflash2.tensor_batch_divergent_splits, 3);
+        assert_eq!(snapshot.dflash2.tensor_batch_groups_created, 5);
+        assert_eq!(snapshot.dflash2.tensor_batch_width_limit, 6);
+        assert_eq!(snapshot.dflash2.tensor_batch_max_width, 4);
+        assert_eq!(snapshot.dflash2.sampled_requests, 2);
+        assert_eq!(snapshot.dflash2.exact_sampling_windows, 9);
+        assert_eq!(snapshot.dflash2.exact_acceptance_draws, 21);
+        assert_eq!(snapshot.dflash2.exact_residual_corrections, 5);
+        assert_eq!(snapshot.dflash2.exact_bonus_samples, 4);
+        assert_eq!(snapshot.dflash2.sampling_us, 12_345);
+        assert_eq!(snapshot.dflash2.latest_generation_tps, 48.5);
+        assert_eq!(snapshot.dflash2.latest_acceptance_rate, 0.75);
+        assert_eq!(snapshot.dflash2.peak_memory_bytes, 20_000_000_000);
+        assert!(snapshot.dflash2.prefix_cache_enabled);
+        assert_eq!(snapshot.dflash2.prefix_cache_max_bytes, Some(8_589_934_592));
+        assert_eq!(snapshot.dflash2.prefix_cache_entries, 2);
+        assert_eq!(snapshot.dflash2.prefix_cache_bytes, 1_500_000_000);
+        assert_eq!(snapshot.dflash2.prefix_cache_hits, 4);
+        assert_eq!(snapshot.dflash2.prefix_cache_misses, 1);
+        assert_eq!(snapshot.dflash2.prefix_cache_saves, 3);
+        assert_eq!(snapshot.dflash2.prefix_cache_evictions, 1);
+        assert_eq!(snapshot.dflash2.prefix_cache_hit_tokens, 16_384);
+        assert_eq!(snapshot.dflash2.runtime_usage.input_tokens, 832);
+        assert_eq!(snapshot.dflash2.runtime_usage.output_tokens, 258);
+        assert_eq!(
+            snapshot.dflash2.runtime_usage.prefix_cache,
+            Some(crate::core::runtime_usage::PrefixCacheUsageSnapshot {
+                hit_tokens: 512,
+                eligible_tokens: 700,
+            })
+        );
+        let performance = snapshot.dflash2.runtime_usage.performance;
+        assert_eq!(performance.completed_requests, 1);
+        assert!(performance.live_decode_tokens_per_second.is_some());
+        assert!(performance.prefill_tokens_per_second.is_some());
+        assert!(performance.decode_tokens_per_second.is_some());
+        assert!(performance.session_decode_tokens_per_second.is_some());
+        assert!(performance.ttft_ms.is_some());
     }
 
     #[test]
@@ -1558,6 +1913,7 @@ mod tests {
                 cache_restore_us: 0,
                 sampled_exact_qualification: NeuralExactQualificationHealth::default(),
             },
+            dflash2: DFlash2HealthConfig::disabled().snapshot(),
             prompt_lookup: PromptLookupHealthInfo::default(),
             active_kv_offload: ActiveKvOffloadHealth::disabled(),
             device_name: Some("Apple Test GPU".to_string()),

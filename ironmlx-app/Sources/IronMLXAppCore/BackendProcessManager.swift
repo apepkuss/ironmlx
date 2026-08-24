@@ -104,7 +104,8 @@ public final class BackendProcessManager {
 
     public init(
         configStore: AppConfigStore = .shared,
-        scanner _: LocalModelScanner = LocalModelScanner(),
+        scanner: LocalModelScanner = LocalModelScanner(),
+        parameterStore: ModelParameterStore = .shared,
         terminator: BackendProcessTerminator = BackendProcessTerminator(),
         logStore: IronMLXLogStore = IronMLXLogStore(),
         notificationCenter: NotificationCenter = .default,
@@ -120,6 +121,18 @@ public final class BackendProcessManager {
             let config = configStore.load()
             let runtime = try BackendBinaryResolver.resolveValidatedRuntime()
             let options = BackendLaunchOptions(config: config)
+            let dflash2Runtime: ModelDFlash2Runtime?
+            if let defaultModel = config.defaultModelReference {
+                dflash2Runtime = try ModelDFlash2RuntimeResolver.runtime(
+                    for: defaultModel,
+                    useDFlash2: nil,
+                    scanner: scanner,
+                    parameterStore: parameterStore,
+                    fullChecksum: false
+                )
+            } else {
+                dflash2Runtime = nil
+            }
             if let validationError = options.validationError {
                 throw BackendProcessError.invalidLaunchConfiguration(validationError)
             }
@@ -131,7 +144,8 @@ public final class BackendProcessManager {
                 options: options,
                 networkMode: config.isLANMode ? "lan" : "local",
                 lanHost: config.lanHost,
-                securityBootstrapStdin: config.isLANMode
+                securityBootstrapStdin: config.isLANMode,
+                dflash2Runtime: dflash2Runtime
             )
             if let validationError = launch.validationError {
                 throw BackendProcessError.invalidLaunchConfiguration(validationError)

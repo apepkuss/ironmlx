@@ -617,7 +617,9 @@ private let testCommit = String(repeating: "a", count: 40)
 
     #expect(await service.startHuggingFaceDownload(repoID: repoID, token: "hf_secret_value").success)
     try await waitForDownloadCondition {
-        await service.downloadQueueSnapshot().activeCount == 1
+        let snapshot = await service.downloadQueueSnapshot()
+        let preflightCalls = await preflight.totalCalls()
+        return snapshot.activeCount == 1 && preflightCalls == 1
     }
     await service.cancelAllDownloads()
     await preflight.releaseAll()
@@ -1073,13 +1075,16 @@ private actor BlockingMetadataPreflight: ModelMetadataPreflighting {
     private var activeCalls = 0
     private var maximumCalls = 0
     private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseAllRequested = false
 
     func validate(metadataDirectory _: URL) async throws -> ModelMetadataPreflightResult {
         calls += 1
         activeCalls += 1
         maximumCalls = max(maximumCalls, activeCalls)
-        await withCheckedContinuation { continuation in
-            waiters.append(continuation)
+        if !releaseAllRequested {
+            await withCheckedContinuation { continuation in
+                waiters.append(continuation)
+            }
         }
         activeCalls -= 1
         try Task.checkCancellation()
@@ -1106,6 +1111,7 @@ private actor BlockingMetadataPreflight: ModelMetadataPreflighting {
     }
 
     func releaseAll() {
+        releaseAllRequested = true
         let pending = waiters
         waiters.removeAll()
         for waiter in pending {

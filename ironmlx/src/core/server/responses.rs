@@ -32,12 +32,12 @@ use crate::core::scheduler::DenseVlMethods;
 use crate::core::server::chat_format::{
     ChatFunctionCall, ChatMessage, ChatToolCall, Content, ContentPart, ImageUrl,
 };
-use crate::core::server::scheduler_actor::{AdmitReply, SchedulerCommand};
+use crate::core::server::scheduler_actor::AdmitReply;
 use crate::core::tool_calling::{ToolCall, ToolDefinition};
 
 use super::api_transport::ApiJson;
 use super::structured_output::{coalesce_system_messages, StructuredOutputFormat};
-use super::{openai, AppState, Gemma4DrafterAppState};
+use super::{openai, AppState, Gemma4DrafterAppState, RequestAdmissionError};
 
 const DEFAULT_MAX_OUTPUT_TOKENS: usize = 256;
 
@@ -1350,7 +1350,8 @@ where
     };
     let prompt_len = prompt_ids.len();
     let scheduler_config = state.scheduler_request_config(prompt_len, max_output_tokens);
-    let use_scheduler = force_scheduler
+    let use_scheduler = state.request_execution.is_dflash2()
+        || force_scheduler
         || super::should_route_to_scheduler::<M>(
             prompt_len,
             scheduler_config.prefill_chunk_size,
@@ -2353,28 +2354,21 @@ async fn admit_request<M>(
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
-    let (reply_tx, reply_rx) = oneshot::channel();
-    if state
-        .scheduler_handle
-        .cmd_tx
-        .send(SchedulerCommand::Admit { request, reply_tx })
-        .await
-        .is_err()
-    {
-        return Err(error_response(
+    match state.request_execution.admit(request).await {
+        Ok(reply) => Ok(reply),
+        Err(RequestAdmissionError::Rejected(error)) => {
+            Err(super::api_error::ApiError::scheduler_admission(error)
+                .into_response(super::api_error::ApiProtocol::OpenAi))
+        }
+        Err(RequestAdmissionError::Unavailable) => Err(error_response(
             StatusCode::SERVICE_UNAVAILABLE,
-            "scheduler_unavailable",
-            "scheduler actor unavailable",
-        ));
-    }
-    match reply_rx.await {
-        Ok(Ok(reply)) => Ok(reply),
-        Ok(Err(error)) => Err(super::api_error::ApiError::scheduler_admission(error)
-            .into_response(super::api_error::ApiProtocol::OpenAi)),
-        Err(_) => Err(error_response(
+            "execution_unavailable",
+            "request execution actor unavailable",
+        )),
+        Err(RequestAdmissionError::ReplyLost) => Err(error_response(
             StatusCode::SERVICE_UNAVAILABLE,
-            "scheduler_reply_lost",
-            "scheduler reply lost",
+            "execution_reply_lost",
+            "request execution actor reply lost",
         )),
     }
 }

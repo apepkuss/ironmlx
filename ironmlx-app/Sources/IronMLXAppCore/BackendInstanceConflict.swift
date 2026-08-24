@@ -3,6 +3,7 @@ import Foundation
 
 public enum BackendRuntimeFailureCode: String, Codable, Equatable, Sendable {
     case instanceAlreadyRunning = "ironmlx_instance_already_running"
+    case backendReadinessFailed = "backend_readiness_failed"
 
     public static func detect(in logText: String) -> Self? {
         logText.contains(Self.instanceAlreadyRunning.rawValue) ? .instanceAlreadyRunning : nil

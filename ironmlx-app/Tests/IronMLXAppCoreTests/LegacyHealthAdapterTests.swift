@@ -124,6 +124,77 @@ import Testing
     #expect(legacy.activeKvOffload.parkedRequests == 1)
     #expect(legacy.activeKvOffload.swapOutCount == 4)
     #expect(legacy.deviceName == "Apple M3 Max")
+
+    var dflash2Snapshot = snapshot
+    dflash2Snapshot.models = []
+    dflash2Snapshot.model = HealthzSnapshot.ModelInfo(
+        name: "mlx-community/Qwen3.8-27B-4bit",
+        maxPositionEmbeddings: 262144
+    )
+    dflash2Snapshot.dflash2 = HealthzSnapshot.DFlash2Info(
+        enabled: true,
+        blockSize: 4,
+        draftQuantizationBits: 4,
+        requests: 3,
+        windows: 30,
+        draftedTokens: 120,
+        acceptedDraftTokens: 90,
+        rollbackCount: 2,
+        tensorBatchWindows: 12,
+        tensorBatchDivergentSplits: 2,
+        tensorBatchGroupsCreated: 3,
+        tensorBatchWidthLimit: 4,
+        tensorBatchMaxWidth: 4,
+        sampledRequests: 1,
+        exactSamplingWindows: 10,
+        exactAcceptanceDraws: 40,
+        exactResidualCorrections: 1,
+        exactBonusSamples: 8,
+        samplingUs: 500,
+        latestGenerationTPS: 49.2,
+        latestAcceptanceRate: 0.75,
+        peakMemoryBytes: 20_000_000_000,
+        prefixCacheEnabled: true,
+        prefixCacheMaxBytes: 8_589_934_592,
+        prefixCacheEntries: 2,
+        prefixCacheBytes: 1_500_000_000,
+        prefixCacheHits: 4,
+        prefixCacheMisses: 1,
+        prefixCacheSaves: 3,
+        prefixCacheEvictions: 1,
+        prefixCacheHitTokens: 16_384,
+        runtimeUsage: BackendModelRuntimeUsage(
+            cumulativeTokens: 1_024,
+            inputTokens: 768,
+            outputTokens: 256,
+            prefixCache: BackendPrefixCacheUsage(hitTokens: 512, eligibleTokens: 700),
+            performance: BackendModelRuntimePerformance(
+                windowSeconds: 60,
+                completedRequests: 2,
+                liveDecodeTokensPerSecond: 31.5,
+                prefillTokensPerSecond: 640.25,
+                decodeTokensPerSecond: 52.75,
+                sessionDecodeTokensPerSecond: 49.5,
+                ttftMs: 125.25
+            )
+        )
+    )
+
+    let dflash2Legacy = LegacyHealthAdapter(statusNow: Date(timeIntervalSince1970: 1_700_000_000))
+        .legacyStatus(from: dflash2Snapshot)
+    let dflash2Model = try #require(dflash2Legacy.runtimeModels.first)
+    #expect(dflash2Legacy.dflash2?.enabled == true)
+    #expect(dflash2Model.id == "mlx-community/Qwen3.8-27B-4bit")
+    #expect(dflash2Model.dflash2?.latestGenerationTPS == 49.2)
+    #expect(dflash2Model.scheduler == "dflash2")
+    #expect(dflash2Model.usage.cumulativeTokens == 1_024)
+    #expect(dflash2Model.usage.prefixCache?.hitTokens == 512)
+    #expect(dflash2Model.usage.performance.completedRequests == 2)
+    #expect(dflash2Model.usage.performance.liveDecodeTokensPerSecond == 31.5)
+    #expect(dflash2Model.usage.performance.prefillTokensPerSecond == 640.25)
+    #expect(dflash2Model.usage.performance.decodeTokensPerSecond == 52.75)
+    #expect(dflash2Model.usage.performance.sessionDecodeTokensPerSecond == 49.5)
+    #expect(dflash2Model.usage.performance.ttftMs == 125.25)
 }
 
 @Test func dashboardStatusPageUsesAdaptiveGpuPollingAndOneHourHistory() throws {

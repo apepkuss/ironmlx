@@ -3,6 +3,7 @@
 pub mod cache;
 pub mod chat_template;
 pub mod constrained;
+pub mod dflash2;
 pub mod generate;
 pub mod generated_output;
 pub mod image_input;
@@ -26,6 +27,8 @@ mod tool_prompt_cache;
 
 pub use cache::KVCache;
 pub use chat_template::{ChatTemplate, Message};
+pub use dflash2::DFlash2Metrics;
+pub(crate) use dflash2::DFlash2TextGenerationStream;
 pub use generate::{build_position_ids, GenerateEvent, GenerateRequest, GenerationStream};
 pub use generated_output::{
     AudioChunk, CapabilitySupport, CollectedGeneratedOutput, GeneratedFinishReason,

@@ -83,6 +83,7 @@ std::unique_ptr<MlxArray> fast_scaled_dot_product_attention(
           std::string(mask_mode),
           opt_arr(mask_arr),
           opt_arr(sinks),
+          false,
           target));
 }
 

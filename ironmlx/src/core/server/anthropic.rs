@@ -35,7 +35,7 @@ use crate::core::scheduler::DenseVlMethods;
 use crate::core::server::chat_format::{
     render_and_encode, ChatFunctionCall, ChatMessage, ChatToolCall, Content, ContentPart, ImageUrl,
 };
-use crate::core::server::scheduler_actor::{AdmitReply, SchedulerCommand};
+use crate::core::server::scheduler_actor::AdmitReply;
 use crate::core::server::structured_output::StructuredOutputFormat;
 #[cfg(test)]
 use crate::core::server::vision::{DecodedMessage, DecodedPart};
@@ -44,7 +44,7 @@ use crate::core::tool_calling::{ToolCall, ToolDefinition, ToolDialect};
 
 use super::api_transport::ApiJson;
 use super::SamplingDefaults;
-use super::{AppState, Gemma4DrafterAppState};
+use super::{AppState, Gemma4DrafterAppState, RequestAdmissionError};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -58,6 +58,27 @@ use super::{AppState, Gemma4DrafterAppState};
 fn admit_err_to_response(err: anyhow::Error) -> Response {
     super::api_error::ApiError::scheduler_admission(err)
         .into_response(super::api_error::ApiProtocol::Anthropic)
+}
+
+async fn admit_request<M>(
+    state: &AppState<M>,
+    request: GenerateRequest,
+) -> std::result::Result<AdmitReply, Response>
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    match state.request_execution.admit(request).await {
+        Ok(reply) => Ok(reply),
+        Err(RequestAdmissionError::Rejected(error)) => Err(admit_err_to_response(error)),
+        Err(RequestAdmissionError::Unavailable) => Err(service_unavailable_response(
+            "execution_unavailable",
+            "request execution actor unavailable",
+        )),
+        Err(RequestAdmissionError::ReplyLost) => Err(service_unavailable_response(
+            "execution_reply_lost",
+            "request execution actor reply lost",
+        )),
+    }
 }
 
 fn generation_err_to_response(err: anyhow::Error) -> Response {
@@ -1071,13 +1092,14 @@ where
         constraint,
     };
 
-    let use_scheduler = super::should_route_to_scheduler::<M>(
-        prompt_len,
-        scheduler_config.prefill_chunk_size,
-        state.b_max,
-        state.paged_prefix_cache_enabled,
-        state.force_scheduler_for_greedy && sampler.is_pipelinable(),
-    );
+    let use_scheduler = state.request_execution.is_dflash2()
+        || super::should_route_to_scheduler::<M>(
+            prompt_len,
+            scheduler_config.prefill_chunk_size,
+            state.b_max,
+            state.paged_prefix_cache_enabled,
+            state.force_scheduler_for_greedy && sampler.is_pipelinable(),
+        );
 
     if let Some(prepared) = prepared_tools.filter(|prepared| prepared.constraint_options.is_some())
     {
@@ -1916,27 +1938,9 @@ async fn admit_tool_request<M>(
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
-    let (reply_tx, reply_rx) = oneshot::channel();
-    if state
-        .scheduler_handle
-        .cmd_tx
-        .send(SchedulerCommand::Admit { request, reply_tx })
+    admit_request(state, request)
         .await
-        .is_err()
-    {
-        return Err(service_unavailable_response(
-            "scheduler_unavailable",
-            "scheduler actor unavailable",
-        ));
-    }
-    match reply_rx.await {
-        Ok(Ok(AdmitReply { event_rx, .. })) => Ok(event_rx),
-        Ok(Err(error)) => Err(admit_err_to_response(error)),
-        Err(_) => Err(service_unavailable_response(
-            "scheduler_reply_lost",
-            "scheduler reply lost",
-        )),
-    }
+        .map(|AdmitReply { event_rx, .. }| event_rx)
 }
 
 async fn serve_via_scheduler_tools_unary<M>(
@@ -2578,30 +2582,12 @@ where
     let msg_id = gen_msg_id();
 
     // 1. Admit request to the actor.
-    let (reply_tx, reply_rx) = oneshot::channel();
-    if state
-        .scheduler_handle
-        .cmd_tx
-        .send(SchedulerCommand::Admit { request, reply_tx })
-        .await
-        .is_err()
-    {
-        return service_unavailable_response(
-            "scheduler_unavailable",
-            "scheduler actor unavailable",
-        );
-    }
     let AdmitReply {
         request_id: _,
         mut event_rx,
-    } = match reply_rx.await {
-        Ok(Ok(r)) => r,
-        Ok(Err(e)) => {
-            return admit_err_to_response(e);
-        }
-        Err(_) => {
-            return service_unavailable_response("scheduler_reply_lost", "scheduler reply lost");
-        }
+    } = match admit_request(&state, request).await {
+        Ok(reply) => reply,
+        Err(response) => return response,
     };
     let mut performance = state.record_request_started(input_tokens, started_at);
 
@@ -2819,30 +2805,12 @@ where
     let id = gen_msg_id();
 
     // 1. Admit.
-    let (reply_tx, reply_rx) = oneshot::channel();
-    if state
-        .scheduler_handle
-        .cmd_tx
-        .send(SchedulerCommand::Admit { request, reply_tx })
-        .await
-        .is_err()
-    {
-        return service_unavailable_response(
-            "scheduler_unavailable",
-            "scheduler actor unavailable",
-        );
-    }
     let AdmitReply {
         request_id: _,
         mut event_rx,
-    } = match reply_rx.await {
-        Ok(Ok(r)) => r,
-        Ok(Err(e)) => {
-            return admit_err_to_response(e);
-        }
-        Err(_) => {
-            return service_unavailable_response("scheduler_reply_lost", "scheduler reply lost");
-        }
+    } = match admit_request(&state, request).await {
+        Ok(reply) => reply,
+        Err(response) => return response,
     };
     let mut performance = state.record_request_started(input_tokens, started_at);
 

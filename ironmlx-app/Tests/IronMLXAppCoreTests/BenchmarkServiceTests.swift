@@ -1023,6 +1023,68 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     )
 }
 
+@Test func dashboardModelParamsAndLoadActionsExposeDFlash2AsAnExclusiveMode() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(html, contains: #"id="modal-dflash2-enabled""#))
+    #expect(dashboardHTML(html, contains: #"id="modal-dflash2-model""#))
+    #expect(dashboardHTML(html, contains: #"id="modal-dflash2-block-size""#))
+    #expect(dashboardHTML(html, contains: #"id="modal-dflash2-draft-bits""#))
+    #expect(dashboardHTML(html, contains: #"id="modal-dflash2-tensor-batch-max-width""#))
+    #expect(dashboardHTML(html, contains: #"class="modal-row dflash2-tensor-row""#))
+    #expect(
+        dashboardHTML(
+            html,
+            contains: ".dflash2-tensor-row .modal-field {\n    flex: 0 0 calc((100% - 10px) / 2);"
+        )
+    )
+    #expect(
+        dashboardHTML(
+            html,
+            contains: #"id="dflash2-tensor-batch-help-tooltip" role="tooltip""#
+        )
+    )
+    #expect(
+        dashboardHTML(
+            html,
+            contains: #"data-i18n-aria-label="dflash2_tensor_batch_help_label""#
+        )
+    )
+    #expect(dashboardHTML(html, contains: "saved.dflash2_tensor_batch_max_width || ''"))
+    #expect(dashboardHTML(html, contains: "Max Sequences、该上限和当前就绪兼容请求数的最小值"))
+    #expect(dashboardHTML(html, contains: "【设置 → 高级 → 最大序列数】"))
+    #expect(dashboardHTML(html, contains: "function updateAccelerationExclusivity"))
+    #expect(dashboardHTML(html, contains: "loadModelWithDFlash2"))
+    #expect(dashboardHTML(html, contains: "action_load_dflash2"))
+    #expect(dashboardHTML(html, contains: "renderDFlash2Badge"))
+    #expect(dashboardHTML(html, contains: "dflash2_help_exclusive"))
+    #expect(dashboardHTML(html, contains: "runtime_dflash2_acceptance"))
+    #expect(dashboardHTML(html, contains: "exact_residual_corrections"))
+    #expect(
+        html.components(separatedBy: "err_backend_readiness_failed:").count - 1 == 5,
+        "DFlash2 backend readiness failure must be localized in all five languages"
+    )
+    #expect(
+        html.components(separatedBy: "params_invalid_dflash2_tensor_batch_max_width:").count - 1
+            == 5,
+        "DFlash2 tensor batch width validation must be localized in all five languages"
+    )
+    for key in [
+        "dflash2_tensor_batch_help_label",
+        "dflash2_tensor_batch_help_title",
+        "dflash2_tensor_batch_help_body",
+        "dflash2_tensor_batch_help_constraint",
+    ] {
+        #expect(
+            html.components(separatedBy: "\(key):").count - 1 == 5,
+            "\(key) must be localized in all five languages"
+        )
+    }
+}
+
 @Test func dashboardRendersUnifiedRuntimeHealth() throws {
     let html = try String(
         contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",

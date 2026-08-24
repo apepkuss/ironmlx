@@ -37,6 +37,7 @@ const DEFAULT_ADMISSION_DEADLINE_MS: u64 = 5;
 const DEFAULT_ADMISSION_QUEUE_MAX: usize = 32;
 const DEFAULT_MAX_CACHE_CAP: usize = 32768;
 const DEFAULT_DECODE_CADENCE_MID_CHUNK_CAP: usize = 256;
+const DEFAULT_DFLASH2_TENSOR_BATCH_MAX_WIDTH: usize = 4;
 const DEFAULT_PAGED_PREFIX_CACHE_DIR: &str = "~/.ironmlx/cache/paged_prefix_cache";
 const BYTES_PER_GIB: usize = 1024 * 1024 * 1024;
 
@@ -46,6 +47,15 @@ pub struct ServeArgs {
     /// HF repo-id resolution is deferred to a future phase; pass a local path for now.
     #[arg(long, conflicts_with = "model_manifest")]
     pub model: Option<String>,
+
+    /// Stable public identifier for single-model serving. When omitted, the
+    /// value passed to --model remains the public identifier.
+    #[arg(
+        long = "model-id",
+        requires = "model",
+        conflicts_with = "model_manifest"
+    )]
+    pub model_id: Option<String>,
 
     /// JSON manifest describing one or more model engines for runtime routing.
     #[arg(long = "model-manifest", conflicts_with = "model")]
@@ -174,6 +184,30 @@ pub struct ServeArgs {
     #[arg(long = "mtp-draft-tokens")]
     pub mtp_draft_tokens: Option<usize>,
 
+    /// Official DFlash2 draft checkpoint directory. Selects the isolated,
+    /// text-only DFlash2 request actor for this server.
+    #[arg(long = "dflash2-model-dir")]
+    pub dflash2_model_dir: Option<PathBuf>,
+
+    /// DFlash2 proposal block width.
+    #[arg(long = "dflash2-block-size", default_value_t = 4)]
+    pub dflash2_block_size: usize,
+
+    /// Runtime affine quantization for the official BF16 DFlash2 draft.
+    /// Pass 0 to keep the draft in BF16.
+    #[arg(long = "dflash2-draft-bits", default_value_t = 4)]
+    pub dflash2_draft_bits: i32,
+
+    /// Maximum number of compatible DFlash2 requests combined into one tensor
+    /// verification group. The effective width is also capped by
+    /// --max-sequences. If omitted, the certified default is 4; pass 1 to
+    /// disable cross-request tensor batching while retaining actor concurrency.
+    #[arg(
+        long = "dflash2-tensor-batch-max-width",
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..)
+    )]
+    pub dflash2_tensor_batch_max_width: Option<usize>,
+
     /// Enable request-local greedy or exact sampled prompt lookup speculative decoding.
     #[arg(long = "prompt-lookup", default_value_t = false)]
     pub prompt_lookup: bool,
@@ -235,8 +269,8 @@ pub struct ServeArgs {
     pub ssd_prefix_cache_max_gb: Option<usize>,
 
     /// Maximum bytes for the in-process cross-request prefix LRU cache. Disabled
-    /// by default; initial support requires --paged-prefix-cache-dir so L1 can
-    /// share the same paged prefix cache key and restore semantics.
+    /// by default. Ordinary/MTP serving requires --paged-prefix-cache-dir;
+    /// DFlash2 uses a dedicated in-memory artifact and does not enable SSD.
     #[arg(long = "prefix-lru-cache-max-bytes")]
     pub prefix_lru_cache_max_bytes: Option<usize>,
 
@@ -362,6 +396,14 @@ pub(crate) fn resolve_prefix_lru_cache_config(
         bail!("--prefix-lru-cache-max-bytes requires --paged-prefix-cache-dir");
     }
     crate::core::cache::PrefixLruCacheConfig::new(max_bytes).map(Some)
+}
+
+fn resolve_dflash2_prefix_lru_cache_config(
+    args: &ServeArgs,
+) -> Result<Option<crate::core::cache::PrefixLruCacheConfig>> {
+    args.prefix_lru_cache_max_bytes
+        .map(crate::core::cache::PrefixLruCacheConfig::new)
+        .transpose()
 }
 
 pub(crate) fn resolve_model_ttl(args: &ServeArgs) -> Result<Option<Duration>> {
@@ -855,6 +897,59 @@ fn resolve_serve_mtp_config(
     }))
 }
 
+fn ensure_dflash2_serve_supported(
+    args: &ServeArgs,
+    architecture: crate::models::ModelArchitecture,
+    scheduler_config: SchedulerServeConfig,
+) -> Result<()> {
+    let Some(draft_dir) = args.dflash2_model_dir.as_ref() else {
+        return Ok(());
+    };
+    if architecture != crate::models::ModelArchitecture::Qwen35Dense {
+        bail!("--dflash2-model-dir currently supports dense Qwen3.5 targets only");
+    }
+    if !draft_dir.is_dir() {
+        bail!(
+            "--dflash2-model-dir must point to a local directory (got '{}')",
+            draft_dir.display()
+        );
+    }
+    if args.mtp_model_dir.is_some() || args.mtp_draft_tokens.is_some() {
+        bail!("--dflash2-model-dir cannot be combined with MTP arguments");
+    }
+    if resolve_prompt_lookup_config(args)?.is_some() {
+        bail!("--dflash2-model-dir cannot be combined with PromptLookup");
+    }
+    if args.kv_quant.turboquant_bits().is_some()
+        || args.paged_prefix_cache_dir.is_some()
+        || args.active_kv_offload
+    {
+        bail!(
+            "--dflash2-model-dir has not qualified KV quantization, paged/SSD prefix cache, or active KV offload"
+        );
+    }
+    if scheduler_config.b_max == 0 {
+        bail!("--dflash2-model-dir requires --max-sequences greater than zero");
+    }
+    if args.scheduler_profile.is_some() || args.scheduler_autotune_report {
+        bail!("--dflash2-model-dir does not use scheduler profiles or scheduler autotune reports");
+    }
+    if !(2..=8).contains(&args.dflash2_block_size) {
+        bail!("--dflash2-block-size must be in [2, 8] for the official Qwen3.8 draft");
+    }
+    if !matches!(args.dflash2_draft_bits, 0 | 4 | 8) {
+        bail!("--dflash2-draft-bits must be one of 0, 4, or 8");
+    }
+    Ok(())
+}
+
+fn resolve_dflash2_tensor_batch_width(args: &ServeArgs, b_max: usize) -> (usize, usize) {
+    let requested = args
+        .dflash2_tensor_batch_max_width
+        .unwrap_or(DEFAULT_DFLASH2_TENSOR_BATCH_MAX_WIDTH);
+    (requested, requested.min(b_max))
+}
+
 fn resolve_scheduler_runtime_profile(
     args: &ServeArgs,
     profile: Option<&SchedulerAutotuneRuntimeProfile>,
@@ -1074,6 +1169,13 @@ fn serve_runtime() -> Result<tokio::runtime::Runtime> {
 }
 
 fn single_model_id(args: &ServeArgs) -> Result<String> {
+    if let Some(model_id) = args.model_id.as_deref() {
+        let model_id = model_id.trim();
+        if model_id.is_empty() {
+            bail!("--model-id cannot be empty");
+        }
+        return Ok(model_id.to_owned());
+    }
     args.model
         .clone()
         .context("--model is required when --model-manifest is not set")
@@ -1231,6 +1333,64 @@ where
         scheduler_runtime_profile,
         args.scheduler_autotune_report,
         vision_input,
+        static_memory_estimate,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn serve_with_dflash2_model(
+    model: crate::models::Qwen35Model,
+    tokenizer: Tokenizer,
+    args: &ServeArgs,
+    scheduler_config: SchedulerServeConfig,
+    scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
+    mut static_memory_estimate: StaticMemoryEstimate,
+) -> Result<()> {
+    let draft_dir = args
+        .dflash2_model_dir
+        .as_ref()
+        .context("DFlash2 server started without --dflash2-model-dir")?;
+    let draft_loader = Loader::open_dflash2(draft_dir)
+        .with_context(|| format!("Loader::open_dflash2 {}", draft_dir.display()))?;
+    let draft_bits = (args.dflash2_draft_bits != 0).then_some(args.dflash2_draft_bits);
+    let draft =
+        crate::models::DFlash2DraftModel::from_loader(&draft_loader, model.config(), draft_bits)
+            .context("DFlash2DraftModel::from_loader")?;
+    static_memory_estimate.speculative_cold_bytes = draft_loader.loaded_tensor_bytes();
+    drop(draft_loader);
+    mlx::clear_cache();
+
+    let model_id = single_model_id(args)?;
+    let prefix_cache = resolve_dflash2_prefix_lru_cache_config(args)?;
+    let (tensor_batch_requested_max_width, tensor_batch_max_width) =
+        resolve_dflash2_tensor_batch_width(args, scheduler_config.b_max);
+    tracing::info!(
+        "ironmlx serve: DFlash2 enabled model_dir={} block_size={} draft_bits={} max_sequences={} tensor_batch_requested_max_width={} tensor_batch_effective_max_width={} prefix_cache_max_bytes={:?}",
+        draft_dir.display(),
+        args.dflash2_block_size,
+        args.dflash2_draft_bits,
+        scheduler_config.b_max,
+        tensor_batch_requested_max_width,
+        tensor_batch_max_width,
+        prefix_cache.map(|config| config.max_bytes),
+    );
+    let runtime = serve_runtime()?;
+    runtime.block_on(server::serve_with_dflash2(
+        model,
+        draft,
+        tokenizer,
+        model_id,
+        args.resolved_network_config()?,
+        scheduler_config.prefill_chunk_size,
+        scheduler_config.b_max,
+        scheduler_config.admission_deadline_ms,
+        tensor_batch_max_width,
+        scheduler_config.admission_queue_max,
+        scheduler_config.max_cache_cap,
+        args.dflash2_block_size,
+        draft_bits,
+        prefix_cache,
+        scheduler_runtime_profile,
         static_memory_estimate,
     ))
 }
@@ -1582,6 +1742,9 @@ fn build_engine_model_config_for_pool(
 }
 
 fn run_engine_pool(args: ServeArgs, manifest_path: &Path) -> Result<()> {
+    if args.dflash2_model_dir.is_some() {
+        bail!("--model-manifest does not accept the single-model --dflash2-model-dir flag");
+    }
     if args.mtp_model_dir.is_some() || args.mtp_draft_tokens.is_some() {
         bail!("--model-manifest uses per-model mtp_model_dir / mtp_draft_tokens entries; do not pass global MTP flags");
     }
@@ -1686,17 +1849,38 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
         ));
     }
 
-    let mut resolved_scheduler = resolve_scheduler_for_model(&args, &model_dir)?;
+    let mut resolved_scheduler = if args.dflash2_model_dir.is_some() {
+        let runtime_context = SchedulerAutotuneRuntimeContext::local_default(DEFAULT_MAX_CACHE_CAP);
+        let scheduler_runtime_profile =
+            resolve_scheduler_runtime_profile(&args, None, &runtime_context)?;
+        ResolvedSchedulerRuntime {
+            scheduler_config: SchedulerServeConfig {
+                prefill_chunk_size: scheduler_runtime_profile.config.prefill_chunk_size,
+                b_max: scheduler_runtime_profile.config.b_max,
+                admission_deadline_ms: scheduler_runtime_profile.config.admission_deadline_ms,
+                admission_queue_max: scheduler_runtime_profile.config.admission_queue_max,
+                max_cache_cap: scheduler_runtime_profile.config.max_cache_cap,
+                decode_cadence_mid_chunk_cap: scheduler_runtime_profile
+                    .config
+                    .decode_cadence_mid_chunk_cap,
+            },
+            scheduler_runtime_profile,
+            profile_source: None,
+        }
+    } else {
+        resolve_scheduler_for_model(&args, &model_dir)?
+    };
 
     let model_type = read_model_type(&model_dir)?;
     let architecture = crate::models::ModelArchitecture::from_model_type(&model_type)?;
+    ensure_dflash2_serve_supported(&args, architecture, resolved_scheduler.scheduler_config)?;
     if resolve_prompt_lookup_config(&args)?.is_some() && !architecture.supports_prompt_lookup() {
         bail!(
             "ironmlx serve --prompt-lookup requires a causal scheduler model; `{model_type}` is not supported"
         );
     }
     // open_multimodal so Qwen VL checkpoints retain vision_tower.* keys.
-    let loader = Loader::open_multimodal(&model_dir).context("Loader::open_multimodal")?;
+    let mut loader = Loader::open_multimodal(&model_dir).context("Loader::open_multimodal")?;
     let component_bytes = loader.loaded_tensor_component_bytes();
     let static_memory_estimate = StaticMemoryEstimate {
         text_cold_bytes: component_bytes.text,
@@ -1743,9 +1927,23 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
 
     match architecture {
         crate::models::ModelArchitecture::Qwen35Dense => {
-            let model = crate::models::Qwen35Model::from_loader(&loader)
-                .context("Qwen35Model::from_loader")?;
-            if let Some(mtp_config) = mtp_config.clone() {
+            let model = if args.dflash2_model_dir.is_some() {
+                crate::models::Qwen35Model::from_loader_dflash2(&mut loader)
+                    .context("Qwen35Model::from_loader_dflash2")?
+            } else {
+                crate::models::Qwen35Model::from_loader(&loader)
+                    .context("Qwen35Model::from_loader")?
+            };
+            if args.dflash2_model_dir.is_some() {
+                serve_with_dflash2_model(
+                    model,
+                    tokenizer,
+                    &args,
+                    scheduler_config,
+                    scheduler_runtime_profile,
+                    static_memory_estimate,
+                )
+            } else if let Some(mtp_config) = mtp_config.clone() {
                 serve_with_mtp_model(
                     model,
                     tokenizer,
@@ -1941,11 +2139,13 @@ mod scheduler_profile_tests {
     use super::{
         apply_adaptive_mtp_scheduler_defaults, build_engine_model_config_for_pool,
         check_loaded_scheduler_profile_health, default_scheduler_runtime_profile,
-        load_scheduler_profile_for_model, qwen_moe_serve_model, read_engine_pool_manifest,
-        resolve_active_kv_offload_config, resolve_memory_limit_bytes, resolve_model_ttl,
-        resolve_paged_prefix_cache_config, resolve_prefix_lru_cache_config,
-        resolve_prompt_lookup_config, resolve_scheduler_runtime_profile,
-        resolve_scheduler_serve_config, resolve_serve_mtp_config, KvQuantArg, QwenMoeServeModel,
+        ensure_dflash2_serve_supported, load_scheduler_profile_for_model, qwen_moe_serve_model,
+        read_engine_pool_manifest, resolve_active_kv_offload_config,
+        resolve_dflash2_prefix_lru_cache_config, resolve_dflash2_tensor_batch_width,
+        resolve_memory_limit_bytes, resolve_model_ttl, resolve_paged_prefix_cache_config,
+        resolve_prefix_lru_cache_config, resolve_prompt_lookup_config,
+        resolve_scheduler_runtime_profile, resolve_scheduler_serve_config,
+        resolve_serve_mtp_config, single_model_id, KvQuantArg, QwenMoeServeModel,
         ResolvedSchedulerRuntime, SchedulerProfileSource, SchedulerServeConfig, ServeArgs,
         BYTES_PER_GIB,
     };
@@ -1994,6 +2194,7 @@ mod scheduler_profile_tests {
     fn base_args() -> ServeArgs {
         ServeArgs {
             model: Some("/tmp/model".to_string()),
+            model_id: None,
             model_manifest: None,
             max_loaded_models: None,
             memory_limit_total_gb: None,
@@ -2018,6 +2219,10 @@ mod scheduler_profile_tests {
             scheduler_autotune_report: false,
             mtp_model_dir: None,
             mtp_draft_tokens: None,
+            dflash2_model_dir: None,
+            dflash2_block_size: 4,
+            dflash2_draft_bits: 4,
+            dflash2_tensor_batch_max_width: None,
             prompt_lookup: false,
             prompt_lookup_min_ngram: None,
             prompt_lookup_max_ngram: None,
@@ -2039,6 +2244,17 @@ mod scheduler_profile_tests {
     }
 
     #[test]
+    fn single_model_id_prefers_explicit_public_identifier() {
+        let mut args = base_args();
+        args.model_id = Some("mlx-community/Qwen3.8-27B-4bit".to_string());
+
+        assert_eq!(
+            single_model_id(&args).expect("model id"),
+            "mlx-community/Qwen3.8-27B-4bit"
+        );
+    }
+
+    #[test]
     fn memory_limit_gigabytes_resolve_to_bytes() {
         assert_eq!(
             resolve_memory_limit_bytes(Some(2), "--memory-limit-total-gb").unwrap(),
@@ -2048,6 +2264,66 @@ mod scheduler_profile_tests {
             resolve_memory_limit_bytes(None, "--memory-limit-total-gb").unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn dflash2_serve_policy_is_strictly_isolated_and_supports_multiple_sequences() {
+        let draft_dir = unique_temp_dir("dflash2-serve-policy");
+        std::fs::create_dir_all(&draft_dir).expect("create draft dir");
+        let mut args = base_args();
+        args.dflash2_model_dir = Some(draft_dir.clone());
+        let config = SchedulerServeConfig {
+            b_max: 1,
+            ..SchedulerServeConfig::default()
+        };
+        ensure_dflash2_serve_supported(
+            &args,
+            crate::models::ModelArchitecture::Qwen35Dense,
+            config,
+        )
+        .expect("valid isolated DFlash2 policy");
+
+        let mut concurrent = config;
+        concurrent.b_max = 2;
+        ensure_dflash2_serve_supported(
+            &args,
+            crate::models::ModelArchitecture::Qwen35Dense,
+            concurrent,
+        )
+        .expect("DFlash2 must accept multi-sequence mode");
+
+        let mut empty = config;
+        empty.b_max = 0;
+        let error = ensure_dflash2_serve_supported(
+            &args,
+            crate::models::ModelArchitecture::Qwen35Dense,
+            empty,
+        )
+        .expect_err("DFlash2 must reject zero max sequences");
+        assert!(format!("{error:#}").contains("greater than zero"));
+
+        args.mtp_model_dir = Some(draft_dir.clone());
+        let error = ensure_dflash2_serve_supported(
+            &args,
+            crate::models::ModelArchitecture::Qwen35Dense,
+            config,
+        )
+        .expect_err("DFlash2 must reject MTP mixing");
+        assert!(format!("{error:#}").contains("cannot be combined with MTP"));
+        std::fs::remove_dir_all(draft_dir).expect("remove draft dir");
+    }
+
+    #[test]
+    fn dflash2_tensor_batch_width_uses_certified_default_and_max_sequence_cap() {
+        let mut args = base_args();
+        assert_eq!(resolve_dflash2_tensor_batch_width(&args, 8), (4, 4));
+        assert_eq!(resolve_dflash2_tensor_batch_width(&args, 2), (4, 2));
+
+        args.dflash2_tensor_batch_max_width = Some(6);
+        assert_eq!(resolve_dflash2_tensor_batch_width(&args, 3), (6, 3));
+
+        args.dflash2_tensor_batch_max_width = Some(1);
+        assert_eq!(resolve_dflash2_tensor_batch_width(&args, 8), (1, 1));
     }
 
     #[test]
@@ -2972,6 +3248,29 @@ mod scheduler_profile_tests {
 
         assert_eq!(cfg.max_bytes, 4096);
         std::fs::remove_dir_all(prefix_dir).ok();
+    }
+
+    #[test]
+    fn dflash2_prefix_lru_cache_accepts_standalone_memory_budget() {
+        let mut args = base_args();
+        args.prefix_lru_cache_max_bytes = Some(4096);
+
+        let config = resolve_dflash2_prefix_lru_cache_config(&args)
+            .expect("DFlash2 prefix config")
+            .expect("enabled");
+
+        assert_eq!(config.max_bytes, 4096);
+    }
+
+    #[test]
+    fn dflash2_prefix_lru_cache_rejects_zero_capacity() {
+        let mut args = base_args();
+        args.prefix_lru_cache_max_bytes = Some(0);
+
+        let error = resolve_dflash2_prefix_lru_cache_config(&args)
+            .expect_err("zero DFlash2 prefix capacity");
+
+        assert!(error.to_string().contains("max_bytes must be > 0"));
     }
 
     #[test]

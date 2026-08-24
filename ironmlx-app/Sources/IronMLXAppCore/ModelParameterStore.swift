@@ -13,6 +13,11 @@ public struct ModelParameters: Codable, Equatable, Sendable {
     public var mtpEnabled: Bool?
     public var mtpModelID: String?
     public var mtpDraftTokens: String?
+    public var dflash2Enabled: Bool?
+    public var dflash2ModelID: String?
+    public var dflash2BlockSize: String?
+    public var dflash2DraftBits: String?
+    public var dflash2TensorBatchMaxWidth: String?
     public var promptLookupEnabled: Bool?
     public var promptLookupCrossRequest: Bool?
 
@@ -29,6 +34,11 @@ public struct ModelParameters: Codable, Equatable, Sendable {
         mtpEnabled: Bool? = nil,
         mtpModelID: String? = nil,
         mtpDraftTokens: String? = nil,
+        dflash2Enabled: Bool? = nil,
+        dflash2ModelID: String? = nil,
+        dflash2BlockSize: String? = nil,
+        dflash2DraftBits: String? = nil,
+        dflash2TensorBatchMaxWidth: String? = nil,
         promptLookupEnabled: Bool? = nil,
         promptLookupCrossRequest: Bool? = nil
     ) {
@@ -44,6 +54,11 @@ public struct ModelParameters: Codable, Equatable, Sendable {
         self.mtpEnabled = mtpEnabled
         self.mtpModelID = mtpModelID
         self.mtpDraftTokens = mtpDraftTokens
+        self.dflash2Enabled = dflash2Enabled
+        self.dflash2ModelID = dflash2ModelID
+        self.dflash2BlockSize = dflash2BlockSize
+        self.dflash2DraftBits = dflash2DraftBits
+        self.dflash2TensorBatchMaxWidth = dflash2TensorBatchMaxWidth
         self.promptLookupEnabled = promptLookupEnabled
         self.promptLookupCrossRequest = promptLookupCrossRequest
     }
@@ -68,6 +83,18 @@ public struct ModelParameters: Codable, Equatable, Sendable {
         positiveInt(mtpDraftTokens)
     }
 
+    public var dflash2BlockSizeValue: Int {
+        Int(dflash2BlockSize?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 4
+    }
+
+    public var dflash2DraftBitsValue: Int {
+        Int(dflash2DraftBits?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 4
+    }
+
+    public var dflash2TensorBatchMaxWidthValue: Int? {
+        positiveInt(dflash2TensorBatchMaxWidth)
+    }
+
     public var promptLookupConfig: BackendPromptLookupConfig? {
         guard promptLookupEnabled == true else {
             return nil
@@ -90,6 +117,11 @@ public struct ModelParameters: Codable, Equatable, Sendable {
         case mtpEnabled = "mtp_enabled"
         case mtpModelID = "mtp_model_id"
         case mtpDraftTokens = "mtp_draft_tokens"
+        case dflash2Enabled = "dflash2_enabled"
+        case dflash2ModelID = "dflash2_model_id"
+        case dflash2BlockSize = "dflash2_block_size"
+        case dflash2DraftBits = "dflash2_draft_bits"
+        case dflash2TensorBatchMaxWidth = "dflash2_tensor_batch_max_width"
         case promptLookupEnabled = "prompt_lookup_enabled"
         case promptLookupCrossRequest = "prompt_lookup_cross_request"
     }
@@ -218,6 +250,28 @@ public final class ModelParameterStore: @unchecked Sendable {
         }
     }
 
+    public func replaceParameters(
+        for modelID: String,
+        with parameters: ModelParameters?
+    ) throws {
+        try coordinator.withLock {
+            try assertWritable()
+            let key = modelID.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !key.isEmpty else {
+                return
+            }
+            var all = try loadAll()
+            try assertWritable()
+            if let parameters {
+                try validate(parameters, key: key)
+                all[key] = parameters
+            } else {
+                all.removeValue(forKey: key)
+            }
+            try commit(all)
+        }
+    }
+
     public func recordMtpLoadPreference(
         modelID: String,
         enabled: Bool,
@@ -236,6 +290,36 @@ public final class ModelParameterStore: @unchecked Sendable {
             let selectedMtp = mtpModelID?.trimmingCharacters(in: .whitespacesAndNewlines)
             if enabled, let selectedMtp, !selectedMtp.isEmpty {
                 parameters.mtpModelID = selectedMtp
+            }
+            try validate(parameters, key: key)
+            all[key] = parameters
+            try commit(all)
+        }
+    }
+
+    public func recordDFlash2LoadPreference(
+        modelID: String,
+        enabled: Bool,
+        dflash2ModelID: String?
+    ) throws {
+        try coordinator.withLock {
+            try assertWritable()
+            let key = modelID.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !key.isEmpty else {
+                return
+            }
+            var all = try loadAll()
+            try assertWritable()
+            var parameters = all[key] ?? ModelParameters(modelID: key)
+            parameters.dflash2Enabled = enabled
+            let selectedDraft = dflash2ModelID?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if enabled, let selectedDraft, !selectedDraft.isEmpty {
+                parameters.dflash2ModelID = selectedDraft
+            }
+            if enabled {
+                parameters.mtpEnabled = false
+                parameters.promptLookupEnabled = false
+                parameters.promptLookupCrossRequest = false
             }
             try validate(parameters, key: key)
             all[key] = parameters
@@ -393,6 +477,18 @@ public final class ModelParameterStore: @unchecked Sendable {
         try validatePositiveInteger(parameters.maxTokens, field: "max_tokens")
         try validatePositiveInteger(parameters.topK, field: "top_k")
         try validatePositiveInteger(parameters.mtpDraftTokens, field: "mtp_draft_tokens")
+        if let value = nonEmpty(parameters.dflash2BlockSize),
+           !(Int(value).map { (2 ... 8).contains($0) } ?? false) {
+            throw ConfigurationPersistenceError.invalidValue("dflash2_block_size")
+        }
+        if let value = nonEmpty(parameters.dflash2DraftBits),
+           !(Int(value).map { [0, 4, 8].contains($0) } ?? false) {
+            throw ConfigurationPersistenceError.invalidValue("dflash2_draft_bits")
+        }
+        try validatePositiveInteger(
+            parameters.dflash2TensorBatchMaxWidth,
+            field: "dflash2_tensor_batch_max_width"
+        )
         try validatePositiveDouble(parameters.temperature, field: "temperature")
         try validatePositiveDouble(parameters.repeatPenalty, field: "repeat_penalty")
         if let value = nonEmpty(parameters.topP),
@@ -402,6 +498,14 @@ public final class ModelParameterStore: @unchecked Sendable {
         if let mtpModelID = parameters.mtpModelID,
            mtpModelID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             throw ConfigurationPersistenceError.invalidValue("mtp_model_id")
+        }
+        if let dflash2ModelID = parameters.dflash2ModelID,
+           dflash2ModelID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw ConfigurationPersistenceError.invalidValue("dflash2_model_id")
+        }
+        if parameters.dflash2Enabled == true,
+           parameters.mtpEnabled == true || parameters.promptLookupEnabled == true {
+            throw ConfigurationPersistenceError.invalidValue("dflash2_acceleration_conflict")
         }
     }
 
@@ -499,7 +603,9 @@ public final class ModelParameterStore: @unchecked Sendable {
     private static let modelKeys: Set<String> = [
         "model_id", "alias", "model_type", "context_size", "max_tokens", "temperature",
         "top_p", "top_k", "repeat_penalty", "mtp_enabled", "mtp_model_id",
-        "mtp_draft_tokens", "prompt_lookup_enabled", "prompt_lookup_cross_request",
+        "mtp_draft_tokens", "dflash2_enabled", "dflash2_model_id", "dflash2_block_size",
+        "dflash2_draft_bits", "dflash2_tensor_batch_max_width", "prompt_lookup_enabled",
+        "prompt_lookup_cross_request",
     ]
 
     public static func defaultURL() -> URL {

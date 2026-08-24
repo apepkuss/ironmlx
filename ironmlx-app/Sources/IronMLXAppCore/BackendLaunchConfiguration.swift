@@ -187,6 +187,7 @@ public struct BackendLaunchConfiguration: Equatable {
     public var networkMode: String
     public var lanHost: String?
     public var securityBootstrapStdin: Bool
+    public var dflash2Runtime: ModelDFlash2Runtime?
 
     public init(
         executableURL: URL,
@@ -196,7 +197,8 @@ public struct BackendLaunchConfiguration: Equatable {
         options: BackendLaunchOptions = BackendLaunchOptions(),
         networkMode: String = "local",
         lanHost: String? = nil,
-        securityBootstrapStdin: Bool = false
+        securityBootstrapStdin: Bool = false,
+        dflash2Runtime: ModelDFlash2Runtime? = nil
     ) {
         self.executableURL = executableURL
         self.metallibURL = metallibURL
@@ -206,6 +208,7 @@ public struct BackendLaunchConfiguration: Equatable {
         self.networkMode = networkMode
         self.lanHost = lanHost
         self.securityBootstrapStdin = securityBootstrapStdin
+        self.dflash2Runtime = dflash2Runtime
     }
 
     public var validationError: BackendLaunchValidationError? {
@@ -240,6 +243,32 @@ public struct BackendLaunchConfiguration: Equatable {
             if securityBootstrapStdin {
                 arguments.append("--security-bootstrap-stdin")
             }
+        }
+        if let dflash2Runtime {
+            arguments += [
+                "--model", dflash2Runtime.targetModelDir,
+                "--model-id", dflash2Runtime.targetModelID,
+                "--dflash2-model-dir", dflash2Runtime.draftModelDir,
+                "--dflash2-block-size", String(dflash2Runtime.blockSize),
+                "--dflash2-draft-bits", String(dflash2Runtime.draftBits),
+            ]
+            appendIntegerFlag(
+                "--dflash2-tensor-batch-max-width",
+                dflash2Runtime.tensorBatchMaxWidth,
+                to: &arguments
+            )
+            appendIntegerFlag("--prefill-chunk-size", options.prefillChunkSize, to: &arguments, allowsZero: true)
+            appendIntegerFlag("--max-sequences", options.bMax, to: &arguments)
+            appendIntegerFlag("--admission-queue-max", options.admissionQueueMax, to: &arguments, allowsZero: true)
+            appendIntegerFlag(
+                "--max-cache-cap",
+                dflash2Runtime.maxCacheCap ?? options.maxCacheCap,
+                to: &arguments
+            )
+            appendIntegerFlag("--memory-limit-total-gb", options.memoryLimitTotalGB, to: &arguments)
+            appendIntegerFlag("--memory-limit-model-gb", options.memoryLimitModelGB, to: &arguments)
+            appendIntegerFlag("--prefix-lru-cache-max-bytes", options.prefixLruCacheMaxBytes, to: &arguments)
+            return arguments
         }
         appendIntegerFlag("--prefill-chunk-size", options.prefillChunkSize, to: &arguments, allowsZero: true)
         appendIntegerFlag("--max-sequences", options.bMax, to: &arguments)

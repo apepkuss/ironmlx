@@ -126,6 +126,21 @@ impl Qwen35MoeConfig {
         Ok(cfg)
     }
 
+    /// Parse the text-only contract used by a Qwen MoE MTP head. MTP
+    /// checkpoints do not carry a vision tower, so top-level vision metadata
+    /// is irrelevant.
+    pub fn from_mtp_loader(loader: &Loader) -> Result<Self> {
+        Self::from_mtp_config_value(loader.config_raw_value())
+    }
+
+    pub(crate) fn from_mtp_config_value(raw: &serde_json::Value) -> Result<Self> {
+        let text_config = raw
+            .get("text_config")
+            .ok_or_else(|| anyhow!("config.json missing text_config field"))?;
+        serde_json::from_value(text_config.clone())
+            .context("failed to deserialize Qwen35MoeConfig from text_config")
+    }
+
     /// Effective per-head dim: `head_dim` if specified, else `hidden_size / num_attention_heads`.
     pub fn effective_head_dim(&self) -> i32 {
         self.head_dim

@@ -216,9 +216,11 @@ public final class DiagnosticBundleService {
                 scheduler: nil,
                 memory: nil,
                 activeKV: nil,
+                dflash2: nil,
                 loadedModels: []
             )
         }
+        let runtimeModels = LegacyHealthAdapter().legacyStatus(from: health).runtimeModels
         return DiagnosticRuntimeHealth(
             status: health.status,
             errorCode: nil,
@@ -229,7 +231,8 @@ public final class DiagnosticBundleService {
             scheduler: health.scheduler,
             memory: health.memory,
             activeKV: DiagnosticActiveKV(health.activeKvOffload),
-            loadedModels: health.models.map {
+            dflash2: health.dflash2,
+            loadedModels: runtimeModels.map {
                 DiagnosticLoadedModel(
                     id: DiagnosticPrivacy.stableModelReference($0.id),
                     repoID: DiagnosticPrivacy.stableModelReference($0.model),
@@ -240,6 +243,7 @@ public final class DiagnosticBundleService {
                     isDefault: $0.isDefault,
                     pinned: $0.pinned,
                     mtpEnabled: $0.mtpEnabled,
+                    dflash2Enabled: $0.dflash2?.enabled == true,
                     activeRequests: $0.activeRequests,
                     queuedRequests: $0.queuedRequests,
                     queueCapacity: $0.queueCapacity

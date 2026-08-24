@@ -2,6 +2,24 @@ import AppKit
 import Foundation
 import WebKit
 
+private enum DFlash2AppActivationError: LocalizedError {
+    case restartFailed(message: String, code: String?)
+
+    var errorDescription: String? {
+        switch self {
+        case .restartFailed(let message, _):
+            return message
+        }
+    }
+
+    var failureCode: String? {
+        switch self {
+        case .restartFailed(_, let code):
+            return code
+        }
+    }
+}
+
 @MainActor
 public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     private weak var webView: WKWebView?
@@ -232,7 +250,13 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 do {
                     let client = BackendAPIClient(host: host, port: port)
                     let healthz = try await client.fetchHealthz()
-                    let legacy = LegacyHealthAdapter(statusNow: Date()).legacyStatus(from: healthz)
+                    var legacy = LegacyHealthAdapter(statusNow: Date()).legacyStatus(from: healthz)
+                    if healthz.dflash2?.enabled == true,
+                       let target = config.defaultModelReference,
+                       let draft = self.parameterStore.parameters(for: target)?.dflash2ModelID,
+                       !legacy.runtimeModels.isEmpty {
+                        legacy.runtimeModels[0].dflash2DraftModel = draft
+                    }
                     let json = try Self.jsonString(legacy)
                     await MainActor.run {
                         self.sendFetchResult(path: path, jsonString: json)
@@ -259,7 +283,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 let models = self.scanner.scan(
                     loadedModels: state.references,
                     pinnedModels: state.pinnedModels,
-                    mtpEnabledModels: state.mtpEnabledModels
+                    mtpEnabledModels: state.mtpEnabledModels,
+                    dflash2EnabledModels: state.dflash2EnabledModels
                 )
                 let benchmarkModels = models.filter { $0.readiness?.isLoadable != false }.map {
                     BenchmarkModel(repoID: $0.repoID, loaded: $0.loaded)
@@ -1088,6 +1113,10 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             deliverModelOperationResult(error: "No model is configured.", callback: callback)
             return
         }
+        if instruction.useDFlash2 == true {
+            loadBackendModelWithDFlash2(instruction: instruction, callback: callback)
+            return
+        }
         if let readiness = scanner.readiness(for: model), !readiness.isLoadable {
             let detail = readiness.message ?? "Model snapshot is not ready to load."
             deliverModelOperationResult(error: detail, callback: callback)
@@ -1187,6 +1216,10 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                         instruction: instruction,
                         mtpRuntime: loadMtpRuntime
                     )
+                    self.persistDFlash2LoadPreferenceIfRequested(
+                        model: model,
+                        instruction: instruction
+                    )
                     self.persistBackendLoadedModels(
                         response.loadedModels,
                         parameterConfirmedModelIDs: [model]
@@ -1202,6 +1235,89 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         }
     }
 
+    private func loadBackendModelWithDFlash2(
+        instruction: ModelLoadInstruction,
+        callback: ModelOperationCallback,
+        rollbackConfig: AppConfig? = nil,
+        rollbackParameters: ModelParameters? = nil
+    ) {
+        let model = instruction.modelReference.trimmingCharacters(in: .whitespacesAndNewlines)
+        let previousConfig = rollbackConfig ?? configStore.load()
+        let previousParameters = rollbackConfig == nil
+            ? parameterStore.parameters(for: model)
+            : rollbackParameters
+        do {
+            try parameterStore.recordDFlash2LoadPreference(
+                modelID: model,
+                enabled: true,
+                dflash2ModelID: instruction.dflash2ModelID
+            )
+        } catch {
+            deliverModelOperationResult(error: error.localizedDescription, callback: callback)
+            return
+        }
+        var dflash2Config = previousConfig
+        dflash2Config.loadedModels = [model]
+        dflash2Config.defaultModel = model
+        dflash2Config.pinnedModels = previousConfig.pinnedModelReferences.contains(model)
+            ? [model]
+            : []
+        guard configStore.save(dflash2Config) else {
+            try? parameterStore.replaceParameters(for: model, with: previousParameters)
+            deliverModelOperationResult(
+                error: "DFlash2 configuration could not be persisted.",
+                callback: callback
+            )
+            return
+        }
+        Task {
+            do {
+                _ = try await ModelDFlash2RuntimeResolver.runtimeAsync(
+                    for: model,
+                    useDFlash2: true,
+                    explicitDraftModelID: instruction.dflash2ModelID,
+                    scanner: self.scanner,
+                    parameterStore: self.parameterStore,
+                    fullChecksum: dflash2Config.verifyModelOnLoad == true
+                )
+                await MainActor.run {
+                    self.backend.refreshConfirmedSnapshot()
+                }
+                let result = await self.backend.restart(intent: .plannedRestart)
+                guard result.success else {
+                    throw DFlash2AppActivationError.restartFailed(
+                        message: result.error ?? "DFlash2 backend restart failed.",
+                        code: result.errorCode
+                    )
+                }
+                let json = try Self.jsonString(result)
+                await MainActor.run {
+                    self.deliverModelOperationResult(jsonString: json, callback: callback)
+                    self.sendScannedModels()
+                    self.notificationCenter.post(
+                        name: .ironMLXLoadedModelsDidChange,
+                        object: self
+                    )
+                }
+            } catch {
+                _ = self.configStore.save(previousConfig)
+                try? self.parameterStore.replaceParameters(for: model, with: previousParameters)
+                await MainActor.run {
+                    self.backend.refreshConfirmedSnapshot()
+                }
+                _ = await self.backend.restart(intent: .plannedRestart)
+                await MainActor.run {
+                    self.deliverModelOperationResult(
+                        error: error.localizedDescription,
+                        code: (error as? DFlash2AppActivationError)?.failureCode,
+                        callback: callback
+                    )
+                    self.sendScannedModels()
+                }
+            }
+        }
+    }
+
     private func unloadBackendModel(modelReference: String, callback: ModelOperationCallback) {
         let model = modelReference.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !model.isEmpty else {
@@ -1209,6 +1325,14 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             return
         }
         let config = configStore.load()
+        if configuredDFlash2Target(in: config) == model {
+            unloadBackendDFlash2Model(
+                model: model,
+                previousConfig: config,
+                callback: callback
+            )
+            return
+        }
         let resolvedModel = scanner.resolveModelPath(for: model)
         Task {
             do {
@@ -1225,6 +1349,60 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 await MainActor.run {
                     self.deliverBackendError(error, callback: callback)
                 }
+            }
+        }
+    }
+
+    private func unloadBackendDFlash2Model(
+        model: String,
+        previousConfig: AppConfig,
+        callback: ModelOperationCallback
+    ) {
+        let previousParameters = parameterStore.parameters(for: model)
+        do {
+            try parameterStore.recordDFlash2LoadPreference(
+                modelID: model,
+                enabled: false,
+                dflash2ModelID: nil
+            )
+        } catch {
+            deliverModelOperationResult(error: error.localizedDescription, callback: callback)
+            return
+        }
+        var ordinaryConfig = previousConfig
+        ordinaryConfig.recordUnloadedModel(model)
+        guard configStore.save(ordinaryConfig) else {
+            try? parameterStore.replaceParameters(for: model, with: previousParameters)
+            deliverModelOperationResult(
+                error: "DFlash2 unload configuration could not be persisted.",
+                callback: callback
+            )
+            return
+        }
+        backend.refreshConfirmedSnapshot()
+        Task {
+            let result = await self.backend.restart(intent: .plannedRestart)
+            if result.success {
+                let json = (try? Self.jsonString(result))
+                    ?? #"{"success":true,"status":"restarted"}"#
+                await MainActor.run {
+                    self.deliverModelOperationResult(jsonString: json, callback: callback)
+                    self.sendScannedModels()
+                }
+                return
+            }
+            _ = self.configStore.save(previousConfig)
+            try? self.parameterStore.replaceParameters(for: model, with: previousParameters)
+            await MainActor.run {
+                self.backend.refreshConfirmedSnapshot()
+            }
+            _ = await self.backend.restart(intent: .plannedRestart)
+            await MainActor.run {
+                self.deliverModelOperationResult(
+                    error: result.error ?? "DFlash2 backend restart failed.",
+                    callback: callback
+                )
+                self.sendScannedModels()
             }
         }
     }
@@ -1311,6 +1489,26 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             )
         } catch {
             IronMLXAppLogger.error("Failed to persist MTP load preference for \(model): \(error)")
+        }
+    }
+
+    private func persistDFlash2LoadPreferenceIfRequested(
+        model: String,
+        instruction: ModelLoadInstruction
+    ) {
+        guard instruction.useDFlash2 == false else {
+            return
+        }
+        do {
+            try parameterStore.recordDFlash2LoadPreference(
+                modelID: model,
+                enabled: false,
+                dflash2ModelID: nil
+            )
+        } catch {
+            IronMLXAppLogger.error(
+                "Failed to persist DFlash2 load preference for \(model): \(error)"
+            )
         }
     }
 
@@ -1830,10 +2028,17 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             sendJavaScript("onModelParamsSaved(\(Self.jsStringLiteral(response)))")
             return
         }
+        let previousParameters = parameterStore.parameters(for: parameters.modelID)
         do {
             try parameterStore.save(parameters)
             sendModelParameters()
             sendJavaScript("onModelParamsSaved(\(Self.jsStringLiteral(#"{"status":"ok"}"#)))")
+            if applyDFlash2ParameterChangeIfNeeded(
+                parameters,
+                previousParameters: previousParameters
+            ) {
+                return
+            }
             scheduleModelParameterReloadIfNeeded(parameters)
         } catch {
             let issue = parameterStore.recoveryIssue
@@ -1843,6 +2048,85 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             )
             sendJavaScript("onModelParamsSaved(\(Self.jsStringLiteral(response)))")
         }
+    }
+
+    private func applyDFlash2ParameterChangeIfNeeded(
+        _ parameters: ModelParameters,
+        previousParameters: ModelParameters?
+    ) -> Bool {
+        let changed = parameters.dflash2Enabled != previousParameters?.dflash2Enabled
+            || parameters.dflash2ModelID != previousParameters?.dflash2ModelID
+            || parameters.dflash2BlockSizeValue != previousParameters?.dflash2BlockSizeValue
+            || parameters.dflash2DraftBitsValue != previousParameters?.dflash2DraftBitsValue
+            || parameters.dflash2TensorBatchMaxWidthValue
+                != previousParameters?.dflash2TensorBatchMaxWidthValue
+        guard changed else {
+            return false
+        }
+        let model = parameters.modelID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let config = configStore.load()
+        guard config.restoredModelReferences.contains(model) else {
+            sendScannedModels()
+            return true
+        }
+        if parameters.dflash2Enabled == true {
+            loadBackendModelWithDFlash2(
+                instruction: ModelLoadInstruction(
+                    modelReference: model,
+                    useMtp: false,
+                    mtpModelID: nil,
+                    useDFlash2: true,
+                    dflash2ModelID: parameters.dflash2ModelID
+                ),
+                callback: .modelLoaded,
+                rollbackConfig: config,
+                rollbackParameters: previousParameters
+            )
+            return true
+        }
+        guard configuredDFlash2Target(in: config) == nil,
+              previousParameters?.dflash2Enabled == true,
+              config.defaultModelReference == model
+        else {
+            sendScannedModels()
+            return true
+        }
+        backend.refreshConfirmedSnapshot()
+        Task {
+            let result = await self.backend.restart(intent: .plannedRestart)
+            if result.success {
+                let json = (try? Self.jsonString(result))
+                    ?? #"{"success":true,"status":"models_loaded"}"#
+                await MainActor.run {
+                    self.sendJavaScript("onModelParamsReloaded(\(Self.jsStringLiteral(json)))")
+                    self.sendScannedModels()
+                }
+                return
+            }
+            try? self.parameterStore.replaceParameters(for: model, with: previousParameters)
+            await MainActor.run {
+                self.backend.refreshConfirmedSnapshot()
+            }
+            _ = await self.backend.restart(intent: .plannedRestart)
+            let errorResponse = BackendModelAdminResponse(
+                success: false,
+                status: "error",
+                code: result.errorCode,
+                model: model,
+                loadedModels: [],
+                warningCode: nil,
+                warning: nil,
+                error: result.error ?? "DFlash2 backend restart failed."
+            )
+            let json = (try? Self.jsonString(errorResponse))
+                ?? #"{"success":false,"status":"error"}"#
+            await MainActor.run {
+                self.sendModelParameters()
+                self.sendJavaScript("onModelParamsReloaded(\(Self.jsStringLiteral(json)))")
+                self.sendScannedModels()
+            }
+        }
+        return true
     }
 
     private func scheduleModelParameterReloadIfNeeded(_ parameters: ModelParameters) {
@@ -1974,11 +2258,25 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         }
     }
 
-    private func loadedModelState() async -> (references: Set<String>, pinnedModels: Set<String>, mtpEnabledModels: Set<String>) {
+    private func loadedModelState() async -> (
+        references: Set<String>,
+        pinnedModels: Set<String>,
+        mtpEnabledModels: Set<String>,
+        dflash2EnabledModels: Set<String>
+    ) {
         let config = configStore.load()
         var loaded = Set<String>()
         var pinned = Set<String>()
         var mtpEnabled = Set<String>()
+        var dflash2Enabled = Set<String>()
+        if let target = configuredDFlash2Target(in: config) {
+            loaded.insert(target)
+            if config.pinnedModelReferences.contains(target) {
+                pinned.insert(target)
+            }
+            dflash2Enabled.insert(target)
+            return (loaded, pinned, mtpEnabled, dflash2Enabled)
+        }
         if backend.isRunning {
             do {
                 let client = BackendAPIClient(host: config.host, port: config.port)
@@ -1997,7 +2295,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                         mtpEnabled.insert(model.id)
                     }
                 }
-                return (loaded, pinned, mtpEnabled)
+                return (loaded, pinned, mtpEnabled, dflash2Enabled)
             } catch {
                 IronMLXAppLogger.error("Failed to fetch loaded models: \(error)")
             }
@@ -2008,7 +2306,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         for model in config.pinnedModelReferences {
             pinned.insert(model)
         }
-        return (loaded, pinned, mtpEnabled)
+        return (loaded, pinned, mtpEnabled, dflash2Enabled)
     }
 
     private func syncPersistedLoadedModelsIfNeeded(_ models: [BackendLoadedModelInfo]) {
@@ -2060,14 +2358,15 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             let models = self.scanner.scan(
                 loadedModels: state.references,
                 pinnedModels: state.pinnedModels,
-                mtpEnabledModels: state.mtpEnabledModels
+                mtpEnabledModels: state.mtpEnabledModels,
+                dflash2EnabledModels: state.dflash2EnabledModels
             )
             let config = self.configStore.load()
             let dashboardModels = self.modelsWithEffectiveMaxTokens(
                 models,
                 activeKvOffloadEnabled: config.activeKvOffload == true
             )
-            if self.backend.isRunning {
+            if self.backend.isRunning, self.configuredDFlash2Target(in: config) == nil {
                 let client = BackendAPIClient(host: config.host, port: config.port)
                 await self.registerLocalModels(models: models, config: config, client: client)
             }
@@ -2115,6 +2414,16 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         sendJavaScript("onModelParamsLoaded(\(Self.jsStringLiteral(parameterStore.jsonString())))")
     }
 
+    private func configuredDFlash2Target(in config: AppConfig) -> String? {
+        guard let target = config.defaultModelReference,
+              config.restoredModelReferences.contains(target),
+              parameterStore.parameters(for: target)?.dflash2Enabled == true
+        else {
+            return nil
+        }
+        return target
+    }
+
     private func deliverModelOperationResult(jsonString: String, callback: ModelOperationCallback) {
         switch callback {
         case .modelLoaded:
@@ -2128,10 +2437,20 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         }
     }
 
-    private func deliverModelOperationResult(error: String, callback: ModelOperationCallback) {
-        let payload = BridgeErrorResponse(success: false, status: "error", error: error)
-        let json = (try? Self.jsonString(payload)) ?? "{\"success\":false,\"status\":\"error\"}"
-        deliverModelOperationResult(jsonString: json, callback: callback)
+    private func deliverModelOperationResult(
+        error: String,
+        code: String? = nil,
+        callback: ModelOperationCallback
+    ) {
+        deliverModelOperationResult(
+            jsonString: Self.modelOperationErrorJSON(error: error, code: code),
+            callback: callback
+        )
+    }
+
+    static func modelOperationErrorJSON(error: String, code: String? = nil) -> String {
+        let payload = BridgeErrorResponse(success: false, status: "error", error: error, code: code)
+        return (try? jsonString(payload)) ?? "{\"success\":false,\"status\":\"error\"}"
     }
 
     private func deliverBackendError(_ error: Error, callback: ModelOperationCallback) {
@@ -2460,6 +2779,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                     ?? "",
                 useMtp: boolValue(dictionary, "use_mtp"),
                 mtpModelID: stringValue(dictionary, "mtp_model_id"),
+                useDFlash2: boolValue(dictionary, "use_dflash2"),
+                dflash2ModelID: stringValue(dictionary, "dflash2_model_id"),
                 usePromptLookup: boolValue(dictionary, "use_prompt_lookup"),
                 crossRequestPromptLookup: boolValue(
                     dictionary,
@@ -2474,11 +2795,19 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 modelReference: decoded.model,
                 useMtp: decoded.useMtp,
                 mtpModelID: decoded.mtpModelID,
+                useDFlash2: decoded.useDFlash2,
+                dflash2ModelID: decoded.dflash2ModelID,
                 usePromptLookup: decoded.usePromptLookup,
                 crossRequestPromptLookup: decoded.crossRequestPromptLookup
             )
         }
-        return ModelLoadInstruction(modelReference: text, useMtp: nil, mtpModelID: nil)
+        return ModelLoadInstruction(
+            modelReference: text,
+            useMtp: nil,
+            mtpModelID: nil,
+            useDFlash2: nil,
+            dflash2ModelID: nil
+        )
     }
 
     private struct BenchmarkModel: Codable {
@@ -2502,6 +2831,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         var modelReference: String
         var useMtp: Bool?
         var mtpModelID: String?
+        var useDFlash2: Bool?
+        var dflash2ModelID: String?
         var usePromptLookup: Bool?
         var crossRequestPromptLookup: Bool?
 
@@ -2509,12 +2840,16 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             modelReference: String,
             useMtp: Bool?,
             mtpModelID: String?,
+            useDFlash2: Bool? = nil,
+            dflash2ModelID: String? = nil,
             usePromptLookup: Bool? = nil,
             crossRequestPromptLookup: Bool? = nil
         ) {
             self.modelReference = modelReference
             self.useMtp = useMtp
             self.mtpModelID = mtpModelID
+            self.useDFlash2 = useDFlash2
+            self.dflash2ModelID = dflash2ModelID
             self.usePromptLookup = usePromptLookup
             self.crossRequestPromptLookup = crossRequestPromptLookup
         }
@@ -2524,6 +2859,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         var model: String
         var useMtp: Bool?
         var mtpModelID: String?
+        var useDFlash2: Bool?
+        var dflash2ModelID: String?
         var usePromptLookup: Bool?
         var crossRequestPromptLookup: Bool?
 
@@ -2531,6 +2868,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             case model
             case useMtp = "use_mtp"
             case mtpModelID = "mtp_model_id"
+            case useDFlash2 = "use_dflash2"
+            case dflash2ModelID = "dflash2_model_id"
             case usePromptLookup = "use_prompt_lookup"
             case crossRequestPromptLookup = "cross_request_prompt_lookup"
         }
@@ -2540,6 +2879,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         var success: Bool
         var status: String
         var error: String
+        var code: String?
     }
 
     private struct PinModelBridgeResponse: Encodable {

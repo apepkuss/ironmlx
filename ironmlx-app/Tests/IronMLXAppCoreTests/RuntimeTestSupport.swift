@@ -56,4 +56,8 @@ final class TestRuntimeBackend: MenuBarBackendProcessManaging {
     ) {
         calls.append("confirm:\(models.count):\(parameterConfirmedModelIDs.count)")
     }
+
+    func refreshConfirmedSnapshot() {
+        calls.append("refreshConfirmedSnapshot")
+    }
 }

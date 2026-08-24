@@ -87,16 +87,16 @@ HTTP 503 + `overloaded_error` 表达暂时过载；413 使用 `request_too_large
 ### 运行拓扑一致性
 
 公开推理 API 的 transport 契约不随服务器启动方式变化。普通 causal 服务、
-Gemma4 drafter、DiffusionGemma、EnginePool 和 App daemon 共用同一请求提取、
+DFlash2 actor、Gemma4 drafter、DiffusionGemma、EnginePool 和 App daemon 共用同一请求提取、
 模型无关字段校验、协议错误渲染和 SSE header 构造路径。
 
-| 行为 | 普通服务 | Gemma4 drafter | DiffusionGemma | EnginePool | App daemon |
-|---|---|---|---|---|---|
-| Chat/Responses/Messages 严格 JSON 与模型无关字段校验 | 相同 | 相同 | 相同 | 相同 | 相同 |
-| OpenAI/Anthropic 错误 envelope、413/503 与 `Retry-After` | 相同 | 相同 | 相同 | 相同 | 相同 |
-| SSE transport headers | `text/event-stream` + `no-cache` | 相同 | 相同 | 相同 | 相同 |
-| typed request 进入模型实现 | 直接 | 直接 | 直接进入 block-diffusion lane | 解析模型后直接分派 | 解析模型后直接分派 |
-| 模型选择 | 启动时固定 | 启动时固定 | 启动时固定 | request `model` 或唯一/default model | request `model` 或唯一/default model |
+| 行为 | 普通服务 | DFlash2 actor | Gemma4 drafter | DiffusionGemma | EnginePool | App daemon |
+|---|---|---|---|---|---|---|
+| Chat/Responses/Messages 严格 JSON 与模型无关字段校验 | 相同 | 相同 | 相同 | 相同 | 相同 | 相同 |
+| OpenAI/Anthropic 错误 envelope、413/503 与 `Retry-After` | 相同 | 相同 | 相同 | 相同 | 相同 | 相同 |
+| SSE transport headers | `text/event-stream` + `no-cache` | 相同 | 相同 | 相同 | 相同 | 相同 |
+| typed request 进入模型实现 | 直接 | 独立 actor | 直接 | 直接进入 block-diffusion lane | 解析模型后直接分派 | 解析模型后直接分派 |
+| 模型选择 | 启动时固定 | target + draft 启动时固定 | 启动时固定 | 启动时固定 | request `model` 或唯一/default model | request `model` 或唯一/default model |
 
 该一致性只约束 HTTP transport、协议错误和模型分派语义，不表示所有模型架构拥有
 相同推理能力。DiffusionGemma 的 sampling、MTP、KV cache 和 PromptLookup 限制仍按
@@ -113,6 +113,7 @@ Chat Completions、Responses 和 Anthropic Messages 的流式请求在 SSE 响�
 | 生成路径 | 取消生效点 | 释放内容 |
 |---|---|---|
 | Scheduler（包括 MTP/辅助 drafter） | 当前模型 forward 结束后的下一次安全调度边界 | 活跃请求、调度槽、KV cache 与内存预算 |
+| DFlash2 actor | 当前 target/draft forward 结束后的下一次安全事件边界 | 请求级 target/draft cache、活动槽与内存预算 |
 | 直接 `GenerationStream` | 当前 token forward 结束后的下一次 token 边界 | 生成状态与直接请求内存预留 |
 | DiffusionGemma | 当前 block-diffusion 步骤结束后的下一次事件边界 | generation lane 与请求状态 |
 
@@ -120,6 +121,18 @@ Chat Completions、Responses 和 Anthropic Messages 的流式请求在 SSE 响�
 和 KV 状态。因此，从 TCP 断开到资源归还可能包含一个当前 forward/扩散步骤的尾延迟。
 本契约只承诺已经开始返回 SSE 的流式请求；v0.1 不承诺非流式 HTTP 请求在客户端断开
 后取消底层生成。
+
+## DFlash2 Server
+
+`ironmlx serve --dflash2-model-dir ...` 为固定的 Qwen3.8 target/draft 组合启动独立
+DFlash2 actor。该路径支持 Chat Completions、Responses 和 Anthropic Messages 的
+同步与 SSE 文本请求，也支持 Greedy、精确 sampling 及
+`--max-sequences N`（`N >= 1`）请求级并发。
+
+DFlash2 的启动参数、sampling、并发语义、隔离限制、`/healthz` 字段与最终验收结果
+见 [`dflash2-server-api.md`](dflash2-server-api.md)。App 启用 DFlash2 时会从普通 daemon
+受控切换为独立 actor，并继续通过 `/v1/models` 公开唯一 target 的稳定模型 ID；动态
+`/admin/api/models/*` 仍只属于普通 App daemon。
 
 ## OpenAI Responses API
 

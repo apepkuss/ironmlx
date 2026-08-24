@@ -16,6 +16,8 @@ pub struct GatedDeltaCache {
     recurrent_state: Array,
     offsets: Vec<i32>,
     cap: i32,
+    speculative_base: Option<GatedDeltaCacheSnapshot>,
+    speculative_replay: Option<GatedDeltaReplayCapture>,
 }
 
 /// Lightweight checkpoint for [`GatedDeltaCache`] rollback.
@@ -31,9 +33,58 @@ pub struct GatedDeltaCacheSnapshot {
     recurrent_state: Array,
 }
 
+pub(crate) struct GatedDeltaReplayCapture {
+    pub(crate) base: GatedDeltaCacheSnapshot,
+    /// Cache state after each Q=1 verify position. Sequence-stable DFlash2
+    /// restores an accepted prefix directly from these snapshots, avoiding a
+    /// numerically different multi-token recurrent replay.
+    pub(crate) prefix_states: Vec<GatedDeltaCacheSnapshot>,
+    pub(crate) conv_input: Array,
+    pub(crate) q: Array,
+    pub(crate) k: Array,
+    pub(crate) v: Array,
+    pub(crate) g: Array,
+    pub(crate) beta: Array,
+    pub(crate) mask: Option<Array>,
+}
+
 impl GatedDeltaCacheSnapshot {
     pub fn offsets(&self) -> &[i32] {
         &self.offsets
+    }
+
+    pub(crate) fn prefix_state_for_row_on(
+        &self,
+        row: usize,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<(Array, Array, i32)> {
+        let target = target.into();
+        let conv_dims = self.conv_state.shape();
+        let conv_dims = conv_dims.as_slice();
+        let rec_dims = self.recurrent_state.shape();
+        let rec_dims = rec_dims.as_slice();
+        if row >= self.offsets.len() {
+            anyhow::bail!(
+                "GatedDeltaCacheSnapshot::prefix_state_for_row_on: row {} >= B {}",
+                row,
+                self.offsets.len()
+            );
+        }
+        let conv_state = slice_strided_on(
+            &self.conv_state,
+            [row as i32, 0, 0],
+            [row as i32 + 1, conv_dims[1], conv_dims[2]],
+            [1_i32, 1, 1],
+            target,
+        )?;
+        let recurrent_state = slice_strided_on(
+            &self.recurrent_state,
+            [row as i32, 0, 0, 0],
+            [row as i32 + 1, rec_dims[1], rec_dims[2], rec_dims[3]],
+            [1_i32, 1, 1, 1],
+            target,
+        )?;
+        Ok((conv_state, recurrent_state, self.offsets[row]))
     }
 }
 
@@ -71,6 +122,8 @@ impl GatedDeltaCache {
             recurrent_state,
             offsets: vec![0; b as usize],
             cap,
+            speculative_base: None,
+            speculative_replay: None,
         })
     }
 
@@ -157,6 +210,104 @@ impl GatedDeltaCache {
         Ok(())
     }
 
+    /// Arm one speculative target-verify capture from the current cache state.
+    pub(crate) fn begin_speculative_prefix_capture(&mut self) -> Result<()> {
+        if self.speculative_base.is_some() || self.speculative_replay.is_some() {
+            return Err(anyhow!(
+                "GatedDeltaCache speculative prefix capture is already active"
+            ));
+        }
+        self.speculative_base = Some(self.snapshot());
+        Ok(())
+    }
+
+    pub(crate) fn speculative_prefix_capture_active(&self) -> bool {
+        self.speculative_base.is_some() || self.speculative_replay.is_some()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_speculative_replay(
+        &mut self,
+        conv_input: &Array,
+        q: &Array,
+        k: &Array,
+        v: &Array,
+        g: &Array,
+        beta: &Array,
+        mask: Option<&Array>,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<()> {
+        let target = target.into();
+        let prefix_state = self.snapshot();
+        if let Some(recorded) = self.speculative_replay.as_mut() {
+            let replay_width = q.shape().as_slice()[1];
+            let conv_dims = conv_input.shape();
+            let conv_dims = conv_dims.as_slice();
+            let conv_width = conv_dims[1];
+            if replay_width > conv_width {
+                return Err(anyhow!(
+                    "GatedDeltaCache replay width {replay_width} exceeds conv input width {conv_width}"
+                ));
+            }
+            let conv_suffix = slice_strided_on(
+                conv_input,
+                &[0_i32, conv_width - replay_width, 0][..],
+                &[conv_dims[0], conv_width, conv_dims[2]][..],
+                &[1_i32, 1, 1][..],
+                target,
+            )?;
+            recorded.conv_input =
+                mlx::ops::shape::concatenate_on(&[&recorded.conv_input, &conv_suffix], 1, target)?;
+            recorded.q = mlx::ops::shape::concatenate_on(&[&recorded.q, q], 1, target)?;
+            recorded.k = mlx::ops::shape::concatenate_on(&[&recorded.k, k], 1, target)?;
+            recorded.v = mlx::ops::shape::concatenate_on(&[&recorded.v, v], 1, target)?;
+            recorded.g = mlx::ops::shape::concatenate_on(&[&recorded.g, g], 1, target)?;
+            recorded.beta = mlx::ops::shape::concatenate_on(&[&recorded.beta, beta], 1, target)?;
+            recorded.mask = match (recorded.mask.as_ref(), mask) {
+                (Some(recorded_mask), Some(mask)) => Some(mlx::ops::shape::concatenate_on(
+                    &[recorded_mask, mask],
+                    1,
+                    target,
+                )?),
+                (None, None) => None,
+                _ => {
+                    return Err(anyhow!(
+                        "GatedDeltaCache speculative replay mask presence changed during capture"
+                    ));
+                }
+            };
+            recorded.prefix_states.push(prefix_state);
+        } else {
+            let base = self.speculative_base.take().ok_or_else(|| {
+                anyhow!("GatedDeltaCache speculative prefix capture is not active")
+            })?;
+            self.speculative_replay = Some(GatedDeltaReplayCapture {
+                base,
+                prefix_states: vec![prefix_state],
+                conv_input: conv_input.clone(),
+                q: q.clone(),
+                k: k.clone(),
+                v: v.clone(),
+                g: g.clone(),
+                beta: beta.clone(),
+                mask: mask.cloned(),
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn take_speculative_replay(&mut self) -> Result<GatedDeltaReplayCapture> {
+        self.speculative_base = None;
+        self.speculative_replay
+            .take()
+            .ok_or_else(|| anyhow!("GatedDeltaCache speculative replay inputs were not recorded"))
+    }
+
+    pub(crate) fn discard_speculative_prefix_capture(&mut self) {
+        self.speculative_base = None;
+        self.speculative_replay = None;
+    }
+
     pub fn reset(&mut self) -> Result<()> {
         let conv_dims = self.conv_state.shape();
         let conv_dims = conv_dims.as_slice();
@@ -168,6 +319,8 @@ impl GatedDeltaCache {
         self.recurrent_state = Array::zeros(rec_dims, Dtype::Float32)?;
 
         self.offsets.fill(0);
+        self.speculative_base = None;
+        self.speculative_replay = None;
         Ok(())
     }
 
@@ -509,6 +662,89 @@ mod tests {
     }
 
     #[test]
+    fn gdcache_captures_speculative_replay_inputs() {
+        let mut cache =
+            GatedDeltaCache::new_with_cap(1, 4, 2, 1, 2, 2, Dtype::Float32, 8).expect("cache");
+        cache.advance(&[2]).expect("base offset");
+        cache
+            .begin_speculative_prefix_capture()
+            .expect("begin capture");
+        assert!(cache.speculative_prefix_capture_active());
+
+        let conv_input = filled_f32(&[1, 6, 2], 1.0);
+        let q = filled_f32(&[1, 3, 1, 2], 2.0);
+        let k = filled_f32(&[1, 3, 1, 2], 3.0);
+        let v = filled_f32(&[1, 3, 1, 2], 4.0);
+        let g = filled_f32(&[1, 3, 1], 5.0);
+        let beta = filled_f32(&[1, 3, 1], 6.0);
+        cache
+            .record_speculative_replay(&conv_input, &q, &k, &v, &g, &beta, None, ())
+            .expect("record replay");
+
+        let capture = cache.take_speculative_replay().expect("take replay");
+        assert_eq!(capture.base.offsets(), &[2]);
+        assert_eq!(capture.conv_input.shape().as_slice(), &[1, 6, 2]);
+        assert_eq!(capture.q.shape().as_slice(), &[1, 3, 1, 2]);
+        assert_eq!(capture.prefix_states.len(), 1);
+        assert_eq!(capture.g.shape().as_slice(), &[1, 3, 1]);
+        assert!(capture.mask.is_none());
+        assert!(!cache.speculative_prefix_capture_active());
+    }
+
+    #[test]
+    fn gdcache_appends_sequence_stable_speculative_replay_inputs() {
+        let mut cache =
+            GatedDeltaCache::new_with_cap(1, 4, 2, 1, 2, 2, Dtype::Float32, 8).expect("cache");
+        cache
+            .begin_speculative_prefix_capture()
+            .expect("begin capture");
+
+        for value in [1.0_f32, 2.0] {
+            cache.update_conv(filled_f32(&[1, 3, 2], value));
+            cache.update_recurrent(filled_f32(&[1, 1, 2, 2], value));
+            cache.advance(&[1]).expect("advance captured prefix");
+            let conv_input = filled_f32(&[1, 4, 2], value);
+            let q = filled_f32(&[1, 1, 1, 2], value);
+            let k = filled_f32(&[1, 1, 1, 2], value);
+            let v = filled_f32(&[1, 1, 1, 2], value);
+            let g = filled_f32(&[1, 1, 1], value);
+            let beta = filled_f32(&[1, 1, 1], value);
+            cache
+                .record_speculative_replay(&conv_input, &q, &k, &v, &g, &beta, None, ())
+                .expect("append replay");
+            assert!(cache.speculative_prefix_capture_active());
+        }
+
+        let capture = cache.take_speculative_replay().expect("take replay");
+        assert_eq!(capture.conv_input.shape().as_slice(), &[1, 5, 2]);
+        assert_eq!(capture.q.shape().as_slice(), &[1, 2, 1, 2]);
+        assert_eq!(capture.prefix_states.len(), 2);
+        assert_eq!(capture.prefix_states[0].offsets(), &[1]);
+        assert_eq!(capture.prefix_states[1].offsets(), &[2]);
+        assert_eq!(capture.g.shape().as_slice(), &[1, 2, 1]);
+        assert!(!cache.speculative_prefix_capture_active());
+
+        cache
+            .restore(&capture.prefix_states[0])
+            .expect("restore first prefix");
+        assert_eq!(cache.offsets(), &[1]);
+        assert_eq!(
+            cache
+                .conv_state()
+                .to_vec::<f32>()
+                .expect("read restored conv state"),
+            vec![1.0; 6]
+        );
+        assert_eq!(
+            cache
+                .recurrent_state()
+                .to_vec::<f32>()
+                .expect("read restored recurrent state"),
+            vec![1.0; 4]
+        );
+    }
+
+    #[test]
     fn gdcache_advance_mixed() {
         let mut c = make_cache_b(2, 16);
         c.advance(&[3, 12]).expect("advance mixed");
@@ -778,6 +1014,19 @@ mod tests {
 
         let (conv_row, recurrent_row, cached_len) =
             src.prefix_state_for_row_on(1, ()).expect("export row");
+        let snapshot = src.snapshot();
+        let (snapshot_conv_row, snapshot_recurrent_row, snapshot_cached_len) = snapshot
+            .prefix_state_for_row_on(1, ())
+            .expect("export snapshot row");
+        assert_eq!(snapshot_cached_len, cached_len);
+        assert_eq!(
+            snapshot_conv_row.to_vec::<f32>().unwrap(),
+            conv_row.to_vec::<f32>().unwrap()
+        );
+        assert_eq!(
+            snapshot_recurrent_row.to_vec::<f32>().unwrap(),
+            recurrent_row.to_vec::<f32>().unwrap()
+        );
 
         let mut dst =
             GatedDeltaCache::new_with_cap(1, 4, 8, 4, 8, 8, Dtype::Float32, 16).expect("dst");

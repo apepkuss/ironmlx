@@ -25,6 +25,7 @@
 //!   implemented; image inputs are out of scope.
 
 pub mod architecture;
+pub mod dflash2;
 pub mod diffusion_gemma;
 pub mod gemma4;
 pub mod glm4_moe_lite;
@@ -36,6 +37,7 @@ pub mod qwen3_6_moe;
 pub mod vision;
 
 pub use architecture::ModelArchitecture;
+pub use dflash2::{DFlash2Config, DFlash2DraftModel};
 pub use diffusion_gemma::{
     DiffusionGemmaConfig, DiffusionGemmaGenerateEvent, DiffusionGemmaGenerationConfig,
     DiffusionGemmaModel, DiffusionGemmaTextConfig,

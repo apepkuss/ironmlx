@@ -116,7 +116,7 @@ std::unique_ptr<ArrayVec> compiled_fn_invoke(
 // === P5.7 compile cache control ===
 
 void compile_clear_cache() {
-  mlx::core::detail::compile_clear_cache();
+  mlx::core::detail::compile_clear_cache(mlx::core::detail::compile_cache());
 }
 
 } // namespace cxx_mlx

@@ -841,7 +841,16 @@ pub(crate) fn validate_mtp_pair(
         ));
     }
 
-    let base_raw = read_config_json(model_dir)?;
+    let base_raw = match read_config_json(model_dir) {
+        Ok(raw) => raw,
+        Err(error) => {
+            return Ok(MtpValidationResponse::not_compatible(
+                MTP_INVALID_CONFIG_CODE,
+                format!("{error:#}"),
+                None,
+            ));
+        }
+    };
     let model_type = base_raw
         .get("model_type")
         .and_then(serde_json::Value::as_str)
@@ -869,7 +878,16 @@ pub(crate) fn validate_mtp_pair(
         }
     }
 
-    let mtp_raw = read_config_json(mtp_model_dir)?;
+    let mtp_raw = match read_config_json(mtp_model_dir) {
+        Ok(raw) => raw,
+        Err(error) => {
+            return Ok(MtpValidationResponse::not_compatible(
+                MTP_INVALID_CONFIG_CODE,
+                format!("{error:#}"),
+                None,
+            ));
+        }
+    };
     let mtp_model_type = mtp_raw
         .get("model_type")
         .and_then(serde_json::Value::as_str)
@@ -918,6 +936,44 @@ pub(crate) fn validate_mtp_pair(
         _ => unreachable!("MTP architecture was filtered above"),
     }
 
+    let base_lineage = match mtp_model_lineage(model_dir, &base_raw) {
+        Ok(lineage) => lineage,
+        Err(error) => {
+            return Ok(MtpValidationResponse::not_compatible(
+                MTP_INVALID_CONFIG_CODE,
+                format!("{error:#}"),
+                None,
+            ));
+        }
+    };
+    let mtp_lineage = match mtp_model_lineage(mtp_model_dir, &mtp_raw) {
+        Ok(lineage) => lineage,
+        Err(error) => {
+            return Ok(MtpValidationResponse::not_compatible(
+                MTP_INVALID_CONFIG_CODE,
+                format!("{error:#}"),
+                None,
+            ));
+        }
+    };
+    match (base_lineage.as_deref(), mtp_lineage.as_deref()) {
+        (Some(base), Some(mtp)) if base == mtp => {}
+        (Some(base), Some(mtp)) => {
+            return Ok(MtpValidationResponse::not_compatible(
+                MTP_INCOMPATIBLE_CODE,
+                format!("MTP model lineage mismatch: base={base} mtp={mtp}"),
+                None,
+            ));
+        }
+        _ => {
+            return Ok(MtpValidationResponse::not_compatible(
+                MTP_INCOMPATIBLE_CODE,
+                "MTP model lineage could not be established from model metadata.",
+                None,
+            ));
+        }
+    }
+
     let draft_tokens = crate::core::speculative::resolve_mtp_draft_tokens(
         &base_raw,
         mtp_draft_tokens
@@ -938,8 +994,26 @@ fn validate_qwen35_dense_mtp_config(
     base_raw: &serde_json::Value,
     mtp_raw: &serde_json::Value,
 ) -> Result<Option<MtpValidationResponse>> {
-    let base_cfg = qwen35_config_from_raw(base_raw)?;
-    let mtp_cfg = qwen35_config_from_raw(mtp_raw)?;
+    let base_cfg = match qwen35_config_from_raw(base_raw) {
+        Ok(config) => config,
+        Err(error) => {
+            return Ok(Some(MtpValidationResponse::not_compatible(
+                MTP_INVALID_CONFIG_CODE,
+                format!("{error:#}"),
+                None,
+            )));
+        }
+    };
+    let mtp_cfg = match Qwen35Config::from_mtp_config_value(mtp_raw) {
+        Ok(config) => config,
+        Err(error) => {
+            return Ok(Some(MtpValidationResponse::not_compatible(
+                MTP_INVALID_CONFIG_CODE,
+                format!("{error:#}"),
+                None,
+            )));
+        }
+    };
     if let Err(error) = mtp_cfg.mtp_config() {
         return Ok(Some(MtpValidationResponse::not_compatible(
             MTP_INVALID_CONFIG_CODE,
@@ -961,8 +1035,26 @@ fn validate_qwen35_moe_mtp_config(
     base_raw: &serde_json::Value,
     mtp_raw: &serde_json::Value,
 ) -> Result<Option<MtpValidationResponse>> {
-    let base_cfg = qwen35_moe_config_from_raw(base_raw)?;
-    let mtp_cfg = qwen35_moe_config_from_raw(mtp_raw)?;
+    let base_cfg = match qwen35_moe_config_from_raw(base_raw) {
+        Ok(config) => config,
+        Err(error) => {
+            return Ok(Some(MtpValidationResponse::not_compatible(
+                MTP_INVALID_CONFIG_CODE,
+                format!("{error:#}"),
+                None,
+            )));
+        }
+    };
+    let mtp_cfg = match Qwen35MoeConfig::from_mtp_config_value(mtp_raw) {
+        Ok(config) => config,
+        Err(error) => {
+            return Ok(Some(MtpValidationResponse::not_compatible(
+                MTP_INVALID_CONFIG_CODE,
+                format!("{error:#}"),
+                None,
+            )));
+        }
+    };
     if let Err(error) = mtp_cfg.mtp_config() {
         return Ok(Some(MtpValidationResponse::not_compatible(
             MTP_INVALID_CONFIG_CODE,
@@ -984,8 +1076,18 @@ fn validate_gemma4_assistant_mtp_config(
     base_raw: &serde_json::Value,
     mtp_raw: &serde_json::Value,
 ) -> Result<Option<MtpValidationResponse>> {
-    let mut base_cfg: Gemma4Config =
-        serde_json::from_value(base_raw.clone()).context("failed to deserialize Gemma4Config")?;
+    let mut base_cfg: Gemma4Config = match serde_json::from_value(base_raw.clone())
+        .context("failed to deserialize Gemma4Config")
+    {
+        Ok(config) => config,
+        Err(error) => {
+            return Ok(Some(MtpValidationResponse::not_compatible(
+                MTP_INVALID_CONFIG_CODE,
+                format!("{error:#}"),
+                None,
+            )));
+        }
+    };
     if let Err(error) = base_cfg.validate_and_finalize() {
         return Ok(Some(MtpValidationResponse::not_compatible(
             MTP_INVALID_CONFIG_CODE,
@@ -993,8 +1095,18 @@ fn validate_gemma4_assistant_mtp_config(
             None,
         )));
     }
-    let mut mtp_cfg: Gemma4AssistantConfig = serde_json::from_value(mtp_raw.clone())
-        .context("failed to deserialize Gemma4AssistantConfig")?;
+    let mut mtp_cfg: Gemma4AssistantConfig = match serde_json::from_value(mtp_raw.clone())
+        .context("failed to deserialize Gemma4AssistantConfig")
+    {
+        Ok(config) => config,
+        Err(error) => {
+            return Ok(Some(MtpValidationResponse::not_compatible(
+                MTP_INVALID_CONFIG_CODE,
+                format!("{error:#}"),
+                None,
+            )));
+        }
+    };
     if let Err(error) = mtp_cfg.validate_and_finalize() {
         return Ok(Some(MtpValidationResponse::not_compatible(
             MTP_INVALID_CONFIG_CODE,
@@ -1076,6 +1188,94 @@ fn read_config_json(model_dir: &Path) -> Result<serde_json::Value> {
     let path = model_dir.join("config.json");
     let data = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
     serde_json::from_slice(&data).with_context(|| format!("parsing {}", path.display()))
+}
+
+/// Resolve the model identity that an MTP artifact was trained against.
+///
+/// Execution graph identifiers are intentionally broad: `qwen3_5`, for
+/// example, covers Qwen3.5, Qwen3.6, and Qwen3.8. Weight compatibility must
+/// therefore also retain the model generation and parameter variant encoded in
+/// the source model identity.
+fn mtp_model_lineage(model_dir: &Path, raw: &serde_json::Value) -> Result<Option<String>> {
+    let text = raw.get("text_config");
+    for identity in [
+        raw.get("base_model_name_or_path")
+            .and_then(serde_json::Value::as_str),
+        raw.get("_name_or_path").and_then(serde_json::Value::as_str),
+        text.and_then(|value| value.get("base_model_name_or_path"))
+            .and_then(serde_json::Value::as_str),
+        text.and_then(|value| value.get("_name_or_path"))
+            .and_then(serde_json::Value::as_str),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Some(lineage) = normalized_mtp_lineage(identity) {
+            return Ok(Some(lineage));
+        }
+    }
+
+    let manifest_path = model_dir.join(".ironmlx-snapshot.json");
+    if !manifest_path.is_file() {
+        return Ok(None);
+    }
+    let data = std::fs::read(&manifest_path)
+        .with_context(|| format!("reading {}", manifest_path.display()))?;
+    let manifest: serde_json::Value = serde_json::from_slice(&data)
+        .with_context(|| format!("parsing {}", manifest_path.display()))?;
+    Ok(manifest
+        .get("repo_id")
+        .and_then(serde_json::Value::as_str)
+        .and_then(normalized_mtp_lineage))
+}
+
+fn normalized_mtp_lineage(identity: &str) -> Option<String> {
+    let leaf = identity
+        .trim()
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or_default();
+    let normalized = leaf.to_ascii_lowercase();
+    let tokens = normalized
+        .split(|character: char| !(character.is_ascii_alphanumeric() || character == '.'))
+        .filter(|token| !token.is_empty() && !is_mtp_packaging_marker(token))
+        .collect::<Vec<_>>();
+    if tokens.is_empty() {
+        None
+    } else {
+        Some(tokens.join("-"))
+    }
+}
+
+fn is_mtp_packaging_marker(token: &str) -> bool {
+    if matches!(
+        token,
+        "mtp"
+            | "assistant"
+            | "drafter"
+            | "mlx"
+            | "qat"
+            | "optiq"
+            | "awq"
+            | "gptq"
+            | "gguf"
+            | "quantized"
+            | "bfloat16"
+            | "float16"
+    ) {
+        return true;
+    }
+    if token
+        .strip_suffix("bit")
+        .is_some_and(|bits| bits.parse::<u8>().is_ok())
+    {
+        return true;
+    }
+    ["mxfp", "int", "fp", "bf"].into_iter().any(|prefix| {
+        token
+            .strip_prefix(prefix)
+            .is_some_and(|bits| bits.parse::<u8>().is_ok())
+    })
 }
 
 fn qwen35_config_from_raw(raw: &serde_json::Value) -> Result<Qwen35Config> {
@@ -2009,6 +2209,7 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
             cache_restore_us: mtp_cache_restore_us,
             sampled_exact_qualification: neural_exact_qualification,
         },
+        dflash2: crate::core::server::health::DFlash2HealthConfig::disabled().snapshot(),
         prompt_lookup: PromptLookupHealthInfo::aggregate(prompt_lookup_snapshots),
         active_kv_offload,
         device_name: mlx_memory.device_name,
@@ -2509,6 +2710,7 @@ mod tests {
                 cache_restore_us: 43,
                 sampled_exact_qualification: NeuralExactQualificationHealth::default(),
             },
+            dflash2: crate::core::server::health::DFlash2HealthConfig::disabled().snapshot(),
             prompt_lookup: PromptLookupHealthInfo::default(),
             active_kv_offload: crate::core::cache::ActiveKvOffloadHealth::disabled(),
             device_name: None,
@@ -2550,6 +2752,132 @@ mod tests {
         assert!(response.compatible);
         assert_eq!(response.reason_code, "ok");
         assert_eq!(response.draft_tokens, Some(2));
+
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn mtp_validation_accepts_same_qwen_lineage_from_snapshot_metadata() {
+        let root = unique_temp_dir("mtp-validation-qwen38-lineage");
+        let base = root.join("base");
+        let mtp = root.join("mtp");
+        write_config(
+            &base,
+            &without_model_identity(qwen35_config("qwen3_5", 0, 5120)),
+        );
+        write_config(
+            &mtp,
+            &without_model_identity(qwen35_config("qwen3_5_mtp", 1, 5120)),
+        );
+        write_snapshot_identity(&base, "mlx-community/Qwen3.8-27B-4bit");
+        write_snapshot_identity(&mtp, "mlx-community/Qwen3.8-27B-MTP-8bit");
+
+        let response = validate_mtp_pair(&base, &mtp, Some(2)).expect("validate");
+
+        assert!(response.compatible, "response={response:?}");
+        assert_eq!(response.reason_code, MTP_OK_CODE);
+
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn mtp_validation_rejects_cross_generation_qwen_with_identical_structure() {
+        let root = unique_temp_dir("mtp-validation-qwen-cross-generation");
+        let base = root.join("base");
+        let mtp = root.join("mtp");
+        write_config(
+            &base,
+            &without_model_identity(qwen35_config("qwen3_5", 0, 5120)),
+        );
+        write_config(
+            &mtp,
+            &without_model_identity(qwen35_config("qwen3_5_mtp", 1, 5120)),
+        );
+        write_snapshot_identity(&base, "mlx-community/Qwen3.8-27B-4bit");
+        write_snapshot_identity(&mtp, "mlx-community/Qwen3.6-27B-MTP-4bit");
+
+        let response = validate_mtp_pair(&base, &mtp, Some(2)).expect("validate");
+
+        assert!(!response.compatible);
+        assert_eq!(response.reason_code, MTP_INCOMPATIBLE_CODE);
+        assert!(response.message.contains("lineage mismatch"));
+
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn mtp_validation_rejects_pair_without_lineage_metadata() {
+        let root = unique_temp_dir("mtp-validation-missing-lineage");
+        let base = root.join("base");
+        let mtp = root.join("mtp");
+        write_config(
+            &base,
+            &without_model_identity(qwen35_config("qwen3_5", 0, 2560)),
+        );
+        write_config(
+            &mtp,
+            &without_model_identity(qwen35_config("qwen3_5_mtp", 1, 2560)),
+        );
+
+        let response = validate_mtp_pair(&base, &mtp, Some(2)).expect("validate");
+
+        assert!(!response.compatible);
+        assert_eq!(response.reason_code, MTP_INCOMPATIBLE_CODE);
+        assert!(response.message.contains("could not be established"));
+
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn mtp_validation_ignores_empty_vision_config_on_qwen_mtp_artifact() {
+        let root = unique_temp_dir("mtp-validation-empty-vision-config");
+        let base = root.join("base");
+        let mtp = root.join("mtp");
+        write_config(&base, &qwen35_config("qwen3_5", 0, 2560));
+        let mut mtp_config: serde_json::Value =
+            serde_json::from_str(&qwen35_config("qwen3_5_mtp", 1, 2560))
+                .expect("parse test MTP config");
+        mtp_config["vision_config"] = serde_json::json!({});
+        write_config(&mtp, &mtp_config.to_string());
+
+        let response = validate_mtp_pair(&base, &mtp, Some(2)).expect("validate");
+
+        assert!(response.compatible, "response={response:?}");
+        assert_eq!(response.reason_code, MTP_OK_CODE);
+        assert_eq!(response.draft_tokens, Some(2));
+
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn mtp_validation_returns_stable_code_for_invalid_qwen_mtp_config() {
+        let root = unique_temp_dir("mtp-validation-invalid-config");
+        let base = root.join("base");
+        let mtp = root.join("mtp");
+        write_config(&base, &qwen35_config("qwen3_5", 0, 2560));
+        write_config(
+            &mtp,
+            r#"{
+                "model_type": "qwen3_5_mtp",
+                "text_config": {"mtp_num_hidden_layers": 1},
+                "vision_config": {}
+            }"#,
+        );
+
+        let response = validate_mtp_pair(&base, &mtp, Some(2)).expect("validate");
+
+        assert!(!response.compatible);
+        assert_eq!(response.reason_code, MTP_INVALID_CONFIG_CODE);
+
+        let error = AdminError::from_load_error(anyhow::anyhow!(
+            "MTP validation failed: {}: {}",
+            response.reason_code,
+            response.message
+        ));
+        let value = serde_json::to_value(AdminModelResponse::from_error(error.message, error.code))
+            .expect("response json");
+        assert_eq!(value["code"], MTP_INVALID_CONFIG_CODE);
+        assert_ne!(value["error"], response.message);
 
         std::fs::remove_dir_all(root).expect("cleanup");
     }
@@ -2757,6 +3085,7 @@ mod tests {
     fn serve_args() -> ServeArgs {
         ServeArgs {
             model: None,
+            model_id: None,
             model_manifest: None,
             max_loaded_models: None,
             memory_limit_total_gb: None,
@@ -2781,6 +3110,10 @@ mod tests {
             scheduler_autotune_report: false,
             mtp_model_dir: None,
             mtp_draft_tokens: None,
+            dflash2_model_dir: None,
+            dflash2_block_size: 4,
+            dflash2_draft_bits: 4,
+            dflash2_tensor_batch_max_width: None,
             prompt_lookup: false,
             prompt_lookup_min_ngram: None,
             prompt_lookup_max_ngram: None,
@@ -2806,10 +3139,32 @@ mod tests {
         std::fs::write(dir.join("config.json"), config).expect("write config");
     }
 
+    fn write_snapshot_identity(dir: &Path, repo_id: &str) {
+        std::fs::write(
+            dir.join(".ironmlx-snapshot.json"),
+            serde_json::json!({"repo_id": repo_id}).to_string(),
+        )
+        .expect("write snapshot identity");
+    }
+
+    fn without_model_identity(config: String) -> String {
+        let mut raw: serde_json::Value = serde_json::from_str(&config).expect("parse config");
+        raw.as_object_mut()
+            .expect("config object")
+            .remove("_name_or_path");
+        raw.to_string()
+    }
+
     fn qwen35_config(model_type: &str, mtp_layers: i32, hidden_size: i32) -> String {
+        let model_identity = if model_type == "qwen3_5_mtp" {
+            "mlx-community/Qwen3.5-4B-MTP-4bit"
+        } else {
+            "mlx-community/Qwen3.5-4B-MLX-4bit"
+        };
         format!(
             r#"{{
                 "model_type": "{model_type}",
+                "_name_or_path": "{model_identity}",
                 "text_config": {{
                     "hidden_size": {hidden_size},
                     "intermediate_size": 9728,
@@ -2838,6 +3193,7 @@ mod tests {
         format!(
             r#"{{
                 "model_type": "{model_type}",
+                "_name_or_path": "mlx-community/gemma-4-e4b-it-4bit",
                 "text_config": {{
                     "model_type": "{text_model_type}",
                     "hidden_size": {hidden_size},
@@ -2881,6 +3237,7 @@ mod tests {
         format!(
             r#"{{
                 "model_type": "{model_type}",
+                "base_model_name_or_path": "google/gemma-4-e4b-it",
                 "backbone_hidden_size": {backbone_hidden_size},
                 "use_ordered_embeddings": true,
                 "num_centroids": 2048,
@@ -2914,9 +3271,15 @@ mod tests {
         hidden_size: i32,
         moe_intermediate_size: i32,
     ) -> String {
+        let model_identity = if model_type == "qwen3_5_mtp" {
+            "mlx-community/Qwen3.6-35B-A3B-MTP-4bit"
+        } else {
+            "mlx-community/Qwen3.6-35B-A3B-4bit"
+        };
         format!(
             r#"{{
                 "model_type": "{model_type}",
+                "_name_or_path": "{model_identity}",
                 "text_config": {{
                     "model_type": "qwen3_5_moe_text",
                     "hidden_size": {hidden_size},

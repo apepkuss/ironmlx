@@ -475,6 +475,7 @@ enum SanitizeMode {
     Text { keep_vision_tower: bool },
     Mtp,
     Gemma4Drafter,
+    DFlash2Draft,
 }
 
 impl Loader {
@@ -523,6 +524,15 @@ impl Loader {
         Self::open_impl(model_dir, SanitizeMode::Gemma4Drafter)
     }
 
+    /// Open a standalone DFlash2 draft checkpoint.
+    ///
+    /// DFlash2 checkpoints are auxiliary artifacts: they intentionally omit
+    /// token embeddings and an LM head and instead borrow both from the target
+    /// model. Their root tensor names must therefore be preserved verbatim.
+    pub fn open_dflash2(model_dir: &Path) -> Result<Self> {
+        Self::open_impl(model_dir, SanitizeMode::DFlash2Draft)
+    }
+
     fn open_impl(model_dir: &Path, sanitize_mode: SanitizeMode) -> Result<Self> {
         let config_path = model_dir.join("config.json");
         let config_raw: serde_json::Value = serde_json::from_reader(
@@ -560,6 +570,7 @@ impl Loader {
             SanitizeMode::Gemma4Drafter => {
                 Self::sanitize_gemma4_drafter(&mut tensors, &config_raw)?
             }
+            SanitizeMode::DFlash2Draft => Self::sanitize_dflash2_draft(&mut tensors, &config_raw)?,
         }
         validate_quantized_storage_manifest(&tensors, quant, &quant_overrides)?;
 
@@ -595,6 +606,20 @@ impl Loader {
         self.tensors
             .get(key)
             .ok_or_else(|| anyhow!("Loader: missing tensor key `{key}`"))
+    }
+
+    /// Drop loader-owned references to projections replaced by a
+    /// model-private fused tensor. The constructed model must already own the
+    /// fused result before this is called.
+    pub(crate) fn release_projection_prefixes(&mut self, prefixes: &[String]) {
+        self.tensors.retain(|key, _| {
+            !prefixes.iter().any(|prefix| {
+                key == prefix
+                    || key
+                        .strip_prefix(prefix)
+                        .is_some_and(|suffix| suffix.starts_with('.'))
+            })
+        });
     }
 
     /// Returns tensor by full key, or None if absent.
@@ -788,6 +813,23 @@ impl Loader {
                 "norm.weight",
             ],
         )
+    }
+
+    /// Validate a DFlash2 auxiliary checkpoint without rewriting its tensor
+    /// namespace. The model implementation owns the complete tensor-shape
+    /// contract; the loader only prevents this mode from being used for a
+    /// plain Qwen3 base model or a legacy DFlash draft.
+    fn sanitize_dflash2_draft(
+        _weights: &mut HashMap<String, Array>,
+        config_raw: &serde_json::Value,
+    ) -> Result<()> {
+        if !is_dflash2_draft_metadata(config_raw) {
+            return Err(anyhow!(
+                "Loader::open_dflash2 expected architectures to contain DFlash2DraftModel"
+            ));
+        }
+        validate_dflash2_draft_metadata(config_raw)
+            .context("Loader::open_dflash2 metadata validation")
     }
 
     /// Sanitize a standalone Gemma4 assistant/drafter checkpoint.

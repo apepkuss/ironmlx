@@ -134,7 +134,11 @@ impl Qwen35Config {
     /// Parse the text-only contract used by a Qwen MTP head. MTP checkpoints
     /// do not carry a vision tower, so top-level vision metadata is irrelevant.
     pub fn from_mtp_loader(loader: &Loader) -> Result<Self> {
-        Self::text_config_from_raw(loader.config_raw_value())
+        Self::from_mtp_config_value(loader.config_raw_value())
+    }
+
+    pub(crate) fn from_mtp_config_value(raw: &serde_json::Value) -> Result<Self> {
+        Self::text_config_from_raw(raw)
     }
 
     /// Effective per-head dim: `head_dim` if specified, else `hidden_size / num_attention_heads`.

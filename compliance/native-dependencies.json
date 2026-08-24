@@ -7,14 +7,14 @@
       "license_sha256": "ccfab7ccb2ea306f71531c8ca77bb55507606cd90768b1e32b8b52ab5b48cf01",
       "license_source": "mlx:LICENSE",
       "repository": "https://github.com/apepkuss/mlx.git",
-      "revision": "16dea39b545cd641310fdcfdfc6fc62bb141ddd7",
+      "revision": "73ad5df20cb30be4192e5c4d0ae8130674773427",
       "source_verification": {
-        "commit": "16dea39b545cd641310fdcfdfc6fc62bb141ddd7",
+        "commit": "73ad5df20cb30be4192e5c4d0ae8130674773427",
         "source": "mlx:.",
         "type": "git"
       },
       "upstream_repository": "https://github.com/ml-explore/mlx.git",
-      "upstream_revision": "973e27f82ffe68dbd626cda31ba34997045d1eb7"
+      "upstream_revision": "8a81722b1d71cac9b7dde47e56a438c4b529129b"
     },
     {
       "component": "metal-cpp",

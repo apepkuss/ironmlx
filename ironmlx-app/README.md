@@ -6,7 +6,7 @@ macOS 26.2 or newer. It does not support Intel or earlier macOS releases.
 ## Release build
 
 The release builder requires a clean MLX checkout pinned to commit
-`16dea39b545cd641310fdcfdfc6fc62bb141ddd7`. By default it uses the sibling
+`73ad5df20cb30be4192e5c4d0ae8130674773427`. By default it uses the sibling
 checkout at `../iron-rivals/mlx`; set `MLX_SRC` to another clean checkout of
 that exact commit when needed.
 

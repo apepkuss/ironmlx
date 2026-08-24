@@ -1,6 +1,7 @@
 # IronMLX v0.1 API 兼容矩阵
 
-状态基线：`dev@c82659b`。本文是 IronMLX v0.1 的公开协议承诺，适用于：
+状态基线：`feat/dflash2-execution-path`（DFlash2 P4 提交前验收树）。本文是
+IronMLX v0.1 的公开协议承诺，适用于：
 
 - `POST /v1/chat/completions`（OpenAI Chat Completions 子集）；
 - `POST /v1/responses`（OpenAI Responses 无状态子集）；
@@ -134,20 +135,24 @@
 
 ## 拓扑矩阵
 
-| 契约 | 普通服务 | Gemma4 drafter | DiffusionGemma | EnginePool | App daemon |
-|---|---:|---:|---:|---:|---:|
-| 请求字段/模型无关校验 | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 协议错误 envelope | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 413 body/token 区分 | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 503 JSON + `Retry-After:5` | ✅ | ✅ | ✅ | ✅ | ✅ |
-| SSE `text/event-stream` + `no-cache` | ✅ | ✅ | ✅ | ✅ | ✅ |
-| TCP 断连后驱逐与预算释放 | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 模型选择 | 启动时固定 | 启动时固定 | 启动时固定 | request model 或默认模型 | request model 或默认模型 |
-| 模型能力完全相同 | ❌ | ❌ | ❌ | ❌ | ❌ |
+| 契约 | 普通服务 | DFlash2 actor | Gemma4 drafter | DiffusionGemma | EnginePool | App daemon |
+|---|---:|---:|---:|---:|---:|---:|
+| 请求字段/模型无关校验 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 协议错误 envelope | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 413 body/token 区分 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 503 JSON + `Retry-After:5` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| SSE `text/event-stream` + `no-cache` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| TCP 断连后驱逐与预算释放 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 模型选择 | 启动时固定 | target + draft 启动时固定 | 启动时固定 | 启动时固定 | request model 或默认模型 | request model 或默认模型 |
+| 模型能力完全相同 | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 
 最后一行是有意保留的限制：拓扑统一的是 transport、协议和生命周期契约，不是
 模型架构、sampling、MTP、KV cache 或工具模板能力。具体模型能力仍以
 [`docs/supported-models.md`](supported-models.md) 为准。
+DFlash2 actor 的文本、sampling、并发与隔离边界见
+[`docs/dflash2-server-api.md`](dflash2-server-api.md)。
+App 启用 DFlash2 时使用本表的 DFlash2 actor 拓扑，而非普通 App daemon 拓扑；该模式
+保留只读 `/v1/models` discovery，但不公开动态 `/admin/api/models/*`。
 
 ## SDK 与版本矩阵
 
