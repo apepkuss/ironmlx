@@ -141,6 +141,22 @@ pub enum LayerCacheSnapshot {
 }
 
 impl LayerCache {
+    pub(crate) fn begin_speculative_prefix_capture(&mut self) -> anyhow::Result<()> {
+        match self {
+            LayerCache::Full(_) => Ok(()),
+            LayerCache::Linear(cache) => cache.begin_speculative_prefix_capture(),
+            LayerCache::Mla(_) => {
+                anyhow::bail!("speculative prefix capture does not support MLA cache")
+            }
+        }
+    }
+
+    pub(crate) fn discard_speculative_prefix_capture(&mut self) {
+        if let LayerCache::Linear(cache) = self {
+            cache.discard_speculative_prefix_capture();
+        }
+    }
+
     pub fn enable_turboquant(&mut self, bits: TurboQuantKVBits) -> anyhow::Result<()> {
         if let LayerCache::Full(kv) = self {
             kv.enable_turboquant(bits)?;
@@ -231,6 +247,35 @@ impl LayerCache {
             }
         }
     }
+}
+
+pub(crate) fn adopt_layer_cache_rows(
+    dst: &mut [LayerCache],
+    src: &[LayerCache],
+    dst_row: usize,
+    src_row: usize,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        dst.len() == src.len(),
+        "cache layer count mismatch: destination={} source={}",
+        dst.len(),
+        src.len()
+    );
+    for (dst_layer, src_layer) in dst.iter_mut().zip(src) {
+        match (dst_layer, src_layer) {
+            (LayerCache::Full(dst), LayerCache::Full(src)) => {
+                dst.adopt_row_from(src, dst_row, src_row)?;
+            }
+            (LayerCache::Linear(dst), LayerCache::Linear(src)) => {
+                dst.adopt_row_from(src, dst_row, src_row)?;
+            }
+            (LayerCache::Mla(dst), LayerCache::Mla(src)) => {
+                dst.adopt_row_from(src, dst_row, src_row)?;
+            }
+            _ => anyhow::bail!("cache layer kind mismatch"),
+        }
+    }
+    Ok(())
 }
 
 pub fn enable_turboquant_kv_caches(
@@ -891,6 +936,100 @@ impl DecoderLayer {
         }
     }
 
+    pub(crate) fn restore_speculative_prefix_on(
+        &self,
+        cache: &mut LayerCache,
+        base: &LayerCacheSnapshot,
+        accepted_len: usize,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<()> {
+        match (&self.attn, cache, base) {
+            (AttnPath::Full(_), LayerCache::Full(cache), LayerCacheSnapshot::Full(saved)) => {
+                let accepted_len = i32::try_from(accepted_len)?;
+                anyhow::ensure!(
+                    saved.offsets().len() == cache.offsets().len(),
+                    "Full KV speculative snapshot batch {} != live batch {}",
+                    saved.offsets().len(),
+                    cache.offsets().len()
+                );
+                let mut accepted_offsets = Vec::with_capacity(saved.offsets().len());
+                for (row, (&base_offset, &live_offset)) in
+                    saved.offsets().iter().zip(cache.offsets()).enumerate()
+                {
+                    let accepted_offset =
+                        base_offset.checked_add(accepted_len).ok_or_else(|| {
+                            anyhow::anyhow!("Full KV accepted-prefix offset overflow on row {row}")
+                        })?;
+                    if accepted_offset > live_offset {
+                        anyhow::bail!(
+                            "Full KV accepted offset {accepted_offset} exceeds live offset {live_offset} on row {row}"
+                        );
+                    }
+                    accepted_offsets.push(accepted_offset);
+                }
+                cache.restore_offsets(&accepted_offsets)?;
+                Ok(())
+            }
+            (AttnPath::Linear(attn), LayerCache::Linear(cache), LayerCacheSnapshot::Linear(_)) => {
+                attn.restore_speculative_prefix_on(cache, accepted_len, target)
+            }
+            (AttnPath::Full(_), _, _) => {
+                anyhow::bail!("Full attention received incompatible speculative cache state")
+            }
+            (AttnPath::Linear(_), _, _) => {
+                anyhow::bail!("Linear attention received incompatible speculative cache state")
+            }
+        }
+    }
+
+    pub(crate) fn restore_speculative_prefix_rows_on(
+        &self,
+        cache: &mut LayerCache,
+        base: &LayerCacheSnapshot,
+        accepted_lens: &[usize],
+        target: impl Into<StreamOrDevice>,
+    ) -> anyhow::Result<()> {
+        let target = target.into();
+        match (&self.attn, cache, base) {
+            (AttnPath::Full(_), LayerCache::Full(cache), LayerCacheSnapshot::Full(saved)) => {
+                anyhow::ensure!(
+                    saved.offsets().len() == cache.offsets().len()
+                        && accepted_lens.len() == cache.offsets().len(),
+                    "Full KV per-row speculative restore batch mismatch"
+                );
+                let accepted_offsets = saved
+                    .offsets()
+                    .iter()
+                    .zip(cache.offsets())
+                    .zip(accepted_lens)
+                    .enumerate()
+                    .map(|(row, ((&base_offset, &live_offset), &accepted_len))| {
+                        let accepted_offset = base_offset
+                            .checked_add(i32::try_from(accepted_len)?)
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "Full KV accepted-prefix offset overflow on row {row}"
+                                )
+                            })?;
+                        anyhow::ensure!(
+                            accepted_offset <= live_offset,
+                            "Full KV accepted offset {accepted_offset} exceeds live offset {live_offset} on row {row}"
+                        );
+                        Ok(accepted_offset)
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                cache.restore_offsets(&accepted_offsets)?;
+                Ok(())
+            }
+            (AttnPath::Linear(attn), LayerCache::Linear(cache), LayerCacheSnapshot::Linear(_)) => {
+                attn.restore_speculative_prefix_rows_on(cache, accepted_lens, target)
+            }
+            _ => {
+                anyhow::bail!("DFlash2 per-row restore received incompatible cache state")
+            }
+        }
+    }
+
     /// Pre-flight: enforce rank-3 input + last-axis matches `cfg.hidden_size`.
     /// `caller` is embedded in the diagnostic so callers (forward_on,
     /// forward_on_full_kv) surface in the error string.
@@ -1105,6 +1244,25 @@ impl DecoderLayer {
         cfg: DecoderLayerConfig,
         kind: AttnKind,
     ) -> Result<Self> {
+        Self::from_loader_impl(loader, prefix, cfg, kind, false)
+    }
+
+    pub(crate) fn from_loader_dflash2(
+        loader: &Loader,
+        prefix: &str,
+        cfg: DecoderLayerConfig,
+        kind: AttnKind,
+    ) -> Result<Self> {
+        Self::from_loader_impl(loader, prefix, cfg, kind, true)
+    }
+
+    fn from_loader_impl(
+        loader: &Loader,
+        prefix: &str,
+        cfg: DecoderLayerConfig,
+        kind: AttnKind,
+        dflash2_projection_fusion: bool,
+    ) -> Result<Self> {
         let input_layernorm = RmsNorm::from_loader(
             loader,
             &format!("{prefix}.input_layernorm"),
@@ -1112,33 +1270,47 @@ impl DecoderLayer {
         )?;
         let attn = match kind {
             AttnKind::Full => {
-                let ga = GatedAttention::from_loader(
-                    loader,
-                    &format!("{prefix}.self_attn"),
-                    GatedAttentionConfig {
-                        num_heads: cfg.num_heads,
-                        num_kv_heads: cfg.num_kv_heads,
-                        head_dim: cfg.head_dim,
-                        rms_norm_eps: cfg.rms_norm_eps,
-                        attention_bias: cfg.attention_bias,
-                    },
-                )?;
+                let attention_cfg = GatedAttentionConfig {
+                    num_heads: cfg.num_heads,
+                    num_kv_heads: cfg.num_kv_heads,
+                    head_dim: cfg.head_dim,
+                    rms_norm_eps: cfg.rms_norm_eps,
+                    attention_bias: cfg.attention_bias,
+                };
+                let ga = if dflash2_projection_fusion {
+                    GatedAttention::from_loader_dflash2(
+                        loader,
+                        &format!("{prefix}.self_attn"),
+                        attention_cfg,
+                    )?
+                } else {
+                    GatedAttention::from_loader(
+                        loader,
+                        &format!("{prefix}.self_attn"),
+                        attention_cfg,
+                    )?
+                };
                 AttnPath::Full(Box::new(ga))
             }
             AttnKind::Linear => {
-                let gdn = GatedDeltaNet::from_loader(
-                    loader,
-                    &format!("{prefix}.linear_attn"),
-                    GatedDeltaNetConfig {
-                        hidden_size: cfg.hidden_size,
-                        num_v_heads: cfg.linear_num_value_heads,
-                        num_k_heads: cfg.linear_num_key_heads,
-                        head_k_dim: cfg.linear_key_head_dim,
-                        head_v_dim: cfg.linear_value_head_dim,
-                        conv_kernel_size: cfg.linear_conv_kernel_dim,
-                        rms_norm_eps: cfg.rms_norm_eps,
-                    },
-                )?;
+                let gdn_cfg = GatedDeltaNetConfig {
+                    hidden_size: cfg.hidden_size,
+                    num_v_heads: cfg.linear_num_value_heads,
+                    num_k_heads: cfg.linear_num_key_heads,
+                    head_k_dim: cfg.linear_key_head_dim,
+                    head_v_dim: cfg.linear_value_head_dim,
+                    conv_kernel_size: cfg.linear_conv_kernel_dim,
+                    rms_norm_eps: cfg.rms_norm_eps,
+                };
+                let gdn = if dflash2_projection_fusion {
+                    GatedDeltaNet::from_loader_dflash2(
+                        loader,
+                        &format!("{prefix}.linear_attn"),
+                        gdn_cfg,
+                    )?
+                } else {
+                    GatedDeltaNet::from_loader(loader, &format!("{prefix}.linear_attn"), gdn_cfg)?
+                };
                 AttnPath::Linear(Box::new(gdn))
             }
         };
@@ -1147,7 +1319,11 @@ impl DecoderLayer {
             &format!("{prefix}.post_attention_layernorm"),
             cfg.rms_norm_eps,
         )?;
-        let mlp = Mlp::from_loader(loader, &format!("{prefix}.mlp"))?;
+        let mlp = if dflash2_projection_fusion {
+            Mlp::from_loader_dflash2(loader, &format!("{prefix}.mlp"))?
+        } else {
+            Mlp::from_loader(loader, &format!("{prefix}.mlp"))?
+        };
         Ok(Self {
             input_layernorm,
             attn,

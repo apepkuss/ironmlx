@@ -98,6 +98,7 @@ public struct DiagnosticRuntimeHealth: Codable, Sendable, Equatable {
     public var scheduler: HealthzSnapshot.SchedulerInfo?
     public var memory: HealthzSnapshot.MemoryInfo?
     public var activeKV: DiagnosticActiveKV?
+    public var dflash2: HealthzSnapshot.DFlash2Info?
     public var loadedModels: [DiagnosticLoadedModel]
 
     enum CodingKeys: String, CodingKey {
@@ -110,6 +111,7 @@ public struct DiagnosticRuntimeHealth: Codable, Sendable, Equatable {
         case scheduler
         case memory
         case activeKV = "active_kv"
+        case dflash2
         case loadedModels = "loaded_models"
     }
 }
@@ -165,6 +167,7 @@ public struct DiagnosticLoadedModel: Codable, Sendable, Equatable {
     public var isDefault: Bool
     public var pinned: Bool
     public var mtpEnabled: Bool
+    public var dflash2Enabled: Bool
     public var activeRequests: Int
     public var queuedRequests: Int
     public var queueCapacity: Int
@@ -179,6 +182,7 @@ public struct DiagnosticLoadedModel: Codable, Sendable, Equatable {
         case isDefault = "is_default"
         case pinned
         case mtpEnabled = "mtp_enabled"
+        case dflash2Enabled = "dflash2_enabled"
         case activeRequests = "active_requests"
         case queuedRequests = "queued_requests"
         case queueCapacity = "queue_capacity"

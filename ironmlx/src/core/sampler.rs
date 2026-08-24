@@ -298,6 +298,17 @@ impl Sampler {
             && self.presence_penalty.is_none()
     }
 
+    pub(crate) fn requires_sampling_history(&self) -> bool {
+        self.repetition_penalty
+            .is_some_and(|penalty| (penalty - 1.0).abs() > f32::EPSILON)
+            || self
+                .frequency_penalty
+                .is_some_and(|penalty| penalty.abs() > f32::EPSILON)
+            || self
+                .presence_penalty
+                .is_some_and(|penalty| penalty.abs() > f32::EPSILON)
+    }
+
     /// Returns `true` iff this sampler can be driven by the pipelined
     /// (async-eval) decode path. The pipelined path requires:
     /// - greedy short-circuit active (`temperature <= 0.0`)
@@ -411,6 +422,109 @@ pub(crate) fn sample_target_tokens_with_uniforms_batch(
     histories: &[&[u32]],
     uniforms: &[f32],
 ) -> Result<Vec<u32>> {
+    prepare_target_tokens_with_uniforms_batch(samplers, logits, histories)?.sample(uniforms)
+}
+
+pub(crate) struct PreparedTargetTokenSampling {
+    probabilities: Array,
+    compact_probabilities: Option<Array>,
+    compact_indices: Option<Array>,
+    top_p: Vec<f32>,
+    min_p: Vec<f32>,
+    rows: usize,
+    vocab: usize,
+}
+
+impl PreparedTargetTokenSampling {
+    pub(crate) fn probabilities(&self) -> &Array {
+        &self.probabilities
+    }
+
+    pub(crate) fn compact_probabilities(&self) -> Option<&Array> {
+        self.compact_probabilities.as_ref()
+    }
+
+    pub(crate) fn compact_indices(&self) -> Option<&Array> {
+        self.compact_indices.as_ref()
+    }
+
+    pub(crate) fn sample(self, uniforms: &[f32]) -> Result<Vec<u32>> {
+        anyhow::ensure!(
+            uniforms.len() == self.rows
+                && uniforms
+                    .iter()
+                    .all(|uniform| uniform.is_finite() && (0.0..1.0).contains(uniform)),
+            "target token sampling requires one finite [0, 1) uniform per row"
+        );
+        let mut compact_supports = if let (Some(probabilities), Some(indices)) =
+            (self.compact_probabilities, self.compact_indices)
+        {
+            let candidate_shape = probabilities.shape();
+            let candidate_width = candidate_shape.as_slice()[1] as usize;
+            let probabilities = probabilities.to_vec::<f32>()?;
+            let indices = indices.to_vec::<u32>()?;
+            (0..self.rows)
+                .map(|row| {
+                    let start = row * candidate_width;
+                    let end = start + candidate_width;
+                    filter_sampling_support_compact(
+                        &probabilities[start..end],
+                        &indices[start..end],
+                        self.top_p[row],
+                        self.min_p[row],
+                        self.vocab,
+                    )
+                })
+                .collect::<Vec<_>>()
+        } else {
+            vec![None; self.rows]
+        };
+        let needs_full_probabilities = compact_supports.iter().any(Option::is_none);
+        let probs_flat = needs_full_probabilities
+            .then(|| self.probabilities.to_vec::<f32>())
+            .transpose()?;
+        std::thread::scope(|scope| {
+            let handles = (0..self.rows)
+                .map(|row| {
+                    let compact_support = compact_supports[row].take();
+                    let probs = probs_flat
+                        .as_ref()
+                        .map(|probs| &probs[row * self.vocab..(row + 1) * self.vocab]);
+                    let top_p = self.top_p[row];
+                    let min_p = self.min_p[row];
+                    let uniform = uniforms[row];
+                    scope.spawn(move || {
+                        let support = if let Some(support) = compact_support {
+                            support
+                        } else {
+                            let probs = probs.ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "full probabilities missing for compact sampling fallback"
+                                )
+                            })?;
+                            filter_sampling_support(probs, top_p, min_p)
+                        };
+                        sample_unnormalized_support(&support, uniform)
+                    })
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle
+                        .join()
+                        .map_err(|_| anyhow::anyhow!("target token sampling worker panicked"))?
+                })
+                .collect()
+        })
+    }
+}
+
+pub(crate) fn prepare_target_tokens_with_uniforms_batch(
+    samplers: &[&Sampler],
+    logits: &Array,
+    histories: &[&[u32]],
+) -> Result<PreparedTargetTokenSampling> {
     let dims_owned = logits.shape();
     let dims = dims_owned.as_slice();
     anyhow::ensure!(
@@ -421,21 +535,14 @@ pub(crate) fn sample_target_tokens_with_uniforms_batch(
     let vocab_i32 = dims[1];
     let vocab = vocab_i32 as usize;
     anyhow::ensure!(
-        samplers.len() == b && histories.len() == b && uniforms.len() == b,
-        "target token sampling rows do not match batch {b}: {} samplers, {} histories, {} uniforms",
+        samplers.len() == b && histories.len() == b,
+        "target token sampling rows do not match batch {b}: {} samplers, {} histories",
         samplers.len(),
-        histories.len(),
-        uniforms.len()
+        histories.len()
     );
     anyhow::ensure!(
         samplers.iter().all(|sampler| sampler.temperature > 0.0),
         "target token sampling requires temperature > 0"
-    );
-    anyhow::ensure!(
-        uniforms
-            .iter()
-            .all(|uniform| uniform.is_finite() && (0.0..1.0).contains(uniform)),
-        "target token sampling uniforms must be finite and in [0, 1)"
     );
     let configs = collect_per_row_configs(samplers, vocab_i32)?;
     let history_count = if configs.need_history {
@@ -446,31 +553,56 @@ pub(crate) fn sample_target_tokens_with_uniforms_batch(
     let logits = apply_penalties(logits, history_count.as_ref(), &configs)?;
     let logits = apply_temperature(&logits, &configs.temp)?;
     let logits = apply_top_k_batched(&logits, &configs.top_k)?;
-    let probs_flat: Vec<f32> = apply_softmax(&logits)?.to_vec()?;
-
-    std::thread::scope(|scope| {
-        let handles = (0..b)
-            .map(|row| {
-                let probs = &probs_flat[row * vocab..(row + 1) * vocab];
-                scope.spawn(move || {
-                    let support = filter_sampling_support(
-                        probs,
-                        samplers[row].top_p.unwrap_or(1.0),
-                        samplers[row].min_p.unwrap_or(0.0),
-                    );
-                    sample_unnormalized_support(&support, uniforms[row])
-                })
-            })
-            .collect::<Vec<_>>();
-        handles
-            .into_iter()
-            .map(|handle| {
-                handle
-                    .join()
-                    .map_err(|_| anyhow::anyhow!("target token sampling worker panicked"))?
-            })
-            .collect()
+    let probabilities = apply_softmax(&logits)?;
+    let (compact_probabilities, compact_indices) = prepare_compact_sampling_candidates(
+        &probabilities,
+        samplers
+            .iter()
+            .all(|sampler| sampler.top_p.is_some_and(|top_p| top_p < 1.0)),
+    )?;
+    Ok(PreparedTargetTokenSampling {
+        probabilities,
+        compact_probabilities,
+        compact_indices,
+        top_p: samplers
+            .iter()
+            .map(|sampler| sampler.top_p.unwrap_or(1.0))
+            .collect(),
+        min_p: samplers
+            .iter()
+            .map(|sampler| sampler.min_p.unwrap_or(0.0))
+            .collect(),
+        rows: b,
+        vocab,
     })
+}
+
+const COMPACT_SAMPLING_CANDIDATES: usize = 512;
+
+fn prepare_compact_sampling_candidates(
+    probabilities: &Array,
+    all_rows_use_top_p: bool,
+) -> Result<(Option<Array>, Option<Array>)> {
+    if !all_rows_use_top_p {
+        return Ok((None, None));
+    }
+    let shape = probabilities.shape();
+    let dims = shape.as_slice();
+    let rows = dims[0];
+    let vocab = dims[1] as usize;
+    let width = COMPACT_SAMPLING_CANDIDATES + 1;
+    if vocab <= width {
+        return Ok((None, None));
+    }
+    let indices = mlx::ops::sort::argpartition(probabilities, -(width as i32), -1)?;
+    let indices = indexing::slice_strided(
+        &indices,
+        &[0_i32, i32::try_from(vocab - width)?][..],
+        &[rows, i32::try_from(vocab)?][..],
+        &[1_i32, 1][..],
+    )?;
+    let candidate_probabilities = indexing::take_along_axis(probabilities, &indices, -1)?;
+    Ok((Some(candidate_probabilities), Some(indices)))
 }
 
 /// Batched per-row sampling for `Scheduler::step` and
@@ -780,6 +912,64 @@ fn configured_distributions(
 
 const INITIAL_SAMPLING_CANDIDATES: usize = 32;
 
+fn filter_sampling_support_compact(
+    probabilities: &[f32],
+    indices: &[u32],
+    top_p: f32,
+    min_p: f32,
+    vocab: usize,
+) -> Option<Vec<(u32, f32)>> {
+    if probabilities.len() != indices.len() || probabilities.len() < 2 {
+        return None;
+    }
+    let mut indexed = probabilities
+        .iter()
+        .copied()
+        .zip(indices.iter().copied())
+        .collect::<Vec<_>>();
+    if indexed
+        .iter()
+        .any(|&(probability, token)| !probability.is_finite() || token as usize >= vocab)
+    {
+        return None;
+    }
+    indexed.sort_unstable_by(|left, right| {
+        right
+            .0
+            .partial_cmp(&left.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let candidate_limit = indexed.len() - 1;
+    let outside_upper_bound = indexed[candidate_limit].0;
+    let candidates = &indexed[..candidate_limit];
+    let mut cumulative = 0.0_f32;
+    let mut keep_count = candidate_limit;
+    for (index, &(probability, _)) in candidates.iter().enumerate() {
+        if cumulative >= top_p {
+            keep_count = index;
+            break;
+        }
+        cumulative += probability;
+    }
+    if cumulative < top_p || keep_count == 0 || outside_upper_bound >= candidates[keep_count - 1].0
+    {
+        return None;
+    }
+    let nucleus = &candidates[..keep_count];
+    let min_p_threshold = min_p * nucleus[0].0;
+    let mut support = nucleus
+        .iter()
+        .filter_map(|&(probability, token)| {
+            (probability > 0.0 && probability >= min_p_threshold).then_some((token, probability))
+        })
+        .collect::<Vec<_>>();
+    if support.is_empty() {
+        support.push((nucleus[0].1, 1.0));
+    }
+    support.sort_unstable_by_key(|&(token, _)| token);
+    Some(support)
+}
+
 fn filter_sampling_support(probs: &[f32], top_p: f32, min_p: f32) -> Vec<(u32, f32)> {
     let vocab = probs.len();
     if top_p >= 1.0 {
@@ -907,13 +1097,17 @@ pub(crate) fn draw_uniform(prng_state_row: &mut Array) -> Result<f32> {
 }
 
 pub(crate) fn draw_uniforms(prng_state_row: &mut Array, count: usize) -> Result<Vec<f32>> {
+    Ok(prepare_uniforms(prng_state_row, count)?.to_vec()?)
+}
+
+pub(crate) fn prepare_uniforms(prng_state_row: &mut Array, count: usize) -> Result<Array> {
     anyhow::ensure!(
         prng_state_row.size() == 2,
         "uniform PRNG state must contain one two-word key, got shape {:?}",
         prng_state_row.shape().as_slice()
     );
     if count == 0 {
-        return Ok(Vec::new());
+        return Ok(Array::zeros(&[0_i32][..], mlx::Dtype::Float32)?);
     }
     let original_shape = prng_state_row.shape().as_slice().to_vec();
     let flat_key = prng_state_row.reshape(&[2_i32][..])?;
@@ -923,9 +1117,8 @@ pub(crate) fn draw_uniforms(prng_state_row: &mut Array, count: usize) -> Result<
         .dtype(mlx::Dtype::Float32)
         .key(&sample_key)
         .sample()?;
-    let uniforms = u_arr.to_vec()?;
     *prng_state_row = next_key.reshape(original_shape.as_slice())?;
-    Ok(uniforms)
+    Ok(u_arr)
 }
 
 // ── T2: batched ops over [B, vocab] ─────────────────────────────────────────
@@ -1957,7 +2150,7 @@ mod tests {
 
     #[test]
     fn target_token_sampling_matches_distribution_sampling() {
-        let vocab = 257_i32;
+        let vocab = 1021_i32;
         let rows = 3_i32;
         let logits_host = (0..rows * vocab)
             .map(|index| ((index * 37 % 509) as f32 - 254.0) * 0.017)
@@ -1992,6 +2185,57 @@ mod tests {
                 .expect("sample target tokens");
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn sampling_history_is_required_only_for_effective_penalties() {
+        let no_op = Sampler::greedy()
+            .with_repetition_penalty(1.0)
+            .with_frequency_penalty(0.0)
+            .with_presence_penalty(0.0);
+        assert!(!no_op.requires_sampling_history());
+        assert!(Sampler::greedy()
+            .with_repetition_penalty(1.01)
+            .requires_sampling_history());
+        assert!(Sampler::greedy()
+            .with_frequency_penalty(-0.01)
+            .requires_sampling_history());
+        assert!(Sampler::greedy()
+            .with_presence_penalty(0.01)
+            .requires_sampling_history());
+    }
+
+    #[test]
+    fn compact_sampling_support_matches_full_nucleus_when_boundary_is_strict() {
+        let probabilities = [0.10_f32, 0.20, 0.30, 0.40, 0.0];
+        let indices = [3_u32, 0, 4, 2, 1];
+        let compact = filter_sampling_support_compact(
+            &probabilities,
+            &indices,
+            0.8,
+            0.0,
+            probabilities.len(),
+        )
+        .expect("strict boundary should use compact support");
+        let full = filter_sampling_support(&[0.20_f32, 0.0, 0.40, 0.10, 0.30], 0.8, 0.0);
+
+        assert_eq!(compact, full);
+    }
+
+    #[test]
+    fn compact_sampling_support_falls_back_on_boundary_tie_or_missing_mass() {
+        assert!(
+            filter_sampling_support_compact(&[0.4_f32, 0.2, 0.2], &[0_u32, 1, 2], 0.5, 0.0, 3,)
+                .is_none()
+        );
+        assert!(filter_sampling_support_compact(
+            &[0.01_f32; 8],
+            &[0_u32, 1, 2, 3, 4, 5, 6, 7],
+            0.95,
+            0.0,
+            8,
+        )
+        .is_none());
     }
 
     #[test]

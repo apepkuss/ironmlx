@@ -302,6 +302,7 @@ async fn anthropic_actor_scheduler_path_emits_6_event_sequence() {
         kv_cache_resident_cap_tokens: handle.kv_cache_resident_cap_tokens,
         kv_cache_budget_policy: handle.kv_cache_budget_policy.to_string(),
         mtp: ironmlx::core::server::health::MtpHealthConfig::disabled(),
+        dflash2: ironmlx::core::server::health::DFlash2HealthConfig::disabled(),
         prompt_lookup: ironmlx::core::server::health::PromptLookupHealthConfig::disabled(),
         active_kv_offload: handle.active_kv_offload.clone(),
         immutable_prefix_blocks: handle.immutable_prefix_blocks.clone(),
@@ -314,7 +315,9 @@ async fn anthropic_actor_scheduler_path_emits_6_event_sequence() {
         vision_input: VisionInputConfig::Qwen {
             spatial_merge_size: 2,
         },
-        scheduler_handle: handle.clone(),
+        request_execution: ironmlx::core::server::RequestExecutionHandle::Scheduler(Arc::new(
+            handle.clone(),
+        )),
         paged_prefix_cache_enabled: false,
         b_max: 4,
         admission_deadline_ms: 5,

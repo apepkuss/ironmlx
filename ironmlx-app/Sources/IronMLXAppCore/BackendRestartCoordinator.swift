@@ -104,6 +104,28 @@ public struct BackendRestartCoordinator: Sendable {
 
     public func restore(_ snapshot: BackendRecoverySnapshot) async -> BackendRestartResult {
         let config = snapshot.config
+        if let dflash2Model = snapshot.models.first(where: { $0.dflash2ModelDir != nil }) {
+            let invalidShape = snapshot.models.count != 1 || !dflash2Model.isDefault
+            if invalidShape {
+                return BackendRestartResult(
+                    success: false,
+                    status: "dflash2_restore_invalid",
+                    port: config.port,
+                    model: dflash2Model.id,
+                    failedModels: snapshot.models.map(\.id),
+                    errorCode: "dflash2_requires_exclusive_model",
+                    error: "DFlash2 App mode requires exactly one default target model."
+                )
+            }
+            return BackendRestartResult(
+                success: true,
+                status: "dflash2_model_loaded",
+                port: config.port,
+                model: dflash2Model.id,
+                modelLoaded: true,
+                loadedModels: [dflash2Model.id]
+            )
+        }
         let client = clientFactory(config.host, config.port)
         let pinnedModels = Set(config.pinnedModelReferences)
         let localModels = scanner.scan(

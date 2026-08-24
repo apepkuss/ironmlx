@@ -128,6 +128,12 @@ impl ApiError {
 
     pub(crate) fn scheduler_admission(error: anyhow::Error) -> Self {
         let message = format!("{error:#}");
+        if error
+            .downcast_ref::<crate::core::dflash2::DFlash2RequestError>()
+            .is_some()
+        {
+            return Self::invalid_request("dflash2_request_rejected", message);
+        }
         match error.downcast_ref::<SchedulerError>() {
             Some(SchedulerError::QueueFull { .. }) => {
                 Self::service_unavailable("scheduler_queue_full", message)
@@ -349,6 +355,22 @@ mod tests {
             "request_token_capacity_exceeded"
         );
         assert_eq!(token_limit["error"]["details"]["input_tokens"], 64);
+    }
+
+    #[tokio::test]
+    async fn dflash2_policy_rejection_has_stable_code() {
+        let response = ApiError::scheduler_admission(anyhow::Error::new(
+            crate::core::dflash2::DFlash2RequestError::VisionUnsupported,
+        ))
+        .into_response(ApiProtocol::OpenAi);
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = json(response).await;
+        assert_eq!(body["error"]["code"], "dflash2_request_rejected");
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("text-only"));
     }
 
     #[test]

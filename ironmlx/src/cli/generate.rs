@@ -15,7 +15,9 @@ use crate::core::speculative::{
     resolve_mtp_draft_tokens, MtpDraftTokensArg, MtpSpeculativeConfig, MtpSpeculativeModel,
     MtpTextGenerationStream,
 };
-use crate::core::{Loader, Message, Model, Phase, Scheduler, StepEvent, Tokenizer};
+use crate::core::{
+    DFlash2TextGenerationStream, Loader, Message, Model, Phase, Scheduler, StepEvent, Tokenizer,
+};
 use crate::models::qwen3_5::image_processor;
 use crate::Result;
 
@@ -67,6 +69,21 @@ pub struct GenerateArgs {
     /// Gemma4 assistant drafter weights for greedy or exact sampled speculative decoding.
     #[arg(long = "mtp-model-dir")]
     pub mtp_model_dir: Option<PathBuf>,
+
+    /// Official DFlash2 draft checkpoint directory. This selects the isolated,
+    /// text-only DFlash2 path with greedy or exact sampled decoding.
+    #[arg(long = "dflash2-model-dir")]
+    pub dflash2_model_dir: Option<PathBuf>,
+
+    /// DFlash2 proposal block width. Current MLX quantized target kernels are
+    /// fastest at width 4 for the official Qwen3.8 checkpoint.
+    #[arg(long, default_value_t = 4)]
+    pub dflash2_block_size: usize,
+
+    /// Runtime affine quantization for the official BF16 DFlash2 draft. Zero
+    /// keeps BF16; 4 and 8 select the supported quantized variants.
+    #[arg(long, default_value_t = 4)]
+    pub dflash2_draft_bits: i32,
 
     /// Maximum MTP draft tokens per speculative window. If omitted, ironmlx
     /// picks a model-aware default from local benchmark policy.
@@ -312,6 +329,44 @@ fn ensure_mtp_generation_supported(
     }
 }
 
+fn ensure_dflash2_generation_supported(
+    architecture: crate::models::ModelArchitecture,
+    args: &GenerateArgs,
+) -> Result<()> {
+    if args.dflash2_model_dir.is_none() {
+        return Ok(());
+    }
+    if args.mtp_model_dir.is_some() || args.mtp_draft_tokens.is_some() {
+        return Err(anyhow!(
+            "--dflash2-model-dir cannot be combined with MTP arguments"
+        ));
+    }
+    if architecture != crate::models::ModelArchitecture::Qwen35Dense {
+        return Err(anyhow!(
+            "--dflash2-model-dir currently supports dense Qwen3.5 targets only"
+        ));
+    }
+    if !args.images.is_empty() {
+        return Err(anyhow!(
+            "--dflash2-model-dir is text-only and cannot be combined with --image"
+        ));
+    }
+    if args.kv_quant.turboquant_bits().is_some() {
+        return Err(anyhow!(
+            "--dflash2-model-dir P0-P2 has not qualified --kv-quant"
+        ));
+    }
+    if !(2..=8).contains(&args.dflash2_block_size) {
+        return Err(anyhow!(
+            "--dflash2-block-size must be in [2, 8] for the official Qwen3.8 draft"
+        ));
+    }
+    if !matches!(args.dflash2_draft_bits, 0 | 4 | 8) {
+        return Err(anyhow!("--dflash2-draft-bits must be one of 0, 4, or 8"));
+    }
+    Ok(())
+}
+
 fn build_sampler(args: &GenerateArgs) -> Sampler {
     let mut sampler = Sampler::greedy();
     if args.temperature > 0.0 {
@@ -403,6 +458,45 @@ fn run_generation_with_model<M: Model + DenseVlMethods>(
         GenerationStream::new_text_only(model, tokenizer, request)?
     };
     write_generation_events(|| stream.next_token())
+}
+
+fn run_generation_with_dflash2_model(
+    model: &crate::models::Qwen35Model,
+    tokenizer: &Tokenizer,
+    loader: &Loader,
+    model_type: &str,
+    args: &GenerateArgs,
+) -> Result<()> {
+    let request = build_generate_request(model, tokenizer, loader, model_type, args)?;
+    let draft_dir = args.dflash2_model_dir.as_ref().ok_or_else(|| {
+        anyhow!("run_generation_with_dflash2_model called without --dflash2-model-dir")
+    })?;
+    if !draft_dir.is_dir() {
+        return Err(anyhow!(
+            "--dflash2-model-dir must point to a local directory (got '{}')",
+            draft_dir.display()
+        ));
+    }
+    let draft_loader = Loader::open_dflash2(draft_dir).context("Loader::open_dflash2")?;
+    let draft_bits = (args.dflash2_draft_bits != 0).then_some(args.dflash2_draft_bits);
+    let draft =
+        crate::models::DFlash2DraftModel::from_loader(&draft_loader, model.config(), draft_bits)
+            .context("DFlash2DraftModel::from_loader")?;
+    drop(draft_loader);
+    mlx::clear_cache();
+    let mut stream = DFlash2TextGenerationStream::new_text_only(
+        model,
+        &draft,
+        tokenizer,
+        request,
+        args.dflash2_block_size,
+    )?;
+    write_generation_events(|| stream.next_token())?;
+    eprintln!(
+        "ironmlx generate: dflash2_metrics {}",
+        serde_json::to_string(&stream.metrics())?
+    );
+    Ok(())
 }
 
 fn scheduler_step_event_to_generate_event(
@@ -650,7 +744,7 @@ pub fn run(args: GenerateArgs) -> Result<()> {
             args.model
         ));
     }
-    let loader = if args.images.is_empty() {
+    let mut loader = if args.images.is_empty() {
         Loader::open(&model_dir).context("Loader::open")?
     } else {
         Loader::open_multimodal(&model_dir).context("Loader::open_multimodal")?
@@ -661,12 +755,20 @@ pub fn run(args: GenerateArgs) -> Result<()> {
         crate::models::ModelArchitecture::from_config_value(loader.config_raw_value())?;
     let model_type = architecture.model_type();
     ensure_mtp_generation_supported(architecture, !args.images.is_empty(), &args)?;
+    ensure_dflash2_generation_supported(architecture, &args)?;
 
     match architecture {
         crate::models::ModelArchitecture::Qwen35Dense => {
-            let model = crate::models::Qwen35Model::from_loader(&loader)
-                .context("Qwen35Model::from_loader")?;
-            if args.mtp_model_dir.is_some() {
+            let model = if args.dflash2_model_dir.is_some() {
+                crate::models::Qwen35Model::from_loader_dflash2(&mut loader)
+                    .context("Qwen35Model::from_loader_dflash2")?
+            } else {
+                crate::models::Qwen35Model::from_loader(&loader)
+                    .context("Qwen35Model::from_loader")?
+            };
+            if args.dflash2_model_dir.is_some() {
+                run_generation_with_dflash2_model(&model, &tokenizer, &loader, model_type, &args)
+            } else if args.mtp_model_dir.is_some() {
                 run_generation_with_mtp_model(&model, &tokenizer, &loader, model_type, &args)
             } else {
                 run_generation_with_model(&model, &tokenizer, &loader, model_type, &args)
@@ -782,7 +884,10 @@ mod tests {
         let default_cli =
             GenerateTestCli::parse_from(["test", "--model", "/tmp/model", "--prompt", "hello"]);
         assert!(default_cli.args.mtp_model_dir.is_none());
+        assert!(default_cli.args.dflash2_model_dir.is_none());
         assert_eq!(default_cli.args.mtp_draft_tokens, None);
+        assert_eq!(default_cli.args.dflash2_block_size, 4);
+        assert_eq!(default_cli.args.dflash2_draft_bits, 4);
 
         let enabled_cli = GenerateTestCli::parse_from([
             "test",
@@ -800,6 +905,68 @@ mod tests {
             Some(std::path::Path::new("/tmp/mtp"))
         );
         assert_eq!(enabled_cli.args.mtp_draft_tokens, Some(6));
+    }
+
+    #[test]
+    fn dflash2_arg_parses_and_policy_is_strictly_isolated() {
+        let mut args = GenerateTestCli::parse_from([
+            "test",
+            "--model",
+            "/tmp/model",
+            "--prompt",
+            "hello",
+            "--dflash2-model-dir",
+            "/tmp/dflash2",
+        ])
+        .args;
+        assert_eq!(
+            args.dflash2_model_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/dflash2"))
+        );
+        assert!(ensure_dflash2_generation_supported(
+            crate::models::ModelArchitecture::Qwen35Dense,
+            &args
+        )
+        .is_ok());
+
+        let architecture_error =
+            ensure_dflash2_generation_supported(crate::models::ModelArchitecture::Qwen35Moe, &args)
+                .expect_err("reject non-dense target");
+        assert!(architecture_error.to_string().contains("dense Qwen3.5"));
+
+        args.temperature = 0.8;
+        assert!(ensure_dflash2_generation_supported(
+            crate::models::ModelArchitecture::Qwen35Dense,
+            &args,
+        )
+        .is_ok());
+
+        args.temperature = 0.0;
+        args.mtp_model_dir = Some(PathBuf::from("/tmp/mtp"));
+        let isolation_error = ensure_dflash2_generation_supported(
+            crate::models::ModelArchitecture::Qwen35Dense,
+            &args,
+        )
+        .expect_err("reject MTP combination");
+        assert!(isolation_error.to_string().contains("cannot be combined"));
+
+        args.mtp_model_dir = None;
+        args.dflash2_block_size = 1;
+        let block_error = ensure_dflash2_generation_supported(
+            crate::models::ModelArchitecture::Qwen35Dense,
+            &args,
+        )
+        .expect_err("reject invalid block size");
+        assert!(block_error.to_string().contains("must be in [2, 8]"));
+
+        args.dflash2_block_size = 5;
+        args.dflash2_draft_bits = 6;
+        let draft_bits_error = ensure_dflash2_generation_supported(
+            crate::models::ModelArchitecture::Qwen35Dense,
+            &args,
+        )
+        .expect_err("reject unsupported draft quantization");
+        assert!(draft_bits_error.to_string().contains("0, 4, or 8"));
     }
 
     #[test]

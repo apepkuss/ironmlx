@@ -144,8 +144,9 @@ fn available_budget_bytes_for_total_ram(meta: &ModelMeta, total_ram_bytes: usize
 
 #[derive(Debug, Error)]
 #[error(
-    "memory budget exceeded: b_max={b_max} × resident_cap={resident_cap} × \
-     {bytes_per_token} bytes/token = {requested_bytes} bytes > available {available_bytes} \
+    "memory budget exceeded: b_max={b_max} × (resident_cap={resident_cap} × \
+     {bytes_per_token} bytes/token + {fixed_bytes_per_sequence} fixed bytes/sequence) = \
+     {requested_bytes} bytes > available {available_bytes} \
      (logical cap {cap}, policy {policy}, total RAM {total_ram_bytes} - model {model_weight_bytes} - safety margin 2147483648). \
      Lower --b-max or --max-cache-cap."
 )]
@@ -155,6 +156,7 @@ pub struct MemoryBudgetError {
     pub resident_cap: usize,
     pub policy: &'static str,
     pub bytes_per_token: usize,
+    pub fixed_bytes_per_sequence: usize,
     pub requested_bytes: usize,
     pub available_bytes: usize,
     pub total_ram_bytes: usize,
@@ -271,15 +273,36 @@ pub fn validate_startup_budget_with_policy(
     meta: &ModelMeta,
     policy: KvBudgetPolicy,
 ) -> Result<BudgetState, MemoryBudgetError> {
-    validate_startup_budget_with_policy_for_total_ram(
+    validate_startup_budget_with_cost_for_total_ram(
         b_max,
         effective_cap_max,
         meta,
+        kv_bytes_per_token(meta),
+        0,
         policy,
         system_total_ram_bytes(),
     )
 }
 
+pub(crate) fn validate_startup_budget_with_cost(
+    b_max: usize,
+    effective_cap_max: usize,
+    meta: &ModelMeta,
+    bytes_per_token: usize,
+    fixed_bytes_per_sequence: usize,
+) -> Result<BudgetState, MemoryBudgetError> {
+    validate_startup_budget_with_cost_for_total_ram(
+        b_max,
+        effective_cap_max,
+        meta,
+        bytes_per_token,
+        fixed_bytes_per_sequence,
+        KvBudgetPolicy::FullResident,
+        system_total_ram_bytes(),
+    )
+}
+
+#[cfg(test)]
 fn validate_startup_budget_with_policy_for_total_ram(
     b_max: usize,
     effective_cap_max: usize,
@@ -287,11 +310,31 @@ fn validate_startup_budget_with_policy_for_total_ram(
     policy: KvBudgetPolicy,
     total_ram_bytes: usize,
 ) -> Result<BudgetState, MemoryBudgetError> {
-    let bytes_per_token = kv_bytes_per_token(meta);
+    validate_startup_budget_with_cost_for_total_ram(
+        b_max,
+        effective_cap_max,
+        meta,
+        kv_bytes_per_token(meta),
+        0,
+        policy,
+        total_ram_bytes,
+    )
+}
+
+fn validate_startup_budget_with_cost_for_total_ram(
+    b_max: usize,
+    effective_cap_max: usize,
+    meta: &ModelMeta,
+    bytes_per_token: usize,
+    fixed_bytes_per_sequence: usize,
+    policy: KvBudgetPolicy,
+    total_ram_bytes: usize,
+) -> Result<BudgetState, MemoryBudgetError> {
     let resident_cap = policy.resident_cap(effective_cap_max);
-    let requested = b_max
-        .saturating_mul(resident_cap)
-        .saturating_mul(bytes_per_token);
+    let requested_per_sequence = resident_cap
+        .saturating_mul(bytes_per_token)
+        .saturating_add(fixed_bytes_per_sequence);
+    let requested = b_max.saturating_mul(requested_per_sequence);
     let available = available_budget_bytes_for_total_ram(meta, total_ram_bytes);
     if requested > available {
         return Err(MemoryBudgetError {
@@ -300,6 +343,7 @@ fn validate_startup_budget_with_policy_for_total_ram(
             resident_cap,
             policy: policy.name(),
             bytes_per_token,
+            fixed_bytes_per_sequence,
             requested_bytes: requested,
             available_bytes: available,
             total_ram_bytes,
@@ -431,6 +475,39 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("memory budget exceeded"), "msg: {msg}");
         assert!(msg.contains("Lower --b-max"), "msg: {msg}");
+    }
+
+    #[test]
+    fn custom_cache_cost_includes_fixed_per_sequence_state() {
+        let meta = meta();
+        let total_ram = meta
+            .weight_bytes
+            .saturating_add(SAFETY_MARGIN_BYTES)
+            .saturating_add(1_000);
+        let accepted = validate_startup_budget_with_cost_for_total_ram(
+            2,
+            100,
+            &meta,
+            2,
+            300,
+            KvBudgetPolicy::FullResident,
+            total_ram,
+        )
+        .expect("2 × (100 × 2 + 300) exactly fits");
+        assert_eq!(accepted.soft_limit(), 1_000);
+
+        let rejected = validate_startup_budget_with_cost_for_total_ram(
+            2,
+            100,
+            &meta,
+            2,
+            301,
+            KvBudgetPolicy::FullResident,
+            total_ram,
+        )
+        .expect_err("fixed sequence state must participate in startup admission");
+        assert_eq!(rejected.fixed_bytes_per_sequence, 301);
+        assert_eq!(rejected.requested_bytes, 1_002);
     }
 
     #[test]

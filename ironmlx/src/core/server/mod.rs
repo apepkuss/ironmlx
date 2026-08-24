@@ -6,9 +6,9 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use axum::{routing::get, routing::post, Router};
+use axum::{extract::State, routing::get, routing::post, Json, Router};
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot, Mutex};
 
 use crate::core::cache::{
     ActiveKvOffloadConfig, PagedPrefixCacheConfig, PrefixLruCacheConfig, TurboQuantKVBits,
@@ -29,6 +29,7 @@ pub mod anthropic;
 pub(crate) mod api_error;
 pub(crate) mod api_transport;
 pub mod chat_format;
+pub(crate) mod dflash2_actor;
 pub mod diffusion_gemma;
 pub mod engine;
 pub mod health;
@@ -39,6 +40,69 @@ pub mod scheduler_actor;
 pub mod security;
 pub(crate) mod structured_output;
 pub mod vision;
+
+#[derive(Clone)]
+pub enum RequestExecutionHandle {
+    Scheduler(Arc<scheduler_actor::SchedulerActorHandle>),
+    DFlash2(Arc<dflash2_actor::DFlash2ActorHandle>),
+}
+
+pub(crate) enum RequestAdmissionError {
+    Rejected(anyhow::Error),
+    Unavailable,
+    ReplyLost,
+}
+
+impl RequestExecutionHandle {
+    pub(crate) fn is_dflash2(&self) -> bool {
+        matches!(self, Self::DFlash2(_))
+    }
+
+    pub(crate) fn active_and_queued(&self) -> (usize, usize) {
+        let (active, queued) = match self {
+            Self::Scheduler(handle) => (&handle.b_active, &handle.b_queued),
+            Self::DFlash2(handle) => (&handle.b_active, &handle.b_queued),
+        };
+        (
+            active.load(Ordering::Relaxed) as usize,
+            queued.load(Ordering::Relaxed) as usize,
+        )
+    }
+
+    pub(crate) async fn admit(
+        &self,
+        request: crate::core::generate::GenerateRequest,
+    ) -> std::result::Result<scheduler_actor::AdmitReply, RequestAdmissionError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        match self {
+            Self::Scheduler(handle) => handle
+                .cmd_tx
+                .send(scheduler_actor::SchedulerCommand::Admit { request, reply_tx })
+                .await
+                .map_err(|_| RequestAdmissionError::Unavailable)?,
+            Self::DFlash2(handle) => match handle.enqueue(request, reply_tx) {
+                Ok(()) => {}
+                Err(dflash2_actor::DFlash2EnqueueError::QueueFull(error)) => {
+                    return Err(RequestAdmissionError::Rejected(error));
+                }
+                Err(dflash2_actor::DFlash2EnqueueError::Unavailable) => {
+                    return Err(RequestAdmissionError::Unavailable);
+                }
+            },
+        }
+        reply_rx
+            .await
+            .map_err(|_| RequestAdmissionError::ReplyLost)?
+            .map_err(RequestAdmissionError::Rejected)
+    }
+
+    pub(crate) async fn clear_shared_prompt_lookup(&self) -> Result<usize> {
+        match self {
+            Self::Scheduler(handle) => handle.clear_shared_prompt_lookup().await,
+            Self::DFlash2(_) => Ok(0),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct SamplingDefaults {
@@ -82,9 +146,10 @@ pub enum VisionInputConfig {
 /// HTTP server shared state. The model is wrapped in a tokio Mutex —
 /// concurrent requests serialize behind the lock (P4 single-stream contract).
 ///
-/// 3b-2 adds `scheduler_handle`; short prompts, including VL prompts, route
-/// through the SchedulerActor. Long text prompts keep using GenerationStream
-/// unless model limits or paged prefix cache require SchedulerActor features.
+/// `request_execution` selects either the mature SchedulerActor or the isolated
+/// DFlash2 actor. Ordinary engines may still route long text requests directly
+/// through GenerationStream; DFlash2 engines route every request to their actor
+/// so unsupported capabilities cannot silently fall back to ordinary decoding.
 ///
 /// P5a-T5: AppState is now generic over `M: Model + DenseVlMethods + Send +
 /// 'static`. CLI call sites pass either `Qwen35Model` or `Qwen35MoeModel`
@@ -102,9 +167,8 @@ pub struct AppState<M: Model + DenseVlMethods + Send + 'static> {
     /// by the request handlers.
     pub prefill_chunk_size: usize,
     pub vision_input: VisionInputConfig,
-    /// SchedulerActor handle. Routed to by short-prompt requests. See
-    /// `serve_via_scheduler_*` in `openai.rs`.
-    pub scheduler_handle: scheduler_actor::SchedulerActorHandle,
+    /// Request execution backend selected when this engine is built.
+    pub request_execution: RequestExecutionHandle,
     /// True when the SchedulerActor was started with paged SSD prefix cache.
     pub paged_prefix_cache_enabled: bool,
     /// Maximum concurrent in-flight requests routed to the SchedulerActor.
@@ -151,7 +215,7 @@ impl<M: Model + DenseVlMethods + Send + 'static> Clone for AppState<M> {
             model_id: self.model_id.clone(),
             prefill_chunk_size: self.prefill_chunk_size,
             vision_input: self.vision_input.clone(),
-            scheduler_handle: self.scheduler_handle.clone(),
+            request_execution: self.request_execution.clone(),
             paged_prefix_cache_enabled: self.paged_prefix_cache_enabled,
             b_max: self.b_max,
             admission_deadline_ms: self.admission_deadline_ms,
@@ -190,8 +254,7 @@ impl<M: Model + DenseVlMethods + Send + 'static> AppState<M> {
         prompt_len: usize,
         max_new_tokens: usize,
     ) -> SchedulerAutotuneProfileConfig {
-        let active = self.scheduler_handle.b_active.load(Ordering::Relaxed) as usize;
-        let queued = self.scheduler_handle.b_queued.load(Ordering::Relaxed) as usize;
+        let (active, queued) = self.request_execution.active_and_queued();
         self.scheduler_runtime_profile
             .select_config(SchedulerAutotuneRuntimeRequest {
                 prompt_len,
@@ -208,7 +271,7 @@ impl<M: Model + DenseVlMethods + Send + 'static> AppState<M> {
         let tracker = self
             .runtime_usage
             .start_request(u64::from(input_tokens), started_at);
-        if self.paged_prefix_cache_enabled {
+        if self.paged_prefix_cache_enabled && !self.request_execution.is_dflash2() {
             self.runtime_usage
                 .record_prefix_cache_eligible_tokens(u64::from(input_tokens.saturating_sub(1)));
         }
@@ -1330,7 +1393,7 @@ where
         model_id,
         prefill_chunk_size,
         vision_input,
-        scheduler_handle,
+        request_execution: RequestExecutionHandle::Scheduler(Arc::new(scheduler_handle)),
         paged_prefix_cache_enabled,
         b_max,
         admission_deadline_ms,
@@ -1347,6 +1410,196 @@ where
         health_collector,
         runtime_usage,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn serve_with_dflash2<M>(
+    model: M,
+    draft: crate::models::DFlash2DraftModel,
+    tokenizer: Tokenizer,
+    model_id: String,
+    network_config: security::ServerNetworkConfig,
+    prefill_chunk_size: usize,
+    b_max: usize,
+    admission_deadline_ms: u64,
+    tensor_batch_max_width: usize,
+    admission_queue_max: usize,
+    max_cache_cap: usize,
+    block_size: usize,
+    draft_quantization_bits: Option<i32>,
+    prefix_cache: Option<crate::core::cache::PrefixLruCacheConfig>,
+    scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
+    static_memory_estimate: crate::core::process_memory::StaticMemoryEstimate,
+) -> Result<()>
+where
+    M: Model + DenseVlMethods + crate::models::dflash2::DFlash2Target + Send + 'static,
+{
+    let model = Arc::new(Mutex::new(model));
+    let (mut meta, dflash2_cache_cost) = {
+        let guard = model.lock().await;
+        (guard.model_meta(), guard.dflash2_target_cache_cost())
+    };
+    meta.weight_bytes =
+        effective_model_weight_bytes(meta.weight_bytes, static_memory_estimate.total_cold_bytes());
+    let model_max_context = meta.max_position_embeddings.max(0) as usize;
+    let effective_cap_max = max_cache_cap.min(model_max_context);
+    let budget_state = crate::core::memory_budget::validate_startup_budget_with_cost(
+        b_max,
+        effective_cap_max,
+        &meta,
+        dflash2_cache_cost.bytes_per_token,
+        dflash2_cache_cost.fixed_bytes_per_sequence,
+    )?;
+    let tokenizer = Arc::new(tokenizer);
+    let cold_materialization_tracker =
+        crate::core::process_memory::ColdMaterializationTracker::new(static_memory_estimate);
+    let dflash2_handle = dflash2_actor::spawn_dflash2_actor(
+        Arc::clone(&model),
+        draft,
+        Arc::clone(&tokenizer),
+        dflash2_actor::DFlash2ActorConfig {
+            block_size,
+            b_max,
+            admission_deadline: std::time::Duration::from_millis(admission_deadline_ms),
+            tensor_batch_max_width,
+            admission_queue_max,
+            effective_cap_max,
+            budget_state,
+            cache_cost: dflash2_cache_cost,
+            prefix_cache_max_bytes: prefix_cache.map(|config| config.max_bytes),
+        },
+        Arc::clone(&cold_materialization_tracker),
+    );
+    let health_collector = Arc::new(health::SchedulerHealthCollector {
+        start_time: std::time::Instant::now(),
+        b_max,
+        queue_max: admission_queue_max,
+        model_name: model_id.clone(),
+        max_position_embeddings: meta.max_position_embeddings,
+        b_active: dflash2_handle.b_active.clone(),
+        b_queued: dflash2_handle.b_queued.clone(),
+        admit_count: dflash2_handle.admit_count.clone(),
+        batch_count: dflash2_handle.batch_count.clone(),
+        admission_queue_full_count: dflash2_handle.admission_queue_full_count.clone(),
+        memory_budget_exceeded_count: dflash2_handle.memory_budget_exceeded_count.clone(),
+        kv_cache_active_bytes: dflash2_handle.kv_cache_active_bytes.clone(),
+        kv_cache_soft_limit_bytes: dflash2_handle.kv_cache_soft_limit_bytes,
+        kv_cache_logical_cap_tokens: dflash2_handle.kv_cache_logical_cap_tokens,
+        kv_cache_resident_cap_tokens: dflash2_handle.kv_cache_resident_cap_tokens,
+        kv_cache_budget_policy: dflash2_handle.kv_cache_budget_policy.to_owned(),
+        mtp: health::MtpHealthConfig::disabled(),
+        dflash2: health::DFlash2HealthConfig::enabled(
+            block_size,
+            draft_quantization_bits,
+            dflash2_handle.admit_count.clone(),
+            dflash2_handle.windows.clone(),
+            dflash2_handle.drafted_tokens.clone(),
+            dflash2_handle.accepted_draft_tokens.clone(),
+            dflash2_handle.rollback_count.clone(),
+            dflash2_handle.tensor_batch_windows.clone(),
+            dflash2_handle.tensor_batch_divergent_splits.clone(),
+            dflash2_handle.tensor_batch_groups_created.clone(),
+            dflash2_handle.tensor_batch_width_limit,
+            dflash2_handle.tensor_batch_max_width.clone(),
+            dflash2_handle.sampled_requests.clone(),
+            dflash2_handle.exact_sampling_windows.clone(),
+            dflash2_handle.exact_acceptance_draws.clone(),
+            dflash2_handle.exact_residual_corrections.clone(),
+            dflash2_handle.exact_bonus_samples.clone(),
+            dflash2_handle.sampling_us.clone(),
+            dflash2_handle.latest_generation_tps_bits.clone(),
+            dflash2_handle.latest_acceptance_rate_bits.clone(),
+            dflash2_handle.peak_memory_bytes.clone(),
+            dflash2_handle.prefix_cache_enabled,
+            dflash2_handle.prefix_cache_max_bytes,
+            dflash2_handle.prefix_cache_entries.clone(),
+            dflash2_handle.prefix_cache_bytes.clone(),
+            dflash2_handle.prefix_cache_hits.clone(),
+            dflash2_handle.prefix_cache_misses.clone(),
+            dflash2_handle.prefix_cache_saves.clone(),
+            dflash2_handle.prefix_cache_evictions.clone(),
+            dflash2_handle.prefix_cache_hit_tokens.clone(),
+            dflash2_handle.runtime_usage.clone(),
+        ),
+        prompt_lookup: health::PromptLookupHealthConfig::disabled(),
+        active_kv_offload: crate::core::cache::ActiveKvOffloadSharedStats::new(
+            &ActiveKvOffloadConfig::disabled(),
+        ),
+        immutable_prefix_blocks: scheduler_actor::ImmutablePrefixBlockSharedStats::new(false),
+    });
+    let runtime_usage = Arc::clone(&dflash2_handle.runtime_usage);
+    let state = AppState {
+        model,
+        tokenizer,
+        model_id,
+        prefill_chunk_size,
+        vision_input: VisionInputConfig::Qwen {
+            spatial_merge_size: meta.spatial_merge_size,
+        },
+        request_execution: RequestExecutionHandle::DFlash2(Arc::new(dflash2_handle)),
+        paged_prefix_cache_enabled: prefix_cache.is_some(),
+        b_max,
+        admission_deadline_ms: 0,
+        admission_queue_max,
+        effective_cap_max,
+        scheduler_runtime_profile: Arc::new(scheduler_runtime_profile),
+        sampling_defaults: SamplingDefaults::default(),
+        model_weight_bytes: meta.weight_bytes,
+        static_memory_estimate,
+        cold_materialization_tracker,
+        kv_cache_turboquant_bits: None,
+        force_scheduler_for_greedy: true,
+        prompt_lookup_enabled: false,
+        health_collector,
+        runtime_usage,
+    };
+    let app = Router::new()
+        .route("/health", get(|| async { "ok" }))
+        .route("/healthz", get(healthz_handler))
+        .route("/v1/models", get(dflash2_models_handler::<M>))
+        .route(
+            "/admin/api/prompt-lookup/clear",
+            post(clear_prompt_lookup_handler),
+        )
+        .route("/v1/chat/completions", post(openai::chat_completions))
+        .route("/v1/responses", post(responses::responses))
+        .route("/v1/messages", post(anthropic::messages))
+        .with_state(state);
+
+    security::serve_router(app, network_config, "ironmlx DFlash2 server").await
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+struct DFlash2ModelList {
+    object: &'static str,
+    data: Vec<DFlash2ModelInfo>,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+struct DFlash2ModelInfo {
+    id: String,
+    object: &'static str,
+    created: u64,
+    owned_by: &'static str,
+}
+
+fn dflash2_model_list(model_id: &str) -> DFlash2ModelList {
+    DFlash2ModelList {
+        object: "list",
+        data: vec![DFlash2ModelInfo {
+            id: model_id.to_owned(),
+            object: "model",
+            created: 0,
+            owned_by: "ironmlx",
+        }],
+    }
+}
+
+async fn dflash2_models_handler<M>(State(state): State<AppState<M>>) -> Json<DFlash2ModelList>
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    Json(dflash2_model_list(&state.model_id))
 }
 
 fn effective_model_weight_bytes(meta_weight_bytes: usize, loaded_weight_bytes: usize) -> usize {
@@ -1438,6 +1691,7 @@ fn build_health_collector(
         kv_cache_resident_cap_tokens: scheduler_handle.kv_cache_resident_cap_tokens,
         kv_cache_budget_policy: scheduler_handle.kv_cache_budget_policy.to_string(),
         mtp,
+        dflash2: health::DFlash2HealthConfig::disabled(),
         prompt_lookup,
         active_kv_offload: scheduler_handle.active_kv_offload.clone(),
         immutable_prefix_blocks: scheduler_handle.immutable_prefix_blocks.clone(),
@@ -1446,19 +1700,41 @@ fn build_health_collector(
 
 /// GET /healthz — returns a JSON HealthSnapshot. Reads only Arc atomics;
 /// no lock contention with the model or SchedulerActor. B1-p2.5 G3.
+#[derive(Debug, Serialize)]
+struct SingleActorHealthResponse<T> {
+    #[serde(flatten)]
+    health: T,
+    mode: &'static str,
+    models: [(); 0],
+}
+
+impl<T> SingleActorHealthResponse<T> {
+    fn new(health: T) -> Self {
+        Self {
+            health,
+            mode: "single",
+            models: [],
+        }
+    }
+}
+
 async fn healthz_handler<M>(
     axum::extract::State(state): axum::extract::State<AppState<M>>,
-) -> axum::Json<health::HealthSnapshot>
+) -> axum::Json<SingleActorHealthResponse<health::HealthSnapshot>>
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
-    axum::Json(state.health_collector.snapshot())
+    axum::Json(SingleActorHealthResponse::new(
+        state.health_collector.snapshot(),
+    ))
 }
 
 async fn gemma4_drafter_healthz_handler(
     axum::extract::State(state): axum::extract::State<Gemma4DrafterAppState>,
-) -> axum::Json<health::HealthSnapshot> {
-    axum::Json(state.base.health_collector.snapshot())
+) -> axum::Json<SingleActorHealthResponse<health::HealthSnapshot>> {
+    axum::Json(SingleActorHealthResponse::new(
+        state.base.health_collector.snapshot(),
+    ))
 }
 
 async fn clear_prompt_lookup_handler<M>(
@@ -1467,20 +1743,20 @@ async fn clear_prompt_lookup_handler<M>(
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
-    clear_prompt_lookup_response(&state.scheduler_handle, &state.model_id).await
+    clear_prompt_lookup_response(&state.request_execution, &state.model_id).await
 }
 
 async fn gemma4_drafter_clear_prompt_lookup_handler(
     axum::extract::State(state): axum::extract::State<Gemma4DrafterAppState>,
 ) -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
-    clear_prompt_lookup_response(&state.base.scheduler_handle, &state.base.model_id).await
+    clear_prompt_lookup_response(&state.base.request_execution, &state.base.model_id).await
 }
 
 async fn clear_prompt_lookup_response(
-    scheduler_handle: &scheduler_actor::SchedulerActorHandle,
+    request_execution: &RequestExecutionHandle,
     model_id: &str,
 ) -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
-    match scheduler_handle.clear_shared_prompt_lookup().await {
+    match request_execution.clear_shared_prompt_lookup().await {
         Ok(cleared_entries) => (
             axum::http::StatusCode::OK,
             axum::Json(serde_json::json!({
@@ -1525,6 +1801,32 @@ mod tests {
     #[test]
     fn effective_model_weight_bytes_keeps_meta_estimate_when_larger() {
         assert_eq!(effective_model_weight_bytes(4_096, 1_024), 4_096);
+    }
+
+    #[test]
+    fn dflash2_model_list_exposes_only_the_public_target_identifier() {
+        let list = dflash2_model_list("mlx-community/Qwen3.8-27B-4bit");
+        let json = serde_json::to_value(list).expect("serialize model list");
+
+        assert_eq!(json["object"], "list");
+        assert_eq!(json["data"].as_array().map(Vec::len), Some(1));
+        assert_eq!(json["data"][0]["id"], "mlx-community/Qwen3.8-27B-4bit");
+        assert_eq!(json["data"][0]["object"], "model");
+        assert_eq!(json["data"][0]["owned_by"], "ironmlx");
+    }
+
+    #[test]
+    fn single_actor_health_response_exposes_app_runtime_contract() {
+        let response = SingleActorHealthResponse::new(serde_json::json!({
+            "status": "healthy",
+            "model": {"name": "test-model"},
+        }));
+        let json = serde_json::to_value(response).expect("serialize health response");
+
+        assert_eq!(json["status"], "healthy");
+        assert_eq!(json["model"]["name"], "test-model");
+        assert_eq!(json["mode"], "single");
+        assert_eq!(json["models"], serde_json::json!([]));
     }
 
     struct DefaultRouteModel;

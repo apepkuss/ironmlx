@@ -26,6 +26,59 @@ import Testing
     #expect(loaded["mlx-community/LongContext-4bit"]?.maxCacheCap == 65536)
 }
 
+@Test func modelParameterStorePersistsValidatedDFlash2Configuration() throws {
+    let root = try temporaryDirectory()
+    let store = ModelParameterStore(url: root.appendingPathComponent("model_params.json"))
+    let parameters = ModelParameters(
+        modelID: "mlx-community/Qwen3.8-27B-4bit",
+        dflash2Enabled: true,
+        dflash2ModelID: "z-lab/Qwen3.8-27B-DFlash2",
+        dflash2BlockSize: "4",
+        dflash2DraftBits: "8",
+        dflash2TensorBatchMaxWidth: "6"
+    )
+
+    try store.save(parameters)
+
+    let loaded = try #require(store.parameters(for: parameters.modelID))
+    #expect(loaded.dflash2Enabled == true)
+    #expect(loaded.dflash2BlockSizeValue == 4)
+    #expect(loaded.dflash2DraftBitsValue == 8)
+    #expect(loaded.dflash2TensorBatchMaxWidthValue == 6)
+}
+
+@Test func modelParameterStoreRejectsInvalidDFlash2TensorBatchWidth() throws {
+    let root = try temporaryDirectory()
+    let store = ModelParameterStore(url: root.appendingPathComponent("model_params.json"))
+    let parameters = ModelParameters(
+        modelID: "mlx-community/Qwen3.8-27B-4bit",
+        dflash2TensorBatchMaxWidth: "0"
+    )
+
+    #expect(
+        throws: ConfigurationPersistenceError.invalidValue(
+            "dflash2_tensor_batch_max_width"
+        )
+    ) {
+        try store.save(parameters)
+    }
+}
+
+@Test func modelParameterStoreRejectsConflictingDFlash2Acceleration() throws {
+    let root = try temporaryDirectory()
+    let store = ModelParameterStore(url: root.appendingPathComponent("model_params.json"))
+    let parameters = ModelParameters(
+        modelID: "mlx-community/Qwen3.8-27B-4bit",
+        mtpEnabled: true,
+        dflash2Enabled: true,
+        dflash2ModelID: "z-lab/Qwen3.8-27B-DFlash2"
+    )
+
+    #expect(throws: ConfigurationPersistenceError.invalidValue("dflash2_acceleration_conflict")) {
+        try store.save(parameters)
+    }
+}
+
 @Test func modelParameterV0MigratesAllFieldsAndCreatesIndependentLKG() throws {
     let root = try temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: root) }

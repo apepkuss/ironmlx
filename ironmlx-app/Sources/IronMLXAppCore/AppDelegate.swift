@@ -6,6 +6,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private let configStore: AppConfigStore
     private let backend: BackendRuntimeSupervisor
     private let scanner: LocalModelScanner
+    private let parameterStore: ModelParameterStore
     private let launchPlanner: AppLaunchPlanner
     private let configurationRecovery: ConfigurationRecoveryManager
     private var dashboard: DashboardWindowController?
@@ -21,7 +22,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             appConfigStore: store,
             modelParameterStore: parameterStore
         )
-        let processManager = BackendProcessManager(configStore: store)
+        let processManager = BackendProcessManager(
+            configStore: store,
+            scanner: scanner,
+            parameterStore: parameterStore
+        )
         self.configStore = store
         self.backend = BackendRuntimeSupervisor(
             processManager: processManager,
@@ -30,6 +35,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             parameterStore: parameterStore
         )
         self.scanner = scanner
+        self.parameterStore = parameterStore
         self.launchPlanner = AppLaunchPlanner()
         self.configurationRecovery = configurationRecovery
         super.init()
@@ -57,7 +63,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         let localModels = scanner.scan(
             loadedModels: Set(config.restoredModelReferences),
             pinnedModels: pinnedModels,
-            mtpEnabledModels: []
+            mtpEnabledModels: [],
+            dflash2EnabledModels: Set(config.restoredModelReferences.filter {
+                parameterStore.parameters(for: $0)?.dflash2Enabled == true
+            })
         )
         let launchPlan = launchPlanner.plan(config: config, localModels: localModels)
         Task {

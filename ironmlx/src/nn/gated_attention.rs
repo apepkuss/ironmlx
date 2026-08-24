@@ -101,14 +101,28 @@ pub struct GatedAttentionConfig {
 
 /// Qwen3.5 / Qwen3-Next gated full attention block.
 pub struct GatedAttention {
-    q_proj: Linear,  // [hidden] -> [num_heads * head_dim * 2]  (queries + gate halves)
-    k_proj: Linear,  // [hidden] -> [num_kv_heads * head_dim]
-    v_proj: Linear,  // [hidden] -> [num_kv_heads * head_dim]
+    input_projections: GatedAttentionInputProjections,
     o_proj: Linear,  // [num_heads * head_dim] -> [hidden]
     q_norm: RmsNorm, // weight: [head_dim]
     k_norm: RmsNorm, // weight: [head_dim]
     cfg: GatedAttentionConfig,
     scale: f32, // 1 / sqrt(head_dim)
+}
+
+enum GatedAttentionInputProjections {
+    Separate {
+        q: Linear,
+        k: Linear,
+        v: Linear,
+    },
+    Fused {
+        projection: Linear,
+        q: Linear,
+        k: Linear,
+        v: Linear,
+        q_width: i32,
+        k_width: i32,
+    },
 }
 
 impl GatedAttention {
@@ -133,14 +147,53 @@ impl GatedAttention {
 
         let scale = 1.0 / (cfg.head_dim as f32).sqrt();
         Ok(Self {
-            q_proj,
-            k_proj,
-            v_proj,
+            input_projections: GatedAttentionInputProjections::Separate {
+                q: q_proj,
+                k: k_proj,
+                v: v_proj,
+            },
             o_proj,
             q_norm,
             k_norm,
             cfg,
             scale,
+        })
+    }
+
+    pub(crate) fn from_loader_dflash2(
+        loader: &Loader,
+        prefix: &str,
+        cfg: GatedAttentionConfig,
+    ) -> Result<Self> {
+        let q = Linear::from_loader(loader, &format!("{prefix}.q_proj"))?;
+        let k = Linear::from_loader(loader, &format!("{prefix}.k_proj"))?;
+        let v = Linear::from_loader(loader, &format!("{prefix}.v_proj"))?;
+        let output_widths = [q.out_features(), k.out_features(), v.out_features()];
+        let projection = Linear::fuse_quantized_outputs(
+            &[&q, &k, &v],
+            "DFlash2 fused full-attention Q/K/V projections",
+        )?;
+        let mut separate = projection.split_quantized_outputs(
+            &output_widths,
+            "DFlash2 split full-attention Q/K/V projections",
+        )?;
+        let o_proj = Linear::from_loader(loader, &format!("{prefix}.o_proj"))?;
+        let q_norm = RmsNorm::from_loader(loader, &format!("{prefix}.q_norm"), cfg.rms_norm_eps)?;
+        let k_norm = RmsNorm::from_loader(loader, &format!("{prefix}.k_norm"), cfg.rms_norm_eps)?;
+        Ok(Self {
+            input_projections: GatedAttentionInputProjections::Fused {
+                projection,
+                q: separate.remove(0),
+                k: separate.remove(0),
+                v: separate.remove(0),
+                q_width: i32::try_from(output_widths[0])?,
+                k_width: i32::try_from(output_widths[1])?,
+            },
+            o_proj,
+            q_norm,
+            k_norm,
+            cfg,
+            scale: 1.0 / (cfg.head_dim as f32).sqrt(),
         })
     }
 
@@ -163,9 +216,11 @@ impl GatedAttention {
     ) -> Self {
         let scale = 1.0 / (cfg.head_dim as f32).sqrt();
         Self {
-            q_proj,
-            k_proj,
-            v_proj,
+            input_projections: GatedAttentionInputProjections::Separate {
+                q: q_proj,
+                k: k_proj,
+                v: v_proj,
+            },
             o_proj,
             q_norm,
             k_norm,
@@ -255,9 +310,44 @@ impl GatedAttention {
             let _ = layer_idx;
 
             // Step 1: project Q (2x), K, V.
-            let q_full = self.q_proj.forward_on(x, target)?; // [B, S, Hq*D*2]
-            let k = self.k_proj.forward_on(x, target)?; // [B, S, Hkv*D]
-            let v = self.v_proj.forward_on(x, target)?; // [B, S, Hkv*D]
+            let (q_full, k, v) = match &self.input_projections {
+                GatedAttentionInputProjections::Separate { q, k, v } => (
+                    q.forward_on(x, target)?,
+                    k.forward_on(x, target)?,
+                    v.forward_on(x, target)?,
+                ),
+                GatedAttentionInputProjections::Fused {
+                    projection,
+                    q,
+                    k,
+                    v,
+                    q_width,
+                    k_width,
+                } => {
+                    if super::product_stable_qmm::is_armed() {
+                        let output = projection.forward_on(x, target)?;
+                        let mut parts = mlx::ops::shape::split_at_on(
+                            &output,
+                            &[*q_width, *q_width + *k_width],
+                            -1,
+                            target,
+                        )?;
+                        if parts.len() != 3 {
+                            return Err(anyhow!(
+                                "DFlash2 fused full-attention Q/K/V projection returned {} parts",
+                                parts.len()
+                            ));
+                        }
+                        (parts.remove(0), parts.remove(0), parts.remove(0))
+                    } else {
+                        (
+                            q.forward_on(x, target)?,
+                            k.forward_on(x, target)?,
+                            v.forward_on(x, target)?,
+                        )
+                    }
+                }
+            };
             profile_decode_attention_turbo_stage(
                 "decode_qkv_proj",
                 &[&q_full, &k, &v],

@@ -3867,6 +3867,31 @@ mod tests {
     }
 
     #[test]
+    fn exact_deterministic_coupling_preserves_target_distribution_on_uniform_grid() {
+        let target =
+            SamplingDistribution::new(vec![0.1, 0.2, 0.3, 0.4]).expect("target distribution");
+        let mut counts = [0_usize; 4];
+        let mut accepted = 0_usize;
+        let mut corrected = 0_usize;
+
+        for index in 0..1_000 {
+            let uniform = (index as f32 + 0.5) / 1_000.0;
+            let target_token = target
+                .sample_with_uniform(uniform)
+                .expect("sample target token");
+            let resolution = resolve_exact_deterministic_target_tokens(&[3], &[target_token, 0])
+                .expect("resolve deterministic draft");
+            counts[resolution.tokens_to_append[0] as usize] += 1;
+            accepted += resolution.accepted_draft_len;
+            corrected += resolution.exact_sampling.residual_corrections;
+        }
+
+        assert_eq!(counts, [100, 200, 300, 400]);
+        assert_eq!(accepted, 400);
+        assert_eq!(corrected, 600);
+    }
+
+    #[test]
     fn exact_target_logits_preserve_position_histories_with_penalties() {
         let logits: Array = (
             &[

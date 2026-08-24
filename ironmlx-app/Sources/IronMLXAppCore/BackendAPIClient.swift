@@ -611,6 +611,8 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
     public var mtpEnabled: Bool
     public var mtpModelDir: String?
     public var mtpDraftTokens: Int?
+    public var dflash2: HealthzSnapshot.DFlash2Info?
+    public var dflash2DraftModel: String?
     public var promptLookup: BackendPromptLookupConfig?
     public var capabilities: BackendModelCapabilities
     public var runtimeState: String
@@ -632,6 +634,8 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
         mtpEnabled: Bool = false,
         mtpModelDir: String? = nil,
         mtpDraftTokens: Int? = nil,
+        dflash2: HealthzSnapshot.DFlash2Info? = nil,
+        dflash2DraftModel: String? = nil,
         promptLookup: BackendPromptLookupConfig? = nil,
         capabilities: BackendModelCapabilities = BackendModelCapabilities(
             runtimeKind: "causal",
@@ -663,6 +667,8 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
         self.mtpEnabled = mtpEnabled
         self.mtpModelDir = mtpModelDir
         self.mtpDraftTokens = mtpDraftTokens
+        self.dflash2 = dflash2
+        self.dflash2DraftModel = dflash2DraftModel
         self.promptLookup = promptLookup
         self.capabilities = capabilities
         self.runtimeState = runtimeState
@@ -685,6 +691,8 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
         case mtpEnabled = "mtp_enabled"
         case mtpModelDir = "mtp_model_dir"
         case mtpDraftTokens = "mtp_draft_tokens"
+        case dflash2
+        case dflash2DraftModel = "dflash2_draft_model"
         case promptLookup = "prompt_lookup"
         case runtimeKind = "runtime_kind"
         case supportsStreaming = "supports_streaming"
@@ -715,6 +723,14 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
         self.mtpEnabled = try container.decodeIfPresent(Bool.self, forKey: .mtpEnabled) ?? false
         self.mtpModelDir = try container.decodeIfPresent(String.self, forKey: .mtpModelDir)
         self.mtpDraftTokens = try container.decodeIfPresent(Int.self, forKey: .mtpDraftTokens)
+        self.dflash2 = try container.decodeIfPresent(
+            HealthzSnapshot.DFlash2Info.self,
+            forKey: .dflash2
+        )
+        self.dflash2DraftModel = try container.decodeIfPresent(
+            String.self,
+            forKey: .dflash2DraftModel
+        )
         self.promptLookup = try container.decodeIfPresent(
             BackendPromptLookupConfig.self,
             forKey: .promptLookup
@@ -759,6 +775,8 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
         try container.encode(mtpEnabled, forKey: .mtpEnabled)
         try container.encodeIfPresent(mtpModelDir, forKey: .mtpModelDir)
         try container.encodeIfPresent(mtpDraftTokens, forKey: .mtpDraftTokens)
+        try container.encodeIfPresent(dflash2, forKey: .dflash2)
+        try container.encodeIfPresent(dflash2DraftModel, forKey: .dflash2DraftModel)
         try container.encodeIfPresent(promptLookup, forKey: .promptLookup)
         try container.encode(capabilities.runtimeKind, forKey: .runtimeKind)
         try container.encode(capabilities.supportsStreaming, forKey: .supportsStreaming)

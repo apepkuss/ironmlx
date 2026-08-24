@@ -253,12 +253,25 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
 
         Task {
             let models: [BackendLoadedModelInfo]?
+            let backendModelListIsAuthoritative: Bool
             do {
                 let client = BackendAPIClient(host: config.host, port: config.port)
                 models = try await client.fetchLoadedModels()
-            } catch {
-                IronMLXAppLogger.error("Failed to refresh menu loaded models: \(error)")
-                models = nil
+                backendModelListIsAuthoritative = true
+            } catch let adminError {
+                do {
+                    let client = BackendAPIClient(host: config.host, port: config.port)
+                    let health = try await client.fetchHealthz()
+                    guard health.dflash2?.enabled == true else {
+                        throw adminError
+                    }
+                    models = LegacyHealthAdapter().legacyStatus(from: health).runtimeModels
+                    backendModelListIsAuthoritative = false
+                } catch {
+                    IronMLXAppLogger.error("Failed to refresh menu loaded models: \(error)")
+                    models = nil
+                    backendModelListIsAuthoritative = false
+                }
             }
 
             await MainActor.run {
@@ -266,7 +279,9 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
                 guard let models else {
                     return
                 }
-                self.persistLoadedModelsIfNeeded(models)
+                if backendModelListIsAuthoritative {
+                    self.persistLoadedModelsIfNeeded(models)
+                }
                 let names = MenuBarMenuBuilder.modelNames(from: models)
                 guard names != self.loadedModelNames else {
                     return

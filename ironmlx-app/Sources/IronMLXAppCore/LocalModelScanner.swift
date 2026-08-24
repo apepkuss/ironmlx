@@ -78,6 +78,7 @@ public struct LocalModel: Codable, Equatable, Sendable {
     public var effectiveMaxTokens: Int?
     public var generationDefaults: BackendSamplingDefaults?
     public var mtp: LocalModelMtpInfo?
+    public var dflash2: LocalModelDFlash2Info?
     public var quantization: LocalModelQuantization?
     public var readiness: LocalModelReadiness?
     public var integrity: ModelIntegrityStatus?
@@ -96,6 +97,7 @@ public struct LocalModel: Codable, Equatable, Sendable {
         effectiveMaxTokens: Int? = nil,
         generationDefaults: BackendSamplingDefaults? = nil,
         mtp: LocalModelMtpInfo? = nil,
+        dflash2: LocalModelDFlash2Info? = nil,
         quantization: LocalModelQuantization? = nil,
         readiness: LocalModelReadiness? = nil,
         integrity: ModelIntegrityStatus? = nil
@@ -113,6 +115,7 @@ public struct LocalModel: Codable, Equatable, Sendable {
         self.effectiveMaxTokens = effectiveMaxTokens
         self.generationDefaults = generationDefaults
         self.mtp = mtp
+        self.dflash2 = dflash2
         self.quantization = quantization
         self.readiness = readiness
         self.integrity = integrity
@@ -132,6 +135,7 @@ public struct LocalModel: Codable, Equatable, Sendable {
         case effectiveMaxTokens = "effective_max_tokens"
         case generationDefaults = "generation_defaults"
         case mtp
+        case dflash2
         case quantization
         case readiness
         case integrity
@@ -153,6 +157,7 @@ private struct LocalModelArtifact {
     var kind: LocalModelArtifactKind
     var path: URL
     var signature: MtpCompatibilitySignature?
+    var dflash2Signature: DFlash2CompatibilitySignature?
 
     var mtpCandidate: LocalMtpCandidate {
         LocalMtpCandidate(
@@ -162,6 +167,18 @@ private struct LocalModelArtifact {
             sizeMB: model.sizeMB,
             path: path.path,
             reasonCode: signature == nil ? "mtp_invalid_config" : nil
+        )
+    }
+
+    var dflash2Candidate: LocalDFlash2Candidate {
+        LocalDFlash2Candidate(
+            id: model.id,
+            repoID: model.repoID,
+            source: model.source,
+            sizeMB: model.sizeMB,
+            path: path.path,
+            blockSize: dflash2Signature?.blockSize,
+            reasonCode: dflash2Signature == nil ? "dflash2_invalid_config" : nil
         )
     }
 }
@@ -185,15 +202,61 @@ private extension LocalModel {
     func artifact(
         kind: LocalModelArtifactKind,
         path: URL,
-        signature: MtpCompatibilitySignature?
+        signature: MtpCompatibilitySignature?,
+        dflash2Signature: DFlash2CompatibilitySignature?
     ) -> LocalModelArtifact {
-        LocalModelArtifact(model: self, kind: kind, path: path, signature: signature)
+        LocalModelArtifact(
+            model: self,
+            kind: kind,
+            path: path,
+            signature: signature,
+            dflash2Signature: dflash2Signature
+        )
+    }
+}
+
+private struct DFlash2CompatibilitySignature: Equatable {
+    var role: String
+    var hiddenSize: Int?
+    var intermediateSize: Int?
+    var vocabSize: Int?
+    var maxPositionEmbeddings: Int?
+    var targetLayerCount: Int?
+    var rmsNormEps: Double?
+    var ropeTheta: Double?
+    var blockSize: Int?
+    var targetLayerIDs: [Int]
+
+    func isDraftCompatible(withTarget target: Self) -> Bool {
+        guard role == "draft", target.role == "target" else {
+            return false
+        }
+        return hiddenSize == target.hiddenSize
+            && intermediateSize == target.intermediateSize
+            && vocabSize == target.vocabSize
+            && maxPositionEmbeddings == target.maxPositionEmbeddings
+            && targetLayerCount == target.targetLayerCount
+            && floatValuesMatch(rmsNormEps, target.rmsNormEps)
+            && floatValuesMatch(ropeTheta, target.ropeTheta)
+            && blockSize.map { (2 ... 8).contains($0) } == true
+            && !targetLayerIDs.isEmpty
+            && targetLayerIDs.allSatisfy { layer in
+                layer >= 0 && targetLayerCount.map { layer < $0 } == true
+            }
+    }
+
+    private func floatValuesMatch(_ lhs: Double?, _ rhs: Double?) -> Bool {
+        guard let lhs, let rhs else {
+            return false
+        }
+        return Float(lhs) == Float(rhs)
     }
 }
 
 private struct MtpCompatibilitySignature: Equatable {
     var supportsMtp: Bool
     var family: String
+    var lineage: String?
     var hiddenSize: Int?
     var intermediateSize: Int?
     var moeIntermediateSize: Int?
@@ -219,6 +282,7 @@ private struct MtpCompatibilitySignature: Equatable {
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.family == rhs.family
+            && lhs.lineage == rhs.lineage
             && lhs.hiddenSize == rhs.hiddenSize
             && lhs.intermediateSize == rhs.intermediateSize
             && lhs.moeIntermediateSize == rhs.moeIntermediateSize
@@ -244,7 +308,11 @@ private struct MtpCompatibilitySignature: Equatable {
     }
 
     func isMtpCandidateCompatible(withBase base: Self) -> Bool {
-        guard base.supportsMtp, !supportsMtp else {
+        guard base.supportsMtp,
+              !supportsMtp,
+              let lineage,
+              let baseLineage = base.lineage,
+              lineage == baseLineage else {
             return false
         }
         return family == base.family
@@ -333,6 +401,70 @@ public struct LocalMtpCandidate: Codable, Equatable, Sendable {
     }
 }
 
+public struct LocalModelDFlash2Info: Codable, Equatable, Sendable {
+    public var status: String
+    public var enabled: Bool
+    public var candidates: [LocalDFlash2Candidate]
+    public var incompatibleCandidates: [LocalDFlash2Candidate]
+
+    public init(
+        status: String,
+        enabled: Bool = false,
+        candidates: [LocalDFlash2Candidate] = [],
+        incompatibleCandidates: [LocalDFlash2Candidate] = []
+    ) {
+        self.status = status
+        self.enabled = enabled
+        self.candidates = candidates
+        self.incompatibleCandidates = incompatibleCandidates
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case status
+        case enabled
+        case candidates
+        case incompatibleCandidates = "incompatible_candidates"
+    }
+}
+
+public struct LocalDFlash2Candidate: Codable, Equatable, Sendable {
+    public var id: String
+    public var repoID: String
+    public var source: String
+    public var sizeMB: Double
+    public var path: String
+    public var blockSize: Int?
+    public var reasonCode: String?
+
+    public init(
+        id: String,
+        repoID: String,
+        source: String,
+        sizeMB: Double,
+        path: String,
+        blockSize: Int? = nil,
+        reasonCode: String? = nil
+    ) {
+        self.id = id
+        self.repoID = repoID
+        self.source = source
+        self.sizeMB = sizeMB
+        self.path = path
+        self.blockSize = blockSize
+        self.reasonCode = reasonCode
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case repoID = "repo_id"
+        case source
+        case sizeMB = "size_mb"
+        case path
+        case blockSize = "block_size"
+        case reasonCode = "reason_code"
+    }
+}
+
 public struct LocalModelScanner: Sendable {
     public var rootURL: URL
 
@@ -353,7 +485,12 @@ public struct LocalModelScanner: Sendable {
         scan(loadedModels: loadedModels, pinnedModels: [], mtpEnabledModels: mtpEnabledModels)
     }
 
-    public func scan(loadedModels: Set<String>, pinnedModels: Set<String>, mtpEnabledModels: Set<String>) -> [LocalModel] {
+    public func scan(
+        loadedModels: Set<String>,
+        pinnedModels: Set<String>,
+        mtpEnabledModels: Set<String>,
+        dflash2EnabledModels: Set<String> = []
+    ) -> [LocalModel] {
         var artifacts: [LocalModelArtifact] = []
         artifacts += scanCacheDirectory(
             ModelRepositoryLayout.providerRoot(rootURL: rootURL, provider: .huggingFace),
@@ -374,6 +511,10 @@ public struct LocalModelScanner: Sendable {
             $0.kind == .mtp && $0.model.readiness?.isLoadable != false
         }
         let mtpCandidates = mtpArtifacts.map(\.mtpCandidate)
+        let dflash2Artifacts = artifacts.filter {
+            $0.kind == .dflash2Draft && $0.model.readiness?.isLoadable != false
+        }
+        let dflash2Candidates = dflash2Artifacts.map(\.dflash2Candidate)
         return artifacts
             .filter { $0.kind == .base }
             .map { artifact in
@@ -395,6 +536,35 @@ public struct LocalModelScanner: Sendable {
                         )
                     } else if !incompatible.isEmpty {
                         model.mtp = LocalModelMtpInfo(status: "incompatible", incompatibleCandidates: incompatible)
+                    }
+                }
+                if let targetSignature = artifact.dflash2Signature,
+                   targetSignature.role == "target" {
+                    let compatible = dflash2Artifacts
+                        .filter {
+                            $0.dflash2Signature?.isDraftCompatible(withTarget: targetSignature) == true
+                        }
+                        .map(\.dflash2Candidate)
+                        .sorted { $0.id.localizedStandardCompare($1.id) == .orderedAscending }
+                    let incompatible = dflash2Candidates
+                        .filter { candidate in
+                            !compatible.contains(where: { $0.id == candidate.id })
+                        }
+                        .sorted { $0.id.localizedStandardCompare($1.id) == .orderedAscending }
+                    if !compatible.isEmpty {
+                        let enabled = dflash2EnabledModels.contains(model.id)
+                        model.dflash2 = LocalModelDFlash2Info(
+                            status: enabled ? "enabled" : "available",
+                            enabled: enabled,
+                            candidates: compatible
+                        )
+                    } else if !incompatible.isEmpty {
+                        model.dflash2 = LocalModelDFlash2Info(
+                            status: "incompatible",
+                            incompatibleCandidates: incompatible
+                        )
+                    } else {
+                        model.dflash2 = LocalModelDFlash2Info(status: "unavailable")
                     }
                 }
                 return model
@@ -569,6 +739,33 @@ public struct LocalModelScanner: Sendable {
         scan(loadedModels: []).first(where: { $0.id == reference })?.mtp?.candidates ?? []
     }
 
+    public func dflash2Candidates(for reference: String) -> [LocalDFlash2Candidate] {
+        scan(loadedModels: []).first(where: { $0.id == reference })?.dflash2?.candidates ?? []
+    }
+
+    public func resolveDFlash2DraftPath(for reference: String) -> String? {
+        resolveAuxiliaryModelPath(for: reference, expectedKind: .dflash2Draft)
+    }
+
+    public func verifiedDFlash2DraftPath(
+        for reference: String,
+        fullChecksum: Bool = false
+    ) throws -> String {
+        guard let path = resolveDFlash2DraftPath(for: reference) else {
+            throw ModelSnapshotVerificationError.manifestMissing
+        }
+        let snapshot = URL(fileURLWithPath: path, isDirectory: true)
+        if fullChecksum {
+            try verifyFullSnapshot(
+                snapshot,
+                expectedProvider: nil,
+                expectedRepoID: nil,
+                requireCommitDirectory: false
+            )
+        }
+        return path
+    }
+
     public func model(for reference: String) -> LocalModel? {
         scan(loadedModels: []).first(where: { $0.id == reference })
     }
@@ -612,7 +809,8 @@ public struct LocalModelScanner: Sendable {
             let pinned = loaded && (pinnedModels.contains(id) || pinnedModels.contains(snapshot.path))
             let config = inspection.config
             let kind = artifactKind(config, artifactRole: inspection.artifactRole)
-            let signature = mtpCompatibilitySignature(config)
+            let signature = mtpCompatibilitySignature(config, repoID: id)
+            let dflash2Signature = dflash2CompatibilitySignature(config, kind: kind)
             let architecture = normalizedString(config["model_type"])
             let capabilities = runtimeCapabilities(config: config)
             let type: String
@@ -644,8 +842,39 @@ public struct LocalModelScanner: Sendable {
                     provider: provider,
                     repoID: id
                 )
-            ).artifact(kind: kind, path: snapshot, signature: signature)
+            ).artifact(
+                kind: kind,
+                path: snapshot,
+                signature: signature,
+                dflash2Signature: dflash2Signature
+            )
         }
+    }
+
+    private func resolveAuxiliaryModelPath(
+        for reference: String,
+        expectedKind: LocalModelArtifactKind
+    ) -> String? {
+        let direct = URL(fileURLWithPath: NSString(string: reference).expandingTildeInPath)
+        if FileManager.default.fileExists(atPath: direct.path),
+           let inspection = inspectSnapshot(direct),
+           inspection.readiness.isLoadable,
+           artifactKind(inspection.config, artifactRole: inspection.artifactRole) == expectedKind {
+            return direct.path
+        }
+        for provider in ModelRepositoryProvider.allCases {
+            if let snapshot = referencedSnapshot(provider: provider, repoID: reference),
+               let inspection = inspectSnapshot(
+                   snapshot,
+                   expectedProvider: provider,
+                   expectedRepoID: reference
+               ),
+               inspection.readiness.isLoadable,
+               artifactKind(inspection.config, artifactRole: inspection.artifactRole) == expectedKind {
+                return snapshot.path
+            }
+        }
+        return nil
     }
 
     private func configJSON(in snapshot: URL) -> [String: Any]? {
@@ -737,6 +966,13 @@ public struct LocalModelScanner: Sendable {
             .replacingOccurrences(of: "_", with: "-")
     }
 
+    private func intArray(_ value: Any?) -> [Int] {
+        guard let values = value as? [Any] else {
+            return []
+        }
+        return values.compactMap(intValue)
+    }
+
     private func signalsContainAny(_ signals: [String], _ keywords: [String]) -> Bool {
         signals.contains { signal in
             keywords.contains { signal.contains($0) }
@@ -803,6 +1039,113 @@ public struct LocalModelScanner: Sendable {
         return stringArray(config?["architectures"]).contains("DFlash2DraftModel")
     }
 
+    private func dflash2CompatibilitySignature(
+        _ config: [String: Any]?,
+        kind: LocalModelArtifactKind
+    ) -> DFlash2CompatibilitySignature? {
+        guard let config else {
+            return nil
+        }
+        switch kind {
+        case .base:
+            guard normalizedString(config["model_type"]) == "qwen3-5",
+                  let text = config["text_config"] as? [String: Any],
+                  intValue(text["num_experts"]) == nil,
+                  let hiddenSize = positiveIntValue(text["hidden_size"]),
+                  let intermediateSize = positiveIntValue(text["intermediate_size"]),
+                  let vocabSize = positiveIntValue(text["vocab_size"]),
+                  let maxPositionEmbeddings = positiveIntValue(text["max_position_embeddings"]),
+                  let targetLayerCount = positiveIntValue(text["num_hidden_layers"]),
+                  let rmsNormEps = finitePositiveDouble(text["rms_norm_eps"]),
+                  let rope = text["rope_parameters"] as? [String: Any],
+                  let ropeTheta = finitePositiveDouble(rope["rope_theta"])
+            else {
+                return nil
+            }
+            return DFlash2CompatibilitySignature(
+                role: "target",
+                hiddenSize: hiddenSize,
+                intermediateSize: intermediateSize,
+                vocabSize: vocabSize,
+                maxPositionEmbeddings: maxPositionEmbeddings,
+                targetLayerCount: targetLayerCount,
+                rmsNormEps: rmsNormEps,
+                ropeTheta: ropeTheta,
+                blockSize: nil,
+                targetLayerIDs: []
+            )
+        case .dflash2Draft:
+            guard isDFlash2DraftConfig(config),
+                  let dflash = config["dflash_config"] as? [String: Any],
+                  normalizedString(config["model_type"]) == "qwen3",
+                  normalizedString(config["dtype"]) == "bfloat16",
+                  normalizedString(config["hidden_act"]) == "silu",
+                  boolValue(config["attention_bias"]) == false,
+                  boolValue(config["is_causal"]) == false,
+                  let hiddenSize = positiveIntValue(config["hidden_size"]),
+                  let intermediateSize = positiveIntValue(config["intermediate_size"]),
+                  let vocabSize = positiveIntValue(config["vocab_size"]),
+                  let maxPositionEmbeddings = positiveIntValue(config["max_position_embeddings"]),
+                  let targetLayerCount = positiveIntValue(config["num_target_layers"]),
+                  let numHiddenLayers = positiveIntValue(config["num_hidden_layers"]),
+                  let numAttentionHeads = positiveIntValue(config["num_attention_heads"]),
+                  let numKeyValueHeads = positiveIntValue(config["num_key_value_heads"]),
+                  let headDim = positiveIntValue(config["head_dim"]),
+                  numKeyValueHeads <= numAttentionHeads,
+                  numAttentionHeads.isMultiple(of: numKeyValueHeads),
+                  numAttentionHeads.multipliedReportingOverflow(by: headDim).overflow == false,
+                  let slidingWindow = positiveIntValue(config["sliding_window"]),
+                  let blockSize = positiveIntValue(dflash["block_size"]),
+                  (2 ... slidingWindow).contains(blockSize),
+                  let convGroupSize = positiveIntValue(dflash["conv_group_size"]),
+                  hiddenSize.isMultiple(of: convGroupSize),
+                  positiveIntValue(dflash["conv_kernel_size"]) != nil,
+                  positiveIntValue(dflash["selector_rank"]) != nil,
+                  let selectorTopK = positiveIntValue(dflash["selector_top_k"]),
+                  selectorTopK <= vocabSize,
+                  let maskTokenID = intValue(dflash["mask_token_id"]),
+                  (0 ..< vocabSize).contains(maskTokenID),
+                  let rmsNormEps = finitePositiveDouble(config["rms_norm_eps"]),
+                  let rope = config["rope_parameters"] as? [String: Any],
+                  normalizedString(rope["rope_type"]) == "default",
+                  let ropeTheta = finitePositiveDouble(rope["rope_theta"])
+            else {
+                return nil
+            }
+            let layerTypes = stringArray(config["layer_types"])
+            let targetLayerIDs = intArray(dflash["target_layer_ids"])
+            guard layerTypes.count == numHiddenLayers,
+                  layerTypes.allSatisfy({ $0 == "sliding_attention" }),
+                  targetLayerIDs.count == numHiddenLayers,
+                  targetLayerIDs.allSatisfy({ (0 ..< targetLayerCount).contains($0) }),
+                  zip(targetLayerIDs, targetLayerIDs.dropFirst()).allSatisfy({ $0.0 < $0.1 })
+            else {
+                return nil
+            }
+            return DFlash2CompatibilitySignature(
+                role: "draft",
+                hiddenSize: hiddenSize,
+                intermediateSize: intermediateSize,
+                vocabSize: vocabSize,
+                maxPositionEmbeddings: maxPositionEmbeddings,
+                targetLayerCount: targetLayerCount,
+                rmsNormEps: rmsNormEps,
+                ropeTheta: ropeTheta,
+                blockSize: blockSize,
+                targetLayerIDs: targetLayerIDs
+            )
+        case .mtp:
+            return nil
+        }
+    }
+
+    private func finitePositiveDouble(_ value: Any?) -> Double? {
+        guard let value = doubleValue(value), value.isFinite, value > 0 else {
+            return nil
+        }
+        return value
+    }
+
     private func isStandaloneLoadable(_ inspection: SnapshotInspection) -> Bool {
         inspection.readiness.isLoadable
             && artifactKind(
@@ -811,7 +1154,10 @@ public struct LocalModelScanner: Sendable {
             ) != .dflash2Draft
     }
 
-    private func mtpCompatibilitySignature(_ config: [String: Any]?) -> MtpCompatibilitySignature? {
+    private func mtpCompatibilitySignature(
+        _ config: [String: Any]?,
+        repoID: String? = nil
+    ) -> MtpCompatibilitySignature? {
         guard let config,
               let modelType = config["model_type"] as? String,
               let text = config["text_config"] as? [String: Any] else {
@@ -821,7 +1167,12 @@ public struct LocalModelScanner: Sendable {
             || modelType == "gemma4_unified"
             || modelType == "gemma4_assistant"
             || modelType == "gemma4_unified_assistant" {
-            return gemma4MtpCompatibilitySignature(config, modelType: modelType, text: text)
+            return gemma4MtpCompatibilitySignature(
+                config,
+                modelType: modelType,
+                text: text,
+                repoID: repoID
+            )
         }
         guard modelType == "qwen3_5" || modelType == "qwen3_5_moe" || modelType == "qwen3_5_mtp" else {
             return nil
@@ -829,6 +1180,7 @@ public struct LocalModelScanner: Sendable {
         return MtpCompatibilitySignature(
             supportsMtp: modelType == "qwen3_5" || modelType == "qwen3_5_moe",
             family: qwenMtpFamily(modelType: modelType, text: text),
+            lineage: mtpLineage(config: config, repoID: repoID),
             hiddenSize: intValue(text["hidden_size"]),
             intermediateSize: intValue(text["intermediate_size"]),
             moeIntermediateSize: intValue(text["moe_intermediate_size"]),
@@ -861,10 +1213,63 @@ public struct LocalModelScanner: Sendable {
         return "qwen3_5"
     }
 
+    /// MTP weights are trained for a specific model lineage. Execution graph
+    /// identifiers such as `qwen3_5` are deliberately broader and may cover
+    /// multiple model generations, so they cannot establish weight lineage.
+    private func mtpLineage(config: [String: Any], repoID: String?) -> String? {
+        let text = config["text_config"] as? [String: Any]
+        let identities: [String?] = [
+            config["base_model_name_or_path"] as? String,
+            config["_name_or_path"] as? String,
+            text?["base_model_name_or_path"] as? String,
+            text?["_name_or_path"] as? String,
+            repoID,
+        ]
+        return identities.lazy.compactMap(normalizedMtpLineage).first
+    }
+
+    private func normalizedMtpLineage(_ identity: String?) -> String? {
+        guard let identity else {
+            return nil
+        }
+        let leaf = identity
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(whereSeparator: { $0 == "/" || $0 == "\\" })
+            .last
+            .map(String.init) ?? ""
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "."))
+        let tokens = leaf.lowercased()
+            .components(separatedBy: allowed.inverted)
+            .filter { !$0.isEmpty && !isMtpPackagingMarker($0) }
+        guard !tokens.isEmpty else {
+            return nil
+        }
+        return tokens.joined(separator: "-")
+    }
+
+    private func isMtpPackagingMarker(_ token: String) -> Bool {
+        if [
+            "mtp", "assistant", "drafter", "mlx", "qat", "optiq",
+            "awq", "gptq", "gguf", "quantized", "bfloat16", "float16",
+        ].contains(token) {
+            return true
+        }
+        if token.hasSuffix("bit"), Int(token.dropLast(3)) != nil {
+            return true
+        }
+        for prefix in ["mxfp", "int", "fp", "bf"] where token.hasPrefix(prefix) {
+            if Int(token.dropFirst(prefix.count)) != nil {
+                return true
+            }
+        }
+        return false
+    }
+
     private func gemma4MtpCompatibilitySignature(
         _ config: [String: Any],
         modelType: String,
-        text: [String: Any]
+        text: [String: Any],
+        repoID: String?
     ) -> MtpCompatibilitySignature? {
         let isAssistant = modelType == "gemma4_assistant" || modelType == "gemma4_unified_assistant"
         if isAssistant {
@@ -885,6 +1290,7 @@ public struct LocalModelScanner: Sendable {
         return MtpCompatibilitySignature(
             supportsMtp: !isAssistant,
             family: family,
+            lineage: mtpLineage(config: config, repoID: repoID),
             hiddenSize: isAssistant ? intValue(config["backbone_hidden_size"]) : intValue(text["hidden_size"]),
             intermediateSize: nil,
             moeIntermediateSize: nil,

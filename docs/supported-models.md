@@ -4,10 +4,10 @@
 包含兼容的 `config.json`、tokenizer、chat template、权重布局和量化元数据。
 下载前预检与加载时完整性校验仍可能拒绝不兼容 checkpoint。
 
-| 模型族 | `model_type` | 文本 | 图片 | Responses/Messages reasoning | Chat/Responses/Messages tools | MTP/辅助 drafter | Prompt Lookup | KV cache |
+| 模型族 | `model_type` | 文本 | 图片 | Responses/Messages reasoning | Chat/Responses/Messages tools | MTP/DFlash2/辅助 drafter | Prompt Lookup | KV cache |
 | --- | --- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | Qwen 3.5 Dense / 声明相同类型的 Qwen 3.6 Dense | `qwen3_5` | 是 | 否 | 是，需原生 `<think>` 模板 | 是，需原生工具模板 | 是 | 是 | 是 |
-| Qwen 3.8 Dense（已验收 `mlx-community/Qwen3.8-27B-4bit`） | `qwen3_5` | 是 | 是（图片；不含视频） | 是，默认开启；支持 `low`/`medium`/`xhigh` | 是，需 Qwen3.8 原生工具模板 | 是，已验收 `Qwen3.8-27B-MTP-4bit`；收益需实测 | 是 | 是 |
+| Qwen 3.8 Dense（已验收 `mlx-community/Qwen3.8-27B-4bit`） | `qwen3_5` | 是 | 是（图片；不含视频） | 是，默认开启；支持 `low`/`medium`/`xhigh` | 是，需 Qwen3.8 原生工具模板 | 是，已验收 `Qwen3.8-27B-MTP-4bit` 与 `z-lab/Qwen3.8-27B-DFlash2`；DFlash2 仅文本 | 是 | 是 |
 | Qwen 3.5/3.6 MoE | `qwen3_5_moe` | 是 | 否 | 是，需原生 `<think>` 模板 | 是，需原生工具模板 | 是 | 是 | 是 |
 | Gemma 4 / Gemma 4 Unified | `gemma4`, `gemma4_unified` | 是 | checkpoint 含 `vision_config` 时支持 | 是，需原生 `thought` channel | 是，需原生工具模板 | 是 | 是 | 是 |
 | GLM-4 MoE Lite | `glm4_moe_lite` | 是 | 否 | 是，需原生 `<think>` 模板 | 是，需原生工具模板 | 否 | 是 | 是 |
@@ -36,6 +36,13 @@ Responses 输出独立 typed item；Messages 输出原生 `thinking` block；两
 当前模型没有独立 reasoning summary、
 refusal、音频输出或图片输出通道；这些能力不会从普通文本推断。
 即使其他模型的模板包含相似标记，也不会被推断为支持。
+Qwen3.8 DFlash2 使用独立 CLI/Server actor，支持 Greedy、精确 sampling、
+`max-sequences>1` 的请求级并发和有安全宽度上限的 `B=N` tensor batching；它不与
+MTP、Prompt Lookup、KV quantization、paged/SSD prefix cache 或 active KV offload
+混用。DFlash2 独立路径可使用自己的内存 prefix cache。App 通过结构兼容 matcher、
+独立 actor 重启、失败回滚、Tensor Batch 上限配置、Dashboard 运行指标和诊断快照
+提供同一执行路径；draft 不作为 base model 独立加载。
+完整边界见 [`dflash2-server-api.md`](dflash2-server-api.md)。
 Llama 3.1/3.2 的原生自定义函数协议只允许每个 assistant turn 产生一个工具调用；
 其独立的 built-in tool / `<|python_tag|>` 协议不属于 OpenAI `tools` 支持范围。
 MiniCPM-V 4.6 与 MiniCPM5 使用不同的原生 XML 工具协议；两者均支持多调用，

@@ -14,10 +14,20 @@ use crate::Result;
 ///
 /// Computes `down( silu(gate(x)) * up(x) )` where `silu(z) = z * sigmoid(z)`.
 pub struct Mlp {
-    gate: Linear,
-    up: Linear,
+    gate_up: GateUp,
     down: Linear,
     swiglu: OnceLock<CompiledFn>,
+}
+
+enum GateUp {
+    Separate { gate: Linear, up: Linear },
+    Fused(Box<FusedGateUp>),
+}
+
+struct FusedGateUp {
+    projection: Linear,
+    gate: Linear,
+    up: Linear,
 }
 
 impl Mlp {
@@ -25,8 +35,37 @@ impl Mlp {
     /// `{prefix}.gate_proj`, `{prefix}.up_proj`, and `{prefix}.down_proj`.
     pub fn from_loader(loader: &Loader, prefix: &str) -> Result<Self> {
         Ok(Self {
-            gate: Linear::from_loader(loader, &format!("{prefix}.gate_proj"))?,
-            up: Linear::from_loader(loader, &format!("{prefix}.up_proj"))?,
+            gate_up: GateUp::Separate {
+                gate: Linear::from_loader(loader, &format!("{prefix}.gate_proj"))?,
+                up: Linear::from_loader(loader, &format!("{prefix}.up_proj"))?,
+            },
+            down: Linear::from_loader(loader, &format!("{prefix}.down_proj"))?,
+            swiglu: OnceLock::new(),
+        })
+    }
+
+    pub(crate) fn from_loader_dflash2(loader: &Loader, prefix: &str) -> Result<Self> {
+        let gate = Linear::from_loader(loader, &format!("{prefix}.gate_proj"))?;
+        let up = Linear::from_loader(loader, &format!("{prefix}.up_proj"))?;
+        if gate.out_features() != up.out_features() {
+            anyhow::bail!(
+                "DFlash2 fused MLP requires matching gate/up widths, got {} and {}",
+                gate.out_features(),
+                up.out_features()
+            );
+        }
+        let projection =
+            Linear::fuse_quantized_outputs(&[&gate, &up], "DFlash2 fused MLP gate/up")?;
+        let mut separate = projection.split_quantized_outputs(
+            &[gate.out_features(), up.out_features()],
+            "DFlash2 split MLP gate/up",
+        )?;
+        Ok(Self {
+            gate_up: GateUp::Fused(Box::new(FusedGateUp {
+                projection,
+                gate: separate.remove(0),
+                up: separate.remove(0),
+            })),
             down: Linear::from_loader(loader, &format!("{prefix}.down_proj"))?,
             swiglu: OnceLock::new(),
         })
@@ -39,8 +78,7 @@ impl Mlp {
     #[doc(hidden)]
     pub fn from_components(gate: Linear, up: Linear, down: Linear) -> Self {
         Self {
-            gate,
-            up,
+            gate_up: GateUp::Separate { gate, up },
             down,
             swiglu: OnceLock::new(),
         }
@@ -62,8 +100,28 @@ impl Mlp {
     /// Stream-targeted forward pass.
     pub fn forward_on(&self, x: &Array, target: impl Into<StreamOrDevice>) -> Result<Array> {
         let target = target.into();
-        let g = self.gate.forward_on(x, target)?;
-        let u = self.up.forward_on(x, target)?;
+        let (g, u) = match &self.gate_up {
+            GateUp::Separate { gate, up } => {
+                (gate.forward_on(x, target)?, up.forward_on(x, target)?)
+            }
+            GateUp::Fused(fused) => {
+                let FusedGateUp {
+                    projection,
+                    gate,
+                    up,
+                } = fused.as_ref();
+                if super::product_stable_qmm::is_armed() {
+                    let output = projection.forward_on(x, target)?;
+                    let mut parts = mlx::ops::shape::split_n_on(&output, 2, -1, target)?;
+                    if parts.len() != 2 {
+                        anyhow::bail!("DFlash2 fused MLP gate/up returned {} parts", parts.len());
+                    }
+                    (parts.remove(0), parts.remove(0))
+                } else {
+                    (gate.forward_on(x, target)?, up.forward_on(x, target)?)
+                }
+            }
+        };
         let activated = self.swiglu_on(&g, &u)?;
         self.down.forward_on(&activated, target)
     }

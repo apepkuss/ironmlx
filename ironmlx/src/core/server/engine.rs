@@ -2514,20 +2514,20 @@ impl EngineSlot {
 impl EngineVariant {
     async fn clear_shared_prompt_lookup(&self) -> Result<usize> {
         match self {
-            Self::Qwen35(state) => state.scheduler_handle.clear_shared_prompt_lookup().await,
-            Self::Qwen35Moe(state) => state.scheduler_handle.clear_shared_prompt_lookup().await,
-            Self::Qwen36Moe(state) => state.scheduler_handle.clear_shared_prompt_lookup().await,
-            Self::Gemma4(state) => state.scheduler_handle.clear_shared_prompt_lookup().await,
+            Self::Qwen35(state) => state.request_execution.clear_shared_prompt_lookup().await,
+            Self::Qwen35Moe(state) => state.request_execution.clear_shared_prompt_lookup().await,
+            Self::Qwen36Moe(state) => state.request_execution.clear_shared_prompt_lookup().await,
+            Self::Gemma4(state) => state.request_execution.clear_shared_prompt_lookup().await,
             Self::Gemma4Drafter(state) => {
                 state
                     .base
-                    .scheduler_handle
+                    .request_execution
                     .clear_shared_prompt_lookup()
                     .await
             }
-            Self::Glm4MoeLite(state) => state.scheduler_handle.clear_shared_prompt_lookup().await,
-            Self::Llama(state) => state.scheduler_handle.clear_shared_prompt_lookup().await,
-            Self::MiniCpmV46(state) => state.scheduler_handle.clear_shared_prompt_lookup().await,
+            Self::Glm4MoeLite(state) => state.request_execution.clear_shared_prompt_lookup().await,
+            Self::Llama(state) => state.request_execution.clear_shared_prompt_lookup().await,
+            Self::MiniCpmV46(state) => state.request_execution.clear_shared_prompt_lookup().await,
             Self::DiffusionGemma(_) => Ok(0),
         }
     }

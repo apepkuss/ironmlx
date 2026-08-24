@@ -225,7 +225,7 @@ pub struct PagedPrefixEntryStats {
 }
 
 impl PagedPrefixEntry {
-    fn eval(&self) -> Result<()> {
+    pub(crate) fn eval(&self) -> Result<()> {
         let mut arrays = Vec::new();
         for layer in &self.main_layers {
             match layer {

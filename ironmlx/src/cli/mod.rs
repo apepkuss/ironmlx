@@ -482,6 +482,8 @@ mod tests {
             "serve",
             "--model",
             "/tmp/model",
+            "--model-id",
+            "mlx-community/Qwen3.8-27B-4bit",
             "--scheduler-profile",
             "scheduler-profile.json",
             "--kv-quant",
@@ -490,6 +492,10 @@ mod tests {
 
         match cli.command {
             Command::Serve(args) => {
+                assert_eq!(
+                    args.model_id.as_deref(),
+                    Some("mlx-community/Qwen3.8-27B-4bit")
+                );
                 assert_eq!(args.model.as_deref(), Some("/tmp/model"));
                 assert_eq!(
                     args.scheduler_profile
@@ -499,6 +505,37 @@ mod tests {
                     "scheduler-profile.json"
                 );
                 assert_eq!(args.kv_quant, KvQuantArg::Turbo4);
+            }
+            other => panic!("expected Serve command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn serve_subcommand_parses_dflash2_execution_flags() {
+        let cli = Cli::parse_from([
+            "ironmlx",
+            "serve",
+            "--model",
+            "/tmp/model",
+            "--dflash2-model-dir",
+            "/tmp/dflash2",
+            "--dflash2-block-size",
+            "6",
+            "--dflash2-draft-bits",
+            "8",
+            "--dflash2-tensor-batch-max-width",
+            "6",
+        ]);
+
+        match cli.command {
+            Command::Serve(args) => {
+                assert_eq!(
+                    args.dflash2_model_dir.as_deref(),
+                    Some(std::path::Path::new("/tmp/dflash2"))
+                );
+                assert_eq!(args.dflash2_block_size, 6);
+                assert_eq!(args.dflash2_draft_bits, 8);
+                assert_eq!(args.dflash2_tensor_batch_max_width, Some(6));
             }
             other => panic!("expected Serve command, got {other:?}"),
         }

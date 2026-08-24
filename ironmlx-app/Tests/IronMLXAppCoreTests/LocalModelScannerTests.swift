@@ -329,24 +329,63 @@ import Testing
     #expect(base.lastPathComponent == String(repeating: "a", count: 40))
 }
 
+@Test func localModelScannerAcceptsSameMtpLineageAcrossQuantizationFormats() throws {
+    let root = try temporaryDirectory()
+    _ = try writeSnapshot(
+        root: root,
+        repoID: "mlx-community/Qwen3.8-27B-4bit",
+        configJSON: qwen35Config(modelType: "qwen3_5", mtpLayers: 0, hiddenSize: 5120)
+    )
+    _ = try writeSnapshot(
+        root: root,
+        repoID: "mlx-community/Qwen3.8-27B-MTP-8bit",
+        configJSON: qwen35Config(modelType: "qwen3_5_mtp", mtpLayers: 1, hiddenSize: 5120)
+    )
+
+    let model = try #require(LocalModelScanner(rootURL: root).scan().first)
+
+    #expect(model.mtp?.status == "available")
+    #expect(model.mtp?.candidates.map(\.id) == ["mlx-community/Qwen3.8-27B-MTP-8bit"])
+}
+
+@Test func localModelScannerRejectsCrossGenerationMtpWithIdenticalStructure() throws {
+    let root = try temporaryDirectory()
+    _ = try writeSnapshot(
+        root: root,
+        repoID: "mlx-community/Qwen3.8-27B-4bit",
+        configJSON: qwen35Config(modelType: "qwen3_5", mtpLayers: 0, hiddenSize: 5120)
+    )
+    _ = try writeSnapshot(
+        root: root,
+        repoID: "mlx-community/Qwen3.6-27B-MTP-4bit",
+        configJSON: qwen35Config(modelType: "qwen3_5_mtp", mtpLayers: 1, hiddenSize: 5120)
+    )
+
+    let model = try #require(LocalModelScanner(rootURL: root).scan().first)
+
+    #expect(model.mtp?.status == "incompatible")
+    #expect(model.mtp?.candidates.isEmpty == true)
+    #expect(model.mtp?.incompatibleCandidates.map(\.id) == ["mlx-community/Qwen3.6-27B-MTP-4bit"])
+}
+
 @Test func localModelScannerAttachesCompatibleMoeMtpWeightsWithoutDenseIntermediateSize() throws {
     let root = try temporaryDirectory()
     _ = try writeSnapshot(
         root: root,
-        repoID: "mlx-community/Qwen3.6-35B-A3B-4bit",
+        repoID: "mlx-community/Qwen3.6-35B-A3B-OptiQ-4bit",
         configJSON: qwen35MoeConfig(modelType: "qwen3_5_moe", mtpLayers: 0)
     )
     _ = try writeSnapshot(
         root: root,
-        repoID: "mlx-community/Qwen3.6-35B-A3B-MTP-4bit",
+        repoID: "mlx-community/Qwen3.6-35B-A3B-MTP-5bit",
         configJSON: qwen35MoeConfig(modelType: "qwen3_5_mtp", mtpLayers: 1)
     )
 
     let model = try #require(LocalModelScanner(rootURL: root).scan().first)
 
-    #expect(model.id == "mlx-community/Qwen3.6-35B-A3B-4bit")
+    #expect(model.id == "mlx-community/Qwen3.6-35B-A3B-OptiQ-4bit")
     #expect(model.mtp?.status == "available")
-    #expect(model.mtp?.candidates.map(\.id) == ["mlx-community/Qwen3.6-35B-A3B-MTP-4bit"])
+    #expect(model.mtp?.candidates.map(\.id) == ["mlx-community/Qwen3.6-35B-A3B-MTP-5bit"])
 }
 
 @Test func localModelScannerAttachesCompatibleGemma4AssistantWeights() throws {
@@ -388,6 +427,61 @@ import Testing
     #expect(model.mtp?.status == "incompatible")
     #expect(model.mtp?.candidates.isEmpty == true)
     #expect(model.mtp?.incompatibleCandidates.map(\.id) == ["mlx-community/Qwen3.5-8B-MTP-4bit"])
+}
+
+@Test func localModelScannerAttachesOnlyStructurallyCompatibleDFlash2Drafts() throws {
+    let root = try temporaryDirectory()
+    _ = try writeSnapshot(
+        root: root,
+        repoID: "mlx-community/Qwen3.8-27B-4bit",
+        configJSON: dflash2TargetConfig()
+    )
+    _ = try writeSnapshot(
+        root: root,
+        repoID: "z-lab/Qwen3.8-27B-DFlash2",
+        configJSON: dflash2DraftConfig(hiddenSize: 5120)
+    )
+    _ = try writeSnapshot(
+        root: root,
+        repoID: "example/Incompatible-DFlash2",
+        configJSON: dflash2DraftConfig(hiddenSize: 4096)
+    )
+
+    let scanner = LocalModelScanner(rootURL: root)
+    let model = try #require(scanner.scan().first(where: {
+        $0.id == "mlx-community/Qwen3.8-27B-4bit"
+    }))
+
+    #expect(model.dflash2?.status == "available")
+    #expect(model.dflash2?.candidates.map(\.id) == ["z-lab/Qwen3.8-27B-DFlash2"])
+    #expect(model.dflash2?.incompatibleCandidates.isEmpty == true)
+    #expect(scanner.resolveModelPath(for: "z-lab/Qwen3.8-27B-DFlash2") == nil)
+    #expect(scanner.resolveDFlash2DraftPath(for: "z-lab/Qwen3.8-27B-DFlash2") != nil)
+}
+
+@Test func localModelScannerRejectsDFlash2DraftThatBackendContractWouldReject() throws {
+    let root = try temporaryDirectory()
+    _ = try writeSnapshot(
+        root: root,
+        repoID: "mlx-community/Qwen3.8-27B-4bit",
+        configJSON: dflash2TargetConfig()
+    )
+    let invalidDraft = dflash2DraftConfig(hiddenSize: 5120)
+        .replacingOccurrences(
+            of: #""target_layer_ids": [5, 19, 33, 47, 61]"#,
+            with: #""target_layer_ids": [5, 19, 19, 47, 61]"#
+        )
+    _ = try writeSnapshot(
+        root: root,
+        repoID: "example/Invalid-DFlash2",
+        configJSON: invalidDraft
+    )
+
+    let model = try #require(LocalModelScanner(rootURL: root).scan().first)
+
+    #expect(model.dflash2?.status == "incompatible")
+    #expect(model.dflash2?.candidates.isEmpty == true)
+    #expect(model.dflash2?.incompatibleCandidates.first?.reasonCode == "dflash2_invalid_config")
 }
 
 func temporaryDirectory() throws -> URL {
@@ -440,6 +534,71 @@ private func qwen35Config(
         "linear_conv_kernel_dim": 4,
         "mtp_num_hidden_layers": \(mtpLayers),
         "max_position_embeddings": 262144
+      }
+    }
+    """
+}
+
+private func dflash2DraftConfig(hiddenSize: Int) -> String {
+    """
+    {
+      "architectures": ["DFlash2DraftModel"],
+      "model_type": "qwen3",
+      "dtype": "bfloat16",
+      "hidden_act": "silu",
+      "attention_bias": false,
+      "is_causal": false,
+      "hidden_size": \(hiddenSize),
+      "intermediate_size": 17408,
+      "vocab_size": 248320,
+      "max_position_embeddings": 262144,
+      "head_dim": 128,
+      "num_attention_heads": 32,
+      "num_hidden_layers": 5,
+      "num_key_value_heads": 8,
+      "num_target_layers": 64,
+      "rms_norm_eps": 0.000001,
+      "rope_parameters": {
+        "rope_type": "default",
+        "rope_theta": 10000000
+      },
+      "sliding_window": 2048,
+      "layer_types": [
+        "sliding_attention",
+        "sliding_attention",
+        "sliding_attention",
+        "sliding_attention",
+        "sliding_attention"
+      ],
+      "dflash_config": {
+        "block_size": 8,
+        "conv_group_size": 16,
+        "conv_kernel_size": 2,
+        "mask_token_id": 248070,
+        "selector_rank": 256,
+        "selector_top_k": 16,
+        "target_layer_ids": [5, 19, 33, 47, 61]
+      }
+    }
+    """
+}
+
+private func dflash2TargetConfig() -> String {
+    """
+    {
+      "model_type": "qwen3_5",
+      "text_config": {
+        "hidden_size": 5120,
+        "intermediate_size": 17408,
+        "num_hidden_layers": 64,
+        "vocab_size": 248320,
+        "max_position_embeddings": 262144,
+        "rms_norm_eps": 0.000001,
+        "rope_parameters": {
+          "rope_type": "default",
+          "rope_theta": 10000000
+        },
+        "tie_word_embeddings": false
       }
     }
     """

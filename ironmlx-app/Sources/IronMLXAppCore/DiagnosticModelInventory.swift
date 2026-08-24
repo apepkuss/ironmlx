@@ -20,10 +20,14 @@ public struct DiagnosticModelInventoryCollector: Sendable {
         let loadedReferences = Set(loadedModels.flatMap { [$0.id, $0.model] })
         let pinned = Set(loadedModels.filter(\.pinned).flatMap { [$0.id, $0.model] })
         let mtp = Set(loadedModels.filter(\.mtpEnabled).flatMap { [$0.id, $0.model] })
+        let dflash2 = Set(loadedModels.filter { $0.dflash2?.enabled == true }.flatMap {
+            [$0.id, $0.model]
+        })
         let localModels = scanner.scan(
             loadedModels: loadedReferences,
             pinnedModels: pinned,
-            mtpEnabledModels: mtp
+            mtpEnabledModels: mtp,
+            dflash2EnabledModels: dflash2
         )
         var records: [DiagnosticModelVersion] = []
         var metadataFailed = false

@@ -18,6 +18,63 @@ import Testing
     ])
 }
 
+@Test func serveArgumentsUseIsolatedDFlash2ActorAndOmitIncompatibleDaemonFlags() {
+    let options = BackendLaunchOptions(
+        prefillChunkSize: 512,
+        bMax: 3,
+        admissionDeadlineMs: 50,
+        admissionQueueMax: 7,
+        maxCacheCap: 32768,
+        schedulerProfile: "/tmp/profile.json",
+        schedulerAutotuneReport: true,
+        kvQuant: "turbo4",
+        pagedPrefixCacheDir: "/tmp/prefix",
+        prefixLruCacheMaxBytes: 2_147_483_648,
+        activeKvOffload: true,
+        maxLoadedModels: 4,
+        modelTtlMinutes: 30
+    )
+    let runtime = ModelDFlash2Runtime(
+        targetModelID: "target",
+        targetModelDir: "/models/target",
+        draftModelID: "draft",
+        draftModelDir: "/models/draft",
+        blockSize: 4,
+        draftBits: 8,
+        tensorBatchMaxWidth: 6,
+        maxCacheCap: 65_536
+    )
+    let config = BackendLaunchConfiguration(
+        executableURL: URL(fileURLWithPath: "/tmp/ironmlx"),
+        host: "127.0.0.1",
+        port: 9068,
+        options: options,
+        dflash2Runtime: runtime
+    )
+
+    #expect(argumentValue("--model", in: config.arguments) == "/models/target")
+    #expect(argumentValue("--model-id", in: config.arguments) == "target")
+    #expect(argumentValue("--dflash2-model-dir", in: config.arguments) == "/models/draft")
+    #expect(argumentValue("--dflash2-block-size", in: config.arguments) == "4")
+    #expect(argumentValue("--dflash2-draft-bits", in: config.arguments) == "8")
+    #expect(argumentValue("--dflash2-tensor-batch-max-width", in: config.arguments) == "6")
+    #expect(argumentValue("--max-sequences", in: config.arguments) == "3")
+    #expect(argumentValue("--max-cache-cap", in: config.arguments) == "65536")
+    #expect(!config.arguments.contains("--scheduler-profile"))
+    #expect(!config.arguments.contains("--kv-quant"))
+    #expect(!config.arguments.contains("--paged-prefix-cache-dir"))
+    #expect(argumentValue("--prefix-lru-cache-max-bytes", in: config.arguments) == "2147483648")
+    #expect(!config.arguments.contains("--active-kv-offload"))
+    #expect(!config.arguments.contains("--max-loaded-models"))
+}
+
+private func argumentValue(_ flag: String, in arguments: [String]) -> String? {
+    guard let index = arguments.firstIndex(of: flag), arguments.indices.contains(index + 1) else {
+        return nil
+    }
+    return arguments[index + 1]
+}
+
 @Test func serveArgumentsIncludePersistedBackendRuntimeSettings() {
     let options = BackendLaunchOptions(
         prefillChunkSize: 1024,

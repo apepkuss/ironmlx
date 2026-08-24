@@ -425,7 +425,12 @@ func readinessFailureTerminatesUnhealthyProcessAndEntersFailed() async throws {
     #expect(harness.processManager.currentLaunchID == nil)
     #expect(harness.processManager.lastTermination?.stopIntent == .startupFailureCleanup)
     #expect(harness.supervisor.lastEvent?.phase == .failed)
+    #expect(harness.supervisor.lastEvent?.errorCode == .backendReadinessFailed)
     #expect(harness.supervisor.lastEvent?.processHealthy == false)
+    #expect(
+        BackendRuntimeSupervisorError.readinessFailed("health payload invalid").failureCode
+            == .backendReadinessFailed
+    )
 }
 
 @Test @MainActor

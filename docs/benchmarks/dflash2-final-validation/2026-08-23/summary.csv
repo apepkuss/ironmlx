@@ -1,0 +1,16 @@
+scenario,prompt,mode,active_batch,max_sequences,max_tokens,temperature,top_k,seed,wall_tps,generation_tps,acceptance_rate,sha256,parity,evidence
+greedy,math,ordinary,1,1,128,0,,,27.843,,,7468009993d3a50d8f8136fdd4b1839cda4c70bb01c2891b899de30d12882578,reference,single_paired
+greedy,math,mtp,1,1,128,0,,,27.572,,,7468009993d3a50d8f8136fdd4b1839cda4c70bb01c2891b899de30d12882578,exact,single_paired
+greedy,math,dflash2,1,1,128,0,,,49.207,54.957,0.688000,7468009993d3a50d8f8136fdd4b1839cda4c70bb01c2891b899de30d12882578,exact,single_paired
+greedy,chinese,ordinary,1,1,128,0,,,30.053,,,d1bcf5094068a8031096394d0c4d0192ea366daed3b11b892346299a08709284,reference,single_paired
+greedy,chinese,mtp,1,1,128,0,,,34.924,,,d1bcf5094068a8031096394d0c4d0192ea366daed3b11b892346299a08709284,exact,single_paired
+greedy,chinese,dflash2,1,1,128,0,,,48.123,52.534,0.567376,d1bcf5094068a8031096394d0c4d0192ea366daed3b11b892346299a08709284,exact,single_paired
+greedy,rust_utf8,ordinary,1,1,128,0,,,28.485,,,f0da204dfaa0e09b0ddf22033cac040e9b891faa8fa272a22174f8a828f6b221,reference,single_paired
+greedy,rust_utf8,mtp,1,1,128,0,,,28.469,,,f0da204dfaa0e09b0ddf22033cac040e9b891faa8fa272a22174f8a828f6b221,exact,single_paired
+greedy,rust_utf8,dflash2,1,1,128,0,,,49.018,53.099,0.560284,f0da204dfaa0e09b0ddf22033cac040e9b891faa8fa272a22174f8a828f6b221,exact,single_paired
+sampled,math,dflash2_run_1,1,2,128,0.7,20,20260823,,40.964,0.567376,a41d89508ebbe01609b9156d4b8544927c55061f9b6663e0b4d163294f25a201,reproducible,repeated_3
+sampled,math,dflash2_run_2,1,2,128,0.7,20,20260823,,41.031,0.567376,a41d89508ebbe01609b9156d4b8544927c55061f9b6663e0b4d163294f25a201,reproducible,repeated_3
+sampled,math,dflash2_run_3,1,2,128,0.7,20,20260823,,40.840,0.567376,a41d89508ebbe01609b9156d4b8544927c55061f9b6663e0b4d163294f25a201,reproducible,repeated_3
+concurrent,greedy,dflash2,2,2,384,0,,,20.554,,,e590c4cce00ec969d8ac3e844793d0cacbcdcdf7f915520c6eba23314d077e6b,completed,mixed_pair
+concurrent,sampled,dflash2,2,2,384,0.7,20,20260823,20.555,,,9f56f20a8c6e64db93f8b2b4f7aed2f2a47b725c4ab5e640e171c17b4cf59470,completed,mixed_pair
+concurrent,aggregate,dflash2,2,2,768,mixed,,,41.079,,,,completed,mixed_pair

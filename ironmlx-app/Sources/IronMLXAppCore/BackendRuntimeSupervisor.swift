@@ -117,6 +117,7 @@ public protocol BackendRuntimeManaging: AnyObject {
         _ models: [BackendLoadedModelInfo],
         parameterConfirmedModelIDs: Set<String>
     )
+    func refreshConfirmedSnapshot()
 }
 
 @MainActor
@@ -335,10 +336,23 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
             confirmed?.pinned = model.pinned
             confirmed?.mtpModelDir = model.mtpModelDir
             confirmed?.mtpDraftTokens = model.mtpDraftTokens
+            confirmed?.dflash2ModelDir = capturedByID[model.id]?.dflash2ModelDir
+            confirmed?.dflash2BlockSize = capturedByID[model.id]?.dflash2BlockSize
+            confirmed?.dflash2DraftBits = capturedByID[model.id]?.dflash2DraftBits
+            confirmed?.dflash2TensorBatchMaxWidth =
+                capturedByID[model.id]?.dflash2TensorBatchMaxWidth
             confirmed?.promptLookup = model.promptLookup
             return confirmed!
         }
         confirmedSnapshot = BackendRecoverySnapshot(config: config, models: confirmedModels)
+    }
+
+    public func refreshConfirmedSnapshot() {
+        confirmedSnapshot = BackendRecoverySnapshot.capture(
+            config: configStore.load(),
+            scanner: scanner,
+            parameterStore: parameterStore
+        )
     }
 
     private func launchAndRestore(
@@ -375,6 +389,7 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
                     runtimeState: .failed,
                     incidentID: incidentID,
                     launchID: launchID,
+                    errorCode: .backendReadinessFailed,
                     detail: "Backend health check failed: \(error.localizedDescription)",
                     logTail: activeIncident?.record.logTail,
                     canRetry: true,
@@ -739,7 +754,9 @@ public enum BackendRuntimeSupervisorError: LocalizedError, Equatable {
         switch self {
         case .instanceAlreadyRunning:
             .instanceAlreadyRunning
-        case .readinessFailed, .launchFailed:
+        case .readinessFailed:
+            .backendReadinessFailed
+        case .launchFailed:
             nil
         }
     }

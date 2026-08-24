@@ -20,6 +20,7 @@ pub struct Linear {
 }
 
 /// Borrowed quantized Linear internals for architecture-specific fused paths.
+#[derive(Clone, Copy)]
 pub(crate) struct QuantizedLinearParts<'a> {
     pub(crate) weight: &'a Array,
     pub(crate) scales: &'a Array,
@@ -225,6 +226,169 @@ impl Linear {
         }
     }
 
+    /// Fuse output rows from matching quantized projections without retaining
+    /// duplicate weights. Each output row keeps the same affine-4 dot-product
+    /// accumulation tree; callers split the fused result on the original row
+    /// boundaries.
+    pub(crate) fn fuse_quantized_outputs(projections: &[&Linear], context: &str) -> Result<Self> {
+        let first = projections
+            .first()
+            .ok_or_else(|| anyhow!("{context} requires at least one projection"))?;
+        let first_parts = first
+            .quantized_parts()
+            .ok_or_else(|| anyhow!("{context} requires quantized projections"))?;
+        if first_parts.mode != QuantMode::Affine || first_parts.bits != 4 {
+            return Err(anyhow!("{context} requires affine 4-bit projections"));
+        }
+        let mut parts = Vec::with_capacity(projections.len());
+        for projection in projections {
+            let candidate = projection
+                .quantized_parts()
+                .ok_or_else(|| anyhow!("{context} requires quantized projections"))?;
+            if projection.in_features() != first.in_features()
+                || candidate.group_size != first_parts.group_size
+                || candidate.bits != first_parts.bits
+                || candidate.mode != first_parts.mode
+                || candidate.weight.dtype() != first_parts.weight.dtype()
+                || candidate.scales.dtype() != first_parts.scales.dtype()
+            {
+                return Err(anyhow!(
+                    "{context} requires matching quantized input layouts"
+                ));
+            }
+            parts.push(candidate);
+        }
+
+        let weight_refs = parts.iter().map(|part| part.weight).collect::<Vec<_>>();
+        let scale_refs = parts.iter().map(|part| part.scales).collect::<Vec<_>>();
+        let weight = mlx::ops::shape::concatenate_on(&weight_refs, 0, ())?;
+        let scales = mlx::ops::shape::concatenate_on(&scale_refs, 0, ())?;
+        let biases = if parts.iter().all(|part| part.biases.is_some()) {
+            let refs = parts
+                .iter()
+                .map(|part| part.biases.expect("checked affine biases"))
+                .collect::<Vec<_>>();
+            Some(mlx::ops::shape::concatenate_on(&refs, 0, ())?)
+        } else if parts.iter().all(|part| part.biases.is_none()) {
+            None
+        } else {
+            return Err(anyhow!(
+                "{context} requires matching quantization-bias presence"
+            ));
+        };
+        let bias = if parts.iter().all(|part| part.bias.is_some()) {
+            let refs = parts
+                .iter()
+                .map(|part| part.bias.expect("checked additive biases"))
+                .collect::<Vec<_>>();
+            Some(mlx::ops::shape::concatenate_on(&refs, 0, ())?)
+        } else if parts.iter().all(|part| part.bias.is_none()) {
+            None
+        } else {
+            return Err(anyhow!(
+                "{context} requires matching additive-bias presence"
+            ));
+        };
+        let mut arrays = vec![&weight, &scales];
+        if let Some(biases) = &biases {
+            arrays.push(biases);
+        }
+        if let Some(bias) = &bias {
+            arrays.push(bias);
+        }
+        mlx::transforms::eval(&arrays)?;
+        Ok(Self::new_quant_with_mode(
+            weight,
+            scales,
+            biases,
+            bias,
+            first_parts.group_size,
+            first_parts.bits,
+            first_parts.mode,
+        ))
+    }
+
+    /// Split a fused quantized projection into row views that share the fused
+    /// storage. This lets DFlash2 retain the ordinary projection morphology
+    /// for prefill and Q=1 work without keeping a second copy of the weights.
+    pub(crate) fn split_quantized_outputs(
+        &self,
+        output_widths: &[usize],
+        context: &str,
+    ) -> Result<Vec<Self>> {
+        let parts = self
+            .quantized_parts()
+            .ok_or_else(|| anyhow!("{context} requires a quantized projection"))?;
+        if output_widths.is_empty() || output_widths.contains(&0) {
+            return Err(anyhow!("{context} requires non-empty output widths"));
+        }
+        let total_width = output_widths.iter().try_fold(0_usize, |total, width| {
+            total
+                .checked_add(*width)
+                .ok_or_else(|| anyhow!("{context} output width overflow"))
+        })?;
+        if total_width != self.out_features() {
+            return Err(anyhow!(
+                "{context} output widths total {total_width}, expected {}",
+                self.out_features()
+            ));
+        }
+        let mut cumulative = 0_usize;
+        let cuts = output_widths
+            .iter()
+            .take(output_widths.len() - 1)
+            .map(|width| {
+                cumulative = cumulative
+                    .checked_add(*width)
+                    .ok_or_else(|| anyhow!("{context} output cut overflow"))?;
+                i32::try_from(cumulative).map_err(Into::into)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let weights = mlx::ops::shape::split_at_on(parts.weight, &cuts, 0, ())?;
+        let scales = mlx::ops::shape::split_at_on(parts.scales, &cuts, 0, ())?;
+        let biases = parts
+            .biases
+            .map(|array| mlx::ops::shape::split_at_on(array, &cuts, 0, ()))
+            .transpose()?;
+        let bias = parts
+            .bias
+            .map(|array| mlx::ops::shape::split_at_on(array, &cuts, 0, ()))
+            .transpose()?;
+        let mut projections = Vec::with_capacity(output_widths.len());
+        for index in 0..output_widths.len() {
+            projections.push(Self::new_quant_with_mode(
+                weights[index].clone(),
+                scales[index].clone(),
+                biases.as_ref().map(|arrays| arrays[index].clone()),
+                bias.as_ref().map(|arrays| arrays[index].clone()),
+                parts.group_size,
+                parts.bits,
+                parts.mode,
+            ));
+        }
+        // `split_at_on` produces lazy row views on the loading thread's MLX
+        // stream. DFlash2 moves the constructed target model into its actor
+        // thread, so retaining those lazy views would make the first Q=1
+        // projection try to use a command encoder owned by another thread.
+        // Evaluate every view here while preserving the shared fused storage.
+        let mut arrays = Vec::new();
+        for projection in &projections {
+            let projection_parts = projection
+                .quantized_parts()
+                .expect("split projections remain quantized");
+            arrays.push(projection_parts.weight);
+            arrays.push(projection_parts.scales);
+            if let Some(biases) = projection_parts.biases {
+                arrays.push(biases);
+            }
+            if let Some(bias) = projection_parts.bias {
+                arrays.push(bias);
+            }
+        }
+        mlx::transforms::eval(&arrays)?;
+        Ok(projections)
+    }
+
     /// Stream-targeted forward pass.
     pub fn forward_on(&self, x: &Array, target: impl Into<StreamOrDevice>) -> Result<Array> {
         let target = target.into();
@@ -236,6 +400,7 @@ impl Linear {
             return self.forward_fp_positions_isolated_on(x, target);
         }
         if super::position_stable_qmm::is_armed()
+            && !super::product_stable_qmm::is_armed()
             && x.ndim() == 3
             && x.shape().as_slice()[1] > 1
             && self.quantized_parts().is_some()
@@ -566,6 +731,105 @@ mod tests {
 
         assert_eq!(lin.in_features(), in_dim as usize);
         assert_eq!(lin.out_features(), out as usize);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn fused_affine4_outputs_match_separate_product_stable_projections_exactly() {
+        fn make_projection(out: i32, offset: i32) -> Linear {
+            let input = 64_i32;
+            let raw = (0..out * input)
+                .map(|index| (((index + offset) % 31) as f32 - 15.0) * 0.0125)
+                .collect::<Vec<_>>();
+            let raw: Array = (raw.as_slice(), &[out, input][..]).try_into().unwrap();
+            let raw = mlx::ops::cast::astype(&raw, mlx::Dtype::Bfloat16).unwrap();
+            let quantized = mlx::quantization::quantize(&raw, Some(64), Some(4), "affine", None)
+                .expect("quantize affine4 projection");
+            Linear::new_quant(
+                quantized[0].clone(),
+                quantized[1].clone(),
+                Some(quantized[2].clone()),
+                None,
+                64,
+                4,
+            )
+        }
+
+        let first = make_projection(16, 0);
+        let second = make_projection(8, 7);
+        let fused =
+            Linear::fuse_quantized_outputs(&[&first, &second], "test fused affine4 projections")
+                .expect("fuse projections");
+        let input = (0..4 * 64)
+            .map(|index| ((index % 23) as f32 - 11.0) * 0.02)
+            .collect::<Vec<_>>();
+        let input: Array = (input.as_slice(), &[1_i32, 4, 64][..]).try_into().unwrap();
+        let input = mlx::ops::cast::astype(&input, mlx::Dtype::Bfloat16).unwrap();
+
+        let _scope = crate::nn::product_stable_qmm::scope();
+        let first_output = first.forward(&input).expect("first projection");
+        let second_output = second.forward(&input).expect("second projection");
+        let expected = mlx::ops::shape::concatenate(&[&first_output, &second_output], -1).unwrap();
+        let actual = fused.forward(&input).expect("fused projection");
+        let expected = mlx::ops::cast::astype(&expected, mlx::Dtype::Float32).unwrap();
+        let actual = mlx::ops::cast::astype(&actual, mlx::Dtype::Float32).unwrap();
+
+        assert_eq!(actual.shape().as_slice(), &[1, 4, 24]);
+        assert_eq!(
+            expected.to_vec::<f32>().unwrap(),
+            actual.to_vec::<f32>().unwrap()
+        );
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn split_quantized_outputs_are_safe_to_use_on_an_actor_thread() {
+        fn make_projection(out: i32, offset: i32) -> Linear {
+            let input = 64_i32;
+            let raw = (0..out * input)
+                .map(|index| (((index + offset) % 31) as f32 - 15.0) * 0.0125)
+                .collect::<Vec<_>>();
+            let raw: Array = (raw.as_slice(), &[out, input][..]).try_into().unwrap();
+            let raw = mlx::ops::cast::astype(&raw, mlx::Dtype::Bfloat16).unwrap();
+            let quantized = mlx::quantization::quantize(&raw, Some(64), Some(4), "affine", None)
+                .expect("quantize affine4 projection");
+            Linear::new_quant(
+                quantized[0].clone(),
+                quantized[1].clone(),
+                Some(quantized[2].clone()),
+                None,
+                64,
+                4,
+            )
+        }
+
+        let first = make_projection(16, 0);
+        let second = make_projection(8, 7);
+        let fused = Linear::fuse_quantized_outputs(&[&first, &second], "actor-thread split test")
+            .expect("fuse projections");
+        let mut split = fused
+            .split_quantized_outputs(&[16, 8], "actor-thread split test")
+            .expect("split projections");
+        let projection = split.remove(0);
+
+        let output = std::thread::spawn(move || {
+            let input = (0..64)
+                .map(|index| ((index % 23) as f32 - 11.0) * 0.02)
+                .collect::<Vec<_>>();
+            let input: Array = (input.as_slice(), &[1_i32, 1, 64][..]).try_into().unwrap();
+            let input = mlx::ops::cast::astype(&input, mlx::Dtype::Bfloat16).unwrap();
+            projection
+                .forward(&input)
+                .and_then(|output| {
+                    mlx::ops::cast::astype(&output, mlx::Dtype::Float32).map_err(Into::into)
+                })
+                .and_then(|output| output.to_vec::<f32>().map_err(Into::into))
+        })
+        .join()
+        .expect("actor thread must not panic")
+        .expect("split projection must execute on actor thread");
+
+        assert_eq!(output.len(), 16);
     }
 
     #[test]
