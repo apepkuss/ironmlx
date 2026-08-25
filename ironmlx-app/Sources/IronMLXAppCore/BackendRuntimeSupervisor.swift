@@ -254,14 +254,13 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
                 onProcessReady: nil
             )
         } catch {
-            let failureCode = (error as? BackendRuntimeSupervisorError)?.failureCode
             return BackendRestartResult(
                 success: false,
                 status: "restart_failed",
                 port: snapshot.config.port,
                 model: snapshot.config.defaultModelReference,
                 failedModels: snapshot.models.map(\.id),
-                errorCode: failureCode?.rawValue,
+                errorCode: DashboardErrorClassifier.code(for: error),
                 error: error.localizedDescription
             )
         }

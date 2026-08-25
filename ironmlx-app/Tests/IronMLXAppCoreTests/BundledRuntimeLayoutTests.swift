@@ -27,6 +27,14 @@ import Testing
     }
 }
 
+@Test func bundledRuntimeFailuresExposeAStableDashboardLocalizationCode() {
+    let error = BundledRuntimeLayoutError.missingFile(
+        "/Applications/IronMLX.app/Contents/Helpers/ironmlx"
+    )
+
+    #expect(DashboardErrorClassifier.code(for: error) == "bundled_runtime_invalid")
+}
+
 @Test func bundledRuntimeLayoutRejectsHelperSymlinks() throws {
     let bundleURL = try makeCompleteTestBundle()
     defer { try? FileManager.default.removeItem(at: bundleURL.deletingLastPathComponent()) }

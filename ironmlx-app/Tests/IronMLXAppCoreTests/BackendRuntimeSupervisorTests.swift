@@ -68,6 +68,38 @@ func plannedRestartCreatesNewGenerationWithoutOldTerminationPollution() async th
 }
 
 @Test @MainActor
+func restartClassifiesMissingBundledRuntimeForDashboardLocalization() async throws {
+    let root = try runtimeTemporaryDirectory()
+    let configStore = AppConfigStore(url: root.appendingPathComponent("app_config.json"))
+    configStore.save(AppConfig())
+    let processManager = BackendProcessManager(
+        configStore: configStore,
+        logStore: IronMLXLogStore(rootURL: root.appendingPathComponent("logs")),
+        launchPlanProvider: {
+            throw BundledRuntimeLayoutError.missingFile(
+                root.appendingPathComponent("IronMLX.app/Contents/Helpers/ironmlx").path
+            )
+        }
+    )
+    let supervisor = BackendRuntimeSupervisor(
+        processManager: processManager,
+        configStore: configStore,
+        scanner: LocalModelScanner(rootURL: root),
+        parameterStore: ModelParameterStore(
+            url: root.appendingPathComponent("model_params.json")
+        ),
+        restartCoordinator: FixedModelRestorer(result: .successful(port: 9068)),
+        incidentStore: BackendIncidentStore(url: root.appendingPathComponent("incidents.json")),
+        readinessWaiter: { _, _ in }
+    )
+
+    let result = await supervisor.restart(intent: .plannedRestart)
+
+    #expect(!result.success)
+    #expect(result.errorCode == "bundled_runtime_invalid")
+}
+
+@Test @MainActor
 func processReadyCallbackRunsBeforeModelRestoreCompletes() async throws {
     let restorer = GatedModelRestorer()
     let harness = try runtimeHarness(restorer: restorer)
