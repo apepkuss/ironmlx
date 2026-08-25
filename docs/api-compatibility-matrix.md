@@ -86,7 +86,7 @@ IronMLX v0.1 的公开协议承诺，适用于：
 | `stream` / `stream_options` | ◐ | 原生 Responses SSE；`stream_options` 仅接受对象形状 |
 | `max_output_tokens` | ✅ | 输出预算；受模型上下文容量约束 |
 | `temperature` / `top_p` | ✅ | 取值范围见能力矩阵 |
-| `reasoning` | ◐ | `effort` 与 `summary` 仅支持文档列出的本地语义；输出为明文 reasoning item |
+| `reasoning` | ◐ | `effort` 与 `summary` 仅支持文档列出的本地语义；缺省 effort 按 `none` 处理；输出为明文 reasoning item |
 | `store` | ◐ | 只能省略或设为 `false`；`true` 返回 400 |
 | `previous_response_id` / `conversation` | ❌ | 本地服务不提供服务端 response/conversation 存储 |
 | `background` | ◐ | 仅 `false`；`true` 返回 400，不启动后台任务 |

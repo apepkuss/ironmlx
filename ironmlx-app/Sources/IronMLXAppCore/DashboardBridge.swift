@@ -20,6 +20,13 @@ private enum DFlash2AppActivationError: LocalizedError {
     }
 }
 
+public protocol DashboardModelStatusFetching: Sendable {
+    func fetchHealthz() async throws -> HealthzSnapshot
+    func fetchLoadedModels() async throws -> [BackendLoadedModelInfo]
+}
+
+extension BackendAPIClient: DashboardModelStatusFetching {}
+
 @MainActor
 public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     private weak var webView: WKWebView?
@@ -37,6 +44,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     private let incidentStore: BackendIncidentStore
     private let notificationCenter: NotificationCenter
     private let securityStore: LANSecurityMaterialStore
+    private let modelStatusClientFactory: @Sendable (String, UInt16) -> any DashboardModelStatusFetching
     private var huggingFaceSearchTask: Task<Void, Never>?
     private lazy var diagnosticExportCoordinator = DiagnosticExportCoordinator(
         window: webView?.window,
@@ -62,7 +70,10 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         parameterStore: ModelParameterStore = .shared,
         incidentStore: BackendIncidentStore = BackendIncidentStore(),
         securityStore: LANSecurityMaterialStore = .shared,
-        notificationCenter: NotificationCenter = .default
+        notificationCenter: NotificationCenter = .default,
+        modelStatusClientFactory: @escaping @Sendable (String, UInt16) -> any DashboardModelStatusFetching = {
+            host, port in BackendAPIClient(host: host, port: port)
+        }
     ) {
         self.webView = webView
         self.configStore = configStore
@@ -79,6 +90,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         self.incidentStore = incidentStore
         self.notificationCenter = notificationCenter
         self.securityStore = securityStore
+        self.modelStatusClientFactory = modelStatusClientFactory
         super.init()
         notificationCenter.addObserver(
             self,
@@ -2338,9 +2350,19 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             return (loaded, pinned, mtpEnabled, dflash2Enabled)
         }
         if backend.isRunning {
+            let client = modelStatusClientFactory(config.host, config.port)
             do {
-                let client = BackendAPIClient(host: config.host, port: config.port)
                 let models = try await client.fetchLoadedModels()
+                let currentConfig = configStore.load()
+                if let target = configuredDFlash2Target(in: currentConfig) {
+                    return configuredDFlash2State(target: target, config: currentConfig)
+                }
+                guard Self.modelStatusQueryRemainsCurrent(
+                    queriedConfig: config,
+                    currentConfig: currentConfig
+                ) else {
+                    return persistedModelState(config: currentConfig)
+                }
                 syncPersistedLoadedModelsIfNeeded(models)
                 for model in models {
                     loaded.insert(model.id)
@@ -2358,15 +2380,87 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 return (loaded, pinned, mtpEnabled, dflash2Enabled)
             } catch {
                 IronMLXAppLogger.error("Failed to fetch loaded models: \(error)")
+                if let recovered = await recoverDFlash2ModelState(
+                    config: config,
+                    client: client
+                ) {
+                    return recovered
+                }
             }
         }
-        for model in config.restoredModelReferences {
-            loaded.insert(model)
+        return persistedModelState(config: config)
+    }
+
+    private static func modelStatusQueryRemainsCurrent(
+        queriedConfig: AppConfig,
+        currentConfig: AppConfig
+    ) -> Bool {
+        queriedConfig.restoredModelReferences == currentConfig.restoredModelReferences
+            && queriedConfig.pinnedModelReferences == currentConfig.pinnedModelReferences
+            && queriedConfig.defaultModelReference == currentConfig.defaultModelReference
+    }
+
+    private func recoverDFlash2ModelState(
+        config: AppConfig,
+        client: any DashboardModelStatusFetching
+    ) async -> (
+        references: Set<String>,
+        pinnedModels: Set<String>,
+        mtpEnabledModels: Set<String>,
+        dflash2EnabledModels: Set<String>
+    )? {
+        guard let target = preferredDFlash2Target(in: config) else {
+            return nil
         }
-        for model in config.pinnedModelReferences {
-            pinned.insert(model)
+        do {
+            let health = try await client.fetchHealthz()
+            guard health.dflash2?.enabled == true,
+                  AppConfig.normalizedModelReference(health.model.name) == target
+            else {
+                return nil
+            }
+            let currentConfig = configStore.load()
+            guard preferredDFlash2Target(in: currentConfig) == target else {
+                return nil
+            }
+            if !currentConfig.restoredModelReferences.contains(target) {
+                guard updateConfig({ $0.recordLoadedModel(target, setDefault: true) }) else {
+                    return nil
+                }
+                backend.refreshConfirmedSnapshot()
+            }
+            return configuredDFlash2State(target: target, config: configStore.load())
+        } catch {
+            IronMLXAppLogger.error("Failed to recover DFlash2 model state from health: \(error)")
+            return nil
         }
-        return (loaded, pinned, mtpEnabled, dflash2Enabled)
+    }
+
+    private func configuredDFlash2State(
+        target: String,
+        config: AppConfig
+    ) -> (
+        references: Set<String>,
+        pinnedModels: Set<String>,
+        mtpEnabledModels: Set<String>,
+        dflash2EnabledModels: Set<String>
+    ) {
+        let pinned = config.pinnedModelReferences.contains(target) ? Set([target]) : Set<String>()
+        return (Set([target]), pinned, [], Set([target]))
+    }
+
+    private func persistedModelState(config: AppConfig) -> (
+        references: Set<String>,
+        pinnedModels: Set<String>,
+        mtpEnabledModels: Set<String>,
+        dflash2EnabledModels: Set<String>
+    ) {
+        (
+            Set(config.restoredModelReferences),
+            Set(config.pinnedModelReferences),
+            [],
+            []
+        )
     }
 
     private func syncPersistedLoadedModelsIfNeeded(_ models: [BackendLoadedModelInfo]) {
@@ -2475,8 +2569,16 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     }
 
     private func configuredDFlash2Target(in config: AppConfig) -> String? {
+        guard let target = preferredDFlash2Target(in: config),
+              config.restoredModelReferences.contains(target)
+        else {
+            return nil
+        }
+        return target
+    }
+
+    private func preferredDFlash2Target(in config: AppConfig) -> String? {
         guard let target = config.defaultModelReference,
-              config.restoredModelReferences.contains(target),
               parameterStore.parameters(for: target)?.dflash2Enabled == true
         else {
             return nil

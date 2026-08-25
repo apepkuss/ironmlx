@@ -449,6 +449,14 @@ impl NormalizedRequest {
 }
 
 impl ReasoningRequest {
+    fn with_responses_default(mut self) -> Self {
+        // Agent clients commonly omit `reasoning` when thinking is disabled. Resolve that
+        // omission at the Responses boundary instead of falling through to a model template's
+        // potentially enabled-by-default behavior.
+        self.effort.get_or_insert(ReasoningEffort::None);
+        self
+    }
+
     fn template_kwargs(&self) -> Option<serde_json::Value> {
         self.effort.map(|effort| {
             let mut kwargs = serde_json::Map::new();
@@ -1166,7 +1174,11 @@ fn normalize_tool_choice(choice: Option<serde_json::Value>) -> anyhow::Result<se
 impl ResponsesRequest {
     pub(crate) fn normalize(self) -> anyhow::Result<NormalizedRequest> {
         validate_advisory_fields(&self)?;
-        let reasoning = self.reasoning.clone().unwrap_or_default();
+        let reasoning = self
+            .reasoning
+            .clone()
+            .unwrap_or_default()
+            .with_responses_default();
         let text_format = parse_response_text_format(self.text.as_ref())?;
         let response_tools = self.tools.clone();
         let (tools, tool_aliases) = flatten_response_tools(&self.tools)?;
@@ -3290,6 +3302,43 @@ mod tests {
         .template_kwargs()
         .unwrap();
         assert_eq!(disabled, serde_json::json!({"enable_thinking": false}));
+    }
+
+    #[test]
+    fn responses_reasoning_defaults_to_none_when_effort_is_unspecified() {
+        for (reasoning, expected_summary) in [
+            (None, None),
+            (Some(serde_json::Value::Null), None),
+            (Some(serde_json::json!({})), None),
+            (Some(serde_json::json!({"effort": null})), None),
+            (
+                Some(serde_json::json!({"summary": "auto"})),
+                Some(ReasoningSummaryMode::Auto),
+            ),
+        ] {
+            let mut body = serde_json::json!({"model": "local", "input": "hi"});
+            if let Some(reasoning) = reasoning {
+                body["reasoning"] = reasoning;
+            }
+            let normalized = request(body)
+                .normalize()
+                .expect("Responses reasoning defaults normalize");
+
+            assert_eq!(normalized.reasoning.effort, Some(ReasoningEffort::None));
+            assert_eq!(normalized.reasoning.summary, expected_summary);
+            assert_eq!(
+                normalized.chat.chat_template_kwargs,
+                Some(serde_json::json!({"enable_thinking": false}))
+            );
+
+            let response = ResponseMeta::from_normalized(&normalized, "local".into()).object(
+                "completed",
+                Vec::new(),
+                Some(Usage::new(1, 1)),
+            );
+            let response = serde_json::to_value(response).expect("response serializes");
+            assert_eq!(response["reasoning"]["effort"], "none");
+        }
     }
 
     #[test]
