@@ -177,7 +177,9 @@ Responses `reasoning` item；流式响应使用 `response.reasoning_text.delta` 
 Qwen3.8 原生模板支持三档 reasoning effort：Responses 的 `minimal`/`low` 映射为
 `low`，`medium` 映射为 `medium`，`high`/`xhigh`/`max` 映射为 `xhigh`；`none`
 表示关闭。未实现分档模板的其他模型只把非 `none` effort 作为原生 reasoning 开关。
-具体推理长度仍由 checkpoint 决定；未显式指定 effort 时使用模型模板默认值。
+具体推理长度仍由 checkpoint 决定。Responses 请求省略 `reasoning`、将其设为 `null`
+或未提供 `reasoning.effort` 时，IronMLX 均按 `effort=none` 处理并在响应中回显该有效值；
+客户端必须显式提供非 `none` effort 才会开启 reasoning。
 
 无状态历史回灌接受 `reasoning` item 中的明文 `reasoning_text`，并将它传给下一轮
 原生模板。IronMLX 不生成 OpenAI 托管的 `encrypted_content`；只有 encrypted

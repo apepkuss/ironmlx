@@ -445,6 +445,91 @@ import WebKit
     withExtendedLifetime(bridge) {}
 }
 
+@MainActor
+@Test func dashboardDoesNotLetStaleOrdinaryModelStateOverwriteDFlash2Activation() async throws {
+    let targetID = "mlx-community/Qwen3.8-27B-4bit"
+    let draftID = "z-lab/Qwen3.8-27B-DFlash2"
+    let root = try dashboardDFlash2ModelRoot(targetID: targetID, draftID: draftID)
+    let configStore = AppConfigStore(url: root.appendingPathComponent("app_config.json"))
+    configStore.save(AppConfig(defaultModel: targetID, loadedModels: []))
+    let parameterStore = ModelParameterStore(url: root.appendingPathComponent("model_params.json"))
+    try parameterStore.save(ModelParameters(
+        modelID: targetID,
+        dflash2Enabled: true,
+        dflash2ModelID: draftID
+    ))
+    let client = SuspendedDashboardModelStatusClient()
+    let webView = CapturingDashboardWebView()
+    let notificationCenter = NotificationCenter()
+    let bridge = DashboardBridge(
+        webView: webView,
+        configStore: configStore,
+        backend: TestRuntimeBackend(state: .running, isRunning: true),
+        scanner: LocalModelScanner(rootURL: root),
+        parameterStore: parameterStore,
+        notificationCenter: notificationCenter,
+        modelStatusClientFactory: { _, _ in client }
+    )
+
+    notificationCenter.post(name: .ironMLXLoadedModelsDidChange, object: nil)
+    await client.waitUntilFetchStarted()
+    var activatedConfig = configStore.load()
+    activatedConfig.loadedModels = [targetID]
+    #expect(configStore.save(activatedConfig))
+    await client.finishLoadedModelFetch(with: [])
+
+    let script = try #require(await webView.script(containing: "onLocalModelsScanned"))
+    let target = try dashboardModel(from: script, id: targetID)
+    let dflash2 = try #require(target["dflash2"] as? [String: Any])
+
+    #expect(target["loaded"] as? Bool == true)
+    #expect(dflash2["enabled"] as? Bool == true)
+    #expect(configStore.load().restoredModelReferences == [targetID])
+    withExtendedLifetime(bridge) {}
+}
+
+@MainActor
+@Test func dashboardRecoversDFlash2LoadedStateFromHealthWhenAdminRouteIsUnavailable() async throws {
+    let targetID = "mlx-community/Qwen3.8-27B-4bit"
+    let draftID = "z-lab/Qwen3.8-27B-DFlash2"
+    let root = try dashboardDFlash2ModelRoot(targetID: targetID, draftID: draftID)
+    let configStore = AppConfigStore(url: root.appendingPathComponent("app_config.json"))
+    configStore.save(AppConfig(defaultModel: targetID, loadedModels: []))
+    let parameterStore = ModelParameterStore(url: root.appendingPathComponent("model_params.json"))
+    try parameterStore.save(ModelParameters(
+        modelID: targetID,
+        dflash2Enabled: true,
+        dflash2ModelID: draftID
+    ))
+    let client = DFlash2HealthDashboardModelStatusClient(
+        health: dashboardDFlash2HealthSnapshot(modelID: targetID)
+    )
+    let backend = TestRuntimeBackend(state: .running, isRunning: true)
+    let webView = CapturingDashboardWebView()
+    let notificationCenter = NotificationCenter()
+    let bridge = DashboardBridge(
+        webView: webView,
+        configStore: configStore,
+        backend: backend,
+        scanner: LocalModelScanner(rootURL: root),
+        parameterStore: parameterStore,
+        notificationCenter: notificationCenter,
+        modelStatusClientFactory: { _, _ in client }
+    )
+
+    notificationCenter.post(name: .ironMLXLoadedModelsDidChange, object: nil)
+
+    let script = try #require(await webView.script(containing: "onLocalModelsScanned"))
+    let target = try dashboardModel(from: script, id: targetID)
+    let dflash2 = try #require(target["dflash2"] as? [String: Any])
+
+    #expect(target["loaded"] as? Bool == true)
+    #expect(dflash2["enabled"] as? Bool == true)
+    #expect(configStore.load().restoredModelReferences == [targetID])
+    #expect(backend.calls.contains("refreshConfirmedSnapshot"))
+    withExtendedLifetime(bridge) {}
+}
+
 @Test func dashboardModelParamsUseLanguageInvariantCapacityLabels() throws {
     let html = try String(
         contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
@@ -730,6 +815,171 @@ private let dashboardDFlash2DraftConfig = """
   }
 }
 """
+
+private func dashboardDFlash2ModelRoot(targetID: String, draftID: String) throws -> URL {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ironmlx-dashboard-dflash2-state-\(UUID().uuidString)", isDirectory: true)
+    _ = try writeVerifiedTestSnapshot(
+        root: root,
+        repoID: targetID,
+        files: [
+            "config.json": Data(dashboardDFlash2TargetConfig.utf8),
+            "model.safetensors": Data("target-weights".utf8),
+        ]
+    )
+    _ = try writeVerifiedTestSnapshot(
+        root: root,
+        repoID: draftID,
+        files: [
+            "config.json": Data(dashboardDFlash2DraftConfig.utf8),
+            "model.safetensors": Data("draft-weights".utf8),
+        ]
+    )
+    return root
+}
+
+private func dashboardModel(from script: String, id: String) throws -> [String: Any] {
+    let payload = try decodedJavaScriptStringArgument(
+        from: script,
+        functionName: "onLocalModelsScanned"
+    )
+    let data = try #require(payload.data(using: .utf8))
+    let models = try #require(JSONSerialization.jsonObject(with: data) as? [[String: Any]])
+    return try #require(models.first(where: { $0["id"] as? String == id }))
+}
+
+private func dashboardDFlash2HealthSnapshot(modelID: String) -> HealthzSnapshot {
+    HealthzSnapshot(
+        status: "healthy",
+        uptimeSecs: 10,
+        model: .init(name: modelID, maxPositionEmbeddings: 262_144),
+        scheduler: .init(
+            bMax: 4,
+            bActive: 0,
+            bQueued: 0,
+            queueMax: 32,
+            admissionQueueFullCount: 0,
+            memoryBudgetExceededCount: 0
+        ),
+        memory: .init(
+            totalRamBytes: 1,
+            freeRamBytes: 1,
+            kvCacheActiveBytes: 0,
+            kvCacheSoftLimitBytes: 0,
+            kvCacheLogicalCapTokens: 262_144,
+            kvCacheResidentCapTokens: 262_144,
+            kvCacheBudgetPolicy: "automatic",
+            mlxTotalBytes: 1,
+            mlxMaxRecommendedBytes: 1,
+            mlxActiveBytes: 0,
+            mlxCacheBytes: 0,
+            mlxPeakBytes: 0,
+            mlxMemoryLimitBytes: 1
+        ),
+        dflash2: HealthzSnapshot.DFlash2Info(
+            enabled: true,
+            blockSize: 4,
+            draftQuantizationBits: 4,
+            requests: 1,
+            windows: 1,
+            draftedTokens: 4,
+            acceptedDraftTokens: 3,
+            rollbackCount: 0,
+            tensorBatchWindows: 1,
+            tensorBatchDivergentSplits: 0,
+            tensorBatchGroupsCreated: 1,
+            tensorBatchWidthLimit: 4,
+            tensorBatchMaxWidth: 1,
+            sampledRequests: 0,
+            exactSamplingWindows: 0,
+            exactAcceptanceDraws: 0,
+            exactResidualCorrections: 0,
+            exactBonusSamples: 0,
+            samplingUs: 0,
+            latestGenerationTPS: 1,
+            latestAcceptanceRate: 0.75,
+            peakMemoryBytes: 1,
+            prefixCacheEnabled: false,
+            prefixCacheMaxBytes: nil,
+            prefixCacheEntries: 0,
+            prefixCacheBytes: 0,
+            prefixCacheHits: 0,
+            prefixCacheMisses: 0,
+            prefixCacheSaves: 0,
+            prefixCacheEvictions: 0,
+            prefixCacheHitTokens: 0,
+            runtimeUsage: BackendModelRuntimeUsage()
+        ),
+        activeKvOffload: .init(
+            enabled: false,
+            status: "disabled",
+            active: false,
+            degraded: false,
+            mode: "disabled",
+            storageDir: nil,
+            residentPages: 0,
+            offloadedPages: 0,
+            loadingPages: 0,
+            dirtyPages: 0,
+            parkedRequests: 0,
+            offloadedBytes: 0,
+            swapOutCount: 0,
+            swapInCount: 0,
+            swapErrorCount: 0,
+            lastSwapOutUs: 0,
+            lastSwapInUs: 0,
+            supportedCacheKinds: [],
+            notApplicableCacheKinds: []
+        ),
+        deviceName: "Apple Test",
+        version: "test"
+    )
+}
+
+private enum DashboardModelStatusClientTestError: Error {
+    case adminRouteUnavailable
+}
+
+private actor SuspendedDashboardModelStatusClient: DashboardModelStatusFetching {
+    private var fetchStarted = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var fetchContinuation: CheckedContinuation<[BackendLoadedModelInfo], Never>?
+
+    func fetchLoadedModels() async throws -> [BackendLoadedModelInfo] {
+        fetchStarted = true
+        startWaiters.forEach { $0.resume() }
+        startWaiters.removeAll()
+        return await withCheckedContinuation { fetchContinuation = $0 }
+    }
+
+    func fetchHealthz() async throws -> HealthzSnapshot {
+        throw DashboardModelStatusClientTestError.adminRouteUnavailable
+    }
+
+    func waitUntilFetchStarted() async {
+        guard !fetchStarted else {
+            return
+        }
+        await withCheckedContinuation { startWaiters.append($0) }
+    }
+
+    func finishLoadedModelFetch(with models: [BackendLoadedModelInfo]) {
+        fetchContinuation?.resume(returning: models)
+        fetchContinuation = nil
+    }
+}
+
+private struct DFlash2HealthDashboardModelStatusClient: DashboardModelStatusFetching {
+    let health: HealthzSnapshot
+
+    func fetchLoadedModels() async throws -> [BackendLoadedModelInfo] {
+        throw DashboardModelStatusClientTestError.adminRouteUnavailable
+    }
+
+    func fetchHealthz() async throws -> HealthzSnapshot {
+        health
+    }
+}
 
 @MainActor
 private final class CapturingDashboardWebView: WKWebView {

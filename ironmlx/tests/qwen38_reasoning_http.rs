@@ -149,10 +149,10 @@ fn assert_completed_response(
 ) {
     assert_eq!(response["status"], "completed", "response: {response:#}");
     assert!(response["incomplete_details"].is_null());
-    match requested_effort {
-        Some(effort) => assert_eq!(response["reasoning"]["effort"], effort),
-        None => assert!(response["reasoning"]["effort"].is_null()),
-    }
+    assert_eq!(
+        response["reasoning"]["effort"],
+        requested_effort.unwrap_or("none")
+    );
     assert!(
         output_text(response).is_some_and(|text| !text.trim().is_empty()),
         "missing final output text: {response:#}"
@@ -226,7 +226,7 @@ async fn send_stream(
     assert!(event_types.contains(&"response.created"));
     assert!(event_types.contains(&"response.output_text.delta"));
     assert!(event_types.contains(&"response.completed"));
-    if effort != Some("none") {
+    if effort.is_some_and(|effort| effort != "none") {
         assert!(event_types.contains(&"response.reasoning_text.delta"));
         assert!(event_types.contains(&"response.reasoning_text.done"));
     } else {
@@ -254,7 +254,7 @@ async fn qwen38_all_reasoning_efforts_real_http_acceptance() {
     let endpoint = format!("http://127.0.0.1:{port}/v1/responses");
 
     let default = send_sync(&client, &endpoint, None).await;
-    assert_completed_response(&default, None, true);
+    assert_completed_response(&default, None, false);
 
     let mut medium = None;
     for effort in EFFORTS {
@@ -266,7 +266,7 @@ async fn qwen38_all_reasoning_efforts_real_http_acceptance() {
     }
 
     let default = send_stream(&client, &endpoint, None).await;
-    assert_completed_response(&default, None, true);
+    assert_completed_response(&default, None, false);
     for effort in EFFORTS {
         let response = send_stream(&client, &endpoint, Some(effort)).await;
         assert_completed_response(&response, Some(effort), effort != "none");
