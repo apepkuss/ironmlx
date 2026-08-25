@@ -1260,7 +1260,7 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
         encoding: .utf8
     )
 
-    #expect(dashboardHTML(html, contains: "function localizeBackendErrorMessage(message)"))
+    #expect(dashboardHTML(html, contains: "function localizeBackendErrorMessage(message, fallbackKey)"))
     #expect(dashboardHTML(html, contains: "err_memory_budget_exceeded"))
     #expect(dashboardHTML(html, contains: "err_kv_memory_budget_exceeded"))
     #expect(dashboardHTML(html, contains: "localizeErrorResult(result)"))

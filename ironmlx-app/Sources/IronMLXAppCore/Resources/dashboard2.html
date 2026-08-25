@@ -4704,6 +4704,16 @@
       err_network_error: "Network error: {detail}",
       err_callback_malformed: "Internal error: callback payload could not be parsed. The button has been reset.",
       err_backend_unload_error: "Backend refused to unload the model: {detail}",
+      err_operation_failed: "The operation could not be completed. See the App log for technical details.",
+      warning_operation_completed: "The operation completed with warnings. See the App log for technical details.",
+      err_bundled_runtime_invalid: "IronMLX App runtime files are missing or invalid. Rebuild or reinstall the App, then try again.",
+      err_model_delete_invalid_request: "The model deletion request is invalid. Refresh the model list and try again.",
+      err_model_delete_failed: "The model could not be deleted. Check file permissions and try again.",
+      err_model_version_invalid_request: "The model version request is invalid. Refresh the version list and try again.",
+      err_dflash2_target_not_found: "The DFlash2 target model is not available locally. Download it again and retry.",
+      err_dflash2_draft_not_found: "No compatible local DFlash2 draft is available. Download a matching draft and retry.",
+      err_dflash2_acceleration_conflict: "DFlash2 cannot be enabled together with MTP or repeated-text acceleration.",
+      integrity_error_toast: "Model integrity verification could not be completed. See the App log for technical details.",
       warn_default_scheduler_profile_used: "No matching scheduler profile was found for this model. The model is running with the default scheduler configuration. Generate a dedicated profile with Scheduler Profile for better model-specific scheduling.",
       warn_model_reload_deferred: "The model is processing requests. New parameters will be applied automatically after the model becomes idle.",
       err_benchmark_oom: "Insufficient GPU memory for {batch_size}x batch (pp{pp}). Estimated need: {need_mb}MB, available: {avail_mb}MB. Try reducing batch size or prompt length.",
@@ -5058,6 +5068,16 @@
       err_network_error: "网络错误：{detail}",
       err_callback_malformed: "内部错误：回调数据无法解析。按钮已重置。",
       err_backend_unload_error: "后端拒绝卸载模型：{detail}",
+      err_operation_failed: "操作未能完成。技术详情请查看 App 日志。",
+      warning_operation_completed: "操作已完成，但存在警告。技术详情请查看 App 日志。",
+      err_bundled_runtime_invalid: "IronMLX App 运行文件缺失或无效。请重新构建或安装 App 后重试。",
+      err_model_delete_invalid_request: "模型删除请求无效。请刷新模型列表后重试。",
+      err_model_delete_failed: "无法删除模型。请检查文件权限后重试。",
+      err_model_version_invalid_request: "模型版本请求无效。请刷新版本列表后重试。",
+      err_dflash2_target_not_found: "本地不存在 DFlash2 Target 模型。请重新下载后重试。",
+      err_dflash2_draft_not_found: "本地不存在兼容的 DFlash2 Draft。请下载匹配的 Draft 后重试。",
+      err_dflash2_acceleration_conflict: "DFlash2 不能与 MTP 或重复文本加速同时启用。",
+      integrity_error_toast: "模型完整性验证未能完成。技术详情请查看 App 日志。",
       warn_default_scheduler_profile_used: "未找到该模型匹配的 scheduler profile，已使用默认调度配置运行。建议通过 Scheduler Profile 为该模型生成专用 profile，以获得更合适的模型调度参数。",
       warn_model_reload_deferred: "模型正在处理请求，新参数将在该模型空闲后自动重新加载。",
       err_benchmark_oom: "GPU 显存不足以跑 {batch_size}x batch (pp{pp})。预估需要 {need_mb}MB，可用 {avail_mb}MB。请减小批大小或 prompt 长度。",
@@ -5340,6 +5360,26 @@
       download_generic_failed: "下載失敗。",
       ms_starting: "正在連線 ModelScope…",
       bench_no_prompt_size: "請至少選擇一個 pp 設定後再執行基準測試。",
+      bench_preflight: "正在檢查基準測試準備狀態…",
+      bench_confirm_title: "執行基準測試？",
+      bench_confirm_point_1: "1. 基準測試將以獨佔模式執行。",
+      bench_confirm_point_2: "2. 如果目前沒有處理中的 requests，將暫時卸載未固定的非測試模型以釋放 GPU 記憶體。",
+      bench_confirm_point_3: "3. 測試模型將會載入並用於本次基準測試。",
+      bench_confirm_point_4: "4. 測試期間 Dashboard 會停留在基準測試頁面，模型管理操作將無法使用。",
+      bench_confirm_point_5: "5. 測試結束、失敗或取消後，先前載入的模型與預設模型將自動恢復。",
+      bench_confirm_point_6: "6. 測試期間 GPU 負載會提高，基準測試可能需要一些時間。",
+      bench_preparing_exclusive: "正在準備獨佔基準測試工作階段…",
+      bench_restoring_models: "正在恢復先前載入的模型…",
+      bench_restore_warning: "基準測試已完成，但模型恢復過程出現警告。",
+      bench_locked_navigation: "基準測試正在執行。完成前請停留在基準測試頁面。",
+      err_benchmark_active_requests: "有執行中或排隊中的 requests，無法開始基準測試。執行中：{active_requests}，排隊中：{queued_requests}。",
+      err_benchmark_already_running: "已有基準測試工作階段正在執行。",
+      err_benchmark_not_prepared: "獨佔基準測試工作階段尚未準備完成。請從「執行基準測試」按鈕開始。",
+      err_benchmark_model_unavailable: "本機沒有可用的基準測試模型。",
+      err_benchmark_exclusive_failed: "無法準備獨佔基準測試工作階段：{error}",
+      kv_quant: "KV Cache 壓縮",
+      kv_quant_desc: "使用 TurboQuant 降低長上下文執行時 KV Cache 的記憶體占用。K3V3 更節省記憶體，K4V4 較保守，K3V4 是建議的平衡選項。",
+      kv_quant_off: "不壓縮",
       bench_start: "開始",
       bench_loading_model: "正在載入模型：{name}…",
       bench_running_task: "執行中 {current}/{total}：{label}…",
@@ -5400,6 +5440,16 @@
       err_network_error: "網路錯誤：{detail}",
       err_callback_malformed: "內部錯誤：回呼資料無法解析。按鈕已重設。",
       err_backend_unload_error: "後端拒絕卸載模型：{detail}",
+      err_operation_failed: "操作未能完成。技術詳情請查看 App 日誌。",
+      warning_operation_completed: "操作已完成，但出現警告。技術詳情請查看 App 日誌。",
+      err_bundled_runtime_invalid: "IronMLX App 執行檔案遺失或無效。請重新建置或安裝 App 後再試。",
+      err_model_delete_invalid_request: "模型刪除請求無效。請重新整理模型清單後再試。",
+      err_model_delete_failed: "無法刪除模型。請檢查檔案權限後再試。",
+      err_model_version_invalid_request: "模型版本請求無效。請重新整理版本清單後再試。",
+      err_dflash2_target_not_found: "本機沒有 DFlash2 Target 模型。請重新下載後再試。",
+      err_dflash2_draft_not_found: "本機沒有相容的 DFlash2 Draft。請下載相符的 Draft 後再試。",
+      err_dflash2_acceleration_conflict: "DFlash2 無法與 MTP 或重複文字加速同時啟用。",
+      integrity_error_toast: "模型完整性驗證未能完成。技術詳情請查看 App 日誌。",
       warn_default_scheduler_profile_used: "未找到此模型匹配的 scheduler profile，已使用預設調度設定執行。建議透過 Scheduler Profile 為此模型產生專用 profile，以取得更合適的模型調度參數。",
       warn_model_reload_deferred: "模型正在處理請求，新參數將在該模型閒置後自動重新載入。",
       err_benchmark_oom: "GPU 記憶體不足以執行 {batch_size}x batch (pp{pp})。預估需要 {need_mb}MB，可用 {avail_mb}MB。請減少批次大小或 prompt 長度。",
@@ -5677,6 +5727,26 @@
       download_generic_failed: "ダウンロードに失敗しました。",
       ms_starting: "ModelScope に接続中…",
       bench_no_prompt_size: "ベンチマークを実行する前に、少なくとも1つの pp 設定を選択してください。",
+      bench_preflight: "ベンチマークの実行準備を確認中…",
+      bench_confirm_title: "ベンチマークを実行しますか？",
+      bench_confirm_point_1: "1. ベンチマークは排他モードで実行されます。",
+      bench_confirm_point_2: "2. 処理中の requests がない場合、固定されていない非テストモデルを一時的にアンロードして GPU メモリを解放します。",
+      bench_confirm_point_3: "3. テストモデルをロードして、このベンチマークで使用します。",
+      bench_confirm_point_4: "4. テスト中は Dashboard がベンチマークページに固定され、モデル管理操作は利用できません。",
+      bench_confirm_point_5: "5. テストの完了、失敗、キャンセル時には、以前ロードされていたモデルとデフォルトモデルを自動的に復元します。",
+      bench_confirm_point_6: "6. テスト中は GPU 負荷が高まり、ベンチマークに時間がかかる場合があります。",
+      bench_preparing_exclusive: "排他ベンチマークセッションを準備中…",
+      bench_restoring_models: "以前ロードされていたモデルを復元中…",
+      bench_restore_warning: "ベンチマークは完了しましたが、モデルの復元時に警告が発生しました。",
+      bench_locked_navigation: "ベンチマークを実行中です。完了するまでベンチマークページに留まってください。",
+      err_benchmark_active_requests: "実行中または待機中の requests があるため、ベンチマークを開始できません。実行中：{active_requests}、待機中：{queued_requests}。",
+      err_benchmark_already_running: "ベンチマークセッションはすでに実行中です。",
+      err_benchmark_not_prepared: "排他ベンチマークセッションの準備ができていません。「ベンチマークを実行」ボタンから開始してください。",
+      err_benchmark_model_unavailable: "ベンチマークモデルをローカルで利用できません。",
+      err_benchmark_exclusive_failed: "排他ベンチマークセッションを準備できませんでした：{error}",
+      kv_quant: "KV Cache 圧縮",
+      kv_quant_desc: "TurboQuant を使用して、長いコンテキストの実行時 KV Cache メモリ使用量を削減します。K3V3 はより省メモリ、K4V4 はより保守的で、K3V4 が推奨されるバランス設定です。",
+      kv_quant_off: "圧縮なし",
       bench_start: "開始",
       bench_loading_model: "モデル {name} を読み込み中…",
       bench_running_task: "実行中 {current}/{total}：{label}…",
@@ -5737,6 +5807,16 @@
       err_network_error: "ネットワークエラー：{detail}",
       err_callback_malformed: "内部エラー：コールバックの内容を解析できませんでした。ボタンをリセットしました。",
       err_backend_unload_error: "バックエンドがモデルのアンロードを拒否しました：{detail}",
+      err_operation_failed: "操作を完了できませんでした。技術的な詳細は App ログを確認してください。",
+      warning_operation_completed: "操作は完了しましたが、警告があります。技術的な詳細は App ログを確認してください。",
+      err_bundled_runtime_invalid: "IronMLX App の実行ファイルが見つからないか無効です。App を再ビルドまたは再インストールしてから再試行してください。",
+      err_model_delete_invalid_request: "モデル削除リクエストが無効です。モデル一覧を更新してから再試行してください。",
+      err_model_delete_failed: "モデルを削除できませんでした。ファイルのアクセス権を確認してから再試行してください。",
+      err_model_version_invalid_request: "モデルバージョンのリクエストが無効です。バージョン一覧を更新してから再試行してください。",
+      err_dflash2_target_not_found: "DFlash2 Target モデルがローカルにありません。再ダウンロードしてから再試行してください。",
+      err_dflash2_draft_not_found: "互換性のある DFlash2 Draft がローカルにありません。対応する Draft をダウンロードしてから再試行してください。",
+      err_dflash2_acceleration_conflict: "DFlash2 は MTP または繰り返しテキスト高速化と同時に有効化できません。",
+      integrity_error_toast: "モデルの整合性検証を完了できませんでした。技術的な詳細は App ログを確認してください。",
       warn_default_scheduler_profile_used: "このモデルに一致する scheduler profile が見つかりませんでした。デフォルトのスケジューラ設定で実行しています。モデルに合わせたスケジューリングのため、Scheduler Profile で専用 profile を生成してください。",
       warn_model_reload_deferred: "モデルはリクエストを処理中です。新しいパラメータはモデルがアイドル状態になった後に自動で適用されます。",
       err_benchmark_oom: "{batch_size}x batch (pp{pp}) を実行するための GPU メモリが不足しています。必要：約 {need_mb}MB、利用可能：{avail_mb}MB。バッチサイズまたは prompt 長を減らしてください。",
@@ -6014,6 +6094,26 @@
       download_generic_failed: "다운로드에 실패했습니다.",
       ms_starting: "ModelScope에 연결 중…",
       bench_no_prompt_size: "벤치마크를 실행하기 전에 pp 설정을 하나 이상 선택하세요.",
+      bench_preflight: "벤치마크 실행 준비 상태 확인 중…",
+      bench_confirm_title: "벤치마크를 실행하시겠습니까?",
+      bench_confirm_point_1: "1. 벤치마크는 독점 모드로 실행됩니다.",
+      bench_confirm_point_2: "2. 처리 중인 requests가 없으면 고정되지 않은 비테스트 모델을 일시적으로 언로드하여 GPU 메모리를 확보합니다.",
+      bench_confirm_point_3: "3. 테스트 모델을 로드하여 이번 벤치마크에 사용합니다.",
+      bench_confirm_point_4: "4. 테스트 중에는 Dashboard가 벤치마크 페이지에 유지되며 모델 관리 작업을 사용할 수 없습니다.",
+      bench_confirm_point_5: "5. 테스트가 완료되거나 실패 또는 취소되면 이전에 로드된 모델과 기본 모델을 자동으로 복원합니다.",
+      bench_confirm_point_6: "6. 테스트 중에는 GPU 부하가 증가하며 벤치마크에 시간이 걸릴 수 있습니다.",
+      bench_preparing_exclusive: "독점 벤치마크 세션 준비 중…",
+      bench_restoring_models: "이전에 로드된 모델 복원 중…",
+      bench_restore_warning: "벤치마크는 완료되었지만 모델 복원 중 경고가 발생했습니다.",
+      bench_locked_navigation: "벤치마크가 실행 중입니다. 완료될 때까지 벤치마크 페이지에 머물러 주세요.",
+      err_benchmark_active_requests: "실행 중이거나 대기 중인 requests가 있어 벤치마크를 시작할 수 없습니다. 실행 중: {active_requests}, 대기 중: {queued_requests}.",
+      err_benchmark_already_running: "벤치마크 세션이 이미 실행 중입니다.",
+      err_benchmark_not_prepared: "독점 벤치마크 세션이 준비되지 않았습니다. '벤치마크 실행' 버튼에서 시작하세요.",
+      err_benchmark_model_unavailable: "벤치마크 모델을 로컬에서 사용할 수 없습니다.",
+      err_benchmark_exclusive_failed: "독점 벤치마크 세션 준비에 실패했습니다: {error}",
+      kv_quant: "KV Cache 압축",
+      kv_quant_desc: "TurboQuant를 사용하여 긴 컨텍스트 실행 시 KV Cache 메모리 사용량을 줄입니다. K3V3는 메모리를 더 절약하고 K4V4는 더 보수적이며 K3V4가 권장 균형 옵션입니다.",
+      kv_quant_off: "압축 없음",
       bench_start: "시작",
       bench_loading_model: "모델 {name} 로드 중…",
       bench_running_task: "실행 중 {current}/{total}: {label}…",
@@ -6074,6 +6174,16 @@
       err_network_error: "네트워크 오류: {detail}",
       err_callback_malformed: "내부 오류: 콜백 데이터를 파싱할 수 없습니다. 버튼이 초기화되었습니다.",
       err_backend_unload_error: "백엔드가 모델 언로드를 거부했습니다: {detail}",
+      err_operation_failed: "작업을 완료하지 못했습니다. 기술 세부 정보는 App 로그를 확인하십시오.",
+      warning_operation_completed: "작업은 완료되었지만 경고가 있습니다. 기술 세부 정보는 App 로그를 확인하십시오.",
+      err_bundled_runtime_invalid: "IronMLX App 런타임 파일이 없거나 유효하지 않습니다. App을 다시 빌드하거나 설치한 뒤 다시 시도하십시오.",
+      err_model_delete_invalid_request: "모델 삭제 요청이 유효하지 않습니다. 모델 목록을 새로 고친 뒤 다시 시도하십시오.",
+      err_model_delete_failed: "모델을 삭제하지 못했습니다. 파일 권한을 확인한 뒤 다시 시도하십시오.",
+      err_model_version_invalid_request: "모델 버전 요청이 유효하지 않습니다. 버전 목록을 새로 고친 뒤 다시 시도하십시오.",
+      err_dflash2_target_not_found: "DFlash2 Target 모델을 로컬에서 사용할 수 없습니다. 다시 다운로드한 뒤 시도하십시오.",
+      err_dflash2_draft_not_found: "호환되는 DFlash2 Draft를 로컬에서 사용할 수 없습니다. 일치하는 Draft를 다운로드한 뒤 시도하십시오.",
+      err_dflash2_acceleration_conflict: "DFlash2는 MTP 또는 반복 텍스트 가속과 동시에 활성화할 수 없습니다.",
+      integrity_error_toast: "모델 무결성 검증을 완료하지 못했습니다. 기술 세부 정보는 App 로그를 확인하십시오.",
       warn_default_scheduler_profile_used: "이 모델에 맞는 scheduler profile을 찾지 못했습니다. 기본 스케줄러 설정으로 실행 중입니다. 모델에 맞는 스케줄링을 위해 Scheduler Profile에서 전용 profile을 생성하세요.",
       warn_model_reload_deferred: "모델이 요청을 처리 중입니다. 새 파라미터는 모델이 유휴 상태가 된 뒤 자동으로 적용됩니다.",
       err_benchmark_oom: "{batch_size}x batch (pp{pp})를 실행하기에 GPU 메모리가 부족합니다. 예상: {need_mb}MB, 가용: {avail_mb}MB. 배치 크기 또는 prompt 길이를 줄여 주세요.",
@@ -6430,6 +6540,12 @@
   // Called from Rust after deletion completes
   function onModelsDeleted(resultJson) {
     const dict = I18N[currentLang] || I18N.en;
+    let result = {};
+    try { result = JSON.parse(resultJson || '{}'); } catch(e) {}
+    if (result.success === false) {
+      showToast(localizeErrorResult(result, 'err_model_delete_failed'), 'warn');
+      return;
+    }
     showToast(dict.model_deleted || 'Model deleted successfully.', 'success');
     clearModelSelection();
     syncModelList();
@@ -6681,13 +6797,17 @@
     }
   }
 
-  // Pick the localized error message for a Rust-side failure payload.
-  // Rust emits either a structured `code` (e.g. "server_stopped",
+  // Pick the localized error message for a native-side failure payload.
+  // The bridge emits either a structured `code` (e.g. "server_stopped",
   // "repo_not_found") with optional params, or an opaque `error` string
   // as a last resort. Dashboard prefers the localized form so toasts
   // don't leak English when the UI is running in zh / ja / ko / etc.
-  function localizeErrorResult(result) {
+  function localizeErrorResult(result, fallbackKey) {
     const dict = I18N[currentLang] || I18N.en;
+    const rawError = String(result.error || '').trim();
+    if (/^memory budget exceeded\b/i.test(rawError)) {
+      return localizeBackendErrorMessage(rawError, fallbackKey);
+    }
     if (result.code) {
       const key = 'err_' + result.code;
       if (dict[key]) {
@@ -6700,6 +6820,9 @@
             if (result.repo_id) return result.repo_id;
             if (result.model_id) return result.model_id;
           }
+          if (k === 'detail' || k === 'error') {
+            return dict.unknown_error || 'Unknown error';
+          }
           return (k in result) ? result[k] : m;
         });
       }
@@ -6708,7 +6831,7 @@
           || 'This model has settings that its runtime does not support.';
       }
     }
-    return localizeBackendErrorMessage(result.error);
+    return localizeBackendErrorMessage(result.error, fallbackKey);
   }
 
   function localizeWarningResult(result) {
@@ -6719,13 +6842,14 @@
         return dict[key].replace(/\{(\w+)\}/g, (m, k) => (k in result) ? result[k] : m);
       }
     }
-    return result.warning || dict.download_generic_failed || 'Operation completed with warnings.';
+    if (result.warning) console.warn('IronMLX operation completed with warnings:', result.warning);
+    return dict.warning_operation_completed || 'The operation completed with warnings.';
   }
 
-  function localizeBackendErrorMessage(message) {
+  function localizeBackendErrorMessage(message, fallbackKey) {
     const dict = I18N[currentLang] || I18N.en;
     const text = String(message || '').trim();
-    if (!text) return dict.download_generic_failed || 'Operation failed.';
+    if (!text) return dict.err_operation_failed || 'The operation could not be completed.';
 
     if (/^memory budget exceeded\b/i.test(text)) {
       const maxSequences = (text.match(new RegExp('b' + '_max=(\\d+)')) || [])[1] || '--';
@@ -6739,7 +6863,9 @@
         .replace('{max_cache_cap}', maxCacheCap);
     }
 
-    return text;
+    if (text) console.error('IronMLX operation failed:', text);
+    const key = fallbackKey || 'err_operation_failed';
+    return dict[key] || dict.err_operation_failed || 'The operation could not be completed.';
   }
 
   // Called from Rust after unload completes
@@ -7330,8 +7456,7 @@
       showToast(localized, 'success');
       syncModelList();
     } else {
-      const errMsg = result.code ? localizeErrorResult(result)
-        : (result.error || dict.download_generic_failed || 'Download failed.');
+      const errMsg = localizeErrorResult(result, 'download_generic_failed');
       showToast(errMsg, 'warn');
     }
     refreshDownloadQueue();
@@ -7472,9 +7597,7 @@
     let result = {};
     try { result = JSON.parse(jsonStr); } catch(e) {}
     const dict = I18N[currentLang] || I18N.en;
-    const message = result.code
-      ? localizeErrorResult(result)
-      : (result.error || dict.download_generic_failed || 'HuggingFace search failed.');
+    const message = localizeErrorResult(result, 'download_generic_failed');
     const resultsDiv = document.getElementById('search-results');
     const error = document.createElement('div');
     error.className = 'hf-search-message error';
@@ -7693,7 +7816,7 @@
     const list = document.getElementById('model-version-list');
     if (list) list.style.pointerEvents = '';
     if (!result.success) {
-      showToast(result.error || t('unknown_error', 'Unknown error'), 'warn');
+      showToast(localizeErrorResult(result), 'warn');
       return;
     }
     const deleted = result.deleted_commit_shas && result.deleted_commit_shas.length;
@@ -8462,7 +8585,7 @@
         model.readiness = {
           status: 'corrupt',
           reason_code: 'snapshot_corrupt',
-          message: status.error || (dict.status_corrupt || 'Corrupt'),
+          message: dict.integrity_corrupt_toast || dict.status_corrupt || 'Corrupt',
           missing_files: []
         };
       } else if (status.state === 'verified' && model.readiness && model.readiness.status === 'corrupt') {
@@ -8475,7 +8598,8 @@
     } else if ((!previous || previous.state !== status.state) && status.state === 'corrupt') {
       showToast(dict.integrity_corrupt_toast || 'Integrity verification failed. This model cannot be loaded.', 'warn');
     } else if (status.state === 'error') {
-      showToast(status.error || 'Integrity verification failed.', 'warn');
+      if (status.error) console.error('Model integrity verification failed:', status.error);
+      showToast(dict.integrity_error_toast || dict.err_operation_failed || 'Integrity verification failed.', 'warn');
     }
   }
 
@@ -8941,14 +9065,19 @@
           runNextBench();
         }
       } else {
-        throw new Error(r.error || 'Failed to load model');
+        throw new Error(localizeErrorResult(r));
       }
     } catch (e) {
-      const errMsg = e instanceof SyntaxError ? jsonStr : e.message;
+      const dict = I18N[currentLang] || I18N.en;
+      const errMsg = e instanceof SyntaxError
+        ? (dict.err_operation_failed || 'The operation could not be completed.')
+        : e.message;
       if (benchRunning) {
         const tbody = document.getElementById('bench-results-body');
         const tr = document.createElement('tr');
-        tr.innerHTML = '<td style="padding:6px;color:#ff3b30;" colspan="9">Load model failed: ' + errMsg + '</td>';
+        tr.innerHTML = '<td style="padding:6px;color:#ff3b30;" colspan="9">'
+          + escapeAttr((dict.err_backend_load_error || 'Model load failed: {detail}')
+            .replace('{detail}', errMsg)) + '</td>';
         tbody.appendChild(tr);
         benchFinish();
       }
@@ -8995,7 +9124,7 @@
         // Structured error from backend — localize via err_* key.
         throw new Error(localizeErrorResult(r));
       }
-      if (r.error || r.status) throw new Error(r.error || r.status || (dict.unknown_error || 'Unknown error'));
+      if (r.error || r.status) throw new Error(localizeErrorResult(r));
       tr.innerHTML =
         '<td style="padding:6px;font-weight:500;">' + t.label + '</td>' +
         '<td style="text-align:right;padding:6px;">' + r.batch_size + '</td>' +
@@ -9007,7 +9136,9 @@
         '<td style="text-align:right;padding:6px;">' + r.total_throughput.toFixed(1) + '</td>' +
         '<td style="text-align:right;padding:6px;">' + (r.memory_peak_mb ? r.memory_peak_mb.toFixed(0) : '--') + '</td>';
     } catch (e) {
-      const errMsg = e instanceof SyntaxError ? jsonStr : e.message;
+      const errMsg = e instanceof SyntaxError
+        ? (dict.err_operation_failed || 'The operation could not be completed.')
+        : e.message;
       tr.innerHTML = '<td style="padding:6px;color:var(--text-secondary);" colspan="9"><span style="color:#ff9500;">&#9888;</span> ' + t.label + ': ' + errMsg + '</td>';
     }
     tbody.appendChild(tr);
@@ -9161,8 +9292,9 @@
       return;
     }
     if (schedulerProfilePreview && schedulerProfilePreview.error) {
+      console.error('Scheduler profile preview failed:', schedulerProfilePreview.error);
       hint.textContent = (dict.scheduler_profile_preview_failed || 'Unable to estimate: {detail}')
-        .replace('{detail}', schedulerProfilePreview.error);
+        .replace('{detail}', dict.unknown_error || 'Unknown error');
       return;
     }
     hint.textContent = dict['scheduler_profile_level_' + payload.calibration_level + '_hint'] || '';
@@ -9209,7 +9341,8 @@
       if (status.state === 'succeeded') {
         showToast((I18N[currentLang] || I18N.en).profile_succeeded.replace('{name}', status.model || ''), 'success');
       } else if (status.state === 'failed') {
-        const detail = status.error || 'Unknown error';
+        if (status.error) console.error('Scheduler profile generation failed:', status.error);
+        const detail = (I18N[currentLang] || I18N.en).unknown_error || 'Unknown error';
         showToast((I18N[currentLang] || I18N.en).profile_failed.replace('{detail}', detail), 'warn');
       }
     }
@@ -9298,7 +9431,9 @@
     } else if (status.state === 'cancelled') {
       statusEl.textContent = dict.profile_cancelled || 'Calibration stopped.';
     } else {
-      statusEl.textContent = (dict.profile_failed || 'Scheduler profile generation failed: {detail}').replace('{detail}', status.error || 'Unknown error');
+      if (status.error) console.error('Scheduler profile generation failed:', status.error);
+      statusEl.textContent = (dict.profile_failed || 'Scheduler profile generation failed: {detail}')
+        .replace('{detail}', dict.unknown_error || 'Unknown error');
     }
     if (!isActive) {
       if (generateBtn) generateBtn.style.display = '';
@@ -10782,7 +10917,7 @@
       if (path.startsWith('/admin/api/incidents/export')) {
         const result = JSON.parse(jsonStr || '{}');
         if (!result.success) {
-          showToast(result.error || dict.incident_export_failed || 'Incident export failed.', 'warn');
+          showToast(localizeErrorResult(result, 'incident_export_failed'), 'warn');
         } else if (result.status === 'exported') {
           showToast(dict.incident_exported || 'Diagnostic export saved.', 'success');
         }
@@ -10793,14 +10928,14 @@
           renderIncidentHistory({ incidents: [] });
           showToast(dict.incident_cleared || 'Incident history cleared.', 'success');
         } else {
-          showToast(result.error || dict.incident_clear_failed || 'Could not clear incident history.', 'warn');
+          showToast(localizeErrorResult(result, 'incident_clear_failed'), 'warn');
         }
       } else if (path.startsWith('/admin/api/incidents/')) {
         const result = JSON.parse(jsonStr || '{}');
         if (result.success && result.incident) {
           renderIncidentDetail(result.incident);
         } else {
-          showToast(result.error || dict.incident_load_failed || 'Could not load incident details.', 'warn');
+          showToast(localizeErrorResult(result, 'incident_load_failed'), 'warn');
         }
       } else if (path === '/admin/api/incidents' || path.startsWith('/admin/api/incidents?')) {
         const result = JSON.parse(jsonStr || '{}');
@@ -10819,7 +10954,7 @@
           }
         } else {
           pendingIncidentQueries.delete(path);
-          showToast(result.error || dict.incident_load_failed || 'Could not load incident history.', 'warn');
+          showToast(localizeErrorResult(result, 'incident_load_failed'), 'warn');
         }
       } else if (path === '/health') {
         window.__HEALTH_PENDING__ = false;
@@ -10876,7 +11011,7 @@
         renderEndpoints(jsonStr);
       } else if (path === '/admin/api/models/ms/download') {
         const result = JSON.parse(jsonStr || '{}');
-        if (!result.success) showToast(result.error || dict.download_generic_failed || 'Download failed.', 'warn');
+        if (!result.success) showToast(localizeErrorResult(result, 'download_generic_failed'), 'warn');
         refreshDownloadQueue();
       } else if (path === '/admin/api/models/downloads') {
         renderDownloadQueue(JSON.parse(jsonStr || '{}'));
@@ -10889,7 +11024,7 @@
         if (result.success) {
           showToast(dict.prompt_lookup_cleared || 'Reuse history cleared.', 'success');
         } else {
-          showToast(result.error || dict.prompt_lookup_clear_failed || 'Failed to clear reuse history.', 'warn');
+          showToast(localizeErrorResult(result, 'prompt_lookup_clear_failed'), 'warn');
         }
       } else if (path === '/admin/api/models/load') {
         onModelLoadResult(jsonStr);

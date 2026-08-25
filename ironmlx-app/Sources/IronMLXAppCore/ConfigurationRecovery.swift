@@ -352,10 +352,11 @@ public final class ConfigurationRecoveryManager: ConfigurationRecoveryManaging {
     }
 
     private func showOperationFailure(_ error: Error, text: ConfigurationRecoveryText) {
+        IronMLXAppLogger.error("Configuration recovery operation failed: \(error.localizedDescription)")
         let alert = NSAlert()
         alert.alertStyle = .critical
         alert.messageText = text.operationFailed
-        alert.informativeText = error.localizedDescription
+        alert.informativeText = text.operationFailedDetail
         alert.addButton(withTitle: text.close)
         alert.runModal()
     }
@@ -384,6 +385,7 @@ struct ConfigurationRecoveryText: Equatable {
     var quit: String { value(en: "Quit IronMLX", zhHans: "退出 IronMLX", zhHant: "結束 IronMLX", ja: "IronMLX を終了", ko: "IronMLX 종료") }
     var close: String { value(en: "Close", zhHans: "关闭", zhHant: "關閉", ja: "閉じる", ko: "닫기") }
     var operationFailed: String { value(en: "Configuration recovery failed", zhHans: "配置恢复失败", zhHant: "設定恢復失敗", ja: "設定の復旧に失敗しました", ko: "설정 복구에 실패했습니다") }
+    var operationFailedDetail: String { value(en: "The operation could not be completed. See the application log for technical details.", zhHans: "操作未能完成。技术详情请查看 App 日志。", zhHant: "操作未能完成。技術詳情請查看 App 日誌。", ja: "操作を完了できませんでした。技術的な詳細は App ログを確認してください。", ko: "작업을 완료하지 못했습니다. 기술 세부 정보는 App 로그를 확인하십시오.") }
     var blockedIntroduction: String { value(en: "Configuration writes are blocked until the following issue is explicitly resolved.", zhHans: "在明确解决以下问题前，配置写入已被阻止。", zhHant: "在明確解決以下問題前，設定寫入已被阻止。", ja: "次の問題を明示的に解決するまで、設定への書き込みはブロックされます。", ko: "다음 문제를 명시적으로 해결할 때까지 설정 쓰기가 차단됩니다.") }
     var corruptionReason: String { value(en: "The active configuration is damaged or invalid.", zhHans: "活动配置已损坏或无效。", zhHant: "使用中的設定已損壞或無效。", ja: "現在の設定が破損しているか無効です。", ko: "현재 설정이 손상되었거나 유효하지 않습니다.") }
     var errorLabel: String { value(en: "Error", zhHans: "错误", zhHant: "錯誤", ja: "エラー", ko: "오류") }

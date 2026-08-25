@@ -644,7 +644,11 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                     self.sendFetchResult(path: payload.path, jsonString: json)
                 }
             } catch {
-                let failure = ErrorPayload(success: false, error: error.localizedDescription)
+                let failure = ErrorPayload(
+                    success: false,
+                    error: error.localizedDescription,
+                    code: DashboardErrorClassifier.code(for: error)
+                )
                 let json = (try? Self.jsonString(failure)) ?? "{\"success\":false,\"error\":\"Benchmark failed.\"}"
                 await MainActor.run {
                     self.sendFetchResult(path: payload.path, jsonString: json)
@@ -847,7 +851,11 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         guard let data = json.data(using: .utf8),
               let modelIDs = try? JSONDecoder().decode([String].self, from: data)
         else {
-            sendJavaScript("showToast(\(Self.jsStringLiteral("Invalid model deletion request.")), 'warn')")
+            let result = Self.modelOperationErrorJSON(
+                error: "Invalid model deletion request.",
+                code: "model_delete_invalid_request"
+            )
+            sendJavaScript("onModelsDeleted(\(Self.jsStringLiteral(result)))")
             return
         }
 
@@ -858,9 +866,11 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             syncLoadedModels()
             sendJavaScript("\(defaultSync)onModelsDeleted(\(Self.jsStringLiteral(resultJSON)))")
         } catch {
-            sendJavaScript(
-                "showToast(\(Self.jsStringLiteral("Failed to delete model: \(error.localizedDescription)")), 'warn')"
+            let result = Self.modelOperationErrorJSON(
+                error: error.localizedDescription,
+                code: "model_delete_failed"
             )
+            sendJavaScript("onModelsDeleted(\(Self.jsStringLiteral(result)))")
         }
     }
 
@@ -909,7 +919,10 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         guard let payload = decodeVersionRepositoryPayload(json),
               let provider = ModelRepositoryProvider(rawValue: payload.provider)
         else {
-            sendModelVersionOperationError("Invalid model version request.")
+            sendModelVersionOperationError(
+                "Invalid model version request.",
+                code: "model_version_invalid_request"
+            )
             return
         }
         Task {
@@ -933,7 +946,10 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 }
             } catch {
                 await MainActor.run {
-                    self.sendModelVersionOperationError(error.localizedDescription)
+                    self.sendModelVersionOperationError(
+                        error.localizedDescription,
+                        code: DashboardErrorClassifier.code(for: error)
+                    )
                 }
             }
         }
@@ -944,7 +960,10 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
               let payload = try? JSONDecoder().decode(ModelVersionActivationPayload.self, from: data),
               let provider = ModelRepositoryProvider(rawValue: payload.provider)
         else {
-            sendModelVersionOperationError("Invalid model version activation request.")
+            sendModelVersionOperationError(
+                "Invalid model version activation request.",
+                code: "model_version_invalid_request"
+            )
             return
         }
         let config = configStore.load()
@@ -1029,7 +1048,10 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 }
             } catch {
                 await MainActor.run {
-                    self.sendModelVersionOperationError(error.localizedDescription)
+                    self.sendModelVersionOperationError(
+                        error.localizedDescription,
+                        code: DashboardErrorClassifier.code(for: error)
+                    )
                     self.listModelVersions(json: json)
                     self.sendScannedModels()
                 }
@@ -1042,7 +1064,10 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
               let payload = try? JSONDecoder().decode(ModelVersionDeletionPayload.self, from: data),
               let provider = ModelRepositoryProvider(rawValue: payload.provider)
         else {
-            sendModelVersionOperationError("Invalid model version deletion request.")
+            sendModelVersionOperationError(
+                "Invalid model version deletion request.",
+                code: "model_version_invalid_request"
+            )
             return
         }
         let repoID = payload.repoID
@@ -1080,14 +1105,17 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 }
             } catch {
                 await MainActor.run {
-                    self.sendModelVersionOperationError(error.localizedDescription)
+                    self.sendModelVersionOperationError(
+                        error.localizedDescription,
+                        code: DashboardErrorClassifier.code(for: error)
+                    )
                     self.listModelVersions(json: json)
                 }
             }
         }
     }
 
-    private func sendModelVersionOperationError(_ message: String) {
+    private func sendModelVersionOperationError(_ message: String, code: String) {
         let result = ModelVersionBridgeOperationResult(
             success: false,
             provider: nil,
@@ -1096,6 +1124,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             deletedCommitSHAs: nil,
             reclaimedBytes: nil,
             reloadStatus: nil,
+            code: code,
             error: message
         )
         let json = (try? Self.jsonString(result)) ?? #"{"success":false}"#
@@ -1110,7 +1139,11 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     private func loadBackendModel(instruction: ModelLoadInstruction, callback: ModelOperationCallback) {
         let model = instruction.modelReference.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !model.isEmpty else {
-            deliverModelOperationResult(error: "No model is configured.", callback: callback)
+            deliverModelOperationResult(
+                error: "No model is configured.",
+                code: "model_required",
+                callback: callback
+            )
             return
         }
         if instruction.useDFlash2 == true {
@@ -1119,7 +1152,11 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         }
         if let readiness = scanner.readiness(for: model), !readiness.isLoadable {
             let detail = readiness.message ?? "Model snapshot is not ready to load."
-            deliverModelOperationResult(error: detail, callback: callback)
+            deliverModelOperationResult(
+                error: detail,
+                code: readiness.reasonCode ?? "operation_failed",
+                callback: callback
+            )
             return
         }
         let config = configStore.load()
@@ -1132,7 +1169,11 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 fullChecksum: false
             )
         } catch {
-            deliverModelOperationResult(error: error.localizedDescription, callback: callback)
+            deliverModelOperationResult(
+                error: error.localizedDescription,
+                code: DashboardErrorClassifier.code(for: error),
+                callback: callback
+            )
             return
         }
         let maxCacheCap = capabilities?.supportsKvCache != false
@@ -1159,7 +1200,11 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 )
                 : nil
         } catch {
-            deliverModelOperationResult(error: error.localizedDescription, callback: callback)
+            deliverModelOperationResult(
+                error: error.localizedDescription,
+                code: DashboardErrorClassifier.code(for: error),
+                callback: callback
+            )
             return
         }
         Task {
@@ -1253,7 +1298,11 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 dflash2ModelID: instruction.dflash2ModelID
             )
         } catch {
-            deliverModelOperationResult(error: error.localizedDescription, callback: callback)
+            deliverModelOperationResult(
+                error: error.localizedDescription,
+                code: DashboardErrorClassifier.code(for: error),
+                callback: callback
+            )
             return
         }
         var dflash2Config = previousConfig
@@ -1266,6 +1315,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             try? parameterStore.replaceParameters(for: model, with: previousParameters)
             deliverModelOperationResult(
                 error: "DFlash2 configuration could not be persisted.",
+                code: "settings_persist_failed",
                 callback: callback
             )
             return
@@ -1321,7 +1371,11 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     private func unloadBackendModel(modelReference: String, callback: ModelOperationCallback) {
         let model = modelReference.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !model.isEmpty else {
-            deliverModelOperationResult(error: "No model is configured.", callback: callback)
+            deliverModelOperationResult(
+                error: "No model is configured.",
+                code: "model_required",
+                callback: callback
+            )
             return
         }
         let config = configStore.load()
@@ -1366,7 +1420,11 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 dflash2ModelID: nil
             )
         } catch {
-            deliverModelOperationResult(error: error.localizedDescription, callback: callback)
+            deliverModelOperationResult(
+                error: error.localizedDescription,
+                code: DashboardErrorClassifier.code(for: error),
+                callback: callback
+            )
             return
         }
         var ordinaryConfig = previousConfig
@@ -1375,6 +1433,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             try? parameterStore.replaceParameters(for: model, with: previousParameters)
             deliverModelOperationResult(
                 error: "DFlash2 unload configuration could not be persisted.",
+                code: "settings_persist_failed",
                 callback: callback
             )
             return
@@ -1400,6 +1459,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             await MainActor.run {
                 self.deliverModelOperationResult(
                     error: result.error ?? "DFlash2 backend restart failed.",
+                    code: result.errorCode ?? "operation_failed",
                     callback: callback
                 )
                 self.sendScannedModels()
@@ -2460,7 +2520,11 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             deliverModelOperationResult(jsonString: body, callback: callback)
             return
         }
-        deliverModelOperationResult(error: error.localizedDescription, callback: callback)
+        deliverModelOperationResult(
+            error: error.localizedDescription,
+            code: DashboardErrorClassifier.code(for: error),
+            callback: callback
+        )
     }
 
     private func backendErrorJSON(_ error: Error) -> String {
@@ -2469,7 +2533,12 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
            !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return body
         }
-        let payload = BridgeErrorResponse(success: false, status: "error", error: error.localizedDescription)
+        let payload = BridgeErrorResponse(
+            success: false,
+            status: "error",
+            error: error.localizedDescription,
+            code: DashboardErrorClassifier.code(for: error)
+        )
         return (try? Self.jsonString(payload)) ?? "{\"success\":false,\"status\":\"error\"}"
     }
 
@@ -2966,6 +3035,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         var deletedCommitSHAs: [String]?
         var reclaimedBytes: Int64?
         var reloadStatus: String?
+        var code: String? = nil
         var error: String?
 
         enum CodingKeys: String, CodingKey {
@@ -2976,6 +3046,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             case deletedCommitSHAs = "deleted_commit_shas"
             case reclaimedBytes = "reclaimed_bytes"
             case reloadStatus = "reload_status"
+            case code
             case error
         }
     }
@@ -3034,6 +3105,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     private struct ErrorPayload: Encodable {
         var success: Bool
         var error: String
+        var code: String? = nil
     }
 
     private struct IncidentErrorPayload: Encodable {
