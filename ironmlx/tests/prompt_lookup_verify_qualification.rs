@@ -618,7 +618,9 @@ fn qualify_qwen_cache_and_ragged<M: Model>(model: &M, tokenizer: &Tokenizer) -> 
         QualificationCache::TurboQuant(TurboQuantKVBits::K4V4),
     ] {
         if model.supports_exact_batched_speculative_verify(8, 64, 8) {
-            qualify_case(model, &tokens, 4, 64, 8, cache_mode)?;
+            for &batch in &[4_usize, 8] {
+                qualify_case(model, &tokens, batch, 64, 8, cache_mode)?;
+            }
         } else if model.supports_exact_batched_speculative_verify(4, 64, 5) {
             qualify_case(model, &tokens, 4, 64, 5, cache_mode)?;
         } else if model.supports_exact_batched_speculative_verify(8, 64, 2) {
@@ -626,7 +628,12 @@ fn qualify_qwen_cache_and_ragged<M: Model>(model: &M, tokenizer: &Tokenizer) -> 
                 qualify_case(model, &tokens, batch, 64, 2, cache_mode)?;
             }
         } else {
-            for &(batch, verify_width) in &[(1_usize, 5_usize), (2, 4), (4, 2)] {
+            let single_verify_width = if model.supports_exact_batched_speculative_verify(1, 64, 8) {
+                8
+            } else {
+                5
+            };
+            for &(batch, verify_width) in &[(1_usize, single_verify_width), (2, 4), (4, 2)] {
                 anyhow::ensure!(
                     model.supports_exact_batched_speculative_verify(batch, 64, verify_width),
                     "missing expected Affine8 exact qualification for B{batch} Q{verify_width}"
@@ -882,21 +889,23 @@ fn qwen35_dense_qgt1_matches_sequential_verify() -> Result<()> {
     let loader = Loader::open(&model_dir).context("opening Qwen3.5 checkpoint")?;
     let tokenizer = load_tokenizer(&loader, &model_dir)?;
     let model = Qwen35Model::from_loader(&loader).context("loading Qwen3.5 model")?;
+    let force_candidate = std::env::var_os("PROMPT_LOOKUP_VERIFY_FORCE_CANDIDATE").is_some();
     let quant_bits = loader.quant_meta().map(|quant| quant.bits);
-    if quant_bits == Some(8) {
+    if !force_candidate && quant_bits == Some(8) {
         anyhow::ensure!(
-            model.supports_exact_batched_speculative_verify(1, LONG_CONTEXT_TOKENS, 5)
+            model.supports_exact_batched_speculative_verify(1, LONG_CONTEXT_TOKENS, 8)
                 && model.supports_exact_batched_speculative_verify(2, LONG_CONTEXT_TOKENS, 4)
                 && model.supports_exact_batched_speculative_verify(4, LONG_CONTEXT_TOKENS, 2),
             "Qwen3.5 Dense Affine8 checkpoint is missing its exact qualification staircase"
         );
         anyhow::ensure!(
-            !model.supports_exact_batched_speculative_verify(2, LONG_CONTEXT_TOKENS, 5)
+            !model.supports_exact_batched_speculative_verify(1, LONG_CONTEXT_TOKENS, 9)
+                && !model.supports_exact_batched_speculative_verify(2, LONG_CONTEXT_TOKENS, 5)
                 && !model.supports_exact_batched_speculative_verify(4, LONG_CONTEXT_TOKENS, 3)
                 && !model.supports_exact_batched_speculative_verify(8, LONG_CONTEXT_TOKENS, 2),
-            "Qwen3.5 Dense Affine8 checkpoint exceeded its qualified exact shape"
+            "Qwen3.5 Dense Affine8 checkpoint exceeded its qualified exact staircase"
         );
-    } else if matches!(quant_bits, Some(5 | 6)) {
+    } else if !force_candidate && matches!(quant_bits, Some(5 | 6)) {
         anyhow::ensure!(
             model.supports_exact_batched_speculative_verify(1, LONG_CONTEXT_TOKENS, 5)
                 && model.supports_exact_batched_speculative_verify(2, LONG_CONTEXT_TOKENS, 4)
@@ -906,7 +915,7 @@ fn qwen35_dense_qgt1_matches_sequential_verify() -> Result<()> {
                 && !model.supports_exact_batched_speculative_verify(8, LONG_CONTEXT_TOKENS, 2),
             "Qwen3.5 Dense Affine5/6 checkpoint exceeded its exact qualification staircase"
         );
-    } else if quant_bits == Some(4) {
+    } else if !force_candidate && quant_bits == Some(4) {
         anyhow::ensure!(
             model.supports_exact_batched_speculative_verify(8, LONG_CONTEXT_TOKENS, 5),
             "Qwen3.5 Dense Affine4 checkpoint is missing long-context exact qualification"

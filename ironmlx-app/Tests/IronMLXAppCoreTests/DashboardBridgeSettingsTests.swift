@@ -530,6 +530,33 @@ import WebKit
     withExtendedLifetime(bridge) {}
 }
 
+@Test func dashboardMtpIncompatibleStatusUsesNoCompatibleWeightsCopy() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(html.components(separatedBy: "mtp_status_incompatible:").count - 1 == 5)
+    for copy in [
+        "No compatible MTP weights",
+        "无兼容 MTP 权重",
+        "無相容 MTP 權重",
+        "互換 MTP ウェイトなし",
+        "호환 MTP 가중치 없음",
+    ] {
+        #expect(html.contains(#"mtp_status_incompatible: "\#(copy)""#))
+    }
+    for obsoleteCopy in [
+        "MTP weights are incompatible",
+        "MTP 权重不兼容",
+        "MTP 權重不相容",
+        "MTP ウェイトは非互換です",
+        "MTP 가중치가 호환되지 않습니다",
+    ] {
+        #expect(!html.contains(#"mtp_status_incompatible: "\#(obsoleteCopy)""#))
+    }
+}
+
 @Test func dashboardModelParamsUseLanguageInvariantCapacityLabels() throws {
     let html = try String(
         contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
@@ -759,6 +786,11 @@ private func decodedJavaScriptStringArgument(from script: String, functionName: 
 private let dashboardDFlash2TargetConfig = """
 {
   "model_type": "qwen3_5",
+  "quantization": {
+    "mode": "affine",
+    "bits": 4,
+    "group_size": 64
+  },
   "text_config": {
     "hidden_size": 5120,
     "intermediate_size": 17408,

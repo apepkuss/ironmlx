@@ -97,18 +97,45 @@ pub(crate) fn exact_batched_verify_shape_qualified(
                 && verify_width > 1
                 && verify_width <= max_verify_width
         }
-        ExactBatchedVerifyProfile::Affine5Dense
-        | ExactBatchedVerifyProfile::Affine6Dense
-        | ExactBatchedVerifyProfile::Affine8Dense => match batch_width {
-            1 => verify_width > 1 && verify_width <= 5,
-            2 => verify_width > 1 && verify_width <= 4,
-            3 | 4 => verify_width == 2,
-            _ => false,
-        },
+        ExactBatchedVerifyProfile::Affine5Dense | ExactBatchedVerifyProfile::Affine6Dense => {
+            match batch_width {
+                1 => verify_width > 1 && verify_width <= 5,
+                2 => verify_width > 1 && verify_width <= 4,
+                3 | 4 => verify_width == 2,
+                _ => false,
+            }
+        }
+        ExactBatchedVerifyProfile::Affine8Dense => {
+            // Real Qwen3.8-27B-8bit qualification is numerically exact through
+            // B8/Q8, but end-to-end MTP regresses against ordinary decode for
+            // the newly enabled B2/B4/B8 shapes. B1/Q8 retains a measured
+            // throughput win; keep the prior concurrent staircase unchanged.
+            match batch_width {
+                1 => verify_width > 1 && verify_width <= 8,
+                2 => verify_width > 1 && verify_width <= 4,
+                3 | 4 => verify_width == 2,
+                _ => false,
+            }
+        }
         ExactBatchedVerifyProfile::Affine8Moe => {
             batch_width > 0 && batch_width <= 8 && verify_width == 2
         }
     }
+}
+
+pub(crate) fn dflash2_exact_batched_verify_shape_qualified(
+    profile: ExactBatchedVerifyProfile,
+    batch_width: usize,
+    verify_width: usize,
+) -> bool {
+    if profile == ExactBatchedVerifyProfile::Affine8Dense {
+        // DFlash2 keeps every affine projection on the product-stable QMM
+        // route. Unlike MTP's performance-qualified staircase, this actor's
+        // certified tensor width is four and must also accept transient B3
+        // groups without failing the request.
+        return batch_width > 0 && batch_width <= 4 && verify_width > 1 && verify_width <= 4;
+    }
+    exact_batched_verify_shape_qualified(profile, batch_width, verify_width)
 }
 
 pub(crate) fn sequential_prompt_lookup_verify_qualified(
@@ -297,15 +324,24 @@ mod tests {
         }
 
         let affine8 = ExactBatchedVerifyProfile::Affine8Dense;
-        assert!(exact_batched_verify_shape_qualified(affine8, 1, 5));
+        assert!(exact_batched_verify_shape_qualified(affine8, 1, 8));
         assert!(exact_batched_verify_shape_qualified(affine8, 2, 4));
         assert!(exact_batched_verify_shape_qualified(affine8, 3, 2));
         assert!(exact_batched_verify_shape_qualified(affine8, 4, 2));
         assert!(!exact_batched_verify_shape_qualified(affine8, 2, 5));
         assert!(!exact_batched_verify_shape_qualified(affine8, 4, 3));
         assert!(!exact_batched_verify_shape_qualified(affine8, 8, 2));
+        assert!(!exact_batched_verify_shape_qualified(affine8, 1, 9));
         assert!(!exact_batched_verify_shape_qualified(affine8, 1, 1));
-
+        for batch in 1..=4 {
+            for verify in 2..=4 {
+                assert!(dflash2_exact_batched_verify_shape_qualified(
+                    affine8, batch, verify
+                ));
+            }
+        }
+        assert!(!dflash2_exact_batched_verify_shape_qualified(affine8, 5, 4));
+        assert!(!dflash2_exact_batched_verify_shape_qualified(affine8, 4, 5));
         let affine8_moe = ExactBatchedVerifyProfile::Affine8Moe;
         assert!(exact_batched_verify_qualified(affine8_moe, 8, 65_536, 2));
         assert!(!exact_batched_verify_qualified(affine8_moe, 8, 65_536, 4));

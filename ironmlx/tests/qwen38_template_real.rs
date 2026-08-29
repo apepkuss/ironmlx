@@ -1,26 +1,72 @@
 //! Metadata-only acceptance for the exact mlx-community Qwen3.8 template.
 //! The test skips when the checkpoint metadata is not present locally.
 
-use std::path::PathBuf;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
-use ironmlx::core::{ChatTemplate, NativeOutputDialect, TokenizerConfig, ToolDialect};
+use ironmlx::core::{
+    preflight_model_metadata, ChatTemplate, NativeOutputDialect, TokenizerConfig, ToolDialect,
+};
 
-fn snapshot_dir() -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
-    let snapshots = home.join(".ironmlx/models/models--mlx-community--Qwen3.8-27B-4bit/snapshots");
-    std::fs::read_dir(snapshots)
-        .ok()?
-        .flatten()
-        .map(|entry| entry.path())
-        .find(|path| path.join("chat_template.jinja").is_file())
+fn add_snapshot_dirs(found: &mut BTreeSet<PathBuf>, snapshots: &Path) {
+    let Some(entries) = std::fs::read_dir(snapshots).ok() else {
+        return;
+    };
+    for path in entries.flatten().map(|entry| entry.path()) {
+        if path.join("chat_template.jinja").is_file() && path.join("config.json").is_file() {
+            found.insert(path);
+        }
+    }
+}
+
+fn snapshot_dirs() -> Vec<PathBuf> {
+    let mut found = BTreeSet::new();
+    for env_name in ["QWEN38_MODEL", "QWEN38_4BIT_MODEL", "QWEN38_8BIT_MODEL"] {
+        if let Some(path) = std::env::var_os(env_name).map(PathBuf::from) {
+            found.insert(path);
+        }
+    }
+    if let Some(home) = dirs::home_dir() {
+        for bits in [4, 8] {
+            let repo = format!("mlx-community--Qwen3.8-27B-{bits}bit");
+            add_snapshot_dirs(
+                &mut found,
+                &home.join(format!(".ironmlx/models/huggingface/{repo}/snapshots")),
+            );
+            add_snapshot_dirs(
+                &mut found,
+                &home.join(format!(".ironmlx/models/models--{repo}/snapshots")),
+            );
+        }
+    }
+    found.into_iter().collect()
 }
 
 #[test]
-fn exact_qwen38_template_supports_native_contract_and_reasoning_controls() {
-    let Some(model_dir) = snapshot_dir() else {
+fn exact_qwen38_templates_support_native_contract_and_reasoning_controls() {
+    let model_dirs = snapshot_dirs();
+    if model_dirs.is_empty() {
         eprintln!("Qwen3.8 metadata absent — skipping");
         return;
-    };
+    }
+    for model_dir in model_dirs {
+        assert_qwen38_template(&model_dir);
+    }
+}
+
+fn assert_qwen38_template(model_dir: &Path) {
+    let preflight = preflight_model_metadata(model_dir).expect("Qwen3.8 metadata preflight");
+    assert_eq!(preflight.model_type, "qwen3_5");
+    assert_eq!(preflight.artifact_role, "base");
+    let quantization = preflight.quantization.expect("Qwen3.8 quantization");
+    assert_eq!(quantization.mode, "affine");
+    assert!(
+        matches!(quantization.bits, 4 | 8),
+        "unexpected Qwen3.8 quantization in {}",
+        model_dir.display()
+    );
+    assert_eq!(quantization.group_size, 64);
+
     let config = TokenizerConfig::from_model_dir(&model_dir).expect("tokenizer config");
     let source = config.chat_template.expect("standalone chat template");
     assert_eq!(

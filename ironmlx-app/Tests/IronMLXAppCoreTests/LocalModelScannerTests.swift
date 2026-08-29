@@ -431,11 +431,13 @@ import Testing
 
 @Test func localModelScannerAttachesOnlyStructurallyCompatibleDFlash2Drafts() throws {
     let root = try temporaryDirectory()
-    _ = try writeSnapshot(
-        root: root,
-        repoID: "mlx-community/Qwen3.8-27B-4bit",
-        configJSON: dflash2TargetConfig()
-    )
+    for bits in [4, 8] {
+        _ = try writeSnapshot(
+            root: root,
+            repoID: "mlx-community/Qwen3.8-27B-\(bits)bit",
+            configJSON: dflash2TargetConfig(bits: bits)
+        )
+    }
     _ = try writeSnapshot(
         root: root,
         repoID: "z-lab/Qwen3.8-27B-DFlash2",
@@ -448,13 +450,15 @@ import Testing
     )
 
     let scanner = LocalModelScanner(rootURL: root)
-    let model = try #require(scanner.scan().first(where: {
-        $0.id == "mlx-community/Qwen3.8-27B-4bit"
-    }))
-
-    #expect(model.dflash2?.status == "available")
-    #expect(model.dflash2?.candidates.map(\.id) == ["z-lab/Qwen3.8-27B-DFlash2"])
-    #expect(model.dflash2?.incompatibleCandidates.isEmpty == true)
+    let models = scanner.scan()
+    for bits in [4, 8] {
+        let model = try #require(models.first(where: {
+            $0.id == "mlx-community/Qwen3.8-27B-\(bits)bit"
+        }))
+        #expect(model.dflash2?.status == "available")
+        #expect(model.dflash2?.candidates.map(\.id) == ["z-lab/Qwen3.8-27B-DFlash2"])
+        #expect(model.dflash2?.incompatibleCandidates.isEmpty == true)
+    }
     #expect(scanner.resolveModelPath(for: "z-lab/Qwen3.8-27B-DFlash2") == nil)
     #expect(scanner.resolveDFlash2DraftPath(for: "z-lab/Qwen3.8-27B-DFlash2") != nil)
 }
@@ -583,10 +587,15 @@ private func dflash2DraftConfig(hiddenSize: Int) -> String {
     """
 }
 
-private func dflash2TargetConfig() -> String {
+private func dflash2TargetConfig(bits: Int = 4) -> String {
     """
     {
       "model_type": "qwen3_5",
+      "quantization": {
+        "group_size": 64,
+        "bits": \(bits),
+        "mode": "affine"
+      },
       "text_config": {
         "hidden_size": 5120,
         "intermediate_size": 17408,

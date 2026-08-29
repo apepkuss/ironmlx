@@ -47,6 +47,17 @@ func menuBarRefreshesImmediatelyForBackendRuntimeNotification() throws {
     #expect(controller.rebuildMenu().state == .recovering)
 }
 
+@Test
+func menuBarRefreshesLoadedModelsOnlyAfterBackendReadiness() {
+    #expect(!MenuBarController.shouldRefreshLoadedModelNames(in: .stopped))
+    #expect(!MenuBarController.shouldRefreshLoadedModelNames(in: .starting))
+    #expect(!MenuBarController.shouldRefreshLoadedModelNames(in: .stopping))
+    #expect(!MenuBarController.shouldRefreshLoadedModelNames(in: .recovering))
+    #expect(!MenuBarController.shouldRefreshLoadedModelNames(in: .failed))
+    #expect(MenuBarController.shouldRefreshLoadedModelNames(in: .running))
+    #expect(MenuBarController.shouldRefreshLoadedModelNames(in: .degraded))
+}
+
 @Test @MainActor
 func menuBarRestartUsesExplicitPlannedRestartIntent() async throws {
     let root = try menuTemporaryDirectory()

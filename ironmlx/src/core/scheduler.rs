@@ -12043,7 +12043,10 @@ impl<M: Model> Scheduler<M> {
             )?;
             add_mtp_prefill_cache_commit_us(&mut stats, commit_start);
             let chunk_last_hidden = slice_hidden_position(&hidden, n - 1)?;
-            mlx::transforms::eval(&[&hidden, &chunk_last_hidden])?;
+            // `commit_mtp_cache_hidden_prefix` has already evaluated the MTP
+            // graph and therefore its `hidden` dependency. Keep the last-row
+            // slice lazy until its next real consumer instead of introducing
+            // a second host synchronization on every prefill chunk.
             mtp_prev_hidden = Some(chunk_last_hidden.clone());
             let new_pos = pos + n;
             if let Some(cache) = self.cache.as_ref() {
@@ -12344,23 +12347,15 @@ impl<M: Model> Scheduler<M> {
         } else {
             Phase::Decoding
         };
-        let mut mtp_state = SchedulerMtpState {
+        let mtp_state = SchedulerMtpState {
             cfg,
             rows: row_states,
             stats,
         };
-        if !all_finished && active_rows.len() > 1 {
-            self.fill_mtp_windows_batched(
-                &active_rows,
-                cfg,
-                &mut mtp_state.stats,
-                &mut mtp_state.rows,
-                model,
-                mtp,
-                projection,
-                None,
-            )?;
-        }
+        // Return the already-computed first target tokens immediately. The
+        // first `step_mtp_batch` call fills the empty speculative queues at
+        // the window boundary; doing that work here delays TTFT and charges a
+        // decode window to prefill instead of aggregate generation time.
         self.mtp_state = Some(mtp_state);
 
         Ok(events)
@@ -13413,6 +13408,23 @@ impl<M: Model> Scheduler<M> {
                 None
             };
             let b = self.cache_rows.len();
+            let affine8_b4_exact_hot_path =
+                has_draft_tokens && model.supports_affine8_b4_mtp_exact_hot_path(b, max_verify_len);
+            let _exact_affine8_b4_q2 = affine8_b4_exact_hot_path
+                .then(crate::nn::position_stable_qmm::exact_affine8_b4_q2_scope);
+            // The direct recurrent-prefix restore path is calibrated for B2/Q2
+            // and the explicitly qualified Qwen affine8 B4/Q2 shape.
+            // Other models and batch widths retain the established replay path.
+            let accepted_prefix_capture = has_draft_tokens
+                && ((b == 2 && max_verify_len == 2) || affine8_b4_exact_hot_path)
+                && model.supports_mtp_accepted_prefix_restore();
+            if accepted_prefix_capture {
+                let cache = self
+                    .cache
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("fill_mtp_windows_batched: main cache absent"))?;
+                model.begin_mtp_accepted_prefix_capture(cache.as_mut_slice())?;
+            }
             let mut verify_starts = vec![0_i32; b];
             for (ctx, &compact_row) in contexts.iter().zip(cache_row_for_ctx.iter()) {
                 verify_starts[compact_row] = ctx.verify_start_pos;
@@ -13583,8 +13595,38 @@ impl<M: Model> Scheduler<M> {
                     .ok_or_else(|| anyhow!("fill_mtp_windows_batched: main cache absent"))?;
                 layer_cache_supports_accepted_prefix_trim(cache.as_slice())
             };
+            if mismatch_rows.is_empty() && accepted_prefix_capture && !affine8_b4_exact_hot_path {
+                let cache = self
+                    .cache
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("fill_mtp_windows_batched: main cache absent"))?;
+                model.discard_mtp_accepted_prefix_capture(cache.as_mut_slice());
+            }
             let (accepted_hidden_source, accepted_position_ids_source) =
-                if mismatch_rows.is_empty() {
+                if accepted_prefix_capture
+                    && (affine8_b4_exact_hot_path || !mismatch_rows.is_empty())
+                {
+                    let rollback_start = Instant::now();
+                    let accepted_lens = resolutions
+                        .iter()
+                        .map(|resolution| resolution.accepted_verify_input_len)
+                        .collect::<Vec<_>>();
+                    {
+                        let cache = self.cache.as_mut().ok_or_else(|| {
+                            anyhow!("fill_mtp_windows_batched: main cache absent")
+                        })?;
+                        model.restore_mtp_accepted_prefix_rows_on(
+                            cache.as_mut_slice(),
+                            base_snapshot.as_ref().ok_or_else(|| {
+                                anyhow!("fill_mtp_windows_batched: rollback snapshot absent")
+                            })?,
+                            &accepted_lens,
+                            mlx::StreamOrDevice::default(),
+                        )?;
+                    }
+                    add_elapsed_us(&mut stats.main_rollback_us, rollback_start);
+                    (verified_hidden.clone(), verify_pos_ids.clone())
+                } else if mismatch_rows.is_empty() {
                     (verified_hidden.clone(), verify_pos_ids.clone())
                 } else if main_cache_supports_trim {
                     let rollback_start = Instant::now();
@@ -13846,7 +13888,14 @@ impl<M: Model> Scheduler<M> {
                             Some(&mut tail_cache),
                             mlx::StreamOrDevice::default(),
                         )?;
-                        mlx::transforms::eval(&[&mtp_hidden])?;
+                        // The qualified affine8 B4 graph is consumed by the
+                        // next draft window before its existing acceptance
+                        // synchronization. Keeping the tail state lazy avoids
+                        // a second per-window GPU barrier without changing the
+                        // cache graph or numerical path.
+                        if !affine8_b4_exact_hot_path {
+                            mlx::transforms::eval(&[&mtp_hidden])?;
+                        }
                         add_mtp_decode_cache_commit_us(stats, commit_start);
 
                         for (compact_idx, (ctx_idx, _, _, _)) in
@@ -14620,6 +14669,7 @@ impl<M: Model> Scheduler<M> {
                 anyhow!("prefill_admitted_row_isolated row {row_idx}: {error:#}")
             })?;
             temp.commit_all_governor_admissions();
+            let temp_prng_key = temp.prng_key_for_row(0)?;
             let temp_cache = temp.cache.take().ok_or_else(|| {
                 anyhow!("prefill_admitted_row_isolated row {row_idx}: temp cache absent")
             })?;
@@ -14641,6 +14691,7 @@ impl<M: Model> Scheduler<M> {
                 0,
                 "prefill_admitted_row_isolated",
             )?;
+            self.write_row_prng_host(row_idx, temp_prng_key)?;
             events.extend(row_events);
         }
 
@@ -21040,6 +21091,7 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingPrefillModel {
+        split_batched_prefill: bool,
         make_cache_batches: std::sync::Mutex<Vec<i32>>,
         text_forward_batches: std::sync::Mutex<Vec<i32>>,
         text_forward_seq_lens: std::sync::Mutex<Vec<i32>>,
@@ -21198,6 +21250,10 @@ mod tests {
 
         fn num_hidden_layers(&self) -> usize {
             0
+        }
+
+        fn requires_split_batched_prefill_for_token_parity(&self) -> bool {
+            self.split_batched_prefill
         }
     }
 
@@ -25512,7 +25568,7 @@ mod tests {
         scheduler
             .prefill_admitted_mtp_batch(&model, &FakeMtpHead, cfg)
             .expect("mtp batch prefill");
-        assert!(!scheduler.mtp_at_batch_window_boundary());
+        assert!(scheduler.mtp_at_batch_window_boundary());
         scheduler
             .step_mtp_batch_without_postfill(&model, &FakeMtpHead)
             .expect("emit first pending token");
@@ -25727,11 +25783,8 @@ mod tests {
             ]
         );
         let prefill_stats = s.mtp_stats().expect("MTP stats");
-        assert_eq!(prefill_stats.windows, 2);
-        assert!(prefill_stats
-            .draft_cap_observations
-            .iter()
-            .all(|observation| observation.batch_width == 2));
+        assert_eq!(prefill_stats.windows, 0);
+        assert!(prefill_stats.draft_cap_observations.is_empty());
 
         s.step_mtp_batch(&model, &FakeMtpHead)
             .expect("first pending batch step");
@@ -26049,7 +26102,7 @@ mod tests {
 
     #[test]
     #[serial(mlx_metal)]
-    fn mtp_batch_subset_postfill_verifies_only_rows_needing_new_window() {
+    fn mtp_batch_subset_refill_verifies_only_rows_needing_new_window() {
         let mut s = Scheduler::<ScriptedMtpSchedulerModel>::new(
             2,
             32768,
@@ -26085,12 +26138,9 @@ mod tests {
             ]
         );
 
-        model.clear_text_hidden_trace();
-        model.clear_mtp_hidden_trace();
-        *model.project_calls.lock().unwrap() = 0;
         let step_1 = s
-            .step_mtp_batch(&model, &FakeMtpHead)
-            .expect("first pending batch step with subset postfill");
+            .step_mtp_batch_without_postfill(&model, &FakeMtpHead)
+            .expect("initial batch window without postfill");
         assert_eq!(
             step_1,
             vec![
@@ -26106,20 +26156,42 @@ mod tests {
                 }
             ]
         );
+
+        model.clear_text_hidden_trace();
+        model.clear_mtp_hidden_trace();
+        *model.project_calls.lock().unwrap() = 0;
+        let step_2 = s
+            .step_mtp_batch_without_postfill(&model, &FakeMtpHead)
+            .expect("subset refill at the next batch step");
+        assert_eq!(
+            step_2,
+            vec![
+                StepEvent {
+                    id: id0,
+                    token: 8,
+                    finish_reason: None
+                },
+                StepEvent {
+                    id: id1,
+                    token: 7,
+                    finish_reason: None
+                }
+            ]
+        );
         assert_eq!(
             model.text_hidden_batch_sizes(),
             vec![2],
-            "postfill should preserve the qualified model-facing batch width"
+            "subset refill should preserve the qualified model-facing batch width"
         );
         assert_eq!(
             model.text_hidden_seq_lens(),
             vec![2],
-            "subset postfill should still verify the full current+draft window"
+            "subset refill should still verify the full current+draft window"
         );
         assert_eq!(
             *model.project_calls.lock().unwrap(),
             1,
-            "subset postfill should project only the compact verify batch once"
+            "subset refill should project only the compact verify batch once"
         );
 
         let mtp_state = s.mtp_state.as_ref().expect("scheduler MTP state");
@@ -26132,8 +26204,8 @@ mod tests {
                 .iter()
                 .copied()
                 .collect::<Vec<_>>(),
-            vec![8, 12],
-            "row 0 should receive its new postfill window"
+            vec![12],
+            "row 0 should retain the bonus token from its new refill window"
         );
         assert_eq!(
             mtp_state
@@ -26144,8 +26216,8 @@ mod tests {
                 .iter()
                 .copied()
                 .collect::<Vec<_>>(),
-            vec![7],
-            "row 1 should keep its existing pending token without being reverified"
+            Vec::<u32>::new(),
+            "row 1 should emit its existing token without being reverified"
         );
     }
 
@@ -26564,6 +26636,68 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!((events[0].id, events[0].token), (id_0, 3));
         assert_eq!((events[1].id, events[1].token), (id_2, 4));
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn row_isolated_sampled_prefill_commits_each_row_prng_state() {
+        let model = RecordingPrefillModel {
+            split_batched_prefill: true,
+            ..RecordingPrefillModel::default()
+        };
+        let seeds = [7_u64, 11_u64];
+        let mut expected_keys = Vec::with_capacity(seeds.len());
+
+        for seed in seeds {
+            let mut single = Scheduler::<RecordingPrefillModel>::new(
+                1,
+                32768,
+                crate::core::memory_budget::test_meta_qwen35(),
+            )
+            .expect("single-row scheduler startup");
+            let mut request = mk_req(vec![1, 2, 3]);
+            request.sampler = Sampler::greedy()
+                .with_temperature(0.7)
+                .with_top_p(0.9)
+                .with_seed(seed);
+            single.admit(request).expect("single-row sampled admit");
+            single
+                .prefill_admitted(&model)
+                .expect("single-row sampled prefill");
+            expected_keys.push(
+                single
+                    .prng_key_for_row(0)
+                    .expect("single-row PRNG after prefill"),
+            );
+        }
+
+        let mut batched = Scheduler::<RecordingPrefillModel>::new(
+            seeds.len(),
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("batched scheduler startup");
+        for seed in seeds {
+            let mut request = mk_req(vec![1, 2, 3]);
+            request.sampler = Sampler::greedy()
+                .with_temperature(0.7)
+                .with_top_p(0.9)
+                .with_seed(seed);
+            batched.admit(request).expect("row-isolated sampled admit");
+        }
+        batched
+            .prefill_admitted(&model)
+            .expect("row-isolated sampled prefill");
+
+        for (row, expected_key) in expected_keys.into_iter().enumerate() {
+            assert_eq!(
+                batched
+                    .prng_key_for_row(row)
+                    .expect("batched PRNG after prefill"),
+                expected_key,
+                "row {row} must commit the same post-prefill PRNG key as B1"
+            );
+        }
     }
 
     #[test]

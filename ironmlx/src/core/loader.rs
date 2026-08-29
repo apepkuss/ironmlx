@@ -1417,6 +1417,47 @@ mod tests {
     }
 
     #[test]
+    fn metadata_preflight_accepts_qwen38_affine8_contract() {
+        let dir =
+            std::env::temp_dir().join(format!("ironmlx-model-preflight-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create preflight dir");
+        std::fs::write(
+            dir.join("config.json"),
+            serde_json::to_vec(&json!({
+                "model_type": "qwen3_5",
+                "architectures": ["Qwen3_5ForConditionalGeneration"],
+                "quantization": {"mode": "affine", "bits": 8, "group_size": 64},
+                "quantization_config": {"mode": "affine", "bits": 8, "group_size": 64},
+                "text_config": {
+                    "model_type": "qwen3_5_text",
+                    "dtype": "bfloat16",
+                    "num_hidden_layers": 64,
+                    "hidden_size": 5120,
+                    "vocab_size": 248320
+                },
+                "vision_config": {
+                    "model_type": "qwen3_5",
+                    "depth": 27,
+                    "out_hidden_size": 5120
+                }
+            }))
+            .expect("encode config"),
+        )
+        .expect("write config");
+
+        let result = preflight_model_metadata(&dir).expect("preflight Qwen3.8 affine8 metadata");
+
+        assert_eq!(result.model_type, "qwen3_5");
+        assert_eq!(result.artifact_role, "base");
+        let quantization = result.quantization.expect("quantization");
+        assert_eq!(quantization.mode, "affine");
+        assert_eq!(quantization.bits, 8);
+        assert_eq!(quantization.group_size, 64);
+        assert_eq!(quantization.override_count, 0);
+        std::fs::remove_dir_all(dir).expect("cleanup preflight dir");
+    }
+
+    #[test]
     fn metadata_preflight_rejects_unsupported_architecture_before_weights() {
         let dir =
             std::env::temp_dir().join(format!("ironmlx-model-preflight-{}", uuid::Uuid::new_v4()));

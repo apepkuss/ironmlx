@@ -40,6 +40,9 @@ pub const MIN_KV_CACHE_CAP_FOR_GPU_PERF: i32 = 256;
 pub struct Qwen35Model {
     text: Qwen35TextModel,
     exact_batched_verify_profile: super::speculative::ExactBatchedVerifyProfile,
+    /// Exact storage bytes retained by the sanitized production loader.
+    /// Composition-only constructors fall back to the architecture estimate.
+    loaded_weight_bytes: Option<usize>,
     /// `Some` when `!tie_word_embeddings`. `None` reuses `text.embed_tokens` for output projection.
     lm_head: Option<Linear>,
     /// Vision encoder; `Some` for VL models loaded with `open_multimodal`. `None` for text-only.
@@ -107,6 +110,7 @@ impl Qwen35Model {
     }
 
     pub(crate) fn from_loader_dflash2(loader: &mut Loader) -> Result<Self> {
+        let loaded_weight_bytes = loader.loaded_tensor_bytes();
         let cfg = Qwen35Config::from_loader(loader)
             .context("parsing Qwen35Config from loader.config_raw_value")?;
         let exact_batched_verify_profile = super::speculative::dense_exact_batched_verify_profile(
@@ -134,6 +138,7 @@ impl Qwen35Model {
         Ok(Self {
             text,
             exact_batched_verify_profile,
+            loaded_weight_bytes: Some(loaded_weight_bytes),
             lm_head,
             vision,
         })
@@ -144,6 +149,7 @@ impl Qwen35Model {
     }
 
     fn from_loader_with_config_impl(loader: &Loader, cfg: Qwen35Config) -> Result<Self> {
+        let loaded_weight_bytes = loader.loaded_tensor_bytes();
         let exact_batched_verify_profile = super::speculative::dense_exact_batched_verify_profile(
             loader.quant_meta(),
             loader
@@ -177,6 +183,7 @@ impl Qwen35Model {
         Ok(Self {
             text,
             exact_batched_verify_profile,
+            loaded_weight_bytes: Some(loaded_weight_bytes),
             lm_head,
             vision,
         })
@@ -188,6 +195,7 @@ impl Qwen35Model {
         Self {
             text,
             exact_batched_verify_profile: super::speculative::ExactBatchedVerifyProfile::Disabled,
+            loaded_weight_bytes: None,
             lm_head,
             vision: None,
         }
@@ -216,16 +224,16 @@ impl Qwen35Model {
             num_key_value_heads: cfg.num_key_value_heads,
             hidden_size: cfg.hidden_size,
             head_dim: cfg.head_dim,
-            weight_bytes: self.approx_weight_bytes(),
+            weight_bytes: self
+                .loaded_weight_bytes
+                .unwrap_or_else(|| self.approx_weight_bytes()),
             max_position_embeddings: cfg.max_position_embeddings,
             spatial_merge_size,
         }
     }
 
-    /// Conservative weight-bytes estimate for memory budgeting (B1-p2.5).
-    /// Returns approx total quantized weight bytes for 4-bit Qwen3.5-like
-    /// model: FF (~12 hidden² per layer × 4-bit) + attention (~4 hidden²)
-    /// + embedding (vocab × hidden / 8 for 4-bit).
+    /// Composition-only fallback estimate for memory budgeting (B1-p2.5).
+    /// Production models use the sanitized loader's exact tensor storage bytes.
     fn approx_weight_bytes(&self) -> usize {
         let cfg = self.config();
         let h = cfg.hidden_size as usize;
@@ -242,6 +250,17 @@ impl Qwen35Model {
 
     pub fn hidden_dtype(&self) -> Dtype {
         self.text.hidden_dtype()
+    }
+
+    pub(crate) fn supports_affine8_b4_mtp_exact_hot_path(
+        &self,
+        batch_width: usize,
+        verify_width: usize,
+    ) -> bool {
+        self.exact_batched_verify_profile
+            == super::speculative::ExactBatchedVerifyProfile::Affine8Dense
+            && batch_width == 4
+            && verify_width == 2
     }
 
     pub fn load_mtp_head(&self, loader: &Loader) -> Result<Mtp> {
@@ -307,6 +326,13 @@ impl Qwen35Model {
     ) -> Result<Array> {
         let target = target.into();
         let shape = hidden.shape();
+        if shape.as_slice().first() == Some(&4)
+            && shape.as_slice().get(1) == Some(&2)
+            && shape.as_slice().get(2) == Some(&self.config().hidden_size)
+            && crate::nn::position_stable_qmm::exact_affine8_b4_q2_is_armed()
+        {
+            return self.project_hidden_unisolated_on(hidden, target);
+        }
         if shape
             .as_slice()
             .get(1)
@@ -412,6 +438,19 @@ impl Qwen35Model {
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
         let target = target.into();
+        let input_shape = input_ids.shape();
+        let input_shape = input_shape.as_slice();
+        let batch_stable_affine8_q1 = self.exact_batched_verify_profile
+            == super::speculative::ExactBatchedVerifyProfile::Affine8Dense
+            && input_shape.len() == 2
+            && input_shape[0] > 1
+            && input_shape[1] == 1;
+        // MLX affine8 QMM can select a different accumulation morphology when
+        // the leading product changes from B1 to B>1, even though every row is
+        // independent. Preserve the B1 accumulation tree for ordinary
+        // concurrent Q=1 decode while retaining one multi-row dispatch.
+        let _product_stable_qmm =
+            batch_stable_affine8_q1.then(crate::nn::product_stable_qmm::scope);
         let hidden = self.text.forward_on(
             input_ids,
             position_ids,
@@ -929,6 +968,7 @@ impl Qwen35Model {
         Self {
             text,
             exact_batched_verify_profile: super::speculative::ExactBatchedVerifyProfile::Disabled,
+            loaded_weight_bytes: None,
             lm_head: None,
             vision: None,
         }
@@ -1097,9 +1137,19 @@ impl crate::models::dflash2::DFlash2Target for Qwen35Model {
         let batch_width = input_dims.first().copied().unwrap_or(0) as usize;
         let verify_width = input_dims.get(1).copied().unwrap_or(0) as usize;
         let is_verify = mode.is_verify();
+        let _batch_stable_prefill =
+            (mode == crate::models::dflash2::DFlash2TargetForwardMode::Prefill && batch_width > 1)
+                .then(crate::nn::batch_stable_qmm::linear_scope);
+        // Cache-bearing attention and GatedDelta prefill must retain the
+        // scheduler B1 row morphology for affine4 and affine8. Their B=N state
+        // is numerically close but not exact, and the difference is amplified
+        // by subsequent tensor verification.
+        let _batch_stable_prefill_state =
+            (mode == crate::models::dflash2::DFlash2TargetForwardMode::Prefill && batch_width > 1)
+                .then(crate::nn::batch_stable_qmm::context_scope);
         if is_verify
             && verify_width > 1
-            && !crate::models::qwen3_5::speculative::exact_batched_verify_shape_qualified(
+            && !crate::models::qwen3_5::speculative::dflash2_exact_batched_verify_shape_qualified(
                 self.exact_batched_verify_profile,
                 batch_width,
                 verify_width,
@@ -1111,28 +1161,32 @@ impl crate::models::dflash2::DFlash2Target for Qwen35Model {
             ));
         }
         // Exact DFlash2 verification must preserve the ordinary decode Q=1
-        // kernel route as well as its shapes. The speculative verify QMM
-        // candidate is intentionally not armed here: sequence-stable
-        // GatedDelta invokes its projections at Q=1, where that candidate
-        // would otherwise bypass the ordinary quantized matmul.
+        // accumulation tree. The speculative verify QMM candidate is
+        // intentionally not armed here; the position- and product-stable
+        // routes below provide that contract for the batched verify block.
         let _position_stable_linear = mode
             .requires_position_stability()
             .then(crate::nn::position_stable_linear::scope);
         let _position_stable_qmm = mode
             .requires_position_stability()
             .then(crate::nn::position_stable_qmm::scope);
-        let _product_stable_qmm =
-            (mode.is_verify() && verify_width > 1).then(crate::nn::product_stable_qmm::scope);
+        let _dflash2_bulk_attention = mode
+            .requires_position_stability()
+            .then(crate::nn::position_stable_qmm::dflash2_bulk_attention_scope);
+        let affine8_wide_tiling = mode.is_verify()
+            && verify_width == 3
+            && self.exact_batched_verify_profile
+                == super::speculative::ExactBatchedVerifyProfile::Affine8Dense;
+        let _affine8_wide_qmm =
+            affine8_wide_tiling.then(crate::nn::product_stable_qmm::affine8_wide_scope);
+        let _product_stable_qmm = (mode.is_verify() && verify_width > 1 && !affine8_wide_tiling)
+            .then(crate::nn::product_stable_qmm::scope);
         // Both verify modes keep the whole block batched. Product-stable QMM
-        // retains the ordinary Q=1 affine accumulation tree, while the scopes
-        // below isolate the remaining position-sensitive operations:
-        // attention advances the KV cache one position at a time and sampled
-        // GatedDelta advances recurrent state one position at a time. This
-        // avoids replaying all decoder layers or quantized projections once
-        // per verify token without changing target logits.
-        let _sequence_stable_gated_delta = (mode
-            == crate::models::dflash2::DFlash2TargetForwardMode::SampledVerify)
-            .then(crate::nn::sequence_stable_gated_delta::scope);
+        // retains the ordinary Q=1 affine accumulation tree; bulk attention
+        // preserves its position-sensitive cache updates, and GatedDelta
+        // captures enough replay state to restore an exact accepted prefix.
+        // This avoids replaying all decoder layers or quantized projections
+        // once per verify token without changing target logits.
         let (hidden, context_hidden) = self.text.forward_with_dflash2_taps_on(
             input_ids,
             position_ids,
@@ -1162,8 +1216,15 @@ impl crate::models::dflash2::DFlash2Target for Qwen35Model {
             return self.project_hidden_unisolated_on(hidden, target);
         }
         // The product-stable affine kernel evaluates all verify positions in
-        // one dispatch while retaining the exact Q=1 accumulation tree.
-        let _product_stable = crate::nn::product_stable_qmm::scope();
+        // one dispatch while retaining the exact Q=1 accumulation tree. Q3
+        // affine8 uses its explicit four-vector tiling hint; every other
+        // product-stable projection remains on the default tile.
+        let affine8_wide_tiling = dims[1] == 3
+            && self.exact_batched_verify_profile
+                == super::speculative::ExactBatchedVerifyProfile::Affine8Dense;
+        let _affine8_wide_qmm =
+            affine8_wide_tiling.then(crate::nn::product_stable_qmm::affine8_wide_scope);
+        let _product_stable = (!affine8_wide_tiling).then(crate::nn::product_stable_qmm::scope);
         self.project_hidden_unisolated_on(hidden, target)
     }
 
@@ -1322,6 +1383,17 @@ mod tests {
             matches!(cache[3], LayerCache::Full(_)),
             "layer 3 should be Full"
         );
+    }
+
+    #[test]
+    fn model_meta_uses_exact_loaded_tensor_bytes() {
+        let mut model = Qwen35Model::from_cfg_for_test(make_cfg());
+        let fallback = model.model_meta().weight_bytes;
+        let affine8_storage_bytes = fallback * 2;
+
+        model.loaded_weight_bytes = Some(affine8_storage_bytes);
+
+        assert_eq!(model.model_meta().weight_bytes, affine8_storage_bytes);
     }
 
     #[test]

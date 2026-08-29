@@ -1049,6 +1049,10 @@ public struct LocalModelScanner: Sendable {
         switch kind {
         case .base:
             guard normalizedString(config["model_type"]) == "qwen3-5",
+                  let quantization = config["quantization"] as? [String: Any],
+                  normalizedString(quantization["mode"]) == "affine",
+                  let quantizationBits = positiveIntValue(quantization["bits"]),
+                  [4, 8].contains(quantizationBits),
                   let text = config["text_config"] as? [String: Any],
                   intValue(text["num_experts"]) == nil,
                   let hiddenSize = positiveIntValue(text["hidden_size"]),

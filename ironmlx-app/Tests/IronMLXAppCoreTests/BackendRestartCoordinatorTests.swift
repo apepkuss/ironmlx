@@ -445,6 +445,7 @@ private func restartTemporaryDirectory() throws -> URL {
 private let dflash2RestartTargetConfig = """
 {
   "model_type": "qwen3_5",
+  "quantization": {"mode": "affine", "bits": 4, "group_size": 64},
   "text_config": {
     "hidden_size": 5120,
     "intermediate_size": 17408,

@@ -61,6 +61,8 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     private let notificationCenter: NotificationCenter
     private var loadedModelNames: [String]?
     private var isRefreshingLoadedModelNames = false
+    private var loadedModelRefreshGeneration: UInt64 = 0
+    private var loadedModelRefreshTask: Task<Void, Never>?
     private var refreshTimer: Timer?
 
     public init(
@@ -90,6 +92,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     deinit {
         MainActor.assumeIsolated {
             refreshTimer?.invalidate()
+            loadedModelRefreshTask?.cancel()
         }
         notificationCenter.removeObserver(self)
     }
@@ -164,6 +167,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     @objc private func backendRuntimeDidChange(_ notification: Notification) {
         if backend.state != .running, backend.state != .degraded {
             loadedModelNames = []
+            cancelLoadedModelRefresh()
         }
         rebuildMenu()
     }
@@ -243,15 +247,23 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     private func refreshLoadedModelNamesIfNeeded(state: BackendProcessState) {
-        guard state == .running || state == .starting || state == .degraded,
+        guard Self.shouldRefreshLoadedModelNames(in: state),
               !isRefreshingLoadedModelNames
         else {
             return
         }
         isRefreshingLoadedModelNames = true
+        loadedModelRefreshGeneration &+= 1
+        let refreshGeneration = loadedModelRefreshGeneration
         let config = configStore.load()
 
-        Task {
+        loadedModelRefreshTask = Task { [weak self] in
+            guard let self else {
+                return
+            }
+            defer {
+                self.finishLoadedModelRefresh(generation: refreshGeneration)
+            }
             let models: [BackendLoadedModelInfo]?
             let backendModelListIsAuthoritative: Bool
             do {
@@ -268,28 +280,54 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
                     models = LegacyHealthAdapter().legacyStatus(from: health).runtimeModels
                     backendModelListIsAuthoritative = false
                 } catch {
+                    guard !Task.isCancelled,
+                          refreshGeneration == self.loadedModelRefreshGeneration,
+                          Self.shouldRefreshLoadedModelNames(in: self.backend.state)
+                    else {
+                        return
+                    }
                     IronMLXAppLogger.error("Failed to refresh menu loaded models: \(error)")
                     models = nil
                     backendModelListIsAuthoritative = false
                 }
             }
 
-            await MainActor.run {
-                self.isRefreshingLoadedModelNames = false
-                guard let models else {
-                    return
-                }
-                if backendModelListIsAuthoritative {
-                    self.persistLoadedModelsIfNeeded(models)
-                }
-                let names = MenuBarMenuBuilder.modelNames(from: models)
-                guard names != self.loadedModelNames else {
-                    return
-                }
-                self.loadedModelNames = names
-                self.rebuildMenu()
+            guard !Task.isCancelled,
+                  refreshGeneration == loadedModelRefreshGeneration,
+                  Self.shouldRefreshLoadedModelNames(in: backend.state),
+                  let models
+            else {
+                return
             }
+            if backendModelListIsAuthoritative {
+                persistLoadedModelsIfNeeded(models)
+            }
+            let names = MenuBarMenuBuilder.modelNames(from: models)
+            guard names != loadedModelNames else {
+                return
+            }
+            loadedModelNames = names
+            rebuildMenu()
         }
+    }
+
+    nonisolated static func shouldRefreshLoadedModelNames(in state: BackendProcessState) -> Bool {
+        state == .running || state == .degraded
+    }
+
+    private func cancelLoadedModelRefresh() {
+        loadedModelRefreshGeneration &+= 1
+        loadedModelRefreshTask?.cancel()
+        loadedModelRefreshTask = nil
+        isRefreshingLoadedModelNames = false
+    }
+
+    private func finishLoadedModelRefresh(generation: UInt64) {
+        guard generation == loadedModelRefreshGeneration else {
+            return
+        }
+        loadedModelRefreshTask = nil
+        isRefreshingLoadedModelNames = false
     }
 
     private func persistLoadedModelsIfNeeded(_ models: [BackendLoadedModelInfo]) {
@@ -316,7 +354,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
 
     private func restartConfiguredBackendFromMenu() {
         loadedModelNames = []
-        rebuildMenu()
+        cancelLoadedModelRefresh()
 
         Task {
             let result = await self.backend.restart(intent: .plannedRestart)

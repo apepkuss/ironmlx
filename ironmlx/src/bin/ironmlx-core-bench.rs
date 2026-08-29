@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, ValueEnum};
@@ -16,8 +16,9 @@ use ironmlx::core::cache::{
 };
 use ironmlx::core::scheduler::DenseVlMethods;
 use ironmlx::core::speculative::{
-    resolve_mtp_draft_tokens, MtpDraftCapObservation, MtpDraftTokensArg, MtpSpeculativeConfig,
-    MtpSpeculativeModel, MtpSpeculativeStats, MtpTextGenerationStream,
+    qwen_fixed_mtp_draft_depth_scope, resolve_mtp_draft_tokens, MtpDraftCapObservation,
+    MtpDraftTokensArg, MtpSpeculativeConfig, MtpSpeculativeModel, MtpSpeculativeStats,
+    MtpTextGenerationStream,
 };
 use ironmlx::core::{GenerateRequest, GenerationStream, Loader, Model, Sampler, Scheduler};
 use ironmlx::models::gemma4::{
@@ -76,6 +77,11 @@ struct Args {
     #[arg(long)]
     mtp_draft_tokens: Option<usize>,
 
+    /// Freeze Qwen MTP at --mtp-draft-tokens for controlled calibration.
+    /// This disables adaptive depth changes and ordinary-decode fallback.
+    #[arg(long = "qwen-fixed-mtp-draft-depth", default_value_t = false)]
+    qwen_fixed_mtp_draft_depth: bool,
+
     /// Record the first N Gemma4 drafter speculative windows into JSON.
     #[arg(long, default_value_t = 0)]
     mtp_trace_windows: usize,
@@ -97,6 +103,11 @@ struct Args {
     /// Warmup runs, excluded from summary.
     #[arg(long, default_value_t = 1)]
     warmup_runs: usize,
+
+    /// Fixed idle interval after every benchmark workload. This is excluded
+    /// from timings and is intended to control sustained-device thermal state.
+    #[arg(long, default_value_t = 0)]
+    run_cooldown_ms: u64,
 
     /// Prefill chunk size passed to GenerateRequest.
     #[arg(long, default_value_t = 2048)]
@@ -199,8 +210,27 @@ impl KvQuantBenchArg {
 struct BenchOutput {
     meta: Meta,
     summary: Summary,
+    mlx_memory: MlxMemoryStats,
     warmups: Vec<Record>,
     records: Vec<Record>,
+}
+
+#[derive(Clone, Serialize)]
+struct MlxMemoryStats {
+    active_bytes: usize,
+    cache_bytes: usize,
+    peak_bytes: usize,
+}
+
+impl MlxMemoryStats {
+    fn capture() -> Self {
+        let memory = mlx::memory::snapshot();
+        Self {
+            active_bytes: memory.active_bytes,
+            cache_bytes: memory.cache_bytes,
+            peak_bytes: memory.peak_bytes,
+        }
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -211,6 +241,7 @@ struct Meta {
     model_dir: String,
     mtp_model_dir: Option<String>,
     mtp_draft_tokens: Option<usize>,
+    qwen_fixed_mtp_draft_depth: bool,
     mtp_trace_windows: usize,
     prompt_file: String,
     chat: bool,
@@ -234,6 +265,7 @@ struct Meta {
     effective_cap_max: usize,
     warmup_runs: usize,
     measured_runs: usize,
+    run_cooldown_ms: u64,
     load_ms: f64,
     device_name: Option<String>,
     ironmlx_version: &'static str,
@@ -270,6 +302,7 @@ struct Record {
     aggregate_generation_tps: f64,
     finish_reason: Option<&'static str>,
     valid: bool,
+    mlx_memory: MlxMemoryStats,
     mtp_stats: Option<MtpRecordStats>,
     #[serde(skip_serializing_if = "Option::is_none")]
     mtp_trace: Option<Vec<MtpTraceWindowRecord>>,
@@ -571,6 +604,13 @@ fn validate_args(args: &Args) -> Result<()> {
             "--scheduler-baseline-out requires --mode scheduler-text with --mtp-model-dir"
         ));
     }
+    if args.qwen_fixed_mtp_draft_depth
+        && (args.mtp_model_dir.is_none() || args.mtp_draft_tokens.is_none())
+    {
+        return Err(anyhow!(
+            "--qwen-fixed-mtp-draft-depth requires --mtp-model-dir and explicit --mtp-draft-tokens"
+        ));
+    }
     if args.paged_prefix_cache_block_size <= 0 {
         return Err(anyhow!(
             "--paged-prefix-cache-block-size must be > 0, got {}",
@@ -658,6 +698,12 @@ fn validate_args(args: &Args) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn run_cooldown(args: &Args) {
+    if args.run_cooldown_ms > 0 {
+        std::thread::sleep(Duration::from_millis(args.run_cooldown_ms));
+    }
 }
 
 fn resolve_scheduler_features(
@@ -922,6 +968,7 @@ where
             args,
             scheduler_config,
         )?);
+        run_cooldown(args);
     }
 
     let mut records = Vec::with_capacity(args.runs);
@@ -933,6 +980,7 @@ where
             args,
             scheduler_config,
         )?);
+        run_cooldown(args);
     }
 
     let output = BenchOutput {
@@ -943,6 +991,7 @@ where
             model_dir: args.model.display().to_string(),
             mtp_model_dir: None,
             mtp_draft_tokens: None,
+            qwen_fixed_mtp_draft_depth: false,
             mtp_trace_windows: args.mtp_trace_windows,
             prompt_file: prompt_file.display().to_string(),
             chat: args.chat,
@@ -980,11 +1029,13 @@ where
             effective_cap_max,
             warmup_runs: args.warmup_runs,
             measured_runs: args.runs,
+            run_cooldown_ms: args.run_cooldown_ms,
             load_ms,
             device_name: mlx::memory::snapshot().device_name,
             ironmlx_version: env!("CARGO_PKG_VERSION"),
         },
         summary: summarize(&records),
+        mlx_memory: MlxMemoryStats::capture(),
         warmups,
         records,
     };
@@ -1004,6 +1055,9 @@ fn run_for_qwen_model<M>(
 where
     M: MtpSpeculativeModel + DenseVlMethods,
 {
+    let _fixed_draft_depth = args
+        .qwen_fixed_mtp_draft_depth
+        .then(qwen_fixed_mtp_draft_depth_scope);
     let prompt_ids = read_scheduler_prompt_ids(tokenizer, args)?;
     let primary_prompt_ids = prompt_ids
         .first()
@@ -1061,6 +1115,7 @@ where
                 scheduler_config,
                 None,
             )?);
+            run_cooldown(args);
         }
         warmups.push(run_once_qwen(
             model,
@@ -1071,6 +1126,7 @@ where
             scheduler_config,
             mtp_draft_tokens,
         )?);
+        run_cooldown(args);
         if args.scheduler_baseline_out.is_some() && index % 2 == 1 {
             baseline_warmups.push(run_once_qwen(
                 model,
@@ -1081,6 +1137,7 @@ where
                 scheduler_config,
                 None,
             )?);
+            run_cooldown(args);
         }
     }
 
@@ -1097,6 +1154,7 @@ where
                 scheduler_config,
                 None,
             )?);
+            run_cooldown(args);
         }
         records.push(run_once_qwen(
             model,
@@ -1107,6 +1165,7 @@ where
             scheduler_config,
             mtp_draft_tokens,
         )?);
+        run_cooldown(args);
         if args.scheduler_baseline_out.is_some() && index % 2 == 1 {
             baseline_records.push(run_once_qwen(
                 model,
@@ -1117,6 +1176,7 @@ where
                 scheduler_config,
                 None,
             )?);
+            run_cooldown(args);
         }
     }
 
@@ -1130,6 +1190,7 @@ where
             .as_ref()
             .map(|dir| dir.display().to_string()),
         mtp_draft_tokens,
+        qwen_fixed_mtp_draft_depth: args.qwen_fixed_mtp_draft_depth,
         mtp_trace_windows: args.mtp_trace_windows,
         prompt_file: primary_prompt_file(args).display().to_string(),
         chat: args.chat,
@@ -1167,6 +1228,7 @@ where
         effective_cap_max,
         warmup_runs: args.warmup_runs,
         measured_runs: args.runs,
+        run_cooldown_ms: args.run_cooldown_ms,
         load_ms,
         device_name: mlx::memory::snapshot().device_name,
         ironmlx_version: env!("CARGO_PKG_VERSION"),
@@ -1179,6 +1241,7 @@ where
         let baseline_output = BenchOutput {
             meta: baseline_meta,
             summary: summarize(&baseline_records),
+            mlx_memory: MlxMemoryStats::capture(),
             warmups: baseline_warmups,
             records: baseline_records,
         };
@@ -1192,6 +1255,7 @@ where
     let output = BenchOutput {
         meta,
         summary: summarize(&records),
+        mlx_memory: MlxMemoryStats::capture(),
         warmups,
         records,
     };
@@ -1208,6 +1272,10 @@ fn run_for_gemma4_model(
     raw_config: &serde_json::Value,
     load_ms: f64,
 ) -> Result<()> {
+    anyhow::ensure!(
+        !args.qwen_fixed_mtp_draft_depth,
+        "--qwen-fixed-mtp-draft-depth is only valid for Qwen MTP benchmarks"
+    );
     let prompt_ids = read_scheduler_prompt_ids(tokenizer, args)?;
     let primary_prompt_ids = prompt_ids
         .first()
@@ -1298,6 +1366,7 @@ fn run_for_gemma4_model(
             // the following drafter run measures its own working set instead
             // of stacking on the baseline high-water mark.
             mlx::transforms::clear_cache();
+            run_cooldown(args);
         }
         warmups.push(run_once_gemma4(
             model,
@@ -1311,6 +1380,7 @@ fn run_for_gemma4_model(
         if args.scheduler_baseline_out.is_some() {
             mlx::transforms::clear_cache();
         }
+        run_cooldown(args);
         if args.scheduler_baseline_out.is_some() && index % 2 == 1 {
             baseline_warmups.push(run_once_gemma4(
                 model,
@@ -1322,6 +1392,7 @@ fn run_for_gemma4_model(
                 None,
             )?);
             mlx::transforms::clear_cache();
+            run_cooldown(args);
         }
     }
 
@@ -1339,6 +1410,7 @@ fn run_for_gemma4_model(
                 None,
             )?);
             mlx::transforms::clear_cache();
+            run_cooldown(args);
         }
         records.push(run_once_gemma4(
             model,
@@ -1352,6 +1424,7 @@ fn run_for_gemma4_model(
         if args.scheduler_baseline_out.is_some() {
             mlx::transforms::clear_cache();
         }
+        run_cooldown(args);
         if args.scheduler_baseline_out.is_some() && index % 2 == 1 {
             baseline_records.push(run_once_gemma4(
                 model,
@@ -1363,6 +1436,7 @@ fn run_for_gemma4_model(
                 None,
             )?);
             mlx::transforms::clear_cache();
+            run_cooldown(args);
         }
     }
 
@@ -1376,6 +1450,7 @@ fn run_for_gemma4_model(
             .as_ref()
             .map(|dir| dir.display().to_string()),
         mtp_draft_tokens,
+        qwen_fixed_mtp_draft_depth: false,
         mtp_trace_windows: args.mtp_trace_windows,
         prompt_file: primary_prompt_file(args).display().to_string(),
         chat: args.chat,
@@ -1413,6 +1488,7 @@ fn run_for_gemma4_model(
         effective_cap_max,
         warmup_runs: args.warmup_runs,
         measured_runs: args.runs,
+        run_cooldown_ms: args.run_cooldown_ms,
         load_ms,
         device_name: mlx::memory::snapshot().device_name,
         ironmlx_version: env!("CARGO_PKG_VERSION"),
@@ -1425,6 +1501,7 @@ fn run_for_gemma4_model(
         let baseline_output = BenchOutput {
             meta: baseline_meta,
             summary: summarize(&baseline_records),
+            mlx_memory: MlxMemoryStats::capture(),
             warmups: baseline_warmups,
             records: baseline_records,
         };
@@ -1438,6 +1515,7 @@ fn run_for_gemma4_model(
     let output = BenchOutput {
         meta,
         summary: summarize(&records),
+        mlx_memory: MlxMemoryStats::capture(),
         warmups,
         records,
     };
@@ -2317,6 +2395,7 @@ fn make_record(input: RecordInput) -> Record {
         aggregate_generation_tps: generation_tps,
         finish_reason,
         valid: finish_reason == Some("length") && generated_tokens >= max_tokens,
+        mlx_memory: MlxMemoryStats::capture(),
         mtp_stats,
         mtp_trace,
         active_kv_stats,

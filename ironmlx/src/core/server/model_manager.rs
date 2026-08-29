@@ -2769,7 +2769,7 @@ mod tests {
             &mtp,
             &without_model_identity(qwen35_config("qwen3_5_mtp", 1, 5120)),
         );
-        write_snapshot_identity(&base, "mlx-community/Qwen3.8-27B-4bit");
+        write_snapshot_identity(&base, "mlx-community/Qwen3.8-27B-8bit");
         write_snapshot_identity(&mtp, "mlx-community/Qwen3.8-27B-MTP-8bit");
 
         let response = validate_mtp_pair(&base, &mtp, Some(2)).expect("validate");
