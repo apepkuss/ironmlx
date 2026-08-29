@@ -423,6 +423,191 @@ where
         )
     }
 
+    /// Construct an equal-length scheduler batch with one target prefill graph.
+    ///
+    /// The batched path deliberately preserves the scheduler B1 `[N - 1] + [1]`
+    /// prefill morphology. Quantized projections are isolated per batch row by
+    /// the target implementation, so each resulting stream starts from the same
+    /// target hidden state, logits, and cache state as its B1 counterpart.
+    pub(crate) fn new_scheduler_bn_text_only_with_cancellation(
+        model: &'m M,
+        draft: &'m DFlash2DraftModel,
+        tokenizer: &'m Tokenizer,
+        requests: Vec<GenerateRequest>,
+        block_size: usize,
+        is_cancelled: &dyn Fn(usize) -> bool,
+    ) -> Result<Vec<Self>> {
+        anyhow::ensure!(
+            requests.len() > 1,
+            "DFlash2 batched prefill requires at least two requests"
+        );
+        for (index, request) in requests.iter().enumerate() {
+            Self::validate_text_request(draft, request, block_size)?;
+            ensure_dflash2_request_not_cancelled(Some(&|| is_cancelled(index)))?;
+        }
+
+        let batch_size = requests.len();
+        let batch_size_i32 = i32::try_from(batch_size)?;
+        let prompt_len = requests[0].prompt_ids.len();
+        anyhow::ensure!(
+            requests
+                .iter()
+                .all(|request| request.prompt_ids.len() == prompt_len),
+            "DFlash2 batched prefill requires equal prompt lengths"
+        );
+        let requested_chunk_size = requests[0].prefill_chunk_size;
+        anyhow::ensure!(
+            requests
+                .iter()
+                .all(|request| request.prefill_chunk_size == requested_chunk_size),
+            "DFlash2 batched prefill requires equal prefill chunk sizes"
+        );
+
+        let prompt_len_i32 = i32::try_from(prompt_len).context("DFlash2 prompt is too long")?;
+        let cap = requests
+            .iter()
+            .map(|request| {
+                request
+                    .prompt_ids
+                    .len()
+                    .saturating_add(request.max_new_tokens)
+            })
+            .max()
+            .unwrap_or(1);
+        let cap = i32::try_from(cap)?.max(crate::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF);
+        let mut batched_target_cache =
+            model.make_cache(batch_size_i32, cap, model.cache_dtype())?;
+        let target_layer_ids = &draft.config().dflash_config.target_layer_ids;
+        let context_limit = draft.config().sliding_window - 1;
+        let prefill_started = Instant::now();
+        let mut context_hidden: Option<Array> = None;
+        let mut last_hidden: Option<Array> = None;
+        let mut position = 0_i32;
+
+        while position < prompt_len_i32 {
+            for index in 0..batch_size {
+                ensure_dflash2_request_not_cancelled(Some(&|| is_cancelled(index)))?;
+            }
+            let remaining = prompt_len_i32 - position;
+            let chunk_len = dflash2_prefill_chunk_len(
+                remaining,
+                requested_chunk_size,
+                position,
+                DFlash2PrefillExecution::SchedulerB1,
+            );
+            let start = position as usize;
+            let stop = start + chunk_len as usize;
+            let mut flat = Vec::with_capacity(batch_size * chunk_len as usize);
+            for request in &requests {
+                flat.extend_from_slice(&request.prompt_ids[start..stop]);
+            }
+            let input: Array = (&flat[..], &[batch_size_i32, chunk_len][..]).try_into()?;
+            let position_ids = build_position_ids(position, chunk_len)?;
+            let position_ids = mlx::ops::shape::broadcast_to(
+                &position_ids,
+                &[3_i32, batch_size_i32, chunk_len][..],
+            )?;
+            let output = model.dflash2_forward_target_on(
+                &input,
+                &position_ids,
+                Some(&mut batched_target_cache),
+                target_layer_ids,
+                DFlash2TargetForwardMode::Prefill,
+                StreamOrDevice::default(),
+            )?;
+            context_hidden = Some(retain_context_tail_batched(
+                context_hidden.as_ref(),
+                &output.context_hidden,
+                context_limit,
+                StreamOrDevice::default(),
+            )?);
+            last_hidden = Some(slice_sequence_position_batched(
+                &output.hidden,
+                chunk_len - 1,
+                StreamOrDevice::default(),
+            )?);
+            mlx::transforms::eval(&[
+                context_hidden
+                    .as_ref()
+                    .expect("batched DFlash2 context is present"),
+                last_hidden
+                    .as_ref()
+                    .expect("batched DFlash2 final hidden is present"),
+            ])?;
+            position += chunk_len;
+        }
+
+        let context_hidden =
+            context_hidden.ok_or_else(|| anyhow!("DFlash2 batched prefill produced no context"))?;
+        let last_hidden =
+            last_hidden.ok_or_else(|| anyhow!("DFlash2 batched prefill produced no hidden"))?;
+        let retained_len = sequence_len_batched(&context_hidden)?;
+        let initial_offset = prompt_len_i32
+            .checked_sub(retained_len)
+            .ok_or_else(|| anyhow!("DFlash2 retained context exceeds prompt length"))?;
+        let prefill_us = elapsed_us(prefill_started);
+        let mut streams = Vec::with_capacity(batch_size);
+
+        for (batch_row, request) in requests.into_iter().enumerate() {
+            ensure_dflash2_request_not_cancelled(Some(&|| is_cancelled(batch_row)))?;
+            let row_context =
+                slice_batch_row(&context_hidden, batch_row, StreamOrDevice::default())?;
+            let row_last_hidden =
+                slice_batch_row(&last_hidden, batch_row, StreamOrDevice::default())?;
+            let first_logits =
+                model.dflash2_project_hidden_on(&row_last_hidden, StreamOrDevice::default())?;
+            mlx::transforms::eval(&[&first_logits, &row_context])?;
+
+            let mut target_cache = model.make_cache(1, cap, model.cache_dtype())?;
+            crate::nn::decoder_layer::adopt_layer_cache_rows(
+                &mut target_cache,
+                &batched_target_cache,
+                0,
+                batch_row,
+            )?;
+            let mut prng_state = mlx::random::key(request.sampler.seed)?;
+            let mut constraint = request
+                .constraint
+                .as_ref()
+                .map(|plan| plan.start_session())
+                .transpose()?;
+            let first_token = sample_initial_token(
+                &first_logits,
+                request.sampler,
+                &request.prompt_ids,
+                &mut prng_state,
+                &mut constraint,
+            )?;
+            commit_constraint_token(&mut constraint, first_token)?;
+            let draft_cache = draft.make_cache(initial_offset)?;
+            let mut history = request.prompt_ids.clone();
+            history.push(first_token);
+            let mut pending_tokens = VecDeque::new();
+            pending_tokens.push_back(first_token);
+            streams.push(Self {
+                model,
+                draft,
+                target_cache,
+                draft_cache,
+                history,
+                request,
+                pending_tokens,
+                detok: tokenizer.decode_stream(true),
+                pending_context_hidden: row_context,
+                prng_state,
+                block_size,
+                emitted_new_tokens: 0,
+                finished: false,
+                prefill_us,
+                generation_started: Instant::now(),
+                counters: DFlash2Counters::default(),
+                constraint,
+                prefix_cache_hit_tokens: 0,
+            });
+        }
+        Ok(streams)
+    }
+
     fn new_text_only_with_prefill_execution(
         model: &'m M,
         draft: &'m DFlash2DraftModel,
@@ -914,47 +1099,55 @@ where
         let projected_logits = rows[0]
             .model
             .dflash2_project_hidden_on(&verified.hidden, target)?;
-        let host_sync_started = Instant::now();
-        let draft_tokens_flat = draft_tokens_arr.to_vec::<u32>()?;
-        let mut host_sync_us = elapsed_us(host_sync_started);
-        let draft_tokens = draft_tokens_flat
-            .chunks_exact(draft_len)
-            .map(<[u32]>::to_vec)
-            .collect::<Vec<_>>();
-        anyhow::ensure!(
-            draft_tokens.len() == batch_size,
-            "DFlash2 B={batch_size} draft host result has invalid length {}",
-            draft_tokens_flat.len()
-        );
-        for tokens in &draft_tokens {
-            anyhow::ensure!(
-                !tokens.contains(&mask_token),
-                "DFlash2 draft emitted reserved mask token {mask_token}"
-            );
-        }
-        let mut constrained_rows = Vec::with_capacity(batch_size);
-        for (batch_row, row) in rows.iter().enumerate() {
-            let logits = slice_batch_row(&projected_logits, batch_row, target)?;
-            constrained_rows.push(constrain_dflash2_verified_logits(
-                row.constraint.as_ref(),
-                &logits,
-                &draft_tokens[batch_row],
-            )?);
-        }
-        let verified_logits_refs = constrained_rows.iter().collect::<Vec<_>>();
-        let verified_logits = mlx::ops::shape::concatenate_on(&verified_logits_refs, 0, target)?;
+        let all_unconstrained = rows.iter().all(|row| row.constraint.is_none());
+        let mut host_sync_us = 0;
+        let mut draft_tokens = if all_unconstrained {
+            None
+        } else {
+            let host_sync_started = Instant::now();
+            let tokens = materialize_dflash2_draft_tokens(
+                &draft_tokens_arr,
+                batch_size,
+                draft_len,
+                mask_token,
+            )?;
+            host_sync_us = elapsed_us(host_sync_started);
+            Some(tokens)
+        };
+        let verified_logits = if all_unconstrained {
+            projected_logits
+        } else {
+            let draft_tokens = draft_tokens
+                .as_ref()
+                .expect("constrained DFlash2 batch materializes draft tokens");
+            let mut constrained_rows = Vec::with_capacity(batch_size);
+            for (batch_row, row) in rows.iter().enumerate() {
+                let logits = slice_batch_row(&projected_logits, batch_row, target)?;
+                constrained_rows.push(constrain_dflash2_verified_logits(
+                    row.constraint.as_ref(),
+                    &logits,
+                    &draft_tokens[batch_row],
+                )?);
+            }
+            let verified_logits_refs = constrained_rows.iter().collect::<Vec<_>>();
+            mlx::ops::shape::concatenate_on(&verified_logits_refs, 0, target)?
+        };
         let verified_tokens_arr = (!first_key.sampled)
             .then(|| mlx::ops::reduction::argmax(&verified_logits, -1, false))
             .transpose()?;
         let mut prepared_sampling = Vec::with_capacity(batch_size);
         for (batch_row, row) in rows.iter().enumerate() {
-            let logits = slice_batch_row(&verified_logits, batch_row, target)?;
-            prepared_sampling.push(prepare_dflash2_exact_sampling(
-                &logits,
-                row.request.sampler,
-                draft_len,
-                exact_uniforms[batch_row].is_some(),
-            )?);
+            prepared_sampling.push(if first_key.sampled {
+                let logits = slice_batch_row(&verified_logits, batch_row, target)?;
+                prepare_dflash2_exact_sampling(
+                    &logits,
+                    row.request.sampler,
+                    draft_len,
+                    exact_uniforms[batch_row].is_some(),
+                )?
+            } else {
+                None
+            });
         }
         let projection_build_us = elapsed_us(projection_started);
 
@@ -968,6 +1161,15 @@ where
         mlx::transforms::async_eval(&eval_roots)?;
         let verify_schedule_us = elapsed_us(verify_schedule_started);
         let host_sync_started = Instant::now();
+        let draft_tokens = match draft_tokens.take() {
+            Some(tokens) => tokens,
+            None => materialize_dflash2_draft_tokens(
+                &draft_tokens_arr,
+                batch_size,
+                draft_len,
+                mask_token,
+            )?,
+        };
         let greedy_tokens_flat = verified_tokens_arr
             .as_ref()
             .map(Array::to_vec::<u32>)
@@ -980,14 +1182,18 @@ where
             let greedy_tokens = greedy_tokens_flat
                 .as_ref()
                 .map(|tokens| &tokens[batch_row * verify_len..(batch_row + 1) * verify_len]);
-            let logits = slice_batch_row(&verified_logits, batch_row, target)?;
-            let resolution = if let (Some(prepared), Some(uniforms)) = (
+            let resolution = if !first_key.sampled {
+                let target_tokens = greedy_tokens
+                    .ok_or_else(|| anyhow!("DFlash2 greedy verification tokens are absent"))?;
+                resolve_speculative_tokens(&draft_tokens[batch_row], target_tokens)?
+            } else if let (Some(prepared), Some(uniforms)) = (
                 prepared_sampling[batch_row].take(),
                 exact_uniforms[batch_row].as_ref(),
             ) {
                 let target_tokens = prepared.sample(&uniforms.to_vec()?)?;
                 resolve_exact_deterministic_target_tokens(&draft_tokens[batch_row], &target_tokens)?
             } else {
+                let logits = slice_batch_row(&verified_logits, batch_row, target)?;
                 resolve_dflash2_window(
                     &draft_tokens[batch_row],
                     greedy_tokens,
@@ -1592,6 +1798,17 @@ fn sequence_len(array: &Array) -> Result<i32> {
     Ok(dims[1])
 }
 
+fn sequence_len_batched(array: &Array) -> Result<i32> {
+    let shape = array.shape();
+    let dims = shape.as_slice();
+    if dims.len() != 3 || dims[0] <= 0 {
+        return Err(anyhow!(
+            "DFlash2 expected batched [B,S,H] tensor, got {dims:?}"
+        ));
+    }
+    Ok(dims[1])
+}
+
 fn array_payload_bytes(array: &Array) -> usize {
     array.size().saturating_mul(array.dtype().byte_size())
 }
@@ -1614,6 +1831,31 @@ fn slice_batch_row(array: &Array, row: usize, target: StreamOrDevice) -> Result<
     .map_err(Into::into)
 }
 
+fn materialize_dflash2_draft_tokens(
+    draft_tokens: &Array,
+    batch_size: usize,
+    draft_len: usize,
+    mask_token: u32,
+) -> Result<Vec<Vec<u32>>> {
+    let flat = draft_tokens.to_vec::<u32>()?;
+    let rows = flat
+        .chunks_exact(draft_len)
+        .map(<[u32]>::to_vec)
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        rows.len() == batch_size && flat.len() == batch_size.saturating_mul(draft_len),
+        "DFlash2 B={batch_size} draft host result has invalid length {}",
+        flat.len()
+    );
+    for tokens in &rows {
+        anyhow::ensure!(
+            !tokens.contains(&mask_token),
+            "DFlash2 draft emitted reserved mask token {mask_token}"
+        );
+    }
+    Ok(rows)
+}
+
 fn slice_sequence_position(hidden: &Array, position: i32, target: StreamOrDevice) -> Result<Array> {
     let shape = hidden.shape();
     let dims = shape.as_slice();
@@ -1626,6 +1868,28 @@ fn slice_sequence_position(hidden: &Array, position: i32, target: StreamOrDevice
         hidden,
         &[0_i32, position, 0][..],
         &[1_i32, position + 1, dims[2]][..],
+        &[1_i32, 1, 1][..],
+        target,
+    )
+    .map_err(Into::into)
+}
+
+fn slice_sequence_position_batched(
+    hidden: &Array,
+    position: i32,
+    target: StreamOrDevice,
+) -> Result<Array> {
+    let shape = hidden.shape();
+    let dims = shape.as_slice();
+    if dims.len() != 3 || dims[0] <= 0 || position < 0 || position >= dims[1] {
+        return Err(anyhow!(
+            "DFlash2 cannot slice batched position {position} from hidden shape {dims:?}"
+        ));
+    }
+    mlx::ops::indexing::slice_strided_on(
+        hidden,
+        &[0_i32, position, 0][..],
+        &[dims[0], position + 1, dims[2]][..],
         &[1_i32, 1, 1][..],
         target,
     )
@@ -1670,6 +1934,32 @@ fn retain_context_tail(
         &combined,
         &[0_i32, len - limit, 0][..],
         &[1_i32, len, hidden][..],
+        &[1_i32, 1, 1][..],
+        target,
+    )
+    .map_err(Into::into)
+}
+
+fn retain_context_tail_batched(
+    previous: Option<&Array>,
+    next: &Array,
+    limit: i32,
+    target: StreamOrDevice,
+) -> Result<Array> {
+    let combined = match previous {
+        Some(previous) => mlx::ops::shape::concatenate_on(&[previous, next], 1, target)?,
+        None => next.clone(),
+    };
+    let len = sequence_len_batched(&combined)?;
+    if len <= limit {
+        return Ok(combined);
+    }
+    let shape = combined.shape();
+    let dims = shape.as_slice();
+    mlx::ops::indexing::slice_strided_on(
+        &combined,
+        &[0_i32, len - limit, 0][..],
+        &[dims[0], len, dims[2]][..],
         &[1_i32, 1, 1][..],
         target,
     )
@@ -1736,6 +2026,260 @@ mod tests {
     use super::*;
     use crate::core::constrained::ConstraintTokenizer;
     use serial_test::serial;
+
+    fn assert_array_exact(label: &str, expected: &Array, actual: &Array) {
+        assert_eq!(expected.shape(), actual.shape(), "{label} shape");
+        let expected = mlx::ops::cast::astype(expected, mlx::Dtype::Float32)
+            .expect("cast expected")
+            .to_vec::<f32>()
+            .expect("read expected");
+        let actual = mlx::ops::cast::astype(actual, mlx::Dtype::Float32)
+            .expect("cast actual")
+            .to_vec::<f32>()
+            .expect("read actual");
+        if expected != actual {
+            let mut mismatch_count = 0_usize;
+            let mut first_mismatch = None;
+            let mut max_abs_diff = 0.0_f32;
+            for (index, (&left, &right)) in expected.iter().zip(&actual).enumerate() {
+                if left != right {
+                    mismatch_count += 1;
+                    first_mismatch.get_or_insert((index, left, right));
+                    max_abs_diff = max_abs_diff.max((left - right).abs());
+                }
+            }
+            panic!(
+                "{label}: mismatch_count={mismatch_count} first={first_mismatch:?} max_abs_diff={max_abs_diff}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "loads the full local Qwen3.8 target and DFlash2 draft checkpoints"]
+    #[serial(mlx_metal)]
+    fn qwen38_dflash2_batched_prefill_matches_scheduler_b1_exactly() {
+        use crate::core::sampler::Sampler;
+        use crate::core::{Loader, Tokenizer};
+        use crate::models::dflash2::DFlash2DraftModel;
+        use crate::models::Qwen35Model;
+
+        let target_dir = std::env::var("QWEN38_MODEL").expect("QWEN38_MODEL not set");
+        let draft_dir = std::env::var("DFLASH2_MODEL").expect("DFLASH2_MODEL not set");
+        let mut target_loader = Loader::open(std::path::Path::new(&target_dir))
+            .expect("open Qwen3.8 target checkpoint");
+        let tokenizer = Tokenizer::from_loader(&target_loader).expect("load tokenizer");
+        let target =
+            Qwen35Model::from_loader_dflash2(&mut target_loader).expect("load DFlash2 target");
+        let draft_loader = Loader::open_dflash2(std::path::Path::new(&draft_dir))
+            .expect("open DFlash2 draft checkpoint");
+        let draft = DFlash2DraftModel::from_loader(&draft_loader, target.config(), Some(4))
+            .expect("load runtime-quantized DFlash2 draft");
+        let request = |prompt_ids: Vec<u32>| GenerateRequest {
+            prompt_ids,
+            max_new_tokens: 256,
+            sampler: Sampler::greedy(),
+            stop_token_ids: Vec::new(),
+            prefill_chunk_size: 0,
+            decode_cadence_mid_chunk_cap: 1,
+            kv_cache_turboquant_bits: None,
+            pixel_values: None,
+            image_grid_thw: None,
+            image_spatial_merge_size: 2,
+            image_token_id: 248_056,
+            constraint: None,
+        };
+        let requests = vec![
+            request(vec![151_644, 872, 198, 3_838]),
+            request(vec![151_644, 872, 198, 10_264]),
+        ];
+        let mut references = requests
+            .iter()
+            .cloned()
+            .map(|request| {
+                DFlash2TextGenerationStream::new_scheduler_b1_text_only_with_cancellation(
+                    &target,
+                    &draft,
+                    &tokenizer,
+                    request,
+                    4,
+                    None,
+                    &|| false,
+                )
+                .expect("B1 DFlash2 prefill")
+            })
+            .collect::<Vec<_>>();
+        let mut batched =
+            DFlash2TextGenerationStream::new_scheduler_bn_text_only_with_cancellation(
+                &target,
+                &draft,
+                &tokenizer,
+                requests,
+                4,
+                &|_| false,
+            )
+            .expect("batched DFlash2 prefill");
+        eprintln!(
+            "dflash2_prefill_timing b1_row_us={:?} batched_us={}",
+            references
+                .iter()
+                .map(|stream| stream.prefill_us)
+                .collect::<Vec<_>>(),
+            batched[0].prefill_us
+        );
+
+        for row in 0..2 {
+            assert_eq!(
+                references[row].history, batched[row].history,
+                "row {row} history"
+            );
+            assert_array_exact(
+                &format!("row {row} retained target context"),
+                &references[row].pending_context_hidden,
+                &batched[row].pending_context_hidden,
+            );
+        }
+        for step in 0..256 {
+            for row in 0..2 {
+                let expected = references[row]
+                    .next_token()
+                    .expect("B1 token")
+                    .map(|event| (event.token, event.finish_reason));
+                let actual = batched[row]
+                    .next_token()
+                    .expect("batched-prefill token")
+                    .map(|event| (event.token, event.finish_reason));
+                assert_eq!(expected, actual, "row {row} step {step}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "loads the full local Qwen3.8 target and DFlash2 draft checkpoints"]
+    #[serial(mlx_metal)]
+    fn qwen38_dflash2_b4_windows_match_scheduler_b1_exactly() {
+        use crate::core::sampler::Sampler;
+        use crate::core::{Loader, Message, Tokenizer};
+        use crate::models::dflash2::DFlash2DraftModel;
+        use crate::models::Qwen35Model;
+
+        let target_dir = std::env::var("QWEN38_MODEL").expect("QWEN38_MODEL not set");
+        let draft_dir = std::env::var("DFLASH2_MODEL").expect("DFLASH2_MODEL not set");
+        let mut target_loader = Loader::open(std::path::Path::new(&target_dir))
+            .expect("open Qwen3.8 target checkpoint");
+        let tokenizer = Tokenizer::from_loader(&target_loader).expect("load tokenizer");
+        let target =
+            Qwen35Model::from_loader_dflash2(&mut target_loader).expect("load DFlash2 target");
+        let draft_loader = Loader::open_dflash2(std::path::Path::new(&draft_dir))
+            .expect("open DFlash2 draft checkpoint");
+        let draft = DFlash2DraftModel::from_loader(&draft_loader, target.config(), Some(4))
+            .expect("load runtime-quantized DFlash2 draft");
+        let prompt = tokenizer
+            .apply_chat_template(
+                &[Message {
+                    role: "user".to_owned(),
+                    content: "Use Rust language to write a function for computing the nth Fibonacci number. Explain overflow handling and include tests for n = 0, 1, 10, and 93."
+                        .to_owned(),
+                }],
+                true,
+                Some(&serde_json::json!({"enable_thinking": false})),
+            )
+            .expect("render benchmark chat prompt");
+        let prompt_ids = tokenizer
+            .encode(&prompt, false)
+            .expect("encode benchmark chat prompt");
+        eprintln!("dflash2_b4_exact_prompt_tokens={}", prompt_ids.len());
+        for (case, max_new_tokens, sampler) in [
+            ("greedy", 64, Sampler::greedy()),
+            (
+                "sampled",
+                256,
+                Sampler::greedy()
+                    .with_temperature(0.7)
+                    .with_top_p(0.9)
+                    .with_seed(20_260_824),
+            ),
+        ] {
+            let request = GenerateRequest {
+                prompt_ids: prompt_ids.clone(),
+                max_new_tokens,
+                sampler,
+                stop_token_ids: tokenizer.eos_token_ids().to_vec(),
+                prefill_chunk_size: 0,
+                decode_cadence_mid_chunk_cap: 1,
+                kv_cache_turboquant_bits: None,
+                pixel_values: None,
+                image_grid_thw: None,
+                image_spatial_merge_size: 2,
+                image_token_id: 248_056,
+                constraint: None,
+            };
+            let mut reference =
+                DFlash2TextGenerationStream::new_scheduler_b1_text_only_with_cancellation(
+                    &target,
+                    &draft,
+                    &tokenizer,
+                    request.clone(),
+                    3,
+                    None,
+                    &|| false,
+                )
+                .expect("B1 DFlash2 stream");
+            let mut batched =
+                DFlash2TextGenerationStream::new_scheduler_bn_text_only_with_cancellation(
+                    &target,
+                    &draft,
+                    &tokenizer,
+                    vec![request; 4],
+                    3,
+                    &|_| false,
+                )
+                .expect("B4 DFlash2 streams");
+            let mut tensor_cache = None;
+
+            for (row, stream) in batched.iter().enumerate() {
+                assert_array_exact(
+                    &format!("{case} B4 row {row} prefill context"),
+                    &reference.pending_context_hidden,
+                    &stream.pending_context_hidden,
+                );
+            }
+
+            for step in 0..max_new_tokens {
+                let expected = reference
+                    .next_token()
+                    .expect("B1 token")
+                    .map(|event| (event.token, event.finish_reason));
+                for (row, stream) in batched.iter_mut().enumerate() {
+                    let actual = stream
+                        .next_token_deferred()
+                        .expect("B4 token")
+                        .map(|event| (event.token, event.finish_reason));
+                    assert_eq!(expected, actual, "{case} row {row} step {step}");
+                }
+                if expected
+                    .as_ref()
+                    .is_some_and(|(_, finish_reason)| finish_reason.is_none())
+                    && batched
+                        .iter()
+                        .all(|stream| stream.tensor_batch_key().expect("batch key").is_some())
+                {
+                    let mut rows = batched.iter_mut().collect::<Vec<_>>();
+                    tensor_cache = DFlash2TextGenerationStream::fill_deferred_window_bn(
+                        &mut rows,
+                        tensor_cache.take(),
+                    )
+                    .expect("B4 tensor window");
+                    for (row, stream) in batched.iter().enumerate() {
+                        assert_array_exact(
+                            &format!("{case} B4 row {row} step {step} aligned context"),
+                            &reference.pending_context_hidden,
+                            &stream.pending_context_hidden,
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     fn test_prefix_artifact(
         token_ids: &[u32],

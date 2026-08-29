@@ -81,7 +81,13 @@ impl DFlash2CandidateSelector {
             target,
         )?;
         let unary = mlx::ops::indexing::take_along_axis_on(logits, &candidates, -1, target)?;
-        let hidden = self.hidden_projection.forward_on(hidden, target)?;
+        // Keep selector edge scores independent of the number of active rows.
+        // This projection is small relative to the target LM head, while its
+        // rounding can change the selected draft path and acceptance rate.
+        let hidden = {
+            let _product_stable_qmm = crate::nn::product_stable_qmm::scope();
+            self.hidden_projection.forward_on(hidden, target)?
+        };
         let mut predecessor = anchor_ids.reshape_on((batch,), target)?;
         let mut path = Vec::with_capacity(length as usize);
         for position in 0..length {

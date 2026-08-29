@@ -2,7 +2,7 @@
 //!
 //! Run with:
 //! ```text
-//! QWEN38_MODEL=/path/to/Qwen3.8-27B-4bit \
+//! QWEN38_MODEL=/path/to/Qwen3.8-27B-8bit \
 //!   cargo test --release -p ironmlx --test qwen38_reasoning_http \
 //!   -- --ignored --test-threads=1
 //! ```
@@ -10,23 +10,23 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use base64::Engine;
 use ironmlx::core::cache::ActiveKvOffloadConfig;
 use ironmlx::core::scheduler_autotune::{
     SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeProfile,
     SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
 };
 use ironmlx::core::server;
-use ironmlx::core::{Loader, Tokenizer};
+use ironmlx::core::{Loader, QuantMode, Tokenizer};
 use ironmlx::models::Qwen35Model;
 
-const MODEL_ID: &str = "Qwen3.8-27B-4bit";
 const MAX_CACHE_CAP: usize = 4096;
 const EFFORTS: [&str; 7] = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
-fn scheduler_profile() -> SchedulerAutotuneRuntimeProfile {
+fn scheduler_profile(model_id: &str) -> SchedulerAutotuneRuntimeProfile {
     SchedulerAutotuneRuntimeProfile {
         schema_version: SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
-        model_name: MODEL_ID.to_owned(),
+        model_name: model_id.to_owned(),
         hardware_label: "qwen38-reasoning-http-test".to_owned(),
         runtime_context:
             ironmlx::core::scheduler_autotune::SchedulerAutotuneRuntimeContext::local_default(
@@ -57,18 +57,28 @@ async fn alloc_port() -> u16 {
     port
 }
 
-async fn boot_server(port: u16) -> tokio::task::JoinHandle<anyhow::Result<()>> {
+async fn boot_server(port: u16) -> (tokio::task::JoinHandle<anyhow::Result<()>>, String) {
     let model_dir = PathBuf::from(
         std::env::var("QWEN38_MODEL").expect("QWEN38_MODEL must point to a real checkpoint"),
     );
-    let loader = Loader::open(&model_dir).expect("Loader::open");
+    let loader = Loader::open_multimodal(&model_dir).expect("Loader::open_multimodal");
+    let quantization = loader.quant_meta().expect("Qwen3.8 quantization metadata");
+    assert_eq!(quantization.mode, QuantMode::Affine);
+    assert_eq!(quantization.group_size, 64);
+    assert!(
+        matches!(quantization.bits, 4 | 8),
+        "QWEN38_MODEL must point to the affine 4-bit or 8-bit checkpoint"
+    );
+    let model_id = format!("mlx-community/Qwen3.8-27B-{}bit", quantization.bits);
     let tokenizer = Tokenizer::from_loader(&loader).expect("Tokenizer::from_loader");
     let model = Qwen35Model::from_loader(&loader).expect("Qwen35Model::from_loader");
-    tokio::spawn(async move {
+    let served_model_id = model_id.clone();
+    let profile = scheduler_profile(&model_id);
+    let server = tokio::spawn(async move {
         server::serve(
             model,
             tokenizer,
-            MODEL_ID.to_owned(),
+            served_model_id,
             server::security::ServerNetworkConfig::local("127.0.0.1", port)?,
             2048,
             1,
@@ -80,14 +90,15 @@ async fn boot_server(port: u16) -> tokio::task::JoinHandle<anyhow::Result<()>> {
             None,
             None,
             ActiveKvOffloadConfig::disabled(),
-            scheduler_profile(),
+            profile,
             false,
             None,
             Default::default(),
             false,
         )
         .await
-    })
+    });
+    (server, model_id)
 }
 
 async fn wait_until_healthy(client: &reqwest::Client, port: u16) {
@@ -105,9 +116,9 @@ async fn wait_until_healthy(client: &reqwest::Client, port: u16) {
     panic!("server did not become healthy");
 }
 
-fn request(effort: Option<&str>, stream: bool) -> serde_json::Value {
+fn request(model_id: &str, effort: Option<&str>, stream: bool) -> serde_json::Value {
     let mut body = serde_json::json!({
-        "model": MODEL_ID,
+        "model": model_id,
         "input": "用一句话回答：1+1等于几？推理尽量简短。",
         "store": false,
         "max_output_tokens": 256,
@@ -182,11 +193,12 @@ fn assert_completed_response(
 async fn send_sync(
     client: &reqwest::Client,
     endpoint: &str,
+    model_id: &str,
     effort: Option<&str>,
 ) -> serde_json::Value {
     let response = client
         .post(endpoint)
-        .json(&request(effort, false))
+        .json(&request(model_id, effort, false))
         .send()
         .await
         .unwrap_or_else(|error| panic!("send sync effort {effort:?}: {error:#}"));
@@ -207,11 +219,12 @@ fn sse_events(body: &str) -> Vec<serde_json::Value> {
 async fn send_stream(
     client: &reqwest::Client,
     endpoint: &str,
+    model_id: &str,
     effort: Option<&str>,
 ) -> serde_json::Value {
     let response = client
         .post(endpoint)
-        .json(&request(effort, true))
+        .json(&request(model_id, effort, true))
         .send()
         .await
         .unwrap_or_else(|error| panic!("send SSE effort {effort:?}: {error:#}"));
@@ -240,11 +253,174 @@ async fn send_stream(
         .clone()
 }
 
+async fn post_json(
+    client: &reqwest::Client,
+    endpoint: &str,
+    body: serde_json::Value,
+    context: &str,
+) -> serde_json::Value {
+    let response = client
+        .post(endpoint)
+        .json(&body)
+        .send()
+        .await
+        .unwrap_or_else(|error| panic!("{context}: {error:#}"));
+    let status = response.status();
+    let text = response
+        .text()
+        .await
+        .unwrap_or_else(|error| panic!("{context} response body: {error:#}"));
+    assert_eq!(status, 200, "{context}: {text}");
+    serde_json::from_str(&text).unwrap_or_else(|error| panic!("{context} JSON: {error:#}\n{text}"))
+}
+
+async fn assert_structured_output(client: &reqwest::Client, endpoint: &str, model_id: &str) {
+    let response = post_json(
+        client,
+        endpoint,
+        serde_json::json!({
+            "model": model_id,
+            "input": "Return a JSON object whose answer is the integer result of 1+1.",
+            "reasoning": {"effort": "none", "summary": "none"},
+            "text": {"format": {
+                "type": "json_schema",
+                "name": "arithmetic_answer",
+                "schema": {
+                    "type": "object",
+                    "properties": {"answer": {"type": "integer"}},
+                    "required": ["answer"],
+                    "additionalProperties": false
+                },
+                "strict": true
+            }},
+            "store": false,
+            "max_output_tokens": 64,
+            "temperature": 0,
+            "stream": false
+        }),
+        "structured output",
+    )
+    .await;
+    let text = output_text(&response).expect("structured output text");
+    let value: serde_json::Value = serde_json::from_str(text).expect("structured output JSON");
+    assert!(value["answer"].is_i64(), "structured output: {value}");
+}
+
+async fn assert_tool_round_trip(client: &reqwest::Client, endpoint: &str, model_id: &str) {
+    let tools = serde_json::json!([{
+        "type": "function",
+        "name": "weather",
+        "description": "Return the weather for a city.",
+        "parameters": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"],
+            "additionalProperties": false
+        },
+        "strict": true
+    }]);
+    let first = post_json(
+        client,
+        endpoint,
+        serde_json::json!({
+            "model": model_id,
+            "input": "Call the weather tool for Tokyo.",
+            "tools": tools.clone(),
+            "tool_choice": {"type": "function", "name": "weather"},
+            "parallel_tool_calls": false,
+            "reasoning": {"effort": "none", "summary": "none"},
+            "store": false,
+            "max_output_tokens": 128,
+            "temperature": 0,
+            "stream": false
+        }),
+        "tool call",
+    )
+    .await;
+    let call = first["output"]
+        .as_array()
+        .expect("tool output items")
+        .iter()
+        .find(|item| item["type"] == "function_call")
+        .expect("function_call output");
+    assert_eq!(call["name"], "weather");
+    let arguments: serde_json::Value = serde_json::from_str(
+        call["arguments"]
+            .as_str()
+            .expect("function_call arguments string"),
+    )
+    .expect("function_call arguments JSON");
+    assert!(arguments["city"].is_string(), "tool arguments: {arguments}");
+    let call_id = call["call_id"].as_str().expect("function_call call_id");
+
+    let second = post_json(
+        client,
+        endpoint,
+        serde_json::json!({
+            "model": model_id,
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Call the weather tool for Tokyo."}]},
+                call.clone(),
+                {"type": "function_call_output", "call_id": call_id, "output": "22 C and sunny"}
+            ],
+            "tools": tools,
+            "tool_choice": "none",
+            "parallel_tool_calls": false,
+            "reasoning": {"effort": "none", "summary": "none"},
+            "store": false,
+            "max_output_tokens": 128,
+            "temperature": 0,
+            "stream": false
+        }),
+        "tool result round trip",
+    )
+    .await;
+    assert!(
+        output_text(&second).is_some_and(|text| !text.trim().is_empty()),
+        "missing tool-result answer: {second:#}"
+    );
+}
+
+async fn assert_image_input(client: &reqwest::Client, endpoint: &str, model_id: &str) {
+    let image_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/p6_qwen35_vl/coco_sample.jpg");
+    let image = std::fs::read(&image_path).expect("read COCO image fixture");
+    let image_url = format!(
+        "data:image/jpeg;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(image)
+    );
+    let response = post_json(
+        client,
+        endpoint,
+        serde_json::json!({
+            "model": model_id,
+            "input": [{
+                "role": "user",
+                "content": [
+                    {"type": "input_image", "image_url": image_url, "detail": "auto"},
+                    {"type": "input_text", "text": "Describe this image in one short sentence."}
+                ]
+            }],
+            "reasoning": {"effort": "none", "summary": "none"},
+            "store": false,
+            "max_output_tokens": 64,
+            "temperature": 0,
+            "stream": false
+        }),
+        "image input",
+    )
+    .await;
+    assert!(
+        output_text(&response).is_some_and(|text| !text.trim().is_empty()),
+        "missing image answer: {response:#}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires QWEN38_MODEL pointing to mlx-community/Qwen3.8-27B-4bit"]
+#[ignore = "requires QWEN38_MODEL pointing to mlx-community/Qwen3.8-27B-4bit or Qwen3.8-27B-8bit"]
 async fn qwen38_all_reasoning_efforts_real_http_acceptance() {
     let port = alloc_port().await;
-    let server = boot_server(port).await;
+    let (server, model_id) = boot_server(port).await;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(180))
         .no_proxy()
@@ -253,22 +429,22 @@ async fn qwen38_all_reasoning_efforts_real_http_acceptance() {
     wait_until_healthy(&client, port).await;
     let endpoint = format!("http://127.0.0.1:{port}/v1/responses");
 
-    let default = send_sync(&client, &endpoint, None).await;
+    let default = send_sync(&client, &endpoint, &model_id, None).await;
     assert_completed_response(&default, None, false);
 
     let mut medium = None;
     for effort in EFFORTS {
-        let response = send_sync(&client, &endpoint, Some(effort)).await;
+        let response = send_sync(&client, &endpoint, &model_id, Some(effort)).await;
         assert_completed_response(&response, Some(effort), effort != "none");
         if effort == "medium" {
             medium = Some(response);
         }
     }
 
-    let default = send_stream(&client, &endpoint, None).await;
+    let default = send_stream(&client, &endpoint, &model_id, None).await;
     assert_completed_response(&default, None, false);
     for effort in EFFORTS {
-        let response = send_stream(&client, &endpoint, Some(effort)).await;
+        let response = send_stream(&client, &endpoint, &model_id, Some(effort)).await;
         assert_completed_response(&response, Some(effort), effort != "none");
     }
 
@@ -292,7 +468,7 @@ async fn qwen38_all_reasoning_efforts_real_http_acceptance() {
     let response = client
         .post(&endpoint)
         .json(&serde_json::json!({
-            "model": MODEL_ID,
+            "model": &model_id,
             "input": history,
             "reasoning": {"effort": "medium", "summary": "none"},
             "store": false,
@@ -309,6 +485,10 @@ async fn qwen38_all_reasoning_efforts_real_http_acceptance() {
     let response: serde_json::Value =
         serde_json::from_str(&text).expect("reasoning history response JSON");
     assert_completed_response(&response, Some("medium"), true);
+
+    assert_structured_output(&client, &endpoint, &model_id).await;
+    assert_tool_round_trip(&client, &endpoint, &model_id).await;
+    assert_image_input(&client, &endpoint, &model_id).await;
 
     server.abort();
     let _ = server.await;

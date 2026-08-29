@@ -227,9 +227,9 @@ impl Linear {
     }
 
     /// Fuse output rows from matching quantized projections without retaining
-    /// duplicate weights. Each output row keeps the same affine-4 dot-product
-    /// accumulation tree; callers split the fused result on the original row
-    /// boundaries.
+    /// duplicate weights. Each output row keeps the same affine-4 or affine-8
+    /// dot-product accumulation tree; callers split the fused result on the
+    /// original row boundaries.
     pub(crate) fn fuse_quantized_outputs(projections: &[&Linear], context: &str) -> Result<Self> {
         let first = projections
             .first()
@@ -237,8 +237,10 @@ impl Linear {
         let first_parts = first
             .quantized_parts()
             .ok_or_else(|| anyhow!("{context} requires quantized projections"))?;
-        if first_parts.mode != QuantMode::Affine || first_parts.bits != 4 {
-            return Err(anyhow!("{context} requires affine 4-bit projections"));
+        if first_parts.mode != QuantMode::Affine || !matches!(first_parts.bits, 4 | 8) {
+            return Err(anyhow!(
+                "{context} requires affine 4-bit or 8-bit projections"
+            ));
         }
         let mut parts = Vec::with_capacity(projections.len());
         for projection in projections {
@@ -392,6 +394,15 @@ impl Linear {
     /// Stream-targeted forward pass.
     pub fn forward_on(&self, x: &Array, target: impl Into<StreamOrDevice>) -> Result<Array> {
         let target = target.into();
+        if super::position_stable_qmm::exact_affine8_b4_q2_is_armed() {
+            if let Some(parts) = self.quantized_parts() {
+                if let Some(output) =
+                    super::verify_qmm::forward_affine8_b4_q2_exact_on(x, parts, target)?
+                {
+                    return Ok(output);
+                }
+            }
+        }
         if super::position_stable_linear::is_armed()
             && x.ndim() == 3
             && x.shape().as_slice()[1] > 1
@@ -438,14 +449,14 @@ impl Linear {
                     && matches!(*bits, 4 | 5 | 6 | 8)
                     && *mode == QuantMode::Affine;
                 let mut y = if product_stable {
-                    mlx::quantization::quantized_matmul_product_stable_on(
+                    super::product_stable_qmm::forward_on(
                         x,
                         weight,
                         scales,
                         biases.as_ref(),
                         true,
-                        Some(*group_size),
-                        Some(*bits),
+                        *group_size,
+                        *bits,
                         mode.mlx_backend_mode(),
                         target,
                     )?
@@ -535,34 +546,70 @@ impl Linear {
         else {
             return self.forward_on(x, target);
         };
+        if batch == 4 && sequence == 2 && super::position_stable_qmm::exact_affine8_b4_q2_is_armed()
+        {
+            let parts = QuantizedLinearParts {
+                weight,
+                scales,
+                biases: biases.as_ref(),
+                bias: bias.as_ref(),
+                group_size: *group_size,
+                bits: *bits,
+                mode: *mode,
+            };
+            if let Some(output) =
+                super::verify_qmm::forward_affine8_b4_q2_exact_on(x, parts, target)?
+            {
+                return Ok(output);
+            }
+        }
         let product_stable =
             batch == 1 && matches!(*bits, 4 | 5 | 6 | 8) && *mode == QuantMode::Affine;
         let mut output = if product_stable {
-            mlx::quantization::quantized_matmul_product_stable_on(
+            super::product_stable_qmm::forward_on(
                 x,
                 weight,
                 scales,
                 biases.as_ref(),
                 true,
-                Some(*group_size),
-                Some(*bits),
+                *group_size,
+                *bits,
                 mode.mlx_backend_mode(),
                 target,
             )?
         } else {
-            let isolated = x.transpose_axes_on(&[1_i32, 0, 2][..], target)?;
-            let output = mlx::quantization::quantized_matmul_batch_isolated_on(
-                &isolated,
-                weight,
-                scales,
-                biases.as_ref(),
-                true,
-                Some(*group_size),
-                Some(*bits),
-                mode.mlx_backend_mode(),
-                target,
-            )?;
-            output.transpose_axes_on(&[1_i32, 0, 2][..], target)?
+            // Affine8 B2/Q2 produces the same per-position morphology through
+            // MLX's native flattened qmv-wide route as the transposed
+            // batch-isolated route, while reusing each weight tile across all
+            // four vectors. Keep every other qualified shape fail-closed on
+            // the established isolated path.
+            if batch == 2 && sequence == 2 && *bits == 8 && *mode == QuantMode::Affine {
+                mlx::quantization::quantized_matmul_on(
+                    x,
+                    weight,
+                    scales,
+                    biases.as_ref(),
+                    true,
+                    Some(*group_size),
+                    Some(*bits),
+                    mode.mlx_backend_mode(),
+                    target,
+                )?
+            } else {
+                let isolated = x.transpose_axes_on(&[1_i32, 0, 2][..], target)?;
+                let output = mlx::quantization::quantized_matmul_batch_isolated_on(
+                    &isolated,
+                    weight,
+                    scales,
+                    biases.as_ref(),
+                    true,
+                    Some(*group_size),
+                    Some(*bits),
+                    mode.mlx_backend_mode(),
+                    target,
+                )?;
+                output.transpose_axes_on(&[1_i32, 0, 2][..], target)?
+            }
         };
         if let Some(bias) = bias {
             output = &output + bias;
@@ -735,101 +782,108 @@ mod tests {
 
     #[test]
     #[serial(mlx_metal)]
-    fn fused_affine4_outputs_match_separate_product_stable_projections_exactly() {
-        fn make_projection(out: i32, offset: i32) -> Linear {
+    fn fused_affine4_and_affine8_outputs_match_separate_product_stable_projections_exactly() {
+        fn make_projection(out: i32, offset: i32, bits: i32) -> Linear {
             let input = 64_i32;
             let raw = (0..out * input)
                 .map(|index| (((index + offset) % 31) as f32 - 15.0) * 0.0125)
                 .collect::<Vec<_>>();
             let raw: Array = (raw.as_slice(), &[out, input][..]).try_into().unwrap();
             let raw = mlx::ops::cast::astype(&raw, mlx::Dtype::Bfloat16).unwrap();
-            let quantized = mlx::quantization::quantize(&raw, Some(64), Some(4), "affine", None)
-                .expect("quantize affine4 projection");
+            let quantized = mlx::quantization::quantize(&raw, Some(64), Some(bits), "affine", None)
+                .expect("quantize affine projection");
             Linear::new_quant(
                 quantized[0].clone(),
                 quantized[1].clone(),
                 Some(quantized[2].clone()),
                 None,
                 64,
-                4,
+                bits,
             )
         }
 
-        let first = make_projection(16, 0);
-        let second = make_projection(8, 7);
-        let fused =
-            Linear::fuse_quantized_outputs(&[&first, &second], "test fused affine4 projections")
-                .expect("fuse projections");
-        let input = (0..4 * 64)
-            .map(|index| ((index % 23) as f32 - 11.0) * 0.02)
-            .collect::<Vec<_>>();
-        let input: Array = (input.as_slice(), &[1_i32, 4, 64][..]).try_into().unwrap();
-        let input = mlx::ops::cast::astype(&input, mlx::Dtype::Bfloat16).unwrap();
+        for bits in [4, 8] {
+            let first = make_projection(16, 0, bits);
+            let second = make_projection(8, 7, bits);
+            let fused =
+                Linear::fuse_quantized_outputs(&[&first, &second], "test fused affine projections")
+                    .expect("fuse projections");
+            let input = (0..4 * 64)
+                .map(|index| ((index % 23) as f32 - 11.0) * 0.02)
+                .collect::<Vec<_>>();
+            let input: Array = (input.as_slice(), &[1_i32, 4, 64][..]).try_into().unwrap();
+            let input = mlx::ops::cast::astype(&input, mlx::Dtype::Bfloat16).unwrap();
 
-        let _scope = crate::nn::product_stable_qmm::scope();
-        let first_output = first.forward(&input).expect("first projection");
-        let second_output = second.forward(&input).expect("second projection");
-        let expected = mlx::ops::shape::concatenate(&[&first_output, &second_output], -1).unwrap();
-        let actual = fused.forward(&input).expect("fused projection");
-        let expected = mlx::ops::cast::astype(&expected, mlx::Dtype::Float32).unwrap();
-        let actual = mlx::ops::cast::astype(&actual, mlx::Dtype::Float32).unwrap();
+            let _scope = crate::nn::product_stable_qmm::scope();
+            let first_output = first.forward(&input).expect("first projection");
+            let second_output = second.forward(&input).expect("second projection");
+            let expected =
+                mlx::ops::shape::concatenate(&[&first_output, &second_output], -1).unwrap();
+            let actual = fused.forward(&input).expect("fused projection");
+            let expected = mlx::ops::cast::astype(&expected, mlx::Dtype::Float32).unwrap();
+            let actual = mlx::ops::cast::astype(&actual, mlx::Dtype::Float32).unwrap();
 
-        assert_eq!(actual.shape().as_slice(), &[1, 4, 24]);
-        assert_eq!(
-            expected.to_vec::<f32>().unwrap(),
-            actual.to_vec::<f32>().unwrap()
-        );
+            assert_eq!(actual.shape().as_slice(), &[1, 4, 24]);
+            assert_eq!(
+                expected.to_vec::<f32>().unwrap(),
+                actual.to_vec::<f32>().unwrap(),
+                "affine{bits} fused projection diverged"
+            );
+        }
     }
 
     #[test]
     #[serial(mlx_metal)]
     fn split_quantized_outputs_are_safe_to_use_on_an_actor_thread() {
-        fn make_projection(out: i32, offset: i32) -> Linear {
+        fn make_projection(out: i32, offset: i32, bits: i32) -> Linear {
             let input = 64_i32;
             let raw = (0..out * input)
                 .map(|index| (((index + offset) % 31) as f32 - 15.0) * 0.0125)
                 .collect::<Vec<_>>();
             let raw: Array = (raw.as_slice(), &[out, input][..]).try_into().unwrap();
             let raw = mlx::ops::cast::astype(&raw, mlx::Dtype::Bfloat16).unwrap();
-            let quantized = mlx::quantization::quantize(&raw, Some(64), Some(4), "affine", None)
-                .expect("quantize affine4 projection");
+            let quantized = mlx::quantization::quantize(&raw, Some(64), Some(bits), "affine", None)
+                .expect("quantize affine projection");
             Linear::new_quant(
                 quantized[0].clone(),
                 quantized[1].clone(),
                 Some(quantized[2].clone()),
                 None,
                 64,
-                4,
+                bits,
             )
         }
 
-        let first = make_projection(16, 0);
-        let second = make_projection(8, 7);
-        let fused = Linear::fuse_quantized_outputs(&[&first, &second], "actor-thread split test")
-            .expect("fuse projections");
-        let mut split = fused
-            .split_quantized_outputs(&[16, 8], "actor-thread split test")
-            .expect("split projections");
-        let projection = split.remove(0);
+        for bits in [4, 8] {
+            let first = make_projection(16, 0, bits);
+            let second = make_projection(8, 7, bits);
+            let fused =
+                Linear::fuse_quantized_outputs(&[&first, &second], "actor-thread split test")
+                    .expect("fuse projections");
+            let mut split = fused
+                .split_quantized_outputs(&[16, 8], "actor-thread split test")
+                .expect("split projections");
+            let projection = split.remove(0);
 
-        let output = std::thread::spawn(move || {
-            let input = (0..64)
-                .map(|index| ((index % 23) as f32 - 11.0) * 0.02)
-                .collect::<Vec<_>>();
-            let input: Array = (input.as_slice(), &[1_i32, 1, 64][..]).try_into().unwrap();
-            let input = mlx::ops::cast::astype(&input, mlx::Dtype::Bfloat16).unwrap();
-            projection
-                .forward(&input)
-                .and_then(|output| {
-                    mlx::ops::cast::astype(&output, mlx::Dtype::Float32).map_err(Into::into)
-                })
-                .and_then(|output| output.to_vec::<f32>().map_err(Into::into))
-        })
-        .join()
-        .expect("actor thread must not panic")
-        .expect("split projection must execute on actor thread");
+            let output = std::thread::spawn(move || {
+                let input = (0..64)
+                    .map(|index| ((index % 23) as f32 - 11.0) * 0.02)
+                    .collect::<Vec<_>>();
+                let input: Array = (input.as_slice(), &[1_i32, 1, 64][..]).try_into().unwrap();
+                let input = mlx::ops::cast::astype(&input, mlx::Dtype::Bfloat16).unwrap();
+                projection
+                    .forward(&input)
+                    .and_then(|output| {
+                        mlx::ops::cast::astype(&output, mlx::Dtype::Float32).map_err(Into::into)
+                    })
+                    .and_then(|output| output.to_vec::<f32>().map_err(Into::into))
+            })
+            .join()
+            .expect("actor thread must not panic")
+            .expect("split projection must execute on actor thread");
 
-        assert_eq!(output.len(), 16);
+            assert_eq!(output.len(), 16, "affine{bits} actor-thread output");
+        }
     }
 
     #[test]
@@ -950,6 +1004,59 @@ mod tests {
 
     #[test]
     #[serial(mlx_metal)]
+    fn product_stable_affine8_q1_matches_single_row_shape() {
+        let out = 64_i32;
+        let in_dim = 128_i32;
+        let group_size = 64_i32;
+        let weight_data = (0..(out * in_dim))
+            .map(|idx| ((idx % 41) as f32 - 20.0) * 0.0125)
+            .collect::<Vec<_>>();
+        let input_data = (0..in_dim)
+            .map(|idx| ((idx % 31) as f32 - 15.0) * 0.02)
+            .collect::<Vec<_>>();
+        let weight: Array = (weight_data.as_slice(), &[out, in_dim][..])
+            .try_into()
+            .unwrap();
+        let input: Array = (input_data.as_slice(), &[1_i32, 1_i32, in_dim][..])
+            .try_into()
+            .unwrap();
+        let weight = mlx::ops::cast::astype(&weight, mlx::Dtype::Bfloat16).unwrap();
+        let input = mlx::ops::cast::astype(&input, mlx::Dtype::Bfloat16).unwrap();
+        let quantized =
+            mlx::quantization::quantize(&weight, Some(group_size), Some(8), "affine", None)
+                .unwrap();
+        let layer = Linear::new_quant(
+            quantized[0].clone(),
+            quantized[1].clone(),
+            Some(quantized[2].clone()),
+            None,
+            group_size,
+            8,
+        );
+        let expected = mlx::ops::cast::astype(&layer.forward(&input).unwrap(), mlx::Dtype::Float32)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+
+        for batch in [2_i32, 4] {
+            let rows = std::iter::repeat_n(&input, batch as usize).collect::<Vec<_>>();
+            let input = mlx::ops::shape::concatenate(&rows, 0).unwrap();
+            let actual = {
+                let _scope = crate::nn::product_stable_qmm::scope();
+                layer.forward(&input).unwrap()
+            };
+            let actual = mlx::ops::cast::astype(&actual, mlx::Dtype::Float32)
+                .unwrap()
+                .to_vec::<f32>()
+                .unwrap();
+            for row in actual.chunks_exact(expected.len()) {
+                assert_eq!(row, expected.as_slice(), "B{batch}");
+            }
+        }
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
     fn position_stable_quantized_forward_matches_sequential_q1_shapes() {
         let sequence = 5_i32;
         let out = 32_i32;
@@ -1018,6 +1125,61 @@ mod tests {
                 assert_eq!(actual, expected, "batch={batch} bits={bits}");
             }
         }
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn affine8_b2q2_native_matches_batch_isolated_exactly() {
+        let (batch, sequence, out, in_dim, group_size) = (2_i32, 2_i32, 256_i32, 512_i32, 64_i32);
+        let weight_data = (0..(out * in_dim))
+            .map(|idx| ((idx % 41) as f32 - 20.0) * 0.0125)
+            .collect::<Vec<_>>();
+        let input_data = (0..(batch * sequence * in_dim))
+            .map(|idx| ((idx % 31) as f32 - 15.0) * 0.02)
+            .collect::<Vec<_>>();
+        let weight: Array = (weight_data.as_slice(), &[out, in_dim][..])
+            .try_into()
+            .unwrap();
+        let input: Array = (input_data.as_slice(), &[batch, sequence, in_dim][..])
+            .try_into()
+            .unwrap();
+        let weight = mlx::ops::cast::astype(&weight, mlx::Dtype::Bfloat16).unwrap();
+        let input = mlx::ops::cast::astype(&input, mlx::Dtype::Bfloat16).unwrap();
+        let quantized =
+            mlx::quantization::quantize(&weight, Some(group_size), Some(8), "affine", None)
+                .unwrap();
+        let native = mlx::quantization::quantized_matmul(
+            &input,
+            &quantized[0],
+            &quantized[1],
+            Some(&quantized[2]),
+            true,
+            Some(group_size),
+            Some(8),
+            "affine",
+        )
+        .unwrap();
+        let isolated_input = input.transpose_axes(&[1_i32, 0, 2][..]).unwrap();
+        let isolated = mlx::quantization::quantized_matmul_batch_isolated(
+            &isolated_input,
+            &quantized[0],
+            &quantized[1],
+            Some(&quantized[2]),
+            true,
+            Some(group_size),
+            Some(8),
+            "affine",
+        )
+        .unwrap()
+        .transpose_axes(&[1_i32, 0, 2][..])
+        .unwrap();
+
+        let native = mlx::ops::cast::astype(&native, mlx::Dtype::Float32).unwrap();
+        let isolated = mlx::ops::cast::astype(&isolated, mlx::Dtype::Float32).unwrap();
+        assert_eq!(
+            native.to_vec::<f32>().unwrap(),
+            isolated.to_vec::<f32>().unwrap()
+        );
     }
 
     #[test]

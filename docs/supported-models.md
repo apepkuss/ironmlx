@@ -7,7 +7,7 @@
 | 模型族 | `model_type` | 文本 | 图片 | Responses/Messages reasoning | Chat/Responses/Messages tools | MTP/DFlash2/辅助 drafter | Prompt Lookup | KV cache |
 | --- | --- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | Qwen 3.5 Dense / 声明相同类型的 Qwen 3.6 Dense | `qwen3_5` | 是 | 否 | 是，需原生 `<think>` 模板 | 是，需原生工具模板 | 是 | 是 | 是 |
-| Qwen 3.8 Dense（已验收 `mlx-community/Qwen3.8-27B-4bit`） | `qwen3_5` | 是 | 是（图片；不含视频） | 是，默认开启；支持 `low`/`medium`/`xhigh` | 是，需 Qwen3.8 原生工具模板 | 是，已验收 `Qwen3.8-27B-MTP-4bit` 与 `z-lab/Qwen3.8-27B-DFlash2`；DFlash2 仅文本 | 是 | 是 |
+| Qwen 3.8 Dense（已验收 `mlx-community/Qwen3.8-27B-4bit` 与 `mlx-community/Qwen3.8-27B-8bit`） | `qwen3_5` | 是 | 是（图片；不含视频） | 是，默认开启；支持 `none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max` | 是，需 Qwen3.8 原生工具模板 | 是，已验收匹配的 4-bit/8-bit MTP 与 `z-lab/Qwen3.8-27B-DFlash2`；DFlash2 支持 affine 4-bit/8-bit target，且仅文本 | 是 | 是 |
 | Qwen 3.5/3.6 MoE | `qwen3_5_moe` | 是 | 否 | 是，需原生 `<think>` 模板 | 是，需原生工具模板 | 是 | 是 | 是 |
 | Gemma 4 / Gemma 4 Unified | `gemma4`, `gemma4_unified` | 是 | checkpoint 含 `vision_config` 时支持 | 是，需原生 `thought` channel | 是，需原生工具模板 | 是 | 是 | 是 |
 | GLM-4 MoE Lite | `glm4_moe_lite` | 是 | 否 | 是，需原生 `<think>` 模板 | 是，需原生工具模板 | 否 | 是 | 是 |

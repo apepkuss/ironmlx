@@ -1,5 +1,6 @@
 //! Speculative decoding helpers shared by MTP generation paths.
 
+use std::cell::Cell;
 use std::collections::VecDeque;
 use std::time::Instant;
 
@@ -23,6 +24,32 @@ use crate::Result;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MtpSpeculativeConfig {
     pub max_draft_tokens: usize,
+}
+
+thread_local! {
+    static QWEN_FIXED_DRAFT_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Benchmark-only scope that freezes Qwen's adaptive MTP draft policy at the
+/// configured maximum depth. Production callers must retain the adaptive
+/// policy so an unprofitable drafter can fail closed to ordinary decode.
+#[doc(hidden)]
+pub struct QwenFixedMtpDraftDepthScope;
+
+impl Drop for QwenFixedMtpDraftDepthScope {
+    fn drop(&mut self) {
+        QWEN_FIXED_DRAFT_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+#[doc(hidden)]
+pub fn qwen_fixed_mtp_draft_depth_scope() -> QwenFixedMtpDraftDepthScope {
+    QWEN_FIXED_DRAFT_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
+    QwenFixedMtpDraftDepthScope
+}
+
+fn qwen_fixed_mtp_draft_depth_is_armed() -> bool {
+    QWEN_FIXED_DRAFT_DEPTH.with(|depth| depth.get() > 0)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -668,6 +695,44 @@ pub trait MtpSpeculativeModel: Model {
         Model::project_hidden_on(self, hidden, target.into())
     }
 
+    fn supports_mtp_accepted_prefix_restore(&self) -> bool {
+        false
+    }
+
+    fn supports_affine8_b4_mtp_exact_hot_path(
+        &self,
+        _batch_width: usize,
+        _verify_width: usize,
+    ) -> bool {
+        false
+    }
+
+    fn begin_mtp_accepted_prefix_capture(&self, _cache: &mut [LayerCache]) -> Result<()> {
+        Err(anyhow!(
+            "{} does not support MTP accepted-prefix capture",
+            std::any::type_name::<Self>()
+        ))
+    }
+
+    fn restore_mtp_accepted_prefix_rows_on(
+        &self,
+        _cache: &mut [LayerCache],
+        _snapshots: &[LayerCacheSnapshot],
+        _accepted_lens: &[usize],
+        _target: StreamOrDevice,
+    ) -> Result<()> {
+        Err(anyhow!(
+            "{} does not support MTP accepted-prefix restore",
+            std::any::type_name::<Self>()
+        ))
+    }
+
+    fn discard_mtp_accepted_prefix_capture(&self, cache: &mut [LayerCache]) {
+        for layer in cache {
+            layer.discard_speculative_prefix_capture();
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn mtp_forward_hidden_on(
         &self,
@@ -725,6 +790,40 @@ impl MtpSpeculativeModel for Qwen35Model {
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
         Qwen35Model::project_mtp_verify_hidden_on(self, hidden, target)
+    }
+
+    fn supports_mtp_accepted_prefix_restore(&self) -> bool {
+        true
+    }
+
+    fn supports_affine8_b4_mtp_exact_hot_path(
+        &self,
+        batch_width: usize,
+        verify_width: usize,
+    ) -> bool {
+        Qwen35Model::supports_affine8_b4_mtp_exact_hot_path(self, batch_width, verify_width)
+    }
+
+    fn begin_mtp_accepted_prefix_capture(&self, cache: &mut [LayerCache]) -> Result<()> {
+        for layer in cache {
+            layer.begin_speculative_prefix_capture()?;
+        }
+        Ok(())
+    }
+
+    fn restore_mtp_accepted_prefix_rows_on(
+        &self,
+        cache: &mut [LayerCache],
+        snapshots: &[LayerCacheSnapshot],
+        accepted_lens: &[usize],
+        target: StreamOrDevice,
+    ) -> Result<()> {
+        self.text().restore_dflash2_speculative_prefix_rows_on(
+            cache,
+            snapshots,
+            accepted_lens,
+            target,
+        )
     }
 
     fn mtp_hidden_size(&self, mtp: &Self::MtpHead) -> i32 {
@@ -2123,6 +2222,9 @@ impl QwenMtpDraftPolicyState {
     }
 
     pub(crate) fn observe_window(&mut self, window: MtpDraftPolicyWindow) -> MtpDraftBudgetChange {
+        if qwen_fixed_mtp_draft_depth_is_armed() {
+            return MtpDraftBudgetChange::default();
+        }
         let regime = window.regime();
         if self.active_regime != Some(regime) {
             self.active_regime = Some(regime);
@@ -4538,6 +4640,24 @@ mod tests {
         let second = policy.cost_estimate(regime, 0).unwrap();
         assert_eq!(second.samples, 2);
         assert_eq!(second.cost_ewma, 685.0);
+    }
+
+    #[test]
+    fn qwen_fixed_draft_depth_scope_disables_adaptation_only_while_armed() {
+        let mut policy = QwenMtpDraftPolicyState::new(2);
+        let mut rejected = policy_window(2, 1, 1_000);
+        rejected.accepted_draft_tokens = 0;
+
+        {
+            let _fixed = qwen_fixed_mtp_draft_depth_scope();
+            let change = policy.observe_window(rejected);
+            assert_eq!(change, MtpDraftBudgetChange::default());
+            assert_eq!(policy.current_budget(), 2);
+        }
+
+        let change = policy.observe_window(rejected);
+        assert!(change.reduced);
+        assert_eq!(policy.current_budget(), 1);
     }
 
     #[test]

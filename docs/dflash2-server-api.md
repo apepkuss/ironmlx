@@ -12,18 +12,19 @@ DFlash2 当前通过独立执行路径提供三类入口：
 
 | 角色 | Checkpoint |
 |---|---|
-| Target | `mlx-community/Qwen3.8-27B-4bit` |
+| Target | `mlx-community/Qwen3.8-27B-4bit` 或 `mlx-community/Qwen3.8-27B-8bit` |
 | Draft | `z-lab/Qwen3.8-27B-DFlash2` |
 
 当前范围仅包含文本生成。DFlash2 draft 不能作为普通 base model 加载，也不能用于
-图片或视频请求。
+图片或视频请求。Target 必须使用 affine 4-bit 或 affine 8-bit；其他量化格式和
+非量化 target 不会被 App 标记为 DFlash2 兼容。
 
 ## 启动示例
 
 ```bash
 ironmlx serve \
-  --model /path/to/Qwen3.8-27B-4bit \
-  --model-id mlx-community/Qwen3.8-27B-4bit \
+  --model /path/to/Qwen3.8-27B-8bit \
+  --model-id mlx-community/Qwen3.8-27B-8bit \
   --dflash2-model-dir /path/to/Qwen3.8-27B-DFlash2 \
   --dflash2-block-size 4 \
   --dflash2-draft-bits 4 \
@@ -156,5 +157,7 @@ HTTP transport、严格字段校验、错误 envelope 与断连语义见
 
 P3、P3.5、P3.5.1、P3.5.2、P3.6 的最终正确性、性能、并发和三协议验收见
 [`benchmarks/dflash2-final-validation/2026-08-23/summary.md`](benchmarks/dflash2-final-validation/2026-08-23/summary.md)。
+当前 `dd37fde` 上 Qwen3.8-27B-4bit 的回归吞吐与精确性结果见
+[`benchmarks/qwen38-affine4-dflash2/2026-08-29/summary.md`](benchmarks/qwen38-affine4-dflash2/2026-08-29/summary.md)。
 P4 的 App matcher、启动参数、恢复、Dashboard 和诊断由 App 全量测试、Rust 严格门禁、
 Release Bundle 校验及本机 target/draft HTTP smoke 共同验收。

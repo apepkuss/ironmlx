@@ -251,17 +251,24 @@ impl DFlash2Attention {
             .forward_on(x, target)?
             .reshape_on((batch, query_len, self.num_heads, self.head_dim), target)?
             .transpose_axes_on(&[0_i32, 2, 1, 3][..], target)?;
-        let context_k = self
-            .k_proj
-            .forward_on(context, target)?
+        // Context K/V uses a dynamic accepted-prefix length. Preserve the B1
+        // affine accumulation tree across tensor-batch widths without routing
+        // the fixed-width proposal and MLP projections through the slower
+        // product-stable kernel.
+        let (context_k, context_v) = {
+            let _product_stable_qmm = crate::nn::product_stable_qmm::scope();
+            (
+                self.k_proj.forward_on(context, target)?,
+                self.v_proj.forward_on(context, target)?,
+            )
+        };
+        let context_k = context_k
             .reshape_on(
                 (batch, context_len, self.num_kv_heads, self.head_dim),
                 target,
             )?
             .transpose_axes_on(&[0_i32, 2, 1, 3][..], target)?;
-        let context_v = self
-            .v_proj
-            .forward_on(context, target)?
+        let context_v = context_v
             .reshape_on(
                 (batch, context_len, self.num_kv_heads, self.head_dim),
                 target,

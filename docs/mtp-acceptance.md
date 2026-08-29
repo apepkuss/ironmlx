@@ -18,12 +18,37 @@ fixed-condition comparison against the same base model without MTP.
 | `QWEN35_MTP_MODEL` | `mlx-community/Qwen3.5-4B-MTP-4bit` snapshot. |
 | `QWEN36_DENSE_MODEL` | `mlx-community/Qwen3.6-27B-4bit` snapshot. |
 | `QWEN36_DENSE_MTP_MODEL` | `mlx-community/Qwen3.6-27B-MTP-4bit` snapshot. |
-| `QWEN38_DENSE_MODEL` | `mlx-community/Qwen3.8-27B-4bit` snapshot. |
-| `QWEN38_DENSE_MTP_MODEL` | `mlx-community/Qwen3.8-27B-MTP-4bit` snapshot. |
+| `QWEN38_DENSE_MODEL` | Matching `mlx-community/Qwen3.8-27B-4bit` or `Qwen3.8-27B-8bit` snapshot. |
+| `QWEN38_DENSE_MTP_MODEL` | Matching `mlx-community/Qwen3.8-27B-MTP-4bit` or `Qwen3.8-27B-MTP-8bit` snapshot. |
 | `QWEN36_MOE_MODEL` | `mlx-community/Qwen3.6-35B-A3B-4bit` snapshot. |
 | `QWEN36_MOE_MTP_MODEL` | `mlx-community/Qwen3.6-35B-A3B-MTP-4bit` snapshot. |
 | `GEMMA4_LONG_CONTEXT_MODEL` | Matching `gemma4` or `gemma4_unified` base checkpoint. |
 | `GEMMA4_LONG_CONTEXT_DRAFTER` | Matching Gemma4 assistant checkpoint. |
+
+For every Qwen3.8 command below, the 8-bit acceptance variant substitutes the
+matching `Qwen3.8-27B-8bit` base and `Qwen3.8-27B-MTP-8bit` snapshots. Do not
+mix base and MTP precisions in the acceptance matrix.
+
+## Qwen3.8 affine8 B2/B4 Performance Record
+
+The retained Apple M5 Max non-DFlash2 B2/B4 measurements are archived in
+[Qwen3.8-27B affine8 MTP B2/B4 Performance Archive](benchmarks/qwen38-affine8-mtp/2026-08-26/summary.md).
+The record includes Dense short/long paired rows, B4 Paged/Turbo3/Turbo4/K3V4
+profiles, and B1/B2 cross-commit regression data. It does not qualify B8 MTP
+or DFlash2.
+
+The current affine8 DFlash2 performance record is archived separately in
+[Qwen3.8-27B affine8 DFlash2 性能归档](benchmarks/qwen38-affine8-dflash2/2026-08-29/summary.md).
+The latest Greedy summary is bound to `dd37fde67af113501f40ce893b55e7a5609907e1`;
+B1/B2/B4 at both 64 and 256 output tokens are positive-throughput cases. This
+record supersedes the earlier B4/256 negative-throughput screening result and
+does not by itself qualify Sampled or KV-profile performance.
+
+The matching affine4 DFlash2 regression on the same commit is archived in
+[Qwen3.8-27B affine4 DFlash2 回归归档](benchmarks/qwen38-affine4-dflash2/2026-08-29/summary.md).
+Its Q4 Greedy B1/B2/B4 results are 56.108/60.254/58.139 TPS, respectively,
+with output hashes and the 64-token Greedy and 256-token Sampled B4-versus-B1
+checks passing.
 
 ## Fast Validation
 

@@ -69,6 +69,135 @@ fn kernel_cache() -> &'static Mutex<HashMap<KernelKey, MetalKernel>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn affine8_b4_q2_exact_kernel() -> Result<&'static MetalKernel> {
+    static CELL: OnceLock<MetalKernel> = OnceLock::new();
+    if let Some(kernel) = CELL.get() {
+        return Ok(kernel);
+    }
+    let kernel = MetalKernel::builder("ironmlx_qwen38_affine8_b4_q2_exact_wide")
+        .inputs(&["x", "w_q", "scales", "biases"])
+        .outputs(&["y"])
+        .source(
+            r#"
+        constexpr int GS = 64;
+        constexpr int VECS_PER_TG = 8;
+        constexpr int K_LANES = 8;
+        constexpr int NUM_SIMDGROUPS = 2;
+        constexpr int RESULTS_PER_SIMDGROUP = 4;
+
+        uint lane = thread_index_in_simdgroup;
+        uint simdgroup = simdgroup_index_in_threadgroup;
+        uint3 tg = threadgroup_position_in_grid;
+        int K = K_SIZE;
+        int N = N_SIZE;
+        short k_lane = short(lane % K_LANES);
+        short simdgroup_row = short(lane / K_LANES);
+        int output_row = int(tg.y) * (RESULTS_PER_SIMDGROUP * NUM_SIMDGROUPS)
+            + RESULTS_PER_SIMDGROUP * int(simdgroup) + int(simdgroup_row);
+        if (output_row >= N) { return; }
+
+        int groups_per_row = K / GS;
+        const device uint8_t* weight_row =
+            reinterpret_cast<const device uint8_t*>(w_q) + output_row * K;
+        const device T* scale_row = scales + output_row * groups_per_row;
+        const device T* bias_row = biases + output_row * groups_per_row;
+        float result[VECS_PER_TG] = {0.0f};
+
+        for (int group = int(k_lane); group < groups_per_row; group += K_LANES) {
+            float scale = float(scale_row[group]);
+            float bias = float(bias_row[group]);
+            for (int chunk = 0; chunk < GS / 8; ++chunk) {
+                int k0 = group * GS + chunk * 8;
+                const device uint8_t* weights = weight_row + k0;
+                float dequantized[8];
+                for (int i = 0; i < 8; ++i) {
+                    dequantized[i] = scale * float(weights[i]) + bias;
+                }
+                for (int vec = 0; vec < VECS_PER_TG; ++vec) {
+                    const device T* input = x + vec * K + k0;
+                    float partial = 0.0f;
+                    for (int i = 0; i < 8; ++i) {
+                        partial += float(input[i]) * dequantized[i];
+                    }
+                    result[vec] += partial;
+                }
+            }
+        }
+
+        for (int vec = 0; vec < VECS_PER_TG; ++vec) {
+            result[vec] += simd_shuffle_down(result[vec], 4);
+            result[vec] += simd_shuffle_down(result[vec], 2);
+            result[vec] += simd_shuffle_down(result[vec], 1);
+            if (k_lane == 0) {
+                y[vec * N + output_row] = T(result[vec]);
+            }
+        }
+    "#,
+        )
+        .ensure_row_contiguous(true)
+        .atomic_outputs(false)
+        .build()
+        .context("build Qwen3.8 affine8 B4/Q2 exact-wide QMM kernel")?;
+    Ok(CELL.get_or_init(|| kernel))
+}
+
+/// Execute the qualified Qwen3.8 affine8 B4/Q2 projection with the same
+/// accumulation tree as ordinary B4/Q1 QMV while sharing each weight tile
+/// across two verify vectors.
+pub(crate) fn forward_affine8_b4_q2_exact_on(
+    x: &Array,
+    parts: QuantizedLinearParts<'_>,
+    target: impl Into<StreamOrDevice>,
+) -> Result<Option<Array>> {
+    let dims = x.shape();
+    let dims = dims.as_slice();
+    let weight_dims = parts.weight.shape();
+    let weight_dims = weight_dims.as_slice();
+    let eligible = dims.len() == 3
+        && dims[0] == 4
+        && dims[1] == 2
+        && weight_dims.len() == 2
+        && dims[2] % 64 == 0
+        && weight_dims[0] % 8 == 0
+        && parts.mode == QuantMode::Affine
+        && parts.bits == 8
+        && parts.group_size == 64
+        && parts.biases.is_some()
+        && x.dtype() == Dtype::Bfloat16
+        && parts.weight.dtype() == Dtype::Uint32
+        && parts.scales.dtype() == Dtype::Bfloat16
+        && parts
+            .biases
+            .is_some_and(|biases| biases.dtype() == Dtype::Bfloat16);
+    if !eligible {
+        return Ok(None);
+    }
+
+    let k = dims[2];
+    let n = weight_dims[0];
+    let biases = parts
+        .biases
+        .ok_or_else(|| anyhow!("qualified affine8 B4/Q2 QMM requires biases"))?;
+    let mut outputs = affine8_b4_q2_exact_kernel()?
+        .dispatch_builder()
+        .inputs(&[x, parts.weight, parts.scales, biases])
+        .output_shapes(&[Shape::from((4_i32, 2_i32, n))])
+        .output_dtypes(&[x.dtype()])
+        .grid(64, n / 8, 1)
+        .threadgroup(64, 1, 1)
+        .template_dtype("T", x.dtype())
+        .template_int("K_SIZE", k)
+        .template_int("N_SIZE", n)
+        .stream(target)
+        .dispatch()
+        .context("dispatch Qwen3.8 affine8 B4/Q2 exact-wide QMM")?;
+    let mut y = outputs.take_at(0)?;
+    if let Some(bias) = parts.bias {
+        y = &y + bias;
+    }
+    Ok(Some(y))
+}
+
 pub(crate) fn eligible_kind(x: &Array, parts: &QuantizedLinearParts<'_>) -> Option<VerifyQmmKind> {
     let shape = x.shape();
     let dims = shape.as_slice();
@@ -511,6 +640,62 @@ mod tests {
             .collect();
         let f32_array: Array = (data.as_slice(), &[1_i32, rows, k][..]).try_into().unwrap();
         mlx::ops::cast::astype(&f32_array, Dtype::Bfloat16).unwrap()
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn affine8_b4_q2_exact_wide_matches_ordinary_b4_q1_bitwise() {
+        let (n, k, group_size) = (17_408_i32, 5_120_i32, 64_i32);
+        let (weight, scales, biases) = quantized_parts(n, k, 8, group_size);
+        let x = input(8, k).reshape((4_i32, 2_i32, k)).unwrap();
+        let parts = QuantizedLinearParts {
+            weight: &weight,
+            scales: &scales,
+            biases: Some(&biases),
+            bias: None,
+            group_size,
+            bits: 8,
+            mode: QuantMode::Affine,
+        };
+        let candidate = forward_affine8_b4_q2_exact_on(&x, parts, ())
+            .unwrap()
+            .expect("qualified B4/Q2 morphology");
+        let mut ordinary_positions = Vec::with_capacity(2);
+        for position in 0..2_i32 {
+            let position_x = mlx::ops::indexing::slice_strided(
+                &x,
+                &[0_i32, position, 0][..],
+                &[4_i32, position + 1, k][..],
+                &[1_i32, 1, 1][..],
+            )
+            .unwrap()
+            .contiguous(false)
+            .unwrap();
+            ordinary_positions.push(
+                mlx::quantization::quantized_matmul(
+                    &position_x,
+                    &weight,
+                    &scales,
+                    Some(&biases),
+                    true,
+                    Some(group_size),
+                    Some(8),
+                    "affine",
+                )
+                .unwrap(),
+            );
+        }
+        let ordinary_refs = ordinary_positions.iter().collect::<Vec<_>>();
+        let ordinary = mlx::ops::shape::concatenate(&ordinary_refs, 1).unwrap();
+        let candidate = mlx::ops::cast::astype(&candidate, Dtype::Float32)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+        let ordinary = mlx::ops::cast::astype(&ordinary, Dtype::Float32)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+        assert_eq!(candidate, ordinary);
     }
 
     fn assert_candidate_matches_native(

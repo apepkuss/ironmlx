@@ -656,8 +656,117 @@ where
 
                 let request_id = RequestId(next_request_id);
                 next_request_id = next_request_id.wrapping_add(1).max(1);
-                let stream =
-                    match DFlash2TextGenerationStream::new_scheduler_b1_text_only_with_cancellation(
+                let batch_prompt_len = request.prompt_ids.len();
+                let batch_chunk_size = request.prefill_chunk_size;
+                let mut admission_requests = vec![request];
+                let mut admission_replies = vec![reply_tx];
+                let mut admission_request_ids = vec![request_id];
+                let mut admission_memory_charges = vec![memory_charge];
+                let mut admission_governor_reservations = vec![governor_reservation];
+
+                // Prefix artifacts are request-local and may start at different
+                // offsets. Cold misses without that feature can preserve the B1
+                // prefill morphology in one equal-length B=N graph.
+                while prefix_cache.is_none()
+                    && active.len() + admission_requests.len() < b_max
+                    && pending.front().is_some_and(|command| match command {
+                        DFlash2Command::Admit { request, .. } => {
+                            request.prompt_ids.len() == batch_prompt_len
+                                && request.prefill_chunk_size == batch_chunk_size
+                        }
+                    })
+                {
+                    let Some(DFlash2Command::Admit {
+                        request: candidate,
+                        reply_tx: candidate_reply,
+                    }) = pending.pop_front()
+                    else {
+                        break;
+                    };
+                    worker_queued.fetch_sub(1, Ordering::Relaxed);
+                    if discard_abandoned_queued_request(&candidate_reply, &worker_in_flight) {
+                        continue;
+                    }
+                    let required_total_tokens = candidate
+                        .prompt_ids
+                        .len()
+                        .saturating_add(candidate.max_new_tokens);
+                    if required_total_tokens > effective_cap_max {
+                        let error = SchedulerError::RequestTooLarge {
+                            required_total_tokens,
+                            input_tokens: candidate.prompt_ids.len(),
+                            requested_max_output_tokens: candidate.max_new_tokens,
+                            server_max_context_tokens: effective_cap_max,
+                            max_allowed_output_tokens: effective_cap_max
+                                .saturating_sub(candidate.prompt_ids.len()),
+                        };
+                        let _ = candidate_reply.send(Err(anyhow::Error::new(error)));
+                        worker_in_flight.fetch_sub(1, Ordering::Release);
+                        continue;
+                    }
+                    if let Err(error) = DFlash2TextGenerationStream::<M>::validate_text_request(
+                        &draft, &candidate, block_size,
+                    ) {
+                        let _ = candidate_reply.send(Err(error));
+                        worker_in_flight.fetch_sub(1, Ordering::Release);
+                        continue;
+                    }
+                    let candidate_charge = match reserve_dflash2_request_memory(
+                        &budget_state,
+                        cache_cost,
+                        required_total_tokens,
+                        &worker_memory_budget_exceeded_count,
+                    ) {
+                        Ok(charge) => charge,
+                        Err(error) => {
+                            let _ = candidate_reply.send(Err(error));
+                            worker_in_flight.fetch_sub(1, Ordering::Release);
+                            continue;
+                        }
+                    };
+                    let candidate_reservation =
+                        match governor.try_reserve(candidate_charge.bytes(), "dflash2_admission") {
+                            Ok(reservation) => reservation,
+                            Err(error) => {
+                                let snapshot = governor.snapshot();
+                                tracing::warn!(
+                                    error = %error,
+                                    "process memory governor rejected batched DFlash2 admission"
+                                );
+                                let error = SchedulerError::MemoryPressure {
+                                    level: snapshot.pressure_level,
+                                    current_bytes: snapshot.current_usage_bytes,
+                                    ceiling_bytes: snapshot.effective_ceiling_bytes,
+                                };
+                                let _ = candidate_reply.send(Err(anyhow::Error::new(error)));
+                                worker_in_flight.fetch_sub(1, Ordering::Release);
+                                continue;
+                            }
+                        };
+                    let candidate_id = RequestId(next_request_id);
+                    next_request_id = next_request_id.wrapping_add(1).max(1);
+                    admission_requests.push(candidate);
+                    admission_replies.push(candidate_reply);
+                    admission_request_ids.push(candidate_id);
+                    admission_memory_charges.push(candidate_charge);
+                    admission_governor_reservations.push(candidate_reservation);
+                }
+
+                let streams_result = if admission_requests.len() > 1 {
+                    DFlash2TextGenerationStream::new_scheduler_bn_text_only_with_cancellation(
+                        &*model,
+                        &draft,
+                        &tokenizer,
+                        admission_requests,
+                        block_size,
+                        &|_| false,
+                    )
+                    .context("initializing batched DFlash2 actor streams")
+                } else {
+                    let request = admission_requests
+                        .pop()
+                        .expect("one DFlash2 admission request is present");
+                    DFlash2TextGenerationStream::new_scheduler_b1_text_only_with_cancellation(
                         &*model,
                         &draft,
                         &tokenizer,
@@ -666,51 +775,67 @@ where
                         prefix_cache
                             .as_mut()
                             .map(|cache| (cache, prefix_fingerprint.as_str())),
-                        &|| reply_tx.is_closed(),
+                        &|| admission_replies[0].is_closed(),
                     )
+                    .map(|stream| vec![stream])
                     .context("initializing DFlash2 actor stream")
-                    {
-                        Ok(stream) => stream,
-                        Err(error) => {
-                            let _ = reply_tx.send(Err(error));
+                };
+                let streams = match streams_result {
+                    Ok(streams) => streams,
+                    Err(error) => {
+                        let message = format!("{error:#}");
+                        for reply_tx in admission_replies {
+                            let _ = reply_tx.send(Err(anyhow::anyhow!(message.clone())));
                             worker_in_flight.fetch_sub(1, Ordering::Release);
-                            continue;
                         }
-                    };
-                worker_runtime_usage.record_prefix_cache_lookup(
-                    stream.metrics().prompt_tokens as u64,
-                    stream.prefix_cache_hit_tokens() as u64,
-                );
-                worker_prefix_cache_counters
-                    .hit_tokens
-                    .fetch_add(stream.prefix_cache_hit_tokens() as u64, Ordering::Relaxed);
+                        continue;
+                    }
+                };
+                for stream in &streams {
+                    worker_runtime_usage.record_prefix_cache_lookup(
+                        stream.metrics().prompt_tokens as u64,
+                        stream.prefix_cache_hit_tokens() as u64,
+                    );
+                    worker_prefix_cache_counters
+                        .hit_tokens
+                        .fetch_add(stream.prefix_cache_hit_tokens() as u64, Ordering::Relaxed);
+                }
                 worker_prefix_cache_counters.publish(prefix_cache.as_ref());
                 // Prefill and first-token materialization completed while
                 // constructing the stream. Mark the shared weights warm before
                 // admitting another sequence; otherwise a second begin() would
                 // wait on the same blocking worker.
                 cold.commit();
-                governor_reservation.commit();
+                for reservation in admission_governor_reservations {
+                    reservation.commit();
+                }
                 governor.refresh_process();
 
-                let (event_tx, event_rx) = mpsc::unbounded_channel();
-                if reply_tx
-                    .send(Ok(AdmitReply {
-                        request_id,
-                        event_rx,
-                    }))
-                    .is_err()
+                for (((request_id, reply_tx), stream), memory_charge) in admission_request_ids
+                    .into_iter()
+                    .zip(admission_replies)
+                    .zip(streams)
+                    .zip(admission_memory_charges)
                 {
-                    worker_in_flight.fetch_sub(1, Ordering::Release);
-                    continue;
+                    let (event_tx, event_rx) = mpsc::unbounded_channel();
+                    if reply_tx
+                        .send(Ok(AdmitReply {
+                            request_id,
+                            event_rx,
+                        }))
+                        .is_err()
+                    {
+                        worker_in_flight.fetch_sub(1, Ordering::Release);
+                        continue;
+                    }
+                    worker_admit_count.fetch_add(1, Ordering::Relaxed);
+                    active.push(ActiveDFlash2Request {
+                        request_id,
+                        event_tx,
+                        stream,
+                        _memory_charge: memory_charge,
+                    });
                 }
-                worker_admit_count.fetch_add(1, Ordering::Relaxed);
-                active.push(ActiveDFlash2Request {
-                    request_id,
-                    event_tx,
-                    stream,
-                    _memory_charge: memory_charge,
-                });
                 worker_active.store(active.len() as u64, Ordering::Relaxed);
             }
 
@@ -743,6 +868,30 @@ where
                         outcomes[index].finished = true;
                         outcomes[index].failure = Some(format!("{error:#}"));
                     }
+                }
+            }
+
+            // The stream already owns a materialized token before any draft
+            // window is built. Publish it immediately so TTFT does not include
+            // the following speculative draft/verify cycle.
+            for (index, outcome) in outcomes.iter_mut().enumerate() {
+                if outcome.failure.is_some() {
+                    continue;
+                }
+                let Some(event) = outcome.event.as_ref() else {
+                    continue;
+                };
+                if active[index]
+                    .event_tx
+                    .send(StepEvent {
+                        id: active[index].request_id,
+                        token: event.token,
+                        finish_reason: event.finish_reason,
+                    })
+                    .is_err()
+                {
+                    outcome.cancelled = true;
+                    outcome.finished = true;
                 }
             }
 
@@ -906,27 +1055,6 @@ where
                             outcomes[index].failure = Some(error.clone());
                         }
                     }
-                }
-            }
-
-            for (index, outcome) in outcomes.iter_mut().enumerate() {
-                if outcome.failure.is_some() {
-                    continue;
-                }
-                let Some(event) = outcome.event.as_ref() else {
-                    continue;
-                };
-                if active[index]
-                    .event_tx
-                    .send(StepEvent {
-                        id: active[index].request_id,
-                        token: event.token,
-                        finish_reason: event.finish_reason,
-                    })
-                    .is_err()
-                {
-                    outcome.cancelled = true;
-                    outcome.finished = true;
                 }
             }
 

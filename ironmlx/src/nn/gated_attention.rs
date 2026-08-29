@@ -280,7 +280,7 @@ impl GatedAttention {
         mask: Option<&Array>,
         kv_validity_mask: Option<&Array>,
         per_row_lens: Option<&[i32]>,
-        cache: Option<&mut KVCache>,
+        mut cache: Option<&mut KVCache>,
         target: impl Into<StreamOrDevice>,
         layer_idx: i32,
     ) -> Result<Array> {
@@ -295,6 +295,23 @@ impl GatedAttention {
         let h_q = self.cfg.num_heads;
         let h_kv = self.cfg.num_kv_heads;
         let d = self.cfg.head_dim;
+        if super::batch_stable_qmm::context_is_armed() && batch > 1 {
+            let cache = cache
+                .as_deref_mut()
+                .ok_or_else(|| anyhow!("batch-stable attention prefill requires a cache"))?;
+            return self.forward_batch_rows_isolated_on(
+                x,
+                mrope,
+                cos,
+                sin,
+                mask,
+                kv_validity_mask,
+                per_row_lens,
+                cache,
+                target,
+                layer_idx,
+            );
+        }
         let profile_shape = DecodeAttentionTurboProfileShape {
             layer_idx,
             batch,
@@ -531,6 +548,94 @@ impl GatedAttention {
             self.o_proj.forward_on(&gated, target)
         }
     }
+
+    /// Keep cache-bearing attention on the scheduler B1 row morphology while
+    /// the rest of affine4 DFlash2 prefill remains batched. This preserves both
+    /// the full-KV state and the attention output consumed by later layers.
+    #[allow(clippy::too_many_arguments)]
+    fn forward_batch_rows_isolated_on(
+        &self,
+        x: &Array,
+        mrope: &Mrope,
+        cos: &Array,
+        sin: &Array,
+        mask: Option<&Array>,
+        kv_validity_mask: Option<&Array>,
+        per_row_lens: Option<&[i32]>,
+        cache: &mut KVCache,
+        target: StreamOrDevice,
+        layer_idx: i32,
+    ) -> Result<Array> {
+        let shape = x.shape();
+        let [batch, _, _] = *<&[i32; 3]>::try_from(shape.as_slice())
+            .map_err(|_| anyhow!("batch-stable attention requires [B,S,H]"))?;
+        let mut outputs = Vec::with_capacity(batch as usize);
+        for row in 0..batch {
+            let row_x = slice_batch_row_or_broadcast(x, row, target)?;
+            let row_cos = slice_batch_row_or_broadcast(cos, row, target)?;
+            let row_sin = slice_batch_row_or_broadcast(sin, row, target)?;
+            let row_mask = mask
+                .map(|mask| slice_batch_row_or_broadcast(mask, row, target))
+                .transpose()?;
+            let row_validity = kv_validity_mask
+                .map(|validity| slice_batch_row_or_broadcast(validity, row, target))
+                .transpose()?;
+            let row_lens = per_row_lens.map(|lens| [lens[row as usize]]);
+            let mut row_cache = KVCache::new(
+                1,
+                self.cfg.num_kv_heads,
+                self.cfg.head_dim,
+                self.cfg.head_dim,
+                x.dtype(),
+                cache.cap(),
+            )
+            .with_step(cache.cap());
+            row_cache.adopt_row_from(cache, 0, row as usize)?;
+            let row_output = self.forward_on(
+                &row_x,
+                mrope,
+                &row_cos,
+                &row_sin,
+                row_mask.as_ref(),
+                row_validity.as_ref(),
+                row_lens.as_ref().map(<[i32; 1]>::as_slice),
+                Some(&mut row_cache),
+                target,
+                layer_idx,
+            )?;
+            cache.adopt_row_from(&row_cache, row as usize, 0)?;
+            outputs.push(row_output);
+        }
+        let refs = outputs.iter().collect::<Vec<_>>();
+        mlx::ops::shape::concatenate_on(&refs, 0, target).map_err(Into::into)
+    }
+}
+
+fn slice_batch_row_or_broadcast(array: &Array, row: i32, target: StreamOrDevice) -> Result<Array> {
+    let shape = array.shape();
+    let dims = shape.as_slice();
+    anyhow::ensure!(!dims.is_empty(), "batch-stable slice requires rank > 0");
+    if dims[0] == 1 {
+        return Ok(array.clone());
+    }
+    anyhow::ensure!(
+        row >= 0 && row < dims[0],
+        "batch row {row} outside B={}",
+        dims[0]
+    );
+    let mut starts = vec![0_i32; dims.len()];
+    let mut stops = dims.to_vec();
+    starts[0] = row;
+    stops[0] = row + 1;
+    let strides = vec![1_i32; dims.len()];
+    mlx::ops::indexing::slice_strided_on(
+        array,
+        starts.as_slice(),
+        stops.as_slice(),
+        strides.as_slice(),
+        target,
+    )
+    .map_err(Into::into)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -619,6 +724,24 @@ fn query_position_isolated_attention_on(
         ));
     }
 
+    if super::position_stable_qmm::dflash2_bulk_attention_is_armed()
+        && per_row_lens.iter().all(|&len| len == query_len)
+    {
+        return query_position_isolated_attention_bulk_cache_update_on(
+            cache,
+            mrope,
+            queries,
+            keys,
+            values,
+            cos,
+            sin,
+            mask,
+            per_row_lens,
+            scale,
+            target,
+        );
+    }
+
     let mut outputs = Vec::with_capacity(query_len as usize);
     for depth in 0..query_len {
         let query = mlx::ops::indexing::slice_strided_on(
@@ -696,6 +819,147 @@ fn query_position_isolated_attention_on(
             depth_mask.as_ref(),
             target,
         )?);
+    }
+    let output_refs = outputs.iter().collect::<Vec<_>>();
+    mlx::ops::shape::concatenate_on(&output_refs, 2, target).map_err(Into::into)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn query_position_isolated_attention_bulk_cache_update_on(
+    cache: &mut KVCache,
+    mrope: &Mrope,
+    queries: &Array,
+    keys: &Array,
+    values: &Array,
+    cos: &Array,
+    sin: &Array,
+    mask: Option<&Array>,
+    per_row_lens: &[i32],
+    scale: f32,
+    target: StreamOrDevice,
+) -> Result<Array> {
+    let q_dims = queries.shape();
+    let q_dims = q_dims.as_slice();
+    let key_dims = keys.shape();
+    let key_dims = key_dims.as_slice();
+    let value_dims = values.shape();
+    let value_dims = value_dims.as_slice();
+    let cos_dims = cos.shape();
+    let cos_dims = cos_dims.as_slice();
+    let sin_dims = sin.shape();
+    let sin_dims = sin_dims.as_slice();
+    let (batch, heads, query_len, head_dim) = (q_dims[0], q_dims[1], q_dims[2], q_dims[3]);
+    let base_offsets = cache.offsets().to_vec();
+
+    let mut rotated_queries = Vec::with_capacity(query_len as usize);
+    let mut rotated_keys = Vec::with_capacity(query_len as usize);
+    for depth in 0..query_len {
+        let query = mlx::ops::indexing::slice_strided_on(
+            queries,
+            &[0_i32, 0, depth, 0][..],
+            &[batch, heads, depth + 1, head_dim][..],
+            &[1_i32, 1, 1, 1][..],
+            target,
+        )?;
+        let key = mlx::ops::indexing::slice_strided_on(
+            keys,
+            &[0_i32, 0, depth, 0][..],
+            &[batch, key_dims[1], depth + 1, key_dims[3]][..],
+            &[1_i32, 1, 1, 1][..],
+            target,
+        )?;
+        let depth_cos = mlx::ops::indexing::slice_strided_on(
+            cos,
+            &[0_i32, depth, 0][..],
+            &[batch, depth + 1, cos_dims[2]][..],
+            &[1_i32, 1, 1][..],
+            target,
+        )?;
+        let depth_sin = mlx::ops::indexing::slice_strided_on(
+            sin,
+            &[0_i32, depth, 0][..],
+            &[batch, depth + 1, sin_dims[2]][..],
+            &[1_i32, 1, 1][..],
+            target,
+        )?;
+        let (query, key) = mrope.apply(&query, &key, &depth_cos, &depth_sin)?;
+        rotated_queries.push(query);
+        rotated_keys.push(key);
+    }
+    let query_refs = rotated_queries.iter().collect::<Vec<_>>();
+    let key_refs = rotated_keys.iter().collect::<Vec<_>>();
+    let rotated_queries = mlx::ops::shape::concatenate_on(&query_refs, 2, target)?;
+    let rotated_keys = mlx::ops::shape::concatenate_on(&key_refs, 2, target)?;
+    let (cached_keys, cached_values) =
+        cache.update_and_fetch_for_attention_on(&rotated_keys, values, per_row_lens, target)?;
+
+    let mask_shape = mask.map(Array::shape);
+    let mut outputs = Vec::with_capacity(query_len as usize);
+    for depth in 0..query_len {
+        let query = mlx::ops::indexing::slice_strided_on(
+            &rotated_queries,
+            &[0_i32, 0, depth, 0][..],
+            &[batch, heads, depth + 1, head_dim][..],
+            &[1_i32, 1, 1, 1][..],
+            target,
+        )?;
+        let key_end = base_offsets
+            .iter()
+            .map(|&offset| offset + depth + 1)
+            .max()
+            .unwrap_or(0);
+        let cached_key = mlx::ops::indexing::slice_strided_on(
+            &cached_keys,
+            &[0_i32, 0, 0, 0][..],
+            &[batch, key_dims[1], key_end, key_dims[3]][..],
+            &[1_i32, 1, 1, 1][..],
+            target,
+        )?;
+        let cached_value = mlx::ops::indexing::slice_strided_on(
+            &cached_values,
+            &[0_i32, 0, 0, 0][..],
+            &[batch, value_dims[1], key_end, value_dims[3]][..],
+            &[1_i32, 1, 1, 1][..],
+            target,
+        )?;
+        let depth_mask = mask
+            .map(|mask| {
+                let dims = mask_shape
+                    .as_ref()
+                    .expect("mask dimensions exist when mask exists");
+                let dims = dims.as_slice();
+                mlx::ops::indexing::slice_strided_on(
+                    mask,
+                    &[0_i32, 0, depth, 0][..],
+                    &[dims[0], dims[1], depth + 1, key_end][..],
+                    &[1_i32, 1, 1, 1][..],
+                    target,
+                )
+                .map_err(anyhow::Error::from)
+            })
+            .transpose()?;
+        outputs.push(match depth_mask.as_ref() {
+            Some(mask) => mlx::fast::scaled_dot_product_attention_on(
+                &query,
+                &cached_key,
+                &cached_value,
+                scale,
+                "",
+                Some(mask),
+                None,
+                target,
+            )?,
+            None => mlx::fast::scaled_dot_product_attention_on(
+                &query,
+                &cached_key,
+                &cached_value,
+                scale,
+                "causal",
+                None,
+                None,
+                target,
+            )?,
+        });
     }
     let output_refs = outputs.iter().collect::<Vec<_>>();
     mlx::ops::shape::concatenate_on(&output_refs, 2, target).map_err(Into::into)

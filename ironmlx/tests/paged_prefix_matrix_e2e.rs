@@ -1437,7 +1437,10 @@ async fn run_paged_kv_multi_token_parity_case(
     let body = serde_json::json!({
         "model": "paged-prefix-matrix",
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 64,
+        // Keep this parity probe below the adaptive policy's eight d=1 samples.
+        // Otherwise later zero-draft control windows can make the aggregate
+        // drafted_tokens <= windows even after a real d=2 window ran.
+        "max_tokens": 8,
         "temperature": 0.0,
         "stream": false
     });

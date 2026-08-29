@@ -405,7 +405,7 @@ mod tests {
     #[test]
     #[ignore = "loads the full local Qwen3.8 target and DFlash2 draft checkpoints"]
     #[serial(mlx_metal)]
-    fn qwen38_dflash2_b2_kernel_spike_is_row_exact_and_reports_timings() {
+    fn qwen38_dflash2_b2_b4_kernel_spike_is_row_exact_and_reports_timings() {
         use crate::core::generate::build_position_ids;
         use crate::core::Loader;
         use crate::models::dflash2::{DFlash2Target, DFlash2TargetForwardMode};
@@ -432,12 +432,15 @@ mod tests {
             .try_into()
             .expect("B1 proposal block");
         let block_b2 = repeat_batch(&block_b1, batch);
+        let batch_b4 = 4_i32;
+        let block_b4 = repeat_batch(&block_b1, batch_b4);
         let expected_context = draft.config().hidden_size
             * i32::try_from(draft.config().dflash_config.target_layer_ids.len())
                 .expect("target layer count");
         let context_b1 = Array::zeros((1_i32, block, expected_context), target.hidden_dtype())
             .expect("B1 target context");
         let context_b2 = repeat_batch(&context_b1, batch);
+        let context_b4 = repeat_batch(&context_b1, batch_b4);
 
         let run_draft_b1_pair = || {
             let mut first_cache = draft.make_cache(0).expect("first B1 draft cache");
@@ -465,7 +468,13 @@ mod tests {
             (first, second)
         };
         let run_draft_b2 = || {
-            let mut cache = draft.make_cache(0).expect("B2 draft cache");
+            let first_cache = draft.make_cache(0).expect("first B2 draft cache row");
+            let second_cache = draft.make_cache(0).expect("second B2 draft cache row");
+            let mut cache = DFlash2DraftCache::stack_rows_on(
+                &[&first_cache, &second_cache],
+                StreamOrDevice::default(),
+            )
+            .expect("stack B2 draft cache rows");
             let output = draft
                 .propose_greedy_on(
                     &target,
@@ -476,6 +485,26 @@ mod tests {
                 )
                 .expect("B2 proposal");
             mlx::transforms::eval(&[&output]).expect("evaluate B2 proposal");
+            output
+        };
+        let run_draft_b4 = || {
+            let cache_rows = (0..batch_b4)
+                .map(|_| draft.make_cache(0).expect("B4 draft cache row"))
+                .collect::<Vec<_>>();
+            let cache_refs = cache_rows.iter().collect::<Vec<_>>();
+            let mut cache =
+                DFlash2DraftCache::stack_rows_on(&cache_refs, StreamOrDevice::default())
+                    .expect("stack B4 draft cache rows");
+            let output = draft
+                .propose_greedy_on(
+                    &target,
+                    &block_b4,
+                    &context_b4,
+                    &mut cache,
+                    StreamOrDevice::default(),
+                )
+                .expect("B4 proposal");
+            mlx::transforms::eval(&[&output]).expect("evaluate B4 proposal");
             output
         };
         let (draft_reference, _) = run_draft_b1_pair();
@@ -564,11 +593,154 @@ mod tests {
             }
         }
 
+        let verify_b4 = repeat_batch(&verify_b1, batch_b4);
+        let positions_b4 =
+            mlx::ops::shape::broadcast_to(&positions_b1, &[3_i32, batch_b4, 4_i32][..])
+                .expect("B4 verify positions");
+        for mode in [
+            DFlash2TargetForwardMode::GreedyVerify,
+            DFlash2TargetForwardMode::SampledVerify,
+        ] {
+            let reference = target
+                .dflash2_forward_target_on(
+                    &verify_b1,
+                    &positions_b1,
+                    None,
+                    target_layers,
+                    mode,
+                    StreamOrDevice::default(),
+                )
+                .expect("B1 target verify reference");
+            let candidate = target
+                .dflash2_forward_target_on(
+                    &verify_b4,
+                    &positions_b4,
+                    None,
+                    target_layers,
+                    mode,
+                    StreamOrDevice::default(),
+                )
+                .expect("B4 target verify");
+            let reference_logits = target
+                .dflash2_project_hidden_on(&reference.hidden, StreamOrDevice::default())
+                .expect("B1 target projection");
+            let candidate_logits = target
+                .dflash2_project_hidden_on(&candidate.hidden, StreamOrDevice::default())
+                .expect("B4 target projection");
+            mlx::transforms::eval(&[
+                &reference.hidden,
+                &reference.context_hidden,
+                &reference_logits,
+                &candidate.hidden,
+                &candidate.context_hidden,
+                &candidate_logits,
+            ])
+            .expect("evaluate B1/B4 target verify");
+            for row in 0..batch_b4 {
+                assert_array_exact(
+                    &reference.hidden,
+                    &slice_batch_row(&candidate.hidden, row),
+                    &format!("{mode:?} B4 row {row} hidden diverged from B1"),
+                );
+                assert_array_exact(
+                    &reference.context_hidden,
+                    &slice_batch_row(&candidate.context_hidden, row),
+                    &format!("{mode:?} B4 row {row} context diverged from B1"),
+                );
+                assert_array_exact(
+                    &reference_logits,
+                    &slice_batch_row(&candidate_logits, row),
+                    &format!("{mode:?} B4 row {row} logits diverged from B1"),
+                );
+            }
+        }
+        let run_target_b4 = |mode| {
+            let output = target
+                .dflash2_forward_target_on(
+                    &verify_b4,
+                    &positions_b4,
+                    None,
+                    target_layers,
+                    mode,
+                    StreamOrDevice::default(),
+                )
+                .and_then(|output| {
+                    target.dflash2_project_hidden_on(&output.hidden, StreamOrDevice::default())
+                })
+                .expect("B4 target verify");
+            mlx::transforms::eval(&[&output]).expect("evaluate B4 target verify");
+            output
+        };
+        let run_target_forward_b1_pair = |mode| {
+            let first = target
+                .dflash2_forward_target_on(
+                    &verify_b1,
+                    &positions_b1,
+                    None,
+                    target_layers,
+                    mode,
+                    StreamOrDevice::default(),
+                )
+                .expect("first B1 target forward");
+            mlx::transforms::eval(&[&first.hidden, &first.context_hidden])
+                .expect("evaluate first B1 target forward");
+            let second = target
+                .dflash2_forward_target_on(
+                    &verify_b1,
+                    &positions_b1,
+                    None,
+                    target_layers,
+                    mode,
+                    StreamOrDevice::default(),
+                )
+                .expect("second B1 target forward");
+            mlx::transforms::eval(&[&second.hidden, &second.context_hidden])
+                .expect("evaluate second B1 target forward");
+            (first, second)
+        };
+        let run_target_forward_b4 = |mode| {
+            let output = target
+                .dflash2_forward_target_on(
+                    &verify_b4,
+                    &positions_b4,
+                    None,
+                    target_layers,
+                    mode,
+                    StreamOrDevice::default(),
+                )
+                .expect("B4 target forward");
+            mlx::transforms::eval(&[&output.hidden, &output.context_hidden])
+                .expect("evaluate B4 target forward");
+            output
+        };
+        let projection_hidden_b1 =
+            run_target_forward_b1_pair(DFlash2TargetForwardMode::GreedyVerify).0;
+        let projection_hidden_b4 = run_target_forward_b4(DFlash2TargetForwardMode::GreedyVerify);
+        let run_projection_b1_pair = || {
+            let first = target
+                .dflash2_project_hidden_on(&projection_hidden_b1.hidden, StreamOrDevice::default())
+                .expect("first B1 target projection");
+            mlx::transforms::eval(&[&first]).expect("evaluate first B1 target projection");
+            let second = target
+                .dflash2_project_hidden_on(&projection_hidden_b1.hidden, StreamOrDevice::default())
+                .expect("second B1 target projection");
+            mlx::transforms::eval(&[&second]).expect("evaluate second B1 target projection");
+        };
+        let run_projection_b4 = || {
+            let output = target
+                .dflash2_project_hidden_on(&projection_hidden_b4.hidden, StreamOrDevice::default())
+                .expect("B4 target projection");
+            mlx::transforms::eval(&[&output]).expect("evaluate B4 target projection");
+        };
+
         let draft_b1 = measure_median(|| {
             let _ = run_draft_b1_pair();
         });
         let draft_b2 = measure_median(|| {
             let _ = run_draft_b2();
+        });
+        let draft_b4 = measure_median(|| {
+            let _ = run_draft_b4();
         });
         let target_greedy_b1 = measure_median(|| {
             let _ = run_target_b1_pair(DFlash2TargetForwardMode::GreedyVerify);
@@ -576,25 +748,55 @@ mod tests {
         let target_greedy_b2 = measure_median(|| {
             let _ = run_target_b2(DFlash2TargetForwardMode::GreedyVerify);
         });
+        let target_greedy_b4 = measure_median(|| {
+            let _ = run_target_b4(DFlash2TargetForwardMode::GreedyVerify);
+        });
         let target_sampled_b1 = measure_median(|| {
             let _ = run_target_b1_pair(DFlash2TargetForwardMode::SampledVerify);
         });
         let target_sampled_b2 = measure_median(|| {
             let _ = run_target_b2(DFlash2TargetForwardMode::SampledVerify);
         });
+        let target_sampled_b4 = measure_median(|| {
+            let _ = run_target_b4(DFlash2TargetForwardMode::SampledVerify);
+        });
+        let target_forward_greedy_b1 = measure_median(|| {
+            let _ = run_target_forward_b1_pair(DFlash2TargetForwardMode::GreedyVerify);
+        });
+        let target_forward_greedy_b4 = measure_median(|| {
+            let _ = run_target_forward_b4(DFlash2TargetForwardMode::GreedyVerify);
+        });
+        let projection_b1 = measure_median(run_projection_b1_pair);
+        let projection_b4 = measure_median(run_projection_b4);
         let speedup =
             |serial: Duration, batched: Duration| serial.as_secs_f64() / batched.as_secs_f64();
+        let b4_serial = |b1_pair: Duration| b1_pair.saturating_mul(2);
         eprintln!(
-            "dflash2_b2_spike draft_serial_b1_us={} draft_b2_us={} draft_speedup={:.3} target_greedy_serial_b1_us={} target_greedy_b2_us={} target_greedy_speedup={:.3} target_sampled_serial_b1_us={} target_sampled_b2_us={} target_sampled_speedup={:.3}",
+            "dflash2_b2_b4_spike draft_serial_b1_pair_us={} draft_b2_us={} draft_b2_speedup={:.3} draft_b4_us={} draft_b4_speedup={:.3} target_greedy_serial_b1_pair_us={} target_greedy_b2_us={} target_greedy_b2_speedup={:.3} target_greedy_b4_us={} target_greedy_b4_speedup={:.3} target_sampled_serial_b1_pair_us={} target_sampled_b2_us={} target_sampled_b2_speedup={:.3} target_sampled_b4_us={} target_sampled_b4_speedup={:.3} target_forward_greedy_serial_b1_pair_us={} target_forward_greedy_b4_us={} target_forward_greedy_b4_speedup={:.3} projection_serial_b1_pair_us={} projection_b4_us={} projection_b4_speedup={:.3}",
             draft_b1.as_micros(),
             draft_b2.as_micros(),
             speedup(draft_b1, draft_b2),
+            draft_b4.as_micros(),
+            speedup(b4_serial(draft_b1), draft_b4),
             target_greedy_b1.as_micros(),
             target_greedy_b2.as_micros(),
             speedup(target_greedy_b1, target_greedy_b2),
+            target_greedy_b4.as_micros(),
+            speedup(b4_serial(target_greedy_b1), target_greedy_b4),
             target_sampled_b1.as_micros(),
             target_sampled_b2.as_micros(),
             speedup(target_sampled_b1, target_sampled_b2),
+            target_sampled_b4.as_micros(),
+            speedup(b4_serial(target_sampled_b1), target_sampled_b4),
+            target_forward_greedy_b1.as_micros(),
+            target_forward_greedy_b4.as_micros(),
+            speedup(
+                b4_serial(target_forward_greedy_b1),
+                target_forward_greedy_b4,
+            ),
+            projection_b1.as_micros(),
+            projection_b4.as_micros(),
+            speedup(b4_serial(projection_b1), projection_b4),
         );
     }
 }

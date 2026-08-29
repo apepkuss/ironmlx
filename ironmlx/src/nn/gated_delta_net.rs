@@ -78,6 +78,8 @@ pub struct GatedDeltaNet {
     cfg: GatedDeltaNetConfig,
     kernel_no_mask: OnceLock<MetalKernel>,
     kernel_masked: OnceLock<MetalKernel>,
+    kernel_no_state_no_mask: OnceLock<MetalKernel>,
+    kernel_no_state_masked: OnceLock<MetalKernel>,
     kernel_zero_state_no_mask: OnceLock<MetalKernel>,
     kernel_zero_state_masked: OnceLock<MetalKernel>,
 }
@@ -181,6 +183,8 @@ impl GatedDeltaNet {
             cfg,
             kernel_no_mask: OnceLock::new(),
             kernel_masked: OnceLock::new(),
+            kernel_no_state_no_mask: OnceLock::new(),
+            kernel_no_state_masked: OnceLock::new(),
             kernel_zero_state_no_mask: OnceLock::new(),
             kernel_zero_state_masked: OnceLock::new(),
         })
@@ -219,6 +223,8 @@ impl GatedDeltaNet {
             cfg,
             kernel_no_mask: OnceLock::new(),
             kernel_masked: OnceLock::new(),
+            kernel_no_state_no_mask: OnceLock::new(),
+            kernel_no_state_masked: OnceLock::new(),
             kernel_zero_state_no_mask: OnceLock::new(),
             kernel_zero_state_masked: OnceLock::new(),
         }
@@ -300,6 +306,19 @@ impl GatedDeltaNet {
 
         let batch = dims[0];
         let seq = dims[1];
+        if super::batch_stable_qmm::context_is_armed() && batch > 1 {
+            let cache = cache
+                .as_deref_mut()
+                .ok_or_else(|| anyhow!("batch-stable GatedDelta prefill requires a cache"))?;
+            return self.forward_batch_rows_isolated_on(
+                x,
+                mask,
+                per_row_lens,
+                cache,
+                target,
+                layer_idx,
+            );
+        }
         if super::sequence_stable_gated_delta::is_armed() && seq > 1 {
             return self.forward_sequence_stable_on(
                 x,
@@ -319,6 +338,9 @@ impl GatedDeltaNet {
         let capture_active = cache
             .as_deref()
             .is_some_and(GatedDeltaCache::speculative_prefix_capture_active);
+        let defer_captured_state_commit = capture_active
+            && super::position_stable_qmm::exact_affine8_b4_q2_is_armed()
+            && seq == 2;
         let ((qkv, z), (b, a)) = {
             let _stable_linear = capture_active.then(super::position_stable_linear::scope);
             let _stable_qmm = capture_active.then(super::position_stable_qmm::scope);
@@ -448,7 +470,7 @@ impl GatedDeltaNet {
         //
         // When `per_row_lens` is `None` (single-stream / non-batched), we
         // fall back to the simple "last n_keep positions" slice.
-        if let Some(c) = cache.as_mut() {
+        if let Some(c) = cache.as_mut().filter(|_| !defer_captured_state_commit) {
             let n_keep = self.cfg.conv_kernel_size - 1;
             let conv_input_dims = conv_input.shape();
             let total_len = conv_input_dims.as_slice()[1];
@@ -551,21 +573,35 @@ impl GatedDeltaNet {
                 Some(c) => c.offsets().iter().all(|&o| o == 0),
                 None => true,
             };
-            let kernel = match (mask.is_some(), zero_state) {
-                (true, true) => self.kernel_zero_state_masked.get_or_init(|| {
-                    build_gated_delta_zero_state_kernel(true)
-                        .expect("build zero-state masked kernel")
-                }),
-                (false, true) => self.kernel_zero_state_no_mask.get_or_init(|| {
-                    build_gated_delta_zero_state_kernel(false)
-                        .expect("build zero-state no-mask kernel")
-                }),
-                (true, false) => self
-                    .kernel_masked
-                    .get_or_init(|| build_gated_delta_kernel(true).expect("build masked kernel")),
-                (false, false) => self
-                    .kernel_no_mask
-                    .get_or_init(|| build_gated_delta_kernel(false).expect("build no-mask kernel")),
+            let omit_state_output = defer_captured_state_commit && !zero_state;
+            let kernel = if omit_state_output {
+                if mask.is_some() {
+                    self.kernel_no_state_masked.get_or_init(|| {
+                        build_gated_delta_no_state_kernel(true)
+                            .expect("build no-state masked kernel")
+                    })
+                } else {
+                    self.kernel_no_state_no_mask.get_or_init(|| {
+                        build_gated_delta_no_state_kernel(false).expect("build no-state kernel")
+                    })
+                }
+            } else {
+                match (mask.is_some(), zero_state) {
+                    (true, true) => self.kernel_zero_state_masked.get_or_init(|| {
+                        build_gated_delta_zero_state_kernel(true)
+                            .expect("build zero-state masked kernel")
+                    }),
+                    (false, true) => self.kernel_zero_state_no_mask.get_or_init(|| {
+                        build_gated_delta_zero_state_kernel(false)
+                            .expect("build zero-state no-mask kernel")
+                    }),
+                    (true, false) => self.kernel_masked.get_or_init(|| {
+                        build_gated_delta_kernel(true).expect("build masked kernel")
+                    }),
+                    (false, false) => self.kernel_no_mask.get_or_init(|| {
+                        build_gated_delta_kernel(false).expect("build no-mask kernel")
+                    }),
+                }
             };
 
             // Step 7b: get state_in only after the stream has advanced.
@@ -608,11 +644,17 @@ impl GatedDeltaNet {
                 kernel_inputs.push(m);
             }
 
+            let mut output_shapes = vec![y_shape];
+            let mut output_dtypes = vec![in_dtype];
+            if !omit_state_output {
+                output_shapes.push(state_shape);
+                output_dtypes.push(st_dtype);
+            }
             let mut outputs = kernel
                 .dispatch_builder()
                 .inputs(&kernel_inputs)
-                .output_shapes(&[y_shape, state_shape])
-                .output_dtypes(&[in_dtype, st_dtype])
+                .output_shapes(&output_shapes)
+                .output_dtypes(&output_dtypes)
                 .grid(32, self.cfg.head_v_dim, batch * self.cfg.num_v_heads)
                 .threadgroup(32, 4, 1)
                 .template_int("Dk", self.cfg.head_k_dim)
@@ -625,10 +667,12 @@ impl GatedDeltaNet {
                 .dispatch()?;
 
             let y = outputs.take_at(0)?; // [B, S, Hv, Dv]
-            let new_state = outputs.take_at(0)?; // [B, Hv, Dv, Dk]
+            let new_state = (!omit_state_output)
+                .then(|| outputs.take_at(0))
+                .transpose()?; // [B, Hv, Dv, Dk]
 
             // Step 7e: update cache recurrent_state, advance offset
-            if let Some(c) = cache.as_mut() {
+            if let (Some(c), Some(new_state)) = (cache.as_mut(), new_state) {
                 c.update_recurrent(new_state);
                 let lens_owned: Vec<i32>;
                 let lens_ref: &[i32] = match per_row_lens {
@@ -797,10 +841,90 @@ impl GatedDeltaNet {
             ));
         }
         if capture.prefix_states.len() != sequence {
-            return Err(anyhow!(
-                "GatedDeltaNet per-row restore requires position-stable capture, got {} states for sequence {sequence}",
-                capture.prefix_states.len()
-            ));
+            let batch = i32::try_from(accepted_lens.len())?;
+            let sequence_i32 = i32::try_from(sequence)?;
+            let accepted_mask_values = accepted_lens
+                .iter()
+                .flat_map(|&accepted| (0..sequence).map(move |position| position < accepted))
+                .collect::<Vec<_>>();
+            let accepted_mask: Array =
+                (accepted_mask_values.as_slice(), &[batch, sequence_i32][..]).try_into()?;
+            let replay_mask = if let Some(mask) = capture.mask.as_ref() {
+                let disabled = Array::zeros((batch, sequence_i32), Dtype::Bool)?;
+                mlx::ops::indexing::where_on(mask, &accepted_mask, &disabled, target)?
+            } else {
+                accepted_mask
+            };
+            cache.restore(&capture.base)?;
+            let kernel = self
+                .kernel_masked
+                .get_or_init(|| build_gated_delta_kernel(true).expect("build masked kernel"));
+            let t_arr: Array = (&[sequence_i32][..], ()).try_into()?;
+            let mut outputs = kernel
+                .dispatch_builder()
+                .inputs(&[
+                    &capture.q,
+                    &capture.k,
+                    &capture.v,
+                    &capture.g,
+                    &capture.beta,
+                    cache.recurrent_state(),
+                    &t_arr,
+                    &replay_mask,
+                ])
+                .output_shapes(&[
+                    Shape::from((
+                        batch,
+                        sequence_i32,
+                        self.cfg.num_v_heads,
+                        self.cfg.head_v_dim,
+                    )),
+                    Shape::from((
+                        batch,
+                        self.cfg.num_v_heads,
+                        self.cfg.head_v_dim,
+                        self.cfg.head_k_dim,
+                    )),
+                ])
+                .output_dtypes(&[capture.q.dtype(), Dtype::Float32])
+                .grid(32, self.cfg.head_v_dim, batch * self.cfg.num_v_heads)
+                .threadgroup(32, 4, 1)
+                .template_int("Dk", self.cfg.head_k_dim)
+                .template_int("Dv", self.cfg.head_v_dim)
+                .template_int("Hk", self.cfg.num_k_heads)
+                .template_int("Hv", self.cfg.num_v_heads)
+                .template_dtype("InT", capture.q.dtype())
+                .template_dtype("StT", Dtype::Float32)
+                .stream(target)
+                .dispatch()?;
+            let _unused_output = outputs.take_at(0)?;
+            let new_state = outputs.take_at(0)?;
+
+            let keep = self.cfg.conv_kernel_size - 1;
+            let conv_dims = capture.conv_input.shape();
+            let conv_dims = conv_dims.as_slice();
+            let mut conv_rows = Vec::with_capacity(accepted_lens.len());
+            for (row, &accepted_len) in accepted_lens.iter().enumerate() {
+                let accepted_len = i32::try_from(accepted_len)?;
+                let row = i32::try_from(row)?;
+                conv_rows.push(mlx::ops::indexing::slice_strided_on(
+                    &capture.conv_input,
+                    &[row, accepted_len, 0][..],
+                    &[row + 1, accepted_len + keep, conv_dims[2]][..],
+                    &[1_i32, 1, 1][..],
+                    target,
+                )?);
+            }
+            let conv_row_refs = conv_rows.iter().collect::<Vec<_>>();
+            let new_conv_state = mlx::ops::shape::concatenate_on(&conv_row_refs, 0, target)?;
+            let advances = accepted_lens
+                .iter()
+                .map(|&accepted| i32::try_from(accepted))
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            cache.update_conv(new_conv_state);
+            cache.update_recurrent(new_state);
+            cache.advance(&advances)?;
+            return Ok(());
         }
         for (row, &accepted_len) in accepted_lens.iter().enumerate() {
             let snapshot = &capture.prefix_states[accepted_len - 1];
@@ -815,6 +939,63 @@ impl GatedDeltaNet {
             )?;
         }
         Ok(())
+    }
+
+    /// Preserve the cache-bearing B1 numerical morphology while the surrounding
+    /// decoder layer remains batched. DFlash2 batched prefill arms this route:
+    /// the ordinary batched GatedDelta state is close but not bit-exact for
+    /// affine4 or affine8, and later tensor verification can amplify that
+    /// difference into a token mismatch.
+    #[allow(clippy::too_many_arguments)]
+    fn forward_batch_rows_isolated_on(
+        &self,
+        x: &Array,
+        mask: Option<&Array>,
+        per_row_lens: Option<&[i32]>,
+        cache: &mut GatedDeltaCache,
+        target: StreamOrDevice,
+        layer_idx: i32,
+    ) -> Result<Array> {
+        let shape = x.shape();
+        let [batch, sequence, hidden] = *<&[i32; 3]>::try_from(shape.as_slice())
+            .map_err(|_| anyhow!("batch-stable GatedDelta requires [B,S,H]"))?;
+        let mut outputs = Vec::with_capacity(batch as usize);
+        for row in 0..batch {
+            let row_x = mlx::ops::indexing::slice_strided_on(
+                x,
+                &[row, 0_i32, 0][..],
+                &[row + 1, sequence, hidden][..],
+                &[1_i32, 1, 1][..],
+                target,
+            )?;
+            let row_mask = mask
+                .map(|mask| slice_batch_row_or_broadcast(mask, row, target))
+                .transpose()?;
+            let row_lens = per_row_lens.map(|lens| [lens[row as usize]]);
+            let mut row_cache = GatedDeltaCache::new_with_cap(
+                1,
+                self.cfg.conv_kernel_size,
+                self.cfg.conv_dim(),
+                self.cfg.num_v_heads,
+                self.cfg.head_v_dim,
+                self.cfg.head_k_dim,
+                x.dtype(),
+                cache.cap(),
+            )?;
+            row_cache.adopt_row_from(cache, 0, row as usize)?;
+            let row_output = self.forward_on(
+                &row_x,
+                row_mask.as_ref(),
+                row_lens.as_ref().map(<[i32; 1]>::as_slice),
+                Some(&mut row_cache),
+                target,
+                layer_idx,
+            )?;
+            cache.adopt_row_from(&row_cache, row as usize, 0)?;
+            outputs.push(row_output);
+        }
+        let refs = outputs.iter().collect::<Vec<_>>();
+        mlx::ops::shape::concatenate_on(&refs, 0, target).map_err(Into::into)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -874,6 +1055,33 @@ impl GatedDeltaNet {
     }
 }
 
+fn slice_batch_row_or_broadcast(array: &Array, row: i32, target: StreamOrDevice) -> Result<Array> {
+    let shape = array.shape();
+    let dims = shape.as_slice();
+    anyhow::ensure!(!dims.is_empty(), "batch-stable slice requires rank > 0");
+    if dims[0] == 1 {
+        return Ok(array.clone());
+    }
+    anyhow::ensure!(
+        row >= 0 && row < dims[0],
+        "batch row {row} outside B={}",
+        dims[0]
+    );
+    let mut starts = vec![0_i32; dims.len()];
+    let mut stops = dims.to_vec();
+    starts[0] = row;
+    stops[0] = row + 1;
+    let strides = vec![1_i32; dims.len()];
+    mlx::ops::indexing::slice_strided_on(
+        array,
+        starts.as_slice(),
+        stops.as_slice(),
+        strides.as_slice(),
+        target,
+    )
+    .map_err(Into::into)
+}
+
 fn slice_sequence_prefix_on(array: &Array, length: i32, target: StreamOrDevice) -> Result<Array> {
     let shape = array.shape();
     let dims = shape.as_slice();
@@ -907,7 +1115,11 @@ fn slice_sequence_prefix_on(array: &Array, length: i32, target: StreamOrDevice) 
 /// int32_t& T` — usable directly as an integer in the shader (e.g.
 /// `for (int t = 0; t < T; ++t)`).
 pub(crate) fn build_gated_delta_kernel(masked: bool) -> Result<MetalKernel> {
-    build_gated_delta_kernel_impl(masked, false)
+    build_gated_delta_kernel_impl(masked, false, true)
+}
+
+fn build_gated_delta_no_state_kernel(masked: bool) -> Result<MetalKernel> {
+    build_gated_delta_kernel_impl(masked, false, false)
 }
 
 /// Build a `gated_delta_step` kernel for the first chunk of a stream, where
@@ -915,10 +1127,14 @@ pub(crate) fn build_gated_delta_kernel(masked: bool) -> Result<MetalKernel> {
 /// `state_in` input: it initializes the per-thread register tile to 0 and still
 /// emits the same `state_out` shape as the regular kernel.
 pub(crate) fn build_gated_delta_zero_state_kernel(masked: bool) -> Result<MetalKernel> {
-    build_gated_delta_kernel_impl(masked, true)
+    build_gated_delta_kernel_impl(masked, true, true)
 }
 
-fn build_gated_delta_kernel_impl(masked: bool, zero_state: bool) -> Result<MetalKernel> {
+fn build_gated_delta_kernel_impl(
+    masked: bool,
+    zero_state: bool,
+    emit_state: bool,
+) -> Result<MetalKernel> {
     let mask_clause = if masked {
         "mask[b_idx * T + t]"
     } else {
@@ -933,6 +1149,20 @@ fn build_gated_delta_kernel_impl(masked: bool, zero_state: bool) -> Result<Metal
         "state[i] = 0.0f;"
     } else {
         "state[i] = static_cast<float>(i_state[s_idx]);"
+    };
+    let state_out_ptr = if emit_state {
+        "auto o_state = state_out + (n * Dv + dv_idx) * Dk;"
+    } else {
+        ""
+    };
+    let state_store = if emit_state {
+        r#"
+        for (int i = 0; i < n_per_t; ++i) {
+          auto s_idx = n_per_t * dk_idx + i;
+          o_state[s_idx] = static_cast<StT>(state[i]);
+        }"#
+    } else {
+        ""
     };
     let src = format!(
         r#"
@@ -955,7 +1185,7 @@ fn build_gated_delta_kernel_impl(masked: bool, zero_state: bool) -> Result<Metal
 
         // state_in, state_out: [B, Hv, Dv, Dk]
         {state_in_ptr}
-        auto o_state = state_out + (n * Dv + dv_idx) * Dk;
+        {state_out_ptr}
 
         float state[n_per_t];
         for (int i = 0; i < n_per_t; ++i) {{
@@ -1004,21 +1234,23 @@ fn build_gated_delta_kernel_impl(masked: bool, zero_state: bool) -> Result<Metal
           g_ += Hv;
           beta_ += Hv;
         }}
-        for (int i = 0; i < n_per_t; ++i) {{
-          auto s_idx = n_per_t * dk_idx + i;
-          o_state[s_idx] = static_cast<StT>(state[i]);
-        }}
+        {state_store}
         "#,
         mask_clause = mask_clause,
         state_in_ptr = state_in_ptr,
-        state_init = state_init
+        state_init = state_init,
+        state_out_ptr = state_out_ptr,
+        state_store = state_store
     );
 
-    let name = match (masked, zero_state) {
-        (false, false) => "ironmlx_gated_delta",
-        (true, false) => "ironmlx_gated_delta_masked",
-        (false, true) => "ironmlx_gated_delta_zero_state",
-        (true, true) => "ironmlx_gated_delta_zero_state_masked",
+    let name = match (masked, zero_state, emit_state) {
+        (false, false, true) => "ironmlx_gated_delta",
+        (true, false, true) => "ironmlx_gated_delta_masked",
+        (false, false, false) => "ironmlx_gated_delta_no_state",
+        (true, false, false) => "ironmlx_gated_delta_no_state_masked",
+        (false, true, true) => "ironmlx_gated_delta_zero_state",
+        (true, true, true) => "ironmlx_gated_delta_zero_state_masked",
+        (_, true, false) => unreachable!("zero-state kernel must emit state"),
     };
 
     let inputs: &[&str] = match (masked, zero_state) {
@@ -1028,9 +1260,14 @@ fn build_gated_delta_kernel_impl(masked: bool, zero_state: bool) -> Result<Metal
         (true, true) => &["q", "k", "v", "g", "beta", "T", "mask"],
     };
 
+    let outputs: &[&str] = if emit_state {
+        &["y", "state_out"]
+    } else {
+        &["y"]
+    };
     Ok(MetalKernel::builder(name)
         .inputs(inputs)
-        .outputs(&["y", "state_out"])
+        .outputs(outputs)
         .source(&src)
         .ensure_row_contiguous(true)
         .atomic_outputs(false)
@@ -1097,6 +1334,59 @@ mod tests {
             crate::nn::Linear::new_fp(out_w, None),
             a_log,
             dt_bias,
+            cfg,
+        )
+    }
+
+    fn small_nonzero_gdn_components() -> GatedDeltaNet {
+        let cfg = GatedDeltaNetConfig {
+            hidden_size: 32,
+            num_v_heads: 4,
+            num_k_heads: 2,
+            head_k_dim: 32,
+            head_v_dim: 8,
+            conv_kernel_size: 4,
+            rms_norm_eps: 1e-6,
+        };
+        let matrix = |rows: i32, columns: i32, value: f32| {
+            let values = vec![value; usize::try_from(rows * columns).unwrap()];
+            (values.as_slice(), &[rows, columns][..])
+                .try_into()
+                .unwrap()
+        };
+        let conv = |channels: i32, kernel: i32, value: f32| {
+            let values = vec![value; usize::try_from(channels * kernel).unwrap()];
+            (values.as_slice(), &[channels, kernel, 1_i32][..])
+                .try_into()
+                .unwrap()
+        };
+        let conv_dim = cfg.conv_dim();
+        let value_dim = cfg.value_dim();
+        GatedDeltaNet::from_components(
+            crate::nn::Linear::new_fp(matrix(conv_dim, 32, 0.01), None),
+            crate::nn::Linear::new_fp(matrix(value_dim, 32, 0.02), None),
+            crate::nn::Linear::new_fp(matrix(cfg.num_v_heads, 32, 0.01), None),
+            crate::nn::Linear::new_fp(matrix(cfg.num_v_heads, 32, 0.015), None),
+            crate::nn::Conv1d::new(
+                conv(conv_dim, cfg.conv_kernel_size, 0.025),
+                None,
+                crate::nn::Conv1dConfig {
+                    in_channels: conv_dim,
+                    out_channels: conv_dim,
+                    kernel_size: cfg.conv_kernel_size,
+                    stride: 1,
+                    padding: 0,
+                    dilation: 1,
+                    groups: conv_dim,
+                },
+            ),
+            crate::nn::RmsNormGated::new(
+                mlx::ops::constructors::ones((cfg.head_v_dim,), Dtype::Float32).unwrap(),
+                cfg.rms_norm_eps,
+            ),
+            crate::nn::Linear::new_fp(matrix(32, value_dim, 0.01), None),
+            Array::zeros((cfg.num_v_heads,), Dtype::Float32).unwrap(),
+            mlx::ops::constructors::ones((cfg.num_v_heads,), Dtype::Float32).unwrap(),
             cfg,
         )
     }
@@ -1207,6 +1497,116 @@ mod tests {
             .forward(&x, None, Some(&mut cache))
             .expect("forward with cache");
         assert_eq!(cache.offsets(), &[4]);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn captured_b2_q2_and_exact_b4_q2_restore_hidden_and_cache_bitwise() {
+        let gdn = small_nonzero_gdn_components();
+        let cfg = gdn.config();
+        for batch in [2_i32, 4] {
+            let sequence = 2_i32;
+            let new_cache = || {
+                GatedDeltaCache::new_with_cap(
+                    batch,
+                    cfg.conv_kernel_size,
+                    cfg.conv_dim(),
+                    cfg.num_v_heads,
+                    cfg.head_v_dim,
+                    cfg.head_k_dim,
+                    Dtype::Float32,
+                    16,
+                )
+                .expect("cache")
+            };
+            let values = (0..batch * sequence * 32)
+                .map(|index| ((index % 23) as f32 - 11.0) * 0.01)
+                .collect::<Vec<_>>();
+            let input: Array = (values.as_slice(), &[batch, sequence, 32][..])
+                .try_into()
+                .expect("input");
+            let accepted_lens = (0..batch)
+                .map(|row| 1 + row as usize % sequence as usize)
+                .collect::<Vec<_>>();
+            let verify_lens = vec![sequence; batch as usize];
+
+            let mut restored = new_cache();
+            restored
+                .begin_speculative_prefix_capture()
+                .expect("begin capture");
+            let exact_b4_scope =
+                (batch == 4).then(crate::nn::position_stable_qmm::exact_affine8_b4_q2_scope);
+            let restored_output = gdn
+                .forward_on(
+                    &input,
+                    None,
+                    Some(&verify_lens),
+                    Some(&mut restored),
+                    StreamOrDevice::default(),
+                    0,
+                )
+                .expect("captured verify");
+            drop(exact_b4_scope);
+
+            let mut full_expected = new_cache();
+            let full_expected_output = gdn
+                .forward_on(
+                    &input,
+                    None,
+                    Some(&verify_lens),
+                    Some(&mut full_expected),
+                    StreamOrDevice::default(),
+                    0,
+                )
+                .expect("ordinary B4/Q1-equivalent hidden");
+            assert_eq!(
+                restored_output.to_vec::<f32>().unwrap(),
+                full_expected_output.to_vec::<f32>().unwrap(),
+                "verify hidden batch={batch}"
+            );
+            gdn.restore_speculative_prefix_rows_on(
+                &mut restored,
+                &accepted_lens,
+                StreamOrDevice::default(),
+            )
+            .expect("restore accepted prefixes");
+
+            let mut expected = new_cache();
+            let mask_values = accepted_lens
+                .iter()
+                .flat_map(|&accepted| {
+                    (0..sequence as usize).map(move |position| position < accepted)
+                })
+                .collect::<Vec<_>>();
+            let mask: Array = (mask_values.as_slice(), &[batch, sequence][..])
+                .try_into()
+                .expect("mask");
+            let expected_lens = accepted_lens
+                .iter()
+                .map(|&accepted| i32::try_from(accepted).unwrap())
+                .collect::<Vec<_>>();
+            gdn.forward_on(
+                &input,
+                Some(&mask),
+                Some(&expected_lens),
+                Some(&mut expected),
+                StreamOrDevice::default(),
+                0,
+            )
+            .expect("masked accepted prefixes");
+
+            assert_eq!(restored.offsets(), expected.offsets(), "batch={batch}");
+            assert_eq!(
+                restored.conv_state().to_vec::<f32>().unwrap(),
+                expected.conv_state().to_vec::<f32>().unwrap(),
+                "batch={batch}"
+            );
+            assert_eq!(
+                restored.recurrent_state().to_vec::<f32>().unwrap(),
+                expected.recurrent_state().to_vec::<f32>().unwrap(),
+                "batch={batch}"
+            );
+        }
     }
 
     #[test]

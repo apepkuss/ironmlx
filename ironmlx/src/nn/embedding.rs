@@ -195,14 +195,14 @@ impl Embedding {
                     && matches!(*bits, 4 | 5 | 6 | 8)
                     && *mode == QuantMode::Affine;
                 if product_stable {
-                    Ok(mlx::quantization::quantized_matmul_product_stable_on(
+                    Ok(super::product_stable_qmm::forward_on(
                         hidden,
                         weight,
                         scales,
                         biases.as_ref(),
                         true,
-                        Some(*group_size),
-                        Some(*bits),
+                        *group_size,
+                        *bits,
                         mode.mlx_backend_mode(),
                         target,
                     )?)
@@ -269,7 +269,10 @@ fn qembedding_decode_on(
     let Some(biases) = params.biases else {
         return Ok(None);
     };
-    if params.group_size != 64 || params.bits != 4 || !params.mode.uses_affine_storage() {
+    if params.group_size != 64
+        || !matches!(params.bits, 4 | 8)
+        || !params.mode.uses_affine_storage()
+    {
         return Ok(None);
     }
 
@@ -280,7 +283,8 @@ fn qembedding_decode_on(
     }
     let vocab = weight_dims[0];
     let packed_dim = weight_dims[1];
-    let dim = packed_dim * 8;
+    let values_per_word = 32 / params.bits;
+    let dim = packed_dim * values_per_word;
     if vocab <= 0 || packed_dim <= 0 || dim % params.group_size != 0 {
         return Ok(None);
     }
@@ -310,7 +314,7 @@ fn qembedding_decode_on(
         )?));
     }
     let target = target.into();
-    let kernel = qembedding_decode_kernel()?;
+    let kernel = qembedding_decode_kernel(params.bits)?;
     let mut outputs = kernel
         .dispatch_builder()
         .inputs(&[tokens, params.weight, params.scales, biases])
@@ -327,7 +331,17 @@ fn qembedding_decode_on(
     Ok(Some(outputs.take_at(0)?))
 }
 
-fn qembedding_decode_kernel() -> Result<&'static MetalKernel> {
+fn qembedding_decode_kernel(bits: i32) -> Result<&'static MetalKernel> {
+    match bits {
+        4 => qembedding_decode_4bit_kernel(),
+        8 => qembedding_decode_8bit_kernel(),
+        _ => Err(anyhow!(
+            "quantized embedding decode kernel does not support {bits}-bit weights"
+        )),
+    }
+}
+
+fn qembedding_decode_4bit_kernel() -> Result<&'static MetalKernel> {
     static CELL: OnceLock<MetalKernel> = OnceLock::new();
     if let Some(kernel) = CELL.get() {
         return Ok(kernel);
@@ -352,6 +366,40 @@ fn qembedding_decode_kernel() -> Result<&'static MetalKernel> {
     "#;
 
     let kernel = MetalKernel::builder("ironmlx_qembedding_decode_4bit_gs64")
+        .inputs(&["tokens", "w", "scales", "biases"])
+        .outputs(&["out"])
+        .source(source)
+        .ensure_row_contiguous(true)
+        .atomic_outputs(false)
+        .build()?;
+    Ok(CELL.get_or_init(|| kernel))
+}
+
+fn qembedding_decode_8bit_kernel() -> Result<&'static MetalKernel> {
+    static CELL: OnceLock<MetalKernel> = OnceLock::new();
+    if let Some(kernel) = CELL.get() {
+        return Ok(kernel);
+    }
+
+    let source = r#"
+        uint elem = thread_position_in_grid.x;
+        if (elem >= TOKEN_COUNT * DIM) {
+            return;
+        }
+
+        uint token_idx = elem / DIM;
+        uint d = elem - token_idx * DIM;
+        uint token = uint(tokens[token_idx]);
+        uint packed_idx = d >> 2;
+        uint shift = (d & 3u) << 3;
+        uint q = (w[token * PACKED_DIM + packed_idx] >> shift) & 0xffu;
+        uint group = d >> 6;
+        uint sb = token * GROUPS + group;
+        float y = float(scales[sb]) * float(q) + float(biases[sb]);
+        out[elem] = static_cast<__typeof__(*out)>(y);
+    "#;
+
+    let kernel = MetalKernel::builder("ironmlx_qembedding_decode_8bit_gs64")
         .inputs(&["tokens", "w", "scales", "biases"])
         .outputs(&["out"])
         .source(source)
@@ -559,6 +607,18 @@ mod tests {
 
     #[test]
     #[serial(mlx_metal)]
+    fn quantized_8bit_multi_token_forward_matches_dequantize_bfloat16() {
+        assert_quantized_tokens_match_dequantize(
+            Dtype::Bfloat16,
+            8,
+            QuantMode::Affine,
+            &[1, 2, 3, 0],
+            &[2, 2],
+        );
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
     fn quantized_2bit_single_token_forward_matches_dequantize_float32() {
         assert_quantized_tokens_match_dequantize(
             Dtype::Float32,
@@ -584,13 +644,13 @@ mod tests {
     }
 
     #[test]
-    fn quantized_embedding_decode_fast_path_stays_4bit_only() {
+    fn quantized_embedding_decode_fast_path_rejects_unqualified_bits() {
         let tokens = Array::zeros((1,), Dtype::Uint32).unwrap();
         let weight = Array::zeros((2, 10), Dtype::Uint32).unwrap();
         let scales = Array::zeros((2, 1), Dtype::Bfloat16).unwrap();
         let biases = Array::zeros((2, 1), Dtype::Bfloat16).unwrap();
 
-        for bits in [5, 6] {
+        for bits in [2, 5, 6] {
             let result = qembedding_decode_on(
                 &tokens,
                 QEmbeddingDecode {
