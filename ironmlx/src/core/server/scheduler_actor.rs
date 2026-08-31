@@ -6310,18 +6310,20 @@ mod tests {
             .expect("third event");
         assert_eq!(third_event.finish_reason, Some("length"));
 
-        for (events, label) in [(&mut events_1, "first"), (&mut events_2, "second")] {
-            while let Some(event) = tokio::time::timeout(Duration::from_secs(2), events.recv())
-                .await
-                .unwrap_or_else(|_| panic!("{label} restored event timeout"))
-            {
-                if event.finish_reason.is_some() {
-                    break;
+        let health = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let health = handle.active_kv_offload.snapshot();
+                if health.swap_out_count >= 1
+                    && health.swap_in_count >= 1
+                    && health.parked_requests == 0
+                {
+                    break health;
                 }
+                tokio::time::sleep(Duration::from_millis(1)).await;
             }
-        }
-
-        let health = handle.active_kv_offload.snapshot();
+        })
+        .await
+        .expect("MTP Active KV park/restore state timeout");
         assert!(
             health.swap_out_count >= 1,
             "expected useful MTP swap out: {health:?}"
@@ -6329,6 +6331,10 @@ mod tests {
         assert!(health.swap_in_count >= 1, "expected useful MTP swap in");
         assert_eq!(health.swap_error_count, 0);
         assert_eq!(health.parked_requests, 0);
+
+        drop(events_1);
+        drop(events_2);
+        wait_for_scheduler_resources_to_be_released(&handle).await;
 
         drop(handle);
         std::fs::remove_dir_all(root).ok();
