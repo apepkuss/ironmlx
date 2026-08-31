@@ -6,10 +6,15 @@ public final class ApplicationAboutPresenter: NSObject {
 
     public static func panelOptions(bundle: Bundle = .main) -> [NSApplication.AboutPanelOptionKey: Any] {
         let applicationVersion = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
-        return [
+        let applicationBuild = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
+        var options: [NSApplication.AboutPanelOptionKey: Any] = [
             .applicationVersion: applicationVersion,
-            .version: "",
+            .version: applicationBuild.isEmpty ? "" : "Build \(applicationBuild)",
         ]
+        if let applicationIcon = bundle.image(forResource: "AppIcon") {
+            options[.applicationIcon] = applicationIcon
+        }
+        return options
     }
 
     @objc public func showAbout(_ sender: Any?) {
