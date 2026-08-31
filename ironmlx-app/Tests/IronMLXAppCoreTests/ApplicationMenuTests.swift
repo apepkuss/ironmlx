@@ -29,7 +29,7 @@ import Testing
 }
 
 @MainActor
-@Test func applicationAboutPanelShowsMarketingVersionWithoutBuildNumber() throws {
+@Test func applicationAboutPanelShowsMarketingVersionAndBuildNumber() throws {
     let bundleURL = FileManager.default.temporaryDirectory
         .appendingPathComponent(UUID().uuidString, isDirectory: true)
     try FileManager.default.createDirectory(at: bundleURL, withIntermediateDirectories: true)
@@ -53,7 +53,7 @@ import Testing
     let options = ApplicationAboutPresenter.panelOptions(bundle: bundle)
 
     #expect(options[.applicationVersion] as? String == "0.1.0")
-    #expect(options[.version] as? String == "")
+    #expect(options[.version] as? String == "Build 42")
     #expect(bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String == "42")
 }
 
