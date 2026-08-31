@@ -1175,6 +1175,61 @@
     font-size: 12px;
     line-height: 1.55;
   }
+  .agent-profile-options {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    min-width: 0;
+    margin: 0 0 14px;
+    padding: 0;
+    border: 0;
+  }
+  .agent-profile-option {
+    position: relative;
+    min-width: 0;
+    padding: 12px 14px;
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .agent-profile-option:hover {
+    border-color: color-mix(in srgb, var(--accent, #007aff) 45%, var(--border));
+  }
+  .agent-profile-option.active {
+    border-color: color-mix(in srgb, var(--accent, #007aff) 55%, var(--border));
+    background: color-mix(in srgb, var(--accent, #007aff) 8%, var(--card-bg));
+  }
+  .agent-profile-option:focus-within {
+    outline: 2px solid var(--accent, #007aff);
+    outline-offset: 2px;
+  }
+  .agent-profile-option-title {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 12px;
+    font-weight: 650;
+  }
+  .agent-profile-option-badge {
+    padding: 2px 6px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--accent, #007aff) 13%, transparent);
+    color: var(--accent, #007aff);
+    font-size: 10px;
+    font-weight: 650;
+  }
+  .agent-profile-option-desc {
+    display: block;
+    margin-top: 5px;
+    color: var(--text-secondary);
+    font-size: 11px;
+    line-height: 1.45;
+  }
   .agent-runtime-grid {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1325,6 +1380,13 @@
     border-left-color: var(--orange, #ff9500);
     background: color-mix(in srgb, var(--orange, #ff9500) 8%, var(--bg));
   }
+  .agent-guide-note[hidden] {
+    display: none;
+  }
+  .agent-profile-options + .agent-guide-note {
+    margin-top: 0;
+    margin-bottom: 14px;
+  }
   @media (max-width: 820px) {
     .agent-guide-shell {
       grid-template-columns: 1fr;
@@ -1338,6 +1400,7 @@
       grid-column: 1 / -1;
     }
     .agent-runtime-grid,
+    .agent-profile-options,
     .agent-guide-fields {
       grid-template-columns: 1fr;
     }
@@ -3754,17 +3817,7 @@
       <div class="agent-guide-shell">
         <nav class="agent-guide-nav" aria-label="Supported agents" data-i18n-aria-label="agent_supported_label">
           <div class="agent-guide-nav-label" data-i18n="agent_supported">Supported agents</div>
-          <button class="agent-guide-nav-item active" type="button" data-agent-guide="hermes" aria-selected="true" aria-controls="agent-guide-hermes" onclick="selectAgentGuide('hermes')">
-            <span class="agent-guide-mark" aria-hidden="true">
-              <img class="agent-guide-logo" data-agent-logo="hermes" src="hermes-agent-logo.svg" alt="">
-            </span>
-            <span class="agent-guide-nav-copy">
-              <span class="agent-guide-nav-name">Hermes Agent</span>
-              <span class="agent-guide-nav-meta">Responses API</span>
-            </span>
-            <span class="agent-guide-nav-arrow" aria-hidden="true">›</span>
-          </button>
-          <button class="agent-guide-nav-item" type="button" data-agent-guide="omp" aria-selected="false" aria-controls="agent-guide-omp" onclick="selectAgentGuide('omp')">
+          <button class="agent-guide-nav-item active" type="button" data-agent-guide="omp" aria-selected="true" aria-controls="agent-guide-omp" onclick="selectAgentGuide('omp')">
             <span class="agent-guide-mark agent-guide-mark-omp" aria-hidden="true">
               <img class="agent-guide-logo" data-agent-logo="omp" src="oh-my-pi-logo.svg" alt="">
             </span>
@@ -3774,10 +3827,20 @@
             </span>
             <span class="agent-guide-nav-arrow" aria-hidden="true">›</span>
           </button>
+          <button class="agent-guide-nav-item" type="button" data-agent-guide="hermes" aria-selected="false" aria-controls="agent-guide-hermes" onclick="selectAgentGuide('hermes')">
+            <span class="agent-guide-mark" aria-hidden="true">
+              <img class="agent-guide-logo" data-agent-logo="hermes" src="hermes-agent-logo.svg" alt="">
+            </span>
+            <span class="agent-guide-nav-copy">
+              <span class="agent-guide-nav-name">Hermes Agent</span>
+              <span class="agent-guide-nav-meta">Responses API</span>
+            </span>
+            <span class="agent-guide-nav-arrow" aria-hidden="true">›</span>
+          </button>
         </nav>
 
         <div class="agent-guide-panel">
-          <article id="agent-guide-hermes" role="tabpanel" aria-label="Hermes Agent">
+          <article id="agent-guide-hermes" role="tabpanel" aria-label="Hermes Agent" hidden>
             <header class="agent-guide-hero">
               <div>
                 <div class="agent-guide-eyebrow" data-i18n="agent_provider_setup">Provider setup</div>
@@ -3812,8 +3875,28 @@
               <div class="agent-guide-section-header">
                 <div>
                   <h3 class="agent-guide-section-title" data-i18n="agent_configure_provider">Configure provider</h3>
-                  <p class="agent-guide-section-desc"><span data-i18n="agent_edit_file">Edit</span> <code>~/.hermes/config.yaml</code></p>
+                  <p class="agent-guide-section-desc"><span data-i18n="agent_configuration_file">Configuration file</span>: <code id="hermes-config-path">~/.hermes/profiles/ironmlx/config.yaml</code></p>
                 </div>
+              </div>
+              <fieldset class="agent-profile-options">
+                <legend class="visually-hidden" data-i18n="hermes_profile_scope_label">Hermes profile scope</legend>
+                <label class="agent-profile-option active">
+                  <input class="visually-hidden" type="radio" name="hermes-profile-mode" value="dedicated" data-hermes-profile-mode="dedicated" checked onchange="selectHermesProfileMode('dedicated')">
+                  <span class="agent-profile-option-title">
+                    <span data-i18n="hermes_profile_dedicated">Dedicated ironmlx profile</span>
+                    <span class="agent-profile-option-badge" data-i18n="agent_recommended">Recommended</span>
+                  </span>
+                  <span class="agent-profile-option-desc" data-i18n="hermes_profile_dedicated_desc">Keeps IronMLX configuration and sessions isolated from the default profile.</span>
+                </label>
+                <label class="agent-profile-option">
+                  <input class="visually-hidden" type="radio" name="hermes-profile-mode" value="default" data-hermes-profile-mode="default" onchange="selectHermesProfileMode('default')">
+                  <span class="agent-profile-option-title" data-i18n="hermes_profile_default">Default profile</span>
+                  <span class="agent-profile-option-desc" data-i18n="hermes_profile_default_desc">Simpler, but changes the provider used by the default profile.</span>
+                </label>
+              </fieldset>
+              <div class="agent-guide-note" id="hermes-profile-create-note">
+                <span aria-hidden="true">i</span>
+                <span><span data-i18n="hermes_profile_create_once">Create the profile once before editing its configuration:</span> <code>hermes profile create ironmlx</code></span>
               </div>
               <div class="agent-guide-fields">
                 <div class="agent-guide-field">
@@ -3837,6 +3920,14 @@
               <div class="agent-guide-note warning">
                 <span aria-hidden="true">!</span>
                 <span data-i18n="hermes_context_requirement">Hermes Agent v0.20.0 and later require at least 64K context tokens. Use the model's actual context limit.</span>
+              </div>
+              <div class="agent-guide-note">
+                <span aria-hidden="true">i</span>
+                <span>
+                  <span data-i18n="hermes_profile_tui">TUI</span>: <code id="hermes-tui-command">hermes --profile ironmlx --tui</code><br>
+                  <span id="hermes-desktop-dedicated-note" data-i18n="hermes_profile_desktop_dedicated">Desktop: select the ironmlx profile, then start a new chat.</span>
+                  <span id="hermes-desktop-default-note" data-i18n="hermes_profile_desktop_default" hidden>Desktop: use the default profile, then start a new chat.</span>
+                </span>
               </div>
             </section>
 
@@ -3863,7 +3954,7 @@
             </section>
           </article>
 
-          <article id="agent-guide-omp" role="tabpanel" aria-label="oh-my-pi" hidden>
+          <article id="agent-guide-omp" role="tabpanel" aria-label="oh-my-pi">
             <header class="agent-guide-hero">
               <div>
                 <div class="agent-guide-eyebrow" data-i18n="agent_provider_setup">Provider setup</div>
@@ -4498,13 +4589,22 @@
       agent_current_connection: "Current IronMLX connection",
       agent_current_connection_desc: "Start IronMLX and load a model before validating the generated configuration.",
       agent_api_endpoint: "API endpoint", agent_loaded_model: "Loaded model", agent_no_model: "No model loaded",
-      agent_configure_provider: "Configure provider", agent_edit_file: "Edit",
+      agent_configure_provider: "Configure provider", agent_edit_file: "Edit", agent_configuration_file: "Configuration file", agent_recommended: "Recommended",
       agent_model: "Model", agent_context_length: "Context length",
       copy_configuration: "Copy configuration", copy_commands: "Copy commands", agent_copied: "Copied", agent_copy_failed: "Could not copy to the clipboard.",
       agent_verify: "Verify", agent_refresh_models: "Refresh and select a model",
       agent_select_model_placeholder: "Load a model in IronMLX",
       agent_tool_boundary: "The agent executes terminal, bash, and MCP tools locally. IronMLX only provides inference and structured tool calls.",
       hermes_description: "Use IronMLX through Hermes Agent's stateless Responses transport. The configuration below is generated from the current App state.",
+      hermes_profile_scope_label: "Hermes profile scope",
+      hermes_profile_dedicated: "Dedicated ironmlx profile",
+      hermes_profile_dedicated_desc: "Keeps IronMLX configuration and sessions isolated from the default profile.",
+      hermes_profile_default: "Default profile",
+      hermes_profile_default_desc: "Simpler, but changes the provider used by the default profile.",
+      hermes_profile_create_once: "Create the profile once before editing its configuration:",
+      hermes_profile_tui: "TUI",
+      hermes_profile_desktop_dedicated: "Desktop: select the ironmlx profile, then start a new chat.",
+      hermes_profile_desktop_default: "Desktop: use the default profile, then start a new chat.",
       hermes_context_requirement: "Hermes Agent v0.20.0 and later require at least 64K context tokens. Use the model's actual context limit.",
       hermes_verify_desc: "Check the service, complete one inference request, then verify a terminal tool call.",
       omp_description: "Register IronMLX as a keyless Responses provider, discover the models served by the App, and launch OMP in the intended project directory.",
@@ -4862,13 +4962,22 @@
       agent_current_connection: "当前 IronMLX 连接",
       agent_current_connection_desc: "验证生成的配置前，请先启动 IronMLX 并加载模型。",
       agent_api_endpoint: "API Endpoint", agent_loaded_model: "已加载模型", agent_no_model: "尚未加载模型",
-      agent_configure_provider: "配置 Provider", agent_edit_file: "编辑",
+      agent_configure_provider: "配置 Provider", agent_edit_file: "编辑", agent_configuration_file: "配置文件", agent_recommended: "推荐",
       agent_model: "模型", agent_context_length: "Context 长度",
       copy_configuration: "复制配置", copy_commands: "复制命令", agent_copied: "已复制", agent_copy_failed: "无法复制到剪贴板。",
       agent_verify: "验证", agent_refresh_models: "刷新并选择模型",
       agent_select_model_placeholder: "请先在 IronMLX 中加载模型",
       agent_tool_boundary: "Agent 在本机执行 terminal、bash 和 MCP 工具；IronMLX 仅提供推理和结构化工具调用。",
       hermes_description: "通过 Hermes Agent 的无状态 Responses transport 使用 IronMLX。下方配置根据当前 App 状态生成。",
+      hermes_profile_scope_label: "Hermes profile 范围",
+      hermes_profile_dedicated: "专用 ironmlx profile",
+      hermes_profile_dedicated_desc: "将 IronMLX 配置和会话与默认 profile 隔离。",
+      hermes_profile_default: "默认 profile",
+      hermes_profile_default_desc: "配置更简单，但会修改默认 profile 使用的 Provider。",
+      hermes_profile_create_once: "编辑配置前，仅需创建一次 profile：",
+      hermes_profile_tui: "TUI",
+      hermes_profile_desktop_dedicated: "Desktop：选择 ironmlx profile，然后新建会话。",
+      hermes_profile_desktop_default: "Desktop：使用默认 profile，然后新建会话。",
       hermes_context_requirement: "Hermes Agent v0.20.0 及以上版本需要至少 64K context tokens。请填写模型实际的 context 上限。",
       hermes_verify_desc: "检查服务、完成一次推理请求，然后验证一次 terminal 工具调用。",
       omp_description: "将 IronMLX 注册为免密钥 Responses Provider，发现 App 提供的模型，并在目标项目目录启动 OMP。",
@@ -5226,13 +5335,22 @@
       agent_current_connection: "目前 IronMLX 連線",
       agent_current_connection_desc: "驗證產生的設定前，請先啟動 IronMLX 並載入模型。",
       agent_api_endpoint: "API Endpoint", agent_loaded_model: "已載入模型", agent_no_model: "尚未載入模型",
-      agent_configure_provider: "設定 Provider", agent_edit_file: "編輯",
+      agent_configure_provider: "設定 Provider", agent_edit_file: "編輯", agent_configuration_file: "設定檔", agent_recommended: "建議",
       agent_model: "模型", agent_context_length: "Context 長度",
       copy_configuration: "複製設定", copy_commands: "複製指令", agent_copied: "已複製", agent_copy_failed: "無法複製到剪貼簿。",
       agent_verify: "驗證", agent_refresh_models: "重新整理並選擇模型",
       agent_select_model_placeholder: "請先在 IronMLX 載入模型",
       agent_tool_boundary: "Agent 在本機執行 terminal、bash 和 MCP 工具；IronMLX 僅提供推理與結構化工具呼叫。",
       hermes_description: "透過 Hermes Agent 的無狀態 Responses transport 使用 IronMLX。下方設定會根據目前 App 狀態產生。",
+      hermes_profile_scope_label: "Hermes profile 範圍",
+      hermes_profile_dedicated: "專用 ironmlx profile",
+      hermes_profile_dedicated_desc: "將 IronMLX 設定與工作階段和預設 profile 隔離。",
+      hermes_profile_default: "預設 profile",
+      hermes_profile_default_desc: "設定較簡單，但會修改預設 profile 使用的 Provider。",
+      hermes_profile_create_once: "編輯設定前，只需建立一次 profile：",
+      hermes_profile_tui: "TUI",
+      hermes_profile_desktop_dedicated: "Desktop：選擇 ironmlx profile，然後建立新工作階段。",
+      hermes_profile_desktop_default: "Desktop：使用預設 profile，然後建立新工作階段。",
       hermes_context_requirement: "Hermes Agent v0.20.0 及以上版本需要至少 64K context tokens。請填寫模型實際的 context 上限。",
       hermes_verify_desc: "檢查服務、完成一次推理請求，然後驗證一次 terminal 工具呼叫。",
       omp_description: "將 IronMLX 註冊為免金鑰 Responses Provider，探索 App 提供的模型，並在目標專案目錄啟動 OMP。",
@@ -5593,13 +5711,22 @@
       agent_current_connection: "現在の IronMLX 接続",
       agent_current_connection_desc: "生成した設定を検証する前に、IronMLX を起動してモデルを読み込んでください。",
       agent_api_endpoint: "API エンドポイント", agent_loaded_model: "読み込み済みモデル", agent_no_model: "モデルが読み込まれていません",
-      agent_configure_provider: "プロバイダーを設定", agent_edit_file: "編集",
+      agent_configure_provider: "プロバイダーを設定", agent_edit_file: "編集", agent_configuration_file: "設定ファイル", agent_recommended: "推奨",
       agent_model: "モデル", agent_context_length: "コンテキスト長",
       copy_configuration: "設定をコピー", copy_commands: "コマンドをコピー", agent_copied: "コピーしました", agent_copy_failed: "クリップボードにコピーできませんでした。",
       agent_verify: "検証", agent_refresh_models: "モデルを更新して選択",
       agent_select_model_placeholder: "IronMLX でモデルを読み込んでください",
       agent_tool_boundary: "エージェントが terminal、bash、MCP ツールをローカルで実行します。IronMLX は推論と構造化ツール呼び出しのみを提供します。",
       hermes_description: "Hermes Agent のステートレス Responses トランスポートから IronMLX を使用します。以下の設定は現在の App の状態から生成されます。",
+      hermes_profile_scope_label: "Hermes profile の範囲",
+      hermes_profile_dedicated: "専用 ironmlx profile",
+      hermes_profile_dedicated_desc: "IronMLX の設定とセッションをデフォルト profile から分離します。",
+      hermes_profile_default: "デフォルト profile",
+      hermes_profile_default_desc: "簡単ですが、デフォルト profile のプロバイダーが変更されます。",
+      hermes_profile_create_once: "設定を編集する前に profile を一度だけ作成します：",
+      hermes_profile_tui: "TUI",
+      hermes_profile_desktop_dedicated: "Desktop：ironmlx profile を選択して、新しいチャットを開始します。",
+      hermes_profile_desktop_default: "Desktop：デフォルト profile を使用して、新しいチャットを開始します。",
       hermes_context_requirement: "Hermes Agent v0.20.0 以降では 64K 以上のコンテキストトークンが必要です。モデルの実際のコンテキスト上限を指定してください。",
       hermes_verify_desc: "サービスを確認し、推論リクエストを 1 回実行してから terminal ツール呼び出しを検証します。",
       omp_description: "IronMLX をキー不要の Responses プロバイダーとして登録し、App が提供するモデルを検出して、目的のプロジェクトディレクトリで OMP を起動します。",
@@ -5960,13 +6087,22 @@
       agent_current_connection: "현재 IronMLX 연결",
       agent_current_connection_desc: "생성된 설정을 확인하기 전에 IronMLX를 시작하고 모델을 로드하세요.",
       agent_api_endpoint: "API 엔드포인트", agent_loaded_model: "로드된 모델", agent_no_model: "로드된 모델 없음",
-      agent_configure_provider: "프로바이더 구성", agent_edit_file: "편집",
+      agent_configure_provider: "프로바이더 구성", agent_edit_file: "편집", agent_configuration_file: "설정 파일", agent_recommended: "권장",
       agent_model: "모델", agent_context_length: "컨텍스트 길이",
       copy_configuration: "설정 복사", copy_commands: "명령 복사", agent_copied: "복사됨", agent_copy_failed: "클립보드에 복사할 수 없습니다.",
       agent_verify: "검증", agent_refresh_models: "모델 새로고침 및 선택",
       agent_select_model_placeholder: "IronMLX에서 모델을 로드하세요",
       agent_tool_boundary: "에이전트는 terminal, bash 및 MCP 도구를 로컬에서 실행합니다. IronMLX는 추론과 구조화된 도구 호출만 제공합니다.",
       hermes_description: "Hermes Agent의 상태 비저장 Responses 전송을 통해 IronMLX를 사용합니다. 아래 설정은 현재 App 상태에서 생성됩니다.",
+      hermes_profile_scope_label: "Hermes profile 범위",
+      hermes_profile_dedicated: "전용 ironmlx profile",
+      hermes_profile_dedicated_desc: "IronMLX 설정과 세션을 기본 profile에서 분리합니다.",
+      hermes_profile_default: "기본 profile",
+      hermes_profile_default_desc: "간단하지만 기본 profile에서 사용하는 프로바이더가 변경됩니다.",
+      hermes_profile_create_once: "설정을 편집하기 전에 profile을 한 번만 생성하세요:",
+      hermes_profile_tui: "TUI",
+      hermes_profile_desktop_dedicated: "Desktop: ironmlx profile을 선택한 다음 새 채팅을 시작하세요.",
+      hermes_profile_desktop_default: "Desktop: 기본 profile을 사용한 다음 새 채팅을 시작하세요.",
       hermes_context_requirement: "Hermes Agent v0.20.0 이상은 최소 64K 컨텍스트 토큰이 필요합니다. 모델의 실제 컨텍스트 한도를 입력하세요.",
       hermes_verify_desc: "서비스를 확인하고 추론 요청 한 번을 완료한 다음 terminal 도구 호출을 검증하세요.",
       omp_description: "IronMLX를 키가 필요 없는 Responses 프로바이더로 등록하고 App이 제공하는 모델을 검색한 뒤 원하는 프로젝트 디렉터리에서 OMP를 시작하세요.",
@@ -9516,7 +9652,8 @@
   })();
 
   // ── Agent provider guides ──
-  let currentAgentGuide = 'hermes';
+  let currentAgentGuide = null;
+  let hermesProfileMode = 'dedicated';
 
   function selectAgentGuide(agent) {
     if (agent !== 'hermes' && agent !== 'omp') return;
@@ -9529,6 +9666,18 @@
     ['hermes', 'omp'].forEach(function(name) {
       const panel = document.getElementById('agent-guide-' + name);
       if (panel) panel.hidden = name !== agent;
+    });
+    renderAgentGuideConfiguration();
+  }
+
+  function selectHermesProfileMode(mode) {
+    if (mode !== 'dedicated' && mode !== 'default') return;
+    hermesProfileMode = mode;
+    document.querySelectorAll('[data-hermes-profile-mode]').forEach(function(input) {
+      const selected = input.dataset.hermesProfileMode === mode;
+      input.checked = selected;
+      const option = input.closest('.agent-profile-option');
+      if (option) option.classList.toggle('active', selected);
     });
     renderAgentGuideConfiguration();
   }
@@ -9622,6 +9771,25 @@
       contextInput.value = String(contextLength);
     }
 
+    const dedicatedHermesProfile = hermesProfileMode === 'dedicated';
+    const hermesCommand = dedicatedHermesProfile
+      ? 'hermes --profile ironmlx'
+      : 'hermes --profile default';
+    const hermesConfigPath = document.getElementById('hermes-config-path');
+    const hermesCreateNote = document.getElementById('hermes-profile-create-note');
+    const hermesTuiCommand = document.getElementById('hermes-tui-command');
+    const hermesDesktopDedicatedNote = document.getElementById('hermes-desktop-dedicated-note');
+    const hermesDesktopDefaultNote = document.getElementById('hermes-desktop-default-note');
+    if (hermesConfigPath) {
+      hermesConfigPath.textContent = dedicatedHermesProfile
+        ? '~/.hermes/profiles/ironmlx/config.yaml'
+        : '~/.hermes/config.yaml';
+    }
+    if (hermesCreateNote) hermesCreateNote.hidden = !dedicatedHermesProfile;
+    if (hermesTuiCommand) hermesTuiCommand.textContent = hermesCommand + ' --tui';
+    if (hermesDesktopDedicatedNote) hermesDesktopDedicatedNote.hidden = !dedicatedHermesProfile;
+    if (hermesDesktopDefaultNote) hermesDesktopDefaultNote.hidden = dedicatedHermesProfile;
+
     setAgentCode('hermes-config-code', [
       'model:',
       '  default: ' + yamlDoubleQuoted(hermesModel),
@@ -9641,8 +9809,8 @@
 
     setAgentCode('hermes-verify-code', [
       'curl -fsS ' + shellQuote(agentHealthEndpoint()),
-      'hermes -z "Reply with exactly IRONMLX_OK"',
-      'hermes -z -t terminal "Use the terminal tool exactly once to run pwd, then report its output."'
+      hermesCommand + ' -z "Reply with exactly IRONMLX_OK"',
+      hermesCommand + ' -z -t terminal "Use the terminal tool exactly once to run pwd, then report its output."'
     ].join('\n'));
 
     setAgentCode('omp-config-code', [
@@ -11516,7 +11684,8 @@
   (function initDashboardAppShell() {
     initializeIncidentDateTimeFilters();
     setLanguage(window.__APP_LANGUAGE__ || 'en');
-    selectAgentGuide('hermes');
+    const firstAgentGuide = document.querySelector('[data-agent-guide]');
+    if (firstAgentGuide) selectAgentGuide(firstAgentGuide.dataset.agentGuide);
     setupFixedTooltips();
     initStatusPolling();
     refreshDownloadQueue();

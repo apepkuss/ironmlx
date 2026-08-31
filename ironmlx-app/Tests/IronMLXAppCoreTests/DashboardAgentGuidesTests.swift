@@ -12,6 +12,16 @@ import Testing
     #expect(html.contains(#"class="agent-guide-shell""#))
     #expect(html.contains(#"data-agent-guide="hermes""#))
     #expect(html.contains(#"data-agent-guide="omp""#))
+    let ompNavIndex = try #require(html.range(of: #"data-agent-guide="omp""#)?.lowerBound)
+    let hermesNavIndex = try #require(html.range(of: #"data-agent-guide="hermes""#)?.lowerBound)
+    #expect(ompNavIndex < hermesNavIndex)
+    #expect(html.contains(#"class="agent-guide-nav-item active" type="button" data-agent-guide="omp" aria-selected="true""#))
+    #expect(html.contains(#"class="agent-guide-nav-item" type="button" data-agent-guide="hermes" aria-selected="false""#))
+    #expect(html.contains(#"id="agent-guide-hermes" role="tabpanel" aria-label="Hermes Agent" hidden"#))
+    #expect(html.contains(#"id="agent-guide-omp" role="tabpanel" aria-label="oh-my-pi">"#))
+    #expect(html.contains("let currentAgentGuide = null"))
+    #expect(html.contains("const firstAgentGuide = document.querySelector('[data-agent-guide]')"))
+    #expect(html.contains("selectAgentGuide(firstAgentGuide.dataset.agentGuide)"))
     #expect(html.contains(#"data-agent-logo="hermes" src="hermes-agent-logo.svg""#))
     #expect(html.contains(#"data-agent-logo="omp" src="oh-my-pi-logo.svg""#))
     #expect(!html.contains(#"class="agent-guide-mark" aria-hidden="true">H</span>"#))
@@ -33,6 +43,7 @@ import Testing
     #expect(html.components(separatedBy: #"agent_copied: ""#).count - 1 == 5)
     #expect(html.components(separatedBy: #"agent_copy_failed: ""#).count - 1 == 5)
     #expect(html.contains("function selectAgentGuide(agent)"))
+    #expect(html.contains("function selectHermesProfileMode(mode)"))
     #expect(html.contains("function renderAgentGuideConfiguration()"))
 
     let resourcesDirectory = "Sources/IronMLXAppCore/Resources"
@@ -59,10 +70,32 @@ import Testing
     #expect(html.contains("'ironmlx/' + ompModel"))
     #expect(html.contains("Math.max(64000"))
     #expect(html.contains("Hermes Agent v0.20.0 及以上版本需要至少 64K context tokens"))
+    #expect(html.contains(#"data-hermes-profile-mode="dedicated""#))
+    #expect(html.contains(#"data-hermes-profile-mode="default""#))
+    #expect(html.contains("let hermesProfileMode = 'dedicated'"))
+    #expect(html.contains("~/.hermes/profiles/ironmlx/config.yaml"))
+    #expect(html.contains("~/.hermes/config.yaml"))
+    #expect(html.contains("hermes profile create ironmlx"))
+    #expect(html.contains("hermes --profile ironmlx"))
+    #expect(html.contains("hermes --profile default"))
+    #expect(html.contains("hermesCommand + ' --tui'"))
+    #expect(html.contains("Desktop：选择 ironmlx profile，然后新建会话。"))
     #expect(!html.contains("agent_full_guide"))
     #expect(!html.contains("agent-guide-doc-link"))
     #expect(!html.contains(#"docs/hermes-agent.md"#))
     #expect(!html.contains(#"docs/oh-my-pi.md"#))
+}
+
+@Test func hermesAgentGuideRecommendsAnIsolatedProfile() throws {
+    let guide = try String(contentsOfFile: "../docs/hermes-agent.md", encoding: .utf8)
+
+    #expect(guide.contains("## 配置（推荐）"))
+    #expect(guide.contains("hermes profile create ironmlx"))
+    #expect(guide.contains("~/.hermes/profiles/ironmlx/config.yaml"))
+    #expect(guide.contains("hermes --profile ironmlx --tui"))
+    #expect(guide.contains("Desktop：选择 `ironmlx` profile 后新建会话。"))
+    #expect(guide.contains("~/.hermes/config.yaml"))
+    #expect(guide.contains("若使用默认 profile，请将命令中的 `--profile ironmlx` 改为 `--profile default`。"))
 }
 
 @MainActor

@@ -3,9 +3,15 @@
 Hermes Agent 可通过 Responses API 将 IronMLX App 用作推理服务，无需修改 Hermes
 Agent 源码。开始前，请先启动 IronMLX App 并加载需要使用的模型。
 
-## 配置
+## 配置（推荐）
 
-编辑 `~/.hermes/config.yaml`：
+创建专用 profile，避免影响 Hermes 默认配置和会话：
+
+```bash
+hermes profile create ironmlx
+```
+
+编辑 `~/.hermes/profiles/ironmlx/config.yaml`：
 
 ```yaml
 model:
@@ -31,13 +37,21 @@ terminal:
 - 仅在使用 terminal 工具时需要设置 `terminal.cwd`。
 - 本机默认配置不需要 API Key。
 
+如需直接使用默认 profile，也可将同一配置写入 `~/.hermes/config.yaml`；这会改变
+Hermes 默认 profile 使用的 Provider。
+
 ## 验证
 
 ```bash
 curl -fsS http://127.0.0.1:9068/healthz
-hermes -z "Reply with exactly IRONMLX_OK"
-hermes -z -t terminal "Use the terminal tool exactly once to run pwd, then report its output."
+hermes --profile ironmlx -z "Reply with exactly IRONMLX_OK"
+hermes --profile ironmlx -z -t terminal "Use the terminal tool exactly once to run pwd, then report its output."
 ```
+
+- TUI：`hermes --profile ironmlx --tui`
+- Desktop：选择 `ironmlx` profile 后新建会话。
+
+若使用默认 profile，请将命令中的 `--profile ironmlx` 改为 `--profile default`。
 
 Hermes 负责执行 terminal、MCP 等工具，并将工具结果回传给 IronMLX；IronMLX 只负责
 推理和生成结构化工具调用。
