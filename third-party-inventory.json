@@ -3715,8 +3715,8 @@
         "license_file": "swift-sparkle-license.txt",
         "license_sha256": "389a4e4e9a32f059775b13a06e25a591445ba229d2838d26dd3e7c0c45127cfe",
         "repository": "https://github.com/sparkle-project/Sparkle.git",
-        "revision": "79bc9e872948e47877e76f194cb0c8e0412b0b90",
-        "version": "2.9.5"
+        "revision": "ac2def288cbff5cfc7df3ffef6abdf45b72bcb0a",
+        "version": "2.9.6"
       },
       {
         "component": "ZIPFoundation",
@@ -3730,6 +3730,6 @@
       }
     ],
     "manifest": "ironmlx-app/Package.swift",
-    "manifest_sha256": "1c5752ccd7eb99847deb2011eabb51c70ba37dd25b18d93b5617cc7f47b4c9a5"
+    "manifest_sha256": "4a524f655147e30c8d664a24bcd0e975f2c002f154c75d5c646b936b632453b4"
   }
 }
