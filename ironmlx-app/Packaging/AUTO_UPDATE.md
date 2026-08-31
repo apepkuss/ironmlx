@@ -1,6 +1,6 @@
 # IronMLX automatic updates
 
-Phase one integrates Sparkle 2.9.5 for development validation. It does not
+Phase one integrates Sparkle 2.9.6 for development validation. It does not
 authorize public distribution and does not configure the stable channel.
 
 ## Channel isolation

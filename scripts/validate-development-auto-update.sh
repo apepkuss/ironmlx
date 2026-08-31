@@ -33,9 +33,11 @@ cleanup() {
     wait "$server_pid" 2>/dev/null || true
   fi
   if [ -n "$install_app_real" ]; then
-    while IFS= read -r process_id; do
-      [ -n "$process_id" ] && kill "$process_id" 2>/dev/null || true
-    done < <(pgrep -f "$install_app_real/Contents/MacOS/IronMLX" || true)
+    for app_root in "$INSTALL_APP" "$install_app_real"; do
+      while IFS= read -r process_id; do
+        [ -n "$process_id" ] && kill "$process_id" 2>/dev/null || true
+      done < <(pgrep -f "$app_root/Contents/" || true)
+    done
   fi
   if [ -n "$trusted_certificate_sha" ]; then
     security delete-certificate -Z "$trusted_certificate_sha" "$HOME/Library/Keychains/login.keychain-db" \
