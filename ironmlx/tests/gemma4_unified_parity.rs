@@ -16,7 +16,7 @@ use mlx::{Array, Dtype, StreamOrDevice};
 const FIXTURE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/gemma4_unified");
 const COCO_IMAGE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/tests/fixtures/p6_qwen35_vl/coco_sample.jpg"
+    "/tests/fixtures/qwen35_vl/coco_sample.jpg"
 );
 const IMAGE_TOKEN_ID: i32 = 258880;
 // MLX-VLM and ironmlx run the same 4-bit checkpoint through different fused

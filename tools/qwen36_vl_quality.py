@@ -337,7 +337,7 @@ def main() -> int:
     parser.add_argument(
         "--fixture-dir",
         type=Path,
-        default=Path("ironmlx/tests/fixtures/p6_qwen35_vl"),
+        default=Path("ironmlx/tests/fixtures/qwen35_vl"),
     )
     parser.add_argument(
         "--target",

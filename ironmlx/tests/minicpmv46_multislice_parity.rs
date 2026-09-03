@@ -73,7 +73,7 @@ fn load_npy(name: &str) -> Array {
 fn coco_bytes() -> Vec<u8> {
     let p = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/p6_qwen35_vl/coco_sample.jpg"
+        "/tests/fixtures/qwen35_vl/coco_sample.jpg"
     );
     std::fs::read(p).expect("read coco_sample.jpg")
 }

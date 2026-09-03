@@ -3,9 +3,7 @@
 //! procedure with a single callable; can be invoked from individual
 //! integration tests or from `sweep_full.sh` between suites.
 //!
-//! See spec
-//! `docs/superpowers/specs/2026-05-18-b1-p2-5-production-hardening-design.md`
-//! §4.3 G4 for rationale.
+//! The helper keeps test state isolated between cases.
 
 // Shared test helpers: each integration-test crate uses a subset, so unused-in-this-crate items are expected.
 #![allow(dead_code)]

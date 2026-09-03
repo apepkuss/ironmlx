@@ -79,12 +79,14 @@ fn main() {
 }
 
 fn locate_mlx() -> (PathBuf, PathBuf) {
-    let mlx_dir = env::var_os("MLX_DIR").map(PathBuf::from).unwrap_or_else(|| {
-        panic!(
-            "MLX_DIR is not set. Build MLX first (see docs/superpowers/plans/2026-05-03-cxx-mlx-p0-scaffold.md) \
+    let mlx_dir = env::var_os("MLX_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            panic!(
+                "MLX_DIR is not set. Build MLX first (see docs/installation.md) \
              and export MLX_DIR=<install prefix>."
-        )
-    });
+            )
+        });
     let include = mlx_dir.join("include");
     let lib = mlx_dir.join("lib");
     if !include.is_dir() || !lib.is_dir() {

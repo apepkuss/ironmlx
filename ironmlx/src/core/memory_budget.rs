@@ -4,9 +4,7 @@
 //! RAM minus model footprint and safety margin.
 //!
 //! Used at `Scheduler::new` (startup validation) and `admit_inner`
-//! (runtime admission gate). See spec
-//! `docs/superpowers/specs/2026-05-18-b1-p2-5-production-hardening-design.md`
-//! §4.1 for the design rationale.
+//! (runtime admission gate) for production memory safety.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;

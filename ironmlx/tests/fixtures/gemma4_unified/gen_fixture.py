@@ -39,7 +39,7 @@ from PIL import Image
 from mlx_vlm import load
 
 OUT_DIR = Path(__file__).parent
-DEFAULT_IMAGE = Path(__file__).resolve().parents[1] / "p6_qwen35_vl" / "coco_sample.jpg"
+DEFAULT_IMAGE = Path(__file__).resolve().parents[1] / "qwen35_vl" / "coco_sample.jpg"
 IMAGE_TOKEN_ID = 258880
 POOLING_KERNEL_SIZE = 3
 TEXT_PROMPT = "What is 2+2?"

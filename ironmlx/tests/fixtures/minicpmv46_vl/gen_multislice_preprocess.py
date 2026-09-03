@@ -14,7 +14,7 @@ vision tower consumes it: mlx-vlm's per-slice `cur_pixels` is CHW-packed
 post-transpose tensor, matching the layout `image_processor::slice_to_array`
 emits (and `gen_vision_embeds.py`'s single-slice fixture).
 
-Fixture image: `p6_qwen35_vl/coco_sample.jpg` (640×480). ratio = 640*480/448² =
+Fixture image: `qwen35_vl/coco_sample.jpg` (640×480). ratio = 640*480/448² =
 1.5306 → ceil → multiple=2 → best_grid (gx=2, gy=1) → 3 slices (1 source + 2
 refine patches). Source grid (gh,gw)=(28,36); each refine patch (gh,gw)=(40,28).
 
@@ -46,7 +46,7 @@ OUT_DIR = Path(__file__).parent
 PATCH = 14
 MAX_SLICE_NUMS = 9
 
-IMAGE_PATH = Path(__file__).resolve().parents[1] / "p6_qwen35_vl" / "coco_sample.jpg"
+IMAGE_PATH = Path(__file__).resolve().parents[1] / "qwen35_vl" / "coco_sample.jpg"
 
 model_path = os.environ.get("MINICPMV46_MODEL")
 if not model_path:

@@ -39,7 +39,7 @@ SUITES=(
 )
 
 # Append b1_p2_3c_plus_chunked_admit_mid if it exists (3c+ branch only).
-if [ -f "ironmlx/tests/b1_p2_3c_plus_chunked_admit_mid.rs" ]; then
+if [ -f "ironmlx/tests/chunked_admit_mid.rs" ]; then
   SUITES+=("b1_p2_3c_plus_chunked_admit_mid")
 fi
 

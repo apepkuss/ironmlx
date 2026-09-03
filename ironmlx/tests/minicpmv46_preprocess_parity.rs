@@ -36,7 +36,7 @@ fn load_npy(name: &str) -> Array {
 fn preprocess_matches_mlx_vlm_single_slice() {
     let img_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/p6_qwen35_vl/coco_sample.jpg"
+        "/tests/fixtures/qwen35_vl/coco_sample.jpg"
     );
     let bytes = std::fs::read(img_path).expect("read coco_sample.jpg");
 

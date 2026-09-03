@@ -382,8 +382,8 @@ async fn assert_tool_round_trip(client: &reqwest::Client, endpoint: &str, model_
 }
 
 async fn assert_image_input(client: &reqwest::Client, endpoint: &str, model_id: &str) {
-    let image_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/p6_qwen35_vl/coco_sample.jpg");
+    let image_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/qwen35_vl/coco_sample.jpg");
     let image = std::fs::read(&image_path).expect("read COCO image fixture");
     let image_url = format!(
         "data:image/jpeg;base64,{}",

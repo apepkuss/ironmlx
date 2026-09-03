@@ -402,7 +402,7 @@ mod tests {
         // Use the real COCO fixture — same bytes the image_processor unit tests use.
         let img_bytes = std::fs::read(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/p6_qwen35_vl/coco_sample.jpg"
+            "/tests/fixtures/qwen35_vl/coco_sample.jpg"
         ))
         .expect("read coco_sample.jpg fixture");
 

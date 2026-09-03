@@ -53,7 +53,7 @@ IMAGE_TOKEN_ID = 248056
 
 # Reuse the existing COCO fixture image (P1 vision-embeds fixture uses the same).
 IMAGE_PATH = (
-    Path(__file__).resolve().parents[1] / "p6_qwen35_vl" / "coco_sample.jpg"
+    Path(__file__).resolve().parents[1] / "qwen35_vl" / "coco_sample.jpg"
 )
 
 # A simple raw prompt with a single `<image>` marker. We do NOT apply a chat

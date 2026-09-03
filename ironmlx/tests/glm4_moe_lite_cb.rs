@@ -162,7 +162,7 @@ fn spawn(
 /// Block (cooperatively) until the actor's rolling decode loop has driven at
 /// least `target` outer batches, i.e. the already-admitted rows are confirmed
 /// to be in `Decoding` and stepping. Mirrors the mid-admit timing signal used
-/// by `b1_p2_3c_3_continuous_batching.rs` (`batch_count` polling beats a fixed
+/// by `continuous_batching.rs` (`batch_count` polling beats a fixed
 /// sleep, which is fragile on a cold GPU where prefill can exceed 200ms). This
 /// lets a follow-up `Admit` land WHILE the batch is saturated, so it is queued
 /// and later mid-admitted into a freed slot rather than starting a fresh batch.

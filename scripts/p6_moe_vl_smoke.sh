@@ -28,7 +28,7 @@ BASE_PORT="${BASE_PORT:-18190}"
 OUT_DIR="${OUT_DIR:-/tmp/ironmlx-p6-moe-vl-smoke}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 
-FIXTURE_DIR="$REPO_ROOT/ironmlx/tests/fixtures/p6_qwen35_vl"
+FIXTURE_DIR="$REPO_ROOT/ironmlx/tests/fixtures/qwen35_vl"
 PY_HELPER="$OUT_DIR/p6_moe_vl_smoke_client.py"
 
 SERVER_PID=""
@@ -324,7 +324,7 @@ SERVER_PID=""
 
 log "running semantic check N=2"
 QWEN35_MODEL="$MODEL_DIR" MLX_DIR="$MLX_DIR" \
-  uv run --with requests python "$FIXTURE_DIR/p6_6_semantic_check.py" \
+  uv run --with requests python "$FIXTURE_DIR/semantic_check.py" \
   --out "$OUT_DIR/p6_6_semantic_n2.md" \
   --port "$PORT_D" \
   --model-name qwen3_5_moe \
@@ -332,7 +332,7 @@ QWEN35_MODEL="$MODEL_DIR" MLX_DIR="$MLX_DIR" \
 
 log "running semantic check N=3"
 QWEN35_MODEL="$MODEL_DIR" MLX_DIR="$MLX_DIR" \
-  uv run --with requests python "$FIXTURE_DIR/p6_6_semantic_check.py" \
+  uv run --with requests python "$FIXTURE_DIR/semantic_check.py" \
   --out "$OUT_DIR/p6_6_semantic_n3.md" \
   --port "$PORT_E" \
   --model-name qwen3_5_moe \

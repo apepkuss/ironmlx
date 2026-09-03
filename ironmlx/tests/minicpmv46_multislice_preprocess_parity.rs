@@ -8,7 +8,7 @@
 //!   - each slice's grid `(grid_h, grid_w)` matches mlx-vlm's `tgt_sizes`;
 //!   - each slice's packed `[1, 14, n*14, 3]` (HWC) pixel tensor is byte-close.
 //!
-//! Fixture image: `p6_qwen35_vl/coco_sample.jpg` (640×480). It DOES slice:
+//! Fixture image: `qwen35_vl/coco_sample.jpg` (640×480). It DOES slice:
 //! ratio = 640*480/448² = 1.5306 → ceil → multiple=2 → best_grid (gx=2, gy=1)
 //! → 3 slices. Source grid (gh,gw)=(28,36); each refine patch (gh,gw)=(40,28).
 //!
@@ -41,7 +41,7 @@ fn load_npy(name: &str) -> mlx::Array {
 fn preprocess_sliced_matches_mlx_vlm() {
     let img_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/p6_qwen35_vl/coco_sample.jpg"
+        "/tests/fixtures/qwen35_vl/coco_sample.jpg"
     );
     let bytes = std::fs::read(img_path).expect("read coco_sample.jpg");
 

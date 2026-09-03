@@ -19,7 +19,7 @@ pub mod ffi {
     /// (`std::variant<int, bool, Dtype>`). One field per variant arm:
     /// `kind=0` → `int_val` (i32), `kind=1` → `bool_val` (bool),
     /// `kind=2` → `dtype_val` (u8 — same convention as the rest of the
-    /// cxx-mlx FFI surface, e.g. `array_zeros`'s `dtype: u8`).
+    /// IronMLX MLX FFI surface, e.g. `array_zeros`'s `dtype: u8`).
     /// Unused fields are zero-initialized by the Rust producer.
     struct TemplateArgC {
         name: String,

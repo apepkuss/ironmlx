@@ -1962,7 +1962,7 @@ mod tests {
     #[test]
     fn is_pipelined_true_for_greedy_sampler() {
         // GenerationStream::new requires a real Qwen35Model — covered by
-        // tests/p4_qwen35_logits_match.rs. Here we verify the upstream
+        // tests/qwen35_logits_match.rs. Here we verify the upstream
         // predicate (Sampler::is_pipelinable) which GenerationStream::new
         // uses to set the pipelined flag.
         assert!(Sampler::greedy().is_pipelinable());

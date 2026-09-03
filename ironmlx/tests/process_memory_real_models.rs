@@ -15,7 +15,7 @@ use mlx::Array;
 
 fn fixture_image() -> Vec<u8> {
     std::fs::read(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/p6_qwen35_vl/coco_sample.jpg"),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/qwen35_vl/coco_sample.jpg"),
     )
     .expect("read real image fixture")
 }

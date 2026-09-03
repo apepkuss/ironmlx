@@ -73,3 +73,10 @@ App Bundle 的静态验证使用：
 ```bash
 scripts/verify-app-bundle.sh dist/IronMLX.app
 ```
+
+## 许可证
+
+IronMLX 原创源代码采用 Apache License 2.0，详见 [LICENSE](LICENSE) 和
+[NOTICE](NOTICE)。第三方依赖和随 App 打包的资产仍分别受其自身许可证约束，
+完整清单见 `THIRD_PARTY_NOTICES.md` 和 `THIRD_PARTY_LICENSES/`。模型权重不由
+IronMLX 授权或再分发，用户自行承担上游模型仓库条款责任。

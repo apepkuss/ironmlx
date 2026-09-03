@@ -6,6 +6,6 @@ a.out
 .claude/
 __pycache__/
 *.pyc
-ironmlx/tests/fixtures/p4_qwen35/*.npy
+ironmlx/tests/fixtures/qwen35/*.npy
 /reports/
 /dist/

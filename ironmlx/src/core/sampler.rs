@@ -794,8 +794,7 @@ fn apply_penalties(
 }
 
 /// Configured-sampler vectorized pipeline. Called by [`sample_batch`]
-/// when not all rows are greedy. See spec
-/// `docs/superpowers/specs/2026-05-17-b1-p2-3e-1b-vectorize-configured-sampler-design.md`.
+/// when not all rows are greedy.
 ///
 /// **Architecture (GPU → CPU handoff):**
 ///
@@ -1265,7 +1264,7 @@ fn apply_repetition_penalty(logits: &Array, history: &[u32], p: f32) -> Result<A
     // For each token id in history, scale `logits[id]` by `1/p` if the
     // logit is positive, by `p` if negative — this matches the HF
     // canonical implementation. We materialise a multiplier vector on
-    // the host because cxx-mlx's scatter coverage is not yet strong
+    // the host because MLX's scatter coverage is not yet strong
     // enough to do this fully on-device. Acceptable for P1 (vocab is
     // O(150k); cost ≪ a forward pass).
     let v: Vec<f32> = logits.to_vec()?;

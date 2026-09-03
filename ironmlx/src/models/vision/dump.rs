@@ -4,8 +4,7 @@
 //! [`dump_tensor`] is a `#[inline] fn _: () {}` no-op that the compiler erases.
 //! When the feature is ON, the function reads `IRONMLX_VISION_DUMP_DIR` and,
 //! if set, eagerly evaluates and saves the tensor as
-//! `<dir>/<name>.safetensors`. See spec
-//! `docs/superpowers/specs/2026-05-11-p6-1-vision-diff-pipeline-design.md`.
+//! `<dir>/<name>.safetensors` for fixture comparison.
 
 use mlx::Array;
 

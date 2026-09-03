@@ -13,7 +13,9 @@ members = [
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.94"
-repository = "https://github.com/wei/cxx-mlx"
+authors = ["Xin Liu"]
+license = "Apache-2.0"
+repository = "https://github.com/apepkuss/ironmlx"
 
 [workspace.dependencies]
 cxx = "1.0"

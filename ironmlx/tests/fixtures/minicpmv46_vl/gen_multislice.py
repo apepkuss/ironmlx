@@ -64,8 +64,8 @@ IMAGE_TOKEN_ID = 248056
 MAX_SLICE_NUMS = 9
 
 FIX = Path(__file__).resolve().parents[1]
-COCO_PATH = FIX / "p6_qwen35_vl" / "coco_sample.jpg"
-IMG0_PATH = FIX / "p6_qwen35_vl" / "multi_image" / "image_0.jpg"
+COCO_PATH = FIX / "qwen35_vl" / "coco_sample.jpg"
+IMG0_PATH = FIX / "qwen35_vl" / "multi_image" / "image_0.jpg"
 
 model_path = os.environ.get("MINICPMV46_MODEL")
 if not model_path:

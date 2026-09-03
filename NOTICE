@@ -1,0 +1,11 @@
+IronMLX
+Copyright 2026 Xin Liu
+
+IronMLX is distributed under the Apache License, Version 2.0. The Apache
+License text is provided in the repository root as LICENSE.
+
+Third-party dependencies, bundled assets, and their attribution and license
+texts are listed separately in THIRD_PARTY_NOTICES.md and
+THIRD_PARTY_LICENSES/. Those materials remain subject to their respective
+license terms. Model weights are not part of IronMLX and are downloaded by
+users from upstream repositories under the users' responsibility.

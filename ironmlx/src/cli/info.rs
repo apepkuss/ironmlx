@@ -12,7 +12,7 @@ pub struct InfoArgs {
 }
 
 pub fn run(_args: InfoArgs) -> Result<()> {
-    println!("ironmlx — backed by cxx-mlx");
+    println!("ironmlx — backed by Apple MLX");
     println!("MLX device: {:?}", mlx::default_device());
     Ok(())
 }

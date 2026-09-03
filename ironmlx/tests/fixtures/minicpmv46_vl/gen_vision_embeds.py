@@ -40,7 +40,7 @@ PATCH = 14
 
 # Reuse the existing COCO fixture image (P6 Qwen3.5-VL shares it).
 IMAGE_PATH = (
-    Path(__file__).resolve().parents[1] / "p6_qwen35_vl" / "coco_sample.jpg"
+    Path(__file__).resolve().parents[1] / "qwen35_vl" / "coco_sample.jpg"
 )
 
 model_path = os.environ.get("MINICPMV46_MODEL")

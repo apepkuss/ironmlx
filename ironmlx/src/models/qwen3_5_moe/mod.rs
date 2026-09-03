@@ -1,6 +1,5 @@
 //! Qwen3.5 MoE model with text and VL runtime paths. See the original text
-//! bring-up spec:
-//! `docs/superpowers/specs/2026-05-18-ironmlx-p5-qwen35-moe-design.md`.
+//! bring-up and model integration contract.
 
 pub mod config;
 pub mod decoder_layer;

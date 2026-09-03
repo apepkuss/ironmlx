@@ -1252,10 +1252,8 @@ mod tests {
         let tokenizer = crate::core::Tokenizer::from_loader(&loader).expect("tokenizer");
         let model = Qwen36MoeModel::from_loader(&loader).expect("model");
         let merge = model.model_meta().spatial_merge_size;
-        let (pixel_values, grids, mut content) = prepare_fixture_images(
-            &["tests/fixtures/p6_qwen35_vl/multi_image/image_0.jpg"],
-            merge,
-        );
+        let (pixel_values, grids, mut content) =
+            prepare_fixture_images(&["tests/fixtures/qwen35_vl/multi_image/image_0.jpg"], merge);
         content.push_str("Describe this image briefly.");
         let prompt = tokenizer
             .apply_chat_template(
@@ -1294,7 +1292,7 @@ mod tests {
         let model = Qwen36MoeModel::from_loader(&loader).expect("model");
         let merge = model.model_meta().spatial_merge_size;
         let (pixel_values, grids, mut content) =
-            prepare_fixture_images(&["tests/fixtures/p6_qwen35_vl/coco_sample.jpg"], merge);
+            prepare_fixture_images(&["tests/fixtures/qwen35_vl/coco_sample.jpg"], merge);
         content.push_str(
             "Describe this image in one concise sentence. Mention the main animals and the furniture color.",
         );
@@ -1365,8 +1363,8 @@ mod tests {
         let merge = model.model_meta().spatial_merge_size;
         let (pixel_values, grids, mut content) = prepare_fixture_images(
             &[
-                "tests/fixtures/p6_qwen35_vl/multi_image/image_0.jpg",
-                "tests/fixtures/p6_qwen35_vl/multi_image/image_1.jpg",
+                "tests/fixtures/qwen35_vl/multi_image/image_0.jpg",
+                "tests/fixtures/qwen35_vl/multi_image/image_1.jpg",
             ],
             merge,
         );

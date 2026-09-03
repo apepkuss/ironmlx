@@ -98,7 +98,7 @@ fi
 GEMMA4_MODEL="${GEMMA4_MODEL:-$(ls -d "$HOME"/.ironmlx/models/models--mlx-community--gemma-4-e4b-it-4bit/snapshots/* 2>/dev/null | head -1 || true)}"
 QWEN35_MODEL="${QWEN35_MODEL:-$(ls -d "$HOME"/.ironmlx/models/models--mlx-community--Qwen3.5-4B-MLX-4bit/snapshots/* 2>/dev/null | head -1 || true)}"
 
-FIXTURE_IMAGE="$REPO_ROOT/ironmlx/tests/fixtures/p6_qwen35_vl/coco_sample.jpg"
+FIXTURE_IMAGE="$REPO_ROOT/ironmlx/tests/fixtures/qwen35_vl/coco_sample.jpg"
 GEMMA4_IMAGE="${GEMMA4_IMAGE:-$FIXTURE_IMAGE}"
 GEMMA4_IMAGE_2="${GEMMA4_IMAGE_2:-$GEMMA4_IMAGE}"
 QWEN35_IMAGE="${QWEN35_IMAGE:-$FIXTURE_IMAGE}"

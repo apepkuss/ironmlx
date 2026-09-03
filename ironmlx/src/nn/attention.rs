@@ -5,7 +5,7 @@
 //! Scope at P1 is **construction + parameter wiring**: `from_loader` reads
 //! all four projections and (when `has_qk_norm`) the per-head Q/K RMSNorms,
 //! then computes the attention scale. The `forward` body is fully wired
-//! against the cxx-mlx fused SDPA kernel, but **calling it at P1 returns
+//! against the MLX fused SDPA kernel, but **calling it at P1 returns
 //! `Err`** because [`crate::nn::Mrope::apply`] is stubbed: real position-ids
 //! shapes only arrive once the Qwen3.5 model assembly (P3) drives the
 //! attention block. KV-cache integration lands in P2.

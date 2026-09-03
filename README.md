@@ -76,3 +76,12 @@ For a built App Bundle:
 scripts/verify-app-bundle.sh dist/IronMLX.app
 scripts/verify-model-distribution-boundary.sh dist/IronMLX.app
 ```
+
+## License
+
+IronMLX original source code is licensed under the Apache License, Version 2.0;
+see [LICENSE](LICENSE) and [NOTICE](NOTICE). Third-party dependencies and
+bundled assets remain under their respective licenses, as listed in
+`THIRD_PARTY_NOTICES.md` and `THIRD_PARTY_LICENSES/`. Model weights are not
+licensed or redistributed by IronMLX; users are responsible for the terms of
+the upstream model repository.

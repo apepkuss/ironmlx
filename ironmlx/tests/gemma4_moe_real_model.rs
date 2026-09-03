@@ -46,7 +46,7 @@ fn should_run_optiq() -> bool {
 }
 
 fn coco_fixture() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/p6_qwen35_vl/coco_sample.jpg")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/qwen35_vl/coco_sample.jpg")
 }
 
 fn unique_temp_dir(name: &str) -> PathBuf {

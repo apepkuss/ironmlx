@@ -6,7 +6,7 @@ This is an observational triangulation — recording how close two
 independent implementations sit at logit precision level. Not an
 ironmlx alignment gate. Bf16 ULP (0.0625) sets the practical floor;
 threshold 1.0 chosen to match dense path LOGITS_TOL convention (see
-b1_p2_1_batched_prefill.rs notes on GPU kernel reduction drift).
+batched_prefill.rs notes on GPU kernel reduction drift).
 
 For each prompt, records: argmax match status + top-100 max_abs_diff.
 Exits 0 if observation is within historical norms; >0 if external

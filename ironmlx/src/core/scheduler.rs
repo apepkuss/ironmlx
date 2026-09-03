@@ -7,7 +7,7 @@
 //! - B1-p2.3d adds an admission queue + preemption when `b_max` is full.
 //! - B1-p2.3e adds per-row sampler invocation (temperature/top_k per row).
 //!
-//! See `docs/superpowers/specs/2026-05-13-b1-p2-3a-scheduler-skeleton-design.md`.
+//! See the scheduler integration tests for the runtime contract.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::marker::PhantomData;
@@ -1170,8 +1170,7 @@ pub struct RequestState {
     pub stop_token_ids: Vec<u32>,
     /// Per-row sampler — cloned from the request's sampler at admit time so
     /// each row owns independent sampler state. Sampler is `Copy` post-3e.2;
-    /// PRNG state lives in `Scheduler.prng_state` (centralized) — see
-    /// `docs/superpowers/specs/2026-05-17-b1-p2-3e-2-prng-key-batching-design.md`.
+    /// PRNG state lives in `Scheduler.prng_state` (centralized).
     pub sampler: Sampler,
     /// Immutable source plan retained for fresh prefill and rebase helpers.
     pub constraint_plan: Option<crate::core::constrained::ConstraintPlan>,

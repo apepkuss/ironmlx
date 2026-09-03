@@ -1,6 +1,6 @@
 //! Raw FFI bindings to MLX C++.
 //!
-//! This crate is the `-sys` half of `cxx-mlx`. For a safe, idiomatic API,
+//! This crate is the `-sys` half of the IronMLX MLX bindings. For a safe, idiomatic API,
 //! depend on the `mlx` crate instead.
 
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]

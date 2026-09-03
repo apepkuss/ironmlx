@@ -507,7 +507,7 @@ mod tests {
     fn vit_attention_matches_mlx_vlm_reference() {
         let fixture_path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/p6_qwen35_vl/p6_vit_attn_ref.safetensors"
+            "/tests/fixtures/qwen35_vl/p6_vit_attn_ref.safetensors"
         );
 
         let (tensors, _meta) =

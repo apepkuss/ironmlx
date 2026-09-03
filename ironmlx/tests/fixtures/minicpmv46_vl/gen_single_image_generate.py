@@ -55,7 +55,7 @@ K = 5
 
 # Reuse the existing COCO fixture image (P1/P2a fixtures use the same).
 IMAGE_PATH = (
-    Path(__file__).resolve().parents[1] / "p6_qwen35_vl" / "coco_sample.jpg"
+    Path(__file__).resolve().parents[1] / "qwen35_vl" / "coco_sample.jpg"
 )
 
 # Same raw prompt as the P2a logits generator: a single `<image>` marker, NO

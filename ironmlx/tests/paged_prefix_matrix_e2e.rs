@@ -424,7 +424,7 @@ fn coco_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("fixtures")
-        .join("p6_qwen35_vl")
+        .join("qwen35_vl")
         .join("coco_sample.jpg")
 }
 

@@ -17,7 +17,7 @@
 //! [`Scheduler::gc_finished_rows`]. The loop exits when
 //! `active_count == 0` AND `cmd_rx` is empty.
 //!
-//! See `docs/superpowers/specs/2026-05-13-b1-p2-3b-3-admission-window-design.md` § 4.
+//! The admission window is coordinated by the scheduler actor.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};

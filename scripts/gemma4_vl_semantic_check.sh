@@ -82,9 +82,9 @@ if [[ -z "$GEMMA4_MODEL" || ! -d "$GEMMA4_MODEL" ]]; then
     exit 2
 fi
 
-FIXTURE_IMAGE="$REPO_ROOT/ironmlx/tests/fixtures/p6_qwen35_vl/coco_sample.jpg"
-FIXTURE_DISTINCT_1="$REPO_ROOT/ironmlx/tests/fixtures/p6_qwen35_vl/multi_image/image_0.jpg"
-FIXTURE_DISTINCT_2="$REPO_ROOT/ironmlx/tests/fixtures/p6_qwen35_vl/multi_image/image_1.jpg"
+FIXTURE_IMAGE="$REPO_ROOT/ironmlx/tests/fixtures/qwen35_vl/coco_sample.jpg"
+FIXTURE_DISTINCT_1="$REPO_ROOT/ironmlx/tests/fixtures/qwen35_vl/multi_image/image_0.jpg"
+FIXTURE_DISTINCT_2="$REPO_ROOT/ironmlx/tests/fixtures/qwen35_vl/multi_image/image_1.jpg"
 
 GEMMA4_IMAGE="${GEMMA4_IMAGE:-$FIXTURE_IMAGE}"
 GEMMA4_DISTINCT_IMAGE_1="${GEMMA4_DISTINCT_IMAGE_1:-$FIXTURE_DISTINCT_1}"

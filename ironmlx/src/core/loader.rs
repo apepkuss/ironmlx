@@ -683,7 +683,7 @@ impl Loader {
     /// 1. Strips `mtp.*` keys (the dedicated MTP head — see P8c).
     /// 2. If `text_config.tie_word_embeddings`, drops `lm_head.{weight,scales,biases}`.
     /// 3. `transpose_axes [0, 2, 1]` on `conv1d.weight` tensors whose last dim != 1
-    ///    (HF stores them as `[out, in, k]`; cxx-mlx Conv1d wants `[out, k, in]`).
+    ///    (HF stores them as `[out, in, k]`; MLX Conv1d wants `[out, k, in]`).
     /// 4. Adds `1.0` to all 1-D RmsNorm weights at known suffixes when either
     ///    `mtp.*` was present OR an unsanitized conv1d was detected — the HF
     ///    "offset gamma" convention.
@@ -765,7 +765,7 @@ impl Loader {
             .collect();
         for k in conv1d_keys {
             let v = weights.get(&k).expect("key just collected").clone();
-            // HF [out, in, k] → cxx-mlx [out, k, in] : axes permutation [0, 2, 1].
+            // HF [out, in, k] → MLX [out, k, in] : axes permutation [0, 2, 1].
             let moved = mlx::ops::shape::transpose_axes(&v, &[0_i32, 2, 1][..])?;
             weights.insert(k, moved);
         }

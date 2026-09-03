@@ -52,7 +52,7 @@ Default fallback (no diff match) is `b1_p2_3b_2_scheduler_actor` — a fast sche
 ./scripts/sweep/sweep_full.sh
 ```
 
-Runs all 15 (or 16 if `b1_p2_3c_plus_chunked_admit_mid.rs` exists) suites; logs every suite even on failure for full coverage in the close-out report.
+Runs all 15 (or 16 if `chunked_admit_mid.rs` exists) suites; logs every suite even on failure for full coverage in the close-out report.
 
 ## Diff → area mapping
 

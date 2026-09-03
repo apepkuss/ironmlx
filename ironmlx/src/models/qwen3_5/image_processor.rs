@@ -196,8 +196,7 @@ mod tests {
         // and transpose [0, 2, 1, 3, 4]. This test pins that contract.
         //
         // P6.2 regression marker: this is the byte-layout reshape that was
-        // mis-coded in p6_vision_dump.rs (P6.1 Task 4). See
-        // docs/superpowers/specs/2026-05-11-p6-2-patch-embed-reshape-design.md.
+        // mis-coded in vision_dump.rs (P6.1 Task 4).
         let flat: Vec<f32> = (0..1536).map(|i| i as f32).collect();
         let pv: mlx::Array = (flat.as_slice(), &[1_i32, 1536][..]).try_into().unwrap();
         let pv_5d = pv.reshape(&[1_i32, 3, 2, 16, 16][..]).unwrap();
@@ -276,13 +275,13 @@ mod tests {
     #[test]
     fn preprocess_coco_sample_matches_hf() {
         use std::path::Path;
-        let path = Path::new("tests/fixtures/p6_qwen35_vl/coco_sample.jpg");
+        let path = Path::new("tests/fixtures/qwen35_vl/coco_sample.jpg");
         let bytes = std::fs::read(path).expect("read coco sample");
         let (pixel_values, grid_h, grid_w) = preprocess(&bytes).expect("preprocess");
         assert!(grid_h * grid_w >= 4); // at least 4 patches
 
         // Check normalized values match HF
-        let hf_path = Path::new("tests/fixtures/p6_qwen35_vl/coco_sample_normalized.bin");
+        let hf_path = Path::new("tests/fixtures/qwen35_vl/coco_sample_normalized.bin");
         let hf_bytes = std::fs::read(hf_path).expect("read hf normalized");
         let hf_floats: Vec<f32> = hf_bytes
             .chunks_exact(4)
@@ -346,7 +345,7 @@ mod tests {
 
     #[test]
     fn smart_resize_matches_hf_100_random() {
-        let golden = include_str!("../../../tests/fixtures/p6_qwen35_vl/smart_resize_golden.txt");
+        let golden = include_str!("../../../tests/fixtures/qwen35_vl/smart_resize_golden.txt");
         for line in golden.lines() {
             let parts: Vec<i32> = line.split(',').map(|s| s.parse().unwrap()).collect();
             let (h, w, py_h, py_w) = (parts[0], parts[1], parts[2], parts[3]);

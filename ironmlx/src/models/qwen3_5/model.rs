@@ -693,7 +693,7 @@ impl Qwen35Model {
     /// `out[i, :]` should match `forward_on(prompt_i)` to within
     /// `max_abs_diff < 1e-3`, and the greedy argmax must be bit-identical.
     /// The KV cache row `i` must match the state a per-stream `forward_on`
-    /// would have written (verified by `tests/b1_p2_1_batched_prefill.rs`).
+    /// would have written (verified by `tests/batched_prefill.rs`).
     ///
     /// [`build_position_ids_batched`]: crate::core::generate::build_position_ids_batched
     /// [`build_batch_attention_mask`]: crate::core::generate::build_batch_attention_mask
@@ -2060,7 +2060,7 @@ mod tests {
         let model = Qwen35Model::from_loader(&loader).expect("Qwen35Model::from_loader");
 
         // Synthesize a real preprocessed pixel_values from image_0 fixture.
-        let fixture_bytes = std::fs::read("tests/fixtures/p6_qwen35_vl/multi_image/image_0.jpg")
+        let fixture_bytes = std::fs::read("tests/fixtures/qwen35_vl/multi_image/image_0.jpg")
             .expect("image_0 fixture");
         let (pixel_values, grid_h, grid_w) =
             crate::models::qwen3_5::image_processor::preprocess(&fixture_bytes)

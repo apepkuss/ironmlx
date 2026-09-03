@@ -1,4 +1,4 @@
-//! ironmlx — local LLM inference on Apple Silicon, backed by [`mlx`] (cxx-mlx).
+//! ironmlx — local LLM inference on Apple Silicon, backed by [`mlx`] (Apple MLX).
 //!
 //! ## Layered structure
 //!

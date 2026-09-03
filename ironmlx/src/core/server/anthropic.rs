@@ -3914,7 +3914,7 @@ mod parity_tests {
     fn coco_b64() -> String {
         let bytes = std::fs::read(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/p6_qwen35_vl/coco_sample.jpg"
+            "/tests/fixtures/qwen35_vl/coco_sample.jpg"
         ))
         .expect("read coco_sample.jpg fixture");
         base64::engine::general_purpose::STANDARD.encode(bytes)
