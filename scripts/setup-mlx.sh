@@ -60,7 +60,7 @@ cmake --install "$BUILD_DIR"
 # MLX's install does NOT export the private transitive `libgguflib.a` (GGUF
 # support). `libmlx.a` references its `_gguf_*` symbols, and mlx-sys/build.rs
 # auto-links every lib*.a in $MLX_DIR/lib — so without this, anything linking
-# GGUF (e.g. the `mlx` crate's p2c_io test) fails with `Undefined symbols:
+# GGUF (e.g. the `mlx` crate's io test) fails with `Undefined symbols:
 # _gguf_open ...`. Backfill it. (libjaccl.a + mlx.metallib ARE installed.)
 echo "==> Backfill libgguflib.a (omitted by MLX install)"
 GGUF_A="$BUILD_DIR/mlx/io/libgguflib.a"

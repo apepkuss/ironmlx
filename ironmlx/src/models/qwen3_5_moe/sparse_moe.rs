@@ -1144,7 +1144,7 @@ mod tests {
 
     /// Compile-time check: RoutedExperts fields are public and Array can be
     /// referenced through them. Numerical correctness deferred to T5
-    /// integration tests under tests/p5_qwen35_moe_*.rs. Those tests
+    /// integration tests under tests/qwen35_moe_*.rs. Those tests
     /// observe ironmlx output and may also record output from external
     /// reference implementations for triangulation — but ironmlx output
     /// is treated as the source of truth for its own behavior; any

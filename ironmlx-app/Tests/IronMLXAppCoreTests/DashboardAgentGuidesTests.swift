@@ -87,7 +87,7 @@ import Testing
 }
 
 @Test func hermesAgentGuideRecommendsAnIsolatedProfile() throws {
-    let guide = try String(contentsOfFile: "../docs/hermes-agent.md", encoding: .utf8)
+    let guide = try String(contentsOfFile: "../docs/zh-CN/hermes-agent.md", encoding: .utf8)
 
     #expect(guide.contains("## 配置（推荐）"))
     #expect(guide.contains("hermes profile create ironmlx"))
