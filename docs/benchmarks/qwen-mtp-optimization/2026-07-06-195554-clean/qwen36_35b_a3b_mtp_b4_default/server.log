@@ -1,4 +1,0 @@
-2026-07-06T11:02:56.203849Z  INFO ironmlx::cli::serve: ironmlx serve: no matching scheduler profile found store=/Users/xin/.ironmlx/scheduler-profiles model=/Users/xin/.ironmlx/models/models--mlx-community--Qwen3.6-35B-A3B-4bit/snapshots/38740b847e4cb78f352aba30aa41c76e08e6eb46 hardware_label=apple-m5-max-128gb; using CLI/default scheduler config
-2026-07-06T11:02:56.945507Z  INFO ironmlx::cli::serve: ironmlx serve: b_max=4 (multi-request batching enabled; pass --max-sequences 1 to switch to single-request optimized mode)
-2026-07-06T11:02:56.945526Z  INFO ironmlx::cli::serve: ironmlx serve: MTP enabled model_dir=/Users/xin/.ironmlx/models/models--mlx-community--Qwen3.6-35B-A3B-MTP-4bit/snapshots/0295b81421bf4d0fccca9a7c0fcfb1418dda3516 draft_tokens=2
-2026-07-06T11:02:56.968095Z  INFO ironmlx::core::server: ironmlx server listening on http://127.0.0.1:18208

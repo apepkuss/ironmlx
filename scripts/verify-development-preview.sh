@@ -33,6 +33,7 @@ for required in \
   "$asset_dir/PREVIEW-BUILD-METADATA.json" \
   "$asset_dir/THIRD_PARTY_NOTICES.md" \
   "$asset_dir/third-party-inventory.json" \
+  "$asset_dir/model-license-boundary.md" \
   "$asset_dir/RELEASE-NOTES.md" \
   "$asset_dir/SHA256SUMS"; do
   [ -f "$required" ] || fail "required preview asset is missing: $required"
@@ -65,6 +66,8 @@ diff -q "$REPO_ROOT/third-party-inventory.json" "$asset_dir/third-party-inventor
   fail "preview inventory asset differs from the verified source material"
 diff -qr "$REPO_ROOT/THIRD_PARTY_LICENSES" "$asset_dir/THIRD_PARTY_LICENSES" >/dev/null || \
   fail "preview license assets differ from the verified source material"
+diff -q "$REPO_ROOT/docs/model-license-boundary.md" "$asset_dir/model-license-boundary.md" >/dev/null || \
+  fail "preview model license boundary differs from the verified source material"
 
 (
   cd "$asset_dir"
@@ -74,6 +77,9 @@ diff -qr "$REPO_ROOT/THIRD_PARTY_LICENSES" "$asset_dir/THIRD_PARTY_LICENSES" >/d
 if zipinfo -1 "$zip_path" | grep -E '(^/|(^|/)\.\.(/|$)|/Users/)' >/dev/null; then
   fail "ZIP contains an unsafe or developer-specific path"
 fi
+
+"$SCRIPT_DIR/verify-model-distribution-boundary.sh" "$zip_path"
+"$SCRIPT_DIR/verify-model-distribution-boundary.sh" "$dmg_path"
 
 temp_root="$(mktemp -d "${TMPDIR:-/tmp}/ironmlx-preview-verify.XXXXXX")"
 zip_extract="$temp_root/zip"
@@ -99,8 +105,11 @@ verify_preview_app() {
     fail "archive root third-party inventory differs from the verified source material"
   diff -qr "$REPO_ROOT/THIRD_PARTY_LICENSES" "$package_root/THIRD_PARTY_LICENSES" >/dev/null || \
     fail "archive root third-party licenses differ from the verified source material"
+  diff -q "$REPO_ROOT/docs/model-license-boundary.md" "$package_root/model-license-boundary.md" >/dev/null || \
+    fail "archive root model license boundary differs from the verified source material"
   [ -d "$preview_app/Contents" ] || fail "preview App is missing: $preview_app"
   "$SCRIPT_DIR/verify-app-bundle.sh" "$preview_app"
+  "$SCRIPT_DIR/verify-model-distribution-boundary.sh" "$preview_app"
   [ "$(plutil -extract CFBundleDisplayName raw "$preview_app/Contents/Info.plist")" = \
     "IronMLX Development Preview" ] || fail "preview display name is not explicit"
   [ "$(plutil -extract IronMLXDistributionChannel raw "$preview_app/Contents/Info.plist")" = \

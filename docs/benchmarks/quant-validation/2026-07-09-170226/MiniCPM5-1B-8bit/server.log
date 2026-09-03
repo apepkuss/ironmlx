@@ -1,1 +1,0 @@
-2026-07-09T08:02:29.560921Z  WARN ironmlx::cli::serve: ironmlx serve: scheduler profile health status=warning path=/Users/xin/.ironmlx/scheduler-profiles/profiles/mlx-community-minicpm5-1b-8bit--apple-m5-max-128gb--c5b30d0aaf3eada6.json notes=model_name_mismatch,profile_stale recommendation="rerun scheduler-autotune calibrate for this model"

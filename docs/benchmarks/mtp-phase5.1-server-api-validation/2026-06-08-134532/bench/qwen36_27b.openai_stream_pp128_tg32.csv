@@ -1,2 +1,0 @@
-target,pp_target,tg_target,run_idx,ttft_ms,tg_tps,tpot_ms,pp_tps,e2e_s,prompt_tokens_local,prompt_tokens_server,completion_tokens_server,cached_tokens,finish_reason
-qwen36_27b_mtp,128,32,0,307.149,65.017,17.090,416.735,0.460956,128,,,,stop

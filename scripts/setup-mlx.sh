@@ -2,7 +2,7 @@
 #
 # setup-mlx.sh — build + install the MLX C++ static lib for ironmlx, backfilling
 # the private transitive `libgguflib.a` that MLX's `make install` omits, and
-# emitting a sourceable env file. See docs/mlx-setup.md for the full rationale.
+# emitting a sourceable env file. See docs/installation.md for the full rationale.
 #
 # Usage:
 #   MLX_SRC=<mlx-source> MLX_PREFIX=<install-prefix> scripts/setup-mlx.sh

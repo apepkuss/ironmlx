@@ -1,8 +1,0 @@
-contract,scenario,cache_enabled,cache_state,input_tokens,max_output_tokens,samples,total_wall_s_median,total_wall_s_p05,total_wall_s_p95,generation_tps_median,generation_tps_p05,generation_tps_p95,evidence_boundary
-product_agent,omp_agent_long,false,disabled,,,not_retained,29.52,,,27.31,,,accepted_session_summary
-product_agent,omp_agent_long,true,cold,,,1,27.39,,,26.69,,,accepted_session_summary
-product_agent,omp_agent_long,true,hit,,,not_retained,1.83,,,28.33,,,accepted_session_summary
-control_timing,responses_long,false,disabled,21674,1,3,33.91,30.39,35.34,,,,prefill_restore_control
-control_timing,responses_long,true,cold,21674,1,1,31.11,31.11,31.11,,,,prefill_restore_control
-control_timing,responses_long,true,hit,21674,1,2,2.15,2.14,2.16,,,,prefill_restore_control
-short_prompt_smoke,iron_bench_short,true,not_retained,,,3,,,,58.63,58.24,58.81,informational_not_cross_comparable

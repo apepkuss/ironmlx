@@ -1,11 +1,11 @@
-# oh-my-pi integration
+# oh-my-pi 集成
 
-oh-my-pi (OMP) can use the IronMLX App as an inference provider through the
-Responses API. Start IronMLX and make sure the desired model is available.
+oh-my-pi（OMP）可通过 Responses API 将 IronMLX App 用作推理服务。开始前，请先
+启动 IronMLX App，并确保需要使用的模型可用。
 
-## Configuration
+## 配置
 
-Edit `~/.omp/agent/models.yml`:
+编辑 `~/.omp/agent/models.yml`：
 
 ```yaml
 providers:
@@ -17,16 +17,16 @@ providers:
       type: openai-models-list
 ```
 
-Refresh and inspect available models:
+刷新并查看 IronMLX 模型：
 
 ```bash
 omp models refresh
 omp models ironmlx
 ```
 
-## Start and verify
+## 启动与验证
 
-Replace the model selector and project directory with your values:
+将模型选择器和项目目录替换为实际值：
 
 ```bash
 omp --cwd /absolute/path/to/project \
@@ -41,5 +41,5 @@ omp --cwd /absolute/path/to/project \
   -p --auto-approve "Use the bash tool exactly once to run pwd, then report its output."
 ```
 
-OMP executes bash and other client-side tools in `--cwd` and returns results to
-IronMLX. IronMLX only performs inference and emits structured tool calls.
+OMP 在 `--cwd` 指定的目录执行 bash 等客户端工具，并将结果回传给 IronMLX；
+IronMLX 只负责推理和生成结构化工具调用。

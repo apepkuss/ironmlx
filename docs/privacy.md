@@ -1,26 +1,34 @@
-# 隐私与网络边界
+# Privacy and network boundary
 
-IronMLX 的推理在本机 Apple Silicon 上执行。默认 local 模式仅绑定 loopback，
-外部主机不能直接访问 API。
+IronMLX performs inference locally on Apple Silicon. In `local` mode it binds
+only to loopback, so external hosts cannot directly access the API.
 
-## 会产生网络访问的操作
+## Operations that access the network
 
-- 用户主动搜索或下载模型时，会访问 Hugging Face 或 ModelScope；
-- 用户主动启用 LAN 模式时，会在选定的具体局域网地址提供 HTTPS API；
-- 推理 API 不会代替客户端抓取远程图片，图片必须作为受控 base64 内容上传。
+- User-initiated model search and downloads access Hugging Face or ModelScope.
+- User-enabled LAN mode serves HTTPS on the selected concrete LAN address.
+- The inference API does not fetch remote images for the client; images must be
+  uploaded as controlled base64 content.
 
-0.1.0 不包含产品遥测或云端推理上传流程。下载过程会把进度与错误写入本地日志。
-模型仓库服务仍可能按其自身政策记录客户端 IP、请求和访问 token 的使用情况。
+Version 0.1.0 has no product telemetry or cloud inference upload path. Download
+progress and errors are written to local logs. Model-hosting services may record
+client IPs, requests, and token use under their own policies.
 
-## 本地数据
+## Local data
 
-配置、模型、缓存、日志、故障记录和调度器报告默认保存在 `~/.ironmlx`。LAN
-API Key 与 TLS 私钥保存在用户默认 macOS Keychain；普通配置只保存凭据标识和
-证书指纹。完整路径见[数据位置与卸载](storage-and-uninstall.md)。
+Configuration, models, caches, logs, incident records, and scheduler reports are
+stored under `~/.ironmlx` by default. LAN API keys and TLS private keys are kept
+in the user's default macOS Keychain; ordinary configuration stores only a
+credential identifier and certificate fingerprint. See [Data locations and uninstall](storage-and-uninstall.md).
 
-## 请求与日志
+## Requests and logs
 
-后端日志可能包含模型标识、运行参数、错误与性能诊断。不要把原始日志发送给不受信任的第三方。Dashboard 的“导出诊断信息”使用结构化白名单和统一脱敏生成本地 ZIP，排除请求正文、凭据、身份路径、配置原文件和环境变量全集；导出后仍建议在分享前自行审阅。完整边界和容量见 [隐私安全的诊断信息导出](diagnostic-bundle.md)。
+Backend logs may contain model IDs, runtime parameters, errors, and performance
+diagnostics. Do not send raw logs to untrusted parties. Dashboard **Export
+diagnostic information** uses a structured allowlist and redaction to create a
+local ZIP that excludes request bodies, credentials, identity paths, original
+configuration files, and the full environment. Review an export before sharing.
+See [Diagnostic information export](diagnostic-bundle.md) for limits.
 
-LAN 模式属于同一受信任网络/模型引擎域。跨请求 Prompt Lookup 复用历史时，
-不得混用互不信任的租户。
+LAN mode assumes one trusted network/model-engine domain. Do not reuse
+cross-request Prompt Lookup history across untrusted tenants.

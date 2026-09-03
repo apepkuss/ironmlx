@@ -44,6 +44,7 @@ metadata_file="$package_root/PREVIEW-BUILD-METADATA.json"
 third_party_notices="$package_root/THIRD_PARTY_NOTICES.md"
 third_party_inventory="$package_root/third-party-inventory.json"
 third_party_licenses="$package_root/THIRD_PARTY_LICENSES"
+model_license_boundary="$package_root/model-license-boundary.md"
 
 rm -rf "$BUILD_ROOT"
 mkdir -p "$package_root" "$ASSET_DIR"
@@ -51,6 +52,7 @@ ditto "$SOURCE_APP" "$preview_app"
 cp "$REPO_ROOT/THIRD_PARTY_NOTICES.md" "$third_party_notices"
 cp "$REPO_ROOT/third-party-inventory.json" "$third_party_inventory"
 cp -R "$REPO_ROOT/THIRD_PARTY_LICENSES" "$third_party_licenses"
+cp "$REPO_ROOT/docs/model-license-boundary.md" "$model_license_boundary"
 
 cat > "$notice_file" <<EOF
 IronMLX Development Preview / IronMLX 开发预览
@@ -119,11 +121,15 @@ hdiutil create \
   -ov \
   "$dmg_path" >/dev/null
 
+"$SCRIPT_DIR/verify-model-distribution-boundary.sh" "$zip_path"
+"$SCRIPT_DIR/verify-model-distribution-boundary.sh" "$dmg_path"
+
 cp "$notice_file" "$ASSET_DIR/DEVELOPMENT-PREVIEW-NOTICE.txt"
 cp "$metadata_file" "$ASSET_DIR/PREVIEW-BUILD-METADATA.json"
 cp "$third_party_notices" "$ASSET_DIR/THIRD_PARTY_NOTICES.md"
 cp "$third_party_inventory" "$ASSET_DIR/third-party-inventory.json"
 cp -R "$third_party_licenses" "$ASSET_DIR/THIRD_PARTY_LICENSES"
+cp "$model_license_boundary" "$ASSET_DIR/model-license-boundary.md"
 
 cat > "$ASSET_DIR/RELEASE-NOTES.md" <<EOF
 # ⚠️ IronMLX 开发预览
@@ -158,6 +164,7 @@ EOF
     PREVIEW-BUILD-METADATA.json \
     THIRD_PARTY_NOTICES.md \
     third-party-inventory.json \
+    model-license-boundary.md \
     RELEASE-NOTES.md > SHA256SUMS
   find THIRD_PARTY_LICENSES -type f -print | LC_ALL=C sort | while IFS= read -r license_file; do
     shasum -a 256 "$license_file"

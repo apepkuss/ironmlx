@@ -7,5 +7,5 @@ a.out
 __pycache__/
 *.pyc
 ironmlx/tests/fixtures/p4_qwen35/*.npy
-reports/
+/reports/
 /dist/

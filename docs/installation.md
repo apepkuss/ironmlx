@@ -1,21 +1,30 @@
-# 安装与构建
+# Installation and build
 
-## 支持平台
+## Supported platform
 
-IronMLX 0.1.0 仅支持 Apple Silicon arm64 与 macOS 26.2 或更高版本。
-Intel Mac 和更早的 macOS 版本不在支持范围内。
+IronMLX 0.1.0 supports Apple Silicon (`arm64`) and macOS 26.2 or later. Intel
+Macs and older macOS versions are outside the supported range.
 
-## 当前分发状态
+## Distribution status
 
-第三方依赖清单、Notices 与许可证原文已由 P0-8A 生成并纳入 App，但尚未完成
-P0-8B 法律复核、CycloneDX SBOM 与分发授权，因此 GitHub public binary 发布仍被
-硬门禁阻止。当前只支持从受信任的源码 checkout 构建用于本机开发验证。
+Third-party inventories, notices, and license texts are generated and bundled
+for engineering review. Public binary distribution remains blocked until the
+P0-8B legal review, CycloneDX SBOM, and explicit distribution authorization are
+complete. Until then, build from a trusted source checkout for local validation.
 
-## 从源码构建 App
+## Model rights boundary
 
-构建机需要完整 Xcode、CMake、Rust 1.94、`cargo-about 0.9.1`，以及可用的
-macOS 26.2 SDK/Metal 工具链。以下命令会检出项目锁定的 MLX commit，并生成
-自包含 Release App：
+IronMLX can search for and download models, but it does not own or relicense
+model rights. Before use, consult the upstream model page for its license,
+gated-access terms, use restrictions, and redistribution rules. App, DMG, and
+ZIP artifacts do not contain model weights. See [Model rights boundary](model-license-boundary.md)
+for the full statement.
+
+## Build the App from source
+
+The build host needs full Xcode, CMake, Rust 1.94, `cargo-about 0.9.1`, and the
+macOS 26.2 SDK/Metal toolchain. The following commands check out the pinned MLX
+commit and build a self-contained Release App:
 
 ```bash
 cargo install --locked --features cli --version 0.9.1 cargo-about
@@ -23,20 +32,22 @@ scripts/checkout-release-mlx.sh /tmp/ironmlx-mlx-source
 MLX_SRC=/tmp/ironmlx-mlx-source scripts/build-app-bundle.sh
 ```
 
-构建器会拒绝 dirty 或 commit 不匹配的 MLX checkout。成功后运行：
+The builder rejects a dirty MLX checkout or a checkout at the wrong commit.
+After a successful build:
 
 ```bash
 scripts/verify-app-bundle.sh dist/IronMLX.app
 open dist/IronMLX.app
 ```
 
-本地构建使用 ad-hoc 签名，未经 Developer ID 签名与 Apple 公证，不能作为正式
-安装包对外分发。不要绕过 macOS 安全机制运行来源不明的构建。
+Local builds use an ad-hoc signature and are not notarized; they are not formal
+distribution installers. Do not bypass macOS security controls to run an
+untrusted build.
 
-## CLI 开发构建
+## CLI development build
 
-若只调试后端，需要先准备项目锁定且启用 NAX Metal kernels 的 MLX Release
-安装，然后导出 `MLX_DIR` 与 `MLX_METAL_PATH`：
+For backend-only work, prepare a pinned MLX Release install with NAX Metal
+kernels enabled, then set `MLX_DIR` and `MLX_METAL_PATH`:
 
 ```bash
 export MLX_DIR=/path/to/validated/mlx-install
@@ -44,3 +55,123 @@ export MLX_METAL_PATH="$MLX_DIR/lib"
 cargo build --release --bin ironmlx --bin iron-bench
 target/release/ironmlx --version
 ```
+
+## Build and install the MLX dependency
+
+The MLX C++ dependency must be built as a static arm64 library with Metal
+kernels enabled. The repository helper performs this build, installs the
+libraries, and writes a sourceable environment file:
+
+```bash
+MLX_SRC=/path/to/mlx-source \
+MLX_PREFIX="$HOME/.local/mlx" \
+scripts/setup-mlx.sh
+source "$HOME/.local/mlx/mlx-env.sh"
+```
+
+For a manual build, use the same deployment target and static-library options:
+
+```bash
+MLX_SRC=/path/to/mlx-source
+MLX_PREFIX="$HOME/.local/mlx"
+
+cd "$MLX_SRC"
+cmake -S . -B build \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DBUILD_SHARED_LIBS=OFF \
+  -DMLX_BUILD_METAL=ON \
+  -DMLX_METAL_JIT=OFF \
+  -DMLX_BUILD_TESTS=OFF \
+  -DMLX_BUILD_EXAMPLES=OFF \
+  -DMLX_BUILD_BENCHMARKS=OFF \
+  -DMLX_BUILD_PYTHON_BINDINGS=OFF \
+  -DCMAKE_OSX_ARCHITECTURES=arm64 \
+  -DCMAKE_OSX_DEPLOYMENT_TARGET=26.2 \
+  -DCMAKE_INSTALL_PREFIX="$MLX_PREFIX"
+cmake --build build --parallel "$(sysctl -n hw.ncpu)"
+cmake --install build
+```
+
+MLX's install step does not export its private GGUF transitive library. Copy
+it into the install prefix so that the `mlx` crate's GGUF tests and any GGUF
+consumer can link successfully:
+
+```bash
+cp "$MLX_SRC/build/mlx/io/libgguflib.a" "$MLX_PREFIX/lib/"
+```
+
+The production `ironmlx` binary does not use GGUF weights, but omitting this
+library causes GGUF-related tests to fail with undefined `_gguf_*` symbols.
+`mlx-sys/build.rs` links every `lib*.a` in `MLX_DIR/lib`, so no additional
+linker flags are needed.
+
+## MLX build and runtime environment
+
+Each shell, CI job, and tool invocation that builds or runs IronMLX must set
+the MLX paths explicitly:
+
+```bash
+export MLX_ROOT="$HOME/.local/mlx"
+export MLX_DIR="$MLX_ROOT"
+export MLX_METAL_PATH="$MLX_ROOT/lib"
+export DYLD_LIBRARY_PATH="$MLX_ROOT/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+export MACOSX_DEPLOYMENT_TARGET=26.2
+export CMAKE_OSX_DEPLOYMENT_TARGET=26.2
+```
+
+Although MLX is statically linked, `mlx.metallib` is loaded at runtime and
+must be present under `MLX_METAL_PATH`.
+
+## MLX installation sanity check
+
+Before building IronMLX, verify the headers, static libraries, and Metal
+kernel library are present:
+
+```bash
+test -f "$MLX_DIR/include/mlx/array.h"
+test -f "$MLX_DIR/lib/libmlx.a"
+test -f "$MLX_DIR/lib/libgguflib.a"
+test -f "$MLX_DIR/lib/mlx.metallib"
+```
+
+## Backend tests and local serving
+
+After sourcing the environment above, run the complete workspace test suite:
+
+```bash
+cargo build --release
+cargo test --all-features --workspace
+```
+
+To run a local text-generation smoke test:
+
+```bash
+MODEL="$HOME/.ironmlx/models/<org>/<model>"
+./target/release/ironmlx generate \
+  --model "$MODEL" \
+  --prompt "Describe mixture-of-experts architecture in one sentence." \
+  --max-tokens 128 \
+  --temperature 0 \
+  --prefill-chunk-size 2048
+```
+
+To start the local server:
+
+```bash
+./target/release/ironmlx serve \
+  --model "$MODEL" \
+  --host 127.0.0.1 \
+  --port 8080 \
+  --prefill-chunk-size 2048 \
+  --b-max 1 \
+  --max-cache-cap 32768
+```
+
+## MLX troubleshooting
+
+| Symptom | Cause | Resolution |
+|---|---|---|
+| `MLX_DIR is not set` | The current shell did not export the build path. | Source `mlx-env.sh` or set the variables above. |
+| `missing include/ or lib/` | `MLX_DIR` points to the MLX build tree instead of its install prefix. | Point it to `MLX_PREFIX`. |
+| `Undefined symbols: _gguf_*` | `libgguflib.a` was not copied into the install prefix. | Repeat the copy step above or rerun `scripts/setup-mlx.sh`. |
+| `Failed to load the default metallib` | `MLX_METAL_PATH` is unset or points to the wrong directory. | Set it to the directory containing `mlx.metallib`. |

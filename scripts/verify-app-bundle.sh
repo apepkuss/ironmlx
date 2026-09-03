@@ -65,7 +65,8 @@ for file in \
   Contents/Resources/logo.png \
   Contents/Resources/sidebar-logo@2x.png \
   Contents/Resources/Legal/THIRD_PARTY_NOTICES.md \
-  Contents/Resources/Legal/third-party-inventory.json; do
+  Contents/Resources/Legal/third-party-inventory.json \
+  Contents/Resources/Legal/model-license-boundary.md; do
   require_file "$APP_BUNDLE/$file"
 done
 [ -d "$APP_BUNDLE/Contents/Resources/Legal/THIRD_PARTY_LICENSES" ] || \
@@ -82,6 +83,10 @@ diff -qr \
   "$REPO_ROOT/THIRD_PARTY_LICENSES" \
   "$APP_BUNDLE/Contents/Resources/Legal/THIRD_PARTY_LICENSES" >/dev/null || \
   fail "bundled third-party license texts differ from the verified source material"
+diff -q \
+  "$REPO_ROOT/docs/model-license-boundary.md" \
+  "$APP_BUNDLE/Contents/Resources/Legal/model-license-boundary.md" >/dev/null || \
+  fail "bundled model license boundary differs from the verified source material"
 
 [ "$(plutil -extract CFBundleIdentifier raw "$APP_BUNDLE/Contents/Info.plist")" = "com.ironmlx.app" ] || \
   fail "unexpected CFBundleIdentifier"

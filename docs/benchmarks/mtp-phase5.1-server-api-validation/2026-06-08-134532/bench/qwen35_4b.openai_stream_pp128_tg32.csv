@@ -1,2 +1,0 @@
-target,pp_target,tg_target,run_idx,ttft_ms,tg_tps,tpot_ms,pp_tps,e2e_s,prompt_tokens_local,prompt_tokens_server,completion_tokens_server,cached_tokens,finish_reason
-qwen35_4b_mtp,128,32,0,59.336,113.132,9.124,2157.191,0.342191,128,,,,length

@@ -1,5 +1,7 @@
 # IronMLX GitHub Actions development previews
 
+[简体中文](zh-CN/development-preview-release.md)
+
 The development-preview workflow is retained as a future distribution path,
 but public preview packaging and publication are currently disabled. Every
 future preview will be built from the immutable commit selected by manually
@@ -80,12 +82,15 @@ the `ADHOC-NOT-NOTARIZED` suffix, and both archives contain:
 - `DEVELOPMENT-PREVIEW-NOTICE.txt`;
 - `PREVIEW-BUILD-METADATA.json`;
 - `THIRD_PARTY_NOTICES.md`, `third-party-inventory.json`, and
-  `THIRD_PARTY_LICENSES/`.
+  `THIRD_PARTY_LICENSES/`;
+- `model-license-boundary.md`.
 
 The App's `Info.plist`, bundled notice, and metadata repeat that Developer ID
 signing and Apple notarization are disabled. Metadata identifies both the
 non-official MLX fork and its upstream base revision. `SHA256SUMS` covers the
-DMG, ZIP, notices, inventory, every license file, metadata, and release notes.
+DMG, ZIP, notices, inventory, model-rights boundary, every license file, metadata,
+and release notes. The packaging and verification scripts also reject common
+model-weight files in the App, ZIP, and DMG.
 
 ## Local packaging check
 

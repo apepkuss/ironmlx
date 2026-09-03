@@ -1,5 +1,7 @@
 # Network and image security boundary
 
+[简体中文](zh-CN/security-boundary.md)
+
 IronMLX starts in `local` mode. It accepts only a loopback `--host` and serves plain HTTP on that loopback address. External hosts cannot reach this listener.
 
 `lan` mode adds a second listener on one explicitly selected, active LAN IP. The LAN listener always uses HTTPS and requires `Authorization: Bearer <API Key>` on every route, including health, inference, model management, and administrative routes. Wildcard, multicast, unspecified, and loopback LAN addresses are rejected. The loopback listener remains available to the local App and Dashboard.

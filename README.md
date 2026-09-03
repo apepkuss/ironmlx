@@ -1,31 +1,35 @@
 # IronMLX
 
-IronMLX 是面向 Apple Silicon 的本地大语言模型推理 App 与服务运行时。它将
-Rust 推理引擎、MLX/Metal 运行时、模型管理 Dashboard，以及 OpenAI/Anthropic
-兼容 HTTP API 打包为一个自包含的 macOS App。
+[简体中文](README.zh-CN.md)
 
-当前产品版本：**0.1.0**
+IronMLX is a local large-language-model inference App and service runtime for
+Apple Silicon. It packages a Rust inference engine, MLX/Metal runtime, model
+management Dashboard, and OpenAI/Anthropic-compatible HTTP APIs into a
+self-contained macOS App.
 
-## 系统要求
+Current product version: **0.1.0**
 
-- Apple Silicon（arm64）；不支持 Intel Mac；
-- macOS 26.2 或更高版本；
-- 本地构建需要完整 Xcode、Rust 1.94 和项目锁定的 MLX 源码版本。
+## Requirements
 
-## 核心能力
+- Apple Silicon (`arm64`); Intel Macs are not supported;
+- macOS 26.2 or later;
+- Source builds require full Xcode, Rust 1.94, and the pinned MLX source.
 
-- 本地模型搜索、不可变快照下载、断点续传与完整性校验；
-- 多模型加载、卸载、固定、TTL 与内存保护；
-- OpenAI `/v1/chat/completions`、`/v1/responses` 和 Anthropic `/v1/messages`，均支持客户端函数工具调用协议；
-- 流式输出、连续批处理、分页 KV/前缀缓存、MTP 与 Prompt Lookup；
-- 文本及受控 base64 图片输入；
-- 默认仅监听 loopback；可选 LAN 模式使用 HTTPS 与 API Key。
+## Capabilities
 
-## 快速开始
+- Local model search, immutable-snapshot downloads, resume, and integrity checks;
+- Multi-model loading, unloading, pinning, TTL, and memory protection;
+- OpenAI Chat Completions/Responses and Anthropic Messages APIs with client-side
+  function-call protocols;
+- Streaming, continuous batching, paged KV/prefix cache, MTP, and Prompt Lookup;
+- Text and controlled base64 image input;
+- Loopback by default, with optional LAN mode using HTTPS and API keys.
 
-当前仓库已生成与 macOS arm64 Release 产物对应的第三方依赖清单、Notices 和
-许可证文本，但在完成 P0-8B 法律复核、SBOM 与明确授权前，公开二进制分发仍被
-发布门禁阻止。开发者可以从源码构建并在本机验证：
+## Quick start
+
+Third-party inventories, notices, and license texts are generated for engineering
+review, but public binary distribution remains blocked until P0-8B legal review,
+SBOM, and explicit authorization are complete. Build from a trusted checkout:
 
 ```bash
 cargo install --locked --features cli --version 0.9.1 cargo-about
@@ -34,25 +38,28 @@ MLX_SRC=/tmp/ironmlx-mlx-source scripts/build-app-bundle.sh
 open dist/IronMLX.app
 ```
 
-构建产物位于 `dist/IronMLX.app`。详细步骤见
-[安装与构建](docs/installation.md)。
+See [Installation and build](docs/installation.md) for details, or read the
+[Simplified Chinese translation](docs/zh-CN/installation.md).
 
-## 文档
+## Documentation
 
-- [支持模型矩阵](docs/supported-models.md)
-- [API 示例](docs/api.md)
-- [Hermes Agent 集成](docs/hermes-agent.md)
-- [oh-my-pi 集成](docs/oh-my-pi.md)
-- [隐私与网络边界](docs/privacy.md)
-- [数据位置与卸载](docs/storage-and-uninstall.md)
-- [故障排查](docs/troubleshooting.md)
-- [Known Issues](docs/known-issues.md)
-- [0.1.0 候选发布说明](docs/release-notes/0.1.0.md)
-- [版本与发布流程](docs/versioning-and-releases.md)
-- [第三方依赖与许可证材料](docs/third-party-materials.md)
-- [安全边界](docs/security-boundary.md)
+- [Supported model matrix](docs/supported-models.md) · [简体中文](docs/zh-CN/supported-models.md)
+- [Model rights boundary](docs/model-license-boundary.md) · [简体中文](docs/zh-CN/model-license-boundary.md)
+- [HTTP API](docs/api.md) · [简体中文](docs/zh-CN/api.md)
+- [Hermes Agent integration](docs/hermes-agent.md) · [简体中文](docs/zh-CN/hermes-agent.md)
+- [oh-my-pi integration](docs/oh-my-pi.md) · [简体中文](docs/zh-CN/oh-my-pi.md)
+- [Privacy and network boundary](docs/privacy.md) · [简体中文](docs/zh-CN/privacy.md)
+- [Data locations and uninstall](docs/storage-and-uninstall.md) · [简体中文](docs/zh-CN/storage-and-uninstall.md)
+- [Troubleshooting](docs/troubleshooting.md) · [简体中文](docs/zh-CN/troubleshooting.md)
+- [Known issues](docs/known-issues.md) · [简体中文](docs/zh-CN/known-issues.md)
+- [0.1.0 release notes](docs/release-notes/0.1.0.md) · [简体中文](docs/zh-CN/release-notes/0.1.0.md)
+- [Versioning and releases](docs/versioning-and-releases.md) · [简体中文](docs/zh-CN/versioning-and-releases.md)
+- [Third-party materials](docs/third-party-materials.md) · [简体中文](docs/zh-CN/third-party-materials.md)
+- [Security boundary](docs/security-boundary.md) · [简体中文](docs/zh-CN/security-boundary.md)
+- [Development previews](docs/development-preview-release.md) · [简体中文](docs/zh-CN/development-preview-release.md)
+- [Diagnostic export](docs/diagnostic-bundle.md) · [简体中文](docs/zh-CN/diagnostic-bundle.md)
 
-## 开发验证
+## Development verification
 
 ```bash
 scripts/verify-version-consistency.sh
@@ -63,8 +70,9 @@ cargo build --locked --release
 swift test --package-path ironmlx-app --configuration release --no-parallel
 ```
 
-App Bundle 的静态验证使用：
+For a built App Bundle:
 
 ```bash
 scripts/verify-app-bundle.sh dist/IronMLX.app
+scripts/verify-model-distribution-boundary.sh dist/IronMLX.app
 ```

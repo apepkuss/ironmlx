@@ -206,6 +206,7 @@ done
 cp "$REPO_ROOT/THIRD_PARTY_NOTICES.md" "$APP_BUNDLE/Contents/Resources/Legal/"
 cp "$REPO_ROOT/third-party-inventory.json" "$APP_BUNDLE/Contents/Resources/Legal/"
 cp -R "$REPO_ROOT/THIRD_PARTY_LICENSES" "$APP_BUNDLE/Contents/Resources/Legal/"
+cp "$REPO_ROOT/docs/model-license-boundary.md" "$APP_BUNDLE/Contents/Resources/Legal/"
 
 iconset="$BUILD_ROOT/AppIcon.iconset"
 mkdir -p "$iconset"
@@ -257,4 +258,5 @@ codesign --force --sign - "$APP_BUNDLE/Contents/MacOS/IronMLX"
 codesign --force --sign - "$APP_BUNDLE"
 
 "$SCRIPT_DIR/verify-app-bundle.sh" "$APP_BUNDLE"
+"$SCRIPT_DIR/verify-model-distribution-boundary.sh" "$APP_BUNDLE"
 echo "Built: $APP_BUNDLE"

@@ -1,1 +1,0 @@
-You are validating a KV cache quantization implementation. Write a compact technical summary with three numbered points about how to compare logits drift, generation quality, latency, and memory usage.

@@ -1,29 +1,30 @@
-# 数据位置与卸载
+# Data locations and uninstall
 
-## 默认数据位置
+## Default locations
 
-| 内容 | 路径 |
+| Data | Path |
 | --- | --- |
-| App 配置 | `~/.ironmlx/config/app_config.json` |
-| Hugging Face / ModelScope 模型快照 | `~/.ironmlx/models/` |
-| 分页 SSD 前缀缓存 | `~/.ironmlx/cache/paged_prefix_cache/` |
-| App 与后端日志 | `~/.ironmlx/logs/` |
-| 模型参数 | `~/.ironmlx/model_params.json` |
-| 后端故障记录 | `~/.ironmlx/incidents/backend-incidents.json` |
-| 调度器 profile store | `~/.ironmlx/scheduler-profiles/` |
-| 调度器校准报告 | `~/.ironmlx/reports/scheduler-autotune/` |
+| App configuration | `~/.ironmlx/config/app_config.json` |
+| Hugging Face / ModelScope snapshots | `~/.ironmlx/models/` |
+| Paged SSD prefix cache | `~/.ironmlx/cache/paged_prefix_cache/` |
+| App and backend logs | `~/.ironmlx/logs/` |
+| Model parameters | `~/.ironmlx/model_params.json` |
+| Backend incidents | `~/.ironmlx/incidents/backend-incidents.json` |
+| Scheduler profile store | `~/.ironmlx/scheduler-profiles/` |
+| Scheduler calibration reports | `~/.ironmlx/reports/scheduler-autotune/` |
 
-用户在 Dashboard 中配置自定义 cache directory 后，缓存会写到该目录而不是默认
-路径。LAN API Key、CA 与 TLS 私钥由 macOS Keychain 管理，service 标识为
-`com.ironmlx.lan-security.v1`。
+After a custom cache directory is configured in Dashboard, cache data is written
+there instead of the default path. LAN API keys, CA, and TLS private keys are
+managed by macOS Keychain under service `com.ironmlx.lan-security.v1`.
 
-## 卸载 App
+## Uninstall
 
-1. 退出 IronMLX，确认后端进程已停止；
-2. 删除 `IronMLX.app`；
-3. 若不保留模型与配置，删除 `~/.ironmlx`；
-4. 若使用过自定义 cache directory，单独删除该目录；
-5. 若启用过 LAN 模式，在 Keychain Access 中删除 IronMLX LAN security 条目。
+1. Quit IronMLX and confirm the backend has stopped.
+2. Delete `IronMLX.app`.
+3. If you do not need models or configuration, delete `~/.ironmlx`.
+4. Delete a custom cache directory separately, if one was configured.
+5. If LAN mode was enabled, remove the IronMLX LAN security entries in Keychain Access.
 
-删除 `~/.ironmlx` 会永久移除已下载模型、未完成下载、配置、日志、缓存和报告。
-如需保留模型，先备份 `~/.ironmlx/models`，不要直接删除整个目录。
+Deleting `~/.ironmlx` permanently removes downloaded models, partial downloads,
+configuration, logs, caches, and reports. To keep models, back up
+`~/.ironmlx/models` first instead of deleting the entire directory.

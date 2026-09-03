@@ -19,6 +19,7 @@ fail() {
 for required in \
   "$REPO_ROOT/THIRD_PARTY_NOTICES.md" \
   "$REPO_ROOT/third-party-inventory.json" \
+  "$REPO_ROOT/docs/model-license-boundary.md" \
   "$REPO_ROOT/SBOM.cdx.json"; do
   [ -s "$required" ] || fail "required distribution material is missing or empty: $required"
 done
