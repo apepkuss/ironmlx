@@ -1,7 +1,8 @@
 # IronMLX v0.1 API 兼容矩阵
 
-状态基线：`feat/dflash2-execution-path`（DFlash2 P4 提交前验收树）。本文是
-IronMLX v0.1 的公开协议承诺，适用于：
+状态基线：IronMLX v0.1 发布候选主线（以当前 `dev` 分支为准）。发布包会在
+Bundle 元数据中记录不可变的源提交；本文不引用实验性功能分支作为公开基线。
+本文是 IronMLX v0.1 的公开协议承诺，适用于：
 
 - `POST /v1/chat/completions`（OpenAI Chat Completions 子集）；
 - `POST /v1/responses`（OpenAI Responses 无状态子集）；
@@ -10,6 +11,25 @@ IronMLX v0.1 的公开协议承诺，适用于：
 本文中的“支持”表示字段有明确的解析、验证和响应语义，并由服务端 contract
 测试覆盖；“受限”表示只接受文档列出的子集或依赖模型 capability；“拒绝”表示
 收到后返回 400，不能静默忽略或降级。
+
+## v0.1 产品基线关联
+
+本矩阵与以下 v0.1 产品能力保持一致：
+
+- OpenAI Responses：typed output/reasoning、SSE 生命周期、客户端 function tools
+  与 Structured Outputs；Responses 保持无状态，不持久化 conversation 或 response；
+- Qwen3.8：支持文档列出的原生 reasoning、tools、图片输入和 MTP 能力；精确
+  checkpoint、量化和最低内存要求以[支持模型矩阵](supported-models.md)为准；
+- DFlash2：Qwen3.8 的匹配 target/draft 通过独立 actor 提供文本推理、精确 sampling、
+  有界请求并发和 tensor batching；它与 MTP、Prompt Lookup、KV quantization、
+  paged/SSD prefix cache 及 active-KV offload 互斥；
+- 模型管理：Dashboard 使用统一下载队列，提供不可变 snapshot、断点续传、取消、
+  预检和完整性校验；这些是本地模型生命周期能力，不属于三套 HTTP 协议字段；
+- 诊断导出：Dashboard 的“导出诊断信息”只在本机生成经过白名单和脱敏的 ZIP，
+  不上传数据，也不是 HTTP API 或协议持久化承诺。
+
+协议使用示例和请求形状见 [`api.md`](api.md)，模型能力和 DFlash2 的完整限制见
+[`supported-models.md`](supported-models.md) 与 [`dflash2-server-api.md`](dflash2-server-api.md)。
 
 ## 符号与证据
 

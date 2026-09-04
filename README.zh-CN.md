@@ -20,14 +20,16 @@ Rust 推理引擎、MLX/Metal 运行时、模型管理 Dashboard，以及 OpenAI
 - 多模型加载、卸载、固定、TTL 与内存保护；
 - OpenAI `/v1/chat/completions`、`/v1/responses` 和 Anthropic `/v1/messages`，均支持客户端函数工具调用协议；
 - 流式输出、连续批处理、分页 KV/前缀缓存、MTP 与 Prompt Lookup；
+- Qwen3.8 reasoning/工具调用、匹配的 MTP 与独立 DFlash2 文本执行路径；
 - 文本及受控 base64 图片输入；
+- 本地脱敏诊断信息导出，不包含 prompt、凭据且不上传网络；
 - 默认仅监听 loopback；可选 LAN 模式使用 HTTPS 与 API Key。
 
 ## 快速开始
 
 当前仓库已生成与 macOS arm64 Release 产物对应的第三方依赖清单、Notices 和
-许可证文本，但在完成 P0-8B 法律复核、SBOM 与明确授权前，公开二进制分发仍被
-发布门禁阻止。开发者可以从源码构建并在本机验证：
+许可证文本和确定性 CycloneDX SBOM，但在完成 P0-8B 法律复核与明确授权前，公开
+二进制分发仍被发布门禁阻止。开发者可以从源码构建并在本机验证：
 
 ```bash
 cargo install --locked --features cli --version 0.9.1 cargo-about
@@ -44,6 +46,8 @@ open dist/IronMLX.app
 - [支持模型矩阵](docs/zh-CN/supported-models.md)
 - [模型权利边界](docs/zh-CN/model-license-boundary.md)
 - [API 示例](docs/zh-CN/api.md)
+- [API 兼容矩阵](docs/api-compatibility-matrix.md)
+- [DFlash2 服务端与 CLI](docs/dflash2-server-api.md)
 - [Hermes Agent 集成](docs/zh-CN/hermes-agent.md)
 - [oh-my-pi 集成](docs/zh-CN/oh-my-pi.md)
 - [隐私与网络边界](docs/zh-CN/privacy.md)

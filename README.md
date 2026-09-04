@@ -22,14 +22,17 @@ Current product version: **0.1.0**
 - OpenAI Chat Completions/Responses and Anthropic Messages APIs with client-side
   function-call protocols;
 - Streaming, continuous batching, paged KV/prefix cache, MTP, and Prompt Lookup;
+- Qwen3.8 reasoning/tools, matching MTP, and isolated DFlash2 text execution;
 - Text and controlled base64 image input;
+- Local redacted diagnostic export with no prompt, credential, or network upload;
 - Loopback by default, with optional LAN mode using HTTPS and API keys.
 
 ## Quick start
 
-Third-party inventories, notices, and license texts are generated for engineering
-review, but public binary distribution remains blocked until P0-8B legal review,
-SBOM, and explicit authorization are complete. Build from a trusted checkout:
+Third-party inventories, notices, license texts, and the deterministic CycloneDX
+SBOM are generated for engineering review, but public binary distribution remains
+blocked until P0-8B legal review and explicit authorization are complete. Build
+from a trusted checkout:
 
 ```bash
 cargo install --locked --features cli --version 0.9.1 cargo-about
@@ -46,6 +49,8 @@ See [Installation and build](docs/installation.md) for details, or read the
 - [Supported model matrix](docs/supported-models.md) · [简体中文](docs/zh-CN/supported-models.md)
 - [Model rights boundary](docs/model-license-boundary.md) · [简体中文](docs/zh-CN/model-license-boundary.md)
 - [HTTP API](docs/api.md) · [简体中文](docs/zh-CN/api.md)
+- [API compatibility matrix](docs/api-compatibility-matrix.md)
+- [DFlash2 server and CLI](docs/dflash2-server-api.md)
 - [Hermes Agent integration](docs/hermes-agent.md) · [简体中文](docs/zh-CN/hermes-agent.md)
 - [oh-my-pi integration](docs/oh-my-pi.md) · [简体中文](docs/zh-CN/oh-my-pi.md)
 - [Privacy and network boundary](docs/privacy.md) · [简体中文](docs/zh-CN/privacy.md)
