@@ -5,8 +5,8 @@
 - Source builds use an ad-hoc signature and are not notarized; they are not
   formal distribution installers.
 - Third-party notices, license texts, and the engineering inventory exist, but
-  legal review and the CycloneDX SBOM are incomplete; public binary release
-  remains blocked by the P0-8B gate.
+  legal review and approval of the generated CycloneDX SBOM are incomplete;
+  public binary release remains blocked by the P0-8B gate.
 - HTTP image input accepts JPEG/PNG/WebP base64 only; remote URLs are disabled.
 - The App may identify embedding, reranker, ASR, or TTS metadata, but the server
   loads only the LLM/VLM generation architectures in the [supported-models matrix](supported-models.md).

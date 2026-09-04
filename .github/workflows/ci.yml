@@ -87,6 +87,10 @@ jobs:
         shell: bash
         run: scripts/verify-version-consistency.sh
 
+      - name: Verify deterministic CycloneDX SBOM
+        shell: bash
+        run: scripts/verify-sbom.sh
+
       - name: Install pinned license inventory tool
         shell: bash
         run: |

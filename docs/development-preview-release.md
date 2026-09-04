@@ -49,8 +49,8 @@ The job:
 `scripts/release-legal-gate.sh` runs before packaging. It fails while
 `IRONMLX_PUBLIC_DISTRIBUTION_READY` is false. P0-8A now supplies reproducible
 third-party Notices, license texts, and an engineering inventory; P0-8B must
-review those materials, supply the CycloneDX SBOM, and explicitly authorize
-distribution before the flag can be enabled.
+review those materials, approve the generated CycloneDX SBOM, and explicitly
+authorize distribution before the flag can be enabled.
 
 ## Manual preview publication after the gate is approved
 
@@ -81,8 +81,8 @@ the `ADHOC-NOT-NOTARIZED` suffix, and both archives contain:
 - `IronMLX Development Preview.app`;
 - `DEVELOPMENT-PREVIEW-NOTICE.txt`;
 - `PREVIEW-BUILD-METADATA.json`;
-- `THIRD_PARTY_NOTICES.md`, `third-party-inventory.json`, and
-  `THIRD_PARTY_LICENSES/`;
+- `LICENSE`, `NOTICE`, `SBOM.cdx.json`, `THIRD_PARTY_NOTICES.md`,
+  `third-party-inventory.json`, and `THIRD_PARTY_LICENSES/`;
 - `model-license-boundary.md`.
 
 The App's `Info.plist`, bundled notice, and metadata repeat that Developer ID

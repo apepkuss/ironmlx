@@ -28,6 +28,7 @@ P0-8A 为实际打入 `IronMLX.app` 的 macOS arm64 Release 产品建立可复�
 - `third-party-inventory.json`：规范化机器可读工程清单；
 - `THIRD_PARTY_NOTICES.md`：组件、版本、许可表达式与许可证文件映射；
 - `THIRD_PARTY_LICENSES/`：从锁定依赖源码提取的完整许可证原文。
+- `SBOM.cdx.json`：从同一份清单确定性生成的 CycloneDX 1.6 软件物料清单。
 
 MLX 条目标明 IronMLX 使用 `apepkuss/mlx` 分叉，而不是官方 MLX repo，并同时
 记录精确 fork commit、官方 upstream repo 与 upstream base revision。生成器还会
@@ -52,7 +53,7 @@ App 构建所用的实际 MLX/CMake 输入就绪后重新生成到临时目录�
 
 ## App 与归档
 
-Release 构建将三类材料复制到：
+Release 构建将项目 `LICENSE`、`NOTICE`、`SBOM.cdx.json` 以及第三方材料复制到：
 
 ```text
 IronMLX.app/Contents/Resources/Legal/
@@ -67,7 +68,7 @@ ZIP、挂载 DMG，并逐项比较 App 内部和归档根目录的材料。
 以下内容不因 P0-8A 自动完成：
 
 - 对每个许可证表达式、归属声明与闭源分发义务的最终法律复核；
-- CycloneDX `SBOM.cdx.json` 的生成与复核；
+- 对已生成 CycloneDX `SBOM.cdx.json` 的正式复核与批准；
 - 模型权利边界声明的最终法律复核（声明 IronMLX 不重新授权模型，用户自行查阅上游条款）；
 - 将 `IRONMLX_PUBLIC_DISTRIBUTION_READY` 改为 `true` 的明确授权；
 - Developer ID 签名、公证、stapling 与真实最低目标机器验收。

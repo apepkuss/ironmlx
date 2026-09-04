@@ -9,7 +9,7 @@ Macs and older macOS versions are outside the supported range.
 
 Third-party inventories, notices, and license texts are generated and bundled
 for engineering review. Public binary distribution remains blocked until the
-P0-8B legal review, CycloneDX SBOM, and explicit distribution authorization are
+P0-8B legal review, SBOM approval, and explicit distribution authorization are
 complete. Until then, build from a trusted source checkout for local validation.
 
 ## Model rights boundary

@@ -8,7 +8,7 @@ Intel Mac 和更早的 macOS 版本不在支持范围内。
 ## 当前分发状态
 
 第三方依赖清单、Notices 与许可证原文已由 P0-8A 生成并纳入 App，但尚未完成
-P0-8B 法律复核、CycloneDX SBOM 与分发授权，因此 GitHub public binary 发布仍被
+P0-8B 法律复核、SBOM 批准与分发授权，因此 GitHub public binary 发布仍被
 硬门禁阻止。当前只支持从受信任的源码 checkout 构建用于本机开发验证。
 
 ## 模型权利边界

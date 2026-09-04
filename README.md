@@ -58,6 +58,9 @@ See [Installation and build](docs/installation.md) for details, or read the
 - [Security boundary](docs/security-boundary.md) · [简体中文](docs/zh-CN/security-boundary.md)
 - [Development previews](docs/development-preview-release.md) · [简体中文](docs/zh-CN/development-preview-release.md)
 - [Diagnostic export](docs/diagnostic-bundle.md) · [简体中文](docs/zh-CN/diagnostic-bundle.md)
+- [Security reporting](SECURITY.md) · [中文](docs/zh-CN/security.md)
+- [Support](SUPPORT.md) · [中文](docs/zh-CN/support.md)
+- [Contributing](CONTRIBUTING.md) · [中文](docs/zh-CN/contributing.md)
 
 ## Development verification
 

@@ -45,6 +45,9 @@ third_party_notices="$package_root/THIRD_PARTY_NOTICES.md"
 third_party_inventory="$package_root/third-party-inventory.json"
 third_party_licenses="$package_root/THIRD_PARTY_LICENSES"
 model_license_boundary="$package_root/model-license-boundary.md"
+project_license="$package_root/LICENSE"
+project_notice="$package_root/NOTICE"
+sbom="$package_root/SBOM.cdx.json"
 
 rm -rf "$BUILD_ROOT"
 mkdir -p "$package_root" "$ASSET_DIR"
@@ -53,6 +56,9 @@ cp "$REPO_ROOT/THIRD_PARTY_NOTICES.md" "$third_party_notices"
 cp "$REPO_ROOT/third-party-inventory.json" "$third_party_inventory"
 cp -R "$REPO_ROOT/THIRD_PARTY_LICENSES" "$third_party_licenses"
 cp "$REPO_ROOT/docs/model-license-boundary.md" "$model_license_boundary"
+cp "$REPO_ROOT/LICENSE" "$project_license"
+cp "$REPO_ROOT/NOTICE" "$project_notice"
+cp "$REPO_ROOT/SBOM.cdx.json" "$sbom"
 
 cat > "$notice_file" <<EOF
 IronMLX Development Preview / IronMLX 开发预览
@@ -130,6 +136,9 @@ cp "$third_party_notices" "$ASSET_DIR/THIRD_PARTY_NOTICES.md"
 cp "$third_party_inventory" "$ASSET_DIR/third-party-inventory.json"
 cp -R "$third_party_licenses" "$ASSET_DIR/THIRD_PARTY_LICENSES"
 cp "$model_license_boundary" "$ASSET_DIR/model-license-boundary.md"
+cp "$project_license" "$ASSET_DIR/LICENSE"
+cp "$project_notice" "$ASSET_DIR/NOTICE"
+cp "$sbom" "$ASSET_DIR/SBOM.cdx.json"
 
 cat > "$ASSET_DIR/RELEASE-NOTES.md" <<EOF
 # ⚠️ IronMLX 开发预览
@@ -162,6 +171,9 @@ EOF
     "$(basename "$zip_path")" \
     DEVELOPMENT-PREVIEW-NOTICE.txt \
     PREVIEW-BUILD-METADATA.json \
+    LICENSE \
+    NOTICE \
+    SBOM.cdx.json \
     THIRD_PARTY_NOTICES.md \
     third-party-inventory.json \
     model-license-boundary.md \

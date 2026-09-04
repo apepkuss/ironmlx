@@ -64,6 +64,9 @@ for file in \
   Contents/Resources/menubar-icon@2x.png \
   Contents/Resources/logo.png \
   Contents/Resources/sidebar-logo@2x.png \
+  Contents/Resources/Legal/LICENSE \
+  Contents/Resources/Legal/NOTICE \
+  Contents/Resources/Legal/SBOM.cdx.json \
   Contents/Resources/Legal/THIRD_PARTY_NOTICES.md \
   Contents/Resources/Legal/third-party-inventory.json \
   Contents/Resources/Legal/model-license-boundary.md; do
@@ -71,6 +74,18 @@ for file in \
 done
 [ -d "$APP_BUNDLE/Contents/Resources/Legal/THIRD_PARTY_LICENSES" ] || \
   fail "bundled third-party license directory is missing"
+diff -q \
+  "$REPO_ROOT/LICENSE" \
+  "$APP_BUNDLE/Contents/Resources/Legal/LICENSE" >/dev/null || \
+  fail "bundled LICENSE differs from the verified source material"
+diff -q \
+  "$REPO_ROOT/NOTICE" \
+  "$APP_BUNDLE/Contents/Resources/Legal/NOTICE" >/dev/null || \
+  fail "bundled NOTICE differs from the verified source material"
+diff -q \
+  "$REPO_ROOT/SBOM.cdx.json" \
+  "$APP_BUNDLE/Contents/Resources/Legal/SBOM.cdx.json" >/dev/null || \
+  fail "bundled SBOM differs from the verified source material"
 diff -q \
   "$REPO_ROOT/THIRD_PARTY_NOTICES.md" \
   "$APP_BUNDLE/Contents/Resources/Legal/THIRD_PARTY_NOTICES.md" >/dev/null || \

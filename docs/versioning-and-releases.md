@@ -43,6 +43,8 @@ same product version. Development previews use the separate
 fail. After P0-8B, an authorized reviewer may enable it only when notices,
 inventory, license texts, SBOM, and final legal review are complete.
 
-The gate does not require or imply a particular first-party open-source license;
+The gate requires the project `LICENSE`, `NOTICE`, and deterministic
+`SBOM.cdx.json` to be present in the release materials. It does not require or
+imply a particular first-party open-source license;
 that policy is a separate release decision. See [Third-party materials](third-party-materials.md)
 for the locked inventory process.

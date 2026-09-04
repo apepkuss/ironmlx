@@ -24,7 +24,7 @@ GitHub Environment 或 secret，并在昂贵构建前校验 Conventional Commits
 
 打包前执行 `scripts/release-legal-gate.sh`。当
 `IRONMLX_PUBLIC_DISTRIBUTION_READY=false` 时会失败。P0-8B 必须完成第三方材料审查、
-CycloneDX SBOM 和明确分发授权后，才能启用该标志。
+复核第三方材料、批准已生成的 CycloneDX SBOM 并取得明确分发授权后，才能启用该标志。
 
 ## 手动发布预览
 
@@ -32,7 +32,8 @@ CycloneDX SBOM 和明确分发授权后，才能启用该标志。
 workflow 冻结 `GITHUB_SHA`，从独立的 MLX pinned SHA 构建，并创建
 `preview-YYYYMMDD-abcdef0` 命名空间中的 tag。GitHub Release 始终标记为 prerelease。
 
-DMG 和 ZIP 包含 App、预览警告、构建元数据、第三方 notices/inventory/licenses，以及
+DMG 和 ZIP 包含 App、预览警告、构建元数据、项目 LICENSE/NOTICE/SBOM、第三方
+notices/inventory/licenses，以及
 `model-license-boundary.md`。`SHA256SUMS` 覆盖这些材料、归档和 release notes；验证器
 会拒绝 App、ZIP 或 DMG 中的常见模型权重文件。
 

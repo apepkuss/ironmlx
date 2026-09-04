@@ -1,0 +1,89 @@
+name: Stable Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing immutable vX.Y.Z tag to package
+        required: true
+        type: string
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: stable-release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  package-stable:
+    name: Package signed and notarized stable release
+    runs-on: macos-26
+    timeout-minutes: 120
+    environment: stable-release
+
+    steps:
+      - name: Resolve immutable release tag
+        id: release
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            release_tag="$GITHUB_REF_NAME"
+          else
+            release_tag="$INPUT_TAG"
+          fi
+          [[ "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "error: release tag must match vX.Y.Z: $release_tag" >&2
+            exit 1
+          }
+          echo "tag=$release_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout immutable release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.release.outputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify tag and legal release gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git describe --exact-match --tags HEAD)" = "${{ steps.release.outputs.tag }}"
+          scripts/verify-version-consistency.sh
+          scripts/release-legal-gate.sh
+
+      - name: Verify signed and notarized App Bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d dist/IronMLX.app
+          scripts/package-stable-release.sh dist/IronMLX.app .build/stable-release
+
+      - name: Publish immutable stable release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG" \
+            .build/stable-release/*.dmg \
+            .build/stable-release/*.zip \
+            .build/stable-release/SHA256SUMS \
+            .build/stable-release/LICENSE \
+            .build/stable-release/NOTICE \
+            .build/stable-release/SBOM.cdx.json \
+            .build/stable-release/THIRD_PARTY_NOTICES.md \
+            .build/stable-release/third-party-inventory.json \
+            .build/stable-release/model-license-boundary.md \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$(git rev-parse HEAD)" \
+            --title "IronMLX $RELEASE_TAG" \
+            --generate-notes

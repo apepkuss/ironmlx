@@ -10,8 +10,9 @@ readonly IRONMLX_PREVIEW_WARNING_ZH="未使用 Developer ID 签名、未经 Appl
 readonly IRONMLX_PREVIEW_WARNING_EN="Not signed with Developer ID, not notarized by Apple, for development validation only"
 
 # Public binary distribution remains blocked until P0-8B supplies and reviews
-# the required legal review and SBOM. P0-8A generates and packages engineering
-# inventories, notices, and source license texts, but those outputs do not by
-# themselves authorize distribution. Changing this flag is deliberately
+# the required legal review and distribution authorization. R0-1E generates
+# and packages the engineering SBOM alongside P0-8A's inventories, notices,
+# and source license texts, but those outputs do not by themselves authorize
+# distribution. Changing this flag is deliberately
 # insufficient on its own: release-legal-gate.sh also checks every artifact.
 readonly IRONMLX_PUBLIC_DISTRIBUTION_READY="false"

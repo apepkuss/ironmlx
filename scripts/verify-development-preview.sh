@@ -31,6 +31,9 @@ for required in \
   "$dmg_path" \
   "$asset_dir/DEVELOPMENT-PREVIEW-NOTICE.txt" \
   "$asset_dir/PREVIEW-BUILD-METADATA.json" \
+  "$asset_dir/LICENSE" \
+  "$asset_dir/NOTICE" \
+  "$asset_dir/SBOM.cdx.json" \
   "$asset_dir/THIRD_PARTY_NOTICES.md" \
   "$asset_dir/third-party-inventory.json" \
   "$asset_dir/model-license-boundary.md" \
@@ -62,6 +65,12 @@ grep -Fq "Product version: \`$PRODUCT_VERSION\`" "$asset_dir/RELEASE-NOTES.md" |
   "$IRONMLX_MLX_UPSTREAM_REVISION" ] || fail "metadata MLX upstream revision mismatch"
 diff -q "$REPO_ROOT/THIRD_PARTY_NOTICES.md" "$asset_dir/THIRD_PARTY_NOTICES.md" >/dev/null || \
   fail "preview notice asset differs from the verified source material"
+diff -q "$REPO_ROOT/LICENSE" "$asset_dir/LICENSE" >/dev/null || \
+  fail "preview LICENSE asset differs from the verified source material"
+diff -q "$REPO_ROOT/NOTICE" "$asset_dir/NOTICE" >/dev/null || \
+  fail "preview NOTICE asset differs from the verified source material"
+diff -q "$REPO_ROOT/SBOM.cdx.json" "$asset_dir/SBOM.cdx.json" >/dev/null || \
+  fail "preview SBOM asset differs from the verified source material"
 diff -q "$REPO_ROOT/third-party-inventory.json" "$asset_dir/third-party-inventory.json" >/dev/null || \
   fail "preview inventory asset differs from the verified source material"
 diff -qr "$REPO_ROOT/THIRD_PARTY_LICENSES" "$asset_dir/THIRD_PARTY_LICENSES" >/dev/null || \
@@ -101,6 +110,12 @@ verify_preview_app() {
 
   diff -q "$REPO_ROOT/THIRD_PARTY_NOTICES.md" "$package_root/THIRD_PARTY_NOTICES.md" >/dev/null || \
     fail "archive root third-party notices differ from the verified source material"
+  diff -q "$REPO_ROOT/LICENSE" "$package_root/LICENSE" >/dev/null || \
+    fail "archive root LICENSE differs from the verified source material"
+  diff -q "$REPO_ROOT/NOTICE" "$package_root/NOTICE" >/dev/null || \
+    fail "archive root NOTICE differs from the verified source material"
+  diff -q "$REPO_ROOT/SBOM.cdx.json" "$package_root/SBOM.cdx.json" >/dev/null || \
+    fail "archive root SBOM differs from the verified source material"
   diff -q "$REPO_ROOT/third-party-inventory.json" "$package_root/third-party-inventory.json" >/dev/null || \
     fail "archive root third-party inventory differs from the verified source material"
   diff -qr "$REPO_ROOT/THIRD_PARTY_LICENSES" "$package_root/THIRD_PARTY_LICENSES" >/dev/null || \

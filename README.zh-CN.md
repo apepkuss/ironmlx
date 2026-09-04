@@ -56,6 +56,9 @@ open dist/IronMLX.app
 - [安全边界](docs/zh-CN/security-boundary.md)
 - [诊断信息导出](docs/zh-CN/diagnostic-bundle.md)
 - [开发预览发布](docs/zh-CN/development-preview-release.md)
+- [安全漏洞报告](docs/zh-CN/security.md)
+- [用户支持](docs/zh-CN/support.md)
+- [参与开发](docs/zh-CN/contributing.md)
 
 ## 开发验证
 

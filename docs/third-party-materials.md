@@ -21,6 +21,8 @@ advice or public-distribution authorization.
 - locked native dependency and bundled-asset manifests with SHA-256 values;
 - `third-party-inventory.json`;
 - `THIRD_PARTY_NOTICES.md` and `THIRD_PARTY_LICENSES/`.
+- `SBOM.cdx.json` (CycloneDX 1.6, generated deterministically from the same
+  inventory).
 
 The generator records the exact MLX fork commit, upstream repository and base
 revision, and validates native archives, bundled files, and license hashes.
@@ -45,15 +47,17 @@ Release builds copy these materials to:
 IronMLX.app/Contents/Resources/Legal/
 ```
 
-The App menu exposes **Third-Party Notices…**. Approved development previews
-also include the same materials at the DMG/ZIP root; their verifier extracts the
-ZIP, mounts the DMG, and compares every item.
+The App menu exposes **Third-Party Notices…**. Release Bundles include the
+project `LICENSE`, `NOTICE`, `SBOM.cdx.json`, and the third-party materials in
+`Contents/Resources/Legal/`. Approved development previews also include these
+materials at the DMG/ZIP root; their verifier extracts the ZIP, mounts the DMG,
+and compares every item.
 
 ## Remaining P0-8B gate
 
 - Final legal review of license expressions, attribution, and closed-binary
   distribution obligations;
-- CycloneDX `SBOM.cdx.json` generation and review;
+- formal review and approval of the generated CycloneDX `SBOM.cdx.json`;
 - final legal review of the model-rights boundary statement;
 - explicit authorization to set `IRONMLX_PUBLIC_DISTRIBUTION_READY=true`;
 - Developer ID signing, notarization, stapling, and minimum-target acceptance.

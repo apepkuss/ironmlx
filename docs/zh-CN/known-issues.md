@@ -3,7 +3,7 @@
 - 仅支持 Apple Silicon arm64 和 macOS 26.2+；没有 Intel/旧系统兼容路径。
 - 当前源码构建仅为 ad-hoc 签名且未经 Apple 公证，不是正式可分发安装包。
 - 第三方 Notices、许可证原文与工程清单已生成，但尚未完成法律复核与 CycloneDX
-  SBOM；public binary 发布继续由 P0-8B 门禁阻止。
+  SBOM 批准；public binary 发布继续由 P0-8B 门禁阻止。
 - HTTP 图片输入只接受 JPEG/PNG/WebP base64；远程 URL 有意禁用。
 - App 模型列表会识别部分 embedding、reranker、ASR、TTS 元数据，但服务端只加载
   [支持模型矩阵](supported-models.md)中的 LLM/VLM 生成架构。

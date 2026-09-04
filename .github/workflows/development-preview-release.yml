@@ -169,6 +169,9 @@ jobs:
             assets/SHA256SUMS \
             assets/DEVELOPMENT-PREVIEW-NOTICE.txt \
             assets/PREVIEW-BUILD-METADATA.json \
+            assets/LICENSE \
+            assets/NOTICE \
+            assets/SBOM.cdx.json \
             assets/THIRD_PARTY_NOTICES.md \
             assets/third-party-inventory.json \
             assets/RELEASE-NOTES.md \

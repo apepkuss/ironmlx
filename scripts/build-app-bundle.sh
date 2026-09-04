@@ -136,6 +136,7 @@ echo "==> Verify tracked third-party dependency materials"
 MLX_SRC="$MLX_SOURCE" \
   MLX_BUILD_DIR="$BUILD_ROOT/mlx-build" \
   "$SCRIPT_DIR/verify-third-party-materials.sh"
+"$SCRIPT_DIR/verify-sbom.sh"
 
 echo "==> Build Rust helpers (Release, isolated target directory)"
 env \
@@ -204,6 +205,9 @@ for resource in \
   cp "$APP_SOURCE_DIR/Sources/IronMLXAppCore/Resources/$resource" "$APP_BUNDLE/Contents/Resources/$resource"
 done
 cp "$REPO_ROOT/THIRD_PARTY_NOTICES.md" "$APP_BUNDLE/Contents/Resources/Legal/"
+cp "$REPO_ROOT/LICENSE" "$APP_BUNDLE/Contents/Resources/Legal/"
+cp "$REPO_ROOT/NOTICE" "$APP_BUNDLE/Contents/Resources/Legal/"
+cp "$REPO_ROOT/SBOM.cdx.json" "$APP_BUNDLE/Contents/Resources/Legal/"
 cp "$REPO_ROOT/third-party-inventory.json" "$APP_BUNDLE/Contents/Resources/Legal/"
 cp -R "$REPO_ROOT/THIRD_PARTY_LICENSES" "$APP_BUNDLE/Contents/Resources/Legal/"
 cp "$REPO_ROOT/docs/model-license-boundary.md" "$APP_BUNDLE/Contents/Resources/Legal/"
