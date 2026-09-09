@@ -845,8 +845,11 @@ public actor ModelDownloadService {
         var totalBytes: Int64 = 0
         var remainingBytes: Int64 = 0
         var observedBytesByPath: [String: Int64] = [:]
+        let hasComponentManifest = repository.files.contains { $0.path == "model_manifest.json" }
         let downloadableFiles = repository.files.filter { file in
             file.isWeight || Self.isRuntimeMetadata(file)
+                || (hasComponentManifest
+                    && TTSModelDownloadProfile.isPotentialAuxiliary(file))
         }
         for file in downloadableFiles {
             try Task.checkCancellation()
@@ -1263,10 +1266,33 @@ public actor ModelDownloadService {
                 staging: staging,
                 telemetry: telemetry
             )
-            await telemetry.endNetwork()
-            let metadata = metadataResult.files
+            var metadata = metadataResult.files
             var validations = metadataResult.validations
-            let weights = try selectedWeightFiles(repository: repository, staging: staging)
+            let ttsProfile: TTSModelDownloadProfile?
+            do {
+                ttsProfile = try TTSModelDownloadProfile.inspect(directory: staging, files: repository.files)
+            } catch {
+                throw DownloadFailure(repoID: repoID, code: "unsupported_model_metadata", message: error.localizedDescription)
+            }
+            if let ttsProfile {
+                let existing = Set(metadata.map(\.path))
+                let auxiliary = try await acquireMetadata(
+                    repository: repository, token: token, staging: staging, telemetry: telemetry,
+                    selectedFiles: repository.files.filter {
+                        ttsProfile.auxiliaryPaths.contains($0.path) && !existing.contains($0.path)
+                    }
+                )
+                metadata.append(contentsOf: auxiliary.files)
+                validations.append(contentsOf: auxiliary.validations)
+            }
+            await telemetry.endNetwork()
+            let weights: [RemoteModelFile]
+            if let ttsProfile {
+                weights = repository.files.filter { ttsProfile.weightPaths.contains($0.path) }
+                    .sorted { $0.path < $1.path }
+            } else {
+                weights = try selectedWeightFiles(repository: repository, staging: staging)
+            }
             guard !weights.isEmpty else {
                 throw DownloadFailure(
                     repoID: repoID,
@@ -1289,7 +1315,11 @@ public actor ModelDownloadService {
 
             let compatibility: ModelMetadataPreflightResult
             do {
-                compatibility = try await metadataPreflight.validate(metadataDirectory: staging)
+                if let ttsProfile {
+                    compatibility = ttsProfile.compatibility
+                } else {
+                    compatibility = try await metadataPreflight.validate(metadataDirectory: staging)
+                }
             } catch {
                 throw DownloadFailure(
                     repoID: repoID,
@@ -1297,7 +1327,7 @@ public actor ModelDownloadService {
                     message: error.localizedDescription
                 )
             }
-            if compatibility.artifactRole != ModelArtifactRole.dflash2Drafter,
+            if ttsProfile == nil, compatibility.artifactRole != ModelArtifactRole.dflash2Drafter,
                !metadata.contains(where: { $0.path == "tokenizer.json" }) {
                 throw DownloadFailure(
                     repoID: repoID,
@@ -1453,7 +1483,8 @@ public actor ModelDownloadService {
                     artifactRole: compatibility.artifactRole,
                     quantizationMode: compatibility.quantization?.mode,
                     quantizationBits: compatibility.quantization?.bits,
-                    quantizationGroupSize: compatibility.quantization?.groupSize
+                    quantizationGroupSize: compatibility.quantization?.groupSize,
+                    externalResources: ttsProfile?.externalResources
                 ),
                 resources: ModelSnapshotResources(
                     weightBytes: weightBytes,
@@ -1594,7 +1625,8 @@ public actor ModelDownloadService {
         repository: ResolvedModelRepository,
         token: String?,
         staging: URL,
-        telemetry: ModelDownloadTelemetryTracker
+        telemetry: ModelDownloadTelemetryTracker,
+        selectedFiles: [RemoteModelFile]? = nil
     ) async throws -> (files: [ModelSnapshotFile], validations: [ModelValidatedFile]) {
         let required = ["config.json"]
         let byPath = Dictionary(uniqueKeysWithValues: repository.files.map { ($0.path, $0) })
@@ -1605,7 +1637,7 @@ public actor ModelDownloadService {
                 message: "Repository \(repository.repoID) is missing \(path)."
             )
         }
-        let metadataFiles = repository.files.filter(Self.isRuntimeMetadata)
+        let metadataFiles = selectedFiles ?? repository.files.filter(Self.isRuntimeMetadata)
         var resolved: [ModelSnapshotFile] = []
         var validations: [ModelValidatedFile] = []
         for file in metadataFiles {

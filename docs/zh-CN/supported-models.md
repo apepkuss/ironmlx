@@ -1,5 +1,7 @@
 # 支持模型矩阵
 
+App 下载器另支持 `mlx-community/IndexTTS-2.5-fp16` 所用的 IndexTTS 2.5 MLX 仓库布局。此项仅支持仓库下载与完整性验证，不代表支持 TTS 推理或已解决外部运行时依赖。详见 [TTS 模型下载](tts-model-download.md)。
+
 以下矩阵来自 0.1.0 的生产加载分派。`model_type` 匹配只是必要条件；模型还必须
 包含兼容的 `config.json`、tokenizer、chat template、权重布局和量化元数据。
 下载前预检与加载时完整性校验仍可能拒绝不兼容 checkpoint。

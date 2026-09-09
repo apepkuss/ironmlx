@@ -1402,3 +1402,131 @@ private extension Array {
         count == 1 ? self[0] : nil
     }
 }
+
+private func indexTTSFiles() throws -> [(path: String, data: Data, sha256: String?)] {
+    let weights = ["gpt", "codec", "s2mel", "bigvgan"]
+    let manifest: [String: Any] = [
+        "format_version": 1, "model_family": "IndexTTS", "model_version": "2.5",
+        "components": Dictionary(uniqueKeysWithValues: weights.map {
+            ($0, ["file": "\($0).safetensors", "bytes": 7] as [String: Any])
+        }),
+        "tokenizer": ["type": "tiktoken", "filename": "vocab.tiktoken"],
+        "required_auxiliary_resources": ["facebook/w2v-bert-2.0", "funasr/campplus"],
+    ]
+    var files: [(path: String, data: Data, sha256: String?)] = [
+        ("config.json", Data(#"{"version":2.5,"dataset":{"tokenizer_type":"tiktoken","bpe_model":"vocab.tiktoken"},"spk_matrix":"feat1.pt","emo_matrix":"feat2.pt","w2v_stat":"wav2vec2bert_stats.pt"}"#.utf8), nil),
+        ("model_manifest.json", try JSONSerialization.data(withJSONObject: manifest), nil),
+        ("config.yaml", Data("version: 2.5".utf8), nil),
+        ("vocab.tiktoken", Data("YQ== 0".utf8), nil),
+        ("README.md", Data("IndexTTS".utf8), nil),
+        ("LICENSE", Data("model license".utf8), nil),
+    ]
+    for path in weights.map({ "\($0).safetensors" }) + ["model.safetensors", "feat1.pt", "feat2.pt", "wav2vec2bert_stats.pt"] {
+        let data = Data("weights".utf8)
+        files.append((path, data, sha256(data)))
+    }
+    return files
+}
+
+@Test func indexTTSDownloadPublishesAllComponentsAndPreservesTTSReadiness() async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let client = FakeModelDownloadHTTPClient()
+    let repoID = "mlx-community/IndexTTS-2.5-fp16"
+    let files = try indexTTSFiles()
+    configureHuggingFace(client, repoID: repoID, files: files)
+    let service = ModelDownloadService(
+        rootURL: root, httpClient: client, metadataPreflight: RejectingMetadataPreflight(),
+        fileDownloader: ResumableFileDownloader(httpClient: client), telemetryLogger: { _ in }
+    )
+    let result = await service.downloadHuggingFace(repoID: repoID, token: nil)
+    #expect(result.success, "\(result)")
+    let repository = try ModelRepositoryLayout.repositoryRoot(rootURL: root, provider: .huggingFace, repoID: repoID)
+    let snapshot = repository.appendingPathComponent("snapshots/\(testCommit)")
+    let manifest = try ModelSnapshotVerifier().verify(snapshot: snapshot)
+    #expect(Set(manifest.files.map(\.path)) == Set(files.map(\.path)))
+    #expect(manifest.compatibility.artifactRole == "tts")
+    #expect(manifest.compatibility.externalResources == ["facebook/w2v-bert-2.0", "funasr/campplus"])
+    #expect(manifest.resources.weightBytes == 35)
+    let model = try #require(LocalModelScanner(rootURL: root).scan(loadedModels: []).first { $0.id == repoID })
+    #expect(model.type == "tts")
+    #expect(model.readiness?.isLoadable == false)
+    #expect(model.readiness?.reasonCode == "unsupported_model_type")
+}
+
+@Test(arguments: ["codec.safetensors", "model.safetensors", "vocab.tiktoken", "feat1.pt", "config.yaml"])
+func indexTTSDownloadRejectsMissingResourcesBeforeWeights(missing: String) async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let client = FakeModelDownloadHTTPClient()
+    let repoID = "org/tts"
+    configureHuggingFace(client, repoID: repoID, files: try indexTTSFiles().filter { $0.path != missing })
+    let service = ModelDownloadService(
+        rootURL: root, httpClient: client, metadataPreflight: AcceptingMetadataPreflight(),
+        fileDownloader: ResumableFileDownloader(httpClient: client), telemetryLogger: { _ in }
+    )
+    let result = await service.downloadHuggingFace(repoID: repoID, token: nil)
+    #expect(!result.success)
+    #expect(result.code == "unsupported_model_metadata")
+    #expect(client.streamRequests.isEmpty)
+    let repository = try ModelRepositoryLayout.repositoryRoot(rootURL: root, provider: .huggingFace, repoID: repoID)
+    #expect(!FileManager.default.fileExists(atPath: repository.appendingPathComponent("refs/main").path))
+}
+
+@Test(.enabled(if: ProcessInfo.processInfo.environment["IRONMLX_TEST_DOWNLOAD_INDEXTTS"] == "1"))
+func indexTTSLiveDownloadUsingAppService() async throws {
+    let backend = try #require(ProcessInfo.processInfo.environment["IRONMLX_TEST_DOWNLOAD_BACKEND"])
+    let client = URLSessionModelDownloadHTTPClient()
+    let service = ModelDownloadService(
+        httpClient: client,
+        fileDownloader: ProviderModelFileDownloader(httpClient: client, executableURL: URL(fileURLWithPath: backend))
+    )
+    let result = await service.downloadHuggingFace(repoID: "mlx-community/IndexTTS-2.5-fp16", token: nil)
+    #expect(result.success, "\(result)")
+    let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".ironmlx")
+    let repository = try ModelRepositoryLayout.repositoryRoot(
+        rootURL: root, provider: .huggingFace, repoID: "mlx-community/IndexTTS-2.5-fp16"
+    )
+    let commit = try String(contentsOf: repository.appendingPathComponent("refs/main"), encoding: .utf8)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    let snapshot = repository.appendingPathComponent("snapshots/\(commit)")
+    let manifest = try ModelSnapshotVerifier().verify(snapshot: snapshot)
+    #expect(manifest.compatibility.artifactRole == "tts")
+    #expect(manifest.files.filter { $0.path.hasSuffix(".safetensors") }.count == 5)
+    print("Verified IndexTTS snapshot: \(snapshot.path), files=\(manifest.files.count), bytes=\(manifest.files.reduce(Int64(0)) { $0 + $1.size })")
+}
+
+@Test(arguments: ["version", "component_size", "tokenizer_path", "corrupt_auxiliary"])
+func indexTTSDownloadRejectsInconsistentMetadataAndCorruptAuxiliary(fault: String) async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let client = FakeModelDownloadHTTPClient()
+    var files = try indexTTSFiles()
+    if fault == "corrupt_auxiliary" {
+        let index = try #require(files.firstIndex { $0.path == "feat1.pt" })
+        files[index].sha256 = String(repeating: "0", count: 64)
+    } else {
+        let index = try #require(files.firstIndex { $0.path == "model_manifest.json" })
+        var manifest = try #require(JSONSerialization.jsonObject(with: files[index].data) as? [String: Any])
+        switch fault {
+        case "version": manifest["model_version"] = "3.0"
+        case "tokenizer_path": manifest["tokenizer"] = ["type": "tiktoken", "filename": "../vocab.tiktoken"]
+        default:
+            var components = try #require(manifest["components"] as? [String: [String: Any]])
+            components["gpt"]?["bytes"] = 999
+            manifest["components"] = components
+        }
+        files[index].data = try JSONSerialization.data(withJSONObject: manifest)
+    }
+    let repoID = "org/tts"
+    configureHuggingFace(client, repoID: repoID, files: files)
+    let service = ModelDownloadService(
+        rootURL: root, httpClient: client, metadataPreflight: AcceptingMetadataPreflight(),
+        fileDownloader: ResumableFileDownloader(httpClient: client), telemetryLogger: { _ in }
+    )
+    let result = await service.downloadHuggingFace(repoID: repoID, token: nil)
+    #expect(!result.success)
+    let repository = try ModelRepositoryLayout.repositoryRoot(rootURL: root, provider: .huggingFace, repoID: repoID)
+    #expect(!FileManager.default.fileExists(atPath: repository.appendingPathComponent("refs/main").path))
+    #expect(!client.streamRequests.contains { $0.url.hasSuffix(".safetensors") })
+}

@@ -1472,7 +1472,7 @@ public struct LocalModelScanner: Sendable {
         }
         var missingFiles = requiredWeightFilesMissing(in: url, files: files)
         let quantization = quantizationInspection(config: configJSON, snapshot: url)
-        let capabilityType = modelCapabilityType(config: configJSON)
+        var capabilityType = modelCapabilityType(config: configJSON)
         missingFiles.append(contentsOf: quantization.missingFiles)
 
         let readiness: LocalModelReadiness
@@ -1522,6 +1522,9 @@ public struct LocalModelScanner: Sendable {
                 readiness: readiness,
                 quantization: quantization.quantization
             )
+        }
+        if manifest.compatibility.artifactRole == "tts" {
+            capabilityType = "tts"
         }
         if let unsupportedReason = quantization.unsupportedReason {
             readiness = LocalModelReadiness(

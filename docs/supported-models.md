@@ -1,5 +1,7 @@
 # Supported model matrix
 
+App downloads also support the IndexTTS 2.5 MLX repository layout, including `mlx-community/IndexTTS-2.5-fp16`. This is download-only support: TTS inference and external runtime dependencies are not enabled. See the [TTS download contract (Chinese)](zh-CN/tts-model-download.md).
+
 This matrix reflects the 0.1.0 production loading dispatch. Matching
 `model_type` is necessary but not sufficient: a checkpoint must also contain a
 compatible `config.json`, tokenizer, chat template, weight layout, and

@@ -44,6 +44,8 @@ public struct ModelSnapshotCompatibility: Codable, Equatable, Sendable {
     public var quantizationMode: String?
     public var quantizationBits: Int?
     public var quantizationGroupSize: Int?
+    /// Upstream dependencies; downloading this snapshot does not resolve these repositories.
+    public var externalResources: [String]? = nil
 
     enum CodingKeys: String, CodingKey {
         case modelType = "model_type"
@@ -51,6 +53,7 @@ public struct ModelSnapshotCompatibility: Codable, Equatable, Sendable {
         case quantizationMode = "quantization_mode"
         case quantizationBits = "quantization_bits"
         case quantizationGroupSize = "quantization_group_size"
+        case externalResources = "external_resources"
     }
 }
 
