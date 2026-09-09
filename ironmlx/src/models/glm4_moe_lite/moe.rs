@@ -1,10 +1,7 @@
 //! GLM-4.7-Flash MoE block: noaux_tc sigmoid router + ungated shared expert.
 //!
-//! Mirrors mlx_lm `glm4_moe_lite.py`:
-//!   - `group_expert_select` (`:197-228`) — the noaux_tc router (n_group=1
-//!     path; ironmlx rejects grouped routing at config validation, so the
-//!     group-mask branch is intentionally absent here).
-//!   - `Glm4MoeLiteMoE.__call__` (`:277-290`):
+//! The noaux_tc router supports n_group=1; grouped routing is rejected
+//! during config validation. Expert outputs are combined as follows:
 //!
 //! ```text
 //! inds, scores = gate(x)
@@ -32,8 +29,7 @@ use crate::nn::{Linear, Mlp};
 
 /// noaux_tc router: sigmoid scores + additive selection bias → top-k experts.
 ///
-/// Mirrors mlx_lm `group_expert_select` for the `n_group == 1` path (no group
-/// masking). All score math is float32 (per omlx `:207`).
+/// Supports `n_group == 1` without group masking. All score math is float32.
 ///
 /// Arguments:
 ///   - `logits`: `[BS, E]` router logits (plain float `gate(x)`).
@@ -58,14 +54,14 @@ pub fn noaux_tc_route(
     scale: f32,
     target: StreamOrDevice,
 ) -> Result<(Array, Array)> {
-    // Step 1: float32 sigmoid scores (omlx :207).
+    // Step 1: float32 sigmoid scores.
     let scores = logits
         .astype_on(Dtype::Float32, target)
         .context("noaux_tc_route: cast logits to f32")?
         .sigmoid_on(target)
         .context("noaux_tc_route: sigmoid")?; // [BS, E]
 
-    // Step 2/3: selection scores = raw sigmoid + bias (omlx :209). The RAW
+    // Step 2/3: selection scores = raw sigmoid + bias. The RAW
     // `scores` are kept for the weights below; only selection uses `choice`.
     let bias_f32 = bias
         .astype_on(Dtype::Float32, target)
@@ -91,7 +87,7 @@ pub fn noaux_tc_route(
         ));
     }
 
-    // Step 5: top-k selection. Mirror omlx's negate form (omlx :221):
+    // Step 5: top-k selection. Use the negated scores:
     //   inds = argpartition(-choice, kth=k-1, axis=-1)[..., :k]
     // Negating turns "largest choice" into "smallest negated", so the top-k
     // experts land in the FIRST k positions after partitioning at kth=k-1.
@@ -107,11 +103,11 @@ pub fn noaux_tc_route(
     let inds = slice_strided_on(&part, [0_i32, 0], [bs, k], [1_i32, 1], target)
         .context("noaux_tc_route: slice top-k indices [.., :k]")?; // [BS, k]
 
-    // Step 6: weights from the RAW sigmoid scores (omlx :222) — NOT `choice`.
+    // Step 6: weights from the RAW sigmoid scores — NOT `choice`.
     let mut weights = take_along_axis_on(&scores, &inds, -1, target)
         .context("noaux_tc_route: gather raw scores for top-k")?; // [BS, k]
 
-    // Step 7: optional top-k renormalization (omlx :223-225, +1e-20 included).
+    // Step 7: optional top-k renormalization (including +1e-20).
     if k > 1 && norm_topk_prob {
         let denom = sum_on(&weights, -1_i32, /* keepdims */ true, target)
             .context("noaux_tc_route: sum top-k weights")?;
@@ -126,7 +122,7 @@ pub fn noaux_tc_route(
             .context("noaux_tc_route: normalize weights")?;
     }
 
-    // Step 8: routed_scaling_factor (omlx :226).
+    // Step 8: routed_scaling_factor.
     let scale_arr: Array = (&[scale][..], ())
         .try_into()
         .map_err(|e| anyhow::anyhow!("noaux_tc_route: build scale scalar: {e}"))?;

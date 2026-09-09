@@ -11,11 +11,10 @@ const FACTOR: i32 = 32; // patch_size * spatial_merge_size = 16 * 2
 const MIN_PIXELS: i32 = 56 * 56; // 3136
 const MAX_PIXELS: i32 = 14 * 14 * 4 * 1280; // 1003520
 
-/// Port of mlx-vlm `_smart_resize_image` — 保 aspect ratio + 满足 patch
-/// 对齐 + 总像素在 [MIN_PIXELS, MAX_PIXELS]。
+/// Resize with aspect-ratio preservation, patch alignment and a total pixel
+/// count within [MIN_PIXELS, MAX_PIXELS].
 ///
-/// Returns `Err` if absolute aspect ratio > 200 (mlx-vlm parity — bound is
-/// from `_smart_resize_image`).
+/// Returns `Err` if absolute aspect ratio > 200.
 pub fn smart_resize(height: i32, width: i32) -> Result<(i32, i32)> {
     let max_dim = height.max(width) as f64;
     let min_dim = height.min(width) as f64;
@@ -59,8 +58,7 @@ const MERGE_SIZE: i32 = 2;
 
 /// Reshape `[3, H, W]` f32 raw pixels into Qwen3.5 vision patches.
 ///
-/// Matches mlx-vlm's `_process_one` merge_size grouping exactly:
-/// patches are ordered as `(grid_h/ms, grid_w/ms, ms, ms)` merge tiles,
+/// Patches are ordered as `(grid_h/ms, grid_w/ms, ms, ms)` merge tiles,
 /// NOT simple row-major `(grid_h, grid_w)`.
 ///
 /// Output shape: `[grid_h * grid_w, TEMPORAL_PATCH (=2), 3, PATCH (=16), PATCH]`,

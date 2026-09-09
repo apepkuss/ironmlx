@@ -19,6 +19,48 @@
         "usage": "Identifies the supported Hermes Agent integration."
       },
       {
+        "brand_usage_reference": "https://huggingface.co/brand",
+        "bundled_hash_scope": "Ordered SVG path d/fill attributes, excluding presentation wrapper",
+        "bundled_modifications": "Converted React SVG to inline HTML, resized and styled for source identification. Simplified to background and eye paths; mouth, hands and other details omitted.",
+        "bundled_path": "ironmlx-app/Sources/IronMLXAppCore/Resources/dashboard2.html",
+        "bundled_sha256": "ab144d77cb0b3b4d85c0047725c791af4e870d8120d9e10c9bf3e5ca17740893",
+        "component": "HuggingFace inline logo (LobeHub)",
+        "copyright": "Copyright (c) 2023 LobeHub; brand marks belong to their respective owners.",
+        "embedded_svg_marker": "M2.25 11.535",
+        "embedded_svg_occurrences": 2,
+        "license": "MIT",
+        "license_file": "asset-huggingface-lobehub-mit.txt",
+        "license_sha256": "add9d7531d1b21646317a8958e38fc727506fa39d24bdecb44154d943c82753a",
+        "license_url": "https://github.com/lobehub/lobe-icons/blob/a94750e3f5f8fc33757b839d85030e742284e43a/LICENSE",
+        "repository": "https://github.com/lobehub/lobe-icons",
+        "revision": "a94750e3f5f8fc33757b839d85030e742284e43a",
+        "source_path": "src/HuggingFace/components/Color.tsx",
+        "source_url": "https://github.com/lobehub/lobe-icons/blob/a94750e3f5f8fc33757b839d85030e742284e43a/src/HuggingFace/components/Color.tsx",
+        "upstream_sha256": "f4eaafbfd6d8b69bb2e4f63656f93cdce59fa39762c08c022996e8d16a99d48b",
+        "usage": "Identifies a supported model download source; no affiliation or endorsement."
+      },
+      {
+        "brand_usage_reference": "https://modelscope.cn/models/modelscope/logos",
+        "bundled_hash_scope": "Ordered SVG path d/fill attributes, excluding presentation wrapper",
+        "bundled_modifications": "Converted React SVG to inline HTML, resized and styled for source identification. Path geometry and fills unchanged.",
+        "bundled_path": "ironmlx-app/Sources/IronMLXAppCore/Resources/dashboard2.html",
+        "bundled_sha256": "3a3634eb29ee334533ae2f4bdc0a6e49060b0c1151c871c3fa352ba48a1099fe",
+        "component": "ModelScope inline logo (LobeHub)",
+        "copyright": "Copyright (c) 2023 LobeHub; brand marks belong to their respective owners.",
+        "embedded_svg_marker": "M0 7.967h2.667",
+        "embedded_svg_occurrences": 3,
+        "license": "MIT",
+        "license_file": "asset-modelscope-lobehub-mit.txt",
+        "license_sha256": "add9d7531d1b21646317a8958e38fc727506fa39d24bdecb44154d943c82753a",
+        "license_url": "https://github.com/lobehub/lobe-icons/blob/a94750e3f5f8fc33757b839d85030e742284e43a/LICENSE",
+        "repository": "https://github.com/lobehub/lobe-icons",
+        "revision": "a94750e3f5f8fc33757b839d85030e742284e43a",
+        "source_path": "src/ModelScope/components/Color.tsx",
+        "source_url": "https://github.com/lobehub/lobe-icons/blob/a94750e3f5f8fc33757b839d85030e742284e43a/src/ModelScope/components/Color.tsx",
+        "upstream_sha256": "60fa54ec5c93fa491a70f5a933c2156441e98938ea1a5919478f0722e76c1ca4",
+        "usage": "Identifies a supported model download source; no affiliation or endorsement."
+      },
+      {
         "bundled_modifications": "Removed fixed presentation dimensions and comments, then added accessible SVG metadata; artwork geometry and colors unchanged.",
         "bundled_path": "ironmlx-app/Sources/IronMLXAppCore/Resources/oh-my-pi-logo.svg",
         "bundled_sha256": "1c9b81e8ffb4ba0b3cb58a5817798ff1055f62f65af5f553df77feaf0b2ad162",
@@ -38,7 +80,7 @@
       }
     ],
     "manifest": "compliance/bundled-assets.json",
-    "manifest_sha256": "9033b78265a33ef5e43f3e77412816924830c5d1c487c406a8443dbe78958949"
+    "manifest_sha256": "7abfe242750f5384ff826d11f776db1add613b13861d278b7bee57373c1e2953"
   },
   "generation": {
     "cargo_about_config": "about.toml",

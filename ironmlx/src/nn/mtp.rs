@@ -1,6 +1,6 @@
 //! MTP (Multi-Token Prediction) head — the speculative-decoding draft head.
 //!
-//! Mirrors vllm-mlx's `_MTPModule` (`/Volumes/Dev/vllm-mlx/vllm_mlx/patches/qwen3_5_mtp.py:204-216`):
+//! Data flow:
 //!
 //! ```text
 //! e = pre_fc_norm_embedding(next_token_embeds)

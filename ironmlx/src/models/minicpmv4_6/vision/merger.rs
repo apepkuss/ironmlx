@@ -7,9 +7,6 @@
 //!   down-sampled sequence at half resolution in each dim.
 //! - `Merger`: final 2×2 reshape-flatten + MLP projection to the LM hidden size
 //!   (`hidden_size * 4 = 4608` → `lm_hidden = 1024`).
-//!
-//! Both types match the corresponding `__call__` implementations in mlx-vlm's
-//! `minicpmv4_6/minicpmv4_6.py`.
 
 use anyhow::{ensure, Result};
 use mlx::fast::scaled_dot_product_attention;

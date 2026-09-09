@@ -1,7 +1,7 @@
 //! Post-sweep / inter-suite GPU + memory hygiene invariant checks.
 //! Replaces Boss's manual `pgrep + memory_pressure + alloc-probe`
 //! procedure with a single callable; can be invoked from individual
-//! integration tests or from `sweep_full.sh` between suites.
+//! integration tests or the standalone `integration_clean_state` test.
 //!
 //! The helper keeps test state isolated between cases.
 

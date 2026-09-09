@@ -1,5 +1,4 @@
-//! Pure-Rust port of mlx-vlm `MiniCPMVImageProcessor` — single-image
-//! (no-slice, `slice_mode=False`) path. See P2a Task 1.
+//! MiniCPM-V-4.6 image preprocessing with single-image and adaptive-slice paths.
 //!
 //! Pipeline: decode → `_find_best_resize` → BICUBIC resize → normalize →
 //! `_reshape_by_patch` → CHW→HWC transpose + expand_dims, yielding the packed
@@ -29,9 +28,8 @@ const IMAGE_MEAN: [f32; 3] = [0.5, 0.5, 0.5];
 /// `image_std` from preprocessor_config.json (all channels 0.5).
 const IMAGE_STD: [f32; 3] = [0.5, 0.5, 0.5];
 
-/// Python 3 `round()` — round-half-to-even (banker's rounding). mlx-vlm's
-/// `_ensure_divide`/`_find_best_resize` rely on this exact tie behaviour, so we
-/// reproduce it rather than using Rust's round-half-away-from-zero.
+/// Round-half-to-even (banker's rounding), used for resize dimensions.
+/// Rust's `round()` uses round-half-away-from-zero instead.
 fn py_round(x: f64) -> f64 {
     let floor = x.floor();
     let diff = x - floor;
@@ -49,16 +47,16 @@ fn py_round(x: f64) -> f64 {
     }
 }
 
-/// Port of mlx-vlm `_ensure_divide`: `max(round(length/patch)*patch, patch)`.
+/// Round to a patch multiple, with at least one patch: `max(round(length/patch)*patch, patch)`.
 fn ensure_divide(length: f64, patch: i32) -> i32 {
     let p = patch as f64;
     (py_round(length / p) * p).max(p) as i32
 }
 
-/// Port of mlx-vlm `_find_best_resize`.
+/// Choose patch-aligned resize dimensions for the target resolution.
 ///
-/// Input is `(width, height)` to match the PIL `image.size` ordering mlx-vlm
-/// uses; the values are `f64` because `_get_refine_size` passes fractional
+/// Input is `(width, height)`; the values are `f64` because
+/// `get_refine_size` passes fractional
 /// `grid_width`/`grid_height`. Returns `(best_width, best_height)` integers.
 ///
 /// The rescale branch runs iff `width*height > scale_resolution²` OR
@@ -364,14 +362,13 @@ fn slice_to_array(resized: &[u8], h: i32, w: i32) -> Result<(Array, i32, i32)> {
 
 // --- LLaVA-UHD adaptive multi-slice preprocessing (slice_mode=True) ----------
 //
-// Port of mlx-vlm's `slice_image` / `get_sliced_grid` / `_get_refine_size` /
-// `_split_to_patches`. Operates on the decoded HWC u8 RGB buffer (carried as
+// Operates on the decoded HWC u8 RGB buffer (carried as
 // `(Vec<u8>, width, height)`); crops + resizes reuse `resize_rgb` /
 // `pil_bicubic_resize` so the per-slice pixels go through the same resampler as
-// the single-image path. Grid tuples are `(grid_x, grid_y)` matching PIL/mlx-vlm
-// where `grid_x` divides WIDTH and `grid_y` divides HEIGHT.
+// the single-image path. In grid tuples `(grid_x, grid_y)`, `grid_x` divides
+// WIDTH and `grid_y` divides HEIGHT.
 
-/// Port of mlx-vlm `get_sliced_grid`. Returns `Some((grid_x, grid_y))` when the
+/// Select a slice grid. Returns `Some((grid_x, grid_y))` when the
 /// image should be sliced, or `None` (`multiple <= 1`) for the no-slice path.
 ///
 /// Input `(width, height)`; `grid_x` divides width, `grid_y` divides height.
@@ -421,7 +418,7 @@ fn get_sliced_grid(width: i32, height: i32, max_slice_nums: i32) -> Option<(i32,
     Some(best_grid)
 }
 
-/// Port of mlx-vlm `_get_refine_size`. Input `(width, height)` and the chosen
+/// Compute refine-image dimensions. Input `(width, height)` and the chosen
 /// `grid = (grid_x, grid_y)`; returns the refine-image `(width, height)` (each
 /// dimension a clean multiple of the corresponding grid dimension).
 fn get_refine_size(width: i32, height: i32, grid: (i32, i32)) -> (i32, i32) {
@@ -436,7 +433,7 @@ fn get_refine_size(width: i32, height: i32, grid: (i32, i32)) -> (i32, i32) {
     (best_w * gx, best_h * gy)
 }
 
-/// Port of mlx-vlm `_split_to_patches`. Crops the resized refine image
+/// Crop the resized refine image
 /// (`(buf, width, height)`) into a row-major grid of cells.
 ///
 /// `cell_w = width / grid_x`, `cell_h = height / grid_y` (integer division).
@@ -474,7 +471,7 @@ fn split_to_patches(
     out
 }
 
-/// Port of mlx-vlm `slice_image`. Operates on the decoded HWC u8 RGB buffer
+/// Preprocess the decoded HWC u8 RGB buffer
 /// `(src, orig_w, orig_h)` and returns the ordered slice list (source first,
 /// then patches row-major), each `(resized_buf, width, height)`, plus the
 /// `best_grid = Some((grid_x, grid_y))` that drove the slicing (`None` when

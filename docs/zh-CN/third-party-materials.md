@@ -72,3 +72,6 @@ ZIP、挂载 DMG，并逐项比较 App 内部和归档根目录的材料。
 - 模型权利边界声明的最终法律复核（声明 IronMLX 不重新授权模型，用户自行查阅上游条款）；
 - 将 `IRONMLX_PUBLIC_DISTRIBUTION_READY` 改为 `true` 的明确授权；
 - Developer ID 签名、公证、stapling 与真实最低目标机器验收。
+
+随包 Notices 为 MPL-2.0 registry 组件提供精确版本的源码下载说明。
+审查结果与最终发布步骤见[分发材料审查](distribution-review.md)。

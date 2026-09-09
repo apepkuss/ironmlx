@@ -138,7 +138,6 @@ impl VisionTower {
 
     /// Add learned positional embedding to patch features via bilinear interpolation.
     ///
-    /// Translates `fast_pos_embed_interpolate` from mlx-vlm `vision.py:293-371`.
     /// For each grid (t, h, w), bilinearly interpolates the `[num_grid_per_side²,
     /// hidden]` embedding table to the target (h, w) size, tiles over t frames,
     /// then reorders patches into spatial-merge-block-consecutive order via a
@@ -284,7 +283,7 @@ impl VisionTower {
 
         // For each grid, permute patches so that within each 2×2 merged block
         // the 4 sub-patches are consecutive (spatial-merge-block order).
-        // This mirrors mlx-vlm's reshape+transpose(0,1,3,2,4,5)+reshape.
+        // Reshape, transpose axes (0,1,3,2,4,5), then flatten.
         let m = self.spatial_merge_size; // 2
         let hidden = self.hidden_size;
         let mut pieces: Vec<Array> = Vec::with_capacity(grid_thw.len());
@@ -333,8 +332,6 @@ impl VisionTower {
     }
 
     /// Compute rotary positional embeddings for the given grid layout.
-    ///
-    /// Translates `rot_pos_emb` from mlx-vlm `vision.py:232-291`.
     ///
     /// For each grid (t, h, w) with `merge_size = 2`:
     ///   - Builds a 2D position index grid of shape `[merged_h, merged_w, 2, 2]`

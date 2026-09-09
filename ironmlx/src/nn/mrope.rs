@@ -169,7 +169,7 @@ impl Mrope {
     ///
     /// Returns `(cos: [B, S, rot_dim], sin: [B, S, rot_dim])` in fp32;
     /// the full `rot_dim` (not `rot_dim/2`) is returned because the pipeline
-    /// mirrors mlx-vlm's `concatenate([freqs, freqs], axis=-1)` duplication.
+    /// duplicates the frequency vector along the last axis.
     /// Caller is responsible for `astype` to the working compute dtype.
     ///
     /// First call lazily compiles the pipeline via `mlx::compile`; subsequent
@@ -189,10 +189,10 @@ impl Mrope {
 
     /// Build the `mlx::compile`d cos/sin pipeline. Captures the per-position
     /// stream assignment at compile time (model constants) into a `move`
-    /// closure, then traces the full cos/sin derivation matching mlx-vlm's
-    /// `apply_interleaved_mrope` + `concatenate([freqs, freqs])` logic.
+    /// closure, then computes interleaved frequencies, duplicates them along
+    /// the last axis and applies cos/sin.
     ///
-    /// **Qwen3.5 MRoPE layout** (mlx-vlm `apply_interleaved_mrope`):
+    /// **Qwen3.5 MRoPE layout**:
     ///
     /// For `sections=[11,11,10]` (n_streams=3, half=32, rot_dim=64):
     ///
@@ -301,11 +301,11 @@ impl Mrope {
     /// `cos: [B, S, ROTARY_DIM]` (fp32), `sin: [B, S, ROTARY_DIM]` (fp32).
     ///
     /// Note: cos/sin have the **full** `ROTARY_DIM` (not half), matching the
-    /// output of `Mrope::cos_sin` which mirrors mlx-vlm's `concatenate([freqs, freqs])`.
+    /// output of `Mrope::cos_sin`, which duplicates the frequency vector.
     ///
     /// Returns `(q_rot, k_rot)` with the same shape and dtype as their inputs.
     /// The trailing `HEAD_DIM - ROTARY_DIM` channels pass through unchanged.
-    /// Rotation uses split-half style (matching mlx-vlm's `rotate_half`).
+    /// Rotation pairs each channel with the corresponding channel in the other half.
     pub fn apply(&self, q: &Array, k: &Array, cos: &Array, sin: &Array) -> Result<(Array, Array)> {
         // Apply kernel currently supports only interleaved layout (Qwen3.5).
         // If a future caller constructs Mrope with `interleaved=false`
@@ -363,8 +363,7 @@ impl Mrope {
         let s = q_dims[2];
 
         // cos/sin are produced by Mrope::cos_sin in fp32 with shape [B, S, rot_dim].
-        // (The pipeline mirrors mlx-vlm's `concatenate([freqs, freqs])` duplication,
-        // so the last axis is the full rot_dim, not rot_dim/2.)
+        // Frequency duplication makes the last axis the full rot_dim, not rot_dim/2.
         // Apply() requires that contract — silently reading wrong shape in the Metal
         // shader would surface as numerical drift far from the bug origin.
         let expected_cs_shape = [b, s, self.rot_dim];
@@ -586,7 +585,7 @@ impl Mrope {
     /// buffers when the source references them (see
     /// `/Volumes/Dev/mlx/mlx/backend/metal/custom_kernel.cpp:93-105,190-192`).
     ///
-    /// Implements split-half rotation matching mlx-vlm's `rotate_half` pattern.
+    /// Implements split-half rotation.
     /// cos/sin are expected to have shape `[B, S, ROTARY_DIM]`.
     fn build_apply_kernel(&self) -> Result<mlx::MetalKernel> {
         // Metal shader. Templates: HEAD_DIM, ROTARY_DIM. ROT_PAIRS = ROTARY_DIM/2.
@@ -596,8 +595,7 @@ impl Mrope {
         // values address Q; the upper B*Hkv address K. Hq, Hkv, B, S are pulled
         // from the input shape buffers (auto-injected by MLX when the source
         // references `<name>_shape`).
-        // Metal shader implementing split-half RoPE rotation, matching mlx-vlm's
-        // `rotate_half` + `q_rot * cos + rotate_half(q_rot) * sin` pattern.
+        // Split-half RoPE rotation: `q_rot * cos + rotate_half(q_rot) * sin`.
         //
         // cos/sin shape: [B, S, ROTARY_DIM]  (full rot_dim, from concatenate([freqs,freqs]))
         // For channel d in [0, ROTARY_DIM):
@@ -880,7 +878,7 @@ mod tests {
     #[serial(mlx_metal)]
     fn cos_sin_shape_and_dtype() {
         // Qwen3.5: head_dim=256, partial=0.25 -> rot_dim=64, half=32
-        // cos/sin output is [B, S, rot_dim=64] (mirrors mlx-vlm concatenate([freqs,freqs]))
+        // Frequency duplication gives cos/sin shape [B, S, rot_dim=64].
         let mrope = Mrope::new(256, 1e7, 0.25, &[11, 11, 10], true).unwrap();
 
         // position_ids [3, B=1, S=8] i32, three identical streams (text-only)

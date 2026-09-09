@@ -3,9 +3,6 @@
 //! T5: the `gated_delta_step` metal_kernel (2 variants — no-mask + masked).
 //! T6: the `GatedDeltaNet` main struct wiring all components.
 //!
-//! Mirrors mlx-lm's `_make_gated_delta_kernel(has_mask)` from
-//! `/Volumes/Dev/mlx-lm/mlx_lm/models/gated_delta.py:13-115`.
-//!
 //! Templates: `Dk, Dv, Hk, Hv` (i32), `InT, StT` (Dtype).
 //! Grid: `(32, Dv, B * Hv)`; threadgroup: `(32, 4, 1)`.
 
@@ -57,8 +54,7 @@ impl GatedDeltaNetConfig {
 /// Qwen3.5 / Qwen3-Next "linear attention" branch — recurrent SSM with
 /// delta rule and scalar gating.
 ///
-/// Mirrors mlx-lm's `Qwen3NextGatedDeltaNet`
-/// (`/Volumes/Dev/mlx-lm/mlx_lm/models/qwen3_5.py:85-205`). Components:
+/// Components:
 ///
 /// - `in_proj_qkv` — Q/K/V input projection feeding the depthwise conv.
 /// - `in_proj_z` — value gate projection consumed by `RmsNormGated`.

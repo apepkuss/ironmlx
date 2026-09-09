@@ -6,9 +6,7 @@
 //! the sorted rows through the inverse permutation and writes `[tokens, hidden]`
 //! directly, eliminating the scatter and expanded intermediate.
 //!
-//! The kernel topology is informed by oMLX v0.5.1's
-//! `qwen35_moe_weighted_sum`; dispatch, dtype, integration, and gating are
-//! implemented for ironmlx's MLX Rust execution path.
+//! Dispatch, dtype, integration, and gating use ironmlx's MLX Rust execution path.
 
 use std::sync::OnceLock;
 
@@ -20,7 +18,7 @@ use crate::Result;
 const THREADS: i32 = 256;
 /// Below this point the extra custom-kernel dispatch does not reliably repay
 /// its fixed cost. Qwen3.5/3.6 layer-1 A/B measurements establish the crossover
-/// at the 1024-token prefill cell; this also matches oMLX's production gate.
+/// at the 1024-token prefill cell.
 pub(crate) const MIN_TOKENS: i32 = 1024;
 
 pub(crate) fn should_use(x_sorted: &Array, inverse_order: &Array, scores: &Array) -> bool {

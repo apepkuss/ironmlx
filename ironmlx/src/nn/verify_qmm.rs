@@ -7,9 +7,6 @@
 //!
 //! - split-K for `16K <= N < 100K`;
 //! - multi-simdgroup (MSG) for huge outputs such as Qwen's `lm_head`.
-//!
-//! The Metal morphology is adapted from MTPLX and oMLX's
-//! `qwen35_verify_qmm.py` under Apache-2.0.
 
 use std::cell::Cell;
 use std::collections::HashMap;

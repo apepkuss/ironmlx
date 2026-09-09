@@ -42,10 +42,9 @@ use crate::Result;
 
 /// Minimum (batch_size * num_experts_per_tok) for the sorted-routing path.
 ///
-/// This mirrors MLX-LM's `SwitchGLU` routing contract: sort expert indices once
-/// `indices.size >= 64`. Keeping this threshold aligned is correctness-critical
-/// for short Qwen3.6 MoE prefills, where the unsorted gather_qmm path can
-/// diverge from the reference route packing even before any KV-cache logic runs.
+/// Sort expert indices once `indices.size >= 64`. Changing this threshold
+/// changes route packing and can affect numerical results for short Qwen3.6
+/// MoE prefills, before any KV-cache logic runs.
 const SORTED_ROUTING_MIN_BS_K: i32 = 64;
 const MAX_EXACT_U32_IN_F32: i32 = 1 << 24;
 
@@ -643,9 +642,7 @@ impl RoutedExperts {
     /// `inds` `[BS, k]` (Uint32), weight each expert output by `weights`
     /// `[BS, k]`, and reduce across k → `[BS, H]`.
     ///
-    /// Mirrors mlx_lm `SwitchGLU.__call__` (`switch_layers.py`) and is the
-    /// exact dispatch previously inlined in `SparseMoeBlock::forward_on`
-    /// (extracted verbatim so Qwen routing is byte-identical):
+    /// Dispatch and tensor layout:
     ///   - `inds` is passed as `rhs_indices` to `gather_quantized_matmul_on`
     ///     (the expert id per (token, slot)); `transpose=true`.
     ///   - Sorted-flat path when `BS*k >= SORTED_ROUTING_MIN_BS_K` (=64):

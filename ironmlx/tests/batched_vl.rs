@@ -695,7 +695,7 @@ async fn batched_vl_multi_image_per_row() {
     // exceeds gate (observed 0.375 vs 0.95). Not a P5a code bug — verified
     // by line-by-line diff; P5a trait delegation is 100% transparent.
     // Re-enable when P8 precision phase introduces fp32 or flash-attention.
-    // (sweep_full runs all #[ignore] tests via --ignored; early return = pass)
+    // Runs with --ignored still return early here and report this test as passed.
     return;
 
     #[allow(unreachable_code)]

@@ -44,7 +44,7 @@ pub struct RequestResult {
     /// Authoritative token count from server `usage` (preferred over local count).
     pub server_prompt_tokens: Option<u32>,
     pub server_completion_tokens: Option<u32>,
-    /// omlx-specific extension; absent on stock OpenAI.
+    /// Server-specific extension; absent on stock OpenAI.
     pub server_cached_tokens: Option<u32>,
     /// Local fallback count of SSE chunks with non-empty `delta.content`.
     pub chunk_count: u32,
@@ -154,7 +154,7 @@ struct StreamOptions {
 }
 
 // Qwen3+ chat template gates "thinking mode" via this kwarg. With thinking mode
-// enabled, omlx buffers the entire <think>...</think> block into a single SSE
+// enabled, some servers buffer the entire <think>...</think> block into a single SSE
 // event, which collapses gen_duration to ~0 and makes TG tok/s meaningless.
 // Force it off so both engines stream token-by-token under the same protocol.
 #[derive(Serialize)]
@@ -344,7 +344,7 @@ mod tests {
 
     #[test]
     fn parser_captures_cached_tokens_extension() {
-        // omlx-specific cached_tokens field — make sure it round-trips.
+        // Server-specific cached_tokens field — make sure it round-trips.
         let mut state = ParseState::default();
         let now = t0();
         process_event(

@@ -2,7 +2,7 @@
   "$schema": "https://cyclonedx.org/schema/bom-1.6.schema.json",
   "bomFormat": "CycloneDX",
   "specVersion": "1.6",
-  "serialNumber": "urn:uuid:97aa0ea7-b805-5a78-9b70-3182914311d9",
+  "serialNumber": "urn:uuid:02c73e15-d2b5-5808-b1c4-a20fe7f4cdc8",
   "version": 1,
   "metadata": {
     "component": {
@@ -60,6 +60,10 @@
           "value": "website/static/img/apple-touch-icon.png"
         },
         {
+          "name": "ironmlx:hash-scope",
+          "value": "entire-file"
+        },
+        {
           "name": "ironmlx:license-file",
           "value": "asset-hermes-agent-mit.txt"
         }
@@ -72,6 +76,96 @@
         {
           "type": "vcs",
           "url": "https://github.com/NousResearch/hermes-agent"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "bom-ref": "asset:HuggingFace inline logo (LobeHub)@a94750e3f5f8fc33757b839d85030e742284e43a",
+      "name": "HuggingFace inline logo (LobeHub)",
+      "version": "a94750e3f5f8fc33757b839d85030e742284e43a",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "ab144d77cb0b3b4d85c0047725c791af4e870d8120d9e10c9bf3e5ca17740893"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ironmlx:bundled-path",
+          "value": "ironmlx-app/Sources/IronMLXAppCore/Resources/dashboard2.html"
+        },
+        {
+          "name": "ironmlx:source-path",
+          "value": "src/HuggingFace/components/Color.tsx"
+        },
+        {
+          "name": "ironmlx:hash-scope",
+          "value": "Ordered SVG path d/fill attributes, excluding presentation wrapper"
+        },
+        {
+          "name": "ironmlx:license-file",
+          "value": "asset-huggingface-lobehub-mit.txt"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://github.com/lobehub/lobe-icons/blob/a94750e3f5f8fc33757b839d85030e742284e43a/src/HuggingFace/components/Color.tsx"
+        },
+        {
+          "type": "vcs",
+          "url": "https://github.com/lobehub/lobe-icons"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "bom-ref": "asset:ModelScope inline logo (LobeHub)@a94750e3f5f8fc33757b839d85030e742284e43a",
+      "name": "ModelScope inline logo (LobeHub)",
+      "version": "a94750e3f5f8fc33757b839d85030e742284e43a",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "3a3634eb29ee334533ae2f4bdc0a6e49060b0c1151c871c3fa352ba48a1099fe"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ironmlx:bundled-path",
+          "value": "ironmlx-app/Sources/IronMLXAppCore/Resources/dashboard2.html"
+        },
+        {
+          "name": "ironmlx:source-path",
+          "value": "src/ModelScope/components/Color.tsx"
+        },
+        {
+          "name": "ironmlx:hash-scope",
+          "value": "Ordered SVG path d/fill attributes, excluding presentation wrapper"
+        },
+        {
+          "name": "ironmlx:license-file",
+          "value": "asset-modelscope-lobehub-mit.txt"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://github.com/lobehub/lobe-icons/blob/a94750e3f5f8fc33757b839d85030e742284e43a/src/ModelScope/components/Color.tsx"
+        },
+        {
+          "type": "vcs",
+          "url": "https://github.com/lobehub/lobe-icons"
         }
       ]
     },
@@ -99,6 +193,10 @@
         {
           "name": "ironmlx:source-path",
           "value": "assets/icon.svg"
+        },
+        {
+          "name": "ironmlx:hash-scope",
+          "value": "entire-file"
         },
         {
           "name": "ironmlx:license-file",

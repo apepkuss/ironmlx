@@ -2,7 +2,7 @@
 //!
 //! The output prompt encodes to exactly `target_tokens` tokens (± small
 //! BPE round-trip drift) on the same tokenizer. The nonce prevents
-//! prefix-cache hits across runs (omlx defaults to a tiered prefix cache;
+//! prefix-cache hits across runs (with a tiered prefix cache,
 //! without nonce, the second run's prefill would be ~0ms — invalidating
 //! PP measurement).
 

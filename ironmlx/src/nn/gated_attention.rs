@@ -1,8 +1,5 @@
 //! Gated full attention block — Qwen3.5 / Qwen3-Next canonical attention.
 //!
-//! Mirrors mlx-lm's `Qwen3NextAttention` (`/Volumes/Dev/mlx-lm/mlx_lm/models/qwen3_next.py`).
-//! `qwen3_5.py` imports it directly: `from .qwen3_next import Qwen3NextAttention as Attention`.
-//!
 //! Differs from P1 [`crate::nn::Attention`] (standard) in exactly two places:
 //! 1. `q_proj` produces `num_heads * head_dim * 2` outputs; the second half is the gate.
 //! 2. After SDPA + reshape, the result is element-wise multiplied by `sigmoid(gate)` before

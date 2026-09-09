@@ -125,7 +125,7 @@ impl Embedding {
                 Some(y) => Ok(y),
                 None => {
                     // P8a-stage5: gather packed rows first, then dequantize the
-                    // tiny slice — mirrors mlx-lm's QuantizedEmbedding. Per-token
+                    // selected slice. Per-token
                     // dequant work drops from O(vocab × dim) to O(B × S × dim).
                     // Quantization metadata is per-row (scales / biases sized
                     // along vocab axis), so axis-0 gather preserves group

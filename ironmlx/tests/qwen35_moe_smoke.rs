@@ -88,7 +88,7 @@ fn p5b_first_token_argmax_regression_sentinel() {
     // "Once upon a time" with greedy temp=0 emits token id 11 (a `,`).
     // This value was recorded from ironmlx itself during P5b development
     // (deterministic across runs). External reference implementations
-    // (mlx-vlm, omlx) were observed to emit the same token id for the
+    // in comparison runs were observed to emit the same token id for the
     // same input — an informational triangulation, not the assertion's
     // source of authority. The assertion guards against silent ironmlx
     // forward regression; if a future ironmlx implementation change

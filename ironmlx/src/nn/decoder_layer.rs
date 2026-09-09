@@ -1,6 +1,6 @@
 //! Single Qwen3.5 / Qwen3-Next decoder block.
 //!
-//! Mirrors mlx-lm `Qwen3NextDecoderLayer.__call__`:
+//! Normalization, attention and residual data flow:
 //!
 //! ```text
 //! r   = self_attn_or_linear_attn(input_layernorm(x), mask, cache)

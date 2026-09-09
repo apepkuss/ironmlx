@@ -1,6 +1,6 @@
 //! GLM-4.7-Flash (`glm4_moe_lite`) logits-parity harness vs the authoritative
 //! `mlx_lm` reference implementation (`mlx_lm/models/glm4_moe_lite.py`, the
-//! de-facto consumer of the mlx-community 4-bit weights and the omlx perf
+//! de-facto consumer of the mlx-community 4-bit weights and the reference-server perf
 //! baseline).
 //!
 //! Methodology: feed BOTH engines the IDENTICAL raw token sequence (no chat
@@ -9,7 +9,7 @@
 //! tokenization differences, so a mismatch is a genuine numeric/structural
 //! correctness bug rather than a template mismatch.
 //!
-//! Reference captured once from the omlx venv (mlx_lm 0.31.3 / mlx 0.31.2) on
+//! Reference captured once from the reference-server venv (mlx_lm 0.31.3 / mlx 0.31.2) on
 //! the mlx-community GLM-4.7-Flash-4bit checkpoint
 //! (snapshot 1454cffb1a21737e162f508e5bc70be9def89276):
 //!

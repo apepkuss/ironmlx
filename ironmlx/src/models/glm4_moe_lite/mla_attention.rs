@@ -6,16 +6,13 @@
 //! head) and `unembed_out` (`W^UV`, 512→256 per head) are stored as per-head
 //! stacked affine quantized weights `[H, out, packed_in]`. This module provides:
 //!
-//! - [`PerHeadQuantLinear`] — per-head stacked quantized matmul (mirrors omlx
-//!   `QuantizedMultiLinear`); the single kv-head latent broadcasts across all
-//!   `H` query heads automatically via `quantized_matmul`'s batch broadcast.
+//! - [`PerHeadQuantLinear`] — per-head stacked quantized matmul; the single
+//!   kv-head latent broadcasts across all `H` query heads automatically via `quantized_matmul`'s batch broadcast.
 //! - [`MlaAttention::project_qkv`] — the shared prefix (q/kv down+up
 //!   projections, latent split + norm, decoupled RoPE) common to both the
 //!   decode (`L==1`, query absorbed to latent) and prefill (`L>1`, latent
 //!   un-folded per head) regimes. The two regimes are added in Task 4b.
 //!
-//! Mirrors `mlx_lm/models/glm4_moe_lite.py:124-148` + `mla.py`
-//! `QuantizedMultiLinear` (OBS reference, not spec).
 
 use anyhow::Result;
 use mlx::{Array, StreamOrDevice};
@@ -27,7 +24,7 @@ use super::config::Glm4MoeLiteConfig;
 use super::mla_cache::MlaLatentCache;
 use super::rope::{Glm4Rope, RopeOffset};
 
-/// Per-head stacked quantized linear (mirrors omlx `QuantizedMultiLinear`).
+/// Per-head stacked quantized linear.
 ///
 /// Weight is `[H, out, packed_in]` with per-group `scales` and optional
 /// affine `biases` (zero-points). The forward [`apply`](Self::apply) is a
@@ -276,7 +273,7 @@ impl MlaAttention {
         // Latent: [B,S,kv_lora] -> [B,1,S,kv_lora] (single kv head).
         let c_kv_n = c_kv_n.reshape_on((b, 1_i32, seq, self.kv_lora), target)?;
         // k_pe: [B,S,qk_rope] -> [B,S,1,qk_rope] -> [B,1,S,qk_rope]
-        // (reshape to [B,S,1,rope] then transpose, per omlx:141).
+        // (reshape to [B,S,1,rope] then transpose).
         let k_pe = k_pe
             .reshape_on((b, seq, 1_i32, self.qk_rope), target)?
             .transpose_axes_on(&[0, 2, 1, 3][..], target)?;
@@ -311,8 +308,8 @@ impl MlaAttention {
     /// `[B, 1, L, Lc]`-broadcastable additive mask (`0` for valid, `-inf` for
     /// blocked), matching `nn::Attention`/`GatedAttention` (`attention.rs:107`).
     /// We therefore fold it as `pe_scores = pe_scores + mask`, NOT via the
-    /// boolean `mx.where(...)` of omlx:154-159 (omlx feeds a boolean mask; the
-    /// ironmlx scheduler does not). For decode the engine typically passes
+    /// boolean `mx.where(...)`: the scheduler supplies an additive float mask.
+    /// For decode the engine typically passes
     /// `mask = None` (the single query sees the whole valid cache).
     ///
     /// `offset` is the per-row `[B]` i32 RoPE start position; `per_row_lens` is

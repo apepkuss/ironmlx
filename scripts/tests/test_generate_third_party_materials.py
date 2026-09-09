@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import importlib.util
 import tempfile
 import unittest
@@ -89,6 +90,50 @@ class BundledAssetMaterialsTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "invalid generated license"):
                 GENERATOR.bundled_asset_materials(manifest, root, licenses_dir)
+
+
+class SourceAttributionTests(unittest.TestCase):
+    def test_shipped_notices_include_mpl_source(self):
+        root = SCRIPT_PATH.parents[1]
+        inventory = json.loads((root / "third-party-inventory.json").read_text())
+        notices = GENERATOR.render_notices(inventory)
+        self.assertIn("https://static.crates.io/crates/option-ext/option-ext-0.2.0.crate", notices)
+        self.assertIn("source is available under MPL-2.0", notices)
+
+    def test_non_registry_mpl_source_requires_review(self):
+        root = SCRIPT_PATH.parents[1]
+        inventory = json.loads((root / "third-party-inventory.json").read_text())
+        for crate in inventory["rust"]["crates"]:
+            if crate["name"] == "option-ext":
+                crate["source"] = "git+https://example.com/modified-option-ext"
+        with self.assertRaisesRegex(ValueError, "MPL source availability"):
+            GENERATOR.render_notices(inventory)
+
+
+class EmbeddedLogoTests(unittest.TestCase):
+    def test_embedded_logo_geometry_and_occurrence_drift(self):
+        root = SCRIPT_PATH.parents[1]
+        manifest = json.loads((root / "compliance/bundled-assets.json").read_text())
+        assets = [a for a in manifest["assets"] if a.get("embedded_svg_marker")]
+        with tempfile.TemporaryDirectory() as tmp:
+            temp = Path(tmp)
+            for asset in assets:
+                for key in ("bundled_path", "license_source"):
+                    dest = temp / asset[key]
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    dest.write_bytes((root / asset[key]).read_bytes())
+            out = temp / "licenses"
+            out.mkdir()
+            selected = {"schema_version": 1, "assets": assets}
+            self.assertEqual(len(GENERATOR.bundled_asset_materials(selected, temp, out)), 2)
+            html = temp / assets[0]["bundled_path"]
+            original = html.read_text()
+            html.write_text(original.replace("#FF9D0B", "#000000", 1))
+            with self.assertRaisesRegex(ValueError, "embedded SVG"):
+                GENERATOR.bundled_asset_materials(selected, temp, out)
+            html.write_text(original.replace(assets[0]["embedded_svg_marker"], "removed", 1))
+            with self.assertRaisesRegex(ValueError, "embedded SVG"):
+                GENERATOR.bundled_asset_materials(selected, temp, out)
 
 
 if __name__ == "__main__":

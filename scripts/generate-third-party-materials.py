@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
+import xml.etree.ElementTree as ET
 import shutil
 import subprocess
 from collections import defaultdict
@@ -187,13 +189,14 @@ def bundled_asset_materials(
         raise ValueError("unsupported bundled asset manifest schema")
 
     assets: list[dict[str, Any]] = []
-    bundled_paths: set[str] = set()
+    bundled_paths: set[tuple[str, str | None]] = set()
     license_files: set[str] = set()
     for asset in manifest["assets"]:
         bundled_path = asset["bundled_path"]
-        if bundled_path in bundled_paths:
+        path_key = (bundled_path, asset.get("embedded_svg_marker"))
+        if path_key in bundled_paths:
             raise ValueError(f"duplicate bundled asset path: {bundled_path}")
-        bundled_paths.add(bundled_path)
+        bundled_paths.add(path_key)
 
         license_file = asset["license_file"]
         validate_output_filename(license_file)
@@ -202,7 +205,19 @@ def bundled_asset_materials(
         license_files.add(license_file)
 
         source_path = resolve_repository_file(repository_root, bundled_path)
-        actual_asset_hash = sha256_bytes(source_path.read_bytes())
+        content = source_path.read_bytes()
+        if marker := asset.get("embedded_svg_marker"):
+            shapes = []
+            for svg in re.findall(r"<svg\b[^>]*>.*?</svg>", content.decode(), re.S):
+                if marker in svg:
+                    paths = [dict(d=item.get("d"), fill=item.get("fill"))
+                             for item in ET.fromstring(svg).iter()
+                             if item.tag.rsplit("}", 1)[-1] == "path"]
+                    shapes.append(json.dumps(paths, sort_keys=True, separators=(",", ":")).encode())
+            if len(shapes) != asset["embedded_svg_occurrences"] or not shapes or any(value != shapes[0] for value in shapes):
+                raise ValueError(f"embedded SVG occurrences differ for {asset['component']}")
+            content = shapes[0]
+        actual_asset_hash = sha256_bytes(content)
         if actual_asset_hash != asset["bundled_sha256"]:
             raise ValueError(
                 f"bundled asset hash mismatch for {asset['component']}: "
@@ -395,11 +410,24 @@ def render_notices(inventory: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
-            "Hermes Agent and oh-my-pi names and logos are used solely to identify",
+            "Hermes Agent, oh-my-pi, Hugging Face and ModelScope names and logos identify",
             "supported third-party integrations. No affiliation or endorsement is",
             "implied. All trademarks remain the property of their respective owners.",
         ]
     )
+
+    lines.extend(["", "## MPL source availability", ""])
+    for crate in inventory["rust"]["crates"]:
+        if crate["license_expression"] == "MPL-2.0":
+            if crate.get("source") != "registry+https://github.com/rust-lang/crates.io-index":
+                raise ValueError("MPL source availability must be reviewed for non-crates.io sources")
+            name, version = crate["name"], crate["version"]
+            lines.extend([
+                f"- `{name} {version}`: source is available under MPL-2.0 at",
+                f"  https://static.crates.io/crates/{name}/{name}-{version}.crate",
+                "  (a gzip-compressed tar source archive; version is locked in Cargo.lock).",
+                "  IronMLX's Apache-2.0 license does not restrict your rights to this source under MPL-2.0.",
+            ])
 
     lines.extend(
         [
@@ -415,7 +443,7 @@ def render_notices(inventory: dict[str, Any]) -> str:
             "",
             "The generated materials preserve source license texts and detect dependency",
             "drift. Final license interpretation, attribution review, model-license policy,",
-            "CycloneDX SBOM production, and authorization for public distribution remain",
+            "CycloneDX SBOM approval, and authorization for public distribution remain",
             "P0-8B release gates.",
             "",
         ]

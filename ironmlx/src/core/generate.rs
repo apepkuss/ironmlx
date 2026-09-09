@@ -701,9 +701,7 @@ pub const IMAGE_TOKEN_ID: i32 = 248056;
 ///   - Stream 1 (h): height positions; equals temporal stream for text tokens.
 ///   - Stream 2 (w): width positions; equals temporal stream for text tokens.
 ///
-/// Algorithm: faithful Rust translation of `LanguageModel.get_rope_index` in
-/// `mlx_vlm/models/qwen3_vl/language.py:333-486`, restricted to the B=1
-/// image-only path. Video token support is intentionally omitted (P6 scope).
+/// Handles B=1 image-only sequences. Video tokens are not supported.
 ///
 /// For each image at grid `(t, h, w)`:
 ///   - `llm_grid_t = t`, `llm_grid_h = h / spatial_merge_size`,

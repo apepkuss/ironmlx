@@ -144,6 +144,7 @@ def asset_component(asset: dict) -> dict:
         "properties": [
             property_entry("ironmlx:bundled-path", asset["bundled_path"]),
             property_entry("ironmlx:source-path", asset["source_path"]),
+            property_entry("ironmlx:hash-scope", asset.get("bundled_hash_scope", "entire-file")),
             property_entry("ironmlx:license-file", asset["license_file"]),
         ],
         "externalReferences": [

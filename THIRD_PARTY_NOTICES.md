@@ -312,11 +312,20 @@ development dependencies excluded, build dependencies retained.
 | Asset | Source revision | Copyright | License | License text | Bundled file | Source |
 |---|---|---|---|---|---|---|
 | Hermes Agent logo | `1706502aa70485440a64127475f780c193784d6d` | Copyright (c) 2025 Nous Research | MIT | `THIRD_PARTY_LICENSES/asset-hermes-agent-mit.txt` | `ironmlx-app/Sources/IronMLXAppCore/Resources/hermes-agent-logo.svg` | https://github.com/NousResearch/hermes-agent/blob/1706502aa70485440a64127475f780c193784d6d/website/static/img/apple-touch-icon.png |
+| HuggingFace inline logo (LobeHub) | `a94750e3f5f8fc33757b839d85030e742284e43a` | Copyright (c) 2023 LobeHub; brand marks belong to their respective owners. | MIT | `THIRD_PARTY_LICENSES/asset-huggingface-lobehub-mit.txt` | `ironmlx-app/Sources/IronMLXAppCore/Resources/dashboard2.html` | https://github.com/lobehub/lobe-icons/blob/a94750e3f5f8fc33757b839d85030e742284e43a/src/HuggingFace/components/Color.tsx |
+| ModelScope inline logo (LobeHub) | `a94750e3f5f8fc33757b839d85030e742284e43a` | Copyright (c) 2023 LobeHub; brand marks belong to their respective owners. | MIT | `THIRD_PARTY_LICENSES/asset-modelscope-lobehub-mit.txt` | `ironmlx-app/Sources/IronMLXAppCore/Resources/dashboard2.html` | https://github.com/lobehub/lobe-icons/blob/a94750e3f5f8fc33757b839d85030e742284e43a/src/ModelScope/components/Color.tsx |
 | oh-my-pi logo | `v17.2.12` | Copyright (c) 2025 Mario Zechner; Copyright (c) 2025-2026 Can Bölük | MIT | `THIRD_PARTY_LICENSES/asset-oh-my-pi-mit.txt` | `ironmlx-app/Sources/IronMLXAppCore/Resources/oh-my-pi-logo.svg` | https://github.com/can1357/oh-my-pi/blob/45e12e5bb758198a920c6070e7e64cb33b21beac/assets/icon.svg |
 
-Hermes Agent and oh-my-pi names and logos are used solely to identify
+Hermes Agent, oh-my-pi, Hugging Face and ModelScope names and logos identify
 supported third-party integrations. No affiliation or endorsement is
 implied. All trademarks remain the property of their respective owners.
+
+## MPL source availability
+
+- `option-ext 0.2.0`: source is available under MPL-2.0 at
+  https://static.crates.io/crates/option-ext/option-ext-0.2.0.crate
+  (a gzip-compressed tar source archive; version is locked in Cargo.lock).
+  IronMLX's Apache-2.0 license does not restrict your rights to this source under MPL-2.0.
 
 ## Explicit exclusions
 
@@ -329,5 +338,5 @@ license and usage terms.
 
 The generated materials preserve source license texts and detect dependency
 drift. Final license interpretation, attribution review, model-license policy,
-CycloneDX SBOM production, and authorization for public distribution remain
+CycloneDX SBOM approval, and authorization for public distribution remain
 P0-8B release gates.

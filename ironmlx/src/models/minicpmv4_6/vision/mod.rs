@@ -27,7 +27,7 @@ use merger::{Merger, VitMerger};
 /// - `vision_tower.post_layernorm` applied after all encoder layers
 /// - Final `Merger` projecting to LM hidden size
 ///
-/// Semantics match mlx-vlm `Model.get_vision_embedding` exactly:
+/// Encoder and merger order:
 ///   1. Run encoder layer `i`.
 ///   2. After layer whose index == `insert_layer_id`, apply VitMerger.
 ///   3. After all 27 layers, apply post_layernorm.
@@ -90,7 +90,7 @@ impl MiniCpmV46Vision {
     ///
     /// Returns merged vision embeddings `[N, lm_hidden=1024]`.
     ///
-    /// Loop semantics (matching mlx-vlm `get_vision_embedding`):
+    /// Encoder loop order:
     ///   - Layer `i` runs, then the VitMerger fires immediately AFTER the
     ///     layer whose index equals `insert_layer_id` (default: 6).
     ///   - Remaining encoder layers continue on the spatially-downsampled sequence.
