@@ -10038,6 +10038,15 @@
     }
   }
 
+  let serverBannerDismissTimer = null;
+
+  function cancelServerBannerDismissal() {
+    if (serverBannerDismissTimer !== null) {
+      clearTimeout(serverBannerDismissTimer);
+      serverBannerDismissTimer = null;
+    }
+  }
+
   function onServerCrash(phase, detail) {
     const dict = I18N[currentLang] || I18N.en;
     let payload = {};
@@ -10069,11 +10078,7 @@
     } else if (phase === 'recovered') {
       const msg = dict.server_crash_recovered || 'Server has been restarted successfully.';
       showServerBanner(msg, '#34c759', '#34c75914', '#34c75940');
-      // Auto-dismiss after 5 seconds
-      setTimeout(() => {
-        const banner = document.getElementById('server-error-banner');
-        if (banner) banner.remove();
-      }, 10000);
+      serverBannerDismissTimer = setTimeout(clearServerBanner, 10000);
     } else if (phase === 'failed') {
       if (payload.error_code === 'ironmlx_instance_already_running') {
         const msg = dict.server_instance_already_running
@@ -10114,6 +10119,7 @@
   }
 
   function clearServerBanner() {
+    cancelServerBannerDismissal();
     const banner = document.getElementById('server-error-banner');
     if (banner) banner.remove();
   }
@@ -10128,6 +10134,7 @@
     details,
     primaryAction
   ) {
+    cancelServerBannerDismissal();
     let banner = document.getElementById('server-error-banner');
     if (!banner) {
       banner = document.createElement('div');
