@@ -502,6 +502,10 @@ pub async fn expand_image_parts_in_messages(
     messages: Vec<ChatMessage>,
     vision_input: &VisionInputConfig,
 ) -> anyhow::Result<(Vec<ChatMessage>, Option<Vec<Array>>, Vec<(i32, i32, i32)>)> {
+    if messages.iter().any(|message| matches!(&message.content,
+        Content::Parts(parts) if parts.iter().any(|part| matches!(part, ContentPart::ImageUrl { .. })))) {
+        vision_input.validate_image_input()?;
+    }
     let decoded = decode_openai_messages(messages)?;
     expand_decoded_messages_bounded(decoded, vision_input.clone()).await
 }
@@ -635,14 +639,6 @@ fn resolve_tool_constraint_options(
     }))
 }
 
-pub(crate) fn compile_output_constraint(
-    tokenizer: &crate::core::Tokenizer,
-    prepared_tools: Option<&PreparedToolRequest>,
-    output_schema: Option<&serde_json::Value>,
-) -> anyhow::Result<Option<crate::core::constrained::ConstraintPlan>> {
-    compile_output_constraint_with_native(tokenizer, prepared_tools, output_schema, None)
-}
-
 pub(crate) fn compile_output_constraint_with_native(
     tokenizer: &crate::core::Tokenizer,
     prepared_tools: Option<&PreparedToolRequest>,
@@ -672,6 +668,15 @@ pub(crate) fn compile_output_constraint_with_native(
                         &prepared.model_definitions,
                         options,
                         schema,
+                    );
+                }
+            }
+            if !matches!(options.choice, ToolChoiceConstraint::Auto) {
+                if let Some(reasoning) = enabled_reasoning {
+                    return tokenizer.compile_tool_constraint_with_reasoning(
+                        &prepared.model_definitions,
+                        options,
+                        reasoning,
                     );
                 }
             }
@@ -985,7 +990,7 @@ where
             &flat_messages,
         );
         agent_messages.and_then(|messages| {
-            let kwargs = tool_template_kwargs(chat_template_kwargs, prepared)?;
+            let kwargs = tool_template_kwargs(chat_template_kwargs.clone(), prepared)?;
             render_tool_prompt(&state.tokenizer, &messages, &kwargs, prepared)
         })
     } else {
@@ -1023,10 +1028,18 @@ where
         );
 
     let stop_token_ids = stop_token_ids_for_request(state.tokenizer.eos_token_ids(), ignore_eos);
-    let constraint = match compile_output_constraint(
+    let native_output = match state
+        .tokenizer
+        .native_output_decoder_config(chat_template_kwargs.as_ref())
+    {
+        Ok(config) => config,
+        Err(error) => return bad_request_response("invalid_prompt", error.to_string()),
+    };
+    let constraint = match compile_output_constraint_with_native(
         &state.tokenizer,
         prepared_tools.as_ref(),
         output_schema.as_ref(),
+        native_output,
     ) {
         Ok(constraint) => constraint,
         Err(error) => {
@@ -1206,7 +1219,7 @@ pub(crate) async fn chat_completions_with_gemma4_drafter_state(
             &flat_messages,
         )
         .and_then(|messages| {
-            let kwargs = tool_template_kwargs(chat_template_kwargs, prepared)?;
+            let kwargs = tool_template_kwargs(chat_template_kwargs.clone(), prepared)?;
             render_tool_prompt(&state.base.tokenizer, &messages, &kwargs, prepared)
         })
     } else {
@@ -1241,10 +1254,19 @@ pub(crate) async fn chat_completions_with_gemma4_drafter_state(
     let scheduler_config = state.base.scheduler_request_config(prompt_len, max_tokens);
     let stop_token_ids =
         stop_token_ids_for_request(state.base.tokenizer.eos_token_ids(), ignore_eos);
-    let constraint = match compile_output_constraint(
+    let native_output = match state
+        .base
+        .tokenizer
+        .native_output_decoder_config(chat_template_kwargs.as_ref())
+    {
+        Ok(config) => config,
+        Err(error) => return bad_request_response("invalid_prompt", error.to_string()),
+    };
+    let constraint = match compile_output_constraint_with_native(
         &state.base.tokenizer,
         prepared_tools.as_ref(),
         output_schema.as_ref(),
+        native_output,
     ) {
         Ok(constraint) => constraint,
         Err(error) => {
@@ -2740,6 +2762,34 @@ fn format_sse_error(e: &anyhow::Error) -> Bytes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn text_only_image_is_rejected_before_data_url_decoding() {
+        let error = expand_image_parts_in_messages(
+            vec![ChatMessage {
+                role: "user".into(),
+                content: Content::Parts(vec![ContentPart::ImageUrl {
+                    image_url: crate::core::server::chat_format::ImageUrl {
+                        url: "not even a data URL".into(),
+                    },
+                }]),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+            }],
+            &VisionInputConfig::TextOnly,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<ImageInputError>(),
+            Some(&ImageInputError::ModelUnsupported)
+        );
+        assert_eq!(
+            ImageInputError::ModelUnsupported.status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
 
     #[test]
     fn chat_adapter_rejects_unmapped_typed_output() {

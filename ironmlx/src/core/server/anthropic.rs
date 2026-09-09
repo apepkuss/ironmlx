@@ -1970,7 +1970,10 @@ where
     ) {
         Ok(decoder) => decoder,
         Err(error) => {
-            return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{error:#}"))
+            return anthropic_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("{error:#}"),
+            )
         }
     };
     let mut performance = state.record_request_started(input_tokens, started_at);
@@ -1998,11 +2001,17 @@ where
         let events = match events {
             Ok(events) => events,
             Err(error) => {
-                return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{error:#}"))
+                return anthropic_error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("{error:#}"),
+                )
             }
         };
         if let Err(error) = collect_tool_events(&mut output, events) {
-            return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{error:#}"));
+            return anthropic_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("{error:#}"),
+            );
         }
         if let Some(reason) = event.finish_reason {
             model_finish = reason;
@@ -2024,14 +2033,17 @@ where
     let events = match decoder.finish(model_finish) {
         Ok(events) => events,
         Err(error) => {
-            return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{error:#}"))
+            return anthropic_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("{error:#}"),
+            )
         }
     };
     if let Err(error) = collect_tool_events(&mut output, events) {
-        return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{error:#}"));
+        return anthropic_error_response(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}"));
     }
     if let Err(error) = validate_tool_output(&constraint_options, &output.tool_calls) {
-        return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{error:#}"));
+        return anthropic_error_response(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}"));
     }
     performance.complete();
     tool_unary_response(id, model_id, input_tokens, output, output_format)

@@ -22,7 +22,14 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
-use crate::core::generate::{GenerateRequest, GenerationStream};
+use crate::core::generate::GenerateRequest;
+#[cfg(not(test))]
+use crate::core::generate::GenerationStream;
+#[cfg(test)]
+use eof_tests::FaultInjectableGenerationStream as GenerationStream;
+#[cfg(test)]
+#[path = "responses_eof_tests.rs"]
+mod eof_tests;
 use crate::core::generated_output::{
     GeneratedOutputDecoder, GeneratedOutputEvent, ToolOutputDecoderConfig,
 };
@@ -40,6 +47,29 @@ use super::structured_output::{coalesce_system_messages, StructuredOutputFormat}
 use super::{openai, AppState, Gemma4DrafterAppState, RequestAdmissionError};
 
 const DEFAULT_MAX_OUTPUT_TOKENS: usize = 256;
+const MISSING_TERMINAL_EVENT: &str = "generation stream ended before a terminal event";
+
+fn require_terminal_event(finished: bool) -> anyhow::Result<()> {
+    anyhow::ensure!(finished, MISSING_TERMINAL_EVENT);
+    Ok(())
+}
+
+/// EOF is an execution failure; only a dropped client is a silent cancellation.
+async fn next_scheduler_event(
+    receiver: &mut tokio::sync::mpsc::UnboundedReceiver<crate::core::scheduler::StepEvent>,
+    disconnect: Option<&super::api_transport::SseDisconnect>,
+) -> anyhow::Result<Option<crate::core::scheduler::StepEvent>> {
+    let event = match disconnect {
+        Some(disconnect) => super::api_transport::recv_or_disconnect(disconnect, receiver).await,
+        None => receiver.recv().await,
+    };
+    if disconnect.is_some_and(|disconnect| disconnect.is_cancelled()) {
+        return Ok(None);
+    }
+    event
+        .map(Some)
+        .ok_or_else(|| anyhow::anyhow!(MISSING_TERMINAL_EVENT))
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1248,6 +1278,8 @@ impl ToolContext {
 
 #[derive(Debug)]
 struct PreparedResponse {
+    #[cfg(test)]
+    injected_events: Option<Vec<crate::core::generate::GenerateEvent>>,
     request: GenerateRequest,
     model: String,
     prompt_tokens: u32,
@@ -1403,6 +1435,8 @@ where
             })
     });
     Ok(PreparedResponse {
+        #[cfg(test)]
+        injected_events: None,
         request: GenerateRequest {
             prompt_ids,
             max_new_tokens: max_output_tokens,
@@ -2296,7 +2330,13 @@ where
         let model = state.model.blocking_lock();
         let tokenizer = &*state.tokenizer;
         let memory = super::begin_direct_request_memory(&state, &*model, &request)?;
-        let mut generation = GenerationStream::new(&*model, tokenizer, request)?;
+        let mut generation = GenerationStream::new(
+            &*model,
+            tokenizer,
+            request,
+            #[cfg(test)]
+            prepared.injected_events,
+        )?;
         let mut output = CollectedOutput::new();
         let mut decoder = GeneratedOutputDecoder::new_with_native(
             tokenizer,
@@ -2305,6 +2345,7 @@ where
         )?;
         let mut memory = Some(memory);
         let mut performance = None;
+        let mut finished = false;
         loop {
             let Some(event) = generation.next_token()? else {
                 break;
@@ -2329,9 +2370,11 @@ where
             output.collect(events)?;
             if let Some(reason) = event.finish_reason {
                 output.finish_reason = reason;
+                finished = true;
                 break;
             }
         }
+        require_terminal_event(finished)?;
         let model_finish = output.finish_reason;
         if let Some(context) = tool_context.as_ref() {
             finish_decoder(&mut output, &mut decoder, context, model_finish)?;
@@ -2362,10 +2405,15 @@ where
 async fn admit_request<M>(
     state: &AppState<M>,
     request: GenerateRequest,
+    #[cfg(test)] injected_events: Option<Vec<crate::core::generate::GenerateEvent>>,
 ) -> std::result::Result<AdmitReply, Response>
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
+    #[cfg(test)]
+    if let Some(events) = injected_events {
+        return Ok(eof_tests::closed_scheduler_stream(events));
+    }
     match state.request_execution.admit(request).await {
         Ok(reply) => Ok(reply),
         Err(RequestAdmissionError::Rejected(error)) => {
@@ -2397,7 +2445,14 @@ where
     let AdmitReply {
         request_id: _,
         mut event_rx,
-    } = match admit_request(&state, prepared.request).await {
+    } = match admit_request(
+        &state,
+        prepared.request,
+        #[cfg(test)]
+        prepared.injected_events,
+    )
+    .await
+    {
         Ok(reply) => reply,
         Err(response) => return response,
     };
@@ -2417,7 +2472,17 @@ where
             );
         }
     };
-    while let Some(event) = event_rx.recv().await {
+    let mut finished = false;
+    while let Some(event) = match next_scheduler_event(&mut event_rx, None).await {
+        Ok(event) => event,
+        Err(error) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "generation_error",
+                error.to_string(),
+            )
+        }
+    } {
         output.completion_tokens += 1;
         performance.record_output_tokens(1);
         let events = if event.finish_reason == Some("stop") {
@@ -2447,8 +2512,16 @@ where
         }
         if let Some(reason) = event.finish_reason {
             output.finish_reason = reason;
+            finished = true;
             break;
         }
+    }
+    if let Err(error) = require_terminal_event(finished) {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "generation_error",
+            error.to_string(),
+        );
     }
     let model_finish = output.finish_reason;
     if let Some(context) = tool_context.as_ref() {
@@ -2517,7 +2590,14 @@ where
     let AdmitReply {
         request_id: _,
         mut event_rx,
-    } = match admit_request(&state, prepared.request).await {
+    } = match admit_request(
+        &state,
+        prepared.request,
+        #[cfg(test)]
+        prepared.injected_events,
+    )
+    .await
+    {
         Ok(reply) => reply,
         Err(response) => return response,
     };
@@ -2545,9 +2625,13 @@ where
         let mut call_names = Vec::new();
         let mut typed_finish = None;
         let mut finished = false;
-        while let Some(event) =
-            super::api_transport::recv_or_disconnect(&disconnect, &mut event_rx).await
-        {
+        while let Some(event) = match next_scheduler_event(&mut event_rx, Some(&disconnect)).await {
+            Ok(event) => event,
+            Err(error) => {
+                let _ = tx.send(Ok(formatter.failed(error.to_string()))).await;
+                return;
+            }
+        } {
             output.completion_tokens += 1;
             performance.record_output_tokens(1);
             let events = if event.finish_reason == Some("stop") {
@@ -2589,6 +2673,13 @@ where
                 finished = true;
                 break;
             }
+        }
+        if disconnect.is_cancelled() {
+            return;
+        }
+        if let Err(error) = require_terminal_event(finished) {
+            let _ = tx.send(Ok(formatter.failed(error.to_string()))).await;
+            return;
         }
         let events = match decoder.finish(output.finish_reason) {
             Ok(events) => events,
@@ -2664,7 +2755,13 @@ where
                 return;
             }
         };
-        let mut generation = match GenerationStream::new(&*model, tokenizer, request) {
+        let mut generation = match GenerationStream::new(
+            &*model,
+            tokenizer,
+            request,
+            #[cfg(test)]
+            prepared.injected_events,
+        ) {
             Ok(generation) => generation,
             Err(error) => {
                 let _ = init_tx.send(Err(error));
@@ -2764,6 +2861,10 @@ where
         if disconnect.is_cancelled() {
             return;
         }
+        if let Err(error) = require_terminal_event(finished) {
+            let _ = tx.blocking_send(Ok(formatter.failed(error.to_string())));
+            return;
+        }
         let events = match decoder.finish(finish_reason) {
             Ok(events) => events,
             Err(error) => {
@@ -2856,6 +2957,13 @@ where
         Ok(prepared) => prepared,
         Err(response) => return response,
     };
+    serve_prepared_response(state, prepared).await
+}
+
+async fn serve_prepared_response<M>(state: AppState<M>, prepared: PreparedResponse) -> Response
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
     match (prepared.stream, prepared.use_scheduler) {
         (true, true) => serve_stream_scheduler(state, prepared).await,
         (true, false) => serve_stream_gs(state, prepared).await,
@@ -2874,6 +2982,56 @@ pub(crate) async fn gemma4_drafter_responses(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn scheduler_eof_after_zero_or_partial_output_is_an_error() {
+        for count in [0, 2] {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            for token in 0..count {
+                tx.send(crate::core::scheduler::StepEvent {
+                    id: crate::core::scheduler::RequestId(1),
+                    token,
+                    finish_reason: None,
+                })
+                .unwrap();
+            }
+            drop(tx);
+            for _ in 0..count {
+                assert!(next_scheduler_event(&mut rx, None).await.unwrap().is_some());
+            }
+            let error = next_scheduler_event(&mut rx, None).await.unwrap_err();
+            assert_eq!(error.to_string(), MISSING_TERMINAL_EVENT);
+        }
+        for reason in ["stop", "length"] {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            tx.send(crate::core::scheduler::StepEvent {
+                id: crate::core::scheduler::RequestId(1),
+                token: 0,
+                finish_reason: Some(reason),
+            })
+            .unwrap();
+            drop(tx);
+            assert_eq!(
+                next_scheduler_event(&mut rx, None)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .finish_reason,
+                Some(reason)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn disconnected_response_does_not_become_a_generation_error() {
+        let (_tx, rx, disconnect) = super::super::api_transport::disconnect_aware_sse_channel(1);
+        drop(rx);
+        let (_events, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(next_scheduler_event(&mut event_rx, Some(&disconnect))
+            .await
+            .unwrap()
+            .is_none());
+    }
 
     #[tokio::test]
     async fn responses_errors_use_openai_json_and_retry_contracts() {

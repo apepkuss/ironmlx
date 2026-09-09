@@ -8,9 +8,9 @@ still reject an incompatible checkpoint.
 
 | Model family | `model_type` | Text | Images | Responses/Messages reasoning | Chat/Responses/Messages tools | MTP/DFlash2/drafter | Prompt Lookup | KV cache |
 | --- | --- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| Qwen 3.5 Dense / same-type Qwen 3.6 Dense | `qwen3_5` | Yes | No | Yes, native `<think>` template required | Yes, native tool template required | Yes | Yes | Yes |
+| Qwen 3.5 Dense / same-type Qwen 3.6 Dense | `qwen3_5` | Yes | When checkpoint includes `vision_config` | Yes, native `<think>` template required | Yes, native tool template required | Yes | Yes | Yes |
 | Qwen 3.8 Dense (`mlx-community/Qwen3.8-27B-4bit` and `mlx-community/Qwen3.8-27B-8bit` accepted) | `qwen3_5` | Yes | Yes (images; no video) | Yes, enabled by default; `none` through `max` | Yes, native Qwen3.8 tool template required | Yes; accepted matching 4/8-bit MTP and `z-lab/Qwen3.8-27B-DFlash2`; affine 4/8-bit target, text only | Yes | Yes |
-| Qwen 3.5/3.6 MoE | `qwen3_5_moe` | Yes | No | Yes, native `<think>` template required | Yes, native tool template required | Yes | Yes | Yes |
+| Qwen 3.5/3.6 MoE | `qwen3_5_moe` | Yes | When checkpoint includes `vision_config` | Yes, native `<think>` template required | Yes, native tool template required | Yes | Yes | Yes |
 | Gemma 4 / Gemma 4 Unified | `gemma4`, `gemma4_unified` | Yes | Supported when checkpoint includes `vision_config` | Yes, native `thought` channel required | Yes, native tool template required | Yes | Yes | Yes |
 | GLM-4 MoE Lite | `glm4_moe_lite` | Yes | No | Yes, native `<think>` template required | Yes, native tool template required | No | Yes | Yes |
 | Llama GQA Dense (including compatible MiniCPM5-1B) | `llama` | Yes | No | MiniCPM5 native template only | Yes, native Llama 3.1/3.2 or MiniCPM5 tool template required | No | Yes | Yes |

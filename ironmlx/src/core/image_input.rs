@@ -43,6 +43,7 @@ impl SupportedImageMediaType {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ImageInputError {
+    ModelUnsupported,
     RemoteUrlForbidden,
     DataUrlInvalid,
     MediaTypeUnsupported,
@@ -74,6 +75,7 @@ impl ImageInputError {
 
     pub fn code(self) -> &'static str {
         match self {
+            Self::ModelUnsupported => "image_input_unsupported",
             Self::RemoteUrlForbidden => "image_remote_url_forbidden",
             Self::DataUrlInvalid => "image_data_url_invalid",
             Self::MediaTypeUnsupported => "image_media_type_unsupported",
@@ -91,6 +93,7 @@ impl ImageInputError {
 
     pub fn message(self) -> &'static str {
         match self {
+            Self::ModelUnsupported => "The loaded model does not support image input.",
             Self::RemoteUrlForbidden => {
                 "Remote image URLs are forbidden; upload image content as base64 data."
             }

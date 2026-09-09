@@ -5379,7 +5379,7 @@ where
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
     use crate::core::cache::MtpCache;
@@ -5389,13 +5389,13 @@ mod tests {
     use crate::nn::MtpStepOutput;
 
     #[derive(Clone, Copy)]
-    struct SchedulerActorFakeModel {
+    pub(crate) struct SchedulerActorFakeModel {
         forward_delay: Duration,
         mtp_accepted_prefix_restore: bool,
     }
 
     #[allow(non_upper_case_globals)]
-    const SchedulerActorFakeModel: SchedulerActorFakeModel = SchedulerActorFakeModel {
+    pub(crate) const SchedulerActorFakeModel: SchedulerActorFakeModel = SchedulerActorFakeModel {
         forward_delay: Duration::ZERO,
         mtp_accepted_prefix_restore: false,
     };
@@ -5455,7 +5455,7 @@ mod tests {
     }
 
     #[derive(Clone, Copy)]
-    struct SchedulerActorFakeMtpHead;
+    pub(crate) struct SchedulerActorFakeMtpHead;
 
     fn write_fake_full_kv(
         input_ids: &mlx::Array,

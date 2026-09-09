@@ -479,7 +479,28 @@ impl Tokenizer {
                 reasoning.dialect,
                 tools,
                 options,
-                output_schema,
+                Some(output_schema),
+            )
+    }
+
+    pub fn compile_tool_constraint_with_reasoning(
+        &self,
+        tools: &[ToolDefinition],
+        options: &ToolConstraintOptions,
+        reasoning: NativeOutputDecoderConfig,
+    ) -> Result<ConstraintPlan> {
+        let dialect = self
+            .tool_dialect
+            .ok_or_else(|| anyhow!("tokenizer has no tool dialect"))?;
+        self.constraint
+            .as_ref()
+            .ok_or_else(|| anyhow!("tokenizer does not support constrained decoding"))?
+            .compile_tools_with_output_and_reasoning(
+                dialect,
+                reasoning.dialect,
+                tools,
+                options,
+                None,
             )
     }
 

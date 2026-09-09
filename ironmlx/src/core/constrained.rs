@@ -410,20 +410,20 @@ impl ConstraintTokenizer {
         reasoning_dialect: NativeOutputDialect,
         tools: &[ToolDefinition],
         options: &ToolConstraintOptions,
-        output_schema: &Value,
+        output_schema: Option<&Value>,
     ) -> Result<ConstraintPlan> {
         validate_tool_schemas(tools)?;
-        validate_constraint_output_schema(output_schema)?;
+        if let Some(schema) = output_schema {
+            validate_constraint_output_schema(schema)?;
+        }
         let grammar_source = match tool_dialect {
             ToolDialect::Qwen35 | ToolDialect::MiniCpmV46 => {
-                build_qwen_tool_grammar(tools, options, Some(output_schema))?
+                build_qwen_tool_grammar(tools, options, output_schema)?
             }
-            ToolDialect::Gemma => build_gemma_tool_grammar(tools, options, Some(output_schema))?,
-            ToolDialect::Glm => build_glm_tool_grammar(tools, options, Some(output_schema))?,
-            ToolDialect::Llama => build_llama_tool_grammar(tools, options, Some(output_schema))?,
-            ToolDialect::MiniCpm5 => {
-                build_minicpm5_tool_grammar(tools, options, Some(output_schema))?
-            }
+            ToolDialect::Gemma => build_gemma_tool_grammar(tools, options, output_schema)?,
+            ToolDialect::Glm => build_glm_tool_grammar(tools, options, output_schema)?,
+            ToolDialect::Llama => build_llama_tool_grammar(tools, options, output_schema)?,
+            ToolDialect::MiniCpm5 => build_minicpm5_tool_grammar(tools, options, output_schema)?,
         };
         self.compile_reasoning_wrapped_lark(
             grammar_source,
@@ -1296,13 +1296,21 @@ fn build_qwen_tool_grammar(
         }
     }
     append_structured_output_rule(&mut grammar, output_schema)?;
-    let first_text = if output_schema.is_some() {
+    let forced = !matches!(options.choice, ToolChoiceConstraint::Auto);
+    let first_head = if forced {
+        "first_head"
+    } else {
+        "first_head[lazy]"
+    };
+    let first_text = if forced {
+        "\"\""
+    } else if output_schema.is_some() {
         "WS?"
     } else {
         "TEXT"
     };
     grammar.push_str(&format!(
-        "first_call: first_head function_dispatch\nfirst_head[lazy]: {first_text} \"<tool_call>\"\n"
+        "first_call: first_head function_dispatch\n{first_head}: {first_text} \"<tool_call>\"\n"
     ));
     if allows_multiple {
         grammar.push_str(
@@ -1405,13 +1413,21 @@ fn build_gemma_tool_grammar(
         }
     }
     append_structured_output_rule(&mut grammar, output_schema)?;
-    let first_text = if output_schema.is_some() {
+    let forced = !matches!(options.choice, ToolChoiceConstraint::Auto);
+    let first_head = if forced {
+        "first_head"
+    } else {
+        "first_head[lazy]"
+    };
+    let first_text = if forced {
+        "\"\""
+    } else if output_schema.is_some() {
         "WS?"
     } else {
         "TEXT"
     };
     grammar.push_str(&format!(
-        "first_call: first_head function_dispatch\nfirst_head[lazy]: {first_text} \"<|tool_call>\"\n"
+        "first_call: first_head function_dispatch\n{first_head}: {first_text} \"<|tool_call>\"\n"
     ));
     if allows_multiple {
         grammar.push_str(
@@ -1469,13 +1485,21 @@ fn build_glm_tool_grammar(
         }
     }
     append_structured_output_rule(&mut grammar, output_schema)?;
-    let first_text = if output_schema.is_some() {
+    let forced = !matches!(options.choice, ToolChoiceConstraint::Auto);
+    let first_head = if forced {
+        "first_head"
+    } else {
+        "first_head[lazy]"
+    };
+    let first_text = if forced {
+        "\"\""
+    } else if output_schema.is_some() {
         "WS?"
     } else {
         "TEXT"
     };
     grammar.push_str(&format!(
-        "first_call: first_head function_dispatch\nfirst_head[lazy]: {first_text} \"<tool_call>\"\n"
+        "first_call: first_head function_dispatch\n{first_head}: {first_text} \"<tool_call>\"\n"
     ));
     if allows_multiple {
         grammar.push_str(
@@ -1627,13 +1651,21 @@ fn build_minicpm5_tool_grammar(
         }
     }
     append_structured_output_rule(&mut grammar, output_schema)?;
-    let first_text = if output_schema.is_some() {
+    let forced = !matches!(options.choice, ToolChoiceConstraint::Auto);
+    let first_head = if forced {
+        "first_head"
+    } else {
+        "first_head[lazy]"
+    };
+    let first_text = if forced {
+        "\"\""
+    } else if output_schema.is_some() {
         "WS?"
     } else {
         "TEXT"
     };
     grammar.push_str(&format!(
-        "first_call: first_head function_dispatch\nfirst_head[lazy]: {first_text} "
+        "first_call: first_head function_dispatch\n{first_head}: {first_text} "
     ));
     grammar.push_str(&lark_literal("<function name=\"")?);
     grammar.push('\n');
@@ -2561,6 +2593,48 @@ mod tests {
     }
 
     #[test]
+    fn forced_tool_masks_plain_text_independently_of_strict_schema_mode() {
+        let tokenizer = ConstraintTokenizer::byte_level().unwrap();
+        for strict in [None, Some(false), Some(true)] {
+            let mut tool = weather_tool();
+            tool.strict = strict;
+            for choice in [
+                ToolChoiceConstraint::Required,
+                ToolChoiceConstraint::Function("get_weather".into()),
+            ] {
+                let options = ToolConstraintOptions {
+                    choice,
+                    allow_parallel_calls: false,
+                };
+                let plan = tokenizer
+                    .compile_qwen_tools(&[tool.clone()], &options)
+                    .unwrap();
+                let mut session = plan.start_session().unwrap();
+                let mask = session.compute_mask().unwrap();
+                assert!(!mask.is_allowed(u32::from(b'7')));
+                assert!(!mask.is_allowed(u32::from(b'o')));
+                consume_bytes(&mut session, b"<tool_call><function=get_weather><parameter=city>Tokyo</parameter></function></tool_call>").unwrap();
+                assert!(session.is_accepting().unwrap());
+                let reasoning = tokenizer
+                    .compile_tools_with_output_and_reasoning(
+                        ToolDialect::Qwen35,
+                        NativeOutputDialect::Qwen36,
+                        &[tool.clone()],
+                        &options,
+                        None,
+                    )
+                    .unwrap();
+                let mut session = reasoning.start_session().unwrap();
+                consume_bytes(&mut session, b"inspect the weather</think>").unwrap();
+                let mask = session.compute_mask().unwrap();
+                assert!(!mask.is_allowed(u32::from(b'7')));
+                consume_bytes(&mut session, b"<tool_call><function=get_weather><parameter=city>Tokyo</parameter></function></tool_call>").unwrap();
+                assert!(session.is_accepting().unwrap());
+            }
+        }
+    }
+
+    #[test]
     fn required_choice_rejects_plain_text_and_accepts_one_or_more_calls() {
         let tokenizer = ConstraintTokenizer::byte_level().unwrap();
         let options = ToolConstraintOptions {
@@ -2572,7 +2646,7 @@ mod tests {
             .unwrap();
 
         let mut text = plan.start_session().unwrap();
-        consume_bytes(&mut text, b"ordinary answer").unwrap();
+        assert!(consume_bytes(&mut text, b"ordinary answer").is_err());
         assert!(!text.is_accepting().unwrap());
 
         let call = b"<tool_call><function=get_weather><parameter=city>Tokyo</parameter></function></tool_call>";
@@ -2845,7 +2919,7 @@ mod tests {
             )
             .unwrap();
         let mut plain = required.start_session().unwrap();
-        consume_bytes(&mut plain, b"ordinary answer").unwrap();
+        assert!(consume_bytes(&mut plain, b"ordinary answer").is_err());
         assert!(!plain.is_accepting().unwrap());
 
         let call = b"<function name=\"get_weather\"><param name=\"city\">Tokyo</param></function>";
@@ -3192,7 +3266,7 @@ mod tests {
                 NativeOutputDialect::Qwen35,
                 &[weather_tool()],
                 &options,
-                &schema,
+                Some(&schema),
             )
             .unwrap();
         for output in [
@@ -3210,7 +3284,7 @@ mod tests {
                 NativeOutputDialect::Glm,
                 &[weather_tool()],
                 &options,
-                &schema,
+                Some(&schema),
             )
             .unwrap();
         let mut glm_tool = glm.start_session().unwrap();
@@ -3227,7 +3301,7 @@ mod tests {
                 NativeOutputDialect::MiniCpm5,
                 &[weather_tool()],
                 &options,
-                &schema,
+                Some(&schema),
             )
             .unwrap();
         let mut minicpm5_tool = minicpm5.start_session().unwrap();
@@ -3245,7 +3319,7 @@ mod tests {
                 NativeOutputDialect::Gemma,
                 &[weather_tool()],
                 &options,
-                &schema,
+                Some(&schema),
             )
             .unwrap();
         for output in [

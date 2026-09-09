@@ -31,9 +31,9 @@ use crate::core::scheduler_autotune::SchedulerAutotuneRuntimeProfile;
 use crate::core::speculative::{MtpDraftTokensArg, MtpSpeculativeConfig, MtpSpeculativeModel};
 use crate::core::{Loader, Tokenizer};
 use crate::models::{
-    DiffusionGemmaConfig, DiffusionGemmaGenerationConfig, DiffusionGemmaModel, Gemma4Config,
-    Gemma4Model, Glm4MoeLiteModel, LlamaModel, MiniCpmV46Model, ModelArchitecture, Qwen35Model,
-    Qwen35MoeModel, Qwen36MoeModel,
+    DiffusionGemmaConfig, DiffusionGemmaGenerationConfig, DiffusionGemmaModel, Gemma4Model,
+    Glm4MoeLiteModel, LlamaModel, MiniCpmV46Model, ModelArchitecture, Qwen35Model, Qwen35MoeModel,
+    Qwen36MoeModel,
 };
 use crate::Result;
 
@@ -2824,6 +2824,10 @@ async fn load_engine_variant(
     let paged_prefix_cache = runtime.paged_prefix_cache_config(&model.id, scheduler_config)?;
     let prefix_lru_cache = runtime.prefix_lru_cache_config(paged_prefix_cache.as_ref())?;
 
+    let vision_input = Some(VisionInputConfig::from_causal_loader(
+        architecture,
+        &loader,
+    )?);
     match architecture {
         ModelArchitecture::Qwen35Dense => {
             let model_impl =
@@ -2838,7 +2842,7 @@ async fn load_engine_variant(
                 prefix_lru_cache,
                 mtp_config,
                 prompt_lookup,
-                None,
+                vision_input,
             )
             .await
         }
@@ -2856,7 +2860,7 @@ async fn load_engine_variant(
                     prefix_lru_cache,
                     mtp_config,
                     prompt_lookup,
-                    None,
+                    vision_input,
                 )
                 .await
             } else {
@@ -2872,16 +2876,12 @@ async fn load_engine_variant(
                     prefix_lru_cache,
                     mtp_config,
                     prompt_lookup,
-                    None,
+                    vision_input,
                 )
                 .await
             }
         }
         ModelArchitecture::Gemma4 => {
-            let cfg = Gemma4Config::from_loader(&loader).context("Gemma4Config::from_loader")?;
-            let vision_input = cfg
-                .vision_config
-                .map(|vision_config| VisionInputConfig::Gemma4 { vision_config });
             let model_impl =
                 Gemma4Model::from_loader(&loader).context("Gemma4Model::from_loader")?;
             if let Some(mtp_config) = mtp_config {
@@ -2940,7 +2940,7 @@ async fn load_engine_variant(
                 paged_prefix_cache,
                 prefix_lru_cache,
                 prompt_lookup,
-                None,
+                vision_input,
             )
             .await?;
             Ok(EngineVariant::Glm4MoeLite(state))
@@ -2956,7 +2956,7 @@ async fn load_engine_variant(
                 paged_prefix_cache,
                 prefix_lru_cache,
                 prompt_lookup,
-                None,
+                vision_input,
             )
             .await?;
             Ok(EngineVariant::Llama(state))
@@ -2973,9 +2973,7 @@ async fn load_engine_variant(
                 paged_prefix_cache,
                 prefix_lru_cache,
                 prompt_lookup,
-                Some(VisionInputConfig::MiniCpmV46 {
-                    spatial_merge_size: 4,
-                }),
+                vision_input,
             )
             .await?;
             Ok(EngineVariant::MiniCpmV46(state))

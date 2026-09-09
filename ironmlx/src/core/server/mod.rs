@@ -127,6 +127,7 @@ impl SamplingDefaults {
 
 #[derive(Clone)]
 pub enum VisionInputConfig {
+    TextOnly,
     Qwen {
         spatial_merge_size: i32,
     },
@@ -1332,9 +1333,7 @@ where
         crate::core::process_memory::ColdMaterializationTracker::new(static_memory_estimate);
     scheduler_handle
         .install_cold_materialization_tracker(Arc::clone(&cold_materialization_tracker))?;
-    let vision_input = vision_input_override.unwrap_or(VisionInputConfig::Qwen {
-        spatial_merge_size: meta.spatial_merge_size,
-    });
+    let vision_input = vision_input_override.unwrap_or(VisionInputConfig::TextOnly);
 
     let mtp_health = mtp_health_draft_tokens
         .map(|draft_tokens| {

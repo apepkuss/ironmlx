@@ -11,6 +11,54 @@ use crate::core::server::VisionInputConfig;
 use crate::core::tokenizer::Tokenizer;
 use crate::models::{gemma4, qwen3_5};
 
+impl VisionInputConfig {
+    /// Resolve the input contract from the same configuration used by the loader.
+    pub(crate) fn from_causal_loader(
+        architecture: crate::models::ModelArchitecture,
+        loader: &crate::core::Loader,
+    ) -> anyhow::Result<Self> {
+        use crate::models::ModelArchitecture;
+        Ok(match architecture {
+            ModelArchitecture::Qwen35Dense | ModelArchitecture::Qwen35Moe => {
+                match loader
+                    .config_raw_value()
+                    .get("vision_config")
+                    .filter(|value| !value.is_null())
+                {
+                    Some(value) => {
+                        let config: qwen3_5::VisionConfig = serde_json::from_value(value.clone())?;
+                        Self::Qwen {
+                            spatial_merge_size: config.spatial_merge_size,
+                        }
+                    }
+                    None => Self::TextOnly,
+                }
+            }
+            ModelArchitecture::Gemma4 => crate::models::Gemma4Config::from_loader(loader)?
+                .vision_config
+                .map(|vision_config| Self::Gemma4 { vision_config })
+                .unwrap_or(Self::TextOnly),
+            ModelArchitecture::MiniCpmV46 => Self::MiniCpmV46 {
+                spatial_merge_size: 4,
+            },
+            ModelArchitecture::Glm4MoeLite | ModelArchitecture::Llama => Self::TextOnly,
+            ModelArchitecture::DiffusionGemma => {
+                anyhow::bail!("diffusion vision configuration requires its dedicated loader")
+            }
+        })
+    }
+
+    pub(crate) fn validate_image_input(
+        &self,
+    ) -> Result<(), crate::core::image_input::ImageInputError> {
+        if matches!(self, Self::TextOnly) {
+            Err(crate::core::image_input::ImageInputError::ModelUnsupported)
+        } else {
+            Ok(())
+        }
+    }
+}
+
 /// A single content part after the endpoint's wire format has been decoded to
 /// raw bytes (protocol-agnostic).
 pub enum DecodedPart {
@@ -54,6 +102,7 @@ pub fn derive_image_token_and_merge(
     tokenizer: &Tokenizer,
 ) -> (i32, i32) {
     match vision_input {
+        VisionInputConfig::TextOnly => (-1, 1),
         VisionInputConfig::Qwen { spatial_merge_size } => (
             tokenizer
                 .token_to_id("<|image_pad|>")
@@ -125,6 +174,7 @@ pub fn expand_decoded_messages(
     vision_input: &VisionInputConfig,
 ) -> anyhow::Result<ExpandedVisionInputs> {
     let spatial_merge_size = match vision_input {
+        VisionInputConfig::TextOnly => 1,
         VisionInputConfig::Qwen { spatial_merge_size } => *spatial_merge_size,
         VisionInputConfig::Gemma4 { vision_config } => vision_config.pooling_kernel_size,
         VisionInputConfig::DiffusionGemma { vision_config, .. } => {
@@ -146,7 +196,9 @@ pub fn expand_decoded_messages(
     for msg in &messages {
         for part in &msg.parts {
             if let DecodedPart::Image(img_bytes) = part {
+                vision_input.validate_image_input()?;
                 match vision_input {
+                    VisionInputConfig::TextOnly => unreachable!("image input validated above"),
                     VisionInputConfig::Qwen { .. } => {
                         let (pv, gh, gw) = qwen3_5::image_processor::preprocess(img_bytes)?;
                         let n = ((gh / spatial_merge_size) * (gw / spatial_merge_size)) as usize;
@@ -458,5 +510,35 @@ mod tests {
         // Pixel values collected for both images; grid has two entries.
         assert!(pv.is_some(), "pixel_values must be Some for image message");
         assert_eq!(grid.len(), 2, "one grid entry per image");
+    }
+}
+
+#[cfg(test)]
+mod text_only_tests {
+    use super::*;
+
+    #[test]
+    fn text_only_preserves_text_and_rejects_decoded_images() {
+        let message = |part| DecodedMessage {
+            role: "user".into(),
+            parts: vec![part],
+            reasoning_content: None,
+        };
+        let (text, pixels, grid) = expand_decoded_messages(
+            vec![message(DecodedPart::Text("hello".into()))],
+            &VisionInputConfig::TextOnly,
+        )
+        .unwrap();
+        assert_eq!(text.len(), 1);
+        assert!(pixels.is_none() && grid.is_empty());
+        let error = expand_decoded_messages(
+            vec![message(DecodedPart::Image(Vec::new()))],
+            &VisionInputConfig::TextOnly,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<crate::core::image_input::ImageInputError>(),
+            Some(&crate::core::image_input::ImageInputError::ModelUnsupported)
+        );
     }
 }

@@ -1910,19 +1910,13 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
         ..
     } = resolved_scheduler;
     let tokenizer = Tokenizer::from_loader(&loader).context("Tokenizer::from_loader")?;
-    let vision_input = match architecture {
-        crate::models::ModelArchitecture::Gemma4 => {
-            let cfg = crate::models::gemma4::Gemma4Config::from_loader(&loader)
-                .context("Gemma4Config::from_loader")?;
-            cfg.vision_config
-                .map(|vision_config| server::VisionInputConfig::Gemma4 { vision_config })
-        }
-        crate::models::ModelArchitecture::MiniCpmV46 => {
-            Some(server::VisionInputConfig::MiniCpmV46 {
-                spatial_merge_size: 4,
-            })
-        }
-        _ => None,
+    let vision_input = if architecture == crate::models::ModelArchitecture::DiffusionGemma {
+        None
+    } else {
+        Some(server::VisionInputConfig::from_causal_loader(
+            architecture,
+            &loader,
+        )?)
     };
 
     match architecture {
