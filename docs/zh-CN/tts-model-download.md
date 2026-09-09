@@ -52,3 +52,18 @@ swift test -c release --package-path ironmlx-app --filter indexTTSLiveDownloadUs
 初次 Rust 直连遇到 `tls handshake eof`，未发布快照。重试时向进程传入本机已有的 HTTP/HTTPS 代理配置后成功，未更改系统代理设置。使用现有 Release `ironmlx` 下载 helper，其 SHA-256 为 `2b15e6d53c97adaf4cb283bb7f09c46c0429445fca56300aac9fd948b27a3de1`。本次验证的是 Release AppCore 下载服务加生产下载 helper，不是重新打包启动 App 的 UI 验收。
 
 新增 TTS 测试覆盖完整组件发布与不可加载状态、5 种缺资源情况、4 种元数据或辅助文件损坏情况；既有 LLM/DFlash2 下载测试通过。另有 27 项本地扫描、下载队列、预检、断点续传和完整性回归测试通过。
+
+## Dashboard 展示
+
+AppCore 在本地 TTS 模型的 `download_info` 中提供 snapshot 清单中的文件名、字节数和 `external_resources`。Dashboard 的模型详情入口展示这些信息，不打开 LLM 的上下文、采样或推测解码参数表单。外部资源标记为上游声明且本次未下载、未验证。
+
+列表分别处理完整性与运行支持：TTS 的文件验证成功后显示“文件已验证 · 暂不支持 TTS 推理”，加载及默认模型入口保持禁用。损坏模型重新校验成功时，Dashboard 请求 AppCore 重新扫描 readiness，不直接将模型设为 `ready`。此规则也避免覆盖其他不支持的模型类型或缺文件状态。
+
+Dashboard 行为测试：
+
+```sh
+node scripts/tests/test-dashboard-tts.mjs
+swift test -c release --package-path ironmlx-app --filter 'indexTTSDownloadPublishes|localModelScanner|dashboard'
+```
+
+本次浏览器验证使用生产 Dashboard HTML 和由已下载 snapshot 构造的本地预览数据，检查了中文详情、文件列表滚动、外部依赖、详情入口及 Escape 关闭；未重新打包启动原生 App Bundle。

@@ -1450,6 +1450,12 @@ private func indexTTSFiles() throws -> [(path: String, data: Data, sha256: Strin
     #expect(manifest.resources.weightBytes == 35)
     let model = try #require(LocalModelScanner(rootURL: root).scan(loadedModels: []).first { $0.id == repoID })
     #expect(model.type == "tts")
+    #expect(Set(model.downloadInfo?.files.map(\.path) ?? []) == Set(files.map(\.path)))
+    #expect(model.downloadInfo?.externalResources == manifest.compatibility.externalResources)
+    let payload = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(model)) as? [String: Any])
+    let downloadInfo = try #require(payload["download_info"] as? [String: Any])
+    #expect(downloadInfo["external_resources"] as? [String] == manifest.compatibility.externalResources)
+    #expect(try JSONDecoder().decode(LocalModel.self, from: JSONEncoder().encode(model)) == model)
     #expect(model.readiness?.isLoadable == false)
     #expect(model.readiness?.reasonCode == "unsupported_model_type")
 }

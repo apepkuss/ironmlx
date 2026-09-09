@@ -64,6 +64,20 @@ public struct LocalModelReadiness: Codable, Equatable, Sendable {
     }
 }
 
+public struct LocalModelDownloadInfo: Codable, Equatable, Sendable {
+    public struct File: Codable, Equatable, Sendable {
+        public var path: String
+        public var size: Int64
+    }
+    public var files: [File]
+    public var externalResources: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case files
+        case externalResources = "external_resources"
+    }
+}
+
 public struct LocalModel: Codable, Equatable, Sendable {
     public var id: String
     public var repoID: String
@@ -82,6 +96,7 @@ public struct LocalModel: Codable, Equatable, Sendable {
     public var quantization: LocalModelQuantization?
     public var readiness: LocalModelReadiness?
     public var integrity: ModelIntegrityStatus?
+    public var downloadInfo: LocalModelDownloadInfo?
 
     public init(
         id: String,
@@ -100,7 +115,8 @@ public struct LocalModel: Codable, Equatable, Sendable {
         dflash2: LocalModelDFlash2Info? = nil,
         quantization: LocalModelQuantization? = nil,
         readiness: LocalModelReadiness? = nil,
-        integrity: ModelIntegrityStatus? = nil
+        integrity: ModelIntegrityStatus? = nil,
+        downloadInfo: LocalModelDownloadInfo? = nil
     ) {
         self.id = id
         self.repoID = repoID
@@ -119,6 +135,7 @@ public struct LocalModel: Codable, Equatable, Sendable {
         self.quantization = quantization
         self.readiness = readiness
         self.integrity = integrity
+        self.downloadInfo = downloadInfo
     }
 
     enum CodingKeys: String, CodingKey {
@@ -139,6 +156,7 @@ public struct LocalModel: Codable, Equatable, Sendable {
         case quantization
         case readiness
         case integrity
+        case downloadInfo = "download_info"
     }
 
     public var isBlockDiffusion: Bool {
@@ -841,7 +859,8 @@ public struct LocalModelScanner: Sendable {
                     snapshot: snapshot,
                     provider: provider,
                     repoID: id
-                )
+                ),
+                downloadInfo: type == "tts" ? ttsDownloadInfo(snapshot: snapshot) : nil
             ).artifact(
                 kind: kind,
                 path: snapshot,
@@ -849,6 +868,15 @@ public struct LocalModelScanner: Sendable {
                 dflash2Signature: dflash2Signature
             )
         }
+    }
+
+    private func ttsDownloadInfo(snapshot: URL) -> LocalModelDownloadInfo? {
+        guard let manifest = try? ModelSnapshotVerifier().loadManifest(at: snapshot),
+              manifest.compatibility.artifactRole == "tts" else { return nil }
+        return LocalModelDownloadInfo(
+            files: manifest.files.map { .init(path: $0.path, size: $0.size) },
+            externalResources: manifest.compatibility.externalResources ?? []
+        )
     }
 
     private func resolveAuxiliaryModelPath(
