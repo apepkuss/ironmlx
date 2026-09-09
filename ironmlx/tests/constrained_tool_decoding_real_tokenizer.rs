@@ -12,7 +12,10 @@ fn assert_typed_generation_capabilities(tokenizer: &Tokenizer, image_input: bool
     assert_eq!(profile.input.image.is_supported(), image_input);
     assert!(!profile.input.audio.is_supported());
     assert!(profile.output.text.is_supported());
-    assert!(!profile.output.reasoning.is_supported());
+    assert_eq!(
+        profile.output.reasoning.is_supported(),
+        tokenizer.native_output_dialect().is_some()
+    );
     assert!(!profile.output.reasoning_summary.is_supported());
     assert!(!profile.output.refusal.is_supported());
     assert!(!profile.output.audio.is_supported());
@@ -242,9 +245,12 @@ fn real_qwen_tokenizer_compiles_and_enforces_tool_grammar() {
         .encode("ordinary answer", false)
         .expect("encode plain text");
     let mut required_session = required.start_session().expect("start required matcher");
-    required_session
-        .commit_tokens(&plain)
-        .expect("plain thinking prefix remains legal");
+    assert_eq!(
+        required_session
+            .validate_tokens(&plain)
+            .expect("reject plain text"),
+        0
+    );
     assert!(!required_session.is_accepting().expect("required state"));
 
     let forced = tokenizer

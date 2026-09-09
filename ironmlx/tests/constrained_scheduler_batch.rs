@@ -241,13 +241,21 @@ fn scheduler_preserves_required_choice_plan_state() {
 
     let state = scheduler.get_mut(id).expect("required state");
     let constraint = state.constraint.as_mut().expect("constraint session");
-    constraint
-        .commit_tokens(
-            &b"ordinary answer"
-                .iter()
-                .map(|byte| u32::from(*byte))
-                .collect::<Vec<_>>(),
-        )
-        .expect("thinking prefix remains legal");
+    let plain = b"ordinary answer"
+        .iter()
+        .map(|byte| u32::from(*byte))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        constraint
+            .validate_tokens(&plain)
+            .expect("validate plain text"),
+        0
+    );
     assert!(!constraint.is_accepting().expect("required accepting state"));
+    let call = b"<tool_call><function=get_weather><parameter=city>Tokyo</parameter></function></tool_call>"
+        .iter().map(|byte| u32::from(*byte)).collect::<Vec<_>>();
+    constraint
+        .commit_tokens(&call)
+        .expect("required tool call remains legal");
+    assert!(constraint.is_accepting().expect("completed required call"));
 }
