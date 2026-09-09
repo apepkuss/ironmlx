@@ -1896,8 +1896,16 @@ impl EnginePoolInner {
         model: &EngineModelConfig,
     ) -> Result<Option<MemoryReservation>> {
         let target_id = model.id.as_str();
-        let governor = global_process_memory_governor();
         let estimated_weight_bytes = estimated_engine_weight_bytes(model)?;
+        // A target that cannot fit by itself must not evict existing models
+        // while attempting to reclaim capacity for an impossible load.
+        self.runtime
+            .memory_limits
+            .check_model_memory_limit(target_id, estimated_weight_bytes)?;
+        self.runtime
+            .memory_limits
+            .check_total_memory_limit(target_id, estimated_weight_bytes)?;
+        let governor = global_process_memory_governor();
         let first_snapshot = governor.sample_process();
         let first_reservation = if first_snapshot.pressure_level == PressureLevel::Normal {
             governor.try_reserve(estimated_weight_bytes, "model_load")
@@ -1941,25 +1949,58 @@ impl EnginePoolInner {
                 }
             }
         };
-        let Some(max_loaded_models) = self.registry.lock().await.max_loaded_models() else {
-            return Ok(memory_reservation);
-        };
-        let loaded_count = self.loaded_count().await;
-        match decide_engine_pool_capacity(self.capacity_policy, max_loaded_models, loaded_count) {
-            EnginePoolCapacityDecision::Continue => return Ok(memory_reservation),
-            EnginePoolCapacityDecision::Reject => {
-                bail!(
-                    "engine pool capacity reached: max_loaded_models={max_loaded_models}, unload an existing model before loading `{target_id}`"
-                );
+        let max_loaded_models = self.registry.lock().await.max_loaded_models();
+        if let Some(max_loaded_models) = max_loaded_models {
+            let loaded_count = self.loaded_count().await;
+            match decide_engine_pool_capacity(self.capacity_policy, max_loaded_models, loaded_count)
+            {
+                EnginePoolCapacityDecision::Continue => {}
+                EnginePoolCapacityDecision::Reject => {
+                    bail!(
+                        "engine pool capacity reached: max_loaded_models={max_loaded_models}, unload an existing model before loading `{target_id}`"
+                    );
+                }
+                EnginePoolCapacityDecision::TryEvictLruIdle => {
+                    if !self.evict_lru_idle_engine(target_id).await? {
+                        bail!(
+                            "engine pool capacity reached: max_loaded_models={max_loaded_models}, no idle lazy engine can be evicted"
+                        );
+                    }
+                }
             }
-            EnginePoolCapacityDecision::TryEvictLruIdle => {}
         }
-        if self.evict_lru_idle_engine(target_id).await? {
-            return Ok(memory_reservation);
+
+        // Reject known oversize loads before constructing MLX arrays. The
+        // post-load check remains necessary for transformations whose live
+        // allocation differs from the on-disk weight estimate.
+        if self
+            .runtime
+            .memory_limits
+            .model_memory_limit_bytes
+            .is_some()
+        {
+            let estimated_loaded_model_bytes = self
+                .loaded_model_weight_bytes_excluding(target_id)
+                .await
+                .saturating_add(estimated_weight_bytes);
+            self.runtime
+                .memory_limits
+                .check_model_memory_limit(target_id, estimated_loaded_model_bytes)?;
         }
-        bail!(
-            "engine pool capacity reached: max_loaded_models={max_loaded_models}, no idle lazy engine can be evicted"
-        );
+        if self
+            .runtime
+            .memory_limits
+            .total_memory_limit_bytes
+            .is_some()
+        {
+            let estimated_active_bytes = mlx::memory::snapshot()
+                .active_bytes
+                .saturating_add(estimated_weight_bytes);
+            self.runtime
+                .memory_limits
+                .check_total_memory_limit(target_id, estimated_active_bytes)?;
+        }
+        Ok(memory_reservation)
     }
 
     async fn loaded_count(&self) -> usize {
@@ -4050,6 +4091,69 @@ mod tests {
             .expect_err("active bytes above limit must fail");
 
         assert!(format!("{error:#}").contains("engine pool total memory limit exceeded"));
+    }
+
+    #[tokio::test]
+    async fn engine_pool_memory_limits_reject_before_materialization() {
+        for (model_limit, total_limit, draft_bytes, expected_error) in [
+            (
+                Some(511),
+                None,
+                0,
+                "engine pool model memory limit exceeded",
+            ),
+            (
+                None,
+                Some(511),
+                0,
+                "engine pool total memory limit exceeded",
+            ),
+            (
+                Some(768),
+                None,
+                512,
+                "engine pool model memory limit exceeded",
+            ),
+        ] {
+            let mut runtime = runtime_config();
+            runtime.memory_limits = EnginePoolMemoryLimits {
+                model_memory_limit_bytes: model_limit,
+                total_memory_limit_bytes: total_limit,
+            };
+            let pool = EnginePoolState::new_dynamic(runtime, None).expect("pool");
+            let model_dir = write_minimal_model_config("qwen3_5");
+            // Deliberately invalid weights: reaching the loader would produce
+            // a format error instead of the expected admission rejection.
+            std::fs::write(model_dir.join("model.safetensors"), vec![0_u8; 512])
+                .expect("write weight size fixture");
+            let mut config = model_config("alpha", &model_dir, EngineLoadPolicy::Lazy);
+            let draft_dir = (draft_bytes > 0).then(|| {
+                let dir = write_minimal_model_config("qwen3_5_mtp");
+                std::fs::write(dir.join("model.safetensors"), vec![0_u8; draft_bytes])
+                    .expect("write draft size fixture");
+                config.mtp = Some(EngineMtpSettings {
+                    model_dir: dir.clone(),
+                    draft_tokens: Some(2),
+                });
+                dir
+            });
+            pool.register_dynamic_model(config, false)
+                .await
+                .expect("register model");
+
+            let error = pool.load_model("alpha").await.expect_err("reject load");
+            assert!(format!("{error:#}").contains(expected_error));
+            let slot = pool.inner.slots.lock().await["alpha"].clone();
+            let health = slot.health_snapshot().await;
+            assert_eq!(health.state, EngineRuntimeState::Unloaded);
+            assert_eq!(health.load_attempts, 0);
+            assert!(pool.loaded_model_infos().await.is_empty());
+
+            std::fs::remove_dir_all(model_dir).expect("cleanup model fixture");
+            if let Some(dir) = draft_dir {
+                std::fs::remove_dir_all(dir).expect("cleanup draft fixture");
+            }
+        }
     }
 
     #[tokio::test]
