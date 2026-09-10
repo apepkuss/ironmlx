@@ -25,6 +25,11 @@ class ReleaseIdentityTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.repo = pathlib.Path(self.temp.name)
         self.git("init", "-q")
+        # Commits may inherit host auto-maintenance settings. Background Git
+        # writers must not outlive these temporary repositories during cleanup.
+        self.git("config", "maintenance.auto", "false")
+        self.git("config", "gc.auto", "0")
+        self.git("config", "gc.autoDetach", "false")
         self.git("config", "user.name", "Release Test")
         self.git("config", "user.email", "release@example.invalid")
         self.git("config", "commit.gpgsign", "false")
