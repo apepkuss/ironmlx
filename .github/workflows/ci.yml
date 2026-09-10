@@ -88,7 +88,7 @@ jobs:
         run: scripts/verify-version-consistency.sh
 
       - name: Test Dashboard recovery notifications
-        run: node --test scripts/tests/test_dashboard_recovery.cjs
+        run: node --test scripts/tests/test_dashboard_recovery.cjs scripts/tests/test_dashboard_model_parameters.cjs
 
       - name: Test stable release identity gate
         shell: bash

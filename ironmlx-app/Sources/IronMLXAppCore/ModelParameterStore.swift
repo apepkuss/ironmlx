@@ -63,6 +63,19 @@ public struct ModelParameters: Codable, Equatable, Sendable {
         self.promptLookupCrossRequest = promptLookupCrossRequest
     }
 
+    // Dashboard and legacy configurations use blank strings for no selection.
+    // Preserve actual IDs; only canonicalize an absent selection to nil.
+    var normalizedModelSelections: ModelParameters {
+        var result = self
+        if mtpModelID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true {
+            result.mtpModelID = nil
+        }
+        if dflash2ModelID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true {
+            result.dflash2ModelID = nil
+        }
+        return result
+    }
+
     public var maxCacheCap: Int? {
         guard let value = positiveInt(maxTokens) else {
             return nil
@@ -236,6 +249,7 @@ public final class ModelParameterStore: @unchecked Sendable {
     }
 
     public func save(_ parameters: ModelParameters) throws {
+        let parameters = parameters.normalizedModelSelections
         try coordinator.withLock {
             try assertWritable()
             let key = parameters.modelID.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -262,7 +276,7 @@ public final class ModelParameterStore: @unchecked Sendable {
             }
             var all = try loadAll()
             try assertWritable()
-            if let parameters {
+            if let parameters = parameters?.normalizedModelSelections {
                 try validate(parameters, key: key)
                 all[key] = parameters
             } else {
@@ -421,8 +435,9 @@ public final class ModelParameterStore: @unchecked Sendable {
         }
         try validateRawModelObjects(modelsObject)
         let envelope = try JSONDecoder().decode(ModelParameterEnvelope.self, from: data)
-        try validate(envelope.models)
-        return envelope.models
+        let models = envelope.models.mapValues(\.normalizedModelSelections)
+        try validate(models)
+        return models
     }
 
     private func migrateV0(_ data: Data, object: [String: Any]) throws -> [String: ModelParameters] {
@@ -431,6 +446,7 @@ public final class ModelParameterStore: @unchecked Sendable {
             preservedURL = try coordinator.preservePreMigration(data, schemaVersion: 0)
             try validateRawModelObjects(object)
             let models = try JSONDecoder().decode([String: ModelParameters].self, from: data)
+                .mapValues(\.normalizedModelSelections)
             try validate(models)
             let candidate = try encodedV1(models)
             _ = try decodeV1(candidate)

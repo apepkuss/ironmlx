@@ -2093,6 +2093,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     private func saveModelParams(json: String) {
         guard let data = json.data(using: .utf8),
               let parameters = try? JSONDecoder().decode(ModelParameters.self, from: data) else {
+            IronMLXAppLogger.error("event=model_parameters_save_failed code=settings_invalid reason=decode_failed")
             let response = Self.settingsErrorJSON(
                 message: "Invalid model parameters.",
                 code: "settings_invalid"
@@ -2114,12 +2115,33 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             scheduleModelParameterReloadIfNeeded(parameters)
         } catch {
             let issue = parameterStore.recoveryIssue
-            let response = Self.settingsErrorJSON(
-                message: issue?.errorDescription ?? error.localizedDescription,
-                code: issue?.dashboardErrorCode ?? "settings_persist_failed"
-            )
+            let response = Self.modelParameterSaveErrorJSON(error, issue: issue)
             sendJavaScript("onModelParamsSaved(\(Self.jsStringLiteral(response)))")
         }
+    }
+
+    static func modelParameterSaveErrorJSON(
+        _ error: Error,
+        issue: ConfigurationRecoveryIssue? = nil
+    ) -> String {
+        if issue == nil,
+           case let ConfigurationPersistenceError.invalidValue(field) = error {
+            IronMLXAppLogger.error("event=model_parameters_save_failed code=model_parameters_invalid field=\(field)")
+            return settingsErrorJSON(
+                message: error.localizedDescription,
+                code: "model_parameters_invalid",
+                fields: ["field": field]
+            )
+        }
+        let code = issue?.dashboardErrorCode ?? "settings_persist_failed"
+        let underlying = error as NSError
+        IronMLXAppLogger.error(
+            "event=model_parameters_save_failed code=\(code) error_domain=\(underlying.domain) error_code=\(underlying.code)"
+        )
+        return settingsErrorJSON(
+            message: issue?.errorDescription ?? error.localizedDescription,
+            code: code
+        )
     }
 
     private func applyDFlash2ParameterChangeIfNeeded(
