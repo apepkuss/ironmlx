@@ -3757,17 +3757,11 @@ fn driver_loop<M, A>(
                     tracing::warn!(%error, "scheduler memory-pressure reclaim failed");
                 }
             }
-            // Pre-event Finished-batch finalization + handoff. If
-            // previous iteration's prefill_admitted/step left phase=Finished
-            // (e.g. max_tokens=1 workload), handle the completed batch BEFORE
-            // dispatching another event. Per Codex Q6: biased select may pick
-            // Admit over Step, so this must run before the event pick — or the
-            // actor could call admit_mid_begin() in Phase::Finished.
-            //
-            // `drive_empty_scheduler_handoff` itself calls
-            // `finalize_finished_batch_if_any`; do not duplicate finalization
-            // here. This avoids two divergent finalize/error paths.
-            if sched.phase() == Phase::Finished {
+            // A rejected queued admit or cancellation can leave an empty Idle
+            // scheduler. Hand off before selecting Step: there is no batch to
+            // decode. Finished also needs finalization even if its slots have
+            // not been collected yet (e.g. max_new_tokens=1).
+            if sched.phase() == Phase::Finished || sched.active_count() == 0 {
                 match drive_empty_scheduler_handoff(
                     &mut sched,
                     &mut cmd_rx,
@@ -5092,8 +5086,7 @@ fn finalize_finished_batch_if_any<M: Model>(
 /// path used to encounter `Phase::Finished`; the new pre-event hook now
 /// shoulders that case via finalize). The helper preserves the current
 /// reset semantics for `Decoding`-with-zero-active-rows before starting
-/// the next batch but never calls `evict_all` in `Idle` (which is itself
-/// an error per scheduler.rs:775-780).
+/// the next batch; an already Idle scheduler needs no additional reset.
 ///
 /// Behavior per branch:
 /// - Queued admit present → pop head, fresh batch via `handle_admit` +
@@ -5206,7 +5199,8 @@ where
             admit_count,
         );
         if sched.active_count() == 0 {
-            // Admit failed; loop to drain more queue (or exit).
+            // Admit failed or its caller disconnected. The pre-event empty
+            // handoff will drain the next queued request or return to idle.
             return RollingControl::ContinueRolling;
         }
         if sched.active_count() < fresh_batch_limit {
@@ -6428,6 +6422,154 @@ pub(super) mod tests {
 
         drop(handle);
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn queued_admission_failures_preserve_later_requests() {
+        for queue_valid_request in [false, true] {
+            let model = Arc::new(Mutex::new(SchedulerActorFakeModel::with_forward_delay(
+                Duration::from_millis(25),
+            )));
+            let handle = spawn_scheduler_actor(
+                model,
+                1,
+                Duration::from_millis(1),
+                4,
+                32,
+                256,
+                crate::core::memory_budget::test_meta_qwen35(),
+            )
+            .expect("spawn actor");
+            let (reply_tx, reply_rx) = oneshot::channel();
+            handle
+                .cmd_tx
+                .send(SchedulerCommand::Admit {
+                    request: mk_req(11),
+                    reply_tx,
+                })
+                .await
+                .expect("send resident request");
+            let mut resident = reply_rx
+                .await
+                .expect("resident reply")
+                .expect("resident admit")
+                .event_rx;
+            let first = tokio::time::timeout(Duration::from_secs(5), resident.recv())
+                .await
+                .expect("first token timeout")
+                .expect("first token");
+            assert!(first.finish_reason.is_none());
+
+            // Both failures must reach the queue while the resident row is decoding.
+            let mut rejected = Vec::new();
+            for token in [22, 33] {
+                let (reply_tx, reply_rx) = oneshot::channel();
+                let mut request = mk_req(token);
+                request.max_new_tokens = 32; // prompt + output exceeds capacity 32
+                handle
+                    .cmd_tx
+                    .send(SchedulerCommand::Admit { request, reply_tx })
+                    .await
+                    .expect("send oversized request");
+                rejected.push(reply_rx);
+            }
+            let (valid_tx, valid_rx) = oneshot::channel();
+            let mut valid = mk_req(44);
+            valid.max_new_tokens = 4;
+            if queue_valid_request {
+                handle
+                    .cmd_tx
+                    .send(SchedulerCommand::Admit {
+                        request: valid.clone(),
+                        reply_tx: valid_tx,
+                    })
+                    .await
+                    .expect("queue valid request");
+            } else {
+                drop(valid_tx);
+            }
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while handle.queue_depth_peak.load(Ordering::Relaxed)
+                    < if queue_valid_request { 3 } else { 2 }
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("requests must have queued");
+            for reply in rejected {
+                let error = tokio::time::timeout(Duration::from_secs(5), reply)
+                    .await
+                    .expect("rejection timeout")
+                    .expect("rejection reply")
+                    .err()
+                    .expect("oversized request rejected");
+                assert!(
+                    matches!(
+                        error.downcast_ref::<crate::core::scheduler::SchedulerError>(),
+                        Some(crate::core::scheduler::SchedulerError::RequestTooLarge { .. })
+                    ),
+                    "expected capacity rejection, got {error:#}"
+                );
+            }
+            let mut resident_tokens = 1;
+            while let Some(event) = tokio::time::timeout(Duration::from_secs(5), resident.recv())
+                .await
+                .expect("resident completion timeout")
+            {
+                resident_tokens += 1;
+                if event.finish_reason.is_some() {
+                    break;
+                }
+            }
+            assert_eq!(resident_tokens, 16);
+            if queue_valid_request {
+                let mut events = tokio::time::timeout(Duration::from_secs(5), valid_rx)
+                    .await
+                    .expect("queued valid timeout")
+                    .expect("queued valid reply")
+                    .expect("queued valid admit")
+                    .event_rx;
+                let mut tokens = 0;
+                while let Some(event) = tokio::time::timeout(Duration::from_secs(5), events.recv())
+                    .await
+                    .expect("queued valid completion timeout")
+                {
+                    tokens += 1;
+                    if event.finish_reason.is_some() {
+                        break;
+                    }
+                }
+                assert_eq!(tokens, 4);
+            }
+            wait_for_scheduler_resources_to_be_released(&handle).await;
+            let (reply_tx, reply_rx) = oneshot::channel();
+            handle
+                .cmd_tx
+                .send(SchedulerCommand::Admit {
+                    request: valid,
+                    reply_tx,
+                })
+                .await
+                .expect("send after rejected batch");
+            let mut events = tokio::time::timeout(Duration::from_secs(5), reply_rx)
+                .await
+                .expect("later reply timeout")
+                .expect("later reply")
+                .expect("later request must not see poison")
+                .event_rx;
+            let mut tokens = 0;
+            while let Some(event) = tokio::time::timeout(Duration::from_secs(5), events.recv())
+                .await
+                .expect("later completion timeout")
+            {
+                tokens += 1;
+                if event.finish_reason.is_some() {
+                    break;
+                }
+            }
+            assert_eq!(tokens, 4);
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

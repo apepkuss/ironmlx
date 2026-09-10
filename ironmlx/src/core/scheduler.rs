@@ -999,7 +999,7 @@ pub struct RequestOwnedKvStats {
 ///   transitions to `Finished` when all active rows are `finished`.
 /// - `gc_finished_rows()` from `Decoding` + `active_count==0` → `Finished`
 ///   (3c-3, idempotent with `step`'s end-of-loop transition).
-/// - `evict_all()` from `Decoding`/`Finished` → `Idle`.
+/// - `evict_all()` from any phase → `Idle` (also clears poison on success).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
     Idle,
@@ -7807,22 +7807,14 @@ impl<M: Model> Scheduler<M> {
     }
 
     /// Free all in-flight rows and reset every layer cache to offset 0
-    /// (preserves Array allocations for reuse). Legal while admitting, after
-    /// prefill entered decoding, or after the batch finished. After this call
-    /// the scheduler is back in `Idle` and ready to admit a new batch.
+    /// (preserves reusable immutable-prefix allocations). Legal in every phase,
+    /// including `Idle`, so cleanup can be repeated after an error. Poison is
+    /// cleared only after cleanup succeeds. The scheduler is then back in
+    /// `Idle` and ready to admit a new batch.
     ///
     /// `next_id` is **not** reset — the monotonic-no-reuse guarantee from
     /// 3a continues across batches.
     pub fn evict_all(&mut self) -> Result<()> {
-        match self.phase {
-            Phase::Admitting | Phase::Decoding | Phase::Finished => {}
-            Phase::Idle => {
-                return Err(anyhow!(
-                    "evict_all illegal in {:?} phase: no batch is active",
-                    self.phase
-                ));
-            }
-        }
         let completed_histories = self
             .slots
             .iter()
@@ -29223,11 +29215,24 @@ mod tests {
     }
 
     #[test]
-    fn evict_all_in_idle_returns_err() {
-        let mut s = TestScheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
-            .expect("scheduler startup");
-        let err = s.evict_all().expect_err("evict_all from Idle must fail");
-        assert!(format!("{err}").contains("Idle"), "unexpected err: {err}");
+    fn evict_all_in_idle_recovers_step_error_and_is_repeatable() {
+        let mut s = Scheduler::<FinishedPhaseFakeModel>::new(
+            4,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        s.step(&FinishedPhaseFakeModel)
+            .expect_err("idle step must fail");
+        assert!(
+            s.admit(mk_req(vec![1])).is_err(),
+            "step failure poisons scheduler"
+        );
+        s.evict_all().expect("recover idle scheduler");
+        s.evict_all().expect("repeat idle cleanup");
+        let id = s.admit(mk_req(vec![1])).expect("admit after recovery");
+        assert_eq!(s.active_count(), 1);
+        s.evict(id).expect("release recovered request");
     }
 
     #[test]
@@ -29274,7 +29279,7 @@ mod tests {
         let mut s = TestScheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
             .expect("scheduler startup");
         let _ = s.admit(mk_req(vec![1])).expect("admit");
-        s.force_phase(Phase::Finished); // evict_all requires Decoding/Finished
+        s.force_phase(Phase::Finished);
         s.poisoned = true;
         s.evict_all()
             .expect("evict_all should succeed even when poisoned");
