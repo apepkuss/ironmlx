@@ -2,7 +2,7 @@
 
 | Symptom | Check and action |
 | --- | --- |
-| App will not start | Confirm Apple Silicon and macOS 26.2+; for a local build run `scripts/verify-app-bundle.sh dist/IronMLX.app`. |
+| App will not start | Confirm Apple Silicon and macOS 26.4+; for a local build run `scripts/verify-app-bundle.sh dist/IronMLX.app`. |
 | Model download interrupted | Retry the same model in Dashboard; the downloader resumes by immutable commit and Range/ETag. Do not move `.partial` files manually. |
 | Model rejected | Check Dashboard readiness and `~/.ironmlx/logs/backend.log`; verify architecture, quantization metadata, disk, memory, and snapshot integrity. |
 | API connection fails | Confirm the App endpoint and port; local mode is local-only. Request `/health` before `/healthz`. |

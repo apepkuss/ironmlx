@@ -2,7 +2,7 @@
 
 | 现象 | 检查与处理 |
 | --- | --- |
-| App 无法启动 | 确认是 Apple Silicon、macOS 26.2+；本地构建先运行 `scripts/verify-app-bundle.sh dist/IronMLX.app` |
+| App 无法启动 | 确认是 Apple Silicon、macOS 26.4+；本地构建先运行 `scripts/verify-app-bundle.sh dist/IronMLX.app` |
 | 模型下载中断 | 在 Dashboard 重试同一模型；下载器会基于不可变 commit 与 Range/ETag 恢复，避免手动移动 `.partial` 文件 |
 | 模型被拒绝加载 | 查看 Dashboard readiness 与 `~/.ironmlx/logs/backend.log`；确认架构、量化元数据、磁盘、内存和快照完整性 |
 | API 连接失败 | 确认 App endpoint 和端口；local 模式只能从本机访问；先请求 `/health` 再请求 `/healthz` |

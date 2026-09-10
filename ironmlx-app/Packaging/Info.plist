@@ -43,7 +43,7 @@
         <string>arm64</string>
     </array>
     <key>LSMinimumSystemVersion</key>
-    <string>26.2</string>
+    <string>26.4</string>
     <key>LSRequiresNativeExecution</key>
     <true/>
     <key>LSUIElement</key>

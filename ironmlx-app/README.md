@@ -1,7 +1,7 @@
 # IronMLX App Bundle 0.1.0
 
 P0-1 produces one self-contained `IronMLX.app` for Apple Silicon `arm64` on
-macOS 26.2 or newer. It does not support Intel or earlier macOS releases.
+macOS 26.4 or newer. It does not support Intel or earlier macOS releases.
 
 ## Release build
 
@@ -67,7 +67,7 @@ materials, supplies an SBOM, and explicitly authorizes distribution. See
 scripts/verify-app-bundle.sh dist/IronMLX.app
 ```
 
-This gate validates bundle contents, `arm64`, macOS 26.2 minimum versions,
+This gate validates bundle contents, `arm64`, macOS 26.4 minimum versions,
 system-only dynamic dependencies, the metallib AIR target, absence of symlinks,
 absence of developer-home/Cargo fallback paths, exact bundled legal materials,
 and the ad-hoc signature.
@@ -76,4 +76,4 @@ Real release acceptance additionally requires launching this exact artifact in
 an environment without Rust, Xcode, an external MLX installation, or `MLX_*` /
 `DYLD_LIBRARY_PATH`; then loading a real model and completing real inference.
 The same artifact must be copied from the M5 Max builder to an M1 Pro running
-macOS 26.2 or newer without rebuilding or replacing any bundled file.
+macOS 26.4 or newer without rebuilding or replacing any bundled file.

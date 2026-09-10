@@ -1,6 +1,6 @@
 # Known Issues — 0.1.0
 
-- 仅支持 Apple Silicon arm64 和 macOS 26.2+；没有 Intel/旧系统兼容路径。
+- 仅支持 Apple Silicon arm64 和 macOS 26.4+；没有 Intel/旧系统兼容路径。
 - 当前源码构建仅为 ad-hoc 签名且未经 Apple 公证，不是正式可分发安装包。
 - 第三方 Notices、许可证原文与工程清单已生成，但尚未完成法律复核与 CycloneDX
   SBOM 批准；public binary 发布继续由 P0-8B 门禁阻止。

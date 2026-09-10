@@ -171,7 +171,7 @@ This prerelease is **${IRONMLX_PREVIEW_WARNING_EN}**.
 - MLX immutable commit: \`$IRONMLX_MLX_COMMIT\`
 - MLX source: IronMLX fork \`$IRONMLX_MLX_REPOSITORY\`
 - MLX upstream base: \`$IRONMLX_MLX_UPSTREAM_REVISION\`
-- Platform: Apple Silicon arm64, macOS 26.2+
+- Platform: Apple Silicon arm64, macOS 26.4+
 - Signature: ad-hoc only; no Developer ID identity or Team ID
 - Apple notarization/stapling: not performed
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build one self-contained, ad-hoc-signed IronMLX.app for the v0.1 platform:
-# Apple Silicon arm64 on macOS 26.2 or newer.
+# Apple Silicon arm64 on macOS 26.4 or newer.
 
 set -euo pipefail
 
@@ -15,7 +15,7 @@ readonly PACKAGING_DIR="$APP_SOURCE_DIR/Packaging"
 readonly BUILD_ROOT="$REPO_ROOT/.build/app-bundle"
 readonly DIST_DIR="$REPO_ROOT/dist"
 readonly APP_BUNDLE="$DIST_DIR/IronMLX.app"
-readonly DEPLOYMENT_TARGET="26.2"
+readonly DEPLOYMENT_TARGET="26.4"
 readonly ARCHITECTURE="arm64"
 readonly BUILDER_HOME="${HOME:?HOME must be set}"
 readonly C_PATH_REMAP_FLAGS="-ffile-prefix-map=$BUILDER_HOME=. -fdebug-prefix-map=$BUILDER_HOME=."

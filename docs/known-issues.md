@@ -1,6 +1,6 @@
 # Known issues — 0.1.0
 
-- Only Apple Silicon arm64 and macOS 26.2+ are supported; there is no Intel or
+- Only Apple Silicon arm64 and macOS 26.4+ are supported; there is no Intel or
   older-system compatibility path.
 - Source builds use an ad-hoc signature and are not notarized; they are not
   formal distribution installers.

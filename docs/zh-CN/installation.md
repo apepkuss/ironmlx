@@ -2,7 +2,7 @@
 
 ## 支持平台
 
-IronMLX 0.1.0 仅支持 Apple Silicon arm64 与 macOS 26.2 或更高版本。
+IronMLX 0.1.0 仅支持 Apple Silicon arm64 与 macOS 26.4 或更高版本。
 Intel Mac 和更早的 macOS 版本不在支持范围内。
 
 ## 当前分发状态
@@ -20,7 +20,7 @@ IronMLX 可以搜索和下载模型，但不拥有或重新授权模型权利。
 ## 从源码构建 App
 
 构建机需要完整 Xcode、CMake、Rust 1.94、`cargo-about 0.9.1`，以及可用的
-macOS 26.2 SDK/Metal 工具链。以下命令会检出项目锁定的 MLX commit，并生成
+macOS 26.4 SDK/Metal 工具链。以下命令会检出项目锁定的 MLX commit，并生成
 自包含 Release App：
 
 ```bash
@@ -80,7 +80,7 @@ cmake -S . -B build \
   -DMLX_BUILD_BENCHMARKS=OFF \
   -DMLX_BUILD_PYTHON_BINDINGS=OFF \
   -DCMAKE_OSX_ARCHITECTURES=arm64 \
-  -DCMAKE_OSX_DEPLOYMENT_TARGET=26.2 \
+  -DCMAKE_OSX_DEPLOYMENT_TARGET=26.4 \
   -DCMAKE_INSTALL_PREFIX="$MLX_PREFIX"
 cmake --build build --parallel "$(sysctl -n hw.ncpu)"
 cmake --install build
@@ -107,8 +107,8 @@ export MLX_ROOT="$HOME/.local/mlx"
 export MLX_DIR="$MLX_ROOT"
 export MLX_METAL_PATH="$MLX_ROOT/lib"
 export DYLD_LIBRARY_PATH="$MLX_ROOT/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
-export MACOSX_DEPLOYMENT_TARGET=26.2
-export CMAKE_OSX_DEPLOYMENT_TARGET=26.2
+export MACOSX_DEPLOYMENT_TARGET=26.4
+export CMAKE_OSX_DEPLOYMENT_TARGET=26.4
 ```
 
 虽然 MLX 以静态方式链接，但运行期仍会加载 `mlx.metallib`，因此

@@ -4,7 +4,7 @@
 
 ## 支持平台
 
-IronMLX 0.1.0 面向 Apple Silicon（`arm64`）和 macOS 26.2 或更高版本。Intel Mac、更早的 macOS，以及未经修改的第三方模型运行时不在支持范围内。
+IronMLX 0.1.0 面向 Apple Silicon（`arm64`）和 macOS 26.4 或更高版本。Intel Mac、更早的 macOS，以及未经修改的第三方模型运行时不在支持范围内。
 
 ## 获取帮助
 

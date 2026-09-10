@@ -11,7 +11,7 @@ Rust 推理引擎、MLX/Metal 运行时、模型管理 Dashboard，以及 OpenAI
 ## 系统要求
 
 - Apple Silicon（arm64）；不支持 Intel Mac；
-- macOS 26.2 或更高版本；
+- macOS 26.4 或更高版本；
 - 本地构建需要完整 Xcode、Rust 1.94 和项目锁定的 MLX 源码版本。
 
 ## 核心能力

@@ -12,7 +12,7 @@ Current product version: **0.1.0**
 ## Requirements
 
 - Apple Silicon (`arm64`); Intel Macs are not supported;
-- macOS 26.2 or later;
+- macOS 26.4 or later;
 - Source builds require full Xcode, Rust 1.94, and the pinned MLX source.
 
 ## Capabilities

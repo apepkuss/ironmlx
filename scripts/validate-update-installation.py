@@ -92,7 +92,7 @@ app.run()
             "-o", app / "Contents/MacOS/UpdateValidation")
         info = dict(CFBundleIdentifier="com.ironmlx.update-validation", CFBundleName="UpdateValidation",
                     CFBundleExecutable="UpdateValidation", CFBundlePackageType="APPL", CFBundleVersion="1",
-                    CFBundleShortVersionString="0.1.0", LSUIElement=True, LSMinimumSystemVersion="26.2",
+                    CFBundleShortVersionString="0.1.0", LSUIElement=True, LSMinimumSystemVersion="26.4",
                     IronMLXUpdateChannel="development", SUFeedURL=f"https://127.0.0.1:{server.server_port}/appcast.xml",
                     SUPublicEDKey=public, SUEnableAutomaticChecks=True, SUAutomaticallyUpdate=True,
                     SUEnableSystemProfiling=False, SURequireSignedFeed=True, SUVerifyUpdateBeforeExtraction=True)

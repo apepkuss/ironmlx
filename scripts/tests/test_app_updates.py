@@ -76,7 +76,7 @@ class SigningTests(unittest.TestCase):
                             CFBundleVersion="2", CFBundleIdentifier="com.ironmlx.app",
                             SUPublicEDKey=public, SURequireSignedFeed=True, SUVerifyUpdateBeforeExtraction=True,
                             SUFeedURL=f"https://raw.githubusercontent.com/test/repo/updates/{channel}.xml",
-                            IronMLXSourceCommit="a" * 40, LSMinimumSystemVersion="26.2")
+                            IronMLXSourceCommit="a" * 40, LSMinimumSystemVersion="26.4")
                 (app / "Contents/Info.plist").write_bytes(plistlib.dumps(info))
                 output = root / channel
                 command = ["python3", str(SCRIPTS / "package-app-update.py"), str(app), tag, str(output),

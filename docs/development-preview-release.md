@@ -45,7 +45,7 @@ The job:
    Clippy with warnings denied, a locked Release build, and the serial full
    workspace Rust test suite;
 7. runs Swift tests in Release mode;
-8. verifies the App, helpers, and Metal library as arm64 with `minos=26.2`,
+8. verifies the App, helpers, and Metal library as arm64 with `minos=26.4`,
    system-only dynamic dependencies, and no embedded developer paths.
 
 ## Current legal-material gate

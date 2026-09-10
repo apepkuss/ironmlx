@@ -9,7 +9,7 @@ readonly REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/release-config.sh"
 readonly APP_BUNDLE="${1:-$REPO_ROOT/dist/IronMLX.app}"
 readonly EXPECTED_ARCHITECTURE="arm64"
-readonly EXPECTED_MACOS_VERSION="26.2"
+readonly EXPECTED_MACOS_VERSION="26.4"
 readonly EXPECTED_PRODUCT_VERSION="$(tr -d '[:space:]' < "$REPO_ROOT/VERSION")"
 
 fail() {
@@ -45,7 +45,7 @@ verify_macho() {
       *) fail "$label has a non-system dynamic dependency: $dependency" ;;
     esac
   done < <(otool -L "$binary" | awk 'NR > 1 { print $1 }')
-  echo "ok: $label is arm64, minos 26.2, with system-only dynamic dependencies"
+  echo "ok: $label is arm64, minos 26.4, with system-only dynamic dependencies"
 }
 
 [ -d "$APP_BUNDLE/Contents" ] || fail "not an App Bundle: $APP_BUNDLE"
@@ -156,8 +156,8 @@ done < <(find "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework" -type f -print
 
 metallib="$APP_BUNDLE/Contents/Resources/mlx.metallib"
 file "$metallib" | grep -Fq "MetalLib executable (MacOS)" || fail "mlx.metallib is not a macOS metallib"
-LC_ALL=C grep -aEq 'air64_v[0-9]+-apple-macosx26\.2\.0' "$metallib" || \
-  fail "mlx.metallib does not target macOS 26.2"
+LC_ALL=C grep -aEq 'air64_v[0-9]+-apple-macosx26\.4\.0' "$metallib" || \
+  fail "mlx.metallib does not target macOS 26.4"
 
 sparkle_root="$(realpath "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework")"
 while IFS= read -r -d '' bundle_link; do

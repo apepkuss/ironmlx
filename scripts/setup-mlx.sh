@@ -15,11 +15,11 @@
 # After it finishes, source the printed env file in any shell that builds/runs
 # ironmlx:  source "$MLX_PREFIX/mlx-env.sh"
 #
-# Apple Silicon (arm64) and macOS 26.2+ only.
+# Apple Silicon (arm64) and macOS 26.4+ only.
 
 set -euo pipefail
 
-readonly IRONMLX_MACOS_DEPLOYMENT_TARGET="26.2"
+readonly IRONMLX_MACOS_DEPLOYMENT_TARGET="26.4"
 readonly IRONMLX_MACOS_ARCHITECTURE="arm64"
 
 MLX_SRC="${MLX_SRC:-/Users/xin/workspace/iron-rivals/mlx}"

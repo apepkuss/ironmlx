@@ -2,7 +2,7 @@
 
 ## Supported platform
 
-IronMLX 0.1.0 supports Apple Silicon (`arm64`) and macOS 26.2 or later. Intel
+IronMLX 0.1.0 supports Apple Silicon (`arm64`) and macOS 26.4 or later. Intel
 Macs and older macOS versions are outside the supported range.
 
 ## Distribution status
@@ -23,7 +23,7 @@ for the full statement.
 ## Build the App from source
 
 The build host needs full Xcode, CMake, Rust 1.94, `cargo-about 0.9.1`, and the
-macOS 26.2 SDK/Metal toolchain. The following commands check out the pinned MLX
+macOS 26.4 SDK/Metal toolchain. The following commands check out the pinned MLX
 commit and build a self-contained Release App:
 
 ```bash
@@ -86,7 +86,7 @@ cmake -S . -B build \
   -DMLX_BUILD_BENCHMARKS=OFF \
   -DMLX_BUILD_PYTHON_BINDINGS=OFF \
   -DCMAKE_OSX_ARCHITECTURES=arm64 \
-  -DCMAKE_OSX_DEPLOYMENT_TARGET=26.2 \
+  -DCMAKE_OSX_DEPLOYMENT_TARGET=26.4 \
   -DCMAKE_INSTALL_PREFIX="$MLX_PREFIX"
 cmake --build build --parallel "$(sysctl -n hw.ncpu)"
 cmake --install build
@@ -115,8 +115,8 @@ export MLX_ROOT="$HOME/.local/mlx"
 export MLX_DIR="$MLX_ROOT"
 export MLX_METAL_PATH="$MLX_ROOT/lib"
 export DYLD_LIBRARY_PATH="$MLX_ROOT/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
-export MACOSX_DEPLOYMENT_TARGET=26.2
-export CMAKE_OSX_DEPLOYMENT_TARGET=26.2
+export MACOSX_DEPLOYMENT_TARGET=26.4
+export CMAKE_OSX_DEPLOYMENT_TARGET=26.4
 ```
 
 Although MLX is statically linked, `mlx.metallib` is loaded at runtime and
