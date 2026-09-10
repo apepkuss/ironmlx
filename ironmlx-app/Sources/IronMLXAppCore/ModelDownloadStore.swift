@@ -292,6 +292,71 @@ public struct ModelDownloadStore: Sendable {
         return staging
     }
 
+    /// Queue records identify a repository, so include unfinished revisions from
+    /// earlier attempts. Never touch published snapshots or completed journals.
+    public func clearIncompleteDownloads(provider: ModelRepositoryProvider, repoID: String) throws {
+        let repository = try repositoryRoot(provider: provider, repoID: repoID)
+        guard try validateCleanupPath(repository) else { return }
+        let lockURL = repository.appendingPathComponent(".locks/repository.lock")
+        _ = try validateCleanupPath(lockURL)
+        let lock = try acquireRepositoryLock(provider: provider, repoID: repoID)
+        defer { withExtendedLifetime(lock) {} }
+        let downloads = repository.appendingPathComponent(".downloads", isDirectory: true)
+        guard try validateCleanupPath(downloads) else { return }
+
+        let revisions = try FileManager.default.contentsOfDirectory(atPath: downloads.path)
+        var removable: [URL] = []
+        for commitSHA in revisions {
+            guard ModelSnapshotVerifier.isCommitSHA(commitSHA) else {
+                throw ModelSnapshotVerificationError.identityMismatch("invalid temporary download revision")
+            }
+            let revision = downloads.appendingPathComponent(commitSHA, isDirectory: true)
+            _ = try validateCleanupPath(revision)
+            let journalURL = revision.appendingPathComponent("state.json")
+            if try validateCleanupPath(journalURL) {
+                let journal = try JSONDecoder().decode(
+                    ModelDownloadJournal.self, from: Data(contentsOf: journalURL)
+                )
+                guard journal.provider == provider, journal.repoID == repoID,
+                      journal.commitSHA == revision.lastPathComponent
+                else {
+                    throw ModelSnapshotVerificationError.identityMismatch("temporary download journal does not match repository")
+                }
+                if journal.phase == .completed { continue }
+            }
+            removable.append(revision)
+        }
+        // Validate every target before deleting any of them. FileManager removes
+        // symlinks within a directory without following them to their targets.
+        for revision in removable {
+            try FileManager.default.removeItem(at: revision)
+        }
+    }
+
+    /// Permit a configured root symlink, but reject redirected paths beneath it.
+    private func validateCleanupPath(_ url: URL) throws -> Bool {
+        let root = rootURL.standardizedFileURL
+        let target = url.standardizedFileURL
+        guard target.pathComponents.starts(with: root.pathComponents),
+              target.pathComponents.count > root.pathComponents.count
+        else {
+            throw ModelSnapshotVerificationError.identityMismatch("temporary download path is outside model storage")
+        }
+        var current = root.resolvingSymlinksInPath()
+        for component in target.pathComponents.dropFirst(root.pathComponents.count) {
+            current.appendPathComponent(component)
+            var info = stat()
+            guard lstat(current.path, &info) == 0 else {
+                if errno == ENOENT { return false }
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+            guard info.st_mode & S_IFMT != S_IFLNK else {
+                throw ModelSnapshotVerificationError.identityMismatch("temporary download path contains a symbolic link")
+            }
+        }
+        return true
+    }
+
     public func writeJournal(_ journal: ModelDownloadJournal) throws {
         let url = try journalURL(
             provider: journal.provider,

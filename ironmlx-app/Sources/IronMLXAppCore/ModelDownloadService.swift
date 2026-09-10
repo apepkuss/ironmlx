@@ -338,6 +338,30 @@ public struct ModelDownloadQueueSnapshot: Codable, Equatable, Sendable {
     }
 }
 
+public struct ModelDownloadCleanupResult: Codable, Equatable, Sendable {
+    public struct Failure: Codable, Equatable, Sendable {
+        public var provider: String
+        public var repoID: String
+        public var error: String
+
+        enum CodingKeys: String, CodingKey {
+            case provider, error
+            case repoID = "repo_id"
+        }
+    }
+
+    public var success = true
+    public var clearedCount = 0
+    public var skippedCount = 0
+    public var failures: [Failure] = []
+
+    enum CodingKeys: String, CodingKey {
+        case success, failures
+        case clearedCount = "cleared_count"
+        case skippedCount = "skipped_count"
+    }
+}
+
 private struct ModelDownloadResumePlan {
     var remainingBytes: Int64 = 0
     var resumedBytesByPath: [String: Int64] = [:]
@@ -616,15 +640,41 @@ public actor ModelDownloadService {
     }
 
     @discardableResult
-    public func clearFinishedDownloads() -> Int {
+    public func clearFinishedDownloads() -> ModelDownloadCleanupResult {
+        var result = ModelDownloadCleanupResult()
         let finishedKeys = statuses.compactMap { key, status in
             Self.isActiveStatus(status.status) ? nil : key
         }
         for key in finishedKeys {
-            statuses[key] = nil
-            completionResults[key] = nil
+            // A terminal status can appear before its task releases the lock.
+            // No await between this check, disk cleanup and removing the record:
+            // a new download of the same repository cannot reuse these files.
+            guard activeTasks[key] == nil, preparationStates[key] == nil,
+                  activePreflightKey != key,
+                  !pendingDownloads.contains(where: { Self.taskKey(provider: $0.provider, repoID: $0.repoID) == key })
+            else {
+                result.skippedCount += 1
+                continue
+            }
+            guard let status = statuses[key] else { continue }
+            do {
+                if status.status != ModelDownloadPhase.completed.rawValue {
+                    guard let provider = ModelRepositoryProvider(rawValue: status.provider) else {
+                        throw ModelSnapshotVerificationError.identityMismatch("unknown download provider")
+                    }
+                    try store.clearIncompleteDownloads(provider: provider, repoID: status.repoID)
+                }
+                statuses[key] = nil
+                completionResults[key] = nil
+                result.clearedCount += 1
+            } catch {
+                result.success = false
+                result.failures.append(.init(
+                    provider: status.provider, repoID: status.repoID, error: error.localizedDescription
+                ))
+            }
         }
-        return finishedKeys.count
+        return result
     }
 
     public func dismissRecoveryReminders(provider: ModelRepositoryProvider?, repoID: String?) {

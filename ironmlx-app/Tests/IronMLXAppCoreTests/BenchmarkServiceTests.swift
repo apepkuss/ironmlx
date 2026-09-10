@@ -867,7 +867,7 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(dashboardHTML(html, contains: #"const ACTIVE_DOWNLOAD_PHASES = new Set(["#))
     #expect(dashboardHTML(html, contains: #"function renderDownloadQueue(snapshot) {"#))
     #expect(dashboardHTML(html, contains: #"id="download-clear-finished""#))
-    #expect(dashboardHTML(html, contains: #"download_clear_finished: "清除记录""#))
+    #expect(dashboardHTML(html, contains: #"download_clear_finished: "清理下载记录""#))
     #expect(dashboardHTML(html, contains: #"data-i18n-aria-label="download_clear_finished_accessible_label""#))
     #expect(dashboardHTML(html, contains: #"function clearFinishedDownloadTasks() {"#))
     #expect(dashboardHTML(html, contains: #"apiPost('/admin/api/models/downloads/clear-finished', {});"#))

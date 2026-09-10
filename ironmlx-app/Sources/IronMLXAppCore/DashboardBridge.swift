@@ -45,6 +45,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     private let notificationCenter: NotificationCenter
     private let securityStore: LANSecurityMaterialStore
     private let modelStatusClientFactory: @Sendable (String, UInt16) -> any DashboardModelStatusFetching
+    private lazy var runtimeLogExporter = RuntimeLogExporter(window: webView?.window)
     private var huggingFaceSearchTask: Task<Void, Never>?
     private lazy var diagnosticExportCoordinator = DiagnosticExportCoordinator(
         window: webView?.window,
@@ -154,6 +155,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         "scanLocalModels",
         "syncLoadedModels",
         "getAppLogs",
+        "exportRuntimeLog",
         "dashboardLog",
         "exportDiagnosticBundle",
         "previewSchedulerProfileGeneration",
@@ -227,6 +229,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             sendScannedModels()
         case "syncLoadedModels":
             syncLoadedModels()
+        case "exportRuntimeLog":
+            exportRuntimeLog(json: stringBody(body))
         case "getAppLogs":
             sendAppLogs()
         case "dashboardLog":
@@ -365,11 +369,11 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             )
         case "/admin/api/models/downloads/clear-finished":
             Task {
-                let clearedCount = await downloadService.clearFinishedDownloads()
+                let result = await downloadService.clearFinishedDownloads()
                 await MainActor.run {
                     self.sendFetchResult(
                         path: payload.path,
-                        jsonString: #"{"success":true,"status":"cleared","cleared_count":\#(clearedCount)}"#
+                        jsonString: (try? Self.jsonString(result)) ?? #"{"success":false,"error":"Download cleanup failed."}"#
                     )
                 }
             }
@@ -453,6 +457,19 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                     error: error.localizedDescription
                 )
             )
+        }
+    }
+
+    private func exportRuntimeLog(json: String) {
+        guard let request = try? RuntimeLogExportRequest.decode(json) else {
+            IronMLXAppLogger.error("event=runtime_log_export_failed reason=invalid_request")
+            sendJavaScript("onRuntimeLogExported('failed')")
+            return
+        }
+        Task { [weak self] in
+            guard let self else { return }
+            let status = await runtimeLogExporter.export(request)
+            sendJavaScript("onRuntimeLogExported(\(Self.jsStringLiteral(status)))")
         }
     }
 

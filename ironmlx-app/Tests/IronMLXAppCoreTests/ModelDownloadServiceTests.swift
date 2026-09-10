@@ -545,6 +545,9 @@ private let testCommit = String(repeating: "a", count: 40)
     #expect(queued?.queuePosition == 1)
     #expect(await preflight.maximumConcurrentCalls() == 3)
 
+    #expect(await service.clearFinishedDownloads().clearedCount == 0)
+    #expect(await service.downloadQueueSnapshot().tasks.count == 4)
+
     await preflight.releaseOne()
     try await waitForDownloadCondition {
         await preflight.totalCalls() == 4
@@ -558,8 +561,133 @@ private let testCommit = String(repeating: "a", count: 40)
             && snapshot.queuedCount == 0
             && snapshot.tasks.filter { $0.status == ModelDownloadPhase.completed.rawValue }.count == 4
     }
-    #expect(await service.clearFinishedDownloads() == 4)
+    #expect(await service.clearFinishedDownloads().clearedCount == 4)
     #expect(await service.downloadQueueSnapshot().tasks.isEmpty)
+    for repoID in repoIDs {
+        let snapshot = try ModelDownloadStore(rootURL: root).snapshotURL(
+            provider: .huggingFace, repoID: repoID, commitSHA: testCommit
+        )
+        #expect(try Data(contentsOf: snapshot.appendingPathComponent("model.safetensors")) == Data("weights".utf8))
+        _ = try ModelSnapshotVerifier().verifyStructure(snapshot: snapshot)
+    }
+}
+
+@Test(arguments: [false, true])
+func modelDownloadCleanupRemovesPartialDataAndRestartsWithoutRange(cancelled: Bool) async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let client = FakeModelDownloadHTTPClient()
+    let repoID = "org/cleanup-partial"
+    configureTinyHuggingFace(client, repoID: repoID)
+    let weightURL = "https://huggingface.co/\(repoID)/resolve/\(testCommit)/model.safetensors"
+    client.streamResponses[weightURL] = StreamFixture(
+        data: Data("wei".utf8),
+        error: cancelled ? CancellationError() : URLError(.networkConnectionLost)
+    )
+    let service = ModelDownloadService(
+        rootURL: root, httpClient: client,
+        metadataPreflight: AcceptingMetadataPreflight(),
+        fileDownloader: ResumableFileDownloader(httpClient: client),
+        telemetryLogger: { _ in }
+    )
+    #expect(!(await service.downloadHuggingFace(repoID: repoID, token: nil)).success)
+    let store = ModelDownloadStore(rootURL: root)
+    let staging = try store.stagingSnapshotURL(provider: .huggingFace, repoID: repoID, commitSHA: testCommit)
+    #expect(try Data(contentsOf: staging.appendingPathComponent("model.safetensors.partial")) == Data("wei".utf8))
+    let transferCache = staging.appendingPathComponent("model.safetensors.hf-transfer")
+    try FileManager.default.createDirectory(at: transferCache, withIntermediateDirectories: true)
+    try Data("cache".utf8).write(to: transferCache.appendingPathComponent("chunk"))
+
+    let result = await service.clearFinishedDownloads()
+    #expect(result.success && result.clearedCount == 1 && result.failures.isEmpty)
+    #expect(await service.downloadQueueSnapshot().tasks.isEmpty)
+    #expect(!FileManager.default.fileExists(atPath: staging.deletingLastPathComponent().path))
+
+    client.streamResponses[weightURL] = StreamFixture(data: Data("weights".utf8))
+    #expect(await service.downloadHuggingFace(repoID: repoID, token: nil).success)
+    #expect(client.streamRequests.filter { $0.url == weightURL }.count == 2)
+    #expect(client.streamRequests.last { $0.url == weightURL }?.range == nil)
+}
+
+@Test(arguments: [false, true])
+func modelDownloadCleanupKeepsFailedRecordsUntilDataCanBeDeleted(readOnly: Bool) async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let client = FakeModelDownloadHTTPClient()
+    let blockedRepo = "org/cleanup-busy"
+    let otherRepo = "org/cleanup-free"
+    configureTinyHuggingFace(client, repoID: blockedRepo)
+    configureTinyHuggingFace(client, repoID: otherRepo)
+    let service = ModelDownloadService(
+        rootURL: root, httpClient: client,
+        metadataPreflight: RejectingMetadataPreflight(),
+        fileDownloader: ResumableFileDownloader(httpClient: client),
+        telemetryLogger: { _ in }
+    )
+    #expect(!(await service.downloadHuggingFace(repoID: blockedRepo, token: nil)).success)
+    #expect(!(await service.downloadHuggingFace(repoID: otherRepo, token: nil)).success)
+    let store = ModelDownloadStore(rootURL: root)
+    let staging = try store.stagingSnapshotURL(provider: .huggingFace, repoID: blockedRepo, commitSHA: testCommit)
+    let downloads = staging.deletingLastPathComponent().deletingLastPathComponent()
+    var lock: ModelRepositoryLock?
+    if readOnly {
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: downloads.path)
+    } else {
+        lock = try store.acquireRepositoryLock(provider: .huggingFace, repoID: blockedRepo)
+    }
+    defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: downloads.path) }
+    let result = await service.clearFinishedDownloads()
+    withExtendedLifetime(lock) {}
+    #expect(!result.success && result.clearedCount == 1 && result.failures.count == 1)
+    #expect(result.failures.first?.repoID == blockedRepo)
+    #expect(await service.downloadQueueSnapshot().tasks.map(\.repoID) == [blockedRepo])
+    #expect(FileManager.default.fileExists(atPath: staging.deletingLastPathComponent().path))
+    if !readOnly {
+        #expect(FileManager.default.fileExists(atPath: staging.path))
+    }
+    let encoded = try JSONSerialization.jsonObject(with: JSONEncoder().encode(result)) as? [String: Any]
+    #expect(encoded?["cleared_count"] as? Int == 1)
+
+    lock = nil
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: downloads.path)
+    let retry = await service.clearFinishedDownloads()
+    #expect(retry.success && retry.clearedCount == 1)
+    #expect(!FileManager.default.fileExists(atPath: staging.deletingLastPathComponent().path))
+}
+
+@Test func modelDownloadCleanupProtectsFilesReusedByANewTask() async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let client = FakeModelDownloadHTTPClient()
+    let preflight = BlockingMetadataPreflight()
+    let repoID = "org/cleanup-requeued"
+    configureTinyHuggingFace(client, repoID: repoID)
+    let service = ModelDownloadService(
+        rootURL: root, httpClient: client, metadataPreflight: preflight,
+        fileDownloader: ResumableFileDownloader(httpClient: client), telemetryLogger: { _ in }
+    )
+    #expect(await service.startHuggingFaceDownload(repoID: repoID, token: nil).success)
+    try await waitForDownloadCondition { await preflight.totalCalls() == 1 }
+    #expect(await service.cancelDownload(provider: .huggingFace, repoID: repoID))
+    await preflight.releaseOne()
+    try await waitForDownloadCondition { await service.downloadQueueSnapshot().activeCount == 0 }
+    #expect(await service.downloadQueueSnapshot().tasks.first?.status != "completed")
+    let staging = try ModelDownloadStore(rootURL: root).stagingSnapshotURL(
+        provider: .huggingFace, repoID: repoID, commitSHA: testCommit
+    )
+    let config = staging.appendingPathComponent("config.json")
+    let original = try Data(contentsOf: config)
+
+    #expect(await service.startHuggingFaceDownload(repoID: repoID, token: nil).success)
+    try await waitForDownloadCondition { await preflight.totalCalls() == 2 }
+    #expect(await service.clearFinishedDownloads().clearedCount == 0)
+    #expect(try Data(contentsOf: config) == original)
+    #expect(await service.downloadQueueSnapshot().tasks.count == 1)
+    #expect(await service.cancelDownload(provider: .huggingFace, repoID: repoID))
+    await preflight.releaseAll()
+    try await waitForDownloadCondition { await service.downloadQueueSnapshot().activeCount == 0 }
+    #expect(await service.clearFinishedDownloads().clearedCount == 1)
+    #expect(!FileManager.default.fileExists(atPath: staging.path))
 }
 
 @Test func modelDownloadQueueAggregatesDiskReservationsAcrossTasks() async throws {
@@ -589,7 +717,7 @@ private let testCommit = String(repeating: "a", count: 40)
     }
     let rejected = await service.downloadQueueSnapshot().tasks.first { $0.repoID == second }
     #expect(rejected?.errorCode == "insufficient_disk")
-    #expect(await service.clearFinishedDownloads() == 1)
+    #expect(await service.clearFinishedDownloads().clearedCount == 1)
     let afterClear = await service.downloadQueueSnapshot()
     #expect(afterClear.tasks.contains { $0.repoID == first && ModelDownloadPhase(rawValue: $0.status)?.isActive == true })
     #expect(!afterClear.tasks.contains { $0.repoID == second })
@@ -912,6 +1040,7 @@ private struct StreamFixture {
     var data: Data
     var statusCode = 200
     var headers: [String: String] = [:]
+    var error: (any Error)? = nil
 }
 
 private struct RecordedStreamRequest {
@@ -966,6 +1095,7 @@ private final class FakeModelDownloadHTTPClient: ModelDownloadHTTPClient, @unche
             )
         )
         try await onData(fixture.data)
+        if let error = fixture.error { throw error }
     }
 
     private func requestKey(_ request: URLRequest) throws -> String {
