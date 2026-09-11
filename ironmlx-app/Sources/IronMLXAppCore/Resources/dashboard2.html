@@ -10396,10 +10396,20 @@
     if (!Array.isArray(interfaces)) return;
     const lanHost = document.getElementById('cfg-lan-host');
     if (!lanHost) return;
+    if (!lanHost.__selectionRestoreBound) {
+      lanHost.addEventListener('change', () => {
+        lanHost.__preferredHost = lanHost.value;
+      });
+      lanHost.__selectionRestoreBound = true;
+    }
+    // Keep selection intent while a temporary disconnect removes the option.
+    // Explicit config application or a user selection replaces that intent.
+    if (preferredHost !== undefined) lanHost.__preferredHost = preferredHost;
+    else if (lanHost.value) lanHost.__preferredHost = lanHost.value;
     // Avoid rebuilding an open select on unchanged polling responses.
     if (preferredHost === undefined &&
         JSON.stringify(interfaces) === JSON.stringify(window.__IRONMLX_NETWORK_INTERFACES__)) return;
-    const selected = preferredHost === undefined ? lanHost.value : preferredHost;
+    const selected = lanHost.__preferredHost || '';
     window.__IRONMLX_NETWORK_INTERFACES__ = interfaces;
     const placeholder = document.createElement('option');
     placeholder.value = '';

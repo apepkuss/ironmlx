@@ -40,6 +40,16 @@ import WebKit
 
     _ = try await webView.evaluateJavaScript("navigateTo('settings')")
 
+    // Restore the saved selection after a transient loss, without saving edits.
+    _ = try await webView.evaluateJavaScript("document.getElementById('cfg-port').value = '9077'")
+    interfaces = []
+    _ = try await webView.evaluateJavaScript("refreshNetworkInterfaces()")
+    try await waitForLANUI(webView, "document.getElementById('cfg-lan-host').options.length === 1")
+    interfaces = [EndpointPayload.NetworkInterface(name: "en0", ip: "192.168.0.106")]
+    _ = try await webView.evaluateJavaScript("refreshNetworkInterfaces()")
+    try await waitForLANUI(webView, "document.getElementById('cfg-lan-host').value === '192.168.0.106'")
+    #expect(try await webView.evaluateJavaScript("document.getElementById('cfg-port').value") as? String == "9077")
+
     // The existing five-second endpoint poll must refresh an already-open page.
     interfaces = [EndpointPayload.NetworkInterface(name: "en0", ip: "192.168.0.104")]
     try await waitForLANUI(webView, "Array.from(document.getElementById('cfg-lan-host').options).some(o => o.value === '192.168.0.104')")
@@ -48,7 +58,7 @@ import WebKit
     #expect(try await webView.evaluateJavaScript("document.getElementById('cfg-lan-host').value") as? String == "")
 
     // Keep unsaved edits, including another valid interface selected by the user.
-    _ = try await webView.evaluateJavaScript("document.getElementById('cfg-lan-host').value = '192.168.0.104'; document.getElementById('cfg-port').value = '9077';")
+    _ = try await webView.evaluateJavaScript("document.getElementById('cfg-lan-host').value = '192.168.0.104'; document.getElementById('cfg-lan-host').dispatchEvent(new Event('change', { bubbles: true })); document.getElementById('cfg-port').value = '9077';")
     interfaces.append(EndpointPayload.NetworkInterface(name: "en1", ip: "192.168.0.105"))
     _ = try await webView.evaluateJavaScript("navigateTo('settings')")
     try await waitForLANUI(webView, "document.getElementById('cfg-lan-host').options.length === 3")
@@ -59,10 +69,15 @@ import WebKit
     interfaces = []
     _ = try await webView.evaluateJavaScript("refreshNetworkInterfaces()")
     try await waitForLANUI(webView, "document.getElementById('cfg-lan-host').options.length === 1 && document.getElementById('cfg-lan-host').value === ''")
-    interfaces = [EndpointPayload.NetworkInterface(name: "en0", ip: "192.168.0.104")]
+    // The saved address returning must not override the user's newer selection.
+    interfaces = [EndpointPayload.NetworkInterface(name: "en0", ip: "192.168.0.106")]
     _ = try await webView.evaluateJavaScript("refreshNetworkInterfaces()")
     try await waitForLANUI(webView, "document.getElementById('cfg-lan-host').options.length === 2")
     #expect(try await webView.evaluateJavaScript("document.getElementById('cfg-lan-host').value") as? String == "")
+    interfaces.append(EndpointPayload.NetworkInterface(name: "en1", ip: "192.168.0.104"))
+    _ = try await webView.evaluateJavaScript("refreshNetworkInterfaces()")
+    try await waitForLANUI(webView, "document.getElementById('cfg-lan-host').value === '192.168.0.104'")
+    #expect(configStore.load().lanHost == "192.168.0.106")
 }
 
 @MainActor
