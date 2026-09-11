@@ -6572,6 +6572,7 @@
     // Re-sync loaded models when navigating to models page
     if (page === 'models') syncLoadedModels();
     if (page === 'chat') renderAgentGuideConfiguration();
+    if (page === 'settings') refreshNetworkInterfaces();
     if (page === 'logs') {
       initLogs();
     } else {
@@ -9970,6 +9971,7 @@
   // apiFetch/onApiFetchResult pattern as the rest of the dashboard.
   function refreshEndpoints() {
     apiFetch('/admin/api/endpoints');
+    refreshNetworkInterfaces();
   }
 
   function renderEndpoints(jsonStr) {
@@ -10353,17 +10355,7 @@
   function applyPersistedSettingsToInputs() {
     const appConfig = window.__IRONMLX_APP_CONFIG__ || {};
     setSelectInput('cfg-network-mode', appConfig.network_mode, 'local');
-    const lanHost = document.getElementById('cfg-lan-host');
-    if (lanHost) {
-      const interfaces = window.__IRONMLX_NETWORK_INTERFACES__ || [];
-      lanHost.replaceChildren(...interfaces.map(item => {
-        const option = document.createElement('option');
-        option.value = item.ip;
-        option.textContent = item.name + ' — ' + item.ip;
-        return option;
-      }));
-      if (appConfig.lan_host && interfaces.some(item => item.ip === appConfig.lan_host)) lanHost.value = appConfig.lan_host;
-    }
+    renderNetworkInterfaces(window.__IRONMLX_NETWORK_INTERFACES__ || [], appConfig.lan_host || '');
     setNumberInput('cfg-port', appConfig.port, 9068);
     setSelectInput('cfg-log-level', appConfig.log_level, 'INFO');
     setSelectInput('lang-select', LANG_MAP[appConfig.language] || appConfig.language, currentLang);
@@ -10394,6 +10386,33 @@
     setSelectInput('cfg-parallel-mode', appConfig.parallel_mode, 'auto');
     refreshSettingsDerivedUI();
     refreshNetworkSecurityUI();
+  }
+
+  function refreshNetworkInterfaces() {
+    apiFetch('/admin/api/network/interfaces');
+  }
+
+  function renderNetworkInterfaces(interfaces, preferredHost) {
+    if (!Array.isArray(interfaces)) return;
+    const lanHost = document.getElementById('cfg-lan-host');
+    if (!lanHost) return;
+    // Avoid rebuilding an open select on unchanged polling responses.
+    if (preferredHost === undefined &&
+        JSON.stringify(interfaces) === JSON.stringify(window.__IRONMLX_NETWORK_INTERFACES__)) return;
+    const selected = preferredHost === undefined ? lanHost.value : preferredHost;
+    window.__IRONMLX_NETWORK_INTERFACES__ = interfaces;
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = (I18N[currentLang] || I18N.en).lan_interface;
+    placeholder.disabled = true;
+    lanHost.replaceChildren(placeholder, ...interfaces.map(item => {
+      const option = document.createElement('option');
+      option.value = item.ip;
+      option.textContent = item.name + ' — ' + item.ip;
+      return option;
+    }));
+    // Never silently bind a different interface when the chosen address vanishes.
+    lanHost.value = interfaces.some(item => item.ip === selected) ? selected : '';
   }
 
   function refreshNetworkSecurityUI() {
@@ -10771,8 +10790,8 @@
       window.__HEALTH_PENDING__ = true;
       apiFetch('/health');
     }
-    // The endpoints card depends on host/port/interfaces, which are
-    // all read off the running backend. Poll it alongside /health on
+    // Endpoints and available LAN interfaces are read through the native
+    // bridge, even when the backend is stopped. Poll alongside /health on
     // a slower cadence so the Status page populates on first open
     // (previously refreshEndpoints only fired on server-restart).
     const now = Date.now();
@@ -11243,6 +11262,8 @@
       } else if (path === '/admin/api/cache/capacity') {
         const capacity = JSON.parse(jsonStr || '{}');
         applyColdCacheCapacity(capacity);
+      } else if (path === '/admin/api/network/interfaces') {
+        renderNetworkInterfaces(JSON.parse(jsonStr || 'null'));
       } else if (path === '/admin/api/endpoints') {
         renderEndpoints(jsonStr);
       } else if (path === '/admin/api/models/ms/download') {

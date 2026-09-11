@@ -43,6 +43,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     private let parameterStore: ModelParameterStore
     private let incidentStore: BackendIncidentStore
     private let notificationCenter: NotificationCenter
+    private let networkInterfacesProvider: () -> [EndpointPayload.NetworkInterface]
     private let securityStore: LANSecurityMaterialStore
     private let modelStatusClientFactory: @Sendable (String, UInt16) -> any DashboardModelStatusFetching
     private lazy var runtimeLogExporter = RuntimeLogExporter(window: webView?.window)
@@ -72,6 +73,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         incidentStore: BackendIncidentStore = BackendIncidentStore(),
         securityStore: LANSecurityMaterialStore = .shared,
         notificationCenter: NotificationCenter = .default,
+        networkInterfacesProvider: @escaping () -> [EndpointPayload.NetworkInterface] = EndpointPayload.localNetworkInterfaces,
         modelStatusClientFactory: @escaping @Sendable (String, UInt16) -> any DashboardModelStatusFetching = {
             host, port in BackendAPIClient(host: host, port: port)
         }
@@ -91,6 +93,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         self.incidentStore = incidentStore
         self.notificationCenter = notificationCenter
         self.securityStore = securityStore
+        self.networkInterfacesProvider = networkInterfacesProvider
         self.modelStatusClientFactory = modelStatusClientFactory
         super.init()
         notificationCenter.addObserver(
@@ -283,6 +286,9 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                     }
                 }
             }
+        case "/admin/api/network/interfaces":
+            // Read the OS on every request, including when the backend is stopped.
+            sendFetchResult(path: path, jsonString: (try? Self.jsonString(networkInterfacesProvider())) ?? "null")
         case "/admin/api/endpoints":
             let config = configStore.load()
             let payload = EndpointPayload(
