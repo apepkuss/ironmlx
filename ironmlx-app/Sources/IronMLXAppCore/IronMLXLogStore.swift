@@ -255,6 +255,11 @@ public struct IronMLXLogStore: Sendable {
 public enum IronMLXAppLogger {
     private static let lock = NSLock()
     private static let store = IronMLXLogStore()
+    private static let diagnostics = AppDiagnosticLogWriter(store: store)
+
+    public static func setMinimumLevel(_ level: AppLogLevel) { diagnostics.setMinimumLevel(level) }
+    public static func debug(_ message: String) { log(level: "DEBUG", message) }
+    public static func trace(_ message: String) { log(level: "TRACE", message) }
 
     public static func startSession(date: Date = Date()) {
         let header = "===== IronMLX App started at \(timestamp(date)) ====="
@@ -281,16 +286,35 @@ public enum IronMLXAppLogger {
 
     private static func log(level: String, _ message: String) {
         let line = "\(timestamp(Date())) \(level) ironmlx-app: \(message)"
-        lock.withLock {
-            try? store.prepareLog(.app)
-            try? store.appendLine(line, to: .app)
+        if diagnostics.write(line: line, level: AppLogLevel(setting: level) ?? .info) {
+            NSLog("%@", line)
         }
-        NSLog("%@", line)
     }
 
     private static func timestamp(_ date: Date) -> String {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return formatter.string(from: date)
+    }
+}
+
+/// Serializes filter changes with writes so the new level is effective on return.
+final class AppDiagnosticLogWriter: @unchecked Sendable {
+    private let lock = NSLock()
+    private let store: IronMLXLogStore
+    private var minimumLevel: AppLogLevel = .info
+
+    init(store: IronMLXLogStore) { self.store = store }
+
+    func setMinimumLevel(_ level: AppLogLevel) { lock.withLock { minimumLevel = level } }
+
+    @discardableResult
+    func write(line: String, level: AppLogLevel) -> Bool {
+        lock.withLock {
+            guard minimumLevel.includes(level) else { return false }
+            try? store.prepareLog(.app)
+            try? store.appendLine(line, to: .app)
+            return true
+        }
     }
 }

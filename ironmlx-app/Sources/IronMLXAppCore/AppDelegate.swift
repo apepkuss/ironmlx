@@ -49,6 +49,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             fatalError("Invalid IronMLX App Bundle: \(error.localizedDescription)")
         }
 #endif
+        IronMLXAppLogger.setMinimumLevel(.saved(configStore.load().logLevel))
         IronMLXAppLogger.startSession()
         IronMLXAppLogger.info("Application did finish launching")
         Task.detached {

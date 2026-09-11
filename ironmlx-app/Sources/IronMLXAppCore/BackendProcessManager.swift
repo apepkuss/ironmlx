@@ -65,17 +65,20 @@ public struct BackendProcessLaunchPlan: Sendable {
     public var arguments: [String]
     public var command: String
     public var standardInputData: Data?
+    public var logLevel: AppLogLevel
 
     public init(
         processURL: URL,
         arguments: [String],
         command: String? = nil,
-        standardInputData: Data? = nil
+        standardInputData: Data? = nil,
+        logLevel: AppLogLevel = .info
     ) {
         self.processURL = processURL
         self.arguments = arguments
         self.command = command ?? ([processURL.path] + arguments).joined(separator: " ")
         self.standardInputData = standardInputData
+        self.logLevel = logLevel
     }
 }
 
@@ -170,7 +173,8 @@ public final class BackendProcessManager {
             return BackendProcessLaunchPlan(
                 processURL: processURL,
                 arguments: arguments,
-                standardInputData: standardInputData
+                standardInputData: standardInputData,
+                logLevel: .saved(config.logLevel)
             )
         }
     }
@@ -221,7 +225,9 @@ public final class BackendProcessManager {
             let process = processFactory()
             process.executableURL = plan.processURL
             process.arguments = plan.arguments
-            process.environment = BundledChildProcessEnvironment.sanitized()
+            var environment = BundledChildProcessEnvironment.sanitized()
+            environment["IRONMLX_LOG_LEVEL"] = plan.logLevel.rawValue
+            process.environment = environment
             process.standardOutput = logHandle
             process.standardError = logHandle
             let standardInputPipe = plan.standardInputData.map { _ in Pipe() }
@@ -310,6 +316,7 @@ public final class BackendProcessManager {
     }
 
     public func transition(to nextState: BackendProcessState, error: String? = nil) {
+        IronMLXAppLogger.debug("Backend state transition: \(state.rawValue) → \(nextState.rawValue)")
         state = nextState
         lastError = error
         notificationCenter.post(name: .ironMLXBackendRuntimeDidChange, object: self)

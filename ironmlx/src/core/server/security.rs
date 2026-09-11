@@ -269,8 +269,12 @@ fn bounded_router(router: Router) -> Router {
         .layer(middleware::from_fn(enforce_request_body_limit))
 }
 
+fn local_management_router(router: Router) -> Router {
+    bounded_router(router.merge(crate::logging::router()))
+}
+
 pub async fn serve_router(router: Router, config: ServerNetworkConfig, label: &str) -> Result<()> {
-    let local_router = bounded_router(router.clone());
+    let local_router = local_management_router(router.clone());
     let local_std = std::net::TcpListener::bind(config.local_addr)
         .with_context(|| format!("binding local listener {}", config.local_addr))?;
     local_std
@@ -369,6 +373,36 @@ mod tests {
                 .route("/v1/messages", get(|| async { "ok" })),
         )
         .layer(middleware::from_fn_with_state(expected, authenticate_lan))
+    }
+
+    #[tokio::test]
+    async fn log_control_is_local_only_even_with_valid_lan_credentials() {
+        let local = local_management_router(Router::new());
+        let response = local
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/api/log-level")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Unit-test process has no global logger controller, but the route exists.
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        for method in ["GET", "POST"] {
+            let response = protected_test_router("imx_correct")
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri("/admin/api/log-level")
+                        .header(header::AUTHORIZATION, "Bearer imx_correct")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
     }
 
     #[tokio::test]

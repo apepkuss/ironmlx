@@ -32,6 +32,7 @@ compile_error!("ironmlx only supports macOS on Apple Silicon (aarch64-apple-darw
 
 pub mod cli;
 pub mod core;
+pub mod logging;
 pub mod models;
 pub mod nn;
 

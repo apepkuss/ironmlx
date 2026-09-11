@@ -970,6 +970,7 @@ public actor ModelDownloadService {
     }
 
     private func pumpDownloadQueue() {
+        IronMLXAppLogger.debug("Download queue scheduling: active=\(activeTasks.count), pending=\(pendingDownloads.count)")
         guard !isShuttingDown else {
             return
         }

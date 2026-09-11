@@ -47,6 +47,9 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     private let securityStore: LANSecurityMaterialStore
     private let modelStatusClientFactory: @Sendable (String, UInt16) -> any DashboardModelStatusFetching
     private lazy var runtimeLogExporter = RuntimeLogExporter(window: webView?.window)
+    private lazy var logLevelController = RuntimeLogLevelController(configStore: configStore, backend: backend)
+    private var logLevelChangePending = false
+    private var settingsSaveInProgress = false
     private var huggingFaceSearchTask: Task<Void, Never>?
     private lazy var diagnosticExportCoordinator = DiagnosticExportCoordinator(
         window: webView?.window,
@@ -135,6 +138,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         "fetchAPIPost",
         "fetchAPIDelete",
         "setLanguage",
+        "setLogLevel",
         "setTheme",
         "setDefaultModel",
         "deleteModels",
@@ -182,6 +186,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             handlePost(json: stringBody(body))
         case "fetchAPIDelete":
             sendFetchResult(path: stringBody(body), jsonString: "null")
+        case "setLogLevel":
+            setLogLevel(stringBody(body))
         case "setLanguage":
             updateConfig { $0.language = stringBody(body) }
             notifyMenuLanguageDidChange()
@@ -1639,7 +1645,50 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         }
     }
 
+    private func setLogLevel(_ value: String) {
+        guard !logLevelChangePending, !settingsSaveInProgress else {
+            let json = #"{"success":false,"code":"log_level_busy"}"#
+            sendJavaScript("onLogLevelChanged(\(Self.jsStringLiteral(json)))")
+            return
+        }
+        guard let level = AppLogLevel(setting: value) else { return }
+        logLevelChangePending = true
+        Task {
+            var code: String?
+            do {
+                try await logLevelController.apply(level)
+            } catch RuntimeLogLevelError.rollbackFailed {
+                code = "log_level_rollback_failed"
+            } catch RuntimeLogLevelError.busy {
+                code = "log_level_busy"
+            } catch RuntimeLogLevelError.persistenceFailed {
+                code = "log_level_persist_failed"
+            } catch RuntimeLogLevelError.backendChanged {
+                code = "log_level_backend_changed"
+            } catch {
+                code = "log_level_backend_unavailable"
+            }
+            logLevelChangePending = false
+            var result: [String: Any] = [
+                "success": code == nil,
+                "level": AppLogLevel.saved(configStore.load().logLevel).rawValue
+            ]
+            if let code { result["code"] = code }
+            if let data = try? JSONSerialization.data(withJSONObject: result),
+               let json = String(data: data, encoding: .utf8) {
+                sendJavaScript("onLogLevelChanged(\(Self.jsStringLiteral(json)))")
+            }
+        }
+    }
+
     private func saveSettings(json: String) {
+        guard !logLevelChangePending, !settingsSaveInProgress else {
+            sendJavaScript("onSettingsSaved(\(Self.jsStringLiteral(Self.settingsErrorJSON(message: "Wait for the log level change to finish.", code: "log_level_busy"))))")
+            return
+        }
+        settingsSaveInProgress = true
+        var awaitingRestart = false
+        defer { if !awaitingRestart { settingsSaveInProgress = false } }
         let existing = configStore.load()
         if let issue = configStore.recoveryIssue {
             let response = Self.settingsErrorJSON(
@@ -1716,7 +1765,9 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             return
         }
         applyTheme(config.theme)
+        awaitingRestart = true
         Task {
+            defer { settingsSaveInProgress = false }
             let result = await backend.restart(intent: .plannedRestart)
             guard result.success else {
                 configStore.save(existing)
@@ -1974,9 +2025,6 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         }
         if let theme = object["theme"] as? String {
             config.theme = DashboardThemeAppearance.normalizedPreference(theme)
-        }
-        if let logLevel = stringValue(object, "log_level"), !logLevel.isEmpty {
-            config.logLevel = logLevel
         }
         config.memLimitTotal = intValue(object, "mem_limit_total") ?? config.memLimitTotal
         config.memLimitModel = intValue(object, "mem_limit_model") ?? config.memLimitModel

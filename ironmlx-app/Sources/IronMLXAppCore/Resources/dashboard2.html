@@ -4072,8 +4072,8 @@
         <div class="settings-row-right"><input type="number" value="9068" id="cfg-port"></div>
       </div>
       <div class="settings-row">
-        <div class="settings-row-left"><div class="settings-row-label" data-i18n="log_level">Log Level</div></div>
-        <div class="settings-row-right"><select id="cfg-log-level"><option value="ALL">ALL</option><option value="DEBUG">DEBUG</option><option value="INFO" selected>INFO (default)</option><option value="WARNING">WARNING</option><option value="ERROR">ERROR</option></select></div>
+        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="log_level">Log Level</span> <span class="badge badge-live" data-i18n="badge_live">live</span></div><div class="settings-row-desc" id="log-level-status" role="status" aria-live="polite" data-i18n="log_level_live_desc">Applies immediately to App and backend diagnostics. Saved automatically; no restart required.</div></div>
+        <div class="settings-row-right"><select id="cfg-log-level" onchange="selectLogLevel(this.value)"><option value="ALL" data-i18n="log_level_all">All</option><option value="DEBUG">DEBUG</option><option value="INFO" selected>INFO (default)</option><option value="WARNING">WARNING</option><option value="ERROR">ERROR</option></select></div>
       </div>
     </div>
 
@@ -4892,6 +4892,14 @@
       completion_batch: "Completion Batch Size", completion_batch_desc: "Batch size for the token generation phase.",
       save_settings: "Save Settings",
       settings_saved: "Settings saved successfully.",
+      log_level_live_desc: "Applies immediately to App and backend diagnostics. Saved automatically; no restart required.",
+      log_level_applying: "Applying log level…",
+      err_log_level_apply_failed: "Could not apply the log level. The previous setting is retained.",
+      err_log_level_rollback_failed: "Could not confirm backend rollback. Check service status before retrying.",
+      err_log_level_persist_failed: "The setting could not be saved. The previous log level was restored.",
+      err_log_level_backend_changed: "The backend changed during this operation. Try again once the service is ready.",
+      err_log_level_backend_unavailable: "The backend could not apply the log level. Check service availability and try again.",
+      err_log_level_busy: "Wait for the log level change to finish.",
       settings_unsaved_restart: "You have unsaved changes requiring a restart. Click \"Save Settings\" at the bottom to apply.",
       cold_cache_too_large: "SSD cache limit was reduced to {max}GB to fit available disk space.",
       params_saved: "Model parameters saved.",
@@ -5268,6 +5276,14 @@
       completion_batch: "补全批大小", completion_batch_desc: "Token 生成阶段的批处理大小。",
       save_settings: "保存设置",
       settings_saved: "设置已保存。",
+      log_level_live_desc: "立即应用于 App 和后端诊断日志，自动保存，无需重启。",
+      log_level_applying: "正在应用日志级别…",
+      err_log_level_apply_failed: "日志级别应用失败，已保留原设置。",
+      err_log_level_rollback_failed: "无法确认后端日志级别已恢复，请检查服务状态后重试。",
+      err_log_level_persist_failed: "设置写入失败，已恢复原日志级别。",
+      err_log_level_backend_changed: "操作期间后端状态发生变化，请等待服务就绪后重试。",
+      err_log_level_backend_unavailable: "后端未能应用日志级别，请检查服务是否可用后重试。",
+      err_log_level_busy: "请等待日志级别修改完成。",
       settings_unsaved_restart: "有尚未保存且需要重启的改动，请点击底部「保存设置」以生效。",
       cold_cache_too_large: "SSD 缓存限制已根据磁盘可用空间下调为 {max}GB。",
       params_saved: "模型参数已保存。",
@@ -5647,6 +5663,14 @@
       model_ttl: "模型自動卸載 (TTL)", model_ttl_desc: "已載入模型閒置超過指定分鐘數後自動卸載。0 = 不啟用；預設模型偏好會保留。", minutes: "分鐘",
       save_settings: "儲存設定",
       settings_saved: "設定已儲存。",
+      log_level_live_desc: "立即套用至 App 和後端診斷日誌，自動儲存，無需重啟。",
+      log_level_applying: "正在套用日誌等級…",
+      err_log_level_apply_failed: "日誌等級套用失敗，已保留原設定。",
+      err_log_level_rollback_failed: "無法確認後端日誌等級已還原，請檢查服務狀態後重試。",
+      err_log_level_persist_failed: "設定寫入失敗，已還原原日誌等級。",
+      err_log_level_backend_changed: "操作期間後端狀態發生變化，請等待服務就緒後重試。",
+      err_log_level_backend_unavailable: "後端未能套用日誌等級，請檢查服務是否可用後重試。",
+      err_log_level_busy: "請等待日誌等級修改完成。",
       settings_unsaved_restart: "有尚未儲存且需要重啟的改動，請點擊底部「儲存設定」以生效。",
       cold_cache_too_large: "SSD 快取限制已根據磁碟可用空間下調為 {max}GB。",
       params_saved: "模型參數已儲存。",
@@ -6026,6 +6050,14 @@
       model_ttl: "モデル自動アンロード (TTL)", model_ttl_desc: "読み込み済みモデルが指定した分数アイドル状態のままなら自動的にアンロードします。0 = 無効。デフォルトモデル設定は保持されます。", minutes: "分",
       save_settings: "設定を保存",
       settings_saved: "設定が保存されました。",
+      log_level_live_desc: "App とバックエンドの診断ログに即時適用し、自動保存します。再起動は不要です。",
+      log_level_applying: "ログレベルを適用中…",
+      err_log_level_apply_failed: "ログレベルを適用できませんでした。以前の設定を保持しています。",
+      err_log_level_rollback_failed: "バックエンドの復元を確認できません。サービスの状態を確認して再試行してください。",
+      err_log_level_persist_failed: "設定を保存できなかったため、以前のログレベルを復元しました。",
+      err_log_level_backend_changed: "操作中にバックエンドの状態が変わりました。サービスの準備完了後に再試行してください。",
+      err_log_level_backend_unavailable: "バックエンドにログレベルを適用できませんでした。サービスの状態を確認して再試行してください。",
+      err_log_level_busy: "ログレベルの変更が完了するまでお待ちください。",
       settings_unsaved_restart: "再起動が必要な未保存の変更があります。下部の「設定を保存」をクリックして適用してください。",
       cold_cache_too_large: "SSDキャッシュ制限はディスク空き容量に合わせて {max}GB に下げられました。",
       params_saved: "モデルパラメータが保存されました。",
@@ -6405,6 +6437,14 @@
       model_ttl: "모델 자동 언로드 (TTL)", model_ttl_desc: "로드된 모델이 지정된 시간(분) 동안 유휴 상태이면 자동으로 언로드합니다. 0 = 비활성화. 기본 모델 설정은 유지됩니다.", minutes: "분",
       save_settings: "설정 저장",
       settings_saved: "설정이 저장되었습니다.",
+      log_level_live_desc: "App 및 백엔드 진단 로그에 즉시 적용하고 자동 저장합니다. 재시작이 필요하지 않습니다.",
+      log_level_applying: "로그 수준 적용 중…",
+      err_log_level_apply_failed: "로그 수준을 적용하지 못했습니다. 이전 설정을 유지합니다.",
+      err_log_level_rollback_failed: "백엔드 복원을 확인하지 못했습니다. 서비스 상태를 확인한 후 다시 시도하세요.",
+      err_log_level_persist_failed: "설정을 저장하지 못해 이전 로그 수준으로 복원했습니다.",
+      err_log_level_backend_changed: "작업 중 백엔드 상태가 변경되었습니다. 서비스가 준비된 후 다시 시도하세요.",
+      err_log_level_backend_unavailable: "백엔드에 로그 수준을 적용하지 못했습니다. 서비스 상태를 확인한 후 다시 시도하세요.",
+      err_log_level_busy: "로그 수준 변경이 완료될 때까지 기다려 주세요.",
       settings_unsaved_restart: "재시작이 필요한 저장되지 않은 변경사항이 있습니다. 하단의 \"설정 저장\"을 클릭하여 적용하세요.",
       cold_cache_too_large: "SSD 캐시 제한이 디스크 여유 공간에 맞춰 {max}GB로 낮아졌습니다.",
       params_saved: "모델 매개변수가 저장되었습니다.",
@@ -6518,6 +6558,7 @@
       const select = document.getElementById(id);
       if (select) select.value = i18nLang;
     });
+    updateLogLevelControls();
     // Re-render model list to update action buttons text
     syncModelList();
     renderRuntimeModels(window.__RUNTIME_MODELS__ || []);
@@ -10357,7 +10398,7 @@
     setSelectInput('cfg-network-mode', appConfig.network_mode, 'local');
     renderNetworkInterfaces(window.__IRONMLX_NETWORK_INTERFACES__ || [], appConfig.lan_host || '');
     setNumberInput('cfg-port', appConfig.port, 9068);
-    setSelectInput('cfg-log-level', appConfig.log_level, 'INFO');
+    setSelectInput('cfg-log-level', normalizeLogLevel(appConfig.log_level), 'INFO');
     setSelectInput('lang-select', LANG_MAP[appConfig.language] || appConfig.language, currentLang);
     applyThemeInput(appConfig.theme || 'system');
     setCheckboxInput('cfg-mem-total-auto', appConfig.mem_total_auto, true);
@@ -10448,8 +10489,61 @@
     showToast(message, result.success ? 'success' : 'warn');
   }
 
+  let logLevelPending = false;
+  let fullSettingsSavePending = false;
+  let logLevelStatusKey = 'log_level_live_desc';
+
+  function normalizeLogLevel(value) {
+    const level = String(value || 'INFO').toUpperCase();
+    if (level === 'WARN') return 'WARNING';
+    if (level === 'TRACE') return 'ALL';
+    return ['ALL', 'DEBUG', 'INFO', 'WARNING', 'ERROR'].includes(level) ? level : 'INFO';
+  }
+
+  function updateLogLevelControls() {
+    const select = document.getElementById('cfg-log-level');
+    if (select) select.disabled = logLevelPending || fullSettingsSavePending;
+    const status = document.getElementById('log-level-status');
+    if (status) status.textContent = t(logLevelStatusKey);
+    document.querySelectorAll('button[onclick="saveSettings()"]').forEach(button => {
+      button.disabled = logLevelPending || fullSettingsSavePending;
+    });
+  }
+
+  function selectLogLevel(value) {
+    if (logLevelPending || fullSettingsSavePending) return;
+    const handler = window.webkit?.messageHandlers?.setLogLevel;
+    if (!handler) {
+      onLogLevelChanged(JSON.stringify({success:false, code:'log_level_apply_failed'}));
+      return;
+    }
+    logLevelPending = true;
+    logLevelStatusKey = 'log_level_applying';
+    updateLogLevelControls();
+    handler.postMessage(normalizeLogLevel(value));
+  }
+
+  function onLogLevelChanged(jsonStr) {
+    let result = {};
+    try { result = JSON.parse(jsonStr); } catch (_) {}
+    logLevelPending = false;
+    const config = window.__IRONMLX_APP_CONFIG__ || {};
+    const level = normalizeLogLevel(result.level || config.log_level);
+    if (result.success) {
+      window.__IRONMLX_APP_CONFIG__ = Object.assign({}, config, {log_level: level});
+      logLevelStatusKey = 'log_level_live_desc';
+    } else {
+      const codes = ['log_level_rollback_failed', 'log_level_busy', 'log_level_persist_failed',
+        'log_level_backend_changed', 'log_level_backend_unavailable'];
+      logLevelStatusKey = codes.includes(result.code) ? 'err_' + result.code : 'err_log_level_apply_failed';
+    }
+    document.getElementById('cfg-log-level').value = level;
+    updateLogLevelControls();
+  }
+
   // ── Save Settings ──
   async function saveSettings() {
+    if (logLevelPending || fullSettingsSavePending) return;
     const themeActive = document.querySelector('#theme-select .seg-btn.active');
     const memTotalAuto = checkedInputValue('cfg-mem-total-auto', true);
     const memModelAuto = checkedInputValue('cfg-mem-model-auto', true);
@@ -10464,7 +10558,6 @@
       network_mode: (document.getElementById('cfg-network-mode') || {}).value || 'local',
       lan_host: (document.getElementById('cfg-lan-host') || {}).value || '',
       port: numberInputValue('cfg-port', 9068),
-      log_level: document.getElementById('cfg-log-level').value,
       language: document.getElementById('lang-select').value,
       theme: themeActive ? themeActive.dataset.value : 'system',
       mem_limit_total: memTotalAuto ? 0 : numberInputValue('cfg-mem-total', 0),
@@ -10488,12 +10581,16 @@
     };
     window.__IRONMLX_APP_CONFIG__ = Object.assign({}, window.__IRONMLX_APP_CONFIG__ || {}, settings);
     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveSettings) {
+      fullSettingsSavePending = true;
+      updateLogLevelControls();
       window.webkit.messageHandlers.saveSettings.postMessage(JSON.stringify(settings));
     }
   }
 
   // Called from Rust after settings are saved
   function onSettingsSaved(jsonStr) {
+    fullSettingsSavePending = false;
+    updateLogLevelControls();
     let result = {};
     try { result = JSON.parse(jsonStr); } catch(e) { return; }
     const dict = I18N[currentLang] || I18N.en;
