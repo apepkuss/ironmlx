@@ -510,13 +510,13 @@ private actor FakeRestartModelLoader: BackendModelLoading {
         modelDir: String,
         setDefault: Bool,
         maxCacheCap: Int?,
-        pinned: Bool,
+        pinned: Bool?,
         mtpModelDir: String?,
         mtpDraftTokens: Int?,
         promptLookup: BackendPromptLookupConfig?,
         samplingDefaults: BackendSamplingDefaults
     ) async throws -> BackendModelAdminResponse {
-        calls.append("register:\(model):\(modelDir):\(setDefault):\(maxCacheCap.map(String.init) ?? "nil"):\(pinned):\(mtpModelDir ?? "nil"):\(mtpDraftTokens.map(String.init) ?? "nil")")
+        calls.append("register:\(model):\(modelDir):\(setDefault):\(maxCacheCap.map(String.init) ?? "nil"):\(pinned.map(String.init) ?? "nil"):\(mtpModelDir ?? "nil"):\(mtpDraftTokens.map(String.init) ?? "nil")")
         if let error = registrationErrors[model] {
             throw error
         }
@@ -569,4 +569,22 @@ private actor FakeRestartModelLoader: BackendModelLoading {
             error: nil
         )
     }
+}
+
+
+@Test @MainActor func discoveryRegistrationOmitsPinnedState() async throws {
+    let repoID = "mlx-community/Tiny-4bit"
+    let (root, snapshot) = try restartModelRoot(repoID: repoID)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let loader = FakeRestartModelLoader()
+    let scanner = LocalModelScanner(rootURL: root)
+    let models = scanner.scan(loadedModels: [repoID], pinnedModels: [repoID], mtpEnabledModels: [])
+    #expect(models.first?.pinned == true)
+    let failures = await LocalModelBackendRegistrar.register(
+        localModels: models, defaultModel: nil, scanner: scanner,
+        parameterStore: ModelParameterStore(url: root.appendingPathComponent("model_params.json")),
+        activeKvOffloadEnabled: false, preservePinnedState: true, client: loader
+    )
+    #expect(failures.isEmpty)
+    #expect(await loader.calls == ["register:mlx-community/Tiny-4bit:\(snapshot.path):false:nil:nil:nil:nil"])
 }

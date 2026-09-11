@@ -221,6 +221,7 @@ public enum LocalModelBackendRegistrar {
         scanner: LocalModelScanner,
         parameterStore: ModelParameterStore,
         activeKvOffloadEnabled: Bool,
+        preservePinnedState: Bool = false,
         client: any BackendModelLoading
     ) async -> [BackendModelRecoveryFailure] {
         let defaultModel = AppConfig.normalizedModelReference(defaultModel)
@@ -257,7 +258,7 @@ public enum LocalModelBackendRegistrar {
                             activeKvOffloadEnabled: activeKvOffloadEnabled
                         )
                         : nil,
-                    pinned: model.pinned,
+                    pinned: preservePinnedState ? nil : model.pinned,
                     mtpModelDir: mtpRuntime?.modelDir,
                     mtpDraftTokens: mtpRuntime?.draftTokens,
                     promptLookup: capabilities?.supportsPromptLookup != false

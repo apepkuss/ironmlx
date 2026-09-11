@@ -255,6 +255,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         isRefreshingLoadedModelNames = true
         loadedModelRefreshGeneration &+= 1
         let refreshGeneration = loadedModelRefreshGeneration
+        let launchID = backend.currentLaunchID
         let config = configStore.load()
 
         loadedModelRefreshTask = Task { [weak self] in
@@ -294,6 +295,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
 
             guard !Task.isCancelled,
                   refreshGeneration == loadedModelRefreshGeneration,
+                  backend.currentLaunchID == launchID,
                   Self.shouldRefreshLoadedModelNames(in: backend.state),
                   let models
             else {

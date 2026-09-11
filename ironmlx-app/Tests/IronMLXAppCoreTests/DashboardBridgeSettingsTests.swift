@@ -1069,3 +1069,73 @@ private final class CapturingDashboardWebView: WKWebView {
         waiter.continuation.resume(returning: script)
     }
 }
+
+@MainActor
+@Test(arguments: [BackendProcessState.starting, .recovering])
+func dashboardPreservesPinnedIntentWhileBackendRestores(state: BackendProcessState) async throws {
+    let targetID = "mlx-community/Qwen3.8-27B-4bit"
+    let root = try dashboardDFlash2ModelRoot(targetID: targetID, draftID: "z-lab/test-draft")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let configStore = AppConfigStore(url: root.appendingPathComponent("app_config.json"))
+    configStore.save(AppConfig(port: 1, defaultModel: targetID, loadedModels: [targetID], pinnedModels: [targetID]))
+    let client = EmptyDashboardModelStatusClient()
+    let backend = TestRuntimeBackend(state: state, isRunning: true)
+    let webView = CapturingDashboardWebView()
+    let notifications = NotificationCenter()
+    let bridge = DashboardBridge(
+        webView: webView, configStore: configStore, backend: backend,
+        scanner: LocalModelScanner(rootURL: root),
+        parameterStore: ModelParameterStore(url: root.appendingPathComponent("params.json")),
+        notificationCenter: notifications, modelStatusClientFactory: { _, _ in client }
+    )
+    notifications.post(name: .ironMLXLoadedModelsDidChange, object: nil)
+    let script = try #require(await webView.script(containing: "onLocalModelsScanned"))
+    let model = try dashboardModel(from: script, id: targetID)
+    #expect(model["pinned"] as? Bool == true)
+    #expect(configStore.load().pinnedModelReferences == [targetID])
+    #expect(configStore.load().restoredModelReferences == [targetID])
+    #expect(await client.fetches == 0)
+    #expect(!backend.calls.contains(where: { $0.hasPrefix("confirm:") }))
+    withExtendedLifetime(bridge) {}
+}
+
+@MainActor
+@Test(arguments: [false, true])
+func dashboardRejectsModelQueryAcrossBackendRestart(restartFinished: Bool) async throws {
+    let targetID = "mlx-community/Qwen3.8-27B-4bit"
+    let root = try dashboardDFlash2ModelRoot(targetID: targetID, draftID: "z-lab/test-draft")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let configStore = AppConfigStore(url: root.appendingPathComponent("app_config.json"))
+    configStore.save(AppConfig(port: 1, defaultModel: targetID, loadedModels: [targetID], pinnedModels: [targetID]))
+    let client = SuspendedDashboardModelStatusClient()
+    let backend = TestRuntimeBackend(state: .running, isRunning: true)
+    let webView = CapturingDashboardWebView()
+    let notifications = NotificationCenter()
+    let bridge = DashboardBridge(
+        webView: webView, configStore: configStore, backend: backend,
+        scanner: LocalModelScanner(rootURL: root),
+        parameterStore: ModelParameterStore(url: root.appendingPathComponent("params.json")),
+        notificationCenter: notifications, modelStatusClientFactory: { _, _ in client }
+    )
+    notifications.post(name: .ironMLXLoadedModelsDidChange, object: nil)
+    await client.waitUntilFetchStarted()
+    backend.currentLaunchID = UUID()
+    backend.state = restartFinished ? .running : .recovering
+    await client.finishLoadedModelFetch(with: [])
+    _ = try #require(await webView.script(containing: "onLocalModelsScanned"))
+    #expect(configStore.load().pinnedModelReferences == [targetID])
+    #expect(configStore.load().restoredModelReferences == [targetID])
+    #expect(!backend.calls.contains(where: { $0.hasPrefix("confirm:") }))
+    withExtendedLifetime(bridge) {}
+}
+
+private actor EmptyDashboardModelStatusClient: DashboardModelStatusFetching {
+    private(set) var fetches = 0
+    func fetchLoadedModels() async throws -> [BackendLoadedModelInfo] {
+        fetches += 1
+        return []
+    }
+    func fetchHealthz() async throws -> HealthzSnapshot {
+        throw DashboardModelStatusClientTestError.adminRouteUnavailable
+    }
+}

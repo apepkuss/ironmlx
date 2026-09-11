@@ -105,6 +105,7 @@ public struct BackendRuntimeEvent: Codable, Equatable, Sendable {
 public protocol BackendRuntimeManaging: AnyObject {
     var isRunning: Bool { get }
     var state: BackendProcessState { get }
+    var currentLaunchID: UUID? { get }
     var lastError: String? { get }
     var lastEvent: BackendRuntimeEvent? { get }
     var lastIncident: BackendIncidentRecord? { get }
@@ -135,6 +136,10 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
 
     public var state: BackendProcessState {
         processManager.state
+    }
+
+    public var currentLaunchID: UUID? {
+        processManager.currentLaunchID
     }
 
     public var lastError: String? {

@@ -2394,7 +2394,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             dflash2Enabled.insert(target)
             return (loaded, pinned, mtpEnabled, dflash2Enabled)
         }
-        if backend.isRunning {
+        if canSyncBackendModelState {
+            let launchID = backend.currentLaunchID
             let client = modelStatusClientFactory(config.host, config.port)
             do {
                 let models = try await client.fetchLoadedModels()
@@ -2402,7 +2403,9 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 if let target = configuredDFlash2Target(in: currentConfig) {
                     return configuredDFlash2State(target: target, config: currentConfig)
                 }
-                guard Self.modelStatusQueryRemainsCurrent(
+                guard canSyncBackendModelState,
+                      backend.currentLaunchID == launchID,
+                      Self.modelStatusQueryRemainsCurrent(
                     queriedConfig: config,
                     currentConfig: currentConfig
                 ) else {
@@ -2434,6 +2437,12 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             }
         }
         return persistedModelState(config: config)
+    }
+
+    // A healthy process can still be restoring its models. Its temporary list
+    // must not replace the persisted startup intent.
+    private var canSyncBackendModelState: Bool {
+        backend.isRunning && (backend.state == .running || backend.state == .degraded)
     }
 
     private static func modelStatusQueryRemainsCurrent(
@@ -2565,7 +2574,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 models,
                 activeKvOffloadEnabled: config.activeKvOffload == true
             )
-            if self.backend.isRunning, self.configuredDFlash2Target(in: config) == nil {
+            if self.canSyncBackendModelState, self.configuredDFlash2Target(in: config) == nil {
                 let client = BackendAPIClient(host: config.host, port: config.port)
                 await self.registerLocalModels(models: models, config: config, client: client)
             }
@@ -2605,6 +2614,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             scanner: scanner,
             parameterStore: parameterStore,
             activeKvOffloadEnabled: config.activeKvOffload == true,
+            preservePinnedState: true,
             client: client
         )
     }

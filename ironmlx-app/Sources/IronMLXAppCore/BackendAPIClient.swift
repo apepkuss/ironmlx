@@ -195,7 +195,7 @@ public struct BackendAPIClient: Sendable {
         modelDir: String,
         setDefault: Bool = false,
         maxCacheCap: Int? = nil,
-        pinned: Bool = false,
+        pinned: Bool? = nil,
         mtpModelDir: String? = nil,
         mtpDraftTokens: Int? = nil,
         promptLookup: BackendPromptLookupConfig? = nil,

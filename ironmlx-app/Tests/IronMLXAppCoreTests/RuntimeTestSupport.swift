@@ -5,6 +5,7 @@ import Foundation
 @MainActor
 final class TestRuntimeBackend: MenuBarBackendProcessManaging {
     var isRunning: Bool
+    var currentLaunchID: UUID? = UUID()
     var state: BackendProcessState
     var lastError: String?
     var lastEvent: BackendRuntimeEvent?

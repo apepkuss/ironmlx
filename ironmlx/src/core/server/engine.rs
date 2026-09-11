@@ -1506,6 +1506,7 @@ impl EnginePoolState {
         &self,
         model: EngineModelConfig,
         set_default: bool,
+        pinned: Option<bool>,
     ) -> Result<EngineModelControlResult> {
         validate_engine_model_config(&model)?;
         let model_id = model.id.clone();
@@ -1519,15 +1520,21 @@ impl EnginePoolState {
         let existing_slot = self.inner.slots.lock().await.get(&model_id).cloned();
         let slot = match existing_slot {
             Some(existing) if existing.is_loaded_or_loading().await => {
-                existing.set_pinned(model.pinned);
+                // Discovery registrations omit pinned so a stale scan cannot
+                // overwrite a restore or an explicit pin/unpin operation.
+                if let Some(pinned) = pinned {
+                    existing.set_pinned(pinned);
+                }
                 existing
             }
-            _ => {
+            existing => {
+                let pinned = pinned
+                    .unwrap_or_else(|| existing.as_ref().is_some_and(|slot| slot.is_pinned()));
                 let slot = Arc::new(EngineSlot {
                     model: model.clone(),
                     runtime: self.inner.runtime.clone(),
                     active_requests: Arc::new(AtomicUsize::new(0)),
-                    pinned: AtomicBool::new(model.pinned),
+                    pinned: AtomicBool::new(pinned),
                     state: Mutex::new(EngineSlotState::Unloaded {
                         reason: EngineUnloadReason::Startup,
                         last_error: None,
@@ -4137,7 +4144,7 @@ mod tests {
                 });
                 dir
             });
-            pool.register_dynamic_model(config, false)
+            pool.register_dynamic_model(config, false, None)
                 .await
                 .expect("register model");
 
@@ -4163,7 +4170,7 @@ mod tests {
         let config = model_config("alpha", &model_dir, EngineLoadPolicy::Lazy);
 
         let result = pool
-            .register_dynamic_model(config, false)
+            .register_dynamic_model(config, false, None)
             .await
             .expect("register dynamic model");
 
@@ -4190,11 +4197,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn discovery_registration_preserves_pins_during_restore() {
+        let pool = EnginePoolState::new_dynamic(runtime_config(), Some(3)).expect("pool");
+        let model_dir = write_minimal_model_config("qwen3_5");
+        let config = model_config("alpha", &model_dir, EngineLoadPolicy::Lazy);
+        pool.register_dynamic_model(config.clone(), false, Some(true))
+            .await
+            .expect("register pinned model for restore");
+
+        // Discovery must preserve intent both before and during loading.
+        pool.register_dynamic_model(config.clone(), false, None)
+            .await
+            .expect("discover unloaded model");
+        let slot = pool.inner.slots.lock().await["alpha"].clone();
+        assert!(slot.is_pinned());
+        *slot.state.lock().await = EngineSlotState::Loading {
+            started_unix_ms: unix_time_ms(),
+            load_attempts: 1,
+        };
+        pool.register_dynamic_model(config.clone(), false, None)
+            .await
+            .expect("stale discovery during restore");
+        assert!(slot.is_pinned());
+        assert!(std::sync::Arc::ptr_eq(
+            &slot,
+            &pool.inner.slots.lock().await["alpha"]
+        ));
+
+        // Explicit changes still work, and a later discovery cannot undo them.
+        pool.register_dynamic_model(config.clone(), false, Some(false))
+            .await
+            .expect("explicit unpin");
+        assert!(!slot.is_pinned());
+        pool.register_dynamic_model(config.clone(), false, None)
+            .await
+            .expect("discover unpinned model");
+        assert!(!slot.is_pinned());
+        pool.register_dynamic_model(config, false, Some(true))
+            .await
+            .expect("explicit pin");
+        assert!(slot.is_pinned());
+        std::fs::remove_dir_all(model_dir).expect("cleanup model fixture");
+    }
+
+    #[tokio::test]
     async fn dynamic_unload_keeps_model_registered_for_lazy_reload() {
         let pool = EnginePoolState::new_dynamic(runtime_config(), Some(3)).expect("pool");
         let model_dir = write_minimal_model_config("qwen3_5");
         let config = model_config("alpha", &model_dir, EngineLoadPolicy::Lazy);
-        pool.register_dynamic_model(config, true)
+        pool.register_dynamic_model(config, true, None)
             .await
             .expect("register dynamic model");
 

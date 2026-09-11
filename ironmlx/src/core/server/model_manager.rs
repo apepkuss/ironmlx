@@ -221,6 +221,7 @@ impl ModelManager {
         &self,
         request: LoadModelRequest,
     ) -> std::result::Result<AdminModelResponse, AdminError> {
+        let pinned = request.pinned;
         let parsed = ParsedLoadModelRequest::new(request)?;
         let load = build_engine_model_config(
             &self.serve_args,
@@ -236,7 +237,7 @@ impl ModelManager {
         )
         .map_err(AdminError::from_load_error)?;
         self.pool
-            .register_dynamic_model(load.config, parsed.set_default)
+            .register_dynamic_model(load.config, parsed.set_default, pinned)
             .await
             .map_err(AdminError::from_load_error)?;
         Ok(AdminModelResponse::ok(
@@ -2249,6 +2250,7 @@ mod tests {
                     ),
                 },
                 true,
+                None,
             )
             .await
             .expect("register model");

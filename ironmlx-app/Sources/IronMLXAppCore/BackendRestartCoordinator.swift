@@ -7,7 +7,7 @@ public protocol BackendModelLoading: Sendable {
         modelDir: String,
         setDefault: Bool,
         maxCacheCap: Int?,
-        pinned: Bool,
+        pinned: Bool?,
         mtpModelDir: String?,
         mtpDraftTokens: Int?,
         promptLookup: BackendPromptLookupConfig?,
