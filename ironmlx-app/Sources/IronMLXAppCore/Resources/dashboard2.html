@@ -4,6 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>IronMLX Dashboard</title>
+<script>
+  try {
+    document.documentElement.classList.toggle('sidebar-collapsed', localStorage.getItem('ironmlx.sidebar.collapsed') === 'true');
+  } catch (_) {}
+</script>
 <style>
   :root {
     --bg: #f5f5f7;
@@ -17,6 +22,12 @@
     --green: #34c759;
     --green-bg: #34c759;
     --warning: #ff9500;
+    --settings-notice-bg: #FFF7E6;
+    --settings-notice-text: #854D0E;
+    --settings-notice-border: #E8C98A;
+    --settings-error-bg: #FFF1F0;
+    --settings-error-text: #A12622;
+    --settings-error-border: #E7B3AE;
     --destructive: #ff3b30;
     --sidebar-w: 200px;
     --radius: 10px;
@@ -35,6 +46,12 @@
       --green: #30d158;
       --green-bg: #30d158;
       --warning: #ff9f0a;
+      --settings-notice-bg: #332819;
+      --settings-notice-text: #FBBF24;
+      --settings-notice-border: #705326;
+      --settings-error-bg: #382120;
+      --settings-error-text: #FFB4AB;
+      --settings-error-border: #80514B;
       --destructive: #ff453a;
     }
   }
@@ -82,8 +99,9 @@
   }
 
   .sidebar-logo .icon {
-    width: 28px;
-    height: 28px;
+    flex-shrink: 0;
+    width: 32px;
+    height: 32px;
     background: var(--accent);
     border-radius: 6px;
     display: flex;
@@ -91,12 +109,12 @@
     justify-content: center;
     color: white;
     font-weight: 700;
-    font-size: 14px;
+    font-size: 16px;
   }
 
   .sidebar-logo span {
     font-weight: 600;
-    font-size: 15px;
+    font-size: 21px;
   }
 
   .nav-item {
@@ -106,11 +124,13 @@
     padding: 8px 12px;
     border-radius: 8px;
     cursor: pointer;
-    font-size: 13px;
+    font-size: 15px;
     color: var(--text-secondary);
     transition: all 0.15s;
     user-select: none;
   }
+
+  .nav-item[hidden] { display: none; }
 
   .nav-item:hover {
     background: var(--border);
@@ -131,14 +151,84 @@
   }
 
   .nav-item .nav-icon {
-    font-size: 16px;
-    width: 20px;
-    text-align: center;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    flex-shrink: 0;
   }
+  .nav-item .nav-icon svg { display: block; width: 22px; height: 22px; }
+
+  .sidebar-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    align-self: flex-start;
+    width: 40px;
+    height: 40px;
+    margin-top: auto;
+    padding: 10px;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .sidebar-toggle:hover { color: var(--text); background: var(--border); }
+  .sidebar-toggle svg { flex-shrink: 0; }
+  .sidebar-toggle:focus-visible, .nav-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .sidebar-collapsed .sidebar { width: 64px; padding-left: 10px; padding-right: 10px; }
+  .sidebar-collapsed .sidebar-logo { justify-content: center; padding-left: 0; padding-right: 0; }
+  .sidebar-collapsed .sidebar-logo > span,
+  .sidebar-collapsed .sidebar .nav-item > [data-i18n] { display: none; }
+  .sidebar-collapsed .sidebar .nav-item,
+  .sidebar-collapsed .sidebar-toggle { justify-content: center; padding-left: 0; padding-right: 0; gap: 0; }
+  .sidebar-collapsed .sidebar-toggle { align-self: center; }
+  .sidebar-collapsed .sidebar .nav-item {
+    position: relative;
+    isolation: isolate;
+    background: transparent;
+  }
+  .sidebar-collapsed .sidebar .nav-item::before {
+    content: '';
+    position: absolute;
+    width: 32px;
+    height: 32px;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    border-radius: 6px;
+    z-index: -1;
+    pointer-events: none;
+    transition: background 0.15s;
+  }
+  .sidebar-collapsed .sidebar .nav-item:hover::before { background: var(--border); }
+  .sidebar-collapsed .sidebar .nav-item.locked:hover::before { background: transparent; }
+  .sidebar-collapsed .sidebar .nav-item.active::before { background: var(--accent); }
+
+  .sidebar-tooltip {
+    position: fixed;
+    z-index: 10000;
+    max-width: min(240px, calc(100vw - 16px));
+    padding: 6px 10px;
+    border-radius: 6px;
+    background: var(--text);
+    color: var(--bg);
+    font-size: 12px;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+    box-shadow: 0 2px 8px #0003;
+    pointer-events: none;
+  }
+  .sidebar-tooltip[hidden] { display: none; }
 
   /* ── Content ── */
   .content {
     flex: 1;
+    min-width: 0;
     overflow-y: auto;
     padding: 32px;
   }
@@ -182,6 +272,39 @@
     min-height: 0;
     overflow-y: auto;
     overscroll-behavior: contain;
+  }
+
+  .settings-save-bar {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 16px 0 0;
+    border-top: 1px solid var(--border);
+    background: var(--bg);
+  }
+  .settings-save-status { font-size: 13px; color: var(--text-secondary); line-height: 1.5; }
+  .settings-save-notice { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 10px 12px; border: 1px solid transparent; border-radius: 8px; }
+  .settings-save-bar[data-state="clean"] .settings-save-notice { display: none; }
+  .settings-save-icon { display: none; width: 20px; height: 20px; flex-shrink: 0; }
+  .settings-save-bar[data-state="pending"] .settings-save-notice,
+  .settings-save-bar[data-state="saving"] .settings-save-notice {
+    background: var(--settings-notice-bg); color: var(--settings-notice-text); border-color: var(--settings-notice-border);
+  }
+  .settings-save-bar[data-state="error"] .settings-save-notice {
+    background: var(--settings-error-bg); color: var(--settings-error-text); border-color: var(--settings-error-border);
+  }
+  .settings-save-bar:not([data-state="clean"]) .settings-save-icon { display: block; }
+  .settings-save-bar:not([data-state="clean"]) .settings-save-status { color: inherit; font-weight: 600; }
+  .settings-save-status { overflow-wrap: anywhere; }
+  .settings-save-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-shrink: 0; }
+  #settings-save-button, #settings-cancel-button { padding: 10px 24px; }
+  #settings-cancel-button[hidden] { display: none; }
+  .settings-save-actions button:disabled { opacity: 0.5; cursor: default; }
+  @media (max-width: 720px) {
+    .settings-save-bar { flex-wrap: wrap; gap: 8px; }
+    .settings-save-actions { margin-left: auto; }
   }
 
   .models-page-scroll.model-manager-active {
@@ -3146,7 +3269,7 @@
 <body>
 
 <!-- Sidebar -->
-<div class="sidebar">
+<div class="sidebar" id="dashboard-sidebar">
   <div class="sidebar-logo">
     <div class="icon">Fe</div>
     <span>IronMLX</span>
@@ -3161,19 +3284,26 @@
   <div class="nav-item" data-page="chat">
     <span class="nav-icon"><svg data-nav-icon="agent" width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true"><path d="M9 1.5V4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="9" cy="1.5" r="0.75" fill="currentColor"/><rect x="2.5" y="4" width="13" height="11" rx="2.5" stroke="currentColor" stroke-width="1.4"/><circle cx="6.5" cy="8.25" r="1" fill="currentColor"/><circle cx="11.5" cy="8.25" r="1" fill="currentColor"/><path d="M6.5 11.5h5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></span> <span data-i18n="nav_chat">Agent</span>
   </div>
-  <div class="nav-item" data-page="benchmark">
+  <!-- Deferred beyond v0.1.0. Keep the page and its implementation; restore this entry when ready. -->
+  <div class="nav-item" data-page="benchmark" hidden>
     <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="7" stroke="currentColor" stroke-width="1.4"/><path d="M9 5V9L12 11" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></span> <span data-i18n="nav_benchmark">Benchmark</span>
   </div>
   <div class="nav-item" data-page="logs">
     <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none"><rect x="3" y="2" width="12" height="14" rx="2" stroke="currentColor" stroke-width="1.4"/><line x1="6" y1="6" x2="12" y2="6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><line x1="6" y1="9" x2="12" y2="9" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><line x1="6" y1="12" x2="10" y2="12" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg></span> <span data-i18n="nav_logs">Logs</span>
   </div>
   <div class="nav-item" data-page="settings">
-    <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M9 1.5l1.1 2.3a5.2 5.2 0 0 1 1.8 1l2.4-.6.9 1.6-1.3 1.9a5 5 0 0 1 0 2.1l1.3 1.9-.9 1.6-2.4-.6a5.2 5.2 0 0 1-1.8 1L9 16.5l-1.1-2.3a5.2 5.2 0 0 1-1.8-1l-2.4.6-.9-1.6 1.3-1.9a5 5 0 0 1 0-2.1L2.8 6.3l.9-1.6 2.4.6a5.2 5.2 0 0 1 1.8-1L9 1.5Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><circle cx="9" cy="9" r="2.5" stroke="currentColor" stroke-width="1.3"/></svg></span> <span data-i18n="nav_settings">Settings</span>
+    <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M7.551 3.591 L8.060 1.862 L9.940 1.862 L10.449 3.591 A5.6 5.6 0 0 1 11.800 4.150 L13.383 3.288 L14.712 4.617 L13.850 6.200 A5.6 5.6 0 0 1 14.409 7.551 L16.138 8.060 L16.138 9.940 L14.409 10.449 A5.6 5.6 0 0 1 13.850 11.800 L14.712 13.383 L13.383 14.712 L11.800 13.850 A5.6 5.6 0 0 1 10.449 14.409 L9.940 16.138 L8.060 16.138 L7.551 14.409 A5.6 5.6 0 0 1 6.200 13.850 L4.617 14.712 L3.288 13.383 L4.150 11.800 A5.6 5.6 0 0 1 3.591 10.449 L1.862 9.940 L1.862 8.060 L3.591 7.551 A5.6 5.6 0 0 1 4.150 6.200 L3.288 4.617 L4.617 3.288 L6.200 4.150 A5.6 5.6 0 0 1 7.551 3.591Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><circle cx="9" cy="9" r="2.5" stroke="currentColor" stroke-width="1.3"/></svg></span> <span data-i18n="nav_settings">Settings</span>
   </div>
-  <div class="nav-item" data-page="cluster">
+  <!-- Deferred beyond v0.1.0. Keep the page and its implementation; restore this entry when ready. -->
+  <div class="nav-item" data-page="cluster" hidden>
     <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="4" r="2.5" stroke="currentColor" stroke-width="1.3"/><circle cx="4" cy="14" r="2.5" stroke="currentColor" stroke-width="1.3"/><circle cx="14" cy="14" r="2.5" stroke="currentColor" stroke-width="1.3"/><line x1="9" y1="6.5" x2="4" y2="11.5" stroke="currentColor" stroke-width="1.2"/><line x1="9" y1="6.5" x2="14" y2="11.5" stroke="currentColor" stroke-width="1.2"/></svg></span> <span data-i18n="nav_cluster">Cluster (Experimental)</span>
   </div>
+  <button class="sidebar-toggle" id="sidebar-toggle" type="button" onclick="toggleSidebar()" aria-controls="dashboard-sidebar" aria-expanded="true" aria-label="Collapse sidebar">
+    <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="2.5" y="3.5" width="15" height="13" rx="2"/><path d="M7.5 3.5v13"/></svg>
+  </button>
 </div>
+
+<div class="sidebar-tooltip" id="sidebar-tooltip" role="tooltip" hidden></div>
 
 <!-- Content -->
 <div class="content page-scroll-managed">
@@ -4044,7 +4174,7 @@
   <div class="page" id="page-settings">
     <div class="settings-page-header">
       <div class="page-title" data-i18n="settings_title">App Settings</div>
-      <div class="page-subtitle" id="settings-subtitle">Settings marked with <span class="badge badge-restart">restart</span> require a server restart.</div>
+      <div class="page-subtitle" id="settings-subtitle">Changes that require saving are shown in the bottom bar.</div>
     </div>
 
     <div class="settings-page-scroll page-body-scroll">
@@ -4056,11 +4186,11 @@
         <span data-i18n="server">Server</span>
       </div>
       <div class="settings-row">
-        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="network_mode">Network Mode</span> <span class="badge badge-restart" data-i18n="badge_restart">restart</span></div><div class="settings-row-desc" data-i18n="network_mode_desc">Local only listens on loopback. LAN adds an authenticated HTTPS listener on one selected interface.</div></div>
+        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="network_mode">Network Mode</span></div><div class="settings-row-desc" data-i18n="network_mode_desc">Local only listens on loopback. LAN adds an authenticated HTTPS listener on one selected interface.</div></div>
         <div class="settings-row-right"><select id="cfg-network-mode" onchange="refreshNetworkSecurityUI()"><option value="local" data-i18n="network_mode_local">Local only</option><option value="lan" data-i18n="network_mode_lan">LAN (HTTPS + API Key)</option></select></div>
       </div>
       <div class="settings-row" id="cfg-lan-host-row" style="display:none;">
-        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="lan_interface">LAN Interface</span> <span class="badge badge-restart" data-i18n="badge_restart">restart</span></div><div class="settings-row-desc" data-i18n="lan_interface_desc">Select one concrete active LAN address. Wildcard listening is not allowed.</div></div>
+        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="lan_interface">LAN Interface</span></div><div class="settings-row-desc" data-i18n="lan_interface_desc">Select one concrete active LAN address. Wildcard listening is not allowed.</div></div>
         <div class="settings-row-right"><select id="cfg-lan-host"></select></div>
       </div>
       <div class="settings-row" id="cfg-lan-security-row" style="display:none;">
@@ -4068,7 +4198,7 @@
         <div class="settings-row-right" style="display:flex;gap:8px;flex-wrap:wrap;"><button class="btn-secondary" type="button" onclick="copyLanAPIKey()" data-i18n="copy_api_key">Copy API Key</button><button class="btn-secondary" type="button" onclick="copyLanCACertificate()" data-i18n="copy_ca_certificate">Copy CA Certificate</button><button class="btn-secondary" type="button" onclick="rotateLanSecurity()" data-i18n="rotate_credentials">Rotate</button></div>
       </div>
       <div class="settings-row">
-        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="port">Port</span> <span class="badge badge-restart" data-i18n="badge_restart">restart</span></div></div>
+        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="port">Port</span></div></div>
         <div class="settings-row-right"><input type="number" value="9068" id="cfg-port"></div>
       </div>
       <div class="settings-row">
@@ -4126,14 +4256,13 @@
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="opacity:0.55;"><circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.2"/><line x1="8" y1="4" x2="8" y2="8.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><line x1="8" y1="10.5" x2="8" y2="11" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
           <span data-i18n="resource_mgmt">Resource Management</span>
         </span>
-        <span class="badge badge-restart" data-i18n="badge_restart">restart</span>
       </div>
       <div class="settings-row">
-        <div class="settings-row-left"><div class="settings-row-label" data-i18n="mem_limit_total">Memory Limit (Total)</div><div class="settings-row-desc" data-i18n="mem_limit_total_desc">Limits total memory used by the backend service, including models, KV Cache, and runtime overhead. Set 0 for auto.</div></div>
+        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="mem_limit_total">Memory Limit (Total)</span></div><div class="settings-row-desc" data-i18n="mem_limit_total_desc">Limits total memory used by the backend service, including models, KV Cache, and runtime overhead. Set 0 for auto.</div></div>
         <div class="settings-row-right"><label style="font-size:12px;display:flex;align-items:center;gap:4px;"><input type="checkbox" checked style="accent-color:var(--accent);" id="cfg-mem-total-auto"> <span data-i18n="auto">Auto</span></label><div class="slider-row"><input type="range" min="0" max="128" value="24" id="cfg-mem-total"><span class="slider-value" data-i18n="auto">Auto</span></div></div>
       </div>
       <div class="settings-row">
-        <div class="settings-row-left"><div class="settings-row-label" data-i18n="mem_limit_model">Memory Limit (Model Only)</div><div class="settings-row-desc" data-i18n="mem_limit_model_desc">Limits total memory used by loaded model weights. Set 0 for no limit.</div></div>
+        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="mem_limit_model">Memory Limit (Model Only)</span></div><div class="settings-row-desc" data-i18n="mem_limit_model_desc">Limits total memory used by loaded model weights. Set 0 for no limit.</div></div>
         <div class="settings-row-right"><label style="font-size:12px;display:flex;align-items:center;gap:4px;"><input type="checkbox" checked style="accent-color:var(--accent);" id="cfg-mem-model-auto"> <span data-i18n="auto">Auto</span></label><div class="slider-row"><input type="range" min="0" max="128" value="22" id="cfg-mem-model"><span class="slider-value" data-i18n="auto">Auto</span></div></div>
       </div>
     </div>
@@ -4145,10 +4274,9 @@
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="opacity:0.55;"><path d="M3 5C3 3.5 5.2 2 8 2C10.8 2 13 3.5 13 5V11C13 12.5 10.8 14 8 14C5.2 14 3 12.5 3 11V5Z" stroke="currentColor" stroke-width="1.2"/><ellipse cx="8" cy="5" rx="5" ry="2" stroke="currentColor" stroke-width="1.2"/><path d="M3 8C3 9.1 5.2 10 8 10C10.8 10 13 9.1 13 8" stroke="currentColor" stroke-width="1"/></svg>
           <span data-i18n="cache">Cache</span>
         </span>
-        <span class="badge badge-restart" data-i18n="badge_restart">restart</span>
       </div>
       <div class="settings-row">
-        <div class="settings-row-left"><div class="settings-row-label" data-i18n="enable_cache">Enable Cache</div></div>
+        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="enable_cache">Enable Cache</span></div></div>
         <div class="settings-row-right"><label class="toggle"><input type="checkbox" checked id="cfg-cache-enable"><span class="toggle-slider"></span></label></div>
       </div>
       <div class="settings-row">
@@ -4184,7 +4312,7 @@
         <div class="settings-row-right"><div class="slider-row"><input type="range" min="1" max="10" value="10" id="cfg-cold-cache"><span class="slider-value">10GB</span></div></div>
       </div>
       <div class="settings-row">
-        <div class="settings-row-left"><div class="settings-row-label" data-i18n="ssd_cache_dir">SSD Cache Directory</div></div>
+        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="ssd_cache_dir">SSD Cache Directory</span></div></div>
         <div class="settings-row-right"><input type="text" value="~/.ironmlx/cache/paged_prefix_cache" style="min-width:260px;" id="cfg-cache-dir"></div>
       </div>
       <div class="settings-row">
@@ -4207,7 +4335,7 @@
         <div class="settings-row-right"><label class="toggle"><input type="checkbox" id="cfg-active-kv-offload"><span class="toggle-slider"></span></label></div>
       </div>
       <div class="settings-row">
-        <div class="settings-row-left"><div class="settings-row-label" data-i18n="kv_quant">KV Cache Compression</div><div class="settings-row-desc" data-i18n="kv_quant_desc">Use TurboQuant to reduce runtime KV Cache memory usage for long contexts. K3V3 saves more memory, K4V4 is more conservative, and K3V4 is the recommended balanced option.</div></div>
+        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="kv_quant">KV Cache Compression</span></div><div class="settings-row-desc" data-i18n="kv_quant_desc">Use TurboQuant to reduce runtime KV Cache memory usage for long contexts. K3V3 saves more memory, K4V4 is more conservative, and K3V4 is the recommended balanced option.</div></div>
         <div class="settings-row-right"><select id="cfg-kv-quant" style="min-width:160px;"><option value="none" data-i18n="kv_quant_off">Off</option><option value="turbo3">TurboQuant K3V3</option><option value="turbo4">TurboQuant K4V4</option><option value="k3v4">TurboQuant K3V4</option></select></div>
       </div>
     </div>
@@ -4219,27 +4347,31 @@
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="opacity:0.55;"><path d="M2 4L8 2L14 4V12L8 14L2 12V4Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M2 4L8 6L14 4" stroke="currentColor" stroke-width="1.2"/><line x1="8" y1="6" x2="8" y2="14" stroke="currentColor" stroke-width="1.2"/></svg>
           <span data-i18n="advanced">Advanced</span>
         </span>
-        <span class="badge badge-restart" data-i18n="badge_restart">restart</span>
       </div>
       <div class="settings-row">
-        <div class="settings-row-left"><div class="settings-row-label" data-i18n="max_sequences">Max Sequences</div><div class="settings-row-desc" data-i18n="max_sequences_desc">Maximum number of concurrent parallel requests.</div></div>
+        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="max_sequences">Max Sequences</span></div><div class="settings-row-desc" data-i18n="max_sequences_desc">Maximum number of concurrent parallel requests.</div></div>
         <div class="settings-row-right"><input type="number" value="1" style="min-width:80px;" id="cfg-max-sequences"></div>
       </div>
       <div class="settings-row">
-        <div class="settings-row-left"><div class="settings-row-label" data-i18n="max_models">Max Concurrent Loaded Models</div><div class="settings-row-desc" data-i18n="max_models_desc">Maximum number of models the App keeps loaded at the same time. When the limit is reached, new model loads are rejected; existing loaded models are not automatically replaced. Unload an unused model manually before loading another.</div></div>
+        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="max_models">Max Concurrent Loaded Models</span></div><div class="settings-row-desc" data-i18n="max_models_desc">Maximum number of models the App keeps loaded at the same time. When the limit is reached, new model loads are rejected; existing loaded models are not automatically replaced. Unload an unused model manually before loading another.</div></div>
         <div class="settings-row-right"><input type="number" min="1" max="16" value="3" style="min-width:80px;" id="cfg-max-models"></div>
       </div>
       <div class="settings-row">
-        <div class="settings-row-left"><div class="settings-row-label" data-i18n="model_ttl">Model Auto-Unload (TTL)</div><div class="settings-row-desc" data-i18n="model_ttl_desc">Automatically unload loaded models after they stay idle for this many minutes. 0 = disabled. The default model preference is preserved.</div></div>
+        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="model_ttl">Model Auto-Unload (TTL)</span></div><div class="settings-row-desc" data-i18n="model_ttl_desc">Automatically unload loaded models after they stay idle for this many minutes. 0 = disabled. The default model preference is preserved.</div></div>
         <div class="settings-row-right"><input type="number" min="0" max="1440" value="30" style="min-width:80px;" id="cfg-model-ttl"> <span style="font-size:12px;color:var(--text-secondary);" data-i18n="minutes">minutes</span></div>
       </div>
     </div>
 
-    <!-- Save button -->
-    <div style="display:flex;justify-content:flex-end;margin-top:8px;">
-      <button class="btn-accent" style="padding:10px 28px;" data-i18n="save_settings" onclick="saveSettings()">Save Settings</button>
     </div>
-
+    <div class="settings-save-bar" id="settings-save-bar" data-state="clean">
+      <div class="settings-save-notice" role="status" aria-live="polite">
+        <svg class="settings-save-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v6"/><circle cx="12" cy="17" r="1" fill="currentColor" stroke="none"/></svg>
+        <div class="settings-save-status" id="settings-save-status"></div>
+      </div>
+      <div class="settings-save-actions">
+        <button class="btn-secondary" id="settings-cancel-button" onclick="cancelSettingsChanges()" data-i18n="cancel" hidden>Cancel</button>
+        <button class="btn-accent" id="settings-save-button" onclick="saveSettings()">Save Settings</button>
+      </div>
     </div>
   </div>
 
@@ -4583,6 +4715,7 @@
   const I18N = {
     en: {
       nav_status: "Status", nav_models: "Models", nav_benchmark: "Benchmark", nav_logs: "Logs", nav_chat: "Agent", nav_settings: "Settings",
+      sidebar_expand: "Expand sidebar", sidebar_collapse: "Collapse sidebar",
       chat_subtitle: "Configure external agents to use IronMLX as their inference provider.",
       agent_supported: "Supported agents", agent_supported_label: "Supported agents",
       agent_provider_setup: "Provider setup", agent_applicable_version: "Applicable version",
@@ -4861,7 +4994,7 @@
       log_exported: "Log exported.", log_export_failed: "Could not export the log. Check the destination and available disk space.",
       log_viewer: "Log Viewer", auto_refresh: "Auto Refresh", log_lines: "Lines:", log_interval: "Interval:", log_interval_hint: "sec (0=off)", log_file: "File:", log_level_filter: "Level:", log_level_all: "ALL", log_search: "Search:", refresh: "Refresh", auto_scroll: "Auto Scroll", log_showing: "Showing", log_lines_unit: "lines", export_log: "Export Log",
       log_server_offline: "Backend is not running", log_start_hint: "Load a local model from Models to start it and view logs.", log_no_entries: "No log entries", log_no_app_logs: "No app log entries",
-      settings_title: "App Settings", settings_subtitle_html: 'Settings marked with <span class="badge badge-restart">restart</span> require a server restart.',
+      settings_title: "App Settings", settings_subtitle_html: 'Changes that require saving are shown in the bottom bar.',
       server: "Server", host: "Host", port: "Port", log_level: "Log Level",
       network_mode: "Network Mode", network_mode_desc: "Local only listens on loopback. LAN adds an authenticated HTTPS listener on one selected interface.", network_mode_local: "Local only", network_mode_lan: "LAN (HTTPS + API Key)",
       lan_interface: "LAN Interface", lan_interface_desc: "Select one concrete active LAN address. Wildcard listening is not allowed.",
@@ -4892,6 +5025,14 @@
       completion_batch: "Completion Batch Size", completion_batch_desc: "Batch size for the token generation phase.",
       save_settings: "Save Settings",
       settings_saved: "Settings saved successfully.",
+      settings_clean: "No unsaved changes",
+      settings_dirty: "You have unsaved changes",
+      settings_restart_pending: "You have unsaved changes. Saving will restart the service.",
+      settings_next_start: "Changes will apply the next time the service starts",
+      save_restart_settings: "Save and restart service",
+      settings_saving: "Saving settings…",
+      settings_restarting: "Saving and restarting service…",
+      settings_save_failed: "Settings were not saved. Review the error and try again.",
       log_level_live_desc: "Applies immediately to App and backend diagnostics. Saved automatically; no restart required.",
       log_level_applying: "Applying log level…",
       err_log_level_apply_failed: "Could not apply the log level. The previous setting is retained.",
@@ -4900,7 +5041,6 @@
       err_log_level_backend_changed: "The backend changed during this operation. Try again once the service is ready.",
       err_log_level_backend_unavailable: "The backend could not apply the log level. Check service availability and try again.",
       err_log_level_busy: "Wait for the log level change to finish.",
-      settings_unsaved_restart: "You have unsaved changes requiring a restart. Click \"Save Settings\" at the bottom to apply.",
       cold_cache_too_large: "SSD cache limit was reduced to {max}GB to fit available disk space.",
       params_saved: "Model parameters saved.",
       params_reloaded: "Model parameters applied. The model has been reloaded.",
@@ -4967,6 +5107,7 @@
     },
     "zh-Hans": {
       nav_status: "状态", nav_models: "模型", nav_benchmark: "基准测试", nav_logs: "日志", nav_chat: "Agent", nav_settings: "设置",
+      sidebar_expand: "展开侧栏", sidebar_collapse: "收起侧栏",
       chat_subtitle: "配置外部 Agent 使用 IronMLX 作为推理 Provider。",
       agent_supported: "支持的 Agent", agent_supported_label: "支持的 Agent",
       agent_provider_setup: "Provider 配置", agent_applicable_version: "适用版本",
@@ -5245,7 +5386,7 @@
       log_exported: "日志已导出。", log_export_failed: "无法导出日志，请检查保存位置和可用磁盘空间。",
       log_viewer: "日志查看器", auto_refresh: "自动刷新", log_lines: "行数：", log_interval: "刷新间隔：", log_interval_hint: "秒（0=关闭）", log_file: "文件：", log_level_filter: "级别：", log_level_all: "全部", log_search: "搜索：", refresh: "刷新", auto_scroll: "自动滚动", log_showing: "显示", log_lines_unit: "行", export_log: "导出日志",
       log_server_offline: "后端未运行", log_start_hint: "请在模型管理中加载本地模型以启动后端并查看日志。", log_no_entries: "暂无日志", log_no_app_logs: "暂无应用日志",
-      settings_title: "应用设置", settings_subtitle_html: '标有 <span class="badge badge-restart">重启</span> 的设置需要重启服务。',
+      settings_title: "应用设置", settings_subtitle_html: '需要保存的更改会在底部提示。',
       server: "服务器", host: "主机", port: "端口", log_level: "日志级别",
       network_mode: "网络模式", network_mode_desc: "本机模式仅监听回环地址；LAN 模式会在选定接口上增加一个经过认证的 HTTPS 监听端点。", network_mode_local: "仅本机", network_mode_lan: "局域网（HTTPS + API Key）",
       lan_interface: "局域网接口", lan_interface_desc: "请选择一个具体且处于活动状态的局域网地址；不允许监听通配地址。",
@@ -5276,6 +5417,14 @@
       completion_batch: "补全批大小", completion_batch_desc: "Token 生成阶段的批处理大小。",
       save_settings: "保存设置",
       settings_saved: "设置已保存。",
+      settings_clean: "没有未保存的修改",
+      settings_dirty: "有未保存的修改",
+      settings_restart_pending: "有未保存的更改，保存后将重启服务。",
+      settings_next_start: "修改将在下次启动服务时生效",
+      save_restart_settings: "保存并重启服务",
+      settings_saving: "正在保存设置…",
+      settings_restarting: "正在保存并重启服务…",
+      settings_save_failed: "设置未保存，请检查错误后重试。",
       log_level_live_desc: "立即应用于 App 和后端诊断日志，自动保存，无需重启。",
       log_level_applying: "正在应用日志级别…",
       err_log_level_apply_failed: "日志级别应用失败，已保留原设置。",
@@ -5284,7 +5433,6 @@
       err_log_level_backend_changed: "操作期间后端状态发生变化，请等待服务就绪后重试。",
       err_log_level_backend_unavailable: "后端未能应用日志级别，请检查服务是否可用后重试。",
       err_log_level_busy: "请等待日志级别修改完成。",
-      settings_unsaved_restart: "有尚未保存且需要重启的改动，请点击底部「保存设置」以生效。",
       cold_cache_too_large: "SSD 缓存限制已根据磁盘可用空间下调为 {max}GB。",
       params_saved: "模型参数已保存。",
       params_reloaded: "模型参数已生效，模型已重新加载。",
@@ -5351,6 +5499,7 @@
     },
     "zh-Hant": {
       nav_status: "狀態", nav_models: "模型", nav_benchmark: "基準測試", nav_logs: "日誌", nav_chat: "Agent", nav_settings: "設定",
+      sidebar_expand: "展開側欄", sidebar_collapse: "收起側欄",
       chat_subtitle: "設定外部 Agent 使用 IronMLX 作為推理 Provider。",
       agent_supported: "支援的 Agent", agent_supported_label: "支援的 Agent",
       agent_provider_setup: "Provider 設定", agent_applicable_version: "適用版本",
@@ -5632,7 +5781,7 @@
       log_exported: "日誌已匯出。", log_export_failed: "無法匯出日誌，請檢查儲存位置和可用磁碟空間。",
       log_viewer: "日誌檢視器", auto_refresh: "自動重新整理", log_lines: "行數：", log_interval: "重新整理間隔：", log_interval_hint: "秒（0=關閉）", log_file: "檔案：", log_level_filter: "級別：", log_level_all: "全部", log_search: "搜尋：", refresh: "重新整理", auto_scroll: "自動捲動", log_showing: "顯示", log_lines_unit: "行", export_log: "匯出日誌",
       log_server_offline: "後端未執行", log_start_hint: "請在模型管理中載入本地模型以啟動後端並檢視日誌。", log_no_entries: "暫無日誌", log_no_app_logs: "暫無應用日誌",
-      settings_title: "應用設定", settings_subtitle_html: '標有 <span class="badge badge-restart">重啟</span> 的設定需要重啟服務。',
+      settings_title: "應用設定", settings_subtitle_html: '需要儲存的變更會顯示於底部。',
       server: "伺服器", host: "主機", port: "連接埠", log_level: "日誌等級",
       network_mode: "網路模式", network_mode_desc: "本機模式僅監聽迴路位址；LAN 模式會在所選介面上新增一個經過驗證的 HTTPS 監聽端點。", network_mode_local: "僅本機", network_mode_lan: "區域網路（HTTPS + API Key）",
       lan_interface: "區域網路介面", lan_interface_desc: "請選擇一個具體且處於使用中的區域網路位址；不允許監聽萬用位址。",
@@ -5663,6 +5812,14 @@
       model_ttl: "模型自動卸載 (TTL)", model_ttl_desc: "已載入模型閒置超過指定分鐘數後自動卸載。0 = 不啟用；預設模型偏好會保留。", minutes: "分鐘",
       save_settings: "儲存設定",
       settings_saved: "設定已儲存。",
+      settings_clean: "沒有未儲存的修改",
+      settings_dirty: "有未儲存的修改",
+      settings_restart_pending: "有未儲存的變更，儲存後將重啟服務。",
+      settings_next_start: "修改將在下次啟動服務時生效",
+      save_restart_settings: "儲存並重啟服務",
+      settings_saving: "正在儲存設定…",
+      settings_restarting: "正在儲存並重新啟動服務…",
+      settings_save_failed: "設定未儲存，請檢查錯誤後重試。",
       log_level_live_desc: "立即套用至 App 和後端診斷日誌，自動儲存，無需重啟。",
       log_level_applying: "正在套用日誌等級…",
       err_log_level_apply_failed: "日誌等級套用失敗，已保留原設定。",
@@ -5671,7 +5828,6 @@
       err_log_level_backend_changed: "操作期間後端狀態發生變化，請等待服務就緒後重試。",
       err_log_level_backend_unavailable: "後端未能套用日誌等級，請檢查服務是否可用後重試。",
       err_log_level_busy: "請等待日誌等級修改完成。",
-      settings_unsaved_restart: "有尚未儲存且需要重啟的改動，請點擊底部「儲存設定」以生效。",
       cold_cache_too_large: "SSD 快取限制已根據磁碟可用空間下調為 {max}GB。",
       params_saved: "模型參數已儲存。",
       params_reloaded: "模型參數已生效，模型已重新載入。",
@@ -5738,6 +5894,7 @@
     },
     ja: {
       nav_status: "ステータス", nav_models: "モデル", nav_benchmark: "ベンチマーク", nav_logs: "ログ", nav_chat: "AI エージェント", nav_settings: "設定",
+      sidebar_expand: "サイドバーを展開", sidebar_collapse: "サイドバーを折りたたむ",
       chat_subtitle: "外部エージェントが IronMLX を推論プロバイダーとして使用できるように設定します。",
       agent_supported: "対応エージェント", agent_supported_label: "対応しているエージェント",
       agent_provider_setup: "プロバイダー設定", agent_applicable_version: "対応バージョン",
@@ -6019,7 +6176,7 @@
       log_exported: "ログをエクスポートしました。", log_export_failed: "ログをエクスポートできません。保存先と空き容量を確認してください。",
       log_viewer: "ログビューア", auto_refresh: "自動更新", log_lines: "行数：", log_interval: "更新間隔：", log_interval_hint: "秒（0=オフ）", log_file: "ファイル：", log_level_filter: "レベル：", log_level_all: "すべて", log_search: "検索：", refresh: "更新", auto_scroll: "自動スクロール", log_showing: "表示", log_lines_unit: "行", export_log: "ログエクスポート",
       log_server_offline: "バックエンドが実行されていません", log_start_hint: "Models でローカルモデルを読み込むと起動し、ログを表示できます。", log_no_entries: "ログエントリなし", log_no_app_logs: "アプリログエントリなし",
-      settings_title: "アプリ設定", settings_subtitle_html: '<span class="badge badge-restart">再起動</span> マーク付きの設定はサーバーの再起動が必要です。',
+      settings_title: "アプリ設定", settings_subtitle_html: '保存が必要な変更は下部に表示されます。',
       server: "サーバー", host: "ホスト", port: "ポート", log_level: "ログレベル",
       network_mode: "ネットワークモード", network_mode_desc: "ローカルモードはループバックのみで待ち受けます。LAN モードでは、選択したインターフェースに認証付き HTTPS リスナーを追加します。", network_mode_local: "ローカルのみ", network_mode_lan: "LAN（HTTPS + API Key）",
       lan_interface: "LAN インターフェース", lan_interface_desc: "有効な具体的 LAN アドレスを1つ選択してください。ワイルドカードでの待ち受けは許可されません。",
@@ -6050,6 +6207,14 @@
       model_ttl: "モデル自動アンロード (TTL)", model_ttl_desc: "読み込み済みモデルが指定した分数アイドル状態のままなら自動的にアンロードします。0 = 無効。デフォルトモデル設定は保持されます。", minutes: "分",
       save_settings: "設定を保存",
       settings_saved: "設定が保存されました。",
+      settings_clean: "未保存の変更はありません",
+      settings_dirty: "未保存の変更があります",
+      settings_restart_pending: "未保存の変更があります。保存するとサービスが再起動します。",
+      settings_next_start: "変更は次回のサービス起動時に適用されます",
+      save_restart_settings: "保存してサービスを再起動",
+      settings_saving: "設定を保存中…",
+      settings_restarting: "保存してサービスを再起動中…",
+      settings_save_failed: "設定を保存できませんでした。エラーを確認して再試行してください。",
       log_level_live_desc: "App とバックエンドの診断ログに即時適用し、自動保存します。再起動は不要です。",
       log_level_applying: "ログレベルを適用中…",
       err_log_level_apply_failed: "ログレベルを適用できませんでした。以前の設定を保持しています。",
@@ -6058,7 +6223,6 @@
       err_log_level_backend_changed: "操作中にバックエンドの状態が変わりました。サービスの準備完了後に再試行してください。",
       err_log_level_backend_unavailable: "バックエンドにログレベルを適用できませんでした。サービスの状態を確認して再試行してください。",
       err_log_level_busy: "ログレベルの変更が完了するまでお待ちください。",
-      settings_unsaved_restart: "再起動が必要な未保存の変更があります。下部の「設定を保存」をクリックして適用してください。",
       cold_cache_too_large: "SSDキャッシュ制限はディスク空き容量に合わせて {max}GB に下げられました。",
       params_saved: "モデルパラメータが保存されました。",
       params_reloaded: "モデルパラメータが適用され、モデルを再読み込みしました。",
@@ -6125,6 +6289,7 @@
     },
     ko: {
       nav_status: "상태", nav_models: "모델", nav_benchmark: "벤치마크", nav_logs: "로그", nav_chat: "AI 에이전트", nav_settings: "설정",
+      sidebar_expand: "사이드바 펼치기", sidebar_collapse: "사이드바 접기",
       chat_subtitle: "외부 에이전트가 IronMLX를 추론 프로바이더로 사용하도록 구성하세요.",
       agent_supported: "지원 에이전트", agent_supported_label: "지원되는 에이전트",
       agent_provider_setup: "프로바이더 설정", agent_applicable_version: "지원 버전",
@@ -6406,7 +6571,7 @@
       log_exported: "로그를 내보냈습니다.", log_export_failed: "로그를 내보낼 수 없습니다. 저장 위치와 디스크 여유 공간을 확인하세요.",
       log_viewer: "로그 뷰어", auto_refresh: "자동 새로고침", log_lines: "줄 수:", log_interval: "새로고침 간격:", log_interval_hint: "초 (0=끄기)", log_file: "파일:", log_level_filter: "레벨:", log_level_all: "전체", log_search: "검색:", refresh: "새로고침", auto_scroll: "자동 스크롤", log_showing: "표시", log_lines_unit: "줄", export_log: "로그 내보내기",
       log_server_offline: "백엔드가 실행되고 있지 않습니다", log_start_hint: "Models에서 로컬 모델을 로드하면 시작되고 로그를 볼 수 있습니다.", log_no_entries: "로그 항목 없음", log_no_app_logs: "앱 로그 항목 없음",
-      settings_title: "앱 설정", settings_subtitle_html: '<span class="badge badge-restart">재시작</span> 표시된 설정은 서버 재시작이 필요합니다.',
+      settings_title: "앱 설정", settings_subtitle_html: '저장이 필요한 변경사항은 하단에 표시됩니다.',
       server: "서버", host: "호스트", port: "포트", log_level: "로그 수준",
       network_mode: "네트워크 모드", network_mode_desc: "로컬 모드는 루프백에서만 수신합니다. LAN 모드는 선택한 인터페이스에 인증된 HTTPS 리스너를 추가합니다.", network_mode_local: "로컬 전용", network_mode_lan: "LAN (HTTPS + API Key)",
       lan_interface: "LAN 인터페이스", lan_interface_desc: "활성 상태인 구체적인 LAN 주소 하나를 선택하세요. 와일드카드 수신은 허용되지 않습니다.",
@@ -6437,6 +6602,14 @@
       model_ttl: "모델 자동 언로드 (TTL)", model_ttl_desc: "로드된 모델이 지정된 시간(분) 동안 유휴 상태이면 자동으로 언로드합니다. 0 = 비활성화. 기본 모델 설정은 유지됩니다.", minutes: "분",
       save_settings: "설정 저장",
       settings_saved: "설정이 저장되었습니다.",
+      settings_clean: "저장되지 않은 변경사항 없음",
+      settings_dirty: "저장되지 않은 변경사항 있음",
+      settings_restart_pending: "저장되지 않은 변경사항이 있습니다. 저장하면 서비스가 다시 시작됩니다.",
+      settings_next_start: "다음 서비스 시작 시 변경사항이 적용됩니다",
+      save_restart_settings: "저장 및 서비스 재시작",
+      settings_saving: "설정 저장 중…",
+      settings_restarting: "저장 및 서비스 재시작 중…",
+      settings_save_failed: "설정이 저장되지 않았습니다. 오류를 확인하고 다시 시도하세요.",
       log_level_live_desc: "App 및 백엔드 진단 로그에 즉시 적용하고 자동 저장합니다. 재시작이 필요하지 않습니다.",
       log_level_applying: "로그 수준 적용 중…",
       err_log_level_apply_failed: "로그 수준을 적용하지 못했습니다. 이전 설정을 유지합니다.",
@@ -6445,7 +6618,6 @@
       err_log_level_backend_changed: "작업 중 백엔드 상태가 변경되었습니다. 서비스가 준비된 후 다시 시도하세요.",
       err_log_level_backend_unavailable: "백엔드에 로그 수준을 적용하지 못했습니다. 서비스 상태를 확인한 후 다시 시도하세요.",
       err_log_level_busy: "로그 수준 변경이 완료될 때까지 기다려 주세요.",
-      settings_unsaved_restart: "재시작이 필요한 저장되지 않은 변경사항이 있습니다. 하단의 \"설정 저장\"을 클릭하여 적용하세요.",
       cold_cache_too_large: "SSD 캐시 제한이 디스크 여유 공간에 맞춰 {max}GB로 낮아졌습니다.",
       params_saved: "모델 매개변수가 저장되었습니다.",
       params_reloaded: "모델 매개변수가 적용되었고 모델을 다시 로드했습니다.",
@@ -6535,6 +6707,7 @@
       if (dict[key]) el.setAttribute('aria-label', dict[key]);
     });
     refreshAgentCopyButtonLabels();
+    updateSidebarControls(dict);
     // Settings subtitle with inline badge
     const sub = document.getElementById('settings-subtitle');
     if (sub && dict.settings_subtitle_html) {
@@ -6558,6 +6731,7 @@
       const select = document.getElementById(id);
       if (select) select.value = i18nLang;
     });
+    updateSettingsSaveBar();
     updateLogLevelControls();
     // Re-render model list to update action buttons text
     syncModelList();
@@ -8093,12 +8267,79 @@
     btn.addEventListener('click', () => setTheme(btn.dataset.value));
   });
 
+  function updateSidebarControls(dict = I18N[currentLang] || I18N.en) {
+    const collapsed = document.documentElement.classList.contains('sidebar-collapsed');
+    const label = collapsed ? dict.sidebar_expand : dict.sidebar_collapse;
+    const toggle = document.getElementById('sidebar-toggle');
+    toggle.removeAttribute('title');
+    toggle.dataset.sidebarTooltip = label;
+    toggle.setAttribute('aria-label', label);
+    toggle.setAttribute('aria-expanded', String(!collapsed));
+    document.querySelectorAll('.sidebar .nav-item').forEach(item => {
+      const name = item.querySelector('[data-i18n]')?.textContent || '';
+      item.removeAttribute('title');
+      item.dataset.sidebarTooltip = collapsed ? name : '';
+      item.setAttribute('aria-label', name);
+    });
+    const target = document.getElementById('sidebar-tooltip').__target;
+    if (target) showSidebarTooltip(target);
+  }
+
+  function hideSidebarTooltip() {
+    const tooltip = document.getElementById('sidebar-tooltip');
+    if (tooltip.__target) tooltip.__target.removeAttribute('aria-describedby');
+    tooltip.__target = null;
+    tooltip.hidden = true;
+  }
+
+  function showSidebarTooltip(target) {
+    hideSidebarTooltip();
+    const label = target.dataset.sidebarTooltip;
+    if (!label || target.hidden) return;
+    const tooltip = document.getElementById('sidebar-tooltip');
+    tooltip.textContent = label;
+    tooltip.hidden = false;
+    tooltip.__target = target;
+    target.setAttribute('aria-describedby', tooltip.id);
+    const rect = target.getBoundingClientRect();
+    const size = tooltip.getBoundingClientRect();
+    tooltip.style.left = Math.max(8, Math.min(rect.right + 10, window.innerWidth - size.width - 8)) + 'px';
+    tooltip.style.top = Math.max(8, Math.min(rect.top + (rect.height - size.height) / 2, window.innerHeight - size.height - 8)) + 'px';
+  }
+
+  function toggleSidebar() {
+    const collapsed = document.documentElement.classList.toggle('sidebar-collapsed');
+    try { localStorage.setItem('ironmlx.sidebar.collapsed', String(collapsed)); } catch (_) {}
+    updateSidebarControls();
+    window.dispatchEvent(new Event('resize'));
+  }
+
   // Navigation
   document.querySelectorAll('.nav-item').forEach(item => {
+    item.setAttribute('role', 'button');
+    item.tabIndex = 0;
+    item.addEventListener('keydown', event => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        item.click();
+      }
+    });
     item.addEventListener('click', () => {
       navigateTo(item.dataset.page);
     });
   });
+  updateSidebarControls();
+  document.querySelectorAll('.sidebar .nav-item, #sidebar-toggle').forEach(target => {
+    target.addEventListener('mouseenter', () => showSidebarTooltip(target));
+    target.addEventListener('mouseleave', hideSidebarTooltip);
+    target.addEventListener('focus', () => showSidebarTooltip(target));
+    target.addEventListener('blur', hideSidebarTooltip);
+    target.addEventListener('click', hideSidebarTooltip);
+    target.addEventListener('keydown', event => {
+      if (event.key === 'Escape') hideSidebarTooltip();
+    });
+  });
+  window.addEventListener('resize', hideSidebarTooltip);
 
   // Disable autocorrect/autocapitalize on all inputs
   document.querySelectorAll('input[type="text"], input[type="number"]').forEach(el => {
@@ -10505,9 +10746,7 @@
     if (select) select.disabled = logLevelPending || fullSettingsSavePending;
     const status = document.getElementById('log-level-status');
     if (status) status.textContent = t(logLevelStatusKey);
-    document.querySelectorAll('button[onclick="saveSettings()"]').forEach(button => {
-      button.disabled = logLevelPending || fullSettingsSavePending;
-    });
+    updateSettingsSaveBar();
   }
 
   function selectLogLevel(value) {
@@ -10543,7 +10782,7 @@
 
   // ── Save Settings ──
   async function saveSettings() {
-    if (logLevelPending || fullSettingsSavePending) return;
+    if (settingsSaving || logLevelPending || fullSettingsSavePending) return;
     const themeActive = document.querySelector('#theme-select .seg-btn.active');
     const memTotalAuto = checkedInputValue('cfg-mem-total-auto', true);
     const memModelAuto = checkedInputValue('cfg-mem-model-auto', true);
@@ -10581,27 +10820,43 @@
     };
     window.__IRONMLX_APP_CONFIG__ = Object.assign({}, window.__IRONMLX_APP_CONFIG__ || {}, settings);
     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveSettings) {
+      settingsSaving = true;
+      settingsSaveFailed = false;
+      settingsSaveError = null;
+      settingsRestarting = settingsBackendRunning !== false && RESTART_FIELDS.some(id => readSettingsValues()[id] !== settingsBaseline[id]);
+      pendingSettingsBaseline = readSettingsValues();
+      pendingSettingsAuxiliary = readSettingsAuxiliary();
+      updateSettingsSaveBar();
       fullSettingsSavePending = true;
       updateLogLevelControls();
       window.webkit.messageHandlers.saveSettings.postMessage(JSON.stringify(settings));
     }
   }
 
-  // Called from Rust after settings are saved
+  // Called from the native bridge after settings are saved
   function onSettingsSaved(jsonStr) {
     fullSettingsSavePending = false;
     updateLogLevelControls();
     let result = {};
     try { result = JSON.parse(jsonStr); } catch(e) { return; }
     const dict = I18N[currentLang] || I18N.en;
+    settingsSaving = false;
     if (result.status === 'error' || result.code) {
+      pendingSettingsBaseline = null;
+      pendingSettingsAuxiliary = null;
+      settingsSaveFailed = true;
+      settingsSaveError = result;
+      updateSettingsSaveBar();
       showToast(localizeErrorResult(result), 'warn');
       return;
     }
-    // Settings just persisted — current DOM values are the new baseline, and
-    // the "unsaved" toast should be allowed to fire again if the user starts
-    // editing.
-    snapshotSettingsBaseline();
+    // Keep edits made while saving separate from the submitted baseline.
+    settingsBaseline = pendingSettingsBaseline || readSettingsValues();
+    settingsBaselineAuxiliary = pendingSettingsAuxiliary || readSettingsAuxiliary();
+    pendingSettingsBaseline = null;
+    pendingSettingsAuxiliary = null;
+    settingsSaveFailed = false;
+    updateSettingsSaveBar();
     if (result.needs_restart) {
       const msg = dict.restart_confirm || 'Some settings require a server restart to take effect. Restart now?';
       showConfirmDialog(msg, { confirmText: dict.restart_now || 'Restart Now' }).then(function(ok) {
@@ -10616,7 +10871,7 @@
 
   // ── Settings dirty-state watcher ──
   // Fields whose value requires a backend restart to take effect. These
-  // match the keys the Rust side checks in its `needs_restart` diff.
+  // correspond to the native bridge's backendRestartRequired comparison.
   const RESTART_FIELDS = [
     'cfg-network-mode', 'cfg-lan-host', 'cfg-port',
     'cfg-mem-total', 'cfg-mem-total-auto',
@@ -10628,45 +10883,111 @@
     'cfg-kv-quant', 'cfg-model-ttl',
     'cfg-distributed-backend', 'cfg-parallel-mode'
   ];
+  const SETTINGS_FIELDS = [...RESTART_FIELDS, 'cfg-verify-model-on-load'];
   let settingsBaseline = null;
-  let _lastSettingsDirtyToastAt = 0;
+  let pendingSettingsBaseline = null;
+  let settingsBaselineAuxiliary = null;
+  let pendingSettingsAuxiliary = null;
+  let settingsSaving = false;
+  let settingsSaveFailed = false;
+  let settingsSaveError = null;
+  let settingsRestarting = false;
+  let settingsBackendRunning = null;
+
+  function readSettingsValues() {
+    const values = {};
+    SETTINGS_FIELDS.forEach(id => {
+      const el = document.getElementById(id);
+      if (el) values[id] = el.type === 'checkbox' ? el.checked : el.value;
+    });
+    return values;
+  }
 
   function snapshotSettingsBaseline() {
-    settingsBaseline = {};
-    RESTART_FIELDS.forEach(id => {
+    settingsBaseline = readSettingsValues();
+    settingsBaselineAuxiliary = readSettingsAuxiliary();
+    updateSettingsSaveBar();
+  }
+
+  function readSettingsAuxiliary() {
+    const manualValues = {};
+    SETTINGS_FIELDS.forEach(id => {
       const el = document.getElementById(id);
-      if (!el) return;
-      settingsBaseline[id] = (el.type === 'checkbox') ? el.checked : el.value;
+      if (el && el.dataset.manualValue !== undefined) manualValues[id] = el.dataset.manualValue;
     });
+    const lanHost = document.getElementById('cfg-lan-host');
+    return { manualValues, lanHost: lanHost ? (lanHost.__preferredHost ?? lanHost.value) : '' };
+  }
+
+  function changedSettingsFields() {
+    if (!settingsBaseline) return [];
+    const values = readSettingsValues();
+    const auxiliary = readSettingsAuxiliary();
+    return SETTINGS_FIELDS.filter(id => values[id] !== settingsBaseline[id]
+      || auxiliary.manualValues[id] !== settingsBaselineAuxiliary?.manualValues[id]);
+  }
+
+  function cancelSettingsChanges() {
+    if (!settingsBaseline || settingsSaving || fullSettingsSavePending) return;
+    // Restore only deferred settings. Immediate settings keep their current values.
+    SETTINGS_FIELDS.forEach(id => {
+      const el = document.getElementById(id);
+      if (!el || settingsBaseline[id] === undefined) return;
+      if (el.type === 'checkbox') el.checked = settingsBaseline[id];
+      else el.value = settingsBaseline[id];
+      const manualValue = settingsBaselineAuxiliary?.manualValues[id];
+      if (manualValue === undefined) delete el.dataset.manualValue;
+      else el.dataset.manualValue = manualValue;
+    });
+    const lanHost = document.getElementById('cfg-lan-host');
+    if (lanHost) lanHost.__preferredHost = settingsBaselineAuxiliary?.lanHost ?? settingsBaseline['cfg-lan-host'];
+    // Refresh dependent labels and disabled states without posting a settings save.
+    refreshSettingsDerivedUI();
+    refreshNetworkSecurityUI();
+    if (coldCacheCapacityTimer) {
+      clearTimeout(coldCacheCapacityTimer);
+      coldCacheCapacityTimer = null;
+    }
+    settingsSaveFailed = false;
+    settingsSaveError = null;
+    updateSettingsSaveBar();
+  }
+
+  function updateSettingsSaveBar() {
+    const button = document.getElementById('settings-save-button');
+    const status = document.getElementById('settings-save-status');
+    if (!button || !status || !settingsBaseline) return;
+    const changed = changedSettingsFields();
+    const restart = changed.some(id => RESTART_FIELDS.includes(id));
+    const dict = I18N[currentLang] || I18N.en;
+    const willRestart = restart && settingsBackendRunning !== false;
+    button.textContent = settingsSaving ? (settingsRestarting ? dict.settings_restarting : dict.settings_saving)
+      : willRestart ? dict.save_restart_settings : dict.save_settings;
+    button.disabled = settingsSaving || logLevelPending || fullSettingsSavePending || !changed.length;
+    const cancelButton = document.getElementById('settings-cancel-button');
+    if (cancelButton) {
+      cancelButton.hidden = !changed.length && !settingsSaving;
+      cancelButton.disabled = settingsSaving || fullSettingsSavePending;
+    }
+    status.textContent = settingsSaving ? (settingsRestarting ? dict.settings_restarting : dict.settings_saving)
+      : settingsSaveFailed && changed.length ? dict.settings_save_failed + (settingsSaveError ? " " + localizeErrorResult(settingsSaveError) : "")
+      : restart ? (settingsBackendRunning === false ? dict.settings_next_start : dict.settings_restart_pending)
+      : changed.length ? dict.settings_dirty : '';
+    const bar = document.getElementById('settings-save-bar');
+    bar.dataset.restart = String(restart);
+    bar.dataset.state = settingsSaving ? 'saving' : !changed.length ? 'clean' : settingsSaveFailed ? 'error' : 'pending';
   }
 
   function checkSettingsDirty() {
-    if (!settingsBaseline) { snapshotSettingsBaseline(); return; }
-    let dirty = false;
-    for (const id of RESTART_FIELDS) {
-      const el = document.getElementById(id);
-      if (!el) continue;
-      const cur = (el.type === 'checkbox') ? el.checked : el.value;
-      if (cur !== settingsBaseline[id]) { dirty = true; break; }
+    if (settingsBaseline && !changedSettingsFields().length) {
+      settingsSaveFailed = false;
+      settingsSaveError = null;
     }
-    if (!dirty) return;
-    // Throttle to at most one toast every 3.5s so rapid slider drags or
-    // keystrokes don't spam — but any change after that window still fires
-    // so the user is reliably reminded, regardless of which section they
-    // touched.
-    const now = Date.now();
-    if (now - _lastSettingsDirtyToastAt < 3500) return;
-    _lastSettingsDirtyToastAt = now;
-    const dict = I18N[currentLang] || I18N.en;
-    showToast(
-      dict.settings_unsaved_restart ||
-        'You have unsaved changes requiring a restart. Click Save Settings at the bottom to apply.',
-      'info'
-    );
+    updateSettingsSaveBar();
   }
 
   function bindSettingsDirtyWatcher() {
-    RESTART_FIELDS.forEach(id => {
+    SETTINGS_FIELDS.forEach(id => {
       const el = document.getElementById(id);
       if (!el || el.__dirtyBound) return;
       const evt = (el.tagName === 'SELECT' || el.type === 'checkbox') ? 'change' : 'input';
@@ -10918,6 +11239,8 @@
 
   // Dummy — status error display handled in onApiFetchResult
   function showStatusOffline() {
+    settingsBackendRunning = false;
+    updateSettingsSaveBar();
     const dict = I18N[currentLang] || I18N.en;
     updateServerStatusVisual(dict.stopped || 'Stopped', 'var(--text-tertiary)');
     document.getElementById('stat-uptime').textContent = '--';
@@ -11327,6 +11650,8 @@
         const data = JSON.parse(jsonStr);
         const runtimeModels = Array.isArray(data.runtime_models) ? data.runtime_models : [];
         renderRuntimeModels(runtimeModels);
+        settingsBackendRunning = true;
+        updateSettingsSaveBar();
         updateServerStatusVisual(dict.running || 'Running', 'var(--green)');
         document.getElementById('stat-uptime').textContent = formatUptime(data.started_at);
         // Sync loaded model state from health response (supports multiple models)
