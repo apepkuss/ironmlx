@@ -138,6 +138,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         "fetchAPIPost",
         "fetchAPIDelete",
         "setLanguage",
+        "openAgentGuide",
         "setLogLevel",
         "setTheme",
         "setDefaultModel",
@@ -188,6 +189,16 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             sendFetchResult(path: stringBody(body), jsonString: "null")
         case "setLogLevel":
             setLogLevel(stringBody(body))
+        case "openAgentGuide":
+            guard let url = URL(string: stringBody(body)),
+                  url.scheme == "https",
+                  url.user == nil, url.password == nil, url.port == nil
+            else { return }
+            let isHermesGuide = url.host == "hermes-agent.nousresearch.com"
+                && ["/docs/integrations/providers", "/docs/zh-Hans/integrations/providers"].contains(url.path)
+            let isOMPGuide = url.host == "omp.sh" && url.path == "/docs/custom-models"
+            guard isHermesGuide || isOMPGuide else { return }
+            NSWorkspace.shared.open(url)
         case "setLanguage":
             updateConfig { $0.language = stringBody(body) }
             notifyMenuLanguageDidChange()

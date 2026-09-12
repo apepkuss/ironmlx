@@ -1219,6 +1219,27 @@
   .agent-guide-panel[hidden] {
     display: none;
   }
+  .agent-guide-compact-slot {
+    position: sticky;
+    top: 0;
+    height: 0;
+    z-index: 5;
+  }
+  .agent-guide-compact-bar {
+    min-height: 48px;
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 12px 20px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--card-bg);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+  }
+  .agent-guide-compact-bar[hidden] { display: none; }
+  .agent-guide-compact-name { font-size: 15px; font-weight: 650; }
   .agent-guide-hero {
     display: flex;
     align-items: flex-start;
@@ -1229,6 +1250,19 @@
     border: 1px solid var(--border);
     border-radius: 12px;
     background: var(--card-bg);
+  }
+  .agent-guide-docs-link {
+    flex-shrink: 0;
+    color: var(--accent, #007aff);
+    font-size: 13px;
+    line-height: 1.6;
+    text-decoration: none;
+  }
+  .agent-guide-docs-link:hover { text-decoration: underline; }
+  .agent-guide-docs-link:focus-visible {
+    outline: 2px solid var(--accent, #007aff);
+    outline-offset: 4px;
+    border-radius: 3px;
   }
   .agent-guide-eyebrow {
     margin-bottom: 5px;
@@ -3980,6 +4014,7 @@
                 </div>
                 <p class="agent-guide-description" data-i18n="hermes_description">Use IronMLX through Hermes Agent's stateless Responses transport. The configuration below is generated from the current App state.</p>
               </div>
+              <a id="hermes-official-guide" class="agent-guide-docs-link" href="https://hermes-agent.nousresearch.com/docs/integrations/providers#custom--self-hosted-llm-providers" target="_blank" rel="noopener noreferrer" onclick="if (window.webkit?.messageHandlers?.openAgentGuide) { window.webkit.messageHandlers.openAgentGuide.postMessage(this.href); return false; }"><span data-i18n="agent_official_guide">Official configuration guide</span> <span aria-hidden="true">↗</span></a>
             </header>
 
             <section class="agent-guide-section">
@@ -4094,6 +4129,7 @@
                 </div>
                 <p class="agent-guide-description" data-i18n="omp_description">Register IronMLX as a keyless Responses provider, discover the models served by the App, and launch OMP in the intended project directory.</p>
               </div>
+              <a id="omp-official-guide" class="agent-guide-docs-link" href="https://omp.sh/docs/custom-models" target="_blank" rel="noopener noreferrer" onclick="if (window.webkit?.messageHandlers?.openAgentGuide) { window.webkit.messageHandlers.openAgentGuide.postMessage(this.href); return false; }"><span data-i18n="agent_official_guide">Official configuration guide</span> <span aria-hidden="true">↗</span></a>
             </header>
 
             <section class="agent-guide-section">
@@ -4728,6 +4764,7 @@
       agent_verify: "Verify", agent_refresh_models: "Refresh and select a model",
       agent_select_model_placeholder: "Load a model in IronMLX",
       agent_tool_boundary: "The agent executes terminal, bash, and MCP tools locally. IronMLX only provides inference and structured tool calls.",
+      agent_official_guide: "Official configuration guide",
       hermes_description: "Use IronMLX through Hermes Agent's stateless Responses transport. The configuration below is generated from the current App state.",
       hermes_profile_scope_label: "Hermes profile scope",
       hermes_profile_dedicated: "Dedicated ironmlx profile",
@@ -5120,6 +5157,7 @@
       agent_verify: "验证", agent_refresh_models: "刷新并选择模型",
       agent_select_model_placeholder: "请先在 IronMLX 中加载模型",
       agent_tool_boundary: "Agent 在本机执行 terminal、bash 和 MCP 工具；IronMLX 仅提供推理和结构化工具调用。",
+      agent_official_guide: "前往官方配置指南",
       hermes_description: "通过 Hermes Agent 的无状态 Responses transport 使用 IronMLX。下方配置根据当前 App 状态生成。",
       hermes_profile_scope_label: "Hermes profile 范围",
       hermes_profile_dedicated: "专用 ironmlx profile",
@@ -5512,6 +5550,7 @@
       agent_verify: "驗證", agent_refresh_models: "重新整理並選擇模型",
       agent_select_model_placeholder: "請先在 IronMLX 載入模型",
       agent_tool_boundary: "Agent 在本機執行 terminal、bash 和 MCP 工具；IronMLX 僅提供推理與結構化工具呼叫。",
+      agent_official_guide: "前往官方設定指南",
       hermes_description: "透過 Hermes Agent 的無狀態 Responses transport 使用 IronMLX。下方設定會根據目前 App 狀態產生。",
       hermes_profile_scope_label: "Hermes profile 範圍",
       hermes_profile_dedicated: "專用 ironmlx profile",
@@ -5907,6 +5946,7 @@
       agent_verify: "検証", agent_refresh_models: "モデルを更新して選択",
       agent_select_model_placeholder: "IronMLX でモデルを読み込んでください",
       agent_tool_boundary: "エージェントが terminal、bash、MCP ツールをローカルで実行します。IronMLX は推論と構造化ツール呼び出しのみを提供します。",
+      agent_official_guide: "公式設定ガイドへ",
       hermes_description: "Hermes Agent のステートレス Responses トランスポートから IronMLX を使用します。以下の設定は現在の App の状態から生成されます。",
       hermes_profile_scope_label: "Hermes profile の範囲",
       hermes_profile_dedicated: "専用 ironmlx profile",
@@ -6302,6 +6342,7 @@
       agent_verify: "검증", agent_refresh_models: "모델 새로고침 및 선택",
       agent_select_model_placeholder: "IronMLX에서 모델을 로드하세요",
       agent_tool_boundary: "에이전트는 terminal, bash 및 MCP 도구를 로컬에서 실행합니다. IronMLX는 추론과 구조화된 도구 호출만 제공합니다.",
+      agent_official_guide: "공식 설정 가이드 열기",
       hermes_description: "Hermes Agent의 상태 비저장 Responses 전송을 통해 IronMLX를 사용합니다. 아래 설정은 현재 App 상태에서 생성됩니다.",
       hermes_profile_scope_label: "Hermes profile 범위",
       hermes_profile_dedicated: "전용 ironmlx profile",
@@ -6693,6 +6734,10 @@
 
   function applyI18n(lang) {
     const dict = I18N[lang] || I18N.en;
+    const hermesGuide = document.getElementById('hermes-official-guide');
+    if (hermesGuide) hermesGuide.href = lang === 'zh-Hans'
+      ? 'https://hermes-agent.nousresearch.com/docs/zh-Hans/integrations/providers#%E8%87%AA%E5%AE%9A%E4%B9%89%E4%B8%8E%E8%87%AA%E6%89%98%E7%AE%A1-llm-%E6%8F%90%E4%BE%9B%E5%95%86'
+      : 'https://hermes-agent.nousresearch.com/docs/integrations/providers#custom--self-hosted-llm-providers';
     document.documentElement.lang = HTML_LANG_MAP[lang] || 'en';
     document.querySelectorAll('[data-i18n]').forEach(el => {
       const key = el.dataset.i18n;
@@ -9999,6 +10044,52 @@
   let currentAgentGuide = null;
   let hermesProfileMode = 'dedicated';
 
+  function updateAgentCompactBar() {
+    const scroll = document.querySelector('.agent-guide-scroll');
+    if (!scroll) return;
+    const pageVisible = document.getElementById('page-chat').classList.contains('active');
+    ['hermes', 'omp'].forEach(function(name) {
+      const panel = document.getElementById('agent-guide-' + name);
+      const hero = panel.querySelector('.agent-guide-hero');
+      let bar = panel.querySelector('.agent-guide-compact-bar');
+      if (!bar) {
+        const slot = document.createElement('div');
+        slot.className = 'agent-guide-compact-slot';
+        bar = document.createElement('div');
+        bar.className = 'agent-guide-compact-bar';
+        bar.hidden = true;
+        const title = document.createElement('span');
+        title.className = 'agent-guide-compact-name';
+        title.textContent = hero.querySelector('.agent-guide-title').textContent;
+        bar.appendChild(title);
+        const guide = hero.querySelector('.agent-guide-docs-link');
+        if (guide) {
+          const link = guide.cloneNode(true);
+          link.removeAttribute('id');
+          bar.appendChild(link);
+        }
+        slot.appendChild(bar);
+        panel.insertBefore(slot, hero);
+      }
+      const guide = hero.querySelector('.agent-guide-docs-link');
+      const compactGuide = bar.querySelector('.agent-guide-docs-link');
+      if (guide && compactGuide) {
+        compactGuide.href = guide.href;
+        compactGuide.querySelector('[data-i18n]').textContent = guide.querySelector('[data-i18n]').textContent;
+      }
+      bar.hidden = !pageVisible || panel.hidden
+        || hero.getBoundingClientRect().bottom > scroll.getBoundingClientRect().top;
+    });
+  }
+
+  const agentGuideScroll = document.querySelector('.agent-guide-scroll');
+  agentGuideScroll.addEventListener('scroll', updateAgentCompactBar, { passive: true });
+  const agentCompactResizeObserver = new ResizeObserver(updateAgentCompactBar);
+  agentCompactResizeObserver.observe(agentGuideScroll);
+  document.querySelectorAll('.agent-guide-hero').forEach(function(hero) {
+    agentCompactResizeObserver.observe(hero);
+  });
+
   function selectAgentGuide(agent) {
     if (agent !== 'hermes' && agent !== 'omp') return;
     currentAgentGuide = agent;
@@ -10089,6 +10180,7 @@
   }
 
   function renderAgentGuideConfiguration() {
+    updateAgentCompactBar();
     const endpoint = agentEndpoint();
     const models = agentLoadedModels();
     const hermesModel = updateAgentModelSelect(document.getElementById('hermes-model-select'), models);
