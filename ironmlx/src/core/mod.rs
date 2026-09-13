@@ -24,6 +24,7 @@ pub(crate) mod speculative_qualification;
 pub mod tokenizer;
 pub mod tool_calling;
 mod tool_prompt_cache;
+pub mod weights;
 
 pub use cache::KVCache;
 pub use chat_template::{ChatTemplate, Message};
@@ -35,7 +36,6 @@ pub use generated_output::{
     GeneratedOutputDecoder, GeneratedOutputEvent, ImageArtifact, InputCapabilityProfile,
     ModelCapabilityProfile, OutputCapabilityProfile, ToolOutputDecoderConfig,
 };
-pub(crate) use loader::logical_width_from_packed;
 pub use loader::{
     preflight_model_metadata, EosTokenId, Loader, ModelMetadataPreflight, QuantMeta, QuantMode,
     QuantizationMetadataPreflight, TokenizerConfig,
@@ -46,3 +46,4 @@ pub use sampler::Sampler;
 pub use scheduler::{Phase, RequestId, RequestState, Scheduler, SchedulerError, StepEvent};
 pub use tokenizer::Tokenizer;
 pub use tool_calling::{AgentMessage, ToolCall, ToolDefinition, ToolDialect};
+pub(crate) use weights::logical_width_from_packed;

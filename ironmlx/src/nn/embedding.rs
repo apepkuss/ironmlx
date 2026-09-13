@@ -7,7 +7,7 @@
 //! reuses the same weight as a tied output projection (`hidden @ Wᵀ ->
 //! logits`), matching Qwen3.5's lm_head-tied configuration.
 
-use crate::core::{Loader, QuantMode};
+use crate::core::weights::{QuantMode, WeightSource};
 use crate::Result;
 use anyhow::anyhow;
 use mlx::{Array, Dtype, MetalKernel, Shape, StreamOrDevice};
@@ -47,7 +47,7 @@ impl Embedding {
     /// `{prefix}.weight` (required), `{prefix}.scales` (signals quantized
     /// variant), and `{prefix}.biases` (optional zero-points for affine
     /// quant).
-    pub fn from_loader(loader: &Loader, prefix: &str) -> Result<Self> {
+    pub fn from_loader(loader: &(impl WeightSource + ?Sized), prefix: &str) -> Result<Self> {
         let weight_key = format!("{prefix}.weight");
         let scales_key = format!("{prefix}.scales");
         let biases_key = format!("{prefix}.biases");

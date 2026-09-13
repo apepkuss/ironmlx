@@ -10,7 +10,7 @@
 use anyhow::anyhow;
 use mlx::{Array, StreamOrDevice};
 
-use crate::core::{logical_width_from_packed, Loader, QuantMode};
+use crate::core::weights::{logical_width_from_packed, QuantMode, WeightSource};
 use crate::Result;
 
 /// Linear projection layer. Handles both full-precision and quantized
@@ -62,7 +62,7 @@ impl Linear {
     /// `{prefix}.weight` (required), `{prefix}.bias` (optional),
     /// `{prefix}.scales` (signals quantized variant), and
     /// `{prefix}.biases` (optional zero-points for affine quant).
-    pub fn from_loader(loader: &Loader, prefix: &str) -> Result<Self> {
+    pub fn from_loader(loader: &(impl WeightSource + ?Sized), prefix: &str) -> Result<Self> {
         let weight_key = format!("{prefix}.weight");
         let bias_key = format!("{prefix}.bias");
         let scales_key = format!("{prefix}.scales");

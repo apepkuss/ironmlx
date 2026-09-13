@@ -14,7 +14,7 @@ use anyhow::anyhow;
 use mlx::compile::{compile, CompiledFn, ShapeMode};
 use mlx::{Array, Dtype, StreamOrDevice};
 
-use crate::core::Loader;
+use crate::core::weights::WeightSource;
 use crate::Result;
 
 /// Root-mean-square normalization with a learned per-feature scale.
@@ -30,7 +30,11 @@ pub struct RmsNorm {
 
 impl RmsNorm {
     /// Build an `RmsNorm` from `loader`, looking for `{prefix}.weight`.
-    pub fn from_loader(loader: &Loader, prefix: &str, eps: f32) -> Result<Self> {
+    pub fn from_loader(
+        loader: &(impl WeightSource + ?Sized),
+        prefix: &str,
+        eps: f32,
+    ) -> Result<Self> {
         let weight = loader.tensor(&format!("{prefix}.weight"))?.clone();
         Ok(Self { weight, eps })
     }
@@ -100,7 +104,11 @@ impl LayerNorm {
 
     /// Build a `LayerNorm` from `loader`, looking for `{prefix}.weight`
     /// (required) and `{prefix}.bias` (optional).
-    pub fn from_loader(loader: &Loader, prefix: &str, eps: f32) -> Result<Self> {
+    pub fn from_loader(
+        loader: &(impl WeightSource + ?Sized),
+        prefix: &str,
+        eps: f32,
+    ) -> Result<Self> {
         let weight = loader.tensor(&format!("{prefix}.weight"))?.clone();
         let bias = loader.tensor_opt(&format!("{prefix}.bias")).cloned();
         Ok(Self { weight, bias, eps })
@@ -156,7 +164,11 @@ pub struct RmsNormGated {
 
 impl RmsNormGated {
     /// Production constructor: load `{prefix}.weight`.
-    pub fn from_loader(loader: &Loader, prefix: &str, eps: f32) -> Result<Self> {
+    pub fn from_loader(
+        loader: &(impl WeightSource + ?Sized),
+        prefix: &str,
+        eps: f32,
+    ) -> Result<Self> {
         let weight = loader.tensor(&format!("{prefix}.weight"))?.clone();
         Ok(Self {
             weight,

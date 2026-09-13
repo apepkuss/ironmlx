@@ -6,7 +6,7 @@
 
 use mlx::{Array, StreamOrDevice};
 
-use crate::core::Loader;
+use crate::core::weights::WeightSource;
 use crate::Result;
 
 /// Configuration for [`Conv1d`].
@@ -32,7 +32,11 @@ pub struct Conv1d {
 impl Conv1d {
     /// Production constructor: load weight from `{prefix}.weight` and optional
     /// bias from `{prefix}.bias`.
-    pub fn from_loader(loader: &Loader, prefix: &str, cfg: Conv1dConfig) -> Result<Self> {
+    pub fn from_loader(
+        loader: &(impl WeightSource + ?Sized),
+        prefix: &str,
+        cfg: Conv1dConfig,
+    ) -> Result<Self> {
         let weight = loader.tensor(&format!("{prefix}.weight"))?.clone();
         let bias = loader.tensor_opt(&format!("{prefix}.bias")).cloned();
         Ok(Self { weight, bias, cfg })
