@@ -8,7 +8,8 @@
 use anyhow::anyhow;
 use mlx::{Dtype, StreamOrDevice};
 
-use crate::core::cache::{KVCache, KVCacheSnapshot, PrefixMtpLayerPayload};
+use crate::core::cache::prefix_payload::PrefixMtpLayerPayload;
+use crate::core::cache::{KVCache, KVCacheSnapshot};
 use crate::Result;
 
 /// KV caches for the layers of an MTP head.

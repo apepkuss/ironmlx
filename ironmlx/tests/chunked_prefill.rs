@@ -19,7 +19,9 @@ use std::path::Path;
 
 use mlx::Dtype;
 
-use ironmlx::core::generate::{GenerateRequest, GenerationStream, IMAGE_TOKEN_ID};
+use ironmlx::core::generate::GenerationStream;
+use ironmlx::core::generation_types::GenerateRequest;
+use ironmlx::core::model_input::IMAGE_TOKEN_ID;
 use ironmlx::core::{Loader, Sampler, Tokenizer};
 use ironmlx::models::Qwen35Model;
 

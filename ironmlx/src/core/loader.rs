@@ -22,8 +22,8 @@ pub(crate) struct LoadedTensorComponentBytes {
 // Preserve existing public import paths while the weight contract is separated.
 #[cfg(test)]
 use super::weights::logical_width_from_packed;
-use super::weights::WeightSource;
 pub use super::weights::{QuantMeta, QuantMode};
+use super::weights::{WeightMap, WeightSource};
 
 /// Metadata-only compatibility result used before weight transfer begins.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -258,9 +258,7 @@ impl TokenizerConfig {
 
 /// Mmap-eager safetensors model loader. Owns all tensor data + parsed config.
 pub struct Loader {
-    tensors: HashMap<String, Array>,
-    quant: Option<QuantMeta>,
-    quant_overrides: HashMap<String, QuantMeta>,
+    weights: WeightMap,
     tokenizer_config: TokenizerConfig,
     config_raw: serde_json::Value,
     model_dir: std::path::PathBuf,
@@ -406,9 +404,7 @@ impl Loader {
         }
 
         Ok(Self {
-            tensors,
-            quant,
-            quant_overrides,
+            weights: WeightMap::new(tensors, quant, quant_overrides),
             tokenizer_config,
             config_raw,
             model_dir: model_dir.to_path_buf(),
@@ -417,8 +413,8 @@ impl Loader {
 
     /// Returns tensor by full key, or error if absent.
     pub fn tensor(&self, key: &str) -> Result<&Array> {
-        self.tensors
-            .get(key)
+        self.weights
+            .tensor_opt(key)
             .ok_or_else(|| anyhow!("Loader: missing tensor key `{key}`"))
     }
 
@@ -426,7 +422,7 @@ impl Loader {
     /// model-private fused tensor. The constructed model must already own the
     /// fused result before this is called.
     pub(crate) fn release_projection_prefixes(&mut self, prefixes: &[String]) {
-        self.tensors.retain(|key, _| {
+        self.weights.retain(|key, _| {
             !prefixes.iter().any(|prefix| {
                 key == prefix
                     || key
@@ -438,40 +434,40 @@ impl Loader {
 
     /// Returns tensor by full key, or None if absent.
     pub fn tensor_opt(&self, key: &str) -> Option<&Array> {
-        self.tensors.get(key)
+        self.weights.tensor_opt(key)
     }
 
     /// True iff the key is present.
     pub fn contains(&self, key: &str) -> bool {
-        self.tensors.contains_key(key)
+        self.weights.contains(key)
     }
 
     /// Iterator over all loaded tensor keys.
     pub fn keys(&self) -> impl Iterator<Item = &str> {
-        self.tensors.keys().map(|s| s.as_str())
+        self.weights.tensors().keys().map(|s| s.as_str())
     }
 
     /// Total storage bytes of the sanitized, eagerly loaded tensors.
     pub(crate) fn loaded_tensor_bytes(&self) -> usize {
-        tensor_storage_bytes(&self.tensors)
+        tensor_storage_bytes(self.weights.tensors())
     }
 
     /// Storage bytes grouped by the runtime component that consumes them.
     /// This is metadata-only accounting and never evaluates or touches tensor
     /// contents, so model loading retains its mmap-on-demand behavior.
     pub(crate) fn loaded_tensor_component_bytes(&self) -> LoadedTensorComponentBytes {
-        tensor_component_storage_bytes(&self.tensors)
+        tensor_component_storage_bytes(self.weights.tensors())
     }
 
     /// Quantization metadata, or None if model is not quantized.
     pub fn quant_meta(&self) -> Option<QuantMeta> {
-        self.quant
+        self.weights.quant_meta()
     }
 
     /// Quantization metadata for a tensor prefix. Per-prefix overrides in
     /// `config.json` take precedence over the global quantization metadata.
     pub fn quant_meta_for(&self, prefix: &str) -> Option<QuantMeta> {
-        self.quant_overrides.get(prefix).copied().or(self.quant)
+        self.weights.quant_meta_for(prefix)
     }
 
     /// Parse model-specific config struct via serde.
@@ -2093,9 +2089,7 @@ mod tests {
         let mut quant_overrides = HashMap::new();
         quant_overrides.insert("model.layers.0.mlp.gate".to_owned(), override_meta);
         let loader = Loader {
-            tensors: HashMap::new(),
-            quant: Some(global),
-            quant_overrides,
+            weights: WeightMap::new(HashMap::new(), Some(global), quant_overrides),
             tokenizer_config: TokenizerConfig::default(),
             config_raw: json!({}),
             model_dir: std::path::PathBuf::new(),

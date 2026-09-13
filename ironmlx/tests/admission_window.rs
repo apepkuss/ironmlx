@@ -22,9 +22,10 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
-use ironmlx::core::generate::{GenerateRequest, GenerationStream};
+use ironmlx::core::generate::GenerationStream;
+use ironmlx::core::generation_types::GenerateRequest;
 use ironmlx::core::sampler::Sampler;
-use ironmlx::core::server::scheduler_actor::{
+use ironmlx::core::scheduler_actor::{
     spawn_scheduler_actor, SchedulerActorHandle, SchedulerCommand,
 };
 use ironmlx::core::{Loader, Message, Tokenizer};

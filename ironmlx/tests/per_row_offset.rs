@@ -15,14 +15,16 @@ use std::sync::Arc;
 use mlx::{Array, Dtype};
 use tokio::sync::Mutex;
 
-use ironmlx::core::generate::{
+use ironmlx::core::cache::layer::LayerCache;
+use ironmlx::core::generate::GenerationStream;
+use ironmlx::core::generation_types::GenerateRequest;
+use ironmlx::core::model_input::{
     build_batch_attention_mask, build_batch_linear_mask, build_decode_position_ids,
-    build_position_ids_batched, GenerateRequest, GenerationStream,
+    build_position_ids_batched,
 };
 use ironmlx::core::sampler::Sampler;
 use ironmlx::core::{Loader, Message, Tokenizer};
 use ironmlx::models::qwen3_5::Qwen35Model;
-use ironmlx::nn::LayerCache;
 
 const ARGMAX_BITID_GATE: f64 = 0.95;
 const DECODE_STEPS: usize = 8;

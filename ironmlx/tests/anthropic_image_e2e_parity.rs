@@ -45,8 +45,9 @@ use ironmlx::core::scheduler_autotune::{
     SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeProfile,
     SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
 };
-use ironmlx::core::server::{self, VisionInputConfig};
+use ironmlx::core::server::{self};
 use ironmlx::core::vision::DenseVlMethods;
+use ironmlx::core::vision_input::VisionInputConfig;
 use ironmlx::core::{Loader, Tokenizer};
 
 // ---------------------------------------------------------------------------

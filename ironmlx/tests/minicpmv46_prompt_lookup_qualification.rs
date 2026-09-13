@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use ironmlx::core::cache::TurboQuantKVBits;
-use ironmlx::core::generate::build_position_ids;
+use ironmlx::core::model_input::build_position_ids;
 use ironmlx::core::{Loader, Model, Tokenizer};
 use ironmlx::models::MiniCpmV46Model;
 use mlx::{Array, StreamOrDevice};

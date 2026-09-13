@@ -27,10 +27,11 @@
 use anyhow::{anyhow, Context};
 use mlx::{Array, Dtype, StreamOrDevice};
 
+use crate::core::cache::layer::LayerCache;
 use crate::core::cache::KVCache;
 use crate::core::model::ModelMeta;
 use crate::core::{Loader, Model};
-use crate::nn::{Embedding, LayerCache, Linear, RmsNorm};
+use crate::nn::{Embedding, Linear, RmsNorm};
 use crate::Result;
 
 use super::config::LlamaConfig;
@@ -521,7 +522,7 @@ impl crate::core::vision::DenseVlMethods for LlamaModel {
         _per_row_pixel_values: &[Option<&[mlx::Array]>],
         _per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
         _image_token_id: i32,
-        _cache: Option<&mut [crate::nn::LayerCache]>,
+        _cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
         _target: mlx::StreamOrDevice,
     ) -> crate::Result<mlx::Array> {
         Err(anyhow!("LlamaModel is text-only: VL methods unsupported"))
@@ -551,7 +552,7 @@ impl crate::core::vision::DenseVlMethods for LlamaModel {
         _position_ids: &mlx::Array,
         _per_row_lens: Option<&[i32]>,
         _decode_mask: Option<&mlx::Array>,
-        _cache: Option<&mut [crate::nn::LayerCache]>,
+        _cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
         _vision_embeds_slice: Option<&mlx::Array>,
         _image_token_id: i32,
         _target: mlx::StreamOrDevice,
@@ -566,7 +567,7 @@ impl crate::core::vision::DenseVlMethods for LlamaModel {
         _position_ids: &mlx::Array,
         _per_row_lens: Option<&[i32]>,
         _decode_mask: Option<&mlx::Array>,
-        _cache: Option<&mut [crate::nn::LayerCache]>,
+        _cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
         _vision_embeds_slice: Option<&mlx::Array>,
         _image_token_id: i32,
         _target: mlx::StreamOrDevice,

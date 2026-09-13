@@ -11,11 +11,13 @@ use mlx::{Array, StreamOrDevice};
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::core::cache::PagedPrefixEntry;
+use crate::core::cache::layer::{prefix_entry_for_row, restore_prefix_entry_for_row, LayerCache};
+use crate::core::cache::prefix_payload::PagedPrefixEntry;
 use crate::core::constrained::{
     apply_speculative_token_masks, apply_token_mask, ConstraintSession,
 };
-use crate::core::generate::{build_position_ids, GenerateEvent, GenerateRequest};
+use crate::core::generation_types::{GenerateEvent, GenerateRequest};
+use crate::core::model_input::build_position_ids;
 use crate::core::sampler::{
     prepare_target_tokens_with_uniforms_batch, prepare_uniforms, PreparedTargetTokenSampling,
 };
@@ -28,7 +30,6 @@ use crate::core::tokenizer::{DecodeStream, Tokenizer};
 use crate::models::dflash2::{
     DFlash2DraftCache, DFlash2DraftModel, DFlash2Target, DFlash2TargetForwardMode,
 };
-use crate::nn::{prefix_entry_for_row, restore_prefix_entry_for_row, LayerCache};
 use crate::Result;
 
 #[derive(Debug, Clone)]
@@ -335,7 +336,7 @@ impl DFlash2TensorBatchCache {
         );
         let target = StreamOrDevice::default();
         for (batch_row, row) in rows.iter_mut().enumerate() {
-            crate::nn::decoder_layer::adopt_layer_cache_rows(
+            crate::core::cache::layer::adopt_layer_cache_rows(
                 &mut row.target_cache,
                 &self.target,
                 0,
@@ -559,7 +560,7 @@ where
             mlx::transforms::eval(&[&first_logits, &row_context])?;
 
             let mut target_cache = model.make_cache(1, cap, model.cache_dtype())?;
-            crate::nn::decoder_layer::adopt_layer_cache_rows(
+            crate::core::cache::layer::adopt_layer_cache_rows(
                 &mut target_cache,
                 &batched_target_cache,
                 0,
@@ -1030,7 +1031,7 @@ where
                         .model
                         .make_cache(batch_size_i32, cap, rows[0].model.cache_dtype())?;
                 for (batch_row, row) in rows.iter().enumerate() {
-                    crate::nn::decoder_layer::adopt_layer_cache_rows(
+                    crate::core::cache::layer::adopt_layer_cache_rows(
                         &mut target_cache,
                         &row.target_cache,
                         batch_row,

@@ -24,13 +24,13 @@ use std::path::Path;
 use mlx::Array;
 use mlx::Dtype;
 
-use ironmlx::core::generate::{
+use ironmlx::core::cache::layer::LayerCache;
+use ironmlx::core::model_input::{
     build_batch_attention_mask, build_batch_linear_mask, build_decode_position_ids,
     build_position_ids, build_position_ids_batched,
 };
 use ironmlx::core::Loader;
 use ironmlx::models::qwen3_5::Qwen35Model;
-use ironmlx::nn::LayerCache;
 
 const PREFILL_LOGITS_TOL: f32 = 1.0;
 /// Decode tolerance is much looser than prefill because the cache from

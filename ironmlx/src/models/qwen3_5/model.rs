@@ -3,13 +3,14 @@
 use anyhow::{anyhow, Context};
 use mlx::{Array, Dtype, StreamOrDevice};
 
+use crate::core::cache::layer::LayerCache;
 use crate::core::cache::{GatedDeltaCache, KVCache, MtpCache};
 use crate::core::vision::{
     estimate_transformer_vision_prefill_tensor_bytes, DenseVlMethods, VisionPrefillMemoryProfile,
 };
 use crate::core::Loader;
 use crate::models::vision::VisionTower;
-use crate::nn::{AttnKind, LayerCache, Linear, Mtp, MtpStepOutput};
+use crate::nn::{AttnKind, Linear, Mtp, MtpStepOutput};
 use crate::Result;
 
 use super::config::Qwen35Config;
@@ -698,9 +699,9 @@ impl Qwen35Model {
     /// The KV cache row `i` must match the state a per-stream `forward_on`
     /// would have written (verified by `tests/batched_prefill.rs`).
     ///
-    /// [`build_position_ids_batched`]: crate::core::generate::build_position_ids_batched
-    /// [`build_batch_attention_mask`]: crate::core::generate::build_batch_attention_mask
-    /// [`build_batch_linear_mask`]: crate::core::generate::build_batch_linear_mask
+    /// [`build_position_ids_batched`]: crate::core::model_input::build_position_ids_batched
+    /// [`build_batch_attention_mask`]: crate::core::model_input::build_batch_attention_mask
+    /// [`build_batch_linear_mask`]: crate::core::model_input::build_batch_linear_mask
     #[allow(clippy::too_many_arguments)]
     pub fn batched_prefill(
         &self,
@@ -984,7 +985,7 @@ impl crate::core::model::Model for Qwen35Model {
         batch: i32,
         cap: i32,
         dtype: mlx::Dtype,
-    ) -> crate::Result<Vec<crate::nn::LayerCache>> {
+    ) -> crate::Result<Vec<crate::core::cache::layer::LayerCache>> {
         Qwen35Model::make_cache(self, batch, cap, dtype)
     }
 
@@ -994,7 +995,7 @@ impl crate::core::model::Model for Qwen35Model {
         position_ids: &mlx::Array,
         per_row_lens: Option<&[i32]>,
         decode_mask: Option<&mlx::Array>,
-        cache: Option<&mut [crate::nn::LayerCache]>,
+        cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
         target: mlx::StreamOrDevice,
     ) -> crate::Result<mlx::Array> {
         Qwen35Model::forward_on(
@@ -1015,7 +1016,7 @@ impl crate::core::model::Model for Qwen35Model {
         attention_mask: &mlx::Array,
         linear_attention_mask: &mlx::Array,
         per_row_lens: &[i32],
-        cache: Option<&mut [crate::nn::LayerCache]>,
+        cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
         target: mlx::StreamOrDevice,
     ) -> crate::Result<mlx::Array> {
         Qwen35Model::batched_prefill(
@@ -1040,7 +1041,7 @@ impl crate::core::model::Model for Qwen35Model {
         position_ids: &mlx::Array,
         per_row_lens: Option<&[i32]>,
         decode_mask: Option<&mlx::Array>,
-        cache: Option<&mut [crate::nn::LayerCache]>,
+        cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
         target: mlx::StreamOrDevice,
     ) -> crate::Result<mlx::Array> {
         let input_shape = input_ids.shape();
@@ -1130,7 +1131,7 @@ impl crate::models::dflash2::DFlash2Target for Qwen35Model {
         &self,
         input_ids: &mlx::Array,
         position_ids: &mlx::Array,
-        cache: Option<&mut [crate::nn::LayerCache]>,
+        cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
         target_layer_ids: &[usize],
         mode: crate::models::dflash2::DFlash2TargetForwardMode,
         target: mlx::StreamOrDevice,
@@ -1233,8 +1234,8 @@ impl crate::models::dflash2::DFlash2Target for Qwen35Model {
 
     fn dflash2_restore_target_prefix_on(
         &self,
-        cache: &mut [crate::nn::LayerCache],
-        snapshots: &[crate::nn::LayerCacheSnapshot],
+        cache: &mut [crate::core::cache::layer::LayerCache],
+        snapshots: &[crate::core::cache::layer::LayerCacheSnapshot],
         accepted_len: usize,
         target: mlx::StreamOrDevice,
     ) -> crate::Result<()> {
@@ -1245,7 +1246,7 @@ impl crate::models::dflash2::DFlash2Target for Qwen35Model {
     fn dflash2_restore_target_prefix_rows_on(
         &self,
         cache: &mut [LayerCache],
-        snapshots: &[crate::nn::LayerCacheSnapshot],
+        snapshots: &[crate::core::cache::layer::LayerCacheSnapshot],
         accepted_lens: &[usize],
         target: StreamOrDevice,
     ) -> crate::Result<()> {
@@ -1321,7 +1322,7 @@ impl DenseVlMethods for Qwen35Model {
         per_row_pixel_values: &[Option<&[mlx::Array]>],
         per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
         image_token_id: i32,
-        cache: Option<&mut [crate::nn::LayerCache]>,
+        cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
         target: mlx::StreamOrDevice,
     ) -> crate::Result<mlx::Array> {
         Qwen35Model::batched_prefill_vl(
@@ -1394,7 +1395,7 @@ impl DenseVlMethods for Qwen35Model {
         position_ids: &mlx::Array,
         per_row_lens: Option<&[i32]>,
         decode_mask: Option<&mlx::Array>,
-        cache: Option<&mut [crate::nn::LayerCache]>,
+        cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
         vision_embeds_slice: Option<&mlx::Array>,
         image_token_id: i32,
         target: mlx::StreamOrDevice,
@@ -1418,7 +1419,7 @@ impl DenseVlMethods for Qwen35Model {
         position_ids: &mlx::Array,
         per_row_lens: Option<&[i32]>,
         decode_mask: Option<&mlx::Array>,
-        cache: Option<&mut [crate::nn::LayerCache]>,
+        cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
         vision_embeds_slice: Option<&mlx::Array>,
         image_token_id: i32,
         target: mlx::StreamOrDevice,
@@ -1529,7 +1530,7 @@ mod tests {
     #[test]
     #[serial(mlx_metal)]
     fn mtp_forward_projects_every_mtp_position() {
-        use crate::core::generate::build_position_ids;
+        use crate::core::model_input::build_position_ids;
         use crate::nn::{DecoderLayerConfig, Linear, Mtp, MtpConfig, RmsNorm};
 
         let cfg = make_cfg();
@@ -1607,7 +1608,7 @@ mod tests {
     #[ignore = "loads the full local Qwen3.8 target checkpoint"]
     #[serial(mlx_metal)]
     fn qwen38_dflash2_verify_matches_ordinary_q1_logits_exactly() {
-        use crate::core::generate::build_position_ids;
+        use crate::core::model_input::build_position_ids;
         use crate::core::Model;
         use crate::models::dflash2::{DFlash2Target, DFlash2TargetForwardMode};
 
@@ -1737,7 +1738,7 @@ mod tests {
 
         let dflash_snapshots = dflash_cache
             .iter()
-            .map(crate::nn::LayerCache::snapshot)
+            .map(crate::core::cache::layer::LayerCache::snapshot)
             .collect::<Vec<_>>();
         for layer in &mut dflash_cache {
             layer
@@ -1767,7 +1768,7 @@ mod tests {
 
         let sampled_dflash_snapshots = sampled_dflash_cache
             .iter()
-            .map(crate::nn::LayerCache::snapshot)
+            .map(crate::core::cache::layer::LayerCache::snapshot)
             .collect::<Vec<_>>();
         for layer in &mut sampled_dflash_cache {
             layer
@@ -1935,7 +1936,8 @@ mod tests {
         let token_row: Array = (&[100_u32][..], &[1_i32, 1_i32][..])
             .try_into()
             .expect("token row");
-        let position_row = crate::core::generate::build_position_ids(0, 1).expect("position row");
+        let position_row =
+            crate::core::model_input::build_position_ids(0, 1).expect("position row");
         let reference = model
             .mtp_forward_on(
                 &mtp,
@@ -2001,11 +2003,7 @@ mod tests {
     #[test]
     #[ignore] // real-model heavy
     fn forward_vl_text_only_matches_forward_on() {
-        use crate::core::generate::build_position_ids;
-        use crate::core::vision::{
-            estimate_transformer_vision_prefill_tensor_bytes, DenseVlMethods,
-            VisionPrefillMemoryProfile,
-        };
+        use crate::core::model_input::build_position_ids;
         use crate::core::Loader;
 
         let env = std::env::var("QWEN35_MODEL").expect("QWEN35_MODEL not set");
@@ -2033,7 +2031,7 @@ mod tests {
                 None,
                 None,
                 None,
-                crate::core::generate::IMAGE_TOKEN_ID,
+                crate::core::model_input::IMAGE_TOKEN_ID,
                 (),
             )
             .expect("forward_vl text-only");
@@ -2066,13 +2064,9 @@ mod tests {
     #[test]
     #[ignore] // real-model heavy: needs IRONMLX_MODEL_DIR
     fn batched_prefill_vl_text_only_matches_batched_prefill() {
-        use crate::core::generate::{
+        use crate::core::model_input::{
             build_batch_attention_mask, build_batch_linear_mask, build_position_ids_batched,
             IMAGE_TOKEN_ID,
-        };
-        use crate::core::vision::{
-            estimate_transformer_vision_prefill_tensor_bytes, DenseVlMethods,
-            VisionPrefillMemoryProfile,
         };
         use crate::core::Loader;
 
@@ -2172,13 +2166,9 @@ mod tests {
     #[test]
     #[ignore] // real-model heavy: needs IRONMLX_MODEL_DIR
     fn batched_prefill_vl_b1_matches_forward_vl() {
-        use crate::core::generate::{
+        use crate::core::model_input::{
             build_batch_attention_mask, build_batch_linear_mask, build_position_ids_vl,
             build_position_ids_vl_batched, IMAGE_TOKEN_ID,
-        };
-        use crate::core::vision::{
-            estimate_transformer_vision_prefill_tensor_bytes, DenseVlMethods,
-            VisionPrefillMemoryProfile,
         };
         use crate::core::Loader;
 

@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use ironmlx::core::weights::{QuantMeta, QuantMode, WeightSource};
+use ironmlx::core::weights::{QuantMeta, QuantMode, WeightMap, WeightSource};
 use ironmlx::nn::{Conv1d, Conv1dConfig, Embedding, LayerNorm, Linear, RmsNorm, RmsNormGated};
 use ironmlx::Result;
 use mlx::Array;
@@ -200,4 +200,32 @@ fn quantized_storage_is_validated_for_independent_providers() {
         .unwrap()
         .to_string()
         .contains("requires quantization biases"));
+}
+
+#[test]
+fn owned_weight_map_preserves_layer_parameters_after_projection_release() {
+    let global = QuantMeta {
+        group_size: 64,
+        bits: 4,
+        mode: QuantMode::Affine,
+    };
+    let override_meta = QuantMeta { bits: 8, ..global };
+    let mut weights = WeightMap::new(
+        HashMap::from([
+            ("projection.weight".into(), array(&[1.0_f32, 2.0], (1, 2))),
+            ("other.weight".into(), array(&[3.0_f32], (1, 1))),
+        ]),
+        Some(global),
+        HashMap::from([("other".into(), override_meta)]),
+    );
+    assert_eq!(weights.quant_meta_for("projection"), Some(global));
+    assert_eq!(weights.quant_meta_for("other"), Some(override_meta));
+    let projection = Linear::from_loader(&weights, "projection").unwrap();
+    weights.retain(|key, _| !key.starts_with("projection."));
+    assert!(!weights.contains("projection.weight"));
+    assert!(weights.contains("other.weight"));
+    close(
+        &projection.forward(&array(&[2.0_f32, 3.0], (1, 2))).unwrap(),
+        &[8.0],
+    );
 }

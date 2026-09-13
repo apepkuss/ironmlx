@@ -19,7 +19,8 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use ironmlx::core::generate::{GenerateRequest, GenerationStream};
+use ironmlx::core::generate::GenerationStream;
+use ironmlx::core::generation_types::GenerateRequest;
 use ironmlx::core::sampler::Sampler;
 use ironmlx::core::scheduler::{Phase, Scheduler};
 use ironmlx::core::{Loader, Message, Tokenizer};

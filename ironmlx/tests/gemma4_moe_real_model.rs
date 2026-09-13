@@ -9,17 +9,19 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ironmlx::core::cache::{ActiveKvOffloadConfig, PagedPrefixCacheConfig, TurboQuantKVBits};
-use ironmlx::core::generate::{GenerateRequest, GenerationStream, IMAGE_TOKEN_ID};
+use ironmlx::core::generate::GenerationStream;
+use ironmlx::core::generation_types::GenerateRequest;
+use ironmlx::core::model_input::IMAGE_TOKEN_ID;
 use ironmlx::core::scheduler::StepEvent;
-use ironmlx::core::server::chat_format::render_and_encode;
-use ironmlx::core::server::scheduler_actor::{
+use ironmlx::core::scheduler_actor::{
     spawn_scheduler_actor, spawn_scheduler_actor_with_paged_prefix_cache_and_active_kv,
     SchedulerActorHandle, SchedulerCommand,
 };
+use ironmlx::core::server::chat_format::render_and_encode;
 use ironmlx::core::server::vision::{
     derive_image_token_and_merge, expand_decoded_messages, DecodedMessage, DecodedPart,
 };
-use ironmlx::core::server::VisionInputConfig;
+use ironmlx::core::vision_input::VisionInputConfig;
 use ironmlx::core::{QuantMode, Sampler, Tokenizer};
 use ironmlx::models::{Gemma4Config, Gemma4Model};
 use ironmlx::Loader;

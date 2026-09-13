@@ -22,9 +22,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
-use crate::core::generate::GenerateRequest;
 #[cfg(not(test))]
 use crate::core::generate::GenerationStream;
+use crate::core::generation_types::GenerateRequest;
 #[cfg(test)]
 use eof_tests::FaultInjectableGenerationStream as GenerationStream;
 #[cfg(test)]
@@ -35,10 +35,10 @@ use crate::core::generated_output::{
 };
 use crate::core::model::Model;
 use crate::core::native_output::NativeOutputDecoderConfig;
+use crate::core::scheduler_actor::AdmitReply;
 use crate::core::server::chat_format::{
     ChatFunctionCall, ChatMessage, ChatToolCall, Content, ContentPart, ImageUrl,
 };
-use crate::core::server::scheduler_actor::AdmitReply;
 use crate::core::tool_calling::{ToolCall, ToolDefinition};
 use crate::core::vision::DenseVlMethods;
 
@@ -1279,7 +1279,7 @@ impl ToolContext {
 #[derive(Debug)]
 struct PreparedResponse {
     #[cfg(test)]
-    injected_events: Option<Vec<crate::core::generate::GenerateEvent>>,
+    injected_events: Option<Vec<crate::core::generation_types::GenerateEvent>>,
     request: GenerateRequest,
     model: String,
     prompt_tokens: u32,
@@ -2405,7 +2405,7 @@ where
 async fn admit_request<M>(
     state: &AppState<M>,
     request: GenerateRequest,
-    #[cfg(test)] injected_events: Option<Vec<crate::core::generate::GenerateEvent>>,
+    #[cfg(test)] injected_events: Option<Vec<crate::core::generation_types::GenerateEvent>>,
 ) -> std::result::Result<AdmitReply, Response>
 where
     M: Model + DenseVlMethods + Send + 'static,

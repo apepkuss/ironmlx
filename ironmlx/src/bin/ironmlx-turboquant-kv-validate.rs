@@ -4,12 +4,12 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, ValueEnum};
+use ironmlx::core::cache::layer::enable_turboquant_kv_caches;
 use ironmlx::core::cache::TurboQuantKVBits;
-use ironmlx::core::generate::{build_position_ids, slice_logits_row};
+use ironmlx::core::model_input::{build_position_ids, slice_logits_row};
 use ironmlx::core::{Loader, Tokenizer};
 use ironmlx::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF;
 use ironmlx::models::{ModelArchitecture, Qwen35Model};
-use ironmlx::nn::enable_turboquant_kv_caches;
 use mlx::{Array, Dtype};
 use serde::Serialize;
 
@@ -285,7 +285,7 @@ fn make_cache(
     prompt_len: usize,
     max_tokens: usize,
     kv_quant: KvQuantArg,
-) -> Result<Vec<ironmlx::nn::LayerCache>> {
+) -> Result<Vec<ironmlx::core::cache::layer::LayerCache>> {
     let cap = prompt_len
         .saturating_add(max_tokens)
         .max(MIN_KV_CACHE_CAP_FOR_GPU_PERF as usize) as i32;
@@ -299,7 +299,7 @@ fn make_cache(
 fn prefill_logits(
     model: &Qwen35Model,
     prompt_ids: &[u32],
-    cache: &mut [ironmlx::nn::LayerCache],
+    cache: &mut [ironmlx::core::cache::layer::LayerCache],
 ) -> Result<Vec<f32>> {
     let prompt_len = prompt_ids.len() as i32;
     let input_ids = token_array(prompt_ids)?;
@@ -312,7 +312,7 @@ fn decode_logits(
     model: &Qwen35Model,
     token_position: usize,
     token: u32,
-    cache: &mut [ironmlx::nn::LayerCache],
+    cache: &mut [ironmlx::core::cache::layer::LayerCache],
 ) -> Result<Vec<f32>> {
     let token_ids = [token];
     let input_ids = token_array(&token_ids)?;

@@ -8,7 +8,7 @@
 //! Run with:
 //!   cargo test -p ironmlx --release --test scheduler_skeleton
 
-use ironmlx::core::generate::GenerateRequest;
+use ironmlx::core::generation_types::GenerateRequest;
 use ironmlx::core::sampler::Sampler;
 use ironmlx::core::scheduler::{RequestId, Scheduler};
 

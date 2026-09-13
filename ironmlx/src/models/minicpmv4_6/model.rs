@@ -14,9 +14,10 @@ use anyhow::anyhow;
 use mlx::ops::shape::concatenate_on;
 use mlx::{Array, Dtype, StreamOrDevice};
 
+use crate::core::cache::layer::LayerCache;
 use crate::core::cache::{GatedDeltaCache, KVCache};
 use crate::core::Loader;
-use crate::nn::{AttnKind, LayerCache, Linear};
+use crate::nn::{AttnKind, Linear};
 use crate::Result;
 
 use super::config::{text_config_from_loader, MiniCpmV46VisionConfig};
@@ -123,7 +124,7 @@ impl MiniCpmV46Model {
         let image_token_id = vcfg
             .as_ref()
             .map(|v| v.image_token_id)
-            .unwrap_or(crate::core::generate::IMAGE_TOKEN_ID);
+            .unwrap_or(crate::core::model_input::IMAGE_TOKEN_ID);
 
         let text = Qwen35TextModel::from_loader(loader, cfg)?;
         let prompt_lookup_verify_profile = super::qualification::prompt_lookup_verify_profile(
@@ -150,7 +151,7 @@ impl MiniCpmV46Model {
     /// P2b callers (CLI `--image` flow) use this to avoid re-parsing the
     /// config and tokenizer separately. The field is populated from
     /// `MiniCpmV46VisionConfig::image_token_id` when present, otherwise
-    /// falls back to [`crate::core::generate::IMAGE_TOKEN_ID`].
+    /// falls back to [`crate::core::model_input::IMAGE_TOKEN_ID`].
     pub fn image_token_id(&self) -> i32 {
         self.image_token_id
     }
@@ -262,7 +263,7 @@ impl crate::core::model::Model for MiniCpmV46Model {
         batch: i32,
         cap: i32,
         dtype: mlx::Dtype,
-    ) -> crate::Result<Vec<crate::nn::LayerCache>> {
+    ) -> crate::Result<Vec<crate::core::cache::layer::LayerCache>> {
         MiniCpmV46Model::make_cache(self, batch, cap, dtype)
     }
 
@@ -272,7 +273,7 @@ impl crate::core::model::Model for MiniCpmV46Model {
         position_ids: &mlx::Array,
         per_row_lens: Option<&[i32]>,
         decode_mask: Option<&mlx::Array>,
-        cache: Option<&mut [crate::nn::LayerCache]>,
+        cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
         target: mlx::StreamOrDevice,
     ) -> crate::Result<mlx::Array> {
         let hidden = self.text.forward_on(
@@ -293,7 +294,7 @@ impl crate::core::model::Model for MiniCpmV46Model {
         attention_mask: &mlx::Array,
         linear_attention_mask: &mlx::Array,
         per_row_lens: &[i32],
-        cache: Option<&mut [crate::nn::LayerCache]>,
+        cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
         target: mlx::StreamOrDevice,
     ) -> crate::Result<mlx::Array> {
         // Embed: [B, S_max] → [B, S_max, hidden_size]
@@ -323,7 +324,7 @@ impl crate::core::model::Model for MiniCpmV46Model {
         position_ids: &mlx::Array,
         per_row_lens: Option<&[i32]>,
         decode_mask: Option<&mlx::Array>,
-        cache: Option<&mut [crate::nn::LayerCache]>,
+        cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
         target: mlx::StreamOrDevice,
     ) -> crate::Result<mlx::Array> {
         let input_shape = input_ids.shape();
@@ -526,7 +527,7 @@ impl MiniCpmV46Model {
         position_ids: &Array,
         per_row_lens: Option<&[i32]>,
         decode_mask: Option<&Array>,
-        cache: Option<&mut [crate::nn::LayerCache]>,
+        cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
         vision_embeds_slice: Option<&Array>,
         image_token_id: i32,
         target: impl Into<StreamOrDevice>,
@@ -554,7 +555,7 @@ impl MiniCpmV46Model {
         position_ids: &Array,
         per_row_lens: Option<&[i32]>,
         decode_mask: Option<&Array>,
-        cache: Option<&mut [crate::nn::LayerCache]>,
+        cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
         vision_embeds_slice: Option<&Array>,
         image_token_id: i32,
         target: impl Into<StreamOrDevice>,
@@ -596,7 +597,7 @@ impl MiniCpmV46Model {
         per_row_pixel_values: &[Option<&[Array]>],
         per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
         image_token_id: i32,
-        cache: Option<&mut [crate::nn::LayerCache]>,
+        cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
         target: impl Into<StreamOrDevice>,
     ) -> crate::Result<Array> {
         let target = target.into();
@@ -728,7 +729,7 @@ impl crate::core::vision::DenseVlMethods for MiniCpmV46Model {
         position_ids: &mlx::Array,
         per_row_lens: Option<&[i32]>,
         decode_mask: Option<&mlx::Array>,
-        cache: Option<&mut [crate::nn::LayerCache]>,
+        cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
         vision_embeds_slice: Option<&mlx::Array>,
         image_token_id: i32,
         target: mlx::StreamOrDevice,
@@ -753,7 +754,7 @@ impl crate::core::vision::DenseVlMethods for MiniCpmV46Model {
         position_ids: &mlx::Array,
         per_row_lens: Option<&[i32]>,
         decode_mask: Option<&mlx::Array>,
-        cache: Option<&mut [crate::nn::LayerCache]>,
+        cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
         vision_embeds_slice: Option<&mlx::Array>,
         image_token_id: i32,
         target: mlx::StreamOrDevice,
@@ -782,7 +783,7 @@ impl crate::core::vision::DenseVlMethods for MiniCpmV46Model {
         per_row_pixel_values: &[Option<&[mlx::Array]>],
         per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
         image_token_id: i32,
-        cache: Option<&mut [crate::nn::LayerCache]>,
+        cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
         target: mlx::StreamOrDevice,
     ) -> crate::Result<mlx::Array> {
         MiniCpmV46Model::batched_prefill_vl(
@@ -826,7 +827,7 @@ mod tests {
     #[test]
     #[ignore = "requires MINICPMV46_MODEL env var pointing to a real 4-bit checkpoint"]
     fn text_only_vl_chunk_delegates_to_core_forward() {
-        use crate::core::generate::{build_position_ids, IMAGE_TOKEN_ID};
+        use crate::core::model_input::{build_position_ids, IMAGE_TOKEN_ID};
         use crate::core::Loader;
 
         let model_dir = std::env::var("MINICPMV46_MODEL")

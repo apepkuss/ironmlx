@@ -5,11 +5,12 @@
 use anyhow::{anyhow, Context};
 use mlx::{Array, Dtype, StreamOrDevice};
 
+use crate::core::cache::layer::LayerCache;
 use crate::core::cache::{GatedDeltaCache, KVCache, MtpCache};
 use crate::core::model::ModelMeta;
 use crate::core::{Loader, Model};
 use crate::models::vision::{VisionConfig, VisionTower};
-use crate::nn::{AttnKind, LayerCache, Linear, MtpStepOutput};
+use crate::nn::{AttnKind, Linear, MtpStepOutput};
 use crate::Result;
 
 use super::config::Qwen35MoeConfig;
@@ -838,7 +839,7 @@ impl crate::core::vision::DenseVlMethods for Qwen35MoeModel {
         per_row_pixel_values: &[Option<&[mlx::Array]>],
         per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
         image_token_id: i32,
-        cache: Option<&mut [crate::nn::LayerCache]>,
+        cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
         target: mlx::StreamOrDevice,
     ) -> crate::Result<mlx::Array> {
         let mut row_pixel_values = Vec::with_capacity(per_row_pixel_values.len());
@@ -936,7 +937,7 @@ impl crate::core::vision::DenseVlMethods for Qwen35MoeModel {
         position_ids: &mlx::Array,
         per_row_lens: Option<&[i32]>,
         decode_mask: Option<&mlx::Array>,
-        cache: Option<&mut [crate::nn::LayerCache]>,
+        cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
         vision_embeds_slice: Option<&mlx::Array>,
         image_token_id: i32,
         target: mlx::StreamOrDevice,
@@ -960,7 +961,7 @@ impl crate::core::vision::DenseVlMethods for Qwen35MoeModel {
         position_ids: &mlx::Array,
         per_row_lens: Option<&[i32]>,
         decode_mask: Option<&mlx::Array>,
-        cache: Option<&mut [crate::nn::LayerCache]>,
+        cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
         vision_embeds_slice: Option<&mlx::Array>,
         image_token_id: i32,
         target: mlx::StreamOrDevice,
@@ -1151,7 +1152,7 @@ mod tests {
     #[test]
     #[serial(mlx_metal)]
     fn mtp_forward_projects_every_moe_mtp_position() {
-        use crate::core::generate::build_position_ids;
+        use crate::core::model_input::build_position_ids;
         use crate::models::qwen3_5_moe::{Qwen35MoeMtp, Qwen35MoeMtpConfig};
         use crate::nn::{Linear, RmsNorm};
 
@@ -1214,7 +1215,7 @@ mod tests {
 
     #[test]
     fn forward_vl_chunk_text_only_matches_forward_on_stub_model() {
-        use crate::core::generate::{build_position_ids, IMAGE_TOKEN_ID};
+        use crate::core::model_input::{build_position_ids, IMAGE_TOKEN_ID};
 
         let model = Qwen35MoeModel::from_cfg_for_test(make_zero_layer_cfg());
         let input_ids: Array = (&[1_i32, 2, 3][..], &[1_i32, 3][..])
@@ -1243,7 +1244,7 @@ mod tests {
 
     #[test]
     fn batched_prefill_vl_text_only_matches_batched_prefill_on_stub_model() {
-        use crate::core::generate::{
+        use crate::core::model_input::{
             build_batch_attention_mask, build_batch_linear_mask, build_position_ids_batched,
             IMAGE_TOKEN_ID,
         };

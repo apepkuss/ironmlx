@@ -5,7 +5,9 @@
 
 use std::path::PathBuf;
 
-use ironmlx::core::generate::{GenerateRequest, GenerationStream, IMAGE_TOKEN_ID};
+use ironmlx::core::generate::GenerationStream;
+use ironmlx::core::generation_types::GenerateRequest;
+use ironmlx::core::model_input::IMAGE_TOKEN_ID;
 use ironmlx::core::{Model, QuantMode, Sampler, Tokenizer};
 use ironmlx::models::{
     is_qwen36_moe_config, Gemma4Model, Qwen35Model, Qwen35MoeModel, Qwen36MoeModel,

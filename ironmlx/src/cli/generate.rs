@@ -8,12 +8,14 @@ use anyhow::{anyhow, Context};
 use clap::Args;
 use mlx::Array;
 
-use crate::core::generate::{GenerateEvent, GenerateRequest, GenerationStream, IMAGE_TOKEN_ID};
+use crate::core::generate::GenerationStream;
+use crate::core::generation_types::{GenerateEvent, GenerateRequest};
+use crate::core::model_input::IMAGE_TOKEN_ID;
 use crate::core::sampler::Sampler;
 use crate::core::speculative::{
-    resolve_mtp_draft_tokens, MtpDraftTokensArg, MtpSpeculativeConfig, MtpSpeculativeModel,
-    MtpTextGenerationStream,
+    resolve_mtp_draft_tokens, MtpDraftTokensArg, MtpSpeculativeConfig, MtpTextGenerationStream,
 };
+use crate::core::speculative_model::MtpSpeculativeModel;
 use crate::core::vision::DenseVlMethods;
 use crate::core::{
     DFlash2TextGenerationStream, Loader, Message, Model, Phase, Scheduler, StepEvent, Tokenizer,
@@ -648,7 +650,7 @@ fn run_generation_with_gemma4_drafter_model(
             .unwrap_or(MtpDraftTokensArg::Omitted),
     );
     let cfg = MtpSpeculativeConfig::new(draft_tokens, request.sampler)?;
-    let mut stream = crate::models::gemma4::Gemma4DrafterGenerationStream::new(
+    let mut stream = crate::core::gemma4_generation::Gemma4DrafterGenerationStream::new(
         model, &drafter, tokenizer, request, cfg,
     )?;
     write_generation_events(|| stream.next_token())

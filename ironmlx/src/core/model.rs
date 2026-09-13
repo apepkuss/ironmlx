@@ -7,7 +7,7 @@ use mlx::{Array, Dtype, StreamOrDevice};
 
 use crate::core::cache::TurboQuantKVBits;
 
-use crate::nn::LayerCache;
+use crate::core::cache::layer::LayerCache;
 use crate::Result;
 
 /// Architecture metadata available without a concrete model configuration.

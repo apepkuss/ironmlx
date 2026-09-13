@@ -37,6 +37,57 @@ pub trait WeightSource {
     }
 }
 
+/// Model-independent, owned collection of weight tensors and resolved metadata.
+/// Checkpoint readers perform model-specific sanitization before constructing it.
+/// Construction does not evaluate tensors or change their storage/streams.
+pub struct WeightMap {
+    tensors: std::collections::HashMap<String, Array>,
+    quant: Option<QuantMeta>,
+    overrides: std::collections::HashMap<String, QuantMeta>,
+}
+
+impl WeightMap {
+    pub fn new(
+        tensors: std::collections::HashMap<String, Array>,
+        quant: Option<QuantMeta>,
+        overrides: std::collections::HashMap<String, QuantMeta>,
+    ) -> Self {
+        Self {
+            tensors,
+            quant,
+            overrides,
+        }
+    }
+
+    pub fn tensors(&self) -> &std::collections::HashMap<String, Array> {
+        &self.tensors
+    }
+
+    /// Release provider-owned references without changing surviving tensors.
+    pub fn retain(&mut self, keep: impl FnMut(&String, &mut Array) -> bool) {
+        self.tensors.retain(keep);
+    }
+
+    pub fn quant_meta(&self) -> Option<QuantMeta> {
+        self.quant
+    }
+}
+
+impl WeightSource for WeightMap {
+    fn tensor(&self, key: &str) -> Result<&Array> {
+        self.tensor_opt(key)
+            .ok_or_else(|| anyhow!("WeightMap: missing tensor key `{key}`"))
+    }
+
+    fn tensor_opt(&self, key: &str) -> Option<&Array> {
+        self.tensors.get(key)
+    }
+
+    fn quant_meta_for(&self, prefix: &str) -> Option<QuantMeta> {
+        self.overrides.get(prefix).copied().or(self.quant)
+    }
+}
+
 /// Quantization scheme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuantMode {

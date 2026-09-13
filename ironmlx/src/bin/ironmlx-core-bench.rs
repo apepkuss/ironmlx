@@ -14,16 +14,15 @@ use ironmlx::core::cache::{
     ActiveKvOffloadStatus, PagedPrefixCacheConfig, TurboQuantKVBits,
     DEFAULT_PAGED_PREFIX_CACHE_BLOCK_SIZE,
 };
+use ironmlx::core::gemma4_generation::{Gemma4DrafterGenerationStream, Gemma4DrafterTraceWindow};
 use ironmlx::core::speculative::{
     qwen_fixed_mtp_draft_depth_scope, resolve_mtp_draft_tokens, MtpDraftCapObservation,
-    MtpDraftTokensArg, MtpSpeculativeConfig, MtpSpeculativeModel, MtpSpeculativeStats,
-    MtpTextGenerationStream,
+    MtpDraftTokensArg, MtpSpeculativeConfig, MtpSpeculativeStats, MtpTextGenerationStream,
 };
+use ironmlx::core::speculative_model::MtpSpeculativeModel;
 use ironmlx::core::vision::DenseVlMethods;
 use ironmlx::core::{GenerateRequest, GenerationStream, Loader, Model, Sampler, Scheduler};
-use ironmlx::models::gemma4::{
-    Gemma4AssistantModel, Gemma4DrafterGenerationStream, Gemma4DrafterTraceWindow,
-};
+use ironmlx::models::gemma4::Gemma4AssistantModel;
 use ironmlx::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF;
 use ironmlx::models::{
     Gemma4Model, Glm4MoeLiteModel, LlamaModel, ModelArchitecture, Qwen35Model, Qwen35MoeModel,

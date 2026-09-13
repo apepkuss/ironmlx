@@ -139,7 +139,7 @@ fn greedy_argmax(arr: &Array) -> usize {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires QWEN35_MODEL env var pointing to a real 4-bit checkpoint"]
 async fn p4_model_forward_from_blocking_thread() {
-    use ironmlx::core::generate::build_position_ids;
+    use ironmlx::core::model_input::build_position_ids;
     use std::sync::Arc;
     use tokio::sync::Mutex;
 

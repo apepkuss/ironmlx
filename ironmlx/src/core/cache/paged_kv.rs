@@ -1,6 +1,7 @@
+use super::page_storage::{KvPageStore, KvPageStoreFactory};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::Context;
 use mlx::ops::indexing::{slice_strided_on, slice_update_on};
@@ -166,6 +167,13 @@ fn contiguous_page_runs(dst_pages: &[i32]) -> Vec<PageRun> {
 }
 
 impl PagedKVCache {
+    fn page_store(&self) -> Result<&dyn KvPageStore> {
+        self.hot_cold
+            .as_ref()
+            .map(|tiering| tiering.storage.as_ref())
+            .ok_or_else(|| anyhow::anyhow!("PagedKVCache: page storage is not configured"))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         batch: i32,
@@ -1061,8 +1069,7 @@ impl PagedKVCache {
             table.offset = 0;
         }
         if let Some(hot_cold) = &mut self.hot_cold {
-            let _ = fs::remove_dir_all(&hot_cold.cache_dir);
-            let _ = fs::create_dir_all(&hot_cold.cache_dir);
+            let _ = hot_cold.storage.reset();
             hot_cold.reset_runtime_state();
             self.k_pages = None;
             self.v_pages = None;
@@ -2333,10 +2340,8 @@ impl PagedKVCache {
             [1_i32, 1, 1, 1],
             target,
         )?;
-        Self::save_page_segment_file(&path, &k_segment, &v_segment)?;
-        let bytes = fs::metadata(&path)
-            .map(|meta| meta.len().min(usize::MAX as u64) as usize)
-            .unwrap_or(0);
+        self.page_store()?.save(&path, &k_segment, &v_segment)?;
+        let bytes = self.page_store()?.size(&path);
         if let Some(hot_cold) = &mut self.hot_cold {
             for idx in 0..run_len {
                 hot_cold.mark_offloaded(
@@ -3420,15 +3425,15 @@ impl PagedKVCache {
             if let Some(hot_cold) = &mut self.hot_cold {
                 hot_cold.mark_loading(page, segment.clone());
             }
-            let load_result = Self::load_page_segment_file(&path)
+            let load_result = self
+                .page_store()?
+                .load(&path)
                 .with_context(|| format!("load active KV page {}", path.display()));
             let (k_segment, v_segment) = match load_result {
                 Ok(segment_pair) => segment_pair,
                 Err(err) => {
                     if let Some(hot_cold) = &mut self.hot_cold {
-                        let bytes = fs::metadata(&path)
-                            .map(|meta| meta.len().min(usize::MAX as u64) as usize)
-                            .unwrap_or(0);
+                        let bytes = hot_cold.storage.size(&path);
                         hot_cold.mark_offloaded(
                             page,
                             PagedKvPageSegment::new(
@@ -3524,7 +3529,9 @@ impl PagedKVCache {
         target: StreamOrDevice,
     ) -> Result<()> {
         let (path, bytes, start_page, _page_index, page_count) = segment;
-        let (k_segment, v_segment) = Self::load_page_segment_file(&path)
+        let (k_segment, v_segment) = self
+            .page_store()?
+            .load(&path)
             .with_context(|| format!("stage active KV page segment {}", path.display()))?;
         let mut staged = 0_u64;
         for idx in 0..page_count {
@@ -3816,10 +3823,8 @@ impl PagedKVCache {
         let v_refs = v_parts.iter().collect::<Vec<_>>();
         let k_segment = concatenate_on(&k_refs, 0, target)?;
         let v_segment = concatenate_on(&v_refs, 0, target)?;
-        Self::save_page_segment_file(&path, &k_segment, &v_segment)?;
-        let bytes = fs::metadata(&path)
-            .map(|meta| meta.len().min(usize::MAX as u64) as usize)
-            .unwrap_or(0);
+        self.page_store()?.save(&path, &k_segment, &v_segment)?;
+        let bytes = self.page_store()?.size(&path);
         if let Some(hot_cold) = &mut self.hot_cold {
             for (idx, &(page, slot)) in pages.iter().enumerate() {
                 hot_cold.invalidate_stream_cache_page(page);
@@ -3838,53 +3843,6 @@ impl PagedKVCache {
             }
         }
         Ok(())
-    }
-
-    fn save_page_segment_file(path: &Path, k_pages: &Array, v_pages: &Array) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("create active KV page dir {}", parent.display()))?;
-        }
-        let stem = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or("page");
-        let tmp_path = path.with_file_name(format!(
-            "{stem}.tmp-{}.safetensors",
-            uuid::Uuid::new_v4().simple()
-        ));
-        let mut tensors = HashMap::new();
-        tensors.insert("k".to_owned(), k_pages.clone());
-        tensors.insert("v".to_owned(), v_pages.clone());
-        let mut metadata = HashMap::new();
-        metadata.insert(
-            "ironmlx.active_kv.schema".to_owned(),
-            "hot_cold_segment_v1".to_owned(),
-        );
-        let tmp = tmp_path.to_string_lossy().into_owned();
-        mlx::io::save_safetensors(&tmp, &tensors, &metadata)
-            .with_context(|| format!("save active KV page {}", tmp_path.display()))?;
-        fs::rename(&tmp_path, path).with_context(|| {
-            format!(
-                "install active KV page {} -> {}",
-                tmp_path.display(),
-                path.display()
-            )
-        })?;
-        Ok(())
-    }
-
-    fn load_page_segment_file(path: &Path) -> Result<(Array, Array)> {
-        let path_str = path.to_string_lossy().into_owned();
-        let (mut tensors, _) = mlx::io::load_safetensors(&path_str)
-            .with_context(|| format!("load active KV page {path_str}"))?;
-        let k = tensors
-            .remove("k")
-            .ok_or_else(|| anyhow::anyhow!("active KV page {} missing tensor k", path.display()))?;
-        let v = tensors
-            .remove("v")
-            .ok_or_else(|| anyhow::anyhow!("active KV page {} missing tensor v", path.display()))?;
-        Ok((k, v))
     }
 
     fn remove_offloaded_segment_if_unreferenced(
@@ -3912,15 +3870,7 @@ impl PagedKVCache {
         if still_referenced {
             return Ok(());
         }
-        match fs::remove_file(path) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => {
-                return Err(err).with_context(|| {
-                    format!("remove offloaded active KV page {}", path.display())
-                });
-            }
-        }
+        hot_cold.storage.remove(path)?;
         Ok(())
     }
 
@@ -4019,7 +3969,9 @@ impl PagedKVCache {
                 anyhow::anyhow!("PagedKVCache::page_slice_on: page {page} is missing")
             })?;
         let (path, page_index) = path;
-        let (k_segment, v_segment) = Self::load_page_segment_file(&path)
+        let (k_segment, v_segment) = self
+            .page_store()?
+            .load(&path)
             .with_context(|| format!("load offloaded active KV page {}", path.display()))?;
         let k = slice_strided_on(
             &k_segment,
@@ -4126,7 +4078,9 @@ impl PagedKVCache {
             )?;
             return Ok((k, v));
         }
-        let (k_segment, v_segment) = Self::load_page_segment_file(&path)
+        let (k_segment, v_segment) = self
+            .page_store()?
+            .load(&path)
             .with_context(|| format!("stream offloaded active KV page {}", path.display()))?;
         let k = slice_strided_on(
             &k_segment,
@@ -4348,24 +4302,20 @@ fn standard_prefill_valid_mask_on(
     Ok(mask)
 }
 
-impl Drop for PagedKVCache {
-    fn drop(&mut self) {
-        if let Some(hot_cold) = &self.hot_cold {
-            let _ = fs::remove_dir_all(&hot_cold.cache_dir);
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct PagedKvHotColdConfig {
-    pub root: PathBuf,
+    pub storage_factory: Arc<dyn KvPageStoreFactory>,
     pub hot_window_pages: i32,
     pub chunk_pages: i32,
     pub stream_cache_pages: usize,
 }
 
 impl PagedKvHotColdConfig {
-    pub fn new(root: impl Into<PathBuf>, hot_window_pages: i32, chunk_pages: i32) -> Result<Self> {
+    pub fn new(
+        storage_factory: Arc<dyn KvPageStoreFactory>,
+        hot_window_pages: i32,
+        chunk_pages: i32,
+    ) -> Result<Self> {
         anyhow::ensure!(
             hot_window_pages > 0,
             "PagedKvHotColdConfig::new: hot_window_pages must be > 0"
@@ -4375,7 +4325,7 @@ impl PagedKvHotColdConfig {
             "PagedKvHotColdConfig::new: chunk_pages must be > 0"
         );
         Ok(Self {
-            root: root.into(),
+            storage_factory,
             hot_window_pages,
             chunk_pages,
             stream_cache_pages: default_stream_cache_pages(hot_window_pages, chunk_pages),
@@ -4488,7 +4438,7 @@ impl PagedKvPageState {
 
 #[derive(Debug)]
 struct PagedKvHotColdTiering {
-    cache_dir: PathBuf,
+    storage: Box<dyn KvPageStore>,
     hot_window_pages: i32,
     configured_hot_window_pages: i32,
     chunk_pages: i32,
@@ -4506,13 +4456,9 @@ struct PagedKvHotColdTiering {
 
 impl PagedKvHotColdTiering {
     fn new(config: PagedKvHotColdConfig) -> Result<Self> {
-        let cache_dir = config
-            .root
-            .join(format!("cache-{}", uuid::Uuid::new_v4().simple()));
-        fs::create_dir_all(&cache_dir)
-            .with_context(|| format!("create active KV page cache dir {}", cache_dir.display()))?;
+        let storage = config.storage_factory.open()?;
         Ok(Self {
-            cache_dir,
+            storage,
             hot_window_pages: config.hot_window_pages,
             configured_hot_window_pages: config.hot_window_pages,
             chunk_pages: config.chunk_pages,
@@ -4540,10 +4486,7 @@ impl PagedKvHotColdTiering {
     }
 
     fn segment_path(&self, start_page: i32, page_count: i32) -> PathBuf {
-        self.cache_dir.join(format!(
-            "pages-{start_page}-{page_count}-{}.safetensors",
-            uuid::Uuid::new_v4().simple()
-        ))
+        self.storage.segment_path(start_page, page_count)
     }
 
     fn slot_for(&self, page: i32) -> Option<i32> {
@@ -4695,7 +4638,7 @@ impl PagedKvHotColdTiering {
             swap_out_count: self.swap_out_count,
             swap_in_count: self.swap_in_count,
             stream_read_count: self.stream_read_count,
-            storage_dir: self.cache_dir.clone(),
+            storage_dir: self.storage.location(),
         };
         let mut counted_paths = HashSet::new();
         for state in self.page_states.iter().flatten() {
@@ -4728,12 +4671,6 @@ impl PagedKvHotColdTiering {
     }
 }
 
-impl Drop for PagedKvHotColdTiering {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.cache_dir);
-    }
-}
-
 fn ceil_div(n: i32, d: i32) -> i32 {
     if n <= 0 {
         0
@@ -4753,7 +4690,7 @@ fn round_up(n: i32, step: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::generate::{build_batch_attention_mask, build_per_row_decode_mask};
+    use crate::core::model_input::{build_batch_attention_mask, build_per_row_decode_mask};
     use mlx::{Array, Dtype};
     use std::{
         fs,
@@ -5464,7 +5401,8 @@ mod tests {
             PagedKVCache::new(1, 1, 2, 2, Dtype::Float32, 8, 2, 8).expect("empty cache");
         empty
             .enable_hot_cold_tiering(
-                PagedKvHotColdConfig::new(root.join("empty"), 4, 1).expect("hot/cold config"),
+                crate::core::page_storage::file_paged_kv_config(root.join("empty"), 4, 1)
+                    .expect("hot/cold config"),
             )
             .expect("enable hot/cold tiering");
         assert!(empty.can_direct_install_prefix_pages(2));
@@ -5473,7 +5411,8 @@ mod tests {
 
         let mut live = PagedKVCache::new(1, 1, 2, 2, Dtype::Float32, 8, 2, 8).expect("live cache");
         live.enable_hot_cold_tiering(
-            PagedKvHotColdConfig::new(root.join("live"), 4, 1).expect("hot/cold config"),
+            crate::core::page_storage::file_paged_kv_config(root.join("live"), 4, 1)
+                .expect("hot/cold config"),
         )
         .expect("enable hot/cold tiering");
         let k: Array = (&[1.0_f32, 2.0, 3.0, 4.0][..], (1_i32, 1_i32, 2_i32, 2_i32))
@@ -5501,7 +5440,8 @@ mod tests {
             PagedKVCache::new(1, 1, 2, 2, Dtype::Float32, 12, 2, 16).expect("paged cache");
         paged
             .enable_hot_cold_tiering(
-                PagedKvHotColdConfig::new(&root, 1, 1).expect("hot/cold config"),
+                crate::core::page_storage::file_paged_kv_config(&root, 1, 1)
+                    .expect("hot/cold config"),
             )
             .expect("enable hot/cold tiering");
 
@@ -5560,7 +5500,8 @@ mod tests {
             PagedKVCache::new(2, 1, 2, 2, Dtype::Float32, 12, 2, 16).expect("paged cache");
         paged
             .enable_hot_cold_tiering(
-                PagedKvHotColdConfig::new(&root, 1, 1).expect("hot/cold config"),
+                crate::core::page_storage::file_paged_kv_config(&root, 1, 1)
+                    .expect("hot/cold config"),
             )
             .expect("enable hot/cold tiering");
 
@@ -5615,7 +5556,8 @@ mod tests {
                 PagedKVCache::new(1, 1, 4, 4, Dtype::Float32, 8, 2, 8).expect("paged cache");
             paged
                 .enable_hot_cold_tiering(
-                    PagedKvHotColdConfig::new(&root, 1, 1).expect("hot/cold config"),
+                    crate::core::page_storage::file_paged_kv_config(&root, 1, 1)
+                        .expect("hot/cold config"),
                 )
                 .expect("enable hot/cold tiering");
             let storage_dir = paged
@@ -5642,7 +5584,8 @@ mod tests {
             PagedKVCache::new(1, 1, 2, 2, Dtype::Float32, 8, 2, 8).expect("paged cache");
         paged
             .enable_hot_cold_tiering(
-                PagedKvHotColdConfig::new(&root, 4, 1).expect("hot/cold config"),
+                crate::core::page_storage::file_paged_kv_config(&root, 4, 1)
+                    .expect("hot/cold config"),
             )
             .expect("enable hot/cold tiering");
         let data = vec![1.0_f32; 16];
@@ -5687,7 +5630,8 @@ mod tests {
             PagedKVCache::new(1, 1, 2, 2, Dtype::Float32, 8, 2, 8).expect("paged cache");
         paged
             .enable_hot_cold_tiering(
-                PagedKvHotColdConfig::new(&root, 4, 1).expect("hot/cold config"),
+                crate::core::page_storage::file_paged_kv_config(&root, 4, 1)
+                    .expect("hot/cold config"),
             )
             .expect("enable hot/cold tiering");
 
@@ -5738,7 +5682,8 @@ mod tests {
             PagedKVCache::new(1, 1, 4, 4, Dtype::Float32, 8, 2, 8).expect("paged cache");
         paged
             .enable_hot_cold_tiering(
-                PagedKvHotColdConfig::new(&root, 1, 1).expect("hot/cold config"),
+                crate::core::page_storage::file_paged_kv_config(&root, 1, 1)
+                    .expect("hot/cold config"),
             )
             .expect("enable hot/cold tiering");
 
@@ -5869,7 +5814,8 @@ mod tests {
             PagedKVCache::new(2, 1, 4, 4, Dtype::Float32, 8, 2, 8).expect("paged cache");
         paged
             .enable_hot_cold_tiering(
-                PagedKvHotColdConfig::new(&root, 1, 1).expect("hot/cold config"),
+                crate::core::page_storage::file_paged_kv_config(&root, 1, 1)
+                    .expect("hot/cold config"),
             )
             .expect("enable hot/cold tiering");
 
@@ -5973,7 +5919,8 @@ mod tests {
             PagedKVCache::new(1, 1, 4, 4, Dtype::Float32, 8, 2, 16).expect("paged cache");
         paged
             .enable_hot_cold_tiering(
-                PagedKvHotColdConfig::new(&root, 1, 1).expect("hot/cold config"),
+                crate::core::page_storage::file_paged_kv_config(&root, 1, 1)
+                    .expect("hot/cold config"),
             )
             .expect("enable hot/cold tiering");
 
@@ -6068,7 +6015,8 @@ mod tests {
             PagedKVCache::new(1, 1, 4, 4, Dtype::Float32, 12, 2, 16).expect("paged cache");
         paged
             .enable_hot_cold_tiering(
-                PagedKvHotColdConfig::new(&root, 1, 4).expect("hot/cold config"),
+                crate::core::page_storage::file_paged_kv_config(&root, 1, 4)
+                    .expect("hot/cold config"),
             )
             .expect("enable hot/cold tiering");
 
@@ -6147,7 +6095,8 @@ mod tests {
             PagedKVCache::new(1, 1, 4, 4, Dtype::Float32, 12, 2, 16).expect("paged cache");
         paged
             .enable_hot_cold_tiering(
-                PagedKvHotColdConfig::new(&root, 1, 8).expect("hot/cold config"),
+                crate::core::page_storage::file_paged_kv_config(&root, 1, 8)
+                    .expect("hot/cold config"),
             )
             .expect("enable hot/cold tiering");
 
@@ -6227,7 +6176,8 @@ mod tests {
             PagedKVCache::new(1, 1, 4, 4, Dtype::Float32, 16, 2, 16).expect("paged cache");
         paged
             .enable_hot_cold_tiering(
-                PagedKvHotColdConfig::new(&root, 1, 8).expect("hot/cold config"),
+                crate::core::page_storage::file_paged_kv_config(&root, 1, 8)
+                    .expect("hot/cold config"),
             )
             .expect("enable hot/cold tiering");
 
@@ -6315,7 +6265,8 @@ mod tests {
             PagedKVCache::new(2, 1, 4, 4, Dtype::Float32, 8, 2, 8).expect("paged cache");
         paged
             .enable_hot_cold_tiering(
-                PagedKvHotColdConfig::new(&root, 4, 1).expect("hot/cold config"),
+                crate::core::page_storage::file_paged_kv_config(&root, 4, 1)
+                    .expect("hot/cold config"),
             )
             .expect("enable hot/cold tiering");
 
@@ -6394,7 +6345,8 @@ mod tests {
             PagedKVCache::new(1, 1, 4, 4, Dtype::Float32, 8, 2, 8).expect("paged cache");
         paged
             .enable_hot_cold_tiering(
-                PagedKvHotColdConfig::new(&root, 1, 1).expect("hot/cold config"),
+                crate::core::page_storage::file_paged_kv_config(&root, 1, 1)
+                    .expect("hot/cold config"),
             )
             .expect("enable hot/cold tiering");
 
@@ -6457,7 +6409,8 @@ mod tests {
             PagedKVCache::new(1, 1, 4, 4, Dtype::Float32, 8, 2, 8).expect("paged cache");
         paged
             .enable_hot_cold_tiering(
-                PagedKvHotColdConfig::new(&root, 1, 7).expect("hot/cold config"),
+                crate::core::page_storage::file_paged_kv_config(&root, 1, 7)
+                    .expect("hot/cold config"),
             )
             .expect("enable hot/cold tiering");
 
@@ -6525,7 +6478,8 @@ mod tests {
             PagedKVCache::new(1, 1, 4, 4, Dtype::Float32, 132, 4, 64).expect("paged cache");
         paged
             .enable_hot_cold_tiering(
-                PagedKvHotColdConfig::new(&root, 2, 4).expect("hot/cold config"),
+                crate::core::page_storage::file_paged_kv_config(&root, 2, 4)
+                    .expect("hot/cold config"),
             )
             .expect("enable hot/cold tiering");
 
@@ -6592,7 +6546,8 @@ mod tests {
             PagedKVCache::new(2, 1, 4, 4, Dtype::Float32, 8, 2, 8).expect("paged cache");
         paged
             .enable_hot_cold_tiering(
-                PagedKvHotColdConfig::new(&root, 1, 1).expect("hot/cold config"),
+                crate::core::page_storage::file_paged_kv_config(&root, 1, 1)
+                    .expect("hot/cold config"),
             )
             .expect("enable hot/cold tiering");
 
@@ -6653,7 +6608,8 @@ mod tests {
             PagedKVCache::new(3, 2, 4, 4, Dtype::Float32, 24, 2, 48).expect("paged cache");
         paged
             .enable_hot_cold_tiering(
-                PagedKvHotColdConfig::new(&root, 2, 2).expect("hot/cold config"),
+                crate::core::page_storage::file_paged_kv_config(&root, 2, 2)
+                    .expect("hot/cold config"),
             )
             .expect("enable hot/cold tiering");
 

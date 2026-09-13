@@ -406,7 +406,7 @@ mod tests {
     #[ignore = "loads the full local Qwen3.8 target and DFlash2 draft checkpoints"]
     #[serial(mlx_metal)]
     fn qwen38_dflash2_b2_b4_kernel_spike_is_row_exact_and_reports_timings() {
-        use crate::core::generate::build_position_ids;
+        use crate::core::model_input::build_position_ids;
         use crate::core::Loader;
         use crate::models::dflash2::{DFlash2Target, DFlash2TargetForwardMode};
         use crate::models::Qwen35Model;

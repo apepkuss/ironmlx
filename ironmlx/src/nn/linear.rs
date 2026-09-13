@@ -19,43 +19,8 @@ pub struct Linear {
     inner: LinearImpl,
 }
 
-/// Borrowed quantized Linear internals for architecture-specific fused paths.
-#[derive(Clone, Copy)]
-pub(crate) struct QuantizedLinearParts<'a> {
-    pub(crate) weight: &'a Array,
-    pub(crate) scales: &'a Array,
-    pub(crate) biases: Option<&'a Array>,
-    pub(crate) bias: Option<&'a Array>,
-    pub(crate) group_size: i32,
-    pub(crate) bits: i32,
-    pub(crate) mode: QuantMode,
-}
-
-/// Internal backend variant. Private — callers use [`Linear`].
-enum LinearImpl {
-    Fp {
-        /// `[out, in]` dense weight, dtype as stored in the checkpoint.
-        weight: Array,
-        /// Optional `[out]` bias.
-        bias: Option<Array>,
-    },
-    Quant {
-        /// Packed quantized weight (layout per `mlx::quantization`).
-        weight: Array,
-        /// Per-group scales.
-        scales: Array,
-        /// Per-group zero-points (affine quantization).
-        biases: Option<Array>,
-        /// Optional Linear bias term, applied after the quantized matmul.
-        bias: Option<Array>,
-        /// Group size from quantization metadata.
-        group_size: i32,
-        /// Bits per quantized weight.
-        bits: i32,
-        /// Quantization scheme from loader metadata.
-        mode: QuantMode,
-    },
-}
+use crate::core::linear::LinearParameters as LinearImpl;
+pub(crate) use crate::core::linear::QuantizedLinearParts;
 
 impl Linear {
     /// Build a `Linear` from `loader`, looking for tensors at
@@ -426,14 +391,7 @@ impl Linear {
             }
         }
         match &self.inner {
-            LinearImpl::Fp { weight, bias } => {
-                let wt = weight.transpose_on(target)?;
-                let mut y = x.matmul_on(&wt, target)?;
-                if let Some(b) = bias {
-                    y = &y + b;
-                }
-                Ok(y)
-            }
+            LinearImpl::Fp { .. } => self.inner.forward_on(x, target),
             LinearImpl::Quant {
                 weight,
                 scales,
@@ -476,17 +434,7 @@ impl Linear {
                         target,
                     )?
                 } else {
-                    mlx::quantization::quantized_matmul_on(
-                        x,
-                        weight,
-                        scales,
-                        biases.as_ref(),
-                        /* transpose = */ true,
-                        Some(*group_size),
-                        Some(*bits),
-                        mode.mlx_backend_mode(),
-                        target,
-                    )?
+                    return self.inner.forward_on(x, target);
                 };
                 if let Some(b) = bias {
                     y = &y + b;

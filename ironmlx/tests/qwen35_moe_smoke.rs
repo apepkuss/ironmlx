@@ -19,7 +19,7 @@
 
 use mlx::Dtype;
 
-use ironmlx::core::generate::build_position_ids;
+use ironmlx::core::model_input::build_position_ids;
 use ironmlx::core::{Loader, Model, Tokenizer};
 use ironmlx::models::qwen3_5_moe::MIN_KV_CACHE_CAP_FOR_GPU_PERF;
 use ironmlx::models::Qwen35MoeModel;

@@ -31,8 +31,10 @@
 
 use mlx::{ops, Array, Dtype};
 
-use ironmlx::core::generate::{build_position_ids, GenerateRequest, GenerationStream};
+use ironmlx::core::generate::GenerationStream;
+use ironmlx::core::generation_types::GenerateRequest;
 use ironmlx::core::model::Model;
+use ironmlx::core::model_input::build_position_ids;
 use ironmlx::core::{Loader, Sampler, Tokenizer};
 use ironmlx::models::minicpmv4_6::model::MiniCpmV46Model;
 

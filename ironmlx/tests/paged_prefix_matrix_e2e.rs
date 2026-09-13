@@ -28,12 +28,12 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
+use ironmlx::core::cache::layer::enable_paged_kv_caches;
 use ironmlx::core::server::chat_format::render_and_encode;
 use ironmlx::core::server::vision::{expand_decoded_messages, DecodedMessage, DecodedPart};
-use ironmlx::core::server::VisionInputConfig;
 use ironmlx::core::vision::DenseVlMethods;
+use ironmlx::core::vision_input::VisionInputConfig;
 use ironmlx::core::{Loader, Model, Tokenizer};
-use ironmlx::nn::enable_paged_kv_caches;
 use mlx::Dtype;
 
 struct ServerProcess {

@@ -7,7 +7,7 @@
 //!
 //! The fixture stores int32 arrays; comparison is exact (integer equality).
 
-use ironmlx::core::generate::{build_position_ids_vl, IMAGE_TOKEN_ID};
+use ironmlx::core::model_input::{build_position_ids_vl, IMAGE_TOKEN_ID};
 
 const FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),

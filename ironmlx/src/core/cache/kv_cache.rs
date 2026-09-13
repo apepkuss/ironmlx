@@ -2809,7 +2809,7 @@ mod tests {
             .update_and_fetch_for_attention(&step_k, &step_v, &[1, 1])
             .expect("dense decode write");
         let mask =
-            crate::core::generate::build_per_row_decode_mask(dense.offsets(), 5, Dtype::Float32)
+            crate::core::model_input::build_per_row_decode_mask(dense.offsets(), 5, Dtype::Float32)
                 .expect("mask");
         let expected = mlx::fast::scaled_dot_product_attention(
             &q,
@@ -2877,7 +2877,7 @@ mod tests {
             .try_into()
             .unwrap();
         let scale = 0.5_f32;
-        let mask = crate::core::generate::build_per_row_decode_mask(&[5, 3], 5, Dtype::Float32)
+        let mask = crate::core::model_input::build_per_row_decode_mask(&[5, 3], 5, Dtype::Float32)
             .expect("scheduler decode mask");
 
         let actual = paged

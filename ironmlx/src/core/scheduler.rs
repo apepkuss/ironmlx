@@ -118,25 +118,33 @@ pub enum SchedulerError {
     },
 }
 
-use crate::core::cache::{
-    timed, ActiveKvEntryChunkReader, ActiveKvOffloadConfig, ActiveKvOffloadSharedStats,
-    ActiveKvOffloadStore, ActiveKvResidencySummary, ActiveKvStoredPayload,
-    AsyncPrefixStoreAdmission, AsyncPrefixStoreCancellation, AsyncPrefixStorePermit,
-    AsyncPrefixStoreSubmit, MtpCache, MtpCacheSnapshot, PagedKvBlockOwner, PagedKvHotColdConfig,
-    PagedKvImmutableBlockHandle, PagedKvPhysicalStats, PagedPrefixCacheConfig, PagedPrefixEntry,
-    PagedPrefixEntryStats, PagedPrefixKeySpec, PagedPrefixLayer, PagedPrefixLoadStatus,
-    PagedPrefixStore, PrefixEntryKind, PrefixLayerPayload, PrefixLruCache, PrefixLruCacheConfig,
-    PrefixLruInsertStatus, PrefixMtpLayerSpec, PrefixTensorSpec, SharedPrefixLruCache,
-    TurboQuantKVBits,
+use crate::core::cache::active_payload::ActiveKvEntryChunkReader;
+use crate::core::cache::layer::{
+    enable_paged_hot_cold_tiering_caches, enable_paged_kv_caches, enable_turboquant_kv_caches,
+    paged_prefix_key_spec_for_full_caches, prefix_entry_for_row, prefix_key_spec_for_caches,
+    restore_prefix_entry_for_row, restore_prefix_entry_for_rows, LayerCache,
 };
-use crate::core::generate::{
+use crate::core::cache::prefix_payload::{
+    PagedPrefixEntry, PagedPrefixEntryStats, PagedPrefixKeySpec, PagedPrefixLayer, PrefixEntryKind,
+    PrefixLayerPayload, PrefixMtpLayerSpec, PrefixTensorSpec,
+};
+use crate::core::cache::{
+    timed, ActiveKvOffloadConfig, ActiveKvOffloadSharedStats, ActiveKvOffloadStore,
+    ActiveKvResidencySummary, ActiveKvStoredPayload, AsyncPrefixStoreAdmission,
+    AsyncPrefixStoreCancellation, AsyncPrefixStorePermit, AsyncPrefixStoreSubmit, MtpCache,
+    MtpCacheSnapshot, PagedKvBlockOwner, PagedKvImmutableBlockHandle, PagedKvPhysicalStats,
+    PagedPrefixCacheConfig, PagedPrefixLoadStatus, PagedPrefixStore, PrefixLruCache,
+    PrefixLruCacheConfig, PrefixLruInsertStatus, SharedPrefixLruCache, TurboQuantKVBits,
+};
+use crate::core::generation_types::GenerateRequest;
+use crate::core::model::Model;
+use crate::core::model_input::{
     build_batch_attention_mask, build_batch_linear_mask, build_batched_append_attention_mask,
     build_decode_position_ids, build_per_row_decode_mask, build_position_ids,
     build_position_ids_batched, build_position_ids_vl, build_position_ids_vl_batched,
     count_image_pad, extend_vl_chunk_end_for_image_pad, log_vl_chunk_composition, slice_logits_row,
-    slice_pos_ids_axis2, slice_vision_embeds_rows, GenerateRequest,
+    slice_pos_ids_axis2, slice_vision_embeds_rows,
 };
-use crate::core::model::Model;
 #[cfg(test)]
 use crate::core::prompt_lookup::PromptLookupHistoryFingerprint;
 use crate::core::prompt_lookup::{
@@ -156,15 +164,11 @@ use crate::core::speculative::{
     split_speculative_draft_prng, trim_full_layer_cache_rows_to_accepted_prefix, verify_input,
     zero_hidden_like_position, DraftTokenDistribution, Gemma4DrafterPolicyState,
     MainCacheRollbackInput, MtpDraftPolicyKvState, MtpDraftPolicyWindow, MtpSpeculativeConfig,
-    MtpSpeculativeModel, MtpSpeculativeStats, QwenMtpDraftPolicySnapshot, QwenMtpDraftPolicyState,
+    MtpSpeculativeStats, QwenMtpDraftPolicySnapshot, QwenMtpDraftPolicyState,
     SpeculativeResolution,
 };
+use crate::core::speculative_model::MtpSpeculativeModel;
 use crate::core::speculative_qualification::{NeuralExactRegime, NeuralExactSource};
-use crate::nn::{
-    enable_paged_hot_cold_tiering_caches, enable_paged_kv_caches, enable_turboquant_kv_caches,
-    paged_prefix_key_spec_for_full_caches, prefix_entry_for_row, prefix_key_spec_for_caches,
-    restore_prefix_entry_for_row, restore_prefix_entry_for_rows, LayerCache,
-};
 
 /// Convenience alias — avoids `clippy::type_complexity` on Vec<Option<&[...]>> sites.
 type GridThwSlice<'a> = Option<&'a [(i32, i32, i32)]>;
@@ -747,7 +751,7 @@ pub struct AdmitMidHandle {
     pub(crate) chunk_start: i32,
     /// B=1 temp KV cache; `temp_cache.offsets[0]` advances from `0` to
     /// `prompt_len` across the chunk loop.
-    pub(crate) temp_cache: Vec<crate::nn::LayerCache>,
+    pub(crate) temp_cache: Vec<crate::core::cache::layer::LayerCache>,
     pub(crate) immutable_in_place: bool,
     pub(crate) prefix_fingerprint: Option<String>,
     pub(crate) is_vl: bool,
@@ -791,7 +795,7 @@ pub struct MtpAdmitMidHandle {
     pub(crate) chunk_size: i32,
     pub(crate) decode_cadence_mid_chunk_cap: usize,
     pub(crate) chunk_start: i32,
-    pub(crate) temp_cache: Vec<crate::nn::LayerCache>,
+    pub(crate) temp_cache: Vec<crate::core::cache::layer::LayerCache>,
     pub(crate) mtp_cache: MtpCache,
     pub(crate) prefix_fingerprint: Option<String>,
     pub(crate) is_vl: bool,
@@ -823,7 +827,7 @@ pub struct Gemma4DrafterAdmitMidHandle {
     pub(crate) chunk_size: i32,
     pub(crate) decode_cadence_mid_chunk_cap: usize,
     pub(crate) chunk_start: i32,
-    pub(crate) temp_cache: Vec<crate::nn::LayerCache>,
+    pub(crate) temp_cache: Vec<crate::core::cache::layer::LayerCache>,
     pub(crate) prefix_fingerprint: Option<String>,
     pub(crate) is_vl: bool,
     pub(crate) image_token_id: i32,
@@ -3044,7 +3048,7 @@ fn lock_prefix_lru_cache(
 
 fn try_load_prefix_lru_entry(
     prefix_lru_cache: Option<&PrefixLruCacheHandle>,
-    spec: &crate::core::cache::PagedPrefixKeySpec,
+    spec: &crate::core::cache::prefix_payload::PagedPrefixKeySpec,
 ) -> Result<Option<(String, PagedPrefixEntry, PagedPrefixEntryStats, u128)>> {
     let Some(prefix_lru_cache) = prefix_lru_cache else {
         return Ok(None);
@@ -3073,7 +3077,7 @@ fn try_load_prefix_lru_entry(
 
 fn try_insert_prefix_lru_entry(
     prefix_lru_cache: Option<&PrefixLruCacheHandle>,
-    spec: crate::core::cache::PagedPrefixKeySpec,
+    spec: crate::core::cache::prefix_payload::PagedPrefixKeySpec,
     entry: PagedPrefixEntry,
     main_row: usize,
     mtp_row: Option<usize>,
@@ -6376,7 +6380,7 @@ impl<M: Model> Scheduler<M> {
                             hot_window_pages,
                         )
                     });
-                let hot_cold = PagedKvHotColdConfig::new(
+                let hot_cold = crate::core::page_storage::file_paged_kv_config(
                     self.active_kv_config.root.clone(),
                     hot_window_pages,
                     chunk_pages,
@@ -19602,8 +19606,10 @@ impl Scheduler<crate::models::Gemma4Model> {
         }
     }
 
-    fn gemma4_drafter_prefix_cache(&self) -> crate::models::gemma4::Gemma4DrafterPrefixCache {
-        crate::models::gemma4::Gemma4DrafterPrefixCache::new_with_shared_prefix_lru(
+    fn gemma4_drafter_prefix_cache(
+        &self,
+    ) -> crate::core::gemma4_generation::Gemma4DrafterPrefixCache {
+        crate::core::gemma4_generation::Gemma4DrafterPrefixCache::new_with_shared_prefix_lru(
             self.paged_prefix_cache.clone(),
             self.prefix_lru_cache.clone(),
             None,
@@ -19792,7 +19798,8 @@ mod tests {
     use std::collections::VecDeque;
 
     use crate::core::cache::{KVCache, MtpCache, TurboQuantKVBits};
-    use crate::core::speculative::{MtpSpeculativeConfig, MtpSpeculativeModel};
+    use crate::core::speculative::MtpSpeculativeConfig;
+    use crate::core::speculative_model::MtpSpeculativeModel;
     use crate::nn::MtpStepOutput;
     use serial_test::serial;
 
@@ -20590,8 +20597,8 @@ mod tests {
             batch: i32,
             cap: i32,
             dtype: mlx::Dtype,
-        ) -> crate::Result<Vec<crate::nn::LayerCache>> {
-            Ok(vec![crate::nn::LayerCache::Full(
+        ) -> crate::Result<Vec<crate::core::cache::layer::LayerCache>> {
+            Ok(vec![crate::core::cache::layer::LayerCache::Full(
                 crate::core::KVCache::new(batch, 1, 1, 1, dtype, cap),
             )])
         }
@@ -20602,7 +20609,7 @@ mod tests {
             _position_ids: &mlx::Array,
             _per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            _cache: Option<&mut [crate::nn::LayerCache]>,
+            _cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
             let b = input_ids.shape().as_slice()[0] as usize;
@@ -20626,7 +20633,7 @@ mod tests {
             _attention_mask: &mlx::Array,
             _linear_attention_mask: &mlx::Array,
             _per_row_lens: &[i32],
-            _cache: Option<&mut [crate::nn::LayerCache]>,
+            _cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
             let b = input_ids.shape().as_slice()[0] as usize;
@@ -20649,7 +20656,7 @@ mod tests {
             _position_ids: &mlx::Array,
             _per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            _cache: Option<&mut [crate::nn::LayerCache]>,
+            _cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
             let dims = input_ids.shape();
@@ -20678,7 +20685,7 @@ mod tests {
             _per_row_pixel_values: &[Option<&[mlx::Array]>],
             _per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
             _image_token_id: i32,
-            _cache: Option<&mut [crate::nn::LayerCache]>,
+            _cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
             unreachable!("Finished-phase unit tests are text-only")
@@ -20707,7 +20714,7 @@ mod tests {
             _position_ids: &mlx::Array,
             _per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            _cache: Option<&mut [crate::nn::LayerCache]>,
+            _cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
             _vision_embeds_slice: Option<&mlx::Array>,
             _image_token_id: i32,
             _target: mlx::StreamOrDevice,
@@ -20721,7 +20728,7 @@ mod tests {
             _position_ids: &mlx::Array,
             _per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            _cache: Option<&mut [crate::nn::LayerCache]>,
+            _cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
             _vision_embeds_slice: Option<&mlx::Array>,
             _image_token_id: i32,
             _target: mlx::StreamOrDevice,
@@ -20824,7 +20831,7 @@ mod tests {
             batch: i32,
             _cap: i32,
             _dtype: mlx::Dtype,
-        ) -> crate::Result<Vec<crate::nn::LayerCache>> {
+        ) -> crate::Result<Vec<crate::core::cache::layer::LayerCache>> {
             self.make_cache_batches.lock().unwrap().push(batch);
             Ok(Vec::new())
         }
@@ -20835,7 +20842,7 @@ mod tests {
             _position_ids: &mlx::Array,
             per_row_lens: Option<&[i32]>,
             decode_mask: Option<&mlx::Array>,
-            _cache: Option<&mut [crate::nn::LayerCache]>,
+            _cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
             let dims = input_ids.shape();
@@ -20858,7 +20865,7 @@ mod tests {
             _attention_mask: &mlx::Array,
             _linear_attention_mask: &mlx::Array,
             _per_row_lens: &[i32],
-            _cache: Option<&mut [crate::nn::LayerCache]>,
+            _cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
             let batch = input_ids.shape().as_slice()[0];
@@ -20872,7 +20879,7 @@ mod tests {
             _position_ids: &mlx::Array,
             _per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            _cache: Option<&mut [crate::nn::LayerCache]>,
+            _cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
             let dims = input_ids.shape();
@@ -20909,7 +20916,7 @@ mod tests {
             per_row_pixel_values: &[Option<&[mlx::Array]>],
             _per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
             _image_token_id: i32,
-            _cache: Option<&mut [crate::nn::LayerCache]>,
+            _cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
             let batch = input_ids.shape().as_slice()[0];
@@ -20953,7 +20960,7 @@ mod tests {
             _position_ids: &mlx::Array,
             _per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            _cache: Option<&mut [crate::nn::LayerCache]>,
+            _cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
             vision_embeds_slice: Option<&mlx::Array>,
             _image_token_id: i32,
             _target: mlx::StreamOrDevice,
@@ -20973,7 +20980,7 @@ mod tests {
             _position_ids: &mlx::Array,
             _per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            _cache: Option<&mut [crate::nn::LayerCache]>,
+            _cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
             vision_embeds_slice: Option<&mlx::Array>,
             _image_token_id: i32,
             _target: mlx::StreamOrDevice,
@@ -21014,7 +21021,7 @@ mod tests {
         }
 
         fn advance_cache(
-            cache: Option<&mut [crate::nn::LayerCache]>,
+            cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
             input_ids: &mlx::Array,
             per_row_lens: Option<&[i32]>,
         ) -> crate::Result<()> {
@@ -21038,11 +21045,11 @@ mod tests {
                 .map_err(|e| anyhow::anyhow!("fake v failed: {e:?}"))?;
             for layer in cache {
                 match layer {
-                    crate::nn::LayerCache::Full(kv) => {
+                    crate::core::cache::layer::LayerCache::Full(kv) => {
                         kv.update_and_fetch(&k, &v, lens)?;
                     }
-                    crate::nn::LayerCache::Linear(gd) => gd.advance(lens)?,
-                    crate::nn::LayerCache::Mla(_) => {}
+                    crate::core::cache::layer::LayerCache::Linear(gd) => gd.advance(lens)?,
+                    crate::core::cache::layer::LayerCache::Mla(_) => {}
                 }
             }
             Ok(())
@@ -21083,12 +21090,12 @@ mod tests {
             batch: i32,
             cap: i32,
             dtype: mlx::Dtype,
-        ) -> crate::Result<Vec<crate::nn::LayerCache>> {
-            let mut cache = vec![crate::nn::LayerCache::Full(crate::core::KVCache::new(
-                batch, 1, 1, 1, dtype, cap,
-            ))];
+        ) -> crate::Result<Vec<crate::core::cache::layer::LayerCache>> {
+            let mut cache = vec![crate::core::cache::layer::LayerCache::Full(
+                crate::core::KVCache::new(batch, 1, 1, 1, dtype, cap),
+            )];
             if self.hybrid_cache {
-                cache.push(crate::nn::LayerCache::Linear(
+                cache.push(crate::core::cache::layer::LayerCache::Linear(
                     crate::core::cache::GatedDeltaCache::new_with_cap(
                         batch, 2, 2, 1, 1, 1, dtype, cap,
                     )?,
@@ -21103,7 +21110,7 @@ mod tests {
             position_ids: &mlx::Array,
             per_row_lens: Option<&[i32]>,
             decode_mask: Option<&mlx::Array>,
-            cache: Option<&mut [crate::nn::LayerCache]>,
+            cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
             let dims = input_ids.shape();
@@ -21133,7 +21140,7 @@ mod tests {
             _attention_mask: &mlx::Array,
             _linear_attention_mask: &mlx::Array,
             per_row_lens: &[i32],
-            cache: Option<&mut [crate::nn::LayerCache]>,
+            cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
             self.batched_prefill_batches
@@ -21154,7 +21161,7 @@ mod tests {
             _position_ids: &mlx::Array,
             per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            cache: Option<&mut [crate::nn::LayerCache]>,
+            cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
             Self::advance_cache(cache, input_ids, per_row_lens)?;
@@ -21189,7 +21196,7 @@ mod tests {
             _per_row_pixel_values: &[Option<&[mlx::Array]>],
             _per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
             _image_token_id: i32,
-            cache: Option<&mut [crate::nn::LayerCache]>,
+            cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
             self.batched_prefill_batches
@@ -21234,7 +21241,7 @@ mod tests {
             _position_ids: &mlx::Array,
             per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            cache: Option<&mut [crate::nn::LayerCache]>,
+            cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
             _vision_embeds_slice: Option<&mlx::Array>,
             _image_token_id: i32,
             _target: mlx::StreamOrDevice,
@@ -21252,7 +21259,7 @@ mod tests {
             _position_ids: &mlx::Array,
             per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            cache: Option<&mut [crate::nn::LayerCache]>,
+            cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
             _vision_embeds_slice: Option<&mlx::Array>,
             _image_token_id: i32,
             _target: mlx::StreamOrDevice,
@@ -21420,7 +21427,7 @@ mod tests {
         }
 
         fn bump_first_full_cache(
-            cache: Option<&mut [crate::nn::LayerCache]>,
+            cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
             input_ids: &mlx::Array,
             per_row_lens: Option<&[i32]>,
         ) -> crate::Result<()> {
@@ -21444,13 +21451,13 @@ mod tests {
                 .map_err(|e| anyhow::anyhow!("fake v failed: {e:?}"))?;
             for layer in cache {
                 match layer {
-                    crate::nn::LayerCache::Full(kv) => {
+                    crate::core::cache::layer::LayerCache::Full(kv) => {
                         kv.update_and_fetch(&k, &v, lens)?;
                     }
-                    crate::nn::LayerCache::Linear(gd) => {
+                    crate::core::cache::layer::LayerCache::Linear(gd) => {
                         gd.advance(lens)?;
                     }
-                    crate::nn::LayerCache::Mla(_) => {}
+                    crate::core::cache::layer::LayerCache::Mla(_) => {}
                 }
             }
             Ok(())
@@ -21509,12 +21516,12 @@ mod tests {
             batch: i32,
             cap: i32,
             dtype: mlx::Dtype,
-        ) -> crate::Result<Vec<crate::nn::LayerCache>> {
-            let mut cache = vec![crate::nn::LayerCache::Full(crate::core::KVCache::new(
-                batch, 1, 1, 1, dtype, cap,
-            ))];
+        ) -> crate::Result<Vec<crate::core::cache::layer::LayerCache>> {
+            let mut cache = vec![crate::core::cache::layer::LayerCache::Full(
+                crate::core::KVCache::new(batch, 1, 1, 1, dtype, cap),
+            )];
             if self.hybrid_cache {
-                cache.push(crate::nn::LayerCache::Linear(
+                cache.push(crate::core::cache::layer::LayerCache::Linear(
                     crate::core::cache::GatedDeltaCache::new_with_cap(
                         batch, 2, 4, 1, 1, 1, dtype, cap,
                     )?,
@@ -21529,7 +21536,7 @@ mod tests {
             _position_ids: &mlx::Array,
             per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            cache: Option<&mut [crate::nn::LayerCache]>,
+            cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
             Self::bump_first_full_cache(cache, input_ids, per_row_lens)?;
@@ -21544,7 +21551,7 @@ mod tests {
             _attention_mask: &mlx::Array,
             _linear_attention_mask: &mlx::Array,
             per_row_lens: &[i32],
-            cache: Option<&mut [crate::nn::LayerCache]>,
+            cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
             Self::bump_first_full_cache(cache, input_ids, Some(per_row_lens))?;
@@ -21558,7 +21565,7 @@ mod tests {
             _position_ids: &mlx::Array,
             per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            cache: Option<&mut [crate::nn::LayerCache]>,
+            cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
             Self::bump_first_full_cache(cache, input_ids, per_row_lens)?;
@@ -21663,7 +21670,7 @@ mod tests {
             _per_row_pixel_values: &[Option<&[mlx::Array]>],
             _per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
             _image_token_id: i32,
-            cache: Option<&mut [crate::nn::LayerCache]>,
+            cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
             Self::bump_first_full_cache(cache, input_ids, Some(per_row_lens))?;
@@ -21705,7 +21712,7 @@ mod tests {
             _position_ids: &mlx::Array,
             per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            cache: Option<&mut [crate::nn::LayerCache]>,
+            cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
             _vision_embeds_slice: Option<&mlx::Array>,
             _image_token_id: i32,
             _target: mlx::StreamOrDevice,
@@ -21720,7 +21727,7 @@ mod tests {
             _position_ids: &mlx::Array,
             per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            cache: Option<&mut [crate::nn::LayerCache]>,
+            cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
             vision_embeds_slice: Option<&mlx::Array>,
             _image_token_id: i32,
             _target: mlx::StreamOrDevice,
@@ -28194,7 +28201,7 @@ mod tests {
     #[test]
     #[serial(mlx_metal)]
     fn prefill_admitted_batched_vl_uses_fingerprinted_paged_ssd_prefix_cache_on_exact_hits() {
-        use crate::core::generate::IMAGE_TOKEN_ID;
+        use crate::core::model_input::IMAGE_TOKEN_ID;
         use mlx::Dtype;
 
         fn vl_req_with_pixel(value: f32) -> GenerateRequest {
@@ -28264,7 +28271,7 @@ mod tests {
     #[test]
     #[serial(mlx_metal)]
     fn prefill_admitted_batched_vl_paged_prefix_cold_miss_uses_batched_prefill() {
-        use crate::core::generate::IMAGE_TOKEN_ID;
+        use crate::core::model_input::IMAGE_TOKEN_ID;
         use mlx::Dtype;
 
         fn vl_req_with_pixel(value: f32) -> GenerateRequest {
@@ -28325,7 +28332,7 @@ mod tests {
     #[test]
     #[serial(mlx_metal)]
     fn admit_mid_vl_saves_fingerprinted_paged_prefix_cache() {
-        use crate::core::generate::IMAGE_TOKEN_ID;
+        use crate::core::model_input::IMAGE_TOKEN_ID;
         use mlx::Dtype;
 
         fn vl_req_with_pixel(value: f32) -> GenerateRequest {
@@ -28636,7 +28643,7 @@ mod tests {
 
     #[test]
     fn prefill_admitted_single_vl_row_splits_prefix_and_last_token() {
-        use crate::core::generate::IMAGE_TOKEN_ID;
+        use crate::core::model_input::IMAGE_TOKEN_ID;
         use mlx::Dtype;
 
         let mut s = Scheduler::<RecordingPrefillModel>::new(
@@ -28681,7 +28688,7 @@ mod tests {
 
     #[test]
     fn prefill_admitted_single_vl_row_preserves_multi_image_grids() {
-        use crate::core::generate::IMAGE_TOKEN_ID;
+        use crate::core::model_input::IMAGE_TOKEN_ID;
         use mlx::Dtype;
 
         let mut s = Scheduler::<RecordingPrefillModel>::new(
@@ -28727,7 +28734,7 @@ mod tests {
     // Multi-row VL prefill test (2 active VL rows).
     #[test]
     fn prefill_admitted_compacts_vl_rows() {
-        use crate::core::generate::IMAGE_TOKEN_ID;
+        use crate::core::model_input::IMAGE_TOKEN_ID;
         use mlx::Dtype;
 
         let mut s = Scheduler::<RecordingPrefillModel>::new(
@@ -29227,7 +29234,7 @@ mod tests {
 
     #[test]
     fn admit_carries_vl_fields() {
-        use crate::core::generate::IMAGE_TOKEN_ID;
+        use crate::core::model_input::IMAGE_TOKEN_ID;
         use crate::core::sampler::Sampler;
         use mlx::Dtype;
 
@@ -29287,7 +29294,7 @@ mod tests {
             pixel_values: None,
             image_grid_thw: None,
             image_spatial_merge_size: 2,
-            image_token_id: crate::core::generate::IMAGE_TOKEN_ID,
+            image_token_id: crate::core::model_input::IMAGE_TOKEN_ID,
             constraint: None,
         };
         let _id = s.admit(req).expect("admit");
@@ -29327,7 +29334,7 @@ mod tests {
             pixel_values: None,
             image_grid_thw: None,
             image_spatial_merge_size: 2,
-            image_token_id: crate::core::generate::IMAGE_TOKEN_ID,
+            image_token_id: crate::core::model_input::IMAGE_TOKEN_ID,
             constraint: None,
         };
 
@@ -29392,7 +29399,7 @@ mod tests {
             pixel_values: None,
             image_grid_thw: None,
             image_spatial_merge_size: 2,
-            image_token_id: crate::core::generate::IMAGE_TOKEN_ID,
+            image_token_id: crate::core::model_input::IMAGE_TOKEN_ID,
             constraint: None,
         };
 

@@ -7,10 +7,9 @@
 use anyhow::anyhow;
 use mlx::{Array, Dtype, StreamOrDevice};
 
+use crate::core::cache::layer::LayerCache;
 use crate::core::Loader;
-use crate::nn::{
-    AttnKind, DecoderLayer, DecoderLayerConfig, Embedding, LayerCache, Mrope, RmsNorm,
-};
+use crate::nn::{AttnKind, DecoderLayer, DecoderLayerConfig, Embedding, Mrope, RmsNorm};
 use crate::Result;
 
 use super::config::Qwen35Config;
@@ -261,7 +260,7 @@ impl Qwen35TextModel {
     pub(crate) fn restore_dflash2_speculative_prefix_on(
         &self,
         cache: &mut [LayerCache],
-        snapshots: &[crate::nn::LayerCacheSnapshot],
+        snapshots: &[crate::core::cache::layer::LayerCacheSnapshot],
         accepted_len: usize,
         target: impl Into<StreamOrDevice>,
     ) -> Result<()> {
@@ -283,7 +282,7 @@ impl Qwen35TextModel {
     pub(crate) fn restore_dflash2_speculative_prefix_rows_on(
         &self,
         cache: &mut [LayerCache],
-        snapshots: &[crate::nn::LayerCacheSnapshot],
+        snapshots: &[crate::core::cache::layer::LayerCacheSnapshot],
         accepted_lens: &[usize],
         target: impl Into<StreamOrDevice>,
     ) -> Result<()> {

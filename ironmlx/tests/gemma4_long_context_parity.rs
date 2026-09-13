@@ -7,16 +7,18 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{ensure, Context, Result};
+use ironmlx::core::cache::layer::LayerCache;
 use ironmlx::core::cache::TurboQuantKVBits;
-use ironmlx::core::generate::build_position_ids;
-use ironmlx::core::generate::{GenerateRequest, GenerationStream};
+use ironmlx::core::gemma4_generation::Gemma4DrafterGenerationStream;
+use ironmlx::core::generate::GenerationStream;
+use ironmlx::core::generation_types::GenerateRequest;
+use ironmlx::core::model_input::build_position_ids;
 use ironmlx::core::sampler::Sampler;
 use ironmlx::core::scheduler::Scheduler;
 use ironmlx::core::speculative::MtpSpeculativeConfig;
 use ironmlx::core::tokenizer::Tokenizer;
 use ironmlx::core::{Loader, Model};
-use ironmlx::models::gemma4::{Gemma4AssistantModel, Gemma4DrafterGenerationStream, Gemma4Model};
-use ironmlx::nn::LayerCache;
+use ironmlx::models::gemma4::{Gemma4AssistantModel, Gemma4Model};
 use mlx::{Array, Dtype, StreamOrDevice};
 use serde::Deserialize;
 

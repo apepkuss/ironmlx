@@ -3,8 +3,9 @@ mod common;
 use common::constrained::{byte_vocab_size, weather_constraint_plan_with_options};
 use ironmlx::core::constrained::{ToolChoiceConstraint, ToolConstraintOptions};
 use ironmlx::core::speculative::{
-    resolve_speculative_tokens, MtpSpeculativeConfig, MtpSpeculativeModel, MtpTextGenerationStream,
+    resolve_speculative_tokens, MtpSpeculativeConfig, MtpTextGenerationStream,
 };
+use ironmlx::core::speculative_model::MtpSpeculativeModel;
 use ironmlx::core::{GenerateRequest, Loader, Sampler, Tokenizer, TokenizerConfig};
 use ironmlx::models::{Qwen35Model, Qwen35MoeModel, Qwen36MoeModel};
 use mlx::{Array, Dtype, StreamOrDevice};
@@ -111,7 +112,7 @@ impl ironmlx::core::Model for FakeMtpModel {
         _batch: i32,
         _cap: i32,
         _dtype: Dtype,
-    ) -> ironmlx::Result<Vec<ironmlx::nn::LayerCache>> {
+    ) -> ironmlx::Result<Vec<ironmlx::core::cache::layer::LayerCache>> {
         Ok(Vec::new())
     }
 
@@ -121,7 +122,7 @@ impl ironmlx::core::Model for FakeMtpModel {
         _position_ids: &Array,
         _per_row_lens: Option<&[i32]>,
         _decode_mask: Option<&Array>,
-        _cache: Option<&mut [ironmlx::nn::LayerCache]>,
+        _cache: Option<&mut [ironmlx::core::cache::layer::LayerCache]>,
         _target: StreamOrDevice,
     ) -> ironmlx::Result<Array> {
         unreachable!("MTP stream uses forward_text_hidden + project_hidden_on")
@@ -134,7 +135,7 @@ impl ironmlx::core::Model for FakeMtpModel {
         _attention_mask: &Array,
         _linear_attention_mask: &Array,
         _per_row_lens: &[i32],
-        _cache: Option<&mut [ironmlx::nn::LayerCache]>,
+        _cache: Option<&mut [ironmlx::core::cache::layer::LayerCache]>,
         _target: StreamOrDevice,
     ) -> ironmlx::Result<Array> {
         unreachable!("MTP stream text-only constructor does not use batched prefill")
@@ -146,7 +147,7 @@ impl ironmlx::core::Model for FakeMtpModel {
         _position_ids: &Array,
         _per_row_lens: Option<&[i32]>,
         _decode_mask: Option<&Array>,
-        _cache: Option<&mut [ironmlx::nn::LayerCache]>,
+        _cache: Option<&mut [ironmlx::core::cache::layer::LayerCache]>,
         _target: StreamOrDevice,
     ) -> ironmlx::Result<Array> {
         self.text_hidden_inputs

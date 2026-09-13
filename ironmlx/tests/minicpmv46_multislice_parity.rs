@@ -44,7 +44,7 @@ use std::collections::BTreeSet;
 
 use mlx::{ops, Array, Dtype};
 
-use ironmlx::core::generate::build_position_ids;
+use ironmlx::core::model_input::build_position_ids;
 use ironmlx::core::{Loader, Tokenizer};
 use ironmlx::models::minicpmv4_6::image_processor::{preprocess_sliced_with_grid, MAX_SLICE_NUMS};
 use ironmlx::models::minicpmv4_6::{model::MiniCpmV46Model, preprocess_sliced_to_parts};

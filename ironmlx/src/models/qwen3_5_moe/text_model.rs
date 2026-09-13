@@ -6,8 +6,9 @@
 use anyhow::anyhow;
 use mlx::{Array, Dtype, StreamOrDevice};
 
+use crate::core::cache::layer::LayerCache;
 use crate::core::Loader;
-use crate::nn::{Embedding, LayerCache, Mrope, RmsNorm};
+use crate::nn::{Embedding, Mrope, RmsNorm};
 use crate::Result;
 
 use super::config::Qwen35MoeConfig;

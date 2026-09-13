@@ -20,9 +20,11 @@ use std::time::Duration;
 use mlx::Array;
 use tokio::sync::{oneshot, Mutex};
 
-use ironmlx::core::generate::{GenerateRequest, GenerationStream, IMAGE_TOKEN_ID};
+use ironmlx::core::generate::GenerationStream;
+use ironmlx::core::generation_types::GenerateRequest;
+use ironmlx::core::model_input::IMAGE_TOKEN_ID;
 use ironmlx::core::sampler::Sampler;
-use ironmlx::core::server::scheduler_actor::{spawn_scheduler_actor, SchedulerCommand};
+use ironmlx::core::scheduler_actor::{spawn_scheduler_actor, SchedulerCommand};
 use ironmlx::core::{Loader, Message, Tokenizer};
 use ironmlx::models::qwen3_5::image_processor;
 use ironmlx::models::qwen3_5::Qwen35Model;

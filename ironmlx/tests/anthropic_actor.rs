@@ -19,16 +19,18 @@ use std::time::Duration;
 use axum::body::to_bytes;
 use tokio::sync::Mutex;
 
-use ironmlx::core::generate::{GenerateRequest, GenerationStream};
+use ironmlx::core::generate::GenerationStream;
+use ironmlx::core::generation_types::GenerateRequest;
 use ironmlx::core::sampler::Sampler;
+use ironmlx::core::scheduler_actor::{
+    spawn_scheduler_actor, SchedulerActorHandle, SchedulerCommand,
+};
 use ironmlx::core::scheduler_autotune::{
     SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeProfile,
     SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
 };
-use ironmlx::core::server::scheduler_actor::{
-    spawn_scheduler_actor, SchedulerActorHandle, SchedulerCommand,
-};
-use ironmlx::core::server::{AppState, VisionInputConfig};
+use ironmlx::core::server::AppState;
+use ironmlx::core::vision_input::VisionInputConfig;
 use ironmlx::core::{Loader, Message, Tokenizer};
 use ironmlx::models::qwen3_5::Qwen35Model;
 

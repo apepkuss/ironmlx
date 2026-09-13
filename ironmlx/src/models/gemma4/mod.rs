@@ -24,12 +24,9 @@ pub use config::{
     Gemma4AssistantConfig, Gemma4Config, Gemma4LayerKind, Gemma4RopeParams, Gemma4TextConfig,
     Gemma4VisionConfig,
 };
+pub use drafter::Gemma4AssistantModel;
 pub(crate) use drafter::{
     draft_position_for_shared_kv, shared_kv_row_prefix_on, shared_kv_row_trim_suffix_on,
-};
-pub use drafter::{
-    Gemma4AssistantModel, Gemma4DrafterActiveKvRuntime, Gemma4DrafterGenerationStream,
-    Gemma4DrafterPrefixCache, Gemma4DrafterTraceWindow,
 };
 pub use model::Gemma4Model;
 pub use text_model::{Gemma4SharedKvStates, Gemma4TextModel};

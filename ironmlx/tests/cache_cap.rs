@@ -13,9 +13,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ironmlx::core::generate::{GenerateRequest, IMAGE_TOKEN_ID};
+use ironmlx::core::generation_types::GenerateRequest;
+use ironmlx::core::model_input::IMAGE_TOKEN_ID;
 use ironmlx::core::sampler::Sampler;
-use ironmlx::core::server::scheduler_actor::{spawn_scheduler_actor, SchedulerCommand};
+use ironmlx::core::scheduler_actor::{spawn_scheduler_actor, SchedulerCommand};
 use ironmlx::core::{Loader, Tokenizer};
 use ironmlx::models::Qwen35Model;
 use tokio::sync::Mutex;

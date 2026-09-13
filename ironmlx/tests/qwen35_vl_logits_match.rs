@@ -205,7 +205,7 @@ fn p6_qwen35_vl_logits_match() {
             None, // cache
             Some(std::slice::from_ref(&pv)),
             Some(&grids_tup),
-            ironmlx::core::generate::IMAGE_TOKEN_ID,
+            ironmlx::core::model_input::IMAGE_TOKEN_ID,
             (),
         )
         .expect("forward_vl");

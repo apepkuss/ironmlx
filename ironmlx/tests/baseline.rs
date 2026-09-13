@@ -15,7 +15,7 @@
 use mlx::Dtype;
 use std::time::Instant;
 
-use ironmlx::core::generate::build_position_ids;
+use ironmlx::core::model_input::build_position_ids;
 use ironmlx::core::{Loader, Model};
 use ironmlx::models::Qwen35MoeModel;
 

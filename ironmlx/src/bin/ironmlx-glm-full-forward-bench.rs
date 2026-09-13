@@ -8,13 +8,14 @@ use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, ValueEnum};
-use ironmlx::core::generate::build_per_row_decode_mask;
+use ironmlx::core::cache::layer::LayerCache;
+use ironmlx::core::model_input::build_per_row_decode_mask;
 use ironmlx::core::sampler::sample_batch;
 use ironmlx::core::{Loader, Sampler};
 use ironmlx::models::glm4_moe_lite::config::Glm4MoeLiteConfig;
 use ironmlx::models::glm4_moe_lite::decoder_layer::{DecoderBlockMode, Glm4DecoderLayer};
 use ironmlx::models::glm4_moe_lite::mla_cache::MlaLatentCache;
-use ironmlx::nn::{Embedding, LayerCache, Linear, RmsNorm};
+use ironmlx::nn::{Embedding, Linear, RmsNorm};
 use mlx::compile::CompileMode as MlxCompileMode;
 use mlx::random;
 use mlx::{Array, Device, Dtype, StreamOrDevice};

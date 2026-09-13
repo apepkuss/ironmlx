@@ -17,8 +17,9 @@ pub use model::{DFlash2DraftCache, DFlash2DraftModel};
 
 use mlx::{Array, StreamOrDevice};
 
+use crate::core::cache::layer::LayerCache;
 use crate::core::Loader;
-use crate::nn::{LayerCache, Linear};
+use crate::nn::Linear;
 use crate::Result;
 
 const DFLASH2_DRAFT_QUANT_GROUP_SIZE: i32 = 64;
@@ -123,7 +124,7 @@ pub(crate) trait DFlash2Target: crate::core::Model {
     fn dflash2_restore_target_prefix_on(
         &self,
         cache: &mut [LayerCache],
-        snapshots: &[crate::nn::LayerCacheSnapshot],
+        snapshots: &[crate::core::cache::layer::LayerCacheSnapshot],
         accepted_len: usize,
         target: StreamOrDevice,
     ) -> Result<()>;
@@ -131,7 +132,7 @@ pub(crate) trait DFlash2Target: crate::core::Model {
     fn dflash2_restore_target_prefix_rows_on(
         &self,
         cache: &mut [LayerCache],
-        snapshots: &[crate::nn::LayerCacheSnapshot],
+        snapshots: &[crate::core::cache::layer::LayerCacheSnapshot],
         accepted_lens: &[usize],
         target: StreamOrDevice,
     ) -> Result<()>;

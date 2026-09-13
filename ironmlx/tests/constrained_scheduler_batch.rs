@@ -3,11 +3,12 @@ mod common;
 use common::constrained::{
     byte_vocab_size, weather_constraint_plan, weather_constraint_plan_with_options,
 };
+use ironmlx::core::cache::layer::LayerCache;
 use ironmlx::core::constrained::{ToolChoiceConstraint, ToolConstraintOptions};
-use ironmlx::core::generate::{GenerateRequest, IMAGE_TOKEN_ID};
+use ironmlx::core::generation_types::GenerateRequest;
+use ironmlx::core::model_input::IMAGE_TOKEN_ID;
 use ironmlx::core::vision::DenseVlMethods;
 use ironmlx::core::{Model, Sampler, Scheduler};
-use ironmlx::nn::LayerCache;
 use mlx::{Array, Dtype, StreamOrDevice};
 
 struct ConstraintBatchModel;

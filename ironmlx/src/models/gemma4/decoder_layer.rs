@@ -2,8 +2,9 @@ use anyhow::anyhow;
 use mlx::{Array, StreamOrDevice};
 use std::time::Instant;
 
+use crate::core::cache::layer::LayerCache;
 use crate::core::Loader;
-use crate::nn::{LayerCache, Linear, RmsNorm};
+use crate::nn::{Linear, RmsNorm};
 use crate::Result;
 
 use super::attention::{Gemma4Attention, SharedKv};

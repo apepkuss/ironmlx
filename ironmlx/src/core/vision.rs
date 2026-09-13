@@ -18,7 +18,7 @@ pub trait DenseVlMethods {
         per_row_pixel_values: &[Option<&[mlx::Array]>],
         per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
         image_token_id: i32,
-        cache: Option<&mut [crate::nn::LayerCache]>,
+        cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
         target: mlx::StreamOrDevice,
     ) -> crate::Result<mlx::Array>;
 
@@ -47,7 +47,7 @@ pub trait DenseVlMethods {
         position_ids: &mlx::Array,
         per_row_lens: Option<&[i32]>,
         decode_mask: Option<&mlx::Array>,
-        cache: Option<&mut [crate::nn::LayerCache]>,
+        cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
         vision_embeds_slice: Option<&mlx::Array>,
         image_token_id: i32,
         target: mlx::StreamOrDevice,
@@ -60,7 +60,7 @@ pub trait DenseVlMethods {
         position_ids: &mlx::Array,
         per_row_lens: Option<&[i32]>,
         decode_mask: Option<&mlx::Array>,
-        cache: Option<&mut [crate::nn::LayerCache]>,
+        cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
         vision_embeds_slice: Option<&mlx::Array>,
         image_token_id: i32,
         target: mlx::StreamOrDevice,

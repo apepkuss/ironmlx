@@ -21,20 +21,23 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, oneshot};
 
+#[cfg(test)]
+use super::image_input::ImageRequestBudget;
 use crate::core::constrained::ToolConstraintOptions;
-use crate::core::generate::{GenerateRequest, GenerationStream};
+use crate::core::generate::GenerationStream;
 use crate::core::generated_output::{
     GeneratedFinishReason, GeneratedOutputDecoder, GeneratedOutputEvent, ToolOutputDecoderConfig,
 };
+use crate::core::generation_types::GenerateRequest;
 #[cfg(test)]
-use crate::core::image_input::{ImageInputError, ImageRequestBudget};
+use crate::core::image_input::ImageInputError;
 use crate::core::model::Model;
 use crate::core::native_output::NativeOutputDecoderConfig;
 use crate::core::sampler::Sampler;
+use crate::core::scheduler_actor::AdmitReply;
 use crate::core::server::chat_format::{
     render_and_encode, ChatFunctionCall, ChatMessage, ChatToolCall, Content, ContentPart, ImageUrl,
 };
-use crate::core::server::scheduler_actor::AdmitReply;
 use crate::core::server::structured_output::StructuredOutputFormat;
 #[cfg(test)]
 use crate::core::server::vision::{DecodedMessage, DecodedPart};
@@ -3917,7 +3920,7 @@ mod parity_tests {
     use crate::core::server::chat_format::{ChatMessage, Content, ContentPart, ImageUrl};
     use crate::core::server::openai::decode_openai_messages;
     use crate::core::server::vision::expand_decoded_messages;
-    use crate::core::server::VisionInputConfig;
+    use crate::core::vision_input::VisionInputConfig;
     use base64::Engine;
 
     /// Base64 of the real coco test image (shared by both endpoint paths so the

@@ -6,7 +6,7 @@
 
 use anyhow::{Context, Result};
 use ironmlx::core::cache::TurboQuantKVBits;
-use ironmlx::core::generate::{build_batched_append_attention_mask, build_position_ids};
+use ironmlx::core::model_input::{build_batched_append_attention_mask, build_position_ids};
 use ironmlx::core::{Loader, Model, Tokenizer};
 use ironmlx::models::{
     Gemma4Model, LlamaModel, MiniCpmV46Model, Qwen35Model, Qwen35MoeModel, Qwen36MoeModel,
@@ -33,7 +33,7 @@ enum QualificationCache {
 }
 
 fn configure_cache(
-    cache: &mut [ironmlx::nn::LayerCache],
+    cache: &mut [ironmlx::core::cache::layer::LayerCache],
     mode: QualificationCache,
     batch: usize,
     cap: i32,
@@ -146,7 +146,7 @@ fn prefill<M: Model>(
     tokens: &[u32],
     batch: usize,
     prefix_len: usize,
-    cache: &mut [ironmlx::nn::LayerCache],
+    cache: &mut [ironmlx::core::cache::layer::LayerCache],
 ) -> Result<()> {
     const CHUNK_SIZE: usize = 256;
     for chunk_start in (0..prefix_len).step_by(CHUNK_SIZE) {
@@ -805,7 +805,7 @@ fn qualify_identical_row_decode<M: Model>(
     let prefix_len_i32 = i32::try_from(prefix_len).context("prefix length exceeds i32")?;
     let per_row_lens = vec![prefix_len_i32; BATCH];
     let positions =
-        ironmlx::core::generate::build_position_ids_batched(&per_row_lens, prefix_len_i32)?;
+        ironmlx::core::model_input::build_position_ids_batched(&per_row_lens, prefix_len_i32)?;
     let first_logits = model.batched_prefill_causal(
         &input,
         &positions,

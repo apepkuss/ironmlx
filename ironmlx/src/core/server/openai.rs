@@ -20,20 +20,21 @@ use mlx::Array;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
+use super::image_input::ImageRequestBudget;
 use crate::core::constrained::{ToolChoiceConstraint, ToolConstraintOptions};
-use crate::core::generate::{GenerateRequest, GenerationStream};
+use crate::core::generate::GenerationStream;
 use crate::core::generated_output::{
     GeneratedOutputDecoder, GeneratedOutputEvent, ToolOutputDecoderConfig,
 };
-use crate::core::image_input::{ImageInputError, ImageRequestBudget};
+use crate::core::generation_types::GenerateRequest;
+use crate::core::image_input::ImageInputError;
 use crate::core::model::Model;
 use crate::core::sampler::Sampler;
+use crate::core::scheduler_actor::AdmitReply;
 use crate::core::server::chat_format::render_and_encode;
 use crate::core::server::chat_format::{ChatMessage, Content, ContentPart};
-use crate::core::server::scheduler_actor::AdmitReply;
 use crate::core::server::structured_output::StructuredOutputFormat;
 use crate::core::server::vision::{expand_decoded_messages_bounded, DecodedMessage, DecodedPart};
-use crate::core::server::VisionInputConfig;
 use crate::core::speculative::MtpSpeculativeConfig;
 use crate::core::tool_calling::{
     lower_gemma_tool_arguments, lower_gemma_tool_definitions, validate_function_name,
@@ -41,6 +42,7 @@ use crate::core::tool_calling::{
     ToolDialect,
 };
 use crate::core::vision::DenseVlMethods;
+use crate::core::vision_input::VisionInputConfig;
 
 use super::api_transport::ApiJson;
 use super::{AppState, Gemma4DrafterAppState, RequestAdmissionError, SamplingDefaults};
@@ -2786,7 +2788,7 @@ mod tests {
             Some(&ImageInputError::ModelUnsupported)
         );
         assert_eq!(
-            ImageInputError::ModelUnsupported.status(),
+            crate::core::server::image_input::image_error_status(ImageInputError::ModelUnsupported),
             StatusCode::BAD_REQUEST
         );
     }

@@ -17,10 +17,10 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use crate::core::dflash2::{
     DFlash2PrefixCache, DFlash2TensorBatchCache, DFlash2TextGenerationStream,
 };
-use crate::core::generate::{GenerateEvent, GenerateRequest};
+use crate::core::generation_types::{GenerateEvent, GenerateRequest};
 use crate::core::memory_budget::BudgetState;
 use crate::core::scheduler::{RequestId, SchedulerError, StepEvent};
-use crate::core::server::scheduler_actor::AdmitReply;
+use crate::core::scheduler_actor::AdmitReply;
 use crate::core::vision::DenseVlMethods;
 use crate::core::{Model, Tokenizer};
 use crate::models::dflash2::{DFlash2DraftModel, DFlash2Target, DFlash2TargetCacheCost};

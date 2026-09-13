@@ -21,10 +21,11 @@ use std::time::Duration;
 
 use tokio::sync::Mutex;
 
-use ironmlx::core::generate::{GenerateRequest, GenerationStream};
+use ironmlx::core::generate::GenerationStream;
+use ironmlx::core::generation_types::GenerateRequest;
 use ironmlx::core::sampler::Sampler;
 use ironmlx::core::scheduler::StepEvent;
-use ironmlx::core::server::scheduler_actor::{spawn_scheduler_actor, AdmitReply, SchedulerCommand};
+use ironmlx::core::scheduler_actor::{spawn_scheduler_actor, AdmitReply, SchedulerCommand};
 use ironmlx::core::{Loader, Message, Tokenizer};
 use ironmlx::models::qwen3_5::Qwen35Model;
 

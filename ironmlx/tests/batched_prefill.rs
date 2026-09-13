@@ -23,7 +23,7 @@ use std::path::Path;
 use mlx::Array;
 use mlx::Dtype;
 
-use ironmlx::core::generate::{
+use ironmlx::core::model_input::{
     build_batch_attention_mask, build_batch_linear_mask, build_position_ids,
     build_position_ids_batched,
 };

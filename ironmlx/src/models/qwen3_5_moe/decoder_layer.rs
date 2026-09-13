@@ -4,10 +4,11 @@
 use anyhow::anyhow;
 use mlx::{Array, StreamOrDevice};
 
+use crate::core::cache::layer::LayerCache;
 use crate::core::{cache::KVCache, Loader};
 use crate::nn::{
     AttnKind, AttnPath, GatedAttention, GatedAttentionConfig, GatedDeltaNet, GatedDeltaNetConfig,
-    LayerCache, Mrope, RmsNorm,
+    Mrope, RmsNorm,
 };
 use crate::Result;
 

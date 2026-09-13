@@ -2,10 +2,10 @@ use anyhow::{anyhow, Context};
 use mlx::{Array, Dtype, StreamOrDevice};
 use std::time::Instant;
 
+use crate::core::cache::layer::LayerCache;
 use crate::core::cache::{KVCache, TurboQuantKVBits};
 use crate::core::model::ModelMeta;
 use crate::core::{Loader, Model, QuantMeta, QuantMode};
-use crate::nn::LayerCache;
 use crate::Result;
 
 use super::config::Gemma4Config;

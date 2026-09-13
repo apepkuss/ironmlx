@@ -2,8 +2,9 @@ use anyhow::anyhow;
 use mlx::{Array, Dtype, StreamOrDevice};
 use std::time::Instant;
 
+use crate::core::cache::layer::LayerCache;
 use crate::core::Loader;
-use crate::nn::{Embedding, LayerCache, Linear, RmsNorm};
+use crate::nn::{Embedding, Linear, RmsNorm};
 use crate::Result;
 
 use super::attention::SharedKv;

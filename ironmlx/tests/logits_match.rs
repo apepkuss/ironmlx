@@ -13,7 +13,7 @@ use std::path::Path;
 
 use mlx::Dtype;
 
-use ironmlx::core::generate::{build_position_ids_vl, IMAGE_TOKEN_ID};
+use ironmlx::core::model_input::{build_position_ids_vl, IMAGE_TOKEN_ID};
 use ironmlx::core::Loader;
 use ironmlx::models::qwen3_5::Qwen35Config;
 use ironmlx::models::qwen3_5::Qwen35Model;

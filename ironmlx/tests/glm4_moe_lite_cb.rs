@@ -43,11 +43,11 @@ use std::time::Duration;
 
 use tokio::sync::Mutex;
 
-use ironmlx::core::generate::GenerateRequest;
+use ironmlx::core::generation_types::GenerateRequest;
 use ironmlx::core::model::ModelMeta;
 use ironmlx::core::sampler::Sampler;
 use ironmlx::core::scheduler::StepEvent;
-use ironmlx::core::server::scheduler_actor::{
+use ironmlx::core::scheduler_actor::{
     spawn_scheduler_actor, AdmitReply, SchedulerActorHandle, SchedulerCommand,
 };
 use ironmlx::core::{Loader, Tokenizer};

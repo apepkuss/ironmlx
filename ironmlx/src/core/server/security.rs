@@ -176,7 +176,7 @@ pub(crate) fn image_error_response(
 ) -> Response {
     if let Some(error) = error.downcast_ref::<crate::core::image_input::ImageInputError>() {
         return super::api_error::ApiError::from_status(
-            error.status(),
+            super::image_input::image_error_status(*error),
             error.code(),
             error.message(),
         )

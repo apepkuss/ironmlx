@@ -1,9 +1,9 @@
 //! Request-local fault injection; all response loops and wire formatting remain real.
 use super::*;
-use crate::core::generate::GenerateEvent;
+use crate::core::generation_types::GenerateEvent;
 use crate::core::scheduler::{RequestId, StepEvent};
+use crate::core::scheduler_actor::tests::SchedulerActorFakeModel;
 use crate::core::scheduler_autotune::*;
-use crate::core::server::scheduler_actor::tests::SchedulerActorFakeModel;
 use tower::ServiceExt;
 
 pub(super) enum FaultInjectableGenerationStream<'a, M: Model> {

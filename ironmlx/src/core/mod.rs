@@ -4,12 +4,16 @@ pub mod cache;
 pub mod chat_template;
 pub mod constrained;
 pub mod dflash2;
+pub mod gemma4_generation;
 pub mod generate;
 pub mod generated_output;
+pub mod generation_types;
 pub mod image_input;
+pub(crate) mod linear;
 pub mod loader;
 pub mod memory_budget;
 pub mod model;
+pub mod model_input;
 pub mod mtp_draft_cap_calibration;
 pub mod native_output;
 pub mod process_memory;
@@ -20,6 +24,7 @@ pub mod scheduler;
 pub mod scheduler_autotune;
 pub mod server;
 pub mod speculative;
+pub mod speculative_model;
 pub(crate) mod speculative_qualification;
 pub mod tokenizer;
 pub mod tool_calling;
@@ -48,3 +53,28 @@ pub use scheduler::{Phase, RequestId, RequestState, Scheduler, SchedulerError, S
 pub use tokenizer::Tokenizer;
 pub use tool_calling::{AgentMessage, ToolCall, ToolDefinition, ToolDialect};
 pub(crate) use weights::logical_width_from_packed;
+
+pub mod vision_input;
+
+pub mod runtime_config;
+
+pub(crate) mod adaptive_admission;
+pub(crate) mod dflash2_actor;
+pub mod scheduler_actor;
+pub mod task_execution;
+
+pub mod diffusion_execution;
+
+pub(crate) mod scheduler_profile_context;
+pub(crate) mod scheduler_profile_store;
+
+pub(crate) mod scheduler_resolution;
+
+pub mod page_storage;
+
+pub mod engine_state;
+pub mod runtime_health;
+
+pub(crate) mod model_validation;
+
+pub mod engine_pool;

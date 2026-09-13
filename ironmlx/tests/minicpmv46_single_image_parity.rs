@@ -30,7 +30,7 @@
 
 use mlx::{ops, Array, Dtype};
 
-use ironmlx::core::generate::build_position_ids;
+use ironmlx::core::model_input::build_position_ids;
 use ironmlx::core::Loader;
 use ironmlx::models::minicpmv4_6::model::MiniCpmV46Model;
 

@@ -8,12 +8,13 @@
 use anyhow::Context;
 use mlx::{Array, Dtype, StreamOrDevice};
 
+use crate::core::cache::layer::LayerCache;
 use crate::core::cache::MtpCache;
 use crate::core::model::ModelMeta;
 use crate::core::{Loader, Model};
 use crate::models::qwen3_5_moe::{Qwen35MoeModel, Qwen35MoeMtp};
 use crate::models::vision::VisionTower;
-use crate::nn::{LayerCache, MtpStepOutput};
+use crate::nn::MtpStepOutput;
 use crate::Result;
 
 use super::config::Qwen36MoeConfig;
@@ -432,7 +433,7 @@ impl crate::core::vision::DenseVlMethods for Qwen36MoeModel {
         per_row_pixel_values: &[Option<&[mlx::Array]>],
         per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
         image_token_id: i32,
-        cache: Option<&mut [crate::nn::LayerCache]>,
+        cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
         target: mlx::StreamOrDevice,
     ) -> crate::Result<mlx::Array> {
         Qwen36MoeModel::batched_prefill_vl(
@@ -477,7 +478,7 @@ impl crate::core::vision::DenseVlMethods for Qwen36MoeModel {
         position_ids: &mlx::Array,
         per_row_lens: Option<&[i32]>,
         decode_mask: Option<&mlx::Array>,
-        cache: Option<&mut [crate::nn::LayerCache]>,
+        cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
         vision_embeds_slice: Option<&mlx::Array>,
         image_token_id: i32,
         target: mlx::StreamOrDevice,
@@ -501,7 +502,7 @@ impl crate::core::vision::DenseVlMethods for Qwen36MoeModel {
         position_ids: &mlx::Array,
         per_row_lens: Option<&[i32]>,
         decode_mask: Option<&mlx::Array>,
-        cache: Option<&mut [crate::nn::LayerCache]>,
+        cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
         vision_embeds_slice: Option<&mlx::Array>,
         image_token_id: i32,
         target: mlx::StreamOrDevice,
@@ -573,7 +574,7 @@ mod tests {
 
     #[test]
     fn text_only_vl_chunk_delegates_to_core_forward() {
-        use crate::core::generate::{build_position_ids, IMAGE_TOKEN_ID};
+        use crate::core::model_input::{build_position_ids, IMAGE_TOKEN_ID};
 
         let model = Qwen36MoeModel::from_cfg_for_test(make_cfg());
         let input_ids: Array = (&[1_i32, 2, 3][..], &[1_i32, 3][..])
@@ -755,7 +756,8 @@ mod tests {
         let token_row: Array = (&[100_u32][..], &[1_i32, 1_i32][..])
             .try_into()
             .expect("token row");
-        let position_row = crate::core::generate::build_position_ids(0, 1).expect("position row");
+        let position_row =
+            crate::core::model_input::build_position_ids(0, 1).expect("position row");
         let reference = model
             .mtp_forward_on(
                 &mtp,
@@ -914,8 +916,8 @@ mod tests {
         pixel_values: Option<Array>,
         image_grid_thw: Option<Vec<(i32, i32, i32)>>,
         image_spatial_merge_size: i32,
-    ) -> crate::core::generate::GenerateRequest {
-        crate::core::generate::GenerateRequest {
+    ) -> crate::core::generation_types::GenerateRequest {
+        crate::core::generation_types::GenerateRequest {
             prompt_ids,
             max_new_tokens,
             sampler: crate::core::sampler::Sampler::greedy(),
@@ -929,7 +931,7 @@ mod tests {
             image_token_id: tokenizer
                 .token_to_id("<|image_pad|>")
                 .map(|id| id as i32)
-                .unwrap_or(crate::core::generate::IMAGE_TOKEN_ID),
+                .unwrap_or(crate::core::model_input::IMAGE_TOKEN_ID),
             constraint: None,
         }
     }
@@ -991,7 +993,8 @@ mod tests {
         let input_ids: Array = (prompt_ids.as_slice(), &[1_i32, len][..])
             .try_into()
             .expect("input ids");
-        let position_ids = crate::core::generate::build_position_ids(0, len).expect("position ids");
+        let position_ids =
+            crate::core::model_input::build_position_ids(0, len).expect("position ids");
         let sample = |logits: &Array| {
             let vocab = logits.shape().as_slice()[2];
             let flat = logits.reshape((vocab,)).expect("reshape logits");
@@ -1036,7 +1039,7 @@ mod tests {
         )
         .expect("prefix ids");
         let prefix_pos =
-            crate::core::generate::build_position_ids(0, prefix_len).expect("prefix pos");
+            crate::core::model_input::build_position_ids(0, prefix_len).expect("prefix pos");
         let prefix_hidden = model
             .forward_text_hidden(
                 &prefix_ids,
@@ -1055,7 +1058,8 @@ mod tests {
             &[1_i32, 1][..],
         )
         .expect("last ids");
-        let last_pos = crate::core::generate::build_position_ids(prefix_len, 1).expect("last pos");
+        let last_pos =
+            crate::core::model_input::build_position_ids(prefix_len, 1).expect("last pos");
         let logits_split_cache = model
             .forward_on(&last_ids, &last_pos, None, None, Some(&mut split_cache), ())
             .expect("forward split cache");
@@ -1065,12 +1069,12 @@ mod tests {
             .make_cache(1, len + 4, Dtype::Bfloat16)
             .expect("batch cache");
         let batch_pos =
-            crate::core::generate::build_position_ids_batched(&[len], len).expect("batch pos");
+            crate::core::model_input::build_position_ids_batched(&[len], len).expect("batch pos");
         let attention_mask =
-            crate::core::generate::build_batch_attention_mask(&[len], len, Dtype::Bfloat16)
+            crate::core::model_input::build_batch_attention_mask(&[len], len, Dtype::Bfloat16)
                 .expect("attention mask");
         let linear_mask =
-            crate::core::generate::build_batch_linear_mask(&[len], len).expect("linear mask");
+            crate::core::model_input::build_batch_linear_mask(&[len], len).expect("linear mask");
         let logits_batched = model
             .batched_prefill(
                 &input_ids,
@@ -1110,7 +1114,8 @@ mod tests {
         let input_b1: Array = (prompt_ids.as_slice(), &[1_i32, len][..])
             .try_into()
             .expect("input_b1");
-        let position_b1 = crate::core::generate::build_position_ids(0, len).expect("position_b1");
+        let position_b1 =
+            crate::core::model_input::build_position_ids(0, len).expect("position_b1");
         let mut cache_b1 = model
             .make_cache(1, len + 4, Dtype::Bfloat16)
             .expect("cache_b1");
@@ -1120,13 +1125,13 @@ mod tests {
         let logits_b1 = flatten_logits(&logits_b1);
         let (arg_batched_b1, diff_batched_b1) = {
             let position_batched_b1 =
-                crate::core::generate::build_position_ids_batched(&[len], len)
+                crate::core::model_input::build_position_ids_batched(&[len], len)
                     .expect("position_batched_b1");
             let attention_mask_b1 =
-                crate::core::generate::build_batch_attention_mask(&[len], len, Dtype::Bfloat16)
+                crate::core::model_input::build_batch_attention_mask(&[len], len, Dtype::Bfloat16)
                     .expect("attention_mask_b1");
             let linear_attention_mask_b1 =
-                crate::core::generate::build_batch_linear_mask(&[len], len)
+                crate::core::model_input::build_batch_linear_mask(&[len], len)
                     .expect("linear_attention_mask_b1");
             let mut cache_batched_b1 = model
                 .make_cache(1, len + 4, Dtype::Bfloat16)
@@ -1156,13 +1161,16 @@ mod tests {
             .try_into()
             .expect("input_b2");
         let prompt_lens = [len, len];
-        let position_b2 = crate::core::generate::build_position_ids_batched(&prompt_lens, len)
+        let position_b2 = crate::core::model_input::build_position_ids_batched(&prompt_lens, len)
             .expect("position_b2");
-        let attention_mask =
-            crate::core::generate::build_batch_attention_mask(&prompt_lens, len, Dtype::Bfloat16)
-                .expect("attention_mask");
+        let attention_mask = crate::core::model_input::build_batch_attention_mask(
+            &prompt_lens,
+            len,
+            Dtype::Bfloat16,
+        )
+        .expect("attention_mask");
         let linear_attention_mask =
-            crate::core::generate::build_batch_linear_mask(&prompt_lens, len)
+            crate::core::model_input::build_batch_linear_mask(&prompt_lens, len)
                 .expect("linear_attention_mask");
         if std::env::var("IRONMLX_QWEN36_TRACE_LAYERS").as_deref() == Ok("1") {
             let mut trace_cache_b1 = model
@@ -1317,8 +1325,8 @@ mod tests {
         let image_token_id = tokenizer
             .token_to_id("<|image_pad|>")
             .map(|id| id as i32)
-            .unwrap_or(crate::core::generate::IMAGE_TOKEN_ID);
-        let position_ids = crate::core::generate::build_position_ids_vl(
+            .unwrap_or(crate::core::model_input::IMAGE_TOKEN_ID);
+        let position_ids = crate::core::model_input::build_position_ids_vl(
             &prompt_ids_i32,
             &grids,
             image_token_id,

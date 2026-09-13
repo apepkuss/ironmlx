@@ -1,5 +1,5 @@
-//! SchedulerActor — Tokio task wrapping [`Scheduler`] for serving HTTP
-//! requests via mpsc channels.
+//! SchedulerActor — native execution task wrapping [`Scheduler`].
+//! Requests and incremental results cross mpsc channels.
 //!
 //! 3b-3 activates multi-request batching via a hybrid admission window:
 //! the first admit starts a [`ADMISSION_DEADLINE`] timer; further admits
@@ -27,10 +27,13 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
+use crate::core::adaptive_admission::{
+    AdaptiveAdmissionPolicy, AdmissionRequestShape, ROLLING_DECODE_STEPS_AFTER_ADMISSION_WORK,
+};
 use crate::core::cache::{
     ActiveKvOffloadConfig, ActiveKvOffloadSharedStats, PagedPrefixCacheConfig, PrefixLruCacheConfig,
 };
-use crate::core::generate::GenerateRequest;
+use crate::core::generation_types::GenerateRequest;
 use crate::core::model::Model;
 use crate::core::prompt_lookup::{
     PromptLookupConfig, PromptLookupCostAction, PromptLookupCostController,
@@ -41,10 +44,8 @@ use crate::core::scheduler::{
     ActiveKvParkedRequest, AdmitMidHandle, Gemma4DrafterAdmitMidHandle, ImmutablePrefixBlockStats,
     MtpAdmitMidHandle, Phase, PromptLookupMtpStepOutcome, RequestId, Scheduler, StepEvent,
 };
-use crate::core::server::adaptive_admission::{
-    AdaptiveAdmissionPolicy, AdmissionRequestShape, ROLLING_DECODE_STEPS_AFTER_ADMISSION_WORK,
-};
-use crate::core::speculative::{MtpSpeculativeConfig, MtpSpeculativeModel, MtpSpeculativeStats};
+use crate::core::speculative::{MtpSpeculativeConfig, MtpSpeculativeStats};
+use crate::core::speculative_model::MtpSpeculativeModel;
 use crate::core::speculative_qualification::{
     NeuralExactAction, NeuralExactCostController, NeuralExactQualificationRuntimeConfig,
     NeuralExactQualificationStats, NeuralExactRegime, NeuralExactSampleCounters, NeuralExactSource,
@@ -187,7 +188,7 @@ pub enum SchedulerCommand {
     },
 }
 
-pub(super) enum SchedulerControlCommand {
+pub(crate) enum SchedulerControlCommand {
     ClearSharedPromptLookup { reply_tx: oneshot::Sender<usize> },
 }
 
@@ -2595,12 +2596,12 @@ pub struct AdmitReply {
     pub event_rx: mpsc::UnboundedReceiver<StepEvent>,
 }
 
-/// Handle held by [`crate::core::server::AppState`]. Cheap to clone
+/// Native execution handle. Cheap to clone
 /// (`mpsc::Sender` and `Arc<AtomicU64>` are both `Clone`).
 #[derive(Clone)]
 pub struct SchedulerActorHandle {
     pub cmd_tx: mpsc::Sender<SchedulerCommand>,
-    pub(super) control_tx: mpsc::Sender<SchedulerControlCommand>,
+    pub(crate) control_tx: mpsc::Sender<SchedulerControlCommand>,
     pub(crate) cold_materialization_tracker:
         Arc<OnceLock<Arc<crate::core::process_memory::ColdMaterializationTracker>>>,
     pub(crate) runtime_usage: Arc<crate::core::runtime_usage::ModelRuntimeUsageCounters>,
@@ -5373,13 +5374,14 @@ where
 }
 
 #[cfg(test)]
-pub(super) mod tests {
+pub(crate) mod tests {
     use super::*;
 
     use crate::core::cache::MtpCache;
-    use crate::core::generate::{GenerateRequest, IMAGE_TOKEN_ID};
+    use crate::core::generation_types::GenerateRequest;
+    use crate::core::model_input::IMAGE_TOKEN_ID;
     use crate::core::sampler::Sampler;
-    use crate::core::speculative::MtpSpeculativeModel;
+    use crate::core::speculative_model::MtpSpeculativeModel;
     use crate::nn::MtpStepOutput;
 
     #[derive(Clone, Copy)]
@@ -5427,7 +5429,7 @@ pub(super) mod tests {
     }
 
     impl SchedulerActorFakeModel {
-        fn with_forward_delay(forward_delay: Duration) -> Self {
+        pub(crate) fn with_forward_delay(forward_delay: Duration) -> Self {
             Self {
                 forward_delay,
                 mtp_accepted_prefix_restore: false,
@@ -5454,12 +5456,12 @@ pub(super) mod tests {
     fn write_fake_full_kv(
         input_ids: &mlx::Array,
         per_row_lens: Option<&[i32]>,
-        cache: Option<&mut [crate::nn::LayerCache]>,
+        cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
     ) -> Result<()> {
         let Some(cache) = cache else {
             return Ok(());
         };
-        let Some(crate::nn::LayerCache::Full(kv)) = cache.first_mut() else {
+        let Some(crate::core::cache::layer::LayerCache::Full(kv)) = cache.first_mut() else {
             return Ok(());
         };
         let shape = input_ids.shape();
@@ -5488,8 +5490,8 @@ pub(super) mod tests {
             batch: i32,
             cap: i32,
             dtype: mlx::Dtype,
-        ) -> Result<Vec<crate::nn::LayerCache>> {
-            Ok(vec![crate::nn::LayerCache::Full(
+        ) -> Result<Vec<crate::core::cache::layer::LayerCache>> {
+            Ok(vec![crate::core::cache::layer::LayerCache::Full(
                 crate::core::KVCache::new(batch, 1, 1, 1, dtype, cap),
             )])
         }
@@ -5500,7 +5502,7 @@ pub(super) mod tests {
             _position_ids: &mlx::Array,
             _per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            cache: Option<&mut [crate::nn::LayerCache]>,
+            cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> Result<mlx::Array> {
             write_fake_full_kv(input_ids, _per_row_lens, cache)?;
@@ -5515,7 +5517,7 @@ pub(super) mod tests {
             _attention_mask: &mlx::Array,
             _linear_attention_mask: &mlx::Array,
             per_row_lens: &[i32],
-            cache: Option<&mut [crate::nn::LayerCache]>,
+            cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> Result<mlx::Array> {
             write_fake_full_kv(input_ids, Some(per_row_lens), cache)?;
@@ -5528,7 +5530,7 @@ pub(super) mod tests {
             _position_ids: &mlx::Array,
             per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            cache: Option<&mut [crate::nn::LayerCache]>,
+            cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> Result<mlx::Array> {
             write_fake_full_kv(input_ids, per_row_lens, cache)?;
@@ -5588,7 +5590,7 @@ pub(super) mod tests {
             _per_row_pixel_values: &[Option<&[mlx::Array]>],
             _per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
             _image_token_id: i32,
-            _cache: Option<&mut [crate::nn::LayerCache]>,
+            _cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> Result<mlx::Array> {
             fake_logits(input_ids.shape().as_slice()[0] as usize)
@@ -5628,7 +5630,7 @@ pub(super) mod tests {
             _position_ids: &mlx::Array,
             _per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            _cache: Option<&mut [crate::nn::LayerCache]>,
+            _cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
             _vision_embeds_slice: Option<&mlx::Array>,
             _image_token_id: i32,
             _target: mlx::StreamOrDevice,
@@ -5642,7 +5644,7 @@ pub(super) mod tests {
             _position_ids: &mlx::Array,
             _per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            _cache: Option<&mut [crate::nn::LayerCache]>,
+            _cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
             _vision_embeds_slice: Option<&mlx::Array>,
             _image_token_id: i32,
             _target: mlx::StreamOrDevice,
@@ -5702,7 +5704,7 @@ pub(super) mod tests {
 
         fn begin_mtp_accepted_prefix_capture(
             &self,
-            cache: &mut [crate::nn::LayerCache],
+            cache: &mut [crate::core::cache::layer::LayerCache],
         ) -> Result<()> {
             anyhow::ensure!(
                 self.mtp_accepted_prefix_restore,
@@ -5716,15 +5718,17 @@ pub(super) mod tests {
 
         fn restore_mtp_accepted_prefix_rows_on(
             &self,
-            cache: &mut [crate::nn::LayerCache],
-            snapshots: &[crate::nn::LayerCacheSnapshot],
+            cache: &mut [crate::core::cache::layer::LayerCache],
+            snapshots: &[crate::core::cache::layer::LayerCacheSnapshot],
             accepted_lens: &[usize],
             _target: mlx::StreamOrDevice,
         ) -> Result<()> {
             anyhow::ensure!(cache.len() == snapshots.len(), "fake cache layer mismatch");
             for (layer, snapshot) in cache.iter_mut().zip(snapshots) {
-                let (crate::nn::LayerCache::Full(cache), crate::nn::LayerCacheSnapshot::Full(base)) =
-                    (layer, snapshot)
+                let (
+                    crate::core::cache::layer::LayerCache::Full(cache),
+                    crate::core::cache::layer::LayerCacheSnapshot::Full(base),
+                ) = (layer, snapshot)
                 else {
                     anyhow::bail!("fake accepted-prefix restore requires Full KV");
                 };
@@ -5826,7 +5830,7 @@ pub(super) mod tests {
             .map_err(|e| anyhow::anyhow!("fake batched logits Array failed: {e:?}"))
     }
 
-    fn mk_req(prompt_token: u32) -> GenerateRequest {
+    pub(crate) fn mk_req(prompt_token: u32) -> GenerateRequest {
         GenerateRequest {
             prompt_ids: vec![prompt_token],
             max_new_tokens: 16,
@@ -5843,124 +5847,7 @@ pub(super) mod tests {
         }
     }
 
-    #[derive(Clone)]
-    struct SseDisconnectContractState {
-        scheduler: SchedulerActorHandle,
-        terminal_events: Arc<AtomicU64>,
-    }
-
-    async fn scheduler_disconnect_contract_stream(
-        axum::extract::State(state): axum::extract::State<SseDisconnectContractState>,
-    ) -> axum::response::Response {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        state
-            .scheduler
-            .cmd_tx
-            .send(SchedulerCommand::Admit {
-                request: mk_req(11),
-                reply_tx,
-            })
-            .await
-            .expect("send disconnect-contract admission");
-        let mut event_rx = reply_rx
-            .await
-            .expect("disconnect-contract admission reply")
-            .expect("disconnect-contract admission accepted")
-            .event_rx;
-
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if state.scheduler.b_active.load(Ordering::Relaxed) == 1
-                    && state
-                        .scheduler
-                        .kv_cache_active_bytes
-                        .load(Ordering::Relaxed)
-                        > 0
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-        })
-        .await
-        .expect("scheduler resources must be live before returning SSE response");
-
-        let (tx, rx, disconnect) =
-            crate::core::server::api_transport::disconnect_aware_sse_channel(2);
-        let terminal_events = state.terminal_events;
-        tokio::spawn(async move {
-            if tx
-                .send(Ok(axum::body::Bytes::from_static(
-                    b"data: {\"type\":\"started\"}\n\n",
-                )))
-                .await
-                .is_err()
-            {
-                return;
-            }
-
-            while let Some(event) =
-                crate::core::server::api_transport::recv_or_disconnect(&disconnect, &mut event_rx)
-                    .await
-            {
-                let terminal = event.finish_reason.is_some();
-                if terminal {
-                    terminal_events.fetch_add(1, Ordering::Relaxed);
-                }
-                let frame = format!("data: {{\"token\":{}}}\n\n", event.token);
-                if tx.send(Ok(axum::body::Bytes::from(frame))).await.is_err() {
-                    return;
-                }
-                if terminal {
-                    return;
-                }
-            }
-        });
-
-        crate::core::server::api_transport::disconnect_aware_sse_response(rx)
-    }
-
-    async fn disconnect_tcp_client_after_first_sse_frame(
-        address: std::net::SocketAddr,
-        path: &str,
-    ) {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        let mut stream = tokio::net::TcpStream::connect(address)
-            .await
-            .expect("connect contract client");
-        let request = format!(
-            "POST {path} HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{{}}"
-        );
-        stream
-            .write_all(request.as_bytes())
-            .await
-            .expect("write contract request");
-
-        let response = tokio::time::timeout(Duration::from_secs(2), async {
-            let mut response = Vec::new();
-            let mut buffer = [0_u8; 512];
-            loop {
-                let read = stream.read(&mut buffer).await.expect("read SSE response");
-                assert!(read > 0, "SSE response closed before its first frame");
-                response.extend_from_slice(&buffer[..read]);
-                if response
-                    .windows(b"data:".len())
-                    .any(|part| part == b"data:")
-                {
-                    return response;
-                }
-            }
-        })
-        .await
-        .expect("first SSE frame timeout");
-        let response = String::from_utf8_lossy(&response);
-        assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
-
-        drop(stream);
-    }
-
-    async fn wait_for_scheduler_resources_to_be_released(handle: &SchedulerActorHandle) {
+    pub(crate) async fn wait_for_scheduler_resources_to_be_released(handle: &SchedulerActorHandle) {
         tokio::time::timeout(Duration::from_secs(3), async {
             loop {
                 if handle.b_active.load(Ordering::Relaxed) == 0
@@ -7429,65 +7316,6 @@ pub(super) mod tests {
         assert!(event_txs.is_empty());
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn http_sse_disconnect_releases_scheduler_resources_for_all_public_protocols() {
-        use axum::{routing::post, Router};
-
-        let model = Arc::new(Mutex::new(SchedulerActorFakeModel::with_forward_delay(
-            Duration::from_millis(100),
-        )));
-        let handle = spawn_scheduler_actor(
-            model,
-            1,
-            Duration::from_millis(1),
-            1,
-            32,
-            256,
-            crate::core::memory_budget::test_meta_qwen35(),
-        )
-        .expect("spawn disconnect-contract scheduler");
-        let terminal_events = Arc::new(AtomicU64::new(0));
-        let state = SseDisconnectContractState {
-            scheduler: handle.clone(),
-            terminal_events: terminal_events.clone(),
-        };
-        let router = Router::new()
-            .route(
-                "/v1/chat/completions",
-                post(scheduler_disconnect_contract_stream),
-            )
-            .route("/v1/responses", post(scheduler_disconnect_contract_stream))
-            .route("/v1/messages", post(scheduler_disconnect_contract_stream))
-            .with_state(state);
-        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-            .await
-            .expect("bind disconnect-contract server");
-        let address = listener.local_addr().expect("contract server address");
-        let server = tokio::spawn(async move {
-            axum::serve(listener, router)
-                .await
-                .expect("serve disconnect-contract router");
-        });
-
-        for path in ["/v1/chat/completions", "/v1/responses", "/v1/messages"] {
-            let terminal_before = terminal_events.load(Ordering::Relaxed);
-            disconnect_tcp_client_after_first_sse_frame(address, path).await;
-            assert_eq!(handle.b_active.load(Ordering::Relaxed), 1);
-            assert!(handle.kv_cache_active_bytes.load(Ordering::Relaxed) > 0);
-
-            wait_for_scheduler_resources_to_be_released(&handle).await;
-            assert_eq!(
-                terminal_events.load(Ordering::Relaxed),
-                terminal_before,
-                "{path} emitted a terminal SSE event after disconnect"
-            );
-        }
-
-        assert_eq!(handle.admit_count.load(Ordering::Relaxed), 3);
-        server.abort();
-        let _ = server.await;
-    }
-
     #[test]
     fn abandoned_queued_admission_does_not_consume_queue_capacity() {
         let (abandoned, abandoned_rx) = queued_pending(11);
@@ -7549,7 +7377,7 @@ pub(super) mod tests {
         let limit = fresh_prefill_batch_limit_for_request::<SchedulerActorFakeModel>(
             &request,
             4,
-            crate::core::server::adaptive_admission::AdaptiveAdmissionPolicy::gemma4_drafter(),
+            crate::core::adaptive_admission::AdaptiveAdmissionPolicy::gemma4_drafter(),
         );
 
         assert_eq!(limit, 1);
@@ -7562,7 +7390,7 @@ pub(super) mod tests {
         let limit = fresh_prefill_batch_limit_for_request::<SchedulerActorFakeModel>(
             &request,
             4,
-            crate::core::server::adaptive_admission::AdaptiveAdmissionPolicy::gemma4_drafter(),
+            crate::core::adaptive_admission::AdaptiveAdmissionPolicy::gemma4_drafter(),
         );
 
         assert_eq!(limit, 2);
@@ -7577,7 +7405,7 @@ pub(super) mod tests {
         let limit = fresh_prefill_batch_limit_for_request::<SchedulerActorFakeModel>(
             &request,
             4,
-            crate::core::server::adaptive_admission::AdaptiveAdmissionPolicy::qwen_mtp(),
+            crate::core::adaptive_admission::AdaptiveAdmissionPolicy::qwen_mtp(),
         );
 
         assert_eq!(limit, 2);
@@ -7593,7 +7421,7 @@ pub(super) mod tests {
         let limit = fresh_prefill_batch_limit_for_request::<SchedulerActorFakeModel>(
             &request,
             4,
-            crate::core::server::adaptive_admission::AdaptiveAdmissionPolicy::qwen_mtp(),
+            crate::core::adaptive_admission::AdaptiveAdmissionPolicy::qwen_mtp(),
         );
 
         assert_eq!(limit, 1);
@@ -7606,7 +7434,7 @@ pub(super) mod tests {
         let limit = fresh_prefill_batch_limit_for_request::<SchedulerActorFakeModel>(
             &request,
             4,
-            crate::core::server::adaptive_admission::AdaptiveAdmissionPolicy::qwen_mtp(),
+            crate::core::adaptive_admission::AdaptiveAdmissionPolicy::qwen_mtp(),
         );
 
         assert_eq!(limit, 2);
@@ -8122,7 +7950,8 @@ pub(super) mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore] // real-model heavy: loads Qwen3.5-4B-MLX-4bit
     async fn admission_queue_push_when_full() {
-        use crate::core::generate::{GenerateRequest, IMAGE_TOKEN_ID};
+        use crate::core::generation_types::GenerateRequest;
+        use crate::core::model_input::IMAGE_TOKEN_ID;
         use crate::core::sampler::Sampler;
         use crate::core::{Loader, Tokenizer};
         use std::sync::atomic::Ordering;
@@ -8233,7 +8062,8 @@ pub(super) mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore] // real-model heavy
     async fn admission_queue_overflow_returns_err() {
-        use crate::core::generate::{GenerateRequest, IMAGE_TOKEN_ID};
+        use crate::core::generation_types::GenerateRequest;
+        use crate::core::model_input::IMAGE_TOKEN_ID;
         use crate::core::sampler::Sampler;
         use crate::core::{Loader, Tokenizer};
         use std::sync::atomic::Ordering;
