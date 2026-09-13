@@ -2,9 +2,9 @@
 
 use std::collections::HashMap;
 
-use ironmlx::core::weights::{QuantMeta, QuantMode, WeightMap, WeightSource};
-use ironmlx::nn::{Conv1d, Conv1dConfig, Embedding, LayerNorm, Linear, RmsNorm, RmsNormGated};
-use ironmlx::Result;
+use ironmlx_core::nn::{Conv1d, Conv1dConfig, Embedding, LayerNorm, Linear, RmsNorm, RmsNormGated};
+use ironmlx_core::weights::{QuantMeta, QuantMode, WeightMap, WeightSource};
+use ironmlx_core::Result;
 use mlx::Array;
 
 #[derive(Default)]

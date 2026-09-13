@@ -1357,6 +1357,7 @@ dependencies = [
  "futures",
  "hf-hub",
  "image",
+ "ironmlx-core",
  "libc",
  "llguidance",
  "minijinja",
@@ -1389,6 +1390,16 @@ dependencies = [
  "anyhow",
  "clap",
  "mlx",
+]
+
+[[package]]
+name = "ironmlx-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "approx",
+ "mlx",
+ "serial_test",
 ]
 
 [[package]]

@@ -9,7 +9,6 @@ pub mod generate;
 pub mod generated_output;
 pub mod generation_types;
 pub mod image_input;
-pub(crate) mod linear;
 pub mod loader;
 pub mod memory_budget;
 pub mod model;

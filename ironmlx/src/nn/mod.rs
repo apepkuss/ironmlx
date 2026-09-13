@@ -1,6 +1,6 @@
 //! Neural-network primitives shared across model architectures.
 //!
-//! Each layer exposes a `from_loader(&Loader, prefix)` static constructor
+//! Each layer exposes a `from_loader(&impl WeightSource, prefix)` static constructor
 //! that reads its weights directly. Forward methods are inherent (per-layer);
 //! there is no `Module` trait — see P1 spec § 3 for rationale.
 

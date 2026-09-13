@@ -20,8 +20,6 @@ pub(crate) struct LoadedTensorComponentBytes {
 }
 
 // Preserve existing public import paths while the weight contract is separated.
-#[cfg(test)]
-use super::weights::logical_width_from_packed;
 pub use super::weights::{QuantMeta, QuantMode};
 use super::weights::{WeightMap, WeightSource};
 
@@ -1539,45 +1537,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn mxfp_storage_requires_uint8_scales_without_quant_biases() {
-        for mode in [QuantMode::Mxfp4, QuantMode::Mxfp8] {
-            let bits = if mode == QuantMode::Mxfp4 { 4 } else { 8 };
-            let meta = QuantMeta {
-                group_size: 32,
-                bits,
-                mode,
-            };
-            let weight = Array::zeros((2, 2), Dtype::Uint32).unwrap();
-            let scales = Array::zeros((2, 2), Dtype::Uint8).unwrap();
-            meta.validate_storage("model.layers.0.mlp.down_proj", &weight, &scales, None)
-                .expect("valid MXFP storage");
-
-            let byte_weight = Array::zeros((2, 2), Dtype::Uint8).unwrap();
-            let err = meta
-                .validate_storage("model.layers.0.mlp.down_proj", &byte_weight, &scales, None)
-                .expect_err("MXFP byte weights must fail");
-            assert!(err.to_string().contains("uint32"));
-
-            let float_scales = Array::zeros((2, 2), Dtype::Bfloat16).unwrap();
-            let err = meta
-                .validate_storage("model.layers.0.mlp.down_proj", &weight, &float_scales, None)
-                .expect_err("MXFP float scales must fail");
-            assert!(err.to_string().contains("uint8"));
-
-            let biases = Array::zeros((2, 2), Dtype::Uint8).unwrap();
-            let err = meta
-                .validate_storage(
-                    "model.layers.0.mlp.down_proj",
-                    &weight,
-                    &scales,
-                    Some(&biases),
-                )
-                .expect_err("MXFP quant biases must fail");
-            assert!(err.to_string().contains("must not contain"));
-        }
-    }
-
     fn affine_storage(bits: i32, weight_shape: &[i32], params_shape: &[i32]) -> Result<()> {
         let meta = QuantMeta {
             group_size: 64,
@@ -1670,92 +1629,6 @@ mod tests {
         let err = validate_quantized_storage_manifest(&tensors, None, &HashMap::new())
             .expect_err("orphan quant biases must fail");
         assert!(err.to_string().contains("missing"), "{err:#}");
-    }
-
-    #[test]
-    fn affine_storage_rejects_invalid_dtype_and_missing_biases() {
-        let meta = QuantMeta {
-            group_size: 64,
-            bits: 5,
-            mode: QuantMode::Affine,
-        };
-        let weight = Array::zeros((2, 10), Dtype::Uint8).unwrap();
-        let scales = Array::zeros((2, 1), Dtype::Bfloat16).unwrap();
-        let biases = Array::zeros((2, 1), Dtype::Bfloat16).unwrap();
-        let err = meta
-            .validate_storage("proj", &weight, &scales, Some(&biases))
-            .expect_err("byte affine weights must fail");
-        assert!(err.to_string().contains("uint32"), "{err:#}");
-
-        let weight = Array::zeros((2, 10), Dtype::Uint32).unwrap();
-        let err = meta
-            .validate_storage("proj", &weight, &scales, None)
-            .expect_err("affine biases are required");
-        assert!(err.to_string().contains("biases"), "{err:#}");
-
-        let integer_scales = Array::zeros((2, 1), Dtype::Uint16).unwrap();
-        let integer_biases = Array::zeros((2, 1), Dtype::Int16).unwrap();
-        let err = meta
-            .validate_storage("proj", &weight, &integer_scales, Some(&integer_biases))
-            .expect_err("affine parameters must promote to a real floating dtype");
-        assert!(err.to_string().contains("floating"), "{err:#}");
-    }
-
-    #[test]
-    fn affine_storage_rejects_invalid_group_and_packed_width() {
-        let weight = Array::zeros((2, 10), Dtype::Uint32).unwrap();
-        let params = Array::zeros((2, 1), Dtype::Bfloat16).unwrap();
-        let invalid_group = QuantMeta {
-            group_size: 48,
-            bits: 5,
-            mode: QuantMode::Affine,
-        };
-        let err = invalid_group
-            .validate_storage("proj", &weight, &params, Some(&params))
-            .expect_err("unsupported affine group size must fail");
-        assert!(err.to_string().contains("group_size"), "{err:#}");
-
-        let non_integral_weight = Array::zeros((2, 11), Dtype::Uint32).unwrap();
-        let meta = QuantMeta {
-            group_size: 64,
-            bits: 6,
-            mode: QuantMode::Affine,
-        };
-        let err = meta
-            .validate_storage("proj", &non_integral_weight, &params, Some(&params))
-            .expect_err("non-integral packed width must fail");
-        assert!(
-            format!("{err:#}").contains("integral logical width"),
-            "{err:#}"
-        );
-    }
-
-    #[test]
-    fn affine_storage_rejects_inconsistent_parameter_shapes() {
-        let meta = QuantMeta {
-            group_size: 64,
-            bits: 5,
-            mode: QuantMode::Affine,
-        };
-        let weight = Array::zeros(&[4, 2, 10], Dtype::Uint32).unwrap();
-        let scales = Array::zeros(&[4, 2, 1], Dtype::Bfloat16).unwrap();
-        let wrong_biases = Array::zeros(&[4, 2, 2], Dtype::Bfloat16).unwrap();
-        let err = meta
-            .validate_storage("proj", &weight, &scales, Some(&wrong_biases))
-            .expect_err("scale/bias shape mismatch must fail");
-        assert!(err.to_string().contains("same shape"), "{err:#}");
-
-        let wrong_groups = Array::zeros(&[4, 2, 2], Dtype::Bfloat16).unwrap();
-        let err = meta
-            .validate_storage("proj", &weight, &wrong_groups, Some(&wrong_groups))
-            .expect_err("wrong scale group count must fail");
-        assert!(err.to_string().contains("trailing"), "{err:#}");
-
-        let wrong_leading = Array::zeros(&[3, 2, 1], Dtype::Bfloat16).unwrap();
-        let err = meta
-            .validate_storage("proj", &weight, &wrong_leading, Some(&wrong_leading))
-            .expect_err("weight/parameter leading dimensions must match");
-        assert!(err.to_string().contains("leading dimensions"), "{err:#}");
     }
 
     #[test]
@@ -2181,18 +2054,6 @@ mod tests {
                 .expect_err("OptiQ contract must remain limited to its existing widths");
             assert!(err.to_string().contains("OptiQ"), "{err:#}");
         }
-    }
-
-    #[test]
-    fn packed_columns_recover_exact_logical_width() {
-        for (packed_columns, bits) in [(320, 4), (400, 5), (480, 6), (640, 8)] {
-            assert_eq!(
-                logical_width_from_packed(packed_columns, bits).unwrap(),
-                2560
-            );
-        }
-        assert!(logical_width_from_packed(401, 5).is_err());
-        assert!(logical_width_from_packed(481, 6).is_err());
     }
 
     #[test]

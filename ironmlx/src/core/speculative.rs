@@ -13,9 +13,9 @@ use crate::core::cache::{MtpCache, MtpCacheSnapshot};
 use crate::core::constrained::{apply_speculative_token_masks, ConstraintSession};
 use crate::core::generation_types::{GenerateEvent, GenerateRequest};
 use crate::core::model_input::build_position_ids;
-#[cfg(test)]
-use crate::core::sampler::SamplingDistribution;
 use crate::core::sampler::{draw_uniforms, sample_target_tokens_with_uniforms_batch};
+#[cfg(test)]
+use crate::core::sampler::{SamplingDistribution, SamplingTestExt};
 use crate::core::tokenizer::{DecodeStream, Tokenizer};
 use crate::core::Sampler;
 #[cfg(test)]

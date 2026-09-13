@@ -4,6 +4,7 @@ members = [
     "mlx-sys",
     "mlx",
     "ironmlx",
+    "ironmlx-core",
     "iron-bench",
     "ironmlx-bench-kernel",
     "turboquant",
