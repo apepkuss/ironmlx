@@ -1323,22 +1323,22 @@ where
                 .counters
                 .exact_sampling
                 .windows
-                .saturating_add(resolution.exact_sampling.windows);
+                .saturating_add(resolution.exact_sampling().windows);
             row.counters.exact_sampling.acceptance_draws = row
                 .counters
                 .exact_sampling
                 .acceptance_draws
-                .saturating_add(resolution.exact_sampling.acceptance_draws);
+                .saturating_add(resolution.exact_sampling().acceptance_draws);
             row.counters.exact_sampling.residual_corrections = row
                 .counters
                 .exact_sampling
                 .residual_corrections
-                .saturating_add(resolution.exact_sampling.residual_corrections);
+                .saturating_add(resolution.exact_sampling().residual_corrections);
             row.counters.exact_sampling.bonus_samples = row
                 .counters
                 .exact_sampling
                 .bonus_samples
-                .saturating_add(resolution.exact_sampling.bonus_samples);
+                .saturating_add(resolution.exact_sampling().bonus_samples);
             if resolution.needs_rollback {
                 row.counters.rollback_count += 1;
             }
@@ -1594,22 +1594,22 @@ where
             .counters
             .exact_sampling
             .windows
-            .saturating_add(resolution.exact_sampling.windows);
+            .saturating_add(resolution.exact_sampling().windows);
         self.counters.exact_sampling.acceptance_draws = self
             .counters
             .exact_sampling
             .acceptance_draws
-            .saturating_add(resolution.exact_sampling.acceptance_draws);
+            .saturating_add(resolution.exact_sampling().acceptance_draws);
         self.counters.exact_sampling.residual_corrections = self
             .counters
             .exact_sampling
             .residual_corrections
-            .saturating_add(resolution.exact_sampling.residual_corrections);
+            .saturating_add(resolution.exact_sampling().residual_corrections);
         self.counters.exact_sampling.bonus_samples = self
             .counters
             .exact_sampling
             .bonus_samples
-            .saturating_add(resolution.exact_sampling.bonus_samples);
+            .saturating_add(resolution.exact_sampling().bonus_samples);
         if resolution.needs_rollback {
             self.counters.rollback_count += 1;
         }
@@ -2025,7 +2025,6 @@ fn rate_per_second(tokens: usize, elapsed_us: u64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::constrained::ConstraintTokenizer;
     use serial_test::serial;
 
     fn assert_array_exact(label: &str, expected: &Array, actual: &Array) {
@@ -2302,7 +2301,8 @@ mod tests {
     }
 
     fn fixed_json_constraint() -> ConstraintSession {
-        let tokenizer = ConstraintTokenizer::byte_level().expect("byte tokenizer");
+        let tokenizer =
+            ironmlx_lm::test_support::byte_level_constraint_tokenizer().expect("byte tokenizer");
         let plan = tokenizer
             .compile_json_output(&serde_json::json!({
                 "type": "object",
@@ -2510,8 +2510,8 @@ mod tests {
                 .expect("resolution b");
 
         assert_eq!(resolution_a, resolution_b);
-        assert_eq!(resolution_a.exact_sampling.windows, 1);
-        assert!(resolution_a.exact_sampling.acceptance_draws > 0);
+        assert_eq!(resolution_a.exact_sampling().windows, 1);
+        assert!(resolution_a.exact_sampling().acceptance_draws > 0);
         assert_eq!(
             key_a.to_vec::<u32>().expect("key a values"),
             key_b.to_vec::<u32>().expect("key b values")
@@ -2539,7 +2539,10 @@ mod tests {
 
         assert_eq!(resolution.tokens_to_append[0], 2);
         assert_eq!(resolution.accepted_draft_len, 0);
-        assert_eq!(resolution.exact_sampling, ExactSamplingCounters::default());
+        assert_eq!(
+            resolution.exact_sampling(),
+            ExactSamplingCounters::default()
+        );
     }
 
     #[test]

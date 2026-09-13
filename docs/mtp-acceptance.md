@@ -136,7 +136,7 @@ PROMPT_LOOKUP_VERIFY_BATCHES=1,2,4,8 \
 PROMPT_LOOKUP_VERIFY_PREFIX_LENS=1024,1025,4096,4097,8192,32768,65536 \
 PROMPT_LOOKUP_VERIFY_WIDTHS=2,3,4,5,6,8 \
 PROMPT_LOOKUP_VERIFY_MAX_WIDTH=8 \
-cargo test --release -p ironmlx --test prompt_lookup_verify_qualification \
+cargo test --release -p ironmlx-lm --test prompt_lookup_verify_qualification \
   qwen35_dense_qgt1_matches_sequential_verify \
   -- --ignored --test-threads=1 --nocapture
 ```
@@ -151,7 +151,7 @@ PROMPT_LOOKUP_VERIFY_BATCHES=1 \
 PROMPT_LOOKUP_VERIFY_PREFIX_LENS=8192,32768 \
 PROMPT_LOOKUP_VERIFY_WIDTHS=2,3 \
 PROMPT_LOOKUP_VERIFY_MAX_WIDTH=3 \
-cargo test --release -p ironmlx --test prompt_lookup_verify_qualification \
+cargo test --release -p ironmlx-lm --test prompt_lookup_verify_qualification \
   qwen36_dense_long_context_qgt1_matches_sequential_verify \
   -- --ignored --test-threads=1 --nocapture
 
@@ -162,7 +162,7 @@ PROMPT_LOOKUP_VERIFY_BATCHES=1 \
 PROMPT_LOOKUP_VERIFY_PREFIX_LENS=8192,32768 \
 PROMPT_LOOKUP_VERIFY_WIDTHS=2,3 \
 PROMPT_LOOKUP_VERIFY_MAX_WIDTH=3 \
-cargo test --release -p ironmlx --test prompt_lookup_verify_qualification \
+cargo test --release -p ironmlx-lm --test prompt_lookup_verify_qualification \
   qwen36_moe_long_context_qgt1_matches_sequential_verify \
   -- --ignored --test-threads=1 --nocapture
 ```
@@ -262,7 +262,7 @@ PROMPT_LOOKUP_VERIFY_GEMMA4_MODEL=/path/to/gemma4-base/snapshots/<sha> \
 PROMPT_LOOKUP_VERIFY_BATCHES=1,2,4,8 \
 PROMPT_LOOKUP_VERIFY_PREFIX_LENS=1024,1025,8192,32768,65536 \
 PROMPT_LOOKUP_VERIFY_WIDTHS=2,3,4,5 \
-cargo test --release -p ironmlx --test prompt_lookup_verify_qualification \
+cargo test --release -p ironmlx-lm --test prompt_lookup_verify_qualification \
   gemma4_qgt1_matches_sequential_verify \
   -- --ignored --test-threads=1 --nocapture
 ```

@@ -1389,13 +1389,12 @@ fn resolve_packed_greedy_acceptance(
     tokens_to_append.push(corrected);
     Ok((
         draft_tokens,
-        SpeculativeResolution {
+        SpeculativeResolution::deterministic(
             accepted_draft_len,
             tokens_to_append,
-            accepted_verify_input_len: accepted_draft_len + 1,
-            needs_rollback: accepted_draft_len < draft_len,
-            exact_sampling: Default::default(),
-        },
+            accepted_draft_len + 1,
+            accepted_draft_len < draft_len,
+        ),
     ))
 }
 
@@ -9259,7 +9258,7 @@ impl<M: Model> Scheduler<M> {
                 };
                 let verify_start = Instant::now();
                 let hidden = {
-                    let _verify_qmm = crate::nn::verify_qmm::armed_scope();
+                    let _verify_qmm = crate::nn::verify_qmm_scope();
                     let cache = self.cache.as_mut().ok_or_else(|| {
                         anyhow!("fill_prompt_lookup_windows: main cache is absent")
                     })?;
@@ -9563,16 +9562,16 @@ impl<M: Model> Scheduler<M> {
                 let accepted = resolution.accepted_draft_len as u64;
                 stats.exact_sampling_windows = stats
                     .exact_sampling_windows
-                    .saturating_add(resolution.exact_sampling.windows as u64);
+                    .saturating_add(resolution.exact_sampling().windows as u64);
                 stats.exact_acceptance_draws = stats
                     .exact_acceptance_draws
-                    .saturating_add(resolution.exact_sampling.acceptance_draws as u64);
+                    .saturating_add(resolution.exact_sampling().acceptance_draws as u64);
                 stats.exact_residual_corrections = stats
                     .exact_residual_corrections
-                    .saturating_add(resolution.exact_sampling.residual_corrections as u64);
+                    .saturating_add(resolution.exact_sampling().residual_corrections as u64);
                 stats.exact_bonus_samples = stats
                     .exact_bonus_samples
-                    .saturating_add(resolution.exact_sampling.bonus_samples as u64);
+                    .saturating_add(resolution.exact_sampling().bonus_samples as u64);
                 stats.drafted_tokens = stats.drafted_tokens.saturating_add(drafted);
                 stats.accepted_tokens = stats.accepted_tokens.saturating_add(accepted);
                 stats.rejected_tokens = stats
@@ -13100,10 +13099,10 @@ impl<M: Model> Scheduler<M> {
             };
             let b = self.cache_rows.len();
             let affine8_b4_exact_hot_path = has_draft_tokens
-                && crate::nn::verify_qmm::affine8_b4_q2_exact_supported()
+                && crate::nn::affine8_b4_q2_exact_supported()
                 && model.supports_affine8_b4_mtp_exact_hot_path(b, max_verify_len);
-            let _exact_affine8_b4_q2 = affine8_b4_exact_hot_path
-                .then(crate::nn::position_stable_qmm::exact_affine8_b4_q2_scope);
+            let _exact_affine8_b4_q2 =
+                affine8_b4_exact_hot_path.then(crate::nn::exact_affine8_b4_q2_scope);
             // The direct recurrent-prefix restore path is calibrated for B2/Q2
             // and the explicitly qualified Qwen affine8 B4/Q2 shape. Rows that
             // did not open a new MTP window are represented by accepted_len=0;
@@ -13147,7 +13146,7 @@ impl<M: Model> Scheduler<M> {
                 // Once every row selected draft=0, this is an ordinary
                 // batched target decode. Exact speculative QMM and rollback
                 // snapshots are needed only while at least one row drafts.
-                let _verify_qmm = has_draft_tokens.then(crate::nn::verify_qmm::armed_scope);
+                let _verify_qmm = has_draft_tokens.then(crate::nn::verify_qmm_scope);
                 let cache = self
                     .cache
                     .as_mut()
@@ -13411,7 +13410,7 @@ impl<M: Model> Scheduler<M> {
                             maybe_build_sparse_decode_mask(cache, &step_lens)?
                         };
                         let replay_hidden = {
-                            let _verify_qmm = crate::nn::verify_qmm::armed_scope();
+                            let _verify_qmm = crate::nn::verify_qmm_scope();
                             let cache = self.cache.as_mut().ok_or_else(|| {
                                 anyhow!("fill_mtp_windows_batched: main cache absent")
                             })?;
@@ -13971,7 +13970,7 @@ impl<M: Model> Scheduler<M> {
         // A zero-draft window is an ordinary single-token target decode. Do
         // not force it through the exact speculative QMM path; there is no
         // drafted position whose result needs cross-shape verification.
-        let _verify_qmm = (draft_budget > 0).then(crate::nn::verify_qmm::armed_scope);
+        let _verify_qmm = (draft_budget > 0).then(crate::nn::verify_qmm_scope);
         let verified_hidden = {
             let cache = self
                 .cache
@@ -14085,7 +14084,7 @@ impl<M: Model> Scheduler<M> {
         stats.windows += 1;
         stats.drafted_tokens += draft_tokens.len();
         stats.accepted_draft_tokens += resolution.accepted_draft_len;
-        stats.record_exact_sampling(resolution.exact_sampling);
+        stats.record_exact_sampling(resolution.exact_sampling());
         stats.record_window_acceptance(draft_tokens.len(), resolution.accepted_draft_len);
         if resolution.needs_rollback {
             stats.rollback_count += 1;
@@ -18803,9 +18802,9 @@ impl Scheduler<crate::models::Gemma4Model> {
         // lm_head projection as that projection is also shape-sensitive.
         let position_stable_verify = max_verify_len > 1;
         let _position_stable_linear =
-            position_stable_verify.then(crate::nn::position_stable_linear::scope);
+            position_stable_verify.then(crate::nn::position_stable_linear_scope);
         let _position_stable_qmm =
-            position_stable_verify.then(crate::nn::position_stable_qmm::scope);
+            position_stable_verify.then(crate::nn::position_stable_qmm_scope);
         let max_context_tokens = contexts
             .iter()
             .map(|ctx| ctx.draft_history.len())
@@ -18825,9 +18824,8 @@ impl Scheduler<crate::models::Gemma4Model> {
             max_verify_len,
         );
         let verified = {
-            let _stable_qmm = stable_k3v4_verify.then(crate::nn::batch_stable_qmm::context_scope);
-            let _stable_attention =
-                stable_attention.then(crate::nn::gemma4_verify_attention::scope);
+            let _stable_qmm = stable_k3v4_verify.then(crate::nn::batch_stable_qmm_context_scope);
+            let _stable_attention = stable_attention.then(crate::nn::gemma4_verify_attention_scope);
             let cache = self
                 .cache
                 .as_mut()
@@ -19330,9 +19328,9 @@ impl Scheduler<crate::models::Gemma4Model> {
         let verify_forward_start = Instant::now();
         let position_stable_verify = verify_input.len() > 1;
         let _position_stable_linear =
-            position_stable_verify.then(crate::nn::position_stable_linear::scope);
+            position_stable_verify.then(crate::nn::position_stable_linear_scope);
         let _position_stable_qmm =
-            position_stable_verify.then(crate::nn::position_stable_qmm::scope);
+            position_stable_verify.then(crate::nn::position_stable_qmm_scope);
         let verified = {
             let stable_attention = gemma4_long_verify_needs_stable_attention(
                 kv_bits,
@@ -19340,8 +19338,7 @@ impl Scheduler<crate::models::Gemma4Model> {
                 verify_input.len(),
                 1,
             );
-            let _stable_attention =
-                stable_attention.then(crate::nn::gemma4_verify_attention::scope);
+            let _stable_attention = stable_attention.then(crate::nn::gemma4_verify_attention_scope);
             let cache = self
                 .cache
                 .as_mut()
@@ -19424,7 +19421,7 @@ impl Scheduler<crate::models::Gemma4Model> {
         stats.windows += 1;
         stats.drafted_tokens += draft_tokens.len();
         stats.accepted_draft_tokens += resolution.accepted_draft_len;
-        stats.record_exact_sampling(resolution.exact_sampling);
+        stats.record_exact_sampling(resolution.exact_sampling());
         stats.record_window_acceptance(draft_tokens.len(), resolution.accepted_draft_len);
         if resolution.needs_rollback {
             stats.rollback_count += 1;
@@ -26094,7 +26091,7 @@ mod tests {
 
     #[test]
     fn constrained_pending_token_allows_incomplete_prefix_at_length() {
-        let tokenizer = crate::core::constrained::ConstraintTokenizer::byte_level()
+        let tokenizer = ironmlx_lm::test_support::byte_level_constraint_tokenizer()
             .expect("byte-level constraint tokenizer");
         let plan = tokenizer
             .compile_json_output(&serde_json::json!({

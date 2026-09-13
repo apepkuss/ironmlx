@@ -1219,34 +1219,6 @@ mod p6_7_helper_tests {
     }
 
     #[test]
-    fn vl_chunk_composition_counts_runs_and_edges() {
-        let ids: Vec<u32> = vec![42, 42, 1, 42, 2, 42, 42, 42];
-
-        let c = vl_chunk_composition(&ids, 42);
-
-        assert_eq!(c.seq_len, 8);
-        assert_eq!(c.image_tokens, 6);
-        assert_eq!(c.text_tokens, 2);
-        assert_eq!(c.image_runs, 3);
-        assert_eq!(c.leading_image_tokens, 2);
-        assert_eq!(c.trailing_image_tokens, 3);
-    }
-
-    #[test]
-    fn vl_chunk_composition_treats_negative_image_id_as_absent() {
-        let ids: Vec<u32> = vec![1, 2, 3];
-
-        let c = vl_chunk_composition(&ids, -1);
-
-        assert_eq!(c.seq_len, 3);
-        assert_eq!(c.image_tokens, 0);
-        assert_eq!(c.text_tokens, 3);
-        assert_eq!(c.image_runs, 0);
-        assert_eq!(c.leading_image_tokens, 0);
-        assert_eq!(c.trailing_image_tokens, 0);
-    }
-
-    #[test]
     fn extend_vl_chunk_end_extends_inside_image_run() {
         let ids: Vec<u32> = (0..400_u32)
             .map(|i| if (250..260).contains(&i) { 42 } else { 1 })

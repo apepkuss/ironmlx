@@ -44,7 +44,7 @@ use crate::Result;
 use crate::models::gemma4::Gemma4Model;
 use crate::models::gemma4::Gemma4SharedKvStates;
 
-use crate::models::gemma4::drafter::{
+use crate::models::gemma4::{
     draft_position_for_shared_kv, gemma4_shared_kv_from_cache_on, shared_kv_row_trim_suffix_on,
     Gemma4AssistantModel,
 };
@@ -984,12 +984,12 @@ impl<'m> Gemma4DrafterGenerationStream<'m> {
         let verify_forward_start = Instant::now();
         let position_stable_verify = verify_input.len() > 1;
         let _position_stable_linear =
-            position_stable_verify.then(crate::nn::position_stable_linear::scope);
+            position_stable_verify.then(crate::nn::position_stable_linear_scope);
         let _position_stable_qmm =
-            position_stable_verify.then(crate::nn::position_stable_qmm::scope);
+            position_stable_verify.then(crate::nn::position_stable_qmm_scope);
         let stable_attention = position_stable_verify
             && context_tokens > self.model.config().sliding_window.max(0) as usize;
-        let _stable_attention = stable_attention.then(crate::nn::gemma4_verify_attention::scope);
+        let _stable_attention = stable_attention.then(crate::nn::gemma4_verify_attention_scope);
         let verified = self.model.forward_text_hidden_with_shared_kv_on(
             &verify_arr,
             &verify_pos_ids,
@@ -1045,7 +1045,8 @@ impl<'m> Gemma4DrafterGenerationStream<'m> {
         self.stats.windows += 1;
         self.stats.drafted_tokens += draft_tokens.len();
         self.stats.accepted_draft_tokens += resolution.accepted_draft_len;
-        self.stats.record_exact_sampling(resolution.exact_sampling);
+        self.stats
+            .record_exact_sampling(resolution.exact_sampling());
         self.stats
             .record_window_acceptance(draft_tokens.len(), resolution.accepted_draft_len);
         if resolution.needs_rollback {

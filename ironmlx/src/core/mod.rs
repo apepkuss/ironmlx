@@ -27,7 +27,6 @@ pub mod speculative_model;
 pub(crate) mod speculative_qualification;
 pub mod tokenizer;
 pub mod tool_calling;
-mod tool_prompt_cache;
 pub mod vision;
 pub mod weights;
 
@@ -51,7 +50,6 @@ pub use sampler::Sampler;
 pub use scheduler::{Phase, RequestId, RequestState, Scheduler, SchedulerError, StepEvent};
 pub use tokenizer::Tokenizer;
 pub use tool_calling::{AgentMessage, ToolCall, ToolDefinition, ToolDialect};
-pub(crate) use weights::logical_width_from_packed;
 
 pub mod vision_input;
 

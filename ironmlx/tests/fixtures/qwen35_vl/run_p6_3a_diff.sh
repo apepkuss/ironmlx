@@ -29,7 +29,7 @@ cd "$REPO_ROOT"
 MLX_DIR="$MLX_DIR" \
     IMAGE_PATH="$FIXTURE_DIR/coco_sample.jpg" \
     IRONMLX_PREPROCESS_DUMP_DIR="$IRON_PRE_DIR" \
-    cargo test -p ironmlx \
+    cargo test -p ironmlx-lm \
         --features vision-dump \
         --release \
         --test preprocess_dump \

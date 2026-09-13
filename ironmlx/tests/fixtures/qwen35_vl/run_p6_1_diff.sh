@@ -43,7 +43,7 @@ QWEN35_MODEL="$QWEN35_MODEL" \
     MLX_DIR="$MLX_DIR" \
     IRONMLX_VISION_DUMP_DIR="$RUST_DIR" \
     PIXEL_VALUES_PATH="$PY_DIR/00_pixel_values.safetensors" \
-    cargo test -p ironmlx \
+    cargo test -p ironmlx-lm \
         --features vision-dump \
         --release \
         --test vision_dump \

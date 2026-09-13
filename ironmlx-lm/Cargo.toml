@@ -1,0 +1,37 @@
+[package]
+name = "ironmlx-lm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "LLM and VLM models backed by MLX"
+publish = false
+
+[dependencies]
+ironmlx-core = { path = "../ironmlx-core" }
+mlx = { path = "../mlx" }
+turboquant = { path = "../turboquant" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+tracing = "0.1"
+tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
+llguidance = { version = "=1.7.6", default-features = false, features = ["ahash", "lark", "referencing"] }
+sha2 = "0.10"
+anyhow = "1"
+smallvec = "1"
+minijinja = { version = "2", default-features = false, features = ["adjacent_loop_items", "builtins", "loader", "macros", "serde"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+
+[features]
+default = []
+vision-dump = []
+test-support = []
+
+[dev-dependencies]
+ironmlx-core = { path = "../ironmlx-core", features = ["test-support"] }
+approx = "0.5"
+serial_test = { version = "3", default-features = false }
+uuid = { version = "1", features = ["v4"] }
+dirs = "6"

@@ -21,5 +21,5 @@ Run parity tests:
 ```text
 MLX_DIR=$HOME/.local/mlx \
 GEMMA4_UNIFIED_MODEL=$HOME/.ironmlx/models/models--mlx-community--gemma-4-12B-it-4bit/snapshots/<sha> \
-  cargo test --release -p ironmlx --test gemma4_unified_parity -- --ignored --nocapture --test-threads=1
+  cargo test --release -p ironmlx-lm --test gemma4_unified_parity -- --ignored --nocapture --test-threads=1
 ```
