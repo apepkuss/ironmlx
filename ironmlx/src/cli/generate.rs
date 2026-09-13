@@ -10,11 +10,11 @@ use mlx::Array;
 
 use crate::core::generate::{GenerateEvent, GenerateRequest, GenerationStream, IMAGE_TOKEN_ID};
 use crate::core::sampler::Sampler;
-use crate::core::scheduler::DenseVlMethods;
 use crate::core::speculative::{
     resolve_mtp_draft_tokens, MtpDraftTokensArg, MtpSpeculativeConfig, MtpSpeculativeModel,
     MtpTextGenerationStream,
 };
+use crate::core::vision::DenseVlMethods;
 use crate::core::{
     DFlash2TextGenerationStream, Loader, Message, Model, Phase, Scheduler, StepEvent, Tokenizer,
 };

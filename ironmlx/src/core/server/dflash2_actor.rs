@@ -19,8 +19,9 @@ use crate::core::dflash2::{
 };
 use crate::core::generate::{GenerateEvent, GenerateRequest};
 use crate::core::memory_budget::BudgetState;
-use crate::core::scheduler::{DenseVlMethods, RequestId, SchedulerError, StepEvent};
+use crate::core::scheduler::{RequestId, SchedulerError, StepEvent};
 use crate::core::server::scheduler_actor::AdmitReply;
+use crate::core::vision::DenseVlMethods;
 use crate::core::{Model, Tokenizer};
 use crate::models::dflash2::{DFlash2DraftModel, DFlash2Target, DFlash2TargetCacheCost};
 use crate::Result;

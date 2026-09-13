@@ -15,13 +15,13 @@ use crate::core::cache::{
 };
 use crate::core::model::Model;
 use crate::core::sampler::Sampler;
-use crate::core::scheduler::DenseVlMethods;
 use crate::core::scheduler_autotune::{
     SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeProfile,
     SchedulerAutotuneRuntimeRequest,
 };
 use crate::core::speculative::MtpSpeculativeModel;
 use crate::core::tokenizer::Tokenizer;
+use crate::core::vision::DenseVlMethods;
 use crate::Result;
 
 pub(crate) mod adaptive_admission;
@@ -389,7 +389,7 @@ where
         admission_queue_max: usize,
         effective_cap_max: usize,
         decode_cadence_mid_chunk_cap: usize,
-        meta: crate::core::memory_budget::ModelMeta,
+        meta: crate::core::model::ModelMeta,
     ) -> Result<scheduler_actor::SchedulerActorHandle>;
 }
 
@@ -420,7 +420,7 @@ where
         admission_queue_max: usize,
         effective_cap_max: usize,
         decode_cadence_mid_chunk_cap: usize,
-        meta: crate::core::memory_budget::ModelMeta,
+        meta: crate::core::model::ModelMeta,
     ) -> Result<scheduler_actor::SchedulerActorHandle> {
         if self.force_scheduler {
             return Ok(
@@ -552,7 +552,7 @@ impl SchedulerActorSpawner<crate::models::Gemma4Model> for Gemma4DrafterSchedule
         admission_queue_max: usize,
         effective_cap_max: usize,
         decode_cadence_mid_chunk_cap: usize,
-        meta: crate::core::memory_budget::ModelMeta,
+        meta: crate::core::model::ModelMeta,
     ) -> Result<scheduler_actor::SchedulerActorHandle> {
         if let Some((prompt_lookup, qualification)) = self.prompt_lookup {
             return scheduler_actor::spawn_scheduler_actor_with_gemma4_drafter_prompt_lookup(
@@ -634,7 +634,7 @@ where
         admission_queue_max: usize,
         effective_cap_max: usize,
         decode_cadence_mid_chunk_cap: usize,
-        meta: crate::core::memory_budget::ModelMeta,
+        meta: crate::core::model::ModelMeta,
     ) -> Result<scheduler_actor::SchedulerActorHandle> {
         if let Some((prompt_lookup, qualification)) = self.prompt_lookup {
             return scheduler_actor::spawn_scheduler_actor_with_mtp_prompt_lookup(
@@ -715,7 +715,7 @@ where
         admission_queue_max: usize,
         effective_cap_max: usize,
         decode_cadence_mid_chunk_cap: usize,
-        meta: crate::core::memory_budget::ModelMeta,
+        meta: crate::core::model::ModelMeta,
     ) -> Result<scheduler_actor::SchedulerActorHandle> {
         scheduler_actor::spawn_scheduler_actor_with_prompt_lookup(
             model,
@@ -1874,7 +1874,7 @@ mod tests {
             unimplemented!("route tests only call the associated route policy")
         }
 
-        fn model_meta(&self) -> crate::core::memory_budget::ModelMeta {
+        fn model_meta(&self) -> crate::core::model::ModelMeta {
             crate::core::memory_budget::test_meta_qwen35()
         }
 
@@ -1932,7 +1932,7 @@ mod tests {
             b_max.min(2)
         }
 
-        fn model_meta(&self) -> crate::core::memory_budget::ModelMeta {
+        fn model_meta(&self) -> crate::core::model::ModelMeta {
             crate::core::memory_budget::test_meta_qwen35()
         }
 

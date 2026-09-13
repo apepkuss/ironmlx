@@ -38,9 +38,8 @@ use crate::core::prompt_lookup::{
     PromptLookupQualificationRuntimeConfig, PromptLookupQualificationStats, PromptLookupStats,
 };
 use crate::core::scheduler::{
-    ActiveKvParkedRequest, AdmitMidHandle, DenseVlMethods, Gemma4DrafterAdmitMidHandle,
-    ImmutablePrefixBlockStats, MtpAdmitMidHandle, Phase, PromptLookupMtpStepOutcome, RequestId,
-    Scheduler, StepEvent,
+    ActiveKvParkedRequest, AdmitMidHandle, Gemma4DrafterAdmitMidHandle, ImmutablePrefixBlockStats,
+    MtpAdmitMidHandle, Phase, PromptLookupMtpStepOutcome, RequestId, Scheduler, StepEvent,
 };
 use crate::core::server::adaptive_admission::{
     AdaptiveAdmissionPolicy, AdmissionRequestShape, ROLLING_DECODE_STEPS_AFTER_ADMISSION_WORK,
@@ -50,6 +49,7 @@ use crate::core::speculative_qualification::{
     NeuralExactAction, NeuralExactCostController, NeuralExactQualificationRuntimeConfig,
     NeuralExactQualificationStats, NeuralExactRegime, NeuralExactSampleCounters, NeuralExactSource,
 };
+use crate::core::vision::DenseVlMethods;
 use crate::Result;
 
 #[derive(Debug, Clone, Copy, Default, Serialize)]
@@ -2792,7 +2792,7 @@ pub fn spawn_scheduler_actor<M>(
     admission_queue_max: usize,
     effective_cap_max: usize,
     decode_cadence_mid_chunk_cap: usize,
-    meta: crate::core::memory_budget::ModelMeta,
+    meta: crate::core::model::ModelMeta,
 ) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError>
 where
     M: Model + DenseVlMethods + Send + 'static,
@@ -2821,7 +2821,7 @@ pub(crate) fn spawn_scheduler_actor_for_prompt_lookup_control<M>(
     admission_queue_max: usize,
     effective_cap_max: usize,
     decode_cadence_mid_chunk_cap: usize,
-    meta: crate::core::memory_budget::ModelMeta,
+    meta: crate::core::model::ModelMeta,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     active_kv_offload: ActiveKvOffloadConfig,
@@ -2853,7 +2853,7 @@ pub fn spawn_scheduler_actor_with_active_kv_offload<M>(
     admission_queue_max: usize,
     effective_cap_max: usize,
     decode_cadence_mid_chunk_cap: usize,
-    meta: crate::core::memory_budget::ModelMeta,
+    meta: crate::core::model::ModelMeta,
     active_kv_offload: ActiveKvOffloadConfig,
 ) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError>
 where
@@ -2883,7 +2883,7 @@ pub fn spawn_scheduler_actor_with_paged_prefix_cache<M>(
     admission_queue_max: usize,
     effective_cap_max: usize,
     decode_cadence_mid_chunk_cap: usize,
-    meta: crate::core::memory_budget::ModelMeta,
+    meta: crate::core::model::ModelMeta,
     paged_prefix_cache: PagedPrefixCacheConfig,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
 ) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError>
@@ -2914,7 +2914,7 @@ pub fn spawn_scheduler_actor_with_paged_prefix_cache_and_active_kv<M>(
     admission_queue_max: usize,
     effective_cap_max: usize,
     decode_cadence_mid_chunk_cap: usize,
-    meta: crate::core::memory_budget::ModelMeta,
+    meta: crate::core::model::ModelMeta,
     paged_prefix_cache: PagedPrefixCacheConfig,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     active_kv_offload: ActiveKvOffloadConfig,
@@ -2949,7 +2949,7 @@ pub(crate) fn spawn_scheduler_actor_with_mtp<M>(
     admission_queue_max: usize,
     effective_cap_max: usize,
     decode_cadence_mid_chunk_cap: usize,
-    meta: crate::core::memory_budget::ModelMeta,
+    meta: crate::core::model::ModelMeta,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
 ) -> Result<SchedulerActorHandle>
@@ -2990,7 +2990,7 @@ pub(crate) fn spawn_scheduler_actor_with_mtp_prompt_lookup<M>(
     admission_queue_max: usize,
     effective_cap_max: usize,
     decode_cadence_mid_chunk_cap: usize,
-    meta: crate::core::memory_budget::ModelMeta,
+    meta: crate::core::model::ModelMeta,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     active_kv_offload: ActiveKvOffloadConfig,
@@ -3031,7 +3031,7 @@ pub(crate) fn spawn_scheduler_actor_with_prompt_lookup<M>(
     admission_queue_max: usize,
     effective_cap_max: usize,
     decode_cadence_mid_chunk_cap: usize,
-    meta: crate::core::memory_budget::ModelMeta,
+    meta: crate::core::model::ModelMeta,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     active_kv_offload: ActiveKvOffloadConfig,
@@ -3067,7 +3067,7 @@ pub(crate) fn spawn_scheduler_actor_with_mtp_and_active_kv<M>(
     admission_queue_max: usize,
     effective_cap_max: usize,
     decode_cadence_mid_chunk_cap: usize,
-    meta: crate::core::memory_budget::ModelMeta,
+    meta: crate::core::model::ModelMeta,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     active_kv_offload: ActiveKvOffloadConfig,
@@ -3108,7 +3108,7 @@ pub(crate) fn spawn_scheduler_actor_with_gemma4_drafter(
     admission_queue_max: usize,
     effective_cap_max: usize,
     decode_cadence_mid_chunk_cap: usize,
-    meta: crate::core::memory_budget::ModelMeta,
+    meta: crate::core::model::ModelMeta,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
 ) -> Result<SchedulerActorHandle> {
@@ -3145,7 +3145,7 @@ pub(crate) fn spawn_scheduler_actor_with_gemma4_drafter_prompt_lookup(
     admission_queue_max: usize,
     effective_cap_max: usize,
     decode_cadence_mid_chunk_cap: usize,
-    meta: crate::core::memory_budget::ModelMeta,
+    meta: crate::core::model::ModelMeta,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     active_kv_offload: ActiveKvOffloadConfig,
@@ -3183,7 +3183,7 @@ pub(crate) fn spawn_scheduler_actor_with_gemma4_drafter_and_active_kv(
     admission_queue_max: usize,
     effective_cap_max: usize,
     decode_cadence_mid_chunk_cap: usize,
-    meta: crate::core::memory_budget::ModelMeta,
+    meta: crate::core::model::ModelMeta,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     active_kv_offload: ActiveKvOffloadConfig,
@@ -3218,7 +3218,7 @@ fn spawn_scheduler_actor_with_mode<M, A>(
     admission_queue_max: usize,
     effective_cap_max: usize,
     decode_cadence_mid_chunk_cap: usize,
-    meta: crate::core::memory_budget::ModelMeta,
+    meta: crate::core::model::ModelMeta,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     adaptive_policy: AdaptiveAdmissionPolicy,
@@ -3269,7 +3269,7 @@ fn spawn_scheduler_actor_with_mode_and_budget_state<M, A>(
     admission_queue_max: usize,
     effective_cap_max: usize,
     decode_cadence_mid_chunk_cap: usize,
-    meta: crate::core::memory_budget::ModelMeta,
+    meta: crate::core::model::ModelMeta,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     adaptive_policy: AdaptiveAdmissionPolicy,
@@ -5559,7 +5559,7 @@ pub(super) mod tests {
             b_max.min(2)
         }
 
-        fn model_meta(&self) -> crate::core::memory_budget::ModelMeta {
+        fn model_meta(&self) -> crate::core::model::ModelMeta {
             crate::core::memory_budget::test_meta_qwen35()
         }
 
@@ -5594,7 +5594,7 @@ pub(super) mod tests {
             fake_logits(input_ids.shape().as_slice()[0] as usize)
         }
 
-        fn estimate_vision_prefill_peak_bytes(
+        fn estimate_vision_prefill_tensor_bytes(
             &self,
             pixel_values: &[mlx::Array],
             grid_thw: &[(i32, i32, i32)],

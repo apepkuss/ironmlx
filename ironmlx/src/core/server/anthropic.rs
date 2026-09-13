@@ -31,7 +31,6 @@ use crate::core::image_input::{ImageInputError, ImageRequestBudget};
 use crate::core::model::Model;
 use crate::core::native_output::NativeOutputDecoderConfig;
 use crate::core::sampler::Sampler;
-use crate::core::scheduler::DenseVlMethods;
 use crate::core::server::chat_format::{
     render_and_encode, ChatFunctionCall, ChatMessage, ChatToolCall, Content, ContentPart, ImageUrl,
 };
@@ -41,6 +40,7 @@ use crate::core::server::structured_output::StructuredOutputFormat;
 use crate::core::server::vision::{DecodedMessage, DecodedPart};
 use crate::core::speculative::MtpSpeculativeConfig;
 use crate::core::tool_calling::{ToolCall, ToolDefinition, ToolDialect};
+use crate::core::vision::DenseVlMethods;
 
 use super::api_transport::ApiJson;
 use super::SamplingDefaults;

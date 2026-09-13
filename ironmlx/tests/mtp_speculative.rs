@@ -179,7 +179,7 @@ impl ironmlx::core::Model for FakeMtpModel {
         Ok((&flat[..], &[1_i32, seq as i32, vocab as i32][..]).try_into()?)
     }
 
-    fn model_meta(&self) -> ironmlx::core::memory_budget::ModelMeta {
+    fn model_meta(&self) -> ironmlx::core::model::ModelMeta {
         ironmlx::core::memory_budget::test_meta_qwen35()
     }
 

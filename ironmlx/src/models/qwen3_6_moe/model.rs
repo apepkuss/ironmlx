@@ -9,7 +9,7 @@ use anyhow::Context;
 use mlx::{Array, Dtype, StreamOrDevice};
 
 use crate::core::cache::MtpCache;
-use crate::core::memory_budget::ModelMeta;
+use crate::core::model::ModelMeta;
 use crate::core::{Loader, Model};
 use crate::models::qwen3_5_moe::{Qwen35MoeModel, Qwen35MoeMtp};
 use crate::models::vision::VisionTower;
@@ -421,7 +421,7 @@ impl Model for Qwen36MoeModel {
     }
 }
 
-impl crate::core::scheduler::DenseVlMethods for Qwen36MoeModel {
+impl crate::core::vision::DenseVlMethods for Qwen36MoeModel {
     fn batched_prefill_vl(
         &self,
         input_ids: &mlx::Array,
@@ -450,12 +450,12 @@ impl crate::core::scheduler::DenseVlMethods for Qwen36MoeModel {
         )
     }
 
-    fn estimate_vision_prefill_peak_bytes(
+    fn estimate_vision_prefill_tensor_bytes(
         &self,
         pixel_values: &[mlx::Array],
         grid_thw: &[(i32, i32, i32)],
     ) -> crate::Result<usize> {
-        crate::core::scheduler::DenseVlMethods::estimate_vision_prefill_peak_bytes(
+        crate::core::vision::DenseVlMethods::estimate_vision_prefill_tensor_bytes(
             &self.inner,
             pixel_values,
             grid_thw,
@@ -523,7 +523,7 @@ impl crate::core::scheduler::DenseVlMethods for Qwen36MoeModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::scheduler::DenseVlMethods;
+    use crate::core::vision::DenseVlMethods;
 
     fn make_cfg() -> Qwen36MoeConfig {
         let cfg = crate::models::qwen3_5_moe::Qwen35MoeConfig {

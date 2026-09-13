@@ -1,15 +1,37 @@
-//! Trait abstracting the inference model used by [`crate::core::scheduler::Scheduler`],
-//! [`crate::core::generate::GenerationStream`], and [`crate::core::server::SchedulerActor`].
+//! Model-side inference operations and architecture metadata.
 //!
-//! VL-related methods (`forward_vl_chunk` / `batched_prefill_vl` / `compute_vision_embeds`)
-//! intentionally remain inherent on concrete models; see spec §3.1 / §3.9.
+//! Execution drivers consume this interface. Vision-specific operations live
+//! in the extension trait [`super::vision::DenseVlMethods`].
 
 use mlx::{Array, Dtype, StreamOrDevice};
 
 use crate::core::cache::TurboQuantKVBits;
-use crate::core::memory_budget::ModelMeta;
+
 use crate::nn::LayerCache;
 use crate::Result;
+
+/// Architecture metadata available without a concrete model configuration.
+#[derive(Debug, Clone, Copy)]
+pub struct ModelMeta {
+    pub num_hidden_layers: i32,
+    pub num_attention_heads: i32,
+    pub num_key_value_heads: i32,
+    pub hidden_size: i32,
+    pub head_dim: Option<i32>,
+    pub weight_bytes: usize,
+    /// Maximum sequence length declared by the model configuration.
+    pub max_position_embeddings: i32,
+    /// VL vision spatial merge size (= VisionConfig.spatial_merge_size).
+    /// Defaults to 2 for text-only models (unused when no images present).
+    pub spatial_merge_size: i32,
+}
+
+impl ModelMeta {
+    pub fn effective_head_dim(&self) -> i32 {
+        self.head_dim
+            .unwrap_or(self.hidden_size / self.num_attention_heads)
+    }
+}
 
 pub trait Model {
     fn make_cache(&self, batch: i32, cap: i32, dtype: Dtype) -> Result<Vec<LayerCache>>;

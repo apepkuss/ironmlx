@@ -28,7 +28,7 @@ use anyhow::{anyhow, Context};
 use mlx::{Array, Dtype, StreamOrDevice};
 
 use crate::core::cache::KVCache;
-use crate::core::memory_budget::ModelMeta;
+use crate::core::model::ModelMeta;
 use crate::core::{Loader, Model};
 use crate::nn::{Embedding, LayerCache, Linear, RmsNorm};
 use crate::Result;
@@ -509,7 +509,7 @@ impl Model for LlamaModel {
     }
 }
 
-impl crate::core::scheduler::DenseVlMethods for LlamaModel {
+impl crate::core::vision::DenseVlMethods for LlamaModel {
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn batched_prefill_vl(
         &self,
@@ -527,7 +527,7 @@ impl crate::core::scheduler::DenseVlMethods for LlamaModel {
         Err(anyhow!("LlamaModel is text-only: VL methods unsupported"))
     }
 
-    fn estimate_vision_prefill_peak_bytes(
+    fn estimate_vision_prefill_tensor_bytes(
         &self,
         _pixel_values: &[mlx::Array],
         _grid_thw: &[(i32, i32, i32)],

@@ -16,7 +16,6 @@ use super::scheduler_profile_store::{
 use super::KvQuantArg;
 use crate::core::cache::DEFAULT_PAGED_PREFIX_CACHE_BLOCK_SIZE;
 use crate::core::process_memory::StaticMemoryEstimate;
-use crate::core::scheduler::DenseVlMethods;
 use crate::core::scheduler_autotune::{
     evaluate_scheduler_autotune_profile_health, SchedulerAutotuneProfileConfig,
     SchedulerAutotuneProfileHealthInput, SchedulerAutotuneProfileHealthReport,
@@ -28,6 +27,7 @@ use crate::core::server::adaptive_admission::{
     GEMMA4_DRAFTER_ADAPTIVE_PHYSICAL_B_MAX, QWEN_MTP_ADAPTIVE_PHYSICAL_B_MAX,
 };
 use crate::core::speculative::MtpSpeculativeModel;
+use crate::core::vision::DenseVlMethods;
 use crate::core::{server, Loader, Model, Tokenizer};
 use crate::Result;
 

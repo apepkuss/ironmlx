@@ -13,8 +13,8 @@ use crate::core::cache::TurboQuantKVBits;
 use crate::core::constrained::{apply_token_mask, ConstraintPlan, ConstraintSession};
 use crate::core::model::Model;
 use crate::core::sampler::Sampler;
-use crate::core::scheduler::DenseVlMethods;
 use crate::core::tokenizer::{DecodeStream, Tokenizer};
+use crate::core::vision::DenseVlMethods;
 use crate::nn::{enable_turboquant_kv_caches, LayerCache};
 use crate::Result;
 

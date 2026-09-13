@@ -424,7 +424,7 @@ impl crate::core::model::Model for MiniCpmV46Model {
         )
     }
 
-    fn model_meta(&self) -> crate::core::memory_budget::ModelMeta {
+    fn model_meta(&self) -> crate::core::model::ModelMeta {
         let cfg = self.config();
         // MiniCPM-V-4.6 uses a 4× spatial downsample product: 2×2 VitMerger ×
         // 2×2 Merger = 16× total. The `spatial_merge_size` field is the square-root
@@ -433,7 +433,7 @@ impl crate::core::model::Model for MiniCpmV46Model {
         // This is only consumed by P2b CLI image-token estimation; inference is
         // unaffected by this value.
         let spatial_merge_size = 4;
-        crate::core::memory_budget::ModelMeta {
+        crate::core::model::ModelMeta {
             num_hidden_layers: cfg.num_hidden_layers,
             num_attention_heads: cfg.num_attention_heads,
             num_key_value_heads: cfg.num_key_value_heads,
@@ -671,8 +671,8 @@ impl MiniCpmV46Model {
     }
 }
 
-impl crate::core::scheduler::DenseVlMethods for MiniCpmV46Model {
-    fn estimate_vision_prefill_peak_bytes(
+impl crate::core::vision::DenseVlMethods for MiniCpmV46Model {
+    fn estimate_vision_prefill_tensor_bytes(
         &self,
         pixel_values: &[mlx::Array],
         grid_thw: &[(i32, i32, i32)],
@@ -694,10 +694,10 @@ impl crate::core::scheduler::DenseVlMethods for MiniCpmV46Model {
             .map_err(|_| anyhow!("MiniCPM vision merge height must be positive"))?;
         let merge_w = usize::try_from(config.merge_group.1)
             .map_err(|_| anyhow!("MiniCPM vision merge width must be positive"))?;
-        crate::core::scheduler::estimate_transformer_vision_prefill_peak_bytes(
+        crate::core::vision::estimate_transformer_vision_prefill_tensor_bytes(
             pixel_values,
             grid_thw,
-            crate::core::scheduler::VisionPrefillMemoryProfile {
+            crate::core::vision::VisionPrefillMemoryProfile {
                 hidden_size: usize::try_from(config.hidden_size)
                     .map_err(|_| anyhow!("MiniCPM vision hidden_size must be positive"))?,
                 intermediate_size: usize::try_from(config.intermediate_size)
@@ -805,7 +805,7 @@ impl crate::core::scheduler::DenseVlMethods for MiniCpmV46Model {
 mod tests {
     use super::*;
     use crate::core::model::Model;
-    use crate::core::scheduler::DenseVlMethods;
+    use crate::core::vision::DenseVlMethods;
 
     #[test]
     fn minicpmv46_model_implements_model_and_vl_traits() {

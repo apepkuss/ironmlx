@@ -41,12 +41,12 @@ use std::time::Duration;
 
 use base64::Engine;
 use ironmlx::core::model::Model;
-use ironmlx::core::scheduler::DenseVlMethods;
 use ironmlx::core::scheduler_autotune::{
     SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeProfile,
     SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
 };
 use ironmlx::core::server::{self, VisionInputConfig};
+use ironmlx::core::vision::DenseVlMethods;
 use ironmlx::core::{Loader, Tokenizer};
 
 // ---------------------------------------------------------------------------

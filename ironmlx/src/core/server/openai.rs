@@ -28,7 +28,6 @@ use crate::core::generated_output::{
 use crate::core::image_input::{ImageInputError, ImageRequestBudget};
 use crate::core::model::Model;
 use crate::core::sampler::Sampler;
-use crate::core::scheduler::DenseVlMethods;
 use crate::core::server::chat_format::render_and_encode;
 use crate::core::server::chat_format::{ChatMessage, Content, ContentPart};
 use crate::core::server::scheduler_actor::AdmitReply;
@@ -41,6 +40,7 @@ use crate::core::tool_calling::{
     validate_tool_definitions, AgentMessage, TemplateToolCall, ToolCall, ToolDefinition,
     ToolDialect,
 };
+use crate::core::vision::DenseVlMethods;
 
 use super::api_transport::ApiJson;
 use super::{AppState, Gemma4DrafterAppState, RequestAdmissionError, SamplingDefaults};

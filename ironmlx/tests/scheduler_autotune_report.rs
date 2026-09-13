@@ -1,4 +1,4 @@
-use ironmlx::core::memory_budget::ModelMeta;
+use ironmlx::core::model::ModelMeta;
 use ironmlx::core::scheduler_autotune::{
     build_scheduler_autotune_report, prompt_batch_limits_for_model, PromptBatchLimit,
     SchedulerAutotuneInput,

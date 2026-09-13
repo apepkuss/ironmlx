@@ -21,6 +21,9 @@ use tokio::sync::mpsc;
 
 use crate::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF;
 
+// Transitional public path; the trait is owned by the model-side vision module.
+pub use crate::core::vision::DenseVlMethods;
+
 /// Typed scheduler-side errors that need HTTP-level discrimination.
 ///
 /// Anyhow remains the default error type for internal Scheduler paths
@@ -448,182 +451,6 @@ struct Gemma4DrafterWindowPolicy {
     cfg: MtpSpeculativeConfig,
 }
 
-/// Extension trait for VL-capable models, intentionally NOT part of `core::Model`
-/// (per P5 spec §3.1 — VL methods stay inherent / extension-trait-only).
-///
-/// Implemented by Qwen3.5 variants that expose the scheduler-facing VL runtime
-/// surface. `Scheduler<M>` methods that call VL code paths (vision tower +
-/// cross-modal scatter + VL prefill) require `M: Model + DenseVlMethods`.
-pub trait DenseVlMethods {
-    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-    fn batched_prefill_vl(
-        &self,
-        input_ids: &mlx::Array,
-        position_ids: &mlx::Array,
-        attention_mask: &mlx::Array,
-        linear_attention_mask: &mlx::Array,
-        per_row_lens: &[i32],
-        per_row_pixel_values: &[Option<&[mlx::Array]>],
-        per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
-        image_token_id: i32,
-        cache: Option<&mut [crate::nn::LayerCache]>,
-        target: mlx::StreamOrDevice,
-    ) -> crate::Result<mlx::Array>;
-
-    /// Estimate the transient process-memory growth caused by constructing and
-    /// materializing the vision encoder graph for this exact payload. This is
-    /// mandatory for every scheduler-visible model: a multimodal request must
-    /// fail closed when the model cannot provide an architecture-aware bound.
-    fn estimate_vision_prefill_peak_bytes(
-        &self,
-        pixel_values: &[mlx::Array],
-        grid_thw: &[(i32, i32, i32)],
-    ) -> crate::Result<usize>;
-
-    fn compute_vision_embeds(
-        &self,
-        pixel_values: &[mlx::Array],
-        grid_thw: &[(i32, i32, i32)],
-        target: mlx::StreamOrDevice,
-    ) -> crate::Result<mlx::Array>;
-
-    #[allow(clippy::too_many_arguments)]
-    fn forward_vl_chunk(
-        &self,
-        input_ids: &mlx::Array,
-        position_ids: &mlx::Array,
-        per_row_lens: Option<&[i32]>,
-        decode_mask: Option<&mlx::Array>,
-        cache: Option<&mut [crate::nn::LayerCache]>,
-        vision_embeds_slice: Option<&mlx::Array>,
-        image_token_id: i32,
-        target: mlx::StreamOrDevice,
-    ) -> crate::Result<mlx::Array>;
-
-    #[allow(clippy::too_many_arguments)]
-    fn forward_vl_hidden(
-        &self,
-        input_ids: &mlx::Array,
-        position_ids: &mlx::Array,
-        per_row_lens: Option<&[i32]>,
-        decode_mask: Option<&mlx::Array>,
-        cache: Option<&mut [crate::nn::LayerCache]>,
-        vision_embeds_slice: Option<&mlx::Array>,
-        image_token_id: i32,
-        target: mlx::StreamOrDevice,
-    ) -> crate::Result<mlx::Array>;
-}
-
-/// Architecture parameters used by the common vision-prefill peak estimator.
-/// Model implementations remain responsible for selecting the correct values
-/// from their loaded vision configuration.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct VisionPrefillMemoryProfile {
-    pub hidden_size: usize,
-    pub intermediate_size: usize,
-    pub num_attention_heads: usize,
-    pub output_hidden_size: usize,
-    pub spatial_merge_area: usize,
-    pub activation_bytes: usize,
-}
-
-/// Process-footprint headroom for MLX command graphs, allocator churn, and
-/// Metal runtime state that are not represented by tensor-shape arithmetic.
-/// With the process cache governor capped at 512 MiB, real Qwen3.5, Gemma4,
-/// and MiniCPM-V-4.6 runs showed a maximum non-shape warm-run gap of about
-/// 1.02 GiB. 1.125 GiB keeps a deterministic safety margin without requiring
-/// a model warmup or a user-generated memory profile.
-pub(crate) const VISION_PREFILL_RUNTIME_OVERHEAD_BYTES: usize = 1_152 * 1024 * 1024;
-
-/// Conservative upper bound for a transformer-style vision tower. It covers
-/// payload storage, QKV/attention/MLP temporaries, positional intermediates,
-/// merged output retained for cross-modal scatter, a 1.5x tensor-graph safety
-/// margin, and the calibrated MLX runtime footprint above. Saturating
-/// arithmetic intentionally turns overflow into a fail-safe reservation
-/// rejection instead of underestimating the peak.
-pub(crate) fn estimate_transformer_vision_prefill_peak_bytes(
-    pixel_values: &[mlx::Array],
-    grid_thw: &[(i32, i32, i32)],
-    profile: VisionPrefillMemoryProfile,
-) -> crate::Result<usize> {
-    anyhow::ensure!(
-        !pixel_values.is_empty(),
-        "vision peak estimator requires non-empty pixel_values"
-    );
-    anyhow::ensure!(
-        !grid_thw.is_empty(),
-        "vision peak estimator requires non-empty grid_thw"
-    );
-    anyhow::ensure!(
-        profile.hidden_size > 0
-            && profile.intermediate_size > 0
-            && profile.num_attention_heads > 0
-            && profile.output_hidden_size > 0
-            && profile.spatial_merge_area > 0
-            && profile.activation_bytes > 0,
-        "vision peak estimator received an invalid model profile"
-    );
-
-    let payload_bytes = pixel_values.iter().fold(0usize, |total, pixels| {
-        total.saturating_add(pixels.size().saturating_mul(pixels.dtype().byte_size()))
-    });
-    let mut total_tokens = 0usize;
-    let mut attention_scores = 0usize;
-    for &(t, h, w) in grid_thw {
-        anyhow::ensure!(
-            t > 0 && h > 0 && w > 0,
-            "vision peak estimator requires positive grid dimensions, got ({t}, {h}, {w})"
-        );
-        let tokens = usize::try_from(t)
-            .unwrap_or(usize::MAX)
-            .saturating_mul(usize::try_from(h).unwrap_or(usize::MAX))
-            .saturating_mul(usize::try_from(w).unwrap_or(usize::MAX));
-        total_tokens = total_tokens.saturating_add(tokens);
-        attention_scores = attention_scores.saturating_add(
-            profile
-                .num_attention_heads
-                .saturating_mul(tokens)
-                .saturating_mul(tokens)
-                .saturating_mul(std::mem::size_of::<f32>()),
-        );
-    }
-
-    let hidden_activations = total_tokens
-        .saturating_mul(profile.hidden_size)
-        .saturating_mul(profile.activation_bytes);
-    let qkv_peak = hidden_activations.saturating_mul(4);
-    let attention_peak = qkv_peak.saturating_add(attention_scores);
-    let mlp_peak = total_tokens
-        .saturating_mul(profile.intermediate_size)
-        .saturating_mul(profile.activation_bytes)
-        .saturating_add(hidden_activations.saturating_mul(2));
-    let positional_peak = hidden_activations.saturating_mul(4);
-    let merged_tokens =
-        total_tokens.saturating_add(profile.spatial_merge_area - 1) / profile.spatial_merge_area;
-    let retained_output = merged_tokens
-        .saturating_mul(profile.output_hidden_size)
-        .saturating_mul(profile.activation_bytes);
-    let merger_peak = hidden_activations
-        .saturating_mul(profile.spatial_merge_area)
-        .saturating_add(retained_output);
-    let stage_peak = qkv_peak
-        .max(attention_peak)
-        .max(mlp_peak)
-        .max(positional_peak)
-        .max(merger_peak);
-    let unscaled = payload_bytes
-        .saturating_add(retained_output)
-        .saturating_add(stage_peak);
-    let estimated = unscaled
-        .saturating_add(unscaled / 2)
-        .saturating_add(VISION_PREFILL_RUNTIME_OVERHEAD_BYTES);
-    anyhow::ensure!(
-        estimated > 0 && estimated != usize::MAX,
-        "vision peak estimate overflowed or produced zero"
-    );
-    Ok(estimated)
-}
-
 fn reserve_vision_prefill<M: DenseVlMethods>(
     governor: Option<&crate::core::process_memory::SharedProcessMemoryGovernor>,
     model: &M,
@@ -643,7 +470,8 @@ fn reserve_vision_prefill<M: DenseVlMethods>(
         match (pixel_values, grid_thw) {
             (Some(pixel_values), Some(grid_thw)) if !grid_thw.is_empty() => {
                 let row_estimate = model
-                    .estimate_vision_prefill_peak_bytes(pixel_values, grid_thw)
+                    .estimate_vision_prefill_tensor_bytes(pixel_values, grid_thw)
+                    .and_then(crate::core::memory_budget::vision_prefill_reservation_bytes)
                     .with_context(|| {
                         format!("vision prefill peak estimation failed for row {row}")
                     })?;
@@ -706,138 +534,6 @@ pub(crate) fn reserve_vision_prefill_for_request<M: DenseVlMethods>(
     grid_thw: Option<&[(i32, i32, i32)]>,
 ) -> Result<Option<crate::core::process_memory::MemoryReservation>> {
     reserve_vision_prefill(governor, model, &[pixel_values], &[grid_thw])
-}
-
-impl DenseVlMethods for crate::models::qwen3_5::Qwen35Model {
-    fn batched_prefill_vl(
-        &self,
-        input_ids: &mlx::Array,
-        position_ids: &mlx::Array,
-        attention_mask: &mlx::Array,
-        linear_attention_mask: &mlx::Array,
-        per_row_lens: &[i32],
-        per_row_pixel_values: &[Option<&[mlx::Array]>],
-        per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
-        image_token_id: i32,
-        cache: Option<&mut [crate::nn::LayerCache]>,
-        target: mlx::StreamOrDevice,
-    ) -> crate::Result<mlx::Array> {
-        crate::models::qwen3_5::Qwen35Model::batched_prefill_vl(
-            self,
-            input_ids,
-            position_ids,
-            attention_mask,
-            linear_attention_mask,
-            per_row_lens,
-            per_row_pixel_values,
-            per_row_grid_thw,
-            image_token_id,
-            cache,
-            target,
-        )
-    }
-
-    fn estimate_vision_prefill_peak_bytes(
-        &self,
-        pixel_values: &[mlx::Array],
-        grid_thw: &[(i32, i32, i32)],
-    ) -> crate::Result<usize> {
-        anyhow::ensure!(
-            pixel_values.len() == grid_thw.len(),
-            "Qwen35Model vision peak estimator requires pixel_values.len()={} to equal grid_thw.len()={}",
-            pixel_values.len(),
-            grid_thw.len()
-        );
-        anyhow::ensure!(
-            self.vision_loaded(),
-            "Qwen35Model vision peak estimator requires a loaded vision tower"
-        );
-        let config =
-            self.config().vision_config.as_ref().ok_or_else(|| {
-                anyhow!("Qwen35Model vision peak estimator requires vision_config")
-            })?;
-        let merge = usize::try_from(config.spatial_merge_size)
-            .map_err(|_| anyhow!("Qwen35Model spatial_merge_size must be positive"))?;
-        estimate_transformer_vision_prefill_peak_bytes(
-            pixel_values,
-            grid_thw,
-            VisionPrefillMemoryProfile {
-                hidden_size: usize::try_from(config.hidden_size)
-                    .map_err(|_| anyhow!("Qwen35Model vision hidden_size must be positive"))?,
-                intermediate_size: usize::try_from(config.intermediate_size).map_err(|_| {
-                    anyhow!("Qwen35Model vision intermediate_size must be positive")
-                })?,
-                num_attention_heads: usize::try_from(config.num_heads)
-                    .map_err(|_| anyhow!("Qwen35Model vision num_heads must be positive"))?,
-                output_hidden_size: usize::try_from(config.out_hidden_size)
-                    .map_err(|_| anyhow!("Qwen35Model vision out_hidden_size must be positive"))?,
-                spatial_merge_area: merge.saturating_mul(merge),
-                activation_bytes: self.hidden_dtype().byte_size(),
-            },
-        )
-    }
-
-    fn compute_vision_embeds(
-        &self,
-        pixel_values: &[mlx::Array],
-        grid_thw: &[(i32, i32, i32)],
-        target: mlx::StreamOrDevice,
-    ) -> crate::Result<mlx::Array> {
-        crate::models::qwen3_5::Qwen35Model::compute_vision_embeds(
-            self,
-            pixel_values,
-            grid_thw,
-            target,
-        )
-    }
-
-    fn forward_vl_chunk(
-        &self,
-        input_ids: &mlx::Array,
-        position_ids: &mlx::Array,
-        per_row_lens: Option<&[i32]>,
-        decode_mask: Option<&mlx::Array>,
-        cache: Option<&mut [crate::nn::LayerCache]>,
-        vision_embeds_slice: Option<&mlx::Array>,
-        image_token_id: i32,
-        target: mlx::StreamOrDevice,
-    ) -> crate::Result<mlx::Array> {
-        crate::models::qwen3_5::Qwen35Model::forward_vl_chunk(
-            self,
-            input_ids,
-            position_ids,
-            per_row_lens,
-            decode_mask,
-            cache,
-            vision_embeds_slice,
-            image_token_id,
-            target,
-        )
-    }
-
-    fn forward_vl_hidden(
-        &self,
-        input_ids: &mlx::Array,
-        position_ids: &mlx::Array,
-        per_row_lens: Option<&[i32]>,
-        decode_mask: Option<&mlx::Array>,
-        cache: Option<&mut [crate::nn::LayerCache]>,
-        vision_embeds_slice: Option<&mlx::Array>,
-        image_token_id: i32,
-        target: mlx::StreamOrDevice,
-    ) -> crate::Result<mlx::Array> {
-        crate::models::qwen3_5::Qwen35Model::forward_vl_hidden(
-            self,
-            input_ids,
-            position_ids,
-            per_row_lens,
-            decode_mask,
-            cache,
-            vision_embeds_slice,
-            image_token_id,
-            target,
-        )
-    }
 }
 
 fn maybe_build_decode_mask(mask_row_lens: &[i32], max_real_len: i32) -> Result<Option<Array>> {
@@ -5397,7 +5093,7 @@ pub struct Scheduler<M: Model> {
     pub(crate) budget_state: crate::core::memory_budget::BudgetState,
     /// Snapshot of the model's memory-budget metadata, used to compute
     /// per-request KV byte cost in admit. (B1-p2.5)
-    pub(crate) meta: crate::core::memory_budget::ModelMeta,
+    pub(crate) meta: crate::core::model::ModelMeta,
     /// Count of admits rejected by the memory budget gate. Used by T3
     /// /healthz. (B1-p2.5)
     pub(crate) memory_budget_exceeded_count: std::sync::Arc<std::sync::atomic::AtomicU64>,
@@ -5463,7 +5159,7 @@ impl<M: Model> Scheduler<M> {
     pub fn new(
         b_max: usize,
         effective_cap_max: usize,
-        meta: crate::core::memory_budget::ModelMeta,
+        meta: crate::core::model::ModelMeta,
     ) -> Result<Self, crate::core::memory_budget::MemoryBudgetError> {
         let budget_state =
             crate::core::memory_budget::validate_startup_budget(b_max, effective_cap_max, &meta)?;
@@ -5491,7 +5187,7 @@ impl<M: Model> Scheduler<M> {
         effective_cap_max: usize,
         budget_state: crate::core::memory_budget::BudgetState,
         memory_budget_exceeded_count: std::sync::Arc<std::sync::atomic::AtomicU64>,
-        meta: crate::core::memory_budget::ModelMeta,
+        meta: crate::core::model::ModelMeta,
     ) -> Result<Self, crate::core::memory_budget::MemoryBudgetError> {
         let mut slots = Vec::with_capacity(b_max);
         for _ in 0..b_max {
@@ -20574,58 +20270,6 @@ mod tests {
     }
 
     #[test]
-    fn transformer_vision_peak_estimator_is_conservative_and_deterministic() {
-        let pixels: Array = (&[0.0_f32; 16][..], &[1_i32, 16][..])
-            .try_into()
-            .expect("pixel payload");
-        let estimate = estimate_transformer_vision_prefill_peak_bytes(
-            &[pixels],
-            &[(1, 2, 2)],
-            VisionPrefillMemoryProfile {
-                hidden_size: 8,
-                intermediate_size: 16,
-                num_attention_heads: 2,
-                output_hidden_size: 8,
-                spatial_merge_area: 4,
-                activation_bytes: 2,
-            },
-        )
-        .expect("valid estimate");
-
-        assert_eq!(estimate, VISION_PREFILL_RUNTIME_OVERHEAD_BYTES + 696);
-        let concatenated_pixels: Array = (&[0.0_f32; 32][..], &[2_i32, 16][..])
-            .try_into()
-            .expect("concatenated pixel payload");
-        let multi_grid_estimate = estimate_transformer_vision_prefill_peak_bytes(
-            &[concatenated_pixels],
-            &[(1, 2, 2), (1, 2, 2)],
-            VisionPrefillMemoryProfile {
-                hidden_size: 8,
-                intermediate_size: 16,
-                num_attention_heads: 2,
-                output_hidden_size: 8,
-                spatial_merge_area: 4,
-                activation_bytes: 2,
-            },
-        )
-        .expect("one concatenated tensor may describe multiple image grids");
-        assert!(multi_grid_estimate > estimate);
-        assert!(estimate_transformer_vision_prefill_peak_bytes(
-            &[],
-            &[],
-            VisionPrefillMemoryProfile {
-                hidden_size: 8,
-                intermediate_size: 16,
-                num_attention_heads: 2,
-                output_hidden_size: 8,
-                spatial_merge_area: 4,
-                activation_bytes: 2,
-            },
-        )
-        .is_err());
-    }
-
-    #[test]
     #[serial(mlx_metal)]
     fn vision_prefill_reservation_is_fail_safe_and_raii_balanced() {
         use crate::core::process_memory::{
@@ -20694,10 +20338,12 @@ mod tests {
         )
         .expect("reservation")
         .expect("visual payload reserves memory");
-        assert_eq!(reservation.bytes(), 17 + cache_growth_liability);
+        let vision_bytes =
+            crate::core::memory_budget::vision_prefill_reservation_bytes(17).unwrap();
+        assert_eq!(reservation.bytes(), vision_bytes + cache_growth_liability);
         assert_eq!(
             governor.snapshot().reserved_bytes,
-            17 + cache_growth_liability
+            vision_bytes + cache_growth_liability
         );
         drop(reservation);
         assert_eq!(governor.snapshot().reserved_bytes, 0);
@@ -21012,7 +20658,7 @@ mod tests {
                 .map_err(|e| anyhow::anyhow!("fake hidden failed: {e:?}"))
         }
 
-        fn model_meta(&self) -> crate::core::memory_budget::ModelMeta {
+        fn model_meta(&self) -> crate::core::model::ModelMeta {
             crate::core::memory_budget::test_meta_qwen35()
         }
 
@@ -21038,7 +20684,7 @@ mod tests {
             unreachable!("Finished-phase unit tests are text-only")
         }
 
-        fn estimate_vision_prefill_peak_bytes(
+        fn estimate_vision_prefill_tensor_bytes(
             &self,
             _pixel_values: &[mlx::Array],
             _grid_thw: &[(i32, i32, i32)],
@@ -21239,7 +20885,7 @@ mod tests {
                 .map_err(|e| anyhow::anyhow!("fake hidden failed: {e:?}"))
         }
 
-        fn model_meta(&self) -> crate::core::memory_budget::ModelMeta {
+        fn model_meta(&self) -> crate::core::model::ModelMeta {
             crate::core::memory_budget::test_meta_qwen35()
         }
 
@@ -21275,7 +20921,7 @@ mod tests {
             fake_logits_for_batch(batch)
         }
 
-        fn estimate_vision_prefill_peak_bytes(
+        fn estimate_vision_prefill_tensor_bytes(
             &self,
             pixel_values: &[mlx::Array],
             grid_thw: &[(i32, i32, i32)],
@@ -21519,7 +21165,7 @@ mod tests {
                 .map_err(|e| anyhow::anyhow!("fake hidden failed: {e:?}"))
         }
 
-        fn model_meta(&self) -> crate::core::memory_budget::ModelMeta {
+        fn model_meta(&self) -> crate::core::model::ModelMeta {
             crate::core::memory_budget::test_meta_qwen35()
         }
 
@@ -21558,7 +21204,7 @@ mod tests {
             fake_logits_for_batch(input_ids.shape().as_slice()[0])
         }
 
-        fn estimate_vision_prefill_peak_bytes(
+        fn estimate_vision_prefill_tensor_bytes(
             &self,
             pixel_values: &[mlx::Array],
             grid_thw: &[(i32, i32, i32)],
@@ -21982,7 +21628,7 @@ mod tests {
             }
         }
 
-        fn model_meta(&self) -> crate::core::memory_budget::ModelMeta {
+        fn model_meta(&self) -> crate::core::model::ModelMeta {
             crate::core::memory_budget::test_meta_qwen35()
         }
 
@@ -22024,7 +21670,7 @@ mod tests {
             fake_logits_for_token_sequence(&[self.first_token])
         }
 
-        fn estimate_vision_prefill_peak_bytes(
+        fn estimate_vision_prefill_tensor_bytes(
             &self,
             pixel_values: &[mlx::Array],
             grid_thw: &[(i32, i32, i32)],

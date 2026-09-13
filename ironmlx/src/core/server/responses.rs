@@ -35,12 +35,12 @@ use crate::core::generated_output::{
 };
 use crate::core::model::Model;
 use crate::core::native_output::NativeOutputDecoderConfig;
-use crate::core::scheduler::DenseVlMethods;
 use crate::core::server::chat_format::{
     ChatFunctionCall, ChatMessage, ChatToolCall, Content, ContentPart, ImageUrl,
 };
 use crate::core::server::scheduler_actor::AdmitReply;
 use crate::core::tool_calling::{ToolCall, ToolDefinition};
+use crate::core::vision::DenseVlMethods;
 
 use super::api_transport::ApiJson;
 use super::structured_output::{coalesce_system_messages, StructuredOutputFormat};

@@ -38,7 +38,7 @@
 use anyhow::{anyhow, Context};
 use mlx::{Array, Dtype, StreamOrDevice};
 
-use crate::core::memory_budget::ModelMeta;
+use crate::core::model::ModelMeta;
 use crate::core::{Loader, Model};
 use crate::nn::{Embedding, LayerCache, Linear, RmsNorm};
 use crate::Result;
@@ -570,7 +570,7 @@ mod tests {
     }
 }
 
-impl crate::core::scheduler::DenseVlMethods for Glm4MoeLiteModel {
+impl crate::core::vision::DenseVlMethods for Glm4MoeLiteModel {
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn batched_prefill_vl(
         &self,
@@ -590,7 +590,7 @@ impl crate::core::scheduler::DenseVlMethods for Glm4MoeLiteModel {
         ))
     }
 
-    fn estimate_vision_prefill_peak_bytes(
+    fn estimate_vision_prefill_tensor_bytes(
         &self,
         _pixel_values: &[mlx::Array],
         _grid_thw: &[(i32, i32, i32)],

@@ -2747,7 +2747,7 @@ impl EngineVariant {
 
 fn causal_pending_requests<M>(state: &AppState<M>) -> usize
 where
-    M: Model + crate::core::scheduler::DenseVlMethods + Send + 'static,
+    M: Model + crate::core::vision::DenseVlMethods + Send + 'static,
 {
     let snapshot = state.health_collector.snapshot();
     let model_locked = usize::from(state.model.try_lock().is_err());
@@ -3178,7 +3178,7 @@ async fn build_plain_or_prompt_lookup_causal_state<M>(
     vision_input: Option<VisionInputConfig>,
 ) -> Result<AppState<M>>
 where
-    M: Model + crate::core::scheduler::DenseVlMethods + Send + 'static,
+    M: Model + crate::core::vision::DenseVlMethods + Send + 'static,
 {
     if let Some(prompt_lookup) = prompt_lookup {
         build_prompt_lookup_causal_state(
@@ -3220,7 +3220,7 @@ async fn build_plain_causal_state<M>(
     vision_input: Option<VisionInputConfig>,
 ) -> Result<AppState<M>>
 where
-    M: Model + crate::core::scheduler::DenseVlMethods + Send + 'static,
+    M: Model + crate::core::vision::DenseVlMethods + Send + 'static,
 {
     let profile = model
         .scheduler_runtime_profile
@@ -3262,7 +3262,7 @@ async fn build_prompt_lookup_causal_state<M>(
     vision_input: Option<VisionInputConfig>,
 ) -> Result<AppState<M>>
 where
-    M: Model + crate::core::scheduler::DenseVlMethods + Send + 'static,
+    M: Model + crate::core::vision::DenseVlMethods + Send + 'static,
 {
     let profile = model
         .scheduler_runtime_profile
@@ -3306,7 +3306,7 @@ async fn build_mtp_causal_state<M>(
     vision_input: Option<VisionInputConfig>,
 ) -> Result<AppState<M>>
 where
-    M: Model + crate::core::scheduler::DenseVlMethods + MtpSpeculativeModel + Send + 'static,
+    M: Model + crate::core::vision::DenseVlMethods + MtpSpeculativeModel + Send + 'static,
     M::MtpHead: Send + 'static,
 {
     let mtp_loader = Loader::open_mtp(&mtp_config.model_dir)

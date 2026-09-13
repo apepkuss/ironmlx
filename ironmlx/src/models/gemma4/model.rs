@@ -3,7 +3,7 @@ use mlx::{Array, Dtype, StreamOrDevice};
 use std::time::Instant;
 
 use crate::core::cache::{KVCache, TurboQuantKVBits};
-use crate::core::memory_budget::ModelMeta;
+use crate::core::model::ModelMeta;
 use crate::core::{Loader, Model, QuantMeta, QuantMode};
 use crate::nn::LayerCache;
 use crate::Result;
@@ -945,7 +945,7 @@ impl Model for Gemma4Model {
     }
 }
 
-impl crate::core::scheduler::DenseVlMethods for Gemma4Model {
+impl crate::core::vision::DenseVlMethods for Gemma4Model {
     fn batched_prefill_vl(
         &self,
         input_ids: &Array,
@@ -1037,7 +1037,7 @@ impl crate::core::scheduler::DenseVlMethods for Gemma4Model {
         Ok(logits)
     }
 
-    fn estimate_vision_prefill_peak_bytes(
+    fn estimate_vision_prefill_tensor_bytes(
         &self,
         pixel_values: &[Array],
         grid_thw: &[(i32, i32, i32)],
@@ -1134,9 +1134,7 @@ impl crate::core::scheduler::DenseVlMethods for Gemma4Model {
             let unscaled = payload_bytes
                 .saturating_add(retained_output)
                 .saturating_add(stage_peak);
-            let estimated = unscaled
-                .saturating_add(unscaled / 2)
-                .saturating_add(crate::core::scheduler::VISION_PREFILL_RUNTIME_OVERHEAD_BYTES);
+            let estimated = unscaled;
             anyhow::ensure!(
                 estimated > 0 && estimated != usize::MAX,
                 "Gemma4 unified vision peak estimate overflowed or produced zero"
@@ -1145,10 +1143,10 @@ impl crate::core::scheduler::DenseVlMethods for Gemma4Model {
         }
         let pool = usize::try_from(config.pooling_kernel_size)
             .map_err(|_| anyhow!("Gemma4 vision pooling_kernel_size must be positive"))?;
-        crate::core::scheduler::estimate_transformer_vision_prefill_peak_bytes(
+        crate::core::vision::estimate_transformer_vision_prefill_tensor_bytes(
             pixel_values,
             grid_thw,
-            crate::core::scheduler::VisionPrefillMemoryProfile {
+            crate::core::vision::VisionPrefillMemoryProfile {
                 hidden_size: usize::try_from(config.hidden_size)
                     .map_err(|_| anyhow!("Gemma4 vision hidden_size must be positive"))?,
                 intermediate_size: usize::try_from(config.intermediate_size)

@@ -5,7 +5,7 @@ use common::constrained::{
 };
 use ironmlx::core::constrained::{ToolChoiceConstraint, ToolConstraintOptions};
 use ironmlx::core::generate::{GenerateRequest, IMAGE_TOKEN_ID};
-use ironmlx::core::scheduler::DenseVlMethods;
+use ironmlx::core::vision::DenseVlMethods;
 use ironmlx::core::{Model, Sampler, Scheduler};
 use ironmlx::nn::LayerCache;
 use mlx::{Array, Dtype, StreamOrDevice};
@@ -73,7 +73,7 @@ impl Model for ConstraintBatchModel {
         Ok(Array::zeros((dims[0], dims[1], 4_i32), Dtype::Float32)?)
     }
 
-    fn model_meta(&self) -> ironmlx::core::memory_budget::ModelMeta {
+    fn model_meta(&self) -> ironmlx::core::model::ModelMeta {
         ironmlx::core::memory_budget::test_meta_qwen35()
     }
 
@@ -99,7 +99,7 @@ impl DenseVlMethods for ConstraintBatchModel {
         unreachable!("constraint batch test is text-only")
     }
 
-    fn estimate_vision_prefill_peak_bytes(
+    fn estimate_vision_prefill_tensor_bytes(
         &self,
         _pixel_values: &[Array],
         _grid_thw: &[(i32, i32, i32)],

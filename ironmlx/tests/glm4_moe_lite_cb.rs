@@ -44,7 +44,7 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 
 use ironmlx::core::generate::GenerateRequest;
-use ironmlx::core::memory_budget::ModelMeta;
+use ironmlx::core::model::ModelMeta;
 use ironmlx::core::sampler::Sampler;
 use ironmlx::core::scheduler::StepEvent;
 use ironmlx::core::server::scheduler_actor::{

@@ -24,6 +24,7 @@ pub(crate) mod speculative_qualification;
 pub mod tokenizer;
 pub mod tool_calling;
 mod tool_prompt_cache;
+pub mod vision;
 pub mod weights;
 
 pub use cache::KVCache;

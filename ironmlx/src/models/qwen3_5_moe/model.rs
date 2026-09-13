@@ -6,7 +6,7 @@ use anyhow::{anyhow, Context};
 use mlx::{Array, Dtype, StreamOrDevice};
 
 use crate::core::cache::{GatedDeltaCache, KVCache, MtpCache};
-use crate::core::memory_budget::ModelMeta;
+use crate::core::model::ModelMeta;
 use crate::core::{Loader, Model};
 use crate::models::vision::{VisionConfig, VisionTower};
 use crate::nn::{AttnKind, LayerCache, Linear, MtpStepOutput};
@@ -827,7 +827,7 @@ impl Model for Qwen35MoeModel {
 /// Delegate the scheduler's VL extension trait to MoE's inherent runtime
 /// methods. The trait name is historical; both dense and MoE Qwen3.5 variants
 /// use the same scheduler-facing VL surface.
-impl crate::core::scheduler::DenseVlMethods for Qwen35MoeModel {
+impl crate::core::vision::DenseVlMethods for Qwen35MoeModel {
     fn batched_prefill_vl(
         &self,
         input_ids: &mlx::Array,
@@ -876,7 +876,7 @@ impl crate::core::scheduler::DenseVlMethods for Qwen35MoeModel {
         )
     }
 
-    fn estimate_vision_prefill_peak_bytes(
+    fn estimate_vision_prefill_tensor_bytes(
         &self,
         pixel_values: &[mlx::Array],
         grid_thw: &[(i32, i32, i32)],
@@ -890,10 +890,10 @@ impl crate::core::scheduler::DenseVlMethods for Qwen35MoeModel {
         })?;
         let merge = usize::try_from(config.spatial_merge_size)
             .map_err(|_| anyhow!("Qwen35MoeModel spatial_merge_size must be positive"))?;
-        crate::core::scheduler::estimate_transformer_vision_prefill_peak_bytes(
+        crate::core::vision::estimate_transformer_vision_prefill_tensor_bytes(
             pixel_values,
             grid_thw,
-            crate::core::scheduler::VisionPrefillMemoryProfile {
+            crate::core::vision::VisionPrefillMemoryProfile {
                 hidden_size: usize::try_from(config.hidden_size)
                     .map_err(|_| anyhow!("Qwen35MoeModel vision hidden_size must be positive"))?,
                 intermediate_size: usize::try_from(config.intermediate_size).map_err(|_| {

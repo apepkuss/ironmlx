@@ -17,7 +17,7 @@ use crate::core::generate::{
     slice_pos_ids_axis2, slice_vision_embeds_rows, GenerateEvent, GenerateRequest,
 };
 use crate::core::sampler::draw_uniforms;
-use crate::core::scheduler::{paged_prefix_fingerprint_for_request, DenseVlMethods};
+use crate::core::scheduler::paged_prefix_fingerprint_for_request;
 use crate::core::speculative::{
     add_elapsed_us, elapsed_us_since, resolve_exact_deterministic_target_logits,
     resolve_speculative_tokens, sample_draft_logits_position,
@@ -27,6 +27,7 @@ use crate::core::speculative::{
     MtpSpeculativeConfig, MtpSpeculativeStats,
 };
 use crate::core::tokenizer::{DecodeStream, Tokenizer};
+use crate::core::vision::DenseVlMethods;
 use crate::core::{Loader, Model};
 use crate::nn::{
     enable_paged_hot_cold_tiering_caches, enable_paged_kv_caches, enable_turboquant_kv_caches,

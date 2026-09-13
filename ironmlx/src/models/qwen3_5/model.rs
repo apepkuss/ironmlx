@@ -4,6 +4,9 @@ use anyhow::{anyhow, Context};
 use mlx::{Array, Dtype, StreamOrDevice};
 
 use crate::core::cache::{GatedDeltaCache, KVCache, MtpCache};
+use crate::core::vision::{
+    estimate_transformer_vision_prefill_tensor_bytes, DenseVlMethods, VisionPrefillMemoryProfile,
+};
 use crate::core::Loader;
 use crate::models::vision::VisionTower;
 use crate::nn::{AttnKind, LayerCache, Linear, Mtp, MtpStepOutput};
@@ -211,14 +214,14 @@ impl Qwen35Model {
 
     /// Extract memory-budget-relevant model attributes for Scheduler::new
     /// (B1-p2.5 G1).
-    pub fn model_meta(&self) -> crate::core::memory_budget::ModelMeta {
+    pub fn model_meta(&self) -> crate::core::model::ModelMeta {
         let cfg = self.config();
         let spatial_merge_size = cfg
             .vision_config
             .as_ref()
             .map(|vc| vc.spatial_merge_size)
             .unwrap_or(2);
-        crate::core::memory_budget::ModelMeta {
+        crate::core::model::ModelMeta {
             num_hidden_layers: cfg.num_hidden_layers,
             num_attention_heads: cfg.num_attention_heads,
             num_key_value_heads: cfg.num_key_value_heads,
@@ -1101,7 +1104,7 @@ impl crate::core::model::Model for Qwen35Model {
         )
     }
 
-    fn model_meta(&self) -> crate::core::memory_budget::ModelMeta {
+    fn model_meta(&self) -> crate::core::model::ModelMeta {
         Qwen35Model::model_meta(self)
     }
 
@@ -1304,6 +1307,133 @@ fn qwen35_dflash2_target_cache_cost(
     crate::models::dflash2::DFlash2TargetCacheCost {
         bytes_per_token,
         fixed_bytes_per_sequence,
+    }
+}
+
+impl DenseVlMethods for Qwen35Model {
+    fn batched_prefill_vl(
+        &self,
+        input_ids: &mlx::Array,
+        position_ids: &mlx::Array,
+        attention_mask: &mlx::Array,
+        linear_attention_mask: &mlx::Array,
+        per_row_lens: &[i32],
+        per_row_pixel_values: &[Option<&[mlx::Array]>],
+        per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
+        image_token_id: i32,
+        cache: Option<&mut [crate::nn::LayerCache]>,
+        target: mlx::StreamOrDevice,
+    ) -> crate::Result<mlx::Array> {
+        Qwen35Model::batched_prefill_vl(
+            self,
+            input_ids,
+            position_ids,
+            attention_mask,
+            linear_attention_mask,
+            per_row_lens,
+            per_row_pixel_values,
+            per_row_grid_thw,
+            image_token_id,
+            cache,
+            target,
+        )
+    }
+
+    fn estimate_vision_prefill_tensor_bytes(
+        &self,
+        pixel_values: &[mlx::Array],
+        grid_thw: &[(i32, i32, i32)],
+    ) -> crate::Result<usize> {
+        anyhow::ensure!(
+            pixel_values.len() == grid_thw.len(),
+            "Qwen35Model vision peak estimator requires pixel_values.len()={} to equal grid_thw.len()={}",
+            pixel_values.len(),
+            grid_thw.len()
+        );
+        anyhow::ensure!(
+            self.vision_loaded(),
+            "Qwen35Model vision peak estimator requires a loaded vision tower"
+        );
+        let config =
+            self.config().vision_config.as_ref().ok_or_else(|| {
+                anyhow!("Qwen35Model vision peak estimator requires vision_config")
+            })?;
+        let merge = usize::try_from(config.spatial_merge_size)
+            .map_err(|_| anyhow!("Qwen35Model spatial_merge_size must be positive"))?;
+        estimate_transformer_vision_prefill_tensor_bytes(
+            pixel_values,
+            grid_thw,
+            VisionPrefillMemoryProfile {
+                hidden_size: usize::try_from(config.hidden_size)
+                    .map_err(|_| anyhow!("Qwen35Model vision hidden_size must be positive"))?,
+                intermediate_size: usize::try_from(config.intermediate_size).map_err(|_| {
+                    anyhow!("Qwen35Model vision intermediate_size must be positive")
+                })?,
+                num_attention_heads: usize::try_from(config.num_heads)
+                    .map_err(|_| anyhow!("Qwen35Model vision num_heads must be positive"))?,
+                output_hidden_size: usize::try_from(config.out_hidden_size)
+                    .map_err(|_| anyhow!("Qwen35Model vision out_hidden_size must be positive"))?,
+                spatial_merge_area: merge.saturating_mul(merge),
+                activation_bytes: self.hidden_dtype().byte_size(),
+            },
+        )
+    }
+
+    fn compute_vision_embeds(
+        &self,
+        pixel_values: &[mlx::Array],
+        grid_thw: &[(i32, i32, i32)],
+        target: mlx::StreamOrDevice,
+    ) -> crate::Result<mlx::Array> {
+        Qwen35Model::compute_vision_embeds(self, pixel_values, grid_thw, target)
+    }
+
+    fn forward_vl_chunk(
+        &self,
+        input_ids: &mlx::Array,
+        position_ids: &mlx::Array,
+        per_row_lens: Option<&[i32]>,
+        decode_mask: Option<&mlx::Array>,
+        cache: Option<&mut [crate::nn::LayerCache]>,
+        vision_embeds_slice: Option<&mlx::Array>,
+        image_token_id: i32,
+        target: mlx::StreamOrDevice,
+    ) -> crate::Result<mlx::Array> {
+        Qwen35Model::forward_vl_chunk(
+            self,
+            input_ids,
+            position_ids,
+            per_row_lens,
+            decode_mask,
+            cache,
+            vision_embeds_slice,
+            image_token_id,
+            target,
+        )
+    }
+
+    fn forward_vl_hidden(
+        &self,
+        input_ids: &mlx::Array,
+        position_ids: &mlx::Array,
+        per_row_lens: Option<&[i32]>,
+        decode_mask: Option<&mlx::Array>,
+        cache: Option<&mut [crate::nn::LayerCache]>,
+        vision_embeds_slice: Option<&mlx::Array>,
+        image_token_id: i32,
+        target: mlx::StreamOrDevice,
+    ) -> crate::Result<mlx::Array> {
+        Qwen35Model::forward_vl_hidden(
+            self,
+            input_ids,
+            position_ids,
+            per_row_lens,
+            decode_mask,
+            cache,
+            vision_embeds_slice,
+            image_token_id,
+            target,
+        )
     }
 }
 
@@ -1872,6 +2002,10 @@ mod tests {
     #[ignore] // real-model heavy
     fn forward_vl_text_only_matches_forward_on() {
         use crate::core::generate::build_position_ids;
+        use crate::core::vision::{
+            estimate_transformer_vision_prefill_tensor_bytes, DenseVlMethods,
+            VisionPrefillMemoryProfile,
+        };
         use crate::core::Loader;
 
         let env = std::env::var("QWEN35_MODEL").expect("QWEN35_MODEL not set");
@@ -1935,6 +2069,10 @@ mod tests {
         use crate::core::generate::{
             build_batch_attention_mask, build_batch_linear_mask, build_position_ids_batched,
             IMAGE_TOKEN_ID,
+        };
+        use crate::core::vision::{
+            estimate_transformer_vision_prefill_tensor_bytes, DenseVlMethods,
+            VisionPrefillMemoryProfile,
         };
         use crate::core::Loader;
 
@@ -2037,6 +2175,10 @@ mod tests {
         use crate::core::generate::{
             build_batch_attention_mask, build_batch_linear_mask, build_position_ids_vl,
             build_position_ids_vl_batched, IMAGE_TOKEN_ID,
+        };
+        use crate::core::vision::{
+            estimate_transformer_vision_prefill_tensor_bytes, DenseVlMethods,
+            VisionPrefillMemoryProfile,
         };
         use crate::core::Loader;
 

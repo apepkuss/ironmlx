@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::core::memory_budget::{kv_bytes_per_token, ModelMeta};
+use crate::core::memory_budget::kv_bytes_per_token;
+use crate::core::model::ModelMeta;
 
 const GIB: usize = 1024 * 1024 * 1024;
 const MIB: usize = 1024 * 1024;

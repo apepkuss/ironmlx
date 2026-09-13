@@ -14,12 +14,12 @@ use ironmlx::core::cache::{
     ActiveKvOffloadStatus, PagedPrefixCacheConfig, TurboQuantKVBits,
     DEFAULT_PAGED_PREFIX_CACHE_BLOCK_SIZE,
 };
-use ironmlx::core::scheduler::DenseVlMethods;
 use ironmlx::core::speculative::{
     qwen_fixed_mtp_draft_depth_scope, resolve_mtp_draft_tokens, MtpDraftCapObservation,
     MtpDraftTokensArg, MtpSpeculativeConfig, MtpSpeculativeModel, MtpSpeculativeStats,
     MtpTextGenerationStream,
 };
+use ironmlx::core::vision::DenseVlMethods;
 use ironmlx::core::{GenerateRequest, GenerationStream, Loader, Model, Sampler, Scheduler};
 use ironmlx::models::gemma4::{
     Gemma4AssistantModel, Gemma4DrafterGenerationStream, Gemma4DrafterTraceWindow,

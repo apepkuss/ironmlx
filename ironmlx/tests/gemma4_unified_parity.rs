@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use ironmlx::core::generate::build_position_ids;
-use ironmlx::core::scheduler::DenseVlMethods;
+use ironmlx::core::vision::DenseVlMethods;
 use ironmlx::core::{Loader, Model};
 use ironmlx::models::gemma4::image_processor::preprocess;
 use ironmlx::models::gemma4::{Gemma4Config, Gemma4Model};

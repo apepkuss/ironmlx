@@ -3773,7 +3773,7 @@ mod tests {
                 .map_err(anyhow::Error::from)
         }
 
-        fn model_meta(&self) -> crate::core::memory_budget::ModelMeta {
+        fn model_meta(&self) -> crate::core::model::ModelMeta {
             crate::core::memory_budget::test_meta_qwen35()
         }
 

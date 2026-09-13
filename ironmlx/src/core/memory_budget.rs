@@ -10,31 +10,33 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
 
-#[derive(Debug, Clone, Copy)]
-pub struct ModelMeta {
-    pub num_hidden_layers: i32,
-    pub num_attention_heads: i32,
-    pub num_key_value_heads: i32,
-    pub hidden_size: i32,
-    pub head_dim: Option<i32>,
-    pub weight_bytes: usize,
-    /// Maximum sequence length the model supports. Used by `serve()` for
-    /// computing `effective_cap_max = min(--max-cache-cap CLI, max_position_embeddings)`.
-    /// P5a-T5: added here so `serve<M>()` can read it from the `Model` trait
-    /// without requiring a concrete model-specific `config()` method.
-    pub max_position_embeddings: i32,
-    /// VL vision spatial merge size (= VisionConfig.spatial_merge_size).
-    /// Defaults to 2 for text-only models (unused when no images present).
-    /// P5a-T5: carried here so generic HTTP handlers don't need a
-    /// model-specific `config()` method.
-    pub spatial_merge_size: i32,
-}
+// Transitional public path; metadata is owned by the model interface.
+pub use crate::core::model::ModelMeta;
 
-impl ModelMeta {
-    pub fn effective_head_dim(&self) -> i32 {
-        self.head_dim
-            .unwrap_or(self.hidden_size / self.num_attention_heads)
-    }
+/// Process-footprint headroom for MLX command graphs, allocator churn, and
+/// Metal runtime state that are not represented by tensor-shape arithmetic.
+/// With the process cache governor capped at 512 MiB, real Qwen3.5, Gemma4,
+/// and MiniCPM-V-4.6 runs showed a maximum non-shape warm-run gap of about
+/// 1.02 GiB. 1.125 GiB keeps a deterministic safety margin without requiring
+/// a model warmup or a user-generated memory profile.
+pub(crate) const VISION_PREFILL_RUNTIME_OVERHEAD_BYTES: usize = 1_152 * 1024 * 1024;
+
+/// Convert a model's tensor working set into a per-row runtime reservation.
+/// Keep the existing 1.5x graph margin and calibrated Metal/process headroom.
+/// Apply before summing rows: both rounding and fixed overhead are per row.
+pub fn vision_prefill_reservation_bytes(tensor_bytes: usize) -> crate::Result<usize> {
+    anyhow::ensure!(
+        tensor_bytes > 0,
+        "vision prefill peak estimator returned zero"
+    );
+    let estimated = tensor_bytes
+        .saturating_add(tensor_bytes / 2)
+        .saturating_add(VISION_PREFILL_RUNTIME_OVERHEAD_BYTES);
+    anyhow::ensure!(
+        estimated != usize::MAX,
+        "vision peak estimate overflowed or produced zero"
+    );
+    Ok(estimated)
 }
 
 pub const SAFETY_MARGIN_BYTES: usize = 2 * 1024 * 1024 * 1024;
@@ -419,6 +421,35 @@ pub fn test_meta_gemma4_12b() -> ModelMeta {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn vision_reservation_preserves_margin_and_per_row_rounding() {
+        use super::{vision_prefill_reservation_bytes, VISION_PREFILL_RUNTIME_OVERHEAD_BYTES};
+        let overhead = VISION_PREFILL_RUNTIME_OVERHEAD_BYTES;
+        // The pre-migration transformer fixture has a 464-byte tensor working set.
+        assert_eq!(
+            vision_prefill_reservation_bytes(464).unwrap(),
+            overhead + 696
+        );
+        // Fractional rounding and fixed runtime headroom apply to every row.
+        assert_eq!(vision_prefill_reservation_bytes(17).unwrap(), overhead + 25);
+        assert_eq!(
+            vision_prefill_reservation_bytes(1).unwrap() * 2,
+            overhead * 2 + 2
+        );
+        assert_ne!(
+            vision_prefill_reservation_bytes(1).unwrap() * 2,
+            vision_prefill_reservation_bytes(2).unwrap()
+        );
+    }
+
+    #[test]
+    fn vision_reservation_rejects_zero_and_overflow() {
+        use super::vision_prefill_reservation_bytes;
+        assert!(vision_prefill_reservation_bytes(0).is_err());
+        assert!(vision_prefill_reservation_bytes(usize::MAX).is_err());
+        assert!(vision_prefill_reservation_bytes(usize::MAX / 3 * 2).is_err());
+    }
+
     use super::*;
 
     #[cfg(target_os = "macos")]

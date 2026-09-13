@@ -9,7 +9,7 @@ use ironmlx::core::process_memory::{
     global_process_memory_governor, native_memory_telemetry, ColdMaterializationTracker,
     MaterializationComponents, StaticMemoryEstimate,
 };
-use ironmlx::core::scheduler::DenseVlMethods;
+use ironmlx::core::vision::DenseVlMethods;
 use ironmlx::core::Loader;
 use mlx::Array;
 
@@ -40,8 +40,9 @@ fn calibrate<M: DenseVlMethods>(
     grid_thw: &[(i32, i32, i32)],
 ) {
     let estimated_bytes = model
-        .estimate_vision_prefill_peak_bytes(pixel_values, grid_thw)
-        .expect("architecture-aware vision peak estimate");
+        .estimate_vision_prefill_tensor_bytes(pixel_values, grid_thw)
+        .and_then(ironmlx::core::memory_budget::vision_prefill_reservation_bytes)
+        .expect("architecture-aware vision peak estimate with runtime headroom");
     assert!(estimated_bytes > 0 && estimated_bytes != usize::MAX);
 
     // The loader eagerly evaluates graph transformations, but mmap-backed raw

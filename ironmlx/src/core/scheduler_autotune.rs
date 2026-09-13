@@ -10,9 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Result};
 
-use crate::core::memory_budget::{
-    kv_bytes_per_token, ModelMeta, SAFETY_MARGIN_BYTES, SOFT_LIMIT_FRAC,
-};
+use crate::core::memory_budget::{kv_bytes_per_token, SAFETY_MARGIN_BYTES, SOFT_LIMIT_FRAC};
+use crate::core::model::ModelMeta;
 use crate::core::Model;
 use serde::{Deserialize, Serialize};
 
