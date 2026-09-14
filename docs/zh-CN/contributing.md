@@ -4,7 +4,7 @@
 
 ## 开始前
 
-请先阅读[安装与构建](installation.md)、[支持模型矩阵](supported-models.md)和[安全边界](security-boundary.md)。不要在代码、issue 或诊断数据中包含模型权重、token、prompt、私有证书或未脱敏信息。
+请先阅读[从源码构建](building-from-source.md)、[支持模型矩阵](supported-models.md)和[安全边界](security-boundary.md)。不要在代码、issue 或诊断数据中包含模型权重、token、prompt、私有证书或未脱敏信息。
 
 ## 许可证与贡献条款
 

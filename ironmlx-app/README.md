@@ -42,8 +42,9 @@ IronMLX.app/Contents/
         └── THIRD_PARTY_LICENSES/
 ```
 
-The build is ad-hoc signed for local execution. Developer ID signing,
-notarization, and DMG/PKG creation are outside P0-1.
+Ordinary local builds are ad-hoc signed. RC and stable distribution use the
+signing, notarization and archive checks described in the
+[release pipeline](../docs/stable-release-pipeline.md).
 
 The bundled helper shares the same per-user backend lock as direct
 `ironmlx serve` CLI launches. Only one IronMLX backend may run for a macOS
@@ -53,13 +54,6 @@ does not enter automatic helper recovery, and exits after the alert is dismissed
 The App always starts the model-manager helper first, even when no local model
 is configured; after the helper is healthy, the UI is shown and confirmed models
 continue restoring asynchronously.
-
-GitHub Actions development previews preserve this ad-hoc, non-notarized
-boundary and label it explicitly in the App, archives, release title, and
-release notes. Public preview packaging and publication are currently blocked
-by `scripts/release-legal-gate.sh` until P0-8B reviews the generated third-party
-materials, supplies an SBOM, and explicitly authorizes distribution. See
-`docs/development-preview-release.md`.
 
 ## Static verification
 

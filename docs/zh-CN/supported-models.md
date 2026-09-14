@@ -1,68 +1,86 @@
-# 支持模型矩阵
+# 支持的模型
 
-以下矩阵来自 0.1.0 的生产加载分派。`model_type` 匹配只是必要条件；模型还必须
-包含兼容的 `config.json`、tokenizer、chat template、权重布局和量化元数据。
-下载前预检与加载时完整性校验仍可能拒绝不兼容 checkpoint。
+[English](../supported-models.md)
 
-| 模型族 | `model_type` | 文本 | 图片 | Responses/Messages reasoning | Chat/Responses/Messages tools | MTP/DFlash2/辅助 drafter | Prompt Lookup | KV cache |
-| --- | --- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| Qwen 3.5 Dense / 声明相同类型的 Qwen 3.6 Dense | `qwen3_5` | 是 | 检查点包含 `vision_config` 时支持 | 是，需原生 `<think>` 模板 | 是，需原生工具模板 | 是 | 是 | 是 |
-| Qwen 3.8 Dense（已验收 `mlx-community/Qwen3.8-27B-4bit` 与 `mlx-community/Qwen3.8-27B-8bit`） | `qwen3_5` | 是 | 是（图片；不含视频） | 是，默认开启；支持 `none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max` | 是，需 Qwen3.8 原生工具模板 | 是，已验收匹配的 4-bit/8-bit MTP 与 `z-lab/Qwen3.8-27B-DFlash2`；DFlash2 支持 affine 4-bit/8-bit target，且仅文本 | 是 | 是 |
-| Qwen 3.5/3.6 MoE | `qwen3_5_moe` | 是 | 检查点包含 `vision_config` 时支持 | 是，需原生 `<think>` 模板 | 是，需原生工具模板 | 是 | 是 | 是 |
-| Gemma 4 / Gemma 4 Unified | `gemma4`, `gemma4_unified` | 是 | checkpoint 含 `vision_config` 时支持 | 是，需原生 `thought` channel | 是，需原生工具模板 | 是 | 是 | 是 |
-| GLM-4 MoE Lite | `glm4_moe_lite` | 是 | 否 | 是，需原生 `<think>` 模板 | 是，需原生工具模板 | 否 | 是 | 是 |
-| Llama GQA Dense（含兼容的 MiniCPM5-1B） | `llama` | 是 | 否 | 仅 MiniCPM5 原生模板 | 是，需 Llama 3.1/3.2 或 MiniCPM5 原生工具模板 | 否 | 是 | 是 |
-| MiniCPM-V 4.6 | `minicpmv4_6` | 是 | 是 | 是，需原生 `<think>` 模板 | 是，需 MiniCPM-V 4.6 原生工具模板 | 否 | 是 | 是 |
-| DiffusionGemma | `diffusion_gemma` | 是 | 是 | 是，需原生 `thought` channel | 是，需原生 Gemma 工具模板 | 否 | 否 | 否 |
+IronMLX 0.1.0 支持以下文本和视觉语言模型。请先确认模型族和所需功能，再选择适合设备内存的具体版本。
+同一模型族的不同版本、量化文件和模板可能存在兼容性差异；下表不是所有同名模型的验证清单。
 
-所有运行时均支持流式 HTTP 响应。DiffusionGemma 使用 block-diffusion 生成路径，
-只支持 `max_tokens`、`temperature` 与 `seed`；其他 causal 模型的内部 sampler 与
-模型 profile 还支持 `top_p`、`top_k` 与 `repetition_penalty`。公开 HTTP 请求字段
-按协议收口：Chat Completions 和 Responses 接受 `temperature`、`top_p`，Anthropic
-Messages 额外接受 `top_k`；`repetition_penalty` 不属于这三套公开协议字段，
-Chat/Responses 也不接受 `top_k`。内部模型 profile 仍可提供 `top_k` 与
-`repetition_penalty` 默认值。
+## 模型支持概览
 
-Chat/Responses/Messages tools 仅表示 OpenAI 或 Anthropic 协议的结构化函数调用生成与
-历史回灌；IronMLX 不执行工具。Responses API 为无状态接口，不持久化 response 或
-conversation。
-Responses/Messages reasoning 仅在模型类型和 chat template 同时匹配精确原生契约时启用。
-Responses 输出独立 typed item；Messages 输出原生 `thinking` block；两者均支持明文
-历史回灌。Qwen3.8 默认保留历史 `reasoning_content`；Chat Completions 可用顶层
-`reasoning_effort` 选择 `low`、`medium` 或 `xhigh`，也可通过
-`chat_template_kwargs.preserve_thinking=false` 关闭历史思考保留。Responses 的
-`minimal`/`low` 映射到 `low`，`medium` 映射到 `medium`，`high`/`xhigh`/`max`
-映射到 `xhigh`；Anthropic `output_config.effort` 使用同样的三档收敛。
-当前模型没有独立 reasoning summary、
-refusal、音频输出或图片输出通道；这些能力不会从普通文本推断。
-即使其他模型的模板包含相似标记，也不会被推断为支持。
-Qwen3.8 DFlash2 使用独立 CLI/Server actor，支持 Greedy、精确 sampling、
-`max-sequences>1` 的请求级并发和有安全宽度上限的 `B=N` tensor batching；它不与
-MTP、Prompt Lookup、KV quantization、paged/SSD prefix cache 或 active KV offload
-混用。DFlash2 独立路径可使用自己的内存 prefix cache。App 通过结构兼容 matcher、
-独立 actor 重启、失败回滚、Tensor Batch 上限配置、Dashboard 运行指标和诊断快照
-提供同一执行路径；draft 不作为 base model 独立加载。
-完整边界见 [`dflash2-server-api.md`](../dflash2-server-api.md)。
-Llama 3.1/3.2 的原生自定义函数协议只允许每个 assistant turn 产生一个工具调用；
-其独立的 built-in tool / `<|python_tag|>` 协议不属于 OpenAI `tools` 支持范围。
-MiniCPM-V 4.6 与 MiniCPM5 使用不同的原生 XML 工具协议；两者均支持多调用，
-MiniCPM5 对含 `<`、`&` 或换行的字符串参数使用 CDATA。
-全部工具方言均支持非 strict 工具中嵌套的动态 object 属性（`additionalProperties`
-为 `true` 或受支持 Schema），以及字符串、数组和数值边界关键字；顶层工具参数对象
-仍必须封闭，`strict:true` 仍要求递归 `additionalProperties:false` 和完整
-`required`。Gemma 会在提示词、约束解码和历史调用中透明地把动态 object 投影为确定性
-键值条目，并在响应阶段恢复为原始 object；HTTP 请求与响应始终保持客户端提交的 Schema
-和参数形状。IronMLX 只生成并验证函数调用，不执行函数或外部工具。
+“有条件”表示需要兼容的视觉配置和权重。“推理内容”和“工具调用”均要求模型使用受支持的原生模板，不能仅凭模型名称判断。
 
-## 权重量化
+| 模型族 | 文本 | 图片 | 推理内容 | 工具调用 |
+| --- | :---: | :---: | --- | --- |
+| Qwen 3.5 / 3.6 Dense | 支持 | 有条件 | 支持 | 支持 |
+| Qwen 3.8 Dense | 支持 | 支持 | 支持，默认开启 | 支持 |
+| Qwen 3.5 / 3.6 MoE | 支持 | 有条件 | 支持 | 支持 |
+| Gemma 4 / Gemma 4 Unified | 支持 | 有条件 | 支持 | 支持 |
+| GLM-4 MoE Lite | 支持 | 不支持 | 支持 | 支持 |
+| Llama GQA Dense（含兼容的 MiniCPM5-1B） | 支持 | 不支持 | 仅 MiniCPM5 原生模板 | Llama 3.1/3.2 或 MiniCPM5 原生工具模板 |
+| MiniCPM-V 4.6 | 支持 | 支持 | 支持 | 支持 |
+| DiffusionGemma | 支持 | 支持 | 支持 | 支持 |
 
-| 模式 | 支持参数 |
+所有运行时均支持 HTTP 流式响应。图片能力指理解图片，不代表生成图片或支持视频。
+模型列表中出现 embedding、reranker、ASR 或 TTS 信息，不代表 0.1.0 的生成后端可以加载这些模型。
+
+## 已验证的具体模型
+
+以下为本页明确记录的 Qwen3.8 验证范围，不是完整模型推荐列表，也不代表同系列其他版本已通过验证。
+
+| 模型 | 已记录的验证范围 |
 | --- | --- |
-| 未量化权重 | checkpoint dtype 必须能被对应模型加载器处理 |
-| Affine | 2/4/5/6/8 bit；group size 32/64/128 |
-| OptiQ mixed-bit | 2/4/8 bit；group size 64；需要有效 `optiq_metadata.json` |
-| MXFP4 | 4 bit；group size 32 |
-| MXFP8 | 8 bit；group size 32 |
+| `mlx-community/Qwen3.8-27B-4bit` | 文本、图片、推理内容、工具调用；匹配的 4-bit MTP 和 DFlash2 文本路径 |
+| `mlx-community/Qwen3.8-27B-8bit` | 文本、图片、推理内容、工具调用；匹配的 8-bit MTP 和 DFlash2 文本路径 |
 
-App 的模型列表可能展示 embedding、reranker、ASR 或 TTS 元数据，但 0.1.0 的
-服务加载路径只面向上表中的 LLM/VLM 生成模型。
+上述 DFlash2 验证使用 `z-lab/Qwen3.8-27B-DFlash2`。模型仓库后续更新的快照仍需兼容性检查，不能直接沿用历史验证结论。
+
+## 生成加速与缓存
+
+| 功能 | 适用范围 | 主要条件 |
+| --- | --- | --- |
+| MTP | 兼容的 Qwen Dense / MoE | 需要匹配的 MTP 模型；请求模式限制见 [MTP 说明](mtp-server-api.md) |
+| 辅助 drafter | 兼容的 Gemma 4 | 需要匹配的 assistant 模型，不能任意搭配 |
+| DFlash2 | Qwen3.8 affine 4-bit / 8-bit target | 需要匹配的 draft；仅文本 |
+| Prompt Lookup | 表中除 DiffusionGemma 外的模型族 | 取决于运行模式，不能与 DFlash2 同时使用 |
+| KV cache | 表中除 DiffusionGemma 外的模型族 | 不代表每种缓存与加速组合均可用 |
+
+DFlash2 支持贪心和精确采样、请求并发及有宽度上限的批处理。它不能与 MTP、Prompt Lookup、KV 量化、分页/SSD 前缀缓存或 Active KV offload 混用；独立路径可使用自己的内存前缀缓存。
+DFlash2 draft 不能作为主模型独立加载。完整配置与限制见 [DFlash2 说明](dflash2-server-api.md)。
+
+## 量化与设备内存
+
+量化支持取决于具体模型加载器，不代表每个模型都支持下表中的所有格式。
+
+| 权重格式 | 支持范围 |
+| --- | --- |
+| 未量化 | 数据类型必须受对应模型加载器支持 |
+| Affine | 2/4/5/6/8-bit；group size 32/64/128 |
+| OptiQ mixed-bit | 2/4/8-bit；group size 64；需要有效的 `optiq_metadata.json` |
+| MXFP4 | 4-bit；group size 32 |
+| MXFP8 | 8-bit；group size 32 |
+
+内存需求还受到上下文长度、并发请求、缓存和辅助模型影响。架构受支持不代表当前设备一定能够加载；下载前应核对模型文件与可用内存。
+
+## 兼容性与使用限制
+
+- 推理内容依赖精确匹配的模型类型和原生模板。Qwen/GLM/MiniCPM 使用各自受支持的思考模板，Gemma 使用原生 thought channel；相似标记不会自动获得支持。
+- 工具调用表示生成、验证调用参数和接收客户端返回的结果；IronMLX 不执行工具。Llama 3.1/3.2 每轮仅支持一个原生自定义工具调用，其 built-in tool 协议不在此范围内。
+- Responses 为无状态接口，不保存 response 或 conversation。没有独立的推理摘要、拒绝、音频输出或图片输出通道。
+- DiffusionGemma 使用独立生成路径，仅支持 `max_tokens`、`temperature` 和 `seed`，不支持 KV cache、Prompt Lookup 或 MTP。
+- HTTP 可用参数由协议决定，不能将内部采样参数直接作为请求字段；模型 profile 可提供的参数也不等同于公开 API 字段。
+
+接口字段、结构化输出和各执行模式的边界见 [API 兼容矩阵](api-compatibility-matrix.md)及 [API 文档](api.md)。模型授权条件见[模型许可边界](model-license-boundary.md)。
+
+## 架构标识参考
+
+排查模型兼容性时，可核对配置中的 `model_type`。标识匹配只是必要条件；配置、tokenizer、模板、权重布局和量化元数据也必须兼容。下载预检或加载校验仍可能拒绝不兼容文件。
+
+| 模型族 | `model_type` |
+| --- | --- |
+| Qwen 3.5 Dense；采用相同架构的 Qwen 3.6 / 3.8 Dense | `qwen3_5` |
+| Qwen 3.5 / 3.6 MoE | `qwen3_5_moe` |
+| Gemma 4 / Gemma 4 Unified | `gemma4`、`gemma4_unified` |
+| GLM-4 MoE Lite | `glm4_moe_lite` |
+| Llama GQA Dense / 兼容的 MiniCPM5-1B | `llama` |
+| MiniCPM-V 4.6 | `minicpmv4_6` |
+| DiffusionGemma | `diffusion_gemma` |

@@ -1,9 +1,22 @@
-# Privacy-safe diagnostic export
+# Diagnostic information export
 
-The Dashboard Logs page provides **Export diagnostic information**. The App
-collects data locally through native messaging and saves a ZIP only to the
-location explicitly chosen in the macOS save panel. It does not use the backend
-HTTP API, accept LAN-client triggers, upload data, or enable telemetry.
+[简体中文](zh-CN/diagnostic-bundle.md)
+
+## Export and share
+
+1. Open Dashboard **Logs** and select **Export diagnostic information**.
+2. Choose a ZIP destination in the macOS save panel.
+3. Review the archive before attaching it to a support report. The App does not upload it automatically.
+
+Exports include system and version information, model identifiers and runtime state, incidents and limited log tails.
+They exclude model weights, original configuration, request bodies, Keychain credentials and the full environment; text is also redacted.
+Export remains available while the backend is offline and does not start, restart or stop it. The ZIP is capped at 4 MiB; logs can be truncated.
+
+**Export incident records** saves only the current filtered JSON history, not the complete diagnostic ZIP.
+See [Privacy](privacy.md) and [Support](../SUPPORT.md).
+
+<details>
+<summary>Technical reference: archive format, fields and size limits</summary>
 
 ## Fixed format
 
@@ -46,3 +59,5 @@ atomically published, while cancellation or errors remove the temporary file.
 
 **Export incident records** in Incident history is a separate filtered JSON
 export; it is not the complete diagnostic ZIP.
+
+</details>

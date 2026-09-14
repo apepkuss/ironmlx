@@ -4,7 +4,7 @@
 
 ## Before contributing
 
-Read the [installation and build guide](docs/installation.md),
+Read the [source build guide](docs/building-from-source.md),
 [supported-model matrix](docs/supported-models.md), and
 [security boundary](docs/security-boundary.md). Do not include model weights,
 tokens, prompts, private certificates, or unredacted diagnostic data in a

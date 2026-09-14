@@ -3,6 +3,10 @@
 `ironmlx serve --model-manifest` starts a runtime model pool that routes
 OpenAI and Anthropic requests by the request `model` field.
 
+[简体中文](zh-CN/engine-pool.md)
+
+For CLI users who need model routing within one server. This manifest belongs to `ironmlx serve`; the App manages its own models through Dashboard. Do not start a second backend while the App backend is running.
+
 ## Manifest
 
 ```json
@@ -53,7 +57,7 @@ Startup validation:
 - Enabled models must point to local directories with a supported `config.json`
   `model_type`. Unsupported enabled models fail startup instead of failing on
   first lazy request.
-- Supported `model_type` values are `qwen3_5`, `qwen3_5_moe`, `gemma4`,
+- Supported `model_type` values are `qwen3_5`, `qwen3_5_moe`, `gemma4`, `gemma4_unified`,
   `glm4_moe_lite`, `llama`, `minicpmv4_6`, and `diffusion_gemma`.
 - `disabled` models remain non-routable manifest entries and are not loaded.
 

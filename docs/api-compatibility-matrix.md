@@ -1,196 +1,106 @@
-# IronMLX v0.1 API 兼容矩阵
+# IronMLX 0.1.0 API compatibility matrix
 
-状态基线：IronMLX v0.1 发布候选主线（以当前 `dev` 分支为准）。发布包会在
-Bundle 元数据中记录不可变的源提交；本文不引用实验性功能分支作为公开基线。
-本文是 IronMLX v0.1 的公开协议承诺，适用于：
+[简体中文](zh-CN/api-compatibility-matrix.md)
 
-- `POST /v1/chat/completions`（OpenAI Chat Completions 子集）；
-- `POST /v1/responses`（OpenAI Responses 无状态子集）；
-- `POST /v1/messages`（Anthropic Messages 子集）。
+For client integrators: this document describes the 0.1.0 public protocol scope. Use documentation at the release tag; candidate Bundle metadata identifies its exact source commit. A moving branch is not a release baseline.
 
-本文中的“支持”表示字段有明确的解析、验证和响应语义，并由服务端 contract
-测试覆盖；“受限”表示只接受文档列出的子集或依赖模型 capability；“拒绝”表示
-收到后返回 400，不能静默忽略或降级。
+See the [API quick start](api.md), [protocol reference](api-reference.md) for nested fields, tools, reasoning and schemas, and [Supported models](supported-models.md) for model conditions.
 
-## v0.1 产品基线关联
+## Shared rules
 
-本矩阵与以下 v0.1 产品能力保持一致：
+All three protocols support synchronous text, SSE, supported Structured Outputs and native-template-dependent client tools.
+Responses uses typed events, Chat ends with `[DONE]`, and Messages uses its native event lifecycle.
+Responses reasoning items and Messages thinking blocks require exact templates; Chat does not expose the same typed reasoning shape. Messages can combine thinking with final JSON constraints.
 
-- OpenAI Responses：typed output/reasoning、SSE 生命周期、客户端 function tools
-  与 Structured Outputs；Responses 保持无状态，不持久化 conversation 或 response；
-- Qwen3.8：支持文档列出的原生 reasoning、tools、图片输入和 MTP 能力；精确
-  checkpoint、量化和最低内存要求以[支持模型矩阵](supported-models.md)为准；
-- DFlash2：Qwen3.8 的匹配 target/draft 通过独立 actor 提供文本推理、精确 sampling、
-  有界请求并发和 tensor batching；它与 MTP、Prompt Lookup、KV quantization、
-  paged/SSD prefix cache 及 active-KV offload 互斥；
-- 模型管理：Dashboard 使用统一下载队列，提供不可变 snapshot、断点续传、取消、
-  预检和完整性校验；这些是本地模型生命周期能力，不属于三套 HTTP 协议字段；
-- 诊断导出：Dashboard 的“导出诊断信息”只在本机生成经过白名单和脱敏的 ZIP，
-  不上传数据，也不是 HTTP API 或协议持久化承诺。
+Images accept supported base64 shapes only, not remote URLs. The service does not execute external tools, provide hosted tools or store conversations.
+The tables list accepted fields and conditions. Unlisted fields and shapes outside these conditions return 400 rather than being silently ignored.
 
-协议使用示例和请求形状见 [`api.md`](api.md)，模型能力和 DFlash2 的完整限制见
-[`supported-models.md`](supported-models.md) 与 [`dflash2-server-api.md`](dflash2-server-api.md)。
+## Chat Completions
 
-## 符号与证据
+| Fields | Accepted scope and limits |
+| --- | --- |
+| `model` | Optional; resolved by the current service/default model |
+| `messages` | Text, supported content parts and assistant/tool history |
+| `tools / tool_choice / parallel_tool_calls` | Function tools; auto/none/required/named function; false limits a turn to one call and requires tools |
+| `response_format` | text, json_object or supported json_schema |
+| `stream / stream_options` | Synchronous/SSE; stream_options only accepts include_usage |
+| `max_tokens` | Output budget within model context capacity |
+| `temperature / top_p` | Finite values in [0,2] / (0,1] |
+| `reasoning_effort` | Qwen3.8 native low/medium/xhigh tiers; requires the matching template |
+| `seed / ignore_eos / chat_template_kwargs` | IronMLX extensions: request seed, controlled-length generation and supported template kwargs |
+| `functions / function_call / top_k / repetition_penalty` | Rejected; use tools instead of legacy function fields |
 
-| 符号 | 含义 |
-|---|---|
-| ✅ | 支持并纳入 v0.1 承诺 |
-| ◐ | 受限支持：仅文档列出的形状、模型或取值有效 |
-| ❌ | 明确拒绝，返回 400 |
-| — | 该协议没有此字段或语义 |
+## Responses
 
-发布门禁由两层组成：
+| Fields | Accepted scope and limits |
+| --- | --- |
+| `model / instructions / input` | Stateless text or supported typed history |
+| `tools` | Supported function and namespace subsets; bounded schemas |
+| `tool_choice / parallel_tool_calls` | auto/none/required/named function; cannot force a namespace subfunction |
+| `text` | json_object or supported json_schema format |
+| `stream / stream_options` | Typed SSE; stream_options must be an object |
+| `max_output_tokens` | Output budget within context capacity |
+| `temperature / top_p` | Finite values in [0,2] / (0,1] |
+| `reasoning` | Local effort/summary semantics; missing effort is none; plaintext output |
+| `store / background` | Only false or omitted; true is rejected |
+| `previous_response_id / conversation` | Rejected; no server-side history storage |
+| `include` | Only reasoning.encrypted_content request shape; no encrypted content is generated |
+| `prompt_cache_key / client_metadata / metadata` | Structure and length validation only, without hosted-platform semantics |
+| `service_tier / truncation` | Tier: auto/default only; truncation: disabled only |
+| `top_k / repetition_penalty` | Rejected |
 
-1. Rust 服务端 contract suite：`cargo test --locked --all-features -p ironmlx --lib core::server::`，覆盖请求提取、字段校验、错误渲染、主要拓扑和 SSE 断连释放；
-2. 固定版本官方 SDK 黑盒 suite：`scripts/api-contract-sdk/contract.py --fixture`，使用 OpenAI Python SDK `2.48.0` 和 Anthropic Python SDK `0.121.0`，通过真实 loopback HTTP/SSE 验证客户端解析。
+## Anthropic Messages
 
-这两层不证明特定 checkpoint 的回答质量、工具选择准确率或模型生成的 JSON
-质量；真实模型 HTTP/SDK smoke 是独立发布验收层。
+| Fields | Accepted scope and limits |
+| --- | --- |
+| `model / messages / system` | Text, base64 images, tool history and signed thinking; system accepts text or text blocks |
+| `tools / tool_choice` | Client functions; auto/any/named tool/none with supported parallel controls |
+| `output_config.format` | Supported JSON Schema format only |
+| `output_config.effort / thinking` | Requires supported thinking templates; disabled/enabled/adaptive and strictly validated budgets/display; not a calibrated Claude budget |
+| `max_tokens / stream` | Output budget and synchronous/SSE choice |
+| `temperature / top_p / top_k` | Finite [0,1] / (0,1]; top_k is a positive integer |
+| `repetition_penalty / output_format` | Rejected; use output_config.format |
+| `display:omitted / redacted_thinking` | Rejected; no encrypted hidden-thinking channel |
 
-## 能力矩阵
+## Errors and retries
 
-| 能力 | Chat Completions | Responses | Anthropic Messages | v0.1 边界 |
-|---|---:|---:|---:|---|
-| 同步文本响应 | ✅ | ✅ | ✅ | 使用各自协议的原生响应 envelope |
-| SSE 文本响应 | ✅ | ✅ | ✅ | Responses 使用 typed events；Chat 使用 `[DONE]`；Messages 使用原生 event lifecycle |
-| 客户端 function tools | ◐ | ◐ | ◐ | 依赖模型原生 tool template 和受支持 JSON Schema；IronMLX 只生成调用，不执行函数 |
-| Responses namespace tools | — | ◐ | — | 仅 Responses；namespace 编译为有界内部 dispatcher，仍由客户端执行实际函数 |
-| 最终答案 Structured Outputs | ✅ | ✅ | ✅ | Chat=`response_format`；Responses=`text.format`；Messages=`output_config.format` |
-| tools 与最终 JSON 组合 | ✅ | ✅ | ✅ | `auto` 可在工具调用和结构化最终答案间选择；强制 tool choice 时只允许工具调用 |
-| 原生 typed reasoning/thinking | — | ◐ | ◐ | Responses 使用 `reasoning` item；Messages 使用 `thinking` block；依赖精确模型模板契约 |
-| thinking + Structured Outputs | — | — | ◐ | Messages 先自由生成 thinking section，再对最终 text section 启用 JSON grammar |
-| 完整历史回灌 | ◐ | ✅ | ✅ | Chat 回灌 assistant/tool history；Responses 回灌 typed input item；Messages 回灌 signed thinking/tool history |
-| 图片输入 | ◐ | ◐ | ◐ | Chat 严格 `data:` URL；Responses 仅支持文档列出的 input image 形状；Messages 仅 base64 |
-| 远程图片 URL | ❌ | ❌ | ❌ | 不抓取 HTTP/HTTPS 图片 URL |
-| `temperature` | ✅ `[0,2]` | ✅ `[0,2]` | ✅ `[0,1]` | 必须为有限数；非法取值返回 400 |
-| `top_p` | ✅ `(0,1]` | ✅ `(0,1]` | ✅ `(0,1]` | 必须为有限数；非法取值返回 400 |
-| `top_k` | ❌ | ❌ | ✅ 正整数 | 仅 Anthropic Messages 是公开 sampling 字段 |
-| `repetition_penalty` | ❌ | ❌ | ❌ | 不是三套协议的公开字段 |
-| 服务端工具执行、Shell、MCP、HTTP | ❌ | ❌ | ❌ | 服务只生成结构化调用，不执行外部动作 |
-| response/conversation 持久化 | ❌ | ❌ | ❌ | Responses 仅无状态请求；`store:true` 等返回 400 |
+Chat/Responses use OpenAI error envelopes; Messages uses an Anthropic envelope with matching body request_id and request-id header. error.code is an IronMLX machine-readable extension.
 
-## 顶层请求字段矩阵
+| HTTP | Condition | Example code |
+| ---: | --- | --- |
+| 400 | Malformed JSON or unknown fields | `invalid_json` |
+| 400 | Invalid sampling or constraints | `invalid_request / invalid_sampling_parameters` |
+| 400 | Unsupported Schema, tools or thinking | `invalid_response_format / invalid_tools / invalid_request` |
+| 413 | Body exceeds 32 MiB | `request_body_too_large` |
+| 413 | Input plus output exceeds context | `request_token_capacity_exceeded` |
+| 503 | Queue, engine, memory or storage backpressure | `scheduler_queue_full / engine_unavailable / memory_budget_exceeded` |
+| 500 | Unexpected generation failure | `generation_error` |
 
-未列出的顶层字段均因 `deny_unknown_fields` 或等价契约校验返回 400。字段的
-“受限”不是静默忽略：取值或组合不符合下表时同样返回 400。
+Retryable 503 responses return JSON and `Retry-After: 5`; Messages uses `overloaded_error` for overload and `request_too_large` for 413. See the [protocol reference](api-reference.md) for more codes and cancellation boundaries.
 
-### Chat Completions
+## Runtime modes and capability boundaries
 
-| 字段 | 状态 | 接受形状/语义 |
-|---|---:|---|
-| `model` | ◐ | 可省略，使用服务默认模型；指定值必须能由当前拓扑解析 |
-| `messages` | ✅ | 文本、严格 content parts、assistant/tool history |
-| `tools` | ◐ | `type:function`；模型模板和 JSON Schema 子集受限 |
-| `tool_choice` | ◐ | `auto`、`none`、`required` 或指定 function |
-| `parallel_tool_calls` | ◐ | 需存在 tools；`false` 限制当前 turn 最多一个调用 |
-| `response_format` | ✅ | `text`、`json_object`、`json_schema`；Schema 必须符合支持子集 |
-| `stream` | ✅ | 同步或 SSE |
-| `stream_options` | ◐ | 仅 `include_usage` |
-| `max_tokens` | ✅ | 输出预算；受模型上下文容量约束 |
-| `temperature` / `top_p` | ✅ | 取值范围见能力矩阵 |
-| `seed` | ◐ | IronMLX 扩展；用于请求级随机种子，不属于跨服务兼容承诺 |
-| `ignore_eos` | ◐ | IronMLX 扩展；用于受控长度/基准测试，不属于 OpenAI 标准字段 |
-| `chat_template_kwargs` | ◐ | IronMLX 扩展；只允许模型模板公开的 kwargs，不能替代协议字段 |
-| `functions` / `function_call` | ❌ | 已废弃字段，明确要求改用 `tools` |
-| `top_k` / `repetition_penalty` | ❌ | 不属于 Chat 公开 sampling 契约 |
+Ordinary serving, DFlash2, Gemma4 drafter, DiffusionGemma, EnginePool and App daemon share request validation, protocol errors, SSE headers and streaming cancellation/resource-release contracts, not identical model capabilities.
+Fixed services select the model at startup; EnginePool/App daemon resolve the request model or default. App DFlash2 retains read-only discovery, without dynamic model management.
+See [DFlash2](dflash2-server-api.md) for sampling, concurrency and incompatible combinations.
 
-### Responses
+## SDK compatibility checks
 
-| 字段 | 状态 | 接受形状/语义 |
-|---|---:|---|
-| `model` / `instructions` / `input` | ✅ | 无状态 typed input；`input` 为文本或支持的 typed item 历史 |
-| `tools` | ◐ | function 与 namespace 子集；工具参数 Schema 受限 |
-| `tool_choice` / `parallel_tool_calls` | ◐ | `auto`、`none`、`required` 和 function 选择；namespace 不支持指定子函数 |
-| `text` | ✅ | `format=json_object` 或受支持的 `json_schema` |
-| `stream` / `stream_options` | ◐ | 原生 Responses SSE；`stream_options` 仅接受对象形状 |
-| `max_output_tokens` | ✅ | 输出预算；受模型上下文容量约束 |
-| `temperature` / `top_p` | ✅ | 取值范围见能力矩阵 |
-| `reasoning` | ◐ | `effort` 与 `summary` 仅支持文档列出的本地语义；缺省 effort 按 `none` 处理；输出为明文 reasoning item |
-| `store` | ◐ | 只能省略或设为 `false`；`true` 返回 400 |
-| `previous_response_id` / `conversation` | ❌ | 本地服务不提供服务端 response/conversation 存储 |
-| `background` | ◐ | 仅 `false`；`true` 返回 400，不启动后台任务 |
-| `include` | ◐ | 仅接受 `reasoning.encrypted_content` 请求形状；IronMLX 不生成 encrypted content |
-| `prompt_cache_key` / `client_metadata` / `metadata` | ◐ | 仅执行结构和长度校验，不承诺 OpenAI 托管平台语义 |
-| `service_tier` | ◐ | 仅 `auto` 或 `default`；不提供 OpenAI 托管 tier |
-| `truncation` | ◐ | 仅 `disabled` |
-| `top_k` / `repetition_penalty` | ❌ | 不属于 Responses 公开 sampling 契约 |
+| SDK | Pinned version | Coverage |
+| --- | --- | --- |
+| OpenAI Python | `2.48.0` | Chat / Responses, SSE, tools, Structured Outputs, reasoning, 400/413/503 |
+| Anthropic Python | `0.121.0` | Messages, SSE, tools, Structured Outputs + thinking, 400/413/503 |
 
-### Anthropic Messages
+Pinned SDKs access a fixture server over real loopback HTTP/SSE to check client parsing; Rust tests separately cover production request/response contracts. Neither loads a model or establishes response quality, tool selection accuracy or performance.
+Run from the repository root:
 
-| 字段 | 状态 | 接受形状/语义 |
-|---|---:|---|
-| `model` / `messages` | ✅ | 文本、base64 图片、tool_use/tool_result 和 signed thinking history |
-| `system` | ✅ | 文本或文本 block |
-| `tools` | ◐ | 客户端 function tools；`input_schema` 使用受支持 Schema 子集 |
-| `tool_choice` | ◐ | `auto`、`any`、指定 `tool`、`none`；支持并行调用开关 |
-| `output_config.format` | ✅ | 仅受支持的 JSON Schema format |
-| `output_config.effort` | ◐ | 需同时启用 `thinking`；表示本地模板开关，不是已校准的 Claude 预算档位 |
-| `thinking` | ◐ | `disabled`、`enabled`、`adaptive`；`budget_tokens` 和 `display` 有严格限制 |
-| `max_tokens` / `stream` | ✅ | 输出预算及同步/SSE 选择 |
-| `temperature` / `top_p` / `top_k` | ✅ | 取值范围见能力矩阵 |
-| `repetition_penalty` | ❌ | 不是 Anthropic Messages 公开字段 |
-| `display:omitted` / `redacted_thinking` | ❌ | 本地没有 Claude 加密隐藏思考通道 |
+```bash
+python3 -m venv /tmp/ironmlx-api-contract-sdk
+/tmp/ironmlx-api-contract-sdk/bin/python -m pip install -r scripts/api-contract-sdk/requirements.txt
+/tmp/ironmlx-api-contract-sdk/bin/python scripts/api-contract-sdk/contract.py --fixture
+cargo test --locked --all-features -p ironmlx --lib core::server::
+```
 
-## 错误矩阵
+## Maintenance requirements
 
-三套协议共享 HTTP status 和稳定机器码，但错误 body 使用协议原生 envelope。
-
-| 场景 | HTTP | 稳定 code | Chat / Responses body | Messages body | `Retry-After` |
-|---|---:|---|---|---|---:|
-| JSON 无法解析 | 400 | `invalid_json` | OpenAI `error` envelope | Anthropic `type:error` envelope | — |
-| 未知字段或 JSON 形状非法 | 400 | `invalid_json` | OpenAI envelope，`error.code=invalid_json` | Anthropic envelope，`error.code=invalid_json` | — |
-| 已识别字段组合或 sampling 非法 | 400 | `invalid_request`、`invalid_sampling_parameters` 等 | OpenAI envelope，`error.code` 可定位原因 | Anthropic envelope，`error.code` 为 IronMLX 扩展 | — |
-| Structured Outputs / tools / thinking Schema 不支持 | 400 | `invalid_response_format`、`invalid_tools` 或 `invalid_request` | OpenAI envelope | Anthropic envelope | — |
-| HTTP body 超过 32 MiB | 413 | `request_body_too_large` | OpenAI envelope | Anthropic envelope，`error.type=request_too_large` | — |
-| token 与输出预算超过上下文容量 | 413 | `request_token_capacity_exceeded` | OpenAI envelope，含容量 details | Anthropic envelope，`error.type=request_too_large` | — |
-| 调度队列/引擎暂时不可用 | 503 | `scheduler_queue_full`、`scheduler_unavailable`、`engine_unavailable` 等 | OpenAI envelope | Anthropic envelope，过载使用 `overloaded_error` | `5` |
-| 内存 governor / prefix store 背压 | 503 | `memory_budget_exceeded` 等 | OpenAI envelope | Anthropic envelope | `5` |
-| 非预期生成错误 | 500 | `generation_error` 或内部错误码 | OpenAI envelope | Anthropic envelope | — |
-| SSE 客户端断连 | — | — | 停止生成事件，不发送终止事件 | 同左 | — |
-
-`request-id` 由 Messages 响应 body 与 `request-id` header 共同提供；OpenAI 响应
-遵循 SDK 可解析的 OpenAI error envelope。客户端应先按 HTTP status 和协议 envelope
-分类，再使用 `error.code` 选择重试、修正请求或报告内部错误。
-
-## 拓扑矩阵
-
-| 契约 | 普通服务 | DFlash2 actor | Gemma4 drafter | DiffusionGemma | EnginePool | App daemon |
-|---|---:|---:|---:|---:|---:|---:|
-| 请求字段/模型无关校验 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 协议错误 envelope | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 413 body/token 区分 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 503 JSON + `Retry-After:5` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| SSE `text/event-stream` + `no-cache` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| TCP 断连后驱逐与预算释放 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 模型选择 | 启动时固定 | target + draft 启动时固定 | 启动时固定 | 启动时固定 | request model 或默认模型 | request model 或默认模型 |
-| 模型能力完全相同 | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-
-最后一行是有意保留的限制：拓扑统一的是 transport、协议和生命周期契约，不是
-模型架构、sampling、MTP、KV cache 或工具模板能力。具体模型能力仍以
-[`docs/supported-models.md`](supported-models.md) 为准。
-DFlash2 actor 的文本、sampling、并发与隔离边界见
-[`docs/dflash2-server-api.md`](dflash2-server-api.md)。
-App 启用 DFlash2 时使用本表的 DFlash2 actor 拓扑，而非普通 App daemon 拓扑；该模式
-保留只读 `/v1/models` discovery，但不公开动态 `/admin/api/models/*`。
-
-## SDK 与版本矩阵
-
-| SDK | 固定版本 | 覆盖 | 当前不承诺 |
-|---|---:|---|---|
-| OpenAI Python | `2.48.0` | Chat 同步/SSE、Responses typed output/reasoning、function tools、Structured Outputs、400/413/503 | OpenAI 平台存储、托管工具、background、conversation、encrypted reasoning |
-| Anthropic Python | `0.121.0` | Messages 同步/SSE、tool_use、tool_result、Structured Outputs + adaptive thinking、400/413/503 | Anthropic 托管工具、MCP、computer use、Web Search、Code Execution、Claude 加密 thinking |
-
-SDK contract 使用 deterministic fixture server；它验证官方客户端对公开 wire
-shape 的解析，不代表某个模型一定会选择工具或生成符合 Schema 的答案。真实模型
-验收必须另行记录模型 ID、模板、量化、采样参数、响应模式和结果。
-
-## 发布规则
-
-本矩阵是 v0.1 的公开承诺边界：
-
-1. 新增字段必须先进入 DTO 严格解析、协议 contract tests 和 SDK 兼容验证，再更新矩阵；
-2. 不支持字段必须返回 400，不能静默忽略或退化到默认采样；
-3. 任何错误 status、envelope、稳定 code 或 `Retry-After` 改动，都必须同步更新错误矩阵和 SDK contract；
-4. 真实模型能力、性能和质量结论不能仅凭 fixture/SDK contract 宣称；
-5. IronMLX 扩展（例如 Chat 的 `seed`、`ignore_eos`、`chat_template_kwargs`）必须使用独立命名并标注为扩展，不得伪装成 OpenAI 或 Anthropic 标准字段。
+New fields must update strict parsing, contract tests, SDK checks and both translations together. Changes to error status, envelope, code or Retry-After require matching checks. Mark extensions explicitly rather than claiming upstream-standard behavior. Record model revision, template, quantization, sampling, response mode and results separately for real-model claims.

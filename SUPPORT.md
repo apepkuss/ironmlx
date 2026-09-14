@@ -17,7 +17,7 @@ with:
 - macOS version and Apple Silicon model;
 - the model repository and immutable revision, without uploading weights;
 - the exact operation, safe error text, and a minimal reproduction;
-- whether the problem occurs in a source build or development preview.
+- whether the problem occurs in a source build, RC, or stable release.
 
 Do not post credentials, prompts, tool arguments, model weights, private URLs,
 or unredacted logs. Security-sensitive reports belong in [SECURITY.md](SECURITY.md),

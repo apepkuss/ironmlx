@@ -1,58 +1,86 @@
-# Supported model matrix
+# Supported models
 
-This matrix reflects the 0.1.0 production loading dispatch. Matching
-`model_type` is necessary but not sufficient: a checkpoint must also contain a
-compatible `config.json`, tokenizer, chat template, weight layout, and
-quantization metadata. Download preflight and load-time integrity checks may
-still reject an incompatible checkpoint.
+[简体中文](zh-CN/supported-models.md)
 
-| Model family | `model_type` | Text | Images | Responses/Messages reasoning | Chat/Responses/Messages tools | MTP/DFlash2/drafter | Prompt Lookup | KV cache |
-| --- | --- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| Qwen 3.5 Dense / same-type Qwen 3.6 Dense | `qwen3_5` | Yes | When checkpoint includes `vision_config` | Yes, native `<think>` template required | Yes, native tool template required | Yes | Yes | Yes |
-| Qwen 3.8 Dense (`mlx-community/Qwen3.8-27B-4bit` and `mlx-community/Qwen3.8-27B-8bit` accepted) | `qwen3_5` | Yes | Yes (images; no video) | Yes, enabled by default; `none` through `max` | Yes, native Qwen3.8 tool template required | Yes; accepted matching 4/8-bit MTP and `z-lab/Qwen3.8-27B-DFlash2`; affine 4/8-bit target, text only | Yes | Yes |
-| Qwen 3.5/3.6 MoE | `qwen3_5_moe` | Yes | When checkpoint includes `vision_config` | Yes, native `<think>` template required | Yes, native tool template required | Yes | Yes | Yes |
-| Gemma 4 / Gemma 4 Unified | `gemma4`, `gemma4_unified` | Yes | Supported when checkpoint includes `vision_config` | Yes, native `thought` channel required | Yes, native tool template required | Yes | Yes | Yes |
-| GLM-4 MoE Lite | `glm4_moe_lite` | Yes | No | Yes, native `<think>` template required | Yes, native tool template required | No | Yes | Yes |
-| Llama GQA Dense (including compatible MiniCPM5-1B) | `llama` | Yes | No | MiniCPM5 native template only | Yes, native Llama 3.1/3.2 or MiniCPM5 tool template required | No | Yes | Yes |
-| MiniCPM-V 4.6 | `minicpmv4_6` | Yes | Yes | Yes, native `<think>` template required | Yes, native MiniCPM-V 4.6 tool template required | No | Yes | Yes |
-| DiffusionGemma | `diffusion_gemma` | Yes | Yes | Yes, native `thought` channel required | Yes, native Gemma tool template required | No | No | No |
+IronMLX 0.1.0 supports the following text and vision-language models. Check the model family and features you need, then choose a version that fits your device's memory.
+Versions, quantized files and templates within a family can differ in compatibility. This table is not a validation list for every model with a matching name.
 
-All runtimes support streaming HTTP responses. DiffusionGemma uses block
-diffusion and supports only `max_tokens`, `temperature`, and `seed`. Other
-causal models also support `top_p`, `top_k`, and `repetition_penalty` in their
-internal sampler and model profile. Public protocol fields are narrower:
-Chat Completions and Responses accept `temperature` and `top_p`, while
-Anthropic Messages additionally accepts `top_k`; `repetition_penalty` is not a
-public field and Chat/Responses do not accept `top_k`.
+## Model overview
 
-Chat/Responses/Messages tools mean structured function-call generation and
-history replay. IronMLX generates and validates calls but never executes tools.
-Responses is stateless and does not persist responses or conversations.
-Reasoning is enabled only when both model type and chat template match the exact
-native contract. There is no independent reasoning summary, refusal, audio
-output, or image output channel.
+“Conditional” requires compatible vision configuration and weights. Reasoning output and tool calling both require a supported native model template; the model name alone is insufficient.
 
-Qwen3.8 DFlash2 runs in a separate CLI/server actor. It supports greedy and
-exact sampling, request concurrency with `max-sequences > 1`, and bounded
-`B=N` tensor batching. It cannot be combined with MTP, Prompt Lookup, KV
-quantization, paged/SSD prefix cache, or active-KV offload. See the [DFlash2
-server API](dflash2-server-api.md) for the complete boundary.
+| Model family | Text | Images | Reasoning output | Tool calling |
+| --- | :---: | :---: | --- | --- |
+| Qwen 3.5 / 3.6 Dense | Yes | Conditional | Yes | Yes |
+| Qwen 3.8 Dense | Yes | Yes | Yes, enabled by default | Yes |
+| Qwen 3.5 / 3.6 MoE | Yes | Conditional | Yes | Yes |
+| Gemma 4 / Gemma 4 Unified | Yes | Conditional | Yes | Yes |
+| GLM-4 MoE Lite | Yes | No | Yes | Yes |
+| Llama GQA Dense (including compatible MiniCPM5-1B) | Yes | No | MiniCPM5 native template only | Native Llama 3.1/3.2 or MiniCPM5 tool template |
+| MiniCPM-V 4.6 | Yes | Yes | Yes | Yes |
+| DiffusionGemma | Yes | Yes | Yes | Yes |
 
-Llama 3.1/3.2 native custom function protocol permits one tool call per
-assistant turn; its built-in-tool / `<|python_tag|>` dialect is outside OpenAI
-`tools`. MiniCPM-V 4.6 and MiniCPM5 use different native XML tool dialects.
-Tool schemas remain closed at the top level; `strict:true` requires recursive
-`additionalProperties:false` and complete `required` fields.
+All runtimes support streaming HTTP responses. Image support means understanding images, not generating images or supporting video.
+Embedding, reranker, ASR or TTS metadata in the model list does not mean the 0.1.0 generation backend can load those models.
 
-## Weight quantization
+## Validated model versions
 
-| Mode | Supported parameters |
+The following Qwen3.8 validation scope is explicitly recorded on this page. It is not a complete recommendation list and does not establish validation of other versions in the family.
+
+| Model | Recorded validation scope |
 | --- | --- |
-| Unquantized | Checkpoint dtype must be supported by the model loader |
+| `mlx-community/Qwen3.8-27B-4bit` | Text, images, reasoning output and tools; matching 4-bit MTP and DFlash2 text path |
+| `mlx-community/Qwen3.8-27B-8bit` | Text, images, reasoning output and tools; matching 8-bit MTP and DFlash2 text path |
+
+DFlash2 validation used `z-lab/Qwen3.8-27B-DFlash2`. Later repository snapshots still require compatibility checks; historical validation does not automatically apply to updated files.
+
+## Generation acceleration and caching
+
+| Feature | Applicable models | Main conditions |
+| --- | --- | --- |
+| MTP | Compatible Qwen Dense / MoE | Requires a matching MTP model; see [MTP documentation](mtp-server-api.md) for request-mode limits |
+| Auxiliary drafter | Compatible Gemma 4 | Requires a matching assistant model; arbitrary pairings are not supported |
+| DFlash2 | Qwen3.8 affine 4-bit / 8-bit targets | Requires a matching draft; text only |
+| Prompt Lookup | Listed families except DiffusionGemma | Depends on runtime mode; cannot be combined with DFlash2 |
+| KV cache | Listed families except DiffusionGemma | Does not imply support for every cache and acceleration combination |
+
+DFlash2 supports greedy and exact sampling, concurrent requests and bounded batch widths. It cannot be combined with MTP, Prompt Lookup, KV quantization, paged/SSD prefix caches or Active KV offload. Its separate path can use its own in-memory prefix cache.
+The DFlash2 draft cannot be loaded independently as a base model. See [DFlash2 documentation](dflash2-server-api.md) for configuration and full limitations.
+
+## Quantization and device memory
+
+Quantization support depends on the model loader. Not every model supports every format below.
+
+| Weight format | Supported range |
+| --- | --- |
+| Unquantized | Data type must be supported by the model loader |
 | Affine | 2/4/5/6/8-bit; group size 32/64/128 |
 | OptiQ mixed-bit | 2/4/8-bit; group size 64; valid `optiq_metadata.json` required |
 | MXFP4 | 4-bit; group size 32 |
 | MXFP8 | 8-bit; group size 32 |
 
-The App model list may show embedding, reranker, ASR, or TTS metadata, but the
-0.1.0 service loading path targets only the LLM/VLM generation models above.
+Context length, concurrent requests, caches and auxiliary models also affect memory use. Architecture support does not guarantee that a model fits your device. Check model files and available memory before downloading.
+
+## Compatibility and usage limits
+
+- Reasoning output requires an exact match between model type and native template. Qwen/GLM/MiniCPM use their supported thinking templates; Gemma uses its native thought channel. Similar markers do not automatically qualify.
+- Tool calling means generating and validating calls and accepting results returned by the client. IronMLX does not execute tools. Llama 3.1/3.2 allows one native custom tool call per turn; its built-in-tool dialect is outside this scope.
+- Responses is stateless and does not store responses or conversations. There are no independent reasoning-summary, refusal, audio-output or image-output channels.
+- DiffusionGemma uses a separate generation path supporting only `max_tokens`, `temperature` and `seed`, without KV cache, Prompt Lookup or MTP.
+- Public HTTP parameters depend on the protocol. Internal sampling parameters and model-profile settings are not automatically accepted as API request fields.
+
+See the [API compatibility matrix](api-compatibility-matrix.md) and [API documentation](api.md) for request fields, structured outputs and runtime boundaries. See [model license boundaries](model-license-boundary.md) for model usage terms.
+
+## Architecture identifiers
+
+For compatibility troubleshooting, check `model_type` in the model configuration. Matching identifiers are necessary but insufficient: configuration, tokenizer, template, weight layout and quantization metadata must also be compatible. Download preflight or load-time checks may still reject incompatible files.
+
+| Model family | `model_type` |
+| --- | --- |
+| Qwen 3.5 Dense; Qwen 3.6 / 3.8 Dense using the same architecture | `qwen3_5` |
+| Qwen 3.5 / 3.6 MoE | `qwen3_5_moe` |
+| Gemma 4 / Gemma 4 Unified | `gemma4`, `gemma4_unified` |
+| GLM-4 MoE Lite | `glm4_moe_lite` |
+| Llama GQA Dense / compatible MiniCPM5-1B | `llama` |
+| MiniCPM-V 4.6 | `minicpmv4_6` |
+| DiffusionGemma | `diffusion_gemma` |

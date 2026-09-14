@@ -17,14 +17,15 @@ After a custom cache directory is configured in Dashboard, cache data is written
 there instead of the default path. LAN API keys, CA, and TLS private keys are
 managed by macOS Keychain under service `com.ironmlx.lan-security.v1`.
 
-## Uninstall
+## Choose what to remove
 
-1. Quit IronMLX and confirm the backend has stopped.
-2. Delete `IronMLX.app`.
-3. If you do not need models or configuration, delete `~/.ironmlx`.
-4. Delete a custom cache directory separately, if one was configured.
-5. If LAN mode was enabled, remove the IronMLX LAN security entries in Keychain Access.
+- **Remove only the App**: quit IronMLX, confirm the backend has stopped, then delete `IronMLX.app`. Models and settings remain.
+- **Reinstall while keeping data**: remove the App as above and install its replacement, retaining `~/.ironmlx` and Keychain entries. This is not a clean installation.
+- **Remove App data**: after quitting, remove the App, `~/.ironmlx` and any separately configured cache directory. If LAN mode was used, remove IronMLX LAN security entries in Keychain Access.
 
-Deleting `~/.ironmlx` permanently removes downloaded models, partial downloads,
-configuration, logs, caches, and reports. To keep models, back up
-`~/.ironmlx/models` first instead of deleting the entire directory.
+Deleting `~/.ironmlx` permanently removes its models, unfinished downloads, settings, logs, caches and reports. Back up anything needed first and check custom directories separately.
+This lists App-managed data locations; it does not claim to clear macOS trust history or every system preference.
+
+## Reference: incident retention
+
+`~/.ironmlx/incidents/backend-incidents.json` retains up to 20 incidents and 1 MiB total, with at most 32 KiB of log tail per record. Incident JSON export is capped at 512 KiB. Corrupt or oversized history is treated as empty without blocking startup. Dashboard unread markers reside in WebKit local storage.

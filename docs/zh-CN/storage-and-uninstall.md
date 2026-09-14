@@ -17,13 +17,15 @@
 路径。LAN API Key、CA 与 TLS 私钥由 macOS Keychain 管理，service 标识为
 `com.ironmlx.lan-security.v1`。
 
-## 卸载 App
+## 选择清理范围
 
-1. 退出 IronMLX，确认后端进程已停止；
-2. 删除 `IronMLX.app`；
-3. 若不保留模型与配置，删除 `~/.ironmlx`；
-4. 若使用过自定义 cache directory，单独删除该目录；
-5. 若启用过 LAN 模式，在 Keychain Access 中删除 IronMLX LAN security 条目。
+- **只删除 App**：退出 IronMLX，确认后端已停止，再删除 `IronMLX.app`。模型和配置保留。
+- **保留数据重装**：按上一步删除 App 后安装替换版本，保留 `~/.ironmlx` 和 Keychain 条目；这不等同于干净安装。
+- **彻底清理**：退出 App 后删除 App、`~/.ironmlx` 及单独配置的缓存目录；如启用过 LAN，在“钥匙串访问”中删除 IronMLX LAN security 条目。
 
-删除 `~/.ironmlx` 会永久移除已下载模型、未完成下载、配置、日志、缓存和报告。
-如需保留模型，先备份 `~/.ironmlx/models`，不要直接删除整个目录。
+删除 `~/.ironmlx` 会永久移除其中的模型、未完成下载、配置、日志、缓存和报告。需要保留时先备份；自定义目录需单独核对。
+这里列出 App 管理的数据位置，不承诺清除 macOS 的历史信任记录或全部系统偏好。
+
+## 参考：故障历史保留
+
+`~/.ironmlx/incidents/backend-incidents.json` 默认保留最近 20 条事故，总量上限 1 MiB，单条日志尾部最多 32 KiB；单次故障 JSON 导出最多 512 KiB。损坏或异常超限的历史按空记录处理，不阻塞启动。Dashboard 未读标记属于 WebKit 本地存储。

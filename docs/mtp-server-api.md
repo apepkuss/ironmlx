@@ -1,5 +1,9 @@
 # Qwen MTP Support Matrix
 
+[简体中文](zh-CN/mtp-server-api.md)
+
+For CLI/API integrators configuring Qwen MTP. Start with a compatible main model and matching MTP head; the server flag enables a path, not a guarantee that every request uses it.
+
 ## Scope
 
 MTP is exposed in two product entry points:
@@ -12,13 +16,13 @@ MTP is exposed in two product entry points:
 
 ## Support Matrix
 
-| Model family | Text CLI | VL CLI | OpenAI server | Anthropic server | Notes |
-| --- | --- | --- | --- | --- | --- |
-| Qwen3.5 dense + matching MTP head | Supported | Supported | Supported | Supported | Uses the Qwen dense main model and Qwen MTP head. |
-| Qwen3.5 MoE + matching MTP head | Supported | Supported | Supported | Supported | Uses the Qwen MoE main model and Qwen MoE MTP head. |
-| Qwen3.6 dense + matching MTP head | Supported | Supported | Supported | Supported | Checkpoints still dispatch through the Qwen3.5 dense execution architecture; omitted draft depth defaults to the Phase 4 policy. |
-| Qwen3.6 MoE + matching MTP head | Supported | Supported | Supported | Supported | `serve` preserves the Qwen3.6 MoE facade before entering the shared MoE execution kernel. |
-| Non-Qwen architectures | Not supported | Not supported | Not supported | Not supported | `--mtp-model-dir` is rejected at startup/CLI validation. |
+| Main model | Required auxiliary model |
+| --- | --- |
+| Qwen3.5 / 3.6 / 3.8 Dense | Matching Qwen MTP head |
+| Qwen3.5 / 3.6 MoE | Matching Qwen MoE MTP head |
+
+Compatible combinations support text/VL CLI and OpenAI/Anthropic serving, subject to the request constraints below.
+This page describes the Qwen MTP path. The same `--mtp-model-dir` CLI option also accepts a compatible Gemma4 assistant drafter, which uses a separate execution path and sampling rules. Do not apply the Qwen-only constraints below to Gemma4; see [Supported models](supported-models.md).
 
 ## Current constraints
 
@@ -36,8 +40,7 @@ MTP is exposed in two product entry points:
   eligible text or Qwen VL prompts restore both the main paged prefix cache and
   the MTP draft cache state. Passing `--paged-prefix-cache-dir` without a value
   uses `~/.ironmlx/cache/paged_prefix_cache`.
-- `--mtp-draft-tokens` is a startup-level setting. If omitted, the Phase 4
-  model-aware default policy chooses the draft depth.
+- `--mtp-draft-tokens` is a startup-level setting. If omitted, the model-aware default policy chooses the draft depth.
 
 ## `/healthz` MTP fields
 
@@ -93,50 +96,3 @@ The current MTP support does not add dynamic per-request `mtp_model_dir` or
 `mtp_draft_tokens`. The request API remains compatible with the existing OpenAI
 and Anthropic payloads, while server observability can confirm whether the
 startup-level MTP path is active.
-
-## Validation Targets
-
-Core and unit coverage:
-
-```sh
-MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx \
-  cli::generate::tests::mtp_support_policy_allows_qwen_text_and_vl_and_rejects_other_architectures
-
-MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx \
-  cli::serve::scheduler_profile_tests::serve_qwen_moe_dispatch_preserves_qwen36_checkpoint_identity
-
-MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx \
-  core::server::openai::tests::chat_completions_routes_streaming_and_unary_scheduler_requests
-
-MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx \
-  core::server::anthropic::tests::messages_routes_streaming_and_unary_scheduler_requests
-
-MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx --lib actor_mtp_mode -- --nocapture
-
-MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx --lib health_collector_mtp -- --nocapture
-
-MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx --test cli_generate_mtp_e2e -- --list
-```
-
-Real-checkpoint CLI validation remains ignored by default. See
-[`docs/mtp-acceptance.md`](mtp-acceptance.md) for the full text/VL matrix.
-
-VL + MTP + paged-prefix validation remains ignored by default:
-
-```sh
-MLX_DIR=$HOME/.local/mlx \
-QWEN35_MODEL=/path/to/Qwen3.5-4B-MLX-4bit/snapshots/<sha> \
-QWEN35_MTP_MODEL=/path/to/Qwen3.5-4B-MTP-4bit/snapshots/<sha> \
-cargo test --release -p ironmlx --test vl_mtp_paged_prefix_e2e \
-  qwen35_vl_mtp_paged_prefix_cache_exact_hit_batch_and_image_miss \
-  -- --ignored --test-threads=1 --nocapture
-```
-
-```sh
-MLX_DIR=$HOME/.local/mlx \
-QWEN36_MOE_MODEL=/path/to/Qwen3.6-35B-A3B-4bit/snapshots/<sha> \
-QWEN36_MOE_MTP_MODEL=/path/to/Qwen3.6-35B-A3B-MTP-4bit/snapshots/<sha> \
-cargo test --release -p ironmlx --test vl_mtp_paged_prefix_e2e \
-  qwen36_moe_vl_mtp_paged_prefix_cache_exact_hit_batch_and_image_miss \
-  -- --ignored --test-threads=1 --nocapture
-```

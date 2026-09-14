@@ -1,5 +1,7 @@
 # Versioning and release process
 
+[简体中文](zh-CN/versioning-and-releases.md)
+
 ## One product version
 
 The repository-root `VERSION` file is canonical. Rust workspace packages, CLI,
@@ -33,21 +35,11 @@ IronMLX cannot accidentally publish to crates.io.
 
 Stable tags use `vX.Y.Z` and must match `VERSION`. DMG, App About, CLI
 `--version`, `healthz.version`, the release tag, and release notes must use the
-same product version. Development previews use the separate
-`preview-YYYYMMDD-shortSHA` namespace.
+same product version. Release candidates use `vX.Y.Z-rc.N` tags.
 
 ## Current hard gate
 
-`release-legal-gate.sh` runs during packaging and in the GitHub preview workflow.
-`IRONMLX_PUBLIC_DISTRIBUTION_READY=false` currently makes public binary release
-fail. After P0-8B, an authorized reviewer may enable it only when notices,
-inventory, license texts, SBOM, and final legal review are complete.
-
-The gate requires the project `LICENSE`, `NOTICE`, and deterministic
-`SBOM.cdx.json` to be present in the release materials. It does not require or
-imply a particular first-party open-source license;
-that policy is a separate release decision. See [Third-party materials](third-party-materials.md)
-for the locked inventory process.
+`scripts/release-legal-gate.sh` checks the authorized distribution flag and required licenses, Notices, inventory and reproducible SBOM. Read `scripts/release-config.sh` for the current flag. Passing this gate does not publish anything; signing, notarization, tag identity and explicit publication remain separate checks. See [Release pipeline](stable-release-pipeline.md) for material updates.
 
 ## Stable release identity
 
@@ -81,26 +73,19 @@ It compares the base `X.Y.Z` to the App version and `VERSION`, retaining all
 clean-checkout, tag/HEAD, build-number and Bundle-source checks. Stable packaging
 and publication never enable this mode and continue to reject RC tags.
 
-## RC packaging and publication
+## RC and stable release entry points
 
-The Release Candidate workflow requires an immutable vX.Y.Z-rc.N tag. Tag push
-and publish=false validate only, without Apple credentials or publication.
-The repository variable IRONMLX_UPDATE_PUBLIC_ED_KEY is required.
+| Mode | Tag | Workflow |
+| --- | --- | --- |
+| RC | `vX.Y.Z-rc.N` | Release Candidate |
+| Stable | `vX.Y.Z` | Stable Release |
 
-Manual publish=true uses the stable-release Environment credentials and retains
-public-distribution authorization gates. It signs and notarizes the App, staples
-its ticket, packages ZIP/DMG, then signs/notarizes/staples the final DMG.
-The App remains IronMLX.app and uses release-candidate distribution/update channels.
-Archive output uses .build/stable-release (shared with the stable packaging engine).
+Tag pushes and manual `publish=false` build and validate only. Explicit `publish=true` enters signing, notarization and publication.
+Both require the repository update public key. Credentials, ordering, channels and recovery are documented in the [release pipeline](stable-release-pipeline.md).
 
-A draft is uploaded and downloaded for exact asset/hash verification before
-promotion to a prerelease with make_latest=false. The RC feed is updated only
-after public download verification. Existing releases/tags are never overwritten.
-See [RC signing](zh-CN/rc-signing.md) for configuration and validation boundaries.
+## Archive content checks
 
-## Stable archive layout and independent content verification
-
-Stable assets now use one output directory containing `IronMLX-X.Y.Z.dmg`,
+Stable assets use one output directory containing `IronMLX-X.Y.Z.dmg`,
 `IronMLX-X.Y.Z.zip`, `SHA256SUMS`, the individual legal materials and
 `THIRD_PARTY_LICENSES/`. The ZIP has an `IronMLX-X.Y.Z/` root; the mounted DMG
 has the same contents at its volume root. Both contain `IronMLX.app` and all
@@ -123,7 +108,4 @@ identity, clean-source, legal-authorization, static Bundle, signing and Gatekeep
 gates before invoking this archive engine. Content-only artifacts must not be
 published as approved stable releases.
 
-Public Sparkle channel configuration and feed deployment are documented in
-[Automatic updates](automatic-updates.md).
-
-See [Stable release pipeline](stable-release-pipeline.md) for validation-only dispatch, signing credentials and draft publication.
+Credentials, signing, notarization, feeds and recovery are documented in the [release pipeline](stable-release-pipeline.md).

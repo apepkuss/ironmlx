@@ -890,7 +890,7 @@ def parse_int_csv(raw: str) -> Tuple[int, ...]:
 
 def default_out_root(root: Path) -> Path:
     stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
-    return root / "docs/benchmarks/gemma4-drafter-active-kv-regression" / stamp
+    return root / "reports/benchmarks/gemma4-drafter-active-kv-regression" / stamp
 
 
 def default_e4b_model_dir() -> Path:

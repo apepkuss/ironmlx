@@ -650,7 +650,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> MatrixConfig:
     root = Path(__file__).resolve().parent.parent
     default_out = (
         root
-        / "docs"
+        / "reports"
         / "benchmarks"
         / "turboquant-prefix-cache-matrix"
         / datetime.now().strftime("%Y%m%d-%H%M%S")

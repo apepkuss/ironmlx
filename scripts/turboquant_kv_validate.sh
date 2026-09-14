@@ -18,7 +18,7 @@ if [[ -z "$MODEL" || ! -d "$MODEL" ]]; then
 fi
 
 STAMP="${STAMP:-$(date +%Y-%m-%d-%H%M%S)}"
-OUT_DIR="${OUT_DIR:-$ROOT/docs/benchmarks/turboquant-kv/$STAMP}"
+OUT_DIR="${OUT_DIR:-$ROOT/reports/benchmarks/turboquant-kv/$STAMP}"
 MAX_TOKENS="${MAX_TOKENS:-16}"
 BENCH_MAX_TOKENS="${BENCH_MAX_TOKENS:-32}"
 RUNS="${RUNS:-3}"

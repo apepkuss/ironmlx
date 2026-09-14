@@ -28,12 +28,5 @@ the runtime recognizes the format or architecture; it is not an authorization.
   use-compliance checks.
 - IronMLX does not bundle model weights in the App, DMG, ZIP, or source release,
   host a model mirror, or repackage and redistribute third-party weights.
-- The supported-models matrix describes verified runtime capability only. Users
+- The supported-models matrix distinguishes architecture support from validation of specific models. Users
   must return to the upstream model page to confirm rights and conditions.
-
-## Release acceptance
-
-Every App, DMG, and ZIP intended for distribution must pass the release script's
-model-distribution boundary check, which rejects common model-weight files. This
-check does not replace the user's upstream license review or change the user's
-responsibility for downloaded models.

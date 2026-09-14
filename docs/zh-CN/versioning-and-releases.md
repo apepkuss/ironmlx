@@ -1,5 +1,7 @@
 # 版本与发布流程
 
+[English](../versioning-and-releases.md)
+
 ## 单一产品版本
 
 仓库根目录 `VERSION` 是产品版本的规范输入。Rust workspace、CLI、`healthz`、
@@ -30,32 +32,14 @@ IronMLX 不能通过 `cargo publish` 意外发布到 crates.io。
 
 ## Tag 与发布说明
 
-未来 stable tag 使用 `vX.Y.Z`，并必须与 `VERSION` 一致。DMG、App About、CLI
+Stable tag 使用 `vX.Y.Z`，并必须与 `VERSION` 一致。DMG、App About、CLI
 `--version`、`healthz.version`、release tag 和 release notes 应引用同一产品版本。
 
-当前 development preview 使用独立的 `preview-YYYYMMDD-shortSHA` 命名空间，
-不会冒充 stable semantic-version tag。
+RC 使用 `vX.Y.Z-rc.N` tag。
 
 ## 当前发布硬门禁
 
-`scripts/release-legal-gate.sh` 在打包和 GitHub preview workflow 中执行。当前
-`IRONMLX_PUBLIC_DISTRIBUTION_READY=false`，因此 public binary 分发必然失败。
-
-P0-8B 完成后，只有同时满足以下条件才能由单独评审显式开启：
-
-- `THIRD_PARTY_NOTICES.md` 存在且非空；
-- `third-party-inventory.json` 存在且非空；
-- `THIRD_PARTY_LICENSES/` 至少包含一份非空第三方许可证文本；
-- `SBOM.cdx.json` 存在且非空；
-- 材料已按最终闭源 App 的依赖与分发方式完成法律/合规复核；
-- `scripts/release-config.sh` 中的 distribution-ready 标志经授权改为 `true`。
-
-项目 `LICENSE`、`NOTICE` 与确定性生成的 `SBOM.cdx.json` 也必须进入发布材料。门禁不要求或暗示采用任何第一方开源许可证；第一方授权与版权策略由未来发布
-决策单独确定。
-
-第三方材料由 P0-8A 的锁定工程流程生成，更新与验证方式见
-[第三方依赖与许可证材料](third-party-materials.md)。这些材料存在并不等于完成
-法律判断，也不会自动解除 public distribution 门禁。
+`scripts/release-legal-gate.sh` 检查已授权的分发开关和许可证、Notices、清单及可重现 SBOM。开关状态以 `scripts/release-config.sh` 为准；门禁通过不等于执行公开发布。签名、公证、tag 身份和显式发布步骤仍须通过各自检查。材料更新方法见[发布流水线](stable-release-pipeline.md)。
 
 ## 正式发布产物身份
 
@@ -85,15 +69,17 @@ python3 scripts/verify-release-identity.py --candidate v0.1.0-rc.1 dist/IronMLX.
 必须与 App 版本和 `VERSION` 一致，仍执行 clean、tag/HEAD、build number 和
 Bundle 来源检查。正式打包和发布不启用此模式，继续拒绝 RC tag。
 
-## RC 打包与发布
+## RC 与稳定版发布入口
 
-工作流使用不可变的 vX.Y.Z-rc.N tag。推送 tag 或 publish=false 只验证，不读取 Apple 凭据或公开产物；需要仓库公钥变量。
+| 模式 | Tag | 工作流 |
+| --- | --- | --- |
+| RC | `vX.Y.Z-rc.N` | Release Candidate |
+| stable | `vX.Y.Z` | Stable Release |
 
-publish=true 复用 stable-release Environment 凭据和分发授权门禁。App 完成签名、公证和 stapling 后打包，最终 DMG 再签名、公证和 stapling。App 保持 IronMLX.app 名称，分发与更新通道为 release-candidate。归档输出为共享引擎的 .build/stable-release。
+Tag push 和手动 `publish=false` 只构建和验证；显式 `publish=true` 才进入签名、公证和发布流程。
+两者都要求仓库级更新公钥。凭据、执行顺序、更新通道与失败恢复统一见[发布流水线](stable-release-pipeline.md)。
 
-先上传草稿并下载校验完整资产和哈希，再公开为非 Latest 的 Prerelease，最后更新 RC feed。不覆盖现有 tag 或 Release。详见 [RC 签名与公证](rc-signing.md)。
-
-## 正式归档布局与独立内容验证
+## 归档内容检查
 
 正式输出目录统一包含 `IronMLX-X.Y.Z.dmg`、`IronMLX-X.Y.Z.zip`、`SHA256SUMS`、
 独立法律材料和 `THIRD_PARTY_LICENSES/`。ZIP 内以 `IronMLX-X.Y.Z/` 为根目录，
@@ -113,6 +99,4 @@ python3 scripts/release-archives.py verify dist/IronMLX.app .build/archive-check
 正式打包入口仍先执行身份、clean、分发授权、静态 Bundle、签名与 Gatekeeper 门禁。
 仅内容验证产生的文件不能作为已批准的正式版发布。
 
-公网 Sparkle 通道配置及 feed 发布流程见[自动更新](automatic-updates.md)。
-
-稳定版构建、凭据、仅验证模式及草稿发布流程见[稳定版发布流水线](stable-release-pipeline.md)。
+凭据、签名、公证、更新源与发布恢复流程统一见[发布流水线](stable-release-pipeline.md)。

@@ -41,8 +41,8 @@ MLX_SRC=/tmp/ironmlx-mlx-source scripts/build-app-bundle.sh
 open dist/IronMLX.app
 ```
 
-See [Installation and build](docs/installation.md) for details, or read the
-[Simplified Chinese translation](docs/zh-CN/installation.md).
+See [Building from source](docs/building-from-source.md) for details, or read the
+[Simplified Chinese translation](docs/zh-CN/building-from-source.md).
 
 ## Documentation
 
@@ -59,9 +59,8 @@ See [Installation and build](docs/installation.md) for details, or read the
 - [Known issues](docs/known-issues.md) · [简体中文](docs/zh-CN/known-issues.md)
 - [0.1.0 release notes](docs/release-notes/0.1.0.md) · [简体中文](docs/zh-CN/release-notes/0.1.0.md)
 - [Versioning and releases](docs/versioning-and-releases.md) · [简体中文](docs/zh-CN/versioning-and-releases.md)
-- [Third-party materials](docs/third-party-materials.md) · [简体中文](docs/zh-CN/third-party-materials.md)
+- [Third-party materials](docs/stable-release-pipeline.md) · [简体中文](docs/zh-CN/stable-release-pipeline.md)
 - [Security boundary](docs/security-boundary.md) · [简体中文](docs/zh-CN/security-boundary.md)
-- [Development previews](docs/development-preview-release.md) · [简体中文](docs/zh-CN/development-preview-release.md)
 - [Diagnostic export](docs/diagnostic-bundle.md) · [简体中文](docs/zh-CN/diagnostic-bundle.md)
 - [Security reporting](SECURITY.md) · [中文](docs/zh-CN/security.md)
 - [Support](SUPPORT.md) · [中文](docs/zh-CN/support.md)

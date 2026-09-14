@@ -1,15 +1,11 @@
-# HTTP API
+# HTTP API quick start
 
-The App serves the API at `http://127.0.0.1:9068` by default. A direct CLI
-server uses port 8080 unless overridden; always use the endpoint shown by the
-Dashboard or the actual startup arguments.
+[简体中文](zh-CN/api.md)
 
-## Runtime and health
+For client integrators: start the App, load a model and replace `your-model-id` with its actual ID.
+The default App endpoint is `http://127.0.0.1:9068`; direct CLI serving defaults to port 8080. Use the actual configured endpoint.
 
-Only one `ironmlx serve` backend may run for a macOS user. A second instance exits
-with `ironmlx_instance_already_running`. The lock is acquired before MLX,
-metallib, or model initialization and is released by the operating system on
-normal exit, crash, or SIGKILL.
+## Check the service and models
 
 ```bash
 curl http://127.0.0.1:9068/health
@@ -17,103 +13,48 @@ curl http://127.0.0.1:9068/healthz
 curl http://127.0.0.1:9068/v1/models
 ```
 
-`/health` means only that the HTTP process responds. `/healthz` returns a JSON
-snapshot containing product version, models, scheduler, cache, memory, and
-degraded-state details. `GET /v1/models` is an OpenAI-compatible list of
-registered models, including models that are registered but not currently loaded.
-
-## Error contract
-
-Chat Completions and Responses use an OpenAI-style error envelope:
-
-```json
-{
-  "error": {
-    "message": "...",
-    "type": "invalid_request_error",
-    "param": null,
-    "code": "invalid_json"
-  }
-}
-```
-
-Anthropic Messages uses an Anthropic-style envelope and a matching `request-id`
-header. `error.code` is a stable IronMLX machine-readable extension. Clients
-should classify by HTTP status and `error.type`, then use `error.code` for the
-specific cause.
-
-| HTTP status | Stable codes | Meaning |
-| ---: | --- | --- |
-| 400 | `invalid_json` and field/constraint codes | Invalid JSON, fields, sampling, or output constraints |
-| 413 | `request_body_too_large` | Request body exceeds 32 MiB |
-| 413 | `request_token_capacity_exceeded` | Input plus output budget exceeds model context |
-| 503 | `scheduler_queue_full`, `scheduler_unavailable`, `scheduler_reply_lost` | Scheduler temporarily unavailable |
-| 503 | `memory_budget_exceeded`, `memory_pressure`, `prefill_peak_unsafe`, `vision_prefill_peak_unsafe` | Memory governor or storage backpressure |
-| 503 | `engine_unavailable`, `diffusion_lane_overloaded` | Model engine temporarily unavailable |
-| 500 | `generation_error` and internal codes | Unexpected server error |
-
-Retryable 503 responses include `Retry-After: 5`. Messages maps temporary
-overload to `overloaded_error`; 413 uses `request_too_large` in the Anthropic
-envelope.
+`/health` only indicates HTTP responsiveness; `/healthz` reports runtime state. The App model list includes registered models that are not loaded.
+Only one backend may run per macOS user; exit the existing App backend before starting a separate CLI server.
 
 ## OpenAI Chat Completions
 
-Use `POST /v1/chat/completions` with an OpenAI-compatible `model` and `messages`.
-Set `stream: true` for SSE. `temperature` and `top_p` are public sampling
-fields. Tool calls are emitted as structured function calls; the client, not
-IronMLX, executes the function and returns the result in the next request.
+```bash
+curl http://127.0.0.1:9068/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model": "your-model-id", "messages": [{"role": "user", "content": "Hello"}], "max_tokens": 128, "stream": false}'
+```
 
 ## OpenAI Responses
 
-`POST /v1/responses` is the recommended interface for local Agent clients.
-Responses is stateless: send the complete typed item history on every request;
-IronMLX does not persist responses or conversations. Streaming uses typed SSE
-events, including reasoning and function-call items when the selected model's
-native template supports them.
+```bash
+curl http://127.0.0.1:9068/v1/responses \
+  -H 'Content-Type: application/json' \
+  -d '{"model": "your-model-id", "input": "Hello", "store": false, "max_output_tokens": 128, "stream": false}'
+```
+
+Responses is stateless: send complete history with every request. The service does not store conversations or execute tools.
 
 ## Anthropic Messages
 
-Use `POST /v1/messages`. Non-streaming errors use the Anthropic envelope; the
-streaming form emits Anthropic SSE events. `output_config.effort` converges to
-the supported low/medium/xhigh reasoning tiers. Anthropic Messages additionally
-accepts public `top_k`; `repetition_penalty` is not a public protocol field.
+```bash
+curl http://127.0.0.1:9068/v1/messages \
+  -H 'Content-Type: application/json' \
+  -d '{"model": "your-model-id", "messages": [{"role": "user", "content": "Hello"}], "max_tokens": 128, "stream": false}'
+```
 
-## Images and limits
+## Streaming, tools and structured outputs
 
-Image input is accepted only as controlled base64 data URLs for JPEG, PNG, or
-WebP. IronMLX never fetches HTTP/HTTPS image URLs. Requests are bounded to a
-32 MiB body, 8 images, 10 MiB decoded bytes per image, 24 MiB decoded bytes in
-total, 8192-pixel width/height, and the documented text/pixel/decoder budgets.
+Set `stream` to `true` for SSE. Events and termination markers differ by protocol; use the corresponding client parser.
+Tools require a compatible model. The client executes calls and sends results in the next request.
+Structured Outputs use `response_format` in Chat, `text.format` in Responses and `output_config.format` in Messages.
+See the [protocol reference](api-reference.md) for field shapes, the JSON Schema subset, reasoning and history replay.
 
-## Tools and reasoning
+## Images, LAN and errors
 
-Tool support means structured function-call generation and history replay for
-OpenAI or Anthropic protocols. IronMLX does not execute tools. Reasoning is
-enabled only when the model type and native chat template match the supported
-contract; it is not inferred from similar marker text. There is no independent
-reasoning summary, refusal, audio-output, or image-output channel for ordinary
-text models.
+Images accept JPEG/PNG/WebP base64 only; remote URLs are not fetched. LAN uses HTTPS and a Bearer API key, and clients must trust the exported CA.
+See [Security boundaries](security-boundary.md) for authentication and image limits. Log-level management is loopback-only and unavailable over LAN.
 
-## Model and administrative routes
+Invalid requests generally return 400, body/context limits return 413, and retryable overload returns 503 with `Retry-After: 5`.
+Classify by HTTP status and protocol error type, then inspect `error.code`. See the [API compatibility matrix](api-compatibility-matrix.md).
 
-`GET /v1/models` is exposed by EnginePool and App-daemon topologies. Model
-management routes under `/admin/api/models/*` are App-daemon-only. App model
-search/download uses the upstream provider and user credentials; model rights
-remain the user's responsibility (see [Model rights boundary](model-license-boundary.md)).
-
-Qwen3.8 DFlash2 runs in a separate actor and supports text Chat/Responses/
-Messages, greedy or exact sampling, and bounded request concurrency. It cannot
-be mixed with MTP, Prompt Lookup, KV quantization, paged/SSD prefix cache, or
-active-KV offload. See the [DFlash2 server API](dflash2-server-api.md) and the
-[supported model matrix](supported-models.md).
-
-## Cancellation and streaming
-
-After an SSE response starts, a client disconnect publishes a protocol-neutral
-cancellation signal. The encoder stops consuming generation events and does not
-emit a synthetic terminal event after the disconnect. Cancellation takes effect
-at the next safe scheduler/token/block boundary after the current Metal forward;
-it does not forcibly interrupt a device operation.
-
-Additional endpoint examples, compatibility details, request schemas, and
-model-specific fields are also available in the [Simplified Chinese API reference](zh-CN/api.md).
+For Agent configuration, use the [Hermes Agent](hermes-agent.md) or [oh-my-pi](oh-my-pi.md) guides.

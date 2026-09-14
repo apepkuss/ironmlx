@@ -39,15 +39,15 @@ open dist/IronMLX.app
 ```
 
 构建产物位于 `dist/IronMLX.app`。详细步骤见
-[安装与构建](docs/zh-CN/installation.md)。
+[从源码构建](docs/zh-CN/building-from-source.md)。
 
 ## 文档
 
 - [支持模型矩阵](docs/zh-CN/supported-models.md)
 - [模型权利边界](docs/zh-CN/model-license-boundary.md)
 - [API 示例](docs/zh-CN/api.md)
-- [API 兼容矩阵](docs/api-compatibility-matrix.md)
-- [DFlash2 服务端与 CLI](docs/dflash2-server-api.md)
+- [API 兼容矩阵](docs/zh-CN/api-compatibility-matrix.md)
+- [DFlash2 服务端与 CLI](docs/zh-CN/dflash2-server-api.md)
 - [Hermes Agent 集成](docs/zh-CN/hermes-agent.md)
 - [oh-my-pi 集成](docs/zh-CN/oh-my-pi.md)
 - [隐私与网络边界](docs/zh-CN/privacy.md)
@@ -56,10 +56,9 @@ open dist/IronMLX.app
 - [Known Issues](docs/zh-CN/known-issues.md)
 - [0.1.0 候选发布说明](docs/zh-CN/release-notes/0.1.0.md)
 - [版本与发布流程](docs/zh-CN/versioning-and-releases.md)
-- [第三方依赖与许可证材料](docs/zh-CN/third-party-materials.md)
+- [第三方依赖与许可证材料](docs/zh-CN/stable-release-pipeline.md)
 - [安全边界](docs/zh-CN/security-boundary.md)
 - [诊断信息导出](docs/zh-CN/diagnostic-bundle.md)
-- [开发预览发布](docs/zh-CN/development-preview-release.md)
 - [安全漏洞报告](docs/zh-CN/security.md)
 - [用户支持](docs/zh-CN/support.md)
 - [参与开发](docs/zh-CN/contributing.md)

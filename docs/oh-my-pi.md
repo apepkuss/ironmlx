@@ -1,9 +1,17 @@
 # oh-my-pi integration
 
+[简体中文](zh-CN/oh-my-pi.md)
+
 oh-my-pi (OMP) can use the IronMLX App as an inference provider through the
 Responses API. Start IronMLX and make sure the desired model is available.
 
-## Configuration
+## Use the Dashboard guide
+
+Select oh-my-pi on Dashboard **Agent**, generate configuration from the current endpoint/model, then copy it into the client configuration file. The guide does not install the client.
+This example targets OMP with `openai-responses` and models-list discovery support. Check installed-version options after upgrading.
+See the [official configuration guide](https://omp.sh/docs/custom-models). Manual steps follow.
+
+## Manual configuration
 
 Edit `~/.omp/agent/models.yml`:
 
@@ -43,3 +51,8 @@ omp --cwd /absolute/path/to/project \
 
 OMP executes bash and other client-side tools in `--cwd` and returns results to
 IronMLX. IronMLX only performs inference and emits structured tool calls.
+
+## Confirm the result
+
+The text check should return `IRONMLX_OK`. The tool check should execute `pwd` once and return the working directory; a model merely describing the command is not a successful tool call.
+If it fails, check the endpoint, model ID and template support, then see [Troubleshooting](troubleshooting.md).
