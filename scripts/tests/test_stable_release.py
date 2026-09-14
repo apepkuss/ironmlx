@@ -15,7 +15,7 @@ spec.loader.exec_module(stable)
 
 
 class PublicationTests(unittest.TestCase):
-    def scenario(self, failure=None):
+    def scenario(self, failure=None, candidate=False):
         with tempfile.TemporaryDirectory() as tmp:
             asset = Path(tmp) / 'asset.zip'
             asset.write_bytes(b'verified artifact')
@@ -37,22 +37,31 @@ class PublicationTests(unittest.TestCase):
                     public = True
                     return '{}'
                 if '/releases/tags/' in str(args):
-                    return json.dumps(dict(id=10, draft=not public, prerelease=False,
+                    return json.dumps(dict(id=10, draft=not public, prerelease=candidate,
                                            assets=[{'name': 'extra' if failure == 'asset-set' else 'asset.zip'}]))
                 return ''
 
             with patch.object(stable, 'run', run):
                 if failure:
                     with self.assertRaises((ValueError, RuntimeError)):
-                        stable.publish('owner/repo', 'v1.0.0', 'commit', [asset])
+                        stable.publish('owner/repo', 'v1.0.0-rc.1' if candidate else 'v1.0.0', 'commit', [asset], candidate=candidate)
                     self.assertFalse(public)
                 else:
-                    stable.publish('owner/repo', 'v1.0.0', 'commit', [asset])
+                    stable.publish('owner/repo', 'v1.0.0-rc.1' if candidate else 'v1.0.0', 'commit', [asset], candidate=candidate)
                     self.assertTrue(public)
+                    create = next(c for c in calls if c[1:3] == ('release', 'create'))
+                    self.assertEqual('--prerelease' in create, candidate)
+                    promotion = next(c for c in calls if '--method' in c)
+                    self.assertIn('make_latest=false' if candidate else 'make_latest=true', promotion)
                     self.assertEqual(sum(c[1:3] == ('release', 'download') for c in calls), 2)
 
     def test_draft_verified_before_promotion_and_public_download(self):
         self.scenario()
+
+    def test_candidate_draft_and_failure_boundaries(self):
+        self.scenario(candidate=True)
+        for failure in ('upload', 'corrupt', 'asset-set', 'tag-moved'):
+            self.scenario(failure, candidate=True)
 
     def test_failure_never_promotes_draft(self):
         for failure in ('upload', 'corrupt', 'asset-set', 'tag-moved'):
@@ -61,7 +70,7 @@ class PublicationTests(unittest.TestCase):
 
 
 class SigningTests(unittest.TestCase):
-    def scenario(self, status, kind="app"):
+    def scenario(self, status, kind="app", channel="stable"):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             app = root / f'IronMLX.{kind}'
@@ -98,7 +107,7 @@ if name == 'xcrun' and args[:2] == ['notarytool', 'submit']:
             scripts.mkdir()
             script = scripts / 'sign-notarize-app.sh'
             script.write_bytes((SCRIPTS / script.name).read_bytes())
-            result = subprocess.run(['bash', str(script), str(app)], env=env, capture_output=True)
+            result = subprocess.run(['bash', str(script), str(app), channel], env=env, capture_output=True)
             calls = [json.loads(line) for line in log.read_text().splitlines()]
             staple = [c for c in calls if c[:3] == ['xcrun', 'stapler', 'staple']]
             self.assertEqual(result.returncode == 0, status == 'Accepted', result.stderr)
@@ -109,6 +118,7 @@ if name == 'xcrun' and args[:2] == ['notarytool', 'submit']:
             self.assertEqual(len(signed), 8 if kind == "app" else 1)
             self.assertTrue(all(i < signed[0] for i, c in enumerate(calls) if c[0] == 'plutil'))
             if kind == 'app':
+                self.assertTrue(any(c[0] == 'plutil' and 'IronMLXDistributionChannel' in c and channel in c for c in calls))
                 self.assertIn('--entitlements', calls[signed[1]])
             submit = next(i for i, c in enumerate(calls) if c[:3] == ['xcrun', 'notarytool', 'submit'])
             self.assertGreater(submit, signed[-1])
@@ -127,6 +137,10 @@ if name == 'xcrun' and args[:2] == ['notarytool', 'submit']:
 
     def test_signing_order_and_accepted_ticket(self):
         self.scenario('Accepted')
+
+    def test_rc_channel_and_notary_rejection(self):
+        self.scenario('Accepted', channel='release-candidate')
+        self.scenario('Invalid', channel='release-candidate')
 
     def test_dmg_notarization_and_stapling(self):
         self.scenario('Accepted', 'dmg')

@@ -9,6 +9,8 @@ case "$APP" in
   *.dmg) kind=dmg ;;
   *) echo 'error: expected App or DMG' >&2; exit 1 ;;
 esac
+readonly CHANNEL="${2:-stable}"
+case "$CHANNEL" in stable|release-candidate) ;; *) echo 'error: invalid signing channel' >&2; exit 1 ;; esac
 readonly WORK="${RUNNER_TEMP:?RUNNER_TEMP required}/ironmlx-signing"
 readonly KEYCHAIN="$WORK/signing.keychain-db"
 for name in IRONMLX_DEVELOPER_ID_P12_BASE64 IRONMLX_DEVELOPER_ID_P12_PASSWORD IRONMLX_SIGNING_IDENTITY IRONMLX_APPLE_TEAM_ID IRONMLX_NOTARY_KEY_ID IRONMLX_NOTARY_ISSUER_ID IRONMLX_NOTARY_PRIVATE_KEY; do
@@ -47,7 +49,7 @@ if [ "$kind" = app ]; then
   # is accepted only after the actual ticket and Gatekeeper checks below succeed.
   plutil -replace IronMLXDeveloperIDSigned -string developer_id "$APP/Contents/Info.plist"
   plutil -replace IronMLXNotarizationStatus -string stapled "$APP/Contents/Info.plist"
-  plutil -replace IronMLXDistributionChannel -string stable "$APP/Contents/Info.plist"
+  plutil -replace IronMLXDistributionChannel -string "$CHANNEL" "$APP/Contents/Info.plist"
   sparkle="$APP/Contents/Frameworks/Sparkle.framework/Versions/B"
   sign "$sparkle/XPCServices/Installer.xpc"
   sign --entitlements "$SCRIPT_DIR/../ironmlx-app/Packaging/SparkleDownloader.entitlements" "$sparkle/XPCServices/Downloader.xpc"

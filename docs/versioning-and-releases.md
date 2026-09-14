@@ -83,39 +83,20 @@ and publication never enable this mode and continue to reject RC tags.
 
 ## RC packaging and publication
 
-The `Release Candidate` workflow handles existing `vX.Y.Z-rc.N` tags, via tag
-push or manual dispatch with `release_tag`. The workflow must be available on
-the default branch for manual dispatch, and the selected tag must contain the
-RC scripts. Existing tags are never moved or recreated; an existing Release is
-not overwritten. After committing release changes, use a new RC tag on that
-commit rather than moving an earlier RC tag.
+The Release Candidate workflow requires an immutable vX.Y.Z-rc.N tag. Tag push
+and publish=false validate only, without Apple credentials or publication.
+The repository variable IRONMLX_UPDATE_PUBLIC_ED_KEY is required.
 
-Build a clean candidate and validate its archives locally (no publication authorization required):
+Manual publish=true uses the stable-release Environment credentials and retains
+public-distribution authorization gates. It signs and notarizes the App, staples
+its ticket, packages ZIP/DMG, then signs/notarizes/staples the final DMG.
+The App remains IronMLX.app and uses release-candidate distribution/update channels.
+Archive output uses .build/stable-release (shared with the stable packaging engine).
 
-```bash
-scripts/package-release-candidate.sh v0.1.0-rc.2 validate
-```
-
-The command consumes `dist/IronMLX.app` from that exact clean tagged commit.
-It reuses the development archive engine and writes verified assets under
-`.build/development-preview-release/assets`. Both DMG and ZIP carry the RC tag
-and `ADHOC-NOT-NOTARIZED` suffix; the App is named `IronMLX Release Candidate.app`
-and declares `release-candidate`. The existing `DEVELOPMENT-PREVIEW-NOTICE.txt`
-and `PREVIEW-BUILD-METADATA.json` filenames are shared with the preview engine;
-their contents identify the RC tag and channel. Source identity is checked
-before packaging and in both extracted archives.
-
-The workflow builds the pinned MLX and Release App, verifies archives and
-checksums, and defaults to validation only. Tag pushes also validate only. Manual dispatch
-with `publish=true` enables a separate write-permission job that creates a GitHub
-**Prerelease**, never Latest, after enforcing the distribution authorization gate.
-Validation always checks material completeness and SBOM consistency. Installers
-are uploaded as Actions artifacts only when distribution is authorized; otherwise
-only the validation result is retained in the job summary. Local packaging accepts
-`validate` (default) or `publish`; the latter enforces authorization before packaging.
-Neither mode signs with Developer ID or notarizes. Normal Gatekeeper
-installation acceptance and production automatic updates are not established
-by this channel. Stable publication excludes prerelease tags.
+A draft is uploaded and downloaded for exact asset/hash verification before
+promotion to a prerelease with make_latest=false. The RC feed is updated only
+after public download verification. Existing releases/tags are never overwritten.
+See [RC signing](zh-CN/rc-signing.md) for configuration and validation boundaries.
 
 ## Stable archive layout and independent content verification
 

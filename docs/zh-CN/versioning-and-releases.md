@@ -87,33 +87,11 @@ Bundle 来源检查。正式打包和发布不启用此模式，继续拒绝 RC 
 
 ## RC 打包与发布
 
-`Release Candidate` 工作流接受现有 `vX.Y.Z-rc.N` tag，可通过推送 tag 或手动填写
-`release_tag` 触发。手动触发要求工作流已进入默认分支；选定 tag 必须包含 RC
-脚本。不会移动或重建 tag，也不覆盖已有 Release。发布改动提交后应创建新的 RC
-tag，不能移动早先的 RC tag。
+工作流使用不可变的 vX.Y.Z-rc.N tag。推送 tag 或 publish=false 只验证，不读取 Apple 凭据或公开产物；需要仓库公钥变量。
 
-对同一 clean tag 构建的 `dist/IronMLX.app` 执行本地归档验证：
+publish=true 复用 stable-release Environment 凭据和分发授权门禁。App 完成签名、公证和 stapling 后打包，最终 DMG 再签名、公证和 stapling。App 保持 IronMLX.app 名称，分发与更新通道为 release-candidate。归档输出为共享引擎的 .build/stable-release。
 
-```bash
-scripts/package-release-candidate.sh v0.1.0-rc.2 validate
-```
-
-产物复用预览归档引擎，位于 `.build/development-preview-release/assets`。
-DMG/ZIP 文件名含 RC tag 和 `ADHOC-NOT-NOTARIZED`，App 名称为
-`IronMLX Release Candidate.app`，分发通道为 `release-candidate`。沿用的
-`DEVELOPMENT-PREVIEW-NOTICE.txt` 与 `PREVIEW-BUILD-METADATA.json` 文件名属于
-共享归档格式，其内容明确记录 RC tag 和通道。打包前及两种归档解开后均核对身份。
-
-工作流构建固定 MLX 和 Release App，校验归档及 SHA-256。手动触发默认仅验证，
-推送 RC tag 也仅验证。只有手动选择 `publish=true`，才进入独立的写权限任务，
-强制核对分发授权后创建 GitHub **Prerelease**，不标为 Latest。
-
-验证模式始终检查材料完整性和 SBOM 一致性；分发未授权时不上传安装包 artifact，
-只在任务摘要中记录验证结果。授权后才可保留可下载的 Actions artifact。
-本地打包支持 `validate`（默认）与 `publish`；后者在打包前强制检查分发授权。
-本通道不执行 Developer ID
-签名或公证，也不证明正常 Gatekeeper 安装或生产自动更新已经通过。正式发布通道
-排除候选 tag。
+先上传草稿并下载校验完整资产和哈希，再公开为非 Latest 的 Prerelease，最后更新 RC feed。不覆盖现有 tag 或 Release。详见 [RC 签名与公证](rc-signing.md)。
 
 ## 正式归档布局与独立内容验证
 

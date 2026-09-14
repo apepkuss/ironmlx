@@ -80,9 +80,10 @@ class ReleaseIdentityTests(unittest.TestCase):
         shutil.copy2(SCRIPT, scripts / SCRIPT.name)
         shutil.copy2(SCRIPT.parent / "package-release-candidate.sh",
                      scripts / "package-release-candidate.sh")
-        dispatch = scripts / "package-development-preview.sh"
-        dispatch.write_text('#!/usr/bin/env bash\nset -eu\nprintf "%s\\n" "$@"\n')
+        dispatch = scripts / "verify-app-bundle.sh"
+        dispatch.write_text('#!/usr/bin/env bash\nexit 0\n')
         dispatch.chmod(0o755)
+        (scripts / "release-archives.py").write_text('import sys\nprint("archive-dispatch", *sys.argv[1:])\n')
         self.git("add", ".")
         self.git("commit", "-qm", "install candidate packager")
         self.commit = self.git("rev-parse", "HEAD")
@@ -92,8 +93,7 @@ class ReleaseIdentityTests(unittest.TestCase):
         command = ["bash", str(scripts / "package-release-candidate.sh"), "v0.1.0-rc.1"]
         result = subprocess.run(command, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue(result.stdout.endswith(
-            f"v0.1.0-rc.1\n{self.commit}\nrelease-candidate\nvalidate\n"))
+        self.assertIn("archive-dispatch assemble", result.stdout)
         self.info["IronMLXSourceTreeState"] = "dirty"
         self.write_info()
         result = subprocess.run(command, text=True, capture_output=True)

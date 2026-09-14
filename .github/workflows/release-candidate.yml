@@ -4,16 +4,16 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Existing immutable vX.Y.Z-rc.N tag (ad-hoc, not notarized)
+        description: Existing immutable vX.Y.Z-rc.N tag to package
         required: true
         type: string
       publish:
-        description: Publish a public GitHub Prerelease after validation
+        description: Sign, notarize and publicly prerelease after validation
         type: boolean
         default: false
   push:
     tags:
-      - 'v*-rc.*'
+      - "v*-rc.*"
 
 permissions:
   contents: read
@@ -23,144 +23,164 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  validate:
+  package-rc:
+    name: Build and validate RC candidate
     runs-on: macos-26
-    timeout-minutes: 120
-    outputs:
-      tag: ${{ steps.release.outputs.tag }}
-      commit: ${{ steps.policy.outputs.commit }}
-      distribution_ready: ${{ steps.policy.outputs.distribution_ready }}
+    timeout-minutes: 180
+
     steps:
-      - name: Resolve RC tag
+      - name: Resolve immutable release tag
         id: release
         shell: bash
         env:
           INPUT_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
-          if [ "$GITHUB_EVENT_NAME" = push ]; then
-            tag="$GITHUB_REF_NAME"
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            release_tag="$GITHUB_REF_NAME"
           else
-            tag="$INPUT_TAG"
+            release_tag="$INPUT_TAG"
           fi
-          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[1-9][0-9]*$ ]] || {
-            echo 'error: expected vX.Y.Z-rc.N with N >= 1' >&2
+          [[ "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[1-9][0-9]*$ ]] || {
+            echo "error: release tag must match vX.Y.Z-rc.N: $release_tag" >&2
             exit 1
           }
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "tag=$release_tag" >> "$GITHUB_OUTPUT"
 
-      - name: Checkout RC tag
+      - name: Checkout immutable release tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: refs/tags/${{ steps.release.outputs.tag }}
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Verify RC identity and distribution policy
-        id: policy
+      - name: Verify tag and distribution materials
         shell: bash
         env:
-          RC_TAG: ${{ steps.release.outputs.tag }}
-          PUBLISH: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
           set -euo pipefail
-          python3 scripts/verify-release-identity.py --candidate "$RC_TAG"
+          python3 scripts/verify-release-identity.py --candidate "$RELEASE_TAG"
           if [ "$GITHUB_EVENT_NAME" = push ]; then
             test "$(git rev-parse HEAD)" = "$(git rev-parse "$GITHUB_SHA^{commit}")"
           fi
-          scripts/verify-distribution-materials.sh
-          source scripts/release-config.sh
-          echo "distribution_ready=$IRONMLX_PUBLIC_DISTRIBUTION_READY" >> "$GITHUB_OUTPUT"
-          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          if [ "$PUBLISH" = true ]; then
-            scripts/release-legal-gate.sh
-          fi
-          # RC suffix belongs to the tag, while the product version stays X.Y.Z.
           env -u GITHUB_REF_TYPE -u GITHUB_REF_NAME scripts/verify-version-consistency.sh
+          scripts/verify-distribution-materials.sh
 
       - name: Install pinned build tools
-        shell: bash
         run: |
-          set -euo pipefail
           rustup toolchain install 1.94.0 --profile minimal
           cargo install --locked --features cli --version 0.9.1 cargo-about
 
       - name: Checkout immutable MLX source
-        shell: bash
         run: scripts/checkout-release-mlx.sh "$RUNNER_TEMP/ironmlx-mlx-source"
 
-      - name: Configure RC automatic updates
-        id: updates
-        env:
-          PUBLIC_KEY: ${{ vars.IRONMLX_UPDATE_PUBLIC_ED_KEY }}
-          PUBLISH: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
-        run: |
-          set -euo pipefail
-          if [ -z "$PUBLIC_KEY" ]; then
-            test "$PUBLISH" != true || { echo 'error: configure IRONMLX_UPDATE_PUBLIC_ED_KEY before publishing' >&2; exit 1; }
-            PUBLIC_KEY="$(swift scripts/generate-development-update-key.swift "$RUNNER_TEMP/validation-update-key")"
-            echo 'configured=false' >> "$GITHUB_OUTPUT"
-          else
-            echo 'configured=true' >> "$GITHUB_OUTPUT"
-          fi
-          echo "public_key=$PUBLIC_KEY" >> "$GITHUB_OUTPUT"
-
-      - name: Build self-contained RC App
-        shell: bash
+      - name: Build self-contained RC candidate
         env:
           MLX_SRC: ${{ runner.temp }}/ironmlx-mlx-source
+          IRONMLX_DISTRIBUTION_CHANNEL: release-candidate
           IRONMLX_UPDATE_CHANNEL: release-candidate
           IRONMLX_UPDATE_FEED_URL: https://raw.githubusercontent.com/${{ github.repository }}/updates/release-candidate.xml
-          IRONMLX_UPDATE_PUBLIC_ED_KEY: ${{ steps.updates.outputs.public_key }}
+          IRONMLX_UPDATE_PUBLIC_ED_KEY: ${{ vars.IRONMLX_UPDATE_PUBLIC_ED_KEY }}
         run: env -u GITHUB_REF_TYPE -u GITHUB_REF_NAME scripts/build-app-bundle.sh
 
-      - name: Package and verify RC archives
-        shell: bash
+      - name: Validate identity and archive contents without Apple credentials
         env:
-          RC_TAG: ${{ steps.release.outputs.tag }}
-        run: scripts/package-release-candidate.sh "$RC_TAG" validate
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          python3 scripts/verify-release-identity.py --candidate "$RELEASE_TAG" dist/IronMLX.app
+          python3 scripts/release-archives.py assemble dist/IronMLX.app .build/stable-validation
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p test_stable_release.py -v
 
-      - name: Retain verified RC assets
-        if: steps.policy.outputs.distribution_ready == 'true' && steps.updates.outputs.configured == 'true'
+      - name: Authorize production artifact transfer
+        if: github.event_name == 'workflow_dispatch' && inputs.publish
+        run: scripts/release-legal-gate.sh
+
+      - name: Preserve validated App including signatures and symlinks
+        if: github.event_name == 'workflow_dispatch' && inputs.publish
+        run: ditto -c -k --sequesterRsrc --keepParent dist/IronMLX.app .build/rc-candidate.zip
+
+      - name: Transfer validated candidate
+        if: github.event_name == 'workflow_dispatch' && inputs.publish
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: release-candidate-${{ steps.release.outputs.tag }}
-          path: .build/development-preview-release/assets
+          name: rc-candidate-${{ steps.release.outputs.tag }}
+          path: .build/rc-candidate.zip
           if-no-files-found: error
           compression-level: 0
-          retention-days: 14
+          retention-days: 1
 
-      - name: Record validation result
-        run: echo "RC archives verified. Downloadable assets are retained only when public distribution is authorized." >> "$GITHUB_STEP_SUMMARY"
+      - name: Record fixed source
+        id: source
+        run: echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      commit: ${{ steps.source.outputs.commit }}
 
   publish:
-    needs: validate
-    if: github.event_name == 'workflow_dispatch' && inputs.publish && needs.validate.outputs.distribution_ready == 'true'
+    needs: package-rc
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
     runs-on: macos-26
-    timeout-minutes: 15
+    timeout-minutes: 180
+    environment: stable-release
     permissions:
       contents: write
     steps:
-      - name: Checkout validated commit
+      - name: Checkout validated source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.validate.outputs.commit }}
+          ref: ${{ needs.package-rc.outputs.commit }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Recheck publication authorization and identity
-        env:
-          RC_TAG: ${{ needs.validate.outputs.tag }}
-        run: |
-          python3 scripts/verify-release-identity.py --candidate "$RC_TAG"
-          scripts/release-legal-gate.sh
-      - name: Download validated assets
+
+      - name: Download validated candidate
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: release-candidate-${{ needs.validate.outputs.tag }}
-          path: .build/development-preview-release/assets
+          name: rc-candidate-${{ needs.package-rc.outputs.tag }}
+          path: .build/validated-candidate
+
+      - name: Recheck identity and release authorization
+        env:
+          RELEASE_TAG: ${{ needs.package-rc.outputs.tag }}
+        run: |
+          ditto -x -k .build/validated-candidate/rc-candidate.zip dist
+          python3 scripts/verify-release-identity.py --candidate "$RELEASE_TAG" dist/IronMLX.app
+          scripts/release-legal-gate.sh
+          scripts/verify-app-bundle.sh dist/IronMLX.app
+
+      - name: Sign and notarize App
+        env:
+          IRONMLX_DEVELOPER_ID_P12_BASE64: ${{ secrets.IRONMLX_DEVELOPER_ID_P12_BASE64 }}
+          IRONMLX_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.IRONMLX_DEVELOPER_ID_P12_PASSWORD }}
+          IRONMLX_SIGNING_IDENTITY: ${{ vars.IRONMLX_SIGNING_IDENTITY }}
+          IRONMLX_APPLE_TEAM_ID: ${{ vars.IRONMLX_APPLE_TEAM_ID }}
+          IRONMLX_NOTARY_KEY_ID: ${{ secrets.IRONMLX_NOTARY_KEY_ID }}
+          IRONMLX_NOTARY_ISSUER_ID: ${{ secrets.IRONMLX_NOTARY_ISSUER_ID }}
+          IRONMLX_NOTARY_PRIVATE_KEY: ${{ secrets.IRONMLX_NOTARY_PRIVATE_KEY }}
+        run: scripts/sign-notarize-app.sh dist/IronMLX.app release-candidate
+
+      - name: Verify and package signed notarized App
+        env:
+          RELEASE_TAG: ${{ needs.package-rc.outputs.tag }}
+        run: scripts/package-release-candidate.sh "$RELEASE_TAG" publish
+
+      - name: Sign and notarize final DMG
+        env:
+          IRONMLX_DEVELOPER_ID_P12_BASE64: ${{ secrets.IRONMLX_DEVELOPER_ID_P12_BASE64 }}
+          IRONMLX_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.IRONMLX_DEVELOPER_ID_P12_PASSWORD }}
+          IRONMLX_SIGNING_IDENTITY: ${{ vars.IRONMLX_SIGNING_IDENTITY }}
+          IRONMLX_APPLE_TEAM_ID: ${{ vars.IRONMLX_APPLE_TEAM_ID }}
+          IRONMLX_NOTARY_KEY_ID: ${{ secrets.IRONMLX_NOTARY_KEY_ID }}
+          IRONMLX_NOTARY_ISSUER_ID: ${{ secrets.IRONMLX_NOTARY_ISSUER_ID }}
+          IRONMLX_NOTARY_PRIVATE_KEY: ${{ secrets.IRONMLX_NOTARY_PRIVATE_KEY }}
+        run: |
+          scripts/sign-notarize-app.sh .build/stable-release/*.dmg
+          python3 scripts/release-archives.py finalize-dmg dist/IronMLX.app .build/stable-release
+
       - name: Prepare signed RC update payload
         env:
-          RC_TAG: ${{ needs.validate.outputs.tag }}
+          RELEASE_TAG: ${{ needs.package-rc.outputs.tag }}
           UPDATE_PRIVATE_KEY: ${{ secrets.IRONMLX_UPDATE_PRIVATE_ED_KEY }}
         run: |
           set -euo pipefail
@@ -170,43 +190,24 @@ jobs:
           umask 077
           printf '%s\n' "$UPDATE_PRIVATE_KEY" > "$key_file"
           swift package --package-path ironmlx-app resolve
-          assets="$PWD/.build/development-preview-release/assets"
-          (cd "$assets" && shasum -a 256 -c SHA256SUMS)
-          mkdir -p "$RUNNER_TEMP/rc-update-app"
-          ditto -x -k "$assets/"*.zip "$RUNNER_TEMP/rc-update-app"
-          app_paths=("$RUNNER_TEMP/rc-update-app/"*/"IronMLX Release Candidate.app")
-          test "${#app_paths[@]}" = 1
-          python3 scripts/verify-release-identity.py --candidate "$RC_TAG" "${app_paths[0]}"
-          python3 scripts/package-app-update.py "${app_paths[0]}" "$RC_TAG" .build/app-update \
+          python3 scripts/package-app-update.py dist/IronMLX.app "$RELEASE_TAG" .build/app-update \
             --repository "$GITHUB_REPOSITORY" --key-file "$key_file" \
             --sign-tool ironmlx-app/.build/artifacts/sparkle/Sparkle/bin/sign_update
 
-      - name: Publish RC as GitHub Prerelease
-        shell: bash
+      - name: Upload and verify draft before public release
         env:
           GH_TOKEN: ${{ github.token }}
-          RC_TAG: ${{ needs.validate.outputs.tag }}
-        run: |
-          set -euo pipefail
-          python3 scripts/verify-release-identity.py --candidate "$RC_TAG"
-          source_commit="$(git rev-parse HEAD)"
-          test "$(gh api "repos/$GITHUB_REPOSITORY/commits/$RC_TAG" --jq .sha)" = "$source_commit"
-          cd .build/development-preview-release/assets
-          shasum -a 256 -c SHA256SUMS
-          gh release create "$RC_TAG" \
-            ./*.dmg ./*.zip SHA256SUMS \
-            ../../app-update/*.zip ../../app-update/*.xml ../../app-update/update.json \
-            DEVELOPMENT-PREVIEW-NOTICE.txt PREVIEW-BUILD-METADATA.json \
-            LICENSE NOTICE SBOM.cdx.json THIRD_PARTY_NOTICES.md \
-            third-party-inventory.json model-license-boundary.md RELEASE-NOTES.md \
-            --repo "$GITHUB_REPOSITORY" \
-            --verify-tag --prerelease --latest=false \
-            --title "IronMLX $RC_TAG (ADHOC-NOT-NOTARIZED)" \
-            --notes-file RELEASE-NOTES.md
-          test "$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RC_TAG" --jq .prerelease)" = true
-          test "$(gh api "repos/$GITHUB_REPOSITORY/commits/$RC_TAG" --jq .sha)" = "$source_commit"
+          RELEASE_TAG: ${{ needs.package-rc.outputs.tag }}
+        run: python3 scripts/publish-stable-release.py --candidate "$RELEASE_TAG" --repository "$GITHUB_REPOSITORY"
 
       - name: Publish RC feed after release download verification
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/publish-update-feed.py .build/app-update --repository "$GITHUB_REPOSITORY"
+
+      - name: Remove temporary signing credentials
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/ironmlx-signing/signing.keychain-db" >/dev/null 2>&1 || true
+          rm -rf "$RUNNER_TEMP/ironmlx-signing"
+          rm -f "$RUNNER_TEMP/rc-update-key"
