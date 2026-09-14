@@ -14,6 +14,7 @@ name = "ironmlx"
 path = "src/main.rs"
 
 [dependencies]
+ironmlx-runtime = { path = "../ironmlx-runtime" }
 ironmlx-lm = { path = "../ironmlx-lm" }
 ironmlx-core = { path = "../ironmlx-core" }
 mlx = { path = "../mlx" }
@@ -50,6 +51,7 @@ default = []
 vision-dump = ["ironmlx-lm/vision-dump"]
 
 [dev-dependencies]
+ironmlx-runtime = { path = "../ironmlx-runtime", features = ["test-support"] }
 tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
 ironmlx-lm = { path = "../ironmlx-lm", features = ["test-support"] }
 ironmlx-core = { path = "../ironmlx-core", features = ["test-support"] }

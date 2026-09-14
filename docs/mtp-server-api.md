@@ -111,9 +111,9 @@ MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx \
 MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx \
   core::server::anthropic::tests::messages_routes_streaming_and_unary_scheduler_requests
 
-MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx --lib actor_mtp_mode -- --nocapture
+MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx-runtime --lib actor_mtp_mode -- --nocapture
 
-MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx --lib health_collector_mtp -- --nocapture
+MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx-runtime --lib health_collector_mtp -- --nocapture
 
 MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx --test cli_generate_mtp_e2e -- --list
 ```

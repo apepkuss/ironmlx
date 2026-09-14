@@ -194,7 +194,7 @@ pub fn run(args: SchedulerAutotuneArgs) -> Result<()> {
 }
 
 fn run_profile(args: SchedulerAutotuneProfileArgs) -> Result<()> {
-    let store = SchedulerProfileStore::default()?;
+    let store = SchedulerProfileStore::open_default()?;
     match args.action {
         SchedulerAutotuneProfileAction::List => run_profile_list(&store),
         SchedulerAutotuneProfileAction::Show(show) => run_profile_show(&store, show),

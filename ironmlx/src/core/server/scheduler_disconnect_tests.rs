@@ -1,5 +1,5 @@
 //! HTTP disconnect contract against the native scheduler actor.
-use crate::core::scheduler_actor::tests::{
+use crate::core::scheduler_actor::test_support::{
     mk_req, wait_for_scheduler_resources_to_be_released, SchedulerActorFakeModel,
 };
 use crate::core::scheduler_actor::{spawn_scheduler_actor, SchedulerActorHandle, SchedulerCommand};

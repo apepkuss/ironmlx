@@ -540,7 +540,7 @@ fn run_with_cancellation(
     write_final_outputs(inputs, &artifacts, resolved.selection_profile)?;
     cancellation.check()?;
     let stored_runtime_profile = artifacts.runtime_profile.as_ref().and_then(|path| {
-        let stored = SchedulerProfileStore::default()
+        let stored = SchedulerProfileStore::open_default()
             .and_then(|store| persist_runtime_profile_from_artifact(&store, &resolved.model, path));
         match stored {
             Ok(path) => Some(path),

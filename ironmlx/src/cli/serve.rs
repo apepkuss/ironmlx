@@ -1276,7 +1276,7 @@ fn run_engine_pool(args: ServeArgs, manifest_path: &Path) -> Result<()> {
     let manifest = read_engine_pool_manifest(manifest_path)?;
     let _registry = server::engine::EngineRegistry::new(manifest.clone())?;
     let scheduler_profile_store = if args.scheduler_profile.is_none() {
-        match SchedulerProfileStore::default() {
+        match SchedulerProfileStore::open_default() {
             Ok(store) => Some(store),
             Err(error) => {
                 tracing::warn!(

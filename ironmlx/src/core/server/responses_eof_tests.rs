@@ -2,7 +2,7 @@
 use super::*;
 use crate::core::generation_types::GenerateEvent;
 use crate::core::scheduler::{RequestId, StepEvent};
-use crate::core::scheduler_actor::tests::SchedulerActorFakeModel;
+use crate::core::scheduler_actor::test_support::SchedulerActorFakeModel;
 use crate::core::scheduler_autotune::*;
 use tower::ServiceExt;
 

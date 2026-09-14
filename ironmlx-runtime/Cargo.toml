@@ -1,0 +1,34 @@
+[package]
+name = "ironmlx-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Inference runtime and model lifecycle services backed by MLX"
+publish = false
+
+[dependencies]
+ironmlx-lm = { path = "../ironmlx-lm" }
+ironmlx-core = { path = "../ironmlx-core" }
+mlx = { path = "../mlx" }
+anyhow = "1"
+thiserror.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+tracing = "0.1"
+tokio.workspace = true
+uuid = { version = "1", features = ["v4"] }
+dirs = "6"
+libc.workspace = true
+
+[features]
+default = []
+test-support = []
+
+[dev-dependencies]
+ironmlx-lm = { path = "../ironmlx-lm", features = ["test-support"] }
+ironmlx-core = { path = "../ironmlx-core", features = ["test-support"] }
+approx = "0.5"
+serial_test = { version = "3", default-features = false }

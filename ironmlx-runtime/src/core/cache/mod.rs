@@ -1,0 +1,46 @@
+//! Per-layer cache types for inference. See P2 spec § 1 for scope.
+
+pub mod active_kv;
+pub(crate) mod active_payload;
+pub(crate) mod gated_delta;
+pub(crate) mod kv_cache;
+pub(crate) mod layer;
+pub(crate) mod mtp_cache;
+pub(crate) mod paged_kv;
+pub(crate) mod prefix_payload;
+pub mod prefix_store;
+pub(crate) mod turboquant_kv;
+
+pub use active_kv::{
+    default_active_kv_offload_dir, timed, ActiveKvOffloadConfig, ActiveKvOffloadHealth,
+    ActiveKvOffloadSharedStats, ActiveKvOffloadStatus, ActiveKvOffloadStore, ActiveKvPageResidency,
+    ActiveKvResidencyState, ActiveKvResidencySummary, ActiveKvResidencyTracker,
+    ActiveKvStoredPayload,
+};
+pub use active_payload::{
+    ActiveKvEntryChunkReader, ActiveKvLayerChunk, ActiveKvLayerChunkKind, ActiveKvLayerChunkPayload,
+};
+pub use gated_delta::{GatedDeltaCache, GatedDeltaCacheSnapshot};
+pub use kv_cache::{KVCache, KVCacheSnapshot};
+pub use mtp_cache::{MtpCache, MtpCacheSnapshot};
+pub use paged_kv::{
+    PagedKVCache, PagedKvBlockOwner, PagedKvHotColdConfig, PagedKvHotColdSummary,
+    PagedKvImmutableBlockHandle, PagedKvPhysicalStats,
+};
+pub use prefix_payload::{
+    PagedPrefixEntry, PagedPrefixEntryStats, PagedPrefixKeySpec, PagedPrefixLayer, PrefixEntryKind,
+    PrefixLayerKind, PrefixLayerPayload, PrefixLayerSpec, PrefixMtpLayerPayload,
+    PrefixMtpLayerSpec, PrefixTensorSpec,
+};
+pub use prefix_store::{
+    cancel_process_async_prefix_store_model, process_async_prefix_store_queue,
+    process_shared_prefix_lru_cache, shrink_process_prefix_lru_caches,
+    shutdown_process_async_prefix_store_queue, AsyncPrefixStoreAdmission,
+    AsyncPrefixStoreCancellation, AsyncPrefixStorePermit, AsyncPrefixStoreQueue,
+    AsyncPrefixStoreStats, AsyncPrefixStoreSubmit, PagedPrefixCacheConfig, PagedPrefixLoadStatus,
+    PagedPrefixStore, PrefixLruCache, PrefixLruCacheConfig, PrefixLruInsertResult,
+    PrefixLruInsertStatus, SharedPrefixLruCache, DEFAULT_PAGED_PREFIX_CACHE_BLOCK_SIZE,
+};
+pub use turboquant_kv::{TurboQuantKVBits, TurboQuantKVCache, TurboQuantPrefixLayer};
+
+pub(crate) mod page_storage;

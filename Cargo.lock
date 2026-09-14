@@ -1359,6 +1359,7 @@ dependencies = [
  "image",
  "ironmlx-core",
  "ironmlx-lm",
+ "ironmlx-runtime",
  "libc",
  "mlx",
  "mlx-sys",
@@ -1419,6 +1420,26 @@ dependencies = [
  "tokenizers",
  "tracing",
  "turboquant",
+ "uuid",
+]
+
+[[package]]
+name = "ironmlx-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "approx",
+ "dirs",
+ "ironmlx-core",
+ "ironmlx-lm",
+ "libc",
+ "mlx",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
  "uuid",
 ]
 

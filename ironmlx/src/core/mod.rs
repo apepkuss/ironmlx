@@ -24,7 +24,6 @@ pub mod scheduler_autotune;
 pub mod server;
 pub mod speculative;
 pub mod speculative_model;
-pub(crate) mod speculative_qualification;
 pub mod tokenizer;
 pub mod tool_calling;
 pub mod vision;
@@ -55,8 +54,6 @@ pub mod vision_input;
 
 pub mod runtime_config;
 
-pub(crate) mod adaptive_admission;
-pub(crate) mod dflash2_actor;
 pub mod scheduler_actor;
 pub mod task_execution;
 

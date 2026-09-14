@@ -190,6 +190,7 @@ jobs:
             "$GITHUB_WORKSPACE/ironmlx/mlx.metallib"
             "$GITHUB_WORKSPACE/ironmlx-core/mlx.metallib"
             "$GITHUB_WORKSPACE/ironmlx-lm/mlx.metallib"
+            "$GITHUB_WORKSPACE/ironmlx-runtime/mlx.metallib"
             "$GITHUB_WORKSPACE/mlx/mlx.metallib"
             "$GITHUB_WORKSPACE/ironmlx-bench-kernel/mlx.metallib"
             "$GITHUB_WORKSPACE/turboquant/mlx.metallib"
@@ -205,6 +206,7 @@ jobs:
           done
           cargo test --locked -p ironmlx-core --no-default-features -- --test-threads=1
           cargo test --locked -p ironmlx-lm --no-default-features -- --test-threads=1
+          cargo test --locked -p ironmlx-runtime --no-default-features -- --test-threads=1
           cargo test --locked --all-features --workspace -- --test-threads=1
           cargo test --locked --all-features \
             --manifest-path "$GITHUB_WORKSPACE/Cargo.toml" \

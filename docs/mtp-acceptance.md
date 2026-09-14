@@ -56,9 +56,9 @@ checks passing.
 MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx \
   cli::generate::tests::mtp_support_policy_allows_qwen_text_and_vl_and_rejects_other_architectures
 
-MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx --lib actor_mtp_mode -- --nocapture
+MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx-runtime --lib actor_mtp_mode -- --nocapture
 
-MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx --lib health_collector_mtp -- --nocapture
+MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx-runtime --lib health_collector_mtp -- --nocapture
 
 MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx --test cli_generate_mtp_e2e -- --list
 ```
@@ -227,7 +227,7 @@ Gemma4 and Gemma4 Unified long-context assistant-drafter parity (defaults to
 MLX_DIR=$HOME/.local/mlx \
 GEMMA4_LONG_CONTEXT_MODEL=/path/to/gemma4-base/snapshots/<sha> \
 GEMMA4_LONG_CONTEXT_DRAFTER=/path/to/gemma4-assistant/snapshots/<sha> \
-cargo test --release -p ironmlx --test gemma4_long_context_parity \
+cargo test --release -p ironmlx-runtime --test gemma4_long_context_parity \
   gemma4_drafter_long_context_tokens_match_ordinary_q1_exactly \
   -- --ignored --test-threads=1 --nocapture
 ```
@@ -284,7 +284,7 @@ GEMMA4_LONG_CONTEXT_MODEL=/path/to/gemma4-base/snapshots/<sha> \
 GEMMA4_LONG_CONTEXT_DRAFTER=/path/to/gemma4-assistant/snapshots/<sha> \
 GEMMA4_K3V4_CONTEXT_TOKENS=8192 \
 GEMMA4_K3V4_ACTIVE_REQUESTS=1,2 \
-cargo test --release -p ironmlx --test gemma4_long_context_parity \
+cargo test --release -p ironmlx-runtime --test gemma4_long_context_parity \
   gemma4_k3v4_long_context_scheduler_uses_multi_token_verify_exactly \
   -- --ignored --test-threads=1 --nocapture
 ```
