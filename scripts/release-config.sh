@@ -10,6 +10,5 @@ readonly IRONMLX_PREVIEW_WARNING_ZH="未使用 Developer ID 签名、未经 Appl
 readonly IRONMLX_PREVIEW_WARNING_EN="Not signed with Developer ID, not notarized by Apple, for development validation only"
 
 # Distribution materials and scoped acceptance reviewed for the first RC.
-# See docs/zh-CN/release-acceptance/0.1.0-rc.1.md for evidence and exclusions.
 # This enables packaging gates; public release still requires explicit dispatch.
 readonly IRONMLX_PUBLIC_DISTRIBUTION_READY="true"

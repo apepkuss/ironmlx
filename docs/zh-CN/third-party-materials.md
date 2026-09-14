@@ -74,4 +74,3 @@ ZIP、挂载 DMG，并逐项比较 App 内部和归档根目录的材料。
 - Developer ID 签名、公证、stapling 与真实最低目标机器验收。
 
 随包 Notices 为 MPL-2.0 registry 组件提供精确版本的源码下载说明。
-审查结果与最终发布步骤见[分发材料审查](distribution-review.md)。

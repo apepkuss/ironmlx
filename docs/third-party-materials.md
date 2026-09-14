@@ -63,5 +63,4 @@ and compares every item.
 - Developer ID signing, notarization, stapling, and minimum-target acceptance.
 
 MPL-2.0 registry components receive version-specific source download instructions
-in the shipped Notices. See [distribution review](distribution-review.md) for the
-review results and final release steps.
+in the shipped Notices.
