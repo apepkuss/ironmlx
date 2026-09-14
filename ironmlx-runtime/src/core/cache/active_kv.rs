@@ -116,8 +116,6 @@ impl ActiveKvResidencyTracker {
     }
 }
 
-pub use ironmlx_lm::core::cache::active_payload::*;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActiveKvOffloadConfig {
     pub enabled: bool,

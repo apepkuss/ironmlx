@@ -22,7 +22,7 @@ pub(crate) use ironmlx_lm::core::speculative_ops::{
     trim_full_layer_cache_rows_to_accepted_prefix, verify_input, zero_hidden_like_position,
     DraftTokenDistribution, ExactSamplingCounters, MainCacheRollbackInput,
 };
-pub use ironmlx_lm::core::speculative_ops::{resolve_speculative_tokens, SpeculativeResolution};
+use ironmlx_lm::core::speculative_ops::{resolve_speculative_tokens, SpeculativeResolution};
 use {
     ironmlx_lm::core::cache::layer::enable_turboquant_kv_caches,
     ironmlx_lm::core::cache::layer::LayerCache,
@@ -702,7 +702,7 @@ fn merge_counter_vec(dst: &mut Vec<usize>, src: Vec<usize>) {
     }
 }
 
-pub use ironmlx_lm::core::speculative_model::MtpSpeculativeModel;
+use ironmlx_lm::core::speculative_model::MtpSpeculativeModel;
 
 pub(crate) fn elapsed_us_since(start: Instant) -> u64 {
     start.elapsed().as_micros().min(u128::from(u64::MAX)) as u64

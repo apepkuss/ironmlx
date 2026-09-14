@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
 
-// Transitional public path; metadata is owned by the model interface.
-pub use ironmlx_lm::core::model::ModelMeta;
+// Model metadata is owned by the model interface.
+use ironmlx_lm::core::model::ModelMeta;
 
 /// Process-footprint headroom for MLX command graphs, allocator churn, and
 /// Metal runtime state that are not represented by tensor-shape arithmetic.

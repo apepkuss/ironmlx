@@ -10,9 +10,9 @@ use serde::Serialize;
 
 use super::scheduler_profile_context::SchedulerProfileRuntimeArgs;
 use crate::Result;
+use ironmlx_lm::core::chat_template::Message;
 use ironmlx_lm::core::tokenizer::Tokenizer;
 use ironmlx_runtime::core::scheduler_profile_store::SchedulerProfileStore;
-use {crate::server::chat_format::render_and_encode, crate::server::chat_format::ChatMessage};
 use {
     ironmlx_runtime::core::scheduler_autotune::build_scheduler_autotune_runtime_profile,
     ironmlx_runtime::core::scheduler_autotune::merge_scheduler_autotune_calibrations,
@@ -342,9 +342,18 @@ fn benchmark_prompt_token_reserve(model_dir: &Path) -> Result<usize> {
         )
     })?;
     let content_tokens = tokenizer.encode(BENCHMARK_PROMPT_SAMPLE, false)?.len();
-    let messages = [ChatMessage::text("user", BENCHMARK_PROMPT_SAMPLE)];
+    let messages = [Message {
+        role: "user".into(),
+        content: BENCHMARK_PROMPT_SAMPLE.into(),
+    }];
     let template_kwargs = serde_json::json!({"enable_thinking": false});
-    let prompt_tokens = render_and_encode(&tokenizer, &messages, Some(&template_kwargs))?.len();
+    if !tokenizer.has_chat_template() {
+        anyhow::bail!(
+            "tokenizer has no chat_template — cannot serve /v1/chat/completions or /v1/messages"
+        );
+    }
+    let prompt = tokenizer.apply_chat_template(&messages, true, Some(&template_kwargs))?;
+    let prompt_tokens = tokenizer.encode(&prompt, false)?.len();
     Ok(prompt_tokens
         .saturating_sub(content_tokens)
         .saturating_add(BENCHMARK_PROMPT_TOKEN_SAFETY_MARGIN))

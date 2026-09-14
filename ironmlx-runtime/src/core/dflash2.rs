@@ -14,12 +14,12 @@ use thiserror::Error;
 use crate::core::generation_types::{GenerateEvent, GenerateRequest};
 use crate::core::speculative::{
     resolve_exact_deterministic_target_logits, resolve_exact_deterministic_target_tokens,
-    resolve_speculative_tokens, sample_logits_positions, ExactSamplingCounters,
-    SpeculativeResolution,
+    sample_logits_positions, ExactSamplingCounters,
 };
 use crate::Result;
 use ironmlx_lm::core::cache::prefix_payload::PagedPrefixEntry;
 use ironmlx_lm::core::model_input::build_position_ids;
+use ironmlx_lm::core::speculative_ops::{resolve_speculative_tokens, SpeculativeResolution};
 use {
     ironmlx_core::sampler::prepare_target_tokens_with_uniforms_batch,
     ironmlx_core::sampler::prepare_uniforms, ironmlx_core::sampler::PreparedTargetTokenSampling,

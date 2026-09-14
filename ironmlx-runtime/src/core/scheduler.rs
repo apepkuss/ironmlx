@@ -21,8 +21,7 @@ use tokio::sync::mpsc;
 
 use ironmlx_lm::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF;
 
-// Transitional public path; the trait is owned by the model-side vision module.
-pub use ironmlx_lm::core::vision::DenseVlMethods;
+use ironmlx_lm::core::vision::DenseVlMethods;
 
 /// Typed scheduler-side errors that need HTTP-level discrimination.
 ///
@@ -131,19 +130,19 @@ use crate::core::speculative::{
     commit_mtp_cache_hidden_prefix, commit_mtp_cache_hidden_tail, elapsed_us_since,
     layer_cache_supports_accepted_prefix_trim, resolve_exact_deterministic_target_logits,
     resolve_exact_deterministic_target_tokens, resolve_greedy_verified_hidden_until_mismatch,
-    resolve_speculative_tokens, restore_layer_cache, rollback_main_cache_to_accepted_prefix,
-    sample_draft_logits_position, sample_draft_logits_position_with_uniform,
-    sample_logits_positions, slice_hidden_position, slice_position_ids_prefix,
-    split_speculative_draft_prng, trim_full_layer_cache_rows_to_accepted_prefix, verify_input,
-    zero_hidden_like_position, DraftTokenDistribution, Gemma4DrafterPolicyState,
-    MainCacheRollbackInput, MtpDraftPolicyKvState, MtpDraftPolicyWindow, MtpSpeculativeConfig,
-    MtpSpeculativeStats, QwenMtpDraftPolicySnapshot, QwenMtpDraftPolicyState,
-    SpeculativeResolution,
+    restore_layer_cache, rollback_main_cache_to_accepted_prefix, sample_draft_logits_position,
+    sample_draft_logits_position_with_uniform, sample_logits_positions, slice_hidden_position,
+    slice_position_ids_prefix, split_speculative_draft_prng,
+    trim_full_layer_cache_rows_to_accepted_prefix, verify_input, zero_hidden_like_position,
+    DraftTokenDistribution, Gemma4DrafterPolicyState, MainCacheRollbackInput,
+    MtpDraftPolicyKvState, MtpDraftPolicyWindow, MtpSpeculativeConfig, MtpSpeculativeStats,
+    QwenMtpDraftPolicySnapshot, QwenMtpDraftPolicyState,
 };
 use crate::core::speculative_qualification::{NeuralExactRegime, NeuralExactSource};
 use ironmlx_lm::core::cache::active_payload::ActiveKvEntryChunkReader;
 use ironmlx_lm::core::model::Model;
 use ironmlx_lm::core::speculative_model::MtpSpeculativeModel;
+use ironmlx_lm::core::speculative_ops::{resolve_speculative_tokens, SpeculativeResolution};
 use {
     crate::core::cache::timed, crate::core::cache::ActiveKvOffloadConfig,
     crate::core::cache::ActiveKvOffloadSharedStats, crate::core::cache::ActiveKvOffloadStore,

@@ -4,6 +4,7 @@ use common::constrained::{byte_vocab_size, weather_constraint_plan_with_options}
 use ironmlx_lm::core::constrained::ToolChoiceConstraint;
 use ironmlx_lm::core::constrained::ToolConstraintOptions;
 use ironmlx_lm::core::speculative_model::MtpSpeculativeModel;
+use ironmlx_lm::core::speculative_ops::resolve_speculative_tokens;
 use ironmlx_lm::core::Loader;
 use ironmlx_lm::core::Sampler;
 use ironmlx_lm::core::Tokenizer;
@@ -11,7 +12,6 @@ use ironmlx_lm::core::TokenizerConfig;
 use ironmlx_lm::models::Qwen35Model;
 use ironmlx_lm::models::Qwen35MoeModel;
 use ironmlx_lm::models::Qwen36MoeModel;
-use ironmlx_runtime::core::speculative::resolve_speculative_tokens;
 use ironmlx_runtime::core::speculative::MtpSpeculativeConfig;
 use ironmlx_runtime::core::speculative::MtpTextGenerationStream;
 use ironmlx_runtime::core::GenerateRequest;

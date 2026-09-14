@@ -11,15 +11,16 @@ use crate::core::generation_types::{GenerateEvent, GenerateRequest};
 use crate::core::scheduler::paged_prefix_fingerprint_for_request;
 use crate::core::speculative::{
     add_elapsed_us, elapsed_us_since, resolve_exact_deterministic_target_logits,
-    resolve_speculative_tokens, sample_draft_logits_position,
-    sample_draft_logits_position_with_uniform, sample_logits_positions, slice_hidden_position,
-    split_speculative_draft_prng, trim_full_layer_cache_rows_to_accepted_prefix, verify_input,
-    DraftTokenDistribution, Gemma4DrafterPolicyState, MtpDraftPolicyKvState, MtpDraftPolicyWindow,
-    MtpSpeculativeConfig, MtpSpeculativeStats,
+    sample_draft_logits_position, sample_draft_logits_position_with_uniform,
+    sample_logits_positions, slice_hidden_position, split_speculative_draft_prng,
+    trim_full_layer_cache_rows_to_accepted_prefix, verify_input, DraftTokenDistribution,
+    Gemma4DrafterPolicyState, MtpDraftPolicyKvState, MtpDraftPolicyWindow, MtpSpeculativeConfig,
+    MtpSpeculativeStats,
 };
 use crate::Result;
 use ironmlx_core::sampler::draw_uniforms;
 use ironmlx_lm::core::model::Model;
+use ironmlx_lm::core::speculative_ops::resolve_speculative_tokens;
 use ironmlx_lm::core::vision::DenseVlMethods;
 use {
     crate::core::cache::ActiveKvOffloadConfig, crate::core::cache::ActiveKvOffloadSharedStats,
