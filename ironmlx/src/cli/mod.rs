@@ -13,7 +13,6 @@ mod mtp_draft_cap;
 mod scheduler_autotune;
 mod scheduler_autotune_calibrate;
 mod scheduler_profile_context;
-pub(crate) mod scheduler_profile_store;
 pub(crate) mod serve;
 
 pub(crate) use kv_quant::KvQuantArg;

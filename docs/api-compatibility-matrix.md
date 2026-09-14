@@ -42,7 +42,7 @@ Bundle 元数据中记录不可变的源提交；本文不引用实验性功能�
 
 发布门禁由两层组成：
 
-1. Rust 服务端 contract suite：`cargo test --locked --all-features -p ironmlx --lib core::server::`，覆盖请求提取、字段校验、错误渲染、主要拓扑和 SSE 断连释放；
+1. Rust 服务端 contract suite：`cargo test --locked --all-features -p ironmlx --lib server::`，覆盖请求提取、字段校验、错误渲染、主要拓扑和 SSE 断连释放；
 2. 固定版本官方 SDK 黑盒 suite：`scripts/api-contract-sdk/contract.py --fixture`，使用 OpenAI Python SDK `2.48.0` 和 Anthropic Python SDK `0.121.0`，通过真实 loopback HTTP/SSE 验证客户端解析。
 
 这两层不证明特定 checkpoint 的回答质量、工具选择准确率或模型生成的 JSON

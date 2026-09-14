@@ -8,9 +8,12 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use super::{
-    PagedPrefixEntry, PagedPrefixEntryStats, PagedPrefixKeySpec, PagedPrefixStore,
-    PrefixLayerPayload,
+use {
+    crate::core::cache::PagedPrefixStore,
+    ironmlx_lm::core::cache::prefix_payload::PagedPrefixEntry,
+    ironmlx_lm::core::cache::prefix_payload::PagedPrefixEntryStats,
+    ironmlx_lm::core::cache::prefix_payload::PagedPrefixKeySpec,
+    ironmlx_lm::core::cache::prefix_payload::PrefixLayerPayload,
 };
 
 const ACTIVE_KV_PROFILE: &str = "active_kv_offload_v1";
@@ -113,7 +116,7 @@ impl ActiveKvResidencyTracker {
     }
 }
 
-pub use super::active_payload::*;
+pub use ironmlx_lm::core::cache::active_payload::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActiveKvOffloadConfig {
@@ -213,7 +216,7 @@ impl ActiveKvOffloadStore {
             .collect::<Result<Vec<_>>>()?;
         let block_size = infer_block_size(entry).unwrap_or(1);
         let spec = PagedPrefixKeySpec {
-            entry_kind: super::PrefixEntryKind::WholePrefix,
+            entry_kind: ironmlx_lm::core::cache::PrefixEntryKind::WholePrefix,
             model_id: format!("active-kv-request-{request_id}"),
             token_ids,
             cached_len,

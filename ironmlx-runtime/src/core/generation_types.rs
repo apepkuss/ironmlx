@@ -1,8 +1,8 @@
 //! Native execution request and incremental token events. No transport DTOs or scheduler ownership.
 
-use super::cache::TurboQuantKVBits;
-use super::constrained::ConstraintPlan;
-use super::sampler::Sampler;
+use ironmlx_core::sampler::Sampler;
+use ironmlx_lm::core::cache::turboquant_kv::TurboQuantKVBits;
+use ironmlx_lm::core::constrained::ConstraintPlan;
 use mlx::Array;
 
 #[derive(Debug, Clone)]
@@ -42,7 +42,7 @@ pub struct GenerateRequest {
     pub image_spatial_merge_size: i32,
     /// Token id of `<|image_pad|>` (the per-patch image placeholder). Used to
     /// locate which input_id positions get replaced with vision embeddings and
-    /// to drive MRoPE VL stride boundaries. Default [`IMAGE_TOKEN_ID`](super::model_input::IMAGE_TOKEN_ID)
+    /// to drive MRoPE VL stride boundaries. Default [`IMAGE_TOKEN_ID`](ironmlx_lm::core::model_input::IMAGE_TOKEN_ID)
     /// (`248056` for Qwen3.5-VL). Sibling VL models with a different image-pad
     /// id must set this from `Tokenizer::token_to_id("<|image_pad|>")`.
     pub image_token_id: i32,

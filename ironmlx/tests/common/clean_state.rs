@@ -28,7 +28,7 @@ pub const MAX_ALLOC_PROBE_US: u128 = 10_000; // 10 ms
 pub fn verify_clean_state(label: &str) -> Result<CleanStateReport, String> {
     let ironmlx_processes_alive = count_ironmlx_processes()?;
     let zombies = count_zombies()?;
-    let free_ram_bytes = ironmlx::core::server::health::system_free_ram_bytes();
+    let free_ram_bytes = ironmlx_runtime::core::runtime_health::system_free_ram_bytes();
     let small_alloc_probe_us = run_small_alloc_probe()?;
 
     let mut errs = Vec::new();

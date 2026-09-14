@@ -21,10 +21,13 @@ use crate::core::generation_types::{GenerateEvent, GenerateRequest};
 use crate::core::memory_budget::BudgetState;
 use crate::core::scheduler::{RequestId, SchedulerError, StepEvent};
 use crate::core::scheduler_actor::AdmitReply;
-use crate::core::vision::DenseVlMethods;
-use crate::core::{Model, Tokenizer};
-use crate::models::dflash2::{DFlash2DraftModel, DFlash2Target, DFlash2TargetCacheCost};
 use crate::Result;
+use ironmlx_lm::core::vision::DenseVlMethods;
+use {ironmlx_lm::core::model::Model, ironmlx_lm::core::tokenizer::Tokenizer};
+use {
+    ironmlx_lm::models::dflash2::DFlash2DraftModel, ironmlx_lm::models::dflash2::DFlash2Target,
+    ironmlx_lm::models::dflash2::DFlash2TargetCacheCost,
+};
 
 struct ActiveDFlash2Request<'m, M>
 where
@@ -1183,7 +1186,7 @@ where
 mod tests {
     use super::*;
     use crate::core::memory_budget::KvBudgetPolicy;
-    use crate::core::sampler::Sampler;
+    use ironmlx_core::sampler::Sampler;
 
     fn test_request() -> GenerateRequest {
         GenerateRequest {

@@ -35,3 +35,5 @@ pub use tool_calling::{AgentMessage, ToolCall, ToolDefinition, ToolDialect};
 pub(crate) use weights::logical_width_from_packed;
 
 pub mod speculative_ops;
+
+pub mod prompt_images;

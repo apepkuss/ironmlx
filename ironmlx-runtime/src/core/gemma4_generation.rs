@@ -7,26 +7,7 @@ use std::time::Instant;
 use anyhow::anyhow;
 use mlx::{Array, Dtype};
 
-use crate::core::cache::layer::{
-    enable_paged_hot_cold_tiering_caches, enable_paged_kv_caches, enable_turboquant_kv_caches,
-    prefix_entry_for_row, prefix_key_spec_for_caches, restore_prefix_entry_for_row, LayerCache,
-    LayerCacheSnapshot,
-};
-use crate::core::cache::prefix_payload::{
-    PagedPrefixEntry, PagedPrefixEntryStats, PrefixTensorSpec,
-};
-use crate::core::cache::{
-    ActiveKvOffloadConfig, ActiveKvOffloadSharedStats, ActiveKvResidencySummary,
-    AsyncPrefixStoreAdmission, AsyncPrefixStoreCancellation, AsyncPrefixStoreSubmit,
-    PagedPrefixCacheConfig, PagedPrefixLoadStatus, PagedPrefixStore, PrefixLruCache,
-    PrefixLruCacheConfig, PrefixLruInsertStatus, TurboQuantKVBits,
-};
 use crate::core::generation_types::{GenerateEvent, GenerateRequest};
-use crate::core::model_input::{
-    build_position_ids, build_position_ids_vl, count_image_pad, extend_vl_chunk_end_for_image_pad,
-    slice_pos_ids_axis2, slice_vision_embeds_rows,
-};
-use crate::core::sampler::draw_uniforms;
 use crate::core::scheduler::paged_prefix_fingerprint_for_request;
 use crate::core::speculative::{
     add_elapsed_us, elapsed_us_since, resolve_exact_deterministic_target_logits,
@@ -36,17 +17,51 @@ use crate::core::speculative::{
     DraftTokenDistribution, Gemma4DrafterPolicyState, MtpDraftPolicyKvState, MtpDraftPolicyWindow,
     MtpSpeculativeConfig, MtpSpeculativeStats,
 };
-use crate::core::tokenizer::{DecodeStream, Tokenizer};
-use crate::core::vision::DenseVlMethods;
-use crate::core::Model;
 use crate::Result;
+use ironmlx_core::sampler::draw_uniforms;
+use ironmlx_lm::core::model::Model;
+use ironmlx_lm::core::vision::DenseVlMethods;
+use {
+    crate::core::cache::ActiveKvOffloadConfig, crate::core::cache::ActiveKvOffloadSharedStats,
+    crate::core::cache::ActiveKvResidencySummary, crate::core::cache::AsyncPrefixStoreAdmission,
+    crate::core::cache::AsyncPrefixStoreCancellation, crate::core::cache::AsyncPrefixStoreSubmit,
+    crate::core::cache::PagedPrefixCacheConfig, crate::core::cache::PagedPrefixLoadStatus,
+    crate::core::cache::PagedPrefixStore, crate::core::cache::PrefixLruCache,
+    crate::core::cache::PrefixLruCacheConfig, crate::core::cache::PrefixLruInsertStatus,
+    ironmlx_lm::core::cache::turboquant_kv::TurboQuantKVBits,
+};
+use {
+    ironmlx_lm::core::cache::layer::enable_paged_hot_cold_tiering_caches,
+    ironmlx_lm::core::cache::layer::enable_paged_kv_caches,
+    ironmlx_lm::core::cache::layer::enable_turboquant_kv_caches,
+    ironmlx_lm::core::cache::layer::prefix_entry_for_row,
+    ironmlx_lm::core::cache::layer::prefix_key_spec_for_caches,
+    ironmlx_lm::core::cache::layer::restore_prefix_entry_for_row,
+    ironmlx_lm::core::cache::layer::LayerCache, ironmlx_lm::core::cache::layer::LayerCacheSnapshot,
+};
+use {
+    ironmlx_lm::core::cache::prefix_payload::PagedPrefixEntry,
+    ironmlx_lm::core::cache::prefix_payload::PagedPrefixEntryStats,
+    ironmlx_lm::core::cache::prefix_payload::PrefixTensorSpec,
+};
+use {
+    ironmlx_lm::core::model_input::build_position_ids,
+    ironmlx_lm::core::model_input::build_position_ids_vl,
+    ironmlx_lm::core::model_input::count_image_pad,
+    ironmlx_lm::core::model_input::extend_vl_chunk_end_for_image_pad,
+    ironmlx_lm::core::model_input::slice_pos_ids_axis2,
+    ironmlx_lm::core::model_input::slice_vision_embeds_rows,
+};
+use {ironmlx_lm::core::tokenizer::DecodeStream, ironmlx_lm::core::tokenizer::Tokenizer};
 
-use crate::models::gemma4::Gemma4Model;
-use crate::models::gemma4::Gemma4SharedKvStates;
+use ironmlx_lm::models::gemma4::Gemma4Model;
+use ironmlx_lm::models::gemma4::Gemma4SharedKvStates;
 
-use crate::models::gemma4::{
-    draft_position_for_shared_kv, gemma4_shared_kv_from_cache_on, shared_kv_row_trim_suffix_on,
-    Gemma4AssistantModel,
+use {
+    ironmlx_lm::models::gemma4::draft_position_for_shared_kv,
+    ironmlx_lm::models::gemma4::gemma4_shared_kv_from_cache_on,
+    ironmlx_lm::models::gemma4::shared_kv_row_trim_suffix_on,
+    ironmlx_lm::models::gemma4::Gemma4AssistantModel,
 };
 
 type Gemma4DrafterPrefixLruHandle = Arc<Mutex<PrefixLruCache>>;
@@ -497,7 +512,7 @@ fn gemma4_lock_prefix_lru_cache(
 
 fn gemma4_drafter_try_load_prefix_lru_entry(
     prefix_lru_cache: Option<&Gemma4DrafterPrefixLruHandle>,
-    spec: &crate::core::cache::prefix_payload::PagedPrefixKeySpec,
+    spec: &ironmlx_lm::core::cache::prefix_payload::PagedPrefixKeySpec,
 ) -> Result<Option<(String, PagedPrefixEntry, PagedPrefixEntryStats, u128)>> {
     let Some(prefix_lru_cache) = prefix_lru_cache else {
         return Ok(None);
@@ -526,7 +541,7 @@ fn gemma4_drafter_try_load_prefix_lru_entry(
 
 fn gemma4_drafter_try_insert_prefix_lru_entry(
     prefix_lru_cache: Option<&Gemma4DrafterPrefixLruHandle>,
-    spec: crate::core::cache::prefix_payload::PagedPrefixKeySpec,
+    spec: ironmlx_lm::core::cache::prefix_payload::PagedPrefixKeySpec,
     entry: PagedPrefixEntry,
 ) -> Result<Option<String>> {
     let Some(prefix_lru_cache) = prefix_lru_cache else {
@@ -679,7 +694,7 @@ impl<'m> Gemma4DrafterGenerationStream<'m> {
 
         let prompt_len = request.prompt_ids.len();
         let cap = ((prompt_len + request.max_new_tokens) as i32)
-            .max(crate::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF);
+            .max(ironmlx_lm::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF);
         let dtype = model.cache_dtype();
         let mut cache = model.make_cache(1, cap, dtype)?;
         prefix_cache.enable_runtime_cache_storage(
@@ -984,12 +999,13 @@ impl<'m> Gemma4DrafterGenerationStream<'m> {
         let verify_forward_start = Instant::now();
         let position_stable_verify = verify_input.len() > 1;
         let _position_stable_linear =
-            position_stable_verify.then(crate::nn::position_stable_linear_scope);
+            position_stable_verify.then(ironmlx_lm::nn::position_stable_linear_scope);
         let _position_stable_qmm =
-            position_stable_verify.then(crate::nn::position_stable_qmm_scope);
+            position_stable_verify.then(ironmlx_lm::nn::position_stable_qmm_scope);
         let stable_attention = position_stable_verify
             && context_tokens > self.model.config().sliding_window.max(0) as usize;
-        let _stable_attention = stable_attention.then(crate::nn::gemma4_verify_attention_scope);
+        let _stable_attention =
+            stable_attention.then(ironmlx_lm::nn::gemma4_verify_attention_scope);
         let verified = self.model.forward_text_hidden_with_shared_kv_on(
             &verify_arr,
             &verify_pos_ids,
@@ -1216,7 +1232,7 @@ pub(crate) fn effective_draft_budget(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::cache::KVCache;
+    use ironmlx_lm::core::cache::kv_cache::KVCache;
     #[test]
     fn standalone_drafter_can_fall_back_to_ordinary_decode() {
         assert_eq!(effective_draft_budget(0, 4, 32), 0);

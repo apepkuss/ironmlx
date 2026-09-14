@@ -1,12 +1,14 @@
 //! Native model compatibility validation without admin request/response types.
-use crate::core::sampler::Sampler;
 use crate::core::speculative::{MtpDraftTokensArg, MtpSpeculativeConfig};
-use crate::models::{
-    Gemma4AssistantConfig, Gemma4Config, ModelArchitecture, Qwen35Config, Qwen35MoeConfig,
-};
 use crate::Result;
 use anyhow::Context;
+use ironmlx_core::sampler::Sampler;
 use std::path::Path;
+use {
+    ironmlx_lm::models::Gemma4AssistantConfig, ironmlx_lm::models::Gemma4Config,
+    ironmlx_lm::models::ModelArchitecture, ironmlx_lm::models::Qwen35Config,
+    ironmlx_lm::models::Qwen35MoeConfig,
+};
 pub const MTP_BASE_MODEL_NOT_FOUND_CODE: &str = "mtp_base_model_not_found";
 pub const MTP_INCOMPATIBLE_CODE: &str = "mtp_incompatible";
 pub const MTP_INVALID_CONFIG_CODE: &str = "mtp_invalid_config";
@@ -393,16 +395,16 @@ fn validate_gemma4_assistant_mtp_config(
     let mut base_has_full = false;
     for idx in 0..base_cfg.text_config.num_hidden_layers as usize {
         match base_cfg.text_config.layer_kind(idx) {
-            crate::models::gemma4::Gemma4LayerKind::Sliding => base_has_sliding = true,
-            crate::models::gemma4::Gemma4LayerKind::Full => base_has_full = true,
+            ironmlx_lm::models::gemma4::Gemma4LayerKind::Sliding => base_has_sliding = true,
+            ironmlx_lm::models::gemma4::Gemma4LayerKind::Full => base_has_full = true,
         }
     }
     let mut assistant_has_sliding = false;
     let mut assistant_has_full = false;
     for idx in 0..mtp_cfg.text_config.num_hidden_layers as usize {
         match mtp_cfg.text_config.layer_kind(idx) {
-            crate::models::gemma4::Gemma4LayerKind::Sliding => assistant_has_sliding = true,
-            crate::models::gemma4::Gemma4LayerKind::Full => assistant_has_full = true,
+            ironmlx_lm::models::gemma4::Gemma4LayerKind::Sliding => assistant_has_sliding = true,
+            ironmlx_lm::models::gemma4::Gemma4LayerKind::Full => assistant_has_full = true,
         }
     }
     if (base_has_sliding && !assistant_has_sliding) || (base_has_full && !assistant_has_full) {

@@ -10,6 +10,7 @@ description = "LLM and VLM models backed by MLX"
 publish = false
 
 [dependencies]
+clap = { version = "4", features = ["derive"], optional = true }
 ironmlx-core = { path = "../ironmlx-core" }
 mlx = { path = "../mlx" }
 turboquant = { path = "../turboquant" }
@@ -26,6 +27,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 
 [features]
 default = []
+tools = ["dep:clap"]
 vision-dump = []
 test-support = []
 
@@ -35,3 +37,53 @@ approx = "0.5"
 serial_test = { version = "3", default-features = false }
 uuid = { version = "1", features = ["v4"] }
 dirs = "6"
+
+[[bin]]
+name = "ironmlx-bf16-linear-layout-ab"
+path = "src/bin/ironmlx-bf16-linear-layout-ab.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "ironmlx-gdn-bench"
+path = "src/bin/ironmlx-gdn-bench.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "ironmlx-glm-decoder-layer-bench"
+path = "src/bin/ironmlx-glm-decoder-layer-bench.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "ironmlx-glm-full-forward-bench"
+path = "src/bin/ironmlx-glm-full-forward-bench.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "ironmlx-glm-mla-bench"
+path = "src/bin/ironmlx-glm-mla-bench.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "ironmlx-glm-moe-bench"
+path = "src/bin/ironmlx-glm-moe-bench.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "ironmlx-glm-moe-block-bench"
+path = "src/bin/ironmlx-glm-moe-block-bench.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "ironmlx-qlinear-bench"
+path = "src/bin/ironmlx-qlinear-bench.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "ironmlx-turboquant-kv-validate"
+path = "src/bin/ironmlx-turboquant-kv-validate.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "ironmlx-verify-qmm-bench"
+path = "src/bin/ironmlx-verify-qmm-bench.rs"
+required-features = ["tools"]

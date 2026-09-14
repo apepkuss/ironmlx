@@ -8,10 +8,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, bail, Context};
 use serde::{Deserialize, Serialize};
 
-use crate::core::sampler::Sampler;
 use crate::core::scheduler_autotune::SchedulerAutotuneRuntimeProfile;
 use crate::core::speculative::QwenMtpDraftPolicySnapshot;
 use crate::Result;
+use ironmlx_core::sampler::Sampler;
 
 const POSITIONS_PER_NGRAM: usize = 2;
 const QUALIFICATION_SCHEMA_VERSION: u32 = 6;

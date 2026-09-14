@@ -4,9 +4,9 @@ use anyhow::{bail, Context};
 use clap::Args;
 
 use super::KvQuantArg;
-use crate::core::cache::DEFAULT_PAGED_PREFIX_CACHE_BLOCK_SIZE;
-use crate::core::scheduler_autotune::SchedulerAutotuneRuntimeContext;
 use crate::Result;
+use ironmlx_runtime::core::cache::prefix_store::DEFAULT_PAGED_PREFIX_CACHE_BLOCK_SIZE;
+use ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneRuntimeContext;
 
 const BYTES_PER_GIB: usize = 1024 * 1024 * 1024;
 
@@ -137,9 +137,9 @@ impl SchedulerProfileRuntimeArgs {
             bail!("prompt lookup source parameters require --prompt-lookup");
         }
         let prompt_lookup = if self.prompt_lookup {
-            let defaults = crate::core::prompt_lookup::PromptLookupConfig::default();
+            let defaults = ironmlx_runtime::core::prompt_lookup::PromptLookupConfig::default();
             Some(
-                crate::core::prompt_lookup::PromptLookupConfig {
+                ironmlx_runtime::core::prompt_lookup::PromptLookupConfig {
                     min_ngram: self.prompt_lookup_min_ngram.unwrap_or(defaults.min_ngram),
                     max_ngram: self.prompt_lookup_max_ngram.unwrap_or(defaults.max_ngram),
                     max_draft_tokens: self
@@ -204,8 +204,9 @@ fn gib_to_bytes(value: Option<usize>) -> Result<Option<usize>> {
         .transpose()
 }
 
-pub(crate) use crate::core::scheduler_profile_context::{
-    build_scheduler_runtime_context, SchedulerProfileContextOptions,
+pub(crate) use {
+    ironmlx_runtime::core::scheduler_profile_context::build_scheduler_runtime_context,
+    ironmlx_runtime::core::scheduler_profile_context::SchedulerProfileContextOptions,
 };
 
 #[cfg(test)]

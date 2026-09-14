@@ -8,14 +8,10 @@ use anyhow::anyhow;
 use mlx::{Array, StreamOrDevice};
 use serde::{Deserialize, Serialize};
 
-use crate::core::cache::layer::{enable_turboquant_kv_caches, LayerCache};
-use crate::core::cache::{MtpCache, MtpCacheSnapshot};
-use crate::core::constrained::{apply_speculative_token_masks, ConstraintSession};
 use crate::core::generation_types::{GenerateEvent, GenerateRequest};
-use crate::core::model_input::build_position_ids;
-use crate::core::sampler::draw_uniforms;
-use crate::core::tokenizer::{DecodeStream, Tokenizer};
-use crate::core::Sampler;
+use ironmlx_core::sampler::draw_uniforms;
+use ironmlx_core::sampler::Sampler;
+use ironmlx_lm::core::model_input::build_position_ids;
 pub(crate) use ironmlx_lm::core::speculative_ops::{
     commit_mtp_cache_hidden_prefix, commit_mtp_cache_hidden_tail,
     layer_cache_supports_accepted_prefix_trim, resolve_exact_deterministic_target_logits,
@@ -27,14 +23,27 @@ pub(crate) use ironmlx_lm::core::speculative_ops::{
     DraftTokenDistribution, ExactSamplingCounters, MainCacheRollbackInput,
 };
 pub use ironmlx_lm::core::speculative_ops::{resolve_speculative_tokens, SpeculativeResolution};
+use {
+    ironmlx_lm::core::cache::layer::enable_turboquant_kv_caches,
+    ironmlx_lm::core::cache::layer::LayerCache,
+};
+use {
+    ironmlx_lm::core::cache::mtp_cache::MtpCache,
+    ironmlx_lm::core::cache::mtp_cache::MtpCacheSnapshot,
+};
+use {
+    ironmlx_lm::core::constrained::apply_speculative_token_masks,
+    ironmlx_lm::core::constrained::ConstraintSession,
+};
+use {ironmlx_lm::core::tokenizer::DecodeStream, ironmlx_lm::core::tokenizer::Tokenizer};
 
-#[cfg(test)]
-use crate::core::{Loader, Model};
-#[cfg(test)]
-use crate::nn::MtpStepOutput;
 use crate::Result;
 #[cfg(test)]
+use ironmlx_lm::nn::MtpStepOutput;
+#[cfg(test)]
 use mlx::Dtype;
+#[cfg(test)]
+use {ironmlx_lm::core::loader::Loader, ironmlx_lm::core::model::Model};
 
 /// Runtime limits for a single-request MTP speculative generation stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -693,7 +702,7 @@ fn merge_counter_vec(dst: &mut Vec<usize>, src: Vec<usize>) {
     }
 }
 
-pub use super::speculative_model::MtpSpeculativeModel;
+pub use ironmlx_lm::core::speculative_model::MtpSpeculativeModel;
 
 pub(crate) fn elapsed_us_since(start: Instant) -> u64 {
     start.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
@@ -1947,7 +1956,7 @@ where
         }
         let prompt_len = request.prompt_ids.len();
         let cap = ((prompt_len + request.max_new_tokens) as i32)
-            .max(crate::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF);
+            .max(ironmlx_lm::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF);
         let dtype = model.cache_dtype();
         let mut cache = model.make_cache(1, cap, dtype)?;
         if let Some(bits) = request.kv_cache_turboquant_bits {
@@ -2162,7 +2171,7 @@ where
             // A zero-draft window is the ordinary single-token target path.
             // Exact speculative QMM is required only when target positions
             // must be compared against drafted tokens.
-            let _verify_qmm = (draft_budget > 0).then(crate::nn::verify_qmm_scope);
+            let _verify_qmm = (draft_budget > 0).then(ironmlx_lm::nn::verify_qmm_scope);
             self.model.forward_text_hidden(
                 &verify_arr,
                 &verify_pos_ids,
@@ -2569,7 +2578,7 @@ mod tests {
                 .map_err(anyhow::Error::from)
         }
 
-        fn model_meta(&self) -> crate::core::model::ModelMeta {
+        fn model_meta(&self) -> ironmlx_lm::core::model::ModelMeta {
             crate::core::memory_budget::test_meta_qwen35()
         }
 

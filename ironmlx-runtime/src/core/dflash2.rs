@@ -11,26 +11,35 @@ use mlx::{Array, StreamOrDevice};
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::core::cache::layer::{prefix_entry_for_row, restore_prefix_entry_for_row, LayerCache};
-use crate::core::cache::prefix_payload::PagedPrefixEntry;
-use crate::core::constrained::{
-    apply_speculative_token_masks, apply_token_mask, ConstraintSession,
-};
 use crate::core::generation_types::{GenerateEvent, GenerateRequest};
-use crate::core::model_input::build_position_ids;
-use crate::core::sampler::{
-    prepare_target_tokens_with_uniforms_batch, prepare_uniforms, PreparedTargetTokenSampling,
-};
 use crate::core::speculative::{
     resolve_exact_deterministic_target_logits, resolve_exact_deterministic_target_tokens,
     resolve_speculative_tokens, sample_logits_positions, ExactSamplingCounters,
     SpeculativeResolution,
 };
-use crate::core::tokenizer::{DecodeStream, Tokenizer};
-use crate::models::dflash2::{
-    DFlash2DraftCache, DFlash2DraftModel, DFlash2Target, DFlash2TargetForwardMode,
-};
 use crate::Result;
+use ironmlx_lm::core::cache::prefix_payload::PagedPrefixEntry;
+use ironmlx_lm::core::model_input::build_position_ids;
+use {
+    ironmlx_core::sampler::prepare_target_tokens_with_uniforms_batch,
+    ironmlx_core::sampler::prepare_uniforms, ironmlx_core::sampler::PreparedTargetTokenSampling,
+};
+use {
+    ironmlx_lm::core::cache::layer::prefix_entry_for_row,
+    ironmlx_lm::core::cache::layer::restore_prefix_entry_for_row,
+    ironmlx_lm::core::cache::layer::LayerCache,
+};
+use {
+    ironmlx_lm::core::constrained::apply_speculative_token_masks,
+    ironmlx_lm::core::constrained::apply_token_mask,
+    ironmlx_lm::core::constrained::ConstraintSession,
+};
+use {ironmlx_lm::core::tokenizer::DecodeStream, ironmlx_lm::core::tokenizer::Tokenizer};
+use {
+    ironmlx_lm::models::dflash2::DFlash2DraftCache, ironmlx_lm::models::dflash2::DFlash2DraftModel,
+    ironmlx_lm::models::dflash2::DFlash2Target,
+    ironmlx_lm::models::dflash2::DFlash2TargetForwardMode,
+};
 
 #[derive(Debug, Clone)]
 struct DFlash2PrefixArtifact {
@@ -336,7 +345,7 @@ impl DFlash2TensorBatchCache {
         );
         let target = StreamOrDevice::default();
         for (batch_row, row) in rows.iter_mut().enumerate() {
-            crate::core::cache::layer::adopt_layer_cache_rows(
+            ironmlx_lm::core::cache::layer::adopt_layer_cache_rows(
                 &mut row.target_cache,
                 &self.target,
                 0,
@@ -475,7 +484,8 @@ where
             })
             .max()
             .unwrap_or(1);
-        let cap = i32::try_from(cap)?.max(crate::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF);
+        let cap =
+            i32::try_from(cap)?.max(ironmlx_lm::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF);
         let mut batched_target_cache =
             model.make_cache(batch_size_i32, cap, model.cache_dtype())?;
         let target_layer_ids = &draft.config().dflash_config.target_layer_ids;
@@ -560,7 +570,7 @@ where
             mlx::transforms::eval(&[&first_logits, &row_context])?;
 
             let mut target_cache = model.make_cache(1, cap, model.cache_dtype())?;
-            crate::core::cache::layer::adopt_layer_cache_rows(
+            ironmlx_lm::core::cache::layer::adopt_layer_cache_rows(
                 &mut target_cache,
                 &batched_target_cache,
                 0,
@@ -631,7 +641,7 @@ where
 
         let prompt_len = request.prompt_ids.len();
         let cap = ((prompt_len + request.max_new_tokens) as i32)
-            .max(crate::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF);
+            .max(ironmlx_lm::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF);
         let mut target_cache = model.make_cache(1, cap, model.cache_dtype())?;
         let target_layer_ids = &draft.config().dflash_config.target_layer_ids;
         let context_limit = draft.config().sliding_window - 1;
@@ -1024,14 +1034,14 @@ where
                     })
                     .max()
                     .unwrap_or(1);
-                let cap =
-                    i32::try_from(cap)?.max(crate::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF);
+                let cap = i32::try_from(cap)?
+                    .max(ironmlx_lm::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF);
                 let mut target_cache =
                     rows[0]
                         .model
                         .make_cache(batch_size_i32, cap, rows[0].model.cache_dtype())?;
                 for (batch_row, row) in rows.iter().enumerate() {
-                    crate::core::cache::layer::adopt_layer_cache_rows(
+                    ironmlx_lm::core::cache::layer::adopt_layer_cache_rows(
                         &mut target_cache,
                         &row.target_cache,
                         batch_row,
@@ -1691,7 +1701,7 @@ fn materialize_dflash2_target_cache_prefix(
 
 fn sample_initial_token(
     logits: &Array,
-    sampler: crate::core::sampler::Sampler,
+    sampler: ironmlx_core::sampler::Sampler,
     history: &[u32],
     prng_state: &mut Array,
     constraint: &mut Option<ConstraintSession>,
@@ -1732,7 +1742,9 @@ fn commit_constraint_token(constraint: &mut Option<ConstraintSession>, token: u3
     Ok(())
 }
 
-fn dflash2_target_forward_mode(sampler: crate::core::sampler::Sampler) -> DFlash2TargetForwardMode {
+fn dflash2_target_forward_mode(
+    sampler: ironmlx_core::sampler::Sampler,
+) -> DFlash2TargetForwardMode {
     if sampler.is_greedy() {
         DFlash2TargetForwardMode::GreedyVerify
     } else {
@@ -1742,7 +1754,7 @@ fn dflash2_target_forward_mode(sampler: crate::core::sampler::Sampler) -> DFlash
 
 fn prepare_dflash2_exact_sampling(
     target_logits: &Array,
-    sampler: crate::core::sampler::Sampler,
+    sampler: ironmlx_core::sampler::Sampler,
     draft_len: usize,
     exact_sampling: bool,
 ) -> Result<Option<PreparedTargetTokenSampling>> {
@@ -1766,7 +1778,7 @@ fn resolve_dflash2_window(
     draft_tokens: &[u32],
     greedy_verified_tokens: Option<&[u32]>,
     target_logits: &Array,
-    sampler: crate::core::sampler::Sampler,
+    sampler: ironmlx_core::sampler::Sampler,
     history: &[u32],
     prng_state: &mut Array,
 ) -> Result<SpeculativeResolution> {
@@ -2058,10 +2070,10 @@ mod tests {
     #[ignore = "loads the full local Qwen3.8 target and DFlash2 draft checkpoints"]
     #[serial(mlx_metal)]
     fn qwen38_dflash2_batched_prefill_matches_scheduler_b1_exactly() {
-        use crate::core::sampler::Sampler;
-        use crate::core::{Loader, Tokenizer};
-        use crate::models::dflash2::DFlash2DraftModel;
-        use crate::models::Qwen35Model;
+        use ironmlx_core::sampler::Sampler;
+        use ironmlx_lm::models::dflash2::DFlash2DraftModel;
+        use ironmlx_lm::models::Qwen35Model;
+        use {ironmlx_lm::core::loader::Loader, ironmlx_lm::core::tokenizer::Tokenizer};
 
         let target_dir = std::env::var("QWEN38_MODEL").expect("QWEN38_MODEL not set");
         let draft_dir = std::env::var("DFLASH2_MODEL").expect("DFLASH2_MODEL not set");
@@ -2157,10 +2169,13 @@ mod tests {
     #[ignore = "loads the full local Qwen3.8 target and DFlash2 draft checkpoints"]
     #[serial(mlx_metal)]
     fn qwen38_dflash2_b4_windows_match_scheduler_b1_exactly() {
-        use crate::core::sampler::Sampler;
-        use crate::core::{Loader, Message, Tokenizer};
-        use crate::models::dflash2::DFlash2DraftModel;
-        use crate::models::Qwen35Model;
+        use ironmlx_core::sampler::Sampler;
+        use ironmlx_lm::models::dflash2::DFlash2DraftModel;
+        use ironmlx_lm::models::Qwen35Model;
+        use {
+            ironmlx_lm::core::chat_template::Message, ironmlx_lm::core::loader::Loader,
+            ironmlx_lm::core::tokenizer::Tokenizer,
+        };
 
         let target_dir = std::env::var("QWEN38_MODEL").expect("QWEN38_MODEL not set");
         let draft_dir = std::env::var("DFLASH2_MODEL").expect("DFLASH2_MODEL not set");
@@ -2376,7 +2391,7 @@ mod tests {
 
         let token = sample_initial_token(
             &logits,
-            crate::core::sampler::Sampler::greedy(),
+            ironmlx_core::sampler::Sampler::greedy(),
             &[],
             &mut key,
             &mut constraint,
@@ -2495,7 +2510,7 @@ mod tests {
         )
             .try_into()
             .expect("logits");
-        let sampler = crate::core::sampler::Sampler::greedy()
+        let sampler = ironmlx_core::sampler::Sampler::greedy()
             .with_temperature(0.8)
             .with_top_p(0.95)
             .with_seed(71);
@@ -2531,7 +2546,7 @@ mod tests {
         )
             .try_into()
             .expect("logits");
-        let sampler = crate::core::sampler::Sampler::greedy().with_repetition_penalty(2.0);
+        let sampler = ironmlx_core::sampler::Sampler::greedy().with_repetition_penalty(2.0);
         let mut key = mlx::random::key(0).expect("key");
 
         let resolution = resolve_dflash2_window(&[1, 1], None, &logits, sampler, &[1], &mut key)
@@ -2548,18 +2563,18 @@ mod tests {
     #[test]
     fn sampler_selects_greedy_or_sampled_target_mode() {
         assert_eq!(
-            dflash2_target_forward_mode(crate::core::sampler::Sampler::greedy()),
+            dflash2_target_forward_mode(ironmlx_core::sampler::Sampler::greedy()),
             DFlash2TargetForwardMode::GreedyVerify
         );
         assert_eq!(
             dflash2_target_forward_mode(
-                crate::core::sampler::Sampler::greedy().with_temperature(0.8)
+                ironmlx_core::sampler::Sampler::greedy().with_temperature(0.8)
             ),
             DFlash2TargetForwardMode::SampledVerify
         );
         assert_eq!(
             dflash2_target_forward_mode(
-                crate::core::sampler::Sampler::greedy().with_repetition_penalty(1.1)
+                ironmlx_core::sampler::Sampler::greedy().with_repetition_penalty(1.1)
             ),
             DFlash2TargetForwardMode::SampledVerify
         );

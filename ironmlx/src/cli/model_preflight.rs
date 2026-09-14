@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use anyhow::Context;
 use clap::Args;
 
-use crate::core::preflight_model_metadata;
 use crate::Result;
+use ironmlx_lm::core::loader::preflight_model_metadata;
 
 #[derive(Args, Debug)]
 pub struct ModelPreflightArgs {

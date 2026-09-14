@@ -9,18 +9,24 @@ use clap::Args;
 use serde::Serialize;
 
 use super::scheduler_profile_context::SchedulerProfileRuntimeArgs;
-use super::scheduler_profile_store::SchedulerProfileStore;
-use crate::core::scheduler_autotune::{
-    build_scheduler_autotune_runtime_profile, merge_scheduler_autotune_calibrations,
-    select_scheduler_autotune_profile_with_options, SchedulerAutotuneCacheState,
-    SchedulerAutotuneCalibrationInput, SchedulerAutotuneMergeOptions,
-    SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeContext,
-    SchedulerAutotuneSelectionOptions, SchedulerAutotuneSelectionProfile, SchedulerSpeculativeMode,
-    SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
-};
-use crate::core::server::chat_format::{render_and_encode, ChatMessage};
-use crate::core::Tokenizer;
 use crate::Result;
+use ironmlx_lm::core::tokenizer::Tokenizer;
+use ironmlx_runtime::core::scheduler_profile_store::SchedulerProfileStore;
+use {crate::server::chat_format::render_and_encode, crate::server::chat_format::ChatMessage};
+use {
+    ironmlx_runtime::core::scheduler_autotune::build_scheduler_autotune_runtime_profile,
+    ironmlx_runtime::core::scheduler_autotune::merge_scheduler_autotune_calibrations,
+    ironmlx_runtime::core::scheduler_autotune::select_scheduler_autotune_profile_with_options,
+    ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneCacheState,
+    ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneCalibrationInput,
+    ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneMergeOptions,
+    ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneProfileConfig,
+    ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneRuntimeContext,
+    ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneSelectionOptions,
+    ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneSelectionProfile,
+    ironmlx_runtime::core::scheduler_autotune::SchedulerSpeculativeMode,
+    ironmlx_runtime::core::scheduler_autotune::SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+};
 
 const DEFAULT_PORT: u16 = 18080;
 const DEFAULT_STARTUP_TIMEOUT_SEC: u64 = 300;
@@ -1229,13 +1235,18 @@ mod tests {
     };
     use crate::cli::scheduler_autotune::SchedulerAutotuneSelectionProfileArg;
     use crate::cli::scheduler_profile_context::SchedulerProfileRuntimeArgs;
-    use crate::cli::scheduler_profile_store::SchedulerProfileStore;
-    use crate::core::scheduler_autotune::{
-        SchedulerAutotuneCacheState, SchedulerAutotuneCalibrationInput,
-        SchedulerAutotuneMeasurement, SchedulerAutotuneObjective, SchedulerAutotuneProfileConfig,
-        SchedulerAutotuneRuntimeContext, SchedulerAutotuneRuntimeHealth,
-        SchedulerAutotuneSelectionProfile, SchedulerSpeculativeMode,
-        SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+    use ironmlx_runtime::core::scheduler_profile_store::SchedulerProfileStore;
+    use {
+        ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneCacheState,
+        ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneCalibrationInput,
+        ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneMeasurement,
+        ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneObjective,
+        ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneProfileConfig,
+        ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneRuntimeContext,
+        ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneRuntimeHealth,
+        ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneSelectionProfile,
+        ironmlx_runtime::core::scheduler_autotune::SchedulerSpeculativeMode,
+        ironmlx_runtime::core::scheduler_autotune::SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
     };
 
     const TEST_PROMPT_TOKEN_RESERVE: usize = 21;
@@ -1709,7 +1720,7 @@ mod tests {
         let model_dir = temp_dir.join("GLM-4.7-Flash-4bit");
         std::fs::create_dir_all(&model_dir).expect("create model dir");
         let profile_path = temp_dir.join("scheduler-profile.json");
-        let runtime_profile = crate::core::scheduler_autotune::SchedulerAutotuneRuntimeProfile {
+        let runtime_profile = ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneRuntimeProfile {
             schema_version: SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
             model_name: "GLM-4.7-Flash-4bit".to_string(),
             hardware_label: "m5-max-128gb".to_string(),
@@ -1717,7 +1728,7 @@ mod tests {
             config: profile_config(),
             rules: Vec::new(),
             metadata:
-                crate::core::scheduler_autotune::SchedulerAutotuneRuntimeProfileMetadata::synthetic(
+                ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneRuntimeProfileMetadata::synthetic(
                     1811606400000,
                 ),
         };

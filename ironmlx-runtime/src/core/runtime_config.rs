@@ -1,17 +1,19 @@
 //! Model registry, resolved execution configuration and resource policies.
 //! These types have no HTTP, network listener or command-line dependency.
 
-use crate::core::cache::{
-    ActiveKvOffloadConfig, PagedPrefixCacheConfig, PrefixLruCacheConfig, TurboQuantKVBits,
-};
 use crate::core::prompt_lookup::PromptLookupConfig;
 use crate::core::scheduler_autotune::SchedulerAutotuneRuntimeProfile;
-use crate::models::ModelArchitecture;
 use anyhow::{bail, Context, Result};
+use ironmlx_lm::models::ModelArchitecture;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
+use {
+    crate::core::cache::ActiveKvOffloadConfig, crate::core::cache::PagedPrefixCacheConfig,
+    crate::core::cache::PrefixLruCacheConfig,
+    ironmlx_lm::core::cache::turboquant_kv::TurboQuantKVBits,
+};
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct SamplingDefaults {

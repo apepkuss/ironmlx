@@ -13,9 +13,9 @@ use std::{
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    core::{sampler::Sampler, scheduler_autotune::SchedulerAutotuneRuntimeProfile},
-    Result,
+use {
+    crate::core::scheduler_autotune::SchedulerAutotuneRuntimeProfile, crate::Result,
+    ironmlx_core::sampler::Sampler,
 };
 
 const SCHEMA_VERSION: u32 = 1;

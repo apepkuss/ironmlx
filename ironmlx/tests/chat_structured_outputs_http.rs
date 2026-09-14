@@ -10,14 +10,15 @@
 use std::path::Path;
 use std::time::Duration;
 
-use ironmlx::core::cache::ActiveKvOffloadConfig;
-use ironmlx::core::scheduler_autotune::{
-    SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeProfile,
-    SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+use ironmlx::server;
+use ironmlx_lm::models::LlamaModel;
+use ironmlx_runtime::core::cache::active_kv::ActiveKvOffloadConfig;
+use {ironmlx_lm::core::loader::Loader, ironmlx_lm::core::tokenizer::Tokenizer};
+use {
+    ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneProfileConfig,
+    ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneRuntimeProfile,
+    ironmlx_runtime::core::scheduler_autotune::SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
 };
-use ironmlx::core::server;
-use ironmlx::core::{Loader, Tokenizer};
-use ironmlx::models::LlamaModel;
 
 fn scheduler_profile() -> SchedulerAutotuneRuntimeProfile {
     SchedulerAutotuneRuntimeProfile {
@@ -25,7 +26,7 @@ fn scheduler_profile() -> SchedulerAutotuneRuntimeProfile {
         model_name: "llama-3.2-1b".to_owned(),
         hardware_label: "test-host".to_owned(),
         runtime_context:
-            ironmlx::core::scheduler_autotune::SchedulerAutotuneRuntimeContext::local_default(32768),
+            ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneRuntimeContext::local_default(32768),
         config: SchedulerAutotuneProfileConfig {
             b_max: 2,
             prefill_chunk_size: 2048,
@@ -36,7 +37,7 @@ fn scheduler_profile() -> SchedulerAutotuneRuntimeProfile {
         },
         rules: Vec::new(),
         metadata:
-            ironmlx::core::scheduler_autotune::SchedulerAutotuneRuntimeProfileMetadata::synthetic(
+            ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneRuntimeProfileMetadata::synthetic(
                 1811606400000,
             ),
     }

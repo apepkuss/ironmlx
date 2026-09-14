@@ -1406,6 +1406,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "approx",
+ "clap",
  "dirs",
  "image",
  "ironmlx-core",
@@ -1429,6 +1430,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "approx",
+ "clap",
  "dirs",
  "ironmlx-core",
  "ironmlx-lm",

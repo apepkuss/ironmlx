@@ -1,7 +1,7 @@
 use clap::ValueEnum;
 
-use crate::core::cache::TurboQuantKVBits;
-use crate::core::scheduler_autotune::SchedulerKvQuantization;
+use ironmlx_lm::core::cache::turboquant_kv::TurboQuantKVBits;
+use ironmlx_runtime::core::scheduler_autotune::SchedulerKvQuantization;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub(crate) enum KvQuantArg {

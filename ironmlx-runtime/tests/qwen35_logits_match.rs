@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use mlx::{Array, Dtype};
 
-use ironmlx_runtime::core::generate::build_position_ids;
+use ironmlx_lm::core::model_input::build_position_ids;
 
 use ironmlx_lm::core::Loader;
 

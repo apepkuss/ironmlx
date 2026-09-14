@@ -11,14 +11,20 @@ use mlx::Array;
 #[cfg(test)]
 use mlx::Dtype;
 
-use crate::core::cache::layer::{enable_turboquant_kv_caches, LayerCache};
-use crate::core::constrained::{apply_token_mask, ConstraintPlan, ConstraintSession};
-use crate::core::model::Model;
-#[cfg(test)]
-use crate::core::sampler::Sampler;
-use crate::core::tokenizer::{DecodeStream, Tokenizer};
-use crate::core::vision::DenseVlMethods;
 use crate::Result;
+#[cfg(test)]
+use ironmlx_core::sampler::Sampler;
+use ironmlx_lm::core::model::Model;
+use ironmlx_lm::core::vision::DenseVlMethods;
+use {
+    ironmlx_lm::core::cache::layer::enable_turboquant_kv_caches,
+    ironmlx_lm::core::cache::layer::LayerCache,
+};
+use {
+    ironmlx_lm::core::constrained::apply_token_mask, ironmlx_lm::core::constrained::ConstraintPlan,
+    ironmlx_lm::core::constrained::ConstraintSession,
+};
+use {ironmlx_lm::core::tokenizer::DecodeStream, ironmlx_lm::core::tokenizer::Tokenizer};
 
 /// Process-lifetime gate: only the FIRST `GenerationStream` constructed in
 /// the process can claim the Metal capture window. Subsequent constructions
@@ -27,7 +33,9 @@ use crate::Result;
 /// capture another request, restart the server.
 static CAPTURE_CLAIMED: OnceLock<()> = OnceLock::new();
 
-pub use super::generation_types::{GenerateEvent, GenerateRequest};
+pub use {
+    crate::core::generation_types::GenerateEvent, crate::core::generation_types::GenerateRequest,
+};
 
 /// Single-request prefill+decode driver. Owns a per-call cache vector and
 /// accumulates token history; yields one [`GenerateEvent`] per decode step
@@ -160,7 +168,7 @@ fn try_start_capture() -> (bool, Option<String>) {
     }
 }
 
-pub use super::model_input::*;
+use ironmlx_lm::core::model_input::*;
 
 fn gemma4_vl_profile_enabled() -> bool {
     std::env::var_os("IRONMLX_GEMMA4_VL_PROFILE").is_some()
@@ -184,7 +192,7 @@ fn log_gemma4_vl_profile_step_ms(label: &str, start: Option<Instant>, step: usiz
     }
 }
 
-impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
+impl<'m, M: ironmlx_lm::core::model::Model + DenseVlMethods> GenerationStream<'m, M> {
     pub fn new(model: &'m M, tokenizer: &'m Tokenizer, request: GenerateRequest) -> Result<Self> {
         if request.prompt_ids.is_empty() {
             return Err(anyhow!("GenerationStream::new: prompt_ids cannot be empty"));
@@ -204,7 +212,7 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
         // `admission_window_concurrent_scheduler_and_gs_no_deadlock`
         // standalone regression.
         let cap = ((prompt_len + request.max_new_tokens) as i32)
-            .max(crate::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF);
+            .max(ironmlx_lm::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF);
         let dtype = model.cache_dtype();
         let mut cache = model.make_cache(/* batch */ 1, cap, dtype)?;
         if let Some(bits) = request.kv_cache_turboquant_bits {
@@ -485,7 +493,7 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
 
 // Non-VL methods (works for any Model) — decode path and helpers that only
 // call model.forward_on / model.forward_text_hidden (both Model trait methods).
-impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
+impl<'m, M: ironmlx_lm::core::model::Model> GenerationStream<'m, M> {
     /// Text-only constructor: works for any `M: Model`.
     ///
     /// Asserts `request.pixel_values.is_none()` — returns `Err` if called with
@@ -510,7 +518,7 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
         let (capture_active, capture_pending_decode) = try_start_capture();
 
         let cap = ((prompt_len + request.max_new_tokens) as i32)
-            .max(crate::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF);
+            .max(ironmlx_lm::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF);
         let dtype = model.cache_dtype();
         let mut cache = model.make_cache(/* batch */ 1, cap, dtype)?;
         if let Some(bits) = request.kv_cache_turboquant_bits {

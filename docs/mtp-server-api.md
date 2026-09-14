@@ -106,10 +106,10 @@ MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx \
   cli::serve::scheduler_profile_tests::serve_qwen_moe_dispatch_preserves_qwen36_checkpoint_identity
 
 MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx \
-  core::server::openai::tests::chat_completions_routes_streaming_and_unary_scheduler_requests
+  server::openai::tests::chat_completions_routes_streaming_and_unary_scheduler_requests
 
 MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx \
-  core::server::anthropic::tests::messages_routes_streaming_and_unary_scheduler_requests
+  server::anthropic::tests::messages_routes_streaming_and_unary_scheduler_requests
 
 MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx-runtime --lib actor_mtp_mode -- --nocapture
 

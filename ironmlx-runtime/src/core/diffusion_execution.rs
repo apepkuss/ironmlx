@@ -1,12 +1,12 @@
 //! Native DiffusionGemma model state and bounded serial admission.
 //! Queue ownership and cancellation do not depend on an HTTP response type.
 
-use crate::core::tokenizer::Tokenizer;
-use crate::core::vision_input::VisionInputConfig;
-use crate::models::{DiffusionGemmaGenerationConfig, DiffusionGemmaModel};
+use ironmlx_lm::core::tokenizer::Tokenizer;
+use ironmlx_lm::core::vision_input::VisionInputConfig;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, TryAcquireError};
+use {ironmlx_lm::models::DiffusionGemmaGenerationConfig, ironmlx_lm::models::DiffusionGemmaModel};
 
 #[derive(Clone)]
 pub struct DiffusionGemmaRuntime {
@@ -215,5 +215,209 @@ mod tests {
         assert_eq!(lane.stats().queued_requests, 0);
         drop(first);
         assert_eq!(lane.stats().active_requests, 0);
+    }
+}
+
+use ironmlx_lm::core::constrained::ConstraintPlan;
+use ironmlx_lm::models::diffusion_gemma::{DiffusionGemmaEventSink, DiffusionGemmaGenerateEvent};
+use mlx::Array;
+use std::cell::{OnceCell, RefCell};
+
+pub struct DiffusionGenerateRequest {
+    pub prompt_ids: Vec<u32>,
+    pub pixel_values: Option<Vec<Array>>,
+    pub image_grid_thw: Option<Vec<(i32, i32, i32)>>,
+    pub image_token_id: i32,
+    pub constraint: Option<ConstraintPlan>,
+    pub skip_special_tokens: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_generation_with_events(
+    model: &DiffusionGemmaModel,
+    tokenizer: &Tokenizer,
+    generation_config: &DiffusionGemmaGenerationConfig,
+    request: DiffusionGenerateRequest,
+    max_tokens: usize,
+    temperature: f32,
+    seed: Option<u64>,
+    emit: ironmlx_lm::models::diffusion_gemma::DiffusionGemmaEventSink<'_>,
+) -> std::result::Result<(), String> {
+    let DiffusionGenerateRequest {
+        prompt_ids,
+        pixel_values,
+        image_grid_thw,
+        image_token_id,
+        constraint,
+        skip_special_tokens,
+    } = request;
+    match (pixel_values.as_deref(), image_grid_thw.as_deref()) {
+        (Some(pixel_values), Some(image_grid_thw)) => match constraint.as_ref() {
+            Some(constraint) => {
+                ironmlx_lm::models::diffusion_gemma::generate_image_text_with_events_constrained(
+                    model,
+                    tokenizer,
+                    &prompt_ids,
+                    pixel_values,
+                    image_grid_thw,
+                    image_token_id,
+                    generation_config,
+                    max_tokens,
+                    temperature,
+                    seed,
+                    constraint,
+                    skip_special_tokens,
+                    emit,
+                )
+                .map_err(|e| e.to_string())
+            }
+            None => ironmlx_lm::models::diffusion_gemma::generate_image_text_with_events(
+                model,
+                tokenizer,
+                &prompt_ids,
+                pixel_values,
+                image_grid_thw,
+                image_token_id,
+                generation_config,
+                max_tokens,
+                temperature,
+                seed,
+                skip_special_tokens,
+                emit,
+            )
+            .map_err(|e| e.to_string()),
+        },
+        (None, None) => match constraint.as_ref() {
+            Some(constraint) => {
+                ironmlx_lm::models::diffusion_gemma::generate_text_with_events_constrained(
+                    model,
+                    tokenizer,
+                    &prompt_ids,
+                    generation_config,
+                    max_tokens,
+                    temperature,
+                    seed,
+                    constraint,
+                    skip_special_tokens,
+                    emit,
+                )
+                .map_err(|e| e.to_string())
+            }
+            None => ironmlx_lm::models::diffusion_gemma::generate_text_with_events(
+                model,
+                tokenizer,
+                &prompt_ids,
+                generation_config,
+                max_tokens,
+                temperature,
+                seed,
+                skip_special_tokens,
+                emit,
+            )
+            .map_err(|e| e.to_string()),
+        },
+        (Some(_), None) | (None, Some(_)) => {
+            Err("DiffusionGemma image request missing image tensors or grids".to_string())
+        }
+    }
+}
+
+/// Sampling options for native block diffusion generation.
+#[derive(Clone, Copy)]
+pub struct DiffusionGenerationOptions {
+    pub max_tokens: usize,
+    pub temperature: f32,
+    pub seed: Option<u64>,
+}
+
+pub struct AdmittedDiffusionRequest {
+    state: DiffusionGemmaRuntime,
+    guard: DiffusionGemmaLaneGuard,
+    request: DiffusionGenerateRequest,
+}
+
+/// Restricted event producer. Model locks and admission guards remain runtime-owned.
+pub struct DiffusionExecution<'a> {
+    state: &'a DiffusionGemmaRuntime,
+    model: OnceCell<tokio::sync::MutexGuard<'a, DiffusionGemmaModel>>,
+    request: RefCell<Option<DiffusionGenerateRequest>>,
+}
+
+impl DiffusionGemmaRuntime {
+    pub async fn admit(
+        self,
+        request: DiffusionGenerateRequest,
+    ) -> Result<AdmittedDiffusionRequest, DiffusionGemmaLaneError> {
+        let guard = self.lane.clone().enter().await?;
+        self.runtime_usage
+            .record_input_tokens(request.prompt_ids.len() as u64);
+        Ok(AdmittedDiffusionRequest {
+            state: self,
+            guard,
+            request,
+        })
+    }
+}
+
+impl AdmittedDiffusionRequest {
+    pub fn spawn<R: Send + 'static>(
+        self,
+        consume: impl FnOnce(DiffusionExecution<'_>) -> R + Send + 'static,
+    ) -> tokio::task::JoinHandle<R> {
+        tokio::task::spawn_blocking(move || {
+            let _guard = self.guard;
+            consume(DiffusionExecution {
+                state: &self.state,
+                model: OnceCell::new(),
+                request: RefCell::new(Some(self.request)),
+            })
+        })
+    }
+}
+
+impl DiffusionExecution<'_> {
+    /// Called after any initial transport frame, at the model initialization boundary.
+    pub fn initialize(&self) {
+        self.model.get_or_init(|| self.state.model.blocking_lock());
+    }
+
+    pub fn generate(
+        &self,
+        options: DiffusionGenerationOptions,
+        emit: DiffusionGemmaEventSink<'_>,
+    ) -> Result<(), String> {
+        self.initialize();
+        let request = self
+            .request
+            .borrow_mut()
+            .take()
+            .ok_or_else(|| "DiffusionGemma request already executed".to_owned())?;
+        run_generation_with_events(
+            self.model.get().expect("model initialized"),
+            &self.state.tokenizer,
+            &self.state.generation_config,
+            request,
+            options.max_tokens,
+            options.temperature,
+            options.seed,
+            emit,
+        )
+    }
+
+    pub fn collect(
+        &self,
+        options: DiffusionGenerationOptions,
+    ) -> Result<Vec<DiffusionGemmaGenerateEvent>, String> {
+        let mut events = Vec::new();
+        self.generate(options, &mut |event| {
+            events.push(event);
+            Ok(true)
+        })?;
+        mlx::transforms::clear_cache();
+        Ok(events)
+    }
+
+    pub fn record_output_tokens(&self, count: u64) {
+        self.state.runtime_usage.record_output_tokens(count);
     }
 }

@@ -173,6 +173,7 @@ jobs:
           cargo "+$RUST_NIGHTLY_TOOLCHAIN" fmt --all -- --check
           cargo "+$RUST_NIGHTLY_TOOLCHAIN" clippy --locked --all-features --workspace -- -D warnings
           cargo build --locked --release
+          cargo build --locked --release -p ironmlx-lm -p ironmlx-runtime --features ironmlx-lm/tools,ironmlx-runtime/tools --bins
 
       - name: Run public API contract tests
         shell: bash
@@ -210,7 +211,7 @@ jobs:
           cargo test --locked --all-features --workspace -- --test-threads=1
           cargo test --locked --all-features \
             --manifest-path "$GITHUB_WORKSPACE/Cargo.toml" \
-            -p ironmlx --lib core::server::
+            -p ironmlx --lib server::
 
       - name: Run pinned official SDK contract tests
         shell: bash

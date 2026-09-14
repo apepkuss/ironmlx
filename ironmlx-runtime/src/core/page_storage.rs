@@ -1,15 +1,18 @@
 //! Filesystem backend for active paged KV segments. Runtime construction injects
 //! this backend into the model cache; schema and atomic install remain unchanged.
 
-use crate::core::cache::page_storage::{KvPageStore, KvPageStoreFactory};
-use crate::core::cache::PagedKvHotColdConfig;
 use crate::Result;
 use anyhow::Context;
+use ironmlx_lm::core::cache::paged_kv::PagedKvHotColdConfig;
 use mlx::Array;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use {
+    ironmlx_lm::core::cache::page_storage::KvPageStore,
+    ironmlx_lm::core::cache::page_storage::KvPageStoreFactory,
+};
 
 #[derive(Debug)]
 struct FilePageStoreFactory {

@@ -18,7 +18,7 @@ const SCHEMA_VERSION: u32 = 7;
 const META_FILE: &str = "meta.json";
 const PAYLOAD_FILE: &str = "payload.safetensors";
 
-pub use super::prefix_payload::*;
+pub use ironmlx_lm::core::cache::prefix_payload::*;
 
 #[derive(Debug, Clone)]
 pub struct PagedPrefixStore {

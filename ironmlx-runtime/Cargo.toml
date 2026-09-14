@@ -10,6 +10,7 @@ description = "Inference runtime and model lifecycle services backed by MLX"
 publish = false
 
 [dependencies]
+clap = { version = "4", features = ["derive"], optional = true }
 ironmlx-lm = { path = "../ironmlx-lm" }
 ironmlx-core = { path = "../ironmlx-core" }
 mlx = { path = "../mlx" }
@@ -25,6 +26,7 @@ libc.workspace = true
 
 [features]
 default = []
+tools = ["dep:clap"]
 test-support = []
 
 [dev-dependencies]
@@ -32,3 +34,8 @@ ironmlx-lm = { path = "../ironmlx-lm", features = ["test-support"] }
 ironmlx-core = { path = "../ironmlx-core", features = ["test-support"] }
 approx = "0.5"
 serial_test = { version = "3", default-features = false }
+
+[[bin]]
+name = "ironmlx-core-bench"
+path = "src/bin/ironmlx-core-bench.rs"
+required-features = ["tools"]

@@ -122,22 +122,26 @@ pub(crate) fn read_scheduler_runtime_profile(
     serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
 }
 pub(crate) fn adaptive_mtp_physical_b_max(
-    architecture: crate::models::ModelArchitecture,
+    architecture: ironmlx_lm::models::ModelArchitecture,
     mtp_enabled: bool,
 ) -> Option<usize> {
     if !mtp_enabled {
         return None;
     }
     match architecture {
-        crate::models::ModelArchitecture::Gemma4 => Some(GEMMA4_DRAFTER_ADAPTIVE_PHYSICAL_B_MAX),
-        crate::models::ModelArchitecture::Qwen35Dense
-        | crate::models::ModelArchitecture::Qwen35Moe => Some(QWEN_MTP_ADAPTIVE_PHYSICAL_B_MAX),
+        ironmlx_lm::models::ModelArchitecture::Gemma4 => {
+            Some(GEMMA4_DRAFTER_ADAPTIVE_PHYSICAL_B_MAX)
+        }
+        ironmlx_lm::models::ModelArchitecture::Qwen35Dense
+        | ironmlx_lm::models::ModelArchitecture::Qwen35Moe => {
+            Some(QWEN_MTP_ADAPTIVE_PHYSICAL_B_MAX)
+        }
         _ => None,
     }
 }
 pub fn apply_adaptive_mtp_scheduler_defaults(
     args: &SchedulerResolutionOptions,
-    architecture: crate::models::ModelArchitecture,
+    architecture: ironmlx_lm::models::ModelArchitecture,
     mtp_enabled: bool,
     resolved: &mut ResolvedSchedulerRuntime,
 ) -> bool {
@@ -583,4 +587,99 @@ pub fn read_model_type(model_dir: &std::path::Path) -> Result<String> {
         .and_then(|v| v.as_str())
         .map(str::to_owned)
         .ok_or_else(|| anyhow::anyhow!("config.json missing model_type"))
+}
+
+pub struct EnginePoolSchedulerProfileRequest<'a> {
+    pub manifest_profile: Option<&'a Path>,
+    pub store: Option<&'a SchedulerProfileStore>,
+    pub hardware_label: &'a str,
+    pub mtp_model_dir: Option<&'a Path>,
+    pub mtp_draft_tokens: Option<usize>,
+    pub prompt_lookup: Option<crate::core::prompt_lookup::PromptLookupConfig>,
+}
+
+pub fn resolve_engine_pool_scheduler_profile(
+    args: &SchedulerResolutionOptions,
+    model_dir: &Path,
+    request: EnginePoolSchedulerProfileRequest<'_>,
+) -> Result<ResolvedSchedulerRuntime> {
+    let EnginePoolSchedulerProfileRequest {
+        manifest_profile,
+        store,
+        hardware_label,
+        mtp_model_dir,
+        mtp_draft_tokens,
+        prompt_lookup,
+    } = request;
+    let runtime_context = scheduler_runtime_context_for_model(
+        args,
+        model_dir,
+        mtp_model_dir,
+        mtp_draft_tokens,
+        prompt_lookup,
+        None,
+    )?;
+    let runtime_context_fingerprint = runtime_context.fingerprint();
+    let explicit_profile = manifest_profile.or(args.scheduler_profile.as_deref());
+    let mut scheduler_profile_load = load_scheduler_profile_for_model_with_explicit(
+        explicit_profile,
+        model_dir,
+        store,
+        hardware_label,
+        &runtime_context_fingerprint,
+    )?;
+    let scheduler_profile_model_name = scheduler_profile_model_name(model_dir)?;
+    let mut discard_auto_profile = false;
+    if let Some(load) = scheduler_profile_load.as_ref() {
+        match check_loaded_scheduler_profile_health(
+            &load.profile,
+            &scheduler_profile_model_name,
+            hardware_label,
+            &runtime_context,
+            unix_time_ms(),
+        ) {
+            Ok(report) => log_scheduler_profile_health(&load.path, &report),
+            Err(error) if load.auto_loaded => {
+                tracing::warn!(
+                    "ironmlx serve: scheduler profile ignored path={} model_name={} hardware_label={} error={:#}; using CLI/default scheduler config",
+                    load.path.display(),
+                    scheduler_profile_model_name,
+                    hardware_label,
+                    error
+                );
+                discard_auto_profile = true;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    if discard_auto_profile {
+        scheduler_profile_load = None;
+    }
+    let scheduler_runtime_profile = resolve_scheduler_runtime_profile(
+        args,
+        scheduler_profile_load.as_ref().map(|load| &load.profile),
+        &runtime_context,
+    )?;
+    let scheduler_config = SchedulerServeConfig {
+        prefill_chunk_size: scheduler_runtime_profile.config.prefill_chunk_size,
+        b_max: scheduler_runtime_profile.config.b_max,
+        admission_deadline_ms: scheduler_runtime_profile.config.admission_deadline_ms,
+        admission_queue_max: scheduler_runtime_profile.config.admission_queue_max,
+        max_cache_cap: scheduler_runtime_profile.config.max_cache_cap,
+        decode_cadence_mid_chunk_cap: scheduler_runtime_profile
+            .config
+            .decode_cadence_mid_chunk_cap,
+    };
+    let profile_source = scheduler_profile_load.as_ref().map(|load| {
+        if load.auto_loaded {
+            SchedulerProfileSource::Store
+        } else {
+            SchedulerProfileSource::Explicit
+        }
+    });
+    Ok(ResolvedSchedulerRuntime {
+        scheduler_runtime_profile,
+        scheduler_config,
+        profile_source,
+    })
 }

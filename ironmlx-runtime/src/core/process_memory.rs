@@ -13,7 +13,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::core::memory_budget::kv_bytes_per_token;
-use crate::core::model::ModelMeta;
+use ironmlx_lm::core::model::ModelMeta;
 
 const GIB: usize = 1024 * 1024 * 1024;
 const MIB: usize = 1024 * 1024;

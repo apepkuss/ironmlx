@@ -645,7 +645,7 @@ python3 -m venv /tmp/ironmlx-api-contract-sdk
 /tmp/ironmlx-api-contract-sdk/bin/python \
   scripts/api-contract-sdk/contract.py --fixture
 
-cargo test --locked --all-features -p ironmlx --lib core::server::
+cargo test --locked --all-features -p ironmlx --lib server::
 ```
 
 该门禁不加载 checkpoint，因此证明的是协议、transport 和官方客户端解析兼容性，

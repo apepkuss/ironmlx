@@ -34,7 +34,6 @@ use crate::core::cache::{
     ActiveKvOffloadConfig, ActiveKvOffloadSharedStats, PagedPrefixCacheConfig, PrefixLruCacheConfig,
 };
 use crate::core::generation_types::GenerateRequest;
-use crate::core::model::Model;
 use crate::core::prompt_lookup::{
     PromptLookupConfig, PromptLookupCostAction, PromptLookupCostController,
     PromptLookupDraftLimits, PromptLookupProposalSource, PromptLookupQualificationRegime,
@@ -45,13 +44,14 @@ use crate::core::scheduler::{
     MtpAdmitMidHandle, Phase, PromptLookupMtpStepOutcome, RequestId, Scheduler, StepEvent,
 };
 use crate::core::speculative::{MtpSpeculativeConfig, MtpSpeculativeStats};
-use crate::core::speculative_model::MtpSpeculativeModel;
 use crate::core::speculative_qualification::{
     NeuralExactAction, NeuralExactCostController, NeuralExactQualificationRuntimeConfig,
     NeuralExactQualificationStats, NeuralExactRegime, NeuralExactSampleCounters, NeuralExactSource,
 };
-use crate::core::vision::DenseVlMethods;
 use crate::Result;
+use ironmlx_lm::core::model::Model;
+use ironmlx_lm::core::speculative_model::MtpSpeculativeModel;
+use ironmlx_lm::core::vision::DenseVlMethods;
 
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct ImmutablePrefixBlockHealth {
@@ -923,7 +923,7 @@ enum SchedulerActorMtpMidAdmitHandle {
 }
 
 struct SchedulerActorGemma4Drafter {
-    drafter: Arc<Mutex<crate::models::gemma4::Gemma4AssistantModel>>,
+    drafter: Arc<Mutex<ironmlx_lm::models::gemma4::Gemma4AssistantModel>>,
     cfg: MtpSpeculativeConfig,
     exact_cost_controller: Option<NeuralExactCostController>,
     exact_episode: Option<NeuralExactMeasuredEpisode>,
@@ -1007,7 +1007,7 @@ impl<H> SchedulerActorMtpPromptLookupHybrid<H> {
 
 impl SchedulerActorGemma4PromptLookupHybrid {
     fn new(
-        drafter: Arc<Mutex<crate::models::gemma4::Gemma4AssistantModel>>,
+        drafter: Arc<Mutex<ironmlx_lm::models::gemma4::Gemma4AssistantModel>>,
         mtp_draft_tokens: usize,
         prompt_lookup: PromptLookupConfig,
         qualification: PromptLookupQualificationRuntimeConfig,
@@ -1219,7 +1219,7 @@ impl SchedulerActorPromptLookup {
 
 impl SchedulerActorGemma4Drafter {
     fn new(
-        drafter: Arc<Mutex<crate::models::gemma4::Gemma4AssistantModel>>,
+        drafter: Arc<Mutex<ironmlx_lm::models::gemma4::Gemma4AssistantModel>>,
         mtp_draft_tokens: usize,
     ) -> Self {
         debug_assert!(mtp_draft_tokens > 0);
@@ -1234,7 +1234,7 @@ impl SchedulerActorGemma4Drafter {
     }
 
     fn new_with_exact_qualification(
-        drafter: Arc<Mutex<crate::models::gemma4::Gemma4AssistantModel>>,
+        drafter: Arc<Mutex<ironmlx_lm::models::gemma4::Gemma4AssistantModel>>,
         mtp_draft_tokens: usize,
         qualification: NeuralExactQualificationRuntimeConfig,
     ) -> Result<Self> {
@@ -2096,7 +2096,7 @@ where
     }
 }
 
-impl SchedulerActorMtpMode<crate::models::Gemma4Model> for SchedulerActorGemma4Drafter {
+impl SchedulerActorMtpMode<ironmlx_lm::models::Gemma4Model> for SchedulerActorGemma4Drafter {
     type MidAdmitHandle = SchedulerActorGemma4DrafterMidAdmitHandle;
 
     fn mid_admit_request_id(handle: &Self::MidAdmitHandle) -> RequestId {
@@ -2151,8 +2151,8 @@ impl SchedulerActorMtpMode<crate::models::Gemma4Model> for SchedulerActorGemma4D
 
     fn prefill_admitted(
         &mut self,
-        sched: &mut Scheduler<crate::models::Gemma4Model>,
-        model: &crate::models::Gemma4Model,
+        sched: &mut Scheduler<ironmlx_lm::models::Gemma4Model>,
+        model: &ironmlx_lm::models::Gemma4Model,
         counters: &SchedulerActorMtpCounters,
     ) -> Result<Vec<StepEvent>> {
         self.exact_episode = None;
@@ -2199,8 +2199,8 @@ impl SchedulerActorMtpMode<crate::models::Gemma4Model> for SchedulerActorGemma4D
 
     fn step(
         &mut self,
-        sched: &mut Scheduler<crate::models::Gemma4Model>,
-        model: &crate::models::Gemma4Model,
+        sched: &mut Scheduler<ironmlx_lm::models::Gemma4Model>,
+        model: &ironmlx_lm::models::Gemma4Model,
         counters: &SchedulerActorMtpCounters,
         _admission_pending: bool,
     ) -> Result<Vec<StepEvent>> {
@@ -2234,8 +2234,8 @@ impl SchedulerActorMtpMode<crate::models::Gemma4Model> for SchedulerActorGemma4D
 
     fn begin_mid_admit(
         &mut self,
-        sched: &mut Scheduler<crate::models::Gemma4Model>,
-        model: &crate::models::Gemma4Model,
+        sched: &mut Scheduler<ironmlx_lm::models::Gemma4Model>,
+        model: &ironmlx_lm::models::Gemma4Model,
         request: GenerateRequest,
     ) -> Result<Self::MidAdmitHandle> {
         self.exact_episode = None;
@@ -2253,8 +2253,8 @@ impl SchedulerActorMtpMode<crate::models::Gemma4Model> for SchedulerActorGemma4D
 
     fn advance_mid_admit_chunk(
         &mut self,
-        sched: &mut Scheduler<crate::models::Gemma4Model>,
-        model: &crate::models::Gemma4Model,
+        sched: &mut Scheduler<ironmlx_lm::models::Gemma4Model>,
+        model: &ironmlx_lm::models::Gemma4Model,
         handle: &mut Self::MidAdmitHandle,
     ) -> Result<bool> {
         match handle {
@@ -2269,8 +2269,8 @@ impl SchedulerActorMtpMode<crate::models::Gemma4Model> for SchedulerActorGemma4D
 
     fn finalize_mid_admit(
         &mut self,
-        sched: &mut Scheduler<crate::models::Gemma4Model>,
-        model: &crate::models::Gemma4Model,
+        sched: &mut Scheduler<ironmlx_lm::models::Gemma4Model>,
+        model: &ironmlx_lm::models::Gemma4Model,
         handle: Self::MidAdmitHandle,
         counters: &SchedulerActorMtpCounters,
     ) -> Result<(RequestId, StepEvent)> {
@@ -2287,10 +2287,15 @@ impl SchedulerActorMtpMode<crate::models::Gemma4Model> for SchedulerActorGemma4D
     }
 }
 
-impl SchedulerActorMtpMode<crate::models::Gemma4Model> for SchedulerActorGemma4PromptLookupHybrid {
+impl SchedulerActorMtpMode<ironmlx_lm::models::Gemma4Model>
+    for SchedulerActorGemma4PromptLookupHybrid
+{
     type MidAdmitHandle = SchedulerActorGemma4DrafterMidAdmitHandle;
 
-    fn can_start_rolling_mid_admit(&self, sched: &Scheduler<crate::models::Gemma4Model>) -> bool {
+    fn can_start_rolling_mid_admit(
+        &self,
+        sched: &Scheduler<ironmlx_lm::models::Gemma4Model>,
+    ) -> bool {
         self.measured_cycle.is_none()
             && sched.gemma4_drafter_at_batch_window_boundary()
             && sched.prompt_lookup_can_start_rolling_mid_admit()
@@ -2298,44 +2303,44 @@ impl SchedulerActorMtpMode<crate::models::Gemma4Model> for SchedulerActorGemma4P
 
     fn mid_admit_request_id(handle: &Self::MidAdmitHandle) -> RequestId {
         <SchedulerActorGemma4Drafter as SchedulerActorMtpMode<
-            crate::models::Gemma4Model,
+            ironmlx_lm::models::Gemma4Model,
         >>::mid_admit_request_id(handle)
     }
 
     fn mid_admit_chunk_start(handle: &Self::MidAdmitHandle) -> i32 {
         <SchedulerActorGemma4Drafter as SchedulerActorMtpMode<
-            crate::models::Gemma4Model,
+            ironmlx_lm::models::Gemma4Model,
         >>::mid_admit_chunk_start(handle)
     }
 
     fn mid_admit_prompt_len(handle: &Self::MidAdmitHandle) -> i32 {
         <SchedulerActorGemma4Drafter as SchedulerActorMtpMode<
-            crate::models::Gemma4Model,
+            ironmlx_lm::models::Gemma4Model,
         >>::mid_admit_prompt_len(handle)
     }
 
     fn mid_admit_chunk_size(handle: &Self::MidAdmitHandle) -> i32 {
         <SchedulerActorGemma4Drafter as SchedulerActorMtpMode<
-            crate::models::Gemma4Model,
+            ironmlx_lm::models::Gemma4Model,
         >>::mid_admit_chunk_size(handle)
     }
 
     fn set_mid_admit_chunk_size(handle: &mut Self::MidAdmitHandle, chunk_size: i32) {
         <SchedulerActorGemma4Drafter as SchedulerActorMtpMode<
-            crate::models::Gemma4Model,
+            ironmlx_lm::models::Gemma4Model,
         >>::set_mid_admit_chunk_size(handle, chunk_size);
     }
 
     fn mid_admit_decode_cadence_mid_chunk_cap(handle: &Self::MidAdmitHandle) -> usize {
         <SchedulerActorGemma4Drafter as SchedulerActorMtpMode<
-            crate::models::Gemma4Model,
+            ironmlx_lm::models::Gemma4Model,
         >>::mid_admit_decode_cadence_mid_chunk_cap(handle)
     }
 
     fn prefill_admitted(
         &mut self,
-        sched: &mut Scheduler<crate::models::Gemma4Model>,
-        model: &crate::models::Gemma4Model,
+        sched: &mut Scheduler<ironmlx_lm::models::Gemma4Model>,
+        model: &ironmlx_lm::models::Gemma4Model,
         counters: &SchedulerActorMtpCounters,
     ) -> Result<Vec<StepEvent>> {
         let events = self.neural.prefill_admitted(sched, model, counters)?;
@@ -2355,8 +2360,8 @@ impl SchedulerActorMtpMode<crate::models::Gemma4Model> for SchedulerActorGemma4P
 
     fn step(
         &mut self,
-        sched: &mut Scheduler<crate::models::Gemma4Model>,
-        model: &crate::models::Gemma4Model,
+        sched: &mut Scheduler<ironmlx_lm::models::Gemma4Model>,
+        model: &ironmlx_lm::models::Gemma4Model,
         counters: &SchedulerActorMtpCounters,
         admission_pending: bool,
     ) -> Result<Vec<StepEvent>> {
@@ -2507,8 +2512,8 @@ impl SchedulerActorMtpMode<crate::models::Gemma4Model> for SchedulerActorGemma4P
 
     fn begin_mid_admit(
         &mut self,
-        sched: &mut Scheduler<crate::models::Gemma4Model>,
-        model: &crate::models::Gemma4Model,
+        sched: &mut Scheduler<ironmlx_lm::models::Gemma4Model>,
+        model: &ironmlx_lm::models::Gemma4Model,
         request: GenerateRequest,
     ) -> Result<Self::MidAdmitHandle> {
         anyhow::ensure!(
@@ -2520,8 +2525,8 @@ impl SchedulerActorMtpMode<crate::models::Gemma4Model> for SchedulerActorGemma4P
 
     fn advance_mid_admit_chunk(
         &mut self,
-        sched: &mut Scheduler<crate::models::Gemma4Model>,
-        model: &crate::models::Gemma4Model,
+        sched: &mut Scheduler<ironmlx_lm::models::Gemma4Model>,
+        model: &ironmlx_lm::models::Gemma4Model,
         handle: &mut Self::MidAdmitHandle,
     ) -> Result<bool> {
         self.neural.advance_mid_admit_chunk(sched, model, handle)
@@ -2529,8 +2534,8 @@ impl SchedulerActorMtpMode<crate::models::Gemma4Model> for SchedulerActorGemma4P
 
     fn finalize_mid_admit(
         &mut self,
-        sched: &mut Scheduler<crate::models::Gemma4Model>,
-        model: &crate::models::Gemma4Model,
+        sched: &mut Scheduler<ironmlx_lm::models::Gemma4Model>,
+        model: &ironmlx_lm::models::Gemma4Model,
         handle: Self::MidAdmitHandle,
         counters: &SchedulerActorMtpCounters,
     ) -> Result<(RequestId, StepEvent)> {
@@ -2793,7 +2798,7 @@ pub fn spawn_scheduler_actor<M>(
     admission_queue_max: usize,
     effective_cap_max: usize,
     decode_cadence_mid_chunk_cap: usize,
-    meta: crate::core::model::ModelMeta,
+    meta: ironmlx_lm::core::model::ModelMeta,
 ) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError>
 where
     M: Model + DenseVlMethods + Send + 'static,
@@ -2822,7 +2827,7 @@ pub(crate) fn spawn_scheduler_actor_for_prompt_lookup_control<M>(
     admission_queue_max: usize,
     effective_cap_max: usize,
     decode_cadence_mid_chunk_cap: usize,
-    meta: crate::core::model::ModelMeta,
+    meta: ironmlx_lm::core::model::ModelMeta,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     active_kv_offload: ActiveKvOffloadConfig,
@@ -2854,7 +2859,7 @@ pub fn spawn_scheduler_actor_with_active_kv_offload<M>(
     admission_queue_max: usize,
     effective_cap_max: usize,
     decode_cadence_mid_chunk_cap: usize,
-    meta: crate::core::model::ModelMeta,
+    meta: ironmlx_lm::core::model::ModelMeta,
     active_kv_offload: ActiveKvOffloadConfig,
 ) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError>
 where
@@ -2884,7 +2889,7 @@ pub fn spawn_scheduler_actor_with_paged_prefix_cache<M>(
     admission_queue_max: usize,
     effective_cap_max: usize,
     decode_cadence_mid_chunk_cap: usize,
-    meta: crate::core::model::ModelMeta,
+    meta: ironmlx_lm::core::model::ModelMeta,
     paged_prefix_cache: PagedPrefixCacheConfig,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
 ) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError>
@@ -2915,7 +2920,7 @@ pub fn spawn_scheduler_actor_with_paged_prefix_cache_and_active_kv<M>(
     admission_queue_max: usize,
     effective_cap_max: usize,
     decode_cadence_mid_chunk_cap: usize,
-    meta: crate::core::model::ModelMeta,
+    meta: ironmlx_lm::core::model::ModelMeta,
     paged_prefix_cache: PagedPrefixCacheConfig,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     active_kv_offload: ActiveKvOffloadConfig,
@@ -2950,7 +2955,7 @@ pub(crate) fn spawn_scheduler_actor_with_mtp<M>(
     admission_queue_max: usize,
     effective_cap_max: usize,
     decode_cadence_mid_chunk_cap: usize,
-    meta: crate::core::model::ModelMeta,
+    meta: ironmlx_lm::core::model::ModelMeta,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
 ) -> Result<SchedulerActorHandle>
@@ -2991,7 +2996,7 @@ pub(crate) fn spawn_scheduler_actor_with_mtp_prompt_lookup<M>(
     admission_queue_max: usize,
     effective_cap_max: usize,
     decode_cadence_mid_chunk_cap: usize,
-    meta: crate::core::model::ModelMeta,
+    meta: ironmlx_lm::core::model::ModelMeta,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     active_kv_offload: ActiveKvOffloadConfig,
@@ -3032,7 +3037,7 @@ pub(crate) fn spawn_scheduler_actor_with_prompt_lookup<M>(
     admission_queue_max: usize,
     effective_cap_max: usize,
     decode_cadence_mid_chunk_cap: usize,
-    meta: crate::core::model::ModelMeta,
+    meta: ironmlx_lm::core::model::ModelMeta,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     active_kv_offload: ActiveKvOffloadConfig,
@@ -3068,7 +3073,7 @@ pub(crate) fn spawn_scheduler_actor_with_mtp_and_active_kv<M>(
     admission_queue_max: usize,
     effective_cap_max: usize,
     decode_cadence_mid_chunk_cap: usize,
-    meta: crate::core::model::ModelMeta,
+    meta: ironmlx_lm::core::model::ModelMeta,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     active_kv_offload: ActiveKvOffloadConfig,
@@ -3100,8 +3105,8 @@ where
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_scheduler_actor_with_gemma4_drafter(
-    model: Arc<Mutex<crate::models::Gemma4Model>>,
-    drafter: Arc<Mutex<crate::models::gemma4::Gemma4AssistantModel>>,
+    model: Arc<Mutex<ironmlx_lm::models::Gemma4Model>>,
+    drafter: Arc<Mutex<ironmlx_lm::models::gemma4::Gemma4AssistantModel>>,
     mtp_draft_tokens: usize,
     exact_qualification: NeuralExactQualificationRuntimeConfig,
     b_max: usize,
@@ -3109,7 +3114,7 @@ pub(crate) fn spawn_scheduler_actor_with_gemma4_drafter(
     admission_queue_max: usize,
     effective_cap_max: usize,
     decode_cadence_mid_chunk_cap: usize,
-    meta: crate::core::model::ModelMeta,
+    meta: ironmlx_lm::core::model::ModelMeta,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
 ) -> Result<SchedulerActorHandle> {
@@ -3136,8 +3141,8 @@ pub(crate) fn spawn_scheduler_actor_with_gemma4_drafter(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_scheduler_actor_with_gemma4_drafter_prompt_lookup(
-    model: Arc<Mutex<crate::models::Gemma4Model>>,
-    drafter: Arc<Mutex<crate::models::gemma4::Gemma4AssistantModel>>,
+    model: Arc<Mutex<ironmlx_lm::models::Gemma4Model>>,
+    drafter: Arc<Mutex<ironmlx_lm::models::gemma4::Gemma4AssistantModel>>,
     mtp_draft_tokens: usize,
     prompt_lookup: PromptLookupConfig,
     qualification: PromptLookupQualificationRuntimeConfig,
@@ -3146,7 +3151,7 @@ pub(crate) fn spawn_scheduler_actor_with_gemma4_drafter_prompt_lookup(
     admission_queue_max: usize,
     effective_cap_max: usize,
     decode_cadence_mid_chunk_cap: usize,
-    meta: crate::core::model::ModelMeta,
+    meta: ironmlx_lm::core::model::ModelMeta,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     active_kv_offload: ActiveKvOffloadConfig,
@@ -3175,8 +3180,8 @@ pub(crate) fn spawn_scheduler_actor_with_gemma4_drafter_prompt_lookup(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_scheduler_actor_with_gemma4_drafter_and_active_kv(
-    model: Arc<Mutex<crate::models::Gemma4Model>>,
-    drafter: Arc<Mutex<crate::models::gemma4::Gemma4AssistantModel>>,
+    model: Arc<Mutex<ironmlx_lm::models::Gemma4Model>>,
+    drafter: Arc<Mutex<ironmlx_lm::models::gemma4::Gemma4AssistantModel>>,
     mtp_draft_tokens: usize,
     exact_qualification: NeuralExactQualificationRuntimeConfig,
     b_max: usize,
@@ -3184,7 +3189,7 @@ pub(crate) fn spawn_scheduler_actor_with_gemma4_drafter_and_active_kv(
     admission_queue_max: usize,
     effective_cap_max: usize,
     decode_cadence_mid_chunk_cap: usize,
-    meta: crate::core::model::ModelMeta,
+    meta: ironmlx_lm::core::model::ModelMeta,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     active_kv_offload: ActiveKvOffloadConfig,
@@ -3219,7 +3224,7 @@ fn spawn_scheduler_actor_with_mode<M, A>(
     admission_queue_max: usize,
     effective_cap_max: usize,
     decode_cadence_mid_chunk_cap: usize,
-    meta: crate::core::model::ModelMeta,
+    meta: ironmlx_lm::core::model::ModelMeta,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     adaptive_policy: AdaptiveAdmissionPolicy,
@@ -3270,7 +3275,7 @@ fn spawn_scheduler_actor_with_mode_and_budget_state<M, A>(
     admission_queue_max: usize,
     effective_cap_max: usize,
     decode_cadence_mid_chunk_cap: usize,
-    meta: crate::core::model::ModelMeta,
+    meta: ironmlx_lm::core::model::ModelMeta,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     adaptive_policy: AdaptiveAdmissionPolicy,
@@ -5378,8 +5383,8 @@ pub(crate) mod tests {
     use super::*;
 
     use crate::core::generation_types::GenerateRequest;
-    use crate::core::model_input::IMAGE_TOKEN_ID;
-    use crate::core::sampler::Sampler;
+    use ironmlx_core::sampler::Sampler;
+    use ironmlx_lm::core::model_input::IMAGE_TOKEN_ID;
 
     use super::test_support::*;
 
@@ -7503,12 +7508,12 @@ pub(crate) mod tests {
     #[ignore] // real-model heavy: loads Qwen3.5-4B-MLX-4bit
     async fn admission_queue_push_when_full() {
         use crate::core::generation_types::GenerateRequest;
-        use crate::core::model_input::IMAGE_TOKEN_ID;
-        use crate::core::sampler::Sampler;
-        use crate::core::{Loader, Tokenizer};
+        use ironmlx_core::sampler::Sampler;
+        use ironmlx_lm::core::model_input::IMAGE_TOKEN_ID;
         use std::sync::atomic::Ordering;
         use std::time::Duration;
         use tokio::sync::Mutex;
+        use {ironmlx_lm::core::loader::Loader, ironmlx_lm::core::tokenizer::Tokenizer};
 
         let model_dir = std::env::var("IRONMLX_MODEL_DIR").unwrap_or_else(|_| {
             let glob = format!(
@@ -7527,7 +7532,7 @@ pub(crate) mod tests {
         let loader = Loader::open_multimodal(std::path::Path::new(&model_dir)).unwrap();
         let tokenizer = Tokenizer::from_loader(&loader).unwrap();
         let model = Arc::new(Mutex::new(
-            crate::models::Qwen35Model::from_loader(&loader).unwrap(),
+            ironmlx_lm::models::Qwen35Model::from_loader(&loader).unwrap(),
         ));
         let meta = model.lock().await.model_meta();
 
@@ -7543,7 +7548,7 @@ pub(crate) mod tests {
         .expect("spawn");
 
         let mk_req = |text: &str| -> GenerateRequest {
-            let msgs = vec![crate::core::Message {
+            let msgs = vec![ironmlx_lm::core::chat_template::Message {
                 role: "user".into(),
                 content: text.into(),
             }];
@@ -7615,12 +7620,12 @@ pub(crate) mod tests {
     #[ignore] // real-model heavy
     async fn admission_queue_overflow_returns_err() {
         use crate::core::generation_types::GenerateRequest;
-        use crate::core::model_input::IMAGE_TOKEN_ID;
-        use crate::core::sampler::Sampler;
-        use crate::core::{Loader, Tokenizer};
+        use ironmlx_core::sampler::Sampler;
+        use ironmlx_lm::core::model_input::IMAGE_TOKEN_ID;
         use std::sync::atomic::Ordering;
         use std::time::Duration;
         use tokio::sync::Mutex;
+        use {ironmlx_lm::core::loader::Loader, ironmlx_lm::core::tokenizer::Tokenizer};
 
         let model_dir = std::env::var("IRONMLX_MODEL_DIR").unwrap_or_else(|_| {
             let glob = format!(
@@ -7639,7 +7644,7 @@ pub(crate) mod tests {
         let loader = Loader::open_multimodal(std::path::Path::new(&model_dir)).unwrap();
         let tokenizer = Tokenizer::from_loader(&loader).unwrap();
         let model = Arc::new(Mutex::new(
-            crate::models::Qwen35Model::from_loader(&loader).unwrap(),
+            ironmlx_lm::models::Qwen35Model::from_loader(&loader).unwrap(),
         ));
         let meta = model.lock().await.model_meta();
 
@@ -7655,7 +7660,7 @@ pub(crate) mod tests {
         .expect("spawn");
 
         let mk_req = |text: &str, max_new: usize| -> GenerateRequest {
-            let msgs = vec![crate::core::Message {
+            let msgs = vec![ironmlx_lm::core::chat_template::Message {
                 role: "user".into(),
                 content: text.into(),
             }];
@@ -7758,12 +7763,12 @@ pub(crate) mod tests {
 #[doc(hidden)]
 pub mod test_support {
     use super::*;
-    use crate::core::cache::MtpCache;
     use crate::core::generation_types::GenerateRequest;
-    use crate::core::model_input::IMAGE_TOKEN_ID;
-    use crate::core::sampler::Sampler;
-    use crate::core::speculative_model::MtpSpeculativeModel;
-    use crate::nn::MtpStepOutput;
+    use ironmlx_core::sampler::Sampler;
+    use ironmlx_lm::core::cache::mtp_cache::MtpCache;
+    use ironmlx_lm::core::model_input::IMAGE_TOKEN_ID;
+    use ironmlx_lm::core::speculative_model::MtpSpeculativeModel;
+    use ironmlx_lm::nn::MtpStepOutput;
     #[derive(Clone, Copy)]
     pub struct SchedulerActorFakeModel {
         forward_delay: Duration,
@@ -7805,12 +7810,12 @@ pub mod test_support {
     fn write_fake_full_kv(
         input_ids: &mlx::Array,
         per_row_lens: Option<&[i32]>,
-        cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
+        cache: Option<&mut [ironmlx_lm::core::cache::layer::LayerCache]>,
     ) -> Result<()> {
         let Some(cache) = cache else {
             return Ok(());
         };
-        let Some(crate::core::cache::layer::LayerCache::Full(kv)) = cache.first_mut() else {
+        let Some(ironmlx_lm::core::cache::layer::LayerCache::Full(kv)) = cache.first_mut() else {
             return Ok(());
         };
         let shape = input_ids.shape();
@@ -7839,9 +7844,9 @@ pub mod test_support {
             batch: i32,
             cap: i32,
             dtype: mlx::Dtype,
-        ) -> Result<Vec<crate::core::cache::layer::LayerCache>> {
-            Ok(vec![crate::core::cache::layer::LayerCache::Full(
-                crate::core::KVCache::new(batch, 1, 1, 1, dtype, cap),
+        ) -> Result<Vec<ironmlx_lm::core::cache::layer::LayerCache>> {
+            Ok(vec![ironmlx_lm::core::cache::layer::LayerCache::Full(
+                ironmlx_lm::core::cache::kv_cache::KVCache::new(batch, 1, 1, 1, dtype, cap),
             )])
         }
 
@@ -7851,7 +7856,7 @@ pub mod test_support {
             _position_ids: &mlx::Array,
             _per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
+            cache: Option<&mut [ironmlx_lm::core::cache::layer::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> Result<mlx::Array> {
             write_fake_full_kv(input_ids, _per_row_lens, cache)?;
@@ -7866,7 +7871,7 @@ pub mod test_support {
             _attention_mask: &mlx::Array,
             _linear_attention_mask: &mlx::Array,
             per_row_lens: &[i32],
-            cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
+            cache: Option<&mut [ironmlx_lm::core::cache::layer::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> Result<mlx::Array> {
             write_fake_full_kv(input_ids, Some(per_row_lens), cache)?;
@@ -7879,7 +7884,7 @@ pub mod test_support {
             _position_ids: &mlx::Array,
             per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
+            cache: Option<&mut [ironmlx_lm::core::cache::layer::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> Result<mlx::Array> {
             write_fake_full_kv(input_ids, per_row_lens, cache)?;
@@ -7910,7 +7915,7 @@ pub mod test_support {
             b_max.min(2)
         }
 
-        fn model_meta(&self) -> crate::core::model::ModelMeta {
+        fn model_meta(&self) -> ironmlx_lm::core::model::ModelMeta {
             crate::core::memory_budget::test_meta_qwen35()
         }
 
@@ -7939,7 +7944,7 @@ pub mod test_support {
             _per_row_pixel_values: &[Option<&[mlx::Array]>],
             _per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
             _image_token_id: i32,
-            _cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
+            _cache: Option<&mut [ironmlx_lm::core::cache::layer::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> Result<mlx::Array> {
             fake_logits(input_ids.shape().as_slice()[0] as usize)
@@ -7979,7 +7984,7 @@ pub mod test_support {
             _position_ids: &mlx::Array,
             _per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            _cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
+            _cache: Option<&mut [ironmlx_lm::core::cache::layer::LayerCache]>,
             _vision_embeds_slice: Option<&mlx::Array>,
             _image_token_id: i32,
             _target: mlx::StreamOrDevice,
@@ -7993,7 +7998,7 @@ pub mod test_support {
             _position_ids: &mlx::Array,
             _per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            _cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
+            _cache: Option<&mut [ironmlx_lm::core::cache::layer::LayerCache]>,
             _vision_embeds_slice: Option<&mlx::Array>,
             _image_token_id: i32,
             _target: mlx::StreamOrDevice,
@@ -8012,7 +8017,10 @@ pub mod test_support {
     impl MtpSpeculativeModel for SchedulerActorFakeModel {
         type MtpHead = SchedulerActorFakeMtpHead;
 
-        fn load_mtp_head(&self, _loader: &crate::core::Loader) -> Result<Self::MtpHead> {
+        fn load_mtp_head(
+            &self,
+            _loader: &ironmlx_lm::core::loader::Loader,
+        ) -> Result<Self::MtpHead> {
             Ok(SchedulerActorFakeMtpHead)
         }
 
@@ -8053,7 +8061,7 @@ pub mod test_support {
 
         fn begin_mtp_accepted_prefix_capture(
             &self,
-            cache: &mut [crate::core::cache::layer::LayerCache],
+            cache: &mut [ironmlx_lm::core::cache::layer::LayerCache],
         ) -> Result<()> {
             anyhow::ensure!(
                 self.mtp_accepted_prefix_restore,
@@ -8067,16 +8075,16 @@ pub mod test_support {
 
         fn restore_mtp_accepted_prefix_rows_on(
             &self,
-            cache: &mut [crate::core::cache::layer::LayerCache],
-            snapshots: &[crate::core::cache::layer::LayerCacheSnapshot],
+            cache: &mut [ironmlx_lm::core::cache::layer::LayerCache],
+            snapshots: &[ironmlx_lm::core::cache::layer::LayerCacheSnapshot],
             accepted_lens: &[usize],
             _target: mlx::StreamOrDevice,
         ) -> Result<()> {
             anyhow::ensure!(cache.len() == snapshots.len(), "fake cache layer mismatch");
             for (layer, snapshot) in cache.iter_mut().zip(snapshots) {
                 let (
-                    crate::core::cache::layer::LayerCache::Full(cache),
-                    crate::core::cache::layer::LayerCacheSnapshot::Full(base),
+                    ironmlx_lm::core::cache::layer::LayerCache::Full(cache),
+                    ironmlx_lm::core::cache::layer::LayerCacheSnapshot::Full(base),
                 ) = (layer, snapshot)
                 else {
                     anyhow::bail!("fake accepted-prefix restore requires Full KV");

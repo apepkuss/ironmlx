@@ -19,10 +19,10 @@ use mlx::{Array, Dtype};
 use thiserror::Error;
 use tokio::sync::mpsc;
 
-use crate::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF;
+use ironmlx_lm::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF;
 
 // Transitional public path; the trait is owned by the model-side vision module.
-pub use crate::core::vision::DenseVlMethods;
+pub use ironmlx_lm::core::vision::DenseVlMethods;
 
 /// Typed scheduler-side errors that need HTTP-level discrimination.
 ///
@@ -118,33 +118,7 @@ pub enum SchedulerError {
     },
 }
 
-use crate::core::cache::active_payload::ActiveKvEntryChunkReader;
-use crate::core::cache::layer::{
-    enable_paged_hot_cold_tiering_caches, enable_paged_kv_caches, enable_turboquant_kv_caches,
-    paged_prefix_key_spec_for_full_caches, prefix_entry_for_row, prefix_key_spec_for_caches,
-    restore_prefix_entry_for_row, restore_prefix_entry_for_rows, LayerCache,
-};
-use crate::core::cache::prefix_payload::{
-    PagedPrefixEntry, PagedPrefixEntryStats, PagedPrefixKeySpec, PagedPrefixLayer, PrefixEntryKind,
-    PrefixLayerPayload, PrefixMtpLayerSpec, PrefixTensorSpec,
-};
-use crate::core::cache::{
-    timed, ActiveKvOffloadConfig, ActiveKvOffloadSharedStats, ActiveKvOffloadStore,
-    ActiveKvResidencySummary, ActiveKvStoredPayload, AsyncPrefixStoreAdmission,
-    AsyncPrefixStoreCancellation, AsyncPrefixStorePermit, AsyncPrefixStoreSubmit, MtpCache,
-    MtpCacheSnapshot, PagedKvBlockOwner, PagedKvImmutableBlockHandle, PagedKvPhysicalStats,
-    PagedPrefixCacheConfig, PagedPrefixLoadStatus, PagedPrefixStore, PrefixLruCache,
-    PrefixLruCacheConfig, PrefixLruInsertStatus, SharedPrefixLruCache, TurboQuantKVBits,
-};
 use crate::core::generation_types::GenerateRequest;
-use crate::core::model::Model;
-use crate::core::model_input::{
-    build_batch_attention_mask, build_batch_linear_mask, build_batched_append_attention_mask,
-    build_decode_position_ids, build_per_row_decode_mask, build_position_ids,
-    build_position_ids_batched, build_position_ids_vl, build_position_ids_vl_batched,
-    count_image_pad, extend_vl_chunk_end_for_image_pad, log_vl_chunk_composition, slice_logits_row,
-    slice_pos_ids_axis2, slice_vision_embeds_rows,
-};
 #[cfg(test)]
 use crate::core::prompt_lookup::PromptLookupHistoryFingerprint;
 use crate::core::prompt_lookup::{
@@ -152,7 +126,6 @@ use crate::core::prompt_lookup::{
     PromptLookupQualificationRegime, PromptLookupRowState, PromptLookupStats,
     SharedPromptLookupMtpCertification, SharedPromptLookupPool,
 };
-use crate::core::sampler::{draw_uniforms, sample_target_tokens_with_uniforms_batch, Sampler};
 use crate::core::speculative::{
     add_elapsed_us, add_mtp_decode_cache_commit_us, add_mtp_prefill_cache_commit_us,
     commit_mtp_cache_hidden_prefix, commit_mtp_cache_hidden_tail, elapsed_us_since,
@@ -167,8 +140,70 @@ use crate::core::speculative::{
     MtpSpeculativeStats, QwenMtpDraftPolicySnapshot, QwenMtpDraftPolicyState,
     SpeculativeResolution,
 };
-use crate::core::speculative_model::MtpSpeculativeModel;
 use crate::core::speculative_qualification::{NeuralExactRegime, NeuralExactSource};
+use ironmlx_lm::core::cache::active_payload::ActiveKvEntryChunkReader;
+use ironmlx_lm::core::model::Model;
+use ironmlx_lm::core::speculative_model::MtpSpeculativeModel;
+use {
+    crate::core::cache::timed, crate::core::cache::ActiveKvOffloadConfig,
+    crate::core::cache::ActiveKvOffloadSharedStats, crate::core::cache::ActiveKvOffloadStore,
+    crate::core::cache::ActiveKvResidencySummary, crate::core::cache::ActiveKvStoredPayload,
+    crate::core::cache::AsyncPrefixStoreAdmission,
+    crate::core::cache::AsyncPrefixStoreCancellation, crate::core::cache::AsyncPrefixStorePermit,
+    crate::core::cache::AsyncPrefixStoreSubmit, crate::core::cache::PagedPrefixCacheConfig,
+    crate::core::cache::PagedPrefixLoadStatus, crate::core::cache::PagedPrefixStore,
+    crate::core::cache::PrefixLruCache, crate::core::cache::PrefixLruCacheConfig,
+    crate::core::cache::PrefixLruInsertStatus, crate::core::cache::SharedPrefixLruCache,
+    ironmlx_lm::core::cache::mtp_cache::MtpCache,
+    ironmlx_lm::core::cache::mtp_cache::MtpCacheSnapshot,
+    ironmlx_lm::core::cache::paged_kv::PagedKvBlockOwner,
+    ironmlx_lm::core::cache::paged_kv::PagedKvImmutableBlockHandle,
+    ironmlx_lm::core::cache::paged_kv::PagedKvPhysicalStats,
+    ironmlx_lm::core::cache::turboquant_kv::TurboQuantKVBits,
+};
+use {
+    ironmlx_core::sampler::draw_uniforms,
+    ironmlx_core::sampler::sample_target_tokens_with_uniforms_batch,
+    ironmlx_core::sampler::Sampler,
+};
+use {
+    ironmlx_lm::core::cache::layer::enable_paged_hot_cold_tiering_caches,
+    ironmlx_lm::core::cache::layer::enable_paged_kv_caches,
+    ironmlx_lm::core::cache::layer::enable_turboquant_kv_caches,
+    ironmlx_lm::core::cache::layer::paged_prefix_key_spec_for_full_caches,
+    ironmlx_lm::core::cache::layer::prefix_entry_for_row,
+    ironmlx_lm::core::cache::layer::prefix_key_spec_for_caches,
+    ironmlx_lm::core::cache::layer::restore_prefix_entry_for_row,
+    ironmlx_lm::core::cache::layer::restore_prefix_entry_for_rows,
+    ironmlx_lm::core::cache::layer::LayerCache,
+};
+use {
+    ironmlx_lm::core::cache::prefix_payload::PagedPrefixEntry,
+    ironmlx_lm::core::cache::prefix_payload::PagedPrefixEntryStats,
+    ironmlx_lm::core::cache::prefix_payload::PagedPrefixKeySpec,
+    ironmlx_lm::core::cache::prefix_payload::PagedPrefixLayer,
+    ironmlx_lm::core::cache::prefix_payload::PrefixEntryKind,
+    ironmlx_lm::core::cache::prefix_payload::PrefixLayerPayload,
+    ironmlx_lm::core::cache::prefix_payload::PrefixMtpLayerSpec,
+    ironmlx_lm::core::cache::prefix_payload::PrefixTensorSpec,
+};
+use {
+    ironmlx_lm::core::model_input::build_batch_attention_mask,
+    ironmlx_lm::core::model_input::build_batch_linear_mask,
+    ironmlx_lm::core::model_input::build_batched_append_attention_mask,
+    ironmlx_lm::core::model_input::build_decode_position_ids,
+    ironmlx_lm::core::model_input::build_per_row_decode_mask,
+    ironmlx_lm::core::model_input::build_position_ids,
+    ironmlx_lm::core::model_input::build_position_ids_batched,
+    ironmlx_lm::core::model_input::build_position_ids_vl,
+    ironmlx_lm::core::model_input::build_position_ids_vl_batched,
+    ironmlx_lm::core::model_input::count_image_pad,
+    ironmlx_lm::core::model_input::extend_vl_chunk_end_for_image_pad,
+    ironmlx_lm::core::model_input::log_vl_chunk_composition,
+    ironmlx_lm::core::model_input::slice_logits_row,
+    ironmlx_lm::core::model_input::slice_pos_ids_axis2,
+    ironmlx_lm::core::model_input::slice_vision_embeds_rows,
+};
 
 /// Convenience alias — avoids `clippy::type_complexity` on Vec<Option<&[...]>> sites.
 type GridThwSlice<'a> = Option<&'a [(i32, i32, i32)]>;
@@ -265,7 +300,7 @@ fn reborrow_mtp_window_observations<'a>(
 struct SchedulerGemma4DrafterRowState {
     pending_tokens: VecDeque<u32>,
     last_hidden: Array,
-    shared_kv: crate::models::gemma4::Gemma4SharedKvStates,
+    shared_kv: ironmlx_lm::models::gemma4::Gemma4SharedKvStates,
     adaptive_draft_tokens: usize,
     draft_policy: Gemma4DrafterPolicyState,
 }
@@ -442,7 +477,7 @@ struct Gemma4DrafterBatchedFillContext {
     draft_budget: usize,
     kv_valid_len: i32,
     draft_position: i32,
-    shared_kv: crate::models::gemma4::Gemma4SharedKvStates,
+    shared_kv: ironmlx_lm::models::gemma4::Gemma4SharedKvStates,
     input_hidden: Array,
     input_token: u32,
     draft_history: Vec<u32>,
@@ -751,7 +786,7 @@ pub struct AdmitMidHandle {
     pub(crate) chunk_start: i32,
     /// B=1 temp KV cache; `temp_cache.offsets[0]` advances from `0` to
     /// `prompt_len` across the chunk loop.
-    pub(crate) temp_cache: Vec<crate::core::cache::layer::LayerCache>,
+    pub(crate) temp_cache: Vec<ironmlx_lm::core::cache::layer::LayerCache>,
     pub(crate) immutable_in_place: bool,
     pub(crate) prefix_fingerprint: Option<String>,
     pub(crate) is_vl: bool,
@@ -795,7 +830,7 @@ pub struct MtpAdmitMidHandle {
     pub(crate) chunk_size: i32,
     pub(crate) decode_cadence_mid_chunk_cap: usize,
     pub(crate) chunk_start: i32,
-    pub(crate) temp_cache: Vec<crate::core::cache::layer::LayerCache>,
+    pub(crate) temp_cache: Vec<ironmlx_lm::core::cache::layer::LayerCache>,
     pub(crate) mtp_cache: MtpCache,
     pub(crate) prefix_fingerprint: Option<String>,
     pub(crate) is_vl: bool,
@@ -827,7 +862,7 @@ pub struct Gemma4DrafterAdmitMidHandle {
     pub(crate) chunk_size: i32,
     pub(crate) decode_cadence_mid_chunk_cap: usize,
     pub(crate) chunk_start: i32,
-    pub(crate) temp_cache: Vec<crate::core::cache::layer::LayerCache>,
+    pub(crate) temp_cache: Vec<ironmlx_lm::core::cache::layer::LayerCache>,
     pub(crate) prefix_fingerprint: Option<String>,
     pub(crate) is_vl: bool,
     pub(crate) image_token_id: i32,
@@ -839,7 +874,7 @@ pub struct Gemma4DrafterAdmitMidHandle {
         Option<Box<crate::core::process_memory::ColdMaterializationGuard>>,
     pub(crate) image_pad_consumed: usize,
     pub(crate) last_prompt_hidden: Option<Array>,
-    pub(crate) last_shared_kv: Option<crate::models::gemma4::Gemma4SharedKvStates>,
+    pub(crate) last_shared_kv: Option<ironmlx_lm::models::gemma4::Gemma4SharedKvStates>,
     pub(crate) stats: MtpSpeculativeStats,
 }
 
@@ -873,10 +908,10 @@ pub struct RequestState {
     /// PRNG state lives in `Scheduler.prng_state` (centralized).
     pub sampler: Sampler,
     /// Immutable source plan retained for fresh prefill and rebase helpers.
-    pub constraint_plan: Option<crate::core::constrained::ConstraintPlan>,
+    pub constraint_plan: Option<ironmlx_lm::core::constrained::ConstraintPlan>,
     /// Request-local token-level grammar state, advanced only by committed
     /// generated tokens.
-    pub constraint: Option<crate::core::constrained::ConstraintSession>,
+    pub constraint: Option<ironmlx_lm::core::constrained::ConstraintSession>,
     /// Effective KV-cache length for this row: starts at `prompt_ids.len()`
     /// and is incremented by 1 per decode step (3b). Used by 3c to build
     /// the per-row decode mask.
@@ -1620,7 +1655,7 @@ fn row_tokens_from_flat(
 fn append_resolved_gemma4_tokens(
     row_state: &mut SchedulerGemma4DrafterRowState,
     ctx: &Gemma4DrafterBatchedFillContext,
-    constraint: Option<&crate::core::constrained::ConstraintSession>,
+    constraint: Option<&ironmlx_lm::core::constrained::ConstraintSession>,
     resolution: SpeculativeResolution,
 ) -> Result<usize> {
     let mut tokens_to_append = resolution.tokens_to_append;
@@ -3047,7 +3082,7 @@ fn lock_prefix_lru_cache(
 
 fn try_load_prefix_lru_entry(
     prefix_lru_cache: Option<&PrefixLruCacheHandle>,
-    spec: &crate::core::cache::prefix_payload::PagedPrefixKeySpec,
+    spec: &ironmlx_lm::core::cache::prefix_payload::PagedPrefixKeySpec,
 ) -> Result<Option<(String, PagedPrefixEntry, PagedPrefixEntryStats, u128)>> {
     let Some(prefix_lru_cache) = prefix_lru_cache else {
         return Ok(None);
@@ -3076,7 +3111,7 @@ fn try_load_prefix_lru_entry(
 
 fn try_insert_prefix_lru_entry(
     prefix_lru_cache: Option<&PrefixLruCacheHandle>,
-    spec: crate::core::cache::prefix_payload::PagedPrefixKeySpec,
+    spec: ironmlx_lm::core::cache::prefix_payload::PagedPrefixKeySpec,
     entry: PagedPrefixEntry,
     main_row: usize,
     mtp_row: Option<usize>,
@@ -5096,7 +5131,7 @@ pub struct Scheduler<M: Model> {
     pub(crate) budget_state: crate::core::memory_budget::BudgetState,
     /// Snapshot of the model's memory-budget metadata, used to compute
     /// per-request KV byte cost in admit. (B1-p2.5)
-    pub(crate) meta: crate::core::model::ModelMeta,
+    pub(crate) meta: ironmlx_lm::core::model::ModelMeta,
     /// Count of admits rejected by the memory budget gate. Used by T3
     /// /healthz. (B1-p2.5)
     pub(crate) memory_budget_exceeded_count: std::sync::Arc<std::sync::atomic::AtomicU64>,
@@ -5162,7 +5197,7 @@ impl<M: Model> Scheduler<M> {
     pub fn new(
         b_max: usize,
         effective_cap_max: usize,
-        meta: crate::core::model::ModelMeta,
+        meta: ironmlx_lm::core::model::ModelMeta,
     ) -> Result<Self, crate::core::memory_budget::MemoryBudgetError> {
         let budget_state =
             crate::core::memory_budget::validate_startup_budget(b_max, effective_cap_max, &meta)?;
@@ -5190,7 +5225,7 @@ impl<M: Model> Scheduler<M> {
         effective_cap_max: usize,
         budget_state: crate::core::memory_budget::BudgetState,
         memory_budget_exceeded_count: std::sync::Arc<std::sync::atomic::AtomicU64>,
-        meta: crate::core::model::ModelMeta,
+        meta: ironmlx_lm::core::model::ModelMeta,
     ) -> Result<Self, crate::core::memory_budget::MemoryBudgetError> {
         let mut slots = Vec::with_capacity(b_max);
         for _ in 0..b_max {
@@ -6616,7 +6651,7 @@ impl<M: Model> Scheduler<M> {
         let constraint = req
             .constraint
             .as_ref()
-            .map(crate::core::constrained::ConstraintPlan::start_session)
+            .map(ironmlx_lm::core::constrained::ConstraintPlan::start_session)
             .transpose()?;
         let state = RequestState {
             id,
@@ -9258,7 +9293,7 @@ impl<M: Model> Scheduler<M> {
                 };
                 let verify_start = Instant::now();
                 let hidden = {
-                    let _verify_qmm = crate::nn::verify_qmm_scope();
+                    let _verify_qmm = ironmlx_lm::nn::verify_qmm_scope();
                     let cache = self.cache.as_mut().ok_or_else(|| {
                         anyhow!("fill_prompt_lookup_windows: main cache is absent")
                     })?;
@@ -9373,7 +9408,7 @@ impl<M: Model> Scheduler<M> {
                         Some(constraint.speculative_masks(&ctx.draft_tokens)?);
                 }
             }
-            let verify_logits = crate::core::constrained::apply_speculative_token_masks(
+            let verify_logits = ironmlx_lm::core::constrained::apply_speculative_token_masks(
                 &verify_logits,
                 &speculative_masks,
             )?;
@@ -11792,7 +11827,7 @@ impl<M: Model> Scheduler<M> {
                 let sampling_start = Instant::now();
                 let first_tokens = if let Some(constraint) = next_constraint.as_mut() {
                     let row_logits = slice_logits_row(&first_logits, 0)?;
-                    let row_logits = crate::core::constrained::apply_token_mask(
+                    let row_logits = ironmlx_lm::core::constrained::apply_token_mask(
                         &row_logits,
                         &constraint.compute_mask()?,
                     )?;
@@ -12627,7 +12662,7 @@ impl<M: Model> Scheduler<M> {
         row_states: &mut HashMap<usize, SchedulerMtpRowState>,
         model: &M,
         mtp: &M::MtpHead,
-        draft_constraints: &mut HashMap<usize, crate::core::constrained::ConstraintSession>,
+        draft_constraints: &mut HashMap<usize, ironmlx_lm::core::constrained::ConstraintSession>,
     ) -> Result<()>
     where
         M: MtpSpeculativeModel,
@@ -12691,7 +12726,7 @@ impl<M: Model> Scheduler<M> {
                 let sampling_start = Instant::now();
                 let next_token = if let Some(constraint) = draft_constraints.get_mut(&ctx.row_idx) {
                     let logits = slice_logits_row_position(&output.logits, 0, 1)?;
-                    let logits = crate::core::constrained::apply_token_mask(
+                    let logits = ironmlx_lm::core::constrained::apply_token_mask(
                         &logits,
                         &constraint.compute_mask()?,
                     )?;
@@ -12735,7 +12770,7 @@ impl<M: Model> Scheduler<M> {
                 let sampling_start = Instant::now();
                 let next_token = if let Some(constraint) = draft_constraints.get_mut(&ctx.row_idx) {
                     let logits = slice_logits_row(&output.logits, 0)?;
-                    let logits = crate::core::constrained::apply_token_mask(
+                    let logits = ironmlx_lm::core::constrained::apply_token_mask(
                         &logits,
                         &constraint.compute_mask()?,
                     )?;
@@ -12990,12 +13025,12 @@ impl<M: Model> Scheduler<M> {
                         .map(|&ctx_idx| {
                             draft_constraints
                                 .get_mut(&contexts[ctx_idx].row_idx)
-                                .map(crate::core::constrained::ConstraintSession::compute_mask)
+                                .map(ironmlx_lm::core::constrained::ConstraintSession::compute_mask)
                                 .transpose()
                         })
                         .collect::<Result<Vec<_>>>()?;
                     let logits =
-                        crate::core::constrained::apply_batch_token_masks(&logits, &masks)?;
+                        ironmlx_lm::core::constrained::apply_batch_token_masks(&logits, &masks)?;
                     mlx::ops::reduction::argmax(&logits, -1, false)?
                         .reshape(&[active_indices.len() as i32, 1_i32][..])?
                 };
@@ -13099,10 +13134,10 @@ impl<M: Model> Scheduler<M> {
             };
             let b = self.cache_rows.len();
             let affine8_b4_exact_hot_path = has_draft_tokens
-                && crate::nn::affine8_b4_q2_exact_supported()
+                && ironmlx_lm::nn::affine8_b4_q2_exact_supported()
                 && model.supports_affine8_b4_mtp_exact_hot_path(b, max_verify_len);
             let _exact_affine8_b4_q2 =
-                affine8_b4_exact_hot_path.then(crate::nn::exact_affine8_b4_q2_scope);
+                affine8_b4_exact_hot_path.then(ironmlx_lm::nn::exact_affine8_b4_q2_scope);
             // The direct recurrent-prefix restore path is calibrated for B2/Q2
             // and the explicitly qualified Qwen affine8 B4/Q2 shape. Rows that
             // did not open a new MTP window are represented by accepted_len=0;
@@ -13146,7 +13181,7 @@ impl<M: Model> Scheduler<M> {
                 // Once every row selected draft=0, this is an ordinary
                 // batched target decode. Exact speculative QMM and rollback
                 // snapshots are needed only while at least one row drafts.
-                let _verify_qmm = has_draft_tokens.then(crate::nn::verify_qmm_scope);
+                let _verify_qmm = has_draft_tokens.then(ironmlx_lm::nn::verify_qmm_scope);
                 let cache = self
                     .cache
                     .as_mut()
@@ -13201,7 +13236,7 @@ impl<M: Model> Scheduler<M> {
                 speculative_masks[cache_row_for_ctx[ctx_idx]] =
                     Some(constraint.speculative_masks(&draft_tokens)?);
             }
-            let verified_logits = crate::core::constrained::apply_speculative_token_masks(
+            let verified_logits = ironmlx_lm::core::constrained::apply_speculative_token_masks(
                 &verified_logits,
                 &speculative_masks,
             )?;
@@ -13410,7 +13445,7 @@ impl<M: Model> Scheduler<M> {
                             maybe_build_sparse_decode_mask(cache, &step_lens)?
                         };
                         let replay_hidden = {
-                            let _verify_qmm = crate::nn::verify_qmm_scope();
+                            let _verify_qmm = ironmlx_lm::nn::verify_qmm_scope();
                             let cache = self.cache.as_mut().ok_or_else(|| {
                                 anyhow!("fill_mtp_windows_batched: main cache absent")
                             })?;
@@ -13970,7 +14005,7 @@ impl<M: Model> Scheduler<M> {
         // A zero-draft window is an ordinary single-token target decode. Do
         // not force it through the exact speculative QMM path; there is no
         // drafted position whose result needs cross-shape verification.
-        let _verify_qmm = (draft_budget > 0).then(crate::nn::verify_qmm_scope);
+        let _verify_qmm = (draft_budget > 0).then(ironmlx_lm::nn::verify_qmm_scope);
         let verified_hidden = {
             let cache = self
                 .cache
@@ -14012,7 +14047,7 @@ impl<M: Model> Scheduler<M> {
                     let draft_tokens: Vec<u32> = draft_arr.to_vec()?;
                     stats.draft_host_sync_count = stats.draft_host_sync_count.saturating_add(1);
                     add_elapsed_us(&mut stats.draft_host_sync_us, sync_start);
-                    crate::core::constrained::apply_speculative_token_masks(
+                    ironmlx_lm::core::constrained::apply_speculative_token_masks(
                         &verified_logits,
                         &[Some(constraint.speculative_masks(&draft_tokens)?)],
                     )?
@@ -14053,7 +14088,7 @@ impl<M: Model> Scheduler<M> {
                 stats.draft_host_sync_count = stats.draft_host_sync_count.saturating_add(1);
                 add_elapsed_us(&mut stats.draft_host_sync_us, sync_start);
                 let verified_logits = if let Some(constraint) = constraint.as_ref() {
-                    crate::core::constrained::apply_speculative_token_masks(
+                    ironmlx_lm::core::constrained::apply_speculative_token_masks(
                         &verified_logits,
                         &[Some(constraint.speculative_masks(&draft_tokens)?)],
                     )?
@@ -14230,7 +14265,7 @@ impl<M: Model> Scheduler<M> {
         current_token: u32,
         draft_budget: usize,
         history_len: usize,
-        mut constraint: Option<&mut crate::core::constrained::ConstraintSession>,
+        mut constraint: Option<&mut ironmlx_lm::core::constrained::ConstraintSession>,
     ) -> Result<MtpDeviceDraftResult>
     where
         M: MtpSpeculativeModel,
@@ -14260,7 +14295,7 @@ impl<M: Model> Scheduler<M> {
             let sampling_start = Instant::now();
             let next_token = if let Some(constraint) = constraint.as_mut() {
                 let row_logits = slice_logits_row(&output.logits, 0)?;
-                let row_logits = crate::core::constrained::apply_token_mask(
+                let row_logits = ironmlx_lm::core::constrained::apply_token_mask(
                     &row_logits,
                     &constraint.compute_mask()?,
                 )?;
@@ -15147,12 +15182,12 @@ impl<M: Model> Scheduler<M> {
                     .expect("prefill row is occupied")
                     .constraint
                     .as_mut()
-                    .map(crate::core::constrained::ConstraintSession::compute_mask)
+                    .map(ironmlx_lm::core::constrained::ConstraintSession::compute_mask)
                     .transpose()
             })
             .collect::<Result<Vec<_>>>()?;
         let logits_bv =
-            crate::core::constrained::apply_batch_token_masks(&logits_bv, &constraint_masks)?;
+            ironmlx_lm::core::constrained::apply_batch_token_masks(&logits_bv, &constraint_masks)?;
 
         // Stage A — collect per-row sampler refs + histories in compact prefill order.
         let mut row_samplers: Vec<&Sampler> = Vec::with_capacity(b);
@@ -15174,7 +15209,7 @@ impl<M: Model> Scheduler<M> {
         // to materialize; this wrapper makes that cost attributable.
         let mut compact_prng = self.compact_prng_state_for_rows(&prefill_rows)?;
         let history_refs: Vec<&[u32]> = row_histories.iter().map(|h| h.as_slice()).collect();
-        let sample_result = crate::core::sampler::sample_batch(
+        let sample_result = ironmlx_core::sampler::sample_batch(
             &row_samplers,
             &logits_bv,
             &history_refs,
@@ -15522,12 +15557,12 @@ impl<M: Model> Scheduler<M> {
                     .expect("active row is occupied")
                     .constraint
                     .as_mut()
-                    .map(crate::core::constrained::ConstraintSession::compute_mask)
+                    .map(ironmlx_lm::core::constrained::ConstraintSession::compute_mask)
                     .transpose()
             })
             .collect::<Result<Vec<_>>>()?;
         let logits_bv =
-            crate::core::constrained::apply_batch_token_masks(&logits_bv, &constraint_masks)?;
+            ironmlx_lm::core::constrained::apply_batch_token_masks(&logits_bv, &constraint_masks)?;
 
         // Stage A — collect per-row sampler refs + histories in compact
         // active-row order.
@@ -15548,7 +15583,7 @@ impl<M: Model> Scheduler<M> {
         // Stage B — dispatch sample_batch once over [B, vocab].
         let mut compact_prng = self.compact_prng_state_for_rows(&active_rows)?;
         let history_refs: Vec<&[u32]> = row_histories.iter().map(|h| h.as_slice()).collect();
-        let tokens = crate::core::sampler::sample_batch(
+        let tokens = ironmlx_core::sampler::sample_batch(
             &row_samplers,
             &logits_bv,
             &history_refs,
@@ -16311,7 +16346,10 @@ impl<M: Model> Scheduler<M> {
             .constraint
             .as_mut()
         {
-            crate::core::constrained::apply_token_mask(&row_logits, &constraint.compute_mask()?)?
+            ironmlx_lm::core::constrained::apply_token_mask(
+                &row_logits,
+                &constraint.compute_mask()?,
+            )?
         } else {
             row_logits
         };
@@ -16823,7 +16861,7 @@ impl<M: Model> Scheduler<M> {
             .and_then(|state| state.constraint.as_mut())
         {
             let row_logits = slice_logits_row(&first_logits, 0)?;
-            let row_logits = crate::core::constrained::apply_token_mask(
+            let row_logits = ironmlx_lm::core::constrained::apply_token_mask(
                 &row_logits,
                 &constraint.compute_mask()?,
             )?;
@@ -17017,11 +17055,11 @@ impl<M: Model> Scheduler<M> {
     }
 }
 
-impl Scheduler<crate::models::Gemma4Model> {
+impl Scheduler<ironmlx_lm::models::Gemma4Model> {
     pub fn admit_mid_begin_gemma4_drafter(
         &mut self,
         req: GenerateRequest,
-        model: &crate::models::Gemma4Model,
+        model: &ironmlx_lm::models::Gemma4Model,
     ) -> Result<Gemma4DrafterAdmitMidHandle> {
         self.ensure_not_poisoned()?;
         if self.phase != Phase::Decoding {
@@ -17050,7 +17088,7 @@ impl Scheduler<crate::models::Gemma4Model> {
         &mut self,
         id: RequestId,
         row_idx: usize,
-        model: &crate::models::Gemma4Model,
+        model: &ironmlx_lm::models::Gemma4Model,
     ) -> Result<Gemma4DrafterAdmitMidHandle> {
         let (
             prompt_ids,
@@ -17245,7 +17283,7 @@ impl Scheduler<crate::models::Gemma4Model> {
     pub fn admit_mid_chunk_gemma4_drafter(
         &mut self,
         handle: &mut Gemma4DrafterAdmitMidHandle,
-        model: &crate::models::Gemma4Model,
+        model: &ironmlx_lm::models::Gemma4Model,
     ) -> Result<bool> {
         self.ensure_not_poisoned()?;
         if handle.chunk_start >= handle.prompt_len {
@@ -17403,7 +17441,7 @@ impl Scheduler<crate::models::Gemma4Model> {
     pub fn admit_mid_finalize_gemma4_drafter(
         &mut self,
         handle: Gemma4DrafterAdmitMidHandle,
-        model: &crate::models::Gemma4Model,
+        model: &ironmlx_lm::models::Gemma4Model,
     ) -> Result<(RequestId, StepEvent)> {
         self.ensure_not_poisoned()?;
         let Gemma4DrafterAdmitMidHandle {
@@ -17446,7 +17484,7 @@ impl Scheduler<crate::models::Gemma4Model> {
             .and_then(|state| state.constraint.as_mut())
         {
             let row_logits = slice_logits_row(&first_logits, 0)?;
-            let row_logits = crate::core::constrained::apply_token_mask(
+            let row_logits = ironmlx_lm::core::constrained::apply_token_mask(
                 &row_logits,
                 &constraint.compute_mask()?,
             )?;
@@ -17521,8 +17559,8 @@ impl Scheduler<crate::models::Gemma4Model> {
 
     pub fn prefill_admitted_gemma4_drafter_batch(
         &mut self,
-        model: &crate::models::Gemma4Model,
-        drafter: &crate::models::gemma4::Gemma4AssistantModel,
+        model: &ironmlx_lm::models::Gemma4Model,
+        drafter: &ironmlx_lm::models::gemma4::Gemma4AssistantModel,
         cfg: MtpSpeculativeConfig,
     ) -> Result<Vec<StepEvent>> {
         self.ensure_not_poisoned()?;
@@ -17549,8 +17587,8 @@ impl Scheduler<crate::models::Gemma4Model> {
 
     pub fn step_gemma4_drafter_batch(
         &mut self,
-        model: &crate::models::Gemma4Model,
-        drafter: &crate::models::gemma4::Gemma4AssistantModel,
+        model: &ironmlx_lm::models::Gemma4Model,
+        drafter: &ironmlx_lm::models::gemma4::Gemma4AssistantModel,
     ) -> Result<Vec<StepEvent>> {
         self.ensure_not_poisoned()?;
         match self.step_gemma4_drafter_batch_inner(model, drafter, true) {
@@ -17564,8 +17602,8 @@ impl Scheduler<crate::models::Gemma4Model> {
 
     pub fn step_gemma4_drafter_batch_without_postfill(
         &mut self,
-        model: &crate::models::Gemma4Model,
-        drafter: &crate::models::gemma4::Gemma4AssistantModel,
+        model: &ironmlx_lm::models::Gemma4Model,
+        drafter: &ironmlx_lm::models::gemma4::Gemma4AssistantModel,
     ) -> Result<Vec<StepEvent>> {
         self.ensure_not_poisoned()?;
         match self.step_gemma4_drafter_batch_inner(model, drafter, false) {
@@ -17590,8 +17628,8 @@ impl Scheduler<crate::models::Gemma4Model> {
 
     fn prefill_admitted_gemma4_drafter_batch_inner(
         &mut self,
-        model: &crate::models::Gemma4Model,
-        drafter: &crate::models::gemma4::Gemma4AssistantModel,
+        model: &ironmlx_lm::models::Gemma4Model,
+        drafter: &ironmlx_lm::models::gemma4::Gemma4AssistantModel,
         cfg: MtpSpeculativeConfig,
     ) -> Result<Vec<StepEvent>> {
         match self.phase {
@@ -17761,8 +17799,8 @@ impl Scheduler<crate::models::Gemma4Model> {
     fn prefill_admitted_gemma4_drafter_text_batch_direct(
         &mut self,
         active_rows: &[usize],
-        model: &crate::models::Gemma4Model,
-        drafter: &crate::models::gemma4::Gemma4AssistantModel,
+        model: &ironmlx_lm::models::Gemma4Model,
+        drafter: &ironmlx_lm::models::gemma4::Gemma4AssistantModel,
         cfg: MtpSpeculativeConfig,
     ) -> Result<Vec<StepEvent>> {
         let prompt_lens = active_rows
@@ -17895,15 +17933,17 @@ impl Scheduler<crate::models::Gemma4Model> {
                     .expect("active Gemma4 row is occupied")
                     .constraint
                     .as_mut()
-                    .map(crate::core::constrained::ConstraintSession::compute_mask)
+                    .map(ironmlx_lm::core::constrained::ConstraintSession::compute_mask)
                     .transpose()
             })
             .collect::<Result<Vec<_>>>()?;
         let logits_shape = first_logits.shape();
         let vocab = logits_shape.as_slice()[2];
         let first_logits = first_logits.reshape(&[i32::try_from(batch)?, vocab][..])?;
-        let first_logits =
-            crate::core::constrained::apply_batch_token_masks(&first_logits, &constraint_masks)?;
+        let first_logits = ironmlx_lm::core::constrained::apply_batch_token_masks(
+            &first_logits,
+            &constraint_masks,
+        )?;
         let row_samplers = active_rows
             .iter()
             .map(|&row_idx| {
@@ -17925,7 +17965,7 @@ impl Scheduler<crate::models::Gemma4Model> {
             .collect::<Vec<_>>();
         let mut compact_prng = self.compact_prng_state_for_rows(active_rows)?;
         let sampling_start = Instant::now();
-        let first_tokens = crate::core::sampler::sample_batch(
+        let first_tokens = ironmlx_core::sampler::sample_batch(
             &row_samplers,
             &first_logits,
             &row_histories,
@@ -17940,7 +17980,7 @@ impl Scheduler<crate::models::Gemma4Model> {
             active_rows.iter().zip(first_tokens.iter()).enumerate()
         {
             let prompt_len = prompt_lens[compact_row];
-            let shared_kv = crate::models::gemma4::shared_kv_row_prefix_on(
+            let shared_kv = ironmlx_lm::models::gemma4::shared_kv_row_prefix_on(
                 &output.shared_kv,
                 compact_row,
                 prompt_len,
@@ -17993,8 +18033,8 @@ impl Scheduler<crate::models::Gemma4Model> {
 
     fn prefill_admitted_gemma4_drafter_single(
         &mut self,
-        model: &crate::models::Gemma4Model,
-        drafter: &crate::models::gemma4::Gemma4AssistantModel,
+        model: &ironmlx_lm::models::Gemma4Model,
+        drafter: &ironmlx_lm::models::gemma4::Gemma4AssistantModel,
         cfg: MtpSpeculativeConfig,
         fill_initial_window: bool,
     ) -> Result<Vec<StepEvent>> {
@@ -18318,7 +18358,7 @@ impl Scheduler<crate::models::Gemma4Model> {
             .and_then(|state| state.constraint.as_mut())
         {
             let row_logits = slice_logits_row(&first_logits, 0)?;
-            let row_logits = crate::core::constrained::apply_token_mask(
+            let row_logits = ironmlx_lm::core::constrained::apply_token_mask(
                 &row_logits,
                 &constraint.compute_mask()?,
             )?;
@@ -18384,8 +18424,8 @@ impl Scheduler<crate::models::Gemma4Model> {
 
     fn step_gemma4_drafter_batch_inner(
         &mut self,
-        model: &crate::models::Gemma4Model,
-        drafter: &crate::models::gemma4::Gemma4AssistantModel,
+        model: &ironmlx_lm::models::Gemma4Model,
+        drafter: &ironmlx_lm::models::gemma4::Gemma4AssistantModel,
         refill_after_emit: bool,
     ) -> Result<Vec<StepEvent>> {
         if self.phase != Phase::Decoding {
@@ -18529,8 +18569,8 @@ impl Scheduler<crate::models::Gemma4Model> {
         cfg: MtpSpeculativeConfig,
         stats: &mut MtpSpeculativeStats,
         row_states: &mut HashMap<usize, SchedulerGemma4DrafterRowState>,
-        model: &crate::models::Gemma4Model,
-        drafter: &crate::models::gemma4::Gemma4AssistantModel,
+        model: &ironmlx_lm::models::Gemma4Model,
+        drafter: &ironmlx_lm::models::gemma4::Gemma4AssistantModel,
     ) -> Result<()> {
         if rows_to_fill.is_empty() {
             return Ok(());
@@ -18590,7 +18630,9 @@ impl Scheduler<crate::models::Gemma4Model> {
                 effective_max_draft_tokens,
                 draft_budget,
                 kv_valid_len,
-                draft_position: crate::models::gemma4::draft_position_for_shared_kv(kv_valid_len),
+                draft_position: ironmlx_lm::models::gemma4::draft_position_for_shared_kv(
+                    kv_valid_len,
+                ),
                 shared_kv: row_state.shared_kv.clone(),
                 input_hidden: row_state.last_hidden.clone(),
                 input_token: current_token,
@@ -18692,11 +18734,11 @@ impl Scheduler<crate::models::Gemma4Model> {
                     .map(|&ctx_idx| {
                         draft_constraints
                             .get_mut(&contexts[ctx_idx].row_idx)
-                            .map(crate::core::constrained::ConstraintSession::compute_mask)
+                            .map(ironmlx_lm::core::constrained::ConstraintSession::compute_mask)
                             .transpose()
                     })
                     .collect::<Result<Vec<_>>>()?;
-                crate::core::constrained::apply_batch_token_masks(&logits, &masks)?
+                ironmlx_lm::core::constrained::apply_batch_token_masks(&logits, &masks)?
             };
             let sampled_arr = mlx::ops::reduction::argmax(&draft_logits, -1, false)?;
             let sampled: Vec<u32> = sampled_arr.to_vec()?;
@@ -18802,9 +18844,9 @@ impl Scheduler<crate::models::Gemma4Model> {
         // lm_head projection as that projection is also shape-sensitive.
         let position_stable_verify = max_verify_len > 1;
         let _position_stable_linear =
-            position_stable_verify.then(crate::nn::position_stable_linear_scope);
+            position_stable_verify.then(ironmlx_lm::nn::position_stable_linear_scope);
         let _position_stable_qmm =
-            position_stable_verify.then(crate::nn::position_stable_qmm_scope);
+            position_stable_verify.then(ironmlx_lm::nn::position_stable_qmm_scope);
         let max_context_tokens = contexts
             .iter()
             .map(|ctx| ctx.draft_history.len())
@@ -18824,8 +18866,10 @@ impl Scheduler<crate::models::Gemma4Model> {
             max_verify_len,
         );
         let verified = {
-            let _stable_qmm = stable_k3v4_verify.then(crate::nn::batch_stable_qmm_context_scope);
-            let _stable_attention = stable_attention.then(crate::nn::gemma4_verify_attention_scope);
+            let _stable_qmm =
+                stable_k3v4_verify.then(ironmlx_lm::nn::batch_stable_qmm_context_scope);
+            let _stable_attention =
+                stable_attention.then(ironmlx_lm::nn::gemma4_verify_attention_scope);
             let cache = self
                 .cache
                 .as_mut()
@@ -18912,7 +18956,7 @@ impl Scheduler<crate::models::Gemma4Model> {
             speculative_masks[cache_row_for_ctx[ctx_idx]] =
                 Some(constraint.speculative_masks(&ctx.draft_tokens)?);
         }
-        let verified_logits = crate::core::constrained::apply_speculative_token_masks(
+        let verified_logits = ironmlx_lm::core::constrained::apply_speculative_token_masks(
             &verified_logits,
             &speculative_masks,
         )?;
@@ -19004,7 +19048,7 @@ impl Scheduler<crate::models::Gemma4Model> {
                         ctx.verify_input.len()
                     )
                 })?;
-                crate::models::gemma4::shared_kv_row_trim_suffix_on(
+                ironmlx_lm::models::gemma4::shared_kv_row_trim_suffix_on(
                     &verified.shared_kv,
                     compact_row,
                     rejected_len,
@@ -19017,7 +19061,7 @@ impl Scheduler<crate::models::Gemma4Model> {
                     })?;
                     full_layer_cache_row_offset(cache.as_slice(), compact_row)?
                 };
-                crate::models::gemma4::shared_kv_row_prefix_on(
+                ironmlx_lm::models::gemma4::shared_kv_row_prefix_on(
                     &verified.shared_kv,
                     compact_row,
                     accepted_cache_len,
@@ -19106,8 +19150,8 @@ impl Scheduler<crate::models::Gemma4Model> {
 
     fn step_gemma4_drafter_single(
         &mut self,
-        model: &crate::models::Gemma4Model,
-        drafter: &crate::models::gemma4::Gemma4AssistantModel,
+        model: &ironmlx_lm::models::Gemma4Model,
+        drafter: &ironmlx_lm::models::gemma4::Gemma4AssistantModel,
         refill_after_emit: bool,
     ) -> Result<Vec<StepEvent>> {
         if self.phase != Phase::Decoding {
@@ -19197,8 +19241,8 @@ impl Scheduler<crate::models::Gemma4Model> {
     fn fill_gemma4_drafter_window_single(
         &mut self,
         row_idx: usize,
-        model: &crate::models::Gemma4Model,
-        drafter: &crate::models::gemma4::Gemma4AssistantModel,
+        model: &ironmlx_lm::models::Gemma4Model,
+        drafter: &ironmlx_lm::models::gemma4::Gemma4AssistantModel,
     ) -> Result<()> {
         let mut drafter_state = self
             .gemma4_drafter_state
@@ -19228,8 +19272,8 @@ impl Scheduler<crate::models::Gemma4Model> {
         policy: Gemma4DrafterWindowPolicy,
         stats: &mut MtpSpeculativeStats,
         row_state: &mut SchedulerGemma4DrafterRowState,
-        model: &crate::models::Gemma4Model,
-        drafter: &crate::models::gemma4::Gemma4AssistantModel,
+        model: &ironmlx_lm::models::Gemma4Model,
+        drafter: &ironmlx_lm::models::gemma4::Gemma4AssistantModel,
     ) -> Result<()> {
         let Gemma4DrafterWindowPolicy { cfg } = policy;
         let (prompt_ids, generated_tokens, max_new_tokens, sampler, stop_token_ids, constraint) = {
@@ -19328,9 +19372,9 @@ impl Scheduler<crate::models::Gemma4Model> {
         let verify_forward_start = Instant::now();
         let position_stable_verify = verify_input.len() > 1;
         let _position_stable_linear =
-            position_stable_verify.then(crate::nn::position_stable_linear_scope);
+            position_stable_verify.then(ironmlx_lm::nn::position_stable_linear_scope);
         let _position_stable_qmm =
-            position_stable_verify.then(crate::nn::position_stable_qmm_scope);
+            position_stable_verify.then(ironmlx_lm::nn::position_stable_qmm_scope);
         let verified = {
             let stable_attention = gemma4_long_verify_needs_stable_attention(
                 kv_bits,
@@ -19338,7 +19382,8 @@ impl Scheduler<crate::models::Gemma4Model> {
                 verify_input.len(),
                 1,
             );
-            let _stable_attention = stable_attention.then(crate::nn::gemma4_verify_attention_scope);
+            let _stable_attention =
+                stable_attention.then(ironmlx_lm::nn::gemma4_verify_attention_scope);
             let cache = self
                 .cache
                 .as_mut()
@@ -19393,7 +19438,7 @@ impl Scheduler<crate::models::Gemma4Model> {
         let verified_logits =
             model.project_hidden_on(&verified.hidden, mlx::StreamOrDevice::default())?;
         let verified_logits = if let Some(constraint) = constraint.as_ref() {
-            crate::core::constrained::apply_speculative_token_masks(
+            ironmlx_lm::core::constrained::apply_speculative_token_masks(
                 &verified_logits,
                 &[Some(constraint.speculative_masks(&draft_tokens)?)],
             )?
@@ -19449,7 +19494,7 @@ impl Scheduler<crate::models::Gemma4Model> {
                     verify_input.len()
                 )
             })?;
-            crate::models::gemma4::shared_kv_row_trim_suffix_on(
+            ironmlx_lm::models::gemma4::shared_kv_row_trim_suffix_on(
                 &verified.shared_kv,
                 0,
                 rejected_len,
@@ -19519,14 +19564,14 @@ impl Scheduler<crate::models::Gemma4Model> {
         &mut self,
         stats: &mut MtpSpeculativeStats,
         row_state: &mut SchedulerGemma4DrafterRowState,
-        model: &crate::models::Gemma4Model,
-        drafter: &crate::models::gemma4::Gemma4AssistantModel,
+        model: &ironmlx_lm::models::Gemma4Model,
+        drafter: &ironmlx_lm::models::gemma4::Gemma4AssistantModel,
         current_token: u32,
         draft_budget: usize,
         history: &[u32],
         sampler: Sampler,
         draft_prng: Option<&mut Array>,
-        mut constraint: Option<&mut crate::core::constrained::ConstraintSession>,
+        mut constraint: Option<&mut ironmlx_lm::core::constrained::ConstraintSession>,
     ) -> Result<(Vec<u32>, Vec<DraftTokenDistribution>)> {
         let mut draft_tokens = Vec::with_capacity(draft_budget);
         let mut draft_distributions = Vec::with_capacity(draft_budget);
@@ -19534,7 +19579,7 @@ impl Scheduler<crate::models::Gemma4Model> {
         let mut input_hidden = row_state.last_hidden.clone();
         let mut input_token = current_token;
         let kv_valid_len = (history.len() - 1) as i32;
-        let draft_position = crate::models::gemma4::draft_position_for_shared_kv(kv_valid_len);
+        let draft_position = ironmlx_lm::models::gemma4::draft_position_for_shared_kv(kv_valid_len);
         let draft_uniforms = match draft_prng {
             Some(prng) => draw_uniforms(prng, draft_budget)?,
             None => vec![0.0; draft_budget],
@@ -19561,7 +19606,7 @@ impl Scheduler<crate::models::Gemma4Model> {
             let logits = if let Some(constraint) = constraint.as_mut() {
                 let vocab = output.logits.shape().as_slice()[2];
                 let row = output.logits.reshape((vocab,))?;
-                crate::core::constrained::apply_token_mask(&row, &constraint.compute_mask()?)?
+                ironmlx_lm::core::constrained::apply_token_mask(&row, &constraint.compute_mask()?)?
                     .reshape(&[1_i32, 1_i32, vocab][..])?
             } else {
                 output.logits.clone()
@@ -19592,7 +19637,7 @@ impl Scheduler<crate::models::Gemma4Model> {
 
     fn gemma4_drafter_position_ids(
         &mut self,
-        model: &crate::models::Gemma4Model,
+        model: &ironmlx_lm::models::Gemma4Model,
         start_pos: i32,
         len: i32,
     ) -> Result<Array> {
@@ -19616,11 +19661,12 @@ impl Scheduler<crate::models::Gemma4Model> {
     fn temp_gemma4_drafter_scheduler_for_row(
         &self,
         row_idx: usize,
-    ) -> Result<Scheduler<crate::models::Gemma4Model>> {
+    ) -> Result<Scheduler<ironmlx_lm::models::Gemma4Model>> {
         let state = self.slots[row_idx]
             .as_ref()
             .ok_or_else(|| anyhow!("temp_gemma4_drafter_scheduler_for_row: row slot absent"))?;
-        let mut temp = self.temp_scheduler_with_parent_budget::<crate::models::Gemma4Model>()?;
+        let mut temp =
+            self.temp_scheduler_with_parent_budget::<ironmlx_lm::models::Gemma4Model>()?;
         if let Some(config) = self.paged_prefix_cache.as_ref() {
             temp.enable_paged_prefix_cache(config.clone())?;
         }
@@ -19656,7 +19702,7 @@ impl Scheduler<crate::models::Gemma4Model> {
     fn temp_gemma4_drafter_rebase_scheduler_for_row(
         &self,
         row_idx: usize,
-    ) -> Result<Scheduler<crate::models::Gemma4Model>> {
+    ) -> Result<Scheduler<ironmlx_lm::models::Gemma4Model>> {
         let state = self.slots[row_idx].as_ref().ok_or_else(|| {
             anyhow!("temp_gemma4_drafter_rebase_scheduler_for_row: row slot absent")
         })?;
@@ -19667,7 +19713,8 @@ impl Scheduler<crate::models::Gemma4Model> {
             !state.stop_token_ids.contains(&expected_current),
             "temp_gemma4_drafter_rebase_scheduler_for_row: unfinished request current token is a stop token"
         );
-        let mut temp = self.temp_scheduler_with_parent_budget::<crate::models::Gemma4Model>()?;
+        let mut temp =
+            self.temp_scheduler_with_parent_budget::<ironmlx_lm::models::Gemma4Model>()?;
         if let Some(config) = self.paged_prefix_cache.as_ref() {
             temp.enable_paged_prefix_cache(config.clone())?;
         }
@@ -19704,8 +19751,8 @@ impl Scheduler<crate::models::Gemma4Model> {
 
     pub fn rebase_gemma4_drafter_from_committed_history(
         &mut self,
-        model: &crate::models::Gemma4Model,
-        drafter: &crate::models::gemma4::Gemma4AssistantModel,
+        model: &ironmlx_lm::models::Gemma4Model,
+        drafter: &ironmlx_lm::models::gemma4::Gemma4AssistantModel,
     ) -> Result<()> {
         self.ensure_not_poisoned()?;
         anyhow::ensure!(
@@ -19794,22 +19841,25 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
 
-    use crate::core::cache::{KVCache, MtpCache, TurboQuantKVBits};
     use crate::core::speculative::MtpSpeculativeConfig;
-    use crate::core::speculative_model::MtpSpeculativeModel;
-    use crate::nn::MtpStepOutput;
+    use ironmlx_lm::core::speculative_model::MtpSpeculativeModel;
+    use ironmlx_lm::nn::MtpStepOutput;
     use serial_test::serial;
+    use {
+        ironmlx_lm::core::cache::kv_cache::KVCache, ironmlx_lm::core::cache::mtp_cache::MtpCache,
+        ironmlx_lm::core::cache::turboquant_kv::TurboQuantKVBits,
+    };
 
     /// Concrete scheduler type for unit tests — pinned to `Qwen35Model` so
     /// `Scheduler::new` calls don't need turbofish at every site.
-    type TestScheduler = Scheduler<crate::models::qwen3_5::Qwen35Model>;
+    type TestScheduler = Scheduler<ironmlx_lm::models::qwen3_5::Qwen35Model>;
 
     #[test]
     #[serial]
     fn immutable_reclaim_is_not_applicable_to_mixed_cache_layouts() {
         let mut pool = ImmutablePrefixBlockPool::new("mixed".into(), 128, 64, 1);
         let mut cache = vec![LayerCache::Linear(
-            crate::core::cache::GatedDeltaCache::new_with_cap(
+            ironmlx_lm::core::cache::gated_delta::GatedDeltaCache::new_with_cap(
                 1,
                 4,
                 8,
@@ -20222,7 +20272,7 @@ mod tests {
         );
         let memory_budget_exceeded_count =
             std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let mut scheduler = Scheduler::<crate::models::Gemma4Model>::new_with_state(
+        let mut scheduler = Scheduler::<ironmlx_lm::models::Gemma4Model>::new_with_state(
             1,
             262_144,
             budget_state,
@@ -20588,15 +20638,15 @@ mod tests {
     /// to token 3; all other forward paths are unreachable from unit tests.
     struct FinishedPhaseFakeModel;
 
-    impl crate::core::model::Model for FinishedPhaseFakeModel {
+    impl ironmlx_lm::core::model::Model for FinishedPhaseFakeModel {
         fn make_cache(
             &self,
             batch: i32,
             cap: i32,
             dtype: mlx::Dtype,
-        ) -> crate::Result<Vec<crate::core::cache::layer::LayerCache>> {
-            Ok(vec![crate::core::cache::layer::LayerCache::Full(
-                crate::core::KVCache::new(batch, 1, 1, 1, dtype, cap),
+        ) -> crate::Result<Vec<ironmlx_lm::core::cache::layer::LayerCache>> {
+            Ok(vec![ironmlx_lm::core::cache::layer::LayerCache::Full(
+                ironmlx_lm::core::cache::kv_cache::KVCache::new(batch, 1, 1, 1, dtype, cap),
             )])
         }
 
@@ -20606,7 +20656,7 @@ mod tests {
             _position_ids: &mlx::Array,
             _per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            _cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
+            _cache: Option<&mut [ironmlx_lm::core::cache::layer::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
             let b = input_ids.shape().as_slice()[0] as usize;
@@ -20630,7 +20680,7 @@ mod tests {
             _attention_mask: &mlx::Array,
             _linear_attention_mask: &mlx::Array,
             _per_row_lens: &[i32],
-            _cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
+            _cache: Option<&mut [ironmlx_lm::core::cache::layer::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
             let b = input_ids.shape().as_slice()[0] as usize;
@@ -20653,7 +20703,7 @@ mod tests {
             _position_ids: &mlx::Array,
             _per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            _cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
+            _cache: Option<&mut [ironmlx_lm::core::cache::layer::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
             let dims = input_ids.shape();
@@ -20662,7 +20712,7 @@ mod tests {
                 .map_err(|e| anyhow::anyhow!("fake hidden failed: {e:?}"))
         }
 
-        fn model_meta(&self) -> crate::core::model::ModelMeta {
+        fn model_meta(&self) -> ironmlx_lm::core::model::ModelMeta {
             crate::core::memory_budget::test_meta_qwen35()
         }
 
@@ -20682,7 +20732,7 @@ mod tests {
             _per_row_pixel_values: &[Option<&[mlx::Array]>],
             _per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
             _image_token_id: i32,
-            _cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
+            _cache: Option<&mut [ironmlx_lm::core::cache::layer::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
             unreachable!("Finished-phase unit tests are text-only")
@@ -20711,7 +20761,7 @@ mod tests {
             _position_ids: &mlx::Array,
             _per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            _cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
+            _cache: Option<&mut [ironmlx_lm::core::cache::layer::LayerCache]>,
             _vision_embeds_slice: Option<&mlx::Array>,
             _image_token_id: i32,
             _target: mlx::StreamOrDevice,
@@ -20725,7 +20775,7 @@ mod tests {
             _position_ids: &mlx::Array,
             _per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            _cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
+            _cache: Option<&mut [ironmlx_lm::core::cache::layer::LayerCache]>,
             _vision_embeds_slice: Option<&mlx::Array>,
             _image_token_id: i32,
             _target: mlx::StreamOrDevice,
@@ -20822,13 +20872,13 @@ mod tests {
             .map_err(|e| anyhow::anyhow!("fake logits reshape failed: {e:?}"))
     }
 
-    impl crate::core::model::Model for RecordingPrefillModel {
+    impl ironmlx_lm::core::model::Model for RecordingPrefillModel {
         fn make_cache(
             &self,
             batch: i32,
             _cap: i32,
             _dtype: mlx::Dtype,
-        ) -> crate::Result<Vec<crate::core::cache::layer::LayerCache>> {
+        ) -> crate::Result<Vec<ironmlx_lm::core::cache::layer::LayerCache>> {
             self.make_cache_batches.lock().unwrap().push(batch);
             Ok(Vec::new())
         }
@@ -20839,7 +20889,7 @@ mod tests {
             _position_ids: &mlx::Array,
             per_row_lens: Option<&[i32]>,
             decode_mask: Option<&mlx::Array>,
-            _cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
+            _cache: Option<&mut [ironmlx_lm::core::cache::layer::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
             let dims = input_ids.shape();
@@ -20862,7 +20912,7 @@ mod tests {
             _attention_mask: &mlx::Array,
             _linear_attention_mask: &mlx::Array,
             _per_row_lens: &[i32],
-            _cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
+            _cache: Option<&mut [ironmlx_lm::core::cache::layer::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
             let batch = input_ids.shape().as_slice()[0];
@@ -20876,7 +20926,7 @@ mod tests {
             _position_ids: &mlx::Array,
             _per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            _cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
+            _cache: Option<&mut [ironmlx_lm::core::cache::layer::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
             let dims = input_ids.shape();
@@ -20889,7 +20939,7 @@ mod tests {
                 .map_err(|e| anyhow::anyhow!("fake hidden failed: {e:?}"))
         }
 
-        fn model_meta(&self) -> crate::core::model::ModelMeta {
+        fn model_meta(&self) -> ironmlx_lm::core::model::ModelMeta {
             crate::core::memory_budget::test_meta_qwen35()
         }
 
@@ -20913,7 +20963,7 @@ mod tests {
             per_row_pixel_values: &[Option<&[mlx::Array]>],
             _per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
             _image_token_id: i32,
-            _cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
+            _cache: Option<&mut [ironmlx_lm::core::cache::layer::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
             let batch = input_ids.shape().as_slice()[0];
@@ -20957,7 +21007,7 @@ mod tests {
             _position_ids: &mlx::Array,
             _per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            _cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
+            _cache: Option<&mut [ironmlx_lm::core::cache::layer::LayerCache]>,
             vision_embeds_slice: Option<&mlx::Array>,
             _image_token_id: i32,
             _target: mlx::StreamOrDevice,
@@ -20977,7 +21027,7 @@ mod tests {
             _position_ids: &mlx::Array,
             _per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            _cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
+            _cache: Option<&mut [ironmlx_lm::core::cache::layer::LayerCache]>,
             vision_embeds_slice: Option<&mlx::Array>,
             _image_token_id: i32,
             _target: mlx::StreamOrDevice,
@@ -21018,7 +21068,7 @@ mod tests {
         }
 
         fn advance_cache(
-            cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
+            cache: Option<&mut [ironmlx_lm::core::cache::layer::LayerCache]>,
             input_ids: &mlx::Array,
             per_row_lens: Option<&[i32]>,
         ) -> crate::Result<()> {
@@ -21042,11 +21092,11 @@ mod tests {
                 .map_err(|e| anyhow::anyhow!("fake v failed: {e:?}"))?;
             for layer in cache {
                 match layer {
-                    crate::core::cache::layer::LayerCache::Full(kv) => {
+                    ironmlx_lm::core::cache::layer::LayerCache::Full(kv) => {
                         kv.update_and_fetch(&k, &v, lens)?;
                     }
-                    crate::core::cache::layer::LayerCache::Linear(gd) => gd.advance(lens)?,
-                    crate::core::cache::layer::LayerCache::Mla(_) => {}
+                    ironmlx_lm::core::cache::layer::LayerCache::Linear(gd) => gd.advance(lens)?,
+                    ironmlx_lm::core::cache::layer::LayerCache::Mla(_) => {}
                 }
             }
             Ok(())
@@ -21081,19 +21131,19 @@ mod tests {
         }
     }
 
-    impl crate::core::model::Model for StepDecodeMaskModel {
+    impl ironmlx_lm::core::model::Model for StepDecodeMaskModel {
         fn make_cache(
             &self,
             batch: i32,
             cap: i32,
             dtype: mlx::Dtype,
-        ) -> crate::Result<Vec<crate::core::cache::layer::LayerCache>> {
-            let mut cache = vec![crate::core::cache::layer::LayerCache::Full(
-                crate::core::KVCache::new(batch, 1, 1, 1, dtype, cap),
+        ) -> crate::Result<Vec<ironmlx_lm::core::cache::layer::LayerCache>> {
+            let mut cache = vec![ironmlx_lm::core::cache::layer::LayerCache::Full(
+                ironmlx_lm::core::cache::kv_cache::KVCache::new(batch, 1, 1, 1, dtype, cap),
             )];
             if self.hybrid_cache {
-                cache.push(crate::core::cache::layer::LayerCache::Linear(
-                    crate::core::cache::GatedDeltaCache::new_with_cap(
+                cache.push(ironmlx_lm::core::cache::layer::LayerCache::Linear(
+                    ironmlx_lm::core::cache::gated_delta::GatedDeltaCache::new_with_cap(
                         batch, 2, 2, 1, 1, 1, dtype, cap,
                     )?,
                 ));
@@ -21107,7 +21157,7 @@ mod tests {
             position_ids: &mlx::Array,
             per_row_lens: Option<&[i32]>,
             decode_mask: Option<&mlx::Array>,
-            cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
+            cache: Option<&mut [ironmlx_lm::core::cache::layer::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
             let dims = input_ids.shape();
@@ -21137,7 +21187,7 @@ mod tests {
             _attention_mask: &mlx::Array,
             _linear_attention_mask: &mlx::Array,
             per_row_lens: &[i32],
-            cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
+            cache: Option<&mut [ironmlx_lm::core::cache::layer::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
             self.batched_prefill_batches
@@ -21158,7 +21208,7 @@ mod tests {
             _position_ids: &mlx::Array,
             per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
+            cache: Option<&mut [ironmlx_lm::core::cache::layer::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
             Self::advance_cache(cache, input_ids, per_row_lens)?;
@@ -21169,7 +21219,7 @@ mod tests {
                 .map_err(|e| anyhow::anyhow!("fake hidden failed: {e:?}"))
         }
 
-        fn model_meta(&self) -> crate::core::model::ModelMeta {
+        fn model_meta(&self) -> ironmlx_lm::core::model::ModelMeta {
             crate::core::memory_budget::test_meta_qwen35()
         }
 
@@ -21193,7 +21243,7 @@ mod tests {
             _per_row_pixel_values: &[Option<&[mlx::Array]>],
             _per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
             _image_token_id: i32,
-            cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
+            cache: Option<&mut [ironmlx_lm::core::cache::layer::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
             self.batched_prefill_batches
@@ -21238,7 +21288,7 @@ mod tests {
             _position_ids: &mlx::Array,
             per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
+            cache: Option<&mut [ironmlx_lm::core::cache::layer::LayerCache]>,
             _vision_embeds_slice: Option<&mlx::Array>,
             _image_token_id: i32,
             _target: mlx::StreamOrDevice,
@@ -21256,7 +21306,7 @@ mod tests {
             _position_ids: &mlx::Array,
             per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
+            cache: Option<&mut [ironmlx_lm::core::cache::layer::LayerCache]>,
             _vision_embeds_slice: Option<&mlx::Array>,
             _image_token_id: i32,
             _target: mlx::StreamOrDevice,
@@ -21424,7 +21474,7 @@ mod tests {
         }
 
         fn bump_first_full_cache(
-            cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
+            cache: Option<&mut [ironmlx_lm::core::cache::layer::LayerCache]>,
             input_ids: &mlx::Array,
             per_row_lens: Option<&[i32]>,
         ) -> crate::Result<()> {
@@ -21448,13 +21498,13 @@ mod tests {
                 .map_err(|e| anyhow::anyhow!("fake v failed: {e:?}"))?;
             for layer in cache {
                 match layer {
-                    crate::core::cache::layer::LayerCache::Full(kv) => {
+                    ironmlx_lm::core::cache::layer::LayerCache::Full(kv) => {
                         kv.update_and_fetch(&k, &v, lens)?;
                     }
-                    crate::core::cache::layer::LayerCache::Linear(gd) => {
+                    ironmlx_lm::core::cache::layer::LayerCache::Linear(gd) => {
                         gd.advance(lens)?;
                     }
-                    crate::core::cache::layer::LayerCache::Mla(_) => {}
+                    ironmlx_lm::core::cache::layer::LayerCache::Mla(_) => {}
                 }
             }
             Ok(())
@@ -21507,19 +21557,19 @@ mod tests {
         Ok(logits)
     }
 
-    impl crate::core::model::Model for ScriptedMtpSchedulerModel {
+    impl ironmlx_lm::core::model::Model for ScriptedMtpSchedulerModel {
         fn make_cache(
             &self,
             batch: i32,
             cap: i32,
             dtype: mlx::Dtype,
-        ) -> crate::Result<Vec<crate::core::cache::layer::LayerCache>> {
-            let mut cache = vec![crate::core::cache::layer::LayerCache::Full(
-                crate::core::KVCache::new(batch, 1, 1, 1, dtype, cap),
+        ) -> crate::Result<Vec<ironmlx_lm::core::cache::layer::LayerCache>> {
+            let mut cache = vec![ironmlx_lm::core::cache::layer::LayerCache::Full(
+                ironmlx_lm::core::cache::kv_cache::KVCache::new(batch, 1, 1, 1, dtype, cap),
             )];
             if self.hybrid_cache {
-                cache.push(crate::core::cache::layer::LayerCache::Linear(
-                    crate::core::cache::GatedDeltaCache::new_with_cap(
+                cache.push(ironmlx_lm::core::cache::layer::LayerCache::Linear(
+                    ironmlx_lm::core::cache::gated_delta::GatedDeltaCache::new_with_cap(
                         batch, 2, 4, 1, 1, 1, dtype, cap,
                     )?,
                 ));
@@ -21533,7 +21583,7 @@ mod tests {
             _position_ids: &mlx::Array,
             per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
+            cache: Option<&mut [ironmlx_lm::core::cache::layer::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
             Self::bump_first_full_cache(cache, input_ids, per_row_lens)?;
@@ -21548,7 +21598,7 @@ mod tests {
             _attention_mask: &mlx::Array,
             _linear_attention_mask: &mlx::Array,
             per_row_lens: &[i32],
-            cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
+            cache: Option<&mut [ironmlx_lm::core::cache::layer::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
             Self::bump_first_full_cache(cache, input_ids, Some(per_row_lens))?;
@@ -21562,7 +21612,7 @@ mod tests {
             _position_ids: &mlx::Array,
             per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
+            cache: Option<&mut [ironmlx_lm::core::cache::layer::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
             Self::bump_first_full_cache(cache, input_ids, per_row_lens)?;
@@ -21632,7 +21682,7 @@ mod tests {
             }
         }
 
-        fn model_meta(&self) -> crate::core::model::ModelMeta {
+        fn model_meta(&self) -> ironmlx_lm::core::model::ModelMeta {
             crate::core::memory_budget::test_meta_qwen35()
         }
 
@@ -21667,7 +21717,7 @@ mod tests {
             _per_row_pixel_values: &[Option<&[mlx::Array]>],
             _per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
             _image_token_id: i32,
-            cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
+            cache: Option<&mut [ironmlx_lm::core::cache::layer::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
             Self::bump_first_full_cache(cache, input_ids, Some(per_row_lens))?;
@@ -21709,7 +21759,7 @@ mod tests {
             _position_ids: &mlx::Array,
             per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
+            cache: Option<&mut [ironmlx_lm::core::cache::layer::LayerCache]>,
             _vision_embeds_slice: Option<&mlx::Array>,
             _image_token_id: i32,
             _target: mlx::StreamOrDevice,
@@ -21724,7 +21774,7 @@ mod tests {
             _position_ids: &mlx::Array,
             per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
+            cache: Option<&mut [ironmlx_lm::core::cache::layer::LayerCache]>,
             vision_embeds_slice: Option<&mlx::Array>,
             _image_token_id: i32,
             _target: mlx::StreamOrDevice,
@@ -21745,7 +21795,10 @@ mod tests {
     impl MtpSpeculativeModel for ScriptedMtpSchedulerModel {
         type MtpHead = FakeMtpHead;
 
-        fn load_mtp_head(&self, _loader: &crate::core::Loader) -> crate::Result<Self::MtpHead> {
+        fn load_mtp_head(
+            &self,
+            _loader: &ironmlx_lm::core::loader::Loader,
+        ) -> crate::Result<Self::MtpHead> {
             Ok(FakeMtpHead)
         }
 
@@ -23260,7 +23313,7 @@ mod tests {
         assert!(scheduler.prompt_lookup_can_start_rolling_mid_admit());
 
         scheduler.cache = Some(vec![LayerCache::Linear(
-            crate::core::cache::GatedDeltaCache::new_with_cap(
+            ironmlx_lm::core::cache::gated_delta::GatedDeltaCache::new_with_cap(
                 1,
                 4,
                 8,
@@ -26881,7 +26934,8 @@ mod tests {
         )
         .expect("scheduler startup");
         let mut req = mk_req(vec![1, 2, 3]);
-        req.kv_cache_turboquant_bits = Some(crate::core::cache::TurboQuantKVBits::K3V4);
+        req.kv_cache_turboquant_bits =
+            Some(ironmlx_lm::core::cache::turboquant_kv::TurboQuantKVBits::K3V4);
         let id = s.admit(req).expect("admit");
 
         let model = StepDecodeMaskModel::default();
@@ -26893,7 +26947,10 @@ mod tests {
         match &cache[0] {
             LayerCache::Full(kv) => {
                 let tq = kv.turboquant().expect("turboquant cache");
-                assert_eq!(tq.bits(), crate::core::cache::TurboQuantKVBits::K3V4);
+                assert_eq!(
+                    tq.bits(),
+                    ironmlx_lm::core::cache::turboquant_kv::TurboQuantKVBits::K3V4
+                );
                 assert_eq!(tq.key_bits(), 3);
                 assert_eq!(tq.value_bits(), 4);
             }
@@ -26920,7 +26977,8 @@ mod tests {
         s.enable_paged_prefix_cache(config)
             .expect("enable prefix cache");
         let mut req = mk_req(vec![1, 2, 3, 4]);
-        req.kv_cache_turboquant_bits = Some(crate::core::cache::TurboQuantKVBits::K3V4);
+        req.kv_cache_turboquant_bits =
+            Some(ironmlx_lm::core::cache::turboquant_kv::TurboQuantKVBits::K3V4);
         let id = s.admit(req).expect("admit");
 
         let model = StepDecodeMaskModel::default();
@@ -26933,7 +26991,10 @@ mod tests {
         match &s.cache.as_ref().expect("scheduler cache")[0] {
             LayerCache::Full(kv) => {
                 let tq = kv.turboquant().expect("turboquant cache");
-                assert_eq!(tq.bits(), crate::core::cache::TurboQuantKVBits::K3V4);
+                assert_eq!(
+                    tq.bits(),
+                    ironmlx_lm::core::cache::turboquant_kv::TurboQuantKVBits::K3V4
+                );
                 assert!(
                     kv.paged().is_none(),
                     "TurboQuant runtime KV should not also switch to paged storage"
@@ -28198,7 +28259,7 @@ mod tests {
     #[test]
     #[serial(mlx_metal)]
     fn prefill_admitted_batched_vl_uses_fingerprinted_paged_ssd_prefix_cache_on_exact_hits() {
-        use crate::core::model_input::IMAGE_TOKEN_ID;
+        use ironmlx_lm::core::model_input::IMAGE_TOKEN_ID;
         use mlx::Dtype;
 
         fn vl_req_with_pixel(value: f32) -> GenerateRequest {
@@ -28268,7 +28329,7 @@ mod tests {
     #[test]
     #[serial(mlx_metal)]
     fn prefill_admitted_batched_vl_paged_prefix_cold_miss_uses_batched_prefill() {
-        use crate::core::model_input::IMAGE_TOKEN_ID;
+        use ironmlx_lm::core::model_input::IMAGE_TOKEN_ID;
         use mlx::Dtype;
 
         fn vl_req_with_pixel(value: f32) -> GenerateRequest {
@@ -28329,7 +28390,7 @@ mod tests {
     #[test]
     #[serial(mlx_metal)]
     fn admit_mid_vl_saves_fingerprinted_paged_prefix_cache() {
-        use crate::core::model_input::IMAGE_TOKEN_ID;
+        use ironmlx_lm::core::model_input::IMAGE_TOKEN_ID;
         use mlx::Dtype;
 
         fn vl_req_with_pixel(value: f32) -> GenerateRequest {
@@ -28444,9 +28505,11 @@ mod tests {
         )
         .expect("scheduler startup");
         let mut req_k3v4 = mk_req(vec![1, 2, 3]);
-        req_k3v4.kv_cache_turboquant_bits = Some(crate::core::cache::TurboQuantKVBits::K3V4);
+        req_k3v4.kv_cache_turboquant_bits =
+            Some(ironmlx_lm::core::cache::turboquant_kv::TurboQuantKVBits::K3V4);
         let mut req_k4v4 = mk_req(vec![4, 5, 6]);
-        req_k4v4.kv_cache_turboquant_bits = Some(crate::core::cache::TurboQuantKVBits::K4V4);
+        req_k4v4.kv_cache_turboquant_bits =
+            Some(ironmlx_lm::core::cache::turboquant_kv::TurboQuantKVBits::K4V4);
         s.admit(req_k3v4).expect("admit K3V4");
         s.admit(req_k4v4).expect("admit K4V4");
 
@@ -28640,7 +28703,7 @@ mod tests {
 
     #[test]
     fn prefill_admitted_single_vl_row_splits_prefix_and_last_token() {
-        use crate::core::model_input::IMAGE_TOKEN_ID;
+        use ironmlx_lm::core::model_input::IMAGE_TOKEN_ID;
         use mlx::Dtype;
 
         let mut s = Scheduler::<RecordingPrefillModel>::new(
@@ -28685,7 +28748,7 @@ mod tests {
 
     #[test]
     fn prefill_admitted_single_vl_row_preserves_multi_image_grids() {
-        use crate::core::model_input::IMAGE_TOKEN_ID;
+        use ironmlx_lm::core::model_input::IMAGE_TOKEN_ID;
         use mlx::Dtype;
 
         let mut s = Scheduler::<RecordingPrefillModel>::new(
@@ -28731,7 +28794,7 @@ mod tests {
     // Multi-row VL prefill test (2 active VL rows).
     #[test]
     fn prefill_admitted_compacts_vl_rows() {
-        use crate::core::model_input::IMAGE_TOKEN_ID;
+        use ironmlx_lm::core::model_input::IMAGE_TOKEN_ID;
         use mlx::Dtype;
 
         let mut s = Scheduler::<RecordingPrefillModel>::new(
@@ -29071,7 +29134,7 @@ mod tests {
         use std::collections::HashMap;
         use tokio::sync::mpsc;
 
-        let mut s = Scheduler::<crate::models::Gemma4Model>::new(
+        let mut s = Scheduler::<ironmlx_lm::models::Gemma4Model>::new(
             2,
             32768,
             crate::core::memory_budget::test_meta_gemma4_12b(),
@@ -29091,7 +29154,7 @@ mod tests {
                         last_hidden: (&[1.0_f32][..], &[1_i32, 1, 1][..])
                             .try_into()
                             .expect("last_hidden row 0"),
-                        shared_kv: crate::models::gemma4::Gemma4SharedKvStates::default(),
+                        shared_kv: ironmlx_lm::models::gemma4::Gemma4SharedKvStates::default(),
                         adaptive_draft_tokens: 2,
                         draft_policy: Gemma4DrafterPolicyState::new(2),
                     },
@@ -29103,7 +29166,7 @@ mod tests {
                         last_hidden: (&[2.0_f32][..], &[1_i32, 1, 1][..])
                             .try_into()
                             .expect("last_hidden row 1"),
-                        shared_kv: crate::models::gemma4::Gemma4SharedKvStates::default(),
+                        shared_kv: ironmlx_lm::models::gemma4::Gemma4SharedKvStates::default(),
                         adaptive_draft_tokens: 2,
                         draft_policy: Gemma4DrafterPolicyState::new(2),
                     },
@@ -29142,7 +29205,7 @@ mod tests {
 
     #[test]
     fn scheduler_evict_removes_gemma4_drafter_row_state_for_evicted_slot() {
-        let mut s = Scheduler::<crate::models::Gemma4Model>::new(
+        let mut s = Scheduler::<ironmlx_lm::models::Gemma4Model>::new(
             2,
             32768,
             crate::core::memory_budget::test_meta_gemma4_12b(),
@@ -29162,7 +29225,7 @@ mod tests {
                         last_hidden: (&[1.0_f32][..], &[1_i32, 1, 1][..])
                             .try_into()
                             .expect("last_hidden row 0"),
-                        shared_kv: crate::models::gemma4::Gemma4SharedKvStates::default(),
+                        shared_kv: ironmlx_lm::models::gemma4::Gemma4SharedKvStates::default(),
                         adaptive_draft_tokens: 2,
                         draft_policy: Gemma4DrafterPolicyState::new(2),
                     },
@@ -29174,7 +29237,7 @@ mod tests {
                         last_hidden: (&[2.0_f32][..], &[1_i32, 1, 1][..])
                             .try_into()
                             .expect("last_hidden row 1"),
-                        shared_kv: crate::models::gemma4::Gemma4SharedKvStates::default(),
+                        shared_kv: ironmlx_lm::models::gemma4::Gemma4SharedKvStates::default(),
                         adaptive_draft_tokens: 2,
                         draft_policy: Gemma4DrafterPolicyState::new(2),
                     },
@@ -29231,8 +29294,8 @@ mod tests {
 
     #[test]
     fn admit_carries_vl_fields() {
-        use crate::core::model_input::IMAGE_TOKEN_ID;
-        use crate::core::sampler::Sampler;
+        use ironmlx_core::sampler::Sampler;
+        use ironmlx_lm::core::model_input::IMAGE_TOKEN_ID;
         use mlx::Dtype;
 
         let mut sched =
@@ -29283,7 +29346,7 @@ mod tests {
         let req = GenerateRequest {
             prompt_ids: vec![1, 2, 3],
             max_new_tokens: 8,
-            sampler: crate::core::sampler::Sampler::greedy(),
+            sampler: ironmlx_core::sampler::Sampler::greedy(),
             stop_token_ids: vec![],
             prefill_chunk_size: 0,
             decode_cadence_mid_chunk_cap: 256,
@@ -29291,7 +29354,7 @@ mod tests {
             pixel_values: None,
             image_grid_thw: None,
             image_spatial_merge_size: 2,
-            image_token_id: crate::core::model_input::IMAGE_TOKEN_ID,
+            image_token_id: ironmlx_lm::core::model_input::IMAGE_TOKEN_ID,
             constraint: None,
         };
         let _id = s.admit(req).expect("admit");
@@ -29323,7 +29386,7 @@ mod tests {
         let oversize_req = GenerateRequest {
             prompt_ids: vec![0; 1500],
             max_new_tokens: 600,
-            sampler: crate::core::sampler::Sampler::greedy(),
+            sampler: ironmlx_core::sampler::Sampler::greedy(),
             stop_token_ids: vec![],
             prefill_chunk_size: 0,
             decode_cadence_mid_chunk_cap: 256,
@@ -29331,7 +29394,7 @@ mod tests {
             pixel_values: None,
             image_grid_thw: None,
             image_spatial_merge_size: 2,
-            image_token_id: crate::core::model_input::IMAGE_TOKEN_ID,
+            image_token_id: ironmlx_lm::core::model_input::IMAGE_TOKEN_ID,
             constraint: None,
         };
 
@@ -29388,7 +29451,7 @@ mod tests {
         let req = |prompt_len: usize, max_new: usize| GenerateRequest {
             prompt_ids: vec![0; prompt_len],
             max_new_tokens: max_new,
-            sampler: crate::core::sampler::Sampler::greedy(),
+            sampler: ironmlx_core::sampler::Sampler::greedy(),
             stop_token_ids: vec![],
             prefill_chunk_size: 0,
             decode_cadence_mid_chunk_cap: 256,
@@ -29396,7 +29459,7 @@ mod tests {
             pixel_values: None,
             image_grid_thw: None,
             image_spatial_merge_size: 2,
-            image_token_id: crate::core::model_input::IMAGE_TOKEN_ID,
+            image_token_id: ironmlx_lm::core::model_input::IMAGE_TOKEN_ID,
             constraint: None,
         };
 

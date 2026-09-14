@@ -11,8 +11,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{bail, Result};
 
 use crate::core::memory_budget::{kv_bytes_per_token, SAFETY_MARGIN_BYTES, SOFT_LIMIT_FRAC};
-use crate::core::model::ModelMeta;
-use crate::core::Model;
+use ironmlx_lm::core::model::Model;
+use ironmlx_lm::core::model::ModelMeta;
 use serde::{Deserialize, Serialize};
 
 const PROMPT_LIMIT_SAMPLES: [usize; 4] = [512, 1024, 2048, 8192];

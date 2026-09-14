@@ -28,13 +28,19 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
-use ironmlx::core::cache::layer::enable_paged_kv_caches;
-use ironmlx::core::server::chat_format::render_and_encode;
-use ironmlx::core::server::vision::{expand_decoded_messages, DecodedMessage, DecodedPart};
-use ironmlx::core::vision::DenseVlMethods;
-use ironmlx::core::vision_input::VisionInputConfig;
-use ironmlx::core::{Loader, Model, Tokenizer};
+use ironmlx::server::chat_format::render_and_encode;
+use ironmlx_lm::core::cache::layer::enable_paged_kv_caches;
+use ironmlx_lm::core::vision::DenseVlMethods;
+use ironmlx_lm::core::vision_input::VisionInputConfig;
 use mlx::Dtype;
+use {
+    ironmlx::server::vision::expand_decoded_messages,
+    ironmlx_lm::core::vision_input::DecodedMessage, ironmlx_lm::core::vision_input::DecodedPart,
+};
+use {
+    ironmlx_lm::core::loader::Loader, ironmlx_lm::core::model::Model,
+    ironmlx_lm::core::tokenizer::Tokenizer,
+};
 
 struct ServerProcess {
     child: Child,
@@ -801,7 +807,7 @@ fn gemma4_prompt_inputs(
     vision: &VisionInputConfig,
 ) -> (Vec<i32>, Vec<mlx::Array>, Vec<(i32, i32, i32)>, i32) {
     let image_token_id =
-        ironmlx::core::server::vision::derive_image_token_and_merge(vision, tokenizer).0;
+        ironmlx_lm::core::vision_input::derive_image_token_and_merge(vision, tokenizer).0;
     let bytes = std::fs::read(coco_path()).expect("read image fixture");
     let messages = vec![DecodedMessage {
         role: "user".to_owned(),
@@ -827,7 +833,7 @@ fn gemma4_prompt_inputs(
 }
 
 fn gemma4_split_prefill_argmax(
-    model: &ironmlx::models::Gemma4Model,
+    model: &ironmlx_lm::models::Gemma4Model,
     prompt_ids: &[i32],
     pixel_values: &[mlx::Array],
     grid_thw: &[(i32, i32, i32)],
@@ -1866,14 +1872,14 @@ fn gemma4_vl_split_prefill_paged_kv_matches_dense_argmax() {
     let model_dir = gemma4_model_dir();
     let loader = Loader::open_multimodal(&model_dir).expect("open Gemma4 loader");
     let tokenizer = Tokenizer::from_loader(&loader).expect("Gemma4 tokenizer");
-    let cfg = ironmlx::models::Gemma4Config::from_loader(&loader).expect("Gemma4 config");
+    let cfg = ironmlx_lm::models::Gemma4Config::from_loader(&loader).expect("Gemma4 config");
     let vision = VisionInputConfig::Gemma4 {
         vision_config: cfg
             .vision_config
             .clone()
             .expect("Gemma4 checkpoint must include vision config"),
     };
-    let model = ironmlx::models::Gemma4Model::from_loader(&loader).expect("Gemma4 model");
+    let model = ironmlx_lm::models::Gemma4Model::from_loader(&loader).expect("Gemma4 model");
     let (prompt_ids, pixel_values, grid_thw, image_token_id) =
         gemma4_prompt_inputs(&tokenizer, &vision);
 

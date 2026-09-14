@@ -7,19 +7,24 @@ use std::time::Duration;
 use anyhow::{bail, Context};
 use clap::Args;
 
-use super::scheduler_profile_store::{
-    detect_scheduler_profile_hardware_label, SchedulerProfileStore,
-};
 use super::KvQuantArg;
-use crate::core::cache::DEFAULT_PAGED_PREFIX_CACHE_BLOCK_SIZE;
-use crate::core::process_memory::StaticMemoryEstimate;
-use crate::core::scheduler_autotune::{
-    SchedulerAutotuneRuntimeContext, SchedulerAutotuneRuntimeProfile,
-};
-use crate::core::speculative_model::MtpSpeculativeModel;
-use crate::core::vision::DenseVlMethods;
-use crate::core::{server, Loader, Model, Tokenizer};
 use crate::Result;
+use ironmlx_lm::core::speculative_model::MtpSpeculativeModel;
+use ironmlx_lm::core::vision::DenseVlMethods;
+use ironmlx_runtime::core::cache::prefix_store::DEFAULT_PAGED_PREFIX_CACHE_BLOCK_SIZE;
+use ironmlx_runtime::core::process_memory::StaticMemoryEstimate;
+use {
+    crate::server, ironmlx_lm::core::loader::Loader, ironmlx_lm::core::model::Model,
+    ironmlx_lm::core::tokenizer::Tokenizer,
+};
+use {
+    ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneRuntimeContext,
+    ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneRuntimeProfile,
+};
+use {
+    ironmlx_runtime::core::scheduler_profile_store::detect_scheduler_profile_hardware_label,
+    ironmlx_runtime::core::scheduler_profile_store::SchedulerProfileStore,
+};
 
 const DEFAULT_DFLASH2_TENSOR_BATCH_MAX_WIDTH: usize = 4;
 const DEFAULT_PAGED_PREFIX_CACHE_DIR: &str = "~/.ironmlx/cache/paged_prefix_cache";
@@ -282,7 +287,7 @@ pub(crate) fn resolve_paged_prefix_cache_config(
     args: &ServeArgs,
     scheduler_config: SchedulerServeConfig,
     model_id: &str,
-) -> Result<Option<crate::core::cache::PagedPrefixCacheConfig>> {
+) -> Result<Option<ironmlx_runtime::core::cache::prefix_store::PagedPrefixCacheConfig>> {
     let Some(root) = args.paged_prefix_cache_dir.as_ref() else {
         return Ok(None);
     };
@@ -307,7 +312,7 @@ pub(crate) fn resolve_paged_prefix_cache_config(
         }
     };
     let max_disk_bytes = resolve_ssd_prefix_cache_max_bytes(args)?;
-    crate::core::cache::PagedPrefixCacheConfig::new_with_max_disk_bytes(
+    ironmlx_runtime::core::cache::prefix_store::PagedPrefixCacheConfig::new_with_max_disk_bytes(
         root,
         model_id.to_string(),
         block_size,
@@ -318,14 +323,14 @@ pub(crate) fn resolve_paged_prefix_cache_config(
 }
 
 fn resolve_ssd_prefix_cache_max_bytes(args: &ServeArgs) -> Result<Option<usize>> {
-    crate::core::scheduler_resolution::resolve_ssd_prefix_cache_max_bytes(
+    ironmlx_runtime::core::scheduler_resolution::resolve_ssd_prefix_cache_max_bytes(
         &SchedulerResolutionOptions::from(args),
     )
 }
 
 pub(crate) fn resolve_engine_paged_prefix_cache_settings(
     args: &ServeArgs,
-) -> Result<Option<server::engine::EnginePagedPrefixCacheSettings>> {
+) -> Result<Option<ironmlx_runtime::core::engine_pool::EnginePagedPrefixCacheSettings>> {
     let Some(root) = args.paged_prefix_cache_dir.as_ref() else {
         return Ok(None);
     };
@@ -340,32 +345,34 @@ pub(crate) fn resolve_engine_paged_prefix_cache_settings(
         }
     }
     let max_disk_bytes = resolve_ssd_prefix_cache_max_bytes(args)?;
-    Ok(Some(server::engine::EnginePagedPrefixCacheSettings {
-        root,
-        block_size,
-        max_pages: args.paged_prefix_cache_max_pages,
-        max_disk_bytes,
-    }))
+    Ok(Some(
+        ironmlx_runtime::core::engine_pool::EnginePagedPrefixCacheSettings {
+            root,
+            block_size,
+            max_pages: args.paged_prefix_cache_max_pages,
+            max_disk_bytes,
+        },
+    ))
 }
 
 pub(crate) fn resolve_prefix_lru_cache_config(
     args: &ServeArgs,
-    paged_prefix_cache: Option<&crate::core::cache::PagedPrefixCacheConfig>,
-) -> Result<Option<crate::core::cache::PrefixLruCacheConfig>> {
+    paged_prefix_cache: Option<&ironmlx_runtime::core::cache::prefix_store::PagedPrefixCacheConfig>,
+) -> Result<Option<ironmlx_runtime::core::cache::prefix_store::PrefixLruCacheConfig>> {
     let Some(max_bytes) = args.prefix_lru_cache_max_bytes else {
         return Ok(None);
     };
     if paged_prefix_cache.is_none() {
         bail!("--prefix-lru-cache-max-bytes requires --paged-prefix-cache-dir");
     }
-    crate::core::cache::PrefixLruCacheConfig::new(max_bytes).map(Some)
+    ironmlx_runtime::core::cache::prefix_store::PrefixLruCacheConfig::new(max_bytes).map(Some)
 }
 
 fn resolve_dflash2_prefix_lru_cache_config(
     args: &ServeArgs,
-) -> Result<Option<crate::core::cache::PrefixLruCacheConfig>> {
+) -> Result<Option<ironmlx_runtime::core::cache::prefix_store::PrefixLruCacheConfig>> {
     args.prefix_lru_cache_max_bytes
-        .map(crate::core::cache::PrefixLruCacheConfig::new)
+        .map(ironmlx_runtime::core::cache::prefix_store::PrefixLruCacheConfig::new)
         .transpose()
 }
 
@@ -385,15 +392,15 @@ pub(crate) fn resolve_model_ttl(args: &ServeArgs) -> Result<Option<Duration>> {
 
 pub(crate) fn resolve_active_kv_offload_config(
     args: &ServeArgs,
-) -> Result<crate::core::cache::ActiveKvOffloadConfig> {
+) -> Result<ironmlx_runtime::core::cache::active_kv::ActiveKvOffloadConfig> {
     if !args.active_kv_offload {
-        return Ok(crate::core::cache::ActiveKvOffloadConfig::disabled());
+        return Ok(ironmlx_runtime::core::cache::active_kv::ActiveKvOffloadConfig::disabled());
     }
     let root = match args.active_kv_offload_dir.as_ref() {
         Some(root) => expand_home_path(root)?,
-        None => crate::core::cache::default_active_kv_offload_dir(),
+        None => ironmlx_runtime::core::cache::active_kv::default_active_kv_offload_dir(),
     };
-    Ok(crate::core::cache::ActiveKvOffloadConfig::enabled(root))
+    Ok(ironmlx_runtime::core::cache::active_kv::ActiveKvOffloadConfig::enabled(root))
 }
 
 fn expand_home_path(path: &Path) -> Result<PathBuf> {
@@ -418,7 +425,7 @@ struct ServeMtpConfig {
 
 fn resolve_prompt_lookup_config(
     args: &ServeArgs,
-) -> Result<Option<crate::core::prompt_lookup::PromptLookupConfig>> {
+) -> Result<Option<ironmlx_runtime::core::prompt_lookup::PromptLookupConfig>> {
     let has_source_params = args.prompt_lookup_min_ngram.is_some()
         || args.prompt_lookup_max_ngram.is_some()
         || args.prompt_lookup_max_draft_tokens.is_some()
@@ -431,9 +438,9 @@ fn resolve_prompt_lookup_config(
         }
         return Ok(None);
     }
-    let defaults = crate::core::prompt_lookup::PromptLookupConfig::default();
+    let defaults = ironmlx_runtime::core::prompt_lookup::PromptLookupConfig::default();
     Ok(Some(
-        crate::core::prompt_lookup::PromptLookupConfig {
+        ironmlx_runtime::core::prompt_lookup::PromptLookupConfig {
             min_ngram: args.prompt_lookup_min_ngram.unwrap_or(defaults.min_ngram),
             max_ngram: args.prompt_lookup_max_ngram.unwrap_or(defaults.max_ngram),
             max_draft_tokens: args
@@ -458,7 +465,7 @@ enum QwenMoeServeModel {
 }
 
 fn qwen_moe_serve_model(raw_config: &serde_json::Value) -> QwenMoeServeModel {
-    if crate::models::is_qwen36_moe_config(raw_config) {
+    if ironmlx_lm::models::is_qwen36_moe_config(raw_config) {
         QwenMoeServeModel::Qwen36
     } else {
         QwenMoeServeModel::Qwen35
@@ -467,11 +474,11 @@ fn qwen_moe_serve_model(raw_config: &serde_json::Value) -> QwenMoeServeModel {
 
 pub(crate) fn apply_adaptive_mtp_scheduler_defaults(
     args: &ServeArgs,
-    architecture: crate::models::ModelArchitecture,
+    architecture: ironmlx_lm::models::ModelArchitecture,
     mtp_enabled: bool,
     resolved: &mut ResolvedSchedulerRuntime,
 ) -> bool {
-    crate::core::scheduler_resolution::apply_adaptive_mtp_scheduler_defaults(
+    ironmlx_runtime::core::scheduler_resolution::apply_adaptive_mtp_scheduler_defaults(
         &SchedulerResolutionOptions::from(args),
         architecture,
         mtp_enabled,
@@ -487,7 +494,7 @@ fn load_scheduler_profile_for_model(
     hardware_label: &str,
     runtime_context_fingerprint: &str,
 ) -> Result<Option<SchedulerProfileLoad>> {
-    crate::core::scheduler_resolution::load_scheduler_profile_for_model(
+    ironmlx_runtime::core::scheduler_resolution::load_scheduler_profile_for_model(
         &SchedulerResolutionOptions::from(args),
         model_dir,
         store,
@@ -496,27 +503,9 @@ fn load_scheduler_profile_for_model(
     )
 }
 
-fn scheduler_runtime_context_for_model(
-    args: &ServeArgs,
-    model_dir: &Path,
-    mtp_model_dir: Option<&Path>,
-    mtp_draft_tokens: Option<usize>,
-    prompt_lookup: Option<crate::core::prompt_lookup::PromptLookupConfig>,
-    logical_kv_cap_tokens: Option<usize>,
-) -> Result<SchedulerAutotuneRuntimeContext> {
-    crate::core::scheduler_resolution::scheduler_runtime_context_for_model(
-        &SchedulerResolutionOptions::from(args),
-        model_dir,
-        mtp_model_dir,
-        mtp_draft_tokens,
-        prompt_lookup,
-        logical_kv_cap_tokens,
-    )
-}
-
 fn resolve_serve_mtp_config(
     args: &ServeArgs,
-    architecture: crate::models::ModelArchitecture,
+    architecture: ironmlx_lm::models::ModelArchitecture,
     raw_config: &serde_json::Value,
     _scheduler_config: SchedulerServeConfig,
 ) -> Result<Option<ServeMtpConfig>> {
@@ -524,9 +513,9 @@ fn resolve_serve_mtp_config(
         return Ok(None);
     };
     match architecture {
-        crate::models::ModelArchitecture::Qwen35Dense
-        | crate::models::ModelArchitecture::Qwen35Moe
-        | crate::models::ModelArchitecture::Gemma4 => {}
+        ironmlx_lm::models::ModelArchitecture::Qwen35Dense
+        | ironmlx_lm::models::ModelArchitecture::Qwen35Moe
+        | ironmlx_lm::models::ModelArchitecture::Gemma4 => {}
         _ => bail!("ironmlx serve --mtp-model-dir currently supports Qwen/Gemma4 models only"),
     }
     if !model_dir.exists() {
@@ -535,15 +524,15 @@ fn resolve_serve_mtp_config(
             model_dir.display()
         );
     }
-    let draft_tokens = crate::core::speculative::resolve_mtp_draft_tokens(
+    let draft_tokens = ironmlx_runtime::core::speculative::resolve_mtp_draft_tokens(
         raw_config,
         args.mtp_draft_tokens
-            .map(crate::core::speculative::MtpDraftTokensArg::Explicit)
-            .unwrap_or(crate::core::speculative::MtpDraftTokensArg::Omitted),
+            .map(ironmlx_runtime::core::speculative::MtpDraftTokensArg::Explicit)
+            .unwrap_or(ironmlx_runtime::core::speculative::MtpDraftTokensArg::Omitted),
     );
-    crate::core::speculative::MtpSpeculativeConfig::new(
+    ironmlx_runtime::core::speculative::MtpSpeculativeConfig::new(
         draft_tokens,
-        crate::core::sampler::Sampler::greedy(),
+        ironmlx_core::sampler::Sampler::greedy(),
     )?;
     Ok(Some(ServeMtpConfig {
         model_dir: model_dir.clone(),
@@ -553,13 +542,13 @@ fn resolve_serve_mtp_config(
 
 fn ensure_dflash2_serve_supported(
     args: &ServeArgs,
-    architecture: crate::models::ModelArchitecture,
+    architecture: ironmlx_lm::models::ModelArchitecture,
     scheduler_config: SchedulerServeConfig,
 ) -> Result<()> {
     let Some(draft_dir) = args.dflash2_model_dir.as_ref() else {
         return Ok(());
     };
-    if architecture != crate::models::ModelArchitecture::Qwen35Dense {
+    if architecture != ironmlx_lm::models::ModelArchitecture::Qwen35Dense {
         bail!("--dflash2-model-dir currently supports dense Qwen3.5 targets only");
     }
     if !draft_dir.is_dir() {
@@ -609,7 +598,7 @@ fn resolve_scheduler_runtime_profile(
     profile: Option<&SchedulerAutotuneRuntimeProfile>,
     runtime_context: &SchedulerAutotuneRuntimeContext,
 ) -> Result<SchedulerAutotuneRuntimeProfile> {
-    crate::core::scheduler_resolution::resolve_scheduler_runtime_profile(
+    ironmlx_runtime::core::scheduler_resolution::resolve_scheduler_runtime_profile(
         &SchedulerResolutionOptions::from(args),
         profile,
         runtime_context,
@@ -654,10 +643,10 @@ pub(crate) fn resolve_scheduler_for_model_with_speculative(
     model_dir: &Path,
     mtp_model_dir: Option<&Path>,
     mtp_draft_tokens: Option<usize>,
-    prompt_lookup: Option<crate::core::prompt_lookup::PromptLookupConfig>,
+    prompt_lookup: Option<ironmlx_runtime::core::prompt_lookup::PromptLookupConfig>,
     max_cache_cap_override: Option<usize>,
 ) -> Result<ResolvedSchedulerRuntime> {
-    crate::core::scheduler_resolution::resolve_scheduler_for_model_with_speculative(
+    ironmlx_runtime::core::scheduler_resolution::resolve_scheduler_for_model_with_speculative(
         &SchedulerResolutionOptions::from(args),
         model_dir,
         mtp_model_dir,
@@ -718,7 +707,7 @@ fn serve_with_model<M>(
     args: &ServeArgs,
     scheduler_config: SchedulerServeConfig,
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
-    vision_input: Option<server::VisionInputConfig>,
+    vision_input: Option<ironmlx_lm::core::vision_input::VisionInputConfig>,
     static_memory_estimate: StaticMemoryEstimate,
 ) -> Result<()>
 where
@@ -810,7 +799,7 @@ fn serve_with_mtp_model<M>(
     args: &ServeArgs,
     scheduler_config: SchedulerServeConfig,
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
-    vision_input: Option<server::VisionInputConfig>,
+    vision_input: Option<ironmlx_lm::core::vision_input::VisionInputConfig>,
     mut static_memory_estimate: StaticMemoryEstimate,
 ) -> Result<()>
 where
@@ -870,7 +859,7 @@ where
 
 #[allow(clippy::too_many_arguments)]
 fn serve_with_dflash2_model(
-    model: crate::models::Qwen35Model,
+    model: ironmlx_lm::models::Qwen35Model,
     tokenizer: Tokenizer,
     args: &ServeArgs,
     scheduler_config: SchedulerServeConfig,
@@ -884,9 +873,12 @@ fn serve_with_dflash2_model(
     let draft_loader = Loader::open_dflash2(draft_dir)
         .with_context(|| format!("Loader::open_dflash2 {}", draft_dir.display()))?;
     let draft_bits = (args.dflash2_draft_bits != 0).then_some(args.dflash2_draft_bits);
-    let draft =
-        crate::models::DFlash2DraftModel::from_loader(&draft_loader, model.config(), draft_bits)
-            .context("DFlash2DraftModel::from_loader")?;
+    let draft = ironmlx_lm::models::DFlash2DraftModel::from_loader(
+        &draft_loader,
+        model.config(),
+        draft_bits,
+    )
+    .context("DFlash2DraftModel::from_loader")?;
     static_memory_estimate.speculative_cold_bytes = draft_loader.loaded_tensor_bytes();
     drop(draft_loader);
     mlx::clear_cache();
@@ -928,7 +920,7 @@ fn serve_with_dflash2_model(
 
 #[allow(clippy::too_many_arguments)]
 fn serve_with_gemma4_drafter_model(
-    model: crate::models::Gemma4Model,
+    model: ironmlx_lm::models::Gemma4Model,
     tokenizer: Tokenizer,
     model_dir: &Path,
     mut static_memory_estimate: StaticMemoryEstimate,
@@ -936,7 +928,7 @@ fn serve_with_gemma4_drafter_model(
     args: &ServeArgs,
     scheduler_config: SchedulerServeConfig,
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
-    vision_input: Option<server::VisionInputConfig>,
+    vision_input: Option<ironmlx_lm::core::vision_input::VisionInputConfig>,
 ) -> Result<()> {
     log_scheduler_mode(scheduler_config);
     tracing::info!(
@@ -965,7 +957,7 @@ fn serve_with_gemma4_drafter_model(
         )
     })?;
     static_memory_estimate.speculative_cold_bytes = drafter_loader.loaded_tensor_bytes();
-    let drafter = crate::models::gemma4::Gemma4AssistantModel::from_loader(&drafter_loader)
+    let drafter = ironmlx_lm::models::gemma4::Gemma4AssistantModel::from_loader(&drafter_loader)
         .with_context(|| {
             format!(
                 "loading Gemma4 assistant drafter from {}",
@@ -1011,12 +1003,12 @@ fn serve_with_gemma4_drafter_model(
 }
 
 fn serve_with_diffusion_gemma_model(
-    model: crate::models::DiffusionGemmaModel,
+    model: ironmlx_lm::models::DiffusionGemmaModel,
     tokenizer: Tokenizer,
-    generation_config: crate::models::DiffusionGemmaGenerationConfig,
+    generation_config: ironmlx_lm::models::DiffusionGemmaGenerationConfig,
     model_weight_bytes: usize,
     args: &ServeArgs,
-    vision_input: server::VisionInputConfig,
+    vision_input: ironmlx_lm::core::vision_input::VisionInputConfig,
 ) -> Result<()> {
     let model_id = single_model_id(args)?;
     let runtime = serve_runtime()?;
@@ -1031,232 +1023,26 @@ fn serve_with_diffusion_gemma_model(
     ))
 }
 
-fn read_engine_pool_manifest(path: &Path) -> Result<server::engine::EnginePoolManifest> {
+fn read_engine_pool_manifest(
+    path: &Path,
+) -> Result<ironmlx_runtime::core::engine_pool::EnginePoolManifest> {
     let raw =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
 }
 
-struct EnginePoolSchedulerProfileRequest<'a> {
-    manifest_profile: Option<&'a Path>,
-    store: Option<&'a SchedulerProfileStore>,
-    hardware_label: &'a str,
-    mtp_model_dir: Option<&'a Path>,
-    mtp_draft_tokens: Option<usize>,
-    prompt_lookup: Option<crate::core::prompt_lookup::PromptLookupConfig>,
-}
-
-fn resolve_engine_pool_scheduler_profile(
-    args: &ServeArgs,
-    model_dir: &Path,
-    request: EnginePoolSchedulerProfileRequest<'_>,
-) -> Result<ResolvedSchedulerRuntime> {
-    let EnginePoolSchedulerProfileRequest {
-        manifest_profile,
-        store,
-        hardware_label,
-        mtp_model_dir,
-        mtp_draft_tokens,
-        prompt_lookup,
-    } = request;
-    let runtime_context = scheduler_runtime_context_for_model(
-        args,
-        model_dir,
-        mtp_model_dir,
-        mtp_draft_tokens,
-        prompt_lookup,
-        None,
-    )?;
-    let runtime_context_fingerprint = runtime_context.fingerprint();
-    let explicit_profile = manifest_profile.or(args.scheduler_profile.as_deref());
-    let mut scheduler_profile_load = load_scheduler_profile_for_model_with_explicit(
-        explicit_profile,
-        model_dir,
-        store,
-        hardware_label,
-        &runtime_context_fingerprint,
-    )?;
-    let scheduler_profile_model_name = scheduler_profile_model_name(model_dir)?;
-    let mut discard_auto_profile = false;
-    if let Some(load) = scheduler_profile_load.as_ref() {
-        match check_loaded_scheduler_profile_health(
-            &load.profile,
-            &scheduler_profile_model_name,
-            hardware_label,
-            &runtime_context,
-            unix_time_ms(),
-        ) {
-            Ok(report) => log_scheduler_profile_health(&load.path, &report),
-            Err(error) if load.auto_loaded => {
-                tracing::warn!(
-                    "ironmlx serve: scheduler profile ignored path={} model_name={} hardware_label={} error={:#}; using CLI/default scheduler config",
-                    load.path.display(),
-                    scheduler_profile_model_name,
-                    hardware_label,
-                    error
-                );
-                discard_auto_profile = true;
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    if discard_auto_profile {
-        scheduler_profile_load = None;
-    }
-    let scheduler_runtime_profile = resolve_scheduler_runtime_profile(
-        args,
-        scheduler_profile_load.as_ref().map(|load| &load.profile),
-        &runtime_context,
-    )?;
-    let scheduler_config = SchedulerServeConfig {
-        prefill_chunk_size: scheduler_runtime_profile.config.prefill_chunk_size,
-        b_max: scheduler_runtime_profile.config.b_max,
-        admission_deadline_ms: scheduler_runtime_profile.config.admission_deadline_ms,
-        admission_queue_max: scheduler_runtime_profile.config.admission_queue_max,
-        max_cache_cap: scheduler_runtime_profile.config.max_cache_cap,
-        decode_cadence_mid_chunk_cap: scheduler_runtime_profile
-            .config
-            .decode_cadence_mid_chunk_cap,
-    };
-    let profile_source = scheduler_profile_load.as_ref().map(|load| {
-        if load.auto_loaded {
-            SchedulerProfileSource::Store
-        } else {
-            SchedulerProfileSource::Explicit
-        }
-    });
-    Ok(ResolvedSchedulerRuntime {
-        scheduler_runtime_profile,
-        scheduler_config,
-        profile_source,
-    })
-}
-
 fn build_engine_model_config_for_pool(
     args: &ServeArgs,
-    model: server::engine::EngineModelManifest,
+    model: ironmlx_runtime::core::engine_pool::EngineModelManifest,
     scheduler_profile_store: Option<&SchedulerProfileStore>,
     hardware_label: &str,
-) -> Result<server::engine::EngineModelConfig> {
-    let prompt_lookup = model
-        .prompt_lookup
-        .map(crate::core::prompt_lookup::PromptLookupConfig::validate)
-        .transpose()?;
-    let mtp = model
-        .mtp_model_dir
-        .map(|model_dir| server::engine::EngineMtpSettings {
-            model_dir,
-            draft_tokens: model.mtp_draft_tokens,
-        });
-    if model.load_policy == server::engine::EngineLoadPolicy::Disabled {
-        return Ok(server::engine::EngineModelConfig {
-            id: model.id,
-            path: model.path,
-            load_policy: model.load_policy,
-            default: model.default,
-            pinned: false,
-            scheduler_runtime_profile: Some(default_scheduler_runtime_profile(
-                SchedulerAutotuneRuntimeContext::local_default(DEFAULT_MAX_CACHE_CAP),
-            )),
-            mtp,
-            prompt_lookup,
-            sampling_defaults: server::SamplingDefaults::default(),
-            capabilities: server::engine::EngineModelCapabilities::for_architecture(
-                crate::models::ModelArchitecture::Qwen35Dense,
-                false,
-            ),
-        });
-    }
-    if !model.path.exists() {
-        bail!(
-            "engine model `{}` path must point to a local directory (got '{}')",
-            model.id,
-            model.path.display()
-        );
-    }
-    if model.mtp_draft_tokens.is_some() && mtp.is_none() {
-        bail!(
-            "engine model `{}` sets mtp_draft_tokens without mtp_model_dir",
-            model.id
-        );
-    }
-    let model_type = read_model_type(&model.path)?;
-    let architecture = crate::models::ModelArchitecture::from_model_type(&model_type)?;
-    let config_data = std::fs::read(model.path.join("config.json"))?;
-    let config: serde_json::Value = serde_json::from_slice(&config_data)?;
-    let supports_vision = matches!(
-        architecture,
-        crate::models::ModelArchitecture::DiffusionGemma
-            | crate::models::ModelArchitecture::MiniCpmV46
-    ) || config
-        .get("vision_config")
-        .and_then(serde_json::Value::as_object)
-        .is_some_and(|vision| !vision.is_empty());
-    let capabilities =
-        server::engine::EngineModelCapabilities::for_architecture(architecture, supports_vision);
-    if architecture == crate::models::ModelArchitecture::DiffusionGemma {
-        if mtp.is_some() {
-            bail!(
-                "engine model `{}` configures MTP for DiffusionGemma",
-                model.id
-            );
-        }
-        if prompt_lookup.is_some() {
-            bail!(
-                "engine model `{}` configures PromptLookup for DiffusionGemma",
-                model.id
-            );
-        }
-        if model.scheduler_profile.is_some() {
-            bail!(
-                "engine model `{}` configures a causal scheduler profile for DiffusionGemma",
-                model.id
-            );
-        }
-        return Ok(server::engine::EngineModelConfig {
-            id: model.id,
-            path: model.path,
-            load_policy: model.load_policy,
-            default: model.default,
-            pinned: false,
-            scheduler_runtime_profile: None,
-            mtp: None,
-            prompt_lookup: None,
-            sampling_defaults: server::SamplingDefaults::default(),
-            capabilities,
-        });
-    }
-    let mut resolved = resolve_engine_pool_scheduler_profile(
-        args,
-        &model.path,
-        EnginePoolSchedulerProfileRequest {
-            manifest_profile: model.scheduler_profile.as_deref(),
-            store: scheduler_profile_store,
-            hardware_label,
-            mtp_model_dir: mtp.as_ref().map(|settings| settings.model_dir.as_path()),
-            mtp_draft_tokens: mtp.as_ref().and_then(|settings| settings.draft_tokens),
-            prompt_lookup,
-        },
-    )?;
-    if apply_adaptive_mtp_scheduler_defaults(args, architecture, mtp.is_some(), &mut resolved) {
-        tracing::info!(
-            "ironmlx serve: adaptive MTP scheduler default applied manifest_model={} b_max={}",
-            model.id,
-            resolved.scheduler_config.b_max
-        );
-    }
-    Ok(server::engine::EngineModelConfig {
-        id: model.id,
-        path: model.path,
-        load_policy: model.load_policy,
-        default: model.default,
-        pinned: false,
-        scheduler_runtime_profile: Some(resolved.scheduler_runtime_profile),
-        mtp,
-        prompt_lookup,
-        sampling_defaults: server::SamplingDefaults::default(),
-        capabilities,
-    })
+) -> Result<ironmlx_runtime::core::engine_pool::EngineModelConfig> {
+    ironmlx_runtime::core::model_management::build_engine_model_config_for_pool(
+        &SchedulerResolutionOptions::from(args),
+        model,
+        scheduler_profile_store,
+        hardware_label,
+    )
 }
 
 fn run_engine_pool(args: ServeArgs, manifest_path: &Path) -> Result<()> {
@@ -1274,7 +1060,7 @@ fn run_engine_pool(args: ServeArgs, manifest_path: &Path) -> Result<()> {
     }
 
     let manifest = read_engine_pool_manifest(manifest_path)?;
-    let _registry = server::engine::EngineRegistry::new(manifest.clone())?;
+    let _registry = ironmlx_runtime::core::engine_pool::EngineRegistry::new(manifest.clone())?;
     let scheduler_profile_store = if args.scheduler_profile.is_none() {
         match SchedulerProfileStore::open_default() {
             Ok(store) => Some(store),
@@ -1304,13 +1090,13 @@ fn run_engine_pool(args: ServeArgs, manifest_path: &Path) -> Result<()> {
     let model_ttl = resolve_model_ttl(&args)?;
     let runtime_config = server::engine::EnginePoolRuntimeConfig {
         network: args.resolved_network_config()?,
-        options: crate::core::runtime_config::EngineRuntimeOptions {
+        options: ironmlx_runtime::core::runtime_config::EngineRuntimeOptions {
             kv_cache_turboquant_bits: args.kv_quant.turboquant_bits(),
             scheduler_autotune_report: args.scheduler_autotune_report,
             paged_prefix_cache,
             prefix_lru_cache_max_bytes: args.prefix_lru_cache_max_bytes,
             model_ttl,
-            memory_limits: server::engine::EnginePoolMemoryLimits {
+            memory_limits: ironmlx_runtime::core::engine_pool::EnginePoolMemoryLimits {
                 total_memory_limit_bytes: resolve_memory_limit_bytes(
                     args.memory_limit_total_gb,
                     "--memory-limit-total-gb",
@@ -1323,7 +1109,7 @@ fn run_engine_pool(args: ServeArgs, manifest_path: &Path) -> Result<()> {
             active_kv_offload,
         },
     };
-    let config = server::engine::EnginePoolConfig {
+    let config = ironmlx_runtime::core::engine_pool::EnginePoolConfig {
         default_model: manifest.default_model,
         max_loaded_models: manifest.max_loaded_models,
         models,
@@ -1400,7 +1186,7 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
     };
 
     let model_type = read_model_type(&model_dir)?;
-    let architecture = crate::models::ModelArchitecture::from_model_type(&model_type)?;
+    let architecture = ironmlx_lm::models::ModelArchitecture::from_model_type(&model_type)?;
     ensure_dflash2_serve_supported(&args, architecture, resolved_scheduler.scheduler_config)?;
     if resolve_prompt_lookup_config(&args)?.is_some() && !architecture.supports_prompt_lookup() {
         bail!(
@@ -1438,22 +1224,24 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
         ..
     } = resolved_scheduler;
     let tokenizer = Tokenizer::from_loader(&loader).context("Tokenizer::from_loader")?;
-    let vision_input = if architecture == crate::models::ModelArchitecture::DiffusionGemma {
+    let vision_input = if architecture == ironmlx_lm::models::ModelArchitecture::DiffusionGemma {
         None
     } else {
-        Some(server::VisionInputConfig::from_causal_loader(
-            architecture,
-            &loader,
-        )?)
+        Some(
+            ironmlx_lm::core::vision_input::VisionInputConfig::from_causal_loader(
+                architecture,
+                &loader,
+            )?,
+        )
     };
 
     match architecture {
-        crate::models::ModelArchitecture::Qwen35Dense => {
+        ironmlx_lm::models::ModelArchitecture::Qwen35Dense => {
             let model = if args.dflash2_model_dir.is_some() {
-                crate::models::Qwen35Model::from_loader_dflash2(&mut loader)
+                ironmlx_lm::models::Qwen35Model::from_loader_dflash2(&mut loader)
                     .context("Qwen35Model::from_loader_dflash2")?
             } else {
-                crate::models::Qwen35Model::from_loader(&loader)
+                ironmlx_lm::models::Qwen35Model::from_loader(&loader)
                     .context("Qwen35Model::from_loader")?
             };
             if args.dflash2_model_dir.is_some() {
@@ -1488,10 +1276,10 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
                 )
             }
         }
-        crate::models::ModelArchitecture::Qwen35Moe => {
+        ironmlx_lm::models::ModelArchitecture::Qwen35Moe => {
             match qwen_moe_serve_model(loader.config_raw_value()) {
                 QwenMoeServeModel::Qwen35 => {
-                    let model = crate::models::Qwen35MoeModel::from_loader(&loader)
+                    let model = ironmlx_lm::models::Qwen35MoeModel::from_loader(&loader)
                         .context("Qwen35MoeModel::from_loader")?;
                     if let Some(mtp_config) = mtp_config.clone() {
                         serve_with_mtp_model(
@@ -1517,7 +1305,7 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
                     }
                 }
                 QwenMoeServeModel::Qwen36 => {
-                    let model = crate::models::Qwen36MoeModel::from_loader(&loader)
+                    let model = ironmlx_lm::models::Qwen36MoeModel::from_loader(&loader)
                         .context("Qwen36MoeModel::from_loader")?;
                     if let Some(mtp_config) = mtp_config.clone() {
                         serve_with_mtp_model(
@@ -1544,8 +1332,8 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
                 }
             }
         }
-        crate::models::ModelArchitecture::Gemma4 => {
-            let model = crate::models::Gemma4Model::from_loader(&loader)
+        ironmlx_lm::models::ModelArchitecture::Gemma4 => {
+            let model = ironmlx_lm::models::Gemma4Model::from_loader(&loader)
                 .context("Gemma4Model::from_loader")?;
             if let Some(mtp_config) = mtp_config.clone() {
                 serve_with_gemma4_drafter_model(
@@ -1571,8 +1359,8 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
                 )
             }
         }
-        crate::models::ModelArchitecture::Glm4MoeLite => {
-            let model = crate::models::Glm4MoeLiteModel::from_loader(&loader)
+        ironmlx_lm::models::ModelArchitecture::Glm4MoeLite => {
+            let model = ironmlx_lm::models::Glm4MoeLiteModel::from_loader(&loader)
                 .context("Glm4MoeLiteModel::from_loader")?;
             serve_with_model(
                 model,
@@ -1584,8 +1372,8 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
                 static_memory_estimate,
             )
         }
-        crate::models::ModelArchitecture::Llama => {
-            let model = crate::models::LlamaModel::from_loader(&loader)
+        ironmlx_lm::models::ModelArchitecture::Llama => {
+            let model = ironmlx_lm::models::LlamaModel::from_loader(&loader)
                 .context("LlamaModel::from_loader")?;
             serve_with_model(
                 model,
@@ -1597,9 +1385,9 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
                 static_memory_estimate,
             )
         }
-        crate::models::ModelArchitecture::MiniCpmV46 => {
+        ironmlx_lm::models::ModelArchitecture::MiniCpmV46 => {
             // MiniCpmV46Model serves text + single-image VL (vision_input set above).
-            let model = crate::models::minicpmv4_6::model_from_loader(&loader)
+            let model = ironmlx_lm::models::minicpmv4_6::model_from_loader(&loader)
                 .context("minicpmv4_6::model_from_loader")?;
             serve_with_model(
                 model,
@@ -1611,8 +1399,8 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
                 static_memory_estimate,
             )
         }
-        crate::models::ModelArchitecture::DiffusionGemma => {
-            let cfg = crate::models::DiffusionGemmaConfig::from_loader(&loader)
+        ironmlx_lm::models::ModelArchitecture::DiffusionGemma => {
+            let cfg = ironmlx_lm::models::DiffusionGemmaConfig::from_loader(&loader)
                 .context("DiffusionGemmaConfig::from_loader")?;
             let vision_config = cfg
                 .vision_config
@@ -1620,9 +1408,9 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("DiffusionGemma config has no vision_config"))?;
             let image_token_id = cfg.image_token_id;
             let generation_config =
-                crate::models::DiffusionGemmaGenerationConfig::from_loader(&loader)
+                ironmlx_lm::models::DiffusionGemmaGenerationConfig::from_loader(&loader)
                     .context("DiffusionGemmaGenerationConfig::from_loader")?;
-            let model = crate::models::DiffusionGemmaModel::from_loader(&loader)
+            let model = ironmlx_lm::models::DiffusionGemmaModel::from_loader(&loader)
                 .context("DiffusionGemmaModel::from_loader")?;
             let model_weight_bytes = loader.loaded_tensor_bytes();
             serve_with_diffusion_gemma_model(
@@ -1631,7 +1419,7 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
                 generation_config,
                 model_weight_bytes,
                 &args,
-                server::VisionInputConfig::DiffusionGemma {
+                ironmlx_lm::core::vision_input::VisionInputConfig::DiffusionGemma {
                     vision_config,
                     image_token_id,
                 },
@@ -1642,25 +1430,35 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
 
 #[cfg(test)]
 mod scheduler_profile_tests {
+    use ironmlx_runtime::core::scheduler_resolution::{
+        check_loaded_scheduler_profile_health, default_scheduler_runtime_profile,
+        SchedulerProfileSource,
+    };
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use clap::Parser;
 
-    use crate::cli::scheduler_profile_store::SchedulerProfileStore;
     use crate::cli::Command;
-    use crate::core::scheduler_autotune::{
-        SchedulerAutotuneCacheState, SchedulerAutotuneProfileConfig,
-        SchedulerAutotuneProfileHealthStatus, SchedulerAutotuneRuntimeContext,
-        SchedulerAutotuneRuntimeProfile, SchedulerAutotuneRuntimeRule,
-        SchedulerAutotuneRuntimeRuleCondition, SchedulerAutotuneScenario,
-        SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+    use ironmlx_runtime::core::scheduler_profile_store::SchedulerProfileStore;
+    use {
+        ironmlx_runtime::core::engine_pool::EngineLoadPolicy,
+        ironmlx_runtime::core::engine_pool::EngineModelManifest,
     };
-    use crate::core::server::engine::{EngineLoadPolicy, EngineModelManifest};
+    use {
+        ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneCacheState,
+        ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneProfileConfig,
+        ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneProfileHealthStatus,
+        ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneRuntimeContext,
+        ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneRuntimeProfile,
+        ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneRuntimeRule,
+        ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneRuntimeRuleCondition,
+        ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneScenario,
+        ironmlx_runtime::core::scheduler_autotune::SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+    };
 
     use super::{
         apply_adaptive_mtp_scheduler_defaults, build_engine_model_config_for_pool,
-        check_loaded_scheduler_profile_health, default_scheduler_runtime_profile,
         ensure_dflash2_serve_supported, load_scheduler_profile_for_model, qwen_moe_serve_model,
         read_engine_pool_manifest, resolve_active_kv_offload_config,
         resolve_dflash2_prefix_lru_cache_config, resolve_dflash2_tensor_batch_width,
@@ -1668,7 +1466,7 @@ mod scheduler_profile_tests {
         resolve_prefix_lru_cache_config, resolve_prompt_lookup_config,
         resolve_scheduler_runtime_profile, resolve_scheduler_serve_config,
         resolve_serve_mtp_config, single_model_id, KvQuantArg, QwenMoeServeModel,
-        ResolvedSchedulerRuntime, SchedulerProfileSource, SchedulerServeConfig, ServeArgs,
+        ResolvedSchedulerRuntime, SchedulerServeConfig, ServeArgs,
     };
 
     fn profile_config() -> SchedulerAutotuneProfileConfig {
@@ -1702,7 +1500,7 @@ mod scheduler_profile_tests {
                 },
             }],
             metadata:
-                crate::core::scheduler_autotune::SchedulerAutotuneRuntimeProfileMetadata::synthetic(
+                ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneRuntimeProfileMetadata::synthetic(
                     1811606400000,
                 ),
         }
@@ -1722,12 +1520,11 @@ mod scheduler_profile_tests {
             memory_limit_model_gb: None,
             port: 8080,
             host: "127.0.0.1".to_string(),
-            network_mode: crate::core::server::security::NetworkMode::Local,
+            network_mode: crate::server::security::NetworkMode::Local,
             lan_host: None,
             security_bootstrap_stdin: false,
             network_config: Some(
-                crate::core::server::security::ServerNetworkConfig::local("127.0.0.1", 8080)
-                    .unwrap(),
+                crate::server::security::ServerNetworkConfig::local("127.0.0.1", 8080).unwrap(),
             ),
             prefill_chunk_size: None,
             force_scheduler: false,
@@ -1754,7 +1551,7 @@ mod scheduler_profile_tests {
             kv_quant: KvQuantArg::None,
             paged_prefix_cache_dir: None,
             paged_prefix_cache_block_size:
-                crate::core::cache::DEFAULT_PAGED_PREFIX_CACHE_BLOCK_SIZE,
+                ironmlx_runtime::core::cache::prefix_store::DEFAULT_PAGED_PREFIX_CACHE_BLOCK_SIZE,
             paged_prefix_cache_max_pages: None,
             ssd_prefix_cache_max_gb: None,
             prefix_lru_cache_max_bytes: None,
@@ -1779,7 +1576,7 @@ mod scheduler_profile_tests {
     fn memory_limit_gigabytes_resolve_to_bytes() {
         assert_eq!(
             resolve_memory_limit_bytes(Some(2), "--memory-limit-total-gb").unwrap(),
-            Some(2 * crate::core::scheduler_resolution::BYTES_PER_GIB)
+            Some(2 * ironmlx_runtime::core::scheduler_resolution::BYTES_PER_GIB)
         );
         assert_eq!(
             resolve_memory_limit_bytes(None, "--memory-limit-total-gb").unwrap(),
@@ -1799,7 +1596,7 @@ mod scheduler_profile_tests {
         };
         ensure_dflash2_serve_supported(
             &args,
-            crate::models::ModelArchitecture::Qwen35Dense,
+            ironmlx_lm::models::ModelArchitecture::Qwen35Dense,
             config,
         )
         .expect("valid isolated DFlash2 policy");
@@ -1808,7 +1605,7 @@ mod scheduler_profile_tests {
         concurrent.b_max = 2;
         ensure_dflash2_serve_supported(
             &args,
-            crate::models::ModelArchitecture::Qwen35Dense,
+            ironmlx_lm::models::ModelArchitecture::Qwen35Dense,
             concurrent,
         )
         .expect("DFlash2 must accept multi-sequence mode");
@@ -1817,7 +1614,7 @@ mod scheduler_profile_tests {
         empty.b_max = 0;
         let error = ensure_dflash2_serve_supported(
             &args,
-            crate::models::ModelArchitecture::Qwen35Dense,
+            ironmlx_lm::models::ModelArchitecture::Qwen35Dense,
             empty,
         )
         .expect_err("DFlash2 must reject zero max sequences");
@@ -1826,7 +1623,7 @@ mod scheduler_profile_tests {
         args.mtp_model_dir = Some(draft_dir.clone());
         let error = ensure_dflash2_serve_supported(
             &args,
-            crate::models::ModelArchitecture::Qwen35Dense,
+            ironmlx_lm::models::ModelArchitecture::Qwen35Dense,
             config,
         )
         .expect_err("DFlash2 must reject MTP mixing");
@@ -1906,7 +1703,7 @@ mod scheduler_profile_tests {
         assert!(!cfg.enabled);
         assert_eq!(
             cfg.root,
-            crate::core::cache::default_active_kv_offload_dir()
+            ironmlx_runtime::core::cache::active_kv::default_active_kv_offload_dir()
         );
     }
 
@@ -1920,7 +1717,7 @@ mod scheduler_profile_tests {
         assert!(cfg.enabled);
         assert_eq!(
             cfg.root,
-            crate::core::cache::default_active_kv_offload_dir()
+            ironmlx_runtime::core::cache::active_kv::default_active_kv_offload_dir()
         );
     }
 
@@ -2032,7 +1829,7 @@ mod scheduler_profile_tests {
         std::fs::write(model_dir.join("config.json"), r#"{"model_type":"qwen3_5"}"#)
             .expect("write config");
         let args = base_args();
-        let prompt_lookup = crate::core::prompt_lookup::PromptLookupConfig {
+        let prompt_lookup = ironmlx_runtime::core::prompt_lookup::PromptLookupConfig {
             min_ngram: 2,
             max_ngram: 5,
             max_draft_tokens: 3,
@@ -2063,7 +1860,7 @@ mod scheduler_profile_tests {
                 .runtime_context
                 .speculative
                 .mode,
-            crate::core::scheduler_autotune::SchedulerSpeculativeMode::PromptLookup
+            ironmlx_runtime::core::scheduler_autotune::SchedulerSpeculativeMode::PromptLookup
         );
         std::fs::remove_dir_all(temp_dir).expect("cleanup");
     }
@@ -2083,7 +1880,7 @@ mod scheduler_profile_tests {
         )
         .expect("write MTP config");
         let args = base_args();
-        let prompt_lookup = crate::core::prompt_lookup::PromptLookupConfig::default();
+        let prompt_lookup = ironmlx_runtime::core::prompt_lookup::PromptLookupConfig::default();
         let manifest_model = EngineModelManifest {
             id: "qwen-hybrid".to_string(),
             path: model_dir,
@@ -2108,7 +1905,7 @@ mod scheduler_profile_tests {
                 .runtime_context
                 .speculative
                 .mode,
-            crate::core::scheduler_autotune::SchedulerSpeculativeMode::QwenMtpPromptLookup
+            ironmlx_runtime::core::scheduler_autotune::SchedulerSpeculativeMode::QwenMtpPromptLookup
         );
         std::fs::remove_dir_all(temp_dir).expect("cleanup");
     }
@@ -2253,7 +2050,7 @@ mod scheduler_profile_tests {
 
         let changed = apply_adaptive_mtp_scheduler_defaults(
             &args,
-            crate::models::ModelArchitecture::Gemma4,
+            ironmlx_lm::models::ModelArchitecture::Gemma4,
             true,
             &mut resolved,
         );
@@ -2285,7 +2082,7 @@ mod scheduler_profile_tests {
 
         let changed = apply_adaptive_mtp_scheduler_defaults(
             &args,
-            crate::models::ModelArchitecture::Gemma4,
+            ironmlx_lm::models::ModelArchitecture::Gemma4,
             true,
             &mut resolved,
         );
@@ -2309,7 +2106,7 @@ mod scheduler_profile_tests {
 
         let changed = apply_adaptive_mtp_scheduler_defaults(
             &args,
-            crate::models::ModelArchitecture::Gemma4,
+            ironmlx_lm::models::ModelArchitecture::Gemma4,
             true,
             &mut resolved,
         );
@@ -2340,7 +2137,7 @@ mod scheduler_profile_tests {
 
         let changed = apply_adaptive_mtp_scheduler_defaults(
             &args,
-            crate::models::ModelArchitecture::Gemma4,
+            ironmlx_lm::models::ModelArchitecture::Gemma4,
             true,
             &mut resolved,
         );
@@ -2362,7 +2159,7 @@ mod scheduler_profile_tests {
 
         let changed = apply_adaptive_mtp_scheduler_defaults(
             &args,
-            crate::models::ModelArchitecture::Qwen35Dense,
+            ironmlx_lm::models::ModelArchitecture::Qwen35Dense,
             true,
             &mut resolved,
         );
@@ -2449,7 +2246,7 @@ mod scheduler_profile_tests {
 
         assert_eq!(
             args.paged_prefix_cache_block_size,
-            crate::core::cache::DEFAULT_PAGED_PREFIX_CACHE_BLOCK_SIZE
+            ironmlx_runtime::core::cache::prefix_store::DEFAULT_PAGED_PREFIX_CACHE_BLOCK_SIZE
         );
     }
 
@@ -2478,7 +2275,7 @@ mod scheduler_profile_tests {
 
         let cfg = resolve_serve_mtp_config(
             &args,
-            crate::models::ModelArchitecture::Qwen35Dense,
+            ironmlx_lm::models::ModelArchitecture::Qwen35Dense,
             &serde_json::json!({"model_type": "qwen3_5", "text_config": {}}),
             SchedulerServeConfig {
                 b_max: 1,
@@ -2502,7 +2299,7 @@ mod scheduler_profile_tests {
 
         let cfg = resolve_serve_mtp_config(
             &args,
-            crate::models::ModelArchitecture::Qwen35Dense,
+            ironmlx_lm::models::ModelArchitecture::Qwen35Dense,
             &qwen36_dense_27b_raw_config(),
             SchedulerServeConfig {
                 b_max: 1,
@@ -2526,7 +2323,7 @@ mod scheduler_profile_tests {
 
         let cfg = resolve_serve_mtp_config(
             &args,
-            crate::models::ModelArchitecture::Qwen35Dense,
+            ironmlx_lm::models::ModelArchitecture::Qwen35Dense,
             &serde_json::json!({"model_type": "qwen3_5", "text_config": {}}),
             SchedulerServeConfig {
                 b_max: 2,
@@ -2550,7 +2347,7 @@ mod scheduler_profile_tests {
 
         let cfg = resolve_serve_mtp_config(
             &args,
-            crate::models::ModelArchitecture::Gemma4,
+            ironmlx_lm::models::ModelArchitecture::Gemma4,
             &serde_json::json!({"model_type": "gemma4", "text_config": {"model_type": "gemma4_text"}}),
             SchedulerServeConfig {
                 b_max: 1,
@@ -2574,7 +2371,7 @@ mod scheduler_profile_tests {
 
         let cfg = resolve_serve_mtp_config(
             &args,
-            crate::models::ModelArchitecture::Gemma4,
+            ironmlx_lm::models::ModelArchitecture::Gemma4,
             &serde_json::json!({"model_type": "gemma4", "text_config": {"model_type": "gemma4_text"}}),
             SchedulerServeConfig {
                 b_max: 2,
@@ -2803,7 +2600,7 @@ mod scheduler_profile_tests {
 
         let err = resolve_serve_mtp_config(
             &args,
-            crate::models::ModelArchitecture::Llama,
+            ironmlx_lm::models::ModelArchitecture::Llama,
             &serde_json::json!({"model_type": "llama"}),
             SchedulerServeConfig {
                 b_max: 1,
@@ -2822,7 +2619,7 @@ mod scheduler_profile_tests {
         args.mtp_model_dir = Some(PathBuf::from("/tmp/ironmlx-missing-mtp-dir"));
         let missing = resolve_serve_mtp_config(
             &args,
-            crate::models::ModelArchitecture::Qwen35Dense,
+            ironmlx_lm::models::ModelArchitecture::Qwen35Dense,
             &serde_json::json!({"model_type": "qwen3_5", "text_config": {}}),
             SchedulerServeConfig {
                 b_max: 1,
@@ -2838,7 +2635,7 @@ mod scheduler_profile_tests {
         args.mtp_draft_tokens = Some(0);
         let zero = resolve_serve_mtp_config(
             &args,
-            crate::models::ModelArchitecture::Qwen35Dense,
+            ironmlx_lm::models::ModelArchitecture::Qwen35Dense,
             &serde_json::json!({"model_type": "qwen3_5", "text_config": {}}),
             SchedulerServeConfig {
                 b_max: 1,
@@ -3047,12 +2844,13 @@ mod scheduler_profile_tests {
     }
 }
 
-use crate::core::scheduler_resolution::{
-    check_loaded_scheduler_profile_health, default_scheduler_runtime_profile,
-    load_scheduler_profile_for_model_with_explicit, log_scheduler_profile_health, read_model_type,
-    resolve_memory_limit_bytes, scheduler_profile_model_name, unix_time_ms,
-    ResolvedSchedulerRuntime, SchedulerProfileSource, SchedulerResolutionOptions,
-    SchedulerServeConfig, DEFAULT_MAX_CACHE_CAP,
+use {
+    ironmlx_runtime::core::scheduler_resolution::read_model_type,
+    ironmlx_runtime::core::scheduler_resolution::resolve_memory_limit_bytes,
+    ironmlx_runtime::core::scheduler_resolution::ResolvedSchedulerRuntime,
+    ironmlx_runtime::core::scheduler_resolution::SchedulerResolutionOptions,
+    ironmlx_runtime::core::scheduler_resolution::SchedulerServeConfig,
+    ironmlx_runtime::core::scheduler_resolution::DEFAULT_MAX_CACHE_CAP,
 };
 impl From<&ServeArgs> for SchedulerResolutionOptions {
     fn from(args: &ServeArgs) -> Self {
@@ -3082,13 +2880,13 @@ pub(crate) fn engine_runtime_config(
 ) -> Result<server::engine::EnginePoolRuntimeConfig> {
     Ok(server::engine::EnginePoolRuntimeConfig {
         network: args.resolved_network_config()?,
-        options: crate::core::runtime_config::EngineRuntimeOptions {
+        options: ironmlx_runtime::core::runtime_config::EngineRuntimeOptions {
             kv_cache_turboquant_bits: args.kv_quant.turboquant_bits(),
             scheduler_autotune_report: args.scheduler_autotune_report,
             paged_prefix_cache: resolve_engine_paged_prefix_cache_settings(args)?,
             prefix_lru_cache_max_bytes: args.prefix_lru_cache_max_bytes,
             model_ttl: resolve_model_ttl(args)?,
-            memory_limits: crate::core::runtime_config::EnginePoolMemoryLimits {
+            memory_limits: ironmlx_runtime::core::runtime_config::EnginePoolMemoryLimits {
                 total_memory_limit_bytes: resolve_memory_limit_bytes(
                     args.memory_limit_total_gb,
                     "--memory-limit-total-gb",
@@ -3104,4 +2902,4 @@ pub(crate) fn engine_runtime_config(
 }
 
 #[cfg(test)]
-use crate::core::scheduler_resolution::SchedulerProfileLoad;
+use ironmlx_runtime::core::scheduler_resolution::SchedulerProfileLoad;

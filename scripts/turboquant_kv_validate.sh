@@ -41,7 +41,8 @@ PROMPT_TEXT
 fi
 
 cargo build --release \
-  -p ironmlx \
+  -p ironmlx-lm -p ironmlx-runtime \
+  --features ironmlx-lm/tools,ironmlx-runtime/tools \
   --bin ironmlx-turboquant-kv-validate \
   --bin ironmlx-core-bench
 

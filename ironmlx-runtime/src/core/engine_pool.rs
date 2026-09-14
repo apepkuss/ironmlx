@@ -14,27 +14,30 @@ use serde::Serialize;
 use tokio::sync::{Mutex, Notify};
 
 use crate::core::cache::{PagedPrefixCacheConfig, PrefixLruCacheConfig};
-use crate::core::model::Model;
 use crate::core::process_memory::{
     global_process_memory_governor, MemoryReservation, PressureLevel, StaticMemoryEstimate,
 };
 use crate::core::prompt_lookup::PromptLookupConfig;
-use crate::core::sampler::Sampler;
 use crate::core::speculative::{MtpDraftTokensArg, MtpSpeculativeConfig};
-use crate::core::speculative_model::MtpSpeculativeModel;
-use crate::core::{Loader, Tokenizer};
-use crate::models::{
-    DiffusionGemmaConfig, DiffusionGemmaGenerationConfig, DiffusionGemmaModel, Gemma4Model,
-    Glm4MoeLiteModel, LlamaModel, MiniCpmV46Model, ModelArchitecture, Qwen35Model, Qwen35MoeModel,
-    Qwen36MoeModel,
-};
 use crate::Result;
+use ironmlx_core::sampler::Sampler;
+use ironmlx_lm::core::model::Model;
+use ironmlx_lm::core::speculative_model::MtpSpeculativeModel;
+use {ironmlx_lm::core::loader::Loader, ironmlx_lm::core::tokenizer::Tokenizer};
+use {
+    ironmlx_lm::models::DiffusionGemmaConfig, ironmlx_lm::models::DiffusionGemmaGenerationConfig,
+    ironmlx_lm::models::DiffusionGemmaModel, ironmlx_lm::models::Gemma4Model,
+    ironmlx_lm::models::Glm4MoeLiteModel, ironmlx_lm::models::LlamaModel,
+    ironmlx_lm::models::MiniCpmV46Model, ironmlx_lm::models::ModelArchitecture,
+    ironmlx_lm::models::Qwen35Model, ironmlx_lm::models::Qwen35MoeModel,
+    ironmlx_lm::models::Qwen36MoeModel,
+};
 
 use crate::core::engine_state::{
     CausalEngine as AppState, Gemma4DrafterEngine as Gemma4DrafterAppState,
 };
 use crate::core::runtime_health as health;
-use crate::core::vision_input::VisionInputConfig;
+use ironmlx_lm::core::vision_input::VisionInputConfig;
 
 pub use crate::core::runtime_config::*;
 
@@ -1991,7 +1994,7 @@ impl EngineVariant {
 
 fn causal_pending_requests<M>(state: &AppState<M>) -> usize
 where
-    M: Model + crate::core::vision::DenseVlMethods + Send + 'static,
+    M: Model + ironmlx_lm::core::vision::DenseVlMethods + Send + 'static,
 {
     let snapshot = state.health_collector.snapshot();
     let model_locked = usize::from(state.model.try_lock().is_err());
@@ -2139,7 +2142,7 @@ async fn load_engine_variant(
             .await
         }
         ModelArchitecture::Qwen35Moe => {
-            if crate::models::is_qwen36_moe_config(loader.config_raw_value()) {
+            if ironmlx_lm::models::is_qwen36_moe_config(loader.config_raw_value()) {
                 let model_impl =
                     Qwen36MoeModel::from_loader(&loader).context("Qwen36MoeModel::from_loader")?;
                 build_qwen36_moe_engine(
@@ -2254,7 +2257,7 @@ async fn load_engine_variant(
             Ok(EngineVariant::Llama(state))
         }
         ModelArchitecture::MiniCpmV46 => {
-            let model_impl = crate::models::minicpmv4_6::model_from_loader(&loader)
+            let model_impl = ironmlx_lm::models::minicpmv4_6::model_from_loader(&loader)
                 .context("minicpmv4_6::model_from_loader")?;
             let state = build_plain_or_prompt_lookup_causal_state(
                 model_impl,
@@ -2422,7 +2425,7 @@ async fn build_plain_or_prompt_lookup_causal_state<M>(
     vision_input: Option<VisionInputConfig>,
 ) -> Result<AppState<M>>
 where
-    M: Model + crate::core::vision::DenseVlMethods + Send + 'static,
+    M: Model + ironmlx_lm::core::vision::DenseVlMethods + Send + 'static,
 {
     if let Some(prompt_lookup) = prompt_lookup {
         build_prompt_lookup_causal_state(
@@ -2464,7 +2467,7 @@ async fn build_plain_causal_state<M>(
     vision_input: Option<VisionInputConfig>,
 ) -> Result<AppState<M>>
 where
-    M: Model + crate::core::vision::DenseVlMethods + Send + 'static,
+    M: Model + ironmlx_lm::core::vision::DenseVlMethods + Send + 'static,
 {
     let profile = model
         .scheduler_runtime_profile
@@ -2506,7 +2509,7 @@ async fn build_prompt_lookup_causal_state<M>(
     vision_input: Option<VisionInputConfig>,
 ) -> Result<AppState<M>>
 where
-    M: Model + crate::core::vision::DenseVlMethods + Send + 'static,
+    M: Model + ironmlx_lm::core::vision::DenseVlMethods + Send + 'static,
 {
     let profile = model
         .scheduler_runtime_profile
@@ -2550,7 +2553,7 @@ async fn build_mtp_causal_state<M>(
     vision_input: Option<VisionInputConfig>,
 ) -> Result<AppState<M>>
 where
-    M: Model + crate::core::vision::DenseVlMethods + MtpSpeculativeModel + Send + 'static,
+    M: Model + ironmlx_lm::core::vision::DenseVlMethods + MtpSpeculativeModel + Send + 'static,
     M::MtpHead: Send + 'static,
 {
     let mtp_loader = Loader::open_mtp(&mtp_config.model_dir)
@@ -2609,7 +2612,7 @@ async fn build_gemma4_drafter_causal_state(
         )
     })?;
     static_memory_estimate.speculative_cold_bytes = drafter_loader.loaded_tensor_bytes();
-    let drafter = crate::models::gemma4::Gemma4AssistantModel::from_loader(&drafter_loader)
+    let drafter = ironmlx_lm::models::gemma4::Gemma4AssistantModel::from_loader(&drafter_loader)
         .with_context(|| {
             format!(
                 "loading Gemma4 assistant drafter from {}",
@@ -2722,7 +2725,7 @@ impl LoadedEngineHealth {
 #[cfg(test)]
 mod tests {
     use super::EngineModelCapabilities;
-    use crate::models::ModelArchitecture;
+    use ironmlx_lm::models::ModelArchitecture;
     use std::fs::OpenOptions;
     use std::os::fd::AsRawFd;
     use std::path::{Path, PathBuf};

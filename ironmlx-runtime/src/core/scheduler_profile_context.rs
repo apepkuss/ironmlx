@@ -5,9 +5,9 @@ use crate::core::scheduler_autotune::{
     SchedulerKvQuantization, SchedulerPrefixCacheContext, SchedulerSpeculativeContext,
     SchedulerSpeculativeMode, SchedulerWeightQuantizationContext,
 };
-use crate::models::ModelArchitecture;
 use crate::Result;
 use anyhow::{bail, Context};
+use ironmlx_lm::models::ModelArchitecture;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;

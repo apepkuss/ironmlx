@@ -6,4 +6,3 @@ pub use anyhow::{Error, Result};
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub use core::scheduler_actor::test_support;
-pub(crate) use ironmlx_lm::{models, nn};

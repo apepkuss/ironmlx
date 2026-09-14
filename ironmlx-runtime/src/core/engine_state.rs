@@ -1,24 +1,26 @@
 //! Native model state and execution construction. HTTP routers consume these instances.
 
-use crate::core::cache::{
-    ActiveKvOffloadConfig, PagedPrefixCacheConfig, PrefixLruCacheConfig, TurboQuantKVBits,
-};
-use crate::core::model::Model;
 use crate::core::runtime_config::SamplingDefaults;
-use crate::core::sampler::Sampler;
 use crate::core::scheduler_autotune::{
     SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeProfile,
     SchedulerAutotuneRuntimeRequest,
 };
-use crate::core::speculative_model::MtpSpeculativeModel;
 use crate::core::task_execution::RequestExecutionHandle;
-use crate::core::tokenizer::Tokenizer;
-use crate::core::vision::DenseVlMethods;
-use crate::core::vision_input::VisionInputConfig;
 use crate::core::{dflash2_actor, runtime_health as health, scheduler_actor};
 use crate::Result;
+use ironmlx_core::sampler::Sampler;
+use ironmlx_lm::core::model::Model;
+use ironmlx_lm::core::speculative_model::MtpSpeculativeModel;
+use ironmlx_lm::core::tokenizer::Tokenizer;
+use ironmlx_lm::core::vision::DenseVlMethods;
+use ironmlx_lm::core::vision_input::VisionInputConfig;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use {
+    crate::core::cache::ActiveKvOffloadConfig, crate::core::cache::PagedPrefixCacheConfig,
+    crate::core::cache::PrefixLruCacheConfig,
+    ironmlx_lm::core::cache::turboquant_kv::TurboQuantKVBits,
+};
 
 /// Native model and execution state. The model is wrapped in a tokio Mutex —
 /// concurrent requests serialize behind the lock (P4 single-stream contract).
@@ -208,7 +210,7 @@ where
 
 #[derive(Clone)]
 pub struct Gemma4DrafterEngine {
-    pub base: CausalEngine<crate::models::Gemma4Model>,
+    pub base: CausalEngine<ironmlx_lm::models::Gemma4Model>,
     pub mtp_draft_tokens: usize,
 }
 
@@ -265,7 +267,7 @@ where
         admission_queue_max: usize,
         effective_cap_max: usize,
         decode_cadence_mid_chunk_cap: usize,
-        meta: crate::core::model::ModelMeta,
+        meta: ironmlx_lm::core::model::ModelMeta,
     ) -> Result<scheduler_actor::SchedulerActorHandle>;
 }
 
@@ -296,7 +298,7 @@ where
         admission_queue_max: usize,
         effective_cap_max: usize,
         decode_cadence_mid_chunk_cap: usize,
-        meta: crate::core::model::ModelMeta,
+        meta: ironmlx_lm::core::model::ModelMeta,
     ) -> Result<scheduler_actor::SchedulerActorHandle> {
         if self.force_scheduler {
             return Ok(
@@ -394,7 +396,7 @@ pub(crate) struct PromptLookupSchedulerActorSpawner {
 }
 
 pub(crate) struct Gemma4DrafterSchedulerActorSpawner {
-    pub(crate) drafter: Arc<Mutex<crate::models::gemma4::Gemma4AssistantModel>>,
+    pub(crate) drafter: Arc<Mutex<ironmlx_lm::models::gemma4::Gemma4AssistantModel>>,
     pub(crate) mtp_draft_tokens: usize,
     pub(crate) exact_qualification:
         crate::core::speculative_qualification::NeuralExactQualificationRuntimeConfig,
@@ -407,7 +409,7 @@ pub(crate) struct Gemma4DrafterSchedulerActorSpawner {
     pub(crate) active_kv_offload: ActiveKvOffloadConfig,
 }
 
-impl SchedulerActorSpawner<crate::models::Gemma4Model> for Gemma4DrafterSchedulerActorSpawner {
+impl SchedulerActorSpawner<ironmlx_lm::models::Gemma4Model> for Gemma4DrafterSchedulerActorSpawner {
     fn paged_prefix_cache_enabled(&self) -> bool {
         self.paged_prefix_cache.is_some()
     }
@@ -422,13 +424,13 @@ impl SchedulerActorSpawner<crate::models::Gemma4Model> for Gemma4DrafterSchedule
 
     fn spawn(
         self,
-        model: Arc<Mutex<crate::models::Gemma4Model>>,
+        model: Arc<Mutex<ironmlx_lm::models::Gemma4Model>>,
         b_max: usize,
         admission_deadline: std::time::Duration,
         admission_queue_max: usize,
         effective_cap_max: usize,
         decode_cadence_mid_chunk_cap: usize,
-        meta: crate::core::model::ModelMeta,
+        meta: ironmlx_lm::core::model::ModelMeta,
     ) -> Result<scheduler_actor::SchedulerActorHandle> {
         if let Some((prompt_lookup, qualification)) = self.prompt_lookup {
             return scheduler_actor::spawn_scheduler_actor_with_gemma4_drafter_prompt_lookup(
@@ -510,7 +512,7 @@ where
         admission_queue_max: usize,
         effective_cap_max: usize,
         decode_cadence_mid_chunk_cap: usize,
-        meta: crate::core::model::ModelMeta,
+        meta: ironmlx_lm::core::model::ModelMeta,
     ) -> Result<scheduler_actor::SchedulerActorHandle> {
         if let Some((prompt_lookup, qualification)) = self.prompt_lookup {
             return scheduler_actor::spawn_scheduler_actor_with_mtp_prompt_lookup(
@@ -591,7 +593,7 @@ where
         admission_queue_max: usize,
         effective_cap_max: usize,
         decode_cadence_mid_chunk_cap: usize,
-        meta: crate::core::model::ModelMeta,
+        meta: ironmlx_lm::core::model::ModelMeta,
     ) -> Result<scheduler_actor::SchedulerActorHandle> {
         scheduler_actor::spawn_scheduler_actor_with_prompt_lookup(
             model,
@@ -836,8 +838,8 @@ where
 
 #[allow(clippy::too_many_arguments)]
 pub async fn build_gemma4_drafter_app_state(
-    model: crate::models::Gemma4Model,
-    drafter: crate::models::gemma4::Gemma4AssistantModel,
+    model: ironmlx_lm::models::Gemma4Model,
+    drafter: ironmlx_lm::models::gemma4::Gemma4AssistantModel,
     mtp_draft_tokens: usize,
     prompt_lookup: Option<crate::core::prompt_lookup::PromptLookupConfig>,
     tokenizer: Tokenizer,
@@ -1127,7 +1129,7 @@ pub(crate) fn build_health_collector(
 #[allow(clippy::too_many_arguments)]
 pub async fn build_dflash2_engine<M>(
     model: M,
-    draft: crate::models::DFlash2DraftModel,
+    draft: ironmlx_lm::models::DFlash2DraftModel,
     tokenizer: Tokenizer,
     model_id: String,
     prefill_chunk_size: usize,
@@ -1143,7 +1145,7 @@ pub async fn build_dflash2_engine<M>(
     static_memory_estimate: crate::core::process_memory::StaticMemoryEstimate,
 ) -> Result<CausalEngine<M>>
 where
-    M: Model + DenseVlMethods + crate::models::dflash2::DFlash2Target + Send + 'static,
+    M: Model + DenseVlMethods + ironmlx_lm::models::dflash2::DFlash2Target + Send + 'static,
 {
     let model = Arc::new(Mutex::new(model));
     let (mut meta, dflash2_cache_cost) = {
