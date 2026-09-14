@@ -40,3 +40,6 @@ will be enabled only after all final acceptance steps, immediately before public
 release. This deferred switch does not block completion of the materials review.
 Actual signing, notarization, installation and upgrade acceptance remain separate
 later steps.
+
+
+2026-09-14: RC distribution preparation supersedes the historical disabled-gate arrangement above. See [scoped acceptance and authorization](zh-CN/release-acceptance/0.1.0-rc.1.md). No publication performed.

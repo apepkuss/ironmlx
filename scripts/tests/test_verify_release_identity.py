@@ -115,13 +115,19 @@ class ReleaseIdentityTests(unittest.TestCase):
             path = self.repo / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("fixture")
+        config = scripts / "release-config.sh"
+        config.write_text('readonly IRONMLX_PUBLIC_DISTRIBUTION_READY="false"\n')
         validate = ["bash", str(scripts / "verify-distribution-materials.sh")]
         self.assertEqual(subprocess.run(validate, capture_output=True).returncode, 0)
         result = subprocess.run(["bash", str(scripts / "release-legal-gate.sh")],
                                 capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("public distribution is disabled", result.stderr)
+        config.write_text('readonly IRONMLX_PUBLIC_DISTRIBUTION_READY="true"\n')
+        gate = ["bash", str(scripts / "release-legal-gate.sh")]
+        self.assertEqual(subprocess.run(gate, capture_output=True).returncode, 0)
         (self.repo / "NOTICE").unlink()
+        self.assertNotEqual(subprocess.run(gate, capture_output=True).returncode, 0)
         self.assertNotEqual(subprocess.run(validate, capture_output=True).returncode, 0)
 
     def test_candidate_accepts_matching_rc_and_stable_mode_rejects_it(self):

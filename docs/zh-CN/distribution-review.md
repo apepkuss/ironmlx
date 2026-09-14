@@ -83,3 +83,6 @@ ModelScope 的四组路径完全匹配；Hugging Face 背景路径匹配，眼�
 | THIRD_PARTY_NOTICES.md | `89522531122eb471899f6235e5ec7a993442acf6689ea00428e67d206a807458` |
 
 任何依赖、移植文件或品牌素材变更都需要复核相应项；本快照不覆盖后续变化。
+
+
+2026-09-14: RC distribution preparation supersedes the historical disabled-gate arrangement above. See [scoped acceptance and authorization](release-acceptance/0.1.0-rc.1.md). No publication performed.
