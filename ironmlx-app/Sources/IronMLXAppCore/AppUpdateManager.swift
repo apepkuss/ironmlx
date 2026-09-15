@@ -126,6 +126,14 @@ struct AppUpdateConfiguration: Equatable {
 
 @MainActor
 public final class SparkleAppUpdateManager: NSObject, AppUpdateManaging, SPUUpdaterDelegate {
+    static func sparkleLanguage(for appLanguage: String) -> String {
+        appLanguage == "zh" ? "zh-Hans" : appLanguage
+    }
+
+    private static func applySparkleLanguage(for appLanguage: String) {
+        UserDefaults.standard.set([sparkleLanguage(for: appLanguage)], forKey: "AppleLanguages")
+        UserDefaults.standard.synchronize()
+    }
     private var controller: SPUStandardUpdaterController!
     private let developmentTestMarkerURL: URL?
     private let channel: String
@@ -186,6 +194,7 @@ public final class SparkleAppUpdateManager: NSObject, AppUpdateManaging, SPUUpda
     }
 
     public func checkForUpdates(_ sender: Any?) {
+        Self.applySparkleLanguage(for: AppConfigStore.shared.load().language)
         controller.checkForUpdates(sender)
     }
 

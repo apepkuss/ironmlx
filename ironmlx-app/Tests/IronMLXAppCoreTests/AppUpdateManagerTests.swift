@@ -4,6 +4,14 @@ import Testing
 @testable import IronMLXAppCore
 
 @Test
+@MainActor
+func sparkleLanguageFollowsAppLanguage() {
+    #expect(SparkleAppUpdateManager.sparkleLanguage(for: "zh") == "zh-Hans")
+    #expect(SparkleAppUpdateManager.sparkleLanguage(for: "zh-Hans") == "zh-Hans")
+    #expect(SparkleAppUpdateManager.sparkleLanguage(for: "en") == "en")
+}
+
+@Test
 func developmentUpdateConfigurationRequiresLoopbackHTTPSAndSignatures() throws {
     let configuration = try AppUpdateConfiguration(infoDictionary: validUpdateInfo())
 
