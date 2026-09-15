@@ -102,7 +102,10 @@ def main():
         run('codesign', '--verify', '--strict', dmg)
         run('xcrun', 'stapler', 'validate', dmg)
         run('spctl', '--assess', '--type', 'open', '--context', 'context:primary-signature', dmg)
-    assets = sorted(p for p in (root / '.build/stable-release').iterdir() if p.is_file())
+    # Detailed materials remain inside the installation packages.
+    version = (root / 'VERSION').read_text().strip()
+    assets = [root / '.build/stable-release' / f'IronMLX-{version}.{kind}'
+              for kind in ('dmg', 'zip')]
     update = root / '.build/app-update'
     data = json.loads((update / 'update.json').read_text())
     require(data['tag'] == args.tag and data['channel'] == ('release-candidate' if args.candidate else 'stable'), 'update identity mismatch')
@@ -110,7 +113,8 @@ def main():
             'invalid update asset names')
     for kind in ('archive', 'feed'):
         require(sha(update / data[kind]) == data[kind + '_sha256'], 'update hash mismatch')
-    assets += [update / data['archive'], update / data['feed'], update / 'update.json']
+    # The signed feed and its metadata are published separately on updates.
+    assets.append(update / data['archive'])
     manifest = root / '.build/RELEASE-SHA256SUMS'
     manifest.write_text(''.join(f'{sha(p)}  {p.name}\n' for p in assets))
     publish(args.repository, args.tag, run('git', '-C', root, 'rev-parse', 'HEAD'), assets + [manifest], candidate=args.candidate)
