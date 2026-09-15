@@ -15,16 +15,23 @@ spec.loader.exec_module(stable)
 
 
 class PublicationTests(unittest.TestCase):
-    def scenario(self, failure=None, candidate=False):
+    def scenario(self, failure=None, candidate=False, existing=False):
         with tempfile.TemporaryDirectory() as tmp:
             asset = Path(tmp) / 'asset.zip'
             asset.write_bytes(b'verified artifact')
             calls = []
             public = False
+            created = existing
 
             def run(*args):
-                nonlocal public
+                nonlocal public, created
                 calls.append(args)
+                if args[1:3] == ('release', 'create'):
+                    created = True
+                if args[1:3] == ('api', 'repos/owner/repo/releases'):
+                    return '10' if created else ''
+                if '/releases/tags/' in str(args):
+                    raise AssertionError('by-tag endpoint cannot resolve drafts')
                 if 'commits/v1.0.0' in str(args):
                     moved = failure == 'tag-moved' and sum('commits/v1.0.0' in str(c) for c in calls) > 1
                     return json.dumps({'sha': 'other' if moved else 'commit'})
@@ -36,8 +43,8 @@ class PublicationTests(unittest.TestCase):
                 if '--method' in args:
                     public = True
                     return '{}'
-                if '/releases/tags/' in str(args):
-                    return json.dumps(dict(id=10, draft=not public, prerelease=candidate,
+                if args[1:3] == ('api', 'repos/owner/repo/releases/10'):
+                    return json.dumps(dict(id=10, tag_name='v1.0.0-rc.1' if candidate else 'v1.0.0', draft=not public and failure != 'public', prerelease=candidate,
                                            assets=[{'name': 'extra' if failure == 'asset-set' else 'asset.zip'}]))
                 return ''
 
@@ -49,11 +56,22 @@ class PublicationTests(unittest.TestCase):
                 else:
                     stable.publish('owner/repo', 'v1.0.0-rc.1' if candidate else 'v1.0.0', 'commit', [asset], candidate=candidate)
                     self.assertTrue(public)
-                    create = next(c for c in calls if c[1:3] == ('release', 'create'))
-                    self.assertEqual('--prerelease' in create, candidate)
+                    creates = [c for c in calls if c[1:3] == ('release', 'create')]
+                    self.assertEqual(len(creates), 0 if existing else 1)
+                    if creates:
+                        self.assertEqual('--prerelease' in creates[0], candidate)
                     promotion = next(c for c in calls if '--method' in c)
                     self.assertIn('make_latest=false' if candidate else 'make_latest=true', promotion)
                     self.assertEqual(sum(c[1:3] == ('release', 'download') for c in calls), 2)
+
+            if existing:
+                self.assertFalse(any(c[1:3] in (('release', 'create'), ('release', 'upload')) for c in calls))
+
+    def test_existing_draft_is_resumed_only_when_exact(self):
+        self.scenario(candidate=True, existing=True)
+        for failure in ('corrupt', 'asset-set', 'tag-moved', 'public'):
+            with self.subTest(failure=failure):
+                self.scenario(failure, candidate=True, existing=True)
 
     def test_draft_verified_before_promotion_and_public_download(self):
         self.scenario()

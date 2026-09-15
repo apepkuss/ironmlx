@@ -39,7 +39,8 @@ def publish(repo, tag, commit, assets, candidate=False):
                 'remote release tag moved')
 
     def verify_downloads():
-        release = json.loads(run('gh', 'api', f'{route}/releases/tags/{tag}'))
+        release = json.loads(run('gh', 'api', f'{route}/releases/{release_id}'))
+        require(release['tag_name'] == tag, 'release tag differs')
         require(release['prerelease'] == candidate, 'unexpected prerelease state')
         names = [asset['name'] for asset in release['assets']]
         require(len(names) == len(expected) and set(names) == set(expected), 'release asset set differs')
@@ -50,11 +51,26 @@ def publish(repo, tag, commit, assets, candidate=False):
         return release
 
     check_tag()
-    # gh create rejects an existing tag release; never delete/overwrite on retry.
-    run('gh', 'release', 'create', tag, '--repo', repo, '--verify-tag', '--draft',
-        '--title', f'IronMLX {tag}', '--generate-notes',
-        *(['--prerelease', '--latest=false'] if candidate else []))
-    run('gh', 'release', 'upload', tag, '--repo', repo, *assets)
+    def find_release():
+        # The by-tag REST endpoint does not resolve unpublished drafts.
+        ids = run('gh', 'api', f'{route}/releases', '--paginate', '--jq',
+                  f'.[] | select(.tag_name == "{tag}") | .id').splitlines()
+        require(len(ids) <= 1, 'multiple releases for tag')
+        require(all(value.isdigit() for value in ids), 'invalid release ID')
+        return ids[0] if ids else None
+
+    release_id = find_release()
+    if release_id is None:
+        run('gh', 'release', 'create', tag, '--repo', repo, '--verify-tag', '--draft',
+            '--title', f'IronMLX {tag}', '--generate-notes',
+            *(['--prerelease', '--latest=false'] if candidate else []))
+        release_id = find_release()
+        require(release_id is not None, 'created draft not found')
+        run('gh', 'release', 'upload', tag, '--repo', repo, *assets)
+    else:
+        existing = json.loads(run('gh', 'api', f'{route}/releases/{release_id}'))
+        require(existing['draft'], 'release is already public')
+        # Resume only an exact draft: never replace or add assets on retry.
     release = verify_downloads()
     require(release['draft'], 'release became public before verification')
     check_tag()
