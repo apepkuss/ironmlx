@@ -22,26 +22,57 @@ done
 [ ! -e "$WORK" ] || { echo 'error: signing workspace already exists' >&2; exit 1; }
 umask 077
 mkdir -p "$WORK"
+original_keychains=()
+search_list_changed=false
 cleanup() {
+  if [ "$search_list_changed" = true ]; then
+    security list-keychains -d user -s ${original_keychains[@]+"${original_keychains[@]}"} >/dev/null 2>&1 || true
+  fi
   security delete-keychain "$KEYCHAIN" >/dev/null 2>&1 || true
   rm -rf "$WORK"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+security list-keychains -d user > "$WORK/keychains.txt"
+while IFS= read -r keychain; do
+  original_keychains+=("$keychain")
+done < <(sed -E 's/^[[:space:]]*"(.*)"$/\1/' "$WORK/keychains.txt")
 printf '%s' "$IRONMLX_DEVELOPER_ID_P12_BASE64" | base64 --decode > "$WORK/certificate.p12"
 printf '%s\n' "$IRONMLX_NOTARY_PRIVATE_KEY" > "$WORK/notary.p8"
 keychain_password="$(openssl rand -hex 32)"
 security create-keychain -p "$keychain_password" "$KEYCHAIN"
+search_list_changed=true
+security list-keychains -d user -s "$KEYCHAIN" ${original_keychains[@]+"${original_keychains[@]}"}
 security set-keychain-settings -lut 21600 "$KEYCHAIN"
 security unlock-keychain -p "$keychain_password" "$KEYCHAIN"
 security import "$WORK/certificate.p12" -k "$KEYCHAIN" -P "$IRONMLX_DEVELOPER_ID_P12_PASSWORD" -T /usr/bin/codesign >/dev/null
+# Provision Apple's Developer ID intermediates in this isolated keychain.
+# Importing certificates does not override macOS trust policy.
+for certificate in DeveloperIDCA DeveloperIDG2CA; do
+  curl --fail --silent --show-error --retry 3 --proto '=https' \
+    "https://www.apple.com/certificateauthority/$certificate.cer" -o "$WORK/$certificate.cer"
+  security import "$WORK/$certificate.cer" -k "$KEYCHAIN" >/dev/null
+done
 security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$KEYCHAIN" >/dev/null
+# A successful PKCS#12 import alone does not prove a usable signing identity.
+security find-identity -v -p codesigning "$KEYCHAIN" > "$WORK/identities.txt"
+signing_identity_sha="$(python3 - "$WORK/identities.txt" "$IRONMLX_SIGNING_IDENTITY" <<'PYIDENTITY'
+import re, sys
+matches = [m.group(1) for line in open(sys.argv[1])
+           if (m := re.match(r'\s*\d+\) ([0-9A-Fa-f]{40}) "(.*)"$', line.strip()))
+           and m.group(2) == sys.argv[2]]
+if len(matches) != 1:
+    raise SystemExit('error: expected one valid Developer ID identity in signing keychain; '
+                     'check P12 certificate/private key, configured identity, expiry and Apple trust chain')
+print(matches[0])
+PYIDENTITY
+)"
 xcrun notarytool store-credentials ironmlx-release --key "$WORK/notary.p8" \
   --key-id "$IRONMLX_NOTARY_KEY_ID" --issuer "$IRONMLX_NOTARY_ISSUER_ID" --keychain "$KEYCHAIN" >/dev/null
 
 sign() {
-  codesign --force --sign "$IRONMLX_SIGNING_IDENTITY" --keychain "$KEYCHAIN" \
+  codesign --force --sign "$signing_identity_sha" --keychain "$KEYCHAIN" \
     --options runtime --timestamp "$@"
 }
 if [ "$kind" = app ]; then
@@ -60,7 +91,7 @@ if [ "$kind" = app ]; then
   sign "$APP/Contents/Helpers/iron-bench"
   sign "$APP"
 else
-  codesign --force --sign "$IRONMLX_SIGNING_IDENTITY" --keychain "$KEYCHAIN" --timestamp "$APP"
+  codesign --force --sign "$signing_identity_sha" --keychain "$KEYCHAIN" --timestamp "$APP"
 fi
 codesign --verify --deep --strict "$APP"
 codesign -dv "$APP" 2>&1 | grep -Fx "TeamIdentifier=$IRONMLX_APPLE_TEAM_ID"

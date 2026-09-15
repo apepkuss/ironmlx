@@ -70,7 +70,7 @@ class PublicationTests(unittest.TestCase):
 
 
 class SigningTests(unittest.TestCase):
-    def scenario(self, status, kind="app", channel="stable"):
+    def scenario(self, status, kind="app", channel="stable", identity="valid"):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             app = root / f'IronMLX.{kind}'
@@ -88,16 +88,25 @@ from pathlib import Path
 name = Path(sys.argv[0]).name
 args = sys.argv[1:]
 with open(os.environ['CALL_LOG'], 'a') as f: f.write(json.dumps([name, *args])+'\\n')
+if name == 'security' and args == ['list-keychains', '-d', 'user']:
+    print('    "/Users/test/Library/Keychains/login with spaces.keychain-db"')
+if name == 'security' and args[:2] == ['find-identity', '-v']:
+    if os.environ['TEST_IDENTITY'] == 'valid':
+        print('  1) ' + 'A'*40 + ' "Developer ID Application: Test (TESTTEAM)"')
+    elif os.environ['TEST_IDENTITY'] == 'mismatch':
+        print('  1) ' + 'B'*40 + ' "Developer ID Application: Other (TESTTEAM)"')
+    else:
+        print('     0 valid identities found')
 if name == 'openssl': print('temporary-test-password')
 if name == 'codesign' and '-dv' in args: print('TeamIdentifier=TESTTEAM')
 if name == 'xcrun' and args[:2] == ['notarytool', 'submit']:
     print(json.dumps({'status': os.environ['NOTARY_STATUS']}))
 ''')
             shim.chmod(0o755)
-            for name in ('security', 'openssl', 'xcrun', 'codesign', 'plutil', 'ditto', 'spctl'):
+            for name in ('security', 'openssl', 'xcrun', 'codesign', 'plutil', 'ditto', 'spctl', 'curl'):
                 (bindir / name).symlink_to(shim)
             env = os.environ.copy()
-            env.update(PATH=f'{bindir}:{env["PATH"]}', RUNNER_TEMP=tmp, CALL_LOG=str(log), NOTARY_STATUS=status,
+            env.update(PATH=f'{bindir}:{env["PATH"]}', RUNNER_TEMP=tmp, CALL_LOG=str(log), NOTARY_STATUS=status, TEST_IDENTITY=identity,
                        IRONMLX_DEVELOPER_ID_P12_BASE64='dGVzdA==', IRONMLX_DEVELOPER_ID_P12_PASSWORD='test',
                        IRONMLX_SIGNING_IDENTITY='Developer ID Application: Test (TESTTEAM)',
                        IRONMLX_APPLE_TEAM_ID='TESTTEAM', IRONMLX_NOTARY_KEY_ID='test',
@@ -110,10 +119,18 @@ if name == 'xcrun' and args[:2] == ['notarytool', 'submit']:
             result = subprocess.run(['bash', str(script), str(app), channel], env=env, capture_output=True)
             calls = [json.loads(line) for line in log.read_text().splitlines()]
             staple = [c for c in calls if c[:3] == ['xcrun', 'stapler', 'staple']]
-            self.assertEqual(result.returncode == 0, status == 'Accepted', result.stderr)
-            self.assertEqual(bool(staple), status == 'Accepted')
+            self.assertEqual(result.returncode == 0, status == 'Accepted' and identity == 'valid', result.stderr)
+            self.assertEqual(bool(staple), status == 'Accepted' and identity == 'valid')
             self.assertFalse((root / 'ironmlx-signing').exists())
             self.assertTrue(any(c[:2] == ['security', 'delete-keychain'] for c in calls))
+            search_updates = [c for c in calls if c[:5] == ['security', 'list-keychains', '-d', 'user', '-s']]
+            self.assertEqual(search_updates[-1][5:], ['/Users/test/Library/Keychains/login with spaces.keychain-db'])
+            self.assertEqual(search_updates[0][5:], [str(root / 'ironmlx-signing/signing.keychain-db'), *search_updates[-1][5:]])
+            if identity != 'valid':
+                self.assertIn(b'expected one valid Developer ID identity', result.stderr)
+                self.assertFalse(any(c[0] in ('codesign', 'plutil', 'xcrun') for c in calls))
+                return
+            self.assertTrue(all(c[c.index('--sign') + 1] == 'A'*40 for c in calls if '--sign' in c))
             signed = [i for i, c in enumerate(calls) if c[:2] == ['codesign', '--force']]
             self.assertEqual(len(signed), 8 if kind == "app" else 1)
             self.assertTrue(all(i < signed[0] for i, c in enumerate(calls) if c[0] == 'plutil'))
@@ -134,6 +151,11 @@ if name == 'xcrun' and args[:2] == ['notarytool', 'submit']:
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('missing IRONMLX_DEVELOPER_ID_P12_BASE64', result.stderr)
             self.assertFalse((Path(tmp) / 'ironmlx-signing').exists())
+
+    def test_missing_or_mismatched_identity_restores_keychains_before_app_mutation(self):
+        for identity in ('missing', 'mismatch'):
+            with self.subTest(identity=identity):
+                self.scenario('Accepted', identity=identity)
 
     def test_signing_order_and_accepted_ticket(self):
         self.scenario('Accepted')
