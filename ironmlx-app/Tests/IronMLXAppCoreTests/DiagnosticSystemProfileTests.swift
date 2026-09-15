@@ -28,7 +28,7 @@ import Testing
 @Test func bundleScriptsInjectAndVerifyDiagnosticBuildIdentity() throws {
     let build = try String(contentsOfFile: "../scripts/build-app-bundle.sh", encoding: .utf8)
     let verify = try String(contentsOfFile: "../scripts/verify-app-bundle.sh", encoding: .utf8)
-    let preview = try String(contentsOfFile: "../scripts/package-development-preview.sh", encoding: .utf8)
+    let signing = try String(contentsOfFile: "../scripts/sign-notarize-app.sh", encoding: .utf8)
 
     for key in [
         "IronMLXSourceCommit", "IronMLXSourceTreeState", "IronMLXMLXCommit",
@@ -36,8 +36,12 @@ import Testing
     ] {
         #expect(build.contains(key), "build script missing \(key)")
         #expect(verify.contains(key), "verify script missing \(key)")
-        #expect(preview.contains(key), "preview script missing \(key)")
     }
     #expect(!build.contains("/Users/xin"))
-    #expect(!preview.contains("/Users/xin"))
+    for key in [
+        "IronMLXDistributionChannel", "IronMLXDeveloperIDSigned", "IronMLXNotarizationStatus",
+    ] {
+        #expect(signing.contains(key), "signing script missing \(key)")
+    }
+    #expect(!signing.contains("/Users/xin"))
 }
