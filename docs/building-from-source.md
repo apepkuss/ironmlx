@@ -1,5 +1,7 @@
 # Building from source
 
+[简体中文](zh-CN/building-from-source.md)
+
 ## Supported platform
 
 IronMLX 0.1.0 supports Apple Silicon (`arm64`) and macOS 26.4 or later. Intel

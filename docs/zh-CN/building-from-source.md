@@ -1,5 +1,7 @@
 # 从源码构建
 
+[English](../building-from-source.md)
+
 ## 支持平台
 
 IronMLX 0.1.0 仅支持 Apple Silicon arm64 与 macOS 26.4 或更高版本。

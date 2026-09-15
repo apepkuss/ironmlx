@@ -41,30 +41,29 @@ MLX_SRC=/tmp/ironmlx-mlx-source scripts/build-app-bundle.sh
 open dist/IronMLX.app
 ```
 
-See [Building from source](docs/building-from-source.md) for details, or read the
-[Simplified Chinese translation](docs/zh-CN/building-from-source.md).
+See [Building from source](docs/building-from-source.md) for details.
 
 ## Documentation
 
-- [Supported model matrix](docs/supported-models.md) · [简体中文](docs/zh-CN/supported-models.md)
-- [Model rights boundary](docs/model-license-boundary.md) · [简体中文](docs/zh-CN/model-license-boundary.md)
-- [HTTP API](docs/api.md) · [简体中文](docs/zh-CN/api.md)
+- [Supported model matrix](docs/supported-models.md)
+- [Model rights boundary](docs/model-license-boundary.md)
+- [HTTP API](docs/api.md)
 - [API compatibility matrix](docs/api-compatibility-matrix.md)
 - [DFlash2 server and CLI](docs/dflash2-server-api.md)
-- [Hermes Agent integration](docs/hermes-agent.md) · [简体中文](docs/zh-CN/hermes-agent.md)
-- [oh-my-pi integration](docs/oh-my-pi.md) · [简体中文](docs/zh-CN/oh-my-pi.md)
-- [Privacy and network boundary](docs/privacy.md) · [简体中文](docs/zh-CN/privacy.md)
-- [Data locations and uninstall](docs/storage-and-uninstall.md) · [简体中文](docs/zh-CN/storage-and-uninstall.md)
-- [Troubleshooting](docs/troubleshooting.md) · [简体中文](docs/zh-CN/troubleshooting.md)
-- [Known issues](docs/known-issues.md) · [简体中文](docs/zh-CN/known-issues.md)
-- [0.1.0 release notes](docs/release-notes/0.1.0.md) · [简体中文](docs/zh-CN/release-notes/0.1.0.md)
-- [Versioning and releases](docs/versioning-and-releases.md) · [简体中文](docs/zh-CN/versioning-and-releases.md)
-- [Third-party materials](docs/stable-release-pipeline.md) · [简体中文](docs/zh-CN/stable-release-pipeline.md)
-- [Security boundary](docs/security-boundary.md) · [简体中文](docs/zh-CN/security-boundary.md)
-- [Diagnostic export](docs/diagnostic-bundle.md) · [简体中文](docs/zh-CN/diagnostic-bundle.md)
-- [Security reporting](SECURITY.md) · [中文](docs/zh-CN/security.md)
-- [Support](SUPPORT.md) · [中文](docs/zh-CN/support.md)
-- [Contributing](CONTRIBUTING.md) · [中文](docs/zh-CN/contributing.md)
+- [Hermes Agent integration](docs/hermes-agent.md)
+- [oh-my-pi integration](docs/oh-my-pi.md)
+- [Privacy and network boundary](docs/privacy.md)
+- [Data locations and uninstall](docs/storage-and-uninstall.md)
+- [Troubleshooting](docs/troubleshooting.md)
+- [Known issues](docs/known-issues.md)
+- [0.1.0 release notes](docs/release-notes/0.1.0.md)
+- [Versioning and releases](docs/versioning-and-releases.md)
+- [Third-party materials](docs/stable-release-pipeline.md)
+- [Security boundary](docs/security-boundary.md)
+- [Diagnostic export](docs/diagnostic-bundle.md)
+- [Security reporting](SECURITY.md)
+- [Support](SUPPORT.md)
+- [Contributing](CONTRIBUTING.md)
 
 ## Development verification
 
