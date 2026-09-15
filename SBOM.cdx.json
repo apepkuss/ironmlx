@@ -2,7 +2,7 @@
   "$schema": "https://cyclonedx.org/schema/bom-1.6.schema.json",
   "bomFormat": "CycloneDX",
   "specVersion": "1.6",
-  "serialNumber": "urn:uuid:02c73e15-d2b5-5808-b1c4-a20fe7f4cdc8",
+  "serialNumber": "urn:uuid:b5fb5d5f-0200-536b-9399-59b4aaf9ef78",
   "version": 1,
   "metadata": {
     "component": {
@@ -5668,10 +5668,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "cargo:rustls-webpki@0.103.13",
+      "bom-ref": "cargo:rustls-webpki@0.103.15",
       "group": "crates.io",
       "name": "rustls-webpki",
-      "version": "0.103.13",
+      "version": "0.103.15",
       "licenses": [
         {
           "expression": "ISC"
@@ -5687,7 +5687,7 @@
           "value": "rust-license-5b698ca13897be3a.txt"
         }
       ],
-      "purl": "pkg:cargo/rustls-webpki@0.103.13",
+      "purl": "pkg:cargo/rustls-webpki@0.103.15",
       "externalReferences": [
         {
           "type": "vcs",
@@ -5697,10 +5697,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "cargo:rustls@0.23.43",
+      "bom-ref": "cargo:rustls@0.23.45",
       "group": "crates.io",
       "name": "rustls",
-      "version": "0.23.43",
+      "version": "0.23.45",
       "licenses": [
         {
           "expression": "Apache-2.0 OR ISC OR MIT"
@@ -5716,7 +5716,7 @@
           "value": "rust-license-709e3175b4212f7b.txt"
         }
       ],
-      "purl": "pkg:cargo/rustls@0.23.43",
+      "purl": "pkg:cargo/rustls@0.23.45",
       "externalReferences": [
         {
           "type": "vcs",

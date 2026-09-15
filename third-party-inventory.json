@@ -2052,7 +2052,7 @@
         "name": "rustls",
         "repository": "https://github.com/rustls/rustls",
         "source": "registry+https://github.com/rust-lang/crates.io-index",
-        "version": "0.23.43"
+        "version": "0.23.45"
       },
       {
         "license_expression": "Apache-2.0 OR ISC OR MIT",
@@ -2082,7 +2082,7 @@
         "name": "rustls-webpki",
         "repository": "https://github.com/rustls/webpki",
         "source": "registry+https://github.com/rust-lang/crates.io-index",
-        "version": "0.103.13"
+        "version": "0.103.15"
       },
       {
         "license_expression": "MIT OR Apache-2.0",
