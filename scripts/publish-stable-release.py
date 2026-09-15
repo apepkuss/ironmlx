@@ -61,11 +61,15 @@ def publish(repo, tag, commit, assets, candidate=False):
 
     release_id = find_release()
     if release_id is None:
-        run('gh', 'release', 'create', tag, '--repo', repo, '--verify-tag', '--draft',
-            '--title', f'IronMLX {tag}', '--generate-notes',
-            *(['--prerelease', '--latest=false'] if candidate else []))
-        release_id = find_release()
-        require(release_id is not None, 'created draft not found')
+        created = json.loads(run('gh', 'api', f'{route}/releases', '--method', 'POST',
+                                 '-f', f'tag_name={tag}', '-f', f'target_commitish={commit}',
+                                 '-f', f'name=IronMLX {tag}', '-F', 'draft=true',
+                                 '-F', f'prerelease={str(candidate).lower()}',
+                                 '-F', 'generate_release_notes=true', '-f', 'make_latest=false'))
+        release_id = created.get('id')
+        require(type(release_id) is int and release_id > 0, 'invalid created release ID')
+        require(created.get('tag_name') == tag and created.get('draft') is True
+                and created.get('prerelease') == candidate, 'unexpected created release state')
         run('gh', 'release', 'upload', tag, '--repo', repo, *assets)
     else:
         existing = json.loads(run('gh', 'api', f'{route}/releases/{release_id}'))

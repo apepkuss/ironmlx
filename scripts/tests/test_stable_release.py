@@ -21,15 +21,17 @@ class PublicationTests(unittest.TestCase):
             asset.write_bytes(b'verified artifact')
             calls = []
             public = False
-            created = existing
 
             def run(*args):
-                nonlocal public, created
+                nonlocal public
                 calls.append(args)
-                if args[1:3] == ('release', 'create'):
-                    created = True
                 if args[1:3] == ('api', 'repos/owner/repo/releases'):
-                    return '10' if created else ''
+                    if 'POST' in args:
+                        return json.dumps(dict(id=None if failure == 'create-id' else 10,
+                                               tag_name='v1.0.0-rc.1' if candidate else 'v1.0.0',
+                                               draft=failure != 'create-state', prerelease=candidate))
+                    # Deliberately never expose newly created drafts in list responses.
+                    return '10' if existing else ''
                 if '/releases/tags/' in str(args):
                     raise AssertionError('by-tag endpoint cannot resolve drafts')
                 if 'commits/v1.0.0' in str(args):
@@ -53,14 +55,17 @@ class PublicationTests(unittest.TestCase):
                     with self.assertRaises((ValueError, RuntimeError)):
                         stable.publish('owner/repo', 'v1.0.0-rc.1' if candidate else 'v1.0.0', 'commit', [asset], candidate=candidate)
                     self.assertFalse(public)
+                    if failure in ('create-id', 'create-state'):
+                        self.assertFalse(any(c[1:3] == ('release', 'upload') for c in calls))
                 else:
                     stable.publish('owner/repo', 'v1.0.0-rc.1' if candidate else 'v1.0.0', 'commit', [asset], candidate=candidate)
                     self.assertTrue(public)
-                    creates = [c for c in calls if c[1:3] == ('release', 'create')]
+                    creates = [c for c in calls if 'POST' in c]
                     self.assertEqual(len(creates), 0 if existing else 1)
                     if creates:
-                        self.assertEqual('--prerelease' in creates[0], candidate)
-                    promotion = next(c for c in calls if '--method' in c)
+                        self.assertIn(f'prerelease={str(candidate).lower()}', creates[0])
+                        self.assertEqual(sum('--paginate' in c for c in calls), 1)
+                    promotion = next(c for c in calls if 'PATCH' in c)
                     self.assertIn('make_latest=false' if candidate else 'make_latest=true', promotion)
                     self.assertEqual(sum(c[1:3] == ('release', 'download') for c in calls), 2)
 
@@ -78,11 +83,11 @@ class PublicationTests(unittest.TestCase):
 
     def test_candidate_draft_and_failure_boundaries(self):
         self.scenario(candidate=True)
-        for failure in ('upload', 'corrupt', 'asset-set', 'tag-moved'):
+        for failure in ('upload', 'corrupt', 'asset-set', 'tag-moved', 'create-id', 'create-state'):
             self.scenario(failure, candidate=True)
 
     def test_failure_never_promotes_draft(self):
-        for failure in ('upload', 'corrupt', 'asset-set', 'tag-moved'):
+        for failure in ('upload', 'corrupt', 'asset-set', 'tag-moved', 'create-id', 'create-state'):
             with self.subTest(failure=failure):
                 self.scenario(failure)
 
