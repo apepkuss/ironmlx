@@ -71,7 +71,7 @@ def check_materials(repo, root):
 
 
 def asset_names(repo, package):
-    return sorted([f"{package}.zip", f"{package}.dmg", *MATERIALS] + [
+    return sorted([f"{package}.zip", "IronMLX.dmg", *MATERIALS] + [
         f"THIRD_PARTY_LICENSES/{path.relative_to(repo / 'THIRD_PARTY_LICENSES').as_posix()}"
         for path in (repo / "THIRD_PARTY_LICENSES").rglob("*") if path.is_file()])
 
@@ -86,7 +86,7 @@ def verify(repo, app, output, package):
             "SHA256SUMS mismatch or incomplete coverage")
     check_materials(repo, output)
     require({p.name for p in output.iterdir()} == {
-        f"{package}.zip", f"{package}.dmg", "SHA256SUMS", *MATERIALS, "THIRD_PARTY_LICENSES"},
+        f"{package}.zip", "IronMLX.dmg", "SHA256SUMS", *MATERIALS, "THIRD_PARTY_LICENSES"},
         "unexpected standalone assets")
     expected = inventory(app)
 
@@ -117,7 +117,7 @@ def verify(repo, app, output, package):
         check_root(unpack / package)
         mount = temp / "dmg"
         mount.mkdir()
-        run("hdiutil", "attach", output / f"{package}.dmg", "-readonly", "-nobrowse",
+        run("hdiutil", "attach", output / "IronMLX.dmg", "-readonly", "-nobrowse",
             "-mountpoint", mount, "-quiet")
         try:
             check_root(mount)
@@ -139,7 +139,7 @@ def assemble(repo, app, output, package):
             run("ditto", output / name, root / name)
         run("ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", root, output / f"{package}.zip")
         run("hdiutil", "create", "-volname", package, "-srcfolder", root,
-            "-format", "UDZO", output / f"{package}.dmg")
+            "-format", "UDZO", output / "IronMLX.dmg")
     (output / "SHA256SUMS").write_text(checksums(repo, output, package))
     verify(repo, app, output, package)
 
@@ -161,7 +161,7 @@ def main():
     run(repo / "scripts/verify-distribution-materials.sh")
     if args.action == "finalize-dmg":
         # Signing/stapling changes the container bytes, never the mounted App.
-        dmg = output / f"IronMLX-{version}.dmg"
+        dmg = output / "IronMLX.dmg"
         run("codesign", "--verify", "--strict", dmg)
         run("xcrun", "stapler", "validate", dmg)
         run("spctl", "--assess", "--type", "open", "--context", "context:primary-signature", dmg)

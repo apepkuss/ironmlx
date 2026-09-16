@@ -104,7 +104,7 @@ def main():
         run('spctl', '--assess', '--type', 'open', '--context', 'context:primary-signature', dmg)
     # Detailed materials remain inside the installation packages.
     version = (root / 'VERSION').read_text().strip()
-    assets = [root / '.build/stable-release' / f'IronMLX-{version}.{kind}'
+    assets = [root / '.build/stable-release' / ('IronMLX.dmg' if kind == 'dmg' else f'IronMLX-{version}.zip')
               for kind in ('dmg', 'zip')]
     update = root / '.build/app-update'
     data = json.loads((update / 'update.json').read_text())
