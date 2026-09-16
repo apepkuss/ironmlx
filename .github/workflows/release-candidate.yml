@@ -77,12 +77,17 @@ jobs:
 
       - name: Build self-contained RC candidate
         env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
           MLX_SRC: ${{ runner.temp }}/ironmlx-mlx-source
           IRONMLX_DISTRIBUTION_CHANNEL: release-candidate
           IRONMLX_UPDATE_CHANNEL: release-candidate
           IRONMLX_UPDATE_FEED_URL: https://raw.githubusercontent.com/${{ github.repository }}/updates/release-candidate.xml
           IRONMLX_UPDATE_PUBLIC_ED_KEY: ${{ vars.IRONMLX_UPDATE_PUBLIC_ED_KEY }}
-        run: env -u GITHUB_REF_TYPE -u GITHUB_REF_NAME scripts/build-app-bundle.sh
+        run: |
+          set -euo pipefail
+          rc_number="${RELEASE_TAG##*-rc.}"
+          export IRONMLX_APP_BUILD_NUMBER="$rc_number"
+          env -u GITHUB_REF_TYPE -u GITHUB_REF_NAME scripts/build-app-bundle.sh
 
       - name: Validate identity and archive contents without Apple credentials
         env:
