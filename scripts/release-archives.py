@@ -90,10 +90,21 @@ def verify(repo, app, output, package):
         "unexpected standalone assets")
     expected = inventory(app)
 
-    def check_root(root):
+    def check_zip_root(root):
         check_materials(repo, root)
         require({p.name for p in root.iterdir()} == {*MATERIALS, "THIRD_PARTY_LICENSES", "IronMLX.app"},
                 "unexpected or missing archive root entries")
+        require(inventory(root / "IronMLX.app") == expected, "archived App differs from reference App")
+        run(repo / "scripts/verify-model-distribution-boundary.sh", root)
+
+    def check_dmg_root(root):
+        require({p.name for p in root.iterdir()} == {"IronMLX.app", "Applications", "Documentation"},
+                "unexpected or missing DMG root entries")
+        applications = root / "Applications"
+        require(applications.is_symlink() and os.readlink(applications) == "/Applications",
+                "DMG Applications entry must link to /Applications")
+        documentation = root / "Documentation"
+        check_materials(repo, documentation)
         require(inventory(root / "IronMLX.app") == expected, "archived App differs from reference App")
         run(repo / "scripts/verify-model-distribution-boundary.sh", root)
 
@@ -114,13 +125,13 @@ def verify(repo, app, output, package):
         unpack = temp / "zip"
         unpack.mkdir()
         run("ditto", "-x", "-k", zip_path, unpack)
-        check_root(unpack / package)
+        check_zip_root(unpack / package)
         mount = temp / "dmg"
         mount.mkdir()
         run("hdiutil", "attach", output / "IronMLX.dmg", "-readonly", "-nobrowse",
             "-mountpoint", mount, "-quiet")
         try:
-            check_root(mount)
+            check_dmg_root(mount)
         finally:
             run("hdiutil", "detach", mount, "-quiet")
 
@@ -138,7 +149,15 @@ def assemble(repo, app, output, package):
         for name in (*MATERIALS, "THIRD_PARTY_LICENSES"):
             run("ditto", output / name, root / name)
         run("ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", root, output / f"{package}.zip")
-        run("hdiutil", "create", "-volname", package, "-srcfolder", root,
+        dmg_root = Path(temporary) / "dmg"
+        dmg_root.mkdir()
+        run("ditto", app, dmg_root / "IronMLX.app")
+        os.symlink("/Applications", dmg_root / "Applications")
+        documentation = dmg_root / "Documentation"
+        documentation.mkdir()
+        for name in (*MATERIALS, "THIRD_PARTY_LICENSES"):
+            run("ditto", output / name, documentation / name)
+        run("hdiutil", "create", "-volname", package, "-srcfolder", dmg_root,
             "-format", "UDZO", output / "IronMLX.dmg")
     (output / "SHA256SUMS").write_text(checksums(repo, output, package))
     verify(repo, app, output, package)

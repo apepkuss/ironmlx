@@ -82,9 +82,10 @@ Tag push 和手动 `publish=false` 只构建和验证；显式 `publish=true` �
 ## 归档内容检查
 
 正式输出目录统一包含 `IronMLX-X.Y.Z.dmg`、`IronMLX-X.Y.Z.zip`、`SHA256SUMS`、
-独立法律材料和 `THIRD_PARTY_LICENSES/`。ZIP 内以 `IronMLX-X.Y.Z/` 为根目录，
-DMG 卷根目录放置相同内容：`IronMLX.app` 和所有法律材料。输出目录必须不存在或
-为空；脚本不自动删除旧产物。
+独立法律材料和 `THIRD_PARTY_LICENSES/`。ZIP 内以 `IronMLX-X.Y.Z/` 为根目录；
+DMG 卷根目录仅包含 `IronMLX.app`、`Applications` 快捷方式和 `Documentation/`，
+其中放置法律材料及 `THIRD_PARTY_LICENSES/`。输出目录必须不存在或为空；脚本不自动
+删除旧产物。
 
 无需 release tag 或 Developer ID 即可验证归档机制：
 

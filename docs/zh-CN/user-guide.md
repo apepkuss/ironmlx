@@ -14,9 +14,13 @@
 1. 从 [IronMLX v0.1.0-rc.1 GitHub Release](https://github.com/apepkuss/ironmlx/releases/tag/v0.1.0-rc.1)
    下载 Apple Silicon 版 DMG 或 ZIP；
 2. 可选：使用同一 Release 页面提供的 `RELEASE-SHA256SUMS` 校验下载的归档文件；
-3. 打开 `IronMLX.app`；
-4. 使用 Dashboard 从 Hugging Face 或 ModelScope 搜索、下载或加载兼容模型；
-5. 访问 `http://127.0.0.1:9068/healthz` 检查服务状态。
+3. 如果下载的是 DMG：打开 DMG，将 `IronMLX.app` 拖到 `Applications` 文件夹图标，
+   等待复制完成；关闭 DMG 窗口并推出磁盘映像；
+4. 如果下载的是 ZIP：将其解压到本地文件夹；
+5. 使用 DMG 时，在 Finder 的“应用程序”中找到并双击 IronMLX；使用 ZIP 时，打开
+   解压出的 App；
+6. 使用 Dashboard 从 Hugging Face 或 ModelScope 搜索、下载或加载兼容模型；
+7. 访问 `http://127.0.0.1:9068/healthz` 检查服务状态。
 
 下载模型前请先阅读[支持模型矩阵](supported-models.md)。架构受支持不代表某个具体快照一定
 适合当前设备内存，也不代表其上游许可证条款允许你的使用方式。安装包不包含模型权重，模型仍受

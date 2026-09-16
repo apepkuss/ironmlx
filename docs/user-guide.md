@@ -17,10 +17,15 @@ The status page shows a running local endpoint, the loaded
    [IronMLX v0.1.0-rc.1 GitHub Release](https://github.com/apepkuss/ironmlx/releases/tag/v0.1.0-rc.1).
 2. Optionally verify the downloaded archive with the `RELEASE-SHA256SUMS`
    file published on the same Release page.
-3. Open `IronMLX.app`.
-4. Use the Dashboard to search Hugging Face or ModelScope, download, or load a
+3. If you downloaded the DMG, open it, drag `IronMLX.app` onto the
+   `Applications` folder shortcut, and wait for the copy to finish. Close the
+   DMG window and eject the disk image.
+4. If you downloaded the ZIP, extract it to a local folder.
+5. In Finder's Applications folder, find and double-click IronMLX (or open the
+   extracted App when using the ZIP).
+6. Use the Dashboard to search Hugging Face or ModelScope, download, or load a
    compatible model.
-5. Check the service at `http://127.0.0.1:9068/healthz`.
+7. Check the service at `http://127.0.0.1:9068/healthz`.
 
 See [supported models](supported-models.md) before downloading a model. Model
 architecture support does not guarantee that a particular revision fits your

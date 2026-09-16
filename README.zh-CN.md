@@ -34,8 +34,10 @@ Rust 推理引擎、MLX/Metal 运行时、模型管理 Dashboard，以及 OpenAI
 ## 安装与首次运行
 
 从 [GitHub Release](https://github.com/apepkuss/ironmlx/releases/tag/v0.1.0-rc.1)
-下载当前 Apple Silicon 候选版，打开 DMG 或 ZIP 并启动 `IronMLX.app`，然后在
-Dashboard 中选择并加载兼容的模型。
+下载当前 Apple Silicon 候选版。使用 DMG 时，打开 DMG，将 `IronMLX.app` 拖到
+`Applications` 文件夹图标，推出磁盘映像，再从 Finder 的“应用程序”中启动
+IronMLX；使用 ZIP 时，先解压，再打开解压出的 App。然后在 Dashboard 中选择并加载
+兼容的模型。
 
 App 默认监听 `http://127.0.0.1:9068`。如需发送第一条 API 请求，请参阅
 [HTTP API 快速开始](docs/zh-CN/api.md)。

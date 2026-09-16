@@ -137,7 +137,9 @@ Release 构建将项目 `LICENSE`、`NOTICE`、`SBOM.cdx.json` 以及第三方�
 IronMLX.app/Contents/Resources/Legal/
 ```
 
-App 菜单的 `Third-Party Notices…` 可以读取并显示 bundled notices。RC 和 stable 打包时，DMG 与 ZIP 根目录也会包含相同材料；`scripts/release-archives.py` 会解包
+App 菜单的 `Third-Party Notices…` 可以读取并显示 bundled notices。RC 和 stable 打包时，
+ZIP 根目录保留归档材料，DMG 根目录仅包含 `IronMLX.app`、`Applications` 快捷方式和
+`Documentation/`；法律材料放在 `Documentation/` 中。`scripts/release-archives.py` 会解包
 ZIP、挂载 DMG，并核对归档中的材料与源码目录一致。
 
 ### 模型权重排除检查

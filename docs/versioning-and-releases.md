@@ -87,10 +87,11 @@ Both require the repository update public key. Credentials, ordering, channels a
 
 Stable assets use one output directory containing `IronMLX-X.Y.Z.dmg`,
 `IronMLX-X.Y.Z.zip`, `SHA256SUMS`, the individual legal materials and
-`THIRD_PARTY_LICENSES/`. The ZIP has an `IronMLX-X.Y.Z/` root; the mounted DMG
-has the same contents at its volume root. Both contain `IronMLX.app` and all
-legal materials. The output directory must be absent or empty; existing
-artifacts are never automatically deleted.
+`THIRD_PARTY_LICENSES/`. The ZIP has an `IronMLX-X.Y.Z/` root. The mounted DMG
+contains only `IronMLX.app`, an `Applications` shortcut, and `Documentation/`,
+which contains the legal materials and `THIRD_PARTY_LICENSES/`. The output
+directory must be absent or empty; existing artifacts are never automatically
+deleted.
 
 Archive mechanics can be validated without a release tag or Developer ID:
 

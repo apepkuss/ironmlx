@@ -38,8 +38,10 @@ This is a release candidate, not a stable release. The product version base is
 
 Download the current Apple Silicon release candidate from the
 [GitHub Release](https://github.com/apepkuss/ironmlx/releases/tag/v0.1.0-rc.1),
-open the DMG or ZIP, and launch `IronMLX.app`. Then use the Dashboard to select
-and load a compatible model.
+open the DMG, drag `IronMLX.app` onto the `Applications` folder shortcut, eject
+the disk image, and launch IronMLX from Finder's Applications folder. If you
+use the ZIP, extract it first and open the extracted App. Then use the
+Dashboard to select and load a compatible model.
 
 For API clients, the App listens on `http://127.0.0.1:9068` by default. See the
 [HTTP API quick start](docs/api.md) for a first request.

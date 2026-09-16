@@ -129,6 +129,9 @@ jobs:
           abort "missing links:\n#{missing.join("\n")}" unless missing.empty?
           puts "Markdown links and image paths passed"
 
+      - name: Verify English and Simplified Chinese documentation structure
+        run: python3 scripts/verify-documentation-parity.py
+
   release-quality:
     name: Rust, Swift, MLX, and App Bundle
     needs: changes

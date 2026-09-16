@@ -140,8 +140,10 @@ IronMLX.app/Contents/Resources/Legal/
 The App menu exposes **Third-Party Notices…**. Release Bundles include the
 project `LICENSE`, `NOTICE`, `SBOM.cdx.json`, and the third-party materials in
 `Contents/Resources/Legal/`. RC and stable archives also include these
-materials at the DMG/ZIP root. `scripts/release-archives.py` extracts the ZIP,
-mounts the DMG, and verifies the archived materials against the source tree.
+materials in the ZIP root and in `Documentation/` inside the DMG. The DMG root
+also contains the `Applications` shortcut. `scripts/release-archives.py`
+extracts the ZIP, mounts the DMG, and verifies the archived materials against
+the source tree.
 
 ### Model-weight exclusion checks
 
