@@ -339,4 +339,4 @@ license and usage terms.
 The generated materials preserve source license texts and detect dependency
 drift. Final license interpretation, attribution review, model-license policy,
 CycloneDX SBOM approval, and authorization for public distribution remain
-P0-8B release gates.
+release legal and distribution gates.

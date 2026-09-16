@@ -1,4 +1,4 @@
-# P3b1 MRoPE fixtures
+# MRoPE fixtures
 
 Reference data for Qwen3.5 MRoPE numerical-correctness tests.
 

@@ -1,9 +1,9 @@
-//! P5d T4 supplementary observation: dump first-step logits from
+//! Supplementary logits observation: dump first-step logits from
 //! Qwen35MoeModel for 5 prompts as numpy .npy files. These are
 //! recorded outputs of ironmlx itself; comparison with external
 //! reference implementations (mlx-vlm) at logit precision is
 //! observational triangulation, not an alignment gate.
-//! Output: reports/p5d-argmax/ironmlx_logits_p<N>.npy (N=0..4)
+//! Output: reports/logits-argmax/ironmlx_logits_p<N>.npy (N=0..4)
 //!
 //! Run with:
 //!   IRONMLX_MOE_MODEL_DIR=<snap> MLX_DIR=$HOME/.local/mlx \
@@ -71,21 +71,21 @@ fn write_npy_f32(path: &str, data: &[f32]) -> std::io::Result<()> {
 
 #[test]
 #[ignore]
-fn p5d_dump_first_token_logits_for_5_prompts() {
+fn dump_first_token_logits_for_5_prompts() {
     let dir = locate_snapshot();
-    eprintln!("[T4-ironmlx] loading model from {dir}");
+    eprintln!("ironmlx: loading model from {dir}");
     let loader = Loader::open(std::path::Path::new(&dir)).expect("Loader::open");
     let tokenizer = Tokenizer::from_loader(&loader).expect("Tokenizer::from_loader");
     let model = Qwen35MoeModel::from_loader(&loader).expect("Qwen35MoeModel::from_loader");
     eprintln!(
-        "[T4-ironmlx] model loaded: {} layers",
+        "ironmlx: model loaded: {} layers",
         model.config().num_hidden_layers
     );
 
-    std::fs::create_dir_all("reports/p5d-argmax").expect("mkdir reports/p5d-argmax");
+    std::fs::create_dir_all("reports/logits-argmax").expect("mkdir reports/logits-argmax");
 
     for (idx, &prompt) in PROMPTS.iter().enumerate() {
-        eprintln!("[T4-ironmlx] prompt {idx}: {prompt:.60}");
+        eprintln!("ironmlx: prompt {idx}: {prompt:.60}");
         let prompt_ids = tokenizer
             .encode(prompt, /* add_special_tokens */ false)
             .expect("encode");
@@ -113,7 +113,7 @@ fn p5d_dump_first_token_logits_for_5_prompts() {
             .to_vec()
             .unwrap();
 
-        let path = format!("reports/p5d-argmax/ironmlx_logits_p{idx}.npy");
+        let path = format!("reports/logits-argmax/ironmlx_logits_p{idx}.npy");
         write_npy_f32(&path, &v).expect("write_npy");
 
         let argmax = v
@@ -123,10 +123,10 @@ fn p5d_dump_first_token_logits_for_5_prompts() {
             .map(|(i, _)| i)
             .unwrap();
         eprintln!(
-            "[T4-ironmlx] saved p{idx} ({} fp32 elements), argmax={argmax}",
+            "ironmlx: saved p{idx} ({} fp32 elements), argmax={argmax}",
             v.len()
         );
     }
 
-    eprintln!("[T4-ironmlx] done — 5 .npy files in reports/p5d-argmax/");
+    eprintln!("done — 5 .npy files in reports/logits-argmax/");
 }

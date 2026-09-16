@@ -1,4 +1,4 @@
-# P4 Qwen3.5 logits-alignment fixture
+# Qwen3.5 logits-alignment fixture
 
 Verifies `Qwen35Model::forward_on` matches mlx-lm's `model(input_ids)` last-position
 logits on a real 4-bit checkpoint with two correctness gates:

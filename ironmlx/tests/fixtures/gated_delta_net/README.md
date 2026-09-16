@@ -1,4 +1,4 @@
-# P3b3 GatedDeltaNet fixtures
+# GatedDeltaNet fixtures
 
 Reference data for `nn::GatedDeltaNet` numerical-correctness tests.
 

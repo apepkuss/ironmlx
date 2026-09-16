@@ -1,4 +1,4 @@
-# P3b4 MTP fixture
+# MTP fixture
 
 Tiny synthetic fixture for verifying numerical correctness of `nn::Mtp::forward`
 against an independent Python reference built only from `mlx.core` primitives

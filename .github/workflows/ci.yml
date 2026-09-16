@@ -19,6 +19,7 @@ on:
       - "style/**"
       - "chore/**"
       - "revert/**"
+      - "docs/**"
 
 permissions:
   contents: read
@@ -31,8 +32,107 @@ env:
   RUST_NIGHTLY_TOOLCHAIN: nightly-2026-05-18
 
 jobs:
+  changes:
+    name: Classify changes
+    runs-on: macos-26
+    outputs:
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+      code_changed: ${{ steps.classify.outputs.code_changed }}
+      base_sha: ${{ steps.range.outputs.base_sha }}
+      head_sha: ${{ steps.range.outputs.head_sha }}
+    steps:
+      - name: Checkout change range
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve change range
+        id: range
+        shell: bash
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            base_sha="$PR_BASE_SHA"
+            head_sha="$PR_HEAD_SHA"
+          else
+            base_sha="$PUSH_BEFORE_SHA"
+            head_sha="$GITHUB_SHA"
+          fi
+          printf 'base_sha=%s\n' "$base_sha" >> "$GITHUB_OUTPUT"
+          printf 'head_sha=%s\n' "$head_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Classify changed files
+        id: classify
+        shell: bash
+        env:
+          BASE_SHA: ${{ steps.range.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.range.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          docs_only=true
+          code_changed=false
+          while IFS= read -r path; do
+            [[ -n "$path" ]] || continue
+            if [[ "$path" == README.md || "$path" == README.zh-CN.md || "$path" == docs/* || "$path" == *.md ]]; then
+              continue
+            fi
+            docs_only=false
+            code_changed=true
+          done < <(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+          if [[ "$docs_only" != true ]]; then
+            docs_only=false
+          fi
+          printf 'docs_only=%s\n' "$docs_only" >> "$GITHUB_OUTPUT"
+          printf 'code_changed=%s\n' "$code_changed" >> "$GITHUB_OUTPUT"
+
+  docs-quality:
+    name: Documentation quality
+    needs: changes
+    if: needs.changes.outputs.docs_only == 'true'
+    runs-on: macos-26
+    steps:
+      - name: Checkout immutable IronMLX commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify checkout identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=normal)"
+
+      - name: Verify Conventional Commits
+        shell: bash
+        run: scripts/verify-conventional-commits.sh "${{ needs.changes.outputs.base_sha }}" "${{ needs.changes.outputs.head_sha }}"
+
+      - name: Verify Markdown links and image paths
+        shell: ruby {0}
+        run: |
+          require "pathname"
+          missing = []
+          Dir.glob("**/*.md", File::FNM_DOTMATCH).reject { |f| f.start_with?(".git/") }.each do |file|
+            File.read(file).scan(/!?(?:\[[^\]]*\])\(([^)]+)\)/).flatten.each do |raw|
+              target = raw.split(/[?#]/, 2).first
+              next if target.empty? || target =~ %r{\A(?:https?:|mailto:|#)}
+              path = Pathname.new(file).dirname.join(target).cleanpath
+              missing << "#{file} -> #{target}" unless File.exist?(path.to_s)
+            end
+          end
+          abort "missing links:\n#{missing.join("\n")}" unless missing.empty?
+          puts "Markdown links and image paths passed"
+
   release-quality:
     name: Rust, Swift, MLX, and App Bundle
+    needs: changes
+    if: needs.changes.outputs.code_changed == 'true'
     runs-on: macos-26
     timeout-minutes: 120
 

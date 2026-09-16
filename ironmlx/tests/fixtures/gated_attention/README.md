@@ -1,4 +1,4 @@
-# P3b2 Gated Full Attention fixtures
+# Gated Full Attention fixtures
 
 Reference data for `nn::GatedAttention` numerical-correctness tests.
 

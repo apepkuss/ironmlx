@@ -7,87 +7,54 @@ Apple Silicon. It packages a Rust inference engine, MLX/Metal runtime, model
 management Dashboard, and OpenAI/Anthropic-compatible HTTP APIs into a
 self-contained macOS App.
 
-Current product version: **0.1.0**
+![IronMLX Dashboard overview](docs/images/dashboard-overview.png)
+
+The screenshot shows the local Dashboard with a running server, a loaded model,
+and the DFlash2 runtime status. Runtime metrics vary by model and hardware.
+
+Latest public release: **0.1.0-rc.1**
+
+This is a release candidate, not a stable release. The product version base is
+**0.1.0**.
 
 ## Requirements
 
 - Apple Silicon (`arm64`); Intel Macs are not supported;
 - macOS 26.4 or later;
-- Source builds require full Xcode, Rust 1.94, and the pinned MLX source.
 
 ## Capabilities
 
 - Local model search, immutable-snapshot downloads, resume, and integrity checks;
 - Multi-model loading, unloading, pinning, TTL, and memory protection;
-- OpenAI Chat Completions/Responses and Anthropic Messages APIs with client-side
-  function-call protocols;
+- OpenAI `/v1/chat/completions` and `/v1/responses`, plus Anthropic
+  `/v1/messages`, with client-side function-call protocols;
 - Streaming, continuous batching, paged KV/prefix cache, MTP, and Prompt Lookup;
 - Qwen3.8 reasoning/tools, matching MTP, and isolated DFlash2 text execution;
 - Text and controlled base64 image input;
 - Local redacted diagnostic export with no prompt, credential, or network upload;
 - Loopback by default, with optional LAN mode using HTTPS and API keys.
 
-## Quick start
+## Install and run
 
-Third-party inventories, notices, license texts, and the deterministic CycloneDX
-SBOM are generated for engineering review, but public binary distribution remains
-blocked until P0-8B legal review and explicit authorization are complete. Build
-from a trusted checkout:
+Download the current Apple Silicon release candidate from the
+[GitHub Release](https://github.com/apepkuss/ironmlx/releases/tag/v0.1.0-rc.1),
+open the DMG or ZIP, and launch `IronMLX.app`. Then use the Dashboard to select
+and load a compatible model.
 
-```bash
-cargo install --locked --features cli --version 0.9.1 cargo-about
-scripts/checkout-release-mlx.sh /tmp/ironmlx-mlx-source
-MLX_SRC=/tmp/ironmlx-mlx-source scripts/build-app-bundle.sh
-open dist/IronMLX.app
-```
+For API clients, the App listens on `http://127.0.0.1:9068` by default. See the
+[HTTP API quick start](docs/api.md) for a first request.
 
-See [Building from source](docs/building-from-source.md) for details.
+Developers who need to build and run IronMLX from source should follow the
+[Developer Guide](docs/developer-guide.md).
 
 ## Documentation
 
-- [Supported model matrix](docs/supported-models.md)
-- [Model rights boundary](docs/model-license-boundary.md)
-- [HTTP API](docs/api.md)
-- [API compatibility matrix](docs/api-compatibility-matrix.md)
-- [DFlash2 server and CLI](docs/dflash2-server-api.md)
-- [Hermes Agent integration](docs/hermes-agent.md)
-- [oh-my-pi integration](docs/oh-my-pi.md)
-- [Privacy and network boundary](docs/privacy.md)
-- [Data locations and uninstall](docs/storage-and-uninstall.md)
-- [Troubleshooting](docs/troubleshooting.md)
-- [Known issues](docs/known-issues.md)
-- [0.1.0 release notes](docs/release-notes/0.1.0.md)
-- [Versioning and releases](docs/versioning-and-releases.md)
-- [Third-party materials](docs/stable-release-pipeline.md)
-- [Security boundary](docs/security-boundary.md)
-- [Diagnostic export](docs/diagnostic-bundle.md)
-- [Security reporting](SECURITY.md)
-- [Support](SUPPORT.md)
-- [Contributing](CONTRIBUTING.md)
-
-## Development verification
-
-```bash
-scripts/verify-version-consistency.sh
-scripts/verify-sbom.sh
-scripts/verify-third-party-materials.sh
-python3 scripts/verify-license-policy.py
-cargo audit
-GITLEAKS_BIN=/path/to/gitleaks-8.30.1 scripts/verify-secrets.sh
-cargo fmt --all -- --check
-cargo +nightly fmt --all -- --check
-cargo +nightly clippy --locked --all-features --workspace -- -D warnings
-cargo build --locked --release
-cargo test --locked --all-features --workspace -- --test-threads=1
-swift test --package-path ironmlx-app --configuration release --no-parallel
-```
-
-For a built App Bundle:
-
-```bash
-scripts/verify-app-bundle.sh dist/IronMLX.app
-scripts/verify-model-distribution-boundary.sh dist/IronMLX.app
-```
+- [User Guide](docs/user-guide.md) — installation, model use, API clients,
+  agent integrations, privacy, and troubleshooting.
+- [Developer Guide](docs/developer-guide.md) — source builds, tests,
+  contributions, architecture, and release validation.
+- [Supported model matrix](docs/supported-models.md) — architectures and
+  concrete versions recorded for this release candidate.
 
 ## License
 

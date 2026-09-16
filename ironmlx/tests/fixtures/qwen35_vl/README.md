@@ -1,16 +1,16 @@
-# P6 Qwen3.5-VL Fixtures
+# Qwen3.5-VL Fixtures
 
-This directory contains reference fixtures for the P6 VL integration test suite.
+This directory contains reference fixtures for the Qwen3.5-VL integration test suite.
 
 ## File Status
 
 | File | Committed | Description |
 |---|---|---|
 | `coco_sample.jpg` | YES | COCO val2017 sample image used as the multimodal input |
-| `coco_sample_normalized.bin` | YES | Raw normalized pixel tensor (Task 5 — smart-resize path) |
-| `smart_resize_golden.txt` | YES | Expected smart-resize output dimensions (Task 3) |
-| `p6_vit_attn_ref.safetensors` | YES | Vision-transformer attention reference tensors (Task 9) |
-| `p6_pos_ids_ref.safetensors` | YES | Position-IDs reference tensors (Task 14) |
+| `coco_sample_normalized.bin` | YES | Raw normalized pixel tensor for the smart-resize path |
+| `smart_resize_golden.txt` | YES | Expected smart-resize output dimensions |
+| `p6_vit_attn_ref.safetensors` | YES | Vision-transformer attention reference tensors |
+| `p6_pos_ids_ref.safetensors` | YES | Position-IDs reference tensors |
 | `gen_fixture.py` | YES | Script that generates the `expected_*` files below |
 | `expected_input_ids.npy` | **NO** | Tokenized prompt — shape (1, S) int32 |
 | `expected_pixel_values.npy` | **NO** | Preprocessed image patches — float32 |
@@ -20,7 +20,7 @@ This directory contains reference fixtures for the P6 VL integration test suite.
 
 The `expected_*` files are **not committed** (listed in `.gitignore`) because they are
 large binary artifacts that must be regenerated against the exact mlx-vlm 0.5.0 release
-being tested. They are consumed by the Task 21 logits-match e2e test.
+being tested. They are consumed by the logits-match end-to-end test.
 
 ## How to Regenerate
 

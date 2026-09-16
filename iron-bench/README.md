@@ -272,7 +272,7 @@ breakdown**. Good for **multi-request throughput** comparison.
 
 Server requirements for v2:
 
-- **ironmlx**: needs B1-p2.3c-3 (continuous batching, mid-batch admit). Set `b_max ≥ N`
+- **ironmlx**: needs continuous batching with mid-batch admission. Set `b_max ≥ N`
   to avoid scheduler-full errors during the cell.
 - **omlx**, **mlx-lm-server**: native multi-request support, no extra flags needed.
 - **vllm-mlx**, **llama.cpp**: configure server-side `--max-num-seqs ≥ N`.
@@ -293,7 +293,8 @@ Server requirements for v2:
 ## Measured numbers — Qwen3.5-4B-MLX-4bit, M-series Apple Silicon
 
 Single-request, greedy (`temperature=0`, `top_p=1`), `max_tokens=128`, `runs=3`, `warmup=1`,
-ironmlx as built from current `ironmlx` branch (P8a applied), omlx 0.3.8 from
+ironmlx as built from the current `ironmlx` branch with the async-eval pipeline and
+incremental detokenizer, omlx 0.3.8 from
 `/Volumes/Dev/omlx`.
 
 | Target  | Decode TG (tok/s) median | TTFT PP=128 (ms) | TTFT PP=2048 (ms) | Prefill PP=2048 (tok/s) |
@@ -301,7 +302,7 @@ ironmlx as built from current `ironmlx` branch (P8a applied), omlx 0.3.8 from
 | ironmlx | 28.9 – 32.0              | 697              | 8530              | 240                     |
 | omlx    | 53.2 – 54.9              | 604              | 7075              | 291                     |
 
-**Decode TG gap**: omlx is ~1.7-1.9× faster across all PP cells. P8a's async-eval pipeline + incremental detokenizer landed cleanly (P4 fixture PASS, byte-identical token sequence to mlx-lm reference) but only delivered ~5-9% TG improvement. The remaining gap is in the GPU forward pass itself (kernel-level), not orchestration; addressing it requires kernel profiling and is out of scope for this benchmark harness.
+**Decode TG gap**: omlx is ~1.7-1.9× faster across all PP cells. The async-eval pipeline + incremental detokenizer landed cleanly (logits fixture PASS, byte-identical token sequence to mlx-lm reference) but only delivered ~5-9% TG improvement. The remaining gap is in the GPU forward pass itself (kernel-level), not orchestration; addressing it requires kernel profiling and is out of scope for this benchmark harness.
 
 **TTFT / Prefill**: ironmlx is ~14-21% slower across PP — closer to parity than decode but
 still a kernel-level gap. Prefill scales sub-linearly on both engines (GPU saturation
@@ -309,9 +310,9 @@ helps), so the relative gap shrinks as PP grows.
 
 ### Post-stage2 numbers (kernel fuse: SwiGLU + GDN proj concat + conv1d silu)
 
-After P8a-stage2 (RmsNormGated SwiGLU compile-fuse + GatedDeltaNet 4→2 input
+After the second optimization stage (RmsNormGated SwiGLU compile-fuse + GatedDeltaNet 4→2 input
 projection concat + conv1d-output silu compile-fuse), the same protocol re-run
-yields essentially the same numbers as post-P8a:
+yields essentially the same numbers as the previous optimization stage:
 
 | Target  | Decode TG (tok/s) median | TTFT PP=128 (ms) | TTFT PP=2048 (ms) | Prefill PP=2048 (tok/s) |
 |---------|--------------------------|------------------|-------------------|-------------------------|
@@ -319,7 +320,7 @@ yields essentially the same numbers as post-P8a:
 | omlx    | 53.3 – 55.0              | 609              | 7046              | 292                     |
 
 **Stage2 acceptance MISSED**: target was decode TG ≥ 40 tok/s; achieved ~31 tok/s
-(≈+1% over P8a). The three structural fuses landed cleanly (P4 fixture passes
+(≈+1% over the previous optimization stage). The three structural fuses landed cleanly (logits fixture passes
 byte-identical + a new `p4_model_forward_from_blocking_thread` regression test
 confirms thread-correctness), but `mlx::compile` shapeless mode plus GDN
 projection concat did NOT deliver the predicted ~6-8ms/step savings.
@@ -330,14 +331,14 @@ compute time of the kernels themselves — i.e. the matmul / attention / SSM
 kernels execute meaningfully slower on ironmlx's call paths than on
 mlx-lm's, despite using the same MLX C++ primitives at the bottom layer.
 
-Possible remaining root causes worth investigating in P8a-stage3:
+Possible remaining root causes worth investigating in the next optimization stage:
 
 1. **Per-step shape forcing recompile** — if `mlx::compile`'s shapeless cache
    is keyed on dtype/shape and our decode passes vary per layer, we may be
    recompiling every step rather than re-running a cached graph.
 2. **Attention kernel selection** — `mlx::fast::scaled_dot_product_attention`
    may pick a different (slower) algorithm for ironmlx's tensor layout vs
-   mlx-lm's. P8a-stage1 ruled out the args, but the chosen kernel may differ.
+   mlx-lm's. The first optimization stage ruled out the args, but the chosen kernel may differ.
 3. **Per-head reshape overhead** — the GDN forward reshapes q/k/v to
    per-head layout each step. mlx-lm does this too but maybe the Rust
    bindings introduce a stride / contiguity hit.

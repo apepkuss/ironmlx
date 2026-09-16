@@ -6,13 +6,19 @@ IronMLX 是面向 Apple Silicon 的本地大语言模型推理 App 与服务运�
 Rust 推理引擎、MLX/Metal 运行时、模型管理 Dashboard，以及 OpenAI/Anthropic
 兼容 HTTP API 打包为一个自包含的 macOS App。
 
-当前产品版本：**0.1.0**
+![IronMLX Dashboard 总览](docs/images/dashboard-overview.png)
+
+截图展示了本地 Dashboard、运行中的服务、已加载模型以及 DFlash2 运行状态。
+运行时指标会因模型和硬件而变化。
+
+当前公开版本：**0.1.0-rc.1**
+
+这是候选发布版，不是稳定版；产品基础版本为 **0.1.0**。
 
 ## 系统要求
 
 - Apple Silicon（arm64）；不支持 Intel Mac；
 - macOS 26.4 或更高版本；
-- 本地构建需要完整 Xcode、Rust 1.94 和项目锁定的 MLX 源码版本。
 
 ## 核心能力
 
@@ -25,66 +31,22 @@ Rust 推理引擎、MLX/Metal 运行时、模型管理 Dashboard，以及 OpenAI
 - 本地脱敏诊断信息导出，不包含 prompt、凭据且不上传网络；
 - 默认仅监听 loopback；可选 LAN 模式使用 HTTPS 与 API Key。
 
-## 快速开始
+## 安装与首次运行
 
-当前仓库已生成与 macOS arm64 Release 产物对应的第三方依赖清单、Notices 和
-许可证文本和确定性 CycloneDX SBOM，但在完成 P0-8B 法律复核与明确授权前，公开
-二进制分发仍被发布门禁阻止。开发者可以从源码构建并在本机验证：
+从 [GitHub Release](https://github.com/apepkuss/ironmlx/releases/tag/v0.1.0-rc.1)
+下载当前 Apple Silicon 候选版，打开 DMG 或 ZIP 并启动 `IronMLX.app`，然后在
+Dashboard 中选择并加载兼容的模型。
 
-```bash
-cargo install --locked --features cli --version 0.9.1 cargo-about
-scripts/checkout-release-mlx.sh /tmp/ironmlx-mlx-source
-MLX_SRC=/tmp/ironmlx-mlx-source scripts/build-app-bundle.sh
-open dist/IronMLX.app
-```
+App 默认监听 `http://127.0.0.1:9068`。如需发送第一条 API 请求，请参阅
+[HTTP API 快速开始](docs/zh-CN/api.md)。
 
-构建产物位于 `dist/IronMLX.app`。详细步骤见
-[从源码构建](docs/zh-CN/building-from-source.md)。
+需要从源码构建和运行 IronMLX 的开发者，请参阅[开发者指南](docs/zh-CN/developer-guide.md)。
 
 ## 文档
 
-- [支持模型矩阵](docs/zh-CN/supported-models.md)
-- [模型权利边界](docs/zh-CN/model-license-boundary.md)
-- [API 示例](docs/zh-CN/api.md)
-- [API 兼容矩阵](docs/zh-CN/api-compatibility-matrix.md)
-- [DFlash2 服务端与 CLI](docs/zh-CN/dflash2-server-api.md)
-- [Hermes Agent 集成](docs/zh-CN/hermes-agent.md)
-- [oh-my-pi 集成](docs/zh-CN/oh-my-pi.md)
-- [隐私与网络边界](docs/zh-CN/privacy.md)
-- [数据位置与卸载](docs/zh-CN/storage-and-uninstall.md)
-- [故障排查](docs/zh-CN/troubleshooting.md)
-- [Known Issues](docs/zh-CN/known-issues.md)
-- [0.1.0 候选发布说明](docs/zh-CN/release-notes/0.1.0.md)
-- [版本与发布流程](docs/zh-CN/versioning-and-releases.md)
-- [第三方依赖与许可证材料](docs/zh-CN/stable-release-pipeline.md)
-- [安全边界](docs/zh-CN/security-boundary.md)
-- [诊断信息导出](docs/zh-CN/diagnostic-bundle.md)
-- [安全漏洞报告](docs/zh-CN/security.md)
-- [用户支持](docs/zh-CN/support.md)
-- [参与开发](docs/zh-CN/contributing.md)
-
-## 开发验证
-
-```bash
-scripts/verify-version-consistency.sh
-scripts/verify-sbom.sh
-scripts/verify-third-party-materials.sh
-python3 scripts/verify-license-policy.py
-cargo audit
-GITLEAKS_BIN=/path/to/gitleaks-8.30.1 scripts/verify-secrets.sh
-cargo fmt --all -- --check
-cargo +nightly fmt --all -- --check
-cargo +nightly clippy --locked --all-features --workspace -- -D warnings
-cargo build --locked --release
-cargo test --locked --all-features --workspace -- --test-threads=1
-swift test --package-path ironmlx-app --configuration release --no-parallel
-```
-
-App Bundle 的静态验证使用：
-
-```bash
-scripts/verify-app-bundle.sh dist/IronMLX.app
-```
+- [用户指南](docs/zh-CN/user-guide.md)：安装、模型使用、API 客户端、Agent 集成、隐私和故障排查；
+- [开发者指南](docs/zh-CN/developer-guide.md)：源码构建、测试、贡献、架构和发布验收。
+- [支持模型矩阵](docs/zh-CN/supported-models.md)：本候选发布版已记录的模型架构和具体版本。
 
 ## 许可证
 

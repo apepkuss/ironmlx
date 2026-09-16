@@ -1,6 +1,6 @@
 # IronMLX App Bundle 0.1.0
 
-P0-1 produces one self-contained `IronMLX.app` for Apple Silicon `arm64` on
+The release build produces one self-contained `IronMLX.app` for Apple Silicon `arm64` on
 macOS 26.4 or newer. It does not support Intel or earlier macOS releases.
 
 ## Release build

@@ -45,7 +45,7 @@ curl http://127.0.0.1:9068/v1/messages \
 ## 流式、工具和结构化输出
 
 将 `stream` 设为 `true` 可使用 SSE。各协议的事件和终止标记不同，应使用对应客户端解析。
-工具调用需要兼容模型；工具由客户端执行，再将结果送回后续请求。
+工具调用需要兼容模型；工具由 provider（服务提供方）生成调用，客户端执行后再将结果送回后续请求。
 Structured Outputs 的字段分别为 Chat 的 `response_format`、Responses 的 `text.format`、Messages 的 `output_config.format`。
 字段形状、JSON Schema 子集、思考内容和历史回传规则见[协议参考](api-reference.md)。
 
