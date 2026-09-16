@@ -5,7 +5,7 @@
 本指南为当前 `0.1.0-rc.1` 候选发布版组织用户使用路径。各章节链接到现有专题文档，
 不重复复制详细内容。
 
-![IronMLX Dashboard 展示 Qwen3.8-27B-4bit 与 DFlash2](../images/dashboard-qwen38-dflash2.png)
+![IronMLX Dashboard 中文界面展示 Qwen3.8-27B-4bit 与 DFlash2](../images/dashboard-qwen38-dflash2-zh-CN.png)
 
 状态页展示了运行中的本机 endpoint、已加载的 `mlx-community/Qwen3.8-27B-4bit` 模型及其匹配的 DFlash2 draft。
 
