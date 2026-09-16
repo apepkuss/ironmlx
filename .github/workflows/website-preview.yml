@@ -1,8 +1,8 @@
-name: Website preview
+name: Deploy website
 
 on:
   push:
-    branches: [feat/website]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -11,7 +11,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: website-preview
+  group: website-deploy
   cancel-in-progress: true
 
 jobs:
