@@ -6,7 +6,7 @@ IronMLX 是面向 Apple Silicon 的本地大语言模型推理 App 与服务运�
 Rust 推理引擎、MLX/Metal 运行时、模型管理 Dashboard，以及 OpenAI/Anthropic
 兼容 HTTP API 打包为一个自包含的 macOS App。
 
-![IronMLX Dashboard 总览](docs/images/dashboard-overview.png)
+![IronMLX Dashboard 中文界面总览](docs/images/dashboard-overview-zh-CN.png)
 
 截图展示了本地 Dashboard、运行中的服务、已加载模型以及 DFlash2 运行状态。
 运行时指标会因模型和硬件而变化。
