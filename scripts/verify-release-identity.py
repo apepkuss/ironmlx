@@ -21,7 +21,7 @@ def verify(repo, tag, app=None, *, candidate=False):
 
     pattern = r"v([0-9]+\.[0-9]+\.[0-9]+)"
     if candidate:
-        pattern += r"-rc\.[1-9][0-9]*"
+        pattern += r"(-rc\.[1-9][0-9]*)"
     match = re.fullmatch(pattern, tag)
     require(match is not None,
             "candidate tag must be vX.Y.Z-rc.N (N >= 1)" if candidate
@@ -43,10 +43,11 @@ def verify(repo, tag, app=None, *, candidate=False):
     if app is not None:
         with (app / "Contents/Info.plist").open("rb") as handle:
             info = plistlib.load(handle)
+        expected_build = match.group(2).removeprefix("-rc.") if candidate else build
         expected = {
             "CFBundleIdentifier": "com.ironmlx.app",
             "CFBundleShortVersionString": version,
-            "CFBundleVersion": build,
+            "CFBundleVersion": expected_build,
             "IronMLXSourceCommit": commit,
             "IronMLXSourceTreeState": "clean",
         }

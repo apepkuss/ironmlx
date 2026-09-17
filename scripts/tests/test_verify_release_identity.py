@@ -133,11 +133,15 @@ class ReleaseIdentityTests(unittest.TestCase):
     def test_candidate_accepts_matching_rc_and_stable_mode_rejects_it(self):
         for number in (1, 12):
             tag = f"v0.1.0-rc.{number}"
+            self.info["CFBundleVersion"] = str(number)
+            self.write_info()
             self.git("tag", tag)
             self.assertEqual(identity.verify(self.repo, tag, self.app, candidate=True),
                              self.commit)
             with self.assertRaises(ValueError):
                 identity.verify(self.repo, tag, self.app)
+        self.info["CFBundleVersion"] = "1"
+        self.write_info()
 
     def test_candidate_rejects_wrong_version_and_invalid_suffix(self):
         for tag in ("v0.2.0-rc.1", "v0.1.0", "v0.1.0-rc.0", "v0.1.0-rc.01",
