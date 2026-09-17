@@ -6,8 +6,9 @@ import Testing
 @Test
 @MainActor
 func sparkleLanguageFollowsAppLanguage() {
-    #expect(SparkleAppUpdateManager.sparkleLanguage(for: "zh") == "zh-Hans")
-    #expect(SparkleAppUpdateManager.sparkleLanguage(for: "zh-Hans") == "zh-Hans")
+    #expect(SparkleAppUpdateManager.sparkleLanguage(for: "zh") == "zh_CN")
+    #expect(SparkleAppUpdateManager.sparkleLanguage(for: "zh-Hans") == "zh_CN")
+    #expect(SparkleAppUpdateManager.sparkleLanguage(for: "zh-Hant") == "zh_TW")
     #expect(SparkleAppUpdateManager.sparkleLanguage(for: "en") == "en")
 }
 
