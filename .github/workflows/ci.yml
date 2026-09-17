@@ -118,7 +118,9 @@ jobs:
         run: |
           require "pathname"
           missing = []
-          Dir.glob("**/*.md", File::FNM_DOTMATCH).reject { |f| f.start_with?(".git/") }.each do |file|
+          Dir.glob("**/*.md", File::FNM_DOTMATCH)
+            .reject { |f| f.start_with?(".git/") || f == ".github/release-notes-template.md" }
+            .each do |file|
             File.read(file).scan(/!?(?:\[[^\]]*\])\(([^)]+)\)/).flatten.each do |raw|
               target = raw.split(/[?#]/, 2).first
               next if target.empty? || target =~ %r{\A(?:https?:|mailto:|#)}

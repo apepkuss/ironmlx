@@ -33,6 +33,17 @@ def publish(repo, tag, commit, assets, candidate=False):
     require(len({p.name for p in assets}) == len(assets), 'duplicate asset names')
     expected = {p.name: sha(p) for p in assets}
     route = f'repos/{repo}'
+    root = Path(__file__).resolve().parent.parent
+    notes_path = Path(tempfile.mkstemp(prefix='ironmlx-release-notes-', suffix='.md')[1])
+    try:
+        subprocess.run([
+            'python3', root / 'scripts/render-release-notes.py', tag,
+            '--repository', repo, *(['--candidate'] if candidate else []),
+            '--output', notes_path,
+        ], check=True)
+        body = notes_path.read_text()
+    finally:
+        notes_path.unlink(missing_ok=True)
 
     def check_tag():
         require(json.loads(run('gh', 'api', f'{route}/commits/{tag}'))['sha'] == commit,
@@ -65,7 +76,8 @@ def publish(repo, tag, commit, assets, candidate=False):
                                  '-f', f'tag_name={tag}', '-f', f'target_commitish={commit}',
                                  '-f', f'name=IronMLX {tag}', '-F', 'draft=true',
                                  '-F', f'prerelease={str(candidate).lower()}',
-                                 '-F', 'generate_release_notes=true', '-f', 'make_latest=false'))
+                                 '-F', 'generate_release_notes=false', '-f', 'body=' + body,
+                                 '-f', 'make_latest=false'))
         release_id = created.get('id')
         require(type(release_id) is int and release_id > 0, 'invalid created release ID')
         require(created.get('tag_name') == tag and created.get('draft') is True
