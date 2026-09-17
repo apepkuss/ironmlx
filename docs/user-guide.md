@@ -2,9 +2,8 @@
 
 [简体中文](zh-CN/user-guide.md)
 
-This guide organizes the user path for the current `0.1.0-rc.1` release
-candidate. It links to focused reference pages instead of repeating their
-details.
+This guide organizes the user path for the latest public release. It links to
+focused reference pages instead of repeating their details.
 
 ![IronMLX Dashboard showing Qwen3.8-27B-4bit with DFlash2](images/dashboard-qwen38-dflash2.png)
 
@@ -13,8 +12,8 @@ The status page shows a running local endpoint, the loaded
 
 ## Install and start
 
-1. Download the Apple Silicon DMG or ZIP from the
-   [IronMLX v0.1.0-rc.1 GitHub Release](https://github.com/apepkuss/ironmlx/releases/tag/v0.1.0-rc.1).
+1. Download the latest Apple Silicon DMG or ZIP from the
+   [IronMLX GitHub Releases page](https://github.com/apepkuss/ironmlx/releases/latest).
 2. Optionally verify the downloaded archive with the `RELEASE-SHA256SUMS`
    file published on the same Release page.
 3. If you downloaded the DMG, open it, drag `IronMLX.app` onto the

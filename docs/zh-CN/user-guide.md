@@ -2,8 +2,7 @@
 
 [English](../user-guide.md)
 
-本指南为当前 `0.1.0-rc.1` 候选发布版组织用户使用路径。各章节链接到现有专题文档，
-不重复复制详细内容。
+本指南围绕最新公开版本组织用户使用路径。各章节链接到现有专题文档，不重复复制详细内容。
 
 ![IronMLX Dashboard 中文界面展示 Qwen3.8-27B-4bit 与 DFlash2](../images/dashboard-qwen38-dflash2-zh-CN.png)
 
@@ -11,8 +10,8 @@
 
 ## 安装与启动
 
-1. 从 [IronMLX v0.1.0-rc.1 GitHub Release](https://github.com/apepkuss/ironmlx/releases/tag/v0.1.0-rc.1)
-   下载 Apple Silicon 版 DMG 或 ZIP；
+1. 从 [IronMLX GitHub Releases 页面](https://github.com/apepkuss/ironmlx/releases/latest)
+   下载最新的 Apple Silicon 版 DMG 或 ZIP；
 2. 可选：使用同一 Release 页面提供的 `RELEASE-SHA256SUMS` 校验下载的归档文件；
 3. 如果下载的是 DMG：打开 DMG，将 `IronMLX.app` 拖到 `Applications` 文件夹图标，
    等待复制完成；关闭 DMG 窗口并推出磁盘映像；

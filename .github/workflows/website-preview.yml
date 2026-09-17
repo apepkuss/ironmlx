@@ -28,6 +28,8 @@ jobs:
         uses: actions/checkout@v5
       - name: Configure Pages
         uses: actions/configure-pages@v6
+      - name: Build documentation pages
+        run: python3 scripts/build-website-docs.py
       - name: Upload website artifact
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9
         with:
