@@ -12,10 +12,7 @@ self-contained macOS App.
 The screenshot shows the local Dashboard with a running server, a loaded model,
 and the DFlash2 runtime status. Runtime metrics vary by model and hardware.
 
-Latest public release: **0.1.0-rc.1**
-
-This is a release candidate, not a stable release. The product version base is
-**0.1.0**.
+Latest public release: [0.1.0-rc.1](https://github.com/apepkuss/ironmlx/releases/tag/v0.1.0-rc.1)
 
 ## Requirements
 
@@ -24,14 +21,28 @@ This is a release candidate, not a stable release. The product version base is
 
 ## Capabilities
 
-- Local model search, immutable-snapshot downloads, resume, and integrity checks;
+- Discover models from Hugging Face and ModelScope with immutable-snapshot
+  downloads, resumable transfers, and integrity verification;
+- Support multiple model architectures, with coverage continuing to expand; see
+  the [Supported model matrix](docs/supported-models.md);
+- Provide standardized APIs compatible with mainstream clients, including
+  OpenAI-compatible `/v1/chat/completions` and `/v1/responses`, plus Anthropic
+  `/v1/messages`, with client-side function-call protocol support;
+- Support synchronous responses, SSE streaming, Structured Outputs, and
+  reasoning;
+- Provide model discovery, health checks, and runtime status APIs, including
+  `/healthz` and `/v1/models`;
+- Support Agent Harnesses such as Hermes Agent and oh-my-pi, with integration
+  coverage continuing to expand; see the
+  [Hermes Agent integration guide](docs/hermes-agent.md) and
+  [oh-my-pi integration guide](docs/oh-my-pi.md);
+- High-throughput inference with continuous batching, paged KV/prefix caching,
+  and Prompt Lookup;
+- MTP and DFlash2 speculative decoding paths for compatible models;
 - Multi-model loading, unloading, pinning, TTL, and memory protection;
-- OpenAI `/v1/chat/completions` and `/v1/responses`, plus Anthropic
-  `/v1/messages`, with client-side function-call protocols;
-- Streaming, continuous batching, paged KV/prefix cache, MTP, and Prompt Lookup;
-- Qwen3.8 reasoning/tools, matching MTP, and isolated DFlash2 text execution;
-- Text and controlled base64 image input;
+- Support LLM/VLM and multimodal inference, depending on the model;
 - Local redacted diagnostic export with no prompt, credential, or network upload;
+- Document local-data, privacy, and model-rights boundaries;
 - Loopback by default, with optional LAN mode using HTTPS and API keys.
 
 ## Install and run
