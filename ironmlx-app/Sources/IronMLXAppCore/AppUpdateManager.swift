@@ -1,4 +1,5 @@
 import Foundation
+import ObjectiveC.runtime
 import Sparkle
 
 @MainActor
@@ -137,9 +138,11 @@ public final class SparkleAppUpdateManager: NSObject, AppUpdateManaging, SPUUpda
         }
     }
 
-    private static func applySparkleLanguage(for appLanguage: String) {
-        UserDefaults.standard.set([sparkleLanguage(for: appLanguage)], forKey: "AppleLanguages")
-        UserDefaults.standard.synchronize()
+    static func applySparkleLanguage(for appLanguage: String) {
+        SparkleLocalizationOverride.install()
+        SparkleLocalizationOverride.select(
+            localization: sparkleLanguage(for: appLanguage)
+        )
     }
     private var controller: SPUStandardUpdaterController!
     private let developmentTestMarkerURL: URL?
@@ -246,6 +249,84 @@ public final class SparkleAppUpdateManager: NSObject, AppUpdateManaging, SPUUpda
                 "Failed to write development update error marker: \(error.localizedDescription)"
             )
         }
+    }
+}
+
+private enum SparkleLocalizationOverride {
+    private static let sparkleBundleIdentifier = "org.sparkle-project.Sparkle"
+    private static let languageLock = NSLock()
+    nonisolated(unsafe) private static var selectedLocalization: String?
+
+    private static let installOnce: Void = {
+        guard
+            let originalMethod = class_getInstanceMethod(
+                Bundle.self,
+                #selector(Bundle.localizedString(forKey:value:table:))
+            ),
+            let replacementMethod = class_getInstanceMethod(
+                Bundle.self,
+                #selector(Bundle.ironMLXLocalizedString(forKey:value:table:))
+            )
+        else {
+            preconditionFailure("Unable to install the Sparkle localization override")
+        }
+        method_exchangeImplementations(originalMethod, replacementMethod)
+    }()
+
+    static func install() {
+        _ = installOnce
+    }
+
+    static func select(localization: String) {
+        languageLock.lock()
+        selectedLocalization = localization == "en" ? "Base" : localization
+        languageLock.unlock()
+    }
+
+    static func localizedString(
+        forKey key: String,
+        value: String?,
+        table tableName: String?,
+        in bundle: Bundle
+    ) -> String? {
+        guard bundle.bundleIdentifier == sparkleBundleIdentifier else {
+            return nil
+        }
+
+        languageLock.lock()
+        let localization = selectedLocalization
+        languageLock.unlock()
+
+        guard
+            let localization,
+            let path = bundle.path(forResource: localization, ofType: "lproj"),
+            let localizedBundle = Bundle(path: path)
+        else {
+            return nil
+        }
+        return localizedBundle.ironMLXLocalizedString(
+            forKey: key,
+            value: value,
+            table: tableName
+        )
+    }
+}
+
+private extension Bundle {
+    @objc func ironMLXLocalizedString(
+        forKey key: String,
+        value: String?,
+        table tableName: String?
+    ) -> String {
+        if let localized = SparkleLocalizationOverride.localizedString(
+            forKey: key,
+            value: value,
+            table: tableName,
+            in: self
+        ) {
+            return localized
+        }
+        return ironMLXLocalizedString(forKey: key, value: value, table: tableName)
     }
 }
 

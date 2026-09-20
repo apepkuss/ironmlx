@@ -13,6 +13,24 @@ func sparkleLanguageFollowsAppLanguage() {
 }
 
 @Test
+@MainActor
+func sparkleLocalizationCanChangeBetweenUpdateChecks() throws {
+    let bundle = try #require(Bundle(identifier: "org.sparkle-project.Sparkle"))
+    for (language, expected) in [
+        ("en", "Update Error!"),
+        ("zh-Hans", "\u{66f4}\u{65b0}\u{9519}\u{8bef}\u{ff01}"),
+        ("ja", "\u{30a2}\u{30c3}\u{30d7}\u{30c7}\u{30fc}\u{30c8}\u{30a8}\u{30e9}\u{30fc}!"),
+        ("en", "Update Error!"),
+    ] {
+        SparkleAppUpdateManager.applySparkleLanguage(for: language)
+        #expect(
+            bundle.localizedString(forKey: "Update Error!", value: nil, table: "Sparkle")
+                == expected
+        )
+    }
+}
+
+@Test
 func developmentUpdateConfigurationRequiresLoopbackHTTPSAndSignatures() throws {
     let configuration = try AppUpdateConfiguration(infoDictionary: validUpdateInfo())
 
