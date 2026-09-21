@@ -64,6 +64,20 @@ public struct LocalModelReadiness: Codable, Equatable, Sendable {
     }
 }
 
+public struct LocalModelDownloadInfo: Codable, Equatable, Sendable {
+    public struct File: Codable, Equatable, Sendable {
+        public var path: String
+        public var size: Int64
+    }
+    public var files: [File]
+    public var externalResources: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case files
+        case externalResources = "external_resources"
+    }
+}
+
 public struct LocalModel: Codable, Equatable, Sendable {
     public var id: String
     public var repoID: String
@@ -82,6 +96,7 @@ public struct LocalModel: Codable, Equatable, Sendable {
     public var quantization: LocalModelQuantization?
     public var readiness: LocalModelReadiness?
     public var integrity: ModelIntegrityStatus?
+    public var downloadInfo: LocalModelDownloadInfo?
 
     public init(
         id: String,
@@ -100,7 +115,8 @@ public struct LocalModel: Codable, Equatable, Sendable {
         dflash2: LocalModelDFlash2Info? = nil,
         quantization: LocalModelQuantization? = nil,
         readiness: LocalModelReadiness? = nil,
-        integrity: ModelIntegrityStatus? = nil
+        integrity: ModelIntegrityStatus? = nil,
+        downloadInfo: LocalModelDownloadInfo? = nil
     ) {
         self.id = id
         self.repoID = repoID
@@ -119,6 +135,7 @@ public struct LocalModel: Codable, Equatable, Sendable {
         self.quantization = quantization
         self.readiness = readiness
         self.integrity = integrity
+        self.downloadInfo = downloadInfo
     }
 
     enum CodingKeys: String, CodingKey {
@@ -139,6 +156,7 @@ public struct LocalModel: Codable, Equatable, Sendable {
         case quantization
         case readiness
         case integrity
+        case downloadInfo = "download_info"
     }
 
     public var isBlockDiffusion: Bool {
@@ -470,6 +488,32 @@ public struct LocalModelScanner: Sendable {
 
     public init(rootURL: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".ironmlx", isDirectory: true)) {
         self.rootURL = rootURL
+    }
+
+    public func audioResources(for reference: String) throws -> BackendAudioResources? {
+        guard let model = model(for: reference), model.type == "tts" else { return nil }
+        guard model.readiness?.isLoadable == true else {
+            throw AudioResourceError.invalid(model.readiness?.message ?? "model is not ready")
+        }
+        return try AudioResourcePreparationService(rootURL: rootURL).readyConfiguration()
+    }
+
+    private func audioReadiness(manifest: ModelSnapshotManifest) -> LocalModelReadiness {
+        do {
+            let profile = try AudioResourceProfile()
+            let actual = Dictionary(uniqueKeysWithValues: manifest.files.map { ($0.path, $0) })
+            guard profile.source.files.allSatisfy({ file in
+                actual[file.path]?.size == file.bytes && actual[file.path]?.sha256 == file.sha256
+            }) else {
+                return LocalModelReadiness(status: "unsupported", reasonCode: "unsupported_audio_profile",
+                                           message: "This IndexTTS snapshot does not match the supported resource profile.")
+            }
+            _ = try AudioResourcePreparationService(rootURL: rootURL).readyConfiguration()
+            return LocalModelReadiness()
+        } catch {
+            return LocalModelReadiness(status: "incomplete", reasonCode: "audio_resources_missing",
+                                       message: "Prepare the speech resources to load this model. \(error.localizedDescription)")
+        }
     }
 
     public func scan(loadedModel: String? = nil) -> [LocalModel] {
@@ -812,7 +856,12 @@ public struct LocalModelScanner: Sendable {
             let signature = mtpCompatibilitySignature(config, repoID: id)
             let dflash2Signature = dflash2CompatibilitySignature(config, kind: kind)
             let architecture = normalizedString(config["model_type"])
-            let capabilities = runtimeCapabilities(config: config)
+            let capabilities = inspection.capabilityType == "tts"
+                ? BackendModelCapabilities(runtimeKind: "tts", supportsStreaming: true, supportsVision: false,
+                                           supportsMtp: false, supportsPromptLookup: false,
+                                           supportsSpeculativeDecoding: false, supportsKvCache: false,
+                                           supportedSamplingParameters: [])
+                : runtimeCapabilities(config: config)
             let type: String
             switch kind {
             case .base:
@@ -841,7 +890,8 @@ public struct LocalModelScanner: Sendable {
                     snapshot: snapshot,
                     provider: provider,
                     repoID: id
-                )
+                ),
+                downloadInfo: type == "tts" ? ttsDownloadInfo(snapshot: snapshot) : nil
             ).artifact(
                 kind: kind,
                 path: snapshot,
@@ -849,6 +899,15 @@ public struct LocalModelScanner: Sendable {
                 dflash2Signature: dflash2Signature
             )
         }
+    }
+
+    private func ttsDownloadInfo(snapshot: URL) -> LocalModelDownloadInfo? {
+        guard let manifest = try? ModelSnapshotVerifier().loadManifest(at: snapshot),
+              manifest.compatibility.artifactRole == "tts" else { return nil }
+        return LocalModelDownloadInfo(
+            files: manifest.files.map { .init(path: $0.path, size: $0.size) },
+            externalResources: manifest.compatibility.externalResources ?? []
+        )
     }
 
     private func resolveAuxiliaryModelPath(
@@ -1472,7 +1531,7 @@ public struct LocalModelScanner: Sendable {
         }
         var missingFiles = requiredWeightFilesMissing(in: url, files: files)
         let quantization = quantizationInspection(config: configJSON, snapshot: url)
-        let capabilityType = modelCapabilityType(config: configJSON)
+        var capabilityType = modelCapabilityType(config: configJSON)
         missingFiles.append(contentsOf: quantization.missingFiles)
 
         let readiness: LocalModelReadiness
@@ -1523,12 +1582,17 @@ public struct LocalModelScanner: Sendable {
                 quantization: quantization.quantization
             )
         }
+        if manifest.compatibility.artifactRole == "tts" {
+            capabilityType = "tts"
+        }
         if let unsupportedReason = quantization.unsupportedReason {
             readiness = LocalModelReadiness(
                 status: "unsupported",
                 reasonCode: "unsupported_quantization",
                 message: unsupportedReason
             )
+        } else if capabilityType == "tts", manifest.compatibility.modelType == "indextts2_5", missingFiles.isEmpty {
+            readiness = audioReadiness(manifest: manifest)
         } else if let unsupportedReason = unsupportedModelTypeReason(for: capabilityType) {
             readiness = LocalModelReadiness(
                 status: "unsupported",

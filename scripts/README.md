@@ -21,8 +21,8 @@
 | 测试与输入 | `test_*.py`、`tests/`、`fixtures/` | 上述工具的单元测试、发布测试及固定输入 |
 
 模型诊断工具通常需要本地模型、MLX 环境及空闲 GPU；具体参数见脚本说明。
-常规 Rust 回归应使用当前 `ironmlx/tests/` 的测试目标，例如
-`cargo test --release -p ironmlx --test scheduler_actor -- --ignored --test-threads=1`，
+常规 Rust 回归应使用当前 `ironmlx-runtime/tests/` 的原生运行时测试目标，例如
+`cargo test --release -p ironmlx-runtime --test scheduler_actor -- --ignored --test-threads=1`，
 并按相应测试要求配置模型。脚本修改后应执行对应测试，而不是无差别启动所有模型实验。
 
 ## Gemma4 Drafter / Active KV 回归

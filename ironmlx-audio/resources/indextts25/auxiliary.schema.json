@@ -1,0 +1,1 @@
+{"emotion_matrix":{"dtype":"F32","shape":[73,1280]},"speaker_matrix":{"dtype":"F32","shape":[73,192]},"w2v_mean":{"dtype":"F32","shape":[1024]},"w2v_var":{"dtype":"F32","shape":[1024]}}

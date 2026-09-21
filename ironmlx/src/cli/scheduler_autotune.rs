@@ -8,18 +8,25 @@ use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
 
 use super::scheduler_profile_context::SchedulerProfileRuntimeArgs;
-use super::scheduler_profile_store::{
-    detect_scheduler_profile_hardware_label, SchedulerProfileStore,
-};
-use crate::core::scheduler_autotune::{
-    build_scheduler_autotune_runtime_profile, evaluate_scheduler_autotune_profile_health,
-    merge_scheduler_autotune_calibrations, select_scheduler_autotune_profile_with_options,
-    SchedulerAutotuneCalibrationInput, SchedulerAutotuneMergeOptions,
-    SchedulerAutotuneProfileHealthInput, SchedulerAutotuneProfileHealthReport,
-    SchedulerAutotuneProfileHealthStatus, SchedulerAutotuneRuntimeProfile,
-    SchedulerAutotuneSelectionOptions, SchedulerAutotuneSelectionProfile,
-};
 use crate::Result;
+use {
+    ironmlx_runtime::core::scheduler_autotune::build_scheduler_autotune_runtime_profile,
+    ironmlx_runtime::core::scheduler_autotune::evaluate_scheduler_autotune_profile_health,
+    ironmlx_runtime::core::scheduler_autotune::merge_scheduler_autotune_calibrations,
+    ironmlx_runtime::core::scheduler_autotune::select_scheduler_autotune_profile_with_options,
+    ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneCalibrationInput,
+    ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneMergeOptions,
+    ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneProfileHealthInput,
+    ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneProfileHealthReport,
+    ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneProfileHealthStatus,
+    ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneRuntimeProfile,
+    ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneSelectionOptions,
+    ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneSelectionProfile,
+};
+use {
+    ironmlx_runtime::core::scheduler_profile_store::detect_scheduler_profile_hardware_label,
+    ironmlx_runtime::core::scheduler_profile_store::SchedulerProfileStore,
+};
 
 #[derive(Args, Debug)]
 pub struct SchedulerAutotuneArgs {
@@ -194,7 +201,7 @@ pub fn run(args: SchedulerAutotuneArgs) -> Result<()> {
 }
 
 fn run_profile(args: SchedulerAutotuneProfileArgs) -> Result<()> {
-    let store = SchedulerProfileStore::default()?;
+    let store = SchedulerProfileStore::open_default()?;
     match args.action {
         SchedulerAutotuneProfileAction::List => run_profile_list(&store),
         SchedulerAutotuneProfileAction::Show(show) => run_profile_show(&store, show),
@@ -454,10 +461,12 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{import_profile, SchedulerAutotuneProfileImportArgs};
-    use crate::cli::scheduler_profile_store::SchedulerProfileStore;
-    use crate::core::scheduler_autotune::{
-        SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeContext,
-        SchedulerAutotuneRuntimeProfile, SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+    use ironmlx_runtime::core::scheduler_profile_store::SchedulerProfileStore;
+    use {
+        ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneProfileConfig,
+        ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneRuntimeContext,
+        ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneRuntimeProfile,
+        ironmlx_runtime::core::scheduler_autotune::SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
     };
 
     #[test]
@@ -519,7 +528,7 @@ mod tests {
             },
             rules: Vec::new(),
             metadata:
-                crate::core::scheduler_autotune::SchedulerAutotuneRuntimeProfileMetadata::synthetic(
+                ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneRuntimeProfileMetadata::synthetic(
                     1811606400000,
                 ),
         }

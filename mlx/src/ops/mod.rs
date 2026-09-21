@@ -17,6 +17,7 @@ pub mod cast;
 pub mod constructors;
 pub mod conv;
 pub mod cumulative;
+pub mod fft;
 pub mod indexing;
 pub mod matmul;
 pub mod reduction;
@@ -68,7 +69,7 @@ pub use constructors::{
     linspace, linspace_on, ones, ones_like, ones_like_on, ones_on, tri, tri_on, tril, tril_on,
     triu, triu_on, zeros_like, zeros_like_on,
 };
-pub use conv::{conv1d, conv1d_on};
+pub use conv::{conv1d, conv1d_on, conv2d, conv2d_on, conv_transpose1d, conv_transpose1d_on};
 pub use cumulative::{cumprod, cumprod_on, cumsum, cumsum_on};
 pub use indexing::{
     gather, gather_on, put_along_axis, put_along_axis_on, slice, slice_on, slice_strided,

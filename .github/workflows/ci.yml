@@ -36,8 +36,8 @@ jobs:
     name: Classify changes
     runs-on: macos-26
     outputs:
-      docs_only: ${{ steps.classify.outputs.docs_only }}
-      code_changed: ${{ steps.classify.outputs.code_changed }}
+      docs_only: ${{ steps.range.outputs.docs_only }}
+      code_changed: ${{ steps.range.outputs.code_changed }}
       base_sha: ${{ steps.range.outputs.base_sha }}
       head_sha: ${{ steps.range.outputs.head_sha }}
     steps:
@@ -63,32 +63,7 @@ jobs:
             base_sha="$PUSH_BEFORE_SHA"
             head_sha="$GITHUB_SHA"
           fi
-          printf 'base_sha=%s\n' "$base_sha" >> "$GITHUB_OUTPUT"
-          printf 'head_sha=%s\n' "$head_sha" >> "$GITHUB_OUTPUT"
-
-      - name: Classify changed files
-        id: classify
-        shell: bash
-        env:
-          BASE_SHA: ${{ steps.range.outputs.base_sha }}
-          HEAD_SHA: ${{ steps.range.outputs.head_sha }}
-        run: |
-          set -euo pipefail
-          docs_only=true
-          code_changed=false
-          while IFS= read -r path; do
-            [[ -n "$path" ]] || continue
-            if [[ "$path" == README.md || "$path" == README.zh-CN.md || "$path" == docs/* || "$path" == *.md ]]; then
-              continue
-            fi
-            docs_only=false
-            code_changed=true
-          done < <(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
-          if [[ "$docs_only" != true ]]; then
-            docs_only=false
-          fi
-          printf 'docs_only=%s\n' "$docs_only" >> "$GITHUB_OUTPUT"
-          printf 'code_changed=%s\n' "$code_changed" >> "$GITHUB_OUTPUT"
+          scripts/resolve-ci-change-range.sh "$base_sha" "$head_sha" >> "$GITHUB_OUTPUT"
 
   docs-quality:
     name: Documentation quality
@@ -157,27 +132,10 @@ jobs:
 
       - name: Verify Conventional Commits
         shell: bash
-        env:
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PUSH_BEFORE_SHA: ${{ github.event.before }}
-        run: |
-          set -euo pipefail
-          case "$GITHUB_EVENT_NAME" in
-            pull_request)
-              base_sha="${PR_BASE_SHA:?missing pull request base SHA}"
-              head_sha="${PR_HEAD_SHA:?missing pull request head SHA}"
-              ;;
-            push)
-              base_sha="${PUSH_BEFORE_SHA:?missing push before SHA}"
-              head_sha="$GITHUB_SHA"
-              ;;
-            *)
-              echo "error: unsupported CI event: $GITHUB_EVENT_NAME" >&2
-              exit 1
-              ;;
-          esac
-          scripts/verify-conventional-commits.sh "$base_sha" "$head_sha"
+        run: scripts/verify-conventional-commits.sh "${{ needs.changes.outputs.base_sha }}" "${{ needs.changes.outputs.head_sha }}"
+
+      - name: Test CI range resolution
+        run: python3 -m unittest discover -s scripts/tests -p test_ci_change_range.py -v
 
       - name: Install pinned Rust toolchains
         shell: bash
@@ -278,6 +236,7 @@ jobs:
           cargo "+$RUST_NIGHTLY_TOOLCHAIN" fmt --all -- --check
           cargo "+$RUST_NIGHTLY_TOOLCHAIN" clippy --locked --all-features --workspace -- -D warnings
           cargo build --locked --release
+          cargo build --locked --release -p ironmlx-lm -p ironmlx-runtime --features ironmlx-lm/tools,ironmlx-runtime/tools --bins
 
       - name: Run public API contract tests
         shell: bash
@@ -293,6 +252,10 @@ jobs:
           metallib_paths=(
             "$GITHUB_WORKSPACE/mlx-sys/mlx.metallib"
             "$GITHUB_WORKSPACE/ironmlx/mlx.metallib"
+            "$GITHUB_WORKSPACE/ironmlx-core/mlx.metallib"
+            "$GITHUB_WORKSPACE/ironmlx-audio/mlx.metallib"
+            "$GITHUB_WORKSPACE/ironmlx-lm/mlx.metallib"
+            "$GITHUB_WORKSPACE/ironmlx-runtime/mlx.metallib"
             "$GITHUB_WORKSPACE/mlx/mlx.metallib"
             "$GITHUB_WORKSPACE/ironmlx-bench-kernel/mlx.metallib"
             "$GITHUB_WORKSPACE/turboquant/mlx.metallib"
@@ -306,10 +269,13 @@ jobs:
           for path in "${metallib_paths[@]}"; do
             cp "$MLX_DIR/lib/mlx.metallib" "$path"
           done
+          cargo test --locked -p ironmlx-core --no-default-features -- --test-threads=1
+          cargo test --locked -p ironmlx-lm --no-default-features -- --test-threads=1
+          cargo test --locked -p ironmlx-runtime --no-default-features -- --test-threads=1
           cargo test --locked --all-features --workspace -- --test-threads=1
           cargo test --locked --all-features \
             --manifest-path "$GITHUB_WORKSPACE/Cargo.toml" \
-            -p ironmlx --lib core::server::
+            -p ironmlx --lib server::
 
       - name: Run pinned official SDK contract tests
         shell: bash
@@ -333,6 +299,15 @@ jobs:
             --configuration release \
             --scratch-path .build/ci-swift \
             --no-parallel
+
+      - name: Verify standalone speech client transport
+        shell: bash
+        run: |
+          set -euo pipefail
+          swiftc -parse-as-library -swift-version 6 examples/speech-client.swift \
+            -o "$RUNNER_TEMP/ironmlx-speech-client"
+          IRONMLX_SPEECH_CLIENT="$RUNNER_TEMP/ironmlx-speech-client" \
+            python3 -m unittest discover -s scripts/tests -p test_speech_client.py -v
 
       - name: Test stable release failure boundaries
         run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p test_stable_release.py -v

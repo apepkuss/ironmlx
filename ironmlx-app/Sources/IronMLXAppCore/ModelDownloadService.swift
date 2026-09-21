@@ -399,6 +399,7 @@ public actor ModelDownloadService {
     private let store: ModelDownloadStore
     private let downloader: any ModelFileDownloading
     private let metadataPreflight: any ModelMetadataPreflighting
+    private let audioPreparer: any AudioResourcePreparing
     private let telemetryLogger: @Sendable (String) -> Void
     private let maxConcurrentDownloads: Int
     private let availableCapacityProvider: @Sendable (URL) -> Int64?
@@ -428,6 +429,7 @@ public actor ModelDownloadService {
         modelScopeGitEndpoint: URL = URL(string: "https://www.modelscope.cn")!,
         metadataPreflight: any ModelMetadataPreflighting = IronMLXModelMetadataPreflight(),
         fileDownloader: (any ModelFileDownloading)? = nil,
+        audioPreparer: (any AudioResourcePreparing)? = nil,
         maxConcurrentDownloads: Int = ModelDownloadService.defaultMaxConcurrentDownloads,
         availableCapacityProvider: (@Sendable (URL) -> Int64?)? = nil,
         telemetryLogger: @escaping @Sendable (String) -> Void = {
@@ -447,6 +449,9 @@ public actor ModelDownloadService {
         reminderStore = ModelDownloadQueueReminderStore(rootURL: rootURL)
         downloader = fileDownloader ?? ProviderModelFileDownloader(httpClient: httpClient)
         self.metadataPreflight = metadataPreflight
+        self.audioPreparer = audioPreparer ?? AudioResourcePreparationService(
+            rootURL: rootURL, httpClient: httpClient, huggingFaceEndpoint: huggingFaceEndpoint
+        )
         self.maxConcurrentDownloads = max(1, maxConcurrentDownloads)
         self.availableCapacityProvider = availableCapacityProvider ?? { url in
             Self.systemAvailableCapacity(at: url)
@@ -472,7 +477,7 @@ public actor ModelDownloadService {
     ) async throws -> [HuggingFaceSearchResult] {
         let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         if Self.isCanonicalHuggingFaceRepoID(normalizedQuery) {
-            let repository = try await resolver.resolve(
+            let repository = try await resolveDownloadRepository(
                 provider: .huggingFace,
                 repoID: normalizedQuery,
                 token: token
@@ -518,7 +523,7 @@ public actor ModelDownloadService {
             try Task.checkCancellation()
             let repoID = results[index].modelId ?? results[index].id
             do {
-                let repository = try await resolver.resolve(
+                let repository = try await resolveDownloadRepository(
                     provider: .huggingFace,
                     repoID: repoID,
                     token: token
@@ -832,7 +837,7 @@ public actor ModelDownloadService {
         _ request: QueuedModelDownload
     ) async throws -> DownloadQueuePreflightEstimate {
         try Task.checkCancellation()
-        let repository = try await resolver.resolve(
+        let repository = try await resolveDownloadRepository(
             provider: request.provider,
             repoID: request.repoID,
             token: request.token
@@ -845,8 +850,11 @@ public actor ModelDownloadService {
         var totalBytes: Int64 = 0
         var remainingBytes: Int64 = 0
         var observedBytesByPath: [String: Int64] = [:]
+        let hasComponentManifest = repository.files.contains { $0.path == "model_manifest.json" }
         let downloadableFiles = repository.files.filter { file in
             file.isWeight || Self.isRuntimeMetadata(file)
+                || (hasComponentManifest
+                    && TTSModelDownloadProfile.isPotentialAuxiliary(file))
         }
         for file in downloadableFiles {
             try Task.checkCancellation()
@@ -900,7 +908,7 @@ public actor ModelDownloadService {
         return DownloadQueuePreflightEstimate(
             commitSHA: repository.commitSHA,
             totalBytes: totalBytes,
-            remainingBytes: remainingBytes,
+            remainingBytes: try reservedBytesIncludingAudio(remainingBytes, required: hasComponentManifest, repoID: request.repoID),
             observedBytesByPath: observedBytesByPath
         )
     }
@@ -1201,7 +1209,7 @@ public actor ModelDownloadService {
         do {
             let repositoryLock = try store.acquireRepositoryLock(provider: provider, repoID: repoID)
             defer { withExtendedLifetime(repositoryLock) {} }
-            let repository = try await resolver.resolve(provider: provider, repoID: repoID, token: token)
+            let repository = try await resolveDownloadRepository(provider: provider, repoID: repoID, token: token)
             setStatus(
                 key: key,
                 provider: provider,
@@ -1228,6 +1236,9 @@ public actor ModelDownloadService {
                    record.commitSHA == repository.commitSHA,
                    record.state == .verified
                 {
+                    if manifest.compatibility.artifactRole == "tts" {
+                        try await prepareAudio(snapshot: finalSnapshot, repository: repository, token: token, key: key)
+                    }
                     try store.updateRef(for: manifest)
                     setStatus(
                         key: key,
@@ -1263,10 +1274,33 @@ public actor ModelDownloadService {
                 staging: staging,
                 telemetry: telemetry
             )
-            await telemetry.endNetwork()
-            let metadata = metadataResult.files
+            var metadata = metadataResult.files
             var validations = metadataResult.validations
-            let weights = try selectedWeightFiles(repository: repository, staging: staging)
+            let ttsProfile: TTSModelDownloadProfile?
+            do {
+                ttsProfile = try TTSModelDownloadProfile.inspect(directory: staging, files: repository.files)
+            } catch {
+                throw DownloadFailure(repoID: repoID, code: "unsupported_model_metadata", message: error.localizedDescription)
+            }
+            if let ttsProfile {
+                let existing = Set(metadata.map(\.path))
+                let auxiliary = try await acquireMetadata(
+                    repository: repository, token: token, staging: staging, telemetry: telemetry,
+                    selectedFiles: repository.files.filter {
+                        ttsProfile.auxiliaryPaths.contains($0.path) && !existing.contains($0.path)
+                    }
+                )
+                metadata.append(contentsOf: auxiliary.files)
+                validations.append(contentsOf: auxiliary.validations)
+            }
+            await telemetry.endNetwork()
+            let weights: [RemoteModelFile]
+            if let ttsProfile {
+                weights = repository.files.filter { ttsProfile.weightPaths.contains($0.path) }
+                    .sorted { $0.path < $1.path }
+            } else {
+                weights = try selectedWeightFiles(repository: repository, staging: staging)
+            }
             guard !weights.isEmpty else {
                 throw DownloadFailure(
                     repoID: repoID,
@@ -1289,7 +1323,11 @@ public actor ModelDownloadService {
 
             let compatibility: ModelMetadataPreflightResult
             do {
-                compatibility = try await metadataPreflight.validate(metadataDirectory: staging)
+                if let ttsProfile {
+                    compatibility = ttsProfile.compatibility
+                } else {
+                    compatibility = try await metadataPreflight.validate(metadataDirectory: staging)
+                }
             } catch {
                 throw DownloadFailure(
                     repoID: repoID,
@@ -1297,7 +1335,7 @@ public actor ModelDownloadService {
                     message: error.localizedDescription
                 )
             }
-            if compatibility.artifactRole != ModelArtifactRole.dflash2Drafter,
+            if ttsProfile == nil, compatibility.artifactRole != ModelArtifactRole.dflash2Drafter,
                !metadata.contains(where: { $0.path == "tokenizer.json" }) {
                 throw DownloadFailure(
                     repoID: repoID,
@@ -1315,7 +1353,8 @@ public actor ModelDownloadService {
                 staging: staging,
                 repository: repository
             )
-            let remainingBytes = resumePlan.remainingBytes
+            let remainingBytes = try reservedBytesIncludingAudio(resumePlan.remainingBytes,
+                                                                 required: ttsProfile != nil, repoID: repoID)
             try adjustDiskReservation(
                 key: key,
                 remainingBytes: remainingBytes,
@@ -1453,7 +1492,8 @@ public actor ModelDownloadService {
                     artifactRole: compatibility.artifactRole,
                     quantizationMode: compatibility.quantization?.mode,
                     quantizationBits: compatibility.quantization?.bits,
-                    quantizationGroupSize: compatibility.quantization?.groupSize
+                    quantizationGroupSize: compatibility.quantization?.groupSize,
+                    externalResources: ttsProfile?.externalResources
                 ),
                 resources: ModelSnapshotResources(
                     weightBytes: weightBytes,
@@ -1492,6 +1532,10 @@ public actor ModelDownloadService {
             await telemetry.beginPublication()
             _ = try store.publish(manifest)
             await telemetry.endPublication()
+
+            if ttsProfile != nil {
+                try await prepareAudio(snapshot: finalSnapshot, repository: repository, token: token, key: key)
+            }
 
             journal?.phase = .completed
             journal?.updatedAt = Date()
@@ -1590,11 +1634,46 @@ public actor ModelDownloadService {
         }
     }
 
+    private func resolveDownloadRepository(
+        provider: ModelRepositoryProvider, repoID: String, token: String?
+    ) async throws -> ResolvedModelRepository {
+        if provider == .huggingFace, repoID == "mlx-community/IndexTTS-2.5-fp16" {
+            let profile = try AudioResourceProfile()
+            var repository = try await resolver.resolveHuggingFace(repoID: repoID, revision: profile.source.revision, token: token)
+            // The store's requestedRevision names its local active ref, while
+            // commitSHA preserves the exact immutable upstream revision selected here.
+            repository.requestedRevision = provider.mutableRevision
+            return repository
+        }
+        return try await resolver.resolve(provider: provider, repoID: repoID, token: token)
+    }
+
+    private func prepareAudio(
+        snapshot: URL, repository: ResolvedModelRepository, token: String?, key: String
+    ) async throws {
+        try adjustDiskReservation(key: key, remainingBytes: AudioResourcePreparationService.diskReservationBytes,
+                                  observedBytesByPath: [:])
+        _ = try await audioPreparer.prepare(snapshot: snapshot, token: token) { name, bytes, total in
+            await self.setStatus(key: key, provider: repository.provider, repoID: repository.repoID,
+                                 phase: .verifying, progressPct: total > 0 ? Double(bytes) / Double(total) * 100 : 0,
+                                 currentFile: name, commitSHA: repository.commitSHA)
+        }
+    }
+
+    private func reservedBytesIncludingAudio(_ bytes: Int64, required: Bool, repoID: String) throws -> Int64 {
+        let result = bytes.addingReportingOverflow(required ? AudioResourcePreparationService.diskReservationBytes : 0)
+        guard !result.overflow else {
+            throw DownloadFailure(repoID: repoID, code: "repo_size_overflow", message: "Model resources exceed the supported size.")
+        }
+        return result.partialValue
+    }
+
     private func acquireMetadata(
         repository: ResolvedModelRepository,
         token: String?,
         staging: URL,
-        telemetry: ModelDownloadTelemetryTracker
+        telemetry: ModelDownloadTelemetryTracker,
+        selectedFiles: [RemoteModelFile]? = nil
     ) async throws -> (files: [ModelSnapshotFile], validations: [ModelValidatedFile]) {
         let required = ["config.json"]
         let byPath = Dictionary(uniqueKeysWithValues: repository.files.map { ($0.path, $0) })
@@ -1605,7 +1684,7 @@ public actor ModelDownloadService {
                 message: "Repository \(repository.repoID) is missing \(path)."
             )
         }
-        let metadataFiles = repository.files.filter(Self.isRuntimeMetadata)
+        let metadataFiles = selectedFiles ?? repository.files.filter(Self.isRuntimeMetadata)
         var resolved: [ModelSnapshotFile] = []
         var validations: [ModelValidatedFile] = []
         for file in metadataFiles {

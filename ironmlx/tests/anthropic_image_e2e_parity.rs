@@ -40,14 +40,16 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use base64::Engine;
-use ironmlx::core::model::Model;
-use ironmlx::core::scheduler::DenseVlMethods;
-use ironmlx::core::scheduler_autotune::{
-    SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeProfile,
-    SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+use ironmlx::server;
+use ironmlx_lm::core::model::Model;
+use ironmlx_lm::core::vision::DenseVlMethods;
+use ironmlx_lm::core::vision_input::VisionInputConfig;
+use {ironmlx_lm::core::loader::Loader, ironmlx_lm::core::tokenizer::Tokenizer};
+use {
+    ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneProfileConfig,
+    ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneRuntimeProfile,
+    ironmlx_runtime::core::scheduler_autotune::SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
 };
-use ironmlx::core::server::{self, VisionInputConfig};
-use ironmlx::core::{Loader, Tokenizer};
 
 // ---------------------------------------------------------------------------
 // Image fixture
@@ -85,7 +87,7 @@ fn scheduler_profile() -> SchedulerAutotuneRuntimeProfile {
         model_name: "e2e".to_string(),
         hardware_label: "test-host".to_string(),
         runtime_context:
-            ironmlx::core::scheduler_autotune::SchedulerAutotuneRuntimeContext::local_default(32768),
+            ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneRuntimeContext::local_default(32768),
         config: SchedulerAutotuneProfileConfig {
             b_max: 1,
             prefill_chunk_size: 2048,
@@ -96,7 +98,7 @@ fn scheduler_profile() -> SchedulerAutotuneRuntimeProfile {
         },
         rules: Vec::new(),
         metadata:
-            ironmlx::core::scheduler_autotune::SchedulerAutotuneRuntimeProfileMetadata::synthetic(
+            ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneRuntimeProfileMetadata::synthetic(
                 1811606400000,
             ),
     }
@@ -116,7 +118,7 @@ where
             model,
             tokenizer,
             "e2e".to_string(),
-            ironmlx::core::server::security::ServerNetworkConfig::local("127.0.0.1", port)?,
+            ironmlx::server::security::ServerNetworkConfig::local("127.0.0.1", port)?,
             /* prefill_chunk_size */ 2048,
             /* b_max */ 1,
             /* admission_deadline_ms */ 5,
@@ -126,7 +128,8 @@ where
             /* kv_cache_turboquant_bits */ None,
             /* paged_prefix_cache */ None,
             /* prefix_lru_cache */ None,
-            /* active_kv_offload */ ironmlx::core::cache::ActiveKvOffloadConfig::disabled(),
+            /* active_kv_offload */
+            ironmlx_runtime::core::cache::active_kv::ActiveKvOffloadConfig::disabled(),
             scheduler_profile(),
             /* scheduler_autotune_report */ false,
             /* vision_input_override */ vision,
@@ -271,7 +274,7 @@ async fn e2e_qwen35_vl_dense() {
     let dir = PathBuf::from(std::env::var("QWEN35_VL_DENSE_MODEL").unwrap());
     let loader = Loader::open_multimodal(&dir).unwrap();
     let tok = Tokenizer::from_loader(&loader).unwrap();
-    let model = ironmlx::models::Qwen35Model::from_loader(&loader).unwrap();
+    let model = ironmlx_lm::models::Qwen35Model::from_loader(&loader).unwrap();
     let port = alloc_port().await;
     // None → server falls back to VisionInputConfig::Qwen{spatial_merge_size from ModelMeta}
     let _s = boot(model, tok, port, None);
@@ -288,7 +291,7 @@ async fn e2e_qwen35_vl_moe() {
     let dir = PathBuf::from(std::env::var("QWEN35_VL_MOE_MODEL").unwrap());
     let loader = Loader::open_multimodal(&dir).unwrap();
     let tok = Tokenizer::from_loader(&loader).unwrap();
-    let model = ironmlx::models::Qwen35MoeModel::from_loader(&loader).unwrap();
+    let model = ironmlx_lm::models::Qwen35MoeModel::from_loader(&loader).unwrap();
     let port = alloc_port().await;
     let _s = boot(model, tok, port, None);
     assert_transitive_parity(port).await;
@@ -306,11 +309,11 @@ async fn e2e_gemma4() {
     let dir = PathBuf::from(std::env::var("GEMMA4_MODEL").unwrap());
     let loader = Loader::open_multimodal(&dir).unwrap();
     let tok = Tokenizer::from_loader(&loader).unwrap();
-    let cfg = ironmlx::models::Gemma4Config::from_loader(&loader).unwrap();
+    let cfg = ironmlx_lm::models::Gemma4Config::from_loader(&loader).unwrap();
     let vision = cfg
         .vision_config
         .map(|vision_config| VisionInputConfig::Gemma4 { vision_config });
-    let model = ironmlx::models::Gemma4Model::from_loader(&loader).unwrap();
+    let model = ironmlx_lm::models::Gemma4Model::from_loader(&loader).unwrap();
     let port = alloc_port().await;
     let _s = boot(model, tok, port, vision);
     assert_transitive_parity(port).await;
@@ -328,7 +331,7 @@ async fn e2e_minicpmv46() {
     let dir = PathBuf::from(std::env::var("MINICPMV46_MODEL").unwrap());
     let loader = Loader::open_multimodal(&dir).unwrap();
     let tok = Tokenizer::from_loader(&loader).unwrap();
-    let model = ironmlx::models::minicpmv4_6::model_from_loader(&loader).unwrap();
+    let model = ironmlx_lm::models::minicpmv4_6::model_from_loader(&loader).unwrap();
     let port = alloc_port().await;
     let vision = Some(VisionInputConfig::MiniCpmV46 {
         spatial_merge_size: 4,

@@ -1,0 +1,12 @@
+{
+  "repository": "vanch007/mlx-indextts2",
+  "revision": "a7666367b8551656a2029ad75f259cb5e4936b3b",
+  "files": {
+    "normalizer_v25.py": "a4ae8a9cf2850d63b86560481cf1777a8f9d44128c5aad23af2574921ad5de3b",
+    "text_frontend_v25.py": "0cf326fba7527829a8e7c424da54ff19e1c32caf0c733eddb253bfc1eae11222",
+    "tokenizer_v25.py": "42392f30e1c7c4069d39d523e278a00991d0d7005b229685f1e40373399ef860",
+    "japanese_v25.py": "1c9af830027996159c99f2f83d6c1b665e3eb52d936f0a713670a7cdcd3e9754",
+    "normalize.py": "d8476a5900c42c3f5bf5ccf80c911f06dafe3e8a5703a597b1da4070c9dec8fb",
+    "model_version.py": "c9a906f44b227efc96efb49b37e9b7c57df043d19a19787740cdd2d66671ce50"
+  }
+}

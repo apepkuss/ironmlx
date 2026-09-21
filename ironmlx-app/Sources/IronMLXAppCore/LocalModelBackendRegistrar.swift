@@ -265,7 +265,8 @@ public enum LocalModelBackendRegistrar {
                         ? parameters?.promptLookupConfig
                         : nil,
                     samplingDefaults: (parameters?.samplingDefaults ?? .empty)
-                        .filtered(for: capabilities)
+                        .filtered(for: capabilities),
+                    audio: try scanner.audioResources(for: model.id)
                 )
             } catch {
                 failed.append(

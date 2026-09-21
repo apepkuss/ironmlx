@@ -1,6 +1,7 @@
 import Foundation
 
 public struct BackendRecoveryModel: Codable, Equatable, Sendable {
+    public var audio: BackendAudioResources?
     public var id: String
     public var modelDir: String?
     public var isDefault: Bool
@@ -30,7 +31,8 @@ public struct BackendRecoveryModel: Codable, Equatable, Sendable {
         dflash2TensorBatchMaxWidth: Int? = nil,
         promptLookup: BackendPromptLookupConfig?,
         samplingDefaults: BackendSamplingDefaults,
-        capabilities: BackendModelCapabilities? = nil
+        capabilities: BackendModelCapabilities? = nil,
+        audio: BackendAudioResources? = nil
     ) {
         self.id = id
         self.modelDir = modelDir
@@ -46,6 +48,7 @@ public struct BackendRecoveryModel: Codable, Equatable, Sendable {
         self.promptLookup = promptLookup
         self.samplingDefaults = samplingDefaults
         self.capabilities = capabilities
+        self.audio = audio
     }
 }
 
@@ -111,7 +114,8 @@ public struct BackendRecoverySnapshot: Codable, Equatable, Sendable {
                 promptLookup: supportsPromptLookup ? parameters?.promptLookupConfig : nil,
                 samplingDefaults: (parameters?.samplingDefaults ?? .empty)
                     .filtered(for: capabilities),
-                capabilities: capabilities
+                capabilities: capabilities,
+                audio: try? scanner.audioResources(for: model)
             )
         }
         return BackendRecoverySnapshot(config: config, models: models)

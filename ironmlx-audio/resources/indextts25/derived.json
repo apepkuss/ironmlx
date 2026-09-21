@@ -1,0 +1,273 @@
+{
+  "allowed_unused": {
+    "campplus.safetensors": [
+      "head.bn1.num_batches_tracked",
+      "head.bn2.num_batches_tracked",
+      "head.layer1.0.bn1.num_batches_tracked",
+      "head.layer1.0.bn2.num_batches_tracked",
+      "head.layer1.0.shortcut.1.num_batches_tracked",
+      "head.layer1.1.bn1.num_batches_tracked",
+      "head.layer1.1.bn2.num_batches_tracked",
+      "head.layer2.0.bn1.num_batches_tracked",
+      "head.layer2.0.bn2.num_batches_tracked",
+      "head.layer2.0.shortcut.1.num_batches_tracked",
+      "head.layer2.1.bn1.num_batches_tracked",
+      "head.layer2.1.bn2.num_batches_tracked",
+      "xvector.block1.tdnnd1.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block1.tdnnd1.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block1.tdnnd10.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block1.tdnnd10.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block1.tdnnd11.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block1.tdnnd11.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block1.tdnnd12.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block1.tdnnd12.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block1.tdnnd2.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block1.tdnnd2.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block1.tdnnd3.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block1.tdnnd3.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block1.tdnnd4.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block1.tdnnd4.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block1.tdnnd5.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block1.tdnnd5.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block1.tdnnd6.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block1.tdnnd6.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block1.tdnnd7.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block1.tdnnd7.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block1.tdnnd8.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block1.tdnnd8.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block1.tdnnd9.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block1.tdnnd9.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd1.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd1.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd10.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd10.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd11.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd11.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd12.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd12.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd13.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd13.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd14.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd14.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd15.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd15.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd16.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd16.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd17.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd17.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd18.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd18.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd19.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd19.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd2.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd2.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd20.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd20.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd21.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd21.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd22.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd22.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd23.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd23.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd24.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd24.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd3.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd3.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd4.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd4.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd5.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd5.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd6.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd6.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd7.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd7.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd8.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd8.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd9.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block2.tdnnd9.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block3.tdnnd1.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block3.tdnnd1.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block3.tdnnd10.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block3.tdnnd10.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block3.tdnnd11.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block3.tdnnd11.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block3.tdnnd12.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block3.tdnnd12.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block3.tdnnd13.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block3.tdnnd13.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block3.tdnnd14.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block3.tdnnd14.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block3.tdnnd15.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block3.tdnnd15.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block3.tdnnd16.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block3.tdnnd16.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block3.tdnnd2.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block3.tdnnd2.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block3.tdnnd3.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block3.tdnnd3.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block3.tdnnd4.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block3.tdnnd4.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block3.tdnnd5.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block3.tdnnd5.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block3.tdnnd6.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block3.tdnnd6.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block3.tdnnd7.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block3.tdnnd7.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block3.tdnnd8.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block3.tdnnd8.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.block3.tdnnd9.nonlinear1.batchnorm.num_batches_tracked",
+      "xvector.block3.tdnnd9.nonlinear2.batchnorm.num_batches_tracked",
+      "xvector.dense.nonlinear.batchnorm.num_batches_tracked",
+      "xvector.out_nonlinear.batchnorm.num_batches_tracked",
+      "xvector.tdnn.nonlinear.batchnorm.num_batches_tracked",
+      "xvector.transit1.nonlinear.batchnorm.num_batches_tracked",
+      "xvector.transit2.nonlinear.batchnorm.num_batches_tracked",
+      "xvector.transit3.nonlinear.batchnorm.num_batches_tracked"
+    ]
+  },
+  "components": {
+    "auxiliary.safetensors": {
+      "bytes": 438360,
+      "name": "auxiliary.safetensors",
+      "sha256": "befcc769a0a1cfb85b9958b64973d09da52407972ea19abf45b57a1f0d46caac"
+    },
+    "campplus.safetensors": {
+      "bytes": 27831360,
+      "name": "campplus.safetensors",
+      "sha256": "baa92627d5a5a9ef39264fa3d619847ab2fce3d94e7d235e4fe7cf4544cbc897"
+    }
+  },
+  "family": "indextts2_5",
+  "files": [
+    {
+      "bytes": 10553,
+      "path": "notices/main/LICENSE",
+      "sha256": "e41645104f7e83d614d94daf93c452ebeaeca12415865b0f76cc02374ad3a223"
+    },
+    {
+      "bytes": 2902,
+      "path": "notices/main/README.md",
+      "sha256": "12cd5544ef9a231b313582abb599762632aea63437dc5ff4de726b3988fc6c89"
+    },
+    {
+      "bytes": 2020,
+      "path": "notices/campplus/README.md",
+      "sha256": "c6025ccc42e290640f44e06f0742c584b99afe738bb819d74889330c692446f9"
+    },
+    {
+      "bytes": 537,
+      "path": "notices/campplus/config.yaml",
+      "sha256": "17342041bd5b22f6fd7e32f6e7a267b0bf65f018c0a721bada6547e3d28fbfc9"
+    },
+    {
+      "bytes": 581,
+      "path": "notices/campplus/configuration.json",
+      "sha256": "6f7acaf1e81ca121f4a3c71b6ddb66beec24350a3ef330e2c846f17829176a8f"
+    },
+    {
+      "bytes": 4792,
+      "path": "notices/w2v-bert/README.md",
+      "sha256": "478afeacb3b4ce0d86b361f099416d28a7e7673ade31775c0f85f396979b7fc2"
+    },
+    {
+      "bytes": 1874,
+      "path": "w2v-bert/config.json",
+      "sha256": "f5572bd5998b68182e9c328a43127ed21fed687f6910497136b91a4e3b0e3675"
+    },
+    {
+      "bytes": 275,
+      "path": "w2v-bert/preprocessor_config.json",
+      "sha256": "8e6281aad64f97e40534135a59dcc5d33571efae376f2a25adf5551951897ab4"
+    }
+  ],
+  "input_digest": "52aee0db6ca4bccba39f61b571ce6b753683b3f89f521692afc56b151992ecc6",
+  "inputs": [
+    {
+      "bytes": 57170,
+      "path": "feat1.pt",
+      "role": "snapshot",
+      "sha256": "f219cb447d80216ba615666da2ff8d63ac544eee26657f3a7b278692bf7a67c4"
+    },
+    {
+      "bytes": 374866,
+      "path": "feat2.pt",
+      "role": "snapshot",
+      "sha256": "9c4292e96dee535aea9a6206e9a0c856dd578dde9212acdb16dd3ada4d12bf80"
+    },
+    {
+      "bytes": 9343,
+      "path": "wav2vec2bert_stats.pt",
+      "role": "snapshot",
+      "sha256": "c9c176c2b8850ab2e3ba828bbfa969deaf4566ce55db5f2687b8430b87526ad2"
+    },
+    {
+      "bytes": 2322063736,
+      "path": "model.safetensors",
+      "role": "snapshot",
+      "sha256": "eb890c9660ed6e3414b6812e27257b8ce5454365d5490d3ad581ea60b93be043"
+    },
+    {
+      "bytes": 10553,
+      "path": "LICENSE",
+      "role": "snapshot",
+      "sha256": "e41645104f7e83d614d94daf93c452ebeaeca12415865b0f76cc02374ad3a223"
+    },
+    {
+      "bytes": 2902,
+      "path": "README.md",
+      "role": "snapshot",
+      "sha256": "12cd5544ef9a231b313582abb599762632aea63437dc5ff4de726b3988fc6c89"
+    },
+    {
+      "bytes": 28036335,
+      "path": "campplus_cn_common.bin",
+      "role": "campplus",
+      "sha256": "3388cf5fd3493c9ac9c69851d8e7a8badcfb4f3dc631020c4961371646d5ada8"
+    },
+    {
+      "bytes": 537,
+      "path": "config.yaml",
+      "role": "campplus",
+      "sha256": "17342041bd5b22f6fd7e32f6e7a267b0bf65f018c0a721bada6547e3d28fbfc9"
+    },
+    {
+      "bytes": 581,
+      "path": "configuration.json",
+      "role": "campplus",
+      "sha256": "6f7acaf1e81ca121f4a3c71b6ddb66beec24350a3ef330e2c846f17829176a8f"
+    },
+    {
+      "bytes": 2020,
+      "path": "README.md",
+      "role": "campplus",
+      "sha256": "c6025ccc42e290640f44e06f0742c584b99afe738bb819d74889330c692446f9"
+    },
+    {
+      "bytes": 1874,
+      "path": "config.json",
+      "role": "w2v",
+      "sha256": "f5572bd5998b68182e9c328a43127ed21fed687f6910497136b91a4e3b0e3675"
+    },
+    {
+      "bytes": 275,
+      "path": "preprocessor_config.json",
+      "role": "w2v",
+      "sha256": "8e6281aad64f97e40534135a59dcc5d33571efae376f2a25adf5551951897ab4"
+    },
+    {
+      "bytes": 4792,
+      "path": "README.md",
+      "role": "w2v",
+      "sha256": "478afeacb3b4ce0d86b361f099416d28a7e7673ade31775c0f85f396979b7fc2"
+    }
+  ],
+  "recipe": "indextts25-native-resources-v1",
+  "reuse_weight": {
+    "bytes": 2322063736,
+    "path": "model.safetensors",
+    "role": "snapshot",
+    "sha256": "eb890c9660ed6e3414b6812e27257b8ce5454365d5490d3ad581ea60b93be043"
+  },
+  "schema_version": 1,
+  "source_revision": "65644cd70da15309ffeb74aa03f3686bb04e3eb1"
+}

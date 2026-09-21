@@ -2,6 +2,22 @@
   "bundled_assets": {
     "assets": [
       {
+        "bundled_hash_scope": "Attribution notice text; not a hash of compiled implementations",
+        "bundled_modifications": "Notice retained with the complete accompanying upstream license texts. External model and dictionary distributions are not bundled.",
+        "bundled_path": "ironmlx-audio/NOTICE.md",
+        "bundled_sha256": "4567acc63653b7a64163e15b5e9bae0cdb69844caa08f3b273ecfb298d67e987",
+        "component": "Audio implementation attribution notice",
+        "copyright": "Upstream authors are identified in the bundled attribution notice.",
+        "license": "Apache-2.0",
+        "license_file": "audio-attributions.txt",
+        "license_sha256": "4567acc63653b7a64163e15b5e9bae0cdb69844caa08f3b273ecfb298d67e987",
+        "repository": "https://github.com/apepkuss/ironmlx",
+        "revision": "555dcc1d484737c4235cd221278244be89876131",
+        "source_path": "ironmlx-audio/NOTICE.md",
+        "source_url": "https://github.com/apepkuss/ironmlx",
+        "usage": "Preserves upstream copyright, adaptation and license-selection notices for audio code."
+      },
+      {
         "bundled_modifications": "Wrapped the upstream PNG in SVG for local Bundle loading; artwork unchanged.",
         "bundled_path": "ironmlx-app/Sources/IronMLXAppCore/Resources/hermes-agent-logo.svg",
         "bundled_sha256": "81ee441b8ee6e4e0cf086d7606d358fa8a8ebd143fd33e206a6ad9e5705bbceb",
@@ -38,6 +54,54 @@
         "source_url": "https://github.com/lobehub/lobe-icons/blob/a94750e3f5f8fc33757b839d85030e742284e43a/src/HuggingFace/components/Color.tsx",
         "upstream_sha256": "f4eaafbfd6d8b69bb2e4f63656f93cdce59fa39762c08c022996e8d16a99d48b",
         "usage": "Identifies a supported model download source; no affiliation or endorsement."
+      },
+      {
+        "bundled_hash_scope": "License notice text; not a hash of the compiled or adapted implementation",
+        "bundled_modifications": "License text retained for native code linked through ironmlx-audio or algorithms adapted in its implementation. Model weights and external linguistic resources are not bundled.",
+        "bundled_path": "ironmlx-audio/licenses/mlx-indextts2-MIT.txt",
+        "bundled_sha256": "54ae94cdbc4f164b12a826a001b2aef9dae187846b7b382878a3515684c81f34",
+        "component": "IndexTTS implementation MIT notice",
+        "copyright": "Copyright (c) 2026 Didi",
+        "license": "MIT",
+        "license_file": "audio-mlx-indextts2-MIT.txt",
+        "license_sha256": "54ae94cdbc4f164b12a826a001b2aef9dae187846b7b382878a3515684c81f34",
+        "repository": "https://github.com/vanch007/mlx-indextts2",
+        "revision": "a7666367b8551656a2029ad75f259cb5e4936b3b",
+        "source_path": "LICENSE",
+        "source_url": "https://github.com/vanch007/mlx-indextts2",
+        "usage": "Required attribution for audio implementation distributed with the server."
+      },
+      {
+        "bundled_hash_scope": "License notice text; not a hash of the compiled or adapted implementation",
+        "bundled_modifications": "License text retained for native code linked through ironmlx-audio or algorithms adapted in its implementation. Model weights and external linguistic resources are not bundled.",
+        "bundled_path": "ironmlx-audio/licenses/librosa-ISC.txt",
+        "bundled_sha256": "1746ca32b53fa31941c38b63a986e4126ab998e81a2f73a566000847a588e2a3",
+        "component": "librosa algorithm ISC notice",
+        "copyright": "Copyright (c) 2013-2023 librosa development team",
+        "license": "ISC",
+        "license_file": "audio-librosa-ISC.txt",
+        "license_sha256": "1746ca32b53fa31941c38b63a986e4126ab998e81a2f73a566000847a588e2a3",
+        "repository": "https://github.com/librosa/librosa",
+        "revision": "0.11.0",
+        "source_path": "LICENSE.md",
+        "source_url": "https://github.com/librosa/librosa",
+        "usage": "Required attribution for audio implementation distributed with the server."
+      },
+      {
+        "bundled_hash_scope": "License notice text; not a hash of the compiled or adapted implementation",
+        "bundled_modifications": "License text retained for native code linked through ironmlx-audio or algorithms adapted in its implementation. Model weights and external linguistic resources are not bundled.",
+        "bundled_path": "ironmlx-audio/licenses/MeCab-BSD.txt",
+        "bundled_sha256": "62f4b23450a9ad40e4db8063d45c1d13c78d07ca27c9ada62c4ca9c11c1f3e7b",
+        "component": "MeCab native BSD notice",
+        "copyright": "Copyright (c) 2001-2008 Taku Kudo; Copyright (c) 2004-2008 Nippon Telegraph and Telephone Corporation",
+        "license": "BSD-3-Clause",
+        "license_file": "audio-MeCab-BSD.txt",
+        "license_sha256": "62f4b23450a9ad40e4db8063d45c1d13c78d07ca27c9ada62c4ca9c11c1f3e7b",
+        "repository": "https://github.com/taku910/mecab",
+        "revision": "0.1.0 (mecab-sys)",
+        "source_path": "mecab/COPYING",
+        "source_url": "https://github.com/taku910/mecab",
+        "usage": "Required attribution for audio implementation distributed with the server."
       },
       {
         "brand_usage_reference": "https://modelscope.cn/models/modelscope/logos",
@@ -77,10 +141,26 @@
         "upstream_sha256": "727019727006f26fe3d1f187d3fe9830f26213733a51721096a2044ab059cf61",
         "usage": "Identifies the supported oh-my-pi integration.",
         "version": "v17.2.12"
+      },
+      {
+        "bundled_hash_scope": "License notice text; not a hash of the compiled or adapted implementation",
+        "bundled_modifications": "License text retained for native code linked through ironmlx-audio or algorithms adapted in its implementation. Model weights and external linguistic resources are not bundled.",
+        "bundled_path": "ironmlx-audio/licenses/torchaudio-BSD.txt",
+        "bundled_sha256": "c23327aa7dc5240acce57117302ed02c38886f10fa2e41fb33af86812fd3f88a",
+        "component": "torchaudio algorithm BSD notice",
+        "copyright": "Copyright (c) 2017 Facebook Inc. (Soumith Chintala)",
+        "license": "BSD-2-Clause",
+        "license_file": "audio-torchaudio-BSD.txt",
+        "license_sha256": "c23327aa7dc5240acce57117302ed02c38886f10fa2e41fb33af86812fd3f88a",
+        "repository": "https://github.com/pytorch/audio",
+        "revision": "v2.10.0",
+        "source_path": "LICENSE",
+        "source_url": "https://github.com/pytorch/audio",
+        "usage": "Required attribution for audio implementation distributed with the server."
       }
     ],
     "manifest": "compliance/bundled-assets.json",
-    "manifest_sha256": "7abfe242750f5384ff826d11f776db1add613b13861d278b7bee57373c1e2953"
+    "manifest_sha256": "feea9fad1c038daecd9ea9b26cd517fccc3a23e727a6b4b5b77a70d8e35f269f"
   },
   "generation": {
     "cargo_about_config": "about.toml",
@@ -272,6 +352,16 @@
         "version": "1.9.2"
       },
       {
+        "license_expression": "MIT OR Apache-2.0",
+        "license_files": [
+          "rust-license-4da95ec4ecb65b73.txt"
+        ],
+        "name": "arrayvec",
+        "repository": "https://github.com/bluss/arrayvec",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "0.7.8"
+      },
+      {
         "license_expression": "Apache-2.0 OR MIT",
         "license_files": [
           "rust-license-23f18e03dc49df91.txt"
@@ -382,6 +472,46 @@
         "version": "0.22.1"
       },
       {
+        "license_expression": "Apache-2.0 OR MIT",
+        "license_files": [
+          "rust-license-b05785f9f18e6716.txt"
+        ],
+        "name": "bimap",
+        "repository": "https://github.com/billyrieger/bimap-rs/",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "0.6.3"
+      },
+      {
+        "license_expression": "Apache-2.0 OR MIT",
+        "license_files": [
+          "rust-license-f51ac2c59a222f74.txt"
+        ],
+        "name": "bit-set",
+        "repository": "https://github.com/contain-rs/bit-set",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "0.8.0"
+      },
+      {
+        "license_expression": "Apache-2.0 OR MIT",
+        "license_files": [
+          "rust-license-f51ac2c59a222f74.txt"
+        ],
+        "name": "bit-vec",
+        "repository": "https://github.com/contain-rs/bit-vec",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "0.8.0"
+      },
+      {
+        "license_expression": "MIT OR Apache-2.0",
+        "license_files": [
+          "rust-license-6485b8ed310d3f03.txt"
+        ],
+        "name": "bitflags",
+        "repository": "https://github.com/bitflags/bitflags",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "1.3.2"
+      },
+      {
         "license_expression": "MIT OR Apache-2.0",
         "license_files": [
           "rust-license-6485b8ed310d3f03.txt"
@@ -420,6 +550,16 @@
         "repository": "https://github.com/yescallop/borrow-or-share",
         "source": "registry+https://github.com/rust-lang/crates.io-index",
         "version": "0.2.4"
+      },
+      {
+        "license_expression": "MIT OR Apache-2.0",
+        "license_files": [
+          "rust-license-6b7374c39a57e57f.txt"
+        ],
+        "name": "bstr",
+        "repository": "https://github.com/BurntSushi/bstr",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "1.13.1"
       },
       {
         "license_expression": "Zlib OR Apache-2.0 OR MIT",
@@ -853,6 +993,16 @@
         "version": "0.5.4"
       },
       {
+        "license_expression": "MIT",
+        "license_files": [
+          "rust-license-3bc70e239e912727.txt"
+        ],
+        "name": "fancy-regex",
+        "repository": "https://github.com/fancy-regex/fancy-regex",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "0.17.0"
+      },
+      {
         "license_expression": "Apache-2.0 OR MIT",
         "license_files": [
           "rust-license-23f18e03dc49df91.txt"
@@ -1051,6 +1201,16 @@
         "repository": "https://github.com/fizyk20/generic-array.git",
         "source": "registry+https://github.com/rust-lang/crates.io-index",
         "version": "0.14.7"
+      },
+      {
+        "license_expression": "MIT",
+        "license_files": [
+          "rust-license-8a28736d1243c67e.txt"
+        ],
+        "name": "generic-array",
+        "repository": "https://github.com/fizyk20/generic-array.git",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "1.4.5"
       },
       {
         "license_expression": "MIT OR Apache-2.0",
@@ -1395,12 +1555,32 @@
       {
         "license_expression": "MIT OR Apache-2.0",
         "license_files": [
+          "rust-license-7576269ea71f767b.txt"
+        ],
+        "name": "itertools",
+        "repository": "https://github.com/rust-itertools/itertools",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "0.14.0"
+      },
+      {
+        "license_expression": "MIT OR Apache-2.0",
+        "license_files": [
           "rust-license-23f18e03dc49df91.txt"
         ],
         "name": "itoa",
         "repository": "https://github.com/dtolnay/itoa",
         "source": "registry+https://github.com/rust-lang/crates.io-index",
         "version": "1.0.18"
+      },
+      {
+        "license_expression": "MIT OR Apache-2.0",
+        "license_files": [
+          "rust-license-378f5840b258e277.txt"
+        ],
+        "name": "jobserver",
+        "repository": "https://github.com/rust-lang/jobserver-rs",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "0.1.35"
       },
       {
         "license_expression": "MIT OR Apache-2.0",
@@ -1512,6 +1692,16 @@
         "repository": "https://github.com/ibraheemdev/matchit",
         "source": "registry+https://github.com/rust-lang/crates.io-index",
         "version": "0.7.3"
+      },
+      {
+        "license_expression": "MIT OR Apache-2.0",
+        "license_files": [
+          "rust-license-b05785f9f18e6716.txt"
+        ],
+        "name": "mecab-sys",
+        "repository": "https://github.com/naughie/lita-tokenizers",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "0.1.0"
       },
       {
         "license_expression": "Unlicense OR MIT",
@@ -1702,6 +1892,16 @@
         "repository": "https://github.com/soc/option-ext.git",
         "source": "registry+https://github.com/rust-lang/crates.io-index",
         "version": "0.2.0"
+      },
+      {
+        "license_expression": "MIT",
+        "license_files": [
+          "rust-license-f7715d38a3fa1b4a.txt"
+        ],
+        "name": "ordered-float",
+        "repository": "https://github.com/reem/rust-ordered-float",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "5.5.0"
       },
       {
         "license_expression": "Apache-2.0 OR MIT",
@@ -2045,6 +2245,26 @@
         "version": "0.17.14"
       },
       {
+        "license_expression": "Apache-2.0 OR MIT",
+        "license_files": [
+          "rust-license-23f18e03dc49df91.txt"
+        ],
+        "name": "rustc-hash",
+        "repository": "https://github.com/rust-lang/rustc-hash",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "2.1.3"
+      },
+      {
+        "license_expression": "MIT OR Apache-2.0",
+        "license_files": [
+          "rust-license-b05785f9f18e6716.txt"
+        ],
+        "name": "rustfst",
+        "repository": "https://github.com/Garvys/rustfst",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "1.3.1"
+      },
+      {
         "license_expression": "Apache-2.0 OR ISC OR MIT",
         "license_files": [
           "rust-license-709e3175b4212f7b.txt"
@@ -2315,6 +2535,76 @@
         "version": "2.6.1"
       },
       {
+        "license_expression": "Apache-2.0",
+        "license_files": [
+          "rust-license-17de84ce8b605a18.txt"
+        ],
+        "name": "superslice",
+        "repository": "https://github.com/alkis/superslice-rs",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "1.0.0"
+      },
+      {
+        "license_expression": "MPL-2.0",
+        "license_files": [
+          "rust-license-66a3107d5ad6a058.txt"
+        ],
+        "name": "symphonia",
+        "repository": "https://github.com/pdeljanov/Symphonia",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "0.5.5"
+      },
+      {
+        "license_expression": "MPL-2.0",
+        "license_files": [
+          "rust-license-66a3107d5ad6a058.txt"
+        ],
+        "name": "symphonia-bundle-flac",
+        "repository": "https://github.com/pdeljanov/Symphonia",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "0.5.5"
+      },
+      {
+        "license_expression": "MPL-2.0",
+        "license_files": [
+          "rust-license-66a3107d5ad6a058.txt"
+        ],
+        "name": "symphonia-bundle-mp3",
+        "repository": "https://github.com/pdeljanov/Symphonia",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "0.5.5"
+      },
+      {
+        "license_expression": "MPL-2.0",
+        "license_files": [
+          "rust-license-66a3107d5ad6a058.txt"
+        ],
+        "name": "symphonia-core",
+        "repository": "https://github.com/pdeljanov/Symphonia",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "0.5.5"
+      },
+      {
+        "license_expression": "MPL-2.0",
+        "license_files": [
+          "rust-license-66a3107d5ad6a058.txt"
+        ],
+        "name": "symphonia-metadata",
+        "repository": "https://github.com/pdeljanov/Symphonia",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "0.5.5"
+      },
+      {
+        "license_expression": "MPL-2.0",
+        "license_files": [
+          "rust-license-66a3107d5ad6a058.txt"
+        ],
+        "name": "symphonia-utils-xiph",
+        "repository": "https://github.com/pdeljanov/Symphonia",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "0.5.5"
+      },
+      {
         "license_expression": "MIT OR Apache-2.0",
         "license_files": [
           "rust-license-23f18e03dc49df91.txt"
@@ -2433,6 +2723,16 @@
         "repository": "https://github.com/Amanieu/thread_local-rs",
         "source": "registry+https://github.com/rust-lang/crates.io-index",
         "version": "1.1.10"
+      },
+      {
+        "license_expression": "MIT",
+        "license_files": [
+          "rust-license-b05785f9f18e6716.txt"
+        ],
+        "name": "tiktoken-rs",
+        "repository": "https://github.com/zurawiki/tiktoken-rs",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "0.12.0"
       },
       {
         "license_expression": "Unicode-3.0",
@@ -3003,6 +3303,13 @@
         "sha256": "162ce11ad71338d0a0c6ebaf5c48af72c6ae237b468859d3656fe2d9ed3f3a85"
       },
       {
+        "file": "rust-license-17de84ce8b605a18.txt",
+        "license_ids": [
+          "Apache-2.0"
+        ],
+        "sha256": "17de84ce8b605a18699d04d6d9371da2aacc0e2af58f2128e87f75e6d190f901"
+      },
+      {
         "file": "rust-license-1d4c38d56650edc2.txt",
         "license_ids": [
           "Zlib"
@@ -3115,6 +3422,13 @@
         "sha256": "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397"
       },
       {
+        "file": "rust-license-3bc70e239e912727.txt",
+        "license_ids": [
+          "MIT"
+        ],
+        "sha256": "3bc70e239e91272782006c638fc0452a714d384224f11f0923036b7be07cf9b5"
+      },
+      {
         "file": "rust-license-3c125f249fc6fb19.txt",
         "license_ids": [
           "MIT"
@@ -3197,6 +3511,13 @@
           "MIT"
         ],
         "sha256": "4cada0bd02ea3692eee6f16400d86c6508bbd3bafb2b65fed0419f36d4f83e8f"
+      },
+      {
+        "file": "rust-license-4da95ec4ecb65b73.txt",
+        "license_ids": [
+          "MIT"
+        ],
+        "sha256": "4da95ec4ecb65b738d470b7d762894ad9c97da93e6cbfb18b570fc2c96f4b871"
       },
       {
         "file": "rust-license-4dbda04344456f09.txt",
@@ -3302,6 +3623,13 @@
           "MIT"
         ],
         "sha256": "6a2e0ade09a7d5f816f11566fee2b151b32235a7fad52b41d49cce96f833c1a9"
+      },
+      {
+        "file": "rust-license-6b7374c39a57e57f.txt",
+        "license_ids": [
+          "MIT"
+        ],
+        "sha256": "6b7374c39a57e57fc2c38eb529c4c88340152b10f51dd5ae2d819dfa67f61715"
       },
       {
         "file": "rust-license-6efb0476a1cc0850.txt",
@@ -3710,6 +4038,20 @@
         "sha256": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2"
       },
       {
+        "file": "rust-license-f51ac2c59a222f74.txt",
+        "license_ids": [
+          "MIT"
+        ],
+        "sha256": "f51ac2c59a222f7476ce507ca879960e2b64ea64bb2786eefdbeb7b0b538d1b7"
+      },
+      {
+        "file": "rust-license-f7715d38a3fa1b4a.txt",
+        "license_ids": [
+          "MIT"
+        ],
+        "sha256": "f7715d38a3fa1b4ac97c5729740752505a39cb92ee83ab5b102aeb5eaa7cdea4"
+      },
+      {
         "file": "rust-license-f7db81051789b729.txt",
         "license_ids": [
           "Unicode-3.0"
@@ -3772,6 +4114,6 @@
       }
     ],
     "manifest": "ironmlx-app/Package.swift",
-    "manifest_sha256": "a145c150d187e78184a20a0a3bb2e087f5783be04cad4ec20813e0af5677a3be"
+    "manifest_sha256": "1c50d29e2b1bd5b88ec5191ae9c193326607f1ad2dbdbe33cfa1228ad29786bf"
   }
 }

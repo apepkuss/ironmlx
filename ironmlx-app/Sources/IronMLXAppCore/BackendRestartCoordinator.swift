@@ -11,7 +11,8 @@ public protocol BackendModelLoading: Sendable {
         mtpModelDir: String?,
         mtpDraftTokens: Int?,
         promptLookup: BackendPromptLookupConfig?,
-        samplingDefaults: BackendSamplingDefaults
+        samplingDefaults: BackendSamplingDefaults,
+        audio: BackendAudioResources?
     ) async throws -> BackendModelAdminResponse
     func loadModel(
         model: String,
@@ -23,7 +24,8 @@ public protocol BackendModelLoading: Sendable {
         mtpDraftTokens: Int?,
         promptLookup: BackendPromptLookupConfig?,
         reloadWhenIdle: Bool,
-        samplingDefaults: BackendSamplingDefaults
+        samplingDefaults: BackendSamplingDefaults,
+        audio: BackendAudioResources?
     ) async throws -> BackendModelAdminResponse
 }
 
@@ -169,7 +171,8 @@ public struct BackendRestartCoordinator: Sendable {
                     mtpDraftTokens: model.mtpDraftTokens,
                     promptLookup: model.promptLookup,
                     reloadWhenIdle: false,
-                    samplingDefaults: model.samplingDefaults
+                    samplingDefaults: model.samplingDefaults,
+                    audio: try scanner.audioResources(for: model.id) ?? model.audio
                 )
                 loadedModels.append(model.id)
             } catch {

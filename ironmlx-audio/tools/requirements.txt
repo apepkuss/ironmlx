@@ -1,0 +1,13 @@
+# Offline conversion and reference generation only. Python 3.11, Apple Silicon.
+numpy==2.4.3
+torch==2.10.0
+torchaudio==2.10.0
+safetensors==0.7.0
+transformers==5.3.0
+mlx==0.31.1
+librosa==0.11.0
+soundfile==0.13.1
+omegaconf==2.3.0
+einops==0.8.2
+tiktoken==0.13.0
+PyYAML==6.0.3

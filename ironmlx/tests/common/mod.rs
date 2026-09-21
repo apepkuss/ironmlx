@@ -2,5 +2,7 @@
 #![allow(dead_code)]
 
 pub mod clean_state;
+#[path = "../../../ironmlx-lm/tests/common/constrained.rs"]
 pub mod constrained;
+#[path = "../../../ironmlx-lm/tests/common/minicpmv46_parity.rs"]
 pub mod minicpmv46_parity;

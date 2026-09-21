@@ -98,7 +98,7 @@ DFlash2 的采样、并发及互斥组合见 [DFlash2 说明](dflash2-server-api
 python3 -m venv /tmp/ironmlx-api-contract-sdk
 /tmp/ironmlx-api-contract-sdk/bin/python -m pip install -r scripts/api-contract-sdk/requirements.txt
 /tmp/ironmlx-api-contract-sdk/bin/python scripts/api-contract-sdk/contract.py --fixture
-cargo test --locked --all-features -p ironmlx --lib core::server::
+cargo test --locked --all-features -p ironmlx --lib server::
 ```
 
 ## 维护要求

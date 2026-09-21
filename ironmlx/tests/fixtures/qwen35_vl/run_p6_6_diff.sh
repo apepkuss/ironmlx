@@ -68,7 +68,7 @@ for ((i=0; i<N_IMAGES; i++)); do
     MLX_DIR="$MLX_DIR" \
         IMAGE_PATH="$MULTI_DIR/image_${i}.jpg" \
         IRONMLX_PREPROCESS_DUMP_DIR="$SUBDIR" \
-        cargo test -p ironmlx --features vision-dump --release \
+        cargo test -p ironmlx-lm --features vision-dump --release \
             --test preprocess_dump -- --ignored 2>&1 | tail -3
     mv "$SUBDIR/00_ironmlx_pv_native.safetensors" "$IRON_PRE_DIR/image_${i}_pv_native.safetensors"
     mv "$SUBDIR/00_ironmlx_pv_vlmlayout.safetensors" "$IRON_PRE_DIR/image_${i}_pv_vlmlayout.safetensors"
@@ -82,7 +82,7 @@ QWEN35_MODEL="$QWEN35_MODEL" \
 IRONMLX_VISION_DUMP_DIR="$RUST_DIR" \
 PIXEL_VALUES_PATH="$PY_DIR/expected_pixel_values.safetensors" \
 IMAGE_GRID_THW_PATH="$PY_DIR/expected_image_grid_thw.npy" \
-    cargo test -p ironmlx --features vision-dump --release \
+    cargo test -p ironmlx-lm --features vision-dump --release \
         --test multi_image_dump -- --ignored 2>&1 | tail -5
 echo "  RUST_DIR files: $(ls "$RUST_DIR" | wc -l)"
 
@@ -108,7 +108,7 @@ ln -sf "$PY_DIR/expected_first_token.txt" "$MULTI_DIR/expected_first_token.txt" 
 
 QWEN35_MODEL="$QWEN35_MODEL" \
     MLX_DIR="$MLX_DIR" \
-    cargo test -p ironmlx --release --test logits_match -- --ignored --nocapture 2>&1 \
+    cargo test -p ironmlx-lm --release --test logits_match -- --ignored --nocapture 2>&1 \
     | tee "$REPORT_DIR/p6_6_logits_match.log" | tail -15
 
 echo "=== Done (N=$N_IMAGES). Reports in: $REPORT_DIR ==="

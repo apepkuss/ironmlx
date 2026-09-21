@@ -1,0 +1,476 @@
+{
+  "schema_version": 1,
+  "family": "indextts2_5",
+  "source": {
+    "repository": "mlx-community/IndexTTS-2.5-fp16",
+    "revision": "65644cd70da15309ffeb74aa03f3686bb04e3eb1",
+    "files": [
+      {
+        "path": "LICENSE",
+        "bytes": 10553,
+        "sha256": "e41645104f7e83d614d94daf93c452ebeaeca12415865b0f76cc02374ad3a223"
+      },
+      {
+        "path": "README.md",
+        "bytes": 2902,
+        "sha256": "12cd5544ef9a231b313582abb599762632aea63437dc5ff4de726b3988fc6c89"
+      },
+      {
+        "path": "bigvgan.safetensors",
+        "bytes": 224443177,
+        "sha256": "e69b708e7faac5bc4907e050909419dea214d250b11729f80855c95016fea7b5",
+        "tensor_count": 449
+      },
+      {
+        "path": "codec.safetensors",
+        "bytes": 101188975,
+        "sha256": "7ba36ba12dbc6f19adaf50bb4aebee2c4092526c7f4a56479ed1e72e2562009e",
+        "tensor_count": 241
+      },
+      {
+        "path": "config.json",
+        "bytes": 3464,
+        "sha256": "438e3e76610ddcc85f764cf0a06cde43df3937ac966dc2c199a52b5f9a7eee57"
+      },
+      {
+        "path": "config.yaml",
+        "bytes": 2663,
+        "sha256": "65d07de92a2c26843c14c797951613ef939593ae1e842f31ad7d9f2d04b6eb52"
+      },
+      {
+        "path": "conversion_report.json",
+        "bytes": 14651,
+        "sha256": "5b7ef86ab7f87bc648c5c858dbb29cdad8ed4159a24f4b6264a587ecea96458e"
+      },
+      {
+        "path": "feat1.pt",
+        "bytes": 57170,
+        "sha256": "f219cb447d80216ba615666da2ff8d63ac544eee26657f3a7b278692bf7a67c4"
+      },
+      {
+        "path": "feat2.pt",
+        "bytes": 374866,
+        "sha256": "9c4292e96dee535aea9a6206e9a0c856dd578dde9212acdb16dd3ada4d12bf80"
+      },
+      {
+        "path": "gpt.safetensors",
+        "bytes": 1624627631,
+        "sha256": "9603e2d7e36751133bf96a57c91c403ba40e419b646487aa93774aed25d8c757",
+        "tensor_count": 457
+      },
+      {
+        "path": "model.safetensors",
+        "bytes": 2322063736,
+        "sha256": "eb890c9660ed6e3414b6812e27257b8ce5454365d5490d3ad581ea60b93be043",
+        "tensor_count": 773
+      },
+      {
+        "path": "model_manifest.json",
+        "bytes": 15327,
+        "sha256": "8129939e45f444c45a00147064359b02b591b4d6f77e6ac3ef09be6091e4eba6"
+      },
+      {
+        "path": "multilingual_zh_ja_yue_char_del.tiktoken",
+        "bytes": 907395,
+        "sha256": "747979631e813193436aabcff7c1c235d37de8097b71c563ec8b63b7a515c718"
+      },
+      {
+        "path": "s2mel.safetensors",
+        "bytes": 207320482,
+        "sha256": "26f8c0d388716f1adfa29919d4b924683329cda470464786759e2461ffd5233f",
+        "tensor_count": 264
+      },
+      {
+        "path": "wav2vec2bert_stats.pt",
+        "bytes": 9343,
+        "sha256": "c9c176c2b8850ab2e3ba828bbfa969deaf4566ce55db5f2687b8430b87526ad2"
+      }
+    ]
+  },
+  "reference": {
+    "repository": "vanch007/mlx-indextts2",
+    "revision": "a7666367b8551656a2029ad75f259cb5e4936b3b"
+  },
+  "auxiliary_sources": [
+    {
+      "repository": "facebook/w2v-bert-2.0",
+      "revision": "da985ba0987f70aaeb84a80f2851cfac8c697a7b",
+      "files": [
+        {
+          "path": "config.json",
+          "bytes": 1874,
+          "sha256": "f5572bd5998b68182e9c328a43127ed21fed687f6910497136b91a4e3b0e3675"
+        },
+        {
+          "path": "preprocessor_config.json",
+          "bytes": 275,
+          "sha256": "8e6281aad64f97e40534135a59dcc5d33571efae376f2a25adf5551951897ab4"
+        },
+        {
+          "path": "README.md",
+          "bytes": 4792,
+          "sha256": "478afeacb3b4ce0d86b361f099416d28a7e7673ade31775c0f85f396979b7fc2"
+        }
+      ],
+      "reuse_weight": {
+        "from": "main_snapshot/model.safetensors",
+        "sha256": "eb890c9660ed6e3414b6812e27257b8ce5454365d5490d3ad581ea60b93be043",
+        "bytes": 2322063736
+      }
+    },
+    {
+      "repository": "funasr/campplus",
+      "revision": "e4b6ede7ce16997aff4ae69fbca1f0175e2afede",
+      "files": [
+        {
+          "path": "campplus_cn_common.bin",
+          "bytes": 28036335,
+          "sha256": "3388cf5fd3493c9ac9c69851d8e7a8badcfb4f3dc631020c4961371646d5ada8"
+        },
+        {
+          "path": "config.yaml",
+          "bytes": 537,
+          "sha256": "17342041bd5b22f6fd7e32f6e7a267b0bf65f018c0a721bada6547e3d28fbfc9"
+        },
+        {
+          "path": "configuration.json",
+          "bytes": 581,
+          "sha256": "6f7acaf1e81ca121f4a3c71b6ddb66beec24350a3ef330e2c846f17829176a8f"
+        },
+        {
+          "path": "README.md",
+          "bytes": 2020,
+          "sha256": "c6025ccc42e290640f44e06f0742c584b99afe738bb819d74889330c692446f9"
+        }
+      ]
+    }
+  ],
+  "text_resources": [
+    {
+      "name": "unidic-lite",
+      "version": "1.0.8",
+      "artifact": {
+        "url": "https://files.pythonhosted.org/packages/55/2b/8cf7514cb57d028abcef625afa847d60ff1ffbf0049c36b78faa7c35046f/unidic-lite-1.0.8.tar.gz",
+        "hash": "sha256:db9d4572d9fdd4d00a97949d4b0741ec480ee05a7e7e2e32f547500dae27b245",
+        "size": 47356746,
+        "upload-time": "2021-01-25T06:07:54.719Z"
+      },
+      "sha256": "db9d4572d9fdd4d00a97949d4b0741ec480ee05a7e7e2e32f547500dae27b245",
+      "members": [
+        {
+          "path": "unidic-lite-1.0.8/LICENSE",
+          "bytes": 1051,
+          "sha256": "34565936df8ff50715b729c065d0b2a475231da79efc4c2279e2bccee5f02a33"
+        },
+        {
+          "path": "unidic-lite-1.0.8/LICENSE.unidic",
+          "bytes": 1515,
+          "sha256": "d2cfdec25d7acb59b7aee2c9b36fd52470773cee58a2c340c179f435ab053bf2"
+        },
+        {
+          "path": "unidic-lite-1.0.8/PKG-INFO",
+          "bytes": 1915,
+          "sha256": "4b08defbcc8705eda4a379e6d8f3b0159d48367ea9ad8c4de655f9ba0ef61350"
+        },
+        {
+          "path": "unidic-lite-1.0.8/README.md",
+          "bytes": 1188,
+          "sha256": "58e4759636a2a2f8c660ba5d0fb7541cd4a003698c83bfabd08042a796676488"
+        },
+        {
+          "path": "unidic-lite-1.0.8/setup.cfg",
+          "bytes": 38,
+          "sha256": "1c473cbaee8da5fc46e7f0158794af5cea4414c34a3cf3f180c2001f5e38bd3e"
+        },
+        {
+          "path": "unidic-lite-1.0.8/setup.py",
+          "bytes": 883,
+          "sha256": "2a520968f093c397f3a73a12fbea036409f0d8d4eca73e5002e46e89e1f015a1"
+        },
+        {
+          "path": "unidic-lite-1.0.8/unidic_lite/__init__.py",
+          "bytes": 36,
+          "sha256": "8a3e798489319de7f732b8f635fe980c2d0317739ed93828c90995d083da5e9e"
+        },
+        {
+          "path": "unidic-lite-1.0.8/unidic_lite/dicdir/AUTHORS",
+          "bytes": 22,
+          "sha256": "a05bfdd3a9db36d9c64495f4a3d1824d05b95fbb4fc6dc07c660e91bc191c481"
+        },
+        {
+          "path": "unidic-lite-1.0.8/unidic_lite/dicdir/BSD",
+          "bytes": 1515,
+          "sha256": "7917ecfaf95a5ba7b4f45aa9a845ac931d79c90f39b7e711442dbc21c612560f"
+        },
+        {
+          "path": "unidic-lite-1.0.8/unidic_lite/dicdir/COPYING",
+          "bytes": 195,
+          "sha256": "178ffb7cbc2beadb0b87a14497e58222b484076ba7cfc8938a07ac7627fa22c4"
+        },
+        {
+          "path": "unidic-lite-1.0.8/unidic_lite/dicdir/ChangeLog",
+          "bytes": 947,
+          "sha256": "48035977a308fbb65326e4d81f15186cc241013b360ad161d82c7a151a5bd8a0"
+        },
+        {
+          "path": "unidic-lite-1.0.8/unidic_lite/dicdir/GPL",
+          "bytes": 17991,
+          "sha256": "a137434196f5e39d8836de895866fcfea074ad1b28243174ca1c4a585a1229b0"
+        },
+        {
+          "path": "unidic-lite-1.0.8/unidic_lite/dicdir/INSTALL",
+          "bytes": 22,
+          "sha256": "7b4f980a88e9e33e96ce57b75ace60bc936138ec7edac0b03ebbd9c9e3be7250"
+        },
+        {
+          "path": "unidic-lite-1.0.8/unidic_lite/dicdir/LGPL",
+          "bytes": 26428,
+          "sha256": "512d2d21b6b3384ba64781abb0208a1b87740bc31e2df48e2b206ddb7e4d5779"
+        },
+        {
+          "path": "unidic-lite-1.0.8/unidic_lite/dicdir/README.md",
+          "bytes": 402,
+          "sha256": "c2797d1bb416d9cb2f4f2d47e3ff8eb3e91a6bc35974a02ecc4ffcd4441607f7"
+        },
+        {
+          "path": "unidic-lite-1.0.8/unidic_lite/dicdir/char.bin",
+          "bytes": 262496,
+          "sha256": "dd31396563d8924645b80fd3c9aa7b13ca089d7748f25553a1d6bc3f9b511ae8"
+        },
+        {
+          "path": "unidic-lite-1.0.8/unidic_lite/dicdir/dicrc",
+          "bytes": 1444,
+          "sha256": "fcd17f35752de1417859a15e2e1f043d666da03f36dc632e8c0ed46887883a59"
+        },
+        {
+          "path": "unidic-lite-1.0.8/unidic_lite/dicdir/left-id.def",
+          "bytes": 449526,
+          "sha256": "c5ecfbe47a7d2d9f0404b6f9746e4ab96fc7f2f37e16224f0325a530ab67adf7"
+        },
+        {
+          "path": "unidic-lite-1.0.8/unidic_lite/dicdir/matrix.bin",
+          "bytes": 71544726,
+          "sha256": "88fb99efe1075d9b8b40e01bb2751e4095f1612618f2490af776eb5ed39190a9"
+        },
+        {
+          "path": "unidic-lite-1.0.8/unidic_lite/dicdir/mecabrc",
+          "bytes": 62,
+          "sha256": "72021ae17e5680bb4bb3b570e7e792b567e4c6758c7b17b39fbc7c8c499229b3"
+        },
+        {
+          "path": "unidic-lite-1.0.8/unidic_lite/dicdir/rewrite.def",
+          "bytes": 4061,
+          "sha256": "1e50193f2f8c3e0fbef2759cd78cb756ee3b93bfdf51cb66c85fddc243298bdb"
+        },
+        {
+          "path": "unidic-lite-1.0.8/unidic_lite/dicdir/right-id.def",
+          "bytes": 449526,
+          "sha256": "c5ecfbe47a7d2d9f0404b6f9746e4ab96fc7f2f37e16224f0325a530ab67adf7"
+        },
+        {
+          "path": "unidic-lite-1.0.8/unidic_lite/dicdir/sys.dic",
+          "bytes": 187680870,
+          "sha256": "122c4c91f026bf4b65bbe2dfd8b9f8eeb6ab56d8eb2a7287a68bca75708ba513"
+        },
+        {
+          "path": "unidic-lite-1.0.8/unidic_lite/dicdir/unidic-mecab.pdf",
+          "bytes": 21462,
+          "sha256": "6e5ecc4770881cfe2bca6c3b74ba20f1b07bba757c864548cb79f62b0550cc5b"
+        },
+        {
+          "path": "unidic-lite-1.0.8/unidic_lite/dicdir/unk.dic",
+          "bytes": 5475,
+          "sha256": "e3b92803feeb6c2712c796b905317ec192a59729d2c1e92b2728d454169541c4"
+        },
+        {
+          "path": "unidic-lite-1.0.8/unidic_lite/dicdir/version",
+          "bytes": 6,
+          "sha256": "9f6271951edca02e0c8a669a79930626717b77f0443ad8a327b93a52e4194829"
+        },
+        {
+          "path": "unidic-lite-1.0.8/unidic_lite/unidic.py",
+          "bytes": 322,
+          "sha256": "8db0f2ef9e47d657dda0faa6371c1f526859459271a3ca6d9c22e654efb1814c"
+        },
+        {
+          "path": "unidic-lite-1.0.8/unidic_lite.egg-info/PKG-INFO",
+          "bytes": 1915,
+          "sha256": "4b08defbcc8705eda4a379e6d8f3b0159d48367ea9ad8c4de655f9ba0ef61350"
+        },
+        {
+          "path": "unidic-lite-1.0.8/unidic_lite.egg-info/SOURCES.txt",
+          "bytes": 757,
+          "sha256": "58c83cf49c3cfb107ffd6f9a21d4958efd320a09d00b6301aa15703054977f6f"
+        },
+        {
+          "path": "unidic-lite-1.0.8/unidic_lite.egg-info/dependency_links.txt",
+          "bytes": 1,
+          "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+        },
+        {
+          "path": "unidic-lite-1.0.8/unidic_lite.egg-info/top_level.txt",
+          "bytes": 12,
+          "sha256": "9ac94933eeb793319d6f5de78205a684cdc2b1663bf74e8139762e7ddac14449"
+        }
+      ]
+    },
+    {
+      "name": "wetext",
+      "version": "0.1.2",
+      "artifact": {
+        "url": "https://files.pythonhosted.org/packages/a1/58/b778473e32f4afa877f1313b137edac2c9cef40da571078a351507aa362a/wetext-0.1.2-py3-none-any.whl",
+        "hash": "sha256:7467ac08a4bb44523780626437b9b0718cd611b1ccb4304bc49b649fe29370ee",
+        "size": 1771722,
+        "upload-time": "2025-11-28T07:33:47.177Z"
+      },
+      "sha256": "7467ac08a4bb44523780626437b9b0718cd611b1ccb4304bc49b649fe29370ee",
+      "members": [
+        {
+          "path": "wetext/fsts/en/tn/tagger.fst",
+          "bytes": 5220942,
+          "sha256": "bb804f88030153999f154f01950c18dbfd64de2c4cfc5035e21371d4eb4ead8a"
+        },
+        {
+          "path": "wetext/fsts/en/tn/verbalizer.fst",
+          "bytes": 1822714,
+          "sha256": "33ad65460a3e8f7fe313994ff0204a218c0fcb5dec9c09b24aeeaa30ef21d67b"
+        },
+        {
+          "path": "wetext/fsts/full_to_half.fst",
+          "bytes": 18210,
+          "sha256": "66525f2871df378216c443eedc0789e1f884b3156a3b0ba086e52143788e951c"
+        },
+        {
+          "path": "wetext/fsts/ja/itn/tagger.fst",
+          "bytes": 595066,
+          "sha256": "fc0109d62ce57bbd2ab424250b8021b8add63e0b1278b823ddb5443642d39e9c"
+        },
+        {
+          "path": "wetext/fsts/ja/itn/tagger_enable_0_to_9.fst",
+          "bytes": 531458,
+          "sha256": "5f92a57e5b7e86e997eb06335c00c3a270e5a538265f8fde6eaf6ba92b63f5f9"
+        },
+        {
+          "path": "wetext/fsts/ja/itn/verbalizer.fst",
+          "bytes": 95090,
+          "sha256": "25bb53f5e16d7051037d03a167909bba4268fced4829d6995a50ccb5b096ba30"
+        },
+        {
+          "path": "wetext/fsts/ja/tn/tagger.fst",
+          "bytes": 469322,
+          "sha256": "cce60ca1d1e5f29ae439434c94e6659166130b3a12c91e4b6e2becedd5aa7321"
+        },
+        {
+          "path": "wetext/fsts/ja/tn/verbalizer.fst",
+          "bytes": 86902,
+          "sha256": "79d49c76a7b556660dc4babe908b477787a550ab1415d75440c180f3c0c81ee0"
+        },
+        {
+          "path": "wetext/fsts/remove_interjections.fst",
+          "bytes": 11322,
+          "sha256": "70f36aa8071968f72278fb8db9f17a060e8f8ac73a5e4161a009e33c688fedc1"
+        },
+        {
+          "path": "wetext/fsts/remove_puncts.fst",
+          "bytes": 16642,
+          "sha256": "0d69853648848ddad69e0b7a6398e5bc15be39b5559aa0119938aa6e60632538"
+        },
+        {
+          "path": "wetext/fsts/tag_oov.fst",
+          "bytes": 468802,
+          "sha256": "7d58b861760f691b24f095ca17dcac6ccb79de1871282847895380249f2b034b"
+        },
+        {
+          "path": "wetext/fsts/traditional_to_simple.fst",
+          "bytes": 487346,
+          "sha256": "5b642063048290dbe7dded164230e3885d418464e6987f16a1f35078a9cb6a30"
+        },
+        {
+          "path": "wetext/fsts/zh/itn/tagger.fst",
+          "bytes": 1177666,
+          "sha256": "48548211f0bda9108f31874e36b892b58f9c0b218afdfb5a7af251d97205123b"
+        },
+        {
+          "path": "wetext/fsts/zh/itn/tagger_enable_0_to_9.fst",
+          "bytes": 1188590,
+          "sha256": "a5e5bc7726fdf1f3c020d9d2abc8b955234142950c0a66aea5038f490efb73e9"
+        },
+        {
+          "path": "wetext/fsts/zh/itn/verbalizer.fst",
+          "bytes": 87098,
+          "sha256": "86c35a5772a79bc998149e7eb0344544e52675b6fc85ad362cbad912349c017d"
+        },
+        {
+          "path": "wetext/fsts/zh/tn/tagger.fst",
+          "bytes": 811822,
+          "sha256": "8261de8e6dbb17f2cc8e51067e237c363b3ffc1341fef4080c2c73b850d46d7f"
+        },
+        {
+          "path": "wetext/fsts/zh/tn/verbalizer.fst",
+          "bytes": 87702,
+          "sha256": "9fcadad76cafddb2e96b92d892d18249f0ba5fbe60e4d4fc51f466cb6bc7ade9"
+        },
+        {
+          "path": "wetext/fsts/zh/tn/verbalizer_remove_erhua.fst",
+          "bytes": 87702,
+          "sha256": "f6663ebe403344f9d68c4c6c64d3bf17ba755deda41d3386bc010280b96ee315"
+        }
+      ]
+    }
+  ],
+  "conversion": {
+    "id": "indextts25-native-resources-v1",
+    "campplus": {
+      "output": "campplus.safetensors",
+      "tensor_count": 937,
+      "schema": "campplus.schema.json",
+      "layout": "source_pytorch",
+      "preserve_all_tensors": true
+    },
+    "auxiliary": {
+      "output": "auxiliary.safetensors",
+      "tensors": [
+        {
+          "source_file": "feat1.pt",
+          "source_key": "$",
+          "output_key": "speaker_matrix",
+          "dtype": "F32",
+          "shape": [
+            73,
+            192
+          ]
+        },
+        {
+          "source_file": "feat2.pt",
+          "source_key": "$",
+          "output_key": "emotion_matrix",
+          "dtype": "F32",
+          "shape": [
+            73,
+            1280
+          ]
+        },
+        {
+          "source_file": "wav2vec2bert_stats.pt",
+          "source_key": "mean",
+          "output_key": "w2v_mean",
+          "dtype": "F32",
+          "shape": [
+            1024
+          ]
+        },
+        {
+          "source_file": "wav2vec2bert_stats.pt",
+          "source_key": "var",
+          "output_key": "w2v_var",
+          "dtype": "F32",
+          "shape": [
+            1024
+          ]
+        }
+      ]
+    },
+    "tensor_value_policy": "lossless_no_dtype_cast_no_transpose",
+    "publication": "separate_immutable_derived_directory_with_input_and_output_sha256"
+  }
+}

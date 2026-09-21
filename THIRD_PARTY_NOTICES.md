@@ -37,6 +37,7 @@ development dependencies excluded, build dependencies retained.
 | anstyle-query | 1.1.5 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-6efb0476a1cc0850.txt` | https://github.com/rust-cli/anstyle.git |
 | anyhow | 1.0.104 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-23f18e03dc49df91.txt` | https://github.com/dtolnay/anyhow |
 | arc-swap | 1.9.2 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-ff3f1cd12af8866d.txt` | https://github.com/vorner/arc-swap |
+| arrayvec | 0.7.8 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-4da95ec4ecb65b73.txt` | https://github.com/bluss/arrayvec |
 | async-channel | 2.5.0 | Apache-2.0 OR MIT | `THIRD_PARTY_LICENSES/rust-license-23f18e03dc49df91.txt` | https://github.com/smol-rs/async-channel |
 | async-task | 4.7.1 | Apache-2.0 OR MIT | `THIRD_PARTY_LICENSES/rust-license-23f18e03dc49df91.txt` | https://github.com/smol-rs/async-task |
 | async-trait | 0.1.91 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-23f18e03dc49df91.txt` | https://github.com/dtolnay/async-trait |
@@ -48,10 +49,15 @@ development dependencies excluded, build dependencies retained.
 | axum-server | 0.7.3 | MIT | `THIRD_PARTY_LICENSES/rust-license-ab743bd126625ce5.txt` | https://github.com/programatik29/axum-server |
 | base64 | 0.13.1 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-0dd882e53de11566.txt` | https://github.com/marshallpierce/rust-base64 |
 | base64 | 0.22.1 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-0dd882e53de11566.txt` | https://github.com/marshallpierce/rust-base64 |
+| bimap | 0.6.3 | Apache-2.0 OR MIT | `THIRD_PARTY_LICENSES/rust-license-b05785f9f18e6716.txt` | https://github.com/billyrieger/bimap-rs/ |
+| bit-set | 0.8.0 | Apache-2.0 OR MIT | `THIRD_PARTY_LICENSES/rust-license-f51ac2c59a222f74.txt` | https://github.com/contain-rs/bit-set |
+| bit-vec | 0.8.0 | Apache-2.0 OR MIT | `THIRD_PARTY_LICENSES/rust-license-f51ac2c59a222f74.txt` | https://github.com/contain-rs/bit-vec |
+| bitflags | 1.3.2 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-6485b8ed310d3f03.txt` | https://github.com/bitflags/bitflags |
 | bitflags | 2.13.1 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-6485b8ed310d3f03.txt` | https://github.com/bitflags/bitflags |
 | block-buffer | 0.10.4 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-d5c22aa3118d240e.txt` | https://github.com/RustCrypto/utils |
 | blocking | 1.6.2 | Apache-2.0 OR MIT | `THIRD_PARTY_LICENSES/rust-license-23f18e03dc49df91.txt` | https://github.com/smol-rs/blocking |
 | borrow-or-share | 0.2.4 | MIT-0 | `THIRD_PARTY_LICENSES/rust-license-fdef904ef5d29e4d.txt` | https://github.com/yescallop/borrow-or-share |
+| bstr | 1.13.1 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-6b7374c39a57e57f.txt` | https://github.com/BurntSushi/bstr |
 | bytemuck | 1.25.2 | Zlib OR Apache-2.0 OR MIT | `THIRD_PARTY_LICENSES/rust-license-9df9ba60a11af705.txt` | https://github.com/Lokathor/bytemuck |
 | bytemuck_derive | 1.11.0 | Zlib OR Apache-2.0 OR MIT | `THIRD_PARTY_LICENSES/rust-license-9df9ba60a11af705.txt` | https://github.com/Lokathor/bytemuck |
 | byteorder-lite | 0.1.0 | Unlicense OR MIT | `THIRD_PARTY_LICENSES/rust-license-0f96a83840e146e4.txt` | https://github.com/image-rs/byteorder-lite |
@@ -95,6 +101,7 @@ development dependencies excluded, build dependencies retained.
 | esaxx-rs | 0.1.10 | Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-50e6751797c50ded.txt` | https://github.com/Narsil/esaxx-rs |
 | event-listener | 5.4.2 | Apache-2.0 OR MIT | `THIRD_PARTY_LICENSES/rust-license-23f18e03dc49df91.txt` | https://github.com/smol-rs/event-listener |
 | event-listener-strategy | 0.5.4 | Apache-2.0 OR MIT | `THIRD_PARTY_LICENSES/rust-license-23f18e03dc49df91.txt` | https://github.com/smol-rs/event-listener-strategy |
+| fancy-regex | 0.17.0 | MIT | `THIRD_PARTY_LICENSES/rust-license-3bc70e239e912727.txt` | https://github.com/fancy-regex/fancy-regex |
 | fastrand | 2.5.0 | Apache-2.0 OR MIT | `THIRD_PARTY_LICENSES/rust-license-23f18e03dc49df91.txt` | https://github.com/smol-rs/fastrand |
 | fdeflate | 0.3.7 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-c77a4cf9da729987.txt` | https://github.com/image-rs/fdeflate |
 | find-msvc-tools | 0.1.9 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-378f5840b258e277.txt` | https://github.com/rust-lang/cc-rs |
@@ -115,6 +122,7 @@ development dependencies excluded, build dependencies retained.
 | futures-task | 0.3.33 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-6652c868f35dfe5e.txt` | https://github.com/rust-lang/futures-rs |
 | futures-util | 0.3.33 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-6652c868f35dfe5e.txt` | https://github.com/rust-lang/futures-rs |
 | generic-array | 0.14.7 | MIT | `THIRD_PARTY_LICENSES/rust-license-8a28736d1243c67e.txt` | https://github.com/fizyk20/generic-array.git |
+| generic-array | 1.4.5 | MIT | `THIRD_PARTY_LICENSES/rust-license-8a28736d1243c67e.txt` | https://github.com/fizyk20/generic-array.git |
 | getrandom | 0.2.17 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-42fa16951ce7f24b.txt` | https://github.com/rust-random/getrandom |
 | getrandom | 0.3.4 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-29e9fe5074bd27e0.txt` | https://github.com/rust-random/getrandom |
 | getrandom | 0.4.3 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-523a42c25d245dde.txt` | https://github.com/rust-random/getrandom |
@@ -149,7 +157,9 @@ development dependencies excluded, build dependencies retained.
 | is_terminal_polyfill | 1.70.2 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-6efb0476a1cc0850.txt` | https://github.com/polyfill-rs/is_terminal_polyfill |
 | itertools | 0.11.0 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-7576269ea71f767b.txt` | https://github.com/rust-itertools/itertools |
 | itertools | 0.12.1 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-7576269ea71f767b.txt` | https://github.com/rust-itertools/itertools |
+| itertools | 0.14.0 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-7576269ea71f767b.txt` | https://github.com/rust-itertools/itertools |
 | itoa | 1.0.18 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-23f18e03dc49df91.txt` | https://github.com/dtolnay/itoa |
+| jobserver | 0.1.35 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-378f5840b258e277.txt` | https://github.com/rust-lang/jobserver-rs |
 | lazy_static | 1.5.0 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-0621878e61f0d0fd.txt` | https://github.com/rust-lang-nursery/lazy-static.rs |
 | libc | 0.2.189 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-123a331b5dbf04c3.txt` | https://github.com/rust-lang/libc |
 | link-cplusplus | 1.0.12 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-23f18e03dc49df91.txt` | https://github.com/dtolnay/link-cplusplus |
@@ -161,6 +171,7 @@ development dependencies excluded, build dependencies retained.
 | macro_rules_attribute-proc_macro | 0.2.3 | Apache-2.0 OR MIT OR Zlib | `THIRD_PARTY_LICENSES/rust-license-603fb27ef3266ea5.txt` | https://github.com/danielhenrymantilla/macro_rules_attribute-rs |
 | matchers | 0.2.0 | MIT | `THIRD_PARTY_LICENSES/rust-license-a47129d738752a6a.txt` | https://github.com/hawkw/matchers |
 | matchit | 0.7.3 | MIT AND BSD-3-Clause | `THIRD_PARTY_LICENSES/rust-license-162ce11ad71338d0.txt`<br>`THIRD_PARTY_LICENSES/rust-license-de701d0618d694fe.txt` | https://github.com/ibraheemdev/matchit |
+| mecab-sys | 0.1.0 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-b05785f9f18e6716.txt` | https://github.com/naughie/lita-tokenizers |
 | memchr | 2.8.3 | Unlicense OR MIT | `THIRD_PARTY_LICENSES/rust-license-0f96a83840e146e4.txt` | https://github.com/BurntSushi/memchr |
 | memo-map | 0.3.3 | Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-143368af9701a24e.txt` | https://github.com/mitsuhiko/memo-map |
 | mime | 0.3.17 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-8b87502eddb2d7fa.txt` | https://github.com/hyperium/mime |
@@ -180,6 +191,7 @@ development dependencies excluded, build dependencies retained.
 | onig | 6.5.3 | MIT | `THIRD_PARTY_LICENSES/rust-license-e9c1238c5beb73c6.txt` | https://github.com/iwillspeak/rust-onig |
 | onig_sys | 69.9.3 | MIT | `THIRD_PARTY_LICENSES/rust-license-71f321038b088358.txt` | https://github.com/rust-onig/rust-onig |
 | option-ext | 0.2.0 | MPL-2.0 | `THIRD_PARTY_LICENSES/rust-license-66a3107d5ad6a058.txt` | https://github.com/soc/option-ext.git |
+| ordered-float | 5.5.0 | MIT | `THIRD_PARTY_LICENSES/rust-license-f7715d38a3fa1b4a.txt` | https://github.com/reem/rust-ordered-float |
 | parking | 2.2.1 | Apache-2.0 OR MIT | `THIRD_PARTY_LICENSES/rust-license-23f18e03dc49df91.txt` | https://github.com/smol-rs/parking |
 | parking_lot | 0.12.5 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-c9a75f18b9ab2927.txt` | https://github.com/Amanieu/parking_lot |
 | parking_lot_core | 0.9.12 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-c9a75f18b9ab2927.txt` | https://github.com/Amanieu/parking_lot |
@@ -214,6 +226,8 @@ development dependencies excluded, build dependencies retained.
 | regex-syntax | 0.8.11 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-6485b8ed310d3f03.txt` | https://github.com/rust-lang/regex |
 | reqwest | 0.12.28 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-34f17d9067385431.txt` | https://github.com/seanmonstar/reqwest |
 | ring | 0.17.14 | Apache-2.0 AND ISC | `THIRD_PARTY_LICENSES/rust-license-143368af9701a24e.txt`<br>`THIRD_PARTY_LICENSES/rust-license-f025ccfb7dfb6bdf.txt` | https://github.com/briansmith/ring |
+| rustc-hash | 2.1.3 | Apache-2.0 OR MIT | `THIRD_PARTY_LICENSES/rust-license-23f18e03dc49df91.txt` | https://github.com/rust-lang/rustc-hash |
+| rustfst | 1.3.1 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-b05785f9f18e6716.txt` | https://github.com/Garvys/rustfst |
 | rustls | 0.23.45 | Apache-2.0 OR ISC OR MIT | `THIRD_PARTY_LICENSES/rust-license-709e3175b4212f7b.txt` | https://github.com/rustls/rustls |
 | rustls-pemfile | 2.2.0 | Apache-2.0 OR ISC OR MIT | `THIRD_PARTY_LICENSES/rust-license-709e3175b4212f7b.txt` | https://github.com/rustls/pemfile |
 | rustls-pki-types | 1.15.1 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-9117d922e6671255.txt` | https://github.com/rustls/pki-types |
@@ -241,6 +255,13 @@ development dependencies excluded, build dependencies retained.
 | strum | 0.28.0 | MIT | `THIRD_PARTY_LICENSES/rust-license-8bce3b45e49ecd14.txt` | https://github.com/Peternator7/strum |
 | strum_macros | 0.28.0 | MIT | `THIRD_PARTY_LICENSES/rust-license-8bce3b45e49ecd14.txt` | https://github.com/Peternator7/strum |
 | subtle | 2.6.1 | BSD-3-Clause | `THIRD_PARTY_LICENSES/rust-license-cc0332a88c2ea21d.txt` | https://github.com/dalek-cryptography/subtle |
+| superslice | 1.0.0 | Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-17de84ce8b605a18.txt` | https://github.com/alkis/superslice-rs |
+| symphonia | 0.5.5 | MPL-2.0 | `THIRD_PARTY_LICENSES/rust-license-66a3107d5ad6a058.txt` | https://github.com/pdeljanov/Symphonia |
+| symphonia-bundle-flac | 0.5.5 | MPL-2.0 | `THIRD_PARTY_LICENSES/rust-license-66a3107d5ad6a058.txt` | https://github.com/pdeljanov/Symphonia |
+| symphonia-bundle-mp3 | 0.5.5 | MPL-2.0 | `THIRD_PARTY_LICENSES/rust-license-66a3107d5ad6a058.txt` | https://github.com/pdeljanov/Symphonia |
+| symphonia-core | 0.5.5 | MPL-2.0 | `THIRD_PARTY_LICENSES/rust-license-66a3107d5ad6a058.txt` | https://github.com/pdeljanov/Symphonia |
+| symphonia-metadata | 0.5.5 | MPL-2.0 | `THIRD_PARTY_LICENSES/rust-license-66a3107d5ad6a058.txt` | https://github.com/pdeljanov/Symphonia |
+| symphonia-utils-xiph | 0.5.5 | MPL-2.0 | `THIRD_PARTY_LICENSES/rust-license-66a3107d5ad6a058.txt` | https://github.com/pdeljanov/Symphonia |
 | syn | 2.0.119 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-23f18e03dc49df91.txt` | https://github.com/dtolnay/syn |
 | syn | 3.0.3 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-23f18e03dc49df91.txt` | https://github.com/dtolnay/syn |
 | sync_wrapper | 1.0.2 | Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-074e6e32c86a4c0e.txt` | https://github.com/Actyx/sync_wrapper |
@@ -253,6 +274,7 @@ development dependencies excluded, build dependencies retained.
 | thiserror-impl | 1.0.69 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-23f18e03dc49df91.txt` | https://github.com/dtolnay/thiserror |
 | thiserror-impl | 2.0.19 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-23f18e03dc49df91.txt` | https://github.com/dtolnay/thiserror |
 | thread_local | 1.1.10 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-c9a75f18b9ab2927.txt` | https://github.com/Amanieu/thread_local-rs |
+| tiktoken-rs | 0.12.0 | MIT | `THIRD_PARTY_LICENSES/rust-license-b05785f9f18e6716.txt` | https://github.com/zurawiki/tiktoken-rs |
 | tinystr | 0.8.3 | Unicode-3.0 | `THIRD_PARTY_LICENSES/rust-license-f367c1b8e1aa2624.txt` | https://github.com/unicode-org/icu4x |
 | tokenizers | 0.20.4 | Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-50e6751797c50ded.txt` | https://github.com/huggingface/tokenizers |
 | tokio | 1.53.1 | MIT | `THIRD_PARTY_LICENSES/rust-license-253cd04c6714889d.txt` | https://github.com/tokio-rs/tokio |
@@ -311,10 +333,15 @@ development dependencies excluded, build dependencies retained.
 
 | Asset | Source revision | Copyright | License | License text | Bundled file | Source |
 |---|---|---|---|---|---|---|
+| Audio implementation attribution notice | `555dcc1d484737c4235cd221278244be89876131` | Upstream authors are identified in the bundled attribution notice. | Apache-2.0 | `THIRD_PARTY_LICENSES/audio-attributions.txt` | `ironmlx-audio/NOTICE.md` | https://github.com/apepkuss/ironmlx |
 | Hermes Agent logo | `1706502aa70485440a64127475f780c193784d6d` | Copyright (c) 2025 Nous Research | MIT | `THIRD_PARTY_LICENSES/asset-hermes-agent-mit.txt` | `ironmlx-app/Sources/IronMLXAppCore/Resources/hermes-agent-logo.svg` | https://github.com/NousResearch/hermes-agent/blob/1706502aa70485440a64127475f780c193784d6d/website/static/img/apple-touch-icon.png |
 | HuggingFace inline logo (LobeHub) | `a94750e3f5f8fc33757b839d85030e742284e43a` | Copyright (c) 2023 LobeHub; brand marks belong to their respective owners. | MIT | `THIRD_PARTY_LICENSES/asset-huggingface-lobehub-mit.txt` | `ironmlx-app/Sources/IronMLXAppCore/Resources/dashboard2.html` | https://github.com/lobehub/lobe-icons/blob/a94750e3f5f8fc33757b839d85030e742284e43a/src/HuggingFace/components/Color.tsx |
+| IndexTTS implementation MIT notice | `a7666367b8551656a2029ad75f259cb5e4936b3b` | Copyright (c) 2026 Didi | MIT | `THIRD_PARTY_LICENSES/audio-mlx-indextts2-MIT.txt` | `ironmlx-audio/licenses/mlx-indextts2-MIT.txt` | https://github.com/vanch007/mlx-indextts2 |
+| librosa algorithm ISC notice | `0.11.0` | Copyright (c) 2013-2023 librosa development team | ISC | `THIRD_PARTY_LICENSES/audio-librosa-ISC.txt` | `ironmlx-audio/licenses/librosa-ISC.txt` | https://github.com/librosa/librosa |
+| MeCab native BSD notice | `0.1.0 (mecab-sys)` | Copyright (c) 2001-2008 Taku Kudo; Copyright (c) 2004-2008 Nippon Telegraph and Telephone Corporation | BSD-3-Clause | `THIRD_PARTY_LICENSES/audio-MeCab-BSD.txt` | `ironmlx-audio/licenses/MeCab-BSD.txt` | https://github.com/taku910/mecab |
 | ModelScope inline logo (LobeHub) | `a94750e3f5f8fc33757b839d85030e742284e43a` | Copyright (c) 2023 LobeHub; brand marks belong to their respective owners. | MIT | `THIRD_PARTY_LICENSES/asset-modelscope-lobehub-mit.txt` | `ironmlx-app/Sources/IronMLXAppCore/Resources/dashboard2.html` | https://github.com/lobehub/lobe-icons/blob/a94750e3f5f8fc33757b839d85030e742284e43a/src/ModelScope/components/Color.tsx |
 | oh-my-pi logo | `v17.2.12` | Copyright (c) 2025 Mario Zechner; Copyright (c) 2025-2026 Can Bölük | MIT | `THIRD_PARTY_LICENSES/asset-oh-my-pi-mit.txt` | `ironmlx-app/Sources/IronMLXAppCore/Resources/oh-my-pi-logo.svg` | https://github.com/can1357/oh-my-pi/blob/45e12e5bb758198a920c6070e7e64cb33b21beac/assets/icon.svg |
+| torchaudio algorithm BSD notice | `v2.10.0` | Copyright (c) 2017 Facebook Inc. (Soumith Chintala) | BSD-2-Clause | `THIRD_PARTY_LICENSES/audio-torchaudio-BSD.txt` | `ironmlx-audio/licenses/torchaudio-BSD.txt` | https://github.com/pytorch/audio |
 
 Hermes Agent, oh-my-pi, Hugging Face and ModelScope names and logos identify
 supported third-party integrations. No affiliation or endorsement is
@@ -324,6 +351,30 @@ implied. All trademarks remain the property of their respective owners.
 
 - `option-ext 0.2.0`: source is available under MPL-2.0 at
   https://static.crates.io/crates/option-ext/option-ext-0.2.0.crate
+  (a gzip-compressed tar source archive; version is locked in Cargo.lock).
+  IronMLX's Apache-2.0 license does not restrict your rights to this source under MPL-2.0.
+- `symphonia 0.5.5`: source is available under MPL-2.0 at
+  https://static.crates.io/crates/symphonia/symphonia-0.5.5.crate
+  (a gzip-compressed tar source archive; version is locked in Cargo.lock).
+  IronMLX's Apache-2.0 license does not restrict your rights to this source under MPL-2.0.
+- `symphonia-bundle-flac 0.5.5`: source is available under MPL-2.0 at
+  https://static.crates.io/crates/symphonia-bundle-flac/symphonia-bundle-flac-0.5.5.crate
+  (a gzip-compressed tar source archive; version is locked in Cargo.lock).
+  IronMLX's Apache-2.0 license does not restrict your rights to this source under MPL-2.0.
+- `symphonia-bundle-mp3 0.5.5`: source is available under MPL-2.0 at
+  https://static.crates.io/crates/symphonia-bundle-mp3/symphonia-bundle-mp3-0.5.5.crate
+  (a gzip-compressed tar source archive; version is locked in Cargo.lock).
+  IronMLX's Apache-2.0 license does not restrict your rights to this source under MPL-2.0.
+- `symphonia-core 0.5.5`: source is available under MPL-2.0 at
+  https://static.crates.io/crates/symphonia-core/symphonia-core-0.5.5.crate
+  (a gzip-compressed tar source archive; version is locked in Cargo.lock).
+  IronMLX's Apache-2.0 license does not restrict your rights to this source under MPL-2.0.
+- `symphonia-metadata 0.5.5`: source is available under MPL-2.0 at
+  https://static.crates.io/crates/symphonia-metadata/symphonia-metadata-0.5.5.crate
+  (a gzip-compressed tar source archive; version is locked in Cargo.lock).
+  IronMLX's Apache-2.0 license does not restrict your rights to this source under MPL-2.0.
+- `symphonia-utils-xiph 0.5.5`: source is available under MPL-2.0 at
+  https://static.crates.io/crates/symphonia-utils-xiph/symphonia-utils-xiph-0.5.5.crate
   (a gzip-compressed tar source archive; version is locked in Cargo.lock).
   IronMLX's Apache-2.0 license does not restrict your rights to this source under MPL-2.0.
 

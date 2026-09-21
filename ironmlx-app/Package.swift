@@ -37,6 +37,7 @@ let package = Package(
                 .product(name: "ZIPFoundation", package: "ZIPFoundation"),
             ],
             resources: [
+                .copy("Resources/indextts25-preparation.json"),
                 .copy("Resources/dashboard2.html"),
                 .copy("Resources/hermes-agent-logo.svg"),
                 .copy("Resources/logo.png"),

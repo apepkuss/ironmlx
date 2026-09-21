@@ -13,13 +13,14 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use ironmlx::core::scheduler_autotune::{
-    SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeProfile,
-    SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+use ironmlx::server;
+use ironmlx_lm::models::Qwen35Model;
+use {ironmlx_lm::core::loader::Loader, ironmlx_lm::core::tokenizer::Tokenizer};
+use {
+    ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneProfileConfig,
+    ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneRuntimeProfile,
+    ironmlx_runtime::core::scheduler_autotune::SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
 };
-use ironmlx::core::server;
-use ironmlx::core::{Loader, Tokenizer};
-use ironmlx::models::Qwen35Model;
 
 fn scheduler_profile() -> SchedulerAutotuneRuntimeProfile {
     SchedulerAutotuneRuntimeProfile {
@@ -27,7 +28,7 @@ fn scheduler_profile() -> SchedulerAutotuneRuntimeProfile {
         model_name: "qwen3.5-4b".to_string(),
         hardware_label: "test-host".to_string(),
         runtime_context:
-            ironmlx::core::scheduler_autotune::SchedulerAutotuneRuntimeContext::local_default(32768),
+            ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneRuntimeContext::local_default(32768),
         config: SchedulerAutotuneProfileConfig {
             b_max: 4,
             prefill_chunk_size: 2048,
@@ -38,7 +39,7 @@ fn scheduler_profile() -> SchedulerAutotuneRuntimeProfile {
         },
         rules: Vec::new(),
         metadata:
-            ironmlx::core::scheduler_autotune::SchedulerAutotuneRuntimeProfileMetadata::synthetic(
+            ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneRuntimeProfileMetadata::synthetic(
                 1811606400000,
             ),
     }
@@ -59,7 +60,7 @@ async fn boot_server(port: u16) -> tokio::task::JoinHandle<anyhow::Result<()>> {
             model,
             tokenizer,
             model_id,
-            ironmlx::core::server::security::ServerNetworkConfig::local("127.0.0.1", port)?,
+            ironmlx::server::security::ServerNetworkConfig::local("127.0.0.1", port)?,
             /* prefill_chunk_size */ 2048,
             /* b_max */ 4,
             /* admission_deadline_ms */ 5,
@@ -69,7 +70,8 @@ async fn boot_server(port: u16) -> tokio::task::JoinHandle<anyhow::Result<()>> {
             /* kv_cache_turboquant_bits */ None,
             /* paged_prefix_cache */ None,
             /* prefix_lru_cache */ None,
-            /* active_kv_offload */ ironmlx::core::cache::ActiveKvOffloadConfig::disabled(),
+            /* active_kv_offload */
+            ironmlx_runtime::core::cache::active_kv::ActiveKvOffloadConfig::disabled(),
             scheduler_profile(),
             /* scheduler_autotune_report */ false,
             /* vision_input_override */ None,

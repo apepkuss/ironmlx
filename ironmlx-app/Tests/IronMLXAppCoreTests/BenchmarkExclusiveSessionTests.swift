@@ -151,11 +151,25 @@ import Testing
     #expect(restored.promptLookup == .crossRequest)
 }
 
+@Test func benchmarkExclusiveRestorePreservesAudioResources() async throws {
+    let audio = BackendAudioResources(derivedResources: "/derived", resourceLock: "/lock",
+                                      wetextFsts: "/fst", unidicDir: "/dictionary")
+    let client = MockBenchmarkModelClient(health: healthSnapshot(active: 0, queued: 0),
+                                         loadedModels: [loadedModel("tts", path: "/tts", isDefault: true)])
+    let coordinator = BenchmarkExclusiveSessionCoordinator()
+    _ = try await coordinator.prepare(client: client, targetModel: "llm", targetModelPath: "/llm",
+                                      audioResources: { $0 == "tts" ? audio : nil })
+    let result = try await coordinator.restore(client: client)
+    #expect(result.success)
+    #expect(await client.restoredAudio["tts"] == audio)
+}
+
 private actor MockBenchmarkModelClient: BackendModelManaging {
     private var health: HealthzSnapshot
     private var loadedModelsByID: [String: BackendLoadedModelInfo]
     private var defaultModelID: String?
     private(set) var calls: [String] = []
+    private(set) var restoredAudio: [String: BackendAudioResources] = [:]
 
     init(health: HealthzSnapshot, loadedModels: [BackendLoadedModelInfo]) {
         self.health = health
@@ -200,9 +214,11 @@ private actor MockBenchmarkModelClient: BackendModelManaging {
         setDefault: Bool,
         maxCacheCap: Int?,
         pinned: Bool,
-        promptLookup: BackendPromptLookupConfig?
+        promptLookup: BackendPromptLookupConfig?,
+        audio: BackendAudioResources?
     ) async throws -> BackendModelAdminResponse {
         calls.append("load:\(model):\(modelDir):\(setDefault):\(pinned)")
+        restoredAudio[model] = audio
         var loaded = loadedModel(model, path: modelDir, isDefault: setDefault, pinned: pinned)
         loaded.promptLookup = promptLookup
         loadedModelsByID[model] = loaded

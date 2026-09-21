@@ -14,23 +14,22 @@ name = "ironmlx"
 path = "src/main.rs"
 
 [dependencies]
+ironmlx-audio = { path = "../ironmlx-audio" }
+ironmlx-runtime = { path = "../ironmlx-runtime" }
+ironmlx-lm = { path = "../ironmlx-lm" }
+ironmlx-core = { path = "../ironmlx-core" }
 mlx = { path = "../mlx" }
 mlx-sys = { path = "../mlx-sys" }
-turboquant = { path = "../turboquant" }
 thiserror.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
-llguidance = { version = "=1.7.6", default-features = false, features = ["ahash", "lark", "referencing"] }
 hf-hub = { version = "0.4", default-features = false, features = ["tokio", "rustls-tls"] }
 sha2 = "0.10"
 dirs = "6"
 anyhow = "1"
-smallvec = "1"
-minijinja = { version = "2", default-features = false, features = ["adjacent_loop_items", "builtins", "loader", "macros", "serde"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 base64 = "0.22"
 tokio.workspace = true
@@ -50,9 +49,13 @@ subtle = "2"
 
 [features]
 default = []
-vision-dump = []
+vision-dump = ["ironmlx-lm/vision-dump"]
 
 [dev-dependencies]
+ironmlx-runtime = { path = "../ironmlx-runtime", features = ["test-support"] }
+tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
+ironmlx-lm = { path = "../ironmlx-lm", features = ["test-support"] }
+ironmlx-core = { path = "../ironmlx-core", features = ["test-support"] }
 approx = "0.5"
 tokio-stream.workspace = true
 # Serializes tests that share global MLX/Metal state (default stream / command

@@ -1,0 +1,34 @@
+{
+  "reference_revision": "a7666367b8551656a2029ad75f259cb5e4936b3b",
+  "audio_sha256": "synthetic-seed-2025",
+  "source_sha256": "2f363022dc35dfd2b2d512a1f06ad0ebf328e93e45673e47b4ce3b1b5ec8633f",
+  "tensors": {
+    "synthetic.wave16": [
+      1,
+      16000
+    ],
+    "synthetic.wave22": [
+      1,
+      22050
+    ],
+    "synthetic.mel": [
+      1,
+      86,
+      80
+    ],
+    "synthetic.fbank": [
+      1,
+      98,
+      80
+    ],
+    "synthetic.semantic": [
+      1,
+      49,
+      160
+    ],
+    "synthetic.mask": [
+      1,
+      49
+    ]
+  }
+}

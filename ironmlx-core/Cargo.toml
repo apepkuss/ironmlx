@@ -1,0 +1,22 @@
+[package]
+name = "ironmlx-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared inference layers, weights, and sampling backed by MLX"
+publish = false
+
+[dependencies]
+mlx = { path = "../mlx" }
+anyhow = "1"
+
+[features]
+default = []
+test-support = []
+
+[dev-dependencies]
+approx = "0.5"
+serial_test = { version = "3", default-features = false }

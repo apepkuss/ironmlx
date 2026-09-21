@@ -169,6 +169,7 @@ cp "$BUILD_ROOT/cargo-target/release/ironmlx" "$APP_BUNDLE/Contents/Helpers/iron
 cp "$BUILD_ROOT/cargo-target/release/iron-bench" "$APP_BUNDLE/Contents/Helpers/iron-bench"
 cp "$BUILD_ROOT/mlx-install/lib/mlx.metallib" "$APP_BUNDLE/Contents/Resources/mlx.metallib"
 for resource in \
+  indextts25-preparation.json \
   dashboard2.html \
   hermes-agent-logo.svg \
   logo.png \

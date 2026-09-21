@@ -51,6 +51,7 @@ fn main() {
         "src/bridge/array.rs",
         "src/bridge/compile.rs",
         "src/bridge/conv.rs",
+        "src/bridge/fft.rs",
         "src/bridge/transforms.rs",
         "src/bridge/stream.rs",
         "src/bridge/fast.rs",
@@ -63,6 +64,7 @@ fn main() {
     .file("shim/src/array.cc")
     .file("shim/src/compile.cc")
     .file("shim/src/conv.cc")
+    .file("shim/src/fft.cc")
     .file("shim/src/transforms.cc")
     .file("shim/src/stream.cc")
     .file("shim/src/fast.cc")

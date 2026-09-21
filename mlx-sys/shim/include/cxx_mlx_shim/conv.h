@@ -29,4 +29,32 @@ std::unique_ptr<MlxArray> ops_conv1d(
     uint8_t device_type,
     int32_t stream_index);
 
+std::unique_ptr<MlxArray> ops_conv2d(
+    const MlxArray& input,
+    const MlxArray& weight,
+    int32_t stride_h,
+    int32_t stride_w,
+    int32_t padding_h,
+    int32_t padding_w,
+    int32_t dilation_h,
+    int32_t dilation_w,
+    int32_t groups,
+    bool has_target,
+    bool is_device_only,
+    uint8_t device_type,
+    int32_t stream_index);
+
+std::unique_ptr<MlxArray> ops_conv_transpose1d(
+    const MlxArray& input,
+    const MlxArray& weight,
+    int32_t stride,
+    int32_t padding,
+    int32_t dilation,
+    int32_t output_padding,
+    int32_t groups,
+    bool has_target,
+    bool is_device_only,
+    uint8_t device_type,
+    int32_t stream_index);
+
 }  // namespace cxx_mlx

@@ -2,6 +2,8 @@
 
 [简体中文](zh-CN/supported-models.md)
 
+IronMLX.app supports speech synthesis with the verified `mlx-community/IndexTTS-2.5-fp16` profile: automatic resource preparation, model loading, complete WAV responses and PCM streaming. See the [speech API](audio-speech-api.md) and [TTS resource guide (Chinese)](zh-CN/tts-model-download.md).
+
 IronMLX 0.1.0 supports the following text and vision-language models. Check the model family and features you need, then choose a version that fits your device's memory.
 Versions, quantized files and templates within a family can differ in compatibility. This table is not a validation list for every model with a matching name.
 

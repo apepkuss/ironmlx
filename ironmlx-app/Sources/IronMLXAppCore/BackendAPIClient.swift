@@ -8,7 +8,8 @@ public protocol BackendModelManaging: Sendable {
         setDefault: Bool,
         maxCacheCap: Int?,
         pinned: Bool,
-        promptLookup: BackendPromptLookupConfig?
+        promptLookup: BackendPromptLookupConfig?,
+        audio: BackendAudioResources?
     ) async throws -> BackendModelAdminResponse
     func unloadModel(model: String, modelDir: String?) async throws -> BackendModelAdminResponse
     func setDefaultModel(_ model: String) async throws -> BackendModelAdminResponse
@@ -26,7 +27,8 @@ public extension BackendModelManaging {
             setDefault: setDefault,
             maxCacheCap: nil,
             pinned: false,
-            promptLookup: nil
+            promptLookup: nil,
+            audio: nil
         )
     }
 }
@@ -119,7 +121,8 @@ public struct BackendAPIClient: Sendable {
         setDefault: Bool = true,
         maxCacheCap: Int? = nil,
         pinned: Bool = false,
-        promptLookup: BackendPromptLookupConfig? = nil
+        promptLookup: BackendPromptLookupConfig? = nil,
+        audio: BackendAudioResources? = nil
     ) async throws -> BackendModelAdminResponse {
         try await loadModel(
             model: model,
@@ -129,7 +132,8 @@ public struct BackendAPIClient: Sendable {
             pinned: pinned,
             promptLookup: promptLookup,
             reloadWhenIdle: false,
-            samplingDefaults: .empty
+            samplingDefaults: .empty,
+            audio: audio
         )
     }
 
@@ -143,7 +147,8 @@ public struct BackendAPIClient: Sendable {
         mtpDraftTokens: Int? = nil,
         promptLookup: BackendPromptLookupConfig? = nil,
         reloadWhenIdle: Bool,
-        samplingDefaults: BackendSamplingDefaults
+        samplingDefaults: BackendSamplingDefaults,
+        audio: BackendAudioResources? = nil
     ) async throws -> BackendModelAdminResponse {
         try await loadModel(
             model: model,
@@ -156,7 +161,8 @@ public struct BackendAPIClient: Sendable {
             promptLookup: promptLookup,
             reloadWhenIdle: reloadWhenIdle,
             deferWhenBusy: nil,
-            samplingDefaults: samplingDefaults
+            samplingDefaults: samplingDefaults,
+            audio: audio
         )
     }
 
@@ -171,7 +177,8 @@ public struct BackendAPIClient: Sendable {
         promptLookup: BackendPromptLookupConfig? = nil,
         reloadWhenIdle: Bool,
         deferWhenBusy: Bool? = nil,
-        samplingDefaults: BackendSamplingDefaults
+        samplingDefaults: BackendSamplingDefaults,
+        audio: BackendAudioResources? = nil
     ) async throws -> BackendModelAdminResponse {
         let request = BackendLoadModelRequest(
             model: model,
@@ -184,7 +191,8 @@ public struct BackendAPIClient: Sendable {
             promptLookup: promptLookup,
             reloadWhenIdle: reloadWhenIdle,
             deferWhenBusy: deferWhenBusy,
-            samplingDefaults: samplingDefaults
+            samplingDefaults: samplingDefaults,
+            audio: audio
         )
         let data = try await postJSON(path: "/admin/api/models/load", body: request)
         return try JSONDecoder().decode(BackendModelAdminResponse.self, from: data)
@@ -199,7 +207,8 @@ public struct BackendAPIClient: Sendable {
         mtpModelDir: String? = nil,
         mtpDraftTokens: Int? = nil,
         promptLookup: BackendPromptLookupConfig? = nil,
-        samplingDefaults: BackendSamplingDefaults = .empty
+        samplingDefaults: BackendSamplingDefaults = .empty,
+        audio: BackendAudioResources? = nil
     ) async throws -> BackendModelAdminResponse {
         let request = BackendLoadModelRequest(
             model: model,
@@ -210,7 +219,8 @@ public struct BackendAPIClient: Sendable {
             mtpModelDir: mtpModelDir,
             mtpDraftTokens: mtpDraftTokens,
             promptLookup: promptLookup,
-            samplingDefaults: samplingDefaults
+            samplingDefaults: samplingDefaults,
+            audio: audio
         )
         let data = try await postJSON(path: "/admin/api/models/register", body: request)
         return try JSONDecoder().decode(BackendModelAdminResponse.self, from: data)
@@ -275,6 +285,7 @@ public enum BackendAPIError: LocalizedError {
 }
 
 public struct BackendLoadModelRequest: Codable, Equatable, Sendable {
+    public var audio: BackendAudioResources?
     public var model: String
     public var modelDir: String
     public var setDefault: Bool
@@ -291,6 +302,7 @@ public struct BackendLoadModelRequest: Codable, Equatable, Sendable {
     public var repetitionPenalty: Double?
 
     enum CodingKeys: String, CodingKey {
+        case audio
         case model
         case modelDir = "model_dir"
         case setDefault = "set_default"
@@ -318,22 +330,24 @@ public struct BackendLoadModelRequest: Codable, Equatable, Sendable {
         promptLookup: BackendPromptLookupConfig? = nil,
         reloadWhenIdle: Bool? = nil,
         deferWhenBusy: Bool? = nil,
-        samplingDefaults: BackendSamplingDefaults = .empty
+        samplingDefaults: BackendSamplingDefaults = .empty,
+        audio: BackendAudioResources? = nil
     ) {
+        self.audio = audio
         self.model = model
         self.modelDir = modelDir
         self.setDefault = setDefault
-        self.maxCacheCap = maxCacheCap
+        self.maxCacheCap = audio == nil ? maxCacheCap : nil
         self.pinned = pinned
-        self.mtpModelDir = mtpModelDir
-        self.mtpDraftTokens = mtpDraftTokens
-        self.promptLookup = promptLookup
+        self.mtpModelDir = audio == nil ? mtpModelDir : nil
+        self.mtpDraftTokens = audio == nil ? mtpDraftTokens : nil
+        self.promptLookup = audio == nil ? promptLookup : nil
         self.reloadWhenIdle = reloadWhenIdle
         self.deferWhenBusy = deferWhenBusy
-        self.temperature = samplingDefaults.temperature
-        self.topP = samplingDefaults.topP
-        self.topK = samplingDefaults.topK
-        self.repetitionPenalty = samplingDefaults.repetitionPenalty
+        self.temperature = audio == nil ? samplingDefaults.temperature : nil
+        self.topP = audio == nil ? samplingDefaults.topP : nil
+        self.topK = audio == nil ? samplingDefaults.topK : nil
+        self.repetitionPenalty = audio == nil ? samplingDefaults.repetitionPenalty : nil
     }
 }
 

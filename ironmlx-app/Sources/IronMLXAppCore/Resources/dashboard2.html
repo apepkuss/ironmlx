@@ -2069,6 +2069,14 @@
     font-size: 12px;
   }
 
+  #tts-details-modal .modal { width: min(620px, calc(100vw - 40px)); }
+  #tts-details-modal .modal-body { font-size: 13px; line-height: 1.6; }
+  #tts-details-modal h3 { font-size: 13px; margin: 18px 0 8px; }
+  #tts-details-modal p { color: var(--text-secondary); }
+  #tts-details-modal ul { list-style: none; padding: 0; }
+  #tts-details-modal li { padding: 3px 0; }
+  #model-table .tts-model-row .model-status-cell { white-space: normal; line-height: 1.45; }
+
   .model-params-modal {
     width: 480px;
     max-width: calc(100vw - 32px);
@@ -4569,6 +4577,26 @@
   </div>
 </div>
 
+<!-- Download-only TTS details -->
+<div class="modal-overlay" id="tts-details-modal">
+  <div class="modal model-params-modal" role="dialog" aria-modal="true" aria-labelledby="tts-details-name">
+    <button class="modal-close" onclick="closeTTSDetails()" id="tts-details-close" aria-label="Close">&times;</button>
+    <div class="modal-header">
+      <div class="modal-pre" data-i18n="tts_details">TTS Model Details</div>
+      <h2 id="tts-details-name"></h2>
+    </div>
+    <div class="modal-body" style="display:block;">
+      <p id="tts-details-status"></p>
+      <p data-i18n="tts_api_usage">Load this model to use speech synthesis through /v1/audio/speech.</p>
+      <h3 data-i18n="tts_files">Downloaded files</h3>
+      <ul id="tts-details-files" style="overflow-wrap:anywhere;"></ul>
+      <h3 data-i18n="tts_dependencies">External dependencies</h3>
+      <p data-i18n="tts_dependencies_note">Required resources are downloaded and verified automatically before the model is ready.</p>
+      <ul id="tts-details-dependencies" style="overflow-wrap:anywhere;"></ul>
+    </div>
+  </div>
+</div>
+
 <!-- Model Params Modal -->
 <div class="modal-overlay" id="model-params-modal">
   <div class="modal model-params-modal">
@@ -4750,6 +4778,15 @@
   // ── i18n translations ──
   const I18N = {
     en: {
+      tts_details: "TTS Model Details",
+      tts_api_usage: "Load this model to use speech synthesis through /v1/audio/speech.",
+      tts_files: "Downloaded files",
+      tts_dependencies: "External dependencies",
+      tts_dependencies_note: "Required resources are downloaded and verified automatically before the model is ready.",
+      tts_files_empty: "No file information available.",
+      tts_dependencies_empty: "No external dependencies recorded.",
+      tts_prepare_resources: "Prepare resources",
+
       nav_status: "Status", nav_models: "Models", nav_benchmark: "Benchmark", nav_logs: "Logs", nav_chat: "Agent", nav_settings: "Settings",
       sidebar_expand: "Expand sidebar", sidebar_collapse: "Collapse sidebar",
       chat_subtitle: "Configure external agents to use IronMLX as their inference provider.",
@@ -5143,6 +5180,15 @@
       cluster_pm_auto: "Auto (default)", cluster_pm_tp: "Tensor Parallel", cluster_pm_pp: "Pipeline Parallel"
     },
     "zh-Hans": {
+      tts_details: "TTS 模型详情",
+      tts_api_usage: "加载模型后，可通过 /v1/audio/speech 接口合成语音。",
+      tts_files: "已下载文件",
+      tts_dependencies: "外部依赖",
+      tts_dependencies_note: "模型就绪前，应用会自动下载并验证所需资源。",
+      tts_files_empty: "暂无文件信息。",
+      tts_dependencies_empty: "未记录外部依赖。",
+      tts_prepare_resources: "准备语音资源",
+
       nav_status: "状态", nav_models: "模型", nav_benchmark: "基准测试", nav_logs: "日志", nav_chat: "Agent", nav_settings: "设置",
       sidebar_expand: "展开侧栏", sidebar_collapse: "收起侧栏",
       chat_subtitle: "配置外部 Agent 使用 IronMLX 作为推理 Provider。",
@@ -5536,6 +5582,15 @@
       cluster_pm_auto: "自动（默认）", cluster_pm_tp: "张量并行 (TP)", cluster_pm_pp: "流水线并行 (PP)"
     },
     "zh-Hant": {
+      tts_details: "TTS 模型詳情",
+      tts_api_usage: "載入模型後，可透過 /v1/audio/speech 介面合成語音。",
+      tts_files: "已下載檔案",
+      tts_dependencies: "外部相依資源",
+      tts_dependencies_note: "模型就緒前，應用程式會自動下載並驗證所需資源。",
+      tts_files_empty: "暫無檔案資訊。",
+      tts_dependencies_empty: "未記錄外部相依資源。",
+      tts_prepare_resources: "準備語音資源",
+
       nav_status: "狀態", nav_models: "模型", nav_benchmark: "基準測試", nav_logs: "日誌", nav_chat: "Agent", nav_settings: "設定",
       sidebar_expand: "展開側欄", sidebar_collapse: "收起側欄",
       chat_subtitle: "設定外部 Agent 使用 IronMLX 作為推理 Provider。",
@@ -5932,6 +5987,15 @@
       cluster_pm_auto: "自動（預設）", cluster_pm_tp: "張量平行 (TP)", cluster_pm_pp: "管線平行 (PP)"
     },
     ja: {
+      tts_details: "TTS モデル詳細",
+      tts_api_usage: "モデルを読み込むと /v1/audio/speech で音声を合成できます。",
+      tts_files: "ダウンロード済みファイル",
+      tts_dependencies: "外部依存リソース",
+      tts_dependencies_note: "必要なリソースを自動的にダウンロード・検証してから、モデルが使用可能になります。",
+      tts_files_empty: "ファイル情報がありません。",
+      tts_dependencies_empty: "外部依存リソースの記録はありません。",
+      tts_prepare_resources: "音声リソースを準備",
+
       nav_status: "ステータス", nav_models: "モデル", nav_benchmark: "ベンチマーク", nav_logs: "ログ", nav_chat: "AI エージェント", nav_settings: "設定",
       sidebar_expand: "サイドバーを展開", sidebar_collapse: "サイドバーを折りたたむ",
       chat_subtitle: "外部エージェントが IronMLX を推論プロバイダーとして使用できるように設定します。",
@@ -6328,6 +6392,15 @@
       cluster_pm_auto: "自動（既定）", cluster_pm_tp: "テンソル並列 (TP)", cluster_pm_pp: "パイプライン並列 (PP)"
     },
     ko: {
+      tts_details: "TTS 모델 세부 정보",
+      tts_api_usage: "모델을 로드한 후 /v1/audio/speech로 음성을 합성할 수 있습니다.",
+      tts_files: "다운로드한 파일",
+      tts_dependencies: "외부 의존성",
+      tts_dependencies_note: "모델이 준비되기 전에 필요한 리소스를 자동으로 다운로드하고 검증합니다.",
+      tts_files_empty: "파일 정보가 없습니다.",
+      tts_dependencies_empty: "기록된 외부 의존성이 없습니다.",
+      tts_prepare_resources: "음성 리소스 준비",
+
       nav_status: "상태", nav_models: "모델", nav_benchmark: "벤치마크", nav_logs: "로그", nav_chat: "AI 에이전트", nav_settings: "설정",
       sidebar_expand: "사이드바 펼치기", sidebar_collapse: "사이드바 접기",
       chat_subtitle: "외부 에이전트가 IronMLX를 추론 프로바이더로 사용하도록 구성하세요.",
@@ -7320,7 +7393,40 @@
     return Number.isSafeInteger(parsed) ? parsed : null;
   }
 
+  function closeTTSDetails() {
+    document.getElementById('tts-details-modal').classList.remove('open');
+    if (window.__TTS_DETAILS_TRIGGER__) window.__TTS_DETAILS_TRIGGER__.focus();
+  }
+
+  function openTTSDetails(model) {
+    window.__TTS_DETAILS_TRIGGER__ = document.activeElement;
+    const dict = I18N[currentLang] || I18N.en;
+    const info = model.download_info || {};
+    document.getElementById('tts-details-name').textContent = model.id;
+    document.getElementById('tts-details-status').textContent = modelStatusPresentation(model, !!model.loaded).text;
+    function fillList(id, values, emptyText) {
+      const list = document.getElementById(id);
+      list.replaceChildren();
+      (values.length ? values : [emptyText]).forEach(value => {
+        const item = document.createElement('li');
+        item.textContent = value;
+        list.appendChild(item);
+      });
+    }
+    fillList('tts-details-files', (info.files || []).map(file =>
+      file.path + ' · ' + formatVersionBytes(file.size)), dict.tts_files_empty);
+    fillList('tts-details-dependencies', info.external_resources || [], dict.tts_dependencies_empty);
+    applyI18n(currentLang);
+    document.getElementById('tts-details-modal').classList.add('open');
+    document.getElementById('tts-details-close').focus();
+  }
+
   function openParamsModal(modelId) {
+    const model = window.__LOCAL_MODELS__[modelId];
+    if (model && model.type === 'tts') {
+      openTTSDetails(model);
+      return;
+    }
     const name = modelId;
     window.__CURRENT_PARAM_MODEL__ = name;
     document.getElementById('modal-model-name').textContent = name;
@@ -8284,6 +8390,15 @@
     if (query) searchHuggingFace();
   }
 
+  document.getElementById('tts-details-modal').addEventListener('click', function(e) {
+    if (e.target === this) closeTTSDetails();
+  });
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape' && document.getElementById('tts-details-modal').classList.contains('open')) {
+      closeTTSDetails();
+    }
+  });
+
   document.getElementById('model-versions-modal').addEventListener('click', function(e) {
     if (e.target === this) closeModelVersions();
   });
@@ -9004,6 +9119,7 @@
   }
 
   function isModelLoadable(model) {
+    if (model.type === 'tts') return !!model.readiness && model.readiness.status === 'ready';
     return (modelReadiness(model).status || 'ready') === 'ready';
   }
 
@@ -9043,6 +9159,14 @@
         title: (integrity && integrity.error) || modelReadinessTitle(model)
       };
     }
+    const readiness = modelReadiness(model);
+    if (readiness.status === 'unsupported' || readiness.status === 'incomplete') {
+      const text = readiness.status === 'incomplete' ? dict.status_incomplete : dict.status_unsupported;
+      return { dot: readiness.status === 'incomplete' ? 'model-incomplete' : 'model-unsupported', text: text, title: modelReadinessTitle(model) };
+    }
+    if (readiness.status === 'unverified') {
+      return { dot: 'model-incomplete', text: dict.action_unavailable || 'Unavailable', title: modelReadinessTitle(model) };
+    }
     if (integrity && integrity.state === 'verified' && integrity.verified_at) {
       const verifiedText = (dict.status_verified || 'Verified {time}')
         .replace('{time}', formatIntegrityTime(integrity.verified_at));
@@ -9052,7 +9176,6 @@
         title: verifiedText
       };
     }
-    const readiness = modelReadiness(model);
     if (isLoaded) {
       return { dot: 'model-loaded', text: dict.status_loaded || 'Loaded', title: '' };
     }
@@ -9114,7 +9237,11 @@
           missing_files: []
         };
       } else if (status.state === 'verified' && model.readiness && model.readiness.status === 'corrupt') {
-        model.readiness = { status: 'ready', missing_files: [] };
+        // Integrity cannot establish runtime support. Await authoritative readiness.
+        model.readiness = { status: 'unverified', missing_files: [] };
+        if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.scanLocalModels) {
+          window.webkit.messageHandlers.scanLocalModels.postMessage('scan');
+        }
       }
     }
     updateModelIntegrityRow(modelId);
@@ -9319,6 +9446,10 @@
     if (isLoaded) {
       return '<button class="action-btn ' + actionClass + '" onclick="toggleModelLoad(\'' + escapedSq + '\', this)" data-model="' + escaped + '">' + actionText + '</button>';
     }
+    if (model.type === 'tts' && modelReadiness(model).reason_code === 'audio_resources_missing') {
+      const dict = I18N[currentLang] || I18N.en;
+      return '<button class="action-btn action-load" onclick="startDownload(\'' + escapedSq + '\')">' + dict.tts_prepare_resources + '</button>';
+    }
     if (!isModelLoadable(model)) {
       const dict = I18N[currentLang] || I18N.en;
       const title = escapeAttr(modelReadinessTitle(model) || (dict.model_not_ready || 'Model snapshot is not ready to load.'));
@@ -9381,6 +9512,7 @@
         const actionText = isLoaded ? (dict.action_unload || 'Unload') : (dict.action_load || 'Load');
         const tr = document.createElement('tr');
         tr.dataset.modelId = m.id;
+        tr.classList.toggle("tts-model-row", m.type === "tts");
         const msIcon = '<svg height="14" viewBox="0 0 24 24" width="14" xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle;opacity:0.7;" title="ModelScope"><path d="M0 7.967h2.667v2.667H0zM8 10.633h2.667V13.3H8z" fill="#36CED0"></path><path d="M0 10.633h2.667V13.3H0zM2.667 13.3h2.666v2.667H8v2.666H2.667V13.3zM2.667 5.3H8v2.667H5.333v2.666H2.667V5.3zM10.667 13.3h2.667v2.667h-2.667z" fill="#624AFF"></path><path d="M24 7.967h-2.667v2.667H24zM16 10.633h-2.667V13.3H16z" fill="#36CED0"></path><path d="M24 10.633h-2.667V13.3H24zM21.333 13.3h-2.666v2.667H16v2.666h5.333V13.3zM21.333 5.3H16v2.667h2.667v2.666h2.666V5.3z" fill="#624AFF"></path></svg>';
         const hfIcon = '<svg height="14" width="14" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle;opacity:0.8;" title="HuggingFace"><path d="M2.25 11.535c0-3.407 1.847-6.554 4.844-8.258a9.822 9.822 0 019.687 0c2.997 1.704 4.844 4.851 4.844 8.258 0 5.266-4.337 9.535-9.687 9.535S2.25 16.8 2.25 11.535z" fill="#FF9D0B"/><path d="M11.938 20.086c4.797 0 8.687-3.829 8.687-8.551 0-4.722-3.89-8.55-8.687-8.55-4.798 0-8.688 3.828-8.688 8.55 0 4.722 3.89 8.55 8.688 8.55z" fill="#FFD21E"/><path d="M14.76 9.21c.32.108.445.753.767.585.447-.233.707-.708.659-1.204a1.235 1.235 0 00-.879-1.059 1.262 1.262 0 00-1.33.394c-.322.384-.377.92-.14 1.36.153.283.638-.177.925-.079zm-5.887 0c-.32.108-.448.753-.768.585a1.226 1.226 0 01-.658-1.204c.048-.495.395-.913.878-1.059a1.262 1.262 0 011.33.394c.322.384.377.92.14 1.36-.152.283-.64-.177-.925-.079z" fill="#3A3B45"/></svg>';
         var sourceIcon = m.source === 'ms' ? msIcon : hfIcon;
@@ -9393,7 +9525,7 @@
           + '<td>' + formatSize(m.size_mb) + '</td>'
           + '<td class="model-status-cell" title="' + escapeAttr(status.title || modelReadinessTitle(m)) + '"><span class="status-dot ' + status.dot + '"></span> <span class="model-status-text">' + status.text + '</span></td>'
           + '<td><input type="radio" name="default-model" value="' + escaped + '" ' + (isDefault ? 'checked' : '') + ' ' + (!isModelLoadable(m) ? 'disabled ' : '') + 'style="accent-color:var(--accent);" onchange="setDefaultModel(this.value)"></td>'
-          + '<td><button class="icon-btn" onclick="openParamsModal(\'' + escapedSq + '\')"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1.5l1 2a4.5 4.5 0 0 1 1.5.9l2-.5.8 1.4-1.1 1.6a4.3 4.3 0 0 1 0 1.8l1.1 1.6-.8 1.4-2-.5a4.5 4.5 0 0 1-1.5.9l-1 2-1-2a4.5 4.5 0 0 1-1.5-.9l-2 .5-.8-1.4 1.1-1.6a4.3 4.3 0 0 1 0-1.8L2.2 5.8l.8-1.4 2 .5A4.5 4.5 0 0 1 6.5 4l1-2Z" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/><circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.1"/></svg></button></td>'
+          + '<td><button class="icon-btn" title="' + escapeAttr(m.type === 'tts' ? dict.tts_details : dict.model_param_settings) + '" aria-label="' + escapeAttr(m.type === 'tts' ? dict.tts_details : dict.model_param_settings) + '" onclick="openParamsModal(\'' + escapedSq + '\')"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1.5l1 2a4.5 4.5 0 0 1 1.5.9l2-.5.8 1.4-1.1 1.6a4.3 4.3 0 0 1 0 1.8l1.1 1.6-.8 1.4-2-.5a4.5 4.5 0 0 1-1.5.9l-1 2-1-2a4.5 4.5 0 0 1-1.5-.9l-2 .5-.8-1.4 1.1-1.6a4.3 4.3 0 0 1 0-1.8L2.2 5.8l.8-1.4 2 .5A4.5 4.5 0 0 1 6.5 4l1-2Z" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/><circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.1"/></svg></button></td>'
           + '<td>' + renderModelLoadActions(m, escapedSq, escaped, actionClass, actionText, isLoaded) + '</td>'
           + '<td>' + renderModelMoreActions(m, escapedSq) + '</td>';
         tbody.appendChild(tr);

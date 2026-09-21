@@ -11,14 +11,18 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use base64::Engine;
-use ironmlx::core::cache::ActiveKvOffloadConfig;
-use ironmlx::core::scheduler_autotune::{
-    SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeProfile,
-    SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+use ironmlx::server;
+use ironmlx_lm::models::Qwen35Model;
+use ironmlx_runtime::core::cache::active_kv::ActiveKvOffloadConfig;
+use {
+    ironmlx_lm::core::loader::Loader, ironmlx_lm::core::loader::QuantMode,
+    ironmlx_lm::core::tokenizer::Tokenizer,
 };
-use ironmlx::core::server;
-use ironmlx::core::{Loader, QuantMode, Tokenizer};
-use ironmlx::models::Qwen35Model;
+use {
+    ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneProfileConfig,
+    ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneRuntimeProfile,
+    ironmlx_runtime::core::scheduler_autotune::SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+};
 
 const MAX_CACHE_CAP: usize = 4096;
 const EFFORTS: [&str; 7] = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
@@ -29,7 +33,7 @@ fn scheduler_profile(model_id: &str) -> SchedulerAutotuneRuntimeProfile {
         model_name: model_id.to_owned(),
         hardware_label: "qwen38-reasoning-http-test".to_owned(),
         runtime_context:
-            ironmlx::core::scheduler_autotune::SchedulerAutotuneRuntimeContext::local_default(
+            ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneRuntimeContext::local_default(
                 MAX_CACHE_CAP,
             ),
         config: SchedulerAutotuneProfileConfig {
@@ -42,7 +46,7 @@ fn scheduler_profile(model_id: &str) -> SchedulerAutotuneRuntimeProfile {
         },
         rules: Vec::new(),
         metadata:
-            ironmlx::core::scheduler_autotune::SchedulerAutotuneRuntimeProfileMetadata::synthetic(
+            ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneRuntimeProfileMetadata::synthetic(
                 1818374400000,
             ),
     }

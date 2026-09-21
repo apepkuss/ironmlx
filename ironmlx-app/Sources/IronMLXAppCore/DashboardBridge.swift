@@ -642,7 +642,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                     client: client,
                     targetModel: target.model,
                     targetModelPath: target.path,
-                    validateModelPath: self.benchmarkModelPathValidator(config: config)
+                    validateModelPath: self.benchmarkModelPathValidator(config: config),
+                    audioResources: { [scanner = self.scanner] model in try scanner.audioResources(for: model) }
                 )
                 let json = try Self.jsonString(result)
                 await MainActor.run {
@@ -1060,7 +1061,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                             promptLookup: loaded.promptLookup,
                             reloadWhenIdle: true,
                             deferWhenBusy: false,
-                            samplingDefaults: parameters?.samplingDefaults ?? .empty
+                            samplingDefaults: (parameters?.samplingDefaults ?? .empty).filtered(for: scanner.model(for: repoID)?.capabilities),
+                            audio: try scanner.audioResources(for: repoID)
                         )
                         reloadStatus = response.status
                         await MainActor.run {
@@ -1304,7 +1306,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                     reloadWhenIdle: false,
                     samplingDefaults: (
                         self.parameterStore.parameters(for: model)?.samplingDefaults ?? .empty
-                    ).filtered(for: capabilities)
+                    ).filtered(for: capabilities),
+                    audio: try self.scanner.audioResources(for: model)
                 )
                 let json = try Self.jsonString(response)
                 await MainActor.run {
@@ -2158,7 +2161,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                         mtpModelDir: mtpRuntime?.modelDir,
                         mtpDraftTokens: mtpRuntime?.draftTokens,
                         promptLookup: self.parameterStore.parameters(for: model)?.promptLookupConfig,
-                        samplingDefaults: self.parameterStore.parameters(for: model)?.samplingDefaults ?? .empty
+                        samplingDefaults: (self.parameterStore.parameters(for: model)?.samplingDefaults ?? .empty).filtered(for: self.scanner.model(for: model)?.capabilities),
+                        audio: try self.scanner.audioResources(for: model)
                     )
                 } else {
                     response = try await client.setDefaultModel(model)
@@ -2341,7 +2345,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                     mtpDraftTokens: mtpRuntime?.draftTokens,
                     promptLookup: parameters.promptLookupConfig,
                     reloadWhenIdle: true,
-                    samplingDefaults: parameters.samplingDefaults
+                    samplingDefaults: parameters.samplingDefaults.filtered(for: scanner.model(for: model)?.capabilities),
+                    audio: try scanner.audioResources(for: model)
                 )
                 let json = try Self.jsonString(response)
                 await MainActor.run {

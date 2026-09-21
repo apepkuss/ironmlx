@@ -2,6 +2,8 @@
 
 [English](../supported-models.md)
 
+IronMLX.app 支持经过验证的 `mlx-community/IndexTTS-2.5-fp16` 资源配置，包括自动准备资源、加载模型、完整 WAV 与 PCM 流式输出。详见 [TTS 模型下载与使用](tts-model-download.md)及[语音 API](../audio-speech-api.md)。
+
 IronMLX 0.1.0 支持以下文本和视觉语言模型。请先确认模型族和所需功能，再选择适合设备内存的具体版本。
 同一模型族的不同版本、量化文件和模板可能存在兼容性差异；下表不是所有同名模型的验证清单。
 

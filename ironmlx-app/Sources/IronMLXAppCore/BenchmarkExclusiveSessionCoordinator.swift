@@ -38,7 +38,8 @@ public actor BenchmarkExclusiveSessionCoordinator {
         client: BackendModelManaging,
         targetModel: String,
         targetModelPath: String,
-        validateModelPath: BenchmarkModelPathValidator? = nil
+        validateModelPath: BenchmarkModelPathValidator? = nil,
+        audioResources: (@Sendable (String) throws -> BackendAudioResources?)? = nil
     ) async throws -> BenchmarkExclusivePrepareResult {
         guard session == nil else {
             throw BenchmarkExclusiveSessionError.alreadyRunning
@@ -59,7 +60,7 @@ public actor BenchmarkExclusiveSessionCoordinator {
         let snapshot = BenchmarkExclusiveSession(
             targetModel: targetModel,
             targetModelPath: validatedTargetPath,
-            loadedModels: loadedModels.map(BenchmarkLoadedModelSnapshot.init),
+            loadedModels: try loadedModels.map { BenchmarkLoadedModelSnapshot($0, audio: try audioResources?($0.id)) },
             defaultModel: loadedModels.first(where: \.isDefault)?.id
         )
         session = snapshot
@@ -88,7 +89,8 @@ public actor BenchmarkExclusiveSessionCoordinator {
                 setDefault: true,
                 maxCacheCap: nil,
                 pinned: targetWasPinned,
-                promptLookup: targetPromptLookup
+                promptLookup: targetPromptLookup,
+                audio: try audioResources?(targetModel)
             )
             _ = try await client.setDefaultModel(targetModel)
 
@@ -166,7 +168,8 @@ public actor BenchmarkExclusiveSessionCoordinator {
                     setDefault: false,
                     maxCacheCap: nil,
                     pinned: model.pinned,
-                    promptLookup: model.promptLookup
+                    promptLookup: model.promptLookup,
+                    audio: model.audio
                 )
                 restored.append(model.id)
                 currentByID[model.id] = model.backendInfo(isDefault: false)
@@ -309,7 +312,10 @@ private struct BenchmarkLoadedModelSnapshot: Equatable, Sendable {
     var maxPositionEmbeddings: Int
     var promptLookup: BackendPromptLookupConfig?
 
-    init(_ model: BackendLoadedModelInfo) {
+    var audio: BackendAudioResources?
+
+    init(_ model: BackendLoadedModelInfo, audio: BackendAudioResources? = nil) {
+        self.audio = audio
         self.id = model.id
         self.model = model.model
         self.path = model.path

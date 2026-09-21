@@ -1,0 +1,12 @@
+# Offline reference generation only; not an application dependency.
+numpy==2.4.3
+torch==2.10.0
+torchaudio==2.10.0
+soundfile==0.13.1
+tiktoken==0.13.0
+wetext==0.1.2
+kaldifst==1.7.17
+fugashi==1.5.2
+unidic-lite==1.0.8
+contractions==0.1.73
+PyYAML==6.0.3

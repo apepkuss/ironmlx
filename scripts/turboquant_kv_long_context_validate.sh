@@ -37,7 +37,8 @@ export CONTEXTS_FOR_SUMMARY
 mkdir -p "$OUT_ROOT/prompts"
 
 cargo build --release \
-  -p ironmlx \
+  -p ironmlx-lm -p ironmlx-runtime \
+  --features ironmlx-lm/tools,ironmlx-runtime/tools \
   --bin ironmlx-turboquant-kv-validate \
   --bin ironmlx-core-bench
 

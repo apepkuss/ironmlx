@@ -19,18 +19,26 @@ use std::time::Duration;
 use axum::body::to_bytes;
 use tokio::sync::Mutex;
 
-use ironmlx::core::generate::{GenerateRequest, GenerationStream};
-use ironmlx::core::sampler::Sampler;
-use ironmlx::core::scheduler_autotune::{
-    SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeProfile,
-    SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+use ironmlx::server::AppState;
+use ironmlx_core::sampler::Sampler;
+use ironmlx_lm::core::vision_input::VisionInputConfig;
+use ironmlx_lm::models::qwen3_5::Qwen35Model;
+use ironmlx_runtime::core::generate::GenerationStream;
+use ironmlx_runtime::core::generation_types::GenerateRequest;
+use {
+    ironmlx_lm::core::chat_template::Message, ironmlx_lm::core::loader::Loader,
+    ironmlx_lm::core::tokenizer::Tokenizer,
 };
-use ironmlx::core::server::scheduler_actor::{
-    spawn_scheduler_actor, SchedulerActorHandle, SchedulerCommand,
+use {
+    ironmlx_runtime::core::scheduler_actor::spawn_scheduler_actor,
+    ironmlx_runtime::core::scheduler_actor::SchedulerActorHandle,
+    ironmlx_runtime::core::scheduler_actor::SchedulerCommand,
 };
-use ironmlx::core::server::{AppState, VisionInputConfig};
-use ironmlx::core::{Loader, Message, Tokenizer};
-use ironmlx::models::qwen3_5::Qwen35Model;
+use {
+    ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneProfileConfig,
+    ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneRuntimeProfile,
+    ironmlx_runtime::core::scheduler_autotune::SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+};
 
 #[allow(dead_code)]
 const ARGMAX_BITID_GATE: f64 = 0.95;
@@ -284,29 +292,32 @@ async fn anthropic_actor_scheduler_path_emits_6_event_sequence() {
         meta,
     )
     .expect("spawn");
-    let health_collector = Arc::new(ironmlx::core::server::health::SchedulerHealthCollector {
-        start_time: std::time::Instant::now(),
-        b_max: 4,
-        queue_max: 32,
-        model_name: "test-model".to_string(),
-        max_position_embeddings: 32768_i32,
-        b_active: handle.b_active.clone(),
-        b_queued: handle.b_queued.clone(),
-        admit_count: handle.admit_count.clone(),
-        batch_count: handle.batch_count.clone(),
-        admission_queue_full_count: handle.admission_queue_full_count.clone(),
-        memory_budget_exceeded_count: handle.memory_budget_exceeded_count.clone(),
-        kv_cache_active_bytes: handle.kv_cache_active_bytes.clone(),
-        kv_cache_soft_limit_bytes: handle.kv_cache_soft_limit_bytes,
-        kv_cache_logical_cap_tokens: handle.kv_cache_logical_cap_tokens,
-        kv_cache_resident_cap_tokens: handle.kv_cache_resident_cap_tokens,
-        kv_cache_budget_policy: handle.kv_cache_budget_policy.to_string(),
-        mtp: ironmlx::core::server::health::MtpHealthConfig::disabled(),
-        dflash2: ironmlx::core::server::health::DFlash2HealthConfig::disabled(),
-        prompt_lookup: ironmlx::core::server::health::PromptLookupHealthConfig::disabled(),
-        active_kv_offload: handle.active_kv_offload.clone(),
-        immutable_prefix_blocks: handle.immutable_prefix_blocks.clone(),
-    });
+    let health_collector = Arc::new(
+        ironmlx_runtime::core::runtime_health::SchedulerHealthCollector {
+            start_time: std::time::Instant::now(),
+            b_max: 4,
+            queue_max: 32,
+            model_name: "test-model".to_string(),
+            max_position_embeddings: 32768_i32,
+            b_active: handle.b_active.clone(),
+            b_queued: handle.b_queued.clone(),
+            admit_count: handle.admit_count.clone(),
+            batch_count: handle.batch_count.clone(),
+            admission_queue_full_count: handle.admission_queue_full_count.clone(),
+            memory_budget_exceeded_count: handle.memory_budget_exceeded_count.clone(),
+            kv_cache_active_bytes: handle.kv_cache_active_bytes.clone(),
+            kv_cache_soft_limit_bytes: handle.kv_cache_soft_limit_bytes,
+            kv_cache_logical_cap_tokens: handle.kv_cache_logical_cap_tokens,
+            kv_cache_resident_cap_tokens: handle.kv_cache_resident_cap_tokens,
+            kv_cache_budget_policy: handle.kv_cache_budget_policy.to_string(),
+            mtp: ironmlx_runtime::core::runtime_health::MtpHealthConfig::disabled(),
+            dflash2: ironmlx_runtime::core::runtime_health::DFlash2HealthConfig::disabled(),
+            prompt_lookup:
+                ironmlx_runtime::core::runtime_health::PromptLookupHealthConfig::disabled(),
+            active_kv_offload: handle.active_kv_offload.clone(),
+            immutable_prefix_blocks: handle.immutable_prefix_blocks.clone(),
+        },
+    );
     let state = AppState {
         model: model.clone(),
         tokenizer: tokenizer.clone(),
@@ -315,7 +326,7 @@ async fn anthropic_actor_scheduler_path_emits_6_event_sequence() {
         vision_input: VisionInputConfig::Qwen {
             spatial_merge_size: 2,
         },
-        request_execution: ironmlx::core::server::RequestExecutionHandle::Scheduler(Arc::new(
+        request_execution: ironmlx_runtime::core::task_execution::RequestExecutionHandle::Scheduler(Arc::new(
             handle.clone(),
         )),
         paged_prefix_cache_enabled: false,
@@ -328,7 +339,7 @@ async fn anthropic_actor_scheduler_path_emits_6_event_sequence() {
             model_name: "test-model".to_string(),
             hardware_label: "test-host".to_string(),
             runtime_context:
-                ironmlx::core::scheduler_autotune::SchedulerAutotuneRuntimeContext::local_default(
+                ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneRuntimeContext::local_default(
                     32768,
                 ),
             config: SchedulerAutotuneProfileConfig {
@@ -341,28 +352,28 @@ async fn anthropic_actor_scheduler_path_emits_6_event_sequence() {
             },
             rules: Vec::new(),
             metadata:
-                ironmlx::core::scheduler_autotune::SchedulerAutotuneRuntimeProfileMetadata::synthetic(
+                ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneRuntimeProfileMetadata::synthetic(
                     1811606400000,
                 ),
         }),
-        sampling_defaults: ironmlx::core::server::SamplingDefaults::default(),
+        sampling_defaults: ironmlx_runtime::core::runtime_config::SamplingDefaults::default(),
         model_weight_bytes: meta.weight_bytes,
         static_memory_estimate: Default::default(),
         cold_materialization_tracker:
-            ironmlx::core::process_memory::ColdMaterializationTracker::new(Default::default()),
+            ironmlx_runtime::core::process_memory::ColdMaterializationTracker::new(Default::default()),
         kv_cache_turboquant_bits: None,
         force_scheduler_for_greedy: true,
         prompt_lookup_enabled: false,
         health_collector,
         runtime_usage: Arc::new(
-            ironmlx::core::runtime_usage::ModelRuntimeUsageCounters::default(),
+            ironmlx_runtime::core::runtime_usage::ModelRuntimeUsageCounters::default(),
         ),
     };
 
     let req = make_request(prompt_ids, max_new_tokens, stop_token_ids);
 
     // Invoke the scheduler-path helper directly.
-    let response = ironmlx::core::server::anthropic::serve_via_scheduler_stream(
+    let response = ironmlx::server::anthropic::serve_via_scheduler_stream(
         state,
         req,
         "test-model".to_string(),

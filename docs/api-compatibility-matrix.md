@@ -98,7 +98,7 @@ Run from the repository root:
 python3 -m venv /tmp/ironmlx-api-contract-sdk
 /tmp/ironmlx-api-contract-sdk/bin/python -m pip install -r scripts/api-contract-sdk/requirements.txt
 /tmp/ironmlx-api-contract-sdk/bin/python scripts/api-contract-sdk/contract.py --fixture
-cargo test --locked --all-features -p ironmlx --lib core::server::
+cargo test --locked --all-features -p ironmlx --lib server::
 ```
 
 ## Maintenance requirements

@@ -50,6 +50,109 @@ pub fn conv1d_on(
     Ok(Array::from_inner(inner))
 }
 
+/// 2D convolution in NHWC layout; weights are [out, height, width, in/groups].
+#[allow(clippy::too_many_arguments)]
+pub fn conv2d(
+    input: &Array,
+    weight: &Array,
+    stride: (i32, i32),
+    padding: (i32, i32),
+    dilation: (i32, i32),
+    groups: i32,
+) -> Result<Array> {
+    conv2d_on(input, weight, stride, padding, dilation, groups, ())
+}
+
+/// Stream-targeted conv2d.
+#[allow(clippy::too_many_arguments)]
+pub fn conv2d_on(
+    input: &Array,
+    weight: &Array,
+    stride: (i32, i32),
+    padding: (i32, i32),
+    dilation: (i32, i32),
+    groups: i32,
+    target: impl Into<StreamOrDevice>,
+) -> Result<Array> {
+    let (has, dev_only, dev_t, idx) = target.into().encode();
+    // SAFETY: input and weight are borrowed for the duration of the call.
+    let inner = unsafe {
+        mlx_sys::conv::ffi::ops_conv2d(
+            input.as_inner(),
+            weight.as_inner(),
+            stride.0,
+            stride.1,
+            padding.0,
+            padding.1,
+            dilation.0,
+            dilation.1,
+            groups,
+            has,
+            dev_only,
+            dev_t,
+            idx,
+        )
+    }
+    .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
+/// Transposed 1D convolution in NLC layout; weights are [out, kernel, in/groups].
+#[allow(clippy::too_many_arguments)]
+pub fn conv_transpose1d(
+    input: &Array,
+    weight: &Array,
+    stride: i32,
+    padding: i32,
+    dilation: i32,
+    output_padding: i32,
+    groups: i32,
+) -> Result<Array> {
+    conv_transpose1d_on(
+        input,
+        weight,
+        stride,
+        padding,
+        dilation,
+        output_padding,
+        groups,
+        (),
+    )
+}
+
+/// Stream-targeted conv_transpose1d.
+#[allow(clippy::too_many_arguments)]
+pub fn conv_transpose1d_on(
+    input: &Array,
+    weight: &Array,
+    stride: i32,
+    padding: i32,
+    dilation: i32,
+    output_padding: i32,
+    groups: i32,
+    target: impl Into<StreamOrDevice>,
+) -> Result<Array> {
+    let (has, dev_only, dev_t, idx) = target.into().encode();
+    // SAFETY: input and weight are borrowed for the duration of the call.
+    let inner = unsafe {
+        mlx_sys::conv::ffi::ops_conv_transpose1d(
+            input.as_inner(),
+            weight.as_inner(),
+            stride,
+            padding,
+            dilation,
+            output_padding,
+            groups,
+            has,
+            dev_only,
+            dev_t,
+            idx,
+        )
+    }
+    .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
