@@ -154,15 +154,30 @@ def render(markdown, source, target):
 def page(title, content, language, index_href, home_href, toc=(), switch_href=None):
     lang_name = "zh-Hans" if language == "zh" else "en"
     home = home_href
+    system_icon = '<svg class="theme-option-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="14" rx="2"></rect><path d="M8 22h8M12 18v4"></path></svg>'
+    sun_icon = '<svg class="theme-option-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.65 17.65l1.42 1.42M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.65 6.35l1.42-1.42"></path></svg>'
+    moon_icon = '<svg class="theme-option-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.4 14.6A8.5 8.5 0 0 1 9.4 3.6a8.5 8.5 0 1 0 11 11Z"></path></svg>'
     if language == "zh":
         home_label, docs_label, docs_title, github = "首页", "文档", "文档", "GitHub"
         switch = f'<a href="{switch_href or "../../docs/"}">English</a>'
     else:
         home_label, docs_label, docs_title, github = "Home", "Docs", "Documentation", "GitHub"
         switch = f'<a href="{switch_href or "../zh-Hans/docs/"}">中文</a>'
+    if language == "zh":
+        theme_label = "主题"
+        theme_options = (("system", system_icon, "跟随系统"), ("light", sun_icon, "浅色"), ("dark", moon_icon, "深色"))
+    else:
+        theme_label = "Theme"
+        theme_options = (("system", system_icon, "System"), ("light", sun_icon, "Light"), ("dark", moon_icon, "Dark"))
+    theme_items = "".join(
+        f'<button type="button" role="menuitemradio" data-theme-option="{value}">{icon}<span>{label}</span><span class="theme-check" aria-hidden="true">✓</span></button>'
+        for value, icon, label in theme_options
+    )
+    theme_trigger_icon = sun_icon.replace('class="theme-option-icon"', 'class="theme-icon"')
+    theme = f'<div class="theme-picker" data-theme-picker data-theme-label="{theme_label}"><button class="theme-trigger" type="button" aria-haspopup="menu" aria-expanded="false" data-theme-trigger>{theme_trigger_icon}</button><div class="theme-menu" role="menu" data-theme-menu hidden>{theme_items}</div></div>'
     toc_html = "".join(f'<li class="toc-level-{level}"><a href="#{anchor}">{label}</a></li>' for level, label, anchor in toc)
     sidebar = f'<aside><p class="current-doc">{escape(title)}</p><ul class="toc">{toc_html}</ul></aside>' if toc else f'<aside><a href="{index_href}">{docs_title}</a></aside>'
-    return f'''<!doctype html><html lang="{lang_name}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="{escape(title)} — IronMLX documentation"><link rel="icon" href="{home}assets/favicon.png"><link rel="stylesheet" href="{home}styles.css"><title>{escape(title)} — IronMLX</title></head><body><header class="nav"><a class="brand" href="{home}"><span class="mark">Fe</span><span>IronMLX</span></a><nav><a href="{home}">{home_label}</a><a href="{index_href}">{docs_label}</a>{switch}</nav></header><main class="docs-layout">{sidebar}<article class="doc-content">{content}</article></main><footer><span>© IronMLX</span><span><a href="https://github.com/apepkuss/ironmlx">{github}</a></span></footer></body></html>'''
+    return f'''<!doctype html><html lang="{lang_name}" data-theme="system"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="description" content="{escape(title)} — IronMLX documentation"><link rel="icon" href="{home}assets/favicon.png"><script src="{home}theme.js"></script><link rel="stylesheet" href="{home}styles.css"><title>{escape(title)} — IronMLX</title></head><body><header class="nav"><a class="brand" href="{home}"><span class="mark">Fe</span><span>IronMLX</span></a><nav><a href="{home}">{home_label}</a><a href="{index_href}">{docs_label}</a>{switch}{theme}</nav></header><main class="docs-layout">{sidebar}<article class="doc-content">{content}</article></main><footer><span>© IronMLX</span><span><a href="https://github.com/apepkuss/ironmlx">{github}</a></span></footer></body></html>'''
 
 
 def build(language, output, docs_root):

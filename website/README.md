@@ -9,3 +9,7 @@ python3 -m http.server 8000
 ```
 
 Then open <http://localhost:8000/website/> from the repository root.
+
+The theme control defaults to the system appearance. Explicit light or dark
+choices are stored locally in the browser and shared by the landing page and
+generated documentation pages.
