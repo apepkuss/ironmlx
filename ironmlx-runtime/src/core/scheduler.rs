@@ -19853,6 +19853,47 @@ mod tests {
     /// `Scheduler::new` calls don't need turbofish at every site.
     type TestScheduler = Scheduler<ironmlx_lm::models::qwen3_5::Qwen35Model>;
 
+    /// Keep tests that use the process-wide asynchronous prefix-store queue
+    /// independent of work left by an earlier test. The queue intentionally
+    /// lives for the process lifetime in production, so test cleanup must be
+    /// explicit at both boundaries.
+    struct PrefixStoreTestIsolation;
+
+    impl PrefixStoreTestIsolation {
+        fn new() -> Self {
+            let queue = crate::core::cache::process_async_prefix_store_queue();
+            queue.wait_idle();
+            let stats = queue.stats();
+            assert_eq!(
+                stats.pending_jobs, 0,
+                "prefix-store test setup must start with no pending jobs"
+            );
+            assert_eq!(
+                stats.pending_bytes, 0,
+                "prefix-store test setup must start with no pending bytes"
+            );
+            Self
+        }
+    }
+
+    impl Drop for PrefixStoreTestIsolation {
+        fn drop(&mut self) {
+            let queue = crate::core::cache::process_async_prefix_store_queue();
+            queue.wait_idle();
+            if !std::thread::panicking() {
+                let stats = queue.stats();
+                assert_eq!(
+                    stats.pending_jobs, 0,
+                    "prefix-store test must not leave pending jobs"
+                );
+                assert_eq!(
+                    stats.pending_bytes, 0,
+                    "prefix-store test must not leave pending bytes"
+                );
+            }
+        }
+    }
+
     #[test]
     #[serial]
     fn immutable_reclaim_is_not_applicable_to_mixed_cache_layouts() {
@@ -22048,6 +22089,7 @@ mod tests {
     #[test]
     #[serial(mlx_metal)]
     fn mtp_batch_prefill_uses_paged_ssd_prefix_cache_on_exact_hits() {
+        let _prefix_store_isolation = PrefixStoreTestIsolation::new();
         let root = std::env::temp_dir().join(format!(
             "ironmlx-paged-prefix-mtp-batch-{}",
             uuid::Uuid::new_v4().simple()
@@ -22276,6 +22318,7 @@ mod tests {
     #[test]
     #[serial(mlx_metal)]
     fn mtp_batch_prefill_vl_uses_paged_ssd_prefix_cache_on_exact_hits() {
+        let _prefix_store_isolation = PrefixStoreTestIsolation::new();
         let root = std::env::temp_dir().join(format!(
             "ironmlx-paged-prefix-mtp-vl-batch-{}",
             uuid::Uuid::new_v4().simple()
