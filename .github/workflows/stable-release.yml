@@ -212,3 +212,16 @@ jobs:
           security delete-keychain "$RUNNER_TEMP/ironmlx-signing/signing.keychain-db" >/dev/null 2>&1 || true
           rm -rf "$RUNNER_TEMP/ironmlx-signing"
           rm -f "$RUNNER_TEMP/stable-update-key"
+
+  deploy-website:
+    name: Deploy website after stable publication
+    needs: publish
+    if: needs.publish.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Trigger website deployment from main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run website-preview.yml --repo "$GITHUB_REPOSITORY" --ref main
