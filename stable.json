@@ -1,0 +1,11 @@
+{
+  "channel": "stable",
+  "tag": "v0.1.0",
+  "build": 4,
+  "source_commit": "edf98bf8c9124ca3c2c14492a45fb601e5032739",
+  "feed_url": "https://raw.githubusercontent.com/apepkuss/ironmlx/updates/stable.xml",
+  "archive": "IronMLX-v0.1.0-update.zip",
+  "archive_sha256": "753d63d03281da2f2555555cfcce561837607abb91f176fe8c62e5f3200ecbc4",
+  "feed": "stable.xml",
+  "feed_sha256": "e924af27785bc9b0c6741784c8b8329e1d13773a9161a65605d58c2cacc7a291"
+}
