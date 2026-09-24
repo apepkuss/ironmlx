@@ -410,6 +410,8 @@ pub struct EngineModelConfig {
     pub mtp: Option<EngineMtpSettings>,
     pub prompt_lookup: Option<PromptLookupConfig>,
     pub sampling_defaults: SamplingDefaults,
+    /// Used by Responses requests that omit max_output_tokens.
+    pub default_max_output_tokens: Option<usize>,
     pub capabilities: EngineModelCapabilities,
 }
 
@@ -523,6 +525,9 @@ impl EnginePoolConfig {
 }
 
 pub(crate) fn validate_engine_model_config(model: &EngineModelConfig) -> Result<()> {
+    if model.default_max_output_tokens == Some(0) {
+        bail!("default_max_output_tokens must be greater than zero");
+    }
     if model.load_policy == EngineLoadPolicy::Disabled {
         return Ok(());
     }
@@ -532,6 +537,7 @@ pub(crate) fn validate_engine_model_config(model: &EngineModelConfig) -> Result<
             || model.prompt_lookup.is_some()
             || model.scheduler_runtime_profile.is_some()
             || model.sampling_defaults != SamplingDefaults::default()
+            || model.default_max_output_tokens.is_some()
         {
             bail!("audio models do not accept causal scheduler, MTP, PromptLookup or sampling overrides");
         }

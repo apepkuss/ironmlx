@@ -8,6 +8,7 @@ pub mod loader;
 pub mod model;
 pub mod model_input;
 pub mod native_output;
+pub mod reasoning_budget;
 pub mod sampler;
 pub mod speculative_model;
 pub mod tokenizer;

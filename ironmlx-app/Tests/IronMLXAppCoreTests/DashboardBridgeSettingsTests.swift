@@ -563,12 +563,9 @@ import WebKit
         encoding: .utf8
     )
 
-    #expect(html.contains(#"<label data-i18n="context_size">CONTEXT SIZE</label>"#))
+    #expect(html.contains(#"<label for="modal-context-size" data-i18n="context_size">CONTEXT SIZE</label>"#))
     #expect(html.contains(#"context_size: "CONTEXT SIZE""#))
-    #expect(!html.contains("上下文大小"))
-    #expect(!html.contains("コンテキストサイズ"))
-    #expect(!html.contains("컨텍스트 크기"))
-    #expect(html.contains(#"<label data-i18n="max_context_tokens">MAX CONTEXT TOKENS</label>"#))
+    #expect(html.contains(#"<label for="modal-max-tokens" data-i18n="max_context_tokens">MAX CONTEXT TOKENS</label>"#))
     #expect(html.contains(#"max_context_tokens: "MAX CONTEXT TOKENS""#))
     #expect(!html.contains("single_request_max_tokens"))
     #expect(!html.contains("单请求最大 Token 数"))
@@ -578,21 +575,21 @@ import WebKit
     #expect(!html.contains(">MAX TOKENS</label>"))
 }
 
-@Test func dashboardModelParamsKeepCapacityInputsAligned() throws {
+@Test func dashboardModelParamsUseThreeAlignedSettingRows() throws {
     let html = try String(
         contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
         encoding: .utf8
     )
 
     #expect(html.contains(#"<div class="modal model-params-modal">"#))
-    #expect(
-        html.contains(
-            "<div class=\"modal-row model-params-capacity-row\">\n"
-                + "        <div class=\"modal-field\"><label data-i18n=\"context_size\">"
-        )
-    )
-    #expect(html.contains(".model-params-modal {\n    width: 480px;\n    max-width: calc(100vw - 32px);"))
-    #expect(html.contains(".model-params-capacity-row .modal-field > label {\n    white-space: nowrap;"))
+    #expect(html.contains(#"class="modal-row model-params-setting-row model-params-identity-row""#))
+    #expect(html.contains(#"<div class="model-params-output-section">"#))
+    #expect(html.contains(#"class="modal-row model-params-setting-row model-params-capacity-row""#))
+    #expect(html.contains(#"class="modal-row model-params-setting-row" id="modal-causal-sampling-row""#))
+    #expect(html.contains(".model-params-modal {\n    width: 640px;\n    max-width: calc(100vw - 32px);"))
+    #expect(html.contains(".model-params-output-section {\n    border-top: 0.5px solid var(--border);"))
+    #expect(html.contains("grid-template-columns: repeat(3, minmax(0, 1fr));"))
+    #expect(html.contains(".model-params-setting-row .field-label-with-help label {\n    white-space: nowrap;"))
 }
 
 @Test func dashboardExposesCrossRequestPromptLookupControlsAndClearAction() throws {

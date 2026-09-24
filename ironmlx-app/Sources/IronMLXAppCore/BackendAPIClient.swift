@@ -290,6 +290,7 @@ public struct BackendLoadModelRequest: Codable, Equatable, Sendable {
     public var modelDir: String
     public var setDefault: Bool
     public var maxCacheCap: Int?
+    public var defaultMaxOutputTokens: Int?
     public var pinned: Bool?
     public var mtpModelDir: String?
     public var mtpDraftTokens: Int?
@@ -307,6 +308,7 @@ public struct BackendLoadModelRequest: Codable, Equatable, Sendable {
         case modelDir = "model_dir"
         case setDefault = "set_default"
         case maxCacheCap = "max_cache_cap"
+        case defaultMaxOutputTokens = "default_max_output_tokens"
         case pinned
         case mtpModelDir = "mtp_model_dir"
         case mtpDraftTokens = "mtp_draft_tokens"
@@ -338,6 +340,7 @@ public struct BackendLoadModelRequest: Codable, Equatable, Sendable {
         self.modelDir = modelDir
         self.setDefault = setDefault
         self.maxCacheCap = audio == nil ? maxCacheCap : nil
+        self.defaultMaxOutputTokens = audio == nil ? samplingDefaults.defaultMaxOutputTokens : nil
         self.pinned = pinned
         self.mtpModelDir = audio == nil ? mtpModelDir : nil
         self.mtpDraftTokens = audio == nil ? mtpDraftTokens : nil
@@ -391,12 +394,14 @@ public struct BackendPromptLookupConfig: Codable, Equatable, Sendable {
 public struct BackendSamplingDefaults: Codable, Equatable, Sendable {
     public static let empty = BackendSamplingDefaults()
 
+    public var defaultMaxOutputTokens: Int?
     public var temperature: Double?
     public var topP: Double?
     public var topK: Int?
     public var repetitionPenalty: Double?
 
     enum CodingKeys: String, CodingKey {
+        case defaultMaxOutputTokens = "default_max_output_tokens"
         case temperature
         case topP = "top_p"
         case topK = "top_k"
@@ -404,11 +409,13 @@ public struct BackendSamplingDefaults: Codable, Equatable, Sendable {
     }
 
     public init(
+        defaultMaxOutputTokens: Int? = nil,
         temperature: Double? = nil,
         topP: Double? = nil,
         topK: Int? = nil,
         repetitionPenalty: Double? = nil
     ) {
+        self.defaultMaxOutputTokens = defaultMaxOutputTokens
         self.temperature = temperature
         self.topP = topP
         self.topK = topK
@@ -421,6 +428,7 @@ public struct BackendSamplingDefaults: Codable, Equatable, Sendable {
         }
         let supported = Set(capabilities.supportedSamplingParameters)
         return BackendSamplingDefaults(
+            defaultMaxOutputTokens: defaultMaxOutputTokens,
             temperature: supported.contains("temperature") ? temperature : nil,
             topP: supported.contains("top_p") ? topP : nil,
             topK: supported.contains("top_k") ? topK : nil,

@@ -13,6 +13,7 @@ use serde_json::{Map, Value};
 use mlx::Array;
 
 use crate::core::native_output::NativeOutputDialect;
+use crate::core::reasoning_budget::{ReasoningBudget, ReasoningBudgetPlan, ReasoningBudgetSession};
 use crate::core::tool_calling::ToolDialect;
 use crate::core::tool_calling::{ToolDefinition, GEMMA_STRING_DELIMITER};
 use crate::Result;
@@ -66,6 +67,33 @@ impl fmt::Debug for ConstraintTokenizer {
 }
 
 impl ConstraintTokenizer {
+    /// Intersect a reasoning budget with existing tool/JSON constraints. Plain
+    /// responses use the budget as their only constraint. Existing generation
+    /// paths then enforce it for target sampling, drafts, forks and rollback.
+    pub fn with_reasoning_budget(
+        &self,
+        plan: Option<ConstraintPlan>,
+        dialect: NativeOutputDialect,
+        budget: ReasoningBudget,
+    ) -> Result<ConstraintPlan> {
+        let budget = ReasoningBudgetPlan::new(Arc::clone(&self.factory), dialect, budget)?;
+        if let Some(mut plan) = plan {
+            plan.budget_plan = Some(budget);
+            Ok(plan)
+        } else {
+            let plain = "start: /(?s:.*)/";
+            Ok(ConstraintPlan {
+                factory: Arc::clone(&self.factory),
+                grammar: TopLevelGrammar::from_lark(plain.to_owned()),
+                grammar_source: Arc::from(plain),
+                vocab_size: self.vocab_size,
+                eos_token_ids: Arc::clone(&self.eos_token_ids),
+                require_accepting_state_at_length: false,
+                budget_plan: Some(budget),
+            })
+        }
+    }
+
     pub fn from_tokenizer_json(
         tokenizer_json: &Value,
         eos_token_ids: &[u32],
@@ -202,6 +230,7 @@ impl ConstraintTokenizer {
             vocab_size: self.vocab_size,
             eos_token_ids: Arc::clone(&self.eos_token_ids),
             require_accepting_state_at_length: requires_accepting_state_at_length(options),
+            budget_plan: None,
         })
     }
 
@@ -241,6 +270,7 @@ impl ConstraintTokenizer {
             vocab_size: self.vocab_size,
             eos_token_ids: Arc::clone(&self.eos_token_ids),
             require_accepting_state_at_length: requires_accepting_state_at_length(options),
+            budget_plan: None,
         })
     }
 
@@ -280,6 +310,7 @@ impl ConstraintTokenizer {
             vocab_size: self.vocab_size,
             eos_token_ids: Arc::clone(&self.eos_token_ids),
             require_accepting_state_at_length: requires_accepting_state_at_length(options),
+            budget_plan: None,
         })
     }
 
@@ -319,6 +350,7 @@ impl ConstraintTokenizer {
             vocab_size: self.vocab_size,
             eos_token_ids: Arc::clone(&self.eos_token_ids),
             require_accepting_state_at_length: requires_accepting_state_at_length(options),
+            budget_plan: None,
         })
     }
 
@@ -358,6 +390,7 @@ impl ConstraintTokenizer {
             vocab_size: self.vocab_size,
             eos_token_ids: Arc::clone(&self.eos_token_ids),
             require_accepting_state_at_length: requires_accepting_state_at_length(options),
+            budget_plan: None,
         })
     }
 
@@ -383,6 +416,7 @@ impl ConstraintTokenizer {
             vocab_size: self.vocab_size,
             eos_token_ids: Arc::clone(&self.eos_token_ids),
             require_accepting_state_at_length: false,
+            budget_plan: None,
         })
     }
 
@@ -456,6 +490,7 @@ impl ConstraintTokenizer {
             vocab_size: self.vocab_size,
             eos_token_ids: Arc::clone(&self.eos_token_ids),
             require_accepting_state_at_length,
+            budget_plan: None,
         })
     }
 }
@@ -469,6 +504,7 @@ pub struct ConstraintPlan {
     vocab_size: usize,
     eos_token_ids: Arc<[u32]>,
     require_accepting_state_at_length: bool,
+    budget_plan: Option<Arc<ReasoningBudgetPlan>>,
 }
 
 impl fmt::Debug for ConstraintPlan {
@@ -493,6 +529,11 @@ impl ConstraintPlan {
         }
         Ok(ConstraintSession {
             matcher,
+            budget_matcher: self
+                .budget_plan
+                .as_ref()
+                .map(|plan| plan.start_session())
+                .transpose()?,
             vocab_size: self.vocab_size,
             committed_tokens: 0,
             eos_token_ids: Arc::clone(&self.eos_token_ids),
@@ -509,6 +550,7 @@ impl ConstraintPlan {
 /// Mutable grammar state owned by one generation request.
 pub struct ConstraintSession {
     matcher: Matcher,
+    budget_matcher: Option<ReasoningBudgetSession>,
     vocab_size: usize,
     committed_tokens: usize,
     eos_token_ids: Arc<[u32]>,
@@ -519,6 +561,7 @@ impl Clone for ConstraintSession {
     fn clone(&self) -> Self {
         Self {
             matcher: self.matcher.deep_clone(),
+            budget_matcher: self.budget_matcher.clone(),
             vocab_size: self.vocab_size,
             committed_tokens: self.committed_tokens,
             eos_token_ids: Arc::clone(&self.eos_token_ids),
@@ -555,10 +598,17 @@ impl ConstraintSession {
     }
 
     pub fn compute_mask(&mut self) -> Result<SimpleVob> {
-        let mask = self
+        let mut mask = self
             .matcher
             .compute_mask_or_eos()
             .context("compute constrained token mask")?;
+        if let Some(budget) = &mut self.budget_matcher {
+            mask.and(
+                &budget
+                    .compute_mask()
+                    .context("compute reasoning budget mask")?,
+            );
+        }
         anyhow::ensure!(
             mask.num_set() > 0,
             "constrained decoding reached a state with no valid next token"
@@ -603,11 +653,24 @@ impl ConstraintSession {
         self.matcher
             .consume_token(token)
             .with_context(|| format!("commit constrained token {token}"))?;
+        if let Some(budget) = &mut self.budget_matcher {
+            budget
+                .commit_token(token)
+                .context("commit reasoning budget token")?;
+        }
         self.committed_tokens = self.committed_tokens.saturating_add(1);
         Ok(())
     }
 
     pub fn is_accepting(&mut self) -> Result<bool> {
+        if let Some(budget) = &mut self.budget_matcher {
+            if !budget
+                .is_accepting()
+                .context("query reasoning budget accepting state")?
+            {
+                return Ok(false);
+            }
+        }
         self.matcher
             .is_accepting()
             .context("query constrained-decoding accepting state")
@@ -667,6 +730,11 @@ impl ConstraintSession {
         self.matcher
             .rollback(tokens)
             .context("roll back constrained-decoding matcher")?;
+        if let Some(budget) = &mut self.budget_matcher {
+            budget
+                .rollback(tokens)
+                .context("roll back reasoning budget")?;
+        }
         self.committed_tokens -= tokens;
         Ok(())
     }
@@ -3198,6 +3266,212 @@ mod tests {
                 .unwrap()
                 < tokens.len()
         );
+    }
+
+    #[test]
+    fn bounded_reasoning_closes_before_final_output() {
+        let tokenizer = ConstraintTokenizer::byte_level().unwrap();
+        let plan = tokenizer
+            .with_reasoning_budget(
+                None,
+                NativeOutputDialect::Qwen35,
+                ReasoningBudget {
+                    reasoning_tokens: 8,
+                    answer_reserve: 32,
+                    framing_reserve: 12,
+                },
+            )
+            .unwrap();
+        let mut session = plan.start_session().unwrap();
+        consume_bytes(&mut session, b"abcdefgh").unwrap();
+        assert!(!session.compute_mask().unwrap().is_allowed(b'x' as u32));
+        consume_bytes(&mut session, b"</think>\n\nanswer").unwrap();
+        assert!(session.is_accepting().unwrap());
+        let reopened = b"<think>"
+            .iter()
+            .copied()
+            .map(u32::from)
+            .collect::<Vec<_>>();
+        assert!(session.validate_tokens(&reopened).unwrap() < reopened.len());
+        let repeated_close = b"</think>"
+            .iter()
+            .copied()
+            .map(u32::from)
+            .collect::<Vec<_>>();
+        assert!(session.validate_tokens(&repeated_close).unwrap() < repeated_close.len());
+    }
+
+    #[test]
+    fn bounded_gemma_thought_cannot_hide_in_optional_plain_text_branch() {
+        let tokenizer = ConstraintTokenizer::byte_level_gemma().unwrap();
+        let plan = tokenizer
+            .with_reasoning_budget(
+                None,
+                NativeOutputDialect::Gemma,
+                ReasoningBudget {
+                    reasoning_tokens: 8,
+                    answer_reserve: 32,
+                    framing_reserve: 32,
+                },
+            )
+            .unwrap();
+        let mut session = plan.start_session().unwrap();
+        for token in gemma_tokens("<|channel>thought\nabcdefgh") {
+            assert!(session.compute_mask().unwrap().is_allowed(token));
+            session.commit_token(token).unwrap();
+        }
+        let closing_mask = session.compute_mask().unwrap();
+        assert_eq!(closing_mask.num_set(), 1);
+        assert!(closing_mask.is_allowed(260)); // native <channel|>, not byte '<'
+        session
+            .commit_tokens(&gemma_tokens("<channel|>answer"))
+            .unwrap();
+        assert!(session.is_accepting().unwrap());
+        let mut direct = plan.start_session().unwrap();
+        direct
+            .commit_tokens(&gemma_tokens("<|channel>thought\n<channel|>direct answer"))
+            .unwrap();
+        assert!(direct.is_accepting().unwrap());
+        let reopened = gemma_tokens("<|channel>thought\n");
+        assert!(direct.validate_tokens(&reopened).unwrap() < reopened.len());
+        let mut no_thought = plan.start_session().unwrap();
+        consume_bytes(&mut no_thought, b"direct answer").unwrap();
+        assert!(no_thought.is_accepting().unwrap());
+    }
+
+    #[test]
+    fn reasoning_budget_composes_with_json_and_restores_across_speculation() {
+        let tokenizer = ConstraintTokenizer::byte_level().unwrap();
+        let schema = serde_json::json!({"type":"object", "properties":{"answer":{"const":42}},
+            "required":["answer"], "additionalProperties":false});
+        let json = tokenizer
+            .compile_json_output_with_reasoning(&schema, NativeOutputDialect::Qwen35)
+            .unwrap();
+        let plan = tokenizer
+            .with_reasoning_budget(
+                Some(json),
+                NativeOutputDialect::Qwen35,
+                ReasoningBudget {
+                    reasoning_tokens: 8,
+                    answer_reserve: 32,
+                    framing_reserve: 12,
+                },
+            )
+            .unwrap();
+        let mut session = plan.start_session().unwrap();
+        consume_bytes(&mut session, b"abcdefg").unwrap();
+        let draft = b"hx".iter().copied().map(u32::from).collect::<Vec<_>>();
+        let masks = session.speculative_masks(&draft).unwrap();
+        assert!(masks[0].is_allowed(b'h' as u32));
+        assert!(!masks[1].is_allowed(b'x' as u32));
+        assert_eq!(session.validate_tokens(&draft).unwrap(), 1);
+        assert!(session.compute_mask().unwrap().is_allowed(b'h' as u32));
+        let mut fork = session.fork();
+        consume_bytes(&mut fork, b"h</think>\n\n{\"answer\":42}").unwrap();
+        assert!(fork.is_accepting().unwrap());
+        assert!(session.compute_mask().unwrap().is_allowed(b'h' as u32));
+        consume_bytes(&mut session, b"h</think>").unwrap();
+        assert!(!session.compute_mask().unwrap().is_allowed(b'x' as u32));
+        session.rollback(9).unwrap(); // closing marker and the eighth thought token
+        assert!(session.compute_mask().unwrap().is_allowed(b'h' as u32));
+        consume_bytes(&mut session, b"h</think>\n\n{\"answer\":42}").unwrap();
+        assert!(session.is_accepting().unwrap());
+        let early_plan = tokenizer
+            .with_reasoning_budget(
+                Some(
+                    tokenizer
+                        .compile_json_output_with_reasoning(&schema, NativeOutputDialect::Qwen35)
+                        .unwrap(),
+                ),
+                NativeOutputDialect::Qwen35,
+                ReasoningBudget {
+                    reasoning_tokens: 32,
+                    answer_reserve: 32,
+                    framing_reserve: 12,
+                },
+            )
+            .unwrap();
+        let mut early = early_plan.start_session().unwrap();
+        consume_bytes(&mut early, b"ok</think>{\"answer\":42}").unwrap();
+        assert!(early.is_accepting().unwrap());
+        let mut invalid = early_plan.start_session().unwrap();
+        consume_bytes(&mut invalid, b"ok</think>{\"answer\":").unwrap();
+        assert!(!invalid.compute_mask().unwrap().is_allowed(b'5' as u32));
+    }
+
+    #[test]
+    fn reasoning_budget_preserves_native_tool_constraints() {
+        let tokenizer = ConstraintTokenizer::byte_level().unwrap();
+        for choice in [ToolChoiceConstraint::Auto, ToolChoiceConstraint::Required] {
+            let options = ToolConstraintOptions {
+                choice,
+                allow_parallel_calls: false,
+            };
+            let tools = tokenizer
+                .compile_tools_with_output_and_reasoning(
+                    ToolDialect::Qwen35,
+                    NativeOutputDialect::Qwen35,
+                    &[weather_tool()],
+                    &options,
+                    None,
+                )
+                .unwrap();
+            let plan = tokenizer
+                .with_reasoning_budget(
+                    Some(tools),
+                    NativeOutputDialect::Qwen35,
+                    ReasoningBudget {
+                        reasoning_tokens: 8,
+                        answer_reserve: 128,
+                        framing_reserve: 12,
+                    },
+                )
+                .unwrap();
+            let mut session = plan.start_session().unwrap();
+            consume_bytes(&mut session, b"abcdefgh</think>\n\n<tool_call><function=get_weather><parameter=city>Tokyo</parameter></function></tool_call>").unwrap();
+            assert!(session.is_accepting().unwrap());
+        }
+    }
+
+    #[test]
+    fn reasoning_budget_handles_utf8_and_partial_closing_markers() {
+        let tokenizer = ConstraintTokenizer::byte_level().unwrap();
+        let plan = tokenizer
+            .with_reasoning_budget(
+                None,
+                NativeOutputDialect::Qwen35,
+                ReasoningBudget {
+                    reasoning_tokens: 8,
+                    answer_reserve: 32,
+                    framing_reserve: 12,
+                },
+            )
+            .unwrap();
+        for prefix in ["思考", "abc</thi"] {
+            let mut session = plan.start_session().unwrap();
+            consume_bytes(&mut session, prefix.as_bytes()).unwrap();
+            let mut output = prefix.as_bytes().to_vec();
+            // A partially generated closing marker may be charged to thought.
+            // Follow the forced mask and require a complete native close in
+            // bounded space, rather than assuming a particular tokenization.
+            while !output.ends_with(b"</think>") {
+                let mask = session.compute_mask().unwrap();
+                let next = if mask.is_allowed(b'x' as u32) {
+                    b'x'
+                } else {
+                    (0..=255).find(|&byte| mask.is_allowed(byte)).unwrap() as u8
+                };
+                session.commit_token(u32::from(next)).unwrap();
+                output.push(next);
+                assert!(
+                    output.len() <= 20,
+                    "unbounded delimiter transition: {output:?}"
+                );
+            }
+            assert!(std::str::from_utf8(&output).is_ok());
+            consume_bytes(&mut session, b"\n\nanswer").unwrap();
+            assert!(session.is_accepting().unwrap());
+        }
     }
 
     #[test]

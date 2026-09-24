@@ -335,16 +335,23 @@ struct DFlash2ModelList {
 #[derive(Debug, Serialize, PartialEq)]
 struct DFlash2ModelInfo {
     id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_window: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_output_tokens: Option<usize>,
     object: &'static str,
     created: u64,
     owned_by: &'static str,
 }
 
-fn dflash2_model_list(model_id: &str) -> DFlash2ModelList {
+fn dflash2_model_list(model_id: &str, effective_cap_max: usize) -> DFlash2ModelList {
+    let capacity = (effective_cap_max > 0).then_some(effective_cap_max);
     DFlash2ModelList {
         object: "list",
         data: vec![DFlash2ModelInfo {
             id: model_id.to_owned(),
+            context_window: capacity,
+            max_output_tokens: capacity,
             object: "model",
             created: 0,
             owned_by: "ironmlx",
@@ -356,7 +363,7 @@ async fn dflash2_models_handler<M>(State(state): State<AppState<M>>) -> Json<DFl
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
-    Json(dflash2_model_list(&state.model_id))
+    Json(dflash2_model_list(&state.model_id, state.effective_cap_max))
 }
 
 async fn serve_inner<M>(
@@ -476,7 +483,7 @@ mod tests {
 
     #[test]
     fn dflash2_model_list_exposes_only_the_public_target_identifier() {
-        let list = dflash2_model_list("mlx-community/Qwen3.8-27B-4bit");
+        let list = dflash2_model_list("mlx-community/Qwen3.8-27B-4bit", 65536);
         let json = serde_json::to_value(list).expect("serialize model list");
 
         assert_eq!(json["object"], "list");
@@ -484,6 +491,11 @@ mod tests {
         assert_eq!(json["data"][0]["id"], "mlx-community/Qwen3.8-27B-4bit");
         assert_eq!(json["data"][0]["object"], "model");
         assert_eq!(json["data"][0]["owned_by"], "ironmlx");
+        assert_eq!(json["data"][0]["context_window"], 65536);
+        assert_eq!(json["data"][0]["max_output_tokens"], 65536);
+        let unknown = serde_json::to_value(dflash2_model_list("unknown", 0)).unwrap();
+        assert!(unknown["data"][0].get("context_window").is_none());
+        assert!(unknown["data"][0].get("max_output_tokens").is_none());
     }
 
     #[test]

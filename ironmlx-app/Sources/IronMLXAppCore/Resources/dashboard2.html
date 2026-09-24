@@ -1186,6 +1186,14 @@
     padding: 4px 2px;
     background: #0d0d0d;
   }
+  .agent-guide-mark-dsh {
+    background: #142b46;
+    color: #e9f3ff;
+    font-family: 'SF Mono', Menlo, monospace;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: -0.06em;
+  }
   .agent-guide-logo {
     width: 100%;
     height: 100%;
@@ -1419,6 +1427,9 @@
     gap: 12px;
     margin-bottom: 14px;
   }
+  .agent-guide-field {
+    min-width: 0;
+  }
   .agent-guide-field label {
     display: block;
     margin-bottom: 6px;
@@ -1429,6 +1440,7 @@
   .agent-guide-field select,
   .agent-guide-field input {
     width: 100%;
+    min-width: 0;
     min-height: 36px;
     box-sizing: border-box;
     border: 1px solid var(--border);
@@ -1540,6 +1552,10 @@
   .agent-guide-note[hidden] {
     display: none;
   }
+  .agent-code-copy:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+  }
   .agent-profile-options + .agent-guide-note {
     margin-top: 0;
     margin-bottom: 14px;
@@ -1556,6 +1572,9 @@
     .agent-guide-nav-label {
       grid-column: 1 / -1;
     }
+    .agent-guide-nav-item[data-agent-guide="dsh"] {
+      grid-column: 1 / -1;
+    }
     .agent-runtime-grid,
     .agent-profile-options,
     .agent-guide-fields {
@@ -1563,6 +1582,11 @@
     }
     .agent-guide-hero {
       flex-direction: column;
+    }
+  }
+  @media (max-width: 520px) {
+    .agent-guide-nav {
+      grid-template-columns: 1fr;
     }
   }
 
@@ -2078,12 +2102,47 @@
   #model-table .tts-model-row .model-status-cell { white-space: normal; line-height: 1.45; }
 
   .model-params-modal {
-    width: 480px;
+    width: 640px;
     max-width: calc(100vw - 32px);
   }
 
-  .model-params-capacity-row .modal-field > label {
+  .model-params-setting-row {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    column-gap: 12px;
+  }
+
+  .model-params-setting-row .modal-field {
+    min-width: 0;
+  }
+
+  .model-params-setting-row .field-label-with-help label {
     white-space: nowrap;
+  }
+
+  .model-params-output-section {
+    border-top: 0.5px solid var(--border);
+    padding-top: 16px;
+  }
+
+  .model-params-modal .field-label-with-help {
+    margin-bottom: 4px;
+  }
+
+  .model-params-modal .field-label-with-help label {
+    margin-bottom: 0;
+  }
+
+  @media (max-width: 620px) {
+    .model-params-setting-row {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+
+  @media (max-width: 420px) {
+    .model-params-setting-row {
+      grid-template-columns: minmax(0, 1fr);
+    }
   }
 
   .dflash2-tensor-row {
@@ -4009,6 +4068,14 @@
             </span>
             <span class="agent-guide-nav-arrow" aria-hidden="true">›</span>
           </button>
+          <button class="agent-guide-nav-item" type="button" data-agent-guide="dsh" aria-selected="false" aria-controls="agent-guide-dsh" onclick="selectAgentGuide('dsh')">
+            <span class="agent-guide-mark agent-guide-mark-dsh" aria-hidden="true">dsh</span>
+            <span class="agent-guide-nav-copy">
+              <span class="agent-guide-nav-name">DeepSeek Harness</span>
+              <span class="agent-guide-nav-meta">Responses API</span>
+            </span>
+            <span class="agent-guide-nav-arrow" aria-hidden="true">›</span>
+          </button>
         </nav>
 
         <div class="agent-guide-panel">
@@ -4202,6 +4269,120 @@
               <div class="agent-guide-note">
                 <span aria-hidden="true">i</span>
                 <span data-i18n="omp_cwd_note">Replace the project path before running the command. OMP executes bash tools in the directory supplied by --cwd.</span>
+              </div>
+              <div class="agent-guide-note">
+                <span aria-hidden="true">i</span>
+                <span data-i18n="agent_tool_boundary">The agent executes terminal, bash, and MCP tools locally. IronMLX only provides inference and structured tool calls.</span>
+              </div>
+            </section>
+          </article>
+          <article id="agent-guide-dsh" role="tabpanel" aria-label="DeepSeek Harness" hidden>
+            <header class="agent-guide-hero">
+              <div>
+                <div class="agent-guide-eyebrow" data-i18n="agent_provider_setup">Provider setup</div>
+                <div class="agent-guide-title-row">
+                  <h2 class="agent-guide-title">DeepSeek Harness</h2>
+                  <span class="agent-guide-version-badge"><span data-i18n="dsh_verified_revision">Validated master</span>: <strong>ddefc45fbc</strong></span>
+                </div>
+                <p class="agent-guide-description" data-i18n="dsh_description">Use dsh's pi-ai Responses route with the model currently served by IronMLX. Apply this overlay only to the runs that should use IronMLX.</p>
+              </div>
+              <a id="dsh-official-guide" class="agent-guide-docs-link" href="https://deepseek-harness.github.io/deepseek-harness/en/guide/providers#add-a-custom-provider" target="_blank" rel="noopener noreferrer" onclick="if (window.webkit?.messageHandlers?.openAgentGuide) { window.webkit.messageHandlers.openAgentGuide.postMessage(this.href); return false; }"><span data-i18n="agent_official_guide">Official configuration guide</span> <span aria-hidden="true">↗</span></a>
+            </header>
+
+            <section class="agent-guide-section">
+              <div class="agent-guide-section-header">
+                <div>
+                  <h3 class="agent-guide-section-title" data-i18n="agent_current_connection">Current IronMLX connection</h3>
+                  <p class="agent-guide-section-desc" data-i18n="agent_current_connection_desc">Start IronMLX and load a model before validating the generated configuration.</p>
+                </div>
+              </div>
+              <div class="agent-runtime-grid">
+                <div class="agent-runtime-item">
+                  <span class="agent-runtime-label" data-i18n="agent_api_endpoint">API endpoint</span>
+                  <span class="agent-runtime-value" data-agent-endpoint>http://127.0.0.1:9068/v1</span>
+                </div>
+                <div class="agent-runtime-item">
+                  <span class="agent-runtime-label" data-i18n="agent_loaded_model">Loaded model</span>
+                  <span class="agent-runtime-value" data-agent-model-status data-i18n="agent_no_model">No model loaded</span>
+                </div>
+              </div>
+            </section>
+
+            <section class="agent-guide-section">
+              <div class="agent-guide-section-header">
+                <div>
+                  <h3 class="agent-guide-section-title" data-i18n="agent_configure_provider">Configure provider</h3>
+                  <p class="agent-guide-section-desc"><span data-i18n="dsh_save_file">Save as</span> <code>$DSH_HOME/ironmlx.patch.yml</code> <span data-i18n="dsh_home_default">(normally ~/.dsh)</span></p>
+                </div>
+              </div>
+              <div class="agent-guide-fields">
+                <div class="agent-guide-field">
+                  <label for="dsh-model-select" data-i18n="agent_model">Model</label>
+                  <select id="dsh-model-select" onchange="renderAgentGuideConfiguration()"></select>
+                </div>
+                <div class="agent-guide-field">
+                  <label for="dsh-reasoning-select" data-i18n="dsh_reasoning">Reasoning</label>
+                  <select id="dsh-reasoning-select" onchange="renderAgentGuideConfiguration()">
+                    <option value="off" data-i18n="dsh_reasoning_off">Off</option>
+                    <option value="minimal" data-i18n="dsh_reasoning_minimal">Minimal</option>
+                    <option value="low" data-i18n="dsh_reasoning_low">Low</option>
+                    <option value="medium" data-i18n="dsh_reasoning_medium">Medium</option>
+                    <option value="high" data-i18n="dsh_reasoning_high" selected>High</option>
+                    <option value="xhigh" data-i18n="dsh_reasoning_xhigh">Xhigh</option>
+                    <option value="max" data-i18n="dsh_reasoning_max">Max</option>
+                  </select>
+                </div>
+                <div class="agent-guide-field">
+                  <label for="dsh-context-window" data-i18n="dsh_context_window">Context window</label>
+                  <input id="dsh-context-window" type="number" min="1" step="1" inputmode="numeric" oninput="this.dataset.userEdited='true';renderAgentGuideConfiguration()">
+                </div>
+                <div class="agent-guide-field">
+                  <label for="dsh-max-tokens" data-i18n="dsh_output_budget">Output budget (tokens)</label>
+                  <input id="dsh-max-tokens" type="number" min="1" step="1" inputmode="numeric" oninput="this.dataset.userEdited='true';renderAgentGuideConfiguration()">
+                </div>
+              </div>
+              <div class="agent-code-wrap">
+                <div class="agent-code-toolbar">
+                  <span>ironmlx.patch.yml</span>
+                  <button class="agent-code-copy" id="copy-dsh-config" type="button" onclick="copyAgentCode('dsh-config-code', this)" data-copy-label="copy_configuration" aria-label="Copy configuration" title="Copy configuration" disabled>
+                    <svg class="agent-code-copy-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true"><g class="agent-code-copy-glyph" stroke="currentColor" stroke-width="1.35"><rect x="5.25" y="2.25" width="8.5" height="8.5" rx="1.5"/><path d="M10.75 10.75v1.5a1.5 1.5 0 0 1-1.5 1.5h-5.5a1.5 1.5 0 0 1 1.5-1.5h1.5"/></g><path class="agent-code-check-glyph" d="m3.25 8.25 3 3 6.5-6.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  </button>
+                </div>
+                <pre class="agent-code"><code id="dsh-config-code"></code></pre>
+              </div>
+              <div class="agent-guide-note" id="dsh-config-status" role="status" aria-live="polite">
+                <span aria-hidden="true">i</span>
+                <span data-i18n="dsh_missing_model">Load a model in IronMLX to generate the dsh configuration.</span>
+              </div>
+              <div class="agent-guide-note">
+                <span aria-hidden="true">i</span>
+                <span data-i18n="dsh_budget_note">The output budget is prefilled to at most 4096 tokens, not to the service's hard maximum. Reasoning and visible text share it; adjust it for your workload without exceeding the model limit.</span>
+              </div>
+              <div class="agent-guide-note">
+                <span aria-hidden="true">i</span>
+                <span data-i18n="dsh_settings_note">If dsh settings.yaml already selects a default model or overrides llm-pi-ai, update those conflicting settings; user settings take precedence over this overlay.</span>
+              </div>
+            </section>
+
+            <section class="agent-guide-section">
+              <div class="agent-guide-section-header">
+                <div>
+                  <h3 class="agent-guide-section-title" data-i18n="agent_verify">Verify</h3>
+                  <p class="agent-guide-section-desc" data-i18n="dsh_verify_desc">Set a local placeholder key, run a text turn, then check a real file-reading tool call.</p>
+                </div>
+              </div>
+              <div class="agent-code-wrap">
+                <div class="agent-code-toolbar">
+                  <span>Terminal</span>
+                  <button class="agent-code-copy" type="button" onclick="copyAgentCode('dsh-verify-code', this)" data-copy-label="copy_commands" aria-label="Copy commands" title="Copy commands">
+                    <svg class="agent-code-copy-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true"><g class="agent-code-copy-glyph" stroke="currentColor" stroke-width="1.35"><rect x="5.25" y="2.25" width="8.5" height="8.5" rx="1.5"/><path d="M10.75 10.75v1.5a1.5 1.5 0 0 1-1.5 1.5h-5.5a1.5 1.5 0 0 1-1.5-1.5v-5.5a1.5 1.5 0 0 1 1.5-1.5h1.5"/></g><path class="agent-code-check-glyph" d="m3.25 8.25 3 3 6.5-6.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  </button>
+                </div>
+                <pre class="agent-code"><code id="dsh-verify-code"></code></pre>
+              </div>
+              <div class="agent-guide-note">
+                <span aria-hidden="true">i</span>
+                <span data-i18n="dsh_key_note">The placeholder key only satisfies the dsh provider's credential lookup on a local keyless endpoint. Do not use it as a LAN API key.</span>
               </div>
               <div class="agent-guide-note">
                 <span aria-hidden="true">i</span>
@@ -4606,27 +4787,30 @@
       <h2 id="modal-model-name"></h2>
     </div>
     <div class="modal-body" style="display:block;">
-      <div class="modal-row">
-        <div class="modal-field" style="flex:2.06;">
-          <label data-i18n="model_alias">Model Alias</label>
+      <div class="modal-row model-params-setting-row model-params-identity-row">
+        <div class="modal-field">
+          <label for="modal-alias-input" data-i18n="model_alias">Model Alias</label>
           <input type="text" id="modal-alias-input">
         </div>
-        <div class="modal-field" style="flex:1;">
-          <label data-i18n="model_type">Model Type</label>
+        <div class="modal-field">
+          <label for="modal-model-type" data-i18n="model_type">Model Type</label>
           <select id="modal-model-type"><option value="auto" data-i18n="auto_detect">Auto Detect</option><option value="llm">LLM</option><option value="vlm">LLM/VLM</option><option value="block_diffusion_vlm">Block Diffusion VLM</option><option value="embedding">Embedding</option><option value="reranker">Reranker</option><option value="asr">ASR</option><option value="tts">TTS</option></select>
         </div>
+        <div class="modal-field"><div class="field-label-with-help"><label for="modal-context-size" data-i18n="context_size">CONTEXT SIZE</label><span class="profile-help profile-help-fixed"><button type="button" class="profile-help-trigger" aria-label="About context size" data-i18n-aria-label="context_size_help_label" aria-describedby="context-size-help">?</button><span class="profile-help-tooltip profile-help-tooltip-fixed" id="context-size-help" role="tooltip" data-i18n="context_size_help">Model context window read from its configuration. Read only; the runtime limit is set separately.</span></span></div><input type="text" placeholder="--" id="modal-context-size" readonly></div>
       </div>
-      <div class="modal-row model-params-capacity-row">
-        <div class="modal-field"><label data-i18n="context_size">CONTEXT SIZE</label><input type="text" placeholder="--" id="modal-context-size" readonly></div>
-        <div class="modal-field"><label data-i18n="max_context_tokens">MAX CONTEXT TOKENS</label><input type="text" placeholder="--" id="modal-max-tokens"></div>
-        <div class="modal-field"><label>TEMPERATURE</label><input type="text" placeholder="1.0" id="modal-temperature"></div>
+      <div class="model-params-output-section">
+      <div class="modal-row model-params-setting-row model-params-capacity-row">
+        <div class="modal-field"><div class="field-label-with-help"><label for="modal-max-tokens" data-i18n="max_context_tokens">MAX CONTEXT TOKENS</label><span class="profile-help profile-help-fixed"><button type="button" class="profile-help-trigger" aria-label="About max context tokens" data-i18n-aria-label="max_context_tokens_help_label" aria-describedby="max-context-tokens-help">?</button><span class="profile-help-tooltip profile-help-tooltip-fixed" id="max-context-tokens-help" role="tooltip" data-i18n="max_context_tokens_help">Runtime KV cache limit for one sequence. Input and generated tokens share this context; this is not the output limit.</span></span></div><input type="text" placeholder="--" id="modal-max-tokens"></div>
+        <div class="modal-field"><div class="field-label-with-help"><label for="modal-max-output-tokens" data-i18n="default_max_output_tokens">MAX OUTPUT TOKENS</label><span class="profile-help profile-help-fixed"><button type="button" class="profile-help-trigger" aria-label="About max output tokens" data-i18n-aria-label="default_max_output_tokens_help_label" aria-describedby="max-output-tokens-help">?</button><span class="profile-help-tooltip profile-help-tooltip-fixed" id="max-output-tokens-help" role="tooltip"><span class="profile-help-tooltip-title" data-i18n="default_max_output_tokens">MAX OUTPUT TOKENS</span><span class="profile-help-tooltip-body" data-i18n="default_max_output_tokens_help">Default token budget for one Responses reply when the request omits max_output_tokens.</span><span class="profile-help-tooltip-flow" data-i18n="default_max_output_tokens_help_budget">Reasoning and visible answer tokens share this budget. If it runs out, the answer may be cut off or may not appear at all.</span><span class="profile-help-tooltip-flow" data-i18n="default_max_output_tokens_help_priority">An explicit request value takes precedence. Leave this field empty to use the server default of 256.</span><span class="profile-help-tooltip-flow" data-i18n="default_max_output_tokens_help_scope">This is not the model's fixed output capability and does not change its context or KV cache size. The remaining context also limits usable output.</span></span></span></div><input type="text" inputmode="numeric" placeholder="256" id="modal-max-output-tokens"></div>
+        <div class="modal-field"><label for="modal-temperature">TEMPERATURE</label><input type="text" placeholder="1.0" id="modal-temperature"></div>
       </div>
-      <div class="modal-row" id="modal-causal-sampling-row">
-        <div class="modal-field"><label>TOP P</label><input type="text" placeholder="1.0" id="modal-top-p"></div>
-        <div class="modal-field"><label>TOP K</label><input type="text" placeholder="-1" id="modal-top-k"></div>
-        <div class="modal-field"><label>REPEAT PENALTY</label><input type="text" placeholder="1.0" id="modal-repeat-penalty"></div>
+      <div class="modal-row model-params-setting-row" id="modal-causal-sampling-row">
+        <div class="modal-field"><label for="modal-top-p">TOP P</label><input type="text" placeholder="1.0" id="modal-top-p"></div>
+        <div class="modal-field"><label for="modal-top-k">TOP K</label><input type="text" placeholder="-1" id="modal-top-k"></div>
+        <div class="modal-field"><label for="modal-repeat-penalty">REPEAT PENALTY</label><input type="text" placeholder="1.0" id="modal-repeat-penalty"></div>
       </div>
-      <div id="modal-mtp-section" style="margin-top:14px;border-top:0.5px solid var(--border);padding-top:14px;">
+      </div>
+      <div id="modal-mtp-section" style="margin-top:2px;border-top:0.5px solid var(--border);padding-top:14px;">
         <div class="modal-row mtp-header-row">
           <div class="mtp-control">
             <label class="mtp-toggle-label">
@@ -4817,6 +5001,19 @@
       omp_description: "Register IronMLX as a keyless Responses provider, discover the models served by the App, and launch OMP in the intended project directory.",
       omp_refresh_desc: "Refresh provider discovery, inspect available models, then start OMP from your project.",
       omp_cwd_note: "Replace the project path before running the command. OMP executes bash tools in the directory supplied by --cwd.",
+      dsh_verified_revision: "Validated master", dsh_description: "Use dsh's pi-ai Responses route with the model currently served by IronMLX. Apply this overlay only to the runs that should use IronMLX.",
+      dsh_save_file: "Save as", dsh_home_default: "(normally ~/.dsh)", dsh_reasoning: "Reasoning", dsh_reasoning_off: "Off",
+      dsh_reasoning_minimal: "Minimal", dsh_reasoning_low: "Low", dsh_reasoning_medium: "Medium", dsh_reasoning_high: "High", dsh_reasoning_xhigh: "Extra high", dsh_reasoning_max: "Maximum",
+      dsh_context_window: "Context window", dsh_output_budget: "Output budget (tokens)",
+      dsh_missing_model: "Load a model in IronMLX to generate the dsh configuration.",
+      dsh_missing_capacity: "Capacity unavailable. Enter the model's actual context window and a per-turn output budget to enable copying.",
+      dsh_capacity_manual: "Capacity could not be read from /v1/models. Check the entered limits against the model before using this overlay.",
+      dsh_capacity_ready: "Limits were prefilled from /v1/models. Review the output budget before copying.",
+      dsh_invalid_capacity: "Enter positive whole-number limits. Output must fit within context and the capacities reported by /v1/models.",
+      dsh_budget_note: "The output budget defaults to at most 4096 tokens, not automatically to the service's maximum. Reasoning and visible text share it; adjust it for your workload.",
+      dsh_settings_note: "If dsh settings.yaml already selects a default model or overrides llm-pi-ai, update those conflicting settings; user settings take precedence over this overlay.",
+      dsh_verify_desc: "Set a local placeholder key, run a text turn, then check a real file-reading tool call.",
+      dsh_key_note: "The placeholder key only satisfies dsh's credential lookup on the local keyless endpoint. It is not a LAN API key.",
       server_crash_restarting: "Server exited unexpectedly. Restarting...",
       server_crash_recovering: "Server recovery is in progress...",
       server_crash_recovered: "Server has been restarted successfully.",
@@ -5038,6 +5235,14 @@
       search_hf: "Search HuggingFace", hf_model_query: "Model name or repository ID", search_hf_placeholder: "Enter a model name or organization/model", sort_by: "Sort by", trending: "Trending", most_downloads: "Most Downloads", recently_created: "Recently Created", recently_updated: "Recently Updated", most_params: "Most Params", least_params: "Least Params", search: "Search",
       model_param_settings: "Model Param Settings", context_size: "CONTEXT SIZE",
       max_context_tokens: "MAX CONTEXT TOKENS",
+      default_max_output_tokens: "MAX OUTPUT TOKENS",
+      context_size_help_label: "About context size", context_size_help: "Read-only model context window from its configuration. It does not set the runtime context limit.",
+      max_context_tokens_help_label: "About max context tokens", max_context_tokens_help: "Runtime KV cache limit per sequence. Input and generated tokens share this context; this is not the output limit.",
+      default_max_output_tokens_help_label: "About max output tokens", default_max_output_tokens_help: "Used as this model's per-reply output budget only when a Responses request omits max_output_tokens.",
+      default_max_output_tokens_help_budget: "Reasoning and visible answer tokens share the budget. If it runs out, the answer may be incomplete or may not begin at all.",
+      default_max_output_tokens_help_priority: "A request-supplied max_output_tokens takes precedence. Leave blank to use the server default (256).",
+      default_max_output_tokens_help_scope: "This is not the model's fixed output capability and does not change CONTEXT SIZE or MAX CONTEXT TOKENS. Remaining context can further limit output.",
+      params_invalid_max_output_tokens: "MAX OUTPUT TOKENS must be a positive integer or empty.",
       model_alias: "Model Alias", model_type: "Model Type", auto_detect: "Auto Detect",
       max_token_count: "Max Tokens", temperature: "Temperature", repeat_penalty: "Repeat Penalty", ttl_seconds: "TTL (seconds)",
       load_defaults: "Load Defaults", default_hint: "Leave empty to use global defaults",
@@ -5219,6 +5424,19 @@
       omp_description: "将 IronMLX 注册为免密钥 Responses Provider，发现 App 提供的模型，并在目标项目目录启动 OMP。",
       omp_refresh_desc: "刷新 Provider 发现、查看可用模型，然后从项目目录启动 OMP。",
       omp_cwd_note: "执行前请替换项目路径。OMP 会在 --cwd 指定的目录中执行 bash 工具。",
+      dsh_verified_revision: "已验证 master", dsh_description: "通过 dsh 的 pi-ai Responses 路由使用 IronMLX 当前提供的模型。仅在需要使用 IronMLX 的运行中应用此 overlay。",
+      dsh_save_file: "保存为", dsh_home_default: "（通常为 ~/.dsh）", dsh_reasoning: "推理模式", dsh_reasoning_off: "关闭",
+      dsh_reasoning_minimal: "极低", dsh_reasoning_low: "低", dsh_reasoning_medium: "中", dsh_reasoning_high: "高", dsh_reasoning_xhigh: "极高", dsh_reasoning_max: "最大",
+      dsh_context_window: "上下文容量", dsh_output_budget: "单轮输出预算（tokens）",
+      dsh_missing_model: "先在 IronMLX 中加载模型，再生成 dsh 配置。",
+      dsh_missing_capacity: "无法读取容量信息。请填写模型实际的上下文容量及单轮输出预算，然后复制配置。",
+      dsh_capacity_manual: "未能从 /v1/models 读取容量信息；使用此 overlay 前请核对手动填写的上限。",
+      dsh_capacity_ready: "已根据 /v1/models 预填容量；复制前请检查输出预算。",
+      dsh_invalid_capacity: "请输入正整数；输出预算不得超过上下文容量或 /v1/models 公布的上限。",
+      dsh_budget_note: "输出预算默认不超过 4096 tokens，不会一律取服务端硬上限。reasoning 与正文共同消耗它，请按任务需要调整。",
+      dsh_settings_note: "若 dsh 的 settings.yaml 已指定默认模型或覆盖 llm-pi-ai，请更新这些冲突的设置；用户设置的优先级高于此 overlay。",
+      dsh_verify_desc: "设置本地占位密钥，完成一轮文本请求，再验证真实的文件读取工具调用。",
+      dsh_key_note: "占位密钥仅满足 dsh 对本地免鉴权 endpoint 的凭据查询；它不是 LAN API Key。",
       server_crash_restarting: "服务异常退出，正在重启...",
       server_crash_recovering: "正在恢复服务...",
       server_crash_recovered: "服务已成功重启。",
@@ -5440,6 +5658,14 @@
       search_hf: "搜索 HuggingFace", hf_model_query: "模型名称或仓库 ID", search_hf_placeholder: "输入模型名称或组织/模型", sort_by: "排序方式", trending: "热门趋势", most_downloads: "下载最多", recently_created: "最近创建", recently_updated: "最近更新", most_params: "参数最多", least_params: "参数最少", search: "搜索",
       model_param_settings: "模型参数设置", context_size: "CONTEXT SIZE",
       max_context_tokens: "MAX CONTEXT TOKENS",
+      default_max_output_tokens: "MAX OUTPUT TOKENS",
+      context_size_help_label: "关于上下文长度", context_size_help: "只读：从模型配置读取的上下文长度，不用于设置运行时上限。",
+      max_context_tokens_help_label: "关于最大上下文 Token 数", max_context_tokens_help: "每条序列的运行时 KV Cache 上限。输入与生成内容共享该容量；这不是输出上限。",
+      default_max_output_tokens_help_label: "关于 MAX OUTPUT TOKENS", default_max_output_tokens_help: "仅当 Responses 请求未指定 max_output_tokens 时，此值才作为该模型每次回答的默认输出预算。",
+      default_max_output_tokens_help_budget: "推理过程（reasoning）与可见正文共同消耗预算；耗尽时，正文可能不完整，甚至还未开始输出。",
+      default_max_output_tokens_help_priority: "请求显式传入 max_output_tokens 时以请求值为准；留空则使用服务端默认值 256。",
+      default_max_output_tokens_help_scope: "这不是模型固定的输出能力上限，也不修改 CONTEXT SIZE 或 MAX CONTEXT TOKENS；剩余上下文空间还会限制实际可输出长度。",
+      params_invalid_max_output_tokens: "MAX OUTPUT TOKENS 必须是正整数，或留空。",
       model_alias: "模型别名", model_type: "模型类型", auto_detect: "自动检测",
       max_token_count: "最大 Token 数", temperature: "温度", repeat_penalty: "重复惩罚", ttl_seconds: "TTL（秒）",
       load_defaults: "加载默认值", default_hint: "留空则使用全局默认值",
@@ -5621,6 +5847,19 @@
       omp_description: "將 IronMLX 註冊為免金鑰 Responses Provider，探索 App 提供的模型，並在目標專案目錄啟動 OMP。",
       omp_refresh_desc: "重新整理 Provider 探索、檢視可用模型，然後從專案目錄啟動 OMP。",
       omp_cwd_note: "執行前請替換專案路徑。OMP 會在 --cwd 指定的目錄中執行 bash 工具。",
+      dsh_verified_revision: "已驗證 master", dsh_description: "透過 dsh 的 pi-ai Responses 路由使用 IronMLX 目前提供的模型。只在需要使用 IronMLX 的執行中套用此 overlay。",
+      dsh_save_file: "儲存為", dsh_home_default: "（通常為 ~/.dsh）", dsh_reasoning: "推理模式", dsh_reasoning_off: "關閉",
+      dsh_reasoning_minimal: "極低", dsh_reasoning_low: "低", dsh_reasoning_medium: "中", dsh_reasoning_high: "高", dsh_reasoning_xhigh: "極高", dsh_reasoning_max: "最大",
+      dsh_context_window: "上下文容量", dsh_output_budget: "單輪輸出預算（tokens）",
+      dsh_missing_model: "請先在 IronMLX 載入模型，再產生 dsh 設定。",
+      dsh_missing_capacity: "無法讀取容量資訊。請填入模型實際的上下文容量與單輪輸出預算，再複製設定。",
+      dsh_capacity_manual: "無法從 /v1/models 讀取容量資訊；使用此 overlay 前請核對手動填入的上限。",
+      dsh_capacity_ready: "已根據 /v1/models 預填容量；複製前請檢查輸出預算。",
+      dsh_invalid_capacity: "請輸入正整數；輸出預算不得超過上下文容量或 /v1/models 公布的上限。",
+      dsh_budget_note: "輸出預算預設不超過 4096 tokens，不會一律採用伺服器硬上限。reasoning 與正文共用預算，請依工作需要調整。",
+      dsh_settings_note: "若 dsh 的 settings.yaml 已指定預設模型或覆蓋 llm-pi-ai，請更新這些衝突的設定；使用者設定的優先順序高於此 overlay。",
+      dsh_verify_desc: "設定本機佔位金鑰，完成一輪文字請求，再驗證實際的檔案讀取工具呼叫。",
+      dsh_key_note: "佔位金鑰僅滿足 dsh 對本機免驗證 endpoint 的憑證查詢；它不是 LAN API Key。",
       server_crash_restarting: "服務異常退出，正在重啟...",
       server_crash_recovering: "正在恢復服務...",
       server_crash_recovered: "服務已成功重啟。",
@@ -5844,6 +6083,14 @@
       dl_from_ms: "從 ModelScope 下載", ms_repo_id: "倉庫 ID", ms_browse: "瀏覽模型",
       search_hf: "搜尋 HuggingFace", hf_model_query: "模型名稱或儲存庫 ID", search_hf_placeholder: "輸入模型名稱或組織/模型", sort_by: "排序方式", trending: "熱門趨勢", most_downloads: "下載最多", recently_created: "最近建立", recently_updated: "最近更新", most_params: "參數最多", least_params: "參數最少", search: "搜尋",
       max_context_tokens: "MAX CONTEXT TOKENS",
+      default_max_output_tokens: "MAX OUTPUT TOKENS",
+      context_size_help_label: "關於上下文長度", context_size_help: "唯讀：從模型設定讀取的上下文長度，不用於設定執行時上限。",
+      max_context_tokens_help_label: "關於最大上下文 Token 數", max_context_tokens_help: "每條序列的執行時 KV Cache 上限。輸入與生成內容共用此容量；這不是輸出上限。",
+      default_max_output_tokens_help_label: "關於 MAX OUTPUT TOKENS", default_max_output_tokens_help: "僅當 Responses 請求未指定 max_output_tokens 時，此值才作為該模型每次回答的預設輸出預算。",
+      default_max_output_tokens_help_budget: "推理過程（reasoning）與可見正文共同消耗預算；耗盡時，正文可能不完整，甚至尚未開始輸出。",
+      default_max_output_tokens_help_priority: "請求明確傳入 max_output_tokens 時以請求值為準；留空則使用伺服器預設值 256。",
+      default_max_output_tokens_help_scope: "這不是模型固定的輸出能力上限，也不修改 CONTEXT SIZE 或 MAX CONTEXT TOKENS；剩餘上下文空間還會限制實際可輸出長度。",
+      params_invalid_max_output_tokens: "MAX OUTPUT TOKENS 必須是正整數，或留空。",
       model_param_settings: "模型參數設定", context_size: "CONTEXT SIZE",
       model_alias: "模型別名", model_type: "模型類型", auto_detect: "自動偵測",
       max_token_count: "最大 Token 數", temperature: "溫度", repeat_penalty: "重複懲罰", ttl_seconds: "TTL（秒）",
@@ -6026,6 +6273,19 @@
       omp_description: "IronMLX をキー不要の Responses プロバイダーとして登録し、App が提供するモデルを検出して、目的のプロジェクトディレクトリで OMP を起動します。",
       omp_refresh_desc: "プロバイダー検出を更新し、利用可能なモデルを確認してからプロジェクトで OMP を起動します。",
       omp_cwd_note: "実行前にプロジェクトパスを置き換えてください。OMP は --cwd で指定したディレクトリで bash ツールを実行します。",
+      dsh_verified_revision: "検証済み master", dsh_description: "dsh の pi-ai Responses ルートから、IronMLX が現在提供するモデルを使用します。IronMLX を使う実行にのみこの overlay を適用します。",
+      dsh_save_file: "保存先", dsh_home_default: "（通常は ~/.dsh）", dsh_reasoning: "推論モード", dsh_reasoning_off: "オフ",
+      dsh_reasoning_minimal: "最小", dsh_reasoning_low: "低", dsh_reasoning_medium: "中", dsh_reasoning_high: "高", dsh_reasoning_xhigh: "非常に高い", dsh_reasoning_max: "最大",
+      dsh_context_window: "コンテキスト容量", dsh_output_budget: "回答ごとの出力予算（tokens）",
+      dsh_missing_model: "dsh の設定を生成するには、IronMLX でモデルを読み込んでください。",
+      dsh_missing_capacity: "容量を取得できません。モデルの実際のコンテキスト容量と回答ごとの出力予算を入力してください。",
+      dsh_capacity_manual: "/v1/models から容量を取得できませんでした。この overlay を使う前に入力値を確認してください。",
+      dsh_capacity_ready: "/v1/models の容量を入力しました。コピーする前に出力予算を確認してください。",
+      dsh_invalid_capacity: "正の整数を入力してください。出力予算はコンテキスト容量と /v1/models の上限以下にしてください。",
+      dsh_budget_note: "出力予算は最大 4096 tokens で初期入力され、サーバー上限を常に使うわけではありません。推論と本文は同じ予算を消費するため、用途に合わせて調整してください。",
+      dsh_settings_note: "dsh の settings.yaml が既定のモデルを指定するか llm-pi-ai を上書きしている場合は、競合する設定を更新してください。ユーザー設定がこの overlay より優先されます。",
+      dsh_verify_desc: "ローカルの仮キーを設定し、テキストの応答と実際のファイル読み取りツール呼び出しを確認します。",
+      dsh_key_note: "仮キーは認証不要のローカル endpoint で dsh の認証情報照会を満たすためだけのものです。LAN API Key ではありません。",
       server_crash_restarting: "サーバーが異常終了しました。再起動中...",
       server_crash_recovering: "サーバーを復旧しています...",
       server_crash_recovered: "サーバーが正常に再起動しました。",
@@ -6249,6 +6509,14 @@
       dl_from_ms: "ModelScope からダウンロード", ms_repo_id: "リポジトリ ID", ms_browse: "モデルを閲覧",
       search_hf: "HuggingFace を検索", hf_model_query: "モデル名またはリポジトリ ID", search_hf_placeholder: "モデル名または組織/モデルを入力", sort_by: "並び順", trending: "トレンド", most_downloads: "ダウンロード数順", recently_created: "最近作成順", recently_updated: "最近更新順", most_params: "パラメータ数順(多)", least_params: "パラメータ数順(少)", search: "検索",
       max_context_tokens: "MAX CONTEXT TOKENS",
+      default_max_output_tokens: "MAX OUTPUT TOKENS",
+      context_size_help_label: "コンテキスト長について", context_size_help: "読み取り専用。モデル設定に記載されたコンテキスト長で、実行時の上限設定ではありません。",
+      max_context_tokens_help_label: "最大コンテキストトークン数について", max_context_tokens_help: "シーケンスごとの実行時 KV Cache 上限です。入力と生成トークンで共有し、出力上限とは異なります。",
+      default_max_output_tokens_help_label: "MAX OUTPUT TOKENS について", default_max_output_tokens_help: "Responses リクエストで max_output_tokens が省略された場合にのみ、このモデルの回答ごとの既定の出力予算として使います。",
+      default_max_output_tokens_help_budget: "推論（reasoning）と表示される回答は同じ予算を消費します。使い切ると回答が途中で終わるか、本文を出せない場合があります。",
+      default_max_output_tokens_help_priority: "リクエストで max_output_tokens を明示した場合はその値が優先されます。空欄ならサーバーの既定値 256 を使います。",
+      default_max_output_tokens_help_scope: "モデル固有の出力能力の上限ではなく、CONTEXT SIZE や MAX CONTEXT TOKENS も変更しません。残りのコンテキスト量によって実際の出力はさらに制限されます。",
+      params_invalid_max_output_tokens: "MAX OUTPUT TOKENS には正の整数を入力するか、空欄にしてください。",
       model_param_settings: "モデルパラメータ設定", context_size: "CONTEXT SIZE",
       model_alias: "モデルエイリアス", model_type: "モデルタイプ", auto_detect: "自動検出",
       max_token_count: "最大トークン数", temperature: "温度", repeat_penalty: "繰り返しペナルティ", ttl_seconds: "TTL（秒）",
@@ -6431,6 +6699,19 @@
       omp_description: "IronMLX를 키가 필요 없는 Responses 프로바이더로 등록하고 App이 제공하는 모델을 검색한 뒤 원하는 프로젝트 디렉터리에서 OMP를 시작하세요.",
       omp_refresh_desc: "프로바이더 검색을 새로고침하고 사용 가능한 모델을 확인한 다음 프로젝트에서 OMP를 시작하세요.",
       omp_cwd_note: "명령을 실행하기 전에 프로젝트 경로를 바꾸세요. OMP는 --cwd로 지정한 디렉터리에서 bash 도구를 실행합니다.",
+      dsh_verified_revision: "검증된 master", dsh_description: "dsh의 pi-ai Responses 경로에서 IronMLX가 현재 제공하는 모델을 사용합니다. IronMLX를 사용할 실행에만 이 overlay를 적용하세요.",
+      dsh_save_file: "다음 이름으로 저장", dsh_home_default: "(일반적으로 ~/.dsh)", dsh_reasoning: "추론 모드", dsh_reasoning_off: "끄기",
+      dsh_reasoning_minimal: "최소", dsh_reasoning_low: "낮음", dsh_reasoning_medium: "중간", dsh_reasoning_high: "높음", dsh_reasoning_xhigh: "매우 높음", dsh_reasoning_max: "최대",
+      dsh_context_window: "컨텍스트 용량", dsh_output_budget: "응답당 출력 예산(tokens)",
+      dsh_missing_model: "dsh 설정을 생성하려면 IronMLX에서 모델을 로드하세요.",
+      dsh_missing_capacity: "용량을 가져올 수 없습니다. 모델의 실제 컨텍스트 용량과 응답당 출력 예산을 입력하세요.",
+      dsh_capacity_manual: "/v1/models에서 용량을 가져오지 못했습니다. 이 overlay를 사용하기 전에 입력값을 확인하세요.",
+      dsh_capacity_ready: "/v1/models의 용량을 채웠습니다. 복사하기 전에 출력 예산을 확인하세요.",
+      dsh_invalid_capacity: "양의 정수를 입력하세요. 출력 예산은 컨텍스트 용량과 /v1/models의 상한을 넘을 수 없습니다.",
+      dsh_budget_note: "출력 예산은 최대 4096 tokens로 초기 설정되며 항상 서버 최대값을 사용하지는 않습니다. 추론과 본문이 같은 예산을 사용하므로 작업에 맞게 조정하세요.",
+      dsh_settings_note: "dsh settings.yaml이 기본 모델을 지정하거나 llm-pi-ai를 덮어쓰는 경우 충돌하는 설정을 수정하세요. 사용자 설정이 이 overlay보다 우선합니다.",
+      dsh_verify_desc: "로컬 임시 키를 설정하고 텍스트 응답과 실제 파일 읽기 도구 호출을 확인하세요.",
+      dsh_key_note: "임시 키는 인증이 필요 없는 로컬 endpoint에서 dsh의 자격 증명 조회만 충족합니다. LAN API Key가 아닙니다.",
       server_crash_restarting: "서버가 비정상 종료되었습니다. 재시작 중...",
       server_crash_recovering: "서버를 복구하는 중입니다...",
       server_crash_recovered: "서버가 성공적으로 재시작되었습니다.",
@@ -6654,6 +6935,14 @@
       dl_from_ms: "ModelScope에서 다운로드", ms_repo_id: "저장소 ID", ms_browse: "모델 찾아보기",
       search_hf: "HuggingFace 검색", hf_model_query: "모델 이름 또는 저장소 ID", search_hf_placeholder: "모델 이름 또는 조직/모델 입력", sort_by: "정렬 방식", trending: "인기 트렌드", most_downloads: "다운로드순", recently_created: "최근 생성순", recently_updated: "최근 업데이트순", most_params: "매개변수 많은순", least_params: "매개변수 적은순", search: "검색",
       max_context_tokens: "MAX CONTEXT TOKENS",
+      default_max_output_tokens: "MAX OUTPUT TOKENS",
+      context_size_help_label: "컨텍스트 크기 정보", context_size_help: "읽기 전용입니다. 모델 설정의 컨텍스트 길이를 표시하며 실행 시 상한을 설정하지 않습니다.",
+      max_context_tokens_help_label: "최대 컨텍스트 토큰 정보", max_context_tokens_help: "시퀀스별 실행 시 KV Cache 상한입니다. 입력과 생성 토큰이 이 용량을 공유하며 출력 상한은 아닙니다.",
+      default_max_output_tokens_help_label: "MAX OUTPUT TOKENS 정보", default_max_output_tokens_help: "Responses 요청에서 max_output_tokens를 생략한 경우에만 이 모델의 응답당 기본 출력 예산으로 사용합니다.",
+      default_max_output_tokens_help_budget: "추론(reasoning)과 표시되는 답변이 같은 예산을 사용합니다. 예산이 소진되면 답변이 중간에 끊기거나 본문이 시작되지 않을 수 있습니다.",
+      default_max_output_tokens_help_priority: "요청에 max_output_tokens가 명시되어 있으면 그 값이 우선합니다. 비워 두면 서버 기본값 256을 사용합니다.",
+      default_max_output_tokens_help_scope: "모델 고유의 출력 능력 상한이 아니며 CONTEXT SIZE 또는 MAX CONTEXT TOKENS를 바꾸지 않습니다. 남은 컨텍스트에 따라 실제 출력 길이는 더 제한될 수 있습니다.",
+      params_invalid_max_output_tokens: "MAX OUTPUT TOKENS에는 양의 정수를 입력하거나 비워 두세요.",
       model_param_settings: "모델 매개변수 설정", context_size: "CONTEXT SIZE",
       model_alias: "모델 별칭", model_type: "모델 유형", auto_detect: "자동 감지",
       max_token_count: "최대 토큰 수", temperature: "온도", repeat_penalty: "반복 페널티", ttl_seconds: "TTL (초)",
@@ -6811,6 +7100,10 @@
     if (hermesGuide) hermesGuide.href = lang === 'zh-Hans'
       ? 'https://hermes-agent.nousresearch.com/docs/zh-Hans/integrations/providers#%E8%87%AA%E5%AE%9A%E4%B9%89%E4%B8%8E%E8%87%AA%E6%89%98%E7%AE%A1-llm-%E6%8F%90%E4%BE%9B%E5%95%86'
       : 'https://hermes-agent.nousresearch.com/docs/integrations/providers#custom--self-hosted-llm-providers';
+    const dshGuide = document.getElementById('dsh-official-guide');
+    if (dshGuide) dshGuide.href = lang === 'zh-Hans'
+      ? 'https://deepseek-harness.github.io/deepseek-harness/guide/providers#%E6%B7%BB%E5%8A%A0%E8%87%AA%E5%AE%9A%E4%B9%89%E6%8F%90%E4%BE%9B%E6%96%B9'
+      : 'https://deepseek-harness.github.io/deepseek-harness/en/guide/providers#add-a-custom-provider';
     document.documentElement.lang = HTML_LANG_MAP[lang] || 'en';
     document.querySelectorAll('[data-i18n]').forEach(el => {
       const key = el.dataset.i18n;
@@ -6904,7 +7197,10 @@
     updateStatusPollingInterval();
     // Re-sync loaded models when navigating to models page
     if (page === 'models') syncLoadedModels();
-    if (page === 'chat') renderAgentGuideConfiguration();
+    if (page === 'chat') {
+      renderAgentGuideConfiguration();
+      apiFetch('/v1/models');
+    }
     if (page === 'settings') refreshNetworkInterfaces();
     if (page === 'logs') {
       initLogs();
@@ -7441,6 +7737,7 @@
     const contextWindow = local.max_position_embeddings || saved.context_size || '';
     document.getElementById('modal-context-size').value = contextWindow || '--';
     document.getElementById('modal-max-tokens').value = local.effective_max_tokens || saved.max_tokens || contextWindow || '';
+    document.getElementById('modal-max-output-tokens').value = saved.max_output_tokens || '';
     document.getElementById('modal-temperature').value = saved.temperature || generationDefaults.temperature || '';
     document.getElementById('modal-top-p').value = saved.top_p || generationDefaults.top_p || '';
     document.getElementById('modal-top-k').value = saved.top_k || generationDefaults.top_k || '';
@@ -7595,6 +7892,11 @@
     const contextText = document.getElementById('modal-context-size').value;
     const maxTokensText = document.getElementById('modal-max-tokens').value;
     const maxTokens = parsePositiveInteger(maxTokensText);
+    const maxOutputTokensText = document.getElementById('modal-max-output-tokens').value.trim();
+    if (maxOutputTokensText && !parsePositiveInteger(maxOutputTokensText)) {
+      showToast(t('params_invalid_max_output_tokens'), 'warn');
+      return;
+    }
     if (!maxTokens) {
       showToast(dict.params_invalid_max_tokens || 'MAX CONTEXT TOKENS must be a positive integer.', 'warn');
       return;
@@ -7638,6 +7940,7 @@
       model_type: document.getElementById('modal-model-type').value,
       context_size: contextWindow ? String(contextWindow) : '',
       max_tokens: String(maxTokens),
+      max_output_tokens: maxOutputTokensText,
       temperature: document.getElementById('modal-temperature').value,
       top_p: isBlockDiffusion ? '' : document.getElementById('modal-top-p').value,
       top_k: isBlockDiffusion ? '' : document.getElementById('modal-top-k').value,
@@ -10175,12 +10478,14 @@
   // ── Agent provider guides ──
   let currentAgentGuide = null;
   let hermesProfileMode = 'dedicated';
+  let dshModelCapacities = new Map();
+  let dshConfiguredModel = null;
 
   function updateAgentCompactBar() {
     const scroll = document.querySelector('.agent-guide-scroll');
     if (!scroll) return;
     const pageVisible = document.getElementById('page-chat').classList.contains('active');
-    ['hermes', 'omp'].forEach(function(name) {
+    ['hermes', 'omp', 'dsh'].forEach(function(name) {
       const panel = document.getElementById('agent-guide-' + name);
       const hero = panel.querySelector('.agent-guide-hero');
       let bar = panel.querySelector('.agent-guide-compact-bar');
@@ -10223,14 +10528,14 @@
   });
 
   function selectAgentGuide(agent) {
-    if (agent !== 'hermes' && agent !== 'omp') return;
+    if (agent !== 'hermes' && agent !== 'omp' && agent !== 'dsh') return;
     currentAgentGuide = agent;
     document.querySelectorAll('[data-agent-guide]').forEach(function(button) {
       const selected = button.dataset.agentGuide === agent;
       button.classList.toggle('active', selected);
       button.setAttribute('aria-selected', selected ? 'true' : 'false');
     });
-    ['hermes', 'omp'].forEach(function(name) {
+    ['hermes', 'omp', 'dsh'].forEach(function(name) {
       const panel = document.getElementById('agent-guide-' + name);
       if (panel) panel.hidden = name !== agent;
     });
@@ -10311,12 +10616,18 @@
     if (code) code.textContent = value;
   }
 
+  function agentPositiveInteger(value) {
+    const number = Number(value);
+    return Number.isSafeInteger(number) && number > 0 ? number : null;
+  }
+
   function renderAgentGuideConfiguration() {
     updateAgentCompactBar();
     const endpoint = agentEndpoint();
     const models = agentLoadedModels();
     const hermesModel = updateAgentModelSelect(document.getElementById('hermes-model-select'), models);
     const ompModel = updateAgentModelSelect(document.getElementById('omp-model-select'), models);
+    const dshModel = updateAgentModelSelect(document.getElementById('dsh-model-select'), models);
     const modelStatus = models.length
       ? models.join(', ')
       : t('agent_no_model', 'No model loaded');
@@ -10406,6 +10717,75 @@
       'omp --cwd /absolute/path/to/project \\',
       '  --model ' + shellQuote(ompSelector) + ' \\',
       '  -p --auto-approve "Use the bash tool exactly once to run pwd, then report its output."'
+    ].join('\n'));
+
+    const dshContextInput = document.getElementById('dsh-context-window');
+    const dshOutputInput = document.getElementById('dsh-max-tokens');
+    const dshCapacity = dshModelCapacities.get(dshModel);
+    if (dshConfiguredModel !== dshModel) {
+      dshConfiguredModel = dshModel;
+      [dshContextInput, dshOutputInput].forEach(function(input) {
+        input.value = '';
+        delete input.dataset.userEdited;
+      });
+    }
+    if (dshCapacity) {
+      if (!dshContextInput.dataset.userEdited && dshCapacity.contextWindow) {
+        dshContextInput.value = dshCapacity.contextWindow;
+      }
+      if (!dshOutputInput.dataset.userEdited && dshCapacity.maxOutputTokens) {
+        dshOutputInput.value = Math.min(4096, dshCapacity.maxOutputTokens, agentPositiveInteger(dshContextInput.value) || 4096);
+      }
+    }
+    const dshContext = agentPositiveInteger(dshContextInput.value);
+    const dshOutput = agentPositiveInteger(dshOutputInput.value);
+    const dshValid = dshModel !== 'MODEL_ID' && dshContext !== null && dshOutput !== null
+      && dshOutput <= dshContext
+      && (!dshCapacity?.contextWindow || dshContext <= dshCapacity.contextWindow)
+      && (!dshCapacity?.maxOutputTokens || dshOutput <= dshCapacity.maxOutputTokens);
+    const dshStatus = document.querySelector('#dsh-config-status [data-i18n]');
+    const dshStatusKey = dshModel === 'MODEL_ID' ? 'dsh_missing_model'
+      : !dshCapacity || !dshCapacity.contextWindow || !dshCapacity.maxOutputTokens
+        ? dshValid ? 'dsh_capacity_manual' : 'dsh_missing_capacity'
+        : dshValid ? 'dsh_capacity_ready' : 'dsh_invalid_capacity';
+    dshStatus.dataset.i18n = dshStatusKey;
+    dshStatus.textContent = t(dshStatusKey);
+    document.getElementById('copy-dsh-config').disabled = !dshValid;
+    const dshReasoning = document.getElementById('dsh-reasoning-select').value;
+    setAgentCode('dsh-config-code', [
+      '- id: agent-default-model',
+      '  config:',
+      '    provider: ironmlx-local',
+      '    model: ' + yamlDoubleQuoted(dshModel),
+      '',
+      '- id: llm-pi-ai',
+      '  config:',
+      '    providers:',
+      '      ironmlx-local:',
+      '        displayName: IronMLX',
+      '        apiKeyEnv: IRONMLX_API_KEY',
+      '        api: openai-responses',
+      '        baseURL: ' + yamlDoubleQuoted(endpoint),
+      '        cacheRetention: none',
+      ...(dshReasoning !== 'off' ? ['        reasoning: ' + dshReasoning] : []),
+      '        models:',
+      '          - id: ' + yamlDoubleQuoted(dshModel),
+      '            name: ' + yamlDoubleQuoted(dshModel),
+      '            contextWindow: ' + (dshContext || 'CONTEXT_WINDOW'),
+      '            maxTokens: ' + (dshOutput || 'OUTPUT_BUDGET'),
+      ...(dshReasoning !== 'off'
+        ? ['            reasoningEfforts:', '              off:', '              minimal: minimal', '              low: low', '              medium: medium', '              high: high', '              xhigh: xhigh', '              max: max']
+        : ['            reasoningEfforts: false'])
+    ].join('\n'));
+
+    const dshPatch = '"${DSH_HOME:-$HOME/.dsh}/ironmlx.patch.yml"';
+    setAgentCode('dsh-verify-code', [
+      'curl -fsS ' + shellQuote(agentHealthEndpoint()),
+      'export IRONMLX_API_KEY=local',
+      'dsh --profile headless --patch ' + dshPatch + ' --json "Reply with exactly IRONMLX_OK"',
+      'probe_file="$(mktemp)"',
+      'printf "IRONMLX_DSH_TOOL_OK\\n" > "$probe_file"',
+      'dsh --profile headless --patch ' + dshPatch + ' --json "Use the read tool to read $probe_file, then reply with its complete contents."'
     ].join('\n'));
   }
 
@@ -11823,7 +12203,20 @@
   function onApiFetchResult(path, jsonStr) {
     const dict = I18N[currentLang] || I18N.en;
     try {
-      if (path.startsWith('/admin/api/incidents/export')) {
+      if (path === '/v1/models') {
+        const result = JSON.parse(jsonStr || 'null');
+        dshModelCapacities = new Map();
+        if (Array.isArray(result?.data)) {
+          result.data.forEach(function(entry) {
+            if (!entry || typeof entry.id !== 'string') return;
+            dshModelCapacities.set(entry.id, {
+              contextWindow: agentPositiveInteger(entry.context_window),
+              maxOutputTokens: agentPositiveInteger(entry.max_output_tokens)
+            });
+          });
+        }
+        renderAgentGuideConfiguration();
+      } else if (path.startsWith('/admin/api/incidents/export')) {
         const result = JSON.parse(jsonStr || '{}');
         if (!result.success) {
           showToast(localizeErrorResult(result, 'incident_export_failed'), 'warn');

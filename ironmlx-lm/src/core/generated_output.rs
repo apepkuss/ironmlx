@@ -255,6 +255,7 @@ pub struct GeneratedOutputDecoder<'a> {
     tool_parser: Option<ToolCallParser>,
     saw_tool_call: bool,
     last_token_was_reasoning: bool,
+    reasoning_incomplete: bool,
     finished: bool,
 }
 
@@ -282,6 +283,7 @@ impl<'a> GeneratedOutputDecoder<'a> {
             tool_parser,
             saw_tool_call: false,
             last_token_was_reasoning: false,
+            reasoning_incomplete: false,
             finished: false,
         })
     }
@@ -303,6 +305,7 @@ impl<'a> GeneratedOutputDecoder<'a> {
             tool_parser,
             saw_tool_call: false,
             last_token_was_reasoning: false,
+            reasoning_incomplete: false,
             finished: false,
         })
     }
@@ -376,6 +379,11 @@ impl<'a> GeneratedOutputDecoder<'a> {
             "generated output decoder is already finished"
         );
         self.finished = true;
+        self.reasoning_incomplete = reason == "length"
+            && self
+                .native_parser
+                .as_ref()
+                .is_some_and(NativeOutputParser::is_reasoning);
         let native_events = match self.native_parser.take() {
             Some(parser) => parser.finish(reason)?,
             None => Vec::new(),
@@ -402,6 +410,12 @@ impl<'a> GeneratedOutputDecoder<'a> {
 
     pub fn last_token_was_reasoning(&self) -> bool {
         self.last_token_was_reasoning
+    }
+
+    /// After `finish`, whether the output limit interrupted an open reasoning
+    /// channel. A consumed closing marker counts as complete even without text.
+    pub fn reasoning_incomplete(&self) -> bool {
+        self.reasoning_incomplete
     }
 
     fn record_tool_calls(&mut self, events: &[GeneratedOutputEvent]) {

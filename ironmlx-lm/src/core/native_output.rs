@@ -146,6 +146,7 @@ enum ChannelState {
 }
 
 /// Incrementally splits native reasoning from visible text.
+#[derive(Clone)]
 pub struct NativeOutputParser {
     dialect: NativeOutputDialect,
     state: ChannelState,
@@ -156,6 +157,24 @@ pub struct NativeOutputParser {
 }
 
 impl NativeOutputParser {
+    /// Remaining bytes of the native closing marker at the current boundary.
+    /// `advance` retains only a partial marker in `pending`; completing that
+    /// suffix avoids duplicating a marker which the model already started.
+    pub(crate) fn reasoning_close_suffix(&self) -> Option<&'static str> {
+        if !matches!(self.state, ChannelState::Reasoning) {
+            return None;
+        }
+        let close = match self.dialect {
+            NativeOutputDialect::Gemma => GEMMA_CHANNEL_CLOSE,
+            _ => THINK_CLOSE,
+        };
+        Some(if close.starts_with(&self.pending) {
+            &close[self.pending.len()..]
+        } else {
+            close
+        })
+    }
+
     pub fn new(config: NativeOutputDecoderConfig) -> Self {
         let state =
             if config.reasoning_enabled && !matches!(config.dialect, NativeOutputDialect::Gemma) {

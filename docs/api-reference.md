@@ -16,6 +16,15 @@ A second instance exits with `ironmlx_instance_already_running`. The App stops i
 `GET /health` indicates HTTP responsiveness. `GET /healthz` returns version, model, scheduler, cache and memory state.
 App daemon and EnginePool expose an OpenAI-compatible `GET /v1/models` list. Entries include `id`, `object:"model"`, `created`, `owned_by`, load policy and runtime state. Registered models can be discovered even before loading.
 
+When reliably known, each causal model entry also includes these IronMLX extension fields:
+
+- `context_window`: effective total token capacity, the smaller of the model's context capacity and the deployment's `max_cache_cap` (App **MAX CONTEXT TOKENS**).
+- `max_output_tokens`: output-token ceiling, including reasoning, answer text and tool calls. Causal serving currently has no separate output-only hard cap, so this equals `context_window`. For each request, the output budget must still fit within `context_window - input_tokens`, including chat-template and multimodal input tokens. This is **not** the App's **MAX OUTPUT TOKENS** setting: that setting supplies a default Responses budget only when the request omits it.
+
+For example, a model with a 262144-token context deployed with `max_cache_cap=65536` advertises `context_window:65536` and `max_output_tokens:65536`, even if its default output budget is 256. Clients must subtract input usage before choosing an output budget; the advertised ceiling does not guarantee that amount for a nonempty prompt or guarantee a complete answer. Admission and memory checks still apply.
+
+Loaded models use their actual admission capacity. Unloaded causal models use explicit checkpoint metadata and the registered scheduler configuration without loading weights. Missing, invalid or unsupported capacity metadata is omitted, not returned as zero or inferred from generation defaults. Audio and DiffusionGemma currently omit both fields. App DFlash2 discovery reports the loaded target's effective capacity, never the draft model's capacity. These are optional extensions; clients should retain fallbacks when absent.
+
 `memory.free_ram_bytes` is raw OS free memory for observation. `available_ram_bytes` includes reclaimable memory using the governor's accounting. `process_governor.pressure_level` determines memory health; `degraded_reasons` identifies queue, cache, pressure, telemetry or backpressure causes.
 
 ## Errors
@@ -105,7 +114,36 @@ Exact native templates expose reasoning as a separate item, with `response.reaso
 For Qwen3.8, `minimal`/`low` map to `low`, `medium` to `medium`, and `high`/`xhigh`/`max` to `xhigh`; `none` disables reasoning. Other supported templates treat non-`none` effort as an enable switch. These are not calibrated reasoning-token budgets.
 Omitted/null `reasoning` or missing effort means `none`, echoed as the effective setting. Clients must request a non-`none` effort explicitly.
 
+For causal Qwen3.5/3.6/3.8 and Gemma4/Unified with exact supported templates,
+enabled reasoning automatically reserves `min(floor(max_output_tokens / 4), 1024)`
+tokens for the answer or tool call, plus native framing/UTF-8 boundary space.
+The remainder is the reasoning budget. If reasoning is still open at that
+boundary, decoding constrains the next tokens to finish the model's native
+closing marker (`</think>` or `<channel|>`) and then continues the response.
+The marker enters the actual model context and counts toward the original
+total output limit. Natural early closure and Gemma's direct-answer path are
+preserved. The same policy applies to Chat Completions and Messages using their
+`max_tokens` total; no client changes are required.
+
+The policy composes with JSON/tool constraints and request-local speculative
+fork/rollback. Disabled reasoning, unrecognized templates, other reasoning
+dialects, DiffusionGemma, and budgets too small to fit framing plus a positive
+reasoning/answer allocation retain their existing behavior. This first policy
+is automatic, with no new App setting or request field. It never enlarges an
+explicit client budget or retries a request. Reservation does not guarantee a
+complete or correct answer; if the total limit is reached, existing incomplete
+status and item-level truncation reporting still apply. Completing a native
+reasoning marker indicates channel closure, not a guarantee of reasoning quality.
+The model can still emit analysis-style prose in the answer channel after a forced
+transition, particularly with a very small total budget; this is not treated as
+proof that the task was solved. Native channel delimiters cannot reopen reasoning
+or be repeated in the answer under this policy.
+
 History accepts plaintext `reasoning_text` in reasoning items. IronMLX does not generate hosted `encrypted_content`; encrypted-only reasoning history is rejected with 400. `summary:"auto"` can request automatic capability selection but does not cause generation or truncation into an independent reasoning summary.
+
+For replay compatibility, an orphan plaintext reasoning item without a following assistant body or function call is skipped, while other history and normally paired reasoning are retained. This also applies to old items without `status`; it does not prove that the old turn hit an output limit. Opaque encrypted history remains invalid even when orphaned (an empty `reasoning_text` is not decryptable content).
+
+Reasoning items carry `status:"in_progress"` when added, and `completed` or `incomplete` in `response.output_item.done`, the final response, and non-streaming output. A length limit marks the item incomplete only if the native reasoning channel is still open. A consumed reasoning closing marker or subsequent answer/tool call leaves that reasoning completed even if the whole response is incomplete. Clients should retain the full item from `response.output_item.done` for replay. This compatibility handling prevents history-validation failures; it neither restores the interrupted answer nor guarantees answer completeness.
 
 ### Function tools and history
 
@@ -139,7 +177,7 @@ History accepts plaintext `reasoning_text` in reasoning items. IronMLX does not 
 ```
 
 The client executes `function_call` items and appends both the original call and a `function_call_output` with the same `call_id` to complete history. Text, supported image message items and call/output items work in synchronous and SSE modes.
-[Hermes Agent](hermes-agent.md) and [oh-my-pi](oh-my-pi.md) provide configuration guides.
+[Hermes Agent](hermes-agent.md), [oh-my-pi](oh-my-pi.md), and [DeepSeek Harness](dsh.md) provide configuration guides.
 
 ### Structured Outputs
 

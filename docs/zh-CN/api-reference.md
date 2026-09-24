@@ -35,6 +35,22 @@ App daemon 与 EnginePool 的 `GET /v1/models` 返回 OpenAI-compatible 模型�
 模型加载策略与运行状态字段。列表来自当前可服务的注册模型，因此 OMP 等客户端可通过
 OpenAI models-list discovery 自动发现已经注册但尚未加载或已经加载的模型。
 
+能够可靠确定容量时，causal 模型条目还会返回以下 IronMLX 扩展字段：
+
+- `context_window`：有效总 token 容量，取模型上下文容量与部署配置 `max_cache_cap`（App 的 **MAX CONTEXT TOKENS**）中的较小值。
+- `max_output_tokens`：输出 token 上限，包含 reasoning、答案正文和工具调用。当前 causal 推理没有独立的输出硬上限，因此其值等于 `context_window`。具体请求的输出预算仍须满足 `context_window - input_tokens`，其中输入包含聊天模板和多模态输入 token。这**不是** App 的 **MAX OUTPUT TOKENS** 设置值：该设置仅在 Responses 请求未指定输出预算时提供默认值。
+
+例如，模型上下文容量为 262144，部署配置 `max_cache_cap=65536`，则返回
+`context_window:65536`、`max_output_tokens:65536`，即使默认输出预算为 256。
+客户端必须扣除输入占用后再选择输出预算；声明的上限不保证非空输入能获得这么多输出，
+也不保证答案完整。请求仍受准入与内存检查约束。
+
+已加载模型使用实际准入容量；未加载的 causal 模型使用 checkpoint 中明确的容量元数据
+与已注册的调度器配置，无需加载权重。容量缺失、无效或不受支持时省略字段，不返回零，
+也不从生成默认值推断。Audio 与 DiffusionGemma 暂不返回这两个字段。
+App DFlash2 discovery 返回已加载 target 的有效容量，而非 draft 模型容量。
+这两个字段是可选扩展，客户端应保留字段缺失时的回退逻辑。
+
 `/healthz.memory.free_ram_bytes` 是操作系统报告的原始空闲页，仅用于观测；
 `available_ram_bytes` 使用与进程内存 governor 相同的可回收内存口径。内存健康
 状态由 `process_governor.pressure_level` 决定，而不是固定的 raw-free 阈值。
@@ -177,9 +193,40 @@ Qwen3.8 原生模板支持三档 reasoning effort：Responses 的 `minimal`/`low
 或未提供 `reasoning.effort` 时，IronMLX 均按 `effort=none` 处理并在响应中回显该有效值；
 客户端必须显式提供非 `none` effort 才会开启 reasoning。
 
+对于使用精确受支持模板的 causal Qwen3.5/3.6/3.8 与 Gemma4/Unified，开启 reasoning
+时会自动从总输出预算中预留 `min(floor(max_output_tokens / 4), 1024)` 个 token
+给正文或工具调用，并另留原生通道标记和 UTF-8 边界所需空间，其余作为 reasoning
+预算。达到该预算时若仍在思考，解码会约束后续 token，完成模型原生结束标记
+（`</think>` 或 `<channel|>`），然后继续生成。结束标记会进入实际模型上下文，
+并计入原来的总输出上限；模型提前自然结束思考以及 Gemma 直接回答的路径均保留。
+Chat Completions 和 Messages 也根据各自的 `max_tokens` 总预算应用相同策略，
+客户端无需修改。
+
+这项策略与 JSON/工具调用约束、请求独立的推测解码分叉与回滚共同生效。关闭
+reasoning、模板无法识别、其他 reasoning 方言、DiffusionGemma，以及不足以容纳
+通道标记和正数 reasoning/正文预算的小额请求，保留原行为。首版采用自动策略，
+不新增 App 配置或请求字段，不提高客户端明确指定的总预算，也不自动重试请求。
+预留空间不保证答案完整或正确；达到总上限后，仍按原有规则报告 incomplete
+及条目级截断状态。完成 reasoning 结束标记仅表示通道关闭，不代表推理质量保证。
+强制切换后，模型仍可能在正文通道继续输出分析式文字，尤其在总预算很小时；
+不能据此认定任务已完成。该策略会禁止在正文中重复原生通道标记或重新打开
+reasoning 通道。
+
 无状态历史回灌接受 `reasoning` item 中的明文 `reasoning_text`，并将它传给下一轮
 原生模板。IronMLX 不生成 OpenAI 托管的 `encrypted_content`；只有 encrypted
 content、没有明文 reasoning 的历史无法在本地重放，会返回 400。
+
+为兼容历史重放，没有后续 assistant 正文或 function call 的孤立明文 reasoning 会被跳过，
+其余历史及正常配对的 reasoning 保留。旧历史没有 `status` 时也适用；这不代表能够
+准确判断旧记录是否因输出上限截断。无法解读的加密历史即使孤立也仍被拒绝，空的
+`reasoning_text` 不能用来绕过这项校验。
+
+新增 reasoning 条目以 `status:"in_progress"` 开始，并在 `response.output_item.done`、
+最终响应及非流式输出中标记为 `completed` 或 `incomplete`。只有原生 reasoning 通道
+仍未关闭时达到输出上限，才将该条目标记为 `incomplete`。已消费结束标记，或已转入正文/
+工具调用的 reasoning 不会因为后续内容截断而被误标。客户端应保留
+`response.output_item.done` 中的完整条目供重放。这项兼容处理解决历史校验错误，
+不会恢复被截断的答案，也不保证答案完整。
 
 `reasoning.summary:"auto"` 仍可作为上游客户端的自动能力请求，但当前模型没有
 独立 summary 生成通道，因此不会把完整 reasoning 截断或改写成 summary。原生
@@ -227,6 +274,12 @@ Hermes Agent 应使用无状态 Responses transport。配置方法和验证命�
 
 oh-my-pi 应使用 `openai-responses` provider。配置方法和验证命令见
 [oh-my-pi 集成指南](oh-my-pi.md)。OMP 执行客户端工具，IronMLX 只负责推理和
+生成结构化调用。
+
+#### DeepSeek Harness
+
+dsh 应通过 `llm-pi-ai` 使用 `openai-responses` 路由。配置方法和验证命令见
+[DeepSeek Harness 集成指南](dsh.md)。dsh 执行客户端工具，IronMLX 只负责推理和
 生成结构化调用。
 
 ### Responses structured outputs

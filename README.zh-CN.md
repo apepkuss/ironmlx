@@ -30,9 +30,10 @@ Rust 推理引擎、MLX/Metal 运行时、模型管理 Dashboard，以及 OpenAI
 - 支持同步响应、SSE 流式输出、Structured Outputs 和 reasoning；
 - 提供模型发现、健康检查与运行状态查询 API，包括 `/healthz` 和
   `/v1/models`；
-- 支持 Hermes Agent、oh-my-pi 等 Agent Harness，支持范围持续扩展，详见
+- 支持 Hermes Agent、oh-my-pi、DeepSeek Harness 等 Agent Harness，支持范围持续扩展，详见
   [Hermes Agent 集成文档](docs/zh-CN/hermes-agent.md) 和
-  [oh-my-pi 集成文档](docs/zh-CN/oh-my-pi.md)；
+  [oh-my-pi 集成文档](docs/zh-CN/oh-my-pi.md)、
+  [DeepSeek Harness 集成文档](docs/zh-CN/dsh.md)；
 - 面向高吞吐推理，支持连续批处理、分页 KV/前缀缓存与 Prompt Lookup；
 - 支持 MTP 和 DFlash2 等投机解码路径，具体取决于模型兼容性；
 - 支持多模型加载、卸载、固定、TTL 与内存保护；

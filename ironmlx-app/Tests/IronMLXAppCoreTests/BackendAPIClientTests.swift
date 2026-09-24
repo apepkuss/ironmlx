@@ -31,6 +31,21 @@ import Testing
     #expect(object["mtp_draft_tokens"] as? Int == 2)
 }
 
+@Test func backendLoadModelRequestEncodesDefaultOutputBudgetSeparatelyFromCacheCap() throws {
+    let request = BackendLoadModelRequest(
+        model: "mlx-community/Model-4bit",
+        modelDir: "/models/model",
+        setDefault: true,
+        maxCacheCap: 65_536,
+        samplingDefaults: BackendSamplingDefaults(defaultMaxOutputTokens: 8_192)
+    )
+    let data = try JSONEncoder().encode(request)
+    let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+
+    #expect(object["max_cache_cap"] as? Int == 65_536)
+    #expect(object["default_max_output_tokens"] as? Int == 8_192)
+}
+
 @Test func backendLoadModelRequestEncodesCrossRequestPromptLookupSettings() throws {
     let request = BackendLoadModelRequest(
         model: "mlx-community/Qwen3.5-4B-MLX-4bit",

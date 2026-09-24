@@ -63,6 +63,8 @@ the [supported model matrix](supported-models.md).
   local Responses endpoint.
 - [oh-my-pi integration](oh-my-pi.md) — configure a local OpenAI-compatible
   provider and verify the tool-call round trip.
+- [DeepSeek Harness integration](dsh.md) — configure a pi-ai Responses overlay
+  and verify local text and tool-call turns.
 
 ## Privacy, security, and local data
 

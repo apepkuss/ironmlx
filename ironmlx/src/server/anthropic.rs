@@ -1080,6 +1080,7 @@ where
         prepared_tools.as_ref(),
         output_schema.as_ref(),
         native_output,
+        Some(max_tokens),
     ) {
         Ok(constraint) => constraint,
         Err(error) => {
@@ -1329,6 +1330,7 @@ pub(crate) async fn messages_with_gemma4_drafter_state(
         prepared_tools.as_ref(),
         output_schema.as_ref(),
         native_output,
+        Some(max_tokens),
     ) {
         Ok(constraint) => constraint,
         Err(error) => {

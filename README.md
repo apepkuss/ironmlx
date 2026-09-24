@@ -32,10 +32,11 @@ Current stable release: [0.1.0](https://github.com/apepkuss/ironmlx/releases/tag
   reasoning;
 - Provide model discovery, health checks, and runtime status APIs, including
   `/healthz` and `/v1/models`;
-- Support Agent Harnesses such as Hermes Agent and oh-my-pi, with integration
+- Support Agent Harnesses such as Hermes Agent, oh-my-pi, and DeepSeek Harness, with integration
   coverage continuing to expand; see the
   [Hermes Agent integration guide](docs/hermes-agent.md) and
-  [oh-my-pi integration guide](docs/oh-my-pi.md);
+  [oh-my-pi integration guide](docs/oh-my-pi.md), and
+  [DeepSeek Harness integration guide](docs/dsh.md);
 - High-throughput inference with continuous batching, paged KV/prefix caching,
   and Prompt Lookup;
 - MTP and DFlash2 speculative decoding paths for compatible models;

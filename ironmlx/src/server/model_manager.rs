@@ -295,6 +295,12 @@ fn parse_load_model_request(
         Some(0) => return Err(AdminError::invalid_max_cache_cap()),
         value => value,
     };
+    if request.default_max_output_tokens == Some(0) {
+        return Err(AdminError::bad_request_with_code(
+            "default_max_output_tokens must be greater than zero",
+            Some("invalid_default_max_output_tokens"),
+        ));
+    }
     let mtp = match (
         request
             .mtp_model_dir
@@ -327,6 +333,7 @@ fn parse_load_model_request(
         model_reference,
         model_dir,
         max_cache_cap_override,
+        default_max_output_tokens: request.default_max_output_tokens,
         sampling_defaults: request.sampling_defaults,
         mtp,
         prompt_lookup,
@@ -525,6 +532,7 @@ struct LoadModelRequest {
     repo_id: Option<String>,
     set_default: Option<bool>,
     max_cache_cap: Option<usize>,
+    default_max_output_tokens: Option<usize>,
     pinned: Option<bool>,
     mtp_model_dir: Option<String>,
     mtp_draft_tokens: Option<usize>,
@@ -1270,6 +1278,7 @@ mod tests {
                     mtp: None,
                     prompt_lookup: None,
                     sampling_defaults: SamplingDefaults::default(),
+                    default_max_output_tokens: None,
                     capabilities: EngineModelCapabilities::for_architecture(
                         ModelArchitecture::Qwen35Dense,
                         false,
@@ -1304,6 +1313,80 @@ mod tests {
         assert_eq!(body["data"][0]["created"], 0);
         assert_eq!(body["data"][0]["owned_by"], "ironmlx");
         assert_eq!(body["data"][0]["state"], "unloaded");
+        assert!(body["data"][0].get("context_window").is_none());
+        assert!(body["data"][0].get("max_output_tokens").is_none());
+    }
+
+    #[tokio::test]
+    async fn models_routes_expose_effective_capacity_not_default_output_budget() {
+        let model_dir = unique_temp_dir("models-capacity-route");
+        let mut config: serde_json::Value =
+            serde_json::from_str(&gemma4_base_config("gemma4", "gemma4_text", 2560)).unwrap();
+        config["text_config"]["max_position_embeddings"] = serde_json::json!(262144);
+        write_config(&model_dir, &config.to_string());
+        let args = serve_args();
+        let manager = ModelManager::new(
+            crate::cli::serve::engine_runtime_config(&args).unwrap(),
+            args.max_loaded_models,
+            SchedulerResolutionOptions::from(&args),
+        )
+        .unwrap();
+        for (id, cache_cap, default_budget, expected) in [
+            ("small-cache", 8192, Some(256), 8192),
+            ("model-limited", 524288, Some(32768), 262144),
+            ("no-default", 65536, None, 65536),
+        ] {
+            let load = build_engine_model_config(
+                &SchedulerResolutionOptions::from(&args),
+                EngineModelBuildRequest {
+                    audio: None,
+                    model_id: id.to_string(),
+                    model_dir: &model_dir,
+                    max_cache_cap_override: Some(cache_cap),
+                    default_max_output_tokens: default_budget,
+                    sampling_defaults_override: SamplingDefaults::default(),
+                    mtp: None,
+                    prompt_lookup: None,
+                    pinned: false,
+                },
+            )
+            .expect("build model config");
+            manager
+                .pool
+                .register_dynamic_model(load.config, false, None)
+                .await
+                .unwrap();
+            for router in [
+                app_router(manager.clone()),
+                crate::server::engine::engine_pool_router().with_state(manager.pool.clone()),
+            ] {
+                let response = router
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .uri("/v1/models")
+                            .body(axum::body::Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                let entry = body["data"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|entry| entry["id"] == id)
+                    .unwrap();
+                assert_eq!(entry["context_window"], expected);
+                assert_eq!(entry["max_output_tokens"], expected);
+                assert_eq!(entry["state"], "unloaded");
+                assert_eq!(entry["load_attempts"], 0);
+            }
+        }
+        std::fs::remove_dir_all(model_dir).unwrap();
     }
 
     #[tokio::test]
@@ -1407,6 +1490,29 @@ mod tests {
 
         assert_eq!(request.max_cache_cap, Some(65536));
         assert_eq!(request.pinned, Some(true));
+    }
+
+    #[test]
+    fn load_model_request_accepts_positive_default_output_budget() {
+        let request: LoadModelRequest = serde_json::from_value(serde_json::json!({
+            "model": "mlx-community/Model-4bit",
+            "model_dir": ".",
+            "default_max_output_tokens": 8192
+        }))
+        .expect("load request");
+        let parsed = match parse_load_model_request(request) {
+            Ok(parsed) => parsed,
+            Err(_) => panic!("positive output budget should parse"),
+        };
+        assert_eq!(parsed.default_max_output_tokens, Some(8192));
+
+        let invalid: LoadModelRequest = serde_json::from_value(serde_json::json!({
+            "model": "mlx-community/Model-4bit",
+            "model_dir": ".",
+            "default_max_output_tokens": 0
+        }))
+        .expect("load request shape");
+        assert!(parse_load_model_request(invalid).is_err());
     }
 
     #[test]
@@ -1558,6 +1664,7 @@ mod tests {
                 model_id: "gemma4-test".to_string(),
                 model_dir: &base,
                 max_cache_cap_override: None,
+                default_max_output_tokens: Some(8192),
                 sampling_defaults_override: SamplingDefaults::default(),
                 mtp: Some(ironmlx_runtime::core::engine_pool::EngineMtpSettings {
                     model_dir: mtp,
@@ -1568,6 +1675,8 @@ mod tests {
             },
         )
         .expect("build app dynamic model config");
+
+        assert_eq!(load.config.default_max_output_tokens, Some(8192));
 
         assert_eq!(
             load.config
@@ -1600,6 +1709,7 @@ mod tests {
                 model_id: "diffusion-gemma-test".to_string(),
                 model_dir: &model,
                 max_cache_cap_override: None,
+                default_max_output_tokens: None,
                 sampling_defaults_override: SamplingDefaults {
                     temperature: Some(0.7),
                     ..SamplingDefaults::default()
@@ -1656,6 +1766,7 @@ mod tests {
                 model_id: "diffusion-gemma-test".to_string(),
                 model_dir: &model,
                 max_cache_cap_override: Some(4096),
+                default_max_output_tokens: None,
                 sampling_defaults_override: SamplingDefaults::default(),
                 mtp: None,
                 prompt_lookup: None,

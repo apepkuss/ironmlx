@@ -140,6 +140,7 @@ struct CompletionParts {
     finish_reason: &'static str,
     completion_tokens: u32,
     reasoning_tokens: u32,
+    reasoning_incomplete: bool,
 }
 
 struct CompletionRequest {
@@ -373,6 +374,7 @@ fn collect_events(
         finish_reason,
         completion_tokens,
         reasoning_tokens,
+        reasoning_incomplete: decoder.reasoning_incomplete(),
     })
 }
 
@@ -435,6 +437,7 @@ fn collect_tool_events(
         finish_reason,
         completion_tokens,
         reasoning_tokens,
+        reasoning_incomplete: decoder.reasoning_incomplete(),
     })
 }
 
@@ -813,6 +816,8 @@ async fn prepare_openai_request(
         prepared_tools.as_ref(),
         output_schema.as_ref(),
         constraint_native_output,
+        // The bounded native-channel policy is validated for causal decoding.
+        None,
     ) {
         Ok(constraint) => constraint,
         Err(error) => {
@@ -1365,6 +1370,7 @@ async fn responses_stream_completion(
             finish_reason,
             super::responses::Usage::new(prompt_tokens, completion_tokens)
                 .with_reasoning_tokens(reasoning_tokens),
+            decoder.reasoning_incomplete(),
         ) {
             if tx.blocking_send(Ok(frame)).is_err() {
                 return;
@@ -1736,6 +1742,7 @@ pub(crate) async fn openai_responses_with_state(
             finish_reason: completion.finish_reason,
             completion_tokens: completion.completion_tokens,
             reasoning_tokens: completion.reasoning_tokens,
+            reasoning_incomplete: completion.reasoning_incomplete,
         },
     )
 }

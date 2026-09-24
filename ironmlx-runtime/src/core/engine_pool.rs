@@ -158,6 +158,8 @@ struct EnginePoolInner {
 }
 
 struct EngineSlot {
+    /// Cached at registration; loaded engines supply their actual admission cap.
+    configured_context_window: Option<usize>,
     model: EngineModelConfig,
     runtime: EngineRuntimeOptions,
     active_requests: Arc<AtomicUsize>,
@@ -439,6 +441,7 @@ pub enum EngineVariant {
 
 pub struct EngineLease {
     engine: Arc<EngineVariant>,
+    default_max_output_tokens: Option<usize>,
     active_requests: Option<Arc<AtomicUsize>>,
     _snapshot_use_lease: Option<Arc<ModelSnapshotUseLease>>,
 }
@@ -452,11 +455,13 @@ impl std::fmt::Debug for EngineLease {
 impl EngineLease {
     fn new(
         engine: Arc<EngineVariant>,
+        default_max_output_tokens: Option<usize>,
         active_requests: Option<Arc<AtomicUsize>>,
         snapshot_use_lease: Option<Arc<ModelSnapshotUseLease>>,
     ) -> Self {
         Self {
             engine,
+            default_max_output_tokens,
             active_requests,
             _snapshot_use_lease: snapshot_use_lease,
         }
@@ -464,6 +469,10 @@ impl EngineLease {
 
     pub fn engine(&self) -> &EngineVariant {
         &self.engine
+    }
+
+    pub fn default_max_output_tokens(&self) -> Option<usize> {
+        self.default_max_output_tokens
     }
 }
 
@@ -544,6 +553,7 @@ impl EnginePoolState {
         let mut slots = HashMap::with_capacity(config.models.len());
         for model in config.models {
             let slot = Arc::new(EngineSlot {
+                configured_context_window: super::model_capacity::configured_context_window(&model),
                 model: model.clone(),
                 runtime: runtime.clone(),
                 active_requests: Arc::new(AtomicUsize::new(0)),
@@ -800,6 +810,7 @@ impl EnginePoolState {
         validate_engine_model_config(&model)?;
         let model_id = model.id.clone();
         let new_slot = Arc::new(EngineSlot {
+            configured_context_window: super::model_capacity::configured_context_window(&model),
             model: model.clone(),
             runtime: self.inner.runtime.clone(),
             active_requests: Arc::new(AtomicUsize::new(0)),
@@ -886,6 +897,9 @@ impl EnginePoolState {
                 let pinned = pinned
                     .unwrap_or_else(|| existing.as_ref().is_some_and(|slot| slot.is_pinned()));
                 let slot = Arc::new(EngineSlot {
+                    configured_context_window: super::model_capacity::configured_context_window(
+                        &model,
+                    ),
                     model: model.clone(),
                     runtime: self.inner.runtime.clone(),
                     active_requests: Arc::new(AtomicUsize::new(0)),
@@ -1152,23 +1166,37 @@ impl EnginePoolState {
                 let slots = self.inner.slots.lock().await;
                 slots.get(&model.id).cloned()
             };
-            let snapshot = match slot {
-                Some(slot) => slot.runtime_snapshot().await,
-                None => EngineSlotRuntimeSnapshot {
-                    state: EngineRuntimeState::Missing,
-                    unload_reason: None,
-                    last_error: Some("engine slot missing".to_string()),
-                    changed_unix_ms: None,
-                    load_started_unix_ms: None,
-                    loaded_unix_ms: None,
-                    last_used_unix_ms: None,
-                    failed_unix_ms: None,
-                    load_attempts: 0,
-                    request_count: 0,
-                },
+            let (snapshot, context_window) = match slot {
+                Some(slot) => {
+                    let state = slot.state.lock().await;
+                    let context_window = match &*state {
+                        EngineSlotState::Loaded { engine, .. } => engine.context_window(),
+                        _ => slot.configured_context_window,
+                    };
+                    (state.runtime_snapshot(), context_window)
+                }
+                None => (
+                    EngineSlotRuntimeSnapshot {
+                        state: EngineRuntimeState::Missing,
+                        unload_reason: None,
+                        last_error: Some("engine slot missing".to_string()),
+                        changed_unix_ms: None,
+                        load_started_unix_ms: None,
+                        loaded_unix_ms: None,
+                        last_used_unix_ms: None,
+                        failed_unix_ms: None,
+                        load_attempts: 0,
+                        request_count: 0,
+                    },
+                    None,
+                ),
             };
             data.push(EngineModelSnapshot {
                 id: model.id.clone(),
+                context_window,
+                // Causal serving has no independent output-only cap. The
+                // per-request budget must additionally subtract input tokens.
+                max_output_tokens: context_window,
                 load_policy: model.load_policy,
                 state: snapshot.state,
                 unload_reason: snapshot.unload_reason,
@@ -1533,6 +1561,7 @@ impl EngineSlot {
                         };
                         return Ok(EngineLease::new(
                             engine.clone(),
+                            self.model.default_max_output_tokens,
                             active_requests,
                             snapshot_use_lease.clone(),
                         ));
@@ -1589,6 +1618,7 @@ impl EngineSlot {
                         };
                         return Ok(EngineLease::new(
                             engine.clone(),
+                            self.model.default_max_output_tokens,
                             active_requests,
                             snapshot_use_lease.clone(),
                         ));
@@ -1707,6 +1737,7 @@ impl EngineSlot {
                     self.notify.notify_waiters();
                     return Ok(EngineLease::new(
                         engine,
+                        self.model.default_max_output_tokens,
                         active_requests,
                         snapshot_use_lease,
                     ));
@@ -1914,6 +1945,21 @@ impl EngineSlot {
 }
 
 impl EngineVariant {
+    fn context_window(&self) -> Option<usize> {
+        let cap = match self {
+            Self::Qwen35(state) => state.effective_cap_max,
+            Self::Qwen35Moe(state) => state.effective_cap_max,
+            Self::Qwen36Moe(state) => state.effective_cap_max,
+            Self::Gemma4(state) => state.effective_cap_max,
+            Self::Gemma4Drafter(state) => state.base.effective_cap_max,
+            Self::Glm4MoeLite(state) => state.effective_cap_max,
+            Self::Llama(state) => state.effective_cap_max,
+            Self::MiniCpmV46(state) => state.effective_cap_max,
+            Self::DiffusionGemma(_) | Self::Audio(_) => return None,
+        };
+        (cap > 0).then_some(cap)
+    }
+
     async fn clear_shared_prompt_lookup(&self) -> Result<usize> {
         match self {
             Self::Qwen35(state) => state.request_execution.clear_shared_prompt_lookup().await,
@@ -2878,6 +2924,7 @@ mod tests {
             mtp: None,
             prompt_lookup: None,
             sampling_defaults: SamplingDefaults::default(),
+            default_max_output_tokens: None,
             capabilities: EngineModelCapabilities::for_architecture(
                 ModelArchitecture::Qwen35Dense,
                 false,
@@ -3368,6 +3415,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn discovery_capacity_is_cached_and_refreshed_on_registration() {
+        let pool = EnginePoolState::new_dynamic(runtime_config(), Some(3)).unwrap();
+        let model_dir = write_minimal_model_config("qwen3_5");
+        std::fs::write(
+            model_dir.join("config.json"),
+            r#"{
+            "model_type":"qwen3_5", "text_config":{"max_position_embeddings":8192}
+        }"#,
+        )
+        .unwrap();
+        let mut config = model_config("capacity", &model_dir, EngineLoadPolicy::Lazy);
+        config.default_max_output_tokens = Some(256);
+        pool.register_dynamic_model(config.clone(), false, None)
+            .await
+            .unwrap();
+        let list = pool.model_snapshots().await;
+        assert_eq!(list[0].context_window, Some(1024));
+        assert_eq!(list[0].max_output_tokens, Some(1024));
+        assert_eq!(list[0].load_attempts, 0);
+
+        // Discovery does not reread files or load weights on each request.
+        std::fs::write(
+            model_dir.join("config.json"),
+            r#"{
+            "model_type":"qwen3_5", "text_config":{"max_position_embeddings":4096}
+        }"#,
+        )
+        .unwrap();
+        assert_eq!(pool.model_snapshots().await[0].context_window, Some(1024));
+        config
+            .scheduler_runtime_profile
+            .as_mut()
+            .unwrap()
+            .config
+            .max_cache_cap = 16384;
+        config.default_max_output_tokens = Some(32768);
+        pool.register_dynamic_model(config, false, None)
+            .await
+            .unwrap();
+        let list = pool.model_snapshots().await;
+        assert_eq!(list[0].context_window, Some(4096));
+        assert_eq!(list[0].max_output_tokens, Some(4096));
+        assert_eq!(list[0].state, EngineRuntimeState::Unloaded);
+        std::fs::remove_dir_all(model_dir).unwrap();
+    }
+
+    #[test]
+    fn discovery_capacity_requires_readable_metadata_and_a_causal_profile() {
+        let model_dir = write_minimal_model_config("qwen3_5");
+        let mut config = model_config("capacity", &model_dir, EngineLoadPolicy::Lazy);
+        let capacity = crate::core::model_capacity::configured_context_window;
+        assert_eq!(capacity(&config), None);
+        std::fs::write(
+            model_dir.join("config.json"),
+            r#"{
+            "model_type":"qwen3_5", "text_config":{"max_position_embeddings":8192}
+        }"#,
+        )
+        .unwrap();
+        assert_eq!(capacity(&config), Some(1024));
+        config.capabilities = EngineModelCapabilities::audio();
+        assert_eq!(capacity(&config), None);
+        config.capabilities =
+            EngineModelCapabilities::for_architecture(ModelArchitecture::DiffusionGemma, false);
+        assert_eq!(capacity(&config), None);
+        config.capabilities =
+            EngineModelCapabilities::for_architecture(ModelArchitecture::Qwen35Dense, false);
+        config.scheduler_runtime_profile = None;
+        assert_eq!(capacity(&config), None);
+        config.scheduler_runtime_profile = Some(runtime_profile());
+        std::fs::write(model_dir.join("config.json"), "invalid json").unwrap();
+        assert_eq!(capacity(&config), None);
+        std::fs::remove_dir_all(model_dir).unwrap();
+        assert_eq!(capacity(&config), None);
+    }
+
+    #[tokio::test]
     async fn discovery_registration_preserves_pins_during_restore() {
         let pool = EnginePoolState::new_dynamic(runtime_config(), Some(3)).expect("pool");
         let model_dir = write_minimal_model_config("qwen3_5");
@@ -3443,6 +3567,7 @@ mod tests {
         let pool = EnginePoolState::new_dynamic(runtime_config(), Some(3)).expect("pool");
         let model_dir = write_minimal_model_config("qwen3_5");
         let slot = EngineSlot {
+            configured_context_window: None,
             model: model_config("alpha", &model_dir, EngineLoadPolicy::Lazy),
             runtime: runtime_config(),
             active_requests: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(1)),
@@ -3642,6 +3767,10 @@ mod tests {
 #[derive(Debug, Serialize)]
 pub struct EngineModelSnapshot {
     pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<usize>,
     pub load_policy: EngineLoadPolicy,
     pub state: EngineRuntimeState,
     pub unload_reason: Option<EngineUnloadReason>,

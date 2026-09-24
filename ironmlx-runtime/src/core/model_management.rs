@@ -138,6 +138,7 @@ struct PendingModelReload {
     model_reference: String,
     model_dir: PathBuf,
     max_cache_cap_override: Option<usize>,
+    default_max_output_tokens: Option<usize>,
     sampling_defaults_override: SamplingDefaults,
     mtp: Option<crate::core::engine_pool::EngineMtpSettings>,
     prompt_lookup: Option<PromptLookupConfig>,
@@ -156,6 +157,7 @@ pub struct ModelLoadRequest {
     pub model_reference: String,
     pub model_dir: PathBuf,
     pub max_cache_cap_override: Option<usize>,
+    pub default_max_output_tokens: Option<usize>,
     pub sampling_defaults: SamplingDefaults,
     pub mtp: Option<crate::core::engine_pool::EngineMtpSettings>,
     pub prompt_lookup: Option<PromptLookupConfig>,
@@ -170,6 +172,7 @@ pub struct EngineModelBuildRequest<'a> {
     pub model_id: String,
     pub model_dir: &'a Path,
     pub max_cache_cap_override: Option<usize>,
+    pub default_max_output_tokens: Option<usize>,
     pub sampling_defaults_override: SamplingDefaults,
     pub mtp: Option<crate::core::engine_pool::EngineMtpSettings>,
     pub prompt_lookup: Option<PromptLookupConfig>,
@@ -185,6 +188,7 @@ pub fn build_engine_model_config(
         model_id,
         model_dir,
         max_cache_cap_override,
+        default_max_output_tokens,
         sampling_defaults_override,
         mtp,
         prompt_lookup,
@@ -192,6 +196,7 @@ pub fn build_engine_model_config(
     } = request;
     if let Some(audio) = audio {
         if max_cache_cap_override.is_some()
+            || default_max_output_tokens.is_some()
             || mtp.is_some()
             || prompt_lookup.is_some()
             || sampling_defaults_override != SamplingDefaults::default()
@@ -210,6 +215,7 @@ pub fn build_engine_model_config(
                 mtp: None,
                 prompt_lookup: None,
                 sampling_defaults: SamplingDefaults::default(),
+                default_max_output_tokens: None,
                 capabilities: EngineModelCapabilities::audio(),
             },
             warning: None,
@@ -237,6 +243,7 @@ pub fn build_engine_model_config(
                 mtp: None,
                 prompt_lookup: None,
                 sampling_defaults: sampling_defaults_override,
+                default_max_output_tokens,
                 capabilities,
             },
             warning: None,
@@ -291,6 +298,7 @@ pub fn build_engine_model_config(
             mtp,
             prompt_lookup,
             sampling_defaults,
+            default_max_output_tokens,
             capabilities,
         },
         warning,
@@ -443,6 +451,7 @@ impl ModelManagement {
             model_reference: parsed.model_reference.clone(),
             model_dir: parsed.model_dir.clone(),
             max_cache_cap_override: parsed.max_cache_cap_override,
+            default_max_output_tokens: parsed.default_max_output_tokens,
             sampling_defaults_override: parsed.sampling_defaults,
             mtp: parsed.mtp.clone(),
             prompt_lookup: parsed.prompt_lookup,
@@ -494,6 +503,7 @@ impl ModelManagement {
                 model_id: parsed.model_reference.clone(),
                 model_dir: &parsed.model_dir,
                 max_cache_cap_override: parsed.max_cache_cap_override,
+                default_max_output_tokens: parsed.default_max_output_tokens,
                 sampling_defaults_override: parsed.sampling_defaults,
                 mtp: parsed.mtp,
                 prompt_lookup: parsed.prompt_lookup,
@@ -527,6 +537,7 @@ impl ModelManagement {
                 model_id: parsed.model_reference.clone(),
                 model_dir: &parsed.model_dir,
                 max_cache_cap_override: parsed.max_cache_cap_override,
+                default_max_output_tokens: parsed.default_max_output_tokens,
                 sampling_defaults_override: parsed.sampling_defaults,
                 mtp: parsed.mtp,
                 prompt_lookup: parsed.prompt_lookup,
@@ -583,6 +594,7 @@ impl ModelManagement {
                 model_id: reload.model_reference.clone(),
                 model_dir: &reload.model_dir,
                 max_cache_cap_override: reload.max_cache_cap_override,
+                default_max_output_tokens: reload.default_max_output_tokens,
                 sampling_defaults_override: reload.sampling_defaults_override,
                 mtp: reload.mtp.clone(),
                 prompt_lookup: reload.prompt_lookup,
@@ -649,6 +661,7 @@ impl ModelManagement {
                         model_id: reload.model_reference.clone(),
                         model_dir: &reload.model_dir,
                         max_cache_cap_override: reload.max_cache_cap_override,
+                        default_max_output_tokens: reload.default_max_output_tokens,
                         sampling_defaults_override: reload.sampling_defaults_override,
                         mtp: reload.mtp.clone(),
                         prompt_lookup: reload.prompt_lookup,
@@ -703,6 +716,7 @@ pub fn build_engine_model_config_for_pool(
             mtp: None,
             prompt_lookup: None,
             sampling_defaults: SamplingDefaults::default(),
+            default_max_output_tokens: None,
             capabilities: EngineModelCapabilities::audio(),
         };
         super::runtime_config::validate_engine_model_config(&config)?;
@@ -732,6 +746,7 @@ pub fn build_engine_model_config_for_pool(
             mtp,
             prompt_lookup,
             sampling_defaults: crate::core::runtime_config::SamplingDefaults::default(),
+            default_max_output_tokens: None,
             capabilities: crate::core::engine_pool::EngineModelCapabilities::for_architecture(
                 ironmlx_lm::models::ModelArchitecture::Qwen35Dense,
                 false,
@@ -797,6 +812,7 @@ pub fn build_engine_model_config_for_pool(
             mtp: None,
             prompt_lookup: None,
             sampling_defaults: crate::core::runtime_config::SamplingDefaults::default(),
+            default_max_output_tokens: None,
             capabilities,
         });
     }
@@ -830,6 +846,7 @@ pub fn build_engine_model_config_for_pool(
         mtp,
         prompt_lookup,
         sampling_defaults: crate::core::runtime_config::SamplingDefaults::default(),
+        default_max_output_tokens: None,
         capabilities,
     })
 }

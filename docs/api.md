@@ -57,4 +57,4 @@ See [Security boundaries](security-boundary.md) for authentication and image lim
 Invalid requests generally return 400, body/context limits return 413, and retryable overload returns 503 with `Retry-After: 5`.
 Classify by HTTP status and protocol error type, then inspect `error.code`. See the [API compatibility matrix](api-compatibility-matrix.md).
 
-For Agent configuration, use the [Hermes Agent](hermes-agent.md) or [oh-my-pi](oh-my-pi.md) guides.
+For Agent configuration, use the [Hermes Agent](hermes-agent.md), [oh-my-pi](oh-my-pi.md), or [DeepSeek Harness](dsh.md) guides.

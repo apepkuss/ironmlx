@@ -13,6 +13,7 @@ import Testing
         modelType: "llm",
         contextSize: "262144",
         maxTokens: "65536",
+        maxOutputTokens: "8192",
         temperature: "0.7",
         topP: "0.95",
         topK: "40",
@@ -24,6 +25,8 @@ import Testing
     let loaded = try ModelParameterStore(url: url).loadAll()
     #expect(loaded["mlx-community/LongContext-4bit"]?.maxTokens == "65536")
     #expect(loaded["mlx-community/LongContext-4bit"]?.maxCacheCap == 65536)
+    #expect(loaded["mlx-community/LongContext-4bit"]?.defaultMaxOutputTokens == 8192)
+    #expect(loaded["mlx-community/LongContext-4bit"]?.samplingDefaults.defaultMaxOutputTokens == 8192)
 }
 
 @Test func modelParameterStorePersistsValidatedDFlash2Configuration() throws {

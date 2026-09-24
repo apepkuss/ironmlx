@@ -30,6 +30,9 @@ use ironmlx_runtime::core::generation_types::GenerateRequest;
 #[cfg(test)]
 #[path = "responses_eof_tests.rs"]
 mod eof_tests;
+#[cfg(test)]
+#[path = "responses_reasoning_replay_tests.rs"]
+mod reasoning_replay_tests;
 use ironmlx_lm::core::model::Model;
 use ironmlx_lm::core::native_output::NativeOutputDecoderConfig;
 use ironmlx_lm::core::vision::DenseVlMethods;
@@ -776,12 +779,16 @@ fn convert_input(
                         let chat_role = if role == "developer" { "system" } else { &role };
                         let content = response_content_to_chat(&role, content)?;
                         let reasoning_content = if role == "assistant" {
-                            pending_reasoning.take()
+                            let has_body = match &content {
+                                Content::Text(text) => !text.trim().is_empty(),
+                                Content::Parts(parts) => parts.iter().any(|part| matches!(part, ContentPart::Text { text } if !text.trim().is_empty())),
+                            };
+                            pending_reasoning.take().filter(|_| has_body)
                         } else {
-                            anyhow::ensure!(
-                                pending_reasoning.is_none(),
-                                "reasoning input must be followed by an assistant message or function_call"
-                            );
+                            // Stateless clients may replay reasoning-only turns
+                            // cut short before an assistant message/tool call.
+                            // Never attach this orphan to a later user turn.
+                            pending_reasoning = None;
                             None
                         };
                         messages.push(ChatMessage {
@@ -828,10 +835,7 @@ fn convert_input(
                         output,
                         status,
                     } => {
-                        anyhow::ensure!(
-                            pending_reasoning.is_none(),
-                            "reasoning input must be followed by an assistant message or function_call"
-                        );
+                        pending_reasoning = None;
                         if let Some(status) = status.as_deref() {
                             anyhow::ensure!(
                                 matches!(status, "in_progress" | "completed" | "incomplete"),
@@ -862,30 +866,25 @@ fn convert_input(
                                 "unsupported reasoning status `{status}`"
                             );
                         }
-                        anyhow::ensure!(
-                            pending_reasoning.is_none(),
-                            "consecutive reasoning input items are not supported"
-                        );
-                        anyhow::ensure!(
-                            encrypted_content.is_none() || !content.is_empty(),
-                            "encrypted reasoning cannot be replayed without reasoning_text content"
-                        );
                         let text = content
                             .into_iter()
                             .map(|part| match part {
                                 ReasoningContentPart::ReasoningText { text } => text,
                             })
                             .collect::<String>();
+                        anyhow::ensure!(
+                            encrypted_content.is_none() || !text.trim().is_empty(),
+                            "encrypted reasoning cannot be replayed without reasoning_text content"
+                        );
+                        // A preceding unpaired item is an orphan, not context
+                        // for this new reasoning item. Validate before dropping.
                         pending_reasoning = (!text.is_empty()).then_some(text);
                     }
                 }
             }
         }
     }
-    anyhow::ensure!(
-        pending_reasoning.is_none(),
-        "reasoning input must be followed by an assistant message or function_call"
-    );
+    // A trailing orphan is intentionally not rendered into the chat prompt.
     coalesce_system_messages(&mut messages);
     anyhow::ensure!(!messages.is_empty(), "input must not be empty");
     Ok(messages)
@@ -1421,6 +1420,7 @@ where
         prepared_tools.as_ref(),
         output_schema.as_ref(),
         native_output,
+        Some(max_output_tokens),
     ) {
         Ok(value) => value,
         Err(error) => {
@@ -1528,6 +1528,7 @@ impl Usage {
 enum OutputItem {
     Reasoning {
         id: String,
+        status: &'static str,
         summary: Vec<ReasoningSummaryOutput>,
         content: Vec<ReasoningContentOutput>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -1575,9 +1576,15 @@ enum ReasoningContentOutput {
     ReasoningText { text: String },
 }
 
-fn reasoning_item(id: String, reasoning: String, summary: String) -> OutputItem {
+fn reasoning_item(
+    id: String,
+    reasoning: String,
+    summary: String,
+    status: &'static str,
+) -> OutputItem {
     OutputItem::Reasoning {
         id,
+        status,
         summary: (!summary.is_empty())
             .then_some(ReasoningSummaryOutput::SummaryText { text: summary })
             .into_iter()
@@ -1768,6 +1775,7 @@ pub(crate) struct CollectedOutput {
     pub(crate) finish_reason: &'static str,
     pub(crate) completion_tokens: u32,
     pub(crate) reasoning_tokens: u32,
+    pub(crate) reasoning_incomplete: bool,
 }
 
 impl CollectedOutput {
@@ -1780,6 +1788,7 @@ impl CollectedOutput {
             finish_reason: "stop",
             completion_tokens: 0,
             reasoning_tokens: 0,
+            reasoning_incomplete: false,
         }
     }
 
@@ -1799,6 +1808,16 @@ impl CollectedOutput {
                 ),
             }
         }
+        Ok(())
+    }
+
+    fn finish_decode(
+        &mut self,
+        decoder: &mut GeneratedOutputDecoder<'_>,
+        reason: &'static str,
+    ) -> anyhow::Result<()> {
+        self.collect(decoder.finish(reason)?)?;
+        self.reasoning_incomplete = decoder.reasoning_incomplete();
         Ok(())
     }
 }
@@ -1837,6 +1856,11 @@ pub(crate) fn unary_response(
             format!("rs_{}", uuid::Uuid::new_v4().simple()),
             output.reasoning,
             output.reasoning_summary,
+            if output.reasoning_incomplete {
+                "incomplete"
+            } else {
+                "completed"
+            },
         ));
     }
     if !output.content.is_empty() {
@@ -2031,7 +2055,7 @@ impl ResponsesStream {
     }
 
     pub(crate) fn text_delta(&mut self, delta: String) -> Vec<Bytes> {
-        let mut frames = self.finish_reasoning();
+        let mut frames = self.finish_reasoning("completed");
         if self.active_text.is_none() {
             let output_index = self.output.len();
             let id = message_id();
@@ -2090,6 +2114,7 @@ impl ResponsesStream {
                 ItemPayload {
                     item: OutputItem::Reasoning {
                         id: id.clone(),
+                        status: "in_progress",
                         summary: Vec::new(),
                         content: Vec::new(),
                         encrypted_content: None,
@@ -2130,7 +2155,7 @@ impl ResponsesStream {
         frames
     }
 
-    fn finish_reasoning(&mut self) -> Vec<Bytes> {
+    fn finish_reasoning(&mut self, status: &'static str) -> Vec<Bytes> {
         let Some((output_index, id, text)) = self.active_reasoning.take() else {
             return Vec::new();
         };
@@ -2153,7 +2178,7 @@ impl ResponsesStream {
                 part: OutputContent::ReasoningText { text: text.clone() },
             },
         ));
-        let item = reasoning_item(id, text, String::new());
+        let item = reasoning_item(id, text, String::new(), status);
         frames.push(self.event(
             "response.output_item.done",
             ItemPayload {
@@ -2206,7 +2231,7 @@ impl ResponsesStream {
     }
 
     pub(crate) fn tool_call(&mut self, call: ToolCall) -> anyhow::Result<Vec<Bytes>> {
-        let mut frames = self.finish_reasoning();
+        let mut frames = self.finish_reasoning("completed");
         frames.extend(self.finish_text());
         let output_index = self.output.len();
         let item_id = function_item_id();
@@ -2266,7 +2291,12 @@ impl ResponsesStream {
         Ok(frames)
     }
 
-    pub(crate) fn completed(&mut self, finish_reason: &'static str, usage: Usage) -> Vec<Bytes> {
+    pub(crate) fn completed(
+        &mut self,
+        finish_reason: &'static str,
+        usage: Usage,
+        reasoning_incomplete: bool,
+    ) -> Vec<Bytes> {
         let has_tool_calls = self
             .output
             .iter()
@@ -2283,7 +2313,11 @@ impl ResponsesStream {
         {
             return vec![self.failed(format!("{error:#}"))];
         }
-        let mut frames = self.finish_reasoning();
+        let mut frames = self.finish_reasoning(if reasoning_incomplete {
+            "incomplete"
+        } else {
+            "completed"
+        });
         frames.extend(self.finish_text());
         let (kind, status) = if finish_reason == "length" {
             ("response.incomplete", "incomplete")
@@ -2324,7 +2358,7 @@ fn finish_decoder(
     context: &ToolContext,
     model_finish: &'static str,
 ) -> anyhow::Result<()> {
-    output.collect(decoder.finish(model_finish)?)?;
+    output.finish_decode(decoder, model_finish)?;
     validate_collected_output(output, context)
 }
 
@@ -2386,7 +2420,7 @@ where
             if let Some(context) = tool_context.as_ref() {
                 finish_decoder(&mut output, &mut decoder, context, model_finish)?;
             } else {
-                output.collect(decoder.finish(model_finish)?)?;
+                output.finish_decode(&mut decoder, model_finish)?;
             }
             performance
                 .ok_or_else(|| anyhow::anyhow!("generation ended before producing a token"))?
@@ -2542,10 +2576,7 @@ where
                 format!("{error:#}"),
             );
         }
-    } else if let Err(error) = decoder
-        .finish(model_finish)
-        .and_then(|events| output.collect(events))
-    {
+    } else if let Err(error) = output.finish_decode(&mut decoder, model_finish) {
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "generated_output_decode_error",
@@ -2734,6 +2765,7 @@ where
             output.finish_reason,
             Usage::new(input_tokens, output.completion_tokens)
                 .with_reasoning_tokens(output.reasoning_tokens),
+            decoder.reasoning_incomplete(),
         ) {
             if tx.send(Ok(frame)).await.is_err() {
                 return;
@@ -2905,6 +2937,7 @@ where
             for frame in formatter.completed(
                 finish_reason,
                 Usage::new(input_tokens, completion_tokens).with_reasoning_tokens(reasoning_tokens),
+                decoder.reasoning_incomplete(),
             ) {
                 if tx.blocking_send(Ok(frame)).is_err() {
                     return;
@@ -3549,6 +3582,7 @@ mod tests {
             None,
             output_schema.as_ref(),
             native_output,
+            Some(normalized.chat.max_tokens),
         )
         .expect("compile reasoning-aware Responses constraint")
         .expect("structured output constraint");
@@ -3824,7 +3858,7 @@ mod tests {
         let mut stream = ResponsesStream::new(meta);
         let mut frames = vec![stream.created()];
         frames.extend(stream.text_delta("hello".into()));
-        frames.extend(stream.completed("stop", Usage::new(2, 1)));
+        frames.extend(stream.completed("stop", Usage::new(2, 1), false));
         let wire = frames
             .into_iter()
             .map(|frame| String::from_utf8(frame.to_vec()).unwrap())
@@ -3857,7 +3891,7 @@ mod tests {
         let mut frames = vec![stream.created()];
         frames.extend(stream.reasoning_delta("check".into()));
         frames.extend(stream.text_delta("answer".into()));
-        frames.extend(stream.completed("stop", Usage::new(4, 3).with_reasoning_tokens(2)));
+        frames.extend(stream.completed("stop", Usage::new(4, 3).with_reasoning_tokens(2), false));
         let events = frames
             .into_iter()
             .map(|frame| {
@@ -3906,6 +3940,7 @@ mod tests {
             "rs_1".into(),
             "inspect inputs".into(),
             String::new(),
+            "completed",
         ))
         .expect("reasoning item serializes");
         assert_eq!(
@@ -3913,6 +3948,7 @@ mod tests {
             serde_json::json!({
                 "type":"reasoning",
                 "id":"rs_1",
+                "status":"completed",
                 "summary":[],
                 "content":[{"type":"reasoning_text","text":"inspect inputs"}]
             })
@@ -4003,7 +4039,7 @@ mod tests {
                 })
                 .expect("function call formats"),
         );
-        frames.extend(stream.completed("tool_calls", Usage::new(10, 5)));
+        frames.extend(stream.completed("tool_calls", Usage::new(10, 5), false));
         let events = frames
             .into_iter()
             .map(|frame| {
@@ -4230,7 +4266,7 @@ mod tests {
         };
         let mut stream = ResponsesStream::new(meta);
         stream.text_delta("not json".into());
-        let frames = stream.completed("stop", Usage::new(2, 2));
+        let frames = stream.completed("stop", Usage::new(2, 2), false);
         let wire = frames
             .iter()
             .map(|frame| String::from_utf8(frame.to_vec()).unwrap())

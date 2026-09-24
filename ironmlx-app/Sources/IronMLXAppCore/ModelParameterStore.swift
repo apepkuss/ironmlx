@@ -5,7 +5,10 @@ public struct ModelParameters: Codable, Equatable, Sendable {
     public var alias: String?
     public var modelType: String?
     public var contextSize: String?
+    /// Historical name: the runtime KV cache cap, not response output tokens.
     public var maxTokens: String?
+    /// Per-model default when a Responses request omits max_output_tokens.
+    public var maxOutputTokens: String?
     public var temperature: String?
     public var topP: String?
     public var topK: String?
@@ -27,6 +30,7 @@ public struct ModelParameters: Codable, Equatable, Sendable {
         modelType: String? = nil,
         contextSize: String? = nil,
         maxTokens: String? = nil,
+        maxOutputTokens: String? = nil,
         temperature: String? = nil,
         topP: String? = nil,
         topK: String? = nil,
@@ -47,6 +51,7 @@ public struct ModelParameters: Codable, Equatable, Sendable {
         self.modelType = modelType
         self.contextSize = contextSize
         self.maxTokens = maxTokens
+        self.maxOutputTokens = maxOutputTokens
         self.temperature = temperature
         self.topP = topP
         self.topK = topK
@@ -83,8 +88,13 @@ public struct ModelParameters: Codable, Equatable, Sendable {
         return value
     }
 
+    public var defaultMaxOutputTokens: Int? {
+        positiveInt(maxOutputTokens)
+    }
+
     public var samplingDefaults: BackendSamplingDefaults {
         BackendSamplingDefaults(
+            defaultMaxOutputTokens: defaultMaxOutputTokens,
             temperature: positiveDouble(temperature),
             topP: probability(topP),
             topK: positiveInt(topK),
@@ -123,6 +133,7 @@ public struct ModelParameters: Codable, Equatable, Sendable {
         case modelType = "model_type"
         case contextSize = "context_size"
         case maxTokens = "max_tokens"
+        case maxOutputTokens = "max_output_tokens"
         case temperature
         case topP = "top_p"
         case topK = "top_k"
@@ -491,6 +502,7 @@ public final class ModelParameterStore: @unchecked Sendable {
         }
         try validatePositiveInteger(parameters.contextSize, field: "context_size")
         try validatePositiveInteger(parameters.maxTokens, field: "max_tokens")
+        try validatePositiveInteger(parameters.maxOutputTokens, field: "max_output_tokens")
         try validatePositiveInteger(parameters.topK, field: "top_k")
         try validatePositiveInteger(parameters.mtpDraftTokens, field: "mtp_draft_tokens")
         if let value = nonEmpty(parameters.dflash2BlockSize),
@@ -617,7 +629,8 @@ public final class ModelParameterStore: @unchecked Sendable {
     }
 
     private static let modelKeys: Set<String> = [
-        "model_id", "alias", "model_type", "context_size", "max_tokens", "temperature",
+        "model_id", "alias", "model_type", "context_size", "max_tokens",
+        "max_output_tokens", "temperature",
         "top_p", "top_k", "repeat_penalty", "mtp_enabled", "mtp_model_id",
         "mtp_draft_tokens", "dflash2_enabled", "dflash2_model_id", "dflash2_block_size",
         "dflash2_draft_bits", "dflash2_tensor_batch_max_width", "prompt_lookup_enabled",

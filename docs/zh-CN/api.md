@@ -57,4 +57,4 @@ Structured Outputs 的字段分别为 Chat 的 `response_format`、Responses 的
 无效请求通常返回 400；请求体或上下文容量超限返回 413；可重试的过载返回 503 和 `Retry-After: 5`。
 按 HTTP 状态及协议错误类型分类，再读取 `error.code`；完整规则见[API 兼容矩阵](api-compatibility-matrix.md)。
 
-Agent 配置可直接使用 [Hermes Agent](hermes-agent.md) 或 [oh-my-pi](oh-my-pi.md) 指南。
+Agent 配置可直接使用 [Hermes Agent](hermes-agent.md)、[oh-my-pi](oh-my-pi.md) 或 [DeepSeek Harness](dsh.md) 指南。

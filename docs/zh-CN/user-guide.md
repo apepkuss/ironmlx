@@ -48,6 +48,7 @@ curl -fsS http://127.0.0.1:9068/v1/responses \
 - [API 兼容矩阵](api-compatibility-matrix.md)：请求字段、流式输出、结构化输出、推理、图片和错误；
 - [Hermes Agent 集成](hermes-agent.md)：配置 Hermes 使用本地 Responses 接口；
 - [oh-my-pi 集成](oh-my-pi.md)：配置本地 OpenAI 兼容 provider，并验证工具调用闭环。
+- [DeepSeek Harness 集成](dsh.md)：配置 pi-ai Responses overlay，并验证文本与工具调用。
 
 ## 隐私、安全与本地数据
 

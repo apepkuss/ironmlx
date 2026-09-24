@@ -391,6 +391,33 @@ impl Tokenizer {
         )
     }
 
+    /// Add an automatic native reasoning limit without overriding the total
+    /// output budget or enabling reasoning for requests which disabled it.
+    pub fn apply_reasoning_budget(
+        &self,
+        plan: Option<ConstraintPlan>,
+        native: Option<NativeOutputDecoderConfig>,
+        max_output_tokens: usize,
+    ) -> Result<Option<ConstraintPlan>> {
+        let Some(native) = native.filter(|native| native.reasoning_enabled) else {
+            return Ok(plan);
+        };
+        let Some(budget) = crate::core::reasoning_budget::ReasoningBudget::automatic(
+            native.dialect,
+            max_output_tokens,
+        ) else {
+            return Ok(plan);
+        };
+        let Some(tokenizer) = self.constraint.as_ref() else {
+            return Ok(plan);
+        };
+        tracing::debug!(?budget, dialect = ?native.dialect, max_output_tokens,
+            "reserve output space after native reasoning");
+        tokenizer
+            .with_reasoning_budget(plan, native.dialect, budget)
+            .map(Some)
+    }
+
     /// Compile one immutable request plan for the active native tool dialect.
     pub fn compile_tool_constraint(
         &self,

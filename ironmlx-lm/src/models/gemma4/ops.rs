@@ -261,6 +261,9 @@ fn rms_norm_default_rope_decode_kernel() -> Result<&'static MetalKernel> {
         }
 
         float inv_rms = rsqrt(vals[0] / float(D) + EPS);
+        // Every SIMD group must read the reduction before thread 0 reuses
+        // vals[0] for its normalized value (which may be negative).
+        threadgroup_barrier(mem_flags::mem_threadgroup);
         vals[d] = xv * inv_rms * float(weight[d]);
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -635,18 +638,67 @@ mod tests {
     #[test]
     #[serial(mlx_metal)]
     fn rms_norm_default_rope_decode_matches_composed_non_traditional() {
-        assert_rms_norm_default_rope_decode(false);
+        for head_dim in [8, 256, 512] {
+            assert_rms_norm_default_rope_decode(false, head_dim);
+        }
     }
 
     #[test]
     #[serial(mlx_metal)]
     fn rms_norm_default_rope_decode_matches_composed_traditional() {
-        assert_rms_norm_default_rope_decode(true);
+        for head_dim in [8, 256, 512] {
+            assert_rms_norm_default_rope_decode(true, head_dim);
+        }
     }
 
-    fn assert_rms_norm_default_rope_decode(traditional: bool) {
+    #[test]
+    #[serial(mlx_metal)]
+    fn rms_norm_default_rope_decode_multi_simdgroup_stays_finite() {
+        // Negative lane-zero values expose reuse of the reduction buffer
+        // before other SIMD groups have read it: rsqrt then receives a
+        // negative value. D=8 tests cannot exercise that cross-group race.
+        for head_dim in [256, 512] {
+            for dtype in [Dtype::Bfloat16, Dtype::Float32] {
+                let heads = 128;
+                let data = vec![-1.0_f32; (heads * head_dim) as usize];
+                let x: Array = (data.as_slice(), (1, 1, heads, head_dim))
+                    .try_into()
+                    .unwrap();
+                let x = x.astype(dtype).unwrap();
+                let weight = mlx::ops::constructors::ones([head_dim], dtype).unwrap();
+                let offsets: Array = (&[0_i32][..], [1]).try_into().unwrap();
+                for iteration in 0..4096 {
+                    let got = rms_norm_default_rope_decode_on(
+                        &x,
+                        RmsNormDefaultRopeDecode {
+                            weight: &weight,
+                            offsets: &offsets,
+                            eps: 1.0e-6,
+                            base: 10_000.0,
+                            traditional: false,
+                            heads,
+                            head_dim,
+                        },
+                        (),
+                    )
+                    .unwrap()
+                    .unwrap();
+                    let values = got.astype(Dtype::Float32).unwrap().to_vec::<f32>().unwrap();
+                    let invalid = values
+                        .iter()
+                        .filter(|v| !v.is_finite() || (**v + 1.0).abs() >= 0.00001)
+                        .count();
+                    assert_eq!(
+                        invalid, 0,
+                        "head_dim={head_dim} dtype={dtype:?} iteration={iteration}"
+                    );
+                }
+            }
+        }
+    }
+
+    fn assert_rms_norm_default_rope_decode(traditional: bool, head_dim: i32) {
         let heads = 2_i32;
-        let head_dim = 8_i32;
         let offset = 17_i32;
         let x_data: Vec<f32> = (0..(heads * head_dim))
             .map(|i| ((i % 13) as f32 - 6.0) * 0.07)

@@ -23,6 +23,7 @@ function dashboard() {
     },
     document: { getElementById(id) {
       return { value: id === 'modal-max-tokens' ? '4096'
+        : id === 'modal-max-output-tokens' ? '1024'
         : id === 'modal-context-size' ? '262144' : '', checked: false };
     } },
     I18N: { en: {
@@ -40,12 +41,59 @@ function dashboard() {
   return { context, get payload() { return payload; } };
 }
 
-test('saving an ordinary model sends absent draft IDs and the selected context limit', () => {
+test('saving an ordinary model keeps output budget separate from the context limit', () => {
   const page = dashboard();
   vm.runInContext('saveModelParams()', page.context);
   assert.equal(page.payload.mtp_model_id, null);
   assert.equal(page.payload.dflash2_model_id, null);
   assert.equal(page.payload.max_tokens, '4096');
+  assert.equal(page.payload.max_output_tokens, '1024');
+});
+
+test('model parameter help explains the three capacity fields in each language', () => {
+  const start = html.indexOf('  const I18N =');
+  const dictionary = html.slice(start, html.indexOf('\n  };', start) + 5);
+  const translations = vm.runInNewContext(`${dictionary}\nI18N`, {});
+  const fields = ['context_size', 'max_context_tokens', 'default_max_output_tokens'];
+  for (const field of fields) {
+    assert.ok(html.includes(`data-i18n-aria-label="${field}_help_label"`));
+    assert.ok(html.includes(`data-i18n="${field}_help"`));
+    for (const language of ['en', 'zh-Hans', 'zh-Hant', 'ja', 'ko']) {
+      assert.ok(translations[language][`${field}_help_label`], `${language} ${field} label`);
+      assert.ok(translations[language][`${field}_help`], `${language} ${field} help`);
+    }
+  }
+  assert.match(translations.en.context_size_help, /Read-only/i);
+  for (const language of ['en', 'zh-Hans', 'zh-Hant', 'ja', 'ko']) {
+    assert.equal(translations[language].default_max_output_tokens, 'MAX OUTPUT TOKENS');
+    for (const detail of ['budget', 'priority', 'scope']) {
+      assert.ok(translations[language][`default_max_output_tokens_help_${detail}`],
+        `${language} output budget ${detail}`);
+    }
+  }
+});
+
+test('model parameters form three aligned rows without sampling help buttons', () => {
+  const rows = [...html.matchAll(/<div class="modal-row model-params-setting-row[^>]*>/g)];
+  const expected = [
+    ['modal-alias-input', 'modal-model-type', 'modal-context-size'],
+    ['modal-max-tokens', 'modal-max-output-tokens', 'modal-temperature'],
+    ['modal-top-p', 'modal-top-k', 'modal-repeat-penalty'],
+  ];
+  assert.equal(rows.length, expected.length);
+  const outputSection = html.indexOf('<div class="model-params-output-section">');
+  assert.ok(outputSection > rows[0].index && outputSection < rows[1].index);
+  assert.ok(html.includes('.model-params-output-section {\n    border-top: 0.5px solid var(--border);'));
+  for (let index = 0; index < rows.length; index++) {
+    const end = index + 1 < rows.length
+      ? rows[index + 1].index : html.indexOf('<div id="modal-mtp-section"', rows[index].index);
+    const row = html.slice(rows[index].index, end);
+    const positions = expected[index].map(id => row.indexOf(`id="${id}"`));
+    assert.equal((row.match(/class="modal-field"/g) || []).length, 3);
+    assert.ok(positions.every(position => position >= 0));
+    assert.ok(positions[0] < positions[1] && positions[1] < positions[2]);
+    assert.equal((row.match(/class="profile-help-trigger"/g) || []).length, [1, 2, 0][index]);
+  }
 });
 
 test('parameter validation identifies the field without suggesting filesystem repair', () => {

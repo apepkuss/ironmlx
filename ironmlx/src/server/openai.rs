@@ -664,9 +664,10 @@ pub(crate) fn compile_output_constraint_with_native(
     prepared_tools: Option<&PreparedToolRequest>,
     output_schema: Option<&serde_json::Value>,
     native_output: Option<ironmlx_lm::core::native_output::NativeOutputDecoderConfig>,
+    max_output_tokens: Option<usize>,
 ) -> anyhow::Result<Option<ironmlx_lm::core::constrained::ConstraintPlan>> {
     let enabled_reasoning = native_output.filter(|config| config.reasoning_enabled);
-    prepared_tools
+    let plan = prepared_tools
         .and_then(|prepared| {
             prepared
                 .constraint_options
@@ -712,7 +713,11 @@ pub(crate) fn compile_output_constraint_with_native(
                 None => tokenizer.compile_json_output_constraint(schema).map(Some),
             },
             (None, None) => Ok(None),
-        })
+        })?;
+    match max_output_tokens {
+        Some(total) => tokenizer.apply_reasoning_budget(plan, native_output, total),
+        None => Ok(plan),
+    }
 }
 
 pub(crate) fn allows_structured_final_output(prepared_tools: Option<&PreparedToolRequest>) -> bool {
@@ -1060,6 +1065,7 @@ where
         prepared_tools.as_ref(),
         output_schema.as_ref(),
         native_output,
+        Some(req.max_tokens),
     ) {
         Ok(constraint) => constraint,
         Err(error) => {
@@ -1287,6 +1293,7 @@ pub(crate) async fn chat_completions_with_gemma4_drafter_state(
         prepared_tools.as_ref(),
         output_schema.as_ref(),
         native_output,
+        Some(req.max_tokens),
     ) {
         Ok(constraint) => constraint,
         Err(error) => {

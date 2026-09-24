@@ -71,6 +71,13 @@ impl EngineLeaseHttpAdapter for EngineLease {
         self.engine().anthropic_messages(req).await
     }
 }
+
+fn apply_default_output_budget(request: &mut responses::ResponsesRequest, default: Option<usize>) {
+    if request.max_output_tokens.is_none() {
+        request.max_output_tokens = default;
+    }
+}
+
 pub(crate) trait EngineVariantHttpAdapter {
     async fn openai_chat_completions(&self, req: openai::ChatRequest) -> Response;
     async fn openai_responses(&self, req: responses::ResponsesRequest) -> Response;
@@ -182,6 +189,7 @@ impl EnginePoolHttpAdapter for EnginePoolState {
 
     async fn app_openai_responses(&self, mut req: responses::ResponsesRequest) -> Result<Response> {
         let engine = self.resolve_request_engine(&mut req).await?;
+        apply_default_output_budget(&mut req, engine.default_max_output_tokens());
         Ok(engine.openai_responses(req).await)
     }
 
@@ -203,6 +211,8 @@ impl EnginePoolHttpAdapter for EnginePoolState {
                 created: 0,
                 owned_by: "ironmlx",
                 id: model.id,
+                context_window: model.context_window,
+                max_output_tokens: model.max_output_tokens,
                 load_policy: model.load_policy,
                 state: model.state,
                 unload_reason: model.unload_reason,
@@ -332,6 +342,10 @@ pub(crate) struct OpenAiModelList {
 #[derive(Debug, Serialize)]
 struct OpenAiModelInfo {
     id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_window: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_output_tokens: Option<usize>,
     object: &'static str,
     created: u64,
     owned_by: &'static str,
@@ -358,6 +372,23 @@ struct OpenAiModelInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn per_model_output_budget_applies_only_when_responses_request_omits_it() {
+        let mut omitted: responses::ResponsesRequest =
+            serde_json::from_value(serde_json::json!({"input": "hello"}))
+                .expect("Responses request");
+        apply_default_output_budget(&mut omitted, Some(8192));
+        assert_eq!(omitted.max_output_tokens, Some(8192));
+
+        let mut explicit: responses::ResponsesRequest = serde_json::from_value(
+            serde_json::json!({"input": "hello", "max_output_tokens": 1024}),
+        )
+        .expect("Responses request");
+        apply_default_output_budget(&mut explicit, Some(8192));
+        assert_eq!(explicit.max_output_tokens, Some(1024));
+    }
+
     #[tokio::test]
     async fn engine_pool_errors_render_for_each_public_protocol() {
         let openai = crate::server::api_error::ApiError::engine_resolution(

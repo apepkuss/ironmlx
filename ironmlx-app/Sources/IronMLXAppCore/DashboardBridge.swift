@@ -197,7 +197,9 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             let isHermesGuide = url.host == "hermes-agent.nousresearch.com"
                 && ["/docs/integrations/providers", "/docs/zh-Hans/integrations/providers"].contains(url.path)
             let isOMPGuide = url.host == "omp.sh" && url.path == "/docs/custom-models"
-            guard isHermesGuide || isOMPGuide else { return }
+            let isDSHGuide = url.host == "deepseek-harness.github.io"
+                && ["/deepseek-harness/guide/providers", "/deepseek-harness/en/guide/providers"].contains(url.path)
+            guard isHermesGuide || isOMPGuide || isDSHGuide else { return }
             NSWorkspace.shared.open(url)
         case "setLanguage":
             updateConfig { $0.language = stringBody(body) }
@@ -278,6 +280,16 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             return
         }
         switch path {
+        case "/v1/models":
+            let config = configStore.load()
+            Task {
+                let client = BackendAPIClient(host: config.host, port: config.port)
+                let data = try? await client.fetchData(path: path)
+                let json = data.flatMap { String(data: $0, encoding: .utf8) } ?? "null"
+                await MainActor.run {
+                    self.sendFetchResult(path: path, jsonString: json)
+                }
+            }
         case "/health":
             let config = configStore.load()
             let host = config.host

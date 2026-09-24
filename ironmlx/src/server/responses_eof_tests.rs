@@ -35,6 +35,7 @@ async fn state() -> AppState<SchedulerActorFakeModel> {
                 ("[UNK]".into(), 0),
                 ("hello".into(), 1),
                 ("world".into(), 2),
+                ("</think>".into(), 3),
             ]
             .into_iter()
             .collect(),
@@ -148,6 +149,149 @@ fn sse_events(wire: &str) -> Vec<serde_json::Value> {
         .filter_map(|line| line.strip_prefix("data: "))
         .map(|data| serde_json::from_str(data).unwrap())
         .collect()
+}
+
+async fn reasoning_replay_response(
+    state: AppState<SchedulerActorFakeModel>,
+    scheduler: bool,
+    stream: bool,
+    input: serde_json::Value,
+    tokens: Vec<u32>,
+    native_reasoning: bool,
+) -> Response {
+    let router = axum::Router::new().route(
+        "/v1/responses",
+        axum::routing::post(move |ApiJson(request): ApiJson<ResponsesRequest>| {
+            let state = state.clone();
+            let tokens = tokens.clone();
+            async move {
+                let normalized = match request.normalize() {
+                    Ok(normalized) => normalized,
+                    Err(error) => {
+                        return error_response(
+                            StatusCode::BAD_REQUEST,
+                            "invalid_request",
+                            error.to_string(),
+                        )
+                    }
+                };
+                let mut prepared = match prepare_response(&state, normalized, scheduler).await {
+                    Ok(prepared) => prepared,
+                    Err(response) => return response,
+                };
+                prepared.use_scheduler = scheduler;
+                // The fake model has no native template. Only inject its
+                // decoder dialect and committed tokens; all response loops,
+                // input normalization and SSE/JSON serialization are real.
+                prepared.native_output = native_reasoning.then_some(NativeOutputDecoderConfig {
+                    dialect: ironmlx_lm::core::native_output::NativeOutputDialect::Qwen35,
+                    reasoning_enabled: true,
+                });
+                prepared.injected_events = Some(
+                    tokens
+                        .iter()
+                        .enumerate()
+                        .map(|(index, token)| GenerateEvent {
+                            token: *token,
+                            text: String::new(),
+                            finish_reason: (index + 1 == tokens.len()).then_some("length"),
+                        })
+                        .collect(),
+                );
+                serve_prepared_response(state, prepared).await
+            }
+        }),
+    );
+    router
+        .oneshot(
+            axum::http::Request::post("/v1/responses")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::json!({
+                        "model":"eof-test", "input":input, "store":false, "stream":stream,
+                        "max_output_tokens":8,
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn endpoints_replay_reasoning_only_truncation_without_400() {
+    let state = state().await;
+    for scheduler in [false, true] {
+        for stream in [false, true] {
+            for (tokens, expected) in [
+                (vec![1], "incomplete"),
+                (vec![1, 3], "completed"),
+                (vec![1, 3, 2], "completed"),
+            ] {
+                let first = reasoning_replay_response(
+                    state.clone(),
+                    scheduler,
+                    stream,
+                    serde_json::json!([{"role":"user", "content":"question"}]),
+                    tokens,
+                    true,
+                )
+                .await;
+                assert_eq!(first.status(), StatusCode::OK);
+                let bytes = axum::body::to_bytes(first.into_body(), 65536)
+                    .await
+                    .unwrap();
+                let output = if stream {
+                    let events = sse_events(std::str::from_utf8(&bytes).unwrap());
+                    let done = events
+                        .iter()
+                        .find(|event| {
+                            event["type"] == "response.output_item.done"
+                                && event["item"]["type"] == "reasoning"
+                        })
+                        .unwrap();
+                    assert_eq!(done["item"]["status"], expected);
+                    assert_eq!(events.last().unwrap()["type"], "response.incomplete");
+                    assert_eq!(
+                        events.last().unwrap()["response"]["output"][0],
+                        done["item"]
+                    );
+                    // pi-ai retains the full item from this event for replay.
+                    serde_json::json!([done["item"].clone()])
+                } else {
+                    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    assert_eq!(body["output"][0]["status"], expected);
+                    assert_eq!(body["status"], "incomplete");
+                    body["output"].clone()
+                };
+                let mut history = vec![serde_json::json!({"role":"user", "content":"question"})];
+                history.extend(output.as_array().unwrap().iter().cloned());
+                history.push(serde_json::json!({"role":"user", "content":"continue"}));
+                let next = reasoning_replay_response(
+                    state.clone(),
+                    scheduler,
+                    stream,
+                    serde_json::json!(history),
+                    vec![1],
+                    false,
+                )
+                .await;
+                assert_eq!(next.status(), StatusCode::OK);
+                let bytes = axum::body::to_bytes(next.into_body(), 65536).await.unwrap();
+                if stream {
+                    let events = sse_events(std::str::from_utf8(&bytes).unwrap());
+                    assert_eq!(events.last().unwrap()["type"], "response.incomplete");
+                    assert!(events
+                        .iter()
+                        .any(|event| event["type"] == "response.output_text.delta"));
+                } else {
+                    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    assert_eq!(body["output"][0]["type"], "message");
+                }
+            }
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
