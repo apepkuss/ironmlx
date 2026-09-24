@@ -251,6 +251,51 @@
     min-height: 0;
   }
 
+  #page-voices.active {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
+
+  .voices-toolbar { display:flex; justify-content:space-between; align-items:center; gap:16px; margin-bottom:18px; }
+  .voices-list { display:grid; gap:10px; }
+  .voice-card { padding:16px; border:1px solid var(--border); border-radius:var(--radius); background:var(--card-bg); }
+  .voice-card-header { display:grid; grid-template-columns:minmax(210px,auto) minmax(260px,1fr) auto; align-items:center; gap:16px; }
+  .voice-card-main { min-width:0; }
+  .voice-card-title { display:flex; align-items:center; gap:8px; min-width:0; font-weight:600; flex-wrap:wrap; }
+  .voice-card-title-id { color:var(--text-secondary); font-size:12px; font-weight:400; overflow-wrap:anywhere; }
+  .voice-card-meta { margin-top:5px; color:var(--text-secondary); font-size:12px; overflow-wrap:anywhere; }
+  .voice-card-actions { display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
+  .voice-player { display:grid; grid-template-columns:34px auto minmax(100px,1fr) 34px; align-items:center; gap:8px; min-width:0; padding:9px 12px; border-radius:22px; background:var(--bg); }
+  .voice-player-button { display:flex; align-items:center; justify-content:center; width:32px; height:32px; padding:0; border:0; border-radius:50%; background:transparent; color:var(--text); cursor:pointer; font:inherit; }
+  .voice-player-button:hover { background:var(--border); }
+  .voice-player-button:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  .voice-player-button[aria-busy="true"] { color:var(--text-secondary); cursor:progress; }
+  .voice-player-time { color:var(--text-secondary); font-variant-numeric:tabular-nums; font-size:12px; text-align:center; }
+  .voice-player-progress { -webkit-appearance:none; appearance:none; width:100%; height:4px; border-radius:2px; background:var(--border); outline:none; }
+  .voice-player-progress::-webkit-slider-thumb { -webkit-appearance:none; width:14px; height:14px; border-radius:50%; background:var(--text); cursor:pointer; }
+  .voice-player-progress:disabled::-webkit-slider-thumb { background:var(--text-tertiary); cursor:default; }
+  .voice-player-audio { display:none; }
+  .voice-empty { padding:30px; text-align:center; color:var(--text-secondary); border:1px dashed var(--border); border-radius:var(--radius); }
+  .voice-editor { margin-top:18px; }
+  .voice-editor[data-position="create"] { margin:0 0 18px; }
+  .voice-editor[data-position="inline"] { margin:0; }
+  .voice-editor-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; padding:18px 20px; }
+  .voice-editor-field { display:flex; flex-direction:column; gap:6px; font-size:13px; }
+  .voice-editor-field.voice-file { grid-column:1/-1; }
+  .voice-editor .profile-help-tooltip { left:0; transform:translateY(-4px); text-align:left; }
+  .voice-editor .profile-help:not(.profile-help-fixed):hover .profile-help-tooltip,
+  .voice-editor .profile-help:not(.profile-help-fixed):focus-within .profile-help-tooltip { transform:translateY(0); }
+  .voice-file-picker { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .voice-file-picker input[type="file"] { display:none; }
+  .voice-file-status { color:var(--text-secondary); font-size:12px; overflow-wrap:anywhere; }
+  .voice-editor-actions { display:flex; justify-content:flex-end; gap:8px; padding:0 20px 18px; }
+  .voice-editor-actions > [hidden] { display:none; }
+  @media (max-width:900px) { .voice-card-header { grid-template-columns:minmax(0,1fr) auto; align-items:start; } .voice-player { grid-column:1/-1; grid-row:2; } .voice-card-actions { grid-column:2; grid-row:1; } }
+  @media (max-width:760px) { .voice-card-header { grid-template-columns:1fr; } .voice-player, .voice-card-actions { grid-column:1; grid-row:auto; } .voice-card-actions { justify-content:flex-start; } .voice-editor-grid { grid-template-columns:1fr; } }
+  @media (max-width:560px) { .voice-player { grid-template-columns:34px auto minmax(70px,1fr) 34px; gap:5px; padding-inline:8px; } }
+
   #page-chat.active {
     display: flex;
     flex-direction: column;
@@ -3382,6 +3427,9 @@
   <div class="nav-item" data-page="models">
     <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M9 2L15 5.5V12.5L9 16L3 12.5V5.5L9 2Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M3 5.5L9 9M9 9L15 5.5M9 9V16" stroke="currentColor" stroke-width="1.4"/></svg></span> <span data-i18n="nav_models">Models</span>
   </div>
+  <div class="nav-item" data-page="voices">
+    <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M3 7v4M6 4v10M9 2v14M12 5v8M15 7v4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></span> <span data-i18n="nav_voices">Voices</span>
+  </div>
   <div class="nav-item" data-page="chat">
     <span class="nav-icon"><svg data-nav-icon="agent" width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true"><path d="M9 1.5V4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="9" cy="1.5" r="0.75" fill="currentColor"/><rect x="2.5" y="4" width="13" height="11" rx="2.5" stroke="currentColor" stroke-width="1.4"/><circle cx="6.5" cy="8.25" r="1" fill="currentColor"/><circle cx="11.5" cy="8.25" r="1" fill="currentColor"/><path d="M6.5 11.5h5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></span> <span data-i18n="nav_chat">Agent</span>
   </div>
@@ -4395,6 +4443,34 @@
     </div>
   </div>
 
+  <!-- Voices Page -->
+  <div class="page" id="page-voices">
+    <div class="voices-toolbar">
+      <div>
+        <div class="page-title" data-i18n="voices_title">Voices</div>
+        <div class="page-subtitle" data-i18n="voices_subtitle">Manage stable voice IDs and their reference audio.</div>
+      </div>
+      <button class="btn-accent" type="button" onclick="openVoiceEditor()" data-i18n="voice_add">Add Voice</button>
+    </div>
+    <div class="page-body-scroll">
+      <div id="voices-list" class="voices-list"></div>
+      <div id="voice-editor" class="card-settings voice-editor" hidden>
+        <div class="card-header"><span id="voice-editor-title" data-i18n="voice_add">Add Voice</span></div>
+        <div class="voice-editor-grid">
+          <div class="voice-editor-field"><div class="field-label-with-help"><label for="voice-id" data-i18n="voice_id">Voice ID</label><span class="profile-help"><button type="button" class="profile-help-trigger" aria-describedby="voice-id-help-tooltip" data-i18n-aria-label="voice_id_help_label">?</button><span class="profile-help-tooltip" id="voice-id-help-tooltip" role="tooltip"><span class="profile-help-tooltip-title" data-i18n="voice_id_help_title">How Voice ID is used</span><span class="profile-help-tooltip-body" data-i18n="voice_id_help">API requests and compatible clients use this value. Choose a stable identifier such as speaker_a; it cannot be changed after creation.</span></span></span></div><input id="voice-id" type="text" maxlength="64" placeholder="speaker_a"></div>
+          <div class="voice-editor-field"><div class="field-label-with-help"><label for="voice-name" data-i18n="voice_name">Voice name</label><span class="profile-help"><button type="button" class="profile-help-trigger" aria-describedby="voice-name-help-tooltip" data-i18n-aria-label="voice_name_help_label">?</button><span class="profile-help-tooltip" id="voice-name-help-tooltip" role="tooltip"><span class="profile-help-tooltip-title" data-i18n="voice_name_help_title">About voice name</span><span class="profile-help-tooltip-body" data-i18n="voice_name_help">A recognizable name shown in the app.</span></span></span></div><input id="voice-name" type="text" maxlength="128" data-i18n-placeholder="voice_name_placeholder"></div>
+          <div class="voice-editor-field"><div class="field-label-with-help"><label for="voice-language" data-i18n="voice_language">Reference language</label><span class="profile-help"><button type="button" class="profile-help-trigger" aria-describedby="voice-language-help-tooltip" data-i18n-aria-label="voice_language_help_label">?</button><span class="profile-help-tooltip" id="voice-language-help-tooltip" role="tooltip"><span class="profile-help-tooltip-title" data-i18n="voice_language_help_title">About reference language</span><span class="profile-help-tooltip-body" data-i18n="voice_language_help">Labels the reference recording for identification; it does not restrict the synthesis text language.</span></span></span></div><select id="voice-language"><option value="" data-i18n="voice_language_unspecified">Automatic / unspecified</option><option value="zh" data-i18n="voice_language_zh">Chinese</option><option value="en" data-i18n="voice_language_en">English</option><option value="ja" data-i18n="voice_language_ja">Japanese</option><option value="es" data-i18n="voice_language_es">Spanish</option><option value="ar" data-i18n="voice_language_ar">Arabic</option></select></div>
+          <div class="voice-editor-field voice-file"><div class="field-label-with-help"><span data-i18n="voice_reference_audio">Reference audio (WAV, FLAC or MP3)</span><span class="profile-help"><button type="button" class="profile-help-trigger" aria-describedby="voice-reference-help-tooltip" data-i18n-aria-label="voice_reference_help_label">?</button><span class="profile-help-tooltip" id="voice-reference-help-tooltip" role="tooltip"><span class="profile-help-tooltip-title" data-i18n="voice_reference_help_title">Reference audio requirements</span><span class="profile-help-tooltip-body" data-i18n="voice_reference_help">Use a clear, single-speaker recording between 1 and 60 seconds, up to 16 MiB.</span></span></span></div><div class="voice-file-picker"><input id="voice-file" type="file" accept="audio/wav,audio/flac,audio/mpeg,.wav,.flac,.mp3" onchange="readVoiceReference(this)"><button class="btn-secondary" type="button" onclick="openVoiceReferencePicker()" data-i18n="voice_choose_file">Choose audio file</button><span id="voice-file-status" class="voice-file-status" role="status" aria-live="polite" data-i18n="voice_no_file_selected">No file selected</span></div></div>
+        </div>
+        <div class="voice-editor-actions">
+          <button class="btn-secondary" type="button" onclick="closeVoiceEditor()" data-i18n="cancel">Cancel</button>
+          <button id="voice-save-only" class="btn-secondary" type="button" onclick="saveVoiceProfile(false)" data-i18n="voice_save_only">Save only</button>
+          <button id="voice-save-enable" class="btn-accent" type="button" onclick="saveVoiceProfile(true)" data-i18n="voice_save_and_enable">Save and enable</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Settings Page -->
   <div class="page" id="page-settings">
     <div class="settings-page-header">
@@ -4970,8 +5046,16 @@
       tts_files_empty: "No file information available.",
       tts_dependencies_empty: "No external dependencies recorded.",
       tts_prepare_resources: "Prepare resources",
+      voices_title: "Voices", voices_subtitle: "Manage stable voice IDs and their reference audio.",
+      voice_add: "Add Voice", voice_edit: "Edit Voice", voice_id: "Voice ID", voice_id_help_label: "About Voice ID", voice_id_help_title: "How Voice ID is used", voice_id_help: "API requests and compatible clients use this value. Choose a stable identifier such as speaker_a; it cannot be changed after creation.", voice_name: "Voice name", voice_name_placeholder: "For example, Xiaoyu · warm voice", voice_name_help_label: "About voice name", voice_name_help_title: "About voice name", voice_name_help: "A recognizable name shown in the app.",
+      voice_language: "Reference language", voice_language_unspecified: "Automatic / unspecified", voice_language_zh: "Chinese", voice_language_en: "English", voice_language_ja: "Japanese", voice_language_es: "Spanish", voice_language_ar: "Arabic", voice_language_help_label: "About reference language", voice_language_help_title: "About reference language", voice_language_help: "Labels the reference recording for identification; it does not restrict the synthesis text language.",
+      voice_reference_audio: "Reference audio (WAV, FLAC or MP3)", voice_choose_file: "Choose audio file", voice_no_file_selected: "No file selected", voice_file_unchanged: "Keep current reference audio", voice_reference_help_label: "About reference audio", voice_reference_help_title: "Reference audio requirements", voice_reference_help: "Use a clear, single-speaker recording between 1 and 60 seconds, up to 16 MiB.", voice_save_only: "Save only", voice_save_and_enable: "Save and enable",
+      voice_player_label: "Reference audio player for {name}", voice_play: "Play reference audio", voice_pause: "Pause reference audio", voice_seek: "Reference audio position", voice_mute: "Mute reference audio", voice_unmute: "Unmute reference audio", voice_loading: "Loading reference audio", voice_preview_failed: "Could not play the reference audio.",
+      voice_empty: "No voice profiles configured.", voice_preview: "Preview reference", voice_enable_action: "Enable", voice_disable_action: "Disable", voice_edit_action: "Edit", voice_delete: "Delete",
+      voice_audio_required: "Choose a reference audio file.", voice_saved: "Voice profile saved.", voice_deleted: "Voice profile deleted.",
+      voice_fields_required: "Voice ID and voice name are required.", voice_file_too_large: "Reference audio exceeds 16 MiB.", voice_file_read_failed: "Could not read the reference audio.", voice_delete_confirm: "Delete voice \"{id}\"?",
 
-      nav_status: "Status", nav_models: "Models", nav_benchmark: "Benchmark", nav_logs: "Logs", nav_chat: "Agent", nav_settings: "Settings",
+      nav_status: "Status", nav_models: "Models", nav_voices: "Voices", nav_benchmark: "Benchmark", nav_logs: "Logs", nav_chat: "Agent", nav_settings: "Settings",
       sidebar_expand: "Expand sidebar", sidebar_collapse: "Collapse sidebar",
       chat_subtitle: "Configure external agents to use IronMLX as their inference provider.",
       agent_supported: "Supported agents", agent_supported_label: "Supported agents",
@@ -5092,7 +5176,7 @@
       server_status: "Server Status", running: "Running", uptime: "Uptime", model: "Model",
       gpu_memory: "GPU Memory", requests: "Requests", active_mem: "Active", peak_mem: "Peak", cache_mem: "Cache", stopped: "Stopped",
       models_subtitle: "Manage, download, and configure model scheduling.", model_manager: "Model Manager", model_download: "Model Download", scheduler_profile_tab: "Scheduling",
-      col_model: "Model \u25B2", col_type: "Type", col_quant: "Quant", col_size: "Size", col_status: "Status", col_pinned: "Pinned", col_default: "Default", col_params: "Params", status_ready: "Not loaded",
+      col_model: "Model \u25B2", col_type: "Type", col_quant: "Quant", quant_unquantized: "Unquantized", col_size: "Size", col_status: "Status", col_pinned: "Pinned", col_default: "Default", col_params: "Params", status_ready: "Not loaded",
       status_incomplete: "Incomplete", status_unsupported: "Unsupported", model_not_ready: "Model snapshot is not ready to load.", action_unavailable: "Unavailable",
       batch_delete: "Batch Delete", cancel: "Cancel", selected_count: "{n} selected",
       confirm_delete_single: 'Delete model "{name}"? This cannot be undone.',
@@ -5393,8 +5477,16 @@
       tts_files_empty: "暂无文件信息。",
       tts_dependencies_empty: "未记录外部依赖。",
       tts_prepare_resources: "准备语音资源",
+      voices_title: "声音", voices_subtitle: "管理稳定的声音 ID 及其参考音频。",
+      voice_add: "添加声音", voice_edit: "编辑声音", voice_id: "声音 ID", voice_id_help_label: "声音 ID 说明", voice_id_help_title: "声音 ID 的用途", voice_id_help: "API 请求及兼容客户端使用此值。请选择稳定的标识，例如 speaker_a；创建后不能修改。", voice_name: "声音名称", voice_name_placeholder: "例如：晓雨 · 温柔女声", voice_name_help_label: "声音名称说明", voice_name_help_title: "声音名称的用途", voice_name_help: "用于在应用中辨识声音。",
+      voice_language: "参考音频语言", voice_language_unspecified: "自动识别 / 未指定", voice_language_zh: "中文", voice_language_en: "英语", voice_language_ja: "日语", voice_language_es: "西班牙语", voice_language_ar: "阿拉伯语", voice_language_help_label: "参考音频语言说明", voice_language_help_title: "参考音频语言的用途", voice_language_help: "用于标注参考录音，方便辨识；不会限制合成文本的语言。",
+      voice_reference_audio: "参考音频（WAV、FLAC 或 MP3）", voice_choose_file: "选择音频文件", voice_no_file_selected: "未选择文件", voice_file_unchanged: "保留当前参考音频", voice_reference_help_label: "参考音频说明", voice_reference_help_title: "参考音频要求", voice_reference_help: "请选择 1–60 秒、单人清晰且不超过 16 MiB 的录音。", voice_save_only: "仅保存", voice_save_and_enable: "保存并启用",
+      voice_player_label: "{name} 的参考音频播放器", voice_play: "播放参考音频", voice_pause: "暂停参考音频", voice_seek: "参考音频播放进度", voice_mute: "静音", voice_unmute: "取消静音", voice_loading: "正在加载参考音频", voice_preview_failed: "无法播放参考音频。",
+      voice_empty: "尚未配置声音。", voice_preview: "试听参考音频", voice_enable_action: "启用", voice_disable_action: "停用", voice_edit_action: "编辑", voice_delete: "删除",
+      voice_audio_required: "请选择参考音频文件。", voice_saved: "声音配置已保存。", voice_deleted: "声音配置已删除。",
+      voice_fields_required: "声音 ID 和声音名称为必填项。", voice_file_too_large: "参考音频不能超过 16 MiB。", voice_file_read_failed: "无法读取参考音频。", voice_delete_confirm: "删除声音“{id}”？",
 
-      nav_status: "状态", nav_models: "模型", nav_benchmark: "基准测试", nav_logs: "日志", nav_chat: "Agent", nav_settings: "设置",
+      nav_status: "状态", nav_models: "模型", nav_voices: "声音", nav_benchmark: "基准测试", nav_logs: "日志", nav_chat: "Agent", nav_settings: "设置",
       sidebar_expand: "展开侧栏", sidebar_collapse: "收起侧栏",
       chat_subtitle: "配置外部 Agent 使用 IronMLX 作为推理 Provider。",
       agent_supported: "支持的 Agent", agent_supported_label: "支持的 Agent",
@@ -5515,7 +5607,7 @@
       server_status: "服务器状态", running: "运行中", uptime: "运行时间", model: "模型",
       gpu_memory: "GPU 内存", requests: "请求数", active_mem: "活跃", peak_mem: "峰值", cache_mem: "缓存", stopped: "已停止",
       models_subtitle: "管理、下载模型和配置模型调度。", model_manager: "模型管理", model_download: "模型下载", scheduler_profile_tab: "调度配置",
-      col_model: "模型 \u25B2", col_type: "类型", col_quant: "量化", col_size: "大小", col_status: "状态", col_pinned: "固定", col_default: "默认", col_params: "参数", status_ready: "未加载",
+      col_model: "模型 \u25B2", col_type: "类型", col_quant: "量化", quant_unquantized: "未量化", col_size: "大小", col_status: "状态", col_pinned: "固定", col_default: "默认", col_params: "参数", status_ready: "未加载",
       status_incomplete: "不完整", status_unsupported: "不支持", model_not_ready: "模型快照尚未达到可加载状态。", action_unavailable: "不可用",
       batch_delete: "批量删除", cancel: "取消", selected_count: "已选 {n} 个",
       confirm_delete_single: '确定删除模型 "{name}"？此操作不可恢复。',
@@ -5816,8 +5908,16 @@
       tts_files_empty: "暫無檔案資訊。",
       tts_dependencies_empty: "未記錄外部相依資源。",
       tts_prepare_resources: "準備語音資源",
+      voices_title: "聲音", voices_subtitle: "管理穩定的聲音 ID 及其參考音訊。",
+      voice_add: "新增聲音", voice_edit: "編輯聲音", voice_id: "聲音 ID", voice_id_help_label: "聲音 ID 說明", voice_id_help_title: "聲音 ID 的用途", voice_id_help: "API 請求及相容用戶端使用此值。請選擇穩定的識別碼，例如 speaker_a；建立後無法修改。", voice_name: "聲音名稱", voice_name_placeholder: "例如：曉雨 · 溫柔女聲", voice_name_help_label: "聲音名稱說明", voice_name_help_title: "聲音名稱的用途", voice_name_help: "用於在應用程式中辨識聲音。",
+      voice_language: "參考音訊語言", voice_language_unspecified: "自動辨識 / 未指定", voice_language_zh: "中文", voice_language_en: "英文", voice_language_ja: "日文", voice_language_es: "西班牙文", voice_language_ar: "阿拉伯文", voice_language_help_label: "參考音訊語言說明", voice_language_help_title: "參考音訊語言的用途", voice_language_help: "用於標記參考錄音，方便辨識；不會限制合成文字的語言。",
+      voice_reference_audio: "參考音訊（WAV、FLAC 或 MP3）", voice_choose_file: "選擇音訊檔案", voice_no_file_selected: "尚未選擇檔案", voice_file_unchanged: "保留目前的參考音訊", voice_reference_help_label: "參考音訊說明", voice_reference_help_title: "參考音訊要求", voice_reference_help: "請選擇 1–60 秒、單人清晰且不超過 16 MiB 的錄音。", voice_save_only: "僅儲存", voice_save_and_enable: "儲存並啟用",
+      voice_player_label: "{name} 的參考音訊播放器", voice_play: "播放參考音訊", voice_pause: "暫停參考音訊", voice_seek: "參考音訊播放進度", voice_mute: "靜音", voice_unmute: "取消靜音", voice_loading: "正在載入參考音訊", voice_preview_failed: "無法播放參考音訊。",
+      voice_empty: "尚未設定聲音。", voice_preview: "試聽參考音訊", voice_enable_action: "啟用", voice_disable_action: "停用", voice_edit_action: "編輯", voice_delete: "刪除",
+      voice_audio_required: "請選擇參考音訊檔案。", voice_saved: "聲音設定已儲存。", voice_deleted: "聲音設定已刪除。",
+      voice_fields_required: "聲音 ID 和聲音名稱為必填欄位。", voice_file_too_large: "參考音訊不可超過 16 MiB。", voice_file_read_failed: "無法讀取參考音訊。", voice_delete_confirm: "刪除聲音「{id}」？",
 
-      nav_status: "狀態", nav_models: "模型", nav_benchmark: "基準測試", nav_logs: "日誌", nav_chat: "Agent", nav_settings: "設定",
+      nav_status: "狀態", nav_models: "模型", nav_voices: "聲音", nav_benchmark: "基準測試", nav_logs: "日誌", nav_chat: "Agent", nav_settings: "設定",
       sidebar_expand: "展開側欄", sidebar_collapse: "收起側欄",
       chat_subtitle: "設定外部 Agent 使用 IronMLX 作為推理 Provider。",
       agent_supported: "支援的 Agent", agent_supported_label: "支援的 Agent",
@@ -5938,7 +6038,7 @@
       server_status: "伺服器狀態", running: "執行中", uptime: "執行時間", model: "模型",
       gpu_memory: "GPU 記憶體", requests: "請求數", active_mem: "活躍", peak_mem: "峰值", cache_mem: "快取", stopped: "已停止",
       models_subtitle: "管理、下載模型和設定模型調度。", model_manager: "模型管理", model_download: "模型下載", scheduler_profile_tab: "調度設定",
-      col_model: "模型 \u25B2", col_type: "類型", col_quant: "量化", col_size: "大小", col_status: "狀態", col_pinned: "固定", col_default: "預設", col_params: "參數", status_ready: "未載入",
+      col_model: "模型 \u25B2", col_type: "類型", col_quant: "量化", quant_unquantized: "未量化", col_size: "大小", col_status: "狀態", col_pinned: "固定", col_default: "預設", col_params: "參數", status_ready: "未載入",
       status_incomplete: "不完整", status_unsupported: "不支援", model_not_ready: "模型快照尚未達到可載入狀態。", action_unavailable: "不可用",
       batch_delete: "批量刪除", cancel: "取消", selected_count: "已選 {n} 個",
       confirm_delete_single: '確定刪除模型 "{name}"？此操作不可復原。',
@@ -6242,8 +6342,16 @@
       tts_files_empty: "ファイル情報がありません。",
       tts_dependencies_empty: "外部依存リソースの記録はありません。",
       tts_prepare_resources: "音声リソースを準備",
+      voices_title: "音声", voices_subtitle: "安定した音声 ID と参照音声を管理します。",
+      voice_add: "音声を追加", voice_edit: "音声を編集", voice_id: "音声 ID", voice_id_help_label: "音声 ID の説明", voice_id_help_title: "音声 ID の用途", voice_id_help: "API リクエストと互換クライアントがこの値を使用します。speaker_a のような安定した識別子を指定してください。作成後は変更できません。", voice_name: "音声名", voice_name_placeholder: "例：Xiaoyu・穏やかな声", voice_name_help_label: "音声名の説明", voice_name_help_title: "音声名の用途", voice_name_help: "アプリ内で音声を識別するための名前です。",
+      voice_language: "参照音声の言語", voice_language_unspecified: "自動判定 / 未指定", voice_language_zh: "中国語", voice_language_en: "英語", voice_language_ja: "日本語", voice_language_es: "スペイン語", voice_language_ar: "アラビア語", voice_language_help_label: "参照音声の言語の説明", voice_language_help_title: "参照音声の言語について", voice_language_help: "参照録音を識別するための情報です。合成テキストの言語は制限しません。",
+      voice_reference_audio: "参照音声（WAV、FLAC、MP3）", voice_choose_file: "音声ファイルを選択", voice_no_file_selected: "ファイルが選択されていません", voice_file_unchanged: "現在の参照音声を保持", voice_reference_help_label: "参照音声の説明", voice_reference_help_title: "参照音声の要件", voice_reference_help: "1〜60 秒の明瞭な一人の音声（16 MiB 以下）を選択してください。", voice_save_only: "保存のみ", voice_save_and_enable: "保存して有効化",
+      voice_player_label: "{name} の参照音声プレーヤー", voice_play: "参照音声を再生", voice_pause: "参照音声を一時停止", voice_seek: "参照音声の再生位置", voice_mute: "ミュート", voice_unmute: "ミュート解除", voice_loading: "参照音声を読み込み中", voice_preview_failed: "参照音声を再生できません。",
+      voice_empty: "音声プロファイルはありません。", voice_preview: "参照音声を試聴", voice_enable_action: "有効にする", voice_disable_action: "無効にする", voice_edit_action: "編集", voice_delete: "削除",
+      voice_audio_required: "参照音声ファイルを選択してください。", voice_saved: "音声プロファイルを保存しました。", voice_deleted: "音声プロファイルを削除しました。",
+      voice_fields_required: "音声 ID と音声名は必須です。", voice_file_too_large: "参照音声は 16 MiB 以下にしてください。", voice_file_read_failed: "参照音声を読み込めませんでした。", voice_delete_confirm: "音声「{id}」を削除しますか？",
 
-      nav_status: "ステータス", nav_models: "モデル", nav_benchmark: "ベンチマーク", nav_logs: "ログ", nav_chat: "AI エージェント", nav_settings: "設定",
+      nav_status: "ステータス", nav_models: "モデル", nav_voices: "音声", nav_benchmark: "ベンチマーク", nav_logs: "ログ", nav_chat: "AI エージェント", nav_settings: "設定",
       sidebar_expand: "サイドバーを展開", sidebar_collapse: "サイドバーを折りたたむ",
       chat_subtitle: "外部エージェントが IronMLX を推論プロバイダーとして使用できるように設定します。",
       agent_supported: "対応エージェント", agent_supported_label: "対応しているエージェント",
@@ -6364,7 +6472,7 @@
       server_status: "サーバーステータス", running: "実行中", uptime: "稼働時間", model: "モデル",
       gpu_memory: "GPU メモリ", requests: "リクエスト", active_mem: "アクティブ", peak_mem: "ピーク", cache_mem: "キャッシュ", stopped: "停止中",
       models_subtitle: "モデルの管理、ダウンロード、スケジューリング設定。", model_manager: "モデル管理", model_download: "モデルダウンロード", scheduler_profile_tab: "スケジューラ設定",
-      col_model: "モデル \u25B2", col_type: "タイプ", col_quant: "量子化", col_size: "サイズ", col_status: "ステータス", col_pinned: "固定", col_default: "デフォルト", col_params: "パラメータ", status_ready: "未ロード",
+      col_model: "モデル \u25B2", col_type: "タイプ", col_quant: "量子化", quant_unquantized: "量子化なし", col_size: "サイズ", col_status: "ステータス", col_pinned: "固定", col_default: "デフォルト", col_params: "パラメータ", status_ready: "未ロード",
       status_incomplete: "不完全", status_unsupported: "未対応", model_not_ready: "モデルスナップショットはまだロード可能な状態ではありません。", action_unavailable: "利用不可",
       batch_delete: "一括削除", cancel: "キャンセル", selected_count: "{n} 件選択中",
       confirm_delete_single: 'モデル "{name}" を削除しますか？この操作は元に戻せません。',
@@ -6668,8 +6776,16 @@
       tts_files_empty: "파일 정보가 없습니다.",
       tts_dependencies_empty: "기록된 외부 의존성이 없습니다.",
       tts_prepare_resources: "음성 리소스 준비",
+      voices_title: "음성", voices_subtitle: "안정적인 음성 ID와 참조 오디오를 관리합니다.",
+      voice_add: "음성 추가", voice_edit: "음성 편집", voice_id: "음성 ID", voice_id_help_label: "음성 ID 설명", voice_id_help_title: "음성 ID 사용 방식", voice_id_help: "API 요청과 호환 클라이언트에서 이 값을 사용합니다. speaker_a와 같은 안정적인 식별자를 지정하세요. 생성 후에는 변경할 수 없습니다.", voice_name: "음성 이름", voice_name_placeholder: "예: Xiaoyu · 따뜻한 목소리", voice_name_help_label: "음성 이름 설명", voice_name_help_title: "음성 이름 용도", voice_name_help: "앱에서 음성을 알아보기 위한 이름입니다.",
+      voice_language: "참조 오디오 언어", voice_language_unspecified: "자동 감지 / 지정 안 함", voice_language_zh: "중국어", voice_language_en: "영어", voice_language_ja: "일본어", voice_language_es: "스페인어", voice_language_ar: "아랍어", voice_language_help_label: "참조 오디오 언어 설명", voice_language_help_title: "참조 오디오 언어 정보", voice_language_help: "참조 녹음을 식별하기 위한 정보이며 합성 텍스트의 언어를 제한하지 않습니다.",
+      voice_reference_audio: "참조 오디오(WAV, FLAC 또는 MP3)", voice_choose_file: "오디오 파일 선택", voice_no_file_selected: "선택한 파일 없음", voice_file_unchanged: "현재 참조 오디오 유지", voice_reference_help_label: "참조 오디오 설명", voice_reference_help_title: "참조 오디오 요구 사항", voice_reference_help: "1~60초의 선명한 1인 음성 녹음(16 MiB 이하)을 선택하세요.", voice_save_only: "저장만", voice_save_and_enable: "저장 후 활성화",
+      voice_player_label: "{name} 참조 오디오 플레이어", voice_play: "참조 오디오 재생", voice_pause: "참조 오디오 일시 정지", voice_seek: "참조 오디오 재생 위치", voice_mute: "음소거", voice_unmute: "음소거 해제", voice_loading: "참조 오디오 로드 중", voice_preview_failed: "참조 오디오를 재생할 수 없습니다.",
+      voice_empty: "구성된 음성 프로필이 없습니다.", voice_preview: "참조 오디오 미리 듣기", voice_enable_action: "활성화", voice_disable_action: "비활성화", voice_edit_action: "편집", voice_delete: "삭제",
+      voice_audio_required: "참조 오디오 파일을 선택하세요.", voice_saved: "음성 프로필을 저장했습니다.", voice_deleted: "음성 프로필을 삭제했습니다.",
+      voice_fields_required: "음성 ID와 음성 이름은 필수입니다.", voice_file_too_large: "참조 오디오는 16 MiB 이하여야 합니다.", voice_file_read_failed: "참조 오디오를 읽을 수 없습니다.", voice_delete_confirm: "음성 \"{id}\"을(를) 삭제하시겠습니까?",
 
-      nav_status: "상태", nav_models: "모델", nav_benchmark: "벤치마크", nav_logs: "로그", nav_chat: "AI 에이전트", nav_settings: "설정",
+      nav_status: "상태", nav_models: "모델", nav_voices: "음성", nav_benchmark: "벤치마크", nav_logs: "로그", nav_chat: "AI 에이전트", nav_settings: "설정",
       sidebar_expand: "사이드바 펼치기", sidebar_collapse: "사이드바 접기",
       chat_subtitle: "외부 에이전트가 IronMLX를 추론 프로바이더로 사용하도록 구성하세요.",
       agent_supported: "지원 에이전트", agent_supported_label: "지원되는 에이전트",
@@ -6790,7 +6906,7 @@
       server_status: "서버 상태", running: "실행 중", uptime: "가동 시간", model: "모델",
       gpu_memory: "GPU 메모리", requests: "요청", active_mem: "활성", peak_mem: "피크", cache_mem: "캐시", stopped: "중지됨",
       models_subtitle: "모델 관리, 다운로드 및 스케줄링 설정.", model_manager: "모델 관리", model_download: "모델 다운로드", scheduler_profile_tab: "스케줄러 설정",
-      col_model: "모델 \u25B2", col_type: "유형", col_quant: "양자화", col_size: "크기", col_status: "상태", col_pinned: "고정", col_default: "기본", col_params: "매개변수", status_ready: "로드 안 됨",
+      col_model: "모델 \u25B2", col_type: "유형", col_quant: "양자화", quant_unquantized: "양자화되지 않음", col_size: "크기", col_status: "상태", col_pinned: "고정", col_default: "기본", col_params: "매개변수", status_ready: "로드 안 됨",
       status_incomplete: "불완전", status_unsupported: "지원 안 됨", model_not_ready: "모델 스냅샷을 아직 로드할 수 없습니다.", action_unavailable: "사용 불가",
       batch_delete: "일괄 삭제", cancel: "취소", selected_count: "{n}개 선택됨",
       confirm_delete_single: '모델 "{name}"을(를) 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.',
@@ -7127,6 +7243,7 @@
     updateDiagnosticExportButton();
     renderSchedulerProfilePreview();
     renderAgentGuideConfiguration();
+    localizeVoiceFileStatus();
   }
 
   function t(key, fallback) {
@@ -7147,6 +7264,7 @@
     // Re-render model list to update action buttons text
     syncModelList();
     renderRuntimeModels(window.__RUNTIME_MODELS__ || []);
+    renderVoiceProfiles({ data: voiceProfiles });
     if (incidentSummaries.length) renderIncidentHistory({ incidents: incidentSummaries });
     if (typeof renderDownloadQueue === 'function') renderDownloadQueue(downloadQueueSnapshot);
   }
@@ -7167,6 +7285,348 @@
 
   // Model params modal
   // Set default model via Rust bridge
+  let voiceProfiles = [];
+  let editingVoiceId = null;
+  let voiceReferenceBase64 = null;
+  let pendingVoiceDeleteId = null;
+  const pendingVoicePreviewIds = new Set();
+
+  function refreshVoices() {
+    apiFetch('/admin/api/audio/voices');
+  }
+
+  function renderVoiceProfiles(payload) {
+    voiceProfiles = payload && Array.isArray(payload.data) ? payload.data : [];
+    const list = document.getElementById('voices-list');
+    if (!list) return;
+    const editor = document.getElementById('voice-editor');
+    const editorWasOpen = !!editor && editor.hidden === false;
+    const editorVoiceId = editingVoiceId;
+    if (editor && editor.parentElement === list) list.after(editor);
+    releaseVoicePlayers();
+    const dict = I18N[currentLang] || I18N.en;
+    if (!voiceProfiles.length) {
+      list.innerHTML = '<div class="voice-empty">' + escapeAttr(dict.voice_empty || 'No voice profiles configured.') + '</div>';
+      if (editorWasOpen) positionVoiceEditor(editorVoiceId);
+      return;
+    }
+    list.innerHTML = voiceProfiles.map(function(voice) {
+      const id = escapeAttr(voice.id || '');
+      const name = String(voice.name || voice.id || '');
+      const language = voice.language ? escapeAttr(voiceLanguageLabel(voice.language, dict)) : '';
+      const duration = Number(voice.duration_ms || 0) / 1000;
+      const durationLabel = formatVoicePlayerTime(duration, true);
+      return '<div class="voice-card" data-voice-card-id="' + id + '">'
+        + '<div class="voice-card-header"><div class="voice-card-main"><div class="voice-card-title">'
+        + escapeAttr(name) + '<span class="voice-card-title-id">(ID: ' + id + ')</span></div>'
+        + '<div class="voice-card-meta">' + (language ? language + ' · ' : '')
+        + escapeAttr(String(voice.reference_format || '').toUpperCase()) + ' · '
+        + duration.toFixed(1) + 's · ' + Number(voice.sample_rate || 0).toLocaleString(HTML_LANG_MAP[currentLang] || 'en') + ' Hz</div></div>'
+        + '<div class="voice-player" data-voice-player-id="' + id + '" data-duration="' + escapeAttr(String(duration)) + '" role="group" aria-label="' + escapeAttr((dict.voice_player_label || 'Reference audio player for {name}').replace('{name}', name)) + '">'
+        + '<button class="voice-player-button voice-player-toggle" type="button" data-voice-id="' + id + '" onclick="toggleVoicePreview(this)" aria-label="' + escapeAttr(dict.voice_play || 'Play reference audio') + '">' + voicePlayerIcon('play') + '</button>'
+        + '<span class="voice-player-time"><span class="voice-player-current">0:00</span> / <span class="voice-player-duration">' + durationLabel + '</span></span>'
+        + '<input class="voice-player-progress" type="range" min="0" max="' + escapeAttr(String(Math.max(duration, 0))) + '" step="0.01" value="0" disabled oninput="seekVoicePreview(this)" aria-label="' + escapeAttr(dict.voice_seek || 'Reference audio position') + '">'
+        + '<button class="voice-player-button voice-player-volume" type="button" onclick="toggleVoicePreviewMute(this)" aria-label="' + escapeAttr(dict.voice_mute || 'Mute reference audio') + '">' + voicePlayerIcon('volume') + '</button>'
+        + '<audio class="voice-player-audio" preload="none" data-voice-id="' + id + '" onloadedmetadata="syncVoicePreview(this)" ontimeupdate="syncVoicePreview(this)" onplay="syncVoicePreviewState(this)" onpause="syncVoicePreviewState(this)" onended="syncVoicePreviewState(this)" onerror="voicePreviewFailed(this)"></audio>'
+        + '</div>'
+        + '<div class="voice-card-actions">'
+        + '<button class="btn-secondary" data-voice-id="' + id + '" onclick="toggleVoice(this.dataset.voiceId)">' + escapeAttr(voice.enabled ? (dict.voice_disable_action || 'Disable') : (dict.voice_enable_action || 'Enable')) + '</button>'
+        + '<button class="btn-secondary" data-voice-id="' + id + '" onclick="openVoiceEditor(this.dataset.voiceId)">' + escapeAttr(dict.voice_edit_action || 'Edit') + '</button>'
+        + '<button class="btn-danger" data-voice-id="' + id + '" onclick="deleteVoice(this.dataset.voiceId)">' + escapeAttr(dict.voice_delete || 'Delete') + '</button>'
+        + '</div></div></div>';
+    }).join('');
+    if (editorWasOpen) positionVoiceEditor(editorVoiceId);
+  }
+
+  function positionVoiceEditor(id) {
+    const editor = document.getElementById('voice-editor');
+    const list = document.getElementById('voices-list');
+    if (!editor || !list) return;
+    if (id) {
+      const card = Array.from(list.querySelectorAll('.voice-card')).find(function(item) {
+        return item.dataset.voiceCardId === id;
+      });
+      if (card) {
+        card.after(editor);
+        editor.dataset.position = 'inline';
+        return;
+      }
+    }
+    list.before(editor);
+    editor.dataset.position = 'create';
+  }
+
+  function openVoiceEditor(id) {
+    const dict = I18N[currentLang] || I18N.en;
+    const voice = id ? voiceProfiles.find(item => item.id === id) : null;
+    editingVoiceId = voice ? voice.id : null;
+    voiceReferenceBase64 = null;
+    positionVoiceEditor(editingVoiceId);
+    document.getElementById('voice-editor').hidden = false;
+    document.getElementById('voice-editor-title').textContent = voice ? (dict.voice_edit || 'Edit Voice') : (dict.voice_add || 'Add Voice');
+    const idInput = document.getElementById('voice-id');
+    idInput.value = voice ? voice.id : '';
+    idInput.disabled = !!voice;
+    document.getElementById('voice-name').value = voice ? voice.name : '';
+    document.getElementById('voice-language').value = normalizeVoiceLanguage(voice && voice.language);
+    document.getElementById('voice-file').value = '';
+    const saveOnlyButton = document.getElementById('voice-save-only');
+    saveOnlyButton.dataset.i18n = voice ? 'save' : 'voice_save_only';
+    saveOnlyButton.textContent = voice ? (dict.save || 'Save') : (dict.voice_save_only || 'Save only');
+    saveOnlyButton.className = voice ? 'btn-accent' : 'btn-secondary';
+    document.getElementById('voice-save-enable').hidden = !!voice;
+    const status = document.getElementById('voice-file-status');
+    status.dataset.state = voice ? 'unchanged' : 'empty';
+    localizeVoiceFileStatus();
+  }
+
+  function closeVoiceEditor() {
+    editingVoiceId = null;
+    voiceReferenceBase64 = null;
+    const editor = document.getElementById('voice-editor');
+    const list = document.getElementById('voices-list');
+    editor.hidden = true;
+    if (list) list.after(editor);
+    delete editor.dataset.position;
+  }
+
+  function normalizeVoiceLanguage(value) {
+    const normalized = String(value || '').trim().toLowerCase();
+    if (!normalized) return '';
+    const base = normalized.split(/[-_]/, 1)[0];
+    return ['zh', 'en', 'ja', 'es', 'ar'].includes(base) ? base : '';
+  }
+
+  function localizeVoiceFileStatus() {
+    const status = document.getElementById('voice-file-status');
+    if (!status) return;
+    const dict = I18N[currentLang] || I18N.en;
+    if (status.dataset.state === 'unchanged') {
+      status.textContent = dict.voice_file_unchanged || 'Keep current reference audio';
+    } else if (status.dataset.state !== 'selected') {
+      status.textContent = dict.voice_no_file_selected || 'No file selected';
+    }
+  }
+
+  function openVoiceReferencePicker() {
+    document.getElementById('voice-file').click();
+  }
+
+  function readVoiceReference(input) {
+    const file = input.files && input.files[0];
+    voiceReferenceBase64 = null;
+    const status = document.getElementById('voice-file-status');
+    if (!file) {
+      status.dataset.state = editingVoiceId ? 'unchanged' : 'empty';
+      localizeVoiceFileStatus();
+      return;
+    }
+    if (file.size > 16 * 1024 * 1024) {
+      showToast(t('voice_file_too_large', 'Reference audio exceeds 16 MiB.'), 'warn');
+      input.value = '';
+      status.dataset.state = editingVoiceId ? 'unchanged' : 'empty';
+      localizeVoiceFileStatus();
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = function() {
+      const result = String(reader.result || '');
+      voiceReferenceBase64 = result.includes(',') ? result.split(',', 2)[1] : null;
+      status.dataset.state = 'selected';
+      status.textContent = file.name;
+    };
+    reader.onerror = function() {
+      status.dataset.state = editingVoiceId ? 'unchanged' : 'empty';
+      localizeVoiceFileStatus();
+      showToast(t('voice_file_read_failed', 'Could not read the reference audio.'), 'warn');
+    };
+    reader.readAsDataURL(file);
+  }
+
+  function saveVoiceProfile(enableAfterSave) {
+    const dict = I18N[currentLang] || I18N.en;
+    const id = document.getElementById('voice-id').value.trim();
+    const name = document.getElementById('voice-name').value.trim();
+    const language = document.getElementById('voice-language').value.trim();
+    if (!id || !name) {
+      showToast(dict.voice_fields_required || 'Voice ID and voice name are required.', 'warn');
+      return;
+    }
+    if (!editingVoiceId && !voiceReferenceBase64) {
+      showToast(dict.voice_audio_required || 'Choose a reference audio file.', 'warn');
+      return;
+    }
+    const body = { name: name, language: language || null };
+    if (voiceReferenceBase64) body.ref_audio = voiceReferenceBase64;
+    if (editingVoiceId) {
+      apiPatch('/v1/audio/voices/' + encodeURIComponent(editingVoiceId), body);
+    } else {
+      body.id = id;
+      body.enabled = enableAfterSave === true;
+      apiPost('/v1/audio/voices', body);
+    }
+  }
+
+  function toggleVoice(id) {
+    const voice = voiceProfiles.find(item => item.id === id);
+    if (voice) apiPatch('/v1/audio/voices/' + encodeURIComponent(id), { enabled: !voice.enabled });
+  }
+
+  function voiceLanguageLabel(value, dict) {
+    const normalized = normalizeVoiceLanguage(value);
+    const labels = {
+      zh: dict.voice_language_zh,
+      en: dict.voice_language_en,
+      ja: dict.voice_language_ja,
+      es: dict.voice_language_es,
+      ar: dict.voice_language_ar
+    };
+    return labels[normalized] || String(value || '');
+  }
+
+  function formatVoicePlayerTime(value, total) {
+    const seconds = Number(value);
+    const whole = Number.isFinite(seconds) && seconds > 0
+      ? (total ? Math.round(seconds) : Math.floor(seconds))
+      : 0;
+    return Math.floor(whole / 60) + ':' + String(whole % 60).padStart(2, '0');
+  }
+
+  function voicePlayerIcon(kind) {
+    if (kind === 'pause') return '<svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 2h4v12H3zm6 0h4v12H9z" fill="currentColor"/></svg>';
+    if (kind === 'loading') return '<span aria-hidden="true">…</span>';
+    if (kind === 'muted') return '<svg width="18" height="18" viewBox="0 0 20 20" aria-hidden="true"><path d="M3 8v4h3l4 4V4L6 8H3zm10.2.2 4.6 4.6-1 1-4.6-4.6 1-1zm3.6 0-4.6 4.6-1-1 4.6-4.6 1 1z" fill="currentColor"/></svg>';
+    if (kind === 'volume') return '<svg width="18" height="18" viewBox="0 0 20 20" aria-hidden="true"><path d="M3 8v4h3l4 4V4L6 8H3zm10-1.5a5 5 0 0 1 0 7l-1-1a3.6 3.6 0 0 0 0-5l1-1zm2-2a8 8 0 0 1 0 11l-1-1a6.5 6.5 0 0 0 0-9l1-1z" fill="currentColor"/></svg>';
+    return '<svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5v11l9-5.5z" fill="currentColor"/></svg>';
+  }
+
+  function voicePlayerForId(id) {
+    return Array.from(document.querySelectorAll('[data-voice-player-id]')).find(function(player) {
+      return player.dataset.voicePlayerId === id;
+    }) || null;
+  }
+
+  function releaseVoicePlayers() {
+    document.querySelectorAll('.voice-player-audio').forEach(function(audio) {
+      audio.pause();
+      audio.removeAttribute('src');
+    });
+    pendingVoicePreviewIds.clear();
+  }
+
+  function stopOtherVoicePlayers(active) {
+    document.querySelectorAll('.voice-player-audio').forEach(function(audio) {
+      if (audio !== active && !audio.paused) audio.pause();
+    });
+  }
+
+  function setVoicePlayerLoading(player, loading) {
+    if (!player) return;
+    const button = player.querySelector('.voice-player-toggle');
+    const dict = I18N[currentLang] || I18N.en;
+    button.setAttribute('aria-busy', loading ? 'true' : 'false');
+    button.setAttribute('aria-label', loading ? (dict.voice_loading || 'Loading reference audio') : (dict.voice_play || 'Play reference audio'));
+    button.innerHTML = voicePlayerIcon(loading ? 'loading' : 'play');
+  }
+
+  function toggleVoicePreview(button) {
+    const id = button.dataset.voiceId || '';
+    const player = voicePlayerForId(id);
+    const audio = player && player.querySelector('.voice-player-audio');
+    if (!audio || pendingVoicePreviewIds.has(id)) return;
+    if (!audio.getAttribute('src')) {
+      pendingVoicePreviewIds.add(id);
+      setVoicePlayerLoading(player, true);
+      apiFetch('/v1/audio/voices/' + encodeURIComponent(id) + '/preview');
+      return;
+    }
+    if (audio.paused) {
+      stopOtherVoicePlayers(audio);
+      audio.play().catch(function() { syncVoicePreviewState(audio); });
+    } else {
+      audio.pause();
+    }
+  }
+
+  function applyVoicePreviewResponse(path, result) {
+    const prefix = '/v1/audio/voices/';
+    const suffix = '/preview';
+    let id = '';
+    try { id = decodeURIComponent(path.slice(prefix.length, -suffix.length)); } catch (_) {}
+    pendingVoicePreviewIds.delete(id);
+    const player = voicePlayerForId(id);
+    if (!player) return false;
+    if (!result.data_base64) {
+      setVoicePlayerLoading(player, false);
+      return false;
+    }
+    const audio = player.querySelector('.voice-player-audio');
+    audio.src = 'data:' + (result.content_type || 'application/octet-stream') + ';base64,' + result.data_base64;
+    audio.load();
+    stopOtherVoicePlayers(audio);
+    audio.play().catch(function() { syncVoicePreviewState(audio); });
+    return true;
+  }
+
+  function syncVoicePreview(audio) {
+    const player = audio.closest('.voice-player');
+    if (!player) return;
+    const knownDuration = Number(player.dataset.duration || 0);
+    const duration = Number.isFinite(audio.duration) ? audio.duration : knownDuration;
+    const progress = player.querySelector('.voice-player-progress');
+    progress.max = String(Math.max(duration, 0));
+    progress.value = String(Math.min(audio.currentTime || 0, duration || 0));
+    progress.disabled = !audio.getAttribute('src');
+    player.querySelector('.voice-player-current').textContent = formatVoicePlayerTime(audio.currentTime, false);
+    player.querySelector('.voice-player-duration').textContent = formatVoicePlayerTime(duration, true);
+  }
+
+  function syncVoicePreviewState(audio) {
+    const player = audio.closest('.voice-player');
+    if (!player) return;
+    const button = player.querySelector('.voice-player-toggle');
+    const dict = I18N[currentLang] || I18N.en;
+    const playing = !audio.paused && !audio.ended;
+    button.setAttribute('aria-busy', 'false');
+    button.setAttribute('aria-label', playing ? (dict.voice_pause || 'Pause reference audio') : (dict.voice_play || 'Play reference audio'));
+    button.innerHTML = voicePlayerIcon(playing ? 'pause' : 'play');
+    syncVoicePreview(audio);
+  }
+
+  function seekVoicePreview(progress) {
+    const audio = progress.closest('.voice-player').querySelector('.voice-player-audio');
+    if (audio.getAttribute('src')) audio.currentTime = Number(progress.value || 0);
+  }
+
+  function toggleVoicePreviewMute(button) {
+    const audio = button.closest('.voice-player').querySelector('.voice-player-audio');
+    const dict = I18N[currentLang] || I18N.en;
+    audio.muted = !audio.muted;
+    button.setAttribute('aria-label', audio.muted ? (dict.voice_unmute || 'Unmute reference audio') : (dict.voice_mute || 'Mute reference audio'));
+    button.innerHTML = voicePlayerIcon(audio.muted ? 'muted' : 'volume');
+  }
+
+  function voicePreviewFailed(audio) {
+    const player = audio.closest('.voice-player');
+    if (!player || !audio.getAttribute('src')) return;
+    pendingVoicePreviewIds.delete(audio.dataset.voiceId || '');
+    setVoicePlayerLoading(player, false);
+    showToast(t('voice_preview_failed', 'Could not play the reference audio.'), 'warn');
+  }
+
+  function deleteVoice(id) {
+    const dict = I18N[currentLang] || I18N.en;
+    const message = t('voice_delete_confirm', 'Delete voice "{id}"?').replace('{id}', id);
+    showConfirmDialog(message, {
+      confirmText: dict.voice_delete || 'Delete',
+      danger: true,
+    }).then(function(ok) {
+      if (!ok) return;
+      pendingVoiceDeleteId = id;
+      apiDelete('/v1/audio/voices/' + encodeURIComponent(id));
+    });
+  }
+
   // Navigation helpers
   let benchmarkUiLocked = false;
 
@@ -7188,7 +7648,7 @@
       content.classList.toggle(
         'page-scroll-managed',
         page === 'status' || page === 'models' || page === 'benchmark' ||
-        page === 'logs' || page === 'settings' || page === 'chat'
+        page === 'logs' || page === 'settings' || page === 'chat' || page === 'voices'
       );
       content.scrollTop = 0;
     }
@@ -7201,6 +7661,7 @@
       renderAgentGuideConfiguration();
       apiFetch('/v1/models');
     }
+    if (page === 'voices') refreshVoices();
     if (page === 'settings') refreshNetworkInterfaces();
     if (page === 'logs') {
       initLogs();
@@ -9731,11 +10192,13 @@
 
   function renderQuantBadge(model) {
     const quant = model.quantization || {};
+    const dict = I18N[currentLang] || I18N.en;
     const readiness = modelReadiness(model);
     const label = quantDisplayLabel(quant);
     const warn = readiness.status === 'incomplete' || readiness.status === 'unsupported';
     const titleParts = [];
-    if (quant.kind) titleParts.push('kind=' + quant.kind);
+    if (quant.kind === 'dense' && quant.dtype) titleParts.push(dict.quant_unquantized || 'Unquantized');
+    else if (quant.kind) titleParts.push('kind=' + quant.kind);
     if (quant.bits) titleParts.push('bits=' + quant.bits);
     if (quant.group_size) titleParts.push('group_size=' + quant.group_size);
     if (quant.dtype) titleParts.push('dtype=' + quant.dtype);
@@ -11883,6 +12346,12 @@
     }
   }
 
+  function apiPatch(path, body) {
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.fetchAPIPatch) {
+      window.webkit.messageHandlers.fetchAPIPatch.postMessage(JSON.stringify({ path, body }));
+    }
+  }
+
   function apiDelete(path) {
     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.fetchAPIDelete) {
       window.webkit.messageHandlers.fetchAPIDelete.postMessage(path);
@@ -12216,6 +12685,27 @@
           });
         }
         renderAgentGuideConfiguration();
+      } else if (path === '/admin/api/audio/voices') {
+        const result = JSON.parse(jsonStr || '{}');
+        if (result && result.success === false) showToast(localizeErrorResult(result), 'warn');
+        else renderVoiceProfiles(result);
+      } else if (path.startsWith('/v1/audio/voices/') && path.endsWith('/preview')) {
+        const result = JSON.parse(jsonStr || '{}');
+        if (!applyVoicePreviewResponse(path, result)) {
+          showToast(localizeErrorResult(result), 'warn');
+        }
+      } else if (path === '/v1/audio/voices' || path.startsWith('/v1/audio/voices/')) {
+        const result = JSON.parse(jsonStr || '{}');
+        if (result && result.success === false) {
+          pendingVoiceDeleteId = null;
+          showToast(localizeErrorResult(result), 'warn');
+        } else {
+          const deleted = pendingVoiceDeleteId !== null;
+          pendingVoiceDeleteId = null;
+          closeVoiceEditor();
+          showToast(deleted ? (dict.voice_deleted || 'Voice profile deleted.') : (dict.voice_saved || 'Voice profile saved.'), 'success');
+          refreshVoices();
+        }
       } else if (path.startsWith('/admin/api/incidents/export')) {
         const result = JSON.parse(jsonStr || '{}');
         if (!result.success) {

@@ -42,6 +42,7 @@ mod scheduler_disconnect_tests;
 pub mod security;
 pub(crate) mod structured_output;
 pub mod vision;
+pub(crate) mod voices;
 
 pub(crate) use ironmlx_runtime::core::task_execution::RequestAdmissionError;
 use ironmlx_runtime::core::task_execution::RequestExecutionHandle;

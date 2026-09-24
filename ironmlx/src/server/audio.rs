@@ -2,13 +2,13 @@
 use super::api_error::{ApiError, ApiProtocol};
 use axum::{
     body::{to_bytes, Body, Bytes},
-    extract::{Request, State},
+    extract::{Extension, Request, State},
     http::{header, HeaderValue, StatusCode},
     response::Response,
 };
 use ironmlx_audio::{
     io::{write_pcm_s16le, write_wav, NativeAudioIo},
-    AudioError, DecodeLimits, PcmBuffer, PcmFormat,
+    AudioError, AudioIo, DecodeLimits, PcmBuffer, PcmFormat,
 };
 use ironmlx_runtime::core::{
     audio_execution::{
@@ -32,22 +32,54 @@ const MAX_OUTPUT_FRAMES: usize = 600 * 22050;
 struct SpeechRequest {
     model: String,
     input: String,
-    ref_audio: String,
+    #[serde(default)]
+    ref_audio: Option<String>,
+    #[serde(default)]
+    voice: Option<VoiceSelector>,
     #[serde(default = "wav_format")]
     response_format: String,
     #[serde(default)]
     stream: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum VoiceSelector {
+    Name(String),
+    Id { id: String },
+}
+
+impl VoiceSelector {
+    fn id(&self) -> &str {
+        match self {
+            Self::Name(value) => value,
+            Self::Id { id } => id,
+        }
+    }
 }
 fn wav_format() -> String {
     "wav".into()
 }
 impl SpeechRequest {
     fn validate(&self) -> Result<(), Box<ApiError>> {
-        if self.model.trim().is_empty() || self.input.trim().is_empty() || self.ref_audio.is_empty()
-        {
+        if self.model.trim().is_empty() || self.input.trim().is_empty() {
             return Err(Box::new(ApiError::invalid_request(
                 "invalid_audio_request",
-                "model, input and ref_audio must be nonempty",
+                "model and input must be nonempty",
+            )));
+        }
+        let has_reference = self
+            .ref_audio
+            .as_ref()
+            .is_some_and(|value| !value.is_empty());
+        let has_voice = self
+            .voice
+            .as_ref()
+            .is_some_and(|value| !value.id().trim().is_empty());
+        if has_reference == has_voice {
+            return Err(Box::new(ApiError::invalid_request(
+                "invalid_audio_reference",
+                "provide exactly one of ref_audio or voice",
             )));
         }
         if self.input.len() > 65536 {
@@ -129,12 +161,20 @@ fn input_execution() -> Arc<Semaphore> {
         .clone()
 }
 
-pub(super) async fn speech(State(pool): State<EnginePoolState>, request: Request) -> Response {
-    speech_with_pool(pool, request).await
+pub(super) async fn speech(
+    State(pool): State<EnginePoolState>,
+    Extension(voices): Extension<super::voices::VoiceStore>,
+    request: Request,
+) -> Response {
+    speech_with_pool(pool, voices, request).await
 }
-pub(super) async fn speech_with_pool(pool: EnginePoolState, request: Request) -> Response {
+pub(super) async fn speech_with_pool(
+    pool: EnginePoolState,
+    voices: super::voices::VoiceStore,
+    request: Request,
+) -> Response {
     let request_id = uuid::Uuid::new_v4().to_string();
-    let mut response = match execute(pool, request).await {
+    let mut response = match execute(pool, voices, request).await {
         Ok(response) => response,
         Err(error) => error.into_response(ApiProtocol::OpenAi),
     };
@@ -145,7 +185,11 @@ pub(super) async fn speech_with_pool(pool: EnginePoolState, request: Request) ->
     response
 }
 
-async fn execute(pool: EnginePoolState, request: Request) -> Result<Response, ApiError> {
+async fn execute(
+    pool: EnginePoolState,
+    voices: super::voices::VoiceStore,
+    request: Request,
+) -> Result<Response, ApiError> {
     // Admission and governor reservation precede reading any body bytes. The
     // common middleware delegates this route's bounded read here.
     let slot = input_slots().try_acquire_owned().map_err(|_| {
@@ -191,26 +235,46 @@ async fn execute(pool: EnginePoolState, request: Request) -> Result<Response, Ap
         .await
         .map_err(|_| runtime_error(AudioExecutionError::Timeout("input queue")))?
         .map_err(|_| ApiError::internal("audio_input_stopped", "Input executor stopped"))?;
-    // CPU parsing/decoding owns the admission and memory guards even when its
-    // HTTP future is dropped. Queued async acquisition above is cancel-safe.
-    let (model, stream, request, input_memory) = tokio::task::spawn_blocking(move || {
-        let _guards = (slot, permit);
+    // CPU parsing owns the admission and memory guards even when the HTTP
+    // future is dropped. Queued async acquisition above is cancel-safe.
+    let (req, slot, permit, input_memory) = tokio::task::spawn_blocking(move || {
         let req: SpeechRequest = serde_json::from_slice(&bytes)
             .map_err(|e| ApiError::invalid_request("invalid_json", e.to_string()))?;
         req.validate()?;
-        let reference = NativeAudioIo
-            .decode_base64(&req.ref_audio, &DecodeLimits::default())
-            .map_err(model_error)?;
-        Ok::<_, Box<ApiError>>((
-            req.model,
-            req.stream,
-            speech_request(req.input, reference, req.stream),
-            input_memory,
-        ))
+        Ok::<_, Box<ApiError>>((req, slot, permit, input_memory))
     })
     .await
     .map_err(|_| ApiError::internal("audio_input_failed", "Input worker failed"))?
     .map_err(|error| *error)?;
+    let (reference, slot, permit, input_memory) = if let Some(encoded) = req.ref_audio {
+        tokio::task::spawn_blocking(move || {
+            NativeAudioIo
+                .decode_base64(&encoded, &DecodeLimits::default())
+                .map(|reference| (reference, slot, permit, input_memory))
+        })
+        .await
+        .map_err(|_| ApiError::internal("audio_input_failed", "Input worker failed"))?
+        .map_err(model_error)?
+    } else {
+        let voice = req.voice.expect("validated voice reference");
+        let bytes = voices
+            .reference_bytes(voice.id().trim())
+            .await
+            .map_err(|error| error.api_error())?;
+        tokio::task::spawn_blocking(move || {
+            NativeAudioIo
+                .decode(&bytes, &DecodeLimits::default())
+                .map(|reference| (reference, slot, permit, input_memory))
+        })
+        .await
+        .map_err(|_| ApiError::internal("audio_input_failed", "Input worker failed"))?
+        .map_err(model_error)?
+    };
+    // Input guards stay live through JSON parsing, profile lookup and audio decoding.
+    let _guards = (slot, permit);
+    let model = req.model;
+    let stream = req.stream;
+    let request = speech_request(req.input, reference, stream);
     if !pool
         .is_audio_model(Some(&model))
         .await
@@ -406,8 +470,11 @@ mod tests {
     use super::*;
     #[test]
     fn speech_contract_rejects_ambiguous_or_unknown_fields() {
+        let ambiguous: SpeechRequest =
+            serde_json::from_str(r#"{"model":"m","input":"x","ref_audio":"a","voice":"x"}"#)
+                .expect("ambiguous request parses before validation");
+        assert!(ambiguous.validate().is_err());
         for invalid in [
-            r#"{"model":"m","input":"x","ref_audio":"a","voice":"x"}"#,
             r#"{"model":"m","model":"n","input":"x","ref_audio":"a"}"#,
             r#"{"model":"m","input":"x","ref_audio":"a","stream":null}"#,
             r#"{"model":"m","input":"x","ref_audio":"a","response_format":null}"#,
@@ -427,11 +494,18 @@ mod tests {
             let req = SpeechRequest {
                 model: "m".into(),
                 input: "x".into(),
-                ref_audio: "a".into(),
+                ref_audio: Some("a".into()),
+                voice: None,
                 stream,
                 response_format: format.into(),
             };
             assert_eq!(req.validate().is_ok(), valid);
+        }
+        for voice in [r#""speaker_a""#, r#"{"id":"speaker_a"}"#] {
+            let request =
+                format!(r#"{{"model":"m","input":"x","voice":{voice},"response_format":"wav"}}"#);
+            let request: SpeechRequest = serde_json::from_str(&request).expect("voice request");
+            assert!(request.validate().is_ok());
         }
     }
 }

@@ -44,18 +44,26 @@ class ChangeRangeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return dict(line.split("=", 1) for line in result.stdout.splitlines())
 
-    def test_normal_docs_change_stays_docs_only(self):
+    def test_normal_docs_change_runs_documentation_quality_only(self):
         head = self.commit("docs/api.md", "API", "docs: add API")
         result = self.resolve(self.base, head)
         self.assertEqual(result["base_sha"], self.base)
-        self.assertEqual(result["docs_only"], "true")
+        self.assertEqual(result["docs_changed"], "true")
         self.assertEqual(result["code_changed"], "false")
 
     def test_code_change_runs_full_quality(self):
         head = self.commit("src/lib.rs", "fn main() {}", "feat: add source")
         result = self.resolve(self.base, head)
         self.assertEqual(result["code_changed"], "true")
-        self.assertEqual(result["docs_only"], "false")
+        self.assertEqual(result["docs_changed"], "false")
+
+    def test_mixed_change_runs_documentation_and_code_quality(self):
+        docs = self.commit("docs/api.md", "API", "docs: add API")
+        head = self.commit("src/lib.rs", "fn main() {}", "feat: add source")
+        result = self.resolve(self.base, head)
+        self.assertNotEqual(docs, head)
+        self.assertEqual(result["docs_changed"], "true")
+        self.assertEqual(result["code_changed"], "true")
 
     def test_missing_old_tip_forces_full_quality_even_for_docs(self):
         head = self.commit("docs/api.md", "API", "docs: add API")
@@ -64,13 +72,14 @@ class ChangeRangeTests(unittest.TestCase):
         result = self.resolve(MISSING, head)
         self.assertEqual(result["base_sha"], self.base)
         self.assertEqual(result["head_sha"], head)
+        self.assertEqual(result["docs_changed"], "true")
         self.assertEqual(result["code_changed"], "true")
-        self.assertEqual(result["docs_only"], "false")
 
     def test_new_branch_uses_reachable_ancestor(self):
         head = self.commit("docs/api.md", "API", "docs: add API")
         result = self.resolve(ZERO, head)
         self.assertEqual(result["base_sha"], self.base)
+        self.assertEqual(result["docs_changed"], "true")
         self.assertEqual(result["code_changed"], "true")
 
     def test_closest_mainline_ancestor_is_used(self):

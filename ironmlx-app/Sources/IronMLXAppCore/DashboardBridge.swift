@@ -136,6 +136,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     public static let handlerNames = [
         "fetchAPI",
         "fetchAPIPost",
+        "fetchAPIPatch",
         "fetchAPIDelete",
         "setLanguage",
         "openAgentGuide",
@@ -185,8 +186,10 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             handleFetch(path: stringBody(body))
         case "fetchAPIPost":
             handlePost(json: stringBody(body))
+        case "fetchAPIPatch":
+            handlePatch(json: stringBody(body))
         case "fetchAPIDelete":
-            sendFetchResult(path: stringBody(body), jsonString: "null")
+            handleDelete(path: stringBody(body))
         case "setLogLevel":
             setLogLevel(stringBody(body))
         case "openAgentGuide":
@@ -356,7 +359,13 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             }
         case "/admin/api/logs":
             sendFetchResult(path: path, jsonString: logText(from: .backend))
+        case "/admin/api/audio/voices":
+            proxyVoiceFetch(path: path, backendPath: path, preview: false)
         default:
+            if path.hasPrefix("/v1/audio/voices/"), path.hasSuffix("/preview") {
+                proxyVoiceFetch(path: path, backendPath: path, preview: true)
+                return
+            }
             sendFetchResult(path: path, jsonString: emptyPayload(for: path))
         }
     }
@@ -434,8 +443,77 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             restoreBenchmark(path: payload.path)
         case "/admin/api/cache/capacity":
             sendColdCacheCapacity(payload: payload)
+        case "/v1/audio/voices":
+            proxyVoiceMutation(path: payload.path, method: "POST", body: payload.body)
         default:
             sendFetchResult(path: payload.path, jsonString: emptyPayload(for: payload.path))
+        }
+    }
+
+    private func handlePatch(json: String) {
+        guard let data = json.data(using: .utf8),
+              let payload = try? JSONDecoder().decode(APIPostPayload.self, from: data),
+              payload.path.hasPrefix("/v1/audio/voices/")
+        else { return }
+        proxyVoiceMutation(path: payload.path, method: "PATCH", body: payload.body)
+    }
+
+    private func handleDelete(path: String) {
+        guard path.hasPrefix("/v1/audio/voices/") else {
+            sendFetchResult(path: path, jsonString: "null")
+            return
+        }
+        let config = configStore.load()
+        Task {
+            do {
+                let data = try await BackendAPIClient(host: config.host, port: config.port)
+                    .deleteData(path: path)
+                let json = String(data: data, encoding: .utf8) ?? "null"
+                await MainActor.run { self.sendFetchResult(path: path, jsonString: json) }
+            } catch {
+                let json = (try? Self.jsonString(ErrorPayload(success: false, error: error.localizedDescription))) ?? "null"
+                await MainActor.run { self.sendFetchResult(path: path, jsonString: json) }
+            }
+        }
+    }
+
+    private func proxyVoiceFetch(path: String, backendPath: String, preview: Bool) {
+        let config = configStore.load()
+        Task {
+            do {
+                let response = try await BackendAPIClient(host: config.host, port: config.port)
+                    .fetchDataWithContentType(path: backendPath)
+                let json: String
+                if preview {
+                    json = (try? Self.jsonString(VoicePreviewPayload(
+                        contentType: response.contentType ?? "application/octet-stream",
+                        dataBase64: response.data.base64EncodedString()
+                    ))) ?? "null"
+                } else {
+                    json = String(data: response.data, encoding: .utf8) ?? "null"
+                }
+                await MainActor.run { self.sendFetchResult(path: path, jsonString: json) }
+            } catch {
+                let json = (try? Self.jsonString(ErrorPayload(success: false, error: error.localizedDescription))) ?? "null"
+                await MainActor.run { self.sendFetchResult(path: path, jsonString: json) }
+            }
+        }
+    }
+
+    private func proxyVoiceMutation(path: String, method: String, body: [String: JSONValue]) {
+        let config = configStore.load()
+        Task {
+            do {
+                let client = BackendAPIClient(host: config.host, port: config.port)
+                let data = method == "PATCH"
+                    ? try await client.patchJSON(path: path, body: body)
+                    : try await client.postJSON(path: path, body: body)
+                let json = String(data: data, encoding: .utf8) ?? "null"
+                await MainActor.run { self.sendFetchResult(path: path, jsonString: json) }
+            } catch {
+                let json = (try? Self.jsonString(ErrorPayload(success: false, error: error.localizedDescription))) ?? "null"
+                await MainActor.run { self.sendFetchResult(path: path, jsonString: json) }
+            }
         }
     }
 
@@ -3341,6 +3419,16 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         var code: String? = nil
     }
 
+    private struct VoicePreviewPayload: Encodable {
+        var contentType: String
+        var dataBase64: String
+
+        enum CodingKeys: String, CodingKey {
+            case contentType = "content_type"
+            case dataBase64 = "data_base64"
+        }
+    }
+
     private struct IncidentErrorPayload: Encodable {
         var success = false
         var code: String
@@ -3400,7 +3488,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         }
     }
 
-    private enum JSONValue: Decodable {
+    private enum JSONValue: Codable, Sendable {
         case string(String)
         case number(Double)
         case bool(Bool)
@@ -3444,6 +3532,18 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 self = .object(value)
             } else {
                 self = .array(try container.decode([JSONValue].self))
+            }
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.singleValueContainer()
+            switch self {
+            case .string(let value): try container.encode(value)
+            case .number(let value): try container.encode(value)
+            case .bool(let value): try container.encode(value)
+            case .object(let value): try container.encode(value)
+            case .array(let value): try container.encode(value)
+            case .null: try container.encodeNil()
             }
         }
     }

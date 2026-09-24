@@ -373,7 +373,18 @@ mod tests {
         bounded_router(
             Router::new()
                 .route("/admin/api/test", get(|| async { "ok" }))
-                .route("/v1/messages", get(|| async { "ok" })),
+                .route("/v1/messages", get(|| async { "ok" }))
+                .route(
+                    "/v1/audio/voices",
+                    get(|| async { "ok" }).post(|| async { "ok" }),
+                )
+                .route(
+                    "/v1/audio/voices/:id",
+                    get(|| async { "ok" })
+                        .patch(|| async { "ok" })
+                        .delete(|| async { "ok" }),
+                )
+                .route("/v1/audio/voices/:id/preview", get(|| async { "ok" })),
         )
         .layer(middleware::from_fn_with_state(expected, authenticate_lan))
     }
@@ -435,6 +446,49 @@ mod tests {
             .unwrap();
         let response = router.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn voice_routes_require_lan_bearer_authentication() {
+        let router = protected_test_router("imx_correct");
+        for (method, path) in [
+            ("GET", "/v1/audio/voices"),
+            ("POST", "/v1/audio/voices"),
+            ("GET", "/v1/audio/voices/narrator/preview"),
+            ("PATCH", "/v1/audio/voices/narrator"),
+            ("DELETE", "/v1/audio/voices/narrator"),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "{method} {path}"
+            );
+
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .header(header::AUTHORIZATION, "Bearer imx_correct")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{method} {path}");
+        }
     }
 
     #[tokio::test]

@@ -68,7 +68,11 @@ impl Server {
             command
         };
         let child = command
-            .args(["serve", "--port", &port.to_string()])
+            .arg("serve")
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--voice-profile-dir")
+            .arg(root.join("voices"))
             .stdout(Stdio::null())
             .stderr(std::fs::File::create(root.join("server.log")).unwrap())
             .spawn()
@@ -178,6 +182,9 @@ impl Server {
 fn request(id: &str, reference: &str, text: &str, stream: bool) -> Value {
     json!({"model":id,"input":text,"ref_audio":reference,"stream":stream,"response_format":if stream {"pcm"} else {"wav"}})
 }
+fn voice_request(id: &str, voice: &str, text: &str, stream: bool) -> Value {
+    json!({"model":id,"input":text,"voice":voice,"stream":stream,"response_format":if stream {"pcm"} else {"wav"}})
+}
 fn headers(response: &reqwest::Response, stream: bool) {
     assert_eq!(response.status(), 200);
     let h = response.headers();
@@ -193,6 +200,94 @@ fn headers(response: &reqwest::Response, stream: bool) {
         assert!(!h.contains_key("content-length"));
         assert_eq!(h["x-ironmlx-streaming-granularity"], "segment");
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires pinned audio resources and reference WAV"]
+async fn real_voice_profile_speech_wav_and_pcm() {
+    let fixture: Value = serde_json::from_slice(
+        &std::fs::read(std::env::var("IRONMLX_AUDIO_HTTP_MODEL").unwrap()).unwrap(),
+    )
+    .unwrap();
+    let reference_bytes =
+        std::fs::read(std::env::var("IRONMLX_AUDIO_HTTP_REFERENCE").unwrap()).unwrap();
+    let reference = base64::engine::general_purpose::STANDARD.encode(&reference_bytes);
+    let server = Server::start().await;
+
+    let response = server
+        .post(
+            "/v1/audio/voices",
+            &json!({
+                "id": "acceptance-voice",
+                "name": "Acceptance Voice",
+                "language": "zh-CN",
+                "ref_audio": reference,
+            }),
+        )
+        .await;
+    let status = response.status();
+    let profile: Value = response.json().await.unwrap();
+    assert_eq!(status, 201, "{profile}");
+    assert_eq!(profile["id"], "acceptance-voice");
+    assert_eq!(profile["enabled"], true);
+
+    let voices: Value = server
+        .client
+        .get(format!("{}/v1/audio/voices", server.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(voices["data"][0]["id"], "acceptance-voice");
+    assert!(voices["data"][0].get("reference_sha256").is_none());
+
+    let preview = server
+        .client
+        .get(format!(
+            "{}/v1/audio/voices/acceptance-voice/preview",
+            server.base
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(preview.status(), 200);
+    assert_eq!(preview.headers()["x-ironmlx-voice-preview"], "reference");
+    assert_eq!(preview.bytes().await.unwrap().as_ref(), reference_bytes);
+
+    server
+        .load(&fixture, "tts", json!({"segment_tokens":12}))
+        .await;
+    let text = "你好，这是声音配置的语音合成验收。";
+    let response = server
+        .post(
+            "/v1/audio/speech",
+            &voice_request("tts", "acceptance-voice", text, false),
+        )
+        .await;
+    headers(&response, false);
+    let wav = response.bytes().await.unwrap();
+    assert!(wav.len() > 44);
+    assert_eq!(&wav[..4], b"RIFF");
+    assert_eq!(&wav[8..12], b"WAVE");
+
+    let mut response = server
+        .post(
+            "/v1/audio/speech",
+            &voice_request("tts", "acceptance-voice", text, true),
+        )
+        .await;
+    headers(&response, true);
+    let mut pcm = Vec::new();
+    while let Some(chunk) = response.chunk().await.unwrap() {
+        pcm.extend_from_slice(&chunk);
+    }
+    assert!(!pcm.is_empty() && pcm.len() % 2 == 0);
+    assert_ne!(&pcm[..4], b"RIFF");
+
+    server.idle("tts").await;
+    server.unload("tts").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

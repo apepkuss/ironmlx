@@ -40,6 +40,15 @@ import Testing
         repoID: "mlx-community/Dense-bf16",
         configJSON: #"{"torch_dtype":"bfloat16"}"#
     )
+    _ = try writeVerifiedTestSnapshot(
+        root: root,
+        repoID: "mlx-community/IndexTTS-2.5-fp16",
+        files: [
+            "config.json": Data("{}".utf8),
+            "model.safetensors": Data("weights".utf8),
+            "model_manifest.json": Data(#"{"dtype":"float16","quantization":null}"#.utf8),
+        ]
+    )
     for bits in [2, 4, 5, 6, 8] {
         _ = try writeSnapshot(
             root: root,
@@ -75,6 +84,9 @@ import Testing
     let models = Dictionary(uniqueKeysWithValues: LocalModelScanner(rootURL: root).scan().map { ($0.id, $0) })
 
     #expect(models["mlx-community/Dense-bf16"]?.quantization?.label == "bf16")
+    #expect(models["mlx-community/IndexTTS-2.5-fp16"]?.quantization?.kind == "dense")
+    #expect(models["mlx-community/IndexTTS-2.5-fp16"]?.quantization?.label == "FP16")
+    #expect(models["mlx-community/IndexTTS-2.5-fp16"]?.quantization?.dtype == "float16")
     for bits in [2, 4, 5, 6, 8] {
         let model = try #require(models["mlx-community/Affine-\(bits)bit"])
         #expect(model.quantization?.kind == "affine")

@@ -49,6 +49,11 @@ pub struct ServeArgs {
     #[arg(long = "model-manifest", conflicts_with = "model")]
     pub model_manifest: Option<PathBuf>,
 
+    /// Directory containing persistent voice profiles and managed reference audio.
+    /// Defaults to ~/.ironmlx/audio/voices.
+    #[arg(long = "voice-profile-dir")]
+    pub voice_profile_dir: Option<PathBuf>,
+
     /// Maximum number of models that may stay loaded in App / dynamic EnginePool mode.
     #[arg(
         long = "max-loaded-models",
@@ -1090,6 +1095,7 @@ fn run_engine_pool(args: ServeArgs, manifest_path: &Path) -> Result<()> {
     let model_ttl = resolve_model_ttl(&args)?;
     let runtime_config = server::engine::EnginePoolRuntimeConfig {
         network: args.resolved_network_config()?,
+        voice_profile_dir: resolve_voice_profile_dir(&args)?,
         options: ironmlx_runtime::core::runtime_config::EngineRuntimeOptions {
             kv_cache_turboquant_bits: args.kv_quant.turboquant_bits(),
             scheduler_autotune_report: args.scheduler_autotune_report,
@@ -1130,12 +1136,14 @@ fn run_app_daemon(args: ServeArgs) -> Result<()> {
         .context("tokio::Runtime::new")?;
     let network = args.resolved_network_config()?;
     runtime.block_on(async move {
+        let runtime_config = engine_runtime_config(&args)?;
+        let voice_profile_dir = runtime_config.voice_profile_dir.clone();
         let manager = server::model_manager::ModelManager::new(
-            engine_runtime_config(&args)?,
+            runtime_config,
             args.max_loaded_models,
             SchedulerResolutionOptions::from(&args),
         )?;
-        server::model_manager::serve_app_daemon(manager, network).await
+        server::model_manager::serve_app_daemon(manager, network, voice_profile_dir).await
     })
 }
 
@@ -1515,6 +1523,7 @@ mod scheduler_profile_tests {
             model: Some("/tmp/model".to_string()),
             model_id: None,
             model_manifest: None,
+            voice_profile_dir: None,
             max_loaded_models: None,
             memory_limit_total_gb: None,
             memory_limit_model_gb: None,
@@ -2884,6 +2893,7 @@ pub(crate) fn engine_runtime_config(
 ) -> Result<server::engine::EnginePoolRuntimeConfig> {
     Ok(server::engine::EnginePoolRuntimeConfig {
         network: args.resolved_network_config()?,
+        voice_profile_dir: resolve_voice_profile_dir(args)?,
         options: ironmlx_runtime::core::runtime_config::EngineRuntimeOptions {
             kv_cache_turboquant_bits: args.kv_quant.turboquant_bits(),
             scheduler_autotune_report: args.scheduler_autotune_report,
@@ -2903,6 +2913,16 @@ pub(crate) fn engine_runtime_config(
             active_kv_offload: resolve_active_kv_offload_config(args)?,
         },
     })
+}
+
+fn resolve_voice_profile_dir(args: &ServeArgs) -> Result<PathBuf> {
+    match &args.voice_profile_dir {
+        Some(path) if path.as_os_str().is_empty() => {
+            bail!("--voice-profile-dir must not be empty")
+        }
+        Some(path) => Ok(path.clone()),
+        None => server::voices::VoiceStore::default_root(),
+    }
 }
 
 #[cfg(test)]

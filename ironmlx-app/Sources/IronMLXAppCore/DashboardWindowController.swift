@@ -1,6 +1,35 @@
 import AppKit
 import Foundation
+import UniformTypeIdentifiers
 import WebKit
+
+@MainActor
+final class DashboardFilePickerDelegate: NSObject, WKUIDelegate {
+    static let supportedAudioFileExtensions = ["wav", "flac", "mp3"]
+
+    func webView(
+        _ webView: WKWebView,
+        runOpenPanelWith parameters: WKOpenPanelParameters,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping @MainActor @Sendable ([URL]?) -> Void
+    ) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = parameters.allowsDirectories
+        panel.allowsMultipleSelection = parameters.allowsMultipleSelection
+        panel.allowedContentTypes = Self.supportedAudioFileExtensions.compactMap {
+            UTType(filenameExtension: $0)
+        }
+        let finish: (NSApplication.ModalResponse) -> Void = { response in
+            completionHandler(response == .OK ? panel.urls : nil)
+        }
+        if let window = webView.window {
+            panel.beginSheetModal(for: window, completionHandler: finish)
+        } else {
+            panel.begin(completionHandler: finish)
+        }
+    }
+}
 
 @MainActor
 enum DashboardThemeAppearance {
@@ -50,6 +79,7 @@ public final class DashboardWindowController {
     private var webView: WKWebView?
     private var bridge: DashboardBridge?
     private var windowDelegate: DashboardWindowDelegate?
+    private var filePickerDelegate: DashboardFilePickerDelegate?
 
     public init(configStore: AppConfigStore, backend: any BackendRuntimeManaging) {
         self.configStore = configStore
@@ -82,6 +112,8 @@ public final class DashboardWindowController {
         configuration.userContentController = userContentController
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
+        let filePickerDelegate = DashboardFilePickerDelegate()
+        webView.uiDelegate = filePickerDelegate
         let bridge = DashboardBridge(
             webView: webView,
             configStore: configStore,
@@ -125,6 +157,7 @@ public final class DashboardWindowController {
         self.webView = webView
         self.bridge = bridge
         self.windowDelegate = windowDelegate
+        self.filePickerDelegate = filePickerDelegate
 
         guard let htmlURL = IronMLXAppResourceResolver.url(forResource: "dashboard2", withExtension: "html") else {
             preconditionFailure("IronMLX App Bundle is missing dashboard2.html")

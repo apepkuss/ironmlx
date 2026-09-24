@@ -4,7 +4,7 @@ use ironmlx_runtime::core::engine_pool::*;
 
 use crate::Result;
 use axum::{
-    extract::{Path, State},
+    extract::{Extension, Path, State},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -16,6 +16,7 @@ use serde::Serialize;
 pub struct EnginePoolRuntimeConfig {
     pub network: super::security::ServerNetworkConfig,
     pub options: EngineRuntimeOptions,
+    pub voice_profile_dir: std::path::PathBuf,
 }
 
 pub(crate) trait EngineRoutedRequest {
@@ -237,10 +238,14 @@ pub async fn serve_engine_pool(
     runtime: EnginePoolRuntimeConfig,
 ) -> Result<()> {
     let network = runtime.network.clone();
+    let voices = super::voices::VoiceStore::open(runtime.voice_profile_dir)?;
     let state = EnginePoolState::new(config, runtime.options).await?;
     state.start_model_ttl_sweeper();
     state.start_memory_governor_monitor();
-    let app = engine_pool_router().with_state(state);
+    let app = engine_pool_router()
+        .merge(super::voices::router())
+        .layer(Extension(voices))
+        .with_state(state);
 
     let serve_result =
         super::security::serve_router(app, network, "ironmlx EnginePool server").await;

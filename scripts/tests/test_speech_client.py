@@ -117,11 +117,12 @@ class SpeechClientTests(unittest.TestCase):
         self.server.server_close()
         self.tmp.cleanup()
 
-    def invoke(self, mode, fmt="pcm", extra=()):
+    def invoke(self, mode, fmt="pcm", extra=(), voice=None):
         self.output = self.root / f"{mode}.{fmt}"
+        selector = ["--voice", voice] if voice else ["--reference", str(self.reference)]
         result = subprocess.run([
             CLIENT, "--url", f"http://127.0.0.1:{self.server.server_port}/{mode}",
-            "--reference", str(self.reference), "--text", "client test",
+            *selector, "--text", "client test",
             "--format", fmt, "--output", str(self.output), *extra,
         ], capture_output=True, text=True, timeout=15)
         self.assertFalse(list(self.root.glob("*.partial")))
@@ -142,6 +143,13 @@ class SpeechClientTests(unittest.TestCase):
 
     def test_cancel_before_headers(self):
         self.assertFailure("cancel-before-headers", "speech client failed", extra=("--cancel-after-ms", "100"))
+
+    def test_voice_selector_is_sent_without_reference_audio(self):
+        result = self.invoke("json-error", voice="narrator")
+        self.assertNotEqual(result.returncode, 0)
+        request = self.server.requests[0]
+        self.assertEqual(request["voice"], "narrator")
+        self.assertNotIn("ref_audio", request)
 
     @unittest.skipUnless(PLAYBACK, "requires actual audio device")
     def test_pcm_odd_reads_play_before_eof(self):

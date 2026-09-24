@@ -987,7 +987,8 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(dashboardHTML(html, contains: "quant.kind === 'affine' && quant.bits"))
     #expect(dashboardHTML(html, contains: "return quant.bits + '-bit';"))
     #expect(dashboardHTML(html, contains: "const label = quantDisplayLabel(quant);"))
-    #expect(dashboardHTML(html, contains: "titleParts.push('kind=' + quant.kind)"))
+    #expect(dashboardHTML(html, contains: "dict.quant_unquantized || 'Unquantized'"))
+    #expect(dashboardHTML(html, contains: "titleParts.push('dtype=' + quant.dtype)"))
 }
 
 @Test func dashboardModelParamsModalIncludesMtpRuntimeControls() throws {

@@ -59,7 +59,7 @@ import WebKit
           check(!isVisible(), 'Escape dismisses tooltip');
           toggle.blur();
           const items = [...document.querySelectorAll('.sidebar .nav-item')].filter(item => !item.hidden);
-          check(items.length === 5, 'only released pages are visible');
+          check(items.map(item => item.dataset.page).join(',') === 'status,models,voices,chat,logs,settings', 'only released pages are visible');
           const geometry = items.map(item => {
             item.click();
             const tile = item.getBoundingClientRect();

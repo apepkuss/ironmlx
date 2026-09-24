@@ -33,7 +33,8 @@ struct Options {
     var endpoint = "http://127.0.0.1:9068/v1/audio/speech"
     var model = "mlx-community/IndexTTS-2.5-fp16"
     var text = ""
-    var reference = ""
+    var reference: String?
+    var voice: String?
     var format = "pcm"
     var output: String?
     var cancelAfterMS: UInt64?
@@ -47,6 +48,7 @@ struct Options {
             case "--model": model = value
             case "--text": text = value
             case "--reference": reference = value
+            case "--voice": voice = value
             case "--format": format = value
             case "--output": output = value
             case "--cancel-after-ms":
@@ -58,9 +60,11 @@ struct Options {
             }
             i += 2
         }
-        guard !text.isEmpty, !reference.isEmpty, ["wav", "pcm"].contains(format),
+        guard !text.isEmpty, (reference == nil) != (voice == nil),
+              reference?.isEmpty != true, voice?.isEmpty != true,
+              ["wav", "pcm"].contains(format),
               let url = URL(string: endpoint), ["http", "https"].contains(url.scheme) else {
-            throw ClientError("Use --reference FILE --text TEXT [--format wav|pcm] [--url URL] [--model ID] [--output FILE] [--cancel-after-ms N]")
+            throw ClientError("Use exactly one of --reference FILE or --voice ID, with --text TEXT [--format wav|pcm] [--url URL] [--model ID] [--output FILE] [--cancel-after-ms N]")
         }
     }
 }
@@ -254,14 +258,19 @@ final class Transport {
 @MainActor
 func run(_ options: Options) async throws {
     let start = ContinuousClock.now
-    let referenceURL = URL(fileURLWithPath: options.reference)
-    let size = try referenceURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-    guard size > 0 && size <= 16 * 1024 * 1024 else { throw ClientError("Reference exceeds file limit") }
-    let reference = try Data(contentsOf: referenceURL)
-    let body = try JSONSerialization.data(withJSONObject: [
-        "model": options.model, "input": options.text, "ref_audio": reference.base64EncodedString(),
+    var request: [String: Any] = [
+        "model": options.model, "input": options.text,
         "response_format": options.format, "stream": options.format == "pcm",
-    ])
+    ]
+    if let referencePath = options.reference {
+        let referenceURL = URL(fileURLWithPath: referencePath)
+        let size = try referenceURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+        guard size > 0 && size <= 16 * 1024 * 1024 else { throw ClientError("Reference exceeds file limit") }
+        request["ref_audio"] = try Data(contentsOf: referenceURL).base64EncodedString()
+    } else {
+        request["voice"] = options.voice
+    }
+    let body = try JSONSerialization.data(withJSONObject: request)
     let transport = try Transport(options: options, body: body)
     defer { transport.close() }
     var next = try await transport.read()

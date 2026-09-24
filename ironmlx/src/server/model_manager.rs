@@ -11,7 +11,7 @@ use ironmlx_runtime::core::model_management::{
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -360,9 +360,11 @@ pub(crate) fn validate_mtp_pair(
 pub async fn serve_app_daemon(
     manager: ModelManager,
     network: super::security::ServerNetworkConfig,
+    voice_profile_dir: PathBuf,
 ) -> Result<()> {
     manager.start_model_ttl_sweeper();
-    let app = app_router(manager);
+    let voices = super::voices::VoiceStore::open(voice_profile_dir)?;
+    let app = app_router(manager, voices);
 
     let serve_result = super::security::serve_router(app, network, "ironmlx app daemon").await;
     ironmlx_runtime::core::cache::prefix_store::shutdown_process_async_prefix_store_queue();
@@ -371,12 +373,13 @@ pub async fn serve_app_daemon(
 
 async fn app_speech_handler(
     State(manager): State<ModelManager>,
+    Extension(voices): Extension<super::voices::VoiceStore>,
     request: axum::extract::Request,
 ) -> Response {
-    super::audio::speech_with_pool(manager.pool, request).await
+    super::audio::speech_with_pool(manager.pool, voices, request).await
 }
 
-fn app_router(manager: ModelManager) -> Router {
+fn app_router(manager: ModelManager, voices: super::voices::VoiceStore) -> Router {
     Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/healthz", get(app_healthz_handler))
@@ -385,6 +388,7 @@ fn app_router(manager: ModelManager) -> Router {
         .route("/v1/responses", post(app_responses_handler))
         .route("/v1/messages", post(app_anthropic_handler))
         .route("/v1/audio/speech", post(app_speech_handler))
+        .merge(super::voices::router())
         .route("/admin/api/models/loaded", get(list_loaded_handler))
         .route("/admin/api/models/register", post(register_model_handler))
         .route("/admin/api/models/load", post(load_model_handler))
@@ -397,6 +401,7 @@ fn app_router(manager: ModelManager) -> Router {
         .route("/admin/api/models/pin", post(pin_model_handler))
         .route("/admin/api/models/unpin", post(unpin_model_handler))
         .route("/admin/api/models/default", post(set_default_model_handler))
+        .layer(Extension(voices))
         .with_state(manager)
 }
 
@@ -1290,7 +1295,10 @@ mod tests {
             .await
             .expect("register model");
 
-        let response = app_router(manager)
+        let voice_dir = unique_temp_dir("app-models-route-voices");
+        let voices =
+            crate::server::voices::VoiceStore::open(voice_dir.clone()).expect("voice store");
+        let response = app_router(manager, voices)
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/v1/models")
@@ -1305,6 +1313,7 @@ mod tests {
             .expect("models body");
         let body: serde_json::Value = serde_json::from_slice(&body).expect("models json");
         std::fs::remove_dir_all(model_dir).expect("remove temp model dir");
+        std::fs::remove_dir_all(voice_dir).expect("remove temp voice dir");
 
         assert_eq!(body["object"], "list");
         assert_eq!(body["data"].as_array().map(Vec::len), Some(1));
@@ -1320,6 +1329,9 @@ mod tests {
     #[tokio::test]
     async fn models_routes_expose_effective_capacity_not_default_output_budget() {
         let model_dir = unique_temp_dir("models-capacity-route");
+        let voice_dir = unique_temp_dir("models-capacity-route-voices");
+        let voices =
+            crate::server::voices::VoiceStore::open(voice_dir.clone()).expect("voice store");
         let mut config: serde_json::Value =
             serde_json::from_str(&gemma4_base_config("gemma4", "gemma4_text", 2560)).unwrap();
         config["text_config"]["max_position_embeddings"] = serde_json::json!(262144);
@@ -1357,7 +1369,7 @@ mod tests {
                 .await
                 .unwrap();
             for router in [
-                app_router(manager.clone()),
+                app_router(manager.clone(), voices.clone()),
                 crate::server::engine::engine_pool_router().with_state(manager.pool.clone()),
             ] {
                 let response = router
@@ -1387,6 +1399,7 @@ mod tests {
             }
         }
         std::fs::remove_dir_all(model_dir).unwrap();
+        std::fs::remove_dir_all(voice_dir).unwrap();
     }
 
     #[tokio::test]
@@ -2241,6 +2254,7 @@ mod tests {
             model: None,
             model_id: None,
             model_manifest: None,
+            voice_profile_dir: None,
             max_loaded_models: None,
             memory_limit_total_gb: None,
             memory_limit_model_gb: None,

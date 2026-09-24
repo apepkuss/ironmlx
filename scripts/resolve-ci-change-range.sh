@@ -38,20 +38,20 @@ fi
 # Evaluate the diff before iteration: errors inside process substitution would
 # otherwise be swallowed and misclassify an unavailable range as docs-only.
 changed_files="$(git diff --name-only "$base_sha" "$head_sha")" || fail "cannot compare CI commits"
-docs_only=true
+docs_changed=false
 code_changed=false
 if [[ "$force_full" = true ]]; then
-  docs_only=false
+  docs_changed=true
   code_changed=true
 else
   while IFS= read -r path; do
     [[ -n "$path" ]] || continue
     if [[ "$path" == README.md || "$path" == README.zh-CN.md || "$path" == docs/* || "$path" == *.md ]]; then
+      docs_changed=true
       continue
     fi
-    docs_only=false
     code_changed=true
   done <<< "$changed_files"
 fi
-printf 'base_sha=%s\nhead_sha=%s\ndocs_only=%s\ncode_changed=%s\n' \
-  "$base_sha" "$head_sha" "$docs_only" "$code_changed"
+printf 'base_sha=%s\nhead_sha=%s\ndocs_changed=%s\ncode_changed=%s\n' \
+  "$base_sha" "$head_sha" "$docs_changed" "$code_changed"

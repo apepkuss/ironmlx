@@ -36,7 +36,7 @@ jobs:
     name: Classify changes
     runs-on: macos-26
     outputs:
-      docs_only: ${{ steps.range.outputs.docs_only }}
+      docs_changed: ${{ steps.range.outputs.docs_changed }}
       code_changed: ${{ steps.range.outputs.code_changed }}
       base_sha: ${{ steps.range.outputs.base_sha }}
       head_sha: ${{ steps.range.outputs.head_sha }}
@@ -68,7 +68,7 @@ jobs:
   docs-quality:
     name: Documentation quality
     needs: changes
-    if: needs.changes.outputs.docs_only == 'true'
+    if: needs.changes.outputs.docs_changed == 'true'
     runs-on: macos-26
     steps:
       - name: Checkout immutable IronMLX commit

@@ -1674,7 +1674,7 @@ public struct LocalModelScanner: Sendable {
         let hasOptiQMetadata = FileManager.default.isReadableFile(atPath: optiqMetadataURL.path)
         guard let rawQuantization = quantizationConfig(in: config) else {
             return QuantizationInspection(
-                quantization: denseQuantization(config: config),
+                quantization: denseQuantization(config: config, snapshot: snapshot),
                 missingFiles: [],
                 unsupportedReason: nil
             )
@@ -1779,10 +1779,27 @@ public struct LocalModelScanner: Sendable {
         (config["quantization"] as? [String: Any]) ?? (config["quantization_config"] as? [String: Any])
     }
 
-    private func denseQuantization(config: [String: Any]) -> LocalModelQuantization {
-        let dtype = dtypeValue(config)
-        let label = dtype == "bf16" ? "bf16" : "Dense"
+    private func denseQuantization(config: [String: Any], snapshot: URL) -> LocalModelQuantization {
+        let dtype = dtypeValue(config) ?? modelManifestDtype(snapshot: snapshot)
+        let label: String
+        switch dtype {
+        case "float16", "fp16":
+            label = "FP16"
+        case "bf16":
+            label = "bf16"
+        default:
+            label = "Dense"
+        }
         return LocalModelQuantization(kind: "dense", label: label, dtype: dtype)
+    }
+
+    private func modelManifestDtype(snapshot: URL) -> String? {
+        let manifest = snapshot.appendingPathComponent("model_manifest.json")
+        guard let data = try? Data(contentsOf: manifest),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return normalizedDtype(json["dtype"] as? String)
     }
 
     private func dtypeValue(_ config: [String: Any]) -> String? {
@@ -1790,9 +1807,11 @@ public struct LocalModelScanner: Sendable {
             ?? (config["dtype"] as? String)
             ?? ((config["text_config"] as? [String: Any])?["torch_dtype"] as? String)
             ?? ((config["text_config"] as? [String: Any])?["dtype"] as? String)
-        guard let raw else {
-            return nil
-        }
+        return normalizedDtype(raw)
+    }
+
+    private func normalizedDtype(_ raw: String?) -> String? {
+        guard let raw else { return nil }
         let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         switch normalized {
         case "bfloat16":

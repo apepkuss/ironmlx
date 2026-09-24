@@ -51,6 +51,10 @@ public struct BackendAPIClient: Sendable {
     }
 
     public func fetchData(path: String) async throws -> Data {
+        try await fetchDataWithContentType(path: path).data
+    }
+
+    public func fetchDataWithContentType(path: String) async throws -> (data: Data, contentType: String?) {
         guard let url = URL(string: "http://\(host):\(port)\(path)") else {
             throw URLError(.badURL)
         }
@@ -58,15 +62,37 @@ public struct BackendAPIClient: Sendable {
         if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
             throw URLError(.badServerResponse)
         }
-        return data
+        return (data, (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Type"))
     }
 
     public func postJSON<T: Encodable>(path: String, body: T) async throws -> Data {
+        try await sendJSON(method: "POST", path: path, body: body)
+    }
+
+    public func patchJSON<T: Encodable>(path: String, body: T) async throws -> Data {
+        try await sendJSON(method: "PATCH", path: path, body: body)
+    }
+
+    public func deleteData(path: String) async throws -> Data {
         guard let url = URL(string: "http://\(host):\(port)\(path)") else {
             throw URLError(.badURL)
         }
         var request = URLRequest(url: url)
-        request.httpMethod = "POST"
+        request.httpMethod = "DELETE"
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            let body = String(data: data, encoding: .utf8)
+            throw BackendAPIError.serverResponse(statusCode: http.statusCode, body: body)
+        }
+        return data
+    }
+
+    private func sendJSON<T: Encodable>(method: String, path: String, body: T) async throws -> Data {
+        guard let url = URL(string: "http://\(host):\(port)\(path)") else {
+            throw URLError(.badURL)
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = method
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(body)
         let (data, response) = try await URLSession.shared.data(for: request)

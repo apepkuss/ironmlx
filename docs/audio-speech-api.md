@@ -1,28 +1,16 @@
 # Speech synthesis API
 
+[简体中文](zh-CN/audio-speech-api.md) · [TTS download and usage](tts-model-download.md)
+
 The server exposes `POST /v1/audio/speech` through the model pool and the App
 model-management daemon. `ironmlx-audio` supplies native synthesis and audio IO;
 `ironmlx-runtime` owns loading, scheduling, cancellation and memory admission.
 
 ## Use from IronMLX.app
 
-Download `mlx-community/IndexTTS-2.5-fp16` in the Dashboard. The App selects the
-supported immutable revision and automatically downloads and verifies the
-reference-encoder dependencies, WeText data and UniDic-lite dictionary. It builds
-the auxiliary safetensors natively; Python, PyTorch and package installation are
-not required. The first download requires network access. Verified resources are
-reused offline and are stored under `~/.ironmlx/audio/indextts25/<revision>/`.
-
-When preparation completes, load the model from the model list. The App passes
-its saved resource configuration to the backend and restores loaded/pinned models
-on restart. Call `/v1/audio/speech` using the model identifier and a Base64 reference
-audio clip as shown below. Playback is provided by your API client or the standalone
-example, rather than an embedded Dashboard player.
-
-For a previously downloaded model with missing or changed resources, use **Prepare
-resources** in the model list. Interrupted downloads can be retried; verified model
-weights are reused. Other TTS repositories and revisions require their own verified
-runtime profile and are not enabled merely by their model type.
+Download, resource preparation, loading, voice management and recovery steps are
+documented in [TTS model download and usage](tts-model-download.md). The request
+and response contract remains defined on this page.
 
 ## Register local resources
 
@@ -66,6 +54,30 @@ this process-wide precision policy before their first MLX call. Audio workers us
 separate registered streams and request-local random state. Memory and allocator
 cache limits remain process-wide and shared with language models.
 
+## Voice profiles
+
+Voice profiles provide stable identifiers for OpenAI-compatible clients. The App
+stores them under `~/.ironmlx/audio/voices/` by default; `ironmlx serve` accepts
+`--voice-profile-dir` to select another directory. `profiles.json` contains metadata
+and relative managed filenames. Reference audio is stored separately under `files/`.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /v1/audio/voices` | List enabled voices for compatible clients |
+| `GET /admin/api/audio/voices` | List all voices, including disabled profiles |
+| `POST /v1/audio/voices` | Create a voice from `id`, `name`, optional `language`/`enabled`, and Base64 `ref_audio` |
+| `PATCH /v1/audio/voices/{id}` | Update metadata, enabled state, or replace `ref_audio` |
+| `DELETE /v1/audio/voices/{id}` | Delete the profile and its managed reference file |
+| `GET /v1/audio/voices/{id}/preview` | Return the stored reference recording for playback |
+
+Voice IDs contain 1–64 ASCII letters, digits, `.`, `_` or `-`, starting with a
+letter or digit. IDs remain stable when the display name changes. Writes validate
+the complete audio before atomically publishing metadata. Public discovery returns
+only the ID, display name and optional language; the admin list also returns
+validation metadata and enabled state. The preview endpoint
+returns the reference recording and sets `X-IronMLX-Voice-Preview: reference`; it
+does not synthesize a new sample.
+
 ## Request
 
 Complete WAV response:
@@ -75,6 +87,17 @@ Complete WAV response:
   "model": "mlx-community/IndexTTS-2.5-fp16",
   "input": "这是需要合成的文本。",
   "ref_audio": "<Base64>",
+  "response_format": "wav"
+}
+```
+
+The same request using a managed voice:
+
+```json
+{
+  "model": "mlx-community/IndexTTS-2.5-fp16",
+  "input": "这是需要合成的文本。",
+  "voice": "speaker_a",
   "response_format": "wav"
 }
 ```
@@ -91,10 +114,11 @@ PCM stream:
 }
 ```
 
-`model`, `input` and `ref_audio` are required nonempty strings; model and input
-must contain non-whitespace characters. `response_format` defaults to `wav`;
-`stream` defaults to `false`. The two combinations above are the supported output
-modes. Unknown fields, duplicate fields and explicit nulls are rejected.
+`model` and `input` are required nonempty strings. Exactly one of `ref_audio` or
+`voice` is required. `voice` accepts a stable string ID or `{ "id": "speaker_a" }`.
+`response_format` defaults to `wav`; `stream` defaults to `false`. The two output
+combinations above are supported. Unknown fields, duplicate fields and explicit
+nulls are rejected.
 
 `ref_audio` contains canonical standard Base64 with padding and no whitespace.
 Encode the complete audio file into that string; file paths, URLs and data URLs
@@ -203,7 +227,10 @@ line tools:
 swiftc -parse-as-library -swift-version 6 examples/speech-client.swift -o /tmp/ironmlx-speech-client
 /tmp/ironmlx-speech-client --reference reference.wav --text '这是需要合成的文本。' --format wav --output speech.wav
 /tmp/ironmlx-speech-client --reference reference.wav --text '这是需要合成的文本。' --format pcm --output speech.pcm
+/tmp/ironmlx-speech-client --voice speaker_a --text '这是需要合成的文本。' --format pcm --output voice.pcm
 ```
+
+Pass exactly one of `--reference FILE` or `--voice ID`.
 
 The default endpoint is `http://127.0.0.1:9068/v1/audio/speech`; `--url` and
 `--model` select another endpoint or registered model. Set `IRONMLX_API_KEY` when

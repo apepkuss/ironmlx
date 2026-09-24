@@ -62,6 +62,15 @@ The tables list accepted fields and conditions. Unlisted fields and shapes outsi
 | `repetition_penalty / output_format` | Rejected; use output_config.format |
 | `display:omitted / redacted_thinking` | Rejected; no encrypted hidden-thinking channel |
 
+## Speech synthesis
+
+`POST /v1/audio/speech` accepts the model, input text, WAV/PCM response policy and
+exactly one reference source: Base64 `ref_audio` or a managed `voice` ID. The
+`voice` string follows OpenAI-compatible client conventions; IronMLX resolves it
+to validated local reference audio. `GET /v1/audio/voices` is an IronMLX discovery
+extension for clients that support dynamic voice lists. Voice management and
+reference-preview endpoints are documented in the [speech API](audio-speech-api.md).
+
 ## Errors and retries
 
 Chat/Responses use OpenAI error envelopes; Messages uses an Anthropic envelope with matching body request_id and request-id header. error.code is an IronMLX machine-readable extension.
