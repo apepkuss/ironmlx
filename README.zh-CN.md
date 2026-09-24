@@ -11,7 +11,7 @@ Rust 推理引擎、MLX/Metal 运行时、模型管理 Dashboard，以及 OpenAI
 截图展示了本地 Dashboard、运行中的服务、已加载模型以及 DFlash2 运行状态。
 运行时指标会因模型和硬件而变化。
 
-当前公开版本：[0.1.0-rc.1](https://github.com/apepkuss/ironmlx/releases/tag/v0.1.0-rc.1)
+当前正式版本：[0.1.0](https://github.com/apepkuss/ironmlx/releases/tag/v0.1.0)
 
 ## 系统要求
 
@@ -43,8 +43,8 @@ Rust 推理引擎、MLX/Metal 运行时、模型管理 Dashboard，以及 OpenAI
 
 ## 安装与首次运行
 
-从 [GitHub Release](https://github.com/apepkuss/ironmlx/releases/tag/v0.1.0-rc.1)
-下载当前 Apple Silicon 候选版。使用 DMG 时，打开 DMG，将 `IronMLX.app` 拖到
+从 [GitHub Release](https://github.com/apepkuss/ironmlx/releases/tag/v0.1.0)
+下载当前 Apple Silicon 正式版。使用 DMG 时，打开 DMG，将 `IronMLX.app` 拖到
 `Applications` 文件夹图标，推出磁盘映像，再从 Finder 的“应用程序”中启动
 IronMLX；使用 ZIP 时，先解压，再打开解压出的 App。然后在 Dashboard 中选择并加载
 兼容的模型。
@@ -58,7 +58,7 @@ App 默认监听 `http://127.0.0.1:9068`。如需发送第一条 API 请求，�
 
 - [用户指南](docs/zh-CN/user-guide.md)：安装、模型使用、API 客户端、Agent 集成、隐私和故障排查；
 - [开发者指南](docs/zh-CN/developer-guide.md)：源码构建、测试、贡献、架构和发布验收。
-- [支持模型矩阵](docs/zh-CN/supported-models.md)：本候选发布版已记录的模型架构和具体版本。
+- [支持模型矩阵](docs/zh-CN/supported-models.md)：当前版本已记录的模型架构和具体版本。
 
 ## 许可证
 

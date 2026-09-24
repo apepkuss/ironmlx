@@ -31,11 +31,12 @@ upstream project when IronMLX is not the cause.
 
 ## Supported versions and disclosure
 
-The current `dev` tip and the latest published release candidate are the
-security-support baseline while 0.1.0 is unreleased. Maintainers will
-acknowledge and triage reports when practical, prioritize critical impact, and
-coordinate a fix and disclosure timeline with the reporter. There is no
-guaranteed response or remediation SLA.
+The latest stable release is the security-support baseline for users. The
+current `dev` tip is covered for development and coordinated prerelease
+testing. A release candidate remains supported only until a newer candidate or
+stable release supersedes it. Maintainers will acknowledge and triage reports
+when practical, prioritize critical impact, and coordinate a fix and disclosure
+timeline with the reporter. There is no guaranteed response or remediation SLA.
 
 ## Security boundary
 

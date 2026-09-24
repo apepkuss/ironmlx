@@ -69,6 +69,6 @@ curl -fsS http://127.0.0.1:9068/v1/responses \
 
 - [故障排查](troubleshooting.md)
 - [Known Issues](known-issues.md)
-- [0.1.0 候选发布说明](release-notes/0.1.0.md)
+- [0.1.0 发布说明](release-notes/0.1.0.md)
 
 源码构建、测试、贡献和发布工程请从[从源码构建](building-from-source.md)及[参与开发](contributing.md)开始。

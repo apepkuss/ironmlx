@@ -12,7 +12,7 @@ self-contained macOS App.
 The screenshot shows the local Dashboard with a running server, a loaded model,
 and the DFlash2 runtime status. Runtime metrics vary by model and hardware.
 
-Latest public release: [0.1.0-rc.1](https://github.com/apepkuss/ironmlx/releases/tag/v0.1.0-rc.1)
+Current stable release: [0.1.0](https://github.com/apepkuss/ironmlx/releases/tag/v0.1.0)
 
 ## Requirements
 
@@ -47,8 +47,8 @@ Latest public release: [0.1.0-rc.1](https://github.com/apepkuss/ironmlx/releases
 
 ## Install and run
 
-Download the current Apple Silicon release candidate from the
-[GitHub Release](https://github.com/apepkuss/ironmlx/releases/tag/v0.1.0-rc.1),
+Download the current Apple Silicon release from the
+[GitHub Release](https://github.com/apepkuss/ironmlx/releases/tag/v0.1.0),
 open the DMG, drag `IronMLX.app` onto the `Applications` folder shortcut, eject
 the disk image, and launch IronMLX from Finder's Applications folder. If you
 use the ZIP, extract it first and open the extracted App. Then use the
@@ -67,7 +67,7 @@ Developers who need to build and run IronMLX from source should follow the
 - [Developer Guide](docs/developer-guide.md) — source builds, tests,
   contributions, architecture, and release validation.
 - [Supported model matrix](docs/supported-models.md) — architectures and
-  concrete versions recorded for this release candidate.
+  concrete versions recorded for this release.
 
 ## License
 
