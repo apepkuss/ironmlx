@@ -592,6 +592,75 @@ import WebKit
     #expect(html.contains(".model-params-setting-row .field-label-with-help label {\n    white-space: nowrap;"))
 }
 
+@Test func dashboardTTSModelParamsExposeLocalizedReadOnlyCapabilities() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(html.contains(#"class="modal-row model-params-setting-row tts-capabilities-row""#))
+    #expect(!html.contains(#"class="model-params-output-section tts-capabilities-section""#))
+    #expect(html.contains(#"id="tts-supported-languages" readonly"#))
+    #expect(html.contains(#"id="tts-output-sample-rate" readonly"#))
+    #expect(html.contains(#"id="tts-max-text-tokens" readonly"#))
+    #expect(html.contains(#"id="tts-max-audio-tokens" readonly"#))
+    #expect(html.contains("#tts-details-modal .tts-capabilities-row {\n    grid-template-columns: repeat(2, minmax(0, 1fr));"))
+    #expect(html.contains("#tts-details-modal .model-params-setting-row {\n      grid-template-columns: minmax(0, 1fr);"))
+    #expect(html.contains("const metadata = model.tts_metadata || {};"))
+    #expect(html.contains("input.closest('.modal-field').style.display = value ? '' : 'none';"))
+    #expect(html.contains(".tts-capabilities-row').style.display = visibleFields ? '' : 'none';"))
+    #expect(!html.contains(#"id="tts-max-text-tokens" value="600""#))
+    #expect(!html.contains(#"id="tts-max-audio-tokens" value="1815""#))
+    #expect(!html.contains("22050 Hz · Mono"))
+
+    for key in [
+        "tts_supported_languages",
+        "tts_max_text_tokens",
+        "tts_max_audio_tokens",
+        "tts_output_sample_rate",
+    ] {
+        #expect(
+            html.components(separatedBy: "\(key):").count - 1 == 5,
+            "\(key) must be present in all five locale dictionaries"
+        )
+    }
+}
+
+@Test func dashboardTTSModelParamsExposeBackendDrivenExecutionPolicy() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    for id in [
+        "tts-queue-timeout", "tts-first-audio-timeout", "tts-execution-timeout",
+        "tts-slow-consumer-timeout", "tts-max-output-duration", "tts-segment-tokens",
+    ] {
+        #expect(html.contains("id=\"\(id)\""))
+    }
+    #expect(html.contains("apiFetch('/admin/api/audio/execution-profile')"))
+    #expect(html.contains("const defaults = profile.defaults;"))
+    #expect(html.contains("const constraints = profile.constraints;"))
+    #expect(html.contains("const sampleRate = Number(profile.output_frames_per_second);"))
+    #expect(html.contains("audio_execution: {"))
+    #expect(html.contains("max_output_frames: maxOutputFrames"))
+    #expect(html.contains("&& window.webkit.messageHandlers.saveModelParams;"))
+    #expect(html.contains("handler.postMessage(JSON.stringify(params));"))
+    #expect(!html.contains(#"id="tts-queue-timeout" value="60""#))
+    #expect(!html.contains(#"id="tts-segment-tokens" value="120""#))
+
+    for key in [
+        "tts_execution_policy", "tts_queue_timeout", "tts_first_audio_timeout",
+        "tts_execution_timeout", "tts_slow_consumer_timeout",
+        "tts_max_output_duration", "tts_segment_tokens", "tts_execution_invalid",
+    ] {
+        #expect(
+            html.components(separatedBy: "\(key):").count - 1 == 5,
+            "\(key) must be present in all five locale dictionaries"
+        )
+    }
+}
+
 @Test func dashboardExposesCrossRequestPromptLookupControlsAndClearAction() throws {
     let html = try String(
         contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",

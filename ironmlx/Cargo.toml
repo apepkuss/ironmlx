@@ -18,6 +18,7 @@ ironmlx-audio = { path = "../ironmlx-audio" }
 ironmlx-runtime = { path = "../ironmlx-runtime" }
 ironmlx-lm = { path = "../ironmlx-lm" }
 ironmlx-core = { path = "../ironmlx-core" }
+ironmlx-decision = { path = "../ironmlx-decision" }
 mlx = { path = "../mlx" }
 mlx-sys = { path = "../mlx-sys" }
 thiserror.workspace = true

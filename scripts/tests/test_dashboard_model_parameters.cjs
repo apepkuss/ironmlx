@@ -48,6 +48,7 @@ test('saving an ordinary model keeps output budget separate from the context lim
   assert.equal(page.payload.dflash2_model_id, null);
   assert.equal(page.payload.max_tokens, '4096');
   assert.equal(page.payload.max_output_tokens, '1024');
+  assert.ok(!Object.hasOwn(page.payload, 'model_type'), 'readonly display must not save a type override');
 });
 
 test('model parameter help explains the three capacity fields in each language', () => {
@@ -74,14 +75,15 @@ test('model parameter help explains the three capacity fields in each language',
 });
 
 test('model parameters form three aligned rows without sampling help buttons', () => {
-  const rows = [...html.matchAll(/<div class="modal-row model-params-setting-row[^>]*>/g)];
+  const rows = [...html.matchAll(/<div class="modal-row model-params-setting-row[^>]*>/g)]
+    .filter(row => row.index > html.indexOf('<!-- Model Params Modal -->'));
   const expected = [
     ['modal-alias-input', 'modal-model-type', 'modal-context-size'],
     ['modal-max-tokens', 'modal-max-output-tokens', 'modal-temperature'],
     ['modal-top-p', 'modal-top-k', 'modal-repeat-penalty'],
   ];
   assert.equal(rows.length, expected.length);
-  const outputSection = html.indexOf('<div class="model-params-output-section">');
+  const outputSection = html.indexOf('<div class="model-params-output-section">', rows[0].index);
   assert.ok(outputSection > rows[0].index && outputSection < rows[1].index);
   assert.ok(html.includes('.model-params-output-section {\n    border-top: 0.5px solid var(--border);'));
   for (let index = 0; index < rows.length; index++) {

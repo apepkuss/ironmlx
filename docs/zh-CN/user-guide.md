@@ -43,6 +43,7 @@ curl -fsS http://127.0.0.1:9068/v1/responses \
 
 ## 按任务选择文档
 
+- [Laya 决策 API](laya-systemone-api.md)：在 App 中加载 Laya，并供外部应用调用。
 - [支持模型矩阵](supported-models.md)：架构、已验证版本、量化、内存和功能限制；
 - [HTTP API 快速开始](api.md)：Chat Completions、Responses 和 Anthropic Messages 的首个请求；
 - [API 兼容矩阵](api-compatibility-matrix.md)：请求字段、流式输出、结构化输出、推理、图片和错误；

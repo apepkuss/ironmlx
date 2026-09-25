@@ -1,6 +1,7 @@
 import Foundation
 
 public struct BackendRecoveryModel: Codable, Equatable, Sendable {
+    public var decision: BackendDecisionSettings?
     public var audio: BackendAudioResources?
     public var id: String
     public var modelDir: String?
@@ -32,7 +33,8 @@ public struct BackendRecoveryModel: Codable, Equatable, Sendable {
         promptLookup: BackendPromptLookupConfig?,
         samplingDefaults: BackendSamplingDefaults,
         capabilities: BackendModelCapabilities? = nil,
-        audio: BackendAudioResources? = nil
+        audio: BackendAudioResources? = nil,
+        decision: BackendDecisionSettings? = nil
     ) {
         self.id = id
         self.modelDir = modelDir
@@ -49,6 +51,7 @@ public struct BackendRecoveryModel: Codable, Equatable, Sendable {
         self.samplingDefaults = samplingDefaults
         self.capabilities = capabilities
         self.audio = audio
+        self.decision = decision
     }
 }
 
@@ -115,7 +118,11 @@ public struct BackendRecoverySnapshot: Codable, Equatable, Sendable {
                 samplingDefaults: (parameters?.samplingDefaults ?? .empty)
                     .filtered(for: capabilities),
                 capabilities: capabilities,
-                audio: try? scanner.audioResources(for: model)
+                audio: try? scanner.audioResources(
+                    for: model,
+                    execution: parameters?.audioExecution
+                ),
+                decision: parameters?.decision
             )
         }
         return BackendRecoverySnapshot(config: config, models: models)

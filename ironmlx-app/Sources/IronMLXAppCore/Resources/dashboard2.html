@@ -29,6 +29,14 @@
     --settings-error-text: #A12622;
     --settings-error-border: #E7B3AE;
     --destructive: #ff3b30;
+    --tooltip-compact-bg: rgba(44, 44, 46, 0.96);
+    --tooltip-compact-text: #ffffff;
+    --tooltip-compact-border: rgba(255, 255, 255, 0.14);
+    --tooltip-surface-bg: rgba(255, 255, 255, 0.96);
+    --tooltip-surface-text: #515154;
+    --tooltip-surface-border: rgba(0, 0, 0, 0.12);
+    --tooltip-compact-shadow: 0 4px 14px rgba(0, 0, 0, 0.24);
+    --tooltip-surface-shadow: 0 12px 28px rgba(0, 0, 0, 0.16);
     --sidebar-w: 200px;
     --radius: 10px;
   }
@@ -53,6 +61,14 @@
       --settings-error-text: #FFB4AB;
       --settings-error-border: #80514B;
       --destructive: #ff453a;
+      --tooltip-compact-bg: rgba(58, 58, 60, 0.98);
+      --tooltip-compact-text: #f5f5f7;
+      --tooltip-compact-border: rgba(255, 255, 255, 0.16);
+      --tooltip-surface-bg: rgba(44, 44, 46, 0.96);
+      --tooltip-surface-text: #d1d1d6;
+      --tooltip-surface-border: rgba(255, 255, 255, 0.13);
+      --tooltip-compact-shadow: 0 5px 18px rgba(0, 0, 0, 0.48);
+      --tooltip-surface-shadow: 0 14px 32px rgba(0, 0, 0, 0.46);
     }
   }
 
@@ -209,21 +225,26 @@
   .sidebar-collapsed .sidebar .nav-item.locked:hover::before { background: transparent; }
   .sidebar-collapsed .sidebar .nav-item.active::before { background: var(--accent); }
 
-  .sidebar-tooltip {
+  .sidebar-tooltip,
+  .quantization-tooltip {
     position: fixed;
     z-index: 10000;
     max-width: min(240px, calc(100vw - 16px));
     padding: 6px 10px;
+    border: 0.5px solid var(--tooltip-compact-border);
     border-radius: 6px;
-    background: var(--text);
-    color: var(--bg);
+    background: var(--tooltip-compact-bg);
+    color: var(--tooltip-compact-text);
     font-size: 12px;
     line-height: 1.4;
     overflow-wrap: anywhere;
-    box-shadow: 0 2px 8px #0003;
+    box-shadow: var(--tooltip-compact-shadow);
+    -webkit-backdrop-filter: blur(18px) saturate(1.15);
+    backdrop-filter: blur(18px) saturate(1.15);
     pointer-events: none;
   }
-  .sidebar-tooltip[hidden] { display: none; }
+  .sidebar-tooltip[hidden],
+  .quantization-tooltip[hidden] { display: none; }
 
   /* ── Content ── */
   .content {
@@ -414,17 +435,19 @@
     right: 0;
     width: 320px;
     padding: 9px 11px;
-    border: 1px solid var(--border);
+    border: 1px solid var(--tooltip-surface-border);
     border-radius: 7px;
-    background: var(--card-bg);
-    box-shadow: 0 7px 22px rgba(0, 0, 0, 0.14);
-    color: var(--text-secondary);
+    background: var(--tooltip-surface-bg);
+    box-shadow: var(--tooltip-surface-shadow);
+    color: var(--tooltip-surface-text);
     font-size: 12px;
     line-height: 1.45;
     opacity: 0;
     visibility: hidden;
     pointer-events: none;
     transition: opacity 0.12s ease;
+    -webkit-backdrop-filter: blur(18px) saturate(1.15);
+    backdrop-filter: blur(18px) saturate(1.15);
   }
 
   .diagnostic-export-help:hover .diagnostic-export-tooltip,
@@ -890,10 +913,10 @@
     width: min(340px, calc(100vw - 96px));
     padding: 12px 14px;
     border-radius: 8px;
-    background: var(--card-bg);
-    border: 0.5px solid var(--border);
-    box-shadow: 0 12px 28px rgba(0,0,0,0.16);
-    color: var(--text-secondary);
+    background: var(--tooltip-surface-bg);
+    border: 0.5px solid var(--tooltip-surface-border);
+    box-shadow: var(--tooltip-surface-shadow);
+    color: var(--tooltip-surface-text);
     font-size: 12px;
     line-height: 1.55;
     white-space: normal;
@@ -901,6 +924,8 @@
     pointer-events: none;
     z-index: 30;
     transition: opacity 0.15s, transform 0.15s;
+    -webkit-backdrop-filter: blur(18px) saturate(1.15);
+    backdrop-filter: blur(18px) saturate(1.15);
   }
 
   .profile-help-tooltip-fixed {
@@ -1849,6 +1874,11 @@
     border: 1px solid rgba(52, 199, 89, 0.30);
   }
 
+  .badge-quant:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
   .badge-quant-warning {
     background: #fff3cd;
     color: #856404;
@@ -2138,12 +2168,21 @@
     font-size: 12px;
   }
 
-  #tts-details-modal .modal { width: min(620px, calc(100vw - 40px)); }
-  #tts-details-modal .modal-body { font-size: 13px; line-height: 1.6; }
-  #tts-details-modal h3 { font-size: 13px; margin: 18px 0 8px; }
-  #tts-details-modal p { color: var(--text-secondary); }
-  #tts-details-modal ul { list-style: none; padding: 0; }
-  #tts-details-modal li { padding: 3px 0; }
+  #tts-details-modal .model-params-setting-row { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); }
+  #tts-details-modal .tts-capabilities-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    row-gap: 12px;
+  }
+  #tts-details-modal .tts-capabilities-row { margin-top: 16px; }
+  #tts-details-modal .tts-execution-section { margin-top: 22px; }
+  #tts-details-modal .tts-execution-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    row-gap: 12px;
+  }
+  #tts-details-modal .modal-field { margin-bottom: 0; }
+  #tts-details-modal .modal-body { padding-bottom: 28px; }
+  .model-params-modal input[readonly] { text-overflow: ellipsis; }
+
   #model-table .tts-model-row .model-status-cell { white-space: normal; line-height: 1.45; }
 
   .model-params-modal {
@@ -2155,15 +2194,39 @@
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
     column-gap: 12px;
+    align-items: end;
   }
 
   .model-params-setting-row .modal-field {
     min-width: 0;
   }
 
+  .model-params-setting-row .modal-field > label,
+  .model-params-setting-row .field-label-with-help {
+    display: flex;
+    align-items: center;
+    min-height: 18px;
+  }
+
   .model-params-setting-row .field-label-with-help label {
     white-space: nowrap;
   }
+
+  .decision-advanced { margin-top: 22px; padding-top: 16px; border-top: 0.5px solid var(--border); }
+  .decision-advanced summary { color: var(--text-secondary); font-size: 12px; font-weight: 500; cursor: pointer; }
+  .decision-advanced[open] summary { margin-bottom: 16px; }
+  .decision-padding-control { display: flex; align-items: center; gap: 10px; height: 30px; }
+  .decision-padding-control .toggle { margin: 0; flex-shrink: 0; }
+  .decision-padding-control input[type="number"] { flex: 1; min-width: 0; }
+  .decision-metadata-row { margin-top: 18px; }
+  .decision-metadata-row .modal-field:last-child { grid-column: span 2; }
+
+  #decision-details-modal .model-params-output-section { margin-top: 22px; }
+  #decision-details-modal .decision-cache-control { height: 30px; display:flex; align-items:center; }
+  #decision-details-modal .decision-cache-control .toggle { margin:0; }
+  #decision-details-modal .toggle input:focus-visible + .toggle-slider { outline:2px solid var(--accent); outline-offset:3px; }
+  #decision-details-modal .modal-field { margin-bottom: 0; }
+  #decision-details-modal .modal-body { padding-bottom: 28px; }
 
   .model-params-output-section {
     border-top: 0.5px solid var(--border);
@@ -2185,7 +2248,11 @@
   }
 
   @media (max-width: 420px) {
+    .decision-metadata-row .modal-field:last-child { grid-column: auto; }
     .model-params-setting-row {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    #tts-details-modal .model-params-setting-row {
       grid-template-columns: minmax(0, 1fr);
     }
   }
@@ -3453,6 +3520,7 @@
 </div>
 
 <div class="sidebar-tooltip" id="sidebar-tooltip" role="tooltip" hidden></div>
+<div class="quantization-tooltip" id="quantization-tooltip" role="tooltip" hidden></div>
 
 <!-- Content -->
 <div class="content page-scroll-managed">
@@ -4834,22 +4902,168 @@
   </div>
 </div>
 
-<!-- Download-only TTS details -->
+<!-- TTS model parameters -->
 <div class="modal-overlay" id="tts-details-modal">
   <div class="modal model-params-modal" role="dialog" aria-modal="true" aria-labelledby="tts-details-name">
-    <button class="modal-close" onclick="closeTTSDetails()" id="tts-details-close" aria-label="Close">&times;</button>
+    <button class="modal-close" onclick="closeTTSDetails()" id="tts-details-close" aria-label="Close" data-i18n-aria-label="decision_close">&times;</button>
     <div class="modal-header">
-      <div class="modal-pre" data-i18n="tts_details">TTS Model Details</div>
+      <div class="modal-pre" data-i18n="model_param_settings">Model Param Settings</div>
       <h2 id="tts-details-name"></h2>
     </div>
     <div class="modal-body" style="display:block;">
-      <p id="tts-details-status"></p>
-      <p data-i18n="tts_api_usage">Load this model to use speech synthesis through /v1/audio/speech.</p>
-      <h3 data-i18n="tts_files">Downloaded files</h3>
-      <ul id="tts-details-files" style="overflow-wrap:anywhere;"></ul>
-      <h3 data-i18n="tts_dependencies">External dependencies</h3>
-      <p data-i18n="tts_dependencies_note">Required resources are downloaded and verified automatically before the model is ready.</p>
-      <ul id="tts-details-dependencies" style="overflow-wrap:anywhere;"></ul>
+      <div class="modal-row model-params-setting-row model-params-identity-row">
+        <div class="modal-field">
+          <label for="tts-alias" data-i18n="model_alias">Model Alias</label>
+          <input type="text" id="tts-alias" readonly>
+        </div>
+        <div class="modal-field">
+          <label for="tts-model-type" data-i18n="model_type">Model Type</label>
+          <input type="text" id="tts-model-type" readonly>
+        </div>
+      </div>
+      <div class="modal-row model-params-setting-row tts-capabilities-row">
+        <div class="modal-field">
+          <label for="tts-supported-languages" data-i18n="tts_supported_languages">Supported Languages</label>
+          <input type="text" id="tts-supported-languages" readonly>
+        </div>
+        <div class="modal-field">
+          <label for="tts-output-sample-rate" data-i18n="tts_output_sample_rate">Output Sample Rate</label>
+          <input type="text" id="tts-output-sample-rate" readonly>
+        </div>
+        <div class="modal-field">
+          <label for="tts-max-text-tokens" data-i18n="tts_max_text_tokens">Max Text Tokens</label>
+          <input type="text" id="tts-max-text-tokens" readonly>
+        </div>
+        <div class="modal-field">
+          <label for="tts-max-audio-tokens" data-i18n="tts_max_audio_tokens">Max Audio Tokens</label>
+          <input type="text" id="tts-max-audio-tokens" readonly>
+        </div>
+      </div>
+      <div class="tts-execution-section">
+        <div class="modal-section-title" data-i18n="tts_execution_policy">Runtime Policy</div>
+        <div class="modal-row model-params-setting-row tts-execution-row">
+          <div class="modal-field">
+            <label for="tts-queue-timeout" data-i18n="tts_queue_timeout">Queue Timeout (seconds)</label>
+            <input type="number" id="tts-queue-timeout" step="0.001" disabled>
+          </div>
+          <div class="modal-field">
+            <label for="tts-first-audio-timeout" data-i18n="tts_first_audio_timeout">First Audio Timeout (seconds)</label>
+            <input type="number" id="tts-first-audio-timeout" step="0.001" disabled>
+          </div>
+          <div class="modal-field">
+            <label for="tts-execution-timeout" data-i18n="tts_execution_timeout">Execution Timeout (seconds)</label>
+            <input type="number" id="tts-execution-timeout" step="0.001" disabled>
+          </div>
+          <div class="modal-field">
+            <label for="tts-slow-consumer-timeout" data-i18n="tts_slow_consumer_timeout">Slow Consumer Timeout (seconds)</label>
+            <input type="number" id="tts-slow-consumer-timeout" step="0.001" disabled>
+          </div>
+          <div class="modal-field">
+            <label for="tts-max-output-duration" data-i18n="tts_max_output_duration">Max Output Duration (seconds)</label>
+            <input type="number" id="tts-max-output-duration" step="0.001" disabled>
+          </div>
+          <div class="modal-field">
+            <label for="tts-segment-tokens" data-i18n="tts_segment_tokens">Segment Tokens</label>
+            <input type="number" id="tts-segment-tokens" step="1" disabled>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-cancel" onclick="closeTTSDetails()" data-i18n="cancel">Cancel</button>
+      <button class="btn-accent" id="tts-save" onclick="saveTTSParams()" style="padding:8px 24px;" data-i18n="save" disabled>Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Decision model parameters: fixed model metadata -->
+<div class="modal-overlay" id="decision-details-modal">
+  <div class="modal model-params-modal" role="dialog" aria-modal="true" aria-labelledby="decision-details-name">
+    <button class="modal-close" onclick="closeDecisionDetails()" id="decision-details-close" aria-label="Close" data-i18n-aria-label="decision_close">&times;</button>
+    <div class="modal-header">
+      <div class="modal-pre" data-i18n="model_param_settings">Model Param Settings</div>
+      <h2 id="decision-details-name"></h2>
+    </div>
+    <div class="modal-body" style="display:block;">
+      <div class="modal-row model-params-setting-row model-params-identity-row">
+        <div class="modal-field">
+          <label for="decision-alias" data-i18n="model_alias">Model Alias</label>
+          <input type="text" id="decision-alias" readonly>
+        </div>
+        <div class="modal-field">
+          <label for="decision-model-type" data-i18n="model_type">Model Type</label>
+          <input type="text" id="decision-model-type" value="DECISION" readonly>
+        </div>
+        <div class="modal-field">
+          <div class="field-label-with-help">
+            <label for="decision-context-size" data-i18n="context_size">Context Size</label>
+            <span class="profile-help profile-help-fixed">
+              <button type="button" class="profile-help-trigger" aria-label="About context size" data-i18n-aria-label="context_size_help_label" aria-describedby="decision-context-help">?</button>
+              <span class="profile-help-tooltip profile-help-tooltip-fixed" id="decision-context-help" role="tooltip" data-i18n="decision_context_help"></span>
+            </span>
+          </div>
+          <input type="text" id="decision-context-size" readonly>
+        </div>
+      </div>
+      <div class="model-params-output-section">
+        <div class="modal-row model-params-setting-row">
+          <div class="modal-field">
+            <div class="field-label-with-help">
+              <label for="decision-dtype" id="decision-precision-label" data-i18n="decision_precision"></label>
+              <span class="profile-help profile-help-fixed">
+                <button type="button" class="profile-help-trigger" data-i18n-aria-label="decision_precision" aria-describedby="decision-precision-help">?</button>
+                <span class="profile-help-tooltip profile-help-tooltip-fixed" id="decision-precision-help" role="tooltip" data-i18n="decision_precision_help"></span>
+              </span>
+            </div>
+            <select id="decision-dtype"><option value="float16">FP16</option><option value="float32">FP32</option></select>
+          </div>
+          <div class="modal-field">
+            <div class="field-label-with-help">
+              <label for="decision-batch-size" id="decision-batch-label" data-i18n="decision_batch"></label>
+              <span class="profile-help profile-help-fixed">
+                <button type="button" class="profile-help-trigger" data-i18n-aria-label="decision_batch" aria-describedby="decision-batch-help">?</button>
+                <span class="profile-help-tooltip profile-help-tooltip-fixed" id="decision-batch-help" role="tooltip" data-i18n="decision_batch_help"></span>
+              </span>
+            </div>
+            <input type="number" id="decision-batch-size" min="1" max="256" step="1" value="16">
+          </div>
+          <div class="modal-field">
+            <div class="field-label-with-help">
+              <label for="decision-cache-prompts" id="decision-cache-label" data-i18n="decision_cache"></label>
+              <span class="profile-help profile-help-fixed">
+                <button type="button" class="profile-help-trigger" data-i18n-aria-label="decision_cache" aria-describedby="decision-cache-help">?</button>
+                <span class="profile-help-tooltip profile-help-tooltip-fixed" id="decision-cache-help" role="tooltip" data-i18n="decision_cache_help"></span>
+              </span>
+            </div>
+            <div class="decision-cache-control"><label class="toggle"><input type="checkbox" id="decision-cache-prompts" aria-labelledby="decision-cache-label" aria-describedby="decision-cache-help"><span class="toggle-slider"></span></label></div>
+          </div>
+        </div>
+      </div>
+      <details id="decision-advanced" class="decision-advanced">
+        <summary data-i18n="decision_advanced"></summary>
+        <div class="modal-row model-params-setting-row">
+          <div class="modal-field">
+            <div class="field-label-with-help"><label for="decision-device" id="decision-device-label" data-i18n="decision_device"></label><span class="profile-help profile-help-fixed"><button type="button" class="profile-help-trigger" data-i18n-aria-label="decision_device" aria-describedby="decision-device-help">?</button><span class="profile-help-tooltip profile-help-tooltip-fixed" id="decision-device-help" role="tooltip" data-i18n="decision_device_help"></span></span></div>
+            <select id="decision-device"><option value="auto" data-i18n="decision_device_auto"></option><option value="gpu">GPU</option><option value="cpu">CPU</option></select>
+          </div>
+          <div class="modal-field">
+            <div class="field-label-with-help"><label for="decision-compile" id="decision-compile-label" data-i18n="decision_compile"></label><span class="profile-help profile-help-fixed"><button type="button" class="profile-help-trigger" data-i18n-aria-label="decision_compile" aria-describedby="decision-compile-help">?</button><span class="profile-help-tooltip profile-help-tooltip-fixed" id="decision-compile-help" role="tooltip" data-i18n="decision_compile_help"></span></span></div>
+            <div class="decision-cache-control"><label class="toggle"><input type="checkbox" id="decision-compile" aria-labelledby="decision-compile-label" ><span class="toggle-slider"></span></label></div>
+          </div>
+          <div class="modal-field">
+            <div class="field-label-with-help"><label for="decision-padding" id="decision-padding-label" data-i18n="decision_padding"></label><span class="profile-help profile-help-fixed"><button type="button" class="profile-help-trigger" data-i18n-aria-label="decision_padding" aria-describedby="decision-padding-help">?</button><span class="profile-help-tooltip profile-help-tooltip-fixed" id="decision-padding-help" role="tooltip" data-i18n="decision_padding_help"></span></span></div>
+            <div class="decision-padding-control"><label class="toggle"><input type="checkbox" id="decision-padding" aria-labelledby="decision-padding-label" onchange="document.getElementById('decision-pad-multiple').disabled = !this.checked"><span class="toggle-slider"></span></label><input type="number" id="decision-pad-multiple" min="1" max="1024" step="1" value="16" disabled aria-labelledby="decision-padding-label"></div>
+          </div>
+        </div>
+        <div class="modal-row model-params-setting-row decision-metadata-row">
+          <div class="modal-field"><div class="field-label-with-help"><label for="decision-head-budget" data-i18n="decision_head_budget"></label><span class="profile-help profile-help-fixed"><button type="button" class="profile-help-trigger" data-i18n-aria-label="decision_head_budget" aria-describedby="decision-head-budget-help">?</button><span class="profile-help-tooltip profile-help-tooltip-fixed" id="decision-head-budget-help" role="tooltip" data-i18n="decision_head_budget_help"></span></span></div><input type="text" id="decision-head-budget" readonly></div>
+          <div class="modal-field"><div class="field-label-with-help"><label for="decision-calibration" data-i18n="decision_calibration"></label><span class="profile-help profile-help-fixed"><button type="button" class="profile-help-trigger" data-i18n-aria-label="decision_calibration" aria-describedby="decision-calibration-help">?</button><span class="profile-help-tooltip profile-help-tooltip-fixed" id="decision-calibration-help" role="tooltip" data-i18n="decision_calibration_help"></span></span></div><input type="text" id="decision-calibration" readonly></div>
+        </div>
+      </details>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-cancel" onclick="closeDecisionDetails()" data-i18n="cancel">Cancel</button>
+      <button class="btn-accent" onclick="saveDecisionParams()" style="padding:8px 24px;" data-i18n="save">Save</button>
     </div>
   </div>
 </div>
@@ -4870,7 +5084,7 @@
         </div>
         <div class="modal-field">
           <label for="modal-model-type" data-i18n="model_type">Model Type</label>
-          <select id="modal-model-type"><option value="auto" data-i18n="auto_detect">Auto Detect</option><option value="llm">LLM</option><option value="vlm">LLM/VLM</option><option value="block_diffusion_vlm">Block Diffusion VLM</option><option value="embedding">Embedding</option><option value="reranker">Reranker</option><option value="asr">ASR</option><option value="tts">TTS</option></select>
+          <input type="text" id="modal-model-type" readonly>
         </div>
         <div class="modal-field"><div class="field-label-with-help"><label for="modal-context-size" data-i18n="context_size">CONTEXT SIZE</label><span class="profile-help profile-help-fixed"><button type="button" class="profile-help-trigger" aria-label="About context size" data-i18n-aria-label="context_size_help_label" aria-describedby="context-size-help">?</button><span class="profile-help-tooltip profile-help-tooltip-fixed" id="context-size-help" role="tooltip" data-i18n="context_size_help">Model context window read from its configuration. Read only; the runtime limit is set separately.</span></span></div><input type="text" placeholder="--" id="modal-context-size" readonly></div>
       </div>
@@ -5039,6 +5253,43 @@
   const I18N = {
     en: {
       tts_details: "TTS Model Details",
+      tts_supported_languages: "Supported Languages",
+      tts_max_text_tokens: "Max Text Tokens",
+      tts_max_audio_tokens: "Max Audio Tokens",
+      tts_output_sample_rate: "Output Sample Rate",
+      tts_execution_policy: "Runtime Policy",
+      tts_queue_timeout: "Queue Timeout (seconds)",
+      tts_first_audio_timeout: "First Audio Timeout (seconds)",
+      tts_execution_timeout: "Execution Timeout (seconds)",
+      tts_slow_consumer_timeout: "Slow Consumer Timeout (seconds)",
+      tts_max_output_duration: "Max Output Duration (seconds)",
+      tts_segment_tokens: "Segment Tokens",
+      tts_execution_invalid: "Enter values within the limits shown by the runtime.",
+      decision_close: "Close",
+      decision_context_help: "Total input tokens per question, including instructions, options and state. Defined by the model; read-only and cannot be changed. Excess state tokens are truncated from the end.",
+      decision_head_budget: "Question / Option Budget",
+      decision_head_budget_help: "Read only. Token budget for question instructions and options, read from the checkpoint. This uses part of the total context window.",
+      decision_calibration: "Calibration Temperature",
+      decision_calibration_help: "Read only. Effective checkpoint temperatures for choice, score and noul, including option-count overrides when present; values are clamped to 0.5–5.0, matching inference. Not a sampling temperature.",
+      decision_advanced: "Advanced Settings",
+      decision_device: "Compute Device",
+      decision_device_auto: "Auto",
+      decision_device_help: "Automatically prefer an available GPU. CPU runs inference on the CPU. Changing this reloads the model.",
+      decision_compile: "Compile Optimization",
+      decision_compile_help: "Compile the inference graph. The first call for a new input shape has compilation overhead; performance depends on the workload. Off by default.",
+      decision_padding: "Sequence Alignment",
+      decision_padding_help: "Pad sequences to a multiple of this value (1–1024), capped by the model context limit. Does not increase the context size. Off by default; suggested multiple: 16.",
+      decision_padding_invalid: "Enter a whole number from 1 to 1024.",
+      decision_precision: "Compute Precision",
+      decision_batch: "Question Batch Size",
+      decision_cache: "Question Prefix Cache",
+      decision_precision_help: "Precision used for inference. FP16 uses less memory; FP32 uses more memory for higher numerical precision.",
+      decision_batch_help: "Questions processed in one forward pass (1–256). Larger batches use more memory. Default: 16.",
+      decision_cache_help: "Reuse tokenized question prefixes for repeated questions. Does not cache state or decision results. Off by default.",
+      decision_batch_invalid: "Enter a whole number from 1 to 256.",
+
+      err_dflash2_unload_required: "Unload the current DFlash2 model before loading another model.",
+
       tts_api_usage: "Load this model to use speech synthesis through /v1/audio/speech.",
       tts_files: "Downloaded files",
       tts_dependencies: "External dependencies",
@@ -5176,7 +5427,7 @@
       server_status: "Server Status", running: "Running", uptime: "Uptime", model: "Model",
       gpu_memory: "GPU Memory", requests: "Requests", active_mem: "Active", peak_mem: "Peak", cache_mem: "Cache", stopped: "Stopped",
       models_subtitle: "Manage, download, and configure model scheduling.", model_manager: "Model Manager", model_download: "Model Download", scheduler_profile_tab: "Scheduling",
-      col_model: "Model \u25B2", col_type: "Type", col_quant: "Quant", quant_unquantized: "Unquantized", col_size: "Size", col_status: "Status", col_pinned: "Pinned", col_default: "Default", col_params: "Params", status_ready: "Not loaded",
+      col_model: "Model \u25B2", col_type: "Type", col_quant: "Quant", quant_unquantized: "Unquantized", quant_unknown: "Unknown", col_size: "Size", col_status: "Status", col_pinned: "Pinned", col_default: "Default", col_params: "Params", status_ready: "Not loaded",
       status_incomplete: "Incomplete", status_unsupported: "Unsupported", model_not_ready: "Model snapshot is not ready to load.", action_unavailable: "Unavailable",
       batch_delete: "Batch Delete", cancel: "Cancel", selected_count: "{n} selected",
       confirm_delete_single: 'Delete model "{name}"? This cannot be undone.',
@@ -5470,6 +5721,43 @@
     },
     "zh-Hans": {
       tts_details: "TTS 模型详情",
+      tts_supported_languages: "支持语言",
+      tts_max_text_tokens: "最大文本 Token",
+      tts_max_audio_tokens: "最大音频 Token",
+      tts_output_sample_rate: "输出采样率",
+      tts_execution_policy: "运行策略",
+      tts_queue_timeout: "队列超时（秒）",
+      tts_first_audio_timeout: "首段音频超时（秒）",
+      tts_execution_timeout: "执行超时（秒）",
+      tts_slow_consumer_timeout: "慢速消费者超时（秒）",
+      tts_max_output_duration: "最大输出时长（秒）",
+      tts_segment_tokens: "分段 Token 数",
+      tts_execution_invalid: "请输入运行时允许范围内的数值。",
+      decision_close: "关闭",
+      decision_context_help: "每个问题的输入 token 总长度，包含任务说明、选项和待判断内容。由模型定义，只读且不可修改；超长的待判断内容会从末尾截断。",
+      decision_head_budget: "问题与选项预算",
+      decision_head_budget_help: "只读：从检查点读取的问题说明与选项 token 预算，占用总上下文空间的一部分。",
+      decision_calibration: "概率校准温度",
+      decision_calibration_help: "只读：展示检查点中 choice、score、noul 的有效校准温度，以及存在时按选项数量设置的覆盖值。与推理一致，限制在 0.5–5.0 范围内；不是采样温度。",
+      decision_advanced: "高级设置",
+      decision_device: "计算设备",
+      decision_device_auto: "自动",
+      decision_device_help: "自动模式优先使用可用的 GPU；CPU 模式使用 CPU 推理。修改后重新加载模型。",
+      decision_compile: "编译优化",
+      decision_compile_help: "编译推理计算图。新输入形状首次执行有编译开销，性能收益取决于工作负载。默认关闭。",
+      decision_padding: "序列长度对齐",
+      decision_padding_help: "按指定倍数（1–1024）补齐序列，不超过模型上下文上限，不会扩大上下文长度。默认关闭；建议倍数为 16。",
+      decision_padding_invalid: "请输入 1 到 1024 之间的整数。",
+      decision_precision: "计算精度",
+      decision_batch: "问题批大小",
+      decision_cache: "问题前缀缓存",
+      decision_precision_help: "推理使用的计算精度。FP16 占用较少内存；FP32 占用更多内存，提供更高数值精度。",
+      decision_batch_help: "一次前向计算处理的问题数量（1–256）。数值越大，内存占用越高。默认 16。",
+      decision_cache_help: "重复问题可复用分词后的问题前缀，不缓存待判断内容或决策结果。默认关闭。",
+      decision_batch_invalid: "请输入 1 到 256 之间的整数。",
+
+      err_dflash2_unload_required: "请先卸载当前 DFlash2 模型，再加载其他模型。",
+
       tts_api_usage: "加载模型后，可通过 /v1/audio/speech 接口合成语音。",
       tts_files: "已下载文件",
       tts_dependencies: "外部依赖",
@@ -5607,7 +5895,7 @@
       server_status: "服务器状态", running: "运行中", uptime: "运行时间", model: "模型",
       gpu_memory: "GPU 内存", requests: "请求数", active_mem: "活跃", peak_mem: "峰值", cache_mem: "缓存", stopped: "已停止",
       models_subtitle: "管理、下载模型和配置模型调度。", model_manager: "模型管理", model_download: "模型下载", scheduler_profile_tab: "调度配置",
-      col_model: "模型 \u25B2", col_type: "类型", col_quant: "量化", quant_unquantized: "未量化", col_size: "大小", col_status: "状态", col_pinned: "固定", col_default: "默认", col_params: "参数", status_ready: "未加载",
+      col_model: "模型 \u25B2", col_type: "类型", col_quant: "量化", quant_unquantized: "未量化", quant_unknown: "未知", col_size: "大小", col_status: "状态", col_pinned: "固定", col_default: "默认", col_params: "参数", status_ready: "未加载",
       status_incomplete: "不完整", status_unsupported: "不支持", model_not_ready: "模型快照尚未达到可加载状态。", action_unavailable: "不可用",
       batch_delete: "批量删除", cancel: "取消", selected_count: "已选 {n} 个",
       confirm_delete_single: '确定删除模型 "{name}"？此操作不可恢复。',
@@ -5901,6 +6189,43 @@
     },
     "zh-Hant": {
       tts_details: "TTS 模型詳情",
+      tts_supported_languages: "支援語言",
+      tts_max_text_tokens: "最大文字 Token",
+      tts_max_audio_tokens: "最大音訊 Token",
+      tts_output_sample_rate: "輸出取樣率",
+      tts_execution_policy: "執行策略",
+      tts_queue_timeout: "佇列逾時（秒）",
+      tts_first_audio_timeout: "首段音訊逾時（秒）",
+      tts_execution_timeout: "執行逾時（秒）",
+      tts_slow_consumer_timeout: "慢速消費者逾時（秒）",
+      tts_max_output_duration: "最大輸出時長（秒）",
+      tts_segment_tokens: "分段 Token 數",
+      tts_execution_invalid: "請輸入執行階段允許範圍內的數值。",
+      decision_close: "關閉",
+      decision_context_help: "每個問題的輸入 token 總長度，包含任務說明、選項和待判斷內容。由模型定義，唯讀且無法修改；超長的待判斷內容會從末尾截斷。",
+      decision_head_budget: "問題與選項預算",
+      decision_head_budget_help: "唯讀：從檢查點讀取的問題說明與選項 token 預算，占用總上下文空間的一部分。",
+      decision_calibration: "機率校準溫度",
+      decision_calibration_help: "唯讀：顯示檢查點中 choice、score、noul 的有效校準溫度，以及存在時依選項數量設定的覆寫值。與推論一致，限制在 0.5–5.0 範圍內；不是取樣溫度。",
+      decision_advanced: "進階設定",
+      decision_device: "計算裝置",
+      decision_device_auto: "自動",
+      decision_device_help: "自動模式優先使用可用的 GPU；CPU 模式使用 CPU 推論。修改後重新載入模型。",
+      decision_compile: "編譯最佳化",
+      decision_compile_help: "編譯推論計算圖。新輸入形狀首次執行有編譯成本，效能收益取決於工作負載。預設關閉。",
+      decision_padding: "序列長度對齊",
+      decision_padding_help: "依指定倍數（1–1024）補齊序列，不超過模型上下文上限，不會擴大上下文長度。預設關閉；建議倍數為 16。",
+      decision_padding_invalid: "請輸入 1 到 1024 之間的整數。",
+      decision_precision: "計算精度",
+      decision_batch: "問題批次大小",
+      decision_cache: "問題前綴快取",
+      decision_precision_help: "推理使用的計算精度。FP16 使用較少記憶體；FP32 使用更多記憶體，提供更高數值精度。",
+      decision_batch_help: "一次前向計算處理的問題數量（1–256）。數值越大，記憶體用量越高。預設為 16。",
+      decision_cache_help: "重複問題可重用分詞後的問題前綴，不快取待判斷內容或決策結果。預設關閉。",
+      decision_batch_invalid: "請輸入 1 到 256 之間的整數。",
+
+      err_dflash2_unload_required: "請先卸載目前的 DFlash2 模型，再載入其他模型。",
+
       tts_api_usage: "載入模型後，可透過 /v1/audio/speech 介面合成語音。",
       tts_files: "已下載檔案",
       tts_dependencies: "外部相依資源",
@@ -6038,7 +6363,7 @@
       server_status: "伺服器狀態", running: "執行中", uptime: "執行時間", model: "模型",
       gpu_memory: "GPU 記憶體", requests: "請求數", active_mem: "活躍", peak_mem: "峰值", cache_mem: "快取", stopped: "已停止",
       models_subtitle: "管理、下載模型和設定模型調度。", model_manager: "模型管理", model_download: "模型下載", scheduler_profile_tab: "調度設定",
-      col_model: "模型 \u25B2", col_type: "類型", col_quant: "量化", quant_unquantized: "未量化", col_size: "大小", col_status: "狀態", col_pinned: "固定", col_default: "預設", col_params: "參數", status_ready: "未載入",
+      col_model: "模型 \u25B2", col_type: "類型", col_quant: "量化", quant_unquantized: "未量化", quant_unknown: "未知", col_size: "大小", col_status: "狀態", col_pinned: "固定", col_default: "預設", col_params: "參數", status_ready: "未載入",
       status_incomplete: "不完整", status_unsupported: "不支援", model_not_ready: "模型快照尚未達到可載入狀態。", action_unavailable: "不可用",
       batch_delete: "批量刪除", cancel: "取消", selected_count: "已選 {n} 個",
       confirm_delete_single: '確定刪除模型 "{name}"？此操作不可復原。',
@@ -6335,6 +6660,43 @@
     },
     ja: {
       tts_details: "TTS モデル詳細",
+      tts_supported_languages: "対応言語",
+      tts_max_text_tokens: "最大テキスト Token",
+      tts_max_audio_tokens: "最大音声 Token",
+      tts_output_sample_rate: "出力サンプルレート",
+      tts_execution_policy: "実行ポリシー",
+      tts_queue_timeout: "キューのタイムアウト（秒）",
+      tts_first_audio_timeout: "最初の音声のタイムアウト（秒）",
+      tts_execution_timeout: "実行タイムアウト（秒）",
+      tts_slow_consumer_timeout: "低速コンシューマーのタイムアウト（秒）",
+      tts_max_output_duration: "最大出力時間（秒）",
+      tts_segment_tokens: "セグメント Token 数",
+      tts_execution_invalid: "ランタイムが許可する範囲内の値を入力してください。",
+      decision_close: "閉じる",
+      decision_context_help: "各質問の入力トークン総数です。指示、選択肢、判定対象を含みます。モデルで定義された読み取り専用の値で、変更できません。上限を超える判定対象の末尾は切り捨てられます。",
+      decision_head_budget: "質問・選択肢の予算",
+      decision_head_budget_help: "読み取り専用。チェックポイントの質問説明と選択肢のトークン予算です。全体のコンテキストの一部を使用します。",
+      decision_calibration: "確率校正温度",
+      decision_calibration_help: "読み取り専用。choice、score、noul の有効な校正温度と、存在する場合は選択肢数別の値を表示します。推論と同様に 0.5〜5.0 に制限されます。サンプリング温度ではありません。",
+      decision_advanced: "詳細設定",
+      decision_device: "計算デバイス",
+      decision_device_auto: "自動",
+      decision_device_help: "自動では利用可能な GPU を優先します。CPU では CPU で推論します。変更後にモデルを再読み込みします。",
+      decision_compile: "コンパイル最適化",
+      decision_compile_help: "推論グラフをコンパイルします。新しい入力形状の初回実行には追加時間がかかります。効果は処理内容に依存します。既定ではオフです。",
+      decision_padding: "系列長の整列",
+      decision_padding_help: "指定の倍数（1〜1024）にパディングします。モデルのコンテキスト上限を超えず、上限自体は増えません。既定ではオフ、推奨値は 16 です。",
+      decision_padding_invalid: "1〜1024 の整数を入力してください。",
+      decision_precision: "計算精度",
+      decision_batch: "質問バッチサイズ",
+      decision_cache: "質問プレフィックスキャッシュ",
+      decision_precision_help: "推論に使う計算精度です。FP16 は省メモリ、FP32 はメモリ使用量が増えますが数値精度が高くなります。",
+      decision_batch_help: "1 回の順伝播で処理する質問数（1〜256）。大きいほどメモリを消費します。既定値は 16 です。",
+      decision_cache_help: "繰り返す質問のトークン化済みプレフィックスを再利用します。判定対象や結果は保存しません。既定ではオフです。",
+      decision_batch_invalid: "1〜256 の整数を入力してください。",
+
+      err_dflash2_unload_required: "別のモデルを読み込む前に、現在の DFlash2 モデルをアンロードしてください。",
+
       tts_api_usage: "モデルを読み込むと /v1/audio/speech で音声を合成できます。",
       tts_files: "ダウンロード済みファイル",
       tts_dependencies: "外部依存リソース",
@@ -6472,7 +6834,7 @@
       server_status: "サーバーステータス", running: "実行中", uptime: "稼働時間", model: "モデル",
       gpu_memory: "GPU メモリ", requests: "リクエスト", active_mem: "アクティブ", peak_mem: "ピーク", cache_mem: "キャッシュ", stopped: "停止中",
       models_subtitle: "モデルの管理、ダウンロード、スケジューリング設定。", model_manager: "モデル管理", model_download: "モデルダウンロード", scheduler_profile_tab: "スケジューラ設定",
-      col_model: "モデル \u25B2", col_type: "タイプ", col_quant: "量子化", quant_unquantized: "量子化なし", col_size: "サイズ", col_status: "ステータス", col_pinned: "固定", col_default: "デフォルト", col_params: "パラメータ", status_ready: "未ロード",
+      col_model: "モデル \u25B2", col_type: "タイプ", col_quant: "量子化", quant_unquantized: "量子化なし", quant_unknown: "不明", col_size: "サイズ", col_status: "ステータス", col_pinned: "固定", col_default: "デフォルト", col_params: "パラメータ", status_ready: "未ロード",
       status_incomplete: "不完全", status_unsupported: "未対応", model_not_ready: "モデルスナップショットはまだロード可能な状態ではありません。", action_unavailable: "利用不可",
       batch_delete: "一括削除", cancel: "キャンセル", selected_count: "{n} 件選択中",
       confirm_delete_single: 'モデル "{name}" を削除しますか？この操作は元に戻せません。',
@@ -6769,6 +7131,43 @@
     },
     ko: {
       tts_details: "TTS 모델 세부 정보",
+      tts_supported_languages: "지원 언어",
+      tts_max_text_tokens: "최대 텍스트 Token",
+      tts_max_audio_tokens: "최대 오디오 Token",
+      tts_output_sample_rate: "출력 샘플 레이트",
+      tts_execution_policy: "실행 정책",
+      tts_queue_timeout: "대기열 시간 제한(초)",
+      tts_first_audio_timeout: "첫 오디오 시간 제한(초)",
+      tts_execution_timeout: "실행 시간 제한(초)",
+      tts_slow_consumer_timeout: "느린 소비자 시간 제한(초)",
+      tts_max_output_duration: "최대 출력 시간(초)",
+      tts_segment_tokens: "세그먼트 Token 수",
+      tts_execution_invalid: "런타임에서 허용하는 범위의 값을 입력하세요.",
+      decision_close: "닫기",
+      decision_context_help: "질문별 총 입력 토큰 수로, 지침, 선택지, 판단할 내용을 포함합니다. 모델이 정의하는 읽기 전용 값으로 변경할 수 없으며, 한도를 넘는 판단 내용은 끝부분이 잘립니다.",
+      decision_head_budget: "질문·선택지 예산",
+      decision_head_budget_help: "읽기 전용. 체크포인트에서 읽은 질문 설명과 선택지의 토큰 예산으로 전체 문맥의 일부를 사용합니다.",
+      decision_calibration: "확률 보정 온도",
+      decision_calibration_help: "읽기 전용. choice, score, noul의 유효 보정 온도와 선택지 수에 따른 값이 있으면 함께 표시합니다. 추론과 동일하게 0.5–5.0으로 제한되며 샘플링 온도가 아닙니다.",
+      decision_advanced: "고급 설정",
+      decision_device: "계산 장치",
+      decision_device_auto: "자동",
+      decision_device_help: "자동은 사용 가능한 GPU를 우선합니다. CPU는 CPU에서 추론합니다. 변경하면 모델을 다시 불러옵니다.",
+      decision_compile: "컴파일 최적화",
+      decision_compile_help: "추론 그래프를 컴파일합니다. 새로운 입력 형태의 첫 실행에는 컴파일 시간이 필요하며 성능 효과는 작업에 따라 달라집니다. 기본값은 꺼짐입니다.",
+      decision_padding: "시퀀스 길이 정렬",
+      decision_padding_help: "지정한 배수(1–1024)로 패딩하되 모델 문맥 한도를 넘지 않습니다. 문맥 크기를 늘리지 않습니다. 기본값은 꺼짐이며 권장 배수는 16입니다.",
+      decision_padding_invalid: "1에서 1024 사이의 정수를 입력하세요.",
+      decision_precision: "계산 정밀도",
+      decision_batch: "질문 배치 크기",
+      decision_cache: "질문 접두사 캐시",
+      decision_precision_help: "추론 계산에 사용할 정밀도입니다. FP16은 메모리를 절약하며, FP32는 더 많은 메모리로 높은 수치 정밀도를 제공합니다.",
+      decision_batch_help: "한 번의 순전파에서 처리하는 질문 수(1–256)입니다. 값이 클수록 메모리 사용량이 증가합니다. 기본값: 16.",
+      decision_cache_help: "반복되는 질문의 토큰화된 접두사를 재사용합니다. 판단할 내용이나 결정 결과는 캐시하지 않습니다. 기본값은 꺼짐입니다.",
+      decision_batch_invalid: "1에서 256 사이의 정수를 입력하세요.",
+
+      err_dflash2_unload_required: "다른 모델을 로드하기 전에 현재 DFlash2 모델을 언로드하세요.",
+
       tts_api_usage: "모델을 로드한 후 /v1/audio/speech로 음성을 합성할 수 있습니다.",
       tts_files: "다운로드한 파일",
       tts_dependencies: "외부 의존성",
@@ -6906,7 +7305,7 @@
       server_status: "서버 상태", running: "실행 중", uptime: "가동 시간", model: "모델",
       gpu_memory: "GPU 메모리", requests: "요청", active_mem: "활성", peak_mem: "피크", cache_mem: "캐시", stopped: "중지됨",
       models_subtitle: "모델 관리, 다운로드 및 스케줄링 설정.", model_manager: "모델 관리", model_download: "모델 다운로드", scheduler_profile_tab: "스케줄러 설정",
-      col_model: "모델 \u25B2", col_type: "유형", col_quant: "양자화", quant_unquantized: "양자화되지 않음", col_size: "크기", col_status: "상태", col_pinned: "고정", col_default: "기본", col_params: "매개변수", status_ready: "로드 안 됨",
+      col_model: "모델 \u25B2", col_type: "유형", col_quant: "양자화", quant_unquantized: "양자화되지 않음", quant_unknown: "알 수 없음", col_size: "크기", col_status: "상태", col_pinned: "고정", col_default: "기본", col_params: "매개변수", status_ready: "로드 안 됨",
       status_incomplete: "불완전", status_unsupported: "지원 안 됨", model_not_ready: "모델 스냅샷을 아직 로드할 수 없습니다.", action_unavailable: "사용 불가",
       batch_delete: "일괄 삭제", cancel: "취소", selected_count: "{n}개 선택됨",
       confirm_delete_single: '모델 "{name}"을(를) 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.',
@@ -8140,6 +8539,8 @@
   }
 
   window.__CURRENT_PARAM_MODEL__ = '';
+  window.__TTS_PARAM_MODEL__ = '';
+  window.__TTS_EXECUTION_PROFILE__ = null;
   window.__MODEL_PARAMS__ = {}; // { modelId: { context_size, max_tokens, ... } }
   window.__LOCAL_MODELS__ = {}; // { modelId: local model scan row }
 
@@ -8157,29 +8558,232 @@
 
   function openTTSDetails(model) {
     window.__TTS_DETAILS_TRIGGER__ = document.activeElement;
-    const dict = I18N[currentLang] || I18N.en;
-    const info = model.download_info || {};
+    window.__TTS_PARAM_MODEL__ = model.id;
+    const saved = (window.__MODEL_PARAMS__ || {})[model.id] || {};
+    const alias = saved.alias || model.id;
     document.getElementById('tts-details-name').textContent = model.id;
-    document.getElementById('tts-details-status').textContent = modelStatusPresentation(model, !!model.loaded).text;
-    function fillList(id, values, emptyText) {
-      const list = document.getElementById(id);
-      list.replaceChildren();
-      (values.length ? values : [emptyText]).forEach(value => {
-        const item = document.createElement('li');
-        item.textContent = value;
-        list.appendChild(item);
-      });
-    }
-    fillList('tts-details-files', (info.files || []).map(file =>
-      file.path + ' · ' + formatVersionBytes(file.size)), dict.tts_files_empty);
-    fillList('tts-details-dependencies', info.external_resources || [], dict.tts_dependencies_empty);
+    document.getElementById('tts-alias').value = alias;
+    document.getElementById('tts-alias').title = alias;
+    document.getElementById('tts-model-type').value = modelTypeLabel(model);
+    const metadata = model.tts_metadata || {};
+    const languages = Array.isArray(metadata.supported_languages)
+      ? metadata.supported_languages.filter(value => typeof value === 'string' && value.trim()).join(' · ')
+      : '';
+    const fields = [
+      ['tts-supported-languages', languages],
+      ['tts-output-sample-rate', Number.isSafeInteger(metadata.output_sample_rate_hz) && metadata.output_sample_rate_hz > 0
+        ? metadata.output_sample_rate_hz.toLocaleString('en-US') + ' Hz' : ''],
+      ['tts-max-text-tokens', Number.isSafeInteger(metadata.max_text_tokens) && metadata.max_text_tokens > 0
+        ? metadata.max_text_tokens.toLocaleString('en-US') : ''],
+      ['tts-max-audio-tokens', Number.isSafeInteger(metadata.max_audio_tokens) && metadata.max_audio_tokens > 0
+        ? metadata.max_audio_tokens.toLocaleString('en-US') : '']
+    ];
+    let visibleFields = 0;
+    fields.forEach(([id, value]) => {
+      const input = document.getElementById(id);
+      input.value = value;
+      input.title = value;
+      input.closest('.modal-field').style.display = value ? '' : 'none';
+      if (value) visibleFields += 1;
+    });
+    document.querySelector('#tts-details-modal .tts-capabilities-row').style.display = visibleFields ? '' : 'none';
+    renderTTSExecutionSettings(model, saved);
     applyI18n(currentLang);
     document.getElementById('tts-details-modal').classList.add('open');
     document.getElementById('tts-details-close').focus();
+    if (!window.__TTS_EXECUTION_PROFILE__) {
+      apiFetch('/admin/api/audio/execution-profile');
+    }
+  }
+
+  function ttsExecutionControls() {
+    return [
+      document.getElementById('tts-queue-timeout'),
+      document.getElementById('tts-first-audio-timeout'),
+      document.getElementById('tts-execution-timeout'),
+      document.getElementById('tts-slow-consumer-timeout'),
+      document.getElementById('tts-max-output-duration'),
+      document.getElementById('tts-segment-tokens')
+    ];
+  }
+
+  function renderTTSExecutionSettings(model, saved) {
+    const profile = window.__TTS_EXECUTION_PROFILE__;
+    const controls = ttsExecutionControls();
+    const save = document.getElementById('tts-save');
+    if (!profile || !profile.defaults || !profile.constraints) {
+      controls.forEach(control => { control.value = ''; control.disabled = true; });
+      save.disabled = true;
+      return;
+    }
+    const defaults = profile.defaults;
+    const constraints = profile.constraints;
+    const settings = saved.audio_execution || {};
+    const sampleRate = Number(profile.output_frames_per_second);
+    const deadlineRange = constraints.deadline_ms || {};
+    const outputRange = constraints.max_output_frames || {};
+    const segmentRange = constraints.segment_tokens || {};
+    const assignSeconds = (id, value, range) => {
+      const control = document.getElementById(id);
+      control.value = Number(value) / 1000;
+      control.min = Number(range.min) / 1000;
+      control.max = Number(range.max) / 1000;
+      control.disabled = false;
+    };
+    assignSeconds('tts-queue-timeout', settings.queue_timeout_ms ?? defaults.queue_timeout_ms, deadlineRange);
+    assignSeconds('tts-first-audio-timeout', settings.first_audio_timeout_ms ?? defaults.first_audio_timeout_ms, deadlineRange);
+    assignSeconds('tts-execution-timeout', settings.execution_timeout_ms ?? defaults.execution_timeout_ms, deadlineRange);
+    assignSeconds('tts-slow-consumer-timeout', settings.slow_consumer_timeout_ms ?? defaults.slow_consumer_timeout_ms, deadlineRange);
+    const maxOutput = document.getElementById('tts-max-output-duration');
+    const frames = Number(settings.max_output_frames ?? defaults.max_output_frames);
+    const hasOutputProfile = Number.isSafeInteger(sampleRate) && sampleRate > 0
+      && Number.isSafeInteger(frames) && frames > 0;
+    maxOutput.value = hasOutputProfile ? frames / sampleRate : '';
+    maxOutput.min = hasOutputProfile ? Number(outputRange.min) / sampleRate : '';
+    maxOutput.max = hasOutputProfile ? Number(outputRange.max) / sampleRate : '';
+    maxOutput.disabled = !hasOutputProfile;
+    const segment = document.getElementById('tts-segment-tokens');
+    segment.value = settings.segment_tokens ?? defaults.segment_tokens;
+    segment.min = segmentRange.min;
+    segment.max = segmentRange.max;
+    segment.disabled = false;
+    save.disabled = !hasOutputProfile;
+  }
+
+  function saveTTSParams() {
+    const modelId = window.__TTS_PARAM_MODEL__;
+    const model = (window.__LOCAL_MODELS__ || {})[modelId];
+    const profile = window.__TTS_EXECUTION_PROFILE__;
+    if (!modelId || !model || !profile?.defaults || !profile?.constraints) return;
+    const deadlineRange = profile.constraints.deadline_ms || {};
+    const outputRange = profile.constraints.max_output_frames || {};
+    const segmentRange = profile.constraints.segment_tokens || {};
+    const milliseconds = id => {
+      const seconds = Number(document.getElementById(id).value);
+      const value = Math.round(seconds * 1000);
+      return Number.isFinite(seconds) && seconds > 0 && Number.isSafeInteger(value)
+        && value >= Number(deadlineRange.min) && value <= Number(deadlineRange.max) ? value : null;
+    };
+    const queueTimeout = milliseconds('tts-queue-timeout');
+    const firstAudioTimeout = milliseconds('tts-first-audio-timeout');
+    const executionTimeout = milliseconds('tts-execution-timeout');
+    const slowConsumerTimeout = milliseconds('tts-slow-consumer-timeout');
+    const sampleRate = Number(profile.output_frames_per_second);
+    const duration = Number(document.getElementById('tts-max-output-duration').value);
+    const maxOutputFrames = Math.round(duration * sampleRate);
+    const segmentTokens = Number(document.getElementById('tts-segment-tokens').value);
+    const outputValid = Number.isFinite(duration) && duration > 0 && Number.isSafeInteger(sampleRate)
+      && sampleRate > 0 && Number.isSafeInteger(maxOutputFrames)
+      && maxOutputFrames >= Number(outputRange.min) && maxOutputFrames <= Number(outputRange.max);
+    const segmentValid = Number.isSafeInteger(segmentTokens)
+      && segmentTokens >= Number(segmentRange.min) && segmentTokens <= Number(segmentRange.max);
+    if ([queueTimeout, firstAudioTimeout, executionTimeout, slowConsumerTimeout].includes(null)
+        || !outputValid || !segmentValid) {
+      const dict = I18N[currentLang] || I18N.en;
+      showToast(dict.tts_execution_invalid || 'Enter values within the limits shown by the runtime.', 'warn');
+      return;
+    }
+    const params = Object.assign({}, (window.__MODEL_PARAMS__ || {})[modelId] || {}, {
+      model_id: modelId,
+      audio_execution: {
+        queue_timeout_ms: queueTimeout,
+        first_audio_timeout_ms: firstAudioTimeout,
+        execution_timeout_ms: executionTimeout,
+        slow_consumer_timeout_ms: slowConsumerTimeout,
+        max_output_frames: maxOutputFrames,
+        segment_tokens: segmentTokens
+      }
+    });
+    const handler = window.webkit && window.webkit.messageHandlers
+      && window.webkit.messageHandlers.saveModelParams;
+    if (!handler) {
+      const dict = I18N[currentLang] || I18N.en;
+      showToast(dict.settings_save_failed || 'Unable to save model parameters.', 'warn');
+      return;
+    }
+    handler.postMessage(JSON.stringify(params));
+    closeTTSDetails();
+  }
+
+  function closeDecisionDetails() {
+    document.getElementById('decision-details-modal').classList.remove('open');
+    if (window.__DECISION_DETAILS_TRIGGER__) window.__DECISION_DETAILS_TRIGGER__.focus();
+  }
+
+  function openDecisionDetails(model) {
+    window.__DECISION_DETAILS_TRIGGER__ = document.activeElement;
+    window.__DECISION_PARAM_MODEL__ = model.id;
+    const saved = (window.__MODEL_PARAMS__ || {})[model.id] || {};
+    const alias = saved.alias || model.id;
+    document.getElementById('decision-details-name').textContent = model.id;
+    document.getElementById('decision-alias').value = alias;
+    document.getElementById('decision-alias').title = alias;
+    document.getElementById('decision-model-type').value = modelTypeLabel(model);
+    const settings = saved.decision || {};
+    document.getElementById('decision-dtype').value = settings.dtype || 'float16';
+    document.getElementById('decision-batch-size').value = settings.batch_size || 16;
+    document.getElementById('decision-cache-prompts').checked = settings.cache_prompts === true;
+    document.getElementById('decision-device').value = settings.device || 'auto';
+    document.getElementById('decision-compile').checked = settings.compile === true;
+    document.getElementById('decision-padding').checked = settings.pad_to_multiple != null;
+    document.getElementById('decision-pad-multiple').value = settings.pad_to_multiple || 16;
+    document.getElementById('decision-pad-multiple').disabled = settings.pad_to_multiple == null;
+    document.getElementById('decision-advanced').open = false;
+    const metadata = model.decision_metadata || {};
+    document.getElementById('decision-head-budget').value = metadata.head_max_len || '--';
+    const temperatures = metadata.temperature;
+    const calibration = Array.isArray(temperatures) && temperatures.length === 3
+      ? ['choice', 'score', 'noul'].map((kind, index) => kind + ': ' + Number(temperatures[index]).toLocaleString('en-US', {minimumFractionDigits: 1, maximumFractionDigits: 6}))
+          .concat(Object.entries(metadata.temperature_by_options || {}).sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) => key + ': ' + value)).join(' · ')
+      : '--';
+    document.getElementById('decision-calibration').value = calibration;
+    document.getElementById('decision-calibration').title = calibration;
+    document.getElementById('decision-context-size').value = model.max_position_embeddings > 0
+      ? model.max_position_embeddings.toLocaleString('en-US') : '--';
+    applyI18n(currentLang);
+    document.getElementById('decision-details-modal').classList.add('open');
+    document.getElementById('decision-details-close').focus();
+  }
+
+  function saveDecisionParams() {
+    const modelId = window.__DECISION_PARAM_MODEL__;
+    if (!modelId) return;
+    const dict = I18N[currentLang] || I18N.en;
+    const text = document.getElementById('decision-batch-size').value.trim();
+    const batch = Number(text);
+    if (!/^\d+$/.test(text) || !Number.isInteger(batch) || batch < 1 || batch > 256) {
+      showToast(dict.decision_batch_invalid, 'warn');
+      document.getElementById('decision-batch-size').focus();
+      return;
+    }
+    const padEnabled = document.getElementById('decision-padding').checked;
+    const padText = String(document.getElementById('decision-pad-multiple').value).trim();
+    const pad = Number(padText);
+    if (padEnabled && (!/^\d+$/.test(padText) || !Number.isInteger(pad) || pad < 1 || pad > 1024)) {
+      showToast(dict.decision_padding_invalid, 'warn');
+      document.getElementById('decision-pad-multiple').focus();
+      return;
+    }
+    const params = Object.assign({}, (window.__MODEL_PARAMS__ || {})[modelId] || {}, {
+      model_id: modelId,
+      decision: {
+        dtype: document.getElementById('decision-dtype').value,
+        batch_size: batch,
+        cache_prompts: document.getElementById('decision-cache-prompts').checked,
+        device: document.getElementById('decision-device').value,
+        compile: document.getElementById('decision-compile').checked,
+        pad_to_multiple: padEnabled ? pad : null
+      }
+    });
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveModelParams) {
+      window.webkit.messageHandlers.saveModelParams.postMessage(JSON.stringify(params));
+    }
+    closeDecisionDetails();
   }
 
   function openParamsModal(modelId) {
     const model = window.__LOCAL_MODELS__[modelId];
+    if (model && model.type === 'decision') { openDecisionDetails(model); return; }
     if (model && model.type === 'tts') {
       openTTSDetails(model);
       return;
@@ -8203,10 +8807,7 @@
     document.getElementById('modal-top-p').value = saved.top_p || generationDefaults.top_p || '';
     document.getElementById('modal-top-k').value = saved.top_k || generationDefaults.top_k || '';
     document.getElementById('modal-repeat-penalty').value = saved.repeat_penalty || generationDefaults.repetition_penalty || '';
-    document.getElementById('modal-model-type').value = isBlockDiffusion
-      ? 'block_diffusion_vlm'
-      : (saved.model_type || 'auto');
-    document.getElementById('modal-model-type').disabled = isBlockDiffusion;
+    document.getElementById('modal-model-type').value = modelTypeLabel(local);
     document.getElementById('modal-context-size').closest('.modal-field').style.display =
       capabilities.supports_kv_cache === false ? 'none' : '';
     document.getElementById('modal-causal-sampling-row').style.display =
@@ -8339,7 +8940,6 @@
   }
   function closeParamsModal() {
     document.getElementById('model-params-modal').classList.remove('open');
-    document.getElementById('modal-model-type').disabled = false;
   }
 
   function saveModelParams() {
@@ -8398,7 +8998,6 @@
     const params = {
       model_id: modelId,
       alias: document.getElementById('modal-alias-input').value,
-      model_type: document.getElementById('modal-model-type').value,
       context_size: contextWindow ? String(contextWindow) : '',
       max_tokens: String(maxTokens),
       max_output_tokens: maxOutputTokensText,
@@ -9153,6 +9752,15 @@
     const query = document.getElementById('search-hf-query').value.trim();
     if (query) searchHuggingFace();
   }
+
+  document.getElementById('decision-details-modal').addEventListener('click', function(e) {
+    if (e.target === this) closeDecisionDetails();
+  });
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape' && document.getElementById('decision-details-modal').classList.contains('open')) {
+      closeDecisionDetails();
+    }
+  });
 
   document.getElementById('tts-details-modal').addEventListener('click', function(e) {
     if (e.target === this) closeTTSDetails();
@@ -10169,25 +10777,80 @@
       + ' onclick="toggleModelMoreActions(\'' + escapedSq + '\', this, event)">⋯</button>';
   }
 
-  function renderModelType(model) {
-    const type = String(model.type || 'llm').toLowerCase();
-      const labels = {
+  function modelTypeLabel(model) {
+    const type = String(model.type || '').toLowerCase();
+    const labels = {
       llm: 'LLM',
       vlm: 'LLM/VLM',
       block_diffusion_vlm: 'Block Diffusion VLM',
       embedding: 'Embedding',
       reranker: 'Reranker',
       asr: 'ASR',
-      tts: 'TTS'
+      tts: 'TTS',
+      decision: 'DECISION'
     };
-    return '<span class="badge badge-model-type">' + escapeAttr(labels[type] || type.toUpperCase()) + '</span>';
+    return labels[type] || type.toUpperCase() || '--';
+  }
+
+  function renderModelType(model) {
+    return '<span class="badge badge-model-type">' + escapeAttr(modelTypeLabel(model)) + '</span>';
+  }
+
+  function normalizedWeightDtype(dtype) {
+    const value = String(dtype || '').trim().toLowerCase();
+    const aliases = {
+      float16: 'fp16', half: 'fp16',
+      bfloat16: 'bf16',
+      float32: 'fp32', float: 'fp32',
+      float64: 'fp64', double: 'fp64'
+    };
+    return aliases[value] || value;
+  }
+
+  function weightDtypeLabel(dtype) {
+    const value = normalizedWeightDtype(dtype);
+    return value ? value.toUpperCase() : '';
   }
 
   function quantDisplayLabel(quant) {
     if (quant.kind === 'affine' && quant.bits) {
       return quant.bits + '-bit';
     }
-    return quant.label || 'Unknown';
+    if (quant.kind === 'dense') {
+      const dtypeLabel = weightDtypeLabel(quant.dtype);
+      if (dtypeLabel) return dtypeLabel;
+      if (quant.label && String(quant.label).toLowerCase() !== 'dense') return quant.label;
+      return (I18N[currentLang] || I18N.en).quant_unknown || 'Unknown';
+    }
+    return quant.label || (I18N[currentLang] || I18N.en).quant_unknown || 'Unknown';
+  }
+
+  function hideQuantizationTooltip() {
+    const tooltip = document.getElementById('quantization-tooltip');
+    if (!tooltip) return;
+    if (tooltip.__target) tooltip.__target.removeAttribute('aria-describedby');
+    tooltip.__target = null;
+    tooltip.hidden = true;
+  }
+
+  function showQuantizationTooltip(target) {
+    hideQuantizationTooltip();
+    const text = target?.dataset?.quantTooltip;
+    if (!text || target.hidden) return;
+    const tooltip = document.getElementById('quantization-tooltip');
+    if (!tooltip) return;
+    tooltip.textContent = text;
+    tooltip.hidden = false;
+    tooltip.__target = target;
+    target.setAttribute('aria-describedby', tooltip.id);
+    const rect = target.getBoundingClientRect();
+    const size = tooltip.getBoundingClientRect();
+    const gap = 8;
+    const left = rect.left + (rect.width - size.width) / 2;
+    let top = rect.top - size.height - gap;
+    if (top < 8) top = rect.bottom + gap;
+    tooltip.style.left = Math.max(8, Math.min(left, window.innerWidth - size.width - 8)) + 'px';
+    tooltip.style.top = Math.max(8, Math.min(top, window.innerHeight - size.height - 8)) + 'px';
   }
 
   function renderQuantBadge(model) {
@@ -10196,16 +10859,22 @@
     const readiness = modelReadiness(model);
     const label = quantDisplayLabel(quant);
     const warn = readiness.status === 'incomplete' || readiness.status === 'unsupported';
-    const titleParts = [];
-    if (quant.kind === 'dense' && quant.dtype) titleParts.push(dict.quant_unquantized || 'Unquantized');
-    else if (quant.kind) titleParts.push('kind=' + quant.kind);
-    if (quant.bits) titleParts.push('bits=' + quant.bits);
-    if (quant.group_size) titleParts.push('group_size=' + quant.group_size);
-    if (quant.dtype) titleParts.push('dtype=' + quant.dtype);
-    if ((quant.mixed_bits || []).length) titleParts.push('mixed_bits=' + quant.mixed_bits.join('/'));
-    if (readiness.message) titleParts.push(readiness.message);
-    const title = escapeAttr(titleParts.join('; '));
-    return '<span class="badge badge-quant' + (warn ? ' badge-quant-warning' : '') + '" title="' + title + '">' + escapeAttr(label) + '</span>';
+    const tooltipParts = [];
+    if (quant.kind === 'dense') tooltipParts.push(dict.quant_unquantized || 'Unquantized');
+    else if (quant.kind) tooltipParts.push('kind=' + quant.kind);
+    if (quant.bits) tooltipParts.push('bits=' + quant.bits);
+    if (quant.group_size) tooltipParts.push('group_size=' + quant.group_size);
+    const dtype = normalizedWeightDtype(quant.dtype);
+    if (dtype) tooltipParts.push('dtype=' + dtype);
+    if ((quant.mixed_bits || []).length) tooltipParts.push('mixed_bits=' + quant.mixed_bits.join('/'));
+    if (readiness.message) tooltipParts.push(readiness.message);
+    const separator = currentLang === 'zh-Hans' || currentLang === 'zh-Hant' ? '；' : '; ';
+    const tooltipText = escapeAttr(tooltipParts.join(separator));
+    return '<span class="badge badge-quant' + (warn ? ' badge-quant-warning' : '')
+      + '" tabindex="0" data-quant-tooltip="' + tooltipText + '"'
+      + ' onmouseenter="showQuantizationTooltip(this)" onmouseleave="hideQuantizationTooltip()"'
+      + ' onfocus="showQuantizationTooltip(this)" onblur="hideQuantizationTooltip()">'
+      + escapeAttr(label) + '</span>';
   }
 
   function renderModelLoadActions(model, escapedSq, escaped, actionClass, actionText, isLoaded) {
@@ -10291,7 +10960,7 @@
           + '<td>' + formatSize(m.size_mb) + '</td>'
           + '<td class="model-status-cell" title="' + escapeAttr(status.title || modelReadinessTitle(m)) + '"><span class="status-dot ' + status.dot + '"></span> <span class="model-status-text">' + status.text + '</span></td>'
           + '<td><input type="radio" name="default-model" value="' + escaped + '" ' + (isDefault ? 'checked' : '') + ' ' + (!isModelLoadable(m) ? 'disabled ' : '') + 'style="accent-color:var(--accent);" onchange="setDefaultModel(this.value)"></td>'
-          + '<td><button class="icon-btn" title="' + escapeAttr(m.type === 'tts' ? dict.tts_details : dict.model_param_settings) + '" aria-label="' + escapeAttr(m.type === 'tts' ? dict.tts_details : dict.model_param_settings) + '" onclick="openParamsModal(\'' + escapedSq + '\')"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1.5l1 2a4.5 4.5 0 0 1 1.5.9l2-.5.8 1.4-1.1 1.6a4.3 4.3 0 0 1 0 1.8l1.1 1.6-.8 1.4-2-.5a4.5 4.5 0 0 1-1.5.9l-1 2-1-2a4.5 4.5 0 0 1-1.5-.9l-2 .5-.8-1.4 1.1-1.6a4.3 4.3 0 0 1 0-1.8L2.2 5.8l.8-1.4 2 .5A4.5 4.5 0 0 1 6.5 4l1-2Z" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/><circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.1"/></svg></button></td>'
+          + '<td><button class="icon-btn" title="' + escapeAttr(dict.model_param_settings) + '" aria-label="' + escapeAttr(dict.model_param_settings) + '" onclick="openParamsModal(\'' + escapedSq + '\')"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1.5l1 2a4.5 4.5 0 0 1 1.5.9l2-.5.8 1.4-1.1 1.6a4.3 4.3 0 0 1 0 1.8l1.1 1.6-.8 1.4-2-.5a4.5 4.5 0 0 1-1.5.9l-1 2-1-2a4.5 4.5 0 0 1-1.5-.9l-2 .5-.8-1.4 1.1-1.6a4.3 4.3 0 0 1 0-1.8L2.2 5.8l.8-1.4 2 .5A4.5 4.5 0 0 1 6.5 4l1-2Z" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/><circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.1"/></svg></button></td>'
           + '<td>' + renderModelLoadActions(m, escapedSq, escaped, actionClass, actionText, isLoaded) + '</td>'
           + '<td>' + renderModelMoreActions(m, escapedSq) + '</td>';
         tbody.appendChild(tr);
@@ -10309,7 +10978,7 @@
     if (!profileSelect) return;
     const current = profileSelect.value;
     profileSelect.innerHTML = '<option value="">' + (dict.select_model || 'Select a model...') + '</option>';
-    models.filter(m => m.capabilities?.runtime_kind !== 'block_diffusion').forEach(m => {
+    models.filter(m => !['block_diffusion', 'decision'].includes(m.capabilities?.runtime_kind)).forEach(m => {
       const opt = document.createElement('option');
       opt.value = m.id;
       opt.textContent = m.id;
@@ -12798,6 +13467,16 @@
         }
       } else if (path === '/admin/api/models/local') {
         onLocalModelsResult(jsonStr);
+      } else if (path === '/admin/api/audio/execution-profile') {
+        const profile = JSON.parse(jsonStr || 'null');
+        if (profile && profile.defaults && profile.constraints) {
+          window.__TTS_EXECUTION_PROFILE__ = profile;
+          const modelId = window.__TTS_PARAM_MODEL__;
+          const model = (window.__LOCAL_MODELS__ || {})[modelId];
+          if (model && document.getElementById('tts-details-modal').classList.contains('open')) {
+            renderTTSExecutionSettings(model, (window.__MODEL_PARAMS__ || {})[modelId] || {});
+          }
+        }
       } else if (path === '/admin/api/cache/capacity') {
         const capacity = JSON.parse(jsonStr || '{}');
         applyColdCacheCapacity(capacity);

@@ -111,6 +111,9 @@ fn estimated_engine_weight_bytes(model: &EngineModelConfig) -> Result<usize> {
                     .map(|audio| audio.derived_resources.as_path()),
             ),
     )?;
+    let weights = weights
+        .checked_mul(model.decision.unwrap_or_default().dtype.weight_multiplier())
+        .ok_or_else(|| anyhow::anyhow!("model load size overflow"))?;
     // Audio additionally retains verified FSTs, dictionary bytes and their Rust
     // indexes. Count auxiliary weights and reserve conservative frontend growth
     // before loading, while actual resident use is sampled by the same governor.
@@ -130,6 +133,7 @@ pub struct EnginePoolState {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EngineLoadedModelInfo {
+    pub decision: Option<ironmlx_decision::DecisionSettings>,
     pub id: String,
     pub path: String,
     pub architecture: String,
@@ -427,6 +431,7 @@ struct EngineSlotRuntimeSnapshot {
 
 #[derive(Clone)]
 pub enum EngineVariant {
+    Decision(super::decision_execution::DecisionRuntime),
     Audio(super::audio_execution::AudioRuntime),
     Qwen35(AppState<Qwen35Model>),
     Qwen35Moe(AppState<Qwen35MoeModel>),
@@ -740,6 +745,40 @@ impl EnginePoolState {
             .is_some_and(|slot| slot.model.audio.is_some()))
     }
 
+    pub async fn is_decision_model(&self, requested: Option<&str>) -> Result<bool> {
+        let id = self
+            .inner
+            .registry
+            .lock()
+            .await
+            .resolve_model_id(requested)?
+            .to_owned();
+        Ok(self
+            .inner
+            .slots
+            .lock()
+            .await
+            .get(&id)
+            .is_some_and(|slot| slot.model.capabilities.runtime_kind == "decision"))
+    }
+
+    pub async fn decision_model_ids(&self) -> Vec<String> {
+        let mut ids: Vec<_> = self
+            .inner
+            .slots
+            .lock()
+            .await
+            .values()
+            .filter(|slot| {
+                slot.model.capabilities.runtime_kind == "decision"
+                    && slot.model.load_policy != EngineLoadPolicy::Disabled
+            })
+            .map(|slot| slot.model.id.clone())
+            .collect();
+        ids.sort();
+        ids
+    }
+
     pub async fn resolve_engine(&self, requested: Option<&str>) -> Result<(String, EngineLease)> {
         let model_id = self
             .inner
@@ -1033,7 +1072,8 @@ impl EnginePoolState {
                 }
                 LoadedEngineHealth::Causal(_)
                 | LoadedEngineHealth::DiffusionGemma { .. }
-                | LoadedEngineHealth::Audio { .. } => None,
+                | LoadedEngineHealth::Audio { .. }
+                | LoadedEngineHealth::Decision { .. } => None,
             };
             let (scheduler, active_requests, queued_requests, queue_capacity) = match &health {
                 LoadedEngineHealth::Causal(snapshot) => (
@@ -1053,6 +1093,12 @@ impl EnginePoolState {
                     active_requests,
                     queued_requests,
                     queue_capacity,
+                }
+                | LoadedEngineHealth::Decision {
+                    scheduler,
+                    active_requests,
+                    queued_requests,
+                    queue_capacity,
                 } => (
                     Some(*scheduler),
                     *active_requests,
@@ -1061,6 +1107,7 @@ impl EnginePoolState {
                 ),
             };
             models.push(EngineLoadedModelInfo {
+                decision: slot.model.decision,
                 id: id.clone(),
                 path: slot.model.path.to_string_lossy().into_owned(),
                 architecture: engine.architecture().to_string(),
@@ -1955,7 +2002,7 @@ impl EngineVariant {
             Self::Glm4MoeLite(state) => state.effective_cap_max,
             Self::Llama(state) => state.effective_cap_max,
             Self::MiniCpmV46(state) => state.effective_cap_max,
-            Self::DiffusionGemma(_) | Self::Audio(_) => return None,
+            Self::DiffusionGemma(_) | Self::Audio(_) | Self::Decision(_) => return None,
         };
         (cap > 0).then_some(cap)
     }
@@ -1976,12 +2023,21 @@ impl EngineVariant {
             Self::Glm4MoeLite(state) => state.request_execution.clear_shared_prompt_lookup().await,
             Self::Llama(state) => state.request_execution.clear_shared_prompt_lookup().await,
             Self::MiniCpmV46(state) => state.request_execution.clear_shared_prompt_lookup().await,
-            Self::DiffusionGemma(_) | Self::Audio(_) => Ok(0),
+            Self::DiffusionGemma(_) | Self::Audio(_) | Self::Decision(_) => Ok(0),
         }
     }
 
     fn loaded_health(&self) -> LoadedEngineHealth {
         match self {
+            Self::Decision(state) => {
+                let (active_requests, queued_requests) = state.active_and_queued();
+                LoadedEngineHealth::Decision {
+                    scheduler: "serial_decision",
+                    active_requests,
+                    queued_requests,
+                    queue_capacity: super::decision_execution::DECISION_QUEUE_CAPACITY,
+                }
+            }
             Self::Audio(state) => {
                 let (active_requests, queued_requests) = state.active_and_queued();
                 LoadedEngineHealth::Audio {
@@ -2039,6 +2095,7 @@ impl EngineVariant {
             Self::MiniCpmV46(_) => "minicpmv4_6",
             Self::DiffusionGemma(_) => "diffusion_gemma",
             Self::Audio(_) => "indextts25",
+            Self::Decision(_) => "laya_multilingual_mlx",
         }
     }
 
@@ -2054,11 +2111,16 @@ impl EngineVariant {
             Self::MiniCpmV46(state) => state.model_weight_bytes,
             Self::DiffusionGemma(state) => state.model_weight_bytes,
             Self::Audio(state) => state.model_weight_bytes(),
+            Self::Decision(state) => state.model_weight_bytes(),
         }
     }
 
     fn pending_requests(&self) -> usize {
         match self {
+            Self::Decision(state) => {
+                let (active, queued) = state.active_and_queued();
+                active + queued
+            }
             Self::Audio(state) => {
                 let (active, queued) = state.active_and_queued();
                 active + queued
@@ -2090,6 +2152,7 @@ impl EngineVariant {
             Self::MiniCpmV46(state) => state.runtime_usage.snapshot(true),
             Self::DiffusionGemma(state) => state.runtime_usage.snapshot(false),
             Self::Audio(_) => Default::default(),
+            Self::Decision(state) => state.usage(),
         }
     }
 }
@@ -2168,6 +2231,15 @@ async fn load_engine_variant(
     model: &EngineModelConfig,
     runtime: &EngineRuntimeOptions,
 ) -> Result<EngineVariant> {
+    if model.capabilities.runtime_kind == "decision" {
+        return Ok(EngineVariant::Decision(
+            super::decision_execution::DecisionRuntime::load(
+                model.path.clone(),
+                model.decision.unwrap_or_default(),
+            )
+            .await?,
+        ));
+    }
     if let Some(audio) = &model.audio {
         return Ok(EngineVariant::Audio(
             super::audio_execution::AudioRuntime::load(model.path.clone(), audio.clone()).await?,
@@ -2811,6 +2883,12 @@ struct EngineModelHealth {
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum LoadedEngineHealth {
+    Decision {
+        scheduler: &'static str,
+        active_requests: usize,
+        queued_requests: usize,
+        queue_capacity: usize,
+    },
     Audio {
         scheduler: &'static str,
         active_requests: usize,
@@ -2830,7 +2908,7 @@ impl LoadedEngineHealth {
     fn max_position_embeddings(&self) -> i32 {
         match self {
             Self::Causal(snapshot) => snapshot.model.max_position_embeddings,
-            Self::DiffusionGemma { .. } | Self::Audio { .. } => 0,
+            Self::DiffusionGemma { .. } | Self::Audio { .. } | Self::Decision { .. } => 0,
         }
     }
 }
@@ -2863,6 +2941,7 @@ mod tests {
     fn model(id: &str) -> EngineModelManifest {
         EngineModelManifest {
             audio: None,
+            decision: None,
             id: id.to_string(),
             path: PathBuf::from(format!("/models/{id}")),
             load_policy: EngineLoadPolicy::Lazy,
@@ -2915,6 +2994,7 @@ mod tests {
     fn model_config(id: &str, path: &Path, load_policy: EngineLoadPolicy) -> EngineModelConfig {
         EngineModelConfig {
             audio: None,
+            decision: None,
             id: id.to_string(),
             path: path.to_path_buf(),
             load_policy,

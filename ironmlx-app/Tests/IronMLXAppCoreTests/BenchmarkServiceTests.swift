@@ -966,15 +966,11 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(dashboardHTML(html, contains: "asr: 'ASR'"))
     #expect(dashboardHTML(html, contains: "tts: 'TTS'"))
     #expect(dashboardHTML(html, contains: "renderModelType(m)"))
-    #expect(dashboardHTML(html, contains: #"option value="vlm">LLM/VLM</option>"#))
-    #expect(
-        dashboardHTML(
-            html,
-            contains: #"option value="block_diffusion_vlm">Block Diffusion VLM</option>"#
-        )
-    )
-    #expect(dashboardHTML(html, contains: #"option value="asr">ASR</option>"#))
-    #expect(dashboardHTML(html, contains: #"option value="tts">TTS</option>"#))
+    #expect(dashboardHTML(html, contains: "function modelTypeLabel(model)"))
+    #expect(dashboardHTML(html, contains: "decision: 'DECISION'"))
+    #expect(dashboardHTML(html, contains: #"id="modal-model-type" readonly"#))
+    #expect(dashboardHTML(html, contains: #"id="tts-model-type" readonly"#))
+    #expect(dashboardHTML(html, contains: #"id="decision-model-type" value="DECISION" readonly"#))
 }
 
 @Test func dashboardQuantColumnHidesAffinePrefixInDisplayOnly() throws {
@@ -988,7 +984,13 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(dashboardHTML(html, contains: "return quant.bits + '-bit';"))
     #expect(dashboardHTML(html, contains: "const label = quantDisplayLabel(quant);"))
     #expect(dashboardHTML(html, contains: "dict.quant_unquantized || 'Unquantized'"))
-    #expect(dashboardHTML(html, contains: "titleParts.push('dtype=' + quant.dtype)"))
+    #expect(dashboardHTML(html, contains: "normalizedWeightDtype(quant.dtype)"))
+    #expect(dashboardHTML(html, contains: "tooltipParts.push('dtype=' + dtype)"))
+    #expect(dashboardHTML(html, contains: #"data-quant-tooltip=""#))
+    #expect(dashboardHTML(html, contains: #"onmouseenter="showQuantizationTooltip(this)""#))
+    #expect(dashboardHTML(html, contains: #"onfocus="showQuantizationTooltip(this)""#))
+    #expect(dashboardHTML(html, contains: "function showQuantizationTooltip(target)"))
+    #expect(dashboardHTML(html, contains: "function hideQuantizationTooltip()"))
 }
 
 @Test func dashboardModelParamsModalIncludesMtpRuntimeControls() throws {
@@ -1019,7 +1021,7 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(
         dashboardHTML(
             html,
-            contains: "models.filter(m => m.capabilities?.runtime_kind !== 'block_diffusion')"
+            contains: "models.filter(m => !['block_diffusion', 'decision'].includes(m.capabilities?.runtime_kind))"
         )
     )
 }

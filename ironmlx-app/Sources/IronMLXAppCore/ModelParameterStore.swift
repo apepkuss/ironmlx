@@ -1,6 +1,8 @@
 import Foundation
 
 public struct ModelParameters: Codable, Equatable, Sendable {
+    public var decision: BackendDecisionSettings?
+    public var audioExecution: BackendAudioExecutionSettings?
     public var modelID: String
     public var alias: String?
     public var modelType: String?
@@ -26,6 +28,8 @@ public struct ModelParameters: Codable, Equatable, Sendable {
 
     public init(
         modelID: String,
+        decision: BackendDecisionSettings? = nil,
+        audioExecution: BackendAudioExecutionSettings? = nil,
         alias: String? = nil,
         modelType: String? = nil,
         contextSize: String? = nil,
@@ -47,6 +51,8 @@ public struct ModelParameters: Codable, Equatable, Sendable {
         promptLookupCrossRequest: Bool? = nil
     ) {
         self.modelID = modelID
+        self.decision = decision
+        self.audioExecution = audioExecution
         self.alias = alias
         self.modelType = modelType
         self.contextSize = contextSize
@@ -128,6 +134,8 @@ public struct ModelParameters: Codable, Equatable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
+        case decision
+        case audioExecution = "audio_execution"
         case modelID = "model_id"
         case alias
         case modelType = "model_type"
@@ -495,6 +503,10 @@ public final class ModelParameterStore: @unchecked Sendable {
     }
 
     private func validate(_ parameters: ModelParameters, key: String) throws {
+        if let decision = parameters.decision { try decision.validate() }
+        if let audioExecution = parameters.audioExecution {
+            try validateAudioExecution(audioExecution)
+        }
         let normalizedKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedID = parameters.modelID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedKey.isEmpty, normalizedKey == key, normalizedID == normalizedKey else {
@@ -534,6 +546,20 @@ public final class ModelParameterStore: @unchecked Sendable {
         if parameters.dflash2Enabled == true,
            parameters.mtpEnabled == true || parameters.promptLookupEnabled == true {
             throw ConfigurationPersistenceError.invalidValue("dflash2_acceleration_conflict")
+        }
+    }
+
+    private func validateAudioExecution(_ settings: BackendAudioExecutionSettings) throws {
+        let fields: [(String, Int?)] = [
+            ("queue_timeout_ms", settings.queueTimeoutMS),
+            ("first_audio_timeout_ms", settings.firstAudioTimeoutMS),
+            ("execution_timeout_ms", settings.executionTimeoutMS),
+            ("slow_consumer_timeout_ms", settings.slowConsumerTimeoutMS),
+            ("max_output_frames", settings.maxOutputFrames),
+            ("segment_tokens", settings.segmentTokens),
+        ]
+        for (field, value) in fields where value.map({ $0 <= 0 }) == true {
+            throw ConfigurationPersistenceError.invalidValue(field)
         }
     }
 
@@ -629,7 +655,7 @@ public final class ModelParameterStore: @unchecked Sendable {
     }
 
     private static let modelKeys: Set<String> = [
-        "model_id", "alias", "model_type", "context_size", "max_tokens",
+        "decision", "audio_execution", "model_id", "alias", "model_type", "context_size", "max_tokens",
         "max_output_tokens", "temperature",
         "top_p", "top_k", "repeat_penalty", "mtp_enabled", "mtp_model_id",
         "mtp_draft_tokens", "dflash2_enabled", "dflash2_model_id", "dflash2_block_size",

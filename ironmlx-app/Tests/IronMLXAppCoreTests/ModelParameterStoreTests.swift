@@ -29,6 +29,68 @@ import Testing
     #expect(loaded["mlx-community/LongContext-4bit"]?.samplingDefaults.defaultMaxOutputTokens == 8192)
 }
 
+@Test func modelParameterStorePersistsValidatedTTSExecutionSettings() throws {
+    let root = try temporaryDirectory()
+    let store = ModelParameterStore(url: root.appendingPathComponent("model_params.json"))
+    let execution = BackendAudioExecutionSettings(
+        queueTimeoutMS: 30_000,
+        firstAudioTimeoutMS: 90_000,
+        executionTimeoutMS: 600_000,
+        slowConsumerTimeoutMS: 15_000,
+        maxOutputFrames: 6_615_000,
+        segmentTokens: 96
+    )
+
+    try store.save(ModelParameters(
+        modelID: "mlx-community/IndexTTS-2.5-fp16",
+        audioExecution: execution
+    ))
+
+    #expect(store.parameters(for: "mlx-community/IndexTTS-2.5-fp16")?.audioExecution == execution)
+}
+
+@Test func modelParameterStoreRejectsNonPositiveTTSExecutionSettings() throws {
+    let root = try temporaryDirectory()
+    let store = ModelParameterStore(url: root.appendingPathComponent("model_params.json"))
+
+    let invalid: [(String, BackendAudioExecutionSettings)] = [
+        ("queue_timeout_ms", .init(queueTimeoutMS: 0)),
+        ("first_audio_timeout_ms", .init(firstAudioTimeoutMS: 0)),
+        ("execution_timeout_ms", .init(executionTimeoutMS: 0)),
+        ("slow_consumer_timeout_ms", .init(slowConsumerTimeoutMS: 0)),
+        ("max_output_frames", .init(maxOutputFrames: 0)),
+        ("segment_tokens", .init(segmentTokens: 0)),
+    ]
+    for (field, settings) in invalid {
+        #expect(throws: ConfigurationPersistenceError.invalidValue(field)) {
+            try store.save(ModelParameters(
+                modelID: "mlx-community/IndexTTS-2.5-fp16",
+                audioExecution: settings
+            ))
+        }
+    }
+}
+
+@Test func modelParameterStoreLeavesTTSExecutionLimitsToBackendProfile() throws {
+    let root = try temporaryDirectory()
+    let store = ModelParameterStore(url: root.appendingPathComponent("model_params.json"))
+    let settings = BackendAudioExecutionSettings(
+        queueTimeoutMS: 86_400_001,
+        firstAudioTimeoutMS: 86_400_001,
+        executionTimeoutMS: 86_400_001,
+        slowConsumerTimeoutMS: 86_400_001,
+        maxOutputFrames: 13_230_001,
+        segmentTokens: 121
+    )
+
+    try store.save(ModelParameters(
+        modelID: "mlx-community/IndexTTS-2.5-fp16",
+        audioExecution: settings
+    ))
+
+    #expect(store.parameters(for: "mlx-community/IndexTTS-2.5-fp16")?.audioExecution == settings)
+}
+
 @Test func modelParameterStorePersistsValidatedDFlash2Configuration() throws {
     let root = try temporaryDirectory()
     let store = ModelParameterStore(url: root.appendingPathComponent("model_params.json"))
@@ -472,4 +534,60 @@ private final class ConcurrentConfigurationErrorBox: @unchecked Sendable {
     func append(_ error: Error) {
         lock.withLock { errors.append(error) }
     }
+}
+
+@Test func decisionSettingsPersistAndRejectInvalidBatchSizes() throws {
+    let root = try temporaryDirectory()
+    let url = root.appendingPathComponent("model_params.json")
+    let store = ModelParameterStore(url: url)
+    let settings = BackendDecisionSettings(dtype: .float32, batchSize: 2, cachePrompts: true,
+        device: .cpu, compile: true, padToMultiple: 16)
+    let parameters = ModelParameters(modelID: "aac6fef/laya-multilingual-mlx", decision: settings)
+    try store.save(parameters)
+    #expect(try ModelParameterStore(url: url).loadAll()[parameters.modelID]?.decision == settings)
+    for batchSize in [0, -1, 257] {
+        var invalid = parameters
+        invalid.decision?.batchSize = batchSize
+        #expect(throws: ConfigurationPersistenceError.invalidValue("decision.batch_size")) {
+            try store.save(invalid)
+        }
+    }
+    let request = BackendLoadModelRequest(model: parameters.modelID, modelDir: "/models/laya", setDefault: false,
+        maxCacheCap: 4096, samplingDefaults: BackendSamplingDefaults(temperature: 0.8), decision: settings)
+    let json = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(request)) as? [String: Any])
+    let decision = try #require(json["decision"] as? [String: Any])
+    #expect(decision["dtype"] as? String == "float32")
+    #expect(decision["batch_size"] as? Int == 2)
+    #expect(decision["cache_prompts"] as? Bool == true)
+    #expect(decision["device"] as? String == "cpu")
+    #expect(decision["compile"] as? Bool == true)
+    #expect(decision["pad_to_multiple"] as? Int == 16)
+    for multiple in [0, -1, 1025] {
+        var invalid = parameters
+        invalid.decision?.padToMultiple = multiple
+        #expect(throws: ConfigurationPersistenceError.invalidValue("decision.pad_to_multiple")) {
+            try store.save(invalid)
+        }
+    }
+    let legacy = try JSONDecoder().decode(BackendDecisionSettings.self,
+        from: Data(#"{"dtype":"float16","batch_size":16,"cache_prompts":false}"#.utf8))
+    #expect(legacy == BackendDecisionSettings())
+    #expect(json["temperature"] == nil)
+    #expect(json["max_cache_cap"] == nil)
+}
+
+@Test func decisionMetadataReadsCheckpointValuesAndEffectiveCalibration() throws {
+    let root = try temporaryDirectory()
+    let file = root.appendingPathComponent("rl_agent_config.json")
+    try Data(#"{"max_len":1024,"head_max_len":192,"temperature":[0.1,1.2,7],"temperature_by_options":{"choice:2":1.3}}"#.utf8).write(to: file)
+    let metadata = try #require(LocalDecisionMetadata.read(from: root))
+    #expect(metadata.headMaxLen == 192)
+    #expect(metadata.temperature == [0.5, 1.2, 5])
+    #expect(metadata.temperatureByOptions == ["choice:2": 1.3])
+    let model = LocalModel(id: "test", repoID: "test", source: "huggingface", type: "decision", sizeMB: 1, decisionMetadata: metadata)
+    let json = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(model)) as? [String: Any])
+    let decision = try #require(json["decision_metadata"] as? [String: Any])
+    #expect(decision["head_max_len"] as? Int == 192)
+    try Data(#"{"max_len":1024,"head_max_len":1024,"temperature":[1,1,1]}"#.utf8).write(to: file)
+    #expect(LocalDecisionMetadata.read(from: root) == nil)
 }

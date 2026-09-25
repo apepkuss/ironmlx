@@ -49,6 +49,8 @@ pub enum EngineLoadPolicy {
 pub struct EngineModelManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio: Option<super::audio_execution::AudioModelResources>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<ironmlx_decision::DecisionSettings>,
     pub id: String,
     pub path: PathBuf,
     #[serde(default)]
@@ -401,6 +403,7 @@ pub struct EngineMtpSettings {
 #[derive(Debug, Clone)]
 pub struct EngineModelConfig {
     pub audio: Option<super::audio_execution::AudioModelResources>,
+    pub decision: Option<ironmlx_decision::DecisionSettings>,
     pub id: String,
     pub path: PathBuf,
     pub load_policy: EngineLoadPolicy,
@@ -428,6 +431,14 @@ pub struct EngineModelCapabilities {
 }
 
 impl EngineModelCapabilities {
+    pub fn decision() -> Self {
+        Self {
+            runtime_kind: "decision",
+            supports_streaming: false,
+            ..Self::audio()
+        }
+    }
+
     pub fn audio() -> Self {
         Self {
             runtime_kind: "tts",
@@ -484,6 +495,7 @@ impl EngineModelConfig {
     pub(crate) fn manifest_view(&self) -> EngineModelManifest {
         EngineModelManifest {
             audio: self.audio.clone(),
+            decision: self.decision,
             id: self.id.clone(),
             path: self.path.clone(),
             load_policy: self.load_policy,
@@ -525,6 +537,12 @@ impl EnginePoolConfig {
 }
 
 pub(crate) fn validate_engine_model_config(model: &EngineModelConfig) -> Result<()> {
+    if let Some(settings) = model.decision {
+        settings.validate()?;
+        if model.capabilities.runtime_kind != "decision" {
+            bail!("decision settings require a decision model");
+        }
+    }
     if model.default_max_output_tokens == Some(0) {
         bail!("default_max_output_tokens must be greater than zero");
     }
@@ -543,6 +561,21 @@ pub(crate) fn validate_engine_model_config(model: &EngineModelConfig) -> Result<
         }
         if model.capabilities != EngineModelCapabilities::audio() {
             bail!("audio model capability mismatch");
+        }
+        return Ok(());
+    }
+    if model.capabilities.runtime_kind == "decision" {
+        if !ironmlx_decision::is_laya_checkpoint(&model.path)? {
+            bail!("unsupported decision checkpoint");
+        }
+        if model.capabilities != EngineModelCapabilities::decision()
+            || model.scheduler_runtime_profile.is_some()
+            || model.mtp.is_some()
+            || model.prompt_lookup.is_some()
+            || model.default_max_output_tokens.is_some()
+            || model.sampling_defaults != SamplingDefaults::default()
+        {
+            bail!("decision models do not accept generation settings");
         }
         return Ok(());
     }

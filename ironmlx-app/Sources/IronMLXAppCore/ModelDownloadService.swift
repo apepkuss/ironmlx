@@ -853,6 +853,8 @@ public actor ModelDownloadService {
         let hasComponentManifest = repository.files.contains { $0.path == "model_manifest.json" }
         let downloadableFiles = repository.files.filter { file in
             file.isWeight || Self.isRuntimeMetadata(file)
+                || (repository.repoID == "aac6fef/laya-multilingual-mlx"
+                    && Self.isLayaAttribution(file))
                 || (hasComponentManifest
                     && TTSModelDownloadProfile.isPotentialAuxiliary(file))
         }
@@ -1335,12 +1337,14 @@ public actor ModelDownloadService {
                     message: error.localizedDescription
                 )
             }
+            let tokenizerPath = compatibility.artifactRole == "decision"
+                ? "tokenizer/tokenizer.json" : "tokenizer.json"
             if ttsProfile == nil, compatibility.artifactRole != ModelArtifactRole.dflash2Drafter,
-               !metadata.contains(where: { $0.path == "tokenizer.json" }) {
+               !metadata.contains(where: { $0.path == tokenizerPath }) {
                 throw DownloadFailure(
                     repoID: repoID,
                     code: "repo_missing_metadata",
-                    message: "Repository \(repoID) is missing tokenizer.json."
+                    message: "Repository \(repoID) is missing \(tokenizerPath)."
                 )
             }
             let weightBytes = try checkedTotalBytes(
@@ -1675,7 +1679,9 @@ public actor ModelDownloadService {
         telemetry: ModelDownloadTelemetryTracker,
         selectedFiles: [RemoteModelFile]? = nil
     ) async throws -> (files: [ModelSnapshotFile], validations: [ModelValidatedFile]) {
-        let required = ["config.json"]
+        let required = repository.repoID == "aac6fef/laya-multilingual-mlx"
+            ? ["mlx_config.json", "encoder/config.json", "rl_agent_config.json", "tokenizer/tokenizer.json", "tokenizer/tokenizer_config.json"]
+            : ["config.json"]
         let byPath = Dictionary(uniqueKeysWithValues: repository.files.map { ($0.path, $0) })
         for path in required where byPath[path] == nil {
             throw DownloadFailure(
@@ -1684,7 +1690,11 @@ public actor ModelDownloadService {
                 message: "Repository \(repository.repoID) is missing \(path)."
             )
         }
-        let metadataFiles = selectedFiles ?? repository.files.filter(Self.isRuntimeMetadata)
+        let metadataFiles = selectedFiles ?? repository.files.filter {
+            Self.isRuntimeMetadata($0)
+                || (repository.repoID == "aac6fef/laya-multilingual-mlx"
+                    && Self.isLayaAttribution($0))
+        }
         var resolved: [ModelSnapshotFile] = []
         var validations: [ModelValidatedFile] = []
         for file in metadataFiles {
@@ -2097,6 +2107,10 @@ public actor ModelDownloadService {
             || name.hasSuffix(".jinja")
             || name.hasSuffix(".txt")
             || name.hasSuffix(".model")
+    }
+
+    private static func isLayaAttribution(_ file: RemoteModelFile) -> Bool {
+        ["LICENSE", "NOTICE", "README.md"].contains(file.path)
     }
 
     private static func sha256(_ data: Data) -> String {

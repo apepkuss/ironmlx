@@ -33,6 +33,7 @@ pub(crate) mod audio;
 pub mod chat_format;
 pub mod diffusion_gemma;
 pub mod engine;
+pub(crate) mod systemone;
 use ironmlx_runtime::core::runtime_health as health;
 pub mod model_manager;
 pub(crate) mod openai;

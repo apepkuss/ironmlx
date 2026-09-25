@@ -7,12 +7,20 @@ public struct BackendAudioResources: Codable, Equatable, Sendable {
     public var resourceLock: String
     public var wetextFsts: String
     public var unidicDir: String
+    public var execution: BackendAudioExecutionSettings?
 
-    public init(derivedResources: String, resourceLock: String, wetextFsts: String, unidicDir: String) {
+    public init(
+        derivedResources: String,
+        resourceLock: String,
+        wetextFsts: String,
+        unidicDir: String,
+        execution: BackendAudioExecutionSettings? = nil
+    ) {
         self.derivedResources = derivedResources
         self.resourceLock = resourceLock
         self.wetextFsts = wetextFsts
         self.unidicDir = unidicDir
+        self.execution = execution
     }
 
     enum CodingKeys: String, CodingKey {
@@ -20,6 +28,41 @@ public struct BackendAudioResources: Codable, Equatable, Sendable {
         case resourceLock = "resource_lock"
         case wetextFsts = "wetext_fsts"
         case unidicDir = "unidic_dir"
+        case execution
+    }
+}
+
+public struct BackendAudioExecutionSettings: Codable, Equatable, Sendable {
+    public var queueTimeoutMS: Int?
+    public var firstAudioTimeoutMS: Int?
+    public var executionTimeoutMS: Int?
+    public var slowConsumerTimeoutMS: Int?
+    public var maxOutputFrames: Int?
+    public var segmentTokens: Int?
+
+    public init(
+        queueTimeoutMS: Int? = nil,
+        firstAudioTimeoutMS: Int? = nil,
+        executionTimeoutMS: Int? = nil,
+        slowConsumerTimeoutMS: Int? = nil,
+        maxOutputFrames: Int? = nil,
+        segmentTokens: Int? = nil
+    ) {
+        self.queueTimeoutMS = queueTimeoutMS
+        self.firstAudioTimeoutMS = firstAudioTimeoutMS
+        self.executionTimeoutMS = executionTimeoutMS
+        self.slowConsumerTimeoutMS = slowConsumerTimeoutMS
+        self.maxOutputFrames = maxOutputFrames
+        self.segmentTokens = segmentTokens
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case queueTimeoutMS = "queue_timeout_ms"
+        case firstAudioTimeoutMS = "first_audio_timeout_ms"
+        case executionTimeoutMS = "execution_timeout_ms"
+        case slowConsumerTimeoutMS = "slow_consumer_timeout_ms"
+        case maxOutputFrames = "max_output_frames"
+        case segmentTokens = "segment_tokens"
     }
 }
 

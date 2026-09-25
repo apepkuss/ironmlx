@@ -272,6 +272,10 @@ fn bounded_router(router: Router) -> Router {
         .layer(middleware::from_fn(enforce_request_body_limit))
 }
 
+pub(super) fn lan_api_router(router: Router, key_digest: [u8; 32]) -> Router {
+    bounded_router(router).layer(middleware::from_fn_with_state(key_digest, authenticate_lan))
+}
+
 fn local_management_router(router: Router) -> Router {
     bounded_router(router.merge(crate::logging::router()))
 }
@@ -306,10 +310,7 @@ pub async fn serve_router(router: Router, config: ServerNetworkConfig, label: &s
     lan_std
         .set_nonblocking(true)
         .context("configuring LAN listener")?;
-    let lan_router = bounded_router(router).layer(middleware::from_fn_with_state(
-        security.api_key_digest,
-        authenticate_lan,
-    ));
+    let lan_router = lan_api_router(router, security.api_key_digest);
     tracing::info!(
         "{label} listening locally on http://{} and on authenticated LAN endpoint https://{}",
         config.local_addr,

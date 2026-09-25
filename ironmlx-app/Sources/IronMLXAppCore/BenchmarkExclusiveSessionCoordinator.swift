@@ -90,7 +90,8 @@ public actor BenchmarkExclusiveSessionCoordinator {
                 maxCacheCap: nil,
                 pinned: targetWasPinned,
                 promptLookup: targetPromptLookup,
-                audio: try audioResources?(targetModel)
+                audio: try audioResources?(targetModel),
+                decision: nil
             )
             _ = try await client.setDefaultModel(targetModel)
 
@@ -169,7 +170,8 @@ public actor BenchmarkExclusiveSessionCoordinator {
                     maxCacheCap: nil,
                     pinned: model.pinned,
                     promptLookup: model.promptLookup,
-                    audio: model.audio
+                    audio: model.audio,
+                    decision: model.decision
                 )
                 restored.append(model.id)
                 currentByID[model.id] = model.backendInfo(isDefault: false)
@@ -312,10 +314,12 @@ private struct BenchmarkLoadedModelSnapshot: Equatable, Sendable {
     var maxPositionEmbeddings: Int
     var promptLookup: BackendPromptLookupConfig?
 
+    var decision: BackendDecisionSettings?
     var audio: BackendAudioResources?
 
     init(_ model: BackendLoadedModelInfo, audio: BackendAudioResources? = nil) {
         self.audio = audio
+        self.decision = model.decision
         self.id = model.id
         self.model = model.model
         self.path = model.path

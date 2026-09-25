@@ -1426,6 +1426,7 @@ dependencies = [
  "image",
  "ironmlx-audio",
  "ironmlx-core",
+ "ironmlx-decision",
  "ironmlx-lm",
  "ironmlx-runtime",
  "libc",
@@ -1489,6 +1490,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironmlx-decision"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ironmlx-core",
+ "mlx",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokenizers",
+]
+
+[[package]]
 name = "ironmlx-lm"
 version = "0.1.0"
 dependencies = [
@@ -1522,6 +1536,7 @@ dependencies = [
  "dirs",
  "ironmlx-audio",
  "ironmlx-core",
+ "ironmlx-decision",
  "ironmlx-lm",
  "libc",
  "mlx",

@@ -144,6 +144,9 @@ fn validate_dflash2_draft_metadata(config: &serde_json::Value) -> Result<()> {
 /// is opened.
 pub fn preflight_model_metadata(model_dir: &Path) -> Result<ModelMetadataPreflight> {
     let config_path = model_dir.join("config.json");
+    if !config_path.exists() && model_dir.join("mlx_config.json").exists() {
+        return preflight_laya_metadata(model_dir);
+    }
     let config_raw: serde_json::Value = serde_json::from_reader(
         std::fs::File::open(&config_path)
             .with_context(|| format!("opening {}", config_path.display()))?,
@@ -192,6 +195,42 @@ pub fn preflight_model_metadata(model_dir: &Path) -> Result<ModelMetadataPreflig
         model_type: model_type.to_owned(),
         artifact_role,
         quantization,
+    })
+}
+
+fn preflight_laya_metadata(model_dir: &Path) -> Result<ModelMetadataPreflight> {
+    let mlx_config: serde_json::Value =
+        serde_json::from_reader(std::fs::File::open(model_dir.join("mlx_config.json"))?)?;
+    let encoder: serde_json::Value =
+        serde_json::from_reader(std::fs::File::open(model_dir.join("encoder/config.json"))?)?;
+    let agent: serde_json::Value =
+        serde_json::from_reader(std::fs::File::open(model_dir.join("rl_agent_config.json"))?)?;
+    if mlx_config.get("format").and_then(serde_json::Value::as_str) != Some("laya-mlx")
+        || mlx_config
+            .get("format_version")
+            .and_then(serde_json::Value::as_u64)
+            != Some(1)
+        || mlx_config
+            .get("repository")
+            .and_then(serde_json::Value::as_str)
+            != Some("aac6fef/laya-multilingual-mlx")
+        || mlx_config.get("dtype").and_then(serde_json::Value::as_str) != Some("float16")
+        || encoder
+            .get("model_type")
+            .and_then(serde_json::Value::as_str)
+            != Some("modernbert")
+        || agent.get("max_len").and_then(serde_json::Value::as_u64) != Some(1024)
+        || agent
+            .get("head_max_len")
+            .and_then(serde_json::Value::as_u64)
+            != Some(256)
+    {
+        return Err(anyhow!("unsupported Laya multilingual MLX metadata"));
+    }
+    Ok(ModelMetadataPreflight {
+        model_type: "laya_multilingual_mlx".into(),
+        artifact_role: "decision",
+        quantization: None,
     })
 }
 
@@ -1201,6 +1240,28 @@ mod tests {
     use serde_json::json;
     use serial_test::serial;
     use std::collections::HashMap;
+
+    #[test]
+    fn metadata_preflight_accepts_laya_decision_checkpoint() {
+        let dir =
+            std::env::temp_dir().join(format!("ironmlx-laya-preflight-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("encoder")).expect("create encoder directory");
+        std::fs::write(dir.join("mlx_config.json"), r#"{"format":"laya-mlx","format_version":1,"repository":"aac6fef/laya-multilingual-mlx","dtype":"float16"}"#).expect("write MLX config");
+        std::fs::write(
+            dir.join("encoder/config.json"),
+            r#"{"model_type":"modernbert"}"#,
+        )
+        .expect("write encoder config");
+        std::fs::write(
+            dir.join("rl_agent_config.json"),
+            r#"{"max_len":1024,"head_max_len":256}"#,
+        )
+        .expect("write agent config");
+        let result = preflight_model_metadata(&dir).expect("preflight Laya metadata");
+        assert_eq!(result.model_type, "laya_multilingual_mlx");
+        assert_eq!(result.artifact_role, "decision");
+        std::fs::remove_dir_all(dir).expect("cleanup preflight dir");
+    }
 
     #[test]
     fn metadata_preflight_accepts_supported_architecture_and_quantization() {

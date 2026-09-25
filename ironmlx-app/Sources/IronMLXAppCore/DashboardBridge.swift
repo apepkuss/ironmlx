@@ -293,6 +293,16 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                     self.sendFetchResult(path: path, jsonString: json)
                 }
             }
+        case "/admin/api/audio/execution-profile":
+            let config = configStore.load()
+            Task {
+                let client = BackendAPIClient(host: config.host, port: config.port)
+                let data = try? await client.fetchData(path: path)
+                let json = data.flatMap { String(data: $0, encoding: .utf8) } ?? "null"
+                await MainActor.run {
+                    self.sendFetchResult(path: path, jsonString: json)
+                }
+            }
         case "/health":
             let config = configStore.load()
             let host = config.host
@@ -340,7 +350,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                     mtpEnabledModels: state.mtpEnabledModels,
                     dflash2EnabledModels: state.dflash2EnabledModels
                 )
-                let benchmarkModels = models.filter { $0.readiness?.isLoadable != false }.map {
+                let benchmarkModels = models.filter { $0.readiness?.isLoadable != false && $0.capabilities?.runtimeKind != "decision" }.map {
                     BenchmarkModel(repoID: $0.repoID, loaded: $0.loaded)
                 }
                 let json = (try? Self.jsonString(benchmarkModels)) ?? "[]"
@@ -733,7 +743,12 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                     targetModel: target.model,
                     targetModelPath: target.path,
                     validateModelPath: self.benchmarkModelPathValidator(config: config),
-                    audioResources: { [scanner = self.scanner] model in try scanner.audioResources(for: model) }
+                    audioResources: { [scanner = self.scanner, parameterStore = self.parameterStore] model in
+                        try scanner.audioResources(
+                            for: model,
+                            execution: parameterStore.parameters(for: model)?.audioExecution
+                        )
+                    }
                 )
                 let json = try Self.jsonString(result)
                 await MainActor.run {
@@ -1152,7 +1167,11 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                             reloadWhenIdle: true,
                             deferWhenBusy: false,
                             samplingDefaults: (parameters?.samplingDefaults ?? .empty).filtered(for: scanner.model(for: repoID)?.capabilities),
-                            audio: try scanner.audioResources(for: repoID)
+                            audio: try scanner.audioResources(
+                                for: repoID,
+                                execution: parameters?.audioExecution
+                            ),
+                            decision: parameters?.decision
                         )
                         reloadStatus = response.status
                         await MainActor.run {
@@ -1304,6 +1323,14 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             return
         }
         let config = configStore.load()
+        if configuredDFlash2Target(in: config) != nil {
+            deliverModelOperationResult(
+                error: "Unload the current DFlash2 model before loading another model.",
+                code: "dflash2_unload_required",
+                callback: callback
+            )
+            return
+        }
         let capabilities = scanner.model(for: model)?.capabilities
         let pinned = config.pinnedModelReferences.contains(model)
         let resolvedModel: String
@@ -1397,7 +1424,11 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                     samplingDefaults: (
                         self.parameterStore.parameters(for: model)?.samplingDefaults ?? .empty
                     ).filtered(for: capabilities),
-                    audio: try self.scanner.audioResources(for: model)
+                    audio: try self.scanner.audioResources(
+                        for: model,
+                        execution: self.parameterStore.parameters(for: model)?.audioExecution
+                    ),
+                    decision: self.parameterStore.parameters(for: model)?.decision
                 )
                 let json = try Self.jsonString(response)
                 await MainActor.run {
@@ -2252,7 +2283,11 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                         mtpDraftTokens: mtpRuntime?.draftTokens,
                         promptLookup: self.parameterStore.parameters(for: model)?.promptLookupConfig,
                         samplingDefaults: (self.parameterStore.parameters(for: model)?.samplingDefaults ?? .empty).filtered(for: self.scanner.model(for: model)?.capabilities),
-                        audio: try self.scanner.audioResources(for: model)
+                        audio: try self.scanner.audioResources(
+                            for: model,
+                            execution: self.parameterStore.parameters(for: model)?.audioExecution
+                        ),
+                        decision: self.parameterStore.parameters(for: model)?.decision
                     )
                 } else {
                     response = try await client.setDefaultModel(model)
@@ -2280,6 +2315,9 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         let previousParameters = parameterStore.parameters(for: parameters.modelID)
         do {
             try parameterStore.save(parameters)
+            IronMLXAppLogger.info(
+                "event=model_parameters_saved model=\(parameters.modelID)"
+            )
             sendModelParameters()
             sendJavaScript("onModelParamsSaved(\(Self.jsStringLiteral(#"{"status":"ok"}"#)))")
             if applyDFlash2ParameterChangeIfNeeded(
@@ -2409,6 +2447,19 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             do {
                 let client = BackendAPIClient(host: config.host, port: config.port)
                 let loadedModels = try await client.fetchLoadedModels()
+                if scanner.model(for: model)?.capabilities?.runtimeKind == "decision",
+                   !loadedModels.contains(where: { $0.id == model || $0.model == model || $0.path == model }) {
+                    let path = try await scanner.verifiedModelPathAsync(
+                        for: model, fullChecksum: config.verifyModelOnLoad == true
+                    )
+                    _ = try await client.registerModel(
+                        model: model, modelDir: path,
+                        setDefault: config.defaultModelReference == model,
+                        samplingDefaults: .empty,
+                        decision: parameters.decision
+                    )
+                    return
+                }
                 guard let loaded = loadedModels.first(where: { candidate in
                     candidate.id == model || candidate.model == model || candidate.path == model
                 }) else {
@@ -2436,7 +2487,11 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                     promptLookup: parameters.promptLookupConfig,
                     reloadWhenIdle: true,
                     samplingDefaults: parameters.samplingDefaults.filtered(for: scanner.model(for: model)?.capabilities),
-                    audio: try scanner.audioResources(for: model)
+                    audio: try scanner.audioResources(
+                        for: model,
+                        execution: parameters.audioExecution
+                    ),
+                    decision: parameterStore.parameters(for: model)?.decision
                 )
                 let json = try Self.jsonString(response)
                 await MainActor.run {

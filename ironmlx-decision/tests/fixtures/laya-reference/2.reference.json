@@ -1,0 +1,1 @@
+{"model": "laya-rl-agent", "answers": {"empty": {"type": "noul", "confidence": 0.9928, "action": {"act_probability": 1.0}, "noul": 0.0072}}, "usage": {"input_tokens": 31, "output_tokens": 0}}

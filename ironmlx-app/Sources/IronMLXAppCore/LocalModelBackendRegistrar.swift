@@ -266,7 +266,11 @@ public enum LocalModelBackendRegistrar {
                         : nil,
                     samplingDefaults: (parameters?.samplingDefaults ?? .empty)
                         .filtered(for: capabilities),
-                    audio: try scanner.audioResources(for: model.id)
+                    audio: try scanner.audioResources(
+                        for: model.id,
+                        execution: parameters?.audioExecution
+                    ),
+                    decision: parameters?.decision
                 )
             } catch {
                 failed.append(

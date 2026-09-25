@@ -29,6 +29,43 @@ If the main model was downloaded before auxiliary resource support was available
 choose **Prepare resources** from the model list. Preparation can be retried after
 an interruption; verified model files and download caches are reused.
 
+## Model parameter settings
+
+Open **Model Management** and select the gear button for a TTS model. The basic
+information is read-only: model alias and model type are always shown, while the
+remaining values appear only when they can be read from the model configuration.
+
+| Field | Source and behavior |
+| --- | --- |
+| Model alias | Registered model identity; read-only |
+| Model type | Detected TTS capability; read-only |
+| Supported languages | `supported_languages` in the model configuration |
+| Output sample rate | `s2mel.preprocess_params.sr` in the model configuration |
+| Max text tokens | `gpt.max_text_tokens` in the model configuration |
+| Max audio tokens | `gpt.max_mel_tokens` in the model configuration |
+
+Configuration-backed fields are omitted when the model files do not provide a
+valid value. The App does not infer or hard-code missing model metadata.
+
+The same window provides six editable runtime policies. Defaults and allowed
+ranges are obtained from the running backend rather than embedded in the UI.
+
+| Setting | Default | Allowed range and behavior |
+| --- | --- | --- |
+| Queue timeout | 60 seconds | Positive, at most 24 hours; limits waiting for an execution permit |
+| First audio timeout | 120 seconds | Positive, at most 24 hours; starts after the request obtains an execution permit |
+| Execution timeout | 900 seconds | Positive, at most 24 hours; starts after the request obtains an execution permit |
+| Slow consumer timeout | 30 seconds | Positive, at most 24 hours; limits how long output can remain blocked by the consumer |
+| Max output duration | 600 seconds | Positive, up to the runtime profile maximum; includes silence between segments |
+| Segment tokens | 120 | Integer from 6 through 120; token budget for each synthesis segment |
+
+If the execution profile is unavailable, these controls and the save action stay
+disabled. Saving stores the policies for that model. If the model is loaded, the
+App applies them by reloading it after active work becomes idle; the saved values
+are also used for later loads and restart recovery. These settings are service
+policies, not model limits or latency guarantees. See the [speech API](audio-speech-api.md)
+for the corresponding `audio.execution` fields and scheduling semantics.
+
 ## IndexTTS 2.5 repository contract
 
 The supported reference is

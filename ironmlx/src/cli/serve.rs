@@ -1768,6 +1768,7 @@ mod scheduler_profile_tests {
         let args = base_args();
         let manifest_model = EngineModelManifest {
             audio: None,
+            decision: None,
             id: "disabled-exp".to_string(),
             path: PathBuf::from("/tmp/ironmlx-disabled-model-does-not-exist"),
             load_policy: EngineLoadPolicy::Disabled,
@@ -1807,6 +1808,7 @@ mod scheduler_profile_tests {
         let args = base_args();
         let manifest_model = EngineModelManifest {
             audio: None,
+            decision: None,
             id: "gemma4-manifest".to_string(),
             path: model_dir,
             load_policy: EngineLoadPolicy::Lazy,
@@ -1850,6 +1852,7 @@ mod scheduler_profile_tests {
         };
         let manifest_model = EngineModelManifest {
             audio: None,
+            decision: None,
             id: "qwen-prompt-lookup".to_string(),
             path: model_dir,
             load_policy: EngineLoadPolicy::Lazy,
@@ -1895,6 +1898,7 @@ mod scheduler_profile_tests {
         let prompt_lookup = ironmlx_runtime::core::prompt_lookup::PromptLookupConfig::default();
         let manifest_model = EngineModelManifest {
             audio: None,
+            decision: None,
             id: "qwen-hybrid".to_string(),
             path: model_dir,
             load_policy: EngineLoadPolicy::Lazy,

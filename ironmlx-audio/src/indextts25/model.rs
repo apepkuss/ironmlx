@@ -24,8 +24,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub const INDEXTTS25_OUTPUT_SAMPLE_RATE_HZ: u32 = 22_050;
+pub const INDEXTTS25_MAX_OUTPUT_FRAMES: u64 = 600 * INDEXTTS25_OUTPUT_SAMPLE_RATE_HZ as u64;
+
 const FORMAT: PcmFormat = PcmFormat {
-    sample_rate: 22050,
+    sample_rate: INDEXTTS25_OUTPUT_SAMPLE_RATE_HZ,
     channels: 1,
 };
 const BLOCK_FRAMES: usize = 8192;
@@ -44,7 +47,7 @@ impl IndexTts25Loader {
             wetext_fsts,
             unidic_dir,
             text_limits: TextLimits::default(),
-            max_output_frames: 600 * 22050,
+            max_output_frames: INDEXTTS25_MAX_OUTPUT_FRAMES,
         }
     }
     /// Service policies; model positions and per-segment generation limits remain fixed.

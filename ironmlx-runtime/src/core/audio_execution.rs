@@ -5,8 +5,11 @@ use super::{
     process_memory::{global_process_memory_governor, MemoryReservation},
 };
 use ironmlx_audio::{
-    indextts25::IndexTts25Loader, AudioError, Language, OutputPolicy, PcmChunk,
-    ResolvedModelResources, SessionControl, TtsModel, TtsRequest, TtsStep, TtsSummary,
+    indextts25::{
+        IndexTts25Loader, INDEXTTS25_MAX_OUTPUT_FRAMES, INDEXTTS25_OUTPUT_SAMPLE_RATE_HZ,
+    },
+    AudioError, Language, OutputPolicy, PcmChunk, ResolvedModelResources, SessionControl, TtsModel,
+    TtsRequest, TtsStep, TtsSummary,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -60,6 +63,46 @@ pub struct AudioExecutionLimits {
     pub max_output_frames: u64,
     pub segment_tokens: usize,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AudioExecutionProfile {
+    pub defaults: AudioExecutionLimits,
+    pub constraints: AudioExecutionConstraints,
+    pub output_frames_per_second: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AudioExecutionConstraints {
+    pub deadline_ms: AudioExecutionRange,
+    pub max_output_frames: AudioExecutionRange,
+    pub segment_tokens: AudioExecutionRange,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AudioExecutionRange {
+    pub min: u64,
+    pub max: u64,
+}
+
+impl AudioExecutionProfile {
+    pub fn current() -> Self {
+        Self {
+            defaults: AudioExecutionLimits::default(),
+            constraints: AudioExecutionConstraints {
+                deadline_ms: AudioExecutionRange {
+                    min: 1,
+                    max: Duration::from_secs(24 * 60 * 60).as_millis() as u64,
+                },
+                max_output_frames: AudioExecutionRange {
+                    min: 1,
+                    max: INDEXTTS25_MAX_OUTPUT_FRAMES,
+                },
+                segment_tokens: AudioExecutionRange { min: 6, max: 120 },
+            },
+            output_frames_per_second: INDEXTTS25_OUTPUT_SAMPLE_RATE_HZ,
+        }
+    }
+}
 impl Default for AudioExecutionLimits {
     fn default() -> Self {
         Self {
@@ -67,7 +110,7 @@ impl Default for AudioExecutionLimits {
             first_audio_timeout: Duration::from_secs(120),
             execution_timeout: Duration::from_secs(900),
             slow_consumer_timeout: Duration::from_secs(30),
-            max_output_frames: 600 * 22050,
+            max_output_frames: INDEXTTS25_MAX_OUTPUT_FRAMES,
             segment_tokens: 120,
         }
     }
@@ -573,7 +616,8 @@ pub fn speech_request(
 
 impl AudioExecutionLimits {
     pub fn validate(&self) -> anyhow::Result<()> {
-        let maximum_deadline = Duration::from_secs(24 * 60 * 60);
+        let profile = AudioExecutionProfile::current();
+        let maximum_deadline = Duration::from_millis(profile.constraints.deadline_ms.max);
         if [
             self.queue_timeout,
             self.first_audio_timeout,
@@ -587,10 +631,15 @@ impl AudioExecutionLimits {
             || self.execution_timeout.is_zero()
             || self.slow_consumer_timeout.is_zero()
             || self.max_output_frames == 0
-            || self.max_output_frames > 600 * 22050
-            || !(6..=120).contains(&self.segment_tokens)
+            || self.max_output_frames > profile.constraints.max_output_frames.max
+            || !(profile.constraints.segment_tokens.min as usize
+                ..=profile.constraints.segment_tokens.max as usize)
+                .contains(&self.segment_tokens)
         {
-            anyhow::bail!("audio deadlines must be positive and max_output_frames must be within 1..=13230000");
+            anyhow::bail!(
+                "audio execution settings must satisfy the runtime profile: {:?}",
+                profile.constraints
+            );
         }
         Ok(())
     }
@@ -614,6 +663,21 @@ mod duration_millis {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn execution_profile_is_the_validation_source_of_truth() {
+        let profile = AudioExecutionProfile::current();
+        assert_eq!(profile.defaults, AudioExecutionLimits::default());
+        assert_eq!(profile.constraints.deadline_ms.min, 1);
+        assert_eq!(profile.constraints.deadline_ms.max, 86_400_000);
+        assert_eq!(profile.constraints.max_output_frames.max, 13_230_000);
+        assert_eq!(profile.output_frames_per_second, 22_050);
+        assert_eq!(
+            profile.constraints.segment_tokens,
+            AudioExecutionRange { min: 6, max: 120 }
+        );
+        profile.defaults.validate().unwrap();
+    }
+
     fn response(
         limits: AudioExecutionLimits,
     ) -> (

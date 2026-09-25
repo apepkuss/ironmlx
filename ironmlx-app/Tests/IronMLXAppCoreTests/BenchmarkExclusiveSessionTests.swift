@@ -215,7 +215,8 @@ private actor MockBenchmarkModelClient: BackendModelManaging {
         maxCacheCap: Int?,
         pinned: Bool,
         promptLookup: BackendPromptLookupConfig?,
-        audio: BackendAudioResources?
+        audio: BackendAudioResources?,
+        decision: BackendDecisionSettings? = nil
     ) async throws -> BackendModelAdminResponse {
         calls.append("load:\(model):\(modelDir):\(setDefault):\(pinned)")
         restoredAudio[model] = audio

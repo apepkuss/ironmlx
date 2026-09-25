@@ -515,7 +515,8 @@ private actor FakeRestartModelLoader: BackendModelLoading {
         mtpDraftTokens: Int?,
         promptLookup: BackendPromptLookupConfig?,
         samplingDefaults: BackendSamplingDefaults,
-        audio: BackendAudioResources?
+        audio: BackendAudioResources?,
+        decision: BackendDecisionSettings? = nil
     ) async throws -> BackendModelAdminResponse {
         calls.append("register:\(model):\(modelDir):\(setDefault):\(maxCacheCap.map(String.init) ?? "nil"):\(pinned.map(String.init) ?? "nil"):\(mtpModelDir ?? "nil"):\(mtpDraftTokens.map(String.init) ?? "nil")")
         if let error = registrationErrors[model] {
@@ -544,7 +545,8 @@ private actor FakeRestartModelLoader: BackendModelLoading {
         promptLookup: BackendPromptLookupConfig?,
         reloadWhenIdle: Bool,
         samplingDefaults: BackendSamplingDefaults,
-        audio: BackendAudioResources?
+        audio: BackendAudioResources?,
+        decision: BackendDecisionSettings? = nil
     ) async throws -> BackendModelAdminResponse {
         calls.append("load:\(model):\(modelDir):\(setDefault):\(maxCacheCap.map(String.init) ?? "nil"):\(pinned):\(mtpModelDir ?? "nil"):\(mtpDraftTokens.map(String.init) ?? "nil")")
         if let loadError {

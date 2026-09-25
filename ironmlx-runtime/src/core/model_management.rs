@@ -135,6 +135,7 @@ impl std::error::Error for ModelCapabilityError {}
 #[derive(Clone)]
 struct PendingModelReload {
     pub audio: Option<AudioModelResources>,
+    pub decision: Option<ironmlx_decision::DecisionSettings>,
     model_reference: String,
     model_dir: PathBuf,
     max_cache_cap_override: Option<usize>,
@@ -154,6 +155,7 @@ pub struct EngineModelLoad {
 
 pub struct ModelLoadRequest {
     pub audio: Option<AudioModelResources>,
+    pub decision: Option<ironmlx_decision::DecisionSettings>,
     pub model_reference: String,
     pub model_dir: PathBuf,
     pub max_cache_cap_override: Option<usize>,
@@ -169,6 +171,7 @@ pub struct ModelLoadRequest {
 
 pub struct EngineModelBuildRequest<'a> {
     pub audio: Option<AudioModelResources>,
+    pub decision: Option<ironmlx_decision::DecisionSettings>,
     pub model_id: String,
     pub model_dir: &'a Path,
     pub max_cache_cap_override: Option<usize>,
@@ -185,6 +188,7 @@ pub fn build_engine_model_config(
 ) -> Result<EngineModelLoad> {
     let EngineModelBuildRequest {
         audio,
+        decision,
         model_id,
         model_dir,
         max_cache_cap_override,
@@ -194,6 +198,33 @@ pub fn build_engine_model_config(
         prompt_lookup,
         pinned,
     } = request;
+    if ironmlx_decision::is_laya_checkpoint(model_dir)? {
+        if model_id != ironmlx_decision::contract::MULTILINGUAL_MODEL_ID {
+            bail!("Laya must be registered under its canonical model ID");
+        }
+        if audio.is_some()
+            || max_cache_cap_override.is_some()
+            || default_max_output_tokens.is_some()
+            || mtp.is_some()
+            || prompt_lookup.is_some()
+            || sampling_defaults_override != SamplingDefaults::default()
+        {
+            bail!("decision models do not accept audio or generation settings");
+        }
+        return Ok(EngineModelLoad {
+            config: {
+                let mut config = decision_model_config(model_id, model_dir.to_path_buf(), pinned);
+                let settings = decision.unwrap_or_default();
+                settings.validate()?;
+                config.decision = Some(settings);
+                config
+            },
+            warning: None,
+        });
+    }
+    if decision.is_some() {
+        bail!("decision settings require a decision model");
+    }
     if let Some(audio) = audio {
         if max_cache_cap_override.is_some()
             || default_max_output_tokens.is_some()
@@ -206,6 +237,7 @@ pub fn build_engine_model_config(
         return Ok(EngineModelLoad {
             config: EngineModelConfig {
                 audio: Some(audio),
+                decision: None,
                 id: model_id,
                 path: model_dir.to_path_buf(),
                 load_policy: EngineLoadPolicy::Lazy,
@@ -234,6 +266,7 @@ pub fn build_engine_model_config(
         return Ok(EngineModelLoad {
             config: EngineModelConfig {
                 audio: None,
+                decision: None,
                 id: model_id,
                 path: model_dir.to_path_buf(),
                 load_policy: EngineLoadPolicy::Lazy,
@@ -289,6 +322,7 @@ pub fn build_engine_model_config(
     Ok(EngineModelLoad {
         config: EngineModelConfig {
             audio: None,
+            decision: None,
             id: model_id,
             path: model_dir.to_path_buf(),
             load_policy: EngineLoadPolicy::Lazy,
@@ -448,6 +482,7 @@ impl ModelManagement {
         let parsed = request;
         let reload = PendingModelReload {
             audio: parsed.audio.clone(),
+            decision: parsed.decision,
             model_reference: parsed.model_reference.clone(),
             model_dir: parsed.model_dir.clone(),
             max_cache_cap_override: parsed.max_cache_cap_override,
@@ -500,6 +535,7 @@ impl ModelManagement {
             &self.scheduler_options,
             EngineModelBuildRequest {
                 audio: parsed.audio,
+                decision: parsed.decision,
                 model_id: parsed.model_reference.clone(),
                 model_dir: &parsed.model_dir,
                 max_cache_cap_override: parsed.max_cache_cap_override,
@@ -534,6 +570,7 @@ impl ModelManagement {
             &self.scheduler_options,
             EngineModelBuildRequest {
                 audio: parsed.audio,
+                decision: parsed.decision,
                 model_id: parsed.model_reference.clone(),
                 model_dir: &parsed.model_dir,
                 max_cache_cap_override: parsed.max_cache_cap_override,
@@ -591,6 +628,7 @@ impl ModelManagement {
             &self.scheduler_options,
             EngineModelBuildRequest {
                 audio: reload.audio,
+                decision: reload.decision,
                 model_id: reload.model_reference.clone(),
                 model_dir: &reload.model_dir,
                 max_cache_cap_override: reload.max_cache_cap_override,
@@ -658,6 +696,7 @@ impl ModelManagement {
                     &scheduler_options,
                     EngineModelBuildRequest {
                         audio: reload.audio,
+                        decision: reload.decision,
                         model_id: reload.model_reference.clone(),
                         model_dir: &reload.model_dir,
                         max_cache_cap_override: reload.max_cache_cap_override,
@@ -691,12 +730,52 @@ impl ModelManagement {
     }
 }
 
+fn decision_model_config(id: String, path: PathBuf, pinned: bool) -> EngineModelConfig {
+    EngineModelConfig {
+        audio: None,
+        decision: None,
+        id,
+        path,
+        pinned,
+        load_policy: EngineLoadPolicy::Lazy,
+        default: false,
+        scheduler_runtime_profile: None,
+        mtp: None,
+        prompt_lookup: None,
+        sampling_defaults: SamplingDefaults::default(),
+        default_max_output_tokens: None,
+        capabilities: EngineModelCapabilities::decision(),
+    }
+}
+
 pub fn build_engine_model_config_for_pool(
     args: &SchedulerResolutionOptions,
     model: crate::core::engine_pool::EngineModelManifest,
     scheduler_profile_store: Option<&SchedulerProfileStore>,
     hardware_label: &str,
 ) -> Result<crate::core::engine_pool::EngineModelConfig> {
+    if ironmlx_decision::is_laya_checkpoint(&model.path)? {
+        if model.id != ironmlx_decision::contract::MULTILINGUAL_MODEL_ID {
+            bail!("Laya must be registered under its canonical model ID");
+        }
+        if model.audio.is_some()
+            || model.scheduler_profile.is_some()
+            || model.mtp_model_dir.is_some()
+            || model.mtp_draft_tokens.is_some()
+            || model.prompt_lookup.is_some()
+        {
+            bail!("decision models do not accept audio or generation settings");
+        }
+        let mut config = decision_model_config(model.id, model.path, false);
+        config.decision = Some(model.decision.unwrap_or_default());
+        config.default = model.default;
+        config.load_policy = model.load_policy;
+        super::runtime_config::validate_engine_model_config(&config)?;
+        return Ok(config);
+    }
+    if model.decision.is_some() {
+        bail!("decision settings require a decision model");
+    }
     if let Some(audio) = model.audio.clone() {
         if model.scheduler_profile.is_some()
             || model.mtp_model_dir.is_some()
@@ -707,6 +786,7 @@ pub fn build_engine_model_config_for_pool(
         }
         let config = EngineModelConfig {
             audio: Some(audio),
+            decision: None,
             id: model.id,
             path: model.path,
             load_policy: model.load_policy,
@@ -735,6 +815,7 @@ pub fn build_engine_model_config_for_pool(
     if model.load_policy == crate::core::engine_pool::EngineLoadPolicy::Disabled {
         return Ok(crate::core::engine_pool::EngineModelConfig {
             audio: None,
+            decision: None,
             id: model.id,
             path: model.path,
             load_policy: model.load_policy,
@@ -803,6 +884,7 @@ pub fn build_engine_model_config_for_pool(
         }
         return Ok(crate::core::engine_pool::EngineModelConfig {
             audio: None,
+            decision: None,
             id: model.id,
             path: model.path,
             load_policy: model.load_policy,
@@ -837,6 +919,7 @@ pub fn build_engine_model_config_for_pool(
     }
     Ok(crate::core::engine_pool::EngineModelConfig {
         audio: None,
+        decision: None,
         id: model.id,
         path: model.path,
         load_policy: model.load_policy,

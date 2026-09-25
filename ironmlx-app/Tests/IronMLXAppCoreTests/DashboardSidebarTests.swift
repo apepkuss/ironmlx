@@ -32,6 +32,7 @@ import WebKit
           document.documentElement.classList.remove('sidebar-collapsed'); updateSidebarControls();
           const toggle = document.getElementById('sidebar-toggle');
           const tooltip = document.getElementById('sidebar-tooltip');
+          const helpTooltip = document.getElementById('profile-help-tooltip');
           const enter = element => element.dispatchEvent(new MouseEvent('mouseenter'));
           const leave = element => element.dispatchEvent(new MouseEvent('mouseleave'));
           const isVisible = () => !tooltip.hidden && getComputedStyle(tooltip).display !== 'none' && tooltip.getBoundingClientRect().height > 0;
@@ -39,6 +40,13 @@ import WebKit
             const rect = tooltip.getBoundingClientRect();
             return rect.left >= 0 && rect.top >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight;
           };
+          const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+          const compactStyle = getComputedStyle(tooltip);
+          const helpStyle = getComputedStyle(helpTooltip);
+          check(compactStyle.backgroundColor === (dark ? 'rgba(58, 58, 60, 0.98)' : 'rgba(44, 44, 46, 0.96)'), 'adaptive compact tooltip background');
+          check(compactStyle.color === (dark ? 'rgb(245, 245, 247)' : 'rgb(255, 255, 255)'), 'adaptive compact tooltip text');
+          check(helpStyle.backgroundColor === (dark ? 'rgba(44, 44, 46, 0.96)' : 'rgba(255, 255, 255, 0.96)'), 'adaptive explanatory tooltip background');
+          check(helpStyle.color === (dark ? 'rgb(209, 209, 214)' : 'rgb(81, 81, 84)'), 'adaptive explanatory tooltip text');
           check(toggle.textContent.trim() === '', 'toggle has no visible text label');
           enter(toggle);
           check(isVisible() && tooltip.textContent === '收起侧栏' && inViewport(), 'expanded hover tooltip');

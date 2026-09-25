@@ -330,6 +330,7 @@ fn parse_load_model_request(
         .map_err(AdminError::from_load_error)?;
     Ok(ModelLoadRequest {
         audio: request.audio,
+        decision: request.decision,
         model_reference,
         model_dir,
         max_cache_cap_override,
@@ -379,6 +380,16 @@ async fn app_speech_handler(
     super::audio::speech_with_pool(manager.pool, voices, request).await
 }
 
+async fn app_systemone_handler(
+    State(manager): State<ModelManager>,
+    body: std::result::Result<
+        Json<ironmlx_decision::DecisionRequest>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> Response {
+    super::systemone::system_one_with_pool(manager.pool, body).await
+}
+
 fn app_router(manager: ModelManager, voices: super::voices::VoiceStore) -> Router {
     Router::new()
         .route("/health", get(|| async { "ok" }))
@@ -389,7 +400,12 @@ fn app_router(manager: ModelManager, voices: super::voices::VoiceStore) -> Route
         .route("/v1/messages", post(app_anthropic_handler))
         .route("/v1/audio/speech", post(app_speech_handler))
         .merge(super::voices::router())
+        .route("/v1/systemone", post(app_systemone_handler))
         .route("/admin/api/models/loaded", get(list_loaded_handler))
+        .route(
+            "/admin/api/audio/execution-profile",
+            get(audio_execution_profile_handler),
+        )
         .route("/admin/api/models/register", post(register_model_handler))
         .route("/admin/api/models/load", post(load_model_handler))
         .route("/admin/api/models/mtp/validate", post(validate_mtp_handler))
@@ -403,6 +419,11 @@ fn app_router(manager: ModelManager, voices: super::voices::VoiceStore) -> Route
         .route("/admin/api/models/default", post(set_default_model_handler))
         .layer(Extension(voices))
         .with_state(manager)
+}
+
+async fn audio_execution_profile_handler(
+) -> Json<ironmlx_runtime::core::audio_execution::AudioExecutionProfile> {
+    Json(ironmlx_runtime::core::audio_execution::AudioExecutionProfile::current())
 }
 
 async fn app_openai_handler(
@@ -532,6 +553,8 @@ async fn set_default_model_handler(
 struct LoadModelRequest {
     #[serde(default)]
     audio: Option<ironmlx_runtime::core::audio_execution::AudioModelResources>,
+    #[serde(default)]
+    decision: Option<ironmlx_decision::DecisionSettings>,
     model: Option<String>,
     model_dir: Option<String>,
     repo_id: Option<String>,
@@ -663,6 +686,8 @@ impl AdminModelResponse {
 
 #[derive(Debug, Clone, Serialize)]
 struct LoadedModelInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decision: Option<ironmlx_decision::DecisionSettings>,
     id: String,
     model: String,
     path: String,
@@ -736,6 +761,7 @@ impl From<EngineLoadedModelInfo> for LoadedModelInfo {
             mtp_draft_tokens: info.mtp_draft_tokens,
             prompt_lookup_enabled: info.prompt_lookup.is_some(),
             prompt_lookup: info.prompt_lookup,
+            decision: info.decision,
         }
     }
 }
@@ -1274,6 +1300,7 @@ mod tests {
             .register_dynamic_model(
                 EngineModelConfig {
                     audio: None,
+                    decision: None,
                     id: "mlx-community/Qwen3.6-27B-4bit".to_string(),
                     path: model_dir.clone(),
                     load_policy: EngineLoadPolicy::Lazy,
@@ -1352,6 +1379,7 @@ mod tests {
                 &SchedulerResolutionOptions::from(&args),
                 EngineModelBuildRequest {
                     audio: None,
+                    decision: None,
                     model_id: id.to_string(),
                     model_dir: &model_dir,
                     max_cache_cap_override: Some(cache_cap),
@@ -1447,6 +1475,7 @@ mod tests {
         active_stats.set_parked_requests(2);
         active_stats.record_error();
         let mut info = EngineLoadedModelInfo {
+            decision: None,
             id: "model-a".to_string(),
             path: "/models/model-a".to_string(),
             architecture: "llama".to_string(),
@@ -1674,6 +1703,7 @@ mod tests {
             &SchedulerResolutionOptions::from(&args),
             EngineModelBuildRequest {
                 audio: None,
+                decision: None,
                 model_id: "gemma4-test".to_string(),
                 model_dir: &base,
                 max_cache_cap_override: None,
@@ -1719,6 +1749,7 @@ mod tests {
             &SchedulerResolutionOptions::from(&serve_args()),
             EngineModelBuildRequest {
                 audio: None,
+                decision: None,
                 model_id: "diffusion-gemma-test".to_string(),
                 model_dir: &model,
                 max_cache_cap_override: None,
@@ -1776,6 +1807,7 @@ mod tests {
             &SchedulerResolutionOptions::from(&serve_args()),
             EngineModelBuildRequest {
                 audio: None,
+                decision: None,
                 model_id: "diffusion-gemma-test".to_string(),
                 model_dir: &model,
                 max_cache_cap_override: Some(4096),
@@ -2249,7 +2281,7 @@ mod tests {
         ))
     }
 
-    fn serve_args() -> ServeArgs {
+    pub(super) fn serve_args() -> ServeArgs {
         ServeArgs {
             model: None,
             model_id: None,
@@ -2607,3 +2639,7 @@ impl From<ModelManagementOutcome> for AdminModelResponse {
         )
     }
 }
+
+#[cfg(test)]
+#[path = "laya_app_tests.rs"]
+mod laya_app_tests;

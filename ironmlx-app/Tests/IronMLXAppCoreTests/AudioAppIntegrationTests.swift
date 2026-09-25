@@ -37,8 +37,17 @@ import WebKit
 }
 
 @Test func audioLoadRequestCarriesResourcesWithoutStaleLanguageModelOverrides() throws {
+    let execution = BackendAudioExecutionSettings(
+        queueTimeoutMS: 30_000,
+        firstAudioTimeoutMS: 90_000,
+        executionTimeoutMS: 600_000,
+        slowConsumerTimeoutMS: 15_000,
+        maxOutputFrames: 6_615_000,
+        segmentTokens: 96
+    )
     let audio = BackendAudioResources(derivedResources: "/audio/derived", resourceLock: "/audio/sources.json",
-                                      wetextFsts: "/audio/fsts", unidicDir: "/audio/dictionary")
+                                      wetextFsts: "/audio/fsts", unidicDir: "/audio/dictionary",
+                                      execution: execution)
     let request = BackendLoadModelRequest(
         model: "tts", modelDir: "/snapshot", setDefault: false, maxCacheCap: 8192,
         mtpModelDir: "/old-mtp", mtpDraftTokens: 4, promptLookup: .crossRequest,
@@ -46,11 +55,18 @@ import WebKit
     )
     let data = try JSONEncoder().encode(request)
     let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
-    let config = try #require(object["audio"] as? [String: String])
-    #expect(config["derived_resources"] == audio.derivedResources)
-    #expect(config["resource_lock"] == audio.resourceLock)
-    #expect(config["wetext_fsts"] == audio.wetextFsts)
-    #expect(config["unidic_dir"] == audio.unidicDir)
+    let config = try #require(object["audio"] as? [String: Any])
+    #expect(config["derived_resources"] as? String == audio.derivedResources)
+    #expect(config["resource_lock"] as? String == audio.resourceLock)
+    #expect(config["wetext_fsts"] as? String == audio.wetextFsts)
+    #expect(config["unidic_dir"] as? String == audio.unidicDir)
+    let encodedExecution = try #require(config["execution"] as? [String: Any])
+    #expect(encodedExecution["queue_timeout_ms"] as? Int == execution.queueTimeoutMS)
+    #expect(encodedExecution["first_audio_timeout_ms"] as? Int == execution.firstAudioTimeoutMS)
+    #expect(encodedExecution["execution_timeout_ms"] as? Int == execution.executionTimeoutMS)
+    #expect(encodedExecution["slow_consumer_timeout_ms"] as? Int == execution.slowConsumerTimeoutMS)
+    #expect(encodedExecution["max_output_frames"] as? Int == execution.maxOutputFrames)
+    #expect(encodedExecution["segment_tokens"] as? Int == execution.segmentTokens)
     for key in ["max_cache_cap", "mtp_model_dir", "mtp_draft_tokens", "prompt_lookup", "temperature", "top_k"] {
         #expect(object[key] == nil)
     }

@@ -9,3 +9,10 @@ texts are listed separately in THIRD_PARTY_NOTICES.md and
 THIRD_PARTY_LICENSES/. Those materials remain subject to their respective
 license terms. Model weights are not part of IronMLX and are downloaded by
 users from upstream repositories under the users' responsibility.
+
+The Laya decision runtime in ironmlx-decision adapts prompt construction,
+question rendering, and confidence calculations from laya-mlx at revision
+0a859518634112655cb97c745dbf04f5191aaf13. Copyright 2026 laya-mlx
+contributors. laya-mlx itself includes software derived from Laya by Convai
+Innovations and Laya contributors. Both are licensed under Apache-2.0.
+See https://github.com/mizorewww/laya-mlx and https://github.com/NandhaKishorM/laya.

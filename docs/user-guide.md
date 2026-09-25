@@ -53,6 +53,7 @@ the [supported model matrix](supported-models.md).
 
 ## Choose a task
 
+- [Laya decision API](laya-systemone-api.md) — load Laya in the App and connect external TypeSafe clients.
 - [Model support matrix](supported-models.md) — architectures, validated
   versions, quantization, memory, and feature limits.
 - [HTTP API quick start](api.md) — first requests for Chat Completions,

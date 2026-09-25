@@ -49,6 +49,32 @@ import Testing
             "model_manifest.json": Data(#"{"dtype":"float16","quantization":null}"#.utf8),
         ]
     )
+    _ = try writeVerifiedTestSnapshot(
+        root: root,
+        repoID: "example/Laya-like-decision-model",
+        files: [
+            "config.json": Data("{}".utf8),
+            "model.safetensors": Data("weights".utf8),
+            "mlx_config.json": Data(#"{"format":"decision-mlx","dtype":"float16"}"#.utf8),
+            "manifest.json": Data(#"{"dtype":"float32"}"#.utf8),
+        ]
+    )
+    _ = try writeVerifiedTestSnapshot(
+        root: root,
+        repoID: "example/Unknown-dtype-model",
+        files: [
+            "config.json": Data("{}".utf8),
+            "model.safetensors": Data("weights".utf8),
+        ]
+    )
+    _ = try writeVerifiedTestSnapshot(
+        root: root,
+        repoID: "example/Header-fp32-model",
+        files: [
+            "config.json": Data("{}".utf8),
+            "model.safetensors": try safetensorsFixture(dtype: "F32", byteCount: 64),
+        ]
+    )
     for bits in [2, 4, 5, 6, 8] {
         _ = try writeSnapshot(
             root: root,
@@ -83,10 +109,18 @@ import Testing
 
     let models = Dictionary(uniqueKeysWithValues: LocalModelScanner(rootURL: root).scan().map { ($0.id, $0) })
 
-    #expect(models["mlx-community/Dense-bf16"]?.quantization?.label == "bf16")
+    #expect(models["mlx-community/Dense-bf16"]?.quantization?.label == "BF16")
+    #expect(models["mlx-community/Dense-bf16"]?.quantization?.dtype == "bf16")
     #expect(models["mlx-community/IndexTTS-2.5-fp16"]?.quantization?.kind == "dense")
     #expect(models["mlx-community/IndexTTS-2.5-fp16"]?.quantization?.label == "FP16")
-    #expect(models["mlx-community/IndexTTS-2.5-fp16"]?.quantization?.dtype == "float16")
+    #expect(models["mlx-community/IndexTTS-2.5-fp16"]?.quantization?.dtype == "fp16")
+    #expect(models["example/Laya-like-decision-model"]?.quantization?.kind == "dense")
+    #expect(models["example/Laya-like-decision-model"]?.quantization?.label == "FP16")
+    #expect(models["example/Laya-like-decision-model"]?.quantization?.dtype == "fp16")
+    #expect(models["example/Unknown-dtype-model"]?.quantization?.label == "Unknown")
+    #expect(models["example/Unknown-dtype-model"]?.quantization?.dtype == nil)
+    #expect(models["example/Header-fp32-model"]?.quantization?.label == "FP32")
+    #expect(models["example/Header-fp32-model"]?.quantization?.dtype == "fp32")
     for bits in [2, 4, 5, 6, 8] {
         let model = try #require(models["mlx-community/Affine-\(bits)bit"])
         #expect(model.quantization?.kind == "affine")
@@ -261,6 +295,52 @@ import Testing
     let scanner = LocalModelScanner(rootURL: root)
 
     #expect(scanner.scan().first?.maxPositionEmbeddings == 262144)
+}
+
+@Test func localModelScannerReadsTTSMetadataFromModelConfig() throws {
+    let root = try temporaryDirectory()
+    let snapshot = try writeVerifiedTestSnapshot(
+        root: root,
+        repoID: "mlx-community/Test-TTS",
+        files: [
+            "config.json": Data("""
+            {
+              "gpt": {"max_text_tokens": 321, "max_mel_tokens": 654},
+              "s2mel": {"preprocess_params": {"sr": 16000}},
+              "supported_languages": ["en", "ja"]
+            }
+            """.utf8),
+            "model.safetensors": Data("weights".utf8),
+        ]
+    )
+    let verifier = ModelSnapshotVerifier()
+    var manifest = try verifier.loadManifest(at: snapshot)
+    manifest.compatibility = ModelSnapshotCompatibility(
+        modelType: "indextts2_5",
+        artifactRole: "tts",
+        quantizationMode: nil,
+        quantizationBits: nil,
+        quantizationGroupSize: nil
+    )
+    try ModelDownloadStore(rootURL: root).writeManifest(manifest, to: snapshot)
+
+    let model = try #require(LocalModelScanner(rootURL: root).scan().first)
+    let metadata = try #require(model.ttsMetadata)
+
+    #expect(model.type == "tts")
+    #expect(metadata.supportedLanguages == ["en", "ja"])
+    #expect(metadata.maxTextTokens == 321)
+    #expect(metadata.maxAudioTokens == 654)
+    #expect(metadata.outputSampleRateHz == 16000)
+
+    let encoded = try #require(
+        JSONSerialization.jsonObject(with: JSONEncoder().encode(model)) as? [String: Any]
+    )
+    let json = try #require(encoded["tts_metadata"] as? [String: Any])
+    #expect(json["supported_languages"] as? [String] == ["en", "ja"])
+    #expect(json["max_text_tokens"] as? Int == 321)
+    #expect(json["max_audio_tokens"] as? Int == 654)
+    #expect(json["output_sample_rate_hz"] as? Int == 16000)
 }
 
 @Test func localModelScannerCountsSymlinkedSnapshotTargetsForModelSize() throws {
@@ -521,6 +601,21 @@ private func writeSnapshot(
             "model.safetensors": Data("weights".utf8),
         ]
     )
+}
+
+private func safetensorsFixture(dtype: String, byteCount: Int) throws -> Data {
+    let header = try JSONSerialization.data(withJSONObject: [
+        "weight": [
+            "dtype": dtype,
+            "shape": [byteCount],
+            "data_offsets": [0, byteCount],
+        ],
+    ])
+    var length = UInt64(header.count).littleEndian
+    var data = Data(bytes: &length, count: MemoryLayout<UInt64>.size)
+    data.append(header)
+    data.append(Data(repeating: 0, count: byteCount))
+    return data
 }
 
 private func qwen35Config(

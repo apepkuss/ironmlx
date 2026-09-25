@@ -5,6 +5,7 @@ members = [
     "mlx",
     "ironmlx",
     "ironmlx-core",
+    "ironmlx-decision",
     "ironmlx-audio",
     "ironmlx-lm",
     "ironmlx-runtime",

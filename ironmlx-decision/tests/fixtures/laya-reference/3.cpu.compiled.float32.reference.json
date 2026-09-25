@@ -1,0 +1,22 @@
+{
+  "model": "laya-rl-agent",
+  "answers": {
+    "long": {
+      "type": "choice",
+      "confidence": 0.2505,
+      "action": {
+        "act_probability": 1.0
+      },
+      "choice": "first",
+      "probabilities": {
+        "first": 0.6925,
+        "second": 0.1859,
+        "third": 0.1216
+      }
+    }
+  },
+  "usage": {
+    "input_tokens": 1024,
+    "output_tokens": 0
+  }
+}

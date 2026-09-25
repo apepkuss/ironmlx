@@ -10,6 +10,7 @@ description = "Inference runtime and model lifecycle services backed by MLX"
 publish = false
 
 [dependencies]
+ironmlx-decision = { path = "../ironmlx-decision" }
 ironmlx-audio = { path = "../ironmlx-audio" }
 clap = { version = "4", features = ["derive"], optional = true }
 ironmlx-lm = { path = "../ironmlx-lm" }

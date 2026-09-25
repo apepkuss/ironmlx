@@ -7,6 +7,7 @@ use axum::{
     response::Response,
 };
 use ironmlx_audio::{
+    indextts25::INDEXTTS25_MAX_OUTPUT_FRAMES,
     io::{write_pcm_s16le, write_wav, NativeAudioIo},
     AudioError, AudioIo, DecodeLimits, PcmBuffer, PcmFormat,
 };
@@ -25,7 +26,7 @@ use std::{
 use tokio::sync::Semaphore;
 
 const INPUT_RESERVATION: usize = 256 * 1024 * 1024;
-const MAX_OUTPUT_FRAMES: usize = 600 * 22050;
+const MAX_OUTPUT_FRAMES: usize = INDEXTTS25_MAX_OUTPUT_FRAMES as usize;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

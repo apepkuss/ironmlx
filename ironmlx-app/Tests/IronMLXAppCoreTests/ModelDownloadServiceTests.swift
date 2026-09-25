@@ -1020,6 +1020,55 @@ private struct AcceptingMetadataPreflight: ModelMetadataPreflighting {
     }
 }
 
+private struct AcceptingLayaMetadataPreflight: ModelMetadataPreflighting {
+    func validate(metadataDirectory: URL) async throws -> ModelMetadataPreflightResult {
+        #expect(FileManager.default.fileExists(atPath: metadataDirectory.appendingPathComponent("mlx_config.json").path))
+        #expect(FileManager.default.fileExists(atPath: metadataDirectory.appendingPathComponent("tokenizer/tokenizer.json").path))
+        return ModelMetadataPreflightResult(modelType: "laya_multilingual_mlx", artifactRole: "decision", quantization: nil)
+    }
+}
+
+@Test func layaDownloadPreservesNestedMetadataAndIdentifiesDecisionModel() async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let repoID = "aac6fef/laya-multilingual-mlx"
+    let client = FakeModelDownloadHTTPClient()
+    let weights = Data("laya weights".utf8)
+    let files: [(path: String, data: Data, sha256: String?)] = [
+        ("mlx_config.json", Data(#"{"format":"laya-mlx","format_version":1,"repository":"aac6fef/laya-multilingual-mlx","dtype":"float16"}"#.utf8), nil),
+        ("encoder/config.json", Data(#"{"model_type":"modernbert"}"#.utf8), nil),
+        ("rl_agent_config.json", Data(#"{"max_len":1024,"head_max_len":256}"#.utf8), nil),
+        ("tokenizer/tokenizer.json", Data("{}".utf8), nil),
+        ("tokenizer/tokenizer_config.json", Data("{}".utf8), nil),
+        ("LICENSE", Data("license".utf8), nil),
+        ("NOTICE", Data("notice".utf8), nil),
+        ("README.md", Data("readme".utf8), nil),
+        ("model.safetensors", weights, sha256(weights)),
+    ]
+    configureHuggingFace(client, repoID: repoID, files: files)
+    let service = ModelDownloadService(
+        rootURL: root, httpClient: client, metadataPreflight: AcceptingLayaMetadataPreflight(),
+        fileDownloader: ResumableFileDownloader(httpClient: client), telemetryLogger: { _ in }
+    )
+    let result = await service.downloadHuggingFace(repoID: repoID, token: nil)
+    #expect(result.success, "\(result)")
+    let repository = try ModelRepositoryLayout.repositoryRoot(rootURL: root, provider: .huggingFace, repoID: repoID)
+    let snapshot = repository.appendingPathComponent("snapshots/\(testCommit)")
+    let manifest = try ModelSnapshotVerifier().verify(snapshot: snapshot)
+    #expect(Set(manifest.files.map(\.path)) == Set(files.map(\.path)))
+    #expect(manifest.compatibility.artifactRole == "decision")
+    let scanner = LocalModelScanner(rootURL: root)
+    let model = try #require(scanner.scan().first { $0.id == repoID })
+    #expect(model.type == "decision")
+    #expect(model.capabilities?.runtimeKind == "decision")
+    let staleGenerationSettings = BackendSamplingDefaults(
+        defaultMaxOutputTokens: 512, temperature: 0.7, topP: 0.9, topK: 40, repetitionPenalty: 1.1
+    )
+    #expect(staleGenerationSettings.filtered(for: model.capabilities) == .empty)
+    #expect(model.readiness?.isLoadable == true)
+    #expect(scanner.resolveModelPath(for: repoID) != nil)
+}
+
 private struct AcceptingDFlash2MetadataPreflight: ModelMetadataPreflighting {
     func validate(metadataDirectory _: URL) async throws -> ModelMetadataPreflightResult {
         ModelMetadataPreflightResult(

@@ -78,6 +78,87 @@ public struct LocalModelDownloadInfo: Codable, Equatable, Sendable {
     }
 }
 
+public struct LocalDecisionMetadata: Codable, Equatable, Sendable {
+    public var headMaxLen: Int
+    public var temperature: [Double]
+    public var temperatureByOptions: [String: Double]
+
+    enum CodingKeys: String, CodingKey {
+        case headMaxLen = "head_max_len"
+        case temperature
+        case temperatureByOptions = "temperature_by_options"
+    }
+
+    static func read(from snapshot: URL) -> Self? {
+        guard let data = try? Data(contentsOf: snapshot.appendingPathComponent("rl_agent_config.json")),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let head = json["head_max_len"] as? Int,
+              let maxLen = json["max_len"] as? Int, head > 4, head < maxLen,
+              let temperatures = json["temperature"] as? [Double], temperatures.count == 3
+        else { return nil }
+        let buckets = json["temperature_by_options"] as? [String: Double] ?? [:]
+        guard (temperatures + Array(buckets.values)).allSatisfy({ $0.isFinite && $0 > 0 }) else { return nil }
+        return Self(headMaxLen: head, temperature: temperatures.map { min(5, max(0.5, $0)) },
+                    temperatureByOptions: buckets.mapValues { min(5, max(0.5, $0)) })
+    }
+}
+
+public struct LocalTTSMetadata: Codable, Equatable, Sendable {
+    public var supportedLanguages: [String]
+    public var maxTextTokens: Int?
+    public var maxAudioTokens: Int?
+    public var outputSampleRateHz: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case supportedLanguages = "supported_languages"
+        case maxTextTokens = "max_text_tokens"
+        case maxAudioTokens = "max_audio_tokens"
+        case outputSampleRateHz = "output_sample_rate_hz"
+    }
+
+    static func read(config: [String: Any]) -> Self? {
+        let supportedLanguages = (config["supported_languages"] as? [Any])?
+            .compactMap { value -> String? in
+                guard let code = value as? String else { return nil }
+                let normalized = code.trimmingCharacters(in: .whitespacesAndNewlines)
+                return normalized.isEmpty ? nil : normalized
+            } ?? []
+        let gpt = config["gpt"] as? [String: Any]
+        let maxTextTokens = positiveInteger(gpt?["max_text_tokens"])
+        let maxAudioTokens = positiveInteger(gpt?["max_mel_tokens"])
+        let s2mel = config["s2mel"] as? [String: Any]
+        let preprocess = s2mel?["preprocess_params"] as? [String: Any]
+        let outputSampleRateHz = positiveInteger(preprocess?["sr"])
+        guard !supportedLanguages.isEmpty
+                || maxTextTokens != nil
+                || maxAudioTokens != nil
+                || outputSampleRateHz != nil
+        else { return nil }
+        return Self(
+            supportedLanguages: Array(supportedLanguages.prefix(64)),
+            maxTextTokens: maxTextTokens,
+            maxAudioTokens: maxAudioTokens,
+            outputSampleRateHz: outputSampleRateHz
+        )
+    }
+
+    private static func positiveInteger(_ value: Any?) -> Int? {
+        let number: Int?
+        switch value {
+        case let value as Int: number = value
+        case let value as NSNumber:
+            let raw = value.doubleValue
+            guard raw.isFinite, raw.rounded(.towardZero) == raw, raw <= Double(Int.max) else {
+                return nil
+            }
+            number = Int(raw)
+        default: number = nil
+        }
+        guard let number, number > 0 else { return nil }
+        return number
+    }
+}
+
 public struct LocalModel: Codable, Equatable, Sendable {
     public var id: String
     public var repoID: String
@@ -97,6 +178,8 @@ public struct LocalModel: Codable, Equatable, Sendable {
     public var readiness: LocalModelReadiness?
     public var integrity: ModelIntegrityStatus?
     public var downloadInfo: LocalModelDownloadInfo?
+    public var decisionMetadata: LocalDecisionMetadata?
+    public var ttsMetadata: LocalTTSMetadata?
 
     public init(
         id: String,
@@ -116,6 +199,8 @@ public struct LocalModel: Codable, Equatable, Sendable {
         quantization: LocalModelQuantization? = nil,
         readiness: LocalModelReadiness? = nil,
         integrity: ModelIntegrityStatus? = nil,
+        decisionMetadata: LocalDecisionMetadata? = nil,
+        ttsMetadata: LocalTTSMetadata? = nil,
         downloadInfo: LocalModelDownloadInfo? = nil
     ) {
         self.id = id
@@ -136,6 +221,8 @@ public struct LocalModel: Codable, Equatable, Sendable {
         self.readiness = readiness
         self.integrity = integrity
         self.downloadInfo = downloadInfo
+        self.decisionMetadata = decisionMetadata
+        self.ttsMetadata = ttsMetadata
     }
 
     enum CodingKeys: String, CodingKey {
@@ -156,6 +243,8 @@ public struct LocalModel: Codable, Equatable, Sendable {
         case quantization
         case readiness
         case integrity
+        case decisionMetadata = "decision_metadata"
+        case ttsMetadata = "tts_metadata"
         case downloadInfo = "download_info"
     }
 
@@ -490,12 +579,17 @@ public struct LocalModelScanner: Sendable {
         self.rootURL = rootURL
     }
 
-    public func audioResources(for reference: String) throws -> BackendAudioResources? {
+    public func audioResources(
+        for reference: String,
+        execution: BackendAudioExecutionSettings? = nil
+    ) throws -> BackendAudioResources? {
         guard let model = model(for: reference), model.type == "tts" else { return nil }
         guard model.readiness?.isLoadable == true else {
             throw AudioResourceError.invalid(model.readiness?.message ?? "model is not ready")
         }
-        return try AudioResourcePreparationService(rootURL: rootURL).readyConfiguration()
+        var resources = try AudioResourcePreparationService(rootURL: rootURL).readyConfiguration()
+        resources.execution = execution
+        return resources
     }
 
     private func audioReadiness(manifest: ModelSnapshotManifest) -> LocalModelReadiness {
@@ -891,6 +985,8 @@ public struct LocalModelScanner: Sendable {
                     provider: provider,
                     repoID: id
                 ),
+                decisionMetadata: type == "decision" ? LocalDecisionMetadata.read(from: snapshot) : nil,
+                ttsMetadata: type == "tts" ? LocalTTSMetadata.read(config: config) : nil,
                 downloadInfo: type == "tts" ? ttsDownloadInfo(snapshot: snapshot) : nil
             ).artifact(
                 kind: kind,
@@ -938,16 +1034,28 @@ public struct LocalModelScanner: Sendable {
 
     private func configJSON(in snapshot: URL) -> [String: Any]? {
         let config = snapshot.appendingPathComponent("config.json")
-        guard let data = try? Data(contentsOf: config),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return nil
+        if let data = try? Data(contentsOf: config),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            return json
         }
-        return json
+        let mlxConfigURL = snapshot.appendingPathComponent("mlx_config.json")
+        let agentConfigURL = snapshot.appendingPathComponent("rl_agent_config.json")
+        guard let mlxData = try? Data(contentsOf: mlxConfigURL),
+              let mlxConfig = try? JSONSerialization.jsonObject(with: mlxData) as? [String: Any],
+              mlxConfig["format"] as? String == "laya-mlx",
+              mlxConfig["repository"] as? String == "aac6fef/laya-multilingual-mlx",
+              let agentData = try? Data(contentsOf: agentConfigURL),
+              let agent = try? JSONSerialization.jsonObject(with: agentData) as? [String: Any],
+              let maxLen = agent["max_len"] as? Int else { return nil }
+        return ["model_type": "laya_multilingual_mlx", "max_position_embeddings": maxLen]
     }
 
     private func modelCapabilityType(config: [String: Any]) -> String {
         let signals = modelCapabilitySignals(config: config)
         let modelType = normalizedString(config["model_type"]) ?? ""
+        if modelType == "laya-multilingual-mlx" {
+            return "decision"
+        }
         if isMtpModelType(modelType) {
             return "mtp"
         }
@@ -980,6 +1088,18 @@ public struct LocalModelScanner: Sendable {
 
     private func runtimeCapabilities(config: [String: Any]) -> BackendModelCapabilities {
         let modelType = normalizedString(config["model_type"]) ?? ""
+        if modelType == "laya-multilingual-mlx" {
+            return BackendModelCapabilities(
+                runtimeKind: "decision",
+                supportsStreaming: false,
+                supportsVision: false,
+                supportsMtp: false,
+                supportsPromptLookup: false,
+                supportsSpeculativeDecoding: false,
+                supportsKvCache: false,
+                supportedSamplingParameters: []
+            )
+        }
         let isDiffusion = modelType == "diffusion-gemma"
         return BackendModelCapabilities(
             runtimeKind: isDiffusion ? "block_diffusion" : "causal",
@@ -1380,9 +1500,7 @@ public struct LocalModelScanner: Sendable {
     }
 
     private func maxPositionEmbeddings(in snapshot: URL) -> Int? {
-        let config = snapshot.appendingPathComponent("config.json")
-        guard let data = try? Data(contentsOf: config),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        guard let json = configJSON(in: snapshot) else {
             return nil
         }
         if let value = intValue(json["max_position_embeddings"]) {
@@ -1518,8 +1636,9 @@ public struct LocalModelScanner: Sendable {
         expectedProvider: ModelRepositoryProvider? = nil,
         expectedRepoID: String? = nil
     ) -> SnapshotInspection? {
-        let config = url.appendingPathComponent("config.json")
-        guard FileManager.default.isReadableFile(atPath: config.path),
+        let hasConfig = FileManager.default.isReadableFile(atPath: url.appendingPathComponent("config.json").path)
+            || FileManager.default.isReadableFile(atPath: url.appendingPathComponent("mlx_config.json").path)
+        guard hasConfig,
               let files = try? FileManager.default.contentsOfDirectory(
                 at: url,
                 includingPropertiesForKeys: nil,
@@ -1780,26 +1899,73 @@ public struct LocalModelScanner: Sendable {
     }
 
     private func denseQuantization(config: [String: Any], snapshot: URL) -> LocalModelQuantization {
-        let dtype = dtypeValue(config) ?? modelManifestDtype(snapshot: snapshot)
-        let label: String
-        switch dtype {
-        case "float16", "fp16":
-            label = "FP16"
-        case "bf16":
-            label = "bf16"
-        default:
-            label = "Dense"
-        }
+        let dtype = dtypeValue(config) ?? snapshotMetadataDtype(snapshot: snapshot)
+        let label = dtypeDisplayLabel(dtype) ?? "Unknown"
         return LocalModelQuantization(kind: "dense", label: label, dtype: dtype)
     }
 
-    private func modelManifestDtype(snapshot: URL) -> String? {
-        let manifest = snapshot.appendingPathComponent("model_manifest.json")
-        guard let data = try? Data(contentsOf: manifest),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return nil
+    private func snapshotMetadataDtype(snapshot: URL) -> String? {
+        for filename in ["model_manifest.json", "mlx_config.json", "manifest.json"] {
+            let metadataURL = snapshot.appendingPathComponent(filename)
+            guard let data = try? Data(contentsOf: metadataURL),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { continue }
+            if let dtype = dtypeValue(json) {
+                return dtype
+            }
         }
-        return normalizedDtype(json["dtype"] as? String)
+        return safetensorsWeightDtype(snapshot: snapshot)
+    }
+
+    private func safetensorsWeightDtype(snapshot: URL) -> String? {
+        guard let enumerator = FileManager.default.enumerator(
+            at: snapshot,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else { return nil }
+
+        let files = enumerator.compactMap { $0 as? URL }
+            .filter { $0.pathExtension.lowercased() == "safetensors" }
+            .sorted { $0.path < $1.path }
+        var bytesByDtype: [String: UInt64] = [:]
+        for file in files {
+            guard let handle = try? FileHandle(forReadingFrom: file) else { continue }
+            defer { try? handle.close() }
+            guard let lengthData = try? handle.read(upToCount: MemoryLayout<UInt64>.size),
+                  lengthData.count == MemoryLayout<UInt64>.size
+            else { continue }
+            let headerLength = lengthData.withUnsafeBytes {
+                UInt64(littleEndian: $0.loadUnaligned(as: UInt64.self))
+            }
+            guard headerLength > 0, headerLength <= 64 * 1_024 * 1_024,
+                  let headerData = try? handle.read(upToCount: Int(headerLength)),
+                  headerData.count == Int(headerLength),
+                  let json = try? JSONSerialization.jsonObject(with: headerData) as? [String: Any]
+            else { continue }
+
+            for (name, value) in json where name != "__metadata__" {
+                guard let tensor = value as? [String: Any],
+                      let dtype = normalizedDtype(tensor["dtype"] as? String),
+                      let offsets = tensor["data_offsets"] as? [Any], offsets.count == 2,
+                      let start = uint64Value(offsets[0]),
+                      let end = uint64Value(offsets[1]), end >= start
+                else { continue }
+                bytesByDtype[dtype, default: 0] += end - start
+            }
+        }
+        return bytesByDtype.max { lhs, rhs in
+            lhs.value == rhs.value ? lhs.key > rhs.key : lhs.value < rhs.value
+        }?.key
+    }
+
+    private func uint64Value(_ value: Any?) -> UInt64? {
+        if let number = value as? NSNumber, number.int64Value >= 0 {
+            return number.uint64Value
+        }
+        if let string = value as? String {
+            return UInt64(string.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return nil
     }
 
     private func dtypeValue(_ config: [String: Any]) -> String? {
@@ -1814,10 +1980,27 @@ public struct LocalModelScanner: Sendable {
         guard let raw else { return nil }
         let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         switch normalized {
+        case "f16", "float16", "half":
+            return "fp16"
         case "bfloat16":
             return "bf16"
+        case "f32", "float32", "float":
+            return "fp32"
+        case "f64", "float64", "double":
+            return "fp64"
         default:
             return normalized
+        }
+    }
+
+    private func dtypeDisplayLabel(_ dtype: String?) -> String? {
+        guard let dtype, !dtype.isEmpty else { return nil }
+        switch dtype {
+        case "fp16": return "FP16"
+        case "bf16": return "BF16"
+        case "fp32": return "FP32"
+        case "fp64": return "FP64"
+        default: return dtype.uppercased()
         }
     }
 

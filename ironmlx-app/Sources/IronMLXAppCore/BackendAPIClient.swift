@@ -9,7 +9,8 @@ public protocol BackendModelManaging: Sendable {
         maxCacheCap: Int?,
         pinned: Bool,
         promptLookup: BackendPromptLookupConfig?,
-        audio: BackendAudioResources?
+        audio: BackendAudioResources?,
+        decision: BackendDecisionSettings?
     ) async throws -> BackendModelAdminResponse
     func unloadModel(model: String, modelDir: String?) async throws -> BackendModelAdminResponse
     func setDefaultModel(_ model: String) async throws -> BackendModelAdminResponse
@@ -28,7 +29,8 @@ public extension BackendModelManaging {
             maxCacheCap: nil,
             pinned: false,
             promptLookup: nil,
-            audio: nil
+            audio: nil,
+            decision: nil
         )
     }
 }
@@ -148,7 +150,8 @@ public struct BackendAPIClient: Sendable {
         maxCacheCap: Int? = nil,
         pinned: Bool = false,
         promptLookup: BackendPromptLookupConfig? = nil,
-        audio: BackendAudioResources? = nil
+        audio: BackendAudioResources? = nil,
+        decision: BackendDecisionSettings? = nil
     ) async throws -> BackendModelAdminResponse {
         try await loadModel(
             model: model,
@@ -159,7 +162,8 @@ public struct BackendAPIClient: Sendable {
             promptLookup: promptLookup,
             reloadWhenIdle: false,
             samplingDefaults: .empty,
-            audio: audio
+            audio: audio,
+            decision: decision
         )
     }
 
@@ -174,7 +178,8 @@ public struct BackendAPIClient: Sendable {
         promptLookup: BackendPromptLookupConfig? = nil,
         reloadWhenIdle: Bool,
         samplingDefaults: BackendSamplingDefaults,
-        audio: BackendAudioResources? = nil
+        audio: BackendAudioResources? = nil,
+        decision: BackendDecisionSettings? = nil
     ) async throws -> BackendModelAdminResponse {
         try await loadModel(
             model: model,
@@ -188,7 +193,8 @@ public struct BackendAPIClient: Sendable {
             reloadWhenIdle: reloadWhenIdle,
             deferWhenBusy: nil,
             samplingDefaults: samplingDefaults,
-            audio: audio
+            audio: audio,
+            decision: decision
         )
     }
 
@@ -204,7 +210,8 @@ public struct BackendAPIClient: Sendable {
         reloadWhenIdle: Bool,
         deferWhenBusy: Bool? = nil,
         samplingDefaults: BackendSamplingDefaults,
-        audio: BackendAudioResources? = nil
+        audio: BackendAudioResources? = nil,
+        decision: BackendDecisionSettings? = nil
     ) async throws -> BackendModelAdminResponse {
         let request = BackendLoadModelRequest(
             model: model,
@@ -218,7 +225,8 @@ public struct BackendAPIClient: Sendable {
             reloadWhenIdle: reloadWhenIdle,
             deferWhenBusy: deferWhenBusy,
             samplingDefaults: samplingDefaults,
-            audio: audio
+            audio: audio,
+            decision: decision
         )
         let data = try await postJSON(path: "/admin/api/models/load", body: request)
         return try JSONDecoder().decode(BackendModelAdminResponse.self, from: data)
@@ -234,7 +242,8 @@ public struct BackendAPIClient: Sendable {
         mtpDraftTokens: Int? = nil,
         promptLookup: BackendPromptLookupConfig? = nil,
         samplingDefaults: BackendSamplingDefaults = .empty,
-        audio: BackendAudioResources? = nil
+        audio: BackendAudioResources? = nil,
+        decision: BackendDecisionSettings? = nil
     ) async throws -> BackendModelAdminResponse {
         let request = BackendLoadModelRequest(
             model: model,
@@ -246,7 +255,8 @@ public struct BackendAPIClient: Sendable {
             mtpDraftTokens: mtpDraftTokens,
             promptLookup: promptLookup,
             samplingDefaults: samplingDefaults,
-            audio: audio
+            audio: audio,
+            decision: decision
         )
         let data = try await postJSON(path: "/admin/api/models/register", body: request)
         return try JSONDecoder().decode(BackendModelAdminResponse.self, from: data)
@@ -311,6 +321,7 @@ public enum BackendAPIError: LocalizedError {
 }
 
 public struct BackendLoadModelRequest: Codable, Equatable, Sendable {
+    public var decision: BackendDecisionSettings?
     public var audio: BackendAudioResources?
     public var model: String
     public var modelDir: String
@@ -330,6 +341,7 @@ public struct BackendLoadModelRequest: Codable, Equatable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case audio
+        case decision
         case model
         case modelDir = "model_dir"
         case setDefault = "set_default"
@@ -359,24 +371,26 @@ public struct BackendLoadModelRequest: Codable, Equatable, Sendable {
         reloadWhenIdle: Bool? = nil,
         deferWhenBusy: Bool? = nil,
         samplingDefaults: BackendSamplingDefaults = .empty,
-        audio: BackendAudioResources? = nil
+        audio: BackendAudioResources? = nil,
+        decision: BackendDecisionSettings? = nil
     ) {
         self.audio = audio
+        self.decision = decision
         self.model = model
         self.modelDir = modelDir
         self.setDefault = setDefault
-        self.maxCacheCap = audio == nil ? maxCacheCap : nil
-        self.defaultMaxOutputTokens = audio == nil ? samplingDefaults.defaultMaxOutputTokens : nil
+        self.maxCacheCap = audio == nil && decision == nil ? maxCacheCap : nil
+        self.defaultMaxOutputTokens = audio == nil && decision == nil ? samplingDefaults.defaultMaxOutputTokens : nil
         self.pinned = pinned
-        self.mtpModelDir = audio == nil ? mtpModelDir : nil
-        self.mtpDraftTokens = audio == nil ? mtpDraftTokens : nil
-        self.promptLookup = audio == nil ? promptLookup : nil
+        self.mtpModelDir = audio == nil && decision == nil ? mtpModelDir : nil
+        self.mtpDraftTokens = audio == nil && decision == nil ? mtpDraftTokens : nil
+        self.promptLookup = audio == nil && decision == nil ? promptLookup : nil
         self.reloadWhenIdle = reloadWhenIdle
         self.deferWhenBusy = deferWhenBusy
-        self.temperature = audio == nil ? samplingDefaults.temperature : nil
-        self.topP = audio == nil ? samplingDefaults.topP : nil
-        self.topK = audio == nil ? samplingDefaults.topK : nil
-        self.repetitionPenalty = audio == nil ? samplingDefaults.repetitionPenalty : nil
+        self.temperature = audio == nil && decision == nil ? samplingDefaults.temperature : nil
+        self.topP = audio == nil && decision == nil ? samplingDefaults.topP : nil
+        self.topK = audio == nil && decision == nil ? samplingDefaults.topK : nil
+        self.repetitionPenalty = audio == nil && decision == nil ? samplingDefaults.repetitionPenalty : nil
     }
 }
 
@@ -454,7 +468,7 @@ public struct BackendSamplingDefaults: Codable, Equatable, Sendable {
         }
         let supported = Set(capabilities.supportedSamplingParameters)
         return BackendSamplingDefaults(
-            defaultMaxOutputTokens: defaultMaxOutputTokens,
+            defaultMaxOutputTokens: supported.contains("max_tokens") ? defaultMaxOutputTokens : nil,
             temperature: supported.contains("temperature") ? temperature : nil,
             topP: supported.contains("top_p") ? topP : nil,
             topK: supported.contains("top_k") ? topK : nil,
@@ -649,6 +663,7 @@ public struct BackendModelRuntimeUsage: Codable, Equatable, Sendable {
 }
 
 public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
+    public var decision: BackendDecisionSettings?
     public var id: String
     public var model: String
     public var path: String
@@ -673,6 +688,7 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
 
     public init(
         id: String,
+        decision: BackendDecisionSettings? = nil,
         model: String,
         path: String,
         architecture: String,
@@ -705,6 +721,7 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
         usage: BackendModelRuntimeUsage = BackendModelRuntimeUsage(),
         activeKvOffload: HealthzSnapshot.ActiveKvOffloadInfo? = nil
     ) {
+        self.decision = decision
         self.id = id
         self.model = model
         self.path = path
@@ -729,6 +746,7 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
+        case decision
         case id
         case model
         case path
@@ -761,6 +779,7 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.decision = try container.decodeIfPresent(BackendDecisionSettings.self, forKey: .decision)
         self.id = try container.decode(String.self, forKey: .id)
         self.model = try container.decode(String.self, forKey: .model)
         self.path = try container.decode(String.self, forKey: .path)
@@ -813,6 +832,7 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(decision, forKey: .decision)
         try container.encode(id, forKey: .id)
         try container.encode(model, forKey: .model)
         try container.encode(path, forKey: .path)

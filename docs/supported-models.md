@@ -4,6 +4,8 @@
 
 IronMLX.app supports speech synthesis with the verified `mlx-community/IndexTTS-2.5-fp16` profile: automatic resource preparation, model loading, complete WAV responses and PCM streaming. See the [speech API](audio-speech-api.md) and [TTS model download and usage](tts-model-download.md).
 
+IronMLX App also supports the typed decision model `aac6fef/laya-multilingual-mlx`: download, load/unload, restart recovery and TypeSafe-compatible System One API calls on the App service port. See the [Laya guide](laya-systemone-api.md).
+
 IronMLX 0.1.0 supports the following text and vision-language models. Check the model family and features you need, then choose a version that fits your device's memory.
 Versions, quantized files and templates within a family can differ in compatibility. This table is not a validation list for every model with a matching name.
 
@@ -22,7 +24,7 @@ Versions, quantized files and templates within a family can differ in compatibil
 | MiniCPM-V 4.6 | Yes | Yes | Yes | Yes |
 | DiffusionGemma | Yes | Yes | Yes | Yes |
 
-All runtimes support streaming HTTP responses. Image support means understanding images, not generating images or supporting video.
+All text and vision generation runtimes in the table support streaming HTTP responses. Image support means understanding images, not generating images or supporting video.
 Embedding, reranker, ASR or TTS metadata in the model list does not mean the 0.1.0 generation backend can load those models.
 
 ## Validated model versions
@@ -52,6 +54,13 @@ The DFlash2 draft cannot be loaded independently as a base model. See [DFlash2 d
 ## Quantization and device memory
 
 Quantization support depends on the model loader. Not every model supports every format below.
+
+In the App's **Model Management** list, quantized checkpoints display their
+detected quantization format or bit width. Unquantized checkpoints display the
+detected weight data type, such as `FP16` or `BF16`; the tooltip identifies the
+checkpoint as unquantized and includes the normalized `dtype`. If neither model
+metadata nor safetensors headers provide a usable value, the column displays
+**Unknown**. These labels describe stored weights, not runtime compute precision.
 
 | Weight format | Supported range |
 | --- | --- |

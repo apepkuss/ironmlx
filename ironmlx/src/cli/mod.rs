@@ -4,6 +4,7 @@
 //! file under `src/cli/`.
 
 mod backend_instance_lock;
+mod decide;
 mod generate;
 mod hf_transfer;
 mod info;
@@ -14,6 +15,7 @@ mod scheduler_autotune;
 mod scheduler_autotune_calibrate;
 mod scheduler_profile_context;
 pub(crate) mod serve;
+mod serve_systemone;
 
 pub(crate) use kv_quant::KvQuantArg;
 
@@ -40,6 +42,8 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// Evaluate typed questions with a local Laya decision checkpoint.
+    Decide(decide::DecideArgs),
     /// Print discovered model and runtime info, then exit.
     Info(info::InfoArgs),
     /// Generate text from a prompt (prefill + decode).
@@ -54,6 +58,8 @@ enum Command {
     HfTransfer(hf_transfer::HfTransferArgs),
     /// Boot an OpenAI/Anthropic-compatible HTTP server (single-stream).
     Serve(Box<serve::ServeArgs>),
+    /// Serve the TypeSafe-compatible System One decision API.
+    ServeSystemone(serve_systemone::ServeSystemoneArgs),
 }
 
 impl Cli {
@@ -74,6 +80,7 @@ impl Cli {
         }
 
         match self.command {
+            Command::Decide(args) => decide::run(args),
             Command::Info(args) => info::run(args),
             Command::Generate(args) => generate::run(args),
             Command::SchedulerAutotune(args) => scheduler_autotune::run(args),
@@ -81,6 +88,7 @@ impl Cli {
             Command::ModelPreflight(args) => model_preflight::run(args),
             Command::HfTransfer(args) => hf_transfer::run(args),
             Command::Serve(args) => serve::run(*args),
+            Command::ServeSystemone(args) => serve_systemone::run(args),
         }
     }
 }

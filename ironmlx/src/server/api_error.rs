@@ -13,12 +13,15 @@ pub(crate) const RETRY_AFTER_SECONDS: u64 = 5;
 pub(crate) enum ApiProtocol {
     OpenAi,
     Anthropic,
+    SystemOne,
 }
 
 impl ApiProtocol {
     pub(crate) fn from_path(path: &str) -> Self {
         if path == "/v1/messages" {
             Self::Anthropic
+        } else if path == "/v1/systemone" {
+            Self::SystemOne
         } else {
             Self::OpenAi
         }
@@ -199,6 +202,11 @@ impl ApiError {
         let mut response = match protocol {
             ApiProtocol::OpenAi => self.openai_response(),
             ApiProtocol::Anthropic => self.anthropic_response(),
+            ApiProtocol::SystemOne => (
+                self.status,
+                Json(serde_json::json!({"detail": self.message})),
+            )
+                .into_response(),
         };
         if let Some(seconds) = self.retry_after_seconds {
             response.headers_mut().insert(

@@ -87,7 +87,9 @@ pub(crate) trait EngineVariantHttpAdapter {
 impl EngineVariantHttpAdapter for EngineVariant {
     async fn openai_chat_completions(&self, req: openai::ChatRequest) -> Response {
         match self {
-            Self::Audio(_) => super::audio::task_mismatch(super::api_error::ApiProtocol::OpenAi),
+            Self::Audio(_) | Self::Decision(_) => {
+                super::audio::task_mismatch(super::api_error::ApiProtocol::OpenAi)
+            }
             Self::Qwen35(state) => openai::chat_completions_with_state(state.clone(), req).await,
             Self::Qwen35Moe(state) => openai::chat_completions_with_state(state.clone(), req).await,
             Self::Qwen36Moe(state) => openai::chat_completions_with_state(state.clone(), req).await,
@@ -111,7 +113,9 @@ impl EngineVariantHttpAdapter for EngineVariant {
 
     async fn openai_responses(&self, req: responses::ResponsesRequest) -> Response {
         match self {
-            Self::Audio(_) => super::audio::task_mismatch(super::api_error::ApiProtocol::OpenAi),
+            Self::Audio(_) | Self::Decision(_) => {
+                super::audio::task_mismatch(super::api_error::ApiProtocol::OpenAi)
+            }
             Self::Qwen35(state) => responses::responses_with_state(state.clone(), req, false).await,
             Self::Qwen35Moe(state) => {
                 responses::responses_with_state(state.clone(), req, false).await
@@ -138,7 +142,9 @@ impl EngineVariantHttpAdapter for EngineVariant {
 
     async fn anthropic_messages(&self, req: anthropic::MessagesRequest) -> Response {
         match self {
-            Self::Audio(_) => super::audio::task_mismatch(super::api_error::ApiProtocol::Anthropic),
+            Self::Audio(_) | Self::Decision(_) => {
+                super::audio::task_mismatch(super::api_error::ApiProtocol::Anthropic)
+            }
             Self::Qwen35(state) => anthropic::messages_with_state(state.clone(), req).await,
             Self::Qwen35Moe(state) => anthropic::messages_with_state(state.clone(), req).await,
             Self::Qwen36Moe(state) => anthropic::messages_with_state(state.clone(), req).await,
@@ -173,7 +179,9 @@ impl EnginePoolHttpAdapter for EnginePoolState {
             .model()
             .filter(|model| !model.is_empty())
             .map(str::to_owned);
-        if self.is_audio_model(requested.as_deref()).await? {
+        if self.is_audio_model(requested.as_deref()).await?
+            || self.is_decision_model(requested.as_deref()).await?
+        {
             return Err(super::audio::ModelTaskMismatch.into());
         }
         let (model_id, engine) = self.resolve_engine(requested.as_deref()).await?;
@@ -230,6 +238,7 @@ impl EnginePoolHttpAdapter for EnginePoolState {
         OpenAiModelList {
             object: "list",
             data,
+            models: super::systemone::model_list(self).await,
         }
     }
 }
@@ -264,6 +273,7 @@ pub(crate) fn engine_pool_router() -> Router<EnginePoolState> {
         .route("/v1/responses", post(openai_responses))
         .route("/v1/messages", post(anthropic_messages))
         .route("/v1/audio/speech", post(super::audio::speech))
+        .route("/v1/systemone", post(super::systemone::system_one))
 }
 
 async fn openai_chat_completions(
@@ -342,6 +352,7 @@ async fn healthz_handler(State(pool): State<EnginePoolState>) -> Json<EnginePool
 pub(crate) struct OpenAiModelList {
     object: &'static str,
     data: Vec<OpenAiModelInfo>,
+    models: Vec<super::systemone::SystemOneModelInfo>,
 }
 
 #[derive(Debug, Serialize)]
