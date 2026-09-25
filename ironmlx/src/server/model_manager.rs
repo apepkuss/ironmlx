@@ -1354,7 +1354,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn models_routes_expose_effective_capacity_not_default_output_budget() {
+    async fn models_routes_expose_context_and_safe_output_budget() {
         let model_dir = unique_temp_dir("models-capacity-route");
         let voice_dir = unique_temp_dir("models-capacity-route-voices");
         let voices =
@@ -1370,10 +1370,10 @@ mod tests {
             SchedulerResolutionOptions::from(&args),
         )
         .unwrap();
-        for (id, cache_cap, default_budget, expected) in [
-            ("small-cache", 8192, Some(256), 8192),
-            ("model-limited", 524288, Some(32768), 262144),
-            ("no-default", 65536, None, 65536),
+        for (id, cache_cap, default_budget, expected_context, expected_output) in [
+            ("small-cache", 8192, Some(256), 8192, 256),
+            ("model-limited", 524288, Some(32768), 262144, 32768),
+            ("no-default", 65536, None, 65536, 4096),
         ] {
             let load = build_engine_model_config(
                 &SchedulerResolutionOptions::from(&args),
@@ -1420,8 +1420,8 @@ mod tests {
                     .iter()
                     .find(|entry| entry["id"] == id)
                     .unwrap();
-                assert_eq!(entry["context_window"], expected);
-                assert_eq!(entry["max_output_tokens"], expected);
+                assert_eq!(entry["context_window"], expected_context);
+                assert_eq!(entry["max_output_tokens"], expected_output);
                 assert_eq!(entry["state"], "unloaded");
                 assert_eq!(entry["load_attempts"], 0);
             }

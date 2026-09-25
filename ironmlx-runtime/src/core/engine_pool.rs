@@ -1213,14 +1213,18 @@ impl EnginePoolState {
                 let slots = self.inner.slots.lock().await;
                 slots.get(&model.id).cloned()
             };
-            let (snapshot, context_window) = match slot {
+            let (snapshot, context_window, default_max_output_tokens) = match slot {
                 Some(slot) => {
                     let state = slot.state.lock().await;
                     let context_window = match &*state {
                         EngineSlotState::Loaded { engine, .. } => engine.context_window(),
                         _ => slot.configured_context_window,
                     };
-                    (state.runtime_snapshot(), context_window)
+                    (
+                        state.runtime_snapshot(),
+                        context_window,
+                        slot.model.default_max_output_tokens,
+                    )
                 }
                 None => (
                     EngineSlotRuntimeSnapshot {
@@ -1236,14 +1240,19 @@ impl EnginePoolState {
                         request_count: 0,
                     },
                     None,
+                    None,
                 ),
             };
             data.push(EngineModelSnapshot {
                 id: model.id.clone(),
                 context_window,
-                // Causal serving has no independent output-only cap. The
-                // per-request budget must additionally subtract input tokens.
-                max_output_tokens: context_window,
+                // Causal serving has no independent output-only cap in model
+                // metadata. Publish the deployment default when configured,
+                // otherwise a conservative budget that leaves input room.
+                max_output_tokens: super::model_capacity::advertised_max_output_tokens(
+                    context_window,
+                    default_max_output_tokens,
+                ),
                 load_policy: model.load_policy,
                 state: snapshot.state,
                 unload_reason: snapshot.unload_reason,
@@ -3512,7 +3521,7 @@ mod tests {
             .unwrap();
         let list = pool.model_snapshots().await;
         assert_eq!(list[0].context_window, Some(1024));
-        assert_eq!(list[0].max_output_tokens, Some(1024));
+        assert_eq!(list[0].max_output_tokens, Some(256));
         assert_eq!(list[0].load_attempts, 0);
 
         // Discovery does not reread files or load weights on each request.
@@ -3530,13 +3539,13 @@ mod tests {
             .unwrap()
             .config
             .max_cache_cap = 16384;
-        config.default_max_output_tokens = Some(32768);
+        config.default_max_output_tokens = Some(1024);
         pool.register_dynamic_model(config, false, None)
             .await
             .unwrap();
         let list = pool.model_snapshots().await;
         assert_eq!(list[0].context_window, Some(4096));
-        assert_eq!(list[0].max_output_tokens, Some(4096));
+        assert_eq!(list[0].max_output_tokens, Some(1024));
         assert_eq!(list[0].state, EngineRuntimeState::Unloaded);
         std::fs::remove_dir_all(model_dir).unwrap();
     }

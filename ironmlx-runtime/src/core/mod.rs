@@ -50,7 +50,7 @@ pub mod direct_execution;
 
 pub mod model_management;
 
-mod model_capacity;
+pub mod model_capacity;
 
 pub mod audio_execution;
 pub mod decision_execution;

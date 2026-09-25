@@ -18,7 +18,8 @@ func realHelperKill9RecoversOnceThenTripsBreakerAndAllowsManualRetry() async thr
             "model.safetensors": Data("weights".utf8),
         ]
     )
-    let port = try availableLoopbackPort()
+    let portReservation = try LoopbackPortReservation()
+    let port = portReservation.port
     let configStore = AppConfigStore(url: root.appendingPathComponent("app_config.json"))
     configStore.save(
         AppConfig(
@@ -54,6 +55,13 @@ func realHelperKill9RecoversOnceThenTripsBreakerAndAllowsManualRetry() async thr
                 processURL: URL(fileURLWithPath: "/usr/bin/python3"),
                 arguments: [helperURL.path, "--port", String(port)]
             )
+        },
+        processFactory: {
+            // Hold the selected port until immediately before the helper is
+            // created. Releasing it in availableLoopbackPort() left a wide
+            // bind-close-launch window that intermittently failed on CI.
+            portReservation.release()
+            return Process()
         }
     )
     let scanner = LocalModelScanner(rootURL: root)
@@ -213,40 +221,55 @@ private func crashRecoveryTemporaryDirectory() throws -> URL {
     return root
 }
 
-private func availableLoopbackPort() throws -> UInt16 {
-    let descriptor = socket(AF_INET, SOCK_STREAM, 0)
-    guard descriptor >= 0 else {
-        throw POSIXError(.ENOTSOCK)
+private final class LoopbackPortReservation {
+    let port: UInt16
+    private var descriptor: Int32?
+
+    init() throws {
+        let descriptor = socket(AF_INET, SOCK_STREAM, 0)
+        guard descriptor >= 0 else {
+            throw POSIXError(.ENOTSOCK)
+        }
+
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = 0
+        address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+        let bindResult = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard bindResult == 0 else {
+            Darwin.close(descriptor)
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EADDRINUSE)
+        }
+
+        var boundAddress = sockaddr_in()
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let nameResult = withUnsafeMutablePointer(to: &boundAddress) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                getsockname(descriptor, $0, &length)
+            }
+        }
+        guard nameResult == 0 else {
+            Darwin.close(descriptor)
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EINVAL)
+        }
+        self.port = UInt16(bigEndian: boundAddress.sin_port)
+        self.descriptor = descriptor
     }
-    defer {
+
+    func release() {
+        guard let descriptor else { return }
         Darwin.close(descriptor)
+        self.descriptor = nil
     }
 
-    var address = sockaddr_in()
-    address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-    address.sin_family = sa_family_t(AF_INET)
-    address.sin_port = 0
-    address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
-    let bindResult = withUnsafePointer(to: &address) { pointer in
-        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-            Darwin.bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-        }
+    deinit {
+        release()
     }
-    guard bindResult == 0 else {
-        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EADDRINUSE)
-    }
-
-    var boundAddress = sockaddr_in()
-    var length = socklen_t(MemoryLayout<sockaddr_in>.size)
-    let nameResult = withUnsafeMutablePointer(to: &boundAddress) { pointer in
-        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-            getsockname(descriptor, $0, &length)
-        }
-    }
-    guard nameResult == 0 else {
-        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EINVAL)
-    }
-    return UInt16(bigEndian: boundAddress.sin_port)
 }
 
 @MainActor

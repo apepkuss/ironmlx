@@ -74,17 +74,19 @@ test('model parameter help explains the three capacity fields in each language',
   }
 });
 
-test('model parameters form three aligned rows without sampling help buttons', () => {
+test('model parameters form three base rows plus a hidden reasoning metadata row', () => {
   const rows = [...html.matchAll(/<div class="modal-row model-params-setting-row[^>]*>/g)]
     .filter(row => row.index > html.indexOf('<!-- Model Params Modal -->'));
   const expected = [
     ['modal-alias-input', 'modal-model-type', 'modal-context-size'],
+    ['modal-reasoning-capability', 'modal-reasoning-efforts', 'modal-reasoning-default'],
     ['modal-max-tokens', 'modal-max-output-tokens', 'modal-temperature'],
     ['modal-top-p', 'modal-top-k', 'modal-repeat-penalty'],
   ];
   assert.equal(rows.length, expected.length);
+  assert.match(rows[1][0], /id="modal-reasoning-metadata-row" hidden/);
   const outputSection = html.indexOf('<div class="model-params-output-section">', rows[0].index);
-  assert.ok(outputSection > rows[0].index && outputSection < rows[1].index);
+  assert.ok(outputSection > rows[1].index && outputSection < rows[2].index);
   assert.ok(html.includes('.model-params-output-section {\n    border-top: 0.5px solid var(--border);'));
   for (let index = 0; index < rows.length; index++) {
     const end = index + 1 < rows.length
@@ -94,7 +96,7 @@ test('model parameters form three aligned rows without sampling help buttons', (
     assert.equal((row.match(/class="modal-field"/g) || []).length, 3);
     assert.ok(positions.every(position => position >= 0));
     assert.ok(positions[0] < positions[1] && positions[1] < positions[2]);
-    assert.equal((row.match(/class="profile-help-trigger"/g) || []).length, [1, 2, 0][index]);
+    assert.equal((row.match(/class="profile-help-trigger"/g) || []).length, [1, 1, 2, 0][index]);
   }
 });
 

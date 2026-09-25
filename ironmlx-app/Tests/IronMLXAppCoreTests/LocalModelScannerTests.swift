@@ -297,6 +297,72 @@ import Testing
     #expect(scanner.scan().first?.maxPositionEmbeddings == 262144)
 }
 
+@Test func localModelScannerReadsQwen38ReasoningMetadataFromStandaloneTemplate() throws {
+    let root = try temporaryDirectory()
+    _ = try writeVerifiedTestSnapshot(
+        root: root,
+        repoID: "mlx-community/Qwen3.8-27B-4bit",
+        files: [
+            "config.json": Data(#"{"model_type":"qwen3_5"}"#.utf8),
+            "tokenizer_config.json": Data("{}".utf8),
+            "chat_template.jinja": Data(qwen38ReasoningTemplate.utf8),
+            "model.safetensors": Data("weights".utf8),
+        ]
+    )
+
+    let model = try #require(LocalModelScanner(rootURL: root).scan().first)
+    let reasoning = try #require(model.reasoning)
+
+    #expect(reasoning.nativeEfforts == ["low", "medium", "xhigh"])
+    #expect(reasoning.defaultEffort == "xhigh")
+    #expect(reasoning.supportsDisable)
+    #expect(reasoning.source == "chat_template")
+
+    let encoded = try #require(
+        JSONSerialization.jsonObject(with: JSONEncoder().encode(model)) as? [String: Any]
+    )
+    let json = try #require(encoded["reasoning"] as? [String: Any])
+    #expect(json["native_efforts"] as? [String] == ["low", "medium", "xhigh"])
+    #expect(json["default_effort"] as? String == "xhigh")
+    #expect(json["supports_disable"] as? Bool == true)
+    #expect(json["source"] as? String == "chat_template")
+}
+
+@Test func localModelScannerReadsQwen38ReasoningMetadataFromInlineTemplate() throws {
+    let root = try temporaryDirectory()
+    let tokenizerConfig = try JSONSerialization.data(withJSONObject: [
+        "chat_template": qwen38ReasoningTemplate,
+    ])
+    _ = try writeVerifiedTestSnapshot(
+        root: root,
+        repoID: "mlx-community/Qwen3.8-MoE-4bit",
+        files: [
+            "config.json": Data(#"{"model_type":"qwen3_5_moe"}"#.utf8),
+            "tokenizer_config.json": tokenizerConfig,
+            "model.safetensors": Data("weights".utf8),
+        ]
+    )
+
+    let model = try #require(LocalModelScanner(rootURL: root).scan().first)
+
+    #expect(model.reasoning?.nativeEfforts == ["low", "medium", "xhigh"])
+}
+
+@Test func localModelScannerDoesNotGuessReasoningMetadataFromPartialTemplate() throws {
+    let root = try temporaryDirectory()
+    _ = try writeVerifiedTestSnapshot(
+        root: root,
+        repoID: "mlx-community/Similar-Template-4bit",
+        files: [
+            "config.json": Data(#"{"model_type":"qwen3_5"}"#.utf8),
+            "chat_template.jinja": Data("reasoning_effort|default('xhigh')".utf8),
+            "model.safetensors": Data("weights".utf8),
+        ]
+    )
+
+    #expect(LocalModelScanner(rootURL: root).scan().first?.reasoning == nil)
+}
+
 @Test func localModelScannerReadsTTSMetadataFromModelConfig() throws {
     let root = try temporaryDirectory()
     let snapshot = try writeVerifiedTestSnapshot(
@@ -649,6 +715,16 @@ private func qwen35Config(
     }
     """
 }
+
+private let qwen38ReasoningTemplate = """
+{% if message.reasoning_content is string %}
+{% set resolved_reasoning_effort = reasoning_effort|default('xhigh') %}
+{% if resolved_reasoning_effort not in ('xhigh', 'medium', 'low') %}
+{% if preserve_thinking is undefined or preserve_thinking is true %}
+{% if enable_thinking is undefined or enable_thinking is true %}
+{{ '<think>\\n' }}{{ '<think>\\n\\n</think>\\n\\n' }}
+{% endif %}
+"""
 
 private func dflash2DraftConfig(hiddenSize: Int) -> String {
     """

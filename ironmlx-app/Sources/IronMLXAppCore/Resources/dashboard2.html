@@ -1257,18 +1257,24 @@
     background: #0d0d0d;
   }
   .agent-guide-mark-dsh {
-    background: #142b46;
-    color: #e9f3ff;
-    font-family: 'SF Mono', Menlo, monospace;
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: -0.06em;
+    padding: 4px;
+    background: #fff;
+  }
+  .agent-guide-mark picture {
+    width: 100%;
+    height: 100%;
+    display: block;
   }
   .agent-guide-logo {
     width: 100%;
     height: 100%;
     display: block;
     object-fit: contain;
+  }
+  @media (prefers-color-scheme: dark) {
+    .agent-guide-mark-dsh {
+      background: #0d0d0d;
+    }
   }
   .agent-guide-nav-copy {
     min-width: 0;
@@ -1630,6 +1636,53 @@
     margin-top: 0;
     margin-bottom: 14px;
   }
+  .agent-guide-mode-panel[hidden] {
+    display: none;
+  }
+  .agent-step-list {
+    margin: 0;
+    padding-left: 24px;
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.6;
+  }
+  .agent-step-list li {
+    padding: 0 0 12px 5px;
+  }
+  .agent-step-list li:last-child {
+    padding-bottom: 0;
+  }
+  .agent-step-list li::marker {
+    color: var(--accent, #007aff);
+    font-weight: 700;
+  }
+  .agent-field-values {
+    display: grid;
+    grid-template-columns: minmax(130px, 0.34fr) minmax(0, 1fr);
+    gap: 1px;
+    overflow: hidden;
+    margin: 10px 0 2px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--border);
+  }
+  .agent-field-values dt,
+  .agent-field-values dd {
+    min-width: 0;
+    margin: 0;
+    padding: 8px 10px;
+    background: var(--bg);
+  }
+  .agent-field-values dt {
+    color: var(--text-secondary);
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .agent-field-values dd {
+    overflow-wrap: anywhere;
+    font-family: 'SF Mono', Menlo, monospace;
+    font-size: 12px;
+  }
   @media (max-width: 820px) {
     .agent-guide-shell {
       grid-template-columns: 1fr;
@@ -1648,6 +1701,9 @@
     .agent-runtime-grid,
     .agent-profile-options,
     .agent-guide-fields {
+      grid-template-columns: 1fr;
+    }
+    .agent-field-values {
       grid-template-columns: 1fr;
     }
     .agent-guide-hero {
@@ -2135,6 +2191,10 @@
   .modal-row {
     display: flex;
     gap: 10px;
+  }
+
+  .modal-row[hidden] {
+    display: none;
   }
 
   .modal-row .modal-field {
@@ -4185,7 +4245,12 @@
             <span class="agent-guide-nav-arrow" aria-hidden="true">›</span>
           </button>
           <button class="agent-guide-nav-item" type="button" data-agent-guide="dsh" aria-selected="false" aria-controls="agent-guide-dsh" onclick="selectAgentGuide('dsh')">
-            <span class="agent-guide-mark agent-guide-mark-dsh" aria-hidden="true">dsh</span>
+            <span class="agent-guide-mark agent-guide-mark-dsh" aria-hidden="true">
+              <picture>
+                <source media="(prefers-color-scheme: dark)" srcset="deepseek-harness-logo-dark.svg">
+                <img class="agent-guide-logo" data-agent-logo="dsh" src="deepseek-harness-logo.svg" alt="">
+              </picture>
+            </span>
             <span class="agent-guide-nav-copy">
               <span class="agent-guide-nav-name">DeepSeek Harness</span>
               <span class="agent-guide-nav-meta">Responses API</span>
@@ -4400,7 +4465,7 @@
                   <h2 class="agent-guide-title">DeepSeek Harness</h2>
                   <span class="agent-guide-version-badge"><span data-i18n="dsh_verified_revision">Validated master</span>: <strong>ddefc45fbc</strong></span>
                 </div>
-                <p class="agent-guide-description" data-i18n="dsh_description">Use dsh's pi-ai Responses route with the model currently served by IronMLX. Apply this overlay only to the runs that should use IronMLX.</p>
+                <p class="agent-guide-description" data-i18n="dsh_description">Connect DeepSeek Harness to IronMLX through the Responses API, using either a DSH CLI overlay or the DSH Desktop GUI.</p>
               </div>
               <a id="dsh-official-guide" class="agent-guide-docs-link" href="https://deepseek-harness.github.io/deepseek-harness/en/guide/providers#add-a-custom-provider" target="_blank" rel="noopener noreferrer" onclick="if (window.webkit?.messageHandlers?.openAgentGuide) { window.webkit.messageHandlers.openAgentGuide.postMessage(this.href); return false; }"><span data-i18n="agent_official_guide">Official configuration guide</span> <span aria-hidden="true">↗</span></a>
             </header>
@@ -4424,6 +4489,32 @@
               </div>
             </section>
 
+            <section class="agent-guide-section">
+              <div class="agent-guide-section-header">
+                <div>
+                  <h3 class="agent-guide-section-title" data-i18n="dsh_setup_method">Choose a setup method</h3>
+                  <p class="agent-guide-section-desc" data-i18n="dsh_setup_method_desc">Configure the provider in DSH Desktop, or use the generated overlay with DSH CLI.</p>
+                </div>
+              </div>
+              <fieldset class="agent-profile-options">
+                <legend class="visually-hidden" data-i18n="dsh_setup_method">Choose a setup method</legend>
+                <label class="agent-profile-option active">
+                  <input class="visually-hidden" type="radio" name="dsh-setup-mode" value="desktop" data-dsh-setup-mode="desktop" checked onchange="selectDshSetupMode('desktop')">
+                  <span class="agent-profile-option-title">
+                    <span data-i18n="dsh_desktop">DSH Desktop</span>
+                    <span class="agent-profile-option-badge" data-i18n="dsh_gui">GUI</span>
+                  </span>
+                  <span class="agent-profile-option-desc" data-i18n="dsh_desktop_desc">Add IronMLX as a custom provider from DSH Desktop settings.</span>
+                </label>
+                <label class="agent-profile-option">
+                  <input class="visually-hidden" type="radio" name="dsh-setup-mode" value="cli" data-dsh-setup-mode="cli" onchange="selectDshSetupMode('cli')">
+                  <span class="agent-profile-option-title" data-i18n="dsh_cli">DSH CLI</span>
+                  <span class="agent-profile-option-desc" data-i18n="dsh_cli_desc">Generate a scoped overlay and pass it only to dsh runs that should use IronMLX.</span>
+                </label>
+              </fieldset>
+            </section>
+
+            <div class="agent-guide-mode-panel" data-dsh-setup-panel="cli" hidden>
             <section class="agent-guide-section">
               <div class="agent-guide-section-header">
                 <div>
@@ -4505,6 +4596,58 @@
                 <span data-i18n="agent_tool_boundary">The agent executes terminal, bash, and MCP tools locally. IronMLX only provides inference and structured tool calls.</span>
               </div>
             </section>
+            </div>
+
+            <div class="agent-guide-mode-panel" data-dsh-setup-panel="desktop">
+              <section class="agent-guide-section">
+                <div class="agent-guide-section-header">
+                  <div>
+                    <h3 class="agent-guide-section-title" data-i18n="dsh_desktop_configure">Configure DSH Desktop</h3>
+                    <p class="agent-guide-section-desc" data-i18n="dsh_desktop_configure_desc">Create a custom provider in the Desktop app; no overlay file or DSH_HOME change is required.</p>
+                  </div>
+                  <a id="dsh-desktop-full-guide" class="agent-guide-docs-link" href="https://github.com/apepkuss/ironmlx/blob/dev/docs/dsh.md#dsh-desktop-gui-setup" target="_blank" rel="noopener noreferrer" onclick="if (window.webkit?.messageHandlers?.openAgentGuide) { window.webkit.messageHandlers.openAgentGuide.postMessage(this.href); return false; }"><span data-i18n="dsh_desktop_full_guide">Full DSH Desktop guide</span> <span aria-hidden="true">↗</span></a>
+                </div>
+                <ol class="agent-step-list">
+                  <li data-i18n="dsh_desktop_step_1">Start IronMLX and load the conversation LLM you intend to use with the agent.</li>
+                  <li data-i18n="dsh_desktop_step_2">In DSH Desktop, open Settings → Models → Add custom provider.</li>
+                  <li>
+                    <span data-i18n="dsh_desktop_step_3">Fill in the custom provider form with these values:</span>
+                    <dl class="agent-field-values">
+                      <dt data-i18n="dsh_desktop_provider_id">Provider ID</dt><dd>ironmlx-local</dd>
+                      <dt data-i18n="dsh_desktop_display_name">Display name</dt><dd>IronMLX</dd>
+                      <dt data-i18n="dsh_desktop_api_address">API address</dt><dd><code id="dsh-desktop-endpoint">http://127.0.0.1:9068/v1</code></dd>
+                      <dt data-i18n="dsh_desktop_api_protocol">API protocol</dt><dd>openai-responses</dd>
+                      <dt data-i18n="dsh_desktop_api_key">API key</dt><dd>local</dd>
+                    </dl>
+                  </li>
+                  <li data-i18n="dsh_desktop_step_4">Select Fetch available models.</li>
+                  <li data-i18n="dsh_desktop_step_5">Deselect all, then select only an Agent-capable conversation LLM. Do not add TTS, image, vision, or decision models.</li>
+                  <li data-i18n="dsh_desktop_step_6">Select Add selected, expand the model settings, keep the discovered context window, and review Max output tokens. IronMLX advertises 4096 when the model has no independent limit; adjust it for your workload. Reasoning and visible output share this budget.</li>
+                  <li data-i18n="dsh_desktop_step_7">Create the provider, then start a new chat with IronMLX / your model.</li>
+                </ol>
+                <div class="agent-guide-note">
+                  <span aria-hidden="true">i</span>
+                  <span data-i18n="dsh_desktop_key_note">The local value is only a placeholder for the keyless loopback endpoint. For LAN access, use the actual IronMLX address and API key.</span>
+                </div>
+              </section>
+
+              <section class="agent-guide-section">
+                <div class="agent-guide-section-header">
+                  <div>
+                    <h3 class="agent-guide-section-title" data-i18n="agent_verify">Verify</h3>
+                    <p class="agent-guide-section-desc" data-i18n="dsh_desktop_verify_desc">Confirm that the provider appears in a new chat and complete one short Responses request.</p>
+                  </div>
+                </div>
+                <div class="agent-guide-note">
+                  <span aria-hidden="true">i</span>
+                  <span data-i18n="dsh_desktop_verify">Create a new chat, select IronMLX / your model, and ask it to reply with exactly IRONMLX_OK. A normal response confirms the Desktop provider path.</span>
+                </div>
+                <div class="agent-guide-note">
+                  <span aria-hidden="true">i</span>
+                  <span data-i18n="agent_tool_boundary">The agent executes terminal, bash, and MCP tools locally. IronMLX only provides inference and structured tool calls.</span>
+                </div>
+              </section>
+            </div>
           </article>
         </div>
       </div>
@@ -5088,6 +5231,11 @@
         </div>
         <div class="modal-field"><div class="field-label-with-help"><label for="modal-context-size" data-i18n="context_size">CONTEXT SIZE</label><span class="profile-help profile-help-fixed"><button type="button" class="profile-help-trigger" aria-label="About context size" data-i18n-aria-label="context_size_help_label" aria-describedby="context-size-help">?</button><span class="profile-help-tooltip profile-help-tooltip-fixed" id="context-size-help" role="tooltip" data-i18n="context_size_help">Model context window read from its configuration. Read only; the runtime limit is set separately.</span></span></div><input type="text" placeholder="--" id="modal-context-size" readonly></div>
       </div>
+      <div class="modal-row model-params-setting-row model-params-reasoning-row" id="modal-reasoning-metadata-row" hidden>
+        <div class="modal-field"><div class="field-label-with-help"><label for="modal-reasoning-capability" data-i18n="reasoning_capability">REASONING CAPABILITY</label><span class="profile-help profile-help-fixed"><button type="button" class="profile-help-trigger" aria-label="About reasoning capability" data-i18n-aria-label="reasoning_metadata_help_label" aria-describedby="reasoning-metadata-help">?</button><span class="profile-help-tooltip profile-help-tooltip-fixed" id="reasoning-metadata-help" role="tooltip" data-i18n="reasoning_metadata_help">Detected from a verified chat-template contract. Disabling reasoning uses enable_thinking=false; off is not a native effort.</span></span></div><input type="text" id="modal-reasoning-capability" readonly></div>
+        <div class="modal-field"><label for="modal-reasoning-efforts" data-i18n="reasoning_native_efforts">NATIVE EFFORTS</label><input type="text" id="modal-reasoning-efforts" readonly></div>
+        <div class="modal-field"><label for="modal-reasoning-default" data-i18n="reasoning_default_effort">DEFAULT EFFORT</label><input type="text" id="modal-reasoning-default" readonly></div>
+      </div>
       <div class="model-params-output-section">
       <div class="modal-row model-params-setting-row model-params-capacity-row">
         <div class="modal-field"><div class="field-label-with-help"><label for="modal-max-tokens" data-i18n="max_context_tokens">MAX CONTEXT TOKENS</label><span class="profile-help profile-help-fixed"><button type="button" class="profile-help-trigger" aria-label="About max context tokens" data-i18n-aria-label="max_context_tokens_help_label" aria-describedby="max-context-tokens-help">?</button><span class="profile-help-tooltip profile-help-tooltip-fixed" id="max-context-tokens-help" role="tooltip" data-i18n="max_context_tokens_help">Runtime KV cache limit for one sequence. Input and generated tokens share this context; this is not the output limit.</span></span></div><input type="text" placeholder="--" id="modal-max-tokens"></div>
@@ -5336,7 +5484,7 @@
       omp_description: "Register IronMLX as a keyless Responses provider, discover the models served by the App, and launch OMP in the intended project directory.",
       omp_refresh_desc: "Refresh provider discovery, inspect available models, then start OMP from your project.",
       omp_cwd_note: "Replace the project path before running the command. OMP executes bash tools in the directory supplied by --cwd.",
-      dsh_verified_revision: "Validated master", dsh_description: "Use dsh's pi-ai Responses route with the model currently served by IronMLX. Apply this overlay only to the runs that should use IronMLX.",
+      dsh_verified_revision: "Validated master", dsh_description: "Connect DeepSeek Harness to IronMLX through the Responses API, using either a DSH CLI overlay or the DSH Desktop GUI.",
       dsh_save_file: "Save as", dsh_home_default: "(normally ~/.dsh)", dsh_reasoning: "Reasoning", dsh_reasoning_off: "Off",
       dsh_reasoning_minimal: "Minimal", dsh_reasoning_low: "Low", dsh_reasoning_medium: "Medium", dsh_reasoning_high: "High", dsh_reasoning_xhigh: "Extra high", dsh_reasoning_max: "Maximum",
       dsh_context_window: "Context window", dsh_output_budget: "Output budget (tokens)",
@@ -5349,6 +5497,23 @@
       dsh_settings_note: "If dsh settings.yaml already selects a default model or overrides llm-pi-ai, update those conflicting settings; user settings take precedence over this overlay.",
       dsh_verify_desc: "Set a local placeholder key, run a text turn, then check a real file-reading tool call.",
       dsh_key_note: "The placeholder key only satisfies dsh's credential lookup on the local keyless endpoint. It is not a LAN API key.",
+      dsh_setup_method: "Choose a setup method", dsh_setup_method_desc: "Configure the provider in DSH Desktop, or use the generated overlay with DSH CLI.",
+      dsh_cli: "DSH CLI", dsh_cli_desc: "Generate a scoped overlay and pass it only to dsh runs that should use IronMLX.",
+      dsh_desktop: "DSH Desktop", dsh_gui: "GUI", dsh_desktop_desc: "Add IronMLX as a custom provider from DSH Desktop settings.",
+      dsh_desktop_configure: "Configure DSH Desktop", dsh_desktop_configure_desc: "Create a custom provider in the Desktop app; no overlay file or DSH_HOME change is required.",
+      dsh_desktop_full_guide: "Full DSH Desktop guide",
+      dsh_desktop_step_1: "Start IronMLX and load the conversation LLM you intend to use with the agent.",
+      dsh_desktop_step_2: "In DSH Desktop, open Settings → Models → Add custom provider.",
+      dsh_desktop_step_3: "Fill in the custom provider form with these values:",
+      dsh_desktop_step_4: "Select Fetch available models.",
+      dsh_desktop_step_5: "Deselect all, then select only an Agent-capable conversation LLM. Do not add TTS, image, vision, or decision models.",
+      dsh_desktop_step_6: "Select Add selected, expand the model settings, keep the discovered context window, and review Max output tokens. IronMLX advertises 4096 when the model has no independent limit; adjust it for your workload. Reasoning and visible output share this budget.",
+      dsh_desktop_step_7: "Create the provider, then start a new chat with IronMLX / your model.",
+      dsh_desktop_provider_id: "Provider ID", dsh_desktop_display_name: "Display name", dsh_desktop_api_address: "API address",
+      dsh_desktop_api_protocol: "API protocol", dsh_desktop_api_key: "API key",
+      dsh_desktop_key_note: "The local value is only a placeholder for the keyless loopback endpoint. For LAN access, use the actual IronMLX address and API key.",
+      dsh_desktop_verify_desc: "Confirm that the provider appears in a new chat and complete one short Responses request.",
+      dsh_desktop_verify: "Create a new chat, select IronMLX / your model, and ask it to reply with exactly IRONMLX_OK. A normal response confirms the Desktop provider path.",
       server_crash_restarting: "Server exited unexpectedly. Restarting...",
       server_crash_recovering: "Server recovery is in progress...",
       server_crash_recovered: "Server has been restarted successfully.",
@@ -5577,6 +5742,9 @@
       default_max_output_tokens_help_budget: "Reasoning and visible answer tokens share the budget. If it runs out, the answer may be incomplete or may not begin at all.",
       default_max_output_tokens_help_priority: "A request-supplied max_output_tokens takes precedence. Leave blank to use the server default (256).",
       default_max_output_tokens_help_scope: "This is not the model's fixed output capability and does not change CONTEXT SIZE or MAX CONTEXT TOKENS. Remaining context can further limit output.",
+      reasoning_capability: "REASONING CAPABILITY", reasoning_native_efforts: "NATIVE EFFORTS", reasoning_default_effort: "DEFAULT EFFORT",
+      reasoning_supported_disable: "Supported · can be disabled", reasoning_supported: "Supported",
+      reasoning_metadata_help_label: "About reasoning capability", reasoning_metadata_help: "Detected from a verified chat-template contract. Disabling reasoning uses enable_thinking=false; off is not a native effort.",
       params_invalid_max_output_tokens: "MAX OUTPUT TOKENS must be a positive integer or empty.",
       model_alias: "Model Alias", model_type: "Model Type", auto_detect: "Auto Detect",
       max_token_count: "Max Tokens", temperature: "Temperature", repeat_penalty: "Repeat Penalty", ttl_seconds: "TTL (seconds)",
@@ -5804,7 +5972,7 @@
       omp_description: "将 IronMLX 注册为免密钥 Responses Provider，发现 App 提供的模型，并在目标项目目录启动 OMP。",
       omp_refresh_desc: "刷新 Provider 发现、查看可用模型，然后从项目目录启动 OMP。",
       omp_cwd_note: "执行前请替换项目路径。OMP 会在 --cwd 指定的目录中执行 bash 工具。",
-      dsh_verified_revision: "已验证 master", dsh_description: "通过 dsh 的 pi-ai Responses 路由使用 IronMLX 当前提供的模型。仅在需要使用 IronMLX 的运行中应用此 overlay。",
+      dsh_verified_revision: "已验证 master", dsh_description: "通过 Responses API 将 DeepSeek Harness 连接到 IronMLX，可选择 DSH CLI overlay 或 DSH Desktop GUI。",
       dsh_save_file: "保存为", dsh_home_default: "（通常为 ~/.dsh）", dsh_reasoning: "推理模式", dsh_reasoning_off: "关闭",
       dsh_reasoning_minimal: "极低", dsh_reasoning_low: "低", dsh_reasoning_medium: "中", dsh_reasoning_high: "高", dsh_reasoning_xhigh: "极高", dsh_reasoning_max: "最大",
       dsh_context_window: "上下文容量", dsh_output_budget: "单轮输出预算（tokens）",
@@ -5817,6 +5985,23 @@
       dsh_settings_note: "若 dsh 的 settings.yaml 已指定默认模型或覆盖 llm-pi-ai，请更新这些冲突的设置；用户设置的优先级高于此 overlay。",
       dsh_verify_desc: "设置本地占位密钥，完成一轮文本请求，再验证真实的文件读取工具调用。",
       dsh_key_note: "占位密钥仅满足 dsh 对本地免鉴权 endpoint 的凭据查询；它不是 LAN API Key。",
+      dsh_setup_method: "选择配置方式", dsh_setup_method_desc: "在 DSH Desktop 中配置提供方，或使用 DSH CLI 加载生成的 overlay。",
+      dsh_cli: "DSH CLI", dsh_cli_desc: "生成独立 overlay，仅在需要使用 IronMLX 的 dsh 运行中加载。",
+      dsh_desktop: "DSH Desktop", dsh_gui: "GUI", dsh_desktop_desc: "从 DSH Desktop 设置中将 IronMLX 添加为自定义提供方。",
+      dsh_desktop_configure: "配置 DSH Desktop", dsh_desktop_configure_desc: "在桌面应用中创建自定义提供方；无需 overlay 文件，也无需修改 DSH_HOME。",
+      dsh_desktop_full_guide: "完整 DSH Desktop 指南",
+      dsh_desktop_step_1: "启动 IronMLX，并加载准备供 Agent 使用的对话 LLM。",
+      dsh_desktop_step_2: "在 DSH Desktop 中打开“设置 → 模型 → 添加自定义提供方”。",
+      dsh_desktop_step_3: "在自定义提供方窗口中填写以下值：",
+      dsh_desktop_step_4: "点击“获取可用模型”。",
+      dsh_desktop_step_5: "先取消全选，再只选择具备 Agent 能力的对话 LLM；不要添加 TTS、图像、视觉或 decision model。",
+      dsh_desktop_step_6: "点击“添加所选”并展开模型设置。保留自动发现的“上下文窗口”，检查“最大输出 token 数”。模型没有独立上限时，IronMLX 会提供 4096；可按任务需要调整，reasoning 与可见正文共同消耗该预算。",
+      dsh_desktop_step_7: "点击“创建提供方”，然后使用“IronMLX / 你的模型”新建会话。",
+      dsh_desktop_provider_id: "Provider ID", dsh_desktop_display_name: "显示名称", dsh_desktop_api_address: "API 地址",
+      dsh_desktop_api_protocol: "API 协议", dsh_desktop_api_key: "API 密钥",
+      dsh_desktop_key_note: "local 仅是本机回环免鉴权接口的占位值。通过 LAN 访问时，请使用实际的 IronMLX 地址和 API Key。",
+      dsh_desktop_verify_desc: "确认新会话中可选择该提供方，并完成一次简短的 Responses 请求。",
+      dsh_desktop_verify: "新建会话，选择“IronMLX / 你的模型”，要求模型只回复 IRONMLX_OK；正常返回即可确认 Desktop 提供方路径可用。",
       server_crash_restarting: "服务异常退出，正在重启...",
       server_crash_recovering: "正在恢复服务...",
       server_crash_recovered: "服务已成功重启。",
@@ -6045,6 +6230,9 @@
       default_max_output_tokens_help_budget: "推理过程（reasoning）与可见正文共同消耗预算；耗尽时，正文可能不完整，甚至还未开始输出。",
       default_max_output_tokens_help_priority: "请求显式传入 max_output_tokens 时以请求值为准；留空则使用服务端默认值 256。",
       default_max_output_tokens_help_scope: "这不是模型固定的输出能力上限，也不修改 CONTEXT SIZE 或 MAX CONTEXT TOKENS；剩余上下文空间还会限制实际可输出长度。",
+      reasoning_capability: "推理能力", reasoning_native_efforts: "原生推理等级", reasoning_default_effort: "默认推理等级",
+      reasoning_supported_disable: "支持 · 可关闭", reasoning_supported: "支持",
+      reasoning_metadata_help_label: "关于推理能力", reasoning_metadata_help: "基于已验证的 Chat Template 契约检测。关闭推理使用 enable_thinking=false；off 不是模型的原生推理等级。",
       params_invalid_max_output_tokens: "MAX OUTPUT TOKENS 必须是正整数，或留空。",
       model_alias: "模型别名", model_type: "模型类型", auto_detect: "自动检测",
       max_token_count: "最大 Token 数", temperature: "温度", repeat_penalty: "重复惩罚", ttl_seconds: "TTL（秒）",
@@ -6272,7 +6460,7 @@
       omp_description: "將 IronMLX 註冊為免金鑰 Responses Provider，探索 App 提供的模型，並在目標專案目錄啟動 OMP。",
       omp_refresh_desc: "重新整理 Provider 探索、檢視可用模型，然後從專案目錄啟動 OMP。",
       omp_cwd_note: "執行前請替換專案路徑。OMP 會在 --cwd 指定的目錄中執行 bash 工具。",
-      dsh_verified_revision: "已驗證 master", dsh_description: "透過 dsh 的 pi-ai Responses 路由使用 IronMLX 目前提供的模型。只在需要使用 IronMLX 的執行中套用此 overlay。",
+      dsh_verified_revision: "已驗證 master", dsh_description: "透過 Responses API 將 DeepSeek Harness 連接到 IronMLX，可選擇 DSH CLI overlay 或 DSH Desktop GUI。",
       dsh_save_file: "儲存為", dsh_home_default: "（通常為 ~/.dsh）", dsh_reasoning: "推理模式", dsh_reasoning_off: "關閉",
       dsh_reasoning_minimal: "極低", dsh_reasoning_low: "低", dsh_reasoning_medium: "中", dsh_reasoning_high: "高", dsh_reasoning_xhigh: "極高", dsh_reasoning_max: "最大",
       dsh_context_window: "上下文容量", dsh_output_budget: "單輪輸出預算（tokens）",
@@ -6285,6 +6473,23 @@
       dsh_settings_note: "若 dsh 的 settings.yaml 已指定預設模型或覆蓋 llm-pi-ai，請更新這些衝突的設定；使用者設定的優先順序高於此 overlay。",
       dsh_verify_desc: "設定本機佔位金鑰，完成一輪文字請求，再驗證實際的檔案讀取工具呼叫。",
       dsh_key_note: "佔位金鑰僅滿足 dsh 對本機免驗證 endpoint 的憑證查詢；它不是 LAN API Key。",
+      dsh_setup_method: "選擇設定方式", dsh_setup_method_desc: "在 DSH Desktop 中設定提供者，或使用 DSH CLI 載入產生的 overlay。",
+      dsh_cli: "DSH CLI", dsh_cli_desc: "產生獨立 overlay，只在需要使用 IronMLX 的 dsh 執行中載入。",
+      dsh_desktop: "DSH Desktop", dsh_gui: "GUI", dsh_desktop_desc: "從 DSH Desktop 設定中將 IronMLX 加入為自訂提供者。",
+      dsh_desktop_configure: "設定 DSH Desktop", dsh_desktop_configure_desc: "在桌面應用程式中建立自訂提供者；不需要 overlay 檔案，也不需要修改 DSH_HOME。",
+      dsh_desktop_full_guide: "完整 DSH Desktop 指南",
+      dsh_desktop_step_1: "啟動 IronMLX，並載入準備供 Agent 使用的對話 LLM。",
+      dsh_desktop_step_2: "在 DSH Desktop 中開啟「設定 → 模型 → 新增自訂提供者」。",
+      dsh_desktop_step_3: "在自訂提供者視窗中填入以下值：",
+      dsh_desktop_step_4: "按一下「取得可用模型」。",
+      dsh_desktop_step_5: "先取消全選，再只選擇具備 Agent 能力的對話 LLM；不要加入 TTS、圖像、視覺或 decision model。",
+      dsh_desktop_step_6: "按一下「加入所選」並展開模型設定。保留自動探索的「上下文視窗」，檢查「最大輸出 token 數」。模型沒有獨立上限時，IronMLX 會提供 4096；可依工作需要調整，reasoning 與可見正文共同使用此預算。",
+      dsh_desktop_step_7: "按一下「建立提供者」，然後使用「IronMLX / 你的模型」建立新對話。",
+      dsh_desktop_provider_id: "Provider ID", dsh_desktop_display_name: "顯示名稱", dsh_desktop_api_address: "API 位址",
+      dsh_desktop_api_protocol: "API 協定", dsh_desktop_api_key: "API 金鑰",
+      dsh_desktop_key_note: "local 只是本機回環免驗證介面的佔位值。透過 LAN 存取時，請使用實際的 IronMLX 位址與 API Key。",
+      dsh_desktop_verify_desc: "確認新對話中可選擇此提供者，並完成一次簡短的 Responses 請求。",
+      dsh_desktop_verify: "建立新對話，選擇「IronMLX / 你的模型」，要求模型只回覆 IRONMLX_OK；正常回覆即可確認 Desktop 提供者路徑可用。",
       server_crash_restarting: "服務異常退出，正在重啟...",
       server_crash_recovering: "正在恢復服務...",
       server_crash_recovered: "服務已成功重啟。",
@@ -6515,6 +6720,9 @@
       default_max_output_tokens_help_budget: "推理過程（reasoning）與可見正文共同消耗預算；耗盡時，正文可能不完整，甚至尚未開始輸出。",
       default_max_output_tokens_help_priority: "請求明確傳入 max_output_tokens 時以請求值為準；留空則使用伺服器預設值 256。",
       default_max_output_tokens_help_scope: "這不是模型固定的輸出能力上限，也不修改 CONTEXT SIZE 或 MAX CONTEXT TOKENS；剩餘上下文空間還會限制實際可輸出長度。",
+      reasoning_capability: "推理能力", reasoning_native_efforts: "原生推理等級", reasoning_default_effort: "預設推理等級",
+      reasoning_supported_disable: "支援 · 可關閉", reasoning_supported: "支援",
+      reasoning_metadata_help_label: "關於推理能力", reasoning_metadata_help: "依據已驗證的 Chat Template 契約偵測。關閉推理使用 enable_thinking=false；off 不是模型的原生推理等級。",
       params_invalid_max_output_tokens: "MAX OUTPUT TOKENS 必須是正整數，或留空。",
       model_param_settings: "模型參數設定", context_size: "CONTEXT SIZE",
       model_alias: "模型別名", model_type: "模型類型", auto_detect: "自動偵測",
@@ -6743,7 +6951,7 @@
       omp_description: "IronMLX をキー不要の Responses プロバイダーとして登録し、App が提供するモデルを検出して、目的のプロジェクトディレクトリで OMP を起動します。",
       omp_refresh_desc: "プロバイダー検出を更新し、利用可能なモデルを確認してからプロジェクトで OMP を起動します。",
       omp_cwd_note: "実行前にプロジェクトパスを置き換えてください。OMP は --cwd で指定したディレクトリで bash ツールを実行します。",
-      dsh_verified_revision: "検証済み master", dsh_description: "dsh の pi-ai Responses ルートから、IronMLX が現在提供するモデルを使用します。IronMLX を使う実行にのみこの overlay を適用します。",
+      dsh_verified_revision: "検証済み master", dsh_description: "Responses API 経由で DeepSeek Harness を IronMLX に接続し、DSH CLI overlay または DSH Desktop GUI を使用します。",
       dsh_save_file: "保存先", dsh_home_default: "（通常は ~/.dsh）", dsh_reasoning: "推論モード", dsh_reasoning_off: "オフ",
       dsh_reasoning_minimal: "最小", dsh_reasoning_low: "低", dsh_reasoning_medium: "中", dsh_reasoning_high: "高", dsh_reasoning_xhigh: "非常に高い", dsh_reasoning_max: "最大",
       dsh_context_window: "コンテキスト容量", dsh_output_budget: "回答ごとの出力予算（tokens）",
@@ -6756,6 +6964,23 @@
       dsh_settings_note: "dsh の settings.yaml が既定のモデルを指定するか llm-pi-ai を上書きしている場合は、競合する設定を更新してください。ユーザー設定がこの overlay より優先されます。",
       dsh_verify_desc: "ローカルの仮キーを設定し、テキストの応答と実際のファイル読み取りツール呼び出しを確認します。",
       dsh_key_note: "仮キーは認証不要のローカル endpoint で dsh の認証情報照会を満たすためだけのものです。LAN API Key ではありません。",
+      dsh_setup_method: "設定方法を選択", dsh_setup_method_desc: "DSH Desktop でプロバイダーを設定するか、DSH CLI で生成した overlay を使います。",
+      dsh_cli: "DSH CLI", dsh_cli_desc: "専用 overlay を生成し、IronMLX を使う dsh 実行にだけ渡します。",
+      dsh_desktop: "DSH Desktop", dsh_gui: "GUI", dsh_desktop_desc: "DSH Desktop の設定から IronMLX をカスタムプロバイダーとして追加します。",
+      dsh_desktop_configure: "DSH Desktop を設定", dsh_desktop_configure_desc: "デスクトップアプリでカスタムプロバイダーを作成します。overlay ファイルや DSH_HOME の変更は不要です。",
+      dsh_desktop_full_guide: "DSH Desktop の完全ガイド",
+      dsh_desktop_step_1: "IronMLX を起動し、Agent で使う対話 LLM を読み込みます。",
+      dsh_desktop_step_2: "DSH Desktop で「設定 → モデル → カスタムプロバイダーを追加」を開きます。",
+      dsh_desktop_step_3: "カスタムプロバイダー画面に次の値を入力します。",
+      dsh_desktop_step_4: "「利用可能なモデルを取得」を選択します。",
+      dsh_desktop_step_5: "全選択を解除し、Agent 対応の対話 LLM だけを選択します。TTS、画像、視覚、decision model は追加しないでください。",
+      dsh_desktop_step_6: "選択したモデルを追加してモデル設定を展開します。検出されたコンテキストウィンドウは維持し、最大出力トークン数を確認してください。モデルに独立した上限がない場合、IronMLX は 4096 を提示します。用途に合わせて調整でき、reasoning と表示される本文でこの予算を共有します。",
+      dsh_desktop_step_7: "プロバイダーを作成し、「IronMLX / 使用するモデル」で新しいチャットを開始します。",
+      dsh_desktop_provider_id: "Provider ID", dsh_desktop_display_name: "表示名", dsh_desktop_api_address: "API アドレス",
+      dsh_desktop_api_protocol: "API プロトコル", dsh_desktop_api_key: "API キー",
+      dsh_desktop_key_note: "local は認証不要のループバック endpoint 用の仮値です。LAN では実際の IronMLX アドレスと API Key を使用してください。",
+      dsh_desktop_verify_desc: "新しいチャットにプロバイダーが表示されることを確認し、短い Responses リクエストを実行します。",
+      dsh_desktop_verify: "新しいチャットで「IronMLX / 使用するモデル」を選び、IRONMLX_OK だけを返すよう依頼します。通常の応答が返れば Desktop のプロバイダー経路を確認できます。",
       server_crash_restarting: "サーバーが異常終了しました。再起動中...",
       server_crash_recovering: "サーバーを復旧しています...",
       server_crash_recovered: "サーバーが正常に再起動しました。",
@@ -6986,6 +7211,9 @@
       default_max_output_tokens_help_budget: "推論（reasoning）と表示される回答は同じ予算を消費します。使い切ると回答が途中で終わるか、本文を出せない場合があります。",
       default_max_output_tokens_help_priority: "リクエストで max_output_tokens を明示した場合はその値が優先されます。空欄ならサーバーの既定値 256 を使います。",
       default_max_output_tokens_help_scope: "モデル固有の出力能力の上限ではなく、CONTEXT SIZE や MAX CONTEXT TOKENS も変更しません。残りのコンテキスト量によって実際の出力はさらに制限されます。",
+      reasoning_capability: "推論機能", reasoning_native_efforts: "ネイティブ推論レベル", reasoning_default_effort: "既定の推論レベル",
+      reasoning_supported_disable: "対応 · 無効化可能", reasoning_supported: "対応",
+      reasoning_metadata_help_label: "推論機能について", reasoning_metadata_help: "検証済みの Chat Template 契約から検出します。推論の無効化には enable_thinking=false を使い、off はモデルのネイティブ推論レベルではありません。",
       params_invalid_max_output_tokens: "MAX OUTPUT TOKENS には正の整数を入力するか、空欄にしてください。",
       model_param_settings: "モデルパラメータ設定", context_size: "CONTEXT SIZE",
       model_alias: "モデルエイリアス", model_type: "モデルタイプ", auto_detect: "自動検出",
@@ -7214,7 +7442,7 @@
       omp_description: "IronMLX를 키가 필요 없는 Responses 프로바이더로 등록하고 App이 제공하는 모델을 검색한 뒤 원하는 프로젝트 디렉터리에서 OMP를 시작하세요.",
       omp_refresh_desc: "프로바이더 검색을 새로고침하고 사용 가능한 모델을 확인한 다음 프로젝트에서 OMP를 시작하세요.",
       omp_cwd_note: "명령을 실행하기 전에 프로젝트 경로를 바꾸세요. OMP는 --cwd로 지정한 디렉터리에서 bash 도구를 실행합니다.",
-      dsh_verified_revision: "검증된 master", dsh_description: "dsh의 pi-ai Responses 경로에서 IronMLX가 현재 제공하는 모델을 사용합니다. IronMLX를 사용할 실행에만 이 overlay를 적용하세요.",
+      dsh_verified_revision: "검증된 master", dsh_description: "Responses API를 통해 DeepSeek Harness를 IronMLX에 연결하고 DSH CLI overlay 또는 DSH Desktop GUI를 사용하세요.",
       dsh_save_file: "다음 이름으로 저장", dsh_home_default: "(일반적으로 ~/.dsh)", dsh_reasoning: "추론 모드", dsh_reasoning_off: "끄기",
       dsh_reasoning_minimal: "최소", dsh_reasoning_low: "낮음", dsh_reasoning_medium: "중간", dsh_reasoning_high: "높음", dsh_reasoning_xhigh: "매우 높음", dsh_reasoning_max: "최대",
       dsh_context_window: "컨텍스트 용량", dsh_output_budget: "응답당 출력 예산(tokens)",
@@ -7227,6 +7455,23 @@
       dsh_settings_note: "dsh settings.yaml이 기본 모델을 지정하거나 llm-pi-ai를 덮어쓰는 경우 충돌하는 설정을 수정하세요. 사용자 설정이 이 overlay보다 우선합니다.",
       dsh_verify_desc: "로컬 임시 키를 설정하고 텍스트 응답과 실제 파일 읽기 도구 호출을 확인하세요.",
       dsh_key_note: "임시 키는 인증이 필요 없는 로컬 endpoint에서 dsh의 자격 증명 조회만 충족합니다. LAN API Key가 아닙니다.",
+      dsh_setup_method: "설정 방법 선택", dsh_setup_method_desc: "DSH Desktop에서 제공자를 설정하거나 DSH CLI에서 생성된 overlay를 사용하세요.",
+      dsh_cli: "DSH CLI", dsh_cli_desc: "전용 overlay를 생성하여 IronMLX를 사용할 dsh 실행에만 전달합니다.",
+      dsh_desktop: "DSH Desktop", dsh_gui: "GUI", dsh_desktop_desc: "DSH Desktop 설정에서 IronMLX를 사용자 지정 제공자로 추가합니다.",
+      dsh_desktop_configure: "DSH Desktop 설정", dsh_desktop_configure_desc: "데스크톱 앱에서 사용자 지정 제공자를 만드세요. overlay 파일이나 DSH_HOME 변경은 필요하지 않습니다.",
+      dsh_desktop_full_guide: "전체 DSH Desktop 가이드",
+      dsh_desktop_step_1: "IronMLX를 시작하고 Agent에서 사용할 대화형 LLM을 로드하세요.",
+      dsh_desktop_step_2: "DSH Desktop에서 설정 → 모델 → 사용자 지정 제공자 추가를 여세요.",
+      dsh_desktop_step_3: "사용자 지정 제공자 양식에 다음 값을 입력하세요.",
+      dsh_desktop_step_4: "사용 가능한 모델 가져오기를 선택하세요.",
+      dsh_desktop_step_5: "전체 선택을 해제한 뒤 Agent를 지원하는 대화형 LLM만 선택하세요. TTS, 이미지, 비전 또는 decision model은 추가하지 마세요.",
+      dsh_desktop_step_6: "선택한 모델을 추가하고 모델 설정을 펼치세요. 검색된 컨텍스트 창은 유지하고 최대 출력 토큰 수를 확인하세요. 모델에 독립적인 한도가 없으면 IronMLX가 4096을 제시합니다. 작업에 맞게 조정할 수 있으며 reasoning과 표시되는 본문이 이 예산을 함께 사용합니다.",
+      dsh_desktop_step_7: "제공자를 만든 다음 IronMLX / 사용할 모델로 새 채팅을 시작하세요.",
+      dsh_desktop_provider_id: "Provider ID", dsh_desktop_display_name: "표시 이름", dsh_desktop_api_address: "API 주소",
+      dsh_desktop_api_protocol: "API 프로토콜", dsh_desktop_api_key: "API 키",
+      dsh_desktop_key_note: "local은 인증이 없는 루프백 endpoint용 임시 값입니다. LAN에서는 실제 IronMLX 주소와 API Key를 사용하세요.",
+      dsh_desktop_verify_desc: "새 채팅에 제공자가 표시되는지 확인하고 짧은 Responses 요청을 완료하세요.",
+      dsh_desktop_verify: "새 채팅에서 IronMLX / 사용할 모델을 선택하고 IRONMLX_OK만 답하도록 요청하세요. 정상 응답이 오면 Desktop 제공자 경로가 확인됩니다.",
       server_crash_restarting: "서버가 비정상 종료되었습니다. 재시작 중...",
       server_crash_recovering: "서버를 복구하는 중입니다...",
       server_crash_recovered: "서버가 성공적으로 재시작되었습니다.",
@@ -7457,6 +7702,9 @@
       default_max_output_tokens_help_budget: "추론(reasoning)과 표시되는 답변이 같은 예산을 사용합니다. 예산이 소진되면 답변이 중간에 끊기거나 본문이 시작되지 않을 수 있습니다.",
       default_max_output_tokens_help_priority: "요청에 max_output_tokens가 명시되어 있으면 그 값이 우선합니다. 비워 두면 서버 기본값 256을 사용합니다.",
       default_max_output_tokens_help_scope: "모델 고유의 출력 능력 상한이 아니며 CONTEXT SIZE 또는 MAX CONTEXT TOKENS를 바꾸지 않습니다. 남은 컨텍스트에 따라 실제 출력 길이는 더 제한될 수 있습니다.",
+      reasoning_capability: "추론 기능", reasoning_native_efforts: "네이티브 추론 수준", reasoning_default_effort: "기본 추론 수준",
+      reasoning_supported_disable: "지원 · 비활성화 가능", reasoning_supported: "지원",
+      reasoning_metadata_help_label: "추론 기능 정보", reasoning_metadata_help: "검증된 Chat Template 계약에서 감지합니다. 추론 비활성화에는 enable_thinking=false를 사용하며 off는 모델의 네이티브 추론 수준이 아닙니다.",
       params_invalid_max_output_tokens: "MAX OUTPUT TOKENS에는 양의 정수를 입력하거나 비워 두세요.",
       model_param_settings: "모델 매개변수 설정", context_size: "CONTEXT SIZE",
       model_alias: "모델 별칭", model_type: "모델 유형", auto_detect: "자동 감지",
@@ -7619,6 +7867,10 @@
     if (dshGuide) dshGuide.href = lang === 'zh-Hans'
       ? 'https://deepseek-harness.github.io/deepseek-harness/guide/providers#%E6%B7%BB%E5%8A%A0%E8%87%AA%E5%AE%9A%E4%B9%89%E6%8F%90%E4%BE%9B%E6%96%B9'
       : 'https://deepseek-harness.github.io/deepseek-harness/en/guide/providers#add-a-custom-provider';
+    const dshDesktopGuide = document.getElementById('dsh-desktop-full-guide');
+    if (dshDesktopGuide) dshDesktopGuide.href = lang === 'zh-Hans' || lang === 'zh-Hant'
+      ? 'https://github.com/apepkuss/ironmlx/blob/dev/docs/zh-CN/dsh.md#dsh-desktop-gui-%E9%85%8D%E7%BD%AE'
+      : 'https://github.com/apepkuss/ironmlx/blob/dev/docs/dsh.md#dsh-desktop-gui-setup';
     document.documentElement.lang = HTML_LANG_MAP[lang] || 'en';
     document.querySelectorAll('[data-i18n]').forEach(el => {
       const key = el.dataset.i18n;
@@ -8795,8 +9047,21 @@
     // Load saved params if any
     const saved = window.__MODEL_PARAMS__[name] || {};
     const local = window.__LOCAL_MODELS__[name] || {};
+    const dict = I18N[currentLang] || I18N.en;
     const generationDefaults = local.generation_defaults || {};
     const capabilities = local.capabilities || {};
+    const reasoning = local.reasoning || {};
+    const nativeEfforts = Array.isArray(reasoning.native_efforts)
+      ? reasoning.native_efforts.filter(effort => typeof effort === 'string' && effort.trim())
+      : [];
+    const reasoningRow = document.getElementById('modal-reasoning-metadata-row');
+    const hasReasoningMetadata = nativeEfforts.length > 0;
+    reasoningRow.hidden = !hasReasoningMetadata;
+    document.getElementById('modal-reasoning-capability').value = hasReasoningMetadata
+      ? (reasoning.supports_disable ? dict.reasoning_supported_disable : dict.reasoning_supported)
+      : '';
+    document.getElementById('modal-reasoning-efforts').value = nativeEfforts.join(' · ');
+    document.getElementById('modal-reasoning-default').value = reasoning.default_effort || '--';
     const isBlockDiffusion = capabilities.runtime_kind === 'block_diffusion'
       || local.type === 'block_diffusion_vlm';
     const contextWindow = local.max_position_embeddings || saved.context_size || '';
@@ -11610,6 +11875,7 @@
   // ── Agent provider guides ──
   let currentAgentGuide = null;
   let hermesProfileMode = 'dedicated';
+  let dshSetupMode = 'desktop';
   let dshModelCapacities = new Map();
   let dshConfiguredModel = null;
 
@@ -11682,6 +11948,21 @@
       input.checked = selected;
       const option = input.closest('.agent-profile-option');
       if (option) option.classList.toggle('active', selected);
+    });
+    renderAgentGuideConfiguration();
+  }
+
+  function selectDshSetupMode(mode) {
+    if (mode !== 'cli' && mode !== 'desktop') return;
+    dshSetupMode = mode;
+    document.querySelectorAll('[data-dsh-setup-mode]').forEach(function(input) {
+      const selected = input.dataset.dshSetupMode === mode;
+      input.checked = selected;
+      const option = input.closest('.agent-profile-option');
+      if (option) option.classList.toggle('active', selected);
+    });
+    document.querySelectorAll('[data-dsh-setup-panel]').forEach(function(panel) {
+      panel.hidden = panel.dataset.dshSetupPanel !== mode;
     });
     renderAgentGuideConfiguration();
   }
@@ -11767,6 +12048,8 @@
     document.querySelectorAll('[data-agent-endpoint]').forEach(function(element) {
       element.textContent = endpoint;
     });
+    const dshDesktopEndpoint = document.getElementById('dsh-desktop-endpoint');
+    if (dshDesktopEndpoint) dshDesktopEndpoint.textContent = endpoint;
     document.querySelectorAll('[data-agent-model-status]').forEach(function(element) {
       element.textContent = modelStatus;
       if (models.length) {

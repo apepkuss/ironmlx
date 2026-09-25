@@ -18,6 +18,40 @@
         "usage": "Preserves upstream copyright, adaptation and license-selection notices for audio code."
       },
       {
+        "bundled_modifications": "None; copied byte-for-byte from the upstream dark favicon.",
+        "bundled_path": "ironmlx-app/Sources/IronMLXAppCore/Resources/deepseek-harness-logo-dark.svg",
+        "bundled_sha256": "dde7db781f41e7aeb4709ff5485af2bdcf7f4b4ea81b4500cfd5df44efdbd817",
+        "component": "DeepSeek Harness dark logo",
+        "copyright": "Copyright (c) 2026 DeepSeek",
+        "license": "MIT",
+        "license_file": "asset-deepseek-harness-dark-mit.txt",
+        "license_sha256": "ebb4f09972aee8608be255debaf78451a68e95c290f55c240dec2ecfa16ea6be",
+        "license_url": "https://github.com/deepseek-ai/deepseek-harness/blob/a9840f055f0091a3b729191a82fed28025ded3e1/LICENSE",
+        "repository": "https://github.com/deepseek-ai/deepseek-harness",
+        "revision": "a9840f055f0091a3b729191a82fed28025ded3e1",
+        "source_path": "apps/web/public/favicon-dark.svg",
+        "source_url": "https://github.com/deepseek-ai/deepseek-harness/blob/a9840f055f0091a3b729191a82fed28025ded3e1/apps/web/public/favicon-dark.svg",
+        "upstream_sha256": "dde7db781f41e7aeb4709ff5485af2bdcf7f4b4ea81b4500cfd5df44efdbd817",
+        "usage": "Identifies the supported DeepSeek Harness integration in dark appearance."
+      },
+      {
+        "bundled_modifications": "None; copied byte-for-byte from the upstream light favicon.",
+        "bundled_path": "ironmlx-app/Sources/IronMLXAppCore/Resources/deepseek-harness-logo.svg",
+        "bundled_sha256": "9e983b4f649c25c6ca0623a50be1a6e705fd8f49f756638b980fa13b40575ab6",
+        "component": "DeepSeek Harness light logo",
+        "copyright": "Copyright (c) 2026 DeepSeek",
+        "license": "MIT",
+        "license_file": "asset-deepseek-harness-light-mit.txt",
+        "license_sha256": "ebb4f09972aee8608be255debaf78451a68e95c290f55c240dec2ecfa16ea6be",
+        "license_url": "https://github.com/deepseek-ai/deepseek-harness/blob/a9840f055f0091a3b729191a82fed28025ded3e1/LICENSE",
+        "repository": "https://github.com/deepseek-ai/deepseek-harness",
+        "revision": "a9840f055f0091a3b729191a82fed28025ded3e1",
+        "source_path": "apps/web/public/favicon.svg",
+        "source_url": "https://github.com/deepseek-ai/deepseek-harness/blob/a9840f055f0091a3b729191a82fed28025ded3e1/apps/web/public/favicon.svg",
+        "upstream_sha256": "9e983b4f649c25c6ca0623a50be1a6e705fd8f49f756638b980fa13b40575ab6",
+        "usage": "Identifies the supported DeepSeek Harness integration in light appearance."
+      },
+      {
         "bundled_modifications": "Wrapped the upstream PNG in SVG for local Bundle loading; artwork unchanged.",
         "bundled_path": "ironmlx-app/Sources/IronMLXAppCore/Resources/hermes-agent-logo.svg",
         "bundled_sha256": "81ee441b8ee6e4e0cf086d7606d358fa8a8ebd143fd33e206a6ad9e5705bbceb",
@@ -160,7 +194,7 @@
       }
     ],
     "manifest": "compliance/bundled-assets.json",
-    "manifest_sha256": "feea9fad1c038daecd9ea9b26cd517fccc3a23e727a6b4b5b77a70d8e35f269f"
+    "manifest_sha256": "0ce6bba95eee40a5148a084bab7a7fb5dde7704f3e7cfebaf8095a1eee1f2182"
   },
   "generation": {
     "cargo_about_config": "about.toml",
@@ -4114,6 +4148,6 @@
       }
     ],
     "manifest": "ironmlx-app/Package.swift",
-    "manifest_sha256": "1c50d29e2b1bd5b88ec5191ae9c193326607f1ad2dbdbe33cfa1228ad29786bf"
+    "manifest_sha256": "e5e244c52bd6c0adb336d3f8849dafad4a363c564bf114a4e39823492154e550"
   }
 }

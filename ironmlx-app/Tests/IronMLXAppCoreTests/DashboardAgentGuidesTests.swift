@@ -28,6 +28,8 @@ import Testing
     #expect(html.contains("selectAgentGuide(firstAgentGuide.dataset.agentGuide)"))
     #expect(html.contains(#"data-agent-logo="hermes" src="hermes-agent-logo.svg""#))
     #expect(html.contains(#"data-agent-logo="omp" src="oh-my-pi-logo.svg""#))
+    #expect(html.contains(#"data-agent-logo="dsh" src="deepseek-harness-logo.svg""#))
+    #expect(html.contains(#"srcset="deepseek-harness-logo-dark.svg""#))
     #expect(!html.contains(#"class="agent-guide-mark" aria-hidden="true">H</span>"#))
     #expect(!html.contains(#"aria-hidden="true">π</span>"#))
     #expect(html.contains(#"<svg data-nav-icon="agent""#))
@@ -49,16 +51,28 @@ import Testing
     #expect(html.components(separatedBy: #"agent_copy_failed: ""#).count - 1 == 5)
     #expect(html.contains("function selectAgentGuide(agent)"))
     #expect(html.contains("function selectHermesProfileMode(mode)"))
+    #expect(html.contains("function selectDshSetupMode(mode)"))
     #expect(html.contains("function renderAgentGuideConfiguration()"))
     #expect(html.contains("['hermes', 'omp', 'dsh'].forEach"))
+    #expect(html.contains(#"data-dsh-setup-mode="desktop" checked"#))
+    #expect(html.contains(#"data-dsh-setup-mode="cli" onchange"#))
+    #expect(html.contains(#"data-dsh-setup-panel="cli" hidden"#))
+    #expect(html.contains(#"data-dsh-setup-panel="desktop">"#))
+    #expect(html.contains("let dshSetupMode = 'desktop';"))
+    let desktopSetupOption = try #require(html.range(of: #"data-dsh-setup-mode="desktop""#))
+    let cliSetupOption = try #require(html.range(of: #"data-dsh-setup-mode="cli""#))
+    #expect(desktopSetupOption.lowerBound < cliSetupOption.lowerBound)
 
     let resourcesDirectory = "Sources/IronMLXAppCore/Resources"
-    #expect(FileManager.default.fileExists(atPath: "\(resourcesDirectory)/hermes-agent-logo.svg"))
-    #expect(FileManager.default.fileExists(atPath: "\(resourcesDirectory)/oh-my-pi-logo.svg"))
-
     let bundleBuildScript = try String(contentsOfFile: "../scripts/build-app-bundle.sh", encoding: .utf8)
     let bundleVerifyScript = try String(contentsOfFile: "../scripts/verify-app-bundle.sh", encoding: .utf8)
-    for logo in ["hermes-agent-logo.svg", "oh-my-pi-logo.svg"] {
+    for logo in [
+        "deepseek-harness-logo-dark.svg",
+        "deepseek-harness-logo.svg",
+        "hermes-agent-logo.svg",
+        "oh-my-pi-logo.svg",
+    ] {
+        #expect(FileManager.default.fileExists(atPath: "\(resourcesDirectory)/\(logo)"))
         #expect(bundleBuildScript.contains(logo), "App assembly omits Agent logo: \(logo)")
         #expect(bundleVerifyScript.contains(logo), "Bundle verification omits Agent logo: \(logo)")
     }
@@ -94,6 +108,18 @@ import Testing
     #expect(html.contains("https://deepseek-harness.github.io/deepseek-harness/guide/providers#%E6%B7%BB%E5%8A%A0%E8%87%AA%E5%AE%9A%E4%B9%89%E6%8F%90%E4%BE%9B%E6%96%B9"))
     #expect(html.contains("https://deepseek-harness.github.io/deepseek-harness/en/guide/providers#add-a-custom-provider"))
     #expect(html.contains("if (dshGuide) dshGuide.href = lang === 'zh-Hans'"))
+    #expect(html.contains(#"id="dsh-desktop-full-guide" class="agent-guide-docs-link""#))
+    #expect(html.contains("https://github.com/apepkuss/ironmlx/blob/dev/docs/dsh.md#dsh-desktop-gui-setup"))
+    #expect(html.contains("https://github.com/apepkuss/ironmlx/blob/dev/docs/zh-CN/dsh.md#dsh-desktop-gui-%E9%85%8D%E7%BD%AE"))
+    #expect(html.contains("if (dshDesktopGuide) dshDesktopGuide.href = lang === 'zh-Hans' || lang === 'zh-Hant'"))
+    #expect(html.contains(#"id="dsh-desktop-endpoint""#))
+    #expect(html.contains("dshDesktopEndpoint.textContent = endpoint"))
+    #expect(html.contains(#"data-i18n="dsh_desktop_step_7""#))
+    #expect(html.contains("IronMLX advertises 4096 when the model has no independent limit"))
+    #expect(html.contains("模型没有独立上限时，IronMLX 会提供 4096"))
+    #expect(html.contains("ironmlx-local</dd>"))
+    #expect(html.contains("openai-responses</dd>"))
+    #expect(html.contains("local</dd>"))
     #expect(html.contains("--patch ' + dshPatch"))
     #expect(html.contains("Math.max(64000"))
     #expect(html.contains("Hermes Agent v0.20.0 及以上版本需要至少 64K context tokens"))
@@ -111,7 +137,7 @@ import Testing
     #expect(!html.contains("agent-guide-doc-link"))
     #expect(!html.contains(#"docs/hermes-agent.md"#))
     #expect(!html.contains(#"docs/oh-my-pi.md"#))
-    #expect(!html.contains(#"docs/dsh.md"#))
+    #expect(!html.contains(#"href="docs/dsh.md""#))
 }
 
 @Test func dshAgentGuideDocumentsTheVerifiedOverlay() throws {
@@ -128,9 +154,21 @@ import Testing
         #expect(guide.contains("maxTokens: 4096"))
         #expect(guide.contains("tool_call"))
         #expect(guide.contains("tool_result"))
+        #expect(guide.contains("DSH Desktop"))
+        #expect(guide.contains("ironmlx-local"))
+        #expect(guide.contains("openai-responses"))
+        #expect(guide.contains("http://127.0.0.1:9068/v1"))
+        #expect(guide.contains("local"))
+        #expect(guide.contains("TTS"))
+        #expect(guide.contains("default_max_output_tokens"))
+        #expect(guide.contains("8192"))
+        #expect(guide.contains("16384"))
     }
     #expect(bridge.contains(#"case "/v1/models":"#))
     #expect(bridge.contains(#"client.fetchData(path: path)"#))
+    #expect(bridge.contains(#"let isIronMLXDSHGuide = url.host == "github.com""#))
+    #expect(bridge.contains(#"/apepkuss/ironmlx/blob/dev/docs/dsh.md"#))
+    #expect(bridge.contains(#"/apepkuss/ironmlx/blob/dev/docs/zh-CN/dsh.md"#))
 }
 
 @Test func hermesAgentGuideRecommendsAnIsolatedProfile() throws {

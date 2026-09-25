@@ -353,7 +353,9 @@ fn dflash2_model_list(model_id: &str, effective_cap_max: usize) -> DFlash2ModelL
         data: vec![DFlash2ModelInfo {
             id: model_id.to_owned(),
             context_window: capacity,
-            max_output_tokens: capacity,
+            max_output_tokens: ironmlx_runtime::core::model_capacity::advertised_max_output_tokens(
+                capacity, None,
+            ),
             object: "model",
             created: 0,
             owned_by: "ironmlx",
@@ -494,7 +496,7 @@ mod tests {
         assert_eq!(json["data"][0]["object"], "model");
         assert_eq!(json["data"][0]["owned_by"], "ironmlx");
         assert_eq!(json["data"][0]["context_window"], 65536);
-        assert_eq!(json["data"][0]["max_output_tokens"], 65536);
+        assert_eq!(json["data"][0]["max_output_tokens"], 4096);
         let unknown = serde_json::to_value(dflash2_model_list("unknown", 0)).unwrap();
         assert!(unknown["data"][0].get("context_window").is_none());
         assert!(unknown["data"][0].get("max_output_tokens").is_none());

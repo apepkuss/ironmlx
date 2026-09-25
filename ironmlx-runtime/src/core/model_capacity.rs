@@ -4,6 +4,30 @@ use super::runtime_config::EngineModelConfig;
 use ironmlx_lm::models::ModelArchitecture;
 use serde_json::Value;
 
+/// Conservative output budget advertised when a causal model has no trusted
+/// independent output-only limit and no deployment override.
+pub const DEFAULT_ADVERTISED_MAX_OUTPUT_TOKENS: usize = 4_096;
+
+/// Resolve the output budget published by model discovery.
+///
+/// `context_window` is the combined input/output capacity, not an output-only
+/// limit. A configured deployment default therefore wins, otherwise discovery
+/// advertises a conservative 4K budget. Both paths leave at least half of a
+/// multi-token window available for input so clients cannot mistake the total
+/// context capacity for a directly usable per-request output budget.
+pub fn advertised_max_output_tokens(
+    context_window: Option<usize>,
+    configured_default: Option<usize>,
+) -> Option<usize> {
+    let context_window = context_window?;
+    let input_aware_cap = (context_window / 2).max(1);
+    Some(
+        configured_default
+            .unwrap_or(DEFAULT_ADVERTISED_MAX_OUTPUT_TOKENS)
+            .min(input_aware_cap),
+    )
+}
+
 /// Resolve the same total-token ceiling used by causal admission. Missing or
 /// invalid metadata is deliberately not replaced with a generation default.
 pub(crate) fn configured_context_window(model: &EngineModelConfig) -> Option<usize> {
@@ -93,5 +117,24 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn advertised_output_budget_prefers_configuration_then_uses_safe_fallback() {
+        assert_eq!(
+            advertised_max_output_tokens(Some(262_144), None),
+            Some(4_096)
+        );
+        assert_eq!(
+            advertised_max_output_tokens(Some(262_144), Some(8_192)),
+            Some(8_192)
+        );
+        assert_eq!(advertised_max_output_tokens(Some(4_096), None), Some(2_048));
+        assert_eq!(
+            advertised_max_output_tokens(Some(4_096), Some(32_768)),
+            Some(2_048)
+        );
+        assert_eq!(advertised_max_output_tokens(Some(1), None), Some(1));
+        assert_eq!(advertised_max_output_tokens(None, Some(8_192)), None);
     }
 }

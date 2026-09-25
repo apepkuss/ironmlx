@@ -575,7 +575,7 @@ import WebKit
     #expect(!html.contains(">MAX TOKENS</label>"))
 }
 
-@Test func dashboardModelParamsUseThreeAlignedSettingRows() throws {
+@Test func dashboardModelParamsUseAlignedSettingRowsWithOptionalReasoningMetadata() throws {
     let html = try String(
         contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
         encoding: .utf8
@@ -583,6 +583,7 @@ import WebKit
 
     #expect(html.contains(#"<div class="modal model-params-modal">"#))
     #expect(html.contains(#"class="modal-row model-params-setting-row model-params-identity-row""#))
+    #expect(html.contains(#"class="modal-row model-params-setting-row model-params-reasoning-row" id="modal-reasoning-metadata-row" hidden"#))
     #expect(html.contains(#"<div class="model-params-output-section">"#))
     #expect(html.contains(#"class="modal-row model-params-setting-row model-params-capacity-row""#))
     #expect(html.contains(#"class="modal-row model-params-setting-row" id="modal-causal-sampling-row""#))
@@ -590,6 +591,38 @@ import WebKit
     #expect(html.contains(".model-params-output-section {\n    border-top: 0.5px solid var(--border);"))
     #expect(html.contains("grid-template-columns: repeat(3, minmax(0, 1fr));"))
     #expect(html.contains(".model-params-setting-row .field-label-with-help label {\n    white-space: nowrap;"))
+}
+
+@Test func dashboardModelParamsExposeDetectedReasoningMetadataAsReadOnlyInformation() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(html.contains(#"id="modal-reasoning-metadata-row" hidden"#))
+    #expect(html.contains(".modal-row[hidden] {\n    display: none;"))
+    #expect(html.contains(#"id="modal-reasoning-capability" readonly"#))
+    #expect(html.contains(#"id="modal-reasoning-efforts" readonly"#))
+    #expect(html.contains(#"id="modal-reasoning-default" readonly"#))
+    #expect(html.contains("const reasoning = local.reasoning || {};"))
+    #expect(html.contains("reasoningRow.hidden = !hasReasoningMetadata;"))
+    #expect(html.contains("nativeEfforts.join(' · ')"))
+    #expect(html.contains("reasoning.supports_disable ? dict.reasoning_supported_disable : dict.reasoning_supported"))
+
+    for key in [
+        "reasoning_capability",
+        "reasoning_native_efforts",
+        "reasoning_default_effort",
+        "reasoning_supported_disable",
+        "reasoning_supported",
+        "reasoning_metadata_help_label",
+        "reasoning_metadata_help",
+    ] {
+        #expect(
+            html.components(separatedBy: "\(key):").count - 1 == 5,
+            "\(key) must be present in all five locale dictionaries"
+        )
+    }
 }
 
 @Test func dashboardTTSModelParamsExposeLocalizedReadOnlyCapabilities() throws {

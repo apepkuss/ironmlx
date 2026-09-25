@@ -202,7 +202,9 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             let isOMPGuide = url.host == "omp.sh" && url.path == "/docs/custom-models"
             let isDSHGuide = url.host == "deepseek-harness.github.io"
                 && ["/deepseek-harness/guide/providers", "/deepseek-harness/en/guide/providers"].contains(url.path)
-            guard isHermesGuide || isOMPGuide || isDSHGuide else { return }
+            let isIronMLXDSHGuide = url.host == "github.com"
+                && ["/apepkuss/ironmlx/blob/dev/docs/dsh.md", "/apepkuss/ironmlx/blob/dev/docs/zh-CN/dsh.md"].contains(url.path)
+            guard isHermesGuide || isOMPGuide || isDSHGuide || isIronMLXDSHGuide else { return }
             NSWorkspace.shared.open(url)
         case "setLanguage":
             updateConfig { $0.language = stringBody(body) }

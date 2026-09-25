@@ -159,6 +159,32 @@ public struct LocalTTSMetadata: Codable, Equatable, Sendable {
     }
 }
 
+public struct LocalModelReasoningMetadata: Codable, Equatable, Sendable {
+    public var nativeEfforts: [String]
+    public var defaultEffort: String?
+    public var supportsDisable: Bool
+    public var source: String
+
+    public init(
+        nativeEfforts: [String],
+        defaultEffort: String? = nil,
+        supportsDisable: Bool,
+        source: String
+    ) {
+        self.nativeEfforts = nativeEfforts
+        self.defaultEffort = defaultEffort
+        self.supportsDisable = supportsDisable
+        self.source = source
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case nativeEfforts = "native_efforts"
+        case defaultEffort = "default_effort"
+        case supportsDisable = "supports_disable"
+        case source
+    }
+}
+
 public struct LocalModel: Codable, Equatable, Sendable {
     public var id: String
     public var repoID: String
@@ -178,6 +204,7 @@ public struct LocalModel: Codable, Equatable, Sendable {
     public var readiness: LocalModelReadiness?
     public var integrity: ModelIntegrityStatus?
     public var downloadInfo: LocalModelDownloadInfo?
+    public var reasoning: LocalModelReasoningMetadata?
     public var decisionMetadata: LocalDecisionMetadata?
     public var ttsMetadata: LocalTTSMetadata?
 
@@ -199,6 +226,7 @@ public struct LocalModel: Codable, Equatable, Sendable {
         quantization: LocalModelQuantization? = nil,
         readiness: LocalModelReadiness? = nil,
         integrity: ModelIntegrityStatus? = nil,
+        reasoning: LocalModelReasoningMetadata? = nil,
         decisionMetadata: LocalDecisionMetadata? = nil,
         ttsMetadata: LocalTTSMetadata? = nil,
         downloadInfo: LocalModelDownloadInfo? = nil
@@ -221,6 +249,7 @@ public struct LocalModel: Codable, Equatable, Sendable {
         self.readiness = readiness
         self.integrity = integrity
         self.downloadInfo = downloadInfo
+        self.reasoning = reasoning
         self.decisionMetadata = decisionMetadata
         self.ttsMetadata = ttsMetadata
     }
@@ -243,6 +272,7 @@ public struct LocalModel: Codable, Equatable, Sendable {
         case quantization
         case readiness
         case integrity
+        case reasoning
         case decisionMetadata = "decision_metadata"
         case ttsMetadata = "tts_metadata"
         case downloadInfo = "download_info"
@@ -985,6 +1015,7 @@ public struct LocalModelScanner: Sendable {
                     provider: provider,
                     repoID: id
                 ),
+                reasoning: kind == .base ? reasoningMetadata(config: config, snapshot: snapshot) : nil,
                 decisionMetadata: type == "decision" ? LocalDecisionMetadata.read(from: snapshot) : nil,
                 ttsMetadata: type == "tts" ? LocalTTSMetadata.read(config: config) : nil,
                 downloadInfo: type == "tts" ? ttsDownloadInfo(snapshot: snapshot) : nil
@@ -1048,6 +1079,48 @@ public struct LocalModelScanner: Sendable {
               let agent = try? JSONSerialization.jsonObject(with: agentData) as? [String: Any],
               let maxLen = agent["max_len"] as? Int else { return nil }
         return ["model_type": "laya_multilingual_mlx", "max_position_embeddings": maxLen]
+    }
+
+    /// Reasoning levels are not standardized model metadata. Only publish them
+    /// when a known model family exposes an exact, runtime-supported template
+    /// contract; otherwise absence means "not detected", not "unsupported".
+    private func reasoningMetadata(
+        config: [String: Any],
+        snapshot: URL
+    ) -> LocalModelReasoningMetadata? {
+        guard let modelType = config["model_type"] as? String,
+              modelType == "qwen3_5" || modelType == "qwen3_5_moe",
+              let template = chatTemplate(in: snapshot) else {
+            return nil
+        }
+        let qwen38Markers = [
+            "message.reasoning_content is string",
+            "reasoning_effort|default('xhigh')",
+            "resolved_reasoning_effort not in ('xhigh', 'medium', 'low')",
+            "preserve_thinking is undefined or preserve_thinking is true",
+            "'<think>\\n'",
+            "'<think>\\n\\n</think>\\n\\n'",
+        ]
+        guard qwen38Markers.allSatisfy(template.contains) else {
+            return nil
+        }
+        return LocalModelReasoningMetadata(
+            nativeEfforts: ["low", "medium", "xhigh"],
+            defaultEffort: "xhigh",
+            supportsDisable: template.contains("enable_thinking is undefined or enable_thinking is true"),
+            source: "chat_template"
+        )
+    }
+
+    private func chatTemplate(in snapshot: URL) -> String? {
+        let tokenizerConfigURL = snapshot.appendingPathComponent("tokenizer_config.json")
+        if let data = try? Data(contentsOf: tokenizerConfigURL),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let inlineTemplate = json["chat_template"] as? String {
+            return inlineTemplate
+        }
+        let templateURL = snapshot.appendingPathComponent("chat_template.jinja")
+        return try? String(contentsOf: templateURL, encoding: .utf8)
     }
 
     private func modelCapabilityType(config: [String: Any]) -> String {

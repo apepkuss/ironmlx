@@ -2,7 +2,7 @@
   "$schema": "https://cyclonedx.org/schema/bom-1.6.schema.json",
   "bomFormat": "CycloneDX",
   "specVersion": "1.6",
-  "serialNumber": "urn:uuid:f27ec36e-b77e-5538-82bb-2af7a8939a45",
+  "serialNumber": "urn:uuid:94b880f2-acdb-583e-941b-76e8eb3e8ef0",
   "version": 1,
   "metadata": {
     "component": {
@@ -76,6 +76,96 @@
         {
           "type": "vcs",
           "url": "https://github.com/apepkuss/ironmlx"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "bom-ref": "asset:DeepSeek Harness dark logo@a9840f055f0091a3b729191a82fed28025ded3e1",
+      "name": "DeepSeek Harness dark logo",
+      "version": "a9840f055f0091a3b729191a82fed28025ded3e1",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "dde7db781f41e7aeb4709ff5485af2bdcf7f4b4ea81b4500cfd5df44efdbd817"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ironmlx:bundled-path",
+          "value": "ironmlx-app/Sources/IronMLXAppCore/Resources/deepseek-harness-logo-dark.svg"
+        },
+        {
+          "name": "ironmlx:source-path",
+          "value": "apps/web/public/favicon-dark.svg"
+        },
+        {
+          "name": "ironmlx:hash-scope",
+          "value": "entire-file"
+        },
+        {
+          "name": "ironmlx:license-file",
+          "value": "asset-deepseek-harness-dark-mit.txt"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://github.com/deepseek-ai/deepseek-harness/blob/a9840f055f0091a3b729191a82fed28025ded3e1/apps/web/public/favicon-dark.svg"
+        },
+        {
+          "type": "vcs",
+          "url": "https://github.com/deepseek-ai/deepseek-harness"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "bom-ref": "asset:DeepSeek Harness light logo@a9840f055f0091a3b729191a82fed28025ded3e1",
+      "name": "DeepSeek Harness light logo",
+      "version": "a9840f055f0091a3b729191a82fed28025ded3e1",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "9e983b4f649c25c6ca0623a50be1a6e705fd8f49f756638b980fa13b40575ab6"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ironmlx:bundled-path",
+          "value": "ironmlx-app/Sources/IronMLXAppCore/Resources/deepseek-harness-logo.svg"
+        },
+        {
+          "name": "ironmlx:source-path",
+          "value": "apps/web/public/favicon.svg"
+        },
+        {
+          "name": "ironmlx:hash-scope",
+          "value": "entire-file"
+        },
+        {
+          "name": "ironmlx:license-file",
+          "value": "asset-deepseek-harness-light-mit.txt"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://github.com/deepseek-ai/deepseek-harness/blob/a9840f055f0091a3b729191a82fed28025ded3e1/apps/web/public/favicon.svg"
+        },
+        {
+          "type": "vcs",
+          "url": "https://github.com/deepseek-ai/deepseek-harness"
         }
       ]
     },

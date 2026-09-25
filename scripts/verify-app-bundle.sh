@@ -58,6 +58,8 @@ for file in \
   Contents/Resources/mlx.metallib \
   Contents/Resources/dashboard2.html \
   Contents/Resources/indextts25-preparation.json \
+  Contents/Resources/deepseek-harness-logo-dark.svg \
+  Contents/Resources/deepseek-harness-logo.svg \
   Contents/Resources/hermes-agent-logo.svg \
   Contents/Resources/oh-my-pi-logo.svg \
   Contents/Resources/AppIcon.icns \
