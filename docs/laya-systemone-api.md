@@ -63,6 +63,37 @@ The model-management load/register payload accepts a `decision` object:
 information reports the applied settings. These are model settings, not fields
 in a System One inference request. The standalone CLI uses the defaults.
 
+## Status and decision metrics
+
+While a decision model is loaded, **Status** presents request activity using
+the decision runtime rather than causal-model token-generation metrics:
+
+- **Processing** means at least one decision request is active or queued.
+- **Just completed** remains visible briefly after the most recent request
+  finishes, so short decisions do not disappear between Dashboard refreshes.
+- **Idle** means no request is active, queued or recently completed.
+
+The decision performance section reports:
+
+| Metric | Meaning |
+| --- | --- |
+| Completed | Successful requests since this model instance was loaded. |
+| Errors | Failed requests since this model instance was loaded, including validation, queue, timeout and inference failures. |
+| P50 latency | Median end-to-end latency of successful requests completed in the most recent 60-second window, in milliseconds. |
+| Input throughput | Median per-request input-token rate in the same recent window, in tokens per second. |
+| Question throughput | Median per-request question rate in the same recent window, in questions per second. |
+
+The three recent-window metrics show `—` until a successful request supplies a
+sample, and return to `—` when the 60-second window becomes empty. Completed and
+error counts remain cumulative for the current loaded instance. Unloading and
+reloading the model, or restarting the backend, starts a new metrics lifecycle.
+
+App integrations can read the same data from
+`GET /admin/api/models/loaded`. A loaded decision model has
+`runtime_kind: "decision"` and a `decision_metrics` object. See the
+[HTTP API reference](api-reference.md#app-decision-runtime-metrics) for its
+field contract.
+
 ## Optional standalone CLI
 
 ```sh

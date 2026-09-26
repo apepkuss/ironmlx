@@ -662,8 +662,51 @@ public struct BackendModelRuntimeUsage: Codable, Equatable, Sendable {
     }
 }
 
+public struct BackendDecisionMetrics: Codable, Equatable, Sendable {
+    public var windowSeconds: UInt64
+    public var completedRequests: UInt64
+    public var failedRequests: UInt64
+    public var recentCompletedRequests: Int
+    public var latencyMsP50: Double?
+    public var inputTokensPerSecond: Double?
+    public var questionsPerSecond: Double?
+    public var lastRequestUnixMs: UInt64?
+
+    public init(
+        windowSeconds: UInt64,
+        completedRequests: UInt64,
+        failedRequests: UInt64,
+        recentCompletedRequests: Int,
+        latencyMsP50: Double? = nil,
+        inputTokensPerSecond: Double? = nil,
+        questionsPerSecond: Double? = nil,
+        lastRequestUnixMs: UInt64? = nil
+    ) {
+        self.windowSeconds = windowSeconds
+        self.completedRequests = completedRequests
+        self.failedRequests = failedRequests
+        self.recentCompletedRequests = recentCompletedRequests
+        self.latencyMsP50 = latencyMsP50
+        self.inputTokensPerSecond = inputTokensPerSecond
+        self.questionsPerSecond = questionsPerSecond
+        self.lastRequestUnixMs = lastRequestUnixMs
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case windowSeconds = "window_seconds"
+        case completedRequests = "completed_requests"
+        case failedRequests = "failed_requests"
+        case recentCompletedRequests = "recent_completed_requests"
+        case latencyMsP50 = "latency_ms_p50"
+        case inputTokensPerSecond = "input_tokens_per_second"
+        case questionsPerSecond = "questions_per_second"
+        case lastRequestUnixMs = "last_request_unix_ms"
+    }
+}
+
 public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
     public var decision: BackendDecisionSettings?
+    public var decisionMetrics: BackendDecisionMetrics?
     public var id: String
     public var model: String
     public var path: String
@@ -689,6 +732,7 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
     public init(
         id: String,
         decision: BackendDecisionSettings? = nil,
+        decisionMetrics: BackendDecisionMetrics? = nil,
         model: String,
         path: String,
         architecture: String,
@@ -722,6 +766,7 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
         activeKvOffload: HealthzSnapshot.ActiveKvOffloadInfo? = nil
     ) {
         self.decision = decision
+        self.decisionMetrics = decisionMetrics
         self.id = id
         self.model = model
         self.path = path
@@ -747,6 +792,7 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case decision
+        case decisionMetrics = "decision_metrics"
         case id
         case model
         case path
@@ -780,6 +826,10 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.decision = try container.decodeIfPresent(BackendDecisionSettings.self, forKey: .decision)
+        self.decisionMetrics = try container.decodeIfPresent(
+            BackendDecisionMetrics.self,
+            forKey: .decisionMetrics
+        )
         self.id = try container.decode(String.self, forKey: .id)
         self.model = try container.decode(String.self, forKey: .model)
         self.path = try container.decode(String.self, forKey: .path)
@@ -833,6 +883,7 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encodeIfPresent(decision, forKey: .decision)
+        try container.encodeIfPresent(decisionMetrics, forKey: .decisionMetrics)
         try container.encode(id, forKey: .id)
         try container.encode(model, forKey: .model)
         try container.encode(path, forKey: .path)

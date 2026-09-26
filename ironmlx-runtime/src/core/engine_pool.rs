@@ -134,6 +134,7 @@ pub struct EnginePoolState {
 #[derive(Debug, Clone, PartialEq)]
 pub struct EngineLoadedModelInfo {
     pub decision: Option<ironmlx_decision::DecisionSettings>,
+    pub decision_metrics: Option<crate::core::decision_execution::DecisionMetricsSnapshot>,
     pub id: String,
     pub path: String,
     pub architecture: String,
@@ -1066,6 +1067,10 @@ impl EnginePoolState {
             };
             let health = engine.loaded_health();
             let usage = engine.runtime_usage_snapshot();
+            let decision_metrics = match &health {
+                LoadedEngineHealth::Decision { metrics, .. } => Some(*metrics),
+                _ => None,
+            };
             let active_kv_offload = match &health {
                 LoadedEngineHealth::Causal(snapshot) if snapshot.active_kv_offload.enabled => {
                     Some(snapshot.active_kv_offload.clone())
@@ -1099,6 +1104,7 @@ impl EnginePoolState {
                     active_requests,
                     queued_requests,
                     queue_capacity,
+                    ..
                 } => (
                     Some(*scheduler),
                     *active_requests,
@@ -1108,6 +1114,7 @@ impl EnginePoolState {
             };
             models.push(EngineLoadedModelInfo {
                 decision: slot.model.decision,
+                decision_metrics,
                 id: id.clone(),
                 path: slot.model.path.to_string_lossy().into_owned(),
                 architecture: engine.architecture().to_string(),
@@ -2045,6 +2052,7 @@ impl EngineVariant {
                     active_requests,
                     queued_requests,
                     queue_capacity: super::decision_execution::DECISION_QUEUE_CAPACITY,
+                    metrics: state.metrics(),
                 }
             }
             Self::Audio(state) => {
@@ -2897,6 +2905,7 @@ enum LoadedEngineHealth {
         active_requests: usize,
         queued_requests: usize,
         queue_capacity: usize,
+        metrics: super::decision_execution::DecisionMetricsSnapshot,
     },
     Audio {
         scheduler: &'static str,

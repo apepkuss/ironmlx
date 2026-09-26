@@ -523,6 +523,63 @@ func appLanguageResolverMatchesSupportedMacOSPreferences(
     #expect(info.activeKvOffload?.offloadedBytes == 1_048_576)
 }
 
+@Test func backendLoadedDecisionModelInfoDecodesRuntimeMetrics() throws {
+    let data = Data("""
+    {
+      "id": "aac6fef/laya-multilingual-mlx",
+      "model": "aac6fef/laya-multilingual-mlx",
+      "path": "/models/laya",
+      "architecture": "laya",
+      "default": false,
+      "max_position_embeddings": 512,
+      "runtime_kind": "decision",
+      "supports_streaming": false,
+      "supports_vision": false,
+      "supports_mtp": false,
+      "supports_prompt_lookup": false,
+      "supports_speculative_decoding": false,
+      "supports_kv_cache": false,
+      "supported_sampling_parameters": [],
+      "runtime_state": "loaded",
+      "active_requests": 0,
+      "queued_requests": 0,
+      "queue_capacity": 16,
+      "usage": {
+        "cumulative_tokens": 120,
+        "input_tokens": 120,
+        "output_tokens": 0,
+        "performance": {
+          "window_seconds": 60,
+          "completed_requests": 0
+        }
+      },
+      "decision_metrics": {
+        "window_seconds": 60,
+        "completed_requests": 7,
+        "failed_requests": 1,
+        "recent_completed_requests": 4,
+        "latency_ms_p50": 18.5,
+        "input_tokens_per_second": 932.4,
+        "questions_per_second": 41.2,
+        "last_request_unix_ms": 1790200000123
+      }
+    }
+    """.utf8)
+
+    let info = try JSONDecoder().decode(BackendLoadedModelInfo.self, from: data)
+    let metrics = try #require(info.decisionMetrics)
+
+    #expect(info.capabilities.runtimeKind == "decision")
+    #expect(metrics.windowSeconds == 60)
+    #expect(metrics.completedRequests == 7)
+    #expect(metrics.failedRequests == 1)
+    #expect(metrics.recentCompletedRequests == 4)
+    #expect(metrics.latencyMsP50 == 18.5)
+    #expect(metrics.inputTokensPerSecond == 932.4)
+    #expect(metrics.questionsPerSecond == 41.2)
+    #expect(metrics.lastRequestUnixMs == 1_790_200_000_123)
+}
+
 @Test func restoredModelReferencesExcludeUnloadedDefaultModel() {
     let config = AppConfig(
         defaultModel: "mlx-community/Default-4bit",

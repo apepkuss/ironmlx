@@ -688,6 +688,8 @@ impl AdminModelResponse {
 struct LoadedModelInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     decision: Option<ironmlx_decision::DecisionSettings>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decision_metrics: Option<ironmlx_runtime::core::decision_execution::DecisionMetricsSnapshot>,
     id: String,
     model: String,
     path: String,
@@ -762,6 +764,7 @@ impl From<EngineLoadedModelInfo> for LoadedModelInfo {
             prompt_lookup_enabled: info.prompt_lookup.is_some(),
             prompt_lookup: info.prompt_lookup,
             decision: info.decision,
+            decision_metrics: info.decision_metrics,
         }
     }
 }
@@ -1465,7 +1468,7 @@ mod tests {
     }
 
     #[test]
-    fn loaded_model_info_serializes_only_enabled_per_model_active_kv_health() {
+    fn loaded_model_info_serializes_optional_runtime_health() {
         let active_config = ironmlx_runtime::core::cache::active_kv::ActiveKvOffloadConfig::enabled(
             "/tmp/model-active-kv",
         );
@@ -1476,6 +1479,7 @@ mod tests {
         active_stats.record_error();
         let mut info = EngineLoadedModelInfo {
             decision: None,
+            decision_metrics: None,
             id: "model-a".to_string(),
             path: "/models/model-a".to_string(),
             architecture: "llama".to_string(),
@@ -1513,10 +1517,35 @@ mod tests {
             serde_json::json!(1)
         );
 
+        info.decision_metrics = Some(
+            ironmlx_runtime::core::decision_execution::DecisionMetricsSnapshot {
+                window_seconds: 60,
+                completed_requests: 7,
+                failed_requests: 1,
+                recent_completed_requests: 4,
+                latency_ms_p50: Some(18.5),
+                input_tokens_per_second: Some(932.4),
+                questions_per_second: Some(41.2),
+                last_request_unix_ms: Some(1_790_200_000_123),
+            },
+        );
+        let decision = serde_json::to_value(LoadedModelInfo::from(info.clone()))
+            .expect("serialize decision metrics");
+        assert_eq!(
+            decision["decision_metrics"]["completed_requests"],
+            serde_json::json!(7)
+        );
+        assert_eq!(
+            decision["decision_metrics"]["last_request_unix_ms"],
+            serde_json::json!(1_790_200_000_123_u64)
+        );
+
         info.active_kv_offload = None;
+        info.decision_metrics = None;
         let hidden = serde_json::to_value(LoadedModelInfo::from(info))
             .expect("serialize model without Active KV health");
         assert!(hidden.get("active_kv_offload").is_none());
+        assert!(hidden.get("decision_metrics").is_none());
     }
 
     #[test]

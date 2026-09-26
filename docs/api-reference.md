@@ -27,6 +27,31 @@ Loaded models use their actual admission capacity. Unloaded causal models use ex
 
 `memory.free_ram_bytes` is raw OS free memory for observation. `available_ram_bytes` includes reclaimable memory using the governor's accounting. `process_governor.pressure_level` determines memory health; `degraded_reasons` identifies queue, cache, pressure, telemetry or backpressure causes.
 
+### App decision runtime metrics
+
+The App-daemon-only `GET /admin/api/models/loaded` response includes
+`decision_metrics` for a loaded model whose `runtime_kind` is `decision`. Other
+runtime kinds omit this object.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `window_seconds` | integer | Recent performance window in seconds; currently `60`. |
+| `completed_requests` | integer | Successful requests since the model instance was loaded. |
+| `failed_requests` | integer | Failed requests since the model instance was loaded. |
+| `recent_completed_requests` | integer | Successful requests represented in the current recent window. |
+| `latency_ms_p50` | number or `null` | Median end-to-end latency in the recent window, in milliseconds. |
+| `input_tokens_per_second` | number or `null` | Median per-request input-token rate in the recent window. |
+| `questions_per_second` | number or `null` | Median per-request question rate in the recent window. |
+| `last_request_unix_ms` | integer or `null` | Completion time of the latest successful or failed request, as Unix epoch milliseconds. |
+
+Recent performance fields are `null` when the window contains no successful
+samples. Counts are cumulative only for the current loaded model instance and
+reset when the model is unloaded and loaded again or when the backend restarts.
+The Dashboard combines active and queued request counts with
+`last_request_unix_ms` to distinguish **Processing**, **Just completed** and
+**Idle** without requiring faster polling. See the [Laya guide](laya-systemone-api.md#status-and-decision-metrics)
+for the user-facing presentation.
+
 ## Errors
 
 Chat and Responses use an OpenAI error envelope:

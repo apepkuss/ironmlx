@@ -56,6 +56,27 @@ App DFlash2 discovery 返回已加载 target 的有效容量，而非 draft 模�
 状态由 `process_governor.pressure_level` 决定，而不是固定的 raw-free 阈值。
 `degraded_reasons` 会列出队列、KV 缓存、内存压力、遥测或后端背压等具体原因。
 
+### App 决策运行时指标
+
+仅 App daemon 提供的 `GET /admin/api/models/loaded` 会为已加载且
+`runtime_kind` 为 `decision` 的模型返回 `decision_metrics`；其他运行时类型省略该对象。
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `window_seconds` | 整数 | 近期性能窗口秒数，当前为 `60`。 |
+| `completed_requests` | 整数 | 当前模型实例加载以来成功完成的请求数。 |
+| `failed_requests` | 整数 | 当前模型实例加载以来失败的请求数。 |
+| `recent_completed_requests` | 整数 | 当前近期窗口中参与统计的成功请求数。 |
+| `latency_ms_p50` | 数值或 `null` | 近期窗口内端到端延迟的中位数，单位为毫秒。 |
+| `input_tokens_per_second` | 数值或 `null` | 近期窗口内各请求输入 Token 速率的中位数。 |
+| `questions_per_second` | 数值或 `null` | 近期窗口内各请求问题处理速率的中位数。 |
+| `last_request_unix_ms` | 整数或 `null` | 最近一次成功或失败请求的完成时间，使用 Unix epoch 毫秒。 |
+
+近期窗口内没有成功样本时，相应性能字段为 `null`。累计值只覆盖当前模型加载周期；
+卸载后重新加载模型或重启后端会重新计数。Dashboard 结合活动请求数、排队请求数和
+`last_request_unix_ms` 展示**处理中**、**刚刚完成**与**空闲**，无需提高轮询频率。
+面向用户的展示说明见 [Laya 使用指南](laya-systemone-api.md#状态与决策指标)。
+
 ## 错误契约
 
 Chat Completions 与 Responses 的非流式错误使用 OpenAI 风格信封：

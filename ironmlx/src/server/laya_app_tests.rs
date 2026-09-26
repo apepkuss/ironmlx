@@ -156,6 +156,16 @@ async fn laya_real_app_load_predict_drain_unload_reload() {
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body, output);
     }
+    let (status, loaded) = request(&app, "/admin/api/models/loaded", None).await;
+    assert_eq!(status, StatusCode::OK, "{loaded}");
+    let metrics = &loaded[0]["decision_metrics"];
+    assert_eq!(metrics["completed_requests"], 4);
+    assert_eq!(metrics["failed_requests"], 0);
+    assert_eq!(metrics["recent_completed_requests"], 4);
+    assert!(metrics["latency_ms_p50"].as_f64().unwrap() > 0.0);
+    assert!(metrics["input_tokens_per_second"].as_f64().unwrap() > 0.0);
+    assert!(metrics["questions_per_second"].as_f64().unwrap() > 0.0);
+    assert!(metrics["last_request_unix_ms"].as_u64().unwrap() > 0);
     let (status, body) = request(&app, "/admin/api/models/pin", Some(json!({"model":MODEL}))).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["loaded_models"][0]["pinned"], true);

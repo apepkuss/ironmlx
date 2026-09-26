@@ -687,6 +687,11 @@
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 16%, transparent);
   }
 
+  .runtime-state-recent .runtime-state-dot {
+    background: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+  }
+
   .runtime-model-footer {
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(220px, auto);
@@ -5554,7 +5559,21 @@
       runtime_operational_state: "State",
       runtime_state_idle: "Idle",
       runtime_state_busy: "Processing",
+      runtime_state_recent: "Just completed",
       runtime_performance: "Performance",
+      runtime_decision_performance: "Decision performance",
+      runtime_decision_completed: "Completed",
+      runtime_decision_errors: "Errors",
+      runtime_decision_latency: "P50 latency",
+      runtime_decision_input_rate: "Input throughput",
+      runtime_decision_question_rate: "Question throughput",
+      runtime_decision_completed_help: "Decision requests completed since this model was loaded.",
+      runtime_decision_errors_help: "Decision requests that failed since this model was loaded.",
+      runtime_decision_latency_help: "Median end-to-end latency of completed decision requests in the recent window.",
+      runtime_decision_input_rate_help: "Median input-token throughput of completed decision requests in the recent window.",
+      runtime_decision_question_rate_help: "Median question throughput of completed decision requests in the recent window.",
+      runtime_decision_performance_window: "Recent decisions · P50 · Last {seconds}s · {requests} completed",
+      runtime_decision_performance_empty: "Decision metrics · Complete a request to begin sampling",
       runtime_active: "Active",
       runtime_queued: "Queued",
       runtime_capacity: "Queue capacity",
@@ -6042,7 +6061,21 @@
       runtime_operational_state: "运行状态",
       runtime_state_idle: "空闲",
       runtime_state_busy: "处理中",
+      runtime_state_recent: "刚刚完成",
       runtime_performance: "性能",
+      runtime_decision_performance: "决策性能",
+      runtime_decision_completed: "完成请求",
+      runtime_decision_errors: "错误",
+      runtime_decision_latency: "P50 延迟",
+      runtime_decision_input_rate: "输入吞吐",
+      runtime_decision_question_rate: "问题吞吐",
+      runtime_decision_completed_help: "该模型本次加载后已完成的决策请求数。",
+      runtime_decision_errors_help: "该模型本次加载后失败的决策请求数。",
+      runtime_decision_latency_help: "近期窗口内已完成决策请求的端到端延迟中位数。",
+      runtime_decision_input_rate_help: "近期窗口内已完成决策请求的输入 Token 吞吐中位数。",
+      runtime_decision_question_rate_help: "近期窗口内已完成决策请求的问题吞吐中位数。",
+      runtime_decision_performance_window: "近期决策 · P50 · 近 {seconds} 秒 · {requests} 个完成请求",
+      runtime_decision_performance_empty: "决策指标 · 完成一次请求后开始采样",
       runtime_active: "活跃请求",
       runtime_queued: "排队请求",
       runtime_capacity: "队列容量",
@@ -6530,7 +6563,21 @@
       runtime_operational_state: "執行狀態",
       runtime_state_idle: "閒置",
       runtime_state_busy: "處理中",
+      runtime_state_recent: "剛剛完成",
       runtime_performance: "效能",
+      runtime_decision_performance: "決策效能",
+      runtime_decision_completed: "完成請求",
+      runtime_decision_errors: "錯誤",
+      runtime_decision_latency: "P50 延遲",
+      runtime_decision_input_rate: "輸入吞吐",
+      runtime_decision_question_rate: "問題吞吐",
+      runtime_decision_completed_help: "此模型本次載入後已完成的決策請求數。",
+      runtime_decision_errors_help: "此模型本次載入後失敗的決策請求數。",
+      runtime_decision_latency_help: "近期視窗內已完成決策請求的端對端延遲中位數。",
+      runtime_decision_input_rate_help: "近期視窗內已完成決策請求的輸入 Token 吞吐中位數。",
+      runtime_decision_question_rate_help: "近期視窗內已完成決策請求的問題吞吐中位數。",
+      runtime_decision_performance_window: "近期決策 · P50 · 近 {seconds} 秒 · {requests} 個完成請求",
+      runtime_decision_performance_empty: "決策指標 · 完成一次請求後開始取樣",
       runtime_active: "作用中請求",
       runtime_queued: "排隊請求",
       runtime_capacity: "佇列容量",
@@ -7021,7 +7068,21 @@
       runtime_operational_state: "実行状態",
       runtime_state_idle: "待機中",
       runtime_state_busy: "処理中",
+      runtime_state_recent: "完了したばかり",
       runtime_performance: "パフォーマンス",
+      runtime_decision_performance: "判定パフォーマンス",
+      runtime_decision_completed: "完了",
+      runtime_decision_errors: "エラー",
+      runtime_decision_latency: "P50 レイテンシ",
+      runtime_decision_input_rate: "入力スループット",
+      runtime_decision_question_rate: "質問スループット",
+      runtime_decision_completed_help: "このモデルを読み込んでから完了した判定リクエスト数です。",
+      runtime_decision_errors_help: "このモデルを読み込んでから失敗した判定リクエスト数です。",
+      runtime_decision_latency_help: "直近の期間に完了した判定リクエストのエンドツーエンドレイテンシ中央値です。",
+      runtime_decision_input_rate_help: "直近の期間に完了した判定リクエストの入力 Token スループット中央値です。",
+      runtime_decision_question_rate_help: "直近の期間に完了した判定リクエストの質問スループット中央値です。",
+      runtime_decision_performance_window: "直近の判定 · P50 · 過去 {seconds} 秒 · 完了 {requests} 件",
+      runtime_decision_performance_empty: "判定メトリクス · リクエスト完了後に計測を開始します",
       runtime_active: "実行中",
       runtime_queued: "待機中",
       runtime_capacity: "キュー容量",
@@ -7512,7 +7573,21 @@
       runtime_operational_state: "실행 상태",
       runtime_state_idle: "대기",
       runtime_state_busy: "처리 중",
+      runtime_state_recent: "방금 완료",
       runtime_performance: "성능",
+      runtime_decision_performance: "의사결정 성능",
+      runtime_decision_completed: "완료",
+      runtime_decision_errors: "오류",
+      runtime_decision_latency: "P50 지연 시간",
+      runtime_decision_input_rate: "입력 처리량",
+      runtime_decision_question_rate: "질문 처리량",
+      runtime_decision_completed_help: "이 모델을 로드한 뒤 완료된 의사결정 요청 수입니다.",
+      runtime_decision_errors_help: "이 모델을 로드한 뒤 실패한 의사결정 요청 수입니다.",
+      runtime_decision_latency_help: "최근 구간에 완료된 의사결정 요청의 종단 간 지연 시간 중앙값입니다.",
+      runtime_decision_input_rate_help: "최근 구간에 완료된 의사결정 요청의 입력 토큰 처리량 중앙값입니다.",
+      runtime_decision_question_rate_help: "최근 구간에 완료된 의사결정 요청의 질문 처리량 중앙값입니다.",
+      runtime_decision_performance_window: "최근 의사결정 · P50 · 최근 {seconds}초 · 완료 {requests}건",
+      runtime_decision_performance_empty: "의사결정 지표 · 요청을 완료하면 측정을 시작합니다",
       runtime_active: "활성 요청",
       runtime_queued: "대기 요청",
       runtime_capacity: "대기열 용량",
@@ -13058,6 +13133,7 @@
   const gpuCtx = gpuCanvas.getContext('2d');
   const GPU_ACTIVE_POLL_MS = 500;
   const GPU_IDLE_POLL_MS = 1000;
+  const DECISION_RECENT_ACTIVITY_MS = 2500;
   const GPU_HISTORY_LIMIT_MS = 60 * 60 * 1000;
   const gpuHistory = []; // [{time, active, peak, cache}]
   let gpuMaxMB = 8192; // auto-scale, start at 8GB
@@ -13385,6 +13461,23 @@
       + '</span>';
   }
 
+  function runtimeOperationalState(model, nowUnixMs = Date.now()) {
+    const activeRequests = Number(model && model.active_requests || 0);
+    const queuedRequests = Number(model && model.queued_requests || 0);
+    if (activeRequests > 0 || queuedRequests > 0) return 'busy';
+    if (!model || model.runtime_kind !== 'decision') return 'idle';
+    const lastRequestUnixMs = Number(
+      model.decision_metrics && model.decision_metrics.last_request_unix_ms
+    );
+    const recentRequestAgeMs = nowUnixMs - lastRequestUnixMs;
+    return Number.isFinite(lastRequestUnixMs)
+      && lastRequestUnixMs > 0
+      && recentRequestAgeMs >= 0
+      && recentRequestAgeMs <= DECISION_RECENT_ACTIVITY_MS
+      ? 'recent'
+      : 'idle';
+  }
+
   function renderRuntimeModels(models) {
     const card = document.getElementById('runtime-model-health-card');
     const container = document.getElementById('runtime-model-health');
@@ -13425,11 +13518,22 @@
     container.innerHTML = models.map(model => {
       const modelId = String(model.id || model.model || '');
       const isDiffusion = model.runtime_kind === 'block_diffusion';
+      const isDecision = model.runtime_kind === 'decision';
       const activeRequests = Number(model.active_requests || 0);
       const queuedRequests = Number(model.queued_requests || 0);
       const queueCapacity = Number(model.queue_capacity || 0);
-      const isBusy = activeRequests > 0 || queuedRequests > 0;
+      const operationalState = runtimeOperationalState(model);
+      const isBusy = operationalState === 'busy';
       const usage = model.usage || {};
+      const decisionMetrics = model.decision_metrics || null;
+      const operationalStateClass = isBusy
+        ? 'runtime-state-busy'
+        : operationalState === 'recent' ? 'runtime-state-recent' : 'runtime-state-idle';
+      const operationalStateLabel = isBusy
+        ? (dict.runtime_state_busy || 'Processing')
+        : operationalState === 'recent'
+          ? (dict.runtime_state_recent || 'Just completed')
+          : (dict.runtime_state_idle || 'Idle');
       const metric = (label, help, value, unit, digits, primary) => {
         const available = value !== null && Number.isFinite(Number(value));
         const number = available
@@ -13453,9 +13557,9 @@
         + '<div class="runtime-metric"><span class="runtime-metric-label">'
         + escapeAttr(dict.runtime_operational_state || 'State') + '</span>'
         + '<span class="runtime-metric-value runtime-state-value '
-        + (isBusy ? 'runtime-state-busy' : 'runtime-state-idle') + '">'
+        + operationalStateClass + '">'
         + '<span class="runtime-state-dot"></span>'
-        + escapeAttr(isBusy ? (dict.runtime_state_busy || 'Processing') : (dict.runtime_state_idle || 'Idle'))
+        + escapeAttr(operationalStateLabel)
         + '</span></div>'
         + metric(dict.runtime_active || 'Active', '', activeRequests, '', 0, false)
         + metric(dict.runtime_queued || 'Queued', '', queuedRequests, '', 0, false)
@@ -13503,7 +13607,64 @@
         );
       }
       let performanceDetails = '';
-      if (!isDiffusion) {
+      if (isDecision) {
+        const completedRequests = Number(decisionMetrics && decisionMetrics.recent_completed_requests);
+        const windowSeconds = Number(decisionMetrics && decisionMetrics.window_seconds);
+        const performanceMeta = completedRequests > 0
+          ? (dict.runtime_decision_performance_window
+              || 'Recent decisions · P50 · Last {seconds}s · {requests} completed')
+              .replace('{seconds}', String(windowSeconds))
+              .replace('{requests}', completedRequests.toLocaleString(numberLocale))
+          : (dict.runtime_decision_performance_empty
+              || 'Decision metrics · Complete a request to begin sampling');
+        performanceDetails = '<div class="runtime-model-section">'
+          + '<div class="runtime-section-header"><span class="runtime-section-title">'
+          + escapeAttr(dict.runtime_decision_performance || 'Decision performance') + '</span>'
+          + '<span class="runtime-section-meta">' + escapeAttr(performanceMeta) + '</span></div>'
+          + '<div class="runtime-metric-rail runtime-performance-rail" aria-label="'
+          + escapeAttr(dict.runtime_decision_performance || 'Decision performance') + '">'
+          + metric(
+              dict.runtime_decision_completed || 'Completed',
+              dict.runtime_decision_completed_help || 'Decision requests completed since this model was loaded.',
+              decisionMetrics && decisionMetrics.completed_requests,
+              '',
+              0,
+              true
+            )
+          + metric(
+              dict.runtime_decision_errors || 'Errors',
+              dict.runtime_decision_errors_help || 'Decision requests that failed since this model was loaded.',
+              decisionMetrics && decisionMetrics.failed_requests,
+              '',
+              0,
+              false
+            )
+          + metric(
+              dict.runtime_decision_latency || 'P50 latency',
+              dict.runtime_decision_latency_help || 'Median end-to-end latency of completed decision requests in the recent window.',
+              decisionMetrics && decisionMetrics.latency_ms_p50,
+              'ms',
+              1,
+              false
+            )
+          + metric(
+              dict.runtime_decision_input_rate || 'Input throughput',
+              dict.runtime_decision_input_rate_help || 'Median input-token throughput of completed decision requests in the recent window.',
+              decisionMetrics && decisionMetrics.input_tokens_per_second,
+              'tok/s',
+              1,
+              false
+            )
+          + metric(
+              dict.runtime_decision_question_rate || 'Question throughput',
+              dict.runtime_decision_question_rate_help || 'Median question throughput of completed decision requests in the recent window.',
+              decisionMetrics && decisionMetrics.questions_per_second,
+              'q/s',
+              1,
+              false
+            )
+          + '</div></div>';
+      } else if (!isDiffusion) {
         const performance = usage.performance || {};
         const completedRequests = Number(performance.completed_requests);
         const windowSeconds = Number(performance.window_seconds);

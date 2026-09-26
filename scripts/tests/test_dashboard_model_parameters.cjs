@@ -107,3 +107,61 @@ test('parameter validation identifies the field without suggesting filesystem re
   assert.equal(context.localizeErrorResult({ code: 'settings_persist_failed' }),
     'IronMLX 无法保存应用设置，请检查文件权限和可用磁盘空间。');
 });
+
+test('decision runtime status uses persistent metrics without increasing poll frequency', () => {
+  const start = html.indexOf('  const I18N =');
+  const dictionary = html.slice(start, html.indexOf('\n  };', start) + 5);
+  const translations = vm.runInNewContext(`${dictionary}\nI18N`, {});
+  const keys = [
+    'runtime_state_recent',
+    'runtime_decision_performance',
+    'runtime_decision_completed',
+    'runtime_decision_errors',
+    'runtime_decision_latency',
+    'runtime_decision_input_rate',
+    'runtime_decision_question_rate',
+    'runtime_decision_performance_window',
+    'runtime_decision_performance_empty',
+  ];
+  for (const language of ['en', 'zh-Hans', 'zh-Hant', 'ja', 'ko']) {
+    for (const key of keys) {
+      assert.ok(translations[language][key], `${language} ${key}`);
+    }
+  }
+
+  const stateFunction = extract('runtimeOperationalState', 'renderRuntimeModels');
+  const stateContext = { Date };
+  vm.createContext(stateContext);
+  vm.runInContext(
+    `const DECISION_RECENT_ACTIVITY_MS = 2500;\n${stateFunction}`,
+    stateContext
+  );
+  assert.equal(stateContext.runtimeOperationalState({
+    runtime_kind: 'decision',
+    active_requests: 1,
+    decision_metrics: { last_request_unix_ms: 999_900 },
+  }, 1_000_000), 'busy');
+  assert.equal(stateContext.runtimeOperationalState({
+    runtime_kind: 'decision',
+    decision_metrics: { last_request_unix_ms: 999_000 },
+  }, 1_000_000), 'recent');
+  assert.equal(stateContext.runtimeOperationalState({
+    runtime_kind: 'decision',
+    decision_metrics: { last_request_unix_ms: 997_000 },
+  }, 1_000_000), 'idle');
+  assert.equal(stateContext.runtimeOperationalState({
+    runtime_kind: 'causal',
+    decision_metrics: { last_request_unix_ms: 999_000 },
+  }, 1_000_000), 'idle');
+
+  const render = extract('renderRuntimeModels', 'onApiFetchResult');
+  assert.match(render, /model\.runtime_kind === 'decision'/);
+  assert.match(render, /model\.decision_metrics/);
+  assert.match(stateFunction, /last_request_unix_ms/);
+  assert.match(render, /runtime-state-recent/);
+  assert.match(render, /recent_completed_requests/);
+  assert.match(render, /input_tokens_per_second/);
+  assert.match(render, /questions_per_second/);
+  assert.match(html, /const GPU_ACTIVE_POLL_MS = 500;/);
+  assert.match(html, /const GPU_IDLE_POLL_MS = 1000;/);
+});
