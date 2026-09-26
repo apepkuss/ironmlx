@@ -87,6 +87,7 @@ the [supported model matrix](supported-models.md).
 
 - [Troubleshooting](troubleshooting.md)
 - [Known issues](known-issues.md)
+- [0.2.0 release notes](release-notes/0.2.0.md)
 - [0.1.0 release notes](release-notes/0.1.0.md)
 
 For source builds, tests, contributions, and release engineering, start with

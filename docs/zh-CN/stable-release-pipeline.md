@@ -52,7 +52,7 @@ Release 已公开但 feed 发布失败时，用完全相同的公开 ZIP/XML/`up
 
 ## 更新通道与版本规则
 
-App 产品版本保持 `X.Y.Z`，RC tag/feed 显示版本附加 `-rc.N`。Sparkle 按正整数 `CFBundleVersion` 比较，每次更新都必须增加，包括同产品版本的后续 RC。使用 `scripts/bump-version.sh X.Y.Z N` 指定更高 build。
+App 产品版本保持 `X.Y.Z`，RC tag/feed 显示版本附加 `-rc.N`。RC 后缀是候选版序号，不是 App build number。Sparkle 按正整数 `CFBundleVersion` 比较，每次更新都必须全局递增，包括新产品版本的首个 RC 和同产品版本的后续 RC。使用 `scripts/bump-version.sh X.Y.Z BUILD` 指定高于所有已发布 build 的新值；RC 工作流保留源码中的 build number。
 更新源位于独立 `updates` 分支：`https://raw.githubusercontent.com/<owner>/<repo>/updates/stable.xml` 和同目录的 `release-candidate.xml`；feed 发布不修改源码分支或 release tag。
 RC 条目带 `release-candidate` 通道标记，稳定版客户端不订阅；已安装 RC 切换稳定版需要主动安装/切换。
 发布器拒绝倒退或冲突的 build，使用非强制更新；并发冲突时失败而不覆盖另一通道。首次发布前 feed 可以不存在；更新源缺失或不可用不能阻止现有 App 使用。

@@ -53,6 +53,7 @@ scripts/verify-model-distribution-boundary.sh dist/IronMLX.app
 - [安全漏洞报告](security.md)
 - [版本与发布流程](versioning-and-releases.md)
 - [稳定版发布流水线](stable-release-pipeline.md)
-- [发布说明](release-notes/0.1.0.md)
+- [0.2.0 发布说明](release-notes/0.2.0.md)
+- [0.1.0 发布说明](release-notes/0.1.0.md)
 
 发布验收必须分别记录源码测试、Bundle 静态检查、签名与公证产物、Gatekeeper 检查和公开分发状态。

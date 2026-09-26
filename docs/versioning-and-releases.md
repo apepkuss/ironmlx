@@ -46,8 +46,8 @@ same product version. Release candidates use `vX.Y.Z-rc.N` tags.
 Before packaging, run the identity gate with the exact existing release tag:
 
 ```bash
-python3 scripts/verify-release-identity.py v0.1.0
-python3 scripts/verify-release-identity.py v0.1.0 dist/IronMLX.app
+python3 scripts/verify-release-identity.py v0.2.0
+python3 scripts/verify-release-identity.py v0.2.0 dist/IronMLX.app
 ```
 
 The source check requires the tag under `refs/tags/` to resolve to HEAD, match
@@ -65,7 +65,7 @@ builds and their static Bundle checks continue to allow dirty source trees.
 RC identity validation is explicitly separate from stable packaging:
 
 ```bash
-python3 scripts/verify-release-identity.py --candidate v0.1.0-rc.1 dist/IronMLX.app
+python3 scripts/verify-release-identity.py --candidate v0.2.0-rc.1 dist/IronMLX.app
 ```
 
 Candidate mode accepts only `vX.Y.Z-rc.N` with a positive, non-zero-prefixed N.

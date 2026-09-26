@@ -1,8 +1,8 @@
-# IronMLX 0.1.0 API compatibility matrix
+# IronMLX 0.2.0 API compatibility matrix
 
 [简体中文](zh-CN/api-compatibility-matrix.md)
 
-For client integrators: this document describes the 0.1.0 public protocol scope. Use documentation at the release tag; candidate Bundle metadata identifies its exact source commit. A moving branch is not a release baseline.
+For client integrators: this document describes the 0.2.0 public protocol scope. Use documentation at the release tag; candidate Bundle metadata identifies its exact source commit. A moving branch is not a release baseline.
 
 See the [API quick start](api.md), [protocol reference](api-reference.md) for nested fields, tools, reasoning and schemas, and [Supported models](supported-models.md) for model conditions.
 

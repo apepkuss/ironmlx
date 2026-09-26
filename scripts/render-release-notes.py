@@ -5,11 +5,50 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import re
+import subprocess
+
+
+def version_tuple(tag: str) -> tuple[int, int, int]:
+    match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)(?:-rc\.[1-9]\d*)?", tag)
+    if match is None:
+        raise ValueError(f"invalid release tag: {tag}")
+    return tuple(int(value) for value in match.groups())
+
+
+def previous_stable_tag(root: Path, tag: str) -> str | None:
+    current = version_tuple(tag)
+    try:
+        tags = subprocess.check_output(
+            ["git", "-C", str(root), "tag", "--merged", tag, "--list", "v*"],
+            text=True,
+            stderr=subprocess.PIPE,
+        ).splitlines()
+    except subprocess.CalledProcessError:
+        # Allow release-note previews before the immutable tag is created.
+        tags = subprocess.check_output(
+            ["git", "-C", str(root), "tag", "--merged", "HEAD", "--list", "v*"],
+            text=True,
+        ).splitlines()
+    candidates = []
+    for candidate in tags:
+        match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", candidate)
+        if match is None:
+            continue
+        parsed = tuple(int(value) for value in match.groups())
+        if parsed < current:
+            candidates.append((parsed, candidate))
+    return max(candidates)[1] if candidates else None
 
 
 def render(root: Path, repository: str, tag: str, candidate: bool) -> str:
     template = (root / ".github/release-notes-template.md").read_text()
     version = tag.removeprefix("v").split("-", 1)[0]
+    for relative in (f"docs/release-notes/{version}.md",
+                     f"docs/zh-CN/release-notes/{version}.md"):
+        if not (root / relative).is_file():
+            raise FileNotFoundError(f"missing release notes: {relative}")
+    previous = previous_stable_tag(root, tag)
     base = f"https://github.com/{repository}"
     release_url = f"{base}/releases/download/{tag}"
     values = {
@@ -24,10 +63,10 @@ def render(root: Path, repository: str, tag: str, candidate: bool) -> str:
         "KNOWN_ISSUES_URL": f"{base}/blob/{tag}/docs/known-issues.md",
         "SUPPORTED_MODELS_ZH_URL": f"{base}/blob/{tag}/docs/zh-CN/supported-models.md",
         "KNOWN_ISSUES_ZH_URL": f"{base}/blob/{tag}/docs/zh-CN/known-issues.md",
-        "RELEASE_NOTES_URL": f"{base}/blob/{tag}/docs/release-notes/0.1.0.md",
-        "RELEASE_NOTES_ZH_URL": f"{base}/blob/{tag}/docs/zh-CN/release-notes/0.1.0.md",
+        "RELEASE_NOTES_URL": f"{base}/blob/{tag}/docs/release-notes/{version}.md",
+        "RELEASE_NOTES_ZH_URL": f"{base}/blob/{tag}/docs/zh-CN/release-notes/{version}.md",
         "ISSUES_URL": f"{base}/issues",
-        "CHANGELOG_URL": f"{base}/compare/{tag}^...{tag}",
+        "CHANGELOG_URL": f"{base}/compare/{previous or tag + '^'}...{tag}",
         "UPDATE_CHANNELS_EN": "RC and stable updates use separate channels." if candidate else "Stable updates use the stable channel.",
         "UPDATE_CHANNELS_ZH": "RC 与稳定版使用独立更新通道。" if candidate else "正式版更新使用稳定通道。",
     }

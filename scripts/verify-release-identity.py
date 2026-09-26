@@ -43,11 +43,10 @@ def verify(repo, tag, app=None, *, candidate=False):
     if app is not None:
         with (app / "Contents/Info.plist").open("rb") as handle:
             info = plistlib.load(handle)
-        expected_build = match.group(2).removeprefix("-rc.") if candidate else build
         expected = {
             "CFBundleIdentifier": "com.ironmlx.app",
             "CFBundleShortVersionString": version,
-            "CFBundleVersion": expected_build,
+            "CFBundleVersion": build,
             "IronMLXSourceCommit": commit,
             "IronMLXSourceTreeState": "clean",
         }

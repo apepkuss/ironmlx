@@ -46,8 +46,8 @@ RC 使用 `vX.Y.Z-rc.N` tag。
 正式打包前，使用明确的现有发布 tag 检查源码及 App：
 
 ```bash
-python3 scripts/verify-release-identity.py v0.1.0
-python3 scripts/verify-release-identity.py v0.1.0 dist/IronMLX.app
+python3 scripts/verify-release-identity.py v0.2.0
+python3 scripts/verify-release-identity.py v0.2.0 dist/IronMLX.app
 ```
 
 源码检查要求 `refs/tags/` 下的 tag 指向 HEAD、与 `VERSION` 一致，且工作区
@@ -62,7 +62,7 @@ clean，包括未忽略的未跟踪文件。支持 lightweight 和 annotated tag
 RC 身份验收使用独立的显式模式：
 
 ```bash
-python3 scripts/verify-release-identity.py --candidate v0.1.0-rc.1 dist/IronMLX.app
+python3 scripts/verify-release-identity.py --candidate v0.2.0-rc.1 dist/IronMLX.app
 ```
 
 候选模式只接受 `vX.Y.Z-rc.N`，N 必须为无前导零的正整数。基础版本 `X.Y.Z`

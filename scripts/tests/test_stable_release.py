@@ -21,6 +21,7 @@ class PublicationTests(unittest.TestCase):
             asset.write_bytes(b'verified artifact')
             calls = []
             public = False
+            tag = 'v0.2.0-rc.1' if candidate else 'v0.2.0'
 
             def run(*args):
                 nonlocal public
@@ -28,14 +29,14 @@ class PublicationTests(unittest.TestCase):
                 if args[1:3] == ('api', 'repos/owner/repo/releases'):
                     if 'POST' in args:
                         return json.dumps(dict(id=None if failure == 'create-id' else 10,
-                                               tag_name='v1.0.0-rc.1' if candidate else 'v1.0.0',
+                                               tag_name=tag,
                                                draft=failure != 'create-state', prerelease=candidate))
                     # Deliberately never expose newly created drafts in list responses.
                     return '10' if existing else ''
                 if '/releases/tags/' in str(args):
                     raise AssertionError('by-tag endpoint cannot resolve drafts')
-                if 'commits/v1.0.0' in str(args):
-                    moved = failure == 'tag-moved' and sum('commits/v1.0.0' in str(c) for c in calls) > 1
+                if f'commits/{tag}' in str(args):
+                    moved = failure == 'tag-moved' and sum(f'commits/{tag}' in str(c) for c in calls) > 1
                     return json.dumps({'sha': 'other' if moved else 'commit'})
                 if args[1:3] == ('release', 'upload') and failure == 'upload':
                     raise RuntimeError('upload failed')
@@ -46,19 +47,19 @@ class PublicationTests(unittest.TestCase):
                     public = True
                     return '{}'
                 if args[1:3] == ('api', 'repos/owner/repo/releases/10'):
-                    return json.dumps(dict(id=10, tag_name='v1.0.0-rc.1' if candidate else 'v1.0.0', draft=not public and failure != 'public', prerelease=candidate,
+                    return json.dumps(dict(id=10, tag_name=tag, draft=not public and failure != 'public', prerelease=candidate,
                                            assets=[{'name': 'extra' if failure == 'asset-set' else 'asset.zip'}]))
                 return ''
 
             with patch.object(stable, 'run', run):
                 if failure:
                     with self.assertRaises((ValueError, RuntimeError)):
-                        stable.publish('owner/repo', 'v1.0.0-rc.1' if candidate else 'v1.0.0', 'commit', [asset], candidate=candidate)
+                        stable.publish('owner/repo', tag, 'commit', [asset], candidate=candidate)
                     self.assertFalse(public)
                     if failure in ('create-id', 'create-state'):
                         self.assertFalse(any(c[1:3] == ('release', 'upload') for c in calls))
                 else:
-                    stable.publish('owner/repo', 'v1.0.0-rc.1' if candidate else 'v1.0.0', 'commit', [asset], candidate=candidate)
+                    stable.publish('owner/repo', tag, 'commit', [asset], candidate=candidate)
                     self.assertTrue(public)
                     creates = [c for c in calls if 'POST' in c]
                     self.assertEqual(len(creates), 0 if existing else 1)

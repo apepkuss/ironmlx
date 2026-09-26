@@ -6,7 +6,7 @@ IronMLX.app 支持经过验证的 `mlx-community/IndexTTS-2.5-fp16` 资源配置
 
 IronMLX App 还支持 `aac6fef/laya-multilingual-mlx` 决策模型：下载、加载与卸载、重启恢复，以及通过 App 服务端口调用兼容 TypeSafe 的 System One API。详见 [Laya 使用指南](laya-systemone-api.md)。
 
-IronMLX 0.1.0 支持以下文本和视觉语言模型。请先确认模型族和所需功能，再选择适合设备内存的具体版本。
+IronMLX 0.2.0 支持以下文本和视觉语言模型。请先确认模型族和所需功能，再选择适合设备内存的具体版本。
 同一模型族的不同版本、量化文件和模板可能存在兼容性差异；下表不是所有同名模型的验证清单。
 
 ## 模型支持概览
@@ -25,7 +25,7 @@ IronMLX 0.1.0 支持以下文本和视觉语言模型。请先确认模型族和
 | DiffusionGemma | 支持 | 支持 | 支持 | 支持 |
 
 表中的文本和视觉生成运行时均支持 HTTP 流式响应。图片能力指理解图片，不代表生成图片或支持视频。
-模型列表中出现 embedding、reranker、ASR 或 TTS 信息，不代表 0.1.0 的生成后端可以加载这些模型。
+模型列表中出现 embedding、reranker 或 ASR 信息不代表运行时受支持。TTS 仅支持已验证的 IndexTTS 2.5 配置及其独立音频运行时。
 
 ## 已验证的具体模型
 

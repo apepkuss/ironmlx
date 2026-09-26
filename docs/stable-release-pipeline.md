@@ -52,7 +52,7 @@ If the Release is public but feed publication failed, reuse the exact published 
 
 ## Update channel and version rules
 
-The App product version stays `X.Y.Z`; RC tags/feed display versions add `-rc.N`. Sparkle compares positive integer `CFBundleVersion`, which must increase for every update, including successive RCs. Use `scripts/bump-version.sh X.Y.Z N` with a higher build number.
+The App product version stays `X.Y.Z`; RC tags/feed display versions add `-rc.N`. The RC suffix is a candidate sequence, not the App build number. Sparkle compares positive integer `CFBundleVersion`, which must increase globally for every update, including the first RC of a new product version and successive RCs. Use `scripts/bump-version.sh X.Y.Z BUILD` with a build number higher than every previously published build; the RC workflow preserves that source build number.
 Feeds live on the separate `updates` branch at `https://raw.githubusercontent.com/<owner>/<repo>/updates/stable.xml` and `release-candidate.xml` in the same directory. Source branches and release tags are not modified by feed publication.
 RC entries carry the `release-candidate` channel marker; stable clients do not subscribe to it. Switching an installed RC to stable requires a deliberate installation/channel change.
 Feed publishing rejects lower or conflicting build numbers and uses non-force updates; concurrent changes fail without overwriting another channel. Before first publication the feed may not exist; a missing or unavailable feed must not prevent use of the installed App.

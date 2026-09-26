@@ -85,8 +85,6 @@ jobs:
           IRONMLX_UPDATE_PUBLIC_ED_KEY: ${{ vars.IRONMLX_UPDATE_PUBLIC_ED_KEY }}
         run: |
           set -euo pipefail
-          rc_number="${RELEASE_TAG##*-rc.}"
-          export IRONMLX_APP_BUILD_NUMBER="$rc_number"
           env -u GITHUB_REF_TYPE -u GITHUB_REF_NAME scripts/build-app-bundle.sh
 
       - name: Validate identity and archive contents without Apple credentials

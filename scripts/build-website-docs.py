@@ -31,6 +31,7 @@ PAGES = (
     ("oh-my-pi.md", "oh-my-pi", "oh-my-pi"),
     ("troubleshooting.md", "Troubleshooting", "故障排查"),
     ("privacy.md", "Privacy", "隐私说明"),
+    ("release-notes/0.2.0.md", "0.2.0 release notes", "0.2.0 发布说明"),
     ("release-notes/0.1.0.md", "0.1.0 release notes", "0.1.0 发布说明"),
 )
 

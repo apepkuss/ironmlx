@@ -10,7 +10,7 @@ description = "Safe, idiomatic Rust bindings to Apple MLX"
 publish = false
 
 [dependencies]
-mlx-sys = { path = "../mlx-sys", version = "0.1.0" }
+mlx-sys = { path = "../mlx-sys", version = "0.2.0" }
 cxx.workspace = true
 thiserror.workspace = true
 half = "2"

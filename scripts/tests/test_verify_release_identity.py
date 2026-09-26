@@ -133,15 +133,33 @@ class ReleaseIdentityTests(unittest.TestCase):
     def test_candidate_accepts_matching_rc_and_stable_mode_rejects_it(self):
         for number in (1, 12):
             tag = f"v0.1.0-rc.{number}"
-            self.info["CFBundleVersion"] = str(number)
             self.write_info()
             self.git("tag", tag)
             self.assertEqual(identity.verify(self.repo, tag, self.app, candidate=True),
                              self.commit)
             with self.assertRaises(ValueError):
                 identity.verify(self.repo, tag, self.app)
+
+    def test_candidate_build_matches_monotonic_source_build_not_rc_number(self):
+        tag = "v0.1.0-rc.1"
+        self.source.write_bytes(plistlib.dumps({
+            "CFBundleShortVersionString": "0.1.0", "CFBundleVersion": "5",
+        }))
+        self.info["CFBundleVersion"] = "5"
+        self.write_info()
+        self.git("add", ".")
+        self.git("commit", "-qm", "use monotonic build")
+        self.commit = self.git("rev-parse", "HEAD")
+        self.info["IronMLXSourceCommit"] = self.commit
+        self.write_info()
+        self.git("tag", tag)
+        self.assertEqual(identity.verify(self.repo, tag, self.app, candidate=True),
+                         self.commit)
+
         self.info["CFBundleVersion"] = "1"
         self.write_info()
+        with self.assertRaisesRegex(ValueError, "CFBundleVersion"):
+            identity.verify(self.repo, tag, self.app, candidate=True)
 
     def test_candidate_rejects_wrong_version_and_invalid_suffix(self):
         for tag in ("v0.2.0-rc.1", "v0.1.0", "v0.1.0-rc.0", "v0.1.0-rc.01",

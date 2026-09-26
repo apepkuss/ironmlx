@@ -1396,7 +1396,7 @@ checksum = "6a756c3fac73139e83f14c2d742155dd2b78d3ee56597b419a0579b7bdd6dd78"
 
 [[package]]
 name = "iron-bench"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1412,7 +1412,7 @@ dependencies = [
 
 [[package]]
 name = "ironmlx"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "approx",
@@ -1452,7 +1452,7 @@ dependencies = [
 
 [[package]]
 name = "ironmlx-audio"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "fancy-regex",
@@ -1472,7 +1472,7 @@ dependencies = [
 
 [[package]]
 name = "ironmlx-bench-kernel"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1481,7 +1481,7 @@ dependencies = [
 
 [[package]]
 name = "ironmlx-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "approx",
@@ -1491,7 +1491,7 @@ dependencies = [
 
 [[package]]
 name = "ironmlx-decision"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "ironmlx-core",
@@ -1504,7 +1504,7 @@ dependencies = [
 
 [[package]]
 name = "ironmlx-lm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "approx",
@@ -1528,7 +1528,7 @@ dependencies = [
 
 [[package]]
 name = "ironmlx-runtime"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "approx",
@@ -1786,7 +1786,7 @@ dependencies = [
 
 [[package]]
 name = "mlx"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blocking",
  "cxx",
@@ -1805,7 +1805,7 @@ dependencies = [
 
 [[package]]
 name = "mlx-sys"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cxx",
  "cxx-build",
@@ -3246,7 +3246,7 @@ dependencies = [
 
 [[package]]
 name = "turboquant"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "half",
 ]

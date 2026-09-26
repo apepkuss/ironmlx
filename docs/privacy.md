@@ -12,7 +12,7 @@ only to loopback, so external hosts cannot directly access the API.
 - The inference API does not fetch remote images for the client; images must be
   uploaded as controlled base64 content.
 
-Version 0.1.0 has no product telemetry or cloud inference upload path. Download
+Version 0.2.0 has no product telemetry or cloud inference upload path. Download
 progress and errors are written to local logs. Model and update hosting services may record
 client IPs, requests, and token use under their own policies.
 

@@ -1,8 +1,8 @@
-# IronMLX 0.1.0 API 兼容矩阵
+# IronMLX 0.2.0 API 兼容矩阵
 
 [English](../api-compatibility-matrix.md)
 
-本文面向客户端集成者，描述 0.1.0 的公开协议范围。使用发布 tag 对应的文档；候选包的精确源码提交以 Bundle 元数据为准，不以持续变化的分支作为发布基线。
+本文面向客户端集成者，描述 0.2.0 的公开协议范围。使用发布 tag 对应的文档；候选包的精确源码提交以 Bundle 元数据为准，不以持续变化的分支作为发布基线。
 
 使用示例见 [API 快速开始](api.md)，嵌套字段、工具、思考和 Schema 规则见[协议参考](api-reference.md)。模型相关条件见[支持模型](supported-models.md)。
 

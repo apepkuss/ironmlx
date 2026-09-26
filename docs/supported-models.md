@@ -6,7 +6,7 @@ IronMLX.app supports speech synthesis with the verified `mlx-community/IndexTTS-
 
 IronMLX App also supports the typed decision model `aac6fef/laya-multilingual-mlx`: download, load/unload, restart recovery and TypeSafe-compatible System One API calls on the App service port. See the [Laya guide](laya-systemone-api.md).
 
-IronMLX 0.1.0 supports the following text and vision-language models. Check the model family and features you need, then choose a version that fits your device's memory.
+IronMLX 0.2.0 supports the following text and vision-language models. Check the model family and features you need, then choose a version that fits your device's memory.
 Versions, quantized files and templates within a family can differ in compatibility. This table is not a validation list for every model with a matching name.
 
 ## Model overview
@@ -25,7 +25,7 @@ Versions, quantized files and templates within a family can differ in compatibil
 | DiffusionGemma | Yes | Yes | Yes | Yes |
 
 All text and vision generation runtimes in the table support streaming HTTP responses. Image support means understanding images, not generating images or supporting video.
-Embedding, reranker, ASR or TTS metadata in the model list does not mean the 0.1.0 generation backend can load those models.
+Embedding, reranker or ASR metadata in the model list does not imply runtime support. TTS support is limited to the verified IndexTTS 2.5 profile and its separate audio runtime.
 
 ## Validated model versions
 

@@ -25,6 +25,12 @@ publish = module("publish-update-feed")
 
 
 class PolicyTests(unittest.TestCase):
+    def test_rc_workflow_preserves_monotonic_source_build(self):
+        workflow = (SCRIPTS.parent / ".github/workflows/release-candidate.yml").read_text()
+        self.assertNotIn('rc_number="${RELEASE_TAG##*-rc.}"', workflow)
+        self.assertNotIn("IRONMLX_APP_BUILD_NUMBER", workflow)
+        self.assertIn("scripts/build-app-bundle.sh", workflow)
+
     def test_channels_and_signed_key_requirements(self):
         key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
         for channel in ("stable", "release-candidate"):

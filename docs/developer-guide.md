@@ -65,7 +65,8 @@ streaming, and App runtime validation when those paths are affected.
 - [Security reporting](../SECURITY.md)
 - [Versioning and releases](versioning-and-releases.md)
 - [Stable release pipeline](stable-release-pipeline.md)
-- [Release notes](release-notes/0.1.0.md)
+- [0.2.0 release notes](release-notes/0.2.0.md)
+- [0.1.0 release notes](release-notes/0.1.0.md)
 
 Release validation must distinguish source tests, static Bundle checks, signed
 and notarized artifacts, Gatekeeper checks, and public distribution.

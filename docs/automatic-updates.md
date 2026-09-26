@@ -15,7 +15,7 @@ Ordinary local source builds have updates disabled by default; an unavailable up
 
 RC and stable releases use separate update channels. An RC installation does not automatically switch to the stable channel.
 To move from RC to stable, deliberately install the stable App when it is available. Check the release notes before changing versions.
-The updater compares build numbers, so successive RCs can be updates even when the product version remains the same.
+The updater compares globally increasing build numbers. RC suffixes such as `rc.1` are candidate sequence labels and do not reset or define the App build number.
 
 ## Downloads and privacy
 
