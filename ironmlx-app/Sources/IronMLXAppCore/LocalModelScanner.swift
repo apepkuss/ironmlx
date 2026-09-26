@@ -188,6 +188,7 @@ public struct LocalModelReasoningMetadata: Codable, Equatable, Sendable {
 public struct LocalModel: Codable, Equatable, Sendable {
     public var id: String
     public var repoID: String
+    public var displayName: String?
     public var source: String
     public var type: String
     public var architecture: String?
@@ -211,6 +212,7 @@ public struct LocalModel: Codable, Equatable, Sendable {
     public init(
         id: String,
         repoID: String,
+        displayName: String? = nil,
         source: String,
         type: String = "llm",
         architecture: String? = nil,
@@ -233,6 +235,7 @@ public struct LocalModel: Codable, Equatable, Sendable {
     ) {
         self.id = id
         self.repoID = repoID
+        self.displayName = displayName
         self.source = source
         self.type = type
         self.architecture = architecture
@@ -257,6 +260,7 @@ public struct LocalModel: Codable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey {
         case id
         case repoID = "repo_id"
+        case displayName = "display_name"
         case source
         case type
         case architecture
@@ -674,6 +678,13 @@ public struct LocalModelScanner: Sendable {
             loadedModels: loadedModels,
             pinnedModels: pinnedModels
         )
+        artifacts += scanCacheDirectory(
+            ModelRepositoryLayout.providerRoot(rootURL: rootURL, provider: .standalone),
+            provider: .standalone,
+            source: "standalone",
+            loadedModels: loadedModels,
+            pinnedModels: pinnedModels
+        )
 
         let mtpArtifacts = artifacts.filter {
             $0.kind == .mtp && $0.model.readiness?.isLoadable != false
@@ -955,13 +966,18 @@ public struct LocalModelScanner: Sendable {
 
         return entries.compactMap { entry in
             let name = entry.lastPathComponent
-            guard let separator = name.range(of: "--"),
-                  separator.lowerBound != name.startIndex,
-                  separator.upperBound != name.endIndex
-            else {
-                return nil
+            let id: String
+            if provider == .standalone {
+                id = "standalone/" + name
+            } else {
+                guard let separator = name.range(of: "--"),
+                      separator.lowerBound != name.startIndex,
+                      separator.upperBound != name.endIndex
+                else {
+                    return nil
+                }
+                id = String(name[..<separator.lowerBound]) + "/" + String(name[separator.upperBound...])
             }
-            let id = String(name[..<separator.lowerBound]) + "/" + String(name[separator.upperBound...])
             guard let referenced = referencedSnapshot(provider: provider, repoID: id),
                   let inspection = inspectSnapshot(
                       referenced,
@@ -999,6 +1015,7 @@ public struct LocalModelScanner: Sendable {
             return LocalModel(
                 id: id,
                 repoID: id,
+                displayName: (try? ModelSnapshotVerifier().loadManifest(at: snapshot))?.displayName,
                 source: source,
                 type: type,
                 architecture: architecture,

@@ -420,7 +420,8 @@ public struct ModelDownloadStore: Sendable {
                   existing.commitSHA == manifest.commitSHA,
                   existing.files == manifest.files,
                   existing.compatibility == manifest.compatibility,
-                  existing.resources == manifest.resources
+                  existing.resources == manifest.resources,
+                  existing.displayName == manifest.displayName
             else {
                 throw ModelSnapshotVerificationError.identityMismatch(
                     "published commit exists with a different manifest"

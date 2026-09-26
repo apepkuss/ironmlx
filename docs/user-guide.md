@@ -34,6 +34,21 @@ license and access terms.
 
 If the health check fails, see [Troubleshooting](troubleshooting.md).
 
+## Import a model already on this Mac
+
+In Dashboard, open **Models → Model Manager** and select **Import local model**
+at the upper right. Choose the model directory containing `config.json`, weights,
+and a tokenizer. For a Hugging Face cache, choose the `snapshots/<commit>`
+directory rather than its parent cache directory. Review the source, destination,
+and copy size before starting. IronMLX copies and verifies the snapshot, then adds
+it to the model list. The original directory remains untouched.
+
+Snapshots with a valid IronMLX manifest retain their repository identity. Other
+local folders are stored under `~/.ironmlx/models/standalone/`. Importing needs
+enough free space for a complete copy. After import, use the ID shown in the model
+list to load and manage it. Some model families also need additional runtime
+resources prepared before loading.
+
 ## First API request
 
 With `mlx-community/Qwen3.8-27B-4bit` loaded, verify a complete local

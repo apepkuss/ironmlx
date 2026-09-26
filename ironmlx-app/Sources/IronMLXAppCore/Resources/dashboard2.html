@@ -226,7 +226,7 @@
   .sidebar-collapsed .sidebar .nav-item.active::before { background: var(--accent); }
 
   .sidebar-tooltip,
-  .quantization-tooltip {
+  .model-table-tooltip {
     position: fixed;
     z-index: 10000;
     max-width: min(240px, calc(100vw - 16px));
@@ -244,7 +244,7 @@
     pointer-events: none;
   }
   .sidebar-tooltip[hidden],
-  .quantization-tooltip[hidden] { display: none; }
+  .model-table-tooltip[hidden] { display: none; }
 
   /* ── Content ── */
   .content {
@@ -390,6 +390,37 @@
     flex-direction: column;
     min-height: 0;
   }
+  .model-library-toolbar { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 16px; border-bottom:1px solid var(--border); }
+  .model-library-toolbar-title { font-size:13px; font-weight:600; color:var(--text-secondary); }
+  .model-import-status { display:none; padding:10px 16px; border-bottom:1px solid var(--border); font-size:12px; color:var(--text-secondary); }
+  .model-import-status.visible { display:flex; align-items:center; gap:12px; }
+  .model-import-status progress { flex:1; max-width:220px; accent-color:var(--accent); }
+  .model-import-empty { padding:48px 20px; text-align:center; color:var(--text-secondary); }
+  .model-import-empty-actions { display:flex; gap:8px; justify-content:center; margin-top:16px; }
+  .modal.model-import-dialog { width:min(680px, calc(100vw - 32px)); }
+  .model-import-dialog .modal-header { padding-bottom:18px; }
+  .model-import-dialog .modal-body { display:block; padding:22px 28px 26px; }
+  .model-import-note { margin-top:7px; padding-right:28px; color:var(--text-secondary); font-size:13px; line-height:1.5; }
+  .model-import-identity { display:flex; align-items:center; gap:10px; min-width:0; margin-bottom:20px; }
+  .model-import-name { min-width:0; color:var(--text); font-size:17px; font-weight:650; line-height:1.35; overflow-wrap:anywhere; }
+  .model-import-type { flex:none; padding:3px 8px; border:1px solid var(--border); border-radius:6px; color:var(--text-secondary); font-size:11px; }
+  .model-import-paths { display:grid; gap:12px; }
+  .model-import-path { min-width:0; padding:12px 14px; border:1px solid var(--border); border-radius:8px; background:var(--bg); }
+  .model-import-path.destination { border-color:color-mix(in srgb, var(--accent) 28%, var(--border)); background:color-mix(in srgb, var(--accent) 5%, var(--card-bg)); }
+  .model-import-path-label { display:block; margin-bottom:7px; color:var(--text-secondary); font-size:12px; font-weight:600; }
+  .model-import-path-value { display:block; color:var(--text); font-family:ui-monospace, 'SFMono-Regular', Menlo, monospace; font-size:12px; line-height:1.5; overflow-wrap:anywhere; user-select:text; }
+  .model-import-facts { display:flex; flex-wrap:wrap; gap:8px 20px; margin-top:18px; color:var(--text-secondary); font-size:12px; font-variant-numeric:tabular-nums; }
+  .model-import-facts strong { color:var(--text); font-size:13px; font-weight:600; }
+  .model-import-dialog button:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  @media (max-width:560px) {
+    .model-import-dialog .modal-header { padding:20px 20px 16px; }
+    .model-import-dialog .modal-body { padding:20px; }
+    .model-import-dialog .modal-footer { padding:14px 20px; }
+    .model-import-identity { align-items:flex-start; flex-direction:column; gap:8px; }
+  }
+  #model-table tr.model-just-imported { outline:2px solid var(--accent); outline-offset:-2px; animation:model-import-highlight 4s ease-out forwards; }
+  @keyframes model-import-highlight { 0%, 72% { outline-color:var(--accent); } 100% { outline-color:transparent; } }
+  @media (prefers-reduced-motion:reduce) { #model-table tr.model-just-imported { animation:none; } }
 
   #tab-models-manage .data-table-wrapper {
     flex: 1 1 auto;
@@ -2520,15 +2551,11 @@
     min-width: 110px;
     max-width: 110px;
   }
-  .data-table th:first-child,
-  .data-table td:first-child {
-    width: 44px !important;
-    min-width: 44px;
-    max-width: 44px;
-    overflow: visible;
-    text-overflow: clip;
-    text-align: center;
+  .data-table th:first-child {
+    text-align: left;
   }
+  .data-table th:nth-child(2),
+  .data-table td:nth-child(2),
   .data-table th:nth-child(3),
   .data-table td:nth-child(3),
   .data-table th:nth-child(4),
@@ -2578,9 +2605,27 @@
   .data-table .model-name {
     display: flex;
     align-items: center;
+    justify-content: flex-start;
     gap: 8px;
     font-weight: 500;
     min-width: 0;
+  }
+
+  .data-table .model-source-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 14px;
+    width: 14px;
+    height: 14px;
+    line-height: 1;
+  }
+
+  .data-table .model-source-icon svg {
+    display: block;
+    flex: none;
+    width: 14px;
+    height: 14px;
   }
 
   .data-table .model-name-text {
@@ -3585,7 +3630,7 @@
 </div>
 
 <div class="sidebar-tooltip" id="sidebar-tooltip" role="tooltip" hidden></div>
-<div class="quantization-tooltip" id="quantization-tooltip" role="tooltip" hidden></div>
+<div class="model-table-tooltip" id="model-table-tooltip" role="tooltip" hidden></div>
 
 <!-- Content -->
 <div class="content page-scroll-managed">
@@ -3725,16 +3770,25 @@
     <!-- Tab 1: Model Manager -->
     <div class="tab-panel active" id="tab-models-manage">
       <div class="card" style="padding:0;overflow:hidden;">
-        <!-- Batch action bar (hidden by default) -->
-        <div id="batch-action-bar" style="display:none; padding:8px 12px; margin-bottom:8px; background:var(--card-bg); border:1px solid var(--border); border-radius:8px; display:none; align-items:center; gap:12px;">
-          <span id="batch-selected-count" style="font-size:13px; color:var(--text-secondary);"></span>
-          <button class="btn-primary" onclick="batchDeleteModels()" style="background:#e53e3e; font-size:12px; padding:4px 12px;" id="batch-delete-btn" data-i18n="batch_delete">Batch Delete</button>
-          <button class="btn-primary" onclick="clearModelSelection()" style="background:var(--text-secondary); font-size:12px; padding:4px 12px;" data-i18n="cancel">Cancel</button>
+        <div class="model-library-toolbar">
+          <span class="model-library-toolbar-title" data-i18n="model_library_title">Model library</span>
+          <button class="btn-primary" id="model-import-button" type="button" onclick="chooseModelImport()" data-i18n="import_local_model">Import local model</button>
+        </div>
+        <div class="model-import-status" id="model-import-status" role="status" aria-live="polite">
+          <span id="model-import-status-text"></span>
+          <progress id="model-import-progress" max="100" value="0"></progress>
+          <button class="btn-secondary" type="button" onclick="cancelModelImport()" data-i18n="cancel">Cancel</button>
         </div>
         <div class="data-table-wrapper">
+        <div class="model-import-empty" id="model-import-empty" style="display:none;">
+          <div data-i18n="model_library_empty">No models in your library yet.</div>
+          <div class="model-import-empty-actions">
+            <button class="btn-primary" type="button" onclick="chooseModelImport()" data-i18n="import_local_model">Import local model</button>
+            <button class="btn-secondary" type="button" onclick="switchToTab('models-download')" data-i18n="model_download">Model Download</button>
+          </div>
+        </div>
         <table class="data-table" id="model-table">
           <colgroup>
-            <col class="col-select" style="width:44px; min-width:44px; max-width:44px;">
             <col class="col-model" style="width:32%;">
             <col class="col-type" style="width:8%;">
             <col class="col-quant" style="width:8%;">
@@ -3747,7 +3801,6 @@
           </colgroup>
           <thead>
             <tr>
-              <th><input type="checkbox" id="select-all-models" onchange="toggleSelectAllModels(this)" style="accent-color:var(--accent);"></th>
               <th data-i18n="col_model" data-resizable="true">Model &#9650;</th>
               <th data-i18n="col_type" data-resizable="true">Type</th>
               <th data-i18n="col_quant" data-resizable="true">Quant</th>
@@ -5401,6 +5454,42 @@
   </div>
 </div>
 
+<!-- Import Existing Model -->
+<div class="modal-overlay" id="model-import-modal">
+  <div class="modal model-import-dialog" role="dialog" aria-modal="true" aria-labelledby="model-import-title" aria-describedby="model-import-note">
+    <button class="modal-close" type="button" onclick="closeModelImport()" aria-label="Close">&times;</button>
+    <div class="modal-header">
+      <h2 id="model-import-title" data-i18n="import_local_model">Import local model</h2>
+      <p class="model-import-note" id="model-import-note" data-i18n="model_import_copy_note">IronMLX will copy this model into its managed model library. Your original files will stay in place.</p>
+    </div>
+    <div class="modal-body">
+      <div class="model-import-identity">
+        <strong class="model-import-name" id="model-import-name"></strong>
+        <span class="model-import-type" id="model-import-type"></span>
+      </div>
+      <div class="model-import-paths">
+        <div class="model-import-path">
+          <span class="model-import-path-label" data-i18n="model_import_source">Source</span>
+          <span class="model-import-path-value" id="model-import-source"></span>
+        </div>
+        <div class="model-import-path destination">
+          <span class="model-import-path-label" data-i18n="model_import_destination">Destination</span>
+          <span class="model-import-path-value" id="model-import-destination"></span>
+        </div>
+      </div>
+      <div class="model-import-facts">
+        <span><span data-i18n="model_import_size">Copy size</span> <strong id="model-import-size"></strong></span>
+        <span id="model-import-files"></span>
+        <span id="model-import-available"></span>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-cancel" type="button" onclick="closeModelImport()" data-i18n="cancel">Cancel</button>
+      <button class="btn-primary" type="button" onclick="confirmModelImport()" data-i18n="model_import_copy">Copy to IronMLX</button>
+    </div>
+  </div>
+</div>
+
 <script>
   // ── i18n translations ──
   const I18N = {
@@ -5611,15 +5700,16 @@
       server_status: "Server Status", running: "Running", uptime: "Uptime", model: "Model",
       gpu_memory: "GPU Memory", requests: "Requests", active_mem: "Active", peak_mem: "Peak", cache_mem: "Cache", stopped: "Stopped",
       models_subtitle: "Manage, download, and configure model scheduling.", model_manager: "Model Manager", model_download: "Model Download", scheduler_profile_tab: "Scheduling",
+      model_library_title: "Model library", import_local_model: "Import local model", model_library_empty: "No models in your library yet.",
+      model_import_copy_note: "IronMLX will copy this model into its managed model library. Your original files will stay in place.", model_import_name: "Model", model_import_source: "Source", model_import_destination: "Destination", model_import_size: "Copy size", model_import_type: "Model type", model_import_copy: "Copy to IronMLX", model_import_inspecting: "Checking model files…", model_import_progress: "Copying model… {pct}%", model_import_verifying: "Verifying copied files… {pct}%", model_import_preparing: "Preparing model resources…", model_import_done: "Imported {name}.", model_import_cancelled: "Model import cancelled.", model_import_files: "{count} files", model_import_available: "Free space {size}", model_import_source_badge: "Imported model",
       col_model: "Model \u25B2", col_type: "Type", col_quant: "Quant", quant_unquantized: "Unquantized", quant_unknown: "Unknown", col_size: "Size", col_status: "Status", col_pinned: "Pinned", col_default: "Default", col_params: "Params", status_ready: "Not loaded",
       status_incomplete: "Incomplete", status_unsupported: "Unsupported", model_not_ready: "Model snapshot is not ready to load.", action_unavailable: "Unavailable",
-      batch_delete: "Batch Delete", cancel: "Cancel", selected_count: "{n} selected",
+      cancel: "Cancel",
       confirm_delete_single: 'Delete model "{name}"? This cannot be undone.',
-      confirm_delete_batch: "Delete {n} selected models? This cannot be undone.",
       col_actions: "Actions", status_loaded: "Loaded", action_load: "Load", action_unload: "Unload",
       status_loading: "Loading...", status_unloading: "Unloading...",
-      status_verifying: "Verifying integrity… {pct}%", status_verified: "Verified {time}", status_corrupt: "Corrupt",
-      verify_integrity: "Verify model integrity", delete_model: "Delete model", more_actions: "More actions", manage_versions: "Manage versions",
+      status_verifying: "Verifying integrity… {pct}%", status_verified: "Verified {time}", status_verified_label: "Verified", status_corrupt: "Corrupt",
+      verify_integrity: "Verify model integrity", delete_model: "Delete model", more_actions: "More actions", manage_versions: "Manage versions", copy_model_id: "Copy model ID", model_id_copied: "Model ID copied.",
       model_versions_loading: "Loading versions…", model_versions_count: "{n} versions", reclaimable_space: "{size} reclaimable", current_version: "Current", loaded_version: "Loaded", verified_version: "Verified", unverified_version: "Unverified", corrupt_version: "Corrupt",
       activate_version: "Use this version", rollback_reload: "Roll back and reload", delete_version: "Delete version", cleanup_selected_versions: "Clean up selected versions", confirm_delete_versions: "Delete {n} selected versions and reclaim {size}? This cannot be undone.", version_activated: "Model version activated.", versions_deleted: "Selected model versions deleted.",
       local_model_exists: "✓ Exists", local_model_completed: "✓ Completed", local_model_update: "Download update", local_model_inactive: "Use local version", local_model_repair: "Repair download", local_model_identity_unavailable: "Version unavailable",
@@ -6113,15 +6203,16 @@
       server_status: "服务器状态", running: "运行中", uptime: "运行时间", model: "模型",
       gpu_memory: "GPU 内存", requests: "请求数", active_mem: "活跃", peak_mem: "峰值", cache_mem: "缓存", stopped: "已停止",
       models_subtitle: "管理、下载模型和配置模型调度。", model_manager: "模型管理", model_download: "模型下载", scheduler_profile_tab: "调度配置",
+      model_library_title: "模型库", import_local_model: "导入本地模型", model_library_empty: "模型库中还没有模型。",
+      model_import_copy_note: "IronMLX 会将模型复制到自己管理的模型库，原文件会保留。", model_import_name: "模型", model_import_source: "来源", model_import_destination: "目标位置", model_import_size: "复制大小", model_import_type: "模型类型", model_import_copy: "复制到 IronMLX", model_import_inspecting: "正在检查模型文件…", model_import_progress: "正在复制模型… {pct}%", model_import_verifying: "正在校验复制的文件… {pct}%", model_import_preparing: "正在准备模型资源…", model_import_done: "已导入 {name}。", model_import_cancelled: "已取消模型导入。", model_import_files: "{count} 个文件", model_import_available: "可用空间 {size}", model_import_source_badge: "导入的模型",
       col_model: "模型 \u25B2", col_type: "类型", col_quant: "量化", quant_unquantized: "未量化", quant_unknown: "未知", col_size: "大小", col_status: "状态", col_pinned: "固定", col_default: "默认", col_params: "参数", status_ready: "未加载",
       status_incomplete: "不完整", status_unsupported: "不支持", model_not_ready: "模型快照尚未达到可加载状态。", action_unavailable: "不可用",
-      batch_delete: "批量删除", cancel: "取消", selected_count: "已选 {n} 个",
+      cancel: "取消",
       confirm_delete_single: '确定删除模型 "{name}"？此操作不可恢复。',
-      confirm_delete_batch: "确定删除 {n} 个模型？此操作不可恢复。",
       col_actions: "操作", status_loaded: "已加载", action_load: "加载", action_unload: "卸载",
       status_loading: "加载中...", status_unloading: "卸载中...",
-      status_verifying: "正在验证完整性… {pct}%", status_verified: "已验证 {time}", status_corrupt: "已损坏",
-      verify_integrity: "验证模型完整性", delete_model: "删除模型", more_actions: "更多操作", manage_versions: "管理版本",
+      status_verifying: "正在验证完整性… {pct}%", status_verified: "已验证 {time}", status_verified_label: "已验证", status_corrupt: "已损坏",
+      verify_integrity: "验证模型完整性", delete_model: "删除模型", more_actions: "更多操作", manage_versions: "管理版本", copy_model_id: "复制模型 ID", model_id_copied: "已复制模型 ID。",
       model_versions_loading: "正在加载版本…", model_versions_count: "共 {n} 个版本", reclaimable_space: "可释放 {size}", current_version: "当前版本", loaded_version: "已加载", verified_version: "已验证", unverified_version: "未验证", corrupt_version: "已损坏",
       activate_version: "切换到此版本", rollback_reload: "回滚并重新加载", delete_version: "删除版本", cleanup_selected_versions: "清理所选版本", confirm_delete_versions: "确定删除所选 {n} 个版本并释放 {size}？此操作不可恢复。", version_activated: "模型版本已切换。", versions_deleted: "所选模型版本已删除。",
       local_model_exists: "✓ 已存在", local_model_completed: "✓ 已完成", local_model_update: "下载新版本", local_model_inactive: "设为当前版本", local_model_repair: "修复下载", local_model_identity_unavailable: "版本身份无法确认",
@@ -6615,15 +6706,16 @@
       server_status: "伺服器狀態", running: "執行中", uptime: "執行時間", model: "模型",
       gpu_memory: "GPU 記憶體", requests: "請求數", active_mem: "活躍", peak_mem: "峰值", cache_mem: "快取", stopped: "已停止",
       models_subtitle: "管理、下載模型和設定模型調度。", model_manager: "模型管理", model_download: "模型下載", scheduler_profile_tab: "調度設定",
+      model_library_title: "模型庫", import_local_model: "匯入本機模型", model_library_empty: "模型庫中尚無模型。",
+      model_import_copy_note: "IronMLX 會將模型複製到受管理的模型庫，原始檔案會保留。", model_import_name: "模型", model_import_source: "來源", model_import_destination: "目標位置", model_import_size: "複製大小", model_import_type: "模型類型", model_import_copy: "複製到 IronMLX", model_import_inspecting: "正在檢查模型檔案…", model_import_progress: "正在複製模型… {pct}%", model_import_verifying: "正在驗證複製的檔案… {pct}%", model_import_preparing: "正在準備模型資源…", model_import_done: "已匯入 {name}。", model_import_cancelled: "已取消模型匯入。", model_import_files: "{count} 個檔案", model_import_available: "可用空間 {size}", model_import_source_badge: "匯入的模型",
       col_model: "模型 \u25B2", col_type: "類型", col_quant: "量化", quant_unquantized: "未量化", quant_unknown: "未知", col_size: "大小", col_status: "狀態", col_pinned: "固定", col_default: "預設", col_params: "參數", status_ready: "未載入",
       status_incomplete: "不完整", status_unsupported: "不支援", model_not_ready: "模型快照尚未達到可載入狀態。", action_unavailable: "不可用",
-      batch_delete: "批量刪除", cancel: "取消", selected_count: "已選 {n} 個",
+      cancel: "取消",
       confirm_delete_single: '確定刪除模型 "{name}"？此操作不可復原。',
-      confirm_delete_batch: "確定刪除 {n} 個模型？此操作不可復原。",
       col_actions: "操作", status_loaded: "已載入", action_load: "載入", action_unload: "卸載",
       status_loading: "載入中...", status_unloading: "卸載中...",
-      status_verifying: "正在驗證完整性… {pct}%", status_verified: "已驗證 {time}", status_corrupt: "已損壞",
-      verify_integrity: "驗證模型完整性", delete_model: "刪除模型", more_actions: "更多操作", manage_versions: "管理版本",
+      status_verifying: "正在驗證完整性… {pct}%", status_verified: "已驗證 {time}", status_verified_label: "已驗證", status_corrupt: "已損壞",
+      verify_integrity: "驗證模型完整性", delete_model: "刪除模型", more_actions: "更多操作", manage_versions: "管理版本", copy_model_id: "複製模型 ID", model_id_copied: "已複製模型 ID。",
       model_versions_loading: "正在載入版本…", model_versions_count: "共 {n} 個版本", reclaimable_space: "可釋放 {size}", current_version: "目前版本", loaded_version: "已載入", verified_version: "已驗證", unverified_version: "未驗證", corrupt_version: "已損壞",
       activate_version: "切換到此版本", rollback_reload: "回滾並重新載入", delete_version: "刪除版本", cleanup_selected_versions: "清理所選版本", confirm_delete_versions: "確定刪除所選 {n} 個版本並釋放 {size}？此操作無法復原。", version_activated: "模型版本已切換。", versions_deleted: "所選模型版本已刪除。",
       local_model_exists: "✓ 已存在", local_model_completed: "✓ 已完成", local_model_update: "下載新版本", local_model_inactive: "設為目前版本", local_model_repair: "修復下載", local_model_identity_unavailable: "無法確認版本身分",
@@ -7120,15 +7212,16 @@
       server_status: "サーバーステータス", running: "実行中", uptime: "稼働時間", model: "モデル",
       gpu_memory: "GPU メモリ", requests: "リクエスト", active_mem: "アクティブ", peak_mem: "ピーク", cache_mem: "キャッシュ", stopped: "停止中",
       models_subtitle: "モデルの管理、ダウンロード、スケジューリング設定。", model_manager: "モデル管理", model_download: "モデルダウンロード", scheduler_profile_tab: "スケジューラ設定",
+      model_library_title: "モデルライブラリ", import_local_model: "ローカルモデルを読み込む", model_library_empty: "モデルライブラリは空です。",
+      model_import_copy_note: "IronMLX が管理するモデルライブラリにコピーします。元のファイルは残ります。", model_import_name: "モデル", model_import_source: "コピー元", model_import_destination: "コピー先", model_import_size: "コピーサイズ", model_import_type: "モデルの種類", model_import_copy: "IronMLX にコピー", model_import_inspecting: "モデルファイルを確認中…", model_import_progress: "モデルをコピー中… {pct}%", model_import_verifying: "コピーしたファイルを検証中… {pct}%", model_import_preparing: "モデルリソースを準備中…", model_import_done: "{name} を読み込みました。", model_import_cancelled: "モデルの読み込みをキャンセルしました。", model_import_files: "{count} ファイル", model_import_available: "空き容量 {size}", model_import_source_badge: "読み込んだモデル",
       col_model: "モデル \u25B2", col_type: "タイプ", col_quant: "量子化", quant_unquantized: "量子化なし", quant_unknown: "不明", col_size: "サイズ", col_status: "ステータス", col_pinned: "固定", col_default: "デフォルト", col_params: "パラメータ", status_ready: "未ロード",
       status_incomplete: "不完全", status_unsupported: "未対応", model_not_ready: "モデルスナップショットはまだロード可能な状態ではありません。", action_unavailable: "利用不可",
-      batch_delete: "一括削除", cancel: "キャンセル", selected_count: "{n} 件選択中",
+      cancel: "キャンセル",
       confirm_delete_single: 'モデル "{name}" を削除しますか？この操作は元に戻せません。',
-      confirm_delete_batch: "{n} 件のモデルを削除しますか？この操作は元に戻せません。",
       col_actions: "アクション", status_loaded: "ロード済み", action_load: "ロード", action_unload: "アンロード",
       status_loading: "ロード中...", status_unloading: "アンロード中...",
-      status_verifying: "整合性を検証中… {pct}%", status_verified: "検証済み {time}", status_corrupt: "破損",
-      verify_integrity: "モデルの整合性を検証", delete_model: "モデルを削除", more_actions: "その他の操作", manage_versions: "バージョン管理",
+      status_verifying: "整合性を検証中… {pct}%", status_verified: "検証済み {time}", status_verified_label: "検証済み", status_corrupt: "破損",
+      verify_integrity: "モデルの整合性を検証", delete_model: "モデルを削除", more_actions: "その他の操作", manage_versions: "バージョン管理", copy_model_id: "モデル ID をコピー", model_id_copied: "モデル ID をコピーしました。",
       model_versions_loading: "バージョンを読み込み中…", model_versions_count: "{n} バージョン", reclaimable_space: "{size} 解放可能", current_version: "現在", loaded_version: "ロード済み", verified_version: "検証済み", unverified_version: "未検証", corrupt_version: "破損",
       activate_version: "このバージョンを使用", rollback_reload: "ロールバックして再ロード", delete_version: "バージョンを削除", cleanup_selected_versions: "選択したバージョンを整理", confirm_delete_versions: "選択した {n} バージョンを削除して {size} 解放しますか？元に戻せません。", version_activated: "モデルバージョンを切り替えました。", versions_deleted: "選択したモデルバージョンを削除しました。",
       local_model_exists: "✓ 既存", local_model_completed: "✓ 完了", local_model_update: "新バージョンを取得", local_model_inactive: "ローカル版を使用", local_model_repair: "再ダウンロード", local_model_identity_unavailable: "バージョンを確認できません",
@@ -7625,15 +7718,16 @@
       server_status: "서버 상태", running: "실행 중", uptime: "가동 시간", model: "모델",
       gpu_memory: "GPU 메모리", requests: "요청", active_mem: "활성", peak_mem: "피크", cache_mem: "캐시", stopped: "중지됨",
       models_subtitle: "모델 관리, 다운로드 및 스케줄링 설정.", model_manager: "모델 관리", model_download: "모델 다운로드", scheduler_profile_tab: "스케줄러 설정",
+      model_library_title: "모델 라이브러리", import_local_model: "로컬 모델 가져오기", model_library_empty: "모델 라이브러리가 비어 있습니다.",
+      model_import_copy_note: "IronMLX 관리 모델 라이브러리에 복사합니다. 원본 파일은 유지됩니다.", model_import_name: "모델", model_import_source: "원본", model_import_destination: "대상", model_import_size: "복사 크기", model_import_type: "모델 유형", model_import_copy: "IronMLX에 복사", model_import_inspecting: "모델 파일 확인 중…", model_import_progress: "모델 복사 중… {pct}%", model_import_verifying: "복사한 파일 확인 중… {pct}%", model_import_preparing: "모델 리소스 준비 중…", model_import_done: "{name} 가져오기 완료.", model_import_cancelled: "모델 가져오기를 취소했습니다.", model_import_files: "파일 {count}개", model_import_available: "여유 공간 {size}", model_import_source_badge: "가져온 모델",
       col_model: "모델 \u25B2", col_type: "유형", col_quant: "양자화", quant_unquantized: "양자화되지 않음", quant_unknown: "알 수 없음", col_size: "크기", col_status: "상태", col_pinned: "고정", col_default: "기본", col_params: "매개변수", status_ready: "로드 안 됨",
       status_incomplete: "불완전", status_unsupported: "지원 안 됨", model_not_ready: "모델 스냅샷을 아직 로드할 수 없습니다.", action_unavailable: "사용 불가",
-      batch_delete: "일괄 삭제", cancel: "취소", selected_count: "{n}개 선택됨",
+      cancel: "취소",
       confirm_delete_single: '모델 "{name}"을(를) 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.',
-      confirm_delete_batch: "{n}개의 모델을 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.",
       col_actions: "작업", status_loaded: "로드됨", action_load: "로드", action_unload: "언로드",
       status_loading: "로딩 중...", status_unloading: "언로드 중...",
-      status_verifying: "무결성 확인 중… {pct}%", status_verified: "확인됨 {time}", status_corrupt: "손상됨",
-      verify_integrity: "모델 무결성 확인", delete_model: "모델 삭제", more_actions: "추가 작업", manage_versions: "버전 관리",
+      status_verifying: "무결성 확인 중… {pct}%", status_verified: "확인됨 {time}", status_verified_label: "확인됨", status_corrupt: "손상됨",
+      verify_integrity: "모델 무결성 확인", delete_model: "모델 삭제", more_actions: "추가 작업", manage_versions: "버전 관리", copy_model_id: "모델 ID 복사", model_id_copied: "모델 ID를 복사했습니다.",
       model_versions_loading: "버전을 불러오는 중…", model_versions_count: "{n}개 버전", reclaimable_space: "{size} 확보 가능", current_version: "현재", loaded_version: "로드됨", verified_version: "검증됨", unverified_version: "미검증", corrupt_version: "손상됨",
       activate_version: "이 버전 사용", rollback_reload: "롤백 후 다시 로드", delete_version: "버전 삭제", cleanup_selected_versions: "선택한 버전 정리", confirm_delete_versions: "선택한 {n}개 버전을 삭제하고 {size}를 확보하시겠습니까? 되돌릴 수 없습니다.", version_activated: "모델 버전을 전환했습니다.", versions_deleted: "선택한 모델 버전을 삭제했습니다.",
       local_model_exists: "✓ 존재함", local_model_completed: "✓ 완료", local_model_update: "새 버전 다운로드", local_model_inactive: "로컬 버전 사용", local_model_repair: "다시 다운로드", local_model_identity_unavailable: "버전을 확인할 수 없음",
@@ -8450,35 +8544,95 @@
   }
 
   // ── Model Selection & Deletion ──
-  function toggleSelectAllModels(el) {
-    document.querySelectorAll('.model-checkbox').forEach(cb => { cb.checked = el.checked; });
-    updateModelSelection();
+  let modelImportBusy = false;
+
+  function chooseModelImport() {
+    if (modelImportBusy) return;
+    window.webkit?.messageHandlers?.chooseModelImport?.postMessage('');
   }
 
-  function updateModelSelection() {
-    const dict = I18N[currentLang] || I18N.en;
-    const checked = document.querySelectorAll('.model-checkbox:checked');
-    const bar = document.getElementById('batch-action-bar');
-    const allCbs = document.querySelectorAll('.model-checkbox');
-    const selectAll = document.getElementById('select-all-models');
-    if (selectAll) selectAll.checked = allCbs.length > 0 && checked.length === allCbs.length;
-    if (checked.length > 0) {
-      bar.style.display = 'flex';
-      document.getElementById('batch-selected-count').textContent = (dict.selected_count || '{n} selected').replace('{n}', checked.length);
-    } else {
-      bar.style.display = 'none';
+  function onModelImportInspecting() {
+    modelImportBusy = true;
+    document.getElementById('model-import-button').disabled = true;
+    const status = document.getElementById('model-import-status');
+    status.classList.add('visible');
+    document.getElementById('model-import-status-text').textContent = t('model_import_inspecting');
+    document.getElementById('model-import-progress').removeAttribute('value');
+  }
+
+  function onModelImportPreview(jsonStr) {
+    const preview = JSON.parse(jsonStr);
+    modelImportBusy = false;
+    document.getElementById('model-import-button').disabled = false;
+    document.getElementById('model-import-status').classList.remove('visible');
+    document.getElementById('model-import-name').textContent = preview.name;
+    document.getElementById('model-import-source').textContent = preview.source;
+    document.getElementById('model-import-destination').textContent = preview.destination;
+    document.getElementById('model-import-size').textContent = formatVersionBytes(preview.totalBytes);
+    document.getElementById('model-import-files').textContent = t('model_import_files').replace('{count}', preview.fileCount);
+    document.getElementById('model-import-available').textContent = preview.availableBytes == null
+      ? '' : t('model_import_available').replace('{size}', formatVersionBytes(preview.availableBytes));
+    document.getElementById('model-import-type').textContent = preview.modelType;
+    document.getElementById('model-import-modal').classList.add('open');
+  }
+
+  function closeModelImport() {
+    document.getElementById('model-import-modal').classList.remove('open');
+    window.webkit?.messageHandlers?.cancelModelImport?.postMessage('');
+  }
+
+  function confirmModelImport() {
+    document.getElementById('model-import-modal').classList.remove('open');
+    modelImportBusy = true;
+    document.getElementById('model-import-button').disabled = true;
+    document.getElementById('model-import-status').classList.add('visible');
+    document.getElementById('model-import-status-text').textContent = t('model_import_progress').replace('{pct}', '0');
+    document.getElementById('model-import-progress').value = 0;
+    window.webkit?.messageHandlers?.confirmModelImport?.postMessage('');
+  }
+
+  function onModelImportProgress(jsonStr) {
+    if (!modelImportBusy) return;
+    const status = JSON.parse(jsonStr);
+    const pct = status.totalBytes > 0 ? Math.min(100, Math.round(100 * status.completedBytes / status.totalBytes)) : 100;
+    const label = status.phase === 'verifying' ? t('model_import_verifying')
+      : status.phase === 'preparing' ? t('model_import_preparing') : t('model_import_progress');
+    document.getElementById('model-import-status-text').textContent =
+      label.replace('{pct}', pct) + ' · ' + status.currentFile;
+    document.getElementById('model-import-progress').value = pct;
+  }
+
+  function cancelModelImport() {
+    window.webkit?.messageHandlers?.cancelModelImport?.postMessage('');
+    document.getElementById('model-import-status-text').textContent = t('model_import_cancelled');
+  }
+
+  function finishModelImport() {
+    modelImportBusy = false;
+    document.getElementById('model-import-button').disabled = false;
+    document.getElementById('model-import-status').classList.remove('visible');
+  }
+
+  function onModelImportComplete(modelId) {
+    finishModelImport();
+    const row = Array.from(document.querySelectorAll('#model-table tbody tr'))
+      .find(tr => tr.dataset.modelId === modelId);
+    if (row) {
+      row.classList.add('model-just-imported');
+      row.scrollIntoView({block:'nearest'});
+      setTimeout(() => row.classList.remove('model-just-imported'), 4000);
     }
+    showToast(t('model_import_done').replace('{name}', modelId), 'success');
   }
 
-  function clearModelSelection() {
-    document.querySelectorAll('.model-checkbox').forEach(cb => { cb.checked = false; });
-    const selectAll = document.getElementById('select-all-models');
-    if (selectAll) selectAll.checked = false;
-    document.getElementById('batch-action-bar').style.display = 'none';
+  function onModelImportCancelled() {
+    finishModelImport();
+    showToast(t('model_import_cancelled'), 'info');
   }
 
-  function getSelectedModelIds() {
-    return Array.from(document.querySelectorAll('.model-checkbox:checked')).map(cb => cb.value);
+  function onModelImportError(message) {
+    finishModelImport();
+    showToast(message, 'warn', 8000);
   }
 
   function deleteSingleModel(modelId) {
@@ -8486,16 +8640,6 @@
     const msg = (dict.confirm_delete_single || 'Delete model "{name}"? This cannot be undone.').replace('{name}', modelId);
     showConfirmDialog(msg, { confirmText: dict.delete_btn || 'Delete', danger: true }).then(function(ok) {
       if (ok) deleteModelsViaRust([modelId]);
-    });
-  }
-
-  function batchDeleteModels() {
-    const dict = I18N[currentLang] || I18N.en;
-    const ids = getSelectedModelIds();
-    if (ids.length === 0) return;
-    const msg = (dict.confirm_delete_batch || 'Delete {n} selected models? This cannot be undone.').replace('{n}', ids.length);
-    showConfirmDialog(msg, { confirmText: dict.delete_btn || 'Delete', danger: true }).then(function(ok) {
-      if (ok) deleteModelsViaRust(ids);
     });
   }
 
@@ -8515,8 +8659,6 @@
       return;
     }
     showToast(dict.model_deleted || 'Model deleted successfully.', 'success');
-    clearModelSelection();
-    syncModelList();
   }
 
   // ── Model Load / Unload ──
@@ -9923,6 +10065,7 @@
   let activeModelVersionList = null;
 
   function modelProvider(model) {
+    if (model && model.source === 'standalone') return 'standalone';
     return model && model.source === 'ms' ? 'modelscope' : 'huggingface';
   }
 
@@ -10802,10 +10945,14 @@
     const dict = I18N[currentLang] || I18N.en;
     const mtp = model.mtp || {};
     if (mtp.enabled) {
-      return ' <span class="badge badge-mtp badge-mtp-enabled" title="' + (dict.mtp_badge_enabled_title || 'Loaded with MTP acceleration') + '">' + (dict.mtp_badge_enabled || 'MTP') + '</span>';
+      return ' <span class="badge badge-mtp badge-mtp-enabled"'
+        + modelColumnTooltipAttributes(dict.mtp_badge_enabled_title || 'Loaded with MTP acceleration')
+        + '>' + (dict.mtp_badge_enabled || 'MTP') + '</span>';
     }
     if (mtp.status === 'available') {
-      return ' <span class="badge badge-mtp" title="' + (dict.mtp_badge_available_title || 'Compatible MTP weights are available') + '">' + (dict.mtp_badge_available || 'MTP available') + '</span>';
+      return ' <span class="badge badge-mtp"'
+        + modelColumnTooltipAttributes(dict.mtp_badge_available_title || 'Compatible MTP weights are available')
+        + '>' + (dict.mtp_badge_available || 'MTP available') + '</span>';
     }
     return '';
   }
@@ -10814,14 +10961,14 @@
     const dict = I18N[currentLang] || I18N.en;
     const dflash2 = model.dflash2 || {};
     if (dflash2.enabled) {
-      return ' <span class="badge badge-dflash2 badge-dflash2-enabled" title="'
-        + escapeAttr(dict.dflash2_badge_enabled_title || 'This model is running with DFlash2 acceleration.')
-        + '">' + escapeAttr(dict.dflash2_badge_enabled || 'DFlash2') + '</span>';
+      return ' <span class="badge badge-dflash2 badge-dflash2-enabled"'
+        + modelColumnTooltipAttributes(dict.dflash2_badge_enabled_title || 'This model is running with DFlash2 acceleration.')
+        + '>' + escapeAttr(dict.dflash2_badge_enabled || 'DFlash2') + '</span>';
     }
     if (dflash2.status === 'available') {
-      return ' <span class="badge badge-dflash2" title="'
-        + escapeAttr(dict.dflash2_badge_available_title || 'A compatible DFlash2 draft is available.')
-        + '">' + escapeAttr(dict.dflash2_badge_available || 'DFlash2') + '</span>';
+      return ' <span class="badge badge-dflash2"'
+        + modelColumnTooltipAttributes(dict.dflash2_badge_available_title || 'A compatible DFlash2 draft is available.')
+        + '>' + escapeAttr(dict.dflash2_badge_available || 'DFlash2') + '</span>';
     }
     return '';
   }
@@ -10861,43 +11008,37 @@
       return {
         dot: 'model-busy',
         text: (dict.status_verifying || 'Verifying integrity… {pct}%').replace('{pct}', pct),
-        title: integrity.current_file || ''
+        title: ''
       };
     }
     if ((integrity && integrity.state === 'corrupt') || modelReadiness(model).status === 'corrupt') {
       return {
         dot: 'model-corrupt',
         text: dict.status_corrupt || 'Corrupt',
-        title: (integrity && integrity.error) || modelReadinessTitle(model)
+        title: ''
       };
     }
     const readiness = modelReadiness(model);
     if (readiness.status === 'unsupported' || readiness.status === 'incomplete') {
       const text = readiness.status === 'incomplete' ? dict.status_incomplete : dict.status_unsupported;
-      return { dot: readiness.status === 'incomplete' ? 'model-incomplete' : 'model-unsupported', text: text, title: modelReadinessTitle(model) };
+      return { dot: readiness.status === 'incomplete' ? 'model-incomplete' : 'model-unsupported', text: text, title: readiness.status === 'incomplete' ? '' : modelReadinessTitle(model) };
     }
-    if (readiness.status === 'unverified') {
-      return { dot: 'model-incomplete', text: dict.action_unavailable || 'Unavailable', title: modelReadinessTitle(model) };
-    }
-    if (integrity && integrity.state === 'verified' && integrity.verified_at) {
-      const verifiedText = (dict.status_verified || 'Verified {time}')
-        .replace('{time}', formatIntegrityTime(integrity.verified_at));
-      return {
-        dot: isLoaded ? 'model-loaded' : 'model-ready',
-        text: isLoaded ? (dict.status_loaded || 'Loaded') + ' · ' + verifiedText : verifiedText,
-        title: verifiedText
-      };
+    let verifiedTitle = '';
+    if (integrity && integrity.state === 'verified') {
+      const verifiedLabel = dict.status_verified_label || 'Verified';
+      const verifiedTime = formatIntegrityTime(integrity.verified_at);
+      verifiedTitle = verifiedTime
+        ? (dict.status_verified || 'Verified {time}').replace('{time}', verifiedTime)
+        : verifiedLabel;
     }
     if (isLoaded) {
-      return { dot: 'model-loaded', text: dict.status_loaded || 'Loaded', title: '' };
+      return { dot: 'model-loaded', text: dict.status_loaded || 'Loaded', title: verifiedTitle };
     }
-    if (readiness.status === 'incomplete') {
-      return { dot: 'model-incomplete', text: dict.status_incomplete || 'Incomplete', title: modelReadinessTitle(model) };
-    }
-    if (readiness.status === 'unsupported') {
-      return { dot: 'model-unsupported', text: dict.status_unsupported || 'Unsupported', title: modelReadinessTitle(model) };
-    }
-    return { dot: 'model-ready', text: dict.status_ready || 'Ready', title: modelReadinessTitle(model) };
+    return {
+      dot: readiness.status === 'unverified' ? 'model-incomplete' : 'model-ready',
+      text: dict.status_ready || 'Not loaded',
+      title: verifiedTitle
+    };
   }
 
   function updateModelIntegrityRow(modelId) {
@@ -10909,7 +11050,11 @@
     const status = modelStatusPresentation(model, !!model.loaded);
     const cell = row.querySelector('.model-status-cell');
     if (!cell) return;
-    cell.title = status.title || '';
+    cell.dataset.statusTooltip = status.title || '';
+    cell.tabIndex = status.title ? 0 : -1;
+    if (document.getElementById('model-table-tooltip')?.__target === cell) {
+      showModelStatusTooltip(cell);
+    }
     const dot = cell.querySelector('.status-dot');
     const label = cell.querySelector('.model-status-text');
     if (dot) dot.className = 'status-dot ' + status.dot;
@@ -11015,6 +11160,8 @@
       ? ['M6 3h8l4 4v14H6V3Z', 'M14 3v5h4', 'm9 14 2 2 4-4']
       : kind === 'versions'
         ? ['M7 4h12v14H7', 'M4 7v14h12', 'M10 8h6', 'M10 12h6']
+        : kind === 'copy'
+          ? ['M8 4h12v15H8z', 'M5 7H4v14h12v-1']
         : ['M3 6h18', 'M8 6V4h8v2', 'M19 6l-1 15H6L5 6', 'M10 10v7', 'M14 10v7'];
     paths.forEach(function(pathData) {
       const path = document.createElementNS(namespace, 'path');
@@ -11067,6 +11214,21 @@
       openModelVersions(modelId);
     });
 
+    const copyButton = document.createElement('button');
+    copyButton.type = 'button';
+    copyButton.className = 'model-more-copy-id';
+    copyButton.setAttribute('role', 'menuitem');
+    copyButton.appendChild(createModelMoreActionIcon('copy'));
+    const copyLabel = document.createElement('span');
+    copyLabel.textContent = dict.copy_model_id || 'Copy model ID';
+    copyButton.appendChild(copyLabel);
+    copyButton.addEventListener('click', function(menuEvent) {
+      menuEvent.stopPropagation();
+      const copied = copyToClipboard(modelId);
+      closeModelMoreActions();
+      if (copied) showToast(dict.model_id_copied || 'Model ID copied.', 'success');
+    });
+
     const deleteButton = document.createElement('button');
     deleteButton.type = 'button';
     deleteButton.className = 'model-more-delete';
@@ -11083,6 +11245,7 @@
 
     menu.appendChild(verifyButton);
     menu.appendChild(versionsButton);
+    menu.appendChild(copyButton);
     menu.appendChild(deleteButton);
     document.body.appendChild(menu);
     activeModelMoreMenu = menu;
@@ -11165,19 +11328,18 @@
     return quant.label || (I18N[currentLang] || I18N.en).quant_unknown || 'Unknown';
   }
 
-  function hideQuantizationTooltip() {
-    const tooltip = document.getElementById('quantization-tooltip');
+  function hideModelTableTooltip() {
+    const tooltip = document.getElementById('model-table-tooltip');
     if (!tooltip) return;
     if (tooltip.__target) tooltip.__target.removeAttribute('aria-describedby');
     tooltip.__target = null;
     tooltip.hidden = true;
   }
 
-  function showQuantizationTooltip(target) {
-    hideQuantizationTooltip();
-    const text = target?.dataset?.quantTooltip;
+  function showModelTableTooltip(target, text) {
+    hideModelTableTooltip();
     if (!text || target.hidden) return;
-    const tooltip = document.getElementById('quantization-tooltip');
+    const tooltip = document.getElementById('model-table-tooltip');
     if (!tooltip) return;
     tooltip.textContent = text;
     tooltip.hidden = false;
@@ -11191,6 +11353,24 @@
     if (top < 8) top = rect.bottom + gap;
     tooltip.style.left = Math.max(8, Math.min(left, window.innerWidth - size.width - 8)) + 'px';
     tooltip.style.top = Math.max(8, Math.min(top, window.innerHeight - size.height - 8)) + 'px';
+  }
+
+  function hideQuantizationTooltip() { hideModelTableTooltip(); }
+  function showQuantizationTooltip(target) {
+    showModelTableTooltip(target, target?.dataset?.quantTooltip);
+  }
+  function showModelStatusTooltip(target) {
+    showModelTableTooltip(target, target?.dataset?.statusTooltip);
+  }
+
+  function showModelColumnTooltip(target) {
+    showModelTableTooltip(target, target?.dataset?.modelTooltip);
+  }
+
+  function modelColumnTooltipAttributes(text) {
+    return ' data-model-tooltip="' + escapeAttr(text) + '" tabindex="0"'
+      + ' onmouseenter="showModelColumnTooltip(this)" onmouseleave="hideModelTableTooltip()"'
+      + ' onfocus="showModelColumnTooltip(this)" onblur="hideModelTableTooltip()"';
   }
 
   function renderQuantBadge(model) {
@@ -11273,10 +11453,16 @@
     models.forEach(m => { if (m && m.id) window.__LOCAL_MODELS__[m.id] = m; });
     const defaultModel = window.__DEFAULT_MODEL__ || '';
     const tbody = document.querySelector('#tab-models-manage tbody');
+    const empty = document.getElementById('model-import-empty');
+    if (empty) empty.style.display = models.length ? 'none' : '';
+    const table = document.getElementById('model-table');
+    if (table) table.style.display = models.length ? '' : 'none';
+    if (tbody) hideModelTableTooltip();
+    if (tbody && models.length === 0) tbody.innerHTML = '';
     if (tbody && models.length > 0) {
       tbody.innerHTML = '';
       models.filter(m => (m.type || 'llm') !== 'mtp').forEach(m => {
-        const displayName = m.id;
+        const displayName = m.display_name || m.id;
         const isDefault = (m.id === defaultModel);
         const isLoaded = m.loaded;
         const readiness = modelReadiness(m);
@@ -11288,17 +11474,24 @@
         const tr = document.createElement('tr');
         tr.dataset.modelId = m.id;
         tr.classList.toggle("tts-model-row", m.type === "tts");
-        const msIcon = '<svg height="14" viewBox="0 0 24 24" width="14" xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle;opacity:0.7;" title="ModelScope"><path d="M0 7.967h2.667v2.667H0zM8 10.633h2.667V13.3H8z" fill="#36CED0"></path><path d="M0 10.633h2.667V13.3H0zM2.667 13.3h2.666v2.667H8v2.666H2.667V13.3zM2.667 5.3H8v2.667H5.333v2.666H2.667V5.3zM10.667 13.3h2.667v2.667h-2.667z" fill="#624AFF"></path><path d="M24 7.967h-2.667v2.667H24zM16 10.633h-2.667V13.3H16z" fill="#36CED0"></path><path d="M24 10.633h-2.667V13.3H24zM21.333 13.3h-2.666v2.667H16v2.666h5.333V13.3zM21.333 5.3H16v2.667h2.667v2.666h2.666V5.3z" fill="#624AFF"></path></svg>';
-        const hfIcon = '<svg height="14" width="14" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle;opacity:0.8;" title="HuggingFace"><path d="M2.25 11.535c0-3.407 1.847-6.554 4.844-8.258a9.822 9.822 0 019.687 0c2.997 1.704 4.844 4.851 4.844 8.258 0 5.266-4.337 9.535-9.687 9.535S2.25 16.8 2.25 11.535z" fill="#FF9D0B"/><path d="M11.938 20.086c4.797 0 8.687-3.829 8.687-8.551 0-4.722-3.89-8.55-8.687-8.55-4.798 0-8.688 3.828-8.688 8.55 0 4.722 3.89 8.55 8.688 8.55z" fill="#FFD21E"/><path d="M14.76 9.21c.32.108.445.753.767.585.447-.233.707-.708.659-1.204a1.235 1.235 0 00-.879-1.059 1.262 1.262 0 00-1.33.394c-.322.384-.377.92-.14 1.36.153.283.638-.177.925-.079zm-5.887 0c-.32.108-.448.753-.768.585a1.226 1.226 0 01-.658-1.204c.048-.495.395-.913.878-1.059a1.262 1.262 0 011.33.394c.322.384.377.92.14 1.36-.152.283-.64-.177-.925-.079z" fill="#3A3B45"/></svg>';
-        var sourceIcon = m.source === 'ms' ? msIcon : hfIcon;
-        tr.innerHTML = '<td><input type="checkbox" class="model-checkbox" value="' + escaped + '" onchange="updateModelSelection()" style="accent-color:var(--accent);"></td>'
-          + '<td><div class="model-name">' + sourceIcon + '<span class="model-name-text">' + displayName + '</span>' + renderMtpBadge(m) + renderDFlash2Badge(m)
-          + (isLoaded && !(m.dflash2 && m.dflash2.enabled) ? ' <button class="icon-btn pin-btn' + (m.pinned ? ' pinned' : '') + '" onclick="event.stopPropagation();togglePin(\'' + escapedSq + '\', this)" data-model="' + escaped + '" title="' + escapeAttr(pinTooltip(m.pinned)) + '" style="vertical-align:middle;padding:0 2px;font-size:13px;opacity:' + (m.pinned ? '1' : '0.4') + '">&#x1F4CC;</button>' : '')
+        const msIcon = '<svg height="14" viewBox="0 0 24 24" width="14" xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle;opacity:0.7;" aria-hidden="true"><path d="M0 7.967h2.667v2.667H0zM8 10.633h2.667V13.3H8z" fill="#36CED0"></path><path d="M0 10.633h2.667V13.3H0zM2.667 13.3h2.666v2.667H8v2.666H2.667V13.3zM2.667 5.3H8v2.667H5.333v2.666H2.667V5.3zM10.667 13.3h2.667v2.667h-2.667z" fill="#624AFF"></path><path d="M24 7.967h-2.667v2.667H24zM16 10.633h-2.667V13.3H16z" fill="#36CED0"></path><path d="M24 10.633h-2.667V13.3H24zM21.333 13.3h-2.666v2.667H16v2.666h5.333V13.3zM21.333 5.3H16v2.667h2.667v2.666h2.666V5.3z" fill="#624AFF"></path></svg>';
+        const hfIcon = '<svg height="14" width="14" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle;opacity:0.8;" aria-hidden="true"><path d="M2.25 11.535c0-3.407 1.847-6.554 4.844-8.258a9.822 9.822 0 019.687 0c2.997 1.704 4.844 4.851 4.844 8.258 0 5.266-4.337 9.535-9.687 9.535S2.25 16.8 2.25 11.535z" fill="#FF9D0B"/><path d="M11.938 20.086c4.797 0 8.687-3.829 8.687-8.551 0-4.722-3.89-8.55-8.687-8.55-4.798 0-8.688 3.828-8.688 8.55 0 4.722 3.89 8.55 8.688 8.55z" fill="#FFD21E"/><path d="M14.76 9.21c.32.108.445.753.767.585.447-.233.707-.708.659-1.204a1.235 1.235 0 00-.879-1.059 1.262 1.262 0 00-1.33.394c-.322.384-.377.92-.14 1.36.153.283.638-.177.925-.079zm-5.887 0c-.32.108-.448.753-.768.585a1.226 1.226 0 01-.658-1.204c.048-.495.395-.913.878-1.059a1.262 1.262 0 011.33.394c.322.384.377.92.14 1.36-.152.283-.64-.177-.925-.079z" fill="#3A3B45"/></svg>';
+        const localIcon = '<svg height="14" width="14" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">'
+          + '<path d="M2.5 6.25A2.25 2.25 0 0 1 4.75 4h4.1L11 6.5h8.25a2.25 2.25 0 0 1 2.25 2.25v9.5a2.25 2.25 0 0 1-2.25 2.25H4.75a2.25 2.25 0 0 1-2.25-2.25v-12Z" fill="#849AB2"/>'
+          + '<path d="M2.5 9h19v9.25a2.25 2.25 0 0 1-2.25 2.25H4.75a2.25 2.25 0 0 1-2.25-2.25V9Z" fill="#B3C4D6"/></svg>';
+        var sourceIcon = m.source === 'standalone' ? localIcon : (m.source === 'ms' ? msIcon : hfIcon);
+        const sourceTooltip = m.source === 'standalone'
+          ? (dict.model_import_source_badge || 'Imported model')
+          : (m.source === 'ms' ? 'ModelScope' : 'HuggingFace');
+        tr.innerHTML = '<td><div class="model-name"><span class="model-source-icon"' + modelColumnTooltipAttributes(sourceTooltip) + '>' + sourceIcon + '</span><span class="model-name-text"' + modelColumnTooltipAttributes(m.id) + '>' + escapeHTML(displayName) + '</span>' + renderMtpBadge(m) + renderDFlash2Badge(m)
+          + (isLoaded && !(m.dflash2 && m.dflash2.enabled) ? ' <button class="icon-btn pin-btn' + (m.pinned ? ' pinned' : '') + '" onclick="event.stopPropagation();togglePin(\'' + escapedSq + '\', this)" data-model="' + escaped + '"' + modelColumnTooltipAttributes(pinTooltip(m.pinned)) + ' style="vertical-align:middle;padding:0 2px;font-size:13px;opacity:' + (m.pinned ? '1' : '0.4') + '">&#x1F4CC;</button>' : '')
           + '</div></td>'
           + '<td>' + renderModelType(m) + '</td>'
           + '<td>' + renderQuantBadge(m) + '</td>'
           + '<td>' + formatSize(m.size_mb) + '</td>'
-          + '<td class="model-status-cell" title="' + escapeAttr(status.title || modelReadinessTitle(m)) + '"><span class="status-dot ' + status.dot + '"></span> <span class="model-status-text">' + status.text + '</span></td>'
+          + '<td class="model-status-cell" data-status-tooltip="' + escapeAttr(status.title) + '"' + (status.title ? ' tabindex="0"' : '')
+          + ' onmouseenter="showModelStatusTooltip(this)" onmouseleave="hideModelTableTooltip()"'
+          + ' onfocus="showModelStatusTooltip(this)" onblur="hideModelTableTooltip()"><span class="status-dot ' + status.dot + '"></span> <span class="model-status-text">' + status.text + '</span></td>'
           + '<td><input type="radio" name="default-model" value="' + escaped + '" ' + (isDefault ? 'checked' : '') + ' ' + (!isModelLoadable(m) ? 'disabled ' : '') + 'style="accent-color:var(--accent);" onchange="setDefaultModel(this.value)"></td>'
           + '<td><button class="icon-btn" title="' + escapeAttr(dict.model_param_settings) + '" aria-label="' + escapeAttr(dict.model_param_settings) + '" onclick="openParamsModal(\'' + escapedSq + '\')"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1.5l1 2a4.5 4.5 0 0 1 1.5.9l2-.5.8 1.4-1.1 1.6a4.3 4.3 0 0 1 0 1.8l1.1 1.6-.8 1.4-2-.5a4.5 4.5 0 0 1-1.5.9l-1 2-1-2a4.5 4.5 0 0 1-1.5-.9l-2 .5-.8-1.4 1.1-1.6a4.3 4.3 0 0 1 0-1.8L2.2 5.8l.8-1.4 2 .5A4.5 4.5 0 0 1 6.5 4l1-2Z" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/><circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.1"/></svg></button></td>'
           + '<td>' + renderModelLoadActions(m, escapedSq, escaped, actionClass, actionText, isLoaded) + '</td>'
@@ -12329,17 +12522,18 @@
     }
     if (!copied) {
       showToast(t('agent_copy_failed', 'Could not copy to the clipboard.'), 'warn');
-      return;
+      return false;
     }
     if (btn) {
       if (btn.classList.contains('agent-code-copy')) {
         showAgentCopySuccess(btn);
-        return;
+        return true;
       }
       const orig = btn.innerHTML;
       btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M4 8l3 3 5-5" stroke="#34c759" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
       setTimeout(() => { btn.innerHTML = orig; }, 1500);
     }
+    return true;
   }
 
   // Service Overview endpoints — trigger backend fetch via the WKWebView API bridge.
@@ -13990,7 +14184,10 @@
           window.__PENDING_PIN__ = null;
           const nowPinned = data.pinned;
           pp.btn.classList.toggle('pinned', nowPinned);
-          pp.btn.title = pinTooltip(nowPinned);
+          pp.btn.dataset.modelTooltip = pinTooltip(nowPinned);
+          if (document.getElementById('model-table-tooltip')?.__target === pp.btn) {
+            showModelColumnTooltip(pp.btn);
+          }
           pp.btn.style.opacity = nowPinned ? '1' : '0.4';
         }
       }

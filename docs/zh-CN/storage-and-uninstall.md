@@ -5,7 +5,7 @@
 | 内容 | 路径 |
 | --- | --- |
 | App 配置 | `~/.ironmlx/config/app_config.json` |
-| Hugging Face / ModelScope 模型快照 | `~/.ironmlx/models/` |
+| Hugging Face / ModelScope 模型快照及导入的独立模型 | `~/.ironmlx/models/` |
 | 分页 SSD 前缀缓存 | `~/.ironmlx/cache/paged_prefix_cache/` |
 | App 与后端日志 | `~/.ironmlx/logs/` |
 | 模型参数 | `~/.ironmlx/model_params.json` |

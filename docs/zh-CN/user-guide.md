@@ -27,6 +27,18 @@
 
 如果健康检查失败，请参阅[故障排查](troubleshooting.md)。
 
+## 导入已有模型
+
+如果模型已在这台 Mac 上下载，进入 Dashboard 的**模型 → 模型管理**，点击右上角
+**导入本地模型**。选择含有 `config.json`、权重和 tokenizer 的模型目录；使用 Hugging
+Face 缓存时，应选择 `snapshots/<commit>` 目录，而不是缓存仓库的上层目录。确认页会
+显示来源、目标位置和复制大小。IronMLX 会复制文件、校验快照，再将模型加入管理列表；
+原目录不会被删除。
+
+有可验证 IronMLX 清单的快照会保留原仓库身份。其他本地目录进入 IronMLX 管理的
+`~/.ironmlx/models/standalone/`。导入需要足够空间存放完整副本；成功后，列表中的
+模型可按其显示的 ID 加载和管理。特殊模型可能还需要准备额外运行资源。
+
 ## 首个 API 请求
 
 加载 `mlx-community/Qwen3.8-27B-4bit` 后，可使用以下命令验证完整的本地 Responses 请求：

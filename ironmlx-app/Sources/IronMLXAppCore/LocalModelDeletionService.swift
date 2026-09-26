@@ -33,6 +33,8 @@ public struct LocalModelDeletionService {
         for id in normalizedIDs {
             var removed = false
             for provider in ModelRepositoryProvider.allCases {
+                if provider == .standalone && !id.hasPrefix("standalone/") { continue }
+                if provider != .standalone && id.hasPrefix("standalone/") { continue }
                 let directory = try ModelRepositoryLayout.repositoryRoot(
                     rootURL: rootURL,
                     provider: provider,

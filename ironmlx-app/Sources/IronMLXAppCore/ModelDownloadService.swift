@@ -1909,6 +1909,8 @@ public actor ModelDownloadService {
                 return min(identity.expectedSize, Int64(size))
             }
             return 0
+        case .standalone:
+            return 0
         }
     }
 

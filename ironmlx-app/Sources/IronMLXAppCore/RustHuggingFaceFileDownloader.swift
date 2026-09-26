@@ -22,6 +22,8 @@ public struct ProviderModelFileDownloader: ModelFileDownloading {
             try await huggingFace.download(request, progress: progress)
         case .modelScope:
             try await standard.download(request, progress: progress)
+        case .standalone:
+            throw RustHuggingFaceTransferError.unsupportedProvider(request.identity.provider.rawValue)
         }
     }
 }

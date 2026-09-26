@@ -422,13 +422,15 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(dashboardHTML(html, contains: #"class="col-quant" style="width:8%;""#))
     #expect(dashboardHTML(html, contains: #"class="col-default" style="width:6%;""#))
     #expect(dashboardHTML(html, contains: #"class="col-params" style="width:6%;""#))
-    #expect(dashboardHTML(html, contains: #"class="col-select" style="width:44px; min-width:44px; max-width:44px;""#))
+    #expect(!dashboardHTML(html, contains: #"class="col-select""#))
     #expect(dashboardHTML(html, contains: #"""
   .data-table th {
     text-align: center;
 """#))
-    #expect(dashboardHTML(html, contains: #".data-table th:first-child,"#))
-    #expect(dashboardHTML(html, contains: #"text-overflow: clip;"#))
+    #expect(dashboardHTML(html, contains: #".data-table th:first-child {"#))
+    #expect(dashboardHTML(html, contains: #"text-align: left;"#))
+    #expect(dashboardHTML(html, contains: #".data-table th:nth-child(2),"#))
+    #expect(dashboardHTML(html, contains: #".data-table td:nth-child(2),"#))
     #expect(dashboardHTML(html, contains: #".data-table th:nth-child(3),"#))
     #expect(dashboardHTML(html, contains: #".data-table td:nth-child(3),"#))
     #expect(dashboardHTML(html, contains: #".data-table th:nth-child(4),"#))
@@ -445,6 +447,11 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(dashboardHTML(html, contains: #".data-table .model-name-text"#))
     #expect(dashboardHTML(html, contains: #"min-width: 0;"#))
     #expect(dashboardHTML(html, contains: #"text-overflow: ellipsis;"#))
+    #expect(!dashboardHTML(html, contains: #"id="select-all-models""#))
+    #expect(!dashboardHTML(html, contains: #"class="model-checkbox""#))
+    #expect(!dashboardHTML(html, contains: #"id="batch-action-bar""#))
+    #expect(dashboardHTML(html, contains: #"function deleteSingleModel(modelId)"#))
+    #expect(dashboardHTML(html, contains: #"function cleanupSelectedModelVersions()"#))
 }
 
 @Test func dashboardModelsPageKeepsHeaderAndTabsFixedAboveAnIndependentScroller() throws {

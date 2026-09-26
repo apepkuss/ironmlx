@@ -5,11 +5,13 @@ import Foundation
 public enum ModelRepositoryProvider: String, Codable, CaseIterable, Sendable {
     case huggingFace = "huggingface"
     case modelScope = "modelscope"
+    case standalone
 
     var mutableRevision: String {
         switch self {
         case .huggingFace: "main"
         case .modelScope: "master"
+        case .standalone: "current"
         }
     }
 }
@@ -79,6 +81,7 @@ public struct ModelSnapshotManifest: Codable, Equatable, Sendable {
     public var files: [ModelSnapshotFile]
     public var compatibility: ModelSnapshotCompatibility
     public var resources: ModelSnapshotResources
+    public var displayName: String?
     public var publishedAt: Date
 
     public init(
@@ -89,6 +92,7 @@ public struct ModelSnapshotManifest: Codable, Equatable, Sendable {
         files: [ModelSnapshotFile],
         compatibility: ModelSnapshotCompatibility,
         resources: ModelSnapshotResources,
+        displayName: String? = nil,
         publishedAt: Date = Date()
     ) {
         version = Self.currentVersion
@@ -99,6 +103,7 @@ public struct ModelSnapshotManifest: Codable, Equatable, Sendable {
         self.files = files.sorted { $0.path < $1.path }
         self.compatibility = compatibility
         self.resources = resources
+        self.displayName = displayName
         self.publishedAt = publishedAt
     }
 
@@ -111,6 +116,7 @@ public struct ModelSnapshotManifest: Codable, Equatable, Sendable {
         case files
         case compatibility
         case resources
+        case displayName = "display_name"
         case publishedAt = "published_at"
     }
 }
@@ -578,6 +584,20 @@ public enum ModelRepositoryLayout {
         return "\(parts[0])--\(parts[1])"
     }
 
+    public static func repositoryName(provider: ModelRepositoryProvider, repoID: String) throws -> String {
+        if provider == .standalone {
+            guard repoID.hasPrefix("standalone/") else {
+                throw ModelSnapshotVerificationError.manifestInvalid("standalone repo_id must start with standalone/")
+            }
+            let name = String(repoID.dropFirst("standalone/".count))
+            guard !name.isEmpty, !name.contains("/"), name != ".", name != "..", !name.contains("\\") else {
+                throw ModelSnapshotVerificationError.manifestInvalid("invalid standalone model ID")
+            }
+            return name
+        }
+        return try repositoryName(repoID: repoID)
+    }
+
     public static func providerRoot(rootURL: URL, provider: ModelRepositoryProvider) -> URL {
         rootURL
             .appendingPathComponent("models", isDirectory: true)
@@ -586,6 +606,6 @@ public enum ModelRepositoryLayout {
 
     public static func repositoryRoot(rootURL: URL, provider: ModelRepositoryProvider, repoID: String) throws -> URL {
         try providerRoot(rootURL: rootURL, provider: provider)
-            .appendingPathComponent(repositoryName(repoID: repoID), isDirectory: true)
+            .appendingPathComponent(repositoryName(provider: provider, repoID: repoID), isDirectory: true)
     }
 }

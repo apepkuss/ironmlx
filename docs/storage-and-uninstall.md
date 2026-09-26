@@ -5,7 +5,7 @@
 | Data | Path |
 | --- | --- |
 | App configuration | `~/.ironmlx/config/app_config.json` |
-| Hugging Face / ModelScope snapshots | `~/.ironmlx/models/` |
+| Hugging Face / ModelScope snapshots and imported standalone models | `~/.ironmlx/models/` |
 | Paged SSD prefix cache | `~/.ironmlx/cache/paged_prefix_cache/` |
 | App and backend logs | `~/.ironmlx/logs/` |
 | Model parameters | `~/.ironmlx/model_params.json` |

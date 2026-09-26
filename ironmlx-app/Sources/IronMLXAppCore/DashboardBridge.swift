@@ -27,6 +27,16 @@ public protocol DashboardModelStatusFetching: Sendable {
 
 extension BackendAPIClient: DashboardModelStatusFetching {}
 
+private struct ModelImportDashboardPreview: Encodable {
+    let name: String
+    let source: String
+    let destination: String
+    let fileCount: Int
+    let totalBytes: Int64
+    let availableBytes: Int64?
+    let modelType: String
+}
+
 @MainActor
 public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     private weak var webView: WKWebView?
@@ -34,6 +44,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     private let backend: any BackendRuntimeManaging
     private let scanner: LocalModelScanner
     private let downloadService: ModelDownloadService
+    private let importService: ModelImportService
     private let deletionService: LocalModelDeletionService
     private let integrityService: ModelIntegrityVerificationService
     private let versionService: ModelVersionManagementService
@@ -51,6 +62,9 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     private var logLevelChangePending = false
     private var settingsSaveInProgress = false
     private var huggingFaceSearchTask: Task<Void, Never>?
+    private var pendingModelImport: ModelImportPreview?
+    private var modelImportInspectionTask: Task<ModelImportPreview, Error>?
+    private var modelImportTask: Task<ModelImportResult, Error>?
     private lazy var diagnosticExportCoordinator = DiagnosticExportCoordinator(
         window: webView?.window,
         service: DiagnosticBundleService(
@@ -66,6 +80,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         backend: any BackendRuntimeManaging,
         scanner: LocalModelScanner = LocalModelScanner(),
         downloadService: ModelDownloadService = ModelDownloadService(),
+        importService: ModelImportService = ModelImportService(),
         deletionService: LocalModelDeletionService? = nil,
         integrityService: ModelIntegrityVerificationService = ModelIntegrityVerificationService(),
         versionService: ModelVersionManagementService = ModelVersionManagementService(),
@@ -86,6 +101,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         self.backend = backend
         self.scanner = scanner
         self.downloadService = downloadService
+        self.importService = importService
         self.deletionService = deletionService ?? LocalModelDeletionService(configStore: configStore)
         self.integrityService = integrityService
         self.versionService = versionService
@@ -115,6 +131,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
 
     deinit {
         huggingFaceSearchTask?.cancel()
+        modelImportInspectionTask?.cancel()
+        modelImportTask?.cancel()
         notificationCenter.removeObserver(self)
         let downloadService = downloadService
         Task {
@@ -124,6 +142,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
 
     public func cancelAllDownloads() {
         diagnosticExportCoordinator.cancel()
+        modelImportInspectionTask?.cancel()
+        modelImportTask?.cancel()
         Task {
             await downloadService.cancelAllDownloads()
         }
@@ -158,6 +178,9 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         "forceLoadModel",
         "unloadModel",
         "downloadModel",
+        "chooseModelImport",
+        "confirmModelImport",
+        "cancelModelImport",
         "cancelModelDownload",
         "searchHF",
         "cancelHFSearch",
@@ -254,6 +277,12 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             cancelHuggingFaceSearch()
         case "scanLocalModels":
             sendScannedModels()
+        case "chooseModelImport":
+            chooseModelImport()
+        case "confirmModelImport":
+            confirmModelImport()
+        case "cancelModelImport":
+            cancelModelImport()
         case "syncLoadedModels":
             syncLoadedModels()
         case "exportRuntimeLog":
@@ -1024,7 +1053,9 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             let resultJSON = (try? Self.jsonString(result)) ?? "{}"
             let defaultSync = result.clearedDefault ? "window.__DEFAULT_MODEL__ = '';" : ""
             syncLoadedModels()
-            sendJavaScript("\(defaultSync)onModelsDeleted(\(Self.jsStringLiteral(resultJSON)))")
+            sendScannedModels(
+                afterScanJavaScript: "\(defaultSync)onModelsDeleted(\(Self.jsStringLiteral(resultJSON)))"
+            )
         } catch {
             let result = Self.modelOperationErrorJSON(
                 error: error.localizedDescription,
@@ -2771,7 +2802,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         }
     }
 
-    private func sendScannedModels() {
+    private func sendScannedModels(afterScanJavaScript: String? = nil) {
         Task {
             let state = await self.loadedModelState()
             let models = self.scanner.scan(
@@ -2785,16 +2816,102 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 models,
                 activeKvOffloadEnabled: config.activeKvOffload == true
             )
+            let json = (try? Self.jsonString(dashboardModels)) ?? "[]"
+            await MainActor.run {
+                self.sendModelParameters()
+                let scanJavaScript = "onLocalModelsScanned(\(Self.jsStringLiteral(json)))"
+                self.sendJavaScript(afterScanJavaScript.map { "\(scanJavaScript);\($0)" } ?? scanJavaScript)
+            }
             if self.canSyncBackendModelState, self.configuredDFlash2Target(in: config) == nil {
                 let client = BackendAPIClient(host: config.host, port: config.port)
                 await self.registerLocalModels(models: models, config: config, client: client)
             }
-            let json = (try? Self.jsonString(dashboardModels)) ?? "[]"
-            await MainActor.run {
-                self.sendModelParameters()
-                self.sendJavaScript("onLocalModelsScanned(\(Self.jsStringLiteral(json)))")
+        }
+    }
+
+    private func chooseModelImport() {
+        guard modelImportTask == nil, modelImportInspectionTask == nil else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        let completion: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard let self, response == .OK, let source = panel.url else { return }
+            self.pendingModelImport = nil
+            self.sendJavaScript("onModelImportInspecting()")
+            let service = self.importService
+            let task = Task.detached(priority: .userInitiated) {
+                try await service.inspect(source)
+            }
+            self.modelImportInspectionTask = task
+            Task {
+                do {
+                    let preview = try await task.value
+                    self.modelImportInspectionTask = nil
+                    self.pendingModelImport = preview
+                    let payload = ModelImportDashboardPreview(
+                        name: preview.displayName,
+                        source: preview.source.path,
+                        destination: preview.destination.path,
+                        fileCount: preview.fileCount,
+                        totalBytes: preview.totalBytes,
+                        availableBytes: preview.availableBytes,
+                        modelType: preview.compatibility.modelType
+                    )
+                    let json = try Self.jsonString(payload)
+                    self.sendJavaScript("onModelImportPreview(\(Self.jsStringLiteral(json)))")
+                } catch {
+                    self.modelImportInspectionTask = nil
+                    if error is CancellationError {
+                        self.sendJavaScript("onModelImportCancelled()")
+                    } else {
+                        self.sendJavaScript("onModelImportError(\(Self.jsStringLiteral(error.localizedDescription)))")
+                    }
+                }
             }
         }
+        if let window = webView?.window {
+            panel.beginSheetModal(for: window, completionHandler: completion)
+        } else {
+            panel.begin(completionHandler: completion)
+        }
+    }
+
+    private func confirmModelImport() {
+        guard modelImportTask == nil, let preview = pendingModelImport else { return }
+        pendingModelImport = nil
+        let service = importService
+        let task = Task.detached(priority: .userInitiated) {
+            try await service.importModel(preview) { status in
+                Task { @MainActor in
+                    guard let json = try? Self.jsonString(status) else { return }
+                    self.sendJavaScript("onModelImportProgress(\(Self.jsStringLiteral(json)))")
+                }
+            }
+        }
+        modelImportTask = task
+        Task {
+            do {
+                let result = try await task.value
+                modelImportTask = nil
+                sendScannedModels(
+                    afterScanJavaScript: "onModelImportComplete(\(Self.jsStringLiteral(result.repoID)))"
+                )
+            } catch {
+                modelImportTask = nil
+                if error is CancellationError {
+                    sendJavaScript("onModelImportCancelled()")
+                } else {
+                    sendJavaScript("onModelImportError(\(Self.jsStringLiteral(error.localizedDescription)))")
+                }
+            }
+        }
+    }
+
+    private func cancelModelImport() {
+        modelImportInspectionTask?.cancel()
+        modelImportTask?.cancel()
+        pendingModelImport = nil
     }
 
     private func modelsWithEffectiveMaxTokens(

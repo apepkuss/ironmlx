@@ -5,6 +5,7 @@ import Testing
 
 private let cleanupCommit = String(repeating: "a", count: 40)
 private let completedCommit = String(repeating: "b", count: 40)
+private let downloadableProviders: [ModelRepositoryProvider] = [.huggingFace, .modelScope]
 
 @Test func downloadCleanupSupportsASymlinkConfiguredAsTheStorageRoot() throws {
     let parent = try temporaryDirectory()
@@ -20,13 +21,13 @@ private let completedCommit = String(repeating: "b", count: 40)
     #expect(FileManager.default.fileExists(atPath: target.path))
 }
 
-@Test(arguments: ModelRepositoryProvider.allCases)
+@Test(arguments: downloadableProviders)
 func downloadCleanupOnlyRemovesIncompleteDataForTheSelectedRepository(provider: ModelRepositoryProvider) throws {
     let root = try temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: root) }
     let store = ModelDownloadStore(rootURL: root)
     let repoID = "org/cleanup"
-    for source in ModelRepositoryProvider.allCases {
+    for source in downloadableProviders {
         for (commit, phase) in [(cleanupCommit, ModelDownloadPhase.interrupted), (completedCommit, .completed)] {
             let staging = try store.prepareStaging(provider: source, repoID: repoID, commitSHA: commit)
             try Data("staging".utf8).write(to: staging.appendingPathComponent("weight.partial"))
@@ -54,7 +55,7 @@ func downloadCleanupOnlyRemovesIncompleteDataForTheSelectedRepository(provider: 
     #expect(try Data(contentsOf: weight) == Data("installed".utf8))
     let completed = try store.downloadRoot(provider: provider, repoID: repoID, commitSHA: completedCommit)
     #expect(FileManager.default.fileExists(atPath: completed.appendingPathComponent("state.json").path))
-    for source in ModelRepositoryProvider.allCases where source != provider {
+    for source in downloadableProviders where source != provider {
         let untouched = try store.stagingSnapshotURL(provider: source, repoID: repoID, commitSHA: cleanupCommit)
         #expect(FileManager.default.fileExists(atPath: untouched.path))
     }

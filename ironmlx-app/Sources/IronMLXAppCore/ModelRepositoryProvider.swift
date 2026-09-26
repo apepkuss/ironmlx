@@ -48,6 +48,8 @@ public struct ModelRepositoryResolver: Sendable {
             try await resolveHuggingFaceRevision(repoID: repoID, revision: nil, token: token)
         case .modelScope:
             try await resolveModelScope(repoID: repoID)
+        case .standalone:
+            throw RepositoryResolutionError.notFound(repoID)
         }
     }
 
@@ -81,6 +83,8 @@ public struct ModelRepositoryResolver: Sendable {
                 throw URLError(.badURL)
             }
             url = resolved
+        case .standalone:
+            throw RepositoryResolutionError.notFound(repository.repoID)
         }
         var request = URLRequest(url: url)
         if repository.provider == .huggingFace {
