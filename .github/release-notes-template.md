@@ -7,6 +7,7 @@ Model weights are downloaded separately. Memory requirements depend on the model
 ### Highlights
 
 - Local text and supported image inference across Qwen, Gemma, GLM, Llama and MiniCPM families, plus DiffusionGemma.
+- Import existing local model directories into the IronMLX-managed library with copy verification while preserving the source directory.
 - OpenAI Chat Completions / Responses and Anthropic Messages compatible APIs, streaming, model-dependent tool calling and structured outputs.
 - Agent application integrations configured from the Dashboard.
 - IndexTTS 2.5 speech synthesis with WAV/PCM output and managed local voice profiles.
@@ -30,6 +31,7 @@ Compatibility depends on the specific architecture, weights and runtime mode. Ch
 ### 主要能力
 
 - 支持 Qwen、Gemma、GLM、Llama、MiniCPM 系列及 DiffusionGemma 的兼容架构，提供文本及受支持的图片推理。
+- 将本机已有模型目录复制并校验至 IronMLX 托管模型库，同时保留原始目录。
 - 兼容 OpenAI Chat Completions / Responses 和 Anthropic Messages API，支持流式输出，以及依赖模型能力的工具调用和结构化输出。
 - 在 Dashboard 中配置和管理 Agent 应用集成。
 - IndexTTS 2.5 语音合成，支持 WAV/PCM 输出和本地托管语音档案。
