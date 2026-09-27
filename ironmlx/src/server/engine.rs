@@ -1,10 +1,10 @@
 //! HTTP adapters over the native model pool.
-use super::{anthropic, api_transport::ApiJson, diffusion_gemma, openai, responses};
+use super::{anthropic, api_transport::ApiJson, diffusion_gemma, images, openai, responses};
 use ironmlx_runtime::core::engine_pool::*;
 
 use crate::Result;
 use axum::{
-    extract::{Extension, Path, State},
+    extract::{Extension, Multipart, Path, State},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -54,9 +54,31 @@ impl EngineRoutedRequest for anthropic::MessagesRequest {
     }
 }
 
+impl EngineRoutedRequest for images::ImagesGenerationRequest {
+    fn model(&self) -> Option<&str> {
+        self.model.as_deref()
+    }
+
+    fn set_model(&mut self, model: String) {
+        self.model = Some(model);
+    }
+}
+
+impl EngineRoutedRequest for images::ImagesEditRequest {
+    fn model(&self) -> Option<&str> {
+        self.model.as_deref()
+    }
+
+    fn set_model(&mut self, model: String) {
+        self.model = Some(model);
+    }
+}
+
 pub(crate) trait EngineLeaseHttpAdapter {
     async fn openai_chat_completions(&self, req: openai::ChatRequest) -> Response;
     async fn openai_responses(&self, req: responses::ResponsesRequest) -> Response;
+    async fn openai_images_generations(&self, req: images::ImagesGenerationRequest) -> Response;
+    async fn openai_images_edits(&self, req: images::ImagesEditRequest) -> Response;
     async fn anthropic_messages(&self, req: anthropic::MessagesRequest) -> Response;
 }
 impl EngineLeaseHttpAdapter for EngineLease {
@@ -66,6 +88,14 @@ impl EngineLeaseHttpAdapter for EngineLease {
 
     async fn openai_responses(&self, req: responses::ResponsesRequest) -> Response {
         self.engine().openai_responses(req).await
+    }
+
+    async fn openai_images_generations(&self, req: images::ImagesGenerationRequest) -> Response {
+        self.engine().openai_images_generations(req).await
+    }
+
+    async fn openai_images_edits(&self, req: images::ImagesEditRequest) -> Response {
+        self.engine().openai_images_edits(req).await
     }
 
     async fn anthropic_messages(&self, req: anthropic::MessagesRequest) -> Response {
@@ -82,12 +112,14 @@ fn apply_default_output_budget(request: &mut responses::ResponsesRequest, defaul
 pub(crate) trait EngineVariantHttpAdapter {
     async fn openai_chat_completions(&self, req: openai::ChatRequest) -> Response;
     async fn openai_responses(&self, req: responses::ResponsesRequest) -> Response;
+    async fn openai_images_generations(&self, req: images::ImagesGenerationRequest) -> Response;
+    async fn openai_images_edits(&self, req: images::ImagesEditRequest) -> Response;
     async fn anthropic_messages(&self, req: anthropic::MessagesRequest) -> Response;
 }
 impl EngineVariantHttpAdapter for EngineVariant {
     async fn openai_chat_completions(&self, req: openai::ChatRequest) -> Response {
         match self {
-            Self::Audio(_) | Self::Decision(_) => {
+            Self::Audio(_) | Self::Decision(_) | Self::QwenImage(_) => {
                 super::audio::task_mismatch(super::api_error::ApiProtocol::OpenAi)
             }
             Self::Qwen35(state) => openai::chat_completions_with_state(state.clone(), req).await,
@@ -113,7 +145,7 @@ impl EngineVariantHttpAdapter for EngineVariant {
 
     async fn openai_responses(&self, req: responses::ResponsesRequest) -> Response {
         match self {
-            Self::Audio(_) | Self::Decision(_) => {
+            Self::Audio(_) | Self::Decision(_) | Self::QwenImage(_) => {
                 super::audio::task_mismatch(super::api_error::ApiProtocol::OpenAi)
             }
             Self::Qwen35(state) => responses::responses_with_state(state.clone(), req, false).await,
@@ -140,9 +172,23 @@ impl EngineVariantHttpAdapter for EngineVariant {
         }
     }
 
+    async fn openai_images_generations(&self, req: images::ImagesGenerationRequest) -> Response {
+        match self {
+            Self::QwenImage(state) => images::generate_with_state(state.clone(), req).await,
+            _ => super::audio::task_mismatch(super::api_error::ApiProtocol::OpenAi),
+        }
+    }
+
+    async fn openai_images_edits(&self, req: images::ImagesEditRequest) -> Response {
+        match self {
+            Self::QwenImage(state) => images::edit_with_state(state.clone(), req).await,
+            _ => super::audio::task_mismatch(super::api_error::ApiProtocol::OpenAi),
+        }
+    }
+
     async fn anthropic_messages(&self, req: anthropic::MessagesRequest) -> Response {
         match self {
-            Self::Audio(_) | Self::Decision(_) => {
+            Self::Audio(_) | Self::Decision(_) | Self::QwenImage(_) => {
                 super::audio::task_mismatch(super::api_error::ApiProtocol::Anthropic)
             }
             Self::Qwen35(state) => anthropic::messages_with_state(state.clone(), req).await,
@@ -167,6 +213,11 @@ pub(crate) trait EnginePoolHttpAdapter {
         R: EngineRoutedRequest;
     async fn app_openai_chat_completions(&self, req: openai::ChatRequest) -> Result<Response>;
     async fn app_openai_responses(&self, req: responses::ResponsesRequest) -> Result<Response>;
+    async fn app_openai_images_generations(
+        &self,
+        req: images::ImagesGenerationRequest,
+    ) -> Result<Response>;
+    async fn app_openai_images_edits(&self, req: images::ImagesEditRequest) -> Result<Response>;
     async fn app_anthropic_messages(&self, req: anthropic::MessagesRequest) -> Result<Response>;
     async fn model_list(&self) -> OpenAiModelList;
 }
@@ -200,6 +251,22 @@ impl EnginePoolHttpAdapter for EnginePoolState {
         let engine = self.resolve_request_engine(&mut req).await?;
         apply_default_output_budget(&mut req, engine.default_max_output_tokens());
         Ok(engine.openai_responses(req).await)
+    }
+
+    async fn app_openai_images_generations(
+        &self,
+        mut req: images::ImagesGenerationRequest,
+    ) -> Result<Response> {
+        let engine = self.resolve_request_engine(&mut req).await?;
+        Ok(engine.openai_images_generations(req).await)
+    }
+
+    async fn app_openai_images_edits(
+        &self,
+        mut req: images::ImagesEditRequest,
+    ) -> Result<Response> {
+        let engine = self.resolve_request_engine(&mut req).await?;
+        Ok(engine.openai_images_edits(req).await)
     }
 
     async fn app_anthropic_messages(
@@ -271,6 +338,8 @@ pub(crate) fn engine_pool_router() -> Router<EnginePoolState> {
         .route("/v1/models/:model_id/unload", post(unload_model_handler))
         .route("/v1/chat/completions", post(openai_chat_completions))
         .route("/v1/responses", post(openai_responses))
+        .route("/v1/images/generations", post(openai_images_generations))
+        .route("/v1/images/edits", post(openai_images_edits))
         .route("/v1/messages", post(anthropic_messages))
         .route("/v1/audio/speech", post(super::audio::speech))
         .route("/v1/systemone", post(super::systemone::system_one))
@@ -302,6 +371,38 @@ async fn openai_responses(
         }
     };
     engine.openai_responses(req).await
+}
+
+async fn openai_images_generations(
+    State(pool): State<EnginePoolState>,
+    ApiJson(mut req): ApiJson<images::ImagesGenerationRequest>,
+) -> Response {
+    let engine = match pool.resolve_request_engine(&mut req).await {
+        Ok(engine) => engine,
+        Err(error) => {
+            return super::api_error::ApiError::engine_resolution(error)
+                .into_response(super::api_error::ApiProtocol::OpenAi)
+        }
+    };
+    engine.openai_images_generations(req).await
+}
+
+async fn openai_images_edits(
+    State(pool): State<EnginePoolState>,
+    multipart: Multipart,
+) -> Response {
+    let mut req = match images::parse_edit_request(multipart).await {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
+    let engine = match pool.resolve_request_engine(&mut req).await {
+        Ok(engine) => engine,
+        Err(error) => {
+            return super::api_error::ApiError::engine_resolution(error)
+                .into_response(super::api_error::ApiProtocol::OpenAi)
+        }
+    };
+    engine.openai_images_edits(req).await
 }
 
 async fn anthropic_messages(

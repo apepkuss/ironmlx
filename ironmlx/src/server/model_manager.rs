@@ -11,7 +11,7 @@ use ironmlx_runtime::core::model_management::{
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use axum::extract::{Extension, State};
+use axum::extract::{Extension, Multipart, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -24,8 +24,8 @@ use crate::Result;
 use ironmlx_runtime::core::prompt_lookup::PromptLookupConfig;
 
 use {
-    super::anthropic, super::api_transport::ApiJson, super::openai, super::responses,
-    ironmlx_runtime::core::runtime_config::SamplingDefaults,
+    super::anthropic, super::api_transport::ApiJson, super::images, super::openai,
+    super::responses, ironmlx_runtime::core::runtime_config::SamplingDefaults,
 };
 use {
     super::engine::EnginePoolRuntimeConfig,
@@ -258,6 +258,22 @@ impl ModelManager {
         }
     }
 
+    async fn images(&self, req: images::ImagesGenerationRequest) -> Response {
+        match self.pool.app_openai_images_generations(req).await {
+            Ok(response) => response,
+            Err(error) => super::api_error::ApiError::engine_resolution(error)
+                .into_response(super::api_error::ApiProtocol::OpenAi),
+        }
+    }
+
+    async fn images_edit(&self, req: images::ImagesEditRequest) -> Response {
+        match self.pool.app_openai_images_edits(req).await {
+            Ok(response) => response,
+            Err(error) => super::api_error::ApiError::engine_resolution(error)
+                .into_response(super::api_error::ApiProtocol::OpenAi),
+        }
+    }
+
     async fn anthropic(&self, req: anthropic::MessagesRequest) -> Response {
         match self.pool.app_anthropic_messages(req).await {
             Ok(response) => response,
@@ -397,6 +413,8 @@ fn app_router(manager: ModelManager, voices: super::voices::VoiceStore) -> Route
         .route("/v1/models", get(app_models_handler))
         .route("/v1/chat/completions", post(app_openai_handler))
         .route("/v1/responses", post(app_responses_handler))
+        .route("/v1/images/generations", post(app_images_handler))
+        .route("/v1/images/edits", post(app_images_edit_handler))
         .route("/v1/messages", post(app_anthropic_handler))
         .route("/v1/audio/speech", post(app_speech_handler))
         .merge(super::voices::router())
@@ -438,6 +456,24 @@ async fn app_responses_handler(
     ApiJson(req): ApiJson<responses::ResponsesRequest>,
 ) -> Response {
     manager.responses(req).await
+}
+
+async fn app_images_handler(
+    State(manager): State<ModelManager>,
+    ApiJson(req): ApiJson<images::ImagesGenerationRequest>,
+) -> Response {
+    manager.images(req).await
+}
+
+async fn app_images_edit_handler(
+    State(manager): State<ModelManager>,
+    multipart: Multipart,
+) -> Response {
+    let request = match images::parse_edit_request(multipart).await {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
+    manager.images_edit(request).await
 }
 
 async fn app_anthropic_handler(
@@ -1354,6 +1390,68 @@ mod tests {
         assert_eq!(body["data"][0]["state"], "unloaded");
         assert!(body["data"][0].get("context_window").is_none());
         assert!(body["data"][0].get("max_output_tokens").is_none());
+    }
+
+    #[tokio::test]
+    async fn app_daemon_exposes_openai_image_routes() {
+        let args = serve_args();
+        let manager = ModelManager::new(
+            crate::cli::serve::engine_runtime_config(&args).unwrap(),
+            args.max_loaded_models,
+            SchedulerResolutionOptions::from(&args),
+        )
+        .expect("model manager");
+        let voice_dir = unique_temp_dir("app-images-route-voices");
+        let voices =
+            crate::server::voices::VoiceStore::open(voice_dir.clone()).expect("voice store");
+
+        let app = app_router(manager, voices);
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/images/generations")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        r#"{"prompt":"a red circle","size":"256x256"}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("images response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("images body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("images json");
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert_eq!(body["error"]["code"], "model_required");
+
+        let boundary = "ironmlx-edit-route";
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/images/edits")
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(axum::body::Body::from(format!("--{boundary}--\r\n")))
+                    .expect("edit request"),
+            )
+            .await
+            .expect("edit response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("edit body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("edit json");
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert_eq!(body["error"]["code"], "missing_image_prompt");
+
+        std::fs::remove_dir_all(voice_dir).expect("remove temp voice dir");
     }
 
     #[tokio::test]

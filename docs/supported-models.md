@@ -4,6 +4,11 @@
 
 IronMLX.app supports speech synthesis with the verified `mlx-community/IndexTTS-2.5-fp16` profile: automatic resource preparation, model loading, complete WAV responses and PCM streaming. See the [speech API](audio-speech-api.md) and [TTS model download and usage](tts-model-download.md).
 
+IronMLX.app supports native text-to-image inference with
+`mlx-community/Qwen-Image-2.1-MLX-4bit`. The App manages the model while upstream
+clients call the OpenAI-compatible endpoint documented in the
+[image generation API](image-generation-api.md). Image editing is not included.
+
 IronMLX App also supports the typed decision model `aac6fef/laya-multilingual-mlx`: download, load/unload, restart recovery and TypeSafe-compatible System One API calls on the App service port. See the [Laya guide](laya-systemone-api.md).
 
 IronMLX 0.2.0 supports the following text and vision-language models. Check the model family and features you need, then choose a version that fits your device's memory.
@@ -25,6 +30,7 @@ Versions, quantized files and templates within a family can differ in compatibil
 | DiffusionGemma | Yes | Yes | Yes | Yes |
 
 All text and vision generation runtimes in the table support streaming HTTP responses. Image support means understanding images, not generating images or supporting video.
+Qwen Image 2.1 is a separate text-to-image runtime and does not change that table's meaning.
 Embedding, reranker or ASR metadata in the model list does not imply runtime support. TTS support is limited to the verified IndexTTS 2.5 profile and its separate audio runtime.
 
 ## Validated model versions
@@ -95,3 +101,4 @@ For compatibility troubleshooting, check `model_type` in the model configuration
 | Llama GQA Dense / compatible MiniCPM5-1B | `llama` |
 | MiniCPM-V 4.6 | `minicpmv4_6` |
 | DiffusionGemma | `diffusion_gemma` |
+| Qwen Image 2.1 | `qwen_image_2_1` |

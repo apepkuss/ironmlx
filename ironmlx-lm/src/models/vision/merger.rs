@@ -4,8 +4,9 @@
 use anyhow::Result;
 use mlx::{ops, Array, StreamOrDevice};
 
-use crate::core::Loader;
+use super::projection::VisionProjection;
 use crate::nn::LayerNorm;
+use ironmlx_core::weights::WeightSource;
 
 /// Exact GELU activation (erf-based).
 ///
@@ -41,28 +42,17 @@ fn gelu_exact(x: &Array, target: StreamOrDevice) -> Result<Array> {
 /// where `m = spatial_merge_size = 2`.
 pub struct PatchMerger {
     norm: LayerNorm,
-    fc1_w: Array,
-    fc1_b: Array,
-    fc2_w: Array,
-    fc2_b: Array,
+    fc1: VisionProjection,
+    fc2: VisionProjection,
     /// Spatial merge size (default 2 → merges 2×2 = 4 patches per token).
     spatial_merge_size: i32,
     /// Per-patch hidden dim before merge (1024 for Qwen3.5-VL).
     hidden_size: i32,
+    /// DeepStack mergers normalize the already shuffled 2x2 patch group.
+    use_postshuffle_norm: bool,
 }
 
 impl PatchMerger {
-    pub(super) fn collect_weights<'a>(&'a self, out: &mut Vec<&'a Array>) {
-        out.push(self.norm.weight());
-        if let Some(b) = self.norm.bias() {
-            out.push(b);
-        }
-        out.push(&self.fc1_w);
-        out.push(&self.fc1_b);
-        out.push(&self.fc2_w);
-        out.push(&self.fc2_b);
-    }
-
     /// Construct from pre-loaded weight Arrays.
     ///
     /// - `norm_w` / `norm_b`: shape `[hidden_size]`, e.g. `[1024]`.
@@ -83,12 +73,11 @@ impl PatchMerger {
         let hidden_size = norm_w.shape()[0];
         Self {
             norm: LayerNorm::new(norm_w, Some(norm_b), 1e-6),
-            fc1_w,
-            fc1_b,
-            fc2_w,
-            fc2_b,
+            fc1: VisionProjection::new_fp(fc1_w, Some(fc1_b)),
+            fc2: VisionProjection::new_fp(fc2_w, Some(fc2_b)),
             spatial_merge_size,
             hidden_size,
+            use_postshuffle_norm: false,
         }
     }
 
@@ -98,26 +87,46 @@ impl PatchMerger {
     /// - `{prefix}.norm.weight` / `.bias`
     /// - `{prefix}.linear_fc1.weight` / `.bias`
     /// - `{prefix}.linear_fc2.weight` / `.bias`
-    pub fn from_loader(loader: &Loader, prefix: &str, spatial_merge_size: i32) -> Result<Self> {
+    pub fn from_loader(
+        loader: &(impl WeightSource + ?Sized),
+        prefix: &str,
+        spatial_merge_size: i32,
+    ) -> Result<Self> {
+        Self::from_loader_with_norm_position(loader, prefix, spatial_merge_size, false)
+    }
+
+    /// Load a DeepStack merger whose LayerNorm is applied after the spatial
+    /// 2x2 patches have been shuffled into a single feature vector.
+    pub fn from_loader_postshuffle(
+        loader: &(impl WeightSource + ?Sized),
+        prefix: &str,
+        spatial_merge_size: i32,
+    ) -> Result<Self> {
+        Self::from_loader_with_norm_position(loader, prefix, spatial_merge_size, true)
+    }
+
+    fn from_loader_with_norm_position(
+        loader: &(impl WeightSource + ?Sized),
+        prefix: &str,
+        spatial_merge_size: i32,
+        use_postshuffle_norm: bool,
+    ) -> Result<Self> {
         let norm_w = loader.tensor(&format!("{prefix}.norm.weight"))?.clone();
         let norm_b = loader.tensor(&format!("{prefix}.norm.bias"))?.clone();
-        let fc1_w = loader
-            .tensor(&format!("{prefix}.linear_fc1.weight"))?
-            .clone();
-        let fc1_b = loader.tensor(&format!("{prefix}.linear_fc1.bias"))?.clone();
-        let fc2_w = loader
-            .tensor(&format!("{prefix}.linear_fc2.weight"))?
-            .clone();
-        let fc2_b = loader.tensor(&format!("{prefix}.linear_fc2.bias"))?.clone();
-        Ok(Self::new(
-            norm_w,
-            norm_b,
-            fc1_w,
-            fc1_b,
-            fc2_w,
-            fc2_b,
+        let m2 = spatial_merge_size * spatial_merge_size;
+        let hidden_size = if use_postshuffle_norm {
+            norm_w.shape()[0] / m2
+        } else {
+            norm_w.shape()[0]
+        };
+        Ok(Self {
+            norm: LayerNorm::new(norm_w, Some(norm_b), 1e-6),
+            fc1: VisionProjection::from_loader(loader, &format!("{prefix}.linear_fc1"))?,
+            fc2: VisionProjection::from_loader(loader, &format!("{prefix}.linear_fc2"))?,
             spatial_merge_size,
-        ))
+            hidden_size,
+            use_postshuffle_norm,
+        })
     }
 
     /// Forward pass on the default stream.
@@ -133,31 +142,29 @@ impl PatchMerger {
     pub fn forward_on(&self, x: &Array, target: impl Into<StreamOrDevice>) -> Result<Array> {
         let target = target.into();
 
-        // Step 1: LayerNorm  [N, hidden_size]
-        let h = self.norm.forward(x)?;
-
-        // Step 2: spatial merge reshape
+        // Step 1: spatial merge, with LayerNorm either before the shuffle for
+        // the final merger or after it for Qwen3-VL DeepStack mergers.
         // m² = spatial_merge_size²
-        let n = h.shape()[0];
+        let n = x.shape()[0];
         let m2 = self.spatial_merge_size * self.spatial_merge_size; // 4
         let merge_hidden = m2 * self.hidden_size; // 4096
         let n_merged = n / m2; // N/4
-        let h = ops::shape::reshape(&h, &[n_merged, merge_hidden][..])?;
+        let h = if self.use_postshuffle_norm {
+            let grouped = ops::shape::reshape(x, &[n_merged, merge_hidden][..])?;
+            self.norm.forward(&grouped)?
+        } else {
+            let normalized = self.norm.forward(x)?;
+            ops::shape::reshape(&normalized, &[n_merged, merge_hidden][..])?
+        };
 
         // Step 3: fc1  [N/4, 4096] @ [4096, 4096]^T + bias → [N/4, 4096]
-        let wt1 = self.fc1_w.transpose_on(target)?;
-        let h = h.matmul_on(&wt1, target)?;
-        let h = &h + &self.fc1_b;
+        let h = self.fc1.forward_on(&h, target)?;
 
         // Step 4: exact GELU (erf-based)
         let h = gelu_exact(&h, target)?;
 
         // Step 5: fc2  [N/4, 4096] @ [out_hidden, 4096]^T + bias → [N/4, out_hidden]
-        let wt2 = self.fc2_w.transpose_on(target)?;
-        let out = h.matmul_on(&wt2, target)?;
-        let out = &out + &self.fc2_b;
-
-        Ok(out)
+        self.fc2.forward_on(&h, target)
     }
 }
 
@@ -173,6 +180,7 @@ mod tests {
 
     #[test]
     fn patch_merger_output_shape() {
+        crate::models::vision::init_test_metallib();
         // grid 2×2 → after 2×2 merge → 1 token, 2560 dim
         let merger = PatchMerger::new(
             constructors::ones((1024_i32,), Dtype::Bfloat16).unwrap(),
@@ -190,6 +198,7 @@ mod tests {
 
     #[test]
     fn gelu_exact_zero_maps_to_zero() {
+        crate::models::vision::init_test_metallib();
         // gelu_exact(0) = 0.5 * 0 * (1 + erf(0)) = 0
         let zero = Array::try_from((&[0.0_f32][..], &[][..])).unwrap();
         let out = gelu_exact(&zero, ().into()).unwrap();
@@ -202,6 +211,7 @@ mod tests {
 
     #[test]
     fn gelu_exact_positive_passes_through() {
+        crate::models::vision::init_test_metallib();
         // For large positive x, gelu_exact(x) ≈ x.
         let x = Array::try_from((&[10.0_f32][..], &[][..])).unwrap();
         let out = gelu_exact(&x, ().into()).unwrap();
@@ -211,6 +221,7 @@ mod tests {
 
     #[test]
     fn patch_merger_zero_weights_produce_zeros() {
+        crate::models::vision::init_test_metallib();
         // With all-zero fc1/fc2 weights and biases, output must be all zeros.
         let merger = PatchMerger::new(
             constructors::ones((1024_i32,), Dtype::Float32).unwrap(),

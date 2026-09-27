@@ -12,6 +12,7 @@ flowchart TD
     Server["ironmlx<br/>HTTP 服务与协议适配"]
     Runtime["ironmlx-runtime<br/>生命周期、调度与资源管理"]
     LM["ironmlx-lm<br/>LLM / VLM 模型与生成"]
+    Image["ironmlx-image<br/>图片生成模型与流水线"]
     Audio["ironmlx-audio<br/>音频模型与音频处理"]
     Core["ironmlx-core<br/>共享神经网络层<br/>权重接口与计算工具"]
     MLX["mlx<br/>Rust 计算接口"]
@@ -21,18 +22,24 @@ flowchart TD
     App -.->|进程管理与 HTTP| Server
     Server --> Runtime
     Runtime --> LM
+    Runtime --> Image
     Runtime --> Audio
     Runtime --> MLX
     LM --> Core
+    Image --> Core
+    Image --> LM
     Audio --> Core
     LM --> MLX
+    Image --> MLX
     Audio --> MLX
     Core --> MLX
     MLX --> Sys
     Sys --> Native
 ```
 
-两个模型库彼此独立，不反向依赖 runtime 或 server。它们可以直接使用 `mlx`，不必把所有计算包装进 `ironmlx-core`。runtime 直接使用 `mlx` 的设备、执行流与内存观测能力。
+模型库不反向依赖 runtime 或 server。`ironmlx-image` 可单向复用 `ironmlx-lm` 的 tokenizer
+和文本条件组件；`ironmlx-lm` 不依赖图片模型。各模型库可以直接使用 `mlx`，不必把所有
+计算包装进 `ironmlx-core`。runtime 直接使用 `mlx` 的设备、执行流与内存观测能力。
 
 本图聚焦应用、服务、推理与模型库的主要分层，未逐一列出基准工具、专用优化库和所有第三方依赖。crate 拆分是代码边界，不意味着每个 crate 都运行在独立进程，也不会自动隔离 GPU 或内存。
 
@@ -72,6 +79,17 @@ runtime 决定何时执行、执行哪个任务及其资源额度；模型库决
 
 这一层不包含 HTTP 服务或全局请求调度。对外协议的消息结构先由 server 转换为内部表示，再交给模型库处理。
 
+### ironmlx-image
+
+- 实现文生图模型的配置与权重校验、Diffusers 风格组件加载、Transformer、VAE、
+  去噪调度器和生成流水线。
+- 维护提示词条件编码、latent 状态、随机种子和模型内部中间结果。
+- 向 runtime 提供模型侧生成操作及原始图片结果，不定义 OpenAI HTTP DTO 或服务队列。
+- 可复用 `ironmlx-lm` 的文本条件能力，但不得让 LM 反向依赖图片模型。
+
+图片库不承担 Base64、HTTP 响应、全局准入、下载或编辑器 UI。图片展示、编辑、蒙版和
+合成仍属于上游应用职责。
+
 ### ironmlx-audio
 
 - 实现 TTS、语音识别（STT/ASR）、语音转换与增强等音频任务的模型配置、组件加载、权重映射和推理。
@@ -83,7 +101,7 @@ runtime 决定何时执行、执行哪个任务及其资源额度；模型库决
 
 ### ironmlx-core
 
-- 提供经 LLM/VLM 与音频模型实际复用的神经网络基础层，例如 Linear、Embedding、归一化与卷积。
+- 提供经 LLM/VLM、图片与音频模型实际复用的神经网络基础层，例如 Linear、Embedding、归一化与卷积。
 - 提供通用权重张量访问接口、量化描述，以及确有共享需要的采样等计算工具。
 - 依赖 `mlx` 完成计算，不依赖具体模型库、runtime 或 server。
 

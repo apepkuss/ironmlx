@@ -1028,6 +1028,72 @@ private struct AcceptingLayaMetadataPreflight: ModelMetadataPreflighting {
     }
 }
 
+private struct AcceptingQwenImageMetadataPreflight: ModelMetadataPreflighting {
+    func validate(metadataDirectory: URL) async throws -> ModelMetadataPreflightResult {
+        for path in [
+            "model_index.json",
+            "processor/tokenizer.json",
+            "scheduler/scheduler_config.json",
+            "text_encoder/config.json",
+            "transformer/config.json",
+            "vae/config.json",
+        ] {
+            #expect(FileManager.default.fileExists(atPath: metadataDirectory.appendingPathComponent(path).path))
+        }
+        return ModelMetadataPreflightResult(
+            modelType: "qwen_image_2_1",
+            artifactRole: ModelArtifactRole.imageGeneration,
+            quantization: nil
+        )
+    }
+}
+
+@Test func qwenImageDownloadPreservesNestedComponentsAndAllWeights() async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let repoID = "mlx-community/Qwen-Image-2.1-MLX-4bit"
+    let client = FakeModelDownloadHTTPClient()
+    let textWeights = Data("text weights".utf8)
+    let transformerWeights = Data("transformer weights".utf8)
+    let vaeWeights = Data("vae weights".utf8)
+    let files: [(path: String, data: Data, sha256: String?)] = [
+        ("model_index.json", Data(#"{"_class_name":"QwenImage21Pipeline"}"#.utf8), nil),
+        ("processor/tokenizer.json", Data("{}".utf8), nil),
+        ("processor/tokenizer_config.json", Data("{}".utf8), nil),
+        ("scheduler/scheduler_config.json", Data("{}".utf8), nil),
+        ("text_encoder/config.json", Data(#"{"architectures":["Qwen3VLForConditionalGeneration"]}"#.utf8), nil),
+        ("transformer/config.json", Data(#"{"_class_name":"QwenImage21Transformer2DModel"}"#.utf8), nil),
+        ("vae/config.json", Data(#"{"_class_name":"AutoencoderKLQwenImage21"}"#.utf8), nil),
+        ("text_encoder/model.safetensors", textWeights, sha256(textWeights)),
+        ("transformer/model.safetensors", transformerWeights, sha256(transformerWeights)),
+        ("vae/model.safetensors", vaeWeights, sha256(vaeWeights)),
+    ]
+    configureHuggingFace(client, repoID: repoID, files: files)
+    let service = ModelDownloadService(
+        rootURL: root,
+        httpClient: client,
+        metadataPreflight: AcceptingQwenImageMetadataPreflight(),
+        fileDownloader: ResumableFileDownloader(httpClient: client),
+        telemetryLogger: { _ in }
+    )
+
+    let result = await service.downloadHuggingFace(repoID: repoID, token: nil)
+
+    #expect(result.success, "\(result)")
+    let repository = try ModelRepositoryLayout.repositoryRoot(
+        rootURL: root, provider: .huggingFace, repoID: repoID
+    )
+    let snapshot = repository.appendingPathComponent("snapshots/\(testCommit)")
+    let manifest = try ModelSnapshotVerifier().verify(snapshot: snapshot)
+    #expect(Set(manifest.files.map(\.path)) == Set(files.map(\.path)))
+    #expect(manifest.compatibility.artifactRole == ModelArtifactRole.imageGeneration)
+    #expect(manifest.resources.weightBytes == Int64(textWeights.count + transformerWeights.count + vaeWeights.count))
+    let model = try #require(LocalModelScanner(rootURL: root).scan().first { $0.id == repoID })
+    #expect(model.type == "image_generation")
+    #expect(model.capabilities?.runtimeKind == "image_generation")
+    #expect(model.readiness?.isLoadable == true)
+}
+
 @Test func layaDownloadPreservesNestedMetadataAndIdentifiesDecisionModel() async throws {
     let root = try temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: root) }

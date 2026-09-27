@@ -21,6 +21,7 @@ use crate::core::prompt_lookup::PromptLookupConfig;
 use crate::core::speculative::{MtpDraftTokensArg, MtpSpeculativeConfig};
 use crate::Result;
 use ironmlx_core::sampler::Sampler;
+use ironmlx_image::models::QwenImage21Pipeline;
 use ironmlx_lm::core::model::Model;
 use ironmlx_lm::core::speculative_model::MtpSpeculativeModel;
 use {ironmlx_lm::core::loader::Loader, ironmlx_lm::core::tokenizer::Tokenizer};
@@ -443,6 +444,7 @@ pub enum EngineVariant {
     Llama(AppState<LlamaModel>),
     MiniCpmV46(AppState<MiniCpmV46Model>),
     DiffusionGemma(crate::core::diffusion_execution::DiffusionGemmaRuntime),
+    QwenImage(crate::core::qwen_image_execution::QwenImageRuntime),
 }
 
 pub struct EngineLease {
@@ -1077,6 +1079,7 @@ impl EnginePoolState {
                 }
                 LoadedEngineHealth::Causal(_)
                 | LoadedEngineHealth::DiffusionGemma { .. }
+                | LoadedEngineHealth::ImageGeneration { .. }
                 | LoadedEngineHealth::Audio { .. }
                 | LoadedEngineHealth::Decision { .. } => None,
             };
@@ -1088,6 +1091,12 @@ impl EnginePoolState {
                     snapshot.scheduler.queue_max,
                 ),
                 LoadedEngineHealth::DiffusionGemma {
+                    scheduler,
+                    active_requests,
+                    queued_requests,
+                    queue_capacity,
+                }
+                | LoadedEngineHealth::ImageGeneration {
                     scheduler,
                     active_requests,
                     queued_requests,
@@ -2018,7 +2027,9 @@ impl EngineVariant {
             Self::Glm4MoeLite(state) => state.effective_cap_max,
             Self::Llama(state) => state.effective_cap_max,
             Self::MiniCpmV46(state) => state.effective_cap_max,
-            Self::DiffusionGemma(_) | Self::Audio(_) | Self::Decision(_) => return None,
+            Self::DiffusionGemma(_) | Self::QwenImage(_) | Self::Audio(_) | Self::Decision(_) => {
+                return None
+            }
         };
         (cap > 0).then_some(cap)
     }
@@ -2039,7 +2050,9 @@ impl EngineVariant {
             Self::Glm4MoeLite(state) => state.request_execution.clear_shared_prompt_lookup().await,
             Self::Llama(state) => state.request_execution.clear_shared_prompt_lookup().await,
             Self::MiniCpmV46(state) => state.request_execution.clear_shared_prompt_lookup().await,
-            Self::DiffusionGemma(_) | Self::Audio(_) | Self::Decision(_) => Ok(0),
+            Self::DiffusionGemma(_) | Self::QwenImage(_) | Self::Audio(_) | Self::Decision(_) => {
+                Ok(0)
+            }
         }
     }
 
@@ -2097,6 +2110,15 @@ impl EngineVariant {
                     queue_capacity: stats.queue_capacity,
                 }
             }
+            Self::QwenImage(state) => {
+                let stats = state.lane.stats();
+                LoadedEngineHealth::ImageGeneration {
+                    scheduler: "serial_image_generation",
+                    active_requests: stats.active_requests,
+                    queued_requests: stats.queued_requests,
+                    queue_capacity: stats.queue_capacity,
+                }
+            }
         }
     }
 
@@ -2111,6 +2133,7 @@ impl EngineVariant {
             Self::Llama(_) => "llama",
             Self::MiniCpmV46(_) => "minicpmv4_6",
             Self::DiffusionGemma(_) => "diffusion_gemma",
+            Self::QwenImage(_) => "qwen_image_2_1",
             Self::Audio(_) => "indextts25",
             Self::Decision(_) => "laya_multilingual_mlx",
         }
@@ -2127,6 +2150,7 @@ impl EngineVariant {
             Self::Llama(state) => state.model_weight_bytes,
             Self::MiniCpmV46(state) => state.model_weight_bytes,
             Self::DiffusionGemma(state) => state.model_weight_bytes,
+            Self::QwenImage(state) => state.model_weight_bytes,
             Self::Audio(state) => state.model_weight_bytes(),
             Self::Decision(state) => state.model_weight_bytes(),
         }
@@ -2154,6 +2178,10 @@ impl EngineVariant {
                 let stats = state.lane.stats();
                 stats.active_requests.saturating_add(stats.queued_requests)
             }
+            Self::QwenImage(state) => {
+                let stats = state.lane.stats();
+                stats.active_requests.saturating_add(stats.queued_requests)
+            }
         }
     }
 
@@ -2168,6 +2196,7 @@ impl EngineVariant {
             Self::Llama(state) => state.runtime_usage.snapshot(true),
             Self::MiniCpmV46(state) => state.runtime_usage.snapshot(true),
             Self::DiffusionGemma(state) => state.runtime_usage.snapshot(false),
+            Self::QwenImage(state) => state.runtime_usage.snapshot(false),
             Self::Audio(_) => Default::default(),
             Self::Decision(state) => state.usage(),
         }
@@ -2260,6 +2289,18 @@ async fn load_engine_variant(
     if let Some(audio) = &model.audio {
         return Ok(EngineVariant::Audio(
             super::audio_execution::AudioRuntime::load(model.path.clone(), audio.clone()).await?,
+        ));
+    }
+    if model.capabilities.runtime_kind == "image_generation" {
+        let model_weight_bytes = estimated_weight_bytes_for_roots([model.path.as_path()])?;
+        let pipeline = QwenImage21Pipeline::load(&model.path)
+            .with_context(|| format!("QwenImage21Pipeline::load {}", model.path.display()))?;
+        return Ok(EngineVariant::QwenImage(
+            crate::core::qwen_image_execution::QwenImageRuntime::new(
+                pipeline,
+                model.id.clone(),
+                model_weight_bytes,
+            ),
         ));
     }
     let loader = Loader::open_multimodal(&model.path)
@@ -2920,13 +2961,22 @@ enum LoadedEngineHealth {
         queued_requests: usize,
         queue_capacity: usize,
     },
+    ImageGeneration {
+        scheduler: &'static str,
+        active_requests: usize,
+        queued_requests: usize,
+        queue_capacity: usize,
+    },
 }
 
 impl LoadedEngineHealth {
     fn max_position_embeddings(&self) -> i32 {
         match self {
             Self::Causal(snapshot) => snapshot.model.max_position_embeddings,
-            Self::DiffusionGemma { .. } | Self::Audio { .. } | Self::Decision { .. } => 0,
+            Self::DiffusionGemma { .. }
+            | Self::ImageGeneration { .. }
+            | Self::Audio { .. }
+            | Self::Decision { .. } => 0,
         }
     }
 }

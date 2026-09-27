@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 ironmlx-audio = { path = "../ironmlx-audio" }
+ironmlx-image = { path = "../ironmlx-image" }
 ironmlx-runtime = { path = "../ironmlx-runtime" }
 ironmlx-lm = { path = "../ironmlx-lm" }
 ironmlx-core = { path = "../ironmlx-core" }

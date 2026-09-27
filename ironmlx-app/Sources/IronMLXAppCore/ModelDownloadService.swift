@@ -1337,8 +1337,15 @@ public actor ModelDownloadService {
                     message: error.localizedDescription
                 )
             }
-            let tokenizerPath = compatibility.artifactRole == "decision"
-                ? "tokenizer/tokenizer.json" : "tokenizer.json"
+            let tokenizerPath: String
+            switch compatibility.artifactRole {
+            case "decision":
+                tokenizerPath = "tokenizer/tokenizer.json"
+            case ModelArtifactRole.imageGeneration:
+                tokenizerPath = "processor/tokenizer.json"
+            default:
+                tokenizerPath = "tokenizer.json"
+            }
             if ttsProfile == nil, compatibility.artifactRole != ModelArtifactRole.dflash2Drafter,
                !metadata.contains(where: { $0.path == tokenizerPath }) {
                 throw DownloadFailure(
@@ -1679,9 +1686,22 @@ public actor ModelDownloadService {
         telemetry: ModelDownloadTelemetryTracker,
         selectedFiles: [RemoteModelFile]? = nil
     ) async throws -> (files: [ModelSnapshotFile], validations: [ModelValidatedFile]) {
-        let required = repository.repoID == "aac6fef/laya-multilingual-mlx"
-            ? ["mlx_config.json", "encoder/config.json", "rl_agent_config.json", "tokenizer/tokenizer.json", "tokenizer/tokenizer_config.json"]
-            : ["config.json"]
+        let required: [String]
+        if repository.repoID == "aac6fef/laya-multilingual-mlx" {
+            required = ["mlx_config.json", "encoder/config.json", "rl_agent_config.json", "tokenizer/tokenizer.json", "tokenizer/tokenizer_config.json"]
+        } else if repository.repoID == "mlx-community/Qwen-Image-2.1-MLX-4bit" {
+            required = [
+                "model_index.json",
+                "processor/tokenizer.json",
+                "processor/tokenizer_config.json",
+                "scheduler/scheduler_config.json",
+                "text_encoder/config.json",
+                "transformer/config.json",
+                "vae/config.json",
+            ]
+        } else {
+            required = ["config.json"]
+        }
         let byPath = Dictionary(uniqueKeysWithValues: repository.files.map { ($0.path, $0) })
         for path in required where byPath[path] == nil {
             throw DownloadFailure(

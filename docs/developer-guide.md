@@ -14,7 +14,9 @@ serving smoke test.
 
 ## Understand the project
 
-- `ironmlx-core` and `ironmlx-lm` contain model and tensor logic.
+- `ironmlx-core` contains shared tensor and weight primitives.
+- `ironmlx-lm`, `ironmlx-image`, `ironmlx-audio`, and `ironmlx-decision`
+  contain task-specific model logic.
 - `ironmlx-runtime` owns execution, scheduling, lifecycle, and resources.
 - `ironmlx` provides the HTTP API and CLI layer.
 - `ironmlx-app` provides the macOS App and Dashboard.

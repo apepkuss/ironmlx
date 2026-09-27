@@ -4,8 +4,50 @@ import UniformTypeIdentifiers
 import WebKit
 
 @MainActor
-final class DashboardFilePickerDelegate: NSObject, WKUIDelegate {
+final class DashboardUIDelegate: NSObject, WKUIDelegate {
+    struct ConfirmationButtonTitles: Equatable {
+        var accept: String
+        var cancel: String
+
+        static func resolved(for language: String) -> Self {
+            switch language {
+            case "zh-Hans":
+                Self(accept: "继续", cancel: "取消")
+            case "zh-Hant":
+                Self(accept: "繼續", cancel: "取消")
+            case "ja":
+                Self(accept: "続ける", cancel: "キャンセル")
+            case "ko":
+                Self(accept: "계속", cancel: "취소")
+            default:
+                Self(accept: "Continue", cancel: "Cancel")
+            }
+        }
+    }
+
+    typealias ConfirmationPresenter = @MainActor (
+        _ message: String,
+        _ window: NSWindow?,
+        _ completionHandler: @escaping @MainActor @Sendable (Bool) -> Void
+    ) -> Void
+
     static let supportedAudioFileExtensions = ["wav", "flac", "mp3"]
+    private let confirmationPresenter: ConfirmationPresenter
+
+    init(
+        language: String = "en",
+        confirmationPresenter: ConfirmationPresenter? = nil
+    ) {
+        let buttonTitles = ConfirmationButtonTitles.resolved(for: language)
+        self.confirmationPresenter = confirmationPresenter ?? { message, window, completionHandler in
+            DashboardUIDelegate.presentConfirmation(
+                message: message,
+                window: window,
+                buttonTitles: buttonTitles,
+                completionHandler: completionHandler
+            )
+        }
+    }
 
     func webView(
         _ webView: WKWebView,
@@ -27,6 +69,49 @@ final class DashboardFilePickerDelegate: NSObject, WKUIDelegate {
             panel.beginSheetModal(for: window, completionHandler: finish)
         } else {
             panel.begin(completionHandler: finish)
+        }
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        runJavaScriptConfirmPanelWithMessage message: String,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping @MainActor @Sendable (Bool) -> Void
+    ) {
+        presentJavaScriptConfirmation(
+            message: message,
+            in: webView,
+            completionHandler: completionHandler
+        )
+    }
+
+    func presentJavaScriptConfirmation(
+        message: String,
+        in webView: WKWebView,
+        completionHandler: @escaping @MainActor @Sendable (Bool) -> Void
+    ) {
+        confirmationPresenter(message, webView.window, completionHandler)
+    }
+
+    private static func presentConfirmation(
+        message: String,
+        window: NSWindow?,
+        buttonTitles: ConfirmationButtonTitles,
+        completionHandler: @escaping @MainActor @Sendable (Bool) -> Void
+    ) {
+        let alert = NSAlert()
+        alert.messageText = "IronMLX"
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: buttonTitles.accept)
+        alert.addButton(withTitle: buttonTitles.cancel)
+        let finish: (NSApplication.ModalResponse) -> Void = { response in
+            completionHandler(response == .alertFirstButtonReturn)
+        }
+        if let window {
+            alert.beginSheetModal(for: window, completionHandler: finish)
+        } else {
+            finish(alert.runModal())
         }
     }
 }
@@ -79,7 +164,7 @@ public final class DashboardWindowController {
     private var webView: WKWebView?
     private var bridge: DashboardBridge?
     private var windowDelegate: DashboardWindowDelegate?
-    private var filePickerDelegate: DashboardFilePickerDelegate?
+    private var dashboardUIDelegate: DashboardUIDelegate?
 
     public init(configStore: AppConfigStore, backend: any BackendRuntimeManaging) {
         self.configStore = configStore
@@ -112,8 +197,8 @@ public final class DashboardWindowController {
         configuration.userContentController = userContentController
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
-        let filePickerDelegate = DashboardFilePickerDelegate()
-        webView.uiDelegate = filePickerDelegate
+        let dashboardUIDelegate = DashboardUIDelegate(language: config.language)
+        webView.uiDelegate = dashboardUIDelegate
         let bridge = DashboardBridge(
             webView: webView,
             configStore: configStore,
@@ -157,7 +242,7 @@ public final class DashboardWindowController {
         self.webView = webView
         self.bridge = bridge
         self.windowDelegate = windowDelegate
-        self.filePickerDelegate = filePickerDelegate
+        self.dashboardUIDelegate = dashboardUIDelegate
 
         guard let htmlURL = IronMLXAppResourceResolver.url(forResource: "dashboard2", withExtension: "html") else {
             preconditionFailure("IronMLX App Bundle is missing dashboard2.html")

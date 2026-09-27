@@ -5,18 +5,17 @@ use anyhow::Result;
 use mlx::fast::scaled_dot_product_attention;
 use mlx::{ops, Array, StreamOrDevice};
 
-use crate::core::Loader;
+use super::projection::VisionProjection;
 use crate::nn::{gelu_tanh, LayerNorm};
+use ironmlx_core::weights::WeightSource;
 
 /// Two-layer MLP inside each ViT block.
 ///
 /// Architecture: `linear_fc1` (d_model→4*d_model) → GELU-tanh → `linear_fc2` (4*d_model→d_model).
 /// Both layers have bias terms.
 pub struct VitMLP {
-    fc1_w: Array,
-    fc1_b: Array,
-    fc2_w: Array,
-    fc2_b: Array,
+    fc1: VisionProjection,
+    fc2: VisionProjection,
 }
 
 impl VitMLP {
@@ -26,19 +25,10 @@ impl VitMLP {
     /// `fc1_b` shape: `[ffn_dim]`.
     /// `fc2_w` shape: `[d_model, ffn_dim]`, e.g. `[1024, 4096]`.
     /// `fc2_b` shape: `[d_model]`.
-    pub(super) fn collect_weights<'a>(&'a self, out: &mut Vec<&'a Array>) {
-        out.push(&self.fc1_w);
-        out.push(&self.fc1_b);
-        out.push(&self.fc2_w);
-        out.push(&self.fc2_b);
-    }
-
     pub fn new(fc1_w: Array, fc1_b: Array, fc2_w: Array, fc2_b: Array) -> Self {
         Self {
-            fc1_w,
-            fc1_b,
-            fc2_w,
-            fc2_b,
+            fc1: VisionProjection::new_fp(fc1_w, Some(fc1_b)),
+            fc2: VisionProjection::new_fp(fc2_w, Some(fc2_b)),
         }
     }
 
@@ -47,16 +37,11 @@ impl VitMLP {
     /// Expected tensor names:
     /// - `{prefix}.linear_fc1.weight` / `.bias`
     /// - `{prefix}.linear_fc2.weight` / `.bias`
-    pub fn from_loader(loader: &Loader, prefix: &str) -> Result<Self> {
-        let fc1_w = loader
-            .tensor(&format!("{prefix}.linear_fc1.weight"))?
-            .clone();
-        let fc1_b = loader.tensor(&format!("{prefix}.linear_fc1.bias"))?.clone();
-        let fc2_w = loader
-            .tensor(&format!("{prefix}.linear_fc2.weight"))?
-            .clone();
-        let fc2_b = loader.tensor(&format!("{prefix}.linear_fc2.bias"))?.clone();
-        Ok(Self::new(fc1_w, fc1_b, fc2_w, fc2_b))
+    pub fn from_loader(loader: &(impl WeightSource + ?Sized), prefix: &str) -> Result<Self> {
+        Ok(Self {
+            fc1: VisionProjection::from_loader(loader, &format!("{prefix}.linear_fc1"))?,
+            fc2: VisionProjection::from_loader(loader, &format!("{prefix}.linear_fc2"))?,
+        })
     }
 
     /// Forward pass on the default stream.
@@ -75,17 +60,13 @@ impl VitMLP {
         let target = target.into();
 
         // fc1: addmm(b1, x, W1.T) → [T, ffn_dim]
-        let wt1 = self.fc1_w.transpose_on(target)?;
-        let h = ops::addmm_on(&self.fc1_b, x, &wt1, 1.0, 1.0, target)?;
+        let h = self.fc1.forward_on(x, target)?;
 
         // GELU tanh approx
         let h = gelu_tanh(&h, target)?;
 
         // fc2: addmm(b2, h, W2.T) → [T, d_model]
-        let wt2 = self.fc2_w.transpose_on(target)?;
-        let out = ops::addmm_on(&self.fc2_b, &h, &wt2, 1.0, 1.0, target)?;
-
-        Ok(out)
+        self.fc2.forward_on(&h, target)
     }
 }
 
@@ -160,10 +141,8 @@ fn apply_rotary_vision(tensor: &Array, freqs: &Array) -> Result<Array> {
 ///   5. For each cu_seqlens segment: fused SDPA (`scale = 1/sqrt(head_dim)`)
 ///   6. Concat, reshape, output projection
 pub struct VitAttention {
-    qkv_w: Array,
-    qkv_b: Array,
-    proj_w: Array,
-    proj_b: Array,
+    qkv: VisionProjection,
+    projection: VisionProjection,
     num_heads: i32,
     head_dim: i32,
 }
@@ -173,13 +152,6 @@ impl VitAttention {
     ///
     /// `qkv_w` shape: `[3*dim, dim]`, `qkv_b`: `[3*dim]`.
     /// `proj_w` shape: `[dim, dim]`, `proj_b`: `[dim]`.
-    pub(super) fn collect_weights<'a>(&'a self, out: &mut Vec<&'a Array>) {
-        out.push(&self.qkv_w);
-        out.push(&self.qkv_b);
-        out.push(&self.proj_w);
-        out.push(&self.proj_b);
-    }
-
     pub fn new(
         qkv_w: Array,
         qkv_b: Array,
@@ -189,10 +161,8 @@ impl VitAttention {
         head_dim: i32,
     ) -> Self {
         Self {
-            qkv_w,
-            qkv_b,
-            proj_w,
-            proj_b,
+            qkv: VisionProjection::new_fp(qkv_w, Some(qkv_b)),
+            projection: VisionProjection::new_fp(proj_w, Some(proj_b)),
             num_heads,
             head_dim,
         }
@@ -204,16 +174,17 @@ impl VitAttention {
     /// - `{prefix}.qkv.weight` / `.bias`
     /// - `{prefix}.proj.weight` / `.bias`
     pub fn from_loader(
-        loader: &Loader,
+        loader: &(impl WeightSource + ?Sized),
         prefix: &str,
         num_heads: i32,
         head_dim: i32,
     ) -> Result<Self> {
-        let qkv_w = loader.tensor(&format!("{prefix}.qkv.weight"))?.clone();
-        let qkv_b = loader.tensor(&format!("{prefix}.qkv.bias"))?.clone();
-        let proj_w = loader.tensor(&format!("{prefix}.proj.weight"))?.clone();
-        let proj_b = loader.tensor(&format!("{prefix}.proj.bias"))?.clone();
-        Ok(Self::new(qkv_w, qkv_b, proj_w, proj_b, num_heads, head_dim))
+        Ok(Self {
+            qkv: VisionProjection::from_loader(loader, &format!("{prefix}.qkv"))?,
+            projection: VisionProjection::from_loader(loader, &format!("{prefix}.proj"))?,
+            num_heads,
+            head_dim,
+        })
     }
 
     /// Forward pass on the default stream.
@@ -231,8 +202,7 @@ impl VitAttention {
         // Use addmm (fused bias-matmul) to match mlx-vlm's nn.Linear which calls
         // mx.addmm(bias, x, W.T).  This eliminates the 1-ULP rounding difference
         // that would arise from separate matmul + bias-add.
-        let qkv_wt = self.qkv_w.transpose_on(())?;
-        let qkv = ops::addmm(&self.qkv_b, x, &qkv_wt, 1.0, 1.0)?;
+        let qkv = self.qkv.forward_on(x, ().into())?;
 
         // Step 2: reshape to [seq, 3, nh, hd] then transpose(1,0,2,3) → [3, seq, nh, hd]
         let qkv = ops::shape::reshape(&qkv, &[seq, 3, nh, hd][..])?;
@@ -288,8 +258,7 @@ impl VitAttention {
         let output = ops::shape::reshape(&output, &[seq, dim][..])?;
 
         // Step 8: output projection (fused addmm to match nn.Linear)
-        let proj_wt = self.proj_w.transpose_on(())?;
-        ops::addmm(&self.proj_b, &output, &proj_wt, 1.0, 1.0).map_err(anyhow::Error::from)
+        self.projection.forward_on(&output, ().into())
     }
 }
 
@@ -323,19 +292,6 @@ impl VitBlock {
         }
     }
 
-    pub(super) fn collect_weights<'a>(&'a self, out: &mut Vec<&'a Array>) {
-        out.push(self.norm1.weight());
-        if let Some(b) = self.norm1.bias() {
-            out.push(b);
-        }
-        self.attn.collect_weights(out);
-        out.push(self.norm2.weight());
-        if let Some(b) = self.norm2.bias() {
-            out.push(b);
-        }
-        self.mlp.collect_weights(out);
-    }
-
     /// Load from a safetensors checkpoint via `loader`.
     ///
     /// Expected tensor names (under `prefix`):
@@ -346,7 +302,7 @@ impl VitBlock {
     /// - `{prefix}.mlp.linear_fc1.weight` / `.bias`
     /// - `{prefix}.mlp.linear_fc2.weight` / `.bias`
     pub fn from_loader(
-        loader: &Loader,
+        loader: &(impl WeightSource + ?Sized),
         prefix: &str,
         num_heads: i32,
         head_dim: i32,
@@ -411,6 +367,7 @@ mod tests {
 
     #[test]
     fn vit_mlp_output_shape() {
+        crate::models::vision::init_test_metallib();
         let fc1_w = Array::zeros([4096, 1024], Dtype::Bfloat16).unwrap();
         let fc1_b = Array::zeros([4096], Dtype::Bfloat16).unwrap();
         let fc2_w = Array::zeros([1024, 4096], Dtype::Bfloat16).unwrap();
@@ -423,6 +380,7 @@ mod tests {
 
     #[test]
     fn gelu_tanh_zero_maps_to_zero() {
+        crate::models::vision::init_test_metallib();
         // gelu_tanh(0) = 0.5 * 0 * (1 + tanh(0)) = 0
         let zero = Array::try_from((&[0.0_f32][..], &[][..])).unwrap();
         let out = gelu_tanh(&zero, ().into()).unwrap();
@@ -435,6 +393,7 @@ mod tests {
 
     #[test]
     fn gelu_tanh_positive_passes_through() {
+        crate::models::vision::init_test_metallib();
         // For large positive x, gelu_tanh(x) ≈ x.
         let x = Array::try_from((&[10.0_f32][..], &[][..])).unwrap();
         let out = gelu_tanh(&x, ().into()).unwrap();
@@ -460,6 +419,7 @@ mod tests {
     /// Zero-weight mlp fc1 → mlp output = zeros (post-GELU also zero) → y = h + 0 = x.
     #[test]
     fn vit_block_residual_connections() {
+        crate::models::vision::init_test_metallib();
         let n1_w = ops::constructors::ones((1024_i32,), Dtype::Bfloat16).unwrap();
         let n1_b = Array::zeros([1024], Dtype::Bfloat16).unwrap();
         let norm1 = LayerNorm::new(n1_w, Some(n1_b), 1e-6);
@@ -505,6 +465,7 @@ mod tests {
     /// Keys: x, rotary, qkv_w, qkv_b, proj_w, proj_b, out
     #[test]
     fn vit_attention_matches_mlx_vlm_reference() {
+        crate::models::vision::init_test_metallib();
         let fixture_path = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../ironmlx/tests/fixtures/qwen35_vl/p6_vit_attn_ref.safetensors"

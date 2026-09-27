@@ -1086,6 +1086,19 @@ public struct LocalModelScanner: Sendable {
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             return json
         }
+        let modelIndexURL = snapshot.appendingPathComponent("model_index.json")
+        if let data = try? Data(contentsOf: modelIndexURL),
+           let modelIndex = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           modelIndex["_class_name"] as? String == "QwenImage21Pipeline",
+           componentClass(snapshot: snapshot, path: "text_encoder/config.json") == "Qwen3VLForConditionalGeneration",
+           componentClass(snapshot: snapshot, path: "transformer/config.json") == "QwenImage21Transformer2DModel",
+           componentClass(snapshot: snapshot, path: "vae/config.json") == "AutoencoderKLQwenImage21" {
+            return [
+                "model_type": "qwen_image_2_1",
+                "pipeline_tag": "text-to-image",
+                "architectures": ["QwenImage21Pipeline"],
+            ]
+        }
         let mlxConfigURL = snapshot.appendingPathComponent("mlx_config.json")
         let agentConfigURL = snapshot.appendingPathComponent("rl_agent_config.json")
         guard let mlxData = try? Data(contentsOf: mlxConfigURL),
@@ -1096,6 +1109,15 @@ public struct LocalModelScanner: Sendable {
               let agent = try? JSONSerialization.jsonObject(with: agentData) as? [String: Any],
               let maxLen = agent["max_len"] as? Int else { return nil }
         return ["model_type": "laya_multilingual_mlx", "max_position_embeddings": maxLen]
+    }
+
+    private func componentClass(snapshot: URL, path: String) -> String? {
+        let url = snapshot.appendingPathComponent(path)
+        guard let data = try? Data(contentsOf: url),
+              let config = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return config["_class_name"] as? String
+            ?? (config["architectures"] as? [String])?.first
     }
 
     /// Reasoning levels are not standardized model metadata. Only publish them
@@ -1152,6 +1174,9 @@ public struct LocalModelScanner: Sendable {
         if modelType == "diffusion-gemma" {
             return "block_diffusion_vlm"
         }
+        if modelType == "qwen-image-2-1" {
+            return "image_generation"
+        }
         if signalsContainAny(signals, ["reranker", "rerank", "text-ranking"]) {
             return "reranker"
         }
@@ -1188,6 +1213,18 @@ public struct LocalModelScanner: Sendable {
                 supportsSpeculativeDecoding: false,
                 supportsKvCache: false,
                 supportedSamplingParameters: []
+            )
+        }
+        if modelType == "qwen-image-2-1" {
+            return BackendModelCapabilities(
+                runtimeKind: "image_generation",
+                supportsStreaming: false,
+                supportsVision: false,
+                supportsMtp: false,
+                supportsPromptLookup: false,
+                supportsSpeculativeDecoding: false,
+                supportsKvCache: false,
+                supportedSamplingParameters: ["seed", "size", "inference_steps"]
             )
         }
         let isDiffusion = modelType == "diffusion-gemma"
@@ -1728,6 +1765,7 @@ public struct LocalModelScanner: Sendable {
     ) -> SnapshotInspection? {
         let hasConfig = FileManager.default.isReadableFile(atPath: url.appendingPathComponent("config.json").path)
             || FileManager.default.isReadableFile(atPath: url.appendingPathComponent("mlx_config.json").path)
+            || FileManager.default.isReadableFile(atPath: url.appendingPathComponent("model_index.json").path)
         guard hasConfig,
               let files = try? FileManager.default.contentsOfDirectory(
                 at: url,
@@ -1738,7 +1776,9 @@ public struct LocalModelScanner: Sendable {
         else {
             return nil
         }
-        var missingFiles = requiredWeightFilesMissing(in: url, files: files)
+        var missingFiles = normalizedString(configJSON["model_type"]) == "qwen-image-2-1"
+            ? qwenImageRequiredFilesMissing(in: url)
+            : requiredWeightFilesMissing(in: url, files: files)
         let quantization = quantizationInspection(config: configJSON, snapshot: url)
         var capabilityType = modelCapabilityType(config: configJSON)
         missingFiles.append(contentsOf: quantization.missingFiles)
@@ -1867,6 +1907,19 @@ public struct LocalModelScanner: Sendable {
             return []
         }
         return ["model.safetensors"]
+    }
+
+    private func qwenImageRequiredFilesMissing(in snapshot: URL) -> [String] {
+        let required = [
+            "processor/tokenizer.json",
+            "scheduler/scheduler_config.json",
+            "text_encoder/model.safetensors",
+            "transformer/model.safetensors",
+            "vae/model.safetensors",
+        ]
+        return required.filter {
+            !FileManager.default.isReadableFile(atPath: snapshot.appendingPathComponent($0).path)
+        }
     }
 
     private func safetensorsShards(from index: URL) -> [String] {

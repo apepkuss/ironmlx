@@ -114,12 +114,12 @@ impl Mrope {
         // evaluated on thread B that has no encoder for that stream.
         mlx::transforms::eval(&[&inv_freq]).map_err(|e| anyhow::anyhow!("{e}"))?;
 
-        debug_assert!(
-            sections.iter().sum::<i32>() == half,
-            "sections sum {} must equal half rot_dim {}",
-            sections.iter().sum::<i32>(),
-            half
-        );
+        if sections.iter().sum::<i32>() != half {
+            return Err(anyhow::anyhow!(
+                "mrope sections sum {} must equal half rotary dim {half}",
+                sections.iter().sum::<i32>()
+            ));
+        }
 
         Ok(Self {
             inv_freq,
@@ -218,10 +218,10 @@ impl Mrope {
         // Pre-compute the stream assignment for each of the `half` positions.
         //
         // `slot_stream[d]` = stream index whose freq value goes into position d.
-        // Positions are filled round-robin per stream up to its section_len:
-        //   stream 0 (temporal): d = 0, 3, 6, ..., 3*(sect0-1)
-        //   stream 1 (height):   d = 1, 4, 7, ..., 1+3*(sect1-1)
-        //   stream 2 (width):    d = 2, 5, 8, ..., 2+3*(sect2-1)
+        // Qwen initializes every slot from stream 0, then replaces the
+        // round-robin slots owned by streams 1..N. This matters for asymmetric
+        // layouts such as Qwen3-VL's [24, 20, 20]: the final four slots remain
+        // on stream 0 rather than being dropped.
         //
         // Example: sections=[11,11,10], n_streams=3, half=32
         //   d=0  → stream 0   d=1  → stream 1   d=2  → stream 2
@@ -231,17 +231,25 @@ impl Mrope {
         let n_streams = self.sections.len() as i32;
         let half: i32 = self.sections.iter().sum();
 
-        // Build (dest_d, stream) pairs sorted by dest_d.
-        // Source index into freqs[stream] is the SAME as dest_d (matching Python).
-        let mut slot_stream: Vec<(i32, i32)> = self
-            .sections
-            .iter()
+        // Source index into freqs[stream] is the SAME as destination d,
+        // matching the reference's `freqs_t[..., idx] = freqs[dim, ..., idx]`.
+        let mut streams = vec![0_i32; half as usize];
+        for (stream, &section_len) in self.sections.iter().enumerate().skip(1) {
+            let stream = stream as i32;
+            for d in (0..section_len).map(|k| stream + k * n_streams) {
+                if d >= half {
+                    return Err(anyhow::anyhow!(
+                        "mrope section {stream} selects rotary slot {d} outside half dim {half}"
+                    ));
+                }
+                streams[d as usize] = stream;
+            }
+        }
+        let slot_stream: Vec<(i32, i32)> = streams
+            .into_iter()
             .enumerate()
-            .flat_map(|(s, &sect_len)| {
-                (0..sect_len).map(move |k| (s as i32 + k * n_streams, s as i32))
-            })
+            .map(|(d, stream)| (d as i32, stream))
             .collect();
-        slot_stream.sort_unstable_by_key(|&(d, _)| d);
 
         // `move` closure captures `slot_stream`, `half`, `rot_dim`.
         // `inputs[0]` = position_ids [n_streams, B, S] i32

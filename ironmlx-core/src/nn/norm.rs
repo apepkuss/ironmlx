@@ -68,6 +68,30 @@ impl RmsNorm {
             target,
         )?)
     }
+
+    /// Qwen3-VL rounds the normalized fp32 values back to the activation
+    /// dtype before applying the learned scale. This ordering is observable
+    /// for bf16 checkpoints and differs from a fused RMSNorm that multiplies
+    /// the scale in fp32 before its final cast.
+    pub fn forward_qwen3_vl_on(
+        &self,
+        x: &Array,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        let target = target.into();
+        let value = x.astype_on(Dtype::Float32, target)?;
+        let variance = value.square_on(target)?.mean_on(-1, true, target)?;
+        let epsilon: Array = (&[self.eps][..], ()).try_into()?;
+        let inverse = mlx::ops::binary::add_on(&variance, &epsilon, target)?.rsqrt_on(target)?;
+        let normalized = mlx::ops::binary::multiply_on(&value, &inverse, target)?
+            .astype_on(x.dtype(), target)?;
+        let weight = if self.weight.dtype() == x.dtype() {
+            self.weight.clone()
+        } else {
+            self.weight.astype_on(x.dtype(), target)?
+        };
+        Ok(mlx::ops::binary::multiply_on(&normalized, &weight, target)?)
+    }
 }
 
 /// Layer normalization with a learned per-feature scale and optional bias.

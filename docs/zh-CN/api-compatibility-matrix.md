@@ -66,6 +66,13 @@ Responses reasoning item 和 Messages thinking block 依赖精确模板，Chat �
 
 `POST /v1/audio/speech` 接受模型、输入文本、WAV/PCM 输出策略，以及一种参考来源：Base64 `ref_audio` 或托管的 `voice` ID，两者必须二选一。`voice` 字符串遵循 OpenAI-compatible 客户端惯例；IronMLX 将其解析为经过验证的本地参考音频。`GET /v1/audio/voices` 是供支持动态声音列表的客户端使用的 IronMLX 扩展。声音管理与参考录音试听接口见[语音 API](audio-speech-api.md)。
 
+## 图片生成
+
+`POST /v1/images/generations` 为 `mlx-community/Qwen-Image-2.1-MLX-4bit`
+提供 OpenAI-compatible 文生图能力，每次请求返回一张 Base64 PNG。图片编辑、变体、
+图片输入和 Anthropic 图片 API 不在此范围内。字段、尺寸限制和错误见
+[图片生成 API](image-generation-api.md)。
+
 ## 错误与重试
 
 Chat/Responses 使用 OpenAI 错误信封；Messages 使用 Anthropic 信封，响应体 request_id 与 request-id header 对应。error.code 是 IronMLX 的机器可读扩展。

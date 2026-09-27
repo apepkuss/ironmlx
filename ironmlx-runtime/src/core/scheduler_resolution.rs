@@ -578,6 +578,9 @@ pub fn resolve_memory_limit_bytes(
 }
 pub fn read_model_type(model_dir: &std::path::Path) -> Result<String> {
     let config_path = model_dir.join("config.json");
+    if !config_path.exists() && model_dir.join("model_index.json").exists() {
+        return Ok(ironmlx_image::preflight_model_metadata(model_dir)?.model_type);
+    }
     let raw = std::fs::read_to_string(&config_path)
         .with_context(|| format!("reading {}", config_path.display()))?;
     let config: serde_json::Value =

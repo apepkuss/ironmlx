@@ -1119,7 +1119,7 @@
       {
         "license_expression": "MIT OR Apache-2.0",
         "license_files": [
-          "rust-license-ebeeae2d65a7fc03.txt"
+          "rust-license-23f18e03dc49df91.txt"
         ],
         "name": "fs-err",
         "repository": "https://github.com/andrewhickman/fs-err",
@@ -1229,7 +1229,7 @@
       {
         "license_expression": "MIT",
         "license_files": [
-          "rust-license-8a28736d1243c67e.txt"
+          "rust-license-eb69613e00e596e1.txt"
         ],
         "name": "generic-array",
         "repository": "https://github.com/fizyk20/generic-array.git",
@@ -1239,7 +1239,7 @@
       {
         "license_expression": "MIT",
         "license_files": [
-          "rust-license-8a28736d1243c67e.txt"
+          "rust-license-eb69613e00e596e1.txt"
         ],
         "name": "generic-array",
         "repository": "https://github.com/fizyk20/generic-array.git",
@@ -1768,6 +1768,16 @@
         "version": "0.3.17"
       },
       {
+        "license_expression": "MIT",
+        "license_files": [
+          "rust-license-14373973f98d640e.txt"
+        ],
+        "name": "mime_guess",
+        "repository": "https://github.com/abonander/mime_guess",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "2.0.5"
+      },
+      {
         "license_expression": "Apache-2.0",
         "license_files": [
           "rust-license-143368af9701a24e.txt"
@@ -1840,6 +1850,16 @@
       {
         "license_expression": "MIT",
         "license_files": [
+          "rust-license-cfb47b4c5832e5a2.txt"
+        ],
+        "name": "multer",
+        "repository": "https://github.com/rwf2/multer",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "3.1.0"
+      },
+      {
+        "license_expression": "MIT",
+        "license_files": [
           "rust-license-4dbda04344456f09.txt"
         ],
         "name": "nom",
@@ -1850,7 +1870,7 @@
       {
         "license_expression": "MIT",
         "license_files": [
-          "rust-license-315fde9fe60c6530.txt"
+          "rust-license-cfdb7491dfa8800a.txt"
         ],
         "name": "nu-ansi-term",
         "repository": "https://github.com/nushell/nu-ansi-term",
@@ -2509,6 +2529,16 @@
         "version": "0.6.5"
       },
       {
+        "license_expression": "MIT",
+        "license_files": [
+          "rust-license-58545fed1565e42d.txt"
+        ],
+        "name": "spin",
+        "repository": "https://github.com/mvdnes/spin-rs.git",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "0.9.9"
+      },
+      {
         "license_expression": "Apache-2.0",
         "license_files": [
           "rust-license-50e6751797c50ded.txt"
@@ -2571,7 +2601,7 @@
       {
         "license_expression": "Apache-2.0",
         "license_files": [
-          "rust-license-17de84ce8b605a18.txt"
+          "rust-license-50e6751797c50ded.txt"
         ],
         "name": "superslice",
         "repository": "https://github.com/alkis/superslice-rs",
@@ -2959,6 +2989,16 @@
         "version": "1.20.1"
       },
       {
+        "license_expression": "MIT OR Apache-2.0",
+        "license_files": [
+          "rust-license-2d01890414494742.txt"
+        ],
+        "name": "unicase",
+        "repository": "https://github.com/seanmonstar/unicase",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "2.9.0"
+      },
+      {
         "license_expression": "(MIT OR Apache-2.0) AND Unicode-3.0",
         "license_files": [
           "rust-license-23f18e03dc49df91.txt",
@@ -3323,6 +3363,13 @@
         "sha256": "143368af9701a24ebaf89fe5310ad8116ca71e8e99f17415c0dd893f6a256ae4"
       },
       {
+        "file": "rust-license-14373973f98d640e.txt",
+        "license_ids": [
+          "MIT"
+        ],
+        "sha256": "14373973f98d640ebefcf8161adb9363188fedc7695bdc5604003b17288c4e1f"
+      },
+      {
         "file": "rust-license-1626f2c950cee975.txt",
         "license_ids": [
           "MIT"
@@ -3335,13 +3382,6 @@
           "BSD-3-Clause"
         ],
         "sha256": "162ce11ad71338d0a0c6ebaf5c48af72c6ae237b468859d3656fe2d9ed3f3a85"
-      },
-      {
-        "file": "rust-license-17de84ce8b605a18.txt",
-        "license_ids": [
-          "Apache-2.0"
-        ],
-        "sha256": "17de84ce8b605a18699d04d6d9371da2aacc0e2af58f2128e87f75e6d190f901"
       },
       {
         "file": "rust-license-1d4c38d56650edc2.txt",
@@ -3426,13 +3466,6 @@
           "MIT"
         ],
         "sha256": "2d01890414494742ba4a509fcec8efa40f6d8be22cbd72be7cff08d6fda4ec89"
-      },
-      {
-        "file": "rust-license-315fde9fe60c6530.txt",
-        "license_ids": [
-          "MIT"
-        ],
-        "sha256": "315fde9fe60c653058c86d0cf7a6442204d1faf847e5a4595cf7838ae84cfc2a"
       },
       {
         "file": "rust-license-34f17d9067385431.txt",
@@ -3596,6 +3629,13 @@
         "sha256": "5734ed989dfca1f625b40281ee9f4530f91b2411ec01cb748223e7eb87e201ab"
       },
       {
+        "file": "rust-license-58545fed1565e42d.txt",
+        "license_ids": [
+          "MIT"
+        ],
+        "sha256": "58545fed1565e42d687aecec6897d35c6d37ccb71479a137c0deb2203e125c79"
+      },
+      {
         "file": "rust-license-5b698ca13897be3a.txt",
         "license_ids": [
           "ISC"
@@ -3734,13 +3774,6 @@
           "MIT"
         ],
         "sha256": "898b1ae9821e98daf8964c8d6c7f61641f5f5aa78ad500020771c0939ee0dea1"
-      },
-      {
-        "file": "rust-license-8a28736d1243c67e.txt",
-        "license_ids": [
-          "MIT"
-        ],
-        "sha256": "8a28736d1243c67ed9fc964c82315a00f10c67abfa2c868355d70616a7853465"
       },
       {
         "file": "rust-license-8b43ce8accd61e9d.txt",
@@ -3960,6 +3993,20 @@
         "sha256": "cc0332a88c2ea21d5f3c1298f966120f4c95196871c3f6bb4fcf615508b93fa1"
       },
       {
+        "file": "rust-license-cfb47b4c5832e5a2.txt",
+        "license_ids": [
+          "MIT"
+        ],
+        "sha256": "cfb47b4c5832e5a204d86140ba385e683309e3c82f670e65dfaf491b13c5e2c4"
+      },
+      {
+        "file": "rust-license-cfdb7491dfa8800a.txt",
+        "license_ids": [
+          "MIT"
+        ],
+        "sha256": "cfdb7491dfa8800a1d561957d6a072ad63a6305ffa48386d04eae8eac8d65e8a"
+      },
+      {
         "file": "rust-license-d30047bca3b51663.txt",
         "license_ids": [
           "MIT"
@@ -4037,11 +4084,11 @@
         "sha256": "eafbfa606bc005ed7fd2f623d65af17ffe4ef7c017221ac14405bf4140771ea9"
       },
       {
-        "file": "rust-license-ebeeae2d65a7fc03.txt",
+        "file": "rust-license-eb69613e00e596e1.txt",
         "license_ids": [
           "MIT"
         ],
-        "sha256": "ebeeae2d65a7fc034c6d5bb3667b7d3a22c4f947e75ab2fff982fd7481b3cb7e"
+        "sha256": "eb69613e00e596e13d2f58e820aee10e9d51754b91d7111bc997f1fc90791f66"
       },
       {
         "file": "rust-license-ecc269ef87fd38a1.txt",

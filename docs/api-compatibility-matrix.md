@@ -71,6 +71,14 @@ to validated local reference audio. `GET /v1/audio/voices` is an IronMLX discove
 extension for clients that support dynamic voice lists. Voice management and
 reference-preview endpoints are documented in the [speech API](audio-speech-api.md).
 
+## Image generation
+
+`POST /v1/images/generations` provides OpenAI-compatible text-to-image generation
+for `mlx-community/Qwen-Image-2.1-MLX-4bit`. It returns one Base64 PNG per request.
+Image editing, variations, image inputs and Anthropic image APIs are outside this
+scope. See the [image generation API](image-generation-api.md) for fields, geometry
+limits and errors.
+
 ## Errors and retries
 
 Chat/Responses use OpenAI error envelopes; Messages uses an Anthropic envelope with matching body request_id and request-id header. error.code is an IronMLX machine-readable extension.

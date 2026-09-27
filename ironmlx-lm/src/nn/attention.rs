@@ -13,7 +13,7 @@
 use mlx::{Array, StreamOrDevice};
 
 use crate::core::cache::KVCache;
-use crate::core::Loader;
+use crate::core::weights::WeightSource;
 use crate::nn::{Linear, Mrope, RmsNorm};
 use crate::Result;
 
@@ -44,6 +44,7 @@ pub struct Attention {
     k_norm: Option<RmsNorm>,
     cfg: AttentionConfig,
     scale: f32,
+    qwen3_vl_norm_order: bool,
 }
 
 impl Attention {
@@ -51,7 +52,31 @@ impl Attention {
     /// `{prefix}.q_proj`, `{prefix}.k_proj`, `{prefix}.v_proj`,
     /// `{prefix}.o_proj`, plus `{prefix}.q_norm` / `{prefix}.k_norm` when
     /// `cfg.has_qk_norm` is set.
-    pub fn from_loader(loader: &Loader, prefix: &str, cfg: AttentionConfig) -> Result<Self> {
+    pub fn from_loader(
+        loader: &(impl WeightSource + ?Sized),
+        prefix: &str,
+        cfg: AttentionConfig,
+    ) -> Result<Self> {
+        Self::from_loader_with_norm_order(loader, prefix, cfg, false)
+    }
+
+    /// Qwen3-VL uses a bf16 rounding point between normalization and the
+    /// learned Q/K scale. Keep that checkpoint-specific behavior opt-in so
+    /// other model families retain the fused RMSNorm path.
+    pub fn from_loader_qwen3_vl(
+        loader: &(impl WeightSource + ?Sized),
+        prefix: &str,
+        cfg: AttentionConfig,
+    ) -> Result<Self> {
+        Self::from_loader_with_norm_order(loader, prefix, cfg, true)
+    }
+
+    fn from_loader_with_norm_order(
+        loader: &(impl WeightSource + ?Sized),
+        prefix: &str,
+        cfg: AttentionConfig,
+        qwen3_vl_norm_order: bool,
+    ) -> Result<Self> {
         let q_proj = Linear::from_loader(loader, &format!("{prefix}.q_proj"))?;
         let k_proj = Linear::from_loader(loader, &format!("{prefix}.k_proj"))?;
         let v_proj = Linear::from_loader(loader, &format!("{prefix}.v_proj"))?;
@@ -85,6 +110,7 @@ impl Attention {
             k_norm,
             cfg,
             scale,
+            qwen3_vl_norm_order,
         })
     }
 
@@ -176,12 +202,20 @@ impl Attention {
 
         // Per-head Q/K RMSNorm before rotation (Qwen3+ style).
         let q = if let Some(qn) = &self.q_norm {
-            qn.forward_on(&q, target)?
+            if self.qwen3_vl_norm_order {
+                qn.forward_qwen3_vl_on(&q, target)?
+            } else {
+                qn.forward_on(&q, target)?
+            }
         } else {
             q
         };
         let k = if let Some(kn) = &self.k_norm {
-            kn.forward_on(&k, target)?
+            if self.qwen3_vl_norm_order {
+                kn.forward_qwen3_vl_on(&k, target)?
+            } else {
+                kn.forward_on(&k, target)?
+            }
         } else {
             k
         };
@@ -320,6 +354,7 @@ mod tests {
             o_proj: Linear::new_fp(o_w, None),
             q_norm: None,
             k_norm: None,
+            qwen3_vl_norm_order: false,
             cfg,
             scale,
         };
@@ -412,6 +447,7 @@ mod tests {
             o_proj: Linear::new_fp(identity(8), None),
             q_norm: None,
             k_norm: None,
+            qwen3_vl_norm_order: false,
             cfg,
             scale: 1.0 / 8.0_f32.sqrt(),
         };

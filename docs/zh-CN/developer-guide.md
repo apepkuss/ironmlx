@@ -11,7 +11,9 @@
 
 ## 理解项目结构
 
-- `ironmlx-core` 与 `ironmlx-lm`：模型和 tensor 逻辑；
+- `ironmlx-core`：共享 tensor 与权重基础能力；
+- `ironmlx-lm`、`ironmlx-image`、`ironmlx-audio` 与 `ironmlx-decision`：
+  各任务领域的模型逻辑；
 - `ironmlx-runtime`：执行、调度、生命周期和资源所有权；
 - `ironmlx`：HTTP API 与 CLI 层；
 - `ironmlx-app`：macOS App 与 Dashboard。

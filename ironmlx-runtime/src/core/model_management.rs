@@ -254,6 +254,34 @@ pub fn build_engine_model_config(
         });
     }
     let model_type = read_model_type(model_dir)?;
+    if model_type == "qwen_image_2_1" {
+        if max_cache_cap_override.is_some()
+            || default_max_output_tokens.is_some()
+            || mtp.is_some()
+            || prompt_lookup.is_some()
+            || sampling_defaults_override != SamplingDefaults::default()
+        {
+            bail!("Qwen Image 2.1 does not accept causal scheduler or language sampling settings");
+        }
+        return Ok(EngineModelLoad {
+            config: EngineModelConfig {
+                audio: None,
+                decision: None,
+                id: model_id,
+                path: model_dir.to_path_buf(),
+                load_policy: EngineLoadPolicy::Lazy,
+                default: false,
+                pinned,
+                scheduler_runtime_profile: None,
+                mtp: None,
+                prompt_lookup: None,
+                sampling_defaults: SamplingDefaults::default(),
+                default_max_output_tokens: None,
+                capabilities: EngineModelCapabilities::image_generation(),
+            },
+            warning: None,
+        });
+    }
     let architecture = ModelArchitecture::from_model_type(&model_type)?;
     let capabilities = engine_model_capabilities(architecture, model_dir)?;
     if architecture == ModelArchitecture::DiffusionGemma {
@@ -848,6 +876,29 @@ pub fn build_engine_model_config_for_pool(
         );
     }
     let model_type = read_model_type(&model.path)?;
+    if model_type == "qwen_image_2_1" {
+        if mtp.is_some() || prompt_lookup.is_some() || model.scheduler_profile.is_some() {
+            bail!(
+                "engine model `{}` configures causal execution settings for Qwen Image 2.1",
+                model.id
+            );
+        }
+        return Ok(crate::core::engine_pool::EngineModelConfig {
+            audio: None,
+            decision: None,
+            id: model.id,
+            path: model.path,
+            load_policy: model.load_policy,
+            default: model.default,
+            pinned: false,
+            scheduler_runtime_profile: None,
+            mtp: None,
+            prompt_lookup: None,
+            sampling_defaults: crate::core::runtime_config::SamplingDefaults::default(),
+            default_max_output_tokens: None,
+            capabilities: crate::core::engine_pool::EngineModelCapabilities::image_generation(),
+        });
+    }
     let architecture = ironmlx_lm::models::ModelArchitecture::from_model_type(&model_type)?;
     let config_data = std::fs::read(model.path.join("config.json"))?;
     let config: serde_json::Value = serde_json::from_slice(&config_data)?;

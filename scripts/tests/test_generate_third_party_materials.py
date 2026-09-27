@@ -20,6 +20,42 @@ def sha256(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
+class RustMaterialsTests(unittest.TestCase):
+    def test_normalizes_license_line_endings_before_hashing_and_writing(self) -> None:
+        package_id = "mime_guess 2.0.5 (registry+https://github.com/rust-lang/crates.io-index)"
+        cargo_about = {
+            "licenses": [
+                {
+                    "id": "MIT",
+                    "text": "MIT fixture\r\n\r\nPermission granted.\r\n",
+                    "used_by": [{"crate": {"id": package_id}}],
+                }
+            ],
+            "crates": [
+                {
+                    "package": {
+                        "id": package_id,
+                        "name": "mime_guess",
+                        "version": "2.0.5",
+                        "repository": "https://example.com/mime_guess",
+                        "source": "registry+https://github.com/rust-lang/crates.io-index",
+                    },
+                    "license": "MIT",
+                }
+            ],
+        }
+        normalized = b"MIT fixture\n\nPermission granted.\n"
+
+        with tempfile.TemporaryDirectory() as directory:
+            licenses_dir = Path(directory)
+            crates, licenses = GENERATOR.rust_materials([cargo_about], licenses_dir)
+
+            filename = f"rust-license-{sha256(normalized)[:16]}.txt"
+            self.assertEqual(crates[0]["license_files"], [filename])
+            self.assertEqual(licenses[0]["sha256"], sha256(normalized))
+            self.assertEqual((licenses_dir / filename).read_bytes(), normalized)
+
+
 class BundledAssetMaterialsTests(unittest.TestCase):
     def fixture(self, root: Path) -> tuple[dict, Path]:
         asset_content = b"<svg/>\n"

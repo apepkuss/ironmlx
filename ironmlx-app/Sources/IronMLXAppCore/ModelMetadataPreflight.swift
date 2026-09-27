@@ -2,6 +2,7 @@ import Foundation
 
 enum ModelArtifactRole {
     static let dflash2Drafter = "dflash2_drafter"
+    static let imageGeneration = "image_generation"
 }
 
 public protocol ModelMetadataPreflighting: Sendable {

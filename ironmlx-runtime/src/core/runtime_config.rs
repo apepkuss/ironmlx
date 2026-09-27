@@ -431,6 +431,19 @@ pub struct EngineModelCapabilities {
 }
 
 impl EngineModelCapabilities {
+    pub fn image_generation() -> Self {
+        Self {
+            runtime_kind: "image_generation",
+            supports_streaming: false,
+            supports_vision: false,
+            supports_mtp: false,
+            supports_prompt_lookup: false,
+            supports_speculative_decoding: false,
+            supports_kv_cache: false,
+            supported_sampling_parameters: &["seed", "size", "inference_steps"],
+        }
+    }
+
     pub fn decision() -> Self {
         Self {
             runtime_kind: "decision",
@@ -576,6 +589,20 @@ pub(crate) fn validate_engine_model_config(model: &EngineModelConfig) -> Result<
             || model.sampling_defaults != SamplingDefaults::default()
         {
             bail!("decision models do not accept generation settings");
+        }
+        return Ok(());
+    }
+    if model.capabilities.runtime_kind == "image_generation" {
+        let metadata = ironmlx_image::preflight_model_metadata(&model.path)?;
+        if metadata.model_type != "qwen_image_2_1"
+            || model.capabilities != EngineModelCapabilities::image_generation()
+            || model.scheduler_runtime_profile.is_some()
+            || model.mtp.is_some()
+            || model.prompt_lookup.is_some()
+            || model.default_max_output_tokens.is_some()
+            || model.sampling_defaults != SamplingDefaults::default()
+        {
+            bail!("Qwen Image 2.1 model capability or execution settings mismatch");
         }
         return Ok(());
     }

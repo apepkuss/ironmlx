@@ -28,6 +28,7 @@ pub mod scheduler_actor;
 pub mod task_execution;
 
 pub mod diffusion_execution;
+pub mod qwen_image_execution;
 
 pub mod scheduler_profile_context;
 pub mod scheduler_profile_store;

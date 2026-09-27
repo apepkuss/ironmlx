@@ -12,6 +12,7 @@ publish = false
 [dependencies]
 ironmlx-decision = { path = "../ironmlx-decision" }
 ironmlx-audio = { path = "../ironmlx-audio" }
+ironmlx-image = { path = "../ironmlx-image" }
 clap = { version = "4", features = ["derive"], optional = true }
 ironmlx-lm = { path = "../ironmlx-lm" }
 ironmlx-core = { path = "../ironmlx-core" }

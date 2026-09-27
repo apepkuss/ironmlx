@@ -1,0 +1,23 @@
+[package]
+name = "ironmlx-image"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Native MLX image-generation models and pipelines"
+publish = false
+
+[dependencies]
+ironmlx-core = { path = "../ironmlx-core" }
+ironmlx-lm = { path = "../ironmlx-lm" }
+mlx = { path = "../mlx" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+
+[dev-dependencies]
+serial_test = { version = "3", default-features = false }
+uuid = { version = "1", features = ["v4"] }

@@ -98,6 +98,15 @@ impl PublicApiRequest for super::anthropic::MessagesRequest {
     }
 }
 
+impl PublicApiRequest for super::images::ImagesGenerationRequest {
+    const API_NAME: &'static str = "Images Generations";
+    const PROTOCOL: ApiProtocol = ApiProtocol::OpenAi;
+
+    fn validate_public_contract(&self) -> Result<(), RequestContractError> {
+        Ok(())
+    }
+}
+
 pub(crate) fn sse_response(body: Body) -> Response {
     Response::builder()
         .header(header::CONTENT_TYPE, "text/event-stream")

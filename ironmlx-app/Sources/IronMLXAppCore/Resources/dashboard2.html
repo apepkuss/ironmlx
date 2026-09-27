@@ -5736,6 +5736,7 @@
       menu_start_needs_model: "No default model is set. Download a model and choose it as the default; IronMLX will start the backend automatically.",
       model_download_complete: "Model \"{name}\" downloaded successfully.",
       model_downloading_start: "Downloading {name}...",
+      qwen_image_license_warning: "Qwen-Image-2.1 is governed by the Qwen Research License and is not licensed for commercial use. Continue only if your use complies with that license. Download this model?",
       model_downloading_file: "Downloading {name}... {pct}%",
       download_btn_downloading: "Downloading...",
       download_in_progress: "A HuggingFace download is already in progress.",
@@ -6239,6 +6240,7 @@
       menu_start_needs_model: "尚未设置默认模型。请先下载一个模型并设为默认模型，IronMLX 会自动启动后端。",
       model_download_complete: "模型 \"{name}\" 下载完成。",
       model_downloading_start: "正在下载 {name}…",
+      qwen_image_license_warning: "Qwen-Image-2.1 受 Qwen Research License 约束，不授权商业用途。请仅在你的用途符合该许可证时继续。是否下载该模型？",
       model_downloading_file: "正在下载 {name}… {pct}%",
       download_btn_downloading: "下载中…",
       download_in_progress: "已有 HuggingFace 模型正在下载。",
@@ -6742,6 +6744,7 @@
       menu_start_needs_model: "尚未設定預設模型。請先下載一個模型並設為預設模型，IronMLX 會自動啟動後端。",
       model_download_complete: "模型 \"{name}\" 下載完成。",
       model_downloading_start: "正在下載 {name}…",
+      qwen_image_license_warning: "Qwen-Image-2.1 受 Qwen Research License 約束，不授權商業用途。請僅在你的用途符合該授權條款時繼續。是否下載此模型？",
       model_downloading_file: "正在下載 {name}… {pct}%",
       download_btn_downloading: "下載中…",
       download_in_progress: "已有 HuggingFace 模型正在下載。",
@@ -7248,6 +7251,7 @@
       menu_start_needs_model: "デフォルトモデルが設定されていません。モデルをダウンロードしてデフォルトに設定すると、IronMLX がバックエンドを自動起動します。",
       model_download_complete: "モデル \"{name}\" のダウンロードが完了しました。",
       model_downloading_start: "{name} をダウンロード中…",
+      qwen_image_license_warning: "Qwen-Image-2.1 は Qwen Research License の対象で、商用利用は許諾されていません。ライセンスに適合する場合のみ続行してください。このモデルをダウンロードしますか？",
       model_downloading_file: "{name} をダウンロード中… {pct}%",
       download_btn_downloading: "ダウンロード中…",
       download_in_progress: "HuggingFace モデルをダウンロードしています。",
@@ -7754,6 +7758,7 @@
       menu_start_needs_model: "기본 모델이 설정되어 있지 않습니다. 모델을 다운로드하고 기본값으로 선택하면 IronMLX가 백엔드를 자동으로 시작합니다.",
       model_download_complete: "모델 \"{name}\" 다운로드가 완료되었습니다.",
       model_downloading_start: "{name} 다운로드 중…",
+      qwen_image_license_warning: "Qwen-Image-2.1은 Qwen Research License의 적용을 받으며 상업적 사용은 허가되지 않습니다. 사용 목적이 라이선스를 준수하는 경우에만 계속하세요. 이 모델을 다운로드하시겠습니까?",
       model_downloading_file: "{name} 다운로드 중… {pct}%",
       download_btn_downloading: "다운로드 중…",
       download_in_progress: "HuggingFace 모델을 다운로드하고 있습니다.",
@@ -9791,6 +9796,11 @@
   function startDownload(repoId, explicitToken) {
     const dict = I18N[currentLang] || I18N.en;
     if (!repoId) { showToast(dict.enter_repo_id || 'Please enter a Repo ID.', 'info'); return; }
+    if (repoId === 'mlx-community/Qwen-Image-2.1-MLX-4bit'
+        && !window.confirm(dict.qwen_image_license_warning
+          || 'Qwen-Image-2.1 is governed by the Qwen Research License and is not licensed for commercial use. Continue?')) {
+      return;
+    }
     const token = explicitToken === null
       ? ''
       : (explicitToken || document.getElementById('search-hf-token').value.trim());

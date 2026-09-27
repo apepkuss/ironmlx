@@ -3,7 +3,7 @@
 use anyhow::Result;
 use mlx::{ops, Array, StreamOrDevice};
 
-use crate::core::Loader;
+use ironmlx_core::weights::WeightSource;
 
 pub struct PatchEmbed {
     weight_2d: Array,
@@ -20,19 +20,31 @@ impl PatchEmbed {
         Ok(Self { weight_2d, bias })
     }
 
-    pub fn from_loader(loader: &Loader, prefix: &str, hidden_size: i32) -> Result<Self> {
-        let weight = loader.tensor(&format!("{prefix}.weight"))?.clone();
+    pub fn from_loader(
+        loader: &(impl WeightSource + ?Sized),
+        prefix: &str,
+        hidden_size: i32,
+    ) -> Result<Self> {
+        let source = loader.tensor(&format!("{prefix}.weight"))?;
+        let shape = source.shape();
+        let weight = match shape.as_slice() {
+            // Diffusers OI(T)HW -> MLX-friendly O(T)HWI.
+            [out, 3, 2, 16, 16] if *out == hidden_size => {
+                source.transpose_axes(&[0_i32, 2, 3, 4, 1][..])?
+            }
+            [out, 2, 16, 16, 3] if *out == hidden_size => source.clone(),
+            actual => anyhow::bail!(
+                "vision patch embedding {prefix}.weight has unsupported shape {actual:?}"
+            ),
+        };
         let bias = loader.tensor(&format!("{prefix}.bias"))?.clone();
-        Self::new(weight, bias, hidden_size)
+        let result = Self::new(weight, bias, hidden_size)?;
+        mlx::transforms::eval(&[&result.weight_2d, &result.bias])?;
+        Ok(result)
     }
 
     pub fn forward(&self, x: &Array) -> Result<Array> {
         self.forward_on(x, ())
-    }
-
-    pub(super) fn collect_weights<'a>(&'a self, out: &mut Vec<&'a Array>) {
-        out.push(&self.weight_2d);
-        out.push(&self.bias);
     }
 
     pub fn forward_on(&self, x: &Array, target: impl Into<StreamOrDevice>) -> Result<Array> {
@@ -40,7 +52,9 @@ impl PatchEmbed {
         // x: [N, T=2, C=3, H=16, W=16]  →  [N, T, H, W, C]
         let x = ops::shape::transpose_axes(x, [0_i32, 1, 3, 4, 2])?;
         let n = x.shape().as_slice()[0];
-        let x = x.reshape(&[n, 2 * 16 * 16 * 3][..])?;
+        let x = x
+            .reshape(&[n, 2 * 16 * 16 * 3][..])?
+            .astype_on(self.weight_2d.dtype(), target)?;
         let wt = self.weight_2d.transpose_on(target)?;
         let out = x.matmul_on(&wt, target)?;
         Ok(&out + &self.bias)
@@ -54,6 +68,7 @@ mod tests {
 
     #[test]
     fn patch_embed_output_shape() {
+        crate::models::vision::init_test_metallib();
         let weight = Array::zeros([1024, 2, 16, 16, 3], mlx::Dtype::Bfloat16).unwrap();
         let bias = Array::zeros([1024], mlx::Dtype::Bfloat16).unwrap();
         let pe = PatchEmbed::new(weight, bias, 1024).unwrap();

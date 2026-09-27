@@ -4,12 +4,14 @@ pub mod block;
 pub mod dump;
 pub mod merger;
 pub mod patch_embed;
+mod projection;
 
 use anyhow::Result;
 use mlx::{ops, Array};
 
-use crate::core::Loader;
 pub use crate::models::qwen3_5::VisionConfig;
+use crate::nn::Embedding;
+use ironmlx_core::weights::WeightSource;
 
 use self::block::VitBlock;
 use self::dump::dump_tensor;
@@ -23,35 +25,58 @@ use self::patch_embed::PatchEmbed;
 /// Qwen3.5 VisionTower: composes PatchEmbed + learned pos_embed + 24 ViT blocks
 /// + PatchMerger into a single forward pass.
 ///
-/// Weight loading requires [`Loader::open_multimodal`] so that `vision_tower.*`
-/// keys are retained during sanitize.
+/// Weight loading requires a source that retains `vision_tower.*` keys.
 pub struct VisionTower {
     patch_embed: PatchEmbed,
     /// Learned positional embedding table. Shape: `[num_position_embeddings, hidden_size]`
     /// e.g. `[2304, 1024]`. Used in `add_learned_pos_embed` for bilinear interpolation.
-    pos_embed: Array,
+    pos_embed: Embedding,
     /// Half of head_dim — used as the rotary dimension. E.g. 32 for head_dim=64.
     rotary_dim: i32,
     /// Rotary base frequency (10000.0 for Qwen3.5 VL).
     rotary_theta: f32,
     blocks: Vec<VitBlock>,
     merger: PatchMerger,
+    deepstack_mergers: Vec<(usize, PatchMerger)>,
     hidden_size: i32,
     /// Square root of `num_position_embeddings`, e.g. 48 for 2304 embeddings.
     num_grid_per_side: i32,
     spatial_merge_size: i32,
 }
 
+/// Main visual embedding plus the intermediate DeepStack features injected
+/// into the first language-model layers by Qwen3-VL.
+pub struct VisionTowerOutput {
+    pub pooled: Array,
+    pub deepstack: Vec<Array>,
+}
+
+#[cfg(test)]
+pub(crate) fn init_test_metallib() {
+    static METALLIB: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    METALLIB.get_or_init(|| {
+        let metallib = std::path::PathBuf::from(
+            std::env::var("MLX_DIR").expect("MLX_DIR must point to the local MLX install"),
+        )
+        .join("lib/mlx.metallib");
+        mlx::metal::set_metallib_path(
+            metallib
+                .to_str()
+                .expect("MLX_DIR/lib/mlx.metallib must be UTF-8"),
+        )
+        .expect("load MLX metallib");
+    });
+}
+
 impl VisionTower {
     /// Construct VisionTower by loading all sub-module weights from `loader`.
     ///
-    /// `loader` must have been opened with [`Loader::open_multimodal`] so that
-    /// `vision_tower.*` tensor keys are available.
-    pub fn from_loader(loader: &Loader, cfg: &VisionConfig) -> Result<Self> {
+    /// The source must retain `vision_tower.*` tensor keys.
+    pub fn from_loader(loader: &(impl WeightSource + ?Sized), cfg: &VisionConfig) -> Result<Self> {
         let head_dim = cfg.hidden_size / cfg.num_heads;
         let patch_embed =
             PatchEmbed::from_loader(loader, "vision_tower.patch_embed.proj", cfg.hidden_size)?;
-        let pos_embed = loader.tensor("vision_tower.pos_embed.weight")?.clone();
+        let pos_embed = Embedding::from_loader(loader, "vision_tower.pos_embed")?;
         let mut blocks = Vec::with_capacity(cfg.depth as usize);
         for i in 0..cfg.depth {
             blocks.push(VitBlock::from_loader(
@@ -63,42 +88,53 @@ impl VisionTower {
         }
         let merger =
             PatchMerger::from_loader(loader, "vision_tower.merger", cfg.spatial_merge_size)?;
+        // Qwen3-VL checkpoints carry DeepStack mergers, while Qwen3.5's
+        // vision model inherits the config field but removes those modules.
+        // Key off the actual checkpoint rather than the shared config alone.
+        let mut deepstack_mergers = Vec::new();
+        if loader.contains("vision_tower.deepstack_merger_list.0.norm.weight") {
+            deepstack_mergers.reserve(cfg.deepstack_visual_indexes.len());
+            for (merger_index, &block_index) in cfg.deepstack_visual_indexes.iter().enumerate() {
+                if block_index < 0 || block_index >= cfg.depth {
+                    return Err(anyhow::anyhow!(
+                        "vision DeepStack block index {block_index} is outside 0..{}",
+                        cfg.depth
+                    ));
+                }
+                deepstack_mergers.push((
+                    block_index as usize,
+                    PatchMerger::from_loader_postshuffle(
+                        loader,
+                        &format!("vision_tower.deepstack_merger_list.{merger_index}"),
+                        cfg.spatial_merge_size,
+                    )?,
+                ));
+            }
+        }
         let num_grid_per_side = (cfg.num_position_embeddings as f64).sqrt() as i32;
-        let tower = Self {
+        Ok(Self {
             patch_embed,
             pos_embed,
             rotary_dim: head_dim / 2,
             rotary_theta: 10_000.0,
             blocks,
             merger,
+            deepstack_mergers,
             hidden_size: cfg.hidden_size,
             num_grid_per_side,
             spatial_merge_size: cfg.spatial_merge_size,
-        };
-        // Eagerly evaluate every weight tensor held by the tower on the loading
-        // thread. Constructors like `PatchEmbed::new` introduce lazy reshape ops
-        // tagged with this thread's default MLX stream; if a later inference
-        // call runs on a different thread (e.g. tokio blocking-pool), MLX errors
-        // with "There is no Stream(gpu, N) in current thread." This mirrors the
-        // pattern in `Loader::open_impl` for the raw weight map.
-        tower.eval_weights()?;
-        Ok(tower)
-    }
-
-    fn eval_weights(&self) -> Result<()> {
-        let mut refs: Vec<&Array> = vec![&self.pos_embed];
-        self.patch_embed.collect_weights(&mut refs);
-        for blk in &self.blocks {
-            blk.collect_weights(&mut refs);
-        }
-        self.merger.collect_weights(&mut refs);
-        mlx::transforms::eval(&refs).map_err(|e| anyhow::anyhow!("VisionTower eval: {e}"))?;
-        Ok(())
+        })
     }
 
     /// Returns the number of ViT blocks in the tower (e.g. 24 for Qwen3.5-VL).
     pub fn depth(&self) -> i32 {
         self.blocks.len() as i32
+    }
+
+    /// Number of intermediate visual features produced for language-model
+    /// DeepStack injection. Qwen3.5 checkpoints legitimately report zero.
+    pub fn deepstack_feature_count(&self) -> usize {
+        self.deepstack_mergers.len()
     }
 
     /// Full forward pass through the vision tower.
@@ -108,6 +144,16 @@ impl VisionTower {
     ///
     /// Returns merged patch features, shape `[total_patches / m², out_hidden]`.
     pub fn forward(&self, pixel_values: &Array, grid_thw: &[(i32, i32, i32)]) -> Result<Array> {
+        Ok(self.forward_with_deepstack(pixel_values, grid_thw)?.pooled)
+    }
+
+    /// Full visual forward pass including the intermediate DeepStack merger
+    /// outputs required by Qwen3-VL image-conditioned text encoding.
+    pub fn forward_with_deepstack(
+        &self,
+        pixel_values: &Array,
+        grid_thw: &[(i32, i32, i32)],
+    ) -> Result<VisionTowerOutput> {
         let mut x = self.patch_embed.forward(pixel_values)?;
         dump_tensor("01_patch_embed_out", &x);
 
@@ -126,14 +172,22 @@ impl VisionTower {
             }
             v
         };
+        let mut deepstack = Vec::with_capacity(self.deepstack_mergers.len());
         for (i, blk) in self.blocks.iter().enumerate() {
             let prefix = format!("{:02}_block_{:02}", 5 + i, i);
             x = blk.forward_with_name_prefix(&x, &rotary, &cu_seqlens, &prefix)?;
             dump_tensor(&format!("{prefix}_out"), &x);
+            if let Some((_, merger)) = self
+                .deepstack_mergers
+                .iter()
+                .find(|(block_index, _)| *block_index == i)
+            {
+                deepstack.push(merger.forward(&x)?);
+            }
         }
-        let out = self.merger.forward(&x)?;
-        dump_tensor("29_merger_out", &out);
-        Ok(out)
+        let pooled = self.merger.forward(&x)?;
+        dump_tensor("29_merger_out", &pooled);
+        Ok(VisionTowerOutput { pooled, deepstack })
     }
 
     /// Add learned positional embedding to patch features via bilinear interpolation.
@@ -248,20 +302,18 @@ impl VisionTower {
             .collect();
         let wgt_tensor: Array = (wgt_flat.as_slice(), &[4_i32, total as i32][..]).try_into()?;
         // Cast weights to pos_embed dtype (bfloat16 for this model)
-        let pe_dtype = self.pos_embed.dtype();
+        let pe_dtype = self.pos_embed.output_dtype();
         let wgt_tensor = ops::cast::astype(&wgt_tensor, pe_dtype)?;
         let idx_tensor_i32 = ops::cast::astype(&idx_tensor, mlx::Dtype::Int32)?;
 
         // Look up pos_embed at each corner index: take(pe_w, idx_tensor_i32.reshape(-1), 0)
         // idx_tensor_i32 is [4, total_hw]; flatten to [4*total_hw], take, reshape back
-        let pe_w = &self.pos_embed; // [num_g*num_g, hidden]
-        let hidden_dim = pe_w.shape().as_slice()[1];
         let flat_idx = idx_tensor_i32.reshape(&[4 * total as i32][..])?;
         // take requires uint32 indices
         let flat_idx_u32 = ops::cast::astype(&flat_idx, mlx::Dtype::Uint32)?;
-        let gathered_flat = ops::indexing::take(pe_w, &flat_idx_u32, 0)?;
+        let gathered_flat = self.pos_embed.forward(&flat_idx_u32)?;
         // gathered_flat: [4*total, hidden]
-        let gathered = gathered_flat.reshape(&[4_i32, total as i32, hidden_dim][..])?;
+        let gathered = gathered_flat.reshape(&[4_i32, total as i32, self.hidden_size][..])?;
         // gathered: [4, total_hw, hidden]
 
         // Weighted sum: gathered * wgt_tensor[:, :, None] → bilinear interpolated
@@ -475,15 +527,18 @@ pub fn build_rotary_freqs(seqlen: i32, dim: i32, theta: f32) -> Result<Array> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::Loader;
 
     #[test]
     fn rotary_pos_emb_shape() {
+        init_test_metallib();
         let freqs = build_rotary_freqs(8, 32, 10000.0).unwrap();
         assert_eq!(freqs.shape().as_slice(), &[8, 16]); // dim/2 = 16 entries
     }
 
     #[test]
     fn rotary_pos_emb_values_match_mlx_vlm() {
+        init_test_metallib();
         let freqs = build_rotary_freqs(4, 32, 10000.0).unwrap();
         let v: Vec<f32> = freqs.to_vec().unwrap();
         let expected_1_1 = 1.0_f32 / 10000.0_f32.powf(2.0 / 32.0);

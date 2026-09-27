@@ -4,6 +4,10 @@
 
 IronMLX.app 支持经过验证的 `mlx-community/IndexTTS-2.5-fp16` 资源配置，包括自动准备资源、加载模型、完整 WAV 与 PCM 流式输出。详见 [TTS 模型下载与使用](tts-model-download.md)及[语音 API](audio-speech-api.md)。
 
+IronMLX.app 支持 `mlx-community/Qwen-Image-2.1-MLX-4bit` 原生文生图推理。
+App 负责模型管理，上游客户端通过[图片生成 API](image-generation-api.md)所述的
+OpenAI-compatible 接口调用；不包含图片编辑功能。
+
 IronMLX App 还支持 `aac6fef/laya-multilingual-mlx` 决策模型：下载、加载与卸载、重启恢复，以及通过 App 服务端口调用兼容 TypeSafe 的 System One API。详见 [Laya 使用指南](laya-systemone-api.md)。
 
 IronMLX 0.2.0 支持以下文本和视觉语言模型。请先确认模型族和所需功能，再选择适合设备内存的具体版本。
@@ -25,6 +29,7 @@ IronMLX 0.2.0 支持以下文本和视觉语言模型。请先确认模型族和
 | DiffusionGemma | 支持 | 支持 | 支持 | 支持 |
 
 表中的文本和视觉生成运行时均支持 HTTP 流式响应。图片能力指理解图片，不代表生成图片或支持视频。
+Qwen Image 2.1 使用独立文生图运行时，不改变该表中“图片”的含义。
 模型列表中出现 embedding、reranker 或 ASR 信息不代表运行时受支持。TTS 仅支持已验证的 IndexTTS 2.5 配置及其独立音频运行时。
 
 ## 已验证的具体模型
@@ -93,3 +98,4 @@ DFlash2 draft 不能作为主模型独立加载。完整配置与限制见 [DFla
 | Llama GQA Dense / 兼容的 MiniCPM5-1B | `llama` |
 | MiniCPM-V 4.6 | `minicpmv4_6` |
 | DiffusionGemma | `diffusion_gemma` |
+| Qwen Image 2.1 | `qwen_image_2_1` |

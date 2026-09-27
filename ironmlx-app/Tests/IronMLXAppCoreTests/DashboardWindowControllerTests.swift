@@ -1,7 +1,88 @@
 import AppKit
 import Testing
+import WebKit
 
 @testable import IronMLXAppCore
+
+@MainActor
+@Test func dashboardUIDelegateImplementsJavaScriptConfirmation() {
+    let delegate = DashboardUIDelegate()
+    let selector = NSSelectorFromString(
+        "webView:runJavaScriptConfirmPanelWithMessage:initiatedByFrame:completionHandler:"
+    )
+
+    #expect(delegate.responds(to: selector))
+}
+
+@MainActor
+@Test func dashboardUIDelegateLocalizesConfirmationButtons() {
+    #expect(
+        DashboardUIDelegate.ConfirmationButtonTitles.resolved(for: "en")
+            == .init(accept: "Continue", cancel: "Cancel")
+    )
+    #expect(
+        DashboardUIDelegate.ConfirmationButtonTitles.resolved(for: "zh-Hans")
+            == .init(accept: "继续", cancel: "取消")
+    )
+    #expect(
+        DashboardUIDelegate.ConfirmationButtonTitles.resolved(for: "zh-Hant")
+            == .init(accept: "繼續", cancel: "取消")
+    )
+    #expect(
+        DashboardUIDelegate.ConfirmationButtonTitles.resolved(for: "ja")
+            == .init(accept: "続ける", cancel: "キャンセル")
+    )
+    #expect(
+        DashboardUIDelegate.ConfirmationButtonTitles.resolved(for: "ko")
+            == .init(accept: "계속", cancel: "취소")
+    )
+    #expect(
+        DashboardUIDelegate.ConfirmationButtonTitles.resolved(for: "unsupported")
+            == .init(accept: "Continue", cancel: "Cancel")
+    )
+}
+
+@MainActor
+@Test func dashboardUIDelegateForwardsAcceptedJavaScriptConfirmation() throws {
+    var presentedMessage: String?
+    var presentedWindow: NSWindow?
+    var pendingCompletion: (@MainActor @Sendable (Bool) -> Void)?
+    var accepted: Bool?
+    let delegate = DashboardUIDelegate(confirmationPresenter: { message, window, completion in
+        presentedMessage = message
+        presentedWindow = window
+        pendingCompletion = completion
+    })
+    let webView = WKWebView(frame: .zero)
+
+    delegate.presentJavaScriptConfirmation(message: "Continue download?", in: webView) {
+        accepted = $0
+    }
+
+    #expect(presentedMessage == "Continue download?")
+    #expect(presentedWindow == nil)
+    let completion = try #require(pendingCompletion)
+    completion(true)
+    #expect(accepted == true)
+}
+
+@MainActor
+@Test func dashboardUIDelegateForwardsCancelledJavaScriptConfirmation() throws {
+    var pendingCompletion: (@MainActor @Sendable (Bool) -> Void)?
+    var accepted: Bool?
+    let delegate = DashboardUIDelegate(confirmationPresenter: { _, _, completion in
+        pendingCompletion = completion
+    })
+    let webView = WKWebView(frame: .zero)
+
+    delegate.presentJavaScriptConfirmation(message: "Continue download?", in: webView) {
+        accepted = $0
+    }
+
+    let completion = try #require(pendingCompletion)
+    completion(false)
+    #expect(accepted == false)
+}
 
 @MainActor
 @Test func dashboardWindowSupportsNativeFullscreenWithoutInitialFullscreenStyle() {

@@ -29,6 +29,10 @@ def write_text(path: Path, value: str) -> None:
     path.write_text(value, encoding="utf-8")
 
 
+def normalize_text_newlines(value: str) -> str:
+    return value.replace("\r\n", "\n").replace("\r", "\n")
+
+
 def resolve_repository_file(repository_root: Path, relative_path: str) -> Path:
     candidate = (repository_root / relative_path).resolve()
     root = repository_root.resolve()
@@ -101,7 +105,7 @@ def rust_materials(
 
     for cargo_about in cargo_about_documents:
         for license_entry in cargo_about["licenses"]:
-            text = license_entry["text"].strip() + "\n"
+            text = normalize_text_newlines(license_entry["text"]).strip() + "\n"
             digest = sha256_bytes(text.encode())
             filename = f"rust-license-{digest[:16]}.txt"
             license_texts.setdefault(

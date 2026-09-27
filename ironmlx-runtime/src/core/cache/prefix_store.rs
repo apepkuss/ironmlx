@@ -479,6 +479,19 @@ impl AsyncPrefixStoreQueue {
         if !sender_open {
             return AsyncPrefixStoreAdmission::Closed;
         }
+        let key = PagedPrefixStore::key_for(&spec);
+        let pending_key = (store.root.clone(), key);
+        match self.0.pending.lock() {
+            Ok(pending)
+                if pending
+                    .get(&pending_key)
+                    .is_some_and(|entry| !entry.cancellation.is_cancelled()) =>
+            {
+                return AsyncPrefixStoreAdmission::Coalesced;
+            }
+            Ok(_) => {}
+            Err(_) => return AsyncPrefixStoreAdmission::Closed,
+        }
         let payload_bytes = spec.payload_bytes();
         if !self.reserve_pending(payload_bytes) {
             self.0
@@ -488,8 +501,6 @@ impl AsyncPrefixStoreQueue {
             return AsyncPrefixStoreAdmission::Backpressured;
         }
         let id = self.0.next_job_id.fetch_add(1, Ordering::Relaxed);
-        let key = PagedPrefixStore::key_for(&spec);
-        let pending_key = (store.root.clone(), key);
         let pending_result = self.0.pending.lock().map(|mut pending| {
             if pending
                 .get(&pending_key)
@@ -2632,7 +2643,7 @@ mod tests {
             wanted.payload_bytes(),
             entry.observability_stats(wanted.cached_len).payload_bytes
         );
-        let queue = AsyncPrefixStoreQueue::new(2, 1024).expect("queue");
+        let queue = AsyncPrefixStoreQueue::new(1, 1024).expect("queue");
         let cancellation = AsyncPrefixStoreCancellation::default();
         let permit = match queue.try_admit(store.clone(), wanted.clone(), cancellation.clone()) {
             AsyncPrefixStoreAdmission::Admitted(permit) => *permit,

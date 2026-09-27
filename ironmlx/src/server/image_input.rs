@@ -87,6 +87,29 @@ impl ImageRequestBudget {
         data: &str,
     ) -> Result<Vec<u8>, ImageInputError> {
         let media_type = SupportedImageMediaType::parse(media_type)?;
+        if data.len() > MAX_IMAGE_BASE64_BYTES {
+            return Err(ImageInputError::EncodedTooLarge);
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .map_err(|_| ImageInputError::DataUrlInvalid)?;
+        self.add_image_bytes(bytes, Some(media_type))
+    }
+
+    pub fn add_upload(
+        &mut self,
+        media_type: Option<&str>,
+        bytes: Vec<u8>,
+    ) -> Result<Vec<u8>, ImageInputError> {
+        let media_type = media_type.map(SupportedImageMediaType::parse).transpose()?;
+        self.add_image_bytes(bytes, media_type)
+    }
+
+    fn add_image_bytes(
+        &mut self,
+        bytes: Vec<u8>,
+        declared_media_type: Option<SupportedImageMediaType>,
+    ) -> Result<Vec<u8>, ImageInputError> {
         self.image_count = self
             .image_count
             .checked_add(1)
@@ -94,18 +117,14 @@ impl ImageRequestBudget {
         if self.image_count > MAX_IMAGE_COUNT {
             return Err(ImageInputError::ImageCountExceeded);
         }
-        if data.len() > MAX_IMAGE_BASE64_BYTES {
-            return Err(ImageInputError::EncodedTooLarge);
-        }
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(data)
-            .map_err(|_| ImageInputError::DataUrlInvalid)?;
         if bytes.len() > MAX_IMAGE_BYTES {
             return Err(ImageInputError::DecodedTooLarge);
         }
         let (width, height, actual_format) = inspect_image(&bytes)?;
-        if actual_format != media_type.format() {
-            return Err(ImageInputError::MediaTypeUnsupported);
+        if let Some(media_type) = declared_media_type {
+            if actual_format != media_type.format() {
+                return Err(ImageInputError::MediaTypeUnsupported);
+            }
         }
         if width > MAX_IMAGE_SIDE || height > MAX_IMAGE_SIDE {
             return Err(ImageInputError::DimensionsExceeded);
@@ -201,6 +220,24 @@ mod tests {
                 .add_text(&"x".repeat(MAX_TEXT_BYTES + 1))
                 .unwrap_err(),
             ImageInputError::TextTooLarge
+        );
+    }
+
+    #[test]
+    fn multipart_upload_validates_declared_type_against_image_bytes() {
+        let image = DynamicImage::new_rgba8(2, 2);
+        let mut png = Vec::new();
+        image
+            .write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
+            .unwrap();
+        assert!(ImageRequestBudget::default()
+            .add_upload(Some("image/png"), png.clone())
+            .is_ok());
+        assert_eq!(
+            ImageRequestBudget::default()
+                .add_upload(Some("image/jpeg"), png)
+                .unwrap_err(),
+            ImageInputError::MediaTypeUnsupported
         );
     }
 }

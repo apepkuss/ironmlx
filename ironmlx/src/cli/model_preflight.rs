@@ -4,7 +4,6 @@ use anyhow::Context;
 use clap::Args;
 
 use crate::Result;
-use ironmlx_lm::core::loader::preflight_model_metadata;
 
 #[derive(Args, Debug)]
 pub struct ModelPreflightArgs {
@@ -14,8 +13,16 @@ pub struct ModelPreflightArgs {
 }
 
 pub fn run(args: ModelPreflightArgs) -> Result<()> {
-    let result = preflight_model_metadata(&args.metadata_dir)?;
-    let json = serde_json::to_string(&result).context("serializing model preflight result")?;
+    let json = if args.metadata_dir.join("model_index.json").exists() {
+        serde_json::to_string(&ironmlx_image::preflight_model_metadata(
+            &args.metadata_dir,
+        )?)
+    } else {
+        serde_json::to_string(&ironmlx_lm::core::preflight_model_metadata(
+            &args.metadata_dir,
+        )?)
+    }
+    .context("serializing model preflight result")?;
     println!("{json}");
     Ok(())
 }

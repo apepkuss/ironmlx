@@ -6583,16 +6583,11 @@ impl<M: Model> Scheduler<M> {
                 anyhow!("scheduler full: no row available (b_max={})", self.b_max)
             })?;
 
-        if self.paged_prefix_cache.is_some() {
-            let store_queue = crate::core::cache::process_async_prefix_store_queue();
-            if store_queue.is_backpressured() {
-                let stats = store_queue.stats();
-                return Err(anyhow::Error::new(SchedulerError::StoreBackpressure {
-                    pending_jobs: stats.pending_jobs,
-                    pending_bytes: stats.pending_bytes,
-                }));
-            }
-        }
+        // SSD prefix persistence is an optional cache side effect. Its queue
+        // applies backpressure when a cache entry is reserved or submitted,
+        // where a saturated queue skips that write without failing inference.
+        // Request admission must remain available for cache hits and for
+        // requests that can proceed without persisting a new prefix.
 
         // B1-p2.5: memory budget admission gate.
         let row_cap = req.prompt_ids.len().saturating_add(req.max_new_tokens);
@@ -20361,6 +20356,80 @@ mod tests {
             image_token_id: 248056,
             constraint: None,
         }
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn prefix_store_backpressure_degrades_cache_without_rejecting_request_admission() {
+        let store_queue = crate::core::cache::process_async_prefix_store_queue();
+        store_queue.wait_idle();
+
+        let root = std::env::temp_dir().join(format!(
+            "ironmlx-prefix-store-admission-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let store = PagedPrefixStore::new(&root);
+        let mut permits = Vec::new();
+        let mut token = 1_i32;
+        while !store_queue.is_backpressured() {
+            let spec = PagedPrefixKeySpec {
+                entry_kind: PrefixEntryKind::WholePrefix,
+                model_id: "admission-backpressure-test".to_owned(),
+                token_ids: vec![token],
+                cached_len: 1,
+                fingerprint: None,
+                block_size: 1,
+                kv_cache_profile: None,
+                main_layers: Vec::new(),
+                mtp_layers: Vec::new(),
+                mtp_last_hidden: None,
+                gemma4_drafter_last_hidden: None,
+            };
+            match store_queue.try_admit(
+                store.clone(),
+                spec,
+                AsyncPrefixStoreCancellation::default(),
+            ) {
+                AsyncPrefixStoreAdmission::Admitted(permit) => permits.push(permit),
+                AsyncPrefixStoreAdmission::Coalesced => {
+                    panic!("unique prefix unexpectedly coalesced")
+                }
+                AsyncPrefixStoreAdmission::Backpressured => {
+                    panic!("queue reported backpressure before its saturation flag")
+                }
+                AsyncPrefixStoreAdmission::Closed => {
+                    panic!("process prefix store queue unexpectedly closed")
+                }
+            }
+            token += 1;
+        }
+        assert!(!permits.is_empty());
+
+        let config = crate::core::cache::PagedPrefixCacheConfig::new(
+            &root,
+            "admission-backpressure-test",
+            2,
+            32,
+        )
+        .expect("prefix config");
+        let mut scheduler = Scheduler::<StepDecodeMaskModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        scheduler
+            .enable_paged_prefix_cache(config)
+            .expect("enable prefix cache");
+
+        scheduler
+            .admit(mk_req(vec![1, 2, 3, 4]))
+            .expect("optional cache backpressure must not reject inference admission");
+        assert_eq!(scheduler.active_count(), 1);
+
+        drop(permits);
+        store_queue.wait_idle();
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

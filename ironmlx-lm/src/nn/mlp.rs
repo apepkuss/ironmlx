@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 use mlx::compile::CompiledFn;
 use mlx::{Array, StreamOrDevice};
 
-use crate::core::Loader;
+use crate::core::weights::WeightSource;
 use crate::nn::activations::{build_swiglu, invoke_swiglu};
 use crate::nn::Linear;
 use crate::Result;
@@ -33,7 +33,7 @@ struct FusedGateUp {
 impl Mlp {
     /// Build an `Mlp` from `loader`, expecting the three sub-projections at
     /// `{prefix}.gate_proj`, `{prefix}.up_proj`, and `{prefix}.down_proj`.
-    pub fn from_loader(loader: &Loader, prefix: &str) -> Result<Self> {
+    pub fn from_loader(loader: &(impl WeightSource + ?Sized), prefix: &str) -> Result<Self> {
         Ok(Self {
             gate_up: GateUp::Separate {
                 gate: Linear::from_loader(loader, &format!("{prefix}.gate_proj"))?,
@@ -44,7 +44,10 @@ impl Mlp {
         })
     }
 
-    pub(crate) fn from_loader_dflash2(loader: &Loader, prefix: &str) -> Result<Self> {
+    pub(crate) fn from_loader_dflash2(
+        loader: &(impl WeightSource + ?Sized),
+        prefix: &str,
+    ) -> Result<Self> {
         let gate = Linear::from_loader(loader, &format!("{prefix}.gate_proj"))?;
         let up = Linear::from_loader(loader, &format!("{prefix}.up_proj"))?;
         if gate.out_features() != up.out_features() {

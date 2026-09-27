@@ -2,7 +2,7 @@
   "$schema": "https://cyclonedx.org/schema/bom-1.6.schema.json",
   "bomFormat": "CycloneDX",
   "specVersion": "1.6",
-  "serialNumber": "urn:uuid:94b880f2-acdb-583e-941b-76e8eb3e8ef0",
+  "serialNumber": "urn:uuid:71fd9ebb-7336-56d0-a1d1-8a889d82504c",
   "version": 1,
   "metadata": {
     "component": {
@@ -2925,7 +2925,7 @@
         },
         {
           "name": "ironmlx:license-files",
-          "value": "rust-license-ebeeae2d65a7fc03.txt"
+          "value": "rust-license-23f18e03dc49df91.txt"
         }
       ],
       "purl": "pkg:cargo/fs-err@3.3.1",
@@ -3244,7 +3244,7 @@
         },
         {
           "name": "ironmlx:license-files",
-          "value": "rust-license-8a28736d1243c67e.txt"
+          "value": "rust-license-eb69613e00e596e1.txt"
         }
       ],
       "purl": "pkg:cargo/generic-array@0.14.7",
@@ -3273,7 +3273,7 @@
         },
         {
           "name": "ironmlx:license-files",
-          "value": "rust-license-8a28736d1243c67e.txt"
+          "value": "rust-license-eb69613e00e596e1.txt"
         }
       ],
       "purl": "pkg:cargo/generic-array@1.4.5",
@@ -4794,6 +4794,35 @@
     },
     {
       "type": "library",
+      "bom-ref": "cargo:mime_guess@2.0.5",
+      "group": "crates.io",
+      "name": "mime_guess",
+      "version": "2.0.5",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ironmlx:source",
+          "value": "registry+https://github.com/rust-lang/crates.io-index"
+        },
+        {
+          "name": "ironmlx:license-files",
+          "value": "rust-license-14373973f98d640e.txt"
+        }
+      ],
+      "purl": "pkg:cargo/mime_guess@2.0.5",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/abonander/mime_guess"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "bom-ref": "cargo:minijinja@2.21.0",
       "group": "crates.io",
       "name": "minijinja",
@@ -4997,6 +5026,35 @@
     },
     {
       "type": "library",
+      "bom-ref": "cargo:multer@3.1.0",
+      "group": "crates.io",
+      "name": "multer",
+      "version": "3.1.0",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ironmlx:source",
+          "value": "registry+https://github.com/rust-lang/crates.io-index"
+        },
+        {
+          "name": "ironmlx:license-files",
+          "value": "rust-license-cfb47b4c5832e5a2.txt"
+        }
+      ],
+      "purl": "pkg:cargo/multer@3.1.0",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/rwf2/multer"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "bom-ref": "cargo:nom@7.1.3",
       "group": "crates.io",
       "name": "nom",
@@ -5042,7 +5100,7 @@
         },
         {
           "name": "ironmlx:license-files",
-          "value": "rust-license-315fde9fe60c6530.txt"
+          "value": "rust-license-cfdb7491dfa8800a.txt"
         }
       ],
       "purl": "pkg:cargo/nu-ansi-term@0.50.3",
@@ -6940,6 +6998,35 @@
     },
     {
       "type": "library",
+      "bom-ref": "cargo:spin@0.9.9",
+      "group": "crates.io",
+      "name": "spin",
+      "version": "0.9.9",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ironmlx:source",
+          "value": "registry+https://github.com/rust-lang/crates.io-index"
+        },
+        {
+          "name": "ironmlx:license-files",
+          "value": "rust-license-58545fed1565e42d.txt"
+        }
+      ],
+      "purl": "pkg:cargo/spin@0.9.9",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/mvdnes/spin-rs.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "bom-ref": "cargo:spm_precompiled@0.1.4",
       "group": "crates.io",
       "name": "spm_precompiled",
@@ -7130,7 +7217,7 @@
         },
         {
           "name": "ironmlx:license-files",
-          "value": "rust-license-17de84ce8b605a18.txt"
+          "value": "rust-license-50e6751797c50ded.txt"
         }
       ],
       "purl": "pkg:cargo/superslice@1.0.0",
@@ -8240,6 +8327,35 @@
         {
           "type": "vcs",
           "url": "https://github.com/paholg/typenum"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "cargo:unicase@2.9.0",
+      "group": "crates.io",
+      "name": "unicase",
+      "version": "2.9.0",
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ironmlx:source",
+          "value": "registry+https://github.com/rust-lang/crates.io-index"
+        },
+        {
+          "name": "ironmlx:license-files",
+          "value": "rust-license-2d01890414494742.txt"
+        }
+      ],
+      "purl": "pkg:cargo/unicase@2.9.0",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/seanmonstar/unicase"
         }
       ]
     },

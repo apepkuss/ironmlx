@@ -3,6 +3,35 @@ import Testing
 
 @testable import IronMLXAppCore
 
+@Test func localModelScannerRecognizesQwenImagePipelineSnapshot() throws {
+    let root = try temporaryDirectory()
+    _ = try writeVerifiedTestSnapshot(
+        root: root,
+        repoID: "mlx-community/Qwen-Image-2.1-MLX-4bit",
+        files: [
+            "model_index.json": Data(#"{"_class_name":"QwenImage21Pipeline"}"#.utf8),
+            "processor/tokenizer.json": Data(#"{"version":"1.0"}"#.utf8),
+            "scheduler/scheduler_config.json": Data(#"{"_class_name":"FlowMatchEulerDiscreteScheduler"}"#.utf8),
+            "text_encoder/config.json": Data(#"{"architectures":["Qwen3VLForConditionalGeneration"]}"#.utf8),
+            "text_encoder/model.safetensors": Data("text weights".utf8),
+            "transformer/config.json": Data(#"{"_class_name":"QwenImage21Transformer2DModel"}"#.utf8),
+            "transformer/model.safetensors": Data("transformer weights".utf8),
+            "vae/config.json": Data(#"{"_class_name":"AutoencoderKLQwenImage21"}"#.utf8),
+            "vae/model.safetensors": Data("vae weights".utf8),
+        ]
+    )
+
+    let model = try #require(LocalModelScanner(rootURL: root).scan().first)
+
+    #expect(model.architecture == "qwen-image-2-1")
+    #expect(model.type == "image_generation")
+    #expect(model.capabilities?.runtimeKind == "image_generation")
+    #expect(model.capabilities?.supportsStreaming == false)
+    #expect(model.capabilities?.supportsVision == false)
+    #expect(model.capabilities?.supportedSamplingParameters == ["seed", "size", "inference_steps"])
+    #expect(model.readiness?.status == "ready")
+}
+
 @Test func localModelScannerSurfacesIncompleteShardedSnapshot() throws {
     let root = try temporaryDirectory()
     let index = Data("""
