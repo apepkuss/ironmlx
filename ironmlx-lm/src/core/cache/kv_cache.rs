@@ -57,6 +57,11 @@ impl KVCacheSnapshot {
     pub fn offsets(&self) -> &[i32] {
         &self.offsets
     }
+
+    #[doc(hidden)]
+    pub fn restores_dense_storage(&self) -> bool {
+        self.restores_dense_storage
+    }
 }
 
 impl KVCache {

@@ -1153,12 +1153,16 @@ impl crate::models::dflash2::DFlash2Target for Qwen35Model {
             row_bit_exact_attention: !supported_shapes.is_empty(),
             transactional_state_restore: !supported_shapes.is_empty(),
             supported_shapes,
+            lane_kernel_pack: super::dflash2_lane::kernel_pack(
+                self.config(),
+                self.exact_batched_verify_profile,
+            ),
         }
     }
 
     fn dflash2_execution_fingerprint(&self) -> String {
         format!(
-            "qwen35-dflash2-v1;prepared-qmm=product-stable-v1;attention=bulk-position-stable-v1;recurrent=transactional-prefix-v1;{}",
+            "qwen35-dflash2-v2;prepared-qmm=lane-product-stable-v2;attention=bulk-position-stable-v1;recurrent=logical-prefix-v2;{}",
             self.dflash2_verify_capabilities().stable_fingerprint()
         )
     }
@@ -1235,11 +1239,18 @@ impl crate::models::dflash2::DFlash2Target for Qwen35Model {
         // captures enough replay state to restore an exact accepted prefix.
         // This avoids replaying all decoder layers or quantized projections
         // once per verify token without changing target logits.
+        let layer_submit_interval = super::dflash2_lane::layer_submit_interval(
+            self.config(),
+            self.exact_batched_verify_profile,
+            mode,
+            verify_width,
+        );
         let (hidden, context_hidden) = self.text.forward_with_dflash2_taps_on(
             input_ids,
             position_ids,
             cache,
             target_layer_ids,
+            layer_submit_interval,
             target,
         )?;
         Ok(crate::models::dflash2::DFlash2TargetOutput {
@@ -1784,7 +1795,11 @@ mod tests {
 
         let dflash_snapshots = dflash_cache
             .iter()
-            .map(crate::core::cache::layer::LayerCache::snapshot)
+            .map(|layer| {
+                layer
+                    .dflash2_transaction_snapshot()
+                    .expect("capture zero-copy DFlash2 transaction snapshot")
+            })
             .collect::<Vec<_>>();
         for layer in &mut dflash_cache {
             layer
@@ -1814,7 +1829,11 @@ mod tests {
 
         let sampled_dflash_snapshots = sampled_dflash_cache
             .iter()
-            .map(crate::core::cache::layer::LayerCache::snapshot)
+            .map(|layer| {
+                layer
+                    .dflash2_transaction_snapshot()
+                    .expect("capture sampled zero-copy DFlash2 transaction snapshot")
+            })
             .collect::<Vec<_>>();
         for layer in &mut sampled_dflash_cache {
             layer

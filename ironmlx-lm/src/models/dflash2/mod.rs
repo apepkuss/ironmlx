@@ -80,6 +80,51 @@ pub struct DFlash2VerifyShape {
     pub verify_width: usize,
 }
 
+/// A model-family-specific execution pack for wide DFlash2 verification.
+///
+/// The pack is deliberately descriptive rather than a global feature flag:
+/// callers can only select it through a target's certified capability
+/// matrix.  This keeps the ordinary Q=1 path independent while making the
+/// prepared quantized layout, attention route, transactional cache contract,
+/// and graph-submission cadence part of the execution fingerprint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DFlash2LaneKernelPack {
+    pub family: String,
+    pub revision: u32,
+    pub quant_bits: i32,
+    pub quant_group_size: i32,
+    pub max_lanes: usize,
+    pub prepared_layout: String,
+    pub attention_layout: String,
+    pub state_layout: String,
+    pub layer_submit_interval: usize,
+}
+
+impl DFlash2LaneKernelPack {
+    pub fn supports(&self, batch_width: usize, verify_width: usize) -> bool {
+        batch_width > 0
+            && verify_width > 1
+            && batch_width
+                .checked_mul(verify_width)
+                .is_some_and(|lanes| lanes <= self.max_lanes)
+    }
+
+    pub fn stable_fingerprint(&self) -> String {
+        format!(
+            "family={};revision={};quant=affine{}g{};max-lanes={};weights={};attention={};state={};submit={}",
+            self.family,
+            self.revision,
+            self.quant_bits,
+            self.quant_group_size,
+            self.max_lanes,
+            self.prepared_layout,
+            self.attention_layout,
+            self.state_layout,
+            self.layer_submit_interval,
+        )
+    }
+}
+
 /// Target-side contract consumed by the DFlash2 scheduler. Keeping the
 /// qualification matrix next to the target implementation prevents the actor
 /// from inferring numerical safety from a configured block size alone.
@@ -90,6 +135,7 @@ pub struct DFlash2VerifyCapabilities {
     pub row_bit_exact_attention: bool,
     pub transactional_state_restore: bool,
     pub supported_shapes: Vec<DFlash2VerifyShape>,
+    pub lane_kernel_pack: Option<DFlash2LaneKernelPack>,
 }
 
 impl DFlash2VerifyCapabilities {
@@ -109,8 +155,13 @@ impl DFlash2VerifyCapabilities {
             .map(|shape| format!("b{}q{}", shape.batch_width, shape.verify_width))
             .collect::<Vec<_>>()
             .join(",");
+        let lane_pack = self
+            .lane_kernel_pack
+            .as_ref()
+            .map(DFlash2LaneKernelPack::stable_fingerprint)
+            .unwrap_or_else(|| "none".to_owned());
         format!(
-            "profile={};qmm={};attention={};state={};shapes={shapes}",
+            "profile={};qmm={};attention={};state={};shapes={shapes};lane-pack={lane_pack}",
             self.profile,
             self.row_bit_exact_qmm,
             self.row_bit_exact_attention,
@@ -161,6 +212,14 @@ impl DFlash2VerifyPlan {
                 "DFlash2 verify profile {} does not provide the full row-exact execution contract",
                 capabilities.profile
             );
+            if let Some(pack) = capabilities.lane_kernel_pack.as_ref() {
+                anyhow::ensure!(
+                    pack.supports(batch_width, verify_width),
+                    "DFlash2 lane pack {} revision {} cannot execute B{batch_width}/Q{verify_width}",
+                    pack.family,
+                    pack.revision,
+                );
+            }
         }
         anyhow::ensure!(
             capabilities.supports(batch_width, verify_width),
@@ -291,6 +350,7 @@ mod tests {
                 batch_width: 2,
                 verify_width: 4,
             }],
+            lane_kernel_pack: None,
         };
         let ordinary = DFlash2VerifyPlan::build(&capabilities, 7, 0).unwrap();
         assert_eq!(ordinary.execution, DFlash2VerifyExecution::OrdinaryDecode);
@@ -299,7 +359,7 @@ mod tests {
         assert!(DFlash2VerifyPlan::build(&capabilities, 2, 4).is_err());
         assert_eq!(
             capabilities.stable_fingerprint(),
-            "profile=test;qmm=true;attention=true;state=true;shapes=b2q4"
+            "profile=test;qmm=true;attention=true;state=true;shapes=b2q4;lane-pack=none"
         );
 
         let mut incomplete = capabilities;

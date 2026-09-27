@@ -51,11 +51,11 @@ impl DFlash2DecoderLayer {
                 &format!("{prefix}.post_attention_layernorm"),
                 cfg.rms_norm_eps,
             )?,
-            mlp: Mlp::from_components(
+            mlp: Mlp::from_components_dflash2(
                 load_linear(loader, &format!("{prefix}.mlp.gate_proj"), draft_bits)?,
                 load_linear(loader, &format!("{prefix}.mlp.up_proj"), draft_bits)?,
                 load_linear(loader, &format!("{prefix}.mlp.down_proj"), draft_bits)?,
-            ),
+            )?,
             mlp_conv: DFlash2GroupedConv::from_loader(
                 loader,
                 &format!("{prefix}.mlp_conv"),
@@ -81,14 +81,15 @@ impl DFlash2DecoderLayer {
         let attention = self
             .attention
             .forward_on(&normed, context, mask, cache, target)?;
-        let attention = self.attention_conv.finish_on(&attention, &kernel, target)?;
-        let hidden = residual + &attention;
+        let hidden = self
+            .attention_conv
+            .finish_with_residual_on(&attention, &kernel, residual, target)?;
 
         let residual = &hidden;
         let normed = self.post_attention_layernorm.forward_on(&hidden, target)?;
         let (normed, kernel) = self.mlp_conv.prepare_on(&normed, target)?;
         let mlp = self.mlp.forward_on(&normed, target)?;
-        let mlp = self.mlp_conv.finish_on(&mlp, &kernel, target)?;
-        Ok(residual + &mlp)
+        self.mlp_conv
+            .finish_with_residual_on(&mlp, &kernel, residual, target)
     }
 }

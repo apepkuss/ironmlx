@@ -314,6 +314,7 @@ impl Qwen35TextModel {
         position_ids: &Array,
         cache: Option<&mut [LayerCache]>,
         target_layer_ids: &[usize],
+        layer_submit_interval: Option<usize>,
         target: impl Into<StreamOrDevice>,
     ) -> Result<(Array, Array)> {
         let target = target.into();
@@ -326,6 +327,11 @@ impl Qwen35TextModel {
         if target_layer_ids.is_empty() {
             return Err(anyhow!(
                 "Qwen35 DFlash2 target forward requires at least one target layer"
+            ));
+        }
+        if layer_submit_interval == Some(0) {
+            return Err(anyhow!(
+                "Qwen35 DFlash2 layered graph submission interval must be positive"
             ));
         }
         let mut previous = None;
@@ -379,6 +385,15 @@ impl Qwen35TextModel {
                         captured.push(x.clone());
                         next_capture += 1;
                     }
+                    if should_submit_dflash2_layer(index, self.layers.len(), layer_submit_interval)
+                    {
+                        // `async_eval` is a submission boundary, not a host
+                        // synchronization point.  Four-layer chunks keep the
+                        // GPU fed while Rust constructs the remaining verify
+                        // graph, and are deliberately enabled only by the
+                        // Qwen3.8 wide-verify lane profile.
+                        mlx::transforms::async_eval(&[&x])?;
+                    }
                 }
             }
             None => {
@@ -398,6 +413,10 @@ impl Qwen35TextModel {
                     if target_layer_ids.get(next_capture) == Some(&index) {
                         captured.push(x.clone());
                         next_capture += 1;
+                    }
+                    if should_submit_dflash2_layer(index, self.layers.len(), layer_submit_interval)
+                    {
+                        mlx::transforms::async_eval(&[&x])?;
                     }
                 }
             }
@@ -462,5 +481,32 @@ impl Qwen35TextModel {
     /// Project hidden state to vocab logits via the (tied) `embed_tokens` matrix.
     pub fn as_output_on(&self, hidden: &Array, target: impl Into<StreamOrDevice>) -> Result<Array> {
         self.embed_tokens.as_output_on(hidden, target)
+    }
+}
+
+fn should_submit_dflash2_layer(
+    zero_based_layer: usize,
+    layer_count: usize,
+    interval: Option<usize>,
+) -> bool {
+    let Some(interval) = interval.filter(|interval| *interval > 0) else {
+        return false;
+    };
+    let completed = zero_based_layer.saturating_add(1);
+    completed < layer_count && completed.is_multiple_of(interval)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_submit_dflash2_layer;
+
+    #[test]
+    fn layered_submission_skips_final_layer_and_disabled_path() {
+        let submitted = (0..12)
+            .filter(|&layer| should_submit_dflash2_layer(layer, 12, Some(4)))
+            .collect::<Vec<_>>();
+        assert_eq!(submitted, vec![3, 7]);
+        assert!(!(0..12).any(|layer| should_submit_dflash2_layer(layer, 12, None)));
+        assert!(!(0..12).any(|layer| should_submit_dflash2_layer(layer, 12, Some(0))));
     }
 }

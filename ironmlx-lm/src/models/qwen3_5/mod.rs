@@ -5,6 +5,7 @@
 //! `(layer_idx + 1) % full_attention_interval == 0`.
 
 mod config;
+mod dflash2_lane;
 mod model;
 pub(crate) mod speculative;
 mod text_model;

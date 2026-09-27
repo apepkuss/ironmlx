@@ -1,5 +1,7 @@
-use anyhow::anyhow;
-use mlx::{Array, StreamOrDevice};
+use std::sync::OnceLock;
+
+use anyhow::{anyhow, Context};
+use mlx::{Array, MetalKernel, Shape, StreamOrDevice};
 
 use crate::core::Loader;
 use crate::nn::Linear;
@@ -105,16 +107,87 @@ impl DFlash2GroupedConv {
         ))
     }
 
-    pub(super) fn finish_on(
+    pub(super) fn finish_with_residual_on(
         &self,
         hidden: &Array,
         dynamic: &Array,
+        residual: &Array,
         target: StreamOrDevice,
     ) -> Result<Array> {
-        self.convolve_on(hidden, dynamic, 1, target)
+        self.convolve_fused_on(hidden, dynamic, 1, Some(residual), target)
     }
 
     fn convolve_on(
+        &self,
+        hidden: &Array,
+        dynamic: &Array,
+        side: i32,
+        target: StreamOrDevice,
+    ) -> Result<Array> {
+        if hidden.dtype() == dynamic.dtype() && hidden.dtype() == self.base_kernel.dtype() {
+            return self.convolve_fused_on(hidden, dynamic, side, None, target);
+        }
+        self.convolve_reference_on(hidden, dynamic, side, target)
+    }
+
+    fn convolve_fused_on(
+        &self,
+        hidden: &Array,
+        dynamic: &Array,
+        side: i32,
+        residual: Option<&Array>,
+        target: StreamOrDevice,
+    ) -> Result<Array> {
+        let shape = hidden.shape();
+        let dims = shape.as_slice();
+        let (batch, length, hidden_size) = (dims[0], dims[1], dims[2]);
+        anyhow::ensure!(
+            dynamic.shape().as_slice() == [batch, length, self.kernel_size, self.groups],
+            "DFlash2 fused grouped conv dynamic shape {:?} != [{batch},{length},{},{}]",
+            dynamic.shape().as_slice(),
+            self.kernel_size,
+            self.groups,
+        );
+        if let Some(residual) = residual {
+            anyhow::ensure!(
+                residual.shape().as_slice() == dims && residual.dtype() == hidden.dtype(),
+                "DFlash2 fused grouped conv residual must match hidden"
+            );
+        }
+        anyhow::ensure!(
+            hidden.dtype() == dynamic.dtype() && hidden.dtype() == self.base_kernel.dtype(),
+            "DFlash2 fused grouped conv requires matching hidden/dynamic/base dtypes"
+        );
+        let total = batch
+            .checked_mul(length)
+            .and_then(|value| value.checked_mul(hidden_size))
+            .ok_or_else(|| anyhow!("DFlash2 fused grouped conv size overflow"))?;
+        let kernel = grouped_conv_kernel(residual.is_some())?;
+        let mut inputs = vec![hidden, dynamic, &self.base_kernel];
+        if let Some(residual) = residual {
+            inputs.push(residual);
+        }
+        let mut outputs = kernel
+            .dispatch_builder()
+            .inputs(&inputs)
+            .output_shapes(&[Shape::from((batch, length, hidden_size))])
+            .output_dtypes(&[hidden.dtype()])
+            .grid(total, 1, 1)
+            .threadgroup(total.min(256), 1, 1)
+            .template_int("BATCH", batch)
+            .template_int("LENGTH", length)
+            .template_int("HIDDEN", hidden_size)
+            .template_int("KERNEL", self.kernel_size)
+            .template_int("GROUP_SIZE", self.group_size)
+            .template_int("GROUPS", self.groups)
+            .template_int("SIDE", side)
+            .stream(target)
+            .dispatch()
+            .context("dispatch fused DFlash2 grouped convolution")?;
+        outputs.take_at(0).map_err(Into::into)
+    }
+
+    fn convolve_reference_on(
         &self,
         hidden: &Array,
         dynamic: &Array,
@@ -172,6 +245,62 @@ impl DFlash2GroupedConv {
     }
 }
 
+fn grouped_conv_kernel(add_residual: bool) -> Result<&'static MetalKernel> {
+    static PLAIN: OnceLock<MetalKernel> = OnceLock::new();
+    static RESIDUAL: OnceLock<MetalKernel> = OnceLock::new();
+    let cell = if add_residual { &RESIDUAL } else { &PLAIN };
+    if let Some(kernel) = cell.get() {
+        return Ok(kernel);
+    }
+    let residual = if add_residual {
+        "acc += float(residual[gid]);"
+    } else {
+        ""
+    };
+    let source = format!(
+        r#"
+        uint gid = thread_position_in_grid.x;
+        constexpr int TOTAL = BATCH * LENGTH * HIDDEN;
+        if (int(gid) >= TOTAL) {{ return; }}
+
+        int hidden_index = int(gid) % HIDDEN;
+        int token = (int(gid) / HIDDEN) % LENGTH;
+        int batch = int(gid) / (LENGTH * HIDDEN);
+        int group = hidden_index / GROUP_SIZE;
+        float acc = 0.0f;
+        for (int offset = 0; offset < KERNEL; ++offset) {{
+            int source_token = token - offset;
+            if (source_token < 0) {{ continue; }}
+            int source_index = (batch * LENGTH + source_token) * HIDDEN + hidden_index;
+            int dynamic_index = ((batch * LENGTH + token) * KERNEL + offset) * GROUPS + group;
+            int base_index = (SIDE * KERNEL + offset) * HIDDEN + hidden_index;
+            float coefficient = float(base_kernel[base_index]) + float(dynamic[dynamic_index]);
+            acc += coefficient * float(hidden[source_index]);
+        }}
+        {residual}
+        out[gid] = static_cast<__typeof__(*out)>(acc);
+    "#
+    );
+    let inputs: &[&str] = if add_residual {
+        &["hidden", "dynamic", "base_kernel", "residual"]
+    } else {
+        &["hidden", "dynamic", "base_kernel"]
+    };
+    let kernel = MetalKernel::builder(if add_residual {
+        "ironmlx_dflash2_grouped_conv_residual_v1"
+    } else {
+        "ironmlx_dflash2_grouped_conv_v1"
+    })
+    .inputs(inputs)
+    .outputs(&["out"])
+    .source(source)
+    .ensure_row_contiguous(true)
+    .atomic_outputs(false)
+    .build()
+    .context("build fused DFlash2 grouped convolution")?;
+    Ok(cell.get_or_init(|| kernel))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,6 +334,25 @@ mod tests {
         let expected = [0.5_f32, 1.0, 2.0, 3.0, 4.0, 5.0];
         for (got, expected) in got.iter().zip(expected) {
             assert_abs_diff_eq!(*got, expected, epsilon = 1e-6);
+        }
+
+        let reference = conv
+            .convolve_reference_on(&hidden, &dynamic, 1, StreamOrDevice::default())
+            .expect("reference convolve")
+            .to_vec::<f32>()
+            .expect("reference materialize");
+        assert_eq!(got, reference);
+
+        let residual: Array = (&[0.25_f32; 6][..], &[1_i32, 3, 2][..])
+            .try_into()
+            .expect("residual");
+        let fused = conv
+            .finish_with_residual_on(&hidden, &dynamic, &residual, StreamOrDevice::default())
+            .expect("fused residual convolve")
+            .to_vec::<f32>()
+            .expect("fused residual materialize");
+        for (got, expected) in fused.iter().zip(reference.iter()) {
+            assert_abs_diff_eq!(*got, *expected + 0.25, epsilon = 1e-6);
         }
     }
 }

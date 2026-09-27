@@ -186,9 +186,7 @@ impl DFlash2KvCache {
 }
 
 pub(super) struct DFlash2Attention {
-    q_proj: Linear,
-    k_proj: Linear,
-    v_proj: Linear,
+    input_projections: DFlash2InputProjections,
     o_proj: Linear,
     q_norm: RmsNorm,
     k_norm: RmsNorm,
@@ -199,6 +197,21 @@ pub(super) struct DFlash2Attention {
     scale: f32,
 }
 
+enum DFlash2InputProjections {
+    Separate {
+        q: Linear,
+        k: Linear,
+        v: Linear,
+    },
+    Fused {
+        projection: Linear,
+        k: Linear,
+        v: Linear,
+        q_width: i32,
+        k_width: i32,
+    },
+}
+
 impl DFlash2Attention {
     pub(super) fn from_loader(
         loader: &Loader,
@@ -206,10 +219,40 @@ impl DFlash2Attention {
         cfg: &DFlash2Config,
         draft_bits: Option<i32>,
     ) -> Result<Self> {
+        let q = load_linear(loader, &format!("{prefix}.q_proj"), draft_bits)?;
+        let k = load_linear(loader, &format!("{prefix}.k_proj"), draft_bits)?;
+        let v = load_linear(loader, &format!("{prefix}.v_proj"), draft_bits)?;
+        let input_projections = if q.quantized_parts().is_some()
+            && k.quantized_parts().is_some()
+            && v.quantized_parts().is_some()
+        {
+            let q_width = i32::try_from(q.out_features())?;
+            let k_width = i32::try_from(k.out_features())?;
+            let v_width = v.out_features();
+            let projection =
+                Linear::fuse_quantized_outputs(&[&q, &k, &v], "DFlash2 drafter fused Q/K/V")?;
+            let mut split = projection.split_quantized_outputs(
+                &[q.out_features(), k.out_features(), v_width],
+                "DFlash2 drafter split Q/K/V",
+            )?;
+            DFlash2InputProjections::Fused {
+                projection,
+                // Q is always consumed from the fused proposal projection;
+                // only K/V need shared Q1-compatible row views for the
+                // variable-length context projection.
+                k: {
+                    let _q_view = split.remove(0);
+                    split.remove(0)
+                },
+                v: split.remove(0),
+                q_width,
+                k_width,
+            }
+        } else {
+            DFlash2InputProjections::Separate { q, k, v }
+        };
         Ok(Self {
-            q_proj: load_linear(loader, &format!("{prefix}.q_proj"), draft_bits)?,
-            k_proj: load_linear(loader, &format!("{prefix}.k_proj"), draft_bits)?,
-            v_proj: load_linear(loader, &format!("{prefix}.v_proj"), draft_bits)?,
+            input_projections,
             o_proj: load_linear(loader, &format!("{prefix}.o_proj"), draft_bits)?,
             q_norm: RmsNorm::from_loader(loader, &format!("{prefix}.q_norm"), cfg.rms_norm_eps)?,
             k_norm: RmsNorm::from_loader(loader, &format!("{prefix}.k_norm"), cfg.rms_norm_eps)?,
@@ -246,9 +289,35 @@ impl DFlash2Attention {
             .checked_add(context_len)
             .ok_or_else(|| anyhow!("DFlash2 RoPE position overflow"))?;
 
-        let q = self
-            .q_proj
-            .forward_on(x, target)?
+        let (q, proposal_k, proposal_v) = match &self.input_projections {
+            DFlash2InputProjections::Separate { q, k, v } => (
+                q.forward_on(x, target)?,
+                k.forward_on(x, target)?,
+                v.forward_on(x, target)?,
+            ),
+            DFlash2InputProjections::Fused {
+                projection,
+                q_width,
+                k_width,
+                ..
+            } => {
+                let output = projection.forward_on(x, target)?;
+                let mut parts = mlx::ops::shape::split_at_on(
+                    &output,
+                    &[*q_width, *q_width + *k_width],
+                    -1,
+                    target,
+                )?;
+                if parts.len() != 3 {
+                    return Err(anyhow!(
+                        "DFlash2 drafter fused Q/K/V returned {} parts",
+                        parts.len()
+                    ));
+                }
+                (parts.remove(0), parts.remove(0), parts.remove(0))
+            }
+        };
+        let q = q
             .reshape_on((batch, query_len, self.num_heads, self.head_dim), target)?
             .transpose_axes_on(&[0_i32, 2, 1, 3][..], target)?;
         // Context K/V uses a dynamic accepted-prefix length. Preserve the B1
@@ -257,10 +326,13 @@ impl DFlash2Attention {
         // product-stable kernel.
         let (context_k, context_v) = {
             let _product_stable_qmm = crate::nn::product_stable_qmm::scope();
-            (
-                self.k_proj.forward_on(context, target)?,
-                self.v_proj.forward_on(context, target)?,
-            )
+            match &self.input_projections {
+                DFlash2InputProjections::Separate { k, v, .. }
+                | DFlash2InputProjections::Fused { k, v, .. } => (
+                    k.forward_on(context, target)?,
+                    v.forward_on(context, target)?,
+                ),
+            }
         };
         let context_k = context_k
             .reshape_on(
@@ -274,14 +346,10 @@ impl DFlash2Attention {
                 target,
             )?
             .transpose_axes_on(&[0_i32, 2, 1, 3][..], target)?;
-        let proposal_k = self
-            .k_proj
-            .forward_on(x, target)?
+        let proposal_k = proposal_k
             .reshape_on((batch, query_len, self.num_kv_heads, self.head_dim), target)?
             .transpose_axes_on(&[0_i32, 2, 1, 3][..], target)?;
-        let proposal_v = self
-            .v_proj
-            .forward_on(x, target)?
+        let proposal_v = proposal_v
             .reshape_on((batch, query_len, self.num_kv_heads, self.head_dim), target)?
             .transpose_axes_on(&[0_i32, 2, 1, 3][..], target)?;
 

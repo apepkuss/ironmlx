@@ -117,6 +117,23 @@ impl LayerCache {
         }
     }
 
+    /// Capture the transaction boundary used by DFlash2 verification.
+    ///
+    /// Full-attention caches are append-only during a verify window, so an
+    /// offsets-only checkpoint is sufficient and avoids retaining dense K/V
+    /// Array handles that would force copy-on-write of the whole prefix.
+    /// Recurrent caches keep their fixed-size state checkpoint; the accepted
+    /// state is committed from the separately recorded per-position replay.
+    pub fn dflash2_transaction_snapshot(&self) -> anyhow::Result<LayerCacheSnapshot> {
+        match self {
+            LayerCache::Full(kv) => Ok(LayerCacheSnapshot::Full(kv.append_snapshot())),
+            LayerCache::Linear(gd) => Ok(LayerCacheSnapshot::Linear(gd.snapshot())),
+            LayerCache::Mla(_) => {
+                anyhow::bail!("DFlash2 transaction snapshots do not support MLA cache")
+            }
+        }
+    }
+
     /// Restore this layer cache from a matching checkpoint.
     pub fn restore(&mut self, snapshot: &LayerCacheSnapshot) -> anyhow::Result<()> {
         match (self, snapshot) {
@@ -761,4 +778,24 @@ pub fn restore_paged_prefix_layers_for_row(
         kv.restore_paged_prefix_layer_for_row_on(&layer, row, prefix_len, ())?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LayerCache, LayerCacheSnapshot};
+    use crate::core::cache::KVCache;
+    use mlx::Dtype;
+
+    #[test]
+    fn dflash2_full_kv_transaction_snapshot_is_offsets_only() {
+        let cache = LayerCache::Full(KVCache::new(2, 1, 8, 8, Dtype::Bfloat16, 64));
+        let snapshot = cache
+            .dflash2_transaction_snapshot()
+            .expect("DFlash2 transaction snapshot");
+        let LayerCacheSnapshot::Full(snapshot) = snapshot else {
+            panic!("expected full-KV snapshot");
+        };
+        assert_eq!(snapshot.offsets(), &[0, 0]);
+        assert!(!snapshot.restores_dense_storage());
+    }
 }

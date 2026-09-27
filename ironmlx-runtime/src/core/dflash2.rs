@@ -1208,8 +1208,8 @@ where
         let snapshots = batch_cache
             .target
             .iter()
-            .map(LayerCache::snapshot)
-            .collect::<Vec<_>>();
+            .map(LayerCache::dflash2_transaction_snapshot)
+            .collect::<Result<Vec<_>>>()?;
         for layer in &mut batch_cache.target {
             layer.begin_speculative_prefix_capture()?;
         }
@@ -1607,8 +1607,8 @@ where
         let snapshots = self
             .target_cache
             .iter()
-            .map(LayerCache::snapshot)
-            .collect::<Vec<_>>();
+            .map(LayerCache::dflash2_transaction_snapshot)
+            .collect::<Result<Vec<_>>>()?;
         for layer in &mut self.target_cache {
             layer.begin_speculative_prefix_capture()?;
         }

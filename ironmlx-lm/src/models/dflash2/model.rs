@@ -139,6 +139,7 @@ impl DFlash2DraftModel {
         }
         let batch = input_dims[0];
         let _batch_stable_qmm = (batch > 1).then(crate::nn::batch_stable_qmm::linear_scope);
+        let _drafter_fusion = crate::nn::dflash2_drafter_fusion::scope();
         let hidden_shape = target_hidden.shape();
         let hidden_dims = hidden_shape.as_slice();
         let expected_context = self.config.hidden_size

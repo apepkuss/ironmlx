@@ -50,12 +50,20 @@ impl Mlp {
     ) -> Result<Self> {
         let gate = Linear::from_loader(loader, &format!("{prefix}.gate_proj"))?;
         let up = Linear::from_loader(loader, &format!("{prefix}.up_proj"))?;
+        let down = Linear::from_loader(loader, &format!("{prefix}.down_proj"))?;
+        Self::from_components_dflash2(gate, up, down)
+    }
+
+    pub(crate) fn from_components_dflash2(gate: Linear, up: Linear, down: Linear) -> Result<Self> {
         if gate.out_features() != up.out_features() {
             anyhow::bail!(
                 "DFlash2 fused MLP requires matching gate/up widths, got {} and {}",
                 gate.out_features(),
                 up.out_features()
             );
+        }
+        if gate.quantized_parts().is_none() && up.quantized_parts().is_none() {
+            return Ok(Self::from_components(gate, up, down));
         }
         let projection =
             Linear::fuse_quantized_outputs(&[&gate, &up], "DFlash2 fused MLP gate/up")?;
@@ -69,7 +77,7 @@ impl Mlp {
                 gate: separate.remove(0),
                 up: separate.remove(0),
             })),
-            down: Linear::from_loader(loader, &format!("{prefix}.down_proj"))?,
+            down,
             swiglu: OnceLock::new(),
         })
     }
@@ -113,7 +121,9 @@ impl Mlp {
                     gate,
                     up,
                 } = fused.as_ref();
-                if super::product_stable_qmm::is_armed() {
+                if super::product_stable_qmm::is_armed()
+                    || super::dflash2_drafter_fusion::is_armed()
+                {
                     let output = projection.forward_on(x, target)?;
                     let mut parts = mlx::ops::shape::split_n_on(&output, 2, -1, target)?;
                     if parts.len() != 2 {

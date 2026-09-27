@@ -10,6 +10,7 @@ pub mod attention;
 pub(crate) mod batch_stable_qmm;
 pub mod conv;
 pub mod decoder_layer;
+pub(crate) mod dflash2_drafter_fusion;
 pub mod embedding;
 pub mod gated_attention;
 pub mod gated_delta_net;
