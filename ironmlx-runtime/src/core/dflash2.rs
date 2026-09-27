@@ -14,7 +14,7 @@ use thiserror::Error;
 use crate::core::generation_types::{GenerateEvent, GenerateRequest};
 use crate::core::speculative::{
     resolve_exact_deterministic_target_logits, resolve_exact_deterministic_target_tokens,
-    sample_logits_positions, ExactSamplingCounters,
+    sample_logits_positions, ExactSamplingCounters, MtpDraftPolicyWindow, QwenMtpDraftPolicyState,
 };
 use crate::Result;
 use ironmlx_lm::core::cache::prefix_payload::PagedPrefixEntry;
@@ -39,6 +39,8 @@ use {
     ironmlx_lm::models::dflash2::DFlash2DraftCache, ironmlx_lm::models::dflash2::DFlash2DraftModel,
     ironmlx_lm::models::dflash2::DFlash2Target,
     ironmlx_lm::models::dflash2::DFlash2TargetForwardMode,
+    ironmlx_lm::models::dflash2::DFlash2VerifyCapabilities,
+    ironmlx_lm::models::dflash2::DFlash2VerifyPlan,
 };
 
 #[derive(Debug, Clone)]
@@ -240,6 +242,10 @@ pub struct DFlash2Metrics {
     pub drafted_tokens: usize,
     pub accepted_draft_tokens: usize,
     pub rollback_count: usize,
+    pub ordinary_windows: usize,
+    pub draft_budget_changes: usize,
+    pub current_draft_budget: usize,
+    pub adaptive_acceptance_ewma: Option<f64>,
     pub exact_sampling_windows: usize,
     pub exact_acceptance_draws: usize,
     pub exact_residual_corrections: usize,
@@ -267,6 +273,8 @@ struct DFlash2Counters {
     drafted_tokens: usize,
     accepted_draft_tokens: usize,
     rollback_count: usize,
+    ordinary_windows: usize,
+    draft_budget_changes: usize,
     exact_sampling: ExactSamplingCounters,
     draft_build_us: u64,
     draft_schedule_us: u64,
@@ -286,7 +294,26 @@ pub(crate) struct DFlash2TensorBatchKey {
     context_len: i32,
     draft_processed: i32,
     draft_retained: i32,
+    supported_batch_widths: u64,
     sampled: bool,
+}
+
+impl DFlash2TensorBatchKey {
+    pub(crate) fn is_ordinary_decode(self) -> bool {
+        self.draft_len == 0
+    }
+
+    pub(crate) fn supports_batch_width(self, batch_width: usize) -> bool {
+        batch_width < u64::BITS as usize
+            && self.supported_batch_widths & (1_u64 << batch_width) != 0
+    }
+
+    pub(crate) fn largest_supported_batch_width(self, limit: usize) -> usize {
+        (1..=limit)
+            .rev()
+            .find(|&batch_width| self.supports_batch_width(batch_width))
+            .unwrap_or(1)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -315,6 +342,8 @@ where
     pending_tokens: VecDeque<u32>,
     detok: DecodeStream<'m>,
     pending_context_hidden: Array,
+    verify_capabilities: DFlash2VerifyCapabilities,
+    draft_policy: QwenMtpDraftPolicyState,
     prng_state: Array,
     block_size: usize,
     emitted_new_tokens: usize,
@@ -333,16 +362,40 @@ pub(crate) struct DFlash2TensorBatchCache {
 }
 
 impl DFlash2TensorBatchCache {
+    fn ensure_row_width<M: DFlash2Target>(
+        &self,
+        rows: &[&mut DFlash2TextGenerationStream<'_, M>],
+    ) -> Result<()> {
+        anyhow::ensure!(
+            rows.len() == self.batch_size,
+            "DFlash2 tensor cache width {} cannot address {} rows",
+            self.batch_size,
+            rows.len()
+        );
+        Ok(())
+    }
+
+    /// Keep each stream's lightweight draft-cache position view aligned with
+    /// the authoritative persistent tensor cache. Target KV remains owned by
+    /// the tensor group until it is scattered, so this does not dismantle the
+    /// persistent B=N execution state between windows.
+    fn sync_draft_rows<M: DFlash2Target>(
+        &self,
+        rows: &mut [&mut DFlash2TextGenerationStream<'_, M>],
+    ) -> Result<()> {
+        self.ensure_row_width(rows)?;
+        let target = StreamOrDevice::default();
+        for (batch_row, row) in rows.iter_mut().enumerate() {
+            row.draft_cache = self.draft.row_on(batch_row, target)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn scatter_to_rows<M: DFlash2Target>(
         &self,
         rows: &mut [&mut DFlash2TextGenerationStream<'_, M>],
     ) -> Result<()> {
-        anyhow::ensure!(
-            rows.len() == self.batch_size,
-            "DFlash2 tensor cache width {} cannot scatter into {} rows",
-            self.batch_size,
-            rows.len()
-        );
+        self.ensure_row_width(rows)?;
         let target = StreamOrDevice::default();
         for (batch_row, row) in rows.iter_mut().enumerate() {
             ironmlx_lm::core::cache::layer::adopt_layer_cache_rows(
@@ -595,6 +648,16 @@ where
             history.push(first_token);
             let mut pending_tokens = VecDeque::new();
             pending_tokens.push_back(first_token);
+            let verify_capabilities = model.dflash2_verify_capabilities();
+            let max_draft_tokens = verify_capabilities
+                .max_draft_tokens(1)
+                .unwrap_or(0)
+                .min(block_size - 1);
+            anyhow::ensure!(
+                max_draft_tokens > 0,
+                "DFlash2 verify profile {} has no certified B1 speculative width",
+                verify_capabilities.profile
+            );
             streams.push(Self {
                 model,
                 draft,
@@ -605,6 +668,8 @@ where
                 pending_tokens,
                 detok: tokenizer.decode_stream(true),
                 pending_context_hidden: row_context,
+                verify_capabilities,
+                draft_policy: QwenMtpDraftPolicyState::new(max_draft_tokens),
                 prng_state,
                 block_size,
                 emitted_new_tokens: 0,
@@ -802,6 +867,16 @@ where
         let mut pending_tokens = VecDeque::new();
         pending_tokens.push_back(first_token);
 
+        let verify_capabilities = model.dflash2_verify_capabilities();
+        let max_draft_tokens = verify_capabilities
+            .max_draft_tokens(1)
+            .unwrap_or(0)
+            .min(block_size - 1);
+        anyhow::ensure!(
+            max_draft_tokens > 0,
+            "DFlash2 verify profile {} has no certified B1 speculative width",
+            verify_capabilities.profile
+        );
         Ok(Self {
             model,
             draft,
@@ -812,6 +887,8 @@ where
             pending_tokens,
             detok: tokenizer.decode_stream(true),
             pending_context_hidden: context_hidden,
+            verify_capabilities,
+            draft_policy: QwenMtpDraftPolicyState::new(max_draft_tokens),
             prng_state,
             block_size,
             emitted_new_tokens: 0,
@@ -845,6 +922,10 @@ where
             drafted_tokens: self.counters.drafted_tokens,
             accepted_draft_tokens: self.counters.accepted_draft_tokens,
             rollback_count: self.counters.rollback_count,
+            ordinary_windows: self.counters.ordinary_windows,
+            draft_budget_changes: self.counters.draft_budget_changes,
+            current_draft_budget: self.draft_policy.current_budget(),
+            adaptive_acceptance_ewma: self.draft_policy.acceptance_ewma(),
             exact_sampling_windows: self.counters.exact_sampling.windows,
             exact_acceptance_draws: self.counters.exact_sampling.acceptance_draws,
             exact_residual_corrections: self.counters.exact_sampling.residual_corrections,
@@ -871,7 +952,7 @@ where
         let event = self.next_token_deferred()?;
         if let Some(event) = event.as_ref() {
             if event.finish_reason.is_none() && self.pending_tokens.is_empty() {
-                self.fill_window(event.token)?;
+                self.fill_next_window(event.token)?;
             }
         }
         Ok(event)
@@ -925,6 +1006,7 @@ where
         if remaining == 0 {
             return Ok(None);
         }
+        let draft_len = self.draft_policy.current_budget().min(remaining);
         let context_shape = self.pending_context_hidden.shape();
         let context_dims = context_shape.as_slice();
         anyhow::ensure!(
@@ -932,12 +1014,35 @@ where
             "DFlash2 pending context must be [1,S,H], got {context_dims:?}"
         );
         let (draft_processed, draft_retained) = self.draft_cache.position_signature()?;
+        if draft_len > 0 {
+            anyhow::ensure!(
+                draft_processed.checked_add(context_dims[1])
+                    == Some(i32::try_from(self.history.len() - 1)?),
+                "DFlash2 draft cache/context position mismatch: processed={draft_processed} retained={draft_retained} pending={} verify_start={} draft_len={draft_len}",
+                context_dims[1],
+                self.history.len() - 1,
+            );
+        }
+        DFlash2VerifyPlan::build(&self.verify_capabilities, 1, draft_len)?;
+        let verify_width = draft_len + 1;
+        let supported_batch_widths = if draft_len == 0 {
+            1_u64 << 1
+        } else {
+            self.verify_capabilities
+                .supported_shapes
+                .iter()
+                .filter(|shape| {
+                    shape.verify_width == verify_width && shape.batch_width < u64::BITS as usize
+                })
+                .fold(0_u64, |mask, shape| mask | (1_u64 << shape.batch_width))
+        };
         Ok(Some(DFlash2TensorBatchKey {
-            draft_len: (self.block_size - 1).min(remaining),
+            draft_len,
             verify_start: self.history.len() - 1,
             context_len: context_dims[1],
             draft_processed,
             draft_retained,
+            supported_batch_widths,
             sampled: !self.request.sampler.is_greedy(),
         }))
     }
@@ -947,7 +1052,15 @@ where
             .history
             .last()
             .ok_or_else(|| anyhow!("DFlash2 stream history is empty"))?;
-        self.fill_window(current_token)
+        self.fill_next_window(current_token)
+    }
+
+    fn fill_next_window(&mut self, current_token: u32) -> Result<()> {
+        if self.draft_policy.current_budget() == 0 {
+            self.fill_ordinary_window(current_token)
+        } else {
+            self.fill_window(current_token)
+        }
     }
 
     /// Execute one equal-shape multi-row draft/verify window. Rows with a common
@@ -981,6 +1094,11 @@ where
         let target = StreamOrDevice::default();
         let window_started = Instant::now();
         let draft_len = first_key.draft_len;
+        anyhow::ensure!(
+            draft_len > 0,
+            "DFlash2 Q1 control windows must execute as B1 rows"
+        );
+        DFlash2VerifyPlan::build(&rows[0].verify_capabilities, batch_size, draft_len)?;
         let verify_len = draft_len + 1;
         let mask_token = rows[0].draft.config().dflash_config.mask_token_id;
         let sampling_prepare_started = Instant::now();
@@ -1325,6 +1443,7 @@ where
             .enumerate()
             .zip(context_rows)
         {
+            let accepted_draft_len = resolution.accepted_draft_len;
             row.pending_context_hidden = context_row;
             row.counters.windows += 1;
             row.counters.drafted_tokens += draft_tokens[batch_row].len();
@@ -1373,6 +1492,7 @@ where
             row.counters.rollback_us = row.counters.rollback_us.saturating_add(rollback_us);
             row.counters.window_us = row.counters.window_us.saturating_add(window_us);
 
+            let context_tokens = row.history.len();
             let remaining = row
                 .request
                 .max_new_tokens
@@ -1392,17 +1512,38 @@ where
                 !tokens_to_append.contains(&mask_token),
                 "DFlash2 verification emitted reserved mask token {mask_token}"
             );
+            let committed_tokens = tokens_to_append.len();
             for token in tokens_to_append {
                 commit_constraint_token(&mut row.constraint, token)?;
                 row.history.push(token);
                 row.pending_tokens.push_back(token);
             }
+            row.observe_adaptive_window(MtpDraftPolicyWindow::from_measured_components(
+                draft_tokens[batch_row].len(),
+                accepted_draft_len,
+                committed_tokens,
+                window_us,
+                context_tokens,
+                batch_size,
+                draft_build_us.saturating_add(draft_schedule_us),
+                verify_build_us.saturating_add(verify_schedule_us),
+                projection_build_us,
+                sampling_us,
+                host_sync_us,
+                rollback_us,
+            ));
         }
-        Ok(keep_batch_cache.then_some(batch_cache))
+        if keep_batch_cache {
+            batch_cache.sync_draft_rows(rows)?;
+            Ok(Some(batch_cache))
+        } else {
+            Ok(None)
+        }
     }
 
     fn fill_window(&mut self, current_token: u32) -> Result<()> {
         let window_started = Instant::now();
+        let counters_before = self.counters.clone();
         let remaining = self
             .request
             .max_new_tokens
@@ -1410,7 +1551,8 @@ where
         if remaining == 0 {
             return Ok(());
         }
-        let draft_len = (self.block_size - 1).min(remaining);
+        let draft_len = self.draft_policy.current_budget().min(remaining);
+        DFlash2VerifyPlan::build(&self.verify_capabilities, 1, draft_len)?;
         let sampling_prepare_started = Instant::now();
         let exact_sampling_uniforms = if self.request.sampler.temperature > 0.0
             && !self.request.sampler.requires_sampling_history()
@@ -1649,6 +1791,7 @@ where
             .rollback_us
             .saturating_add(elapsed_us(rollback_started));
 
+        let accepted_draft_len = resolution.accepted_draft_len;
         let mut tokens_to_append = resolution.tokens_to_append;
         if let Some(stop_index) = tokens_to_append
             .iter()
@@ -1665,15 +1808,150 @@ where
                 "DFlash2 verification emitted reserved mask token {mask_token}"
             ));
         }
+        let committed_tokens = tokens_to_append.len();
         for token in tokens_to_append {
             commit_constraint_token(&mut self.constraint, token)?;
             self.history.push(token);
             self.pending_tokens.push_back(token);
         }
-        self.counters.window_us = self
+        let window_us = elapsed_us(window_started);
+        self.counters.window_us = self.counters.window_us.saturating_add(window_us);
+        self.observe_adaptive_window(MtpDraftPolicyWindow::from_measured_components(
+            draft_tokens.len(),
+            accepted_draft_len,
+            committed_tokens,
+            window_us,
+            self.history.len().saturating_sub(committed_tokens),
+            1,
+            self.counters
+                .draft_build_us
+                .saturating_sub(counters_before.draft_build_us)
+                .saturating_add(
+                    self.counters
+                        .draft_schedule_us
+                        .saturating_sub(counters_before.draft_schedule_us),
+                ),
+            self.counters
+                .verify_build_us
+                .saturating_sub(counters_before.verify_build_us)
+                .saturating_add(
+                    self.counters
+                        .verify_schedule_us
+                        .saturating_sub(counters_before.verify_schedule_us),
+                ),
+            self.counters
+                .projection_build_us
+                .saturating_sub(counters_before.projection_build_us),
+            self.counters
+                .sampling_us
+                .saturating_sub(counters_before.sampling_us),
+            self.counters
+                .host_sync_us
+                .saturating_sub(counters_before.host_sync_us),
+            self.counters
+                .rollback_us
+                .saturating_sub(counters_before.rollback_us),
+        ));
+        Ok(())
+    }
+
+    fn observe_adaptive_window(&mut self, window: MtpDraftPolicyWindow) {
+        let change = self.draft_policy.observe_external_window(window);
+        if change.reduced || change.increased {
+            self.counters.draft_budget_changes =
+                self.counters.draft_budget_changes.saturating_add(1);
+        }
+    }
+
+    fn fill_ordinary_window(&mut self, current_token: u32) -> Result<()> {
+        let window_started = Instant::now();
+        let remaining = self
+            .request
+            .max_new_tokens
+            .saturating_sub(self.emitted_new_tokens);
+        if remaining == 0 {
+            return Ok(());
+        }
+        DFlash2VerifyPlan::build(&self.verify_capabilities, 1, 0)?;
+        let context_tokens = self.history.len();
+        let input: Array = (&[current_token][..], &[1_i32, 1][..]).try_into()?;
+        let positions = build_position_ids(i32::try_from(self.history.len() - 1)?, 1)?;
+        let verify_started = Instant::now();
+        let output = self.model.dflash2_forward_target_on(
+            &input,
+            &positions,
+            Some(&mut self.target_cache),
+            &self.draft.config().dflash_config.target_layer_ids,
+            DFlash2TargetForwardMode::OrdinaryDecode,
+            StreamOrDevice::default(),
+        )?;
+        let verify_build_us = elapsed_us(verify_started);
+        self.counters.verify_build_us = self
             .counters
-            .window_us
-            .saturating_add(elapsed_us(window_started));
+            .verify_build_us
+            .saturating_add(verify_build_us);
+
+        let projection_started = Instant::now();
+        let logits = self
+            .model
+            .dflash2_project_hidden_on(&output.hidden, StreamOrDevice::default())?;
+        let row = logits.reshape((logits.shape().as_slice()[2],))?;
+        let row = match self.constraint.as_mut() {
+            Some(constraint) => apply_token_mask(&row, &constraint.compute_mask()?)?,
+            None => row,
+        };
+        let projection_build_us = elapsed_us(projection_started);
+        self.counters.projection_build_us = self
+            .counters
+            .projection_build_us
+            .saturating_add(projection_build_us);
+        let sampling_started = Instant::now();
+        let next_token = self
+            .request
+            .sampler
+            .sample(&row, &self.history, &mut self.prng_state)?;
+        mlx::transforms::eval(&[&output.context_hidden])?;
+        let sampling_us = elapsed_us(sampling_started);
+        self.counters.sampling_us = self.counters.sampling_us.saturating_add(sampling_us);
+
+        let ordinary_context_hidden = output.context_hidden;
+        self.pending_context_hidden = retain_context_tail(
+            Some(&self.pending_context_hidden),
+            &ordinary_context_hidden,
+            // A d=0 probe is bounded to a handful of windows. Keep every raw
+            // target context produced during the probe so its original
+            // positions remain contiguous with the paused draft cache; the
+            // draft cache performs its own sliding eviction when resumed.
+            i32::MAX,
+            StreamOrDevice::default(),
+        )?;
+        commit_constraint_token(&mut self.constraint, next_token)?;
+        self.history.push(next_token);
+        self.pending_tokens.push_back(next_token);
+        self.counters.windows = self.counters.windows.saturating_add(1);
+        self.counters.ordinary_windows = self.counters.ordinary_windows.saturating_add(1);
+        let window_us = elapsed_us(window_started);
+        self.counters.window_us = self.counters.window_us.saturating_add(window_us);
+        self.observe_adaptive_window(MtpDraftPolicyWindow::from_measured_components(
+            0,
+            0,
+            1,
+            window_us,
+            context_tokens,
+            1,
+            0,
+            verify_build_us,
+            projection_build_us,
+            sampling_us,
+            0,
+            0,
+        ));
+        if self.draft_policy.uses_ordinary_decode() {
+            // A completed d=0 probe never re-enters the speculative path. Drop
+            // the accumulated raw target context; the target cache is already
+            // authoritative for continued ordinary decoding.
+            self.pending_context_hidden = ordinary_context_hidden;
+        }
         Ok(())
     }
 }
@@ -2168,7 +2446,7 @@ mod tests {
     #[test]
     #[ignore = "loads the full local Qwen3.8 target and DFlash2 draft checkpoints"]
     #[serial(mlx_metal)]
-    fn qwen38_dflash2_b4_windows_match_scheduler_b1_exactly() {
+    fn qwen38_dflash2_b4_windows_are_row_exact_and_greedy_matches_scheduler_b1() {
         use ironmlx_core::sampler::Sampler;
         use ironmlx_lm::models::dflash2::DFlash2DraftModel;
         use ironmlx_lm::models::Qwen35Model;
@@ -2249,7 +2527,7 @@ mod tests {
                     &|_| false,
                 )
                 .expect("B4 DFlash2 streams");
-            let mut tensor_cache = None;
+            let mut tensor_cache: Option<DFlash2TensorBatchCache> = None;
 
             for (row, stream) in batched.iter().enumerate() {
                 assert_array_exact(
@@ -2264,32 +2542,91 @@ mod tests {
                     .next_token()
                     .expect("B1 token")
                     .map(|event| (event.token, event.finish_reason));
+                let mut first_b4 = None;
                 for (row, stream) in batched.iter_mut().enumerate() {
                     let actual = stream
                         .next_token_deferred()
                         .expect("B4 token")
                         .map(|event| (event.token, event.finish_reason));
-                    assert_eq!(expected, actual, "{case} row {row} step {step}");
+                    if case == "greedy" {
+                        assert_eq!(expected, actual, "{case} row {row} step {step}");
+                    }
+                    if let Some(first_b4) = first_b4.as_ref() {
+                        assert_eq!(first_b4, &actual, "{case} row {row} step {step}");
+                    } else {
+                        first_b4 = Some(actual);
+                    }
                 }
-                if expected
-                    .as_ref()
-                    .is_some_and(|(_, finish_reason)| finish_reason.is_none())
-                    && batched
+                let should_fill = if case == "greedy" {
+                    expected
+                        .as_ref()
+                        .is_some_and(|(_, finish_reason)| finish_reason.is_none())
+                } else {
+                    first_b4.as_ref().is_some_and(|actual| {
+                        actual
+                            .as_ref()
+                            .is_some_and(|(_, finish_reason)| finish_reason.is_none())
+                    })
+                };
+                if should_fill {
+                    let keys = batched
                         .iter()
-                        .all(|stream| stream.tensor_batch_key().expect("batch key").is_some())
-                {
-                    let mut rows = batched.iter_mut().collect::<Vec<_>>();
-                    tensor_cache = DFlash2TextGenerationStream::fill_deferred_window_bn(
-                        &mut rows,
-                        tensor_cache.take(),
-                    )
-                    .expect("B4 tensor window");
-                    for (row, stream) in batched.iter().enumerate() {
+                        .map(|stream| stream.tensor_batch_key().expect("batch key"))
+                        .collect::<Vec<_>>();
+                    if keys.iter().all(Option::is_some) {
+                        assert!(keys.iter().all(|key| *key == keys[0]));
+                        let mut rows = batched.iter_mut().collect::<Vec<_>>();
+                        if keys[0].is_some_and(DFlash2TensorBatchKey::is_ordinary_decode) {
+                            if let Some(cache) = tensor_cache.take() {
+                                cache
+                                    .scatter_to_rows(&mut rows)
+                                    .expect("scatter B4 cache for Q1 control window");
+                            }
+                            for stream in rows {
+                                stream
+                                    .fill_deferred_window_b1()
+                                    .expect("B1 ordinary control window");
+                            }
+                        } else {
+                            tensor_cache = DFlash2TextGenerationStream::fill_deferred_window_bn(
+                                &mut rows,
+                                tensor_cache.take(),
+                            )
+                            .expect("B4 tensor window");
+                        }
+                    }
+                    for row in 1..batched.len() {
                         assert_array_exact(
-                            &format!("{case} B4 row {row} step {step} aligned context"),
-                            &reference.pending_context_hidden,
-                            &stream.pending_context_hidden,
+                            &format!("{case} B4 row {row} step {step} row-exact context"),
+                            &batched[0].pending_context_hidden,
+                            &batched[row].pending_context_hidden,
                         );
+                    }
+                    for (row, stream) in batched.iter().enumerate() {
+                        if case == "greedy"
+                            && reference.pending_context_hidden.shape()
+                                == stream.pending_context_hidden.shape()
+                        {
+                            assert_array_exact(
+                                &format!("{case} B4 row {row} step {step} aligned context"),
+                                &reference.pending_context_hidden,
+                                &stream.pending_context_hidden,
+                            );
+                        }
+                        if stream.draft_policy.should_maintain_mtp_cache() {
+                            let processed = stream
+                                .draft_cache
+                                .position_signature()
+                                .expect("B4 draft position")
+                                .0;
+                            let pending = stream.pending_context_hidden.shape().as_slice()[1];
+                            assert_eq!(
+                                processed + pending,
+                                i32::try_from(stream.history.len() - 1)
+                                    .expect("B4 history position"),
+                                "{case} B4 row {row} step {step} resumable draft position"
+                            );
+                        }
                     }
                 }
             }
@@ -2578,5 +2915,24 @@ mod tests {
             ),
             DFlash2TargetForwardMode::SampledVerify
         );
+    }
+
+    #[test]
+    fn tensor_batch_key_selects_only_certified_group_widths() {
+        let key = DFlash2TensorBatchKey {
+            draft_len: 3,
+            verify_start: 64,
+            context_len: 32,
+            draft_processed: 32,
+            draft_retained: 32,
+            supported_batch_widths: (1_u64 << 1) | (1_u64 << 2) | (1_u64 << 4),
+            sampled: false,
+        };
+
+        assert!(key.supports_batch_width(4));
+        assert!(!key.supports_batch_width(3));
+        assert_eq!(key.largest_supported_batch_width(4), 4);
+        assert_eq!(key.largest_supported_batch_width(3), 2);
+        assert_eq!(key.largest_supported_batch_width(1), 1);
     }
 }

@@ -1119,6 +1119,50 @@ impl crate::models::dflash2::DFlash2Target for Qwen35Model {
         qwen35_dflash2_target_cache_cost(self.config())
     }
 
+    fn dflash2_verify_capabilities(&self) -> crate::models::dflash2::DFlash2VerifyCapabilities {
+        use crate::models::dflash2::{DFlash2VerifyCapabilities, DFlash2VerifyShape};
+
+        let profile = match self.exact_batched_verify_profile {
+            super::speculative::ExactBatchedVerifyProfile::Disabled => "disabled",
+            super::speculative::ExactBatchedVerifyProfile::Affine4 => "qwen35-affine4",
+            super::speculative::ExactBatchedVerifyProfile::Affine5Dense => "qwen35-affine5-dense",
+            super::speculative::ExactBatchedVerifyProfile::Affine5Moe => "qwen35-affine5-moe",
+            super::speculative::ExactBatchedVerifyProfile::Affine6Dense => "qwen35-affine6-dense",
+            super::speculative::ExactBatchedVerifyProfile::Affine6Moe => "qwen35-affine6-moe",
+            super::speculative::ExactBatchedVerifyProfile::Affine8Dense => "qwen35-affine8-dense",
+            super::speculative::ExactBatchedVerifyProfile::Affine8Moe => "qwen35-affine8-moe",
+        };
+        let mut supported_shapes = Vec::new();
+        for batch_width in 1..=8 {
+            for verify_width in 2..=8 {
+                if super::speculative::dflash2_exact_batched_verify_shape_qualified(
+                    self.exact_batched_verify_profile,
+                    batch_width,
+                    verify_width,
+                ) {
+                    supported_shapes.push(DFlash2VerifyShape {
+                        batch_width,
+                        verify_width,
+                    });
+                }
+            }
+        }
+        DFlash2VerifyCapabilities {
+            profile: profile.into(),
+            row_bit_exact_qmm: !supported_shapes.is_empty(),
+            row_bit_exact_attention: !supported_shapes.is_empty(),
+            transactional_state_restore: !supported_shapes.is_empty(),
+            supported_shapes,
+        }
+    }
+
+    fn dflash2_execution_fingerprint(&self) -> String {
+        format!(
+            "qwen35-dflash2-v1;prepared-qmm=product-stable-v1;attention=bulk-position-stable-v1;recurrent=transactional-prefix-v1;{}",
+            self.dflash2_verify_capabilities().stable_fingerprint()
+        )
+    }
+
     fn dflash2_embed_on(
         &self,
         input_ids: &mlx::Array,
@@ -1884,6 +1928,155 @@ mod tests {
             &sampled_dflash_correction,
             "sampled DFlash2 restored prefix continuation",
         );
+    }
+
+    #[test]
+    #[ignore = "loads the full local Qwen3.8 target checkpoint"]
+    #[serial(mlx_metal)]
+    fn qwen38_dflash2_q2_q4_q8_full_accept_matches_ordinary_state() {
+        use crate::core::model_input::build_position_ids;
+        use crate::core::Model;
+        use crate::models::dflash2::{DFlash2Target, DFlash2TargetForwardMode, DFlash2VerifyPlan};
+
+        let Some(model_dir) = qwen35_checkpoint("QWEN38_MODEL") else {
+            return;
+        };
+        let mut loader = crate::core::Loader::open(&model_dir).expect("open Qwen3.8 model");
+        let model = Qwen35Model::from_loader_dflash2(&mut loader)
+            .expect("load DFlash2-optimized Qwen3.8 model");
+        let capabilities = model.dflash2_verify_capabilities();
+        let target_layers = [5_usize, 19, 33, 47, 61];
+        let verify_seed = [400_u32, 500, 600, 700, 800, 900, 1_000, 1_100];
+
+        for verify_width in [2_usize, 4, 8] {
+            if DFlash2VerifyPlan::build(&capabilities, 1, verify_width - 1).is_err() {
+                eprintln!(
+                    "skip B1/Q{verify_width}: profile {} does not advertise it",
+                    capabilities.profile
+                );
+                continue;
+            }
+            for mode in [
+                DFlash2TargetForwardMode::GreedyVerify,
+                DFlash2TargetForwardMode::SampledVerify,
+            ] {
+                let cap = 32;
+                let mut ordinary_cache = model
+                    .make_cache(1, cap, model.cache_dtype())
+                    .expect("ordinary cache");
+                let mut dflash_cache = model
+                    .make_cache(1, cap, model.cache_dtype())
+                    .expect("DFlash2 cache");
+                let prefill: Array = (&[100_u32, 200, 300][..], &[1_i32, 3][..])
+                    .try_into()
+                    .expect("prefill ids");
+                let prefill_positions = build_position_ids(0, 3).expect("prefill positions");
+                model
+                    .forward_on(
+                        &prefill,
+                        &prefill_positions,
+                        None,
+                        None,
+                        Some(&mut ordinary_cache),
+                        (),
+                    )
+                    .expect("ordinary prefill");
+                model
+                    .dflash2_forward_target_on(
+                        &prefill,
+                        &prefill_positions,
+                        Some(&mut dflash_cache),
+                        &target_layers,
+                        DFlash2TargetForwardMode::Prefill,
+                        ().into(),
+                    )
+                    .expect("DFlash2 prefill");
+
+                let verify_ids = &verify_seed[..verify_width];
+                let mut ordinary_logits = Vec::with_capacity(verify_width);
+                for (index, &token) in verify_ids.iter().enumerate() {
+                    let input: Array = (&[token][..], &[1_i32, 1][..])
+                        .try_into()
+                        .expect("ordinary verify input");
+                    let positions =
+                        build_position_ids(3 + index as i32, 1).expect("verify position");
+                    ordinary_logits.push(
+                        model
+                            .forward_on(
+                                &input,
+                                &positions,
+                                None,
+                                None,
+                                Some(&mut ordinary_cache),
+                                (),
+                            )
+                            .expect("ordinary Q1 verify"),
+                    );
+                }
+                let ordinary_refs = ordinary_logits.iter().collect::<Vec<_>>();
+                let ordinary_logits = mlx::ops::shape::concatenate(&ordinary_refs, 1)
+                    .expect("concatenate ordinary logits");
+                let verify: Array = (verify_ids, &[1_i32, verify_width as i32][..])
+                    .try_into()
+                    .expect("DFlash2 verify ids");
+                let verify_positions =
+                    build_position_ids(3, verify_width as i32).expect("DFlash2 verify positions");
+                let dflash_verify = model
+                    .dflash2_forward_target_on(
+                        &verify,
+                        &verify_positions,
+                        Some(&mut dflash_cache),
+                        &target_layers,
+                        mode,
+                        ().into(),
+                    )
+                    .expect("DFlash2 verify");
+                let dflash_logits = model
+                    .dflash2_project_hidden_on(&dflash_verify.hidden, ().into())
+                    .expect("DFlash2 verify projection");
+                mlx::transforms::eval(&[&ordinary_logits, &dflash_logits])
+                    .expect("evaluate verify logits");
+                assert_array_exact(
+                    &ordinary_logits,
+                    &dflash_logits,
+                    &format!("{mode:?} B1/Q{verify_width} full-chain verify"),
+                );
+
+                let continuation: Array = (&[1_200_u32][..], &[1_i32, 1][..])
+                    .try_into()
+                    .expect("continuation input");
+                let continuation_position =
+                    build_position_ids(3 + verify_width as i32, 1).expect("continuation position");
+                let ordinary_continuation = model
+                    .forward_on(
+                        &continuation,
+                        &continuation_position,
+                        None,
+                        None,
+                        Some(&mut ordinary_cache),
+                        (),
+                    )
+                    .expect("ordinary continuation");
+                let dflash_continuation = model
+                    .dflash2_forward_target_on(
+                        &continuation,
+                        &continuation_position,
+                        Some(&mut dflash_cache),
+                        &target_layers,
+                        DFlash2TargetForwardMode::OrdinaryDecode,
+                        ().into(),
+                    )
+                    .and_then(|output| model.dflash2_project_hidden_on(&output.hidden, ().into()))
+                    .expect("DFlash2 continuation");
+                mlx::transforms::eval(&[&ordinary_continuation, &dflash_continuation])
+                    .expect("evaluate continuation logits");
+                assert_array_exact(
+                    &ordinary_continuation,
+                    &dflash_continuation,
+                    &format!("{mode:?} B1/Q{verify_width} accepted-state continuation"),
+                );
+            }
+        }
     }
 
     fn repeat_rank3_row(row: &Array, batch: i32) -> Array {

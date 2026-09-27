@@ -1148,9 +1148,31 @@ where
     M: Model + DenseVlMethods + ironmlx_lm::models::dflash2::DFlash2Target + Send + 'static,
 {
     let model = Arc::new(Mutex::new(model));
-    let (mut meta, dflash2_cache_cost) = {
+    let (
+        mut meta,
+        dflash2_cache_cost,
+        initial_draft_budget,
+        target_execution_fingerprint,
+        verify_profile,
+    ) = {
         let guard = model.lock().await;
-        (guard.model_meta(), guard.dflash2_target_cache_cost())
+        let capabilities = guard.dflash2_verify_capabilities();
+        let initial_draft_budget = capabilities
+            .max_draft_tokens(1)
+            .unwrap_or(0)
+            .min(block_size.saturating_sub(1));
+        anyhow::ensure!(
+            initial_draft_budget > 0,
+            "DFlash2 verify profile {} has no certified B1 speculative width",
+            capabilities.profile
+        );
+        (
+            guard.model_meta(),
+            guard.dflash2_target_cache_cost(),
+            initial_draft_budget,
+            guard.dflash2_execution_fingerprint(),
+            capabilities.profile,
+        )
     };
     meta.weight_bytes =
         effective_model_weight_bytes(meta.weight_bytes, static_memory_estimate.total_cold_bytes());
@@ -1180,6 +1202,9 @@ where
             budget_state,
             cache_cost: dflash2_cache_cost,
             prefix_cache_max_bytes: prefix_cache.map(|config| config.max_bytes),
+            initial_draft_budget,
+            target_execution_fingerprint,
+            verify_profile,
         },
         Arc::clone(&cold_materialization_tracker),
     );
@@ -1209,6 +1234,12 @@ where
             dflash2_handle.drafted_tokens.clone(),
             dflash2_handle.accepted_draft_tokens.clone(),
             dflash2_handle.rollback_count.clone(),
+            dflash2_handle.ordinary_windows.clone(),
+            dflash2_handle.draft_budget_changes.clone(),
+            dflash2_handle.current_draft_budget.clone(),
+            dflash2_handle.latest_adaptive_acceptance_ewma_bits.clone(),
+            dflash2_handle.verify_profile.clone(),
+            dflash2_handle.prefix_fingerprint.clone(),
             dflash2_handle.tensor_batch_windows.clone(),
             dflash2_handle.tensor_batch_divergent_splits.clone(),
             dflash2_handle.tensor_batch_groups_created.clone(),
@@ -1220,6 +1251,16 @@ where
             dflash2_handle.exact_residual_corrections.clone(),
             dflash2_handle.exact_bonus_samples.clone(),
             dflash2_handle.sampling_us.clone(),
+            dflash2_handle.draft_build_us.clone(),
+            dflash2_handle.draft_schedule_us.clone(),
+            dflash2_handle.verify_build_us.clone(),
+            dflash2_handle.projection_build_us.clone(),
+            dflash2_handle.verify_schedule_us.clone(),
+            dflash2_handle.host_sync_us.clone(),
+            dflash2_handle.rollback_us.clone(),
+            dflash2_handle.window_us.clone(),
+            dflash2_handle.prefill_us.clone(),
+            dflash2_handle.generation_us.clone(),
             dflash2_handle.latest_generation_tps_bits.clone(),
             dflash2_handle.latest_acceptance_rate_bits.clone(),
             dflash2_handle.peak_memory_bytes.clone(),

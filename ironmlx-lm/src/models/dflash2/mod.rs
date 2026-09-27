@@ -72,6 +72,114 @@ pub struct DFlash2TargetCacheCost {
     pub fixed_bytes_per_sequence: usize,
 }
 
+/// One target verification shape whose row-wise logits and state transitions
+/// are certified against ordinary Q=1 decoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DFlash2VerifyShape {
+    pub batch_width: usize,
+    pub verify_width: usize,
+}
+
+/// Target-side contract consumed by the DFlash2 scheduler. Keeping the
+/// qualification matrix next to the target implementation prevents the actor
+/// from inferring numerical safety from a configured block size alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DFlash2VerifyCapabilities {
+    pub profile: String,
+    pub row_bit_exact_qmm: bool,
+    pub row_bit_exact_attention: bool,
+    pub transactional_state_restore: bool,
+    pub supported_shapes: Vec<DFlash2VerifyShape>,
+}
+
+impl DFlash2VerifyCapabilities {
+    pub fn supports(&self, batch_width: usize, verify_width: usize) -> bool {
+        verify_width == 1
+            || self.supported_shapes.contains(&DFlash2VerifyShape {
+                batch_width,
+                verify_width,
+            })
+    }
+
+    pub fn stable_fingerprint(&self) -> String {
+        let mut supported_shapes = self.supported_shapes.clone();
+        supported_shapes.sort_by_key(|shape| (shape.batch_width, shape.verify_width));
+        let shapes = supported_shapes
+            .iter()
+            .map(|shape| format!("b{}q{}", shape.batch_width, shape.verify_width))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "profile={};qmm={};attention={};state={};shapes={shapes}",
+            self.profile,
+            self.row_bit_exact_qmm,
+            self.row_bit_exact_attention,
+            self.transactional_state_restore
+        )
+    }
+
+    pub fn max_draft_tokens(&self, batch_width: usize) -> Option<usize> {
+        self.supported_shapes
+            .iter()
+            .filter(|shape| shape.batch_width == batch_width)
+            .map(|shape| shape.verify_width.saturating_sub(1))
+            .max()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DFlash2VerifyExecution {
+    OrdinaryDecode,
+    Speculative,
+}
+
+/// Explicit execution plan for one DFlash2 target window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DFlash2VerifyPlan {
+    pub execution: DFlash2VerifyExecution,
+    pub batch_width: usize,
+    pub draft_tokens: usize,
+    pub verify_width: usize,
+}
+
+impl DFlash2VerifyPlan {
+    pub fn build(
+        capabilities: &DFlash2VerifyCapabilities,
+        batch_width: usize,
+        draft_tokens: usize,
+    ) -> Result<Self> {
+        anyhow::ensure!(
+            batch_width > 0,
+            "DFlash2 verify batch width must be positive"
+        );
+        let verify_width = draft_tokens.saturating_add(1);
+        if draft_tokens > 0 {
+            anyhow::ensure!(
+                capabilities.row_bit_exact_qmm
+                    && capabilities.row_bit_exact_attention
+                    && capabilities.transactional_state_restore,
+                "DFlash2 verify profile {} does not provide the full row-exact execution contract",
+                capabilities.profile
+            );
+        }
+        anyhow::ensure!(
+            capabilities.supports(batch_width, verify_width),
+            "DFlash2 verify profile {} does not certify B{batch_width}/Q{verify_width}",
+            capabilities.profile
+        );
+        Ok(Self {
+            execution: if draft_tokens == 0 {
+                DFlash2VerifyExecution::OrdinaryDecode
+            } else {
+                DFlash2VerifyExecution::Speculative
+            },
+            batch_width,
+            draft_tokens,
+            verify_width,
+        })
+    }
+}
+
 impl DFlash2TargetCacheCost {
     pub fn request_bytes(self, token_cap: usize) -> usize {
         token_cap
@@ -84,6 +192,9 @@ impl DFlash2TargetCacheCost {
 pub enum DFlash2TargetForwardMode {
     /// Prompt ingestion; no speculative verify routing is active.
     Prefill,
+    /// One-token target-only decode used as the measured control path when
+    /// speculative drafting is not currently profitable.
+    OrdinaryDecode,
     /// Qualified batched greedy verify used by the P3 execution path.
     GreedyVerify,
     /// Position-stable target logits required by exact speculative sampling.
@@ -92,7 +203,7 @@ pub enum DFlash2TargetForwardMode {
 
 impl DFlash2TargetForwardMode {
     pub(crate) fn is_verify(self) -> bool {
-        self != Self::Prefill
+        matches!(self, Self::GreedyVerify | Self::SampledVerify)
     }
 
     pub(crate) fn requires_position_stability(self) -> bool {
@@ -107,6 +218,10 @@ impl DFlash2TargetForwardMode {
 /// proposal distribution.
 pub trait DFlash2Target: crate::core::Model {
     fn dflash2_target_cache_cost(&self) -> DFlash2TargetCacheCost;
+
+    fn dflash2_verify_capabilities(&self) -> DFlash2VerifyCapabilities;
+
+    fn dflash2_execution_fingerprint(&self) -> String;
 
     fn dflash2_embed_on(&self, input_ids: &Array, target: StreamOrDevice) -> Result<Array>;
 
@@ -144,12 +259,17 @@ pub use config::{DFlash2Parameters, DFlash2RopeParameters};
 
 #[cfg(test)]
 mod tests {
-    use super::DFlash2TargetForwardMode;
+    use super::{
+        DFlash2TargetForwardMode, DFlash2VerifyCapabilities, DFlash2VerifyExecution,
+        DFlash2VerifyPlan, DFlash2VerifyShape,
+    };
 
     #[test]
     fn every_verify_mode_requires_position_stability() {
         assert!(!DFlash2TargetForwardMode::Prefill.is_verify());
         assert!(!DFlash2TargetForwardMode::Prefill.requires_position_stability());
+        assert!(!DFlash2TargetForwardMode::OrdinaryDecode.is_verify());
+        assert!(!DFlash2TargetForwardMode::OrdinaryDecode.requires_position_stability());
 
         for mode in [
             DFlash2TargetForwardMode::GreedyVerify,
@@ -158,5 +278,35 @@ mod tests {
             assert!(mode.is_verify());
             assert!(mode.requires_position_stability());
         }
+    }
+
+    #[test]
+    fn verify_plan_requires_a_certified_shape_but_always_allows_q1() {
+        let capabilities = DFlash2VerifyCapabilities {
+            profile: "test".into(),
+            row_bit_exact_qmm: true,
+            row_bit_exact_attention: true,
+            transactional_state_restore: true,
+            supported_shapes: vec![DFlash2VerifyShape {
+                batch_width: 2,
+                verify_width: 4,
+            }],
+        };
+        let ordinary = DFlash2VerifyPlan::build(&capabilities, 7, 0).unwrap();
+        assert_eq!(ordinary.execution, DFlash2VerifyExecution::OrdinaryDecode);
+        assert_eq!(ordinary.verify_width, 1);
+        assert!(DFlash2VerifyPlan::build(&capabilities, 2, 3).is_ok());
+        assert!(DFlash2VerifyPlan::build(&capabilities, 2, 4).is_err());
+        assert_eq!(
+            capabilities.stable_fingerprint(),
+            "profile=test;qmm=true;attention=true;state=true;shapes=b2q4"
+        );
+
+        let mut incomplete = capabilities;
+        incomplete.transactional_state_restore = false;
+        assert!(DFlash2VerifyPlan::build(&incomplete, 2, 3).is_err());
+        assert!(DFlash2VerifyPlan::build(&incomplete, 7, 0).is_ok());
+        assert_eq!(incomplete.max_draft_tokens(2), Some(3));
+        assert_eq!(incomplete.max_draft_tokens(1), None);
     }
 }

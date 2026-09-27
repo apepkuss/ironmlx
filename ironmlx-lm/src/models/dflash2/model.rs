@@ -408,7 +408,7 @@ mod tests {
     fn qwen38_dflash2_b2_b4_kernel_spike_is_row_exact_and_reports_timings() {
         use crate::core::model_input::build_position_ids;
         use crate::core::Loader;
-        use crate::models::dflash2::{DFlash2Target, DFlash2TargetForwardMode};
+        use crate::models::dflash2::{DFlash2Target, DFlash2TargetForwardMode, DFlash2VerifyPlan};
         use crate::models::Qwen35Model;
 
         let target_dir = std::env::var("QWEN38_MODEL").expect("QWEN38_MODEL not set");
@@ -528,6 +528,89 @@ mod tests {
         let positions_b2 = mlx::ops::shape::broadcast_to(&positions_b1, &[3_i32, batch, 4_i32][..])
             .expect("B2 verify positions");
         let target_layers = &draft.config().dflash_config.target_layer_ids;
+
+        // Certify every production lane width advertised by the loaded target.
+        // Q8 is expected for affine4; affine8 intentionally stops at Q4.
+        let capabilities = target.dflash2_verify_capabilities();
+        let verify_seed = [101_u32, 102, 103, 104, 105, 106, 107, 108];
+        for verify_width in [2_usize, 4, 8] {
+            if DFlash2VerifyPlan::build(&capabilities, batch_b4 as usize, verify_width - 1).is_err()
+            {
+                continue;
+            }
+            let verify_b1: Array = (
+                &verify_seed[..verify_width],
+                &[1_i32, verify_width as i32][..],
+            )
+                .try_into()
+                .expect("B1 lane verify input");
+            let verify_bn = repeat_batch(&verify_b1, batch_b4);
+            let positions_b1 =
+                build_position_ids(0, verify_width as i32).expect("B1 lane verify positions");
+            let positions_bn = mlx::ops::shape::broadcast_to(
+                &positions_b1,
+                &[3_i32, batch_b4, verify_width as i32][..],
+            )
+            .expect("BN lane verify positions");
+            for mode in [
+                DFlash2TargetForwardMode::GreedyVerify,
+                DFlash2TargetForwardMode::SampledVerify,
+            ] {
+                let reference = target
+                    .dflash2_forward_target_on(
+                        &verify_b1,
+                        &positions_b1,
+                        None,
+                        target_layers,
+                        mode,
+                        StreamOrDevice::default(),
+                    )
+                    .expect("B1 lane target verify");
+                let candidate = target
+                    .dflash2_forward_target_on(
+                        &verify_bn,
+                        &positions_bn,
+                        None,
+                        target_layers,
+                        mode,
+                        StreamOrDevice::default(),
+                    )
+                    .expect("BN lane target verify");
+                let reference_logits = target
+                    .dflash2_project_hidden_on(&reference.hidden, StreamOrDevice::default())
+                    .expect("B1 lane projection");
+                let candidate_logits = target
+                    .dflash2_project_hidden_on(&candidate.hidden, StreamOrDevice::default())
+                    .expect("BN lane projection");
+                mlx::transforms::eval(&[
+                    &reference.hidden,
+                    &reference.context_hidden,
+                    &reference_logits,
+                    &candidate.hidden,
+                    &candidate.context_hidden,
+                    &candidate_logits,
+                ])
+                .expect("evaluate lane certification");
+                for row in 0..batch_b4 {
+                    let label = format!("{mode:?} B{batch_b4}/Q{verify_width} row {row}");
+                    assert_array_exact(
+                        &reference.hidden,
+                        &slice_batch_row(&candidate.hidden, row),
+                        &format!("{label} hidden"),
+                    );
+                    assert_array_exact(
+                        &reference.context_hidden,
+                        &slice_batch_row(&candidate.context_hidden, row),
+                        &format!("{label} context"),
+                    );
+                    assert_array_exact(
+                        &reference_logits,
+                        &slice_batch_row(&candidate_logits, row),
+                        &format!("{label} logits"),
+                    );
+                }
+            }
+        }
 
         let run_target_b1_pair = |mode| {
             let first = target

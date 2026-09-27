@@ -154,12 +154,26 @@ struct DFlash2ActorCounters {
     drafted_tokens: Arc<AtomicU64>,
     accepted_draft_tokens: Arc<AtomicU64>,
     rollback_count: Arc<AtomicU64>,
+    ordinary_windows: Arc<AtomicU64>,
+    draft_budget_changes: Arc<AtomicU64>,
+    current_draft_budget: Arc<AtomicUsize>,
+    latest_adaptive_acceptance_ewma_bits: Arc<AtomicU64>,
     sampled_requests: Arc<AtomicU64>,
     exact_sampling_windows: Arc<AtomicU64>,
     exact_acceptance_draws: Arc<AtomicU64>,
     exact_residual_corrections: Arc<AtomicU64>,
     exact_bonus_samples: Arc<AtomicU64>,
     sampling_us: Arc<AtomicU64>,
+    draft_build_us: Arc<AtomicU64>,
+    draft_schedule_us: Arc<AtomicU64>,
+    verify_build_us: Arc<AtomicU64>,
+    projection_build_us: Arc<AtomicU64>,
+    verify_schedule_us: Arc<AtomicU64>,
+    host_sync_us: Arc<AtomicU64>,
+    rollback_us: Arc<AtomicU64>,
+    window_us: Arc<AtomicU64>,
+    prefill_us: Arc<AtomicU64>,
+    generation_us: Arc<AtomicU64>,
     latest_generation_tps_bits: Arc<AtomicU64>,
     latest_acceptance_rate_bits: Arc<AtomicU64>,
     peak_memory_bytes: Arc<AtomicUsize>,
@@ -175,6 +189,16 @@ impl DFlash2ActorCounters {
             .fetch_add(metrics.accepted_draft_tokens as u64, Ordering::Relaxed);
         self.rollback_count
             .fetch_add(metrics.rollback_count as u64, Ordering::Relaxed);
+        self.ordinary_windows
+            .fetch_add(metrics.ordinary_windows as u64, Ordering::Relaxed);
+        self.draft_budget_changes
+            .fetch_add(metrics.draft_budget_changes as u64, Ordering::Relaxed);
+        self.current_draft_budget
+            .store(metrics.current_draft_budget, Ordering::Relaxed);
+        self.latest_adaptive_acceptance_ewma_bits.store(
+            metrics.adaptive_acceptance_ewma.unwrap_or(0.0).to_bits(),
+            Ordering::Relaxed,
+        );
         if metrics.sampled {
             self.sampled_requests.fetch_add(1, Ordering::Relaxed);
         }
@@ -188,6 +212,20 @@ impl DFlash2ActorCounters {
             .fetch_add(metrics.exact_bonus_samples as u64, Ordering::Relaxed);
         self.sampling_us
             .fetch_add(metrics.sampling_us, Ordering::Relaxed);
+        for (counter, value) in [
+            (&self.draft_build_us, metrics.draft_build_us),
+            (&self.draft_schedule_us, metrics.draft_schedule_us),
+            (&self.verify_build_us, metrics.verify_build_us),
+            (&self.projection_build_us, metrics.projection_build_us),
+            (&self.verify_schedule_us, metrics.verify_schedule_us),
+            (&self.host_sync_us, metrics.host_sync_us),
+            (&self.rollback_us, metrics.rollback_us),
+            (&self.window_us, metrics.window_us),
+            (&self.prefill_us, metrics.prefill_us),
+            (&self.generation_us, metrics.generation_us),
+        ] {
+            counter.fetch_add(value, Ordering::Relaxed);
+        }
         self.latest_generation_tps_bits
             .store(metrics.generation_tps.to_bits(), Ordering::Relaxed);
         self.latest_acceptance_rate_bits
@@ -240,6 +278,9 @@ pub(crate) struct DFlash2ActorConfig {
     pub(crate) budget_state: BudgetState,
     pub(crate) cache_cost: DFlash2TargetCacheCost,
     pub(crate) prefix_cache_max_bytes: Option<usize>,
+    pub(crate) initial_draft_budget: usize,
+    pub(crate) target_execution_fingerprint: String,
+    pub(crate) verify_profile: String,
 }
 
 #[derive(Clone)]
@@ -264,6 +305,10 @@ pub struct DFlash2ActorHandle {
     pub(crate) drafted_tokens: Arc<AtomicU64>,
     pub(crate) accepted_draft_tokens: Arc<AtomicU64>,
     pub(crate) rollback_count: Arc<AtomicU64>,
+    pub(crate) ordinary_windows: Arc<AtomicU64>,
+    pub(crate) draft_budget_changes: Arc<AtomicU64>,
+    pub(crate) current_draft_budget: Arc<AtomicUsize>,
+    pub(crate) latest_adaptive_acceptance_ewma_bits: Arc<AtomicU64>,
     pub(crate) tensor_batch_windows: Arc<AtomicU64>,
     pub(crate) tensor_batch_divergent_splits: Arc<AtomicU64>,
     pub(crate) tensor_batch_groups_created: Arc<AtomicU64>,
@@ -275,6 +320,18 @@ pub struct DFlash2ActorHandle {
     pub(crate) exact_residual_corrections: Arc<AtomicU64>,
     pub(crate) exact_bonus_samples: Arc<AtomicU64>,
     pub(crate) sampling_us: Arc<AtomicU64>,
+    pub(crate) draft_build_us: Arc<AtomicU64>,
+    pub(crate) draft_schedule_us: Arc<AtomicU64>,
+    pub(crate) verify_build_us: Arc<AtomicU64>,
+    pub(crate) projection_build_us: Arc<AtomicU64>,
+    pub(crate) verify_schedule_us: Arc<AtomicU64>,
+    pub(crate) host_sync_us: Arc<AtomicU64>,
+    pub(crate) rollback_us: Arc<AtomicU64>,
+    pub(crate) window_us: Arc<AtomicU64>,
+    pub(crate) prefill_us: Arc<AtomicU64>,
+    pub(crate) generation_us: Arc<AtomicU64>,
+    pub(crate) verify_profile: String,
+    pub(crate) prefix_fingerprint: String,
     pub(crate) latest_generation_tps_bits: Arc<AtomicU64>,
     pub(crate) latest_acceptance_rate_bits: Arc<AtomicU64>,
     pub(crate) peak_memory_bytes: Arc<AtomicUsize>,
@@ -379,6 +436,9 @@ where
         budget_state,
         cache_cost,
         prefix_cache_max_bytes,
+        initial_draft_budget,
+        target_execution_fingerprint,
+        verify_profile,
     } = config;
     assert!(b_max > 0, "DFlash2 actor requires b_max > 0");
     assert!(
@@ -403,6 +463,10 @@ where
     let drafted_tokens = Arc::new(AtomicU64::new(0));
     let accepted_draft_tokens = Arc::new(AtomicU64::new(0));
     let rollback_count = Arc::new(AtomicU64::new(0));
+    let ordinary_windows = Arc::new(AtomicU64::new(0));
+    let draft_budget_changes = Arc::new(AtomicU64::new(0));
+    let current_draft_budget = Arc::new(AtomicUsize::new(initial_draft_budget));
+    let latest_adaptive_acceptance_ewma_bits = Arc::new(AtomicU64::new(0_f64.to_bits()));
     let tensor_batch_windows = Arc::new(AtomicU64::new(0));
     let tensor_batch_divergent_splits = Arc::new(AtomicU64::new(0));
     let tensor_batch_groups_created = Arc::new(AtomicU64::new(0));
@@ -413,6 +477,16 @@ where
     let exact_residual_corrections = Arc::new(AtomicU64::new(0));
     let exact_bonus_samples = Arc::new(AtomicU64::new(0));
     let sampling_us = Arc::new(AtomicU64::new(0));
+    let draft_build_us = Arc::new(AtomicU64::new(0));
+    let draft_schedule_us = Arc::new(AtomicU64::new(0));
+    let verify_build_us = Arc::new(AtomicU64::new(0));
+    let projection_build_us = Arc::new(AtomicU64::new(0));
+    let verify_schedule_us = Arc::new(AtomicU64::new(0));
+    let host_sync_us = Arc::new(AtomicU64::new(0));
+    let rollback_us = Arc::new(AtomicU64::new(0));
+    let window_us = Arc::new(AtomicU64::new(0));
+    let prefill_us = Arc::new(AtomicU64::new(0));
+    let generation_us = Arc::new(AtomicU64::new(0));
     let latest_generation_tps_bits = Arc::new(AtomicU64::new(0_f64.to_bits()));
     let latest_acceptance_rate_bits = Arc::new(AtomicU64::new(0_f64.to_bits()));
     let peak_memory_bytes = Arc::new(AtomicUsize::new(0));
@@ -435,7 +509,9 @@ where
     let runtime_usage = Arc::new(crate::core::runtime_usage::ModelRuntimeUsageCounters::default());
     let worker_runtime_usage = Arc::clone(&runtime_usage);
     let prefix_fingerprint = format!(
-        "dflash2-prefix-v1:draft-dtype={};draft-hidden={};draft-layer-count={};target-layers={:?};sliding-window={};block-size={}",
+        "dflash2-prefix-v2:ironmlx={};backend=mlx;kernel-contract=row-exact-v1;prefill=scheduler-b1-chunk-v1;target={};draft-dtype={};draft-hidden={};draft-layer-count={};target-layers={:?};sliding-window={};block-size={}",
+        env!("CARGO_PKG_VERSION"),
+        target_execution_fingerprint,
         draft.config().dtype,
         draft.config().hidden_size,
         draft.config().num_hidden_layers,
@@ -443,6 +519,7 @@ where
         draft.config().sliding_window,
         block_size,
     );
+    let health_prefix_fingerprint = prefix_fingerprint.clone();
     let worker_in_flight = Arc::clone(&in_flight);
     let worker_active = Arc::clone(&b_active);
     let worker_queued = Arc::clone(&b_queued);
@@ -458,12 +535,26 @@ where
         drafted_tokens: Arc::clone(&drafted_tokens),
         accepted_draft_tokens: Arc::clone(&accepted_draft_tokens),
         rollback_count: Arc::clone(&rollback_count),
+        ordinary_windows: Arc::clone(&ordinary_windows),
+        draft_budget_changes: Arc::clone(&draft_budget_changes),
+        current_draft_budget: Arc::clone(&current_draft_budget),
+        latest_adaptive_acceptance_ewma_bits: Arc::clone(&latest_adaptive_acceptance_ewma_bits),
         sampled_requests: Arc::clone(&sampled_requests),
         exact_sampling_windows: Arc::clone(&exact_sampling_windows),
         exact_acceptance_draws: Arc::clone(&exact_acceptance_draws),
         exact_residual_corrections: Arc::clone(&exact_residual_corrections),
         exact_bonus_samples: Arc::clone(&exact_bonus_samples),
         sampling_us: Arc::clone(&sampling_us),
+        draft_build_us: Arc::clone(&draft_build_us),
+        draft_schedule_us: Arc::clone(&draft_schedule_us),
+        verify_build_us: Arc::clone(&verify_build_us),
+        projection_build_us: Arc::clone(&projection_build_us),
+        verify_schedule_us: Arc::clone(&verify_schedule_us),
+        host_sync_us: Arc::clone(&host_sync_us),
+        rollback_us: Arc::clone(&rollback_us),
+        window_us: Arc::clone(&window_us),
+        prefill_us: Arc::clone(&prefill_us),
+        generation_us: Arc::clone(&generation_us),
         latest_generation_tps_bits: Arc::clone(&latest_generation_tps_bits),
         latest_acceptance_rate_bits: Arc::clone(&latest_acceptance_rate_bits),
         peak_memory_bytes: Arc::clone(&peak_memory_bytes),
@@ -942,7 +1033,30 @@ where
                     continue;
                 }
                 let group_key = keys[positions[0]];
-                if group_key.is_some() && positions.iter().all(|&index| keys[index] == group_key) {
+                if group_key.is_some_and(|key| key.is_ordinary_decode()) {
+                    let mut streams = match tensor_group_streams_mut(&mut active, &positions) {
+                        Ok(streams) => streams,
+                        Err(error) => {
+                            let error = format!("{error:#}");
+                            for &index in &positions {
+                                outcomes[index].finished = true;
+                                outcomes[index].failure = Some(error.clone());
+                            }
+                            continue;
+                        }
+                    };
+                    if let Err(error) = group.cache.scatter_to_rows(&mut streams) {
+                        let error = format!("{error:#}");
+                        for &index in &positions {
+                            outcomes[index].finished = true;
+                            outcomes[index].failure = Some(error.clone());
+                        }
+                    }
+                    continue;
+                }
+                if group_key.is_some_and(|key| key.supports_batch_width(positions.len()))
+                    && positions.iter().all(|&index| keys[index] == group_key)
+                {
                     for &index in &positions {
                         claimed[index] = true;
                     }
@@ -1021,8 +1135,22 @@ where
                 }
             }
             for compatible_indices in ready.values() {
-                for indices in compatible_indices.chunks(tensor_batch_max_width) {
-                    let result = if indices.len() >= 2 {
+                let mut offset = 0_usize;
+                while offset < compatible_indices.len() {
+                    let first_index = compatible_indices[offset];
+                    let key = keys[first_index].expect("ready DFlash2 row has a batch key");
+                    let chunk_limit = tensor_batch_max_width.min(compatible_indices.len() - offset);
+                    let chunk_width = key.largest_supported_batch_width(chunk_limit);
+                    let indices = &compatible_indices[offset..offset + chunk_width];
+                    offset += chunk_width;
+                    let ordinary_decode =
+                        keys[indices[0]].is_some_and(|key| key.is_ordinary_decode());
+                    let result = if ordinary_decode {
+                        indices
+                            .iter()
+                            .copied()
+                            .try_for_each(|index| active[index].stream.fill_deferred_window_b1())
+                    } else if indices.len() >= 2 {
                         let request_ids = indices
                             .iter()
                             .map(|&index| active[index].request_id)
@@ -1156,6 +1284,10 @@ where
         drafted_tokens,
         accepted_draft_tokens,
         rollback_count,
+        ordinary_windows,
+        draft_budget_changes,
+        current_draft_budget,
+        latest_adaptive_acceptance_ewma_bits,
         tensor_batch_windows,
         tensor_batch_divergent_splits,
         tensor_batch_groups_created,
@@ -1167,6 +1299,18 @@ where
         exact_residual_corrections,
         exact_bonus_samples,
         sampling_us,
+        draft_build_us,
+        draft_schedule_us,
+        verify_build_us,
+        projection_build_us,
+        verify_schedule_us,
+        host_sync_us,
+        rollback_us,
+        window_us,
+        prefill_us,
+        generation_us,
+        verify_profile,
+        prefix_fingerprint: health_prefix_fingerprint,
         latest_generation_tps_bits,
         latest_acceptance_rate_bits,
         peak_memory_bytes,

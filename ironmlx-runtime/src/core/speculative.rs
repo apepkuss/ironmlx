@@ -812,6 +812,39 @@ impl MtpDraftPolicyWindow {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_measured_components(
+        attempted_draft_tokens: usize,
+        accepted_draft_tokens: usize,
+        committed_tokens: usize,
+        total_us: u64,
+        context_tokens: usize,
+        batch_width: usize,
+        draft_forward_us: u64,
+        verify_forward_us: u64,
+        projection_us: u64,
+        sampling_us: u64,
+        host_sync_us: u64,
+        rollback_us: u64,
+    ) -> Self {
+        Self {
+            attempted_draft_tokens,
+            accepted_draft_tokens,
+            committed_tokens,
+            total_us,
+            context_tokens,
+            batch_width,
+            kv_state: MtpDraftPolicyKvState::Contiguous,
+            draft_forward_us,
+            verify_forward_us,
+            projection_us,
+            sampling_us,
+            verify_accept_host_sync_us: host_sync_us,
+            main_rollback_us: rollback_us,
+            ..Self::default()
+        }
+    }
+
     fn measured_components_us(self) -> u64 {
         self.draft_forward_us
             .saturating_add(self.verify_forward_us)
@@ -1440,6 +1473,10 @@ impl QwenMtpDraftPolicyState {
         self.current_budget.min(self.max_draft_tokens)
     }
 
+    pub(crate) fn acceptance_ewma(&self) -> Option<f64> {
+        self.acceptance_ewma
+    }
+
     pub(crate) fn should_maintain_mtp_cache(&self) -> bool {
         self.current_budget() > 0 || self.probe_budget.is_some()
     }
@@ -1516,6 +1553,16 @@ impl QwenMtpDraftPolicyState {
         if qwen_fixed_mtp_draft_depth_is_armed() {
             return MtpDraftBudgetChange::default();
         }
+        self.observe_external_window(window)
+    }
+
+    /// Reuse the cost-aware Qwen policy for another exact speculative engine.
+    /// The MTP-only benchmark override intentionally does not affect callers of
+    /// this entry point.
+    pub(crate) fn observe_external_window(
+        &mut self,
+        window: MtpDraftPolicyWindow,
+    ) -> MtpDraftBudgetChange {
         let regime = window.regime();
         let long_context = matches!(
             regime.context_bucket,
@@ -3099,6 +3146,21 @@ mod tests {
         let change = policy.observe_window(rejected);
         assert!(change.reduced);
         assert_eq!(policy.current_budget(), 1);
+    }
+
+    #[test]
+    fn qwen_external_policy_reuses_cost_adaptation_independently_of_mtp_override() {
+        let mut policy = QwenMtpDraftPolicyState::new(2);
+        let rejected = MtpDraftPolicyWindow::from_measured_components(
+            2, 0, 1, 1_000, 1_024, 1, 200, 600, 50, 50, 50, 50,
+        );
+        let _fixed = qwen_fixed_mtp_draft_depth_scope();
+
+        let change = policy.observe_external_window(rejected);
+
+        assert!(change.reduced);
+        assert_eq!(policy.current_budget(), 1);
+        assert_eq!(policy.acceptance_ewma(), Some(0.0));
     }
 
     #[test]
