@@ -58,9 +58,15 @@ pub(crate) fn layer_submit_interval(
     cfg: &Qwen35Config,
     profile: ExactBatchedVerifyProfile,
     mode: DFlash2TargetForwardMode,
+    batch_width: usize,
     verify_width: usize,
 ) -> Option<usize> {
-    if !mode.is_verify() || verify_width <= 1 {
+    // B=1 has no independent row graph for the CPU to build while Metal
+    // executes the submitted chunk.  On that path the extra submission
+    // boundaries only fragment one dependency chain; measured short-context
+    // B=1 verification regressed materially.  Tensor-batched verification
+    // does have independent row work and benefits from keeping the GPU fed.
+    if !mode.is_verify() || batch_width <= 1 || verify_width <= 1 {
         return None;
     }
     kernel_pack(cfg, profile).map(|pack| pack.layer_submit_interval)
@@ -122,6 +128,7 @@ mod tests {
                 &cfg,
                 ExactBatchedVerifyProfile::Affine4,
                 DFlash2TargetForwardMode::GreedyVerify,
+                2,
                 8,
             ),
             Some(4)
@@ -131,6 +138,7 @@ mod tests {
                 &cfg,
                 ExactBatchedVerifyProfile::Affine4,
                 DFlash2TargetForwardMode::Prefill,
+                2,
                 8,
             ),
             None
@@ -140,7 +148,18 @@ mod tests {
                 &cfg,
                 ExactBatchedVerifyProfile::Affine4,
                 DFlash2TargetForwardMode::OrdinaryDecode,
+                2,
                 1,
+            ),
+            None
+        );
+        assert_eq!(
+            layer_submit_interval(
+                &cfg,
+                ExactBatchedVerifyProfile::Affine4,
+                DFlash2TargetForwardMode::GreedyVerify,
+                1,
+                8,
             ),
             None
         );

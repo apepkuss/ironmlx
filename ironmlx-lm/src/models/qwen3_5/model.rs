@@ -1243,6 +1243,7 @@ impl crate::models::dflash2::DFlash2Target for Qwen35Model {
             self.config(),
             self.exact_batched_verify_profile,
             mode,
+            usize::try_from(input_ids.shape().as_slice()[0])?,
             verify_width,
         );
         let (hidden, context_hidden) = self.text.forward_with_dflash2_taps_on(
