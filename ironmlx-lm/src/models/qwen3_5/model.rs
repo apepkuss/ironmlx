@@ -1201,7 +1201,7 @@ impl crate::models::dflash2::DFlash2Target for Qwen35Model {
                 .then(crate::nn::batch_stable_qmm::context_scope);
         if is_verify
             && verify_width > 1
-            && !crate::models::qwen3_5::speculative::dflash2_exact_batched_verify_shape_qualified(
+            && !crate::models::qwen3_5::speculative::dflash2_exact_batched_verify_shape_executable(
                 self.exact_batched_verify_profile,
                 batch_width,
                 verify_width,

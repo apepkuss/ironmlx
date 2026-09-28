@@ -61,6 +61,7 @@ fn make_request(
     stop_token_ids: Vec<u32>,
 ) -> GenerateRequest {
     GenerateRequest {
+        priority: Default::default(),
         prompt_ids,
         max_new_tokens,
         sampler: Sampler::greedy(),

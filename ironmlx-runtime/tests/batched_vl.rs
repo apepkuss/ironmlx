@@ -128,6 +128,7 @@ fn run_b1_baseline(
     max_new_tokens: usize,
 ) -> Vec<u32> {
     let request = GenerateRequest {
+        priority: Default::default(),
         prompt_ids,
         max_new_tokens,
         sampler: Sampler::greedy(),
@@ -228,6 +229,7 @@ async fn batched_vl_b2_full_vl_bit_id() {
     let cmd_tx = handle.cmd_tx.clone();
 
     let req_a = GenerateRequest {
+        priority: Default::default(),
         prompt_ids: prompt_a,
         max_new_tokens: max_new,
         sampler: Sampler::greedy(),
@@ -251,6 +253,7 @@ async fn batched_vl_b2_full_vl_bit_id() {
         .expect("admit A");
 
     let req_b = GenerateRequest {
+        priority: Default::default(),
         prompt_ids: prompt_b,
         max_new_tokens: max_new,
         sampler: Sampler::greedy(),
@@ -386,6 +389,7 @@ async fn batched_vl_b2_mixed_text_and_vl() {
     let cmd_tx = handle.cmd_tx.clone();
 
     let req_text = GenerateRequest {
+        priority: Default::default(),
         prompt_ids: prompt_text,
         max_new_tokens: max_new,
         sampler: Sampler::greedy(),
@@ -409,6 +413,7 @@ async fn batched_vl_b2_mixed_text_and_vl() {
         .unwrap();
 
     let req_vl = GenerateRequest {
+        priority: Default::default(),
         prompt_ids: prompt_vl,
         max_new_tokens: max_new,
         sampler: Sampler::greedy(),
@@ -556,6 +561,7 @@ async fn mid_admit_vl_during_text_decode() {
     cmd_tx
         .send(SchedulerCommand::Admit {
             request: GenerateRequest {
+                priority: Default::default(),
                 prompt_ids: prompt_text_a,
                 max_new_tokens: max_new,
                 sampler: Sampler::greedy(),
@@ -578,6 +584,7 @@ async fn mid_admit_vl_during_text_decode() {
     cmd_tx
         .send(SchedulerCommand::Admit {
             request: GenerateRequest {
+                priority: Default::default(),
                 prompt_ids: prompt_text_b,
                 max_new_tokens: max_new,
                 sampler: Sampler::greedy(),
@@ -617,6 +624,7 @@ async fn mid_admit_vl_during_text_decode() {
     cmd_tx
         .send(SchedulerCommand::Admit {
             request: GenerateRequest {
+                priority: Default::default(),
                 prompt_ids: prompt_vl,
                 max_new_tokens: max_new,
                 sampler: Sampler::greedy(),
@@ -793,6 +801,7 @@ async fn batched_vl_multi_image_per_row() {
     cmd_tx
         .send(SchedulerCommand::Admit {
             request: GenerateRequest {
+                priority: Default::default(),
                 prompt_ids: prompt_0,
                 max_new_tokens: max_new,
                 sampler: Sampler::greedy(),
@@ -815,6 +824,7 @@ async fn batched_vl_multi_image_per_row() {
     cmd_tx
         .send(SchedulerCommand::Admit {
             request: GenerateRequest {
+                priority: Default::default(),
                 prompt_ids: prompt_1,
                 max_new_tokens: max_new,
                 sampler: Sampler::greedy(),

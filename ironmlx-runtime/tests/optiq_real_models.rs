@@ -147,6 +147,7 @@ fn assert_short_text_generation<M: Model>(model: &M, tokenizer: &Tokenizer) {
     assert!(!prompt_ids.is_empty());
 
     let request = GenerateRequest {
+        priority: Default::default(),
         prompt_ids,
         max_new_tokens: 1,
         sampler: Sampler::greedy(),

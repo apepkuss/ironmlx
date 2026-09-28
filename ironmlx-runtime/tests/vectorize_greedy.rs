@@ -46,6 +46,7 @@ fn tokenize_prompt(tokenizer: &Tokenizer, text: &str) -> Vec<u32> {
 
 fn make_request(prompt_ids: Vec<u32>, max_new: usize, stop_token_ids: Vec<u32>) -> GenerateRequest {
     GenerateRequest {
+        priority: Default::default(),
         prompt_ids,
         max_new_tokens: max_new,
         sampler: Sampler::greedy(),

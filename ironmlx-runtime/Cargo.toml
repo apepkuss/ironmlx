@@ -42,3 +42,13 @@ serial_test = { version = "3", default-features = false }
 name = "ironmlx-core-bench"
 path = "src/bin/ironmlx-core-bench.rs"
 required-features = ["tools"]
+
+[[bin]]
+name = "dflash2-q8-q16-qualification"
+path = "src/bin/dflash2-q8-q16-qualification.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "dflash2-batched-q8-q16-gate"
+path = "src/bin/dflash2-batched-q8-q16-gate.rs"
+required-features = ["tools"]

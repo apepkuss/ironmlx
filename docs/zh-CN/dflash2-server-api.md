@@ -102,6 +102,26 @@ DFlash2 server 使用独立 actor，不进入普通 Scheduler、MTP 或 Prompt L
 服务返回 HTTP 503、稳定错误码 `scheduler_queue_full` 和 `Retry-After: 5`。流式客户
 端断连后，请求在当前 forward 完成后的下一个安全边界释放 cache 与活动槽。
 
+## 前台与后台优先级
+
+Chat Completions 与 Responses 请求可通过 `service_tier: "flex"` 标记标题生成、摘要、
+warmup 等低优先级工作。省略 tier 以及 `auto`、`default` 都是前台。前台请求到达后，
+活动中的 flex 请求会在当前 decode/verify 轮次结束时暂停。actor 在内存中保留 target/draft
+cache、sampler、PRNG、已接受 token 历史与 tensor 状态；恢复时不重放 prompt，也不重启请求。
+没有活动或排队的前台工作后，暂停请求按 FIFO 恢复。
+
+DFlash2 服务的每个请求都经过支持优先级的 actor，因此以上契约适用于所有 DFlash2 Chat
+Completions 与 Responses 请求。这是 IronMLX 对 OpenAI 兼容字段的本地调度语义映射，不代表
+实现了托管平台的计费、SLA、项目层级或独立容量池语义。IronMLX 接受 `auto`、`default` 与
+`flex`；其他 tier 值均被拒绝。
+
+优先级只改变延迟调度，不绕过内存准入。暂停请求继续占有已计费 cache 内存；真实驻留集
+无法容纳新请求时，内存 governor 仍可拒绝准入。Responses 的 `background: true` 仍不支持，
+因为它表示需要服务端存储的异步作业，而不是调度优先级。
+
+`healthz.scheduler.background_paused` 是实时暂停数；`background_preemptions` 与
+`background_resumes` 是累计计数。
+
 ## Sampling
 
 Greedy 和非 Greedy 请求都使用 DFlash2 verify。GreedyVerify 保持与普通 Q=1 解码
@@ -179,6 +199,7 @@ HTTP transport、严格字段校验、错误 envelope 与断连语义见
 }
 ```
 
-`scheduler.b_max`、`scheduler.b_active` 和 `scheduler.b_queued` 分别表示 actor 配置的
-活动上限、当前活动请求和排队请求。性能字段用于现场观测，不能脱离硬件、prompt、
+`scheduler.b_max`、`scheduler.b_active`、`scheduler.b_queued` 和
+`scheduler.background_paused` 分别表示 actor 配置的活动上限、当前活动请求、排队请求与
+内存中暂停的 flex 请求。性能字段用于现场观测，不能脱离硬件、prompt、
 接受率和采样配置作为通用性能承诺。

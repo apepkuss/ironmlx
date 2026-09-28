@@ -87,6 +87,7 @@ async fn b1_p2_5_admission_gate_rejects_when_full() {
     let prompt = tokenizer.encode("Hello", false).unwrap();
     let stop_tokens = tokenizer.eos_token_ids().to_vec();
     let make = || GenerateRequest {
+        priority: Default::default(),
         prompt_ids: prompt.clone(),
         max_new_tokens: 512,
         sampler: Sampler::greedy(),

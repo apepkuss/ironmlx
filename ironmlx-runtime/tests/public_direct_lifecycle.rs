@@ -70,6 +70,7 @@ async fn consumer_early_exit_releases_direct_worker_model_lock() {
     .unwrap();
     let model = state.model.clone();
     let request = GenerateRequest {
+        priority: Default::default(),
         prompt_ids: vec![1],
         max_new_tokens: 2,
         ..ironmlx_runtime::test_support::mk_req(1)

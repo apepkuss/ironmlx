@@ -69,6 +69,32 @@ The optional tree builds a best-first candidate lattice capped at 15 nodes, batc
 
 When slots fill, requests wait in the admission queue. A full queue returns HTTP 503, `scheduler_queue_full`, and `Retry-After: 5`. Streaming disconnect releases caches and slots at the next safe boundary after the current forward.
 
+## Foreground and background priority
+
+Chat Completions and Responses requests may set `service_tier: "flex"` for
+low-priority title generation, summaries, warmups, and similar work. Omitted
+tiers plus `auto` and `default` are foreground. A foreground arrival causes an
+active flex request to pause after its current decode/verify round. The actor
+keeps the target/draft cache, sampler, PRNG, accepted-token history, and tensor
+state in memory; it does not replay the prompt or restart the request. Paused
+work resumes FIFO when no foreground request is active or queued.
+
+DFlash2 serving routes every request through its priority-aware actor, so this
+contract applies to every DFlash2 Chat Completions and Responses request. This
+is an IronMLX-local scheduling interpretation of the OpenAI-compatible field,
+not an implementation of hosted billing, SLA, project-tier, or capacity-pool
+semantics. IronMLX accepts `auto`, `default`, and `flex`; other tier values are
+rejected.
+
+Priority changes latency scheduling, not memory admission. A paused request
+continues to own its charged cache memory, so the memory governor may still
+reject new work when the real resident set cannot fit it. `background: true`
+in the Responses API remains unsupported because that field requests a stored
+asynchronous job, not scheduling priority.
+
+`healthz.scheduler.background_paused` is the live paused count;
+`background_preemptions` and `background_resumes` are cumulative counters.
+
 ## Sampling
 
 Both greedy and sampled requests use DFlash2 verification. GreedyVerify preserves byte-for-byte equality with ordinary Q=1 decoding. SampledVerify uses exact speculative sampling: probabilistic acceptance, rejection residuals, bonus tokens and per-request reproducible PRNG state.
@@ -123,4 +149,4 @@ The path rejects MTP, Prompt Lookup, KV quantization, paged/persistent prefix ca
 }
 ```
 
-`scheduler.b_max`, `b_active` and `b_queued` represent actor capacity, active requests and queued requests. Interpret performance metrics with the hardware, prompt, acceptance rate and sampling settings.
+`scheduler.b_max`, `b_active`, `b_queued`, and `background_paused` represent actor capacity, active requests, queued requests, and in-memory paused flex requests. Interpret performance metrics with the hardware, prompt, acceptance rate and sampling settings.

@@ -240,6 +240,7 @@ fn build_generate_request<M: Model>(
     let prompt_ids = tokenizer.encode(&prompt, /* add_special_tokens = */ false)?;
 
     Ok(GenerateRequest {
+        priority: Default::default(),
         prompt_ids,
         max_new_tokens: args.max_tokens,
         sampler: build_sampler(args),

@@ -69,6 +69,7 @@ fn run_b1_baseline(
     stop_token_ids: Vec<u32>,
 ) -> Vec<u32> {
     let req = GenerateRequest {
+        priority: Default::default(),
         prompt_ids,
         max_new_tokens,
         sampler: Sampler::greedy(),
@@ -150,6 +151,7 @@ fn b1_p2_3b_1_b2_happy() {
 
     let id_a = sched
         .admit(GenerateRequest {
+            priority: Default::default(),
             prompt_ids: prompt_a_ids.clone(),
             max_new_tokens,
             sampler: Sampler::greedy(),
@@ -166,6 +168,7 @@ fn b1_p2_3b_1_b2_happy() {
         .expect("admit A");
     let id_b = sched
         .admit(GenerateRequest {
+            priority: Default::default(),
             prompt_ids: prompt_b_ids.clone(),
             max_new_tokens,
             sampler: Sampler::greedy(),
@@ -249,6 +252,7 @@ fn b1_p2_3b_1_b2_happy() {
 
     let id_c = sched
         .admit(GenerateRequest {
+            priority: Default::default(),
             prompt_ids: prompt_a_ids,
             max_new_tokens: 4,
             sampler: Sampler::greedy(),
@@ -334,6 +338,7 @@ fn b1_p2_3b_1_b4_happy() {
         .map(|p| {
             sched
                 .admit(GenerateRequest {
+                    priority: Default::default(),
                     prompt_ids: p.clone(),
                     max_new_tokens,
                     sampler: Sampler::greedy(),
@@ -436,6 +441,7 @@ fn b1_p2_3b_1_mixed_finish() {
     let mut sched = Scheduler::new(2, 32768, model.model_meta()).expect("scheduler startup");
     let id_a = sched
         .admit(GenerateRequest {
+            priority: Default::default(),
             prompt_ids: prompt_ids.clone(),
             max_new_tokens: max_a,
             sampler: Sampler::greedy(),
@@ -452,6 +458,7 @@ fn b1_p2_3b_1_mixed_finish() {
         .expect("admit A");
     let id_b = sched
         .admit(GenerateRequest {
+            priority: Default::default(),
             prompt_ids: prompt_ids.clone(),
             max_new_tokens: max_b,
             sampler: Sampler::greedy(),

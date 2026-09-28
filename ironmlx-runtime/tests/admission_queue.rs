@@ -70,6 +70,7 @@ fn make_req_with_stop(
         .unwrap();
     let prompt_ids = tokenizer.encode(&rendered, false).unwrap();
     GenerateRequest {
+        priority: Default::default(),
         prompt_ids,
         max_new_tokens: max_new,
         sampler: Sampler::greedy(),

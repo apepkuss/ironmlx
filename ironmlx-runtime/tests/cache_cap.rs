@@ -81,6 +81,7 @@ async fn admit_long_prompt_pp10k() {
 
     let max_new = 20_usize;
     let req = GenerateRequest {
+        priority: Default::default(),
         prompt_ids,
         max_new_tokens: max_new,
         sampler: Sampler::greedy(),

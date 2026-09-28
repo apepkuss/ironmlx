@@ -887,6 +887,9 @@ pub struct Gemma4DrafterAdmitMidHandle {
 pub struct RequestState {
     /// Opaque token returned by [`Scheduler::admit`].
     pub id: RequestId,
+    /// Decode scheduling importance. Background rows may be removed from the
+    /// execution layout at a round boundary while foreground work is active.
+    pub priority: crate::core::generation_types::RequestPriority,
     /// Position in the scheduler's slot vector (0..b_max). Fixed for the
     /// lifetime of this request — subsequent admits never relocate it.
     /// Used by 3b to index into the batched KV cache and per-row mask
@@ -969,6 +972,41 @@ pub struct ActiveKvParkedRequest {
     cache_dtype: Dtype,
     prompt_lookup_row: Option<SchedulerPromptLookupRowState>,
     mtp_row: Option<ActiveKvParkedMtpRowState>,
+}
+
+/// A background request removed from the model-facing execution layout while
+/// foreground work runs. Unlike Active KV offload this remains entirely
+/// in-memory: cache tensors and all speculative side state stay materialized,
+/// so resuming does not replay the prompt or restart generation.
+pub struct PausedBackgroundRequest {
+    id: RequestId,
+    entry: PagedPrefixEntry,
+    cached_len: i32,
+    state: RequestState,
+    prng_key: [u32; 2],
+    cache_cap: i32,
+    cache_dtype: Dtype,
+    prompt_lookup_row: Option<SchedulerPromptLookupRowState>,
+    mtp_row: Option<(
+        MtpSpeculativeConfig,
+        MtpSpeculativeStats,
+        SchedulerMtpRowState,
+    )>,
+    gemma4_drafter_row: Option<(
+        MtpSpeculativeConfig,
+        MtpSpeculativeStats,
+        SchedulerGemma4DrafterRowState,
+    )>,
+}
+
+impl PausedBackgroundRequest {
+    pub fn id(&self) -> RequestId {
+        self.id
+    }
+
+    pub fn kv_bytes_admitted(&self) -> usize {
+        self.state.kv_bytes_admitted
+    }
 }
 
 /// Read pre-write per-row offsets from the first cache layer that tracks
@@ -2205,6 +2243,7 @@ fn update_prefix_fingerprint_str(hash: &mut u64, value: &str) {
 
 fn generate_request_from_state(state: &RequestState) -> Result<GenerateRequest> {
     Ok(GenerateRequest {
+        priority: state.priority,
         prompt_ids: state.prompt_ids.clone(),
         max_new_tokens: state.max_new_tokens,
         sampler: state.sampler,
@@ -2249,6 +2288,7 @@ fn generate_neural_rebase_request_from_state(state: &RequestState) -> Result<Gen
         "neural rebase requires at least one remaining token"
     );
     Ok(GenerateRequest {
+        priority: state.priority,
         prompt_ids,
         max_new_tokens,
         sampler: state.sampler,
@@ -5128,6 +5168,10 @@ pub struct Scheduler<M: Model> {
     /// Runtime memory budget tracker. Charged at admit; released on slot
     /// clear. Also holds the soft_limit for admission gating. (B1-p2.5)
     pub(crate) budget_state: crate::core::memory_budget::BudgetState,
+    /// Resident KV retained by paused background requests. Foreground admits
+    /// may use this as a logical replacement allowance while the process
+    /// memory governor still checks the real overlapping allocation.
+    background_priority_budget_allowance: usize,
     /// Snapshot of the model's memory-budget metadata, used to compute
     /// per-request KV byte cost in admit. (B1-p2.5)
     pub(crate) meta: ironmlx_lm::core::model::ModelMeta,
@@ -5257,6 +5301,7 @@ impl<M: Model> Scheduler<M> {
             effective_cap_max,
             prng_state,
             budget_state,
+            background_priority_budget_allowance: 0,
             meta,
             memory_budget_exceeded_count,
             paged_prefix_cache: None,
@@ -5643,6 +5688,251 @@ impl<M: Model> Scheduler<M> {
             }
         }
         stats.set_residency_summary(summary);
+    }
+
+    pub fn has_foreground_request(&self) -> bool {
+        self.slots.iter().flatten().any(|state| {
+            !state.finished
+                && state.priority == crate::core::generation_types::RequestPriority::Foreground
+        })
+    }
+
+    pub fn background_request_ids(&self) -> Vec<RequestId> {
+        self.slots
+            .iter()
+            .flatten()
+            .filter(|state| {
+                !state.finished
+                    && state.priority == crate::core::generation_types::RequestPriority::Background
+            })
+            .map(|state| state.id)
+            .collect()
+    }
+
+    /// Remove one background request from the current decode batch while
+    /// retaining its exact in-memory continuation state.
+    pub fn pause_background_request(
+        &mut self,
+        id: RequestId,
+        model: &M,
+    ) -> Result<PausedBackgroundRequest> {
+        self.ensure_not_poisoned()?;
+        anyhow::ensure!(
+            self.phase == Phase::Decoding,
+            "background pause requires Decoding phase, got {:?}",
+            self.phase
+        );
+        let row_idx = self
+            .slots
+            .iter()
+            .position(|slot| matches!(slot, Some(state) if state.id == id))
+            .ok_or_else(|| anyhow!("background request id {} not found", id.0))?;
+        let state = self.slots[row_idx]
+            .as_ref()
+            .expect("row_idx found an occupied slot");
+        anyhow::ensure!(
+            state.priority == crate::core::generation_types::RequestPriority::Background,
+            "request id {} is not background priority",
+            id.0
+        );
+        anyhow::ensure!(
+            !state.finished && !state.generated_tokens.is_empty(),
+            "background request id {} is not at a resumable decode boundary",
+            id.0
+        );
+        let cache = self
+            .cache
+            .as_ref()
+            .ok_or_else(|| anyhow!("background pause requires an active cache"))?;
+        let cache_row = self
+            .cache_rows
+            .iter()
+            .position(|&row| row == row_idx)
+            .ok_or_else(|| anyhow!("background request row {row_idx} is absent from cache"))?;
+        let (entry, cached_len) = prefix_entry_for_row(cache, cache_row)?
+            .ok_or_else(|| anyhow!("background request row {row_idx} has no cache payload"))?;
+        entry.eval()?;
+        let (cache_cap, cache_dtype) = cache_cap_and_dtype(cache)?;
+        let prng_key = self.prng_key_for_row(row_idx)?;
+        let active_rows = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(row, slot)| {
+                (row != row_idx
+                    && matches!(
+                        slot,
+                        Some(state) if !state.finished && !state.generated_tokens.is_empty()
+                    ))
+                .then_some(row)
+            })
+            .collect::<Vec<_>>();
+        self.rebuild_cache_layout(model, &active_rows)?;
+        if let Some(table) = self.request_block_tables.remove(&id) {
+            if let Some(cache) = self.cache.as_mut() {
+                release_full_paged_cache_owner(cache, table.owner)?;
+            }
+        }
+        let prompt_lookup_row = self
+            .prompt_lookup_state
+            .as_mut()
+            .and_then(|state| state.rows.remove(&row_idx));
+        if let Some(state) = self.prompt_lookup_state.as_mut() {
+            Self::refresh_prompt_lookup_index_stats(state);
+        }
+        let mtp_row = self.mtp_state.as_mut().and_then(|state| {
+            state
+                .rows
+                .remove(&row_idx)
+                .map(|row| (state.cfg, state.stats.clone(), row))
+        });
+        let gemma4_drafter_row = self.gemma4_drafter_state.as_mut().and_then(|state| {
+            state
+                .rows
+                .remove(&row_idx)
+                .map(|row| (state.cfg, state.stats.clone(), row))
+        });
+        let state = self.slots[row_idx]
+            .take()
+            .expect("background row remained occupied through layout rebuild");
+        if self.active_count() == 0 {
+            self.phase = Phase::Idle;
+        }
+        Ok(PausedBackgroundRequest {
+            id,
+            entry,
+            cached_len,
+            state,
+            prng_key,
+            cache_cap,
+            cache_dtype,
+            prompt_lookup_row,
+            mtp_row,
+            gemma4_drafter_row,
+        })
+    }
+
+    /// Restore one paused background request without replaying its prompt.
+    /// The paused value remains intact when restoration fails, allowing the
+    /// actor to retry after foreground work releases capacity.
+    pub fn restore_background_request(
+        &mut self,
+        paused: &mut PausedBackgroundRequest,
+        model: &M,
+    ) -> Result<RequestId> {
+        self.ensure_not_poisoned()?;
+        anyhow::ensure!(
+            self.slots
+                .iter()
+                .all(|slot| !matches!(slot, Some(state) if state.id == paused.id)),
+            "background request id {} is already active",
+            paused.id.0
+        );
+        let row_idx = self
+            .slots
+            .iter()
+            .position(Option::is_none)
+            .ok_or_else(|| anyhow!("background resume: scheduler full"))?;
+        if let Some(row) = paused.prompt_lookup_row.as_ref() {
+            anyhow::ensure!(
+                self.prompt_lookup_state
+                    .as_ref()
+                    .is_none_or(|state| state.cfg == row.cfg),
+                "background resume prompt lookup config mismatch"
+            );
+        }
+        if let Some((cfg, _, _)) = paused.mtp_row.as_ref() {
+            anyhow::ensure!(
+                self.mtp_state
+                    .as_ref()
+                    .is_none_or(|state| state.cfg == *cfg),
+                "background resume MTP config mismatch"
+            );
+        }
+        if let Some((cfg, _, _)) = paused.gemma4_drafter_row.as_ref() {
+            anyhow::ensure!(
+                self.gemma4_drafter_state
+                    .as_ref()
+                    .is_none_or(|state| state.cfg == *cfg),
+                "background resume Gemma4 drafter config mismatch"
+            );
+        }
+        let mut state = paused.state.clone();
+        state.row_idx = row_idx;
+        self.slots[row_idx] = Some(state);
+        self.request_block_tables
+            .insert(paused.id, RequestBlockTable::new(paused.id));
+        let install_result = self
+            .install_active_kv_payload(
+                row_idx,
+                &paused.entry,
+                paused.cached_len,
+                paused.cache_cap,
+                paused.cache_dtype,
+                model,
+            )
+            .and_then(|_| self.write_row_prng_host(row_idx, paused.prng_key));
+        if let Err(error) = install_result {
+            self.request_block_tables.remove(&paused.id);
+            self.slots[row_idx] = None;
+            let target_rows = self
+                .slots
+                .iter()
+                .enumerate()
+                .filter_map(|(row, slot)| slot.as_ref().map(|_| row))
+                .collect::<Vec<_>>();
+            if let Err(cleanup_error) = self.rebuild_cache_layout(model, &target_rows) {
+                self.poisoned = true;
+                return Err(anyhow!(
+                    "background resume failed: {error:#}; cache rollback failed: {cleanup_error:#}"
+                ));
+            }
+            return Err(error);
+        }
+        if let Some(row) = paused.prompt_lookup_row.take() {
+            let cfg = row.cfg;
+            self.prompt_lookup_state
+                .get_or_insert_with(|| SchedulerPromptLookupState {
+                    cfg,
+                    rows: HashMap::new(),
+                    stats: PromptLookupStats::default(),
+                })
+                .rows
+                .insert(row_idx, row);
+            if let Some(state) = self.prompt_lookup_state.as_mut() {
+                Self::refresh_prompt_lookup_index_stats(state);
+            }
+        }
+        if let Some((cfg, stats, row)) = paused.mtp_row.take() {
+            self.mtp_state
+                .get_or_insert_with(|| SchedulerMtpState {
+                    cfg,
+                    rows: HashMap::new(),
+                    stats,
+                })
+                .rows
+                .insert(row_idx, row);
+        }
+        if let Some((cfg, stats, row)) = paused.gemma4_drafter_row.take() {
+            self.gemma4_drafter_state
+                .get_or_insert_with(|| SchedulerGemma4DrafterState {
+                    cfg,
+                    rows: HashMap::new(),
+                    stats,
+                })
+                .rows
+                .insert(row_idx, row);
+        }
+        self.phase = Phase::Decoding;
+        Ok(paused.id)
+    }
+
+    pub fn discard_paused_background_request(&mut self, paused: PausedBackgroundRequest) {
+        self.budget_state.release(paused.state.kv_bytes_admitted);
+    }
+
+    pub fn set_background_priority_budget_allowance(&mut self, allowance: usize) {
+        self.background_priority_budget_allowance = allowance;
     }
 
     pub fn discard_active_kv_request(&self, parked: &ActiveKvParkedRequest) -> Result<()> {
@@ -6594,7 +6884,15 @@ impl<M: Model> Scheduler<M> {
         let charged_cap = self.budget_state.resident_charge_cap(row_cap);
         let requested_bytes =
             crate::core::memory_budget::kv_cache_bytes(1, charged_cap, &self.meta);
-        if let Err((active, requested, soft_limit)) = self.budget_state.try_admit(requested_bytes) {
+        let allowance = if req.priority.is_background() {
+            0
+        } else {
+            self.background_priority_budget_allowance
+        };
+        if let Err((active, requested, soft_limit)) = self
+            .budget_state
+            .try_admit_with_allowance(requested_bytes, allowance)
+        {
             self.memory_budget_exceeded_count
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return Err(anyhow::Error::new(SchedulerError::MemoryBudgetExceeded {
@@ -6649,6 +6947,7 @@ impl<M: Model> Scheduler<M> {
             .transpose()?;
         let state = RequestState {
             id,
+            priority: req.priority,
             row_idx,
             prompt_ids: req.prompt_ids,
             generated_tokens: Vec::new(),
@@ -20343,6 +20642,7 @@ mod tests {
     /// `Sampler::greedy()` and an arbitrary 4-token prompt unless overridden.
     fn mk_req(prompt_ids: Vec<u32>) -> GenerateRequest {
         GenerateRequest {
+            priority: Default::default(),
             prompt_ids,
             max_new_tokens: 16,
             sampler: Sampler::greedy(),
@@ -26558,6 +26858,108 @@ mod tests {
 
     #[test]
     #[serial(mlx_metal)]
+    fn background_pause_preserves_exact_in_memory_continuation() {
+        let model = StepDecodeMaskModel::default();
+        let mut baseline = Scheduler::<StepDecodeMaskModel>::new(
+            2,
+            64,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("baseline scheduler startup");
+        let mut background_request = mk_req(vec![1, 2, 3, 4]);
+        background_request.priority = crate::core::generation_types::RequestPriority::Background;
+        let baseline_id = baseline
+            .admit(background_request.clone())
+            .expect("baseline background admit");
+        baseline
+            .prefill_admitted(&model)
+            .expect("baseline background prefill");
+        baseline.step(&model).expect("baseline first decode");
+        baseline.step(&model).expect("baseline second decode");
+        let expected_tokens = baseline
+            .get(baseline_id)
+            .expect("baseline state")
+            .generated_tokens
+            .clone();
+
+        let mut scheduler = Scheduler::<StepDecodeMaskModel>::new(
+            2,
+            64,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        let background_id = scheduler
+            .admit(background_request)
+            .expect("background admit");
+        scheduler
+            .prefill_admitted(&model)
+            .expect("background prefill");
+        scheduler.step(&model).expect("background first decode");
+        let budget_before_pause = scheduler.budget_state.active_bytes();
+
+        let mut paused = scheduler
+            .pause_background_request(background_id, &model)
+            .expect("pause background at round boundary");
+        assert_eq!(paused.id(), background_id);
+        assert_eq!(scheduler.active_count(), 0);
+        assert_eq!(scheduler.phase(), Phase::Idle);
+        assert_eq!(scheduler.budget_state.active_bytes(), budget_before_pause);
+
+        let foreground_id = scheduler
+            .admit(mk_req(vec![9, 8, 7]))
+            .expect("foreground admit while background paused");
+        scheduler
+            .prefill_admitted(&model)
+            .expect("foreground prefill");
+        assert!(scheduler.has_foreground_request());
+        scheduler
+            .evict(foreground_id)
+            .expect("remove completed foreground fixture");
+
+        assert_eq!(
+            scheduler
+                .restore_background_request(&mut paused, &model)
+                .expect("restore background without prompt replay"),
+            background_id
+        );
+        assert!(!scheduler.has_foreground_request());
+        scheduler.step(&model).expect("background second decode");
+        assert_eq!(
+            scheduler
+                .get(background_id)
+                .expect("restored background state")
+                .generated_tokens,
+            expected_tokens
+        );
+        assert_eq!(scheduler.budget_state.active_bytes(), budget_before_pause);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn discarded_paused_background_releases_retained_budget() {
+        let model = StepDecodeMaskModel::default();
+        let mut scheduler = Scheduler::<StepDecodeMaskModel>::new(
+            1,
+            64,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        let mut request = mk_req(vec![1, 2, 3]);
+        request.priority = crate::core::generation_types::RequestPriority::Background;
+        let id = scheduler.admit(request).expect("background admit");
+        scheduler.prefill_admitted(&model).expect("prefill");
+        let paused = scheduler
+            .pause_background_request(id, &model)
+            .expect("pause background");
+        assert!(scheduler.budget_state.active_bytes() > 0);
+
+        scheduler.discard_paused_background_request(paused);
+
+        assert_eq!(scheduler.budget_state.active_bytes(), 0);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
     fn active_kv_offload_parks_and_restores_mtp_speculative_side_state() {
         let model = ScriptedMtpSchedulerModel::new(3, vec![4], vec![vec![4, 5]]);
         let root = std::env::temp_dir().join(format!(
@@ -28828,6 +29230,7 @@ mod tests {
             .expect("pixel_values");
         let pixel_values = mlx::ops::astype(&pixel_values, Dtype::Bfloat16).unwrap();
         let req = GenerateRequest {
+            priority: Default::default(),
             prompt_ids: vec![1, IMAGE_TOKEN_ID as u32, 2],
             max_new_tokens: 16,
             sampler: Sampler::greedy(),
@@ -28873,6 +29276,7 @@ mod tests {
             .expect("pixel_values");
         let pixel_values = mlx::ops::astype(&pixel_values, Dtype::Bfloat16).unwrap();
         let req = GenerateRequest {
+            priority: Default::default(),
             prompt_ids: vec![1, IMAGE_TOKEN_ID as u32, 2, IMAGE_TOKEN_ID as u32, 3],
             max_new_tokens: 16,
             sampler: Sampler::greedy(),
@@ -28919,6 +29323,7 @@ mod tests {
             .expect("pixel_values");
         let pixel_values = mlx::ops::astype(&pixel_values, Dtype::Bfloat16).unwrap();
         let mk_vl_req = |pixel_values: mlx::Array| GenerateRequest {
+            priority: Default::default(),
             prompt_ids: vec![1, IMAGE_TOKEN_ID as u32, 2],
             max_new_tokens: 16,
             sampler: Sampler::greedy(),
@@ -29419,6 +29824,7 @@ mod tests {
         let grids = vec![(1_i32, 4_i32, 4_i32)];
 
         let req = GenerateRequest {
+            priority: Default::default(),
             prompt_ids: vec![1, 2, 3, IMAGE_TOKEN_ID as u32, 4],
             max_new_tokens: 8,
             sampler: Sampler::greedy(),
@@ -29455,6 +29861,7 @@ mod tests {
             .expect("scheduler startup");
 
         let req = GenerateRequest {
+            priority: Default::default(),
             prompt_ids: vec![1, 2, 3],
             max_new_tokens: 8,
             sampler: ironmlx_core::sampler::Sampler::greedy(),
@@ -29495,6 +29902,7 @@ mod tests {
             .expect("scheduler startup");
 
         let oversize_req = GenerateRequest {
+            priority: Default::default(),
             prompt_ids: vec![0; 1500],
             max_new_tokens: 600,
             sampler: ironmlx_core::sampler::Sampler::greedy(),
@@ -29560,6 +29968,7 @@ mod tests {
             .expect("scheduler startup");
 
         let req = |prompt_len: usize, max_new: usize| GenerateRequest {
+            priority: Default::default(),
             prompt_ids: vec![0; prompt_len],
             max_new_tokens: max_new,
             sampler: ironmlx_core::sampler::Sampler::greedy(),

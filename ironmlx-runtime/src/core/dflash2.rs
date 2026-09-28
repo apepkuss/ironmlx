@@ -4,6 +4,8 @@
 //! state machine. The only shared piece is model-agnostic token resolution.
 
 use std::collections::VecDeque;
+#[cfg(feature = "tools")]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use anyhow::{anyhow, Context};
@@ -69,7 +71,83 @@ use {
     ironmlx_lm::models::dflash2::DFlash2TargetForwardMode,
     ironmlx_lm::models::dflash2::DFlash2VerifyCapabilities,
     ironmlx_lm::models::dflash2::DFlash2VerifyPlan,
+    ironmlx_lm::models::dflash2::DFlash2VerifyShape,
 };
+
+#[cfg(feature = "tools")]
+static BATCHED_Q16_QUALIFICATION_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Process-local capability guard used only by qualification binaries.
+///
+/// Production builds do not expose this type because they do not enable the
+/// `tools` feature. The single-owner guard also prevents unrelated engines in
+/// one qualification process from silently inheriting the experimental lane.
+#[cfg(feature = "tools")]
+#[must_use = "the guard must be retained for the qualification engine lifetime"]
+pub struct BatchedQ16QualificationGuard;
+
+#[cfg(feature = "tools")]
+impl Drop for BatchedQ16QualificationGuard {
+    fn drop(&mut self) {
+        BATCHED_Q16_QUALIFICATION_ENABLED.store(false, Ordering::Release);
+    }
+}
+
+#[cfg(feature = "tools")]
+pub fn enable_batched_q16_qualification() -> Result<BatchedQ16QualificationGuard> {
+    BATCHED_Q16_QUALIFICATION_ENABLED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .map_err(|_| anyhow!("DFlash2 B2/B4 Q16 qualification is already active"))?;
+    Ok(BatchedQ16QualificationGuard)
+}
+
+fn batched_q16_qualification_enabled() -> bool {
+    #[cfg(feature = "tools")]
+    {
+        BATCHED_Q16_QUALIFICATION_ENABLED.load(Ordering::Acquire)
+    }
+    #[cfg(not(feature = "tools"))]
+    {
+        false
+    }
+}
+
+fn qualification_verify_capabilities(
+    capabilities: DFlash2VerifyCapabilities,
+) -> Result<DFlash2VerifyCapabilities> {
+    extend_batched_q16_qualification_capabilities(capabilities, batched_q16_qualification_enabled())
+}
+
+fn extend_batched_q16_qualification_capabilities(
+    mut capabilities: DFlash2VerifyCapabilities,
+    enabled: bool,
+) -> Result<DFlash2VerifyCapabilities> {
+    if !enabled {
+        return Ok(capabilities);
+    }
+    let lane_pack = capabilities
+        .lane_kernel_pack
+        .as_ref()
+        .ok_or_else(|| anyhow!("DFlash2 B2/B4 Q16 qualification requires a lane kernel pack"))?;
+    anyhow::ensure!(
+        capabilities.profile == "qwen35-affine4" && lane_pack.quant_bits == 4,
+        "DFlash2 B2/B4 Q16 qualification requires the Qwen3.8 affine-4 profile"
+    );
+    for batch_width in 2..=4 {
+        for verify_width in 9..=16 {
+            if lane_pack.supports(batch_width, verify_width) {
+                let shape = DFlash2VerifyShape {
+                    batch_width,
+                    verify_width,
+                };
+                if !capabilities.supported_shapes.contains(&shape) {
+                    capabilities.supported_shapes.push(shape);
+                }
+            }
+        }
+    }
+    Ok(capabilities)
+}
 
 #[derive(Debug, Clone)]
 struct DFlash2PrefixArtifact {
@@ -721,7 +799,8 @@ where
             history.push(first_token);
             let mut pending_tokens = VecDeque::new();
             pending_tokens.push_back(first_token);
-            let verify_capabilities = model.dflash2_verify_capabilities();
+            let verify_capabilities =
+                qualification_verify_capabilities(model.dflash2_verify_capabilities())?;
             let max_draft_tokens = verify_capabilities
                 .max_draft_tokens(1)
                 .unwrap_or(0)
@@ -943,7 +1022,8 @@ where
         let mut pending_tokens = VecDeque::new();
         pending_tokens.push_back(first_token);
 
-        let verify_capabilities = model.dflash2_verify_capabilities();
+        let verify_capabilities =
+            qualification_verify_capabilities(model.dflash2_verify_capabilities())?;
         let max_draft_tokens = verify_capabilities
             .max_draft_tokens(1)
             .unwrap_or(0)
@@ -2878,6 +2958,7 @@ mod tests {
             ),
         ] {
             let request = GenerateRequest {
+                priority: Default::default(),
                 prompt_ids: vec![151_644, 872, 198, 3_838],
                 max_new_tokens: 64,
                 sampler,
@@ -2954,6 +3035,7 @@ mod tests {
         );
 
         let request = |sampler| GenerateRequest {
+            priority: Default::default(),
             prompt_ids: vec![151_644, 872, 198, 3_838],
             max_new_tokens: 64,
             sampler,
@@ -3105,6 +3187,7 @@ mod tests {
         let draft = DFlash2DraftModel::from_loader(&draft_loader, target.config(), Some(4))
             .expect("load runtime-quantized DFlash2 draft");
         let request = |prompt_ids: Vec<u32>| GenerateRequest {
+            priority: Default::default(),
             prompt_ids,
             max_new_tokens: 256,
             sampler: Sampler::greedy(),
@@ -3237,6 +3320,7 @@ mod tests {
             ),
         ] {
             let request = GenerateRequest {
+                priority: Default::default(),
                 prompt_ids: prompt_ids.clone(),
                 max_new_tokens,
                 sampler,
@@ -3443,6 +3527,42 @@ mod tests {
         }
         .validate()
         .is_err());
+    }
+
+    #[test]
+    fn qualification_tensor_q16_is_explicit_and_lane_bounded() {
+        use ironmlx_lm::models::dflash2::DFlash2LaneKernelPack;
+
+        let capabilities = DFlash2VerifyCapabilities {
+            profile: "qwen35-affine4".to_owned(),
+            row_bit_exact_qmm: true,
+            row_bit_exact_attention: true,
+            transactional_state_restore: true,
+            supported_shapes: vec![DFlash2VerifyShape {
+                batch_width: 2,
+                verify_width: 8,
+            }],
+            lane_kernel_pack: Some(DFlash2LaneKernelPack {
+                family: "qwen3.8-27b-dflash2".to_owned(),
+                revision: 1,
+                quant_bits: 4,
+                quant_group_size: 64,
+                max_lanes: 64,
+                prepared_layout: "test".to_owned(),
+                attention_layout: "test".to_owned(),
+                state_layout: "test".to_owned(),
+                layer_submit_interval: 4,
+            }),
+        };
+        let stable = extend_batched_q16_qualification_capabilities(capabilities.clone(), false)
+            .expect("stable capabilities");
+        assert!(!stable.supports(2, 16));
+
+        let qualification = extend_batched_q16_qualification_capabilities(capabilities, true)
+            .expect("qualification capabilities");
+        assert!(qualification.supports(2, 16));
+        assert!(qualification.supports(4, 16));
+        assert!(!qualification.supports(5, 16));
     }
 
     #[test]

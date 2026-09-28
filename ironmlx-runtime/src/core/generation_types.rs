@@ -5,8 +5,30 @@ use ironmlx_lm::core::cache::turboquant_kv::TurboQuantKVBits;
 use ironmlx_lm::core::constrained::ConstraintPlan;
 use mlx::Array;
 
+/// Scheduling importance for one inference request.
+///
+/// Foreground is the stable default. Background requests yield at decode
+/// round boundaries while foreground work is active, retaining their model,
+/// cache, sampler, and speculative state for a later resume.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RequestPriority {
+    Background,
+    #[default]
+    Foreground,
+}
+
+impl RequestPriority {
+    pub fn is_background(self) -> bool {
+        matches!(self, Self::Background)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct GenerateRequest {
+    /// Request scheduling importance. Foreground is the default interactive
+    /// path; background is intended for title generation, summaries, warmups,
+    /// and other work that may pause between decode rounds.
+    pub priority: RequestPriority,
     /// Tokenized prompt (after chat template rendering, if any).
     pub prompt_ids: Vec<u32>,
     /// Hard cap on tokens generated beyond the prompt.

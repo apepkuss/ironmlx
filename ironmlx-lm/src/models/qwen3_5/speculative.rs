@@ -148,6 +148,23 @@ pub(crate) fn dflash2_exact_batched_verify_shape_qualified(
     exact_batched_verify_shape_qualified(profile, batch_width, verify_width)
 }
 
+/// Shapes implemented by the Qwen3.8 lane pack but not necessarily exposed by
+/// the production qualification matrix. The runtime still has to opt into an
+/// unqualified shape explicitly before it can reach this execution boundary.
+pub(crate) fn dflash2_exact_batched_verify_shape_executable(
+    profile: ExactBatchedVerifyProfile,
+    batch_width: usize,
+    verify_width: usize,
+) -> bool {
+    dflash2_exact_batched_verify_shape_qualified(profile, batch_width, verify_width)
+        || (profile == ExactBatchedVerifyProfile::Affine4
+            && (2..=4).contains(&batch_width)
+            && (9..=16).contains(&verify_width)
+            && batch_width
+                .checked_mul(verify_width)
+                .is_some_and(|lanes| lanes <= 64))
+}
+
 pub(crate) fn sequential_prompt_lookup_verify_qualified(
     profile: ExactBatchedVerifyProfile,
     _context_tokens: usize,
@@ -363,6 +380,15 @@ mod tests {
         assert!(dflash2_exact_batched_verify_shape_qualified(affine4, 1, 16));
         assert!(!dflash2_exact_batched_verify_shape_qualified(
             affine4, 2, 16
+        ));
+        assert!(dflash2_exact_batched_verify_shape_executable(
+            affine4, 2, 16
+        ));
+        assert!(dflash2_exact_batched_verify_shape_executable(
+            affine4, 4, 16
+        ));
+        assert!(!dflash2_exact_batched_verify_shape_executable(
+            affine4, 5, 16
         ));
         assert!(!dflash2_exact_batched_verify_shape_qualified(
             affine4, 1, 17

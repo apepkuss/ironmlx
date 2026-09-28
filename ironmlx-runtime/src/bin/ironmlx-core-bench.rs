@@ -2359,6 +2359,7 @@ fn make_request<M: Model>(
     args: &Args,
 ) -> GenerateRequest {
     GenerateRequest {
+        priority: Default::default(),
         prompt_ids: prompt_ids.to_vec(),
         max_new_tokens: args.max_tokens,
         sampler: Sampler::greedy(),

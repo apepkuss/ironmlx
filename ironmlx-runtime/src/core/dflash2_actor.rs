@@ -17,7 +17,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use crate::core::dflash2::{
     DFlash2PrefixCache, DFlash2TensorBatchCache, DFlash2TextGenerationStream,
 };
-use crate::core::generation_types::{GenerateEvent, GenerateRequest};
+use crate::core::generation_types::{GenerateEvent, GenerateRequest, RequestPriority};
 use crate::core::memory_budget::BudgetState;
 use crate::core::scheduler::{RequestId, SchedulerError, StepEvent};
 use crate::core::scheduler_actor::AdmitReply;
@@ -34,6 +34,7 @@ where
     M: DFlash2Target,
 {
     request_id: RequestId,
+    priority: RequestPriority,
     event_tx: mpsc::UnboundedSender<StepEvent>,
     stream: DFlash2TextGenerationStream<'m, M>,
     _memory_charge: DFlash2MemoryCharge,
@@ -96,6 +97,22 @@ where
     Ok(streams)
 }
 
+fn scatter_all_tensor_groups<'m, M>(
+    active: &mut [ActiveDFlash2Request<'m, M>],
+    tensor_groups: &mut Vec<DFlash2TensorGroup>,
+) -> Result<()>
+where
+    M: DFlash2Target,
+{
+    while let Some(group) = tensor_groups.pop() {
+        let positions = tensor_group_positions(active, &group.request_ids)
+            .ok_or_else(|| anyhow::anyhow!("DFlash2 priority pause lost a tensor-group row"))?;
+        let mut streams = tensor_group_streams_mut(active, &positions)?;
+        group.cache.scatter_to_rows(&mut streams)?;
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 struct DFlash2MemoryCharge {
     budget_state: BudgetState,
@@ -118,11 +135,12 @@ fn reserve_dflash2_request_memory(
     budget_state: &BudgetState,
     cache_cost: DFlash2TargetCacheCost,
     token_cap: usize,
+    background_priority_allowance: usize,
     memory_budget_exceeded_count: &AtomicU64,
 ) -> Result<DFlash2MemoryCharge> {
     let requested_bytes = cache_cost.request_bytes(token_cap);
     if let Err((active_bytes, requested_bytes, soft_limit_bytes)) =
-        budget_state.try_admit(requested_bytes)
+        budget_state.try_admit_with_allowance(requested_bytes, background_priority_allowance)
     {
         memory_budget_exceeded_count.fetch_add(1, Ordering::Relaxed);
         return Err(anyhow::Error::new(SchedulerError::MemoryBudgetExceeded {
@@ -254,6 +272,24 @@ impl DFlash2Command {
             Self::Admit { reply_tx, .. } => reply_tx.is_closed(),
         }
     }
+
+    fn priority(&self) -> RequestPriority {
+        match self {
+            Self::Admit { request, .. } => request.priority,
+        }
+    }
+}
+
+fn push_pending_by_priority(pending: &mut VecDeque<DFlash2Command>, command: DFlash2Command) {
+    if command.priority().is_background() {
+        pending.push_back(command);
+    } else {
+        let foreground_end = pending
+            .iter()
+            .position(|queued| queued.priority().is_background())
+            .unwrap_or(pending.len());
+        pending.insert(foreground_end, command);
+    }
 }
 
 fn prune_abandoned_pending_requests(
@@ -299,6 +335,9 @@ pub struct DFlash2ActorHandle {
     pub(crate) runtime_usage: Arc<crate::core::runtime_usage::ModelRuntimeUsageCounters>,
     pub(crate) b_active: Arc<AtomicU64>,
     pub(crate) b_queued: Arc<AtomicU64>,
+    pub(crate) background_paused: Arc<AtomicU64>,
+    pub(crate) background_preemptions: Arc<AtomicU64>,
+    pub(crate) background_resumes: Arc<AtomicU64>,
     pub(crate) admit_count: Arc<AtomicU64>,
     pub(crate) batch_count: Arc<AtomicU64>,
     pub(crate) admission_queue_full_count: Arc<AtomicU64>,
@@ -460,6 +499,9 @@ where
     let in_flight = Arc::new(AtomicUsize::new(0));
     let b_active = Arc::new(AtomicU64::new(0));
     let b_queued = Arc::new(AtomicU64::new(0));
+    let background_paused = Arc::new(AtomicU64::new(0));
+    let background_preemptions = Arc::new(AtomicU64::new(0));
+    let background_resumes = Arc::new(AtomicU64::new(0));
     let admit_count = Arc::new(AtomicU64::new(0));
     let batch_count = Arc::new(AtomicU64::new(0));
     let admission_queue_full_count = Arc::new(AtomicU64::new(0));
@@ -535,6 +577,9 @@ where
     let worker_in_flight = Arc::clone(&in_flight);
     let worker_active = Arc::clone(&b_active);
     let worker_queued = Arc::clone(&b_queued);
+    let worker_background_paused = Arc::clone(&background_paused);
+    let worker_background_preemptions = Arc::clone(&background_preemptions);
+    let worker_background_resumes = Arc::clone(&background_resumes);
     let worker_admit_count = Arc::clone(&admit_count);
     let worker_batch_count = Arc::clone(&batch_count);
     let worker_memory_budget_exceeded_count = Arc::clone(&memory_budget_exceeded_count);
@@ -582,6 +627,7 @@ where
             .expect("validated DFlash2 prefix cache capacity");
         let mut next_request_id = 1_u64;
         let mut active = Vec::<ActiveDFlash2Request<'_, M>>::with_capacity(b_max);
+        let mut paused_background = VecDeque::<ActiveDFlash2Request<'_, M>>::with_capacity(b_max);
         let mut tensor_groups = Vec::<DFlash2TensorGroup>::with_capacity(b_max / 2);
         let mut pending = VecDeque::<DFlash2Command>::new();
         let mut command_channel_open = true;
@@ -591,7 +637,7 @@ where
             let mut admission_window_waited = false;
             while command_channel_open {
                 match cmd_rx.try_recv() {
-                    Ok(command) => pending.push_back(command),
+                    Ok(command) => push_pending_by_priority(&mut pending, command),
                     Err(mpsc::error::TryRecvError::Empty) => break,
                     Err(mpsc::error::TryRecvError::Disconnected) => {
                         command_channel_open = false;
@@ -601,10 +647,71 @@ where
             }
             prune_abandoned_pending_requests(&mut pending, &worker_in_flight, &worker_queued);
 
+            let foreground_pressure = active
+                .iter()
+                .any(|request| !request.priority.is_background())
+                || pending
+                    .iter()
+                    .any(|command| !command.priority().is_background());
+            if foreground_pressure
+                && active
+                    .iter()
+                    .any(|request| request.priority.is_background())
+            {
+                if let Err(error) = scatter_all_tensor_groups(&mut active, &mut tensor_groups) {
+                    tracing::error!(%error, "DFlash2 background priority scatter failed");
+                    for request in active.drain(..).chain(paused_background.drain(..)) {
+                        drop(request);
+                        worker_in_flight.fetch_sub(1, Ordering::Release);
+                    }
+                    while let Some(DFlash2Command::Admit { reply_tx, .. }) = pending.pop_front() {
+                        let _ = reply_tx.send(Err(anyhow::anyhow!(
+                            "DFlash2 background priority scatter failed"
+                        )));
+                        worker_in_flight.fetch_sub(1, Ordering::Release);
+                    }
+                    worker_active.store(0, Ordering::Relaxed);
+                    worker_background_paused.store(0, Ordering::Relaxed);
+                    return;
+                }
+                let mut foreground = Vec::with_capacity(active.len());
+                for request in active.drain(..) {
+                    if request.priority.is_background() {
+                        paused_background.push_back(request);
+                        worker_background_preemptions.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        foreground.push(request);
+                    }
+                }
+                active = foreground;
+            } else if !foreground_pressure {
+                while active.len() < b_max {
+                    let Some(request) = paused_background.pop_front() else {
+                        break;
+                    };
+                    if request.event_tx.is_closed() {
+                        worker_in_flight.fetch_sub(1, Ordering::Release);
+                        continue;
+                    }
+                    active.push(request);
+                    worker_background_resumes.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            paused_background.retain(|request| {
+                if request.event_tx.is_closed() {
+                    worker_in_flight.fetch_sub(1, Ordering::Release);
+                    false
+                } else {
+                    true
+                }
+            });
+            worker_active.store(active.len() as u64, Ordering::Relaxed);
+            worker_background_paused.store(paused_background.len() as u64, Ordering::Relaxed);
+
             while active.len() < b_max {
                 if pending.is_empty() && active.is_empty() && command_channel_open {
                     match cmd_rx.blocking_recv() {
-                        Some(command) => pending.push_back(command),
+                        Some(command) => push_pending_by_priority(&mut pending, command),
                         None => command_channel_open = false,
                     }
                     prune_abandoned_pending_requests(
@@ -624,7 +731,7 @@ where
                     admission_window_waited = true;
                     while command_channel_open {
                         match cmd_rx.try_recv() {
-                            Ok(command) => pending.push_back(command),
+                            Ok(command) => push_pending_by_priority(&mut pending, command),
                             Err(mpsc::error::TryRecvError::Empty) => break,
                             Err(mpsc::error::TryRecvError::Disconnected) => {
                                 command_channel_open = false;
@@ -637,6 +744,16 @@ where
                         &worker_in_flight,
                         &worker_queued,
                     );
+                }
+
+                if active
+                    .iter()
+                    .any(|request| !request.priority.is_background())
+                    && pending
+                        .front()
+                        .is_some_and(|command| command.priority().is_background())
+                {
+                    break;
                 }
 
                 let Some(DFlash2Command::Admit { request, reply_tx }) = pending.pop_front() else {
@@ -676,6 +793,14 @@ where
                     &budget_state,
                     cache_cost,
                     required_total_tokens,
+                    if request.priority.is_background() {
+                        0
+                    } else {
+                        paused_background
+                            .iter()
+                            .map(|request| request._memory_charge.bytes())
+                            .fold(0usize, usize::saturating_add)
+                    },
                     &worker_memory_budget_exceeded_count,
                 ) {
                     Ok(charge) => charge,
@@ -767,7 +892,9 @@ where
                 next_request_id = next_request_id.wrapping_add(1).max(1);
                 let batch_prompt_len = request.prompt_ids.len();
                 let batch_chunk_size = request.prefill_chunk_size;
+                let batch_priority = request.priority;
                 let mut admission_requests = vec![request];
+                let mut admission_priorities = vec![batch_priority];
                 let mut admission_replies = vec![reply_tx];
                 let mut admission_request_ids = vec![request_id];
                 let mut admission_memory_charges = vec![memory_charge];
@@ -782,6 +909,7 @@ where
                         DFlash2Command::Admit { request, .. } => {
                             request.prompt_ids.len() == batch_prompt_len
                                 && request.prefill_chunk_size == batch_chunk_size
+                                && request.priority == batch_priority
                         }
                     })
                 {
@@ -824,6 +952,14 @@ where
                         &budget_state,
                         cache_cost,
                         required_total_tokens,
+                        if candidate.priority.is_background() {
+                            0
+                        } else {
+                            paused_background
+                                .iter()
+                                .map(|request| request._memory_charge.bytes())
+                                .fold(0usize, usize::saturating_add)
+                        },
                         &worker_memory_budget_exceeded_count,
                     ) {
                         Ok(charge) => charge,
@@ -855,6 +991,7 @@ where
                     let candidate_id = RequestId(next_request_id);
                     next_request_id = next_request_id.wrapping_add(1).max(1);
                     admission_requests.push(candidate);
+                    admission_priorities.push(batch_priority);
                     admission_replies.push(candidate_reply);
                     admission_request_ids.push(candidate_id);
                     admission_memory_charges.push(candidate_charge);
@@ -924,11 +1061,13 @@ where
                 }
                 governor.refresh_process();
 
-                for (((request_id, reply_tx), stream), memory_charge) in admission_request_ids
-                    .into_iter()
-                    .zip(admission_replies)
-                    .zip(streams)
-                    .zip(admission_memory_charges)
+                for ((((request_id, reply_tx), stream), memory_charge), priority) in
+                    admission_request_ids
+                        .into_iter()
+                        .zip(admission_replies)
+                        .zip(streams)
+                        .zip(admission_memory_charges)
+                        .zip(admission_priorities)
                 {
                     let (event_tx, event_rx) = mpsc::unbounded_channel();
                     if reply_tx
@@ -944,6 +1083,7 @@ where
                     worker_admit_count.fetch_add(1, Ordering::Relaxed);
                     active.push(ActiveDFlash2Request {
                         request_id,
+                        priority,
                         event_tx,
                         stream,
                         _memory_charge: memory_charge,
@@ -1289,6 +1429,9 @@ where
         runtime_usage,
         b_active,
         b_queued,
+        background_paused,
+        background_preemptions,
+        background_resumes,
         admit_count,
         batch_count,
         admission_queue_full_count,
@@ -1354,6 +1497,7 @@ mod tests {
 
     fn test_request() -> GenerateRequest {
         GenerateRequest {
+            priority: Default::default(),
             prompt_ids: vec![1],
             max_new_tokens: 1,
             sampler: Sampler::greedy(),
@@ -1414,6 +1558,36 @@ mod tests {
     }
 
     #[test]
+    fn pending_queue_is_fifo_within_priority_and_foreground_first() {
+        let mut pending = VecDeque::new();
+        let mut receivers = Vec::new();
+        for (token, priority) in [
+            (10, RequestPriority::Background),
+            (20, RequestPriority::Foreground),
+            (30, RequestPriority::Background),
+            (40, RequestPriority::Foreground),
+        ] {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            let mut request = test_request();
+            request.prompt_ids[0] = token;
+            request.priority = priority;
+            push_pending_by_priority(&mut pending, DFlash2Command::Admit { request, reply_tx });
+            receivers.push(reply_rx);
+        }
+
+        assert_eq!(
+            pending
+                .iter()
+                .map(|command| match command {
+                    DFlash2Command::Admit { request, .. } => request.prompt_ids[0],
+                })
+                .collect::<Vec<_>>(),
+            vec![20, 40, 10, 30]
+        );
+        drop(receivers);
+    }
+
+    #[test]
     fn request_memory_charge_rejects_aggregate_overcommit_and_releases_on_drop() {
         let budget = BudgetState::with_soft_limit(1_000, 100, 100, KvBudgetPolicy::FullResident);
         let cost = DFlash2TargetCacheCost {
@@ -1421,12 +1595,12 @@ mod tests {
             fixed_bytes_per_sequence: 100,
         };
         let rejected = AtomicU64::new(0);
-        let first = reserve_dflash2_request_memory(&budget, cost, 40, &rejected)
+        let first = reserve_dflash2_request_memory(&budget, cost, 40, 0, &rejected)
             .expect("first request fits");
         assert_eq!(first.bytes(), 500);
         assert_eq!(budget.active_bytes(), 500);
 
-        let error = reserve_dflash2_request_memory(&budget, cost, 50, &rejected)
+        let error = reserve_dflash2_request_memory(&budget, cost, 50, 0, &rejected)
             .expect_err("aggregate charge exceeds soft limit");
         assert!(matches!(
             error.downcast_ref::<SchedulerError>(),
@@ -1441,10 +1615,33 @@ mod tests {
 
         drop(first);
         assert_eq!(budget.active_bytes(), 0);
-        let second = reserve_dflash2_request_memory(&budget, cost, 50, &rejected)
+        let second = reserve_dflash2_request_memory(&budget, cost, 50, 0, &rejected)
             .expect("released charge makes room");
         assert_eq!(budget.active_bytes(), 600);
         drop(second);
+        assert_eq!(budget.active_bytes(), 0);
+    }
+
+    #[test]
+    fn foreground_replacement_allowance_preserves_truthful_resident_charge() {
+        let budget = BudgetState::with_soft_limit(1_000, 100, 100, KvBudgetPolicy::FullResident);
+        let cost = DFlash2TargetCacheCost {
+            bytes_per_token: 10,
+            fixed_bytes_per_sequence: 100,
+        };
+        let rejected = AtomicU64::new(0);
+        let paused_background = reserve_dflash2_request_memory(&budget, cost, 90, 0, &rejected)
+            .expect("background request fills the logical budget");
+        assert_eq!(paused_background.bytes(), 1_000);
+
+        let foreground =
+            reserve_dflash2_request_memory(&budget, cost, 90, paused_background.bytes(), &rejected)
+                .expect("foreground may replace the paused logical working set");
+        assert_eq!(budget.active_bytes(), 2_000);
+        assert_eq!(rejected.load(Ordering::Relaxed), 0);
+
+        drop(foreground);
+        drop(paused_background);
         assert_eq!(budget.active_bytes(), 0);
     }
 }

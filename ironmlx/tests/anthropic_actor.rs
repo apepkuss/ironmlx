@@ -125,6 +125,7 @@ fn make_request(
     stop_token_ids: Vec<u32>,
 ) -> GenerateRequest {
     GenerateRequest {
+        priority: Default::default(),
         prompt_ids,
         max_new_tokens,
         sampler: Sampler::greedy(),
@@ -221,6 +222,7 @@ async fn anthropic_actor_long_prompt_routes_to_gs() {
 
     let stop_token_ids: Vec<u32> = tokenizer.eos_token_ids().to_vec();
     let request = GenerateRequest {
+        priority: Default::default(),
         prompt_ids: long_ids,
         max_new_tokens: 4,
         sampler: Sampler::greedy(),
@@ -301,6 +303,9 @@ async fn anthropic_actor_scheduler_path_emits_6_event_sequence() {
             max_position_embeddings: 32768_i32,
             b_active: handle.b_active.clone(),
             b_queued: handle.b_queued.clone(),
+            background_paused: handle.background_paused.clone(),
+            background_preemptions: handle.background_preemptions.clone(),
+            background_resumes: handle.background_resumes.clone(),
             admit_count: handle.admit_count.clone(),
             batch_count: handle.batch_count.clone(),
             admission_queue_full_count: handle.admission_queue_full_count.clone(),

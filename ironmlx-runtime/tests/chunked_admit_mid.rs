@@ -64,6 +64,7 @@ fn make_request(
     prefill_chunk_size: usize,
 ) -> GenerateRequest {
     GenerateRequest {
+        priority: Default::default(),
         prompt_ids,
         max_new_tokens,
         sampler: Sampler::greedy(),
