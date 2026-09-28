@@ -2440,6 +2440,8 @@ mod tests {
             dflash2_block_size: 4,
             dflash2_draft_bits: 4,
             dflash2_tensor_batch_max_width: None,
+            dflash2_tree_max_nodes: 0,
+            dflash2_position_keyed_sampling: false,
             prompt_lookup: false,
             prompt_lookup_min_ngram: None,
             prompt_lookup_max_ngram: None,

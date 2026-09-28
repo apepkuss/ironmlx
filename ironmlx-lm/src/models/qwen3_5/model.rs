@@ -1134,7 +1134,7 @@ impl crate::models::dflash2::DFlash2Target for Qwen35Model {
         };
         let mut supported_shapes = Vec::new();
         for batch_width in 1..=8 {
-            for verify_width in 2..=8 {
+            for verify_width in 2..=16 {
                 if super::speculative::dflash2_exact_batched_verify_shape_qualified(
                     self.exact_batched_verify_profile,
                     batch_width,
@@ -1953,7 +1953,7 @@ mod tests {
     #[test]
     #[ignore = "loads the full local Qwen3.8 target checkpoint"]
     #[serial(mlx_metal)]
-    fn qwen38_dflash2_q2_q4_q8_full_accept_matches_ordinary_state() {
+    fn qwen38_dflash2_q2_q4_q8_q16_full_accept_matches_ordinary_state() {
         use crate::core::model_input::build_position_ids;
         use crate::core::Model;
         use crate::models::dflash2::{DFlash2Target, DFlash2TargetForwardMode, DFlash2VerifyPlan};
@@ -1966,9 +1966,12 @@ mod tests {
             .expect("load DFlash2-optimized Qwen3.8 model");
         let capabilities = model.dflash2_verify_capabilities();
         let target_layers = [5_usize, 19, 33, 47, 61];
-        let verify_seed = [400_u32, 500, 600, 700, 800, 900, 1_000, 1_100];
+        let verify_seed = [
+            400_u32, 500, 600, 700, 800, 900, 1_000, 1_100, 1_200, 1_300, 1_400, 1_500, 1_600,
+            1_700, 1_800, 1_900,
+        ];
 
-        for verify_width in [2_usize, 4, 8] {
+        for verify_width in [2_usize, 4, 8, 16] {
             if DFlash2VerifyPlan::build(&capabilities, 1, verify_width - 1).is_err() {
                 eprintln!(
                     "skip B1/Q{verify_width}: profile {} does not advertise it",
@@ -2062,7 +2065,7 @@ mod tests {
                     &format!("{mode:?} B1/Q{verify_width} full-chain verify"),
                 );
 
-                let continuation: Array = (&[1_200_u32][..], &[1_i32, 1][..])
+                let continuation: Array = (&[2_000_u32][..], &[1_i32, 1][..])
                     .try_into()
                     .expect("continuation input");
                 let continuation_position =

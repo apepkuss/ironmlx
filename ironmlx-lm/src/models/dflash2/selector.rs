@@ -5,6 +5,7 @@ use crate::core::Loader;
 use crate::nn::Linear;
 use crate::Result;
 
+use super::DFlash2DraftTree;
 use super::{config::DFlash2Config, load_linear};
 
 pub(super) struct DFlash2CandidateSelector {
@@ -138,12 +139,246 @@ impl DFlash2CandidateSelector {
         let refs = path.iter().collect::<Vec<_>>();
         mlx::ops::shape::stack_on(&refs, 1, target).map_err(Into::into)
     }
+
+    /// Build a bounded best-first tree from one proposal lattice. Candidate
+    /// extraction and codebook gathers stay on the device; only the compact
+    /// `[depth, top_k, rank]` lattice is materialized for the fifteen-node
+    /// host priority walk.
+    pub(super) fn select_tree_on(
+        &self,
+        hidden: &Array,
+        logits: &Array,
+        anchor_ids: &Array,
+        max_nodes: usize,
+        children_per_node: usize,
+        target: StreamOrDevice,
+    ) -> Result<DFlash2DraftTree> {
+        anyhow::ensure!(
+            (1..=DFlash2DraftTree::MAX_NODES).contains(&max_nodes),
+            "DFlash2 tree max_nodes must be in [1, {}]",
+            DFlash2DraftTree::MAX_NODES
+        );
+        anyhow::ensure!(
+            children_per_node > 0,
+            "DFlash2 tree children_per_node must be positive"
+        );
+        let shape = logits.shape();
+        let dims = shape.as_slice();
+        anyhow::ensure!(
+            dims.len() == 3 && dims[0] == 1 && dims[1] > 0 && dims[2] == self.vocab_size,
+            "DFlash2 tree selector expected logits [1,L,{}], got {dims:?}",
+            self.vocab_size
+        );
+        let depth = dims[1] as usize;
+        let rank = self.hidden_projection.out_features();
+        let partition = mlx::ops::sort::argpartition_on(logits, -self.top_k, -1, target)?;
+        let candidates = mlx::ops::indexing::slice_strided_on(
+            &partition,
+            &[0_i32, 0, self.vocab_size - self.top_k][..],
+            &[1_i32, dims[1], self.vocab_size][..],
+            &[1_i32, 1, 1][..],
+            target,
+        )?;
+        let unary = mlx::ops::indexing::take_along_axis_on(logits, &candidates, -1, target)?;
+        let projected = {
+            let _product_stable_qmm = crate::nn::product_stable_qmm::scope();
+            self.hidden_projection.forward_on(hidden, target)?
+        };
+        let flat_candidates = candidates.reshape_on((-1_i32,), target)?;
+        let predecessor = self
+            .predecessor_codebook
+            .take_on(&flat_candidates, 0, target)?;
+        let successor = self
+            .successor_codebook
+            .take_on(&flat_candidates, 0, target)?;
+        let anchor = anchor_ids.reshape_on((-1_i32,), target)?;
+        let anchor_predecessor = self.predecessor_codebook.take_on(&anchor, 0, target)?;
+        let arrays = [
+            &candidates,
+            &unary,
+            &projected,
+            &predecessor,
+            &successor,
+            &anchor_predecessor,
+        ];
+        mlx::transforms::eval(&arrays)?;
+
+        let lattice = HostDraftLattice {
+            depth,
+            width: self.top_k as usize,
+            rank,
+            candidates: candidates.to_vec::<u32>()?,
+            unary: mlx::ops::cast::astype(&unary, mlx::Dtype::Float32)?.to_vec::<f32>()?,
+            projected: mlx::ops::cast::astype(&projected, mlx::Dtype::Float32)?.to_vec::<f32>()?,
+            predecessor: mlx::ops::cast::astype(&predecessor, mlx::Dtype::Float32)?
+                .to_vec::<f32>()?,
+            successor: mlx::ops::cast::astype(&successor, mlx::Dtype::Float32)?.to_vec::<f32>()?,
+            anchor_predecessor: mlx::ops::cast::astype(&anchor_predecessor, mlx::Dtype::Float32)?
+                .to_vec::<f32>()?,
+        };
+        lattice.best_first_tree(max_nodes, children_per_node.min(lattice.width))
+    }
+}
+
+struct HostDraftLattice {
+    depth: usize,
+    width: usize,
+    rank: usize,
+    candidates: Vec<u32>,
+    unary: Vec<f32>,
+    projected: Vec<f32>,
+    predecessor: Vec<f32>,
+    successor: Vec<f32>,
+    anchor_predecessor: Vec<f32>,
+}
+
+#[derive(Clone, Copy)]
+struct FrontierNode {
+    score: f64,
+    parent: i32,
+    token: u32,
+    depth: usize,
+    candidate: usize,
+}
+
+impl HostDraftLattice {
+    fn vector<'a>(&self, values: &'a [f32], depth: usize, candidate: usize) -> &'a [f32] {
+        let start = (depth * self.width + candidate) * self.rank;
+        &values[start..start + self.rank]
+    }
+
+    fn child_scores(&self, predecessor: &[f32], depth: usize) -> Vec<f64> {
+        let hidden = &self.projected[depth * self.rank..(depth + 1) * self.rank];
+        let mut scores = (0..self.width)
+            .map(|candidate| {
+                let successor = self.vector(&self.successor, depth, candidate);
+                let edge = predecessor
+                    .iter()
+                    .zip(hidden)
+                    .zip(successor)
+                    .map(|((&p, &h), &s)| f64::from(p) * f64::from(h) * f64::from(s))
+                    .sum::<f64>();
+                f64::from(self.unary[depth * self.width + candidate]) + edge
+            })
+            .collect::<Vec<_>>();
+        let max = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let normalizer = scores
+            .iter()
+            .map(|score| (*score - max).exp())
+            .sum::<f64>()
+            .ln()
+            + max;
+        for score in &mut scores {
+            *score -= normalizer;
+        }
+        scores
+    }
+
+    fn push_children(
+        &self,
+        frontier: &mut Vec<FrontierNode>,
+        predecessor: &[f32],
+        depth: usize,
+        parent: i32,
+        parent_score: f64,
+        children: usize,
+    ) {
+        let scores = self.child_scores(predecessor, depth);
+        let mut order = (0..self.width).collect::<Vec<_>>();
+        order.sort_by(|&left, &right| {
+            scores[right].total_cmp(&scores[left]).then_with(|| {
+                self.candidates[depth * self.width + left]
+                    .cmp(&self.candidates[depth * self.width + right])
+            })
+        });
+        for candidate in order.into_iter().take(children) {
+            frontier.push(FrontierNode {
+                score: parent_score + scores[candidate],
+                parent,
+                token: self.candidates[depth * self.width + candidate],
+                depth,
+                candidate,
+            });
+        }
+    }
+
+    fn best_first_tree(&self, max_nodes: usize, children: usize) -> Result<DFlash2DraftTree> {
+        anyhow::ensure!(
+            self.depth > 0 && self.width > 0 && self.rank > 0,
+            "empty DFlash2 lattice"
+        );
+        let mut frontier = Vec::new();
+        self.push_children(
+            &mut frontier,
+            &self.anchor_predecessor,
+            0,
+            -1,
+            0.0,
+            children,
+        );
+        let mut tokens = Vec::with_capacity(max_nodes);
+        let mut parents = Vec::with_capacity(max_nodes);
+        while !frontier.is_empty() && tokens.len() < max_nodes {
+            let next = frontier
+                .iter()
+                .enumerate()
+                .max_by(|(_, left), (_, right)| {
+                    left.score
+                        .total_cmp(&right.score)
+                        .then_with(|| right.token.cmp(&left.token))
+                })
+                .map(|(index, _)| index)
+                .expect("non-empty frontier");
+            let node = frontier.swap_remove(next);
+            let node_index = i32::try_from(tokens.len())?;
+            tokens.push(node.token);
+            parents.push(node.parent);
+            if node.depth + 1 < self.depth {
+                let predecessor = self.vector(&self.predecessor, node.depth, node.candidate);
+                self.push_children(
+                    &mut frontier,
+                    predecessor,
+                    node.depth + 1,
+                    node_index,
+                    node.score,
+                    children,
+                );
+            }
+        }
+        DFlash2DraftTree::new(tokens, parents)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    fn best_first_tree_is_bounded_deterministic_and_topological() {
+        let lattice = HostDraftLattice {
+            depth: 3,
+            width: 2,
+            rank: 1,
+            candidates: vec![10, 11, 20, 21, 30, 31],
+            unary: vec![2.0, 1.0, 2.0, 1.0, 2.0, 1.0],
+            projected: vec![1.0; 3],
+            predecessor: vec![1.0; 6],
+            successor: vec![0.0; 6],
+            anchor_predecessor: vec![1.0],
+        };
+        let first = lattice.best_first_tree(7, 2).expect("first tree");
+        let second = lattice.best_first_tree(7, 2).expect("second tree");
+        assert_eq!(first, second);
+        assert_eq!(first.tokens.len(), 7);
+        assert!(first
+            .parents
+            .iter()
+            .enumerate()
+            .all(|(node, parent)| *parent == -1 || (*parent as usize) < node));
+        assert!(first.leaf_paths().len() <= 4);
+        assert!(first.depths().into_iter().all(|depth| depth <= 3));
+    }
 
     #[test]
     #[serial(mlx_metal)]

@@ -128,6 +128,16 @@ pub(crate) fn dflash2_exact_batched_verify_shape_qualified(
     batch_width: usize,
     verify_width: usize,
 ) -> bool {
+    // P2 Q16 lane: the Qwen3.8 affine4 pack keeps the same position-stable
+    // arithmetic through sixteen target rows, but only for the isolated B1
+    // DFlash2 path. Wider batches remain capped at Q8 so Q16 cannot silently
+    // consume the tensor-batching memory budget.
+    if profile == ExactBatchedVerifyProfile::Affine4
+        && batch_width == 1
+        && (2..=16).contains(&verify_width)
+    {
+        return true;
+    }
     if profile == ExactBatchedVerifyProfile::Affine8Dense {
         // DFlash2 keeps every affine projection on the product-stable QMM
         // route. Unlike MTP's performance-qualified staircase, this actor's
@@ -350,6 +360,13 @@ mod tests {
         assert!(exact_batched_verify_shape_qualified(affine4, 8, 8));
         assert!(!exact_batched_verify_shape_qualified(affine4, 9, 8));
         assert!(!exact_batched_verify_shape_qualified(affine4, 8, 9));
+        assert!(dflash2_exact_batched_verify_shape_qualified(affine4, 1, 16));
+        assert!(!dflash2_exact_batched_verify_shape_qualified(
+            affine4, 2, 16
+        ));
+        assert!(!dflash2_exact_batched_verify_shape_qualified(
+            affine4, 1, 17
+        ));
     }
 
     #[test]

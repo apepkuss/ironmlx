@@ -12,7 +12,7 @@ use super::attention::DFlash2KvCache;
 use super::config::DFlash2Config;
 use super::layer::DFlash2DecoderLayer;
 use super::selector::DFlash2CandidateSelector;
-use super::{load_linear, DFlash2Target};
+use super::{load_linear, DFlash2DraftTree, DFlash2Target};
 
 #[derive(Clone)]
 pub struct DFlash2DraftCache {
@@ -74,6 +74,12 @@ pub struct DFlash2DraftModel {
     selector: DFlash2CandidateSelector,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DFlash2TreeSpec {
+    pub max_nodes: usize,
+    pub children_per_node: usize,
+}
+
 impl DFlash2DraftModel {
     pub fn from_loader(
         loader: &Loader,
@@ -125,6 +131,42 @@ impl DFlash2DraftModel {
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
         let target = target.into();
+        let (proposal_hidden, logits, anchor) =
+            self.proposal_lattice_on(target_model, input_ids, target_hidden, cache, target)?;
+        self.selector
+            .select_greedy_on(&proposal_hidden, &logits, &anchor, target)
+    }
+
+    pub fn propose_tree_on<T: DFlash2Target>(
+        &self,
+        target_model: &T,
+        input_ids: &Array,
+        target_hidden: &Array,
+        cache: &mut DFlash2DraftCache,
+        tree: DFlash2TreeSpec,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<DFlash2DraftTree> {
+        let target = target.into();
+        let (proposal_hidden, logits, anchor) =
+            self.proposal_lattice_on(target_model, input_ids, target_hidden, cache, target)?;
+        self.selector.select_tree_on(
+            &proposal_hidden,
+            &logits,
+            &anchor,
+            tree.max_nodes,
+            tree.children_per_node,
+            target,
+        )
+    }
+
+    fn proposal_lattice_on<T: DFlash2Target>(
+        &self,
+        target_model: &T,
+        input_ids: &Array,
+        target_hidden: &Array,
+        cache: &mut DFlash2DraftCache,
+        target: StreamOrDevice,
+    ) -> Result<(Array, Array, Array)> {
         let input_shape = input_ids.shape();
         let input_dims = input_shape.as_slice();
         if input_dims.len() != 2
@@ -200,8 +242,7 @@ impl DFlash2DraftModel {
             &[1_i32, 1][..],
             target,
         )?;
-        self.selector
-            .select_greedy_on(&proposal_hidden, &logits, &anchor, target)
+        Ok((proposal_hidden, logits, anchor))
     }
 }
 

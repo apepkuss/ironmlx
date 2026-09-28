@@ -13,7 +13,7 @@ mod model;
 mod selector;
 
 pub use config::DFlash2Config;
-pub use model::{DFlash2DraftCache, DFlash2DraftModel};
+pub use model::{DFlash2DraftCache, DFlash2DraftModel, DFlash2TreeSpec};
 
 use mlx::{Array, StreamOrDevice};
 
@@ -61,6 +61,81 @@ fn load_linear(loader: &Loader, prefix: &str, draft_bits: Option<i32>) -> Result
 pub struct DFlash2TargetOutput {
     pub hidden: Array,
     pub context_hidden: Array,
+}
+
+/// Topologically ordered DFlash2 draft tree. Parents always precede children;
+/// `-1` denotes a root candidate. The P2 execution path deliberately caps the
+/// tree at fifteen nodes so path batching stays within the qualified B8/Q8
+/// target envelope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DFlash2DraftTree {
+    pub tokens: Vec<u32>,
+    pub parents: Vec<i32>,
+}
+
+impl DFlash2DraftTree {
+    pub const MAX_NODES: usize = 15;
+
+    pub fn new(tokens: Vec<u32>, parents: Vec<i32>) -> Result<Self> {
+        anyhow::ensure!(
+            !tokens.is_empty() && tokens.len() == parents.len(),
+            "DFlash2 draft tree requires equally sized non-empty token and parent lists"
+        );
+        anyhow::ensure!(
+            tokens.len() <= Self::MAX_NODES,
+            "DFlash2 draft tree has {} nodes, maximum is {}",
+            tokens.len(),
+            Self::MAX_NODES
+        );
+        for (node, &parent) in parents.iter().enumerate() {
+            anyhow::ensure!(
+                parent == -1 || (parent >= 0 && (parent as usize) < node),
+                "DFlash2 draft tree parent {parent} must precede node {node}"
+            );
+        }
+        Ok(Self { tokens, parents })
+    }
+
+    pub fn depths(&self) -> Vec<usize> {
+        self.parents
+            .iter()
+            .enumerate()
+            .map(|(node, &parent)| {
+                if parent < 0 {
+                    1
+                } else {
+                    let mut depth = 1;
+                    let mut cursor = node;
+                    while self.parents[cursor] >= 0 {
+                        depth += 1;
+                        cursor = self.parents[cursor] as usize;
+                    }
+                    depth
+                }
+            })
+            .collect()
+    }
+
+    pub fn leaf_paths(&self) -> Vec<Vec<usize>> {
+        let mut is_parent = vec![false; self.tokens.len()];
+        for &parent in &self.parents {
+            if parent >= 0 {
+                is_parent[parent as usize] = true;
+            }
+        }
+        let mut paths = Vec::new();
+        for leaf in (0..self.tokens.len()).filter(|&node| !is_parent[node]) {
+            let mut path = Vec::new();
+            let mut cursor = leaf as i32;
+            while cursor >= 0 {
+                path.push(cursor as usize);
+                cursor = self.parents[cursor as usize];
+            }
+            path.reverse();
+            paths.push(path);
+        }
+        paths
+    }
 }
 
 /// Resident target-cache cost charged for one request-local DFlash2 stream.
@@ -319,9 +394,28 @@ pub use config::{DFlash2Parameters, DFlash2RopeParameters};
 #[cfg(test)]
 mod tests {
     use super::{
-        DFlash2TargetForwardMode, DFlash2VerifyCapabilities, DFlash2VerifyExecution,
-        DFlash2VerifyPlan, DFlash2VerifyShape,
+        DFlash2DraftTree, DFlash2TargetForwardMode, DFlash2VerifyCapabilities,
+        DFlash2VerifyExecution, DFlash2VerifyPlan, DFlash2VerifyShape,
     };
+
+    #[test]
+    fn draft_tree_validates_topology_and_materializes_leaf_paths() {
+        let tree = DFlash2DraftTree::new(vec![10, 20, 30, 40, 50], vec![-1, -1, 0, 0, 2])
+            .expect("valid tree");
+        assert_eq!(tree.depths(), vec![1, 1, 2, 2, 3]);
+        assert_eq!(tree.leaf_paths(), vec![vec![1], vec![0, 3], vec![0, 2, 4]]);
+
+        assert!(DFlash2DraftTree::new(vec![], vec![]).is_err());
+        assert!(DFlash2DraftTree::new(vec![1], vec![0]).is_err());
+        assert!(DFlash2DraftTree::new(vec![1, 2], vec![-1, 2]).is_err());
+        assert!(DFlash2DraftTree::new(
+            (0..=DFlash2DraftTree::MAX_NODES as u32).collect(),
+            std::iter::once(-1)
+                .chain(0..DFlash2DraftTree::MAX_NODES as i32)
+                .collect(),
+        )
+        .is_err());
+    }
 
     #[test]
     fn every_verify_mode_requires_position_stability() {

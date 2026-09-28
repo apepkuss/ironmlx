@@ -1147,6 +1147,49 @@ pub async fn build_dflash2_engine<M>(
 where
     M: Model + DenseVlMethods + ironmlx_lm::models::dflash2::DFlash2Target + Send + 'static,
 {
+    build_dflash2_engine_with_options(
+        model,
+        draft,
+        tokenizer,
+        model_id,
+        prefill_chunk_size,
+        b_max,
+        admission_deadline_ms,
+        tensor_batch_max_width,
+        admission_queue_max,
+        max_cache_cap,
+        block_size,
+        crate::core::dflash2::DFlash2P2Options::default(),
+        draft_quantization_bits,
+        prefix_cache,
+        scheduler_runtime_profile,
+        static_memory_estimate,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn build_dflash2_engine_with_options<M>(
+    model: M,
+    draft: ironmlx_lm::models::DFlash2DraftModel,
+    tokenizer: Tokenizer,
+    model_id: String,
+    prefill_chunk_size: usize,
+    b_max: usize,
+    admission_deadline_ms: u64,
+    tensor_batch_max_width: usize,
+    admission_queue_max: usize,
+    max_cache_cap: usize,
+    block_size: usize,
+    p2_options: crate::core::dflash2::DFlash2P2Options,
+    draft_quantization_bits: Option<i32>,
+    prefix_cache: Option<crate::core::cache::PrefixLruCacheConfig>,
+    scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
+    static_memory_estimate: crate::core::process_memory::StaticMemoryEstimate,
+) -> Result<CausalEngine<M>>
+where
+    M: Model + DenseVlMethods + ironmlx_lm::models::dflash2::DFlash2Target + Send + 'static,
+{
     let model = Arc::new(Mutex::new(model));
     let (
         mut meta,
@@ -1194,6 +1237,7 @@ where
         Arc::clone(&tokenizer),
         dflash2_actor::DFlash2ActorConfig {
             block_size,
+            p2_options,
             b_max,
             admission_deadline: std::time::Duration::from_millis(admission_deadline_ms),
             tensor_batch_max_width,
@@ -1229,12 +1273,16 @@ where
         dflash2: health::DFlash2HealthConfig::enabled(
             block_size,
             draft_quantization_bits,
+            p2_options.tree_max_nodes,
+            p2_options.position_keyed_sampling,
             dflash2_handle.admit_count.clone(),
             dflash2_handle.windows.clone(),
             dflash2_handle.drafted_tokens.clone(),
             dflash2_handle.accepted_draft_tokens.clone(),
             dflash2_handle.rollback_count.clone(),
             dflash2_handle.ordinary_windows.clone(),
+            dflash2_handle.tree_windows.clone(),
+            dflash2_handle.tree_drafted_nodes.clone(),
             dflash2_handle.draft_budget_changes.clone(),
             dflash2_handle.current_draft_budget.clone(),
             dflash2_handle.latest_adaptive_acceptance_ewma_bits.clone(),

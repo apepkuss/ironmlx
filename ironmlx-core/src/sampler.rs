@@ -9,12 +9,12 @@
 //! 6. top_p (nucleus) mask
 //! 7. greedy: argmax | sample: categorical(num_samples=1)
 
-#[cfg(test)]
 use mlx::ops::sort;
 use mlx::{
     ops::{indexing, reduction, unary, All},
-    random, Array,
+    random, Array, Dtype, MetalKernel, Shape,
 };
+use std::sync::OnceLock;
 
 use crate::Result;
 
@@ -51,6 +51,16 @@ pub struct Sampler {
     pub presence_penalty: Option<f32>,
     /// PRNG seed (retained for external key initialisation in 3e.2 Scheduler).
     pub seed: u64,
+    /// Sampling state contract. Stateful exact sampling is the stable default;
+    /// position-keyed sampling is an explicit opt-in for serial/drafted byte
+    /// identity at the same absolute token position.
+    pub strategy: SamplingStrategy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SamplingStrategy {
+    StatefulExact,
+    PositionKeyedV1,
 }
 
 #[derive(Debug, Clone)]
@@ -174,6 +184,7 @@ impl Sampler {
             frequency_penalty: None,
             presence_penalty: None,
             seed: 0,
+            strategy: SamplingStrategy::StatefulExact,
         }
     }
 
@@ -221,6 +232,17 @@ impl Sampler {
     pub fn with_seed(mut self, s: u64) -> Self {
         self.seed = s;
         self
+    }
+
+    /// Opt into the versioned position-keyed sampling contract. This changes
+    /// seeded output and therefore is never enabled implicitly.
+    pub fn with_position_keyed_v1(mut self) -> Self {
+        self.strategy = SamplingStrategy::PositionKeyedV1;
+        self
+    }
+
+    pub fn uses_position_keyed_v1(&self) -> bool {
+        self.strategy == SamplingStrategy::PositionKeyedV1
     }
 
     /// Returns `true` iff this sampler has deterministic argmax semantics:
@@ -351,6 +373,119 @@ impl Sampler {
         let samplers = vec![self; histories.len()];
         configured_distributions(&samplers, logits, histories)
     }
+}
+
+/// Device-side position-keyed Gumbel-max sampling.
+///
+/// Every output token is a pure function of `(seed, absolute_position,
+/// token_id, filtered_logits)`. The distribution filters are built with the
+/// same MLX pipeline as ordinary sampling, then a Metal kernel applies keyed
+/// Gumbel noise to every retained token and returns a lazy `[B]` argmax.
+pub fn sample_position_keyed_v1_batch(
+    samplers: &[&Sampler],
+    logits: &Array,
+    histories: &[&[u32]],
+    absolute_positions: &[u32],
+) -> Result<Array> {
+    let shape = logits.shape();
+    let dims = shape.as_slice();
+    anyhow::ensure!(
+        dims.len() == 2,
+        "position-keyed sampling requires [B,V] logits, got {dims:?}"
+    );
+    let rows = dims[0] as usize;
+    let vocab = dims[1];
+    anyhow::ensure!(
+        samplers.len() == rows && histories.len() == rows && absolute_positions.len() == rows,
+        "position-keyed sampling row metadata does not match batch {rows}"
+    );
+    anyhow::ensure!(
+        samplers
+            .iter()
+            .all(|sampler| sampler.temperature > 0.0 && sampler.uses_position_keyed_v1()),
+        "position-keyed sampling requires positive temperature and PositionKeyedV1 on every row"
+    );
+    let configs = collect_per_row_configs(samplers, vocab)?;
+    let history_count = if configs.need_history {
+        Some(build_history_count(histories, vocab as usize)?)
+    } else {
+        None
+    };
+    let filtered = apply_penalties(logits, history_count.as_ref(), &configs)?;
+    let filtered = apply_temperature(&filtered, &configs.temp)?;
+    let filtered = apply_top_k_batched(&filtered, &configs.top_k)?;
+    let probabilities = apply_softmax(&filtered)?;
+    let probabilities = apply_top_p_batched(&probabilities, &configs.top_p)?;
+    let probabilities = apply_min_p_batched(&probabilities, &configs.min_p)?;
+    let probabilities = renormalize(&probabilities)?;
+
+    let mut seed_words = Vec::with_capacity(rows * 2);
+    for sampler in samplers {
+        seed_words.push(sampler.seed as u32);
+        seed_words.push((sampler.seed >> 32) as u32);
+    }
+    let seeds: Array = (&seed_words[..], &[dims[0], 2_i32][..]).try_into()?;
+    let positions: Array = (absolute_positions, &[dims[0]][..]).try_into()?;
+    let kernel = position_keyed_gumbel_kernel()?;
+    let mut outputs = kernel
+        .dispatch_builder()
+        .inputs(&[&probabilities, &seeds, &positions])
+        .output_shapes(&[Shape::from((dims[0], vocab))])
+        .output_dtypes(&[Dtype::Float32])
+        .grid(dims[0] * vocab, 1, 1)
+        .threadgroup(256.min(dims[0] * vocab), 1, 1)
+        .template_int("VOCAB", vocab)
+        .dispatch()?;
+    let scores = outputs.take_at(0)?;
+    reduction::argmax(&scores, -1_i32, false).map_err(Into::into)
+}
+
+fn position_keyed_gumbel_kernel() -> Result<&'static MetalKernel> {
+    static CELL: OnceLock<MetalKernel> = OnceLock::new();
+    if let Some(kernel) = CELL.get() {
+        return Ok(kernel);
+    }
+    let source = r#"
+        uint elem = thread_position_in_grid.x;
+        uint total = uint(probs_shape[0]) * uint(VOCAB);
+        if (elem >= total) return;
+        uint row = elem / uint(VOCAB);
+        uint token = elem - row * uint(VOCAB);
+        float p = float(probs[elem]);
+        if (!(p > 0.0f)) {
+            scores[elem] = -INFINITY;
+            return;
+        }
+        ulong seed = ulong(seeds[row * 2]) | (ulong(seeds[row * 2 + 1]) << 32);
+        ulong x = seed + 0x9e3779b97f4a7c15ul;
+        x ^= x >> 30;
+        x *= 0xbf58476d1ce4e5b9ul;
+        x ^= x >> 27;
+        x *= 0x94d049bb133111ebul;
+        x ^= x >> 31;
+        x ^= ulong(positions[row]) * 0xd1b54a32d192ed03ul;
+        x ^= x >> 30;
+        x *= 0xbf58476d1ce4e5b9ul;
+        x ^= x >> 27;
+        x *= 0x94d049bb133111ebul;
+        x ^= x >> 31;
+        x ^= ulong(token);
+        x ^= x >> 30;
+        x *= 0xbf58476d1ce4e5b9ul;
+        x ^= x >> 27;
+        x *= 0x94d049bb133111ebul;
+        x ^= x >> 31;
+        float u = (float((x >> 40) & 0xfffffful) + 0.5f) * (1.0f / 16777216.0f);
+        scores[elem] = log(p) - log(-log(u));
+    "#;
+    let kernel = MetalKernel::builder("ironmlx_position_keyed_gumbel_v1")
+        .inputs(&["probs", "seeds", "positions"])
+        .outputs(&["scores"])
+        .source(source)
+        .ensure_row_contiguous(true)
+        .atomic_outputs(false)
+        .build()?;
+    Ok(CELL.get_or_init(|| kernel))
 }
 
 pub fn sample_target_tokens_with_uniforms_batch(
@@ -621,6 +756,10 @@ struct PerRowConfigs {
     temp: Array,
     /// `[B] i32`. None → `vocab_size` (no clip).
     top_k: Array,
+    /// `[B] f32`. None → 1.0 (no nucleus truncation).
+    top_p: Array,
+    /// `[B] f32`. None → 0.0 (no relative floor).
+    min_p: Array,
     /// `[B] f32`. None → 1.0 (no repetition penalty).
     rep_pen: Array,
     /// `[B] f32`. None → 0.0 (no frequency penalty).
@@ -636,6 +775,8 @@ fn collect_per_row_configs(samplers: &[&Sampler], vocab: i32) -> Result<PerRowCo
     let b = samplers.len();
     let mut temp = Vec::with_capacity(b);
     let mut top_k = Vec::with_capacity(b);
+    let mut top_p = Vec::with_capacity(b);
+    let mut min_p = Vec::with_capacity(b);
     let mut rep_pen = Vec::with_capacity(b);
     let mut freq_pen = Vec::with_capacity(b);
     let mut pres_pen = Vec::with_capacity(b);
@@ -650,6 +791,8 @@ fn collect_per_row_configs(samplers: &[&Sampler], vocab: i32) -> Result<PerRowCo
             1.0
         });
         top_k.push(s.top_k.unwrap_or(vocab));
+        top_p.push(s.top_p.unwrap_or(1.0));
+        min_p.push(s.min_p.unwrap_or(0.0));
         rep_pen.push(s.repetition_penalty.unwrap_or(1.0));
         freq_pen.push(s.frequency_penalty.unwrap_or(0.0));
         pres_pen.push(s.presence_penalty.unwrap_or(0.0));
@@ -664,6 +807,8 @@ fn collect_per_row_configs(samplers: &[&Sampler], vocab: i32) -> Result<PerRowCo
     Ok(PerRowConfigs {
         temp: (&temp[..], dim).try_into()?,
         top_k: (&top_k[..], dim).try_into()?,
+        top_p: (&top_p[..], dim).try_into()?,
+        min_p: (&min_p[..], dim).try_into()?,
         rep_pen: (&rep_pen[..], dim).try_into()?,
         freq_pen: (&freq_pen[..], dim).try_into()?,
         pres_pen: (&pres_pen[..], dim).try_into()?,
@@ -1135,7 +1280,6 @@ fn apply_softmax(logits: &Array) -> Result<Array> {
 /// GPU-only version retained for unit-test verification. Production path
 /// uses `sample_row_cpu` which avoids the double `argsort` overhead on
 /// large vocab (measured 0.4–18 s/step at vocab=151936).
-#[cfg(test)]
 fn apply_top_p_batched(probs: &Array, top_p_per_row: &Array) -> Result<Array> {
     use mlx::ops::cumulative::cumsum;
     let b = probs.shape().as_slice()[0];
@@ -1173,7 +1317,6 @@ fn apply_top_p_batched(probs: &Array, top_p_per_row: &Array) -> Result<Array> {
 ///
 /// GPU-only version retained for unit-test verification. Production path
 /// uses `sample_row_cpu` which applies min_p on CPU.
-#[cfg(test)]
 fn apply_min_p_batched(probs: &Array, min_p_per_row: &Array) -> Result<Array> {
     let b = probs.shape().as_slice()[0];
     let max_per_row = reduction::max(probs, &[-1_i32][..], true)?; // [B, 1] keepdims
@@ -1189,7 +1332,6 @@ fn apply_min_p_batched(probs: &Array, min_p_per_row: &Array) -> Result<Array> {
 ///
 /// GPU-only version retained for unit-test verification. Production host
 /// configured sampling normalizes sparse support directly.
-#[cfg(test)]
 fn renormalize(probs: &Array) -> Result<Array> {
     let row_sum = reduction::sum(probs, &[-1_i32][..], true)?; // [B, 1] keepdims
     Ok(probs / &row_sum)
@@ -1242,6 +1384,81 @@ fn apply_freq_presence_penalty(
 mod tests {
     use super::*;
     use mlx::Dtype;
+    use serial_test::serial;
+
+    #[test]
+    fn position_keyed_sampling_is_explicit_and_versioned() {
+        let stable = Sampler::greedy().with_temperature(0.8).with_seed(42);
+        assert!(!stable.uses_position_keyed_v1());
+        assert!(stable.with_position_keyed_v1().uses_position_keyed_v1());
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn position_keyed_sampling_is_batch_shape_independent() {
+        let sampler = Sampler::greedy()
+            .with_temperature(0.8)
+            .with_top_p(0.9)
+            .with_min_p(0.01)
+            .with_seed(0x1234_5678_9abc_def0)
+            .with_position_keyed_v1();
+        let row = [0.1_f32, 0.3, 1.2, -0.4, 0.8, 0.0];
+        let one: Array = (&row[..], &[1_i32, 6][..]).try_into().expect("B1 logits");
+        let two_values = row.into_iter().chain(row).collect::<Vec<_>>();
+        let two: Array = (&two_values[..], &[2_i32, 6][..])
+            .try_into()
+            .expect("B2 logits");
+        let b1 = sample_position_keyed_v1_batch(&[&sampler], &one, &[&[]], &[37])
+            .expect("B1 sample")
+            .to_vec::<u32>()
+            .expect("B1 token");
+        let b2 =
+            sample_position_keyed_v1_batch(&[&sampler, &sampler], &two, &[&[], &[]], &[37, 37])
+                .expect("B2 sample")
+                .to_vec::<u32>()
+                .expect("B2 tokens");
+        assert_eq!(b2, vec![b1[0], b1[0]]);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn position_keyed_sampling_honors_filters_and_position_key() {
+        let forced = Sampler::greedy()
+            .with_temperature(1.0)
+            .with_top_k(1)
+            .with_top_p(0.5)
+            .with_min_p(0.5)
+            .with_seed(7)
+            .with_position_keyed_v1();
+        let logits: Array = (&[0.0_f32, 4.0, 1.0, -2.0][..], &[1_i32, 4][..])
+            .try_into()
+            .expect("logits");
+        let token = sample_position_keyed_v1_batch(&[&forced], &logits, &[&[]], &[9])
+            .expect("filtered sample")
+            .to_vec::<u32>()
+            .expect("token");
+        assert_eq!(token, vec![1]);
+
+        let varied = Sampler::greedy()
+            .with_temperature(1.0)
+            .with_seed(99)
+            .with_position_keyed_v1();
+        let flat: Array = (&[0.0_f32; 8][..], &[1_i32, 8][..])
+            .try_into()
+            .expect("flat logits");
+        let mut observed = std::collections::BTreeSet::new();
+        for position in 0..16 {
+            let token = sample_position_keyed_v1_batch(&[&varied], &flat, &[&[]], &[position])
+                .expect("position sample")
+                .item::<u32>()
+                .expect("position token");
+            observed.insert(token);
+        }
+        assert!(
+            observed.len() > 1,
+            "absolute position must affect the keyed draw"
+        );
+    }
 
     #[test]
     fn greedy_picks_argmax() {

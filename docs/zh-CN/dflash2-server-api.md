@@ -38,9 +38,15 @@ ironmlx serve \
   --port 8080
 ```
 
-`--dflash2-block-size` 接受 `2..=8`；`--dflash2-draft-bits` 接受 `0`、`4` 或
+`--dflash2-block-size` 接受 `2..=16`；大于 `8` 的宽度要求 draft checkpoint 自身声明支持。
+`--dflash2-draft-bits` 接受 `0`、`4` 或
 `8`，其中 `0` 表示保持 draft BF16。`--max-sequences` 必须大于零。`--model-id`
 用于把稳定的公开模型 ID 与本地 target 路径分离；省略时沿用 `--model` 的值。
+
+`--dflash2-tree-max-nodes` 接受 `0..=15`：默认 `0` 保持稳定的线性提议路径，正值仅为
+affine-4、无约束、B1 请求显式启用有界 best-first 草稿树。
+`--dflash2-position-keyed-sampling` 为正温度请求显式启用版本化的设备端位置键采样；
+它会改变相同 seed 的输出序列，不会静默成为默认行为。
 
 `--dflash2-tensor-batch-max-width` 是单个 DFlash2 tensor group 的安全上限，接受
 正整数。省略时使用默认值 `4`；设为 `1` 会关闭跨请求 tensor batching，
@@ -48,6 +54,10 @@ ironmlx serve \
 `min(max_sequences, tensor_batch_max_width, 当前就绪且执行形态兼容的请求数)`。
 因此该参数只限制一次 tensor 操作合并的行数，不增加活动请求数，也不替代
 `--max-sequences`。
+
+当前已验收的 `z-lab/Qwen3.8-27B-DFlash2` checkpoint 声明的 block size 为 `8`，
+因此不能覆盖 Q16 提议。Q16 采用 fail-closed 资格：target 的 affine-4 B1 verify lane 与
+draft checkpoint 必须同时支持所请求宽度，运行时不会隐式扩宽 checkpoint。
 
 ## App 接入
 
@@ -83,6 +93,11 @@ DFlash2 server 使用独立 actor，不进入普通 Scheduler、MTP 或 Prompt L
 不同约束、采样形态或 cache 状态的请求保持独立；组内接受长度分歧时拆回请求级 cache，
 后续满足条件时可重新建组。`batch>1` 的实际收益仍取决于硬件、请求形态和接受率。
 
+可选草稿树从候选 lattice 中 best-first 选择最多 15 个节点，把最多 8 条根到叶路径放入
+一次 target verify forward，并只提交实际接受路径对应行的事务性 cache 状态。启用树后，
+跨请求 tensor batch 的生效宽度固定为 `1`，因为 batch lane 被树路径占用。
+`tree_windows` 和 `tree_drafted_nodes` 分别记录实际执行的树窗口与草稿节点数。
+
 活动槽满后，请求进入 `--admission-queue-max` 控制的等待队列。活动槽和队列都满时，
 服务返回 HTTP 503、稳定错误码 `scheduler_queue_full` 和 `Retry-After: 5`。流式客户
 端断连后，请求在当前 forward 完成后的下一个安全边界释放 cache 与活动槽。
@@ -98,6 +113,11 @@ Greedy 和非 Greedy 请求都使用 DFlash2 verify。GreedyVerify 保持与普�
 使用 checkpoint 的 generation defaults；已验收 Qwen3.8 配置默认提供
 `top_k=20`。固定 seed 只承诺同一 IronMLX/MLX、checkpoint、配置和执行形态下的
 可复现性，不是跨版本随机序列兼容承诺。
+
+默认仍为 stateful exact sampling。显式启用 `--dflash2-position-keyed-sampling` 后，
+`PositionKeyedV1` 会在应用 repetition/frequency/presence penalty 与 top-k/top-p/min-p
+过滤后，以 seed、绝对输出位置和 token ID 在设备端生成抽样键。因此线性窗口、树窗口与
+不同 batch 形态在同一绝对位置选择相同 token；但它不承诺复现默认采样器的同 seed 序列。
 
 ## HTTP 协议
 
@@ -138,11 +158,15 @@ HTTP transport、严格字段校验、错误 envelope 与断连语义见
     "enabled": true,
     "block_size": 4,
     "draft_quantization_bits": 4,
+    "tree_max_nodes": 15,
+    "position_keyed_sampling": true,
     "requests": 3,
     "windows": 96,
     "drafted_tokens": 384,
     "accepted_draft_tokens": 256,
     "rollback_count": 31,
+    "tree_windows": 40,
+    "tree_drafted_nodes": 512,
     "sampled_requests": 1,
     "exact_sampling_windows": 32,
     "exact_acceptance_draws": 128,

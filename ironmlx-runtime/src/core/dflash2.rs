@@ -22,8 +22,36 @@ use ironmlx_lm::core::model_input::build_position_ids;
 use ironmlx_lm::core::speculative_ops::{resolve_speculative_tokens, SpeculativeResolution};
 use {
     ironmlx_core::sampler::prepare_target_tokens_with_uniforms_batch,
-    ironmlx_core::sampler::prepare_uniforms, ironmlx_core::sampler::PreparedTargetTokenSampling,
+    ironmlx_core::sampler::prepare_uniforms, ironmlx_core::sampler::sample_position_keyed_v1_batch,
+    ironmlx_core::sampler::PreparedTargetTokenSampling,
 };
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DFlash2P2Options {
+    /// Zero keeps the stable linear proposal path. Values 1..=15 enable the
+    /// bounded best-first tree for B1 execution.
+    pub tree_max_nodes: usize,
+    /// Opt into versioned position-keyed sampling. Stateful exact sampling
+    /// remains the default and is not silently changed.
+    pub position_keyed_sampling: bool,
+}
+
+impl DFlash2P2Options {
+    pub fn validate(self) -> Result<Self> {
+        anyhow::ensure!(
+            self.tree_max_nodes <= ironmlx_lm::models::dflash2::DFlash2DraftTree::MAX_NODES,
+            "DFlash2 tree_max_nodes must be in [0, {}]",
+            ironmlx_lm::models::dflash2::DFlash2DraftTree::MAX_NODES
+        );
+        Ok(self)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct DFlash2ExecutionOptions {
+    pub(crate) block_size: usize,
+    pub(crate) p2: DFlash2P2Options,
+}
 use {
     ironmlx_lm::core::cache::layer::prefix_entry_for_row,
     ironmlx_lm::core::cache::layer::restore_prefix_entry_for_row,
@@ -37,7 +65,7 @@ use {
 use {ironmlx_lm::core::tokenizer::DecodeStream, ironmlx_lm::core::tokenizer::Tokenizer};
 use {
     ironmlx_lm::models::dflash2::DFlash2DraftCache, ironmlx_lm::models::dflash2::DFlash2DraftModel,
-    ironmlx_lm::models::dflash2::DFlash2Target,
+    ironmlx_lm::models::dflash2::DFlash2DraftTree, ironmlx_lm::models::dflash2::DFlash2Target,
     ironmlx_lm::models::dflash2::DFlash2TargetForwardMode,
     ironmlx_lm::models::dflash2::DFlash2VerifyCapabilities,
     ironmlx_lm::models::dflash2::DFlash2VerifyPlan,
@@ -235,6 +263,8 @@ pub enum DFlash2RequestError {
 #[derive(Debug, Clone, Serialize)]
 pub struct DFlash2Metrics {
     pub block_size: usize,
+    pub tree_max_nodes: usize,
+    pub position_keyed_sampling: bool,
     pub sampled: bool,
     pub prompt_tokens: usize,
     pub generated_tokens: usize,
@@ -243,6 +273,8 @@ pub struct DFlash2Metrics {
     pub accepted_draft_tokens: usize,
     pub rollback_count: usize,
     pub ordinary_windows: usize,
+    pub tree_windows: usize,
+    pub tree_drafted_nodes: usize,
     pub draft_budget_changes: usize,
     pub current_draft_budget: usize,
     pub adaptive_acceptance_ewma: Option<f64>,
@@ -274,6 +306,8 @@ struct DFlash2Counters {
     accepted_draft_tokens: usize,
     rollback_count: usize,
     ordinary_windows: usize,
+    tree_windows: usize,
+    tree_drafted_nodes: usize,
     draft_budget_changes: usize,
     exact_sampling: ExactSamplingCounters,
     draft_build_us: u64,
@@ -353,6 +387,8 @@ where
     counters: DFlash2Counters,
     constraint: Option<ConstraintSession>,
     prefix_cache_hit_tokens: usize,
+    target_cache_cap: i32,
+    p2_options: DFlash2P2Options,
 }
 
 pub(crate) struct DFlash2TensorBatchCache {
@@ -449,12 +485,35 @@ where
         request: GenerateRequest,
         block_size: usize,
     ) -> Result<Self> {
+        Self::new_text_only_with_options(
+            model,
+            draft,
+            tokenizer,
+            request,
+            block_size,
+            DFlash2P2Options::default(),
+        )
+    }
+
+    pub fn new_text_only_with_options(
+        model: &'m M,
+        draft: &'m DFlash2DraftModel,
+        tokenizer: &'m Tokenizer,
+        mut request: GenerateRequest,
+        block_size: usize,
+        options: DFlash2P2Options,
+    ) -> Result<Self> {
+        let options = options.validate()?;
+        if options.position_keyed_sampling {
+            request.sampler = request.sampler.with_position_keyed_v1();
+        }
         Self::new_text_only_with_prefill_execution(
             model,
             draft,
             tokenizer,
             request,
             block_size,
+            options,
             DFlash2PrefillContext {
                 execution: DFlash2PrefillExecution::GenerationStream,
                 prefix_cache: None,
@@ -468,16 +527,22 @@ where
         draft: &'m DFlash2DraftModel,
         tokenizer: &'m Tokenizer,
         request: GenerateRequest,
-        block_size: usize,
+        execution: DFlash2ExecutionOptions,
         prefix_cache: Option<(&mut DFlash2PrefixCache, &str)>,
         is_cancelled: &dyn Fn() -> bool,
     ) -> Result<Self> {
+        let options = execution.p2.validate()?;
+        let mut request = request;
+        if options.position_keyed_sampling {
+            request.sampler = request.sampler.with_position_keyed_v1();
+        }
         Self::new_text_only_with_prefill_execution(
             model,
             draft,
             tokenizer,
             request,
-            block_size,
+            execution.block_size,
+            options,
             DFlash2PrefillContext {
                 execution: DFlash2PrefillExecution::SchedulerB1,
                 prefix_cache,
@@ -498,12 +563,20 @@ where
         tokenizer: &'m Tokenizer,
         requests: Vec<GenerateRequest>,
         block_size: usize,
+        options: DFlash2P2Options,
         is_cancelled: &dyn Fn(usize) -> bool,
     ) -> Result<Vec<Self>> {
+        let options = options.validate()?;
         anyhow::ensure!(
             requests.len() > 1,
             "DFlash2 batched prefill requires at least two requests"
         );
+        let mut requests = requests;
+        if options.position_keyed_sampling {
+            for request in &mut requests {
+                request.sampler = request.sampler.with_position_keyed_v1();
+            }
+        }
         for (index, request) in requests.iter().enumerate() {
             Self::validate_text_request(draft, request, block_size)?;
             ensure_dflash2_request_not_cancelled(Some(&|| is_cancelled(index)))?;
@@ -679,6 +752,8 @@ where
                 counters: DFlash2Counters::default(),
                 constraint,
                 prefix_cache_hit_tokens: 0,
+                target_cache_cap: cap,
+                p2_options: options,
             });
         }
         Ok(streams)
@@ -690,6 +765,7 @@ where
         tokenizer: &'m Tokenizer,
         request: GenerateRequest,
         block_size: usize,
+        p2_options: DFlash2P2Options,
         prefill: DFlash2PrefillContext<'_>,
     ) -> Result<Self> {
         let DFlash2PrefillContext {
@@ -898,6 +974,8 @@ where
             counters: DFlash2Counters::default(),
             constraint,
             prefix_cache_hit_tokens,
+            target_cache_cap: cap,
+            p2_options,
         })
     }
 
@@ -915,6 +993,8 @@ where
         };
         DFlash2Metrics {
             block_size: self.block_size,
+            tree_max_nodes: self.p2_options.tree_max_nodes,
+            position_keyed_sampling: self.p2_options.position_keyed_sampling,
             sampled: self.request.sampler.temperature > 0.0,
             prompt_tokens,
             generated_tokens: self.emitted_new_tokens,
@@ -923,6 +1003,8 @@ where
             accepted_draft_tokens: self.counters.accepted_draft_tokens,
             rollback_count: self.counters.rollback_count,
             ordinary_windows: self.counters.ordinary_windows,
+            tree_windows: self.counters.tree_windows,
+            tree_drafted_nodes: self.counters.tree_drafted_nodes,
             draft_budget_changes: self.counters.draft_budget_changes,
             current_draft_budget: self.draft_policy.current_budget(),
             adaptive_acceptance_ewma: self.draft_policy.acceptance_ewma(),
@@ -1058,9 +1140,22 @@ where
     fn fill_next_window(&mut self, current_token: u32) -> Result<()> {
         if self.draft_policy.current_budget() == 0 {
             self.fill_ordinary_window(current_token)
+        } else if self.tree_eligible() {
+            self.fill_tree_window(current_token)
         } else {
             self.fill_window(current_token)
         }
+    }
+
+    fn tree_eligible(&self) -> bool {
+        self.p2_options.tree_max_nodes > 0
+            && self.constraint.is_none()
+            && (self.request.sampler.is_greedy() || self.request.sampler.uses_position_keyed_v1())
+            && self
+                .verify_capabilities
+                .lane_kernel_pack
+                .as_ref()
+                .is_some_and(|pack| pack.quant_bits == 4)
     }
 
     /// Execute one equal-shape multi-row draft/verify window. Rows with a common
@@ -1106,6 +1201,7 @@ where
         for row in rows.iter_mut() {
             exact_uniforms.push(
                 (row.request.sampler.temperature > 0.0
+                    && !row.request.sampler.uses_position_keyed_v1()
                     && !row.request.sampler.requires_sampling_history())
                 .then(|| prepare_uniforms(&mut row.prng_state, verify_len))
                 .transpose()?,
@@ -1541,6 +1637,251 @@ where
         }
     }
 
+    fn fill_tree_window(&mut self, current_token: u32) -> Result<()> {
+        let window_started = Instant::now();
+        let counters_before = self.counters.clone();
+        let remaining = self
+            .request
+            .max_new_tokens
+            .saturating_sub(self.emitted_new_tokens);
+        if remaining == 0 {
+            return Ok(());
+        }
+        let draft_len = self.draft_policy.current_budget().min(remaining);
+        let mask_token = self.draft.config().dflash_config.mask_token_id;
+        let mut block = Vec::with_capacity(draft_len + 1);
+        block.push(current_token);
+        block.resize(draft_len + 1, mask_token);
+        let block_arr: Array =
+            (&block[..], &[1_i32, i32::try_from(block.len())?][..]).try_into()?;
+
+        let draft_started = Instant::now();
+        let tree = self.draft.propose_tree_on(
+            self.model,
+            &block_arr,
+            &self.pending_context_hidden,
+            &mut self.draft_cache,
+            ironmlx_lm::models::dflash2::DFlash2TreeSpec {
+                max_nodes: self.p2_options.tree_max_nodes,
+                children_per_node: 2,
+            },
+            StreamOrDevice::default(),
+        )?;
+        self.counters.draft_build_us = self
+            .counters
+            .draft_build_us
+            .saturating_add(elapsed_us(draft_started));
+        let paths = tree.leaf_paths();
+        anyhow::ensure!(
+            !paths.is_empty() && paths.len() <= 8,
+            "DFlash2 tree produced unsupported leaf count {}",
+            paths.len()
+        );
+        let max_depth = paths.iter().map(Vec::len).max().unwrap_or(0);
+        anyhow::ensure!(
+            max_depth > 0 && max_depth <= draft_len,
+            "DFlash2 tree depth {max_depth} exceeds proposal depth {draft_len}"
+        );
+        let verify_len = max_depth + 1;
+        DFlash2VerifyPlan::build(&self.verify_capabilities, paths.len(), max_depth)?;
+
+        let mut verify_tokens = Vec::with_capacity(paths.len() * verify_len);
+        for path in &paths {
+            verify_tokens.push(current_token);
+            verify_tokens.extend(path.iter().map(|&node| tree.tokens[node]));
+            verify_tokens.resize(verify_tokens.len() + (max_depth - path.len()), mask_token);
+        }
+        let verify_arr: Array = (
+            verify_tokens.as_slice(),
+            &[i32::try_from(paths.len())?, i32::try_from(verify_len)?][..],
+        )
+            .try_into()?;
+        let verify_start = i32::try_from(self.history.len() - 1)?;
+        let verify_positions = build_position_ids(verify_start, i32::try_from(verify_len)?)?;
+        let verify_positions = mlx::ops::shape::broadcast_to(
+            &verify_positions,
+            &[
+                3_i32,
+                i32::try_from(paths.len())?,
+                i32::try_from(verify_len)?,
+            ][..],
+        )?;
+
+        let mut tree_cache = self.model.make_cache(
+            i32::try_from(paths.len())?,
+            self.target_cache_cap,
+            self.model.cache_dtype(),
+        )?;
+        for row in 0..paths.len() {
+            ironmlx_lm::core::cache::layer::adopt_layer_cache_rows(
+                &mut tree_cache,
+                &self.target_cache,
+                row,
+                0,
+            )?;
+        }
+        let snapshots = tree_cache
+            .iter()
+            .map(LayerCache::dflash2_transaction_snapshot)
+            .collect::<Result<Vec<_>>>()?;
+        for layer in &mut tree_cache {
+            layer.begin_speculative_prefix_capture()?;
+        }
+        let verify_started = Instant::now();
+        let verified = self.model.dflash2_forward_target_on(
+            &verify_arr,
+            &verify_positions,
+            Some(&mut tree_cache),
+            &self.draft.config().dflash_config.target_layer_ids,
+            dflash2_target_forward_mode(self.request.sampler),
+            StreamOrDevice::default(),
+        )?;
+        self.counters.verify_build_us = self
+            .counters
+            .verify_build_us
+            .saturating_add(elapsed_us(verify_started));
+        let projection_started = Instant::now();
+        let logits = self
+            .model
+            .dflash2_project_hidden_on(&verified.hidden, StreamOrDevice::default())?;
+        self.counters.projection_build_us = self
+            .counters
+            .projection_build_us
+            .saturating_add(elapsed_us(projection_started));
+        let sampling_started = Instant::now();
+        let target_tokens_arr = if self.request.sampler.is_greedy() {
+            mlx::ops::reduction::argmax(&logits, -1, false)?
+        } else {
+            sample_tree_position_keyed_targets(
+                &logits,
+                self.request.sampler,
+                &self.history,
+                &tree,
+                &paths,
+                verify_len,
+            )?
+        };
+        self.counters.sampling_us = self
+            .counters
+            .sampling_us
+            .saturating_add(elapsed_us(sampling_started));
+        let schedule_started = Instant::now();
+        mlx::transforms::async_eval(&[&target_tokens_arr, &verified.context_hidden])?;
+        self.counters.verify_schedule_us = self
+            .counters
+            .verify_schedule_us
+            .saturating_add(elapsed_us(schedule_started));
+        let host_sync_started = Instant::now();
+        let target_tokens = target_tokens_arr.to_vec::<u32>()?;
+        self.counters.host_sync_us = self
+            .counters
+            .host_sync_us
+            .saturating_add(elapsed_us(host_sync_started));
+        let accepted = resolve_tree_tokens(&tree, &paths, verify_len, &target_tokens)?;
+
+        let rollback_started = Instant::now();
+        let mut accepted_lens = vec![0_usize; paths.len()];
+        accepted_lens[accepted.row] = accepted.accepted_nodes.len() + 1;
+        self.model.dflash2_restore_target_prefix_rows_on(
+            &mut tree_cache,
+            &snapshots,
+            &accepted_lens,
+            StreamOrDevice::default(),
+        )?;
+        ironmlx_lm::core::cache::layer::adopt_layer_cache_rows(
+            &mut self.target_cache,
+            &tree_cache,
+            0,
+            accepted.row,
+        )?;
+        let context_row = slice_batch_row(
+            &verified.context_hidden,
+            accepted.row,
+            StreamOrDevice::default(),
+        )?;
+        self.pending_context_hidden = slice_sequence_prefix(
+            &context_row,
+            i32::try_from(accepted.accepted_nodes.len() + 1)?,
+            StreamOrDevice::default(),
+        )?;
+        self.counters.rollback_us = self
+            .counters
+            .rollback_us
+            .saturating_add(elapsed_us(rollback_started));
+
+        let accepted_draft_len = accepted.accepted_nodes.len();
+        let mut tokens_to_append = accepted
+            .accepted_nodes
+            .iter()
+            .map(|&node| tree.tokens[node])
+            .collect::<Vec<_>>();
+        tokens_to_append.push(accepted.bonus_token);
+        if let Some(stop_index) = tokens_to_append
+            .iter()
+            .position(|token| self.request.stop_token_ids.contains(token))
+        {
+            tokens_to_append.truncate(stop_index + 1);
+        }
+        tokens_to_append.truncate(remaining);
+        let committed_tokens = tokens_to_append.len();
+        for token in tokens_to_append {
+            self.history.push(token);
+            self.pending_tokens.push_back(token);
+        }
+        self.counters.windows += 1;
+        self.counters.tree_windows = self.counters.tree_windows.saturating_add(1);
+        self.counters.tree_drafted_nodes = self
+            .counters
+            .tree_drafted_nodes
+            .saturating_add(tree.tokens.len());
+        self.counters.drafted_tokens = self
+            .counters
+            .drafted_tokens
+            .saturating_add(tree.tokens.len());
+        self.counters.accepted_draft_tokens = self
+            .counters
+            .accepted_draft_tokens
+            .saturating_add(accepted_draft_len);
+        self.counters.rollback_count = self.counters.rollback_count.saturating_add(1);
+        let window_us = elapsed_us(window_started);
+        self.counters.window_us = self.counters.window_us.saturating_add(window_us);
+        self.observe_adaptive_window(MtpDraftPolicyWindow::from_measured_components(
+            max_depth,
+            accepted_draft_len,
+            committed_tokens,
+            window_us,
+            self.history.len().saturating_sub(committed_tokens),
+            // The leaf-path batch is one request's internal verify shape, not
+            // independent scheduler rows. Keep it in the B1 cost regime so a
+            // d=0 control window remains comparable with this tree window.
+            1,
+            self.counters
+                .draft_build_us
+                .saturating_sub(counters_before.draft_build_us),
+            self.counters
+                .verify_build_us
+                .saturating_sub(counters_before.verify_build_us)
+                .saturating_add(
+                    self.counters
+                        .verify_schedule_us
+                        .saturating_sub(counters_before.verify_schedule_us),
+                ),
+            self.counters
+                .projection_build_us
+                .saturating_sub(counters_before.projection_build_us),
+            self.counters
+                .sampling_us
+                .saturating_sub(counters_before.sampling_us),
+            self.counters
+                .host_sync_us
+                .saturating_sub(counters_before.host_sync_us),
+            self.counters
+                .rollback_us
+                .saturating_sub(counters_before.rollback_us),
+        ));
+        Ok(())
+    }
+
     fn fill_window(&mut self, current_token: u32) -> Result<()> {
         let window_started = Instant::now();
         let counters_before = self.counters.clone();
@@ -1555,6 +1896,7 @@ where
         DFlash2VerifyPlan::build(&self.verify_capabilities, 1, draft_len)?;
         let sampling_prepare_started = Instant::now();
         let exact_sampling_uniforms = if self.request.sampler.temperature > 0.0
+            && !self.request.sampler.uses_position_keyed_v1()
             && !self.request.sampler.requires_sampling_history()
         {
             Some(prepare_uniforms(&mut self.prng_state, draft_len + 1)?)
@@ -1906,10 +2248,22 @@ where
             .projection_build_us
             .saturating_add(projection_build_us);
         let sampling_started = Instant::now();
-        let next_token = self
-            .request
-            .sampler
-            .sample(&row, &self.history, &mut self.prng_state)?;
+        let next_token = if self.request.sampler.uses_position_keyed_v1()
+            && self.request.sampler.temperature > 0.0
+        {
+            let rows = row.reshape(&[1_i32, row.shape().as_slice()[0]][..])?;
+            sample_position_keyed_v1_batch(
+                &[&self.request.sampler],
+                &rows,
+                &[self.history.as_slice()],
+                &[u32::try_from(self.history.len())?],
+            )?
+            .item::<u32>()?
+        } else {
+            self.request
+                .sampler
+                .sample(&row, &self.history, &mut self.prng_state)?
+        };
         mlx::transforms::eval(&[&output.context_hidden])?;
         let sampling_us = elapsed_us(sampling_started);
         self.counters.sampling_us = self.counters.sampling_us.saturating_add(sampling_us);
@@ -1956,6 +2310,103 @@ where
     }
 }
 
+struct DFlash2TreeResolution {
+    accepted_nodes: Vec<usize>,
+    bonus_token: u32,
+    row: usize,
+}
+
+fn resolve_tree_tokens(
+    tree: &DFlash2DraftTree,
+    paths: &[Vec<usize>],
+    verify_len: usize,
+    target_tokens: &[u32],
+) -> Result<DFlash2TreeResolution> {
+    anyhow::ensure!(
+        target_tokens.len() == paths.len().saturating_mul(verify_len),
+        "DFlash2 tree target token count {} != {} rows * {verify_len}",
+        target_tokens.len(),
+        paths.len()
+    );
+    let mut representative = vec![None; tree.tokens.len()];
+    for (row, path) in paths.iter().enumerate() {
+        for (position, &node) in path.iter().enumerate() {
+            representative[node].get_or_insert((row, position + 1));
+        }
+    }
+    anyhow::ensure!(
+        representative.iter().all(Option::is_some),
+        "DFlash2 tree has a node absent from every leaf path"
+    );
+    let mut accepted = Vec::new();
+    let mut parent = -1_i32;
+    loop {
+        let (row, prediction_position) = if parent < 0 {
+            (0, 0)
+        } else {
+            representative[parent as usize].expect("validated tree representative")
+        };
+        let prediction = target_tokens[row * verify_len + prediction_position];
+        let child = tree
+            .parents
+            .iter()
+            .enumerate()
+            .find(|(node, candidate_parent)| {
+                **candidate_parent == parent && tree.tokens[*node] == prediction
+            })
+            .map(|(node, _)| node);
+        let Some(child) = child else {
+            return Ok(DFlash2TreeResolution {
+                accepted_nodes: accepted,
+                bonus_token: prediction,
+                row,
+            });
+        };
+        accepted.push(child);
+        parent = child as i32;
+    }
+}
+
+fn sample_tree_position_keyed_targets(
+    logits: &Array,
+    sampler: ironmlx_core::sampler::Sampler,
+    history: &[u32],
+    tree: &DFlash2DraftTree,
+    paths: &[Vec<usize>],
+    verify_len: usize,
+) -> Result<Array> {
+    let shape = logits.shape();
+    let dims = shape.as_slice();
+    anyhow::ensure!(
+        dims.len() == 3 && dims[0] as usize == paths.len() && dims[1] as usize == verify_len,
+        "DFlash2 tree logits must be [{},{verify_len},V], got {dims:?}",
+        paths.len()
+    );
+    let rows = paths.len().saturating_mul(verify_len);
+    let flat = logits.reshape(&[i32::try_from(rows)?, dims[2]][..])?;
+    let mut histories = Vec::with_capacity(rows);
+    let mut positions = Vec::with_capacity(rows);
+    let start = u32::try_from(history.len())?;
+    for path in paths {
+        for position in 0..verify_len {
+            let mut prefix = Vec::with_capacity(history.len() + position);
+            prefix.extend_from_slice(history);
+            prefix.extend(path.iter().take(position).map(|&node| tree.tokens[node]));
+            histories.push(prefix);
+            positions.push(
+                start
+                    .checked_add(u32::try_from(position)?)
+                    .ok_or_else(|| anyhow!("DFlash2 tree sampling position overflow"))?,
+            );
+        }
+    }
+    let sampler_refs = vec![&sampler; rows];
+    let history_refs = histories.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    sample_position_keyed_v1_batch(&sampler_refs, &flat, &history_refs, &positions)?
+        .reshape(&[i32::try_from(paths.len())?, i32::try_from(verify_len)?][..])
+        .map_err(Into::into)
+}
+
 fn ensure_dflash2_request_not_cancelled(is_cancelled: Option<&dyn Fn() -> bool>) -> Result<()> {
     if is_cancelled.is_some_and(|is_cancelled| is_cancelled()) {
         anyhow::bail!("DFlash2 request cancelled");
@@ -1996,6 +2447,16 @@ fn sample_initial_token(
         Some(session) => apply_token_mask(&row, &session.compute_mask()?)?,
         None => row,
     };
+    if sampler.uses_position_keyed_v1() && sampler.temperature > 0.0 {
+        let rows = row.reshape(&[1_i32, dims[2]][..])?;
+        let token = sample_position_keyed_v1_batch(
+            &[&sampler],
+            &rows,
+            &[history],
+            &[u32::try_from(history.len())?],
+        )?;
+        return token.item::<u32>().map_err(Into::into);
+    }
     sampler.sample(&row, history, prng_state)
 }
 
@@ -2065,6 +2526,11 @@ fn resolve_dflash2_window(
             .ok_or_else(|| anyhow!("DFlash2 greedy verification tokens are absent"))?;
         return resolve_speculative_tokens(draft_tokens, target_tokens);
     }
+    if sampler.uses_position_keyed_v1() && sampler.temperature > 0.0 {
+        let target_tokens =
+            sample_dflash2_position_keyed_targets(target_logits, sampler, history, draft_tokens)?;
+        return resolve_exact_deterministic_target_tokens(draft_tokens, &target_tokens);
+    }
     if sampler.temperature > 0.0 {
         return resolve_exact_deterministic_target_logits(
             draft_tokens,
@@ -2076,6 +2542,43 @@ fn resolve_dflash2_window(
     }
     let target_tokens = sample_logits_positions(target_logits, sampler, history, prng_state)?;
     resolve_speculative_tokens(draft_tokens, &target_tokens)
+}
+
+fn sample_dflash2_position_keyed_targets(
+    target_logits: &Array,
+    sampler: ironmlx_core::sampler::Sampler,
+    history: &[u32],
+    draft_tokens: &[u32],
+) -> Result<Vec<u32>> {
+    let shape = target_logits.shape();
+    let dims = shape.as_slice();
+    let positions = draft_tokens.len() + 1;
+    anyhow::ensure!(
+        dims.len() == 3 && dims[0] == 1 && dims[1] as usize == positions,
+        "position-keyed DFlash2 target logits must be [1,{positions},V], got {dims:?}"
+    );
+    let rows = target_logits.reshape(&[i32::try_from(positions)?, dims[2]][..])?;
+    let histories = (0..positions)
+        .map(|position| {
+            let mut prefix = Vec::with_capacity(history.len() + position);
+            prefix.extend_from_slice(history);
+            prefix.extend_from_slice(&draft_tokens[..position]);
+            prefix
+        })
+        .collect::<Vec<_>>();
+    let history_refs = histories.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    let sampler_refs = vec![&sampler; positions];
+    let start = u32::try_from(history.len())?;
+    let absolute_positions = (0..positions)
+        .map(|position| {
+            start
+                .checked_add(position as u32)
+                .ok_or_else(|| anyhow!("sampling position overflow"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let sampled =
+        sample_position_keyed_v1_batch(&sampler_refs, &rows, &history_refs, &absolute_positions)?;
+    sampled.to_vec::<u32>().map_err(Into::into)
 }
 
 fn sequence_len(array: &Array) -> Result<i32> {
@@ -2347,6 +2850,243 @@ mod tests {
     #[test]
     #[ignore = "loads the full local Qwen3.8 target and DFlash2 draft checkpoints"]
     #[serial(mlx_metal)]
+    fn qwen38_position_keyed_tree_matches_linear_dflash2() {
+        use ironmlx_core::sampler::Sampler;
+        use ironmlx_lm::models::{dflash2::DFlash2DraftModel, Qwen35Model};
+        use ironmlx_lm::{core::loader::Loader, core::tokenizer::Tokenizer};
+
+        let target_dir = std::env::var("QWEN38_MODEL").expect("QWEN38_MODEL not set");
+        let draft_dir = std::env::var("DFLASH2_MODEL").expect("DFLASH2_MODEL not set");
+        let mut target_loader = Loader::open(std::path::Path::new(&target_dir))
+            .expect("open Qwen3.8 target checkpoint");
+        let tokenizer = Tokenizer::from_loader(&target_loader).expect("load tokenizer");
+        let target =
+            Qwen35Model::from_loader_dflash2(&mut target_loader).expect("load DFlash2 target");
+        let draft_loader = Loader::open_dflash2(std::path::Path::new(&draft_dir))
+            .expect("open DFlash2 draft checkpoint");
+        let draft = DFlash2DraftModel::from_loader(&draft_loader, target.config(), Some(4))
+            .expect("load runtime-quantized DFlash2 draft");
+        for (label, sampler, position_keyed_sampling) in [
+            ("greedy", Sampler::greedy(), false),
+            (
+                "position-keyed",
+                Sampler::greedy()
+                    .with_temperature(0.7)
+                    .with_top_p(0.9)
+                    .with_seed(20_260_928),
+                true,
+            ),
+        ] {
+            let request = GenerateRequest {
+                prompt_ids: vec![151_644, 872, 198, 3_838],
+                max_new_tokens: 64,
+                sampler,
+                stop_token_ids: Vec::new(),
+                prefill_chunk_size: 0,
+                decode_cadence_mid_chunk_cap: 1,
+                kv_cache_turboquant_bits: None,
+                pixel_values: None,
+                image_grid_thw: None,
+                image_spatial_merge_size: 2,
+                image_token_id: 248_056,
+                constraint: None,
+            };
+            let mut linear = DFlash2TextGenerationStream::new_text_only_with_options(
+                &target,
+                &draft,
+                &tokenizer,
+                request.clone(),
+                4,
+                DFlash2P2Options {
+                    tree_max_nodes: 0,
+                    position_keyed_sampling,
+                },
+            )
+            .expect("linear stream");
+            let mut tree = DFlash2TextGenerationStream::new_text_only_with_options(
+                &target,
+                &draft,
+                &tokenizer,
+                request,
+                4,
+                DFlash2P2Options {
+                    tree_max_nodes: DFlash2DraftTree::MAX_NODES,
+                    position_keyed_sampling,
+                },
+            )
+            .expect("tree stream");
+            for step in 0..64 {
+                let expected = linear
+                    .next_token()
+                    .expect("linear token")
+                    .map(|event| (event.token, event.finish_reason));
+                let actual = tree
+                    .next_token()
+                    .expect("tree token")
+                    .map(|event| (event.token, event.finish_reason));
+                assert_eq!(actual, expected, "{label} tree divergence at step {step}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "loads the full local Qwen3.8 target and block-16-capable DFlash2 draft checkpoints"]
+    #[serial(mlx_metal)]
+    fn qwen38_b32_q16_linear_matches_ordinary_generation() {
+        use ironmlx_core::sampler::Sampler;
+        use ironmlx_lm::models::{dflash2::DFlash2DraftModel, Qwen35Model};
+        use ironmlx_lm::{core::loader::Loader, core::tokenizer::Tokenizer};
+
+        let target_dir = std::env::var("QWEN38_MODEL").expect("QWEN38_MODEL not set");
+        let draft_dir = std::env::var("DFLASH2_MODEL").expect("DFLASH2_MODEL not set");
+        let mut target_loader = Loader::open(std::path::Path::new(&target_dir))
+            .expect("open Qwen3.8 target checkpoint");
+        let tokenizer = Tokenizer::from_loader(&target_loader).expect("load tokenizer");
+        let target =
+            Qwen35Model::from_loader_dflash2(&mut target_loader).expect("load DFlash2 target");
+        let draft_loader = Loader::open_dflash2(std::path::Path::new(&draft_dir))
+            .expect("open DFlash2 draft checkpoint");
+        let draft = DFlash2DraftModel::from_loader(&draft_loader, target.config(), Some(4))
+            .expect("load runtime-quantized DFlash2 draft");
+        assert!(
+            draft.config().dflash_config.block_size >= 16,
+            "Q16 qualification requires a checkpoint block size of at least 16"
+        );
+
+        let request = |sampler| GenerateRequest {
+            prompt_ids: vec![151_644, 872, 198, 3_838],
+            max_new_tokens: 64,
+            sampler,
+            stop_token_ids: Vec::new(),
+            prefill_chunk_size: 0,
+            decode_cadence_mid_chunk_cap: 1,
+            kv_cache_turboquant_bits: None,
+            pixel_values: None,
+            image_grid_thw: None,
+            image_spatial_merge_size: 2,
+            image_token_id: 248_056,
+            constraint: None,
+        };
+        {
+            let mut ordinary = crate::core::generate::GenerationStream::new_text_only(
+                &target,
+                &tokenizer,
+                request(Sampler::greedy()),
+            )
+            .expect("ordinary stream");
+            let mut dflash = DFlash2TextGenerationStream::new_text_only_with_options(
+                &target,
+                &draft,
+                &tokenizer,
+                request(Sampler::greedy()),
+                16,
+                DFlash2P2Options {
+                    tree_max_nodes: 0,
+                    position_keyed_sampling: false,
+                },
+            )
+            .expect("Q16 DFlash2 stream");
+            for step in 0..64 {
+                let expected = ordinary
+                    .next_token()
+                    .expect("ordinary token")
+                    .map(|event| (event.token, event.finish_reason));
+                let actual = dflash
+                    .next_token()
+                    .expect("Q16 DFlash2 token")
+                    .map(|event| (event.token, event.finish_reason));
+                assert_eq!(actual, expected, "greedy Q16 divergence at step {step}");
+            }
+            let metrics = dflash.metrics();
+            assert_eq!(metrics.block_size, 16);
+            assert_eq!(metrics.generated_tokens, 64);
+            assert!(metrics.windows > 0, "greedy executed no draft windows");
+            assert!(
+                metrics.drafted_tokens >= 15,
+                "greedy did not execute an initial fifteen-token Q16 draft"
+            );
+        }
+
+        let sampled = Sampler::greedy()
+            .with_temperature(0.7)
+            .with_top_p(0.9)
+            .with_seed(20_260_928);
+        {
+            // Position-keyed sampling is a DFlash2 opt-in rather than the
+            // ordinary stream's stateful sampling contract. Use Q8 as the
+            // width-independent oracle for the same absolute positions.
+            let mut q8 = DFlash2TextGenerationStream::new_text_only_with_options(
+                &target,
+                &draft,
+                &tokenizer,
+                request(sampled),
+                8,
+                DFlash2P2Options {
+                    tree_max_nodes: 0,
+                    position_keyed_sampling: true,
+                },
+            )
+            .expect("Q8 position-keyed DFlash2 stream");
+            let mut q16 = DFlash2TextGenerationStream::new_text_only_with_options(
+                &target,
+                &draft,
+                &tokenizer,
+                request(sampled),
+                16,
+                DFlash2P2Options {
+                    tree_max_nodes: 0,
+                    position_keyed_sampling: true,
+                },
+            )
+            .expect("Q16 position-keyed DFlash2 stream");
+            for step in 0..64 {
+                let expected = q8
+                    .next_token()
+                    .expect("Q8 position-keyed token")
+                    .map(|event| (event.token, event.finish_reason));
+                let actual = q16
+                    .next_token()
+                    .expect("Q16 position-keyed token")
+                    .map(|event| (event.token, event.finish_reason));
+                assert_eq!(
+                    actual, expected,
+                    "position-keyed Q8/Q16 divergence at step {step}"
+                );
+            }
+            let metrics = q16.metrics();
+            assert!(
+                metrics.drafted_tokens >= 15,
+                "position-keyed sampling did not execute an initial fifteen-token Q16 draft"
+            );
+        }
+
+        let mut stateful = DFlash2TextGenerationStream::new_text_only_with_options(
+            &target,
+            &draft,
+            &tokenizer,
+            request(sampled),
+            16,
+            DFlash2P2Options::default(),
+        )
+        .expect("Q16 stateful-exact DFlash2 stream");
+        for _ in 0..64 {
+            stateful
+                .next_token()
+                .expect("Q16 stateful-exact token")
+                .expect("Q16 stateful-exact stream ended early");
+        }
+        let metrics = stateful.metrics();
+        assert_eq!(metrics.generated_tokens, 64);
+        assert!(metrics.exact_sampling_windows > 0);
+        assert!(
+            metrics.drafted_tokens >= 15,
+            "stateful exact sampling did not execute an initial fifteen-token Q16 draft"
+        );
+    }
+
+    #[test]
+    #[ignore = "loads the full local Qwen3.8 target and DFlash2 draft checkpoints"]
+    #[serial(mlx_metal)]
     fn qwen38_dflash2_batched_prefill_matches_scheduler_b1_exactly() {
         use ironmlx_core::sampler::Sampler;
         use ironmlx_lm::models::dflash2::DFlash2DraftModel;
@@ -2391,7 +3131,10 @@ mod tests {
                     &draft,
                     &tokenizer,
                     request,
-                    4,
+                    DFlash2ExecutionOptions {
+                        block_size: 4,
+                        p2: DFlash2P2Options::default(),
+                    },
                     None,
                     &|| false,
                 )
@@ -2405,6 +3148,7 @@ mod tests {
                 &tokenizer,
                 requests,
                 4,
+                DFlash2P2Options::default(),
                 &|_| false,
             )
             .expect("batched DFlash2 prefill");
@@ -2512,7 +3256,10 @@ mod tests {
                     &draft,
                     &tokenizer,
                     request.clone(),
-                    3,
+                    DFlash2ExecutionOptions {
+                        block_size: 3,
+                        p2: DFlash2P2Options::default(),
+                    },
                     None,
                     &|| false,
                 )
@@ -2524,6 +3271,7 @@ mod tests {
                     &tokenizer,
                     vec![request; 4],
                     3,
+                    DFlash2P2Options::default(),
                     &|_| false,
                 )
                 .expect("B4 DFlash2 streams");
@@ -2675,6 +3423,51 @@ mod tests {
         let error = ensure_dflash2_request_not_cancelled(Some(&|| true))
             .expect_err("cancelled request must stop at the next safe boundary");
         assert_eq!(error.to_string(), "DFlash2 request cancelled");
+    }
+
+    #[test]
+    fn p2_options_keep_stable_defaults_and_enforce_tree_cap() {
+        let stable = DFlash2P2Options::default();
+        assert_eq!(stable.tree_max_nodes, 0);
+        assert!(!stable.position_keyed_sampling);
+        stable.validate().expect("stable defaults");
+        DFlash2P2Options {
+            tree_max_nodes: DFlash2DraftTree::MAX_NODES,
+            position_keyed_sampling: true,
+        }
+        .validate()
+        .expect("maximum P2 tree");
+        assert!(DFlash2P2Options {
+            tree_max_nodes: DFlash2DraftTree::MAX_NODES + 1,
+            position_keyed_sampling: false,
+        }
+        .validate()
+        .is_err());
+    }
+
+    #[test]
+    fn tree_resolution_follows_matching_branch_and_returns_leaf_bonus() {
+        let tree = DFlash2DraftTree::new(vec![10, 11, 20, 21], vec![-1, -1, 0, 0]).expect("tree");
+        let paths = tree.leaf_paths();
+        assert_eq!(paths, vec![vec![1], vec![0, 2], vec![0, 3]]);
+        let target_tokens = vec![
+            10, 0, 0, // shared root prediction from row zero
+            10, 21, 0, // representative for node 0 predicts node 3
+            10, 21, 99, // representative for node 3 predicts the bonus
+        ];
+        let resolution =
+            resolve_tree_tokens(&tree, &paths, 3, &target_tokens).expect("resolve accepted branch");
+        assert_eq!(resolution.accepted_nodes, vec![0, 3]);
+        assert_eq!(resolution.bonus_token, 99);
+        assert_eq!(resolution.row, 2);
+
+        let mut rejected = target_tokens;
+        rejected[0] = 77;
+        let resolution =
+            resolve_tree_tokens(&tree, &paths, 3, &rejected).expect("resolve root miss");
+        assert!(resolution.accepted_nodes.is_empty());
+        assert_eq!(resolution.bonus_token, 77);
+        assert_eq!(resolution.row, 0);
     }
 
     #[test]

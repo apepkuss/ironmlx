@@ -155,6 +155,8 @@ struct DFlash2ActorCounters {
     accepted_draft_tokens: Arc<AtomicU64>,
     rollback_count: Arc<AtomicU64>,
     ordinary_windows: Arc<AtomicU64>,
+    tree_windows: Arc<AtomicU64>,
+    tree_drafted_nodes: Arc<AtomicU64>,
     draft_budget_changes: Arc<AtomicU64>,
     current_draft_budget: Arc<AtomicUsize>,
     latest_adaptive_acceptance_ewma_bits: Arc<AtomicU64>,
@@ -191,6 +193,10 @@ impl DFlash2ActorCounters {
             .fetch_add(metrics.rollback_count as u64, Ordering::Relaxed);
         self.ordinary_windows
             .fetch_add(metrics.ordinary_windows as u64, Ordering::Relaxed);
+        self.tree_windows
+            .fetch_add(metrics.tree_windows as u64, Ordering::Relaxed);
+        self.tree_drafted_nodes
+            .fetch_add(metrics.tree_drafted_nodes as u64, Ordering::Relaxed);
         self.draft_budget_changes
             .fetch_add(metrics.draft_budget_changes as u64, Ordering::Relaxed);
         self.current_draft_budget
@@ -270,6 +276,7 @@ fn prune_abandoned_pending_requests(
 
 pub(crate) struct DFlash2ActorConfig {
     pub(crate) block_size: usize,
+    pub(crate) p2_options: crate::core::dflash2::DFlash2P2Options,
     pub(crate) b_max: usize,
     pub(crate) admission_deadline: std::time::Duration,
     pub(crate) tensor_batch_max_width: usize,
@@ -306,6 +313,8 @@ pub struct DFlash2ActorHandle {
     pub(crate) accepted_draft_tokens: Arc<AtomicU64>,
     pub(crate) rollback_count: Arc<AtomicU64>,
     pub(crate) ordinary_windows: Arc<AtomicU64>,
+    pub(crate) tree_windows: Arc<AtomicU64>,
+    pub(crate) tree_drafted_nodes: Arc<AtomicU64>,
     pub(crate) draft_budget_changes: Arc<AtomicU64>,
     pub(crate) current_draft_budget: Arc<AtomicUsize>,
     pub(crate) latest_adaptive_acceptance_ewma_bits: Arc<AtomicU64>,
@@ -428,6 +437,7 @@ where
 {
     let DFlash2ActorConfig {
         block_size,
+        p2_options,
         b_max,
         admission_deadline,
         tensor_batch_max_width,
@@ -464,6 +474,8 @@ where
     let accepted_draft_tokens = Arc::new(AtomicU64::new(0));
     let rollback_count = Arc::new(AtomicU64::new(0));
     let ordinary_windows = Arc::new(AtomicU64::new(0));
+    let tree_windows = Arc::new(AtomicU64::new(0));
+    let tree_drafted_nodes = Arc::new(AtomicU64::new(0));
     let draft_budget_changes = Arc::new(AtomicU64::new(0));
     let current_draft_budget = Arc::new(AtomicUsize::new(initial_draft_budget));
     let latest_adaptive_acceptance_ewma_bits = Arc::new(AtomicU64::new(0_f64.to_bits()));
@@ -536,6 +548,8 @@ where
         accepted_draft_tokens: Arc::clone(&accepted_draft_tokens),
         rollback_count: Arc::clone(&rollback_count),
         ordinary_windows: Arc::clone(&ordinary_windows),
+        tree_windows: Arc::clone(&tree_windows),
+        tree_drafted_nodes: Arc::clone(&tree_drafted_nodes),
         draft_budget_changes: Arc::clone(&draft_budget_changes),
         current_draft_budget: Arc::clone(&current_draft_budget),
         latest_adaptive_acceptance_ewma_bits: Arc::clone(&latest_adaptive_acceptance_ewma_bits),
@@ -854,6 +868,7 @@ where
                         &tokenizer,
                         admission_requests,
                         block_size,
+                        p2_options,
                         &|_| false,
                     )
                     .context("initializing batched DFlash2 actor streams")
@@ -866,7 +881,10 @@ where
                         &draft,
                         &tokenizer,
                         request,
-                        block_size,
+                        super::dflash2::DFlash2ExecutionOptions {
+                            block_size,
+                            p2: p2_options,
+                        },
                         prefix_cache
                             .as_mut()
                             .map(|cache| (cache, prefix_fingerprint.as_str())),
@@ -1285,6 +1303,8 @@ where
         accepted_draft_tokens,
         rollback_count,
         ordinary_windows,
+        tree_windows,
+        tree_drafted_nodes,
         draft_budget_changes,
         current_draft_budget,
         latest_adaptive_acceptance_ewma_bits,

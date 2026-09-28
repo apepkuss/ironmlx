@@ -118,12 +118,16 @@ pub struct DFlash2HealthInfo {
     pub enabled: bool,
     pub block_size: Option<usize>,
     pub draft_quantization_bits: Option<i32>,
+    pub tree_max_nodes: usize,
+    pub position_keyed_sampling: bool,
     pub requests: u64,
     pub windows: u64,
     pub drafted_tokens: u64,
     pub accepted_draft_tokens: u64,
     pub rollback_count: u64,
     pub ordinary_windows: u64,
+    pub tree_windows: u64,
+    pub tree_drafted_nodes: u64,
     pub draft_budget_changes: u64,
     pub current_draft_budget: usize,
     pub latest_adaptive_acceptance_ewma: f64,
@@ -170,12 +174,16 @@ pub struct DFlash2HealthConfig {
     enabled: bool,
     block_size: Option<usize>,
     draft_quantization_bits: Option<i32>,
+    tree_max_nodes: usize,
+    position_keyed_sampling: bool,
     requests: Arc<AtomicU64>,
     windows: Arc<AtomicU64>,
     drafted_tokens: Arc<AtomicU64>,
     accepted_draft_tokens: Arc<AtomicU64>,
     rollback_count: Arc<AtomicU64>,
     ordinary_windows: Arc<AtomicU64>,
+    tree_windows: Arc<AtomicU64>,
+    tree_drafted_nodes: Arc<AtomicU64>,
     draft_budget_changes: Arc<AtomicU64>,
     current_draft_budget: Arc<AtomicUsize>,
     latest_adaptive_acceptance_ewma_bits: Arc<AtomicU64>,
@@ -223,12 +231,16 @@ impl DFlash2HealthConfig {
             enabled: false,
             block_size: None,
             draft_quantization_bits: None,
+            tree_max_nodes: 0,
+            position_keyed_sampling: false,
             requests: Arc::new(AtomicU64::new(0)),
             windows: Arc::new(AtomicU64::new(0)),
             drafted_tokens: Arc::new(AtomicU64::new(0)),
             accepted_draft_tokens: Arc::new(AtomicU64::new(0)),
             rollback_count: Arc::new(AtomicU64::new(0)),
             ordinary_windows: Arc::new(AtomicU64::new(0)),
+            tree_windows: Arc::new(AtomicU64::new(0)),
+            tree_drafted_nodes: Arc::new(AtomicU64::new(0)),
             draft_budget_changes: Arc::new(AtomicU64::new(0)),
             current_draft_budget: Arc::new(AtomicUsize::new(0)),
             latest_adaptive_acceptance_ewma_bits: Arc::new(AtomicU64::new(0_f64.to_bits())),
@@ -277,12 +289,16 @@ impl DFlash2HealthConfig {
     pub fn enabled(
         block_size: usize,
         draft_quantization_bits: Option<i32>,
+        tree_max_nodes: usize,
+        position_keyed_sampling: bool,
         requests: Arc<AtomicU64>,
         windows: Arc<AtomicU64>,
         drafted_tokens: Arc<AtomicU64>,
         accepted_draft_tokens: Arc<AtomicU64>,
         rollback_count: Arc<AtomicU64>,
         ordinary_windows: Arc<AtomicU64>,
+        tree_windows: Arc<AtomicU64>,
+        tree_drafted_nodes: Arc<AtomicU64>,
         draft_budget_changes: Arc<AtomicU64>,
         current_draft_budget: Arc<AtomicUsize>,
         latest_adaptive_acceptance_ewma_bits: Arc<AtomicU64>,
@@ -327,12 +343,16 @@ impl DFlash2HealthConfig {
             enabled: true,
             block_size: Some(block_size),
             draft_quantization_bits,
+            tree_max_nodes,
+            position_keyed_sampling,
             requests,
             windows,
             drafted_tokens,
             accepted_draft_tokens,
             rollback_count,
             ordinary_windows,
+            tree_windows,
+            tree_drafted_nodes,
             draft_budget_changes,
             current_draft_budget,
             latest_adaptive_acceptance_ewma_bits,
@@ -380,12 +400,16 @@ impl DFlash2HealthConfig {
             enabled: self.enabled,
             block_size: self.block_size,
             draft_quantization_bits: self.draft_quantization_bits,
+            tree_max_nodes: self.tree_max_nodes,
+            position_keyed_sampling: self.position_keyed_sampling,
             requests: self.requests.load(Ordering::Relaxed),
             windows: self.windows.load(Ordering::Relaxed),
             drafted_tokens: self.drafted_tokens.load(Ordering::Relaxed),
             accepted_draft_tokens: self.accepted_draft_tokens.load(Ordering::Relaxed),
             rollback_count: self.rollback_count.load(Ordering::Relaxed),
             ordinary_windows: self.ordinary_windows.load(Ordering::Relaxed),
+            tree_windows: self.tree_windows.load(Ordering::Relaxed),
+            tree_drafted_nodes: self.tree_drafted_nodes.load(Ordering::Relaxed),
             draft_budget_changes: self.draft_budget_changes.load(Ordering::Relaxed),
             current_draft_budget: self.current_draft_budget.load(Ordering::Relaxed),
             latest_adaptive_acceptance_ewma: f64::from_bits(
@@ -1457,6 +1481,8 @@ mod tests {
         let accepted_draft_tokens = Arc::new(AtomicU64::new(51));
         let rollback_count = Arc::new(AtomicU64::new(4));
         let ordinary_windows = Arc::new(AtomicU64::new(6));
+        let tree_windows = Arc::new(AtomicU64::new(5));
+        let tree_drafted_nodes = Arc::new(AtomicU64::new(42));
         let draft_budget_changes = Arc::new(AtomicU64::new(3));
         let current_draft_budget = Arc::new(AtomicUsize::new(2));
         let adaptive_acceptance_ewma_bits = Arc::new(AtomicU64::new(0.625_f64.to_bits()));
@@ -1499,12 +1525,16 @@ mod tests {
         collector.dflash2 = DFlash2HealthConfig::enabled(
             4,
             Some(4),
+            15,
+            true,
             requests,
             windows,
             drafted_tokens,
             accepted_draft_tokens,
             rollback_count,
             ordinary_windows,
+            tree_windows,
+            tree_drafted_nodes,
             draft_budget_changes,
             current_draft_budget,
             adaptive_acceptance_ewma_bits,
@@ -1555,12 +1585,16 @@ mod tests {
         assert!(snapshot.enabled);
         assert_eq!(snapshot.block_size, Some(4));
         assert_eq!(snapshot.draft_quantization_bits, Some(4));
+        assert_eq!(snapshot.tree_max_nodes, 15);
+        assert!(snapshot.position_keyed_sampling);
         assert_eq!(snapshot.requests, 3);
         assert_eq!(snapshot.windows, 17);
         assert_eq!(snapshot.drafted_tokens, 68);
         assert_eq!(snapshot.accepted_draft_tokens, 51);
         assert_eq!(snapshot.rollback_count, 4);
         assert_eq!(snapshot.ordinary_windows, 6);
+        assert_eq!(snapshot.tree_windows, 5);
+        assert_eq!(snapshot.tree_drafted_nodes, 42);
         assert_eq!(snapshot.draft_budget_changes, 3);
         assert_eq!(snapshot.current_draft_budget, 2);
         assert_eq!(snapshot.latest_adaptive_acceptance_ewma, 0.625);
