@@ -669,6 +669,13 @@ where
 {
     type MidAdmitHandle: Send + 'static;
 
+    /// Only the plain autoregressive mode may use Scheduler's B=1 greedy
+    /// async look-ahead. Speculative modes own different cache/state
+    /// transitions and keep their existing step implementations.
+    fn allow_b1_greedy_pipeline(&self) -> bool {
+        false
+    }
+
     fn allow_rolling_mid_admit(&self) -> bool {
         true
     }
@@ -725,6 +732,29 @@ where
         handle: Self::MidAdmitHandle,
         counters: &SchedulerActorMtpCounters,
     ) -> Result<(RequestId, StepEvent)>;
+}
+
+fn prefill_admitted_route_and_optional_b1_pipeline<M, A>(
+    sched: &mut Scheduler<M>,
+    model: &M,
+    mode: &mut A,
+    counters: &SchedulerActorMtpCounters,
+    can_prime_b1_pipeline: bool,
+    event_txs: &HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
+) -> Result<usize>
+where
+    M: Model + DenseVlMethods,
+    A: SchedulerActorMtpMode<M>,
+{
+    let events = mode.prefill_admitted(sched, model, counters)?;
+    let event_count = events.len();
+    for event in events {
+        route_event(event, event_txs);
+    }
+    if can_prime_b1_pipeline && mode.allow_b1_greedy_pipeline() {
+        let _ = sched.prime_b1_greedy_pipeline(model)?;
+    }
+    Ok(event_count)
 }
 
 struct SchedulerActorNoMtp;
@@ -1295,6 +1325,10 @@ where
 {
     type MidAdmitHandle = AdmitMidHandle;
 
+    fn allow_b1_greedy_pipeline(&self) -> bool {
+        true
+    }
+
     fn mid_admit_request_id(handle: &Self::MidAdmitHandle) -> RequestId {
         handle.request_id
     }
@@ -1333,9 +1367,18 @@ where
         sched: &mut Scheduler<M>,
         model: &M,
         _counters: &SchedulerActorMtpCounters,
-        _admission_pending: bool,
+        admission_pending: bool,
     ) -> Result<Vec<StepEvent>> {
-        sched.step(model)
+        if let Some(events) =
+            sched.step_b1_greedy_pipeline(model, /* continue_pipeline */ !admission_pending)?
+        {
+            return Ok(events);
+        }
+        let events = sched.step(model)?;
+        if !admission_pending {
+            let _ = sched.prime_b1_greedy_pipeline(model)?;
+        }
+        Ok(events)
     }
 
     fn begin_mid_admit(
@@ -3699,12 +3742,21 @@ fn driver_loop<M, A>(
         batch_count.fetch_add(1, Ordering::Relaxed);
         let prefill_profile = rolling_profile_enabled()
             .then(|| (sched.active_count(), admission_queue.len(), Instant::now()));
+        let can_prime_b1_pipeline =
+            mtp_mode.allow_b1_greedy_pipeline() && admission_queue.is_empty() && cmd_rx.is_empty();
         let prefill_result = {
             let model_lock = model.blocking_lock();
-            mtp_mode.prefill_admitted(&mut sched, &model_lock, &mtp_counters)
+            prefill_admitted_route_and_optional_b1_pipeline(
+                &mut sched,
+                &model_lock,
+                &mut mtp_mode,
+                &mtp_counters,
+                can_prime_b1_pipeline,
+                &event_txs,
+            )
         };
         match prefill_result {
-            Ok(prefill_events) => {
+            Ok(prefill_event_count) => {
                 if let Some((prefill_active, prefill_queue_len, prefill_timer)) = prefill_profile {
                     let prefill_end = Instant::now();
                     tracing::info!(
@@ -3713,12 +3765,9 @@ fn driver_loop<M, A>(
                         prefill_active,
                         prefill_queue_len,
                         fresh_batch_limit,
-                        prefill_events.len(),
+                        prefill_event_count,
                         rolling_profile_elapsed_ms(prefill_timer, prefill_end)
                     );
-                }
-                for ev in prefill_events {
-                    route_event(ev, &event_txs);
                 }
             }
             Err(e) => {
@@ -3930,6 +3979,55 @@ fn driver_loop<M, A>(
                     return;
                 }
                 RollingEvent::Admit(cmd) => {
+                    // A command can arrive after the prior decode step has
+                    // already pre-submitted its successor. Resolve that one
+                    // pending token before any mid-admit/cache-layout change.
+                    if mtp_mode.allow_b1_greedy_pipeline() {
+                        if let Err(error) =
+                            drain_b1_greedy_pipeline_before_mutation(&mut sched, &mut event_txs)
+                        {
+                            tracing::error!(%error, "failed to drain B1 greedy pipeline before admission");
+                            let SchedulerCommand::Admit { reply_tx, .. } = cmd;
+                            let _ = reply_tx.send(Err(anyhow::anyhow!(
+                                "scheduler B1 greedy pipeline failed before admission: {error:#}"
+                            )));
+                            if let Err(evict_error) = sched.evict_all() {
+                                tracing::warn!(%evict_error, "scheduler cleanup after B1 pipeline failure failed");
+                            }
+                            mtp_counters.reset_stats_baseline(sched.prompt_lookup_stats());
+                            in_flight_mid_admit = None;
+                            cleanup_parked_active_kv_requests(
+                                &sched,
+                                &mut parked_active_kv,
+                                &mut event_txs,
+                                &active_kv_stats,
+                                "B1 greedy pipeline admission-boundary failure",
+                            );
+                            cleanup_paused_background(
+                                &mut sched,
+                                &mut paused_background,
+                                &mut event_txs,
+                                &background_paused,
+                            );
+                            event_txs.clear();
+                            while let Some(pending) = admission_queue.pop_front() {
+                                let _ = pending.reply_tx.send(Err(anyhow::anyhow!(
+                                    "scheduler B1 greedy pipeline failed before admission"
+                                )));
+                            }
+                            continue 'outer;
+                        }
+                        if sched.phase() == Phase::Finished || sched.active_count() == 0 {
+                            enqueue_or_reject(
+                                cmd,
+                                &mut admission_queue,
+                                admission_queue_max,
+                                &queue_depth_peak,
+                                &queue_rejected,
+                            );
+                            continue 'rolling;
+                        }
+                    }
                     let SchedulerCommand::Admit { request, .. } = &cmd;
                     if (request.priority.is_background() && sched.has_foreground_request())
                         || !mtp_mode.allow_rolling_mid_admit()
@@ -4068,7 +4166,9 @@ fn driver_loop<M, A>(
                             &mut sched,
                             &model_lock,
                             &mtp_counters,
-                            in_flight_mid_admit.is_some() || !admission_queue.is_empty(),
+                            in_flight_mid_admit.is_some()
+                                || !admission_queue.is_empty()
+                                || !cmd_rx.is_empty(),
                         )
                     };
                     let step_end = step_profile.map(|_| Instant::now());
@@ -4078,7 +4178,17 @@ fn driver_loop<M, A>(
                             for ev in events {
                                 route_event(ev, &event_txs);
                             }
-                            let evicted_count = match sched.gc_finished_rows(&mut event_txs) {
+                            // A live look-ahead implies the sole occupied row
+                            // is non-terminal, so the ordinary finished-row
+                            // sweep would only allocate and scan empty lists
+                            // on every token. Defer it until the pipeline is
+                            // drained or reaches a terminal event.
+                            let gc_result = if sched.b1_greedy_pipeline_pending_id().is_some() {
+                                Ok(Vec::new())
+                            } else {
+                                sched.gc_finished_rows(&mut event_txs)
+                            };
+                            let evicted_count = match gc_result {
                                 Ok(evicted) => evicted.len(),
                                 Err(error) => {
                                     tracing::error!(%error, "request-owned KV release failed");
@@ -4861,6 +4971,15 @@ where
     A: SchedulerActorMtpMode<M>,
 {
     let mut evicted = 0;
+    if let Some(id) = sched.b1_greedy_pipeline_pending_id() {
+        let abandoned = event_txs.get(&id).is_none_or(|tx| tx.is_closed());
+        if abandoned {
+            if let Err(error) = sched.discard_b1_greedy_pipeline() {
+                tracing::warn!(request_id = id.0, %error, "failed to drain cancelled B1 greedy pipeline");
+                return 0;
+            }
+        }
+    }
     if let Some(handle) = in_flight_mid_admit.as_ref() {
         let id = A::mid_admit_request_id(handle);
         let abandoned = event_txs.get(&id).is_some_and(|tx| tx.is_closed());
@@ -5164,6 +5283,20 @@ fn route_event(ev: StepEvent, event_txs: &HashMap<RequestId, mpsc::UnboundedSend
         // that request and releases its KV/governor reservations.
         let _ = tx.send(ev);
     }
+}
+
+fn drain_b1_greedy_pipeline_before_mutation<M>(
+    sched: &mut Scheduler<M>,
+    event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
+) -> Result<()>
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    if let Some(event) = sched.drain_b1_greedy_pipeline()? {
+        route_event(event, event_txs);
+        let _ = sched.gc_finished_rows(event_txs)?;
+    }
+    Ok(())
 }
 
 fn try_park_one_active_kv_request<M>(
@@ -5545,16 +5678,20 @@ where
             }
         }
         batch_count.fetch_add(1, Ordering::Relaxed);
+        let can_prime_b1_pipeline = admission_queue.is_empty() && cmd_rx.is_empty();
         let prefill_result = {
             let model_lock = model.blocking_lock();
-            mtp_mode.prefill_admitted(sched, &model_lock, mtp_counters)
+            prefill_admitted_route_and_optional_b1_pipeline(
+                sched,
+                &model_lock,
+                mtp_mode,
+                mtp_counters,
+                can_prime_b1_pipeline,
+                event_txs,
+            )
         };
         match prefill_result {
-            Ok(events) => {
-                for ev in events {
-                    route_event(ev, event_txs);
-                }
-            }
+            Ok(_) => {}
             Err(e) => {
                 tracing::error!("[SchedulerActor] re-prefill (queue drain) error: {e:?}");
                 if let Err(evict_err) = sched.evict_all() {
@@ -5621,16 +5758,20 @@ where
                 ));
             }
             batch_count.fetch_add(1, Ordering::Relaxed);
+            let can_prime_b1_pipeline = admission_queue.is_empty() && cmd_rx.is_empty();
             let prefill_result = {
                 let model_lock = model.blocking_lock();
-                mtp_mode.prefill_admitted(sched, &model_lock, mtp_counters)
+                prefill_admitted_route_and_optional_b1_pipeline(
+                    sched,
+                    &model_lock,
+                    mtp_mode,
+                    mtp_counters,
+                    can_prime_b1_pipeline,
+                    event_txs,
+                )
             };
             match prefill_result {
-                Ok(events) => {
-                    for ev in events {
-                        route_event(ev, event_txs);
-                    }
-                }
+                Ok(_) => {}
                 Err(e) => {
                     tracing::error!("[SchedulerActor] re-prefill error: {e:?}");
                     if let Err(evict_err) = sched.evict_all() {
@@ -5661,6 +5802,7 @@ pub(crate) mod tests {
     use crate::core::generation_types::GenerateRequest;
     use ironmlx_core::sampler::Sampler;
     use ironmlx_lm::core::model_input::IMAGE_TOKEN_ID;
+    use serial_test::serial;
 
     use super::test_support::*;
 
@@ -5684,6 +5826,17 @@ pub(crate) mod tests {
             meta,
         )
         .expect("test scheduler startup")
+    }
+
+    fn configure_local_test_metallib() {
+        let Ok(mlx_dir) = std::env::var("MLX_DIR") else {
+            return;
+        };
+        let path = std::path::Path::new(&mlx_dir).join("lib/mlx.metallib");
+        if path.is_file() {
+            mlx::metal::set_metallib_path(path.to_string_lossy().as_ref())
+                .expect("load MLX_DIR/lib/mlx.metallib for test");
+        }
     }
 
     #[test]
@@ -6195,7 +6348,9 @@ pub(crate) mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial(mlx_metal)]
     async fn queued_admission_failures_preserve_later_requests() {
+        configure_local_test_metallib();
         for queue_valid_request in [false, true] {
             let model = Arc::new(Mutex::new(SchedulerActorFakeModel::with_forward_delay(
                 Duration::from_millis(25),
@@ -6343,7 +6498,9 @@ pub(crate) mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial(mlx_metal)]
     async fn foreground_request_preempts_and_then_resumes_background_in_place() {
+        configure_local_test_metallib();
         let model = Arc::new(Mutex::new(SchedulerActorFakeModel::with_forward_delay(
             Duration::from_millis(20),
         )));

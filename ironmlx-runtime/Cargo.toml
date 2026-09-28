@@ -52,3 +52,8 @@ required-features = ["tools"]
 name = "dflash2-batched-q8-q16-gate"
 path = "src/bin/dflash2-batched-q8-q16-gate.rs"
 required-features = ["tools"]
+
+[[bin]]
+name = "b1-path-qualification"
+path = "src/bin/b1-path-qualification.rs"
+required-features = ["tools"]
