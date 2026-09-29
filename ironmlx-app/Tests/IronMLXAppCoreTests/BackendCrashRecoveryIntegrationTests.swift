@@ -46,6 +46,7 @@ func realHelperKill9RecoversOnceThenTripsBreakerAndAllowsManualRetry() async thr
         url: root.appendingPathComponent("incidents.json")
     )
     var launchCount = 0
+    var initialPortHandoffScheduled = false
     let processManager = BackendProcessManager(
         configStore: configStore,
         logStore: logStore,
@@ -57,10 +58,17 @@ func realHelperKill9RecoversOnceThenTripsBreakerAndAllowsManualRetry() async thr
             )
         },
         processFactory: {
-            // Hold the selected port until immediately before the helper is
-            // created. Releasing it in availableLoopbackPort() left a wide
-            // bind-close-launch window that intermittently failed on CI.
-            portReservation.release()
+            if !initialPortHandoffScheduled {
+                initialPortHandoffScheduled = true
+                // Keep the reservation briefly after the helper starts. This
+                // deterministically exercises the helper's bounded bind retry
+                // and prevents the CI regression from depending on a rare
+                // bind-close-launch race.
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(250))
+                    portReservation.release()
+                }
+            }
             return Process()
         }
     )
