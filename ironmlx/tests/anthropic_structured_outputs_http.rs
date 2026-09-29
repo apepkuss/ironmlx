@@ -76,7 +76,6 @@ async fn boot_server(port: u16, model_dir: &Path) -> tokio::task::JoinHandle<any
             false,
             None,
             Default::default(),
-            true,
         )
         .await
     })

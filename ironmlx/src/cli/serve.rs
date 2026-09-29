@@ -113,11 +113,6 @@ pub struct ServeArgs {
     #[arg(long)]
     pub prefill_chunk_size: Option<usize>,
 
-    /// Deprecated compatibility flag. Ordinary HTTP generation always routes
-    /// through SchedulerActor.
-    #[arg(long)]
-    pub force_scheduler: bool,
-
     /// Maximum concurrent in-flight requests (Scheduler slot count).
     /// Requests beyond this limit go to the admission queue. Default `1`
     /// optimizes single-request prefill / decode by avoiding [B,T_max]-padded
@@ -807,7 +802,6 @@ where
             args.scheduler_autotune_report,
             vision_input,
             static_memory_estimate,
-            args.force_scheduler,
         ))
     }
 }
@@ -1459,6 +1453,7 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod scheduler_profile_tests {
     use ironmlx_runtime::core::scheduler_resolution::{
         check_loaded_scheduler_profile_health, default_scheduler_runtime_profile,
@@ -1558,7 +1553,6 @@ mod scheduler_profile_tests {
                 crate::server::security::ServerNetworkConfig::local("127.0.0.1", 8080).unwrap(),
             ),
             prefill_chunk_size: None,
-            force_scheduler: false,
             b_max: None,
             admission_deadline_ms: None,
             admission_queue_max: None,

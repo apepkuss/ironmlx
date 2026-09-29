@@ -707,7 +707,7 @@ async fn gemma4_moe_turboquant_kv_active_kv_offload_real_text_park_restore_when_
         let active_kv_root = unique_temp_dir(&format!("gemma4-moe-{label}-tq-active-kv-offload"));
         let prefix_config = PagedPrefixCacheConfig::new(
             &prefix_root,
-            &format!("gemma4-moe-{label}-tq-active-kv"),
+            format!("gemma4-moe-{label}-tq-active-kv"),
             16,
             4096,
         )

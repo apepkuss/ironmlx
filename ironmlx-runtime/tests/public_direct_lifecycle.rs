@@ -14,6 +14,7 @@ use ironmlx_runtime::test_support::SchedulerActorFakeModel;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial(mlx_metal)]
 async fn consumer_early_exit_releases_direct_worker_model_lock() {
+    configure_local_test_metallib();
     let dir = std::env::temp_dir().join(format!("ironmlx-direct-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&dir).unwrap();
     let path = dir.join("tokenizer.json");
@@ -119,4 +120,14 @@ async fn consumer_early_exit_releases_direct_worker_model_lock() {
         model.try_lock().is_ok(),
         "early consumer exit must release the model lock"
     );
+}
+
+fn configure_local_test_metallib() {
+    if let Ok(mlx_dir) = std::env::var("MLX_DIR") {
+        let path = std::path::Path::new(&mlx_dir).join("lib/mlx.metallib");
+        if path.is_file() {
+            mlx::metal::set_metallib_path(path.to_string_lossy().as_ref())
+                .expect("load MLX_DIR/lib/mlx.metallib for test");
+        }
+    }
 }

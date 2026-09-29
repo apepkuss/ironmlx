@@ -4,10 +4,8 @@
 //!   A. `scheduler_actor_b1_text_only_swap` — text request routes to
 //!      SchedulerActor; argmax bit-id ≥ 0.95 vs direct GenerationStream
 //!      baseline.
-//!   B. `scheduler_actor_long_prompt_routes_to_scheduler` — prompt_len >
-//!      chunk_size routes to SchedulerActor.
-//!   C. `scheduler_actor_vl_routes_to_scheduler` — VL request routing remains
-//!      unified on SchedulerActor.
+//!   B. `scheduler_actor_handles_chunked_long_prompt` — a prompt longer than
+//!      the prefill chunk is admitted and completed by SchedulerActor.
 //!
 //! Test gated `#[ignore]`; runs only with `QWEN35_MODEL` env var.
 
@@ -23,7 +21,6 @@ use ironmlx_lm::core::Loader;
 use ironmlx_lm::core::Message;
 use ironmlx_lm::core::Tokenizer;
 use ironmlx_lm::models::qwen3_5::Qwen35Model;
-use ironmlx_runtime::core::engine_state::should_route_to_scheduler;
 use ironmlx_runtime::core::generate::GenerationStream;
 use ironmlx_runtime::core::generation_types::GenerateRequest;
 use ironmlx_runtime::core::scheduler_actor::spawn_scheduler_actor;
@@ -160,7 +157,7 @@ async fn scheduler_actor_b1_text_only_swap() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore]
-async fn scheduler_actor_long_prompt_routes_to_scheduler() {
+async fn scheduler_actor_handles_chunked_long_prompt() {
     configure_local_test_metallib();
     let model_dir = std::env::var("QWEN35_MODEL").expect("QWEN35_MODEL env var required");
     let model_path = Path::new(&model_dir);
@@ -197,14 +194,6 @@ async fn scheduler_actor_long_prompt_routes_to_scheduler() {
         image_token_id: 248056,
         constraint: None,
     };
-
-    assert!(should_route_to_scheduler::<Qwen35Model>(
-        request.prompt_ids.len(),
-        request.prefill_chunk_size,
-        4,
-        false,
-        false,
-    ));
 
     // Admit and drain the former direct-path workload through SchedulerActor.
     let meta = model.model_meta();
@@ -243,72 +232,6 @@ async fn scheduler_actor_long_prompt_routes_to_scheduler() {
     assert!(
         !tokens.is_empty(),
         "long-prompt SchedulerActor produced no tokens"
-    );
-
-    let _ = tokenizer;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore]
-async fn scheduler_actor_vl_routes_to_scheduler() {
-    configure_local_test_metallib();
-    let model_dir = std::env::var("QWEN35_MODEL").expect("QWEN35_MODEL env var required");
-    let model_path = Path::new(&model_dir);
-    let loader = Loader::open(model_path).expect("Loader::open");
-    let model = Qwen35Model::from_loader(&loader).expect("Qwen35Model::from_loader");
-    let tokenizer = Tokenizer::from_loader(&loader).expect("Tokenizer::from_loader");
-
-    // Build a minimal VL request marker — pixel_values = Some(non-empty image list).
-    // The routing decision only checks `pixel_values.is_some()`; building a
-    // real VL prompt for end-to-end inference is heavy (P6 fixture) and is
-    // already covered by `qwen35_vl_logits_match`. This test verifies the
-    // routing-decision branch only.
-    let dummy_image: mlx::Array = (&[0.0_f32; 1][..], (1_i32,))
-        .try_into()
-        .expect("dummy array");
-    // image_grid_thw is Vec<(T, H, W)> — one dummy tile.
-    let dummy_grid: Vec<(i32, i32, i32)> = vec![(1, 1, 1)];
-
-    let request = GenerateRequest {
-        priority: Default::default(),
-        prompt_ids: tokenize_prompt(&tokenizer, "Describe the picture."),
-        max_new_tokens: 4,
-        sampler: Sampler::greedy(),
-        stop_token_ids: tokenizer.eos_token_ids().to_vec(),
-        prefill_chunk_size: 0, // chunking off — VL routing wins anyway
-        decode_cadence_mid_chunk_cap: 256,
-        kv_cache_turboquant_bits: None,
-        pixel_values: Some(vec![dummy_image]),
-        image_grid_thw: Some(dummy_grid),
-        image_spatial_merge_size: 2,
-        image_token_id: 248056,
-        constraint: None,
-    };
-
-    assert!(should_route_to_scheduler::<Qwen35Model>(
-        request.prompt_ids.len(),
-        request.prefill_chunk_size,
-        4,
-        false,
-        false,
-    ));
-
-    let meta = model.model_meta();
-    let model_arc = Arc::new(Mutex::new(model));
-    let handle =
-        spawn_scheduler_actor(model_arc, 4, Duration::from_millis(5), 32, 32768, 256, meta)
-            .expect("spawn_scheduler_actor");
-    let before = handle.admit_count.load(Ordering::Relaxed);
-
-    // The dummy image is intentionally not executable. Real Scheduler VL
-    // inference is covered by the batched_vl suite; this test guards the
-    // server-level routing contract.
-    drop(request);
-
-    let after = handle.admit_count.load(Ordering::Relaxed);
-    assert_eq!(
-        after, before,
-        "route-only test must not submit the dummy VL request"
     );
 
     let _ = tokenizer;

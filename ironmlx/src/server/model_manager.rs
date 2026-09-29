@@ -2438,7 +2438,6 @@ mod tests {
                 crate::server::security::ServerNetworkConfig::local("127.0.0.1", 8080).unwrap(),
             ),
             prefill_chunk_size: None,
-            force_scheduler: false,
             b_max: None,
             admission_deadline_ms: None,
             admission_queue_max: None,

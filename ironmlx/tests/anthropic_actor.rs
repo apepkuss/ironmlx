@@ -3,8 +3,8 @@
 //! Three scenarios:
 //!   1. `anthropic_actor_b1_text_only_swap` — single text request routes
 //!      to SchedulerActor; per-row tokens match B=1 GS baseline.
-//!   2. `anthropic_actor_long_prompt_routes_to_scheduler` — prompt_len >
-//!      chunk_size is admitted by SchedulerActor.
+//!   2. `anthropic_actor_handles_chunked_long_prompt` — prompt_len >
+//!      chunk_size is admitted and completed by SchedulerActor.
 //!   3. `anthropic_actor_scheduler_path_emits_6_event_sequence`
 //!      — directly invoke serve_via_scheduler_stream; assert 6 event
 //!      types appear in order + payload fields correct.
@@ -23,7 +23,6 @@ use ironmlx::server::AppState;
 use ironmlx_core::sampler::Sampler;
 use ironmlx_lm::core::vision_input::VisionInputConfig;
 use ironmlx_lm::models::qwen3_5::Qwen35Model;
-use ironmlx_runtime::core::engine_state::should_route_to_scheduler;
 use ironmlx_runtime::core::generate::GenerationStream;
 use ironmlx_runtime::core::generation_types::GenerateRequest;
 use {
@@ -210,7 +209,7 @@ async fn anthropic_actor_b1_text_only_swap() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore]
-async fn anthropic_actor_long_prompt_routes_to_scheduler() {
+async fn anthropic_actor_handles_chunked_long_prompt() {
     let (model, tokenizer) = load_fixture();
     let meta = model.lock().await.model_meta();
 
@@ -244,14 +243,6 @@ async fn anthropic_actor_long_prompt_routes_to_scheduler() {
         image_token_id: 248056,
         constraint: None,
     };
-
-    assert!(should_route_to_scheduler::<Qwen35Model>(
-        request.prompt_ids.len(),
-        request.prefill_chunk_size,
-        4,
-        false,
-        false,
-    ));
 
     // Verify the former direct-path workload is admitted and drained by the
     // same actor used by the Anthropic handler.
@@ -378,7 +369,6 @@ async fn anthropic_actor_scheduler_path_emits_6_event_sequence() {
         cold_materialization_tracker:
             ironmlx_runtime::core::process_memory::ColdMaterializationTracker::new(Default::default()),
         kv_cache_turboquant_bits: None,
-        force_scheduler_for_greedy: true,
         prompt_lookup_enabled: false,
         health_collector,
         runtime_usage: Arc::new(

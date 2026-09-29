@@ -112,7 +112,7 @@ class BenchmarkPromptLookupMatrixTests(unittest.TestCase):
         self.assertEqual(command[command.index("--max-sequences") + 1], "8")
         self.assertEqual(command[command.index("--max-cache-cap") + 1], "9728")
         self.assertEqual(command[command.index("--prefill-chunk-size") + 1], "2048")
-        self.assertIn("--force-scheduler", command)
+        self.assertNotIn("--force-scheduler", command)
         self.assertEqual(
             command[command.index("--prompt-lookup-max-index-entries") + 1],
             "12345",

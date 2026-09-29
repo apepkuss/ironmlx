@@ -2877,38 +2877,6 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn spawn_scheduler_actor_for_prompt_lookup_control<M>(
-    model: Arc<Mutex<M>>,
-    b_max: usize,
-    admission_deadline: Duration,
-    admission_queue_max: usize,
-    effective_cap_max: usize,
-    decode_cadence_mid_chunk_cap: usize,
-    meta: ironmlx_lm::core::model::ModelMeta,
-    paged_prefix_cache: Option<PagedPrefixCacheConfig>,
-    prefix_lru_cache: Option<PrefixLruCacheConfig>,
-    active_kv_offload: ActiveKvOffloadConfig,
-) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError>
-where
-    M: Model + DenseVlMethods + Send + 'static,
-{
-    spawn_scheduler_actor_with_mode(
-        model,
-        SchedulerActorNoMtp,
-        b_max,
-        admission_deadline,
-        admission_queue_max,
-        effective_cap_max,
-        decode_cadence_mid_chunk_cap,
-        meta,
-        paged_prefix_cache,
-        prefix_lru_cache,
-        AdaptiveAdmissionPolicy::prompt_lookup(),
-        active_kv_offload,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
 pub fn spawn_scheduler_actor_with_active_kv_offload<M>(
     model: Arc<Mutex<M>>,
     b_max: usize,

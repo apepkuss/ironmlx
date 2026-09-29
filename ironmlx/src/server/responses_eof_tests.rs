@@ -91,7 +91,6 @@ async fn state() -> AppState<SchedulerActorFakeModel> {
 
 async fn response(
     state: AppState<SchedulerActorFakeModel>,
-    scheduler: bool,
     stream: bool,
     count: usize,
     terminal: Option<&'static str>,
@@ -103,11 +102,9 @@ async fn response(
         axum::routing::post(move |Json(request): Json<ResponsesRequest>| {
             let state = state.clone();
             async move {
-                let mut prepared =
-                    prepare_response(&state, request.normalize().unwrap(), scheduler)
-                        .await
-                        .unwrap();
-                prepared.use_scheduler = scheduler;
+                let mut prepared = prepare_response(&state, request.normalize().unwrap())
+                    .await
+                    .unwrap();
                 let mut events: Vec<_> = (0..count)
                     .map(|index| GenerateEvent {
                         token: if index == 0 { 1 } else { 2 },
@@ -153,7 +150,6 @@ fn sse_events(wire: &str) -> Vec<serde_json::Value> {
 
 async fn reasoning_replay_response(
     state: AppState<SchedulerActorFakeModel>,
-    scheduler: bool,
     stream: bool,
     input: serde_json::Value,
     tokens: Vec<u32>,
@@ -175,11 +171,10 @@ async fn reasoning_replay_response(
                         )
                     }
                 };
-                let mut prepared = match prepare_response(&state, normalized, scheduler).await {
+                let mut prepared = match prepare_response(&state, normalized).await {
                     Ok(prepared) => prepared,
                     Err(response) => return response,
                 };
-                prepared.use_scheduler = scheduler;
                 // The fake model has no native template. Only inject its
                 // decoder dialect and committed tokens; all response loops,
                 // input normalization and SSE/JSON serialization are real.
@@ -222,73 +217,69 @@ async fn reasoning_replay_response(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn endpoints_replay_reasoning_only_truncation_without_400() {
     let state = state().await;
-    for scheduler in [false, true] {
-        for stream in [false, true] {
-            for (tokens, expected) in [
-                (vec![1], "incomplete"),
-                (vec![1, 3], "completed"),
-                (vec![1, 3, 2], "completed"),
-            ] {
-                let first = reasoning_replay_response(
-                    state.clone(),
-                    scheduler,
-                    stream,
-                    serde_json::json!([{"role":"user", "content":"question"}]),
-                    tokens,
-                    true,
-                )
-                .await;
-                assert_eq!(first.status(), StatusCode::OK);
-                let bytes = axum::body::to_bytes(first.into_body(), 65536)
-                    .await
+    for stream in [false, true] {
+        for (tokens, expected) in [
+            (vec![1], "incomplete"),
+            (vec![1, 3], "completed"),
+            (vec![1, 3, 2], "completed"),
+        ] {
+            let first = reasoning_replay_response(
+                state.clone(),
+                stream,
+                serde_json::json!([{"role":"user", "content":"question"}]),
+                tokens,
+                true,
+            )
+            .await;
+            assert_eq!(first.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(first.into_body(), 65536)
+                .await
+                .unwrap();
+            let output = if stream {
+                let events = sse_events(std::str::from_utf8(&bytes).unwrap());
+                let done = events
+                    .iter()
+                    .find(|event| {
+                        event["type"] == "response.output_item.done"
+                            && event["item"]["type"] == "reasoning"
+                    })
                     .unwrap();
-                let output = if stream {
-                    let events = sse_events(std::str::from_utf8(&bytes).unwrap());
-                    let done = events
-                        .iter()
-                        .find(|event| {
-                            event["type"] == "response.output_item.done"
-                                && event["item"]["type"] == "reasoning"
-                        })
-                        .unwrap();
-                    assert_eq!(done["item"]["status"], expected);
-                    assert_eq!(events.last().unwrap()["type"], "response.incomplete");
-                    assert_eq!(
-                        events.last().unwrap()["response"]["output"][0],
-                        done["item"]
-                    );
-                    // pi-ai retains the full item from this event for replay.
-                    serde_json::json!([done["item"].clone()])
-                } else {
-                    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-                    assert_eq!(body["output"][0]["status"], expected);
-                    assert_eq!(body["status"], "incomplete");
-                    body["output"].clone()
-                };
-                let mut history = vec![serde_json::json!({"role":"user", "content":"question"})];
-                history.extend(output.as_array().unwrap().iter().cloned());
-                history.push(serde_json::json!({"role":"user", "content":"continue"}));
-                let next = reasoning_replay_response(
-                    state.clone(),
-                    scheduler,
-                    stream,
-                    serde_json::json!(history),
-                    vec![1],
-                    false,
-                )
-                .await;
-                assert_eq!(next.status(), StatusCode::OK);
-                let bytes = axum::body::to_bytes(next.into_body(), 65536).await.unwrap();
-                if stream {
-                    let events = sse_events(std::str::from_utf8(&bytes).unwrap());
-                    assert_eq!(events.last().unwrap()["type"], "response.incomplete");
-                    assert!(events
-                        .iter()
-                        .any(|event| event["type"] == "response.output_text.delta"));
-                } else {
-                    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-                    assert_eq!(body["output"][0]["type"], "message");
-                }
+                assert_eq!(done["item"]["status"], expected);
+                assert_eq!(events.last().unwrap()["type"], "response.incomplete");
+                assert_eq!(
+                    events.last().unwrap()["response"]["output"][0],
+                    done["item"]
+                );
+                // pi-ai retains the full item from this event for replay.
+                serde_json::json!([done["item"].clone()])
+            } else {
+                let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(body["output"][0]["status"], expected);
+                assert_eq!(body["status"], "incomplete");
+                body["output"].clone()
+            };
+            let mut history = vec![serde_json::json!({"role":"user", "content":"question"})];
+            history.extend(output.as_array().unwrap().iter().cloned());
+            history.push(serde_json::json!({"role":"user", "content":"continue"}));
+            let next = reasoning_replay_response(
+                state.clone(),
+                stream,
+                serde_json::json!(history),
+                vec![1],
+                false,
+            )
+            .await;
+            assert_eq!(next.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(next.into_body(), 65536).await.unwrap();
+            if stream {
+                let events = sse_events(std::str::from_utf8(&bytes).unwrap());
+                assert_eq!(events.last().unwrap()["type"], "response.incomplete");
+                assert!(events
+                    .iter()
+                    .any(|event| event["type"] == "response.output_text.delta"));
+            } else {
+                let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(body["output"][0]["type"], "message");
             }
         }
     }
@@ -297,68 +288,65 @@ async fn endpoints_replay_reasoning_only_truncation_without_400() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn endpoints_reject_eof_before_or_after_output() {
     let state = state().await;
-    for scheduler in [false, true] {
-        for count in [0, 2] {
-            for stream in [false, true] {
-                let response = response(state.clone(), scheduler, stream, count, None).await;
-                assert_eq!(
-                    response.status(),
-                    if stream {
-                        StatusCode::OK
-                    } else {
-                        StatusCode::INTERNAL_SERVER_ERROR
-                    },
-                    "scheduler={scheduler}, count={count}, stream={stream}"
-                );
-                let content_type = response.headers()[header::CONTENT_TYPE]
-                    .to_str()
-                    .unwrap()
-                    .to_owned();
-                let bytes = tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    axum::body::to_bytes(response.into_body(), 65536),
-                )
-                .await
-                .expect("response must close after EOF")
-                .unwrap();
+    for count in [0, 2] {
+        for stream in [false, true] {
+            let response = response(state.clone(), stream, count, None).await;
+            assert_eq!(
+                response.status(),
                 if stream {
-                    assert!(content_type.starts_with("text/event-stream"));
-                    let events = sse_events(std::str::from_utf8(&bytes).unwrap());
-                    assert_eq!(events.first().unwrap()["type"], "response.created");
-                    assert_eq!(events.last().unwrap()["type"], "response.failed");
-                    assert_eq!(
+                    StatusCode::OK
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                },
+                "count={count}, stream={stream}"
+            );
+            let content_type = response.headers()[header::CONTENT_TYPE]
+                .to_str()
+                .unwrap()
+                .to_owned();
+            let bytes = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                axum::body::to_bytes(response.into_body(), 65536),
+            )
+            .await
+            .expect("response must close after EOF")
+            .unwrap();
+            if stream {
+                assert!(content_type.starts_with("text/event-stream"));
+                let events = sse_events(std::str::from_utf8(&bytes).unwrap());
+                assert_eq!(events.first().unwrap()["type"], "response.created");
+                assert_eq!(events.last().unwrap()["type"], "response.failed");
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|e| e["type"] == "response.failed")
+                        .count(),
+                    1
+                );
+                assert!(!events.iter().any(
+                    |e| e["type"] == "response.completed" || e["type"] == "response.incomplete"
+                ));
+                assert!(events
+                    .last()
+                    .unwrap()
+                    .to_string()
+                    .contains(MISSING_TERMINAL_EVENT));
+                if count > 0 {
+                    assert!(
                         events
                             .iter()
-                            .filter(|e| e["type"] == "response.failed")
-                            .count(),
-                        1
+                            .any(|e| e["type"] == "response.output_text.delta"
+                                && !e["delta"].as_str().unwrap().is_empty()),
+                        "partial output must really reach the wire: {events:?}"
                     );
-                    assert!(!events
-                        .iter()
-                        .any(|e| e["type"] == "response.completed"
-                            || e["type"] == "response.incomplete"));
-                    assert!(events
-                        .last()
-                        .unwrap()
-                        .to_string()
-                        .contains(MISSING_TERMINAL_EVENT));
-                    if count > 0 {
-                        assert!(
-                            events
-                                .iter()
-                                .any(|e| e["type"] == "response.output_text.delta"
-                                    && !e["delta"].as_str().unwrap().is_empty()),
-                            "partial output must really reach the wire: {events:?}"
-                        );
-                    }
-                } else {
-                    assert!(content_type.starts_with("application/json"));
-                    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-                    assert_eq!(body["error"]["code"], "generation_error");
-                    assert_eq!(body["error"]["type"], "server_error");
-                    assert_eq!(body["error"]["message"], MISSING_TERMINAL_EVENT);
-                    assert!(body.get("output").is_none());
                 }
+            } else {
+                assert!(content_type.starts_with("application/json"));
+                let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(body["error"]["code"], "generation_error");
+                assert_eq!(body["error"]["type"], "server_error");
+                assert_eq!(body["error"]["message"], MISSING_TERMINAL_EVENT);
+                assert!(body.get("output").is_none());
             }
         }
     }
@@ -367,27 +355,25 @@ async fn endpoints_reject_eof_before_or_after_output() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn endpoints_preserve_stop_and_length_with_terminal_events() {
     let state = state().await;
-    for scheduler in [false, true] {
-        for (reason, status) in [("stop", "completed"), ("length", "incomplete")] {
-            for stream in [false, true] {
-                let response = response(state.clone(), scheduler, stream, 2, Some(reason)).await;
-                assert_eq!(response.status(), StatusCode::OK);
-                let bytes = tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    axum::body::to_bytes(response.into_body(), 65536),
-                )
-                .await
-                .unwrap()
-                .unwrap();
-                if stream {
-                    let events = sse_events(std::str::from_utf8(&bytes).unwrap());
-                    assert_eq!(events.last().unwrap()["type"], format!("response.{status}"));
-                    assert!(!events.iter().any(|e| e["type"] == "response.failed"));
-                } else {
-                    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-                    assert_eq!(body["status"], status);
-                    assert!(body.get("error").is_none_or(serde_json::Value::is_null));
-                }
+    for (reason, status) in [("stop", "completed"), ("length", "incomplete")] {
+        for stream in [false, true] {
+            let response = response(state.clone(), stream, 2, Some(reason)).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                axum::body::to_bytes(response.into_body(), 65536),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            if stream {
+                let events = sse_events(std::str::from_utf8(&bytes).unwrap());
+                assert_eq!(events.last().unwrap()["type"], format!("response.{status}"));
+                assert!(!events.iter().any(|e| e["type"] == "response.failed"));
+            } else {
+                let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(body["status"], status);
+                assert!(body.get("error").is_none_or(serde_json::Value::is_null));
             }
         }
     }

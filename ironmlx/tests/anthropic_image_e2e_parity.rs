@@ -33,8 +33,8 @@
 //!     miscomputed to all-NaN logits (argmax 0 = <pad> → empty). ~35-55%
 //!     intermittent, all-KVCache models only (qwen/minicpmv hybrid cache dodged
 //!     it). Fix: `eval` barrier on the prefix hidden at both VL + text split sites.
-//!   Both bugs were in feature-predating model/scheduler code; the OpenAI endpoint
-//!   hit them identically, confirming the Anthropic wire layer was always sound.
+//!     Both bugs were in feature-predating model/scheduler code; the OpenAI endpoint
+//!     hit them identically, confirming the Anthropic wire layer was always sound.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -134,7 +134,6 @@ where
             /* scheduler_autotune_report */ false,
             /* vision_input_override */ vision,
             /* static_memory_estimate */ Default::default(),
-            /* force_scheduler */ true,
         )
         .await
     })

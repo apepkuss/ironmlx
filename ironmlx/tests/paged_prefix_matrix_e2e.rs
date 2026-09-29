@@ -572,11 +572,10 @@ async fn post_chat(
     assert_eq!(status, 200, "chat completion failed: {text}");
     let json: serde_json::Value = serde_json::from_str(&text).expect("chat completion json");
     assert!(
-        json["choices"][0]["message"]["content"]
+        !json["choices"][0]["message"]["content"]
             .as_str()
             .unwrap_or_default()
-            .len()
-            > 0,
+            .is_empty(),
         "assistant content must not be empty: {json}"
     );
     assert!(
@@ -802,10 +801,9 @@ fn slice_vision_rows(embeds: &mlx::Array, start: i32, end: i32) -> mlx::Array {
     .expect("slice vision rows")
 }
 
-fn gemma4_prompt_inputs(
-    tokenizer: &Tokenizer,
-    vision: &VisionInputConfig,
-) -> (Vec<i32>, Vec<mlx::Array>, Vec<(i32, i32, i32)>, i32) {
+type Gemma4PromptInputs = (Vec<i32>, Vec<mlx::Array>, Vec<(i32, i32, i32)>, i32);
+
+fn gemma4_prompt_inputs(tokenizer: &Tokenizer, vision: &VisionInputConfig) -> Gemma4PromptInputs {
     let image_token_id =
         ironmlx_lm::core::vision_input::derive_image_token_and_merge(vision, tokenizer).0;
     let bytes = std::fs::read(coco_path()).expect("read image fixture");
