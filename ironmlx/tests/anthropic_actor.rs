@@ -1,11 +1,11 @@
 //! B1-p2.3b-4 — Anthropic handler refactor + SchedulerActor integration.
 //!
-//! Three scenarios (see spec § 5.2):
+//! Three scenarios:
 //!   1. `anthropic_actor_b1_text_only_swap` — single text request routes
 //!      to SchedulerActor; per-row tokens match B=1 GS baseline.
-//!   2. `anthropic_actor_long_prompt_routes_to_gs` — prompt_len >
-//!      chunk_size routes to GS; admit_count delta=0.
-//!   3. (Task 3) `anthropic_actor_scheduler_path_emits_6_event_sequence`
+//!   2. `anthropic_actor_long_prompt_routes_to_scheduler` — prompt_len >
+//!      chunk_size is admitted by SchedulerActor.
+//!   3. `anthropic_actor_scheduler_path_emits_6_event_sequence`
 //!      — directly invoke serve_via_scheduler_stream; assert 6 event
 //!      types appear in order + payload fields correct.
 //!
@@ -23,6 +23,7 @@ use ironmlx::server::AppState;
 use ironmlx_core::sampler::Sampler;
 use ironmlx_lm::core::vision_input::VisionInputConfig;
 use ironmlx_lm::models::qwen3_5::Qwen35Model;
+use ironmlx_runtime::core::engine_state::should_route_to_scheduler;
 use ironmlx_runtime::core::generate::GenerationStream;
 use ironmlx_runtime::core::generation_types::GenerateRequest;
 use {
@@ -44,6 +45,13 @@ use {
 const ARGMAX_BITID_GATE: f64 = 0.95;
 
 fn load_fixture() -> (Arc<Mutex<Qwen35Model>>, Arc<Tokenizer>) {
+    static METALLIB: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    METALLIB.get_or_init(|| {
+        let mlx_dir = std::env::var("MLX_DIR").expect("MLX_DIR required for MLX tests");
+        let path = Path::new(&mlx_dir).join("lib/mlx.metallib");
+        mlx::metal::set_metallib_path(path.to_string_lossy().as_ref())
+            .expect("load MLX_DIR/lib/mlx.metallib for test");
+    });
     let model_dir = std::env::var("QWEN35_MODEL").expect("QWEN35_MODEL env var required");
     let model_path = Path::new(&model_dir);
     let loader = Loader::open(model_path).expect("Loader::open");
@@ -202,7 +210,7 @@ async fn anthropic_actor_b1_text_only_swap() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore]
-async fn anthropic_actor_long_prompt_routes_to_gs() {
+async fn anthropic_actor_long_prompt_routes_to_scheduler() {
     let (model, tokenizer) = load_fixture();
     let meta = model.lock().await.model_meta();
 
@@ -237,16 +245,16 @@ async fn anthropic_actor_long_prompt_routes_to_gs() {
         constraint: None,
     };
 
-    // Routing predicate (mirrors Anthropic dispatch in messages handler).
-    // Anthropic has no has_images check (text-only by design).
-    let prompt_len = request.prompt_ids.len();
-    let use_scheduler = request.prefill_chunk_size == 0 || prompt_len <= request.prefill_chunk_size;
-    assert!(
-        !use_scheduler,
-        "routing predicate failed: long prompt would go to scheduler"
-    );
+    assert!(should_route_to_scheduler::<Qwen35Model>(
+        request.prompt_ids.len(),
+        request.prefill_chunk_size,
+        4,
+        false,
+        false,
+    ));
 
-    // Verify admit_count doesn't change when GS path is taken.
+    // Verify the former direct-path workload is admitted and drained by the
+    // same actor used by the Anthropic handler.
     let handle = spawn_scheduler_actor(
         model.clone(),
         4,
@@ -259,15 +267,18 @@ async fn anthropic_actor_long_prompt_routes_to_gs() {
     .expect("spawn");
     let before = handle.admit_count.load(Ordering::Relaxed);
 
-    // Drop the request — the GS path bypasses the actor; the test only
-    // needs to assert the routing decision (mirrors 3b-2 Scenario B/C).
-    let _ = request;
+    let tokens = admit_and_drain(handle.clone(), request).await;
 
     let after = handle.admit_count.load(Ordering::Relaxed);
     assert_eq!(
-        after, before,
-        "admit_count incremented unexpectedly: {} -> {}",
-        before, after
+        after - before,
+        1,
+        "expected one long-prompt admit, got delta={}",
+        after - before
+    );
+    assert!(
+        !tokens.is_empty(),
+        "long-prompt SchedulerActor produced no tokens"
     );
 }
 

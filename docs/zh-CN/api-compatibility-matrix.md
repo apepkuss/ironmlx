@@ -46,7 +46,7 @@ Responses reasoning item 和 Messages thinking block 依赖精确模板，Chat �
 | `previous_response_id / conversation` | 拒绝；无服务端历史存储 |
 | `include` | 仅接受 reasoning.encrypted_content 请求形状；不生成加密内容 |
 | `prompt_cache_key / client_metadata / metadata` | 仅校验结构和长度，不提供托管平台语义 |
-| `service_tier / truncation` | tier 的 auto/default 为前台；flex 可抢占语义已在 DFlash2 服务中完整资格化，普通因果模型在统一调度前尚不保证每个请求都生效；其他 tier 值被拒绝。truncation 仅支持 disabled |
+| `service_tier / truncation` | tier 的 auto/default 为前台；flex 在普通因果与 DFlash2 服务中均以后台优先级运行，并可被前台请求抢占；其他 tier 值被拒绝。truncation 仅支持 disabled |
 | `top_k / repetition_penalty` | 拒绝 |
 
 ## Anthropic Messages

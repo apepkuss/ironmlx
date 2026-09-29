@@ -632,8 +632,8 @@ mod tests {
     }
 
     #[test]
-    fn route_keeps_unlimited_model_long_prompt_on_generation_stream() {
-        assert!(!should_route_to_scheduler::<DefaultRouteModel>(
+    fn route_uses_scheduler_for_unlimited_model_chunked_long_prompt() {
+        assert!(should_route_to_scheduler::<DefaultRouteModel>(
             4096, 2048, 4, false, false,
         ));
     }
@@ -657,6 +657,27 @@ mod tests {
         assert!(should_route_to_scheduler::<DefaultRouteModel>(
             4096, 2048, 1, false, true,
         ));
+    }
+
+    #[test]
+    fn route_uses_scheduler_across_former_direct_path_boundaries() {
+        for prompt_len in [1, 2048, 2049, 32768] {
+            for chunk_size in [0, 2048] {
+                for b_max in [1, 4] {
+                    for paged_prefix in [false, true] {
+                        for force_scheduler in [false, true] {
+                            assert!(should_route_to_scheduler::<DefaultRouteModel>(
+                                prompt_len,
+                                chunk_size,
+                                b_max,
+                                paged_prefix,
+                                force_scheduler,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

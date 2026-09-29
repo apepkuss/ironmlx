@@ -113,8 +113,8 @@ pub struct ServeArgs {
     #[arg(long)]
     pub prefill_chunk_size: Option<usize>,
 
-    /// Route greedy HTTP generation through SchedulerActor even when the
-    /// ordinary GenerationStream path would otherwise be eligible.
+    /// Deprecated compatibility flag. Ordinary HTTP generation always routes
+    /// through SchedulerActor.
     #[arg(long)]
     pub force_scheduler: bool,
 

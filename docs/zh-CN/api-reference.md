@@ -136,6 +136,9 @@ DFlash2 actor、Gemma4 drafter、DiffusionGemma、EnginePool 和 App daemon 共�
 其 capability 描述明确拒绝。`/v1/models` 在 EnginePool、App daemon 及 App 的 DFlash2 discovery 路径公开；
 `/admin/api/models/*` 只在 App daemon 拓扑公开。
 
+普通因果模型的全部 HTTP 请求统一使用 SchedulerActor，包括长上下文 chunked-prefill、
+多模态、sampling 与约束解码请求；请求形态不再选择直接 `GenerationStream` 服务路径。
+
 ### SSE 断连与取消契约
 
 Chat Completions、Responses 和 Anthropic Messages 的流式请求在 SSE 响应开始后
@@ -145,9 +148,8 @@ Chat Completions、Responses 和 Anthropic Messages 的流式请求在 SSE 响�
 
 | 生成路径 | 取消生效点 | 释放内容 |
 |---|---|---|
-| Scheduler（包括 MTP/辅助 drafter） | 当前模型 forward 结束后的下一次安全调度边界 | 活跃请求、调度槽、KV cache 与内存预算 |
+| Scheduler（包括普通因果、MTP 与辅助 drafter 服务） | 当前模型 forward 结束后的下一次安全调度边界 | 活跃请求、调度槽、KV cache 与内存预算 |
 | DFlash2 actor | 当前 target/draft forward 结束后的下一次安全事件边界 | 请求级 target/draft cache、活动槽与内存预算 |
-| 直接 `GenerationStream` | 当前 token forward 结束后的下一次 token 边界 | 生成状态与直接请求内存预留 |
 | DiffusionGemma | 当前 block-diffusion 步骤结束后的下一次事件边界 | generation lane 与请求状态 |
 
 取消不会强行中断正在执行的 Metal forward；这是为了避免在设备工作未完成时破坏模型

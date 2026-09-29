@@ -140,10 +140,10 @@ impl ChatMessage {
 // ---------------------------------------------------------------------------
 
 /// Apply the model's chat template to render `messages` to a single prompt
-/// string, then tokenize. Returns the token ids feeding into
-/// [`ironmlx_runtime::core::generate::GenerationStream`]. `chat_template_kwargs`,
-/// when present, is forwarded as additional template render-context
-/// variables (e.g. `enable_thinking` for Qwen3+ thinking-mode toggle).
+/// string, then tokenize. Returns the token ids consumed by the generation
+/// runtime. `chat_template_kwargs`, when present, is forwarded as additional
+/// template render-context variables (e.g. `enable_thinking` for Qwen3+
+/// thinking-mode toggle).
 ///
 /// **Precondition:** All `ChatMessage::content` values must be `Content::Text`
 /// at call time. Multimodal messages must be expanded by the caller

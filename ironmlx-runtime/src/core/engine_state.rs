@@ -26,9 +26,9 @@ use {
 /// concurrent requests serialize behind the lock (P4 single-stream contract).
 ///
 /// `request_execution` selects either the mature SchedulerActor or the isolated
-/// DFlash2 actor. Ordinary engines may still route long text requests directly
-/// through GenerationStream; DFlash2 engines route every request to their actor
-/// so unsupported capabilities cannot silently fall back to ordinary decoding.
+/// DFlash2 actor. Every ordinary HTTP request routes through SchedulerActor;
+/// DFlash2 engines route every request to their actor. `GenerationStream`
+/// remains available to benchmarks and diagnostics, but is not a serving path.
 ///
 /// P5a-T5: CausalEngine is now generic over `M: Model + DenseVlMethods + Send +
 /// 'static`. CLI call sites pass either `Qwen35Model` or `Qwen35MoeModel`
@@ -228,22 +228,17 @@ impl Gemma4DrafterEngine {
 }
 
 pub fn should_route_to_scheduler<M: Model>(
-    prompt_len: usize,
-    prefill_chunk_size: usize,
-    b_max: usize,
-    paged_prefix_cache_enabled: bool,
-    force_scheduler: bool,
+    _prompt_len: usize,
+    _prefill_chunk_size: usize,
+    _b_max: usize,
+    _paged_prefix_cache_enabled: bool,
+    _force_scheduler: bool,
 ) -> bool {
-    if force_scheduler {
-        return true;
-    }
-    if paged_prefix_cache_enabled {
-        return true;
-    }
-    if prefill_chunk_size == 0 || prompt_len <= prefill_chunk_size {
-        return true;
-    }
-    M::fresh_prefill_batch_limit(prompt_len, b_max) < b_max
+    // Keep this compatibility seam until the now-unreachable direct HTTP
+    // handlers are removed. SchedulerActor covers text, VL, chunked prefill,
+    // constraints, sampling and request priority, so request shape must no
+    // longer select a second serving implementation.
+    true
 }
 
 pub(crate) trait SchedulerActorSpawner<M>
