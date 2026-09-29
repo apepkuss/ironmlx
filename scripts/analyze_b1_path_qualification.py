@@ -239,6 +239,34 @@ def analyze(
     }
 
 
+def interpretation_lines(report: dict[str, Any]) -> list[str]:
+    greedy = report["aggregate"]["greedy"]
+    sampled = report["aggregate"]["sampled"]
+    gates = report["gates"]
+    strict_gate = gates["strict_2pct_per_cell"]
+    all_gates_pass = all(gates.values())
+    lines = [
+        f"- Greedy aggregate generation TPS ratio is {greedy['actor_over_direct_generation_tps']['estimate']:.4f}; the strict 2% per-cell parity gate {'passes' if strict_gate else 'fails'}.",
+        f"- Sampled aggregate generation TPS ratio is {sampled['actor_over_direct_generation_tps']['estimate']:.4f}.",
+    ]
+    if all_gates_pass:
+        lines.extend(
+            [
+                "- Token output is exact, every measured run is valid, and isolated peak memory stays within the 10% limit.",
+                "- Performance qualification passes all declared gates. This clears the B1 performance gate for capability coverage and route unification; it does not by itself complete those later stages.",
+            ]
+        )
+    else:
+        failed = ", ".join(name for name, passed in gates.items() if not passed)
+        lines.extend(
+            [
+                f"- Performance qualification remains incomplete; failed gates: {failed}.",
+                "- Keep the GenerationStream route until the failed gates are addressed and this qualification is repeated.",
+            ]
+        )
+    return lines
+
+
 def render_markdown(report: dict[str, Any]) -> str:
     qualification = report["qualification"]
     lines = [
@@ -290,17 +318,12 @@ def render_markdown(report: dict[str, Any]) -> str:
     lines.extend(["", "## Gates", ""])
     for name, passed in report["gates"].items():
         lines.append(f"- {'PASS' if passed else 'FAIL'}: `{name}`")
-    greedy = report["aggregate"]["greedy"]
-    sampled = report["aggregate"]["sampled"]
     lines.extend(
         [
             "",
             "## Interpretation",
             "",
-            f"- Greedy aggregate generation TPS ratio is {greedy['actor_over_direct_generation_tps']['estimate']:.4f}; the strict 2% per-cell parity gate fails.",
-            f"- Sampled aggregate generation TPS ratio is {sampled['actor_over_direct_generation_tps']['estimate']:.4f}; SchedulerActor is materially faster, especially at long context.",
-            "- Token output is exact and isolated peak memory is effectively unchanged.",
-            "- Do not remove GenerationStream solely on this result. First recover its B1 greedy pre-submit pipeline inside SchedulerActor, or explicitly accept the measured roughly 2-3% greedy decode loss, then repeat this qualification.",
+            *interpretation_lines(report),
         ]
     )
     return "\n".join(lines) + "\n"

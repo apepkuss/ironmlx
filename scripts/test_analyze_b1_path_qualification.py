@@ -25,6 +25,40 @@ class B1AnalysisTests(unittest.TestCase):
     def test_percentile_interpolates(self) -> None:
         self.assertAlmostEqual(MODULE.percentile([1.0, 3.0], 0.25), 1.5)
 
+    @staticmethod
+    def interpretation_report(*, strict_gate: bool) -> dict:
+        ratio = {"estimate": 1.0, "ci95_low": 0.99, "ci95_high": 1.01}
+        return {
+            "aggregate": {
+                "greedy": {"actor_over_direct_generation_tps": ratio},
+                "sampled": {"actor_over_direct_generation_tps": ratio},
+            },
+            "gates": {
+                "token_exact_and_all_valid": True,
+                "strict_2pct_per_cell": strict_gate,
+                "safety_5pct_per_cell": True,
+                "peak_memory_no_more_than_10pct": True,
+            },
+        }
+
+    def test_interpretation_reports_passing_qualification(self) -> None:
+        lines = MODULE.interpretation_lines(
+            self.interpretation_report(strict_gate=True)
+        )
+        rendered = "\n".join(lines)
+        self.assertIn("strict 2% per-cell parity gate passes", rendered)
+        self.assertIn("Performance qualification passes all declared gates", rendered)
+        self.assertNotIn("Keep the GenerationStream route", rendered)
+
+    def test_interpretation_reports_failed_gate(self) -> None:
+        lines = MODULE.interpretation_lines(
+            self.interpretation_report(strict_gate=False)
+        )
+        rendered = "\n".join(lines)
+        self.assertIn("strict 2% per-cell parity gate fails", rendered)
+        self.assertIn("strict_2pct_per_cell", rendered)
+        self.assertIn("Keep the GenerationStream route", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

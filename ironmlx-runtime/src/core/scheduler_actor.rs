@@ -273,6 +273,12 @@ enum RollingEvent {
     Shutdown,
 }
 
+// The process-memory governor polls every 250 ms by default. A B1 decode turn
+// is normally single-digit milliseconds, so forcing full rolling maintenance
+// every ninth turn stays comfortably inside that interval while removing
+// invariant scheduler bookkeeping from the steady-state token gap.
+const B1_GREEDY_FAST_TURNS_BETWEEN_MAINTENANCE: u8 = 8;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RollingMidAdmitSource {
     Direct,
@@ -3819,125 +3825,146 @@ fn driver_loop<M, A>(
         // ===== Rolling decode loop with bounded mid-batch admit + queue drain. =====
         let mut admission_policy = RollingAdmissionPolicy::default();
         admission_policy.record_admission_work();
+        let mut b1_fast_turns_since_maintenance = 0_u8;
         'rolling: loop {
-            process_scheduler_control_commands(&mut sched, &mut control_rx, &mtp_counters);
-            prune_abandoned_pending_admits(&mut admission_queue);
-            evict_abandoned_active_requests::<M, A>(
-                &mut sched,
-                &mut event_txs,
-                &mut in_flight_mid_admit,
-            );
-            discard_abandoned_parked_requests(
-                &sched,
-                &mut parked_active_kv,
-                &mut event_txs,
-                &active_kv_stats,
-            );
-            if let Err(error) = reconcile_background_priority::<M, A>(
-                &mut sched,
-                &model,
-                &admission_queue,
-                &in_flight_mid_admit,
-                &mut paused_background,
-                &mut event_txs,
-                &background_paused,
-                &background_preemptions,
-                &background_resumes,
-            ) {
-                tracing::error!(%error, "background priority reconciliation failed");
-                if let Err(evict_error) = sched.evict_all() {
-                    tracing::warn!(%evict_error, "scheduler cleanup after priority failure failed");
-                }
-                cleanup_paused_background(
+            let pending_pipeline_id = mtp_mode
+                .allow_b1_greedy_pipeline()
+                .then(|| sched.b1_greedy_pipeline_pending_id())
+                .flatten();
+            let b1_fast_turn = b1_fast_turns_since_maintenance
+                < B1_GREEDY_FAST_TURNS_BETWEEN_MAINTENANCE
+                && admission_queue.is_empty()
+                && in_flight_mid_admit.is_none()
+                && parked_active_kv.is_empty()
+                && paused_background.is_empty()
+                && cmd_rx.is_empty()
+                && control_rx.is_empty()
+                && pending_pipeline_id
+                    .is_some_and(|id| event_txs.get(&id).is_some_and(|tx| !tx.is_closed()));
+            if b1_fast_turn {
+                b1_fast_turns_since_maintenance += 1;
+            } else {
+                b1_fast_turns_since_maintenance = 0;
+                process_scheduler_control_commands(&mut sched, &mut control_rx, &mtp_counters);
+                prune_abandoned_pending_admits(&mut admission_queue);
+                evict_abandoned_active_requests::<M, A>(
                     &mut sched,
-                    &mut paused_background,
                     &mut event_txs,
-                    &background_paused,
+                    &mut in_flight_mid_admit,
                 );
-                cleanup_parked_active_kv_requests(
+                discard_abandoned_parked_requests(
                     &sched,
                     &mut parked_active_kv,
                     &mut event_txs,
                     &active_kv_stats,
-                    "background priority reconciliation failed",
                 );
-                while let Some(pending) = admission_queue.pop_front() {
-                    let _ = pending.reply_tx.send(Err(anyhow::anyhow!(
-                        "scheduler failed to reconcile background priority"
-                    )));
-                }
-                continue 'outer;
-            }
-            // Cancellation can empty the scheduler before the rolling-loop
-            // tail is reached. Publish the post-eviction state here so
-            // /healthz never reports a ghost active request while the actor is
-            // already blocked in the outer idle receive.
-            b_active.store(sched.active_count() as u64, Ordering::Relaxed);
-            b_queued.store(admission_queue.len() as u64, Ordering::Relaxed);
-            match sched.apply_process_memory_pressure() {
-                Ok(reclaim) if reclaim.should_park_request && in_flight_mid_admit.is_none() => {
-                    let _ = try_park_one_active_kv_request(
+                if let Err(error) = reconcile_background_priority::<M, A>(
+                    &mut sched,
+                    &model,
+                    &admission_queue,
+                    &in_flight_mid_admit,
+                    &mut paused_background,
+                    &mut event_txs,
+                    &background_paused,
+                    &background_preemptions,
+                    &background_resumes,
+                ) {
+                    tracing::error!(%error, "background priority reconciliation failed");
+                    if let Err(evict_error) = sched.evict_all() {
+                        tracing::warn!(%evict_error, "scheduler cleanup after priority failure failed");
+                    }
+                    cleanup_paused_background(
                         &mut sched,
+                        &mut paused_background,
+                        &mut event_txs,
+                        &background_paused,
+                    );
+                    cleanup_parked_active_kv_requests(
+                        &sched,
+                        &mut parked_active_kv,
+                        &mut event_txs,
+                        &active_kv_stats,
+                        "background priority reconciliation failed",
+                    );
+                    while let Some(pending) = admission_queue.pop_front() {
+                        let _ = pending.reply_tx.send(Err(anyhow::anyhow!(
+                            "scheduler failed to reconcile background priority"
+                        )));
+                    }
+                    continue 'outer;
+                }
+                // Cancellation can empty the scheduler before the rolling-loop
+                // tail is reached. Publish the post-eviction state here so
+                // /healthz never reports a ghost active request while the actor is
+                // already blocked in the outer idle receive.
+                b_active.store(sched.active_count() as u64, Ordering::Relaxed);
+                b_queued.store(admission_queue.len() as u64, Ordering::Relaxed);
+                match sched.apply_process_memory_pressure() {
+                    Ok(reclaim) if reclaim.should_park_request && in_flight_mid_admit.is_none() => {
+                        let _ = try_park_one_active_kv_request(
+                            &mut sched,
+                            &model,
+                            &mut parked_active_kv,
+                            &active_kv_stats,
+                        );
+                        b_active.store(sched.active_count() as u64, Ordering::Relaxed);
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(%error, "scheduler memory-pressure reclaim failed");
+                    }
+                }
+                // A rejected queued admit or cancellation can leave an empty Idle
+                // scheduler. Hand off before selecting Step: there is no batch to
+                // decode. Finished also needs finalization even if its slots have
+                // not been collected yet (e.g. max_new_tokens=1).
+                if sched.phase() == Phase::Finished || sched.active_count() == 0 {
+                    match drive_empty_scheduler_handoff(
+                        &mut sched,
+                        &mut cmd_rx,
+                        &mut event_txs,
+                        &mut admission_queue,
                         &model,
+                        &admit_count,
+                        &saturate_triggered,
+                        &queue_depth_peak,
+                        &queue_rejected,
+                        &batch_count,
+                        &mut mtp_mode,
+                        &mtp_counters,
                         &mut parked_active_kv,
                         &active_kv_stats,
-                    );
-                    b_active.store(sched.active_count() as u64, Ordering::Relaxed);
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    tracing::warn!(%error, "scheduler memory-pressure reclaim failed");
-                }
-            }
-            // A rejected queued admit or cancellation can leave an empty Idle
-            // scheduler. Hand off before selecting Step: there is no batch to
-            // decode. Finished also needs finalization even if its slots have
-            // not been collected yet (e.g. max_new_tokens=1).
-            if sched.phase() == Phase::Finished || sched.active_count() == 0 {
-                match drive_empty_scheduler_handoff(
-                    &mut sched,
-                    &mut cmd_rx,
-                    &mut event_txs,
-                    &mut admission_queue,
-                    &model,
-                    &admit_count,
-                    &saturate_triggered,
-                    &queue_depth_peak,
-                    &queue_rejected,
-                    &batch_count,
-                    &mut mtp_mode,
-                    &mtp_counters,
-                    &mut parked_active_kv,
-                    &active_kv_stats,
-                    b_max,
-                    admission_queue_max,
-                    admission_deadline,
-                    adaptive_policy,
-                    &rt,
-                ) {
-                    RollingControl::ContinueRolling => {
-                        admission_policy.record_admission_work();
-                        continue 'rolling;
-                    }
-                    RollingControl::BreakRolling => break 'rolling,
-                    RollingControl::ContinueOuter => continue 'outer,
-                    RollingControl::ReturnActor => {
-                        cleanup_paused_background(
-                            &mut sched,
-                            &mut paused_background,
-                            &mut event_txs,
-                            &background_paused,
-                        );
-                        return;
+                        b_max,
+                        admission_queue_max,
+                        admission_deadline,
+                        adaptive_policy,
+                        &rt,
+                    ) {
+                        RollingControl::ContinueRolling => {
+                            admission_policy.record_admission_work();
+                            continue 'rolling;
+                        }
+                        RollingControl::BreakRolling => break 'rolling,
+                        RollingControl::ContinueOuter => continue 'outer,
+                        RollingControl::ReturnActor => {
+                            cleanup_paused_background(
+                                &mut sched,
+                                &mut paused_background,
+                                &mut event_txs,
+                                &background_paused,
+                            );
+                            return;
+                        }
                     }
                 }
             }
 
-            let evt: RollingEvent = if admission_policy.should_force_decode(
-                sched.phase(),
-                scheduler_has_decodable_rows(&sched),
-                in_flight_mid_admit.is_some() || !admission_queue.is_empty(),
-            ) {
+            let evt: RollingEvent = if b1_fast_turn
+                || admission_policy.should_force_decode(
+                    sched.phase(),
+                    scheduler_has_decodable_rows(&sched),
+                    in_flight_mid_admit.is_some() || !admission_queue.is_empty(),
+                ) {
                 RollingEvent::Step
             } else if in_flight_mid_admit.is_some() {
                 RollingEvent::AdvanceMidAdmit
@@ -4183,7 +4210,9 @@ fn driver_loop<M, A>(
                             // sweep would only allocate and scan empty lists
                             // on every token. Defer it until the pipeline is
                             // drained or reaches a terminal event.
-                            let gc_result = if sched.b1_greedy_pipeline_pending_id().is_some() {
+                            let pipeline_continues =
+                                sched.b1_greedy_pipeline_pending_id().is_some();
+                            let gc_result = if pipeline_continues {
                                 Ok(Vec::new())
                             } else {
                                 sched.gc_finished_rows(&mut event_txs)
@@ -4223,7 +4252,9 @@ fn driver_loop<M, A>(
                                     continue 'outer;
                                 }
                             };
-                            mtp_counters.store_prompt_lookup_stats(sched.prompt_lookup_stats());
+                            if !pipeline_continues {
+                                mtp_counters.store_prompt_lookup_stats(sched.prompt_lookup_stats());
+                            }
                             if let (
                                 Some((
                                     step_active_before,
@@ -4344,6 +4375,24 @@ fn driver_loop<M, A>(
                         }
                     }
                 }
+            }
+
+            // The sole ordinary B1 row is still live and its successor is
+            // already executing on the GPU. None of the generic tail work can
+            // change scheduler state in this regime; external work or client
+            // cancellation prevents this shortcut and is handled on the very
+            // next turn.
+            let can_continue_b1_fast = admission_queue.is_empty()
+                && in_flight_mid_admit.is_none()
+                && parked_active_kv.is_empty()
+                && paused_background.is_empty()
+                && cmd_rx.is_empty()
+                && control_rx.is_empty()
+                && sched
+                    .b1_greedy_pipeline_pending_id()
+                    .is_some_and(|id| event_txs.get(&id).is_some_and(|tx| !tx.is_closed()));
+            if can_continue_b1_fast {
+                continue 'rolling;
             }
 
             // B1-p2.5 G3: update /healthz live counters at tail of every rolling step.
