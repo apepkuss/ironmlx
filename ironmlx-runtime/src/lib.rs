@@ -6,3 +6,6 @@ pub use anyhow::{Error, Result};
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub use core::scheduler_actor::test_support;
+
+#[cfg(any(test, feature = "test-support"))]
+mod test_metallib;

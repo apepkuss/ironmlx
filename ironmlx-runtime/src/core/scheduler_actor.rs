@@ -5846,14 +5846,7 @@ pub(crate) mod tests {
     }
 
     fn configure_local_test_metallib() {
-        let Ok(mlx_dir) = std::env::var("MLX_DIR") else {
-            return;
-        };
-        let path = std::path::Path::new(&mlx_dir).join("lib/mlx.metallib");
-        if path.is_file() {
-            mlx::metal::set_metallib_path(path.to_string_lossy().as_ref())
-                .expect("load MLX_DIR/lib/mlx.metallib for test");
-        }
+        crate::test_metallib::configure_from_mlx_dir();
     }
 
     #[test]
