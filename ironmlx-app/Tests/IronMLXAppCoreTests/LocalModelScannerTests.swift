@@ -650,6 +650,26 @@ import Testing
     #expect(scanner.resolveDFlash2DraftPath(for: "z-lab/Qwen3.8-27B-DFlash2") != nil)
 }
 
+@Test func localModelScannerPreservesWideDFlash2CheckpointCapability() throws {
+    let root = try temporaryDirectory()
+    _ = try writeSnapshot(
+        root: root,
+        repoID: "mlx-community/Qwen3.8-27B-4bit",
+        configJSON: dflash2TargetConfig()
+    )
+    _ = try writeSnapshot(
+        root: root,
+        repoID: "z-lab/Qwen3.8-27B-DFlash2-b32",
+        configJSON: dflash2DraftConfig(hiddenSize: 5120, blockSize: 32)
+    )
+
+    let model = try #require(LocalModelScanner(rootURL: root).scan().first)
+    let candidate = try #require(model.dflash2?.candidates.first)
+
+    #expect(candidate.id == "z-lab/Qwen3.8-27B-DFlash2-b32")
+    #expect(candidate.blockSize == 32)
+}
+
 @Test func localModelScannerRejectsDFlash2DraftThatBackendContractWouldReject() throws {
     let root = try temporaryDirectory()
     _ = try writeSnapshot(
@@ -755,7 +775,7 @@ private let qwen38ReasoningTemplate = """
 {% endif %}
 """
 
-private func dflash2DraftConfig(hiddenSize: Int) -> String {
+private func dflash2DraftConfig(hiddenSize: Int, blockSize: Int = 8) -> String {
     """
     {
       "architectures": ["DFlash2DraftModel"],
@@ -787,7 +807,7 @@ private func dflash2DraftConfig(hiddenSize: Int) -> String {
         "sliding_attention"
       ],
       "dflash_config": {
-        "block_size": 8,
+        "block_size": \(blockSize),
         "conv_group_size": 16,
         "conv_kernel_size": 2,
         "mask_token_id": 248070,

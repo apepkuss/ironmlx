@@ -133,7 +133,11 @@ public struct HealthzSnapshot: Codable, Equatable, Sendable {
 
     public struct DFlash2Info: Codable, Equatable, Sendable {
         public var enabled: Bool
+        public var checkpointBlockSize: Int?
         public var blockSize: Int?
+        public var maxDraftTokens: Int?
+        public var draftBudgetChanges: UInt64?
+        public var currentDraftBudget: Int?
         public var draftQuantizationBits: Int?
         public var requests: UInt64
         public var windows: UInt64
@@ -167,7 +171,11 @@ public struct HealthzSnapshot: Codable, Equatable, Sendable {
 
         enum CodingKeys: String, CodingKey {
             case enabled
+            case checkpointBlockSize = "checkpoint_block_size"
             case blockSize = "block_size"
+            case maxDraftTokens = "max_draft_tokens"
+            case draftBudgetChanges = "draft_budget_changes"
+            case currentDraftBudget = "current_draft_budget"
             case draftQuantizationBits = "draft_quantization_bits"
             case requests
             case windows

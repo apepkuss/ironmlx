@@ -2448,7 +2448,7 @@ mod tests {
             mtp_model_dir: None,
             mtp_draft_tokens: None,
             dflash2_model_dir: None,
-            dflash2_block_size: 4,
+            dflash2_block_size: None,
             dflash2_draft_bits: 4,
             dflash2_tensor_batch_max_width: None,
             dflash2_tree_max_nodes: 0,

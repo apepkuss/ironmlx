@@ -177,10 +177,11 @@ pub struct ServeArgs {
     #[arg(long = "dflash2-model-dir")]
     pub dflash2_model_dir: Option<PathBuf>,
 
-    /// DFlash2 proposal block width. Widths above 8 explicitly opt into the
-    /// Q16 B1 lane and require a compatible draft checkpoint.
-    #[arg(long = "dflash2-block-size", default_value_t = 4)]
-    pub dflash2_block_size: usize,
+    /// DFlash2 proposal block width. When omitted, use the checkpoint width up
+    /// to the qualified Q8 default. Widths above 8 explicitly opt into the Q16
+    /// B1 lane and require a compatible draft checkpoint.
+    #[arg(long = "dflash2-block-size")]
+    pub dflash2_block_size: Option<usize>,
 
     /// Runtime affine quantization for the official BF16 DFlash2 draft.
     /// Pass 0 to keep the draft in BF16.
@@ -588,8 +589,11 @@ fn ensure_dflash2_serve_supported(
     if args.scheduler_profile.is_some() || args.scheduler_autotune_report {
         bail!("--dflash2-model-dir does not use scheduler profiles or scheduler autotune reports");
     }
-    if !(2..=16).contains(&args.dflash2_block_size) {
-        bail!("--dflash2-block-size must be in [2, 16]; widths above 8 require a compatible Q16 draft checkpoint");
+    if args
+        .dflash2_block_size
+        .is_some_and(|block_size| !(2..=16).contains(&block_size))
+    {
+        bail!("--dflash2-block-size must be in [2, 16]");
     }
     if !matches!(args.dflash2_draft_bits, 0 | 4 | 8) {
         bail!("--dflash2-draft-bits must be one of 0, 4, or 8");
@@ -894,6 +898,12 @@ fn serve_with_dflash2_model(
         draft_bits,
     )
     .context("DFlash2DraftModel::from_loader")?;
+    let checkpoint_block_size = usize::try_from(draft.config().dflash_config.block_size)
+        .context("DFlash2 checkpoint block_size")?;
+    let block_size_resolution = ironmlx_runtime::core::dflash2::resolve_dflash2_block_size(
+        args.dflash2_block_size,
+        checkpoint_block_size,
+    )?;
     static_memory_estimate.speculative_cold_bytes = draft_loader.loaded_tensor_bytes();
     drop(draft_loader);
     mlx::clear_cache();
@@ -903,9 +913,11 @@ fn serve_with_dflash2_model(
     let (tensor_batch_requested_max_width, tensor_batch_max_width) =
         resolve_dflash2_tensor_batch_width(args, scheduler_config.b_max);
     tracing::info!(
-        "ironmlx serve: DFlash2 enabled model_dir={} block_size={} draft_bits={} tree_max_nodes={} position_keyed_sampling={} max_sequences={} tensor_batch_requested_max_width={} tensor_batch_effective_max_width={} prefix_cache_max_bytes={:?}",
+        "ironmlx serve: DFlash2 enabled model_dir={} checkpoint_block_size={} resolved_block_size={} block_size_source={} draft_bits={} tree_max_nodes={} position_keyed_sampling={} max_sequences={} tensor_batch_requested_max_width={} tensor_batch_effective_max_width={} prefix_cache_max_bytes={:?}",
         draft_dir.display(),
-        args.dflash2_block_size,
+        block_size_resolution.checkpoint_block_size,
+        block_size_resolution.block_size,
+        if block_size_resolution.explicit { "explicit" } else { "auto" },
         args.dflash2_draft_bits,
         args.dflash2_tree_max_nodes,
         args.dflash2_position_keyed_sampling,
@@ -927,7 +939,7 @@ fn serve_with_dflash2_model(
         tensor_batch_max_width,
         scheduler_config.admission_queue_max,
         scheduler_config.max_cache_cap,
-        args.dflash2_block_size,
+        block_size_resolution.block_size,
         ironmlx_runtime::core::dflash2::DFlash2P2Options {
             tree_max_nodes: args.dflash2_tree_max_nodes,
             position_keyed_sampling: args.dflash2_position_keyed_sampling,
@@ -1563,7 +1575,7 @@ mod scheduler_profile_tests {
             mtp_model_dir: None,
             mtp_draft_tokens: None,
             dflash2_model_dir: None,
-            dflash2_block_size: 4,
+            dflash2_block_size: None,
             dflash2_draft_bits: 4,
             dflash2_tree_max_nodes: 0,
             dflash2_position_keyed_sampling: false,

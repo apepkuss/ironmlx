@@ -39,6 +39,7 @@ import Testing
         targetModelDir: "/models/target",
         draftModelID: "draft",
         draftModelDir: "/models/draft",
+        checkpointBlockSize: 8,
         blockSize: 4,
         draftBits: 8,
         tensorBatchMaxWidth: 6,

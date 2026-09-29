@@ -119,7 +119,9 @@ pub struct MtpHealthInfo {
 #[derive(Debug, Serialize)]
 pub struct DFlash2HealthInfo {
     pub enabled: bool,
+    pub checkpoint_block_size: Option<usize>,
     pub block_size: Option<usize>,
+    pub max_draft_tokens: usize,
     pub draft_quantization_bits: Option<i32>,
     pub tree_max_nodes: usize,
     pub position_keyed_sampling: bool,
@@ -175,7 +177,9 @@ pub struct DFlash2HealthInfo {
 #[derive(Clone)]
 pub struct DFlash2HealthConfig {
     enabled: bool,
+    checkpoint_block_size: Option<usize>,
     block_size: Option<usize>,
+    max_draft_tokens: usize,
     draft_quantization_bits: Option<i32>,
     tree_max_nodes: usize,
     position_keyed_sampling: bool,
@@ -232,7 +236,9 @@ impl DFlash2HealthConfig {
     pub fn disabled() -> Self {
         Self {
             enabled: false,
+            checkpoint_block_size: None,
             block_size: None,
+            max_draft_tokens: 0,
             draft_quantization_bits: None,
             tree_max_nodes: 0,
             position_keyed_sampling: false,
@@ -290,7 +296,9 @@ impl DFlash2HealthConfig {
 
     #[allow(clippy::too_many_arguments)]
     pub fn enabled(
+        checkpoint_block_size: usize,
         block_size: usize,
+        max_draft_tokens: usize,
         draft_quantization_bits: Option<i32>,
         tree_max_nodes: usize,
         position_keyed_sampling: bool,
@@ -344,7 +352,9 @@ impl DFlash2HealthConfig {
     ) -> Self {
         Self {
             enabled: true,
+            checkpoint_block_size: Some(checkpoint_block_size),
             block_size: Some(block_size),
+            max_draft_tokens,
             draft_quantization_bits,
             tree_max_nodes,
             position_keyed_sampling,
@@ -401,7 +411,9 @@ impl DFlash2HealthConfig {
     pub fn snapshot(&self) -> DFlash2HealthInfo {
         DFlash2HealthInfo {
             enabled: self.enabled,
+            checkpoint_block_size: self.checkpoint_block_size,
             block_size: self.block_size,
+            max_draft_tokens: self.max_draft_tokens,
             draft_quantization_bits: self.draft_quantization_bits,
             tree_max_nodes: self.tree_max_nodes,
             position_keyed_sampling: self.position_keyed_sampling,
@@ -1535,7 +1547,9 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(1));
         let mut collector = test_collector(MtpHealthConfig::disabled());
         collector.dflash2 = DFlash2HealthConfig::enabled(
+            8,
             4,
+            3,
             Some(4),
             15,
             true,
@@ -1595,7 +1609,9 @@ mod tests {
         let snapshot = collector.dflash2.snapshot();
 
         assert!(snapshot.enabled);
+        assert_eq!(snapshot.checkpoint_block_size, Some(8));
         assert_eq!(snapshot.block_size, Some(4));
+        assert_eq!(snapshot.max_draft_tokens, 3);
         assert_eq!(snapshot.draft_quantization_bits, Some(4));
         assert_eq!(snapshot.tree_max_nodes, 15);
         assert!(snapshot.position_keyed_sampling);
@@ -1609,6 +1625,12 @@ mod tests {
         assert_eq!(snapshot.tree_drafted_nodes, 42);
         assert_eq!(snapshot.draft_budget_changes, 3);
         assert_eq!(snapshot.current_draft_budget, 2);
+        let json = serde_json::to_value(&snapshot).expect("DFlash2 health should serialize");
+        assert_eq!(json["checkpoint_block_size"], 8);
+        assert_eq!(json["block_size"], 4);
+        assert_eq!(json["max_draft_tokens"], 3);
+        assert_eq!(json["draft_budget_changes"], 3);
+        assert_eq!(json["current_draft_budget"], 2);
         assert_eq!(snapshot.latest_adaptive_acceptance_ewma, 0.625);
         assert_eq!(snapshot.verify_profile.as_deref(), Some("qwen35-affine4"));
         assert_eq!(

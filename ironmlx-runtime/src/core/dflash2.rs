@@ -77,6 +77,49 @@ use {
 #[cfg(feature = "tools")]
 static BATCHED_Q16_QUALIFICATION_ENABLED: AtomicBool = AtomicBool::new(false);
 
+/// Widest DFlash2 proposal block promoted for automatic production use.
+/// Wider lanes remain an explicit opt-in until they pass the promotion gate.
+pub const DEFAULT_DFLASH2_BLOCK_SIZE_CAP: usize = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DFlash2BlockSizeResolution {
+    pub checkpoint_block_size: usize,
+    pub block_size: usize,
+    pub explicit: bool,
+}
+
+/// Resolve the runtime proposal width from an optional operator override and
+/// the draft checkpoint capability. Automatic selection never promotes a lane
+/// wider than the qualified Q8 default; explicit Q16 remains available when
+/// the checkpoint supports it.
+pub fn resolve_dflash2_block_size(
+    requested: Option<usize>,
+    checkpoint_block_size: usize,
+) -> Result<DFlash2BlockSizeResolution> {
+    anyhow::ensure!(
+        checkpoint_block_size >= 2,
+        "DFlash2 checkpoint block_size must be at least 2, got {checkpoint_block_size}"
+    );
+    let block_size = if let Some(requested) = requested {
+        anyhow::ensure!(
+            (2..=16).contains(&requested),
+            "DFlash2 runtime block_size {requested} must be in [2, 16]"
+        );
+        anyhow::ensure!(
+            requested <= checkpoint_block_size,
+            "DFlash2 runtime block_size {requested} exceeds checkpoint block_size {checkpoint_block_size}"
+        );
+        requested
+    } else {
+        checkpoint_block_size.min(DEFAULT_DFLASH2_BLOCK_SIZE_CAP)
+    };
+    Ok(DFlash2BlockSizeResolution {
+        checkpoint_block_size,
+        block_size,
+        explicit: requested.is_some(),
+    })
+}
+
 /// Process-local capability guard used only by qualification binaries.
 ///
 /// Production builds do not expose this type because they do not enable the
@@ -2899,6 +2942,39 @@ fn rate_per_second(tokens: usize, elapsed_us: u64) -> f64 {
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    fn automatic_block_size_uses_checkpoint_width_up_to_q8() {
+        assert_eq!(
+            resolve_dflash2_block_size(None, 4).expect("Q4 auto"),
+            DFlash2BlockSizeResolution {
+                checkpoint_block_size: 4,
+                block_size: 4,
+                explicit: false,
+            }
+        );
+        assert_eq!(
+            resolve_dflash2_block_size(None, 8)
+                .expect("Q8 auto")
+                .block_size,
+            8
+        );
+        assert_eq!(
+            resolve_dflash2_block_size(None, 32)
+                .expect("b32 remains Q8 by default")
+                .block_size,
+            8
+        );
+    }
+
+    #[test]
+    fn explicit_block_size_preserves_q16_opt_in_and_checkpoint_guard() {
+        let q16 = resolve_dflash2_block_size(Some(16), 32).expect("explicit Q16");
+        assert_eq!(q16.block_size, 16);
+        assert!(q16.explicit);
+        assert!(resolve_dflash2_block_size(Some(16), 8).is_err());
+        assert!(resolve_dflash2_block_size(Some(1), 8).is_err());
+    }
 
     fn assert_array_exact(label: &str, expected: &Array, actual: &Array) {
         assert_eq!(expected.shape(), actual.shape(), "{label} shape");

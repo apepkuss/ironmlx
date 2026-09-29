@@ -60,6 +60,26 @@ import Testing
             maxTokens: "65536",
             dflash2Enabled: true,
             dflash2ModelID: draftID,
+            dflash2DraftBits: "8",
+            dflash2TensorBatchMaxWidth: "4"
+        )
+    )
+    let resolvedAutomaticRuntime = try ModelDFlash2RuntimeResolver.runtime(
+        for: targetID,
+        useDFlash2: nil,
+        scanner: scanner,
+        parameterStore: parameterStore
+    )
+    let automaticRuntime = try #require(resolvedAutomaticRuntime)
+    #expect(automaticRuntime.checkpointBlockSize == 8)
+    #expect(automaticRuntime.blockSize == 8)
+
+    try parameterStore.save(
+        ModelParameters(
+            modelID: targetID,
+            maxTokens: "65536",
+            dflash2Enabled: true,
+            dflash2ModelID: draftID,
             dflash2BlockSize: "6",
             dflash2DraftBits: "8",
             dflash2TensorBatchMaxWidth: "4"
@@ -77,6 +97,8 @@ import Testing
         parameterStore: parameterStore
     )
     let dflash2Runtime = try #require(resolvedDFlash2Runtime)
+    #expect(dflash2Runtime.checkpointBlockSize == 8)
+    #expect(dflash2Runtime.blockSize == 6)
     #expect(dflash2Runtime.maxCacheCap == 65_536)
     let snapshot = BackendRecoverySnapshot.capture(
         config: config,
@@ -102,6 +124,65 @@ import Testing
     #expect(result.status == "dflash2_model_loaded")
     #expect(result.loadedModels == [targetID])
     #expect(await loader.calls.isEmpty)
+}
+
+@Test func dflash2RuntimeCapsAutomaticBlockSizeAtQ8AndAllowsExplicitQ16() throws {
+    let root = try restartTemporaryDirectory()
+    let targetID = "mlx-community/Qwen3.8-27B-4bit"
+    let draftID = "z-lab/Qwen3.8-27B-DFlash2-b32"
+    _ = try writeVerifiedTestSnapshot(
+        root: root,
+        repoID: targetID,
+        files: [
+            "config.json": Data(dflash2RestartTargetConfig.utf8),
+            "model.safetensors": Data("weights".utf8),
+        ]
+    )
+    _ = try writeVerifiedTestSnapshot(
+        root: root,
+        repoID: draftID,
+        files: [
+            "config.json": Data(
+                dflash2RestartDraftConfig
+                    .replacingOccurrences(of: #""block_size": 8"#, with: #""block_size": 32"#)
+                    .utf8
+            ),
+            "model.safetensors": Data("weights".utf8),
+        ]
+    )
+    let scanner = LocalModelScanner(rootURL: root)
+    let parameterStore = ModelParameterStore(url: root.appendingPathComponent("model_params.json"))
+
+    try parameterStore.save(ModelParameters(
+        modelID: targetID,
+        dflash2Enabled: true,
+        dflash2ModelID: draftID
+    ))
+    let resolvedAutomatic = try ModelDFlash2RuntimeResolver.runtime(
+        for: targetID,
+        useDFlash2: nil,
+        scanner: scanner,
+        parameterStore: parameterStore
+    )
+    let automatic = try #require(resolvedAutomatic)
+    #expect(automatic.checkpointBlockSize == 32)
+    #expect(automatic.blockSize == 8)
+
+    try parameterStore.save(ModelParameters(
+        modelID: targetID,
+        dflash2Enabled: true,
+        dflash2ModelID: draftID,
+        dflash2BlockSize: "16"
+    ))
+    let resolvedExplicit = try ModelDFlash2RuntimeResolver.runtime(
+        for: targetID,
+        useDFlash2: nil,
+        scanner: scanner,
+        parameterStore: parameterStore
+    )
+    let explicit = try #require(resolvedExplicit)
+    #expect(explicit.checkpointBlockSize == 32)
+    #expect(explicit.blockSize == 16)
 }
 
 @Test @MainActor func restartDefaultModelReportsLoadFailure() async throws {

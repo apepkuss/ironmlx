@@ -8,6 +8,7 @@ use crate::core::scheduler_autotune::{
 use crate::core::task_execution::RequestExecutionHandle;
 use crate::core::{dflash2_actor, runtime_health as health, scheduler_actor};
 use crate::Result;
+use anyhow::Context;
 use ironmlx_core::sampler::Sampler;
 use ironmlx_lm::core::model::Model;
 use ironmlx_lm::core::speculative_model::MtpSpeculativeModel;
@@ -1087,6 +1088,11 @@ pub async fn build_dflash2_engine_with_options<M>(
 where
     M: Model + DenseVlMethods + ironmlx_lm::models::dflash2::DFlash2Target + Send + 'static,
 {
+    let checkpoint_block_size = usize::try_from(draft.config().dflash_config.block_size)
+        .context("DFlash2 checkpoint block_size")?;
+    let block_size =
+        crate::core::dflash2::resolve_dflash2_block_size(Some(block_size), checkpoint_block_size)?
+            .block_size;
     let model = Arc::new(Mutex::new(model));
     let (
         mut meta,
@@ -1114,6 +1120,12 @@ where
             capabilities.profile,
         )
     };
+    tracing::info!(
+        checkpoint_block_size,
+        resolved_block_size = block_size,
+        max_draft_tokens = initial_draft_budget,
+        "DFlash2 runtime configuration resolved"
+    );
     meta.weight_bytes =
         effective_model_weight_bytes(meta.weight_bytes, static_memory_estimate.total_cold_bytes());
     let model_max_context = meta.max_position_embeddings.max(0) as usize;
@@ -1171,7 +1183,9 @@ where
         kv_cache_budget_policy: dflash2_handle.kv_cache_budget_policy.to_owned(),
         mtp: health::MtpHealthConfig::disabled(),
         dflash2: health::DFlash2HealthConfig::enabled(
+            checkpoint_block_size,
             block_size,
+            initial_draft_budget,
             draft_quantization_bits,
             p2_options.tree_max_nodes,
             p2_options.position_keyed_sampling,

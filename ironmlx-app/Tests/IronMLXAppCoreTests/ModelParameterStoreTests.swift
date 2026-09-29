@@ -112,6 +112,36 @@ import Testing
     #expect(loaded.dflash2TensorBatchMaxWidthValue == 6)
 }
 
+@Test func modelParameterStorePreservesAutomaticDFlash2BlockSizeAsAbsent() throws {
+    let root = try temporaryDirectory()
+    let store = ModelParameterStore(url: root.appendingPathComponent("model_params.json"))
+    try store.save(ModelParameters(
+        modelID: "mlx-community/Qwen3.8-27B-4bit",
+        dflash2Enabled: true,
+        dflash2ModelID: "z-lab/Qwen3.8-27B-DFlash2",
+        dflash2BlockSize: ""
+    ))
+
+    let loaded = try #require(store.parameters(for: "mlx-community/Qwen3.8-27B-4bit"))
+    #expect(loaded.dflash2BlockSize == nil)
+    #expect(loaded.dflash2BlockSizeValue == nil)
+}
+
+@Test func modelParameterStoreAllowsExplicitQ16AndRejectsWiderValues() throws {
+    let root = try temporaryDirectory()
+    let store = ModelParameterStore(url: root.appendingPathComponent("model_params.json"))
+    let modelID = "mlx-community/Qwen3.8-27B-4bit"
+
+    try store.save(ModelParameters(modelID: modelID, dflash2BlockSize: "16"))
+    #expect(store.parameters(for: modelID)?.dflash2BlockSizeValue == 16)
+
+    #expect(
+        throws: ConfigurationPersistenceError.invalidValue("dflash2_block_size")
+    ) {
+        try store.save(ModelParameters(modelID: modelID, dflash2BlockSize: "17"))
+    }
+}
+
 @Test func modelParameterStoreRejectsInvalidDFlash2TensorBatchWidth() throws {
     let root = try temporaryDirectory()
     let store = ModelParameterStore(url: root.appendingPathComponent("model_params.json"))
