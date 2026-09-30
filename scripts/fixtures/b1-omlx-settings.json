@@ -1,0 +1,7 @@
+{
+  "version": "1.0",
+  "server": {"host": "127.0.0.1", "port": 18480, "burst_decode_mode": "aggressive"},
+  "scheduler": {"max_concurrent_requests": 1, "chunked_prefill": false},
+  "cache": {"enabled": false, "hot_cache_max_size": "0"},
+  "sampling": {"max_context_window": 8192, "temperature": 0, "top_p": 1}
+}
