@@ -8,7 +8,7 @@ for performance measurement.
 
 ## Executable code
 
-`scripts/audit_b1_outputs.py` executes reviewed output in temporary fixtures.
+`benchmarks/b1-api-comparison/scripts/audit_b1_outputs.py` executes reviewed output in temporary fixtures.
 It is not a security sandbox and requires explicit `--reviewed` use.
 The native-tree candidate passed:
 

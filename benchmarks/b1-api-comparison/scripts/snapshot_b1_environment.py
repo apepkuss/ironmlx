@@ -8,9 +8,10 @@ from pathlib import Path
 import shutil
 import subprocess
 
-from run_b1_api_sessions import ARTIFACTS, TARGET, DRAFT
+from run_b1_api_sessions import ARTIFACTS, DRAFT, MLX_LIB, TARGET
 
-ROOT = Path(__file__).resolve().parents[1]
+SUITE = Path(__file__).resolve().parents[1]
+ROOT = SUITE.parents[1]
 
 
 def git(*args):
@@ -50,8 +51,8 @@ def main():
         files=files,
         executable=identity(ROOT / "target/release/ironmlx"),
         diagnostic=identity(ROOT / "target/release/dflash2-lane-diagnostic"),
-        mlx_library=identity("/Users/xin/.local/mlx/lib/libmlx.a"),
-        metallib=identity("/Users/xin/.local/mlx/lib/mlx.metallib"),
+        mlx_library=identity(MLX_LIB / "libmlx.a"),
+        metallib=identity(MLX_LIB / "mlx.metallib"),
         rustc=subprocess.check_output(["rustc", "--version"], text=True).strip(),
         cargo=subprocess.check_output(["cargo", "--version"], text=True).strip(),
         macos=subprocess.check_output(["sw_vers"], text=True),

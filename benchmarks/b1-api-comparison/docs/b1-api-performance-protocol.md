@@ -5,7 +5,7 @@ Frozen before implementation: 2026-09-29; base `a2aec98d887f405e4d3faf5827321441
 ## Workload and service contract
 
 Use the six original quick-comparison prompts, verbatim, in
-`scripts/fixtures/b1-api-prompts.json` (three code, three knowledge). Do not
+`benchmarks/b1-api-comparison/fixtures/b1-api-prompts.json` (three code, three knowledge). Do not
 replace difficult prompts after seeing results. Two separate warmup prompts
 precede each server session. Requests use temperature 0, top_p 1, thinking
 off, one user message, streaming, max_tokens 4096 as a safety ceiling only.
@@ -105,7 +105,7 @@ the existing defaults and policy remain in force. `dflash2-lane-diagnostic`
 compares exact token IDs across budgets and reports stage timings; capped runs
 are correctness diagnostics, never natural-stop performance acceptance.
 
-The local runner `scripts/run_b1_api_sessions.py` records commands and runs one
+The local runner `benchmarks/b1-api-comparison/scripts/run_b1_api_sessions.py` records commands and runs one
 owned application process at a time. It uses the preserved release artifacts
 under `/Users/xin/workspace/b1-rival-benchmark/artifacts`; Splash's prepared
 manifest confirms the same target revision and local drafter. oMLX's isolated
@@ -137,7 +137,7 @@ IRONMLX_EXPERIMENTAL_DFLASH2_RADIX_TOPK=1 \
 IRONMLX_EXPERIMENTAL_DFLASH2_FLAT_TREE=1 \
 IRONMLX_EXPERIMENTAL_DFLASH2_TREE_PROFILE=tf-v1 \
 /Users/xin/workspace/b1-rival-benchmark/artifacts/tensorfold/venv/bin/python \
-scripts/run_b1_api_sessions.py --label final-candidate-v1 --sessions 8 \
+benchmarks/b1-api-comparison/scripts/run_b1_api_sessions.py --label final-candidate-v1 --sessions 8 \
   --ironmlx-tree-nodes 15
 ```
 

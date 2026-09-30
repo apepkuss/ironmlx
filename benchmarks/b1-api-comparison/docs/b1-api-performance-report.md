@@ -193,21 +193,24 @@ reference 检查。首次 library 回归因找不到 metallib 失败，日志保
 
 工作目录为 `/Users/xin/workspace/b1-api-performance/ironmlx-backend`，分支
 `perf/b1-api-performance`，基点 `a2aec98d887f405e4d3faf5827321441f9cf7987`。
-原始数据位于该工作目录的 `reports/b1-api-performance/`，保留失败、终止和
-无结论实验。正式数据前缀为 `final-candidate-v1`，每个应用、每轮有独立 JSON。
+原始数据已归档到 `benchmarks/b1-api-comparison/results/local-archive-2026-09-30/`，
+保留失败、终止和无结论实验。该本机归档被 Git 忽略，因为部分日志和运行时设置
+可能包含凭据；分享前必须审查并脱敏。正式数据前缀为 `final-candidate-v1`，每个应用、每轮有独立 JSON。
 `final-candidate-v1-analysis.json` 是首批 8 轮结果，不被补测覆盖。
 `final-candidate-v1-analysis-twelve.json` 是全部 12 轮统计，
 `final-candidate-v1-sensitivity.json` 单独记录补测四轮；四轮不足以独立替代
 冻结协议中的八轮最低样本数，因此只作敏感性检查。原始八轮、补测四轮以及
 全部十二轮的结论方向一致：胜 oMLX 三项、胜 TensorFold TPS/E2E，TTFT 落后。
 
-`candidate-source-v1/manifest.json` 和 `sources/`、`tracked.patch` 在正式测试前
+`candidate-source-v1/manifest.json` 和 `sources/`、`tracked.patch`（位于上述本地归档）在正式测试前
 记录了基点、完整修改源码和 hashes。测量的 IronMLX 二进制 SHA256：
 `11ab79a9cce2575d1bb082b135c02bf8165fdb9e19fb75e63bc7a7971ffc61ee`。
 客户端 SHA256：`8b4f54e37d18cf616c16ac1b7ee313234082e07c2104028790742ddacfabd606`。
 
-按协议中的候选环境变量启动 `scripts/run_b1_api_sessions.py`，使用新的 label
-以免覆盖既有证据；先确认端口 18480 空闲、没有其他推理或编译任务。
+按协议中的候选环境变量启动
+`benchmarks/b1-api-comparison/scripts/run_b1_api_sessions.py`，使用新的 label
+以免覆盖既有证据；输出写入 `benchmarks/b1-api-comparison/results/<label>/`。
+先确认端口 18480 空闲、没有其他推理或编译任务。
 
 构建使用已记录的本机 MLX 安装，不能将另一版 MLX 与这次二进制混为同一候选。
 恢复快照源码后，在上述工作目录执行以下命令，再校验构建产物及配置；构建
@@ -222,16 +225,19 @@ cargo build --release -p ironmlx --bin ironmlx
 
 ```sh
 /Users/xin/workspace/b1-rival-benchmark/artifacts/tensorfold/venv/bin/python \
-  scripts/analyze_b1_api.py reports/b1-api-performance \
-  --label YOUR_NEW_LABEL --output reports/b1-api-performance/YOUR_NEW_LABEL-analysis.json
+  benchmarks/b1-api-comparison/scripts/analyze_b1_api.py \
+  benchmarks/b1-api-comparison/results/YOUR_NEW_LABEL \
+  --label YOUR_NEW_LABEL \
+  --output benchmarks/b1-api-comparison/results/YOUR_NEW_LABEL/YOUR_NEW_LABEL-analysis.json
 ```
 
-输出代码必须先人工审阅，再调用 `scripts/audit_b1_outputs.py --reviewed`；该工具
+输出代码必须先人工审阅，再调用
+`benchmarks/b1-api-comparison/scripts/audit_b1_outputs.py --reviewed`；该工具
 是功能夹具，不是安全沙箱。不要直接公开整个 reports 目录：oMLX runtime
 settings 和部分历史服务日志含本机生成的认证信息。已脱敏的 command 元数据、
 测量 JSON、分析及源码清单可用于复现；凭据不属于报告或可发布证据。
 
-`scripts/audit_b1_evidence.py` 是测量结束后的离线审计工具，核对完整题目集合、
+`benchmarks/b1-api-comparison/scripts/audit_b1_evidence.py` 是测量结束后的离线审计工具，核对完整题目集合、
 自然停止、输出 hashes、客户端与入口二进制身份，以及 Splash 的缓存计数。
 它不启动推理、不修改测量结果，也不将高负载样本排除。首批审计记录为
 `final-candidate-v1-evidence-eight.json`，全量审计为

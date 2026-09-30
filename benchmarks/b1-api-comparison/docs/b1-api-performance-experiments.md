@@ -9,7 +9,9 @@ support that performance result. This does not certify error-free knowledge
 answers or untested workloads. See the [report](b1-api-performance-report.md).
 Protocol: [frozen protocol](b1-api-performance-protocol.md). Base: `a2aec98d887`.
 Performance observations below are local development screens, not confidence-backed wins.
-Raw reports/logs are retained in `reports/b1-api-performance/` in this worktree.
+Raw reports/logs are retained locally under
+`benchmarks/b1-api-comparison/results/local-archive-2026-09-30/`. They are
+ignored by Git because some logs and local settings may contain credentials.
 
 ## Fresh initial screens
 

@@ -12,15 +12,39 @@ import subprocess
 import time
 import urllib.request
 
-ROOT = Path(__file__).resolve().parents[1]
-ARTIFACTS = Path("/Users/xin/workspace/b1-rival-benchmark/artifacts")
+SUITE = Path(__file__).resolve().parents[1]
+ROOT = SUITE.parents[1]
+ARTIFACTS = Path(
+    os.environ.get(
+        "B1_ARTIFACTS_ROOT", "/Users/xin/workspace/b1-rival-benchmark/artifacts"
+    )
+).expanduser()
 TARGET = Path(
-    "/Users/xin/.ironmlx/models/huggingface/mlx-community--Qwen3.8-27B-4bit/snapshots/3e6447f082e89cc7f0bc6e5441afd38dfce760ff"
-)
+    os.environ.get(
+        "B1_TARGET_MODEL",
+        "/Users/xin/.ironmlx/models/huggingface/mlx-community--Qwen3.8-27B-4bit/snapshots/3e6447f082e89cc7f0bc6e5441afd38dfce760ff",
+    )
+).expanduser()
 DRAFT = Path(
-    "/Users/xin/.ironmlx/models/huggingface/z-lab--Qwen3.8-27B-DFlash2/snapshots/50307d4c4cde6860d4eee73e2547cd786fe8e8a4"
-)
-REPORTS = ROOT / "reports/b1-api-performance"
+    os.environ.get(
+        "B1_DRAFT_MODEL",
+        "/Users/xin/.ironmlx/models/huggingface/z-lab--Qwen3.8-27B-DFlash2/snapshots/50307d4c4cde6860d4eee73e2547cd786fe8e8a4",
+    )
+).expanduser()
+MLX_LIB = Path(os.environ.get("B1_MLX_LIB", "/Users/xin/.local/mlx/lib")).expanduser()
+OMLX_MODEL_DIR = Path(
+    os.environ.get(
+        "B1_OMLX_MODEL_DIR", "/Users/xin/workspace/b1-rival-benchmark/runtime/omlx/models"
+    )
+).expanduser()
+SPLASH_PREPARED = Path(
+    os.environ.get(
+        "B1_SPLASH_PREPARED",
+        "/Users/xin/Library/Application Support/Splash/models/.resolved/0c766d93b06d3cbb2000e81376cd681455898449ec91cec5e9749d1ff0b1979d",
+    )
+).expanduser()
+RESULTS_ROOT = SUITE / "results"
+REPORTS = RESULTS_ROOT
 TF = ARTIFACTS / "tensorfold"
 PYTHON = TF / "venv/bin/python"
 ORDER = [
@@ -46,7 +70,7 @@ def initialize_omlx_config():
     settings = runtime / "settings.json"
     if not settings.exists():
         settings.write_bytes(
-            (ROOT / "scripts/fixtures/b1-omlx-settings.json").read_bytes()
+            (SUITE / "fixtures/b1-omlx-settings.json").read_bytes()
         )
     models = runtime / "model_settings.json"
     if not models.exists():
@@ -100,7 +124,7 @@ def configuration(app):
         command = [
             str(ROOT / "target/release/ironmlx"),
             "--mlx-metallib",
-            "/Users/xin/.local/mlx/lib/mlx.metallib",
+            str(MLX_LIB / "mlx.metallib"),
             "serve",
             "--model",
             str(TARGET),
@@ -119,7 +143,7 @@ def configuration(app):
             "--port",
             "18480",
         ]
-        env["DYLD_LIBRARY_PATH"] = "/Users/xin/.local/mlx/lib"
+        env["DYLD_LIBRARY_PATH"] = str(MLX_LIB)
         omit = True
     elif app == "omlx":
         command = [
@@ -128,7 +152,7 @@ def configuration(app):
             "--base-path",
             str(REPORTS / "omlx-runtime"),
             "--model-dir",
-            "/Users/xin/workspace/b1-rival-benchmark/runtime/omlx/models",
+            str(OMLX_MODEL_DIR),
             "--host",
             "127.0.0.1",
             "--port",
@@ -178,9 +202,7 @@ def configuration(app):
         omit = True
     elif app == "splash":
         runtime = ARTIFACTS / "splash/bottle/splash/1.1.0/libexec"
-        prepared = Path(
-            "/Users/xin/Library/Application Support/Splash/models/.resolved/0c766d93b06d3cbb2000e81376cd681455898449ec91cec5e9749d1ff0b1979d"
-        )
+        prepared = SPLASH_PREPARED
         command = [
             str(runtime / "python/bin/python3"),
             "-u",
@@ -213,6 +235,7 @@ def configuration(app):
 
 
 def main():
+    global REPORTS
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apps", default="ironmlx,omlx,splash,tensorfold")
     parser.add_argument("--sessions", type=int, default=1)
@@ -221,6 +244,9 @@ def main():
     parser.add_argument("--only", help="Development prompt ids only")
     parser.add_argument("--ironmlx-tree-nodes", type=int, default=0)
     args = parser.parse_args()
+    if Path(args.label).name != args.label or args.label in (".", ".."):
+        parser.error("--label must be a single safe directory name")
+    REPORTS = RESULTS_ROOT / args.label
     REPORTS.mkdir(parents=True, exist_ok=True)
     if "omlx" in args.apps.split(","):
         initialize_omlx_config()
@@ -244,9 +270,9 @@ def main():
                 session=session,
                 app=app,
                 entrypoint=file_identity(command[0]),
-                benchmark_client=file_identity(ROOT / "scripts/benchmark_b1_api.py"),
+                benchmark_client=file_identity(SUITE / "scripts/benchmark_b1_api.py"),
                 benchmark_runner=file_identity(Path(__file__)),
-                protocol=file_identity(ROOT / "docs/b1-api-performance-protocol.md"),
+                protocol=file_identity(SUITE / "docs/b1-api-performance-protocol.md"),
                 platform=subprocess.getoutput("sw_vers"),
                 hardware=subprocess.getoutput(
                     "system_profiler SPHardwareDataType -detailLevel mini"
@@ -294,7 +320,7 @@ def main():
                         raise TimeoutError(app + " startup")
                     client = [
                         str(PYTHON),
-                        str(ROOT / "scripts/benchmark_b1_api.py"),
+                        str(SUITE / "scripts/benchmark_b1_api.py"),
                         "--label",
                         args.label + "-" + app,
                         "--session",

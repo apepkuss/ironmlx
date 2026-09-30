@@ -137,7 +137,7 @@ def main():
     p.add_argument(
         "--prompts",
         type=Path,
-        default=Path(__file__).parent / "fixtures/b1-api-prompts.json",
+        default=Path(__file__).resolve().parents[1] / "fixtures/b1-api-prompts.json",
     )
     p.add_argument("--output", required=True, type=Path)
     p.add_argument("--omit-reasoning-effort", action="store_true")
