@@ -385,6 +385,8 @@ pub enum DFlash2RequestError {
 pub struct DFlash2Metrics {
     pub block_size: usize,
     pub tree_max_nodes: usize,
+    pub experimental_tree_profile: bool,
+    pub tree_proposal_width: usize,
     pub position_keyed_sampling: bool,
     pub sampled: bool,
     pub prompt_tokens: usize,
@@ -483,6 +485,22 @@ struct DFlash2PrefillContext<'a> {
     is_cancelled: Option<&'a dyn Fn() -> bool>,
 }
 
+fn experimental_fixed_budget(maximum: usize) -> Result<Option<usize>> {
+    let Some(raw) = std::env::var_os("IRONMLX_EXPERIMENTAL_DFLASH2_FIXED_BUDGET") else {
+        return Ok(None);
+    };
+    let value: usize = raw
+        .to_str()
+        .ok_or_else(|| anyhow!("fixed DFlash2 budget must be UTF-8"))?
+        .parse()
+        .map_err(|_| anyhow!("fixed DFlash2 budget must be a non-negative integer"))?;
+    anyhow::ensure!(
+        value <= maximum,
+        "fixed DFlash2 budget {value} exceeds supported {maximum}"
+    );
+    Ok(Some(value))
+}
+
 /// Text-only, single-request DFlash2 stream with greedy and exact sampled decoding.
 pub struct DFlash2TextGenerationStream<'m, M>
 where
@@ -499,6 +517,7 @@ where
     pending_context_hidden: Array,
     verify_capabilities: DFlash2VerifyCapabilities,
     draft_policy: QwenMtpDraftPolicyState,
+    experimental_fixed_budget: Option<usize>,
     prng_state: Array,
     block_size: usize,
     emitted_new_tokens: usize,
@@ -653,6 +672,20 @@ where
         is_cancelled: &dyn Fn() -> bool,
     ) -> Result<Self> {
         let options = execution.p2.validate()?;
+        let single_prefill =
+            std::env::var("IRONMLX_EXPERIMENTAL_DFLASH2_SINGLE_PREFILL").as_deref() == Ok("1");
+        if single_prefill {
+            anyhow::ensure!(
+                prefix_cache.is_none(),
+                "experimental single prefill requires prefix cache disabled"
+            );
+            anyhow::ensure!(
+                model
+                    .dflash2_execution_fingerprint()
+                    .contains("experimental-m5-affine4"),
+                "experimental single prefill requires the M5 affine4 target route"
+            );
+        }
         let mut request = request;
         if options.position_keyed_sampling {
             request.sampler = request.sampler.with_position_keyed_v1();
@@ -665,7 +698,11 @@ where
             execution.block_size,
             options,
             DFlash2PrefillContext {
-                execution: DFlash2PrefillExecution::SchedulerB1,
+                execution: if single_prefill {
+                    DFlash2PrefillExecution::GenerationStream
+                } else {
+                    DFlash2PrefillExecution::SchedulerB1
+                },
                 prefix_cache,
                 is_cancelled: Some(is_cancelled),
             },
@@ -865,6 +902,7 @@ where
                 pending_context_hidden: row_context,
                 verify_capabilities,
                 draft_policy: QwenMtpDraftPolicyState::new(max_draft_tokens),
+                experimental_fixed_budget: experimental_fixed_budget(max_draft_tokens)?,
                 prng_state,
                 block_size,
                 emitted_new_tokens: 0,
@@ -1088,6 +1126,7 @@ where
             pending_context_hidden: context_hidden,
             verify_capabilities,
             draft_policy: QwenMtpDraftPolicyState::new(max_draft_tokens),
+            experimental_fixed_budget: experimental_fixed_budget(max_draft_tokens)?,
             prng_state,
             block_size,
             emitted_new_tokens: 0,
@@ -1117,6 +1156,14 @@ where
         DFlash2Metrics {
             block_size: self.block_size,
             tree_max_nodes: self.p2_options.tree_max_nodes,
+            experimental_tree_profile: ironmlx_lm::models::dflash2::experimental_tree_profile(),
+            tree_proposal_width: if self.p2_options.tree_max_nodes > 0
+                && ironmlx_lm::models::dflash2::experimental_tree_profile()
+            {
+                self.p2_options.tree_max_nodes.min(15) + 1
+            } else {
+                self.block_size
+            },
             position_keyed_sampling: self.p2_options.position_keyed_sampling,
             sampled: self.request.sampler.temperature > 0.0,
             prompt_tokens,
@@ -1129,7 +1176,7 @@ where
             tree_windows: self.counters.tree_windows,
             tree_drafted_nodes: self.counters.tree_drafted_nodes,
             draft_budget_changes: self.counters.draft_budget_changes,
-            current_draft_budget: self.draft_policy.current_budget(),
+            current_draft_budget: self.current_draft_budget(),
             adaptive_acceptance_ewma: self.draft_policy.acceptance_ewma(),
             exact_sampling_windows: self.counters.exact_sampling.windows,
             exact_acceptance_draws: self.counters.exact_sampling.acceptance_draws,
@@ -1211,7 +1258,7 @@ where
         if remaining == 0 {
             return Ok(None);
         }
-        let draft_len = self.draft_policy.current_budget().min(remaining);
+        let draft_len = self.current_draft_budget().min(remaining);
         let context_shape = self.pending_context_hidden.shape();
         let context_dims = context_shape.as_slice();
         anyhow::ensure!(
@@ -1261,7 +1308,7 @@ where
     }
 
     fn fill_next_window(&mut self, current_token: u32) -> Result<()> {
-        if self.draft_policy.current_budget() == 0 {
+        if self.current_draft_budget() == 0 {
             self.fill_ordinary_window(current_token)
         } else if self.tree_eligible() {
             self.fill_tree_window(current_token)
@@ -1770,7 +1817,19 @@ where
         if remaining == 0 {
             return Ok(());
         }
-        let draft_len = self.draft_policy.current_budget().min(remaining);
+        let tf_tree_profile = ironmlx_lm::models::dflash2::experimental_tree_profile();
+        if tf_tree_profile {
+            anyhow::ensure!(
+                std::env::var("IRONMLX_EXPERIMENTAL_DFLASH2_FLAT_TREE").as_deref() == Ok("1"),
+                "experimental tf-v1 proposal requires flat-tree verification"
+            );
+        }
+        let draft_len = if tf_tree_profile {
+            self.p2_options.tree_max_nodes.min(15)
+        } else {
+            self.current_draft_budget()
+        }
+        .min(remaining);
         let mask_token = self.draft.config().dflash_config.mask_token_id;
         let mut block = Vec::with_capacity(draft_len + 1);
         block.push(current_token);
@@ -1786,7 +1845,7 @@ where
             &mut self.draft_cache,
             ironmlx_lm::models::dflash2::DFlash2TreeSpec {
                 max_nodes: self.p2_options.tree_max_nodes,
-                children_per_node: 2,
+                children_per_node: if tf_tree_profile { 4 } else { 2 },
             },
             StreamOrDevice::default(),
         )?;
@@ -1794,6 +1853,9 @@ where
             .counters
             .draft_build_us
             .saturating_add(elapsed_us(draft_started));
+        if std::env::var("IRONMLX_EXPERIMENTAL_DFLASH2_FLAT_TREE").as_deref() == Ok("1") {
+            return self.fill_flat_tree(current_token, &tree, remaining, window_started);
+        }
         let paths = tree.leaf_paths();
         anyhow::ensure!(
             !paths.is_empty() && paths.len() <= 8,
@@ -2005,6 +2067,101 @@ where
         Ok(())
     }
 
+    fn fill_flat_tree(
+        &mut self,
+        current_token: u32,
+        tree: &DFlash2DraftTree,
+        remaining: usize,
+        started: Instant,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.request.sampler.is_greedy() && self.experimental_fixed_budget.is_some(),
+            "experimental flat tree requires greedy sampling and fixed draft budget"
+        );
+        let mut tokens = vec![current_token];
+        tokens.extend_from_slice(&tree.tokens);
+        let mut parents = vec![-1];
+        parents.extend(tree.parents.iter().map(|p| p + 1));
+        let input: Array = (tokens.as_slice(), &[1, tokens.len() as i32][..]).try_into()?;
+        let snapshots = self
+            .target_cache
+            .iter()
+            .map(LayerCache::dflash2_transaction_snapshot)
+            .collect::<Result<Vec<_>>>()?;
+        for cache in &mut self.target_cache {
+            cache.begin_speculative_prefix_capture()?;
+        }
+        let begin = Instant::now();
+        let verified = self.model.dflash2_forward_tree_on(
+            &input,
+            &parents,
+            (self.history.len() - 1) as i32,
+            &mut self.target_cache,
+            &self.draft.config().dflash_config.target_layer_ids,
+            StreamOrDevice::default(),
+        )?;
+        self.counters.verify_build_us += elapsed_us(begin);
+        let begin = Instant::now();
+        let logits = self
+            .model
+            .dflash2_project_hidden_on(&verified.hidden, StreamOrDevice::default())?;
+        let predictions = mlx::ops::reduction::argmax(&logits, -1, false)?;
+        self.counters.projection_build_us += elapsed_us(begin);
+        let begin = Instant::now();
+        mlx::transforms::async_eval(&[&predictions, &verified.context_hidden])?;
+        self.counters.verify_schedule_us += elapsed_us(begin);
+        let begin = Instant::now();
+        let predictions = predictions.to_vec::<u32>()?;
+        self.counters.host_sync_us += elapsed_us(begin);
+        let mut rows = vec![0_i32];
+        loop {
+            let last = *rows.last().unwrap() as usize;
+            let next = (last + 1..tokens.len())
+                .find(|&i| parents[i] == last as i32 && tokens[i] == predictions[last]);
+            match next {
+                Some(i) => rows.push(i as i32),
+                None => break,
+            }
+        }
+        let accepted = rows.len() - 1;
+        let bonus = predictions[*rows.last().unwrap() as usize];
+        let begin = Instant::now();
+        self.model.dflash2_commit_tree_on(
+            &mut self.target_cache,
+            &snapshots,
+            &rows,
+            StreamOrDevice::default(),
+        )?;
+        let indices: Array = (rows.as_slice(), &[rows.len() as i32][..]).try_into()?;
+        self.pending_context_hidden =
+            mlx::ops::indexing::take(&verified.context_hidden, &indices, 1)?;
+        self.counters.rollback_us += elapsed_us(begin);
+        let mut append = rows[1..]
+            .iter()
+            .map(|&r| tokens[r as usize])
+            .collect::<Vec<_>>();
+        append.push(bonus);
+        if let Some(i) = append
+            .iter()
+            .position(|t| self.request.stop_token_ids.contains(t))
+        {
+            append.truncate(i + 1);
+        }
+        append.truncate(remaining);
+        for token in append {
+            self.history.push(token);
+            self.pending_tokens.push_back(token);
+        }
+        self.counters.windows += 1;
+        self.counters.tree_windows += 1;
+        self.counters.tree_drafted_nodes += tree.tokens.len();
+        self.counters.drafted_tokens += tree.tokens.len();
+        self.counters.accepted_draft_tokens += accepted;
+        self.counters.rollback_count += 1;
+        self.counters.window_us += elapsed_us(started);
+        Ok(())
+    }
+
     fn fill_window(&mut self, current_token: u32) -> Result<()> {
         let window_started = Instant::now();
         let counters_before = self.counters.clone();
@@ -2015,7 +2172,7 @@ where
         if remaining == 0 {
             return Ok(());
         }
-        let draft_len = self.draft_policy.current_budget().min(remaining);
+        let draft_len = self.current_draft_budget().min(remaining);
         DFlash2VerifyPlan::build(&self.verify_capabilities, 1, draft_len)?;
         let sampling_prepare_started = Instant::now();
         let exact_sampling_uniforms = if self.request.sampler.temperature > 0.0
@@ -2320,7 +2477,15 @@ where
         Ok(())
     }
 
+    fn current_draft_budget(&self) -> usize {
+        self.experimental_fixed_budget
+            .unwrap_or_else(|| self.draft_policy.current_budget())
+    }
+
     fn observe_adaptive_window(&mut self, window: MtpDraftPolicyWindow) {
+        if self.experimental_fixed_budget.is_some() {
+            return;
+        }
         let change = self.draft_policy.observe_external_window(window);
         if change.reduced || change.increased {
             self.counters.draft_budget_changes =

@@ -338,7 +338,7 @@ impl GatedAttention {
                     q_width,
                     k_width,
                 } => {
-                    if super::product_stable_qmm::is_armed() {
+                    if super::product_stable_qmm::is_armed() || super::m5_affine4::armed() {
                         let output = projection.forward_on(x, target)?;
                         let mut parts = mlx::ops::shape::split_at_on(
                             &output,
@@ -431,7 +431,18 @@ impl GatedAttention {
                     };
 
                     let exact_batched_verify = super::position_stable_qmm::is_armed() && seq > 1;
-                    if exact_batched_verify {
+                    if super::m5_attention::enabled()
+                        && super::m5_attention::compatible(&queries, &k, &v)
+                        && queries.dtype() == mlx::Dtype::Bfloat16
+                        && mask.is_none()
+                        && kv_validity_mask.is_none()
+                        && c.turboquant().is_none()
+                    {
+                        let (queries, k) = mrope.apply(&queries, &k, cos, sin)?;
+                        let (k, v) =
+                            c.update_and_fetch_for_attention_on(&k, &v, lens_ref, target)?;
+                        super::m5_attention::attend(&queries, &k, &v, self.scale, target)?
+                    } else if exact_batched_verify {
                         let (k, v) = mask_kv(k, v)?;
                         query_position_isolated_attention_on(
                             c, mrope, &queries, &k, &v, cos, sin, mask, lens_ref, self.scale,
@@ -890,19 +901,103 @@ fn query_position_isolated_attention_bulk_cache_update_on(
     let (cached_keys, cached_values) =
         cache.update_and_fetch_for_attention_on(&rotated_keys, values, per_row_lens, target)?;
 
+    if let Some(plan) = super::dflash_tree::current() {
+        anyhow::ensure!(
+            batch == 1 && mask.is_none() && plan.paths.len() == query_len as usize,
+            "invalid flat-tree attention shape"
+        );
+        if std::env::var("IRONMLX_EXPERIMENTAL_TREE_BATCH_ATTN").as_deref() == Ok("1") {
+            let mut ordered: Vec<Option<Array>> = vec![None; plan.paths.len()];
+            for group in plan.attention_groups(base_offsets[0])? {
+                let q = mlx::ops::indexing::take_along_axis_on(
+                    &rotated_queries,
+                    &group.queries,
+                    2,
+                    target,
+                )?;
+                let k =
+                    mlx::ops::indexing::take_along_axis_on(&cached_keys, &group.keys, 2, target)?;
+                let v =
+                    mlx::ops::indexing::take_along_axis_on(&cached_values, &group.keys, 2, target)?;
+                let result = mlx::fast::scaled_dot_product_attention_on(
+                    &q, &k, &v, scale, "", None, None, target,
+                )?;
+                for (i, &row) in group.rows.iter().enumerate() {
+                    ordered[row] = Some(mlx::ops::indexing::slice_strided_on(
+                        &result,
+                        &[i as i32, 0, 0, 0][..],
+                        &[i as i32 + 1, heads, 1, head_dim][..],
+                        &[1, 1, 1, 1][..],
+                        target,
+                    )?);
+                }
+            }
+            return Ok(mlx::ops::shape::concatenate_on(
+                &ordered
+                    .iter()
+                    .map(|a| a.as_ref().expect("all tree rows grouped"))
+                    .collect::<Vec<_>>(),
+                2,
+                target,
+            )?);
+        }
+        let mut outputs = Vec::new();
+        for (row, path) in plan.paths.iter().enumerate() {
+            let indices = (0..base_offsets[0])
+                .chain(path.iter().map(|&r| base_offsets[0] + r))
+                .collect::<Vec<_>>();
+            let indices: Array = (indices.as_slice(), &[indices.len() as i32][..]).try_into()?;
+            let k = mlx::ops::indexing::take_on(&cached_keys, &indices, 2, target)?;
+            let v = mlx::ops::indexing::take_on(&cached_values, &indices, 2, target)?;
+            let q = mlx::ops::indexing::slice_strided_on(
+                &rotated_queries,
+                &[0, 0, row as i32, 0][..],
+                &[1, heads, row as i32 + 1, head_dim][..],
+                &[1, 1, 1, 1][..],
+                target,
+            )?;
+            outputs.push(mlx::fast::scaled_dot_product_attention_on(
+                &q, &k, &v, scale, "", None, None, target,
+            )?);
+        }
+        return Ok(mlx::ops::shape::concatenate_on(
+            &outputs.iter().collect::<Vec<_>>(),
+            2,
+            target,
+        )?);
+    }
+
     let mask_shape = mask.map(Array::shape);
+    // Experimental MLX 0.32.2 grouping, adapted from TensorFold exact_attention.
+    // Keep every query in the same vector-kernel/key-partition regime as Q1.
+    // Restrict to the audited B1, GQA=6, BF16 route; all other cases stay serial.
+    let grouped = super::m5_affine4::armed()
+        && std::env::var("IRONMLX_EXPERIMENTAL_GROUPED_VERIFY_ATTN").as_deref() == Ok("1")
+        && batch == 1
+        && heads == 24
+        && key_dims[1] == 4
+        && head_dim == 256
+        && cached_keys.dtype() == mlx::Dtype::Bfloat16
+        && cache.turboquant().is_none()
+        && mask.is_none();
     let mut outputs = Vec::with_capacity(query_len as usize);
-    for depth in 0..query_len {
+    let mut depth = 0;
+    while depth < query_len {
+        let group = if grouped {
+            exact_attention_group_len(base_offsets[0] + depth + 1, query_len - depth)
+        } else {
+            1
+        };
         let query = mlx::ops::indexing::slice_strided_on(
             &rotated_queries,
             &[0_i32, 0, depth, 0][..],
-            &[batch, heads, depth + 1, head_dim][..],
+            &[batch, heads, depth + group, head_dim][..],
             &[1_i32, 1, 1, 1][..],
             target,
         )?;
         let key_end = base_offsets
             .iter()
-            .map(|&offset| offset + depth + 1)
+            .map(|&offset| offset + depth + group)
             .max()
             .unwrap_or(0);
         let cached_key = mlx::ops::indexing::slice_strided_on(
@@ -957,9 +1052,23 @@ fn query_position_isolated_attention_bulk_cache_update_on(
                 target,
             )?,
         });
+        depth += group;
     }
     let output_refs = outputs.iter().collect::<Vec<_>>();
     mlx::ops::shape::concatenate_on(&output_refs, 2, target).map_err(Into::into)
+}
+
+fn exact_attention_group_len(first_key_len: i32, remaining: i32) -> i32 {
+    let group = remaining.min(5); // 6 GQA heads * 5 queries <= 32 SIMD groups.
+    let last = first_key_len + group - 1;
+    if [1024, 1025, 4096, 8193, 16384, 32769, 65536, 65537]
+        .iter()
+        .any(|&boundary| first_key_len < boundary && boundary <= last)
+    {
+        1
+    } else {
+        group
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1029,6 +1138,79 @@ mod tests {
     use mlx::ops::constructors;
     use mlx::{Array, Dtype};
     use serial_test::serial;
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn experimental_grouped_attention_matches_serial_at_regime_boundaries() -> crate::Result<()> {
+        if let Ok(root) = std::env::var("MLX_DIR") {
+            mlx::metal::set_metallib_path(&format!("{root}/lib/mlx.metallib"))?;
+        }
+        use mlx::ops::{cast::astype, indexing::slice_strided, shape::concatenate};
+        let make = |dims: &[i32], seed: usize| -> crate::Result<Array> {
+            let size = dims.iter().map(|&d| d as usize).product();
+            let values = (0..size)
+                .map(|i| (((i * seed + i / 17) % 211) as f32 - 105.) * 0.003)
+                .collect::<Vec<_>>();
+            Ok(astype(
+                &Array::try_from((values.as_slice(), dims))?,
+                Dtype::Bfloat16,
+            )?)
+        };
+        for prefix in [0, 63, 1019, 1020, 1023, 1024, 1025, 4093, 8190, 16381] {
+            let len = prefix + 8;
+            let q = make(&[1, 24, 8, 256], 17)?;
+            let k = make(&[1, 4, len, 256], 19)?;
+            let v = make(&[1, 4, len, 256], 23)?;
+            let attend = |start, group| -> crate::Result<Array> {
+                let query = slice_strided(
+                    &q,
+                    &[0, 0, start, 0][..],
+                    &[1, 24, start + group, 256][..],
+                    &[1, 1, 1, 1][..],
+                )?;
+                let key = slice_strided(
+                    &k,
+                    &[0, 0, 0, 0][..],
+                    &[1, 4, prefix + start + group, 256][..],
+                    &[1, 1, 1, 1][..],
+                )?;
+                let value = slice_strided(
+                    &v,
+                    &[0, 0, 0, 0][..],
+                    &[1, 4, prefix + start + group, 256][..],
+                    &[1, 1, 1, 1][..],
+                )?;
+                Ok(mlx::fast::scaled_dot_product_attention_on(
+                    &query,
+                    &key,
+                    &value,
+                    0.0625,
+                    "causal",
+                    None,
+                    None,
+                    (),
+                )?)
+            };
+            let serial = (0..8)
+                .map(|i| attend(i, 1))
+                .collect::<crate::Result<Vec<_>>>()?;
+            let serial = concatenate(&serial.iter().collect::<Vec<_>>(), 2)?;
+            let mut grouped = Vec::new();
+            let mut depth = 0;
+            while depth < 8 {
+                let group = exact_attention_group_len(prefix + depth + 1, 8 - depth);
+                grouped.push(attend(depth, group)?);
+                depth += group;
+            }
+            let grouped = concatenate(&grouped.iter().collect::<Vec<_>>(), 2)?;
+            assert_eq!(
+                astype(&serial, Dtype::Float32)?.to_vec::<f32>()?,
+                astype(&grouped, Dtype::Float32)?.to_vec::<f32>()?,
+                "prefix {prefix}"
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn format_decode_attention_turbo_profile_line_is_stable_json() {

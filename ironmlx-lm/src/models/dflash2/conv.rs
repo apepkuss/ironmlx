@@ -151,7 +151,11 @@ impl DFlash2GroupedConv {
         if let Some(residual) = residual {
             anyhow::ensure!(
                 residual.shape().as_slice() == dims && residual.dtype() == hidden.dtype(),
-                "DFlash2 fused grouped conv residual must match hidden"
+                "DFlash2 fused grouped conv residual {:?}/{:?} must match hidden {:?}/{:?}",
+                residual.shape().as_slice(),
+                residual.dtype(),
+                dims,
+                hidden.dtype()
             );
         }
         anyhow::ensure!(

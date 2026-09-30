@@ -61,3 +61,8 @@ required-features = ["tools"]
 name = "b1-path-qualification"
 path = "src/bin/b1-path-qualification.rs"
 required-features = ["tools"]
+
+[[bin]]
+name = "dflash2-lane-diagnostic"
+path = "src/bin/dflash2-lane-diagnostic.rs"
+required-features = ["tools"]

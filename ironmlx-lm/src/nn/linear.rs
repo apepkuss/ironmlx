@@ -7,15 +7,18 @@ use mlx::{Array, StreamOrDevice};
 
 pub struct Linear {
     inner: ironmlx_core::nn::Linear,
+    m5_prepared: std::sync::OnceLock<super::m5_affine4::Prepared>,
 }
 impl Linear {
     pub fn from_loader(loader: &(impl WeightSource + ?Sized), prefix: &str) -> Result<Self> {
         Ok(Self {
+            m5_prepared: std::sync::OnceLock::new(),
             inner: ironmlx_core::nn::Linear::from_loader(loader, prefix)?,
         })
     }
     pub fn new_fp(weight: Array, bias: Option<Array>) -> Self {
         Self {
+            m5_prepared: std::sync::OnceLock::new(),
             inner: ironmlx_core::nn::Linear::new_fp(weight, bias),
         }
     }
@@ -31,6 +34,7 @@ impl Linear {
             inner: ironmlx_core::nn::Linear::new_quant(
                 weight, scales, biases, bias, group_size, bits,
             ),
+            m5_prepared: std::sync::OnceLock::new(),
         }
     }
     pub fn new_quant_with_mode(
@@ -46,6 +50,7 @@ impl Linear {
             inner: ironmlx_core::nn::Linear::new_quant_with_mode(
                 weight, scales, biases, bias, group_size, bits, mode,
             ),
+            m5_prepared: std::sync::OnceLock::new(),
         }
     }
     pub fn forward(&self, x: &Array) -> Result<Array> {
@@ -229,6 +234,13 @@ impl Linear {
     /// Stream-targeted forward pass.
     pub fn forward_on(&self, x: &Array, target: impl Into<StreamOrDevice>) -> Result<Array> {
         let target = target.into();
+        if super::m5_affine4::armed() {
+            if let Some(parts) = self.quantized_parts() {
+                if let Some(y) = super::m5_affine4::forward(x, parts, &self.m5_prepared, target)? {
+                    return Ok(y);
+                }
+            }
+        }
         if super::position_stable_qmm::exact_affine8_b4_q2_is_armed() {
             if let Some(parts) = self.quantized_parts() {
                 if let Some(output) =

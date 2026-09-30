@@ -335,9 +335,16 @@ impl GatedDeltaNet {
         let capture_active = cache
             .as_deref()
             .is_some_and(GatedDeltaCache::speculative_prefix_capture_active);
+        let tree = super::dflash_tree::current();
+        if let Some(plan) = tree.as_ref() {
+            anyhow::ensure!(
+                batch == 1 && seq as usize == plan.paths.len() && capture_active && mask.is_none(),
+                "invalid flat-tree GDN state"
+            );
+        }
         let defer_captured_state_commit = capture_active
-            && super::position_stable_qmm::exact_affine8_b4_q2_is_armed()
-            && seq == 2;
+            && ((super::position_stable_qmm::exact_affine8_b4_q2_is_armed() && seq == 2)
+                || tree.is_some());
         let ((qkv, z), (b, a)) = {
             let _stable_linear = capture_active.then(super::position_stable_linear::scope);
             let _stable_qmm = capture_active.then(super::position_stable_qmm::scope);
@@ -386,7 +393,7 @@ impl GatedDeltaNet {
                     z_width,
                     b_width,
                 } => {
-                    if super::product_stable_qmm::is_armed() {
+                    if super::product_stable_qmm::is_armed() || super::m5_affine4::armed() {
                         let output = projection.forward_on(x, target)?;
                         let mut parts = mlx::ops::shape::split_at_on(
                             &output,
@@ -448,7 +455,15 @@ impl GatedDeltaNet {
 
         // Step 2b: conv1d + silu
         let conv_out = {
-            let conv_out = self.conv1d.forward_on(&conv_input, target)?;
+            let conv_out = if let Some(plan) = tree.as_ref() {
+                let windows =
+                    plan.conv_windows(&conv_input, self.cfg.conv_kernel_size - 1, target)?;
+                self.conv1d
+                    .forward_on(&windows, target)?
+                    .reshape_on((1, seq, self.cfg.conv_dim()), target)?
+            } else {
+                self.conv1d.forward_on(&conv_input, target)?
+            };
             let conv_sig = conv_out.sigmoid()?;
             &conv_out * &conv_sig
         };
@@ -561,7 +576,21 @@ impl GatedDeltaNet {
         // Step 6: beta = sigmoid(b)
         let beta = b.sigmoid_on(target)?;
 
-        let y = {
+        let y = if let Some(plan) = tree.as_ref() {
+            super::dflash_tree::recurrent(
+                plan,
+                &q_scaled,
+                &k_scaled,
+                &v_per_head,
+                &g,
+                &beta,
+                cache
+                    .as_deref()
+                    .expect("validated tree cache")
+                    .recurrent_state(),
+                target,
+            )?
+        } else {
             // Step 7a: build/get the appropriate kernel. The initial
             // prefill chunk has a logically all-zero recurrent state; use
             // a zero-state variant so the kernel does not read or

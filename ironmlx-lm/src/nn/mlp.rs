@@ -123,6 +123,7 @@ impl Mlp {
                 } = fused.as_ref();
                 if super::product_stable_qmm::is_armed()
                     || super::dflash2_drafter_fusion::is_armed()
+                    || super::m5_affine4::armed()
                 {
                     let output = projection.forward_on(x, target)?;
                     let mut parts = mlx::ops::shape::split_n_on(&output, 2, -1, target)?;

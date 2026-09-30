@@ -1147,20 +1147,45 @@ impl crate::models::dflash2::DFlash2Target for Qwen35Model {
                 }
             }
         }
+        let m5 = super::dflash2_lane::is_qwen38_27b(self.config())
+            && self.exact_batched_verify_profile
+                == super::speculative::ExactBatchedVerifyProfile::Affine4
+            && crate::nn::m5_affine4::enabled();
+        let mut lane_pack =
+            super::dflash2_lane::kernel_pack(self.config(), self.exact_batched_verify_profile);
+        if m5 {
+            if let Some(pack) = lane_pack.as_mut() {
+                pack.revision = 2;
+                pack.prepared_layout = crate::nn::m5_affine4::fingerprint();
+                pack.attention_layout = "experimental-tree-or-bulk-position-stable-v1".into();
+            }
+        }
         DFlash2VerifyCapabilities {
-            profile: profile.into(),
+            profile: if m5 {
+                "qwen38-m5-affine4-experimental".into()
+            } else {
+                profile.into()
+            },
             row_bit_exact_qmm: !supported_shapes.is_empty(),
             row_bit_exact_attention: !supported_shapes.is_empty(),
             transactional_state_restore: !supported_shapes.is_empty(),
             supported_shapes,
-            lane_kernel_pack: super::dflash2_lane::kernel_pack(
-                self.config(),
-                self.exact_batched_verify_profile,
-            ),
+            lane_kernel_pack: lane_pack,
         }
     }
 
     fn dflash2_execution_fingerprint(&self) -> String {
+        if super::dflash2_lane::is_qwen38_27b(self.config())
+            && self.exact_batched_verify_profile
+                == super::speculative::ExactBatchedVerifyProfile::Affine4
+            && crate::nn::m5_affine4::enabled()
+        {
+            return format!(
+                "qwen38-dflash2;{};reference=lane-serial-not-ordinary-mlx;{}",
+                crate::nn::m5_affine4::fingerprint(),
+                self.dflash2_verify_capabilities().stable_fingerprint()
+            );
+        }
         format!(
             "qwen35-dflash2-v2;prepared-qmm=lane-product-stable-v2;attention=bulk-position-stable-v1;recurrent=logical-prefix-v2;{}",
             self.dflash2_verify_capabilities().stable_fingerprint()
@@ -1175,6 +1200,60 @@ impl crate::models::dflash2::DFlash2Target for Qwen35Model {
         self.text.embed_on(input_ids, target)
     }
 
+    fn dflash2_forward_tree_on(
+        &self,
+        input_ids: &Array,
+        parents: &[i32],
+        start: i32,
+        cache: &mut [LayerCache],
+        target_layer_ids: &[usize],
+        target: StreamOrDevice,
+    ) -> crate::Result<crate::models::dflash2::DFlash2TargetOutput> {
+        anyhow::ensure!(
+            self.dflash2_execution_fingerprint()
+                .contains("experimental-m5-affine4"),
+            "flat tree requires M5 affine4 route"
+        );
+        let plan = crate::nn::dflash_tree::Plan::new(parents)?;
+        let positions = plan.positions(start)?;
+        let _tree = crate::nn::dflash_tree::enter(plan)?;
+        self.dflash2_forward_target_on(
+            input_ids,
+            &positions,
+            Some(cache),
+            target_layer_ids,
+            crate::models::dflash2::DFlash2TargetForwardMode::GreedyVerify,
+            target,
+        )
+    }
+
+    fn dflash2_commit_tree_on(
+        &self,
+        cache: &mut [LayerCache],
+        snapshots: &[crate::core::cache::layer::LayerCacheSnapshot],
+        rows: &[i32],
+        target: StreamOrDevice,
+    ) -> crate::Result<()> {
+        use crate::core::cache::layer::LayerCacheSnapshot;
+        anyhow::ensure!(
+            cache.len() == snapshots.len(),
+            "tree snapshot count mismatch"
+        );
+        for (live, saved) in cache.iter_mut().zip(snapshots) {
+            match (live, saved) {
+                (LayerCache::Full(kv), LayerCacheSnapshot::Full(saved)) => {
+                    kv.commit_tree_rows(saved.offsets()[0], rows, target)?
+                }
+                (LayerCache::Linear(gdn), LayerCacheSnapshot::Linear(_)) => {
+                    gdn.select_tree_replay_rows(rows, target)?
+                }
+                _ => anyhow::bail!("unsupported tree cache"),
+            }
+        }
+        self.text
+            .restore_dflash2_speculative_prefix_on(cache, snapshots, rows.len(), target)
+    }
+
     fn dflash2_forward_target_on(
         &self,
         input_ids: &mlx::Array,
@@ -1184,6 +1263,11 @@ impl crate::models::dflash2::DFlash2Target for Qwen35Model {
         mode: crate::models::dflash2::DFlash2TargetForwardMode,
         target: mlx::StreamOrDevice,
     ) -> crate::Result<crate::models::dflash2::DFlash2TargetOutput> {
+        let _m5_lane = (super::dflash2_lane::is_qwen38_27b(self.config())
+            && self.exact_batched_verify_profile
+                == super::speculative::ExactBatchedVerifyProfile::Affine4
+            && crate::nn::m5_affine4::enabled())
+        .then(crate::nn::m5_affine4::scope);
         let input_shape = input_ids.shape();
         let input_dims = input_shape.as_slice();
         let batch_width = input_dims.first().copied().unwrap_or(0) as usize;
@@ -1265,6 +1349,11 @@ impl crate::models::dflash2::DFlash2Target for Qwen35Model {
         hidden: &mlx::Array,
         target: mlx::StreamOrDevice,
     ) -> crate::Result<mlx::Array> {
+        let _m5_lane = (super::dflash2_lane::is_qwen38_27b(self.config())
+            && self.exact_batched_verify_profile
+                == super::speculative::ExactBatchedVerifyProfile::Affine4
+            && crate::nn::m5_affine4::enabled())
+        .then(crate::nn::m5_affine4::scope);
         let shape = hidden.shape();
         let dims = shape.as_slice();
         if dims.len() != 3 || dims[0] <= 0 {

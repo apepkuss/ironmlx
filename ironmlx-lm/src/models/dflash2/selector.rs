@@ -73,14 +73,19 @@ impl DFlash2CandidateSelector {
         }
         let batch = dims[0];
         let length = dims[1];
-        let partition = mlx::ops::sort::argpartition_on(logits, -self.top_k, -1, target)?;
-        let candidates = mlx::ops::indexing::slice_strided_on(
-            &partition,
-            &[0_i32, 0, self.vocab_size - self.top_k][..],
-            &[batch, length, self.vocab_size][..],
-            &[1_i32, 1, 1][..],
-            target,
-        )?;
+        let candidates = if let Some(indices) = super::topk::candidates(logits, self.top_k, target)?
+        {
+            indices
+        } else {
+            let partition = mlx::ops::sort::argpartition_on(logits, -self.top_k, -1, target)?;
+            mlx::ops::indexing::slice_strided_on(
+                &partition,
+                &[0_i32, 0, self.vocab_size - self.top_k][..],
+                &[batch, length, self.vocab_size][..],
+                &[1_i32, 1, 1][..],
+                target,
+            )?
+        };
         let unary = mlx::ops::indexing::take_along_axis_on(logits, &candidates, -1, target)?;
         // Keep selector edge scores independent of the number of active rows.
         // This projection is small relative to the target LM head, while its
@@ -171,14 +176,19 @@ impl DFlash2CandidateSelector {
         );
         let depth = dims[1] as usize;
         let rank = self.hidden_projection.out_features();
-        let partition = mlx::ops::sort::argpartition_on(logits, -self.top_k, -1, target)?;
-        let candidates = mlx::ops::indexing::slice_strided_on(
-            &partition,
-            &[0_i32, 0, self.vocab_size - self.top_k][..],
-            &[1_i32, dims[1], self.vocab_size][..],
-            &[1_i32, 1, 1][..],
-            target,
-        )?;
+        let candidates = if let Some(indices) = super::topk::candidates(logits, self.top_k, target)?
+        {
+            indices
+        } else {
+            let partition = mlx::ops::sort::argpartition_on(logits, -self.top_k, -1, target)?;
+            mlx::ops::indexing::slice_strided_on(
+                &partition,
+                &[0_i32, 0, self.vocab_size - self.top_k][..],
+                &[1_i32, dims[1], self.vocab_size][..],
+                &[1_i32, 1, 1][..],
+                target,
+            )?
+        };
         let unary = mlx::ops::indexing::take_along_axis_on(logits, &candidates, -1, target)?;
         let projected = {
             let _product_stable_qmm = crate::nn::product_stable_qmm::scope();
@@ -193,6 +203,15 @@ impl DFlash2CandidateSelector {
             .take_on(&flat_candidates, 0, target)?;
         let anchor = anchor_ids.reshape_on((-1_i32,), target)?;
         let anchor_predecessor = self.predecessor_codebook.take_on(&anchor, 0, target)?;
+        // Queue all host-transfer casts before one evaluation boundary. The
+        // previous per-field cast/to_vec sequence launched up to five tiny
+        // GPU jobs after the lattice had already finished.
+        let unary = mlx::ops::cast::astype_on(&unary, mlx::Dtype::Float32, target)?;
+        let projected = mlx::ops::cast::astype_on(&projected, mlx::Dtype::Float32, target)?;
+        let predecessor = mlx::ops::cast::astype_on(&predecessor, mlx::Dtype::Float32, target)?;
+        let successor = mlx::ops::cast::astype_on(&successor, mlx::Dtype::Float32, target)?;
+        let anchor_predecessor =
+            mlx::ops::cast::astype_on(&anchor_predecessor, mlx::Dtype::Float32, target)?;
         let arrays = [
             &candidates,
             &unary,
@@ -208,13 +227,11 @@ impl DFlash2CandidateSelector {
             width: self.top_k as usize,
             rank,
             candidates: candidates.to_vec::<u32>()?,
-            unary: mlx::ops::cast::astype(&unary, mlx::Dtype::Float32)?.to_vec::<f32>()?,
-            projected: mlx::ops::cast::astype(&projected, mlx::Dtype::Float32)?.to_vec::<f32>()?,
-            predecessor: mlx::ops::cast::astype(&predecessor, mlx::Dtype::Float32)?
-                .to_vec::<f32>()?,
-            successor: mlx::ops::cast::astype(&successor, mlx::Dtype::Float32)?.to_vec::<f32>()?,
-            anchor_predecessor: mlx::ops::cast::astype(&anchor_predecessor, mlx::Dtype::Float32)?
-                .to_vec::<f32>()?,
+            unary: unary.to_vec::<f32>()?,
+            projected: projected.to_vec::<f32>()?,
+            predecessor: predecessor.to_vec::<f32>()?,
+            successor: successor.to_vec::<f32>()?,
+            anchor_predecessor: anchor_predecessor.to_vec::<f32>()?,
         };
         lattice.best_first_tree(max_nodes, children_per_node.min(lattice.width))
     }
@@ -258,7 +275,12 @@ impl HostDraftLattice {
                     .zip(successor)
                     .map(|((&p, &h), &s)| f64::from(p) * f64::from(h) * f64::from(s))
                     .sum::<f64>();
-                f64::from(self.unary[depth * self.width + candidate]) + edge
+                let unary = f64::from(self.unary[depth * self.width + candidate]);
+                if super::experimental_tree_profile() {
+                    (unary + 0.6 * edge) / 1.5
+                } else {
+                    unary + edge
+                }
             })
             .collect::<Vec<_>>();
         let max = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);

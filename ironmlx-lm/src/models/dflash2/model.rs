@@ -132,7 +132,7 @@ impl DFlash2DraftModel {
     ) -> Result<Array> {
         let target = target.into();
         let (proposal_hidden, logits, anchor) =
-            self.proposal_lattice_on(target_model, input_ids, target_hidden, cache, target)?;
+            self.proposal_lattice_on(target_model, input_ids, target_hidden, cache, target, false)?;
         self.selector
             .select_greedy_on(&proposal_hidden, &logits, &anchor, target)
     }
@@ -148,7 +148,7 @@ impl DFlash2DraftModel {
     ) -> Result<DFlash2DraftTree> {
         let target = target.into();
         let (proposal_hidden, logits, anchor) =
-            self.proposal_lattice_on(target_model, input_ids, target_hidden, cache, target)?;
+            self.proposal_lattice_on(target_model, input_ids, target_hidden, cache, target, true)?;
         self.selector.select_tree_on(
             &proposal_hidden,
             &logits,
@@ -166,17 +166,23 @@ impl DFlash2DraftModel {
         target_hidden: &Array,
         cache: &mut DFlash2DraftCache,
         target: StreamOrDevice,
+        tree: bool,
     ) -> Result<(Array, Array, Array)> {
         let input_shape = input_ids.shape();
         let input_dims = input_shape.as_slice();
+        let maximum = if tree && super::experimental_tree_profile() {
+            16
+        } else {
+            self.config.dflash_config.block_size
+        };
         if input_dims.len() != 2
             || input_dims[0] <= 0
             || input_dims[1] < 2
-            || input_dims[1] > self.config.dflash_config.block_size
+            || input_dims[1] > maximum
         {
             return Err(anyhow!(
                 "DFlash2 proposal input must be [B,L] with B>0 and 2<=L<={}, got {input_dims:?}",
-                self.config.dflash_config.block_size
+                maximum
             ));
         }
         let batch = input_dims[0];
