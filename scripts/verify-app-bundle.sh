@@ -57,6 +57,7 @@ for file in \
   Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle \
   Contents/Resources/mlx.metallib \
   Contents/Resources/dashboard2.html \
+  Contents/Resources/supported-models.json \
   Contents/Resources/indextts25-preparation.json \
   Contents/Resources/deepseek-harness-logo-dark.svg \
   Contents/Resources/deepseek-harness-logo.svg \

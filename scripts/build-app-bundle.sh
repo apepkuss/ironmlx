@@ -171,6 +171,7 @@ cp "$BUILD_ROOT/mlx-install/lib/mlx.metallib" "$APP_BUNDLE/Contents/Resources/ml
 for resource in \
   indextts25-preparation.json \
   dashboard2.html \
+  supported-models.json \
   deepseek-harness-logo-dark.svg \
   deepseek-harness-logo.svg \
   hermes-agent-logo.svg \

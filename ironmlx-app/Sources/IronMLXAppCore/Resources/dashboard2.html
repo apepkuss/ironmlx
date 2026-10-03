@@ -10,6 +10,44 @@
   } catch (_) {}
 </script>
 <style>
+  /* Curated model catalogue: readable rows with provider actions. */
+  .dl-source-tabs { display:flex; flex-wrap:wrap; gap:0; margin-bottom:16px; border-bottom:1px solid var(--border); }
+  .dl-source-tab { padding:8px 20px; border:0; background:none; cursor:pointer; font:inherit; font-size:13px; font-weight:500; border-bottom:2px solid transparent; color:var(--text-tertiary); }
+  .dl-source-tab[aria-selected="true"] { border-bottom-color:var(--accent); color:var(--text-primary); }
+  .dl-source-tab:focus-visible, .catalog-action:focus-visible, .catalog-variant select:focus-visible, .catalog-filter:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  .catalog-intro { padding:16px 20px 0; }
+  .catalog-intro p { margin:0 0 8px; font-size:13px; line-height:1.6; color:var(--text-secondary); max-width:78ch; }
+  .catalog-summary { padding:0 20px 12px; color:var(--text-tertiary); font-size:12px; }
+  .catalog-filters { display:flex; flex-wrap:wrap; gap:8px; padding:0 20px 16px; }
+  .catalog-filter { display:inline-flex; align-items:center; gap:7px; padding:6px 11px; border:1px solid var(--border); border-radius:16px; background:var(--card-bg); color:var(--text-secondary); font:inherit; font-size:12px; cursor:pointer; }
+  .catalog-filter[aria-pressed="true"] { border-color:var(--accent); color:var(--accent); background:var(--bg); }
+  .catalog-filter-count { font-size:11px; font-variant-numeric:tabular-nums; opacity:0.8; }
+  .catalog-section-header { display:flex; flex-wrap:wrap; align-items:center; gap:10px; padding:14px 20px; border-top:1px solid var(--border); background:var(--bg); }
+  .catalog-section-header h3 { margin:0; font-size:13px; font-weight:600; color:var(--text); }
+  .catalog-section-count { font-size:12px; color:var(--text-secondary); }
+  .catalog-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:16px; align-items:start; padding:18px 20px; border-top:1px solid var(--border); }
+  .catalog-heading { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+  .catalog-name { font-size:14px; font-weight:600; color:var(--text-primary); }
+  .catalog-badge { font-size:11px; padding:3px 7px; border-radius:4px; background:var(--bg); color:var(--text-secondary); }
+  .catalog-variant { display:flex; flex-direction:column; gap:6px; font-size:12px; color:var(--text-secondary); }
+  .catalog-variant select { box-sizing:border-box; width:100%; min-width:0; font:inherit; color:var(--text); background-color:var(--card-bg); border:1px solid var(--border); border-radius:6px; padding:7px 28px 7px 10px; }
+  .catalog-variant select.catalog-variant-placeholder { color:var(--text-secondary); }
+  .catalog-repo { color:var(--text-tertiary); font-size:11px; margin-top:5px; overflow-wrap:anywhere; user-select:text; }
+  .catalog-details { display:flex; flex-wrap:wrap; gap:6px 14px; margin-top:9px; font-size:12px; color:var(--text-secondary); }
+  .catalog-capabilities { display:flex; flex-wrap:wrap; gap:5px; }
+  .catalog-capability { padding:2px 6px; border-radius:4px; background:var(--bg); font-size:11px; }
+  .catalog-note { margin:8px 0 0; font-size:12px; line-height:1.5; color:var(--text-secondary); max-width:78ch; }
+  .catalog-actions { display:flex; flex-direction:column; align-items:stretch; gap:8px; min-width:160px; }
+  .catalog-action { font-size:12px; white-space:nowrap; }
+  .catalog-action:disabled { cursor:default; opacity:0.55; }
+  .catalog-memory-warning { color:var(--orange, #ff9500); }
+  .catalog-empty { padding:24px 20px; color:var(--text-secondary); font-size:13px; }
+  @media (max-width:760px) {
+    .catalog-row { grid-template-columns:1fr; gap:12px; }
+    .catalog-actions { min-width:0; }
+    .dl-source-tab { padding:8px 12px; }
+  }
+
   :root {
     --bg: #f5f5f7;
     --sidebar-bg: #ffffff;
@@ -1117,7 +1155,7 @@
     font-family: inherit;
   }
 
-  input[type="text"], input[type="number"] {
+  input[type="text"], input[type="number"], .catalog-controls input {
     background: var(--bg);
     border: 0.5px solid var(--border);
     border-radius: 6px;
@@ -2867,7 +2905,7 @@
     color: var(--text-secondary);
   }
 
-  .dl-field input[type="text"] {
+  .dl-field input[type="text"], .catalog-controls input {
     width: 100%;
   }
 
@@ -3583,7 +3621,9 @@
   .download-task-status.failed { color: var(--destructive); }
   .download-task-progress { height: 3px; margin-top: 9px; overflow: hidden; border-radius: 2px; background: var(--border); }
   .download-task-progress-bar { height: 100%; border-radius: inherit; background: var(--accent); transition: width 0.25s ease; }
-  .download-task-cancel { flex: 0 0 auto; }
+  .download-task-actions { display:flex; flex:0 0 auto; flex-wrap:wrap; gap:8px; }
+  .download-task-delete { color:var(--destructive); }
+  .download-task-action:disabled { opacity:0.55; cursor:default; }
   @media (prefers-reduced-motion: reduce) {
     .download-task-progress-bar { transition: none; }
   }
@@ -3909,14 +3949,29 @@
         <div id="download-task-list" class="download-task-list" aria-live="polite"></div>
       </div>
 
-      <!-- Source Tabs -->
-      <div style="display:flex; gap:0; margin-bottom:16px; border-bottom:1px solid var(--border);">
-        <button class="dl-source-tab active" id="dl-tab-hf" onclick="switchDlSource('hf')" style="padding:8px 20px; border:none; background:none; cursor:pointer; font-size:13px; font-weight:500; border-bottom:2px solid var(--accent); color:var(--text-primary);"><svg height="14" width="14" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle;margin-right:4px;"><path d="M2.25 11.535c0-3.407 1.847-6.554 4.844-8.258a9.822 9.822 0 019.687 0c2.997 1.704 4.844 4.851 4.844 8.258 0 5.266-4.337 9.535-9.687 9.535S2.25 16.8 2.25 11.535z" fill="#FF9D0B"/><path d="M11.938 20.086c4.797 0 8.687-3.829 8.687-8.551 0-4.722-3.89-8.55-8.687-8.55-4.798 0-8.688 3.828-8.688 8.55 0 4.722 3.89 8.55 8.688 8.55z" fill="#FFD21E"/><path d="M14.76 9.21c.32.108.445.753.767.585.447-.233.707-.708.659-1.204a1.235 1.235 0 00-.879-1.059 1.262 1.262 0 00-1.33.394c-.322.384-.377.92-.14 1.36.153.283.638-.177.925-.079zm-5.887 0c-.32.108-.448.753-.768.585a1.226 1.226 0 01-.658-1.204c.048-.495.395-.913.878-1.059a1.262 1.262 0 011.33.394c.322.384.377.92.14 1.36-.152.283-.64-.177-.925-.079z" fill="#3A3B45"/></svg>HuggingFace</button>
-        <button class="dl-source-tab" id="dl-tab-ms" onclick="switchDlSource('ms')" style="padding:8px 20px; border:none; background:none; cursor:pointer; font-size:13px; font-weight:500; border-bottom:2px solid transparent; color:var(--text-tertiary);"><svg height="14" style="vertical-align:middle;margin-right:4px;" viewBox="0 0 24 24" width="14" xmlns="http://www.w3.org/2000/svg"><path d="M0 7.967h2.667v2.667H0zM8 10.633h2.667V13.3H8z" fill="#36CED0"></path><path d="M0 10.633h2.667V13.3H0zM2.667 13.3h2.666v2.667H8v2.666H2.667V13.3zM2.667 5.3H8v2.667H5.333v2.666H2.667V5.3zM10.667 13.3h2.667v2.667h-2.667z" fill="#624AFF"></path><path d="M24 7.967h-2.667v2.667H24zM16 10.633h-2.667V13.3H16z" fill="#36CED0"></path><path d="M24 10.633h-2.667V13.3H24zM21.333 13.3h-2.666v2.667H16v2.666h5.333V13.3zM21.333 5.3H16v2.667h2.667v2.666h2.666V5.3z" fill="#624AFF"></path></svg>ModelScope</button>
+      <!-- Model discovery tabs -->
+      <div class="dl-source-tabs" role="tablist" aria-label="Model download" data-i18n-aria-label="model_download">
+        <button class="dl-source-tab" id="dl-tab-catalog" type="button" role="tab" aria-selected="true" aria-controls="dl-panel-catalog" onclick="switchDlSource('catalog')" data-i18n="catalog_title">Supported models</button>
+        <button class="dl-source-tab" id="dl-tab-hf" onclick="switchDlSource('hf')" type="button" role="tab" aria-selected="false" tabindex="-1" aria-controls="dl-panel-hf"><svg height="14" width="14" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle;margin-right:4px;"><path d="M2.25 11.535c0-3.407 1.847-6.554 4.844-8.258a9.822 9.822 0 019.687 0c2.997 1.704 4.844 4.851 4.844 8.258 0 5.266-4.337 9.535-9.687 9.535S2.25 16.8 2.25 11.535z" fill="#FF9D0B"/><path d="M11.938 20.086c4.797 0 8.687-3.829 8.687-8.551 0-4.722-3.89-8.55-8.687-8.55-4.798 0-8.688 3.828-8.688 8.55 0 4.722 3.89 8.55 8.688 8.55z" fill="#FFD21E"/><path d="M14.76 9.21c.32.108.445.753.767.585.447-.233.707-.708.659-1.204a1.235 1.235 0 00-.879-1.059 1.262 1.262 0 00-1.33.394c-.322.384-.377.92-.14 1.36.153.283.638-.177.925-.079zm-5.887 0c-.32.108-.448.753-.768.585a1.226 1.226 0 01-.658-1.204c.048-.495.395-.913.878-1.059a1.262 1.262 0 011.33.394c.322.384.377.92.14 1.36-.152.283-.64-.177-.925-.079z" fill="#3A3B45"/></svg>HuggingFace</button>
+        <button class="dl-source-tab" id="dl-tab-ms" onclick="switchDlSource('ms')" type="button" role="tab" aria-selected="false" tabindex="-1" aria-controls="dl-panel-ms"><svg height="14" style="vertical-align:middle;margin-right:4px;" viewBox="0 0 24 24" width="14" xmlns="http://www.w3.org/2000/svg"><path d="M0 7.967h2.667v2.667H0zM8 10.633h2.667V13.3H8z" fill="#36CED0"></path><path d="M0 10.633h2.667V13.3H0zM2.667 13.3h2.666v2.667H8v2.666H2.667V13.3zM2.667 5.3H8v2.667H5.333v2.666H2.667V5.3zM10.667 13.3h2.667v2.667h-2.667z" fill="#624AFF"></path><path d="M24 7.967h-2.667v2.667H24zM16 10.633h-2.667V13.3H16z" fill="#36CED0"></path><path d="M24 10.633h-2.667V13.3H24zM21.333 13.3h-2.666v2.667H16v2.666h5.333V13.3zM21.333 5.3H16v2.667h2.667v2.666h2.666V5.3z" fill="#624AFF"></path></svg>ModelScope</button>
+      </div>
+
+      <!-- Supported model catalogue -->
+      <div id="dl-panel-catalog" role="tabpanel" aria-labelledby="dl-tab-catalog">
+        <div class="card-settings">
+          <div class="card-header"><span data-i18n="catalog_title">Supported models</span></div>
+          <div class="catalog-intro">
+            <p data-i18n="catalog_intro">Specific model variants for this version of IronMLX. Runtime verification applies to the recorded model, not every later repository update.</p>
+            <p data-i18n="catalog_memory_help">Memory hints use weights plus a small allowance. Context, concurrency and extra runtime resources can require more memory. Downloads still run compatibility and resource checks.</p>
+          </div>
+          <div id="catalog-summary" class="catalog-summary"></div>
+          <div id="catalog-type-filters" class="catalog-filters" role="group" aria-label="Model type" data-i18n-aria-label="catalog_type_filter"></div>
+          <div id="catalog-model-list"></div>
+        </div>
       </div>
 
       <!-- HuggingFace Panel -->
-      <div id="dl-panel-hf">
+      <div id="dl-panel-hf" role="tabpanel" aria-labelledby="dl-tab-hf" style="display:none;">
         <div class="card-settings">
           <div class="card-header">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="opacity:0.55;"><circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.3"/><line x1="10.5" y1="10.5" x2="14" y2="14" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
@@ -3958,7 +4013,7 @@
       </div>
 
       <!-- ModelScope Panel -->
-      <div id="dl-panel-ms" style="display:none;">
+      <div id="dl-panel-ms" role="tabpanel" aria-labelledby="dl-tab-ms" style="display:none;">
         <div class="card-settings">
           <div class="card-header">
             <svg height="16" viewBox="0 0 24 24" width="16" xmlns="http://www.w3.org/2000/svg" style="opacity:0.7;"><path d="M0 7.967h2.667v2.667H0zM8 10.633h2.667V13.3H8z" fill="#36CED0"></path><path d="M0 10.633h2.667V13.3H0zM2.667 13.3h2.666v2.667H8v2.666H2.667V13.3zM2.667 5.3H8v2.667H5.333v2.666H2.667V5.3zM10.667 13.3h2.667v2.667h-2.667z" fill="#624AFF"></path><path d="M24 7.967h-2.667v2.667H24zM16 10.633h-2.667V13.3H16z" fill="#36CED0"></path><path d="M24 10.633h-2.667V13.3H24zM21.333 13.3h-2.666v2.667H16v2.666h5.333V13.3zM21.333 5.3H16v2.667h2.667v2.666h2.666V5.3z" fill="#624AFF"></path></svg>
@@ -5494,6 +5549,62 @@
   // ── i18n translations ──
   const I18N = {
     en: {
+      download_pause: "Pause",
+      download_resume: "Resume",
+      download_retry: "Retry",
+      download_delete_task: "Delete",
+      download_delete_title: "Delete download?",
+      download_keep_task: "Keep",
+      download_clear_record: "Clear",
+      download_status_pausing: "Pausing",
+      download_status_paused: "Paused",
+      download_delete_confirm: "Remove “{model}” from the queue and delete its partial download? If you download it again, you'll need to start over.",
+      download_resume_token_prompt: "Enter your Hugging Face token, then click {action} on this download.",
+      download_action_failed: "The operation could not be completed. The task was kept; try again shortly.",
+      catalog_title: "Supported models",
+      catalog_type_filter: "Model type",
+      catalog_type_all: "All",
+      catalog_type_llm: "LLM / VLM · Language and vision",
+      catalog_type_audio: "Audio · Speech and audio",
+      catalog_type_image: "Image · Image generation",
+      catalog_type_decision: "Decision · Typed decisions",
+      catalog_type_drafter: "Drafter · Inference acceleration",
+      catalog_type_other: "Other",
+      catalog_type_count: "{count} models",
+      catalog_drafter_main: "Main model: {model}",
+      catalog_intro: "Specific model variants for this version of IronMLX. Runtime verification applies to the recorded model, not every later repository update.",
+      catalog_memory_help: "Memory hints use weights plus a small allowance. Context, concurrency and extra runtime resources can require more memory. Downloads still run compatibility and resource checks.",
+      catalog_text: "Text generation",
+      catalog_vision: "Image understanding",
+      catalog_tts: "Speech synthesis",
+      catalog_image: "Image generation",
+      catalog_decision: "Typed decisions",
+      catalog_assistant: "Acceleration assistants",
+      catalog_reasoning: "Reasoning",
+      catalog_tools: "Tool calls",
+      catalog_verified: "Runtime verified",
+      catalog_compatible: "Architecture compatible · Runtime unverified",
+      catalog_summary: "{count} models · {variants} variants · Metadata checked {date}",
+      catalog_quantization: "Quantization variant",
+      catalog_select_quantization: "Select quantization variant",
+      catalog_note_optiq: "Mixed 4/8-bit precision: 4 bit is the predominant precision, not the precision of every layer.",
+      catalog_size: "Approx. download {size}",
+      catalog_memory_unknown: "Memory requirements checked before download",
+      catalog_memory_large: "Weight budget {size}: exceeds this device’s memory allowance",
+      catalog_memory_budget: "Weight budget {size}: within this device’s memory allowance",
+      catalog_check_update: "Downloaded · Check for updates",
+      catalog_download_update: "Download update",
+      catalog_up_to_date: "Up to date",
+      catalog_checking_update: "Checking…",
+      catalog_update_check_failed: "Couldn’t check for updates. Try again.",
+      catalog_unavailable: "The model catalogue is unavailable. Use HuggingFace or ModelScope to find a model.",
+      catalog_note_tts: "Requires additional audio resources, prepared automatically by the App. Their downloads are not included in the displayed repository size.",
+      catalog_note_image: "Text-to-image and single-image editing. Qwen Research License applies; commercial use is not licensed.",
+      catalog_note_decision: "For the System One decision API; not a chat model.",
+      catalog_note_dflash: "Requires a matching Qwen3.8-27B affine 4-bit or 8-bit main model. Text only; cannot load as a main model.",
+      catalog_note_mtp: "Requires a main model from the matching Qwen family and size. This MTP head is an acceleration assistant, not a main model.",
+      catalog_note_gemma_assistant: "Requires the matching Gemma 4 main model. This assistant cannot be loaded as a main model.",
+
       tts_details: "TTS Model Details",
       tts_supported_languages: "Supported Languages",
       tts_max_text_tokens: "Max Text Tokens",
@@ -5741,7 +5852,7 @@
       download_btn_downloading: "Downloading...",
       download_in_progress: "A HuggingFace download is already in progress.",
       download_tasks: "Download tasks", download_queue_summary: "{active} of {limit} downloading · {queued} queued", download_remaining: "{size} remaining", download_clear_finished: "Clean up downloads", download_clear_finished_accessible_label: "Clear finished download records and unfinished download data",
-      download_cleanup_confirm: "Clear all finished download records and delete temporary data for cancelled or failed tasks. Installed models and active or queued tasks are kept. Deleted data cannot be used to resume downloads.", download_cleanup_done: "Cleared {count} download records.", download_cleanup_failed: "{count} tasks could not be cleaned up. Their records were kept; retry after resolving the error.", download_cleanup_busy: "{count} tasks are still finishing. Retry shortly.",
+      download_cleanup_confirm: "Clear all finished download records and delete temporary data for cancelled or failed tasks. Installed models and paused, active or queued tasks are kept. Deleted data cannot be used to resume downloads.", download_cleanup_done: "Cleared {count} download records.", download_cleanup_failed: "{count} tasks could not be cleaned up. Their records were kept; retry after resolving the error.", download_cleanup_busy: "{count} tasks are still finishing. Retry shortly.",
       download_status_queued: "Queued", download_status_queued_position: "Queued · #{position}", download_status_resolving: "Resolving repository", download_status_preflighting: "Checking files and disk", download_status_downloading: "Downloading", download_status_verifying: "Verifying", download_status_publishing: "Publishing", download_status_completed: "Completed", download_status_cancelled: "Cancelled", download_status_rejected: "Rejected", download_status_interrupted: "Interrupted", download_status_corrupt: "Corrupt", download_status_failed: "Failed",
       download_recovery_title: "Previous download queue was not restored", download_recovery_copy: "Queued tasks are not resumed after restarting IronMLX. Re-add the tasks you still need.", download_readd_public: "Re-add tasks without credentials", download_readd: "Re-add", download_ignore: "Ignore", download_token_required: "Token required", download_enter_token: "Enter token", download_token_prompt: "Enter the Hugging Face token, then add the task again.", dismiss: "Dismiss",
       download_generic_failed: "Download failed.",
@@ -5998,6 +6109,62 @@
       cluster_pm_auto: "Auto (default)", cluster_pm_tp: "Tensor Parallel", cluster_pm_pp: "Pipeline Parallel"
     },
     "zh-Hans": {
+      download_pause: "暂停",
+      download_resume: "继续下载",
+      download_retry: "重试",
+      download_delete_task: "删除任务",
+      download_delete_title: "删除下载任务",
+      download_keep_task: "保留任务",
+      download_clear_record: "清除记录",
+      download_status_pausing: "暂停中",
+      download_status_paused: "已暂停",
+      download_delete_confirm: "删除下载任务“{model}”及已下载的部分文件？删除后，再次下载需要重新开始。",
+      download_resume_token_prompt: "请输入 Hugging Face Token，然后点击该任务的“{action}”。",
+      download_action_failed: "操作未完成，任务已保留，请稍后重试。",
+      catalog_title: "支持的模型",
+      catalog_type_filter: "模型类型",
+      catalog_type_all: "全部",
+      catalog_type_llm: "LLM / VLM · 语言与视觉",
+      catalog_type_audio: "Audio · 音频",
+      catalog_type_image: "Image · 图片生成",
+      catalog_type_decision: "Decision · 决策",
+      catalog_type_drafter: "Drafter · 推理加速辅助",
+      catalog_type_other: "其他",
+      catalog_type_count: "{count} 个模型",
+      catalog_drafter_main: "搭配主模型：{model}",
+      catalog_intro: "本版本 IronMLX 收录的具体模型版本。已有运行验证不代表仓库后续更新的快照都已通过验证。",
+      catalog_memory_help: "内存提示仅估算权重及少量开销。上下文、并发和额外运行资源可能需要更多内存；下载仍会执行兼容性和资源预检。",
+      catalog_text: "文本生成",
+      catalog_vision: "图片理解",
+      catalog_tts: "语音合成",
+      catalog_image: "图片生成",
+      catalog_decision: "类型化决策",
+      catalog_assistant: "加速辅助模型",
+      catalog_reasoning: "推理内容",
+      catalog_tools: "工具调用",
+      catalog_verified: "已有运行验证",
+      catalog_compatible: "架构兼容 · 待运行验证",
+      catalog_summary: "{count} 个模型 · {variants} 个版本 · 元数据核对于 {date}",
+      catalog_quantization: "量化版本",
+      catalog_select_quantization: "选择量化版本",
+      catalog_note_optiq: "采用 4/8-bit 混合精度；4 bit 表示主要精度，不代表每一层都是 4 bit。",
+      catalog_size: "预计下载 {size}",
+      catalog_memory_unknown: "下载前检查内存需求",
+      catalog_memory_large: "权重预算 {size}：超出本机内存预算",
+      catalog_memory_budget: "权重预算 {size}：在本机内存预算内",
+      catalog_check_update: "已下载 · 检查更新",
+      catalog_download_update: "下载更新",
+      catalog_up_to_date: "已是最新版本",
+      catalog_checking_update: "正在检查…",
+      catalog_update_check_failed: "检查更新失败，请重试。",
+      catalog_unavailable: "模型目录暂不可用，请通过 HuggingFace 或 ModelScope 查找模型。",
+      catalog_note_tts: "需要额外音频资源，由 App 自动准备；其下载量不包含在显示的仓库大小中。",
+      catalog_note_image: "支持文生图与单图编辑。受 Qwen Research License 约束，不授权商业用途。",
+      catalog_note_decision: "用于 System One 决策 API，不是聊天模型。",
+      catalog_note_dflash: "需要匹配的 Qwen3.8-27B affine 4-bit 或 8-bit 主模型。仅用于文本，不能作为主模型加载。",
+      catalog_note_mtp: "需要同系列、同规格的 Qwen 主模型。MTP 是加速辅助模型，不能作为主模型加载。",
+      catalog_note_gemma_assistant: "需要匹配的 Gemma 4 主模型。Assistant 是加速辅助模型，不能作为主模型加载。",
+
       tts_details: "TTS 模型详情",
       tts_supported_languages: "支持语言",
       tts_max_text_tokens: "最大文本 Token",
@@ -6245,7 +6412,7 @@
       download_btn_downloading: "下载中…",
       download_in_progress: "已有 HuggingFace 模型正在下载。",
       download_tasks: "下载任务", download_queue_summary: "正在下载 {active}/{limit} · 排队 {queued}", download_remaining: "剩余 {size}", download_clear_finished: "清理下载记录", download_clear_finished_accessible_label: "清除已结束的下载记录及未完成的下载数据",
-      download_cleanup_confirm: "清除所有已结束的下载记录，并删除取消或失败任务的临时下载数据。已安装模型及正在下载或排队的任务会保留。删除的数据将无法用于续传。", download_cleanup_done: "已清理 {count} 条下载记录。", download_cleanup_failed: "{count} 个任务清理失败，记录已保留；处理错误后可重试。", download_cleanup_busy: "{count} 个任务仍在结束处理中，请稍后重试。",
+      download_cleanup_confirm: "清除所有已结束的下载记录，并删除取消或失败任务的临时下载数据。已安装模型及已暂停、正在下载或排队的任务会保留。删除的数据将无法用于续传。", download_cleanup_done: "已清理 {count} 条下载记录。", download_cleanup_failed: "{count} 个任务清理失败，记录已保留；处理错误后可重试。", download_cleanup_busy: "{count} 个任务仍在结束处理中，请稍后重试。",
       download_status_queued: "排队中", download_status_queued_position: "排队中 · 第 {position} 位", download_status_resolving: "解析仓库", download_status_preflighting: "检查文件与磁盘", download_status_downloading: "下载中", download_status_verifying: "校验中", download_status_publishing: "发布中", download_status_completed: "已完成", download_status_cancelled: "已取消", download_status_rejected: "已拒绝", download_status_interrupted: "已中断", download_status_corrupt: "文件损坏", download_status_failed: "失败",
       download_recovery_title: "上次下载队列未恢复", download_recovery_copy: "IronMLX 重启后不会自动恢复排队任务。请重新添加仍需下载的任务。", download_readd_public: "重新添加无需凭证的任务", download_readd: "重新添加", download_ignore: "忽略此项", download_token_required: "需要 Token", download_enter_token: "输入 Token", download_token_prompt: "请输入 Hugging Face Token，然后重新添加该任务。", dismiss: "全部忽略",
       download_generic_failed: "下载失败。",
@@ -6502,6 +6669,62 @@
       cluster_pm_auto: "自动（默认）", cluster_pm_tp: "张量并行 (TP)", cluster_pm_pp: "流水线并行 (PP)"
     },
     "zh-Hant": {
+      download_pause: "暫停",
+      download_resume: "繼續下載",
+      download_retry: "重試",
+      download_delete_task: "刪除任務",
+      download_delete_title: "刪除下載任務",
+      download_keep_task: "保留任務",
+      download_clear_record: "清除記錄",
+      download_status_pausing: "暫停中",
+      download_status_paused: "已暫停",
+      download_delete_confirm: "刪除下載任務「{model}」及已下載的部分檔案？刪除後，再次下載需要重新開始。",
+      download_resume_token_prompt: "請輸入 Hugging Face Token，然後點擊該任務的「{action}」。",
+      download_action_failed: "操作未完成，任務已保留，請稍後重試。",
+      catalog_title: "支援的模型",
+      catalog_type_filter: "模型類型",
+      catalog_type_all: "全部",
+      catalog_type_llm: "LLM / VLM · 語言與視覺",
+      catalog_type_audio: "Audio · 音訊",
+      catalog_type_image: "Image · 圖片生成",
+      catalog_type_decision: "Decision · 決策",
+      catalog_type_drafter: "Drafter · 推理加速輔助",
+      catalog_type_other: "其他",
+      catalog_type_count: "{count} 個模型",
+      catalog_drafter_main: "搭配主模型：{model}",
+      catalog_intro: "本版本 IronMLX 收錄的具體模型版本。已有執行驗證不代表儲存庫後續更新的快照都已通過驗證。",
+      catalog_memory_help: "記憶體提示僅估算權重及少量開銷。上下文、並行請求和額外執行資源可能需要更多記憶體；下載仍會執行相容性和資源預檢。",
+      catalog_text: "文字生成",
+      catalog_vision: "圖片理解",
+      catalog_tts: "語音合成",
+      catalog_image: "圖片生成",
+      catalog_decision: "型別化決策",
+      catalog_assistant: "加速輔助模型",
+      catalog_reasoning: "推理內容",
+      catalog_tools: "工具呼叫",
+      catalog_verified: "已有執行驗證",
+      catalog_compatible: "架構相容 · 待執行驗證",
+      catalog_summary: "{count} 個模型 · {variants} 個版本 · 中繼資料核對於 {date}",
+      catalog_quantization: "量化版本",
+      catalog_select_quantization: "選擇量化版本",
+      catalog_note_optiq: "採用 4/8-bit 混合精度；4 bit 表示主要精度，不代表每一層都是 4 bit。",
+      catalog_size: "預計下載 {size}",
+      catalog_memory_unknown: "下載前檢查記憶體需求",
+      catalog_memory_large: "權重預算 {size}：超出本機記憶體預算",
+      catalog_memory_budget: "權重預算 {size}：在本機記憶體預算內",
+      catalog_check_update: "已下載 · 檢查更新",
+      catalog_download_update: "下載更新",
+      catalog_up_to_date: "已是最新版本",
+      catalog_checking_update: "正在檢查…",
+      catalog_update_check_failed: "檢查更新失敗，請重試。",
+      catalog_unavailable: "模型目錄暫時無法使用，請透過 HuggingFace 或 ModelScope 尋找模型。",
+      catalog_note_tts: "需要額外音訊資源，由 App 自動準備；其下載量不包含在顯示的儲存庫大小中。",
+      catalog_note_image: "支援文生圖與單圖編輯。受 Qwen Research License 約束，不授權商業用途。",
+      catalog_note_decision: "用於 System One 決策 API，不是聊天模型。",
+      catalog_note_dflash: "需要相符的 Qwen3.8-27B affine 4-bit 或 8-bit 主模型。僅用於文字，不能作為主模型載入。",
+      catalog_note_mtp: "需要同系列、同規格的 Qwen 主模型。MTP 是加速輔助模型，不能作為主模型載入。",
+      catalog_note_gemma_assistant: "需要相符的 Gemma 4 主模型。Assistant 是加速輔助模型，不能作為主模型載入。",
+
       tts_details: "TTS 模型詳情",
       tts_supported_languages: "支援語言",
       tts_max_text_tokens: "最大文字 Token",
@@ -6749,7 +6972,7 @@
       download_btn_downloading: "下載中…",
       download_in_progress: "已有 HuggingFace 模型正在下載。",
       download_tasks: "下載任務", download_queue_summary: "正在下載 {active}/{limit} · 排隊 {queued}", download_remaining: "剩餘 {size}", download_clear_finished: "清理下載記錄", download_clear_finished_accessible_label: "清除已結束的下載記錄及未完成的下載資料",
-      download_cleanup_confirm: "清除所有已結束的下載記錄，並刪除取消或失敗任務的暫存下載資料。已安裝模型及正在下載或排隊的任務會保留。刪除的資料將無法用於續傳。", download_cleanup_done: "已清理 {count} 筆下載記錄。", download_cleanup_failed: "{count} 個任務清理失敗，記錄已保留；處理錯誤後可重試。", download_cleanup_busy: "{count} 個任務仍在結束處理中，請稍後重試。",
+      download_cleanup_confirm: "清除所有已結束的下載記錄，並刪除取消或失敗任務的暫存下載資料。已安裝模型及已暫停、正在下載或排隊的任務會保留。刪除的資料將無法用於續傳。", download_cleanup_done: "已清理 {count} 筆下載記錄。", download_cleanup_failed: "{count} 個任務清理失敗，記錄已保留；處理錯誤後可重試。", download_cleanup_busy: "{count} 個任務仍在結束處理中，請稍後重試。",
       download_status_queued: "排隊中", download_status_queued_position: "排隊中 · 第 {position} 位", download_status_resolving: "解析儲存庫", download_status_preflighting: "檢查檔案與磁碟", download_status_downloading: "下載中", download_status_verifying: "驗證中", download_status_publishing: "發佈中", download_status_completed: "已完成", download_status_cancelled: "已取消", download_status_rejected: "已拒絕", download_status_interrupted: "已中斷", download_status_corrupt: "檔案損壞", download_status_failed: "失敗",
       download_recovery_title: "上次下載佇列未恢復", download_recovery_copy: "IronMLX 重新啟動後不會自動恢復排隊任務。請重新加入仍需下載的任務。", download_readd_public: "重新加入無需憑證的任務", download_readd: "重新加入", download_ignore: "略過此項", download_token_required: "需要 Token", download_enter_token: "輸入 Token", download_token_prompt: "請輸入 Hugging Face Token，然後重新加入該任務。", dismiss: "全部略過",
       download_generic_failed: "下載失敗。",
@@ -7009,6 +7232,62 @@
       cluster_pm_auto: "自動（預設）", cluster_pm_tp: "張量平行 (TP)", cluster_pm_pp: "管線平行 (PP)"
     },
     ja: {
+      download_pause: "一時停止",
+      download_resume: "再開",
+      download_retry: "再試行",
+      download_delete_task: "削除",
+      download_delete_title: "ダウンロードを削除しますか？",
+      download_keep_task: "キャンセル",
+      download_clear_record: "履歴を消去",
+      download_status_pausing: "一時停止中",
+      download_status_paused: "一時停止済み",
+      download_delete_confirm: "「{model}」のダウンロードと一時ファイルを削除します。再度ダウンロードする場合は、最初からやり直す必要があります。",
+      download_resume_token_prompt: "Hugging Face Token を入力し、このダウンロードの「{action}」をクリックしてください。",
+      download_action_failed: "操作を完了できませんでした。タスクは保持されています。しばらくしてから再試行してください。",
+      catalog_title: "対応モデル",
+      catalog_type_filter: "モデルの種類",
+      catalog_type_all: "すべて",
+      catalog_type_llm: "LLM / VLM · 言語と視覚",
+      catalog_type_audio: "Audio · 音声",
+      catalog_type_image: "Image · 画像生成",
+      catalog_type_decision: "Decision · 意思決定",
+      catalog_type_drafter: "Drafter · 推論高速化の補助",
+      catalog_type_other: "その他",
+      catalog_type_count: "{count} モデル",
+      catalog_drafter_main: "対応するメインモデル：{model}",
+      catalog_intro: "このバージョンの IronMLX に収録されたモデルです。動作検証は記録されたモデルに対するもので、以後のリポジトリ更新すべてを保証するものではありません。",
+      catalog_memory_help: "メモリ表示は重みと少量の追加領域の概算です。コンテキスト、同時リクエスト、追加リソースにはさらにメモリが必要です。ダウンロード時にも互換性とリソースを確認します。",
+      catalog_text: "テキスト生成",
+      catalog_vision: "画像理解",
+      catalog_tts: "音声合成",
+      catalog_image: "画像生成",
+      catalog_decision: "型付き意思決定",
+      catalog_assistant: "生成高速化の補助モデル",
+      catalog_reasoning: "推論内容",
+      catalog_tools: "ツール呼び出し",
+      catalog_verified: "動作検証済み",
+      catalog_compatible: "アーキテクチャ対応・動作未検証",
+      catalog_summary: "{count} モデル・{variants} 種類・メタデータ確認日 {date}",
+      catalog_quantization: "量子化バリアント",
+      catalog_select_quantization: "量子化バリアントを選択",
+      catalog_note_optiq: "4/8-bit の混合精度です。4 bit は主な精度を示し、すべての層が 4 bit という意味ではありません。",
+      catalog_size: "推定ダウンロード {size}",
+      catalog_memory_unknown: "ダウンロード前に必要メモリを確認",
+      catalog_memory_large: "重みの概算 {size}：この端末のメモリ予算を超過",
+      catalog_memory_budget: "重みの概算 {size}：この端末のメモリ予算内",
+      catalog_check_update: "ダウンロード済み・更新を確認",
+      catalog_download_update: "更新をダウンロード",
+      catalog_up_to_date: "最新バージョンです",
+      catalog_checking_update: "確認中…",
+      catalog_update_check_failed: "更新を確認できませんでした。再試行してください。",
+      catalog_unavailable: "モデル一覧を利用できません。HuggingFace または ModelScope で検索してください。",
+      catalog_note_tts: "追加の音声リソースを App が自動的に準備します。その容量は表示されるリポジトリの容量に含まれません。",
+      catalog_note_image: "テキストからの画像生成と単一画像の編集に対応。Qwen Research License の対象で、商用利用は許諾されていません。",
+      catalog_note_decision: "System One 意思決定 API 用です。チャットモデルではありません。",
+      catalog_note_dflash: "対応する Qwen3.8-27B affine 4-bit または 8-bit メインモデルが必要です。テキスト専用で、メインモデルとしては読み込めません。",
+      catalog_note_mtp: "同じ Qwen 系列・サイズのメインモデルが必要です。MTP は高速化の補助モデルで、メインモデルとしては読み込めません。",
+      catalog_note_gemma_assistant: "対応する Gemma 4 メインモデルが必要です。この補助モデルはメインモデルとしては読み込めません。",
+
       tts_details: "TTS モデル詳細",
       tts_supported_languages: "対応言語",
       tts_max_text_tokens: "最大テキスト Token",
@@ -7256,7 +7535,7 @@
       download_btn_downloading: "ダウンロード中…",
       download_in_progress: "HuggingFace モデルをダウンロードしています。",
       download_tasks: "ダウンロードタスク", download_queue_summary: "ダウンロード中 {active}/{limit} · 待機 {queued}", download_remaining: "残り {size}", download_clear_finished: "ダウンロードを整理", download_clear_finished_accessible_label: "終了したダウンロード記録と未完了のダウンロードデータを削除",
-      download_cleanup_confirm: "終了したダウンロード記録をすべて消去し、キャンセルまたは失敗したタスクの一時データを削除します。インストール済みモデルとダウンロード中・待機中のタスクは保持されます。削除したデータではダウンロードを再開できません。", download_cleanup_done: "{count} 件のダウンロード記録を整理しました。", download_cleanup_failed: "{count} 件の整理に失敗しました。記録は保持されています。エラー解決後に再試行してください。", download_cleanup_busy: "{count} 件のタスクは終了処理中です。しばらくしてから再試行してください。",
+      download_cleanup_confirm: "終了したダウンロード記録をすべて消去し、キャンセルまたは失敗したタスクの一時データを削除します。インストール済みモデルと一時停止済み・ダウンロード中・待機中のタスクは保持されます。削除したデータではダウンロードを再開できません。", download_cleanup_done: "{count} 件のダウンロード記録を整理しました。", download_cleanup_failed: "{count} 件の整理に失敗しました。記録は保持されています。エラー解決後に再試行してください。", download_cleanup_busy: "{count} 件のタスクは終了処理中です。しばらくしてから再試行してください。",
       download_status_queued: "待機中", download_status_queued_position: "待機中 · {position} 番目", download_status_resolving: "リポジトリを解析中", download_status_preflighting: "ファイルとディスクを確認中", download_status_downloading: "ダウンロード中", download_status_verifying: "検証中", download_status_publishing: "公開処理中", download_status_completed: "完了", download_status_cancelled: "キャンセル済み", download_status_rejected: "拒否", download_status_interrupted: "中断", download_status_corrupt: "破損", download_status_failed: "失敗",
       download_recovery_title: "前回のダウンロードキューは復元されませんでした", download_recovery_copy: "IronMLX の再起動後、待機中タスクは自動再開されません。必要なタスクを再追加してください。", download_readd_public: "認証不要のタスクを再追加", download_readd: "再追加", download_ignore: "無視", download_token_required: "Token が必要", download_enter_token: "Token を入力", download_token_prompt: "Hugging Face Token を入力してからタスクを再追加してください。", dismiss: "すべて閉じる",
       download_generic_failed: "ダウンロードに失敗しました。",
@@ -7516,6 +7795,62 @@
       cluster_pm_auto: "自動（既定）", cluster_pm_tp: "テンソル並列 (TP)", cluster_pm_pp: "パイプライン並列 (PP)"
     },
     ko: {
+      download_pause: "일시 중지",
+      download_resume: "재개",
+      download_retry: "다시 시도",
+      download_delete_task: "삭제",
+      download_delete_title: "다운로드를 삭제할까요?",
+      download_keep_task: "취소",
+      download_clear_record: "기록 지우기",
+      download_status_pausing: "일시 중지 중",
+      download_status_paused: "일시 중지됨",
+      download_delete_confirm: "“{model}” 다운로드 작업과 임시 파일을 삭제합니다. 다시 다운로드하려면 처음부터 시작해야 합니다.",
+      download_resume_token_prompt: "Hugging Face Token을 입력한 다음 이 다운로드의 {action}를 클릭하세요.",
+      download_action_failed: "작업을 완료하지 못했습니다. 작업은 유지됩니다. 잠시 후 다시 시도하세요.",
+      catalog_title: "지원 모델",
+      catalog_type_filter: "모델 유형",
+      catalog_type_all: "전체",
+      catalog_type_llm: "LLM / VLM · 언어 및 시각",
+      catalog_type_audio: "Audio · 음성",
+      catalog_type_image: "Image · 이미지 생성",
+      catalog_type_decision: "Decision · 의사 결정",
+      catalog_type_drafter: "Drafter · 추론 가속 보조",
+      catalog_type_other: "기타",
+      catalog_type_count: "모델 {count}개",
+      catalog_drafter_main: "주 모델: {model}",
+      catalog_intro: "이 IronMLX 버전에 포함된 구체적인 모델 버전입니다. 실행 검증은 기록된 모델에 해당하며 이후의 모든 저장소 업데이트를 보장하지 않습니다.",
+      catalog_memory_help: "메모리 표시는 가중치와 소량의 추가 공간 추정치입니다. 컨텍스트, 동시 요청 및 추가 실행 리소스에는 더 많은 메모리가 필요합니다. 다운로드 시에도 호환성과 리소스를 확인합니다.",
+      catalog_text: "텍스트 생성",
+      catalog_vision: "이미지 이해",
+      catalog_tts: "음성 합성",
+      catalog_image: "이미지 생성",
+      catalog_decision: "타입 지정 의사결정",
+      catalog_assistant: "생성 가속 보조 모델",
+      catalog_reasoning: "추론 내용",
+      catalog_tools: "도구 호출",
+      catalog_verified: "실행 검증됨",
+      catalog_compatible: "아키텍처 호환 · 실행 미검증",
+      catalog_summary: "{count}개 모델 · {variants}개 버전 · 메타데이터 확인일 {date}",
+      catalog_quantization: "양자화 버전",
+      catalog_select_quantization: "양자화 버전 선택",
+      catalog_note_optiq: "4/8-bit 혼합 정밀도입니다. 4 bit는 주된 정밀도이며 모든 레이어의 정밀도를 뜻하지 않습니다.",
+      catalog_size: "예상 다운로드 {size}",
+      catalog_memory_unknown: "다운로드 전에 메모리 요구량 확인",
+      catalog_memory_large: "가중치 예산 {size}: 기기 메모리 예산 초과",
+      catalog_memory_budget: "가중치 예산 {size}: 기기 메모리 예산 내",
+      catalog_check_update: "다운로드됨 · 업데이트 확인",
+      catalog_download_update: "업데이트 다운로드",
+      catalog_up_to_date: "최신 버전",
+      catalog_checking_update: "확인 중…",
+      catalog_update_check_failed: "업데이트를 확인하지 못했습니다. 다시 시도하세요.",
+      catalog_unavailable: "모델 목록을 사용할 수 없습니다. HuggingFace 또는 ModelScope에서 모델을 검색하세요.",
+      catalog_note_tts: "추가 오디오 리소스를 App이 자동으로 준비합니다. 해당 다운로드 용량은 표시된 저장소 크기에 포함되지 않습니다.",
+      catalog_note_image: "텍스트 기반 이미지 생성과 단일 이미지 편집을 지원합니다. Qwen Research License가 적용되며 상업적 사용은 허가되지 않습니다.",
+      catalog_note_decision: "System One 의사결정 API용이며 채팅 모델이 아닙니다.",
+      catalog_note_dflash: "일치하는 Qwen3.8-27B affine 4-bit 또는 8-bit 주 모델이 필요합니다. 텍스트 전용이며 주 모델로 로드할 수 없습니다.",
+      catalog_note_mtp: "동일한 Qwen 계열과 크기의 주 모델이 필요합니다. MTP는 가속 보조 모델이며 주 모델로 로드할 수 없습니다.",
+      catalog_note_gemma_assistant: "일치하는 Gemma 4 주 모델이 필요합니다. 이 보조 모델은 주 모델로 로드할 수 없습니다.",
+
       tts_details: "TTS 모델 세부 정보",
       tts_supported_languages: "지원 언어",
       tts_max_text_tokens: "최대 텍스트 Token",
@@ -7763,7 +8098,7 @@
       download_btn_downloading: "다운로드 중…",
       download_in_progress: "HuggingFace 모델을 다운로드하고 있습니다.",
       download_tasks: "다운로드 작업", download_queue_summary: "다운로드 중 {active}/{limit} · 대기 {queued}", download_remaining: "{size} 남음", download_clear_finished: "다운로드 정리", download_clear_finished_accessible_label: "종료된 다운로드 기록과 미완료 다운로드 데이터 삭제",
-      download_cleanup_confirm: "종료된 다운로드 기록을 모두 지우고 취소되거나 실패한 작업의 임시 데이터를 삭제합니다. 설치된 모델과 다운로드 중이거나 대기 중인 작업은 유지됩니다. 삭제된 데이터로는 다운로드를 이어받을 수 없습니다.", download_cleanup_done: "다운로드 기록 {count}개를 정리했습니다.", download_cleanup_failed: "작업 {count}개를 정리하지 못했습니다. 기록은 유지됩니다. 오류를 해결한 후 다시 시도하세요.", download_cleanup_busy: "작업 {count}개가 아직 종료 처리 중입니다. 잠시 후 다시 시도하세요.",
+      download_cleanup_confirm: "종료된 다운로드 기록을 모두 지우고 취소되거나 실패한 작업의 임시 데이터를 삭제합니다. 설치된 모델과 일시 중지되거나 다운로드 중이거나 대기 중인 작업은 유지됩니다. 삭제된 데이터로는 다운로드를 이어받을 수 없습니다.", download_cleanup_done: "다운로드 기록 {count}개를 정리했습니다.", download_cleanup_failed: "작업 {count}개를 정리하지 못했습니다. 기록은 유지됩니다. 오류를 해결한 후 다시 시도하세요.", download_cleanup_busy: "작업 {count}개가 아직 종료 처리 중입니다. 잠시 후 다시 시도하세요.",
       download_status_queued: "대기 중", download_status_queued_position: "대기 중 · {position}번째", download_status_resolving: "저장소 확인 중", download_status_preflighting: "파일 및 디스크 확인 중", download_status_downloading: "다운로드 중", download_status_verifying: "검증 중", download_status_publishing: "게시 중", download_status_completed: "완료", download_status_cancelled: "취소됨", download_status_rejected: "거부됨", download_status_interrupted: "중단됨", download_status_corrupt: "손상됨", download_status_failed: "실패",
       download_recovery_title: "이전 다운로드 대기열이 복원되지 않았습니다", download_recovery_copy: "IronMLX 재시작 후 대기 중인 작업은 자동으로 복원되지 않습니다. 필요한 작업을 다시 추가하세요.", download_readd_public: "자격 증명 없는 작업 다시 추가", download_readd: "다시 추가", download_ignore: "이 항목 무시", download_token_required: "Token 필요", download_enter_token: "Token 입력", download_token_prompt: "Hugging Face Token을 입력한 다음 작업을 다시 추가하세요.", dismiss: "모두 무시",
       download_generic_failed: "다운로드에 실패했습니다.",
@@ -8092,6 +8427,7 @@
     renderVoiceProfiles({ data: voiceProfiles });
     if (incidentSummaries.length) renderIncidentHistory({ incidents: incidentSummaries });
     if (typeof renderDownloadQueue === 'function') renderDownloadQueue(downloadQueueSnapshot);
+    renderSupportedModels();
   }
 
   function selectInterfaceLanguage(value) {
@@ -9568,23 +9904,41 @@
 
   // ── Download Source Tab Switching ──
   function switchDlSource(source) {
+    if (!['catalog', 'hf', 'ms'].includes(source)) return;
     if (source !== 'hf') clearCompletedHuggingFaceSearchState();
-    document.getElementById('dl-panel-hf').style.display = source === 'hf' ? '' : 'none';
-    document.getElementById('dl-panel-ms').style.display = source === 'ms' ? '' : 'none';
-    const tabHf = document.getElementById('dl-tab-hf');
-    const tabMs = document.getElementById('dl-tab-ms');
-    if (source === 'hf') {
-      tabHf.style.borderBottomColor = 'var(--accent)'; tabHf.style.color = 'var(--text-primary)';
-      tabMs.style.borderBottomColor = 'transparent'; tabMs.style.color = 'var(--text-tertiary)';
-    } else {
-      tabMs.style.borderBottomColor = '#624AFF'; tabMs.style.color = 'var(--text-primary)';
-      tabHf.style.borderBottomColor = 'transparent'; tabHf.style.color = 'var(--text-tertiary)';
-    }
+    ['catalog', 'hf', 'ms'].forEach(function(name) {
+      const selected = name === source;
+      document.getElementById('dl-panel-' + name).style.display = selected ? '' : 'none';
+      const tab = document.getElementById('dl-tab-' + name);
+      tab.setAttribute('aria-selected', String(selected));
+      tab.tabIndex = selected ? 0 : -1;
+    });
+    if (source === 'catalog') renderSupportedModels();
   }
 
+  document.querySelectorAll('.dl-source-tab').forEach(function(tab) {
+    tab.addEventListener('keydown', function(event) {
+      const sources = ['catalog', 'hf', 'ms'];
+      const index = sources.indexOf(tab.id.replace('dl-tab-', ''));
+      let next;
+      if (event.key === 'ArrowRight') next = (index + 1) % sources.length;
+      else if (event.key === 'ArrowLeft') next = (index + sources.length - 1) % sources.length;
+      else if (event.key === 'Home') next = 0;
+      else if (event.key === 'End') next = sources.length - 1;
+      else return;
+      event.preventDefault();
+      switchDlSource(sources[next]);
+      document.getElementById('dl-tab-' + sources[next]).focus();
+    });
+  });
+
   const ACTIVE_DOWNLOAD_PHASES = new Set([
-    'queued', 'resolving', 'preflighting', 'downloading', 'verifying', 'publishing'
+    'queued', 'resolving', 'preflighting', 'downloading', 'verifying', 'publishing', 'pausing'
   ]);
+  const downloadTaskActionsPending = new Map();
+  const downloadQueueManagedCompletions = new Set();
+  let downloadTaskConfirmationPending = false;
+  let downloadResumeCredentialTarget = null;
   let downloadQueueSnapshot = {
     max_concurrent: 3,
     active_count: 0,
@@ -9628,7 +9982,7 @@
         .replace('{active}', downloadQueueSnapshot.active_count || 0)
         .replace('{limit}', downloadQueueSnapshot.max_concurrent || 3)
         .replace('{queued}', downloadQueueSnapshot.queued_count || 0);
-    document.getElementById('download-clear-finished').style.display = tasks.some(task => !isActiveDownload(task))
+    document.getElementById('download-clear-finished').style.display = tasks.some(task => !isActiveDownload(task) && task.status !== 'paused')
       ? '' : 'none';
     list.innerHTML = tasks.map(task => {
       const active = isActiveDownload(task);
@@ -9636,6 +9990,18 @@
       const pct = Math.max(0, Math.min(100, Number(task.progress_pct || 0)));
       const statusClass = failed ? 'failed' : (active ? '' : 'terminal');
       const remaining = Number(task.remaining_bytes || 0);
+      const taskKey = task.provider + ':' + task.repo_id;
+      const disabled = downloadTaskActionsPending.has(taskKey) || task.status === 'pausing';
+      const actionButton = function(action, label) {
+        return '<button class="btn-secondary download-task-action' + (action === 'delete' && task.status !== 'completed' ? ' download-task-delete' : '')
+          + '" type="button" data-download-action="' + action + '" data-provider="' + escapeAttr(task.provider)
+          + '" data-repo-id="' + escapeAttr(task.repo_id) + '"' + (disabled ? ' disabled' : '') + '>' + escapeAttr(label) + '</button>';
+      };
+      const actions = active
+        ? actionButton('pause', t(task.status === 'pausing' ? 'download_status_pausing' : 'download_pause'))
+        : task.status === 'completed' ? actionButton('delete', t('download_clear_record'))
+          : actionButton('resume', t(['paused', 'cancelled'].includes(task.status) ? 'download_resume' : 'download_retry'))
+            + actionButton('delete', t('download_delete_task'));
       const detail = remaining > 0
         ? (dict.download_remaining || '{size} remaining').replace('{size}', formatVersionBytes(remaining))
         : (task.current_file || '');
@@ -9647,23 +10013,33 @@
         + '<span class="download-task-status ' + statusClass + '">' + escapeAttr(downloadStatusLabel(task)) + '</span>'
         + (detail ? '<span>·</span><span>' + escapeAttr(detail) + '</span>' : '')
         + '</div></div>'
-        + (active ? '<button class="btn-secondary download-task-cancel" type="button" onclick="cancelQueuedDownload(\''
-          + task.provider + '\',\'' + task.repo_id + '\')">' + escapeAttr(dict.cancel || 'Cancel') + '</button>' : '')
+        + '<div class="download-task-actions">' + actions + '</div>'
         + '</div><div class="download-task-progress"><div class="download-task-progress-bar" style="width:'
         + pct + '%"></div></div></div>';
     }).join('');
+    list.querySelectorAll('.download-task-action').forEach(function(button) {
+      button.addEventListener('click', function() {
+        const provider = button.dataset.provider;
+        const repoId = button.dataset.repoId;
+        const action = button.dataset.downloadAction;
+        if (action === 'delete') deleteDownloadTask(provider, repoId);
+        else performDownloadTaskAction(provider, repoId, action);
+      });
+    });
     renderDownloadRecovery(downloadQueueSnapshot.recovery_reminders || []);
     refreshSearchResultDownloadStates();
-    const completedModelScopeTask = tasks.find(task => {
+    refreshSupportedModelActions();
+    const completedQueueTask = tasks.find(task => {
       const previousStatus = previousTasks.get(task.provider + ':' + task.repo_id);
-      return task.provider === 'modelscope'
+      return (task.provider === 'modelscope' || downloadQueueManagedCompletions.has(task.provider + ':' + task.repo_id))
         && task.status === 'completed'
         && previousStatus
         && previousStatus !== 'completed';
     });
-    if (completedModelScopeTask) {
+    if (completedQueueTask) {
+      downloadQueueManagedCompletions.delete(completedQueueTask.provider + ':' + completedQueueTask.repo_id);
       const localized = (dict.model_download_complete || 'Model "{name}" downloaded successfully.')
-        .replace('{name}', completedModelScopeTask.repo_id || '');
+        .replace('{name}', completedQueueTask.repo_id || '');
       showToast(localized, 'success');
       syncModelList();
     }
@@ -9702,6 +10078,68 @@
   function cancelQueuedDownload(provider, repoId) {
     apiPost('/admin/api/models/download/cancel', { provider: provider, repo_id: repoId });
     setTimeout(refreshDownloadQueue, 150);
+  }
+
+  function performDownloadTaskAction(provider, repoId, action) {
+    const key = provider + ':' + repoId;
+    if (downloadTaskActionsPending.has(key) || !['pause', 'resume', 'delete'].includes(action)) return;
+    const task = downloadTask(provider, repoId);
+    if (!task) return;
+    const body = { provider: provider, repo_id: repoId };
+    if (action === 'resume' && downloadResumeCredentialTarget === key) {
+      body.token = document.getElementById('search-hf-token').value.trim() || null;
+    }
+    downloadTaskActionsPending.set(key, action);
+    renderDownloadQueue(downloadQueueSnapshot);
+    apiPost('/admin/api/models/download/' + action, body);
+  }
+
+  async function deleteDownloadTask(provider, repoId) {
+    const key = provider + ':' + repoId;
+    const task = downloadTask(provider, repoId);
+    if (!task || isActiveDownload(task) || downloadTaskActionsPending.has(key) || downloadTaskConfirmationPending) return;
+    if (task.status !== 'completed') {
+      downloadTaskConfirmationPending = true;
+      downloadTaskActionsPending.set(key, 'confirm-delete');
+      renderDownloadQueue(downloadQueueSnapshot);
+      let confirmed = false;
+      try {
+        confirmed = await showConfirmDialog(t('download_delete_confirm').replace('{model}', repoId), {
+          title: t('download_delete_title'), confirmText: t('download_delete_task'),
+          cancelText: t('download_keep_task'), danger: true
+        });
+      } finally {
+        downloadTaskConfirmationPending = false;
+        downloadTaskActionsPending.delete(key);
+        renderDownloadQueue(downloadQueueSnapshot);
+      }
+      if (!confirmed) return;
+    }
+    performDownloadTaskAction(provider, repoId, 'delete');
+  }
+
+  function onDownloadTaskActionResult(action, jsonStr) {
+    const result = JSON.parse(jsonStr || '{}');
+    const key = result.provider + ':' + result.repo_id;
+    downloadTaskActionsPending.delete(key);
+    if (action === 'resume' && result.code === 'download_token_required') {
+      downloadResumeCredentialTarget = key;
+      switchDlSource('hf');
+      document.getElementById('search-hf-query').value = result.repo_id;
+      document.getElementById('search-hf-token').focus();
+      showToast(t('download_resume_token_prompt').replace('{action}', t('download_resume')), 'info');
+    } else if (action === 'delete') {
+      onDownloadCleanupResult(jsonStr);
+    } else if (!result.success) {
+      showToast(t('download_action_failed'), 'warn');
+    } else {
+      if (action === 'resume') {
+        downloadQueueManagedCompletions.add(key);
+        if (downloadResumeCredentialTarget === key) downloadResumeCredentialTarget = null;
+      }
+    }
+    renderDownloadQueue(downloadQueueSnapshot);
+    refreshDownloadQueue();
   }
 
   let downloadCleanupPending = false;
@@ -9784,11 +10222,322 @@
     showToast(dict.download_token_prompt || 'Enter the Hugging Face token, then add the task again.', 'info');
   }
 
+  // ── Supported model catalogue (one bundled source of model variants) ──
+  const catalogPendingDownloads = new Set();
+  const catalogPendingUpdateChecks = new Set();
+  const catalogUpdateChecks = new Map();
+  const catalogSelectedVariants = new Map();
+  let catalogSelectedType = 'all';
+  const CATALOG_TYPES = [
+    { id: 'llm', label: 'LLM / VLM', categories: ['text', 'vision'] },
+    { id: 'audio', label: 'Audio', categories: ['tts', 'audio', 'stt'] },
+    { id: 'image', label: 'Image', categories: ['image'] },
+    { id: 'decision', label: 'Decision', categories: ['decision'] },
+    { id: 'drafter', label: 'Drafter', categories: ['assistant', 'drafter'] },
+    { id: 'other', categories: [] },
+  ];
+
+  function supportedModelEntries() {
+    const catalog = window.__IRONMLX_SUPPORTED_MODELS__;
+    return catalog && Array.isArray(catalog.entries) ? catalog.entries : [];
+  }
+
+  function supportedModelGroups() {
+    const groups = new Map();
+    supportedModelEntries().forEach(function(entry) {
+      if (!groups.has(entry.modelId)) groups.set(entry.modelId, { id: entry.modelId, variants: [] });
+      groups.get(entry.modelId).variants.push(entry);
+    });
+    return Array.from(groups.values());
+  }
+
+  function supportedModelSections(groups) {
+    return CATALOG_TYPES.map(function(type) {
+      return { type: type, groups: groups.filter(function(group) {
+        const category = group.variants[0].category;
+        const match = CATALOG_TYPES.find(function(candidate) {
+          return candidate.categories.includes(category);
+        });
+        return (match ? match.id : 'other') === type.id;
+      }) };
+    }).filter(function(section) { return section.groups.length > 0; });
+  }
+
+  function catalogTypeTitle(typeId) {
+    const titles = {
+      llm: t('catalog_type_llm'),
+      audio: t('catalog_type_audio'),
+      image: t('catalog_type_image'),
+      decision: t('catalog_type_decision'),
+      drafter: t('catalog_type_drafter'),
+      other: t('catalog_type_other'),
+    };
+    return titles[typeId] || titles.other;
+  }
+
+  function renderSupportedModelFilters(sections) {
+    const filters = document.getElementById('catalog-type-filters');
+    if (!filters) return;
+    const total = sections.reduce(function(count, section) { return count + section.groups.length; }, 0);
+    const choices = [{ id: 'all', label: t('catalog_type_all'), count: total }].concat(
+      sections.map(function(section) {
+        return { id: section.type.id,
+          label: section.type.label || catalogTypeTitle(section.type.id),
+          count: section.groups.length };
+      })
+    );
+    filters.innerHTML = choices.map(function(choice) {
+      return '<button class="catalog-filter" type="button" data-catalog-type="' + choice.id
+        + '" aria-pressed="' + (catalogSelectedType === choice.id ? 'true' : 'false')
+        + '" aria-controls="catalog-model-list"><span>' + escapeAttr(choice.label)
+        + '</span><span class="catalog-filter-count">' + choice.count + '</span></button>';
+    }).join('');
+    filters.querySelectorAll('.catalog-filter').forEach(function(button) {
+      button.addEventListener('click', function() {
+        catalogSelectedType = button.dataset.catalogType;
+        renderSupportedModels();
+        const replacement = Array.from(filters.querySelectorAll('.catalog-filter')).find(function(element) {
+          return element.dataset.catalogType === catalogSelectedType;
+        });
+        if (replacement) replacement.focus();
+      });
+    });
+  }
+
+  function catalogMemoryHint(entry) {
+    const hints = window.__IRONMLX_CATALOG_MEMORY_HINTS__;
+    const estimate = Number(hints && hints.estimatedBytes && hints.estimatedBytes[entry.id]);
+    const available = Number(hints && hints.availableBytes);
+    if (!hints || !Number.isFinite(estimate) || estimate <= 0 || !Number.isFinite(available)) {
+      return { key: 'catalog_memory_unknown', warning: false };
+    }
+    return { key: estimate > available ? 'catalog_memory_large' : 'catalog_memory_budget',
+      warning: estimate > available, size: formatVersionBytes(estimate) };
+  }
+
+  function catalogDownloadState(provider, repoId) {
+    const key = provider + ':' + repoId;
+    const task = downloadTask(provider, repoId);
+    const local = Object.values(window.__LOCAL_MODELS__ || {}).find(function(model) {
+      return (model.repo_id || model.id) === repoId
+        && (model.source === 'ms' ? 'modelscope' : model.source === 'hf' ? 'huggingface' : '') === provider;
+    });
+    const installed = !!local || (task && task.status === 'completed');
+    if (isActiveDownload(task)) return { disabled: true, label: downloadStatusLabel(task) };
+    if (catalogPendingDownloads.has(key)) {
+      return { disabled: true, label: t('download_status_resolving') };
+    }
+    if (catalogPendingUpdateChecks.has(key)) {
+      return { disabled: true, label: t('catalog_checking_update') };
+    }
+    if (local && local.readiness && local.readiness.status !== 'ready') {
+      return { disabled: false, label: t('local_model_repair'), action: 'download' };
+    }
+    if (installed) {
+      const checked = catalogUpdateChecks.get(key);
+      // A completed update replaces the checked local revision.
+      if (checked && task && task.status === 'completed' && task.commit_sha === checked.remote_commit_sha) {
+        checked.update_available = false;
+      }
+      if (checked && checked.update_available) {
+        return { disabled: false, label: t('catalog_download_update'), action: 'update' };
+      }
+      return { disabled: false, label: t('catalog_check_update'), action: 'check' };
+    }
+    catalogUpdateChecks.delete(key);
+    return { disabled: false, label: t('download'), action: 'download' };
+  }
+
+  function refreshSupportedModelActions() {
+    document.querySelectorAll('.catalog-action').forEach(function(button) {
+      if (!button.dataset.entryId || !button.dataset.repoId) {
+        button.disabled = true;
+        button.textContent = (button.dataset.provider === 'modelscope' ? 'ModelScope' : 'HuggingFace') + ' · ' + t('download');
+        return;
+      }
+      const state = catalogDownloadState(button.dataset.provider, button.dataset.repoId);
+      button.disabled = state.disabled;
+      const providerLabel = button.dataset.provider === 'modelscope' ? 'ModelScope' : 'HuggingFace';
+      button.textContent = ['check', 'update'].includes(state.action) || catalogPendingUpdateChecks.has(button.dataset.provider + ':' + button.dataset.repoId)
+        ? state.label : providerLabel + ' · ' + state.label;
+    });
+  }
+
+  function onCatalogUpdateResult(action, jsonStr) {
+    const result = JSON.parse(jsonStr || '{}');
+    const key = result.provider + ':' + result.repo_id;
+    if (action === 'check') {
+      catalogPendingUpdateChecks.delete(key);
+      if (result.success) {
+        catalogUpdateChecks.set(key, result);
+        if (!result.update_available) showToast(t('catalog_up_to_date'), 'success');
+      } else {
+        catalogUpdateChecks.delete(key);
+        showToast(t('catalog_update_check_failed'), 'warn');
+      }
+    } else {
+      catalogPendingDownloads.delete(key);
+      if (result.success) {
+        catalogUpdateChecks.delete(key);
+        downloadQueueManagedCompletions.add(key);
+        // Seed the previous phase so even an already-cached update triggers a local rescan.
+        const task = downloadTask(result.provider, result.repo_id);
+        if (task) task.status = result.status || 'queued';
+        else downloadQueueSnapshot.tasks.push({ provider: result.provider, repo_id: result.repo_id, status: result.status || 'queued' });
+        refreshDownloadQueue();
+      } else {
+        catalogUpdateChecks.delete(key);
+        showToast(t('download_action_failed'), 'warn');
+      }
+    }
+    refreshSupportedModelActions();
+  }
+
+  function renderSupportedModels() {
+    const list = document.getElementById('catalog-model-list');
+    if (!list) return;
+    const catalog = window.__IRONMLX_SUPPORTED_MODELS__;
+    const summary = document.getElementById('catalog-summary');
+    if (!catalog || !Array.isArray(catalog.entries)) {
+      summary.textContent = '';
+      const filters = document.getElementById('catalog-type-filters');
+      if (filters) filters.innerHTML = '';
+      list.innerHTML = '<div class="catalog-empty">' + escapeAttr(t('catalog_unavailable')) + '</div>';
+      return;
+    }
+    const sections = supportedModelSections(supportedModelGroups());
+    if (catalogSelectedType !== 'all' && !sections.some(function(section) {
+      return section.type.id === catalogSelectedType;
+    })) catalogSelectedType = 'all';
+    renderSupportedModelFilters(sections);
+    const visibleSections = sections.filter(function(section) {
+      return catalogSelectedType === 'all' || section.type.id === catalogSelectedType;
+    });
+    const groups = visibleSections.flatMap(function(section) { return section.groups; });
+    const variantCount = groups.reduce(function(count, group) { return count + group.variants.length; }, 0);
+    summary.textContent = t('catalog_summary').replace('{count}', groups.length)
+      .replace('{variants}', variantCount).replace('{date}', catalog.updatedAt);
+    const renderRow = function(group) {
+      const selected = group.variants.find(function(variant) {
+        return variant.id === catalogSelectedVariants.get(group.id);
+      }) || null;
+      const entry = selected || group.variants[0];
+      const memory = selected ? catalogMemoryHint(selected) : null;
+      const memoryText = memory ? t(memory.key).replace('{size}', memory.size || '') : '';
+      const features = entry.capabilities.map(function(capability) {
+        return '<span class="catalog-capability">' + escapeAttr(t(['catalog', capability].join('_'))) + '</span>';
+      }).join('');
+      const isDrafter = ['assistant', 'drafter'].includes(entry.category);
+      const noteKey = selected && selected.noteKey ? selected.noteKey : isDrafter ? entry.noteKey : null;
+      const mainModel = entry.noteKey === 'catalog_note_dflash' ? 'Qwen 3.8 27B'
+        : entry.noteKey === 'catalog_note_mtp' || entry.noteKey === 'catalog_note_gemma_assistant'
+          ? entry.name.replace(/\s+(MTP|Assistant)$/, '') : null;
+      const providers = [{ name: 'huggingface', repo: selected ? selected.hfRepo : '' }];
+      const variantSelector = '<label class="catalog-variant"><select data-model-id="'
+        + escapeAttr(group.id) + '" class="' + (selected ? '' : 'catalog-variant-placeholder')
+        + '" aria-label="' + escapeAttr(entry.name + ' ' + t('catalog_quantization')) + '">'
+        + '<option value="" disabled' + (selected ? '' : ' selected') + '>'
+        + escapeAttr(t('catalog_select_quantization')) + '</option>'
+        + group.variants.map(function(variant) {
+          return '<option value="' + escapeAttr(variant.id) + '"' + (selected && variant.id === selected.id ? ' selected' : '')
+            + '>' + escapeAttr(variant.variantLabel) + '</option>';
+        }).join('') + '</select></label>';
+      return '<article class="catalog-row"><div><div class="catalog-heading"><span class="catalog-name">'
+        + escapeAttr(entry.name) + '</span>'
+        + (selected ? '<span class="catalog-badge">' + escapeAttr(t(['catalog', selected.status].join('_'))) + '</span>' : '') + '</div>'
+        + (selected ? '<div class="catalog-repo">' + escapeAttr(selected.hfRepo) + '</div>' : '')
+        + '<div class="catalog-details"><span class="catalog-capabilities">' + features + '</span>'
+        + (selected ? '<span>' + escapeAttr(t('catalog_size').replace('{size}', formatVersionBytes(selected.downloadBytes))) + '</span>' : '') + '</div>'
+        + (isDrafter && mainModel ? '<p class="catalog-note">' + escapeAttr(t('catalog_drafter_main').replace('{model}', mainModel)) + '</p>' : '')
+        + (memory ? '<p class="catalog-note' + (memory.warning ? ' catalog-memory-warning' : '') + '">' + escapeAttr(memoryText) + '</p>' : '')
+        + (noteKey ? '<p class="catalog-note">' + escapeAttr(t(noteKey)) + '</p>' : '')
+        + '</div><div class="catalog-actions">' + variantSelector + providers.map(function(provider) {
+          return '<button class="btn-secondary catalog-action" type="button"' + (selected ? '' : ' disabled')
+            + ' data-entry-id="' + escapeAttr(selected ? selected.id : '')
+            + '" data-provider="' + provider.name + '" data-repo-id="' + escapeAttr(provider.repo) + '"></button>';
+        }).join('')
+        + '</div></article>';
+    };
+    list.innerHTML = groups.length ? visibleSections.map(function(section) {
+      const headingId = 'catalog-section-' + section.type.id;
+      return '<section class="catalog-section" aria-labelledby="' + headingId
+        + '"><div class="catalog-section-header"><h3 id="' + headingId + '">'
+        + escapeAttr(catalogTypeTitle(section.type.id)) + '</h3><span class="catalog-section-count">'
+        + escapeAttr(t('catalog_type_count').replace('{count}', section.groups.length))
+        + '</span></div>' + section.groups.map(renderRow).join('') + '</section>';
+    }).join('') : '<div class="catalog-empty">' + escapeAttr(t('catalog_unavailable')) + '</div>';
+    list.querySelectorAll('.catalog-variant select').forEach(function(select) {
+      select.addEventListener('change', function() {
+        const modelId = select.dataset.modelId;
+        const group = supportedModelGroups().find(function(model) { return model.id === modelId; });
+        if (!group || !group.variants.some(function(variant) { return variant.id === select.value; })) return;
+        catalogSelectedVariants.set(modelId, select.value);
+        renderSupportedModels();
+        const replacement = Array.from(list.querySelectorAll('.catalog-variant select')).find(function(element) {
+          return element.dataset.modelId === modelId;
+        });
+        if (replacement) replacement.focus();
+      });
+    });
+    list.querySelectorAll('.catalog-action').forEach(function(button) {
+      button.addEventListener('click', function() {
+        downloadSupportedModel(button.dataset.entryId, button.dataset.provider);
+      });
+    });
+    refreshSupportedModelActions();
+  }
+
+  function downloadSupportedModel(entryId, provider) {
+    const entry = supportedModelEntries().find(function(model) { return model.id === entryId; });
+    if (!entry || !['huggingface', 'modelscope'].includes(provider)) return;
+    if (catalogSelectedVariants.get(entry.modelId) !== entry.id) return;
+    const repoId = provider === 'modelscope' ? entry.msRepo : entry.hfRepo;
+    const state = catalogDownloadState(provider, repoId);
+    if (!repoId || state.disabled) return;
+    const key = provider + ':' + repoId;
+    if (state.action === 'check') {
+      catalogPendingUpdateChecks.add(key);
+      refreshSupportedModelActions();
+      apiPost('/admin/api/models/update/check', { provider: provider, repo_id: repoId });
+      return;
+    }
+    if (state.action === 'update') {
+      const checked = catalogUpdateChecks.get(key);
+      if (!checked || !checked.remote_commit_sha || !confirmModelDownload(repoId)) return;
+      catalogPendingDownloads.add(key);
+      refreshSupportedModelActions();
+      apiPost('/admin/api/models/update/download', {
+        provider: provider, repo_id: repoId, commit_sha: checked.remote_commit_sha
+      });
+      return;
+    }
+    if (provider === 'modelscope') {
+      if (!confirmModelDownload(repoId)) return;
+      apiPost('/admin/api/models/ms/download', { repo_id: repoId });
+      setTimeout(refreshDownloadQueue, 150);
+    } else {
+      if (!startDownload(repoId, null)) return;
+    }
+    catalogPendingDownloads.add(key);
+    refreshSupportedModelActions();
+    // Cover rapid clicks and tab changes before the queue snapshot arrives.
+    setTimeout(function() {
+      catalogPendingDownloads.delete(key);
+      refreshSupportedModelActions();
+    }, 5000);
+  }
+
+  function confirmModelDownload(repoId) {
+    return repoId !== 'mlx-community/Qwen-Image-2.1-MLX-4bit'
+      || window.confirm(t('qwen_image_license_warning'));
+  }
+
   // ── ModelScope Download ──
   function startMsDownload() {
     const dict = I18N[currentLang] || I18N.en;
     const repoId = document.getElementById('dl-ms-repo-id').value.trim();
     if (!repoId) { showToast(dict.ms_repo_id || 'Please enter a ModelScope Repo ID.', 'info'); return; }
+    if (!confirmModelDownload(repoId)) return;
     apiPost('/admin/api/models/ms/download', { repo_id: repoId });
     setTimeout(refreshDownloadQueue, 150);
   }
@@ -9796,11 +10545,7 @@
   function startDownload(repoId, explicitToken) {
     const dict = I18N[currentLang] || I18N.en;
     if (!repoId) { showToast(dict.enter_repo_id || 'Please enter a Repo ID.', 'info'); return; }
-    if (repoId === 'mlx-community/Qwen-Image-2.1-MLX-4bit'
-        && !window.confirm(dict.qwen_image_license_warning
-          || 'Qwen-Image-2.1 is governed by the Qwen Research License and is not licensed for commercial use. Continue?')) {
-      return;
-    }
+    if (!confirmModelDownload(repoId)) return false;
     const token = explicitToken === null
       ? ''
       : (explicitToken || document.getElementById('search-hf-token').value.trim());
@@ -9808,7 +10553,9 @@
     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.downloadModel) {
       window.webkit.messageHandlers.downloadModel.postMessage(payload);
       setTimeout(refreshDownloadQueue, 150);
+      return true;
     }
+    return false;
   }
 
   function onDownloadProgress(provider, repoId, pct, filename) {
@@ -9870,7 +10617,7 @@
       const localized = (dict.model_download_complete || 'Model "{name}" downloaded successfully.').replace('{name}', repoId);
       showToast(localized, 'success');
       syncModelList();
-    } else {
+    } else if (result.code !== 'paused') {
       const errMsg = localizeErrorResult(result, 'download_generic_failed');
       showToast(errMsg, 'warn');
     }
@@ -11461,6 +12208,7 @@
     });
     window.__LOCAL_MODELS__ = {};
     models.forEach(m => { if (m && m.id) window.__LOCAL_MODELS__[m.id] = m; });
+    refreshSupportedModelActions();
     const defaultModel = window.__DEFAULT_MODEL__ || '';
     const tbody = document.querySelector('#tab-models-manage tbody');
     const empty = document.getElementById('model-import-empty');
@@ -14132,6 +14880,8 @@
         renderNetworkInterfaces(JSON.parse(jsonStr || 'null'));
       } else if (path === '/admin/api/endpoints') {
         renderEndpoints(jsonStr);
+      } else if (['/admin/api/models/update/check', '/admin/api/models/update/download'].includes(path)) {
+        onCatalogUpdateResult(path.split('/').pop(), jsonStr);
       } else if (path === '/admin/api/models/ms/download') {
         const result = JSON.parse(jsonStr || '{}');
         if (!result.success) showToast(localizeErrorResult(result, 'download_generic_failed'), 'warn');
@@ -14140,6 +14890,8 @@
         renderDownloadQueue(JSON.parse(jsonStr || '{}'));
       } else if (path === '/admin/api/models/downloads/clear-finished') {
         onDownloadCleanupResult(jsonStr);
+      } else if (['/admin/api/models/download/pause', '/admin/api/models/download/resume', '/admin/api/models/download/delete'].includes(path)) {
+        onDownloadTaskActionResult(path.split('/').pop(), jsonStr);
       } else if (path === '/admin/api/models/download/cancel'
           || path === '/admin/api/models/download/reminders/dismiss') {
         refreshDownloadQueue();

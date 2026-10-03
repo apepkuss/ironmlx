@@ -292,6 +292,25 @@ public struct ModelDownloadStartResponse: Codable, Equatable, Sendable {
     }
 }
 
+public struct ModelUpdateCheckResult: Codable, Equatable, Sendable {
+    public var success: Bool
+    public var provider: String
+    public var repoID: String
+    public var localCommitSHA: String?
+    public var remoteCommitSHA: String?
+    public var updateAvailable: Bool?
+    public var error: String?
+    public var code: String?
+
+    enum CodingKeys: String, CodingKey {
+        case success, provider, error, code
+        case repoID = "repo_id"
+        case localCommitSHA = "local_commit_sha"
+        case remoteCommitSHA = "remote_commit_sha"
+        case updateAvailable = "update_available"
+    }
+}
+
 public struct ModelDownloadStatus: Codable, Equatable, Sendable {
     public var repoID: String
     public var provider: String
@@ -305,6 +324,7 @@ public struct ModelDownloadStatus: Codable, Equatable, Sendable {
     public var totalBytes: Int64? = nil
     public var remainingBytes: Int64? = nil
     public var enqueuedAt: Date? = nil
+    public var usedCredential: Bool? = nil
 
     enum CodingKeys: String, CodingKey {
         case repoID = "repo_id"
@@ -319,6 +339,7 @@ public struct ModelDownloadStatus: Codable, Equatable, Sendable {
         case totalBytes = "total_bytes"
         case remainingBytes = "remaining_bytes"
         case enqueuedAt = "enqueued_at"
+        case usedCredential = "used_credential"
     }
 }
 
@@ -405,6 +426,10 @@ public actor ModelDownloadService {
     private let availableCapacityProvider: @Sendable (URL) -> Int64?
     private let reminderStore: ModelDownloadQueueReminderStore
     private var statuses: [String: ModelDownloadStatus] = [:]
+    private var pauseRequestedKeys: Set<String> = []
+    private var downloadTokens: [String: String] = [:]
+    private var resumeRevisions: [String: String] = [:]
+    private var checkedUpdateRevisions: [String: String] = [:]
     private var activeTasks: [String: Task<ModelDownloadCompletion, Never>] = [:]
     private var pendingDownloads: [QueuedModelDownload] = []
     private var preparationStates: [String: DownloadPreparationState] = [:]
@@ -460,7 +485,20 @@ public actor ModelDownloadService {
 
         for reminder in reminderStore.load() {
             let key = Self.taskKey(provider: reminder.provider, repoID: reminder.repoID)
-            recoveryReminders[key] = reminder
+            if reminder.previousStatus == ModelDownloadPhase.paused.rawValue {
+                var status = reminder.pausedStatus ?? ModelDownloadStatus(
+                    repoID: reminder.repoID, provider: reminder.provider.rawValue,
+                    status: ModelDownloadPhase.paused.rawValue, progressPct: 0,
+                    enqueuedAt: reminder.enqueuedAt
+                )
+                status.status = ModelDownloadPhase.paused.rawValue
+                status.usedCredential = reminder.usedCredential
+                statuses[key] = status
+                currentReminders[key] = reminder
+                resumeRevisions[key] = status.commitSHA
+            } else {
+                recoveryReminders[key] = reminder
+            }
             nextQueueOrder = max(nextQueueOrder, reminder.queueOrder + 1)
         }
 
@@ -585,6 +623,133 @@ public actor ModelDownloadService {
         )
     }
 
+    /// Resolves upstream metadata without enqueuing downloads or changing local refs.
+    public func checkModelUpdate(
+        provider: ModelRepositoryProvider, repoID: String, token: String? = nil
+    ) async -> ModelUpdateCheckResult {
+        let key = Self.taskKey(provider: provider, repoID: repoID)
+        checkedUpdateRevisions[key] = nil
+        do {
+            let repository = try await resolveCurrentRepository(provider: provider, repoID: repoID, token: token)
+            let root = try store.repositoryRoot(provider: provider, repoID: repoID)
+            let ref = root.appendingPathComponent("refs").appendingPathComponent(provider.mutableRevision)
+            let commit = try String(contentsOf: ref, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard ModelSnapshotVerifier.isCommitSHA(commit),
+                  FileManager.default.fileExists(atPath: try store.snapshotURL(
+                    provider: provider, repoID: repoID, commitSHA: commit
+                  ).path)
+            else { throw RepositoryResolutionError.notFound(repoID) }
+            let available = commit != repository.commitSHA
+            if available { checkedUpdateRevisions[key] = repository.commitSHA }
+            return ModelUpdateCheckResult(
+                success: true, provider: provider.rawValue, repoID: repoID,
+                localCommitSHA: commit, remoteCommitSHA: repository.commitSHA, updateAvailable: available
+            )
+        } catch {
+            return ModelUpdateCheckResult(
+                success: false, provider: provider.rawValue, repoID: repoID,
+                error: error.localizedDescription, code: "model_update_check_failed"
+            )
+        }
+    }
+
+    /// Only an explicitly checked immutable revision can be downloaded as an update.
+    public func startModelUpdateDownload(
+        provider: ModelRepositoryProvider, repoID: String, commitSHA: String, token: String? = nil
+    ) -> ModelDownloadStartResponse {
+        let key = Self.taskKey(provider: provider, repoID: repoID)
+        guard checkedUpdateRevisions[key] == commitSHA,
+              !downloadIsBusy(key: key), statuses[key]?.status != ModelDownloadPhase.paused.rawValue
+        else {
+            return ModelDownloadStartResponse(
+                success: false, status: "error", repoID: repoID,
+                error: "Check for updates again or finish the existing download task.",
+                code: "model_update_not_available"
+            )
+        }
+        let previousRevision = resumeRevisions[key]
+        resumeRevisions[key] = commitSHA
+        let response = enqueueDownload(provider: provider, repoID: repoID, token: token, progress: { _ in })
+        if response.success { checkedUpdateRevisions[key] = nil }
+        else { resumeRevisions[key] = previousRevision }
+        return response
+    }
+
+    public func pauseDownload(provider: ModelRepositoryProvider, repoID: String) -> Bool {
+        let key = Self.taskKey(provider: provider, repoID: repoID)
+        guard let status = statuses[key], Self.isActiveStatus(status.status) else { return false }
+        pauseRequestedKeys.insert(key)
+        statuses[key]?.status = ModelDownloadPhase.pausing.rawValue
+        updateCurrentReminderStatus(key: key, status: ModelDownloadPhase.paused.rawValue)
+        if cancelDownload(provider: provider, repoID: repoID) { return true }
+        pauseRequestedKeys.remove(key)
+        statuses[key] = status
+        updateCurrentReminderStatus(key: key, status: status.status)
+        return false
+    }
+
+    public func resumeDownload(
+        provider: ModelRepositoryProvider, repoID: String, token: String? = nil
+    ) -> ModelDownloadStartResponse {
+        let key = Self.taskKey(provider: provider, repoID: repoID)
+        guard let status = statuses[key], !Self.isActiveStatus(status.status),
+              status.status != ModelDownloadPhase.completed.rawValue, !downloadIsBusy(key: key)
+        else {
+            return ModelDownloadStartResponse(
+                success: false, status: "error", repoID: repoID,
+                error: "The download is still stopping or cannot be resumed.", code: "download_not_resumable"
+            )
+        }
+        let credential = token?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let effectiveToken = credential?.isEmpty == false ? credential : downloadTokens[key]
+        if status.usedCredential == true, effectiveToken == nil {
+            return ModelDownloadStartResponse(
+                success: false, status: "error", repoID: repoID,
+                error: "Enter the Hugging Face token to resume this download.", code: "download_token_required"
+            )
+        }
+        resumeRevisions[key] = status.commitSHA
+        return enqueueDownload(provider: provider, repoID: repoID, token: effectiveToken, progress: { _ in })
+    }
+
+    public func deleteDownload(provider: ModelRepositoryProvider, repoID: String) -> ModelDownloadCleanupResult {
+        var result = ModelDownloadCleanupResult()
+        let key = Self.taskKey(provider: provider, repoID: repoID)
+        guard let status = statuses[key] else { return result }
+        guard !Self.isActiveStatus(status.status), !downloadIsBusy(key: key) else {
+            result.skippedCount = 1
+            return result
+        }
+        do {
+            if status.status != ModelDownloadPhase.completed.rawValue {
+                try store.clearIncompleteDownloads(provider: provider, repoID: repoID)
+            }
+            let reminders = (Array(currentReminders.values) + Array(recoveryReminders.values)).filter {
+                Self.taskKey(provider: $0.provider, repoID: $0.repoID) != key
+            }
+            try reminderStore.save(reminders)
+            statuses[key] = nil
+            completionResults[key] = nil
+            currentReminders[key] = nil
+            recoveryReminders[key] = nil
+            downloadTokens[key] = nil
+            resumeRevisions[key] = nil
+            pauseRequestedKeys.remove(key)
+            persistReminderState()
+            result.clearedCount = 1
+        } catch {
+            result.success = false
+            result.failures.append(.init(provider: provider.rawValue, repoID: repoID, error: error.localizedDescription))
+        }
+        return result
+    }
+
+    private func downloadIsBusy(key: String) -> Bool {
+        activeTasks[key] != nil || preparationStates[key] != nil || activePreflightKey == key
+            || pendingDownloads.contains { Self.taskKey(provider: $0.provider, repoID: $0.repoID) == key }
+    }
+
     public func cancelDownload(provider: ModelRepositoryProvider, repoID: String) -> Bool {
         let key = Self.taskKey(provider: provider, repoID: repoID)
         if activePreflightKey == key {
@@ -648,7 +813,7 @@ public actor ModelDownloadService {
     public func clearFinishedDownloads() -> ModelDownloadCleanupResult {
         var result = ModelDownloadCleanupResult()
         let finishedKeys = statuses.compactMap { key, status in
-            Self.isActiveStatus(status.status) ? nil : key
+            Self.isActiveStatus(status.status) || status.status == ModelDownloadPhase.paused.rawValue ? nil : key
         }
         for key in finishedKeys {
             // A terminal status can appear before its task releases the lock.
@@ -671,6 +836,10 @@ public actor ModelDownloadService {
                 }
                 statuses[key] = nil
                 completionResults[key] = nil
+                currentReminders[key] = nil
+                recoveryReminders[key] = nil
+                downloadTokens[key] = nil
+                resumeRevisions[key] = nil
                 result.clearedCount += 1
             } catch {
                 result.success = false
@@ -679,6 +848,7 @@ public actor ModelDownloadService {
                 ))
             }
         }
+        persistReminderState()
         return result
     }
 
@@ -761,6 +931,10 @@ public actor ModelDownloadService {
         completionResults[key] = nil
         recoveryReminders[key] = nil
         let credential = token?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if statuses[key]?.status == ModelDownloadPhase.paused.rawValue {
+            resumeRevisions[key] = statuses[key]?.commitSHA
+        }
+        downloadTokens[key] = credential?.isEmpty == false ? credential : nil
         let request = QueuedModelDownload(
             provider: provider,
             repoID: repoID,
@@ -777,6 +951,8 @@ public actor ModelDownloadService {
             provider: provider,
             repoID: repoID,
             phase: .queued,
+            progressPct: statuses[key]?.progressPct ?? 0,
+            commitSHA: resumeRevisions[key],
             enqueuedAt: request.enqueuedAt
         )
         currentReminders[key] = ModelDownloadRecoveryReminder(
@@ -1042,14 +1218,28 @@ public actor ModelDownloadService {
     }
 
     private func finishQueuedTask(key: String, result: ModelDownloadCompletion) {
-        completionResults[key] = result
-        if !shutdownReminderKeys.contains(key) {
+        let wasPaused = pauseRequestedKeys.remove(key) != nil && !result.success
+        let completion = wasPaused
+            ? failure(message: "Download paused.", code: "paused", repoID: statuses[key]?.repoID ?? "") : result
+        completionResults[key] = completion
+        if wasPaused {
+            statuses[key]?.status = ModelDownloadPhase.paused.rawValue
+            statuses[key]?.error = nil
+            statuses[key]?.errorCode = nil
+            statuses[key]?.queuePosition = nil
+            resumeRevisions[key] = statuses[key]?.commitSHA
+            updateCurrentReminderStatus(key: key, status: ModelDownloadPhase.paused.rawValue)
+        } else if !shutdownReminderKeys.contains(key) {
             currentReminders[key] = nil
+        }
+        if result.success {
+            downloadTokens[key] = nil
+            resumeRevisions[key] = nil
         }
         persistReminderState()
         let waiters = completionWaiters.removeValue(forKey: key) ?? []
         for waiter in waiters {
-            waiter.resume(returning: result)
+            waiter.resume(returning: completion)
         }
     }
 
@@ -1179,6 +1369,14 @@ public actor ModelDownloadService {
             return
         }
         reminder.previousStatus = status
+        if pauseRequestedKeys.contains(key) || status == ModelDownloadPhase.paused.rawValue {
+            reminder.previousStatus = ModelDownloadPhase.paused.rawValue
+            reminder.pausedStatus = statuses[key]
+            reminder.pausedStatus?.status = ModelDownloadPhase.paused.rawValue
+            reminder.pausedStatus?.queuePosition = nil
+        } else {
+            reminder.pausedStatus = nil
+        }
         currentReminders[key] = reminder
         persistReminderState()
     }
@@ -1562,16 +1760,17 @@ public actor ModelDownloadService {
             await telemetry.finish(outcome: "completed")
             return success(repoID: repoID)
         } catch is CancellationError {
-            await telemetry.finish(outcome: "cancelled", errorCode: "cancelled")
-            persistFailure(&journal, phase: .cancelled, code: "cancelled", message: "Download cancelled.")
+            let phase: ModelDownloadPhase = pauseRequestedKeys.contains(key) ? .paused : .cancelled
+            await telemetry.finish(outcome: phase.rawValue, errorCode: phase.rawValue)
+            persistFailure(&journal, phase: phase, code: phase.rawValue, message: "Download stopped.")
             setFailureStatus(
                 key: key,
                 provider: provider,
                 repoID: repoID,
                 journal: journal,
-                phase: .cancelled,
-                code: "cancelled",
-                message: "Download cancelled."
+                phase: phase,
+                code: phase.rawValue,
+                message: "Download stopped."
             )
             return failure(message: "Download cancelled.", code: "cancelled", repoID: repoID)
         } catch let error as DownloadFailure {
@@ -1646,6 +1845,26 @@ public actor ModelDownloadService {
     }
 
     private func resolveDownloadRepository(
+        provider: ModelRepositoryProvider, repoID: String, token: String?
+    ) async throws -> ResolvedModelRepository {
+        let key = Self.taskKey(provider: provider, repoID: repoID)
+        if let revision = resumeRevisions[key] {
+            var repository: ResolvedModelRepository
+            switch provider {
+            case .huggingFace:
+                repository = try await resolver.resolveHuggingFace(repoID: repoID, revision: revision, token: token)
+            case .modelScope:
+                repository = try await resolver.resolveModelScope(repoID: repoID, revision: revision)
+            case .standalone:
+                throw RepositoryResolutionError.notFound(repoID)
+            }
+            repository.requestedRevision = provider.mutableRevision
+            return repository
+        }
+        return try await resolveCurrentRepository(provider: provider, repoID: repoID, token: token)
+    }
+
+    private func resolveCurrentRepository(
         provider: ModelRepositoryProvider, repoID: String, token: String?
     ) async throws -> ResolvedModelRepository {
         if provider == .huggingFace, repoID == "mlx-community/IndexTTS-2.5-fp16" {
@@ -1978,6 +2197,7 @@ public actor ModelDownloadService {
             : 0
         statuses[key]?.progressPct = percent
         statuses[key]?.currentFile = filename
+        statuses[key]?.remainingBytes = max(0, totalBytes - bytes)
         await callback(ModelDownloadProgress(percent: percent, filename: filename))
     }
 
@@ -1998,7 +2218,7 @@ public actor ModelDownloadService {
         statuses[key] = ModelDownloadStatus(
             repoID: repoID,
             provider: provider.rawValue,
-            status: phase.rawValue,
+            status: pauseRequestedKeys.contains(key) && phase.isActive ? ModelDownloadPhase.pausing.rawValue : phase.rawValue,
             progressPct: progressPct,
             currentFile: currentFile,
             commitSHA: commitSHA,
@@ -2007,7 +2227,8 @@ public actor ModelDownloadService {
             queuePosition: queuePosition ?? existing?.queuePosition,
             totalBytes: totalBytes ?? existing?.totalBytes,
             remainingBytes: remainingBytes ?? existing?.remainingBytes,
-            enqueuedAt: enqueuedAt ?? existing?.enqueuedAt
+            enqueuedAt: enqueuedAt ?? existing?.enqueuedAt,
+            usedCredential: downloadTokens[key] != nil || currentReminders[key]?.usedCredential == true
         )
         if currentReminders[key] != nil {
             updateCurrentReminderStatus(key: key, status: phase.rawValue)
@@ -2027,18 +2248,19 @@ public actor ModelDownloadService {
         statuses[key] = ModelDownloadStatus(
             repoID: repoID,
             provider: provider.rawValue,
-            status: phase.rawValue,
+            status: pauseRequestedKeys.contains(key) ? ModelDownloadPhase.pausing.rawValue : phase.rawValue,
             progressPct: journal.map {
-                $0.totalBytes > 0 ? Double($0.progressBytes) / Double($0.totalBytes) * 100 : 0
-            } ?? 0,
-            currentFile: journal?.currentFile,
-            commitSHA: journal?.commitSHA,
+                max(existing?.progressPct ?? 0, $0.totalBytes > 0 ? Double($0.progressBytes) / Double($0.totalBytes) * 100 : 0)
+            } ?? existing?.progressPct ?? 0,
+            currentFile: journal?.currentFile ?? existing?.currentFile,
+            commitSHA: journal?.commitSHA ?? existing?.commitSHA,
             error: message,
             errorCode: code,
             queuePosition: nil,
             totalBytes: journal?.totalBytes ?? existing?.totalBytes,
             remainingBytes: existing?.remainingBytes,
-            enqueuedAt: existing?.enqueuedAt
+            enqueuedAt: existing?.enqueuedAt,
+            usedCredential: existing?.usedCredential
         )
     }
 

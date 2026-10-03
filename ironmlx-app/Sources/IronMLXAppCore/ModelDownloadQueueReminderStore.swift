@@ -7,6 +7,7 @@ public struct ModelDownloadRecoveryReminder: Codable, Equatable, Sendable {
     public var previousStatus: String
     public var usedCredential: Bool
     public var enqueuedAt: Date
+    public var pausedStatus: ModelDownloadStatus? = nil
 
     public init(
         provider: ModelRepositoryProvider,
@@ -31,6 +32,7 @@ public struct ModelDownloadRecoveryReminder: Codable, Equatable, Sendable {
         case previousStatus = "previous_status"
         case usedCredential = "used_credential"
         case enqueuedAt = "enqueued_at"
+        case pausedStatus = "paused_status"
     }
 }
 
@@ -65,7 +67,9 @@ struct ModelDownloadQueueReminderStore: Sendable {
 
     func save(_ reminders: [ModelDownloadRecoveryReminder]) throws {
         if reminders.isEmpty {
-            try? FileManager.default.removeItem(at: url)
+            if FileManager.default.fileExists(atPath: url.path) {
+                try FileManager.default.removeItem(at: url)
+            }
             return
         }
         try ModelDownloadStore.atomicWrite(

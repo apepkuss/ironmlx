@@ -452,6 +452,69 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 providerName: provider,
                 path: payload.path
             )
+        case "/admin/api/models/update/check", "/admin/api/models/update/download":
+            guard let repoID = payload.body["repo_id"]?.stringValue,
+                  let providerName = payload.body["provider"]?.stringValue,
+                  let provider = ModelRepositoryProvider(rawValue: providerName), provider != .standalone
+            else {
+                sendFetchResult(path: payload.path, jsonString: #"{"success":false,"code":"invalid_download_identity"}"#)
+                return
+            }
+            Task {
+                let json: String
+                if payload.path == "/admin/api/models/update/check" {
+                    let result = await downloadService.checkModelUpdate(
+                        provider: provider, repoID: repoID, token: payload.body["token"]?.stringValue
+                    )
+                    json = (try? Self.jsonString(result)) ?? #"{"success":false}"#
+                } else {
+                    let result = await downloadService.startModelUpdateDownload(
+                        provider: provider, repoID: repoID,
+                        commitSHA: payload.body["commit_sha"]?.stringValue ?? "",
+                        token: payload.body["token"]?.stringValue
+                    )
+                    var response = (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(result))
+                        as? [String: Any]) ?? ["success": false]
+                    response["provider"] = provider.rawValue
+                    json = (try? JSONSerialization.data(withJSONObject: response))
+                        .flatMap { String(data: $0, encoding: .utf8) } ?? #"{"success":false}"#
+                }
+                self.sendFetchResult(path: payload.path, jsonString: json)
+            }
+        case "/admin/api/models/download/pause", "/admin/api/models/download/resume", "/admin/api/models/download/delete":
+            guard let repoID = payload.body["repo_id"]?.stringValue,
+                  let providerName = payload.body["provider"]?.stringValue,
+                  let provider = ModelRepositoryProvider(rawValue: providerName), provider != .standalone
+            else {
+                sendFetchResult(path: payload.path, jsonString: #"{"success":false,"code":"invalid_download_identity"}"#)
+                return
+            }
+            Task {
+                let json: String
+                switch payload.path {
+                case "/admin/api/models/download/pause":
+                    let paused = await downloadService.pauseDownload(provider: provider, repoID: repoID)
+                    json = paused
+                        ? #"{"success":true,"status":"pausing"}"#
+                        : #"{"success":false,"code":"download_not_active"}"#
+                case "/admin/api/models/download/resume":
+                    let result = await downloadService.resumeDownload(
+                        provider: provider, repoID: repoID, token: payload.body["token"]?.stringValue
+                    )
+                    json = (try? Self.jsonString(result)) ?? #"{"success":false}"#
+                default:
+                    let result = await downloadService.deleteDownload(provider: provider, repoID: repoID)
+                    json = (try? Self.jsonString(result)) ?? #"{"success":false}"#
+                }
+                var response = (json.data(using: .utf8).flatMap {
+                    try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
+                }) ?? ["success": false]
+                response["repo_id"] = repoID
+                response["provider"] = provider.rawValue
+                let responseJSON = (try? JSONSerialization.data(withJSONObject: response))
+                    .flatMap { String(data: $0, encoding: .utf8) } ?? json
+                self.sendFetchResult(path: payload.path, jsonString: responseJSON)
+            }
         case "/admin/api/models/downloads/clear-finished":
             Task {
                 let result = await downloadService.clearFinishedDownloads()

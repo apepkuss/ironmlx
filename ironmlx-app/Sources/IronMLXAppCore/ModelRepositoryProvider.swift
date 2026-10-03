@@ -161,8 +161,16 @@ public struct ModelRepositoryResolver: Sendable {
         )
     }
 
-    private func resolveModelScope(repoID: String) async throws -> ResolvedModelRepository {
-        let commitSHA = try await resolveModelScopeMaster(repoID: repoID)
+    func resolveModelScope(repoID: String, revision: String? = nil) async throws -> ResolvedModelRepository {
+        let commitSHA: String
+        if let revision {
+            guard ModelSnapshotVerifier.isCommitSHA(revision) else {
+                throw RepositoryResolutionError.invalidCommit("Invalid ModelScope snapshot revision.")
+            }
+            commitSHA = revision
+        } else {
+            commitSHA = try await resolveModelScopeMaster(repoID: repoID)
+        }
         var components = URLComponents(
             url: pathURL(
                 base: modelScopeAPIEndpoint,

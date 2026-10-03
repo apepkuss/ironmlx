@@ -8,6 +8,8 @@ public enum ModelDownloadPhase: String, Codable, Sendable {
     case downloading
     case verifying
     case publishing
+    case pausing
+    case paused
     case completed
     case cancelled
     case interrupted
@@ -16,9 +18,9 @@ public enum ModelDownloadPhase: String, Codable, Sendable {
 
     var isActive: Bool {
         switch self {
-        case .queued, .resolving, .preflighting, .downloading, .verifying, .publishing:
+        case .queued, .resolving, .preflighting, .downloading, .verifying, .publishing, .pausing:
             true
-        case .completed, .cancelled, .interrupted, .rejected, .corrupt:
+        case .completed, .cancelled, .interrupted, .rejected, .corrupt, .paused:
             false
         }
     }

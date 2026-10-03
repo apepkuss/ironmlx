@@ -271,6 +271,16 @@ public final class DashboardWindowController {
         encoder.outputFormatting = [.sortedKeys]
         let configData = try encoder.encode(config)
         let configJSON = String(data: configData, encoding: .utf8) ?? "{}"
+        let catalogJSON: String
+        let catalogMemoryJSON: String
+        if let catalog = try? SupportedModelCatalog.bundled() {
+            catalogJSON = String(data: try encoder.encode(catalog), encoding: .utf8) ?? "null"
+            let memoryHints = catalog.memoryHints(physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory)
+            catalogMemoryJSON = String(data: try encoder.encode(memoryHints), encoding: .utf8) ?? "null"
+        } else {
+            catalogJSON = "null"
+            catalogMemoryJSON = "null"
+        }
         let automaticHotCacheBytes = BackendLaunchOptions.hotCacheLimitBytes(
             hotCacheGigabytes: nil,
             physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory
@@ -284,6 +294,8 @@ public final class DashboardWindowController {
         let networkInterfacesJSON = String(data: networkInterfacesData, encoding: .utf8) ?? "[]"
         return """
         window.__IRONMLX_APP_CONFIG__ = \(configJSON);
+        window.__IRONMLX_SUPPORTED_MODELS__ = \(catalogJSON);
+        window.__IRONMLX_CATALOG_MEMORY_HINTS__ = \(catalogMemoryJSON);
         window.__IRONMLX_PORT__ = \(config.port);
         window.__DEFAULT_MODEL__ = \(DashboardBridge.jsStringLiteral(config.defaultModel ?? ""));
         window.__APP_LANGUAGE__ = \(DashboardBridge.jsStringLiteral(config.language));

@@ -4,17 +4,71 @@
 
 IronMLX.app supports speech synthesis with the verified `mlx-community/IndexTTS-2.5-fp16` profile: automatic resource preparation, model loading, complete WAV responses and PCM streaming. See the [speech API](audio-speech-api.md) and [TTS model download and usage](tts-model-download.md).
 
-IronMLX.app supports native text-to-image inference with
-`mlx-community/Qwen-Image-2.1-MLX-4bit`. The App manages the model while upstream
-clients call the OpenAI-compatible endpoint documented in the
-[image generation API](image-generation-api.md). Image editing is not included.
+IronMLX.app supports native text-to-image inference and single-image conditional
+editing with `mlx-community/Qwen-Image-2.1-MLX-4bit`. The App manages the model while
+upstream clients call the OpenAI-compatible endpoints documented in the
+[image generation API](image-generation-api.md).
 
 IronMLX App also supports the typed decision model `aac6fef/laya-multilingual-mlx`: download, load/unload, restart recovery and TypeSafe-compatible System One API calls on the App service port. See the [Laya guide](laya-systemone-api.md).
 
 IronMLX 0.2.0 supports the following text and vision-language models. Check the model family and features you need, then choose a version that fits your device's memory.
 Versions, quantized files and templates within a family can differ in compatibility. This table is not a validation list for every model with a matching name.
 
+## App model catalogue
+
+In **Models → Model Download**, the default **Supported models** tab lists curated
+repository variants. The catalogue includes all 56 HuggingFace repositories in the
+local inventory captured on 2026-10-03, grouped into 27 model rows. Quantization
+variants of the same model share a row. Auxiliary artifacts have separate rows: all
+7 Qwen MTP versions, 3 Gemma 4 assistants and both DFlash2 repositories are included.
+The JonasLoos b32 DFlash2 checkpoint is distinct from the z-lab checkpoint.
+New entries are marked architecture compatible and runtime unverified; inclusion
+does not extend the existing recorded runtime-validation scope.
+Every model has a **Quantization variant** selector initially showing
+**Select quantization variant**, including models with only one variant.
+Downloads stay disabled until a variant is selected; its repository, size, memory
+hint and validation status are hidden until then. Selection survives tab
+changes within the page. Each option names
+both the format and bit width, such as `Affine · 4 bit` and `OptiQ · 4 bit`.
+Switching updates the repository, size, memory hint, validation status and download
+actions. Choose **HuggingFace** to add a download to the shared queue.
+ModelScope download buttons in this catalogue are hidden until repository availability
+and mirror contents have been verified. Recorded ModelScope mappings are candidates,
+not confirmation that those models are available to download. The separate ModelScope
+tab remains available for user-specified repositories. The source tabs also support
+other repositories, including private or gated repositories that require credentials.
+The catalogue downloads public repositories without an HF token.
+
+**Runtime verified** records existing IronMLX validation for that model variant.
+**Architecture compatible · Runtime unverified** identifies candidates without a
+recorded runtime acceptance. Neither label verifies future repository updates.
+Download size is an approximate repository size; IndexTTS also prepares additional
+audio resources. Memory hints use the existing coarse weight budget, not a full
+runtime capacity estimate. Download compatibility, disk and memory preflight still
+apply. Acceleration assistants are listed separately and require a matching main
+model.
+
+The catalogue ships with the App in
+[`supported-models.json`](../ironmlx-app/Sources/IronMLXAppCore/Resources/supported-models.json).
+Each entry records an explicit model group ID, variant label, metadata revision,
+size, source mapping and validation evidence. Separate fine-tunes and assistants
+have separate group IDs. When updating it, check repository metadata and mirror weight hashes,
+and retain the distinction between metadata checks and runtime validation.
+
 ## Model overview
+
+Installed variants show a **Downloaded · Check for updates** button. Checking only reads repository metadata and compares revisions; it does not
+queue a download. If an update is available, **Download update** starts the explicitly
+checked revision. An **Up to date** notification means the local revision matches the supported upstream
+revision. IndexTTS keeps the revision pinned by its verified App resource profile.
+
+In **Download tasks**, **Pause** keeps the task and downloaded data. Paused tasks
+offer **Resume** and **Delete**, and remain paused after restarting
+the App. Resume uses the recorded snapshot and retained files. Credential-protected
+downloads may require the token again after restart; tokens are not saved to disk.
+Deleting an unfinished task requires confirmation and removes its record and temporary
+files. **Clear** on a completed task keeps the installed model. Bulk cleanup
+also keeps paused tasks.
 
 “Conditional” requires compatible vision configuration and weights. Reasoning output and tool calling both require a supported native model template; the model name alone is insufficient.
 

@@ -1,0 +1,1460 @@
+{
+  "version": 1,
+  "updatedAt": "2026-10-03",
+  "entries": [
+    {
+      "id": "qwen35-2b-4bit",
+      "name": "Qwen 3.5 2B",
+      "parameters": "2B",
+      "weightFormat": "Affine 4-bit",
+      "weightBytes": 1722271785,
+      "downloadBytes": 1749081927,
+      "category": "vision",
+      "capabilities": [
+        "text",
+        "vision",
+        "reasoning",
+        "tools"
+      ],
+      "status": "compatible",
+      "noteKey": null,
+      "hfRepo": "mlx-community/Qwen3.5-2B-4bit",
+      "msRepo": "mlx-community/Qwen3.5-2B-4bit",
+      "metadataRevision": "674aaa7240b91e8012fcad5d791b7dfe5ba90207",
+      "evidence": [
+        "ironmlx-lm/src/models/architecture.rs"
+      ],
+      "msMetadataRevision": "ffa48c63955c56e22d76c1b2acd9b89e26310618",
+      "modelId": "qwen35-2b",
+      "variantLabel": "Affine · 4 bit"
+    },
+    {
+      "id": "qwen35-2b-affine5",
+      "name": "Qwen 3.5 2B",
+      "parameters": "2B",
+      "weightFormat": "Affine 5-bit",
+      "weightBytes": 1957431375,
+      "downloadBytes": 1984241517,
+      "category": "vision",
+      "capabilities": [
+        "text",
+        "vision",
+        "reasoning",
+        "tools"
+      ],
+      "status": "compatible",
+      "noteKey": null,
+      "hfRepo": "mlx-community/Qwen3.5-2B-5bit",
+      "msRepo": "mlx-community/Qwen3.5-2B-5bit",
+      "metadataRevision": "0934527791eb8008cd84b66550b8ab3eefd15b85",
+      "evidence": [
+        "https://huggingface.co/mlx-community/Qwen3.5-2B-5bit/tree/0934527791eb8008cd84b66550b8ab3eefd15b85",
+        "ironmlx-lm/src/models/architecture.rs"
+      ],
+      "msMetadataRevision": "eabad0fe1267f9eee5fd096e148ffa4476eac96f",
+      "modelId": "qwen35-2b",
+      "variantLabel": "Affine · 5 bit"
+    },
+    {
+      "id": "qwen35-2b-affine6",
+      "name": "Qwen 3.5 2B",
+      "parameters": "2B",
+      "weightFormat": "Affine 6-bit",
+      "weightBytes": 2192591075,
+      "downloadBytes": 2219401217,
+      "category": "vision",
+      "capabilities": [
+        "text",
+        "vision",
+        "reasoning",
+        "tools"
+      ],
+      "status": "compatible",
+      "noteKey": null,
+      "hfRepo": "mlx-community/Qwen3.5-2B-6bit",
+      "msRepo": "mlx-community/Qwen3.5-2B-6bit",
+      "metadataRevision": "ba2bcf03dd5b502646de7e32b003cf538f2ca4d6",
+      "evidence": [
+        "https://huggingface.co/mlx-community/Qwen3.5-2B-6bit/tree/ba2bcf03dd5b502646de7e32b003cf538f2ca4d6",
+        "ironmlx-lm/src/models/architecture.rs"
+      ],
+      "msMetadataRevision": "f0e65898d6c2c64d16a177e2341c4489353cf175",
+      "modelId": "qwen35-2b",
+      "variantLabel": "Affine · 6 bit"
+    },
+    {
+      "id": "qwen35-2b-optiq-4bit",
+      "name": "Qwen 3.5 2B",
+      "parameters": "2B",
+      "weightFormat": "OptiQ 4/8-bit",
+      "weightBytes": 2243044840,
+      "downloadBytes": 2263193944,
+      "category": "vision",
+      "capabilities": [
+        "text",
+        "vision",
+        "reasoning",
+        "tools"
+      ],
+      "status": "compatible",
+      "noteKey": "catalog_note_optiq",
+      "hfRepo": "mlx-community/Qwen3.5-2B-OptiQ-4bit",
+      "msRepo": "mlx-community/Qwen3.5-2B-OptiQ-4bit",
+      "metadataRevision": "adc8669eb431e3168aeb4e320bd7b757914350e2",
+      "evidence": [
+        "ironmlx-lm/src/models/architecture.rs",
+        "ironmlx-lm/src/core/loader.rs",
+        "https://huggingface.co/mlx-community/Qwen3.5-2B-OptiQ-4bit/tree/adc8669eb431e3168aeb4e320bd7b757914350e2"
+      ],
+      "msMetadataRevision": "061adb4b2838ad26d9ea51b97b514b72cbe7ba6d",
+      "modelId": "qwen35-2b",
+      "variantLabel": "OptiQ · 4 bit"
+    },
+    {
+      "id": "qwen35-4b-affine4",
+      "name": "Qwen 3.5 4B",
+      "parameters": "4B",
+      "weightFormat": "Affine 4-bit",
+      "weightBytes": 3034300695,
+      "downloadBytes": 3061132920,
+      "category": "vision",
+      "capabilities": [
+        "text",
+        "vision",
+        "reasoning",
+        "tools"
+      ],
+      "status": "compatible",
+      "noteKey": null,
+      "hfRepo": "mlx-community/Qwen3.5-4B-MLX-4bit",
+      "msRepo": "mlx-community/Qwen3.5-4B-MLX-4bit",
+      "metadataRevision": "32f3e8ecf65426fc3306969496342d504bfa13f3",
+      "evidence": [
+        "https://huggingface.co/mlx-community/Qwen3.5-4B-MLX-4bit/tree/32f3e8ecf65426fc3306969496342d504bfa13f3",
+        "ironmlx-lm/src/models/architecture.rs"
+      ],
+      "msMetadataRevision": "8738ddd14a342d7f1ae4d6d879038ec187e66fdf",
+      "modelId": "qwen35-4b",
+      "variantLabel": "Affine · 4 bit"
+    },
+    {
+      "id": "qwen35-4b-affine8",
+      "name": "Qwen 3.5 4B",
+      "parameters": "4B",
+      "weightFormat": "Affine 8-bit",
+      "weightBytes": 5136696107,
+      "downloadBytes": 5163528300,
+      "category": "vision",
+      "capabilities": [
+        "text",
+        "vision",
+        "reasoning",
+        "tools"
+      ],
+      "status": "compatible",
+      "noteKey": null,
+      "hfRepo": "mlx-community/Qwen3.5-4B-MLX-8bit",
+      "msRepo": "mlx-community/Qwen3.5-4B-MLX-8bit",
+      "metadataRevision": "5319bbbe4f1cbe6c0b3c80f4f7de4f0338c3906d",
+      "evidence": [
+        "https://huggingface.co/mlx-community/Qwen3.5-4B-MLX-8bit/tree/5319bbbe4f1cbe6c0b3c80f4f7de4f0338c3906d",
+        "ironmlx-lm/src/models/architecture.rs"
+      ],
+      "msMetadataRevision": "c76c1f06425c3a915f304fbe572eb511e34fc3d8",
+      "modelId": "qwen35-4b",
+      "variantLabel": "Affine · 8 bit"
+    },
+    {
+      "id": "qwen35-4b-mxfp44",
+      "name": "Qwen 3.5 4B",
+      "parameters": "4B",
+      "weightFormat": "MXFP4",
+      "weightBytes": 2902868044,
+      "downloadBytes": 2929676151,
+      "category": "vision",
+      "capabilities": [
+        "text",
+        "vision",
+        "reasoning",
+        "tools"
+      ],
+      "status": "compatible",
+      "noteKey": null,
+      "hfRepo": "mlx-community/Qwen3.5-4B-mxfp4",
+      "msRepo": "mlx-community/Qwen3.5-4B-mxfp4",
+      "metadataRevision": "8e9cb97ec8ee0f6a04021220b7a6b5845353df56",
+      "evidence": [
+        "https://huggingface.co/mlx-community/Qwen3.5-4B-mxfp4/tree/8e9cb97ec8ee0f6a04021220b7a6b5845353df56",
+        "ironmlx-lm/src/models/architecture.rs"
+      ],
+      "msMetadataRevision": "06755e12515ba216728523d6d78164680a771492",
+      "modelId": "qwen35-4b",
+      "variantLabel": "MXFP4 · 4 bit"
+    },
+    {
+      "id": "qwen35-4b-mxfp88",
+      "name": "Qwen 3.5 4B",
+      "parameters": "4B",
+      "weightFormat": "MXFP8",
+      "weightBytes": 5005263364,
+      "downloadBytes": 5032071471,
+      "category": "vision",
+      "capabilities": [
+        "text",
+        "vision",
+        "reasoning",
+        "tools"
+      ],
+      "status": "compatible",
+      "noteKey": null,
+      "hfRepo": "mlx-community/Qwen3.5-4B-mxfp8",
+      "msRepo": "mlx-community/Qwen3.5-4B-mxfp8",
+      "metadataRevision": "a34dd69c7f165c0db75d71061e1bd8f4aeb9eead",
+      "evidence": [
+        "https://huggingface.co/mlx-community/Qwen3.5-4B-mxfp8/tree/a34dd69c7f165c0db75d71061e1bd8f4aeb9eead",
+        "ironmlx-lm/src/models/architecture.rs"
+      ],
+      "msMetadataRevision": "aeb9aa549d5cf9c7d8f0902d630ae0c8047d5426",
+      "modelId": "qwen35-4b",
+      "variantLabel": "MXFP8 · 8 bit"
+    },
+    {
+      "id": "qwen35-4b-bf16",
+      "name": "Qwen 3.5 4B",
+      "parameters": "4B",
+      "weightFormat": "BF16",
+      "weightBytes": 9078621809,
+      "downloadBytes": 9105420817,
+      "category": "vision",
+      "capabilities": [
+        "text",
+        "vision",
+        "reasoning",
+        "tools"
+      ],
+      "status": "compatible",
+      "noteKey": null,
+      "hfRepo": "mlx-community/Qwen3.5-4B-MLX-bf16",
+      "msRepo": "mlx-community/Qwen3.5-4B-MLX-bf16",
+      "metadataRevision": "475632ded9a95863da4e4b235ab9ccbc5d3cc6bf",
+      "evidence": [
+        "https://huggingface.co/mlx-community/Qwen3.5-4B-MLX-bf16/tree/475632ded9a95863da4e4b235ab9ccbc5d3cc6bf",
+        "ironmlx-lm/src/models/architecture.rs"
+      ],
+      "msMetadataRevision": "c3eb9f5854ff176a2384687dac37ec85259a9997",
+      "modelId": "qwen35-4b",
+      "variantLabel": "BF16"
+    },
+    {
+      "id": "qwen35-35b-a3b-affine4",
+      "name": "Qwen 3.5 35B A3B",
+      "parameters": "35B A3B",
+      "weightFormat": "Affine 4-bit",
+      "weightBytes": 20391679439,
+      "downloadBytes": 20418624545,
+      "category": "vision",
+      "capabilities": [
+        "text",
+        "vision",
+        "reasoning",
+        "tools"
+      ],
+      "status": "compatible",
+      "noteKey": null,
+      "hfRepo": "mlx-community/Qwen3.5-35B-A3B-4bit",
+      "msRepo": "mlx-community/Qwen3.5-35B-A3B-4bit",
+      "metadataRevision": "1e20fd8d42056f870933bf98ca6211024744f7ec",
+      "evidence": [
+        "https://huggingface.co/mlx-community/Qwen3.5-35B-A3B-4bit/tree/1e20fd8d42056f870933bf98ca6211024744f7ec",
+        "ironmlx-lm/src/models/architecture.rs"
+      ],
+      "msMetadataRevision": "c35ef17078b25552247b876b2b9cbfd1430bbfa9",
+      "modelId": "qwen35-35b-a3b",
+      "variantLabel": "Affine · 4 bit"
+    },
+    {
+      "id": "qwen35-35b-a3b-optiq4",
+      "name": "Qwen 3.5 35B A3B",
+      "parameters": "35B A3B",
+      "weightFormat": "OptiQ 4-bit",
+      "weightBytes": 23545576087,
+      "downloadBytes": 23565940812,
+      "category": "vision",
+      "capabilities": [
+        "text",
+        "vision",
+        "reasoning",
+        "tools"
+      ],
+      "status": "compatible",
+      "noteKey": "catalog_note_optiq",
+      "hfRepo": "mlx-community/Qwen3.5-35B-A3B-OptiQ-4bit",
+      "msRepo": null,
+      "metadataRevision": "32e73f8539874aa11ca6951dcbadf7d031dd8bc8",
+      "evidence": [
+        "https://huggingface.co/mlx-community/Qwen3.5-35B-A3B-OptiQ-4bit/tree/32e73f8539874aa11ca6951dcbadf7d031dd8bc8",
+        "ironmlx-lm/src/models/architecture.rs"
+      ],
+      "msMetadataRevision": null,
+      "modelId": "qwen35-35b-a3b",
+      "variantLabel": "OptiQ · 4 bit"
+    },
+    {
+      "id": "qwen36-27b-affine4",
+      "name": "Qwen 3.6 27B",
+      "parameters": "27B",
+      "weightFormat": "Affine 4-bit",
+      "weightBytes": 16054541599,
+      "downloadBytes": 16081490064,
+      "category": "vision",
+      "capabilities": [
+        "text",
+        "vision",
+        "reasoning",
+        "tools"
+      ],
+      "status": "compatible",
+      "noteKey": null,
+      "hfRepo": "mlx-community/Qwen3.6-27B-4bit",
+      "msRepo": "mlx-community/Qwen3.6-27B-4bit",
+      "metadataRevision": "c000ac2c2057d94be3fa931000c31723aac53282",
+      "evidence": [
+        "https://huggingface.co/mlx-community/Qwen3.6-27B-4bit/tree/c000ac2c2057d94be3fa931000c31723aac53282",
+        "ironmlx-lm/src/models/architecture.rs"
+      ],
+      "msMetadataRevision": "0dec0372876f1699be21ac7eff9810f4f502db1d",
+      "modelId": "qwen36-27b",
+      "variantLabel": "Affine · 4 bit"
+    },
+    {
+      "id": "qwen36-27b-affine5",
+      "name": "Qwen 3.6 27B",
+      "parameters": "27B",
+      "weightFormat": "Affine 5-bit",
+      "weightBytes": 19416210779,
+      "downloadBytes": 19443156978,
+      "category": "vision",
+      "capabilities": [
+        "text",
+        "vision",
+        "reasoning",
+        "tools"
+      ],
+      "status": "compatible",
+      "noteKey": null,
+      "hfRepo": "mlx-community/Qwen3.6-27B-5bit",
+      "msRepo": "mlx-community/Qwen3.6-27B-5bit",
+      "metadataRevision": "46f9b268ffe53528a8ad4ce8f684a480b3ef0d18",
+      "evidence": [
+        "https://huggingface.co/mlx-community/Qwen3.6-27B-5bit/tree/46f9b268ffe53528a8ad4ce8f684a480b3ef0d18",
+        "ironmlx-lm/src/models/architecture.rs"
+      ],
+      "msMetadataRevision": "857949a1fc0eb97a1520b9b421132994f2780b5d",
+      "modelId": "qwen36-27b",
+      "variantLabel": "Affine · 5 bit"
+    },
+    {
+      "id": "qwen36-35b-a3b-affine4",
+      "name": "Qwen 3.6 35B A3B",
+      "parameters": "35B A3B",
+      "weightFormat": "Affine 4-bit",
+      "weightBytes": 20402204271,
+      "downloadBytes": 20429169263,
+      "category": "vision",
+      "capabilities": [
+        "text",
+        "vision",
+        "reasoning",
+        "tools"
+      ],
+      "status": "compatible",
+      "noteKey": null,
+      "hfRepo": "mlx-community/Qwen3.6-35B-A3B-4bit",
+      "msRepo": "mlx-community/Qwen3.6-35B-A3B-4bit",
+      "metadataRevision": "38740b847e4cb78f352aba30aa41c76e08e6eb46",
+      "evidence": [
+        "https://huggingface.co/mlx-community/Qwen3.6-35B-A3B-4bit/tree/38740b847e4cb78f352aba30aa41c76e08e6eb46",
+        "ironmlx-lm/src/models/architecture.rs"
+      ],
+      "msMetadataRevision": "b4212ebb5451871e7288cb15a9aab3a8f63c9146",
+      "modelId": "qwen36-35b-a3b",
+      "variantLabel": "Affine · 4 bit"
+    },
+    {
+      "id": "qwen36-35b-a3b-affine5",
+      "name": "Qwen 3.6 35B A3B",
+      "parameters": "35B A3B",
+      "weightFormat": "Affine 5-bit",
+      "weightBytes": 24732003283,
+      "downloadBytes": 24758968275,
+      "category": "vision",
+      "capabilities": [
+        "text",
+        "vision",
+        "reasoning",
+        "tools"
+      ],
+      "status": "compatible",
+      "noteKey": null,
+      "hfRepo": "mlx-community/Qwen3.6-35B-A3B-5bit",
+      "msRepo": "mlx-community/Qwen3.6-35B-A3B-5bit",
+      "metadataRevision": "c90c1a8b7e7a6a9e39e549f0361a96eb05bbb499",
+      "evidence": [
+        "https://huggingface.co/mlx-community/Qwen3.6-35B-A3B-5bit/tree/c90c1a8b7e7a6a9e39e549f0361a96eb05bbb499",
+        "ironmlx-lm/src/models/architecture.rs"
+      ],
+      "msMetadataRevision": "3a430c7d1457ab9f4b067c1c28ee7bb3c71e6d0f",
+      "modelId": "qwen36-35b-a3b",
+      "variantLabel": "Affine · 5 bit"
+    },
+    {
+      "id": "qwen36-35b-a3b-affine6",
+      "name": "Qwen 3.6 35B A3B",
+      "parameters": "35B A3B",
+      "weightFormat": "Affine 6-bit",
+      "weightBytes": 29061803049,
+      "downloadBytes": 29088768041,
+      "category": "vision",
+      "capabilities": [
+        "text",
+        "vision",
+        "reasoning",
+        "tools"
+      ],
+      "status": "compatible",
+      "noteKey": null,
+      "hfRepo": "mlx-community/Qwen3.6-35B-A3B-6bit",
+      "msRepo": "mlx-community/Qwen3.6-35B-A3B-6bit",
+      "metadataRevision": "cb7e092ef8efe540bc3672c8929c4adbe5f4f759",
+      "evidence": [
+        "https://huggingface.co/mlx-community/Qwen3.6-35B-A3B-6bit/tree/cb7e092ef8efe540bc3672c8929c4adbe5f4f759",
+        "ironmlx-lm/src/models/architecture.rs"
+      ],
+      "msMetadataRevision": "728fea081cc08a32c37239c9c0a51dce5845f0a6",
+      "modelId": "qwen36-35b-a3b",
+      "variantLabel": "Affine · 6 bit"
+    },
+    {
+      "id": "qwen36-35b-a3b-affine8",
+      "name": "Qwen 3.6 35B A3B",
+      "parameters": "35B A3B",
+      "weightFormat": "Affine 8-bit",
+      "weightBytes": 37721403002,
+      "downloadBytes": 37748367994,
+      "category": "vision",
+      "capabilities": [
+        "text",
+        "vision",
+        "reasoning",
+        "tools"
+      ],
+      "status": "compatible",
+      "noteKey": null,
+      "hfRepo": "mlx-community/Qwen3.6-35B-A3B-8bit",
+      "msRepo": "mlx-community/Qwen3.6-35B-A3B-8bit",
+      "metadataRevision": "e06a74e6236a60c8367e1a3214e83d8b61b637b0",
+      "evidence": [
+        "https://huggingface.co/mlx-community/Qwen3.6-35B-A3B-8bit/tree/e06a74e6236a60c8367e1a3214e83d8b61b637b0",
+        "ironmlx-lm/src/models/architecture.rs"
+      ],
+      "msMetadataRevision": "105983e11f4e3fd53e8ebb0959849a45175b28c8",
+      "modelId": "qwen36-35b-a3b",
+      "variantLabel": "Affine · 8 bit"
+    },
+    {
+      "id": "qwen36-35b-a3b-optiq4",
+      "name": "Qwen 3.6 35B A3B",
+      "parameters": "35B A3B",
+      "weightFormat": "OptiQ 4-bit",
+      "weightBytes": 24673571763,
+      "downloadBytes": 24693936578,
+      "category": "vision",
+      "capabilities": [
+        "text",
+        "vision",
+        "reasoning",
+        "tools"
+      ],
+      "status": "compatible",
+      "noteKey": "catalog_note_optiq",
+      "hfRepo": "mlx-community/Qwen3.6-35B-A3B-OptiQ-4bit",
+      "msRepo": null,
+      "metadataRevision": "b838db58dc3def1f9d2a86491465b86c8e806546",
+      "evidence": [
+        "https://huggingface.co/mlx-community/Qwen3.6-35B-A3B-OptiQ-4bit/tree/b838db58dc3def1f9d2a86491465b86c8e806546",
+        "ironmlx-lm/src/models/architecture.rs"
+      ],
+      "msMetadataRevision": null,
+      "modelId": "qwen36-35b-a3b",
+      "variantLabel": "OptiQ · 4 bit"
+    },
+    {
+      "id": "qwen38-27b-4bit",
+      "name": "Qwen 3.8 27B",
+      "parameters": "27B",
+      "weightFormat": "Affine 4-bit",
+      "weightBytes": 16054541349,
+      "downloadBytes": 16081490933,
+      "category": "vision",
+      "capabilities": [
+        "text",
+        "vision",
+        "reasoning",
+        "tools"
+      ],
+      "status": "verified",
+      "noteKey": null,
+      "hfRepo": "mlx-community/Qwen3.8-27B-4bit",
+      "msRepo": "mlx-community/Qwen3.8-27B-4bit",
+      "metadataRevision": "10c35caafbb80f7dc6a7a432cdd11af10a6d4818",
+      "evidence": [
+        "docs/supported-models.md#validated-model-versions"
+      ],
+      "msMetadataRevision": "a4c82c93faac80a30e11a1a769c5734e449e654e",
+      "modelId": "qwen38-27b",
+      "variantLabel": "Affine · 4 bit"
+    },
+    {
+      "id": "qwen38-27b-8bit",
+      "name": "Qwen 3.8 27B",
+      "parameters": "27B",
+      "weightFormat": "Affine 8-bit",
+      "weightBytes": 29501218479,
+      "downloadBytes": 29531521322,
+      "category": "vision",
+      "capabilities": [
+        "text",
+        "vision",
+        "reasoning",
+        "tools"
+      ],
+      "status": "verified",
+      "noteKey": null,
+      "hfRepo": "mlx-community/Qwen3.8-27B-8bit",
+      "msRepo": "mlx-community/Qwen3.8-27B-8bit",
+      "metadataRevision": "815b83c0df8ffd1d1b5244cf75fd6ef14fca9ef9",
+      "evidence": [
+        "docs/supported-models.md#validated-model-versions"
+      ],
+      "msMetadataRevision": "d2d96122f142c185af55e41b3c109808bfa39e0c",
+      "modelId": "qwen38-27b",
+      "variantLabel": "Affine · 8 bit"
+    },
+    {
+      "id": "gemma4-e2b-4bit",
+      "name": "Gemma 4 E2B IT",
+      "parameters": "E2B",
+      "weightFormat": "Affine 4-bit",
+      "weightBytes": 3550670554,
+      "downloadBytes": 3583088661,
+      "category": "vision",
+      "capabilities": [
+        "text",
+        "vision",
+        "reasoning",
+        "tools"
+      ],
+      "status": "compatible",
+      "noteKey": null,
+      "hfRepo": "mlx-community/gemma-4-e2b-it-4bit",
+      "msRepo": "mlx-community/gemma-4-e2b-it-4bit",
+      "metadataRevision": "238767527555cb75a05732a84dff5d6ba0dd6809",
+      "evidence": [
+        "ironmlx-lm/src/models/architecture.rs"
+      ],
+      "msMetadataRevision": "3e9d138d26462b41728971de120827fdf4ab1859",
+      "modelId": "gemma4-e2b-4bit",
+      "variantLabel": "Affine · 4 bit"
+    },
+    {
+      "id": "gemma4-e2b-4bit-affine5",
+      "name": "Gemma 4 E2B IT",
+      "parameters": "E2B",
+      "weightFormat": "Affine 5-bit",
+      "weightBytes": 4129648457,
+      "downloadBytes": 4162066564,
+      "category": "vision",
+      "capabilities": [
+        "text",
+        "vision",
+        "reasoning",
+        "tools"
+      ],
+      "status": "compatible",
+      "noteKey": null,
+      "hfRepo": "mlx-community/gemma-4-e2b-it-5bit",
+      "msRepo": "mlx-community/gemma-4-e2b-it-5bit",
+      "metadataRevision": "dc565aea8c49afb542497310a2d86bf1fd91391f",
+      "evidence": [
+        "https://huggingface.co/mlx-community/gemma-4-e2b-it-5bit/tree/dc565aea8c49afb542497310a2d86bf1fd91391f",
+        "ironmlx-lm/src/models/architecture.rs"
+      ],
+      "msMetadataRevision": "2148eb82bbf4564f3d20732cd9f400fe58c70483",
+      "modelId": "gemma4-e2b-4bit",
+      "variantLabel": "Affine · 5 bit"
+    },
+    {
+      "id": "gemma4-e2b-4bit-affine6",
+      "name": "Gemma 4 E2B IT",
+      "parameters": "E2B",
+      "weightFormat": "Affine 6-bit",
+      "weightBytes": 4708626264,
+      "downloadBytes": 4741044371,
+      "category": "vision",
+      "capabilities": [
+        "text",
+        "vision",
+        "reasoning",
+        "tools"
+      ],
+      "status": "compatible",
+      "noteKey": null,
+      "hfRepo": "mlx-community/gemma-4-e2b-it-6bit",
+      "msRepo": "mlx-community/gemma-4-e2b-it-6bit",
+      "metadataRevision": "ebd7756d4e55627e11ae043af9cad8ed6465a2e2",
+      "evidence": [
+        "https://huggingface.co/mlx-community/gemma-4-e2b-it-6bit/tree/ebd7756d4e55627e11ae043af9cad8ed6465a2e2",
+        "ironmlx-lm/src/models/architecture.rs"
+      ],
+      "msMetadataRevision": "19f1bab75ff4147b048b04240a6c882988e3676a",
+      "modelId": "gemma4-e2b-4bit",
+      "variantLabel": "Affine · 6 bit"
+    },
+    {
+      "id": "gemma4-e2b-4bit-affine8",
+      "name": "Gemma 4 E2B IT",
+      "parameters": "E2B",
+      "weightFormat": "Affine 8-bit",
+      "weightBytes": 5866581158,
+      "downloadBytes": 5899036930,
+      "category": "vision",
+      "capabilities": [
+        "text",
+        "vision",
+        "reasoning",
+        "tools"
+      ],
+      "status": "compatible",
+      "noteKey": null,
+      "hfRepo": "mlx-community/gemma-4-e2b-it-8bit",
+      "msRepo": "mlx-community/gemma-4-e2b-it-8bit",
+      "metadataRevision": "03dcf209f3f549b4075e7191e77cf69b3d48e1b2",
+      "evidence": [
+        "https://huggingface.co/mlx-community/gemma-4-e2b-it-8bit/tree/03dcf209f3f549b4075e7191e77cf69b3d48e1b2",
+        "ironmlx-lm/src/models/architecture.rs"
+      ],
+      "msMetadataRevision": "100c09be38273b348a6d09b83eb4bd8fb7ab0ea3",
+      "modelId": "gemma4-e2b-4bit",
+      "variantLabel": "Affine · 8 bit"
+    },
+    {
+      "id": "gemma4-e2b-4bit-bf16",
+      "name": "Gemma 4 E2B IT",
+      "parameters": "E2B",
+      "weightFormat": "BF16",
+      "weightBytes": 10208843414,
+      "downloadBytes": 10241242346,
+      "category": "vision",
+      "capabilities": [
+        "text",
+        "vision",
+        "reasoning",
+        "tools"
+      ],
+      "status": "compatible",
+      "noteKey": null,
+      "hfRepo": "mlx-community/gemma-4-e2b-it-bf16",
+      "msRepo": "mlx-community/gemma-4-e2b-it-bf16",
+      "metadataRevision": "fb0b166bbb9a0eb4b37915bfc515a197c9122f39",
+      "evidence": [
+        "https://huggingface.co/mlx-community/gemma-4-e2b-it-bf16/tree/fb0b166bbb9a0eb4b37915bfc515a197c9122f39",
+        "ironmlx-lm/src/models/architecture.rs"
+      ],
+      "msMetadataRevision": "c729cba228164f20a3e91c001b0d27822f12b731",
+      "modelId": "gemma4-e2b-4bit",
+      "variantLabel": "BF16"
+    },
+    {
+      "id": "gemma4-e4b-it-affine4",
+      "name": "Gemma 4 E4B IT",
+      "parameters": "E4B",
+      "weightFormat": "Affine 4-bit",
+      "weightBytes": 5217361182,
+      "downloadBytes": 5249811602,
+      "category": "vision",
+      "capabilities": [
+        "text",
+        "vision",
+        "reasoning",
+        "tools"
+      ],
+      "status": "compatible",
+      "noteKey": null,
+      "hfRepo": "mlx-community/gemma-4-e4b-it-4bit",
+      "msRepo": null,
+      "metadataRevision": "deb1db712068b1c9f83fb1c97f08c1204b9459a1",
+      "evidence": [
+        "https://huggingface.co/mlx-community/gemma-4-e4b-it-4bit/tree/deb1db712068b1c9f83fb1c97f08c1204b9459a1",
+        "ironmlx-lm/src/models/architecture.rs"
+      ],
+      "msMetadataRevision": null,
+      "modelId": "gemma4-e4b-it",
+      "variantLabel": "Affine · 4 bit"
+    },
+    {
+      "id": "gemma4-e4b-it-optiq4",
+      "name": "Gemma 4 E4B IT",
+      "parameters": "E4B",
+      "weightFormat": "OptiQ 4-bit",
+      "weightBytes": 7486327132,
+      "downloadBytes": 7518776597,
+      "category": "vision",
+      "capabilities": [
+        "text",
+        "vision",
+        "reasoning",
+        "tools"
+      ],
+      "status": "compatible",
+      "noteKey": "catalog_note_optiq",
+      "hfRepo": "mlx-community/gemma-4-e4b-it-OptiQ-4bit",
+      "msRepo": null,
+      "metadataRevision": "6ffaa01fb83dcd8cb1d743a41fb45b4a1430503b",
+      "evidence": [
+        "https://huggingface.co/mlx-community/gemma-4-e4b-it-OptiQ-4bit/tree/6ffaa01fb83dcd8cb1d743a41fb45b4a1430503b",
+        "ironmlx-lm/src/models/architecture.rs"
+      ],
+      "msMetadataRevision": null,
+      "modelId": "gemma4-e4b-it",
+      "variantLabel": "OptiQ · 4 bit"
+    },
+    {
+      "id": "gemma4-12b-it-affine4",
+      "name": "Gemma 4 12B IT",
+      "parameters": "12B",
+      "weightFormat": "Affine 4-bit",
+      "weightBytes": 6741039511,
+      "downloadBytes": 6773372848,
+      "category": "vision",
+      "capabilities": [
+        "text",
+        "vision",
+        "reasoning",
+        "tools"
+      ],
+      "status": "compatible",
+      "noteKey": null,
+      "hfRepo": "mlx-community/gemma-4-12B-it-4bit",
+      "msRepo": null,
+      "metadataRevision": "73bcf09092aa277861d5a191b989b666f7f32e8f",
+      "evidence": [
+        "https://huggingface.co/mlx-community/gemma-4-12B-it-4bit/tree/73bcf09092aa277861d5a191b989b666f7f32e8f",
+        "ironmlx-lm/src/models/architecture.rs"
+      ],
+      "msMetadataRevision": null,
+      "modelId": "gemma4-12b-it",
+      "variantLabel": "Affine · 4 bit"
+    },
+    {
+      "id": "gemma4-26b-a4b-it-affine4",
+      "name": "Gemma 4 26B A4B IT",
+      "parameters": "26B A4B",
+      "weightFormat": "Affine 4-bit",
+      "weightBytes": 15341205776,
+      "downloadBytes": 15373588575,
+      "category": "vision",
+      "capabilities": [
+        "text",
+        "vision",
+        "reasoning",
+        "tools"
+      ],
+      "status": "compatible",
+      "noteKey": null,
+      "hfRepo": "mlx-community/gemma-4-26b-a4b-it-4bit",
+      "msRepo": "mlx-community/gemma-4-26b-a4b-it-4bit",
+      "metadataRevision": "0d77464eeb233a2da68ebf9d7dc4edaac7db956d",
+      "evidence": [
+        "https://huggingface.co/mlx-community/gemma-4-26b-a4b-it-4bit/tree/0d77464eeb233a2da68ebf9d7dc4edaac7db956d",
+        "ironmlx-lm/src/models/architecture.rs"
+      ],
+      "msMetadataRevision": "0aadafd4dd9d8e6d22e2856b51fe6f6d6edba5fb",
+      "modelId": "gemma4-26b-a4b-it",
+      "variantLabel": "Affine · 4 bit"
+    },
+    {
+      "id": "gemma4-26b-a4b-it-affine8",
+      "name": "Gemma 4 26B A4B IT",
+      "parameters": "26B A4B",
+      "weightFormat": "Affine 8-bit",
+      "weightBytes": 27953641429,
+      "downloadBytes": 27986024228,
+      "category": "vision",
+      "capabilities": [
+        "text",
+        "vision",
+        "reasoning",
+        "tools"
+      ],
+      "status": "compatible",
+      "noteKey": null,
+      "hfRepo": "mlx-community/gemma-4-26b-a4b-it-8bit",
+      "msRepo": "mlx-community/gemma-4-26b-a4b-it-8bit",
+      "metadataRevision": "33c6d23798a0af159529890f79329206dbfbd73c",
+      "evidence": [
+        "https://huggingface.co/mlx-community/gemma-4-26b-a4b-it-8bit/tree/33c6d23798a0af159529890f79329206dbfbd73c",
+        "ironmlx-lm/src/models/architecture.rs"
+      ],
+      "msMetadataRevision": "e057b49ee85399d92d5b4377054b75452077e08b",
+      "modelId": "gemma4-26b-a4b-it",
+      "variantLabel": "Affine · 8 bit"
+    },
+    {
+      "id": "gemma4-26b-a4b-it-optiq4",
+      "name": "Gemma 4 26B A4B IT",
+      "parameters": "26B A4B",
+      "weightFormat": "OptiQ 4-bit",
+      "weightBytes": 18775350983,
+      "downloadBytes": 18807796287,
+      "category": "vision",
+      "capabilities": [
+        "text",
+        "vision",
+        "reasoning",
+        "tools"
+      ],
+      "status": "compatible",
+      "noteKey": "catalog_note_optiq",
+      "hfRepo": "mlx-community/gemma-4-26B-A4B-it-OptiQ-4bit",
+      "msRepo": null,
+      "metadataRevision": "d117f80dac8e59deef470534a1e41eb43254e035",
+      "evidence": [
+        "https://huggingface.co/mlx-community/gemma-4-26B-A4B-it-OptiQ-4bit/tree/d117f80dac8e59deef470534a1e41eb43254e035",
+        "ironmlx-lm/src/models/architecture.rs"
+      ],
+      "msMetadataRevision": null,
+      "modelId": "gemma4-26b-a4b-it",
+      "variantLabel": "OptiQ · 4 bit"
+    },
+    {
+      "id": "diffusiongemma-26b-a4b-it-mxfp44",
+      "name": "DiffusionGemma 26B A4B IT",
+      "parameters": "26B A4B",
+      "weightFormat": "MXFP4",
+      "weightBytes": 14846736288,
+      "downloadBytes": 14879109609,
+      "category": "vision",
+      "capabilities": [
+        "text",
+        "vision",
+        "reasoning",
+        "tools"
+      ],
+      "status": "compatible",
+      "noteKey": null,
+      "hfRepo": "mlx-community/diffusiongemma-26B-A4B-it-mxfp4",
+      "msRepo": "mlx-community/diffusiongemma-26B-A4B-it-mxfp4",
+      "metadataRevision": "c8982e704b68d7529678564e99ebbc08112d4e11",
+      "evidence": [
+        "https://huggingface.co/mlx-community/diffusiongemma-26B-A4B-it-mxfp4/tree/c8982e704b68d7529678564e99ebbc08112d4e11",
+        "ironmlx-lm/src/models/architecture.rs"
+      ],
+      "msMetadataRevision": "cf3a41a04a201f6f7eedb8e297daa96bf51e310b",
+      "modelId": "diffusiongemma-26b-a4b-it",
+      "variantLabel": "MXFP4 · 4 bit"
+    },
+    {
+      "id": "glm-4.7-flash-affine4",
+      "name": "GLM 4.7 Flash",
+      "parameters": "4B",
+      "weightFormat": "Affine 4-bit",
+      "weightBytes": 16852441819,
+      "downloadBytes": 16872850407,
+      "category": "text",
+      "capabilities": [
+        "text",
+        "reasoning",
+        "tools"
+      ],
+      "status": "compatible",
+      "noteKey": null,
+      "hfRepo": "mlx-community/GLM-4.7-Flash-4bit",
+      "msRepo": "mlx-community/GLM-4.7-Flash-4bit",
+      "metadataRevision": "1454cffb1a21737e162f508e5bc70be9def89276",
+      "evidence": [
+        "https://huggingface.co/mlx-community/GLM-4.7-Flash-4bit/tree/1454cffb1a21737e162f508e5bc70be9def89276",
+        "ironmlx-lm/src/models/architecture.rs"
+      ],
+      "msMetadataRevision": "c7ed4d77ec9339ecaea0b8a3afc540845680a956",
+      "modelId": "glm-4.7-flash",
+      "variantLabel": "Affine · 4 bit"
+    },
+    {
+      "id": "indextts25",
+      "name": "IndexTTS 2.5",
+      "parameters": null,
+      "weightFormat": "FP16",
+      "weightBytes": 4479644001,
+      "downloadBytes": 4481043854,
+      "category": "tts",
+      "capabilities": [
+        "tts"
+      ],
+      "status": "verified",
+      "noteKey": "catalog_note_tts",
+      "hfRepo": "mlx-community/IndexTTS-2.5-fp16",
+      "msRepo": "mlx-community/IndexTTS-2.5-fp16",
+      "metadataRevision": "65644cd70da15309ffeb74aa03f3686bb04e3eb1",
+      "evidence": [
+        "docs/tts-model-download.md"
+      ],
+      "msMetadataRevision": "4939a266e00433b400748ea0815513b6913c3de9",
+      "modelId": "indextts25",
+      "variantLabel": "FP16"
+    },
+    {
+      "id": "laya",
+      "name": "Laya Multilingual",
+      "parameters": null,
+      "weightFormat": "FP16",
+      "weightBytes": 643835426,
+      "downloadBytes": 678238048,
+      "category": "decision",
+      "capabilities": [
+        "decision"
+      ],
+      "status": "verified",
+      "noteKey": "catalog_note_decision",
+      "hfRepo": "aac6fef/laya-multilingual-mlx",
+      "msRepo": null,
+      "metadataRevision": "f2b4faf51023039425946074e2cf1361d2db11d5",
+      "evidence": [
+        "docs/laya-systemone-api.md"
+      ],
+      "msMetadataRevision": null,
+      "modelId": "laya",
+      "variantLabel": "FP16"
+    },
+    {
+      "id": "llama-3.2-1b-instruct-affine4",
+      "name": "Llama 3.2 1B Instruct",
+      "parameters": "1B",
+      "weightFormat": "Affine 4-bit",
+      "weightBytes": 695283921,
+      "downloadBytes": 712593855,
+      "category": "text",
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "status": "compatible",
+      "noteKey": null,
+      "hfRepo": "mlx-community/Llama-3.2-1B-Instruct-4bit",
+      "msRepo": "mlx-community/Llama-3.2-1B-Instruct-4bit",
+      "metadataRevision": "08231374eeacb049a0eade7922910865b8fce912",
+      "evidence": [
+        "https://huggingface.co/mlx-community/Llama-3.2-1B-Instruct-4bit/tree/08231374eeacb049a0eade7922910865b8fce912",
+        "ironmlx-lm/src/models/architecture.rs"
+      ],
+      "msMetadataRevision": "b08465d6197c8acef2775dd9ea8ebf5af4e47ac6",
+      "modelId": "llama-3.2-1b-instruct",
+      "variantLabel": "Affine · 4 bit"
+    },
+    {
+      "id": "minicpm-v-4.6-affine4",
+      "name": "MiniCPM-V 4.6",
+      "parameters": "4B",
+      "weightFormat": "Affine 4-bit",
+      "weightBytes": 2157823786,
+      "downloadBytes": 2177912787,
+      "category": "vision",
+      "capabilities": [
+        "text",
+        "vision",
+        "reasoning",
+        "tools"
+      ],
+      "status": "compatible",
+      "noteKey": null,
+      "hfRepo": "mlx-community/MiniCPM-V-4.6-4bit",
+      "msRepo": "mlx-community/MiniCPM-V-4.6-4bit",
+      "metadataRevision": "86cd463d33a946e4481b77e3c10fc63121b60a19",
+      "evidence": [
+        "https://huggingface.co/mlx-community/MiniCPM-V-4.6-4bit/tree/86cd463d33a946e4481b77e3c10fc63121b60a19",
+        "ironmlx-lm/src/models/architecture.rs"
+      ],
+      "msMetadataRevision": "bea77039d3f4df23c06c0e0198edcf6d8c1a2932",
+      "modelId": "minicpm-v-4.6",
+      "variantLabel": "Affine · 4 bit"
+    },
+    {
+      "id": "minicpm-v-4.6-affine5",
+      "name": "MiniCPM-V 4.6",
+      "parameters": "5B",
+      "weightFormat": "Affine 5-bit",
+      "weightBytes": 2196358966,
+      "downloadBytes": 2216445706,
+      "category": "vision",
+      "capabilities": [
+        "text",
+        "vision",
+        "reasoning",
+        "tools"
+      ],
+      "status": "compatible",
+      "noteKey": null,
+      "hfRepo": "mlx-community/MiniCPM-V-4.6-5bit",
+      "msRepo": "mlx-community/MiniCPM-V-4.6-5bit",
+      "metadataRevision": "6956add43105fe839c81b96ff3cb8d3ec8cb00ef",
+      "evidence": [
+        "https://huggingface.co/mlx-community/MiniCPM-V-4.6-5bit/tree/6956add43105fe839c81b96ff3cb8d3ec8cb00ef",
+        "ironmlx-lm/src/models/architecture.rs"
+      ],
+      "msMetadataRevision": "f1e2e934656fb8b5194481445ea46cde64db15d6",
+      "modelId": "minicpm-v-4.6",
+      "variantLabel": "Affine · 5 bit"
+    },
+    {
+      "id": "minicpm-v-4.6-affine8",
+      "name": "MiniCPM-V 4.6",
+      "parameters": "8B",
+      "weightFormat": "Affine 8-bit",
+      "weightBytes": 2311964514,
+      "downloadBytes": 2332051254,
+      "category": "vision",
+      "capabilities": [
+        "text",
+        "vision",
+        "reasoning",
+        "tools"
+      ],
+      "status": "compatible",
+      "noteKey": null,
+      "hfRepo": "mlx-community/MiniCPM-V-4.6-8bit",
+      "msRepo": "mlx-community/MiniCPM-V-4.6-8bit",
+      "metadataRevision": "03721395f6b82cd000cc74cde28fcff8abd9a04c",
+      "evidence": [
+        "https://huggingface.co/mlx-community/MiniCPM-V-4.6-8bit/tree/03721395f6b82cd000cc74cde28fcff8abd9a04c",
+        "ironmlx-lm/src/models/architecture.rs"
+      ],
+      "msMetadataRevision": "d4299cb30c0b877ab9ccbe9b7451ec6685afee8d",
+      "modelId": "minicpm-v-4.6",
+      "variantLabel": "Affine · 8 bit"
+    },
+    {
+      "id": "minicpm-v-4.6-bf16",
+      "name": "MiniCPM-V 4.6",
+      "parameters": null,
+      "weightFormat": "BF16",
+      "weightBytes": 2600954138,
+      "downloadBytes": 2621024573,
+      "category": "vision",
+      "capabilities": [
+        "text",
+        "vision",
+        "reasoning",
+        "tools"
+      ],
+      "status": "compatible",
+      "noteKey": null,
+      "hfRepo": "mlx-community/MiniCPM-V-4.6-bf16",
+      "msRepo": "mlx-community/MiniCPM-V-4.6-bf16",
+      "metadataRevision": "993c9b1ac21ae5329c1f6549c58effabb11c8279",
+      "evidence": [
+        "https://huggingface.co/mlx-community/MiniCPM-V-4.6-bf16/tree/993c9b1ac21ae5329c1f6549c58effabb11c8279",
+        "ironmlx-lm/src/models/architecture.rs"
+      ],
+      "msMetadataRevision": "2ef877cf488b029b59267912aee084222867845e",
+      "modelId": "minicpm-v-4.6",
+      "variantLabel": "BF16"
+    },
+    {
+      "id": "minicpm5-1b-affine4",
+      "name": "MiniCPM5 1B",
+      "parameters": "1B",
+      "weightFormat": "Affine 4-bit",
+      "weightBytes": 608026621,
+      "downloadBytes": 617970893,
+      "category": "text",
+      "capabilities": [
+        "text",
+        "reasoning",
+        "tools"
+      ],
+      "status": "compatible",
+      "noteKey": null,
+      "hfRepo": "mlx-community/MiniCPM5-1B-4bit",
+      "msRepo": "mlx-community/MiniCPM5-1B-4bit",
+      "metadataRevision": "36447e84d28c57588a6e91907675e44afe54ab00",
+      "evidence": [
+        "https://huggingface.co/mlx-community/MiniCPM5-1B-4bit/tree/36447e84d28c57588a6e91907675e44afe54ab00",
+        "ironmlx-lm/src/models/architecture.rs"
+      ],
+      "msMetadataRevision": "18ffdfdce985ac0451a7e79755e0172a1b492f1f",
+      "modelId": "minicpm5-1b",
+      "variantLabel": "Affine · 4 bit"
+    },
+    {
+      "id": "minicpm5-1b-affine8",
+      "name": "MiniCPM5 1B",
+      "parameters": "1B",
+      "weightFormat": "Affine 8-bit",
+      "weightBytes": 1148305460,
+      "downloadBytes": 1158252324,
+      "category": "text",
+      "capabilities": [
+        "text",
+        "reasoning",
+        "tools"
+      ],
+      "status": "compatible",
+      "noteKey": null,
+      "hfRepo": "mlx-community/MiniCPM5-1B-8bit",
+      "msRepo": "mlx-community/MiniCPM5-1B-8bit",
+      "metadataRevision": "3d164befdfbe496a9e280704c42bcb34ebde9443",
+      "evidence": [
+        "https://huggingface.co/mlx-community/MiniCPM5-1B-8bit/tree/3d164befdfbe496a9e280704c42bcb34ebde9443",
+        "ironmlx-lm/src/models/architecture.rs"
+      ],
+      "msMetadataRevision": "32e79c66d6ea370bef91ed3bbf9a1861acc70010",
+      "modelId": "minicpm5-1b",
+      "variantLabel": "Affine · 8 bit"
+    },
+    {
+      "id": "minicpm5-1b-optiq4",
+      "name": "MiniCPM5 1B",
+      "parameters": "1B",
+      "weightFormat": "OptiQ 4-bit",
+      "weightBytes": 906870787,
+      "downloadBytes": 916867873,
+      "category": "text",
+      "capabilities": [
+        "text",
+        "reasoning",
+        "tools"
+      ],
+      "status": "compatible",
+      "noteKey": "catalog_note_optiq",
+      "hfRepo": "mlx-community/MiniCPM5-1B-OptiQ-4bit",
+      "msRepo": "mlx-community/MiniCPM5-1B-OptiQ-4bit",
+      "metadataRevision": "935dd26f1ce9f3596d7ecd04014a704592b70dcc",
+      "evidence": [
+        "https://huggingface.co/mlx-community/MiniCPM5-1B-OptiQ-4bit/tree/935dd26f1ce9f3596d7ecd04014a704592b70dcc",
+        "ironmlx-lm/src/models/architecture.rs"
+      ],
+      "msMetadataRevision": "e1ade230adf254840d9277167d3d3cf4187f423f",
+      "modelId": "minicpm5-1b",
+      "variantLabel": "OptiQ · 4 bit"
+    },
+    {
+      "id": "qwen-image21",
+      "name": "Qwen Image 2.1",
+      "parameters": null,
+      "weightFormat": "Mixed 4-bit / BF16",
+      "weightBytes": 10481128868,
+      "downloadBytes": 10497210127,
+      "category": "image",
+      "capabilities": [
+        "image"
+      ],
+      "status": "verified",
+      "noteKey": "catalog_note_image",
+      "hfRepo": "mlx-community/Qwen-Image-2.1-MLX-4bit",
+      "msRepo": "mlx-community/Qwen-Image-2.1-MLX-4bit",
+      "metadataRevision": "4db4e8c0c0e7a1debf0320415bec8388e888494c",
+      "evidence": [
+        "docs/image-generation-api.md"
+      ],
+      "msMetadataRevision": "4a6b35cb971153e6b3c42e3136324c5302b1015c",
+      "modelId": "qwen-image21",
+      "variantLabel": "Mixed 4-bit / BF16"
+    },
+    {
+      "id": "dflash2-qwen38",
+      "name": "Qwen 3.8 DFlash2",
+      "parameters": null,
+      "weightFormat": "BF16",
+      "weightBytes": 3848817896,
+      "downloadBytes": 3849113002,
+      "category": "assistant",
+      "capabilities": [
+        "assistant"
+      ],
+      "status": "verified",
+      "noteKey": "catalog_note_dflash",
+      "hfRepo": "z-lab/Qwen3.8-27B-DFlash2",
+      "msRepo": "z-lab/Qwen3.8-27B-DFlash2",
+      "metadataRevision": "50307d4c4cde6860d4eee73e2547cd786fe8e8a4",
+      "evidence": [
+        "docs/dflash2-server-api.md"
+      ],
+      "msMetadataRevision": "0bdb977468fa6579f3f2b98ee306e1ba670ef440",
+      "modelId": "dflash2-qwen38",
+      "variantLabel": "BF16"
+    },
+    {
+      "id": "dflash2-qwen38-b32-bf16",
+      "name": "Qwen 3.8 27B DFlash2 b32",
+      "parameters": "27B",
+      "weightFormat": "BF16",
+      "weightBytes": 3848817896,
+      "downloadBytes": 3848819135,
+      "category": "assistant",
+      "capabilities": [
+        "assistant"
+      ],
+      "status": "compatible",
+      "noteKey": "catalog_note_dflash",
+      "hfRepo": "JonasLoos/Qwen3.8-27B-DFlash2-b32",
+      "msRepo": null,
+      "metadataRevision": "fc65843ba218eeaa8e0dbcc922034184acadd100",
+      "evidence": [
+        "https://huggingface.co/JonasLoos/Qwen3.8-27B-DFlash2-b32/tree/fc65843ba218eeaa8e0dbcc922034184acadd100",
+        "docs/dflash2-server-api.md"
+      ],
+      "msMetadataRevision": null,
+      "modelId": "dflash2-qwen38-b32",
+      "variantLabel": "BF16"
+    },
+    {
+      "id": "gemma4-12b-it-assistant-affine4",
+      "name": "Gemma 4 12B IT Assistant",
+      "parameters": "12B",
+      "weightFormat": "Affine 4-bit",
+      "weightBytes": 237894098,
+      "downloadBytes": 270077496,
+      "category": "assistant",
+      "capabilities": [
+        "assistant"
+      ],
+      "status": "compatible",
+      "noteKey": "catalog_note_gemma_assistant",
+      "hfRepo": "mlx-community/gemma-4-12B-it-assistant-4bit",
+      "msRepo": "mlx-community/gemma-4-12B-it-assistant-4bit",
+      "metadataRevision": "537797012376cd600cf94c16d880d0db51a98be5",
+      "evidence": [
+        "https://huggingface.co/mlx-community/gemma-4-12B-it-assistant-4bit/tree/537797012376cd600cf94c16d880d0db51a98be5",
+        "docs/mtp-server-api.md"
+      ],
+      "msMetadataRevision": "b8c3556742bef136369f6fad9d71a76f708cb0ec",
+      "modelId": "gemma4-12b-it-assistant",
+      "variantLabel": "Affine · 4 bit"
+    },
+    {
+      "id": "gemma4-26b-a4b-it-assistant-affine4",
+      "name": "Gemma 4 26B A4B IT Assistant",
+      "parameters": "26B A4B",
+      "weightFormat": "Affine 4-bit",
+      "weightBytes": 236124704,
+      "downloadBytes": 268327387,
+      "category": "assistant",
+      "capabilities": [
+        "assistant"
+      ],
+      "status": "compatible",
+      "noteKey": "catalog_note_gemma_assistant",
+      "hfRepo": "mlx-community/gemma-4-26B-A4B-it-qat-assistant-4bit",
+      "msRepo": "mlx-community/gemma-4-26B-A4B-it-qat-assistant-4bit",
+      "metadataRevision": "bb94eae1b70a80dac16cbf959bb4b7d56bd1fb8c",
+      "evidence": [
+        "https://huggingface.co/mlx-community/gemma-4-26B-A4B-it-qat-assistant-4bit/tree/bb94eae1b70a80dac16cbf959bb4b7d56bd1fb8c",
+        "docs/mtp-server-api.md"
+      ],
+      "msMetadataRevision": "8c0ec81ba0a2313bdfa7a58cde0bf84627fc6da9",
+      "modelId": "gemma4-26b-a4b-it-assistant",
+      "variantLabel": "Affine · 4 bit"
+    },
+    {
+      "id": "gemma4-e4b-it-assistant-affine4",
+      "name": "Gemma 4 E4B IT Assistant",
+      "parameters": "E4B",
+      "weightFormat": "Affine 4-bit",
+      "weightBytes": 45233323,
+      "downloadBytes": 77436223,
+      "category": "assistant",
+      "capabilities": [
+        "assistant"
+      ],
+      "status": "compatible",
+      "noteKey": "catalog_note_gemma_assistant",
+      "hfRepo": "mlx-community/gemma-4-E4B-it-qat-assistant-4bit",
+      "msRepo": "mlx-community/gemma-4-E4B-it-qat-assistant-4bit",
+      "metadataRevision": "dac8da1a066d5e00bc085e281fa73f2d5ec2fbe0",
+      "evidence": [
+        "https://huggingface.co/mlx-community/gemma-4-E4B-it-qat-assistant-4bit/tree/dac8da1a066d5e00bc085e281fa73f2d5ec2fbe0",
+        "docs/mtp-server-api.md"
+      ],
+      "msMetadataRevision": "71c2a777f9149c7ea712447e80c187760be0b9cb",
+      "modelId": "gemma4-e4b-it-assistant",
+      "variantLabel": "Affine · 4 bit"
+    },
+    {
+      "id": "qwen35-4b-mtp-affine4",
+      "name": "Qwen 3.5 4B MTP",
+      "parameters": "4B",
+      "weightFormat": "Affine 4-bit",
+      "weightBytes": 67859512,
+      "downloadBytes": 87415028,
+      "category": "assistant",
+      "capabilities": [
+        "assistant"
+      ],
+      "status": "compatible",
+      "noteKey": "catalog_note_mtp",
+      "hfRepo": "mlx-community/Qwen3.5-4B-MTP-4bit",
+      "msRepo": "mlx-community/Qwen3.5-4B-MTP-4bit",
+      "metadataRevision": "ab6f59bc6627196c611ab8851638651078170485",
+      "evidence": [
+        "https://huggingface.co/mlx-community/Qwen3.5-4B-MTP-4bit/tree/ab6f59bc6627196c611ab8851638651078170485",
+        "docs/mtp-server-api.md"
+      ],
+      "msMetadataRevision": "f0defbcd317d633cc22591f7d51f69a251b3543f",
+      "modelId": "qwen35-4b-mtp",
+      "variantLabel": "Affine · 4 bit"
+    },
+    {
+      "id": "qwen36-27b-mtp-affine4",
+      "name": "Qwen 3.6 27B MTP",
+      "parameters": "27B",
+      "weightFormat": "Affine 4-bit",
+      "weightBytes": 238934137,
+      "downloadBytes": 258490810,
+      "category": "assistant",
+      "capabilities": [
+        "assistant"
+      ],
+      "status": "compatible",
+      "noteKey": "catalog_note_mtp",
+      "hfRepo": "mlx-community/Qwen3.6-27B-MTP-4bit",
+      "msRepo": "mlx-community/Qwen3.6-27B-MTP-4bit",
+      "metadataRevision": "83795d546e9d328160e593fb0bf10b2bf2fe637e",
+      "evidence": [
+        "https://huggingface.co/mlx-community/Qwen3.6-27B-MTP-4bit/tree/83795d546e9d328160e593fb0bf10b2bf2fe637e",
+        "docs/mtp-server-api.md"
+      ],
+      "msMetadataRevision": "96a6f1c080e2faacd1e49015705871fa40c110e7",
+      "modelId": "qwen36-27b-mtp",
+      "variantLabel": "Affine · 4 bit"
+    },
+    {
+      "id": "qwen36-27b-mtp-affine5",
+      "name": "Qwen 3.6 27B MTP",
+      "parameters": "27B",
+      "weightFormat": "Affine 5-bit",
+      "weightBytes": 292018299,
+      "downloadBytes": 318745019,
+      "category": "assistant",
+      "capabilities": [
+        "assistant"
+      ],
+      "status": "compatible",
+      "noteKey": "catalog_note_mtp",
+      "hfRepo": "mlx-community/Qwen3.6-27B-MTP-5bit",
+      "msRepo": "mlx-community/Qwen3.6-27B-MTP-5bit",
+      "metadataRevision": "09a98f14052bb6b5af226655a58ff5eac8358624",
+      "evidence": [
+        "https://huggingface.co/mlx-community/Qwen3.6-27B-MTP-5bit/tree/09a98f14052bb6b5af226655a58ff5eac8358624",
+        "docs/mtp-server-api.md"
+      ],
+      "msMetadataRevision": "9a1cd5f7ef4650e011f43294c7ef0c755595c20b",
+      "modelId": "qwen36-27b-mtp",
+      "variantLabel": "Affine · 5 bit"
+    },
+    {
+      "id": "qwen36-35b-a3b-mtp-affine4",
+      "name": "Qwen 3.6 35B A3B MTP",
+      "parameters": "35B A3B",
+      "weightFormat": "Affine 4-bit",
+      "weightBytes": 475130833,
+      "downloadBytes": 494688099,
+      "category": "assistant",
+      "capabilities": [
+        "assistant"
+      ],
+      "status": "compatible",
+      "noteKey": "catalog_note_mtp",
+      "hfRepo": "mlx-community/Qwen3.6-35B-A3B-MTP-4bit",
+      "msRepo": "mlx-community/Qwen3.6-35B-A3B-MTP-4bit",
+      "metadataRevision": "0295b81421bf4d0fccca9a7c0fcfb1418dda3516",
+      "evidence": [
+        "https://huggingface.co/mlx-community/Qwen3.6-35B-A3B-MTP-4bit/tree/0295b81421bf4d0fccca9a7c0fcfb1418dda3516",
+        "docs/mtp-server-api.md"
+      ],
+      "msMetadataRevision": "95d5b802f91e89c6374476876ddafd59ac66588a",
+      "modelId": "qwen36-35b-a3b-mtp",
+      "variantLabel": "Affine · 4 bit"
+    },
+    {
+      "id": "qwen36-35b-a3b-mtp-affine5",
+      "name": "Qwen 3.6 35B A3B MTP",
+      "parameters": "35B A3B",
+      "weightFormat": "Affine 5-bit",
+      "weightBytes": 580709585,
+      "downloadBytes": 600263358,
+      "category": "assistant",
+      "capabilities": [
+        "assistant"
+      ],
+      "status": "compatible",
+      "noteKey": "catalog_note_mtp",
+      "hfRepo": "mlx-community/Qwen3.6-35B-A3B-MTP-5bit",
+      "msRepo": "mlx-community/Qwen3.6-35B-A3B-MTP-5bit",
+      "metadataRevision": "998d26dc27cc06baf60ff6e27d673b15f877f0b3",
+      "evidence": [
+        "https://huggingface.co/mlx-community/Qwen3.6-35B-A3B-MTP-5bit/tree/998d26dc27cc06baf60ff6e27d673b15f877f0b3",
+        "docs/mtp-server-api.md"
+      ],
+      "msMetadataRevision": "8d8b23a12040ff1f6219e19e103697d0b18b454b",
+      "modelId": "qwen36-35b-a3b-mtp",
+      "variantLabel": "Affine · 5 bit"
+    },
+    {
+      "id": "qwen38-27b-mtp-affine4",
+      "name": "Qwen 3.8 27B MTP",
+      "parameters": "27B",
+      "weightFormat": "Affine 4-bit",
+      "weightBytes": 238934137,
+      "downloadBytes": 265662074,
+      "category": "assistant",
+      "capabilities": [
+        "assistant"
+      ],
+      "status": "compatible",
+      "noteKey": "catalog_note_mtp",
+      "hfRepo": "mlx-community/Qwen3.8-27B-MTP-4bit",
+      "msRepo": "mlx-community/Qwen3.8-27B-MTP-4bit",
+      "metadataRevision": "b643c01b6d3b094e325edb6ebd832e16c486c575",
+      "evidence": [
+        "https://huggingface.co/mlx-community/Qwen3.8-27B-MTP-4bit/tree/b643c01b6d3b094e325edb6ebd832e16c486c575",
+        "docs/mtp-server-api.md"
+      ],
+      "msMetadataRevision": "5e9491a3240b0a728c7094968e06db15edfde4ef",
+      "modelId": "qwen38-27b-mtp",
+      "variantLabel": "Affine · 4 bit"
+    },
+    {
+      "id": "qwen38-27b-mtp-affine8",
+      "name": "Qwen 3.8 27B MTP",
+      "parameters": "27B",
+      "weightFormat": "Affine 8-bit",
+      "weightBytes": 451270785,
+      "downloadBytes": 477998722,
+      "category": "assistant",
+      "capabilities": [
+        "assistant"
+      ],
+      "status": "compatible",
+      "noteKey": "catalog_note_mtp",
+      "hfRepo": "mlx-community/Qwen3.8-27B-MTP-8bit",
+      "msRepo": "mlx-community/Qwen3.8-27B-MTP-8bit",
+      "metadataRevision": "e88e48d055732ad75d9435f3059139d5279f2064",
+      "evidence": [
+        "https://huggingface.co/mlx-community/Qwen3.8-27B-MTP-8bit/tree/e88e48d055732ad75d9435f3059139d5279f2064",
+        "docs/mtp-server-api.md"
+      ],
+      "msMetadataRevision": "e64560577b733f99cef663605c3a03af3d997cb7",
+      "modelId": "qwen38-27b-mtp",
+      "variantLabel": "Affine · 8 bit"
+    }
+  ]
+}
