@@ -150,6 +150,7 @@ fn minicpmv46_single_image_generate_e2e() {
     // prefill_chunk_size: 0 → single-shot prefill (matches the fixture's
     // prefill_step_size=None). Sampler::greedy() → deterministic argmax decode.
     let request = GenerateRequest {
+        priority: Default::default(),
         prompt_ids: prompt_ids.clone(),
         max_new_tokens: k,
         sampler: Sampler::greedy(),

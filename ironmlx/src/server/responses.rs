@@ -622,8 +622,8 @@ fn validate_advisory_fields(req: &ResponsesRequest) -> anyhow::Result<()> {
     );
     if let Some(tier) = req.service_tier.as_deref() {
         anyhow::ensure!(
-            matches!(tier, "auto" | "default"),
-            "service_tier must be `auto` or `default`"
+            matches!(tier, "auto" | "default" | "flex"),
+            "service_tier must be `auto`, `default`, or `flex`"
         );
     }
     if let Some(truncation) = req.truncation.as_deref() {
@@ -1253,6 +1253,7 @@ impl ResponsesRequest {
                 response_format: None,
                 stream: self.stream,
                 stream_options: None,
+                service_tier: self.service_tier,
                 ignore_eos: false,
                 max_tokens: self.max_output_tokens.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS),
                 temperature: self.temperature,
@@ -1339,6 +1340,7 @@ where
     let model = chat.model.clone().unwrap_or_else(|| state.model_id.clone());
     let temperature = chat.temperature;
     let top_p = chat.top_p;
+    let priority = chat.request_priority();
     let parallel_tool_calls = chat.parallel_tool_calls.unwrap_or(true);
     let sampler = openai::build_sampler(&chat, state.sampling_defaults);
     if let Err(error) = super::validate_prompt_lookup_sampler(state.prompt_lookup_enabled, sampler)
@@ -1450,6 +1452,7 @@ where
         #[cfg(test)]
         injected_events: None,
         request: GenerateRequest {
+            priority,
             prompt_ids,
             max_new_tokens: max_output_tokens,
             sampler,
@@ -1642,7 +1645,7 @@ struct ResponseObject {
     parallel_tool_calls: bool,
     previous_response_id: Option<String>,
     reasoning: ReasoningInfo,
-    service_tier: &'static str,
+    service_tier: String,
     store: bool,
     temperature: Option<f32>,
     text: TextConfig,
@@ -1684,6 +1687,7 @@ pub(crate) struct ResponseMeta {
     top_p: Option<f32>,
     reasoning: ReasoningRequest,
     tool_aliases: ToolAliases,
+    service_tier: String,
 }
 
 impl PreparedResponse {
@@ -1702,6 +1706,11 @@ impl PreparedResponse {
             top_p: self.top_p,
             reasoning: self.reasoning.clone(),
             tool_aliases: self.tool_aliases.clone(),
+            service_tier: if self.request.priority.is_background() {
+                "flex".to_owned()
+            } else {
+                "default".to_owned()
+            },
         }
     }
 }
@@ -1722,6 +1731,11 @@ impl ResponseMeta {
             top_p: normalized.chat.top_p,
             reasoning: normalized.reasoning.clone(),
             tool_aliases: normalized.tool_aliases.clone(),
+            service_tier: if normalized.chat.request_priority().is_background() {
+                "flex".to_owned()
+            } else {
+                "default".to_owned()
+            },
         }
     }
 
@@ -1751,7 +1765,7 @@ impl ResponseMeta {
                 effort: self.reasoning.effort,
                 summary: self.reasoning.summary,
             },
-            service_tier: "default",
+            service_tier: self.service_tier.clone(),
             store: false,
             temperature: self.temperature,
             text: TextConfig {
@@ -3123,6 +3137,29 @@ mod tests {
     }
 
     #[test]
+    fn responses_flex_tier_normalizes_to_background_priority() {
+        let normalized = request(serde_json::json!({
+            "model": "local",
+            "input": "summarize this",
+            "service_tier": "flex"
+        }))
+        .normalize()
+        .expect("flex service tier should be supported");
+        assert_eq!(
+            normalized.chat.request_priority(),
+            ironmlx_runtime::core::generation_types::RequestPriority::Background
+        );
+
+        assert!(request(serde_json::json!({
+            "model": "local",
+            "input": "hi",
+            "service_tier": "priority"
+        }))
+        .normalize()
+        .is_err());
+    }
+
+    #[test]
     fn responses_sampling_contract_rejects_nonstandard_and_invalid_fields() {
         for field in ["top_k", "repetition_penalty"] {
             let mut body = serde_json::json!({"model": "local", "input": "hi"});
@@ -3854,6 +3891,7 @@ mod tests {
             top_p: None,
             reasoning: ReasoningRequest::default(),
             tool_aliases: ToolAliases::default(),
+            service_tier: "default".to_owned(),
         };
         let mut stream = ResponsesStream::new(meta);
         let mut frames = vec![stream.created()];
@@ -3886,6 +3924,7 @@ mod tests {
                 summary: Some(ReasoningSummaryMode::None),
             },
             tool_aliases: ToolAliases::default(),
+            service_tier: "default".to_owned(),
         };
         let mut stream = ResponsesStream::new(meta);
         let mut frames = vec![stream.created()];
@@ -3974,6 +4013,7 @@ mod tests {
                 summary: Some(ReasoningSummaryMode::None),
             },
             tool_aliases: ToolAliases::default(),
+            service_tier: "default".to_owned(),
         };
         let mut stream = ResponsesStream::new(meta);
         let mut frames = stream.reasoning_delta("inspect weather".into());
@@ -4027,6 +4067,7 @@ mod tests {
             top_p: None,
             reasoning: ReasoningRequest::default(),
             tool_aliases: ToolAliases::default(),
+            service_tier: "default".to_owned(),
         };
         let mut stream = ResponsesStream::new(meta);
         let mut frames = vec![stream.created()];
@@ -4263,6 +4304,7 @@ mod tests {
             top_p: None,
             reasoning: ReasoningRequest::default(),
             tool_aliases: ToolAliases::default(),
+            service_tier: "default".to_owned(),
         };
         let mut stream = ResponsesStream::new(meta);
         stream.text_delta("not json".into());

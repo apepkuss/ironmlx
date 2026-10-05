@@ -99,6 +99,7 @@ fn p6_7_chunked_prefill_matrix() {
     for &cs in &chunk_sizes {
         let pv = load_pv_safetensors(&format!("{FIXTURE_DIR}/expected_pixel_values.safetensors"));
         let request = GenerateRequest {
+            priority: Default::default(),
             prompt_ids: prompt_ids.clone(),
             max_new_tokens: 1,
             sampler: Sampler::greedy(),

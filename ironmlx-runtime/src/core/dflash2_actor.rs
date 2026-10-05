@@ -17,7 +17,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use crate::core::dflash2::{
     DFlash2PrefixCache, DFlash2TensorBatchCache, DFlash2TextGenerationStream,
 };
-use crate::core::generation_types::{GenerateEvent, GenerateRequest};
+use crate::core::generation_types::{GenerateEvent, GenerateRequest, RequestPriority};
 use crate::core::memory_budget::BudgetState;
 use crate::core::scheduler::{RequestId, SchedulerError, StepEvent};
 use crate::core::scheduler_actor::AdmitReply;
@@ -34,6 +34,7 @@ where
     M: DFlash2Target,
 {
     request_id: RequestId,
+    priority: RequestPriority,
     event_tx: mpsc::UnboundedSender<StepEvent>,
     stream: DFlash2TextGenerationStream<'m, M>,
     _memory_charge: DFlash2MemoryCharge,
@@ -96,6 +97,22 @@ where
     Ok(streams)
 }
 
+fn scatter_all_tensor_groups<'m, M>(
+    active: &mut [ActiveDFlash2Request<'m, M>],
+    tensor_groups: &mut Vec<DFlash2TensorGroup>,
+) -> Result<()>
+where
+    M: DFlash2Target,
+{
+    while let Some(group) = tensor_groups.pop() {
+        let positions = tensor_group_positions(active, &group.request_ids)
+            .ok_or_else(|| anyhow::anyhow!("DFlash2 priority pause lost a tensor-group row"))?;
+        let mut streams = tensor_group_streams_mut(active, &positions)?;
+        group.cache.scatter_to_rows(&mut streams)?;
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 struct DFlash2MemoryCharge {
     budget_state: BudgetState,
@@ -118,11 +135,12 @@ fn reserve_dflash2_request_memory(
     budget_state: &BudgetState,
     cache_cost: DFlash2TargetCacheCost,
     token_cap: usize,
+    background_priority_allowance: usize,
     memory_budget_exceeded_count: &AtomicU64,
 ) -> Result<DFlash2MemoryCharge> {
     let requested_bytes = cache_cost.request_bytes(token_cap);
     if let Err((active_bytes, requested_bytes, soft_limit_bytes)) =
-        budget_state.try_admit(requested_bytes)
+        budget_state.try_admit_with_allowance(requested_bytes, background_priority_allowance)
     {
         memory_budget_exceeded_count.fetch_add(1, Ordering::Relaxed);
         return Err(anyhow::Error::new(SchedulerError::MemoryBudgetExceeded {
@@ -154,12 +172,28 @@ struct DFlash2ActorCounters {
     drafted_tokens: Arc<AtomicU64>,
     accepted_draft_tokens: Arc<AtomicU64>,
     rollback_count: Arc<AtomicU64>,
+    ordinary_windows: Arc<AtomicU64>,
+    tree_windows: Arc<AtomicU64>,
+    tree_drafted_nodes: Arc<AtomicU64>,
+    draft_budget_changes: Arc<AtomicU64>,
+    current_draft_budget: Arc<AtomicUsize>,
+    latest_adaptive_acceptance_ewma_bits: Arc<AtomicU64>,
     sampled_requests: Arc<AtomicU64>,
     exact_sampling_windows: Arc<AtomicU64>,
     exact_acceptance_draws: Arc<AtomicU64>,
     exact_residual_corrections: Arc<AtomicU64>,
     exact_bonus_samples: Arc<AtomicU64>,
     sampling_us: Arc<AtomicU64>,
+    draft_build_us: Arc<AtomicU64>,
+    draft_schedule_us: Arc<AtomicU64>,
+    verify_build_us: Arc<AtomicU64>,
+    projection_build_us: Arc<AtomicU64>,
+    verify_schedule_us: Arc<AtomicU64>,
+    host_sync_us: Arc<AtomicU64>,
+    rollback_us: Arc<AtomicU64>,
+    window_us: Arc<AtomicU64>,
+    prefill_us: Arc<AtomicU64>,
+    generation_us: Arc<AtomicU64>,
     latest_generation_tps_bits: Arc<AtomicU64>,
     latest_acceptance_rate_bits: Arc<AtomicU64>,
     peak_memory_bytes: Arc<AtomicUsize>,
@@ -175,6 +209,20 @@ impl DFlash2ActorCounters {
             .fetch_add(metrics.accepted_draft_tokens as u64, Ordering::Relaxed);
         self.rollback_count
             .fetch_add(metrics.rollback_count as u64, Ordering::Relaxed);
+        self.ordinary_windows
+            .fetch_add(metrics.ordinary_windows as u64, Ordering::Relaxed);
+        self.tree_windows
+            .fetch_add(metrics.tree_windows as u64, Ordering::Relaxed);
+        self.tree_drafted_nodes
+            .fetch_add(metrics.tree_drafted_nodes as u64, Ordering::Relaxed);
+        self.draft_budget_changes
+            .fetch_add(metrics.draft_budget_changes as u64, Ordering::Relaxed);
+        self.current_draft_budget
+            .store(metrics.current_draft_budget, Ordering::Relaxed);
+        self.latest_adaptive_acceptance_ewma_bits.store(
+            metrics.adaptive_acceptance_ewma.unwrap_or(0.0).to_bits(),
+            Ordering::Relaxed,
+        );
         if metrics.sampled {
             self.sampled_requests.fetch_add(1, Ordering::Relaxed);
         }
@@ -188,6 +236,20 @@ impl DFlash2ActorCounters {
             .fetch_add(metrics.exact_bonus_samples as u64, Ordering::Relaxed);
         self.sampling_us
             .fetch_add(metrics.sampling_us, Ordering::Relaxed);
+        for (counter, value) in [
+            (&self.draft_build_us, metrics.draft_build_us),
+            (&self.draft_schedule_us, metrics.draft_schedule_us),
+            (&self.verify_build_us, metrics.verify_build_us),
+            (&self.projection_build_us, metrics.projection_build_us),
+            (&self.verify_schedule_us, metrics.verify_schedule_us),
+            (&self.host_sync_us, metrics.host_sync_us),
+            (&self.rollback_us, metrics.rollback_us),
+            (&self.window_us, metrics.window_us),
+            (&self.prefill_us, metrics.prefill_us),
+            (&self.generation_us, metrics.generation_us),
+        ] {
+            counter.fetch_add(value, Ordering::Relaxed);
+        }
         self.latest_generation_tps_bits
             .store(metrics.generation_tps.to_bits(), Ordering::Relaxed);
         self.latest_acceptance_rate_bits
@@ -209,6 +271,24 @@ impl DFlash2Command {
         match self {
             Self::Admit { reply_tx, .. } => reply_tx.is_closed(),
         }
+    }
+
+    fn priority(&self) -> RequestPriority {
+        match self {
+            Self::Admit { request, .. } => request.priority,
+        }
+    }
+}
+
+fn push_pending_by_priority(pending: &mut VecDeque<DFlash2Command>, command: DFlash2Command) {
+    if command.priority().is_background() {
+        pending.push_back(command);
+    } else {
+        let foreground_end = pending
+            .iter()
+            .position(|queued| queued.priority().is_background())
+            .unwrap_or(pending.len());
+        pending.insert(foreground_end, command);
     }
 }
 
@@ -232,6 +312,7 @@ fn prune_abandoned_pending_requests(
 
 pub(crate) struct DFlash2ActorConfig {
     pub(crate) block_size: usize,
+    pub(crate) p2_options: crate::core::dflash2::DFlash2P2Options,
     pub(crate) b_max: usize,
     pub(crate) admission_deadline: std::time::Duration,
     pub(crate) tensor_batch_max_width: usize,
@@ -240,6 +321,9 @@ pub(crate) struct DFlash2ActorConfig {
     pub(crate) budget_state: BudgetState,
     pub(crate) cache_cost: DFlash2TargetCacheCost,
     pub(crate) prefix_cache_max_bytes: Option<usize>,
+    pub(crate) initial_draft_budget: usize,
+    pub(crate) target_execution_fingerprint: String,
+    pub(crate) verify_profile: String,
 }
 
 #[derive(Clone)]
@@ -251,6 +335,9 @@ pub struct DFlash2ActorHandle {
     pub(crate) runtime_usage: Arc<crate::core::runtime_usage::ModelRuntimeUsageCounters>,
     pub(crate) b_active: Arc<AtomicU64>,
     pub(crate) b_queued: Arc<AtomicU64>,
+    pub(crate) background_paused: Arc<AtomicU64>,
+    pub(crate) background_preemptions: Arc<AtomicU64>,
+    pub(crate) background_resumes: Arc<AtomicU64>,
     pub(crate) admit_count: Arc<AtomicU64>,
     pub(crate) batch_count: Arc<AtomicU64>,
     pub(crate) admission_queue_full_count: Arc<AtomicU64>,
@@ -264,6 +351,12 @@ pub struct DFlash2ActorHandle {
     pub(crate) drafted_tokens: Arc<AtomicU64>,
     pub(crate) accepted_draft_tokens: Arc<AtomicU64>,
     pub(crate) rollback_count: Arc<AtomicU64>,
+    pub(crate) ordinary_windows: Arc<AtomicU64>,
+    pub(crate) tree_windows: Arc<AtomicU64>,
+    pub(crate) tree_drafted_nodes: Arc<AtomicU64>,
+    pub(crate) draft_budget_changes: Arc<AtomicU64>,
+    pub(crate) current_draft_budget: Arc<AtomicUsize>,
+    pub(crate) latest_adaptive_acceptance_ewma_bits: Arc<AtomicU64>,
     pub(crate) tensor_batch_windows: Arc<AtomicU64>,
     pub(crate) tensor_batch_divergent_splits: Arc<AtomicU64>,
     pub(crate) tensor_batch_groups_created: Arc<AtomicU64>,
@@ -275,6 +368,18 @@ pub struct DFlash2ActorHandle {
     pub(crate) exact_residual_corrections: Arc<AtomicU64>,
     pub(crate) exact_bonus_samples: Arc<AtomicU64>,
     pub(crate) sampling_us: Arc<AtomicU64>,
+    pub(crate) draft_build_us: Arc<AtomicU64>,
+    pub(crate) draft_schedule_us: Arc<AtomicU64>,
+    pub(crate) verify_build_us: Arc<AtomicU64>,
+    pub(crate) projection_build_us: Arc<AtomicU64>,
+    pub(crate) verify_schedule_us: Arc<AtomicU64>,
+    pub(crate) host_sync_us: Arc<AtomicU64>,
+    pub(crate) rollback_us: Arc<AtomicU64>,
+    pub(crate) window_us: Arc<AtomicU64>,
+    pub(crate) prefill_us: Arc<AtomicU64>,
+    pub(crate) generation_us: Arc<AtomicU64>,
+    pub(crate) verify_profile: String,
+    pub(crate) prefix_fingerprint: String,
     pub(crate) latest_generation_tps_bits: Arc<AtomicU64>,
     pub(crate) latest_acceptance_rate_bits: Arc<AtomicU64>,
     pub(crate) peak_memory_bytes: Arc<AtomicUsize>,
@@ -371,6 +476,7 @@ where
 {
     let DFlash2ActorConfig {
         block_size,
+        p2_options,
         b_max,
         admission_deadline,
         tensor_batch_max_width,
@@ -379,6 +485,9 @@ where
         budget_state,
         cache_cost,
         prefix_cache_max_bytes,
+        initial_draft_budget,
+        target_execution_fingerprint,
+        verify_profile,
     } = config;
     assert!(b_max > 0, "DFlash2 actor requires b_max > 0");
     assert!(
@@ -390,6 +499,9 @@ where
     let in_flight = Arc::new(AtomicUsize::new(0));
     let b_active = Arc::new(AtomicU64::new(0));
     let b_queued = Arc::new(AtomicU64::new(0));
+    let background_paused = Arc::new(AtomicU64::new(0));
+    let background_preemptions = Arc::new(AtomicU64::new(0));
+    let background_resumes = Arc::new(AtomicU64::new(0));
     let admit_count = Arc::new(AtomicU64::new(0));
     let batch_count = Arc::new(AtomicU64::new(0));
     let admission_queue_full_count = Arc::new(AtomicU64::new(0));
@@ -403,6 +515,12 @@ where
     let drafted_tokens = Arc::new(AtomicU64::new(0));
     let accepted_draft_tokens = Arc::new(AtomicU64::new(0));
     let rollback_count = Arc::new(AtomicU64::new(0));
+    let ordinary_windows = Arc::new(AtomicU64::new(0));
+    let tree_windows = Arc::new(AtomicU64::new(0));
+    let tree_drafted_nodes = Arc::new(AtomicU64::new(0));
+    let draft_budget_changes = Arc::new(AtomicU64::new(0));
+    let current_draft_budget = Arc::new(AtomicUsize::new(initial_draft_budget));
+    let latest_adaptive_acceptance_ewma_bits = Arc::new(AtomicU64::new(0_f64.to_bits()));
     let tensor_batch_windows = Arc::new(AtomicU64::new(0));
     let tensor_batch_divergent_splits = Arc::new(AtomicU64::new(0));
     let tensor_batch_groups_created = Arc::new(AtomicU64::new(0));
@@ -413,6 +531,16 @@ where
     let exact_residual_corrections = Arc::new(AtomicU64::new(0));
     let exact_bonus_samples = Arc::new(AtomicU64::new(0));
     let sampling_us = Arc::new(AtomicU64::new(0));
+    let draft_build_us = Arc::new(AtomicU64::new(0));
+    let draft_schedule_us = Arc::new(AtomicU64::new(0));
+    let verify_build_us = Arc::new(AtomicU64::new(0));
+    let projection_build_us = Arc::new(AtomicU64::new(0));
+    let verify_schedule_us = Arc::new(AtomicU64::new(0));
+    let host_sync_us = Arc::new(AtomicU64::new(0));
+    let rollback_us = Arc::new(AtomicU64::new(0));
+    let window_us = Arc::new(AtomicU64::new(0));
+    let prefill_us = Arc::new(AtomicU64::new(0));
+    let generation_us = Arc::new(AtomicU64::new(0));
     let latest_generation_tps_bits = Arc::new(AtomicU64::new(0_f64.to_bits()));
     let latest_acceptance_rate_bits = Arc::new(AtomicU64::new(0_f64.to_bits()));
     let peak_memory_bytes = Arc::new(AtomicUsize::new(0));
@@ -435,7 +563,9 @@ where
     let runtime_usage = Arc::new(crate::core::runtime_usage::ModelRuntimeUsageCounters::default());
     let worker_runtime_usage = Arc::clone(&runtime_usage);
     let prefix_fingerprint = format!(
-        "dflash2-prefix-v1:draft-dtype={};draft-hidden={};draft-layer-count={};target-layers={:?};sliding-window={};block-size={}",
+        "dflash2-prefix-v2:ironmlx={};backend=mlx;kernel-contract=row-exact-v1;prefill=scheduler-b1-chunk-v1;target={};draft-dtype={};draft-hidden={};draft-layer-count={};target-layers={:?};sliding-window={};block-size={}",
+        env!("CARGO_PKG_VERSION"),
+        target_execution_fingerprint,
         draft.config().dtype,
         draft.config().hidden_size,
         draft.config().num_hidden_layers,
@@ -443,9 +573,13 @@ where
         draft.config().sliding_window,
         block_size,
     );
+    let health_prefix_fingerprint = prefix_fingerprint.clone();
     let worker_in_flight = Arc::clone(&in_flight);
     let worker_active = Arc::clone(&b_active);
     let worker_queued = Arc::clone(&b_queued);
+    let worker_background_paused = Arc::clone(&background_paused);
+    let worker_background_preemptions = Arc::clone(&background_preemptions);
+    let worker_background_resumes = Arc::clone(&background_resumes);
     let worker_admit_count = Arc::clone(&admit_count);
     let worker_batch_count = Arc::clone(&batch_count);
     let worker_memory_budget_exceeded_count = Arc::clone(&memory_budget_exceeded_count);
@@ -458,12 +592,28 @@ where
         drafted_tokens: Arc::clone(&drafted_tokens),
         accepted_draft_tokens: Arc::clone(&accepted_draft_tokens),
         rollback_count: Arc::clone(&rollback_count),
+        ordinary_windows: Arc::clone(&ordinary_windows),
+        tree_windows: Arc::clone(&tree_windows),
+        tree_drafted_nodes: Arc::clone(&tree_drafted_nodes),
+        draft_budget_changes: Arc::clone(&draft_budget_changes),
+        current_draft_budget: Arc::clone(&current_draft_budget),
+        latest_adaptive_acceptance_ewma_bits: Arc::clone(&latest_adaptive_acceptance_ewma_bits),
         sampled_requests: Arc::clone(&sampled_requests),
         exact_sampling_windows: Arc::clone(&exact_sampling_windows),
         exact_acceptance_draws: Arc::clone(&exact_acceptance_draws),
         exact_residual_corrections: Arc::clone(&exact_residual_corrections),
         exact_bonus_samples: Arc::clone(&exact_bonus_samples),
         sampling_us: Arc::clone(&sampling_us),
+        draft_build_us: Arc::clone(&draft_build_us),
+        draft_schedule_us: Arc::clone(&draft_schedule_us),
+        verify_build_us: Arc::clone(&verify_build_us),
+        projection_build_us: Arc::clone(&projection_build_us),
+        verify_schedule_us: Arc::clone(&verify_schedule_us),
+        host_sync_us: Arc::clone(&host_sync_us),
+        rollback_us: Arc::clone(&rollback_us),
+        window_us: Arc::clone(&window_us),
+        prefill_us: Arc::clone(&prefill_us),
+        generation_us: Arc::clone(&generation_us),
         latest_generation_tps_bits: Arc::clone(&latest_generation_tps_bits),
         latest_acceptance_rate_bits: Arc::clone(&latest_acceptance_rate_bits),
         peak_memory_bytes: Arc::clone(&peak_memory_bytes),
@@ -477,6 +627,7 @@ where
             .expect("validated DFlash2 prefix cache capacity");
         let mut next_request_id = 1_u64;
         let mut active = Vec::<ActiveDFlash2Request<'_, M>>::with_capacity(b_max);
+        let mut paused_background = VecDeque::<ActiveDFlash2Request<'_, M>>::with_capacity(b_max);
         let mut tensor_groups = Vec::<DFlash2TensorGroup>::with_capacity(b_max / 2);
         let mut pending = VecDeque::<DFlash2Command>::new();
         let mut command_channel_open = true;
@@ -486,7 +637,7 @@ where
             let mut admission_window_waited = false;
             while command_channel_open {
                 match cmd_rx.try_recv() {
-                    Ok(command) => pending.push_back(command),
+                    Ok(command) => push_pending_by_priority(&mut pending, command),
                     Err(mpsc::error::TryRecvError::Empty) => break,
                     Err(mpsc::error::TryRecvError::Disconnected) => {
                         command_channel_open = false;
@@ -496,10 +647,71 @@ where
             }
             prune_abandoned_pending_requests(&mut pending, &worker_in_flight, &worker_queued);
 
+            let foreground_pressure = active
+                .iter()
+                .any(|request| !request.priority.is_background())
+                || pending
+                    .iter()
+                    .any(|command| !command.priority().is_background());
+            if foreground_pressure
+                && active
+                    .iter()
+                    .any(|request| request.priority.is_background())
+            {
+                if let Err(error) = scatter_all_tensor_groups(&mut active, &mut tensor_groups) {
+                    tracing::error!(%error, "DFlash2 background priority scatter failed");
+                    for request in active.drain(..).chain(paused_background.drain(..)) {
+                        drop(request);
+                        worker_in_flight.fetch_sub(1, Ordering::Release);
+                    }
+                    while let Some(DFlash2Command::Admit { reply_tx, .. }) = pending.pop_front() {
+                        let _ = reply_tx.send(Err(anyhow::anyhow!(
+                            "DFlash2 background priority scatter failed"
+                        )));
+                        worker_in_flight.fetch_sub(1, Ordering::Release);
+                    }
+                    worker_active.store(0, Ordering::Relaxed);
+                    worker_background_paused.store(0, Ordering::Relaxed);
+                    return;
+                }
+                let mut foreground = Vec::with_capacity(active.len());
+                for request in active.drain(..) {
+                    if request.priority.is_background() {
+                        paused_background.push_back(request);
+                        worker_background_preemptions.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        foreground.push(request);
+                    }
+                }
+                active = foreground;
+            } else if !foreground_pressure {
+                while active.len() < b_max {
+                    let Some(request) = paused_background.pop_front() else {
+                        break;
+                    };
+                    if request.event_tx.is_closed() {
+                        worker_in_flight.fetch_sub(1, Ordering::Release);
+                        continue;
+                    }
+                    active.push(request);
+                    worker_background_resumes.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            paused_background.retain(|request| {
+                if request.event_tx.is_closed() {
+                    worker_in_flight.fetch_sub(1, Ordering::Release);
+                    false
+                } else {
+                    true
+                }
+            });
+            worker_active.store(active.len() as u64, Ordering::Relaxed);
+            worker_background_paused.store(paused_background.len() as u64, Ordering::Relaxed);
+
             while active.len() < b_max {
                 if pending.is_empty() && active.is_empty() && command_channel_open {
                     match cmd_rx.blocking_recv() {
-                        Some(command) => pending.push_back(command),
+                        Some(command) => push_pending_by_priority(&mut pending, command),
                         None => command_channel_open = false,
                     }
                     prune_abandoned_pending_requests(
@@ -519,7 +731,7 @@ where
                     admission_window_waited = true;
                     while command_channel_open {
                         match cmd_rx.try_recv() {
-                            Ok(command) => pending.push_back(command),
+                            Ok(command) => push_pending_by_priority(&mut pending, command),
                             Err(mpsc::error::TryRecvError::Empty) => break,
                             Err(mpsc::error::TryRecvError::Disconnected) => {
                                 command_channel_open = false;
@@ -532,6 +744,16 @@ where
                         &worker_in_flight,
                         &worker_queued,
                     );
+                }
+
+                if active
+                    .iter()
+                    .any(|request| !request.priority.is_background())
+                    && pending
+                        .front()
+                        .is_some_and(|command| command.priority().is_background())
+                {
+                    break;
                 }
 
                 let Some(DFlash2Command::Admit { request, reply_tx }) = pending.pop_front() else {
@@ -571,6 +793,14 @@ where
                     &budget_state,
                     cache_cost,
                     required_total_tokens,
+                    if request.priority.is_background() {
+                        0
+                    } else {
+                        paused_background
+                            .iter()
+                            .map(|request| request._memory_charge.bytes())
+                            .fold(0usize, usize::saturating_add)
+                    },
                     &worker_memory_budget_exceeded_count,
                 ) {
                     Ok(charge) => charge,
@@ -662,7 +892,9 @@ where
                 next_request_id = next_request_id.wrapping_add(1).max(1);
                 let batch_prompt_len = request.prompt_ids.len();
                 let batch_chunk_size = request.prefill_chunk_size;
+                let batch_priority = request.priority;
                 let mut admission_requests = vec![request];
+                let mut admission_priorities = vec![batch_priority];
                 let mut admission_replies = vec![reply_tx];
                 let mut admission_request_ids = vec![request_id];
                 let mut admission_memory_charges = vec![memory_charge];
@@ -677,6 +909,7 @@ where
                         DFlash2Command::Admit { request, .. } => {
                             request.prompt_ids.len() == batch_prompt_len
                                 && request.prefill_chunk_size == batch_chunk_size
+                                && request.priority == batch_priority
                         }
                     })
                 {
@@ -719,6 +952,14 @@ where
                         &budget_state,
                         cache_cost,
                         required_total_tokens,
+                        if candidate.priority.is_background() {
+                            0
+                        } else {
+                            paused_background
+                                .iter()
+                                .map(|request| request._memory_charge.bytes())
+                                .fold(0usize, usize::saturating_add)
+                        },
                         &worker_memory_budget_exceeded_count,
                     ) {
                         Ok(charge) => charge,
@@ -750,6 +991,7 @@ where
                     let candidate_id = RequestId(next_request_id);
                     next_request_id = next_request_id.wrapping_add(1).max(1);
                     admission_requests.push(candidate);
+                    admission_priorities.push(batch_priority);
                     admission_replies.push(candidate_reply);
                     admission_request_ids.push(candidate_id);
                     admission_memory_charges.push(candidate_charge);
@@ -763,6 +1005,7 @@ where
                         &tokenizer,
                         admission_requests,
                         block_size,
+                        p2_options,
                         &|_| false,
                     )
                     .context("initializing batched DFlash2 actor streams")
@@ -775,7 +1018,10 @@ where
                         &draft,
                         &tokenizer,
                         request,
-                        block_size,
+                        super::dflash2::DFlash2ExecutionOptions {
+                            block_size,
+                            p2: p2_options,
+                        },
                         prefix_cache
                             .as_mut()
                             .map(|cache| (cache, prefix_fingerprint.as_str())),
@@ -815,11 +1061,13 @@ where
                 }
                 governor.refresh_process();
 
-                for (((request_id, reply_tx), stream), memory_charge) in admission_request_ids
-                    .into_iter()
-                    .zip(admission_replies)
-                    .zip(streams)
-                    .zip(admission_memory_charges)
+                for ((((request_id, reply_tx), stream), memory_charge), priority) in
+                    admission_request_ids
+                        .into_iter()
+                        .zip(admission_replies)
+                        .zip(streams)
+                        .zip(admission_memory_charges)
+                        .zip(admission_priorities)
                 {
                     let (event_tx, event_rx) = mpsc::unbounded_channel();
                     if reply_tx
@@ -835,6 +1083,7 @@ where
                     worker_admit_count.fetch_add(1, Ordering::Relaxed);
                     active.push(ActiveDFlash2Request {
                         request_id,
+                        priority,
                         event_tx,
                         stream,
                         _memory_charge: memory_charge,
@@ -942,7 +1191,30 @@ where
                     continue;
                 }
                 let group_key = keys[positions[0]];
-                if group_key.is_some() && positions.iter().all(|&index| keys[index] == group_key) {
+                if group_key.is_some_and(|key| key.is_ordinary_decode()) {
+                    let mut streams = match tensor_group_streams_mut(&mut active, &positions) {
+                        Ok(streams) => streams,
+                        Err(error) => {
+                            let error = format!("{error:#}");
+                            for &index in &positions {
+                                outcomes[index].finished = true;
+                                outcomes[index].failure = Some(error.clone());
+                            }
+                            continue;
+                        }
+                    };
+                    if let Err(error) = group.cache.scatter_to_rows(&mut streams) {
+                        let error = format!("{error:#}");
+                        for &index in &positions {
+                            outcomes[index].finished = true;
+                            outcomes[index].failure = Some(error.clone());
+                        }
+                    }
+                    continue;
+                }
+                if group_key.is_some_and(|key| key.supports_batch_width(positions.len()))
+                    && positions.iter().all(|&index| keys[index] == group_key)
+                {
                     for &index in &positions {
                         claimed[index] = true;
                     }
@@ -1021,8 +1293,22 @@ where
                 }
             }
             for compatible_indices in ready.values() {
-                for indices in compatible_indices.chunks(tensor_batch_max_width) {
-                    let result = if indices.len() >= 2 {
+                let mut offset = 0_usize;
+                while offset < compatible_indices.len() {
+                    let first_index = compatible_indices[offset];
+                    let key = keys[first_index].expect("ready DFlash2 row has a batch key");
+                    let chunk_limit = tensor_batch_max_width.min(compatible_indices.len() - offset);
+                    let chunk_width = key.largest_supported_batch_width(chunk_limit);
+                    let indices = &compatible_indices[offset..offset + chunk_width];
+                    offset += chunk_width;
+                    let ordinary_decode =
+                        keys[indices[0]].is_some_and(|key| key.is_ordinary_decode());
+                    let result = if ordinary_decode {
+                        indices
+                            .iter()
+                            .copied()
+                            .try_for_each(|index| active[index].stream.fill_deferred_window_b1())
+                    } else if indices.len() >= 2 {
                         let request_ids = indices
                             .iter()
                             .map(|&index| active[index].request_id)
@@ -1143,6 +1429,9 @@ where
         runtime_usage,
         b_active,
         b_queued,
+        background_paused,
+        background_preemptions,
+        background_resumes,
         admit_count,
         batch_count,
         admission_queue_full_count,
@@ -1156,6 +1445,12 @@ where
         drafted_tokens,
         accepted_draft_tokens,
         rollback_count,
+        ordinary_windows,
+        tree_windows,
+        tree_drafted_nodes,
+        draft_budget_changes,
+        current_draft_budget,
+        latest_adaptive_acceptance_ewma_bits,
         tensor_batch_windows,
         tensor_batch_divergent_splits,
         tensor_batch_groups_created,
@@ -1167,6 +1462,18 @@ where
         exact_residual_corrections,
         exact_bonus_samples,
         sampling_us,
+        draft_build_us,
+        draft_schedule_us,
+        verify_build_us,
+        projection_build_us,
+        verify_schedule_us,
+        host_sync_us,
+        rollback_us,
+        window_us,
+        prefill_us,
+        generation_us,
+        verify_profile,
+        prefix_fingerprint: health_prefix_fingerprint,
         latest_generation_tps_bits,
         latest_acceptance_rate_bits,
         peak_memory_bytes,
@@ -1190,6 +1497,7 @@ mod tests {
 
     fn test_request() -> GenerateRequest {
         GenerateRequest {
+            priority: Default::default(),
             prompt_ids: vec![1],
             max_new_tokens: 1,
             sampler: Sampler::greedy(),
@@ -1250,6 +1558,36 @@ mod tests {
     }
 
     #[test]
+    fn pending_queue_is_fifo_within_priority_and_foreground_first() {
+        let mut pending = VecDeque::new();
+        let mut receivers = Vec::new();
+        for (token, priority) in [
+            (10, RequestPriority::Background),
+            (20, RequestPriority::Foreground),
+            (30, RequestPriority::Background),
+            (40, RequestPriority::Foreground),
+        ] {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            let mut request = test_request();
+            request.prompt_ids[0] = token;
+            request.priority = priority;
+            push_pending_by_priority(&mut pending, DFlash2Command::Admit { request, reply_tx });
+            receivers.push(reply_rx);
+        }
+
+        assert_eq!(
+            pending
+                .iter()
+                .map(|command| match command {
+                    DFlash2Command::Admit { request, .. } => request.prompt_ids[0],
+                })
+                .collect::<Vec<_>>(),
+            vec![20, 40, 10, 30]
+        );
+        drop(receivers);
+    }
+
+    #[test]
     fn request_memory_charge_rejects_aggregate_overcommit_and_releases_on_drop() {
         let budget = BudgetState::with_soft_limit(1_000, 100, 100, KvBudgetPolicy::FullResident);
         let cost = DFlash2TargetCacheCost {
@@ -1257,12 +1595,12 @@ mod tests {
             fixed_bytes_per_sequence: 100,
         };
         let rejected = AtomicU64::new(0);
-        let first = reserve_dflash2_request_memory(&budget, cost, 40, &rejected)
+        let first = reserve_dflash2_request_memory(&budget, cost, 40, 0, &rejected)
             .expect("first request fits");
         assert_eq!(first.bytes(), 500);
         assert_eq!(budget.active_bytes(), 500);
 
-        let error = reserve_dflash2_request_memory(&budget, cost, 50, &rejected)
+        let error = reserve_dflash2_request_memory(&budget, cost, 50, 0, &rejected)
             .expect_err("aggregate charge exceeds soft limit");
         assert!(matches!(
             error.downcast_ref::<SchedulerError>(),
@@ -1277,10 +1615,33 @@ mod tests {
 
         drop(first);
         assert_eq!(budget.active_bytes(), 0);
-        let second = reserve_dflash2_request_memory(&budget, cost, 50, &rejected)
+        let second = reserve_dflash2_request_memory(&budget, cost, 50, 0, &rejected)
             .expect("released charge makes room");
         assert_eq!(budget.active_bytes(), 600);
         drop(second);
+        assert_eq!(budget.active_bytes(), 0);
+    }
+
+    #[test]
+    fn foreground_replacement_allowance_preserves_truthful_resident_charge() {
+        let budget = BudgetState::with_soft_limit(1_000, 100, 100, KvBudgetPolicy::FullResident);
+        let cost = DFlash2TargetCacheCost {
+            bytes_per_token: 10,
+            fixed_bytes_per_sequence: 100,
+        };
+        let rejected = AtomicU64::new(0);
+        let paused_background = reserve_dflash2_request_memory(&budget, cost, 90, 0, &rejected)
+            .expect("background request fills the logical budget");
+        assert_eq!(paused_background.bytes(), 1_000);
+
+        let foreground =
+            reserve_dflash2_request_memory(&budget, cost, 90, paused_background.bytes(), &rejected)
+                .expect("foreground may replace the paused logical working set");
+        assert_eq!(budget.active_bytes(), 2_000);
+        assert_eq!(rejected.load(Ordering::Relaxed), 0);
+
+        drop(foreground);
+        drop(paused_background);
         assert_eq!(budget.active_bytes(), 0);
     }
 }

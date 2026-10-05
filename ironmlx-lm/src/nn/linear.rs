@@ -192,7 +192,7 @@ impl Linear {
             .transpose()?;
         let mut projections = Vec::with_capacity(output_widths.len());
         for index in 0..output_widths.len() {
-            projections.push(Self::new_quant_with_mode(
+            let projection = Self::new_quant_with_mode(
                 weights[index].clone(),
                 scales[index].clone(),
                 biases.as_ref().map(|arrays| arrays[index].clone()),
@@ -200,7 +200,8 @@ impl Linear {
                 parts.group_size,
                 parts.bits,
                 parts.mode,
-            ));
+            );
+            projections.push(projection);
         }
         // `split_at_on` produces lazy row views on the loading thread's MLX
         // stream. DFlash2 moves the constructed target model into its actor

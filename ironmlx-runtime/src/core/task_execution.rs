@@ -26,12 +26,22 @@ impl RequestExecutionHandle {
     }
 
     pub fn active_and_queued(&self) -> (usize, usize) {
-        let (active, queued) = match self {
-            Self::Scheduler(handle) => (&handle.b_active, &handle.b_queued),
-            Self::DFlash2(handle) => (&handle.b_active, &handle.b_queued),
+        let (active, paused, queued) = match self {
+            Self::Scheduler(handle) => (
+                &handle.b_active,
+                &handle.background_paused,
+                &handle.b_queued,
+            ),
+            Self::DFlash2(handle) => (
+                &handle.b_active,
+                &handle.background_paused,
+                &handle.b_queued,
+            ),
         };
         (
-            active.load(Ordering::Relaxed) as usize,
+            active
+                .load(Ordering::Relaxed)
+                .saturating_add(paused.load(Ordering::Relaxed)) as usize,
             queued.load(Ordering::Relaxed) as usize,
         )
     }

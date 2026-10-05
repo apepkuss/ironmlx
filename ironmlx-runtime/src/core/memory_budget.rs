@@ -241,12 +241,41 @@ impl BudgetState {
 
     /// 试图把 `requested` 加到 active；若加后超 soft_limit 则返回 Err。
     pub fn try_admit(&self, requested: usize) -> Result<(), (usize, usize, usize)> {
-        let cur = self.active.load(Ordering::Relaxed);
-        if cur + requested > self.soft_limit {
-            return Err((cur, requested, self.soft_limit));
+        self.try_admit_with_allowance(requested, 0)
+    }
+
+    /// Admit while temporarily treating `allowance` bytes as reclaimable.
+    ///
+    /// Priority preemption keeps paused background KV resident so it can resume
+    /// without prompt replay. A foreground request may replace that logical
+    /// working set even though both allocations overlap briefly. The active
+    /// counter remains the truthful resident charge; only the admission limit
+    /// is extended. The process-memory governor remains responsible for
+    /// rejecting an unsafe physical overlap.
+    pub fn try_admit_with_allowance(
+        &self,
+        requested: usize,
+        allowance: usize,
+    ) -> Result<(), (usize, usize, usize)> {
+        let effective_limit = self.soft_limit.saturating_add(allowance);
+        let mut current = self.active.load(Ordering::Relaxed);
+        loop {
+            let Some(next) = current.checked_add(requested) else {
+                return Err((current, requested, effective_limit));
+            };
+            if next > effective_limit {
+                return Err((current, requested, effective_limit));
+            }
+            match self.active.compare_exchange_weak(
+                current,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Ok(()),
+                Err(observed) => current = observed,
+            }
         }
-        self.active.fetch_add(requested, Ordering::Relaxed);
-        Ok(())
     }
 
     pub fn release(&self, bytes: usize) {
@@ -554,6 +583,24 @@ mod tests {
         );
         st.release(500_000);
         assert_eq!(st.active_bytes(), 0);
+    }
+
+    #[test]
+    fn replacement_allowance_keeps_actual_active_bytes() {
+        let state = BudgetState::with_soft_limit(
+            1_000,
+            usize::MAX,
+            usize::MAX,
+            KvBudgetPolicy::FullResident,
+        );
+        state.try_admit(1_000).expect("initial charge fits");
+        assert!(state.try_admit(1_000).is_err());
+        state
+            .try_admit_with_allowance(1_000, 1_000)
+            .expect("replacement allowance admits overlapping foreground charge");
+        assert_eq!(state.active_bytes(), 2_000);
+        state.release(2_000);
+        assert_eq!(state.active_bytes(), 0);
     }
 
     #[test]

@@ -1022,11 +1022,14 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
     let mut b_max = 0;
     let mut b_active = 0;
     let mut b_queued = 0;
+    let mut background_paused = 0;
     let mut queue_max = 0;
     let mut admit_count = 0;
     let mut batch_count = 0;
     let mut admission_queue_full_count = 0;
     let mut memory_budget_exceeded_count = 0;
+    let mut background_preemptions = 0;
+    let mut background_resumes = 0;
     let mut kv_cache_active_bytes = 0;
     let mut kv_cache_soft_limit_bytes = 0;
     let mut kv_cache_logical_cap_tokens = 0;
@@ -1074,11 +1077,14 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
         b_max += snapshot.scheduler.b_max;
         b_active += snapshot.scheduler.b_active;
         b_queued += snapshot.scheduler.b_queued;
+        background_paused += snapshot.scheduler.background_paused;
         queue_max += snapshot.scheduler.queue_max;
         admit_count += snapshot.scheduler.admit_count;
         batch_count += snapshot.scheduler.batch_count;
         admission_queue_full_count += snapshot.scheduler.admission_queue_full_count;
         memory_budget_exceeded_count += snapshot.scheduler.memory_budget_exceeded_count;
+        background_preemptions += snapshot.scheduler.background_preemptions;
+        background_resumes += snapshot.scheduler.background_resumes;
         kv_cache_active_bytes += snapshot.memory.kv_cache_active_bytes;
         kv_cache_soft_limit_bytes += snapshot.memory.kv_cache_soft_limit_bytes;
         kv_cache_logical_cap_tokens =
@@ -1247,11 +1253,14 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
             b_max,
             b_active,
             b_queued,
+            background_paused,
             queue_max,
             admit_count,
             batch_count,
             admission_queue_full_count,
             memory_budget_exceeded_count,
+            background_preemptions,
+            background_resumes,
         },
         memory: MemoryInfo {
             total_ram_bytes,
@@ -1975,11 +1984,14 @@ mod tests {
                 b_max: 1,
                 b_active: 0,
                 b_queued: 0,
+                background_paused: 0,
                 queue_max: 32,
                 admit_count: 0,
                 batch_count: 0,
                 admission_queue_full_count: 0,
                 memory_budget_exceeded_count: 0,
+                background_preemptions: 0,
+                background_resumes: 0,
             },
             memory: MemoryInfo {
                 total_ram_bytes: 0,
@@ -2440,6 +2452,8 @@ mod tests {
             dflash2_block_size: 4,
             dflash2_draft_bits: 4,
             dflash2_tensor_batch_max_width: None,
+            dflash2_tree_max_nodes: 0,
+            dflash2_position_keyed_sampling: false,
             prompt_lookup: false,
             prompt_lookup_min_ngram: None,
             prompt_lookup_max_ngram: None,

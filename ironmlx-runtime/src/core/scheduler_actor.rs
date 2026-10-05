@@ -41,7 +41,8 @@ use crate::core::prompt_lookup::{
 };
 use crate::core::scheduler::{
     ActiveKvParkedRequest, AdmitMidHandle, Gemma4DrafterAdmitMidHandle, ImmutablePrefixBlockStats,
-    MtpAdmitMidHandle, Phase, PromptLookupMtpStepOutcome, RequestId, Scheduler, StepEvent,
+    MtpAdmitMidHandle, PausedBackgroundRequest, Phase, PromptLookupMtpStepOutcome, RequestId,
+    Scheduler, StepEvent,
 };
 use crate::core::speculative::{MtpSpeculativeConfig, MtpSpeculativeStats};
 use crate::core::speculative_qualification::{
@@ -2720,6 +2721,13 @@ pub struct SchedulerActorHandle {
     /// Live count of requests parked in the admission queue.
     /// Updated by driver_loop tail on every rolling iteration.
     pub b_queued: Arc<AtomicU64>,
+    /// Live count of background requests paused in memory while foreground
+    /// work owns decode rounds.
+    pub background_paused: Arc<AtomicU64>,
+    /// Cumulative background round-boundary preemptions.
+    pub background_preemptions: Arc<AtomicU64>,
+    /// Cumulative in-place background resumes.
+    pub background_resumes: Arc<AtomicU64>,
     /// Monotonic count of admits rejected due to admission queue full.
     /// Aliased from `queue_rejected` — single source of truth in driver_loop.
     /// P1.1: Scheduler.admission_queue_full_count field removed (no fetch_add
@@ -3346,6 +3354,9 @@ where
     // B1-p2.5 G3: live b_active / b_queued updated by driver_loop tail.
     let b_active = Arc::new(AtomicU64::new(0));
     let b_queued = Arc::new(AtomicU64::new(0));
+    let background_paused = Arc::new(AtomicU64::new(0));
+    let background_preemptions = Arc::new(AtomicU64::new(0));
+    let background_resumes = Arc::new(AtomicU64::new(0));
     let active_kv_stats = ActiveKvOffloadSharedStats::new(&active_kv_offload);
     let immutable_prefix_stats = ImmutablePrefixBlockSharedStats::new(paged_prefix_cache.is_some());
 
@@ -3387,6 +3398,9 @@ where
     );
     let b_active_for_task = b_active.clone();
     let b_queued_for_task = b_queued.clone();
+    let background_paused_for_task = background_paused.clone();
+    let background_preemptions_for_task = background_preemptions.clone();
+    let background_resumes_for_task = background_resumes.clone();
     let paged_prefix_cache_for_task = paged_prefix_cache.clone();
     let prefix_lru_cache_for_task = prefix_lru_cache;
     let active_kv_offload_for_task = active_kv_offload.clone();
@@ -3446,6 +3460,9 @@ where
             queue_rejected_for_task,
             b_active_for_task,
             b_queued_for_task,
+            background_paused_for_task,
+            background_preemptions_for_task,
+            background_resumes_for_task,
             decode_cadence_mid_chunk_cap,
             adaptive_policy,
         );
@@ -3489,6 +3506,9 @@ where
         neural_exact_qualification_stats,
         b_active,
         b_queued,
+        background_paused,
+        background_preemptions,
+        background_resumes,
         // P1.1: alias admission_queue_full_count to queue_rejected Arc —
         // driver_loop is the single fetch_add site; Scheduler field removed.
         admission_queue_full_count: queue_rejected,
@@ -3522,6 +3542,9 @@ fn driver_loop<M, A>(
     queue_rejected: Arc<AtomicU64>,
     b_active: Arc<AtomicU64>,
     b_queued: Arc<AtomicU64>,
+    background_paused: Arc<AtomicU64>,
+    background_preemptions: Arc<AtomicU64>,
+    background_resumes: Arc<AtomicU64>,
     decode_cadence_mid_chunk_cap: usize,
     adaptive_policy: AdaptiveAdmissionPolicy,
 ) where
@@ -3537,6 +3560,7 @@ fn driver_loop<M, A>(
     let mut admission_queue: VecDeque<PendingAdmit> = VecDeque::new();
     let mut in_flight_mid_admit: Option<A::MidAdmitHandle> = None;
     let mut parked_active_kv: VecDeque<ActiveKvParkedRequest> = VecDeque::new();
+    let mut paused_background: VecDeque<PausedBackgroundRequest> = VecDeque::new();
     let rt = tokio::runtime::Handle::current();
 
     'outer: loop {
@@ -3561,6 +3585,12 @@ fn driver_loop<M, A>(
                     &mut event_txs,
                     &active_kv_stats,
                     "outer-loop finalize failed",
+                );
+                cleanup_paused_background(
+                    &mut sched,
+                    &mut paused_background,
+                    &mut event_txs,
+                    &background_paused,
                 );
                 event_txs.clear();
                 return;
@@ -3589,6 +3619,12 @@ fn driver_loop<M, A>(
                         &mut event_txs,
                         &active_kv_stats,
                         "scheduler command channel closed",
+                    );
+                    cleanup_paused_background(
+                        &mut sched,
+                        &mut paused_background,
+                        &mut event_txs,
+                        &background_paused,
                     );
                     return;
                 }
@@ -3712,6 +3748,12 @@ fn driver_loop<M, A>(
                     &active_kv_stats,
                     "scheduler poisoned after prefill error",
                 );
+                cleanup_paused_background(
+                    &mut sched,
+                    &mut paused_background,
+                    &mut event_txs,
+                    &background_paused,
+                );
                 event_txs.clear();
                 // Anything queued during the failed-batch window has nowhere
                 // to land — reject with Err so callers see a clear error
@@ -3742,6 +3784,41 @@ fn driver_loop<M, A>(
                 &mut event_txs,
                 &active_kv_stats,
             );
+            if let Err(error) = reconcile_background_priority::<M, A>(
+                &mut sched,
+                &model,
+                &admission_queue,
+                &in_flight_mid_admit,
+                &mut paused_background,
+                &mut event_txs,
+                &background_paused,
+                &background_preemptions,
+                &background_resumes,
+            ) {
+                tracing::error!(%error, "background priority reconciliation failed");
+                if let Err(evict_error) = sched.evict_all() {
+                    tracing::warn!(%evict_error, "scheduler cleanup after priority failure failed");
+                }
+                cleanup_paused_background(
+                    &mut sched,
+                    &mut paused_background,
+                    &mut event_txs,
+                    &background_paused,
+                );
+                cleanup_parked_active_kv_requests(
+                    &sched,
+                    &mut parked_active_kv,
+                    &mut event_txs,
+                    &active_kv_stats,
+                    "background priority reconciliation failed",
+                );
+                while let Some(pending) = admission_queue.pop_front() {
+                    let _ = pending.reply_tx.send(Err(anyhow::anyhow!(
+                        "scheduler failed to reconcile background priority"
+                    )));
+                }
+                continue 'outer;
+            }
             // Cancellation can empty the scheduler before the rolling-loop
             // tail is reached. Publish the post-eviction state here so
             // /healthz never reports a ghost active request while the actor is
@@ -3795,7 +3872,15 @@ fn driver_loop<M, A>(
                     }
                     RollingControl::BreakRolling => break 'rolling,
                     RollingControl::ContinueOuter => continue 'outer,
-                    RollingControl::ReturnActor => return,
+                    RollingControl::ReturnActor => {
+                        cleanup_paused_background(
+                            &mut sched,
+                            &mut paused_background,
+                            &mut event_txs,
+                            &background_paused,
+                        );
+                        return;
+                    }
                 }
             }
 
@@ -3829,6 +3914,12 @@ fn driver_loop<M, A>(
                         &active_kv_stats,
                         "scheduler shutting down",
                     );
+                    cleanup_paused_background(
+                        &mut sched,
+                        &mut paused_background,
+                        &mut event_txs,
+                        &background_paused,
+                    );
                     event_txs.clear();
                     // Reject any queued admits — callers shouldn't hang.
                     while let Some(pending) = admission_queue.pop_front() {
@@ -3839,7 +3930,9 @@ fn driver_loop<M, A>(
                     return;
                 }
                 RollingEvent::Admit(cmd) => {
-                    if !mtp_mode.allow_rolling_mid_admit()
+                    let SchedulerCommand::Admit { request, .. } = &cmd;
+                    if (request.priority.is_background() && sched.has_foreground_request())
+                        || !mtp_mode.allow_rolling_mid_admit()
                         || !mtp_mode.can_start_rolling_mid_admit(&sched)
                     {
                         enqueue_or_reject(
@@ -4003,6 +4096,12 @@ fn driver_loop<M, A>(
                                         &active_kv_stats,
                                         "scheduler poisoned after request-owned KV release failure",
                                     );
+                                    cleanup_paused_background(
+                                        &mut sched,
+                                        &mut paused_background,
+                                        &mut event_txs,
+                                        &background_paused,
+                                    );
                                     event_txs.clear();
                                     while let Some(pending) = admission_queue.pop_front() {
                                         let _ = pending.reply_tx.send(Err(anyhow::anyhow!(
@@ -4117,6 +4216,12 @@ fn driver_loop<M, A>(
                                 &active_kv_stats,
                                 "scheduler poisoned after step error",
                             );
+                            cleanup_paused_background(
+                                &mut sched,
+                                &mut paused_background,
+                                &mut event_txs,
+                                &background_paused,
+                            );
                             event_txs.clear();
                             while let Some(pending) = admission_queue.pop_front() {
                                 let _ = pending.reply_tx.send(Err(anyhow::anyhow!(
@@ -4137,6 +4242,37 @@ fn driver_loop<M, A>(
             sched.refresh_active_kv_residency_stats();
             active_kv_stats.set_parked_requests(parked_active_kv.len());
             immutable_prefix_stats.store(sched.request_owned_kv_stats().immutable_prefix);
+
+            if let Err(error) = reconcile_background_priority::<M, A>(
+                &mut sched,
+                &model,
+                &admission_queue,
+                &in_flight_mid_admit,
+                &mut paused_background,
+                &mut event_txs,
+                &background_paused,
+                &background_preemptions,
+                &background_resumes,
+            ) {
+                tracing::error!(%error, "background priority tail reconciliation failed");
+                if let Err(evict_error) = sched.evict_all() {
+                    tracing::warn!(%evict_error, "scheduler cleanup after tail priority failure failed");
+                }
+                cleanup_paused_background(
+                    &mut sched,
+                    &mut paused_background,
+                    &mut event_txs,
+                    &background_paused,
+                );
+                cleanup_parked_active_kv_requests(
+                    &sched,
+                    &mut parked_active_kv,
+                    &mut event_txs,
+                    &active_kv_stats,
+                    "background priority tail reconciliation failed",
+                );
+                continue 'outer;
+            }
 
             // ===== Exit rolling loop when active_count == 0 AND queue empty. =====
             // Spec §9 R1: if `active_count() == 0` but admission_queue is
@@ -4179,7 +4315,15 @@ fn driver_loop<M, A>(
                     }
                     RollingControl::BreakRolling => break 'rolling,
                     RollingControl::ContinueOuter => continue 'outer,
-                    RollingControl::ReturnActor => return,
+                    RollingControl::ReturnActor => {
+                        cleanup_paused_background(
+                            &mut sched,
+                            &mut paused_background,
+                            &mut event_txs,
+                            &background_paused,
+                        );
+                        return;
+                    }
                 }
             }
         }
@@ -4202,6 +4346,12 @@ fn driver_loop<M, A>(
             &mut event_txs,
             &active_kv_stats,
             "scheduler outer loop reset",
+        );
+        cleanup_paused_background(
+            &mut sched,
+            &mut paused_background,
+            &mut event_txs,
+            &background_paused,
         );
         event_txs.clear();
     }
@@ -4273,7 +4423,12 @@ async fn drain_window<M>(
                 let command_shape = admission_command_shape(&cmd);
                 let command_batch_limit =
                     fresh_prefill_batch_limit_for_command::<M>(&cmd, b_max, adaptive_policy);
-                if limit_reached
+                let SchedulerCommand::Admit { request, .. } = &cmd;
+                let mixed_priority = sched.active().first().is_some_and(|state| {
+                    state.priority.is_background() != request.priority.is_background()
+                });
+                if mixed_priority
+                    || limit_reached
                     || sched.active_count() >= command_batch_limit
                     || !adaptive_policy.can_join_fresh_batch(batch_shape, command_shape)
                 {
@@ -4663,11 +4818,20 @@ fn enqueue_or_reject(
         )
     });
     let queued_at_profile = enqueue_profile.map(|(now, _, _)| now);
-    queue.push_back(PendingAdmit {
+    let pending = PendingAdmit {
         request,
         reply_tx,
         queued_at_profile,
-    });
+    };
+    if pending.request.priority.is_background() {
+        queue.push_back(pending);
+    } else {
+        let foreground_end = queue
+            .iter()
+            .position(|queued| queued.request.priority.is_background())
+            .unwrap_or(queue.len());
+        queue.insert(foreground_end, pending);
+    }
     queue_depth_peak.fetch_max(queue.len(), Ordering::Relaxed);
     if let Some((now, prompt_len, prefill_chunk_size)) = enqueue_profile {
         tracing::info!(
@@ -4776,6 +4940,115 @@ where
     discarded
 }
 
+fn queue_has_foreground(queue: &VecDeque<PendingAdmit>) -> bool {
+    queue
+        .iter()
+        .any(|pending| !pending.request.priority.is_background())
+}
+
+fn discard_abandoned_paused_background<M>(
+    sched: &mut Scheduler<M>,
+    paused_background: &mut VecDeque<PausedBackgroundRequest>,
+    event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
+    background_paused: &AtomicU64,
+) -> usize
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    let mut discarded = 0_usize;
+    let mut retained = VecDeque::with_capacity(paused_background.len());
+    while let Some(paused) = paused_background.pop_front() {
+        let id = paused.id();
+        if event_txs.get(&id).is_none_or(|tx| tx.is_closed()) {
+            sched.discard_paused_background_request(paused);
+            event_txs.remove(&id);
+            discarded += 1;
+        } else {
+            retained.push_back(paused);
+        }
+    }
+    *paused_background = retained;
+    background_paused.store(paused_background.len() as u64, Ordering::Relaxed);
+    discarded
+}
+
+fn cleanup_paused_background<M>(
+    sched: &mut Scheduler<M>,
+    paused_background: &mut VecDeque<PausedBackgroundRequest>,
+    event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
+    background_paused: &AtomicU64,
+) where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    while let Some(paused) = paused_background.pop_front() {
+        event_txs.remove(&paused.id());
+        sched.discard_paused_background_request(paused);
+    }
+    sched.set_background_priority_budget_allowance(0);
+    background_paused.store(0, Ordering::Relaxed);
+}
+
+fn refresh_background_priority_budget_allowance<M>(
+    sched: &mut Scheduler<M>,
+    paused_background: &VecDeque<PausedBackgroundRequest>,
+) where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    let allowance = paused_background
+        .iter()
+        .map(PausedBackgroundRequest::kv_bytes_admitted)
+        .fold(0usize, usize::saturating_add);
+    sched.set_background_priority_budget_allowance(allowance);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reconcile_background_priority<M, A>(
+    sched: &mut Scheduler<M>,
+    model: &Arc<Mutex<M>>,
+    queue: &VecDeque<PendingAdmit>,
+    in_flight_mid_admit: &Option<A::MidAdmitHandle>,
+    paused_background: &mut VecDeque<PausedBackgroundRequest>,
+    event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
+    background_paused: &AtomicU64,
+    background_preemptions: &AtomicU64,
+    background_resumes: &AtomicU64,
+) -> Result<()>
+where
+    M: Model + DenseVlMethods + Send + 'static,
+    A: SchedulerActorMtpMode<M>,
+{
+    discard_abandoned_paused_background(sched, paused_background, event_txs, background_paused);
+    refresh_background_priority_budget_allowance(sched, paused_background);
+    if in_flight_mid_admit.is_some() {
+        return Ok(());
+    }
+    let foreground_pressure = sched.has_foreground_request() || queue_has_foreground(queue);
+    if foreground_pressure {
+        let ids = sched.background_request_ids();
+        if !ids.is_empty() {
+            let model = model.blocking_lock();
+            for id in ids {
+                let paused = sched.pause_background_request(id, &model)?;
+                paused_background.push_back(paused);
+                background_preemptions.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    } else {
+        while sched.active_count() < sched.b_max() && !paused_background.is_empty() {
+            let model = model.blocking_lock();
+            let paused = paused_background
+                .front_mut()
+                .expect("paused background queue checked non-empty");
+            sched.restore_background_request(paused, &model)?;
+            paused_background.pop_front();
+            background_resumes.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    refresh_background_priority_budget_allowance(sched, paused_background);
+    background_paused.store(paused_background.len() as u64, Ordering::Relaxed);
+    Ok(())
+}
+
 /// Drain at most one mid-batch admit chunk from the admission queue.
 /// Full-prompt rolling admits obey the model's `fresh_prefill_batch_limit`.
 /// Multi-chunk admits may start in a spare slot beyond that limit because
@@ -4824,6 +5097,9 @@ where
         if pending.reply_tx.is_closed() {
             queue.pop_front();
             continue;
+        }
+        if pending.request.priority.is_background() && sched.has_foreground_request() {
+            return 0;
         }
         if !can_start_rolling_mid_admit_for_request::<M>(
             &pending.request,
@@ -5443,6 +5719,56 @@ pub(crate) mod tests {
         )
     }
 
+    #[test]
+    fn admission_queue_is_fifo_within_priority_and_foreground_first() {
+        let mut queue = VecDeque::new();
+        let depth_peak = Arc::new(AtomicUsize::new(0));
+        let rejected = Arc::new(AtomicU64::new(0));
+        let mut receivers = Vec::new();
+        for (token, priority) in [
+            (
+                10,
+                crate::core::generation_types::RequestPriority::Background,
+            ),
+            (
+                20,
+                crate::core::generation_types::RequestPriority::Foreground,
+            ),
+            (
+                30,
+                crate::core::generation_types::RequestPriority::Background,
+            ),
+            (
+                40,
+                crate::core::generation_types::RequestPriority::Foreground,
+            ),
+        ] {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            let mut request = mk_req(token);
+            request.priority = priority;
+            enqueue_or_reject(
+                SchedulerCommand::Admit { request, reply_tx },
+                &mut queue,
+                8,
+                &depth_peak,
+                &rejected,
+            );
+            receivers.push(reply_rx);
+        }
+
+        assert_eq!(
+            queue
+                .iter()
+                .map(|pending| pending.request.prompt_ids[0])
+                .collect::<Vec<_>>(),
+            vec![20, 40, 10, 30]
+        );
+        assert!(queue_has_foreground(&queue));
+        assert_eq!(depth_peak.load(Ordering::Relaxed), 4);
+        assert_eq!(rejected.load(Ordering::Relaxed), 0);
+        drop(receivers);
+    }
+
     fn test_mtp_counters() -> SchedulerActorMtpCounters {
         let counter = || Arc::new(AtomicU64::new(0));
         SchedulerActorMtpCounters::new(
@@ -6014,6 +6340,113 @@ pub(crate) mod tests {
             }
             assert_eq!(tokens, 4);
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn foreground_request_preempts_and_then_resumes_background_in_place() {
+        let model = Arc::new(Mutex::new(SchedulerActorFakeModel::with_forward_delay(
+            Duration::from_millis(20),
+        )));
+        let handle = spawn_scheduler_actor(
+            model,
+            1,
+            Duration::from_millis(1),
+            4,
+            64,
+            256,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("spawn actor");
+
+        let (background_reply_tx, background_reply_rx) = oneshot::channel();
+        let mut background = mk_req(11);
+        background.priority = crate::core::generation_types::RequestPriority::Background;
+        background.max_new_tokens = 8;
+        handle
+            .cmd_tx
+            .send(SchedulerCommand::Admit {
+                request: background,
+                reply_tx: background_reply_tx,
+            })
+            .await
+            .expect("send background request");
+        let mut background_events = background_reply_rx
+            .await
+            .expect("background reply")
+            .expect("background admit")
+            .event_rx;
+        let first_background =
+            tokio::time::timeout(Duration::from_secs(2), background_events.recv())
+                .await
+                .expect("background first event timeout")
+                .expect("background first event");
+        assert!(first_background.finish_reason.is_none());
+
+        let (foreground_reply_tx, foreground_reply_rx) = oneshot::channel();
+        let mut foreground = mk_req(22);
+        foreground.max_new_tokens = 4;
+        handle
+            .cmd_tx
+            .send(SchedulerCommand::Admit {
+                request: foreground,
+                reply_tx: foreground_reply_tx,
+            })
+            .await
+            .expect("send foreground request");
+        let mut foreground_events = foreground_reply_rx
+            .await
+            .expect("foreground reply")
+            .expect("foreground admit")
+            .event_rx;
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while handle.background_paused.load(Ordering::Relaxed) != 1 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("background pause was not published");
+        while background_events.try_recv().is_ok() {}
+
+        let mut foreground_count = 0;
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(2), foreground_events.recv())
+                .await
+                .expect("foreground event timeout")
+                .expect("foreground event");
+            foreground_count += 1;
+            if event.finish_reason.is_some() {
+                break;
+            }
+            assert!(
+                background_events.try_recv().is_err(),
+                "background advanced while foreground still owned decode rounds"
+            );
+        }
+        assert_eq!(foreground_count, 4);
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while handle.background_resumes.load(Ordering::Relaxed) == 0 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("background did not resume");
+        let mut saw_background_terminal = false;
+        while let Some(event) =
+            tokio::time::timeout(Duration::from_secs(2), background_events.recv())
+                .await
+                .expect("background continuation timeout")
+        {
+            if event.finish_reason.is_some() {
+                saw_background_terminal = true;
+                break;
+            }
+        }
+        assert!(saw_background_terminal);
+        assert_eq!(handle.background_preemptions.load(Ordering::Relaxed), 1);
+        assert_eq!(handle.background_resumes.load(Ordering::Relaxed), 1);
+        assert_eq!(handle.background_paused.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -7558,6 +7991,7 @@ pub(crate) mod tests {
                 .unwrap();
             let prompt_ids = tokenizer.encode(&rendered, false).unwrap();
             GenerateRequest {
+                priority: Default::default(),
                 prompt_ids,
                 max_new_tokens: 8,
                 sampler: Sampler::greedy(),
@@ -7670,6 +8104,7 @@ pub(crate) mod tests {
                 .unwrap();
             let prompt_ids = tokenizer.encode(&rendered, false).unwrap();
             GenerateRequest {
+                priority: Default::default(),
                 prompt_ids,
                 max_new_tokens: max_new,
                 sampler: Sampler::greedy(),
@@ -8189,6 +8624,7 @@ pub mod test_support {
 
     pub fn mk_req(prompt_token: u32) -> GenerateRequest {
         GenerateRequest {
+            priority: Default::default(),
             prompt_ids: vec![prompt_token],
             max_new_tokens: 16,
             sampler: Sampler::greedy(),
@@ -8266,6 +8702,9 @@ pub mod test_support {
             )),
             b_active: Arc::new(AtomicU64::new(0)),
             b_queued: Arc::new(AtomicU64::new(0)),
+            background_paused: Arc::new(AtomicU64::new(0)),
+            background_preemptions: Arc::new(AtomicU64::new(0)),
+            background_resumes: Arc::new(AtomicU64::new(0)),
             admission_queue_full_count: queue_rejected,
             memory_budget_exceeded_count: Arc::new(AtomicU64::new(0)),
             kv_cache_active_bytes: Arc::new(AtomicUsize::new(0)),

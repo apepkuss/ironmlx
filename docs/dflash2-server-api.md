@@ -38,13 +38,17 @@ ironmlx serve \
 
 | Option | Accepted values / behavior |
 | --- | --- |
-| `--dflash2-block-size` | 2–8 |
+| `--dflash2-block-size` | 2–16; widths above 8 require a draft checkpoint whose declared block size supports them |
 | `--dflash2-draft-bits` | 0, 4 or 8; 0 preserves BF16 draft weights |
+| `--dflash2-tree-max-nodes` | 0–15; 0 is the stable linear default, while a positive value opts affine-4 B1 requests into the bounded best-first tree |
+| `--dflash2-position-keyed-sampling` | Explicitly opts sampled requests into the versioned device-side position-keyed sampler; changes same-seed output |
 | `--max-sequences` | Positive active-request limit |
 | `--model-id` | Stable public ID; defaults to the model path if omitted |
 | `--dflash2-tensor-batch-max-width` | Positive tensor-group width limit; default 4; 1 disables cross-request tensor batching, not request concurrency |
 
 Actual group width is the minimum of max sequences, tensor width limit and the number of ready requests with compatible execution shapes. The width limit does not increase active slots or replace max sequences.
+
+The recorded `z-lab/Qwen3.8-27B-DFlash2` checkpoint declares block size 8, so it cannot exercise the Q16 proposal lane. Q16 is fail-closed: the target's affine-4 B1 verify capability and the draft checkpoint must both support the requested width. No checkpoint is widened implicitly.
 
 ## App configuration
 
@@ -61,11 +65,41 @@ Dashboard shows target/draft, block size, precision, TPS, acceptance rate, windo
 The separate actor does not use ordinary Scheduler, MTP or Prompt Lookup execution. Each request owns target/draft caches, a sampler and PRNG state.
 With one max sequence, one request advances; larger limits permit that many active requests. Ready requests with identical execution keys form bounded MLX tensor groups. Excess requests form subsequent groups and advance in rotation. Different constraints, sampling shapes or cache states remain separate; differing accepted lengths split caches back into requests, which can regroup later. Benefits depend on hardware, workload and acceptance rate.
 
+The optional tree builds a best-first candidate lattice capped at 15 nodes, batches at most eight root-to-leaf paths into one target verify forward, and commits only the accepted row's transactional cache state. It is limited to affine-4, unconstrained B1 execution. Enabling it sets the effective cross-request tensor width to one because its batch lanes are reserved for tree paths. `tree_windows` and `tree_drafted_nodes` expose actual use rather than merely configured eligibility.
+
 When slots fill, requests wait in the admission queue. A full queue returns HTTP 503, `scheduler_queue_full`, and `Retry-After: 5`. Streaming disconnect releases caches and slots at the next safe boundary after the current forward.
+
+## Foreground and background priority
+
+Chat Completions and Responses requests may set `service_tier: "flex"` for
+low-priority title generation, summaries, warmups, and similar work. Omitted
+tiers plus `auto` and `default` are foreground. A foreground arrival causes an
+active flex request to pause after its current decode/verify round. The actor
+keeps the target/draft cache, sampler, PRNG, accepted-token history, and tensor
+state in memory; it does not replay the prompt or restart the request. Paused
+work resumes FIFO when no foreground request is active or queued.
+
+DFlash2 serving routes every request through its priority-aware actor, so this
+contract applies to every DFlash2 Chat Completions and Responses request. This
+is an IronMLX-local scheduling interpretation of the OpenAI-compatible field,
+not an implementation of hosted billing, SLA, project-tier, or capacity-pool
+semantics. IronMLX accepts `auto`, `default`, and `flex`; other tier values are
+rejected.
+
+Priority changes latency scheduling, not memory admission. A paused request
+continues to own its charged cache memory, so the memory governor may still
+reject new work when the real resident set cannot fit it. `background: true`
+in the Responses API remains unsupported because that field requests a stored
+asynchronous job, not scheduling priority.
+
+`healthz.scheduler.background_paused` is the live paused count;
+`background_preemptions` and `background_resumes` are cumulative counters.
 
 ## Sampling
 
 Both greedy and sampled requests use DFlash2 verification. GreedyVerify preserves byte-for-byte equality with ordinary Q=1 decoding. SampledVerify uses exact speculative sampling: probabilistic acceptance, rejection residuals, bonus tokens and per-request reproducible PRNG state.
+
+Stateful exact sampling remains the default. `--dflash2-position-keyed-sampling` switches positive-temperature requests to `PositionKeyedV1`, where every draw is a device-side function of seed, absolute output position and token ID after the configured penalties and top-k/top-p/min-p filters. This makes a serial linear window and a drafted/tree window choose the same token at the same position, independent of batch shape. The mode intentionally does not preserve the default sampler's same-seed token sequence.
 
 Public Chat/Responses sampling accepts `temperature` and `top_p`; Messages additionally accepts `top_k`. Omitted fields use checkpoint defaults; the recorded Qwen3.8 setup defaults to `top_k=20`.
 A fixed seed promises reproducibility only within the same IronMLX/MLX versions, checkpoint, settings and execution shape, not across versions.
@@ -94,11 +128,15 @@ The path rejects MTP, Prompt Lookup, KV quantization, paged/persistent prefix ca
     "enabled": true,
     "block_size": 4,
     "draft_quantization_bits": 4,
+    "tree_max_nodes": 15,
+    "position_keyed_sampling": true,
     "requests": 3,
     "windows": 96,
     "drafted_tokens": 384,
     "accepted_draft_tokens": 256,
     "rollback_count": 31,
+    "tree_windows": 40,
+    "tree_drafted_nodes": 512,
     "sampled_requests": 1,
     "exact_sampling_windows": 32,
     "exact_acceptance_draws": 128,
@@ -111,4 +149,4 @@ The path rejects MTP, Prompt Lookup, KV quantization, paged/persistent prefix ca
 }
 ```
 
-`scheduler.b_max`, `b_active` and `b_queued` represent actor capacity, active requests and queued requests. Interpret performance metrics with the hardware, prompt, acceptance rate and sampling settings.
+`scheduler.b_max`, `b_active`, `b_queued`, and `background_paused` represent actor capacity, active requests, queued requests, and in-memory paused flex requests. Interpret performance metrics with the hardware, prompt, acceptance rate and sampling settings.

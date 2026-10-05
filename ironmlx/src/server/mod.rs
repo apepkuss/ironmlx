@@ -287,6 +287,7 @@ pub(crate) async fn serve_with_dflash2<M>(
     admission_queue_max: usize,
     max_cache_cap: usize,
     block_size: usize,
+    p2_options: ironmlx_runtime::core::dflash2::DFlash2P2Options,
     draft_quantization_bits: Option<i32>,
     prefix_cache: Option<ironmlx_runtime::core::cache::prefix_store::PrefixLruCacheConfig>,
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
@@ -295,7 +296,7 @@ pub(crate) async fn serve_with_dflash2<M>(
 where
     M: Model + DenseVlMethods + ironmlx_lm::models::dflash2::DFlash2Target + Send + 'static,
 {
-    let state = build_dflash2_engine(
+    let state = build_dflash2_engine_with_options(
         model,
         draft,
         tokenizer,
@@ -307,6 +308,7 @@ where
         admission_queue_max,
         max_cache_cap,
         block_size,
+        p2_options,
         draft_quantization_bits,
         prefix_cache,
         scheduler_runtime_profile,

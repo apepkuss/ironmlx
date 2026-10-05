@@ -309,6 +309,7 @@ fn mtp_stream_commits_accepted_prefix_without_replay_after_partial_reject() {
     let mtp = FakeMtpHead;
     let tokenizer = minimal_tokenizer();
     let request = GenerateRequest {
+        priority: Default::default(),
         prompt_ids: vec![1, 2],
         max_new_tokens: 3,
         sampler: Sampler::greedy(),
@@ -352,6 +353,7 @@ fn constrained_sampled_mtp_executes_exact_sampling_path() {
     let mtp = FakeMtpHead;
     let tokenizer = minimal_tokenizer();
     let request = GenerateRequest {
+        priority: Default::default(),
         prompt_ids: vec![1, 2],
         max_new_tokens: 3,
         sampler: Sampler::greedy().with_temperature(0.7).with_seed(42),
@@ -394,6 +396,7 @@ fn constrained_mtp_rejects_length_before_required_tool_call_is_complete() {
     let mtp = FakeMtpHead;
     let tokenizer = minimal_tokenizer();
     let request = GenerateRequest {
+        priority: Default::default(),
         prompt_ids: vec![1, 2],
         max_new_tokens: 3,
         sampler: Sampler::greedy(),

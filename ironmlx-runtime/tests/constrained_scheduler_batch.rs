@@ -156,6 +156,7 @@ impl DenseVlMethods for ConstraintBatchModel {
 
 fn request(constraint: bool) -> GenerateRequest {
     GenerateRequest {
+        priority: Default::default(),
         prompt_ids: vec![1, 2],
         max_new_tokens: 4,
         sampler: Sampler::greedy(),

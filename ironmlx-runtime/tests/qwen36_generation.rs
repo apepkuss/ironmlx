@@ -57,6 +57,7 @@ fn generation_request(
     image_spatial_merge_size: i32,
 ) -> ironmlx_runtime::core::generation_types::GenerateRequest {
     ironmlx_runtime::core::generation_types::GenerateRequest {
+        priority: Default::default(),
         prompt_ids,
         max_new_tokens,
         sampler: ironmlx_core::sampler::Sampler::greedy(),

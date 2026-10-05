@@ -51,6 +51,7 @@ fn make_configured_request(
     stop: Vec<u32>,
 ) -> GenerateRequest {
     GenerateRequest {
+        priority: Default::default(),
         prompt_ids,
         max_new_tokens: max_new,
         sampler: Sampler::greedy()

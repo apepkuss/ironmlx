@@ -86,6 +86,7 @@ async fn scheduler_actor_b1_text_only_swap() {
     let max_new_tokens: usize = 12;
 
     let make_request = || GenerateRequest {
+        priority: Default::default(),
         prompt_ids: prompt_ids.clone(),
         max_new_tokens,
         sampler: Sampler::greedy(),
@@ -179,6 +180,7 @@ async fn scheduler_actor_long_prompt_routes_to_gs() {
     );
 
     let request = GenerateRequest {
+        priority: Default::default(),
         prompt_ids: long_ids,
         max_new_tokens: 4,
         sampler: Sampler::greedy(),
@@ -253,6 +255,7 @@ async fn scheduler_actor_vl_routes_to_gs() {
     let dummy_grid: Vec<(i32, i32, i32)> = vec![(1, 1, 1)];
 
     let request = GenerateRequest {
+        priority: Default::default(),
         prompt_ids: tokenize_prompt(&tokenizer, "Describe the picture."),
         max_new_tokens: 4,
         sampler: Sampler::greedy(),

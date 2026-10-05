@@ -46,7 +46,7 @@ The tables list accepted fields and conditions. Unlisted fields and shapes outsi
 | `previous_response_id / conversation` | Rejected; no server-side history storage |
 | `include` | Only reasoning.encrypted_content request shape; no encrypted content is generated |
 | `prompt_cache_key / client_metadata / metadata` | Structure and length validation only, without hosted-platform semantics |
-| `service_tier / truncation` | Tier: auto/default only; truncation: disabled only |
+| `service_tier / truncation` | Tier: auto/default foreground. Flex preemption is fully qualified for DFlash2 serving; ordinary causal serving does not yet guarantee it for every request pending unified scheduling. Other tier values are rejected. Truncation: disabled only |
 | `top_k / repetition_penalty` | Rejected |
 
 ## Anthropic Messages

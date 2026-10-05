@@ -1110,6 +1110,9 @@ pub(crate) fn build_health_collector(
         max_position_embeddings: model_max_context as i32,
         b_active: scheduler_handle.b_active.clone(),
         b_queued: scheduler_handle.b_queued.clone(),
+        background_paused: scheduler_handle.background_paused.clone(),
+        background_preemptions: scheduler_handle.background_preemptions.clone(),
+        background_resumes: scheduler_handle.background_resumes.clone(),
         admit_count: scheduler_handle.admit_count.clone(),
         batch_count: scheduler_handle.batch_count.clone(),
         admission_queue_full_count: scheduler_handle.admission_queue_full_count.clone(),
@@ -1147,10 +1150,75 @@ pub async fn build_dflash2_engine<M>(
 where
     M: Model + DenseVlMethods + ironmlx_lm::models::dflash2::DFlash2Target + Send + 'static,
 {
+    build_dflash2_engine_with_options(
+        model,
+        draft,
+        tokenizer,
+        model_id,
+        prefill_chunk_size,
+        b_max,
+        admission_deadline_ms,
+        tensor_batch_max_width,
+        admission_queue_max,
+        max_cache_cap,
+        block_size,
+        crate::core::dflash2::DFlash2P2Options::default(),
+        draft_quantization_bits,
+        prefix_cache,
+        scheduler_runtime_profile,
+        static_memory_estimate,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn build_dflash2_engine_with_options<M>(
+    model: M,
+    draft: ironmlx_lm::models::DFlash2DraftModel,
+    tokenizer: Tokenizer,
+    model_id: String,
+    prefill_chunk_size: usize,
+    b_max: usize,
+    admission_deadline_ms: u64,
+    tensor_batch_max_width: usize,
+    admission_queue_max: usize,
+    max_cache_cap: usize,
+    block_size: usize,
+    p2_options: crate::core::dflash2::DFlash2P2Options,
+    draft_quantization_bits: Option<i32>,
+    prefix_cache: Option<crate::core::cache::PrefixLruCacheConfig>,
+    scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
+    static_memory_estimate: crate::core::process_memory::StaticMemoryEstimate,
+) -> Result<CausalEngine<M>>
+where
+    M: Model + DenseVlMethods + ironmlx_lm::models::dflash2::DFlash2Target + Send + 'static,
+{
     let model = Arc::new(Mutex::new(model));
-    let (mut meta, dflash2_cache_cost) = {
+    let (
+        mut meta,
+        dflash2_cache_cost,
+        initial_draft_budget,
+        target_execution_fingerprint,
+        verify_profile,
+    ) = {
         let guard = model.lock().await;
-        (guard.model_meta(), guard.dflash2_target_cache_cost())
+        let capabilities = guard.dflash2_verify_capabilities();
+        let initial_draft_budget = capabilities
+            .max_draft_tokens(1)
+            .unwrap_or(0)
+            .min(block_size.saturating_sub(1));
+        anyhow::ensure!(
+            initial_draft_budget > 0,
+            "DFlash2 verify profile {} has no certified B1 speculative width",
+            capabilities.profile
+        );
+        (
+            guard.model_meta(),
+            guard.dflash2_target_cache_cost(),
+            initial_draft_budget,
+            guard.dflash2_execution_fingerprint(),
+            capabilities.profile,
+        )
     };
     meta.weight_bytes =
         effective_model_weight_bytes(meta.weight_bytes, static_memory_estimate.total_cold_bytes());
@@ -1172,6 +1240,7 @@ where
         Arc::clone(&tokenizer),
         dflash2_actor::DFlash2ActorConfig {
             block_size,
+            p2_options,
             b_max,
             admission_deadline: std::time::Duration::from_millis(admission_deadline_ms),
             tensor_batch_max_width,
@@ -1180,6 +1249,9 @@ where
             budget_state,
             cache_cost: dflash2_cache_cost,
             prefix_cache_max_bytes: prefix_cache.map(|config| config.max_bytes),
+            initial_draft_budget,
+            target_execution_fingerprint,
+            verify_profile,
         },
         Arc::clone(&cold_materialization_tracker),
     );
@@ -1191,6 +1263,9 @@ where
         max_position_embeddings: meta.max_position_embeddings,
         b_active: dflash2_handle.b_active.clone(),
         b_queued: dflash2_handle.b_queued.clone(),
+        background_paused: dflash2_handle.background_paused.clone(),
+        background_preemptions: dflash2_handle.background_preemptions.clone(),
+        background_resumes: dflash2_handle.background_resumes.clone(),
         admit_count: dflash2_handle.admit_count.clone(),
         batch_count: dflash2_handle.batch_count.clone(),
         admission_queue_full_count: dflash2_handle.admission_queue_full_count.clone(),
@@ -1204,11 +1279,21 @@ where
         dflash2: health::DFlash2HealthConfig::enabled(
             block_size,
             draft_quantization_bits,
+            p2_options.tree_max_nodes,
+            p2_options.position_keyed_sampling,
             dflash2_handle.admit_count.clone(),
             dflash2_handle.windows.clone(),
             dflash2_handle.drafted_tokens.clone(),
             dflash2_handle.accepted_draft_tokens.clone(),
             dflash2_handle.rollback_count.clone(),
+            dflash2_handle.ordinary_windows.clone(),
+            dflash2_handle.tree_windows.clone(),
+            dflash2_handle.tree_drafted_nodes.clone(),
+            dflash2_handle.draft_budget_changes.clone(),
+            dflash2_handle.current_draft_budget.clone(),
+            dflash2_handle.latest_adaptive_acceptance_ewma_bits.clone(),
+            dflash2_handle.verify_profile.clone(),
+            dflash2_handle.prefix_fingerprint.clone(),
             dflash2_handle.tensor_batch_windows.clone(),
             dflash2_handle.tensor_batch_divergent_splits.clone(),
             dflash2_handle.tensor_batch_groups_created.clone(),
@@ -1220,6 +1305,16 @@ where
             dflash2_handle.exact_residual_corrections.clone(),
             dflash2_handle.exact_bonus_samples.clone(),
             dflash2_handle.sampling_us.clone(),
+            dflash2_handle.draft_build_us.clone(),
+            dflash2_handle.draft_schedule_us.clone(),
+            dflash2_handle.verify_build_us.clone(),
+            dflash2_handle.projection_build_us.clone(),
+            dflash2_handle.verify_schedule_us.clone(),
+            dflash2_handle.host_sync_us.clone(),
+            dflash2_handle.rollback_us.clone(),
+            dflash2_handle.window_us.clone(),
+            dflash2_handle.prefill_us.clone(),
+            dflash2_handle.generation_us.clone(),
             dflash2_handle.latest_generation_tps_bits.clone(),
             dflash2_handle.latest_acceptance_rate_bits.clone(),
             dflash2_handle.peak_memory_bytes.clone(),

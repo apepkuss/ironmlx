@@ -17,6 +17,7 @@ use ironmlx_runtime::core::scheduler::Scheduler;
 fn mk_req(seed: u32, n: usize) -> GenerateRequest {
     let prompt: Vec<u32> = (0..n as u32).map(|i| seed.wrapping_add(i)).collect();
     GenerateRequest {
+        priority: Default::default(),
         prompt_ids: prompt,
         max_new_tokens: 32,
         sampler: Sampler::greedy(),

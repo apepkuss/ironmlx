@@ -1010,6 +1010,7 @@ mod tests {
     #[test]
     fn generate_request_pixel_values_none_construction() {
         let req = GenerateRequest {
+            priority: Default::default(),
             prompt_ids: vec![1_u32, 2, 3],
             max_new_tokens: 10,
             sampler: Sampler::greedy(),

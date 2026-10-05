@@ -107,8 +107,8 @@ pub struct GenerateArgs {
     #[arg(long = "dflash2-model-dir")]
     pub dflash2_model_dir: Option<PathBuf>,
 
-    /// DFlash2 proposal block width. Current MLX quantized target kernels are
-    /// fastest at width 4 for the official Qwen3.8 checkpoint.
+    /// DFlash2 proposal block width. Widths above 8 are an explicit Q16 opt-in
+    /// and require a compatible draft checkpoint that declares that width.
     #[arg(long, default_value_t = 4)]
     pub dflash2_block_size: usize,
 
@@ -116,6 +116,16 @@ pub struct GenerateArgs {
     /// keeps BF16; 4 and 8 select the supported quantized variants.
     #[arg(long, default_value_t = 4)]
     pub dflash2_draft_bits: i32,
+
+    /// Maximum nodes in the DFlash2 best-first draft tree. Zero keeps the
+    /// stable linear proposal path; the P2 tree is capped at 15 nodes.
+    #[arg(long, default_value_t = 0)]
+    pub dflash2_tree_max_nodes: usize,
+
+    /// Use versioned position-keyed sampling for DFlash2. This changes output
+    /// for the same seed and is therefore explicit rather than a new default.
+    #[arg(long, default_value_t = false)]
+    pub dflash2_position_keyed_sampling: bool,
 
     /// Maximum MTP draft tokens per speculative window. If omitted, ironmlx
     /// picks a model-aware default from local benchmark policy.
@@ -172,13 +182,18 @@ fn ensure_dflash2_generation_supported(
             "--dflash2-model-dir P0-P2 has not qualified --kv-quant"
         ));
     }
-    if !(2..=8).contains(&args.dflash2_block_size) {
+    if !(2..=16).contains(&args.dflash2_block_size) {
         return Err(anyhow!(
-            "--dflash2-block-size must be in [2, 8] for the official Qwen3.8 draft"
+            "--dflash2-block-size must be in [2, 16]; widths above 8 require a compatible Q16 draft checkpoint"
         ));
     }
     if !matches!(args.dflash2_draft_bits, 0 | 4 | 8) {
         return Err(anyhow!("--dflash2-draft-bits must be one of 0, 4, or 8"));
+    }
+    if args.dflash2_position_keyed_sampling && args.temperature <= 0.0 {
+        return Err(anyhow!(
+            "--dflash2-position-keyed-sampling requires --temperature greater than zero"
+        ));
     }
     Ok(())
 }
@@ -225,6 +240,7 @@ fn build_generate_request<M: Model>(
     let prompt_ids = tokenizer.encode(&prompt, /* add_special_tokens = */ false)?;
 
     Ok(GenerateRequest {
+        priority: Default::default(),
         prompt_ids,
         max_new_tokens: args.max_tokens,
         sampler: build_sampler(args),
@@ -303,12 +319,16 @@ fn run_generation_with_dflash2_model(
     .context("DFlash2DraftModel::from_loader")?;
     drop(draft_loader);
     mlx::clear_cache();
-    let mut stream = DFlash2TextGenerationStream::new_text_only(
+    let mut stream = DFlash2TextGenerationStream::new_text_only_with_options(
         model,
         &draft,
         tokenizer,
         request,
         args.dflash2_block_size,
+        ironmlx_runtime::core::dflash2::DFlash2P2Options {
+            tree_max_nodes: args.dflash2_tree_max_nodes,
+            position_keyed_sampling: args.dflash2_position_keyed_sampling,
+        },
     )?;
     write_generation_events(|| stream.next_token())?;
     eprintln!(
@@ -604,6 +624,8 @@ mod tests {
         assert_eq!(default_cli.args.mtp_draft_tokens, None);
         assert_eq!(default_cli.args.dflash2_block_size, 4);
         assert_eq!(default_cli.args.dflash2_draft_bits, 4);
+        assert_eq!(default_cli.args.dflash2_tree_max_nodes, 0);
+        assert!(!default_cli.args.dflash2_position_keyed_sampling);
 
         let enabled_cli = GenerateTestCli::parse_from([
             "test",
@@ -675,8 +697,29 @@ mod tests {
             &args,
         )
         .expect_err("reject invalid block size");
-        assert!(block_error.to_string().contains("must be in [2, 8]"));
+        assert!(block_error.to_string().contains("must be in [2, 16]"));
 
+        args.dflash2_block_size = 16;
+        args.temperature = 0.8;
+        args.dflash2_tree_max_nodes = 15;
+        args.dflash2_position_keyed_sampling = true;
+        assert!(ensure_dflash2_generation_supported(
+            ironmlx_lm::models::ModelArchitecture::Qwen35Dense,
+            &args,
+        )
+        .is_ok());
+
+        args.temperature = 0.0;
+        let keyed_error = ensure_dflash2_generation_supported(
+            ironmlx_lm::models::ModelArchitecture::Qwen35Dense,
+            &args,
+        )
+        .expect_err("position-keyed sampling needs positive temperature");
+        assert!(keyed_error
+            .to_string()
+            .contains("temperature greater than zero"));
+
+        args.dflash2_position_keyed_sampling = false;
         args.dflash2_block_size = 5;
         args.dflash2_draft_bits = 6;
         let draft_bits_error = ensure_dflash2_generation_supported(

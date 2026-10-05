@@ -182,7 +182,8 @@ pub struct ServeArgs {
     #[arg(long = "dflash2-model-dir")]
     pub dflash2_model_dir: Option<PathBuf>,
 
-    /// DFlash2 proposal block width.
+    /// DFlash2 proposal block width. Widths above 8 explicitly opt into the
+    /// Q16 B1 lane and require a compatible draft checkpoint.
     #[arg(long = "dflash2-block-size", default_value_t = 4)]
     pub dflash2_block_size: usize,
 
@@ -190,6 +191,16 @@ pub struct ServeArgs {
     /// Pass 0 to keep the draft in BF16.
     #[arg(long = "dflash2-draft-bits", default_value_t = 4)]
     pub dflash2_draft_bits: i32,
+
+    /// Maximum nodes in the B1 best-first DFlash2 draft tree. Zero keeps the
+    /// stable linear path; values up to 15 reserve target lanes for tree paths.
+    #[arg(long = "dflash2-tree-max-nodes", default_value_t = 0)]
+    pub dflash2_tree_max_nodes: usize,
+
+    /// Use versioned position-keyed sampling for DFlash2 requests. This changes
+    /// same-seed output and is never enabled by default.
+    #[arg(long = "dflash2-position-keyed-sampling", default_value_t = false)]
+    pub dflash2_position_keyed_sampling: bool,
 
     /// Maximum number of compatible DFlash2 requests combined into one tensor
     /// verification group. The effective width is also capped by
@@ -582,8 +593,8 @@ fn ensure_dflash2_serve_supported(
     if args.scheduler_profile.is_some() || args.scheduler_autotune_report {
         bail!("--dflash2-model-dir does not use scheduler profiles or scheduler autotune reports");
     }
-    if !(2..=8).contains(&args.dflash2_block_size) {
-        bail!("--dflash2-block-size must be in [2, 8] for the official Qwen3.8 draft");
+    if !(2..=16).contains(&args.dflash2_block_size) {
+        bail!("--dflash2-block-size must be in [2, 16]; widths above 8 require a compatible Q16 draft checkpoint");
     }
     if !matches!(args.dflash2_draft_bits, 0 | 4 | 8) {
         bail!("--dflash2-draft-bits must be one of 0, 4, or 8");
@@ -595,7 +606,12 @@ fn resolve_dflash2_tensor_batch_width(args: &ServeArgs, b_max: usize) -> (usize,
     let requested = args
         .dflash2_tensor_batch_max_width
         .unwrap_or(DEFAULT_DFLASH2_TENSOR_BATCH_MAX_WIDTH);
-    (requested, requested.min(b_max))
+    let effective = if args.dflash2_tree_max_nodes > 0 {
+        1
+    } else {
+        requested.min(b_max)
+    };
+    (requested, effective)
 }
 
 fn resolve_scheduler_runtime_profile(
@@ -893,10 +909,12 @@ fn serve_with_dflash2_model(
     let (tensor_batch_requested_max_width, tensor_batch_max_width) =
         resolve_dflash2_tensor_batch_width(args, scheduler_config.b_max);
     tracing::info!(
-        "ironmlx serve: DFlash2 enabled model_dir={} block_size={} draft_bits={} max_sequences={} tensor_batch_requested_max_width={} tensor_batch_effective_max_width={} prefix_cache_max_bytes={:?}",
+        "ironmlx serve: DFlash2 enabled model_dir={} block_size={} draft_bits={} tree_max_nodes={} position_keyed_sampling={} max_sequences={} tensor_batch_requested_max_width={} tensor_batch_effective_max_width={} prefix_cache_max_bytes={:?}",
         draft_dir.display(),
         args.dflash2_block_size,
         args.dflash2_draft_bits,
+        args.dflash2_tree_max_nodes,
+        args.dflash2_position_keyed_sampling,
         scheduler_config.b_max,
         tensor_batch_requested_max_width,
         tensor_batch_max_width,
@@ -916,6 +934,10 @@ fn serve_with_dflash2_model(
         scheduler_config.admission_queue_max,
         scheduler_config.max_cache_cap,
         args.dflash2_block_size,
+        ironmlx_runtime::core::dflash2::DFlash2P2Options {
+            tree_max_nodes: args.dflash2_tree_max_nodes,
+            position_keyed_sampling: args.dflash2_position_keyed_sampling,
+        },
         draft_bits,
         prefix_cache,
         scheduler_runtime_profile,
@@ -1549,6 +1571,8 @@ mod scheduler_profile_tests {
             dflash2_model_dir: None,
             dflash2_block_size: 4,
             dflash2_draft_bits: 4,
+            dflash2_tree_max_nodes: 0,
+            dflash2_position_keyed_sampling: false,
             dflash2_tensor_batch_max_width: None,
             prompt_lookup: false,
             prompt_lookup_min_ngram: None,
@@ -1651,6 +1675,10 @@ mod scheduler_profile_tests {
 
         args.dflash2_tensor_batch_max_width = Some(1);
         assert_eq!(resolve_dflash2_tensor_batch_width(&args, 8), (1, 1));
+
+        args.dflash2_tensor_batch_max_width = Some(6);
+        args.dflash2_tree_max_nodes = 15;
+        assert_eq!(resolve_dflash2_tensor_batch_width(&args, 8), (6, 1));
     }
 
     #[test]

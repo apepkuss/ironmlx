@@ -29,7 +29,7 @@ use ironmlx_lm::core::model::Model;
 use ironmlx_lm::core::vision::DenseVlMethods;
 use ironmlx_lm::core::vision_input::VisionInputConfig;
 use ironmlx_runtime::core::direct_execution::spawn_direct;
-use ironmlx_runtime::core::generation_types::GenerateRequest;
+use ironmlx_runtime::core::generation_types::{GenerateRequest, RequestPriority};
 use ironmlx_runtime::core::scheduler_actor::AdmitReply;
 use ironmlx_runtime::core::speculative::MtpSpeculativeConfig;
 use {
@@ -147,6 +147,10 @@ pub struct ChatRequest {
     pub stream: bool,
     #[serde(default)]
     pub stream_options: Option<StreamOptions>,
+    /// Scheduling tier. `flex` runs at background priority and may pause at a
+    /// decode-round boundary while foreground (`auto`/`default`) work runs.
+    #[serde(default)]
+    pub service_tier: Option<String>,
     /// Generate until `max_tokens` even when the model emits an EOS token.
     /// Intended for controlled full-length performance measurements.
     #[serde(default)]
@@ -229,6 +233,12 @@ impl ChatRequest {
     }
 
     pub(crate) fn validate_sampling(&self) -> anyhow::Result<()> {
+        if let Some(tier) = self.service_tier.as_deref() {
+            anyhow::ensure!(
+                matches!(tier, "auto" | "default" | "flex"),
+                "service_tier must be `auto`, `default`, or `flex`"
+            );
+        }
         if let Some(temperature) = self.temperature {
             anyhow::ensure!(
                 temperature.is_finite() && (0.0..=2.0).contains(&temperature),
@@ -242,6 +252,13 @@ impl ChatRequest {
             );
         }
         Ok(())
+    }
+
+    pub(crate) fn request_priority(&self) -> RequestPriority {
+        match self.service_tier.as_deref() {
+            Some("flex") => RequestPriority::Background,
+            _ => RequestPriority::Foreground,
+        }
     }
 
     pub(crate) fn structured_output_format(&self) -> anyhow::Result<StructuredOutputFormat> {
@@ -954,6 +971,7 @@ where
         .map(|options| options.include_usage)
         .unwrap_or(false);
     let ignore_eos = req.ignore_eos;
+    let priority = req.request_priority();
 
     let max_tokens = req.max_tokens;
     let model_label = req.model.clone().unwrap_or_else(|| state.model_id.clone());
@@ -1077,6 +1095,7 @@ where
     };
     let prompt_tokens = prompt_len as u32;
     let request = GenerateRequest {
+        priority,
         prompt_ids,
         max_new_tokens: max_tokens,
         sampler,
@@ -1200,6 +1219,7 @@ pub(crate) async fn chat_completions_with_gemma4_drafter_state(
         .map(|options| options.include_usage)
         .unwrap_or(false);
     let ignore_eos = req.ignore_eos;
+    let priority = req.request_priority();
     let max_tokens = req.max_tokens;
     let model_label = req
         .model
@@ -1305,6 +1325,7 @@ pub(crate) async fn chat_completions_with_gemma4_drafter_state(
     };
     let prompt_tokens = prompt_len as u32;
     let request = GenerateRequest {
+        priority,
         prompt_ids,
         max_new_tokens: max_tokens,
         sampler,
@@ -3614,6 +3635,31 @@ mod tests {
         non_finite.temperature = None;
         non_finite.top_p = Some(f32::INFINITY);
         assert!(non_finite.validate_sampling().is_err());
+    }
+
+    #[test]
+    fn chat_service_tier_maps_flex_to_background_priority() {
+        for (tier, expected) in [
+            (None, RequestPriority::Foreground),
+            (Some("auto"), RequestPriority::Foreground),
+            (Some("default"), RequestPriority::Foreground),
+            (Some("flex"), RequestPriority::Background),
+        ] {
+            let mut body = serde_json::json!({"messages": []});
+            if let Some(tier) = tier {
+                body["service_tier"] = serde_json::Value::String(tier.to_owned());
+            }
+            let request: ChatRequest = serde_json::from_value(body).expect("valid request");
+            request.validate_sampling().expect("valid service tier");
+            assert_eq!(request.request_priority(), expected);
+        }
+
+        let invalid: ChatRequest = serde_json::from_value(serde_json::json!({
+            "messages": [],
+            "service_tier": "priority"
+        }))
+        .expect("shape is valid before semantic validation");
+        assert!(invalid.validate_sampling().is_err());
     }
 
     #[test]

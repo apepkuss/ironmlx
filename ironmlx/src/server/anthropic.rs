@@ -887,6 +887,7 @@ impl MessagesRequest {
             response_format,
             stream: self.stream,
             stream_options: None,
+            service_tier: None,
             ignore_eos: false,
             max_tokens: self.max_tokens,
             temperature: self.temperature,
@@ -1091,6 +1092,7 @@ where
         }
     };
     let request = GenerateRequest {
+        priority: Default::default(),
         prompt_ids,
         max_new_tokens: max_tokens,
         sampler,
@@ -1341,6 +1343,7 @@ pub(crate) async fn messages_with_gemma4_drafter_state(
         }
     };
     let request = GenerateRequest {
+        priority: Default::default(),
         prompt_ids,
         max_new_tokens: max_tokens,
         sampler,

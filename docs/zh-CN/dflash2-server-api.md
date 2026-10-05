@@ -38,9 +38,15 @@ ironmlx serve \
   --port 8080
 ```
 
-`--dflash2-block-size` 接受 `2..=8`；`--dflash2-draft-bits` 接受 `0`、`4` 或
+`--dflash2-block-size` 接受 `2..=16`；大于 `8` 的宽度要求 draft checkpoint 自身声明支持。
+`--dflash2-draft-bits` 接受 `0`、`4` 或
 `8`，其中 `0` 表示保持 draft BF16。`--max-sequences` 必须大于零。`--model-id`
 用于把稳定的公开模型 ID 与本地 target 路径分离；省略时沿用 `--model` 的值。
+
+`--dflash2-tree-max-nodes` 接受 `0..=15`：默认 `0` 保持稳定的线性提议路径，正值仅为
+affine-4、无约束、B1 请求显式启用有界 best-first 草稿树。
+`--dflash2-position-keyed-sampling` 为正温度请求显式启用版本化的设备端位置键采样；
+它会改变相同 seed 的输出序列，不会静默成为默认行为。
 
 `--dflash2-tensor-batch-max-width` 是单个 DFlash2 tensor group 的安全上限，接受
 正整数。省略时使用默认值 `4`；设为 `1` 会关闭跨请求 tensor batching，
@@ -48,6 +54,10 @@ ironmlx serve \
 `min(max_sequences, tensor_batch_max_width, 当前就绪且执行形态兼容的请求数)`。
 因此该参数只限制一次 tensor 操作合并的行数，不增加活动请求数，也不替代
 `--max-sequences`。
+
+当前已验收的 `z-lab/Qwen3.8-27B-DFlash2` checkpoint 声明的 block size 为 `8`，
+因此不能覆盖 Q16 提议。Q16 采用 fail-closed 资格：target 的 affine-4 B1 verify lane 与
+draft checkpoint 必须同时支持所请求宽度，运行时不会隐式扩宽 checkpoint。
 
 ## App 接入
 
@@ -83,9 +93,34 @@ DFlash2 server 使用独立 actor，不进入普通 Scheduler、MTP 或 Prompt L
 不同约束、采样形态或 cache 状态的请求保持独立；组内接受长度分歧时拆回请求级 cache，
 后续满足条件时可重新建组。`batch>1` 的实际收益仍取决于硬件、请求形态和接受率。
 
+可选草稿树从候选 lattice 中 best-first 选择最多 15 个节点，把最多 8 条根到叶路径放入
+一次 target verify forward，并只提交实际接受路径对应行的事务性 cache 状态。启用树后，
+跨请求 tensor batch 的生效宽度固定为 `1`，因为 batch lane 被树路径占用。
+`tree_windows` 和 `tree_drafted_nodes` 分别记录实际执行的树窗口与草稿节点数。
+
 活动槽满后，请求进入 `--admission-queue-max` 控制的等待队列。活动槽和队列都满时，
 服务返回 HTTP 503、稳定错误码 `scheduler_queue_full` 和 `Retry-After: 5`。流式客户
 端断连后，请求在当前 forward 完成后的下一个安全边界释放 cache 与活动槽。
+
+## 前台与后台优先级
+
+Chat Completions 与 Responses 请求可通过 `service_tier: "flex"` 标记标题生成、摘要、
+warmup 等低优先级工作。省略 tier 以及 `auto`、`default` 都是前台。前台请求到达后，
+活动中的 flex 请求会在当前 decode/verify 轮次结束时暂停。actor 在内存中保留 target/draft
+cache、sampler、PRNG、已接受 token 历史与 tensor 状态；恢复时不重放 prompt，也不重启请求。
+没有活动或排队的前台工作后，暂停请求按 FIFO 恢复。
+
+DFlash2 服务的每个请求都经过支持优先级的 actor，因此以上契约适用于所有 DFlash2 Chat
+Completions 与 Responses 请求。这是 IronMLX 对 OpenAI 兼容字段的本地调度语义映射，不代表
+实现了托管平台的计费、SLA、项目层级或独立容量池语义。IronMLX 接受 `auto`、`default` 与
+`flex`；其他 tier 值均被拒绝。
+
+优先级只改变延迟调度，不绕过内存准入。暂停请求继续占有已计费 cache 内存；真实驻留集
+无法容纳新请求时，内存 governor 仍可拒绝准入。Responses 的 `background: true` 仍不支持，
+因为它表示需要服务端存储的异步作业，而不是调度优先级。
+
+`healthz.scheduler.background_paused` 是实时暂停数；`background_preemptions` 与
+`background_resumes` 是累计计数。
 
 ## Sampling
 
@@ -98,6 +133,11 @@ Greedy 和非 Greedy 请求都使用 DFlash2 verify。GreedyVerify 保持与普�
 使用 checkpoint 的 generation defaults；已验收 Qwen3.8 配置默认提供
 `top_k=20`。固定 seed 只承诺同一 IronMLX/MLX、checkpoint、配置和执行形态下的
 可复现性，不是跨版本随机序列兼容承诺。
+
+默认仍为 stateful exact sampling。显式启用 `--dflash2-position-keyed-sampling` 后，
+`PositionKeyedV1` 会在应用 repetition/frequency/presence penalty 与 top-k/top-p/min-p
+过滤后，以 seed、绝对输出位置和 token ID 在设备端生成抽样键。因此线性窗口、树窗口与
+不同 batch 形态在同一绝对位置选择相同 token；但它不承诺复现默认采样器的同 seed 序列。
 
 ## HTTP 协议
 
@@ -138,11 +178,15 @@ HTTP transport、严格字段校验、错误 envelope 与断连语义见
     "enabled": true,
     "block_size": 4,
     "draft_quantization_bits": 4,
+    "tree_max_nodes": 15,
+    "position_keyed_sampling": true,
     "requests": 3,
     "windows": 96,
     "drafted_tokens": 384,
     "accepted_draft_tokens": 256,
     "rollback_count": 31,
+    "tree_windows": 40,
+    "tree_drafted_nodes": 512,
     "sampled_requests": 1,
     "exact_sampling_windows": 32,
     "exact_acceptance_draws": 128,
@@ -155,6 +199,7 @@ HTTP transport、严格字段校验、错误 envelope 与断连语义见
 }
 ```
 
-`scheduler.b_max`、`scheduler.b_active` 和 `scheduler.b_queued` 分别表示 actor 配置的
-活动上限、当前活动请求和排队请求。性能字段用于现场观测，不能脱离硬件、prompt、
+`scheduler.b_max`、`scheduler.b_active`、`scheduler.b_queued` 和
+`scheduler.background_paused` 分别表示 actor 配置的活动上限、当前活动请求、排队请求与
+内存中暂停的 flex 请求。性能字段用于现场观测，不能脱离硬件、prompt、
 接受率和采样配置作为通用性能承诺。

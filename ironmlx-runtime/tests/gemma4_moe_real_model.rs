@@ -224,6 +224,7 @@ fn make_text_request(
     assert!(!prompt_ids.is_empty());
 
     GenerateRequest {
+        priority: Default::default(),
         prompt_ids,
         max_new_tokens,
         sampler: Sampler::greedy(),
@@ -294,6 +295,7 @@ fn make_image_request(
     );
 
     GenerateRequest {
+        priority: Default::default(),
         prompt_ids,
         max_new_tokens,
         sampler: Sampler::greedy(),
